@@ -107,20 +107,34 @@ struct RawPacket {
 /// reports `SIGTRAP` for a breakpoint, a watchpoint, and a completed step
 /// alike, so inventing `STATUS_BREAKPOINT` from it would drive the shared
 /// `int3` rewind over stops that never executed one.
+///
+/// The signal only separates a requested pause (`SIGINT`, 0x02, which QEMU
+/// reports for an interrupt) from a trap the guest took (`SIGTRAP`, 0x05).
 #[derive(Debug, Default, PartialEq, Eq)]
 struct StopReply {
     thread_id: Option<String>,
     /// Address from `watch:`/`rwatch:`/`awatch:`: the data address that made
     /// a hardware watchpoint fire.
     watch_address: Option<u64>,
+    /// The stub stopped with `SIGINT`: a break-in the host asked for.
+    break_in: bool,
 }
 
 impl StopReply {
-    /// Parse `T<sig>[<name>:<value>;]...`. `S<sig>` carries no fields, and
-    /// `W`/`X`/`N` do not describe a stopped thread, so all of them parse
-    /// empty.
+    /// Parse `T<sig>[<name>:<value>;]...`. `S<sig>` carries only the signal,
+    /// and `W`/`X`/`N` do not describe a stopped thread, so they parse empty.
     fn parse(response: &str) -> Self {
         let mut reply = StopReply::default();
+        let Some(body) = response
+            .strip_prefix('T')
+            .or_else(|| response.strip_prefix('S'))
+        else {
+            return reply;
+        };
+        reply.break_in = body
+            .get(..2)
+            .and_then(|sig| u8::from_str_radix(sig, 16).ok())
+            == Some(0x02);
         let Some(fields) = response.strip_prefix('T').and_then(|body| body.get(2..)) else {
             return reply;
         };
@@ -158,6 +172,7 @@ impl StopReply {
             modules_changed: false,
             module_event: None,
             assisted_breakin: false,
+            break_in: self.break_in,
         }
     }
 }
@@ -1743,5 +1758,13 @@ mod tests {
         // `S` carries no fields at all, and `W`/`X` report an exit.
         assert_eq!(StopReply::parse("S05"), StopReply::default());
         assert_eq!(StopReply::parse("W00"), StopReply::default());
+    }
+
+    #[test]
+    fn only_a_sigint_stop_reply_is_a_break_in() {
+        assert!(StopReply::parse("T02thread:p1.1;").break_in);
+        assert!(!StopReply::parse("T05thread:p1.1;").break_in);
+        assert!(StopReply::parse("S02").break_in);
+        assert!(!StopReply::parse("W02").break_in);
     }
 }

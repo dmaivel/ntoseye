@@ -65,12 +65,13 @@ impl Session {
         // Every host inspects the thread the stop landed on: `!thread`,
         // `.thread` and `$thread` read this selection, and resuming cleared it.
         refresh_windows_thread_context_for_backend_thread(&mut self.target, &self.current_thread);
-        // An instruction breakpoint on the Windows hypervisor's VM-exit entry
-        // fires after KVM wrote the exit's eVMCS: its saved state is current.
+        // An instruction breakpoint's trap on the Windows hypervisor's VM-exit
+        // entry fires after KVM wrote the exit's eVMCS, so its saved state is
+        // current. A break-in that merely lands on that address proves nothing.
         self.target.breakpoint_stop = match resolution {
             StopResolution::Breakpoint {
                 breakpoint, rip, ..
-            } if breakpoint.address.0 == *rip => {
+            } if breakpoint.address.0 == *rip && !event.break_in => {
                 self.target.registers.as_ref().and_then(|registers| {
                     BreakpointStop::new(&self.current_thread, *rip, registers)
                 })

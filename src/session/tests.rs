@@ -408,6 +408,7 @@ fn single_step_event() -> StopEvent {
         modules_changed: false,
         module_event: None,
         assisted_breakin: false,
+        break_in: false,
     }
 }
 
@@ -426,6 +427,7 @@ pub fn breakpoint_event(pc: u64) -> StopEvent {
         modules_changed: false,
         module_event: None,
         assisted_breakin: false,
+        break_in: false,
     }
 }
 
@@ -444,6 +446,7 @@ fn module_change_event() -> StopEvent {
         modules_changed: true,
         module_event: None,
         assisted_breakin: false,
+        break_in: false,
     }
 }
 

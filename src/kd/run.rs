@@ -50,6 +50,7 @@ pub(super) fn stop_event(stop: StateChange) -> StopEvent {
             (event, base)
         }),
         assisted_breakin: stop.assisted_breakin,
+        break_in: false,
     }
 }
 

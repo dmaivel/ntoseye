@@ -184,6 +184,7 @@ fn exit_classifies_stray_single_step_but_spares_real_stops() {
         modules_changed: false,
         module_event: None,
         assisted_breakin: false,
+        break_in: false,
     };
 
     assert!(exit_stop_is_stray_single_step(

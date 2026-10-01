@@ -244,6 +244,9 @@ pub struct StopEvent {
     /// during a target refresh/reconnect sequence, rather than by a user break
     /// or target exception.
     pub assisted_breakin: bool,
+    /// The stop is a break-in the host requested (a GDB stub's `SIGINT` stop
+    /// reply), not a trap the guest took. Unrelated to `assisted_breakin`.
+    pub break_in: bool,
 }
 
 /// A kernel image entering or leaving the module list: the events `sx* ld`

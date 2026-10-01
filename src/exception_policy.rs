@@ -379,6 +379,7 @@ mod tests {
             modules_changed: false,
             module_event: None,
             assisted_breakin: false,
+            break_in: false,
         }
     }
 
