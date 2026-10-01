@@ -46,6 +46,9 @@ struct State {
     /// guest memory, and every site with it.
     kernel_base: u64,
     sites: BTreeMap<u64, Site>,
+    /// What the file holds, as last written: a write that would not change
+    /// it is skipped, since each one is synced to disk.
+    written: Option<String>,
 }
 
 /// What an attach found of a previous session's sites.
@@ -69,9 +72,13 @@ impl SiteJournal {
             .unwrap_or_default();
         let journal = Self {
             path,
-            state: Mutex::new(State { kernel_base, sites }),
+            state: Mutex::new(State {
+                kernel_base,
+                sites,
+                written: None,
+            }),
         };
-        journal.persist(&journal.state());
+        journal.persist(&mut journal.state());
         journal
     }
 
@@ -89,14 +96,20 @@ impl SiteJournal {
                 original: original.to_vec(),
             },
         );
-        self.persist(&state);
+        self.persist(&mut state);
     }
 
-    /// Forget a site whose original bytes are back in guest memory.
+    /// Forget a site whose original bytes are back in guest memory. The file
+    /// keeps it until the next write that changes it, until no site is left,
+    /// or until the session ends: an entry for a site no longer patched only
+    /// matters if this session is killed and another debugger plants the same
+    /// bytes there before the next attach, while a site lifted to step past
+    /// it and planted again (every pass over a hot breakpoint) then costs no
+    /// write to disk.
     pub fn forget(&self, address: PhysAddr) {
         let mut state = self.state();
-        if state.sites.remove(&address).is_some() {
-            self.persist(&state);
+        if state.sites.remove(&address).is_some() && state.sites.is_empty() {
+            self.persist(&mut state);
         }
     }
 
@@ -107,7 +120,7 @@ impl SiteJournal {
         if state.kernel_base != kernel_base {
             state.kernel_base = kernel_base;
             state.sites.clear();
-            self.persist(&state);
+            self.persist(&mut state);
         }
     }
 
@@ -135,7 +148,7 @@ impl SiteJournal {
                 Restore::Failed => repair.failed += 1,
             }
         }
-        self.persist(&state);
+        self.persist(&mut state);
         repair
     }
 
@@ -177,13 +190,27 @@ impl SiteJournal {
     /// Mirror the state to disk. An empty journal removes the file.
     /// Persistence is best effort: a journal that cannot be written costs the
     /// repair after a crash, not the breakpoint.
-    fn persist(&self, state: &State) {
+    fn persist(&self, state: &mut State) {
         let mut text = String::new();
         for (address, site) in &state.sites {
             let bytes: String = site.original.iter().map(|b| format!("{b:02x}")).collect();
             text.push_str(&format!("{:x} {address:x} {bytes}\n", state.kernel_base));
         }
-        write_atomically(&self.path, &text);
+        if state.written.as_ref() == Some(&text) {
+            return;
+        }
+        if write_atomically(&self.path, &text) {
+            state.written = Some(text);
+        }
+    }
+}
+
+/// A session that ends writes the sites it forgot but kept in the file, so
+/// the next attach finds only what is still patched.
+impl Drop for SiteJournal {
+    fn drop(&mut self) {
+        let mut state = self.state();
+        self.persist(&mut state);
     }
 }
 
@@ -217,19 +244,22 @@ fn restore(memory: &impl MemoryOps<PhysAddr>, opcode: &[u8], address: u64, site:
 
 /// Replace `path` with `text` in one rename, so a crash mid-write leaves the
 /// previous record rather than a torn one; empty `text` removes the file.
-fn write_atomically(path: &Path, text: &str) {
+/// Whether the file now holds `text`.
+fn write_atomically(path: &Path, text: &str) -> bool {
     if text.is_empty() {
-        let _ = fs::remove_file(path);
-        return;
+        return match fs::remove_file(path) {
+            Ok(()) => true,
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        };
     }
     let staging = path.with_extension("tmp");
-    let written = fs::File::create(&staging).and_then(|mut file| {
-        file.write_all(text.as_bytes())
-            .and_then(|()| file.sync_all())
-    });
-    if written.is_ok() {
-        let _ = fs::rename(&staging, path);
-    }
+    fs::File::create(&staging)
+        .and_then(|mut file| {
+            file.write_all(text.as_bytes())
+                .and_then(|()| file.sync_all())
+        })
+        .and_then(|()| fs::rename(&staging, path))
+        .is_ok()
 }
 
 /// The window of original bytes to record for a site at `address` whose
@@ -428,6 +458,25 @@ mod tests {
         let retry = SiteJournal::open(&dir.0, "target", BASE);
         let frames = Frames::with(0x26a06bf90, &patched());
         assert_eq!(retry.repair(&frames, INT3).restored, 1);
+    }
+
+    /// Every pass over a hot breakpoint lifts its site and plants it again;
+    /// that must not cost a synced write each time, while a new site must.
+    #[test]
+    fn a_site_lifted_and_planted_again_writes_nothing() {
+        let dir = Dir::new("cycle");
+        let journal = SiteJournal::open(&dir.0, "target", BASE);
+        journal.record(0x1000, &NTCLOSE);
+        journal.record(0x2000, &NTCLOSE);
+        let path = dir.0.join("target");
+        fs::remove_file(&path).unwrap();
+        for _ in 0..3 {
+            journal.forget(0x1000);
+            journal.record(0x1000, &NTCLOSE);
+        }
+        assert!(!path.exists(), "a lift and re-plant rewrote the journal");
+        journal.record(0x3000, &NTCLOSE);
+        assert!(path.exists(), "a new site was not written");
     }
 
     #[test]
