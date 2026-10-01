@@ -144,3 +144,13 @@ Each hypercall table entry holds, after the handler and the call code, a word of
 
 This method recognizes 10.0.16299.15, 10.0.17134.1, 10.0.17763.1, 10.0.18362.1, 10.0.19041.1, 10.0.22000.1, 10.0.22621.1, 10.0.26100.1, 10.0.26100.9444, and 10.0.28000.1, whose offsets differ between releases: the partition ID moves from `0xc70` to `0x4630`, and a partition holds up to 0x140, 0x400, or 0x800 VPs. The same test as for the exit registers checks these images (`cargo test --lib hv_layout -- --ignored`).
 
+
+## Hypervisor stacks
+
+The Windows hypervisor's image keeps its unwind data in a discardable `.pdata` section, which its loader does not map, so a walk of a vCPU's stack in the hypervisor cannot read it from the target.
+
+With the file, the walk is exact. ntoseye matches the running build by the `TimeDateStamp` and `SizeOfImage` of the PE header that the hypervisor's address space maps, and looks for `hvix64.exe` in the managed symbol cache, under that key in symbol-store layout, and then in the local directories on the symbol path, in store layout or at their root. It never asks a symbol server, because none has the file. {command}`.fetchimage` `/f <file>` (in the SDK, `dbg.symbols.import_image(path)`) copies a file into the cache under the key in its own header. The file's `.pdata` and `.xdata` then drive the same unwinder as NT's modules, and its function table bounds the names of the hypervisor's code.
+
+Without the file, ntoseye reads prologs. It takes function starts from the targets of direct calls in the code, the 16-byte-aligned code after `int3` padding, the hypercall handlers, and the VM-exit entry points. For a frame, it emulates the instructions of its function's prolog up to the frame's address (pushes, `sub rsp`, frame-pointer setup, and the stores of register arguments, which do not move RSP); the first other instruction ends the prolog. A first frame in an epilog runs the epilog instead. The return address that the frame size gives must follow a call instruction in the hypervisor's code, or the walk falls back to a stack scan. Over the `.pdata` of hypervisor builds 16299 to 28000, the start and frame size found this way agree with the unwind data at 97.4% to 97.9% of call sites.
+
+Either way, a walk ends at a VM-exit entry point (the host RIP of an eVMCS), whose code runs on the bottom of the stack (the host RSP), and at any return address outside the hypervisor's image.

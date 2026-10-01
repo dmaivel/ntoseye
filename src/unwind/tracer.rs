@@ -180,6 +180,11 @@ impl<'a> StackTracer<'a> {
         let Some(module) = self.trace.module_for_address(address) else {
             return false;
         };
+        // The foreign image's file was looked for when it was loaded, and no
+        // server has one (see `ensure_module_loaded`).
+        if self.is_foreign_image(&module.info) {
+            return false;
+        }
         let key = (module.dtb, module.info.base_address.0);
 
         let disk = {
@@ -244,7 +249,15 @@ impl<'a> StackTracer<'a> {
                 }
             }
         };
-        let image = match self.cached_on_disk_image(&image, &module.info) {
+        let disk = if self.is_foreign_image(&module.info) {
+            // The Windows hypervisor's loader is not NT's, so its header
+            // may differ from the file's in more than `ImageBase`; the key
+            // the file is found by comes from the mapped header.
+            self.on_disk_image(&image, &module.info, ImageFetch::Local)
+        } else {
+            self.cached_on_disk_image(&image, &module.info)
+        };
+        let image = match disk {
             Some(disk) if !image.is_complete() => {
                 unwind_trace!(
                     "unwind: using cached on-disk image for {}",
@@ -272,6 +285,15 @@ impl<'a> StackTracer<'a> {
             image.headers().get(..headers_end)?,
         )
         .then_some(disk)
+    }
+
+    /// Whether `info` is the trace's foreign image (the Windows
+    /// hypervisor's), which no symbol server has.
+    pub fn is_foreign_image(&self, info: &ModuleInfo) -> bool {
+        self.trace
+            .foreign_image
+            .as_ref()
+            .is_some_and(|image| image.base_address == info.base_address)
     }
 
     /// The module's complete on-disk PE image, matched by the in-memory

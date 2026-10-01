@@ -831,6 +831,47 @@ pub fn read_pe_image_from_file(path: &Path) -> Result<PeImage> {
     Ok(PeImage::complete(image_buffer))
 }
 
+/// The file name of an image that no loader names: the stem of its CodeView
+/// PDB, with `.dll` or `.exe` as its header's `Characteristics` say. A
+/// renamed copy of the file keeps its build's PDB name, so the copy and the
+/// image mapped in memory are cached under the same name.
+pub fn image_file_name(pdb_path: &str, characteristics: u16) -> String {
+    let file = pdb_path.rsplit(['\\', '/']).next().unwrap_or(pdb_path);
+    let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+    let extension = if characteristics & pelite::image::IMAGE_FILE_DLL != 0 {
+        "dll"
+    } else {
+        "exe"
+    };
+    format!("{stem}.{extension}")
+}
+
+/// The symbol-store identity of the PE file `data` read from `path`: the
+/// name it is cached under ([`image_file_name`], or the file's own name when
+/// it has no CodeView record), its `TimeDateStamp`, and its `SizeOfImage`.
+pub fn image_file_identity(path: &Path, data: &[u8]) -> Result<(String, u32, u32)> {
+    let file = PeFile::from_bytes(data)?;
+    let header = file.file_header();
+    let size_of_image = match file.optional_header() {
+        Wrap::T32(optional) => optional.SizeOfImage,
+        Wrap::T64(optional) => optional.SizeOfImage,
+    };
+    let pdb = file
+        .debug()
+        .ok()
+        .and_then(|debug| debug.pdb_file_name())
+        .and_then(|name| name.to_str().ok().map(str::to_string));
+    let name = match pdb {
+        Some(pdb) => image_file_name(&pdb, header.Characteristics),
+        None => path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| Error::InvalidArgument(format!("{} names no file", path.display())))?
+            .to_string(),
+    };
+    Ok((name, header.TimeDateStamp, size_of_image))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

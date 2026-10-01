@@ -191,11 +191,42 @@ pub fn describe_hypercall_input(value: u64) -> String {
 }
 
 /// The names ntoseye gives the Windows hypervisor's code, and the length of
-/// the function each begins, by RVA, where the image's `.pdata` gives it.
+/// the function each begins, by RVA, where the image's `.pdata` gives it;
+/// with where its functions begin and where its stacks start, which a walk
+/// of its stacks needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HypervisorSymbols {
     pub names: Vec<(String, u32)>,
     pub extents: std::collections::HashMap<u32, u32>,
+    /// The RVAs functions begin at, sorted: the image's `.pdata` when its
+    /// file supplies it, direct call targets and code after padding (see
+    /// [`crate::unwind::prolog::function_starts`]), the hypercall handlers,
+    /// and the VM-exit entry points. The address space maps no `.pdata`, so
+    /// without the file this is the only way to find a frame's function.
+    pub starts: Vec<u32>,
+    /// The VM-exit entry points (each eVMCS's host RIP), sorted, by RVA. The
+    /// code at one runs on the bottom frame of a stack (host RSP is its base).
+    pub exit_entries: Vec<u32>,
+}
+
+impl HypervisorSymbols {
+    /// The function containing `rva`, as `start..end`: from the closest
+    /// start at or below it to the next start (or the end of the address
+    /// space when there is none). `None` below every start.
+    pub fn function_at(&self, rva: u32) -> Option<std::ops::Range<u32>> {
+        let next = self.starts.partition_point(|&start| start <= rva);
+        let start = *self.starts.get(next.checked_sub(1)?)?;
+        Some(start..self.starts.get(next).copied().unwrap_or(u32::MAX))
+    }
+
+    /// Whether `rva` is in the code of a VM-exit entry point, where a stack
+    /// begins: no function starts between the entry and it. The entries lie
+    /// inside larger `.pdata` functions, whose unwind data describes no
+    /// caller, so the walk must stop at one rather than unwind it.
+    pub fn in_exit_entry(&self, rva: u32) -> bool {
+        self.function_at(rva)
+            .is_some_and(|function| self.exit_entries.binary_search(&function.start).is_ok())
+    }
 }
 
 /// The hypercall page's code sequences that ntoseye names: the hypercall

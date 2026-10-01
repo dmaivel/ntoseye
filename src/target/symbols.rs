@@ -102,7 +102,7 @@ impl Target {
                 Error::DebugInfo(format!(
                     "{} (timestamp {time_date_stamp:#010x}, size {size_of_image:#x}) could not \
                      be downloaded: {error}; if no symbol server has it, copy the file from the \
-                     guest and check that its timestamp matches",
+                     guest and import it with .fetchimage /f <file>",
                     module.name
                 ))
             })

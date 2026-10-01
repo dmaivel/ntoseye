@@ -81,6 +81,8 @@ print(hex(kernel_fn), proc_module.name, hex(proc_module.base))
 print(dbg.memory.read(kernel_fn, 16).hex())
 ```
 
+`dbg.symbols.import_image(path)` copies a PE file into the symbol cache under the key in its own header and returns its path there, as {command}`.fetchimage` `/f` does. Use it for an image that no symbol server has, such as the Windows hypervisor's `hvix64.exe`, whose stacks then unwind exactly ([VBS](../platforms/vbs.md)).
+
 To find a type, use `dbg.types[name]` or `proc.types[name]`. `Type.fields` maps names to `Field` layouts in offset order, and for an enum, `Type.values` maps member names to values. `.at(address)` makes a live cursor, and `.read()` returns a snapshot dictionary.
 
 You can get the fields of a cursor as attributes. Pointer fields stay integer addresses, so to dereference a typed pointer, use `follow("Field")`. `address_of("Field")` gives the address of a field (C's `&cursor->Field`) for a watchpoint or a raw read.

@@ -203,7 +203,9 @@ pub(super) fn local_source_candidates(
     ]
 }
 
-fn install_local_pdb(source: &Path, destination: &Path) -> Result<()> {
+/// Copy `source` to `destination` in the cache, through a temporary file
+/// renamed into place, so a reader never sees a partial file.
+pub fn install_local_file(source: &Path, destination: &Path) -> Result<()> {
     if source == destination {
         return Ok(());
     }
@@ -259,7 +261,7 @@ fn resolve_local_sources(
                     }
                     match validate_pdb_identity(&candidate, request.identity) {
                         Ok(()) => {
-                            install_local_pdb(&candidate, &job.path)?;
+                            install_local_file(&candidate, &job.path)?;
                             return Ok(true);
                         }
                         Err(reason) => {

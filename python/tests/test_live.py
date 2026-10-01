@@ -9,6 +9,7 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
@@ -608,3 +609,24 @@ def secure_step_scenario(halted: Debugger, address: int) -> bool:
         halted.interrupt()
         if bp.valid:
             bp.delete()
+
+
+def test_imported_image_lands_under_its_own_key(halted: Debugger, tmp_path: Path) -> None:
+    """A PE file copied in with import_image is filed under the TimeDateStamp
+    and SizeOfImage of its own header, where a lookup for that build finds
+    it."""
+    pe = bytearray(0x200)
+    pe[0:2] = b"MZ"
+    pe[0x3C:0x40] = (0x80).to_bytes(4, "little")
+    pe[0x80:0x84] = b"PE\0\0"
+    pe[0x84:0x86] = (0x8664).to_bytes(2, "little")
+    pe[0x88:0x8C] = (0x7E57_0001).to_bytes(4, "little")
+    pe[0x94:0x96] = (240).to_bytes(2, "little")
+    pe[0x98:0x9A] = (0x20B).to_bytes(2, "little")
+    pe[0x98 + 56 : 0x98 + 60] = (0x3000).to_bytes(4, "little")
+    pe[0x98 + 60 : 0x98 + 64] = (0x200).to_bytes(4, "little")
+    source = tmp_path / "ntoseyetest.exe"
+    source.write_bytes(bytes(pe))
+    imported = Path(halted.symbols.import_image(str(source)))
+    assert imported.parts[-3:] == ("ntoseyetest.exe", "7E5700013000", "ntoseyetest.exe")
+    assert imported.read_bytes() == bytes(pe)

@@ -11,7 +11,7 @@ use crate::{
     bugchecks::looks_like_kernel_pointer,
     error::{Error, Result},
     gdb::RegisterMap,
-    guest::{Image, ModuleInfo, ProcessInfo, SecureKernel},
+    guest::{Image, ModuleInfo, ProcessInfo, SecureKernel, hypercalls::HypervisorSymbols},
     memory::{AddressSpace, DTB_IDENTITY},
     pe::{CodeLayout, PeImage},
     phys::PhysMem,
@@ -43,6 +43,7 @@ macro_rules! unwind_trace {
 mod amd64;
 mod arm64;
 mod arm64ec;
+pub mod prolog;
 mod tracer;
 mod walk;
 mod wow64;
@@ -90,6 +91,9 @@ pub struct ThreadTraceContext {
     /// module's, but it is never symbol-fetched: it has no loader entry, and
     /// every vCPU has its own root, so a fetch would repeat per vCPU.
     pub foreign_image: Option<ModuleInfo>,
+    /// When `foreign_image` is the Windows hypervisor's, where its functions
+    /// begin and its stacks start, for frames its `.pdata` cannot unwind.
+    pub hypervisor: Option<Arc<HypervisorSymbols>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +101,9 @@ pub enum FrameSource {
     Current,
     Seed,
     Unwind,
+    /// Unwound by analyzing its function's prolog, for code whose unwind data
+    /// is not mapped (the Windows hypervisor's without its file).
+    Prolog,
     Scan,
 }
 
@@ -109,6 +116,7 @@ impl FrameSource {
             FrameSource::Current => "current",
             FrameSource::Seed => "seed",
             FrameSource::Unwind => "unwind",
+            FrameSource::Prolog => "prolog",
             FrameSource::Scan => "scan",
         }
     }
@@ -252,6 +260,9 @@ enum Unwound {
     /// trap/interrupt frame, where rsp may move to a different stack (e.g. an IST
     /// or the idle stack) and so need not be greater than the previous rsp.
     Frame { stack_switch: bool },
+    /// Advanced to the caller by prolog analysis ([`prolog`]): a frame of
+    /// code whose unwind data is not mapped.
+    Prolog,
 }
 
 #[derive(Debug, Clone)]
@@ -356,6 +367,7 @@ fn thread_trace_context(debugger: &Target, cr3: u64, process_modules: bool) -> T
             kernel_modules: debugger.kernel_modules().unwrap_or_default(),
             process_modules: Vec::new(),
             foreign_image: None,
+            hypervisor: None,
         },
         RootOwner::SecureKernel(secure) => ThreadTraceContext {
             description: "VTL1".to_string(),
@@ -369,6 +381,7 @@ fn thread_trace_context(debugger: &Target, cr3: u64, process_modules: bool) -> T
                 .unwrap_or_default(),
             process_modules: Vec::new(),
             foreign_image: None,
+            hypervisor: None,
         },
         RootOwner::Process(proc_info) => ThreadTraceContext {
             description: format!("{} ({})", proc_info.name, proc_info.pid),
@@ -383,6 +396,7 @@ fn thread_trace_context(debugger: &Target, cr3: u64, process_modules: bool) -> T
                 .and_then(|guest| guest.process_modules(&proc_info).ok())
                 .unwrap_or_default(),
             foreign_image: None,
+            hypervisor: None,
         },
         RootOwner::Unknown => ThreadTraceContext {
             description: UNKNOWN_CONTEXT.to_string(),
@@ -392,6 +406,7 @@ fn thread_trace_context(debugger: &Target, cr3: u64, process_modules: bool) -> T
             kernel_modules: debugger.kernel_modules().unwrap_or_default(),
             process_modules: Vec::new(),
             foreign_image: None,
+            hypervisor: None,
         },
     }
 }
@@ -468,6 +483,7 @@ fn code_trace_context_at(
         ForeignModules::Image(image) => trace.foreign_image = Some(image),
         ForeignModules::None => {}
     }
+    trace.hypervisor = code.hypervisor;
     trace
 }
 
@@ -910,7 +926,7 @@ pub fn return_address_for_register_values(
     let trace = resolve_thread_trace_context(debugger, dtb);
     let mut tracer = StackTracer::new(debugger, &trace);
     match tracer.unwind_once(&mut context) {
-        Unwound::Frame { .. } => (context.rip != 0).then_some(context.rip),
+        Unwound::Frame { .. } | Unwound::Prolog => (context.rip != 0).then_some(context.rip),
         Unwound::Stop => None,
     }
 }
@@ -1287,7 +1303,12 @@ impl StackTracer<'_> {
         match self.target.arch() {
             Arch::Amd64 => {
                 let unwound = self.unwind_once_amd64(context);
-                if let Unwound::Frame { stack_switch } = unwound {
+                let stack_switch = match unwound {
+                    Unwound::Frame { stack_switch } => Some(stack_switch),
+                    Unwound::Prolog => Some(false),
+                    Unwound::Stop => None,
+                };
+                if let Some(stack_switch) = stack_switch {
                     // Crossing a machine frame lands where an interrupt or
                     // trap stopped the code, not after a call.
                     context.after_call = !stack_switch;

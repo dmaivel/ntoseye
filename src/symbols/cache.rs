@@ -1,15 +1,16 @@
 //! The managed on-disk cache: its location and symbol-store layout, module
 //! identities persisted across sessions, and complete module images kept in it.
 
-use super::download::download_job;
+use super::download::{download_job, install_local_file};
 use super::ntoseye_home;
-use super::{DownloadJob, ImageFetch, SymbolStore, server_urls};
+use super::{DownloadJob, ImageFetch, SymbolSource, SymbolStore, server_urls};
 use crate::{
     error::{Error, Result},
     guest::ModuleInfo,
-    pe::{PeImage, read_pe_image_from_file},
+    pe::{PeImage, image_file_identity, read_pe_image_from_file},
 };
 use indicatif::ProgressBar;
+use memmap2::Mmap;
 use std::{
     collections::HashMap,
     fs::File,
@@ -36,6 +37,56 @@ pub(super) fn symbols_directory() -> Option<PathBuf> {
 /// any of them can read and any of theirs can serve as the cache.
 pub(super) fn store_path(root: &Path, file_name: &str, key: &str) -> PathBuf {
     root.join(file_name).join(key).join(file_name)
+}
+
+/// The key a symbol store files an image under: its `TimeDateStamp` and
+/// `SizeOfImage`, in hex.
+pub fn image_key(time_date_stamp: u32, size_of_image: u32) -> String {
+    format!("{time_date_stamp:08X}{size_of_image:X}")
+}
+
+/// The first file in the local symbol stores `roots` that is image
+/// `file_name` of the build `time_date_stamp`/`size_of_image`: at its
+/// symbol-store path, or bare at a store's root as a copy from the guest
+/// lands. Each candidate's own header must carry the key, since a bare file
+/// can be any build.
+pub fn find_image_in_local_stores<'a>(
+    roots: impl IntoIterator<Item = &'a Path>,
+    file_name: &str,
+    time_date_stamp: u32,
+    size_of_image: u32,
+) -> Option<PathBuf> {
+    let key = image_key(time_date_stamp, size_of_image);
+    roots
+        .into_iter()
+        .flat_map(|root| [store_path(root, file_name, &key), root.join(file_name)])
+        .find(|candidate| {
+            image_identity_at(candidate)
+                .is_some_and(|(_, stamp, size)| stamp == time_date_stamp && size == size_of_image)
+        })
+}
+
+/// The identity [`image_file_identity`] gives the file at `path`, when it is
+/// a readable PE file.
+fn image_identity_at(path: &Path) -> Option<(String, u32, u32)> {
+    let file = File::open(path).ok()?;
+    // SAFETY: the map is read for this call only; a file changed under it
+    // reads as some other header, which the caller's key check rejects.
+    let data = unsafe { Mmap::map(&file) }.ok()?;
+    image_file_identity(path, &data).ok()
+}
+
+/// Copy the PE file at `source` into the symbol store at `root`, under the
+/// name and key its own header gives ([`image_file_identity`]), and return
+/// where it went. For an image no symbol server has, such as the Windows
+/// hypervisor's, copied from the guest.
+pub fn import_image_into(root: &Path, source: &Path) -> Result<PathBuf> {
+    let (name, time_date_stamp, size_of_image) = image_identity_at(source).ok_or_else(|| {
+        Error::InvalidArgument(format!("{} is not a readable PE file", source.display()))
+    })?;
+    let destination = store_path(root, &name, &image_key(time_date_stamp, size_of_image));
+    install_local_file(source, &destination)?;
+    Ok(destination)
 }
 
 /// The image identity the symbol server keys on: file name, `TimeDateStamp`,
@@ -183,8 +234,49 @@ impl SymbolStore {
         size_of_image: u32,
     ) -> Result<PathBuf> {
         let job = Self::build_image_download_job(image_file_name, time_date_stamp, size_of_image)?;
-        download_job(&job, ProgressBar::new(0))?;
+        match self.local_image(&job, time_date_stamp, size_of_image) {
+            Some(local) => install_local_file(&local, &job.path)?,
+            None => download_job(&job, ProgressBar::new(0))?,
+        }
         Ok(job.path)
+    }
+
+    /// Copy the PE file at `source` into the cache under its own key (see
+    /// [`import_image_into`]) and return its cache path. A copy already
+    /// expanded this session is dropped, so the next lookup reads the file.
+    pub fn import_image(&self, source: &Path) -> Result<PathBuf> {
+        let root = symbols_directory().ok_or(Error::StorageNotFound)?;
+        let path = import_image_into(&root, source)?;
+        self.on_disk_images.remove(&path);
+        self.unavailable.lock().remove(&path);
+        Ok(path)
+    }
+
+    /// Where `job`'s image already is on this machine: the cache, or a local
+    /// symbol store on the symbol path.
+    fn local_image(
+        &self,
+        job: &DownloadJob,
+        time_date_stamp: u32,
+        size_of_image: u32,
+    ) -> Option<PathBuf> {
+        if !job.needs_download() {
+            return Some(job.path.clone());
+        }
+        let roots: Vec<PathBuf> = self
+            .symbol_sources()
+            .into_iter()
+            .filter_map(|source| match source {
+                SymbolSource::LocalDirectory(root) => Some(root),
+                SymbolSource::Cache | SymbolSource::Http(_) => None,
+            })
+            .collect();
+        find_image_in_local_stores(
+            roots.iter().map(PathBuf::as_path),
+            &job.filename,
+            time_date_stamp,
+            size_of_image,
+        )
     }
 
     /// The module image's path when it is already in the cache; otherwise
@@ -253,9 +345,10 @@ impl SymbolStore {
     }
 
     /// The module's complete on-disk PE image from the image cache, expanded
-    /// once per session, downloaded first when absent if `fetch` allows. Lets
+    /// once per session, looked for where `fetch` allows when absent. Lets
     /// the unwinder read unwind tables without the target, or recover them
-    /// when the in-memory `.pdata` is paged out.
+    /// when the in-memory `.pdata` is paged out or, as in the Windows
+    /// hypervisor, never mapped. A copy in a local store is read in place.
     pub fn module_image_on_disk(
         &self,
         image_file_name: &str,
@@ -267,10 +360,26 @@ impl SymbolStore {
         if let Some(image) = self.on_disk_images.get(&job.path) {
             return Ok(Arc::clone(&image));
         }
-        if fetch == ImageFetch::Download {
-            download_job(&job, ProgressBar::new(0))?;
-        }
-        let image = Arc::new(read_pe_image_from_file(&job.path)?);
+        let path = match fetch {
+            ImageFetch::CacheOnly => job.path.clone(),
+            ImageFetch::Local | ImageFetch::Download => {
+                match self.local_image(&job, time_date_stamp, size_of_image) {
+                    Some(path) => path,
+                    None if fetch == ImageFetch::Download => {
+                        download_job(&job, ProgressBar::new(0))?;
+                        job.path.clone()
+                    }
+                    None => {
+                        return Err(Error::DebugInfo(format!(
+                            "{} ({}) is in neither the symbol cache nor a local symbol store",
+                            job.filename,
+                            image_key(time_date_stamp, size_of_image)
+                        )));
+                    }
+                }
+            }
+        };
+        let image = Arc::new(read_pe_image_from_file(&path)?);
         self.on_disk_images.insert(job.path, Arc::clone(&image));
         Ok(image)
     }
@@ -281,7 +390,7 @@ impl SymbolStore {
         size_of_image: u32,
     ) -> Result<DownloadJob> {
         let server_name = Self::symbol_server_file_name(image_file_name);
-        let key = format!("{time_date_stamp:08X}{size_of_image:X}");
+        let key = image_key(time_date_stamp, size_of_image);
         let urls = server_urls(&format!("{server_name}/{key}/{server_name}"));
         let storage_dir = symbols_directory().ok_or(Error::StorageNotFound)?;
         let path = store_path(&storage_dir, server_name, &key);

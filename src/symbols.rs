@@ -571,7 +571,12 @@ fn user_home_dir() -> Option<PathBuf> {
 /// Whether a lookup in the image cache may download a missing image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageFetch {
+    /// The managed cache only.
     CacheOnly,
+    /// The managed cache, then the local symbol stores on the symbol path,
+    /// never a server: for an image no server has (the Windows hypervisor's).
+    Local,
+    /// The managed cache, the local symbol stores, then the symbol servers.
     Download,
 }
 

@@ -1388,3 +1388,48 @@ fn a_cleared_synthetic_module_takes_the_names_registered_next() {
         Some("hv!VmExitEntry+0x70".to_string())
     );
 }
+
+/// A minimal AMD64 PE file of the build `time_date_stamp`/`size_of_image`.
+fn pe_file(time_date_stamp: u32, size_of_image: u32) -> Vec<u8> {
+    let mut file = vec![0u8; 0x200];
+    file[..2].copy_from_slice(b"MZ");
+    file[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+    file[0x80..0x84].copy_from_slice(b"PE\0\0");
+    file[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes());
+    file[0x88..0x8c].copy_from_slice(&time_date_stamp.to_le_bytes());
+    file[0x94..0x96].copy_from_slice(&240u16.to_le_bytes());
+    file[0x98..0x9a].copy_from_slice(&0x20bu16.to_le_bytes());
+    file[0x98 + 56..0x98 + 60].copy_from_slice(&size_of_image.to_le_bytes());
+    file[0x98 + 60..0x98 + 64].copy_from_slice(&0x200u32.to_le_bytes());
+    file
+}
+
+/// A file imported from the guest lands at its own build's store path,
+/// where a lookup for the running build finds it; a copy of another build,
+/// at a store's root under the same name, is not taken for it.
+#[test]
+fn an_imported_image_is_found_for_its_own_build_only() {
+    let root = temp_root("import-image");
+    let source = temp_root("import-source");
+    std::fs::create_dir_all(&source).unwrap();
+    let copied = source.join("hvix64.exe");
+    std::fs::write(&copied, pe_file(0x1525_065d, 0x41_5000)).unwrap();
+
+    let imported = cache::import_image_into(&root, &copied).unwrap();
+    assert_eq!(imported, root.join("hvix64.exe/1525065D415000/hvix64.exe"));
+    let found =
+        cache::find_image_in_local_stores([root.as_path()], "hvix64.exe", 0x1525_065d, 0x41_5000);
+    assert_eq!(found, Some(imported));
+
+    let other = temp_root("import-other");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("hvix64.exe"), pe_file(0x1111_1111, 0x41_5000)).unwrap();
+    let bare = |stamp| {
+        cache::find_image_in_local_stores([other.as_path()], "hvix64.exe", stamp, 0x41_5000)
+    };
+    assert_eq!(bare(0x1525_065d), None, "another build");
+    assert_eq!(bare(0x1111_1111), Some(other.join("hvix64.exe")));
+    for directory in [root, source, other] {
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}

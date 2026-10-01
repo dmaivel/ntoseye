@@ -57,7 +57,7 @@ enum UnwindStep {
 
 /// How an epilog starts to release the frame before its pops.
 #[derive(Debug, PartialEq, Eq)]
-enum EpilogRelease {
+pub enum EpilogRelease {
     /// Already at the pops (or the return).
     None,
     /// `add rsp, imm`.
@@ -73,13 +73,13 @@ enum EpilogRelease {
 /// what they would undo again; the unwinder runs the remaining epilog
 /// instead, as `RtlVirtualUnwind` does.
 #[derive(Debug, PartialEq, Eq)]
-struct Epilog {
+pub struct Epilog {
     release: EpilogRelease,
     /// Registers popped, in order, by unwind register number.
     pops: Vec<usize>,
 }
 
-fn decode_epilog(code: &[u8], code_rva: u32, function: Range<u32>) -> Option<Epilog> {
+pub fn decode_epilog(code: &[u8], code_rva: u32, function: Range<u32>) -> Option<Epilog> {
     let mut at = 0usize;
     let release = match code {
         [0x48, 0x83, 0xc4, imm, ..] => {
@@ -216,8 +216,10 @@ impl StackTracer<'_> {
                 return self.unwind_leaf(context);
             }
             Resolve::Holed => {
-                unwind_trace!("unwind: unwind data paged out and unrecoverable -> stop");
-                return Unwound::Stop;
+                // The Windows hypervisor maps no `.pdata` at all; without its
+                // file, its prologs are all there is to unwind by.
+                unwind_trace!("unwind: unwind data paged out and unrecoverable -> prolog");
+                return self.unwind_prolog(context, base_address);
             }
         };
 
@@ -302,9 +304,74 @@ impl StackTracer<'_> {
         Unwound::Stop
     }
 
+    /// Unwind a frame of the foreign image (the Windows hypervisor's) whose
+    /// unwind data is not mapped, by its function's prolog (see
+    /// [`super::prolog`]). A first frame in an epilog runs the epilog. The
+    /// return address must follow a call in the image's code; otherwise the
+    /// walk stops and the scan takes over.
+    pub fn unwind_prolog(&mut self, context: &mut RegisterContext, base: u64) -> Unwound {
+        let Some(symbols) = self.trace.hypervisor.clone() else {
+            return Unwound::Stop;
+        };
+        let Some((image, _)) = self.module_code(context.rip) else {
+            return Unwound::Stop;
+        };
+        let rva = (context.rip - base) as u32;
+        let Some(function) = symbols.function_at(rva) else {
+            return Unwound::Stop;
+        };
+        if !context.after_call
+            && let Some(code) = image.read(rva as usize, 16)
+            && let Some(epilog) = decode_epilog(&code, rva, function.clone())
+        {
+            return match self.unwind_epilog(context, &epilog) {
+                Unwound::Frame { .. } => Unwound::Prolog,
+                other => other,
+            };
+        }
+        let offset = (rva - function.start) as usize;
+        let Some(code) = image.read(function.start as usize, offset.min(0x100)) else {
+            return Unwound::Stop;
+        };
+        let frame = super::prolog::analyze_prolog(&code, offset);
+        let rsp = context.rsp.wrapping_add(u64::from(frame.size));
+        let Ok(return_address) = self.stack_u64(rsp) else {
+            return Unwound::Stop;
+        };
+        let follows = return_address
+            .checked_sub(base)
+            .and_then(|ret| image.read((ret as usize).checked_sub(7)?, 7))
+            .is_some_and(|before| super::prolog::follows_call(&before));
+        if !follows || !self.is_executable_address(return_address) {
+            return Unwound::Stop;
+        }
+        for &(register, at) in &frame.saved {
+            if let Ok(value) = self.stack_u64(context.rsp.wrapping_add(u64::from(at))) {
+                context.regs[register] = Some(value);
+            }
+        }
+        context.rip = return_address;
+        context.rsp = rsp.wrapping_add(8);
+        Unwound::Prolog
+    }
+
+    /// Whether `context` is at a Windows hypervisor VM-exit entry, where its
+    /// stack begins.
+    pub fn at_hypervisor_stack_base(&self, context: &RegisterContext) -> bool {
+        let (Some(symbols), Some(image)) = (&self.trace.hypervisor, &self.trace.foreign_image)
+        else {
+            return false;
+        };
+        context
+            .rip
+            .checked_sub(image.base_address.0)
+            .and_then(|rva| u32::try_from(rva).ok())
+            .is_some_and(|rva| symbols.in_exit_entry(rva))
+    }
+
     /// Run the remainder of `epilog` against `context`: release the frame,
     /// restore the popped registers, and return to the caller.
-    fn unwind_epilog(&self, context: &mut RegisterContext, epilog: &Epilog) -> Unwound {
+    pub fn unwind_epilog(&self, context: &mut RegisterContext, epilog: &Epilog) -> Unwound {
         let mut rsp = match epilog.release {
             EpilogRelease::None => context.rsp,
             EpilogRelease::AddRsp(imm) => context.rsp.wrapping_add(u64::from(imm)),

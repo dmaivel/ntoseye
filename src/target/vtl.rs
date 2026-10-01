@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use pelite::{PeView, image::IMAGE_FILE_DLL};
+use pelite::PeView;
 
 use super::{SelectedFrame, Target};
 use crate::{
@@ -25,11 +25,11 @@ use crate::{
         hypervisor,
     },
     memory::{AddressSpace, PAGE_SIZE},
-    pe::{read_pe_header_page, size_of_image},
+    pe::{PeImage, image_file_name, read_pe_header_page, size_of_image},
     phys::PhysMem,
-    symbols::SymbolStore,
+    symbols::{ImageFetch, SymbolStore},
     types::{Arch, CodeMachine, Dtb, PhysAddr, VirtAddr},
-    unwind::halted_in_windows_hypervisor,
+    unwind::{halted_in_windows_hypervisor, prolog},
 };
 
 /// How far below an instruction pointer to look for the header of the image
@@ -63,6 +63,9 @@ pub struct ForeignCode {
     /// `hypervisor`, `VTL1`, or the name of the image the code lies in.
     pub context: String,
     pub modules: ForeignModules,
+    /// For the Windows hypervisor's code, the names and function starts
+    /// ntoseye made for its image, which a walk of its stacks uses.
+    pub hypervisor: Option<Arc<hypercalls::HypervisorSymbols>>,
 }
 
 /// The modules a trace of foreign code unwinds and symbolizes with.
@@ -589,10 +592,11 @@ impl Target {
             ),
             None => find(),
         };
+        let mut hypervisor = None;
         let context = match &image {
             Some(image) => match image.short_name.as_str() {
                 "hv" => {
-                    self.register_hypervisor_symbols(dtb, image);
+                    hypervisor = self.register_hypervisor_symbols(dtb, image);
                     self.register_hypercall_pages();
                     HYPERVISOR_CONTEXT.to_string()
                 }
@@ -619,28 +623,56 @@ impl Target {
         let modules = secure
             .or_else(|| image.map(ForeignModules::Image))
             .unwrap_or(ForeignModules::None);
-        Some(ForeignCode { context, modules })
+        Some(ForeignCode {
+            context,
+            modules,
+            hypervisor,
+        })
+    }
+
+    /// The running build's `hvix64.exe`, when the symbol cache or a local
+    /// symbol store on the symbol path has it (by the TimeDateStamp and
+    /// SizeOfImage of the header mapped at `image`). Its `.pdata`, which the
+    /// hypervisor's address space does not map, bounds its functions and
+    /// unwinds its frames. No symbol server has it, so none is asked.
+    pub fn hypervisor_file(&self, image: &ModuleInfo) -> Option<Arc<PeImage>> {
+        self.symbols
+            .module_image_on_disk(
+                &image.name,
+                image.time_date_stamp?,
+                image.size,
+                ImageFetch::Local,
+            )
+            .ok()
     }
 
     /// Name the hypervisor image's code in root `dtb` (see
     /// [`hypercalls::hypervisor_symbols`]), once per root: its hypercall
     /// handlers from its hypercall table and its VM-exit entry points from the
-    /// eVMCS pages, so `k`, `u`, `ln`, and `hv!` expressions use them.
-    fn register_hypervisor_symbols(&self, dtb: Dtb, image: &ModuleInfo) {
-        let Some(guest) = &self.guest else { return };
-        if self
-            .symbols
-            .find_module_for_address(dtb, image.base_address)
-            .is_some()
-        {
-            return;
-        }
+    /// eVMCS pages, so `k`, `u`, `ln`, and `hv!` expressions use them. The
+    /// names are made again, once, when the image's file turns up (see
+    /// [`Self::hypervisor_file`]), whose `.pdata` bounds them.
+    fn register_hypervisor_symbols(
+        &self,
+        dtb: Dtb,
+        image: &ModuleInfo,
+    ) -> Option<Arc<hypercalls::HypervisorSymbols>> {
+        let guest = self.guest.as_ref()?;
+        let file = self.hypervisor_file(image);
         let base = image.base_address.0;
-        let Some(names) = guest.hypervisor_symbols(base, || {
+        // The base is page-aligned, so its low bit is free to keep the names
+        // made with the file apart from those made without it.
+        let key = base | u64::from(file.is_some());
+        let names = guest.hypervisor_symbols(key, || {
             let memory = self.address_space(dtb);
-            let Ok(loaded) = hypervisor_image(&memory, image) else {
+            let Ok(mut loaded) = hypervisor_image(&memory, image) else {
                 return Ok(None);
             };
+            if let Some(file) = &file
+                && let Ok(view) = PeView::from_bytes(file.headers())
+            {
+                loaded.functions = runtime_function_lengths(file.headers(), &view);
+            }
             let Ok(table) = hv_layout::hypercall_table(&loaded.view()) else {
                 return Ok(None);
             };
@@ -660,25 +692,44 @@ impl Target {
             entries.dedup();
             let names = hypercalls::hypervisor_symbols(base, &table, &entries);
             let extents = hypercalls::symbol_extents(&names, &loaded.functions, &loaded.bytes);
-            Ok(Some(hypercalls::HypervisorSymbols { names, extents }))
-        }) else {
-            return;
-        };
+            let rva = |address: u64| u32::try_from(address.checked_sub(base)?).ok();
+            let exit_entries: Vec<u32> = entries.iter().filter_map(|&entry| rva(entry)).collect();
+            let mut starts = prolog::function_starts(&loaded.bytes, &loaded.code);
+            starts.extend(loaded.functions.keys());
+            starts.extend(table.iter().filter_map(|entry| rva(entry.handler)));
+            starts.extend(&exit_entries);
+            starts.sort_unstable();
+            starts.dedup();
+            Ok(Some(hypercalls::HypervisorSymbols {
+                names,
+                extents,
+                starts,
+                exit_entries,
+            }))
+        })?;
         // "hv" in the high bytes keeps these keys apart from PDB GUIDs; the
         // image's timestamp and size keep another build at the same base
-        // from reusing these names. A canonical address is its low 48 bits
-        // sign-extended.
-        let guid = (0x6876u128 << 112)
+        // from reusing these names, and the top bit marks names the file
+        // bounded. A canonical address is its low 48 bits sign-extended.
+        let guid = (u128::from(file.is_some()) << 127)
+            | (0x6876u128 << 112)
             | (u128::from(image.time_date_stamp.unwrap_or(0)) << 80)
             | (u128::from(image.size) << 48)
             | u128::from(base & 0xffff_ffff_ffff);
-        self.symbols.register_synthetic_module(
-            dtb,
-            image,
-            guid,
-            &names.names,
-            names.extents.clone(),
-        );
+        if self
+            .symbols
+            .find_module_for_address(dtb, image.base_address)
+            .is_none_or(|registered| registered.guid != guid)
+        {
+            self.symbols.register_synthetic_module(
+                dtb,
+                image,
+                guid,
+                &names.names,
+                names.extents.clone(),
+            );
+        }
+        Some(names)
     }
 
     /// Name the hypercall pages NT and, once its symbols are loaded, the
@@ -807,16 +858,9 @@ fn image_containing<B: MemoryOps<PhysAddr>>(
             let path = SymbolStore::codeview_pdb_path(memory, VirtAddr(page))
                 .ok()
                 .flatten()?;
-            let file = path.rsplit(['\\', '/']).next().unwrap_or(&path);
             // The loader's name is not in memory; the PDB's stem is the
             // image's, and the header says which kind of file it was.
-            let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
-            let extension = if view.file_header().Characteristics & IMAGE_FILE_DLL != 0 {
-                "dll"
-            } else {
-                "exe"
-            };
-            let name = format!("{stem}.{extension}");
+            let name = image_file_name(&path, view.file_header().Characteristics);
             return Some(
                 ModuleInfo::new(name, VirtAddr(page), size)
                     .with_time_date_stamp(view.file_header().TimeDateStamp),
@@ -909,10 +953,26 @@ fn hypervisor_image<B: MemoryOps<PhysAddr>>(
         }
     }
     // The exception directory's RUNTIME_FUNCTIONs: begin, end, unwind RVAs.
+    let functions = runtime_function_lengths(&bytes, &view);
+    Ok(HypervisorImage {
+        base,
+        bytes,
+        code,
+        data,
+        functions,
+    })
+}
+
+/// The length of each function by the RVA it begins at, from the
+/// RUNTIME_FUNCTIONs (begin, end, unwind RVAs) of the exception directory in
+/// `bytes`, an image laid out by RVA whose headers `view` reads.
+fn runtime_function_lengths(bytes: &[u8], view: &PeView<'_>) -> HashMap<u32, u32> {
     let mut functions = HashMap::new();
     if let Some(directory) = view.data_directory().get(3) {
         let start = directory.VirtualAddress as usize;
-        let end = (start + directory.Size as usize).min(size);
+        let end = start
+            .saturating_add(directory.Size as usize)
+            .min(bytes.len());
         for entry in bytes.get(start..end).unwrap_or(&[]).as_chunks::<12>().0 {
             let begin = u32::from_le_bytes([entry[0], entry[1], entry[2], entry[3]]);
             let finish = u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]);
@@ -921,13 +981,7 @@ fn hypervisor_image<B: MemoryOps<PhysAddr>>(
             }
         }
     }
-    Ok(HypervisorImage {
-        base,
-        bytes,
-        code,
-        data,
-        functions,
-    })
+    functions
 }
 
 impl Target {

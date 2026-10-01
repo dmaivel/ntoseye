@@ -149,9 +149,9 @@ repl_command! {
 repl_command! {
     cmd_fetchimage;
     names: [".fetchimage"],
-    usage: ".fetchimage <module>",
-    summary: "Download the PE file of a loaded module into the symbol cache and print its path.",
-    details: "The command finds the file by the TimeDateStamp and SizeOfImage values in the mapped PE header of the module. These values are the symbol-server key, so the file is the same build that is running, and a disassembler database that you make from this file rebases onto the live module.",
+    usage: ".fetchimage <module>  or  .fetchimage /f <file>",
+    summary: "Download the PE file of a loaded module into the symbol cache, or copy a file into it, and print its path.",
+    details: "The command finds the file by the TimeDateStamp and SizeOfImage values in the mapped PE header of the module. These values are the symbol-server key, so the file is the same build that is running, and a disassembler database that you make from this file rebases onto the live module. A copy in a local directory on the symbol path, at its root or in symbol-store layout, is used before a symbol server. `/f` copies a PE file that you have into the cache under the key in its own header, with the name of its PDB, so ntoseye finds it for the module that runs that build. Use it for the Windows hypervisor, which Microsoft's symbol server does not have: copy C:\\Windows\\System32\\hvix64.exe from the guest and run `.fetchimage /f hvix64.exe`, after which the stacks of a vCPU in the hypervisor unwind through the file's unwind data.",
     completion: Symbol,
 }
 
@@ -759,7 +759,16 @@ impl ReplState<'_> {
             outln!("{}\n", command_help(".fetchimage"));
             return Ok(());
         };
-        match self.ctx.target.fetch_module_image(name) {
+        let fetched = if name.eq_ignore_ascii_case("/f") {
+            let Some(file) = invocation.arg(1) else {
+                outln!("{}\n", command_help(".fetchimage"));
+                return Ok(());
+            };
+            self.ctx.target.symbols.import_image(Path::new(file))
+        } else {
+            self.ctx.target.fetch_module_image(name)
+        };
+        match fetched {
             Ok(path) => outln!("{}\n", path.display()),
             Err(err) => error!("{}", err),
         }

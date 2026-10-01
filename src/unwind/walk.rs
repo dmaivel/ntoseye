@@ -10,7 +10,7 @@ use super::{
 use crate::{
     guest::{Guest, ModuleInfo},
     target::Target,
-    types::{Arch, Dtb},
+    types::{Arch, Dtb, VirtAddr},
 };
 
 pub(super) fn build_recovered_stacktrace_seeded(
@@ -38,17 +38,36 @@ pub(super) fn build_recovered_stacktrace_seeded(
         if raw.len() >= limit {
             break;
         }
+        // A Windows hypervisor stack starts at a VM-exit entry: nothing
+        // above its frame belongs to the stack, and its unwind data names no
+        // caller.
+        if tracer.at_hypervisor_stack_base(&context) {
+            reached_end = true;
+            break;
+        }
         let previous_rip = context.rip;
         let previous_rsp = context.rsp;
 
-        let stack_switch = match tracer.unwind_once(&mut context) {
+        let (stack_switch, source) = match tracer.unwind_once(&mut context) {
             Unwound::Stop => break,
-            Unwound::Frame { stack_switch } => stack_switch,
+            Unwound::Frame { stack_switch } => (stack_switch, FrameSource::Unwind),
+            Unwound::Prolog => (false, FrameSource::Prolog),
         };
 
         // A zero return address is the thread's initial frame: nothing above
         // it belongs to the thread, so there is nothing to scan either.
         if context.rip == 0 {
+            reached_end = true;
+            break;
+        }
+        // The hypervisor's root maps no NT code, and its own stacks hold only
+        // its own return addresses: an unwind that leaves its image has gone
+        // past the stack's base.
+        if trace
+            .foreign_image
+            .as_ref()
+            .is_some_and(|image| !image.contains_address(VirtAddr(context.rip)))
+        {
             reached_end = true;
             break;
         }
@@ -72,11 +91,7 @@ pub(super) fn build_recovered_stacktrace_seeded(
             break;
         }
         seen.insert(context.rip);
-        raw.push((
-            context.clone(),
-            FrameSource::Unwind,
-            tracer.frame_base_for(&context),
-        ));
+        raw.push((context.clone(), source, tracer.frame_base_for(&context)));
     }
 
     let remaining = if reached_end {

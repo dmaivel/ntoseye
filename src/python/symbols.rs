@@ -232,6 +232,20 @@ impl Symbols {
         })
     }
 
+    /// Copy a PE file into the symbol cache under the key in its own header, and
+    /// return its path in the cache (`.fetchimage /f`). Use it for an image that
+    /// no symbol server has, such as the Windows hypervisor's `hvix64.exe`.
+    fn import_image(&self, py: Python<'_>, path: String) -> PyResult<String> {
+        scoped(py, &self.owner, &self.space, move |session| {
+            let imported = session
+                .target
+                .symbols
+                .import_image(std::path::Path::new(&path))
+                .map_err(err)?;
+            Ok(imported.to_string_lossy().into_owned())
+        })
+    }
+
     /// The ordered source-path mappings (`.srcpath`). An assignment replaces all of them.
     #[getter(source_path)]
     fn source_path(&self, py: Python<'_>) -> PyResult<Vec<String>> {
