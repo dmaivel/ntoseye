@@ -64,11 +64,11 @@ repl_command! {
 }
 
 repl_command! {
-    cmd_vtlcxr();
+    cmd_vtlcxr;
     names: [".vtlcxr"],
-    usage: ".vtlcxr",
-    summary: "Select the VTL0 context that the Windows hypervisor saved for a vCPU halted in the hypervisor.",
-    details: "Use this command for a vCPU that stopped in the Windows hypervisor (VBS). It reads the saved state of each VTL of the virtual processor from the Enlightened VMCS page of that VTL, lists these states, and selects the VTL0 state, so that r, k, and u show where NT left off. The VM must expose hv-evmcs, and at the first use in each boot, the command scans host RAM for the pages. The context has RIP, RSP, flags, control registers, and segment registers from the Enlightened VMCS. For the current VTL it also has the other general-purpose registers, read where the hypervisor's VM-exit entry code saved them (experimental), and the command says why when they are missing. The command lists the saved VTL1 state but does not select it. A stop in the hypervisor selects the VTL0 state automatically. .cxr goes back to the registers of the hypervisor, and .vtlcxr then selects the VTL0 state again. See 'Where NT left off under the hypervisor' in the VBS guide.",
+    usage: ".vtlcxr [0|1]",
+    summary: "Select the VTL0 or VTL1 context that the Windows hypervisor saved for a vCPU halted in the hypervisor.",
+    details: "Use this command for a vCPU that stopped in the Windows hypervisor (VBS). It reads the saved state of each VTL of the virtual processor from the Enlightened VMCS page of that VTL, lists these states, and selects the VTL0 state, so that r, k, and u show where NT left off. The VM must expose hv-evmcs, and at the first use in each boot, the command scans host RAM for the pages. The context has RIP, RSP, flags, control registers, and segment registers from the Enlightened VMCS. For the current VTL it also has the other general-purpose registers, read where the hypervisor's VM-exit entry code saved them (experimental), and the command says why when they are missing. .vtlcxr 1 selects the saved VTL1 state instead, in the secure kernel's address space with its symbols, which it loads first as .vtl 1 does: k walks the secure kernel's stack from where VTL1 left off, usually its VTL return, and the context is read-only, as at a VTL1 stop: .vtlcxr goes back to the VTL0 state. Its general-purpose registers are known only when VTL1 made the hypervisor's last exit. A stop in the hypervisor selects the VTL0 state automatically. .cxr goes back to the registers of the hypervisor, and .vtlcxr then selects the VTL0 state again. See 'Where NT left off under the hypervisor' in the VBS guide.",
     run_state: Halted,
 }
 
@@ -269,7 +269,15 @@ impl ReplState<'_> {
         Ok(())
     }
 
-    fn cmd_vtlcxr(&mut self) -> Result<()> {
+    fn cmd_vtlcxr(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let vtl = match (invocation.arg(0), invocation.argv.len()) {
+            (None, _) | (Some("0"), 1) => 0,
+            (Some("1"), 1) => 1,
+            _ => {
+                outln!("{}\n", command_help(invocation.name));
+                return Ok(());
+            }
+        };
         if let Err(error) = self
             .ctx
             .backend
@@ -355,14 +363,26 @@ impl ReplState<'_> {
                 print_event_children("", &[detail]);
             }
         }
-        let Some(vtl0) = saved.iter().find(|saved| saved.context.vtl == 0) else {
-            error!("no saved VTL0 state belongs to this vCPU's virtual processor");
+        let Some(chosen) = saved.iter().find(|saved| saved.context.vtl == vtl) else {
+            error!("no saved VTL{vtl} state belongs to this vCPU's virtual processor");
             return Ok(());
         };
-        let selected = SelectedFrame::from_registers(0, vtl0.context.registers());
+        // VTL1's state is read, as a live VTL1 stop's is, through its own
+        // root, which the secure kernel's modules and symbols serve.
+        if vtl == 1
+            && let Err(error) = self.ctx.target.load_secure_kernel_symbols()
+        {
+            error!("the secure kernel's symbols: {error}");
+        }
+        let selected = SelectedFrame::from_registers(0, chosen.context.registers());
         self.set_selected_frame(selected.clone());
-        outln!("selected the VTL0 context the hypervisor saved");
-        if let Err(reason) = &vtl0.context.general_registers {
+        if vtl == 1 {
+            self.caches.refresh_symbol_context(&self.ctx.target);
+            outln!("selected the VTL1 context the hypervisor saved (read-only)");
+        } else {
+            outln!("selected the VTL0 context the hypervisor saved");
+        }
+        if let Err(reason) = &chosen.context.general_registers {
             let reason = match &served {
                 Some(served) if served.state.is_some_and(|state| state.current) => {
                     format!("the processor last ran {}", served.label())
@@ -376,7 +396,7 @@ impl ReplState<'_> {
                 ))
             );
         }
-        if vtl0.context.may_be_stale {
+        if chosen.context.may_be_stale {
             outln!(
                 "{}",
                 ui::muted(

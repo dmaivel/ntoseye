@@ -449,13 +449,17 @@ fn secure_hardware_workflow_command(spec: &CommandSpec) -> bool {
 
 /// vCPU state that is genuinely VTL1's when the backend is stopped there:
 /// the live register file (read-only: `r` refuses assignment), its stack,
-/// frames, and the processor list. NT structures (KPCR, threads, processes)
-/// stay refused because the secure kernel's state is not laid out as NT's.
+/// frames, and the processor list, and `.vtlcxr`, which selects a saved
+/// VTL state the hypervisor wrote and writes nothing, so a selected VTL1
+/// state has a way back to VTL0's. NT structures (KPCR, threads,
+/// processes) and `.cxr` (a context record read from memory) stay refused
+/// because the secure kernel's state is not laid out as NT's.
 fn live_secure_vcpu_command(spec: &CommandSpec) -> bool {
     matches!(
         spec.names[0],
         "r" | "kn"
             | ".frame"
+            | ".vtlcxr"
             | "!for_each_frame"
             | "dv"
             | "~"
@@ -506,6 +510,16 @@ impl ReplState<'_> {
             });
         }
         if target.in_secure_address_space() && !live_secure_admits(spec) {
+            if target
+                .selected_frame
+                .as_ref()
+                .is_some_and(|frame| !frame.is_live())
+            {
+                return Some(format!(
+                    "'{name}' is unavailable while a VTL1 context is selected, which is \
+                     read-only; .vtlcxr goes back to VTL0's"
+                ));
+            }
             return Some(format!(
                 "'{name}' is unavailable while the vCPU is stopped in VTL1: it needs NT state, \
                  or writes VTL1 memory, registers, or code"
@@ -1794,7 +1808,7 @@ mod tests {
     fn live_vtl1_stop_admits_vcpu_state_and_steps_but_not_nt_extensions_or_writes() {
         for name in [
             "r", "k", "kb", ".frame", "~", "vcpu", "break", "status", "ba", "bl", "g", "db", "u",
-            ".vtl", "t", "p", "gu", "pa", "ta", "wt",
+            ".vtl", "t", "p", "gu", "pa", "ta", "wt", ".vtlcxr",
         ] {
             assert!(live_secure_admits(spec(name)), "'{name}' refused");
         }
