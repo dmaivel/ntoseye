@@ -47,6 +47,7 @@ def results(dbg: Debugger) -> list[tuple[object, str, Callable[[], object]]]:
         (cpu, "gdt", cpu.gdt),
         (cpu, "idt", cpu.idt),
         (hypervisor_cpu, "saved_vtl", lambda: hypervisor_cpu.saved_vtl),
+        (hypervisor_cpu, "serving", lambda: hypervisor_cpu.serving),
         (user, "token", user.token),
         (user, "handles", user.handles),
         (heap, "inspect", heap.inspect),

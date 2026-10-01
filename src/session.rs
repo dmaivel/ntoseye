@@ -162,6 +162,9 @@ pub struct RunStatus {
     /// For a vCPU halted in the Windows hypervisor, the VTL states it saved
     /// for the vCPU's virtual processor.
     pub saved_vtl: Vec<SavedVtl>,
+    /// For a vCPU halted in the Windows hypervisor, the guest partition's
+    /// virtual processor whose exit it handles, when it is not the root's.
+    pub serving: Option<ServedVp>,
     /// Attached process inspection scope, if any. This is where `dt`, `dq` and
     /// friends read from; it is chosen with `.process` and survives resumes,
     /// so it is not necessarily what the guest is executing.
@@ -395,7 +398,9 @@ pub struct VcpuInfo {
 
 impl VcpuInfo {
     /// One line naming the vCPU and what it runs: `p1.1 [notepad.exe]
-    /// ntdll!NtWaitForSingleObject+0x14`, as client thread lists show it.
+    /// ntdll!NtWaitForSingleObject+0x14`, as client thread lists show it. In
+    /// the Windows hypervisor, where its VTLs left off with the hypercall
+    /// each made, and the guest partition's VP it serves.
     pub fn label(&self) -> String {
         let mut label = self.id.clone();
         if !self.context.is_empty() {
@@ -408,7 +413,10 @@ impl VcpuInfo {
             _ => Ok(()),
         };
         for saved in self.saved_vtl.iter().filter(|saved| saved.summarized()) {
-            let _ = write!(label, " ({})", saved.describe());
+            let _ = write!(label, " ({})", saved.summary());
+        }
+        if let Some(served) = &self.serving {
+            let _ = write!(label, " (serving {} {})", served.label(), served.describe());
         }
         label
     }

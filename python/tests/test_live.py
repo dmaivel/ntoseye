@@ -493,6 +493,53 @@ def test_hypercall_breakpoint_stops_only_for_its_call_and_caller(halted: Debugge
         assert known > 0, "no stop had a known caller"
 
 
+def test_a_hypercall_stop_decodes_the_call_from_the_callers_registers(halted: Debugger) -> None:
+    """At a stop on the root partition's synthetic IPIs, the current saved
+    state's decoded hypercall is the one its registers hold: the input value
+    is RCX, and the TLFS fields of a fast call are RDX (vector, then target
+    VTL) and R8 (processor mask). The processor handles the root's exit, so
+    a guest VP it serves is not the current one."""
+    if os.environ.get("NTOSEYE_TEST_BACKEND") != "gdb":
+        pytest.skip("breakpoints in the Windows hypervisor require the host GDB backend")
+    try:
+        root = halted.hypervisor_partitions()[0]
+    except ntoseye.NtoseyeError as error:
+        pytest.skip(f"no Windows hypervisor partitions on this target: {error}")
+    bp = halted.breakpoints.add_hypercall("HvCallSendSyntheticClusterIpi", root.id)
+    decoded = 0
+    try:
+        for _ in range(ATTEMPTS * 3):
+            stop = halted.run(timeout=10.0)
+            assert isinstance(stop, Stop.Breakpoint) and bp in stop.breakpoints
+            saved = next((saved for saved in stop.cpu.saved_vtl if saved.current), None)
+            if saved is None or saved.general_registers is None:
+                continue
+            call = saved.hypercall
+            assert call is not None
+            registers = saved.general_registers
+            assert (call.input_value, call.code, call.name) == (
+                registers.rcx,
+                0x000B,
+                "HvCallSendSyntheticClusterIpi",
+            )
+            assert call.summary.startswith("hypercall 0x000b HvCallSendSyntheticClusterIpi")
+            assert [field.name for field in call.fields] == ["Vector", "TargetVtl", "ProcessorMask"]
+            if call.fast:
+                assert (call.input_gpa, call.output_gpa) == (None, None)
+                vector, target_vtl, mask = (field.value for field in call.fields)
+                assert vector == registers.rdx & 0xFFFF_FFFF
+                assert target_vtl == (registers.rdx >> 32) & 0xFF
+                assert mask == registers.r8
+            else:
+                assert call.input_gpa == registers.rdx
+            served = stop.cpu.serving
+            assert served is None or not served.current
+            decoded += 1
+    finally:
+        bp.delete()
+    assert decoded > 0, "no stop had the caller's registers"
+
+
 def test_secure_hardware_breakpoint_preserves_code_and_cpu_identity(halted: Debugger) -> None:
     sk = gdb_secure_kernel(halted)
     address = sk.symbols["securekernel!SkeSelectProcessAddressSpace"]

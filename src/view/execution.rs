@@ -2,6 +2,7 @@
 //! vCPUs, breakpoints, exception policies, stacks, call traces, and
 //! disassembly.
 
+use super::hypervisor::{DecodedHypercall, ServedVp, decoded_hypercall, exit_registers, served_vp};
 use super::process::{ProcessIdentity, ThreadSummary, process, thread_summary};
 use super::shape::{Hex, Keyed, shapes, unions};
 use super::symbols::source_location;
@@ -32,6 +33,10 @@ shapes! {
         /// For a vCPU halted in the Windows hypervisor, the VTL states that the
         /// hypervisor saved for the vCPU's virtual processor, VTL0 first.
         saved_vtl: Vec<SavedVtlState>,
+        /// For a vCPU halted in the Windows hypervisor, the guest partition's
+        /// virtual processor whose exit it handles or that it is about to
+        /// enter, when it is not one of the root partition's.
+        serving: Option<ServedVp>,
         /// The reason that the register context is not available. None if it is
         /// available.
         error: Option<String>,
@@ -104,6 +109,9 @@ shapes! {
         /// The physical address of the eVMCS page that ntoseye read the state
         /// from.
         evmcs: Hex,
+        /// The hypercall of a VMCALL exit whose general-purpose registers are
+        /// known, with its input decoded.
+        hypercall: Option<DecodedHypercall>,
     }
 
     /// A code breakpoint or data watchpoint (`bl`).
@@ -179,6 +187,9 @@ shapes! {
         /// For a vCPU halted in the Windows hypervisor, the VTL states that the
         /// hypervisor saved for the vCPU's virtual processor, VTL0 first.
         saved_vtl: Vec<SavedVtlState>,
+        /// For a vCPU halted in the Windows hypervisor, the guest partition's
+        /// virtual processor it serves, as `VcpuStatus.serving`.
+        serving: Option<ServedVp>,
         /// The process that you selected with `.process`. `dt`, `dq`, and
         /// similar commands read its memory, and the selection stays after the
         /// target resumes.
@@ -505,6 +516,7 @@ pub fn vcpu(v: &VcpuInfo) -> VcpuStatus {
         context: v.context.clone(),
         symbol: v.symbol.clone(),
         saved_vtl: v.saved_vtl.iter().map(saved_vtl_state).collect(),
+        serving: v.serving.as_ref().map(served_vp),
         error: v.error.clone(),
     }
 }
@@ -539,13 +551,14 @@ pub fn saved_vtl_state(saved: &unwind::SavedVtl) -> SavedVtlState {
         host_rip: VirtAddr(state.host_rip),
         host_rsp: VirtAddr(state.host_rsp),
         may_be_stale: saved.context.may_be_stale,
-        general_registers: saved.context.general_registers.as_ref().ok().map(|registers| {
-            crate::guest::EXIT_GPRS
-                .iter()
-                .filter_map(|name| Some((*name, *registers.get(name)?)))
-                .collect()
-        }),
+        general_registers: saved
+            .context
+            .general_registers
+            .as_ref()
+            .ok()
+            .map(exit_registers),
         evmcs: state.address,
+        hypercall: saved.context.hypercall.call().map(decoded_hypercall),
     }
 }
 
@@ -592,6 +605,7 @@ pub fn run_status(status: &session::RunStatus) -> RunStatus {
         rip: status.rip,
         symbol: status.symbol.clone(),
         saved_vtl: status.saved_vtl.iter().map(saved_vtl_state).collect(),
+        serving: status.serving.as_ref().map(served_vp),
         attached_process: status.attached_process.as_ref().map(process),
         stopped_process: status.stopped_process.as_ref().map(process),
         stopped_thread: status

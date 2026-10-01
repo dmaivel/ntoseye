@@ -367,7 +367,14 @@ fn status_trailer(status: &RunStatus) -> String {
         (None, _) => {}
     }
     for saved in status.saved_vtl.iter().filter(|saved| saved.summarized()) {
-        line.push_str(&format!(" | saved {}", saved.describe()));
+        line.push_str(&format!(" | saved {}", saved.summary()));
+    }
+    if let Some(served) = &status.serving {
+        line.push_str(&format!(
+            " | serving {} {}",
+            served.label(),
+            served.describe()
+        ));
     }
     if let Some(process) = &status.stopped_process {
         line.push_str(&format!(" | process {} ({})", process.name, process.pid));

@@ -431,6 +431,7 @@ mod tests {
             rip,
             symbol: rip.map(|_| "sample!fault".into()),
             saved_vtl: Vec::new(),
+            serving: None,
             attached_process: Some(ProcessInfo {
                 pid: 4,
                 name: "System".into(),

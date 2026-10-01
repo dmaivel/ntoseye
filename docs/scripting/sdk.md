@@ -180,6 +180,7 @@ Each `SavedVtlState` holds this data:
 - `general_registers`, the guest's RAX to R15 at the last exit (`saved.general_registers.rbx`, or `.to_dict()`), read where the hypervisor's entry code saved them. It is `None` except for the current VTL once the vCPU is past the entry code's stores, and when the entry code cannot be read. A vCPU that stopped on a breakpoint on `host_rip` has not saved them yet, and there they are its own registers. Experimental.
 - `may_be_stale`, which is `True` when the vCPU is stopped on `host_rip` other than by a breakpoint there. KVM writes the eVMCS when it enters the hypervisor, and a stop from outside can fall between a VM exit and that entry, so the state may still describe the previous exit. The guest's general-purpose registers are then still in `cpu.registers`. A breakpoint on `host_rip` fires after the write, so its stop shows the current exit.
 - `evmcs`, the physical address of the Enlightened VMCS that ntoseye read the state from.
+- `hypercall`, for a `VMCALL` exit whose `general_registers` are known, the hypercall with its input decoded as {command}`!hvcall` shows it (a `DecodedHypercall`, below), else `None`.
 
 The list needs the `hv-evmcs` enlightenment on the VM, and is empty without it or when the saved state fails validation. For more information, see [where NT left off under the hypervisor](../platforms/vbs.md#where-nt-left-off-under-the-hypervisor).
 
@@ -193,6 +194,25 @@ for cpu in dbg.cpus:
     if cpu.thread:
         for frame in cpu.thread.backtrace(limit=5):
             print("   ", frame.symbol)              # nt!HalProcessorIdle+0xf, nt!PpmIdleDefaultExecute+0x2b, ...
+```
+
+A processor that runs a guest partition's VP, such as WSL2's, enters the hypervisor for that VP's exits. `cpu.serving` is that VP, as the stop header's `serving` line names it, or `None` when the processor runs one of the root partition's VPs. A `ServedVp` has `partition_id`, `vp_index`, `vtl`, `rip` (where that VTL left off), `current` (whether the processor handles this VP's exit now, rather than having run it last), `exit_reason` and `exit_reason_name`, `general_registers`, and `hypercall`, each as in `SavedVtlState`.
+
+A `DecodedHypercall` has the hypercall input value (`input_value`, RCX), `code`, `name` (the TLFS name, or `None`), `fast`, `variable_header_size` (in qwords), `nested`, `rep_start` and `rep_count`, and `input_gpa` and `output_gpa` (`None` for a fast call). `fields` lists the fields of the input as the Hyper-V TLFS lays them out, each a `HypercallField` with `name`, `offset`, `size`, `value`, and `meaning` (a name for the value, such as `HV_PARTITION_ID_SELF`, `VPs 0-3`, or a register's TLFS name, or `None`). `elements` lists a rep call's input list, each a `HypercallElement` with its `index` and its `fields`. `decoded` is `False` for a call whose layout ntoseye does not know, whose `fields` are then raw qwords (`Input[0]`, ...), and `unavailable` says why some of the input is missing: an unreadable input page, or an XMM fast call's XMM registers, which ntoseye does not recover. `summary` is the one-line form of the stop header ([VBS](../platforms/vbs.md#hypercalls)).
+
+```python
+bp = dbg.breakpoints.add_hypercall("HvCallFlushVirtualAddressList")
+stop = dbg.run(timeout=10.0)
+bp.delete()
+cpu = stop.cpu
+served = cpu.serving
+calls = [served.hypercall] if served and served.current else [s.hypercall for s in cpu.saved_vtl if s.current]
+for call in filter(None, calls):
+    print(call.summary)                         # hypercall 0x0003 HvCallFlushVirtualAddressList rep 0/2
+    for field in call.fields:
+        print("   ", field.name, hex(field.value), field.meaning)
+    for element in call.elements:
+        print("   ", element.index, [hex(field.value) for field in element.fields])
 ```
 
 ### Hypervisor partitions

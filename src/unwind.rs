@@ -537,6 +537,17 @@ impl SavedVtl {
         }
     }
 
+    /// [`Self::describe`] with the hypercall of a VMCALL exit, as one-line
+    /// summaries of the vCPU (thread names, the MCP trailer) show it: `VTL0
+    /// hvcall!Hypercall (hypercall 0x0003 HvCallFlushVirtualAddressList rep
+    /// 0/12)`.
+    pub fn summary(&self) -> String {
+        match self.context.exit_detail() {
+            Some(detail) => format!("{} ({detail})", self.describe()),
+            None => self.describe(),
+        }
+    }
+
     /// Whether a one-line summary of the vCPU names this state: VTL0's
     /// always, VTL1's when its eVMCS is the current one (the hypervisor was
     /// entered from VTL1, or is about to enter it).

@@ -37,7 +37,7 @@ The trailer takes one of two forms:
 
 In the halted form, `process` is the process whose page tables the stopped vCPU has loaded, and `scope` is the {command}`.process` inspection scope that memory commands read through. The scope stays after the target resumes, so `process` and `scope` can differ.
 
-If a vCPU halted in the Windows hypervisor, the trailer shows `hv+<offset>` and adds the location where Windows stopped, for example `| saved VTL0 nt!HalProcessorIdle+0xf`. For more information, refer to [VBS](../platforms/vbs.md#where-nt-left-off-under-the-hypervisor).
+If a vCPU halted in the Windows hypervisor, the trailer shows `hv+<offset>` and adds the location where Windows stopped, for example `| saved VTL0 nt!HalProcessorIdle+0xf`, with the hypercall that VTL made when its last exit was a `VMCALL` (`| saved VTL0 hvcall!Hypercall (hypercall 0x0003 HvCallFlushVirtualAddressList rep 0/12)`). When the processor serves a guest partition's VP, the trailer adds it too: `| serving partition 0x4 VP 1 VTL0 00007ff6a1b2c3d4, last exit VMCALL (hypercall 0x005c HvCallPostMessage)`. For more information, refer to [VBS](../platforms/vbs.md#where-nt-left-off-under-the-hypervisor).
 
 After a reboot, the target stops, and over KD it stops at the first boot notification of the new kernel. Until the kernel's module list exists, the trailer adds `boot in progress`. Kernel symbols and `bp nt!...` already work at this point, which makes it the place to set early-boot breakpoints, but the process and module lists do not work yet. {command}`g` lets the boot continue. While the target runs, wait for the next stop instead of enumerating the state, because that state is stale.
 
@@ -61,7 +61,7 @@ When a backtrace goes through a module whose PDB is not in the cache yet, ntosey
 `format: "json"` returns `{ok, output, result, target, debug_output}` as structured content, with these fields:
 
 - `output`: the text that the command printed.
-- `target`: the run-state snapshot (`{running, current_thread, rip, symbol, saved_vtl, attached_process, stopped_process, stopped_thread, coherent, kernel_base}`).
+- `target`: the run-state snapshot (`{running, current_thread, rip, symbol, saved_vtl, serving, attached_process, stopped_process, stopped_thread, coherent, kernel_base}`). At a stop in the Windows hypervisor, each `saved_vtl` state has the `hypercall` of a `VMCALL` exit with its input decoded as {command}`!hvcall` shows it (`code`, `name`, `fast`, `rep_start`, `rep_count`, `input_gpa`, `output_gpa`, `fields`, `elements`, ...), and `serving` is the guest partition's VP that the processor serves (`partition_id`, `vp_index`, `vtl`, `rip`, `exit_reason`, `hypercall`), or `null`. The `~` command's result has the same per vCPU.
 - `debug_output`: the captured `DbgPrint` lines.
 - `result`: the typed decoding, for commands that have one. For other commands, `result` is `null`.
 

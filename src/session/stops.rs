@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use crate::breakpoints::BreakpointManager;
 use crate::dbg_backend::{
     ContinueDisposition, DebugBackend, LastEvent, ModuleEvent, StopEvent, clear_trap_flag,
+    processor_index_from_backend_thread_id,
 };
 use crate::error::Result;
 use crate::exception_policy::{ExceptionPolicyAction, ExceptionPolicyMode};
@@ -22,7 +23,7 @@ use crate::session::{
     BreakpointStopAction, ContinueOutcome, RunStatus, STATUS_BREAKPOINT, STATUS_SINGLE_STEP,
     Session, StopResolution, WatchpointStopAction,
 };
-use crate::target::{BreakpointStop, ThreadInfo};
+use crate::target::{BreakpointStop, HYPERVISOR_CONTEXT, ThreadInfo};
 use crate::types::{Arch, VirtAddr};
 use crate::unwind::try_format_symbol_at;
 
@@ -230,39 +231,56 @@ impl Session {
         self.clear_deferred_reload_surface();
         let pending_stop = self.backend.has_pending_stop();
         let running = self.backend.is_running() && !pending_stop;
-        let (rip, symbol, saved_vtl, stopped_process, stopped_thread) = if running || pending_stop {
-            (None, None, Vec::new(), None, None)
-        } else {
-            let _ = self.backend.set_current_thread(&self.current_thread);
-            let registers = self.backend.read_registers().ok();
-            let rip = registers
-                .as_ref()
-                .and_then(|regs| self.register_map.read_u64("rip", regs).ok());
-            // Named in the vCPU's own address space, as the stop header names
-            // it, not the inspection scope (`.process`, a parked `.thread`),
-            // and code outside NT (the Windows hypervisor, VTL1) for what it
-            // is.
-            let symbol = registers.as_ref().zip(rip).and_then(|(regs, rip)| {
-                let cr3 = self
-                    .register_map
-                    .read_u64(self.target.arch().dtb_register(), regs)
-                    .unwrap_or(0);
-                try_format_symbol_at(&self.target, cr3, rip)
-            });
-            // Where the hypervisor's VTLs left off, for a vCPU halted in it.
-            let saved_vtl = registers
-                .as_ref()
-                .map(|regs| self.describe_vcpu(&self.current_thread, regs).saved_vtl)
-                .unwrap_or_default();
-            let (stopped_process, stopped_thread) = self.stopped_context();
-            (rip, symbol, saved_vtl, stopped_process, stopped_thread)
-        };
+        let (rip, symbol, saved_vtl, serving, stopped_process, stopped_thread) =
+            if running || pending_stop {
+                (None, None, Vec::new(), None, None, None)
+            } else {
+                let _ = self.backend.set_current_thread(&self.current_thread);
+                let registers = self.backend.read_registers().ok();
+                let rip = registers
+                    .as_ref()
+                    .and_then(|regs| self.register_map.read_u64("rip", regs).ok());
+                let cr3 = registers.as_ref().and_then(|regs| {
+                    self.register_map
+                        .read_u64(self.target.arch().dtb_register(), regs)
+                        .ok()
+                });
+                // Named in the vCPU's own address space, as the stop header names
+                // it, not the inspection scope (`.process`, a parked `.thread`),
+                // and code outside NT (the Windows hypervisor, VTL1) for what it
+                // is.
+                let symbol =
+                    rip.and_then(|rip| try_format_symbol_at(&self.target, cr3.unwrap_or(0), rip));
+                // Where the hypervisor's VTLs left off, for a vCPU halted in it,
+                // and the guest partition's VP whose exit it handles.
+                let vcpu = registers
+                    .as_ref()
+                    .map(|regs| self.describe_vcpu(&self.current_thread, regs));
+                let serving = match (&vcpu, cr3, rip) {
+                    (Some(vcpu), Some(cr3), Some(rip)) if vcpu.context == HYPERVISOR_CONTEXT => {
+                        processor_index_from_backend_thread_id(&self.current_thread)
+                            .and_then(|number| self.target.served_guest_vp(cr3, rip, number))
+                    }
+                    _ => None,
+                };
+                let saved_vtl = vcpu.map(|vcpu| vcpu.saved_vtl).unwrap_or_default();
+                let (stopped_process, stopped_thread) = self.stopped_context();
+                (
+                    rip,
+                    symbol,
+                    saved_vtl,
+                    serving,
+                    stopped_process,
+                    stopped_thread,
+                )
+            };
         RunStatus {
             running,
             current_thread: self.current_thread.clone(),
             rip,
             symbol,
             saved_vtl,
+            serving,
             attached_process: self.target.attached_process().cloned(),
             stopped_process,
             stopped_thread,

@@ -1,11 +1,16 @@
 //! hypervisor: [`View`](super::View) builders for the Windows hypervisor's
-//! processors, EPTs, and hypercall table.
+//! processors, EPTs, and hypercall table, the guest VP a processor serves,
+//! and the hypercall a VP made.
 
-use super::shape::{Hex, shapes};
-use crate::guest::HvProcessor;
+use std::collections::HashMap;
+
+use super::shape::{Hex, Keyed, shapes};
+use crate::guest::{EXIT_GPRS, HvProcessor};
 use crate::guest::ept::{Difference, EptMapping as EptInfo};
 use crate::guest::hv_layout::HypercallEntry;
+use crate::guest::hypercall_input::{self, DecodedHypercall as Decoded};
 use crate::guest::hypercalls::tlfs_hypercall;
+use crate::target::ServedVp as Served;
 use crate::types::VirtAddr;
 
 shapes! {
@@ -67,6 +72,93 @@ shapes! {
         output_element_size: u16,
         handler: VirtAddr,
     }
+
+    /// One field of a hypercall's input, as the Hyper-V TLFS lays it out.
+    HypercallField {
+        /// The TLFS parameter name, with its member for a structure
+        /// (`ProcessorSet.ValidBanksMask`) and its index for an array
+        /// (`Message[2]`); `Input[n]` for the raw qwords of a call whose
+        /// layout ntoseye does not know.
+        name: String,
+        /// The offset in the input, from its first byte.
+        offset: u16,
+        /// The size in bytes, at most 8.
+        size: u8,
+        value: Hex,
+        /// What the value means, where it has a name or stands for a set
+        /// (`HV_PARTITION_ID_SELF`, `VPs 0-3`, a register's TLFS name).
+        meaning: Option<String>,
+    }
+
+    /// One element of a rep hypercall's input list.
+    HypercallElement {
+        index: u16,
+        fields: Vec<HypercallField>,
+    }
+
+    /// The hypercall of a VMCALL exit, with its input decoded as the Hyper-V
+    /// TLFS lays it out (`!hvcall`).
+    DecodedHypercall {
+        /// The hypercall input value (RCX).
+        input_value: Hex,
+        code: Hex<u16>,
+        /// The TLFS name, or None for a code that the TLFS does not list.
+        name: Option<&'static str>,
+        /// Whether the input is in registers (RDX, R8, and XMM0 to XMM5)
+        /// rather than in memory.
+        fast: bool,
+        /// The size of the variable input header, in qwords.
+        variable_header_size: u16,
+        /// Whether the call is for the L0 hypervisor of a nested environment.
+        nested: bool,
+        rep_count: u16,
+        /// The first rep element still to process; those before it are done.
+        rep_start: u16,
+        /// The guest physical address of the input (RDX), for a call whose
+        /// input is in memory.
+        input_gpa: Option<Hex>,
+        /// The guest physical address of the output (R8), for a call whose
+        /// input is in memory.
+        output_gpa: Option<Hex>,
+        /// Whether ntoseye knows the layout of the call's input. When it does
+        /// not, `fields` holds the input as raw qwords: RDX and R8 for a fast
+        /// call, else the first 8 qwords of the input.
+        decoded: bool,
+        fields: Vec<HypercallField>,
+        /// A rep call's input list, each element up to the rep count.
+        elements: Vec<HypercallElement>,
+        /// Why some of the input is missing: an unreadable input page, input
+        /// in XMM registers, or input past the end of its page.
+        unavailable: Option<String>,
+        /// The call on one line, as the stop header shows it.
+        summary: String,
+    }
+
+    /// The guest partition's virtual processor that a processor in the
+    /// Windows hypervisor runs or last ran: the VP whose exit it handles, or
+    /// which it is about to enter.
+    ServedVp {
+        partition_id: Hex,
+        vp_index: u32,
+        /// The VTL the VP runs in.
+        vtl: u8,
+        /// Where the VTL left off, when the partition walk read its state.
+        rip: Option<VirtAddr>,
+        /// Whether the processor's VP assist page names this VTL's eVMCS: the
+        /// processor handles this VP's exit, or is about to enter it.
+        current: bool,
+        /// The VM-exit reason of the VTL's last exit.
+        exit_reason: Option<Hex<u32>>,
+        /// The name of the exit reason (`HLT`, `VMCALL`, ...), if it is a
+        /// common reason.
+        exit_reason_name: Option<&'static str>,
+        /// The guest's general-purpose registers other than `rsp` at the last
+        /// exit, as `SavedVtlState.general_registers`. None when they are not
+        /// known.
+        general_registers: Option<Keyed<Hex>>,
+        /// The hypercall of a VMCALL exit whose registers are known.
+        hypercall: Option<DecodedHypercall>,
+    }
 }
 
 pub fn hypervisor_processor(processor: &HvProcessor) -> HypervisorProcessor {
@@ -113,5 +205,65 @@ pub fn hypercall(code: u16, entry: &HypercallEntry, unassigned: Option<u64>) -> 
         output_size: entry.output,
         output_element_size: entry.output_element,
         handler: VirtAddr(entry.handler),
+    }
+}
+
+fn hypercall_field(field: &hypercall_input::HypercallField) -> HypercallField {
+    HypercallField {
+        name: field.name.clone(),
+        offset: field.offset,
+        size: field.size,
+        value: field.value,
+        meaning: field.meaning.clone(),
+    }
+}
+
+pub fn decoded_hypercall(call: &Decoded) -> DecodedHypercall {
+    DecodedHypercall {
+        input_value: call.input_value,
+        code: call.control.code,
+        name: call.name,
+        fast: call.control.fast,
+        variable_header_size: call.control.variable_header_qwords,
+        nested: call.control.nested,
+        rep_count: call.control.rep_count,
+        rep_start: call.control.rep_start,
+        input_gpa: call.input_gpa,
+        output_gpa: call.output_gpa,
+        decoded: call.decoded,
+        fields: call.fields.iter().map(hypercall_field).collect(),
+        elements: call
+            .elements
+            .iter()
+            .map(|element| HypercallElement {
+                index: element.index,
+                fields: element.fields.iter().map(hypercall_field).collect(),
+            })
+            .collect(),
+        unavailable: call.unavailable.clone(),
+        summary: call.summary(),
+    }
+}
+
+/// An exit's general-purpose registers, in [`EXIT_GPRS`] order.
+pub fn exit_registers(registers: &HashMap<&'static str, u64>) -> Vec<(&'static str, u64)> {
+    EXIT_GPRS
+        .iter()
+        .filter_map(|name| Some((*name, *registers.get(name)?)))
+        .collect()
+}
+
+pub fn served_vp(served: &Served) -> ServedVp {
+    let state = served.state.as_ref();
+    ServedVp {
+        partition_id: served.partition,
+        vp_index: served.vp,
+        vtl: served.vtl,
+        rip: state.map(|state| VirtAddr(state.rip)),
+        current: state.is_some_and(|state| state.current),
+        exit_reason: state.map(|state| state.exit_reason),
+        exit_reason_name: state.and_then(|state| state.exit_reason_name()),
+        general_registers: served.general_registers.as_ref().ok().map(exit_registers),
+        hypercall: served.hypercall.call().map(decoded_hypercall),
     }
 }

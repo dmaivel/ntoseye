@@ -873,6 +873,21 @@ impl Cpu {
         )
     }
 
+    /// The guest partition's virtual processor that this processor serves,
+    /// for a vCPU halted in the Windows hypervisor: the VP whose exit it
+    /// handles or that it is about to enter, with its partition ID, VP index,
+    /// VTL, where it left off, its last exit, and the hypercall it made.
+    /// None when the processor runs one of the root partition's VPs, or the
+    /// hypervisor's partitions cannot be walked (no `hv-evmcs`).
+    #[getter]
+    fn serving<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Typed<'py, Option<view::hypervisor::ServedVp>>> {
+        let info = self.current_info(py)?;
+        Typed::new(py, info.serving.as_ref().map(view::hypervisor::served_vp))
+    }
+
     /// Memory through the page tables that this processor has loaded (its CR3)
     /// at the time of the read. These are the kernel's or a process's tables, a
     /// VTL1 root (read-only), or a root outside NT (read-only), such as the
