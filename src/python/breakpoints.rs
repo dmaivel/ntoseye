@@ -6,8 +6,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
 use super::args::{
-    CpuArg, Disposition, ExceptionCode, PolicyMode, ProcessArg, ThreadArg, WatchAccess,
-    WhenCallback,
+    CpuArg, Disposition, ExceptionCode, HypercallArg, PolicyMode, ProcessArg, ThreadArg,
+    WatchAccess, WhenCallback,
 };
 use super::handle::{Debugger, Owner, require_halted};
 use super::iter::{BreakpointIterator, ExceptionPolicyIterator};
@@ -17,13 +17,17 @@ use super::runcontrol::reject_condition_mutation;
 use super::symbols::Location;
 use super::thread::Thread;
 use super::{err, raise, symbol_not_found, view_dict};
-use crate::breakpoints::{Breakpoint as CoreBreakpoint, BreakpointConfig, BreakpointScope};
+use crate::breakpoints::{
+    Breakpoint as CoreBreakpoint, BreakpointConfig, BreakpointScope, HypercallFilter,
+};
 use crate::dbg_backend::{HwBreakpointAccess, WatchpointAccess};
 use crate::exception_policy::{EventFilter, ExceptionPolicyFinalAction, parse_event_filter};
+use crate::guest::hypercalls::hypercall_code;
 use crate::session::Session;
 use crate::target::Target;
 use crate::types::{Dtb, VirtAddr};
 use crate::view;
+use crate::view::shape::Typed;
 
 /// The code breakpoints and data watchpoints, with their IDs as keys
 /// (`dbg.breakpoints`).
@@ -397,6 +401,66 @@ impl Breakpoints {
         watchpoint_handle(py, self.owner.dbg(), &bp)?
             .ok_or_else(|| raise(format!("breakpoint #{} is not a watchpoint", bp.id)))
     }
+
+    /// Add a hypercall breakpoint, as `!hvbp` does: a debug-register execute
+    /// breakpoint on the Windows hypervisor's handler of `call`, a call code
+    /// or a name (`"HvCallPostMessage"`, or `"HvCall0004"` as `x hv!*` names
+    /// a code the TLFS does not), that stops only when the caller made that
+    /// call, and, with `partition` (a partition ID) and `vp` (a VP index in
+    /// it), only when the caller is that partition or VP. ntoseye resumes
+    /// the other hits without a stop, before any `when=` callback runs. A
+    /// hit whose caller ntoseye cannot tell stops. Needs the gdb backend and
+    /// the VM's hv-evmcs enlightenment. This feature is experimental.
+    #[pyo3(signature = (call, partition=None, vp=None, *, condition=None, when=None, pass_count=0, one_shot=false, processor=None, action=None))]
+    fn add_hypercall(
+        &self,
+        py: Python<'_>,
+        call: HypercallArg,
+        partition: Option<u64>,
+        vp: Option<u32>,
+        condition: Option<String>,
+        when: Option<WhenCallback>,
+        pass_count: u64,
+        one_shot: bool,
+        processor: Option<CpuArg<'_>>,
+        action: Option<String>,
+    ) -> PyResult<Py<Breakpoint>> {
+        reject_condition_mutation()?;
+        let code = match call {
+            HypercallArg::Code(code) => code,
+            HypercallArg::Name(name) => hypercall_code(&name)
+                .ok_or_else(|| PyValueError::new_err(format!("unknown hypercall {name:?}")))?,
+        };
+        let (config, callback) = build_config(
+            py,
+            &self.owner,
+            condition,
+            when,
+            pass_count,
+            one_shot,
+            None,
+            None,
+            processor,
+            action,
+        )?;
+        let filter = HypercallFilter {
+            code,
+            partition,
+            vp,
+        };
+        let bp = self.owner.with(py, |session| {
+            require_halted(session, "breakpoints.add_hypercall")?;
+            let id = session
+                .add_hypercall_breakpoint(filter, config)
+                .map_err(err)?;
+            session
+                .breakpoint(id)
+                .cloned()
+                .ok_or_else(|| raise(format!("new breakpoint #{id} disappeared during creation")))
+        })?;
+        store_condition(py, self.owner.dbg(), bp.id, callback);
+        handle(py, self.owner.dbg(), &bp)
+    }
 }
 
 #[pymethods]
@@ -424,6 +488,17 @@ impl Breakpoint {
     #[getter]
     fn processor(&self, py: Python<'_>) -> PyResult<Option<u16>> {
         Ok(self.require_snapshot(py)?.processor)
+    }
+
+    /// What a hypercall breakpoint stops on: its call code and the caller's
+    /// partition and VP, if restricted. `None` for any other breakpoint.
+    #[getter]
+    fn hypercall<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Typed<'py, Option<view::execution::HypercallFilter>>> {
+        let filter = self.require_snapshot(py)?.hypercall;
+        Typed::new(py, filter.as_ref().map(view::execution::hypercall_filter))
     }
 
     /// The number of physical hits.

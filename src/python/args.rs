@@ -192,6 +192,14 @@ pub enum ExceptionCode {
     Alias(String),
 }
 
+/// A hypercall by call code, or by name: its TLFS name or the name
+/// `x hv!*` gives it.
+#[derive(FromPyObject)]
+pub enum HypercallArg {
+    Code(u16),
+    Name(String),
+}
+
 /// An ETW trace session by logger id or `_WMI_LOGGER_CONTEXT` address, or by
 /// session name.
 #[derive(FromPyObject)]

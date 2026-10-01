@@ -452,6 +452,47 @@ def test_saved_general_registers_are_the_exits(halted: Debugger) -> None:
     assert compared == ATTEMPTS, f"only {compared} exits of the root partition's VPs were caught"
 
 
+def test_hypercall_breakpoint_stops_only_for_its_call_and_caller(halted: Debugger) -> None:
+    """A hypercall breakpoint on the root partition's synthetic IPIs stops
+    where the root's VP on that processor made that call: its current saved
+    state holds the code in RCX's low 16 bits. With a VP index, the stop is
+    on that VP's processor, as the root's VPs are pinned to the processors
+    with their numbers. A hit whose caller is unknown stops too, so only the
+    stops with a known caller are checked."""
+    if os.environ.get("NTOSEYE_TEST_BACKEND") != "gdb":
+        pytest.skip("breakpoints in the Windows hypervisor require the host GDB backend")
+    try:
+        partitions = halted.hypervisor_partitions()
+    except ntoseye.NtoseyeError as error:
+        pytest.skip(f"no Windows hypervisor partitions on this target: {error}")
+    root = partitions[0]
+    with pytest.raises(ValueError):
+        halted.breakpoints.add_hypercall("HvCallUnimplemented")
+    with pytest.raises(ValueError):
+        halted.breakpoints.add_hypercall(0x000B, max(p.id for p in partitions) + 1)
+    vp = root.virtual_processors[-1]
+    for index in (None, vp.index):
+        bp = halted.breakpoints.add_hypercall("HvCallSendSyntheticClusterIpi", root.id, index)
+        known = 0
+        try:
+            hypercall = bp.hypercall
+            assert hypercall is not None
+            assert (hypercall.code, hypercall.partition, hypercall.vp) == (0x000B, root.id, index)
+            for _ in range(ATTEMPTS * 3):
+                stop = halted.run(timeout=10.0)
+                assert isinstance(stop, Stop.Breakpoint) and bp in stop.breakpoints
+                saved = next((saved for saved in stop.cpu.saved_vtl if saved.current), None)
+                if saved is None or saved.general_registers is None:
+                    continue
+                known += 1
+                assert saved.general_registers.rcx & 0xFFFF == 0x000B
+                if index is not None:
+                    assert stop.cpu == halted.cpus[index]
+        finally:
+            bp.delete()
+        assert known > 0, "no stop had a known caller"
+
+
 def test_secure_hardware_breakpoint_preserves_code_and_cpu_identity(halted: Debugger) -> None:
     sk = gdb_secure_kernel(halted)
     address = sk.symbols["securekernel!SkeSelectProcessAddressSpace"]
