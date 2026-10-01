@@ -135,6 +135,8 @@ impl Target {
             site_journal: None,
             #[cfg(test)]
             test_current_threads: None,
+            #[cfg(test)]
+            test_thread_stacks: HashMap::new(),
         })
     }
 
@@ -184,6 +186,8 @@ impl Target {
             site_journal: None,
             #[cfg(test)]
             test_current_threads: None,
+            #[cfg(test)]
+            test_thread_stacks: HashMap::new(),
         })
     }
 

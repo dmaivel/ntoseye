@@ -140,6 +140,11 @@ pub struct Target {
     /// in tests over bare memory; shared so a mock backend can switch it.
     #[cfg(test)]
     pub test_current_threads: Option<Arc<Mutex<HashMap<u16, VirtAddr>>>>,
+    /// The kernel stack (limit, base) of each `_ETHREAD` a test gives one;
+    /// [`Target::thread_info_from_ethread`] answers those threads without
+    /// reading them.
+    #[cfg(test)]
+    pub test_thread_stacks: HashMap<VirtAddr, (VirtAddr, VirtAddr)>,
 }
 
 /// The inspection scope a host has selected (`.process`, `.context`, `.frame`,

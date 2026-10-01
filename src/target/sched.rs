@@ -1458,6 +1458,16 @@ impl Target {
     }
 
     pub fn thread_info_from_ethread(&self, ethread: VirtAddr) -> Result<ThreadInfo> {
+        #[cfg(test)]
+        if let Some(&(limit, base)) = self.test_thread_stacks.get(&ethread) {
+            return Ok(ThreadInfo {
+                ethread,
+                kthread: ethread,
+                stack_limit: Some(limit),
+                stack_base: Some(base),
+                ..sample_thread()
+            });
+        }
         self.thread_info_from_ethread_with_hint(ethread, None)
     }
 

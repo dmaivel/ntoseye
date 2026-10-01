@@ -1560,17 +1560,39 @@ fn a_call_trace_follows_its_thread_past_a_step_that_switched_it_out() {
 }
 
 /// A step that reached the next instruction stays in the walk even when it
-/// made another thread current, as the instruction that switches does.
+/// made another thread current, as the instruction that switches does, while
+/// the stack is still the walked thread's.
 #[test]
 fn a_walk_step_that_reached_its_successor_is_not_followed() {
     let at = |rip, rsp, ethread| Landing { rip, rsp, ethread };
     let (mut session, continues) = walk_session(&[at(0x1001, 0x2000, OTHER)], &[]);
+    session.target.test_thread_stacks =
+        HashMap::from([(VirtAddr(WALKED), (VirtAddr(0x1000), VirtAddr(0x3000)))]);
 
     let outcome = session
         .step_until(StepMode::Into, 16, None, |ip, _| ip == 0x1002)
         .unwrap();
     assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1002 }));
     assert_eq!(continues.load(Ordering::Relaxed), 0);
+}
+
+/// A step that reached the next instruction on another thread's stack ran
+/// that thread: NT loaded it there, and the walked thread goes on at the
+/// instruction when it is switched back in, so the walk follows it rather
+/// than stepping the other thread.
+#[test]
+fn a_walk_step_that_reached_its_successor_on_another_stack_is_followed() {
+    let at = |rip, rsp, ethread| Landing { rip, rsp, ethread };
+    let (mut session, continues) =
+        walk_session(&[at(0x1001, 0x8000, OTHER)], &[at(0x1001, 0x2000, WALKED)]);
+    session.target.test_thread_stacks =
+        HashMap::from([(VirtAddr(WALKED), (VirtAddr(0x1000), VirtAddr(0x3000)))]);
+
+    let outcome = session
+        .step_until(StepMode::Into, 16, None, |ip, _| ip == 0x1002)
+        .unwrap();
+    assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1002 }));
+    assert_eq!(continues.load(Ordering::Relaxed), 1);
 }
 
 /// A walk whose step ended on a breakpoint in another thread surfaces it;

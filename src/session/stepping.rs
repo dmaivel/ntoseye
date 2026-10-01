@@ -504,7 +504,9 @@ impl Session {
     /// off and the other processors run too (and one may stop first). A step
     /// ended at a successor on its own vCPU completed in `walked`, even if the
     /// instruction made another thread current (NT's `CurrentThread` changes
-    /// before the stacks do). Where `walked` goes on is known only before the
+    /// before the stacks do), unless it loaded the other thread's stack: the
+    /// vCPU then runs that thread, and `walked` goes on at the successors when
+    /// it is switched back in. Where `walked` goes on is known only before the
     /// step, so it is decoded first, from the `registers` and instruction
     /// `bytes` `state` was read from.
     fn walk_step(
@@ -535,7 +537,14 @@ impl Session {
             return Ok(plain(self));
         };
         let elsewhere = self.current_thread != vcpu;
-        if !elsewhere && successors.contains(&rip) {
+        // NT makes the next thread current before it loads that thread's
+        // stack, so in a context switch a step lands on a successor with
+        // another thread current and the walked one still running. Once the
+        // stack is no longer the walked thread's, this vCPU runs the other
+        // thread, and the walked one goes on at the successors when it is
+        // switched back in.
+        let left = !elsewhere && self.vcpu_left_thread(walked);
+        if !elsewhere && !left && successors.contains(&rip) {
             return Ok(WalkStep::At(rip));
         }
         // Where the walked thread goes on: past the instruction, which it
@@ -555,6 +564,7 @@ impl Session {
             })
             .collect();
         let switched = elsewhere
+            || left
             || stepped == RunPast::Diverted
             || nt_thread_on(&self.target, &vcpu).is_some_and(|now| now != walked.ethread.0);
         if let Some(outcome) = self
@@ -572,6 +582,29 @@ impl Session {
         } else {
             WalkStep::At(rip)
         })
+    }
+
+    /// Whether the selected vCPU runs another thread than `walked` on that
+    /// thread's own stack: another thread is current, and the stack pointer
+    /// has left `walked`'s kernel stack. A thread current alone is not
+    /// enough: NT makes the next thread current while the outgoing one still
+    /// runs, on its own stack, to the point where it loads the next one's.
+    fn vcpu_left_thread(&mut self, walked: &ThreadScope) -> bool {
+        if nt_thread_on(&self.target, &self.current_thread)
+            .is_none_or(|now| now == walked.ethread.0)
+        {
+            return false;
+        }
+        let Ok(thread) = self.target.thread_info_from_ethread(walked.ethread) else {
+            return false;
+        };
+        let (Some(base), Some(limit)) = (thread.stack_base, thread.stack_limit) else {
+            return false;
+        };
+        self.read_registers()
+            .ok()
+            .and_then(|registers| stack_pointer(&self.register_map, &registers))
+            .is_some_and(|sp| !(limit.0..base.0).contains(&sp))
     }
 
     /// Where the execution at `state` continues past its instruction: every
