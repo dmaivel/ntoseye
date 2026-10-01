@@ -967,6 +967,30 @@ impl SymbolStore {
         self.load_generation.fetch_add(1, Ordering::AcqRel);
     }
 
+    /// Forget every module registered with
+    /// [`Self::register_synthetic_module`], in every address space, and the
+    /// names it published, for a new boot: the image at an address may now
+    /// be another build, and the next registration publishes its names.
+    pub fn clear_synthetic_modules(&self) {
+        // Only synthetic modules have an entry in `symbol_extents`.
+        let guids: HashSet<u128> = self
+            .symbol_extents
+            .iter()
+            .map(|entry| *entry.key())
+            .collect();
+        if guids.is_empty() {
+            return;
+        }
+        self.modules
+            .retain(|_, module| !guids.contains(&module.guid));
+        for guid in guids {
+            self.symbol_extents.remove(&guid);
+            self.index.remove(&guid);
+            self.symbol_rvas.remove(&guid);
+            self.symbol_addresses.remove(&guid);
+        }
+    }
+
     /// Whether `module` is visible from address space `dtb`: its own space, or
     /// the kernel space that space maps. An NT process maps NT's kernel; a
     /// VTL1 root maps the secure kernel and never NT's.

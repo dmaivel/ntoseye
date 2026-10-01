@@ -127,6 +127,29 @@ pub fn hypervisor_symbols(
     named
 }
 
+/// The length of the function each of `names` begins, by RVA, from
+/// `functions`, the image's `.pdata` (the length of each function by the RVA
+/// it begins at). `.pdata` lists no leaf function, so a name it has no entry
+/// for ends where the next function it lists begins; a name above every
+/// listed function gets no length.
+pub fn symbol_extents(
+    names: &[(String, u32)],
+    functions: &std::collections::HashMap<u32, u32>,
+) -> std::collections::HashMap<u32, u32> {
+    let mut begins: Vec<u32> = functions.keys().copied().collect();
+    begins.sort_unstable();
+    names
+        .iter()
+        .filter_map(|&(_, rva)| {
+            let length = match functions.get(&rva) {
+                Some(&length) => length,
+                None => begins.get(begins.partition_point(|&begin| begin <= rva))? - rva,
+            };
+            Some((rva, length))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,6 +187,24 @@ mod tests {
                 ("VmExitEntry".to_string(), 0x500),
                 ("VmExitEntry2".to_string(), 0x600),
             ]
+        );
+    }
+
+    #[test]
+    fn a_leaf_function_ends_where_the_next_listed_function_begins() {
+        // 0x100 is in `.pdata`; the leaf at 0x400 is followed by an unnamed
+        // function at 0x420 and the one at 0x200 by another at 0x300.
+        let functions =
+            std::collections::HashMap::from([(0x100, 0x40), (0x300, 0x80), (0x420, 0x60)]);
+        let names = [
+            ("HvCallSwitchVirtualAddressSpace".to_string(), 0x100),
+            ("HvCallUnimplemented".to_string(), 0x200),
+            ("HvCallGetPartitionId".to_string(), 0x400),
+            ("VmExitEntry".to_string(), 0x500),
+        ];
+        assert_eq!(
+            symbol_extents(&names, &functions),
+            std::collections::HashMap::from([(0x100, 0x40), (0x200, 0x100), (0x400, 0x20)])
         );
     }
 }

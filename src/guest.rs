@@ -239,6 +239,22 @@ fn hypervisor_image_contains(images: &[(Dtb, ModuleInfo)], address: VirtAddr) ->
         .any(|(_, image)| image.short_name == "hv" && image.contains_address(address))
 }
 
+/// The entry for `key` in `cache`, made by `make` when there is none and
+/// remembered, as `make` finding nothing is. An error from `make` is not
+/// remembered, so the next call makes the entry again.
+fn remembered<T>(
+    cache: &mut HashMap<u64, Option<Arc<T>>>,
+    key: u64,
+    make: impl FnOnce() -> Result<Option<T>>,
+) -> Option<Arc<T>> {
+    if let Some(known) = cache.get(&key) {
+        return known.clone();
+    }
+    let made = make().ok()?.map(Arc::new);
+    cache.insert(key, made.clone());
+    made
+}
+
 impl Guest {
     pub fn from_kernel(ntoskrnl: Image) -> Self {
         // Builds before the L1TF mitigation have no mask to undo.
@@ -339,20 +355,19 @@ impl Guest {
     }
 
     /// The names of the hypervisor image at `base`'s code, made by `name` the
-    /// first time and remembered for the boot, as finding none is.
+    /// first time and remembered for the boot, as finding none (`Ok(None)`)
+    /// is. An error from `name` (an interrupted eVMCS scan) is not
+    /// remembered: the next call makes the names again.
     pub fn hypervisor_symbols(
         &self,
         base: u64,
-        name: impl FnOnce() -> Option<hypercalls::HypervisorSymbols>,
+        name: impl FnOnce() -> Result<Option<hypercalls::HypervisorSymbols>>,
     ) -> Option<Arc<hypercalls::HypervisorSymbols>> {
         let mut symbols = self
             .hypervisor_symbols
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        symbols
-            .entry(base)
-            .or_insert_with(|| name().map(Arc::new))
-            .clone()
+        remembered(&mut symbols, base, name)
     }
 
     fn memo(&self) -> MutexGuard<'_, HaltMemo> {
@@ -612,5 +627,23 @@ mod tests {
             &images(),
             VirtAddr(0xffff_f805_290d_4000)
         ));
+    }
+
+    #[test]
+    fn an_interrupted_naming_is_retried_and_finding_nothing_is_not() {
+        let mut cache = HashMap::new();
+        let interrupted = Error::SavedVtlState("eVMCS scan interrupted".to_string());
+        assert_eq!(remembered::<u32>(&mut cache, 1, || Err(interrupted)), None);
+        assert_eq!(
+            remembered(&mut cache, 1, || Ok(Some(7))).as_deref(),
+            Some(&7)
+        );
+        assert_eq!(
+            remembered(&mut cache, 1, || Ok(Some(8))).as_deref(),
+            Some(&7)
+        );
+
+        assert_eq!(remembered::<u32>(&mut cache, 2, || Ok(None)), None);
+        assert_eq!(remembered(&mut cache, 2, || Ok(Some(9))), None);
     }
 }

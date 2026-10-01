@@ -535,31 +535,40 @@ impl Target {
         let base = image.base_address.0;
         let Some(names) = guest.hypervisor_symbols(base, || {
             let memory = self.address_space(dtb);
-            let loaded = hypervisor_image(&memory, image).ok()?;
-            let table = hv_layout::hypercall_table(&loaded.view()).ok()?;
-            let mut entries: Vec<u64> = guest
-                .any_evmcs_pages(&self.phys, &self.interrupt)
-                .map(|pages| {
-                    pages
-                        .all_states(&*self.phys)
-                        .into_iter()
-                        .map(|state| state.host_rip)
-                        .collect()
-                })
-                .unwrap_or_default();
+            let Ok(loaded) = hypervisor_image(&memory, image) else {
+                return Ok(None);
+            };
+            let Ok(table) = hv_layout::hypercall_table(&loaded.view()) else {
+                return Ok(None);
+            };
+            let mut entries: Vec<u64> = match guest.any_evmcs_pages(&self.phys, &self.interrupt) {
+                Ok(pages) => pages
+                    .all_states(&*self.phys)
+                    .into_iter()
+                    .map(|state| state.host_rip)
+                    .collect(),
+                // An interrupted scan leaves the names unmade, so the next
+                // stop in the hypervisor scans again rather than the boot
+                // going without its exit entry points.
+                Err(error) if self.interrupted() => return Err(error),
+                Err(_) => Vec::new(),
+            };
             entries.sort_unstable();
             entries.dedup();
             let names = hypercalls::hypervisor_symbols(base, &table, &entries);
-            let extents = names
-                .iter()
-                .filter_map(|&(_, rva)| Some((rva, *loaded.functions.get(&rva)?)))
-                .collect();
-            Some(hypercalls::HypervisorSymbols { names, extents })
+            let extents = hypercalls::symbol_extents(&names, &loaded.functions);
+            Ok(Some(hypercalls::HypervisorSymbols { names, extents }))
         }) else {
             return;
         };
-        // "hv" in the high bytes keeps these keys apart from PDB GUIDs.
-        let guid = (0x6876u128 << 112) | u128::from(base);
+        // "hv" in the high bytes keeps these keys apart from PDB GUIDs; the
+        // image's timestamp and size keep another build at the same base
+        // from reusing these names. A canonical address is its low 48 bits
+        // sign-extended.
+        let guid = (0x6876u128 << 112)
+            | (u128::from(image.time_date_stamp.unwrap_or(0)) << 80)
+            | (u128::from(image.size) << 48)
+            | u128::from(base & 0xffff_ffff_ffff);
         self.symbols.register_synthetic_module(
             dtb,
             image,
@@ -632,7 +641,10 @@ fn image_containing<B: MemoryOps<PhysAddr>>(
                 "exe"
             };
             let name = format!("{stem}.{extension}");
-            return Some(ModuleInfo::new(name, VirtAddr(page), size));
+            return Some(
+                ModuleInfo::new(name, VirtAddr(page), size)
+                    .with_time_date_stamp(view.file_header().TimeDateStamp),
+            );
         }
         if page <= floor {
             return None;

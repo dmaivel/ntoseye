@@ -274,6 +274,9 @@ impl Target {
             self.symbols.clear_modules_for_dtb(prev_dtb);
         }
         self.symbols.clear_modules_for_dtb(new_dtb);
+        // The names given the hypervisor's code are the old boot's; the next
+        // stop in the hypervisor names the image it finds then.
+        self.symbols.clear_synthetic_modules();
 
         let (symbol_report, symbol_error) =
             match guest.load_all_kernel_module_symbols(&self.phys, &self.symbols) {

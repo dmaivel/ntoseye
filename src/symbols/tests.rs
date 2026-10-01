@@ -1356,3 +1356,35 @@ fn a_synthetic_symbol_covers_only_its_function() {
         Some("hv!HvCallCreatePartition+0x8".to_string())
     );
 }
+
+/// Clearing synthetic modules (a new boot) forgets their names as well as
+/// their registrations: the image registered again under the same key gets
+/// the names made then, not the first boot's.
+#[test]
+fn a_cleared_synthetic_module_takes_the_names_registered_next() {
+    let store = SymbolStore::new();
+    let base = VirtAddr(0xffff_f840_b140_0000);
+    let module = ModuleInfo::new("hvix64.exe".to_string(), base, 0x40_0000);
+    store.register_synthetic_module(
+        0x1000,
+        &module,
+        7,
+        &[("HvCallCreatePartition".to_string(), 0x2831e0)],
+        HashMap::from([(0x2831e0, 0x40)]),
+    );
+    store.clear_synthetic_modules();
+    assert!(store.find_module_for_address(0x1000, base).is_none());
+
+    store.register_synthetic_module(
+        0x1000,
+        &module,
+        7,
+        &[("VmExitEntry".to_string(), 0x2831e0)],
+        HashMap::from([(0x2831e0, 0x80)]),
+    );
+    assert_eq!(store.symbol_rva(7, "HvCallCreatePartition").unwrap(), None);
+    assert_eq!(
+        store.format_closest_symbol_for_address(0x1000, base + 0x283250u64),
+        Some("hv!VmExitEntry+0x70".to_string())
+    );
+}
