@@ -1832,6 +1832,16 @@ class Cpu:
         saved state does not pass validation.
         """
     @property
+    def serving(self, /) -> ServedVp |None:
+        """
+        The guest partition's virtual processor that this processor serves,
+        for a vCPU halted in the Windows hypervisor: the VP whose exit it
+        handles or that it is about to enter, with its partition ID, VP index,
+        VTL, where it left off, its last exit, and the hypercall it made.
+        None when the processor runs one of the root partition's VPs, or the
+        hypervisor's partitions cannot be walked (no `hv-evmcs`).
+        """
+    @property
     def symbol(self, /) -> str |None:
         """
         The symbol at `rip`, if it resolves to one.
@@ -2299,6 +2309,85 @@ class Debugger:
         Write a full `PAGEDU64` kernel dump of the halted target to `path`
         (`.dump /f`). Returns the number of unreadable pages that were filled
         with zeros.
+        """
+
+@final
+class DecodedHypercall(BaseRecord):
+    """
+    The hypercall of a VMCALL exit, with its input decoded as the Hyper-V
+    TLFS lays it out (`!hvcall`).
+    """
+    @property
+    def code(self, /) -> int: ...
+    @property
+    def decoded(self, /) -> bool:
+        """
+        Whether ntoseye knows the layout of the call's input. When it does
+        not, `fields` holds the input as raw qwords: RDX and R8 for a fast
+        call, else the first 8 qwords of the input.
+        """
+    @property
+    def elements(self, /) -> list[HypercallElement]:
+        """
+        A rep call's input list, each element up to the rep count.
+        """
+    @property
+    def fast(self, /) -> bool:
+        """
+        Whether the input is in registers (RDX, R8, and XMM0 to XMM5)
+        rather than in memory.
+        """
+    @property
+    def fields(self, /) -> list[HypercallField]: ...
+    @property
+    def input_gpa(self, /) -> int |None:
+        """
+        The guest physical address of the input (RDX), for a call whose
+        input is in memory.
+        """
+    @property
+    def input_value(self, /) -> int:
+        """
+        The hypercall input value (RCX).
+        """
+    @property
+    def name(self, /) -> str |None:
+        """
+        The TLFS name, or None for a code that the TLFS does not list.
+        """
+    @property
+    def nested(self, /) -> bool:
+        """
+        Whether the call is for the L0 hypervisor of a nested environment.
+        """
+    @property
+    def output_gpa(self, /) -> int |None:
+        """
+        The guest physical address of the output (R8), for a call whose
+        input is in memory.
+        """
+    @property
+    def rep_count(self, /) -> int: ...
+    @property
+    def rep_start(self, /) -> int:
+        """
+        The first rep element still to process; those before it are done.
+        """
+    @property
+    def summary(self, /) -> str:
+        """
+        The call on one line, as the stop header shows it.
+        """
+    @property
+    def unavailable(self, /) -> str |None:
+        """
+        Why some of the input is missing: an unreadable input page, input
+        in XMM registers, or input past the end of its page.
+        """
+    @property
+    def variable_header_size(self, /) -> int:
+        """
+        The size of the variable input header, in qwords.
         """
 
 @final
@@ -5193,6 +5282,48 @@ class Hypercall(BaseRecord):
         """
         Whether the call takes a variable-size header.
         """
+
+@final
+class HypercallElement(BaseRecord):
+    """
+    One element of a rep hypercall's input list.
+    """
+    @property
+    def fields(self, /) -> list[HypercallField]: ...
+    @property
+    def index(self, /) -> int: ...
+
+@final
+class HypercallField(BaseRecord):
+    """
+    One field of a hypercall's input, as the Hyper-V TLFS lays it out.
+    """
+    @property
+    def meaning(self, /) -> str |None:
+        """
+        What the value means, where it has a name or stands for a set
+        (`HV_PARTITION_ID_SELF`, `VPs 0-3`, a register's TLFS name).
+        """
+    @property
+    def name(self, /) -> str:
+        """
+        The TLFS parameter name, with its member for a structure
+        (`ProcessorSet.ValidBanksMask`) and its index for an array
+        (`Message[2]`); `Input[n]` for the raw qwords of a call whose
+        layout ntoseye does not know.
+        """
+    @property
+    def offset(self, /) -> int:
+        """
+        The offset in the input, from its first byte.
+        """
+    @property
+    def size(self, /) -> int:
+        """
+        The size in bytes, at most 8.
+        """
+    @property
+    def value(self, /) -> int: ...
 
 @final
 class HypercallFilter(BaseRecord):
@@ -10172,6 +10303,12 @@ class RunStatus(BaseRecord):
         hypervisor saved for the vCPU's virtual processor, VTL0 first.
         """
     @property
+    def serving(self, /) -> ServedVp |None:
+        """
+        For a vCPU halted in the Windows hypervisor, the guest partition's
+        virtual processor it serves, as `VcpuStatus.serving`.
+        """
+    @property
     def stopped_process(self, /) -> ProcessIdentity |None:
         """
         The process whose page tables the stopped vCPU has loaded.
@@ -10366,6 +10503,12 @@ class SavedVtlState(BaseRecord):
     def host_rsp(self, /) -> int:
         """
         The stack the hypervisor's VM-exit entry point runs on.
+        """
+    @property
+    def hypercall(self, /) -> DecodedHypercall |None:
+        """
+        The hypercall of a VMCALL exit whose general-purpose registers are
+        known, with its input decoded.
         """
     @property
     def may_be_stale(self, /) -> bool:
@@ -10655,6 +10798,57 @@ class SegmentHeapPageSegment(BaseRecord):
     def address(self, /) -> int: ...
     @property
     def ranges(self, /) -> list[HeapPageRange]: ...
+
+@final
+class ServedVp(BaseRecord):
+    """
+    The guest partition's virtual processor that a processor in the
+    Windows hypervisor runs or last ran: the VP whose exit it handles, or
+    which it is about to enter.
+    """
+    @property
+    def current(self, /) -> bool:
+        """
+        Whether the processor's VP assist page names this VTL's eVMCS: the
+        processor handles this VP's exit, or is about to enter it.
+        """
+    @property
+    def exit_reason(self, /) -> int |None:
+        """
+        The VM-exit reason of the VTL's last exit.
+        """
+    @property
+    def exit_reason_name(self, /) -> str |None:
+        """
+        The name of the exit reason (`HLT`, `VMCALL`, ...), if it is a
+        common reason.
+        """
+    @property
+    def general_registers(self, /) -> Record |None:
+        """
+        The guest's general-purpose registers other than `rsp` at the last
+        exit, as `SavedVtlState.general_registers`. None when they are not
+        known.
+        """
+    @property
+    def hypercall(self, /) -> DecodedHypercall |None:
+        """
+        The hypercall of a VMCALL exit whose registers are known.
+        """
+    @property
+    def partition_id(self, /) -> int: ...
+    @property
+    def rip(self, /) -> int |None:
+        """
+        Where the VTL left off, when the partition walk read its state.
+        """
+    @property
+    def vp_index(self, /) -> int: ...
+    @property
+    def vtl(self, /) -> int:
+        """
+        The VTL the VP runs in.
+        """
 
 @final
 class Session(BaseRecord):
@@ -12579,6 +12773,13 @@ class VcpuStatus(BaseRecord):
         """
         For a vCPU halted in the Windows hypervisor, the VTL states that the
         hypervisor saved for the vCPU's virtual processor, VTL0 first.
+        """
+    @property
+    def serving(self, /) -> ServedVp |None:
+        """
+        For a vCPU halted in the Windows hypervisor, the guest partition's
+        virtual processor whose exit it handles or that it is about to
+        enter, when it is not one of the root partition's.
         """
     @property
     def symbol(self, /) -> str |None:
