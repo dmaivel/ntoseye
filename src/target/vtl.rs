@@ -198,36 +198,45 @@ impl SavedVtlContext {
     /// unwinder use. A VMCS holds no general-purpose register but RSP; the
     /// rest come from where the hypervisor saved them, when known.
     pub fn registers(&self) -> HashMap<String, u64> {
-        let state = &self.state;
-        let mut registers: HashMap<String, u64> = [
-            ("rip", state.rip),
-            ("rsp", state.rsp),
-            ("eflags", state.rflags),
-            ("cr0", state.cr0),
-            ("cr3", state.cr3),
-            ("cr4", state.cr4),
-            ("dr7", state.dr7),
-            ("cs", u64::from(state.cs)),
-            ("ss", u64::from(state.ss)),
-            ("ds", u64::from(state.ds)),
-            ("es", u64::from(state.es)),
-            ("fs", u64::from(state.fs)),
-            ("gs", u64::from(state.gs)),
-            ("fs_base", state.fs_base),
-            ("gs_base", state.gs_base),
-        ]
-        .into_iter()
-        .map(|(name, value)| (name.to_string(), value))
-        .collect();
-        if let Ok(general) = &self.general_registers {
-            registers.extend(
-                general
-                    .iter()
-                    .map(|(name, value)| (name.to_string(), *value)),
-            );
-        }
-        registers
+        exit_registers(&self.state, self.general_registers.as_ref().ok())
     }
+}
+
+/// The registers of the exit `state` saved: RIP, RSP, flags, control and
+/// segment registers from the eVMCS, and the `general` registers the exit
+/// entry code saved, when they are known.
+pub fn exit_registers(
+    state: &EvmcsState,
+    general: Option<&HashMap<&'static str, u64>>,
+) -> HashMap<String, u64> {
+    let mut registers: HashMap<String, u64> = [
+        ("rip", state.rip),
+        ("rsp", state.rsp),
+        ("eflags", state.rflags),
+        ("cr0", state.cr0),
+        ("cr3", state.cr3),
+        ("cr4", state.cr4),
+        ("dr7", state.dr7),
+        ("cs", u64::from(state.cs)),
+        ("ss", u64::from(state.ss)),
+        ("ds", u64::from(state.ds)),
+        ("es", u64::from(state.es)),
+        ("fs", u64::from(state.fs)),
+        ("gs", u64::from(state.gs)),
+        ("fs_base", state.fs_base),
+        ("gs_base", state.gs_base),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_string(), value))
+    .collect();
+    if let Some(general) = general {
+        registers.extend(
+            general
+                .iter()
+                .map(|(name, value)| (name.to_string(), *value)),
+        );
+    }
+    registers
 }
 
 impl Target {
@@ -1366,6 +1375,14 @@ impl Target {
         }
         let partitions = self.hypervisor_partitions().ok()?;
         if let Some(served) = self.served_guest_vp_in(&partitions, cr3, rip, number) {
+            // A state that is not the loaded one is an older exit's: its
+            // registers are not this call's.
+            let registers = match &served.state {
+                Some(state) if state.current => {
+                    exit_registers(state, served.general_registers.as_ref().ok())
+                }
+                _ => HashMap::new(),
+            };
             let input = match &served.state {
                 Some(state) if !state.current => HypercallInput::Unknown(
                     "the processor's current eVMCS is not this VP's, so its saved state is one \
@@ -1380,6 +1397,7 @@ impl Target {
                 vp: served.vp,
                 vtl: served.vtl,
                 input,
+                registers,
             });
         }
         let current = self
@@ -1405,6 +1423,7 @@ impl Target {
             root: true,
             vp: vp.index,
             vtl: current.vtl,
+            registers: current.registers(),
             input: current.hypercall,
         })
     }
@@ -1445,6 +1464,7 @@ impl Target {
             vp: slot.vp,
             vtl: slot.vtl,
             input: self.exit_hypercall(&loaded, registers.as_ref(), xmm),
+            registers: exit_registers(&loaded, registers.as_ref().ok()),
         })
     }
 

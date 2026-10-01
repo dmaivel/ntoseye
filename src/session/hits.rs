@@ -10,8 +10,9 @@ use crate::dbg_backend::{
     ContinueDisposition, DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, StopEvent,
     processor_index_from_backend_thread_id,
 };
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
+use crate::guest::hypercalls::HypercallCaller;
 use crate::kd::hwbp;
 use crate::session::context::{
     refresh_windows_thread_context_for_backend_thread, update_target_context_from_registers,
@@ -49,14 +50,18 @@ impl Session {
                 if !self.stopped_thread_matches(bp.thread.as_ref())
                     || !stopped_processor_matches(bp.processor, &self.current_thread)
                     || !self.stopped_stack_reaches(bp.min_stack_pointer)
-                    || !stopped_hypercall_matches(
-                        &self.target,
-                        bp.hypercall.as_ref(),
-                        &self.current_thread,
-                        cr3,
-                        rip,
-                    )
                 {
+                    self.step_over_and_resume()?;
+                    return Ok(BreakpointStopAction::Resumed);
+                }
+                let (hypercall_matches, caller) = stopped_hypercall_matches(
+                    &self.target,
+                    bp.hypercall.as_ref(),
+                    &self.current_thread,
+                    cr3,
+                    rip,
+                );
+                if !hypercall_matches {
                     self.step_over_and_resume()?;
                     return Ok(BreakpointStopAction::Resumed);
                 }
@@ -69,14 +74,15 @@ impl Session {
                 }
                 // A false condition is absorbed. Evaluation errors fail safe:
                 // surface the stop and carry the error to every host.
-                let condition_error = match bp.evaluate_condition(&self.target) {
-                    Ok(false) => {
-                        self.step_over_and_resume()?;
-                        return Ok(BreakpointStopAction::Resumed);
-                    }
-                    Ok(true) => None,
-                    Err(error) => Some(error.to_string()),
-                };
+                let condition_error =
+                    match evaluate_hit_condition(&mut self.target, &bp, caller.as_ref()) {
+                        Ok(false) => {
+                            self.step_over_and_resume()?;
+                            return Ok(BreakpointStopAction::Resumed);
+                        }
+                        Ok(true) => None,
+                        Err(error) => Some(error.to_string()),
+                    };
 
                 // The stub can drop non-hit breakpoints when the VM stops; re-arm
                 // so they survive the next resume.
@@ -196,8 +202,9 @@ pub fn stopped_processor_matches(processor: Option<u16>, stopped: &str) -> bool 
 
 /// Whether a hit reported on `stopped`, at `rip` on root `cr3`, is the
 /// hypercall from the caller a hypercall breakpoint names (see
-/// [`HypercallFilter::matches`]). Resolved only for such a breakpoint, as
-/// it walks the hypervisor's partitions. A stop whose processor cannot be
+/// [`HypercallFilter::matches`]), with the caller found, whose registers
+/// the breakpoint's condition sees (see [`evaluate_hit_condition`]).
+/// Resolved only for such a breakpoint. A stop whose processor cannot be
 /// resolved has an unknown caller, so it matches.
 pub fn stopped_hypercall_matches(
     target: &Target,
@@ -205,13 +212,39 @@ pub fn stopped_hypercall_matches(
     stopped: &str,
     cr3: u64,
     rip: u64,
-) -> bool {
+) -> (bool, Option<HypercallCaller>) {
     let Some(filter) = filter else {
-        return true;
+        return (true, None);
     };
     let caller = processor_index_from_backend_thread_id(stopped)
         .and_then(|number| target.hypercall_caller(cr3, rip, number));
-    filter.matches(caller.as_ref())
+    (filter.matches(caller.as_ref()), caller)
+}
+
+/// Evaluate `breakpoint`'s condition at a hit. A hypercall breakpoint's
+/// sees its `caller`'s registers at its VMCALL, the ones `!hvcall` decodes
+/// from, rather than the hypervisor's at the handler, which hold none of
+/// the call's; the memory it reads is still the stopped vCPU's. With the
+/// caller unknown, the condition cannot be evaluated, which surfaces the
+/// hit with the error.
+pub fn evaluate_hit_condition(
+    target: &mut Target,
+    breakpoint: &Breakpoint,
+    caller: Option<&HypercallCaller>,
+) -> Result<bool> {
+    if breakpoint.hypercall.is_none() || breakpoint.condition_expr.is_none() {
+        return breakpoint.evaluate_condition(target);
+    }
+    let caller = caller.ok_or_else(|| {
+        Error::Hypervisor(
+            "the hypercall's caller is not known, so neither are the registers the condition reads"
+                .to_string(),
+        )
+    })?;
+    let live = target.registers.replace(caller.registers.clone());
+    let held = breakpoint.evaluate_condition(target);
+    target.registers = live;
+    held
 }
 
 /// The stack pointer in `registers` (`rsp`, or AArch64's `sp`).
@@ -487,14 +520,18 @@ pub fn resolve_watchpoint_stop(
         || breakpoint
             .min_stack_pointer
             .is_some_and(|min| sp.is_some_and(|sp| sp < min))
-        || !stopped_hypercall_matches(
-            target,
-            breakpoint.hypercall.as_ref(),
-            current_thread,
-            scope_dtb,
-            rip,
-        )
     {
+        backend.continue_execution()?;
+        return Ok(WatchpointStopAction::Resumed);
+    }
+    let (hypercall_matches, caller) = stopped_hypercall_matches(
+        target,
+        breakpoint.hypercall.as_ref(),
+        current_thread,
+        scope_dtb,
+        rip,
+    );
+    if !hypercall_matches {
         backend.continue_execution()?;
         return Ok(WatchpointStopAction::Resumed);
     }
@@ -503,7 +540,7 @@ pub fn resolve_watchpoint_stop(
         return Ok(WatchpointStopAction::Resumed);
     }
 
-    let condition_error = match breakpoint.evaluate_condition(target) {
+    let condition_error = match evaluate_hit_condition(target, &breakpoint, caller.as_ref()) {
         Ok(false) => {
             backend.continue_execution()?;
             return Ok(WatchpointStopAction::Resumed);

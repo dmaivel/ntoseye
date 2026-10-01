@@ -247,9 +247,11 @@ mod tests {
     use crate::breakpoints::{BreakpointConfig, BreakpointManager, HypercallFilter, ThreadScope};
     use crate::guest::hypercall_input::decode_hypercall;
     use crate::guest::hypercalls::{HypercallCaller, HypercallInput};
+    use crate::session::hits::evaluate_hit_condition;
     use crate::session::session_over_memory;
-    use crate::target::{ThreadInfo, sample_thread};
+    use crate::target::{Target, ThreadInfo, sample_thread};
     use crate::types::VirtAddr;
+    use std::collections::HashMap;
 
     /// NT's synthetic IPI, as RCX holds it live: fast, code 0x000b.
     const SEND_IPI: u64 = 0x1_000b;
@@ -261,6 +263,7 @@ mod tests {
             vp,
             vtl: 0,
             input,
+            registers: HashMap::new(),
         }
     }
 
@@ -369,5 +372,51 @@ mod tests {
                 "condition {condition:?} was stored but not evaluated"
             );
         }
+    }
+
+    /// A hypercall breakpoint's condition reads its caller's registers, not
+    /// those the hypervisor runs the handler with; with the caller unknown
+    /// it cannot be evaluated (so the hit stops). The registers in use
+    /// afterwards are the hypervisor's again.
+    #[test]
+    fn a_hypercall_condition_reads_the_callers_registers() {
+        let mut session = session_over_memory(0x1000, &[0u8; 0x80]);
+        let mut client = SlotRecorder::accepting();
+        let mut manager = BreakpointManager::new();
+        let id = manager
+            .add_configured(
+                &mut client,
+                &session.target,
+                VirtAddr(0x1000),
+                None,
+                BreakpointConfig {
+                    condition: Some("rdx == 0xfb".to_string()),
+                    hypercall: Some(HypercallFilter {
+                        code: 0xb,
+                        partition: None,
+                        vp: None,
+                    }),
+                    ..BreakpointConfig::default()
+                },
+            )
+            .expect("configured breakpoint installs");
+        let bp = manager.breakpoints[&id].clone();
+        let hypervisor = HashMap::from([("rdx".to_string(), 0xfb), ("rip".to_string(), 0x1000)]);
+        session.target.registers = Some(hypervisor.clone());
+        let with_rdx = |rdx| HypercallCaller {
+            registers: HashMap::from([("rdx".to_string(), rdx)]),
+            ..caller(4, 1, known(SEND_IPI))
+        };
+
+        let holds = |target: &mut Target, caller: Option<&HypercallCaller>| {
+            evaluate_hit_condition(target, &bp, caller)
+        };
+        assert!(holds(&mut session.target, Some(&with_rdx(0xfb))).unwrap());
+        assert!(
+            !holds(&mut session.target, Some(&with_rdx(0x2f))).unwrap(),
+            "the hypervisor's rdx is 0xfb"
+        );
+        assert!(holds(&mut session.target, None).is_err());
+        assert_eq!(session.target.registers, Some(hypervisor));
     }
 }

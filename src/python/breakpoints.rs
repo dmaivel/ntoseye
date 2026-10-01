@@ -409,8 +409,10 @@ impl Breakpoints {
     /// call, and, with `partition` (a partition ID) and `vp` (a VP index in
     /// it), only when the caller is that partition or VP. ntoseye resumes
     /// the other hits without a stop, before any `when=` callback runs. A
-    /// hit whose caller ntoseye cannot tell stops. Needs the gdb backend and
-    /// the VM's hv-evmcs enlightenment. This feature is experimental.
+    /// hit whose caller ntoseye cannot tell stops. A `condition` sees the
+    /// caller's registers at its VMCALL (`"rdx == 0xfb"`), not the
+    /// hypervisor's at the handler. Needs the gdb backend and the VM's
+    /// hv-evmcs enlightenment. This feature is experimental.
     #[pyo3(signature = (call, partition=None, vp=None, *, condition=None, when=None, pass_count=0, one_shot=false, processor=None, action=None))]
     fn add_hypercall(
         &self,

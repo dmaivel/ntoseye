@@ -130,6 +130,11 @@ pub struct HypercallCaller {
     pub vp: u32,
     pub vtl: u8,
     pub input: HypercallInput,
+    /// Its registers at its VMCALL, as `.vtlcxr` selects a saved state's:
+    /// RIP, RSP, flags, control and segment registers from its eVMCS, and
+    /// the general-purpose registers when they are known. A hypercall
+    /// breakpoint's condition sees these.
+    pub registers: std::collections::HashMap<String, u64>,
 }
 
 impl HypercallCaller {
