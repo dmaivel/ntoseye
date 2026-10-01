@@ -175,6 +175,76 @@ pub fn field(page: &[u8], name: &str) -> Option<u64> {
         .map(|(.., value)| value)
 }
 
+/// Architectural MSRs (Intel SDM Vol. 4) an MSR intercept list is most
+/// often read for, each as its first and last number: one MSR, or a block
+/// of them under one name. All are in the ranges an MSR bitmap covers.
+const MSR_NAMES: &[(u32, u32, &str)] = &[
+    (0x10, 0x10, "IA32_TIME_STAMP_COUNTER"),
+    (0x1b, 0x1b, "IA32_APIC_BASE"),
+    (0x3a, 0x3a, "IA32_FEATURE_CONTROL"),
+    (0x48, 0x48, "IA32_SPEC_CTRL"),
+    (0x49, 0x49, "IA32_PRED_CMD"),
+    (0x8b, 0x8b, "IA32_BIOS_SIGN_ID"),
+    (0x9b, 0x9b, "IA32_SMM_MONITOR_CTL"),
+    (0xc1, 0xc8, "IA32_PMCx"),
+    (0xe7, 0xe7, "IA32_MPERF"),
+    (0xe8, 0xe8, "IA32_APERF"),
+    (0xfe, 0xfe, "IA32_MTRRCAP"),
+    (0x10a, 0x10a, "IA32_ARCH_CAPABILITIES"),
+    (0x174, 0x174, "IA32_SYSENTER_CS"),
+    (0x175, 0x175, "IA32_SYSENTER_ESP"),
+    (0x176, 0x176, "IA32_SYSENTER_EIP"),
+    (0x186, 0x18d, "IA32_PERFEVTSELx"),
+    (0x1a0, 0x1a0, "IA32_MISC_ENABLE"),
+    (0x1d9, 0x1d9, "IA32_DEBUGCTL"),
+    (0x200, 0x21f, "IA32_MTRR_PHYSBASE/MASKx"),
+    (0x250, 0x26f, "IA32_MTRR_FIXx"),
+    (0x277, 0x277, "IA32_PAT"),
+    (0x2ff, 0x2ff, "IA32_MTRR_DEF_TYPE"),
+    (0x38f, 0x38f, "IA32_PERF_GLOBAL_CTRL"),
+    (0x400, 0x47f, "IA32_MCi"),
+    (0x480, 0x493, "IA32_VMX_*"),
+    (0x6a0, 0x6a0, "IA32_U_CET"),
+    (0x6a2, 0x6a2, "IA32_S_CET"),
+    (0x6a4, 0x6a7, "IA32_PLx_SSP"),
+    (0x6a8, 0x6a8, "IA32_INTERRUPT_SSP_TABLE_ADDR"),
+    (0x6e0, 0x6e0, "IA32_TSC_DEADLINE"),
+    (0x800, 0x8ff, "x2APIC"),
+    (0xda0, 0xda0, "IA32_XSS"),
+    (0xc000_0080, 0xc000_0080, "IA32_EFER"),
+    (0xc000_0081, 0xc000_0081, "IA32_STAR"),
+    (0xc000_0082, 0xc000_0082, "IA32_LSTAR"),
+    (0xc000_0083, 0xc000_0083, "IA32_CSTAR"),
+    (0xc000_0084, 0xc000_0084, "IA32_FMASK"),
+    (0xc000_0100, 0xc000_0100, "IA32_FS_BASE"),
+    (0xc000_0101, 0xc000_0101, "IA32_GS_BASE"),
+    (0xc000_0102, 0xc000_0102, "IA32_KERNEL_GS_BASE"),
+    (0xc000_0103, 0xc000_0103, "IA32_TSC_AUX"),
+];
+
+/// The names [`MSR_NAMES`] has for any MSR in `first..=last`.
+pub fn msr_names(first: u32, last: u32) -> Vec<&'static str> {
+    MSR_NAMES
+        .iter()
+        .filter(|&&(low, high, _)| low <= last && first <= high)
+        .map(|&(.., name)| name)
+        .collect()
+}
+
+/// The names [`MSR_NAMES`] has whose every MSR is in none of the inclusive
+/// `intercepted` ranges: those the guest accesses without an exit.
+pub fn msr_names_outside(intercepted: &[(u32, u32)]) -> Vec<&'static str> {
+    MSR_NAMES
+        .iter()
+        .filter(|&&(low, high, _)| {
+            intercepted
+                .iter()
+                .all(|&(first, last)| high < first || last < low)
+        })
+        .map(|&(.., name)| name)
+        .collect()
+}
+
 /// The runs of set bits in `bitmap`, as inclusive `(first, last)` numbers,
 /// bit 0 of byte 0 being `base`.
 pub fn set_ranges(bitmap: &[u8], base: u32) -> Vec<(u32, u32)> {
@@ -197,6 +267,27 @@ pub fn set_ranges(bitmap: &[u8], base: u32) -> Vec<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An intercepted range is named by every known MSR or block it
+    /// touches, a block it covers only part of included, but not by one it
+    /// only borders.
+    #[test]
+    fn an_msr_range_is_named_by_what_it_overlaps() {
+        assert_eq!(msr_names(0x7, 0x16), ["IA32_TIME_STAMP_COUNTER"]);
+        assert_eq!(msr_names(0x802, 0x83f), ["x2APIC"]);
+        assert_eq!(msr_names(0x8ff, 0x900), ["x2APIC"]);
+        assert!(msr_names(0x11, 0x1a).is_empty());
+        assert_eq!(
+            msr_names(0xc000_0080, 0xc000_0081),
+            ["IA32_EFER", "IA32_STAR"]
+        );
+        let intercepted = [(0x0, 0x47), (0x4a, 0x8ff), (0xc000_0000, 0xc000_00ff)];
+        assert_eq!(
+            msr_names_outside(&intercepted)[..3],
+            ["IA32_SPEC_CTRL", "IA32_PRED_CMD", "IA32_XSS"]
+        );
+        assert!(!msr_names_outside(&intercepted).contains(&"x2APIC"));
+    }
 
     #[test]
     fn set_bits_become_runs_offset_by_the_base() {

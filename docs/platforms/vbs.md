@@ -241,7 +241,7 @@ With that vCPU selected, {command}`!hvd` `<address>` reads that guest's memory, 
 
 ### VMCS and intercepts
 
-{command}`!hvvmcs` `[-msr|-io] [partition-id [vp-index [vtl]]]` shows the eVMCS of a VTL, by default of the VP that the current vCPU's processor runs (a guest partition's first, else the root partition's) and the VTL that it runs in: each field with its name, offset, and value. With `-msr`, it shows the MSRs whose reads and writes the VTL's MSR bitmap intercepts, and with `-io`, the I/O ports that its I/O bitmaps intercept. When the VM-execution controls do not use the bitmaps, it says that every access exits, or none. The eVMCS layout is the Hyper-V TLFS's, so this works on every hypervisor build.
+{command}`!hvvmcs` `[-msr|-io] [partition-id [vp-index [vtl]]]` shows the eVMCS of a VTL, by default of the VP that the current vCPU's processor runs (a guest partition's first, else the root partition's) and the VTL that it runs in: each field with its name, offset, and value. With `-msr`, it shows the MSRs whose reads and writes the VTL's MSR bitmap intercepts, with the names of the architectural MSRs in each range, and then the architectural MSRs that the VTL reads and writes without an exit (`read without an exit: IA32_SPEC_CTRL ... IA32_KERNEL_GS_BASE`). The bitmap covers 0x0-0x1fff and 0xc0000000-0xc0001fff, and every other MSR, such as Hyper-V's synthetic ones, always exits. With `-io`, it shows the I/O ports that its I/O bitmaps intercept. When the VM-execution controls do not use the bitmaps, it says that every access exits, or none. The eVMCS layout is the Hyper-V TLFS's, so this works on every hypervisor build.
 
 ```text
 mem:1> !hvvmcs -io

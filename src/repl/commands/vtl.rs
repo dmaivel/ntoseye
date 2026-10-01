@@ -77,7 +77,7 @@ repl_command! {
     names: ["!hvvmcs"],
     usage: "!hvvmcs [-msr|-io] [partition-id [vp-index [vtl]]]",
     summary: "Show the eVMCS of a VTL of a Windows hypervisor VP, or the MSRs and I/O ports it intercepts.",
-    details: "Reads the Enlightened VMCS of a VTL, by default the VP the current vCPU's processor runs (a guest partition's first, else the root partition's) and the VTL it runs in, and shows each field with its offset and value. With -msr, it shows the MSRs whose reads and writes the VTL's MSR bitmap intercepts, and with -io the I/O ports its I/O bitmaps intercept, or that every access is intercepted when the VM-execution controls do not use the bitmaps. The layout is the Hyper-V TLFS's, so this does not depend on the hypervisor build. The IDs use the current radix. Needs the VM's hv-evmcs enlightenment.",
+    details: "Reads the Enlightened VMCS of a VTL, by default the VP the current vCPU's processor runs (a guest partition's first, else the root partition's) and the VTL it runs in, and shows each field with its offset and value. With -msr, it shows the MSRs whose reads and writes the VTL's MSR bitmap intercepts, with the architectural MSRs each range holds, and then the architectural MSRs the VTL reads and writes without an exit; MSRs outside the bitmap's 0x0-0x1fff and 0xc0000000-0xc0001fff always exit. With -io the I/O ports its I/O bitmaps intercept, or that every access is intercepted when the VM-execution controls do not use the bitmaps. The layout is the Hyper-V TLFS's, so this does not depend on the hypervisor build. The IDs use the current radix. Needs the VM's hv-evmcs enlightenment.",
 }
 
 repl_command! {
@@ -933,7 +933,9 @@ impl ReplState<'_> {
             return;
         }
         let mut table = Builder::default();
-        table.push_record(["Access", "First MSR", "Last MSR"]);
+        table.push_record(["Access", "First MSR", "Last MSR", "Names"]);
+        // Read, then write: each access's intercepted ranges, low and high.
+        let mut intercepted: [Vec<(u32, u32)>; 2] = Default::default();
         // Read low, read high, write low, write high (Intel SDM 25.6.9).
         for (index, access, base) in [
             (0, "read", 0u32),
@@ -942,15 +944,42 @@ impl ReplState<'_> {
             (3, "write", 0xc000_0000),
         ] {
             for (first, last) in evmcs_fields::set_ranges(&bitmap[index * 0x400..][..0x400], base) {
+                intercepted[index / 2].push((first, last));
+                let names = evmcs_fields::msr_names(first, last);
+                let shown = names.iter().take(4).copied().collect::<Vec<_>>().join(" ");
                 table.push_record([
                     access.to_string(),
                     format!("{first:#x}"),
                     format!("{last:#x}"),
+                    if names.len() > 4 {
+                        format!("{shown} (+{})", names.len() - 4)
+                    } else {
+                        shown
+                    },
                 ]);
             }
         }
         outln!("{} {address:x}", ui::muted("MSR bitmap"));
         print_padded_table(table);
+        for (access, ranges) in ["read", "write"].iter().zip(&intercepted) {
+            let names = evmcs_fields::msr_names_outside(ranges);
+            outln!(
+                "{} {}",
+                ui::muted(&format!("{access} without an exit:")),
+                if names.is_empty() {
+                    "none of the MSRs ntoseye names".to_string()
+                } else {
+                    names.join(" ")
+                }
+            );
+        }
+        outln!(
+            "{}\n",
+            ui::muted(
+                "MSRs outside 0x0-0x1fff and 0xc0000000-0xc0001fff, such as the Hyper-V synthetic \
+                 ones at 0x40000000, always exit"
+            )
+        );
     }
 
     /// The I/O ports the eVMCS `vmcs` intercepts: through its I/O bitmaps A
