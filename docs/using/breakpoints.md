@@ -123,7 +123,7 @@ On the `gdb` backend, `ntoseye` plants an unload trap the same way as the load t
 
 ## User-mode breakpoints in shared pages
 
-The `gdb` backend sets no software breakpoint in user space, whatever the scope. A GDB stub writes and removes the `int3` through the page tables of the vCPU that it has selected, and that vCPU might not map the page, for example a vCPU that is stopped in the Windows hypervisor or that runs a Hyper-V guest. The byte would then stay in shared code after the session, and the next process to run it would trap in the guest. A step or {command}`wt` that follows a thread into user space ends there. Use a hardware breakpoint ({command}`ba` `e1`) to stop in user space.
+The `gdb` backend sets no software breakpoint in user space, whatever the scope. A GDB stub writes and removes the `int3` through the page tables of the vCPU that it has selected, and that vCPU might not map the page, for example a vCPU that is stopped in the Windows hypervisor or that runs a Hyper-V guest. The byte would then stay in shared code after the session, and the next process to run it would trap in the guest. Under VBS, a step or {command}`wt` that goes on into user space marks each next instruction with a free hardware breakpoint slot instead. A step over a call or a {command}`gu` that returns there ends with an error. Use a hardware breakpoint ({command}`ba` `e1`) to stop in user space.
 
 A software breakpoint is an `int3` byte in a physical frame, and all processes that map an image page share that frame. For example, `bu /p <pid> user32!PeekMessageW` puts the byte in the single frame that backs `user32.dll` for the whole machine, so every process that calls that function traps.
 
