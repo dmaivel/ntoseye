@@ -354,14 +354,25 @@ def test_saved_general_registers_are_the_exits(halted: Debugger) -> None:
     already the one the first call sees."""
     if os.environ.get("NTOSEYE_TEST_BACKEND") != "gdb":
         pytest.skip("breakpoints in the Windows hypervisor require the host GDB backend")
-    cpu = next((cpu for cpu in halted.cpus if cpu.saved_vtl), None)
-    if cpu is None:
+    found = next(
+        (
+            (cpu, saved)
+            for cpu in halted.cpus
+            for saved in cpu.saved_vtl
+            if saved.current
+        ),
+        None,
+    )
+    if found is None:
         pytest.skip("no vCPU halted in the Windows hypervisor with saved VTL state (needs VBS and hv-evmcs)")
-    current = next(saved for saved in cpu.saved_vtl if saved.current)
+    cpu, current = found
     assert current.general_registers is not None or current.may_be_stale
     host_rip = current.host_rip
     first_call = next(ins.ip for ins in cpu.memory.disassemble(host_rip, 64) if ins.mnemonic == "call")
-    for _ in range(ATTEMPTS):
+    compared = 0
+    for _ in range(ATTEMPTS * 10):
+        if compared == ATTEMPTS:
+            break
         entry = halted.breakpoints.add(host_rip, hardware=True)
         try:
             stop = halted.run(timeout=10.0)
@@ -370,7 +381,13 @@ def test_saved_general_registers_are_the_exits(halted: Debugger) -> None:
         assert isinstance(stop, Stop.Breakpoint)
         exiting = stop.cpu
         truth = {name: exiting.registers[name] for name in GPRS}
-        at_entry = next(saved for saved in exiting.saved_vtl if saved.current)
+        # The entry also takes the exits of a guest partition's VP (a Hyper-V
+        # VM or WSL2 inside the target), whose eVMCS is then the current one:
+        # none of the root VP's states is, and they hold no registers of it.
+        at_entry = next((saved for saved in exiting.saved_vtl if saved.current), None)
+        if at_entry is None:
+            continue
+        compared += 1
         assert not at_entry.may_be_stale and at_entry.general_registers is not None
         stored = halted.breakpoints.add(first_call, hardware=True, processor=exiting)
         try:
@@ -382,6 +399,7 @@ def test_saved_general_registers_are_the_exits(halted: Debugger) -> None:
         assert (saved.vtl, saved.rip, saved.exit_reason) == (at_entry.vtl, at_entry.rip, at_entry.exit_reason)
         assert saved.general_registers is not None
         assert {name: getattr(saved.general_registers, name) for name in GPRS} == truth
+    assert compared == ATTEMPTS, f"only {compared} exits of the root partition's VPs were caught"
 
 
 def test_secure_hardware_breakpoint_preserves_code_and_cpu_identity(halted: Debugger) -> None:

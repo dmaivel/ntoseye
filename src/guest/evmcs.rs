@@ -79,11 +79,27 @@ const CR0_PG: u64 = 1 << 31;
 pub struct EvmcsPages {
     /// Every eVMCS page with its hypervisor root (`host_cr3`), by address.
     pages: Vec<(PhysAddr, u64)>,
-    /// The eVMCS each VP assist page names as current.
-    current: HashSet<PhysAddr>,
+    /// The VP assist pages, by address. Which eVMCS each names current
+    /// changes with every VTL switch, and every switch to another
+    /// partition's VP, so it is read at each use.
+    assists: Vec<PhysAddr>,
 }
 
 impl EvmcsPages {
+    /// The eVMCS pages the assist pages name current now.
+    fn current(&self, phys: &impl MemoryOps<PhysAddr>) -> HashSet<PhysAddr> {
+        self.assists
+            .iter()
+            .filter_map(|&assist| {
+                let mut page = [0u8; ASSIST_CURRENT_NESTED_VMCS + 8];
+                phys.read_bytes(assist, &mut page).ok()?;
+                let current = u64_at(&page, ASSIST_CURRENT_NESTED_VMCS);
+                (page[ASSIST_ENLIGHTEN_VMENTRY] == 1).then_some(current)
+            })
+            .filter(|current| self.pages.iter().any(|&(address, _)| address == *current))
+            .collect()
+    }
+
     /// The eVMCS pages of the VP whose hypervisor root is `host_root`,
     /// compared under `mask`, read now. A page that no longer holds an eVMCS
     /// of that root is skipped.
@@ -93,6 +109,7 @@ impl EvmcsPages {
         host_root: u64,
         mask: u64,
     ) -> Vec<EvmcsState> {
+        let current = self.current(phys);
         self.pages
             .iter()
             .filter(|(_, root)| root & mask == host_root & mask)
@@ -102,7 +119,7 @@ impl EvmcsPages {
                 let state = EvmcsState::parse(&page)?;
                 (state.host_cr3 & mask == host_root & mask).then(|| EvmcsState {
                     address,
-                    current: self.current.contains(&address),
+                    current: current.contains(&address),
                     ..state
                 })
             })
@@ -115,6 +132,7 @@ impl EvmcsPages {
 
     /// Every page that still holds an eVMCS, read now, whatever its root.
     pub fn all_states(&self, phys: &impl MemoryOps<PhysAddr>) -> Vec<EvmcsState> {
+        let current = self.current(phys);
         self.pages
             .iter()
             .filter_map(|&(address, _)| {
@@ -123,7 +141,7 @@ impl EvmcsPages {
                 let state = EvmcsState::parse(&page)?;
                 Some(EvmcsState {
                     address,
-                    current: self.current.contains(&address),
+                    current: current.contains(&address),
                     ..state
                 })
             })
@@ -318,8 +336,8 @@ fn scan(
 ) -> Result<EvmcsPages> {
     let mut pages = Vec::new();
     // Candidate assist pages: any page whose enlighten_vmentry byte is 1 and
-    // whose current_nested_vmcs is a page address. Kept only if that address
-    // turns out to be an eVMCS.
+    // whose current_nested_vmcs is a page address, with that address. Kept
+    // only if that address turns out to be an eVMCS.
     let mut assists = Vec::new();
     let mut chunk = vec![0u8; SCAN_BYTES];
     for &(start, length) in runs {
@@ -344,18 +362,19 @@ fn scan(
                     && current != 0
                     && current.is_multiple_of(PAGE_SIZE as u64)
                 {
-                    assists.push(current);
+                    assists.push((page_address, current));
                 }
             }
             address += count as u64;
         }
     }
     let found: HashSet<PhysAddr> = pages.iter().map(|&(address, _)| address).collect();
-    let current = assists
+    let assists = assists
         .into_iter()
-        .filter(|current| found.contains(current))
+        .filter(|(_, current)| found.contains(current))
+        .map(|(assist, _)| assist)
         .collect();
-    Ok(EvmcsPages { pages, current })
+    Ok(EvmcsPages { pages, assists })
 }
 
 /// The boot's eVMCS scan, and the hypervisor roots it was repeated for.
@@ -480,6 +499,43 @@ mod tests {
 
     fn scan_ram(ram: &Ram) -> EvmcsPages {
         scan(ram, &[(0, ram.0.len() as u64)], &AtomicBool::new(false)).unwrap()
+    }
+
+    /// The scan runs once per boot, but the VTL a processor last entered
+    /// changes all the time: which eVMCS is current must follow its assist
+    /// page, not stay what the scan saw.
+    #[test]
+    fn the_current_evmcs_follows_the_assist_page_after_the_scan() {
+        let mut ram = Ram(vec![0; 16 * PAGE_SIZE]);
+        ram.evmcs(1, 0x10_0000, 0x1ae002, 0xfffff807978a950f);
+        ram.evmcs(2, 0x10_0000, 0x460_0002, 0xfffff807281c0035);
+        let assist = 8 * PAGE_SIZE;
+        ram.put(assist + ASSIST_ENLIGHTEN_VMENTRY, &[1]);
+        ram.put(
+            assist + ASSIST_CURRENT_NESTED_VMCS,
+            &(PAGE_SIZE as u64).to_le_bytes(),
+        );
+        let pages = scan_ram(&ram);
+        let current = |ram: &Ram| -> Vec<bool> {
+            pages
+                .states_for_root(ram, 0x10_0000, !0xfff)
+                .iter()
+                .map(|state| state.current)
+                .collect()
+        };
+        assert_eq!(current(&ram), [true, false]);
+        // The processor entered VTL1.
+        ram.put(
+            assist + ASSIST_CURRENT_NESTED_VMCS,
+            &(2 * PAGE_SIZE as u64).to_le_bytes(),
+        );
+        assert_eq!(current(&ram), [false, true]);
+        // It entered a guest partition's VP, whose eVMCS the scan never saw.
+        ram.put(
+            assist + ASSIST_CURRENT_NESTED_VMCS,
+            &(12 * PAGE_SIZE as u64).to_le_bytes(),
+        );
+        assert_eq!(current(&ram), [false, false]);
     }
 
     #[test]
