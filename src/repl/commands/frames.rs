@@ -320,12 +320,30 @@ impl ReplState<'_> {
             let exit = state
                 .exit_reason_name()
                 .map_or_else(|| format!("exit {:#x}", state.exit_reason), str::to_string);
+            let detail = vtl
+                .context
+                .exit_detail()
+                .map(|detail| format!(" ({detail})"))
+                .unwrap_or_default();
             outln!(
-                "{}  rsp {}  last exit: {}{}",
+                "{}  rsp {}  last exit: {}{}{}",
                 ui::symbol(&vtl.describe()),
                 ui::addr(state.rsp),
                 exit,
+                detail,
                 if state.current {
+                    ui::muted("  (current)")
+                } else {
+                    String::new()
+                }
+            );
+        }
+        let served = processor.and_then(|number| target.served_guest_vp(cr3, rip, number));
+        if let Some(served) = &served {
+            outln!(
+                "{}{}",
+                ui::symbol(&format!("{}: {}", served.label(), served.describe())),
+                if served.state.is_some_and(|state| state.current) {
                     ui::muted("  (current)")
                 } else {
                     String::new()
@@ -340,6 +358,12 @@ impl ReplState<'_> {
         self.set_selected_frame(selected.clone());
         outln!("selected the VTL0 context the hypervisor saved");
         if let Err(reason) = &vtl0.context.general_registers {
+            let reason = match &served {
+                Some(served) if served.state.is_some_and(|state| state.current) => {
+                    format!("the processor last ran {}", served.label())
+                }
+                _ => reason.clone(),
+            };
             outln!(
                 "{}",
                 ui::muted(&format!(

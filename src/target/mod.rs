@@ -39,7 +39,9 @@ pub mod zombies;
 
 pub use list::{ListCursor, ListTermination, bounded_list_walk};
 pub use memory::{CompareResult, MAX_SEARCH_BYTES, MAX_SEARCH_MATCHES, SearchResult, SearchStop};
-pub use vtl::{BreakpointStop, ForeignCode, ForeignModules, HYPERVISOR_CONTEXT, SavedVtlContext};
+pub use vtl::{
+    BreakpointStop, ForeignCode, ForeignModules, HYPERVISOR_CONTEXT, SavedVtlContext, ServedVp,
+};
 
 use self::mm::AddressDescription;
 use crate::{

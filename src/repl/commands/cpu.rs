@@ -1058,6 +1058,9 @@ impl ReplState<'_> {
             for saved in vcpu.saved_vtl.iter().filter(|saved| saved.summarized()) {
                 symbol_cell.push_str(&ui::muted(&format!("  saved {}", saved.describe())));
             }
+            if let Some(served) = &vcpu.serving {
+                symbol_cell.push_str(&ui::muted(&format!("  serving {}", served.label())));
+            }
             builder.push_record(vec![
                 vcpu.id.to_string(),
                 rip_cell.to_string(),

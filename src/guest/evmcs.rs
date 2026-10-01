@@ -131,6 +131,29 @@ impl EvmcsPages {
         self.pages.is_empty()
     }
 
+    /// The eVMCS loaded now on the processor whose hypervisor root is
+    /// `host_root`, compared under `mask`: the one an assist page names
+    /// current with that root, whatever root it had at the scan, as a guest
+    /// partition's VP moves between processors (and roots) where the root's
+    /// stay on theirs.
+    pub fn loaded_for_root(
+        &self,
+        phys: &impl MemoryOps<PhysAddr>,
+        host_root: u64,
+        mask: u64,
+    ) -> Option<EvmcsState> {
+        self.current(phys).into_iter().find_map(|address| {
+            let mut page = [0u8; EVMCS_BYTES];
+            phys.read_bytes(address, &mut page).ok()?;
+            let state = EvmcsState::parse(&page)?;
+            (state.host_cr3 & mask == host_root & mask).then_some(EvmcsState {
+                address,
+                current: true,
+                ..state
+            })
+        })
+    }
+
     /// Every page that still holds an eVMCS, read now, whatever its root.
     pub fn all_states(&self, phys: &impl MemoryOps<PhysAddr>) -> Vec<EvmcsState> {
         let current = self.current(phys);
@@ -223,6 +246,23 @@ fn u64_at(page: &[u8], offset: usize) -> u64 {
 }
 
 impl EvmcsState {
+    /// A state at `address`, current or not, in 64-bit paging, with every
+    /// other field zero but the few an eVMCS needs to parse.
+    #[cfg(test)]
+    pub fn at(address: PhysAddr, current: bool) -> Self {
+        let mut page = [0u8; EVMCS_BYTES];
+        page[..4].copy_from_slice(&EVMCS_VERSION.to_le_bytes());
+        page[HOST_RIP..HOST_RIP + 8].copy_from_slice(&0xffff_f800_0000_0000u64.to_le_bytes());
+        page[GUEST_CR0..GUEST_CR0 + 8].copy_from_slice(&(CR0_PE | CR0_PG).to_le_bytes());
+        page[HOST_CR3..HOST_CR3 + 8].copy_from_slice(&0x1000u64.to_le_bytes());
+        page[GUEST_CR3..GUEST_CR3 + 8].copy_from_slice(&0x2000u64.to_le_bytes());
+        Self {
+            address,
+            current,
+            ..Self::parse(&page).expect("a minimal eVMCS parses")
+        }
+    }
+
     /// The guest translates virtual addresses with 4-level long-mode paging:
     /// IA32_EFER.LMA set (the "IA-32e mode guest" entry control) and
     /// CR4.LA57 clear. A guest in 32-bit paging, PAE paging, or 5-level

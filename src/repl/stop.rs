@@ -462,7 +462,16 @@ pub fn print_break_context_at(
                         .iter()
                         .filter(|saved| saved.summarized())
                         .map(|saved| {
-                            format!("{} {}", ui::muted("saved"), ui::symbol(&saved.describe()))
+                            let detail = saved
+                                .context
+                                .exit_detail()
+                                .map(|detail| ui::muted(&format!("  {detail}")))
+                                .unwrap_or_default();
+                            format!(
+                                "{} {}{detail}",
+                                ui::muted("saved"),
+                                ui::symbol(&saved.describe())
+                            )
                         }),
                 );
                 // The note explains why VTL0 is not selected; a stale VTL1
@@ -480,6 +489,18 @@ pub fn print_break_context_at(
                 }
             }
             Err(error) => children.push(ui::muted(&format!("saved VTL state: {error}"))),
+        }
+        // The guest's VP whose exit the hypervisor handles here, when the
+        // processor runs one: what the stop is about, more than the root's.
+        if let Some(served) =
+            processor.and_then(|number| debugger.served_guest_vp(cr3, rip, number))
+        {
+            children.push(format!(
+                "{} {}  {}",
+                ui::muted("serving"),
+                served.label(),
+                ui::muted(&served.describe())
+            ));
         }
         if saved_context {
             children.push(ui::muted(

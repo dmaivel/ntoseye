@@ -406,6 +406,16 @@ pub fn partitions(
 /// The vCPU then shows that guest's registers, so its root is none of NT's.
 /// `None` when the processor's current VP is the root partition's.
 pub fn guest_vp_label(partitions: &[HvPartition], number: u16) -> Option<String> {
+    let (partition, vp) = processor_guest_vp(partitions, number)?;
+    Some(format!("partition {partition:#x} VP {}", vp.index))
+}
+
+/// The guest partition's VP, with its partition's ID, that processor
+/// `number`'s processor block names current.
+fn processor_guest_vp(
+    partitions: &[HvPartition],
+    number: u16,
+) -> Option<(u64, &HvVirtualProcessor)> {
     partitions
         .iter()
         .filter(|partition| partition.parent.is_some())
@@ -415,7 +425,45 @@ pub fn guest_vp_label(partitions: &[HvPartition], number: u16) -> Option<String>
                     .iter()
                     .any(|processor| processor.number == Some(u32::from(number)))
             })?;
-            Some(format!("partition {:#x} VP {}", partition.id, vp.index))
+            Some((partition.id, vp))
+        })
+}
+
+/// The guest partition's VP, with its partition's ID, VTL, and state, that
+/// processor `number` serves at a stop in the hypervisor, when `loaded` is
+/// the eVMCS its assist page names current: the VP and VTL with that
+/// eVMCS, or none when it is a root VP's. When it is not known, the VP
+/// whose processor block names it current, with a state that is not
+/// current, as its registers are then unknown.
+pub fn served_vp(
+    partitions: &[HvPartition],
+    loaded: Option<EvmcsState>,
+    number: u16,
+) -> Option<(u64, &HvVirtualProcessor, u8, Option<EvmcsState>)> {
+    let Some(loaded) = loaded else {
+        let (partition, vp) = processor_guest_vp(partitions, number)?;
+        let state = vp
+            .vtls
+            .iter()
+            .find(|vtl| vtl.level == vp.vtl)
+            .and_then(|vtl| vtl.state)
+            .map(|state| EvmcsState {
+                current: false,
+                ..state
+            });
+        return Some((partition, vp, vp.vtl, state));
+    };
+    partitions
+        .iter()
+        .filter(|partition| partition.parent.is_some())
+        .find_map(|partition| {
+            partition.virtual_processors.iter().find_map(|vp| {
+                let vtl = vp.vtls.iter().find(|vtl| {
+                    vtl.state
+                        .is_some_and(|state| state.address == loaded.address)
+                })?;
+                Some((partition.id, vp, vtl.level, Some(loaded)))
+            })
         })
 }
 
@@ -675,5 +723,62 @@ mod tests {
                 None,
             ]
         );
+    }
+
+    /// At a stop in the hypervisor, the processor serves the VP whose eVMCS
+    /// its assist page names loaded, whatever VP its processor block last
+    /// named; a root VP's eVMCS means no guest's. Only when nothing is
+    /// known loaded does the block name it, its registers then unknown.
+    #[test]
+    fn a_processor_serves_the_vp_whose_evmcs_it_has_loaded() {
+        let vtl = |level, address| HvVtl {
+            level,
+            context: 0,
+            vmcs: Some(address),
+            state: Some(EvmcsState::at(address, false)),
+        };
+        let vp = |index, vtls, processor: Option<u32>| HvVirtualProcessor {
+            index,
+            address: 0,
+            vtl: 0,
+            vtls,
+            processors: processor
+                .map(|number| HvProcessor {
+                    block: 0,
+                    number: Some(number),
+                })
+                .into_iter()
+                .collect(),
+        };
+        let partitions = [
+            HvPartition {
+                address: 0,
+                id: 1,
+                parent: None,
+                privileges: 0,
+                virtual_processors: vec![vp(3, vec![vtl(0, 0x1000), vtl(1, 0x2000)], Some(3))],
+            },
+            HvPartition {
+                address: 0,
+                id: 8,
+                parent: Some(1),
+                privileges: 0,
+                virtual_processors: vec![
+                    vp(0, vec![vtl(0, 0x5000)], Some(3)),
+                    vp(1, vec![vtl(0, 0x6000)], None),
+                ],
+            },
+        ];
+        let served = |loaded: Option<u64>| {
+            served_vp(
+                &partitions,
+                loaded.map(|address| EvmcsState::at(address, true)),
+                3,
+            )
+            .map(|(partition, vp, vtl, state)| (partition, vp.index, vtl, state.map(|s| s.current)))
+        };
+        assert_eq!(served(Some(0x6000)), Some((8, 1, 0, Some(true))));
+        assert_eq!(served(Some(0x2000)), None, "the root's VTL1");
+        assert_eq!(served(None), Some((8, 0, 0, Some(false))));
     }
 }

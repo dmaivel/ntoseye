@@ -92,6 +92,58 @@ pub struct BreakpointStop {
     general_registers: HashMap<&'static str, u64>,
 }
 
+/// The hypercall of `state`'s exit, when it is a VMCALL and `registers`, the
+/// exit's general-purpose registers, are known.
+fn exit_detail(
+    state: &EvmcsState,
+    registers: Option<&HashMap<&'static str, u64>>,
+) -> Option<String> {
+    const VMCALL: u32 = 18;
+    if state.exit_reason & 0xffff != VMCALL {
+        return None;
+    }
+    let rcx = *registers?.get("rcx")?;
+    Some(hypercalls::describe_hypercall_input(rcx))
+}
+
+/// A guest partition's virtual processor that a processor runs, or last
+/// ran: at a stop in the hypervisor, the VP whose exit it handles, or which
+/// it is about to enter, rather than one of the root's.
+#[derive(Debug, Clone)]
+pub struct ServedVp {
+    pub partition: u64,
+    pub vp: u32,
+    /// The VTL the VP runs in, and its saved state, when the walk read it.
+    pub vtl: u8,
+    pub state: Option<EvmcsState>,
+    /// The general-purpose registers of the VP's last exit, as
+    /// [`SavedVtlContext::general_registers`], or why they are not known.
+    pub general_registers: std::result::Result<HashMap<&'static str, u64>, String>,
+}
+
+impl ServedVp {
+    /// `partition 0x7 VP 2`.
+    pub fn label(&self) -> String {
+        format!("partition {:#x} VP {}", self.partition, self.vp)
+    }
+
+    /// Where the VP left off and why, as `VTL0 00007cba12f529e3, last exit
+    /// VMCALL (hypercall 0x0003 HvCallFlushVirtualAddressList)`.
+    pub fn describe(&self) -> String {
+        let Some(state) = &self.state else {
+            return format!("VTL{}", self.vtl);
+        };
+        let exit = state
+            .exit_reason_name()
+            .map_or_else(|| format!("exit {:#x}", state.exit_reason), str::to_string);
+        let mut text = format!("VTL{} {:016x}, last exit {exit}", self.vtl, state.rip);
+        if let Some(detail) = exit_detail(state, self.general_registers.as_ref().ok()) {
+            text.push_str(&format!(" ({detail})"));
+        }
+        text
+    }
+}
+
 impl BreakpointStop {
     /// The stop of `vcpu`, whose live registers are `registers`, on an
     /// instruction breakpoint at `rip`. `None` when `vcpu` names no
@@ -109,6 +161,12 @@ impl BreakpointStop {
 }
 
 impl SavedVtlContext {
+    /// The hypercall of a VMCALL exit, from the RCX of its registers, when
+    /// they are known (see [`hypercalls::describe_hypercall_input`]).
+    pub fn exit_detail(&self) -> Option<String> {
+        exit_detail(&self.state, self.general_registers.as_ref().ok())
+    }
+
     /// The saved registers under the names the register display and the
     /// unwinder use. A VMCS holds no general-purpose register but RSP; the
     /// rest come from where the hypervisor saved them, when known.
@@ -951,6 +1009,52 @@ impl Target {
     /// partitions; `None` when they cannot be walked.
     pub fn guest_vp_label(&self, number: u16) -> Option<String> {
         hypervisor::guest_vp_label(&self.hypervisor_partitions().ok()?, number)
+    }
+
+    /// The guest partition's virtual processor that processor `number`
+    /// runs, or last ran, for a vCPU at `rip` halted in the hypervisor on
+    /// root `cr3`: the VP whose exit it handles, or which it is about to
+    /// enter. `None` when the processor's VP is the root's, or the
+    /// partitions cannot be walked.
+    pub fn served_guest_vp(&self, cr3: u64, rip: u64, number: u16) -> Option<ServedVp> {
+        self.served_guest_vp_in(&self.hypervisor_partitions().ok()?, cr3, rip, number)
+    }
+
+    /// [`Self::served_guest_vp`] in `partitions`, walked already.
+    pub fn served_guest_vp_in(
+        &self,
+        partitions: &[HvPartition],
+        cr3: u64,
+        rip: u64,
+        number: u16,
+    ) -> Option<ServedVp> {
+        let mask = self.arch().dtb_page_mask();
+        // The eVMCS loaded on the processor, which its assist page names:
+        // that of the VP and VTL whose exits it handles now.
+        let loaded = self
+            .guest()
+            .ok()
+            .and_then(Guest::cached_evmcs_pages)
+            .and_then(|pages| pages.loaded_for_root(&*self.phys, cr3, mask));
+        let (partition, vp, vtl, state) = hypervisor::served_vp(partitions, loaded, number)?;
+        let entered = self
+            .breakpoint_stop
+            .as_ref()
+            .filter(|stop| stop.processor == number && stop.rip == rip);
+        let general_registers = match (&state, loaded) {
+            (Some(state), Some(_)) => {
+                self.saved_general_registers(cr3 & mask, rip, state, true, entered)
+            }
+            (Some(_), None) => Err("no eVMCS is known loaded on the processor".to_string()),
+            (None, _) => Err("the walk found no state for the VTL it runs".to_string()),
+        };
+        Some(ServedVp {
+            partition,
+            vp: vp.index,
+            vtl,
+            state,
+            general_registers,
+        })
     }
 
     /// The Windows hypervisor's hypercall table, indexed by call code, and

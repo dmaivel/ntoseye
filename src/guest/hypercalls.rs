@@ -80,6 +80,29 @@ pub fn tlfs_hypercall(code: u16) -> Option<(&'static str, bool)> {
         .map(|index| (TLFS_HYPERCALLS[index].1, TLFS_HYPERCALLS[index].2))
 }
 
+/// A hypercall input value (the TLFS's, in RCX at a VMCALL), as
+/// `hypercall 0x0003 HvCallFlushVirtualAddressList rep 0/12`: the call code
+/// and its TLFS name, then `fast` (register input), a rep call's start index
+/// and count, and `nested` (for the hypervisor a nested guest runs).
+pub fn describe_hypercall_input(value: u64) -> String {
+    let code = (value & 0xffff) as u16;
+    let mut text = match tlfs_hypercall(code) {
+        Some((name, _)) => format!("hypercall {code:#06x} {name}"),
+        None => format!("hypercall {code:#06x}"),
+    };
+    if value & (1 << 16) != 0 {
+        text.push_str(" fast");
+    }
+    let count = (value >> 32) & 0xfff;
+    if count != 0 {
+        text.push_str(&format!(" rep {}/{count}", (value >> 48) & 0xfff));
+    }
+    if value & (1 << 31) != 0 {
+        text.push_str(" nested");
+    }
+    text
+}
+
 /// The names ntoseye gives the Windows hypervisor's code, and the length of
 /// the function each begins, by RVA, where the image's `.pdata` gives it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +228,24 @@ mod tests {
     use super::*;
 
     const BASE: u64 = 0xffff_f840_b140_0000;
+
+    /// RCX at a VMCALL: the code by TLFS name, fast, a rep call's start
+    /// index and count, nested. 0x1000b is NT's synthetic IPI, seen live.
+    #[test]
+    fn a_hypercall_input_names_its_call_and_its_flags() {
+        assert_eq!(
+            describe_hypercall_input(0x1_000b),
+            "hypercall 0x000b HvCallSendSyntheticClusterIpi fast"
+        );
+        assert_eq!(
+            describe_hypercall_input(0x0002_000c_0000_0003),
+            "hypercall 0x0003 HvCallFlushVirtualAddressList rep 2/12"
+        );
+        assert_eq!(
+            describe_hypercall_input(0x8000_00c2),
+            "hypercall 0x00c2 nested"
+        );
+    }
 
     fn entry(rva: u64) -> HypercallEntry {
         HypercallEntry {

@@ -24,7 +24,7 @@ use crate::exception_policy::ExceptionPolicyTable;
 use crate::gdb::RegisterMap;
 use crate::guest::{ModuleInfo, ModuleSymbolLoadReport, ProcessInfo};
 use crate::session::lifecycle::InstanceGuard;
-use crate::target::{ReloadReport, Target, TargetSelection, ThreadInfo};
+use crate::target::{ReloadReport, ServedVp, Target, TargetSelection, ThreadInfo};
 #[cfg(test)]
 use crate::triage::{TriageBlock, make_triage_dump};
 use crate::types::VirtAddr;
@@ -386,6 +386,9 @@ pub struct VcpuInfo {
     /// For a vCPU halted in the Windows hypervisor, the VTL states it saved
     /// for the vCPU's virtual processor.
     pub saved_vtl: Vec<SavedVtl>,
+    /// For a vCPU halted in the Windows hypervisor, the guest partition's
+    /// virtual processor whose exit it handles, when it is not the root's.
+    pub serving: Option<ServedVp>,
     /// Why the vCPU context was unavailable, if it was.
     pub error: Option<String>,
 }

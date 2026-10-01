@@ -469,11 +469,17 @@ impl Session {
         let original = self.backend.stopped_thread_id()?;
         let threads = self.backend.thread_list()?;
         let mut out = Vec::with_capacity(threads.len());
+        let mut roots = Vec::with_capacity(threads.len());
         for thread in &threads {
             let regs = self
                 .backend
                 .set_current_thread(thread)
                 .and_then(|_| self.backend.read_registers());
+            roots.push(regs.as_ref().ok().and_then(|regs| {
+                self.register_map
+                    .read_u64(self.target.arch().dtb_register(), regs)
+                    .ok()
+            }));
             out.push(match regs {
                 Ok(regs) => self.describe_vcpu(thread, &regs),
                 Err(e) => VcpuInfo {
@@ -482,22 +488,33 @@ impl Session {
                     context: String::new(),
                     symbol: None,
                     saved_vtl: Vec::new(),
+                    serving: None,
                     error: Some(e.to_string()),
                 },
             });
         }
 
         let _ = self.backend.set_current_thread(&original);
-        // One partition walk names every vCPU running a guest partition's VP.
-        if out.iter().any(|vcpu| vcpu.context == UNKNOWN_CONTEXT)
+        // One partition walk names every vCPU running a guest partition's
+        // VP, and the one each vCPU in the hypervisor serves.
+        if out
+            .iter()
+            .any(|vcpu| vcpu.context == UNKNOWN_CONTEXT || vcpu.context == HYPERVISOR_CONTEXT)
             && let Ok(partitions) = self.target.hypervisor_partitions()
         {
-            for vcpu in &mut out {
+            for (vcpu, root) in out.iter_mut().zip(roots) {
+                let number = processor_index_from_backend_thread_id(&vcpu.id);
                 if vcpu.context == UNKNOWN_CONTEXT
-                    && let Some(label) = processor_index_from_backend_thread_id(&vcpu.id)
-                        .and_then(|number| guest_vp_label(&partitions, number))
+                    && let Some(label) =
+                        number.and_then(|number| guest_vp_label(&partitions, number))
                 {
                     vcpu.context = label;
+                } else if vcpu.context == HYPERVISOR_CONTEXT
+                    && let (Some(number), Some(root), Some(rip)) = (number, root, vcpu.rip)
+                {
+                    vcpu.serving = self
+                        .target
+                        .served_guest_vp_in(&partitions, root, rip, number);
                 }
             }
         }
@@ -520,6 +537,7 @@ impl Session {
                 context: String::new(),
                 symbol: None,
                 saved_vtl: Vec::new(),
+                serving: None,
                 error: None,
             };
         };
@@ -532,6 +550,7 @@ impl Session {
                 context: "no context".to_string(),
                 symbol: None,
                 saved_vtl: Vec::new(),
+                serving: None,
                 error: None,
             };
         }
@@ -615,6 +634,7 @@ impl Session {
             context,
             symbol,
             saved_vtl,
+            serving: None,
             error: None,
         }
     }
