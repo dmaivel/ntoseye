@@ -1092,6 +1092,10 @@ impl Target {
                 "the Windows hypervisor needs an AMD64 target".to_string(),
             ));
         }
+        // The partitions' saved states leave off in the hypercall page too,
+        // and a session's first stop need not be in the hypervisor, where
+        // the page is otherwise first named.
+        self.register_hypercall_pages();
         let guest = self.guest()?;
         let mask = self.arch().dtb_page_mask();
         // (hypervisor root, processor block, an address in the image)
