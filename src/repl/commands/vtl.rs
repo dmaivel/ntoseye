@@ -52,7 +52,7 @@ repl_command! {
     names: ["!hvept"],
     usage: "!hvept [-v] <address> [partition-id [vp-index]]",
     summary: "Translate a guest physical address through each VTL's EPT (second-level address translation) of a Windows hypervisor VP.",
-    details: "Walks the extended page tables that each enabled VTL's eVMCS names, for the root partition's VP 0 by default. The address is guest physical, or with -v virtual in the current address space (the .process or VTL1 scope), which the command translates through the guest's page tables first. Each row shows the VTL, its EPT pointer, the host physical address, the access that every level of the walk allows (r, w, and x, where x is supervisor-mode execute when the VTL uses mode-based execute control), user-mode execute under that control, the page size, and the memory type, or the level where the walk found no entry. This is how memory integrity (HVCI) and the secure kernel set page permissions that NT cannot change. The address and IDs use the current radix. Needs the VM's hv-evmcs enlightenment. See !hvpartitions for where the objects come from.",
+    details: "Walks the extended page tables that each enabled VTL's eVMCS names, for the root partition's VP 0 by default. The address is guest physical, or with -v virtual in the current address space (the .process or VTL1 scope), which the command translates through the guest's page tables first; that space is the root partition's, so -v takes only a root partition VP. Each row shows the VTL, its EPT pointer, the host physical address, the access that every level of the walk allows (r, w, and x, where x is supervisor-mode execute when the VTL uses mode-based execute control), user-mode execute under that control, the page size, and the memory type, or the level where the walk found no entry. This is how memory integrity (HVCI) and the secure kernel set page permissions that NT cannot change. The address and IDs use the current radix. Needs the VM's hv-evmcs enlightenment. See !hvpartitions for where the objects come from.",
 }
 
 repl_command! {
@@ -121,6 +121,14 @@ fn processors_text(processors: &[HvProcessor]) -> String {
         })
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// A VP that a command's partition ID and VP index select.
+struct SelectedVp {
+    partition: u64,
+    /// The partition is the root partition.
+    root: bool,
+    vp: HvVirtualProcessor,
 }
 
 /// The name of an EPT memory type (Intel SDM 29.3.7).
@@ -507,11 +515,13 @@ impl ReplState<'_> {
             }
         }
         print_padded_table(table);
-        let unlinked = partition
+        // A partition with no VPs yet links nothing either way.
+        let mut vtls = partition
             .virtual_processors
             .iter()
             .flat_map(|vp| &vp.vtls)
-            .all(|vtl| vtl.vmcs.is_none());
+            .peekable();
+        let unlinked = vtls.peek().is_some() && vtls.all(|vtl| vtl.vmcs.is_none());
         if unlinked && self.ctx.target.evmcs_found() == Some(true) {
             outln!(
                 "{}\n",
@@ -533,6 +543,19 @@ impl ReplState<'_> {
         let Some(values) = self.eval_all(arguments) else {
             return Ok(());
         };
+        let Some(SelectedVp { root, vp, .. }) =
+            self.hypervisor_vp(values.get(1).copied(), values.get(2).copied())
+        else {
+            return Ok(());
+        };
+        // -v translates through NT's page tables, which are the root
+        // partition's; a guest's addresses mean nothing there.
+        if virtual_address && !root {
+            error!(
+                "-v translates through the root partition's address space; read a guest partition's virtual memory with !hvd"
+            );
+            return Ok(());
+        }
         let gpa = if virtual_address {
             match self.ctx.target.virt_to_phys(None, VirtAddr(values[0])) {
                 Ok(Some(gpa)) => {
@@ -559,10 +582,6 @@ impl ReplState<'_> {
             }
         } else {
             values[0]
-        };
-        let Some((_, vp)) = self.hypervisor_vp(values.get(1).copied(), values.get(2).copied())
-        else {
-            return Ok(());
         };
         let mut table = Builder::default();
         table.push_record([
@@ -622,7 +641,9 @@ impl ReplState<'_> {
         let Some(values) = self.eval_all(&invocation.argv) else {
             return Ok(());
         };
-        let Some((id, vp)) = self.hypervisor_vp(values.first().copied(), values.get(1).copied())
+        let Some(SelectedVp {
+            partition: id, vp, ..
+        }) = self.hypervisor_vp(values.first().copied(), values.get(1).copied())
         else {
             return Ok(());
         };
@@ -778,7 +799,9 @@ impl ReplState<'_> {
         let Some(values) = self.eval_all(arguments) else {
             return Ok(());
         };
-        let Some((id, vp)) = self.hypervisor_vp(values.first().copied(), values.get(1).copied())
+        let Some(SelectedVp {
+            partition: id, vp, ..
+        }) = self.hypervisor_vp(values.first().copied(), values.get(1).copied())
         else {
             return Ok(());
         };
@@ -927,7 +950,10 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        let Some((id, vp)) = self.hypervisor_vp(Some(values[0]), Some(values[1])) else {
+        let Some(SelectedVp {
+            partition: id, vp, ..
+        }) = self.hypervisor_vp(Some(values[0]), Some(values[1]))
+        else {
             return Ok(());
         };
         let Some(state) = vp
@@ -937,7 +963,7 @@ impl ReplState<'_> {
             .and_then(|vtl| vtl.state)
         else {
             error!(
-                "VP {} of partition {id:#x} has no eVMCS state; it may not have started",
+                "VP {} of partition {id:#x} has no eVMCS state: it has not started, or it runs without paging",
                 vp.index
             );
             return Ok(());
@@ -975,11 +1001,7 @@ impl ReplState<'_> {
 
     /// VP `index` (0 by default) of partition `id` (the root by default), with
     /// its partition's ID, or `None` after reporting why there is none.
-    fn hypervisor_vp(
-        &mut self,
-        id: Option<u64>,
-        index: Option<u64>,
-    ) -> Option<(u64, HvVirtualProcessor)> {
+    fn hypervisor_vp(&mut self, id: Option<u64>, index: Option<u64>) -> Option<SelectedVp> {
         let partitions = match self.ctx.target.hypervisor_partitions() {
             Ok(partitions) => partitions,
             Err(error) => {
@@ -1004,7 +1026,11 @@ impl ReplState<'_> {
             error!("partition {:#x} has no VP {index}", partition.id);
             return None;
         };
-        Some((partition.id, vp))
+        Some(SelectedVp {
+            partition: partition.id,
+            root: partition.parent.is_none(),
+            vp,
+        })
     }
 
     fn cmd_trustlets(&mut self) -> Result<()> {

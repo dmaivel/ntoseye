@@ -55,6 +55,7 @@ const GUEST_GS_BASE: usize = 0x100;
 const GUEST_CR0: usize = 0x220;
 const GUEST_CR3: usize = 0x228;
 const GUEST_CR4: usize = 0x230;
+const GUEST_IA32_EFER: usize = 0x1b8;
 const GUEST_DR7: usize = 0x238;
 const VM_EXIT_REASON: usize = 0x2b4;
 const VM_EXIT_INTR_INFO: usize = 0x2b8;
@@ -192,6 +193,8 @@ pub struct EvmcsState {
     pub cr0: u64,
     pub cr3: u64,
     pub cr4: u64,
+    /// The guest's IA32_EFER.
+    pub efer: u64,
     pub dr7: u64,
     pub cs: u16,
     pub ss: u16,
@@ -216,6 +219,15 @@ fn u64_at(page: &[u8], offset: usize) -> u64 {
 }
 
 impl EvmcsState {
+    /// The guest translates virtual addresses with 4-level long-mode paging:
+    /// IA32_EFER.LMA set and CR4.LA57 clear. A guest in 32-bit paging, PAE
+    /// paging, or 5-level paging walks tables of another shape.
+    pub fn four_level_paging(&self) -> bool {
+        const EFER_LMA: u64 = 1 << 10;
+        const CR4_LA57: u64 = 1 << 12;
+        self.efer & EFER_LMA != 0 && self.cr4 & CR4_LA57 == 0
+    }
+
     /// Whether the guest runs with mode-based execute control, under which
     /// EPT entries allow supervisor and user execution separately.
     pub fn mode_based_execute(&self) -> bool {
@@ -266,6 +278,7 @@ impl EvmcsState {
             cr0,
             cr3: u64_at(page, GUEST_CR3),
             cr4: u64_at(page, GUEST_CR4),
+            efer: u64_at(page, GUEST_IA32_EFER),
             dr7: u64_at(page, GUEST_DR7),
             cs: u16_at(page, GUEST_CS_SELECTOR),
             ss: u16_at(page, GUEST_SS_SELECTOR),

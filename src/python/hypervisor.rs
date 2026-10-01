@@ -326,7 +326,8 @@ impl HypervisorVtl {
     /// guest virtual memory through the VTL's page tables (its saved CR3),
     /// or with `physical=True` guest physical memory, both through the VTL's
     /// EPT. Raises `NtoseyeError` without the VTL's eVMCS state or when a
-    /// page is not mapped. The memory is read-only.
+    /// page is not mapped, and for a virtual address unless the guest is in
+    /// 4-level long-mode paging. The memory is read-only.
     #[pyo3(signature = (address, size, physical = false))]
     fn read<'py>(
         &self,
@@ -353,7 +354,8 @@ impl HypervisorVtl {
 
     /// Translate a guest virtual address of this VTL's guest through its page
     /// tables and its EPT: `(guest_physical, host_physical)`, or `None` when
-    /// the page tables do not map it.
+    /// the page tables do not map it. Raises `NtoseyeError` unless the guest
+    /// is in 4-level long-mode paging.
     fn translate_virtual(&self, py: Python<'_>, address: u64) -> PyResult<Option<(u64, u64)>> {
         let Some(state) = self.info.state else {
             return Err(raise("this VTL has no eVMCS state"));

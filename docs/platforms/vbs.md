@@ -191,7 +191,7 @@ VTL  EPT pointer  Host physical                  Access  User exec  Page  Type
 1    10155c01e    18ba000                        rwx                2M    WB
 ```
 
-In the SDK, translate a virtual address with `memory.translate()` first.
+With `-v`, the address is virtual in the current address space (the `.process` or VTL1 scope), which belongs to the root partition, so `-v` works only for the root partition's VPs; {command}`!hvd` reads a guest partition's virtual memory. In the SDK, translate a virtual address with `memory.translate()` first.
 
 {command}`!hveptdiff` `[partition-id [vp-index]]` walks the whole EPT of VTL0 and of VTL1 of a VP and lists every range of guest physical memory that the two map differently. A summary of how they differ comes first, largest first. With memory integrity on:
 
@@ -213,16 +213,16 @@ Start      End        Size    VTL0  VTL1
 216 ranges differ, 9.2G in all
 ```
 
-Most of memory is `rw-` in VTL0 because memory integrity does not let NT execute its data. The `r-x` ranges hold the code that NT can execute but not change, the `none` ranges the memory of the secure kernel and trustlets, and the `r--` ranges pages that NT can read but not write. When a VTL uses mode-based execute control, `x` is execute in kernel mode and the `User exec` column shows execute in user mode. The walk follows Intel's EPT format and needs the `hv-evmcs` enlightenment.
+Most of memory is `rw-` in VTL0 because memory integrity does not let NT execute its data. The `r-x` ranges hold the code that NT can execute but not change, the `none` ranges the memory of the secure kernel and trustlets, and the `r--` ranges pages that NT can read but not write. When a VTL uses mode-based execute control, `x` is execute in kernel mode and a fourth character, `u` or `-`, shows execute in user mode. The walk follows Intel's EPT format and needs the `hv-evmcs` enlightenment.
 
 ### Memory of a guest partition
 
-{command}`!hvd` `[-p] [-b|-d|-q] <partition-id> <vp-index> <address> [range]` shows the memory of the guest that a child partition runs, such as a Hyper-V VM, WSL2, or Windows Sandbox inside the target. It reads guest virtual memory through the page tables of the VTL that the VP runs in (the CR3 in its eVMCS), or guest physical memory with `-p`, and it translates both through that VTL's EPT. `-d` and `-q` show dwords and qwords, and the range works as for {command}`db`. Pages that are not mapped show as `??`. Here, a VM that sits in its firmware halted in the idle loop of its UEFI:
+{command}`!hvd` `[-p] [-b|-d|-q] <partition-id> <vp-index> <address> [range]` shows the memory of the guest that a child partition runs, such as a Hyper-V VM, WSL2, or Windows Sandbox inside the target. It reads guest virtual memory through the page tables of the VTL that the VP runs in (the CR3 in its eVMCS), or guest physical memory with `-p`, and it translates both through that VTL's EPT. Virtual addresses need a guest in 4-level long-mode paging; for a guest in 32-bit, PAE, or 5-level paging, read guest physical memory with `-p`. `-d` and `-q` show dwords and qwords, and the range works as for {command}`db`. Pages that are not mapped show as `??`. Here, a VM that sits in its firmware halted in the idle loop of its UEFI:
 
 ```text
 mem:1> !hvvps 3
-VP  Address           VTL  Context           eVMCS      EPT pointer  Guest RIP         Last exit
-0   ffffe80200231050  0*   ffffe80200232000  2052dc000  20523105e    000000001ff26114  HLT
+VP  Address           CPU  VTL  Context           eVMCS      EPT pointer  Guest RIP         Last exit
+0   ffffe80200231050       0*   ffffe80200232000  2052dc000  20523105e    000000001ff26114  HLT
 ...
 mem:1> !hvd 3 0 0x1ff26110 L10
 000000001ff26110  fb c3 fb f4 c3 cc cc cc cc cc cc cc cc cc cc cc  ................

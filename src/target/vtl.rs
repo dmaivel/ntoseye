@@ -624,6 +624,18 @@ impl Target {
     }
 }
 
+/// Guest virtual addresses are walked as 4-level long-mode page tables only.
+fn require_four_level_paging(state: &EvmcsState) -> Result<()> {
+    if state.four_level_paging() {
+        Ok(())
+    } else {
+        Err(Error::Hypervisor(
+            "the guest is not in 4-level long-mode paging; read its guest physical memory instead"
+                .to_string(),
+        ))
+    }
+}
+
 /// The image mapped at `rip`, named by its CodeView PDB and found by walking
 /// down page by page to its header. Unmapped pages are skipped (images drop
 /// discardable sections); a header whose image ends below `rip` means `rip`
@@ -803,6 +815,7 @@ impl Target {
     ) -> Result<()> {
         let guest = ept::EptMemory::new(&*self.phys, state.ept_pointer, state.mode_based_execute());
         if virtual_address {
+            require_four_level_paging(state)?;
             AddressSpace::new(&guest, state.cr3 & self.arch().dtb_page_mask())
                 .read_bytes(VirtAddr(address), buf)
         } else {
@@ -818,6 +831,7 @@ impl Target {
         state: &EvmcsState,
         address: u64,
     ) -> Result<Option<(u64, u64)>> {
+        require_four_level_paging(state)?;
         let guest = ept::EptMemory::new(&*self.phys, state.ept_pointer, state.mode_based_execute());
         let Some(translation) = AddressSpace::new(&guest, state.cr3 & self.arch().dtb_page_mask())
             .virt_to_phys(VirtAddr(address))?
