@@ -345,6 +345,44 @@ def test_child_partition_memory_reads_agree_three_ways(halted: Debugger) -> None
     assert halted.physical.read(host_physical, 16) == code
 
 
+def test_child_partition_code_disassembles_from_its_memory(halted: Debugger) -> None:
+    """Where a child partition's VP left off, its code disassembles from the
+    bytes its memory holds, through its page tables or its guest physical
+    address alike."""
+    try:
+        partitions = halted.hypervisor_partitions()
+    except ntoseye.NtoseyeError as error:
+        pytest.skip(f"no Windows hypervisor partitions on this target: {error}")
+    vtl = next(
+        (
+            vtl
+            for partition in partitions[1:]
+            for vp in partition.virtual_processors
+            for vtl in vp.vtls.values()
+            if vtl.level == vp.vtl and vtl.rip is not None
+        ),
+        None,
+    )
+    if vtl is None or vtl.rip is None:
+        pytest.skip("needs a running Hyper-V guest and the hv-evmcs enlightenment")
+    rip = vtl.rip
+    translated = vtl.translate_virtual(rip)
+    assert translated is not None
+    guest_physical, _ = translated
+    rows = vtl.disassemble(rip, 4)
+    assert rows and rows[0].ip == rip
+    for row, after in zip(rows, rows[1:]):
+        assert after.ip == row.ip + row.length
+    code = vtl.read(rip, sum(row.length for row in rows))
+    assert "".join(row.hex.replace(" ", "") for row in rows) == code.hex()
+    # The next guest physical page need not be the next virtual one.
+    in_page = [row for row in rows if (row.ip + row.length - 1) >> 12 == rip >> 12]
+    if in_page:
+        physical = vtl.disassemble(guest_physical, len(in_page), physical=True)
+        # Relative operands differ with the address; the instructions do not.
+        assert [row.hex for row in physical] == [row.hex for row in in_page]
+
+
 def gdb_secure_kernel(halted: Debugger) -> ntoseye.SecureKernel:
     if os.environ.get("NTOSEYE_TEST_BACKEND") != "gdb":
         pytest.skip("VTL1 hardware execution requires the host GDB backend")

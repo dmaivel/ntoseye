@@ -6,10 +6,13 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
 use super::handle::Owner;
+use super::memory::check_disassembly_count;
 use super::record::PlainDict;
 use super::{MAX_READ_LEN, err, raise, view_dict};
 use crate::guest::ept::{EptTranslation, differences};
 use crate::guest::{HvPartition, HvVirtualProcessor, HvVtl, evmcs_fields, privilege_names};
+use crate::target::CodeExtent;
+use crate::view::execution::{DisassembledInstruction, disasm_rows};
 use crate::view::hypervisor::{
     EptDifference, EptMapping, HypervisorProcessor, ept_difference, ept_mapping,
     hypervisor_processor,
@@ -366,6 +369,40 @@ impl HypervisorVtl {
                 .translate_guest_partition(&state, address)
                 .map_err(err)
         })
+    }
+
+    /// Disassemble `count` instructions of this VTL's guest at `address`, as
+    /// `!hvu` does: read as `read` reads it (guest virtual, or with
+    /// `physical=True` guest physical), and decoded in the mode the VTL left
+    /// off in, 64-bit in IA-32e mode with a 64-bit code segment, else
+    /// 32-bit. Branch and RIP-relative comments are addresses: there are no
+    /// symbols for a guest. The listing stops at the first unreadable page,
+    /// so it can hold fewer than `count` instructions. Raises `NtoseyeError`
+    /// when the first instruction is unreadable, without the VTL's eVMCS
+    /// state, for real-mode or 16-bit code, and for a virtual address
+    /// unless the guest is in 4-level long-mode paging.
+    #[pyo3(signature = (address, count, physical = false))]
+    fn disassemble<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+        count: usize,
+        physical: bool,
+    ) -> PyResult<Typed<'py, Vec<DisassembledInstruction>>> {
+        let Some(state) = self.info.state else {
+            return Err(raise("this VTL has no eVMCS state"));
+        };
+        check_disassembly_count(count)?;
+        let code = self.owner.with(py, |session| {
+            session
+                .target
+                .disassemble_guest_partition(&state, !physical, address, CodeExtent::Count(count))
+                .map_err(err)
+        })?;
+        if let (true, Some(at)) = (code.rows.is_empty(), code.unreadable) {
+            return Err(raise(format!("guest memory at {at:#x} is unreadable")));
+        }
+        Typed::new(py, disasm_rows(&code.rows))
     }
 
     /// Every field of this VTL's eVMCS, read now, named as the TLFS names it

@@ -464,7 +464,7 @@ impl Memory {
 
 const MAX_DISASSEMBLY_INSTRUCTIONS: usize = 4096;
 
-fn check_disassembly_count(count: usize) -> PyResult<()> {
+pub fn check_disassembly_count(count: usize) -> PyResult<()> {
     if count > MAX_DISASSEMBLY_INSTRUCTIONS {
         return Err(raise(format!(
             "instruction count must be at most {MAX_DISASSEMBLY_INSTRUCTIONS}"
