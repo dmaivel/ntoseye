@@ -27,6 +27,9 @@ DIVERTED = "did not reach the next instruction"
 # How a walk on the gdb backend reports that its thread went on into user
 # space, where a GDB stub cannot be trusted to lift a software breakpoint.
 USER_SPACE = "cannot plant a software breakpoint in user space"
+# A walk following its switched-out thread ends when that thread exits
+# before it runs again; another thread caught at the same function goes on.
+EXITED = "exited before it went on"
 ATTEMPTS = 3
 
 
@@ -108,7 +111,9 @@ def test_trace_calls_returns_a_call_tree(halted: Debugger) -> None:
         trace = halted.trace_calls(limit=2_000)
         if trace.end != "diverted" and not (
             trace.end == "failed"
-            and any(reason in (trace.error or "") for reason in (HYPERVISOR_WAIT, USER_SPACE))
+            and any(
+                reason in (trace.error or "") for reason in (HYPERVISOR_WAIT, USER_SPACE, EXITED)
+            )
         ):
             break
     assert trace.end in ("returned", "limit")

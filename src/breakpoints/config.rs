@@ -8,7 +8,7 @@ use super::{Breakpoint, BreakpointConfig, BreakpointManager, BreakpointScope, Th
 use crate::error::{Error, Result};
 use crate::expr::Expr;
 use crate::guest::ProcessInfo;
-use crate::target::{Target, ThreadInfo};
+use crate::target::{KTHREAD_STATE_TERMINATED, Target, ThreadInfo};
 use crate::types::{Arch, VirtAddr};
 
 impl Breakpoint {
@@ -85,9 +85,21 @@ impl ThreadScope {
     ///
     /// An unresolved stopped thread matches: discarding a hit that cannot be
     /// attributed would lose it silently, and the stop banner names the
-    /// thread either way.
+    /// thread either way. The TID is compared too where both are known: an
+    /// exited thread's `_ETHREAD` is freed, and a new thread can be given
+    /// the same address.
     pub fn matches(&self, stopped: Option<&ThreadInfo>) -> bool {
-        stopped.is_none_or(|thread| thread.ethread == self.ethread)
+        stopped.is_none_or(|thread| {
+            thread.ethread == self.ethread
+                && (self.tid.is_none() || thread.tid.is_none() || thread.tid == self.tid)
+        })
+    }
+
+    /// Whether this thread is gone, its `_ETHREAD` read `now`: terminated,
+    /// or freed and given to a new thread (another TID).
+    pub fn exited(&self, now: &ThreadInfo) -> bool {
+        now.state == Some(KTHREAD_STATE_TERMINATED)
+            || matches!((self.tid, now.tid), (Some(tid), Some(current)) if tid != current)
     }
 
     pub fn label(&self) -> String {
@@ -180,9 +192,30 @@ impl BreakpointManager {
 #[cfg(test)]
 mod tests {
     use crate::breakpoints::test_backend::SlotRecorder;
-    use crate::breakpoints::{BreakpointConfig, BreakpointManager};
+    use crate::breakpoints::{BreakpointConfig, BreakpointManager, ThreadScope};
     use crate::session::session_over_memory;
+    use crate::target::{ThreadInfo, sample_thread};
     use crate::types::VirtAddr;
+
+    /// An exited thread's `_ETHREAD` can be given to a new thread: the new
+    /// one is not the scope's, and the scope's thread is gone, as it is once
+    /// terminated.
+    #[test]
+    fn a_reused_ethread_is_another_thread_and_its_first_owner_has_exited() {
+        let original = sample_thread();
+        let scope = ThreadScope::new(&original);
+        let reused = ThreadInfo {
+            tid: Some(0x99),
+            ..sample_thread()
+        };
+        let terminated = ThreadInfo {
+            state: Some(4),
+            ..sample_thread()
+        };
+        assert!(scope.matches(Some(&original)) && !scope.exited(&original));
+        assert!(!scope.matches(Some(&reused)) && scope.exited(&reused));
+        assert!(scope.exited(&terminated));
+    }
 
     #[test]
     fn conditions_supplied_as_text_are_enforced() {

@@ -246,7 +246,7 @@ print(hv.disassemble(cpu.rip, 4))
 
 `step_over()` across a call and `step_out()` stop only when the stepping thread returns, so if that thread waits, the step waits as long.
 
-A step-until walk (`until=` or `run_to(step=)`) also follows the thread that it started in. If an interrupt switches that thread out during a step, the walk waits until the thread executes that instruction at the same call depth, on any vCPU.
+A step-until walk (`until=` or `run_to(step=)`) also follows the thread that it started in, and so does `trace_calls()`. If an interrupt switches that thread out during a step, the walk waits until the thread executes that instruction at the same call depth, on any vCPU. If the thread exits first, the walk fails with an error that says so, and `trace_calls()` ends as `failed`.
 
 These functions, and also `step(until=...)` and `step_over(until=...)`, have a `timeout=` argument in seconds. When the timeout expires, the function interrupts the target at its current location and returns that stop.
 

@@ -161,6 +161,30 @@ impl BreakpointManager {
         Ok(id)
     }
 
+    /// A debugger-internal write watchpoint on the `len` bytes at kernel
+    /// `address`, in a free debug-register slot.
+    pub fn add_temporary_watch(
+        &mut self,
+        client: &mut dyn DebugBackend,
+        debugger: &Target,
+        address: VirtAddr,
+        len: u8,
+    ) -> Result<u32> {
+        let id = self.add_hardware_configured(
+            client,
+            debugger,
+            address,
+            HwBreakpointAccess::Write,
+            len,
+            None,
+            BreakpointConfig::default(),
+        )?;
+        if let Some(bp) = self.breakpoints.get_mut(&id) {
+            bp.temporary = true;
+        }
+        Ok(id)
+    }
+
     pub(super) fn add_code_configured(
         &mut self,
         client: &mut dyn DebugBackend,

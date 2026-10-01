@@ -29,7 +29,7 @@ use crate::session::{
     ModuleTrap, PendingWalk, STATUS_BREAKPOINT, STATUS_SINGLE_STEP, Session, StepKind, StepMode,
     StepStack,
 };
-use crate::target::{DiagnosticValue, Target};
+use crate::target::{DiagnosticValue, KTHREAD_STATE_RUNNING, KTHREAD_STATE_STANDBY, Target};
 use crate::types::{Arch, Dtb, VirtAddr};
 use crate::unwind::{
     build_stacktrace, halted_in_windows_hypervisor, preferred_code_dtb,
@@ -835,12 +835,21 @@ impl Session {
                 }
             }
         }
-        let outcome = self.continue_until_break(timeout, cancel, ContinueDisposition::Handled);
+        let followed = sites
+            .iter()
+            .find_map(|(_, frame)| frame.as_ref().map(|frame| frame.thread.clone()));
+        let watch = followed
+            .as_ref()
+            .and_then(|thread| self.watch_followed(thread, &temporary));
+        let outcome = self.wait_for_sites(followed.as_ref(), watch, &temporary, timeout, cancel);
 
         // A cancel or timeout leaves the VM running; halt it where it is (the
         // temp breakpoints' removal writes guest memory anyway).
         if self.backend.is_running() {
             let _ = self.interrupt();
+        }
+        if let Some(watch) = watch {
+            self.remove_temporary(&[watch]);
         }
         self.remove_temporary(&temporary);
 
@@ -852,6 +861,122 @@ impl Session {
         };
         self.note_stop(&outcome);
         Ok(outcome)
+    }
+
+    /// Wait for one of a run's sites, as [`Self::continue_until_break`]
+    /// does, except that a run following a thread (`followed`) checks
+    /// between waits of [`FOLLOW_CHECK`] that the thread can still reach
+    /// them. Switched out, a thread runs a pending termination when it is
+    /// next scheduled, and an exited thread never reaches its sites. With a
+    /// `watch` on the thread's state, its `sites` are armed only while it
+    /// is about to run (see [`Self::watch_followed`]).
+    fn wait_for_sites(
+        &mut self,
+        followed: Option<&ThreadScope>,
+        watch: Option<u32>,
+        sites: &[u32],
+        timeout: Option<Duration>,
+        cancel: &AtomicBool,
+    ) -> Result<ContinueOutcome> {
+        let Some(thread) = followed else {
+            return self.continue_until_break(timeout, cancel, ContinueDisposition::Handled);
+        };
+        let deadline = timeout.map(|timeout| Instant::now() + timeout);
+        loop {
+            let slice = deadline.map_or(FOLLOW_CHECK, |deadline| {
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(FOLLOW_CHECK)
+            });
+            let outcome =
+                self.continue_until_break(Some(slice), cancel, ContinueDisposition::Handled)?;
+            if let ContinueOutcome::Breakpoint { id, .. } = outcome
+                && Some(id) == watch
+            {
+                let now = self.target.thread_info_from_ethread(thread.ethread);
+                if now.as_ref().is_ok_and(|now| thread.exited(now)) {
+                    return Err(followed_thread_exited(thread));
+                }
+                let state = now.ok().and_then(|now| now.state);
+                self.arm_followed_sites(sites, about_to_run(state))?;
+                continue;
+            }
+            if !matches!(outcome, ContinueOutcome::Running)
+                || cancel.load(Ordering::SeqCst)
+                || deadline.is_some_and(|deadline| Instant::now() >= deadline)
+            {
+                return Ok(outcome);
+            }
+            // Read while the target runs; a read that fails proves nothing.
+            if self
+                .target
+                .thread_info_from_ethread(thread.ethread)
+                .is_ok_and(|now| thread.exited(&now))
+            {
+                return Err(followed_thread_exited(thread));
+            }
+        }
+    }
+
+    /// Watch switched-out `thread`'s `KTHREAD.State`, and arm `sites`, the
+    /// run's to where it goes on, only while it is about to run: the
+    /// dispatcher makes a thread Standby or Running before it runs it. Each
+    /// hit another thread makes on an armed site stops the target, and a
+    /// thread is often switched out in code every thread runs, a lock
+    /// release say, hit hundreds of times a second: the guest then runs too
+    /// little for a low-priority thread to be scheduled at all. `None`, the
+    /// sites armed throughout, without the field's offset or a free debug
+    /// register.
+    fn watch_followed(&mut self, thread: &ThreadScope, sites: &[u32]) -> Option<u32> {
+        if sites.is_empty() {
+            return None;
+        }
+        let offset = (self.target.guest().ok()?.ntoskrnl.types())
+            .layout("_KTHREAD")
+            .ok()?
+            .field_offset("State")
+            .ok()?;
+        let kthread = self
+            .target
+            .thread_info_from_ethread(thread.ethread)
+            .ok()?
+            .kthread;
+        let watch = self
+            .breakpoints
+            .add_temporary_watch(
+                self.backend.as_mut(),
+                &self.target,
+                VirtAddr(kthread.0 + offset),
+                1,
+            )
+            .ok()?;
+        // Read with the watch armed and the target halted, so no write is
+        // missed between the two.
+        let state = self
+            .target
+            .thread_info_from_ethread(thread.ethread)
+            .ok()
+            .and_then(|now| now.state);
+        if self.arm_followed_sites(sites, about_to_run(state)).is_err() {
+            self.remove_temporary(&[watch]);
+            let _ = self.arm_followed_sites(sites, true);
+            return None;
+        }
+        Some(watch)
+    }
+
+    /// Enable `sites` (`armed`) or disable them.
+    fn arm_followed_sites(&mut self, sites: &[u32], armed: bool) -> Result<()> {
+        for &id in sites {
+            if armed {
+                self.breakpoints
+                    .enable(self.backend.as_mut(), &self.target, id)?;
+            } else {
+                self.breakpoints
+                    .disable(self.backend.as_mut(), &self.target, id)?;
+            }
+        }
+        Ok(())
     }
 
     /// Remove run-to breakpoints. A target reload already cleared the
@@ -1108,6 +1233,24 @@ const KEEPER_RETRIES: u32 = 3;
 
 /// How often a step's wait for its stop checks for Ctrl+C.
 const STEP_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How often a run to a followed thread's sites checks that the thread has
+/// not exited (see [`Session::wait_for_sites`]).
+const FOLLOW_CHECK: Duration = Duration::from_secs(1);
+
+/// Whether a thread in `state` is about to run, or runs: Standby or
+/// Running. A state that could not be read counts, so the sites stay armed.
+fn about_to_run(state: Option<u8>) -> bool {
+    state.is_none_or(|state| matches!(state, KTHREAD_STATE_RUNNING | KTHREAD_STATE_STANDBY))
+}
+
+/// The error a run following `thread` ends with when the thread exited.
+fn followed_thread_exited(thread: &ThreadScope) -> Error {
+    Error::DebugInfo(format!(
+        "the followed thread ({}) exited before it went on",
+        thread.label()
+    ))
+}
 
 /// How long every vCPU runs when the one executing an instruction waits on
 /// the others, so they can answer it.
