@@ -230,6 +230,15 @@ mem:1> !hvd 3 0 0x1ff26110 L10
 
 `sti; hlt` is at `0x1ff26112`, and the guest RIP is after the `hlt`. The memory is read-only, and ntoseye has no symbols or process list for the guest, so to inspect a guest in depth, attach ntoseye to it directly. A VP that has not started, such as a second VP that the firmware has not woken, has no state to read through.
 
+A vCPU that is running a guest partition's VP when the target halts shows that guest's registers. {command}`~` and the stop line name the VP that it runs, so a WSL2 busy loop reads as follows:
+
+```text
+vCPU    RIP               Context             Symbol
+p01.03  00007c27330c4321  partition 0x4 VP 2  0x7c27330c4321
+```
+
+Pass the same partition ID and VP index to {command}`!hvd` to read memory at that RIP.
+
 ### VMCS and intercepts
 
 {command}`!hvvmcs` `[-msr|-io] [partition-id [vp-index [vtl]]]` shows the eVMCS of a VTL, the root partition's VP 0 and the VTL that it runs in by default: each field with its name, offset, and value. With `-msr`, it shows the MSRs whose reads and writes the VTL's MSR bitmap intercepts, and with `-io`, the I/O ports that its I/O bitmaps intercept. When the VM-execution controls do not use the bitmaps, it says that every access exits, or none. The eVMCS layout is the Hyper-V TLFS's, so this works on every hypervisor build.

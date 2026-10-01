@@ -902,6 +902,12 @@ impl Target {
         self.walk_partitions(guest, memory, &image, &processors, &known)
     }
 
+    /// [`hypervisor::guest_vp_label`] for processor `number`, walking the
+    /// partitions; `None` when they cannot be walked.
+    pub fn guest_vp_label(&self, number: u16) -> Option<String> {
+        hypervisor::guest_vp_label(&self.hypervisor_partitions().ok()?, number)
+    }
+
     /// The Windows hypervisor's hypercall table, indexed by call code, and
     /// the base of its image.
     pub fn hypercalls(&self) -> Result<(u64, Vec<HypercallEntry>)> {

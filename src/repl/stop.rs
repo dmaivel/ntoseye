@@ -14,8 +14,8 @@ use crate::target::{HYPERVISOR_CONTEXT, Target, ThreadInfo, kthread_state_name};
 use crate::types::VirtAddr;
 use crate::ui;
 use crate::unwind::{
-    build_stacktrace_with_register_values, format_symbol, resolve_thread_trace_context_at,
-    saved_vtls,
+    UNKNOWN_CONTEXT, build_stacktrace_with_register_values, format_symbol,
+    resolve_thread_trace_context_at, saved_vtls,
 };
 
 use crate::repl::*;
@@ -414,6 +414,12 @@ pub fn print_break_context_at(
     let trace = resolve_thread_trace_context_at(debugger, cr3, rip);
     let context_rip = display_rip.unwrap_or(rip);
     let symbol = format_symbol(debugger, &trace, context_rip);
+    // A vCPU running a guest partition's VP shows that guest's registers.
+    let context = (trace.description == UNKNOWN_CONTEXT)
+        .then(|| processor_index_from_backend_thread_id(&thread_id))
+        .flatten()
+        .and_then(|number| debugger.guest_vp_label(number))
+        .unwrap_or_else(|| trace.description.clone());
 
     outln!(
         "{}{}",
@@ -421,7 +427,7 @@ pub fn print_break_context_at(
         ui::plate(&format!(
             " {} {} at {} ",
             ui::thread_id(&thread_id),
-            trace.description,
+            context,
             ui::symbol(&symbol)
         ))
     );

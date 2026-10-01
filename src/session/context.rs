@@ -6,12 +6,14 @@ use std::collections::HashMap;
 use crate::dbg_backend::{DebugCapability, processor_index_from_backend_thread_id};
 use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
+use crate::guest::hypervisor::guest_vp_label;
 use crate::memory::DTB_IDENTITY;
 use crate::session::{Selection, Session, ThreadContext, VcpuInfo};
 use crate::target::{HYPERVISOR_CONTEXT, SelectedFrame, Target, ThreadInfo};
 use crate::types::VirtAddr;
 use crate::unwind::{
-    halted_in_windows_hypervisor, resolve_thread_trace_context_at, saved_vtls, try_format_symbol,
+    UNKNOWN_CONTEXT, halted_in_windows_hypervisor, resolve_thread_trace_context_at, saved_vtls,
+    try_format_symbol,
 };
 
 pub(super) fn update_target_context_from_registers(
@@ -486,6 +488,19 @@ impl Session {
         }
 
         let _ = self.backend.set_current_thread(&original);
+        // One partition walk names every vCPU running a guest partition's VP.
+        if out.iter().any(|vcpu| vcpu.context == UNKNOWN_CONTEXT)
+            && let Ok(partitions) = self.target.hypervisor_partitions()
+        {
+            for vcpu in &mut out {
+                if vcpu.context == UNKNOWN_CONTEXT
+                    && let Some(label) = processor_index_from_backend_thread_id(&vcpu.id)
+                        .and_then(|number| guest_vp_label(&partitions, number))
+                {
+                    vcpu.context = label;
+                }
+            }
+        }
         Ok(out)
     }
 

@@ -401,6 +401,24 @@ pub fn partitions(
     Ok(result)
 }
 
+/// What a vCPU on processor `number` runs when that is a guest partition's
+/// VP (a Hyper-V VM or WSL2 inside the target), such as `partition 0x3 VP 1`.
+/// The vCPU then shows that guest's registers, so its root is none of NT's.
+/// `None` when the processor's current VP is the root partition's.
+pub fn guest_vp_label(partitions: &[HvPartition], number: u16) -> Option<String> {
+    partitions
+        .iter()
+        .filter(|partition| partition.parent.is_some())
+        .find_map(|partition| {
+            let vp = partition.virtual_processors.iter().find(|vp| {
+                vp.processors
+                    .iter()
+                    .any(|processor| processor.number == Some(u32::from(number)))
+            })?;
+            Some(format!("partition {:#x} VP {}", partition.id, vp.index))
+        })
+}
+
 impl super::Guest {
     /// The partition layout of the hypervisor image at `base`, derived by
     /// `derive` the first time and remembered for the boot, as a failure is.
@@ -616,5 +634,46 @@ mod tests {
         let mut ram = tree();
         ram.insert(0xffff_e800_0038_9050 + 0x3c0, 0xffff_e800_0099_0000);
         assert!(partitions(&layout(), &Ram(ram), &[GS], &HashSet::new()).is_err());
+    }
+
+    #[test]
+    fn a_processor_running_a_guest_vp_is_labeled_with_it_and_the_roots_are_not() {
+        let vp = |index, numbers: &[u32]| HvVirtualProcessor {
+            index,
+            address: 0,
+            vtl: 0,
+            vtls: Vec::new(),
+            processors: numbers
+                .iter()
+                .map(|&number| HvProcessor {
+                    block: 0,
+                    number: Some(number),
+                })
+                .collect(),
+        };
+        let partition = |id, parent, virtual_processors| HvPartition {
+            address: 0,
+            id,
+            parent,
+            privileges: 0,
+            virtual_processors,
+        };
+        let partitions = [
+            partition(1, None, vec![vp(0, &[0]), vp(1, &[1]), vp(2, &[])]),
+            partition(3, Some(1), vec![vp(0, &[]), vp(1, &[2, 3])]),
+        ];
+        let labels: Vec<_> = (0..5)
+            .map(|number| guest_vp_label(&partitions, number))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                None,
+                None,
+                Some("partition 0x3 VP 1".to_string()),
+                Some("partition 0x3 VP 1".to_string()),
+                None,
+            ]
+        );
     }
 }
