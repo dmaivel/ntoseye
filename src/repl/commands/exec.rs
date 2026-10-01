@@ -459,20 +459,24 @@ impl ReplState<'_> {
 
         loop {
             let interrupt_requested = self.ctx.target.interrupt.swap(false, Ordering::SeqCst);
+            // A Ctrl+C breaks in, and again past any hit a filter declines
+            // meanwhile: on code the whole system runs those arrive first,
+            // and resuming past one lost the Ctrl+C.
             let stop_result = if interrupt_requested {
                 outln!();
-                match self.ctx.backend.try_wait_for_stop(REPL_STOP_POLL) {
-                    Ok(Some(event)) => Ok(Some(event)),
-                    Ok(None) => self.ctx.backend.interrupt().map(Some),
-                    Err(e) => Err(e),
-                }
+                self.ctx
+                    .interrupt_classified()
+                    .map(|(resolution, _)| Some(Ok(resolution)))
             } else {
-                self.ctx.backend.try_wait_for_stop(REPL_STOP_POLL)
+                self.ctx
+                    .backend
+                    .try_wait_for_stop(REPL_STOP_POLL)
+                    .map(|event| event.map(|event| self.ctx.classify_stop_event(event)))
             };
 
             match stop_result {
-                Ok(Some(event)) => {
-                    let resolution = match self.ctx.classify_stop_event(event) {
+                Ok(Some(classified)) => {
+                    let resolution = match classified {
                         // A stream of absorbed hits (a temporary site other
                         // threads reach) must not outlast the budget either.
                         Ok(StopResolution::Resumed | StopResolution::ModulesChanged) => {

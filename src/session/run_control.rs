@@ -13,7 +13,11 @@ use crate::session::{ContinueOutcome, STATUS_BREAKPOINT, Session, StopResolution
 const INTERRUPT_MAX_RESUMES: usize = 8;
 
 impl Session {
-    fn interrupt_classified(&mut self) -> Result<(StopResolution, bool)> {
+    /// Break in and classify the stop, breaking in again past one that is
+    /// resumed (a hit a filter declines), up to [`INTERRUPT_MAX_RESUMES`]
+    /// times; then the last stop surfaces as a plain one. With it, whether
+    /// the stop is the break-in itself rather than one already pending.
+    pub fn interrupt_classified(&mut self) -> Result<(StopResolution, bool)> {
         let mut resumed = 0;
         loop {
             let stop_was_pending = self.backend.has_pending_stop();
