@@ -15,7 +15,7 @@ pub use crate::bugchecks::{
 };
 pub use crate::trapframe::KtrapFrame;
 
-use super::disasm::{format_rflags, print_event_children, wrap_prose};
+use super::disasm::{format_rflags, print_event_children, wrapped_dim_tail};
 
 fn print_unresolved_bugcheck_data(failure: &CurrentBugcheckFailure) {
     fn slots_line(label: &str, data: &[u64; BUGCHECK_DATA_SLOTS]) -> String {
@@ -44,18 +44,6 @@ fn print_unresolved_bugcheck_data(failure: &CurrentBugcheckFailure) {
         children.push(slots_line("dereferenced slots", data));
     }
     print_event_children(" ", &children);
-}
-
-/// Tree child with a dim wrapped prose tail. `hang` is the child-relative
-/// indent of continuation lines; `col` the absolute column where the prose
-/// starts on screen, from which the wrap width is derived.
-fn wrapped_dim_tail(prefix: String, hang: usize, prose: &str, col: usize) -> String {
-    let lines = wrap_prose(prose, col);
-    let mut out = format!("{prefix}{}", ui::muted(&lines[0]));
-    for line in &lines[1..] {
-        out.push_str(&format!("\n{}{}", " ".repeat(hang), ui::muted(line)));
-    }
-    out
 }
 
 pub fn format_arg_value(value: u64) -> String {

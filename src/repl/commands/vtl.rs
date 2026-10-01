@@ -514,16 +514,21 @@ impl ReplState<'_> {
         }
         head.push_str(&format!("  {}", ui::muted(&ui::addr(partition.address))));
         let (names, unnamed) = privilege_names(partition.privileges);
-        let mut privileges = format!(
-            "privileges {:016x}: {}",
-            partition.privileges,
-            names.join(" ")
-        );
+        let mut privileges = names.join(" ");
         if unnamed != 0 {
             privileges.push_str(&format!(" (+{unnamed:#x})"));
         }
-        let mut children = vec![ui::muted(
-            &wrap_prose(&privileges, 3 * (depth + 1)).join("\n"),
+        // The names hang under the first: "privileges " (11), the mask
+        // (16), and a separator (2), after the tree's indent and gutter.
+        let mut children = vec![wrapped_dim_tail(
+            format!(
+                "{} {:016x}  ",
+                ui::muted("privileges"),
+                partition.privileges
+            ),
+            29,
+            &privileges,
+            3 * (depth + 1) + 29,
         )];
         let root = partition.parent.is_none();
         children.extend(

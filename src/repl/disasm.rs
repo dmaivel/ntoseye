@@ -60,6 +60,18 @@ pub fn event_children_lines(indent: &str, children: &[String]) -> Vec<String> {
     out
 }
 
+/// Tree child with a dim wrapped prose tail. `hang` is the child-relative
+/// indent of continuation lines; `col` the absolute column where the prose
+/// starts on screen, from which the wrap width is derived.
+pub fn wrapped_dim_tail(prefix: String, hang: usize, prose: &str, col: usize) -> String {
+    let lines = wrap_prose(prose, col);
+    let mut out = format!("{prefix}{}", ui::muted(&lines[0]));
+    for line in &lines[1..] {
+        out.push_str(&format!("\n{}{}", " ".repeat(hang), ui::muted(line)));
+    }
+    out
+}
+
 /// Wrap plain prose for display starting at terminal column `col`, capped at
 /// 100 columns of prose. Returns a single line when stdout is not a terminal
 /// (piped output wants one line per field) or the terminal is too narrow.
