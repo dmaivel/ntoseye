@@ -968,6 +968,14 @@ impl ReplState<'_> {
             );
             return Ok(());
         };
+        // Each page's read would fail the same way; say why once.
+        if !physical && !state.four_level_paging() {
+            error!(
+                "VP {} of partition {id:#x} is not in 4-level long-mode paging; read its guest physical memory with -p",
+                vp.index
+            );
+            return Ok(());
+        }
         // Page by page, so an unmapped page does not hide the rest.
         let mut data = vec![0u8; range.len()];
         let mut valid = vec![false; range.len()];
