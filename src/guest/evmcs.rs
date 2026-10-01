@@ -25,7 +25,7 @@ use crate::{
     error::{Error, Result},
     memory::PAGE_SIZE,
     phys::PhysMem,
-    types::PhysAddr,
+    types::{CodeMachine, PhysAddr},
 };
 
 const SCAN_BYTES: usize = 2 * 1024 * 1024;
@@ -50,6 +50,7 @@ const GUEST_SS_SELECTOR: usize = 0x84;
 const GUEST_DS_SELECTOR: usize = 0x86;
 const GUEST_FS_SELECTOR: usize = 0x88;
 const GUEST_GS_SELECTOR: usize = 0x8a;
+const GUEST_CS_AR_BYTES: usize = 0xbc;
 const GUEST_FS_BASE: usize = 0xf8;
 const GUEST_GS_BASE: usize = 0x100;
 const GUEST_CR0: usize = 0x220;
@@ -74,6 +75,10 @@ const ASSIST_CURRENT_NESTED_VMCS: usize = 0x30;
 
 const CR0_PE: u64 = 1;
 const CR0_PG: u64 = 1 << 31;
+/// The "IA-32e mode guest" VM-entry control: the guest's IA32_EFER.LMA.
+const IA32E_MODE_GUEST: u32 = 1 << 9;
+/// RFLAGS.VM: virtual-8086 mode.
+const RFLAGS_VM: u64 = 1 << 17;
 
 /// Where the eVMCS pages are, as a scan found them.
 #[derive(Debug, Default)]
@@ -229,6 +234,10 @@ pub struct EvmcsState {
     pub es: u16,
     pub fs: u16,
     pub gs: u16,
+    /// CS's access rights in the VMX format (Intel SDM 25.4.1): the segment
+    /// type, P (bit 7), L (bit 13, 64-bit code), D (bit 14, 32-bit
+    /// default operand size), and "unusable" (bit 16).
+    pub cs_access_rights: u32,
     pub fs_base: u64,
     pub gs_base: u64,
 }
@@ -268,9 +277,39 @@ impl EvmcsState {
     /// CR4.LA57 clear. A guest in 32-bit paging, PAE paging, or 5-level
     /// paging walks tables of another shape.
     pub fn four_level_paging(&self) -> bool {
-        const IA32E_MODE_GUEST: u32 = 1 << 9;
         const CR4_LA57: u64 = 1 << 12;
         self.entry_controls & IA32E_MODE_GUEST != 0 && self.cr4 & CR4_LA57 == 0
+    }
+
+    /// The instruction set the guest's code runs in where it left off, so
+    /// its bytes decode as the CPU executes them: 64-bit in IA-32e mode
+    /// with a 64-bit code segment, else 32-bit protected (or compatibility)
+    /// mode. The code segment decides only when its access rights are
+    /// usable and present; otherwise IA-32e mode alone means 64-bit. Real
+    /// mode and 16-bit code are refused rather than decoded as 32-bit.
+    pub fn code_machine(&self) -> Result<CodeMachine> {
+        const PRESENT: u32 = 1 << 7;
+        const LONG: u32 = 1 << 13;
+        const DEFAULT_32: u32 = 1 << 14;
+        const UNUSABLE: u32 = 1 << 16;
+        if self.cr0 & CR0_PE == 0 {
+            return Err(Error::Hypervisor(
+                "the guest is in real mode, whose 16-bit code ntoseye does not disassemble"
+                    .to_string(),
+            ));
+        }
+        let cs = self.cs_access_rights;
+        let cs_known = cs & UNUSABLE == 0 && cs & PRESENT != 0;
+        let long_mode = self.entry_controls & IA32E_MODE_GUEST != 0;
+        if long_mode && (!cs_known || cs & LONG != 0) {
+            return Ok(CodeMachine::Amd64);
+        }
+        if self.rflags & RFLAGS_VM != 0 || (cs_known && cs & DEFAULT_32 == 0) {
+            return Err(Error::Hypervisor(
+                "the guest runs 16-bit code, which ntoseye does not disassemble".to_string(),
+            ));
+        }
+        Ok(CodeMachine::X86)
     }
 
     /// Whether the guest runs with mode-based execute control, under which
@@ -331,6 +370,7 @@ impl EvmcsState {
             es: u16_at(page, GUEST_ES_SELECTOR),
             fs: u16_at(page, GUEST_FS_SELECTOR),
             gs: u16_at(page, GUEST_GS_SELECTOR),
+            cs_access_rights: u32_at(page, GUEST_CS_AR_BYTES),
             fs_base: u64_at(page, GUEST_FS_BASE),
             gs_base: u64_at(page, GUEST_GS_BASE),
         })
@@ -582,6 +622,76 @@ mod tests {
         assert!(with(0x53ff, 0x3726f0));
         assert!(!with(0x53ff, 0x3726f0 | 1 << 12), "5-level paging");
         assert!(!with(0x53ff & !(1 << 9), 0x3726f0), "not in IA-32e mode");
+    }
+
+    /// Guest code decodes in the mode the guest left off in: 64-bit only
+    /// in IA-32e mode with a 64-bit CS (or a CS whose access rights say
+    /// nothing), 32-bit in compatibility and protected mode, and real mode
+    /// and 16-bit code are refused rather than misdecoded.
+    #[test]
+    fn guest_code_decodes_in_the_mode_its_entry_controls_and_cs_give() {
+        const LONG_CS: u32 = 0xa09b;
+        const CODE32_CS: u32 = 0xc09b;
+        const CODE16_CS: u32 = 0x009b;
+        const UNUSABLE: u32 = 1 << 16;
+        let state = |entry_controls: u32, cs: u32, cr0: u64, rflags: u64| {
+            let mut page = vec![0u8; PAGE_SIZE];
+            page[..4].copy_from_slice(&EVMCS_VERSION.to_le_bytes());
+            page[HOST_CR3..HOST_CR3 + 8].copy_from_slice(&0x10_0000u64.to_le_bytes());
+            page[HOST_RIP..HOST_RIP + 8].copy_from_slice(&0xffff_f847_989a_843du64.to_le_bytes());
+            page[GUEST_CR0..GUEST_CR0 + 8].copy_from_slice(&(CR0_PE | CR0_PG).to_le_bytes());
+            page[GUEST_CR3..GUEST_CR3 + 8].copy_from_slice(&0x103_b802u64.to_le_bytes());
+            page[VM_ENTRY_CONTROLS..VM_ENTRY_CONTROLS + 4]
+                .copy_from_slice(&entry_controls.to_le_bytes());
+            page[GUEST_CS_AR_BYTES..GUEST_CS_AR_BYTES + 4].copy_from_slice(&cs.to_le_bytes());
+            page[GUEST_RFLAGS..GUEST_RFLAGS + 8].copy_from_slice(&rflags.to_le_bytes());
+            EvmcsState {
+                cr0,
+                ..EvmcsState::parse(&page).unwrap()
+            }
+        };
+        let machine = |entry_controls, cs, cr0, rflags| {
+            state(entry_controls, cs, cr0, rflags).code_machine().ok()
+        };
+        let protected = CR0_PE | CR0_PG;
+        let long = 0x53ff;
+        let legacy = 0x53ff & !IA32E_MODE_GUEST;
+        assert_eq!(
+            machine(long, LONG_CS, protected, 2),
+            Some(CodeMachine::Amd64)
+        );
+        assert_eq!(
+            machine(long, 0, protected, 2),
+            Some(CodeMachine::Amd64),
+            "CS not present"
+        );
+        assert_eq!(
+            machine(long, CODE32_CS | UNUSABLE, protected, 2),
+            Some(CodeMachine::Amd64),
+            "CS unusable"
+        );
+        assert_eq!(
+            machine(long, CODE32_CS, protected, 2),
+            Some(CodeMachine::X86),
+            "compatibility mode"
+        );
+        assert_eq!(
+            machine(legacy, CODE32_CS, protected, 2),
+            Some(CodeMachine::X86)
+        );
+        assert_eq!(
+            machine(legacy, 0, protected, 2),
+            Some(CodeMachine::X86),
+            "protected mode, CS not present"
+        );
+        assert_eq!(machine(legacy, CODE16_CS, protected, 2), None, "16-bit CS");
+        assert_eq!(
+            machine(legacy, CODE32_CS, protected, 2 | RFLAGS_VM),
+            None,
+            "virtual-8086 mode"
+        );
+        let real = state(legacy, CODE16_CS, 0, 2).code_machine().unwrap_err();
+        assert!(real.to_string().contains("real mode"), "{real}");
     }
 
     /// The scan runs once per boot, but the VTL a processor last entered

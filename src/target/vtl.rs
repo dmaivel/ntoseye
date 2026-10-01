@@ -12,6 +12,7 @@ use crate::{
     backend::MemoryOps,
     cpu_state::kpcr_for_processor,
     dbg_backend::processor_index_from_backend_thread_id,
+    disasm::{self, DisasmRow},
     error::{Error, Result},
     guest::{
         EXIT_GPRS, EvmcsState, Guest, HvMemory, HvPartition, ModuleInfo, ModuleSymbolLoadReport,
@@ -35,6 +36,23 @@ const IMAGE_SEARCH_BYTES: u64 = 16 * 1024 * 1024;
 
 /// The context of code in the Windows hypervisor's image.
 pub const HYPERVISOR_CONTEXT: &str = "hypervisor";
+
+/// How much code a listing covers, as `u` takes it: a number of
+/// instructions, or every instruction that starts before an address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodeExtent {
+    Count(usize),
+    /// Up to this address, exclusive. The caller bounds the range, as the
+    /// bytes it spans are read at once.
+    Before(u64),
+}
+
+/// A guest partition's code, decoded as far as its memory reads.
+pub struct GuestCode {
+    pub rows: Vec<DisasmRow>,
+    /// Where unreadable memory cut the listing short of its extent.
+    pub unreadable: Option<u64>,
+}
 
 /// Code a vCPU was executing outside every NT address space, named by what
 /// it is rather than left `unknown`.
@@ -977,6 +995,65 @@ impl Target {
         )))
     }
 
+    /// Disassemble the code of the guest whose VTL's saved state is `state`
+    /// at `address`, read as [`Self::read_guest_partition`] reads it and
+    /// decoded in the mode the VTL left off in
+    /// ([`EvmcsState::code_machine`]). Branch and RIP-relative comments are
+    /// addresses: ntoseye has no symbols for a guest. The read stops at the
+    /// first unreadable page, and the listing with it.
+    pub fn disassemble_guest_partition(
+        &self,
+        state: &EvmcsState,
+        virtual_address: bool,
+        address: u64,
+        extent: CodeExtent,
+    ) -> Result<GuestCode> {
+        let machine = state.code_machine()?;
+        if virtual_address {
+            // Every page would be unreadable; say why instead.
+            require_four_level_paging(state)?;
+        }
+        let longest = machine.max_instruction_bytes();
+        let (length, limit) = match extent {
+            CodeExtent::Count(count) => (count.saturating_mul(longest), Some(count)),
+            // The last instruction may run past the end.
+            CodeExtent::Before(end) => (
+                usize::try_from(end.saturating_sub(address))
+                    .unwrap_or(usize::MAX)
+                    .saturating_add(longest - 1),
+                None,
+            ),
+        };
+        let mut bytes = vec![0u8; length];
+        let mut read = 0;
+        while read < length {
+            let at = address.wrapping_add(read as u64);
+            let chunk = (PAGE_SIZE - (at as usize & (PAGE_SIZE - 1))).min(length - read);
+            if self
+                .read_guest_partition(state, virtual_address, at, &mut bytes[read..read + chunk])
+                .is_err()
+            {
+                break;
+            }
+            read += chunk;
+        }
+        bytes.truncate(read);
+        let mut rows = disasm::decode_code(&bytes, address, limit, machine, |target| {
+            format!("{target:#x}")
+        });
+        let finished = match extent {
+            CodeExtent::Count(count) => rows.len() == count,
+            CodeExtent::Before(end) => {
+                rows.retain(|row| row.ip < end);
+                rows.last()
+                    .map_or(address, |row| row.ip.saturating_add(row.length as u64))
+                    >= end
+            }
+        };
+        let unreadable = (!finished && read < length).then(|| address.wrapping_add(read as u64));
+        Ok(GuestCode { rows, unreadable })
+    }
+
     /// Every mapping of the EPT of a VTL whose saved state is `state`, in
     /// address order. `None` when a table is unreadable.
     pub fn guest_physical_mappings(&self, state: &EvmcsState) -> Option<Vec<ept::Leaf>> {
@@ -1164,5 +1241,171 @@ impl Target {
                 .and_then(|page| EvmcsState::read(&*self.phys, page));
         }
         Ok(partitions)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::session_over_memory;
+
+    const BASE: u64 = 0x10000;
+    /// A guest virtual address whose page is the code page; the page after
+    /// it is not mapped.
+    const CODE_VA: u64 = 0x7ff6_1234_5000;
+    const CODE_GPA: u64 = BASE + 0x8000;
+    /// `mov rax, rcx; vmcall; ret` in 64-bit code; in 32-bit code the REX
+    /// prefix is `dec eax`.
+    const CODE: [u8; 7] = [0x48, 0x89, 0xc8, 0x0f, 0x01, 0xc1, 0xc3];
+    /// Where the code starts in its page: two nops and the first byte of a
+    /// `vmcall` fit after it before the page ends.
+    const CODE_OFFSET: u64 = 0xff6;
+
+    /// Host memory at `BASE` holding an EPT that maps each guest physical
+    /// page of the block to the same host page, except the one after the
+    /// code page, and guest 4-level page tables that map `CODE_VA` to the
+    /// code page.
+    fn guest_session() -> (crate::session::Session, EvmcsState) {
+        let mut memory = vec![0u8; 0xa000];
+        let mut put = |at: u64, entry: u64| {
+            let at = (at - BASE) as usize;
+            memory[at..at + 8].copy_from_slice(&entry.to_le_bytes());
+        };
+        const RWX: u64 = 7;
+        const WB: u64 = 6 << 3;
+        put(BASE, (BASE + 0x1000) | RWX);
+        put(BASE + 0x1000, (BASE + 0x2000) | RWX);
+        put(BASE + 0x2000, (BASE + 0x3000) | RWX);
+        for page in (BASE..BASE + 0xa000).step_by(PAGE_SIZE) {
+            if page != CODE_GPA + 0x1000 {
+                put(BASE + 0x3000 + (page >> 12) * 8, page | RWX | WB);
+            }
+        }
+        let va = VirtAddr(CODE_VA);
+        put(
+            BASE + 0x4000 + va.pml4_index() as u64 * 8,
+            (BASE + 0x5000) | 7,
+        );
+        put(
+            BASE + 0x5000 + va.pdpt_index() as u64 * 8,
+            (BASE + 0x6000) | 7,
+        );
+        put(
+            BASE + 0x6000 + va.pd_index() as u64 * 8,
+            (BASE + 0x7000) | 7,
+        );
+        put(BASE + 0x7000 + va.pt_index() as u64 * 8, CODE_GPA | 7);
+        let code = (CODE_GPA - BASE + CODE_OFFSET) as usize;
+        memory[code..code + CODE.len()].copy_from_slice(&CODE);
+        memory[code + CODE.len()..code + CODE.len() + 3].copy_from_slice(&[0x90, 0x90, 0x0f]);
+        let state = EvmcsState {
+            ept_pointer: BASE | (3 << 3) | 6,
+            cr3: BASE + 0x4000,
+            entry_controls: 1 << 9,
+            cs_access_rights: 0xa09b,
+            ..EvmcsState::at(0, true)
+        };
+        (session_over_memory(BASE, &memory), state)
+    }
+
+    fn listing(code: &GuestCode) -> Vec<(u64, String)> {
+        // The formatter pads the mnemonic to a column; compare the words.
+        code.rows
+            .iter()
+            .map(|row| {
+                (
+                    row.ip,
+                    row.asm().split_whitespace().collect::<Vec<_>>().join(" "),
+                )
+            })
+            .collect()
+    }
+
+    /// The code reads through the guest's page tables and EPT, or through
+    /// the EPT alone from its guest physical address, and decodes in the
+    /// mode the guest left off in.
+    #[test]
+    fn guest_code_decodes_where_its_page_tables_and_ept_put_it() {
+        let (session, long) = guest_session();
+        let start = CODE_VA + CODE_OFFSET;
+        let expected = vec![
+            (start, "mov rax, rcx".to_string()),
+            (start + 3, "vmcall".to_string()),
+            (start + 6, "ret".to_string()),
+        ];
+        let code = session
+            .target
+            .disassemble_guest_partition(&long, true, start, CodeExtent::Count(3))
+            .unwrap();
+        assert_eq!((listing(&code), code.unreadable), (expected, None));
+
+        let physical = CODE_GPA + CODE_OFFSET;
+        let code = session
+            .target
+            .disassemble_guest_partition(&long, false, physical, CodeExtent::Before(physical + 6))
+            .unwrap();
+        assert_eq!(
+            (listing(&code), code.unreadable),
+            (
+                vec![
+                    (physical, "mov rax, rcx".to_string()),
+                    (physical + 3, "vmcall".to_string()),
+                ],
+                None
+            )
+        );
+
+        let protected = EvmcsState {
+            entry_controls: 0,
+            cs_access_rights: 0xc09b,
+            ..long
+        };
+        let code = session
+            .target
+            .disassemble_guest_partition(&protected, false, physical, CodeExtent::Count(2))
+            .unwrap();
+        assert_eq!(
+            listing(&code),
+            [
+                (physical, "dec eax".to_string()),
+                (physical + 1, "mov eax, ecx".to_string()),
+            ]
+        );
+        // Without long-mode paging, its page tables are not 4-level ones.
+        assert!(
+            session
+                .target
+                .disassemble_guest_partition(&protected, true, start, CodeExtent::Count(2))
+                .is_err()
+        );
+    }
+
+    /// An unmapped page ends the listing at its start, and an instruction
+    /// that runs into it is not shown; a listing that ends before it is
+    /// whole.
+    #[test]
+    fn guest_code_stops_at_the_first_unreadable_page() {
+        let (session, state) = guest_session();
+        let start = CODE_VA + CODE_OFFSET;
+        let code = session
+            .target
+            .disassemble_guest_partition(&state, true, start, CodeExtent::Count(8))
+            .unwrap();
+        assert_eq!(code.rows.len(), 5, "{:?}", listing(&code));
+        assert_eq!(code.rows[4].ip, start + 8);
+        assert_eq!(code.unreadable, Some(CODE_VA + 0x1000));
+
+        let code = session
+            .target
+            .disassemble_guest_partition(&state, true, start, CodeExtent::Before(start + 9))
+            .unwrap();
+        assert_eq!((code.rows.len(), code.unreadable), (5, None));
+
+        let unmapped = CODE_GPA + 0x1000;
+        let code = session
+            .target
+            .disassemble_guest_partition(&state, false, unmapped, CodeExtent::Count(1))
+            .unwrap();
+        assert_eq!((code.rows.len(), code.unreadable), (0, Some(unmapped)));
     }
 }
