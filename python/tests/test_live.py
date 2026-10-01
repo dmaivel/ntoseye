@@ -92,10 +92,11 @@ def test_steps_resume_past_false_predicates(halted: Debugger) -> None:
     # step's stop. Every hit halts the guest while its predicate runs, so
     # under a guest that switches threads constantly (a busy Hyper-V VM
     # inside it) the stepped thread can go unscheduled for long; the timeout
-    # then interrupts the step where it is.
-    over = halted.step_over(until="call", timeout=60.0)
+    # then interrupts the step where it is. Waiting longer only waits: the
+    # hits the test is about are declined either way.
+    over = halted.step_over(until="call", timeout=20.0)
     assert isinstance(over, (Stop.Step, Stop.Interrupt))
-    assert isinstance(halted.step_out(timeout=60.0), (Stop.Step, Stop.Interrupt))
+    assert isinstance(halted.step_out(timeout=20.0), (Stop.Step, Stop.Interrupt))
 
 
 def test_run_to_symbol_stops_there(halted: Debugger) -> None:
@@ -443,15 +444,23 @@ def test_secure_steps_use_hardware_sites_and_leave_code_unchanged(halted: Debugg
         except ntoseye.NtoseyeError as error:
             if HYPERVISOR_WAIT not in str(error) or attempt == ATTEMPTS - 1:
                 raise
-    pytest.fail(f"all {ATTEMPTS} steps were diverted into an interrupt handler")
+    pytest.fail(
+        f"in all {ATTEMPTS} attempts the breakpoint was not reached within 10 s or the step was "
+        "diverted into an interrupt handler"
+    )
 
 
 def secure_step_scenario(halted: Debugger, address: int) -> bool:
     """Step in the secure kernel and step out; `False` when the step was
-    diverted into an interrupt handler, which leaves nothing to check."""
+    diverted into an interrupt handler, which leaves nothing to check, or
+    when the secure kernel did not reach the breakpoint in time (a busy
+    guest can keep VTL1 from switching address spaces for long)."""
     bp = halted.breakpoints.add(address, hardware=True)
     try:
-        assert isinstance(halted.run(timeout=10.0), Stop.Breakpoint)
+        stop = halted.run(timeout=10.0)
+        if isinstance(stop, Stop.Interrupt):
+            return False
+        assert isinstance(stop, Stop.Breakpoint)
         bp.delete()
         # Which sites a step plants is pinned by the Rust unit tests; this is
         # the live path. step_out's run-to site goes through the breakpoint
