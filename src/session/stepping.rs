@@ -160,6 +160,7 @@ impl Session {
                 self.backend.as_mut(),
                 &self.register_map,
                 &self.target,
+                &self.breakpoints,
                 &self.current_thread,
                 &regs,
                 rip,
@@ -938,7 +939,16 @@ pub fn step_over_current_breakpoint(
         (Err(err), _) => return Err(err),
     }
 
-    let stepped = execute_lifted_site(backend, register_map, debugger, thread, &regs, rip, cr3);
+    let stepped = execute_lifted_site(
+        backend,
+        register_map,
+        debugger,
+        breakpoints,
+        thread,
+        &regs,
+        rip,
+        cr3,
+    );
 
     // Re-arm whether or not the step worked: a failed step must not leave the
     // site unpatched with the manager still believing it is enabled.
@@ -968,13 +978,23 @@ fn execute_lifted_site(
     backend: &mut dyn DebugBackend,
     register_map: &RegisterMap,
     debugger: &Target,
+    breakpoints: &BreakpointManager,
     thread: &str,
     regs: &[u8],
     rip: u64,
     cr3: Option<u64>,
 ) -> Result<RunPast> {
     if backend.single_step_unsafe() {
-        run_past_site(backend, register_map, debugger, thread, regs, rip, cr3)
+        run_past_site(
+            backend,
+            register_map,
+            debugger,
+            breakpoints,
+            thread,
+            regs,
+            rip,
+            cr3,
+        )
     } else {
         step_one_and_clear_tf(backend, register_map, &debugger.interrupt).map(|()| RunPast::Reached)
     }
@@ -1072,12 +1092,14 @@ fn run_past_site(
     backend: &mut dyn DebugBackend,
     register_map: &RegisterMap,
     debugger: &Target,
+    breakpoints: &BreakpointManager,
     thread: &str,
     regs: &[u8],
     rip: u64,
     cr3: Option<u64>,
 ) -> Result<RunPast> {
     let successors = site_successors(debugger, register_map, thread, regs, rip, cr3)?;
+    let sites = temporary_sites(backend, debugger, breakpoints, rip, cr3, &successors)?;
     run_past(
         backend,
         register_map,
@@ -1085,7 +1107,7 @@ fn run_past_site(
         thread,
         regs,
         &successors,
-        &TemporarySites::Software,
+        &sites,
     )
 }
 
@@ -1106,25 +1128,7 @@ fn step_without_trap(
         .read_u64(debugger.arch().dtb_register(), &regs)
         .ok();
     let successors = site_successors(debugger, register_map, thread, &regs, rip, cr3)?;
-    let secure = debugger.is_secure_address(VirtAddr(rip))
-        || cr3.is_some_and(|cr3| debugger.recognize_secure_root(cr3))
-        || successors
-            .iter()
-            .any(|&address| debugger.is_secure_address(VirtAddr(address)));
-    let sites = if secure {
-        let slots = breakpoints.free_execute_slots(backend);
-        if slots.len() < successors.len() {
-            return Err(Error::Breakpoint(format!(
-                "a VTL1 step at {rip:#x} needs {} free hardware breakpoint slot(s) and {} are \
-                 free; clear a hardware breakpoint to step",
-                successors.len(),
-                slots.len()
-            )));
-        }
-        TemporarySites::Hardware(slots)
-    } else {
-        TemporarySites::Software
-    };
+    let sites = temporary_sites(backend, debugger, breakpoints, rip, cr3, &successors)?;
     run_past(
         backend,
         register_map,
@@ -1134,6 +1138,49 @@ fn step_without_trap(
         &successors,
         &sites,
     )
+}
+
+/// How to mark `successors` of the instruction at `rip` (root `cr3`).
+/// Debug-register sites, in slots no breakpoint holds, where an `int3`
+/// must not be written: in secure-kernel code, and, on a backend without
+/// user-mode breakpoints, in user space, where a GDB stub would write and
+/// lift it through whichever vCPU it has selected, which need not map the
+/// page. Software sites elsewhere.
+fn temporary_sites(
+    backend: &dyn DebugBackend,
+    debugger: &Target,
+    breakpoints: &BreakpointManager,
+    rip: u64,
+    cr3: Option<u64>,
+    successors: &[u64],
+) -> Result<TemporarySites> {
+    let secure = debugger.is_secure_address(VirtAddr(rip))
+        || cr3.is_some_and(|cr3| debugger.recognize_secure_root(cr3))
+        || successors
+            .iter()
+            .any(|&address| debugger.is_secure_address(VirtAddr(address)));
+    let user_space = !backend.supports_user_mode_breakpoints()
+        && successors.iter().any(|&address| {
+            !BreakpointManager::is_kernel_space(debugger.arch(), VirtAddr(address))
+        });
+    if !secure && !user_space {
+        return Ok(TemporarySites::Software);
+    }
+    let slots = breakpoints.free_execute_slots(backend);
+    if slots.len() < successors.len() {
+        let step = if secure {
+            "a VTL1 step"
+        } else {
+            "a step into user space"
+        };
+        return Err(Error::Breakpoint(format!(
+            "{step} at {rip:#x} needs {} free hardware breakpoint slot(s) and {} are free; clear \
+             a hardware breakpoint to step",
+            successors.len(),
+            slots.len()
+        )));
+    }
+    Ok(TemporarySites::Hardware(slots))
 }
 
 /// How [`run_past`] marks an instruction's successors.

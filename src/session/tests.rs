@@ -1772,6 +1772,36 @@ fn a_secure_kernel_step_uses_free_debug_register_slots_and_writes_no_code() {
     );
 }
 
+/// A backend without user-mode breakpoints (a GDB stub) cannot be trusted to
+/// lift an `int3` in user space, so a step there marks its successors with
+/// debug-register sites; one that has them plants software sites.
+#[test]
+fn a_user_space_step_uses_debug_register_sites_where_int3_is_unsafe() {
+    let mut code = [0x90u8; 0x40];
+    code[..2].copy_from_slice(&[0x74, 0x10]); // je +0x10
+    for user_mode in [false, true] {
+        let mut backend = MockBackend {
+            single_step_unsafe: true,
+            lands_at: Some(0x1002),
+            one_vcpu: true,
+            allow_breakpoints: user_mode,
+            ..MockBackend::default()
+        };
+        backend.set("rip", 0x1000);
+        let (sites, hardware) = (backend.site_writes.clone(), backend.hardware_writes.clone());
+        let mut session = stepping_session(&code, backend);
+
+        assert_eq!(session.step().unwrap(), 0x1002);
+        if user_mode {
+            assert!(hardware.lock().is_empty());
+            assert_eq!(sites.lock()[..2], [(0x1002, true), (0x1012, true)]);
+        } else {
+            assert!(sites.lock().is_empty(), "an int3 was planted in user space");
+            assert_eq!(hardware.lock()[..2], [(0, Some(0x1002)), (1, Some(0x1012))]);
+        }
+    }
+}
+
 #[test]
 fn refresh_rewrites_only_the_sites_the_stop_dropped() {
     let session = session_over_memory(0x1000, &[0u8; 0x80]);
