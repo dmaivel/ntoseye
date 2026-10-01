@@ -882,6 +882,47 @@ fn absorbed_software_breakpoint_invalidates_stopped_inspection() {
     assert_eq!(session.target.current_dtb(), expected_dtb);
 }
 
+fn break_in_at(rip: u64) -> (Session, StopEvent) {
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", rip);
+    let mut session = session_with_mock(backend);
+    session
+        .breakpoints
+        .insert_for_test(1, VirtAddr(rip), true, None);
+    let break_in = StopEvent {
+        exception_code: None,
+        first_chance: None,
+        break_in: true,
+        ..single_step_event()
+    };
+    (session, break_in)
+}
+
+#[test]
+fn a_break_in_on_a_breakpoint_counts_as_reaching_it() {
+    // A walk's closing break-in on its run-to site ends the walk there.
+    let (mut session, break_in) = break_in_at(0x1000);
+    assert!(matches!(
+        session.classify_stop_event(break_in).unwrap(),
+        StopResolution::Breakpoint { rip: 0x1000, .. }
+    ));
+}
+
+#[test]
+fn a_break_in_on_a_declined_breakpoint_stops_rather_than_resuming() {
+    // The pass count declines the hit; resuming would lose the Ctrl+C.
+    let (mut session, break_in) = break_in_at(0x1000);
+    session.breakpoints.set_pass_count(1, 2).unwrap();
+    assert!(matches!(
+        session.classify_stop_event(break_in).unwrap(),
+        StopResolution::Stopped { rip: 0x1000, .. }
+    ));
+    assert!(!session.backend.is_running());
+}
+
 #[test]
 fn absorbed_watchpoint_invalidates_stopped_inspection() {
     let mut backend = MockBackend::default();
@@ -1397,7 +1438,7 @@ fn a_hit_interrupted_on_its_site_is_reported_once() {
             .write_u64("rsp", &mut regs, rsp)
             .unwrap();
         backend.write_registers(&regs).unwrap();
-        session.resolve_breakpoint_stop(0x1000, 0).unwrap()
+        session.resolve_breakpoint_stop(0x1000, 0, false).unwrap()
     };
     assert!(matches!(
         returned(&mut session),
@@ -1658,7 +1699,7 @@ fn a_step_run_to_runs_past_a_deeper_call_of_the_same_code() {
                 .unwrap();
         }
         session.backend.write_registers(&regs).unwrap();
-        session.resolve_breakpoint_stop(0x1000, 0).unwrap()
+        session.resolve_breakpoint_stop(0x1000, 0, false).unwrap()
     };
     assert!(matches!(
         hit_with_stack(&mut session, 0x1ff8),
@@ -1715,7 +1756,7 @@ fn an_interrupted_hit_stepped_back_onto_is_forgotten() {
     assert_eq!(session.step().unwrap(), 0x1003);
     on_site(&mut session);
     assert!(matches!(
-        session.resolve_breakpoint_stop(0x1000, 0).unwrap(),
+        session.resolve_breakpoint_stop(0x1000, 0, false).unwrap(),
         BreakpointStopAction::Hit { .. }
     ));
 }

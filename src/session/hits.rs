@@ -30,10 +30,14 @@ impl Session {
     ///
     /// Shared by [`Self::continue_until_break`] and the REPL's continue loop so
     /// they can't drift on which int3 hits surface and which are silently resumed.
-    pub fn resolve_breakpoint_stop(&mut self, rip: u64, cr3: u64) -> Result<BreakpointStopAction> {
+    pub fn resolve_breakpoint_stop(
+        &mut self,
+        rip: u64,
+        cr3: u64,
+        break_in: bool,
+    ) -> Result<BreakpointStopAction> {
         if self.returned_to_interrupted_hit(rip)? {
-            self.step_over_and_resume()?;
-            return Ok(BreakpointStopAction::Resumed);
+            return self.pass_hit(break_in);
         }
         match self
             .breakpoints
@@ -48,22 +52,19 @@ impl Session {
                     || !stopped_processor_matches(bp.processor, &self.current_thread)
                     || !self.stopped_stack_reaches(bp.min_stack_pointer)
                 {
-                    self.step_over_and_resume()?;
-                    return Ok(BreakpointStopAction::Resumed);
+                    return self.pass_hit(break_in);
                 }
                 // Count every scoped physical hit before pass-count and
                 // condition evaluation. A pass skip uses the same canonical
                 // step-over/resume path as a false condition.
                 if self.breakpoints.record_hit(bp.id)? == BreakpointHitDisposition::SkipPass {
-                    self.step_over_and_resume()?;
-                    return Ok(BreakpointStopAction::Resumed);
+                    return self.pass_hit(break_in);
                 }
                 // A false condition is absorbed. Evaluation errors fail safe:
                 // surface the stop and carry the error to every host.
                 let condition_error = match bp.evaluate_condition(&self.target) {
                     Ok(false) => {
-                        self.step_over_and_resume()?;
-                        return Ok(BreakpointStopAction::Resumed);
+                        return self.pass_hit(break_in);
                     }
                     Ok(true) => None,
                     Err(error) => Some(error.to_string()),
@@ -91,8 +92,7 @@ impl Session {
                 // different address space): silently step over so the wrong
                 // process keeps running, then resume waiting for the right one.
                 if self.breakpoints.breakpoint_id_at_address(rip).is_some() {
-                    self.step_over_and_resume()?;
-                    return Ok(BreakpointStopAction::Resumed);
+                    return self.pass_hit(break_in);
                 }
 
                 Ok(BreakpointStopAction::NotBreakpoint)
@@ -132,6 +132,17 @@ impl Session {
         self.breakpoints
             .refresh_enabled(self.backend.as_mut(), &self.target)?;
         self.continue_backend(ContinueDisposition::Handled)
+    }
+
+    /// Pass a hit by, as [`Self::step_over_and_resume`] does, unless the stop
+    /// is a break-in the host asked for (Ctrl+C, a pause, a run's timeout):
+    /// that surfaces as the plain stop it is rather than resuming behind it.
+    fn pass_hit(&mut self, break_in: bool) -> Result<BreakpointStopAction> {
+        if break_in {
+            return Ok(BreakpointStopAction::NotBreakpoint);
+        }
+        self.step_over_and_resume()?;
+        Ok(BreakpointStopAction::Resumed)
     }
 
     /// Leave a hit a host declined (the SDK's `when=` callback) on another
@@ -443,14 +454,12 @@ pub fn resolve_watchpoint_stop(
     let sp = stack_pointer(register_map, &registers);
     update_target_context_from_registers(target, register_map, Ok(registers));
     if !breakpoint.scope.matches_dtb(scope_dtb, target.arch()) {
-        backend.continue_execution()?;
-        return Ok(WatchpointStopAction::Resumed);
+        return pass_watchpoint_hit(backend, event);
     }
     if let Some(thread) = breakpoint.thread.as_ref() {
         let stopped = refresh_windows_thread_context_for_backend_thread(target, current_thread);
         if !thread.matches(stopped.as_ref()) {
-            backend.continue_execution()?;
-            return Ok(WatchpointStopAction::Resumed);
+            return pass_watchpoint_hit(backend, event);
         }
     }
     if !stopped_processor_matches(breakpoint.processor, current_thread)
@@ -458,18 +467,15 @@ pub fn resolve_watchpoint_stop(
             .min_stack_pointer
             .is_some_and(|min| sp.is_some_and(|sp| sp < min))
     {
-        backend.continue_execution()?;
-        return Ok(WatchpointStopAction::Resumed);
+        return pass_watchpoint_hit(backend, event);
     }
     if breakpoints.record_hit(breakpoint.id)? == BreakpointHitDisposition::SkipPass {
-        backend.continue_execution()?;
-        return Ok(WatchpointStopAction::Resumed);
+        return pass_watchpoint_hit(backend, event);
     }
 
     let condition_error = match breakpoint.evaluate_condition(target) {
         Ok(false) => {
-            backend.continue_execution()?;
-            return Ok(WatchpointStopAction::Resumed);
+            return pass_watchpoint_hit(backend, event);
         }
         Ok(true) => None,
         Err(error) => Some(error.to_string()),
@@ -482,6 +488,19 @@ pub fn resolve_watchpoint_stop(
         breakpoint,
         condition_error,
     })
+}
+
+/// Pass a watchpoint hit by resuming, unless the stop is a break-in the host
+/// asked for, which surfaces as the plain stop it is.
+fn pass_watchpoint_hit(
+    backend: &mut dyn DebugBackend,
+    event: &StopEvent,
+) -> Result<WatchpointStopAction> {
+    if event.break_in {
+        return Ok(WatchpointStopAction::NotBreakpoint);
+    }
+    backend.continue_execution()?;
+    Ok(WatchpointStopAction::Resumed)
 }
 
 /// Rewind the reporting thread back onto the breakpoint address when it is

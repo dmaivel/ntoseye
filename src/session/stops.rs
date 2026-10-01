@@ -423,7 +423,7 @@ impl Session {
             return self.classify_module_trap_hit(kind, event, rip, cr3);
         }
 
-        let resolution = match self.resolve_breakpoint_stop(rip, cr3)? {
+        let resolution = match self.resolve_breakpoint_stop(rip, cr3, event.break_in)? {
             BreakpointStopAction::Hit {
                 breakpoint,
                 condition_error,
@@ -597,7 +597,7 @@ impl Session {
         if self.breakpoints.breakpoint_id_at_address(rip).is_some() {
             // A load may have resolved the last breakpoint waiting on one.
             self.arm_traps();
-            match self.resolve_breakpoint_stop(rip, cr3)? {
+            match self.resolve_breakpoint_stop(rip, cr3, event.break_in)? {
                 BreakpointStopAction::Hit {
                     breakpoint,
                     condition_error,
