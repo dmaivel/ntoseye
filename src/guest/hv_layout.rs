@@ -583,11 +583,10 @@ fn partition_id(image: &ImageView<'_>, table: &[HypercallEntry]) -> Result<(Vec<
 const MIN_VPS: u64 = 0x100;
 const MAX_VPS: u64 = 0x10000;
 
-/// `(array, capacity)` from the VP lookup `(partition, index)`: it bounds
-/// the index with an immediate and loads `partition->vps[index]`.
 /// The traces of the functions the VP hypercalls call, and of those they
-/// call: where the VP lookup is. Each is walked once, in parallel.
-fn vp_lookup_traces(image: &ImageView<'_>, table: &[HypercallEntry]) -> Result<Vec<Trace>> {
+/// call, each with its function's address: where the VP lookup is. Each is
+/// walked once, in parallel.
+fn vp_lookup_traces(image: &ImageView<'_>, table: &[HypercallEntry]) -> Result<Vec<(u64, Trace)>> {
     use rayon::prelude::*;
     let mut first = Vec::new();
     for code in [
@@ -599,16 +598,16 @@ fn vp_lookup_traces(image: &ImageView<'_>, table: &[HypercallEntry]) -> Result<V
     }
     first.sort_unstable();
     first.dedup();
-    let walk_all = |entries: &[u64]| -> Vec<Trace> {
+    let walk_all = |entries: &[u64]| -> Vec<(u64, Trace)> {
         entries
             .par_iter()
-            .map(|&entry| walk(image, entry, &[]))
+            .map(|&entry| (entry, walk(image, entry, &[])))
             .collect()
     };
     let mut traces = walk_all(&first);
     let mut second: Vec<u64> = traces
         .iter()
-        .flat_map(|trace| trace.calls.iter().copied())
+        .flat_map(|(_, trace)| trace.calls.iter().copied())
         .filter(|call| first.binary_search(call).is_err())
         .collect();
     second.sort_unstable();
@@ -617,9 +616,11 @@ fn vp_lookup_traces(image: &ImageView<'_>, table: &[HypercallEntry]) -> Result<V
     Ok(traces)
 }
 
-fn vp_array(traces: &[Trace]) -> Result<(i64, u32)> {
+/// `(array, capacity)` from the VP lookup `(partition, index)`: it bounds
+/// the index with an immediate and loads `partition->vps[index]`.
+fn vp_array(traces: &[(u64, Trace)]) -> Result<(i64, u32)> {
     let mut found: Option<(i64, u32)> = None;
-    for (candidate, trace) in traces.iter().enumerate() {
+    for (entry, trace) in traces {
         // The index may be the argument or, on paths that resolve a
         // "self" index first, a field; either way the same value is bounded
         // and then scales into the partition's array.
@@ -643,7 +644,7 @@ fn vp_array(traces: &[Trace]) -> Result<(i64, u32)> {
                 }
                 Some(other) => {
                     return Err(layout_error(format!(
-                        "VP lookups disagree: {other:x?} and {:x?} in candidate {candidate}",
+                        "VP lookups disagree: {other:x?} and {:x?} at {entry:#x}",
                         (array, bound)
                     )));
                 }
@@ -716,9 +717,9 @@ fn current_vp(
 /// Where the processor block keeps its processor number: the dword from the
 /// block that the VP hypercalls scale by 8 to index per-processor arrays.
 /// Builds whose VP paths use no such array give none.
-fn processor_index(traces: &[Trace]) -> Option<i64> {
+fn processor_index(traces: &[(u64, Trace)]) -> Option<i64> {
     let mut found = Vec::new();
-    for trace in traces {
+    for (_, trace) in traces {
         for access in &trace.accesses {
             if let Some((Value::Load(base, offset, 4), 8)) = &access.index
                 && **base == Value::Gs
