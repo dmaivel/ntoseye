@@ -196,8 +196,11 @@ The stack of the current vCPU starts from the console context, which these comma
 - `.thread <ethread>` selects the saved context of a parked Windows thread. If the vCPU of the thread is halted in the Windows hypervisor, `.thread` selects the VTL0 state that the hypervisor saved.
 - {command}`.cxr` selects a context record.
 - {command}`.trap` selects a trap frame.
+- {command}`.vtlcxr` `1` selects the VTL1 state that the hypervisor saved, and {command}`.vtlcxr` the VTL0 state again.
 
 The stacks of other vCPUs start from their own registers, and showing them in the editor does not change the console context. If you select a frame from one of these stacks, the console switches to that vCPU.
+
+For a vCPU halted in the Windows hypervisor, whose stack starts where VTL0 (or, after {command}`.vtlcxr` `1`, VTL1) left off, the call stack shows the hypervisor's own frames first, as the call chain runs, then a label frame (`VTL0, as the hypervisor saved it`), then the frames of that saved state. Each frame keeps the registers and the address space of its own walk, so the Registers pane and expressions show the hypervisor's state for its frames and the guest's for the others. The label has no registers. After {command}`.cxr` in the console, the stack is the hypervisor's alone.
 
 Clients that support `supportsInvalidatedEvent` refresh their panes automatically. With other clients, you refresh the panes manually.
 

@@ -23,7 +23,7 @@ use crate::unwind::{
     FunctionEntryDetail, RecoveredStackTrace, StackTrace, ThreadStackSource, ThreadStackTrace,
     build_parked_thread_recovered_stack, build_parked_thread_stack,
     build_stacktrace_with_register_values, build_thread_stacktrace, format_symbol, function_entry,
-    function_range, resolve_thread_trace_context,
+    function_range, halted_in_windows_hypervisor, resolve_thread_trace_context,
 };
 
 /// `DBG_STATUS_WORKER`, the status the kernel's debugger worker passes to
@@ -519,6 +519,33 @@ impl Session {
             limit,
         );
         Ok((trace, live, true))
+    }
+
+    /// The Windows hypervisor's own stack on `vcpu`, walked from its live
+    /// registers, with them, when it is halted in the hypervisor: what a
+    /// host shows above where NT or VTL1 left off, which is where its
+    /// [`Self::recovered_vcpu_backtrace`] starts there. `None` elsewhere, or
+    /// when its registers cannot be read.
+    pub fn hypervisor_vcpu_backtrace(
+        &mut self,
+        vcpu: &str,
+        limit: usize,
+    ) -> Result<Option<(RecoveredStackTrace, HashMap<String, u64>)>> {
+        let Some(registers) = self.read_vcpu_registers(vcpu)? else {
+            return Ok(None);
+        };
+        let live = self.register_map.to_hashmap(&registers);
+        let (Some(&cr3), Some(&rip)) =
+            (live.get(self.target.arch().dtb_register()), live.get("rip"))
+        else {
+            return Ok(None);
+        };
+        if !halted_in_windows_hypervisor(&self.target, cr3, rip) {
+            return Ok(None);
+        }
+        let trace =
+            build_stacktrace_with_register_values(&self.target, &self.register_map, &live, limit);
+        Ok(Some((trace, live)))
     }
 
     /// The stack of the thread `vcpu` runs, from that vCPU's context; `None`

@@ -85,6 +85,10 @@ struct FrameRef {
     /// the console's `.frame N` walk that thread again
     /// ([`crate::unwind::RecoveredStackTrace::thread`]).
     thread_walk: Option<VirtAddr>,
+    /// A separator between two walks of one vCPU, named by `symbol` (where
+    /// the hypervisor's frames end and the saved state's begin): no frame,
+    /// so it has no registers and no scopes.
+    label: bool,
 }
 
 /// What a `variablesReference` refers to: one of a frame's scopes, or an

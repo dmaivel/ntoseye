@@ -1,12 +1,16 @@
 //! Threads and stack frames: the vCPU list, stack walks, and installing
 //! the frame a request names as the session's inspection context.
 
+use std::collections::HashMap;
 use std::mem::replace;
 use std::result;
 
 use serde_json::{Value, json};
 
+use crate::symbols::CodeFrame;
 use crate::target::SelectedFrame;
+use crate::types::VirtAddr;
+use crate::unwind::RecoveredStackTrace;
 
 use super::{FrameRef, Handled, RunState, Server, arg_i64, source_value};
 
@@ -145,12 +149,68 @@ impl Server {
     /// frame. Walking does not select it: the current vCPU shows the console's
     /// context (a `.thread`, `.cxr`, or `.trap` selection), and a client
     /// walking every thread leaves that context where the console put it.
+    /// A vCPU halted in the Windows hypervisor, whose walk starts where NT
+    /// (or VTL1) left off, shows the hypervisor's own frames above it, as
+    /// the call chain runs (the guest's VMCALL or exit, then the hypervisor),
+    /// with a label frame between them; each frame keeps its own walk's
+    /// registers and address space.
     fn build_frames(&mut self, thread: i64, vcpu: &str) -> result::Result<(), String> {
         let session = self.session()?;
         let (recovered, seed, seed_live) = session
             .recovered_vcpu_backtrace(vcpu, STACK_FRAME_LIMIT)
             .map_err(|error| error.to_string())?;
-        for (index, frame) in recovered.frames.iter().enumerate() {
+        // A walk already from the live registers is the hypervisor's own
+        // when the vCPU is there (after `.cxr`): nothing goes above it.
+        let hypervisor = if seed_live {
+            None
+        } else {
+            session
+                .hypervisor_vcpu_backtrace(vcpu, STACK_FRAME_LIMIT)
+                .ok()
+                .flatten()
+        };
+        let vtl = if session.target.symbols.is_secure_root(recovered.dtb) {
+            "VTL1"
+        } else {
+            "VTL0"
+        };
+        if let Some((trace, live)) = hypervisor {
+            self.push_walk(thread, &trace, &live, true);
+            self.frames.push(FrameRef {
+                thread,
+                index: 0,
+                ip: 0,
+                sp: 0,
+                code: CodeFrame {
+                    address: VirtAddr(0),
+                    inline_depth: 0,
+                },
+                inline: false,
+                symbol: format!("{vtl}, as the hypervisor saved it"),
+                source_location: None,
+                frame_base: None,
+                registers: HashMap::new(),
+                seed_registers: HashMap::new(),
+                seed_live: false,
+                dtb: recovered.dtb,
+                thread_walk: None,
+                label: true,
+            });
+        }
+        self.push_walk(thread, &recovered, &seed, seed_live);
+        Ok(())
+    }
+
+    /// Publish one handle for each frame of `walk`, the client's `thread`'s,
+    /// seeded from `seed` (the vCPU's live registers when `seed_live`).
+    fn push_walk(
+        &mut self,
+        thread: i64,
+        walk: &RecoveredStackTrace,
+        seed: &HashMap<String, u64>,
+        seed_live: bool,
+    ) {
+        for (index, frame) in walk.frames.iter().enumerate() {
             self.frames.push(FrameRef {
                 thread,
                 index,
@@ -164,15 +224,24 @@ impl Server {
                 registers: frame.registers.clone(),
                 seed_registers: seed.clone(),
                 seed_live,
-                dtb: recovered.dtb,
-                thread_walk: recovered.thread,
+                dtb: walk.dtb,
+                thread_walk: walk.thread,
+                label: false,
             });
         }
-        Ok(())
     }
 
     pub(super) fn frame_value(&mut self, handle: usize) -> Value {
         let frame = &self.frames[handle];
+        if frame.label {
+            return json!({
+                "id": handle as i64 + 1,
+                "name": frame.symbol,
+                "line": 0,
+                "column": 0,
+                "presentationHint": "label",
+            });
+        }
         let ip = frame.ip;
         // Visual Studio's label for a call the compiler inlined.
         let name = if frame.inline {
@@ -202,11 +271,17 @@ impl Server {
 
     pub(super) fn frame_handle(&self, args: &Value, key: &str) -> result::Result<usize, String> {
         let id = arg_i64(args, key).ok_or_else(|| format!("missing {key}"))?;
-        usize::try_from(id)
+        let handle = usize::try_from(id)
             .ok()
             .and_then(|id| id.checked_sub(1))
             .filter(|handle| *handle < self.frames.len())
-            .ok_or_else(|| format!("stale frame id {id}; re-request the stack trace"))
+            .ok_or_else(|| format!("stale frame id {id}; re-request the stack trace"))?;
+        if self.frames[handle].label {
+            return Err(format!(
+                "frame {id} is a label between two walks and has no registers"
+            ));
+        }
+        Ok(handle)
     }
 
     /// Select the requested frame, or keep the current frame if none was supplied.

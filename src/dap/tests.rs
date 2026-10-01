@@ -334,6 +334,7 @@ fn a_console_context_change_invalidates_the_clients_view() {
         seed_registers: HashMap::new(),
         seed_live: true,
         thread_walk: None,
+        label: false,
         dtb: 0,
     });
     server.vars.push(VarRef::Locals(0));
@@ -437,6 +438,7 @@ fn stack_frames_use_recovered_symbol_and_source_metadata() {
         seed_registers: HashMap::new(),
         seed_live: true,
         thread_walk: None,
+        label: false,
         dtb: 0,
     });
 
@@ -494,6 +496,7 @@ fn locals_come_from_the_address_space_the_frame_was_recovered_in() {
         seed_registers: HashMap::new(),
         seed_live: true,
         thread_walk: None,
+        label: false,
         dtb: process_dtb,
     });
 
@@ -555,6 +558,7 @@ fn watches_evaluate_in_the_address_space_the_frame_was_recovered_in() {
         seed_registers: HashMap::new(),
         seed_live: true,
         thread_walk: None,
+        label: false,
         dtb: process_dtb,
     });
 
@@ -1033,4 +1037,48 @@ fn one_instruction_and_unmapped_addresses_are_left_to_the_stepper() {
     assert_eq!(server.coalescible_line_end(0x1003).unwrap(), None);
     // No line record covers this address at all.
     assert_eq!(server.coalescible_line_end(0x9000).unwrap(), None);
+}
+
+/// The label between a hypervisor vCPU's own frames and the saved state's
+/// is shown as a label, with no instruction pointer, and a request naming
+/// it (scopes, which would install its context) is refused: it has none.
+#[test]
+fn a_label_frame_shows_as_a_label_and_has_no_scopes() {
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, _sink) = server_with_sink(None, rx);
+    for (symbol, label) in [
+        ("hv+0x3a6bde", false),
+        ("VTL0, as the hypervisor saved it", true),
+    ] {
+        server.frames.push(FrameRef {
+            thread: 1,
+            index: 0,
+            ip: 0x1000,
+            sp: 0x2000,
+            code: CodeFrame::at(VirtAddr(0x1000)),
+            inline: false,
+            symbol: symbol.to_string(),
+            source_location: None,
+            frame_base: None,
+            registers: HashMap::new(),
+            seed_registers: HashMap::new(),
+            seed_live: !label,
+            thread_walk: None,
+            label,
+            dtb: 0,
+        });
+    }
+
+    let value = server.frame_value(1);
+    assert_eq!(value["presentationHint"], "label");
+    assert_eq!(value["name"], "VTL0, as the hypervisor saved it");
+    assert!(value.get("instructionPointerReference").is_none());
+    assert!(
+        server
+            .frame_value(0)
+            .get("instructionPointerReference")
+            .is_some()
+    );
+    assert!(server.on_scopes(&json!({"frameId": 2})).is_err());
+    assert!(server.on_scopes(&json!({"frameId": 1})).is_ok());
 }
