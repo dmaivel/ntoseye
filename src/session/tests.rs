@@ -883,6 +883,35 @@ fn absorbed_software_breakpoint_invalidates_stopped_inspection() {
 }
 
 #[test]
+fn a_break_in_on_an_armed_address_is_a_plain_stop() {
+    // Counted as a hit, the pass count would absorb it and resume the
+    // target behind the Ctrl+C that asked for the stop.
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1000);
+    let mut session = session_with_mock(backend);
+    session
+        .breakpoints
+        .insert_for_test(1, VirtAddr(0x1000), true, None);
+    session.breakpoints.set_pass_count(1, 2).unwrap();
+    let break_in = StopEvent {
+        exception_code: None,
+        first_chance: None,
+        break_in: true,
+        ..single_step_event()
+    };
+
+    assert!(matches!(
+        session.classify_stop_event(break_in).unwrap(),
+        StopResolution::Stopped { rip: 0x1000, .. }
+    ));
+    assert!(!session.backend.is_running());
+    assert!(session.target.breakpoint_stop.is_none());
+}
+
+#[test]
 fn absorbed_watchpoint_invalidates_stopped_inspection() {
     let mut backend = MockBackend::default();
     backend.set("dr6", 1);
