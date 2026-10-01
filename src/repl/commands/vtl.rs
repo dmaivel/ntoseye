@@ -535,7 +535,7 @@ impl ReplState<'_> {
             partition
                 .virtual_processors
                 .iter()
-                .map(|vp| self.vp_line(vp, root)),
+                .map(|vp| self.vp_line(vp, root, 3 * (depth + 1))),
         );
         for child in partitions {
             if child.parent == Some(partition.id) && !seen.contains(&child.id) {
@@ -551,39 +551,55 @@ impl ReplState<'_> {
     /// One VP in a partition tree: its processor, the VTL it runs (the
     /// other enabled ones after it), and where that VTL left off and why.
     /// The root partition's are named from NT's and the secure kernel's
-    /// symbols.
-    fn vp_line(&self, vp: &HvVirtualProcessor, root: bool) -> String {
-        let mut line = format!("VP {}", vp.index);
+    /// symbols. A line too long for the terminal from column `col` puts the
+    /// last exit on a line of its own, under where the VTL left off.
+    fn vp_line(&self, vp: &HvVirtualProcessor, root: bool, col: usize) -> String {
+        let mut head = format!("VP {}", vp.index);
         let cpu = processors_text(&vp.processors);
         if !cpu.is_empty() {
-            line.push_str(&format!("  CPU {cpu}"));
+            head.push_str(&format!("  CPU {cpu}"));
         }
-        line.push_str(&format!("  VTL{}", vp.vtl));
+        head.push_str(&format!("  VTL{}", vp.vtl));
         let others: Vec<String> = vp
             .vtls
             .iter()
             .filter(|vtl| vtl.level != vp.vtl)
             .map(|vtl| format!("VTL{}", vtl.level))
             .collect();
-        if !others.is_empty() {
-            line.push_str(&ui::muted(&format!(" (+{})", others.join(" "))));
-        }
+        let others = if others.is_empty() {
+            String::new()
+        } else {
+            format!(" (+{})", others.join(" "))
+        };
         let state = vp
             .vtls
             .iter()
             .find(|vtl| vtl.level == vp.vtl)
             .and_then(|vtl| vtl.state);
-        if let Some(state) = state {
-            let at = root
-                .then(|| try_format_symbol_at(&self.ctx.target, state.cr3, state.rip))
-                .flatten()
-                .map_or_else(|| ui::addr(state.rip), |symbol| ui::symbol(&symbol));
-            line.push_str(&format!("  {at}"));
-            if let Some(exit) = state.exit_reason_name() {
-                line.push_str(&ui::muted(&format!("  last exit {exit}")));
-            }
+        let styled_head = format!("{head}{}", ui::muted(&others));
+        let Some(state) = state else {
+            return styled_head;
+        };
+        let symbol = root
+            .then(|| try_format_symbol_at(&self.ctx.target, state.cr3, state.rip))
+            .flatten();
+        let (at, styled_at) = match symbol {
+            Some(symbol) => (symbol.clone(), ui::symbol(&symbol)),
+            None => (format!("{:016x}", state.rip), ui::addr(state.rip)),
+        };
+        let line = format!("{styled_head}  {styled_at}");
+        let Some(exit) = state.exit_reason_name() else {
+            return line;
+        };
+        let exit = format!("last exit {exit}");
+        // Measured plain: styling's escapes would count toward the width.
+        let plain = format!("{head}{others}  {at}  {exit}");
+        if wrap_prose(&plain, col).len() > 1 {
+            let hang = head.len() + others.len() + 2;
+            format!("{line}\n{}{}", " ".repeat(hang), ui::muted(&exit))
+        } else {
+            format!("{line}  {}", ui::muted(&exit))
         }
-        line
     }
 
     fn cmd_hvvps(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {

@@ -75,7 +75,9 @@ pub fn wrapped_dim_tail(prefix: String, hang: usize, prose: &str, col: usize) ->
 /// Wrap plain prose for display starting at terminal column `col`, capped at
 /// 100 columns of prose. Returns a single line when stdout is not a terminal
 /// (piped output wants one line per field) or the terminal is too narrow.
-/// Wrap before styling; width math over ANSI escapes miscounts.
+/// A word longer than the width stays whole on its own line: a name split
+/// in two reads as two names. Wrap before styling; width math over ANSI
+/// escapes miscounts.
 pub fn wrap_prose(text: &str, col: usize) -> Vec<String> {
     let Some((terminal_size::Width(w), _)) = terminal_size::terminal_size() else {
         return vec![text.to_string()];
@@ -84,7 +86,7 @@ pub fn wrap_prose(text: &str, col: usize) -> Vec<String> {
     if width < 20 {
         return vec![text.to_string()];
     }
-    textwrap::wrap(text, width)
+    textwrap::wrap(text, textwrap::Options::new(width).break_words(false))
         .into_iter()
         .map(|line| line.into_owned())
         .collect()
