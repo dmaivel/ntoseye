@@ -533,7 +533,7 @@ impl Target {
         let secure = self.secure_kernel()?;
         self.symbols.set_secure_roots(secure.image.dtb(), []);
         let modules = secure.modules(self.guest()?)?;
-        Guest::load_module_symbols(
+        let report = Guest::load_module_symbols(
             &self.phys,
             &self.symbols,
             modules,
@@ -541,7 +541,9 @@ impl Target {
             SessionSpace::Load,
             self.arch(),
             PdbRecovery::Automatic,
-        )
+        )?;
+        self.register_hypercall_pages();
+        Ok(report)
     }
 
     /// Scope reads and symbol lookups to a secure root already validated by
@@ -579,6 +581,7 @@ impl Target {
             Some(image) => match image.short_name.as_str() {
                 "hv" => {
                     self.register_hypervisor_symbols(dtb, image);
+                    self.register_hypercall_pages();
                     HYPERVISOR_CONTEXT.to_string()
                 }
                 "securekernel" => "VTL1".to_string(),
@@ -663,6 +666,67 @@ impl Target {
             guid,
             &names.names,
             names.extents.clone(),
+        );
+    }
+
+    /// Name the hypercall pages NT and, once its symbols are loaded, the
+    /// secure kernel use (each kernel's `HvcallCodeVa`): VTL0's and VTL1's
+    /// saved states leave off in them at every hypercall, VTL call, and VTL
+    /// return.
+    fn register_hypercall_pages(&self) {
+        let Some(guest) = &self.guest else { return };
+        if let Ok(pointer) = guest.ntoskrnl.symbol("HvcallCodeVa") {
+            self.register_hypercall_page(self.kernel_dtb(), pointer.address());
+        }
+        if let Some(secure) = guest.cached_secure_kernel()
+            && let Ok(pointer) = secure.image.symbol("HvcallCodeVa")
+        {
+            self.register_hypercall_page(secure.image.dtb(), pointer.address());
+        }
+    }
+
+    /// Name the hypercall page `pointer` points to in root `dtb` (see
+    /// [`hypercalls::hypercall_page_symbols`]) as the module `hvcall`, once
+    /// per root.
+    fn register_hypercall_page(&self, dtb: Dtb, pointer: VirtAddr) {
+        let memory = self.address_space(dtb);
+        let Ok(page) = memory.read::<u64>(pointer) else {
+            return;
+        };
+        if page == 0
+            || self
+                .symbols
+                .find_module_for_address(dtb, VirtAddr(page))
+                .is_some()
+        {
+            return;
+        }
+        let mut code = [0u8; 0x40];
+        if memory.read_bytes(VirtAddr(page), &mut code).is_err() {
+            return;
+        }
+        let names = hypercalls::hypercall_page_symbols(&code);
+        if names.is_empty() {
+            return;
+        }
+        // "hc" in the high bytes keeps these keys apart from PDB GUIDs and
+        // from the hypervisor's ("hv"); the root and the page keep each
+        // kernel's page apart.
+        let guid = (0x6863u128 << 112)
+            | (u128::from((dtb >> 12) & 0xffff_ffff) << 48)
+            | u128::from(page & 0xffff_ffff_ffff);
+        self.symbols.register_synthetic_module(
+            dtb,
+            &ModuleInfo::new("hvcall".to_string(), VirtAddr(page), 0x1000),
+            guid,
+            &names
+                .iter()
+                .map(|&(name, offset, _)| (name.to_string(), offset))
+                .collect::<Vec<_>>(),
+            names
+                .iter()
+                .map(|&(_, offset, length)| (offset, length))
+                .collect(),
         );
     }
 

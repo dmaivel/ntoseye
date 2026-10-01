@@ -111,6 +111,56 @@ pub struct HypervisorSymbols {
     pub extents: std::collections::HashMap<u32, u32>,
 }
 
+/// The hypercall page's code sequences that ntoseye names: the hypercall
+/// itself (`vmcall; ret`, which the TLFS puts at the page's start), and VTL
+/// call (code 0x11) and VTL return (0x12) for x64 (input in RCX) and x86
+/// callers (in EAX), which the TLFS places where `HvRegisterVsmCodeOffsets`
+/// says, so they are found by their bytes.
+const HYPERCALL_PAGE_SEQUENCES: [(&str, &[u8]); 5] = [
+    ("Hypercall", &[0x0f, 0x01, 0xc1, 0xc3]),
+    (
+        "VtlCall64",
+        &[
+            0x48, 0x8b, 0xc1, 0x48, 0xc7, 0xc1, 0x11, 0, 0, 0, 0x0f, 0x01, 0xc1, 0xc3,
+        ],
+    ),
+    (
+        "VtlCall32",
+        &[0x8b, 0xc8, 0xb8, 0x11, 0, 0, 0, 0x0f, 0x01, 0xc1, 0xc3],
+    ),
+    (
+        "VtlReturn64",
+        &[
+            0x48, 0x8b, 0xc1, 0x48, 0xc7, 0xc1, 0x12, 0, 0, 0, 0x0f, 0x01, 0xc1, 0xc3,
+        ],
+    ),
+    (
+        "VtlReturn32",
+        &[0x8b, 0xc8, 0xb8, 0x12, 0, 0, 0, 0x0f, 0x01, 0xc1, 0xc3],
+    ),
+];
+
+/// Names for the code of a hypercall page, from its first bytes `code`, as
+/// `(name, offset, length)`: none unless the page starts with the Intel
+/// hypercall (`vmcall; ret`), so a pointer to anything else names nothing.
+pub fn hypercall_page_symbols(code: &[u8]) -> Vec<(&'static str, u32, u32)> {
+    let (_, hypercall) = HYPERCALL_PAGE_SEQUENCES[0];
+    if !code.starts_with(hypercall) {
+        return Vec::new();
+    }
+    let mut names = vec![("Hypercall", 0, hypercall.len() as u32)];
+    for (name, bytes) in &HYPERCALL_PAGE_SEQUENCES[1..] {
+        if let Some(offset) = code
+            .windows(bytes.len())
+            .position(|window| window == *bytes)
+        {
+            names.push((name, offset as u32, bytes.len() as u32));
+        }
+    }
+    names.sort_by_key(|&(_, offset, _)| offset);
+    names
+}
+
 /// Names for the Windows hypervisor's code, as `(name, rva)` in the image at
 /// `base`: each hypercall handler by the lowest call code it serves (its TLFS
 /// name, or `HvCall` and the code when the TLFS does not name it), the
@@ -228,6 +278,35 @@ mod tests {
     use super::*;
 
     const BASE: u64 = 0xffff_f840_b140_0000;
+
+    /// The hypercall page as read live (Win11 26200): the hypercall at 0,
+    /// then VTL call and return for x86 and x64 callers. A page that does
+    /// not start with the hypercall names nothing, whatever follows.
+    #[test]
+    fn a_hypercall_page_is_named_by_its_code() {
+        let mut page = vec![0x0f, 0x01, 0xc1, 0xc3];
+        page.extend([0x8b, 0xc8, 0xb8, 0x11, 0, 0, 0, 0x0f, 0x01, 0xc1, 0xc3]);
+        page.extend([
+            0x48, 0x8b, 0xc1, 0x48, 0xc7, 0xc1, 0x11, 0, 0, 0, 0x0f, 0x01, 0xc1, 0xc3,
+        ]);
+        page.extend([0x8b, 0xc8, 0xb8, 0x12, 0, 0, 0, 0x0f, 0x01, 0xc1, 0xc3]);
+        page.extend([
+            0x48, 0x8b, 0xc1, 0x48, 0xc7, 0xc1, 0x12, 0, 0, 0, 0x0f, 0x01, 0xc1, 0xc3,
+        ]);
+        page.resize(0x40, 0xcc);
+        assert_eq!(
+            hypercall_page_symbols(&page),
+            [
+                ("Hypercall", 0, 4),
+                ("VtlCall32", 0x4, 11),
+                ("VtlCall64", 0xf, 14),
+                ("VtlReturn32", 0x1d, 11),
+                ("VtlReturn64", 0x28, 14),
+            ]
+        );
+        page[2] = 0xd9;
+        assert!(hypercall_page_symbols(&page).is_empty(), "AMD's vmmcall");
+    }
 
     /// RCX at a VMCALL: the code by TLFS name, fast, a rep call's start
     /// index and count, nested. 0x1000b is NT's synthetic IPI, seen live.
