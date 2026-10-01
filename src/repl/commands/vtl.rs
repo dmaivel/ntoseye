@@ -1,10 +1,11 @@
 use tabled::builder::Builder;
 
+use super::memory::MAX_DISASSEMBLY_INSTRUCTIONS;
 use super::memory::MAX_DISPLAY_BYTES;
 use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::error::{Error, Result};
 use crate::guest::{
-    HvPartition, HvProcessor, HvVirtualProcessor,
+    EvmcsState, HvPartition, HvProcessor, HvVirtualProcessor,
     ept::{self, Access, EptTranslation},
     evmcs_fields,
     hypercalls::tlfs_hypercall,
@@ -12,6 +13,7 @@ use crate::guest::{
 };
 use crate::repl::memory_view::{MemoryDisplayMode, display_memory_with_validity, eval_range};
 use crate::repl::*;
+use crate::target::CodeExtent;
 use crate::types::VirtAddr;
 use crate::ui;
 use crate::unwind::{halted_in_windows_hypervisor, try_format_symbol_at};
@@ -87,6 +89,14 @@ repl_command! {
     usage: "!hvd [-p] [-b|-d|-q] [<partition-id> <vp-index>] <address> [range]",
     summary: "Display the memory of a Windows hypervisor partition's guest (a Hyper-V VM, WSL2, Windows Sandbox).",
     details: "Reads the guest's memory through the EPT of the VTL its VP runs in, as its eVMCS names them: guest virtual memory through the VP's page tables (its CR3), or with -p guest physical memory. Without a partition and VP it reads the guest VP that the current vCPU's processor runs, as ~ and a stop in the hypervisor name it. -b shows bytes (the default), -d dwords, and -q qwords. The range is L<count>, an end address, or a byte length, as for db. Unreadable pages show as ??. The memory is read-only, and ntoseye has no symbols for the guest. The numbers use the current radix. Needs the VM's hv-evmcs enlightenment.",
+}
+
+repl_command! {
+    cmd_hvu;
+    names: ["!hvu"],
+    usage: "!hvu [-p] [<partition-id> <vp-index>] <address> [range]",
+    summary: "Disassemble the memory of a Windows hypervisor partition's guest (a Hyper-V VM, WSL2, Windows Sandbox).",
+    details: "Reads the guest's memory as !hvd does: guest virtual memory through the page tables (CR3) and EPT of the VTL its VP runs in, or with -p guest physical memory through the EPT. Without a partition and VP it reads the guest VP that the current vCPU's processor runs. The code decodes in the mode the VTL left off in, by its eVMCS: 64-bit in IA-32e mode with a 64-bit code segment, else 32-bit; real mode and 16-bit code give an error. The range is as for u: L<count> instructions (8 by default), or an end address or byte length, listing every instruction that starts before the range ends. The listing stops at the first unreadable page and says where. ntoseye has no symbols for the guest, so branch targets and RIP-relative operands show as addresses. The numbers use the current radix. Needs the VM's hv-evmcs enlightenment.",
 }
 
 /// How two VTLs' access to a range differs: VTL0's, then VTL1's.
@@ -206,6 +216,7 @@ fn secure_inspection_command(spec: &CommandSpec) -> bool {
             | "!hvcalls"
             | "!hvvmcs"
             | "!hvd"
+            | "!hvu"
             | ".process"
             | "attach"
             | "detach"
@@ -1168,40 +1179,9 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        let Some(SelectedVp {
-            partition: id,
-            root,
-            vp,
-        }) = self.hypervisor_vp(selector.first().copied(), selector.get(1).copied(), false)
-        else {
+        let Some(state) = self.guest_memory_state("!hvd", &selector, physical) else {
             return Ok(());
         };
-        if root && selector.is_empty() {
-            error!(
-                "!hvd reads a guest partition's memory, and the current vCPU's processor runs none; name one: !hvd <partition-id> <vp-index> <address>"
-            );
-            return Ok(());
-        }
-        let Some(state) = vp
-            .vtls
-            .iter()
-            .find(|vtl| vtl.level == vp.vtl)
-            .and_then(|vtl| vtl.state)
-        else {
-            error!(
-                "VP {} of partition {id:#x} has no eVMCS state: it has not started, or it runs without paging",
-                vp.index
-            );
-            return Ok(());
-        };
-        // Each page's read would fail the same way; say why once.
-        if !physical && !state.four_level_paging() {
-            error!(
-                "VP {} of partition {id:#x} is not in 4-level long-mode paging; read its guest physical memory with -p",
-                vp.index
-            );
-            return Ok(());
-        }
         // Page by page, so an unmapped page does not hide the rest.
         let mut data = vec![0u8; range.len()];
         let mut valid = vec![false; range.len()];
@@ -1222,6 +1202,125 @@ impl ReplState<'_> {
         }
         display_memory_with_validity(range.start, &data, Some(&valid), &mode);
         Ok(())
+    }
+
+    fn cmd_hvu(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        const DEFAULT_INSTRUCTIONS: usize = 8;
+        let mut arguments = invocation.argv.as_slice();
+        let physical = arguments.first().is_some_and(|flag| flag == "-p");
+        if physical {
+            arguments = &arguments[1..];
+        }
+        // As for !hvd: `<partition-id> <vp-index> <address> [range]`, or
+        // `<address> [range]` for the guest VP the current vCPU's processor
+        // runs.
+        if !(1..=4).contains(&arguments.len()) {
+            outln!("{}\n", command_help(invocation.name));
+            return Ok(());
+        }
+        let (selector, arguments) = arguments.split_at(if arguments.len() >= 3 { 2 } else { 0 });
+        let Some(selector) = self.eval_all(selector) else {
+            return Ok(());
+        };
+        let Some(address) = self.eval_or_report(&arguments[0]) else {
+            return Ok(());
+        };
+        // As for u: `L<count>` counts instructions; an end address or a
+        // length lists every instruction that starts before the range ends.
+        let extent = match arguments.get(1) {
+            None => CodeExtent::Count(DEFAULT_INSTRUCTIONS),
+            Some(text) => match windbg_count_expression(text) {
+                Some(count) => match self.eval_or_report(count) {
+                    Some(count) if (1..=MAX_DISASSEMBLY_INSTRUCTIONS as u64).contains(&count.0) => {
+                        CodeExtent::Count(count.0 as usize)
+                    }
+                    Some(_) => {
+                        error!("instruction count must be 1..{MAX_DISASSEMBLY_INSTRUCTIONS}");
+                        return Ok(());
+                    }
+                    None => return Ok(()),
+                },
+                None => match eval_range(text, &self.ctx.target, self.radix, address, 1) {
+                    Ok(range) if range.len() <= MAX_DISPLAY_BYTES => {
+                        CodeExtent::Before(range.end.0)
+                    }
+                    Ok(_) => {
+                        error!("range exceeds the maximum of {MAX_DISPLAY_BYTES:#x} bytes");
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        error!("{error}");
+                        return Ok(());
+                    }
+                },
+            },
+        };
+        let Some(state) = self.guest_memory_state("!hvu", &selector, physical) else {
+            return Ok(());
+        };
+        let code = match self
+            .ctx
+            .target
+            .disassemble_guest_partition(&state, !physical, address.0, extent)
+        {
+            Ok(code) => code,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
+        render_rows(&code.rows, |_| None);
+        if let Some(at) = code.unreadable {
+            let space = if physical { "physical" } else { "virtual" };
+            error!("guest {space} memory at {at:#x} is unreadable");
+        }
+        outln!();
+        Ok(())
+    }
+
+    /// The saved state of the VTL that a guest partition's VP runs in, for
+    /// `command` to read its memory: the VP `selector` names (a partition ID
+    /// and a VP index), else the guest VP the current vCPU's processor runs.
+    /// `None` after reporting why there is none, or why its virtual memory
+    /// cannot be read when `physical` is false.
+    fn guest_memory_state(
+        &mut self,
+        command: &str,
+        selector: &[u64],
+        physical: bool,
+    ) -> Option<EvmcsState> {
+        let SelectedVp {
+            partition: id,
+            root,
+            vp,
+        } = self.hypervisor_vp(selector.first().copied(), selector.get(1).copied(), false)?;
+        if root && selector.is_empty() {
+            error!(
+                "{command} reads a guest partition's memory, and the current vCPU's processor runs none; name one: {command} <partition-id> <vp-index> <address>"
+            );
+            return None;
+        }
+        let Some(state) = vp
+            .vtls
+            .iter()
+            .find(|vtl| vtl.level == vp.vtl)
+            .and_then(|vtl| vtl.state)
+        else {
+            error!(
+                "VP {} of partition {id:#x} has no eVMCS state: it has not started, or it runs without paging",
+                vp.index
+            );
+            return None;
+        };
+        // Each page's read would fail the same way; say why once.
+        if !physical && !state.four_level_paging() {
+            error!(
+                "VP {} of partition {id:#x} is not in 4-level long-mode paging; read its guest physical memory with -p",
+                vp.index
+            );
+            return None;
+        }
+        Some(state)
     }
 
     /// Each of `arguments` evaluated, or `None` after reporting the first

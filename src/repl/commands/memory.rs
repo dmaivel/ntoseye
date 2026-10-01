@@ -19,7 +19,7 @@ use crate::unwind::{
 use crate::repl::*;
 
 pub const MAX_DISPLAY_BYTES: usize = 1024 * 1024;
-const MAX_DISASSEMBLY_INSTRUCTIONS: usize = 4096;
+pub const MAX_DISASSEMBLY_INSTRUCTIONS: usize = 4096;
 const FILETIME_UNIX_MIN_SECONDS: i64 = -62_135_596_800;
 const FILETIME_UNIX_MAX_SECONDS: i64 = 253_402_300_799;
 /// Characters `d*a`/`d*u` show of each string, as `da`/`du` do by default.

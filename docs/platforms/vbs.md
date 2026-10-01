@@ -241,6 +241,16 @@ mem:1> !hvd 3 0 0x1ff26110 L10
 
 `sti; hlt` is at `0x1ff26112`, and the guest RIP is after the `hlt`. The memory is read-only, and ntoseye has no symbols or process list for the guest, so to inspect a guest in depth, attach ntoseye to it directly. A VP that has not started, such as a second VP that the firmware has not woken, has no state to read through.
 
+{command}`!hvu` `[-p] [<partition-id> <vp-index>] <address> [range]` disassembles the same memory, read as {command}`!hvd` reads it and with the same defaults. It decodes the code in the mode that the VTL left off in, by its eVMCS: 64-bit when the "IA-32e mode guest" entry control is set and the code segment is a 64-bit one (or its access rights are unusable), else 32-bit, in protected mode or compatibility mode. Real mode and 16-bit code give an error instead of a wrong listing. The range works as for {command}`u`: `L<count>` instructions (8 by default), or an end address or a length, which lists each instruction that starts before the range ends. The listing stops at the first page that it cannot read and says where. ntoseye has no symbols for the guest, so branch targets and RIP-relative operands show as addresses. The same VM, where its VP left off:
+
+```text
+mem:1> !hvu 3 0 0x1ff26110 L4
+000000001ff26110  fb  sti
+000000001ff26111  c3  ret
+000000001ff26112  fb  sti
+000000001ff26113  f4  hlt
+```
+
 A vCPU that is running a guest partition's VP when the target halts shows that guest's registers. {command}`~` and the stop line name the VP that it runs, so a WSL2 busy loop reads as follows:
 
 ```text
@@ -248,7 +258,7 @@ vCPU    RIP               Context             Symbol
 p01.03  00007c27330c4321  partition 0x4 VP 2  0x7c27330c4321
 ```
 
-With that vCPU selected, {command}`!hvd` `<address>` reads that guest's memory, at that RIP for example; from another vCPU, pass the partition ID and VP index.
+With that vCPU selected, {command}`!hvd` `<address>` reads that guest's memory and {command}`!hvu` `<address>` disassembles it, at that RIP for example; from another vCPU, pass the partition ID and VP index.
 
 ### VMCS and intercepts
 
