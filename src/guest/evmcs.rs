@@ -55,8 +55,8 @@ const GUEST_GS_BASE: usize = 0x100;
 const GUEST_CR0: usize = 0x220;
 const GUEST_CR3: usize = 0x228;
 const GUEST_CR4: usize = 0x230;
-const GUEST_IA32_EFER: usize = 0x1b8;
 const GUEST_DR7: usize = 0x238;
+const VM_ENTRY_CONTROLS: usize = 0x31c;
 const VM_EXIT_REASON: usize = 0x2b4;
 const VM_EXIT_INTR_INFO: usize = 0x2b8;
 const VM_EXIT_INSTRUCTION_LEN: usize = 0x2c8;
@@ -193,8 +193,12 @@ pub struct EvmcsState {
     pub cr0: u64,
     pub cr3: u64,
     pub cr4: u64,
-    /// The guest's IA32_EFER.
-    pub efer: u64,
+    /// VM-entry controls (Intel SDM 25.8.1). The CPU loads the guest's
+    /// IA32_EFER.LMA from "IA-32e mode guest" (bit 9) at each entry and
+    /// stores it back there at each exit; the guest IA32_EFER field is used
+    /// only under "load IA32_EFER" (bit 15), which Hyper-V leaves clear
+    /// for some guests, so that field can read 0 for a 64-bit one.
+    pub entry_controls: u32,
     pub dr7: u64,
     pub cs: u16,
     pub ss: u16,
@@ -220,12 +224,13 @@ fn u64_at(page: &[u8], offset: usize) -> u64 {
 
 impl EvmcsState {
     /// The guest translates virtual addresses with 4-level long-mode paging:
-    /// IA32_EFER.LMA set and CR4.LA57 clear. A guest in 32-bit paging, PAE
-    /// paging, or 5-level paging walks tables of another shape.
+    /// IA32_EFER.LMA set (the "IA-32e mode guest" entry control) and
+    /// CR4.LA57 clear. A guest in 32-bit paging, PAE paging, or 5-level
+    /// paging walks tables of another shape.
     pub fn four_level_paging(&self) -> bool {
-        const EFER_LMA: u64 = 1 << 10;
+        const IA32E_MODE_GUEST: u32 = 1 << 9;
         const CR4_LA57: u64 = 1 << 12;
-        self.efer & EFER_LMA != 0 && self.cr4 & CR4_LA57 == 0
+        self.entry_controls & IA32E_MODE_GUEST != 0 && self.cr4 & CR4_LA57 == 0
     }
 
     /// Whether the guest runs with mode-based execute control, under which
@@ -278,7 +283,7 @@ impl EvmcsState {
             cr0,
             cr3: u64_at(page, GUEST_CR3),
             cr4: u64_at(page, GUEST_CR4),
-            efer: u64_at(page, GUEST_IA32_EFER),
+            entry_controls: u32_at(page, VM_ENTRY_CONTROLS),
             dr7: u64_at(page, GUEST_DR7),
             cs: u16_at(page, GUEST_CS_SELECTOR),
             ss: u16_at(page, GUEST_SS_SELECTOR),
@@ -512,6 +517,31 @@ mod tests {
 
     fn scan_ram(ram: &Ram) -> EvmcsPages {
         scan(ram, &[(0, ram.0.len() as u64)], &AtomicBool::new(false)).unwrap()
+    }
+
+    /// A WSL2 guest's eVMCS, as read live: in 64-bit 4-level paging (the
+    /// "IA-32e mode guest" entry control set, CR4.LA57 clear) with the guest
+    /// IA32_EFER field holding no LMA, because "load IA32_EFER" is clear.
+    /// The mode is the entry control's; LA57 makes it 5-level.
+    #[test]
+    fn long_mode_is_the_ia32e_entry_control_not_the_unloaded_efer_field() {
+        let mut page = vec![0u8; PAGE_SIZE];
+        page[..4].copy_from_slice(&EVMCS_VERSION.to_le_bytes());
+        page[HOST_CR3..HOST_CR3 + 8].copy_from_slice(&0x10_0000u64.to_le_bytes());
+        page[HOST_RIP..HOST_RIP + 8].copy_from_slice(&0xffff_f847_989a_843du64.to_le_bytes());
+        page[GUEST_CR0..GUEST_CR0 + 8].copy_from_slice(&0x8005_0033u64.to_le_bytes());
+        page[GUEST_CR3..GUEST_CR3 + 8].copy_from_slice(&0x103_b802u64.to_le_bytes());
+        page[0x1b8..0x1c0].copy_from_slice(&0x801u64.to_le_bytes());
+        let with = |entry_controls: u32, cr4: u64| {
+            let mut page = page.clone();
+            page[VM_ENTRY_CONTROLS..VM_ENTRY_CONTROLS + 4]
+                .copy_from_slice(&entry_controls.to_le_bytes());
+            page[GUEST_CR4..GUEST_CR4 + 8].copy_from_slice(&cr4.to_le_bytes());
+            EvmcsState::parse(&page).unwrap().four_level_paging()
+        };
+        assert!(with(0x53ff, 0x3726f0));
+        assert!(!with(0x53ff, 0x3726f0 | 1 << 12), "5-level paging");
+        assert!(!with(0x53ff & !(1 << 9), 0x3726f0), "not in IA-32e mode");
     }
 
     /// The scan runs once per boot, but the VTL a processor last entered
