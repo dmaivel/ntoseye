@@ -67,12 +67,11 @@ impl Session {
         refresh_windows_thread_context_for_backend_thread(&mut self.target, &self.current_thread);
         // An instruction breakpoint's trap on the Windows hypervisor's VM-exit
         // entry fires after KVM wrote the exit's eVMCS, so its saved state is
-        // current. A break-in that lands on that address proves nothing, and
-        // `classify_stop_event` never resolves one as a breakpoint.
+        // current. A break-in that merely lands on that address proves nothing.
         self.target.breakpoint_stop = match resolution {
             StopResolution::Breakpoint {
                 breakpoint, rip, ..
-            } if breakpoint.address.0 == *rip => {
+            } if breakpoint.address.0 == *rip && !event.break_in => {
                 self.target.registers.as_ref().and_then(|registers| {
                     BreakpointStop::new(&self.current_thread, *rip, registers)
                 })
@@ -339,23 +338,6 @@ impl Session {
             }
             self.continue_backend(ContinueDisposition::Handled)?;
             return Ok(StopResolution::ModulesChanged);
-        }
-
-        // A break-in the host asked for stops the vCPUs wherever they are,
-        // before the instruction at the PC runs. On an armed address it is
-        // still no breakpoint's hit, nor a bugcheck or module trap's: counted
-        // as one, a declined `when=` would resume past the user's Ctrl+C.
-        if event.break_in {
-            let registers = self.backend.read_registers()?;
-            let rip = self.register_map.read_u64("rip", &registers).unwrap_or(0);
-            update_target_context_from_registers(
-                &mut self.target,
-                &self.register_map,
-                Ok(registers),
-            );
-            let resolution = StopResolution::Stopped { event, rip };
-            self.record_visible_stop(&resolution);
-            return Ok(resolution);
         }
 
         match resolve_watchpoint_stop(
