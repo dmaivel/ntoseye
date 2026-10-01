@@ -166,7 +166,7 @@ The EPT pointer is the root of the VTL's second-level address translation (SLAT)
 
 ### Page permissions of each VTL
 
-{command}`!hvept` `[-v] <address> [partition-id [vp-index]]` translates a guest physical address through the EPT of each VTL of a VP, the root partition's VP 0 by default. Each row shows the host physical address, the access that every level of the walk allows, the page size, and the memory type. With memory integrity (HVCI) on, VTL0 can execute NT's code but not write it, and can write its data but not execute it, while VTL1 has full access. VTL0 has no access at all to the pages of the secure kernel:
+{command}`!hvept` `[-v] <address> [partition-id [vp-index]]` translates a guest physical address through the EPT of each VTL of a VP: by default the VP that the current vCPU's processor runs, or the root partition's VP 0, and with `-v` always a root partition's VP. It names the VP first. Each row shows the host physical address, the access that every level of the walk allows, the page size, and the memory type. With memory integrity (HVCI) on, VTL0 can execute NT's code but not write it, and can write its data but not execute it, while VTL1 has full access. VTL0 has no access at all to the pages of the secure kernel:
 
 With `-v`, the address is virtual, in the current address space ({command}`.process`, or the {command}`.vtl` `1` scope), and the command translates it through the guest's page tables first:
 
@@ -193,7 +193,7 @@ VTL  EPT pointer  Host physical                  Access  User exec  Page  Type
 
 With `-v`, the address is virtual in the current address space (the `.process` or VTL1 scope), which belongs to the root partition, so `-v` works only for the root partition's VPs; {command}`!hvd` reads a guest partition's virtual memory. In the SDK, translate a virtual address with `memory.translate()` first.
 
-{command}`!hveptdiff` `[partition-id [vp-index]]` walks the whole EPT of VTL0 and of VTL1 of a VP and lists every range of guest physical memory that the two map differently. A summary of how they differ comes first, largest first. With memory integrity on:
+{command}`!hveptdiff` `[partition-id [vp-index]]` walks the whole EPT of VTL0 and of VTL1 of a VP, by default the one that the current vCPU's processor runs, and lists every range of guest physical memory that the two map differently. A summary of how they differ comes first, largest first. With memory integrity on:
 
 ```text
 mem:1> !hveptdiff
@@ -217,7 +217,7 @@ Most of memory is `rw-` in VTL0 because memory integrity does not let NT execute
 
 ### Memory of a guest partition
 
-{command}`!hvd` `[-p] [-b|-d|-q] <partition-id> <vp-index> <address> [range]` shows the memory of the guest that a child partition runs, such as a Hyper-V VM, WSL2, or Windows Sandbox inside the target. It reads guest virtual memory through the page tables of the VTL that the VP runs in (the CR3 in its eVMCS), or guest physical memory with `-p`, and it translates both through that VTL's EPT. Virtual addresses need a guest in 4-level long-mode paging; for a guest in 32-bit, PAE, or 5-level paging, read guest physical memory with `-p`. `-d` and `-q` show dwords and qwords, and the range works as for {command}`db`. Pages that are not mapped show as `??`. Here, a VM that sits in its firmware halted in the idle loop of its UEFI:
+{command}`!hvd` `[-p] [-b|-d|-q] [<partition-id> <vp-index>] <address> [range]` shows the memory of the guest that a child partition runs, such as a Hyper-V VM, WSL2, or Windows Sandbox inside the target. Without a partition and VP, it reads the guest VP that the current vCPU's processor runs. It reads guest virtual memory through the page tables of the VTL that the VP runs in (the CR3 in its eVMCS), or guest physical memory with `-p`, and it translates both through that VTL's EPT. Virtual addresses need a guest in 4-level long-mode paging; for a guest in 32-bit, PAE, or 5-level paging, read guest physical memory with `-p`. `-d` and `-q` show dwords and qwords, and the range works as for {command}`db`. Pages that are not mapped show as `??`. Here, a VM that sits in its firmware halted in the idle loop of its UEFI:
 
 ```text
 mem:1> !hvvps 3
@@ -237,11 +237,11 @@ vCPU    RIP               Context             Symbol
 p01.03  00007c27330c4321  partition 0x4 VP 2  0x7c27330c4321
 ```
 
-Pass the same partition ID and VP index to {command}`!hvd` to read memory at that RIP.
+With that vCPU selected, {command}`!hvd` `<address>` reads that guest's memory, at that RIP for example; from another vCPU, pass the partition ID and VP index.
 
 ### VMCS and intercepts
 
-{command}`!hvvmcs` `[-msr|-io] [partition-id [vp-index [vtl]]]` shows the eVMCS of a VTL, the root partition's VP 0 and the VTL that it runs in by default: each field with its name, offset, and value. With `-msr`, it shows the MSRs whose reads and writes the VTL's MSR bitmap intercepts, and with `-io`, the I/O ports that its I/O bitmaps intercept. When the VM-execution controls do not use the bitmaps, it says that every access exits, or none. The eVMCS layout is the Hyper-V TLFS's, so this works on every hypervisor build.
+{command}`!hvvmcs` `[-msr|-io] [partition-id [vp-index [vtl]]]` shows the eVMCS of a VTL, by default of the VP that the current vCPU's processor runs (a guest partition's first, else the root partition's) and the VTL that it runs in: each field with its name, offset, and value. With `-msr`, it shows the MSRs whose reads and writes the VTL's MSR bitmap intercepts, and with `-io`, the I/O ports that its I/O bitmaps intercept. When the VM-execution controls do not use the bitmaps, it says that every access exits, or none. The eVMCS layout is the Hyper-V TLFS's, so this works on every hypervisor build.
 
 ```text
 mem:1> !hvvmcs -io

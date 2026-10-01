@@ -1,9 +1,10 @@
 use tabled::builder::Builder;
 
 use super::memory::MAX_DISPLAY_BYTES;
+use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::error::{Error, Result};
 use crate::guest::{
-    HvProcessor, HvVirtualProcessor,
+    HvPartition, HvProcessor, HvVirtualProcessor,
     ept::{self, Access, EptTranslation},
     evmcs_fields,
     hypercalls::tlfs_hypercall,
@@ -52,7 +53,7 @@ repl_command! {
     names: ["!hvept"],
     usage: "!hvept [-v] <address> [partition-id [vp-index]]",
     summary: "Translate a guest physical address through each VTL's EPT (second-level address translation) of a Windows hypervisor VP.",
-    details: "Walks the extended page tables that each enabled VTL's eVMCS names, for the root partition's VP 0 by default. The address is guest physical, or with -v virtual in the current address space (the .process or VTL1 scope), which the command translates through the guest's page tables first; that space is the root partition's, so -v takes only a root partition VP. Each row shows the VTL, its EPT pointer, the host physical address, the access that every level of the walk allows (r, w, and x, where x is supervisor-mode execute when the VTL uses mode-based execute control), user-mode execute under that control, the page size, and the memory type, or the level where the walk found no entry. This is how memory integrity (HVCI) and the secure kernel set page permissions that NT cannot change. The address and IDs use the current radix. Needs the VM's hv-evmcs enlightenment. See !hvpartitions for where the objects come from.",
+    details: "Walks the extended page tables that each enabled VTL's eVMCS names, by default for the VP the current vCPU's processor runs (with -v the root partition's), or the root partition's VP 0. The address is guest physical, or with -v virtual in the current address space (the .process or VTL1 scope), which the command translates through the guest's page tables first; that space is the root partition's, so -v takes only a root partition VP. Each row shows the VTL, its EPT pointer, the host physical address, the access that every level of the walk allows (r, w, and x, where x is supervisor-mode execute when the VTL uses mode-based execute control), user-mode execute under that control, the page size, and the memory type, or the level where the walk found no entry. This is how memory integrity (HVCI) and the secure kernel set page permissions that NT cannot change. The address and IDs use the current radix. Needs the VM's hv-evmcs enlightenment. See !hvpartitions for where the objects come from.",
 }
 
 repl_command! {
@@ -60,7 +61,7 @@ repl_command! {
     names: ["!hveptdiff"],
     usage: "!hveptdiff [partition-id [vp-index]]",
     summary: "List the guest physical ranges that VTL0's and VTL1's EPTs of a Windows hypervisor VP map differently.",
-    details: "Walks the whole EPT of VTL0 and of VTL1 of a VP, the root partition's VP 0 by default, and lists each range of guest physical memory that the two map with different access, or that only one of them maps, with the access in each (r, w, x, and u for user-mode execute under mode-based execute control). Adjacent ranges that differ the same way are merged. These are the pages that the secure kernel and memory integrity (HVCI) protect from NT. The IDs use the current radix. Needs VBS and the VM's hv-evmcs enlightenment.",
+    details: "Walks the whole EPT of VTL0 and of VTL1 of a VP, by default the one the current vCPU's processor runs (a guest partition's first), else the root partition's VP 0, and lists each range of guest physical memory that the two map with different access, or that only one of them maps, with the access in each (r, w, x, and u for user-mode execute under mode-based execute control). Adjacent ranges that differ the same way are merged. These are the pages that the secure kernel and memory integrity (HVCI) protect from NT. The IDs use the current radix. Needs VBS and the VM's hv-evmcs enlightenment.",
 }
 
 repl_command! {
@@ -76,15 +77,15 @@ repl_command! {
     names: ["!hvvmcs"],
     usage: "!hvvmcs [-msr|-io] [partition-id [vp-index [vtl]]]",
     summary: "Show the eVMCS of a VTL of a Windows hypervisor VP, or the MSRs and I/O ports it intercepts.",
-    details: "Reads the Enlightened VMCS of a VTL, the root partition's VP 0 and the VTL it runs in by default, and shows each field with its offset and value. With -msr, it shows the MSRs whose reads and writes the VTL's MSR bitmap intercepts, and with -io the I/O ports its I/O bitmaps intercept, or that every access is intercepted when the VM-execution controls do not use the bitmaps. The layout is the Hyper-V TLFS's, so this does not depend on the hypervisor build. The IDs use the current radix. Needs the VM's hv-evmcs enlightenment.",
+    details: "Reads the Enlightened VMCS of a VTL, by default the VP the current vCPU's processor runs (a guest partition's first, else the root partition's) and the VTL it runs in, and shows each field with its offset and value. With -msr, it shows the MSRs whose reads and writes the VTL's MSR bitmap intercepts, and with -io the I/O ports its I/O bitmaps intercept, or that every access is intercepted when the VM-execution controls do not use the bitmaps. The layout is the Hyper-V TLFS's, so this does not depend on the hypervisor build. The IDs use the current radix. Needs the VM's hv-evmcs enlightenment.",
 }
 
 repl_command! {
     cmd_hvd;
     names: ["!hvd"],
-    usage: "!hvd [-p] [-b|-d|-q] <partition-id> <vp-index> <address> [range]",
+    usage: "!hvd [-p] [-b|-d|-q] [<partition-id> <vp-index>] <address> [range]",
     summary: "Display the memory of a Windows hypervisor partition's guest (a Hyper-V VM, WSL2, Windows Sandbox).",
-    details: "Reads the guest's memory through the EPT of the VTL its VP runs in, as its eVMCS names them: guest virtual memory through the VP's page tables (its CR3), or with -p guest physical memory. -b shows bytes (the default), -d dwords, and -q qwords. The range is L<count>, an end address, or a byte length, as for db. Unreadable pages show as ??. The memory is read-only, and ntoseye has no symbols for the guest. The numbers use the current radix. Needs the VM's hv-evmcs enlightenment.",
+    details: "Reads the guest's memory through the EPT of the VTL its VP runs in, as its eVMCS names them: guest virtual memory through the VP's page tables (its CR3), or with -p guest physical memory. Without a partition and VP it reads the guest VP that the current vCPU's processor runs, as ~ and a stop in the hypervisor name it. -b shows bytes (the default), -d dwords, and -q qwords. The range is L<count>, an end address, or a byte length, as for db. Unreadable pages show as ??. The memory is read-only, and ntoseye has no symbols for the guest. The numbers use the current radix. Needs the VM's hv-evmcs enlightenment.",
 }
 
 /// How two VTLs' access to a range differs: VTL0's, then VTL1's.
@@ -129,6 +130,51 @@ struct SelectedVp {
     /// The partition is the root partition.
     root: bool,
     vp: HvVirtualProcessor,
+}
+
+/// The VP a hypervisor command shows by default, as indexes into
+/// `partitions` and its VPs: the one processor `number` (the current
+/// vCPU's) runs or last ran, a guest partition's first unless `root_only`,
+/// then the root partition's VP on that processor (its VPs are pinned to
+/// the processors with their numbers), then the root's VP 0.
+fn default_vp(
+    partitions: &[HvPartition],
+    number: Option<u16>,
+    root_only: bool,
+) -> Option<(usize, usize)> {
+    let number = number.map(u32::from);
+    let runs = |vp: &HvVirtualProcessor| {
+        number.is_some_and(|number| {
+            vp.processors
+                .iter()
+                .any(|processor| processor.number == Some(number))
+        })
+    };
+    if !root_only {
+        let guest = partitions
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find_map(|(at, partition)| {
+                let vp = partition.virtual_processors.iter().position(runs)?;
+                Some((at, vp))
+            });
+        if guest.is_some() {
+            return guest;
+        }
+    }
+    let root = partitions.first()?;
+    let vp = root
+        .virtual_processors
+        .iter()
+        .position(runs)
+        .or_else(|| {
+            root.virtual_processors
+                .iter()
+                .position(|vp| number.is_some_and(|number| vp.index == number))
+        })
+        .unwrap_or(0);
+    (vp < root.virtual_processors.len()).then_some((0, vp))
 }
 
 /// The name of an EPT memory type (Intel SDM 29.3.7).
@@ -551,8 +597,15 @@ impl ReplState<'_> {
         let Some(values) = self.eval_all(arguments) else {
             return Ok(());
         };
-        let Some(SelectedVp { root, vp, .. }) =
-            self.hypervisor_vp(values.get(1).copied(), values.get(2).copied())
+        let Some(SelectedVp {
+            partition: id,
+            root,
+            vp,
+        }) = self.hypervisor_vp(
+            values.get(1).copied(),
+            values.get(2).copied(),
+            virtual_address,
+        )
         else {
             return Ok(());
         };
@@ -564,6 +617,10 @@ impl ReplState<'_> {
             );
             return Ok(());
         }
+        outln!(
+            "{}",
+            ui::muted(&format!("VP {} of partition {id:#x}", vp.index))
+        );
         let gpa = if virtual_address {
             match self.ctx.target.virt_to_phys(None, VirtAddr(values[0])) {
                 Ok(Some(gpa)) => {
@@ -651,10 +708,14 @@ impl ReplState<'_> {
         };
         let Some(SelectedVp {
             partition: id, vp, ..
-        }) = self.hypervisor_vp(values.first().copied(), values.get(1).copied())
+        }) = self.hypervisor_vp(values.first().copied(), values.get(1).copied(), false)
         else {
             return Ok(());
         };
+        outln!(
+            "{}",
+            ui::muted(&format!("VP {} of partition {id:#x}", vp.index))
+        );
         let states: Vec<_> = [0, 1]
             .iter()
             .map(|level| {
@@ -809,7 +870,7 @@ impl ReplState<'_> {
         };
         let Some(SelectedVp {
             partition: id, vp, ..
-        }) = self.hypervisor_vp(values.first().copied(), values.get(1).copied())
+        }) = self.hypervisor_vp(values.first().copied(), values.get(1).copied(), false)
         else {
             return Ok(());
         };
@@ -935,15 +996,21 @@ impl ReplState<'_> {
             }
             arguments = &arguments[1..];
         }
-        if !(3..=4).contains(&arguments.len()) {
+        // `<partition-id> <vp-index> <address> [range]`, or `<address>
+        // [range]` for the guest VP the current vCPU's processor runs.
+        if !(1..=4).contains(&arguments.len()) {
             outln!("{}\n", command_help(invocation.name));
             return Ok(());
         }
-        let Some(values) = self.eval_all(&arguments[..3]) else {
+        let (selector, arguments) = arguments.split_at(if arguments.len() >= 3 { 2 } else { 0 });
+        let Some(selector) = self.eval_all(selector) else {
             return Ok(());
         };
-        let start = VirtAddr(values[2]);
-        let range = match arguments.get(3) {
+        let Some(address) = self.eval_or_report(&arguments[0]) else {
+            return Ok(());
+        };
+        let start = VirtAddr(address.0);
+        let range = match arguments.get(1) {
             Some(text) => eval_range(text, &self.ctx.target, self.radix, start, item),
             None => eval_range("L80", &self.ctx.target, NumberRadix::Hexadecimal, start, 1),
         };
@@ -959,11 +1026,19 @@ impl ReplState<'_> {
             }
         };
         let Some(SelectedVp {
-            partition: id, vp, ..
-        }) = self.hypervisor_vp(Some(values[0]), Some(values[1]))
+            partition: id,
+            root,
+            vp,
+        }) = self.hypervisor_vp(selector.first().copied(), selector.get(1).copied(), false)
         else {
             return Ok(());
         };
+        if root && selector.is_empty() {
+            error!(
+                "!hvd reads a guest partition's memory, and the current vCPU's processor runs none; name one: !hvd <partition-id> <vp-index> <address>"
+            );
+            return Ok(());
+        }
         let Some(state) = vp
             .vtls
             .iter()
@@ -1015,9 +1090,16 @@ impl ReplState<'_> {
             .collect()
     }
 
-    /// VP `index` (0 by default) of partition `id` (the root by default), with
-    /// its partition's ID, or `None` after reporting why there is none.
-    fn hypervisor_vp(&mut self, id: Option<u64>, index: Option<u64>) -> Option<SelectedVp> {
+    /// VP `index` (0 by default) of partition `id`, with its partition's ID,
+    /// or `None` after reporting why there is none. Without either, the VP
+    /// the current vCPU's processor runs (see [`default_vp`]); `root_only`
+    /// keeps that to the root partition's.
+    fn hypervisor_vp(
+        &mut self,
+        id: Option<u64>,
+        index: Option<u64>,
+        root_only: bool,
+    ) -> Option<SelectedVp> {
         let partitions = match self.ctx.target.hypervisor_partitions() {
             Ok(partitions) => partitions,
             Err(error) => {
@@ -1025,6 +1107,16 @@ impl ReplState<'_> {
                 return None;
             }
         };
+        if id.is_none() && index.is_none() {
+            let number = processor_index_from_backend_thread_id(&self.ctx.current_thread);
+            let (partition, vp) = default_vp(&partitions, number, root_only)?;
+            let partition = &partitions[partition];
+            return Some(SelectedVp {
+                partition: partition.id,
+                root: partition.parent.is_none(),
+                vp: partition.virtual_processors[vp].clone(),
+            });
+        }
         let partition = match id {
             Some(id) => partitions.into_iter().find(|p| p.id == id),
             None => partitions.into_iter().next(),
@@ -1083,6 +1175,42 @@ mod tests {
         command_registry()
             .get(name)
             .unwrap_or_else(|| panic!("'{name}' is not registered"))
+    }
+
+    /// A hypervisor command without a VP shows the one the current vCPU's
+    /// processor runs: a guest partition's first, unless it takes only the
+    /// root's; then the root's VP on that processor, found by number when
+    /// the processor runs a guest's; then the root's VP 0.
+    #[test]
+    fn the_default_vp_is_the_one_the_current_processor_runs() {
+        let vp = |index, processor: Option<u32>| HvVirtualProcessor {
+            index,
+            address: 0,
+            vtl: 0,
+            vtls: Vec::new(),
+            processors: processor
+                .map(|number| HvProcessor {
+                    block: 0,
+                    number: Some(number),
+                })
+                .into_iter()
+                .collect(),
+        };
+        let partition = |id, parent, virtual_processors| HvPartition {
+            address: 0,
+            id,
+            parent,
+            privileges: 0,
+            virtual_processors,
+        };
+        let partitions = [
+            partition(1, None, vec![vp(0, Some(0)), vp(1, None), vp(2, Some(2))]),
+            partition(7, Some(1), vec![vp(0, None), vp(1, Some(1))]),
+        ];
+        assert_eq!(default_vp(&partitions, Some(1), false), Some((1, 1)));
+        assert_eq!(default_vp(&partitions, Some(1), true), Some((0, 1)));
+        assert_eq!(default_vp(&partitions, Some(2), false), Some((0, 2)));
+        assert_eq!(default_vp(&partitions, None, false), Some((0, 0)));
     }
 
     #[test]
