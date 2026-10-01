@@ -19,6 +19,7 @@ mod evmcs;
 pub mod evmcs_fields;
 mod exit_registers;
 pub mod hv_layout;
+pub mod hypercall_input;
 pub mod hypercalls;
 pub mod hypervisor;
 mod image;

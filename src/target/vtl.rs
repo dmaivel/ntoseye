@@ -20,6 +20,7 @@ use crate::{
         ept::{self, EptTranslation},
         hv_layout,
         hv_layout::HypercallEntry,
+        hypercall_input,
         hypercalls::{self, HypercallCaller, HypercallInput},
         hypervisor,
     },
@@ -27,7 +28,7 @@ use crate::{
     pe::{read_pe_header_page, size_of_image},
     phys::PhysMem,
     symbols::SymbolStore,
-    types::{Arch, Dtb, PhysAddr, VirtAddr},
+    types::{Arch, CodeMachine, Dtb, PhysAddr, VirtAddr},
     unwind::halted_in_windows_hypervisor,
 };
 
@@ -96,6 +97,10 @@ pub struct SavedVtlContext {
     /// vCPU is past the entry code's stores, or, stopped on a breakpoint on
     /// the entry, the vCPU's own.
     pub general_registers: std::result::Result<HashMap<&'static str, u64>, String>,
+    /// What the exit says of a hypercall: for a VMCALL whose registers are
+    /// known, the call with its input decoded (see
+    /// [`Target::exit_hypercall`]).
+    pub hypercall: HypercallInput,
 }
 
 /// A vCPU that stopped on an instruction breakpoint at the current stop:
@@ -111,34 +116,6 @@ pub struct BreakpointStop {
     general_registers: HashMap<&'static str, u64>,
 }
 
-/// The hypercall of `state`'s exit, when it is a VMCALL and `registers`, the
-/// exit's general-purpose registers, are known.
-fn exit_detail(
-    state: &EvmcsState,
-    registers: Option<&HashMap<&'static str, u64>>,
-) -> Option<String> {
-    match hypercall_input(state, registers) {
-        HypercallInput::Known(rcx) => Some(hypercalls::describe_hypercall_input(rcx)),
-        HypercallInput::NotHypercall | HypercallInput::Unknown => None,
-    }
-}
-
-/// What `state`'s exit says of a hypercall: the input in RCX of a VMCALL,
-/// from `registers`, the exit's general-purpose registers, when known.
-fn hypercall_input(
-    state: &EvmcsState,
-    registers: Option<&HashMap<&'static str, u64>>,
-) -> HypercallInput {
-    const VMCALL: u32 = 18;
-    if state.exit_reason & 0xffff != VMCALL {
-        return HypercallInput::NotHypercall;
-    }
-    match registers.and_then(|registers| registers.get("rcx")) {
-        Some(&rcx) => HypercallInput::Known(rcx),
-        None => HypercallInput::Unknown,
-    }
-}
-
 /// A guest partition's virtual processor that a processor runs, or last
 /// ran: at a stop in the hypervisor, the VP whose exit it handles, or which
 /// it is about to enter, rather than one of the root's.
@@ -152,6 +129,9 @@ pub struct ServedVp {
     /// The general-purpose registers of the VP's last exit, as
     /// [`SavedVtlContext::general_registers`], or why they are not known.
     pub general_registers: std::result::Result<HashMap<&'static str, u64>, String>,
+    /// The hypercall of the VP's last exit, as
+    /// [`SavedVtlContext::hypercall`].
+    pub hypercall: HypercallInput,
 }
 
 impl ServedVp {
@@ -184,7 +164,7 @@ impl ServedVp {
 
     /// The hypercall of a VMCALL exit, when its registers are known.
     pub fn exit_detail(&self) -> Option<String> {
-        exit_detail(self.state.as_ref()?, self.general_registers.as_ref().ok())
+        self.hypercall.call().map(|call| call.summary())
     }
 }
 
@@ -205,10 +185,10 @@ impl BreakpointStop {
 }
 
 impl SavedVtlContext {
-    /// The hypercall of a VMCALL exit, from the RCX of its registers, when
-    /// they are known (see [`hypercalls::describe_hypercall_input`]).
+    /// The hypercall of a VMCALL exit on one line, when its registers are
+    /// known (see [`hypercall_input::DecodedHypercall::summary`]).
     pub fn exit_detail(&self) -> Option<String> {
-        exit_detail(&self.state, self.general_registers.as_ref().ok())
+        self.hypercall.call().map(|call| call.summary())
     }
 
     /// The saved registers under the names the register display and the
@@ -410,20 +390,19 @@ impl Target {
         let any_current = vtl0.iter().chain(&vtl1).any(|state| state.current);
         let one = |states: Vec<EvmcsState>, vtl: u8| match states.as_slice() {
             [] => Ok(None),
-            [state] => Ok(Some(SavedVtlContext {
-                vtl,
-                state: *state,
-                may_be_stale: rip == state.host_rip
-                    && entered.is_none()
-                    && (state.current || !any_current),
-                general_registers: self.saved_general_registers(
-                    cr3 & mask,
-                    rip,
-                    state,
-                    any_current,
-                    entered,
-                ),
-            })),
+            [state] => {
+                let general_registers =
+                    self.saved_general_registers(cr3 & mask, rip, state, any_current, entered);
+                Ok(Some(SavedVtlContext {
+                    vtl,
+                    state: *state,
+                    may_be_stale: rip == state.host_rip
+                        && entered.is_none()
+                        && (state.current || !any_current),
+                    hypercall: self.exit_hypercall(state, general_registers.as_ref()),
+                    general_registers,
+                }))
+            }
             many => Err(Error::SavedVtlState(format!(
                 "{} eVMCS pages of this virtual processor hold VTL{vtl} state",
                 many.len()
@@ -1223,9 +1202,51 @@ impl Target {
             partition,
             vp: vp.index,
             vtl,
+            hypercall: match &state {
+                Some(state) => self.exit_hypercall(state, general_registers.as_ref()),
+                None => HypercallInput::Unknown(
+                    "the partition walk found no saved state of the VP".to_string(),
+                ),
+            },
             state,
             general_registers,
         })
+    }
+
+    /// What `state`'s exit says of a hypercall: for a VMCALL whose
+    /// general-purpose registers are known (`registers`, or why they are not),
+    /// the call with its input decoded. An input in memory is read at its GPA
+    /// through the EPT of the calling VTL, which `state` holds, whether the
+    /// VTL is the root partition's or a guest's.
+    pub fn exit_hypercall(
+        &self,
+        state: &EvmcsState,
+        registers: std::result::Result<&HashMap<&'static str, u64>, &String>,
+    ) -> HypercallInput {
+        if !state.is_vmcall() {
+            return HypercallInput::NotHypercall;
+        }
+        let registers = match registers {
+            Ok(registers) => registers,
+            Err(reason) => return HypercallInput::Unknown(reason.clone()),
+        };
+        let long_mode = matches!(state.code_machine(), Ok(CodeMachine::Amd64));
+        let Some((value, input, output)) =
+            hypercall_input::hypercall_registers(registers, long_mode)
+        else {
+            return HypercallInput::Unknown(
+                "the exit's registers lack a hypercall parameter register".to_string(),
+            );
+        };
+        HypercallInput::Known(Box::new(hypercall_input::decode_hypercall(
+            value,
+            input,
+            output,
+            |gpa, buf| {
+                self.read_guest_partition(state, false, gpa, buf)
+                    .map_err(|error| error.to_string())
+            },
+        )))
     }
 
     /// The VP whose exit processor `number`, a vCPU at `rip` halted in the
@@ -1241,14 +1262,18 @@ impl Target {
         let partitions = self.hypervisor_partitions().ok()?;
         if let Some(served) = self.served_guest_vp_in(&partitions, cr3, rip, number) {
             let input = match &served.state {
-                Some(state) if state.current => {
-                    hypercall_input(state, served.general_registers.as_ref().ok())
-                }
-                _ => HypercallInput::Unknown,
+                Some(state) if !state.current => HypercallInput::Unknown(
+                    "the processor's current eVMCS is not this VP's, so its saved state is one \
+                     exit behind or more"
+                        .to_string(),
+                ),
+                _ => served.hypercall,
             };
             return Some(HypercallCaller {
                 partition: served.partition,
+                root: false,
                 vp: served.vp,
+                vtl: served.vtl,
                 input,
             });
         }
@@ -1272,8 +1297,10 @@ impl Target {
             .or_else(|| root.virtual_processors.iter().find(|vp| vp.index == number))?;
         Some(HypercallCaller {
             partition: root.id,
+            root: true,
             vp: vp.index,
-            input: hypercall_input(&current.state, current.general_registers.as_ref().ok()),
+            vtl: current.vtl,
+            input: current.hypercall,
         })
     }
 
@@ -1475,5 +1502,70 @@ mod tests {
             .disassemble_guest_partition(&state, false, unmapped, CodeExtent::Count(1))
             .unwrap();
         assert_eq!((code.rows.len(), code.unreadable), (0, Some(unmapped)));
+    }
+
+    /// A VMCALL's input is read at its GPA through the caller's EPT, from
+    /// the code page here, up to the end of its page; an unmapped GPA keeps
+    /// the call with no fields. A 32-bit caller passes register pairs, and
+    /// an exit that is no VMCALL, or whose registers are unknown, has no
+    /// call.
+    #[test]
+    fn a_vmcall_input_reads_through_the_callers_ept() {
+        let (session, long) = guest_session();
+        let vmcall = EvmcsState {
+            exit_reason: 18,
+            ..long
+        };
+        let registers = |rcx: u64, rdx: u64| -> HashMap<&'static str, u64> {
+            EXIT_GPRS
+                .iter()
+                .map(|&name| (name, 0))
+                .chain([("rcx", rcx), ("rdx", rdx), ("r8", 0x7000)])
+                .collect()
+        };
+        let target = &session.target;
+        let space = registers(0x0002, CODE_GPA + CODE_OFFSET - 8);
+        let HypercallInput::Known(call) = target.exit_hypercall(&vmcall, Ok(&space)) else {
+            panic!("no call");
+        };
+        assert_eq!(call.input_gpa, Some(CODE_GPA + CODE_OFFSET - 8));
+        assert_eq!(call.output_gpa, Some(0x7000));
+        let read: Vec<_> = call
+            .fields
+            .iter()
+            .map(|field| (field.offset, field.value))
+            .collect();
+        // `CODE` and the two nops after it, little-endian.
+        assert_eq!(read, [(0, 0), (8, 0x90c3_c101_0fc8_8948)]);
+        assert!(call.unavailable.is_some(), "ProcessorMask is past the page");
+
+        let unmapped = registers(0x0002, CODE_GPA + 0x1000);
+        let HypercallInput::Known(call) = target.exit_hypercall(&vmcall, Ok(&unmapped)) else {
+            panic!("no call");
+        };
+        assert!(call.fields.is_empty() && call.unavailable.is_some());
+
+        let protected = EvmcsState {
+            entry_controls: 0,
+            cs_access_rights: 0xc09b,
+            ..vmcall
+        };
+        let mut pairs = registers(0, 0);
+        pairs.extend([("rax", 0x0001_0008), ("rdx", 0), ("rcx", 0x2a)]);
+        let HypercallInput::Known(call) = target.exit_hypercall(&protected, Ok(&pairs)) else {
+            panic!("no call");
+        };
+        assert_eq!((call.control.code, call.control.fast), (0x0008, true));
+        assert_eq!(call.fields[0].value, 0x2a);
+
+        assert_eq!(
+            target.exit_hypercall(&long, Ok(&space)),
+            HypercallInput::NotHypercall
+        );
+        let reason = "the vCPU is saving them".to_string();
+        assert_eq!(
+            target.exit_hypercall(&vmcall, Err(&reason)),
+            HypercallInput::Unknown(reason.clone())
+        );
     }
 }

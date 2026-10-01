@@ -4,6 +4,7 @@
 //! current pages name without a code, from TLFS 6.0b.
 
 use super::hv_layout::HypercallEntry;
+use super::hypercall_input::{DecodedHypercall, HypercallControl};
 
 /// `(code, name, rep)`, in code order.
 pub const TLFS_HYPERCALLS: &[(u16, &str, bool)] = &[
@@ -119,24 +120,51 @@ fn code_name(code: usize) -> String {
 }
 
 /// The virtual processor whose exit a processor in the Windows hypervisor
-/// handles, as a hypercall's caller: its partition, its index, and what its
-/// exit says of the call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// handles, as a hypercall's caller: its partition, its index, the VTL it
+/// runs in, and what its exit says of the call.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HypercallCaller {
     pub partition: u64,
+    /// The partition is the root partition.
+    pub root: bool,
     pub vp: u32,
+    pub vtl: u8,
     pub input: HypercallInput,
 }
 
+impl HypercallCaller {
+    /// `root partition VP 2 VTL0`, or `partition 0x4 VP 1 VTL0`.
+    pub fn label(&self) -> String {
+        if self.root {
+            format!("root partition VP {} VTL{}", self.vp, self.vtl)
+        } else {
+            format!(
+                "partition {:#x} VP {} VTL{}",
+                self.partition, self.vp, self.vtl
+            )
+        }
+    }
+}
+
 /// What a VP's current exit says of the hypercall the hypervisor handles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HypercallInput {
-    /// A VMCALL, with the caller's RCX: the TLFS hypercall input value.
-    Known(u64),
+    /// A VMCALL whose registers are known: the call, with its input decoded.
+    Known(Box<DecodedHypercall>),
     /// The exit is not a VMCALL, so the VP made no hypercall.
     NotHypercall,
-    /// The exit's state or registers are not known.
-    Unknown,
+    /// The exit's state or registers are not known, and why.
+    Unknown(String),
+}
+
+impl HypercallInput {
+    /// The call, when the exit is a VMCALL whose registers are known.
+    pub fn call(&self) -> Option<&DecodedHypercall> {
+        match self {
+            Self::Known(call) => Some(call),
+            Self::NotHypercall | Self::Unknown(_) => None,
+        }
+    }
 }
 
 /// A hypercall input value (the TLFS's, in RCX at a VMCALL), as
@@ -144,19 +172,19 @@ pub enum HypercallInput {
 /// and its TLFS name, then `fast` (register input), a rep call's start index
 /// and count, and `nested` (for the hypervisor a nested guest runs).
 pub fn describe_hypercall_input(value: u64) -> String {
-    let code = (value & 0xffff) as u16;
+    let control = HypercallControl::new(value);
+    let code = control.code;
     let mut text = match tlfs_hypercall(code) {
         Some((name, _)) => format!("hypercall {code:#06x} {name}"),
         None => format!("hypercall {code:#06x}"),
     };
-    if value & (1 << 16) != 0 {
+    if control.fast {
         text.push_str(" fast");
     }
-    let count = (value >> 32) & 0xfff;
-    if count != 0 {
-        text.push_str(&format!(" rep {}/{count}", (value >> 48) & 0xfff));
+    if control.rep_count != 0 {
+        text.push_str(&format!(" rep {}/{}", control.rep_start, control.rep_count));
     }
-    if value & (1 << 31) != 0 {
+    if control.nested {
         text.push_str(" nested");
     }
     text

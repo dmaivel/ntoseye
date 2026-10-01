@@ -1204,6 +1204,7 @@ mod tests {
     #[test]
     #[ignore = "needs hvix64 images named by NTOSEYE_HVIX64_IMAGES"]
     fn derives_the_layout_of_real_builds() {
+        use crate::guest::hypercall_input::input_layout;
         use pelite::pe64::{Pe, PeFile};
         let images = std::env::var("NTOSEYE_HVIX64_IMAGES").expect("NTOSEYE_HVIX64_IMAGES");
         let mut failures = Vec::new();
@@ -1248,6 +1249,17 @@ mod tests {
                     failures.push(format!(
                         "{path}: {name} ({code:#x}) rep {} in the table",
                         entry.rep()
+                    ));
+                }
+                // The input sizes the decoder lays each call out with are
+                // the build's own.
+                if let Some((input, element)) = input_layout(code)
+                    && entry.handler != table[0].handler
+                    && (entry.input, entry.input_element) != (input, element)
+                {
+                    failures.push(format!(
+                        "{path}: {code:#x} input {:#x}+{:#x} in the table, {input:#x}+{element:#x} decoded",
+                        entry.input, entry.input_element
                     ));
                 }
             }

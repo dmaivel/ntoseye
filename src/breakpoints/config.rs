@@ -138,10 +138,10 @@ impl HypercallFilter {
         {
             return false;
         }
-        match caller.input {
-            HypercallInput::Known(input) => input & 0xffff == u64::from(self.code),
+        match &caller.input {
+            HypercallInput::Known(call) => call.control.code == self.code,
             HypercallInput::NotHypercall => false,
-            HypercallInput::Unknown => true,
+            HypercallInput::Unknown(_) => true,
         }
     }
 
@@ -245,6 +245,7 @@ impl BreakpointManager {
 mod tests {
     use crate::breakpoints::test_backend::SlotRecorder;
     use crate::breakpoints::{BreakpointConfig, BreakpointManager, HypercallFilter, ThreadScope};
+    use crate::guest::hypercall_input::decode_hypercall;
     use crate::guest::hypercalls::{HypercallCaller, HypercallInput};
     use crate::session::session_over_memory;
     use crate::target::{ThreadInfo, sample_thread};
@@ -256,9 +257,18 @@ mod tests {
     fn caller(partition: u64, vp: u32, input: HypercallInput) -> HypercallCaller {
         HypercallCaller {
             partition,
+            root: partition == 0x1,
             vp,
+            vtl: 0,
             input,
         }
+    }
+
+    /// The call of a fast VMCALL whose RCX is `value`.
+    fn known(value: u64) -> HypercallInput {
+        HypercallInput::Known(Box::new(decode_hypercall(value, 0, 0, |_, _| {
+            Err("no memory".to_string())
+        })))
     }
 
     /// The code is RCX's low 16 bits, so the fast and rep flags above them
@@ -266,8 +276,8 @@ mod tests {
     /// the filter names them, whether the caller is the root or a guest.
     #[test]
     fn a_hypercall_filter_takes_only_its_call_from_its_caller() {
-        let root_vp1 = caller(0x1, 1, HypercallInput::Known(SEND_IPI));
-        let guest_vp1 = caller(0x7, 1, HypercallInput::Known(SEND_IPI));
+        let root_vp1 = caller(0x1, 1, known(SEND_IPI));
+        let guest_vp1 = caller(0x7, 1, known(SEND_IPI));
         let any = HypercallFilter {
             code: 0x000b,
             partition: None,
@@ -285,10 +295,10 @@ mod tests {
         assert!(any.matches(Some(&root_vp1)) && any.matches(Some(&guest_vp1)));
         assert!(root.matches(Some(&root_vp1)) && !root.matches(Some(&guest_vp1)));
         assert!(!guest_vp2.matches(Some(&guest_vp1)));
-        assert!(guest_vp2.matches(Some(&caller(0x7, 2, HypercallInput::Known(SEND_IPI)))));
+        assert!(guest_vp2.matches(Some(&caller(0x7, 2, known(SEND_IPI)))));
         // Another call into a handler the codes share, such as
         // HvCallUnimplemented's.
-        let other_code = caller(0x1, 1, HypercallInput::Known(0x1_000c));
+        let other_code = caller(0x1, 1, known(0x1_000c));
         assert!(!any.matches(Some(&other_code)));
     }
 
@@ -303,8 +313,9 @@ mod tests {
             vp: None,
         };
         assert!(filter.matches(None));
-        assert!(filter.matches(Some(&caller(0x7, 0, HypercallInput::Unknown))));
-        assert!(!filter.matches(Some(&caller(0x1, 0, HypercallInput::Unknown))));
+        let unknown = || HypercallInput::Unknown("registers not saved yet".to_string());
+        assert!(filter.matches(Some(&caller(0x7, 0, unknown()))));
+        assert!(!filter.matches(Some(&caller(0x1, 0, unknown()))));
         assert!(!filter.matches(Some(&caller(0x7, 0, HypercallInput::NotHypercall))));
     }
 

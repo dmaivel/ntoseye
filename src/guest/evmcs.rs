@@ -318,6 +318,12 @@ impl EvmcsState {
         self.secondary_controls & (1 << 22) != 0
     }
 
+    /// Whether the last exit was a VMCALL (basic exit reason 18, Intel SDM
+    /// Appendix C): a hypercall.
+    pub fn is_vmcall(&self) -> bool {
+        self.exit_reason & 0xffff == 18
+    }
+
     /// The eVMCS at `address`, read now; `None` when the page does not hold
     /// one a 64-bit paged guest runs under.
     pub fn read(phys: &impl MemoryOps<PhysAddr>, address: PhysAddr) -> Option<Self> {
