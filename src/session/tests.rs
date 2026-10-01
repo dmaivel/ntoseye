@@ -254,6 +254,11 @@ impl DebugBackend for MockBackend {
     fn target_manages_breakpoint_sites(&self) -> bool {
         self.target_manages_sites
     }
+    /// The tests put code at low addresses, user space by address; a mock
+    /// that takes breakpoints takes them there too, as KD does.
+    fn supports_user_mode_breakpoints(&self) -> bool {
+        self.allow_breakpoints
+    }
     fn set_hardware_breakpoint(
         &mut self,
         slot: u8,

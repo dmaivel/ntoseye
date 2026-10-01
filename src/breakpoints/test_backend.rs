@@ -17,6 +17,8 @@ pub(super) struct SlotRecorder {
     pub(super) installed: Vec<u64>,
     /// See [`DebugBackend::reclaims_abandoned_breakpoints`].
     reclaims: bool,
+    /// See [`DebugBackend::supports_user_mode_breakpoints`].
+    user_mode: bool,
 }
 
 impl SlotRecorder {
@@ -27,6 +29,7 @@ impl SlotRecorder {
             refused: None,
             installed: Vec::new(),
             reclaims: true,
+            user_mode: true,
         }
     }
 
@@ -40,6 +43,15 @@ impl SlotRecorder {
         Self {
             reclaims: false,
             ..Self::accepting()
+        }
+    }
+
+    /// Accepts every kernel breakpoint but plants none in user space, like a
+    /// GDB stub.
+    pub fn kernel_only() -> Self {
+        Self {
+            user_mode: false,
+            ..Self::unreclaimed()
         }
     }
 
@@ -59,7 +71,7 @@ impl DebugBackend for SlotRecorder {
     /// so the recorder has to look like a live backend that can patch
     /// guest memory.
     fn supports_user_mode_breakpoints(&self) -> bool {
-        true
+        self.user_mode
     }
     fn read_registers(&mut self) -> Result<Vec<u8>> {
         Err(Error::NotSupported)

@@ -24,6 +24,9 @@ HYPERVISOR_WAIT = "entered the Windows hypervisor before finishing the step"
 # How a step reports that its vCPU, run alone, took an interrupt and waits
 # in the handler on a held vCPU; from VTL1 that handler is NT's.
 DIVERTED = "did not reach the next instruction"
+# How a walk on the gdb backend reports that its thread went on into user
+# space, where a GDB stub cannot be trusted to lift a software breakpoint.
+USER_SPACE = "cannot plant a software breakpoint in user space"
 ATTEMPTS = 3
 
 
@@ -103,7 +106,8 @@ def test_trace_calls_returns_a_call_tree(halted: Debugger) -> None:
         # gdb single-steps at a few hundred instructions a second.
         trace = halted.trace_calls(limit=2_000)
         if trace.end != "diverted" and not (
-            trace.end == "failed" and HYPERVISOR_WAIT in (trace.error or "")
+            trace.end == "failed"
+            and any(reason in (trace.error or "") for reason in (HYPERVISOR_WAIT, USER_SPACE))
         ):
             break
     assert trace.end in ("returned", "limit")

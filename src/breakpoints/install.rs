@@ -230,7 +230,16 @@ impl BreakpointManager {
         address: Option<VirtAddr>,
         scope: &BreakpointScope,
     ) -> Result<()> {
-        let capability = if Self::install_is_target_owned(arch, address, scope) {
+        let user_space = address.is_some_and(|address| !Self::is_kernel_space(arch, address));
+        // A user-space site needs the user-mode capability whatever the scope:
+        // a GDB stub writes and restores it through whichever vCPU it has
+        // selected, so a lift through one that does not map the page (in the
+        // Windows hypervisor, the System process, or a guest partition's VP)
+        // fails or restores nothing, and the stub forgets it anyway when the
+        // client detaches, leaving the `int3` in shared code.
+        let capability = if user_space {
+            DebugCapability::UserModeBreakpoints
+        } else if Self::install_is_target_owned(arch, address, scope) {
             DebugCapability::KernelBreakpoints
         } else {
             DebugCapability::UserModeBreakpoints
@@ -241,6 +250,11 @@ impl BreakpointManager {
             .any(|c| c.capability == capability && c.supported)
         {
             Ok(())
+        } else if let Some(address) = address.filter(|_| user_space) {
+            Err(Error::Breakpoint(format!(
+                "this backend cannot plant a software breakpoint in user space ({:#x}); a hardware breakpoint (ba e1) can stop there",
+                address.0
+            )))
         } else {
             Err(Error::NotSupported)
         }
@@ -677,6 +691,34 @@ mod tests {
             );
         }
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A GDB stub plants and lifts a site through whichever vCPU it has
+    /// selected, so a user-space site needs the user-mode capability even
+    /// when its scope is the kernel's: a lift through a vCPU that does not
+    /// map the page would leave the `int3` in shared code.
+    #[test]
+    fn a_user_space_site_needs_user_mode_breakpoints_whatever_its_scope() {
+        let session = session_over_memory(0x1000, &[0x90; 0x40]);
+        let kernel_scope = || BreakpointConfig {
+            scope: Some(BreakpointScope::Kernel),
+            ..BreakpointConfig::default()
+        };
+        let mut manager = BreakpointManager::new();
+        let mut client = SlotRecorder::kernel_only();
+        let user = manager.add_configured(
+            &mut client,
+            &session.target,
+            VirtAddr(0x7ffd_4952_3ab7),
+            None,
+            kernel_scope(),
+        );
+        assert!(user.is_err() && client.installed.is_empty());
+        let kernel = VirtAddr(0xfffff80000001000);
+        manager
+            .add_configured(&mut client, &session.target, kernel, None, kernel_scope())
+            .expect("a kernel site needs only kernel breakpoints");
+        assert_eq!(client.installed, vec![kernel.0]);
     }
 
     #[test]
