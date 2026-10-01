@@ -8,7 +8,8 @@ use crate::guest::{
     EvmcsState, HvPartition, HvProcessor, HvVirtualProcessor,
     ept::{self, Access, EptTranslation},
     evmcs_fields,
-    hypercalls::tlfs_hypercall,
+    hypercall_input::{DecodedHypercall, HypercallField},
+    hypercalls::{HypercallCaller, HypercallInput, tlfs_hypercall},
     privilege_names,
 };
 use crate::repl::memory_view::{MemoryDisplayMode, display_memory_with_validity, eval_range};
@@ -73,6 +74,15 @@ repl_command! {
     usage: "!hvcalls [-a]",
     summary: "List the hypercalls the Windows hypervisor implements, from its hypercall table.",
     details: "Reads the hypervisor's hypercall table and shows, for each call code, the name the Hyper-V TLFS gives it (when the TLFS documents it), whether it is a simple or a rep call (var marks a variable-size input header), the sizes of its fixed input and output and of each rep element, and its handler in the hv image. Codes that share the handler of the reserved code 0 are not implemented; -a lists them too. Needs the VM's hv-evmcs enlightenment or a vCPU stopped in the hypervisor.",
+}
+
+repl_command! {
+    cmd_hvcall();
+    names: ["!hvcall"],
+    usage: "!hvcall",
+    summary: "Decode the hypercall that the current vCPU's processor handles in the Windows hypervisor.",
+    details: "For a vCPU halted in the Windows hypervisor, for example on a breakpoint on a hypercall handler (ba e1 hv!HvCallFlushVirtualAddressList), shows the hypercall of the VMCALL exit that its processor handles: the caller (a VTL of the root partition, or the guest partition's VP that the processor serves), the call code with its TLFS name, the flags (fast, variable header size, nested), a rep call's start and count, the GPAs of the input and output, and each field of the input as the Hyper-V TLFS lays it out, with names for special values, processor sets, flags, and the common register names, then each element of a rep call's input list. A slow call's input is read at its GPA through the EPT of the calling VTL. A fast call's input is RDX and R8; ntoseye does not recover the XMM registers of an XMM fast call, and says what is missing. A call whose layout ntoseye does not know shows its input as raw qwords. The command needs the general-purpose registers of the exit, which ntoseye reads where the hypervisor's VM-exit entry code saved them, so it explains why when the vCPU is still on the entry or the last exit was not a VMCALL. Needs the VM's hv-evmcs enlightenment.",
+    run_state: Halted,
 }
 
 repl_command! {
@@ -198,6 +208,139 @@ fn memory_type_name(memory_type: u8) -> &'static str {
         6 => "WB",
         _ => "?",
     }
+}
+
+/// What `!hvcall` shows for `caller`, the VP whose exit a processor
+/// handles: the lines of its decoded hypercall, or why it has none.
+fn hypercall_report(caller: &HypercallCaller) -> std::result::Result<Vec<String>, String> {
+    let label = caller.label();
+    match &caller.input {
+        HypercallInput::Known(call) => Ok(hypercall_lines(&label, call)),
+        HypercallInput::NotHypercall => Err(format!(
+            "{label} last left for the hypervisor on an exit other than a VMCALL: it made no hypercall"
+        )),
+        HypercallInput::Unknown(reason) => {
+            Err(format!("the hypercall of {label} is unknown: {reason}"))
+        }
+    }
+}
+
+/// The tree `!hvcall` prints for `caller`'s hypercall `call`: the call on
+/// the head line, then its input value and flags, its GPAs, each field of
+/// its input, and its rep list, the elements before the rep start marked
+/// done.
+fn hypercall_lines(caller: &str, call: &DecodedHypercall) -> Vec<String> {
+    let control = &call.control;
+    let mut flags = Vec::new();
+    if control.fast {
+        flags.push("fast".to_string());
+    }
+    if control.variable_header_qwords != 0 {
+        flags.push(format!(
+            "variable header {} qwords",
+            control.variable_header_qwords
+        ));
+    }
+    if control.nested {
+        flags.push("nested".to_string());
+    }
+    let mut children = vec![format!(
+        "{} {:#018x}{}",
+        ui::muted("input value"),
+        call.input_value,
+        if flags.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", flags.join(", "))
+        }
+    )];
+    match (call.input_gpa, call.output_gpa) {
+        (Some(input), Some(output)) => children.push(format!(
+            "{} {input:#x}  {} {output:#x}",
+            ui::muted("input GPA"),
+            ui::muted("output GPA")
+        )),
+        _ if control.fast => children.push(ui::muted("input in RDX and R8")),
+        _ => {}
+    }
+    if !call.decoded {
+        children.push(ui::muted(
+            "ntoseye does not know this call's input layout: its first qwords, raw",
+        ));
+    }
+    children.extend(field_lines(&call.fields));
+    if !call.elements.is_empty() {
+        let done = call
+            .elements
+            .iter()
+            .filter(|element| element.index < control.rep_start)
+            .count();
+        let count = call.elements.len();
+        let mut head = format!(
+            "{} {count} element{}",
+            ui::muted("rep list"),
+            if count == 1 { "" } else { "s" }
+        );
+        if done != 0 {
+            head.push_str(&format!(", {done} done"));
+        }
+        let elements: Vec<String> = call
+            .elements
+            .iter()
+            .map(|element| {
+                let mark = if element.index < control.rep_start {
+                    ui::muted("  done")
+                } else {
+                    String::new()
+                };
+                let lines = field_lines(&element.fields);
+                match lines.as_slice() {
+                    [line] => format!("[{}] {line}{mark}", element.index),
+                    _ => std::iter::once(format!("[{}]{mark}", element.index))
+                        .chain(event_children_lines("", &lines))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                }
+            })
+            .collect();
+        children.push(
+            std::iter::once(head)
+                .chain(event_children_lines("", &elements))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    if let Some(reason) = &call.unavailable {
+        children.push(ui::muted(reason));
+    }
+    std::iter::once(format!("{}  {}", ui::label(caller), call.summary()))
+        .chain(event_children_lines("", &children))
+        .collect()
+}
+
+/// One line per field, `name  value  meaning`, the values aligned and each
+/// shown at its size.
+fn field_lines(fields: &[HypercallField]) -> Vec<String> {
+    let width = fields
+        .iter()
+        .map(|field| field.name.len())
+        .max()
+        .unwrap_or(0);
+    fields
+        .iter()
+        .map(|field| {
+            let digits = usize::from(field.size) * 2 + 2;
+            let meaning = field
+                .meaning
+                .as_deref()
+                .map(|meaning| format!("  {}", ui::muted(meaning)))
+                .unwrap_or_default();
+            format!(
+                "{:<width$}  {:#0digits$x}{meaning}",
+                field.name, field.value
+            )
+        })
+        .collect()
 }
 
 /// Commands that only read memory through the current root or are
@@ -971,6 +1114,64 @@ impl ReplState<'_> {
         Ok(())
     }
 
+    fn cmd_hvcall(&mut self) -> Result<()> {
+        if let Err(error) = self
+            .ctx
+            .backend
+            .set_current_thread(&self.ctx.current_thread)
+        {
+            error!("failed to select execution context: {error}");
+            return Ok(());
+        }
+        let regs = match self.ctx.read_registers() {
+            Ok(regs) => regs,
+            Err(error) => {
+                error!("failed to read registers: {error}");
+                return Ok(());
+            }
+        };
+        let target = &self.ctx.target;
+        let map = &self.ctx.register_map;
+        let (Ok(cr3), Ok(rip)) = (
+            map.read_u64(target.arch().dtb_register(), &regs),
+            map.read_u64("rip", &regs),
+        ) else {
+            error!("the vCPU's CR3 and RIP are unavailable");
+            return Ok(());
+        };
+        if !halted_in_windows_hypervisor(target, cr3, rip) {
+            error!(
+                "{} is not halted in the Windows hypervisor; !hvcall decodes the hypercall a VP made at a stop there, such as on a hypercall handler (ba e1 hv!HvCallFlushVirtualAddressList)",
+                ui::thread_id(&self.ctx.current_thread)
+            );
+            return Ok(());
+        }
+        let processor = processor_index_from_backend_thread_id(&self.ctx.current_thread);
+        let Some(caller) = processor.and_then(|number| target.hypercall_caller(cr3, rip, number))
+        else {
+            if target.evmcs_found() == Some(false) {
+                error!(
+                    "no Enlightened VMCS in guest RAM: the VM must expose hv-evmcs (libvirt <evmcs state=\"on\"/>) for the Windows hypervisor to use one"
+                );
+            } else {
+                error!(
+                    "the caller is unknown: the hypervisor's partitions cannot be walked, or the processor serves no guest partition's VP and no saved state of its root partition VP is current"
+                );
+            }
+            return Ok(());
+        };
+        match hypercall_report(&caller) {
+            Ok(lines) => {
+                for line in lines {
+                    outln!("{line}");
+                }
+                outln!();
+            }
+            Err(reason) => error!("{reason}"),
+        }
+        Ok(())
+    }
+
     fn cmd_hvvmcs(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let view = match invocation.arg(0) {
             Some("-msr" | "/msr") => "msr",
@@ -1410,6 +1611,7 @@ impl ReplState<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::guest::hypercall_input::decode_hypercall;
     use crate::output::capture;
     use crate::session::tests::{MockBackend, session_with_mock};
 
@@ -1417,6 +1619,122 @@ mod tests {
         command_registry()
             .get(name)
             .unwrap_or_else(|| panic!("'{name}' is not registered"))
+    }
+
+    /// `caller`'s hypercall as `!hvcall` prints it, line by line.
+    fn hvcall_output(caller: HypercallCaller) -> Vec<String> {
+        let (result, text) = capture(|| {
+            for line in hypercall_report(&caller)? {
+                outln!("{line}");
+            }
+            Ok::<(), String>(())
+        });
+        result.unwrap();
+        text.lines().map(str::to_string).collect()
+    }
+
+    /// Root partition VP 2's hypercall `value`, whose input page holds
+    /// `parts`, each `(offset, qword)`.
+    fn root_caller(value: u64, parts: &[(usize, u64)]) -> HypercallCaller {
+        let mut page = vec![0u8; 0x1000];
+        for &(offset, qword) in parts {
+            page[offset..offset + 8].copy_from_slice(&qword.to_le_bytes());
+        }
+        let call = decode_hypercall(value, 0x5000, 0x6000, |_, buf| {
+            buf.copy_from_slice(&page[..buf.len()]);
+            Ok(())
+        });
+        HypercallCaller {
+            partition: 1,
+            root: true,
+            vp: 2,
+            vtl: 0,
+            input: HypercallInput::Known(Box::new(call)),
+        }
+    }
+
+    /// The call heads the tree; its GPAs and fields follow, values aligned at
+    /// their sizes, and its rep list last, the elements before the rep start
+    /// marked done.
+    #[test]
+    fn hvcall_shows_the_fields_and_marks_the_reps_already_done() {
+        let caller = root_caller(
+            0x0001_0002_0000_0003,
+            &[
+                (0, 0x1ad000),
+                (16, 0x3),
+                (24, 0x1000),
+                (32, 0x7ff6_0000_0001),
+            ],
+        );
+        assert_eq!(
+            hvcall_output(caller),
+            [
+                "root partition VP 2 VTL0  hypercall 0x0003 HvCallFlushVirtualAddressList rep 1/2",
+                "├─ input value 0x0001000200000003",
+                "├─ input GPA 0x5000  output GPA 0x6000",
+                "├─ AddressSpace   0x00000000001ad000",
+                "├─ Flags          0x0000000000000000",
+                "├─ ProcessorMask  0x0000000000000003  VPs 0-1",
+                "└─ rep list 2 elements, 1 done",
+                "   ├─ [0] GvaRange  0x0000000000001000  0x1000, 1 page  done",
+                "   └─ [1] GvaRange  0x00007ff600000001  0x7ff600000000, 2 pages",
+            ]
+        );
+    }
+
+    /// An element of several fields is a subtree of its own.
+    #[test]
+    fn hvcall_nests_an_element_of_several_fields() {
+        let caller = root_caller(
+            0x0000_0001_0000_0051,
+            &[(0, u64::MAX), (16, 0x0004_0002), (32, 0x1ad000)],
+        );
+        let tail: Vec<String> = hvcall_output(caller)
+            .into_iter()
+            .skip_while(|line| !line.contains("rep list"))
+            .collect();
+        assert_eq!(
+            tail,
+            [
+                "└─ rep list 1 element",
+                "   └─ [0]",
+                "      ├─ RegisterName        0x00040002  HvX64RegisterCr3",
+                "      ├─ RegisterValue.Low   0x00000000001ad000",
+                "      └─ RegisterValue.High  0x0000000000000000",
+            ]
+        );
+    }
+
+    /// Without a decoded call `!hvcall` says why rather than print a tree.
+    #[test]
+    fn hvcall_explains_an_exit_with_no_known_call() {
+        let caller = |input| HypercallCaller {
+            partition: 4,
+            root: false,
+            vp: 1,
+            vtl: 0,
+            input,
+        };
+        let error = hypercall_report(&caller(HypercallInput::NotHypercall)).unwrap_err();
+        assert!(error.starts_with("partition 0x4 VP 1 VTL0") && error.contains("no hypercall"));
+        let reason = "the vCPU is saving them";
+        let error =
+            hypercall_report(&caller(HypercallInput::Unknown(reason.to_string()))).unwrap_err();
+        assert!(error.ends_with(reason));
+    }
+
+    /// A vCPU outside the hypervisor has no hypercall to decode.
+    #[test]
+    fn hvcall_refuses_a_vcpu_outside_the_hypervisor() {
+        let mut session = session_with_mock(MockBackend::default().one_vcpu());
+        let mut state = ReplState::for_oneshot(&mut session);
+        let (result, text) = capture(|| state.dispatch_line("!hvcall"));
+        result.unwrap();
+        assert!(
+            text.contains("is not halted in the Windows hypervisor"),
+            "{text}"
+        );
     }
 
     /// A hypervisor command without a VP shows the one the current vCPU's
