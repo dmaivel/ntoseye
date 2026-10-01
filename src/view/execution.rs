@@ -21,8 +21,10 @@ shapes! {
         id: String,
         /// None if ntoseye cannot read the register context.
         rip: Option<Hex>,
-        /// The address space in which the vCPU runs: `kernel`, a process name,
-        /// or `unknown`. Empty if ntoseye cannot find the address space.
+        /// What the vCPU runs: `kernel`, a process name, `hypervisor`, `VTL1`,
+        /// a guest partition's VP (`partition 0x3 VP 1`), or `unknown`; `no
+        /// context` for a dump CPU whose context the dump lacks. Empty if
+        /// ntoseye cannot read the register context.
         context: String,
         /// The nearest symbol to `rip`, if one resolves.
         symbol: Option<String>,
