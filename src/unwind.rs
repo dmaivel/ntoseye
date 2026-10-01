@@ -1477,6 +1477,56 @@ mod tests {
         );
     }
 
+    /// A scan lists each return address once: another copy of one higher up
+    /// (a spill slot, a frame since popped) is no second frame.
+    #[test]
+    fn a_scan_lists_a_return_address_once() {
+        let session = frame_pointer_session_with(&[(8, RETURN_ADDRESS), (0x18, RETURN_ADDRESS)]);
+        let seed = registers(&[("rip", FRAMED_RIP), ("rsp", FRAMED_RSP)]);
+
+        let trace =
+            build_stacktrace_with_register_values(&session.target, &session.register_map, &seed, 8);
+
+        let frames: Vec<_> = trace
+            .frames
+            .iter()
+            .map(|frame| (frame.frame.ip, frame.frame.source))
+            .collect();
+        assert_eq!(
+            frames,
+            [
+                (FRAMED_RIP, FrameSource::Current),
+                (RETURN_ADDRESS, FrameSource::Scan)
+            ]
+        );
+    }
+
+    /// On a root none of NT's (the Windows hypervisor's), only its own
+    /// image holds return addresses: an NT module's address on its stack is
+    /// a guest's value, which the scan does not take for a frame.
+    #[test]
+    fn a_foreign_root_scan_takes_only_its_own_image() {
+        let session = frame_pointer_session();
+        let mut trace = super::resolve_thread_trace_context(&session.target, 0);
+        trace.foreign_image = Some(ModuleInfo::new(
+            "hv".to_string(),
+            VirtAddr(0xffff_f847_9860_0000),
+            0x40_0000,
+        ));
+
+        let walk = super::walk::build_recovered_stacktrace_seeded(
+            &session.target,
+            &trace,
+            RegisterContext::new(FRAMED_RIP, FRAMED_RSP),
+            FrameSource::Seed,
+            8,
+            HashMap::new(),
+        );
+
+        let frames: Vec<_> = walk.frames.iter().map(|frame| frame.frame.ip).collect();
+        assert_eq!(frames, [FRAMED_RIP]);
+    }
+
     /// An unwind that lands on a value no code can sit at (the null page, a
     /// non-canonical address) went wrong: it is not listed as a frame, and
     /// the caller is found by scanning above it.

@@ -12,10 +12,10 @@ use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current, trap_frame_ri
 use crate::triage_report::exception_code_name;
 use crate::types::{Arch, VirtAddr};
 use crate::unwind::{
-    Arm64CodeDetail, Arm64UnwindDetail, FunctionEntryDetail, HandlerDetail, RecoveredStackTrace,
-    StackTrace, UNKNOWN_CONTEXT, UnwindDetail, build_stacktrace_with_register_values,
-    build_thread_stacktrace, halted_in_windows_hypervisor, resolve_thread_trace_context,
-    saved_vtls, try_format_symbol,
+    Arm64CodeDetail, Arm64UnwindDetail, FrameSource, FunctionEntryDetail, HandlerDetail,
+    RecoveredStackTrace, StackTrace, UNKNOWN_CONTEXT, UnwindDetail,
+    build_stacktrace_with_register_values, build_thread_stacktrace, halted_in_windows_hypervisor,
+    resolve_thread_trace_context, saved_vtls, try_format_symbol,
 };
 
 use crate::repl::*;
@@ -1012,6 +1012,9 @@ pub fn print_indexed_stacktrace(
         };
         let provenance = if columns.provenance {
             format!("  [{}]", frame.source.as_str())
+        } else if frame.source == FrameSource::Scan {
+            // A stack scan's guess is marked always, as the stop's stack is.
+            "  [scan]".to_string()
         } else {
             String::new()
         };

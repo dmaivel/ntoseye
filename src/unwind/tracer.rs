@@ -69,6 +69,9 @@ impl<'a> StackTracer<'a> {
         limit: usize,
     ) -> Vec<(u64, u64)> {
         let mut frames = Vec::new();
+        // A stale copy of a return address (a spill slot, a frame since
+        // popped) is no second frame: each address is listed once.
+        let mut found = HashSet::new();
         let mut failures = 0usize;
 
         if limit == 0 {
@@ -95,10 +98,23 @@ impl<'a> StackTracer<'a> {
                 }
             };
 
-            if seen.contains(&potential_ip) || !self.is_executable_address(potential_ip) {
+            if seen.contains(&potential_ip)
+                || found.contains(&potential_ip)
+                || !self.is_executable_address(potential_ip)
+            {
+                continue;
+            }
+            // On a root none of NT's (the hypervisor's), NT's modules are not
+            // mapped: an NT address on its stack is a guest's value, and only
+            // its own image holds return addresses.
+            if let Some(image) = self.trace.foreign_image.as_ref()
+                && !(image.base_address.0..image.base_address.0 + u64::from(image.size))
+                    .contains(&potential_ip)
+            {
                 continue;
             }
 
+            found.insert(potential_ip);
             frames.push((sp, potential_ip));
         }
 

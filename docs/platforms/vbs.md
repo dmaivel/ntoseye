@@ -286,7 +286,7 @@ When VBS runs, the GDB stub reports what each vCPU executed when it halted. An i
 
 `hvix64` has no public symbols, but `ntoseye` names some of its code: each hypercall handler by the TLFS name of the lowest call code it serves (`hv!HvCallGetVpRegisters`), or `HvCall` and the code when the TLFS does not name it (`hv!HvCall0004`), the handler of every unimplemented code `hv!HvCallUnimplemented`, and the VM-exit entry point from the eVMCS pages `hv!VmExitEntry`. {command}`k`, {command}`u`, {command}`ln`, {command}`x` `hv!*`, and expressions use these names. A name covers only its own function, as the image's `.pdata` bounds it, so code in the other functions still shows `hv+0x…`. A leaf function has no `.pdata` entry, so its name ends where the next function that `.pdata` lists begins.
 
-Microsoft does not publish symbols for this hypervisor build, and the address space of the hypervisor does not map its unwind data, so all hypervisor frames after the first frame are guesses from a stack scan (`[scan]`).
+Microsoft does not publish symbols for this hypervisor build, and the address space of the hypervisor does not map its unwind data, so all hypervisor frames after the first frame are guesses from a stack scan (`[scan]`). The scan takes only addresses in the hypervisor's image, because NT is not mapped in its address space, and lists each address once.
 
 Because the CR3 of the hypervisor does not map NT memory, ntoseye inspects such a stop at the point where NT left off ([below](#where-nt-left-off-under-the-hypervisor)). {command}`bp` and the bugcheck trap work in all address spaces in which the vCPU can stop ([how](../internals/vbs.md#breakpoints-while-vcpus-are-outside-nt)).
 
