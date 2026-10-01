@@ -130,17 +130,28 @@ impl ServedVp {
     /// Where the VP left off and why, as `VTL0 00007cba12f529e3, last exit
     /// VMCALL (hypercall 0x0003 HvCallFlushVirtualAddressList)`.
     pub fn describe(&self) -> String {
+        let mut text = self.left_off();
+        if let Some(detail) = self.exit_detail() {
+            text.push_str(&format!(" ({detail})"));
+        }
+        text
+    }
+
+    /// Where the VP left off and why, without the exit's detail: `VTL0
+    /// 00007cba12f529e3, last exit VMCALL`.
+    pub fn left_off(&self) -> String {
         let Some(state) = &self.state else {
             return format!("VTL{}", self.vtl);
         };
         let exit = state
             .exit_reason_name()
             .map_or_else(|| format!("exit {:#x}", state.exit_reason), str::to_string);
-        let mut text = format!("VTL{} {:016x}, last exit {exit}", self.vtl, state.rip);
-        if let Some(detail) = exit_detail(state, self.general_registers.as_ref().ok()) {
-            text.push_str(&format!(" ({detail})"));
-        }
-        text
+        format!("VTL{} {:016x}, last exit {exit}", self.vtl, state.rip)
+    }
+
+    /// The hypercall of a VMCALL exit, when its registers are known.
+    pub fn exit_detail(&self) -> Option<String> {
+        exit_detail(self.state.as_ref()?, self.general_registers.as_ref().ok())
     }
 }
 

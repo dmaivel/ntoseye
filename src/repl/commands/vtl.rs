@@ -1053,23 +1053,31 @@ impl ReplState<'_> {
         print_padded_table(table);
         for (access, ranges) in ["read", "write"].iter().zip(&intercepted) {
             let names = evmcs_fields::msr_names_outside(ranges);
+            let names = if names.is_empty() {
+                "none of the MSRs ntoseye names".to_string()
+            } else {
+                names.join(" ")
+            };
+            // Both labels padded to the longer, "write without an exit: "
+            // (23), and the names wrapped to hang under the first.
+            let lines = wrap_prose(&names, 23);
             outln!(
-                "{} {}",
-                ui::muted(&format!("{access} without an exit:")),
-                if names.is_empty() {
-                    "none of the MSRs ntoseye names".to_string()
-                } else {
-                    names.join(" ")
-                }
+                "{}{}",
+                ui::muted(&format!("{:<23}", format!("{access} without an exit:"))),
+                lines[0]
             );
+            for line in &lines[1..] {
+                outln!("{}{line}", " ".repeat(23));
+            }
         }
-        outln!(
-            "{}\n",
-            ui::muted(
-                "MSRs outside 0x0-0x1fff and 0xc0000000-0xc0001fff, such as the Hyper-V synthetic \
-                 ones at 0x40000000, always exit"
-            )
-        );
+        for line in wrap_prose(
+            "MSRs outside 0x0-0x1fff and 0xc0000000-0xc0001fff, such as the Hyper-V synthetic ones \
+             at 0x40000000, always exit",
+            0,
+        ) {
+            outln!("{}", ui::muted(&line));
+        }
+        outln!();
     }
 
     /// The I/O ports the eVMCS `vmcs` intercepts: through its I/O bitmaps A

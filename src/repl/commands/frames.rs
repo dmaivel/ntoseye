@@ -320,35 +320,40 @@ impl ReplState<'_> {
             let exit = state
                 .exit_reason_name()
                 .map_or_else(|| format!("exit {:#x}", state.exit_reason), str::to_string);
-            let detail = vtl
-                .context
-                .exit_detail()
-                .map(|detail| format!(" ({detail})"))
-                .unwrap_or_default();
             outln!(
-                "{}  rsp {}  last exit: {}{}{}",
+                "{}  rsp {}  last exit: {}{}",
                 ui::symbol(&vtl.describe()),
                 ui::addr(state.rsp),
                 exit,
-                detail,
                 if state.current {
                     ui::muted("  (current)")
                 } else {
                     String::new()
                 }
             );
+            // The hypercall below its exit, as the line is long already.
+            if let Some(detail) = vtl.context.exit_detail() {
+                print_event_children("", &[detail]);
+            }
         }
         let served = processor.and_then(|number| target.served_guest_vp(cr3, rip, number));
         if let Some(served) = &served {
             outln!(
                 "{}{}",
-                ui::symbol(&format!("{}: {}", served.label(), served.describe())),
+                ui::symbol(&format!(
+                    "serving {}  {}",
+                    served.label(),
+                    served.left_off()
+                )),
                 if served.state.is_some_and(|state| state.current) {
                     ui::muted("  (current)")
                 } else {
                     String::new()
                 }
             );
+            if let Some(detail) = served.exit_detail() {
+                print_event_children("", &[detail]);
+            }
         }
         let Some(vtl0) = saved.iter().find(|saved| saved.context.vtl == 0) else {
             error!("no saved VTL0 state belongs to this vCPU's virtual processor");
