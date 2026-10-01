@@ -7,9 +7,14 @@ use pyo3::types::{PyBytes, PyDict};
 
 use super::handle::Owner;
 use super::record::PlainDict;
-use super::{MAX_READ_LEN, err, raise};
-use crate::guest::ept::{Access, EptMapping as EptInfo, EptTranslation, differences};
+use super::{MAX_READ_LEN, err, raise, view_dict};
+use crate::guest::ept::{EptTranslation, differences};
 use crate::guest::{HvPartition, HvVirtualProcessor, HvVtl, evmcs_fields, privilege_names};
+use crate::view::hypervisor::{
+    EptDifference, EptMapping, HypervisorProcessor, ept_difference, ept_mapping,
+    hypervisor_processor,
+};
+use crate::view::shape::{Hex, Keyed, Typed};
 
 /// A partition of the Windows hypervisor, as it was when listed.
 #[pyclass(module = "ntoseye", frozen)]
@@ -138,6 +143,12 @@ fn vp_dict<'py>(py: Python<'py>, vp: &HvVirtualProcessor) -> PyResult<Bound<'py,
     let dict = PyDict::new(py);
     dict.set_item("index", vp.index)?;
     dict.set_item("address", vp.address)?;
+    let processors = vp
+        .processors
+        .iter()
+        .map(|processor| view_dict(py, hypervisor_processor(processor)))
+        .collect::<PyResult<Vec<_>>>()?;
+    dict.set_item("processors", processors)?;
     dict.set_item("vtl", vp.vtl)?;
     dict.set_item("vtls", vtl_map(py, vp)?)?;
     Ok(dict)
@@ -160,21 +171,18 @@ impl VirtualProcessor {
     }
 
     /// The processors whose current VP this is (the one that runs it, or ran
-    /// it last), as dicts with `number` (the processor number, or `None` on
-    /// builds before 10.0.19041) and `block` (its processor block).
+    /// it last).
     #[getter]
-    fn processors<'py>(&self, py: Python<'py>) -> PyResult<Vec<PlainDict<'py>>> {
+    fn processors<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<HypervisorProcessor>>> {
         self.owner.check(py)?;
-        self.info
-            .processors
-            .iter()
-            .map(|processor| {
-                let dict = PyDict::new(py);
-                dict.set_item("number", processor.number)?;
-                dict.set_item("block", processor.block)?;
-                Ok(PlainDict(dict))
-            })
-            .collect()
+        Typed::new(
+            py,
+            self.info
+                .processors
+                .iter()
+                .map(hypervisor_processor)
+                .collect(),
+        )
     }
 
     /// The VTL that the VP runs, or last ran, in.
@@ -206,12 +214,9 @@ impl VirtualProcessor {
     }
 
     /// The guest physical ranges that VTL0's and VTL1's EPTs map differently,
-    /// as `!hveptdiff` lists them: dicts with `start`, `end` (exclusive), and
-    /// `vtl0` and `vtl1`, each access as `"r-x"`-style text (with `u` for
-    /// user-mode execute under mode-based execute control) or `None` where
-    /// that VTL maps nothing. Raises `NtoseyeError` unless both VTLs have eVMCS
-    /// state and readable EPTs.
-    fn ept_differences<'py>(&self, py: Python<'py>) -> PyResult<Vec<PlainDict<'py>>> {
+    /// in order, as `!hveptdiff` lists them. Raises `NtoseyeError` unless both
+    /// VTLs have eVMCS state and readable EPTs.
+    fn ept_differences<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<EptDifference>>> {
         let state = |level: u8| {
             self.info
                 .vtls
@@ -231,22 +236,17 @@ impl VirtualProcessor {
         let (Some(first), Some(second)) = mappings else {
             return Err(raise("an EPT is unreadable or not a 4-level walk"));
         };
-        let text = |access: Option<Access>| access.map(|access| access.to_string());
-        differences(&first, &second)
-            .into_iter()
-            .map(|difference| {
-                let dict = PyDict::new(py);
-                dict.set_item("start", difference.start)?;
-                dict.set_item("end", difference.end)?;
-                dict.set_item("vtl0", text(difference.first))?;
-                dict.set_item("vtl1", text(difference.second))?;
-                Ok(PlainDict(dict))
-            })
-            .collect()
+        Typed::new(
+            py,
+            differences(&first, &second)
+                .iter()
+                .map(ept_difference)
+                .collect(),
+        )
     }
 
-    /// Return the VP as a plain `dict` (`index`, `address`, `vtl`, and `vtls`,
-    /// a dict from each VTL to its dict).
+    /// Return the VP as a plain `dict` (`index`, `address`, `processors`,
+    /// `vtl`, and `vtls`, a dict from each VTL to its dict).
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
         Ok(PlainDict(vp_dict(py, &self.info)?))
@@ -368,10 +368,11 @@ impl HypervisorVtl {
         })
     }
 
-    /// Every field of this VTL's eVMCS, read now, as a dict from its TLFS
-    /// name (`"guest_rip"`, `"msr_bitmap"`, ...) to its value, as `!hvvmcs`
-    /// shows them. Raises `NtoseyeError` without the VTL's eVMCS.
-    fn vmcs_fields<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
+    /// Every field of this VTL's eVMCS, read now, named as the TLFS names it
+    /// (`guest_rip`, `msr_bitmap`, ...), as `!hvvmcs` shows them:
+    /// `fields.guest_rip` or `fields["guest_rip"]`. Raises `NtoseyeError`
+    /// without the VTL's eVMCS.
+    fn vmcs_fields<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Keyed<Hex>>> {
         let Some(page) = self.info.vmcs else {
             return Err(raise("this VTL has no eVMCS"));
         };
@@ -379,18 +380,24 @@ impl HypervisorVtl {
         self.owner.with(py, |session| {
             session.target.read_physical(page, &mut vmcs).map_err(err)
         })?;
-        let dict = PyDict::new(py);
-        for (name, _, _, value) in evmcs_fields::field_values(&vmcs) {
-            dict.set_item(name, value)?;
-        }
-        Ok(PlainDict(dict))
+        Typed::new(
+            py,
+            evmcs_fields::field_values(&vmcs)
+                .into_iter()
+                .map(|(name, _, _, value)| (name, value))
+                .collect(),
+        )
     }
 
     /// Translate a guest physical address through this VTL's EPT, as
     /// `!hvept` does. Returns `None` when no entry maps it, and raises
     /// `NtoseyeError` without the VTL's eVMCS state or when a table is
     /// unreadable.
-    fn translate(&self, py: Python<'_>, gpa: u64) -> PyResult<Option<EptMapping>> {
+    fn translate<'py>(
+        &self,
+        py: Python<'py>,
+        gpa: u64,
+    ) -> PyResult<Option<Typed<'py, EptMapping>>> {
         let Some(state) = self.info.state else {
             return Err(raise("this VTL has no eVMCS state"));
         };
@@ -398,10 +405,7 @@ impl HypervisorVtl {
             Ok(session.target.translate_guest_physical(&state, gpa))
         })?;
         match translation {
-            Some(EptTranslation::Mapped(info)) => Ok(Some(EptMapping {
-                owner: self.owner.clone_ref(py),
-                info,
-            })),
+            Some(EptTranslation::Mapped(info)) => Typed::new(py, ept_mapping(&info)).map(Some),
             Some(EptTranslation::NotPresent { .. }) => Ok(None),
             None => Err(raise("the EPT is unreadable or not a 4-level walk")),
         }
@@ -415,85 +419,6 @@ impl HypervisorVtl {
             self.info
                 .vmcs
                 .map_or_else(|| "None".to_string(), |page| format!("{page:#x}"))
-        )
-    }
-}
-
-/// Where a guest physical address goes through one VTL's EPT, and the access
-/// that every level of the walk allows.
-#[pyclass(module = "ntoseye", frozen)]
-pub struct EptMapping {
-    owner: Owner,
-    info: EptInfo,
-}
-
-#[pymethods]
-impl EptMapping {
-    /// The host physical address.
-    #[getter]
-    fn host_physical(&self, py: Python<'_>) -> PyResult<u64> {
-        self.owner.check(py)?;
-        Ok(self.info.host_physical)
-    }
-
-    /// The size of the mapping page: 4 KiB, 2 MiB, or 1 GiB.
-    #[getter]
-    fn page_size(&self, py: Python<'_>) -> PyResult<u64> {
-        self.owner.check(py)?;
-        Ok(self.info.page_size)
-    }
-
-    #[getter]
-    fn read(&self, py: Python<'_>) -> PyResult<bool> {
-        self.owner.check(py)?;
-        Ok(self.info.read)
-    }
-
-    #[getter]
-    fn write(&self, py: Python<'_>) -> PyResult<bool> {
-        self.owner.check(py)?;
-        Ok(self.info.write)
-    }
-
-    /// Execute access: supervisor-mode only when `user_execute` is not
-    /// `None`.
-    #[getter]
-    fn execute(&self, py: Python<'_>) -> PyResult<bool> {
-        self.owner.check(py)?;
-        Ok(self.info.execute)
-    }
-
-    /// User-mode execute access when the VTL uses mode-based execute
-    /// control, else `None`.
-    #[getter]
-    fn user_execute(&self, py: Python<'_>) -> PyResult<Option<bool>> {
-        self.owner.check(py)?;
-        Ok(self.info.user_execute)
-    }
-
-    /// The EPT memory type (0 UC, 1 WC, 4 WT, 5 WP, 6 WB).
-    #[getter]
-    fn memory_type(&self, py: Python<'_>) -> PyResult<u8> {
-        self.owner.check(py)?;
-        Ok(self.info.memory_type)
-    }
-
-    /// The entry of each level of the walk, from the PML4 down.
-    #[getter]
-    fn entries(&self, py: Python<'_>) -> PyResult<Vec<u64>> {
-        self.owner.check(py)?;
-        Ok(self.info.entries.clone())
-    }
-
-    fn __repr__(&self) -> String {
-        let bit = |allowed: bool, letter: char| if allowed { letter } else { '-' };
-        format!(
-            "EptMapping(host_physical={:#x}, access='{}{}{}', page_size={:#x})",
-            self.info.host_physical,
-            bit(self.info.read, 'r'),
-            bit(self.info.write, 'w'),
-            bit(self.info.execute, 'x'),
-            self.info.page_size
         )
     }
 }

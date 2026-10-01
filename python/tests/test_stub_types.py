@@ -57,9 +57,31 @@ def results(dbg: Debugger) -> list[tuple[object, str, Callable[[], object]]]:
     ]
 
 
+def hypervisor_results(dbg: Debugger) -> list[tuple[object, str, Callable[[], object]]]:
+    """The Windows hypervisor's results, on a target that runs it with the
+    hv-evmcs enlightenment; none elsewhere."""
+    try:
+        vp = dbg.hypervisor_partitions()[0].virtual_processors[0]
+    except ntoseye.NtoseyeError:
+        return []
+    vtl = vp.vtls[0]
+    gpa = dbg.memory.translate(dbg.symbols["nt!KeBugCheckEx"])
+    if vtl.vmcs is None or vtl.ept_pointer is None or gpa is None:
+        return []
+    found: list[tuple[object, str, Callable[[], object]]] = [
+        (dbg, "hypercalls", dbg.hypercalls),
+        (vp, "processors", lambda: vp.processors),
+        (vtl, "vmcs_fields", vtl.vmcs_fields),
+        (vtl, "translate", lambda: vtl.translate(gpa)),
+    ]
+    if 1 in vp.vtls:
+        found.append((vp, "ept_differences", vp.ept_differences))
+    return found
+
+
 def test_results_match_their_stub_types(halted: Debugger) -> None:
     checker = Checker(CLASSES)
-    for owner, method, call in results(halted):
+    for owner, method, call in results(halted) + hypervisor_results(halted):
         cls = type(owner).__name__
         checker.value(call(), returns(CLASSES[cls], method), f"{cls}.{method}()")
     assert checker.errors == []

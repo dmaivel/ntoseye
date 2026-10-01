@@ -2129,15 +2129,11 @@ class Debugger:
         `StaleHandleError`, so keep this value with raw addresses to know when
         they become stale.
         """
-    def hypercalls(self, /) -> list[dict[str, Any]]:
+    def hypercalls(self, /) -> list[Hypercall]:
         """
-        The Windows hypervisor's hypercall table, as `!hvcalls -a` lists it:
-        a dict for each call code with `code`, `name` (the TLFS name, or
-        `None`), `implemented` (its own handler, not the reserved code 0's),
-        `rep`, `variable_header`, `input_size`, `input_element_size`,
-        `output_size`, `output_element_size`, and `handler`. Needs the VM's
-        `hv-evmcs` enlightenment or a vCPU stopped in the hypervisor. This
-        feature is experimental.
+        The Windows hypervisor's hypercall table, one entry per call code, as
+        `!hvcalls -a` lists it. Needs the VM's `hv-evmcs` enlightenment or a
+        vCPU stopped in the hypervisor. This feature is experimental.
         """
     def hypervisor_partitions(self, /) -> list[HypervisorPartition]:
         """
@@ -2897,12 +2893,35 @@ class DumpSystemInfo(BaseRecord):
         """
 
 @final
-class EptMapping:
+class EptDifference(BaseRecord):
     """
-    Where a guest physical address goes through one VTL's EPT, and the access
-    that every level of the walk allows.
+    A guest physical range that VTL0's and VTL1's EPTs map differently.
     """
-    def __repr__(self, /) -> str: ...
+    @property
+    def end(self, /) -> int:
+        """
+        The end of the range (exclusive).
+        """
+    @property
+    def start(self, /) -> int: ...
+    @property
+    def vtl0(self, /) -> str |None:
+        """
+        VTL0's access as `r-x`-style text, with `u` for user-mode execute
+        under mode-based execute control, or None where VTL0 maps nothing.
+        """
+    @property
+    def vtl1(self, /) -> str |None:
+        """
+        VTL1's access, as `vtl0` gives VTL0's.
+        """
+
+@final
+class EptMapping(BaseRecord):
+    """
+    Where a guest physical address goes through one VTL's EPT, and the
+    access that every level of the walk allows.
+    """
     @property
     def entries(self, /) -> list[int]:
         """
@@ -2912,13 +2931,10 @@ class EptMapping:
     def execute(self, /) -> bool:
         """
         Execute access: supervisor-mode only when `user_execute` is not
-        `None`.
+        None.
         """
     @property
-    def host_physical(self, /) -> int:
-        """
-        The host physical address.
-        """
+    def host_physical(self, /) -> int: ...
     @property
     def memory_type(self, /) -> int:
         """
@@ -2935,7 +2951,7 @@ class EptMapping:
     def user_execute(self, /) -> bool |None:
         """
         User-mode execute access when the VTL uses mode-based execute
-        control, else `None`.
+        control, else None.
         """
     @property
     def write(self, /) -> bool: ...
@@ -5117,6 +5133,44 @@ class Heaps:
     def get(self, /, index: int) -> Heap |None: ...
 
 @final
+class Hypercall(BaseRecord):
+    """
+    One call code of the hypervisor's hypercall table.
+    """
+    @property
+    def code(self, /) -> int: ...
+    @property
+    def handler(self, /) -> int: ...
+    @property
+    def implemented(self, /) -> bool:
+        """
+        Whether the call has its own handler, not the reserved code 0's.
+        """
+    @property
+    def input_element_size(self, /) -> int: ...
+    @property
+    def input_size(self, /) -> int: ...
+    @property
+    def name(self, /) -> str |None:
+        """
+        The TLFS name, or None for a code that the TLFS does not list.
+        """
+    @property
+    def output_element_size(self, /) -> int: ...
+    @property
+    def output_size(self, /) -> int: ...
+    @property
+    def rep(self, /) -> bool:
+        """
+        Whether the call is a rep hypercall.
+        """
+    @property
+    def variable_header(self, /) -> bool:
+        """
+        Whether the call takes a variable-size header.
+        """
+
+@final
 class HypervisorPartition:
     """
     A partition of the Windows hypervisor, as it was when listed.
@@ -5161,6 +5215,23 @@ class HypervisorPartition:
         """
 
 @final
+class HypervisorProcessor(BaseRecord):
+    """
+    A logical processor whose current VP a VP is: the one that runs it, or
+    ran it last.
+    """
+    @property
+    def block(self, /) -> int:
+        """
+        The processor block (the processor's GS base in the hypervisor).
+        """
+    @property
+    def number(self, /) -> int |None:
+        """
+        The processor number, or None on builds before 10.0.19041.
+        """
+
+@final
 class HypervisorVtl:
     """
     One VTL of a virtual processor: the hypervisor's context for it and, when
@@ -5195,7 +5266,8 @@ class HypervisorVtl:
         guest virtual memory through the VTL's page tables (its saved CR3),
         or with `physical=True` guest physical memory, both through the VTL's
         EPT. Raises `NtoseyeError` without the VTL's eVMCS state or when a
-        page is not mapped. The memory is read-only.
+        page is not mapped, and for a virtual address unless the guest is in
+        4-level long-mode paging. The memory is read-only.
         """
     @property
     def rip(self, /) -> int |None:
@@ -5218,7 +5290,8 @@ class HypervisorVtl:
         """
         Translate a guest virtual address of this VTL's guest through its page
         tables and its EPT: `(guest_physical, host_physical)`, or `None` when
-        the page tables do not map it.
+        the page tables do not map it. Raises `NtoseyeError` unless the guest
+        is in 4-level long-mode paging.
         """
     @property
     def vmcs(self, /) -> int |None:
@@ -5226,11 +5299,12 @@ class HypervisorVtl:
         The physical address of the VTL's eVMCS, or `None` when ntoseye did
         not find where the context keeps it (no `hv-evmcs`).
         """
-    def vmcs_fields(self, /) -> dict[str, Any]:
+    def vmcs_fields(self, /) -> Record:
         """
-        Every field of this VTL's eVMCS, read now, as a dict from its TLFS
-        name (`"guest_rip"`, `"msr_bitmap"`, ...) to its value, as `!hvvmcs`
-        shows them. Raises `NtoseyeError` without the VTL's eVMCS.
+        Every field of this VTL's eVMCS, read now, named as the TLFS names it
+        (`guest_rip`, `msr_bitmap`, ...), as `!hvvmcs` shows them:
+        `fields.guest_rip` or `fields["guest_rip"]`. Raises `NtoseyeError`
+        without the VTL's eVMCS.
         """
 
 @final
@@ -12413,8 +12487,10 @@ class VcpuStatus(BaseRecord):
     @property
     def context(self, /) -> str:
         """
-        The address space in which the vCPU runs: `kernel`, a process name,
-        or `unknown`. Empty if ntoseye cannot find the address space.
+        What the vCPU runs: `kernel`, a process name, `hypervisor`, `VTL1`,
+        a guest partition's VP (`partition 0x3 VP 1`), or `unknown`; `no
+        context` for a dump CPU whose context the dump lacks. Empty if
+        ntoseye cannot read the register context.
         """
     @property
     def error(self, /) -> str |None:
@@ -12751,14 +12827,11 @@ class VirtualProcessor:
         """
         The address of the hypervisor's VP object.
         """
-    def ept_differences(self, /) -> list[dict[str, Any]]:
+    def ept_differences(self, /) -> list[EptDifference]:
         """
         The guest physical ranges that VTL0's and VTL1's EPTs map differently,
-        as `!hveptdiff` lists them: dicts with `start`, `end` (exclusive), and
-        `vtl0` and `vtl1`, each access as `"r-x"`-style text (with `u` for
-        user-mode execute under mode-based execute control) or `None` where
-        that VTL maps nothing. Raises `NtoseyeError` unless both VTLs have eVMCS
-        state and readable EPTs.
+        in order, as `!hveptdiff` lists them. Raises `NtoseyeError` unless both
+        VTLs have eVMCS state and readable EPTs.
         """
     @property
     def index(self, /) -> int:
@@ -12766,16 +12839,15 @@ class VirtualProcessor:
         The VP index in its partition.
         """
     @property
-    def processors(self, /) -> list[dict[str, Any]]:
+    def processors(self, /) -> list[HypervisorProcessor]:
         """
         The processors whose current VP this is (the one that runs it, or ran
-        it last), as dicts with `number` (the processor number, or `None` on
-        builds before 10.0.19041) and `block` (its processor block).
+        it last).
         """
     def to_dict(self, /) -> dict[str, Any]:
         """
-        Return the VP as a plain `dict` (`index`, `address`, `vtl`, and `vtls`,
-        a dict from each VTL to its dict).
+        Return the VP as a plain `dict` (`index`, `address`, `processors`,
+        `vtl`, and `vtls`, a dict from each VTL to its dict).
         """
     @property
     def vtl(self, /) -> int:

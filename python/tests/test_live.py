@@ -219,11 +219,11 @@ def test_hypervisor_partitions_mirror_the_vcpus(halted: Debugger) -> None:
     assert [vp.index for vp in root.virtual_processors] == list(range(len(cpus)))
     # A processor has one current VP, and its number is one of the target's.
     numbers = [
-        processor["number"]
+        processor.number
         for partition in partitions
         for vp in partition.virtual_processors
         for processor in vp.processors
-        if processor["number"] is not None
+        if processor.number is not None
     ]
     assert len(numbers) == len(set(numbers)) and all(0 <= n < len(cpus) for n in numbers)
     compared = 0
@@ -266,10 +266,11 @@ def test_vtl_ept_maps_nt_in_place_and_hides_the_secure_kernel_from_vtl0(halted: 
     # The comparison of the two EPTs finds the same page, in ranges that are
     # in order and do not overlap.
     differences = vp.ept_differences()
-    assert all(a["end"] <= b["start"] for a, b in zip(differences, differences[1:]))
-    covering = [d for d in differences if d["start"] <= secure < d["end"]]
+    assert all(a.end <= b.start for a, b in zip(differences, differences[1:]))
+    covering = [d for d in differences if d.start <= secure < d.end]
     assert len(covering) == 1
-    assert (covering[0]["vtl0"] or "-").startswith("-") and covering[0]["vtl1"].startswith("r")
+    vtl1 = covering[0].vtl1
+    assert (covering[0].vtl0 or "-").startswith("-") and vtl1 is not None and vtl1.startswith("r")
 
 
 def test_hypercall_table_matches_the_tlfs(halted: Debugger) -> None:
@@ -280,13 +281,13 @@ def test_hypercall_table_matches_the_tlfs(halted: Debugger) -> None:
         calls = halted.hypercalls()
     except ntoseye.NtoseyeError as error:
         pytest.skip(f"no Windows hypervisor on this target: {error}")
-    by_code = {call["code"]: call for call in calls}
+    by_code = {call.code: call for call in calls}
     get_id, get_registers = by_code[0x46], by_code[0x50]
-    assert get_id["name"] == "HvCallGetPartitionId" and get_id["implemented"]
-    assert (get_id["rep"], get_id["output_size"]) == (False, 8)
-    assert get_registers["implemented"] and get_registers["rep"]
-    assert (get_registers["input_element_size"], get_registers["output_element_size"]) == (4, 16)
-    assert not by_code[0]["implemented"]
+    assert get_id.name == "HvCallGetPartitionId" and get_id.implemented
+    assert (get_id.rep, get_id.output_size) == (False, 8)
+    assert get_registers.implemented and get_registers.rep
+    assert (get_registers.input_element_size, get_registers.output_element_size) == (4, 16)
+    assert not by_code[0].implemented
 
 
 def test_vmcs_fields_agree_with_the_saved_state(halted: Debugger) -> None:
@@ -301,8 +302,8 @@ def test_vmcs_fields_agree_with_the_saved_state(halted: Debugger) -> None:
         pytest.skip("needs the hv-evmcs enlightenment")
     for vtl in vtls:
         fields = vtl.vmcs_fields()
-        assert fields["revision_id"] == 1
-        assert (fields["ept_pointer"], fields["guest_rip"]) == (vtl.ept_pointer, vtl.rip)
+        assert fields.revision_id == 1
+        assert (fields.ept_pointer, fields.guest_rip) == (vtl.ept_pointer, vtl.rip)
 
 
 def test_child_partition_memory_reads_agree_three_ways(halted: Debugger) -> None:

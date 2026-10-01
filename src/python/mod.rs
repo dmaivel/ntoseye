@@ -284,7 +284,7 @@ pub mod _ntoseye {
     #[pymodule_export]
     use super::record::{BaseRecord, Record};
     #[pymodule_export]
-    use super::hypervisor::{EptMapping, HypervisorPartition, HypervisorVtl, VirtualProcessor};
+    use super::hypervisor::{HypervisorPartition, HypervisorVtl, VirtualProcessor};
     #[pymodule_export]
     use super::secure::{SecureKernel, Trustlet};
     #[pymodule_export]
