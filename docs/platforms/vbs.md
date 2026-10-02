@@ -10,7 +10,7 @@ VBS can run only if the VM gives nested virtualization to the guest, which is th
 If you debug drivers or the kernel, turn off VBS unless your work needs it, because it brings these limits:
 
 - Windows does not allow KD to write to user-mode code, so a user-mode breakpoint over KD uses one of the four hardware slots ({command}`ba` `e1`).
-- The `gdb` backend cannot single-step with the trap flag, so it runs the vCPU alone to the next instruction. Sometimes a step ends early, in an interrupt handler or in another thread ([how](../internals/vbs.md#stepping-without-the-trap-flag)).
+- The `gdb` backend cannot single-step with the trap flag, so it runs the vCPU alone to the next instruction. Sometimes a step ends early, in an interrupt handler, in another thread, or on a watchpoint hit of another vCPU ([how](../internals/vbs.md#stepping-without-the-trap-flag)).
 - A vCPU can stop inside the Windows hypervisor, where you cannot step until the guest resumes.
 
 Keep VBS on when you:

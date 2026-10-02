@@ -2257,6 +2257,9 @@ class Debugger:
         step into instructions until the next instruction of that kind
         (`tc`/`tt`/`th`). With `timeout` (seconds), an `until` walk that does
         not end in time is interrupted where it is.
+        Under VBS on the gdb backend, the other vCPUs can run while the step's
+        vCPU waits on them; a watchpoint hit one of them makes meanwhile ends
+        the step, and is returned instead.
         """
     def step_out(self, /, timeout: float |None = None) -> Stop:
         """

@@ -289,13 +289,12 @@ pub fn hardware_breakpoint_hit(
     }
     let slots = backend.hardware_breakpoint_slots();
 
-    if let Some(hit) = event
-        .watchpoint_address
-        .and_then(|address| watchpoint_covering(breakpoints, slots, address))
-        && !event
-            .program_counter
-            .is_some_and(|pc| execute_site_at(breakpoints, slots, pc))
-    {
+    if let Some(hit) = reported_watch_hit(
+        breakpoints,
+        slots,
+        event.watchpoint_address,
+        event.program_counter,
+    ) {
         return Ok(Some(hit));
     }
 
@@ -353,6 +352,20 @@ pub fn hardware_breakpoint_hit(
     }
 
     Ok(hit)
+}
+
+/// The watchpoint whose hit a stop at `pc` reports with `watch`, the data
+/// address a transport sends: the armed watchpoint covering it, unless the
+/// stop is at an armed execute site, whose hit it is (see
+/// [`hardware_breakpoint_hit`]).
+pub fn reported_watch_hit(
+    breakpoints: &BreakpointManager,
+    slots: u8,
+    watch: Option<u64>,
+    pc: Option<u64>,
+) -> Option<Breakpoint> {
+    let hit = watchpoint_covering(breakpoints, slots, watch?)?;
+    (!pc.is_some_and(|pc| execute_site_at(breakpoints, slots, pc))).then_some(hit)
 }
 
 /// The data watchpoint covering `address`, which is what a transport-reported
@@ -513,8 +526,9 @@ fn arm64_hardware_breakpoint_hit(
 /// Resolve one stop against the watchpoint manager. This owns the behavior
 /// common to every host: claim and acknowledge backend status, adopt the
 /// stopped thread, refresh register/CR3 context before condition evaluation,
-/// and resume a pass-count or false conditional hit. Condition errors fail
-/// safe by surfacing the hit with error metadata.
+/// and decline a hit the filters, pass count or condition reject, leaving
+/// the caller to resume past it. Condition errors fail safe by surfacing
+/// the hit with error metadata.
 pub fn resolve_watchpoint_stop(
     backend: &mut dyn DebugBackend,
     register_map: &RegisterMap,
@@ -571,15 +585,13 @@ pub fn resolve_watchpoint_stop(
     update_target_context_from_registers(target, register_map, Ok(registers));
     if !breakpoint.scope.matches_dtb(scope_dtb, target.arch()) {
         declined("another address space");
-        backend.continue_execution()?;
-        return Ok(WatchpointStopAction::Resumed);
+        return Ok(WatchpointStopAction::Declined);
     }
     if let Some(thread) = breakpoint.thread.as_ref() {
         let stopped = refresh_windows_thread_context_for_backend_thread(target, current_thread);
         if !thread.matches(stopped.as_ref()) {
             declined("another thread");
-            backend.continue_execution()?;
-            return Ok(WatchpointStopAction::Resumed);
+            return Ok(WatchpointStopAction::Declined);
         }
     }
     if !stopped_processor_matches(breakpoint.processor, current_thread)
@@ -588,8 +600,7 @@ pub fn resolve_watchpoint_stop(
             .is_some_and(|min| sp.is_some_and(|sp| sp < min))
     {
         declined("another processor, or the stack is not deep enough");
-        backend.continue_execution()?;
-        return Ok(WatchpointStopAction::Resumed);
+        return Ok(WatchpointStopAction::Declined);
     }
     let (hypercall_matches, caller) = stopped_hypercall_matches(
         target,
@@ -600,20 +611,17 @@ pub fn resolve_watchpoint_stop(
     );
     if !hypercall_matches {
         declined("another hypercall or caller");
-        backend.continue_execution()?;
-        return Ok(WatchpointStopAction::Resumed);
+        return Ok(WatchpointStopAction::Declined);
     }
     if breakpoints.record_hit(breakpoint.id)? == BreakpointHitDisposition::SkipPass {
         declined("pass count");
-        backend.continue_execution()?;
-        return Ok(WatchpointStopAction::Resumed);
+        return Ok(WatchpointStopAction::Declined);
     }
 
     let condition_error = match evaluate_hit_condition(target, &breakpoint, caller.as_ref()) {
         Ok(false) => {
             declined("condition false");
-            backend.continue_execution()?;
-            return Ok(WatchpointStopAction::Resumed);
+            return Ok(WatchpointStopAction::Declined);
         }
         Ok(true) => None,
         Err(error) => Some(error.to_string()),

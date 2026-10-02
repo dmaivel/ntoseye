@@ -835,6 +835,20 @@ pub trait DebugBackend {
         Err(Error::NotSupported)
     }
 
+    /// Keep the stop the last wait returned, with the target halted at it,
+    /// for the next wait (or interrupt) to return again: a resume until then
+    /// leaves the target where it is, as if it had stopped there at once. A
+    /// run that ends on a stop it is not about (another vCPU's watchpoint
+    /// hit while one runs past an instruction) hands it on this way.
+    fn keep_last_stop(&mut self) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    /// Whether a stop is kept (see [`Self::keep_last_stop`]).
+    fn stop_kept(&self) -> bool {
+        false
+    }
+
     fn interrupt(&mut self) -> Result<StopEvent>;
 
     /// Block until the target stops

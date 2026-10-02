@@ -247,10 +247,7 @@ impl Server {
         let cancel = Arc::clone(&self.cancel);
         let session = self.session()?;
         match mode {
-            StepMode::Into => {
-                let rip = session.step().map_err(|error| error.to_string())?;
-                Ok(ContinueOutcome::Step { rip })
-            }
+            StepMode::Into => session.step().map_err(|error| error.to_string()),
             StepMode::Over => session
                 .step_over(&cancel)
                 .map_err(|error| error.to_string()),

@@ -78,11 +78,16 @@ If the vCPU does not get past the instruction in 30 ms, it is waiting on a held 
 
 - The vCPU is past the instruction.
 - The vCPU is back on the instruction, on the same thread. `ntoseye` then runs the vCPU alone again.
+- A vCPU stops on a watchpoint's hit.
 - One second has passed.
 
 If a different vCPU gets to a marked site, the run ends early, which in hot code happens immediately. That vCPU then waits at the site until the next run. `ntoseye` does not hold that vCPU, because it can be the vCPU that the hypervisor waits for, and this is why a time limit ends the runs instead of a count.
 
+A watchpoint's hit ends the runs instead, because a data watchpoint traps after the access: the vCPU that made the hit would not stop on it again in the next run, and the hit would be lost. The step ends on that hit, with the target halted where it was made, and a breakpoint resume reports it as its stop, with nothing run in between. A hit that the watchpoint declines (its thread, processor, pass count, or condition) ends a step where its vCPU waits, as below; a resume goes on past it, as past any declined hit.
+
 After these runs, the step stops and reports its location if it is still in an interrupt handler, if the handler switched out the step's thread, or if the handler hit a breakpoint during the runs. The report includes a notice that gives the reason. Stepping loops ({command}`wt`, `step(until=...)`, `run_to(step=...)`) also stop there, because the handler can wait on a vCPU that the loop holds. {command}`wt` ends as `diverted`.
+
+A handler can be in the hypervisor for a moment, in a call that it makes, such as a spin loop's notification of a long wait. When the second is up with the vCPU there, after it was seen in the handler, the runs continue for up to 250 ms more until the vCPU is back in NT, where the step can end.
 
 If the vCPU is still on the instruction or in the hypervisor after these runs, the step fails, and {command}`g` resumes the vCPU from there.
 

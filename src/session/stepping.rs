@@ -23,7 +23,7 @@ use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
 use crate::session::breakpoints::event_word;
 use crate::session::context::windows_thread_on_backend_thread;
-use crate::session::hits::stack_pointer;
+use crate::session::hits::{reported_watch_hit, stack_pointer};
 use crate::session::{
     CallTrace, CallTraceEnd, CallTraceFrame, ContinueOutcome, ControlState, CurrentInstruction,
     ModuleTrap, PendingWalk, STATUS_BREAKPOINT, STATUS_SINGLE_STEP, Session, StepKind, StepMode,
@@ -42,12 +42,15 @@ impl Session {
     /// plain step + trap-flag clear. Afterward re-arm enabled breakpoints (the
     /// stub can drop non-hit ones on a stop) and re-select the landed-on thread.
     /// The full "step one instruction", shared by the REPL (`si`) and the SDK.
-    pub fn step(&mut self) -> Result<u64> {
-        let (rip, stepped) = self.step_once()?;
+    /// It ends on a `Step` where the vCPU is or, under the Windows hypervisor,
+    /// on a watchpoint's hit another vCPU made while this one waited on them
+    /// (see [`RunPast::Kept`]).
+    pub fn step(&mut self) -> Result<ContinueOutcome> {
+        let (outcome, stepped) = self.step_once()?;
         if stepped == RunPast::Diverted {
             self.note_diverted();
         }
-        Ok(rip)
+        Ok(outcome)
     }
 
     /// [`Self::step`], saying whether the vCPU was diverted: resumed alone,
@@ -55,7 +58,12 @@ impl Session {
     /// interrupt handler that waits on a held vCPU. Stepping on from there
     /// steps that handler's wait, which no held vCPU will ever end; loops
     /// that step stop instead ([`Self::note_diverted`] says so).
-    fn step_once(&mut self) -> Result<(u64, RunPast)> {
+    fn step_once(&mut self) -> Result<(ContinueOutcome, RunPast)> {
+        // A stop a run past kept before this step, while a hit was passed
+        // over for the host (see [`Self::pass_declined_hit`]), is the step's.
+        if let Some(outcome) = self.kept_watch_hit()? {
+            return Ok((outcome, RunPast::Kept));
+        }
         self.require_steppable_vcpu()?;
         self.target.selected_frame = None;
         // Advancing the VM spends any stop `service_idle` parked, so drop it (the
@@ -64,7 +72,7 @@ impl Session {
         self.current_stop = None;
         self.target.breakpoint_stop = None;
         self.backend.set_current_thread(&self.current_thread)?;
-        let stepped = match self.step_over_site_at_pc()? {
+        let mut stepped = match self.step_over_site_at_pc()? {
             Some(stepped) => stepped,
             None if self.backend.single_step_unsafe() => step_without_trap(
                 self.backend.as_mut(),
@@ -98,6 +106,13 @@ impl Session {
                 "failed to re-arm breakpoints after the step: {error}"
             ));
         }
+        if stepped == RunPast::Kept {
+            if let Some(outcome) = self.kept_watch_hit()? {
+                return Ok((outcome, stepped));
+            }
+            // Declined, the hit leaves the vCPU where its run was diverted.
+            stepped = RunPast::Diverted;
+        }
         if !self.backend.single_step_unsafe()
             && let Ok(tid) = self.backend.stopped_thread_id()
         {
@@ -116,7 +131,7 @@ impl Session {
                 self.current_thread
             )));
         }
-        Ok((rip, stepped))
+        Ok((ContinueOutcome::Step { rip }, stepped))
     }
 
     /// Say that a step stopped where it was diverted (see [`Self::step_once`]).
@@ -181,7 +196,7 @@ impl Session {
         }
         // Interrupted on the trap itself, the thread returns to it and hits
         // it again; that hit is this event, not a new one.
-        if matches!(stepped, Ok(RunPast::Diverted)) {
+        if matches!(stepped, Ok(RunPast::Diverted | RunPast::Kept)) {
             self.module_trap_interrupted =
                 interrupted_on(&self.target, &self.register_map, &regs, rip, cr3)
                     .map(|stack| (event, stack));
@@ -525,7 +540,36 @@ impl Session {
             _ => (Vec::new(), None),
         };
         let vcpu = self.current_thread.clone();
-        let (rip, stepped) = self.step_once()?;
+        let (outcome, stepped) = self.step_once()?;
+        // Where the walked thread goes on: past the instruction, which it
+        // executes whether the interrupt came before or after it, at no
+        // lower a stack than the instruction leaves (the same code reached
+        // by a deeper call is not it). Stopping it on the instruction
+        // instead, to step it again, can starve it: under load, the step
+        // after such a stop was switched out again every time.
+        let resume_sites = |walked: &ThreadScope| -> Vec<(VirtAddr, Option<StepFrame>)> {
+            successors
+                .iter()
+                .map(|&address| {
+                    let frame = StepFrame {
+                        thread: walked.clone(),
+                        min_stack_pointer: floor,
+                    };
+                    (VirtAddr(address), Some(frame))
+                })
+                .collect()
+        };
+        let ContinueOutcome::Step { rip } = outcome else {
+            // Another vCPU's watchpoint hit, made while this one waited on
+            // them, ends the walk there. Passed over, the walk goes on where
+            // its thread does, as after a breakpoint the step reached.
+            let sites = walked
+                .filter(|_| !successors.is_empty())
+                .map(resume_sites)
+                .unwrap_or_default();
+            self.pending_walk = Some(PendingWalk { vcpu, sites });
+            return Ok(WalkStep::Stop(outcome));
+        };
         let plain = |session: &mut Self| {
             if stepped == RunPast::Diverted {
                 session.note_diverted();
@@ -547,22 +591,7 @@ impl Session {
         if !elsewhere && !left && successors.contains(&rip) {
             return Ok(WalkStep::At(rip));
         }
-        // Where the walked thread goes on: past the instruction, which it
-        // executes whether the interrupt came before or after it, at no
-        // lower a stack than the instruction leaves (the same code reached
-        // by a deeper call is not it). Stopping it on the instruction
-        // instead, to step it again, can starve it: under load, the step
-        // after such a stop was switched out again every time.
-        let sites = successors
-            .iter()
-            .map(|&address| {
-                let frame = StepFrame {
-                    thread: walked.clone(),
-                    min_stack_pointer: floor,
-                };
-                (VirtAddr(address), Some(frame))
-            })
-            .collect();
+        let sites = resume_sites(walked);
         let switched = elsewhere
             || left
             || stepped == RunPast::Diverted
@@ -1037,7 +1066,7 @@ impl Session {
     /// Shared by the REPL `p` (target only) and the SDKs.
     pub fn step_over(&mut self, cancel: &AtomicBool) -> Result<ContinueOutcome> {
         match self.step_over_target()? {
-            StepKind::Single => Ok(ContinueOutcome::Step { rip: self.step()? }),
+            StepKind::Single => self.step(),
             StepKind::RunTo(addr) => {
                 let frame = self.step_frame(StepStack::CallReturn)?;
                 self.run_to(addr, frame, None, cancel)
@@ -1165,7 +1194,7 @@ pub fn step_over_current_breakpoint(
     }
     // Interrupted on the site itself, the execution returns to it and hits
     // the re-armed breakpoint again; that hit is this one, not a new one.
-    if matches!(stepped, Ok(RunPast::Diverted))
+    if matches!(stepped, Ok(RunPast::Diverted | RunPast::Kept))
         && let Some(rsp) = interrupted_on(debugger, register_map, &regs, rip, cr3)
     {
         breakpoints.note_interrupted_hit(bp_id, rsp);
@@ -1248,6 +1277,12 @@ pub enum RunPast {
     /// switched to another thread, which stopped on the kept site (see
     /// [`keeper_slot`]).
     Diverted,
+    /// Stopped on a watchpoint's hit short of the successors, another vCPU's
+    /// while this one waited on them, or its own in a handler. The backend
+    /// keeps that stop for the next wait (see
+    /// [`DebugBackend::keep_last_stop`]), with the vCPU where it stood, as
+    /// for [`Self::Diverted`].
+    Kept,
 }
 
 /// How one single step of a walk ended (see [`Session::walk_step`]).
@@ -1356,6 +1391,7 @@ fn run_past_site(
         backend,
         register_map,
         debugger,
+        breakpoints,
         thread,
         regs,
         &successors,
@@ -1424,6 +1460,7 @@ fn step_without_trap(
         backend,
         register_map,
         debugger,
+        breakpoints,
         thread,
         &regs,
         &successors,
@@ -1531,6 +1568,7 @@ fn run_past(
     backend: &mut dyn DebugBackend,
     register_map: &RegisterMap,
     debugger: &Target,
+    breakpoints: &BreakpointManager,
     thread: &str,
     regs: &[u8],
     successors: &[u64],
@@ -1542,6 +1580,7 @@ fn run_past(
         backend,
         register_map,
         debugger,
+        breakpoints,
         thread,
         regs,
         successors,
@@ -1562,6 +1601,7 @@ fn run_to_successors(
     backend: &mut dyn DebugBackend,
     register_map: &RegisterMap,
     debugger: &Target,
+    breakpoints: &BreakpointManager,
     thread: &str,
     regs: &[u8],
     successors: &[u64],
@@ -1603,7 +1643,13 @@ fn run_to_successors(
         backend.continue_current_thread()?;
         let (event, timed_out) = match backend.try_wait_for_stop(RUN_PAST_TIMEOUT)? {
             Some(event) => (event, false),
-            None => (backend.interrupt()?, true),
+            // The stop that answers the break-in can be a watchpoint's,
+            // which came first.
+            None => {
+                let event = backend.interrupt()?;
+                let broken_in = event.watchpoint_address.is_none();
+                (event, broken_in)
+            }
         };
         if event.is_bugcheck {
             return Err(Error::DebugInfo(format!(
@@ -1643,6 +1689,21 @@ fn run_to_successors(
                      stopped on it again; resume with g, disabling any breakpoint there first"
                 )));
             }
+            // Stopped by itself short of the successors, in the handler of
+            // an interrupt taken first, on a watchpoint's hit: a stop for the
+            // session to report, not this run's end.
+            if !successors.contains(&now)
+                && reported_watch_hit(
+                    breakpoints,
+                    backend.hardware_breakpoint_slots(),
+                    event.watchpoint_address,
+                    Some(now),
+                )
+                .is_some()
+                && backend.keep_last_stop().is_ok()
+            {
+                return Ok(RunPast::Kept);
+            }
             return Ok(RunPast::Reached);
         }
         // Short of the successors, it waits on a vCPU this holds: in the
@@ -1672,6 +1733,7 @@ fn run_to_successors(
                 backend,
                 register_map,
                 debugger,
+                breakpoints,
                 thread,
                 successors,
                 sites,
@@ -1697,6 +1759,13 @@ fn run_to_successors(
                         release.summary()
                     );
                     break;
+                }
+                Released::Kept => {
+                    step_trace!(
+                        "release of {thread} at {rip:#x} kept a watchpoint's stop: {}",
+                        release.summary()
+                    );
+                    return Ok(RunPast::Kept);
                 }
                 Released::Waiting { in_handler } => {
                     in_nt = in_handler;
@@ -1737,6 +1806,9 @@ enum Released {
     /// stopped on a breakpoint in the handler: the step ends where the vCPU
     /// is.
     Diverted,
+    /// A vCPU stopped on a watchpoint's hit, whose stop the backend keeps
+    /// for the session (see [`RunPast::Kept`]): the step ends there.
+    Kept,
 }
 
 /// Letting every vCPU run while one executing an instruction at `rip` waits
@@ -1745,7 +1817,9 @@ enum Released {
 /// stops past it. Another vCPU can stop on one of those too, ending that
 /// run early; it is simply resumed with the next one, and executes the
 /// instruction once the step is over and they are lifted. Holding it
-/// instead can hold the very vCPU the hypervisor waits for.
+/// instead can hold the very vCPU the hypervisor waits for. A watchpoint's
+/// hit ends the release instead: a watchpoint traps after the access, so
+/// the vCPU resumed would not stop on it again, and the hit would be lost.
 struct Release {
     rip: u64,
     rsp: Option<u64>,
@@ -1789,6 +1863,7 @@ impl Release {
         backend: &mut dyn DebugBackend,
         register_map: &RegisterMap,
         debugger: &Target,
+        breakpoints: &BreakpointManager,
         thread: &str,
         successors: &[u64],
         sites: &TemporarySites,
@@ -1813,8 +1888,12 @@ impl Release {
             Ok(match backend.try_wait_for_stop(RELEASE_WINDOW)? {
                 Some(event) => (event.thread_id, event.watchpoint_address),
                 None => {
-                    backend.interrupt()?;
-                    (None, None)
+                    // A watchpoint's stop can answer the break-in.
+                    let event = backend.interrupt()?;
+                    match event.watchpoint_address {
+                        Some(watch) => (event.thread_id, Some(watch)),
+                        None => (None, None),
+                    }
                 }
             })
         });
@@ -1827,8 +1906,9 @@ impl Release {
         }
         let (stopped, watch) = stop?;
         // Which vCPU ended the run, and where: one held on a marked site
-        // ends every run after at once. Two more packets, so traced only.
-        let stopper_rip = if step_trace_enabled() {
+        // ends every run after at once. Two more packets, so read only for
+        // the trace, or to tell a watchpoint's hit from a site's.
+        let stopper_rip = if watch.is_some() || step_trace_enabled() {
             stopped
                 .as_deref()
                 .filter(|&by| by != thread)
@@ -1859,6 +1939,26 @@ impl Release {
                 ""
             }
         );
+        // The vCPU's own stop at a successor, or back on the instruction,
+        // ends its step whatever else it reports.
+        let own_end =
+            stopped.as_deref() == Some(thread) && (successors.contains(&now) || now == self.rip);
+        let stopper_pc = match stopped.as_deref() {
+            Some(by) if by == thread => Some(now),
+            _ => stopper_rip,
+        };
+        if !own_end
+            && reported_watch_hit(
+                breakpoints,
+                backend.hardware_breakpoint_slots(),
+                watch,
+                stopper_pc,
+            )
+            .is_some()
+            && backend.keep_last_stop().is_ok()
+        {
+            return Ok(Released::Kept);
+        }
         if in_hypervisor {
             return Ok(Released::Waiting { in_handler: false });
         }

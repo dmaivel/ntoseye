@@ -4,7 +4,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::breakpoints::BreakpointManager;
+use crate::breakpoints::{Breakpoint, BreakpointManager};
 use crate::dbg_backend::{
     ContinueDisposition, DebugBackend, LastEvent, ModuleEvent, StopEvent, clear_trap_flag,
     processor_index_from_backend_thread_id,
@@ -289,6 +289,74 @@ impl Session {
         }
     }
 
+    /// The stop of `breakpoint`'s watchpoint hit, reported by `event`,
+    /// recorded as the stop the target is halted at.
+    fn watchpoint_hit(
+        &mut self,
+        breakpoint: Breakpoint,
+        event: StopEvent,
+        condition_error: Option<String>,
+    ) -> StopResolution {
+        let rip = self
+            .target
+            .registers
+            .as_ref()
+            .and_then(|registers| registers.get("rip").copied())
+            .unwrap_or(0);
+        let resolution = StopResolution::Breakpoint {
+            breakpoint: Box::new(breakpoint),
+            event,
+            rip,
+            condition_error,
+        };
+        self.record_visible_stop(&resolution);
+        resolution
+    }
+
+    /// The watchpoint hit a run past kept for the next wait (see
+    /// [`DebugBackend::keep_last_stop`]) as the stop a step ends on: the
+    /// hit, on whichever vCPU made it, when its watchpoint takes it. `None`
+    /// when no stop is kept, or the watchpoint declines the hit, with the
+    /// step's vCPU selected again: a step does not resume past a hit as a run
+    /// does, it ends where its vCPU is.
+    pub fn kept_watch_hit(&mut self) -> Result<Option<ContinueOutcome>> {
+        if !self.backend.stop_kept() {
+            return Ok(None);
+        }
+        let stepping = self.current_thread.clone();
+        let mut event = self.backend.wait_for_stop()?;
+        set_current_thread_from_stop(self.backend.as_mut(), &event, &mut self.current_thread);
+        if event.program_counter.is_none() {
+            event.program_counter = self
+                .backend
+                .read_registers()
+                .ok()
+                .and_then(|regs| self.register_map.read_u64("rip", &regs).ok());
+        }
+        self.record_stop_event(&event);
+        match resolve_watchpoint_stop(
+            self.backend.as_mut(),
+            &self.register_map,
+            &mut self.breakpoints,
+            &mut self.target,
+            &mut self.current_thread,
+            &event,
+        )? {
+            WatchpointStopAction::Hit {
+                breakpoint,
+                condition_error,
+            } => {
+                let resolution = self.watchpoint_hit(breakpoint, event, condition_error);
+                Ok(Some(self.continue_outcome_from_resolution(resolution)))
+            }
+            WatchpointStopAction::Declined | WatchpointStopAction::NotBreakpoint => {
+                self.current_thread = stepping;
+                self.backend.set_current_thread(&self.current_thread)?;
+                Ok(None)
+            }
+        }
+    }
+
     /// Classify one raw backend stop and perform every core-owned transition.
     ///
     /// This is the only stop-ingestion state machine. REPL, MCP, Python, and
@@ -370,23 +438,10 @@ impl Session {
                 breakpoint,
                 condition_error,
             } => {
-                let rip = self
-                    .target
-                    .registers
-                    .as_ref()
-                    .and_then(|registers| registers.get("rip").copied())
-                    .unwrap_or(0);
-                let resolution = StopResolution::Breakpoint {
-                    breakpoint: Box::new(breakpoint),
-                    event,
-                    rip,
-                    condition_error,
-                };
-                self.record_visible_stop(&resolution);
-                return Ok(resolution);
+                return Ok(self.watchpoint_hit(breakpoint, event, condition_error));
             }
-            WatchpointStopAction::Resumed => {
-                self.invalidate_running_context();
+            WatchpointStopAction::Declined => {
+                self.continue_backend(ContinueDisposition::Handled)?;
                 return Ok(StopResolution::Resumed);
             }
             WatchpointStopAction::NotBreakpoint => {}

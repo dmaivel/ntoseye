@@ -93,6 +93,13 @@ pub struct MockBackend {
     /// A run of every vCPU ends with this backend thread reporting its own
     /// stop (a breakpoint it hit), rather than by a break-in.
     released_stop_by: Option<&'static str>,
+    /// The data address a watchpoint trapped on, reported with the stop
+    /// that ends each run of every vCPU at `released_to`.
+    released_watch: Option<u64>,
+    /// The last stop handed out, and the one kept for the next wait (see
+    /// [`DebugBackend::keep_last_stop`]).
+    last_event: Option<StopEvent>,
+    kept: Option<StopEvent>,
     /// Accept selecting (and report) one vCPU, as a stub does.
     one_vcpu: bool,
     /// The `_ETHREAD` each processor runs, shared with the session's target
@@ -144,6 +151,9 @@ impl Default for MockBackend {
             landings: VecDeque::new(),
             released_to: None,
             released_stop_by: None,
+            released_watch: None,
+            last_event: None,
+            kept: None,
             one_vcpu: false,
             threads: Arc::new(Mutex::new(HashMap::new())),
             step_landings: VecDeque::new(),
@@ -288,6 +298,10 @@ impl DebugBackend for MockBackend {
         self.dropped_sites.clone()
     }
     fn continue_execution(&mut self) -> Result<()> {
+        if self.kept.is_some() {
+            self.running = true;
+            return Ok(());
+        }
         self.continues.fetch_add(1, Ordering::Relaxed);
         self.running = true;
         if let Some(landing) = self.schedule.pop_front() {
@@ -296,7 +310,9 @@ impl DebugBackend for MockBackend {
                 .push_back(breakpoint_event(landing.rip));
         } else if let Some(address) = self.released_to {
             self.set("rip", address);
-            self.interrupt_events.push_back(breakpoint_event(address));
+            let mut event = breakpoint_event(address);
+            event.watchpoint_address = self.released_watch;
+            self.interrupt_events.push_back(event);
         }
         Ok(())
     }
@@ -309,6 +325,10 @@ impl DebugBackend for MockBackend {
     /// The lone vCPU reaches `alone_schedule`, then `landings`, then
     /// `lands_at`, and reports a breakpoint there.
     fn continue_current_thread(&mut self) -> Result<()> {
+        if self.kept.is_some() {
+            self.running = true;
+            return Ok(());
+        }
         self.running = true;
         if let Some(landing) = self.alone_schedule.pop_front() {
             self.land(landing);
@@ -337,23 +357,37 @@ impl DebugBackend for MockBackend {
         Ok(())
     }
     fn interrupt(&mut self) -> Result<StopEvent> {
+        if let Some(event) = self.kept.take() {
+            self.running = false;
+            return Ok(event);
+        }
         self.interrupts.fetch_add(1, Ordering::Relaxed);
         let event = self
             .interrupt_events
             .pop_front()
             .ok_or(Error::NotSupported)?;
         self.running = false;
+        self.last_event = Some(event.clone());
         Ok(event)
     }
     fn wait_for_stop(&mut self) -> Result<StopEvent> {
+        if let Some(event) = self.kept.take() {
+            self.running = false;
+            return Ok(event);
+        }
         let event = self
             .interrupt_events
             .pop_front()
             .ok_or(Error::NotSupported)?;
         self.running = false;
+        self.last_event = Some(event.clone());
         Ok(event)
     }
     fn try_wait_for_stop(&mut self, _timeout: Duration) -> Result<Option<StopEvent>> {
+        if let Some(event) = self.kept.take() {
+            self.running = false;
+            return Ok(Some(event));
+        }
         if let Some(thread) = self.released_stop_by
             && self.running
             && self.continues.load(Ordering::Relaxed) > 0
@@ -364,17 +398,26 @@ impl DebugBackend for MockBackend {
                 .ok_or(Error::NotSupported)?;
             event.thread_id = Some(thread.into());
             self.running = false;
+            self.last_event = Some(event.clone());
             return Ok(Some(event));
         }
         if self.halts_only_on_interrupt {
             return Ok(None);
         }
         let event = self.interrupt_events.pop_front();
-        if event.is_some() {
+        if let Some(event) = &event {
             self.running = false;
             self.pending_stop = false;
+            self.last_event = Some(event.clone());
         }
         Ok(event)
+    }
+    fn keep_last_stop(&mut self) -> Result<()> {
+        self.kept = Some(self.last_event.clone().ok_or(Error::NotSupported)?);
+        Ok(())
+    }
+    fn stop_kept(&self) -> bool {
+        self.kept.is_some()
     }
     fn thread_list(&mut self) -> Result<Vec<String>> {
         Err(Error::NotSupported)
@@ -1193,6 +1236,14 @@ fn stepping_session(code: &[u8], backend: MockBackend) -> Session {
     session
 }
 
+/// Where a step that ended as a plain step left its vCPU.
+fn step_rip(session: &mut Session) -> u64 {
+    match session.step().unwrap() {
+        ContinueOutcome::Step { rip } => rip,
+        other => panic!("the step ended on {other:?}"),
+    }
+}
+
 /// A target that runs on after a step never reports it; Ctrl+C breaks in
 /// and the step ends at that stop. The Ctrl+C stays raised for a loop of
 /// steps around this one.
@@ -1208,7 +1259,7 @@ fn ctrl_c_breaks_in_on_a_step_that_does_not_stop() {
     let mut session = stepping_session(&[0x90; 0x10], backend);
     session.target.interrupt.store(true, Ordering::SeqCst);
 
-    assert_eq!(session.step().unwrap(), 0x1001);
+    assert_eq!(step_rip(&mut session), 0x1001);
     assert_eq!(interrupts.load(Ordering::Relaxed), 1);
     assert!(session.target.interrupt.load(Ordering::SeqCst));
 }
@@ -1230,7 +1281,7 @@ fn a_step_under_the_windows_hypervisor_runs_the_vcpu_alone_to_every_successor() 
     let (sites, hardware) = (backend.site_writes.clone(), backend.hardware_writes.clone());
     let mut session = stepping_session(&code, backend);
 
-    assert_eq!(session.step().unwrap(), 0x1012);
+    assert_eq!(step_rip(&mut session), 0x1012);
     assert_eq!(
         *sites.lock(),
         [
@@ -1264,7 +1315,7 @@ fn a_step_diverted_into_an_interrupt_handler_says_so() {
         backend.set("rip", 0x1000);
         let mut session = stepping_session(&code, backend);
 
-        assert_eq!(session.step().unwrap(), lands_at);
+        assert_eq!(step_rip(&mut session), lands_at);
         let notices = session.take_notices();
         assert_eq!(!notices.is_empty(), diverted, "{notices:?}");
     }
@@ -1292,7 +1343,7 @@ fn a_step_whose_handler_stops_on_a_breakpoint_ends_there() {
     let mut session = stepping_session(&code, backend);
     session.current_thread = "p01.01".into();
 
-    assert_eq!(session.step().unwrap(), 0x1030);
+    assert_eq!(step_rip(&mut session), 0x1030);
     assert!(!session.take_notices().is_empty());
     assert_eq!(continues.load(Ordering::Relaxed), 1);
 }
@@ -1324,8 +1375,165 @@ fn slow_checks_between_release_runs_leave_the_handler_its_runs() {
     backend.set("rip", 0x1000);
     let mut session = stepping_session(&code, backend);
 
-    assert_eq!(session.step().unwrap(), 0x1012);
+    assert_eq!(step_rip(&mut session), 0x1012);
     assert!(session.take_notices().is_empty());
+}
+
+/// Under the Windows hypervisor, p01.01 run alone past `je +0x10` at 0x1000
+/// waits in a handler at 0x1030 on the other vCPUs, and every run of them
+/// all ends with a hit on write watchpoint #7 on 0x2000..0x2004: p01.02's
+/// own stop, or with `stop_by` `None`, the stop that answers the break-in.
+fn watched_release_session(stop_by: Option<&'static str>) -> (Session, Arc<AtomicUsize>) {
+    let mut code = [0x90u8; 0x40];
+    code[..2].copy_from_slice(&[0x74, 0x10]); // je +0x10
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        single_step_unsafe: true,
+        halts_only_on_interrupt: true,
+        lands_at: Some(0x1030),
+        released_to: Some(0x1030),
+        released_stop_by: stop_by,
+        released_watch: Some(0x2002),
+        one_vcpu: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1000);
+    let continues = Arc::clone(&backend.continues);
+    let mut session = stepping_session(&code, backend);
+    session.current_thread = "p01.01".into();
+    session.breakpoints.insert_for_test(
+        7,
+        VirtAddr(0x2000),
+        true,
+        Some(HardwareBreakpoint {
+            access: HwBreakpointAccess::Write,
+            len: 4,
+            slot: 0,
+        }),
+    );
+    (session, continues)
+}
+
+/// A watchpoint another vCPU hits while a step waits on them is the step's
+/// stop, with the target halted at it. Resumed with the next run, that
+/// vCPU would not stop on it again (a watchpoint traps after the access),
+/// and the hit was lost.
+#[test]
+fn a_watchpoint_hit_while_a_step_waits_on_the_others_is_the_steps_stop() {
+    let (mut session, continues) = watched_release_session(Some("p01.02"));
+
+    let outcome = session.step().unwrap();
+    assert!(
+        matches!(outcome, ContinueOutcome::Breakpoint { id: 7, .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(session.current_thread, "p01.02");
+    assert_eq!(continues.load(Ordering::Relaxed), 1);
+}
+
+/// A watchpoint's stop that answers the break-in ending a run, having come
+/// first, is kept like one that ended the run itself.
+#[test]
+fn a_watchpoint_hit_that_answers_a_release_break_in_is_the_steps_stop() {
+    let (mut session, continues) = watched_release_session(None);
+
+    let outcome = session.step().unwrap();
+    assert!(
+        matches!(outcome, ContinueOutcome::Breakpoint { id: 7, .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(continues.load(Ordering::Relaxed), 1);
+}
+
+/// A hit its watchpoint declines ends the step where the step's vCPU waits,
+/// as a diverted step, rather than resuming past the hit as a run does.
+#[test]
+fn a_declined_watchpoint_hit_while_a_step_waits_ends_the_step_where_it_is() {
+    let (mut session, continues) = watched_release_session(Some("p01.02"));
+    session.breakpoints.set_pass_count(7, 2).unwrap();
+
+    assert_eq!(step_rip(&mut session), 0x1030);
+    assert_eq!(session.current_thread, "p01.01");
+    assert!(!session.take_notices().is_empty());
+    assert_eq!(continues.load(Ordering::Relaxed), 1);
+}
+
+/// A resume from a breakpoint first runs its vCPU past the site. A
+/// watchpoint another vCPU hits meanwhile is the stop the resume reports,
+/// with nothing run since: a walk following a thread waits on such a hit.
+#[test]
+fn a_watchpoint_hit_while_a_resume_leaves_its_site_is_the_next_stop() {
+    let (mut session, continues) = watched_release_session(Some("p01.02"));
+    session
+        .breakpoints
+        .insert_for_test(1, VirtAddr(0x1000), true, None);
+
+    let outcome = session
+        .continue_until_break(
+            Some(Duration::from_secs(1)),
+            &AtomicBool::new(false),
+            ContinueDisposition::Handled,
+        )
+        .unwrap();
+    assert!(
+        matches!(outcome, ContinueOutcome::Breakpoint { id: 7, .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(continues.load(Ordering::Relaxed), 1);
+}
+
+/// A resume with a stop kept reports that stop with nothing run first: no
+/// vCPU steps off the site it is on, a run that would take the kept stop
+/// for its own and lose it.
+#[test]
+fn a_resume_with_a_stop_kept_reports_it_without_leaving_a_site() {
+    let mut kept = breakpoint_event(0x1030);
+    kept.thread_id = Some("p01.02".into());
+    kept.watchpoint_address = Some(0x2002);
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        single_step_unsafe: true,
+        halts_only_on_interrupt: true,
+        lands_at: Some(0x1001),
+        one_vcpu: true,
+        kept: Some(kept),
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1000);
+    let sites = Arc::clone(&backend.site_writes);
+    let mut session = stepping_session(&[0x90u8; 0x40], backend);
+    session.current_thread = "p01.01".into();
+    session
+        .breakpoints
+        .insert_for_test(1, VirtAddr(0x1000), true, None);
+    session.breakpoints.insert_for_test(
+        7,
+        VirtAddr(0x2000),
+        true,
+        Some(HardwareBreakpoint {
+            access: HwBreakpointAccess::Write,
+            len: 4,
+            slot: 0,
+        }),
+    );
+
+    let outcome = session
+        .continue_until_break(
+            Some(Duration::from_secs(1)),
+            &AtomicBool::new(false),
+            ContinueDisposition::Handled,
+        )
+        .unwrap();
+    assert!(
+        matches!(outcome, ContinueOutcome::Breakpoint { id: 7, .. }),
+        "{outcome:?}"
+    );
+    // A run past the `nop` at 0x1000 would mark its successor.
+    assert!(
+        !sites.lock().iter().any(|&(address, _)| address == 0x1001),
+        "{:?}",
+        sites.lock()
+    );
 }
 
 /// A handler that finishes once the others run returns to the instruction
@@ -1350,7 +1558,7 @@ fn a_step_whose_handler_returns_once_the_others_run_completes() {
     let sites = backend.site_writes.clone();
     let mut session = stepping_session(&code, backend);
 
-    assert_eq!(session.step().unwrap(), 0x1002);
+    assert_eq!(step_rip(&mut session), 0x1002);
     assert!(session.take_notices().is_empty());
     assert_eq!(
         *sites.lock(),
@@ -1899,7 +2107,7 @@ fn an_interrupted_hit_stepped_back_onto_is_forgotten() {
     };
     // Stepped back onto the site, it is stepped past it.
     on_site(&mut session);
-    assert_eq!(session.step().unwrap(), 0x1003);
+    assert_eq!(step_rip(&mut session), 0x1003);
     on_site(&mut session);
     assert!(matches!(
         session.resolve_breakpoint_stop(0x1000, 0).unwrap(),
@@ -1943,7 +2151,7 @@ fn a_secure_kernel_step_uses_free_debug_register_slots_and_writes_no_code() {
         }),
     );
 
-    assert_eq!(session.step().unwrap(), 0x1002);
+    assert_eq!(step_rip(&mut session), 0x1002);
     assert!(
         sites.lock().is_empty(),
         "a software site was planted in VTL1"
@@ -1973,7 +2181,7 @@ fn a_user_space_step_uses_debug_register_sites_where_int3_is_unsafe() {
         let (sites, hardware) = (backend.site_writes.clone(), backend.hardware_writes.clone());
         let mut session = stepping_session(&code, backend);
 
-        assert_eq!(session.step().unwrap(), 0x1002);
+        assert_eq!(step_rip(&mut session), 0x1002);
         if user_mode {
             assert!(hardware.lock().is_empty());
             assert_eq!(sites.lock()[..2], [(0x1002, true), (0x1012, true)]);

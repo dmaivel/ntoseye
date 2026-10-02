@@ -273,7 +273,7 @@ impl MultiThreadResume for GdbTarget<'_> {
             Some(tid) => self
                 .select(tid)
                 .and_then(|()| self.session.step())
-                .map(|rip| Some(ContinueOutcome::Step { rip })),
+                .map(Some),
             None => self.session.resume().map(|()| None),
         };
         self.pending = match outcome {

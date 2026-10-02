@@ -257,7 +257,12 @@ impl Session {
         // halted, so the next `continue` starts the pump with the reconnect-assist
         // poking already off, instead of resuming into another forced break-in.
         self.try_finish_rediscovery_from_memory();
-        if self.breakpoints.has_enabled_breakpoints() || !self.module_traps.is_empty() {
+        // A kept stop is this resume's (see `DebugBackend::keep_last_stop`):
+        // nothing runs before the wait reports it, so no vCPU steps off a
+        // site, which would take that stop for its own.
+        if (self.breakpoints.has_enabled_breakpoints() || !self.module_traps.is_empty())
+            && !self.backend.stop_kept()
+        {
             self.backend.set_current_thread(&self.current_thread)?;
             self.step_over_site_at_pc()?;
         }

@@ -322,9 +322,7 @@ pub fn step_over(
 }
 
 fn single_step(session: &mut Session, _: Option<Duration>) -> CoreResult<ContinueOutcome> {
-    Ok(ContinueOutcome::Step {
-        rip: session.step()?,
-    })
+    session.step()
 }
 
 /// Step into or over calls per `mode` until the next instruction of `kind`.

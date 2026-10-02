@@ -266,6 +266,9 @@ pub struct GdbClient {
     /// removes every breakpoint, including ones this client still counts as
     /// installed.
     last_stop: String,
+    /// `last_stop` is kept for the next wait (see
+    /// [`DebugBackend::keep_last_stop`]); resumes until then send nothing.
+    kept_stop: bool,
     /// The thread the last `Hc` selected; `None` after a continue reset it
     /// to all threads.
     control_thread: Option<String>,
@@ -348,6 +351,7 @@ impl GdbClient {
             hardware_sites: [None; HW_BREAKPOINT_SLOTS as usize],
             extra_registers: Vec::new(),
             last_stop: String::new(),
+            kept_stop: false,
             control_thread: None,
             kernel_dtb: None,
             windows_hypervisor: false,
@@ -889,6 +893,10 @@ impl GdbClient {
     }
 
     fn continue_execution(&mut self) -> Result<()> {
+        if self.kept_stop {
+            self.halts.set_running(true);
+            return Ok(());
+        }
         self.forget_halt_cache();
         let _ = self.send_packet("Hc-1")?;
         self.control_thread = None;
@@ -903,6 +911,10 @@ impl GdbClient {
     fn step(&mut self) -> Result<()> {
         if self.windows_hypervisor {
             return Err(Error::DebugInfo(STEP_UNDER_WINDOWS_HYPERVISOR.to_string()));
+        }
+        if self.kept_stop {
+            self.halts.set_running(true);
+            return Ok(());
         }
         self.forget_halt_cache();
         match &self.control_thread {
@@ -927,6 +939,10 @@ impl GdbClient {
         if !self.features.thread_continue {
             return Err(Error::NotSupported);
         }
+        if self.kept_stop {
+            self.halts.set_running(true);
+            return Ok(());
+        }
         self.forget_halt_cache();
         self.send_command_no_reply(&format!("vCont;c:{thread}"))?;
         self.halts.set_running(true);
@@ -934,6 +950,9 @@ impl GdbClient {
     }
 
     fn wait_for_stop(&mut self) -> Result<String> {
+        if self.kept_stop {
+            return Ok(self.report_kept_stop());
+        }
         if !self.halts.is_running() {
             return Ok(HALTED_NO_NEW_STOP.to_string());
         }
@@ -944,6 +963,9 @@ impl GdbClient {
     }
 
     fn try_wait_for_stop(&mut self) -> Result<Option<String>> {
+        if self.kept_stop {
+            return Ok(Some(self.report_kept_stop()));
+        }
         if !self.halts.is_running() {
             return Ok(Some(HALTED_NO_NEW_STOP.to_string()));
         }
@@ -993,6 +1015,9 @@ impl GdbClient {
     }
 
     fn interrupt(&mut self) -> Result<String> {
+        if self.kept_stop {
+            return Ok(self.report_kept_stop());
+        }
         if !self.halts.is_running() {
             return Ok(String::new());
         }
@@ -1006,6 +1031,14 @@ impl GdbClient {
         self.halts.set_running(false);
 
         Ok(stop)
+    }
+
+    /// The stop kept for this wait (see [`DebugBackend::keep_last_stop`]),
+    /// at which the target was left halted.
+    fn report_kept_stop(&mut self) -> String {
+        self.kept_stop = false;
+        self.halts.set_running(false);
+        self.last_stop.clone()
     }
 
     fn thread_list(&mut self) -> Result<Vec<String>> {
@@ -1295,6 +1328,28 @@ impl DebugBackend for GdbClient {
         GdbClient::continue_current_thread(self)
     }
 
+    fn keep_last_stop(&mut self) -> Result<()> {
+        self.kept_stop = true;
+        Ok(())
+    }
+
+    fn stop_kept(&self) -> bool {
+        self.kept_stop
+    }
+
+    /// A stop kept and never collected leaves the target halted at it, while
+    /// a resume since counts it running: drop it, so that leaving the target
+    /// running resumes it for real.
+    fn prepare_for_exit(&mut self, leave_running: bool) -> Result<()> {
+        if std::mem::take(&mut self.kept_stop) {
+            self.halts.set_running(false);
+        }
+        if leave_running && !self.halts.is_running() {
+            GdbClient::continue_execution(self)?;
+        }
+        Ok(())
+    }
+
     fn read_registers(&mut self) -> Result<Vec<u8>> {
         GdbClient::read_registers(self)
     }
@@ -1484,6 +1539,7 @@ mod tests {
             hardware_sites: [None; HW_BREAKPOINT_SLOTS as usize],
             extra_registers: Vec::new(),
             last_stop: String::new(),
+            kept_stop: false,
             control_thread: None,
             kernel_dtb: None,
             windows_hypervisor: false,
@@ -1655,6 +1711,46 @@ mod tests {
         // The continue is fire-and-forget; give the stub a moment to log it.
         thread::sleep(Duration::from_millis(50));
         assert_eq!(*received.lock(), ["vCont;c:p01.02"]);
+    }
+
+    /// A kept stop comes back from the next wait with the resume before it
+    /// never sent: the target stays halted at the stop, so the stopped
+    /// vCPU's registers are still those of its hit. The resume after that
+    /// goes out.
+    #[test]
+    fn a_kept_stop_comes_back_without_the_target_resuming() {
+        let (mut client, received) = halted_client_over_stub(|_, _| "OK".to_string());
+        client.features.thread_continue = true;
+        client.control_thread = Some("p01.02".to_string());
+        client.last_stop = "T05watch:ffffcc0c31caf204;thread:p01.03;".to_string();
+
+        DebugBackend::keep_last_stop(&mut client).unwrap();
+        DebugBackend::continue_execution(&mut client).unwrap();
+        assert!(DebugBackend::stop_kept(&client));
+        let event = DebugBackend::wait_for_stop(&mut client).unwrap();
+        assert_eq!(event.thread_id.as_deref(), Some("p01.03"));
+        assert_eq!(event.watchpoint_address, Some(0xffff_cc0c_31ca_f204));
+        assert!(!DebugBackend::is_running(&client));
+        assert!(!DebugBackend::stop_kept(&client));
+
+        DebugBackend::continue_current_thread(&mut client).unwrap();
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(*received.lock(), ["vCont;c:p01.02"]);
+    }
+
+    /// An exit that leaves the target running resumes it even when a stop
+    /// kept for a wait that never came holds it, after a resume that sent
+    /// nothing.
+    #[test]
+    fn leaving_the_target_running_resumes_past_a_kept_stop() {
+        let (mut client, received) = halted_client_over_stub(|_, _| "OK".to_string());
+        DebugBackend::keep_last_stop(&mut client).unwrap();
+        DebugBackend::continue_execution(&mut client).unwrap();
+
+        DebugBackend::prepare_for_exit(&mut client, true).unwrap();
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(*received.lock(), ["Hc-1", "c"]);
+        assert!(DebugBackend::is_running(&client));
     }
 
     /// The kernel root cannot map a user-half address any better than the

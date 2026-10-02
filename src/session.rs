@@ -348,8 +348,9 @@ pub enum WatchpointStopAction {
         breakpoint: Breakpoint,
         condition_error: Option<String>,
     },
-    /// A false conditional hit was resumed in place.
-    Resumed,
+    /// A hit the watchpoint's filters, pass count or condition decline,
+    /// still halted: a run resumes past it, a step ends where it was.
+    Declined,
     /// The stop was not raised by one of our watchpoints.
     NotBreakpoint,
 }

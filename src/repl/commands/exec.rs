@@ -753,13 +753,17 @@ impl ReplState<'_> {
     }
 
     fn single_step_checked(&mut self) -> Result<()> {
-        self.ctx.step()?;
+        let outcome = self.ctx.step()?;
 
         if self.quiet_stops {
             return Ok(());
         }
-        print_stop_separator();
-        print_break_context(self.ctx);
+        if matches!(outcome, ContinueOutcome::Step { .. }) {
+            print_stop_separator();
+            print_break_context(self.ctx);
+        } else {
+            print_parked_outcome(self.ctx, &self.caches, outcome);
+        }
 
         Ok(())
     }
