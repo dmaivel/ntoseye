@@ -260,12 +260,15 @@ pub fn stack_pointer(register_map: &RegisterMap, registers: &[u8]) -> Option<u64
 /// If `event` is a hardware-debug stop, return the breakpoint that fired.
 ///
 /// Which evidence says so depends on what the transport exposes. A stop that
-/// names the trapping data address answers directly. Otherwise AMD64 maps DR6
-/// status bits and clears them, and ARM64 uses the stopped PC/FAR together
-/// with BCR/WCR enable and address-select fields. A transport with neither
-/// (a GDB stub owns the debug registers and does not show them) is left with
-/// the PC, which is an execute breakpoint's address because x86 and ARM64
-/// both fault before the instruction runs.
+/// names a data address an armed watchpoint covers answers directly; one no
+/// watchpoint covers says nothing, as QEMU reports a vCPU's watchpoint hit
+/// with its next stop, whatever made it, when another vCPU's stop was
+/// reported instead. Otherwise AMD64 maps DR6 status bits and clears them,
+/// and ARM64 uses the stopped PC/FAR together with BCR/WCR enable and
+/// address-select fields. A transport with neither (a GDB stub owns the
+/// debug registers and does not show them) is left with the PC, which is an
+/// execute breakpoint's address because x86 and ARM64 both fault before the
+/// instruction runs.
 ///
 /// `None` means a plain single-step or no hardware stop. Must run before
 /// [`stop_is_stray_single_step`](super::stops::stop_is_stray_single_step).
@@ -280,8 +283,11 @@ pub fn hardware_breakpoint_hit(
     }
     let slots = backend.hardware_breakpoint_slots();
 
-    if let Some(address) = event.watchpoint_address {
-        return Ok(watchpoint_covering(breakpoints, slots, address));
+    if let Some(hit) = event
+        .watchpoint_address
+        .and_then(|address| watchpoint_covering(breakpoints, slots, address))
+    {
+        return Ok(Some(hit));
     }
 
     // Debug-register evidence only means anything on the debug exception, and

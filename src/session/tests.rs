@@ -2585,6 +2585,28 @@ fn a_reported_watch_address_past_the_watched_range_is_not_a_hit() {
     assert!(hit.is_none());
 }
 
+/// QEMU clears a vCPU's watchpoint hit only when it reports that vCPU, so
+/// one that lost the race to another vCPU's stop names its data address
+/// with the vCPU's next stop, whatever made it. An address no watchpoint
+/// covers then says nothing, and the execute breakpoint at the PC is hit.
+#[test]
+fn a_watch_address_no_watchpoint_covers_leaves_the_execute_breakpoint_at_the_pc_hit() {
+    let manager = manager_with_hw(0, HwBreakpointAccess::Execute, true);
+    let mut backend = MockBackend::default().without_debug_registers();
+    let map = backend.register_map.clone();
+    backend.set("rip", 0x1000);
+
+    let hit = hardware_breakpoint_hit(
+        &mut backend,
+        &map,
+        &manager,
+        &stub_watch_event(0xffff_cc0c_2cc6_7204),
+    )
+    .unwrap();
+
+    assert_eq!(hit.map(|bp| bp.id), Some(7));
+}
+
 #[test]
 fn a_stub_with_no_debug_registers_attributes_an_execute_breakpoint_by_the_stopped_pc() {
     let manager = manager_with_hw(0, HwBreakpointAccess::Execute, true);
