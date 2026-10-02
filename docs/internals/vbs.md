@@ -81,7 +81,9 @@ If the vCPU does not get past the instruction in 30 ms, it is waiting on a held 
 - A vCPU stops on a watchpoint's hit.
 - One second has passed.
 
-If a different vCPU gets to a marked site, the run ends early, which in hot code happens immediately. That vCPU then waits at the site until the next run. `ntoseye` does not hold that vCPU, because it can be the vCPU that the hypervisor waits for, and this is why a time limit ends the runs instead of a count.
+If a different vCPU gets to a marked site or to any breakpoint, the run ends early, which in hot code happens immediately. That vCPU then stays on the site until the step is over, because it traps on the site again each time it is resumed, and it would end every later run within a few milliseconds. So `ntoseye` holds such a vCPU in every other run, and the other vCPUs then run for up to 20 ms without it. The runs in between resume it as well, so it takes its pending interrupts before it traps again. `ntoseye` does not hold it for all runs, because it can be the vCPU that the hypervisor waits for, for example for an IPI. A vCPU that is no longer on its site after such a run is not held again. Because runs can still end early, a time limit ends the runs instead of a count.
+
+In a test of 150 seconds of steps and call traces on a 4-vCPU guest, with a breakpoint on `nt!KiSwapContext` whose condition is false, holding these vCPUs reduced the 95th percentile of runs for each instruction from 11 to 3, and of the time these runs took from 51 ms to 19 ms.
 
 A watchpoint's hit ends the runs instead, because a data watchpoint traps after the access: the vCPU that made the hit would not stop on it again in the next run, and the hit would be lost. The step ends on that hit, with the target halted where it was made, and a breakpoint resume reports it as its stop, with nothing run in between. A hit that the watchpoint declines (its thread, processor, pass count, or condition) ends a step where its vCPU waits, as below; a resume goes on past it, as past any declined hit.
 

@@ -835,6 +835,13 @@ pub trait DebugBackend {
         Err(Error::NotSupported)
     }
 
+    /// Resume only `threads`, with every other one held: a vCPU that would
+    /// end every run at once (stopped on a breakpoint it traps on again)
+    /// stays out of a run that others need time in.
+    fn continue_threads(&mut self, _threads: &[String]) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
     /// Keep the stop the last wait returned, with the target halted at it,
     /// for the next wait (or interrupt) to return again: a resume until then
     /// leaves the target where it is, as if it had stopped there at once. A

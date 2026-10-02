@@ -111,6 +111,21 @@ pub struct MockBackend {
     schedule: VecDeque<Landing>,
     /// Where runs of the lone vCPU stop on a breakpoint, before `landings`.
     alone_schedule: VecDeque<Landing>,
+    /// Another vCPU (and the site it stands on) that traps again at once
+    /// whenever resumed: a run of every vCPU ends with its stop there, the
+    /// step's vCPU not moved. A run that holds it moves the step's vCPU as
+    /// a run of every vCPU otherwise does, once the parked vCPU has been
+    /// resumed `freed_after_resumes` times (to take an IPI the step's
+    /// vCPU waits on); before that, the step's vCPU stays.
+    parked_vcpu: Option<(&'static str, u64)>,
+    freed_after_resumes: usize,
+    /// The times the parked vCPU was resumed.
+    parked_resumes: Arc<AtomicUsize>,
+    /// The vCPU selected, whose registers a fetch returns: the parked one's
+    /// IP is its site, every other vCPU is processor 0.
+    selected: String,
+    /// A stop the next wait returns at once, before any other.
+    immediate_stop: Option<StopEvent>,
 }
 
 /// Where processor 0 stands after a mock step or run: its IP and stack
@@ -159,6 +174,11 @@ impl Default for MockBackend {
             step_landings: VecDeque::new(),
             schedule: VecDeque::new(),
             alone_schedule: VecDeque::new(),
+            parked_vcpu: None,
+            freed_after_resumes: 0,
+            parked_resumes: Arc::new(AtomicUsize::new(0)),
+            selected: String::new(),
+            immediate_stop: None,
         }
     }
 }
@@ -243,7 +263,13 @@ impl DebugBackend for MockBackend {
     fn read_registers(&mut self) -> Result<Vec<u8>> {
         self.reads += 1;
         std::thread::sleep(self.register_read_delay);
-        Ok(self.regs.clone())
+        let mut regs = self.regs.clone();
+        if let Some((vcpu, site)) = self.parked_vcpu
+            && self.selected == vcpu
+        {
+            self.register_map.write_u64("rip", &mut regs, site)?;
+        }
+        Ok(regs)
     }
     fn stop_trap_state(&mut self) -> Option<TrapState> {
         self.reported_trap_state
@@ -304,6 +330,13 @@ impl DebugBackend for MockBackend {
         }
         self.continues.fetch_add(1, Ordering::Relaxed);
         self.running = true;
+        if let Some((vcpu, site)) = self.parked_vcpu {
+            self.parked_resumes.fetch_add(1, Ordering::Relaxed);
+            let mut event = breakpoint_event(site);
+            event.thread_id = Some(vcpu.into());
+            self.immediate_stop = Some(event);
+            return Ok(());
+        }
         if let Some(landing) = self.schedule.pop_front() {
             self.land(landing);
             self.interrupt_events
@@ -338,6 +371,24 @@ impl DebugBackend for MockBackend {
             self.set("rip", address);
             self.interrupt_events.push_back(breakpoint_event(address));
         }
+        Ok(())
+    }
+    /// A run that holds the parked vCPU (see `parked_vcpu`), which must not
+    /// be among `threads`; the break-in answers it.
+    fn continue_threads(&mut self, threads: &[String]) -> Result<()> {
+        let (parked, _) = self.parked_vcpu.ok_or(Error::NotSupported)?;
+        assert!(
+            !threads.iter().any(|thread| thread == parked),
+            "a run that holds {parked} resumed it: {threads:?}"
+        );
+        self.running = true;
+        if self.parked_resumes.load(Ordering::Relaxed) >= self.freed_after_resumes
+            && let Some(address) = self.released_to
+        {
+            self.set("rip", address);
+        }
+        self.interrupt_events
+            .push_back(breakpoint_event(self.get("rip")));
         Ok(())
     }
     /// A step lands on `step_landings`, then one byte on, reported by the
@@ -388,6 +439,11 @@ impl DebugBackend for MockBackend {
             self.running = false;
             return Ok(Some(event));
         }
+        if let Some(event) = self.immediate_stop.take() {
+            self.running = false;
+            self.last_event = Some(event.clone());
+            return Ok(Some(event));
+        }
         if let Some(thread) = self.released_stop_by
             && self.running
             && self.continues.load(Ordering::Relaxed) > 0
@@ -420,10 +476,12 @@ impl DebugBackend for MockBackend {
         self.kept.is_some()
     }
     fn thread_list(&mut self) -> Result<Vec<String>> {
-        Err(Error::NotSupported)
+        let (parked, _) = self.parked_vcpu.ok_or(Error::NotSupported)?;
+        Ok(vec!["p01.01".to_string(), parked.to_string()])
     }
-    fn set_current_thread(&mut self, _thread_id: &str) -> Result<()> {
+    fn set_current_thread(&mut self, thread_id: &str) -> Result<()> {
         if self.one_vcpu {
+            thread_id.clone_into(&mut self.selected);
             Ok(())
         } else {
             Err(Error::NotSupported)
@@ -1346,6 +1404,38 @@ fn a_step_whose_handler_stops_on_a_breakpoint_ends_there() {
     assert_eq!(step_rip(&mut session), 0x1030);
     assert!(!session.take_notices().is_empty());
     assert_eq!(continues.load(Ordering::Relaxed), 1);
+}
+
+/// Another vCPU stopped on a site traps there again each time it is
+/// resumed, so every run that resumes it ends at once. The step's vCPU,
+/// waiting in a handler, gets its time in runs that hold that vCPU, and
+/// the runs between still resume it: its handler can wait on that vCPU
+/// taking an interrupt (here, being resumed `resumes` times).
+#[test]
+fn a_vcpu_parked_on_a_site_is_held_for_every_other_release_run() {
+    let mut code = [0x90u8; 0x40];
+    code[..2].copy_from_slice(&[0x74, 0x10]); // je +0x10
+    for resumes in [1, 3] {
+        let mut backend = MockBackend {
+            allow_breakpoints: true,
+            single_step_unsafe: true,
+            halts_only_on_interrupt: true,
+            lands_at: Some(0x1030),
+            released_to: Some(0x1012),
+            parked_vcpu: Some(("p01.02", 0x1020)),
+            freed_after_resumes: resumes,
+            one_vcpu: true,
+            ..MockBackend::default()
+        };
+        backend.set("rip", 0x1000);
+        let parked_resumes = Arc::clone(&backend.parked_resumes);
+        let mut session = stepping_session(&code, backend);
+        session.current_thread = "p01.01".into();
+
+        assert_eq!(step_rip(&mut session), 0x1012, "freed after {resumes}");
+        assert!(session.take_notices().is_empty());
+        assert_eq!(parked_resumes.load(Ordering::Relaxed), resumes);
+    }
 }
 
 /// The others are let run until the runs themselves have taken the release

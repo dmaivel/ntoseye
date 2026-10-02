@@ -928,23 +928,36 @@ impl GdbClient {
         Ok(())
     }
 
-    /// Resume the selected thread alone; QEMU leaves every vCPU a `vCont`
-    /// names no action for stopped.
+    /// Resume the selected thread alone (see [`Self::continue_threads`]).
     fn continue_current_thread(&mut self) -> Result<()> {
         let Some(thread) = self.control_thread.clone() else {
             return Err(Error::DebugInfo(
                 "no vCPU is selected to resume on its own".to_string(),
             ));
         };
+        self.continue_threads(&[thread])
+    }
+
+    /// Resume `threads` alone; QEMU leaves every vCPU a `vCont` names no
+    /// action for stopped.
+    fn continue_threads(&mut self, threads: &[String]) -> Result<()> {
         if !self.features.thread_continue {
             return Err(Error::NotSupported);
+        }
+        if threads.is_empty() {
+            return Err(Error::DebugInfo("no vCPU is named to resume".to_string()));
         }
         if self.kept_stop {
             self.halts.set_running(true);
             return Ok(());
         }
         self.forget_halt_cache();
-        self.send_command_no_reply(&format!("vCont;c:{thread}"))?;
+        let mut packet = String::from("vCont");
+        for thread in threads {
+            packet.push_str(";c:");
+            packet.push_str(thread);
+        }
+        self.send_command_no_reply(&packet)?;
         self.halts.set_running(true);
         Ok(())
     }
@@ -1326,6 +1339,10 @@ impl DebugBackend for GdbClient {
 
     fn continue_current_thread(&mut self) -> Result<()> {
         GdbClient::continue_current_thread(self)
+    }
+
+    fn continue_threads(&mut self, threads: &[String]) -> Result<()> {
+        GdbClient::continue_threads(self, threads)
     }
 
     fn keep_last_stop(&mut self) -> Result<()> {
@@ -1711,6 +1728,19 @@ mod tests {
         // The continue is fire-and-forget; give the stub a moment to log it.
         thread::sleep(Duration::from_millis(50));
         assert_eq!(*received.lock(), ["vCont;c:p01.02"]);
+    }
+
+    /// A run that holds some vCPUs resumes each of the others by name in one
+    /// packet; QEMU leaves the vCPUs it names no action for stopped.
+    #[test]
+    fn a_run_of_some_vcpus_names_each_one_it_resumes() {
+        let (mut client, received) = halted_client_over_stub(|_, _| "OK".to_string());
+        client.features.thread_continue = true;
+        let threads = ["p01.01".to_string(), "p01.03".to_string()];
+        DebugBackend::continue_threads(&mut client, &threads).unwrap();
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(*received.lock(), ["vCont;c:p01.01;c:p01.03"]);
+        assert!(DebugBackend::is_running(&client));
     }
 
     /// A kept stop comes back from the next wait with the resume before it

@@ -1,6 +1,7 @@
 //! Instruction-level execution: single steps, step over/out, run-to,
 //! step-until walks, and call tracing.
 
+use std::mem;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -27,7 +28,7 @@ use crate::session::hits::{reported_watch_hit, stack_pointer};
 use crate::session::{
     CallTrace, CallTraceEnd, CallTraceFrame, ContinueOutcome, ControlState, CurrentInstruction,
     ModuleTrap, PendingWalk, STATUS_BREAKPOINT, STATUS_SINGLE_STEP, Session, StepKind, StepMode,
-    StepStack, step_trace_enabled,
+    StepStack,
 };
 use crate::target::{DiagnosticValue, KTHREAD_STATE_RUNNING, KTHREAD_STATE_STANDBY, Target};
 use crate::types::{Arch, Dtb, VirtAddr};
@@ -1628,14 +1629,7 @@ fn run_to_successors(
     // Stops of the same execution back on the instruction, each resumed
     // with `RF` set again; one that keeps faulting there gets no keeper.
     let mut kept_back = 0;
-    let mut release = Release {
-        rip,
-        rsp,
-        nt_thread: None,
-        started: None,
-        runs: 0,
-        ran: Duration::ZERO,
-    };
+    let mut release = Release::new(rip, rsp);
     loop {
         if keeper.is_some() {
             pass_keeper(backend, register_map, rip)?;
@@ -1815,11 +1809,16 @@ enum Released {
 /// on them. The instruction stays marked, so the vCPU stops on it if it
 /// returns there without executing it; the successors stay marked, so it
 /// stops past it. Another vCPU can stop on one of those too, ending that
-/// run early; it is simply resumed with the next one, and executes the
-/// instruction once the step is over and they are lifted. Holding it
-/// instead can hold the very vCPU the hypervisor waits for. A watchpoint's
-/// hit ends the release instead: a watchpoint traps after the access, so
-/// the vCPU resumed would not stop on it again, and the hit would be lost.
+/// run early, or on any breakpoint; it executes the instruction once the
+/// step is over and they are lifted. Until then it traps again each time
+/// it is resumed, so it would end every run within a round trip, leaving
+/// the waiting vCPU almost no time. Such a parked vCPU is held for every
+/// other run, and resumed with the runs between, where it takes its
+/// pending interrupts before it traps again: holding it for good can hold
+/// the very vCPU the hypervisor waits for (an IPI's target). A
+/// watchpoint's hit ends the release instead: a watchpoint traps after the
+/// access, so the vCPU resumed would not stop on it again, and the hit
+/// would be lost.
 struct Release {
     rip: u64,
     rsp: Option<u64>,
@@ -1831,9 +1830,33 @@ struct Release {
     /// [`RELEASE_BUDGET`] bounds.
     runs: u32,
     ran: Duration,
+    /// Every vCPU's backend thread, listed for the first run that holds one.
+    vcpus: Vec<String>,
+    /// The other vCPUs seen stopped on a site, and its address, which each
+    /// traps on again at once when resumed.
+    parked: Vec<(String, u64)>,
+    /// The runs that held the parked vCPUs, for the step trace.
+    held: u32,
+    /// Whether the last run held them, so the next resumes them.
+    holding: bool,
 }
 
 impl Release {
+    fn new(rip: u64, rsp: Option<u64>) -> Self {
+        Self {
+            rip,
+            rsp,
+            nt_thread: None,
+            started: None,
+            runs: 0,
+            ran: Duration::ZERO,
+            vcpus: Vec::new(),
+            parked: Vec::new(),
+            held: 0,
+            holding: false,
+        }
+    }
+
     /// Whether to stop letting the vCPUs run once they have run for
     /// [`RELEASE_BUDGET`]: the step then ends where the waiting vCPU is, in
     /// a handler in NT (`in_nt`), or fails. A handler can be in the Windows
@@ -1849,13 +1872,66 @@ impl Release {
     /// The runs so far, for the step trace.
     fn summary(&self) -> String {
         format!(
-            "{} runs, ran {:?} in {:?}",
+            "{} runs, ran {:?} in {:?}, {} holding parked vCPUs",
             self.runs,
             self.ran,
             self.started
                 .map(|started| started.elapsed())
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            self.held
         )
+    }
+
+    /// The vCPUs the next run resumes: all but the parked ones every other
+    /// run while some are parked, else `None` for every vCPU.
+    fn next_runners(
+        &mut self,
+        backend: &mut dyn DebugBackend,
+        thread: &str,
+    ) -> Result<Option<Vec<String>>> {
+        self.holding = !self.parked.is_empty() && !self.holding;
+        if !self.holding {
+            return Ok(None);
+        }
+        if self.vcpus.is_empty() {
+            self.vcpus = backend.thread_list()?;
+        }
+        let mut runners: Vec<String> = self
+            .vcpus
+            .iter()
+            .filter(|&vcpu| !self.parked.iter().any(|(parked, _)| parked == vcpu))
+            .cloned()
+            .collect();
+        if !runners.iter().any(|vcpu| vcpu == thread) {
+            runners.push(thread.to_string());
+        }
+        Ok(Some(runners))
+    }
+
+    /// Note where the other vCPUs that ended a run stand: `stopper` stopped
+    /// on its own at `stopper_rip`. A vCPU resumed by the run that is still
+    /// on its site trapped there again (or never left it); one that moved
+    /// took an interrupt, and the handler went on.
+    fn note_parked(
+        &mut self,
+        backend: &mut dyn DebugBackend,
+        register_map: &RegisterMap,
+        stopper: Option<&str>,
+        stopper_rip: Option<u64>,
+    ) {
+        if !self.holding {
+            let parked = mem::take(&mut self.parked);
+            self.parked = parked
+                .into_iter()
+                .filter(|(vcpu, at)| {
+                    Some(vcpu.as_str()) != stopper
+                        && rip_of(backend, register_map, vcpu) == Some(*at)
+                })
+                .collect();
+        }
+        if let (Some(vcpu), Some(at)) = (stopper, stopper_rip) {
+            self.parked.push((vcpu.to_string(), at));
+        }
     }
 
     fn run(
@@ -1873,6 +1949,7 @@ impl Release {
         let nt_thread = *self
             .nt_thread
             .get_or_insert_with(|| nt_thread_on(debugger, thread));
+        let runners = self.next_runners(backend, thread)?;
         // A keeper marks the instruction already. Without one, or a slot
         // left for it, it goes unmarked: a vCPU returning to it runs it,
         // and stops on a successor.
@@ -1884,7 +1961,11 @@ impl Release {
         // Whichever vCPU stops first ends the run, or a break-in does.
         self.runs += 1;
         let run_started = Instant::now();
-        let stop = backend.continue_execution().and_then(|()| {
+        let resumed = match &runners {
+            Some(runners) => backend.continue_threads(runners),
+            None => backend.continue_execution(),
+        };
+        let stop = resumed.and_then(|()| {
             Ok(match backend.try_wait_for_stop(RELEASE_WINDOW)? {
                 Some(event) => (event.thread_id, event.watchpoint_address),
                 None => {
@@ -1905,28 +1986,33 @@ impl Release {
             }
         }
         let (stopped, watch) = stop?;
-        // Which vCPU ended the run, and where: one held on a marked site
-        // ends every run after at once. Two more packets, so read only for
-        // the trace, or to tell a watchpoint's hit from a site's.
-        let stopper_rip = if watch.is_some() || step_trace_enabled() {
-            stopped
-                .as_deref()
-                .filter(|&by| by != thread)
-                .and_then(|by| {
-                    backend.set_current_thread(by).ok()?;
-                    let registers = backend.read_registers().ok()?;
-                    register_map.read_u64("rip", &registers).ok()
-                })
-        } else {
-            None
-        };
+        if runners.is_some() {
+            self.held += 1;
+        }
+        // Which other vCPU ended the run, and where: one stopped on a site
+        // ends every run after at once, and a watchpoint's hit is told from
+        // a site's by it.
+        let stopper = stopped.as_deref().filter(|&by| by != thread);
+        let stopper_rip = stopper.and_then(|by| rip_of(backend, register_map, by));
         backend.set_current_thread(thread)?;
         let regs = backend.read_registers()?;
         let now = register_map.read_u64("rip", &regs)?;
         let in_hypervisor = in_windows_hypervisor(debugger, register_map, &regs);
         step_trace!(
-            "release run {} of {thread}: {}{}; {thread} at {now:#x}{}",
+            "release run {} of {thread}{}: {}{}; {thread} at {now:#x}{}",
             self.runs,
+            if runners.is_some() {
+                format!(
+                    " holding {}",
+                    self.parked
+                        .iter()
+                        .map(|(vcpu, _)| vcpu.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            } else {
+                String::new()
+            },
             match (stopped.as_deref(), stopper_rip) {
                 (None, _) => "broken in".to_string(),
                 (Some(by), Some(rip)) => format!("{by} stopped at {rip:#x}"),
@@ -1959,6 +2045,8 @@ impl Release {
         {
             return Ok(Released::Kept);
         }
+        self.note_parked(backend, register_map, stopper, stopper_rip);
+        backend.set_current_thread(thread)?;
         if in_hypervisor {
             return Ok(Released::Waiting { in_handler: false });
         }
@@ -1993,6 +2081,13 @@ fn nt_thread_on(debugger: &Target, thread: &str) -> Option<u64> {
         .current_ethread_for_processor(processor)
         .ok()
         .map(|ethread| ethread.0)
+}
+
+/// The IP of the halted vCPU backend `thread` stands for, which it selects.
+fn rip_of(backend: &mut dyn DebugBackend, register_map: &RegisterMap, thread: &str) -> Option<u64> {
+    backend.set_current_thread(thread).ok()?;
+    let registers = backend.read_registers().ok()?;
+    register_map.read_u64("rip", &registers).ok()
 }
 
 /// Every address execution can continue at after the instruction at `rip`,
@@ -2346,12 +2441,8 @@ mod tests {
 
     fn release_that_ran(ran: Duration) -> Release {
         Release {
-            rip: 0x1000,
-            rsp: None,
-            nt_thread: None,
-            started: None,
-            runs: 0,
             ran,
+            ..Release::new(0x1000, None)
         }
     }
 
