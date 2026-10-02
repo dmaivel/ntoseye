@@ -497,6 +497,31 @@ pub fn halted_in_windows_hypervisor(debugger: &Target, cr3: u64, rip: u64) -> bo
     ) && resolve_thread_trace_context_at(debugger, cr3, rip).description == HYPERVISOR_CONTEXT
 }
 
+/// The guest partition's virtual processor (WSL2, a Hyper-V VM) that a vCPU
+/// at `rip` on root `cr3`, on NT processor `processor`, runs because the
+/// Windows hypervisor put it on that processor, as `~` names it
+/// (`partition 0x6 VP 3`). The vCPU then shows that guest's registers, at
+/// code in no root of NT's that is neither the hypervisor's nor VTL1's,
+/// and the processor block names the guest's VP current; NT's state there
+/// waits in its root VP's saved state until the hypervisor runs that VP
+/// again. The partitions are walked only for a vCPU whose code ntoseye
+/// cannot place.
+pub fn guest_vp_running(
+    debugger: &Target,
+    cr3: u64,
+    rip: u64,
+    processor: Option<u16>,
+) -> Option<String> {
+    if !matches!(
+        root_owner(debugger, cr3 & debugger.arch().dtb_page_mask()),
+        RootOwner::Unknown
+    ) || resolve_thread_trace_context_at(debugger, cr3, rip).description != UNKNOWN_CONTEXT
+    {
+        return None;
+    }
+    debugger.guest_vp_label(processor?)
+}
+
 /// [`try_format_symbol`] for code a vCPU runs at `rip` with root `cr3`,
 /// named in that vCPU's own address space (code outside NT, such as the
 /// Windows hypervisor, for what it is) whatever the inspection scope is.

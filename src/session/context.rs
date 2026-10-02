@@ -12,8 +12,8 @@ use crate::session::{Selection, Session, ThreadContext, VcpuInfo};
 use crate::target::{HYPERVISOR_CONTEXT, SelectedFrame, Target, ThreadInfo};
 use crate::types::VirtAddr;
 use crate::unwind::{
-    UNKNOWN_CONTEXT, halted_in_windows_hypervisor, resolve_thread_trace_context_at, saved_vtls,
-    try_format_symbol,
+    UNKNOWN_CONTEXT, guest_vp_running, halted_in_windows_hypervisor,
+    resolve_thread_trace_context_at, saved_vtls, try_format_symbol,
 };
 
 pub(super) fn update_target_context_from_registers(
@@ -313,15 +313,45 @@ impl Session {
         Ok(halted_in_windows_hypervisor(&self.target, cr3, rip))
     }
 
+    /// The guest partition's VP that the current vCPU runs because the
+    /// Windows hypervisor put it on its processor, as `~` names it
+    /// ([`guest_vp_running`]).
+    pub(super) fn vcpu_guest_vp(&mut self) -> Result<Option<String>> {
+        if self.backend.is_running() || !self.backend.halts_in_windows_hypervisor() {
+            return Ok(None);
+        }
+        let registers = self
+            .backend
+            .set_current_thread(&self.current_thread)
+            .and_then(|()| self.backend.read_registers())?;
+        let value = |name| self.register_map.read_u64(name, &registers).ok();
+        let (Some(cr3), Some(rip)) = (value(self.target.arch().dtb_register()), value("rip"))
+        else {
+            return Ok(None);
+        };
+        let processor = processor_index_from_backend_thread_id(&self.current_thread);
+        Ok(guest_vp_running(&self.target, cr3, rip, processor))
+    }
+
     /// Refuse to step a vCPU halted in the Windows hypervisor: the step would
     /// run hypervisor code, not the NT code the stop shows, and plant its
-    /// temporary sites in the hypervisor's image.
+    /// temporary sites in the hypervisor's image. A vCPU that runs a guest
+    /// partition's VP would run that guest, whose code NT's tables do not
+    /// map.
     pub(super) fn require_steppable_vcpu(&mut self) -> Result<()> {
         self.require_live_register_context()?;
         if self.vcpu_halted_in_hypervisor()? {
             return Err(Error::DebugInfo(format!(
                 "{} is halted in the Windows hypervisor: a step would run hypervisor code, not \
                  the NT code shown. Resume with g, or stop in NT with a breakpoint",
+                self.current_thread
+            )));
+        }
+        if let Some(vp) = self.vcpu_guest_vp()? {
+            return Err(Error::DebugInfo(format!(
+                "{} runs {vp} of a guest partition, which the Windows hypervisor put on its \
+                 processor: a step would run that guest, not NT. Resume with g, or stop in NT \
+                 with a breakpoint",
                 self.current_thread
             )));
         }

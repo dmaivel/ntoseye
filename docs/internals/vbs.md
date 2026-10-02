@@ -72,7 +72,7 @@ To resume from a breakpoint, `ntoseye` takes the breakpoint out for the run. The
 
 ### When the vCPU waits on a held vCPU
 
-If the vCPU does not get past the instruction in 30 ms, it is waiting on a held vCPU: in the measurements, every run alone that finished did so within 24 ms. It is then in the hypervisor, still on the instruction, or in the handler of an interrupt that it took first (from VTL1, this is NT's handler, in VTL0).
+If the vCPU does not get past the instruction in 30 ms, it is waiting on a held vCPU: in the measurements, every run alone that finished did so within 24 ms. It is then in the hypervisor, still on the instruction, or in the handler of an interrupt that it took first (from VTL1, this is NT's handler, in VTL0). The hypervisor can also run a guest partition's VP (WSL2, a Hyper-V VM) on the vCPU's processor while NT waits there, for example after NT switched to its idle thread and halted the processor. The vCPU then shows that guest's registers, and `ntoseye` treats it as it treats a vCPU in the hypervisor, as `~` names it: NT is not running there.
 
 `ntoseye` then breaks in on the vCPU and lets all vCPUs run 20 ms at a time, with the instruction also marked. The runs continue until one of these conditions occurs:
 
@@ -91,7 +91,7 @@ After these runs, the step stops and reports its location if it is still in an i
 
 A handler can be in the hypervisor for a moment, in a call that it makes, such as a spin loop's notification of a long wait. When the second is up with the vCPU there, after it was seen in the handler, the runs continue for up to 250 ms more until the vCPU is back in NT, where the step can end.
 
-If the vCPU is still on the instruction or in the hypervisor after these runs, the step fails, and {command}`g` resumes the vCPU from there.
+If the vCPU is still on the instruction, in the hypervisor, or running a guest partition's VP after these runs, the step fails, and {command}`g` resumes the vCPU from there. A step of a vCPU that runs a guest partition's VP is refused, as in the hypervisor.
 
 In a stress test on a 4-vCPU guest, none of 6,000 kernel steps from `nt!NtClose` and none of 3,000 breakpoint resumes on `nt!KiSwapContext` failed, and 13 of the steps ended in a handler.
 

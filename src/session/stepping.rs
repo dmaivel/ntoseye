@@ -33,7 +33,7 @@ use crate::session::{
 use crate::target::{DiagnosticValue, KTHREAD_STATE_RUNNING, KTHREAD_STATE_STANDBY, Target};
 use crate::types::{Arch, Dtb, VirtAddr};
 use crate::unwind::{
-    build_stacktrace, halted_in_windows_hypervisor, preferred_code_dtb,
+    build_stacktrace, guest_vp_running, halted_in_windows_hypervisor, preferred_code_dtb,
     resolve_thread_trace_context, thread_root, try_format_symbol_at,
 };
 
@@ -129,6 +129,16 @@ impl Session {
             return Err(Error::DebugInfo(format!(
                 "{} entered the Windows hypervisor before finishing the step, and waits there \
                  on the other vCPUs; the context shows where NT left off. Resume with g",
+                self.current_thread
+            )));
+        }
+        // A thread that blocked lets NT idle its processor, where the
+        // hypervisor can run a guest partition's VP: the vCPU then shows
+        // that guest, whose code no step can start from.
+        if let Some(vp) = self.vcpu_guest_vp()? {
+            return Err(Error::DebugInfo(format!(
+                "{} began running {vp} of a guest partition before finishing the step: the \
+                 Windows hypervisor put it on the processor while NT waits there. Resume with g",
                 self.current_thread
             )));
         }
@@ -1703,7 +1713,8 @@ fn run_to_successors(
         // Short of the successors, it waits on a vCPU this holds: in the
         // Windows hypervisor, on the instruction, or in the handler of an
         // interrupt taken first. Let them all run so it can finish.
-        let mut in_nt = now != rip && !in_windows_hypervisor(debugger, register_map, &now_regs);
+        let mut in_nt =
+            now != rip && outside_nt(debugger, register_map, thread, &now_regs).is_none();
         // Seen in a handler in NT since it was last on the instruction, it
         // is no longer stuck on the instruction.
         let mut handling = in_nt;
@@ -1719,8 +1730,9 @@ fn run_to_successors(
                 return Err(Error::DebugInfo(format!(
                     "{thread} could not execute the instruction at {rip:#x}: resumed alone, it \
                      did not get past it within {RUN_PAST_TIMEOUT:?}, and letting every vCPU \
-                     run for {RELEASE_BUDGET:?} did not free it (it waits on another vCPU, or in \
-                     the Windows hypervisor); resume with g, disabling any breakpoint there first"
+                     run for {RELEASE_BUDGET:?} did not free it (it waits on another vCPU, in \
+                     the Windows hypervisor, or while the hypervisor runs a guest partition's VP \
+                     on its processor); resume with g, disabling any breakpoint there first"
                 )));
             }
             match release.run(
@@ -1770,13 +1782,23 @@ fn run_to_successors(
     }
 }
 
-/// Whether a vCPU with registers `regs` is executing the Windows hypervisor.
-fn in_windows_hypervisor(debugger: &Target, register_map: &RegisterMap, regs: &[u8]) -> bool {
+/// What vCPU `thread`, with registers `regs`, runs instead of NT, if
+/// anything: the Windows hypervisor, or a guest partition's VP that the
+/// hypervisor put on its processor ([`guest_vp_running`]), whose registers
+/// the vCPU then shows. Either way NT is not running there, and waits.
+fn outside_nt(
+    debugger: &Target,
+    register_map: &RegisterMap,
+    thread: &str,
+    regs: &[u8],
+) -> Option<String> {
     let value = |name| register_map.read_u64(name, regs).ok();
-    match (value(debugger.arch().dtb_register()), value("rip")) {
-        (Some(cr3), Some(rip)) => halted_in_windows_hypervisor(debugger, cr3, rip),
-        _ => false,
+    let (cr3, rip) = (value(debugger.arch().dtb_register())?, value("rip")?);
+    if halted_in_windows_hypervisor(debugger, cr3, rip) {
+        return Some("the Windows hypervisor".to_string());
     }
+    let processor = processor_index_from_backend_thread_id(thread);
+    guest_vp_running(debugger, cr3, rip, processor).map(|vp| format!("{vp} of a guest partition"))
 }
 
 /// ", watch <address>" for a stop that reported the data address a
@@ -1997,7 +2019,10 @@ impl Release {
         backend.set_current_thread(thread)?;
         let regs = backend.read_registers()?;
         let now = register_map.read_u64("rip", &regs)?;
-        let in_hypervisor = in_windows_hypervisor(debugger, register_map, &regs);
+        // NT does not run on the vCPU while it is in the hypervisor, or runs
+        // a guest partition's VP: whatever NT's thread was is not what the
+        // vCPU shows, so the step waits for NT to run there again.
+        let outside = outside_nt(debugger, register_map, thread, &regs);
         step_trace!(
             "release run {} of {thread}{}: {}{}; {thread} at {now:#x}{}",
             self.runs,
@@ -2019,11 +2044,10 @@ impl Release {
                 (Some(by), None) => format!("{by} stopped"),
             },
             watch_note(watch),
-            if in_hypervisor {
-                " in the Windows hypervisor"
-            } else {
-                ""
-            }
+            outside
+                .as_ref()
+                .map(|place| format!(" in {place}"))
+                .unwrap_or_default()
         );
         // The vCPU's own stop at a successor, or back on the instruction,
         // ends its step whatever else it reports.
@@ -2047,7 +2071,7 @@ impl Release {
         }
         self.note_parked(backend, register_map, stopper, stopper_rip);
         backend.set_current_thread(thread)?;
-        if in_hypervisor {
+        if outside.is_some() {
             return Ok(Released::Waiting { in_handler: false });
         }
         if nt_thread_on(debugger, thread) != nt_thread {
