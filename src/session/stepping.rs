@@ -1324,6 +1324,13 @@ pub const RELEASE_BUDGET: Duration = if cfg!(test) {
     Duration::from_secs(1)
 };
 
+/// How much longer than [`RELEASE_BUDGET`] the vCPUs run for the waiting
+/// vCPU's handler to come back to NT from a call into the Windows
+/// hypervisor (see [`Release::gives_up`]). A spin loop that notifies the
+/// hypervisor of its long wait enters it again and again, briefly; the runs
+/// end every few milliseconds, so a quarter of the budget looks tens of times.
+const RELEASE_GRACE: Duration = Duration::from_nanos(RELEASE_BUDGET.as_nanos() as u64 / 4);
+
 /// Execute the instruction under the (already lifted) breakpoint site at
 /// `rip` without a single step, which is unsafe on this backend (see
 /// [`STEP_UNDER_WINDOWS_HYPERVISOR`]): plant temporary breakpoints on every
@@ -1606,9 +1613,10 @@ fn run_to_successors(
         let now_regs = backend.read_registers()?;
         let now = register_map.read_u64("rip", &now_regs)?;
         step_trace!(
-            "run past {thread} at {rip:#x}: {:?} stopped at {now:#x}{}",
+            "run past {thread} at {rip:#x}: {:?} stopped at {now:#x}{}{}",
             event.thread_id,
-            if timed_out { ", broken in" } else { "" }
+            if timed_out { ", broken in" } else { "" },
+            watch_note(event.watchpoint_address)
         );
         if !timed_out || successors.contains(&now) {
             if now == rip
@@ -1641,8 +1649,11 @@ fn run_to_successors(
         // Windows hypervisor, on the instruction, or in the handler of an
         // interrupt taken first. Let them all run so it can finish.
         let mut in_nt = now != rip && !in_windows_hypervisor(debugger, register_map, &now_regs);
+        // Seen in a handler in NT since it was last on the instruction, it
+        // is no longer stuck on the instruction.
+        let mut handling = in_nt;
         loop {
-            if release.exhausted() {
+            if release.gives_up(in_nt, handling) {
                 step_trace!(
                     "release of {thread} at {rip:#x} exhausted: {}",
                     release.summary()
@@ -1687,7 +1698,10 @@ fn run_to_successors(
                     );
                     break;
                 }
-                Released::Waiting { in_handler } => in_nt = in_handler,
+                Released::Waiting { in_handler } => {
+                    in_nt = in_handler;
+                    handling |= in_handler;
+                }
             }
         }
     }
@@ -1700,6 +1714,14 @@ fn in_windows_hypervisor(debugger: &Target, register_map: &RegisterMap, regs: &[
         (Some(cr3), Some(rip)) => halted_in_windows_hypervisor(debugger, cr3, rip),
         _ => false,
     }
+}
+
+/// ", watch <address>" for a stop that reported the data address a
+/// watchpoint trapped on, for the step trace.
+fn watch_note(watch: Option<u64>) -> String {
+    watch
+        .map(|address| format!(", watch {address:#x}"))
+        .unwrap_or_default()
 }
 
 /// Where a vCPU that waited on the held ones stood after they ran.
@@ -1738,8 +1760,16 @@ struct Release {
 }
 
 impl Release {
-    fn exhausted(&self) -> bool {
+    /// Whether to stop letting the vCPUs run once they have run for
+    /// [`RELEASE_BUDGET`]: the step then ends where the waiting vCPU is, in
+    /// a handler in NT (`in_nt`), or fails. A handler can be in the Windows
+    /// hypervisor only for a moment, in a call it makes (a spin loop's
+    /// long-wait notification), where no step can end; one seen in NT
+    /// before (`handling`) gets [`RELEASE_GRACE`] more to come back, rather
+    /// than failing the step for where that moment fell.
+    fn gives_up(&self, in_nt: bool, handling: bool) -> bool {
         self.ran >= RELEASE_BUDGET
+            && (in_nt || !handling || self.ran >= RELEASE_BUDGET + RELEASE_GRACE)
     }
 
     /// The runs so far, for the step trace.
@@ -1781,10 +1811,10 @@ impl Release {
         let run_started = Instant::now();
         let stop = backend.continue_execution().and_then(|()| {
             Ok(match backend.try_wait_for_stop(RELEASE_WINDOW)? {
-                Some(event) => event.thread_id,
+                Some(event) => (event.thread_id, event.watchpoint_address),
                 None => {
                     backend.interrupt()?;
-                    None
+                    (None, None)
                 }
             })
         });
@@ -1795,7 +1825,7 @@ impl Release {
                 lifted?;
             }
         }
-        let stopped = stop?;
+        let (stopped, watch) = stop?;
         // Which vCPU ended the run, and where: one held on a marked site
         // ends every run after at once. Two more packets, so traced only.
         let stopper_rip = if step_trace_enabled() {
@@ -1815,13 +1845,14 @@ impl Release {
         let now = register_map.read_u64("rip", &regs)?;
         let in_hypervisor = in_windows_hypervisor(debugger, register_map, &regs);
         step_trace!(
-            "release run {} of {thread}: {}; {thread} at {now:#x}{}",
+            "release run {} of {thread}: {}{}; {thread} at {now:#x}{}",
             self.runs,
             match (stopped.as_deref(), stopper_rip) {
                 (None, _) => "broken in".to_string(),
                 (Some(by), Some(rip)) => format!("{by} stopped at {rip:#x}"),
                 (Some(by), None) => format!("{by} stopped"),
             },
+            watch_note(watch),
             if in_hypervisor {
                 " in the Windows hypervisor"
             } else {
@@ -2206,5 +2237,39 @@ fn indirect_target(
             Some(address)
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn release_that_ran(ran: Duration) -> Release {
+        Release {
+            rip: 0x1000,
+            rsp: None,
+            nt_thread: None,
+            started: None,
+            runs: 0,
+            ran,
+        }
+    }
+
+    /// Once the vCPUs have run for the budget, a step whose vCPU waits in
+    /// a handler in NT ends there, and one whose vCPU never left the
+    /// instruction fails. A handler caught in the Windows hypervisor, in a
+    /// call it makes, gets the grace to come back to NT first: giving up
+    /// there failed the step for where the last run happened to end.
+    #[test]
+    fn a_handler_in_the_hypervisor_when_the_budget_is_spent_gets_the_grace() {
+        let short = release_that_ran(RELEASE_BUDGET - Duration::from_millis(1));
+        assert!(!short.gives_up(false, true));
+        assert!(!short.gives_up(true, true));
+        let spent = release_that_ran(RELEASE_BUDGET);
+        assert!(spent.gives_up(true, true), "in a handler in NT");
+        assert!(spent.gives_up(false, false), "never left the instruction");
+        assert!(!spent.gives_up(false, true), "a handler in the hypervisor");
+        let late = release_that_ran(RELEASE_BUDGET + RELEASE_GRACE);
+        assert!(late.gives_up(false, true), "past the grace");
     }
 }
