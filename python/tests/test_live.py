@@ -31,6 +31,9 @@ USER_SPACE = "cannot plant a software breakpoint in user space"
 # A walk following its switched-out thread ends when that thread exits
 # before it runs again; another thread caught at the same function goes on.
 EXITED = "exited before it went on"
+# How a step refuses a vCPU halted in the Windows hypervisor, where an
+# interrupt can catch it taking a VM exit.
+IN_HYPERVISOR = "is halted in the Windows hypervisor"
 ATTEMPTS = 3
 
 
@@ -101,11 +104,23 @@ def test_steps_resume_past_false_predicates(halted: Debugger) -> None:
     try:
         over = halted.step_over(until="call", timeout=20.0)
     except ntoseye.NtoseyeError as error:
-        if "exited before it went on" not in str(error):
+        if EXITED not in str(error):
             raise
         return
     assert isinstance(over, (Stop.Step, Stop.Interrupt))
-    assert isinstance(halted.step_out(timeout=20.0), (Stop.Step, Stop.Interrupt))
+    # Stepping out follows the same thread, which can exit under that load
+    # too. The interrupt can also halt the vCPU taking a VM exit, in the
+    # Windows hypervisor, which no step can leave; a finished step is always
+    # in NT.
+    try:
+        out = halted.step_out(timeout=20.0)
+    except ntoseye.NtoseyeError as error:
+        message = str(error)
+        in_hypervisor = isinstance(over, Stop.Interrupt) and IN_HYPERVISOR in message
+        if EXITED not in message and not in_hypervisor:
+            raise
+        return
+    assert isinstance(out, (Stop.Step, Stop.Interrupt))
 
 
 def test_run_to_symbol_stops_there(halted: Debugger) -> None:
