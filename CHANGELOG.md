@@ -42,6 +42,7 @@ ntoseye can now debug the Windows hypervisor itself: walk its partitions and vir
 - On the gdb backend, software breakpoints in user space are refused (use `ba e1`); single steps into user space use debug-register sites, while a run to a user-space address (`p` over a call, `gu`) ends with an error. Previously stray `int3`s could be left in shared user code.
 - Software breakpoints in the Windows hypervisor's code are refused with a pointer to `ba e1`, instead of left pending forever; NT breakpoints can still be set from the hypervisor's context.
 - On the gdb backend, a breakpoint whose condition or filter declines many hits a second slows the target much less: a declined hit no longer rewrites the site journal on disk.
+- On the gdb backend under VBS, single steps (`t`, `step()`, and the walks built on them, such as `wt` and `trace_calls`) are about 15% faster and use less host CPU: replies from the stub are read buffered, and a step no longer selects its vCPU again after the vCPU's own stop.
 
 ### Fixed
 

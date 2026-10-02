@@ -1,4 +1,4 @@
-use std::io::{self, Read, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::mem;
 use std::net::TcpStream;
 use std::sync::{Arc, LazyLock};
@@ -249,7 +249,10 @@ impl StubFeatures {
 }
 
 pub struct GdbClient {
-    stream: TcpStream,
+    /// The connection to the stub. The packet parser takes replies a byte at
+    /// a time; buffered, a reply costs one `recv` rather than one per byte,
+    /// which was most of what a `g` reply (over a kilobyte) took.
+    stream: BufReader<TcpStream>,
     features: StubFeatures,
     rx_state: PacketReadState,
     no_ack_mode: bool,
@@ -280,11 +283,16 @@ pub struct GdbClient {
     /// refused; see [`STEP_UNDER_WINDOWS_HYPERVISOR`].
     windows_hypervisor: bool,
     halt_cache: HaltCache,
+    /// The thread [`HaltCache::thread`] held when the target was last
+    /// resumed, for the halt that resume ends (see [`Self::note_halt`]).
+    resumed_selected: Option<String>,
 }
 
 /// What the stub has answered during one halt, so asking again costs no
 /// round trip. Every resume starts a new halt epoch and drops it: the stub
-/// then picks its own thread, and the vCPUs have moved.
+/// then picks its own thread, and the vCPUs have moved. Only the selection
+/// can outlive a resume, when the stop names the thread selected (see
+/// [`GdbClient::note_halt`]).
 #[derive(Default)]
 struct HaltCache {
     epoch: Option<u64>,
@@ -340,7 +348,7 @@ impl GdbClient {
         stream.set_nodelay(true)?;
 
         let mut client = GdbClient {
-            stream,
+            stream: BufReader::new(stream),
             features: StubFeatures::default(),
             rx_state: PacketReadState::default(),
             no_ack_mode: false,
@@ -356,6 +364,7 @@ impl GdbClient {
             kernel_dtb: None,
             windows_hypervisor: false,
             halt_cache: HaltCache::default(),
+            resumed_selected: None,
         };
 
         client.force_stop_and_resync()?;
@@ -385,16 +394,16 @@ impl GdbClient {
 
     fn force_stop_and_resync(&mut self) -> Result<()> {
         self.stream
+            .get_ref()
             .set_read_timeout(Some(Duration::from_millis(100)))?;
         self.rx_state = PacketReadState::default();
 
         trace_packet("stub", "->", &[0x03]);
-        self.stream.write_all(&[0x03])?;
-        self.stream.flush()?;
+        self.write_bytes(&[0x03])?;
 
         while self.read_response_packet().is_ok() {}
 
-        self.stream.set_read_timeout(None)?;
+        self.stream.get_ref().set_read_timeout(None)?;
         self.rx_state = PacketReadState::default();
 
         self.halts.set_running(false);
@@ -434,8 +443,7 @@ impl GdbClient {
         append_packet(&mut packet, data.as_bytes());
         trace_packet("stub", "->", &packet);
         loop {
-            self.stream.write_all(&packet)?;
-            self.stream.flush()?;
+            self.write_bytes(&packet)?;
 
             if self.no_ack_mode {
                 return Ok(());
@@ -447,6 +455,14 @@ impl GdbClient {
                 AckResult::ReplyStarted => return Ok(()),
             }
         }
+    }
+
+    /// Write `bytes` to the stub.
+    fn write_bytes(&mut self, bytes: &[u8]) -> Result<()> {
+        let stream = self.stream.get_mut();
+        stream.write_all(bytes)?;
+        stream.flush()?;
+        Ok(())
     }
 
     fn wait_for_ack(&mut self) -> Result<AckResult> {
@@ -480,14 +496,12 @@ impl GdbClient {
                     )));
                 }
 
-                self.stream.write_all(b"-")?;
-                self.stream.flush()?;
+                self.write_bytes(b"-")?;
                 continue;
             }
 
             if !self.no_ack_mode {
-                self.stream.write_all(b"+")?;
-                self.stream.flush()?;
+                self.write_bytes(b"+")?;
             }
 
             let decoded = Self::decode_packet_data(&packet.data)?;
@@ -755,6 +769,12 @@ impl GdbClient {
         self.halt_cache = HaltCache::default();
     }
 
+    /// The thread `Hg` and `Hc` both select in this halt, when this client
+    /// selected it (see [`HaltCache::thread`]).
+    fn selected_thread(&mut self) -> Option<String> {
+        self.halt_cache().and_then(|cache| cache.thread.clone())
+    }
+
     /// The slot's record, or an error naming the slot a caller invented.
     /// Indexing would panic, and a debugger has no business dying over one.
     fn hardware_slot(&mut self, slot: u8) -> Result<&mut Option<HardwareSite>> {
@@ -897,6 +917,7 @@ impl GdbClient {
             self.halts.set_running(true);
             return Ok(());
         }
+        self.resumed_selected = None;
         self.forget_halt_cache();
         let _ = self.send_packet("Hc-1")?;
         self.control_thread = None;
@@ -916,6 +937,7 @@ impl GdbClient {
             self.halts.set_running(true);
             return Ok(());
         }
+        self.resumed_selected = self.selected_thread();
         self.forget_halt_cache();
         match &self.control_thread {
             Some(thread) if self.features.thread_step => {
@@ -951,6 +973,7 @@ impl GdbClient {
             self.halts.set_running(true);
             return Ok(());
         }
+        self.resumed_selected = self.selected_thread();
         self.forget_halt_cache();
         let mut packet = String::from("vCont");
         for thread in threads {
@@ -971,7 +994,7 @@ impl GdbClient {
         }
 
         let response = self.read_stop_reply()?;
-        self.halts.set_running(false);
+        self.note_halt(&response);
         Ok(response)
     }
 
@@ -985,7 +1008,7 @@ impl GdbClient {
 
         match self.read_stop_reply() {
             Ok(response) => {
-                self.halts.set_running(false);
+                self.note_halt(&response);
                 Ok(Some(response))
             }
             Err(Error::Io(ref e))
@@ -1036,14 +1059,32 @@ impl GdbClient {
         }
 
         trace_packet("stub", "->", &[0x03]);
-        self.stream.write_all(&[0x03])?;
-        self.stream.flush()?;
+        self.write_bytes(&[0x03])?;
 
         let stop = self.read_stop_reply()?;
 
-        self.halts.set_running(false);
+        self.note_halt(&stop);
 
         Ok(stop)
+    }
+
+    /// Begin the halt that `reply`, a stop the stub reported, ended a run
+    /// with. In all-stop mode a stub makes the thread a stop names its
+    /// current one: GDB records it as the general thread, and reads its
+    /// registers next without selecting it, and QEMU makes it the control
+    /// thread too. A run of the thread both selected that stops on that
+    /// thread leaves both selecting it, whatever the stub does with the
+    /// control thread, so the halt starts with it selected, and the next
+    /// selection of it, after each instruction run past, costs nothing.
+    fn note_halt(&mut self, reply: &str) {
+        self.halts.set_running(false);
+        let resumed = self.resumed_selected.take();
+        if let Some(thread) =
+            resumed.filter(|thread| StopReply::parse(reply).thread_id.as_ref() == Some(thread))
+            && let Some(cache) = self.halt_cache()
+        {
+            cache.thread = Some(thread);
+        }
     }
 
     /// The stop kept for this wait (see [`DebugBackend::keep_last_stop`]),
@@ -1442,9 +1483,9 @@ impl DebugBackend for GdbClient {
     }
 
     fn try_wait_for_stop(&mut self, timeout: Duration) -> Result<Option<StopEvent>> {
-        self.stream.set_read_timeout(Some(timeout))?;
+        self.stream.get_ref().set_read_timeout(Some(timeout))?;
         let result = GdbClient::try_wait_for_stop(self);
-        let _ = self.stream.set_read_timeout(None);
+        let _ = self.stream.get_ref().set_read_timeout(None);
         Ok(result?.map(|response| StopReply::parse(&response).into_event()))
     }
 
@@ -1489,7 +1530,7 @@ impl DebugBackend for GdbClient {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
+    use std::io::{BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::Arc;
     use std::thread;
@@ -1546,7 +1587,7 @@ mod tests {
         let halts = Arc::new(HaltClock::default());
         halts.set_running(true);
         let client = GdbClient {
-            stream: TcpStream::connect(addr).unwrap(),
+            stream: BufReader::new(TcpStream::connect(addr).unwrap()),
             features: StubFeatures::default(),
             rx_state: PacketReadState::default(),
             no_ack_mode: true,
@@ -1561,6 +1602,7 @@ mod tests {
             kernel_dtb: None,
             windows_hypervisor: false,
             halt_cache: HaltCache::default(),
+            resumed_selected: None,
         };
         (client, received)
     }
@@ -1624,6 +1666,57 @@ mod tests {
                 "g",
                 "P43=0000000000000000",
                 "g",
+                "Hgp01.02",
+                "Hcp01.02",
+                "g",
+            ]
+        );
+    }
+
+    /// A run of the selected thread that stops on that thread leaves it
+    /// selected, as the stub does, so the instruction-by-instruction runs
+    /// past of a step under the Windows hypervisor select nothing; the
+    /// vCPU moved, so its registers are read again. A stop on another
+    /// thread, or after a resume of every thread (`Hc-1`), selects it again.
+    #[test]
+    fn a_stop_on_the_thread_run_keeps_it_selected() {
+        let (mut client, received) = halted_client_over_stub(|packet, seen| {
+            match packet {
+                "g" => "0100000000000000",
+                "vCont;c:p01.02" if seen == 1 => "T05thread:p01.01;",
+                "vCont;c:p01.02" | "c" => "T05thread:p01.02;",
+                _ => "OK",
+            }
+            .to_string()
+        });
+        client.features.thread_continue = true;
+        let select = |client: &mut GdbClient| {
+            client.set_current_thread("p01.02").unwrap();
+            client.read_registers().unwrap();
+        };
+        select(&mut client);
+        for _ in 0..2 {
+            DebugBackend::continue_current_thread(&mut client).unwrap();
+            DebugBackend::wait_for_stop(&mut client).unwrap();
+            select(&mut client);
+        }
+        DebugBackend::continue_execution(&mut client).unwrap();
+        DebugBackend::wait_for_stop(&mut client).unwrap();
+        select(&mut client);
+        assert_eq!(
+            *received.lock(),
+            [
+                "Hgp01.02",
+                "Hcp01.02",
+                "g",
+                "vCont;c:p01.02",
+                "g",
+                "vCont;c:p01.02",
+                "Hgp01.02",
+                "Hcp01.02",
+                "g",
+                "Hc-1",
+                "c",
                 "Hgp01.02",
                 "Hcp01.02",
                 "g",
