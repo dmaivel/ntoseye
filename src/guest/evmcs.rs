@@ -136,27 +136,37 @@ impl EvmcsPages {
         self.pages.is_empty()
     }
 
-    /// The eVMCS loaded now on the processor whose hypervisor root is
-    /// `host_root`, compared under `mask`: the one an assist page names
-    /// current with that root, whatever root it had at the scan, as a guest
-    /// partition's VP moves between processors (and roots) where the root's
-    /// stay on theirs.
+    /// The eVMCSes an assist page names current now with hypervisor root
+    /// `host_root`, compared under `mask`, by address. The processor with that
+    /// root has its own among them, whatever root it had at the scan, as a
+    /// guest partition's VP moves between processors (and roots) where the
+    /// root's stay on theirs. Another can be there too: a processor taking
+    /// over a guest VP that last ran on this one names it current before the
+    /// VP's eVMCS host state is rewritten for it (see
+    /// [`hypervisor::served_vp`](super::hypervisor::served_vp)).
     pub fn loaded_for_root(
         &self,
         phys: &impl MemoryOps<PhysAddr>,
         host_root: u64,
         mask: u64,
-    ) -> Option<EvmcsState> {
-        self.current(phys).into_iter().find_map(|address| {
-            let mut page = [0u8; EVMCS_BYTES];
-            phys.read_bytes(address, &mut page).ok()?;
-            let state = EvmcsState::parse(&page)?;
-            (state.host_cr3 & mask == host_root & mask).then_some(EvmcsState {
-                address,
-                current: true,
-                ..state
+    ) -> Vec<EvmcsState> {
+        let mut loaded: Vec<EvmcsState> = self
+            .current(phys)
+            .into_iter()
+            .filter_map(|address| {
+                let mut page = [0u8; EVMCS_BYTES];
+                phys.read_bytes(address, &mut page).ok()?;
+                let state = EvmcsState::parse(&page)?;
+                (state.host_cr3 & mask == host_root & mask).then_some(EvmcsState {
+                    address,
+                    current: true,
+                    ..state
+                })
             })
-        })
+            .collect();
+        // The set iterates in another order at every read.
+        loaded.sort_unstable_by_key(|state| state.address);
+        loaded
     }
 
     /// Every page that still holds an eVMCS, read now, whatever its root.
@@ -735,6 +745,37 @@ mod tests {
             &(12 * PAGE_SIZE as u64).to_le_bytes(),
         );
         assert_eq!(current(&ram), [false, false]);
+    }
+
+    /// A guest VP another processor is taking over from this one is named
+    /// current by that processor's assist page while its eVMCS still holds
+    /// this root: both it and this processor's own are loaded with the
+    /// root, in address order whatever order the assist pages come in.
+    #[test]
+    fn every_evmcs_loaded_with_a_root_is_listed_by_address() {
+        let mut ram = Ram(vec![0; 16 * PAGE_SIZE]);
+        ram.evmcs(1, 0x10_0000, 0x1ae002, 0xfffff807978a950f);
+        ram.evmcs(3, 0x10_0000, 0x460_0002, 0xfffff807281c0035);
+        ram.evmcs(2, 0x20_0000, 0x1ae002, 0xfffff807978a950f);
+        for (assist, page) in [(8, 3), (9, 1), (10, 2)] {
+            ram.put(assist * PAGE_SIZE + ASSIST_ENLIGHTEN_VMENTRY, &[1]);
+            ram.put(
+                assist * PAGE_SIZE + ASSIST_CURRENT_NESTED_VMCS,
+                &((page * PAGE_SIZE) as u64).to_le_bytes(),
+            );
+        }
+        let pages = scan_ram(&ram);
+        let loaded = |root| -> Vec<u64> {
+            pages
+                .loaded_for_root(&ram, root, !0xfff)
+                .iter()
+                .map(|state| state.address)
+                .collect()
+        };
+
+        let page = |index: usize| (index * PAGE_SIZE) as u64;
+        assert_eq!(loaded(0x10_0000), [page(1), page(3)]);
+        assert_eq!(loaded(0x20_0000), [page(2)]);
     }
 
     #[test]

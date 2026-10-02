@@ -1282,24 +1282,25 @@ impl Target {
         number: u16,
     ) -> Option<ServedVp> {
         let mask = self.arch().dtb_page_mask();
-        // The eVMCS loaded on the processor, which its assist page names:
-        // that of the VP and VTL whose exits it handles now.
+        // The eVMCSes loaded with the processor's root, which assist pages
+        // name: its own is that of the VP and VTL whose exits it handles now.
         let loaded = self
             .guest()
             .ok()
             .and_then(Guest::cached_evmcs_pages)
-            .and_then(|pages| pages.loaded_for_root(&*self.phys, cr3, mask));
-        let (partition, vp, vtl, state) = hypervisor::served_vp(partitions, loaded, number)?;
+            .map(|pages| pages.loaded_for_root(&*self.phys, cr3, mask))
+            .unwrap_or_default();
+        let (partition, vp, vtl, state) = hypervisor::served_vp(partitions, &loaded, number)?;
         let entered = self
             .breakpoint_stop
             .as_ref()
             .filter(|stop| stop.processor == number && stop.rip == rip);
-        let general_registers = match (&state, loaded) {
-            (Some(state), Some(_)) => {
+        let general_registers = match &state {
+            Some(state) if state.current => {
                 self.saved_general_registers(cr3 & mask, rip, state, true, entered)
             }
-            (Some(_), None) => Err("no eVMCS is known loaded on the processor".to_string()),
-            (None, _) => Err("the walk found no state for the VTL it runs".to_string()),
+            Some(_) => Err("no eVMCS is known loaded on the processor".to_string()),
+            None => Err("the walk found no state for the VTL it runs".to_string()),
         };
         let xmm = match &state {
             Some(state) => self.saved_xmm_registers(cr3 & mask, rip, state, &general_registers),
@@ -1439,19 +1440,28 @@ impl Target {
 
     /// [`Self::hypercall_caller`] without a partition walk, for each hit of
     /// a hypercall breakpoint: the caller is the VP and VTL whose eVMCS the
-    /// processor's assist page names loaded, found in the eVMCS pages the
-    /// last walk named (see [`Guest::vp_slot`]); its registers are those
-    /// that eVMCS's exit saved. `None` when no eVMCS is known loaded there,
-    /// or no walk names it, which leaves the caller to the walk.
+    /// processor's assist page names loaded (see [`hypervisor::own_loaded`]),
+    /// found in the eVMCS pages the last walk named (see
+    /// [`Guest::vp_slot`]); its registers are those that eVMCS's exit saved.
+    /// `None` when no eVMCS is known loaded there, no walk names one, or
+    /// several guest VPs' are loaded with its root, which leaves the caller
+    /// to the walk.
     fn loaded_hypercall_caller(&self, cr3: u64, rip: u64, number: u16) -> Option<HypercallCaller> {
         let guest = self.guest().ok()?;
         let mask = self.arch().dtb_page_mask();
-        let loaded = guest
+        let walk = || Some(hypervisor::vp_slots(&self.hypervisor_partitions().ok()?));
+        let candidates = guest
             .cached_evmcs_pages()?
-            .loaded_for_root(&*self.phys, cr3, mask)?;
-        let slot = guest.vp_slot(loaded.address, loaded.ept_pointer, || {
-            Some(hypervisor::vp_slots(&self.hypervisor_partitions().ok()?))
-        })?;
+            .loaded_for_root(&*self.phys, cr3, mask)
+            .into_iter()
+            .map(|loaded| {
+                Some((
+                    loaded,
+                    guest.vp_slot(loaded.address, loaded.ept_pointer, walk)?,
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let (loaded, slot) = hypervisor::own_loaded(&candidates)?;
         let entered = self
             .breakpoint_stop
             .as_ref()

@@ -490,41 +490,83 @@ fn processor_guest_vp(
 }
 
 /// The guest partition's VP, with its partition's ID, VTL, and state, that
-/// processor `number` serves at a stop in the hypervisor, when `loaded` is
-/// the eVMCS its assist page names current: the VP and VTL with that
-/// eVMCS, or none when it is a root VP's. When it is not known, the VP
+/// processor `number` serves at a stop in the hypervisor, from `loaded`,
+/// the eVMCSes assist pages name current with its root (see
+/// [`EvmcsPages::loaded_for_root`](super::evmcs::EvmcsPages::loaded_for_root)):
+/// the VP and VTL with the processor's own, or none when that is a root VP's.
+/// One is its own. Of several, the others are guest VPs other processors
+/// are taking over from it, whose eVMCSes still hold its host state: a root
+/// VP's among them is its own, as those never move, and otherwise its own is
+/// the one whose VP its processor block names. When none is known, the VP
 /// whose processor block names it current, with a state that is not
 /// current, as its registers are then unknown.
-pub fn served_vp(
-    partitions: &[HvPartition],
-    loaded: Option<EvmcsState>,
+pub fn served_vp<'a>(
+    partitions: &'a [HvPartition],
+    loaded: &[EvmcsState],
     number: u16,
-) -> Option<(u64, &HvVirtualProcessor, u8, Option<EvmcsState>)> {
-    let Some(loaded) = loaded else {
-        let (partition, vp) = processor_guest_vp(partitions, number)?;
-        let state = vp
-            .vtls
-            .iter()
-            .find(|vtl| vtl.level == vp.vtl)
-            .and_then(|vtl| vtl.state)
-            .map(|state| EvmcsState {
-                current: false,
-                ..state
-            });
-        return Some((partition, vp, vp.vtl, state));
-    };
-    partitions
-        .iter()
-        .filter(|partition| partition.parent.is_some())
-        .find_map(|partition| {
+) -> Option<(u64, &'a HvVirtualProcessor, u8, Option<EvmcsState>)> {
+    let owner = |loaded: &EvmcsState| {
+        partitions.iter().find_map(|partition| {
             partition.virtual_processors.iter().find_map(|vp| {
                 let vtl = vp.vtls.iter().find(|vtl| {
                     vtl.state
                         .is_some_and(|state| state.address == loaded.address)
                 })?;
-                Some((partition.id, vp, vtl.level, Some(loaded)))
+                Some((partition, vp, vtl.level, *loaded))
             })
         })
+    };
+    let own = match loaded {
+        [] => None,
+        [only] => Some(owner(only)),
+        several => {
+            let owners: Vec<_> = several.iter().filter_map(owner).collect();
+            if owners
+                .iter()
+                .any(|(partition, ..)| partition.parent.is_none())
+            {
+                return None;
+            }
+            owners
+                .into_iter()
+                .find(|(_, vp, ..)| {
+                    vp.processors
+                        .iter()
+                        .any(|processor| processor.number == Some(u32::from(number)))
+                })
+                .map(Some)
+        }
+    };
+    if let Some(own) = own {
+        let (partition, vp, vtl, state) = own?;
+        return partition
+            .parent
+            .is_some()
+            .then_some((partition.id, vp, vtl, Some(state)));
+    }
+    let (partition, vp) = processor_guest_vp(partitions, number)?;
+    let state = vp
+        .vtls
+        .iter()
+        .find(|vtl| vtl.level == vp.vtl)
+        .and_then(|vtl| vtl.state)
+        .map(|state| EvmcsState {
+            current: false,
+            ..state
+        });
+    Some((partition, vp, vp.vtl, state))
+}
+
+/// The processor's own of the eVMCSes assist pages name current with its
+/// root (see [`served_vp`]), with the VP and VTL each belongs to: the only
+/// one, or the root VP's among several, as those never move. `None` for
+/// several guest VPs', which only the processor blocks of a partition walk
+/// tell apart.
+pub fn own_loaded(loaded: &[(EvmcsState, VpSlot)]) -> Option<(EvmcsState, VpSlot)> {
+    match loaded {
+        [only] => Some(*only),
+        several => several.iter().find(|(_, slot)| slot.root).copied(),
+    }
 }
 
 impl super::Guest {
@@ -832,7 +874,10 @@ mod tests {
         let served = |loaded: Option<u64>| {
             served_vp(
                 &partitions,
-                loaded.map(|address| EvmcsState::at(address, true)),
+                &loaded
+                    .iter()
+                    .map(|&address| EvmcsState::at(address, true))
+                    .collect::<Vec<_>>(),
                 3,
             )
             .map(|(partition, vp, vtl, state)| (partition, vp.index, vtl, state.map(|s| s.current)))
@@ -840,6 +885,115 @@ mod tests {
         assert_eq!(served(Some(0x6000)), Some((8, 1, 0, Some(true))));
         assert_eq!(served(Some(0x2000)), None, "the root's VTL1");
         assert_eq!(served(None), Some((8, 0, 0, Some(false))));
+    }
+
+    /// While another processor takes over a guest VP that last ran on this
+    /// one, that VP's eVMCS, named current by the other's assist page, still
+    /// holds this processor's root: two are loaded with it. A root VP's is
+    /// this processor's own, as those never move; of guest VPs', its own is
+    /// the one its processor block names, and with neither the block decides.
+    #[test]
+    fn a_guest_vp_another_processor_takes_over_is_not_served_here() {
+        let vtl = |level, address| HvVtl {
+            level,
+            context: 0,
+            vmcs: Some(address),
+            state: Some(EvmcsState::at(address, false)),
+        };
+        let vp = |index, vtls, processor: Option<u32>| HvVirtualProcessor {
+            index,
+            address: 0,
+            vtl: 0,
+            vtls,
+            processors: processor
+                .map(|number| HvProcessor {
+                    block: 0,
+                    number: Some(number),
+                })
+                .into_iter()
+                .collect(),
+        };
+        // Processor 1's block names the root's VP 1; processor 0 is taking
+        // over guest VP 3 (0x5000) and its block names it already.
+        let partitions = |guest_on_1: bool| {
+            [
+                HvPartition {
+                    address: 0,
+                    id: 1,
+                    parent: None,
+                    privileges: 0,
+                    virtual_processors: vec![vp(
+                        1,
+                        vec![vtl(0, 0x1000), vtl(1, 0x2000)],
+                        (!guest_on_1).then_some(1),
+                    )],
+                },
+                HvPartition {
+                    address: 0,
+                    id: 6,
+                    parent: Some(1),
+                    privileges: 0,
+                    virtual_processors: vec![
+                        vp(3, vec![vtl(0, 0x5000)], Some(0)),
+                        vp(0, vec![vtl(0, 0x6000)], guest_on_1.then_some(1)),
+                    ],
+                },
+            ]
+        };
+        let served = |partitions: &[HvPartition], loaded: &[u64]| {
+            served_vp(
+                partitions,
+                &loaded
+                    .iter()
+                    .map(|&address| EvmcsState::at(address, true))
+                    .collect::<Vec<_>>(),
+                1,
+            )
+            .map(|(partition, vp, vtl, state)| (partition, vp.index, vtl, state.map(|s| s.current)))
+        };
+
+        let root_on_1 = partitions(false);
+        assert_eq!(served(&root_on_1, &[0x1000, 0x5000]), None);
+        assert_eq!(served(&root_on_1, &[0x5000, 0x1000]), None);
+
+        let guest_on_1 = partitions(true);
+        let own = Some((6, 0, 0, Some(true)));
+        assert_eq!(served(&guest_on_1, &[0x5000, 0x6000]), own);
+        assert_eq!(served(&guest_on_1, &[0x6000, 0x5000]), own);
+        // Neither guest VP is this processor's by its block: the block's.
+        assert_eq!(
+            served(&guest_on_1, &[0x5000, 0x7000]),
+            Some((6, 0, 0, Some(false)))
+        );
+    }
+
+    /// A hypercall hit's caller is the processor's own loaded eVMCS: the only
+    /// one, or the root VP's beside a guest VP another processor is taking
+    /// over; between guest VPs' only a walk tells.
+    #[test]
+    fn a_hypercall_caller_is_the_root_vp_beside_a_guest_vp_taken_over() {
+        let at = |address, root| {
+            (
+                EvmcsState::at(address, true),
+                VpSlot {
+                    partition: if root { 1 } else { 6 },
+                    root,
+                    vp: 0,
+                    vtl: 0,
+                    ept_pointer: 0,
+                },
+            )
+        };
+        let own = |loaded: &[(EvmcsState, VpSlot)]| {
+            own_loaded(loaded).map(|(state, slot)| (state.address, slot.root))
+        };
+        let (root, guest, other) = (at(0x1000, true), at(0x5000, false), at(0x6000, false));
+
+        assert_eq!(own(&[guest, root]), Some((0x1000, true)));
+        assert_eq!(own(&[root, guest]), Some((0x1000, true)));
+        assert_eq!(own(&[guest]), Some((0x5000, false)));
+        assert_eq!(own(&[guest, other]), None);
+        assert_eq!(own(&[]), None);
     }
 
     /// A hit's caller comes from the last walk's slots without walking
