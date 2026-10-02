@@ -27,7 +27,7 @@ use crate::session::hits::stack_pointer;
 use crate::session::{
     CallTrace, CallTraceEnd, CallTraceFrame, ContinueOutcome, ControlState, CurrentInstruction,
     ModuleTrap, PendingWalk, STATUS_BREAKPOINT, STATUS_SINGLE_STEP, Session, StepKind, StepMode,
-    StepStack,
+    StepStack, step_trace_enabled,
 };
 use crate::target::{DiagnosticValue, KTHREAD_STATE_RUNNING, KTHREAD_STATE_STANDBY, Target};
 use crate::types::{Arch, Dtb, VirtAddr};
@@ -902,11 +902,28 @@ impl Session {
                 return Ok(outcome);
             }
             // Read while the target runs; a read that fails proves nothing.
-            if self
-                .target
-                .thread_info_from_ethread(thread.ethread)
-                .is_ok_and(|now| thread.exited(&now))
-            {
+            let now = self.target.thread_info_from_ethread(thread.ethread);
+            // What a follow that never ends waited on: the thread's state,
+            // and whether its sites and watch are armed.
+            step_trace!(
+                "following {}: state {:?}, {}",
+                thread.label(),
+                now.as_ref().ok().and_then(|now| now.state),
+                watch.map_or("sites armed throughout".to_string(), |watch| {
+                    let enabled = |id| self.breakpoints.get(id).is_some_and(|bp| bp.enabled);
+                    format!(
+                        "sites {}, watch #{} {}",
+                        if watch.sites.iter().any(|&id| enabled(id)) {
+                            "armed"
+                        } else {
+                            "disarmed"
+                        },
+                        watch.id,
+                        if enabled(watch.id) { "armed" } else { "gone" }
+                    )
+                })
+            );
+            if now.is_ok_and(|now| thread.exited(&now)) {
                 return Err(followed_thread_exited(thread));
             }
         }
@@ -972,6 +989,16 @@ impl Session {
             return Err(followed_thread_exited(&watch.thread));
         }
         let state = now.ok().and_then(|now| now.state);
+        step_trace!(
+            "follow watch #{} on {}: state {state:?}, sites {}",
+            watch.id,
+            watch.thread.label(),
+            if about_to_run(state) {
+                "armed"
+            } else {
+                "disarmed"
+            }
+        );
         self.arm_followed_sites(&watch.sites, about_to_run(state))
     }
 
@@ -1769,10 +1796,39 @@ impl Release {
             }
         }
         let stopped = stop?;
+        // Which vCPU ended the run, and where: one held on a marked site
+        // ends every run after at once. Two more packets, so traced only.
+        let stopper_rip = if step_trace_enabled() {
+            stopped
+                .as_deref()
+                .filter(|&by| by != thread)
+                .and_then(|by| {
+                    backend.set_current_thread(by).ok()?;
+                    let registers = backend.read_registers().ok()?;
+                    register_map.read_u64("rip", &registers).ok()
+                })
+        } else {
+            None
+        };
         backend.set_current_thread(thread)?;
         let regs = backend.read_registers()?;
         let now = register_map.read_u64("rip", &regs)?;
-        if in_windows_hypervisor(debugger, register_map, &regs) {
+        let in_hypervisor = in_windows_hypervisor(debugger, register_map, &regs);
+        step_trace!(
+            "release run {} of {thread}: {}; {thread} at {now:#x}{}",
+            self.runs,
+            match (stopped.as_deref(), stopper_rip) {
+                (None, _) => "broken in".to_string(),
+                (Some(by), Some(rip)) => format!("{by} stopped at {rip:#x}"),
+                (Some(by), None) => format!("{by} stopped"),
+            },
+            if in_hypervisor {
+                " in the Windows hypervisor"
+            } else {
+                ""
+            }
+        );
+        if in_hypervisor {
             return Ok(Released::Waiting { in_handler: false });
         }
         if nt_thread_on(debugger, thread) != nt_thread {
