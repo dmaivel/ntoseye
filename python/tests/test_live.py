@@ -482,7 +482,9 @@ def test_hypercall_breakpoint_stops_only_for_its_call_and_caller(halted: Debugge
     state holds the code in RCX's low 16 bits. With a VP index, the stop is
     on that VP's processor, as the root's VPs are pinned to the processors
     with their numbers. A hit whose caller is unknown stops too, so only the
-    stops with a known caller are checked."""
+    stops with a known caller are checked. A root VP can go many seconds
+    without the call (its processor parked by Windows at low load), so the
+    VP is one seen making it."""
     if os.environ.get("NTOSEYE_TEST_BACKEND") != "gdb":
         pytest.skip("breakpoints in the Windows hypervisor require the host GDB backend")
     try:
@@ -494,10 +496,10 @@ def test_hypercall_breakpoint_stops_only_for_its_call_and_caller(halted: Debugge
         halted.breakpoints.add_hypercall("HvCallUnimplemented")
     with pytest.raises(ValueError):
         halted.breakpoints.add_hypercall(0x000B, max(p.id for p in partitions) + 1)
-    vp = root.virtual_processors[-1]
-    for index in (None, vp.index):
+
+    def known_callers(index: int | None) -> list[ntoseye.Cpu]:
         bp = halted.breakpoints.add_hypercall("HvCallSendSyntheticClusterIpi", root.id, index)
-        known = 0
+        callers = []
         try:
             hypercall = bp.hypercall
             assert hypercall is not None
@@ -508,13 +510,17 @@ def test_hypercall_breakpoint_stops_only_for_its_call_and_caller(halted: Debugge
                 saved = next((saved for saved in stop.cpu.saved_vtl if saved.current), None)
                 if saved is None or saved.general_registers is None:
                     continue
-                known += 1
                 assert saved.general_registers.rcx & 0xFFFF == 0x000B
                 if index is not None:
                     assert stop.cpu == halted.cpus[index]
+                callers.append(stop.cpu)
         finally:
             bp.delete()
-        assert known > 0, "no stop had a known caller"
+        assert callers, "no stop had a known caller"
+        return callers
+
+    caller = known_callers(None)[-1]
+    known_callers(list(halted.cpus).index(caller))
 
 
 def test_a_hypercall_stop_decodes_the_call_from_the_callers_registers(halted: Debugger) -> None:
