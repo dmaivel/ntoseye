@@ -2256,7 +2256,8 @@ class Debugger:
         or a symbolic `module!name[+off]`. With `step="over"`/`"into"`,
         single-step to it (`pa`/`ta`). Other stops on the way are returned as
         they are. With `timeout`, if execution does not reach `target` in time,
-        the target is interrupted where it is.
+        the target is interrupted where it is, and the stop is a
+        `Stop.Interrupt`.
         """
     @property
     def secure_kernel(self, /) -> SecureKernel:
@@ -2271,7 +2272,8 @@ class Debugger:
         Single-step one instruction. With `until` ("call", "ret", "branch"),
         step into instructions until the next instruction of that kind
         (`tc`/`tt`/`th`). With `timeout` (seconds), an `until` walk that does
-        not end in time is interrupted where it is.
+        not end in time is interrupted where it is, and the stop is a
+        `Stop.Interrupt`: a `Stop.Step` always ends a walk where it was going.
         Under VBS on the gdb backend, the other vCPUs can run while the step's
         vCPU waits on them; a watchpoint hit one of them makes meanwhile ends
         the step, and is returned instead.
@@ -2280,7 +2282,7 @@ class Debugger:
         """
         Run until the stepping thread returns from the current function (`gu`).
         With `timeout` (seconds), the thread is interrupted where it is if it
-        does not return in time.
+        does not return in time, and the stop is a `Stop.Interrupt`.
         """
     def step_over(self, /, until: Literal["call", "ret", "branch"] |None = None, timeout: float |None = None) -> Stop:
         """
@@ -2288,7 +2290,7 @@ class Debugger:
         until the next call, ret, or branch (`pc`/`pt`/`ph`). Stepping over a
         call runs the target until the stepping thread returns from it. With
         `timeout` (seconds), a run or walk that does not end in time is
-        interrupted where it is.
+        interrupted where it is, and the stop is a `Stop.Interrupt`.
         """
     @property
     def stop(self, /) -> Stop |None:

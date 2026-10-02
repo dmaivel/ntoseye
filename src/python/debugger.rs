@@ -247,7 +247,8 @@ impl Debugger {
     /// or a symbolic `module!name[+off]`. With `step="over"`/`"into"`,
     /// single-step to it (`pa`/`ta`). Other stops on the way are returned as
     /// they are. With `timeout`, if execution does not reach `target` in time,
-    /// the target is interrupted where it is.
+    /// the target is interrupted where it is, and the stop is a
+    /// `Stop.Interrupt`.
     #[pyo3(signature = (target, timeout=None, *, step=None))]
     fn run_to(
         slf: &Bound<'_, Self>,
@@ -261,7 +262,8 @@ impl Debugger {
     /// Single-step one instruction. With `until` ("call", "ret", "branch"),
     /// step into instructions until the next instruction of that kind
     /// (`tc`/`tt`/`th`). With `timeout` (seconds), an `until` walk that does
-    /// not end in time is interrupted where it is.
+    /// not end in time is interrupted where it is, and the stop is a
+    /// `Stop.Interrupt`: a `Stop.Step` always ends a walk where it was going.
     /// Under VBS on the gdb backend, the other vCPUs can run while the step's
     /// vCPU waits on them; a watchpoint hit one of them makes meanwhile ends
     /// the step, and is returned instead.
@@ -278,7 +280,7 @@ impl Debugger {
     /// until the next call, ret, or branch (`pc`/`pt`/`ph`). Stepping over a
     /// call runs the target until the stepping thread returns from it. With
     /// `timeout` (seconds), a run or walk that does not end in time is
-    /// interrupted where it is.
+    /// interrupted where it is, and the stop is a `Stop.Interrupt`.
     #[pyo3(signature = (until=None, timeout=None))]
     fn step_over(
         slf: &Bound<'_, Self>,
@@ -290,7 +292,7 @@ impl Debugger {
 
     /// Run until the stepping thread returns from the current function (`gu`).
     /// With `timeout` (seconds), the thread is interrupted where it is if it
-    /// does not return in time.
+    /// does not return in time, and the stop is a `Stop.Interrupt`.
     #[pyo3(signature = (timeout=None))]
     fn step_out(slf: &Bound<'_, Self>, timeout: Option<f64>) -> PyResult<Py<Stop>> {
         runcontrol::step_out(slf, timeout)

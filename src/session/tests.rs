@@ -2080,6 +2080,65 @@ fn a_walk_resumed_past_a_hit_in_another_thread_goes_on_in_its_own() {
     assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1002 }));
 }
 
+/// A walk its timeout cuts short in a run (over a call here) ends where the
+/// break-in caught the vCPU, as an interrupt's stop: not as a step, which
+/// names an instruction the walk was after. Under VBS the break-in can
+/// catch the vCPU in the Windows hypervisor, where no step goes on.
+#[test]
+fn a_walk_its_timeout_cuts_short_in_a_run_ends_as_an_interrupt() {
+    let mut code = [0x90u8; 0x40];
+    code[..5].copy_from_slice(&[0xe8, 0x1b, 0x00, 0x00, 0x00]); // call 0x1020
+    let break_in = StopEvent {
+        exception_code: None,
+        first_chance: None,
+        exception_address: None,
+        program_counter: None,
+        break_in: true,
+        ..single_step_event()
+    };
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        halts_only_on_interrupt: true,
+        one_vcpu: true,
+        interrupt_events: VecDeque::from([break_in]),
+        schedule: VecDeque::from([Landing {
+            rip: 0x1020,
+            rsp: 0x1ff8,
+            ethread: WALKED,
+        }]),
+        ..MockBackend::default()
+    };
+    backend.land(Landing {
+        rip: 0x1000,
+        rsp: 0x2000,
+        ethread: WALKED,
+    });
+    let threads = Arc::clone(&backend.threads);
+    let mut session = stepping_session(&code, backend);
+    session.target.test_current_threads = Some(threads);
+    session.current_thread = "p01.01".into();
+
+    let outcome = session
+        .step_until(
+            StepMode::Over,
+            16,
+            Some(Duration::from_millis(50)),
+            |ip, _| ip == 0x1010,
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            ContinueOutcome::Stopped {
+                rip: 0x1020,
+                exception_code: None,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+}
+
 /// The stack an instruction can leave is bounded below by what it pushes or
 /// subtracts, and unknown when it switches stacks or sets the pointer.
 #[test]

@@ -382,8 +382,9 @@ impl Session {
     /// over calls per `mode`: the SDK's `step(until=)` and `run_to(step=)`.
     /// Returns the `Step` there; a breakpoint, exception, or other stop met on
     /// the way is returned as is. An interrupt request ([`Target::interrupt`]),
-    /// or an elapsed `timeout` ends the walk where it is, as a `Step`;
-    /// `limit` instructions without a match is an error.
+    /// or an elapsed `timeout` ends the walk where it is (see
+    /// [`Self::cut_walk_short`]); `limit` instructions without a match is an
+    /// error.
     ///
     /// The walk follows the Windows thread it started in, not its vCPU: a
     /// step an interrupt diverted off the instruction (see
@@ -425,13 +426,7 @@ impl Session {
                 let cancel = Arc::clone(&self.target.interrupt);
                 match self.run_to_any(&sites, timeout, &cancel)? {
                     ContinueOutcome::Step { .. } => {}
-                    ContinueOutcome::Running => {
-                        let outcome = ContinueOutcome::Step {
-                            rip: self.current_rip(),
-                        };
-                        self.note_stop(&outcome);
-                        return Ok(outcome);
-                    }
+                    ContinueOutcome::Running => return Ok(self.cut_walk_short()),
                     other => {
                         self.pending_walk = Some(PendingWalk { vcpu, sites });
                         return Ok(other);
@@ -441,6 +436,22 @@ impl Session {
         }
         let remaining = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
         self.walk_until(mode, limit, remaining, stop)
+    }
+
+    /// End a walk that an interrupt request or its timeout cut short, halted
+    /// where it is, as a stop without a cause (an interrupt's), not as a
+    /// `Step`: a `Step` names an instruction the walk was after. A run the
+    /// walk was in is broken into wherever its vCPU is, which under VBS can
+    /// be the Windows hypervisor, where no step goes on.
+    fn cut_walk_short(&mut self) -> ContinueOutcome {
+        let outcome = ContinueOutcome::Stopped {
+            rip: self.current_rip(),
+            exception_code: None,
+            first_chance: None,
+            exception_address: None,
+        };
+        self.note_stop(&outcome);
+        outcome
     }
 
     fn walk_until(
@@ -460,19 +471,16 @@ impl Session {
             .map(|thread| ThreadScope::new(&thread));
         for _ in 0..limit {
             if cancel.swap(false, Ordering::SeqCst) {
-                let outcome = ContinueOutcome::Step {
-                    rip: self.current_rip(),
-                };
-                self.note_stop(&outcome);
-                return Ok(outcome);
+                return Ok(self.cut_walk_short());
             }
             let (state, registers, bytes) = self.read_control()?;
-            if stop(state.ip, state.flow)
-                || deadline.is_some_and(|deadline| Instant::now() >= deadline)
-            {
+            if stop(state.ip, state.flow) {
                 let outcome = ContinueOutcome::Step { rip: state.ip };
                 self.note_stop(&outcome);
                 return Ok(outcome);
+            }
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Ok(self.cut_walk_short());
             }
             let vcpu = self.current_thread.clone();
             let (step, sites) = match self.step_over_target()? {
@@ -494,13 +502,7 @@ impl Session {
             let rip = match step {
                 ContinueOutcome::Step { rip } => rip,
                 // `run_to` was cancelled or timed out and halted the target.
-                ContinueOutcome::Running => {
-                    let outcome = ContinueOutcome::Step {
-                        rip: self.current_rip(),
-                    };
-                    self.note_stop(&outcome);
-                    return Ok(outcome);
-                }
+                ContinueOutcome::Running => return Ok(self.cut_walk_short()),
                 other => {
                     self.pending_walk = Some(PendingWalk { vcpu, sites });
                     return Ok(other);

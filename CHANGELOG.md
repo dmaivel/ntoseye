@@ -48,6 +48,7 @@ ntoseye can now debug the Windows hypervisor itself: walk its partitions and vir
 
 - `t` after `~Ns` on kd/kdnet steps processor N instead of leaving it unmoved, and breakpoints on the stopped processor keep hitting afterwards; on ARM64 targets, stepping another processor is refused instead of hanging.
 - Ctrl+C, a DAP `pause`/`disconnect`, or a server termination signal now break in on a step that never stops, instead of the session hanging until the transport times out; walks (`ta`, `pa`, `wt`, `step(until=)`) end on the first Ctrl+C.
+- A walk (`step(until=)`, `step_over(until=)`, `run_to(step=)`) that its `timeout=` or Ctrl+C cuts short now returns a `Stop.Interrupt`, as `run_to()` and `step_out()` do, instead of a `Stop.Step`. A `Stop.Step` had seemed to say the walk ended on an instruction in NT even when it was broken into in the Windows hypervisor, where the next step was refused.
 - Ctrl+C in the REPL now stops the target when a breakpoint whose hits are declined (condition, `/t` filter, other process) fires constantly.
 - `wt`, `p`, `gu` and the SDK's `step_over`/`step_out` no longer follow the wrong thread, wait forever for a thread that exited, or crawl under load on code every thread runs; a walk whose thread exits ends with an error.
 - A gdbserver step or continue that cannot start now reports SIGINT, so gdb's `next`/`step` no longer loop.

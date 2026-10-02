@@ -298,7 +298,7 @@ print(hv.disassemble(cpu.rip, 4))
 
 A step-until walk (`until=` or `run_to(step=)`) also follows the thread that it started in, and so does `trace_calls()`. If an interrupt switches that thread out during a step, the walk waits until the thread executes that instruction at the same call depth, on any vCPU. If the thread exits first, the walk fails with an error that says so, and `trace_calls()` ends as `failed`.
 
-These functions, and also `step(until=...)` and `step_over(until=...)`, have a `timeout=` argument in seconds. When the timeout expires, the function interrupts the target at its current location and returns that stop.
+These functions, and also `step(until=...)` and `step_over(until=...)`, have a `timeout=` argument in seconds. When the timeout expires, the function interrupts the target at its current location and returns that stop, a `Stop.Interrupt`. A `Stop.Step` from a walk means it got where it was going. Under VBS, an interrupted vCPU can be in the Windows hypervisor, where steps are refused until the target resumes.
 
 `trace_calls()` records the call tree until the current function returns, the same as {command}`wt`.
 
