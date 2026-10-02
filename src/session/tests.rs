@@ -3,7 +3,9 @@ use super::hits::{
 };
 use super::inspection::DBG_STATUS_WORKER;
 use super::lifecycle::prepare_backend_after_cleanup;
-use super::stepping::{RunPast, site_successors, stack_floor, step_over_current_breakpoint};
+use super::stepping::{
+    RELEASE_BUDGET, RunPast, site_successors, stack_floor, step_over_current_breakpoint,
+};
 use super::*;
 use crate::breakpoints::{
     Breakpoint, BreakpointConfig, HardwareBreakpoint, HypercallFilter, StepFrame, ThreadScope,
@@ -73,6 +75,10 @@ pub struct MockBackend {
     hardware_writes: HardwareWrites,
     /// Register fetches, so a test can prove a path avoided one.
     reads: usize,
+    /// How long a register fetch takes: the debugger's own work between
+    /// runs, which can be slow (the first identification of the Windows
+    /// hypervisor in a session takes over half a second).
+    register_read_delay: Duration,
     /// TF and DR6 as a transport would report them with the stop.
     reported_trap_state: Option<TrapState>,
     /// Single steps are unsafe (the Windows hypervisor); `step()` then fails
@@ -131,6 +137,7 @@ impl Default for MockBackend {
             site_writes: Arc::new(Mutex::new(Vec::new())),
             hardware_writes: Arc::new(Mutex::new(Vec::new())),
             reads: 0,
+            register_read_delay: Duration::ZERO,
             reported_trap_state: None,
             single_step_unsafe: false,
             lands_at: None,
@@ -225,6 +232,7 @@ impl DebugBackend for MockBackend {
     }
     fn read_registers(&mut self) -> Result<Vec<u8>> {
         self.reads += 1;
+        std::thread::sleep(self.register_read_delay);
         Ok(self.regs.clone())
     }
     fn stop_trap_state(&mut self) -> Option<TrapState> {
@@ -1287,6 +1295,37 @@ fn a_step_whose_handler_stops_on_a_breakpoint_ends_there() {
     assert_eq!(session.step().unwrap(), 0x1030);
     assert!(!session.take_notices().is_empty());
     assert_eq!(continues.load(Ordering::Relaxed), 1);
+}
+
+/// The others are let run until the runs themselves have taken the release
+/// budget: checks between runs that take as long, as the first one to find
+/// a vCPU in the Windows hypervisor does, leave the handler the runs it
+/// needs to finish, rather than ending the step in it.
+#[test]
+fn slow_checks_between_release_runs_leave_the_handler_its_runs() {
+    let mut code = [0x90u8; 0x40];
+    code[..2].copy_from_slice(&[0x74, 0x10]); // je +0x10
+    let in_handler = Landing {
+        rip: 0x1030,
+        rsp: 0,
+        ethread: 0,
+    };
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        single_step_unsafe: true,
+        halts_only_on_interrupt: true,
+        lands_at: Some(0x1030),
+        schedule: VecDeque::from([in_handler, in_handler]),
+        released_to: Some(0x1012),
+        one_vcpu: true,
+        register_read_delay: RELEASE_BUDGET,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1000);
+    let mut session = stepping_session(&code, backend);
+
+    assert_eq!(session.step().unwrap(), 0x1012);
+    assert!(session.take_notices().is_empty());
 }
 
 /// A handler that finishes once the others run returns to the instruction

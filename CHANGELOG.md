@@ -52,6 +52,7 @@ ntoseye can now debug the Windows hypervisor itself: walk its partitions and vir
 - A gdbserver step or continue that cannot start now reports SIGINT, so gdb's `next`/`step` no longer loop.
 - On the gdb backend, a `bp` on `nt!DbgLoadImageSymbols` (or the unload functions) now stops when no `sx` filter surfaces the event.
 - On the gdb backend, a stop on an execute breakpoint is no longer mistaken for a plain stop because another vCPU hit a data watchpoint earlier.
+- On the gdb backend under VBS, a step or a resume from a breakpoint no longer gives up with "letting every vCPU run for 1s did not free it" after the vCPUs ran for much less: the debugger's own work between their runs counted against that second, and the first time a session finds a vCPU in the Windows hypervisor that work takes over half a second.
 - `Breakpoint.delete()` no longer raises for a breakpoint that is already gone (such as a fired one-shot), and a stale handle no longer deletes a newer breakpoint that reuses its id.
 - `.thread` on a thread whose vCPU is in the hypervisor selects where NT left off instead of the hypervisor's registers.
 - `.vtl 0` after `.vtl 1` at a hypervisor stop returns to the stop's view instead of the hypervisor's registers.

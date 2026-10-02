@@ -1286,8 +1286,11 @@ const RELEASE_WINDOW: Duration = Duration::from_millis(20);
 /// How long the held vCPUs are let run, in all, for one instruction before
 /// it is given up on. A run ends early when another vCPU reaches a marked
 /// site, which in hot code is at once, so the runs are bounded by time
-/// rather than counted.
-const RELEASE_BUDGET: Duration = if cfg!(test) {
+/// rather than counted. The time is the runs' own, not the wall time: the
+/// checks between runs can take longer than the runs (the first that finds
+/// a vCPU in the Windows hypervisor names its code, over half a second), and
+/// would give up on an instruction the vCPUs were barely let run for.
+pub const RELEASE_BUDGET: Duration = if cfg!(test) {
     // The mock target never frees a waiting vCPU; don't spin tests for it.
     Duration::from_millis(20)
 } else {
@@ -1699,18 +1702,17 @@ struct Release {
     rsp: Option<u64>,
     /// The Windows thread on the vCPU when it first waited.
     nt_thread: Option<Option<u64>>,
-    /// When the first run began.
+    /// When the first run began, for the step trace.
     started: Option<Instant>,
-    /// The runs so far, and how long the target ran in them, which a run
-    /// ended at once by a hot marked site keeps far below the wall time.
+    /// The runs so far, and how long the target ran in them, which
+    /// [`RELEASE_BUDGET`] bounds.
     runs: u32,
     ran: Duration,
 }
 
 impl Release {
     fn exhausted(&self) -> bool {
-        self.started
-            .is_some_and(|started| started.elapsed() >= RELEASE_BUDGET)
+        self.ran >= RELEASE_BUDGET
     }
 
     /// The runs so far, for the step trace.
