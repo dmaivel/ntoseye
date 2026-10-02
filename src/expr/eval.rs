@@ -407,7 +407,7 @@ impl Expr {
 
     fn evaluate_read(width: u8, inner: &Expr, context: &Target) -> Result<ExprValue> {
         let address = inner.evaluate(context)?.scalar(context)?;
-        let value = Self::read_integer(&context.context_memory(), address, u64::from(width))?;
+        let value = Self::read_integer(&context.expression_memory(), address, u64::from(width))?;
         Ok(ExprValue::Raw {
             value: VirtAddr(value),
             address: None,
@@ -415,12 +415,13 @@ impl Expr {
     }
 
     /// MASM's `$p*` operators take a physical address, bypassing the page
-    /// tables the virtual reads walk.
+    /// tables the virtual reads walk (a hypercall caller's guest physical
+    /// address in its breakpoint's condition; see [`Target::expression_scope`]).
     fn evaluate_physical_read(width: u8, inner: &Expr, context: &Target) -> Result<ExprValue> {
         let address = inner.evaluate(context)?.scalar(context)?;
         let mut bytes = [0u8; 8];
         let width = usize::from(width);
-        context.phys.read_bytes(address.0, &mut bytes[..width])?;
+        context.read_expression_physical(address.0, &mut bytes[..width])?;
         Ok(ExprValue::Raw {
             value: VirtAddr(u64::from_le_bytes(bytes)),
             address: None,
@@ -434,7 +435,7 @@ impl Expr {
         if length == 0 {
             return true;
         }
-        let memory = context.context_memory();
+        let memory = context.expression_memory();
         let mut buffer = [0u8; 256];
         let mut offset = 0u64;
         while offset < length {
@@ -473,7 +474,7 @@ impl Expr {
             ));
         }
 
-        let read = context.context_memory().read::<u64>(scalar)?;
+        let read = context.expression_memory().read::<u64>(scalar)?;
         Ok(ExprValue::Raw {
             value: VirtAddr(read),
             address: None,
@@ -548,7 +549,7 @@ impl Expr {
     /// header the way WinDbg's `$iment` does. `AddressOfEntryPoint` sits at
     /// the same offset in PE32 and PE32+, so one path covers both.
     fn image_entry_point(base: VirtAddr, context: &Target) -> Result<VirtAddr> {
-        let memory = context.context_memory();
+        let memory = context.expression_memory();
         let not_an_image = || Error::InvalidExpression(format!("no PE image at {:#x}", base.0));
         if memory.read::<u16>(base)? != 0x5a4d {
             return Err(not_an_image());
@@ -955,7 +956,7 @@ impl ExprValue {
                 type_data,
                 byte_size,
             } => {
-                let memory = context.context_memory();
+                let memory = context.expression_memory();
                 let width = Expr::scalar_width(type_data, *byte_size)?;
                 let raw = Expr::read_integer(&memory, *address, width)?;
                 Ok(VirtAddr(Expr::decode_scalar(raw, type_data, width)?))

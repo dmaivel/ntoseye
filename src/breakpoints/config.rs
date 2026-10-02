@@ -244,7 +244,10 @@ impl BreakpointManager {
 #[cfg(test)]
 mod tests {
     use crate::breakpoints::test_backend::SlotRecorder;
-    use crate::breakpoints::{BreakpointConfig, BreakpointManager, HypercallFilter, ThreadScope};
+    use crate::breakpoints::{
+        Breakpoint, BreakpointConfig, BreakpointManager, HypercallFilter, ThreadScope,
+    };
+    use crate::guest::EvmcsState;
     use crate::guest::hypercall_input::decode_hypercall;
     use crate::guest::hypercalls::{HypercallCaller, HypercallInput};
     use crate::session::hits::evaluate_hit_condition;
@@ -264,6 +267,7 @@ mod tests {
             vtl: 0,
             input,
             registers: HashMap::new(),
+            state: None,
         }
     }
 
@@ -374,23 +378,19 @@ mod tests {
         }
     }
 
-    /// A hypercall breakpoint's condition reads its caller's registers, not
-    /// those the hypervisor runs the handler with; with the caller unknown
-    /// it cannot be evaluated (so the hit stops). The registers in use
-    /// afterwards are the hypervisor's again.
-    #[test]
-    fn a_hypercall_condition_reads_the_callers_registers() {
-        let mut session = session_over_memory(0x1000, &[0u8; 0x80]);
+    /// A breakpoint on the hypercall handler at 0x1000 of `target`, for
+    /// call 0xb from any caller, with `condition`.
+    fn conditional_hypercall_breakpoint(target: &Target, condition: &str) -> Breakpoint {
         let mut client = SlotRecorder::accepting();
         let mut manager = BreakpointManager::new();
         let id = manager
             .add_configured(
                 &mut client,
-                &session.target,
+                target,
                 VirtAddr(0x1000),
                 None,
                 BreakpointConfig {
-                    condition: Some("rdx == 0xfb".to_string()),
+                    condition: Some(condition.to_string()),
                     hypercall: Some(HypercallFilter {
                         code: 0xb,
                         partition: None,
@@ -400,7 +400,17 @@ mod tests {
                 },
             )
             .expect("configured breakpoint installs");
-        let bp = manager.breakpoints[&id].clone();
+        manager.breakpoints[&id].clone()
+    }
+
+    /// A hypercall breakpoint's condition reads its caller's registers, not
+    /// those the hypervisor runs the handler with; with the caller unknown
+    /// it cannot be evaluated (so the hit stops). The registers in use
+    /// afterwards are the hypervisor's again.
+    #[test]
+    fn a_hypercall_condition_reads_the_callers_registers() {
+        let mut session = session_over_memory(0x1000, &[0u8; 0x80]);
+        let bp = conditional_hypercall_breakpoint(&session.target, "rdx == 0xfb");
         let hypervisor = HashMap::from([("rdx".to_string(), 0xfb), ("rip".to_string(), 0x1000)]);
         session.target.registers = Some(hypervisor.clone());
         let with_rdx = |rdx| HypercallCaller {
@@ -418,5 +428,80 @@ mod tests {
         );
         assert!(holds(&mut session.target, None).is_err());
         assert_eq!(session.target.registers, Some(hypervisor));
+    }
+
+    /// A hypercall breakpoint's condition reads its caller's memory: `$p`
+    /// reads its guest physical memory through the calling VTL's EPT (a
+    /// slow call's input page, at the GPA in RDX), and `dwo`/`poi` its
+    /// virtual memory through its CR3, walked through the EPT too. The
+    /// host page at the input's GPA holds other data, which a read of the
+    /// target's physical memory would see. With the caller's state not
+    /// known, a read fails rather than read the hypervisor's memory; and
+    /// afterwards, expressions read the target's memory again.
+    #[test]
+    fn a_hypercall_condition_reads_the_callers_memory() {
+        const BASE: u64 = 0x10000;
+        const RWX: u64 = 7;
+        const WB: u64 = 6 << 3;
+        // The input's GPA, which the EPT maps to the host page after it.
+        const INPUT_GPA: u64 = BASE + 0x8000;
+        const INPUT_VA: u64 = 0x7ff6_1234_5000;
+        let mut memory = vec![0u8; 0xa000];
+        let mut put = |at: u64, value: u64| {
+            let at = (at - BASE) as usize;
+            memory[at..at + 8].copy_from_slice(&value.to_le_bytes());
+        };
+        // EPT: PML4, PDPT, PD and PT at BASE, identity but for the input.
+        put(BASE, (BASE + 0x1000) | RWX);
+        put(BASE + 0x1000, (BASE + 0x2000) | RWX);
+        put(BASE + 0x2000, (BASE + 0x3000) | RWX);
+        for gpa in (BASE..BASE + 0xa000).step_by(0x1000) {
+            let host = if gpa == INPUT_GPA { gpa + 0x1000 } else { gpa };
+            put(BASE + 0x3000 + (gpa >> 12) * 8, host | RWX | WB);
+        }
+        // The caller's 4-level page tables, at GPA BASE + 0x4000.
+        let va = VirtAddr(INPUT_VA);
+        put(
+            BASE + 0x4000 + va.pml4_index() as u64 * 8,
+            (BASE + 0x5000) | 7,
+        );
+        put(
+            BASE + 0x5000 + va.pdpt_index() as u64 * 8,
+            (BASE + 0x6000) | 7,
+        );
+        put(
+            BASE + 0x6000 + va.pd_index() as u64 * 8,
+            (BASE + 0x7000) | 7,
+        );
+        put(BASE + 0x7000 + va.pt_index() as u64 * 8, INPUT_GPA | 7);
+        put(INPUT_GPA + 0x10, 0x1111_1111);
+        put(INPUT_GPA + 0x1000 + 0x10, 0x2222_2222);
+        let mut session = session_over_memory(BASE, &memory);
+        let state = EvmcsState {
+            ept_pointer: BASE | (3 << 3) | 6,
+            cr3: BASE + 0x4000,
+            entry_controls: 1 << 9,
+            cs_access_rights: 0xa09b,
+            ..EvmcsState::at(0, true)
+        };
+        let caller_in = |state| HypercallCaller {
+            registers: HashMap::from([
+                ("rdx".to_string(), INPUT_GPA),
+                ("r8".to_string(), INPUT_VA),
+            ]),
+            state,
+            ..caller(4, 1, known(0x000b))
+        };
+        let holds = |target: &mut Target, condition: &str, state| {
+            let bp = conditional_hypercall_breakpoint(target, condition);
+            evaluate_hit_condition(target, &bp, Some(&caller_in(state)))
+        };
+
+        let target = &mut session.target;
+        assert!(holds(target, "$pdwo(rdx+0x10) == 0x22222222", Some(state)).unwrap());
+        assert!(holds(target, "dwo(r8+0x10) == 0x22222222", Some(state)).unwrap());
+        assert!(holds(target, "$pdwo(rdx+0x10) == 0x11111111", None).is_err());
+        let after = conditional_hypercall_breakpoint(target, "$pdwo(0x18010) == 0x11111111");
+        assert!(after.evaluate_condition(target).unwrap());
     }
 }

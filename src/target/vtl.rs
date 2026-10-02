@@ -1415,6 +1415,7 @@ impl Target {
                 vtl: served.vtl,
                 input,
                 registers,
+                state: served.state.filter(|state| state.current),
             });
         }
         let current = self
@@ -1442,6 +1443,7 @@ impl Target {
             vtl: current.vtl,
             registers: current.registers(),
             input: current.hypercall,
+            state: Some(current.state),
         })
     }
 
@@ -1491,6 +1493,7 @@ impl Target {
             vtl: slot.vtl,
             input: self.exit_hypercall(&loaded, registers.as_ref(), xmm),
             registers: exit_registers(&loaded, registers.as_ref().ok()),
+            state: Some(loaded),
         })
     }
 

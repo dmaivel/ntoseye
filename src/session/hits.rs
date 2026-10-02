@@ -21,7 +21,7 @@ use crate::session::stops::set_current_thread_from_stop;
 use crate::session::{
     BreakpointStopAction, STATUS_SINGLE_STEP, Session, WatchpointStopAction, step_trace_enabled,
 };
-use crate::target::Target;
+use crate::target::{ExpressionScope, Target};
 use crate::types::Arch;
 
 impl Session {
@@ -225,10 +225,11 @@ pub fn stopped_hypercall_matches(
 
 /// Evaluate `breakpoint`'s condition at a hit. A hypercall breakpoint's
 /// sees its `caller`'s registers at its VMCALL, the ones `!hvcall` decodes
-/// from, rather than the hypervisor's at the handler, which hold none of
-/// the call's; the memory it reads is still the stopped vCPU's. With the
-/// caller unknown, the condition cannot be evaluated, which surfaces the
-/// hit with the error.
+/// from, and reads its memory, as `!hvcall` reads a slow call's input,
+/// rather than the hypervisor's registers and memory at the handler, which
+/// hold none of the call's (see [`ExpressionScope::HypercallCaller`]). With
+/// the caller unknown, the condition cannot be evaluated, which surfaces
+/// the hit with the error.
 pub fn evaluate_hit_condition(
     target: &mut Target,
     breakpoint: &Breakpoint,
@@ -244,7 +245,9 @@ pub fn evaluate_hit_condition(
         )
     })?;
     let live = target.registers.replace(caller.registers.clone());
+    target.expression_scope = ExpressionScope::HypercallCaller(caller.state);
     let held = breakpoint.evaluate_condition(target);
+    target.expression_scope = ExpressionScope::Context;
     target.registers = live;
     held
 }

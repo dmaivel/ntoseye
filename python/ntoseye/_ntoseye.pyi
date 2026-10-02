@@ -1430,8 +1430,11 @@ class Breakpoints:
         the other hits without a stop, before any `when=` callback runs. A
         hit whose caller ntoseye cannot tell stops. A `condition` sees the
         caller's registers at its VMCALL (`"rdx == 0xfb"`), not the
-        hypervisor's at the handler. Needs the gdb backend and the VM's
-        hv-evmcs enlightenment. This feature is experimental.
+        hypervisor's at the handler, and reads the caller's memory: the `$p`
+        operators its guest physical memory (`"$pqwo(rdx+8) == 1"` tests a
+        slow call's input), the others its virtual memory. Needs the gdb
+        backend and the VM's hv-evmcs enlightenment. This feature is
+        experimental.
         """
     def add_pattern(self, /, pattern: str, condition: str |None = None, *, when: Callable[[Stop], object] |None = None, pass_count: int = 0, one_shot: bool = False, process: Process |int |None = None, thread: Thread |int |None = None, processor: Cpu |int |None = None, action: str |None = None, limit: int = 256) -> list[Breakpoint]:
         """

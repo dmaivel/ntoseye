@@ -19,6 +19,8 @@ ev $pdwo(0x1000)
 ev ((_EPROCESS*)poi(nt!PsInitialSystemProcess))->UniqueProcessId
 ```
 
+In the condition of a hypercall breakpoint ({command}`!hvbp`), these operators read the memory of the hypercall's caller: the `$p` forms its guest physical memory, and the others its virtual memory ([hypercall breakpoints](../using/breakpoints.md#hypercall-breakpoints)).
+
 The {command}`?` command prints a raw expression as a 16-digit address. For a typed expression, it prints the type and the value that {command}`dt` and the editor show, such as `ULONG 0x1a` or `_DEVICE_TYPE 0n34 ( FILE_DEVICE_DISK )`. An aggregate has no numeric value, so {command}`?` shows its location and the command that expands it.
 
 ## Numbers and radix

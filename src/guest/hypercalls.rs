@@ -3,6 +3,7 @@
 //! page for each hypercall, and HvCallGetPartitionId (0x0046), which the
 //! current pages name without a code, from TLFS 6.0b.
 
+use super::evmcs::EvmcsState;
 use super::hv_layout::HypercallEntry;
 use super::hypercall_input::{DecodedHypercall, HypercallControl};
 
@@ -135,6 +136,11 @@ pub struct HypercallCaller {
     /// the general-purpose registers when they are known. A hypercall
     /// breakpoint's condition sees these.
     pub registers: std::collections::HashMap<String, u64>,
+    /// The calling VTL's state at its VMCALL, whose EPT and CR3 a hypercall
+    /// breakpoint's condition reads the caller's memory through. `None`
+    /// when the state ntoseye found is an older exit's, as its registers
+    /// then are.
+    pub state: Option<EvmcsState>,
 }
 
 impl HypercallCaller {

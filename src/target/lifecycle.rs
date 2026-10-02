@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use super::{ReloadReport, StartupMessage, Target};
+use super::{ExpressionScope, ReloadReport, StartupMessage, Target};
 use crate::{
     backend::MemoryOps,
     debugger_data::{
@@ -121,6 +121,7 @@ impl Target {
             triage_modules_cache,
             context_dtb_override: None,
             registers: None,
+            expression_scope: ExpressionScope::Context,
             selected_frame: None,
             windows_thread_selection: None,
             user_vars: HashMap::new(),
@@ -172,6 +173,7 @@ impl Target {
             triage_modules_cache: None,
             context_dtb_override: None,
             registers: None,
+            expression_scope: ExpressionScope::Context,
             selected_frame: None,
             windows_thread_selection: None,
             user_vars: HashMap::new(),

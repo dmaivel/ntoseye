@@ -38,7 +38,10 @@ pub mod workqueue;
 pub mod zombies;
 
 pub use list::{ListCursor, ListTermination, bounded_list_walk};
-pub use memory::{CompareResult, MAX_SEARCH_BYTES, MAX_SEARCH_MATCHES, SearchResult, SearchStop};
+pub use memory::{
+    CompareResult, ExpressionMemory, ExpressionScope, MAX_SEARCH_BYTES, MAX_SEARCH_MATCHES,
+    SearchResult, SearchStop,
+};
 pub use vtl::{
     BreakpointStop, CodeExtent, ForeignCode, ForeignModules, GuestCode, HYPERVISOR_CONTEXT,
     SavedVtlContext, ServedVp,
@@ -95,6 +98,10 @@ pub struct Target {
     triage_modules_cache: Option<Vec<ModuleInfo>>,
     context_dtb_override: Option<Dtb>,
     pub registers: Option<HashMap<String, u64>>,
+    /// Whose memory expressions read, which a hypercall breakpoint's
+    /// condition sets to its caller's for as long as it is evaluated, as it
+    /// sets `registers`; see [`Self::expression_memory`].
+    pub expression_scope: ExpressionScope,
     /// Frontend-selected stack/context frame. The REPL owns the lifetime and
     /// mirrors it into this target so expression and local evaluation see the
     /// same recovered register context across command calls.

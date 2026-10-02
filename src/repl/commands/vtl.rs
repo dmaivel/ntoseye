@@ -1665,6 +1665,7 @@ mod tests {
             vtl: 0,
             input: HypercallInput::Known(Box::new(call)),
             registers: Default::default(),
+            state: None,
         }
     }
 
@@ -1731,6 +1732,7 @@ mod tests {
             vtl: 0,
             input,
             registers: Default::default(),
+            state: None,
         };
         let error = hypercall_report(&caller(HypercallInput::NotHypercall)).unwrap_err();
         assert!(error.starts_with("partition 0x4 VP 1 VTL0") && error.contains("no hypercall"));

@@ -8,10 +8,11 @@ use std::sync::atomic::Ordering;
 use crate::{
     backend::MemoryOps,
     error::{Error, Result},
+    guest::EvmcsState,
     layout::{StructRef, TypeInfo, Types},
     memory::{AddressSpace, PAGE_SIZE, pattern_offsets, read_page_chunks},
     phys::PhysMem,
-    types::{Dtb, VirtAddr},
+    types::{Dtb, PhysAddr, VirtAddr},
 };
 
 /// The most bytes one search scans.
@@ -21,6 +22,61 @@ pub const MAX_SEARCH_BYTES: usize = 1 << 30;
 pub const MAX_SEARCH_MATCHES: usize = 4096;
 /// Bytes read per step of a search.
 const SEARCH_CHUNK: usize = 1 << 20;
+
+/// Whose memory expressions read ([`Target::expression_memory`],
+/// [`Target::read_expression_physical`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ExpressionScope {
+    /// The inspection address space ([`Target::current_dtb`]), and the
+    /// target's physical memory.
+    #[default]
+    Context,
+    /// A hypercall's caller, for its breakpoint's condition: the stopped
+    /// vCPU runs the hypervisor, whose memory holds none of the call, while
+    /// the caller's addresses (a slow call's input GPA in RDX, pointers in
+    /// its own memory) are guest physical through the calling VTL's EPT, or
+    /// virtual through its CR3, as `!hvcall` and `!hvd` read them. `None`
+    /// when the caller's state is not known: every read fails rather than
+    /// read the hypervisor's memory at the caller's addresses.
+    HypercallCaller(Option<EvmcsState>),
+}
+
+/// The virtual memory expressions read: the inspection address space, or a
+/// hypercall caller's (see [`ExpressionScope`]).
+pub enum ExpressionMemory<'a> {
+    Context(AddressSpace<'a, PhysMem>),
+    HypercallCaller(&'a Target, Option<EvmcsState>),
+}
+
+/// The caller's state for a read in its memory, or why there is none.
+fn caller_state(state: Option<&EvmcsState>) -> Result<&EvmcsState> {
+    state.ok_or_else(|| {
+        Error::Hypervisor(
+            "the hypercall caller's saved state is an older exit's, so its memory is not known"
+                .to_string(),
+        )
+    })
+}
+
+impl MemoryOps<VirtAddr> for ExpressionMemory<'_> {
+    fn read_bytes(&self, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
+        match self {
+            Self::Context(memory) => memory.read_bytes(addr, buf),
+            Self::HypercallCaller(target, state) => {
+                target.read_guest_partition(caller_state(state.as_ref())?, true, addr.0, buf)
+            }
+        }
+    }
+
+    fn write_bytes(&self, addr: VirtAddr, buf: &[u8]) -> Result<()> {
+        match self {
+            Self::Context(memory) => memory.write_bytes(addr, buf),
+            Self::HypercallCaller(..) => Err(Error::Hypervisor(
+                "a hypercall caller's memory is read-only".to_string(),
+            )),
+        }
+    }
+}
 
 /// What [`Target::search`] found.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -114,6 +170,29 @@ impl Target {
     /// Memory view for the inspection address space ([`Self::current_dtb`]).
     pub fn context_memory(&self) -> AddressSpace<'_, PhysMem> {
         self.address_space(self.current_dtb())
+    }
+
+    /// The virtual memory expressions read in the [`ExpressionScope`]: the
+    /// inspection address space, or a hypercall caller's.
+    pub fn expression_memory(&self) -> ExpressionMemory<'_> {
+        match self.expression_scope {
+            ExpressionScope::Context => ExpressionMemory::Context(self.context_memory()),
+            ExpressionScope::HypercallCaller(state) => {
+                ExpressionMemory::HypercallCaller(self, state)
+            }
+        }
+    }
+
+    /// Read the physical memory expressions read (`$pdwo` and the other
+    /// `$p` operators) in the [`ExpressionScope`]: the target's, or a
+    /// hypercall caller's guest physical memory through its EPT.
+    pub fn read_expression_physical(&self, address: PhysAddr, buf: &mut [u8]) -> Result<()> {
+        match &self.expression_scope {
+            ExpressionScope::Context => self.phys.read_bytes(address, buf),
+            ExpressionScope::HypercallCaller(state) => {
+                self.read_guest_partition(caller_state(state.as_ref())?, false, address, buf)
+            }
+        }
     }
 
     /// Kernel types read in the inspection address space
