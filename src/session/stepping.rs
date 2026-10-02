@@ -1097,6 +1097,7 @@ pub fn step_over_current_breakpoint(
     let Some(bp_id) = breakpoints.breakpoint_id_at_address(rip) else {
         return Ok(None);
     };
+    step_trace!("stepping {thread} off #{bp_id} at {rip:#x}");
     // An execution interrupted on the site that got back onto it some other
     // way than hitting it (stepped through its handler) runs past it now;
     // its remembered hit must not absorb a later, real one.
@@ -1574,6 +1575,11 @@ fn run_to_successors(
         }
         let now_regs = backend.read_registers()?;
         let now = register_map.read_u64("rip", &now_regs)?;
+        step_trace!(
+            "run past {thread} at {rip:#x}: {:?} stopped at {now:#x}{}",
+            event.thread_id,
+            if timed_out { ", broken in" } else { "" }
+        );
         if !timed_out || successors.contains(&now) {
             if now == rip
                 && let Some(slot) = keeper

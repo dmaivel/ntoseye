@@ -501,9 +501,26 @@ pub fn resolve_watchpoint_stop(
                 .read_registers()
                 .ok()
                 .and_then(|registers| register_map.read_u64("rip", &registers).ok());
+            // What the match was made against: an armed site at `pc` should
+            // have been found, so a stop here with one names the gap.
+            let armed = breakpoints
+                .managed_ids()
+                .into_iter()
+                .filter_map(|id| breakpoints.get(id))
+                .filter(|bp| bp.enabled)
+                .filter_map(|bp| {
+                    bp.hardware
+                        .map(|hw| format!("#{}@{:#x}/{}", bp.id, bp.address.0, hw.slot))
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
             step_trace!(
-                "stop on {:?} (current {current_thread}) at {pc:x?} is no hardware breakpoint's",
-                event.thread_id
+                "stop on {:?} (current {current_thread}) at {pc:x?} is no hardware breakpoint's \
+                 (reported at {:x?}, break-in {}, watch {:x?}; armed {armed})",
+                event.thread_id,
+                event.program_counter,
+                event.break_in,
+                event.watchpoint_address
             );
         }
         return Ok(WatchpointStopAction::NotBreakpoint);
