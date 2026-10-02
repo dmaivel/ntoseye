@@ -14,7 +14,7 @@ use crate::target::cpu::{
     IdtEntryDetail, IrqlDetail, PcrDetail, PrcbDetail, ProcessorStateDetail,
     SpecialRegistersDetail, msr_name, parse_msr_name,
 };
-use crate::target::{DiagnosticValue, Target};
+use crate::target::{DiagnosticValue, ServedVp, Target};
 use crate::types::{Arch, VirtAddr};
 use crate::ui;
 
@@ -1045,6 +1045,26 @@ impl ReplState<'_> {
 
         pb.finish_and_clear();
 
+        // Where the Symbol column starts: each column is as wide as its
+        // widest cell, plus two spaces. The lines below a vCPU wrap from
+        // there, after their three-column tree glyph.
+        let widest = |header: &str, cells: &mut dyn Iterator<Item = usize>| {
+            cells.fold(header.len(), usize::max) + 2
+        };
+        let symbol_column = widest(
+            "vCPU",
+            &mut vcpus.iter().map(|vcpu| vcpu.id.chars().count()),
+        ) + widest(
+            "RIP",
+            &mut vcpus.iter().map(|vcpu| match vcpu.rip {
+                Some(_) => 16,
+                None => "unavailable".len(),
+            }),
+        ) + widest(
+            "Context",
+            &mut vcpus.iter().map(|vcpu| vcpu.context.chars().count()),
+        );
+
         let mut builder = Builder::default();
         builder.push_record(vec!["vCPU", "RIP", "Context", "Symbol"]);
         for vcpu in vcpus {
@@ -1070,7 +1090,7 @@ impl ReplState<'_> {
                 .map(|saved| format!("saved {}", saved.describe()))
                 .collect();
             if let Some(served) = &vcpu.serving {
-                children.push(format!("serving {}  {}", served.label(), served.describe()));
+                children.push(served_vp_lines(served, symbol_column + 3));
             }
             for line in event_children_lines("", &children) {
                 builder.push_record(vec![String::new(), String::new(), String::new(), line]);
@@ -1127,4 +1147,28 @@ impl ReplState<'_> {
 
         Ok(())
     }
+}
+
+/// The guest VP a vCPU in the hypervisor serves, as a line below it in `~`:
+/// `serving partition 0x6 VP 3  VTL0 00007dbffd31f313, last exit VMCALL`,
+/// with the hypercall of a VMCALL exit on a tree line below, as `.vtlcxr`
+/// shows it. A line too long for the terminal from column `col` puts the
+/// last exit on a line of its own, under where the VP left off.
+fn served_vp_lines(served: &ServedVp, col: usize) -> String {
+    let head = format!("serving {}  ", served.label());
+    let place = served.place();
+    let mut text = match served.last_exit() {
+        Some(exit) if wrap_prose(&format!("{head}{place}, {exit}"), col).len() > 1 => {
+            format!("{head}{place}\n{}{exit}", " ".repeat(head.len()))
+        }
+        Some(exit) => format!("{head}{place}, {exit}"),
+        None => format!("{head}{place}"),
+    };
+    if let Some(detail) = served.exit_detail() {
+        for line in event_children_lines("", &[detail]) {
+            text.push('\n');
+            text.push_str(&line);
+        }
+    }
+    text
 }

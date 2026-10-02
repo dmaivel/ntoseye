@@ -156,13 +156,29 @@ impl ServedVp {
     /// Where the VP left off and why, without the exit's detail: `VTL0
     /// 00007cba12f529e3, last exit VMCALL`.
     pub fn left_off(&self) -> String {
-        let Some(state) = &self.state else {
-            return format!("VTL{}", self.vtl);
-        };
+        match self.last_exit() {
+            Some(exit) => format!("{}, {exit}", self.place()),
+            None => self.place(),
+        }
+    }
+
+    /// Where the VP left off: `VTL0 00007cba12f529e3`, or only its VTL
+    /// when its state was not read. A line too long for the terminal puts
+    /// [`Self::last_exit`] on a line of its own below it.
+    pub fn place(&self) -> String {
+        match &self.state {
+            Some(state) => format!("VTL{} {:016x}", self.vtl, state.rip),
+            None => format!("VTL{}", self.vtl),
+        }
+    }
+
+    /// Why the VP left off: `last exit VMCALL`, when its state was read.
+    pub fn last_exit(&self) -> Option<String> {
+        let state = self.state.as_ref()?;
         let exit = state
             .exit_reason_name()
             .map_or_else(|| format!("exit {:#x}", state.exit_reason), str::to_string);
-        format!("VTL{} {:016x}, last exit {exit}", self.vtl, state.rip)
+        Some(format!("last exit {exit}"))
     }
 
     /// The hypercall of a VMCALL exit, when its registers are known.
