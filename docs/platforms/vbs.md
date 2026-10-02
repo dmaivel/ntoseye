@@ -313,13 +313,15 @@ root partition VP 0 VTL0  hypercall 0x0003 HvCallFlushVirtualAddressList fast re
 ├─ Flags          0x000000000000000f  HV_FLUSH_ALL_PROCESSORS | HV_FLUSH_ALL_VIRTUAL_ADDRESS_SPACES | HV_FLUSH_NON_GLOBAL_MAPPINGS_ONLY | HV_FLUSH_USE_EXTENDED_RANGE_FORMAT
 ├─ ProcessorMask  0x0000000000000000  ignored: HV_FLUSH_ALL_PROCESSORS
 └─ rep list 4 elements
-   ├─ [0] GvaRange  0xffffa789d4012000
-   ├─ [1] GvaRange  0xffffa789d401b000
-   ├─ [2] GvaRange  0xffffa789d41a7000
-   └─ [3] GvaRange  0xffffa789d41bd000
+   ├─ [0] GvaRange  0xffffa789d4012000  0xffffa789d4012000, 1 page
+   ├─ [1] GvaRange  0xffffa789d401b000  0xffffa789d401b000, 1 page
+   ├─ [2] GvaRange  0xffffa789d41a7000  0xffffa789d41a7000, 1 page
+   └─ [3] GvaRange  0xffffa789d41bd000  0xffffa789d41bd000, 1 page
 ```
 
-NT made this call as an XMM fast hypercall: the ProcessorMask and the four ranges past RDX and R8 are in XMM0 to XMM2. The ranges show as raw values because the flags select the extended range format, which neither the TLFS nor Linux documents. A slow call shows the GPAs of its input and output instead of `input in RDX and R8`.
+NT made this call as an XMM fast hypercall: the ProcessorMask and the four ranges past RDX and R8 are in XMM0 to XMM2. A slow call shows the GPAs of its input and output instead of `input in RDX and R8`.
+
+The flags select the extended GVA range format, which the TLFS does not describe. Bits 10:0 of a range count the pages after the first, and bit 11 selects large pages. A range of 4 KiB pages has its GVA in bits 63:12; a range of large pages has its GVA in bits 63:21, and bit 12 selects 2 MiB or 1 GiB pages, shown as `<GVA>, <count> of 2 MiB`. Microsoft's OpenVMM defines the format ([`HvGvaRangeExtended`](https://github.com/microsoft/openvmm/blob/b018341376ca9a34afc3502b1b605f8f8da2ecaa/vm/hv1/hvdef/src/lib.rs#L2413-L2444)), and the flush handlers of `hvix64.exe` read it the same way. Without the flag, bits 11:0 count the pages after the first.
 
 ntoseye reads a slow call's input at its GPA through the EPT of the calling VTL, which is the root partition's for its own calls, and the guest's for a guest partition's VP. A fast call passes its input in RDX and R8, and an XMM fast call passes the rest of it in XMM0 to XMM5, which the hypervisor's VM-exit entry code saves beside the general-purpose registers before it clears them (every build from 10.0.16299 to 10.0.28000 does). The registers come from where that code saved them ([below](#where-nt-left-off-under-the-hypervisor)), so when they are not known, for example while the vCPU is still on the entry, or when the caller's last exit was not a `VMCALL`, {command}`!hvcall` says so.
 

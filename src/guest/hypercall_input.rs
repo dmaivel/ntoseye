@@ -85,8 +85,7 @@ const FLUSH_FLAGS: &[(u64, &str)] = &[
 ];
 const FLUSH_ALL_PROCESSORS: u64 = 1 << 0;
 const FLUSH_ALL_VIRTUAL_ADDRESS_SPACES: u64 = 1 << 1;
-/// Neither the TLFS nor Linux documents the GVA range format this flag
-/// selects, so its ranges are shown undecoded.
+/// Selects the small/large-page encoding described by [`extended_gva_range`].
 const FLUSH_USE_EXTENDED_RANGE_FORMAT: u64 = 1 << 3;
 
 /// `HV_MAP_GPA_FLAGS` (TLFS datatypes `HV_MAP_GPA_FLAGS`), by bit, but for
@@ -796,15 +795,49 @@ fn flush_header(input: &mut Input<'_>) -> Option<u64> {
     })
 }
 
-/// A flush's list of GVA ranges: each a page's GVA whose low 12 bits count
-/// the pages after it (TLFS HvCallFlushVirtualAddressList).
+/// A flush's list of GVA ranges, using the format its flags select.
 fn gva_ranges(input: &mut Input<'_>, control: HypercallControl, start: usize, flags: Option<u64>) {
-    let documented = flags.is_some_and(|flags| flags & FLUSH_USE_EXTENDED_RANGE_FORMAT == 0);
     input.rep_list(control, start, 8, |input, at| {
-        input.field("GvaRange", at, 8, |range| {
-            documented.then(|| format!("{:#x}, {}", range & !0xfff, pages((range & 0xfff) + 1)))
+        input.field("GvaRange", at, 8, |range| match flags {
+            Some(flags) if flags & FLUSH_USE_EXTENDED_RANGE_FORMAT != 0 => {
+                Some(extended_gva_range(range))
+            }
+            // The TLFS's layout: bits 11:0 count the pages after the first.
+            Some(_) => Some(format!(
+                "{:#x}, {}",
+                range & !0xfff,
+                pages((range & 0xfff) + 1)
+            )),
+            None => None,
         });
     });
+}
+
+/// A GVA range in the extended format that `HV_FLUSH_USE_EXTENDED_RANGE_FORMAT`
+/// selects, which the TLFS does not describe: bits 10:0 count the pages
+/// after the first, and bit 11 selects large pages. A 4 KiB page's GVA is
+/// bits 63:12; a large page's size is bit 12 (2 MiB or 1 GiB), and its GVA
+/// bits 63:21 (20:13 are reserved).
+///
+/// Microsoft's OpenVMM defines it as `HvGvaRangeExtended` and
+/// `HvGvaRangeExtendedLargePage`
+/// (<https://github.com/microsoft/openvmm/blob/b018341376ca9a34afc3502b1b605f8f8da2ecaa/vm/hv1/hvdef/src/lib.rs#L2413-L2444>),
+/// and hvix64.exe 10.0.26100.9444 reads it so: the page counter at RVA
+/// 0x32b974 masks each range with 0x7ff for this format and 0xfff for the
+/// TLFS's, and the INVVPID loop at 0x354340 takes its page size from bits
+/// 12:11 (shifts 12, 21, 12 and 30 out of 0x1e0c150c).
+fn extended_gva_range(range: u64) -> String {
+    let count = (range & 0x7ff) + 1;
+    if range & (1 << 11) == 0 {
+        format!("{:#x}, {}", range & !0xfff, pages(count))
+    } else {
+        let size = if range & (1 << 12) == 0 {
+            "2 MiB"
+        } else {
+            "1 GiB"
+        };
+        format!("{:#x}, {count} of {size}", range & !0x1f_ffff)
+    }
 }
 
 /// A GPA range of a guest physical flush, as Linux's `union
@@ -1195,6 +1228,78 @@ mod tests {
             ]
         );
         assert!(call.elements.is_empty());
+    }
+
+    /// In the extended format, a range with bit 11 clear is 4 KiB pages:
+    /// bits 10:0 count the pages after the first, up to 2048, and bit 12 is
+    /// part of the address.
+    #[test]
+    fn extended_gva_ranges_decode_small_pages_and_the_maximum_count() {
+        let memory = page(&[
+            (8, FLUSH_USE_EXTENDED_RANGE_FORMAT, 8),
+            (24, 0xffff_cc0c_335e_7010, 8),
+            (32, 0x7ff6_0000_17ff, 8),
+        ]);
+        let call = slow(value(FLUSH_VIRTUAL_ADDRESS_LIST, 0, 0, 2), 0, &memory);
+        assert_eq!(
+            fields(&call.elements[0].fields),
+            [(
+                "GvaRange",
+                24,
+                0xffff_cc0c_335e_7010,
+                Some("0xffffcc0c335e7000, 17 pages")
+            )]
+        );
+        assert_eq!(
+            fields(&call.elements[1].fields),
+            [(
+                "GvaRange",
+                32,
+                0x7ff6_0000_17ff,
+                Some("0x7ff600001000, 2048 pages")
+            )]
+        );
+    }
+
+    /// Bit 11 makes a range large pages, 2 MiB or with bit 12 1 GiB, at the
+    /// address in bits 63:21, where the TLFS's layout would read those bits
+    /// as part of the page count. Here past the variable header of an XMM
+    /// fast Ex call.
+    #[test]
+    fn extended_gva_ranges_decode_large_pages_after_an_xmm_fast_ex_header() {
+        let two_mib = 0xffff_f804_1240_0800u64;
+        let one_gib = 0xffff_f804_4000_1fffu64;
+        let call = fast_with(
+            value(FLUSH_VIRTUAL_ADDRESS_LIST_EX, 1, 0, 2),
+            0,
+            FLUSH_USE_EXTENDED_RANGE_FORMAT,
+            Ok([
+                1u128 << 64,
+                u128::from(two_mib) << 64 | 1,
+                u128::from(one_gib),
+                0,
+                0,
+                0,
+            ]),
+        );
+        assert_eq!(
+            fields(&call.elements[0].fields),
+            [(
+                "GvaRange",
+                40,
+                two_mib,
+                Some("0xfffff80412400000, 1 of 2 MiB")
+            )]
+        );
+        assert_eq!(
+            fields(&call.elements[1].fields),
+            [(
+                "GvaRange",
+                48,
+                one_gib,
+                Some("0xfffff80440000000, 2048 of 1 GiB")
+            )]
+        );
     }
 
     /// The TLFS's own example: VPs {0, 5, 130} are banks 0 and 2 (mask
