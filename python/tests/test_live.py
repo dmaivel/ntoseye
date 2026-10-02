@@ -573,6 +573,157 @@ def test_a_hypercall_stop_decodes_the_call_from_the_callers_registers(halted: De
     assert decoded > 0, "no stop had the caller's registers"
 
 
+# The bytes of a VMCALL, and a condition that holds for every real one: the
+# caller's code at its RIP, read through the calling VTL's page tables.
+VMCALL = bytes.fromhex("0f01c1")
+AT_VMCALL = "(dwo(rip) & 0xffffff) == 0xc1010f"
+NOT_AT_VMCALL = "(dwo(rip) & 0xffffff) != 0xc1010f"
+# The fast bit of a hypercall input value (RCX) is clear: the input is in
+# memory, at the guest physical address in RDX.
+SLOW = "(rcx & 0x10000) == 0"
+# HV_FLUSH_USE_EXTENDED_RANGE_FORMAT in a flush's Flags.
+EXTENDED_RANGES = 1 << 3
+
+
+def hypervisor_root(halted: Debugger) -> ntoseye.HypervisorPartition:
+    """The root partition, whose flushes are frequent; skips without the
+    host GDB backend or the hypervisor's partitions (`hv-evmcs`)."""
+    if os.environ.get("NTOSEYE_TEST_BACKEND") != "gdb":
+        pytest.skip("breakpoints in the Windows hypervisor require the host GDB backend")
+    try:
+        return halted.hypervisor_partitions()[0]
+    except ntoseye.NtoseyeError as error:
+        pytest.skip(f"no Windows hypervisor partitions on this target: {error}")
+
+
+def gva_range(value: int, extended: bool) -> tuple[int, str]:
+    """The first GVA of a flush's GVA range, and what it means. The extended
+    format counts the pages after the first in bits 10:0, and bit 11 selects
+    large pages, whose size is bit 12 (2 MiB or 1 GiB) and whose GVA is bits
+    63:21; the TLFS's counts them in bits 11:0. A 4 KiB page's GVA is bits
+    63:12."""
+    count = (value & (0x7FF if extended else 0xFFF)) + 1
+    if not extended or not value & (1 << 11):
+        gva = value & ~0xFFF
+        return gva, f"{gva:#x}, {count} page{'s' if count > 1 else ''}"
+    gva = value & ~0x1F_FFFF
+    return gva, f"{gva:#x}, {count} of {'1 GiB' if value & (1 << 12) else '2 MiB'}"
+
+
+def test_flush_gva_ranges_decode_in_the_format_their_flags_select(halted: Debugger) -> None:
+    """The root partition's HvCallFlushVirtualAddressList sets
+    HV_FLUSH_USE_EXTENDED_RANGE_FORMAT, which the TLFS does not describe:
+    each decoded GvaRange means what that layout makes of its raw value, and
+    names a canonical GVA. The list follows the three header fields, in
+    memory for a slow call and in the XMM registers for a fast one."""
+    root = hypervisor_root(halted)
+    bp = halted.breakpoints.add_hypercall("HvCallFlushVirtualAddressList", root.id)
+    extended = 0
+    try:
+        for _ in range(ATTEMPTS):
+            stop = halted.run(timeout=10.0)
+            assert isinstance(stop, Stop.Breakpoint) and bp in stop.breakpoints
+            caller = stop.cpu.hypercall_caller()
+            assert caller is not None and caller.partition_id == root.id
+            call = caller.hypercall
+            assert call is not None and call.code == 0x0003
+            flags = next(field.value for field in call.fields if field.name == "Flags")
+            assert len(call.elements) == call.rep_count
+            for element in call.elements:
+                (field,) = element.fields
+                assert (field.name, field.offset, field.size) == ("GvaRange", 24 + 8 * element.index, 8)
+                gva, meaning = gva_range(field.value, bool(flags & EXTENDED_RANGES))
+                assert field.meaning == meaning, f"GvaRange {field.value:#x}"
+                assert gva >> 47 in (0, 0x1FFFF), f"GvaRange {field.value:#x} is not canonical"
+                extended += bool(flags & EXTENDED_RANGES)
+    finally:
+        bp.delete()
+    if not extended:
+        pytest.skip("the root partition's flushes did not use the extended range format")
+
+
+def test_a_hypercall_condition_reads_the_callers_memory(halted: Debugger) -> None:
+    """A hypercall breakpoint's condition reads the caller's memory, not the
+    hypervisor's: its virtual memory at its RIP holds the VMCALL, so a
+    condition that tests for it holds at every hit and its negation at none,
+    without an error; and its guest physical memory at a slow call's input
+    GPA holds the input that the stop decodes. The root partition flushes
+    every address space, so the first field of its flushes, AddressSpace, is
+    0, and the Flags field that follows it varies. The root's guest physical
+    addresses are host physical ones, so only the virtual read tells the
+    caller's memory from the hypervisor's."""
+    root = hypervisor_root(halted)
+    bp = halted.breakpoints.add_hypercall(0x0003, root.id, condition=AT_VMCALL)
+    try:
+        for _ in range(ATTEMPTS):
+            stop = halted.run(timeout=10.0)
+            assert isinstance(stop, Stop.Breakpoint) and bp in stop.breakpoints
+            assert stop.condition_error is None
+    finally:
+        bp.delete()
+    bp = halted.breakpoints.add_hypercall(0x0003, root.id, condition=NOT_AT_VMCALL)
+    try:
+        stop = halted.run(timeout=2.0)
+        assert stop is None, f"stopped at {stop!r}"
+    finally:
+        halted.interrupt()
+        bp.delete()
+    flags = 0xF
+    bp = halted.breakpoints.add_hypercall(
+        0x0003, root.id, condition=f"{SLOW} && $pqwo(rdx) == 0 && $pqwo(rdx + 8) == {flags:#x}"
+    )
+    try:
+        stop = halted.run(timeout=30.0)
+        assert isinstance(stop, Stop.Breakpoint) and bp in stop.breakpoints, "no slow flush of the root in 30 s"
+        assert stop.condition_error is None
+        caller = stop.cpu.hypercall_caller()
+        assert caller is not None and caller.hypercall is not None
+        call = caller.hypercall
+        assert not call.fast and call.input_gpa == caller.registers["rdx"]
+        assert [(field.name, field.value) for field in call.fields[:2]] == [("AddressSpace", 0), ("Flags", flags)]
+    finally:
+        bp.delete()
+
+
+def test_a_hypercall_callback_reads_its_caller(halted: Debugger) -> None:
+    """In a `when=` callback, `Cpu.hypercall_caller()` reads the caller at
+    its VMCALL: the call's bytes at its RIP, and for a slow call the input
+    GPA in its RDX. A vCPU that runs NT, not the hypervisor, has no caller."""
+    root = hypervisor_root(halted)
+    callers: list[ntoseye.HypercallCaller | None] = []
+    code: list[bytes] = []
+    inputs: list[tuple[int, int | None]] = []
+    in_nt: list[ntoseye.HypercallCaller | None] = []
+
+    def check(stop: Stop) -> bool:
+        caller = stop.cpu.hypercall_caller()
+        callers.append(caller)
+        if caller is None or caller.hypercall is None:
+            return True
+        code.append(caller.read(caller.registers["rip"], len(VMCALL)))
+        if not caller.hypercall.fast:
+            inputs.append((caller.registers["rdx"], caller.hypercall.input_gpa))
+        # Most flushes are fast; a slow one can take a hundred hits.
+        if len(in_nt) < ATTEMPTS:
+            in_nt.extend(cpu.hypercall_caller() for cpu in halted.cpus if cpu.process is not None)
+        return len(code) >= ATTEMPTS and bool(inputs) and bool(in_nt)
+
+    bp = halted.breakpoints.add_hypercall(0x0003, root.id, when=check)
+    try:
+        stop = halted.run(timeout=30.0)
+    finally:
+        halted.interrupt()
+        bp.delete()
+    assert isinstance(stop, Stop.Breakpoint) and bp in stop.breakpoints, (
+        "no slow flush of the root, or no vCPU in NT at a flush, in 30 s"
+    )
+    assert stop.condition_error is None
+    assert all(caller is not None and caller.partition_id == root.id and caller.root for caller in callers)
+    assert set(code) == {VMCALL}
+    assert all(rdx == gpa for rdx, gpa in inputs)
+    assert in_nt and all(caller is None for caller in in_nt)
+
+
 def test_secure_hardware_breakpoint_preserves_code_and_cpu_identity(halted: Debugger) -> None:
     sk = gdb_secure_kernel(halted)
     address = sk.symbols["securekernel!SkeSelectProcessAddressSpace"]
