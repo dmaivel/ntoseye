@@ -331,7 +331,7 @@ The walk reads live memory and is not an atomic snapshot, so a partition that is
 
 ### VM exits
 
-{command}`!hvexit` `<reason> [partition-id [vp-index]]` stops on a VM exit by its basic exit reason, optionally only from one partition or one of its VPs ([how](../using/breakpoints.md#vm-exit-breakpoints)): `!hvexit rdmsr 1 2` stops when VP 2 of the root partition reads an MSR. Every exit of every VP enters the hypervisor at one entry point, `hv!VmExitEntry`, the host RIP of the eVMCSes of the VTLs that the partition walk finds; the command breaks there and reads the reason from the eVMCS that the processor has loaded, which the CPU filled in at the exit. On the test guest, about 120 exits a second reached the debugger while it was set, a small part of the thousands that the guest takes when it runs freely.
+{command}`!hvexit` `<reason> [partition-id [vp-index]]` stops on a VM exit by its basic exit reason, optionally only from one partition or one of its VPs ([how](../using/breakpoints.md#vm-exit-breakpoints)): `!hvexit rdmsr 1 2` stops when VP 2 of the root partition reads an MSR. Every exit of every VP enters the hypervisor at one entry point, `hv!VmExitEntry`, the host RIP of the eVMCSes of the VTLs that the partition walk finds; the command breaks there and reads the reason from the eVMCS that the processor has loaded, which the CPU filled in at the exit. On the test guest, about 250 exits a second reached the debugger while it was set, a small part of the thousands that the guest takes when it runs freely: each takes about 4 ms, almost all of it QEMU stopping and resuming every vCPU.
 
 ## Stops in the Windows hypervisor
 

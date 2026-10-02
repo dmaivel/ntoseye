@@ -329,6 +329,14 @@ fn stop_event_requires_target_reload(debugger: &Target, event: &StopEvent) -> bo
     {
         return false;
     }
+    // Under VBS a stop is often in the Windows hypervisor's code or the
+    // secure kernel's, in no NT module and far from NT's base. That code is
+    // where the vCPU is, not a sign of a reboot, and rediscovering the kernel
+    // to tell (a RAM scan and a symbol load) cost every such stop several
+    // milliseconds: most of a hypercall or VM-exit breakpoint's declined hit.
+    if debugger.in_hypervisor_image(VirtAddr(pc)) || debugger.is_secure_address(VirtAddr(pc)) {
+        return false;
+    }
 
     if !event.is_bugcheck
         && debugger
