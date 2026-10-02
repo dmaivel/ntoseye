@@ -8,6 +8,7 @@ use std::fs::{remove_file, write};
 use std::mem::take;
 #[cfg(test)]
 use std::process::id;
+use std::sync::LazyLock;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -37,6 +38,25 @@ macro_rules! reload_trace {
     ($($arg:tt)*) => {
         if trace_enabled() {
             eprintln!("reload: {}", format_args!($($arg)*));
+        }
+    };
+}
+
+/// Whether `NTOSEYE_STEP_TRACE` is set: see [`step_trace`].
+pub fn step_trace_enabled() -> bool {
+    static ENABLED: LazyLock<bool> =
+        LazyLock::new(|| std::env::var_os("NTOSEYE_STEP_TRACE").is_some());
+    *ENABLED
+}
+
+/// Trace breakpoint and step mechanics (lines prefixed `step:`): how each
+/// hardware stop is classified and filtered, and how a run past a
+/// breakpoint site ends when its vCPU had to wait on the others. Gated on
+/// `NTOSEYE_STEP_TRACE`; pure output, for races that only show under load.
+macro_rules! step_trace {
+    ($($arg:tt)*) => {
+        if $crate::session::step_trace_enabled() {
+            eprintln!("step: {}", format_args!($($arg)*));
         }
     };
 }

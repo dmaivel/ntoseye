@@ -95,7 +95,15 @@ def test_steps_resume_past_false_predicates(halted: Debugger) -> None:
     # inside it) the stepped thread can go unscheduled for long; the timeout
     # then interrupts the step where it is. Waiting longer only waits: the
     # hits the test is about are declined either way.
-    over = halted.step_over(until="call", timeout=20.0)
+    # Under that load the stepped thread can also exit before it gets past
+    # its next instruction, which the step reports, and which leaves
+    # nothing to step out of.
+    try:
+        over = halted.step_over(until="call", timeout=20.0)
+    except ntoseye.NtoseyeError as error:
+        if "exited before it went on" not in str(error):
+            raise
+        return
     assert isinstance(over, (Stop.Step, Stop.Interrupt))
     assert isinstance(halted.step_out(timeout=20.0), (Stop.Step, Stop.Interrupt))
 

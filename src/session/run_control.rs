@@ -22,10 +22,16 @@ impl Session {
         loop {
             let stop_was_pending = self.backend.has_pending_stop();
             let event = self.backend.interrupt()?;
+            step_trace!(
+                "break-in on {:?} at {:x?} (a stop was pending: {stop_was_pending})",
+                event.thread_id,
+                event.program_counter
+            );
             let resolution = self.classify_stop_event(event)?;
             match resolution {
                 StopResolution::Resumed => {
                     resumed += 1;
+                    step_trace!("break-in resumed past a declined stop ({resumed})");
                     if resumed < INTERRUPT_MAX_RESUMES {
                         continue;
                     }

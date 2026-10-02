@@ -82,6 +82,7 @@ These environment variables make `ntoseye` show what it does on standard error.
 | `NTOSEYE_KD_TRACE_BYTES=1` | The raw bytes on the KD transport |
 | `NTOSEYE_GDB_TRACE=1` | Each GDB remote protocol packet to the stub of the hypervisor and, for `ntoseye gdbserver`, each packet to its client |
 | `NTOSEYE_UNWIND_TRACE=1` | Each step of each stack unwind, to diagnose a wrong or short stack |
+| `NTOSEYE_STEP_TRACE=1` | How each hardware breakpoint stop is classified and why a filter declines it, each break-in after a run's timeout, and how a step past a breakpoint ends when its vCPU had to wait on the others, to diagnose a stop that does not come or a step that gives up |
 
 ## Reporting a bug
 

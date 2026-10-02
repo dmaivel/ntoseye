@@ -18,7 +18,9 @@ use crate::session::context::{
     refresh_windows_thread_context_for_backend_thread, update_target_context_from_registers,
 };
 use crate::session::stops::set_current_thread_from_stop;
-use crate::session::{BreakpointStopAction, STATUS_SINGLE_STEP, Session, WatchpointStopAction};
+use crate::session::{
+    BreakpointStopAction, STATUS_SINGLE_STEP, Session, WatchpointStopAction, step_trace_enabled,
+};
 use crate::target::Target;
 use crate::types::Arch;
 
@@ -494,6 +496,16 @@ pub fn resolve_watchpoint_stop(
 ) -> Result<WatchpointStopAction> {
     let Some(breakpoint) = hardware_breakpoint_hit(backend, register_map, breakpoints, event)?
     else {
+        if step_trace_enabled() && breakpoints.has_enabled_hardware_breakpoints() {
+            let pc = backend
+                .read_registers()
+                .ok()
+                .and_then(|registers| register_map.read_u64("rip", &registers).ok());
+            step_trace!(
+                "stop on {:?} (current {current_thread}) at {pc:x?} is no hardware breakpoint's",
+                event.thread_id
+            );
+        }
         return Ok(WatchpointStopAction::NotBreakpoint);
     };
 
@@ -504,14 +516,22 @@ pub fn resolve_watchpoint_stop(
         .unwrap_or(0);
     let rip = register_map.read_u64("rip", &registers).unwrap_or(0);
     let sp = stack_pointer(register_map, &registers);
+    step_trace!(
+        "hardware breakpoint #{} at {:#x} hit on {current_thread} at {rip:#x}",
+        breakpoint.id,
+        breakpoint.address.0
+    );
+    let declined = |reason: &str| step_trace!("#{} declined: {reason}", breakpoint.id);
     update_target_context_from_registers(target, register_map, Ok(registers));
     if !breakpoint.scope.matches_dtb(scope_dtb, target.arch()) {
+        declined("another address space");
         backend.continue_execution()?;
         return Ok(WatchpointStopAction::Resumed);
     }
     if let Some(thread) = breakpoint.thread.as_ref() {
         let stopped = refresh_windows_thread_context_for_backend_thread(target, current_thread);
         if !thread.matches(stopped.as_ref()) {
+            declined("another thread");
             backend.continue_execution()?;
             return Ok(WatchpointStopAction::Resumed);
         }
@@ -521,6 +541,7 @@ pub fn resolve_watchpoint_stop(
             .min_stack_pointer
             .is_some_and(|min| sp.is_some_and(|sp| sp < min))
     {
+        declined("another processor, or the stack is not deep enough");
         backend.continue_execution()?;
         return Ok(WatchpointStopAction::Resumed);
     }
@@ -532,16 +553,19 @@ pub fn resolve_watchpoint_stop(
         rip,
     );
     if !hypercall_matches {
+        declined("another hypercall or caller");
         backend.continue_execution()?;
         return Ok(WatchpointStopAction::Resumed);
     }
     if breakpoints.record_hit(breakpoint.id)? == BreakpointHitDisposition::SkipPass {
+        declined("pass count");
         backend.continue_execution()?;
         return Ok(WatchpointStopAction::Resumed);
     }
 
     let condition_error = match evaluate_hit_condition(target, &breakpoint, caller.as_ref()) {
         Ok(false) => {
+            declined("condition false");
             backend.continue_execution()?;
             return Ok(WatchpointStopAction::Resumed);
         }

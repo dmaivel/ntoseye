@@ -1555,6 +1555,8 @@ fn run_to_successors(
         rsp,
         nt_thread: None,
         started: None,
+        runs: 0,
+        ran: Duration::ZERO,
     };
     loop {
         if keeper.is_some() {
@@ -1605,6 +1607,10 @@ fn run_to_successors(
         let mut in_nt = now != rip && !in_windows_hypervisor(debugger, register_map, &now_regs);
         loop {
             if release.exhausted() {
+                step_trace!(
+                    "release of {thread} at {rip:#x} exhausted: {}",
+                    release.summary()
+                );
                 if in_nt {
                     return Ok(RunPast::Diverted);
                 }
@@ -1624,9 +1630,27 @@ fn run_to_successors(
                 sites,
                 keeper.is_some(),
             )? {
-                Released::Reached => return Ok(RunPast::Reached),
-                Released::Diverted => return Ok(RunPast::Diverted),
-                Released::Back => break,
+                Released::Reached => {
+                    step_trace!(
+                        "release of {thread} at {rip:#x} reached: {}",
+                        release.summary()
+                    );
+                    return Ok(RunPast::Reached);
+                }
+                Released::Diverted => {
+                    step_trace!(
+                        "release of {thread} at {rip:#x} diverted: {}",
+                        release.summary()
+                    );
+                    return Ok(RunPast::Diverted);
+                }
+                Released::Back => {
+                    step_trace!(
+                        "release of {thread} at {rip:#x} back on it: {}",
+                        release.summary()
+                    );
+                    break;
+                }
                 Released::Waiting { in_handler } => in_nt = in_handler,
             }
         }
@@ -1671,12 +1695,28 @@ struct Release {
     nt_thread: Option<Option<u64>>,
     /// When the first run began.
     started: Option<Instant>,
+    /// The runs so far, and how long the target ran in them, which a run
+    /// ended at once by a hot marked site keeps far below the wall time.
+    runs: u32,
+    ran: Duration,
 }
 
 impl Release {
     fn exhausted(&self) -> bool {
         self.started
             .is_some_and(|started| started.elapsed() >= RELEASE_BUDGET)
+    }
+
+    /// The runs so far, for the step trace.
+    fn summary(&self) -> String {
+        format!(
+            "{} runs, ran {:?} in {:?}",
+            self.runs,
+            self.ran,
+            self.started
+                .map(|started| started.elapsed())
+                .unwrap_or_default()
+        )
     }
 
     fn run(
@@ -1702,6 +1742,8 @@ impl Release {
             Some(sites.plant(backend, successors.len(), self.rip)?)
         };
         // Whichever vCPU stops first ends the run, or a break-in does.
+        self.runs += 1;
+        let run_started = Instant::now();
         let stop = backend.continue_execution().and_then(|()| {
             Ok(match backend.try_wait_for_stop(RELEASE_WINDOW)? {
                 Some(event) => event.thread_id,
@@ -1711,6 +1753,7 @@ impl Release {
                 }
             })
         });
+        self.ran += run_started.elapsed();
         if let Some(slot) = site {
             let lifted = lift_site(backend, self.rip, slot);
             if stop.is_ok() {
