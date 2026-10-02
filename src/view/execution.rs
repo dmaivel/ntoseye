@@ -11,6 +11,8 @@ use crate::breakpoints::{self, Breakpoint};
 use crate::disasm::{DisasmOperand, DisasmRow, disasm_formatter};
 use crate::exception_policy::{self, ExceptionPolicyFinalAction, exception_alias};
 use crate::guest::hypercalls::tlfs_hypercall;
+use crate::guest::exit_reason_name;
+use crate::guest::vm_exits;
 use crate::session::{self, CallTraceEnd, VcpuInfo};
 use crate::unwind::{
     self, Arm64CodeDetail, Arm64UnwindDetail, FunctionEntryDetail, HandlerDetail, UnwindDetail,
@@ -142,6 +144,9 @@ shapes! {
         /// The hypercall a hit must be handling, and from which caller, for a
         /// hypercall breakpoint (`!hvbp`). None for any other breakpoint.
         hypercall: Option<HypercallFilter>,
+        /// The VM exit a hit must be handling, and from which caller, for a
+        /// VM-exit breakpoint (`!hvexit`). None for any other breakpoint.
+        vm_exit: Option<ExitFilter>,
         /// The condition expression that a hit must satisfy.
         condition: Option<String>,
         /// The requested hit number. Both 0 and 1 break on the first hit.
@@ -167,6 +172,20 @@ shapes! {
         /// The call code: the low 16 bits of the caller's RCX.
         code: Hex<u16>,
         /// The TLFS name, or None for a code that the TLFS does not list.
+        name: Option<&'static str>,
+        /// The caller's partition ID. None for any caller.
+        partition: Option<u64>,
+        /// The caller's VP index in `partition`. None for any VP.
+        vp: Option<u32>,
+    }
+
+    /// What a VM-exit breakpoint (`!hvexit`) stops on: one basic exit
+    /// reason, from any VP or from one partition or VP of the Windows
+    /// hypervisor.
+    ExitFilter {
+        /// The basic exit reason (Intel SDM Appendix C).
+        reason: u16,
+        /// Its name, or None for a reason ntoseye does not name.
         name: Option<&'static str>,
         /// The caller's partition ID. None for any caller.
         partition: Option<u64>,
@@ -574,6 +593,16 @@ pub fn hypercall_filter(filter: &breakpoints::HypercallFilter) -> HypercallFilte
     }
 }
 
+/// What a VM-exit breakpoint stops on.
+pub fn exit_filter(filter: &vm_exits::ExitFilter) -> ExitFilter {
+    ExitFilter {
+        reason: filter.reason,
+        name: exit_reason_name(u32::from(filter.reason)),
+        partition: filter.partition,
+        vp: filter.vp,
+    }
+}
+
 /// One code-breakpoint/data-watchpoint row.
 pub fn breakpoint(bp: &Breakpoint) -> BreakpointStatus {
     BreakpointStatus {
@@ -588,6 +617,7 @@ pub fn breakpoint(bp: &Breakpoint) -> BreakpointStatus {
         thread: bp.thread.as_ref().map(|thread| thread.label()),
         processor: bp.processor,
         hypercall: bp.hypercall.as_ref().map(hypercall_filter),
+        vm_exit: bp.vm_exit.as_ref().map(exit_filter),
         condition: bp.condition.clone(),
         pass_count: bp.pass_count,
         hit_count: bp.hit_count,

@@ -1279,6 +1279,12 @@ class Breakpoint:
         """
         True if the breakpoint still exists in this session.
         """
+    @property
+    def vm_exit(self, /) -> ExitFilter |None:
+        """
+        What a VM-exit breakpoint stops on: its exit reason and the caller's
+        partition and VP, if restricted. `None` for any other breakpoint.
+        """
 
 @final
 class BreakpointIterator:
@@ -1378,6 +1384,12 @@ class BreakpointStatus(BaseRecord):
         `ethread 0x...`). None if there is no thread restriction.
         """
     @property
+    def vm_exit(self, /) -> ExitFilter |None:
+        """
+        The VM exit a hit must be handling, and from which caller, for a
+        VM-exit breakpoint (`!hvexit`). None for any other breakpoint.
+        """
+    @property
     def watch_access(self, /) -> str |None:
         """
         `write` or `read_write` for a data watchpoint. None for a code
@@ -1418,6 +1430,20 @@ class Breakpoints:
         reboot. The secure kernel (VTL1) accepts only this kind of breakpoint,
         for example `add(dbg.secure_kernel.symbols["securekernel!Func"],
         hardware=True)`.
+        """
+    def add_exit(self, /, reason: int |str, partition: int |None = None, vp: int |None = None, *, condition: str |None = None, when: Callable[[Stop], object] |None = None, pass_count: int = 0, one_shot: bool = False, processor: Cpu |int |None = None, action: str |None = None) -> Breakpoint:
+        """
+        Add a VM-exit breakpoint, as `!hvexit` does: a debug-register execute
+        breakpoint on the Windows hypervisor's VM-exit entry point that stops
+        only for an exit with basic exit `reason` (Intel SDM Appendix C), a
+        number or a name (`"cpuid"`, `"rdmsr"`, `"ept_violation"`), and, with
+        `partition` and `vp`, only from that partition or VP. Every exit
+        enters there, so the guest runs far slower while it is set; ntoseye
+        resumes the other exits without a stop, before any `when=` callback
+        runs. A hit whose caller or exit ntoseye cannot tell stops. A
+        `condition` sees the caller's registers at its exit and reads its
+        memory, as for `add_hypercall()`. Needs the gdb backend and the VM's
+        hv-evmcs enlightenment. This feature is experimental.
         """
     def add_hypercall(self, /, call: int |str, partition: int |None = None, vp: int |None = None, *, condition: str |None = None, when: Callable[[Stop], object] |None = None, pass_count: int = 0, one_shot: bool = False, processor: Cpu |int |None = None, action: str |None = None) -> Breakpoint:
         """
@@ -3775,6 +3801,34 @@ class ExecutiveResource(BaseRecord):
     def shared_waiters(self, /) -> Diagnostic[int]:
         """
         The number of threads that wait for shared access.
+        """
+
+@final
+class ExitFilter(BaseRecord):
+    """
+    What a VM-exit breakpoint (`!hvexit`) stops on: one basic exit
+    reason, from any VP or from one partition or VP of the Windows
+    hypervisor.
+    """
+    @property
+    def name(self, /) -> str |None:
+        """
+        Its name, or None for a reason ntoseye does not name.
+        """
+    @property
+    def partition(self, /) -> int |None:
+        """
+        The caller's partition ID. None for any caller.
+        """
+    @property
+    def reason(self, /) -> int:
+        """
+        The basic exit reason (Intel SDM Appendix C).
+        """
+    @property
+    def vp(self, /) -> int |None:
+        """
+        The caller's VP index in `partition`. None for any VP.
         """
 
 @final

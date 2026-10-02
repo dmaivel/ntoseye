@@ -400,7 +400,7 @@ impl EvmcsState {
 
 /// Names of the basic VM-exit reasons a Windows guest commonly takes (Intel
 /// SDM Vol. 3D, Appendix C). Bit 31 marks a failed VM entry.
-fn exit_reason_name(reason: u32) -> Option<&'static str> {
+pub fn exit_reason_name(reason: u32) -> Option<&'static str> {
     if reason & (1 << 31) != 0 {
         return Some("failed VM entry");
     }

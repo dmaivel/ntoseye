@@ -3,8 +3,7 @@
 //! filters reject.
 
 use crate::breakpoints::{
-    Breakpoint, BreakpointHitDisposition, BreakpointHitResult, BreakpointManager, HypercallFilter,
-    ThreadScope,
+    Breakpoint, BreakpointHitDisposition, BreakpointHitResult, BreakpointManager, ThreadScope,
 };
 use crate::dbg_backend::{
     ContinueDisposition, DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, StopEvent,
@@ -21,7 +20,7 @@ use crate::session::stops::set_current_thread_from_stop;
 use crate::session::{
     BreakpointStopAction, STATUS_SINGLE_STEP, Session, WatchpointStopAction, step_trace_enabled,
 };
-use crate::target::{ExpressionScope, Target};
+use crate::target::{BreakpointStop, ExpressionScope, Target};
 use crate::types::Arch;
 
 impl Session {
@@ -56,14 +55,9 @@ impl Session {
                     self.step_over_and_resume()?;
                     return Ok(BreakpointStopAction::Resumed);
                 }
-                let (hypercall_matches, caller) = stopped_hypercall_matches(
-                    &self.target,
-                    bp.hypercall.as_ref(),
-                    &self.current_thread,
-                    cr3,
-                    rip,
-                );
-                if !hypercall_matches {
+                let (caller_matches, caller) =
+                    stopped_caller_matches(&mut self.target, &bp, &self.current_thread, cr3, rip);
+                if !caller_matches {
                     self.step_over_and_resume()?;
                     return Ok(BreakpointStopAction::Resumed);
                 }
@@ -203,28 +197,45 @@ pub fn stopped_processor_matches(processor: Option<u16>, stopped: &str) -> bool 
 }
 
 /// Whether a hit reported on `stopped`, at `rip` on root `cr3`, is the
-/// hypercall from the caller a hypercall breakpoint names (see
-/// [`HypercallFilter::matches`]), with the caller found, whose registers
-/// the breakpoint's condition sees (see [`evaluate_hit_condition`]).
-/// Resolved only for such a breakpoint. A stop whose processor cannot be
-/// resolved has an unknown caller, so it matches.
-pub fn stopped_hypercall_matches(
-    target: &Target,
-    filter: Option<&HypercallFilter>,
+/// hypercall or VM exit from the caller a hypervisor breakpoint names (see
+/// [`crate::breakpoints::HypercallFilter::matches`] and
+/// [`crate::guest::vm_exits::ExitFilter::matches`]), with the
+/// caller found, whose registers the breakpoint's condition sees (see
+/// [`evaluate_hit_condition`]). Resolved only for such a breakpoint. A stop
+/// whose processor cannot be resolved has an unknown caller, so it matches.
+pub fn stopped_caller_matches(
+    target: &mut Target,
+    breakpoint: &Breakpoint,
     stopped: &str,
     cr3: u64,
     rip: u64,
 ) -> (bool, Option<HypercallCaller>) {
-    let Some(filter) = filter else {
+    if breakpoint.hypercall.is_none() && breakpoint.vm_exit.is_none() {
         return (true, None);
-    };
+    }
+    // A hit on the VM-exit entry itself is before the hypervisor stored the
+    // caller's registers: they are still the vCPU's own. The stop records
+    // that only once it surfaces, after this decides whether it does.
+    if rip == breakpoint.address.0 {
+        target.breakpoint_stop = target
+            .registers
+            .as_ref()
+            .and_then(|registers| BreakpointStop::new(stopped, rip, registers));
+    }
     let caller = processor_index_from_backend_thread_id(stopped)
         .and_then(|number| target.hypercall_caller(cr3, rip, number));
-    (filter.matches(caller.as_ref()), caller)
+
+    let matches = breakpoint
+        .hypercall
+        .is_none_or(|filter| filter.matches(caller.as_ref()))
+        && breakpoint
+            .vm_exit
+            .is_none_or(|filter| filter.matches(caller.as_ref()));
+    (matches, caller)
 }
 
-/// Evaluate `breakpoint`'s condition at a hit. A hypercall breakpoint's
-/// sees its `caller`'s registers at its VMCALL, the ones `!hvcall` decodes
+/// Evaluate `breakpoint`'s condition at a hit. A hypercall or VM-exit
+/// breakpoint's sees its `caller`'s registers at its exit, the ones `!hvcall` decodes
 /// from, and reads its memory, as `!hvcall` reads a slow call's input,
 /// rather than the hypervisor's registers and memory at the handler, which
 /// hold none of the call's (see [`ExpressionScope::HypercallCaller`]). With
@@ -235,7 +246,9 @@ pub fn evaluate_hit_condition(
     breakpoint: &Breakpoint,
     caller: Option<&HypercallCaller>,
 ) -> Result<bool> {
-    if breakpoint.hypercall.is_none() || breakpoint.condition_expr.is_none() {
+    if (breakpoint.hypercall.is_none() && breakpoint.vm_exit.is_none())
+        || breakpoint.condition_expr.is_none()
+    {
         return breakpoint.evaluate_condition(target);
     }
     let caller = caller.ok_or_else(|| {
@@ -246,6 +259,7 @@ pub fn evaluate_hit_condition(
     })?;
     let live = target.registers.replace(caller.registers.clone());
     target.expression_scope = ExpressionScope::HypercallCaller(caller.state);
+
     let held = breakpoint.evaluate_condition(target);
     target.expression_scope = ExpressionScope::Context;
     target.registers = live;
@@ -605,15 +619,10 @@ pub fn resolve_watchpoint_stop(
         declined("another processor, or the stack is not deep enough");
         return Ok(WatchpointStopAction::Declined);
     }
-    let (hypercall_matches, caller) = stopped_hypercall_matches(
-        target,
-        breakpoint.hypercall.as_ref(),
-        current_thread,
-        scope_dtb,
-        rip,
-    );
-    if !hypercall_matches {
-        declined("another hypercall or caller");
+    let (caller_matches, caller) =
+        stopped_caller_matches(target, &breakpoint, current_thread, scope_dtb, rip);
+    if !caller_matches {
+        declined("another hypercall, VM exit or caller");
         return Ok(WatchpointStopAction::Declined);
     }
     if breakpoints.record_hit(breakpoint.id)? == BreakpointHitDisposition::SkipPass {

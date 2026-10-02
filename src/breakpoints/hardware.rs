@@ -142,6 +142,7 @@ impl BreakpointManager {
                 processor: config.processor,
                 min_stack_pointer: None,
                 hypercall: config.hypercall,
+                vm_exit: config.vm_exit,
                 backend: BreakpointBackend::Hardware,
             },
         );

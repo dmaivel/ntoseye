@@ -813,3 +813,25 @@ def test_imported_image_lands_under_its_own_key(halted: Debugger, tmp_path: Path
     imported = Path(halted.symbols.import_image(str(source)))
     assert imported.parts[-3:] == ("ntoseyetest.exe", "7E5700013000", "ntoseyetest.exe")
     assert imported.read_bytes() == bytes(pe)
+
+
+def test_a_vm_exit_breakpoint_stops_on_its_reason_from_its_caller(halted: Debugger) -> None:
+    """A VM-exit breakpoint stops only on exits with its reason from its
+    caller: each stop's caller is the root partition, and the instruction at
+    the caller's RIP, read from the caller's registers and memory rather
+    than the hypervisor's at the entry, is the RDMSR that made the exit.
+    About 40% of the root's exits are other ones (external interrupts,
+    WRMSRs), so ten stops make a filter that let them through stop on one
+    all but certainly."""
+    root = hypervisor_root(halted)
+    bp = halted.breakpoints.add_exit("rdmsr", root.id)
+    try:
+        assert bp.vm_exit is not None and bp.vm_exit.reason == 31
+        for _ in range(10):
+            stop = halted.run(timeout=10.0)
+            assert isinstance(stop, Stop.Breakpoint) and bp in stop.breakpoints
+            caller = stop.cpu.hypercall_caller()
+            assert caller is not None and caller.partition_id == root.id
+            assert caller.read(caller.registers["rip"], 2) == b"\x0f\x32"
+    finally:
+        bp.delete()

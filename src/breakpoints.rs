@@ -9,6 +9,7 @@ use std::{
 
 use crate::dbg_backend::HwBreakpointAccess;
 use crate::expr::Expr;
+use crate::guest::vm_exits::ExitFilter;
 use crate::types::{Dtb, VirtAddr};
 
 mod config;
@@ -81,6 +82,9 @@ pub struct Breakpoint {
     /// The hypercall and caller a hit must be handling (`!hvbp`), if
     /// restricted.
     pub hypercall: Option<HypercallFilter>,
+    /// The VM-exit reason and caller a hit must be handling (`!hvexit`), if
+    /// restricted.
+    pub vm_exit: Option<ExitFilter>,
     /// Whether `scope` was inferred from the resolved address and the process
     /// selected when this breakpoint was created. Explicit `/p` scopes remain
     /// fixed across symbol re-resolution.
@@ -166,6 +170,8 @@ pub struct BreakpointConfig {
     pub processor: Option<u16>,
     /// Restrict hits to a hypercall and its caller. See [`HypercallFilter`].
     pub hypercall: Option<HypercallFilter>,
+    /// Restrict hits to a VM-exit reason and its caller. See [`ExitFilter`].
+    pub vm_exit: Option<ExitFilter>,
     /// Resolve a symbol breakpoint past the function's prologue. See
     /// [`BreakpointSpec::Symbol`].
     pub skip_prologue: bool,

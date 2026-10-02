@@ -75,6 +75,20 @@ A condition sees the caller's registers at its `VMCALL`, the ones that {command}
 g
 ```
 
+## VM-exit breakpoints
+
+{command}`!hvexit` `<reason> [partition-id [vp-index]]` stops when a virtual processor leaves for the Windows hypervisor with a VM exit of that basic exit reason (Intel SDM Appendix C). The reason is a number, decimal or `0x` hexadecimal, or its name as {command}`!hvvps` shows it, with spaces written as `_` or left out: `cpuid`, `rdmsr`, `wrmsr`, `io_instruction`, `ept_violation`, `vmcall`, `hlt`. It takes the same options, IDs, `if` and `do` as {command}`!hvbp`, and has the same needs: the `gdb` backend, a free debug register, and the VM's `hv-evmcs` enlightenment ([VBS](../platforms/vbs.md#vm-exits)).
+
+Every exit of every virtual processor enters the hypervisor at one entry point, `hv!VmExitEntry`, so the breakpoint is there, and `ntoseye` checks each hit: it reads the reason from the eVMCS that the hit's processor has loaded, finds the caller as for {command}`!hvbp`, and resumes the target past the exits that do not match, without showing a stop. A hit whose caller or exit `ntoseye` cannot tell stops. Because the guest takes thousands of exits a second, it runs far slower while the breakpoint is set.
+
+A condition sees the caller's registers at its exit and reads its memory, as for {command}`!hvbp`: at an RDMSR or WRMSR exit, RCX is the MSR, so `!hvexit wrmsr if @rcx==0x6e0` stops on writes of `IA32_TSC_DEADLINE`. {command}`bl` shows the filter (`VM exit 31 RDMSR from partition 0x1 VP 2`), and the stop names the breakpoint as a VM-exit breakpoint.
+
+```text
+!hvexit rdmsr 1 2
+!hvexit /1 ept_violation 6
+g
+```
+
 ## The KD breakpoint table
 
 KD has a software-breakpoint table with a fixed size of 32 entries. If you kill a session with `SIGKILL`, its entries stay installed and can prevent later breakpoints at the same addresses.

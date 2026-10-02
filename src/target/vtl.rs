@@ -1456,6 +1456,36 @@ impl Target {
         Ok((loaded.base, table))
     }
 
+    /// The VM-exit entry point every VP's exits enter the Windows
+    /// hypervisor through: the `host_rip` of the eVMCSes of the VTLs the
+    /// partition walk finds, which the hypervisor sets alike for every VTL
+    /// of every partition. Only those: the RAM scan also finds pages of
+    /// VTLs that are gone, some with an older build's entry. Refused when
+    /// no eVMCS is found (the VM lacks `hv-evmcs`) or when they name more
+    /// than one, as one breakpoint would then miss the other's exits.
+    pub fn vm_exit_entry(&self) -> Result<u64> {
+        let mut entries: Vec<u64> = self
+            .hypervisor_partitions()?
+            .iter()
+            .flat_map(|partition| &partition.virtual_processors)
+            .flat_map(|vp| &vp.vtls)
+            .filter_map(|vtl| vtl.state.map(|state| state.host_rip))
+            .collect();
+        entries.sort_unstable();
+        entries.dedup();
+        match entries[..] {
+            [entry] => Ok(entry),
+            [] => Err(Error::Hypervisor(
+                "no eVMCS names the hypervisor's VM-exit entry point (the VM needs hv-evmcs)"
+                    .to_string(),
+            )),
+            _ => Err(Error::Hypervisor(format!(
+                "the eVMCSes name {} VM-exit entry points, and one breakpoint would miss the others' exits",
+                entries.len()
+            ))),
+        }
+    }
+
     /// [`Self::hypercall_caller`] without a partition walk, for each hit of
     /// a hypercall breakpoint: the caller is the VP and VTL whose eVMCS the
     /// processor's assist page names loaded (see [`hypervisor::own_loaded`]),

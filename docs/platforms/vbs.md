@@ -329,6 +329,10 @@ ntoseye reads a slow call's input at its GPA through the EPT of the calling VTL,
 
 The walk reads live memory and is not an atomic snapshot, so a partition that is created or deleted during the walk can make it fail.
 
+### VM exits
+
+{command}`!hvexit` `<reason> [partition-id [vp-index]]` stops on a VM exit by its basic exit reason, optionally only from one partition or one of its VPs ([how](../using/breakpoints.md#vm-exit-breakpoints)): `!hvexit rdmsr 1 2` stops when VP 2 of the root partition reads an MSR. Every exit of every VP enters the hypervisor at one entry point, `hv!VmExitEntry`, the host RIP of the eVMCSes of the VTLs that the partition walk finds; the command breaks there and reads the reason from the eVMCS that the processor has loaded, which the CPU filled in at the exit. On the test guest, about 120 exits a second reached the debugger while it was set, a small part of the thousands that the guest takes when it runs freely.
+
 ## Stops in the Windows hypervisor
 
 When VBS runs, the GDB stub reports what each vCPU executed when it halted. An idle vCPU is usually inside the Windows hypervisor, with the hypervisor's own CR3. `ntoseye` names such a stop by the image in which the vCPU stopped. The context shows `hypervisor`, or `VTL1` for the secure kernel. As in WinDbg, the module name of the hypervisor image (`hvix64.exe`) is `hv`, so code and stack frames show `hv+0x…`. While the context of the hypervisor is selected, expressions accept `hv` and `hv+<offset>` like any other module name.

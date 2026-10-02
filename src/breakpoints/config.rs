@@ -30,6 +30,9 @@ impl Breakpoint {
         if let Some(hypercall) = &self.hypercall {
             label.push_str(&format!(", {}", hypercall.label()));
         }
+        if let Some(vm_exit) = &self.vm_exit {
+            label.push_str(&format!(", {}", vm_exit.label()));
+        }
         label
     }
 

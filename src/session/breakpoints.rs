@@ -15,6 +15,7 @@ use crate::dbg_backend::{
 use crate::error::{Error, Result};
 use crate::exception_policy::ExceptionPolicyMode;
 use crate::expr::Expr;
+use crate::guest::vm_exits::ExitFilter;
 use crate::guest::{ModuleSymbolLoadReport, hypercalls};
 use crate::session::{ModuleTrap, Session, TrapSite};
 use crate::types::{Arch, VirtAddr};
@@ -417,11 +418,7 @@ impl Session {
                 "hypercall breakpoints need the gdb backend: only a debug register the host programs traps in the Windows hypervisor".into(),
             ));
         }
-        if filter.vp.is_some() && filter.partition.is_none() {
-            return Err(Error::InvalidArgument(
-                "a VP index names a VP of one partition; give the partition ID too".into(),
-            ));
-        }
+        self.require_hypervisor_caller(filter.partition, filter.vp)?;
         let (_, table) = self.target.hypercalls()?;
         let handler = table
             .get(usize::from(filter.code))
@@ -433,25 +430,6 @@ impl Session {
                 ))
             })?
             .handler;
-        if let Some(id) = filter.partition {
-            let partitions = self.target.hypervisor_partitions()?;
-            let partition = partitions
-                .iter()
-                .find(|partition| partition.id == id)
-                .ok_or_else(|| {
-                    Error::InvalidArgument(format!("the hypervisor has no partition {id:#x}"))
-                })?;
-            if let Some(vp) = filter.vp
-                && !partition
-                    .virtual_processors
-                    .iter()
-                    .any(|candidate| candidate.index == vp)
-            {
-                return Err(Error::InvalidArgument(format!(
-                    "partition {id:#x} has no VP {vp}"
-                )));
-            }
-        }
         let symbol = hypercalls::handler_name(&table, filter.code).map(|name| format!("hv!{name}"));
         self.breakpoints.add_hardware_configured(
             self.backend.as_mut(),
@@ -467,10 +445,76 @@ impl Session {
         )
     }
 
+    /// Set a VM-exit breakpoint (`!hvexit`): a hardware execute breakpoint
+    /// on the hypervisor's exit entry point ([`Target::vm_exit_entry`]),
+    /// whose hits stop only for an exit with `filter.reason` from the caller
+    /// `filter` names (see [`ExitFilter::matches`]); the others are declined
+    /// and the target resumed. The entry runs for every exit, thousands a
+    /// second, so the guest runs far slower while it is set. As for
+    /// [`Self::add_hypercall_breakpoint`], a partition or VP the hypervisor
+    /// does not have is refused. Returns the breakpoint id.
+    pub fn add_exit_breakpoint(
+        &mut self,
+        filter: ExitFilter,
+        config: BreakpointConfig,
+    ) -> Result<u32> {
+        if !self.backend.hardware_breakpoints_trap_in_host() {
+            return Err(Error::Breakpoint(
+                "VM-exit breakpoints need the gdb backend: only a debug register the host programs traps in the Windows hypervisor".into(),
+            ));
+        }
+        self.require_hypervisor_caller(filter.partition, filter.vp)?;
+        let entry = self.target.vm_exit_entry()?;
+        self.breakpoints.add_hardware_configured(
+            self.backend.as_mut(),
+            &self.target,
+            VirtAddr(entry),
+            HwBreakpointAccess::Execute,
+            1,
+            Some("hv!VmExitEntry".to_string()),
+            BreakpointConfig {
+                vm_exit: Some(filter),
+                ..config
+            },
+        )
+    }
+
     /// Remove a breakpoint by id.
     pub fn remove_breakpoint(&mut self, id: u32) -> Result<()> {
         self.breakpoints
             .remove(self.backend.as_mut(), &self.target, id)
+    }
+
+    /// Refuse a hypervisor breakpoint's caller filter that could never
+    /// match: a VP index without its partition, or a partition or VP the
+    /// hypervisor does not have.
+    fn require_hypervisor_caller(&self, partition: Option<u64>, vp: Option<u32>) -> Result<()> {
+        if vp.is_some() && partition.is_none() {
+            return Err(Error::InvalidArgument(
+                "a VP index names a VP of one partition; give the partition ID too".into(),
+            ));
+        }
+        let Some(id) = partition else {
+            return Ok(());
+        };
+        let partitions = self.target.hypervisor_partitions()?;
+        let partition = partitions
+            .iter()
+            .find(|partition| partition.id == id)
+            .ok_or_else(|| {
+                Error::InvalidArgument(format!("the hypervisor has no partition {id:#x}"))
+            })?;
+        if let Some(vp) = vp
+            && !partition
+                .virtual_processors
+                .iter()
+                .any(|candidate| candidate.index == vp)
+        {
+            return Err(Error::InvalidArgument(format!(
+                "partition {id:#x} has no VP {vp}"
+            )));
+        }
+        Ok(())
     }
 
     /// Re-arm a disabled breakpoint (re-patch its `int3`).

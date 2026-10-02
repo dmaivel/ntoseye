@@ -23,6 +23,7 @@ use crate::breakpoints::{
 use crate::dbg_backend::{HwBreakpointAccess, WatchpointAccess};
 use crate::exception_policy::{EventFilter, ExceptionPolicyFinalAction, parse_event_filter};
 use crate::guest::hypercalls::hypercall_code;
+use crate::guest::vm_exits::{self, ExitFilter};
 use crate::session::Session;
 use crate::target::Target;
 use crate::types::{Dtb, VirtAddr};
@@ -466,6 +467,66 @@ impl Breakpoints {
         store_condition(py, self.owner.dbg(), bp.id, callback);
         handle(py, self.owner.dbg(), &bp)
     }
+
+    /// Add a VM-exit breakpoint, as `!hvexit` does: a debug-register execute
+    /// breakpoint on the Windows hypervisor's VM-exit entry point that stops
+    /// only for an exit with basic exit `reason` (Intel SDM Appendix C), a
+    /// number or a name (`"cpuid"`, `"rdmsr"`, `"ept_violation"`), and, with
+    /// `partition` and `vp`, only from that partition or VP. Every exit
+    /// enters there, so the guest runs far slower while it is set; ntoseye
+    /// resumes the other exits without a stop, before any `when=` callback
+    /// runs. A hit whose caller or exit ntoseye cannot tell stops. A
+    /// `condition` sees the caller's registers at its exit and reads its
+    /// memory, as for `add_hypercall()`. Needs the gdb backend and the VM's
+    /// hv-evmcs enlightenment. This feature is experimental.
+    #[pyo3(signature = (reason, partition=None, vp=None, *, condition=None, when=None, pass_count=0, one_shot=false, processor=None, action=None))]
+    fn add_exit(
+        &self,
+        py: Python<'_>,
+        reason: HypercallArg,
+        partition: Option<u64>,
+        vp: Option<u32>,
+        condition: Option<String>,
+        when: Option<WhenCallback>,
+        pass_count: u64,
+        one_shot: bool,
+        processor: Option<CpuArg<'_>>,
+        action: Option<String>,
+    ) -> PyResult<Py<Breakpoint>> {
+        reject_condition_mutation()?;
+        let reason = match reason {
+            HypercallArg::Code(reason) => reason,
+            HypercallArg::Name(name) => vm_exits::parse_reason(&name)
+                .map_err(|error| PyValueError::new_err(error.to_string()))?,
+        };
+        let (config, callback) = build_config(
+            py,
+            &self.owner,
+            condition,
+            when,
+            pass_count,
+            one_shot,
+            None,
+            None,
+            processor,
+            action,
+        )?;
+        let filter = ExitFilter {
+            reason,
+            partition,
+            vp,
+        };
+        let bp = self.owner.with(py, |session| {
+            require_halted(session, "breakpoints.add_exit")?;
+            let id = session.add_exit_breakpoint(filter, config).map_err(err)?;
+            session
+                .breakpoint(id)
+                .cloned()
+                .ok_or_else(|| raise(format!("new breakpoint #{id} disappeared during creation")))
+        })?;
+        store_condition(py, self.owner.dbg(), bp.id, callback);
+        handle(py, self.owner.dbg(), &bp)
+    }
 }
 
 #[pymethods]
@@ -504,6 +565,17 @@ impl Breakpoint {
     ) -> PyResult<Typed<'py, Option<view::execution::HypercallFilter>>> {
         let filter = self.require_snapshot(py)?.hypercall;
         Typed::new(py, filter.as_ref().map(view::execution::hypercall_filter))
+    }
+
+    /// What a VM-exit breakpoint stops on: its exit reason and the caller's
+    /// partition and VP, if restricted. `None` for any other breakpoint.
+    #[getter]
+    fn vm_exit<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Typed<'py, Option<view::execution::ExitFilter>>> {
+        let filter = self.require_snapshot(py)?.vm_exit;
+        Typed::new(py, filter.as_ref().map(view::execution::exit_filter))
     }
 
     /// The number of physical hits.

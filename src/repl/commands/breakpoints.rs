@@ -15,6 +15,7 @@ use crate::dbg_backend::HwBreakpointAccess;
 use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix, parse_number_literal_text};
 use crate::guest::hypercalls;
+use crate::guest::vm_exits::{self, ExitFilter};
 use crate::target::decimal_pid_literal;
 use crate::ui;
 
@@ -65,6 +66,15 @@ repl_command! {
     usage: "!hvbp [/1] [/c <processor>] [/w \"<expr>\"] <code|name> [partition-id [vp-index]] [if <expr>] [do <commands>]",
     summary: "Set a breakpoint that stops on a hypercall to the Windows hypervisor, optionally only from one partition or VP.",
     details: "Sets a hardware execute breakpoint on the hypercall's handler, which the hypervisor's hypercall table gives (see !hvcalls), so it needs the gdb backend and a free debug register. The call is a call code, in the current radix, or its name: the TLFS name (HvCallPostMessage) or the name x hv!* shows (HvCall0004). Many codes share a handler, HvCallUnimplemented's for every code that is not implemented, so at each hit ntoseye reads the caller's call code from its RCX and resumes the target without a stop when it is another. The caller is the VP whose exit the processor handles: the guest partition's VP it serves, or the root partition's VP. With a partition ID, and a VP index in it, the breakpoint stops only for that caller; the IDs use the current radix, and ntoseye refuses a partition or VP that the hypervisor does not have. A hit whose caller ntoseye cannot tell, or whose caller matches but whose registers it cannot read, stops, so the filter does not hide a hit. /1, /c, /w, if, and do work as for ba; a condition sees the caller's registers at its VMCALL (as !hvcall decodes them), not the hypervisor's at the handler, and stops the hit with an error when they are not known. The command takes no pass count: set it with bpp. bl shows the filter. Needs the VM's hv-evmcs enlightenment. Example: !hvbp HvCallSendSyntheticClusterIpi 3; g",
+    run_state: Halted,
+}
+
+repl_command! {
+    cmd_hvexit;
+    names: ["!hvexit"],
+    usage: "!hvexit [/1] [/c <processor>] [/w \"<expr>\"] <reason> [partition-id [vp-index]] [if <expr>] [do <commands>]",
+    summary: "Set a breakpoint that stops on a VM exit to the Windows hypervisor by its reason, optionally only from one partition or VP.",
+    details: "Sets a hardware execute breakpoint on the hypervisor's VM-exit entry point (hv!VmExitEntry, the host RIP of every eVMCS), so it needs the gdb backend, the VM's hv-evmcs enlightenment and a free debug register. The reason is a basic exit reason (Intel SDM Appendix C), as a decimal or 0x number, or a name as !hvvps shows it: cpuid, rdmsr, wrmsr, io_instruction, ept_violation, vmcall, hlt. Every exit enters there, so at each hit ntoseye reads the reason from the eVMCS the processor has loaded and resumes the target without a stop when it is another; the guest runs far slower while the breakpoint is set. The caller is the VP whose exit it is, as for !hvbp: with a partition ID, and a VP index in it, the breakpoint stops only for that caller. The condition is evaluated on the caller's registers at its exit and reads the caller's memory. Example: !hvexit cpuid 6 if @rax==0x40000000",
     run_state: Halted,
 }
 
@@ -312,10 +322,11 @@ fn parse_breakpoint_arguments(
     })
 }
 
-/// A `!hvbp` command's arguments.
+/// A `!hvbp` or `!hvexit` command's arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedHypercallArgs {
-    /// The call code or name, as typed.
+    /// The call code or name (`!hvbp`), or the exit reason (`!hvexit`), as
+    /// typed.
     call: String,
     partition: Option<u64>,
     vp: Option<u64>,
@@ -325,22 +336,26 @@ struct ParsedHypercallArgs {
     action: Option<String>,
 }
 
-/// Parse `!hvbp`'s arguments: the options `ba` takes but `/p` and `/t`,
-/// the call, up to two IDs (the partition, then the VP index), then the
-/// condition and action. The IDs are positional, so it takes no pass count.
+/// Parse the arguments of `command` (`!hvbp` or `!hvexit`): the options
+/// `ba` takes but `/p` and `/t`, the call or exit reason, up to two IDs (the
+/// partition, then the VP index), then the condition and action. The IDs
+/// are positional, so it takes no pass count.
 fn parse_hypercall_arguments(
     argv: &[Cow<'_, str>],
     radix: NumberRadix,
+    command: &str,
 ) -> Result<ParsedHypercallArgs> {
-    let (options, mut index) = parse_breakpoint_options(argv, radix, "!hvbp")?;
+    let (options, mut index) = parse_breakpoint_options(argv, radix, command)?;
     if options.pid.is_some() || options.thread.is_some() {
-        return Err(Error::InvalidArgument(
-            "!hvbp: /p and /t name NT processes and threads; a hypercall breakpoint names its caller by partition ID and VP index".into(),
-        ));
+        return Err(Error::InvalidArgument(format!(
+            "{command}: /p and /t name NT processes and threads; a hypervisor breakpoint names its caller by partition ID and VP index"
+        )));
     }
     let call = argv
         .get(index)
-        .ok_or_else(|| Error::InvalidArgument("!hvbp: missing hypercall code or name".into()))?
+        .ok_or_else(|| {
+            Error::InvalidArgument(format!("{command}: missing hypercall or exit reason"))
+        })?
         .to_string();
     index += 1;
     let mut ids = Vec::new();
@@ -497,21 +512,27 @@ fn recreate_breakpoint(bp: &Breakpoint) -> Option<(&'static str, ParsedBreakpoin
     if bp.temporary {
         return None;
     }
-    if let Some(filter) = &bp.hypercall {
-        // `!hvbp` takes the call and its caller's IDs where `ba` takes its
-        // address, and no pass count after them.
-        let target = [
-            Some(u64::from(filter.code)),
+    let hypervisor = match (&bp.hypercall, &bp.vm_exit) {
+        (Some(filter), _) => Some(("!hvbp", u64::from(filter.code), filter.partition, filter.vp)),
+        (None, Some(filter)) => Some((
+            "!hvexit",
+            u64::from(filter.reason),
             filter.partition,
-            filter.vp.map(u64::from),
-        ]
-        .into_iter()
-        .flatten()
-        .map(|value| format!("{value:#x}"))
-        .collect::<Vec<_>>()
-        .join(" ");
+            filter.vp,
+        )),
+        (None, None) => None,
+    };
+    if let Some((command, what, partition, vp)) = hypervisor {
+        // `!hvbp` and `!hvexit` take the call or reason and its caller's IDs
+        // where `ba` takes its address, and no pass count after them.
+        let target = [Some(what), partition, vp.map(u64::from)]
+            .into_iter()
+            .flatten()
+            .map(|value| format!("{value:#x}"))
+            .collect::<Vec<_>>()
+            .join(" ");
         return Some((
-            "!hvbp",
+            command,
             ParsedBreakpointArgs {
                 target,
                 access_spec: None,
@@ -746,6 +767,7 @@ impl ReplState<'_> {
             thread,
             processor,
             hypercall: None,
+            vm_exit: None,
             // `bu <symbol>` breaks at the symbol, as WinDbg does. Only a host
             // whose client expects arguments to be live (DAP) skips ahead.
             skip_prologue: false,
@@ -965,19 +987,32 @@ impl ReplState<'_> {
     }
 
     fn cmd_hvbp(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let result = parse_hypercall_arguments(&invocation.argv, self.radix)
+        let result = parse_hypercall_arguments(&invocation.argv, self.radix, "!hvbp")
             .and_then(|parsed| self.add_hypercall_breakpoint(parsed));
+        self.report_hypervisor_breakpoint("hypercall", result);
+        Ok(())
+    }
+
+    fn cmd_hvexit(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let result = parse_hypercall_arguments(&invocation.argv, self.radix, "!hvexit")
+            .and_then(|parsed| self.add_exit_breakpoint(parsed));
+        self.report_hypervisor_breakpoint("VM-exit", result);
+        Ok(())
+    }
+
+    /// Print a hypervisor breakpoint `!hvbp` or `!hvexit` set, or why not.
+    fn report_hypervisor_breakpoint(&mut self, kind: &str, result: Result<u32>) {
         let id = match result {
             Ok(id) => id,
             Err(error) => {
                 error!("{error}");
-                return Ok(());
+                return;
             }
         };
         self.caches.refresh_breakpoints(&self.ctx.breakpoints);
         if let Some(bp) = self.ctx.breakpoints.get(id) {
             outln!(
-                "hypercall breakpoint {} set at {}{}{}\n",
+                "{kind} breakpoint {} set at {}{}{}\n",
                 ui::bp_id(id),
                 ui::addr(bp.address.0),
                 bp.symbol
@@ -987,11 +1022,26 @@ impl ReplState<'_> {
                 format!(" ({})", bp.scope_label()).bright_black(),
             );
         }
-        Ok(())
     }
 
     fn add_hypercall_breakpoint(&mut self, parsed: ParsedHypercallArgs) -> Result<u32> {
         let code = hypercall_code_text(&parsed.call, self.radix)?;
+        let (vp, config) = self.hypervisor_breakpoint_config(&parsed)?;
+        self.ctx.add_hypercall_breakpoint(
+            HypercallFilter {
+                code,
+                partition: parsed.partition,
+                vp,
+            },
+            config,
+        )
+    }
+
+    /// The VP index and configuration a `!hvbp` or `!hvexit` command gives.
+    fn hypervisor_breakpoint_config(
+        &mut self,
+        parsed: &ParsedHypercallArgs,
+    ) -> Result<(Option<u32>, BreakpointConfig)> {
         let vp = parsed
             .vp
             .map(|vp| {
@@ -1001,15 +1051,21 @@ impl ReplState<'_> {
             .transpose()?;
         let config = BreakpointConfig {
             condition_expr: compile_repl_condition(parsed.condition.as_deref(), self.radix)?,
-            condition: parsed.condition,
+            condition: parsed.condition.clone(),
             one_shot: parsed.one_shot,
-            action: parsed.action,
+            action: parsed.action.clone(),
             processor: self.breakpoint_processor_scope(parsed.processor)?,
             ..BreakpointConfig::default()
         };
-        self.ctx.add_hypercall_breakpoint(
-            HypercallFilter {
-                code,
+        Ok((vp, config))
+    }
+
+    fn add_exit_breakpoint(&mut self, parsed: ParsedHypercallArgs) -> Result<u32> {
+        let reason = vm_exits::parse_reason(&parsed.call)?;
+        let (vp, config) = self.hypervisor_breakpoint_config(&parsed)?;
+        self.ctx.add_exit_breakpoint(
+            ExitFilter {
+                reason,
                 partition: parsed.partition,
                 vp,
             },
@@ -1534,7 +1590,7 @@ mod tests {
         assert_eq!(parsed.name, "!hvbp");
         let invocation = parsed.invocation(CommandStyle::StructuredArgs).unwrap();
         for radix in [NumberRadix::Decimal, NumberRadix::Hexadecimal] {
-            let reparsed = parse_hypercall_arguments(&invocation.argv, radix).unwrap();
+            let reparsed = parse_hypercall_arguments(&invocation.argv, radix, "!hvbp").unwrap();
             assert_eq!(hypercall_code_text(&reparsed.call, radix).unwrap(), 0x000b);
             assert_eq!(
                 reparsed,
@@ -1556,7 +1612,7 @@ mod tests {
     fn hvbp_takes_a_call_by_name_or_code_and_refuses_nt_filters() {
         let parse = |line: &[&str]| {
             let argv: Vec<Cow<'_, str>> = line.iter().map(|arg| Cow::from(*arg)).collect();
-            parse_hypercall_arguments(&argv, NumberRadix::Hexadecimal)
+            parse_hypercall_arguments(&argv, NumberRadix::Hexadecimal, "!hvbp")
         };
         let any = parse(&["HvCallPostMessage", "if", "@rdx==0"]).unwrap();
         assert_eq!((any.partition, any.vp), (None, None));

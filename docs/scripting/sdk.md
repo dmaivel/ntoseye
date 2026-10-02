@@ -264,6 +264,16 @@ def in_space(stop: ntoseye.Stop) -> bool:
 dbg.breakpoints.add_hypercall("HvCallFlushVirtualAddressList", guest.id, when=in_space)
 ```
 
+`dbg.breakpoints.add_exit(reason, partition=None, vp=None)` sets a breakpoint that stops on a VM exit, as {command}`!hvexit` does ([how](../using/breakpoints.md#vm-exit-breakpoints)). `reason` is a basic exit reason or its name (`"rdmsr"`, `"ept_violation"`), and the other arguments are those of `add_hypercall()`. `Breakpoint.vm_exit` gives what the breakpoint stops on, and `stop.cpu.hypercall_caller()` gives the caller at the stop, with its `registers` at the exit:
+
+```python
+bp = dbg.breakpoints.add_exit("rdmsr", partition=1)
+stop = dbg.run(timeout=10.0)
+caller = stop.cpu.hypercall_caller()
+print(caller.vp_index, hex(caller.registers["rcx"]))
+bp.delete()
+```
+
 ### Memory of a vCPU
 
 `cpu.memory` reads through the page tables that the vCPU has loaded, whatever their owner. These page tables can be:
