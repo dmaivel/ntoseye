@@ -263,7 +263,13 @@ pub fn stack_pointer(register_map: &RegisterMap, registers: &[u8]) -> Option<u64
 /// names a data address an armed watchpoint covers answers directly; one no
 /// watchpoint covers says nothing, as QEMU reports a vCPU's watchpoint hit
 /// with its next stop, whatever made it, when another vCPU's stop was
-/// reported instead. Otherwise AMD64 maps DR6 status bits and clears them,
+/// reported instead. That stale address can fall in a watchpoint still armed
+/// too, so a stop at an armed execute site (the stop's PC, which
+/// [`Session::classify_stop_event`] fills in) is the site's: taken for the
+/// watchpoint, the site's hit is lost, and a walk waiting there for its
+/// thread waits on after the thread has passed. A write trapped by the
+/// instruction just before a site is lost to it instead, rarer and only one
+/// hit. Otherwise AMD64 maps DR6 status bits and clears them,
 /// and ARM64 uses the stopped PC/FAR together with BCR/WCR enable and
 /// address-select fields. A transport with neither (a GDB stub owns the
 /// debug registers and does not show them) is left with the PC, which is an
@@ -286,6 +292,9 @@ pub fn hardware_breakpoint_hit(
     if let Some(hit) = event
         .watchpoint_address
         .and_then(|address| watchpoint_covering(breakpoints, slots, address))
+        && !event
+            .program_counter
+            .is_some_and(|pc| execute_site_at(breakpoints, slots, pc))
     {
         return Ok(Some(hit));
     }
@@ -365,6 +374,20 @@ fn watchpoint_covering(
                         .is_some_and(|end| address >= bp.address.0 && address < end)
             })
         })
+}
+
+/// Whether an armed breakpoint executes at `pc`: a planted software site, or
+/// a hardware execute breakpoint.
+fn execute_site_at(breakpoints: &BreakpointManager, slots: u8, pc: u64) -> bool {
+    breakpoints.breakpoint_id_at_address(pc).is_some()
+        || (0..slots)
+            .filter_map(|slot| breakpoints.hardware_breakpoint_for_slot(slot))
+            .any(|bp| {
+                bp.address.0 == pc
+                    && bp
+                        .hardware
+                        .is_some_and(|hw| hw.access == HwBreakpointAccess::Execute)
+            })
 }
 
 /// The hardware execute breakpoint parked at the stopped PC, with `RF` set so

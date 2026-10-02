@@ -2646,6 +2646,38 @@ fn a_watch_address_no_watchpoint_covers_leaves_the_execute_breakpoint_at_the_pc_
     assert_eq!(hit.map(|bp| bp.id), Some(7));
 }
 
+/// The stale address can fall in a watchpoint still armed, as a walk's watch
+/// on its thread's state is: a stop at a planted site is the site's hit all
+/// the same, or the walk waiting there never sees its thread pass.
+#[test]
+fn a_covered_watch_address_on_a_stop_at_a_planted_site_leaves_the_site_its_hit() {
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        ..MockBackend::default()
+    }
+    .without_debug_registers();
+    backend.set("rip", 0x1020);
+    let map = backend.register_map.clone();
+    let mut session = session_with_mock(backend);
+    session.register_map = map;
+    session.breakpoints = manager_with_hw(0, HwBreakpointAccess::Write, true);
+    session
+        .breakpoints
+        .insert_for_test(1, VirtAddr(0x1020), true, None);
+
+    let resolution = session
+        .classify_stop_event(StopEvent {
+            program_counter: Some(0x1020),
+            ..stub_watch_event(0x1002)
+        })
+        .unwrap();
+
+    let StopResolution::Breakpoint { breakpoint, .. } = resolution else {
+        panic!("expected the site's breakpoint stop, got {resolution:?}");
+    };
+    assert_eq!(breakpoint.id, 1);
+}
+
 #[test]
 fn a_stub_with_no_debug_registers_attributes_an_execute_breakpoint_by_the_stopped_pc() {
     let manager = manager_with_hw(0, HwBreakpointAccess::Execute, true);
