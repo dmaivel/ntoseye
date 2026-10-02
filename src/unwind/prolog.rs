@@ -1,29 +1,54 @@
 //! Unwinding AMD64 code whose unwind data is not mapped (the Windows
 //! hypervisor's, without its file) by reading its functions' prologs.
 
+use iced_x86::{
+    Code, Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind, Register,
+};
+
 /// RVAs where functions likely begin in `bytes` (an image laid out by RVA),
-/// within the executable `code` ranges: the targets of direct `call rel32`
-/// instructions, and the 16-byte-aligned code after `int3` padding, which
-/// the compiler puts between functions (so functions only ever called
-/// indirectly are found too), sorted and deduplicated.
+/// within the executable `code` ranges, sorted and deduplicated: in a linear
+/// decode of the code, the targets of its direct calls, and the 4-byte-aligned
+/// code after padding of two or more `int3`s (and any NOPs among them), which
+/// the compiler puts between functions, so functions only ever called
+/// indirectly are found too. The decode keeps an `e8` byte inside another
+/// instruction from passing for a call, and the `cc` bytes of an immediate
+/// (`0xcccccccccccccccd`) for padding. A lone `int3` follows a call that does
+/// not return, inside its function. Padding after an indirect `jmp` without
+/// REX.W aligns a switch's cases, inside its function too: the x64 epilog
+/// rules make a jump that leaves a function (a tail call) carry REX.W.
 pub fn function_starts(bytes: &[u8], code: &[(u32, u32)]) -> Vec<u32> {
-    let inside = |rva: u32| code.iter().any(|&(start, end)| (start..end).contains(&rva));
+    let inside = |rva: u64| {
+        code.iter()
+            .any(|&(start, end)| (u64::from(start)..u64::from(end)).contains(&rva))
+    };
     let mut starts = Vec::new();
     for &(start, end) in code {
-        let end = (end as usize).min(bytes.len());
-        let mut at = start as usize;
-        while at + 5 <= end {
-            if bytes[at] == 0xe8 {
-                let rel = i32::from_le_bytes(bytes[at + 1..at + 5].try_into().unwrap());
-                let target = (at as i64 + 5 + i64::from(rel)) as u32;
-                if inside(target) {
-                    starts.push(target);
-                }
+        let Some(range) = bytes.get(start as usize..(end as usize).min(bytes.len())) else {
+            continue;
+        };
+        let mut decoder = Decoder::with_ip(64, range, u64::from(start), DecoderOptions::NONE);
+        let mut instruction = Instruction::default();
+        let (mut int3s, mut after_switch) = (0u32, false);
+        while decoder.can_decode() {
+            decoder.decode_out(&mut instruction);
+            let ip = instruction.ip();
+            if instruction.code() == Code::Int3 {
+                int3s += 1;
+                continue;
             }
-            if at.is_multiple_of(16) && at > 0 && bytes[at - 1] == 0xcc && bytes[at] != 0xcc {
-                starts.push(at as u32);
+            if int3s > 0 && instruction.mnemonic() == Mnemonic::Nop {
+                continue;
             }
-            at += 1;
+            if int3s >= 2 && ip.is_multiple_of(4) && !after_switch {
+                starts.push(ip as u32);
+            }
+            if instruction.code() == Code::Call_rel32_64 && inside(instruction.near_branch_target())
+            {
+                starts.push(instruction.near_branch_target() as u32);
+            }
+            int3s = 0;
+            after_switch = instruction.code() == Code::Jmp_rm64
+                && !(0x48..=0x4f).contains(&range[(ip - u64::from(start)) as usize]);
         }
     }
     starts.sort_unstable();
@@ -40,67 +65,139 @@ pub struct PrologFrame {
     pub saved: Vec<(usize, u32)>,
 }
 
+/// How much of a function's code, from its start, [`analyze_prolog`] needs:
+/// a frame further in is past the prolog, which ends well before this.
+pub const PROLOG_BYTES: usize = 0x100;
+
 /// Emulate the prolog in `code` (a function's first bytes) up to `offset`,
-/// the frame's position in it. The first instruction that is not one a
-/// prolog uses ends the prolog: the body runs on the frame it set up.
-pub fn analyze_prolog(code: &[u8], offset: usize) -> PrologFrame {
+/// the frame's position in it. A prolog pushes registers (and `pushfq`),
+/// subtracts from RSP, directly or by a stack probe (`mov eax, size`, `call
+/// __chkstk`, `sub rsp, rax`), copies RSP (`mov rax, rsp`, `mov rbp, rsp`,
+/// `lea rbp, [rsp+n]`), and stores registers of any width through RSP or a
+/// copy of it (argument homes and saves), none of which moves RSP. The first
+/// other instruction ends the prolog: the body runs on the frame it set up.
+/// `None` when the body moves RSP to another stack before the frame's
+/// position, as assembly that switches stacks does.
+///
+/// Before the frame begins, a shrink-wrapped function tests its arguments
+/// and branches to a return that needs no frame (`test rcx, rcx`, `je
+/// out`); the prolog follows the fall-through when the branch jumps past the
+/// frame's position, or over a `ret` to code that sets up the frame. `None`
+/// for any other branch there, which may lead to the frame by a path that
+/// sets up another.
+pub fn analyze_prolog(code: &[u8], offset: usize) -> Option<PrologFrame> {
+    let code = &code[..offset.min(code.len())];
+    let instructions: Vec<Instruction> = Decoder::with_ip(64, code, 0, DecoderOptions::NONE)
+        .into_iter()
+        .collect();
     let mut size = 0u32;
     let mut pushes: Vec<(usize, u32)> = Vec::new();
-    let mut at = 0usize;
-    while at < offset.min(code.len()) {
-        let rest = &code[at..];
-        let length = match rest {
-            [op @ 0x50..=0x57, ..] => {
+    // Registers holding RSP plus a constant, which stores in the prolog
+    // address the stack by.
+    let mut copies = vec![Register::RSP];
+    // The size a stack probe allocates: `mov eax, size` before the call to
+    // `__chkstk` and the `sub rsp, rax` after it.
+    let mut probe: Option<u32> = None;
+    let mut index = 0;
+    while let Some(instruction) = instructions.get(index) {
+        let next = instructions.get(index + 1);
+        let rsp_operand = instruction.op0_kind() == OpKind::Register
+            && instruction.op0_register() == Register::RSP;
+        match instruction.code() {
+            Code::Push_r64 => {
                 size += 8;
-                pushes.push((usize::from(op - 0x50), size));
-                1
+                pushes.push((instruction.op0_register().number(), size));
             }
-            // push with a REX prefix: `40` for the low registers (MSVC's
-            // `push rbx` is `40 53`), `41` for r8-r15
-            [rex @ 0x40..=0x4f, op @ 0x50..=0x57, ..] => {
-                size += 8;
-                pushes.push((usize::from(op - 0x50) + usize::from(rex & 1) * 8, size));
-                2
+            // `pushfq; pop reg` reads the flags, in the body
+            Code::Pushfq if !next.is_some_and(|next| next.code() == Code::Pop_r64) => size += 8,
+            Code::Sub_rm64_imm8 | Code::Sub_rm64_imm32 if rsp_operand => {
+                match u32::try_from(instruction.immediate(1) as i64) {
+                    Ok(imm) => size += imm,
+                    Err(_) => break,
+                }
             }
-            [0x48, 0x83, 0xec, imm, ..] => {
-                size += u32::from(*imm);
-                4
+            Code::Mov_r32_imm32 if instruction.op0_register() == Register::EAX => {
+                probe = Some(instruction.immediate32());
             }
-            [0x48, 0x81, 0xec, a, b, c, d, ..] => {
-                size += u32::from_le_bytes([*a, *b, *c, *d]);
-                7
-            }
-            // mov rbp, rsp
-            [0x48, 0x8b, 0xec, ..] | [0x48, 0x89, 0xe5, ..] => 3,
-            // mov rax/r11, rsp: a copy of RSP the next stores address by
-            [0x48 | 0x4c, 0x8b, modrm, ..] if modrm & 0xc7 == 0xc4 => 3,
-            // mov [reg+disp8], reg through that copy (argument homes)
-            [0x48 | 0x49 | 0x4c | 0x4d, 0x89, modrm, _, ..]
-                if modrm >> 6 == 1 && modrm & 7 != 4 && modrm & 7 != 5 =>
+            Code::Call_rel32_64 if probe.is_some() => {}
+            Code::Sub_r64_rm64 | Code::Sub_rm64_r64
+                if rsp_operand
+                    && instruction.op1_kind() == OpKind::Register
+                    && instruction.op1_register() == Register::RAX =>
             {
-                4
+                match probe.take() {
+                    Some(probe) => size += probe,
+                    None => break,
+                }
             }
-            // lea rbp, [rsp+disp8]
-            [0x48, 0x8d, 0x6c, 0x24, _, ..] => 5,
-            // lea rbp, [rsp+disp32]
-            [0x48, 0x8d, 0xac, 0x24, _, _, _, _, ..] => 8,
-            // lea rbp, [rax+disp8|disp32], after `mov rax, rsp`
-            [0x48, 0x8d, 0x68, _, ..] => 4,
-            [0x48, 0x8d, 0xa8, _, _, _, _, ..] => 7,
-            // mov [rsp+disp8], reg of any size (argument homes): RSP unchanged
-            [0x88 | 0x89, modrm, 0x24, _, ..] if modrm & 0xc7 == 0x44 => 4,
-            [0x40..=0x4f | 0x66, 0x88 | 0x89, modrm, 0x24, _, ..] if modrm & 0xc7 == 0x44 => 5,
+            Code::Mov_r64_rm64 | Code::Mov_rm64_r64
+                if instruction.op0_kind() == OpKind::Register
+                    && instruction.op1_kind() == OpKind::Register
+                    && instruction.op1_register() == Register::RSP =>
+            {
+                copies.push(instruction.op0_register());
+            }
+            Code::Lea_r64_m
+                if copies.contains(&instruction.memory_base())
+                    && instruction.memory_index() == Register::None =>
+            {
+                copies.push(instruction.op0_register());
+            }
+            _ if instruction.op0_kind() == OpKind::Memory
+                && instruction.op1_kind() == OpKind::Register
+                && copies.contains(&instruction.memory_base())
+                && instruction.memory_index() == Register::None
+                && matches!(
+                    instruction.mnemonic(),
+                    Mnemonic::Mov
+                        | Mnemonic::Movaps
+                        | Mnemonic::Movups
+                        | Mnemonic::Movdqa
+                        | Mnemonic::Movdqu
+                ) => {}
+            _ if size > 0 => break,
+            _ if matches!(instruction.mnemonic(), Mnemonic::Test | Mnemonic::Cmp) => {}
+            _ if instruction.flow_control() == FlowControl::ConditionalBranch => {
+                let target = instruction.near_branch_target();
+                if next.is_some_and(|next| {
+                    next.flow_control() == FlowControl::Return && next.next_ip() == target
+                }) {
+                    index += 1;
+                } else if target <= offset as u64 {
+                    return None;
+                }
+            }
             _ => break,
-        };
-        at += length;
+        }
+        index += 1;
     }
-    PrologFrame {
+    // The body runs on the frame the prolog set up, unless it moves RSP
+    // elsewhere (a stack switch, `mov rsp, rax`) other than on its way out:
+    // an epilog's `lea rsp, [rbp+n]` or `mov rsp, r11` comes right before
+    // its pops or its return.
+    let mut body = instructions[index..].iter().peekable();
+    while let Some(instruction) = body.next() {
+        let moves_rsp = instruction.op0_kind() == OpKind::Register
+            && instruction.op0_register() == Register::RSP
+            && matches!(
+                instruction.mnemonic(),
+                Mnemonic::Mov | Mnemonic::Lea | Mnemonic::And | Mnemonic::Or | Mnemonic::Xchg
+            );
+        if moves_rsp
+            && body.peek().is_some_and(|next| {
+                next.code() != Code::Pop_r64 && next.flow_control() != FlowControl::Return
+            })
+        {
+            return None;
+        }
+    }
+    Some(PrologFrame {
         size,
         saved: pushes
             .into_iter()
             .map(|(reg, depth)| (reg, size - depth))
             .collect(),
-    }
+    })
 }
 
 /// Whether the bytes `before` (ending at a return address) end in a call:
@@ -176,9 +273,15 @@ mod tests {
 
     /// How often the fallback, which has no `.pdata`, finds the function and
     /// the frame size the real unwind data gives at a call's return address
-    /// in each harness image: every `.pdata` function with unwind codes and
-    /// a direct call past its prolog, at its first such call. Measured at
-    /// 97.4-97.9% on builds 16299 to 28000; 95% leaves room for a new build.
+    /// in each harness image: at every call that a decode of a `.pdata`
+    /// function with unwind codes finds past its prolog. A frame the
+    /// fallback gets wrong is printed; an undecided one leaves the walk to
+    /// the scan. Measured on builds 16299 to 28000: 99.79-99.92% agree, and
+    /// 1 to 5 sites wrong, all in assembly: a fragment entered with its
+    /// frame set up, and from 22621 functions whose unwind data leaves out
+    /// their `sub rsp` (so RSP at the call would be misaligned, and the
+    /// prolog is right). 12 to 29 are undecided, most of them in assembly
+    /// that switches stacks. The bounds leave room for a new build.
     #[test]
     #[ignore = "needs hvix64 images named by NTOSEYE_HVIX64_IMAGES"]
     fn the_prolog_fallback_agrees_with_the_unwind_data() {
@@ -204,7 +307,7 @@ mod tests {
             let pdata = image
                 .read(directory.VirtualAddress as usize, directory.Size as usize)
                 .unwrap();
-            let (mut tried, mut agreed) = (0u32, 0u32);
+            let (mut tried, mut agreed, mut wrong) = (0u32, 0u32, 0u32);
             for entry in pdata.as_chunks::<12>().0 {
                 let word = |at: usize| u32::from_le_bytes(entry[at..at + 4].try_into().unwrap());
                 let (begin, finish, unwind) = (word(0), word(4), word(8));
@@ -212,26 +315,51 @@ mod tests {
                     continue;
                 };
                 let prolog = u32::from(image.read(unwind as usize + 1, 1).unwrap()[0]);
-                let Some(call) = (begin + prolog..finish.saturating_sub(5))
-                    .find(|&at| bytes.get(at as usize) == Some(&0xe8))
-                else {
+                // The hypercall page's template, which some builds keep in
+                // `.data`, has an entry too, but no calls.
+                let Some(body) = bytes.get(begin as usize..finish as usize) else {
                     continue;
                 };
-                let ret = call + 5;
-                tried += 1;
-                let next = starts.partition_point(|&start| start <= ret);
-                let Some(&start) = next.checked_sub(1).and_then(|at| starts.get(at)) else {
-                    continue;
-                };
-                let frame = analyze_prolog(&bytes[start as usize..], (ret - start) as usize);
-                agreed += u32::from(start == begin && frame.size == expected);
+                let returns = Decoder::with_ip(64, body, u64::from(begin), DecoderOptions::NONE)
+                    .into_iter()
+                    .filter(|instruction| instruction.mnemonic() == Mnemonic::Call)
+                    .map(|instruction| instruction.next_ip() as u32)
+                    .filter(|&ret| ret - begin > prolog);
+                for ret in returns {
+                    tried += 1;
+                    let next = starts.partition_point(|&start| start <= ret);
+                    let Some(&start) = next.checked_sub(1).and_then(|at| starts.get(at)) else {
+                        continue;
+                    };
+                    let offset = (ret - start) as usize;
+                    let code = &bytes[start as usize..][..offset.min(PROLOG_BYTES)];
+                    match analyze_prolog(code, offset) {
+                        Some(frame) if start == begin && frame.size == expected => agreed += 1,
+                        Some(frame) => {
+                            wrong += 1;
+                            println!(
+                                "  wrong at {ret:#x}: {start:#x} +{:#x}, unwind data {begin:#x} +{expected:#x}",
+                                frame.size
+                            );
+                        }
+                        None => {}
+                    }
+                }
             }
             let rate = f64::from(agreed) / f64::from(tried.max(1));
-            println!("{path}: {agreed}/{tried} ({:.1}%)", rate * 100.0);
+            println!(
+                "{path}: {agreed}/{tried} agree ({:.2}%), {wrong} wrong, {} undecided",
+                rate * 100.0,
+                tried - agreed - wrong
+            );
             assert!(
-                rate >= 0.95,
-                "{path}: the fallback agreed on only {:.1}%",
+                rate >= 0.995,
+                "{path}: the fallback agreed on only {:.2}%",
                 rate * 100.0
+            );
+            assert!(
+                wrong <= tried / 1000,
+                "{path}: the fallback was wrong at {wrong} of {tried} sites"
             );
         }
     }
@@ -246,16 +374,20 @@ mod tests {
             size: 0x38,
             saved: vec![(3, 0x30), (7, 0x28)],
         };
-        assert_eq!(analyze_prolog(&code, 6), body);
-        assert_eq!(analyze_prolog(&code, 10), body);
+        assert_eq!(analyze_prolog(&code, 6), Some(body.clone()));
+        assert_eq!(analyze_prolog(&code, 10), Some(body));
         assert_eq!(
             analyze_prolog(&code, 1),
-            PrologFrame {
+            Some(PrologFrame {
                 size: 8,
                 saved: vec![(3, 0)]
-            }
+            })
         );
-        assert_eq!(analyze_prolog(&[0x48, 0x31, 0xc0], 3).size, 0, "no prolog");
+        assert_eq!(
+            analyze_prolog(&[0x48, 0x31, 0xc0], 3).map(|frame| frame.size),
+            Some(0),
+            "no prolog"
+        );
     }
 
     #[test]
@@ -265,10 +397,131 @@ mod tests {
         ];
         assert_eq!(
             analyze_prolog(&code, code.len()),
-            PrologFrame {
+            Some(PrologFrame {
                 size: 0x110,
                 saved: vec![(5, 0x108), (14, 0x100)]
-            }
+            })
+        );
+    }
+
+    /// A shrink-wrapped function returns early before its frame: past a
+    /// branch that skips to the end, or over a `ret` to its frame, the
+    /// prolog follows. A branch that may reach the frame by another path
+    /// leaves the frame undecided.
+    #[test]
+    fn a_prolog_after_an_early_return_is_followed() {
+        let mut code = vec![
+            0x48, 0x85, 0xc9, // test rcx, rcx
+            0x74, 0x10, // je out (0x15)
+            0x40, 0x53, // push rbx
+            0x48, 0x83, 0xec, 0x20, // sub rsp, 0x20
+            0xe8, 0, 0, 0, 0, // call
+        ];
+        let frame = Some(PrologFrame {
+            size: 0x28,
+            saved: vec![(3, 0x20)],
+        });
+        assert_eq!(analyze_prolog(&code, code.len()), frame);
+        code[4] = 0x06; // je to the call
+        assert_eq!(analyze_prolog(&code, code.len()), None);
+        let code = [
+            0x48, 0x3b, 0x0d, 0, 0, 0, 0, // cmp rcx, [rip]
+            0x75, 0x01, // jne over the ret
+            0xc3, // ret
+            0x48, 0x83, 0xec, 0x28, // sub rsp, 0x28
+            0xe8, 0, 0, 0, 0, // call
+        ];
+        assert_eq!(
+            analyze_prolog(&code, code.len()).map(|frame| frame.size),
+            Some(0x28)
+        );
+    }
+
+    /// Argument homes of every width, stored through a copy of RSP or RSP
+    /// itself, are part of the prolog.
+    #[test]
+    fn stores_of_narrow_registers_stay_in_the_prolog() {
+        let code = [
+            0x48, 0x8b, 0xc4, // mov rax, rsp
+            0x44, 0x89, 0x40, 0x18, // mov [rax+0x18], r8d
+            0x66, 0x89, 0x50, 0x10, // mov [rax+0x10], dx
+            0x88, 0x48, 0x08, // mov [rax+8], cl
+            0x66, 0x44, 0x89, 0x4c, 0x24, 0x20, // mov [rsp+0x20], r9w
+            0x55, // push rbp
+            0x57, // push rdi
+            0x48, 0x83, 0xec, 0x30, // sub rsp, 0x30
+            0x33, 0xc0, // xor eax, eax
+        ];
+        assert_eq!(
+            analyze_prolog(&code, code.len()),
+            Some(PrologFrame {
+                size: 0x40,
+                saved: vec![(5, 0x38), (7, 0x30)]
+            })
+        );
+    }
+
+    /// A frame larger than a page is allocated by a stack probe: `mov eax,
+    /// size`, `call __chkstk`, `sub rsp, rax`. In the probe, the frame is
+    /// what the pushes made.
+    #[test]
+    fn a_stack_probe_allocates_its_size() {
+        let code = [
+            0x40, 0x53, // push rbx
+            0xb8, 0x40, 0x18, 0, 0, // mov eax, 0x1840
+            0xe8, 0, 0, 0, 0, // call __chkstk
+            0x48, 0x2b, 0xe0, // sub rsp, rax
+            0x33, 0xf6, // xor esi, esi
+        ];
+        let size = |offset| analyze_prolog(&code, offset).map(|frame| frame.size);
+        assert_eq!(size(code.len()), Some(0x1848));
+        assert_eq!(size(12), Some(8));
+    }
+
+    #[test]
+    fn pushfq_in_a_prolog_allocates_a_slot() {
+        let code = [
+            0x9c, // pushfq
+            0x65, 0x48, 0x8b, 0x0c, 0x25, 0, 0, 0, 0, // mov rcx, gs:[0]
+        ];
+        assert_eq!(
+            analyze_prolog(&code, code.len()),
+            Some(PrologFrame {
+                size: 8,
+                saved: vec![]
+            })
+        );
+    }
+
+    /// Code that moves RSP to another stack leaves no frame the prolog
+    /// describes; an epilog's move of RSP, before its pops, does not.
+    #[test]
+    fn a_body_that_switches_stacks_leaves_its_frame_undecided() {
+        let switch = [
+            0x48, 0x8b, 0xc4, // mov rax, rsp
+            0x48, 0x25, 0x00, 0xf0, 0xff, 0xff, // and rax, -0x1000
+            0x48, 0x05, 0xc0, 0x0f, 0, 0, // add rax, 0xfc0
+            0x48, 0x8b, 0xe0, // mov rsp, rax
+            0xe8, 0, 0, 0, 0, // call
+        ];
+        assert_eq!(analyze_prolog(&switch, switch.len()), None);
+        let early_return = [
+            0x57, // push rdi
+            0x48, 0x83, 0xec, 0x20, // sub rsp, 0x20
+            0x85, 0xc9, // test ecx, ecx
+            0x75, 0x0a, // jne over the epilog
+            0x4c, 0x8d, 0x5c, 0x24, 0x20, // lea r11, [rsp+0x20]
+            0x49, 0x8b, 0xe3, // mov rsp, r11
+            0x5f, // pop rdi
+            0xc3, // ret
+            0xe8, 0, 0, 0, 0, // call
+        ];
+        assert_eq!(
+            analyze_prolog(&early_return, early_return.len()),
+            Some(PrologFrame {
+                size: 0x28,
+                saved: vec![(7, 0x20)]
+            })
         );
     }
 
@@ -280,13 +533,50 @@ mod tests {
         assert!(!follows_call(&[0x90, 0x90, 0xc3]));
     }
 
-    /// A call's target starts a function even inside padding, and so does
-    /// aligned code after `int3` padding; unaligned code after it does not.
+    /// The function starts in `pieces` laid end to end from RVA 0.
+    fn starts_in(pieces: &[&[u8]]) -> Vec<u32> {
+        let bytes = pieces.concat();
+        function_starts(&bytes, &[(0, bytes.len() as u32)])
+    }
+
+    /// A decoded call's target starts a function, and so does code at a
+    /// 4-byte boundary after two or more `int3`s; an `e8` byte inside
+    /// another instruction is no call.
     #[test]
     fn call_targets_and_code_after_padding_are_function_starts() {
-        let mut bytes = vec![0xcc; 0x40];
-        bytes[0x10..0x15].copy_from_slice(&[0xe8, 0x1b, 0, 0, 0]);
-        bytes[0x24] = 0x90;
-        assert_eq!(function_starts(&bytes, &[(0, 0x40)]), [0x10, 0x30]);
+        let starts = starts_in(&[
+            &[0xcc; 4],
+            &[0x48, 0xb9, 0xe8, 0x10, 0, 0, 0, 0, 0, 0], // mov rcx, 0x10e8
+            &[0xc3],
+            &[0xcc; 5],
+            &[0xe8, 0x07, 0, 0, 0], // call 0x20
+            &[0xc3],
+            &[0xcc; 6],
+            &[0xc3],
+            &[0xcc; 3],
+        ]);
+        assert_eq!(starts, [0x04, 0x14, 0x20]);
+    }
+
+    /// `int3`s inside a function start no function: a lone one after a
+    /// call that does not return, the bytes of an immediate, and the
+    /// padding that aligns a switch's cases after its `jmp rcx`. Padding
+    /// after a tail call through a register (`rex.w jmp rax`) does.
+    #[test]
+    fn int3s_inside_a_function_start_none() {
+        let xors: &[u8] = &[0x31, 0xc0, 0x31, 0xc0, 0x31, 0xc0, 0x31, 0xc0, 0x31, 0xc0];
+        let body: &[u8] = &[0x31, 0xc0, 0xc3]; // xor eax, eax; ret
+        let call_to_0: &[u8] = &[0xe8, 0xf1, 0xff, 0xff, 0xff]; // at 0xa
+        assert_eq!(starts_in(&[xors, call_to_0, &[0xcc], body]), [0]);
+        let mov_rax: &[u8] = &[0x48, 0xb8, 0xcd, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc];
+        assert!(starts_in(&[&xors[..6], mov_rax, body]).is_empty());
+        let jmp_rcx: &[u8] = &[0xff, 0xe1];
+        assert!(starts_in(&[xors, jmp_rcx, &[0xcc; 4], body]).is_empty());
+        let jmp_rax: &[u8] = &[0x48, 0xff, 0xe0];
+        let nop: &[u8] = &[0x90];
+        assert_eq!(
+            starts_in(&[&xors[..8], nop, jmp_rax, &[0xcc; 4], body]),
+            [0x10]
+        );
     }
 }

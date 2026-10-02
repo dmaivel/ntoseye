@@ -307,8 +307,9 @@ impl StackTracer<'_> {
     /// Unwind a frame of the foreign image (the Windows hypervisor's) whose
     /// unwind data is not mapped, by its function's prolog (see
     /// [`super::prolog`]). A first frame in an epilog runs the epilog. The
-    /// return address must follow a call in the image's code; otherwise the
-    /// walk stops and the scan takes over.
+    /// return address must follow a call in the image's code, and the prolog
+    /// must decide the frame; otherwise the walk stops and the scan takes
+    /// over.
     pub fn unwind_prolog(&mut self, context: &mut RegisterContext, base: u64) -> Unwound {
         let Some(symbols) = self.trace.hypervisor.clone() else {
             return Unwound::Stop;
@@ -330,10 +331,16 @@ impl StackTracer<'_> {
             };
         }
         let offset = (rva - function.start) as usize;
-        let Some(code) = image.read(function.start as usize, offset.min(0x100)) else {
+        let Some(code) = image.read(
+            function.start as usize,
+            offset.min(super::prolog::PROLOG_BYTES),
+        ) else {
             return Unwound::Stop;
         };
-        let frame = super::prolog::analyze_prolog(&code, offset);
+        let Some(frame) = super::prolog::analyze_prolog(&code, offset) else {
+            unwind_trace!("unwind: prolog of {:#x} undecided -> stop", function.start);
+            return Unwound::Stop;
+        };
         let rsp = context.rsp.wrapping_add(u64::from(frame.size));
         let Ok(return_address) = self.stack_u64(rsp) else {
             return Unwound::Stop;
