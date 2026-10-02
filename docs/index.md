@@ -141,6 +141,7 @@ Rust crate API (docs.rs) <https://docs.rs/ntoseye/latest/ntoseye/>
 :hidden:
 :caption: Resources
 
+changelog
 Source code <https://github.com/dmaivel/ntoseye>
 Releases <https://github.com/dmaivel/ntoseye/releases>
 Bug reports <https://github.com/dmaivel/ntoseye/issues>

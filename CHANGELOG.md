@@ -1,0 +1,60 @@
+# Changelog
+
+What changed in each release of ntoseye, newest first. The command-line tool, the Python package on PyPI, and the Rust crate on crates.io share one version number.
+
+<!--
+Keeping this file:
+
+- Add a line under "## Unreleased" in the commit that makes the change users will notice: a new command, option or SDK API, changed behavior or output, a fixed bug, a removal. Refactors, tests, CI and docs rewording get none. Start the section at the top if it is not there.
+- Group the lines under "### Added", "### Changed", "### Fixed" and "### Removed", in that order, leaving out empty groups. A fix to something not yet released is no "Fixed" line; amend the line that added it. A change that breaks scripts starts with "**Breaking:**" and comes first in its group.
+- A release with a theme opens with one or two sentences before the groups, saying what users can now do. A release without one goes straight to the groups.
+- Say what users can now do, or what went wrong and no longer does, not how. Name commands and SDK APIs in backticks as users type them.
+- Link only with absolute https://ntoseye.com/... URLs. The same text is shown in the GitHub release, in this file on GitHub, and on the docs site, which each resolve a relative link differently.
+- To release, rename "## Unreleased" to "## vX.Y.Z (YYYY-MM-DD)", the version in Cargo.toml. The release workflow refuses a tag whose version has no section here, or an empty one; dist publishes the section as the release notes and its heading as the release title.
+-->
+
+## Unreleased
+
+ntoseye can now debug the Windows hypervisor itself: walk its partitions and virtual processors, read and disassemble the memory of guests such as WSL2, decode hypercalls and break on them by caller, and unwind its stacks. Kernel module unloads can now stop the debugger, as loads do.
+
+### Added
+
+- `sxe`/`sxn`/`sxd`/`sxi` `ud[:<module>]` stop on, report, or ignore kernel module unloads the way `ld` handles loads, with `-c` to run commands at the stop; the stop comes after the driver's unload routine, while the module is still listed with its symbols. The SDK has `Exceptions.module_events` and `Stop.ModuleUnload`; DAP reports the stop reason `module unload`.
+- `~` accepts the vCPU id it lists in place of a processor number (`~p01.03s`, `~p01.03k`, `~p01.03r`), ignoring case.
+- `Registers.get(name, default=None)` returns a register's value, or `default` when the register file (for example an unwound frame) does not hold it.
+- `DisassembledInstruction` has `length`, `mnemonic` and `operands`; each `Operand` describes a register, memory, immediate or branch operand, so scripts no longer need to parse `asm`.
+- `!hvpartitions` shows the Windows hypervisor's partitions as a tree with their privileges and each VP's processor, VTL, where it left off and its last exit; `!hvvps` lists a partition's VPs and the processors that run them. `~` and the stop line name a vCPU that runs a guest partition (Hyper-V VM, WSL2, Sandbox) as `partition 0x4 VP 2`. The SDK has `dbg.hypervisor_partitions()` and `VirtualProcessor.processors`. Hypervisor commands need the memory or gdb backend, or kd/kdnet with host memory, and say so otherwise.
+- `!hvept <gpa>` (or `-v <address>` for a root virtual address) walks each VTL's extended page tables and shows the host address, access, page size and memory type; `!hveptdiff` lists the guest physical ranges VTL0 and VTL1 map differently. The SDK has `HypervisorVtl.translate()` and `VirtualProcessor.ept_differences()`.
+- `!hvvmcs [-msr|-io]` shows every field of a VTL's Enlightened VMCS, the MSRs it intercepts or passes (named, e.g. `IA32_EFER`), and its intercepted I/O ports. The SDK has `HypervisorVtl.vmcs_fields()`.
+- `!hvd` reads and `!hvu` disassembles a guest partition's memory, virtual (4-level long-mode guests) or with `-p` physical. Like `!hvept`, `!hveptdiff` and `!hvvmcs`, they default to the VP the current processor runs. The SDK has `HypervisorVtl.read()`, `translate_virtual()` and `disassemble()`.
+- `!hvcalls` lists the hypervisor's hypercall table with TLFS names, rep/variable-header flags, input/output sizes and handlers (`-a` includes unimplemented codes); `hv!` now has names for the hypercall handlers and `hv!VmExitEntry`, usable in `k`, `u`, `ln`, `x` and expressions. The SDK has `dbg.hypercalls()`.
+- A saved VTL state shows the VM exit's qualification, interruption info and instruction length, and the guest's general-purpose registers recovered from the hypervisor's exit entry code, which `r`, expressions and stacks use. A state that may describe the previous exit is marked "(may be one exit behind)" and is not selected automatically; a hardware breakpoint on `hv!VmExitEntry` stops with a current state. The SDK has `SavedVtlState.general_registers` and `may_be_stale`.
+- At a hypervisor stop, the stop header, `~` and `.vtlcxr` name the guest VP the processor serves and decode the hypercall being handled (code, TLFS name, flags); `!hvcall` shows its full input, including XMM fast calls and rep lists. The hypercall page shows as module `hvcall` (`hvcall!Hypercall`, `hvcall!VtlReturn64`). MCP, DAP thread names, the JSON status and the SDK (`Cpu.serving`, `SavedVtlState.hypercall`) show the same.
+- `!hvbp <call> [partition [vp]]` stops on a hypercall only from the given caller; its condition is evaluated on the caller's registers. The SDK has `Breakpoints.add_hypercall()` and `Breakpoint.hypercall`.
+- Hypervisor stacks unwind exactly when a copy of the running `hvix64.exe` is in the symbol cache or a local store (`.fetchimage /f <file>`, `Symbols.import_image()` add one), and otherwise from function prologs, marked `[prolog]`.
+- `.vtlcxr 1` selects the state the hypervisor saved for VTL1, so `k`, `r`, `u` and expressions inspect the secure kernel where it left off (read-only); `.vtlcxr` returns to VTL0.
+- In DAP, a vCPU halted in the hypervisor shows the hypervisor's own frames first, then a label frame, then the saved VTL state's frames.
+
+### Changed
+
+- **Breaking:** `Exceptions.module_loads` is replaced by `Exceptions.module_events`, which lists the unload filters (`sx* ud`) along with the load filters.
+- The hypervisor image is named `hv` as in WinDbg (`hv+0x…` instead of `hvix64+0x…`), and expressions accept `hv` in the hypervisor's context.
+- On the gdb backend, software breakpoints in user space are refused (use `ba e1`); single steps into user space use debug-register sites, while a run to a user-space address (`p` over a call, `gu`) ends with an error. Previously stray `int3`s could be left in shared user code.
+- Software breakpoints in the Windows hypervisor's code are refused with a pointer to `ba e1`, instead of left pending forever; NT breakpoints can still be set from the hypervisor's context.
+- On the gdb backend, a breakpoint whose condition or filter declines many hits a second slows the target much less: a declined hit no longer rewrites the site journal on disk.
+
+### Fixed
+
+- `t` after `~Ns` on kd/kdnet steps processor N instead of leaving it unmoved, and breakpoints on the stopped processor keep hitting afterwards; on ARM64 targets, stepping another processor is refused instead of hanging.
+- Ctrl+C, a DAP `pause`/`disconnect`, or a server termination signal now break in on a step that never stops, instead of the session hanging until the transport times out; walks (`ta`, `pa`, `wt`, `step(until=)`) end on the first Ctrl+C.
+- Ctrl+C in the REPL now stops the target when a breakpoint whose hits are declined (condition, `/t` filter, other process) fires constantly.
+- `wt`, `p`, `gu` and the SDK's `step_over`/`step_out` no longer follow the wrong thread, wait forever for a thread that exited, or crawl under load on code every thread runs; a walk whose thread exits ends with an error.
+- A gdbserver step or continue that cannot start now reports SIGINT, so gdb's `next`/`step` no longer loop.
+- On the gdb backend, a `bp` on `nt!DbgLoadImageSymbols` (or the unload functions) now stops when no `sx` filter surfaces the event.
+- On the gdb backend, a stop on an execute breakpoint is no longer mistaken for a plain stop because another vCPU hit a data watchpoint earlier.
+- `Breakpoint.delete()` no longer raises for a breakpoint that is already gone (such as a fired one-shot), and a stale handle no longer deletes a newer breakpoint that reuses its id.
+- `.thread` on a thread whose vCPU is in the hypervisor selects where NT left off instead of the hypervisor's registers.
+- `.vtl 0` after `.vtl 1` at a hypervisor stop returns to the stop's view instead of the hypervisor's registers.
+- VTL1's saved state is listed even before the secure kernel was looked up.
+- A saved VTL state is no longer reported as current after the processor has switched to another VTL or VP.
+- `k` at a hypervisor stop no longer repeats addresses or lists NT addresses as hypervisor frames; scan frames are always marked `[scan]`.

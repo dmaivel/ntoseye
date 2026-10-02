@@ -90,7 +90,8 @@ jobs:
           path: plan-dist-manifest.json
 
   # Custom release checks: keep the tag, Rust crate, and Python wheel version
-  # locked together before any publishable artifact is built.
+  # locked together, and the release notes present, before any publishable
+  # artifact is built.
   validate-release:
     needs:
       - plan
@@ -114,6 +115,27 @@ jobs:
             tag_version="${RELEASE_TAG#v}"
             test "$tag_version" = "$crate_version" || {
               echo "tag $RELEASE_TAG does not match workspace version $crate_version" >&2
+              exit 1
+            }
+          fi
+      # dist publishes CHANGELOG.md's section for the version as the release
+      # notes and its heading as the title, and with no section it publishes
+      # none without failing. Check with the parser dist 0.30.3 uses,
+      # parse-changelog 0.6.14: the file must parse on every run, and a tag
+      # needs a section for its version with something in it.
+      - name: Validate changelog
+        shell: bash
+        env:
+          PUBLISHING: ${{ needs.plan.outputs.publishing }}
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          curl --proto '=https' --tlsv1.2 -fsSL https://github.com/taiki-e/parse-changelog/releases/download/v0.6.14/parse-changelog-x86_64-unknown-linux-musl.tar.gz | tar xz -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/parse-changelog" --json CHANGELOG.md > /dev/null
+          if [[ "$PUBLISHING" == "true" ]]; then
+            version="${RELEASE_TAG#v}"
+            notes="$("$RUNNER_TEMP/parse-changelog" CHANGELOG.md "$version")"
+            test -n "${notes//[[:space:]]/}" || {
+              echo "CHANGELOG.md has an empty section for $version" >&2
               exit 1
             }
           fi

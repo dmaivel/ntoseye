@@ -32,6 +32,7 @@ Homepage = "https://ntoseye.com"
 Documentation = "https://ntoseye.com/scripting/sdk/"
 Repository = "https://github.com/dmaivel/ntoseye"
 Issues = "https://github.com/dmaivel/ntoseye/issues"
+Changelog = "https://ntoseye.com/changelog/"
 
 [tool.maturin]
 # the `ntoseye` package (ntoseye/) wraps the private `_ntoseye`
