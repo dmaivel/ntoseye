@@ -440,9 +440,12 @@ def test_saved_general_registers_are_the_exits(halted: Debugger) -> None:
     if found is None:
         pytest.skip("no vCPU halted in the Windows hypervisor with saved VTL state (needs VBS and hv-evmcs)")
     cpu, current = found
-    assert current.general_registers is not None or current.may_be_stale
     host_rip = current.host_rip
     first_call = next(ins.ip for ins in cpu.memory.disassemble(host_rip, 64) if ins.mnemonic == "call")
+    # The halt can catch the vCPU in the entry code before its last store,
+    # with this exit's registers not yet saved.
+    saving = host_rip <= cpu.registers["rip"] < first_call
+    assert current.general_registers is not None or current.may_be_stale or saving
     compared = 0
     for _ in range(ATTEMPTS * 10):
         if compared == ATTEMPTS:
