@@ -251,6 +251,19 @@ if isinstance(stop, ntoseye.Stop.Breakpoint) and bp in stop.breakpoints:
     print(stop.cpu.id, bp.hypercall)
 ```
 
+A `when=` callback reads the caller through `stop.cpu.hypercall_caller()`, as `!hvcall` finds it: a `HypercallCaller` with the caller's `partition_id`, `root`, `vp_index` and `vtl`, its `registers` at the `VMCALL` (a `dict` of what a condition sees), the decoded `hypercall`, and `read(address, size, physical=False)`, which reads the caller's memory as a condition does. It works at any stop in the hypervisor, and is `None` on a vCPU that is not halted there or whose caller is unknown. This callback stops only for the flushes of one address space:
+
+```python
+def in_space(stop: ntoseye.Stop) -> bool:
+    caller = stop.cpu.hypercall_caller()
+    if caller is None or caller.hypercall is None or caller.hypercall.fast:
+        return True
+    space = caller.read(caller.registers["rdx"], 8, physical=True)
+    return int.from_bytes(space, "little") == 0x102248000
+
+dbg.breakpoints.add_hypercall("HvCallFlushVirtualAddressList", guest.id, when=in_space)
+```
+
 ### Memory of a vCPU
 
 `cpu.memory` reads through the page tables that the vCPU has loaded, whatever their owner. These page tables can be:

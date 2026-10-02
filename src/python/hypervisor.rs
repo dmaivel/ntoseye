@@ -10,12 +10,13 @@ use super::memory::check_disassembly_count;
 use super::record::PlainDict;
 use super::{MAX_READ_LEN, err, raise, view_dict};
 use crate::guest::ept::{EptTranslation, differences};
+use crate::guest::hypercalls::HypercallCaller as Caller;
 use crate::guest::{HvPartition, HvVirtualProcessor, HvVtl, evmcs_fields, privilege_names};
 use crate::target::CodeExtent;
 use crate::view::execution::{DisassembledInstruction, disasm_rows};
 use crate::view::hypervisor::{
-    EptDifference, EptMapping, HypervisorProcessor, ept_difference, ept_mapping,
-    hypervisor_processor,
+    DecodedHypercall, EptDifference, EptMapping, HypervisorProcessor, decoded_hypercall,
+    ept_difference, ept_mapping, hypervisor_processor,
 };
 use crate::view::shape::{Hex, Keyed, Typed};
 
@@ -457,5 +458,131 @@ impl HypervisorVtl {
                 .vmcs
                 .map_or_else(|| "None".to_string(), |page| format!("{page:#x}"))
         )
+    }
+}
+
+/// The virtual processor whose hypercall a processor halted in the Windows
+/// hypervisor handles (`cpu.hypercall_caller()`), found as `!hvcall` and a
+/// hypercall breakpoint's filter find it: the call as the caller made it,
+/// and the caller's memory, which a hypercall breakpoint's condition reads.
+#[pyclass(module = "ntoseye", frozen)]
+pub struct HypercallCaller {
+    owner: Owner,
+    info: Caller,
+}
+
+impl HypercallCaller {
+    pub fn new(owner: Owner, info: Caller) -> Self {
+        Self { owner, info }
+    }
+}
+
+#[pymethods]
+impl HypercallCaller {
+    /// The caller's partition ID (the root partition's is 1).
+    #[getter]
+    fn partition_id(&self, py: Python<'_>) -> PyResult<u64> {
+        self.owner.check(py)?;
+        Ok(self.info.partition)
+    }
+
+    /// Whether the caller is a VP of the root partition (Windows itself)
+    /// rather than of a guest partition.
+    #[getter]
+    fn root(&self, py: Python<'_>) -> PyResult<bool> {
+        self.owner.check(py)?;
+        Ok(self.info.root)
+    }
+
+    /// The caller's VP index in its partition.
+    #[getter]
+    fn vp_index(&self, py: Python<'_>) -> PyResult<u32> {
+        self.owner.check(py)?;
+        Ok(self.info.vp)
+    }
+
+    /// The VTL that made the call.
+    #[getter]
+    fn vtl(&self, py: Python<'_>) -> PyResult<u8> {
+        self.owner.check(py)?;
+        Ok(self.info.vtl)
+    }
+
+    /// The caller's registers at its VMCALL by name (`rcx`, `rdx`, `r8`,
+    /// `rip`, `cr3`, ...), as a hypercall breakpoint's condition sees them:
+    /// RIP, RSP, flags, control and segment registers from the calling
+    /// VTL's eVMCS, and the general-purpose registers when ntoseye
+    /// recovered them. Empty when the state ntoseye found is an older
+    /// exit's.
+    #[getter]
+    fn registers(&self, py: Python<'_>) -> PyResult<std::collections::HashMap<String, u64>> {
+        self.owner.check(py)?;
+        Ok(self.info.registers.clone())
+    }
+
+    /// The call with its input decoded, as `!hvcall` shows it, or `None`
+    /// when the caller's registers are not known.
+    #[getter]
+    fn hypercall<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Option<DecodedHypercall>>> {
+        self.owner.check(py)?;
+        Typed::new(py, self.info.input.call().map(decoded_hypercall))
+    }
+
+    /// Read `size` bytes of the caller's memory, as a hypercall
+    /// breakpoint's condition reads it: guest virtual memory through the
+    /// calling VTL's page tables (its CR3), or with `physical=True` guest
+    /// physical memory (a slow call's input, at the GPA in `rdx`), both
+    /// through its EPT. The memory is read now, so read it while the target
+    /// is halted at the call. Raises `NtoseyeError` when the caller's state
+    /// at the call is not known, when a page is not mapped, and for a
+    /// virtual address unless the caller is in 4-level long-mode paging.
+    /// The memory is read-only.
+    #[pyo3(signature = (address, size, physical = false))]
+    fn read<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+        size: usize,
+        physical: bool,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let Some(state) = self.info.state else {
+            return Err(raise(
+                "the caller's saved state is an older exit's, so its memory is not known",
+            ));
+        };
+        if size > MAX_READ_LEN {
+            return Err(raise(format!("read length {size} exceeds {MAX_READ_LEN}")));
+        }
+        let mut buf = vec![0u8; size];
+        self.owner.with(py, |session| {
+            session
+                .target
+                .read_guest_partition(&state, !physical, address, &mut buf)
+                .map_err(err)
+        })?;
+        Ok(PyBytes::new(py, &buf))
+    }
+
+    /// Return the caller as a plain `dict` (`partition_id`, `root`,
+    /// `vp_index`, `vtl`, `registers`, and `hypercall`, the call's dict or
+    /// `None`).
+    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
+        self.owner.check(py)?;
+        let dict = PyDict::new(py);
+        dict.set_item("partition_id", self.info.partition)?;
+        dict.set_item("root", self.info.root)?;
+        dict.set_item("vp_index", self.info.vp)?;
+        dict.set_item("vtl", self.info.vtl)?;
+        dict.set_item("registers", self.info.registers.clone())?;
+        let hypercall = match self.info.input.call() {
+            Some(call) => Some(view_dict(py, decoded_hypercall(call))?),
+            None => None,
+        };
+        dict.set_item("hypercall", hypercall)?;
+        Ok(PlainDict(dict))
+    }
+
+    fn __repr__(&self) -> String {
+        format!("HypercallCaller({})", self.info.label())
     }
 }

@@ -10,6 +10,7 @@ use pyo3::types::{PyDict, PyInt};
 
 use super::context::{Context, Space};
 use super::handle::{Owner, require_halted};
+use super::hypervisor::HypercallCaller;
 use super::iter::{CpuIterator, NameIterator, ThreadIterator};
 use super::memory::Memory;
 use super::process::Process;
@@ -24,7 +25,7 @@ use crate::target::sched::ApcSelector;
 use crate::target::{SelectedFrame, Target, ThreadInfo, cpu};
 use crate::trapframe::{read_ktrap_frame_at_or_current, trap_frame_rip_symbol};
 use crate::types::VirtAddr;
-use crate::unwind::{RecoveredFrame, StackFrame};
+use crate::unwind::{RecoveredFrame, StackFrame, halted_in_windows_hypervisor};
 use crate::view;
 use crate::view::shape::Typed;
 
@@ -886,6 +887,33 @@ impl Cpu {
     ) -> PyResult<Typed<'py, Option<view::hypervisor::ServedVp>>> {
         let info = self.current_info(py)?;
         Typed::new(py, info.serving.as_ref().map(view::hypervisor::served_vp))
+    }
+
+    /// The virtual processor whose hypercall this processor handles, for a
+    /// vCPU halted in the Windows hypervisor, as `!hvcall` finds it: the
+    /// guest partition's VP that it serves, else the root partition's VP on
+    /// this processor. A `when=` callback of `breakpoints.add_hypercall()`
+    /// reads the caller's registers and memory through it
+    /// (`stop.cpu.hypercall_caller()`), as the breakpoint's condition does.
+    /// `None` when the vCPU is not halted in the hypervisor, or the caller is
+    /// unknown: the partitions cannot be walked, or no saved state of a VP
+    /// that the processor runs is current.
+    fn hypercall_caller(&self, py: Python<'_>) -> PyResult<Option<HypercallCaller>> {
+        let processor = self.processor()?;
+        let context = self.context();
+        let caller = self.owner.with_in(py, &context, |session| {
+            require_halted(session, "cpu.hypercall_caller")?;
+            let registers = session.read_registers().map_err(err)?;
+            let map = &session.register_map;
+            let cr3 = map
+                .read_u64(session.target.arch().dtb_register(), &registers)
+                .map_err(err)?;
+            let rip = map.read_u64("rip", &registers).map_err(err)?;
+            Ok(halted_in_windows_hypervisor(&session.target, cr3, rip)
+                .then(|| session.target.hypercall_caller(cr3, rip, processor))
+                .flatten())
+        })?;
+        Ok(caller.map(|info| HypercallCaller::new(self.owner.derive(py), info)))
     }
 
     /// Memory through the page tables that this processor has loaded (its CR3)

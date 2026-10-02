@@ -1772,6 +1772,18 @@ class Cpu:
         """
         Decode the GDT of this processor (`!gdt`).
         """
+    def hypercall_caller(self, /) -> HypercallCaller |None:
+        """
+        The virtual processor whose hypercall this processor handles, for a
+        vCPU halted in the Windows hypervisor, as `!hvcall` finds it: the
+        guest partition's VP that it serves, else the root partition's VP on
+        this processor. A `when=` callback of `breakpoints.add_hypercall()`
+        reads the caller's registers and memory through it
+        (`stop.cpu.hypercall_caller()`), as the breakpoint's condition does.
+        `None` when the vCPU is not halted in the hypervisor, or the caller is
+        unknown: the partitions cannot be walked, or no saved state of a VP
+        that the processor runs is current.
+        """
     @property
     def id(self, /) -> str:
         """
@@ -5289,6 +5301,71 @@ class Hypercall(BaseRecord):
     def variable_header(self, /) -> bool:
         """
         Whether the call takes a variable-size header.
+        """
+
+@final
+class HypercallCaller:
+    """
+    The virtual processor whose hypercall a processor halted in the Windows
+    hypervisor handles (`cpu.hypercall_caller()`), found as `!hvcall` and a
+    hypercall breakpoint's filter find it: the call as the caller made it,
+    and the caller's memory, which a hypercall breakpoint's condition reads.
+    """
+    def __repr__(self, /) -> str: ...
+    @property
+    def hypercall(self, /) -> DecodedHypercall |None:
+        """
+        The call with its input decoded, as `!hvcall` shows it, or `None`
+        when the caller's registers are not known.
+        """
+    @property
+    def partition_id(self, /) -> int:
+        """
+        The caller's partition ID (the root partition's is 1).
+        """
+    def read(self, /, address: int, size: int, physical: bool = False) -> bytes:
+        """
+        Read `size` bytes of the caller's memory, as a hypercall
+        breakpoint's condition reads it: guest virtual memory through the
+        calling VTL's page tables (its CR3), or with `physical=True` guest
+        physical memory (a slow call's input, at the GPA in `rdx`), both
+        through its EPT. The memory is read now, so read it while the target
+        is halted at the call. Raises `NtoseyeError` when the caller's state
+        at the call is not known, when a page is not mapped, and for a
+        virtual address unless the caller is in 4-level long-mode paging.
+        The memory is read-only.
+        """
+    @property
+    def registers(self, /) -> dict[str, int]:
+        """
+        The caller's registers at its VMCALL by name (`rcx`, `rdx`, `r8`,
+        `rip`, `cr3`, ...), as a hypercall breakpoint's condition sees them:
+        RIP, RSP, flags, control and segment registers from the calling
+        VTL's eVMCS, and the general-purpose registers when ntoseye
+        recovered them. Empty when the state ntoseye found is an older
+        exit's.
+        """
+    @property
+    def root(self, /) -> bool:
+        """
+        Whether the caller is a VP of the root partition (Windows itself)
+        rather than of a guest partition.
+        """
+    def to_dict(self, /) -> dict[str, Any]:
+        """
+        Return the caller as a plain `dict` (`partition_id`, `root`,
+        `vp_index`, `vtl`, `registers`, and `hypercall`, the call's dict or
+        `None`).
+        """
+    @property
+    def vp_index(self, /) -> int:
+        """
+        The caller's VP index in its partition.
+        """
+    @property
+    def vtl(self, /) -> int:
+        """
+        The VTL that made the call.
         """
 
 @final
