@@ -63,6 +63,20 @@ impl BreakpointManager {
         )
     }
 
+    /// Whether a hardware breakpoint at `address` with `config` is a VTL1
+    /// one, held to VTL1's rules: one in the secure kernel, or set while
+    /// the scope is VTL1's. A hypercall or VM-exit breakpoint is on the
+    /// hypervisor's code whatever the scope, so one set while the target is
+    /// stopped in VTL1 is not.
+    pub fn vtl1_rules_apply(
+        debugger: &Target,
+        address: VirtAddr,
+        config: &BreakpointConfig,
+    ) -> bool {
+        let hypervisor = config.hypercall.is_some() || config.vm_exit.is_some();
+        !hypervisor && (debugger.in_secure_address_space() || debugger.is_secure_address(address))
+    }
+
     pub fn add_hardware_configured(
         &mut self,
         client: &mut dyn DebugBackend,
@@ -76,7 +90,7 @@ impl BreakpointManager {
         if !client.supports_watchpoints() {
             return Err(Error::NotSupported);
         }
-        if debugger.in_secure_address_space() || debugger.is_secure_address(address) {
+        if Self::vtl1_rules_apply(debugger, address, &config) {
             if !client.hardware_breakpoints_trap_in_host()
                 || access != HwBreakpointAccess::Execute
                 || len != 1
@@ -219,9 +233,40 @@ impl BreakpointManager {
 #[cfg(test)]
 mod tests {
     use crate::breakpoints::test_backend::SlotRecorder;
-    use crate::breakpoints::{BreakpointManager, HardwareBreakpoint};
+    use crate::breakpoints::{BreakpointConfig, BreakpointManager, HardwareBreakpoint};
     use crate::dbg_backend::HwBreakpointAccess;
+    use crate::guest::vm_exits::ExitFilter;
+    use crate::session::session_over_memory;
     use crate::types::VirtAddr;
+
+    /// Set while the target is stopped in VTL1, an ordinary breakpoint is a
+    /// VTL1 one, but a VM-exit (or hypercall) breakpoint is on the
+    /// hypervisor's code and must not be refused as a trustlet breakpoint.
+    #[test]
+    fn a_hypervisor_breakpoint_set_from_vtl1_is_not_a_vtl1_one() {
+        let mut session = session_over_memory(0x1000, &[0u8; 0x40]);
+        session.target.enter_secure_scope(0x5000);
+        assert!(session.target.in_secure_address_space());
+        let entry = VirtAddr(0xfffff83c_f55a843d);
+        let exit = BreakpointConfig {
+            vm_exit: Some(ExitFilter {
+                reason: 31,
+                partition: None,
+                vp: None,
+            }),
+            ..BreakpointConfig::default()
+        };
+        assert!(!BreakpointManager::vtl1_rules_apply(
+            &session.target,
+            entry,
+            &exit
+        ));
+        assert!(BreakpointManager::vtl1_rules_apply(
+            &session.target,
+            entry,
+            &BreakpointConfig::default()
+        ));
+    }
 
     #[test]
     fn has_enabled_hardware_breakpoints_tracks_enabled_hw_bps() {
