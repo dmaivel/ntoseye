@@ -310,6 +310,7 @@ The second thread of `cmd.exe` is a thread-pool worker that has not run since th
 
 ## Where to go next
 
+- [`guest_partition.py`](https://github.com/dmaivel/ntoseye/blob/master/examples/standalone/guest_partition.py) and [`hypercall_watch.py`](https://github.com/dmaivel/ntoseye/blob/master/examples/standalone/hypercall_watch.py) do these steps as scripts that find the guests and handle their refusals.
 - [Guest partitions](guest-partitions.md) explains the partition view and its limits, and reads the memory of any guest, such as WSL2.
 - [Hypercalls and VM exits](hypercalls.md) explains hypercall breakpoints, conditions on the caller's registers and memory, and breakpoints on VM exits.
 - [Partitions and virtual processors](partitions.md) shows the registers of any VP, the page permissions of each VTL's EPT, and what each VTL intercepts.
