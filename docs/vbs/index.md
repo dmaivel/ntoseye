@@ -1,6 +1,6 @@
 # VBS and the Windows hypervisor
 
-When virtualization-based security (VBS), Hyper-V, WSL2, or Windows Sandbox runs, Windows starts its own hypervisor (`hvix64.exe` on Intel) beneath NT, which then runs as the hypervisor's root partition. With VBS, the hypervisor also runs a second kernel, the secure kernel, in Virtual Trust Level 1 (VTL1), and each Hyper-V VM, WSL2 instance, or Windows Sandbox is a guest partition. `ntoseye` reads all of them from the host:
+When virtualization-based security (VBS), Hyper-V, WSL2, or Windows Sandbox runs, Windows starts its own hypervisor (`hvix64.exe` on Intel) beneath NT, which then runs as the hypervisor's root partition. With VBS, the hypervisor also runs a second kernel, the secure kernel, in Virtual Trust Level 1 (VTL1), and each Hyper-V VM, WSL2 instance, or Windows Sandbox is a guest partition. `ntoseye` reads all of them from the host. [Debugging a Windows Sandbox](sandbox-tutorial.md) walks through one session, from finding the Sandbox to its processes and the hypercalls it makes. The pages below explain each part:
 
 - [The secure kernel (VTL1)](secure-kernel.md): its memory, modules, and trustlets, and breakpoints and steps in its code.
 - [Partitions and virtual processors](partitions.md): the hypervisor's partitions and VPs, the page permissions that each VTL's EPT gives, each VTL's eVMCS and intercepts, and the registers of any VP.

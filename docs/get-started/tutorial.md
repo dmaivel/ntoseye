@@ -206,3 +206,4 @@ kdnet:p1.1> q
 - [Coming from WinDbg](windbg.md) lists what matches WinDbg and what is different.
 - [Breakpoints](../using/breakpoints.md) explains conditions, breakpoints limited to one process or thread, and commands that run when a breakpoint hits.
 - [Python SDK](../scripting/sdk.md) shows how to do all of these tasks from a script.
+- [Debugging a Windows Sandbox](../vbs/sandbox-tutorial.md) inspects a guest that runs inside the VM, under the Windows hypervisor.

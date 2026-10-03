@@ -107,6 +107,7 @@ platforms/wow64
 :caption: VBS and the Windows hypervisor
 
 Overview <vbs/index>
+vbs/sandbox-tutorial
 vbs/secure-kernel
 vbs/partitions
 vbs/guest-partitions
