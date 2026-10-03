@@ -28,6 +28,7 @@ use crate::unwind::{
     build_parked_thread_recovered_stack, build_parked_thread_stack,
     build_stacktrace_with_register_values, build_thread_stacktrace, format_symbol, function_entry,
     function_range, guest_vp_running, halted_in_windows_hypervisor, resolve_thread_trace_context,
+    saved_vtls,
 };
 
 /// `DBG_STATUS_WORKER`, the status the kernel's debugger worker passes to
@@ -550,6 +551,75 @@ impl Session {
         let trace =
             build_stacktrace_with_register_values(&self.target, &self.register_map, &live, limit);
         Ok(Some((trace, live)))
+    }
+
+    /// `vcpu`'s stack walked from its own registers, whatever the inspection
+    /// context selected: halted in the Windows hypervisor, the hypervisor's
+    /// frames (what `.cxr` then `k` shows), else the code it runs. With
+    /// `vtl`, the walk starts where that VTL left off, as the hypervisor
+    /// saved it (what `.vtlcxr <vtl>` then `k` shows): NT's stack for 0, the
+    /// secure kernel's for 1, whose symbols it loads first.
+    pub fn vcpu_backtrace(
+        &mut self,
+        vcpu: &str,
+        vtl: Option<u8>,
+        limit: usize,
+    ) -> Result<RecoveredStackTrace> {
+        let registers = self
+            .read_vcpu_registers(vcpu)?
+            .ok_or_else(|| Error::DebugInfo(format!("{vcpu}'s registers are unavailable")))?;
+        let live = self.register_map.to_hashmap(&registers);
+        let in_hypervisor = match (live.get(self.target.arch().dtb_register()), live.get("rip")) {
+            (Some(&cr3), Some(&rip)) => {
+                halted_in_windows_hypervisor(&self.target, cr3, rip).then_some((cr3, rip))
+            }
+            _ => None,
+        };
+        let Some(vtl) = vtl else {
+            return Ok(match in_hypervisor {
+                Some(_) => build_stacktrace_with_register_values(
+                    &self.target,
+                    &self.register_map,
+                    &live,
+                    limit,
+                ),
+                None => build_thread_stacktrace(
+                    &self.target,
+                    &self.register_map,
+                    &registers,
+                    windows_thread_on_backend_thread(&self.target, vcpu).as_ref(),
+                    limit,
+                ),
+            });
+        };
+        let Some((cr3, rip)) = in_hypervisor else {
+            return Err(Error::DebugInfo(format!(
+                "{vcpu} is not halted in the Windows hypervisor, so no VTL state is saved"
+            )));
+        };
+        let saved = saved_vtls(
+            &self.target,
+            cr3,
+            rip,
+            processor_index_from_backend_thread_id(vcpu),
+        )?;
+        let chosen = saved
+            .iter()
+            .find(|saved| saved.context.vtl == vtl)
+            .ok_or_else(|| {
+                Error::DebugInfo(format!(
+                    "no saved VTL{vtl} state belongs to {vcpu}'s virtual processor"
+                ))
+            })?;
+        if vtl == 1 {
+            self.target.load_secure_kernel_symbols()?;
+        }
+        Ok(build_stacktrace_with_register_values(
+            &self.target,
+            &self.register_map,
+            &chosen.context.registers(),
+            limit,
+        ))
     }
 
     /// The stack of the thread `vcpu` runs, from that vCPU's context; `None`

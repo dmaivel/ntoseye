@@ -1794,6 +1794,18 @@ class Cpu:
     def __eq__(self, other: object, /) -> bool: ...
     def __hash__(self, /) -> int: ...
     def __repr__(self, /) -> str: ...
+    def backtrace(self, /, limit: int = 64, vtl: int |None = None) -> list[Frame]:
+        """
+        Walk this processor's stack from its own registers, whatever `.thread`,
+        `.cxr` or `.frame` selected. Halted in the Windows hypervisor, the
+        frames are the hypervisor's (`hv+...`), as `.cxr` then `k` shows them;
+        elsewhere they are the code it runs. With `vtl`, the walk starts where
+        that VTL left off, as the hypervisor saved it (`.vtlcxr`): NT's stack
+        for 0, the secure kernel's for 1. A `vtl` needs the processor halted
+        in the hypervisor. Frames outside NT's address spaces have no locals.
+        `thread.backtrace()` walks a Windows thread instead, from where NT left
+        off when its processor is in the hypervisor.
+        """
     def gdt(self, /) -> Gdt:
         """
         Decode the GDT of this processor (`!gdt`).

@@ -198,6 +198,14 @@ for cpu in dbg.cpus:
             print("   ", frame.symbol)              # nt!HalProcessorIdle+0xf, nt!PpmIdleDefaultExecute+0x2b, ...
 ```
 
+`cpu.backtrace(limit=64, vtl=None)` walks the processor's own stack from its registers, whatever `.thread`, `.cxr` or `.frame` selected. On a vCPU halted in the hypervisor, these are the hypervisor's frames (`hv+0x3a6bde`, ...), as {command}`.cxr` and then {command}`k` show them, and they belong to no Windows thread. With `vtl`, the walk starts where that VTL left off, as the hypervisor saved it ({command}`.vtlcxr`): `vtl=0` walks the NT stack, and `vtl=1` the secure kernel's, whose symbols it loads first. A `vtl` needs the processor to be halted in the hypervisor, and raises `NtoseyeError` otherwise. Frames outside NT's address spaces have no locals.
+
+```python
+cpu = next(cpu for cpu in dbg.cpus if cpu.saved_vtl)
+print([frame.symbol for frame in cpu.backtrace(limit=4)])         # ['hv+0x3a6bde', 'hv+0x218fbd', ...]
+print([frame.symbol for frame in cpu.backtrace(limit=4, vtl=1)])  # ['hvcall!VtlReturn64+0xd', 'securekernel!SkpReturnFromNormalMode']
+```
+
 A processor that runs a guest partition's VP, such as WSL2's, enters the hypervisor for that VP's exits. `cpu.serving` is that VP, as the stop header's `serving` line names it, or `None` when the processor runs one of the root partition's VPs. A `ServedVp` has `partition_id`, `vp_index`, `vtl`, `rip` (where that VTL left off), `current` (whether the processor handles this VP's exit now, rather than having run it last), `exit_reason` and `exit_reason_name`, `general_registers`, and `hypercall`, each as in `SavedVtlState`.
 
 A `DecodedHypercall` has the hypercall input value (`input_value`, RCX), `code`, `name` (the TLFS name, or `None`), `fast`, `variable_header_size` (in qwords), `nested`, `rep_start` and `rep_count`, and `input_gpa` and `output_gpa` (`None` for a fast call). `fields` lists the fields of the input as the Hyper-V TLFS lays them out, each a `HypercallField` with `name`, `offset`, `size`, `value`, and `meaning` (a name for the value, such as `HV_PARTITION_ID_SELF`, `VPs 0-3`, or a register's TLFS name, or `None`). `elements` lists a rep call's input list, each a `HypercallElement` with its `index` and its `fields`. `decoded` is `False` for a call whose layout ntoseye does not know, whose `fields` are then raw qwords (`Input[0]`, ...), and `unavailable` says why some of the input is missing: an unreadable input page, or an XMM fast call's XMM registers when their saved values are not known. `summary` is the one-line form of the stop header ([VBS](../vbs/hypercalls.md#hypercall-breakpoints-and-decoding)).

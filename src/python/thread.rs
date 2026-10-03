@@ -19,6 +19,7 @@ use super::types::{Struct, enum_value};
 use super::{err, view_dict};
 use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::guest::ProcessInfo;
+use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::{Session, VcpuInfo};
 use crate::symbols::CodeFrame;
 use crate::target::sched::ApcSelector;
@@ -914,6 +915,52 @@ impl Cpu {
                 .flatten())
         })?;
         Ok(caller.map(|info| HypercallCaller::new(self.owner.derive(py), info)))
+    }
+
+    /// Walk this processor's stack from its own registers, whatever `.thread`,
+    /// `.cxr` or `.frame` selected. Halted in the Windows hypervisor, the
+    /// frames are the hypervisor's (`hv+...`), as `.cxr` then `k` shows them;
+    /// elsewhere they are the code it runs. With `vtl`, the walk starts where
+    /// that VTL left off, as the hypervisor saved it (`.vtlcxr`): NT's stack
+    /// for 0, the secure kernel's for 1. A `vtl` needs the processor halted
+    /// in the hypervisor. Frames outside NT's address spaces have no locals.
+    /// `thread.backtrace()` walks a Windows thread instead, from where NT left
+    /// off when its processor is in the hypervisor.
+    #[pyo3(signature = (limit=64, vtl=None))]
+    fn backtrace(&self, py: Python<'_>, limit: usize, vtl: Option<u8>) -> PyResult<Vec<Frame>> {
+        let context = self.context();
+        let (frames, thread, process) = self.owner.with_in(py, &context, |session| {
+            require_halted(session, "cpu.backtrace")?;
+            let trace = session
+                .vcpu_backtrace(&self.id, vtl, limit.clamp(1, 4096))
+                .map_err(err)?;
+            // A walk in NT's address spaces is the stack of the thread the
+            // processor runs, which a frame's locals are read for.
+            let (nt, process) = match Space::for_root(&session.target, trace.dtb) {
+                Space::Kernel => (true, None),
+                Space::Process(process) => (true, Some(process)),
+                _ => (false, None),
+            };
+            let thread = nt
+                .then(|| windows_thread_on_backend_thread(&session.target, &self.id))
+                .flatten();
+            Ok((trace.frames, thread, process))
+        })?;
+        let owner = self.owner.derive(py);
+        Ok(frames
+            .into_iter()
+            .enumerate()
+            .map(|(index, frame)| {
+                Frame::from_recovered(
+                    owner.clone_ref(py),
+                    thread.clone(),
+                    process.clone(),
+                    index,
+                    frame,
+                    false,
+                )
+            })
+            .collect())
     }
 
     /// Memory through the page tables that this processor has loaded (its CR3)

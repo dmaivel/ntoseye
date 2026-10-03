@@ -416,6 +416,30 @@ def test_child_partition_code_disassembles_from_its_memory(halted: Debugger) -> 
         assert [row.hex for row in physical] == [row.hex for row in in_page]
 
 
+def test_a_cpu_walks_the_hypervisor_or_where_a_saved_vtl_left_off(halted: Debugger) -> None:
+    """A vCPU halted in the Windows hypervisor walks from its live RIP, in the
+    hypervisor, with frames of no Windows thread, and from where each VTL left
+    off as the hypervisor saved it; a vCPU elsewhere has no saved VTL to walk
+    from."""
+    cpus = list(halted.cpus)
+    found = next(((cpu, cpu.saved_vtl) for cpu in cpus if cpu.saved_vtl), None)
+    if found is None:
+        pytest.skip("no vCPU halted in the Windows hypervisor with saved VTL state (needs VBS and hv-evmcs)")
+    cpu, saved = found
+    frames = cpu.backtrace(limit=8)
+    assert frames and frames[0].ip == cpu.rip and frames[0].thread is None
+    for state in saved:
+        walked = cpu.backtrace(limit=8, vtl=state.vtl)
+        assert walked and walked[0].ip == state.rip, f"VTL{state.vtl}"
+    elsewhere = next(
+        (other for other in cpus if not other.saved_vtl and not (other.symbol or "").startswith("hv")),
+        None,
+    )
+    if elsewhere is not None:
+        with pytest.raises(ntoseye.NtoseyeError, match="not halted in the Windows hypervisor"):
+            elsewhere.backtrace(vtl=0)
+
+
 def gdb_secure_kernel(halted: Debugger) -> ntoseye.SecureKernel:
     if os.environ.get("NTOSEYE_TEST_BACKEND") != "gdb":
         pytest.skip("VTL1 hardware execution requires the host GDB backend")
