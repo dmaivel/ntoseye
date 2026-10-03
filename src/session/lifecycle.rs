@@ -404,6 +404,9 @@ impl Session {
     /// when both operations succeed. Any failure explicitly prepares the
     /// backend to leave the target halted.
     pub fn cleanup_for_exit(&mut self) -> Result<()> {
+        // The breakpoints, traps and backend to clean up are the target's,
+        // which a partition view keeps aside while it is shown.
+        self.leave_partition();
         // Halting is only for restoring sites; with none to restore a passive
         // backend (which cannot interrupt) exits cleanly too.
         let halted = if self.backend.is_running() && self.has_installed_sites() {

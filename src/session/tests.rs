@@ -17,6 +17,7 @@ use crate::guest::ModuleInfo;
 use crate::kd::context::{REGISTER_BUFFER_SIZE, build_register_map};
 use crate::kd::context_arm64;
 use crate::memory::PAGE_SIZE;
+use crate::partition_backend::{PartitionBackend, PartitionVp};
 use crate::target::SelectedFrame;
 use crate::types::{Arch, VirtAddr};
 use iced_x86::{Decoder, DecoderOptions};
@@ -2407,6 +2408,37 @@ fn exiting_takes_the_bugcheck_trap_back_out_of_the_guest() {
     assert_eq!(*sites.lock(), [(0x1_4000, false)]);
     assert_eq!(interrupts.load(Ordering::Relaxed), 1);
     assert!(!session.has_installed_sites());
+}
+
+/// A session that exits while a partition view is shown cleans up the
+/// target: its trap comes out through the target's backend, not the view's,
+/// which refuses breakpoints, and the view is gone.
+#[test]
+fn exiting_from_a_partition_view_takes_the_targets_trap_out() {
+    let backend = MockBackend {
+        allow_breakpoints: true,
+        ..MockBackend::default()
+    };
+    let sites = Arc::clone(&backend.site_writes);
+    let mut session = session_with_mock(backend);
+    session.bugcheck_trap = Some(TrapSite {
+        address: VirtAddr(0x1_4000),
+        original: vec![0x48],
+    });
+    let view = PartitionBackend::new(
+        session.register_map.clone(),
+        vec![PartitionVp {
+            id: "p4.1".to_string(),
+            registers: vec![0; REGISTER_BUFFER_SIZE],
+        }],
+    );
+    let partition_target = session_over_memory(0x1000, &[0; 0x100]).target;
+    session.show_partition(4, partition_target, Box::new(view), "p4.1".to_string());
+
+    session.cleanup_for_exit().unwrap();
+
+    assert_eq!(*sites.lock(), [(0x1_4000, false)]);
+    assert_eq!(session.partition(), None);
 }
 
 /// Where the mock's `nt!DbgLoadImageSymbols` trap sits.

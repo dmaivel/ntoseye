@@ -943,6 +943,9 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         Ok(())
     })();
 
+    // The breakpoints, traps and backend to clean up are the target's, which
+    // a partition view keeps aside while it is shown.
+    state.ctx.leave_partition();
     let was_running_on_exit = state.ctx.backend.is_running();
     let mut resume_on_exit = !was_running_on_exit;
     if was_running_on_exit && state.ctx.has_installed_sites() {

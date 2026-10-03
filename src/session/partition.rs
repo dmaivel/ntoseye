@@ -82,17 +82,29 @@ impl Session {
             .map(|vp| vp.id.clone())
             .ok_or_else(|| Error::Hypervisor(format!("partition {partition:#x} has no VPs")))?;
         let backend = Box::new(PartitionBackend::new(self.register_map.clone(), vps));
+        self.show_partition(partition, target, backend, first);
+        Ok(())
+    }
+
+    /// Swap `target` and `backend`, partition `partition`'s, in for the
+    /// target's, set the target's breakpoints aside, and select `thread`.
+    pub fn show_partition(
+        &mut self,
+        partition: u64,
+        target: Target,
+        backend: Box<dyn DebugBackend>,
+        thread: String,
+    ) {
         let reconciled = target.symbols.load_generation();
         self.partition_view = Some(PartitionView {
             partition,
             target: mem::replace(&mut self.target, target),
             backend: mem::replace(&mut self.backend, backend),
-            thread: mem::replace(&mut self.current_thread, first),
+            thread: mem::replace(&mut self.current_thread, thread),
             breakpoints: mem::replace(&mut self.breakpoints, BreakpointManager::new()),
             symbols_reconciled_at: mem::replace(&mut self.symbols_reconciled_at, reconciled),
         });
         self.refresh_context_for_current_thread();
-        Ok(())
     }
 
     /// Put the target back in place of the partition view shown, if any.
