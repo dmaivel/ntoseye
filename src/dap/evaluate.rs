@@ -32,8 +32,15 @@ impl Server {
             return Ok(Some(json!({"result": "", "variablesReference": 0})));
         }
         let context = arg_str(args, "context").unwrap_or_else(|| "repl".to_string());
-        self.select_named_frame(args, "frameId")?;
         if context == "repl" {
+            // The console runs in its own inspection context, which the
+            // frame the client names only refines. A frame id a console
+            // command has invalidated, which the client keeps sending until
+            // it walks the stack again, leaves that context as it is rather
+            // than refusing every command until then.
+            if let Ok(handle) = self.frame_handle(args, "frameId") {
+                self.select_frame(handle)?;
+            }
             let before = self.inspection_context();
             let text = self.run_console_command(&expression)?;
             if self.inspection_context() != before {
@@ -44,6 +51,7 @@ impl Server {
                 "variablesReference": 0,
             })));
         }
+        self.select_named_frame(args, "frameId")?;
         // A watch or hover on a frame reads that frame's address space, as its
         // Locals do; only the Debug Console follows a `.process` scope.
         let attached = match args.get("frameId") {

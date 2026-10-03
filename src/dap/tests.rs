@@ -384,6 +384,30 @@ fn a_console_cxr_invalidates_the_clients_view() {
     );
 }
 
+/// A console command that moves the context drops the frame ids handed out,
+/// and the client keeps naming its last frame until it walks the stack
+/// again. The next console command runs in the console's context instead
+/// of failing; a watch, which needs that frame's registers, still refuses.
+#[test]
+fn a_console_command_with_a_stale_frame_id_still_runs() {
+    let session = session_over_memory(0x1000, &[0u8; 0x100]);
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, _sink) = server_with_sink(Some(session), rx);
+
+    let response = server
+        .on_evaluate(&json!({"expression": "? 0x1234+0x1111", "context": "repl", "frameId": 7}))
+        .unwrap()
+        .unwrap();
+
+    let result = response["result"].as_str().unwrap();
+    assert!(result.contains("2345"), "{result}");
+    let watch = server.on_evaluate(&json!({"expression": "1+1", "context": "watch", "frameId": 7}));
+    assert!(
+        watch.is_err_and(|error| error.contains("stale frame id 7")),
+        "a watch on a stale frame must refuse"
+    );
+}
+
 /// A client walks every stopped thread. Showing another vCPU's stack must not
 /// select that vCPU, which would drop the context the console selected.
 #[test]
