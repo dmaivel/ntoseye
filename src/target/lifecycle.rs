@@ -110,7 +110,70 @@ impl Target {
 
         let triage_modules_cache = triage_modules;
 
-        Ok(Self {
+        Ok(Self::from_parts(
+            phys,
+            symbols,
+            guest,
+            triage_modules_cache,
+            notices,
+        ))
+    }
+
+    /// Build a target from KD-provided kernel metadata and KD-backed physical
+    /// memory. This bypasses host RAM scanning, which is unavailable for remote
+    /// or bare-metal targets.
+    pub fn with_remote_phys(
+        phys: Arc<PhysMem>,
+        kernel_dtb: Dtb,
+        kernel_base: VirtAddr,
+        arch: Arch,
+    ) -> Result<Self> {
+        let symbols = Arc::new(SymbolStore::new());
+        let guest = Guest::at(
+            phys.clone(),
+            symbols.clone(),
+            KernelLocation {
+                dtb: kernel_dtb,
+                base: kernel_base,
+                arch,
+            },
+        )?;
+        let _ = guest.load_all_kernel_module_symbols(&phys, &symbols);
+        Ok(Self::from_parts(
+            phys,
+            symbols,
+            Some(guest),
+            None,
+            Vec::new(),
+        ))
+    }
+
+    /// Build a target whose kernel is mapped by `kernel_dtb`, found from
+    /// that root alone without scanning memory for page tables: a
+    /// hypervisor partition's, through a page-table root of one of its VPs.
+    pub fn with_kernel_dtb(phys: Arc<PhysMem>, kernel_dtb: Dtb) -> Result<Self> {
+        let symbols = Arc::new(SymbolStore::new());
+        let guest = Guest::new_with_dtb(phys.clone(), symbols.clone(), kernel_dtb)?;
+        let _ = guest.load_all_kernel_module_symbols(&phys, &symbols);
+        Ok(Self::from_parts(
+            phys,
+            symbols,
+            Some(guest),
+            None,
+            Vec::new(),
+        ))
+    }
+
+    /// A target over `phys` and `guest`, with every view and selection at
+    /// its default.
+    fn from_parts(
+        phys: Arc<PhysMem>,
+        symbols: Arc<SymbolStore>,
+        guest: Option<Guest>,
+        triage_modules_cache: Option<Vec<ModuleInfo>>,
+        notices: Vec<String>,
+    ) -> Self {
+        Self {
             phys,
             symbols,
             guest,
@@ -138,59 +201,7 @@ impl Target {
             test_current_threads: None,
             #[cfg(test)]
             test_thread_stacks: HashMap::new(),
-        })
-    }
-
-    /// Build a target from KD-provided kernel metadata and KD-backed physical
-    /// memory. This bypasses host RAM scanning, which is unavailable for remote
-    /// or bare-metal targets.
-    pub fn with_remote_phys(
-        phys: Arc<PhysMem>,
-        kernel_dtb: Dtb,
-        kernel_base: VirtAddr,
-        arch: Arch,
-    ) -> Result<Self> {
-        let symbols = Arc::new(SymbolStore::new());
-        let guest = Guest::at(
-            phys.clone(),
-            symbols.clone(),
-            KernelLocation {
-                dtb: kernel_dtb,
-                base: kernel_base,
-                arch,
-            },
-        )?;
-        let _ = guest.load_all_kernel_module_symbols(&phys, &symbols);
-
-        Ok(Self {
-            phys,
-            symbols,
-            guest: Some(guest),
-            debugger_data: None,
-            process: None,
-            secure_root: None,
-            effmach: None,
-            triage_modules_cache: None,
-            context_dtb_override: None,
-            registers: None,
-            expression_scope: ExpressionScope::Context,
-            selected_frame: None,
-            windows_thread_selection: None,
-            user_vars: HashMap::new(),
-            results: Vec::new(),
-            results_origin: None,
-            last_exception_code: None,
-            breakpoint_stop: None,
-            interrupt: Arc::new(AtomicBool::new(false)),
-            interrupt_requests: Arc::new(AtomicU64::new(0)),
-            notices: Vec::new(),
-            generation: Arc::new(AtomicU64::new(0)),
-            site_journal: None,
-            #[cfg(test)]
-            test_current_threads: None,
-            #[cfg(test)]
-            test_thread_stacks: HashMap::new(),
-        })
+        }
     }
 
     /// How many times the guest has been rebuilt; see the field.
@@ -202,6 +213,19 @@ impl Target {
     /// from another thread without a trip to the session.
     pub fn generation_counter(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.generation)
+    }
+
+    /// Count rebuilds on `counter`, the counter of the target this one
+    /// stands in for (a partition view's), so a host that holds that
+    /// counter sees this target's rebuilds too.
+    pub fn share_generation(&mut self, counter: Arc<AtomicU64>) {
+        self.generation = counter;
+    }
+
+    /// Count a rebuild without one, so a host takes the handles it minted
+    /// for stale: a partition view swaps another guest in under them.
+    pub fn invalidate_handles(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn debugger_data(&self) -> Option<&DebuggerDataBlock> {

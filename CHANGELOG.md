@@ -15,7 +15,7 @@ Keeping this file:
 
 ## Unreleased
 
-ntoseye can now debug the Windows hypervisor itself: walk its partitions and virtual processors, read and disassemble the memory of guests such as WSL2, decode hypercalls and break on them by caller, and unwind its stacks. Kernel module unloads can now stop the debugger, as loads do.
+ntoseye can now debug the Windows hypervisor itself: walk its partitions and virtual processors, read and disassemble the memory of guests such as WSL2, inspect a Windows Sandbox's kernel with its symbols, decode hypercalls and break on them by caller, and unwind its stacks. Kernel module unloads can now stop the debugger, as loads do.
 
 ### Added
 
@@ -33,6 +33,7 @@ ntoseye can now debug the Windows hypervisor itself: walk its partitions and vir
 - `!hvbp <call> [partition [vp]]` stops on a hypercall only from the given caller; its condition is evaluated on the caller's registers and reads the caller's memory, so `$pqwo(rdx)` tests a slow call's input. The SDK has `Breakpoints.add_hypercall()`, `Breakpoint.hypercall`, and `Cpu.hypercall_caller()`, which gives a `when=` callback the caller's registers, decoded call and memory.
 - `!hvexit <reason> [partition [vp]]` stops on a VM exit by its reason (`cpuid`, `rdmsr`, `wrmsr`, `ept_violation`, or the number), only from the given caller; its condition sees the caller's registers at the exit, so `!hvexit wrmsr if @rcx==0x6e0` stops on writes of `IA32_TSC_DEADLINE`. The guest runs far slower while it is set, as every exit is checked. The SDK has `Breakpoints.add_exit()` and `Breakpoint.vm_exit`.
 - `!hvr [partition vp [vtl]]` shows the registers of any hypervisor VP, such as a WSL2 VP blocked in `HLT` that no processor runs: those of the vCPU that runs it, of the exit a vCPU handles for it, or that it saved at its last exit. The SDK has `VirtualProcessor.registers()`.
+- `.partition <id>` inspects the Windows guest of a hypervisor partition, such as a Windows Sandbox, in place of the target, read-only: `lm`, `!process`, `dt`, `u` and `k` read its kernel with its symbols, and its VPs are the threads. `.partition 1` returns to the target. The SDK has `Debugger.select_partition()` and `Debugger.partition`.
 - Hypervisor stacks unwind exactly when a copy of the running `hvix64.exe` is in the symbol cache or a local store (`.fetchimage /f <file>`, `Symbols.import_image()` add one), and otherwise from function prologs, marked `[prolog]`.
 - `.vtlcxr 1` selects the state the hypervisor saved for VTL1, so `k`, `r`, `u` and expressions inspect the secure kernel where it left off (read-only); `.vtlcxr` returns to VTL0.
 - In DAP, a vCPU halted in the hypervisor shows the hypervisor's own frames first, then a label frame, then the saved VTL state's frames.

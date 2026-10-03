@@ -2250,6 +2250,12 @@ class Debugger:
         reload.
         """
     @property
+    def partition(self, /) -> int |None:
+        """
+        The ID of the hypervisor partition inspected in place of the target
+        (see `select_partition`), or `None` while the target is.
+        """
+    @property
     def physical(self, /) -> Memory:
         """
         Guest-physical memory, without address translation.
@@ -2292,6 +2298,19 @@ class Debugger:
         `types`, `modules`, and `trustlets`. ntoseye finds it in host memory on
         first use and raises `NtoseyeError` if VBS is not running or the backend
         cannot read host memory. This feature is experimental.
+        """
+    def select_partition(self, /, partition_id: int) -> None:
+        """
+        Inspect the Windows guest that hypervisor partition `partition_id`
+        runs (a Windows Sandbox, a Hyper-V VM) in place of the target, as
+        `.partition` does: `memory`, `processes`, `modules`, `symbols`,
+        `types` and `threads` then read that guest, through its EPT, and the
+        vCPUs are its VPs, with the registers they have now. The view is
+        read-only and the target stays halted: running, stepping, breakpoints
+        and writes raise `NtoseyeError` until the root partition's ID (1)
+        returns to the target. Handles minted on either side of a switch go
+        stale (`generation` advances). The target must be halted. This
+        feature is experimental.
         """
     def step(self, /, until: Literal["call", "ret", "branch"] |None = None, timeout: float |None = None) -> Stop:
         """

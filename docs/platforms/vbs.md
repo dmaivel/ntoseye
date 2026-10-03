@@ -297,6 +297,35 @@ partition 0x6 VP 1 VTL0  from its last exit
 
 The hypervisor's VM-exit entry saves a VP's general-purpose registers in a register block that the VP object points at, in a 2 MiB region of the VP's own. A processor's root maps only the region of the VP that the processor runs, so a waiting VP's block is mapped nowhere, and `ntoseye` reads it through the region's page directory entry, which a descriptor that the VP object points at keeps for the hypervisor to map it again. `hvix64` has no public symbols, so `ntoseye` finds where the pointers and fields are on the VPs whose regions are mapped when the target halts, and uses them only when they agree for all of those VPs. Builds before 10.0.17763 save the registers on the processor's stack instead, so `!hvr` has no general-purpose registers for a waiting VP there.
 
+### Inspecting a Windows guest partition
+
+{command}`.partition` `<partition-id>` inspects the Windows guest that a partition runs, such as a Windows Sandbox or a Hyper-V VM, in place of the target:
+
+- Its memory is read through the partition's EPT.
+- Its NT kernel is found from the page-table root of a VP in kernel mode, and its symbols are loaded.
+- Its VPs are the threads. {command}`~` lists them as `p<partition>.<VP index + 1>`, `~Ns` selects VP N, and each has the registers that {command}`!hvr` shows.
+
+{command}`lm`, {command}`!process`, {command}`.process`, {command}`!peb`, {command}`!thread`, {command}`dt`, {command}`db`, {command}`u` and {command}`k` then read that guest. The view is read-only, and the target stays halted while it is shown:
+
+- {command}`g`, steps, breakpoints, register writes and memory writes are refused.
+- The target's breakpoints are not listed, and they are kept as they were.
+- `.partition 1`, the root partition's ID, returns to the target.
+
+In the SDK, `dbg.select_partition(id)` switches and `dbg.partition` says which partition is inspected. Handles minted on one side of a switch raise `StaleHandleError` on the other.
+
+```text
+gdb:p01.01> .partition 4
+inspecting partition 0x4: nt at 0xfffff80586250000, VPs p4.1 p4.2 p4.3 p4.4
+
+partition:p4.1> k
+ 00 fffff805187199a0  fffff8058670f8bd  nt!PpmIdleGuestExecute+0x1d
+ 01 fffff805187199e0  fffff8058658bc54  nt!PpmIdleExecuteTransition+0x518
+ 02 fffff80518719b70  fffff8058658a9f0  nt!PoIdle+0x190
+ 03 fffff80518719c40  fffff805868ff684  nt!KiIdleLoop+0x54
+```
+
+The guest must be 64-bit Windows: a partition with no VP in 4-level long-mode paging, such as a VM still in its firmware, is refused. A Linux guest, such as WSL2's, has no NT kernel to find. Use {command}`!hvd` and {command}`!hvu` for those.
+
 ### Hypercalls
 
 {command}`!hvcalls` lists the hypercalls that the hypervisor implements, from its own hypercall table: the call code, the name that the Hyper-V TLFS gives it, whether it is a simple or a rep call (`+var` marks a variable-size input header), the sizes of its fixed input and output and of each rep element, and its handler. Codes that share the handler of the reserved code 0 are not implemented, and `-a` lists them too.

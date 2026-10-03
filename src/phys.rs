@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use crate::backend::MemoryOps;
 use crate::dmp::{DmpInfo, DmpMem};
 use crate::error::Result;
+use crate::guest::ept::EptMemory;
 use crate::host::VmHandle;
 use crate::kd::KdMemory;
 use crate::memory::{SectionViews, TranslationCache};
@@ -48,6 +49,18 @@ enum Source {
     },
     Dmp(Box<DmpMem>),
     Remote(KdMemory),
+    /// The guest physical memory of a partition of the Windows hypervisor
+    /// that runs inside the target (a Windows Sandbox, a Hyper-V VM), read
+    /// through the EPT that `eptp` roots from the target's own physical
+    /// memory, `host`. Read-only: a write would bypass the guest the way a
+    /// host write to a live VM does, and through another hypervisor too.
+    Partition {
+        host: Arc<PhysMem>,
+        eptp: u64,
+        mode_based: bool,
+        /// The guest physical ranges the EPT maps, as `(base, len)`.
+        runs: Vec<(u64, u64)>,
+    },
 }
 
 /// Whether a backend that controls a live VM has it halted, and which halt
@@ -136,6 +149,23 @@ impl PhysMem {
         Self::from_source(Source::Remote(memory))
     }
 
+    /// The guest physical memory of a hypervisor partition: `host`'s read
+    /// through the EPT `eptp` roots (with mode-based execute control when
+    /// `mode_based`), whose mapped ranges are `runs`.
+    pub fn partition(
+        host: Arc<PhysMem>,
+        eptp: u64,
+        mode_based: bool,
+        runs: Vec<(u64, u64)>,
+    ) -> Self {
+        Self::from_source(Source::Partition {
+            host,
+            eptp,
+            mode_based,
+            runs,
+        })
+    }
+
     /// Whether guest memory is read through the debug target (KD) rather
     /// than from the host, one request per line or page.
     pub fn reads_through_target(&self) -> bool {
@@ -153,7 +183,7 @@ impl PhysMem {
     pub fn guest_debug_aborts_vm(&self) -> bool {
         match &self.source {
             Source::Live { host, .. } => host.guest_debug_aborts_vm(),
-            Source::Dmp(_) | Source::Remote(_) => false,
+            Source::Dmp(_) | Source::Remote(_) | Source::Partition { .. } => false,
         }
     }
 
@@ -201,7 +231,7 @@ impl PhysMem {
     pub fn ram_base(&self) -> u64 {
         match &self.source {
             Source::Live { host, .. } => host.ram_base(),
-            Source::Dmp(_) | Source::Remote(_) => 0,
+            Source::Dmp(_) | Source::Remote(_) | Source::Partition { .. } => 0,
         }
     }
 
@@ -210,7 +240,7 @@ impl PhysMem {
     pub fn host_mapping(&self) -> Option<String> {
         match &self.source {
             Source::Live { host, .. } => Some(host.describe()),
-            Source::Dmp(_) | Source::Remote(_) => None,
+            Source::Dmp(_) | Source::Remote(_) | Source::Partition { .. } => None,
         }
     }
 
@@ -218,6 +248,7 @@ impl PhysMem {
     pub fn ram_size(&self) -> u64 {
         match &self.source {
             Source::Live { host, .. } => host.ram_size(),
+            Source::Partition { runs, .. } => runs.iter().map(|(_, length)| length).sum(),
             Source::Dmp(_) | Source::Remote(_) => 0,
         }
     }
@@ -228,6 +259,7 @@ impl PhysMem {
     pub fn ram_runs(&self) -> Vec<(u64, u64)> {
         match &self.source {
             Source::Live { host, .. } => host.ram_runs(),
+            Source::Partition { runs, .. } => runs.clone(),
             Source::Dmp(_) | Source::Remote(_) => Vec::new(),
         }
     }
@@ -253,6 +285,8 @@ impl PhysMem {
                 halts: Some(clock), ..
             } => clock.epoch(),
             Source::Dmp(_) => Some(0),
+            // The partition changes only while the target runs.
+            Source::Partition { host, .. } => host.halt_epoch(),
             Source::Live { .. } => None,
         }
     }
@@ -264,6 +298,12 @@ impl MemoryOps<PhysAddr> for PhysMem {
             Source::Live { host, .. } => host.read_bytes(addr, buf),
             Source::Dmp(d) => d.read_bytes(addr, buf),
             Source::Remote(kd) => kd.read_bytes(addr, buf),
+            Source::Partition {
+                host,
+                eptp,
+                mode_based,
+                ..
+            } => EptMemory::new(&**host, *eptp, *mode_based).read_bytes(addr, buf),
         }
     }
 
@@ -279,6 +319,12 @@ impl MemoryOps<PhysAddr> for PhysMem {
             Source::Live { host, .. } => host.write_bytes(addr, buf),
             Source::Dmp(d) => d.write_bytes(addr, buf),
             Source::Remote(kd) => kd.write_bytes(addr, buf),
+            Source::Partition {
+                host,
+                eptp,
+                mode_based,
+                ..
+            } => EptMemory::new(&**host, *eptp, *mode_based).write_bytes(addr, buf),
         }
     }
 
@@ -288,7 +334,7 @@ impl MemoryOps<PhysAddr> for PhysMem {
             Source::Remote(kd) => kd.read_virtual_direct(addr, root, buf),
             // A host mapping is there to be read directly; that is the whole
             // point of selecting it.
-            Source::Live { .. } | Source::Dmp(_) => None,
+            Source::Live { .. } | Source::Dmp(_) | Source::Partition { .. } => None,
         }
     }
 
@@ -299,7 +345,7 @@ impl MemoryOps<PhysAddr> for PhysMem {
                 mediated: Some(kd), ..
             } if kd.can_mediate_writes() => kd.write_virtual_direct(addr, root, buf),
             Source::Remote(kd) => kd.write_virtual_direct(addr, root, buf),
-            Source::Live { .. } | Source::Dmp(_) => None,
+            Source::Live { .. } | Source::Dmp(_) | Source::Partition { .. } => None,
         }
     }
 
@@ -309,7 +355,7 @@ impl MemoryOps<PhysAddr> for PhysMem {
                 mediated: Some(kd), ..
             }
             | Source::Remote(kd) => kd.can_mediate_writes(),
-            Source::Live { .. } | Source::Dmp(_) => false,
+            Source::Live { .. } | Source::Dmp(_) | Source::Partition { .. } => false,
         }
     }
 
@@ -318,14 +364,16 @@ impl MemoryOps<PhysAddr> for PhysMem {
             Source::Remote(kd) => kd.translation_cache(),
             // Host reads are cheap enough to walk every time, and a mediated
             // write clears the target's own cache.
-            Source::Live { .. } | Source::Dmp(_) => None,
+            Source::Live { .. } | Source::Dmp(_) | Source::Partition { .. } => None,
         }
     }
 
     fn read_page_table_bytes(&self, addr: PhysAddr, buf: &mut [u8]) -> Result<()> {
         match &self.source {
             Source::Remote(kd) => kd.read_page_table_bytes(addr, buf),
-            Source::Live { .. } | Source::Dmp(_) => self.read_bytes(addr, buf),
+            Source::Live { .. } | Source::Dmp(_) | Source::Partition { .. } => {
+                self.read_bytes(addr, buf)
+            }
         }
     }
 

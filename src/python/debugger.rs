@@ -95,6 +95,32 @@ impl Debugger {
             .collect())
     }
 
+    /// Inspect the Windows guest that hypervisor partition `partition_id`
+    /// runs (a Windows Sandbox, a Hyper-V VM) in place of the target, as
+    /// `.partition` does: `memory`, `processes`, `modules`, `symbols`,
+    /// `types` and `threads` then read that guest, through its EPT, and the
+    /// vCPUs are its VPs, with the registers they have now. The view is
+    /// read-only and the target stays halted: running, stepping, breakpoints
+    /// and writes raise `NtoseyeError` until the root partition's ID (1)
+    /// returns to the target. Handles minted on either side of a switch go
+    /// stale (`generation` advances). The target must be halted. This
+    /// feature is experimental.
+    fn select_partition(slf: &Bound<'_, Self>, partition_id: u64) -> PyResult<()> {
+        let py = slf.py();
+        namespace_owner(slf).with(py, |session| {
+            require_halted(session, "Debugger.select_partition")?;
+            session.enter_partition(partition_id).map_err(err)
+        })
+    }
+
+    /// The ID of the hypervisor partition inspected in place of the target
+    /// (see `select_partition`), or `None` while the target is.
+    #[getter]
+    fn partition(slf: &Bound<'_, Self>) -> PyResult<Option<u64>> {
+        let py = slf.py();
+        namespace_owner(slf).with(py, |session| Ok(session.partition()))
+    }
+
     /// The Windows hypervisor's hypercall table, one entry per call code, as
     /// `!hvcalls -a` lists it. Needs the VM's `hv-evmcs` enlightenment or a
     /// vCPU stopped in the hypervisor. This feature is experimental.

@@ -121,6 +121,15 @@ repl_command! {
     run_state: Halted,
 }
 
+repl_command! {
+    cmd_partition;
+    names: [".partition"],
+    usage: ".partition [partition-id]",
+    summary: "Inspect the Windows guest that a Windows hypervisor partition runs (a Windows Sandbox, a Hyper-V VM) in place of the target, or show which is inspected.",
+    details: "With a partition ID, the session inspects that partition's guest instead of the target: its memory is read through the partition's EPT, its NT kernel is found from the page-table root of a VP in kernel mode, and its symbols are loaded, so lm, !process, dt, db, u, k and the other inspection commands read the guest. Its VPs are the threads (p<partition>.<VP index + 1>, so ~Ns selects VP N), with the registers they have now, as !hvr shows them. The view is read-only and the target stays halted: g, steps, breakpoints and writes are refused until you leave it. The root partition's ID (0x1) returns to the target. Without an ID, it shows which partition is inspected. The ID uses the current radix. Needs the VM's hv-evmcs enlightenment and a 64-bit Windows guest.",
+    run_state: Halted,
+}
+
 /// `registers` three to a row in [`VP_STATE_REGISTERS`] order, as `r` lays
 /// them out, leaving out the ones not known.
 fn print_vp_registers(registers: &HashMap<String, u64>) {
@@ -1627,6 +1636,47 @@ impl ReplState<'_> {
             root: partition.parent.is_none(),
             vp,
         })
+    }
+
+    fn cmd_partition(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        if invocation.argv.len() > 1 {
+            outln!("{}\n", command_help(invocation.name));
+            return Ok(());
+        }
+        if invocation.argv.is_empty() {
+            match self.ctx.partition() {
+                Some(partition) => outln!(
+                    "inspecting partition {partition:#x}; .partition with the root partition's ID returns to the target\n"
+                ),
+                None => outln!("inspecting the target (the root partition)\n"),
+            }
+            return Ok(());
+        }
+        let Some(arguments) = self.eval_all(&invocation.argv) else {
+            return Ok(());
+        };
+        let result = self.ctx.enter_partition(arguments[0]);
+        self.caches.clear_threads();
+        self.caches.refresh_symbol_context(&self.ctx.target);
+        match result {
+            Ok(()) => match self.ctx.partition() {
+                Some(partition) => {
+                    let kernel = self
+                        .ctx
+                        .target
+                        .kernel_base()
+                        .map_or_else(|| "?".to_string(), |base| format!("{:#x}", base.0));
+                    let vps = self.ctx.backend.thread_list().unwrap_or_default();
+                    outln!(
+                        "inspecting partition {partition:#x}: nt at {kernel}, VPs {}\n",
+                        vps.join(" ")
+                    );
+                }
+                None => outln!("inspecting the target (the root partition)\n"),
+            },
+            Err(error) => error!("{error}"),
+        }
+        Ok(())
     }
 
     fn cmd_hvr(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {

@@ -236,6 +236,7 @@ impl Session {
     /// Resume with an explicit exception acknowledgment while preserving the
     /// same breakpoint step-over and cache invalidation prologue as [`Self::resume`].
     pub fn resume_with_disposition(&mut self, disposition: ContinueDisposition) -> Result<()> {
+        self.require_target_view("a resume")?;
         self.target.selected_frame = None;
         self.module_refresh_report = None;
         // A bugcheck or module event can only happen while the guest runs, so

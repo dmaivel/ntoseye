@@ -339,6 +339,7 @@ impl Session {
     /// partition's VP would run that guest, whose code NT's tables do not
     /// map.
     pub(super) fn require_steppable_vcpu(&mut self) -> Result<()> {
+        self.require_target_view("a step")?;
         self.require_live_register_context()?;
         if self.vcpu_halted_in_hypervisor()? {
             return Err(Error::DebugInfo(format!(

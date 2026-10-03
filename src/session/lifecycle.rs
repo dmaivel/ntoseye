@@ -346,6 +346,7 @@ impl Session {
             symbols_reconciled_at: 0,
             unreported_module_change: false,
             last_event: None,
+            partition_view: None,
             _instance_guard: None,
         };
 

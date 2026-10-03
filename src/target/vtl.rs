@@ -1539,6 +1539,59 @@ impl Target {
         vp_registers::saved_registers(&layout, vp.address, &offsets, read, phys)
     }
 
+    /// A target over the guest that partition `id` of the Windows
+    /// hypervisor runs (a Windows Sandbox, a Hyper-V VM): its guest physical
+    /// memory read through the partition's VTL0 EPT, and its NT kernel found
+    /// from the page-table root of a VP stopped in kernel mode (any VP's
+    /// otherwise). Read-only. The root partition is this target itself.
+    pub fn partition_target(&self, id: u64) -> Result<Target> {
+        let partitions = self.hypervisor_partitions()?;
+        let partition = partitions
+            .iter()
+            .find(|partition| partition.id == id)
+            .ok_or_else(|| {
+                Error::InvalidArgument(format!("the hypervisor has no partition {id:#x}"))
+            })?;
+        if partition.parent.is_none() {
+            return Err(Error::InvalidArgument(
+                "the root partition is the target itself".to_string(),
+            ));
+        }
+        let states: Vec<EvmcsState> = partition
+            .virtual_processors
+            .iter()
+            .filter_map(|vp| vp.vtls.iter().find(|vtl| vtl.level == 0)?.state)
+            .filter(EvmcsState::four_level_paging)
+            .collect();
+        let state = states
+            .iter()
+            .find(|state| state.cs & 3 == 0)
+            .or_else(|| states.first())
+            .copied()
+            .ok_or_else(|| {
+                Error::Hypervisor(format!(
+                    "no VP of partition {id:#x} runs in 4-level long-mode paging, so it runs no 64-bit NT"
+                ))
+            })?;
+        let leaves = self.guest_physical_mappings(&state).ok_or_else(|| {
+            Error::Hypervisor(format!("the EPT of partition {id:#x} is unreadable"))
+        })?;
+        let mut runs: Vec<(u64, u64)> = Vec::new();
+        for leaf in leaves.iter().filter(|leaf| leaf.access.read()) {
+            match runs.last_mut() {
+                Some((base, length)) if *base + *length == leaf.gpa => *length += leaf.size,
+                _ => runs.push((leaf.gpa, leaf.size)),
+            }
+        }
+        let phys = PhysMem::partition(
+            Arc::clone(&self.phys),
+            state.ept_pointer,
+            state.mode_based_execute(),
+            runs,
+        );
+        Target::with_kernel_dtb(Arc::new(phys), state.cr3 & self.arch().dtb_page_mask())
+    }
+
     /// The VPs of `partitions` whose register region the root of their
     /// current eVMCS maps now, as their exit entry finds the block through
     /// `block_loads` from its host RSP (see [`ExitRegisterLayout`]).

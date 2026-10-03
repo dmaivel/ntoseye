@@ -25,6 +25,7 @@ use crate::exception_policy::ExceptionPolicyTable;
 use crate::gdb::RegisterMap;
 use crate::guest::{ModuleInfo, ModuleSymbolLoadReport, ProcessInfo};
 use crate::session::lifecycle::InstanceGuard;
+use crate::session::partition::PartitionView;
 use crate::target::{ReloadReport, ServedVp, Target, TargetSelection, ThreadInfo};
 #[cfg(test)]
 use crate::triage::{TriageBlock, make_triage_dump};
@@ -66,6 +67,7 @@ pub mod context;
 pub mod hits;
 pub mod inspection;
 pub mod lifecycle;
+pub mod partition;
 pub mod reload;
 pub mod run_control;
 pub mod scheduler;
@@ -630,6 +632,10 @@ pub struct Session {
     /// Most recently observed backend stop and the disposition used when it was
     /// subsequently continued.
     pub last_event: Option<LastEvent>,
+    /// The target, backend and vCPU a view of a guest partition
+    /// (`.partition`) replaced, while the view is shown; see
+    /// [`Self::enter_partition`].
+    partition_view: Option<PartitionView>,
     /// Per-target single-instance lock, held for the session's lifetime so a
     /// second ntoseye can't attach to the same backend resource. `Some` via
     /// [`Self::connect`] (every host's attach path), `None` via the unguarded
