@@ -6,7 +6,8 @@
 //! object also points at, which holds the region's address and the page
 //! directory entry that maps it. `hvix64` has no symbols, so where those
 //! pointers and fields are is calibrated on the VPs whose regions are
-//! mapped at a halt, and must agree for all of them.
+//! mapped at a halt, must agree for all of them, and must lead every other
+//! VP to the region its own block is in.
 
 use std::collections::HashMap;
 
@@ -86,9 +87,15 @@ pub struct LoadedVp {
 /// (`None` where it is unreadable). The block pointer's offset in the VP
 /// object must be the same for all of them, and exactly one pointer of the
 /// VP object, with one offset of each field, must lead every one of them to
-/// a descriptor that holds its region's address and page directory entry.
+/// a descriptor that holds its region's address and page directory entry,
+/// and every VP object in `vps`, mapped or not, to a descriptor that holds
+/// the region its block is in. A halt maps only a few VPs' regions, and
+/// another pointer of their objects can lead to the same fields by chance:
+/// on 26200, the one 0x60 past the descriptor pointer points 0x80 short of
+/// the descriptor in some VPs and elsewhere in the rest.
 pub fn calibrate(
     loaded: &[LoadedVp],
+    vps: &[u64],
     read: impl Fn(u64, usize) -> Option<Vec<u8>>,
 ) -> Result<VpRegisterLayout> {
     let Some(first) = loaded.first() else {
@@ -117,6 +124,25 @@ pub fn calibrate(
                 .collect(),
         });
     }
+    let qword = |address: u64| {
+        read(address, 8)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u64::from_le_bytes)
+    };
+    // A VP whose block is unknown says nothing; one whose descriptor, under
+    // a candidate, names another region than its block's rules it out.
+    let leads_every_vp = |&(descriptor, region, _): &(u64, u64, u64)| {
+        vps.iter().all(|&vp| {
+            let Some(block) = qword(vp.wrapping_add(block_pointer)).filter(|&block| block != 0)
+            else {
+                return true;
+            };
+            qword(vp.wrapping_add(descriptor))
+                .and_then(|descriptor| qword(descriptor.wrapping_add(region)))
+                == Some(block & !REGION)
+        })
+    };
+    let found = found.map(|found| found.into_iter().filter(leads_every_vp).collect::<Vec<_>>());
     match found.as_deref() {
         Some([(descriptor, region, region_pde)]) => Ok(VpRegisterLayout {
             block_pointer,
@@ -125,10 +151,10 @@ pub fn calibrate(
             region_pde: *region_pde,
         }),
         Some([]) | None => Err(calibration_error(
-            "no pointer of the VP leads every mapped VP to its region's page directory entry",
+            "no pointer of the VP leads every mapped VP to its region's page directory entry and every VP to its block's region",
         )),
         Some(several) => Err(calibration_error(format!(
-            "{} pointers of the VP lead every mapped VP to its region's page directory entry",
+            "{} pointers of the VP lead every mapped VP to its region's page directory entry and every VP to its block's region",
             several.len()
         ))),
     }
@@ -314,10 +340,50 @@ mod tests {
         memory.put(0xffffe800_00500000 + 0x278, first.region_pde);
 
         let read = |address, size| memory.bytes(address, size);
-        assert_eq!(calibrate(&[first, second], read).unwrap(), LAYOUT);
+        assert_eq!(
+            calibrate(&[first, second], &[first.vp, second.vp], read).unwrap(),
+            LAYOUT
+        );
         assert!(
-            calibrate(&[first], read).is_err(),
+            calibrate(&[first], &[first.vp], read).is_err(),
             "one VP leaves the decoy in"
+        );
+    }
+
+    /// A halt maps only a few VPs' regions, and another pointer of their
+    /// objects can lead to the same fields by chance: on 26200, the one at
+    /// 0x478 points 0x80 short of the descriptor in some VPs. A VP the halt
+    /// does not map rules it out, as under it that VP's descriptor does not
+    /// name the region its block is in.
+    #[test]
+    fn an_unmapped_vp_rules_out_a_pointer_only_the_mapped_ones_agree_on() {
+        let mut memory = Memory::default();
+        let mapped = vp(
+            &mut memory,
+            0xffffe800_0038a050,
+            0xffffe800_0038a6c0,
+            0xffffe700_00200000,
+            0x129006063,
+            0xffffe700_00207080,
+        );
+        let unmapped = vp(
+            &mut memory,
+            0xffffe800_003ad050,
+            0xffffe800_003b26c0,
+            0xffffe700_00400000,
+            0x12903f063,
+            0xffffe700_00407080,
+        );
+        memory.put(mapped.vp + 0x478, 0xffffe800_0038a6c0 - 0x80);
+
+        let read = |address, size| memory.bytes(address, size);
+        assert!(
+            calibrate(&[mapped], &[mapped.vp], read).is_err(),
+            "the mapped VP alone cannot tell the two pointers apart"
+        );
+        assert_eq!(
+            calibrate(&[mapped], &[mapped.vp, unmapped.vp], read).unwrap(),
+            LAYOUT
         );
     }
 
@@ -344,11 +410,12 @@ mod tests {
         );
         second.pointer += 8;
         assert!(
-            calibrate(&[first, second], |address, size| memory
-                .bytes(address, size))
+            calibrate(&[first, second], &[first.vp, second.vp], |address, size| {
+                memory.bytes(address, size)
+            })
             .is_err()
         );
-        assert!(calibrate(&[], |address, size| memory.bytes(address, size)).is_err());
+        assert!(calibrate(&[], &[], |address, size| memory.bytes(address, size)).is_err());
     }
 
     /// A VP's block is read through its descriptor's page directory entry

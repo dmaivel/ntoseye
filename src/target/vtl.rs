@@ -1534,7 +1534,12 @@ impl Target {
             .map_err(Error::SavedVtlState)?;
         let layout = guest.vp_register_layout(image.base_address.0, || {
             let loaded = self.loaded_vps(partitions, &exit.block_loads, &phys)?;
-            vp_registers::calibrate(&loaded, |address, size| {
+            let vps: Vec<u64> = partitions
+                .iter()
+                .flat_map(|partition| &partition.virtual_processors)
+                .map(|vp| vp.address)
+                .collect();
+            vp_registers::calibrate(&loaded, &vps, |address, size| {
                 let mut bytes = vec![0u8; size];
                 memory.read_bytes(VirtAddr(address), &mut bytes).ok()?;
                 Some(bytes)
