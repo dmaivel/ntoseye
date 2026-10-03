@@ -244,12 +244,7 @@ impl ReplState<'_> {
         let Some(addr) = self.eval_or_report(arg) else {
             return Ok(());
         };
-        match self
-            .ctx
-            .target
-            .symbols
-            .find_closest_symbol_for_address(self.ctx.target.current_dtb(), addr)
-        {
+        match self.ctx.target.nearest_symbol_current_context(addr) {
             Some((module, sym, offset)) => {
                 let label = format_symbol_with_offset(&module, &sym, offset);
                 outln!("{}  {}\n", ui::addr(addr.0), ui::symbol(&label));

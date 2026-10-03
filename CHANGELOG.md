@@ -58,6 +58,7 @@ ntoseye can now debug the Windows hypervisor itself. It can walk hypervisor part
 - Ctrl+C in the REPL now stops the target when a breakpoint whose hits are declined (condition, `/t` filter, other process) fires constantly.
 - REPL errors from `g`, `t`, `r`, `~` and `.thread` show their message instead of an internal form such as `DebugInfo("…")`, and `bp` or `ba` on a backend that cannot set them names the backend instead of "the current backend does not support this".
 - In DAP, a Debug Console command after one that moved the context (`.thread`, `.cxr`, `!thread`) runs instead of failing with "stale frame id" until the client walks the stack again.
+- Code that profile-guided optimization split off from its function, far from every symbol, is named after that function through its chained unwind data (`nt!IopXxxControlFile+0x22bddf`) in stacks, disassembly, `ln` and the SDK's `symbols.nearest()`, instead of `nt+0xb1552f` or "no symbol found".
 - `wt`, `p`, `gu` and the SDK's `step_over`/`step_out` no longer follow the wrong thread, wait forever for a thread that exited, or crawl under load on code every thread runs; a walk whose thread exits ends with an error.
 - A gdbserver step or continue that cannot start now reports SIGINT, so gdb's `next`/`step` no longer loop.
 - On the gdb backend, a `bp` on `nt!DbgLoadImageSymbols` (or the unload functions) now stops when no `sx` filter surfaces the event.

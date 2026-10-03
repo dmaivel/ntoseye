@@ -15,7 +15,9 @@ use crate::{
     memory::{AddressSpace, DTB_IDENTITY},
     pe::{CodeLayout, PeImage},
     phys::PhysMem,
-    symbols::{CodeFrame, SourceLocation, SymbolStore},
+    symbols::{
+        CodeFrame, ModuleSymbolStatus, SourceLocation, SymbolStore, format_symbol_with_offset,
+    },
     target::{
         ForeignModules, HYPERVISOR_CONTEXT, KTHREAD_STATE_RUNNING, KTHREAD_STATE_TERMINATED,
         SavedThreadRegisters, SavedVtlContext, Target, ThreadInfo, lookup_register,
@@ -423,10 +425,15 @@ pub fn try_format_symbol(
     };
 
     if let Some(module) = trace.module_for_address(addr) {
-        let symbol = try_format(module.dtb).or_else(|| {
-            ensure_module_symbols(debugger, trace, std::iter::once(addr));
-            try_format(module.dtb)
-        });
+        let symbol = try_format(module.dtb)
+            .or_else(|| {
+                ensure_module_symbols(debugger, trace, std::iter::once(addr));
+                try_format(module.dtb)
+            })
+            .or_else(|| {
+                split_function(debugger, trace, module.dtb, addr)
+                    .map(|(module, name, offset)| format_symbol_with_offset(&module, &name, offset))
+            });
         return Some(symbol.unwrap_or_else(|| {
             // The module has no PDB, or its fetch is still running.
             let offset = addr.saturating_sub(module.info.base_address.0);
@@ -445,6 +452,72 @@ pub fn try_format_symbol(
 
 /// The context description for a root that is none of NT's.
 pub const UNKNOWN_CONTEXT: &str = "unknown";
+
+/// The symbol nearest below `address` in root `dtb`, as `ln` names it: the
+/// PDB's, else, for code split off from its function, that function's (see
+/// [`split_function`]). `(module, symbol, offset)`.
+pub fn nearest_symbol(
+    debugger: &Target,
+    dtb: Dtb,
+    address: VirtAddr,
+) -> Option<(String, String, u32)> {
+    debugger
+        .symbols
+        .find_closest_symbol_for_address(dtb, address)
+        .or_else(|| {
+            let trace = resolve_thread_trace_context(debugger, dtb);
+            let module = trace.module_for_address(address.0)?;
+            split_function(debugger, &trace, module.dtb, address.0)
+        })
+}
+
+/// `addr` named after its function when no symbol is near it but its code
+/// is a fragment the compiler split off from a function the PDB names, as
+/// profile-guided optimization moves cold blocks far from every symbol:
+/// its function-table entry chains to that function's
+/// (`nt!IopXxxControlFile+0x22bddf`). Only a module whose symbols are
+/// loaded is looked at, so frames in modules without a PDB read no unwind
+/// data. `(module, symbol, offset)`.
+fn split_function(
+    debugger: &Target,
+    trace: &ThreadTraceContext,
+    dtb: Dtb,
+    addr: u64,
+) -> Option<(String, String, u32)> {
+    let mut tracer = StackTracer::new(debugger, trace);
+    let base = tracer.module_containing(addr)?.info.base_address;
+    if !matches!(
+        debugger.symbols.module_symbol_status(dtb, base),
+        Some(ModuleSymbolStatus::Loaded)
+    ) || tracer.code_machine_at(addr) != CodeMachine::Amd64
+    {
+        return None;
+    }
+    let lookup = |tracer: &StackTracer<'_>| {
+        let (image, layout) = tracer.module_code(addr)?;
+        let found = amd64::primary_function_begin(&image, layout.as_deref(), base.0, addr);
+        Some((found, image.is_complete()))
+    };
+    let (mut found, complete) = lookup(&tracer)?;
+    if matches!(found, amd64::PrimaryLookup::Holed)
+        && !complete
+        && tracer.upgrade_module_image(addr)
+    {
+        found = lookup(&tracer)?.0;
+    }
+    let amd64::PrimaryLookup::Found(start) = found else {
+        return None;
+    };
+    // The function must start at the symbol, not somewhere after it.
+    let (module, name, offset) = debugger
+        .symbols
+        .find_closest_symbol_for_address(dtb, VirtAddr(start))?;
+    if offset != 0 {
+        return None;
+    }
+    let offset = u32::try_from(addr.checked_sub(start)?).ok()?;
+    Some((module, name, offset))
+}
 
 /// [`resolve_thread_trace_context`] for a thread stopped at `rip`. A root
 /// that is none of NT's is named for the code at `rip` (the Windows

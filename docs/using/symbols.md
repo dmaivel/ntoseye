@@ -129,6 +129,10 @@ Frame numbers include inline frames, so `.frame N` selects an inline frame like 
 
 An inline frame has no registers of its own and uses the registers of its physical frame. Stop headers and {command}`ln` show the name of the physical procedure.
 
+## Code split off from its function
+
+Profile-guided optimization moves the rarely run blocks of a function, such as error paths, away from the function's other code, often to near the end of the image. No public symbol is near such a block, but its unwind data chains to its function's. ntoseye names the block after that function, with the offset from the function's start, so {command}`k`, {command}`ln`, and disassembly show `nt!IopXxxControlFile+0x22bddf` instead of `nt+0xb1552f`, and the name evaluates back to the same address. This needs the module's PDB, and works only for x64 code.
+
 ## WPP trace messages
 
 A private PDB also contains the WPP trace message formats (TMF) of the driver. `tracewpp` stores the format string and the argument types of each message as an annotation in the PDB.

@@ -315,12 +315,14 @@ impl Target {
             .collect()
     }
 
+    /// The symbol nearest below `address` in the inspection context, a
+    /// split-off fragment named after its function (see
+    /// [`crate::unwind::nearest_symbol`]). `(module, symbol, offset)`.
     pub fn nearest_symbol_current_context(
         &self,
         address: VirtAddr,
     ) -> Option<(String, String, u32)> {
-        self.symbols
-            .find_closest_symbol_for_address(self.current_dtb(), address)
+        crate::unwind::nearest_symbol(self, self.current_dtb(), address)
     }
 
     pub fn closest_symbol_current_context(&self, address: VirtAddr) -> Option<String> {

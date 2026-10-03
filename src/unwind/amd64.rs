@@ -905,6 +905,46 @@ pub struct UnwindCodeDetail {
     pub description: String,
 }
 
+/// What [`primary_function_begin`] found.
+pub enum PrimaryLookup {
+    /// The address of the function's first instruction.
+    Found(u64),
+    /// No entry covers the address, or its chain is unreadable or too deep.
+    Missing,
+    /// The lookup hit a paged-out hole an on-disk image could fill.
+    Holed,
+}
+
+/// Where the function whose code covers `address` starts: its function-table
+/// entry's begin, or, for a fragment the compiler split off from its
+/// function (a cold block, whose unwind info chains to its function's
+/// entry), the begin of the last entry of the chain.
+pub fn primary_function_begin(
+    image: &PeImage,
+    layout: Option<&CodeLayout>,
+    base_address: u64,
+    address: u64,
+) -> PrimaryLookup {
+    let (mut begin, mut unwind_data) = match resolve_function(image, layout, base_address, address)
+    {
+        Resolve::Function {
+            unwind_data, begin, ..
+        } => (begin, unwind_data),
+        Resolve::Leaf => return PrimaryLookup::Missing,
+        Resolve::Holed => return PrimaryLookup::Holed,
+    };
+    for _ in 0..=MAX_CHAIN_DEPTH {
+        let Some(parsed) = parse_unwind_info(image, unwind_data) else {
+            return PrimaryLookup::Holed;
+        };
+        match parsed.parent {
+            Some(parent) => (begin, unwind_data) = (parent.BeginAddress, parent.UnwindData),
+            None => return PrimaryLookup::Found(base_address + u64::from(begin)),
+        }
+    }
+    PrimaryLookup::Missing
+}
+
 /// What [`describe_function_entry`] found.
 pub enum EntryLookup {
     /// The entry and its chained parents, and why the chain ends early when
@@ -1100,9 +1140,10 @@ fn describe_unwind_codes(codes: &[UnwindCodeSlot]) -> Vec<UnwindCodeDetail> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Epilog, EpilogRelease, Lookup, ParsedUnwindInfo, RUNTIME_FUNCTION, UWOP_ALLOC_LARGE,
-        UWOP_EPILOG, UWOP_SAVE_NONVOL, UnwindCodeSlot, decode_epilog, describe_unwind_codes,
-        frame_base, lookup_runtime_function, parse_unwind_info, unwind_slot_count,
+        Epilog, EpilogRelease, Lookup, ParsedUnwindInfo, PrimaryLookup, RUNTIME_FUNCTION,
+        RUNTIME_FUNCTION_SIZE, UWOP_ALLOC_LARGE, UWOP_EPILOG, UWOP_SAVE_NONVOL, UnwindCodeSlot,
+        decode_epilog, describe_unwind_codes, frame_base, lookup_runtime_function,
+        parse_unwind_info, primary_function_begin, unwind_slot_count,
     };
     use crate::pe::PeImage;
     use crate::unwind::RegisterContext;
@@ -1232,6 +1273,93 @@ mod tests {
         let info =
             parse_unwind_info(&PeImage::complete(blob.to_vec()), 0).expect("unwind info parses");
         assert!(info.parent.is_none());
+    }
+
+    /// A PE32+ image whose exception directory, in `.rdata` at 0x2000, holds
+    /// `functions` (sorted), with `unwind` placed at its RVAs.
+    fn image_with_functions(functions: &[RUNTIME_FUNCTION], unwind: &[(usize, &[u8])]) -> PeImage {
+        let mut image = vec![0u8; 0x3000];
+        let mut put = |at: usize, bytes: &[u8]| image[at..at + bytes.len()].copy_from_slice(bytes);
+        let (pe, opt) = (0x80usize, 0x98usize);
+        put(0, b"MZ");
+        put(0x3c, &(pe as u32).to_le_bytes());
+        put(pe, b"PE\0\0");
+        put(pe + 4, &0x8664u16.to_le_bytes());
+        put(pe + 6, &2u16.to_le_bytes());
+        put(pe + 20, &240u16.to_le_bytes());
+        put(opt, &0x20bu16.to_le_bytes());
+        put(opt + 32, &0x1000u32.to_le_bytes());
+        put(opt + 36, &0x200u32.to_le_bytes());
+        put(opt + 56, &0x3000u32.to_le_bytes());
+        put(opt + 60, &0x1000u32.to_le_bytes());
+        put(opt + 108, &16u32.to_le_bytes());
+        // The exception directory, data directory entry 3.
+        put(opt + 112 + 3 * 8, &0x2000u32.to_le_bytes());
+        put(
+            opt + 112 + 3 * 8 + 4,
+            &((functions.len() * RUNTIME_FUNCTION_SIZE) as u32).to_le_bytes(),
+        );
+        for (index, (name, va)) in [(b".text\0\0\0", 0x1000u32), (b".rdata\0\0", 0x2000)]
+            .into_iter()
+            .enumerate()
+        {
+            let header = opt + 240 + 40 * index;
+            put(header, name);
+            put(header + 8, &0x1000u32.to_le_bytes());
+            put(header + 12, &va.to_le_bytes());
+            put(header + 16, &0x1000u32.to_le_bytes());
+            put(header + 20, &va.to_le_bytes());
+        }
+        for (index, function) in functions.iter().enumerate() {
+            let at = 0x2000 + index * RUNTIME_FUNCTION_SIZE;
+            put(at, &function.BeginAddress.to_le_bytes());
+            put(at + 4, &function.EndAddress.to_le_bytes());
+            put(at + 8, &function.UnwindData.to_le_bytes());
+        }
+        for (at, bytes) in unwind {
+            put(*at, bytes);
+        }
+        PeImage::complete(image)
+    }
+
+    /// A split-off fragment is named after the function at the end of its
+    /// chain, a chain of two included; an entry without a chain is its own
+    /// function; code no entry covers has none.
+    #[test]
+    fn a_chained_fragment_belongs_to_the_last_function_of_its_chain() {
+        let function = |begin: u32, end: u32, unwind: u32| RUNTIME_FUNCTION {
+            BeginAddress: begin,
+            EndAddress: end,
+            UnwindData: unwind,
+        };
+        let chained_to = |parent: RUNTIME_FUNCTION| {
+            let mut bytes = vec![0x21, 0, 0, 0];
+            for value in [parent.BeginAddress, parent.EndAddress, parent.UnwindData] {
+                bytes.extend(value.to_le_bytes());
+            }
+            bytes
+        };
+        let primary = function(0x1000, 0x1100, 0x2100);
+        let middle = function(0x1400, 0x1480, 0x2130);
+        let cold = function(0x1800, 0x1880, 0x2110);
+        let image = image_with_functions(
+            &[primary, middle, cold],
+            &[
+                (0x2100, &[0x01, 0, 0, 0]),
+                (0x2110, &chained_to(middle)),
+                (0x2130, &chained_to(primary)),
+            ],
+        );
+        let base = 0x1_4000_0000;
+        let begin = |rva: u64| match primary_function_begin(&image, None, base, base + rva) {
+            PrimaryLookup::Found(address) => Some(address - base),
+            PrimaryLookup::Missing => None,
+            PrimaryLookup::Holed => panic!("the image is complete"),
+        };
+        assert_eq!(begin(0x1840), Some(0x1000));
+        assert_eq!(begin(0x1410), Some(0x1000));
+        assert_eq!(begin(0x1050), Some(0x1000));
+        assert_eq!(begin(0x1200), None);
     }
 
     #[test]
