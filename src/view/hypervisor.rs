@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use super::shape::{Hex, Keyed, shapes};
 use crate::guest::{EXIT_GPRS, HvProcessor};
 use crate::guest::ept::{Difference, EptMapping as EptInfo};
+use crate::guest::evmcs_fields::{self, IoIntercepts as IoInfo, MsrIntercepts as MsrInfo};
 use crate::guest::hv_layout::HypercallEntry;
 use crate::guest::hypercall_input::{self, DecodedHypercall as Decoded};
 use crate::guest::hypercalls::tlfs_hypercall;
@@ -66,6 +67,48 @@ shapes! {
         vtl0: Option<String>,
         /// VTL1's access, as `vtl0` gives VTL0's.
         vtl1: Option<String>,
+    }
+
+    /// A range of MSRs whose accesses exit, with the architectural MSRs (or
+    /// blocks, such as `x2APIC`) that ntoseye names in it.
+    MsrRange {
+        first: Hex<u32>,
+        last: Hex<u32>,
+        names: Vec<&'static str>,
+    }
+
+    /// Which RDMSRs and WRMSRs of a VTL exit (`!hvvmcs -msr`). MSRs outside
+    /// the bitmap's 0x0-0x1fff and 0xc0000000-0xc0001fff always exit.
+    MsrIntercepts {
+        /// Whether every RDMSR and WRMSR exits: the controls use no MSR
+        /// bitmap, and the lists are empty.
+        every: bool,
+        /// The MSR bitmap's physical address, or None without one.
+        bitmap: Option<Hex>,
+        /// The MSR ranges whose reads exit.
+        read: Vec<MsrRange>,
+        /// The MSR ranges whose writes exit.
+        write: Vec<MsrRange>,
+        /// The MSRs ntoseye names that the VTL reads without an exit.
+        read_without_exit: Vec<&'static str>,
+        /// The MSRs ntoseye names that the VTL writes without an exit.
+        write_without_exit: Vec<&'static str>,
+    }
+
+    /// A range of I/O ports whose accesses exit.
+    PortRange {
+        first: Hex<u32>,
+        last: Hex<u32>,
+    }
+
+    /// Which I/O instructions of a VTL exit (`!hvvmcs -io`).
+    IoIntercepts {
+        /// Whether every I/O instruction exits: the controls use no I/O
+        /// bitmaps but unconditional I/O exiting.
+        every: bool,
+        /// The port ranges whose accesses exit, through I/O bitmaps A and B.
+        /// Empty with `every`, and when no I/O instruction exits.
+        ports: Vec<PortRange>,
     }
 
     /// One call code of the hypervisor's hypercall table.
@@ -201,6 +244,53 @@ pub fn ept_difference(difference: &Difference) -> EptDifference {
         end: difference.end,
         vtl0: text(difference.first),
         vtl1: text(difference.second),
+    }
+}
+
+fn msr_range(&(first, last): &(u32, u32)) -> MsrRange {
+    MsrRange {
+        first,
+        last,
+        names: evmcs_fields::msr_names(first, last),
+    }
+}
+
+pub fn msr_intercepts(intercepts: &MsrInfo) -> MsrIntercepts {
+    match intercepts {
+        MsrInfo::Every => MsrIntercepts {
+            every: true,
+            bitmap: None,
+            read: Vec::new(),
+            write: Vec::new(),
+            read_without_exit: Vec::new(),
+            write_without_exit: Vec::new(),
+        },
+        MsrInfo::Bitmap {
+            bitmap,
+            read,
+            write,
+        } => MsrIntercepts {
+            every: false,
+            bitmap: Some(*bitmap),
+            read: read.iter().map(msr_range).collect(),
+            write: write.iter().map(msr_range).collect(),
+            read_without_exit: evmcs_fields::msr_names_outside(read),
+            write_without_exit: evmcs_fields::msr_names_outside(write),
+        },
+    }
+}
+
+pub fn io_intercepts(intercepts: &IoInfo) -> IoIntercepts {
+    let ports = match intercepts {
+        IoInfo::Bitmaps { ports } => ports
+            .iter()
+            .map(|&(first, last)| PortRange { first, last })
+            .collect(),
+        IoInfo::None | IoInfo::Every => Vec::new(),
+    };
+    IoIntercepts {
+        every: matches!(intercepts, IoInfo::Every),
+        ports,
     }
 }
 

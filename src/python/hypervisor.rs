@@ -15,8 +15,9 @@ use crate::guest::{HvPartition, HvVirtualProcessor, HvVtl, evmcs_fields, privile
 use crate::target::CodeExtent;
 use crate::view::execution::{DisassembledInstruction, disasm_rows};
 use crate::view::hypervisor::{
-    DecodedHypercall, EptDifference, EptMapping, HypervisorProcessor, VpRegisters,
-    decoded_hypercall, ept_difference, ept_mapping, hypervisor_processor, vp_registers,
+    DecodedHypercall, EptDifference, EptMapping, HypervisorProcessor, IoIntercepts, MsrIntercepts,
+    VpRegisters, decoded_hypercall, ept_difference, ept_mapping, hypervisor_processor,
+    io_intercepts, msr_intercepts, vp_registers,
 };
 use crate::view::shape::{Hex, Keyed, Typed};
 
@@ -299,6 +300,20 @@ pub struct HypervisorVtl {
     info: HvVtl,
 }
 
+impl HypervisorVtl {
+    /// This VTL's eVMCS, read now.
+    fn read_vmcs(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
+        let Some(page) = self.info.vmcs else {
+            return Err(raise("this VTL has no eVMCS"));
+        };
+        let mut vmcs = vec![0u8; 0x400];
+        self.owner.with(py, |session| {
+            session.target.read_physical(page, &mut vmcs).map_err(err)
+        })?;
+        Ok(vmcs)
+    }
+}
+
 #[pymethods]
 impl HypervisorVtl {
     /// The VTL (0 for NT, 1 for the secure kernel).
@@ -438,13 +453,7 @@ impl HypervisorVtl {
     /// `fields.guest_rip` or `fields["guest_rip"]`. Raises `NtoseyeError`
     /// without the VTL's eVMCS.
     fn vmcs_fields<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Keyed<Hex>>> {
-        let Some(page) = self.info.vmcs else {
-            return Err(raise("this VTL has no eVMCS"));
-        };
-        let mut vmcs = vec![0u8; 0x400];
-        self.owner.with(py, |session| {
-            session.target.read_physical(page, &mut vmcs).map_err(err)
-        })?;
+        let vmcs = self.read_vmcs(py)?;
         Typed::new(
             py,
             evmcs_fields::field_values(&vmcs)
@@ -452,6 +461,39 @@ impl HypervisorVtl {
                 .map(|(name, _, _, value)| (name, value))
                 .collect(),
         )
+    }
+
+    /// Which RDMSRs and WRMSRs of this VTL exit, as `!hvvmcs -msr` shows
+    /// them: through its MSR bitmap when its controls use one, else every one
+    /// (`every`). Each intercepted range names the architectural MSRs in it,
+    /// and `read_without_exit` and `write_without_exit` list those the VTL
+    /// accesses without an exit. MSRs outside the bitmap's 0x0-0x1fff and
+    /// 0xc0000000-0xc0001fff always exit. Raises `NtoseyeError` without the
+    /// VTL's eVMCS, or when the bitmap is unreadable.
+    fn msr_intercepts<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, MsrIntercepts>> {
+        let vmcs = self.read_vmcs(py)?;
+        let intercepts = self.owner.with(py, |session| {
+            evmcs_fields::msr_intercepts(&vmcs, |address, page| {
+                session.target.read_physical(address, page)
+            })
+            .map_err(err)
+        })?;
+        Typed::new(py, msr_intercepts(&intercepts))
+    }
+
+    /// Which I/O instructions of this VTL exit, as `!hvvmcs -io` shows them:
+    /// the port ranges its I/O bitmaps intercept, or, when its controls use
+    /// none, every port (`every`) or none. Raises `NtoseyeError` without the
+    /// VTL's eVMCS, or when a bitmap is unreadable.
+    fn io_intercepts<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, IoIntercepts>> {
+        let vmcs = self.read_vmcs(py)?;
+        let intercepts = self.owner.with(py, |session| {
+            evmcs_fields::io_intercepts(&vmcs, |address, page| {
+                session.target.read_physical(address, page)
+            })
+            .map_err(err)
+        })?;
+        Typed::new(py, io_intercepts(&intercepts))
     }
 
     /// Translate a guest physical address through this VTL's EPT, as

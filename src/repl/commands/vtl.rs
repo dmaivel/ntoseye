@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 use crate::guest::{
     EvmcsState, HvPartition, HvProcessor, HvVirtualProcessor,
     ept::{self, Access, EptTranslation},
-    evmcs_fields,
+    evmcs_fields::{self, IoIntercepts, MsrIntercepts},
     hypercall_input::{DecodedHypercall, HypercallField},
     hypercalls::{HypercallCaller, HypercallInput, tlfs_hypercall},
     privilege_names,
@@ -1293,30 +1293,28 @@ impl ReplState<'_> {
     /// The MSRs the eVMCS `vmcs` intercepts: through its MSR bitmap when the
     /// primary controls use one (bit 28), else every MSR.
     fn print_msr_intercepts(&mut self, vmcs: &[u8]) {
-        let controls = evmcs_fields::field(vmcs, "cpu_based_vm_exec_control").unwrap_or(0);
-        if controls & (1 << 28) == 0 {
-            outln!("every RDMSR and WRMSR exits: the controls use no MSR bitmap\n");
-            return;
-        }
-        let address = evmcs_fields::field(vmcs, "msr_bitmap").unwrap_or(0);
-        let mut bitmap = vec![0u8; 0x1000];
-        if let Err(error) = self.ctx.target.read_physical(address, &mut bitmap) {
-            error!("MSR bitmap {address:x}: {error}");
-            return;
-        }
+        let target = &self.ctx.target;
+        let (address, read, write) = match evmcs_fields::msr_intercepts(vmcs, |address, page| {
+            target.read_physical(address, page)
+        }) {
+            Ok(MsrIntercepts::Every) => {
+                outln!("every RDMSR and WRMSR exits: the controls use no MSR bitmap\n");
+                return;
+            }
+            Ok(MsrIntercepts::Bitmap {
+                bitmap,
+                read,
+                write,
+            }) => (bitmap, read, write),
+            Err(error) => {
+                error!("{error}");
+                return;
+            }
+        };
         let mut table = Builder::default();
         table.push_record(["Access", "First MSR", "Last MSR", "Names"]);
-        // Read, then write: each access's intercepted ranges, low and high.
-        let mut intercepted: [Vec<(u32, u32)>; 2] = Default::default();
-        // Read low, read high, write low, write high (Intel SDM 25.6.9).
-        for (index, access, base) in [
-            (0, "read", 0u32),
-            (1, "read", 0xc000_0000),
-            (2, "write", 0),
-            (3, "write", 0xc000_0000),
-        ] {
-            for (first, last) in evmcs_fields::set_ranges(&bitmap[index * 0x400..][..0x400], base) {
-                intercepted[index / 2].push((first, last));
+        for (access, ranges) in [("read", &read), ("write", &write)] {
+            for &(first, last) in ranges {
                 let names = evmcs_fields::msr_names(first, last);
                 let shown = names.iter().take(4).copied().collect::<Vec<_>>().join(" ");
                 table.push_record([
@@ -1333,7 +1331,7 @@ impl ReplState<'_> {
         }
         outln!("{} {address:x}", ui::muted("MSR bitmap"));
         print_padded_table(table);
-        for (access, ranges) in ["read", "write"].iter().zip(&intercepted) {
+        for (access, ranges) in [("read", &read), ("write", &write)] {
             let names = evmcs_fields::msr_names_outside(ranges);
             let names = if names.is_empty() {
                 "none of the MSRs ntoseye names".to_string()
@@ -1366,27 +1364,28 @@ impl ReplState<'_> {
     /// (ports 0-0x7fff) and B when the primary controls use them (bit 25),
     /// else every port or none (unconditional I/O exiting, bit 24).
     fn print_io_intercepts(&mut self, vmcs: &[u8]) {
-        let controls = evmcs_fields::field(vmcs, "cpu_based_vm_exec_control").unwrap_or(0);
-        if controls & (1 << 25) == 0 {
-            if controls & (1 << 24) == 0 {
+        let target = &self.ctx.target;
+        let ports = match evmcs_fields::io_intercepts(vmcs, |address, page| {
+            target.read_physical(address, page)
+        }) {
+            Ok(IoIntercepts::None) => {
                 outln!("no I/O instruction exits: the controls use no I/O bitmaps\n");
-            } else {
-                outln!("every I/O instruction exits: the controls use no I/O bitmaps\n");
-            }
-            return;
-        }
-        let mut table = Builder::default();
-        table.push_record(["First port", "Last port"]);
-        for (field, base) in [("io_bitmap_a", 0u32), ("io_bitmap_b", 0x8000)] {
-            let address = evmcs_fields::field(vmcs, field).unwrap_or(0);
-            let mut bitmap = vec![0u8; 0x1000];
-            if let Err(error) = self.ctx.target.read_physical(address, &mut bitmap) {
-                error!("{field} {address:x}: {error}");
                 return;
             }
-            for (first, last) in evmcs_fields::set_ranges(&bitmap, base) {
-                table.push_record([format!("{first:#x}"), format!("{last:#x}")]);
+            Ok(IoIntercepts::Every) => {
+                outln!("every I/O instruction exits: the controls use no I/O bitmaps\n");
+                return;
             }
+            Ok(IoIntercepts::Bitmaps { ports }) => ports,
+            Err(error) => {
+                error!("{error}");
+                return;
+            }
+        };
+        let mut table = Builder::default();
+        table.push_record(["First port", "Last port"]);
+        for (first, last) in ports {
+            table.push_record([format!("{first:#x}"), format!("{last:#x}")]);
         }
         print_padded_table(table);
     }

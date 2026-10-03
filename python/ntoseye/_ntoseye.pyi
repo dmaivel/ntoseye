@@ -5622,10 +5622,27 @@ class HypervisorVtl:
         The basic reason (Intel SDM Appendix C) the VTL last left for the
         hypervisor, or `None` without the eVMCS.
         """
+    def io_intercepts(self, /) -> IoIntercepts:
+        """
+        Which I/O instructions of this VTL exit, as `!hvvmcs -io` shows them:
+        the port ranges its I/O bitmaps intercept, or, when its controls use
+        none, every port (`every`) or none. Raises `NtoseyeError` without the
+        VTL's eVMCS, or when a bitmap is unreadable.
+        """
     @property
     def level(self, /) -> int:
         """
         The VTL (0 for NT, 1 for the secure kernel).
+        """
+    def msr_intercepts(self, /) -> MsrIntercepts:
+        """
+        Which RDMSRs and WRMSRs of this VTL exit, as `!hvvmcs -msr` shows
+        them: through its MSR bitmap when its controls use one, else every one
+        (`every`). Each intercepted range names the architectural MSRs in it,
+        and `read_without_exit` and `write_without_exit` list those the VTL
+        accesses without an exit. MSRs outside the bitmap's 0x0-0x1fff and
+        0xc0000000-0xc0001fff always exit. Raises `NtoseyeError` without the
+        VTL's eVMCS, or when the bitmap is unreadable.
         """
     def read(self, /, address: int, size: int, physical: bool = False) -> bytes:
         """
@@ -6756,6 +6773,24 @@ class Inspect:
         Scan nonpaged pool for exited processes and terminated threads whose
         objects still have references (`!zombies`). `flags` is 1 for
         processes, 2 for threads, or 3 for both.
+        """
+
+@final
+class IoIntercepts(BaseRecord):
+    """
+    Which I/O instructions of a VTL exit (`!hvvmcs -io`).
+    """
+    @property
+    def every(self, /) -> bool:
+        """
+        Whether every I/O instruction exits: the controls use no I/O
+        bitmaps but unconditional I/O exiting.
+        """
+    @property
+    def ports(self, /) -> list[PortRange]:
+        """
+        The port ranges whose accesses exit, through I/O bitmaps A and B.
+        Empty with `every`, and when no I/O instruction exits.
         """
 
 @final
@@ -8271,6 +8306,57 @@ class Modules:
         `wow64_termination`, each `{kind, address, error}`, and is `None` for
         kernel modules.
         """
+
+@final
+class MsrIntercepts(BaseRecord):
+    """
+    Which RDMSRs and WRMSRs of a VTL exit (`!hvvmcs -msr`). MSRs outside
+    the bitmap's 0x0-0x1fff and 0xc0000000-0xc0001fff always exit.
+    """
+    @property
+    def bitmap(self, /) -> int |None:
+        """
+        The MSR bitmap's physical address, or None without one.
+        """
+    @property
+    def every(self, /) -> bool:
+        """
+        Whether every RDMSR and WRMSR exits: the controls use no MSR
+        bitmap, and the lists are empty.
+        """
+    @property
+    def read(self, /) -> list[MsrRange]:
+        """
+        The MSR ranges whose reads exit.
+        """
+    @property
+    def read_without_exit(self, /) -> list[str]:
+        """
+        The MSRs ntoseye names that the VTL reads without an exit.
+        """
+    @property
+    def write(self, /) -> list[MsrRange]:
+        """
+        The MSR ranges whose writes exit.
+        """
+    @property
+    def write_without_exit(self, /) -> list[str]:
+        """
+        The MSRs ntoseye names that the VTL writes without an exit.
+        """
+
+@final
+class MsrRange(BaseRecord):
+    """
+    A range of MSRs whose accesses exit, with the architectural MSRs (or
+    blocks, such as `x2APIC`) that ntoseye names in it.
+    """
+    @property
+    def first(self, /) -> int: ...
+    @property
+    def last(self, /) -> int: ...
+    @property
+    def names(self, /) -> list[str]: ...
 
 @final
 class Msrs:
@@ -9811,6 +9897,16 @@ class PoolValidation(BaseRecord):
         """
         Whether the headers are consistent (`problem` is `None`).
         """
+
+@final
+class PortRange(BaseRecord):
+    """
+    A range of I/O ports whose accesses exit.
+    """
+    @property
+    def first(self, /) -> int: ...
+    @property
+    def last(self, /) -> int: ...
 
 @final
 class Prcb(BaseRecord):

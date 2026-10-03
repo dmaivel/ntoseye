@@ -1,6 +1,8 @@
 //! The fields of an Enlightened VMCS, by name, offset, and size: the Hyper-V
 //! TLFS layout (Linux `struct hv_enlightened_vmcs`), padding left out.
 
+use crate::error::{Error, Result};
+
 /// `(name, offset, size in bytes)`, in offset order.
 pub const EVMCS_FIELDS: &[(&str, u16, u8)] = &[
     ("revision_id", 0x000, 4),
@@ -264,9 +266,180 @@ pub fn set_ranges(bitmap: &[u8], base: u32) -> Vec<(u32, u32)> {
     ranges
 }
 
+/// The primary processor-based controls (Intel SDM 25.6.2) that decide which
+/// MSR and I/O accesses exit.
+const UNCONDITIONAL_IO_EXITING: u64 = 1 << 24;
+const USE_IO_BITMAPS: u64 = 1 << 25;
+const USE_MSR_BITMAPS: u64 = 1 << 28;
+/// The first MSR of the high half the MSR bitmap covers (0xc0000000-0xc0001fff).
+const HIGH_MSRS: u32 = 0xc000_0000;
+
+/// Which RDMSRs and WRMSRs exit, by an eVMCS's controls and MSR bitmap.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MsrIntercepts {
+    /// The controls use no MSR bitmap: every RDMSR and WRMSR exits.
+    Every,
+    /// The MSR bitmap at physical address `bitmap`: the inclusive ranges of
+    /// MSRs whose reads, and whose writes, exit. MSRs outside the two halves
+    /// it covers (0x0-0x1fff and 0xc0000000-0xc0001fff) always exit.
+    Bitmap {
+        bitmap: u64,
+        read: Vec<(u32, u32)>,
+        write: Vec<(u32, u32)>,
+    },
+}
+
+/// Which I/O instructions exit, by an eVMCS's controls and I/O bitmaps.
+#[derive(Debug, PartialEq, Eq)]
+pub enum IoIntercepts {
+    /// No I/O bitmaps and no unconditional I/O exiting: none exits.
+    None,
+    /// No I/O bitmaps, but unconditional I/O exiting: every one exits.
+    Every,
+    /// I/O bitmaps A (ports 0-0x7fff) and B: the inclusive port ranges whose
+    /// accesses exit.
+    Bitmaps { ports: Vec<(u32, u32)> },
+}
+
+/// The RDMSR and WRMSR intercepts of the eVMCS `vmcs`, whose MSR bitmap
+/// `read_physical` reads.
+pub fn msr_intercepts(
+    vmcs: &[u8],
+    read_physical: impl FnOnce(u64, &mut [u8]) -> Result<()>,
+) -> Result<MsrIntercepts> {
+    let controls = field(vmcs, "cpu_based_vm_exec_control").unwrap_or(0);
+    if controls & USE_MSR_BITMAPS == 0 {
+        return Ok(MsrIntercepts::Every);
+    }
+    let bitmap = field(vmcs, "msr_bitmap").unwrap_or(0);
+    let mut page = vec![0u8; 0x1000];
+    read_physical(bitmap, &mut page)
+        .map_err(|error| Error::DebugInfo(format!("the MSR bitmap at {bitmap:#x}: {error}")))?;
+    // Read low, read high, write low, write high (Intel SDM 25.6.9).
+    let quarter = |index: usize, base| set_ranges(&page[index * 0x400..][..0x400], base);
+    let mut read = quarter(0, 0);
+    read.extend(quarter(1, HIGH_MSRS));
+    let mut write = quarter(2, 0);
+    write.extend(quarter(3, HIGH_MSRS));
+    Ok(MsrIntercepts::Bitmap {
+        bitmap,
+        read,
+        write,
+    })
+}
+
+/// The I/O instruction intercepts of the eVMCS `vmcs`, whose I/O bitmaps
+/// `read_physical` reads.
+pub fn io_intercepts(
+    vmcs: &[u8],
+    mut read_physical: impl FnMut(u64, &mut [u8]) -> Result<()>,
+) -> Result<IoIntercepts> {
+    let controls = field(vmcs, "cpu_based_vm_exec_control").unwrap_or(0);
+    if controls & USE_IO_BITMAPS == 0 {
+        return Ok(if controls & UNCONDITIONAL_IO_EXITING == 0 {
+            IoIntercepts::None
+        } else {
+            IoIntercepts::Every
+        });
+    }
+    let mut ports = Vec::new();
+    for (name, base) in [("io_bitmap_a", 0u32), ("io_bitmap_b", 0x8000)] {
+        let address = field(vmcs, name).unwrap_or(0);
+        let mut page = vec![0u8; 0x1000];
+        read_physical(address, &mut page)
+            .map_err(|error| Error::DebugInfo(format!("{name} at {address:#x}: {error}")))?;
+        ports.extend(set_ranges(&page, base));
+    }
+    Ok(IoIntercepts::Bitmaps { ports })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An eVMCS page with `fields` set.
+    fn vmcs_with(fields: &[(&str, u64)]) -> Vec<u8> {
+        let mut page = vec![0u8; 0x1000];
+        for (name, value) in fields {
+            let &(_, offset, size) = EVMCS_FIELDS
+                .iter()
+                .find(|(field, ..)| field == name)
+                .unwrap();
+            let offset = usize::from(offset);
+            page[offset..offset + usize::from(size)]
+                .copy_from_slice(&value.to_le_bytes()[..usize::from(size)]);
+        }
+        page
+    }
+
+    /// The MSR bitmap's four kilobyte quarters are read low, read high,
+    /// write low and write high, so one bit in each lands in its own list
+    /// at its own half; without the control, every access exits.
+    #[test]
+    fn msr_bitmap_quarters_split_reads_from_writes_and_low_from_high() {
+        let vmcs = vmcs_with(&[
+            ("cpu_based_vm_exec_control", USE_MSR_BITMAPS),
+            ("msr_bitmap", 0x5000),
+        ]);
+        let intercepts = msr_intercepts(&vmcs, |address, page| {
+            assert_eq!(address, 0x5000);
+            page[0x10 / 8] = 1 << (0x10 % 8); // read 0x10 (IA32_TIME_STAMP_COUNTER)
+            page[0x400 + 0x80 / 8] = 1; // read 0xc0000080 (IA32_EFER)
+            page[0x800 + 0x1b] = 1 << 3; // write 0xdb
+            page[0xc00 + 0x20] = 1; // write 0xc0000100 (IA32_FS_BASE)
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            intercepts,
+            MsrIntercepts::Bitmap {
+                bitmap: 0x5000,
+                read: vec![(0x10, 0x10), (0xc000_0080, 0xc000_0080)],
+                write: vec![(0xdb, 0xdb), (0xc000_0100, 0xc000_0100)],
+            }
+        );
+        let no_bitmap = vmcs_with(&[("msr_bitmap", 0x5000)]);
+        assert_eq!(
+            msr_intercepts(&no_bitmap, |_, _| panic!("no bitmap to read")).unwrap(),
+            MsrIntercepts::Every
+        );
+    }
+
+    /// Bitmap B starts at port 0x8000; without bitmaps, unconditional I/O
+    /// exiting decides between every port and none.
+    #[test]
+    fn io_bitmap_b_covers_the_upper_ports_and_the_controls_decide_without_bitmaps() {
+        let vmcs = vmcs_with(&[
+            ("cpu_based_vm_exec_control", USE_IO_BITMAPS),
+            ("io_bitmap_a", 0x6000),
+            ("io_bitmap_b", 0x7000),
+        ]);
+        let intercepts = io_intercepts(&vmcs, |address, page| {
+            match address {
+                0x6000 => page[0x60 / 8] = 0b0001_0001, // 0x60 and 0x64
+                0x7000 => page[0] = 1,                  // 0x8000
+                other => panic!("read of {other:#x}"),
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            intercepts,
+            IoIntercepts::Bitmaps {
+                ports: vec![(0x60, 0x60), (0x64, 0x64), (0x8000, 0x8000)],
+            }
+        );
+        let read = |_: u64, _: &mut [u8]| -> Result<()> { panic!("no bitmap to read") };
+        let unconditional = vmcs_with(&[("cpu_based_vm_exec_control", UNCONDITIONAL_IO_EXITING)]);
+        assert_eq!(
+            io_intercepts(&unconditional, read).unwrap(),
+            IoIntercepts::Every
+        );
+        assert_eq!(
+            io_intercepts(&vmcs_with(&[]), read).unwrap(),
+            IoIntercepts::None
+        );
+    }
 
     /// An intercepted range is named by every known MSR or block it
     /// touches, a block it covers only part of included, but not by one it
