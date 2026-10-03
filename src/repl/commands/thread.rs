@@ -425,7 +425,7 @@ impl ReplState<'_> {
         let selection = match self.ctx.select_running_windows_thread(vcpu, thread) {
             Ok(selection) => selection,
             Err(e) => {
-                error!("failed to switch to vCPU {}: {:?}", vcpu, e);
+                error!("failed to switch to vCPU {vcpu}: {e}");
                 return Ok(());
             }
         };
@@ -461,7 +461,7 @@ impl ReplState<'_> {
                         let regs = match self.ctx.read_registers() {
                             Ok(regs) => regs,
                             Err(e) => {
-                                error!("failed to read registers: {:?}", e);
+                                error!("failed to read registers: {e}");
                                 return Ok(());
                             }
                         };

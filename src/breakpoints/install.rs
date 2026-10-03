@@ -256,7 +256,10 @@ impl BreakpointManager {
                 address.0
             )))
         } else {
-            Err(Error::NotSupported)
+            Err(Error::Breakpoint(format!(
+                "the {} backend cannot plant breakpoints",
+                client.name()
+            )))
         }
     }
 

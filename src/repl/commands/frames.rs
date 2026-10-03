@@ -605,14 +605,14 @@ impl ReplState<'_> {
             .backend
             .set_current_thread(&self.ctx.current_thread)
         {
-            error!("failed to select execution context: {:?}", e);
+            error!("failed to select execution context: {e}");
             return Ok(());
         }
 
         let mut regs = match self.ctx.read_registers() {
             Ok(r) => r,
             Err(e) => {
-                error!("failed to read registers: {:?}", e);
+                error!("failed to read registers: {e}");
                 return Ok(());
             }
         };
@@ -821,13 +821,13 @@ impl ReplState<'_> {
                 .backend
                 .set_current_thread(&self.ctx.current_thread)
             {
-                error!("failed to select execution context: {:?}", e);
+                error!("failed to select execution context: {e}");
                 return Ok(());
             }
             let regs = match self.ctx.read_registers() {
                 Ok(r) => r,
                 Err(e) => {
-                    error!("failed to read registers: {:?}", e);
+                    error!("failed to read registers: {e}");
                     return Ok(());
                 }
             };

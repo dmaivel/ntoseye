@@ -88,7 +88,10 @@ impl BreakpointManager {
         config: BreakpointConfig,
     ) -> Result<u32> {
         if !client.supports_watchpoints() {
-            return Err(Error::NotSupported);
+            return Err(Error::Breakpoint(format!(
+                "the {} backend cannot set hardware breakpoints",
+                client.name()
+            )));
         }
         if Self::vtl1_rules_apply(debugger, address, &config) {
             if !client.hardware_breakpoints_trap_in_host()

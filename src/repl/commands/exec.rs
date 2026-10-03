@@ -434,13 +434,13 @@ impl ReplState<'_> {
                     }
                 }
                 Ok(false) => error!("VM is running"),
-                Err(e) => error!("error checking running VM: {:?}", e),
+                Err(e) => error!("error checking running VM: {e}"),
             }
             return Ok(());
         }
 
         if let Err(e) = self.ctx.resume_with_disposition(disposition) {
-            error!("failed to continue: {:?}", e);
+            error!("failed to continue: {e}");
             return Ok(());
         }
 
@@ -747,7 +747,7 @@ impl ReplState<'_> {
 
     fn single_step(&mut self) -> Result<()> {
         if let Err(e) = self.single_step_checked() {
-            error!("failed to step: {:?}", e);
+            error!("failed to step: {e}");
         }
 
         Ok(())

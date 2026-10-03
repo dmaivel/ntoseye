@@ -277,7 +277,7 @@ impl ReplState<'_> {
                 .backend
                 .set_current_thread(&self.ctx.current_thread)
             {
-                error!("failed to select execution context: {:?}", e);
+                error!("failed to select execution context: {e}");
                 return Ok(());
             }
             print_stop_separator();

@@ -1108,7 +1108,7 @@ impl ReplState<'_> {
         let threads = match self.ctx.backend.thread_list() {
             Ok(t) => t,
             Err(e) => {
-                error!("failed to get vCPU list: {:?}", e);
+                error!("failed to get vCPU list: {e}");
                 return Ok(());
             }
         };
@@ -1137,7 +1137,7 @@ impl ReplState<'_> {
         };
 
         if let Err(e) = self.ctx.set_current_thread(&thread_id) {
-            error!("failed to switch vCPU: {:?}", e);
+            error!("failed to switch vCPU: {e}");
             return Ok(());
         }
 
