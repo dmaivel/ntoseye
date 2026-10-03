@@ -15,7 +15,7 @@ Keeping this file:
 
 ## Unreleased
 
-ntoseye can now debug the Windows hypervisor itself: walk its partitions and virtual processors, read and disassemble the memory of guests such as WSL2, inspect a Windows Sandbox's kernel with its symbols, decode hypercalls and break on them by caller, and unwind its stacks. Kernel module unloads can now stop the debugger, as loads do.
+ntoseye can now debug the Windows hypervisor itself. It can walk hypervisor partitions and virtual processors, inspect and disassemble guest memory, including WSL2, decode hypercalls and break on them based on the caller, and unwind hypervisor stacks. Kernel module unloads can now stop the debugger too, just like module loads.
 
 ### Added
 
