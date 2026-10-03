@@ -1,5 +1,6 @@
 use owo_colors::OwoColorize;
 
+use crate::disasm::DisasmRow;
 use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix};
 use crate::repl::CommandInvocation;
@@ -240,6 +241,62 @@ pub struct DisasmSearch {
     pub pattern: Option<String>,
     /// The instruction after the last match, or after the last one searched.
     pub next: Option<VirtAddr>,
+}
+
+/// Where a `u` given no address continues: after the last instruction the
+/// previous `u` listed, while the context it listed them in holds. After a
+/// stop or step, or in another frame, thread or process, the next `u` starts
+/// at the scope's instruction pointer instead, as WinDbg's does after a stop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DisasmCursor {
+    next: VirtAddr,
+    context: DisasmContext,
+}
+
+/// What a [`DisasmCursor`] belongs to: the halt (see
+/// [`crate::phys::PhysMem::halt_epoch`]), the scope's instruction pointer,
+/// and the address space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DisasmContext {
+    halt_epoch: Option<u64>,
+    ip: Option<u64>,
+    dtb: u64,
+}
+
+impl DisasmContext {
+    fn of(target: &Target) -> Self {
+        Self {
+            halt_epoch: target.phys.halt_epoch(),
+            ip: target.builtin_variable_value("ip"),
+            dtb: target.current_dtb(),
+        }
+    }
+}
+
+impl DisasmCursor {
+    /// The cursor past `rows`, listed in `target`'s current context.
+    pub fn after(target: &Target, rows: &[DisasmRow]) -> Option<Self> {
+        let last = rows.last()?;
+        Some(Self {
+            next: VirtAddr(last.ip.wrapping_add(last.length as u64)),
+            context: DisasmContext::of(target),
+        })
+    }
+
+    /// Where a `u` given no address starts: at `cursor` while its context
+    /// holds, else at the scope's instruction pointer, which a running target
+    /// or one without registers does not have.
+    pub fn start(cursor: Option<&Self>, target: &Target) -> Result<VirtAddr> {
+        if let Some(cursor) = cursor.filter(|cursor| cursor.context == DisasmContext::of(target)) {
+            return Ok(cursor.next);
+        }
+        target
+            .builtin_variable_value("ip")
+            .map(VirtAddr)
+            .ok_or_else(|| {
+                Error::DebugInfo("no address to disassemble: give one, or halt the target".into())
+            })
+    }
 }
 
 pub enum ItemFormat {

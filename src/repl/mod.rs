@@ -280,6 +280,8 @@ pub struct ReplState<'a> {
     pub source_cursor: Option<(PathBuf, u32)>,
     /// The pattern and address `#` continues with.
     pub disasm_search: DisasmSearch,
+    /// Where a `u` given no address continues.
+    pub disasm_cursor: Option<DisasmCursor>,
     /// How long a resuming command may wait for the next stop before handing
     /// control back with the target still running. `None` (the interactive
     /// prompt) waits until a stop or Ctrl+C. A request/response host sets it
@@ -378,6 +380,7 @@ pub struct ReplStore {
     context: DispatchContext,
     source_cursor: Option<(PathBuf, u32)>,
     disasm_search: DisasmSearch,
+    disasm_cursor: Option<DisasmCursor>,
 }
 
 impl ReplStore {
@@ -409,6 +412,7 @@ impl ReplStore {
             context,
             source_cursor: None,
             disasm_search: DisasmSearch::default(),
+            disasm_cursor: None,
         }
     }
 
@@ -479,6 +483,7 @@ impl<'a> ReplState<'a> {
             quiet_stops: false,
             source_cursor: store.source_cursor,
             disasm_search: store.disasm_search,
+            disasm_cursor: store.disasm_cursor,
             stop_wait: None,
             follow_watch: None,
             unseen_stop_rendered: false,
@@ -495,6 +500,7 @@ impl<'a> ReplState<'a> {
             context: self.context,
             source_cursor: self.source_cursor,
             disasm_search: self.disasm_search,
+            disasm_cursor: self.disasm_cursor,
         }
     }
 
@@ -854,6 +860,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         quiet_stops: false,
         source_cursor: None,
         disasm_search: DisasmSearch::default(),
+        disasm_cursor: None,
         stop_wait: None,
         follow_watch: None,
         unseen_stop_rendered: false,

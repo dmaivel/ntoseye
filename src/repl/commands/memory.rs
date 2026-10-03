@@ -187,9 +187,9 @@ repl_command! {
 repl_command! {
     cmd_disasm;
     names: ["u", "disasm"],
-    usage: "u <address> [L<count>|length|end]",
+    usage: "u [address [L<count>|length|end]]",
     summary: "Disassemble memory at a symbol or address.",
-    details: "`L<count>` sets the number of instructions, 8 by default. If you give an end address, the command shows all instructions that start at or before that address.",
+    details: "`L<count>` sets the number of instructions, 8 by default. If you give an end address, the command shows all instructions that start at or before that address. If you do not give an address, the command continues after the last instruction that the previous u showed. After the target runs or steps, or when you select another frame, thread, or process, it starts at the instruction pointer instead.",
     completion: Expression,
 }
 
@@ -1100,16 +1100,28 @@ impl ReplState<'_> {
                         )
                     }
                     None => {
-                        let start_arg = require_arg!(invocation, 0, "u");
-                        match self.eval_or_report(start_arg) {
-                            Some(a) => (
-                                a,
-                                DEFAULT_INSTRUCTIONS * max_instruction_bytes,
-                                Some(DEFAULT_INSTRUCTIONS as usize),
-                                None,
-                            ),
-                            None => return Ok(()),
-                        }
+                        let start = match invocation.arg(0) {
+                            Some(text) => match self.eval_or_report(text) {
+                                Some(address) => address,
+                                None => return Ok(()),
+                            },
+                            None => match DisasmCursor::start(
+                                self.disasm_cursor.as_ref(),
+                                &self.ctx.target,
+                            ) {
+                                Ok(address) => address,
+                                Err(error) => {
+                                    error!("{error}");
+                                    return Ok(());
+                                }
+                            },
+                        };
+                        (
+                            start,
+                            DEFAULT_INSTRUCTIONS * max_instruction_bytes,
+                            Some(DEFAULT_INSTRUCTIONS as usize),
+                            None,
+                        )
                     }
                 },
             };
@@ -1140,6 +1152,7 @@ impl ReplState<'_> {
         }
         render_rows(&rows, |_| None);
         outln!();
+        self.disasm_cursor = DisasmCursor::after(&self.ctx.target, &rows);
 
         Ok(())
     }
@@ -1925,6 +1938,51 @@ fn format_unix_timestamp(seconds: i64, nanos: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::output::capture;
+    use crate::session::session_over_memory;
+    use std::collections::HashMap;
+
+    /// The addresses a `u` line listed.
+    fn listed(state: &mut ReplState<'_>, line: &str) -> Vec<u64> {
+        let (result, text) = capture(|| state.dispatch_line(line));
+        result.unwrap();
+        text.lines()
+            .filter_map(|row| u64::from_str_radix(row.split_whitespace().next()?, 16).ok())
+            .collect()
+    }
+
+    /// A `u` given no address goes on after the previous one only while the
+    /// scope stays where it was; at another instruction pointer (a stop, a
+    /// step, another frame or thread) it starts there, as WinDbg's does.
+    #[test]
+    fn u_without_an_address_continues_only_in_the_same_scope() {
+        let mut session = session_over_memory(0x1000, &[0x90; 0x1000]);
+        let mut state = ReplState::for_oneshot(&mut session);
+        state.ctx.target.registers = Some(HashMap::from([("rip".to_string(), 0x1000)]));
+
+        assert_eq!(
+            listed(&mut state, "u"),
+            (0x1000..0x1008).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            listed(&mut state, "u"),
+            (0x1008..0x1010).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            listed(&mut state, "u 1030"),
+            (0x1030..0x1038).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            listed(&mut state, "u"),
+            (0x1038..0x1040).collect::<Vec<_>>()
+        );
+
+        state.ctx.target.registers = Some(HashMap::from([("rip".to_string(), 0x1020)]));
+        assert_eq!(
+            listed(&mut state, "u"),
+            (0x1020..0x1028).collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn string_display_counts_are_limited_by_requested_bytes() {

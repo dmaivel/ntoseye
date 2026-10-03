@@ -46,6 +46,7 @@ ntoseye can now debug the Windows hypervisor itself. It can walk hypervisor part
 - Software breakpoints in the Windows hypervisor's code are refused with a pointer to `ba e1`, instead of left pending forever; NT breakpoints can still be set from the hypervisor's context.
 - On the gdb backend, a breakpoint whose condition or filter declines many hits a second slows the target much less: a declined hit no longer rewrites the site journal on disk.
 - On the gdb backend under VBS, single steps (`t`, `step()`, and the walks built on them, such as `wt` and `trace_calls`) are about 15% faster and use less host CPU: replies from the stub are read buffered, and a step no longer selects its vCPU again after the vCPU's own stop.
+- `u` without an address works as in WinDbg: it starts at the instruction pointer, and continues after the previous `u` until the target runs or another frame, thread, or process is selected.
 
 ### Fixed
 

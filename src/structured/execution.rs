@@ -3,6 +3,7 @@
 
 use super::Args;
 use crate::error::Result;
+use crate::repl::DisasmCursor;
 use crate::view::execution::{ExpressionValue, RegisterContent, RegisterValue};
 use crate::view::{self, View};
 
@@ -28,13 +29,18 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
                 .backtrace(count.map_or(64, |count| count as usize))?;
             Ok(View::list(view::execution::stack_frames(&trace.frames)))
         }),
-        "u" | "disasm" => args.addr(0).and_then(|address| {
+        "u" | "disasm" => args.opt_addr(0).and_then(|address| {
+            let address = match address {
+                Some(address) => address,
+                None => DisasmCursor::start(args.state.disasm_cursor.as_ref(), args.target())?,
+            };
             let count = argv
                 .get(1)
                 .and_then(|arg| arg.strip_prefix(['L', 'l']))
                 .and_then(|count| usize::from_str_radix(count, 16).ok())
                 .unwrap_or(8);
             let rows = args.state.ctx.disassemble(address, count)?;
+            args.state.disasm_cursor = DisasmCursor::after(args.target(), &rows);
             Ok(View::list(view::execution::disasm_rows(&rows)))
         }),
         "?" | "ev" if !args.raw_tail.is_empty() => args.eval(args.raw_tail).map(|value| {
