@@ -68,7 +68,7 @@ If a check fails, the walk stops and reports the corruption, but keeps the recor
 
 ## From Python
 
-`dbg.inspect` has one method for each command, and each method returns the same fields as the MCP JSON:
+`dbg.inspect` has one method for each command, and each method returns the decoded fields as typed records:
 
 - `wdf_loader()` for {command}`!wdfkd.wdfldr`
 - `wdf_driver_info(driver)` for {command}`!wdfkd.wdfdriverinfo`

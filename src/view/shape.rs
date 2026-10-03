@@ -1,7 +1,6 @@
 //! Declared result shapes: a structured result is declared once, in a view
-//! module (`src/view/*.rs`), and rendered from that declaration to every
-//! surface: a JSON object for MCP, a typed class for the SDK, a `dict` for
-//! its `to_dict()`.
+//! module (`src/view/*.rs`), and rendered from that declaration as a typed
+//! class in the SDK and as a `dict` by its `to_dict()`.
 //!
 //! ```text
 //! shapes! {
@@ -510,11 +509,10 @@ macro_rules! key {
 }
 pub(crate) use key;
 
-#[cfg(all(test, feature = "mcp"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::target::DiagnosticValue;
-    use crate::view::to_json;
 
     shapes! {
         Sample {
@@ -549,18 +547,6 @@ mod tests {
         assert_eq!(
             keys,
             ["type", "address", "id", "null", "read", "failed", "items"]
-        );
-        assert_eq!(
-            to_json(&View::Shaped(shaped)),
-            serde_json::json!({
-                "type": "port",
-                "address": "0x1000",
-                "id": "0x1f",
-                "null": null,
-                "read": {"available": true, "value": "0x20", "error": null},
-                "failed": {"available": false, "value": null, "error": "paged out"},
-                "items": 1,
-            })
         );
     }
 }

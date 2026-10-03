@@ -133,7 +133,7 @@ An inline frame has no registers of its own and uses the registers of its physic
 
 A private PDB also contains the WPP trace message formats (TMF) of the driver. `tracewpp` stores the format string and the argument types of each message as an annotation in the PDB.
 
-When the PDB is loaded, {command}`!wmitrace.logdump` shows the WPP messages of the driver as formatted text, with the provider, the function, and the text of each message. In MCP results and in `dbg.inspect.etw_events()`, `message.text` contains the same data.
+When the PDB is loaded, {command}`!wmitrace.logdump` shows the WPP messages of the driver as formatted text, with the provider, the function, and the text of each message. In `dbg.inspect.etw_events()`, `message.text` contains the same data.
 
 If the PDB is not loaded, a message shows only its GUID, number, and payload bytes, and the dump shows how many messages stayed raw.
 

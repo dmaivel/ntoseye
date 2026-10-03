@@ -2,22 +2,12 @@
 //! builders.
 
 use super::shape::shapes;
-use crate::layout::{FieldInfo, TypeInfo};
+use crate::layout::FieldInfo;
 use crate::symbols::{self, SymbolVisibility};
 use crate::target;
 use crate::types::VirtAddr;
 
 shapes! {
-    /// The field layout of a struct or union (`dt`).
-    TypeLayout {
-        /// The PDB type name.
-        name: String,
-        /// The size in bytes.
-        size: usize,
-        /// The fields, sorted by offset.
-        fields: Vec<Field>,
-    }
-
     /// The PDB layout of a field, with its name, byte offset, byte size, and type spelling.
     Field {
         name: String,
@@ -122,19 +112,6 @@ pub fn type_field(name: &str, field: &FieldInfo) -> Field {
         offset: field.offset,
         size: field.size,
         r#type: field.type_data.to_string(),
-    }
-}
-
-/// A struct's field layout, sorted by offset.
-pub fn type_layout(name: &str, info: &TypeInfo) -> TypeLayout {
-    TypeLayout {
-        name: name.to_string(),
-        size: info.size,
-        fields: info
-            .fields_in_order()
-            .into_iter()
-            .map(|(name, field)| type_field(name, field))
-            .collect(),
     }
 }
 

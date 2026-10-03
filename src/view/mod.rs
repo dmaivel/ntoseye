@@ -58,13 +58,11 @@ macro_rules! collected_shape_classes {
 #[cfg(feature = "python")]
 pub(crate) use collected_shape_classes;
 
-// Shared shape for SDK/MCP structure rendering; surfaces disagree only on how
-// address-like values are encoded.
-/// A node in a neutral value tree.
+/// A node in the value tree the SDK builds its results from.
 pub enum View {
-    /// An address/pointer/status: hex string for MCP, int for Python.
+    /// An address, pointer or status: an int that records show in hex.
     Hex(u64),
-    /// A plain count: a number on both surfaces.
+    /// A plain count.
     Num(u64),
     /// A signed count.
     Int(i64),
@@ -77,8 +75,8 @@ pub enum View {
     /// An object declared with [`shape::shapes!`]: rendered as an
     /// [`Object`](Self::Object), and as its own class in the SDK.
     Shaped(shape::Shaped),
-    /// A value that can fail to read on its own: `{available, value, error}`
-    /// for MCP, an `ntoseye.Diagnostic` for Python.
+    /// A value that can fail to read on its own: an `ntoseye.Diagnostic`, or
+    /// `{available, value, error}` in plain form.
     Diagnostic(Box<DiagnosticView>),
 }
 
@@ -97,47 +95,6 @@ pub struct DiagnosticView {
     pub source: Option<Option<String>>,
 }
 
-/// Render a [`View`] to JSON (MCP): addresses become `0x` hex strings.
-#[cfg(feature = "mcp")]
-pub fn to_json(v: &View) -> serde_json::Value {
-    use serde_json::Value;
-    match v {
-        View::Hex(n) => Value::from(format!("{n:#x}")),
-        View::Num(n) => Value::from(*n),
-        View::Int(n) => Value::from(*n),
-        View::Bool(b) => Value::from(*b),
-        View::Str(s) => Value::from(s.clone()),
-        View::Null => Value::Null,
-        View::List(items) => Value::Array(items.iter().map(to_json).collect()),
-        View::Object(fields) | View::Shaped(shape::Shaped { fields, .. }) => {
-            let mut map = serde_json::Map::new();
-            for (key, val) in fields {
-                map.insert((*key).to_string(), to_json(val));
-            }
-            Value::Object(map)
-        }
-        View::Diagnostic(diagnostic) => {
-            let mut map = serde_json::Map::new();
-            map.insert("available".into(), Value::from(diagnostic.error.is_none()));
-            map.insert(
-                "value".into(),
-                diagnostic.value.as_ref().map_or(Value::Null, to_json),
-            );
-            map.insert(
-                "error".into(),
-                diagnostic.error.clone().map_or(Value::Null, Value::from),
-            );
-            if let Some(source) = &diagnostic.source {
-                map.insert(
-                    "source".into(),
-                    source.clone().map_or(Value::Null, Value::from),
-                );
-            }
-            Value::Object(map)
-        }
-    }
-}
-
 /// How [`to_py`] renders objects and diagnostics.
 #[cfg(feature = "python")]
 #[derive(Clone, Copy)]
@@ -146,7 +103,7 @@ pub enum PyShape {
     /// with attribute access.
     Records,
     /// Plain `dict`s throughout, the shape `to_dict()` returns: a diagnostic
-    /// becomes `{available, value, error[, source]}` as in [`to_json`].
+    /// becomes `{available, value, error[, source]}`.
     Plain,
 }
 

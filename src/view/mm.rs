@@ -5,7 +5,7 @@ use super::shape::{Diag, Hex, Metric, shapes};
 use crate::target::mm::{
     self as target_mm, BigPoolDetail, LookasideDetail, LookasideListsDetail, MdlDetail,
     MemoryRegionInfo, PfnDetail, PoolBlockDetail, PoolFindDetail, PoolFindMatch, PoolFindRange,
-    PoolPageDetail, PoolRegionDetail, PoolType, PoolUsageDetail, PoolValidationDetail, PteLevel,
+    PoolPageDetail, PoolRegionDetail, PoolType, PoolUsageDetail, PoolValidationDetail,
     PtovDetail, PtovMapping, SystemMemorySummary, SystemPteTypeDetail, SystemPtesDetail,
     VadProtection, VadType, VmDetail, VprotDetail, VtopDetail, VtopLevel, memory_state_name,
     memory_type_name, page_protection_name,
@@ -586,16 +586,6 @@ shapes! {
         region: Option<MemoryRegion>,
     }
 
-    /// A full page-table walk (`!pte`), with the levels that the walk reached
-    /// from the top down. A large-page mapping stops the walk early, so it has
-    /// fewer levels.
-    PteWalk {
-        address: VirtAddr,
-        /// The address space walked.
-        dtb: Hex,
-        levels: Vec<PageTableEntry>,
-    }
-
     /// One process's memory counters, in bytes.
     ProcessMemoryUsage {
         process: super::process::ProcessIdentity,
@@ -717,10 +707,6 @@ pub fn pfn(detail: &PfnDetail) -> Pfn {
 
 fn vtop_level(level: &VtopLevel) -> PageTableEntry {
     table_level(level.level, level.address, level.value, &level.attributes)
-}
-
-fn pte_level(pte: &PteLevel) -> PageTableEntry {
-    table_level(pte.level, pte.address, pte.value.0, &pte.attributes)
 }
 
 /// One page-table level (WinDbg-style flags), decoded for its architecture.
@@ -1109,15 +1095,6 @@ pub fn undescribed_search_match(
     }
 }
 
-/// `!pte`'s walk.
-pub fn pte_walk(walk: &target_mm::PteWalk) -> PteWalk {
-    PteWalk {
-        address: walk.address,
-        dtb: walk.dtb,
-        levels: walk.levels().map(pte_level).collect(),
-    }
-}
-
 fn process_memory_usage(usage: &target_mm::ProcessMemoryUsage) -> ProcessMemoryUsage {
     ProcessMemoryUsage {
         process: process(&usage.process),
@@ -1146,42 +1123,3 @@ pub fn memory_usage(summary: &SystemMemorySummary) -> SystemMemoryUsage {
     }
 }
 
-#[cfg(all(test, feature = "mcp"))]
-mod tests {
-    use super::memory_usage;
-    use crate::debugger_data::MetadataSource;
-    use crate::target::mm::SystemMemorySummary;
-    use crate::target::{DiagnosticMetric, DiagnosticValue};
-    use crate::view::to_json;
-
-    #[test]
-    fn diagnostic_memory_view_retains_values_errors_and_provenance() {
-        let available = DiagnosticMetric {
-            value: DiagnosticValue::Available(0x1234),
-            source: Some(MetadataSource::KernelSymbol),
-        };
-        let unavailable = DiagnosticMetric {
-            value: DiagnosticValue::unavailable("missing MmAvailablePages"),
-            source: None,
-        };
-        let summary = SystemMemorySummary {
-            physical_pages: available.clone(),
-            available_pages: unavailable.clone(),
-            committed_pages: available.clone(),
-            commit_limit_pages: available.clone(),
-            paged_pool_pages: available.clone(),
-            nonpaged_pool_bytes: unavailable,
-            processes: Vec::new(),
-            process_count: 3,
-            truncated: true,
-        };
-
-        let json = to_json(&memory_usage(&summary).into_view());
-        assert_eq!(json["physical_pages"]["value"], 0x1234);
-        assert_eq!(json["physical_pages"]["source"], "kernel symbol");
-        assert_eq!(json["available_pages"]["available"], false);
-        assert_eq!(json["available_pages"]["error"], "missing MmAvailablePages");
-        assert_eq!(json["process_count"], 3);
-        assert_eq!(json["truncated"], true);
-    }
-}

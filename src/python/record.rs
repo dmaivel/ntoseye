@@ -174,8 +174,8 @@ impl BaseRecord {
             .unwrap_or_else(|| py.None().into_bound(py)))
     }
 
-    /// A plain nested `dict`, with all records and diagnostics converted, in
-    /// the shape that the MCP `format=json` surface returns.
+    /// A plain nested `dict`, with all records and diagnostics converted, for
+    /// serializing or comparing a result.
     pub fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         let dict = PyDict::new(py);
         for (key, value) in self.fields.bind(py).iter() {

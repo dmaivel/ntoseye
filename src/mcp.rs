@@ -30,13 +30,8 @@ use std::time::Duration;
 use crate::diagnostics;
 use crate::error::Error;
 use crate::kd::KdMemorySource;
-use crate::repl::{
-    Flow, RemoteClient, ReplStore, StopWaitBudget, command_registry, parse_command,
-    run_remote_command,
-};
+use crate::repl::{RemoteClient, ReplStore, StopWaitBudget, run_remote_command};
 use crate::session::{RunStatus, Session};
-use crate::structured;
-use crate::view;
 use crate::{Backend, TargetSpec};
 
 /// The session actor's state: the (`!Send`) session plus the REPL state the
@@ -271,15 +266,8 @@ struct OpenArgs {
     key: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-enum OutputFormat {
-    #[default]
-    Text,
-    Json,
-}
-
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct CommandArgs {
     #[schemars(
         description = "A REPL command line in ntoseye's WinDbg-style syntax, e.g. `!process 0 0`, `dt nt!_EPROCESS ffff...`, `k`, `bp nt!NtCreateFile`, `dq rsp l8`, `u rip`, `lm`, `g`, `p`, `break`. Several commands may be separated by `;`. Run `help` for the list and `help <cmd>` for one command."
@@ -290,10 +278,6 @@ struct CommandArgs {
         description = "How long the call may wait for the target to stop before returning with it still running (default 10000, max 300000; 0 = default): a resuming command (g, p, gu, pa, ...) waits for the stop it causes, and a halted-only command (k, r, bp, ...) issued while the target runs waits for the stop before running. Command loops (.for, .while, .foreach, !for_each_*, scripts) and .sleep stop when it elapses; other commands that work on a running target ignore it."
     )]
     timeout_ms: Option<u64>,
-    #[schemars(
-        description = "text (default): the REPL's output with a one-line `[target ...]` trailer. json: a structured envelope {output, result, target, debug_output}; `result` is the typed decoding for commands that have one (the ! inspectors, lm, !process, k, bl, dt, ?, r, !analyze, ...) and null otherwise."
-    )]
-    format: Option<OutputFormat>,
 }
 
 /// A tool failure from the session, classified so a guest memory fault stays
@@ -395,110 +379,31 @@ fn status_trailer(status: &RunStatus) -> String {
     line
 }
 
-/// Everything one `command` call produced, before choosing a rendering.
-struct CommandOutput {
-    ok: bool,
-    text: String,
-    result: Option<serde_json::Value>,
-    status: RunStatus,
-    debug_output: Vec<serde_json::Value>,
-}
-
-impl CommandOutput {
-    fn into_text(mut self) -> CallToolResult {
-        for line in &self.debug_output {
-            if let Some(text) = line.get("text").and_then(|t| t.as_str()) {
-                self.text.push_str(&format!("[dbgprint] {text}\n"));
-            }
-        }
-        if !self.text.is_empty() && !self.text.ends_with('\n') {
-            self.text.push('\n');
-        }
-        self.text.push_str(&status_trailer(&self.status));
-        let content = vec![ContentBlock::text(self.text)];
-        if self.ok {
-            CallToolResult::success(content)
-        } else {
-            CallToolResult::error(content)
-        }
-    }
-
-    fn into_json(self) -> CallToolResult {
-        let value = serde_json::json!({
-            "ok": self.ok,
-            "output": self.text,
-            "result": self.result,
-            "target": view::to_json(&view::execution::run_status(&self.status).into_view()),
-            "debug_output": self.debug_output,
-        });
-        let mut result = CallToolResult::structured(value);
-        if !self.ok {
-            result.is_error = Some(true);
-        }
-        result
-    }
-}
-
-/// MCP-specific rendering around the shared host-neutral REPL dispatch.
-fn run_command(
-    actor: &mut Actor,
-    line: &str,
-    budget: StopWaitBudget,
-    format: OutputFormat,
-) -> CommandOutput {
-    let mut result = None;
+/// Run one line through the shared remote REPL dispatch: its output, the
+/// guest's debug output since the last call, and the run-state trailer.
+fn run_command(actor: &mut Actor, line: &str, budget: StopWaitBudget) -> CallToolResult {
     let remote = run_remote_command(
         &mut actor.ctx,
         &mut actor.repl,
         RemoteClient::Mcp,
         line,
         budget,
-        |state, line| {
-            if format != OutputFormat::Json {
-                return None;
-            }
-            // The structured decoders bypass `dispatch_one` and its gate, so
-            // admit the (single) command here. A line without a decoding
-            // falls through to `dispatch_line`, whose gate is then a no-op:
-            // the target is already halted or the command never needed it.
-            let spec = parse_command(line)
-                .ok()
-                .flatten()
-                .and_then(|parsed| command_registry().get(parsed.name));
-            if let Some(spec) = spec {
-                match state.gate_remote_command(spec) {
-                    Ok(Some(flow)) => return Some(Ok(flow)),
-                    Ok(None) => {}
-                    Err(error) => return Some(Err(error)),
-                }
-            }
-            match structured::structured_command(state, line) {
-                Some(Ok(view)) => {
-                    result = Some(view::to_json(&view));
-                    Some(Ok(Flow::Continue))
-                }
-                Some(Err(error)) => {
-                    outln!("error: {error}");
-                    Some(Ok(Flow::Denied))
-                }
-                None => None,
-            }
-        },
     );
-
+    let mut text = remote.text;
     let page = actor.ctx.read_debug_output(actor.debug_seq);
     actor.debug_seq = page.next_seq;
-    let debug_output = page
-        .lines
-        .iter()
-        .map(|line| view::to_json(&view::backend::debug_log_line(line).into_view()))
-        .collect();
-    CommandOutput {
-        ok: remote.ok,
-        text: remote.text,
-        result,
-        status: remote.status,
-        debug_output,
+    for line in &page.lines {
+        text.push_str(&format!("[dbgprint] {}\n", line.text));
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&status_trailer(&remote.status));
+    let content = vec![ContentBlock::text(text)];
+    if remote.ok {
+        CallToolResult::success(content)
+    } else {
+        CallToolResult::error(content)
     }
 }
 
@@ -552,15 +457,10 @@ impl NtoseyeMcp {
     )]
     async fn command(
         &self,
-        Parameters(CommandArgs {
-            line,
-            timeout_ms,
-            format,
-        }): Parameters<CommandArgs>,
+        Parameters(CommandArgs { line, timeout_ms }): Parameters<CommandArgs>,
         ct: CancellationToken,
     ) -> Result<CallToolResult, McpError> {
         let timeout_ms = optional_timeout_ms(timeout_ms)?;
-        let format = format.unwrap_or_default();
         // Per-request cancel flag the REPL's bounded wait polls. Set when the
         // client cancels this request (`ct`) or the server is shutting down
         // (`self.interrupt`), so an in-flight wait returns and frees the actor
@@ -588,11 +488,7 @@ impl NtoseyeMcp {
         let result = self
             .run(move |actor| {
                 let budget = StopWaitBudget::new(Duration::from_millis(timeout_ms), cancel);
-                let output = run_command(actor, &line, budget, format);
-                Ok(match format {
-                    OutputFormat::Text => output.into_text(),
-                    OutputFormat::Json => output.into_json(),
-                })
+                Ok(run_command(actor, &line, budget))
             })
             .await;
         watcher.abort();
@@ -766,8 +662,7 @@ impl rmcp::ServerHandler for NtoseyeMcp {
                  list exists: kernel \
                  symbols and `bp nt!...` work there, process and module lists do not yet. \
                  `g` lets boot continue; while running, wait rather than enumerating \
-                 stale state. Use format=json when you need typed values \
-                 instead of parsing text. If no session is open and the user has not said \
+                 stale state. If no session is open and the user has not said \
                  how the VM is exposed (kd socket path, kdnet key, gdb address, or a dump \
                  file), ask them before calling `open` rather than guessing; the defaults \
                  only fit the documented QEMU setup.",
@@ -1175,7 +1070,6 @@ mod tests {
                 Parameters(CommandArgs {
                     line: "lm".into(),
                     timeout_ms: None,
-                    format: None,
                 }),
                 CancellationToken::new(),
             )

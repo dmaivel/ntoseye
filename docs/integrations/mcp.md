@@ -8,7 +8,7 @@ If the agent's harness keeps a Python kernel alive between calls, such as oh-my-
 
 | Tool | Purpose |
 | --- | --- |
-| `command` | Runs one REPL line and returns its text with a `[target ...]` trailer. A `;` separates commands, and {command}`help` lists them. The arguments are `line`, `timeout_ms` (default 10 s, maximum 5 min), and `format` (`text` or [`json`](#structured-results)). |
+| `command` | Runs one REPL line and returns its text with a `[target ...]` trailer. A `;` separates commands, and {command}`help` lists them. The arguments are `line` and `timeout_ms` (default 10 s, maximum 5 min). |
 | `open` / `close` | `open` attaches to a target using `backend`, `connect`, and, for `kdnet`, `key`. For a crash dump, use `backend: dump` with the dump path as `connect`. `close` releases the target. The server holds one session at a time. |
 
 ## Run control
@@ -57,17 +57,6 @@ A typical breakpoint flow is:
 For a user-mode breakpoint, give the process, and ntoseye resolves the symbol in that process: `break; bu /p <pid> user32!PeekMessageW; g`. You do not need a `.process /p` first, because the debugger loads the symbols of that module itself. For more information, refer to [symbols](../using/symbols.md).
 
 When a backtrace goes through a module whose PDB is not in the cache yet, ntoseye shows those frames as `module+offset` and gets the PDB in the background without making the call wait. A later {command}`k` shows the names.
-
-## Structured results
-
-`format: "json"` returns `{ok, output, result, target, debug_output}` as structured content, with these fields:
-
-- `output`: the text that the command printed.
-- `target`: the run-state snapshot (`{running, current_thread, rip, symbol, saved_vtl, serving, running_vp, attached_process, stopped_process, stopped_thread, coherent, kernel_base, partition}`). At a stop in the Windows hypervisor, each `saved_vtl` state has the `hypercall` of a `VMCALL` exit with its input decoded as {command}`!hvcall` shows it (`code`, `name`, `fast`, `rep_start`, `rep_count`, `input_gpa`, `output_gpa`, `fields`, `elements`, ...), and `serving` is the guest partition's VP that the processor serves (`partition_id`, `vp_index`, `vtl`, `rip`, `exit_reason`, `hypercall`), or `null`. `running_vp` names the guest partition's VP that a vCPU runs (`partition 0x5 VP 2`), and `partition` is the partition that {command}`.partition` shows, or `null` while the target is. The `~` command's result has the same per vCPU.
-- `debug_output`: the captured `DbgPrint` lines.
-- `result`: the typed decoding, for commands that have one. For other commands, `result` is `null`.
-
-The decodings are the same ones that the [Python SDK](../scripting/sdk.md) provides as methods, such as the `!` inspectors, {command}`lm`, {command}`!process`, {command}`k`, {command}`bl`, {command}`dt`, {command}`?`, {command}`r`, and {command}`!analyze`. The SDK surface table lists the full set.
 
 ## Target at server start
 

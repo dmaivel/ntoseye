@@ -5,8 +5,7 @@ use super::shape::{Diag, Hex, shapes};
 use crate::types::VirtAddr;
 use crate::target::security::{
     self, AceDetail, AclDetail, ObjectSecurityDetail, PrivilegeInfo, SecurityDescriptorDetail,
-    SessionDetail, SessionProcessDetail, SessionProcessesDetail, SessionsDetail, SidDetail,
-    TokenDetail,
+    SessionDetail, SessionsDetail, SidDetail, TokenDetail,
 };
 
 shapes! {
@@ -103,29 +102,6 @@ shapes! {
         /// selected process has no known ID.
         selected_session: Option<u64>,
         sessions: Vec<Session>,
-        process_count: usize,
-        /// Whether the process walk stopped at its limit.
-        truncated: bool,
-    }
-
-    /// A process and its session ID.
-    SessionProcess {
-        /// The process record.
-        process: super::process::ProcessIdentity,
-        /// `None` if ntoseye cannot get the ID from `_EPROCESS` or from the primary
-        /// token.
-        session: Option<u64>,
-    }
-
-    /// The processes of a session, with an optional image glob filter
-    /// (`!sprocess`).
-    SessionProcesses {
-        /// `None` for all sessions.
-        selected_session: Option<u64>,
-        /// Whether a non-zero flags argument requested the detailed list.
-        detailed: bool,
-        image_glob: Option<String>,
-        processes: Vec<SessionProcess>,
         process_count: usize,
         /// Whether the process walk stopped at its limit.
         truncated: bool,
@@ -241,25 +217,6 @@ pub fn sessions(detail: &SessionsDetail) -> Sessions {
     Sessions {
         selected_session: detail.selected_session,
         sessions: detail.sessions.iter().map(session).collect(),
-        process_count: detail.process_count,
-        truncated: detail.truncated,
-    }
-}
-
-fn session_process(detail: &SessionProcessDetail) -> SessionProcess {
-    SessionProcess {
-        process: process(&detail.process),
-        session: detail.session,
-    }
-}
-
-/// Render `!sprocess`.
-pub fn session_processes(detail: &SessionProcessesDetail) -> SessionProcesses {
-    SessionProcesses {
-        selected_session: detail.selected_session,
-        detailed: detail.detailed,
-        image_glob: detail.image_glob.clone(),
-        processes: detail.processes.iter().map(session_process).collect(),
         process_count: detail.process_count,
         truncated: detail.truncated,
     }

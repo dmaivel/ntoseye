@@ -29,7 +29,6 @@ pub fn command(dbg: &Bound<'_, Debugger>, line: &str, timeout: Option<f64>) -> P
             RemoteClient::Sdk,
             line,
             budget,
-            |_, _| None,
         ))
     });
     *debugger.repl_store.lock() = store;

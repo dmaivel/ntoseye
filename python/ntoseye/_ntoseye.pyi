@@ -1053,8 +1053,8 @@ class BaseRecord:
         """
     def to_dict(self, /) -> dict[str, Any]:
         """
-        A plain nested `dict`, with all records and diagnostics converted, in
-        the shape that the MCP `format=json` surface returns.
+        A plain nested `dict`, with all records and diagnostics converted, for
+        serializing or comparing a result.
         """
     def values(self, /) -> list[Any]:
         """
@@ -10163,23 +10163,6 @@ class ProcessorStateArea(BaseRecord):
     def special_registers(self, /) -> Diagnostic[SpecialRegistersArea]: ...
 
 @final
-class PteWalk(BaseRecord):
-    """
-    A full page-table walk (`!pte`), with the levels that the walk reached
-    from the top down. A large-page mapping stops the walk early, so it has
-    fewer levels.
-    """
-    @property
-    def address(self, /) -> int: ...
-    @property
-    def dtb(self, /) -> int:
-        """
-        The address space walked.
-        """
-    @property
-    def levels(self, /) -> list[PageTableEntry]: ...
-
-@final
 class QueuedLock(BaseRecord):
     """
     A numbered queued spinlock and the processors that own it or wait for it.
@@ -11038,51 +11021,6 @@ class Session(BaseRecord):
     def processes(self, /) -> list[ProcessIdentity]:
         """
         The processes in the session.
-        """
-
-@final
-class SessionProcess(BaseRecord):
-    """
-    A process and its session ID.
-    """
-    @property
-    def process(self, /) -> ProcessIdentity:
-        """
-        The process record.
-        """
-    @property
-    def session(self, /) -> int |None:
-        """
-        `None` if ntoseye cannot get the ID from `_EPROCESS` or from the primary
-        token.
-        """
-
-@final
-class SessionProcesses(BaseRecord):
-    """
-    The processes of a session, with an optional image glob filter
-    (`!sprocess`).
-    """
-    @property
-    def detailed(self, /) -> bool:
-        """
-        Whether a non-zero flags argument requested the detailed list.
-        """
-    @property
-    def image_glob(self, /) -> str |None: ...
-    @property
-    def process_count(self, /) -> int: ...
-    @property
-    def processes(self, /) -> list[SessionProcess]: ...
-    @property
-    def selected_session(self, /) -> int |None:
-        """
-        `None` for all sessions.
-        """
-    @property
-    def truncated(self, /) -> bool:
-        """
-        Whether the process walk stopped at its limit.
         """
 
 @final
@@ -12768,27 +12706,6 @@ class Type:
         """
         Walk an intrusive list whose head is at `head`, where `link_field` is
         the field that holds the links.
-        """
-
-@final
-class TypeLayout(BaseRecord):
-    """
-    The field layout of a struct or union (`dt`).
-    """
-    @property
-    def fields(self, /) -> list[Field]:
-        """
-        The fields, sorted by offset.
-        """
-    @property
-    def name(self, /) -> str:
-        """
-        The PDB type name.
-        """
-    @property
-    def size(self, /) -> int:
-        """
-        The size in bytes.
         """
 
 @final

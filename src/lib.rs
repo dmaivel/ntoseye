@@ -169,8 +169,6 @@ pub mod python;
 #[cfg(feature = "repl")]
 pub mod repl;
 pub mod session;
-#[cfg(feature = "mcp")]
-pub mod structured;
 pub mod symbols;
 pub mod target;
 #[cfg(any(feature = "dap", feature = "gdbserver"))]

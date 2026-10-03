@@ -199,5 +199,3 @@ For a crash inside a driver, as in the example on this page, use [NotMyFault](ht
 ## From scripts
 
 In the [Python SDK](../scripting/sdk.md), a bugcheck comes as a `Stop.Bugcheck` whose `info` holds the code, the arguments, and the culprit. `dbg.inspect.bugcheck()` returns the same data for the current stop, and `dbg.inspect.triage()` returns the full `!analyze` report.
-
-With [MCP](../integrations/mcp.md), `!analyze` with `format: "json"` returns the report as structured data.

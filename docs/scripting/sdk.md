@@ -392,7 +392,7 @@ The SDK raises `ValueError` before it touches the target when an argument is not
 
 Decoded results, for example `dbg.inspect.pci()`, `thread.inspect()`, a `Field`, a `Symbol`, or a `MemoryRegion`, are records with one typed property for each field, so an editor can complete the property names and a type checker finds a misspelled name. [Results](../reference/sdk/index.md#results) lists each property.
 
-A result always has every field of its class. If a field does not apply, its value is `None`, or empty or false where the documentation of the field says so. You can also read a record as a mapping, with `keys()` and `record["field"]`. `to_dict()` returns the same fields that the MCP server reports, and you can call it on a record, a process, a thread, a module, a CPU, a driver, or a breakpoint.
+A result always has every field of its class. If a field does not apply, its value is `None`, or empty or false where the documentation of the field says so. You can also read a record as a mapping, with `keys()` and `record["field"]`. `to_dict()` returns the same fields as plain nested `dict`s, and you can call it on a record, a process, a thread, a module, a CPU, a driver, or a breakpoint.
 
 `ntoseye.build` is the commit stamp in the compiled extension: `<commit>`, `<commit>-dirty`, or `unknown`. After you rebuild, compare this value if a long-lived Python interpreter might still have an older native module loaded.
 

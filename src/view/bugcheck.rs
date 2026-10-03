@@ -342,23 +342,3 @@ pub fn bugcheck_trap_frame(tf: &bugchecks::BugcheckTrapFrame) -> BugcheckTrapFra
     }
 }
 
-#[cfg(all(test, feature = "mcp"))]
-mod tests {
-    use super::bugcheck_trap_frame;
-    use crate::bugchecks::BugcheckTrapFrame;
-    use crate::view::to_json;
-
-    #[test]
-    fn bugcheck_trap_frame_exposes_decode_failure() {
-        let view = bugcheck_trap_frame(&BugcheckTrapFrame {
-            address: 0xffff_8000_1234_5000,
-            frame: None,
-            rip_symbol: None,
-            error: Some("type `_KTRAP_FRAME` not found".to_string()),
-        })
-        .into_view();
-        let json = to_json(&view);
-        assert!(json["frame"].is_null());
-        assert_eq!(json["error"], "type `_KTRAP_FRAME` not found");
-    }
-}
