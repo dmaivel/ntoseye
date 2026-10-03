@@ -1272,7 +1272,7 @@ class Breakpoint:
         """
     def to_dict(self, /) -> dict[str, Any]:
         """
-        Get the breakpoint state as a plain `dict`, in the shape that MCP shows.
+        Get the breakpoint state as a plain `dict`.
         """
     @property
     def valid(self, /) -> bool:
@@ -1896,7 +1896,7 @@ class Cpu:
         """
     def to_dict(self, /) -> dict[str, Any]:
         """
-        The processor as a plain `dict`, in the shape that MCP shows.
+        The processor as a plain `dict`.
         """
 
 @final
@@ -2876,7 +2876,7 @@ class Driver:
         """
     def to_dict(self, /) -> dict[str, Any]:
         """
-        The driver object as a plain `dict`, in the shape that MCP renders.
+        The driver object as a plain `dict`.
         """
 
 @final
@@ -6365,8 +6365,7 @@ class InFlightIrp(BaseRecord):
 class Inspect:
     """
     System-wide reports and helpers that decode an object at an address
-    (`dbg.inspect`). The results are `Record`s with the same shape as the MCP
-    JSON output.
+    (`dbg.inspect`). The results are typed `Record`s.
     """
     def __repr__(self, /) -> str: ...
     def acl(self, /, address: int) -> Acl:
@@ -8119,7 +8118,7 @@ class Module:
         """
     def to_dict(self, /) -> dict[str, Any]:
         """
-        The module as a plain `dict`, in the shape that MCP renders.
+        The module as a plain `dict`.
         """
     def verifier(self, /) -> VerifierDriver:
         """
@@ -9984,7 +9983,7 @@ class Process:
     def to_dict(self, /) -> dict[str, Any]:
         """
         Get the process identity as a plain `dict` (`pid`, `name`, `dtb`,
-        `eprocess`, `wow64`), in the shape that MCP shows.
+        `eprocess`, `wow64`).
         """
     def token(self, /) -> Token:
         """
@@ -12190,7 +12189,7 @@ class Thread:
         """
     def to_dict(self, /) -> dict[str, Any]:
         """
-        The thread as a plain `dict`, in the shape that MCP shows.
+        The thread as a plain `dict`.
         """
     def trap_frame(self, /) -> TrapFrame:
         """

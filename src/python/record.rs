@@ -3,8 +3,8 @@
 //! shape ([`shapes!`](crate::view::shape::shapes)) its own [`BaseRecord`]
 //! subclass with a property per field, and every field that can fail to read
 //! on its own is the package's generic `Diagnostic` (`peb.ldr.value`,
-//! `if peb.ldr:`). Records keep dict access (`record["ip"]`, `to_dict()`) so the
-//! shape stays the one the MCP JSON surface documents.
+//! `if peb.ldr:`). Records keep dict access (`record["ip"]`, `to_dict()`) for
+//! code that walks fields by name.
 
 use std::convert::Infallible;
 

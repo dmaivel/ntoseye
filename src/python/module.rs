@@ -412,7 +412,7 @@ impl Module {
         Typed::new(py, view::meta::verifier_driver(&detail))
     }
 
-    /// The module as a plain `dict`, in the shape that MCP renders.
+    /// The module as a plain `dict`.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
         view_dict(py, view::module::module(&self.info))
@@ -650,7 +650,7 @@ impl Driver {
         Typed::new(py, view)
     }
 
-    /// The driver object as a plain `dict`, in the shape that MCP renders.
+    /// The driver object as a plain `dict`.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
         view_dict(py, view::object::driver_object_info(&self.info))

@@ -360,7 +360,7 @@ impl Process {
     }
 
     /// Get the process identity as a plain `dict` (`pid`, `name`, `dtb`,
-    /// `eprocess`, `wow64`), in the shape that MCP shows.
+    /// `eprocess`, `wow64`).
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
         view_dict(py, view::process::process(&self.info))

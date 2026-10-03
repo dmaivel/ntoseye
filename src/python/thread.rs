@@ -330,7 +330,7 @@ impl Thread {
         )
     }
 
-    /// The thread as a plain `dict`, in the shape that MCP shows.
+    /// The thread as a plain `dict`.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         let active = self.cpu_id(py)?;
         view_dict(
@@ -1056,7 +1056,7 @@ impl Cpu {
         Typed::new(py, view::cpu::cpuinfo(&detail))
     }
 
-    /// The processor as a plain `dict`, in the shape that MCP shows.
+    /// The processor as a plain `dict`.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         view_dict(py, view::execution::vcpu(&self.current_info(py)?))
     }

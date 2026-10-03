@@ -25,8 +25,7 @@ use crate::view::shape::{Typed, ViewValue};
 use crate::view::{self};
 
 /// System-wide reports and helpers that decode an object at an address
-/// (`dbg.inspect`). The results are `Record`s with the same shape as the MCP
-/// JSON output.
+/// (`dbg.inspect`). The results are typed `Record`s.
 #[pyclass(module = "ntoseye")]
 pub struct Inspect {
     pub owner: Owner,

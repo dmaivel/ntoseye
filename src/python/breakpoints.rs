@@ -766,7 +766,7 @@ impl Breakpoint {
         Ok(())
     }
 
-    /// Get the breakpoint state as a plain `dict`, in the shape that MCP shows.
+    /// Get the breakpoint state as a plain `dict`.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         view_dict(py, view::execution::breakpoint(&self.require_snapshot(py)?))
     }

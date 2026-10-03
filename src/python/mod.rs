@@ -170,8 +170,8 @@ pub fn timeout_arg(timeout: Option<f64>) -> PyResult<Option<Duration>> {
     }
 }
 
-/// A value as a plain `dict`: an entity's `to_dict()` is the shape MCP renders
-/// for it.
+/// A value as a plain `dict`: an entity's `to_dict()`, with its records and
+/// diagnostics converted.
 pub fn view_dict<'py, T: ViewValue<Source = T>>(
     py: Python<'py>,
     value: T,
