@@ -166,6 +166,12 @@ impl PhysMem {
         })
     }
 
+    /// Whether this is a hypervisor partition's memory (see
+    /// [`Self::partition`]), which its VTL0 EPT maps: never its VTL1's.
+    pub fn is_partition(&self) -> bool {
+        matches!(self.source, Source::Partition { .. })
+    }
+
     /// Whether guest memory is read through the debug target (KD) rather
     /// than from the host, one request per line or page.
     pub fn reads_through_target(&self) -> bool {

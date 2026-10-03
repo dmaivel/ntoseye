@@ -9,9 +9,10 @@ use crate::{
     layout::{StructRef, utf16le_lossy},
     memory,
     pe::read_pe_version_info,
-    target::{ListCursor, ListTermination},
+    target::{ListCursor, ListTermination, links_back_to},
     types::*,
 };
+use std::collections::HashSet;
 use std::sync::Arc;
 
 const MAX_LOADER_MODULES: usize = 1000;
@@ -263,14 +264,42 @@ impl Guest {
             "_LDR_DATA_TABLE_ENTRY"
         };
 
+        let types = self.ntoskrnl.types();
+        let layout = types.layout(record_type)?;
+        let link_offset = layout.field_offset("InLoadOrderLinks")?;
         let mut modules = Vec::new();
-        for record in self
-            .ntoskrnl
-            .types()
-            .list_at(head, record_type, "InLoadOrderLinks")?
-        {
-            if let Some(module) = module_info_from_record(&record?)? {
+        let mut reached = HashSet::new();
+        let mut broken = None;
+        for record in types.list_at(head, record_type, "InLoadOrderLinks")? {
+            let record = match record {
+                Ok(record) => record,
+                Err(error) => {
+                    broken = Some(error);
+                    break;
+                }
+            };
+            reached.insert(record.addr() + link_offset);
+            if let Some(module) = module_info_from_record(&record)? {
                 modules.push(module);
+            }
+        }
+        // An entry that cannot be read ends the walk forward; the modules
+        // past it are found backward, and only that entry's is missing.
+        if let Some(error) = broken {
+            let memory = self.ntoskrnl.memory();
+            let tail = links_back_to(head, &reached, MAX_LOADER_MODULES, |link| {
+                memory.read::<VirtAddr>(link + 8u64)
+            });
+            for link in tail.into_iter().rev() {
+                let record = types
+                    .struct_with_layout(Arc::clone(&layout), link - link_offset)
+                    .prefetch();
+                if let Ok(Some(module)) = module_info_from_record(&record) {
+                    modules.push(module);
+                }
+            }
+            if modules.is_empty() {
+                return Err(error);
             }
         }
 

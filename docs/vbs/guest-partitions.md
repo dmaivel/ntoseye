@@ -31,6 +31,8 @@ partition:p4.1> k
 
 The guest must be 64-bit Windows: a partition with no VP in 4-level long-mode paging, such as a VM still in its firmware, is refused. A Linux guest, such as WSL2's, has no NT kernel to find. Use {command}`!hvd` and {command}`!hvu` for those.
 
+The host can trim a guest's memory, as it does a Windows Sandbox's while it idles, and a trimmed page is not mapped in the partition's EPT until the guest touches it again, so it reads as not mapped. {command}`lm` and {command}`!process` list the modules and processes past a loader entry or process on such a page, by walking their lists back from the end, and leave out only that one. The view reads only the memory that VTL0's EPT maps, so {command}`.vtl` `1` is refused: the partition's secure kernel is not in it.
+
 ## Raw memory and code
 
 {command}`!hvd` `[-p] [-b|-d|-q] [<partition-id> <vp-index>] <address> [range]` shows the memory of the guest that a child partition runs, such as a Hyper-V VM, WSL2, or Windows Sandbox inside the target. Without a partition and VP, it reads the guest VP that the current vCPU's processor runs. It reads guest virtual memory through the page tables of the VTL that the VP runs in (the CR3 in its eVMCS), or guest physical memory with `-p`, and it translates both through that VTL's EPT. Virtual addresses need a guest in 4-level long-mode paging; for a guest in 32-bit, PAE, or 5-level paging, read guest physical memory with `-p`. `-d` and `-q` show dwords and qwords, and the range works as for {command}`db`. Pages that are not mapped show as `??`. Here, a VM that sits in its firmware halted in the idle loop of its UEFI:

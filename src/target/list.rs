@@ -136,6 +136,42 @@ where
     (links, cursor.finish())
 }
 
+/// The links of the entries at the end of a doubly linked intrusive list
+/// that a forward walk did not reach, last first: from `head`'s `Blink` back
+/// to a link in `reached`, the head, a null or repeated link, or a link whose
+/// own `Blink` is unreadable, which is still returned (its record may be
+/// readable where its link is not). A forward walk stops at an entry it
+/// cannot read, such as a page of a guest partition that the host has
+/// trimmed from its EPT; the entries past it are still reachable backward.
+pub fn links_back_to<F>(
+    head: VirtAddr,
+    reached: &HashSet<VirtAddr>,
+    limit: usize,
+    mut read_blink: F,
+) -> Vec<VirtAddr>
+where
+    F: FnMut(VirtAddr) -> Result<VirtAddr>,
+{
+    let mut links = Vec::new();
+    let mut seen = HashSet::new();
+    let Ok(mut link) = read_blink(head) else {
+        return links;
+    };
+    while link != head
+        && !link.is_zero()
+        && !reached.contains(&link)
+        && links.len() < limit
+        && seen.insert(link)
+    {
+        links.push(link);
+        match read_blink(link) {
+            Ok(previous) => link = previous,
+            Err(_) => break,
+        }
+    }
+    links
+}
+
 impl Target {
     /// Walk an intrusive `_LIST_ENTRY` from `head` (the list-head address) in
     /// the current address space, returning each record's base
@@ -163,7 +199,9 @@ impl Target {
 
 #[cfg(test)]
 mod tests {
-    use super::{ListTermination, bounded_list_walk};
+    use std::collections::HashSet;
+
+    use super::{ListTermination, bounded_list_walk, links_back_to};
     use crate::error::Error;
     use crate::types::VirtAddr;
 
@@ -200,5 +238,34 @@ mod tests {
             termination,
             ListTermination::Corrupt("synthetic bad flink".into())
         );
+    }
+
+    /// A list `head -> 0x2000 -> 0x3000 -> 0x4000 -> 0x5000 -> 0x6000` whose
+    /// forward walk reached 0x2000 and 0x3000: walking back from the head
+    /// recovers the rest, up to the entries reached, or up to an entry whose
+    /// own link cannot be read, which is still returned.
+    #[test]
+    fn a_walk_back_from_the_head_recovers_the_entries_past_a_broken_link() {
+        let head = VirtAddr(0x1000);
+        let reached = HashSet::from([VirtAddr(0x2000), VirtAddr(0x3000)]);
+        let blinks = |unreadable: u64| {
+            move |link: VirtAddr| match link.0 {
+                address if address == unreadable => {
+                    Err(Error::DebugInfo("synthetic unmapped page".into()))
+                }
+                0x1000 => Ok(VirtAddr(0x6000)),
+                address => Ok(VirtAddr(address - 0x1000)),
+            }
+        };
+
+        assert_eq!(
+            links_back_to(head, &reached, 16, blinks(0)),
+            [VirtAddr(0x6000), VirtAddr(0x5000), VirtAddr(0x4000)]
+        );
+        assert_eq!(
+            links_back_to(head, &reached, 16, blinks(0x5000)),
+            [VirtAddr(0x6000), VirtAddr(0x5000)]
+        );
+        assert_eq!(links_back_to(head, &reached, 16, blinks(0x1000)), []);
     }
 }

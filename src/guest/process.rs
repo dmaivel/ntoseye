@@ -6,9 +6,10 @@ use crate::{
     backend::MemoryOps,
     bytes::read_u64,
     error::{Error, Result},
-    target::ListCursor,
+    target::{ListCursor, links_back_to},
     types::*,
 };
+use std::collections::HashSet;
 
 /// `EPROCESS.ImageFileName` capacity: the kernel keeps this many bytes of the
 /// image name, unterminated when the name is at least this long.
@@ -113,29 +114,23 @@ impl Guest {
             .map(|s| s.address());
 
         let mut processes = Vec::new();
+        let mut reached = HashSet::new();
+        let mut broken = None;
 
         // Cycle detection handles a corrupt list that loops; the cap handles
         // one that wanders through unrelated memory without repeating.
         const PROCESS_WALK_LIMIT: usize = 65_536;
         let mut cursor = ListCursor::from_first(ps_initial_system_process, PROCESS_WALK_LIMIT);
         while let Some(current_eprocess) = cursor.take_current() {
-            span.read(&memory, current_eprocess)?;
-            let dtb = span.dtb();
-            if dtb == 0 {
+            if let Err(error) = span.read(&memory, current_eprocess) {
+                broken = Some(error);
                 break;
             }
-
-            processes.push(ProcessInfo {
-                pid: span.pid(),
-                name: self.process_name_from_image_file_name(
-                    current_eprocess,
-                    dtb,
-                    span.image_file_name(),
-                ),
-                dtb,
-                eprocess_va: current_eprocess,
-                wow64_peb: self.wow64_peb(dtb, span.wow64_process()),
-            });
+            if span.dtb() == 0 {
+                break;
+            }
+            reached.insert(current_eprocess + span.active_process_links_offset);
+            processes.push(self.process_from_span(current_eprocess, &span));
 
             // PsActiveProcessHead is not embedded in an EPROCESS, so reaching
             // it ends the walk before the link becomes a record address.
@@ -145,8 +140,38 @@ impl Guest {
             }
             cursor.advance(Ok(flink - span.active_process_links_offset));
         }
+        // A process that cannot be read ends the walk forward; the ones past
+        // it are found backward from the list head, and only its is missing.
+        if let Some(error) = broken {
+            if let Some(head) = ps_active_process_head {
+                let tail = links_back_to(head, &reached, PROCESS_WALK_LIMIT, |link| {
+                    memory.read::<VirtAddr>(link + 8u64)
+                });
+                for link in tail.into_iter().rev() {
+                    let eprocess = link - span.active_process_links_offset;
+                    if span.read(&memory, eprocess).is_ok() && span.dtb() != 0 {
+                        processes.push(self.process_from_span(eprocess, &span));
+                    }
+                }
+            }
+            if processes.is_empty() {
+                return Err(error);
+            }
+        }
 
         Ok(processes)
+    }
+
+    /// The process whose `_EPROCESS` at `eprocess_va` `span` has just read.
+    fn process_from_span(&self, eprocess_va: VirtAddr, span: &EprocessSpan) -> ProcessInfo {
+        let dtb = span.dtb();
+        ProcessInfo {
+            pid: span.pid(),
+            name: self.process_name_from_image_file_name(eprocess_va, dtb, span.image_file_name()),
+            dtb,
+            eprocess_va,
+            wow64_peb: self.wow64_peb(dtb, span.wow64_process()),
+        }
     }
 
     /// The process at `eprocess_va` without walking the process list: one
@@ -155,14 +180,7 @@ impl Guest {
     pub fn process_at(&self, eprocess_va: VirtAddr) -> Result<ProcessInfo> {
         let mut span = EprocessSpan::new(self)?;
         span.read(&self.ntoskrnl.memory(), eprocess_va)?;
-        let dtb = span.dtb();
-        Ok(ProcessInfo {
-            pid: span.pid(),
-            name: self.process_name_from_image_file_name(eprocess_va, dtb, span.image_file_name()),
-            dtb,
-            eprocess_va,
-            wow64_peb: self.wow64_peb(dtb, span.wow64_process()),
-        })
+        Ok(self.process_from_span(eprocess_va, &span))
     }
 
     /// The process whose KVA-shadow user root is `user_root`

@@ -355,6 +355,11 @@ impl Target {
     /// Discover the secure kernel from host RAM on first use. No target state
     /// is changed; unsupported sources and architectures return an error.
     pub fn secure_kernel(&self) -> Result<Arc<SecureKernel>> {
+        if self.phys.is_partition() {
+            return Err(Error::Hypervisor(
+                "a guest partition's memory is read through its VTL0 EPT, which does not map its secure kernel".to_string(),
+            ));
+        }
         self.guest()?
             .secure_kernel(&self.phys, &self.symbols, &self.interrupt)
     }
