@@ -25,7 +25,7 @@ use crate::session::{
 };
 use crate::target::{BreakpointStop, HYPERVISOR_CONTEXT, ThreadInfo};
 use crate::types::{Arch, VirtAddr};
-use crate::unwind::try_format_symbol_at;
+use crate::unwind::{UNKNOWN_CONTEXT, try_format_symbol_at};
 
 /// The low bits of a CR3/DTB that select the page-directory base physical
 /// frame (PCID and reserved/canonical bits masked out), for comparing the
@@ -231,9 +231,9 @@ impl Session {
         self.clear_deferred_reload_surface();
         let pending_stop = self.backend.has_pending_stop();
         let running = self.backend.is_running() && !pending_stop;
-        let (rip, symbol, saved_vtl, serving, stopped_process, stopped_thread) =
+        let (rip, symbol, saved_vtl, serving, running_vp, stopped_process, stopped_thread) =
             if running || pending_stop {
-                (None, None, Vec::new(), None, None, None)
+                (None, None, Vec::new(), None, None, None, None)
             } else {
                 let _ = self.backend.set_current_thread(&self.current_thread);
                 let registers = self.backend.read_registers().ok();
@@ -263,6 +263,15 @@ impl Session {
                     }
                     _ => None,
                 };
+                // A vCPU in code no root of NT's maps runs a guest partition's
+                // VP, as the stop header names it.
+                let running_vp = match &vcpu {
+                    Some(vcpu) if vcpu.context == UNKNOWN_CONTEXT => {
+                        processor_index_from_backend_thread_id(&self.current_thread)
+                            .and_then(|number| self.target.guest_vp_label(number))
+                    }
+                    _ => None,
+                };
                 let saved_vtl = vcpu.map(|vcpu| vcpu.saved_vtl).unwrap_or_default();
                 let (stopped_process, stopped_thread) = self.stopped_context();
                 (
@@ -270,6 +279,7 @@ impl Session {
                     symbol,
                     saved_vtl,
                     serving,
+                    running_vp,
                     stopped_process,
                     stopped_thread,
                 )
@@ -281,11 +291,13 @@ impl Session {
             symbol,
             saved_vtl,
             serving,
+            running_vp,
             attached_process: self.target.attached_process().cloned(),
             stopped_process,
             stopped_thread,
             coherent: self.kernel_coherent(),
             kernel_base: self.target.kernel_base().map(|a| a.0).unwrap_or(0),
+            partition: self.partition(),
         }
     }
 

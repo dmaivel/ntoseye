@@ -432,6 +432,7 @@ mod tests {
             symbol: rip.map(|_| "sample!fault".into()),
             saved_vtl: Vec::new(),
             serving: None,
+            running_vp: None,
             attached_process: Some(ProcessInfo {
                 pid: 4,
                 name: "System".into(),
@@ -443,6 +444,7 @@ mod tests {
             stopped_thread: None,
             coherent: true,
             kernel_base: 0xffff_f800_0000_0000,
+            partition: None,
         }
     }
 

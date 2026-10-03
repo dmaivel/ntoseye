@@ -209,6 +209,10 @@ shapes! {
         /// For a vCPU halted in the Windows hypervisor, the guest partition's
         /// virtual processor it serves, as `VcpuStatus.serving`.
         serving: Option<ServedVp>,
+        /// The guest partition's virtual processor that the halted vCPU runs
+        /// (`partition 0x5 VP 2`), whose registers and code the vCPU then
+        /// shows, or None.
+        running_vp: Option<String>,
         /// The process that you selected with `.process`. `dt`, `dq`, and
         /// similar commands read its memory, and the selection stays after the
         /// target resumes.
@@ -223,6 +227,10 @@ shapes! {
         coherent: bool,
         /// The `nt` base that ntoseye found again. It changes across a reboot.
         kernel_base: Hex,
+        /// The hypervisor partition whose Windows guest is inspected in place
+        /// of the target (`.partition`), or None while the target is. Every
+        /// other field is then that guest's.
+        partition: Option<Hex>,
     }
 
     /// One frame of a stack walk.
@@ -638,6 +646,7 @@ pub fn run_status(status: &session::RunStatus) -> RunStatus {
         symbol: status.symbol.clone(),
         saved_vtl: status.saved_vtl.iter().map(saved_vtl_state).collect(),
         serving: status.serving.as_ref().map(served_vp),
+        running_vp: status.running_vp.clone(),
         attached_process: status.attached_process.as_ref().map(process),
         stopped_process: status.stopped_process.as_ref().map(process),
         stopped_thread: status
@@ -646,6 +655,7 @@ pub fn run_status(status: &session::RunStatus) -> RunStatus {
             .map(|thread| thread_summary(thread, None)),
         coherent: status.coherent,
         kernel_base: status.kernel_base,
+        partition: status.partition,
     }
 }
 

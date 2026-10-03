@@ -10450,12 +10450,26 @@ class RunStatus(BaseRecord):
         The `nt` base that ntoseye found again. It changes across a reboot.
         """
     @property
+    def partition(self, /) -> int |None:
+        """
+        The hypervisor partition whose Windows guest is inspected in place
+        of the target (`.partition`), or None while the target is. Every
+        other field is then that guest's.
+        """
+    @property
     def rip(self, /) -> int |None:
         """
         The instruction pointer when halted. None while the target runs.
         """
     @property
     def running(self, /) -> bool: ...
+    @property
+    def running_vp(self, /) -> str |None:
+        """
+        The guest partition's virtual processor that the halted vCPU runs
+        (`partition 0x5 VP 2`), whose registers and code the vCPU then
+        shows, or None.
+        """
     @property
     def saved_vtl(self, /) -> list[SavedVtlState]:
         """

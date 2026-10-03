@@ -187,6 +187,9 @@ pub struct RunStatus {
     /// For a vCPU halted in the Windows hypervisor, the guest partition's
     /// virtual processor whose exit it handles, when it is not the root's.
     pub serving: Option<ServedVp>,
+    /// The guest partition's virtual processor the halted vCPU runs
+    /// (`partition 0x5 VP 2`), whose registers and code the vCPU then shows.
+    pub running_vp: Option<String>,
     /// Attached process inspection scope, if any. This is where `dt`, `dq` and
     /// friends read from; it is chosen with `.process` and survives resumes,
     /// so it is not necessarily what the guest is executing.
@@ -203,6 +206,9 @@ pub struct RunStatus {
     /// Rediscovered `nt` base. A host caches it to detect a reboot (the base
     /// changes) and invalidate stale addresses without parsing prose.
     pub kernel_base: u64,
+    /// The hypervisor partition whose guest is inspected in place of the
+    /// target (`.partition`), if any: every other field is that guest's.
+    pub partition: Option<u64>,
 }
 
 /// The fields decoded from a 64-bit Windows `EXCEPTION_RECORD` by `.exr`.

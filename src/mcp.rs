@@ -376,6 +376,9 @@ fn status_trailer(status: &RunStatus) -> String {
             served.describe()
         ));
     }
+    if let Some(vp) = &status.running_vp {
+        line.push_str(&format!(" | runs {vp}"));
+    }
     if let Some(process) = &status.stopped_process {
         line.push_str(&format!(" | process {} ({})", process.name, process.pid));
     }
@@ -384,6 +387,9 @@ fn status_trailer(status: &RunStatus) -> String {
     }
     if !status.coherent {
         line.push_str(" | boot in progress");
+    }
+    if let Some(partition) = status.partition {
+        line.push_str(&format!(" | inspecting partition {partition:#x}"));
     }
     line.push(']');
     line
