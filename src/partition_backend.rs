@@ -33,7 +33,8 @@ impl PartitionBackend {
         }
     }
 
-    fn read_only(operation: &str) -> Error {
+    /// The refusal of `operation`, which a partition view does not support.
+    pub fn read_only(operation: &str) -> Error {
         Error::DebugInfo(format!(
             "a partition view does not support {operation}: it shows the partition read-only as the target halted; selecting the root partition (1) returns to the target"
         ))

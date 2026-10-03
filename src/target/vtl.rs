@@ -1204,6 +1204,13 @@ impl Target {
                 "the Windows hypervisor needs an AMD64 target".to_string(),
             ));
         }
+        // A guest partition's memory holds no hypervisor: the target's runs
+        // it, and is inspected from the target.
+        if self.phys.is_partition() {
+            return Err(Error::Hypervisor(
+                "a guest partition's memory holds no hypervisor; .partition 1 returns to the target, whose hypervisor runs this partition".to_string(),
+            ));
+        }
         // The partitions' saved states leave off in the hypercall page too,
         // and a session's first stop need not be in the hypervisor, where
         // the page is otherwise first named.

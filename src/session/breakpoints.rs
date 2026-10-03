@@ -17,6 +17,7 @@ use crate::exception_policy::ExceptionPolicyMode;
 use crate::expr::Expr;
 use crate::guest::vm_exits::ExitFilter;
 use crate::guest::{ModuleSymbolLoadReport, hypercalls};
+use crate::partition_backend::PartitionBackend;
 use crate::session::{ModuleTrap, Session, TrapSite};
 use crate::types::{Arch, VirtAddr};
 
@@ -413,6 +414,9 @@ impl Session {
         filter: HypercallFilter,
         config: BreakpointConfig,
     ) -> Result<u32> {
+        if self.partition().is_some() {
+            return Err(PartitionBackend::read_only("hypercall breakpoints"));
+        }
         if !self.backend.hardware_breakpoints_trap_in_host() {
             return Err(Error::Breakpoint(
                 "hypercall breakpoints need the gdb backend: only a debug register the host programs traps in the Windows hypervisor".into(),
@@ -458,6 +462,9 @@ impl Session {
         filter: ExitFilter,
         config: BreakpointConfig,
     ) -> Result<u32> {
+        if self.partition().is_some() {
+            return Err(PartitionBackend::read_only("VM-exit breakpoints"));
+        }
         if !self.backend.hardware_breakpoints_trap_in_host() {
             return Err(Error::Breakpoint(
                 "VM-exit breakpoints need the gdb backend: only a debug register the host programs traps in the Windows hypervisor".into(),
