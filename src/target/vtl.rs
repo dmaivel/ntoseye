@@ -22,7 +22,8 @@ use crate::{
         hv_layout::HypercallEntry,
         hypercall_input,
         hypercalls::{self, HypercallCaller, HypercallInput},
-        hypervisor,
+        hypervisor::{self, HvVirtualProcessor},
+        vp_registers,
     },
     memory::{AddressSpace, PAGE_SIZE},
     pe::{PeImage, image_file_name, read_pe_header_page, size_of_image},
@@ -217,6 +218,14 @@ impl SavedVtlContext {
         exit_registers(&self.state, self.general_registers.as_ref().ok())
     }
 }
+
+/// The registers a VP's state holds, in the order `r` lays out the
+/// general-purpose ones: those, then what an eVMCS holds besides.
+pub const VP_STATE_REGISTERS: [&str; 29] = [
+    "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rsp", "rbp", "rip", "r8", "r9", "r10", "r11", "r12",
+    "r13", "r14", "r15", "eflags", "cr0", "cr3", "cr4", "cs", "ss", "ds", "es", "fs", "gs",
+    "fs_base", "gs_base",
+];
 
 /// The registers of the exit `state` saved: RIP, RSP, flags, control and
 /// segment registers from the eVMCS, and the `general` registers the exit
@@ -1484,6 +1493,96 @@ impl Target {
                 entries.len()
             ))),
         }
+    }
+
+    /// The general-purpose registers `vp`, a VP of `partitions`, saved at
+    /// its last exit, read from its register block through its region's
+    /// descriptor (see [`vp_registers`]), mapped or not. The hypervisor
+    /// resumes the VP with them, but for what it writes as the exit's
+    /// result, such as a hypercall's status in RAX. A VP a processor runs
+    /// now has newer ones in that vCPU.
+    pub fn saved_vp_registers(
+        &self,
+        partitions: &[HvPartition],
+        vp: &HvVirtualProcessor,
+    ) -> Result<HashMap<&'static str, u64>> {
+        let HypervisorLocation { memory, image, .. } = self.locate_hypervisor()?;
+        let guest = self.guest()?;
+        let read = |address: u64| memory.read::<u64>(VirtAddr(address)).ok();
+        let phys = |address: u64| {
+            let mut bytes = [0u8; 8];
+            self.phys
+                .read_bytes(address, &mut bytes)
+                .ok()
+                .map(|()| u64::from_le_bytes(bytes))
+        };
+        let host_rip = partitions
+            .iter()
+            .flat_map(|partition| &partition.virtual_processors)
+            .flat_map(|vp| &vp.vtls)
+            .find_map(|vtl| vtl.state.map(|state| state.host_rip))
+            .ok_or_else(|| {
+                Error::Hypervisor("no eVMCS names the hypervisor's VM-exit entry point".to_string())
+            })?;
+        let exit = guest
+            .exit_register_layout(host_rip, |code| memory.read_bytes(VirtAddr(host_rip), code))
+            .map_err(Error::SavedVtlState)?;
+        let layout = guest.vp_register_layout(image.base_address.0, || {
+            let loaded = self.loaded_vps(partitions, &exit.block_loads, &phys)?;
+            vp_registers::calibrate(&loaded, |address, size| {
+                let mut bytes = vec![0u8; size];
+                memory.read_bytes(VirtAddr(address), &mut bytes).ok()?;
+                Some(bytes)
+            })
+        })?;
+        let offsets: Vec<_> = EXIT_GPRS.iter().copied().zip(exit.offsets).collect();
+        vp_registers::saved_registers(&layout, vp.address, &offsets, read, phys)
+    }
+
+    /// The VPs of `partitions` whose register region the root of their
+    /// current eVMCS maps now, as their exit entry finds the block through
+    /// `block_loads` from its host RSP (see [`ExitRegisterLayout`]).
+    fn loaded_vps(
+        &self,
+        partitions: &[HvPartition],
+        block_loads: &[i64],
+        phys: &impl Fn(u64) -> Option<u64>,
+    ) -> Result<Vec<vp_registers::LoadedVp>> {
+        let Some((last, through)) = block_loads
+            .split_last()
+            .filter(|(_, through)| !through.is_empty())
+        else {
+            return Err(Error::Hypervisor(
+                "this hypervisor build loads the exit registers from the processor's stack, not through the VP, so a VP no processor runs has none ntoseye can read"
+                    .to_string(),
+            ));
+        };
+        let mask = self.arch().dtb_page_mask();
+        Ok(partitions
+            .iter()
+            .flat_map(|partition| &partition.virtual_processors)
+            .filter_map(|vp| {
+                let state = vp.vtls.iter().find(|vtl| vtl.level == vp.vtl)?.state?;
+                let root = state.host_cr3 & mask;
+                let space = self.address_space(root);
+                let mut value = state.host_rsp;
+                for load in through {
+                    value = space
+                        .read::<u64>(VirtAddr(value.wrapping_add_signed(*load)))
+                        .ok()?;
+                }
+                let pointer = value.wrapping_add_signed(*last);
+                let block = space.read::<u64>(VirtAddr(pointer)).ok()?;
+                let region_pde = vp_registers::pde_of(root, block, phys)?;
+                vp_registers::physical_in_region(region_pde, block, phys)?;
+                Some(vp_registers::LoadedVp {
+                    vp: vp.address,
+                    pointer,
+                    region: block & !0x1f_ffff,
+                    region_pde,
+                })
+            })
+            .collect())
     }
 
     /// [`Self::hypercall_caller`] without a partition walk, for each hit of

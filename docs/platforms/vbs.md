@@ -277,6 +277,26 @@ First port  Last port
 ...
 ```
 
+### Registers of a VP
+
+{command}`!hvr` `[partition-id vp-index [vtl]]` shows the registers of a VTL of a VP, by default of the VP that the current vCPU's processor runs and the VTL that it runs in, whether or not a processor runs it:
+
+- A VP that a vCPU runs now has its registers in that vCPU, and `!hvr` shows them.
+- For a VP whose exit a vCPU in the hypervisor handles, it shows the registers of that exit, as {command}`!hvcall` finds them.
+- Any other VP waits for the hypervisor to run it again, such as a WSL2 VP blocked in `HLT`, and `!hvr` shows the registers it saved at its last exit. The hypervisor resumes the VP with them, except for what it writes as the exit's result, such as a hypercall's status in RAX.
+
+RIP, RSP, the flags, the control registers and the segment registers come from the VTL's eVMCS. The general-purpose registers are shared by a VP's VTLs and belong to the VTL that it runs in, so another VTL shows its eVMCS state alone. The SDK has `VirtualProcessor.registers(vtl=None)`, whose `source` says where they are from.
+
+```text
+mem:1> !hvr 6 1
+partition 0x6 VP 1 VTL0  from its last exit
+  rax     ffff8c3020a14000   rbx     0000000000000000   rcx     0000000000000001
+  rdx     0000000000000001   rsi     0000000000000083   rdi     0000000002125454
+  rsp     ffffcd5cc00cbe90   rbp     ffffcd5cc00cbe98   rip     ffffffffa11df02f
+```
+
+The hypervisor's VM-exit entry saves a VP's general-purpose registers in a register block that the VP object points at, in a 2 MiB region of the VP's own. A processor's root maps only the region of the VP that the processor runs, so a waiting VP's block is mapped nowhere, and `ntoseye` reads it through the region's page directory entry, which a descriptor that the VP object points at keeps for the hypervisor to map it again. `hvix64` has no public symbols, so `ntoseye` finds where the pointers and fields are on the VPs whose regions are mapped when the target halts, and uses them only when they agree for all of those VPs. Builds before 10.0.17763 save the registers on the processor's stack instead, so `!hvr` has no general-purpose registers for a waiting VP there.
+
 ### Hypercalls
 
 {command}`!hvcalls` lists the hypercalls that the hypervisor implements, from its own hypercall table: the call code, the name that the Hyper-V TLFS gives it, whether it is a simple or a rep call (`+var` marks a variable-size input header), the sizes of its fixed input and output and of each rep element, and its handler. Codes that share the handler of the reserved code 0 are not implemented, and `-a` lists them too.

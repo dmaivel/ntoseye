@@ -30,6 +30,7 @@ mod secure_kernel;
 mod symbol_load;
 mod trustlet_layout;
 pub mod vm_exits;
+pub mod vp_registers;
 
 use discovery::{
     find_kernel, find_ntoskrnl, find_ntoskrnl_va, find_ntoskrnl_va_arm64, find_ntoskrnl_va_triage,
@@ -212,6 +213,10 @@ pub struct Guest {
     /// last partition walk: a hypercall breakpoint's hit names its caller by
     /// the eVMCS loaded on its processor without walking again.
     vp_slots: Mutex<HashMap<u64, hypervisor::VpSlot>>,
+    /// Where VPs keep their saved registers, by hypervisor image base, once
+    /// calibrated. A calibration that failed is not kept: a later halt may
+    /// have the mapped VPs it needs.
+    vp_register_layouts: Mutex<HashMap<u64, vp_registers::VpRegisterLayout>>,
 }
 
 /// Guest-derived lists memoized for one halt epoch (see
@@ -288,7 +293,28 @@ impl Guest {
             partition_layouts: Mutex::new(HashMap::new()),
             hypervisor_symbols: Mutex::new(HashMap::new()),
             vp_slots: Mutex::new(HashMap::new()),
+            vp_register_layouts: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Where the VPs of the hypervisor image at `base` keep their saved
+    /// registers, calibrated by `calibrate` the first time it succeeds and
+    /// remembered for the boot.
+    pub fn vp_register_layout(
+        &self,
+        base: u64,
+        calibrate: impl FnOnce() -> Result<vp_registers::VpRegisterLayout>,
+    ) -> Result<vp_registers::VpRegisterLayout> {
+        let mut layouts = self
+            .vp_register_layouts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(layout) = layouts.get(&base) {
+            return Ok(*layout);
+        }
+        let layout = calibrate()?;
+        layouts.insert(base, layout);
+        Ok(layout)
     }
 
     /// The image mapped at `rip` in root `dtb`, found once with `find` and

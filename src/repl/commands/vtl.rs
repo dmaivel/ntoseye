@@ -14,11 +14,11 @@ use crate::guest::{
 };
 use crate::repl::memory_view::{MemoryDisplayMode, display_memory_with_validity, eval_range};
 use crate::repl::*;
-use crate::target::CodeExtent;
+use crate::target::{CodeExtent, VP_STATE_REGISTERS};
 use crate::types::VirtAddr;
 use crate::ui;
 use crate::unwind::{halted_in_windows_hypervisor, try_format_symbol_at};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 repl_command! {
     cmd_vtl;
@@ -111,6 +111,36 @@ repl_command! {
 
 /// How two VTLs' access to a range differs: VTL0's, then VTL1's.
 type DifferenceKind = (Option<Access>, Option<Access>);
+
+repl_command! {
+    cmd_hvr;
+    names: ["!hvr"],
+    usage: "!hvr [partition-id vp-index [vtl]]",
+    summary: "Show the registers of a VTL of a Windows hypervisor VP, whether or not a processor runs it.",
+    details: "By default the VP the current vCPU's processor runs (a guest partition's first, else the root partition's) and the VTL it runs in. For a VP that a vCPU runs now, they are that vCPU's; for one whose exit a vCPU in the hypervisor handles, those of that exit; otherwise those the VP saved at its last exit, read from its register block through the descriptor of its register region, which no processor maps while the VP does not run. The VP resumes with them but for what the hypervisor writes as the exit's result, such as a hypercall's status in RAX. RIP, RSP, flags, control and segment registers come from the VTL's eVMCS. The general-purpose registers are shared by a VP's VTLs and belong to the one it runs in; another VTL shows its eVMCS state only. The IDs use the current radix. Needs the VM's hv-evmcs enlightenment; builds before 10.0.17763 keep the saved registers on the processor's stack, so a VP no processor runs has none there.",
+    run_state: Halted,
+}
+
+/// `registers` three to a row in [`VP_STATE_REGISTERS`] order, as `r` lays
+/// them out, leaving out the ones not known.
+fn print_vp_registers(registers: &HashMap<String, u64>) {
+    for row in VP_STATE_REGISTERS.chunks(3) {
+        let cells: Vec<String> = row
+            .iter()
+            .filter_map(|name| {
+                let value = registers.get(*name)?;
+                Some(format!(
+                    "{} {}",
+                    ui::muted(&format!("{name:<7}")),
+                    ui::addr(*value)
+                ))
+            })
+            .collect();
+        if !cells.is_empty() {
+            outln!("  {}", cells.join("   "));
+        }
+    }
+}
 
 /// `access` as `rwx`, or `none` for no mapping.
 fn access_text(access: Option<Access>) -> String {
@@ -358,6 +388,7 @@ fn secure_inspection_command(spec: &CommandSpec) -> bool {
             | "!hveptdiff"
             | "!hvcalls"
             | "!hvvmcs"
+            | "!hvr"
             | "!hvd"
             | "!hvu"
             | ".process"
@@ -1596,6 +1627,49 @@ impl ReplState<'_> {
             root: partition.parent.is_none(),
             vp,
         })
+    }
+
+    fn cmd_hvr(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        if !matches!(invocation.argv.len(), 0 | 2 | 3) {
+            outln!("{}\n", command_help(invocation.name));
+            return Ok(());
+        }
+        let Some(arguments) = self.eval_all(&invocation.argv) else {
+            return Ok(());
+        };
+        let Some(SelectedVp { partition, vp, .. }) =
+            self.hypervisor_vp(arguments.first().copied(), arguments.get(1).copied(), false)
+        else {
+            return Ok(());
+        };
+        let vtl = match arguments.get(2).map(|vtl| u8::try_from(*vtl)) {
+            None => None,
+            Some(Ok(vtl)) => Some(vtl),
+            Some(Err(_)) => {
+                error!("VTL {:#x} is out of range", arguments[2]);
+                return Ok(());
+            }
+        };
+        match self.ctx.vp_registers(partition, vp.index, vtl) {
+            Ok(found) => {
+                outln!(
+                    "partition {partition:#x} VP {} VTL{}  {}",
+                    vp.index,
+                    vtl.unwrap_or(vp.vtl),
+                    ui::muted(&format!("from {}", found.source))
+                );
+                if let Some(missing) = &found.missing {
+                    outln!(
+                        "{}",
+                        ui::muted(&format!("no general-purpose registers: {missing}"))
+                    );
+                }
+                print_vp_registers(&found.registers);
+                outln!();
+            }
+            Err(error) => error!("{error}"),
+        }
+        Ok(())
     }
 
     fn cmd_trustlets(&mut self) -> Result<()> {

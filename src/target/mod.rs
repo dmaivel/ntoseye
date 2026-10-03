@@ -44,7 +44,7 @@ pub use memory::{
 };
 pub use vtl::{
     BreakpointStop, CodeExtent, ForeignCode, ForeignModules, GuestCode, HYPERVISOR_CONTEXT,
-    SavedVtlContext, ServedVp,
+    SavedVtlContext, ServedVp, VP_STATE_REGISTERS, exit_registers,
 };
 
 use self::mm::AddressDescription;

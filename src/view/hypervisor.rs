@@ -10,7 +10,8 @@ use crate::guest::ept::{Difference, EptMapping as EptInfo};
 use crate::guest::hv_layout::HypercallEntry;
 use crate::guest::hypercall_input::{self, DecodedHypercall as Decoded};
 use crate::guest::hypercalls::tlfs_hypercall;
-use crate::target::ServedVp as Served;
+use crate::session;
+use crate::target::{ServedVp as Served, VP_STATE_REGISTERS};
 use crate::types::VirtAddr;
 
 shapes! {
@@ -21,6 +22,18 @@ shapes! {
         number: Option<u32>,
         /// The processor block (the processor's GS base in the hypervisor).
         block: VirtAddr,
+    }
+
+    /// The registers of one VTL of a Windows hypervisor VP (`!hvr`).
+    VpRegisters {
+        /// RIP, RSP, flags, control and segment registers, and the
+        /// general-purpose ones when they are known.
+        registers: Keyed<Hex>,
+        /// Where they are from: a vCPU that runs the VP now, the exit a vCPU
+        /// in the hypervisor handles for it, or its last exit.
+        source: String,
+        /// Why the general-purpose registers are missing, when they are.
+        missing: Option<String>,
     }
 
     /// Where a guest physical address goes through one VTL's EPT, and the
@@ -242,6 +255,18 @@ pub fn decoded_hypercall(call: &Decoded) -> DecodedHypercall {
             .collect(),
         unavailable: call.unavailable.clone(),
         summary: call.summary(),
+    }
+}
+
+/// A VP's registers, in [`VP_STATE_REGISTERS`] order.
+pub fn vp_registers(found: &session::VpRegisters) -> VpRegisters {
+    VpRegisters {
+        registers: VP_STATE_REGISTERS
+            .iter()
+            .filter_map(|name| Some((*name, *found.registers.get(*name)?)))
+            .collect(),
+        source: found.source.clone(),
+        missing: found.missing.clone(),
     }
 }
 

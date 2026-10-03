@@ -10,20 +10,24 @@ use crate::bugchecks::{
     BugcheckAnalysis, analyze_bugcheck, bugcheck_from_dump_info, current_bugcheck,
 };
 use crate::bytes;
+use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::disasm::{DisasmRow, decode_code, decode_preceding};
 use crate::error::{Error, Result};
+use crate::guest::hypervisor::{HvPartition, HvVirtualProcessor, processor_guest_vp};
 use crate::kd::{context, context_arm64};
 use crate::memory::{PAGE_SIZE, read_page_chunks};
 use crate::session::context::windows_thread_on_backend_thread;
-use crate::session::{ContinueOutcome, ExceptionRecord, PageInReport, Session, TerminatedRead};
+use crate::session::{
+    ContinueOutcome, ExceptionRecord, PageInReport, Session, TerminatedRead, VpRegisters,
+};
 use crate::target::usermode::ImageCheckDetail;
-use crate::target::{CompareResult, SearchResult, ThreadInfo};
+use crate::target::{CompareResult, SearchResult, ThreadInfo, exit_registers};
 use crate::types::{Arch, CodeMachine, Dtb, VirtAddr};
 use crate::unwind::{
     FunctionEntryDetail, RecoveredStackTrace, StackTrace, ThreadStackSource, ThreadStackTrace,
     build_parked_thread_recovered_stack, build_parked_thread_stack,
     build_stacktrace_with_register_values, build_thread_stacktrace, format_symbol, function_entry,
-    function_range, halted_in_windows_hypervisor, resolve_thread_trace_context,
+    function_range, guest_vp_running, halted_in_windows_hypervisor, resolve_thread_trace_context,
 };
 
 /// `DBG_STATUS_WORKER`, the status the kernel's debugger worker passes to
@@ -689,5 +693,160 @@ impl Session {
             from_worker,
             resident,
         }
+    }
+}
+
+impl Session {
+    /// The registers of VTL `vtl` (by default the current one) of VP `vp` of
+    /// partition `partition` of the Windows hypervisor: those of a vCPU that
+    /// runs the VP now, those of the exit a vCPU in the hypervisor handles
+    /// for it, or else those it saved at its last exit, which it resumes
+    /// with. The general-purpose registers are shared by a VP's VTLs and
+    /// belong to the current one's state; another VTL's state is its eVMCS
+    /// alone. The target must be halted.
+    pub fn vp_registers(
+        &mut self,
+        partition: u64,
+        vp: u32,
+        vtl: Option<u8>,
+    ) -> Result<VpRegisters> {
+        let partitions = self.target.hypervisor_partitions()?;
+        let owner = partitions
+            .iter()
+            .find(|candidate| candidate.id == partition)
+            .ok_or_else(|| {
+                Error::InvalidArgument(format!("the hypervisor has no partition {partition:#x}"))
+            })?;
+        let selected = owner
+            .virtual_processors
+            .iter()
+            .find(|candidate| candidate.index == vp)
+            .ok_or_else(|| {
+                Error::InvalidArgument(format!("partition {partition:#x} has no VP {vp}"))
+            })?;
+        let level = vtl.unwrap_or(selected.vtl);
+        let state = selected
+            .vtls
+            .iter()
+            .find(|candidate| candidate.level == level)
+            .ok_or_else(|| {
+                Error::InvalidArgument(format!(
+                    "VP {vp} of partition {partition:#x} has no VTL{level}"
+                ))
+            })?
+            .state;
+        let saved = |general: Option<&HashMap<&'static str, u64>>| match &state {
+            Some(state) => exit_registers(state, general),
+            None => general
+                .into_iter()
+                .flatten()
+                .map(|(name, value)| (name.to_string(), *value))
+                .collect(),
+        };
+        if level != selected.vtl {
+            return Ok(VpRegisters {
+                registers: saved(None),
+                source: format!("the state VTL{level} left off in"),
+                missing: Some(format!(
+                    "the general-purpose registers are shared by the VP's VTLs, and are VTL{}'s, the one it runs in",
+                    selected.vtl
+                )),
+            });
+        }
+        let root = owner.parent.is_none();
+        if let Some(found) = self.vp_on_vcpu(&partitions, partition, root, selected)? {
+            return Ok(found);
+        }
+        let (general, missing) = match self.target.saved_vp_registers(&partitions, selected) {
+            Ok(general) => (Some(general), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
+        Ok(VpRegisters {
+            registers: saved(general.as_ref()),
+            source: if state.is_some() {
+                "its last exit".to_string()
+            } else {
+                "its register block; it has no eVMCS state, so it has not run".to_string()
+            },
+            missing,
+        })
+    }
+
+    /// The registers of `vp` (the VP of partition `partition`, the root one
+    /// when `root`, of `partitions`) on a vCPU, when the processor it is the
+    /// current VP of runs it now, or handles its exit in the hypervisor. A
+    /// root partition's VP is pinned to the processor with its number.
+    fn vp_on_vcpu(
+        &mut self,
+        partitions: &[HvPartition],
+        partition: u64,
+        root: bool,
+        vp: &HvVirtualProcessor,
+    ) -> Result<Option<VpRegisters>> {
+        let mut numbers: Vec<u16> = vp
+            .processors
+            .iter()
+            .filter_map(|processor| u16::try_from(processor.number?).ok())
+            .collect();
+        if root && let Ok(number) = u16::try_from(vp.index) {
+            numbers.push(number);
+        }
+        for thread in self.backend.thread_list()? {
+            let Some(number) = processor_index_from_backend_thread_id(&thread)
+                .filter(|number| numbers.contains(number))
+            else {
+                continue;
+            };
+            let registers = self
+                .backend
+                .set_current_thread(&thread)
+                .and_then(|()| self.backend.read_registers());
+            self.backend.set_current_thread(&self.current_thread)?;
+            let registers = registers?;
+            let (Ok(rip), Ok(cr3)) = (
+                self.register_map.read_u64("rip", &registers),
+                self.register_map
+                    .read_u64(self.target.arch().dtb_register(), &registers),
+            ) else {
+                continue;
+            };
+            if halted_in_windows_hypervisor(&self.target, cr3, rip) {
+                let Some(caller) =
+                    self.target
+                        .hypercall_caller(cr3, rip, number)
+                        .filter(|caller| {
+                            caller.partition == partition
+                                && caller.vp == vp.index
+                                && caller.vtl == vp.vtl
+                        })
+                else {
+                    continue;
+                };
+                let missing = (!caller.registers.contains_key("rax")).then(|| {
+                    format!("{thread} handles its exit, and its saved registers are not known")
+                });
+                return Ok(Some(VpRegisters {
+                    registers: caller.registers,
+                    source: format!("the exit {thread} handles for it in the hypervisor"),
+                    missing,
+                }));
+            }
+            // A vCPU outside the hypervisor runs the guest VP its processor
+            // block names when its code is that guest's, else the root's.
+            let runs = match guest_vp_running(&self.target, cr3, rip, Some(number))
+                .and(processor_guest_vp(partitions, number))
+            {
+                Some((id, running)) => !root && id == partition && running.index == vp.index,
+                None => root,
+            };
+            if runs {
+                return Ok(Some(VpRegisters {
+                    registers: self.register_map.to_hashmap(&registers),
+                    source: format!("{thread}, which runs it"),
+                    missing: None,
+                }));
+            }
+        }
+        Ok(None)
     }
 }

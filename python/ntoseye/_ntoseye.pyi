@@ -13260,6 +13260,18 @@ class VirtualProcessor:
         The processors whose current VP this is (the one that runs it, or ran
         it last).
         """
+    def registers(self, /, vtl: int |None = None) -> VpRegisters:
+        """
+        The registers of VTL `vtl` of this VP, by default the VTL it runs
+        in, as `!hvr` shows them, whether or not a processor runs it: those
+        of a vCPU that runs it now, those of the exit a vCPU in the
+        hypervisor handles for it, or those it saved at its last exit, which
+        it resumes with but for the exit's result, such as a hypercall's
+        status in RAX (`source` says which). The general-purpose registers
+        are shared by a VP's VTLs and belong to the one it runs in; another
+        VTL's are its eVMCS state alone, and `missing` says why. Reads the
+        target now, so it must be halted. This feature is experimental.
+        """
     def to_dict(self, /) -> dict[str, Any]:
         """
         Return the VP as a plain `dict` (`index`, `address`, `processors`,
@@ -13338,6 +13350,29 @@ class VmStatistics(BaseRecord):
     def pte(self, /) -> VmPte: ...
     @property
     def system(self, /) -> SystemMemoryUsage: ...
+
+@final
+class VpRegisters(BaseRecord):
+    """
+    The registers of one VTL of a Windows hypervisor VP (`!hvr`).
+    """
+    @property
+    def missing(self, /) -> str |None:
+        """
+        Why the general-purpose registers are missing, when they are.
+        """
+    @property
+    def registers(self, /) -> Record:
+        """
+        RIP, RSP, flags, control and segment registers, and the
+        general-purpose ones when they are known.
+        """
+    @property
+    def source(self, /) -> str:
+        """
+        Where they are from: a vCPU that runs the VP now, the exit a vCPU
+        in the hypervisor handles for it, or its last exit.
+        """
 
 @final
 class Vpb(BaseRecord):

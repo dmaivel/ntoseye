@@ -5,7 +5,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
-use super::handle::Owner;
+use super::handle::{Owner, require_halted};
 use super::memory::check_disassembly_count;
 use super::record::PlainDict;
 use super::{MAX_READ_LEN, err, raise, view_dict};
@@ -15,8 +15,8 @@ use crate::guest::{HvPartition, HvVirtualProcessor, HvVtl, evmcs_fields, privile
 use crate::target::CodeExtent;
 use crate::view::execution::{DisassembledInstruction, disasm_rows};
 use crate::view::hypervisor::{
-    DecodedHypercall, EptDifference, EptMapping, HypervisorProcessor, decoded_hypercall,
-    ept_difference, ept_mapping, hypervisor_processor,
+    DecodedHypercall, EptDifference, EptMapping, HypervisorProcessor, VpRegisters,
+    decoded_hypercall, ept_difference, ept_mapping, hypervisor_processor, vp_registers,
 };
 use crate::view::shape::{Hex, Keyed, Typed};
 
@@ -82,6 +82,7 @@ impl HypervisorPartition {
             .iter()
             .map(|info| VirtualProcessor {
                 owner: self.owner.clone_ref(py),
+                partition: self.info.id,
                 info: info.clone(),
             })
             .collect())
@@ -121,6 +122,8 @@ impl HypervisorPartition {
 #[pyclass(module = "ntoseye", frozen)]
 pub struct VirtualProcessor {
     owner: Owner,
+    /// The ID of the partition it belongs to.
+    partition: u64,
     info: HvVirtualProcessor,
 }
 
@@ -254,6 +257,30 @@ impl VirtualProcessor {
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
         Ok(PlainDict(vp_dict(py, &self.info)?))
+    }
+
+    /// The registers of VTL `vtl` of this VP, by default the VTL it runs
+    /// in, as `!hvr` shows them, whether or not a processor runs it: those
+    /// of a vCPU that runs it now, those of the exit a vCPU in the
+    /// hypervisor handles for it, or those it saved at its last exit, which
+    /// it resumes with but for the exit's result, such as a hypercall's
+    /// status in RAX (`source` says which). The general-purpose registers
+    /// are shared by a VP's VTLs and belong to the one it runs in; another
+    /// VTL's are its eVMCS state alone, and `missing` says why. Reads the
+    /// target now, so it must be halted. This feature is experimental.
+    #[pyo3(signature = (vtl=None))]
+    fn registers<'py>(
+        &self,
+        py: Python<'py>,
+        vtl: Option<u8>,
+    ) -> PyResult<Typed<'py, VpRegisters>> {
+        let found = self.owner.with(py, |session| {
+            require_halted(session, "VirtualProcessor.registers")?;
+            session
+                .vp_registers(self.partition, self.info.index, vtl)
+                .map_err(err)
+        })?;
+        Typed::new(py, vp_registers(&found))
     }
 
     fn __repr__(&self) -> String {

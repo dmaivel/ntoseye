@@ -472,7 +472,7 @@ pub fn guest_vp_label(partitions: &[HvPartition], number: u16) -> Option<String>
 
 /// The guest partition's VP, with its partition's ID, that processor
 /// `number`'s processor block names current.
-fn processor_guest_vp(
+pub fn processor_guest_vp(
     partitions: &[HvPartition],
     number: u16,
 ) -> Option<(u64, &HvVirtualProcessor)> {

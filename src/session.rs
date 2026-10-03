@@ -393,6 +393,21 @@ pub enum StopResolution {
     Stopped { event: StopEvent, rip: u64 },
 }
 
+/// The registers of one VTL of a Windows hypervisor VP (see
+/// [`Session::vp_registers`]).
+#[derive(Debug, Clone)]
+pub struct VpRegisters {
+    /// RIP, RSP, flags, control and segment registers from the VTL's eVMCS,
+    /// and the general-purpose registers when they are known; a vCPU's
+    /// whole register file when it runs the VP.
+    pub registers: HashMap<String, u64>,
+    /// Where they are from: the vCPU that runs the VP now, the exit that a
+    /// vCPU in the hypervisor handles for it, or its last exit.
+    pub source: String,
+    /// Why the general-purpose registers are missing, when they are.
+    pub missing: Option<String>,
+}
+
 /// A backend execution context (vCPU) and the guest code it is currently
 /// running. `symbol` is `None` when nothing resolves (render the raw `rip`);
 /// `error` is set when the vCPU's register context couldn't be read at all.
