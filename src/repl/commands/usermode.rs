@@ -17,8 +17,8 @@ repl_command! {
     cmd_peb;
     names: ["!peb", "peb"],
     usage: "!peb [address]",
-    summary: "Decode the process environment block and process parameters of the attached process.",
-    details: "If you do not give an address, the command uses EPROCESS.Peb of the attached process. It decodes the process parameters with their PDB layouts. To list the loader modules, use !dlls.",
+    summary: "Decode the process environment block and process parameters of the current process.",
+    details: "If you do not give an address, the command uses EPROCESS.Peb of the current process: the one that .process selected, else the owner of the current thread. It decodes the process parameters with their PDB layouts. To list the loader modules, use !dlls.",
     completion: Expression,
 }
 
@@ -35,8 +35,8 @@ repl_command! {
     cmd_dlls;
     names: ["!dlls", "dlls"],
     usage: "!dlls [-c <address>]",
-    summary: "List the modules in the loader lists of the attached process.",
-    details: "With -c <address>, the command shows only the module that contains that address. The module walk has a limit, and also stops if it finds a cycle in a list.",
+    summary: "List the modules in the loader lists of the current process.",
+    details: "The current process is the one that .process selected, else the owner of the current thread. With -c <address>, the command shows only the module that contains that address. The module walk has a limit, and also stops if it finds a cycle in a list.",
     completion: [None, Expression],
 }
 

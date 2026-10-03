@@ -161,23 +161,6 @@ fn print_process_detail(process: &ProcessInfo, detail: &ProcessDetail) {
 }
 
 impl ReplState<'_> {
-    pub(crate) fn current_process_context(&self, processes: &[ProcessInfo]) -> Option<ProcessInfo> {
-        if let Some(process) = self.ctx.target.attached_process() {
-            return Some(process.clone());
-        }
-        if let Some(thread) = &self.ctx.target.windows_thread_selection
-            && let Some(process) = processes.iter().find(|process| {
-                thread.eprocess == Some(process.eprocess_va)
-                    || thread.pid.is_some_and(|pid| pid == process.pid)
-            })
-        {
-            return Some(process.clone());
-        }
-        self.ctx
-            .target
-            .process_for_cr3(self.ctx.target.current_dtb())
-    }
-
     pub fn process_for_selector(
         &self,
         selector: &str,
@@ -324,9 +307,7 @@ impl ReplState<'_> {
                     .collect()
             }
         } else {
-            self.current_process_context(&processes)
-                .into_iter()
-                .collect()
+            self.ctx.target.current_process().into_iter().collect()
         };
         if let Some(filter) = parsed.image {
             selected.retain(|process| {
@@ -492,7 +473,7 @@ impl ReplState<'_> {
             }
         };
         let Some(selector) = selector else {
-            if let Some(process) = self.current_process_context(&processes) {
+            if let Some(process) = self.ctx.target.current_process() {
                 outln!(
                     "process context: {} {} (PID {}, DTB {}{})\n",
                     ui::addr(process.eprocess_va.0),

@@ -2,7 +2,7 @@ use std::fs;
 
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
-use crate::guest::ModuleInfo;
+use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::layout::StructRef;
 use crate::ntstatus::{ntstatus_name, win32_error_name};
 use crate::pe::{image_base, read_pe_header_page, size_of_image};
@@ -334,22 +334,28 @@ struct SelfPatchMatch {
     function: Option<String>,
 }
 
-fn attached_dtb(target: &Target) -> Result<u64> {
-    target
-        .attached_process()
-        .map(|process| process.dtb)
-        .ok_or_else(|| Error::DebugInfo("this command requires an attached user process".into()))
+/// The process a command given none decodes (see [`Target::current_process`]).
+fn current_process(target: &Target) -> Result<ProcessInfo> {
+    target.current_process().ok_or_else(|| {
+        Error::DebugInfo(
+            "no process context: no process owns the current context; select one with .process <pid>"
+                .into(),
+        )
+    })
 }
 
-fn selected_thread_dtb(target: &Target, attached_dtb: u64) -> Result<u64> {
-    let Some(thread) = target.windows_thread_selection.as_ref() else {
-        return Ok(attached_dtb);
-    };
-    target.thread_process_dtb(thread).ok_or_else(|| {
-        Error::DebugInfo(format!(
-            "selected Windows thread's owning process DTB is unavailable; refusing to read its TEB through attached DTB {attached_dtb:#x}"
-        ))
-    })
+/// The root a TEB is read through: the selected Windows thread's owner's, as
+/// the TEB belongs to that thread, else the current process's.
+fn teb_dtb(target: &Target) -> Result<u64> {
+    match target.windows_thread_selection.as_ref() {
+        Some(thread) => target.thread_process_dtb(thread).ok_or_else(|| {
+            Error::DebugInfo(
+                "the selected Windows thread's owning process is unknown, so its TEB cannot be read"
+                    .into(),
+            )
+        }),
+        None => current_process(target).map(|process| process.dtb),
+    }
 }
 
 fn teb32_address(teb: VirtAddr, wow_teb_offset: Option<i32>) -> Option<VirtAddr> {
@@ -444,12 +450,10 @@ impl Target {
     /// Decode the native `_PEB`, its process-parameter strings/pointers, and
     /// loader-list heads. Each `DiagnosticValue` records the field-specific
     /// layout or memory error when that field is unavailable; a WOW64 PEB is
-    /// included when the attached process supplies one and no explicit address
-    /// was requested.
+    /// included when the current process has one and no explicit address was
+    /// requested.
     pub fn inspect_peb(&self, address: Option<VirtAddr>) -> Result<PebDetail> {
-        let process = self
-            .attached_process()
-            .ok_or_else(|| Error::DebugInfo("no attached process".into()))?;
+        let process = current_process(self)?;
         let dtb = process.dtb;
         let peb_address = if let Some(address) = address {
             address
@@ -647,8 +651,7 @@ impl Target {
     /// default address is the selected Windows thread's `teb` pseudo-register;
     /// every independently unreadable field carries its own diagnostic error.
     pub fn inspect_teb(&self, address: Option<VirtAddr>) -> Result<TebDetail> {
-        let attached = attached_dtb(self)?;
-        let dtb = selected_thread_dtb(self, attached)?;
+        let dtb = teb_dtb(self)?;
         let teb_address = match address {
             Some(address) => address,
             None => self
@@ -802,17 +805,12 @@ impl Target {
         })
     }
 
-    /// Walk the attached process's native and (when present) WOW64 loader
+    /// Walk the current process's native and (when present) WOW64 loader
     /// lists, bounded at 1000 entries and reporting list termination rather
     /// than hiding a partial/corrupt walk. `containing` filters after the two
     /// lists are merged, matching `!dlls -c`.
     pub fn loader_modules(&self, containing: Option<VirtAddr>) -> Result<LoaderModulesDetail> {
-        let process = self
-            .attached_process()
-            .ok_or_else(|| {
-                Error::DebugInfo("this command requires an attached user process".into())
-            })?
-            .clone();
+        let process = current_process(self)?;
         let detail = self.guest()?.process_modules_detail(&process)?;
         let modules = detail
             .modules

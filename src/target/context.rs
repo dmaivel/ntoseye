@@ -89,6 +89,27 @@ impl Target {
         self.process.as_ref()
     }
 
+    /// The process the inspection context is in, which commands given no
+    /// process use, as WinDbg's do: the attached one (`.process`), else the
+    /// owner of the selected Windows thread, else the process whose page
+    /// tables the context reads through (the halted vCPU's). `None` where no
+    /// process owns the context: VTL1, the hypervisor, an unknown root.
+    pub fn current_process(&self) -> Option<ProcessInfo> {
+        if let Some(process) = &self.process {
+            return Some(process.clone());
+        }
+        if let Some(thread) = &self.windows_thread_selection
+            && let Some(process) = self
+                .matching_processes(None)
+                .unwrap_or_default()
+                .into_iter()
+                .find(|process| thread_owner_matches(thread, process))
+        {
+            return Some(process);
+        }
+        self.process_for_cr3(self.current_dtb() & self.arch().dtb_page_mask())
+    }
+
     /// Root of the module-list scope: the attached process's, else the
     /// kernel's (identity mapping when no kernel was found). It decides whose
     /// loader list [`Self::modules`] walks and whose symbols load; reads the

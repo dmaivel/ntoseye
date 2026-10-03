@@ -131,7 +131,7 @@ impl ReplState<'_> {
                         return Ok(());
                     }
                 },
-                None => self.current_process_context(&processes),
+                None => self.ctx.target.current_process(),
             }
         } else {
             self.ctx.target.attached_process().cloned()
@@ -285,14 +285,7 @@ impl ReplState<'_> {
         let Some(address) = self.eval_or_report(expr) else {
             return Ok(());
         };
-        let processes = match self.ctx.target.matching_processes(None) {
-            Ok(processes) => processes,
-            Err(error) => {
-                error!("failed to enumerate processes: {error}");
-                return Ok(());
-            }
-        };
-        let Some(process) = self.current_process_context(&processes) else {
+        let Some(process) = self.ctx.target.current_process() else {
             error!("!vprot needs a process context (.process /p <pid>)");
             return Ok(());
         };

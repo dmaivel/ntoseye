@@ -57,10 +57,9 @@ pub(super) fn command(name: &str, args: &mut Args<'_, '_>) -> Option<Result<View
             Ok(view::mm::ptov(&detail).into_view())
         }),
         "!vprot" | "vprot" => args.addr(0).and_then(|address| {
-            let processes = args.target().matching_processes(None)?;
             let process = args
-                .state
-                .current_process_context(&processes)
+                .target()
+                .current_process()
                 .ok_or_else(|| Error::DebugInfo("!vprot needs a process context".into()))?;
             let detail = args.target().virtual_query(&process, address)?;
             Ok(view::mm::vprot(&detail).into_view())
