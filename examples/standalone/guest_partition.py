@@ -14,6 +14,8 @@ backend, which halts the target, and the VM's `hv-evmcs` enlightenment.
     python3 guest_partition.py --partition 7 --process cmd.exe
 """
 
+from __future__ import annotations
+
 import argparse
 
 import ntoseye
