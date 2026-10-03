@@ -1363,9 +1363,11 @@ impl StackTracer<'_> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     use super::{FrameSource, RegisterContext, build_stacktrace_with_register_values};
     use crate::guest::ModuleInfo;
+    use crate::guest::hypercalls::HypervisorSymbols;
     use crate::kd::context::build_register_map;
     use crate::session::{Session, session_over_memory};
     use crate::target::{SavedThreadRegisters, SelectedFrame};
@@ -1582,6 +1584,97 @@ mod tests {
 
         let frames: Vec<_> = walk.frames.iter().map(|frame| frame.frame.ip).collect();
         assert_eq!(frames, [FRAMED_RIP]);
+    }
+
+    /// Windows hypervisor code whose unwind data leaves out its prolog's
+    /// `sub rsp, 0x28`, as some assembly's does from build 22621 (its
+    /// external-interrupt exit handler's): at its call, the data's frame
+    /// would read the return address from the spill area, where a stale one
+    /// lies. The walk takes the prolog's frame, which keeps the caller's RSP
+    /// aligned as at every call, and reaches the real caller.
+    #[test]
+    fn a_hypervisor_frame_whose_unwind_data_misaligns_its_caller_takes_its_prolog() {
+        // The handler, the code that calls it, what it calls, and another
+        // call site whose return address is the stale one. Each calls with
+        // the 5 bytes before its offset 0x10.
+        const HANDLER: u32 = 0x1100;
+        const ENTRY: u32 = 0x1200;
+        const CALLEE: u32 = 0x1300;
+        const DECOY: u32 = 0x1400;
+        let returns_to = |function: u32| IMAGE + u64::from(function) + 0x10;
+        // The handler's RSP at its call, 16-byte aligned as at every call.
+        let rsp = STACK + 0x800;
+
+        let mut memory = frame_pointer_image();
+        // Four RUNTIME_FUNCTIONs, all with the fixture's unwind data of no
+        // codes at 0x2110.
+        memory[0x124..0x128].copy_from_slice(&48u32.to_le_bytes());
+        for (index, begin) in [HANDLER, ENTRY, CALLEE, DECOY].into_iter().enumerate() {
+            let entry = 0x2000 + 12 * index;
+            memory[entry..entry + 4].copy_from_slice(&begin.to_le_bytes());
+            memory[entry + 4..entry + 8].copy_from_slice(&(begin + 0x80).to_le_bytes());
+            memory[entry + 8..entry + 12].copy_from_slice(&0x2110u32.to_le_bytes());
+        }
+        for (function, target) in [(HANDLER, CALLEE), (ENTRY, HANDLER), (DECOY, CALLEE)] {
+            let at = function as usize;
+            memory[at..at + 0xb].fill(0x90);
+            memory[at + 0xb] = 0xe8;
+            let displacement = target.wrapping_sub(function + 0x10);
+            memory[at + 0xc..at + 0x10].copy_from_slice(&displacement.to_le_bytes());
+        }
+        memory[HANDLER as usize..HANDLER as usize + 4].copy_from_slice(&[0x48, 0x83, 0xec, 0x28]);
+        memory.resize(IMAGE_SIZE + 0x2000, 0);
+        for (address, value) in [
+            (rsp - 8, returns_to(HANDLER)),
+            (rsp, returns_to(DECOY)),
+            (rsp + 0x28, returns_to(ENTRY)),
+        ] {
+            let at = (address - IMAGE) as usize;
+            memory[at..at + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        let mut session = session_over_memory(IMAGE, &memory);
+        session
+            .target
+            .set_kernel_modules_for_test(vec![ModuleInfo::new(
+                "hv".to_string(),
+                VirtAddr(IMAGE),
+                IMAGE_SIZE as u32,
+            )]);
+        let mut trace = super::resolve_thread_trace_context(&session.target, 0);
+        trace.foreign_image = Some(ModuleInfo::new(
+            "hv".to_string(),
+            VirtAddr(IMAGE),
+            IMAGE_SIZE as u32,
+        ));
+        trace.hypervisor = Some(Arc::new(HypervisorSymbols {
+            names: Vec::new(),
+            extents: HashMap::new(),
+            starts: vec![HANDLER, ENTRY, CALLEE, DECOY],
+            exit_entries: Vec::new(),
+        }));
+
+        let walk = super::walk::build_recovered_stacktrace_seeded(
+            &session.target,
+            &trace,
+            RegisterContext::new(IMAGE + u64::from(CALLEE), rsp - 8),
+            FrameSource::Seed,
+            8,
+            HashMap::new(),
+        );
+
+        let frames: Vec<_> = walk
+            .frames
+            .iter()
+            .map(|frame| (frame.frame.ip, frame.frame.source))
+            .collect();
+        assert_eq!(
+            frames,
+            [
+                (IMAGE + u64::from(CALLEE), FrameSource::Seed),
+                (returns_to(HANDLER), FrameSource::Unwind),
+                (returns_to(ENTRY), FrameSource::Prolog),
+            ]
+        );
     }
 
     /// An unwind that lands on a value no code can sit at (the null page, a

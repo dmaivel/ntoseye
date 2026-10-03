@@ -13,7 +13,7 @@ use super::{
     AMD64_REGISTER_NAMES, RegisterContext, StackTracer, Unwound, image_u32, runtime_functions,
 };
 use crate::pe::{CodeLayout, PeImage};
-use crate::types::CodeMachine;
+use crate::types::{CodeMachine, VirtAddr};
 
 // cap on chained unwind entries followed per frame, guarding against cyclic or
 // corrupt unwind data
@@ -205,7 +205,7 @@ impl StackTracer<'_> {
             resolved = resolve_function(&image, layout.as_deref(), base_address, context.rip);
         }
 
-        let (mut unwind_data, begin, end) = match resolved {
+        let (unwind_data, begin, end) = match resolved {
             Resolve::Function {
                 unwind_data,
                 begin,
@@ -223,6 +223,83 @@ impl StackTracer<'_> {
             }
         };
 
+        if context.after_call
+            && self
+                .trace
+                .foreign_image
+                .as_ref()
+                .is_some_and(|hypervisor| hypervisor.contains_address(VirtAddr(context.rip)))
+        {
+            return self.unwind_hypervisor_caller(
+                context,
+                &image,
+                base_address,
+                unwind_data,
+                begin,
+                end,
+            );
+        }
+        self.unwind_by_codes(context, &image, base_address, unwind_data, begin, end)
+    }
+
+    /// Step a caller frame of the Windows hypervisor (one stopped at a
+    /// return address) by its file's unwind data, unless that data puts the
+    /// caller's RSP off the 16-byte alignment that every call has and the
+    /// function's prolog keeps it. From build 22621, the unwind data of some
+    /// of its assembly leaves out the prolog's `sub rsp` (its external-
+    /// interrupt exit handler's, among them), so at a call there the data
+    /// would take the return address from the spill area below the real one.
+    fn unwind_hypervisor_caller(
+        &mut self,
+        context: &mut RegisterContext,
+        image: &PeImage,
+        base_address: u64,
+        unwind_data: u32,
+        begin: u32,
+        end: u32,
+    ) -> Unwound {
+        let mut by_codes = context.clone();
+        let unwound =
+            self.unwind_by_codes(&mut by_codes, image, base_address, unwind_data, begin, end);
+        if matches!(
+            unwound,
+            Unwound::Frame {
+                stack_switch: false
+            }
+        ) && context.rsp.is_multiple_of(16)
+            && !by_codes.rsp.is_multiple_of(16)
+        {
+            let mut by_prolog = context.clone();
+            if matches!(
+                self.unwind_prolog(&mut by_prolog, base_address),
+                Unwound::Prolog
+            ) && by_prolog.rsp.is_multiple_of(16)
+            {
+                unwind_trace!(
+                    "unwind: unwind data misaligns the caller (rsp={:#x}); prolog -> rsp={:#x}",
+                    by_codes.rsp,
+                    by_prolog.rsp
+                );
+                *context = by_prolog;
+                return Unwound::Prolog;
+            }
+        }
+        *context = by_codes;
+        unwound
+    }
+
+    /// Step `context` to its caller by the unwind data of its function
+    /// (`begin..end`, whose `UNWIND_INFO` is at `unwind_data`), its chained
+    /// parents' included.
+    fn unwind_by_codes(
+        &mut self,
+        context: &mut RegisterContext,
+        image: &PeImage,
+        base_address: u64,
+        mut unwind_data: u32,
+        begin: u32,
+        end: u32,
+    ) -> Unwound {
         // Walk the function and any chained parents. Only the primary function's
         // codes are gated on the prolog progress at `rip`; chained parents already
         // ran their prologs in full, so all of their codes apply.
@@ -231,7 +308,7 @@ impl StackTracer<'_> {
         let mut primary = true;
 
         for _ in 0..MAX_CHAIN_DEPTH {
-            let Some(unwind_info) = parse_unwind_info(&image, unwind_data) else {
+            let Some(unwind_info) = parse_unwind_info(image, unwind_data) else {
                 unwind_trace!(
                     "unwind: parse_unwind_info failed/holed at unwind_data={unwind_data:#x} -> stop"
                 );
