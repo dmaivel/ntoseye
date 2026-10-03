@@ -37,6 +37,9 @@ IN_HYPERVISOR = "is halted in the Windows hypervisor"
 # A step refused because the vCPU runs a guest partition's VP (WSL2, a
 # Hyper-V VM), whose code is not NT's.
 IN_GUEST_VP = "of a guest partition, which the Windows hypervisor put on its processor"
+# A step-out refused because the stack walk found no caller, as from code
+# that no module or unwind data covers.
+NO_CALLER = "could not find caller return address"
 ATTEMPTS = 3
 
 
@@ -114,15 +117,16 @@ def test_steps_resume_past_false_predicates(halted: Debugger) -> None:
     # Stepping out follows the same thread, which can exit under that load
     # too. The interrupt can also halt the vCPU taking a VM exit, in the
     # Windows hypervisor, or running a guest partition's VP, where no step
-    # can start; a finished step is always in NT.
+    # can start, or in code outside every loaded module, which no unwind data
+    # leaves; a finished step is always in NT.
     try:
         out = halted.step_out(timeout=20.0)
     except ntoseye.NtoseyeError as error:
         message = str(error)
-        outside_nt = isinstance(over, Stop.Interrupt) and (
-            IN_HYPERVISOR in message or IN_GUEST_VP in message
+        refused_after_interrupt = isinstance(over, Stop.Interrupt) and (
+            IN_HYPERVISOR in message or IN_GUEST_VP in message or NO_CALLER in message
         )
-        if EXITED not in message and not outside_nt:
+        if EXITED not in message and not refused_after_interrupt:
             raise
         return
     assert isinstance(out, (Stop.Step, Stop.Interrupt))
