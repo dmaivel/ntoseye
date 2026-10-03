@@ -99,7 +99,7 @@ impl Debugger {
     /// runs (a Windows Sandbox, a Hyper-V VM) in place of the target, as
     /// `.partition` does: `memory`, `processes`, `modules`, `symbols`,
     /// `types` and `threads` then read that guest, through its EPT, and the
-    /// vCPUs are its VPs, with the registers they have now. The view is
+    /// vCPUs are its VPs, with their VTL0 registers. The view is
     /// read-only and the target stays halted: running, stepping, breakpoints
     /// and writes raise `NtoseyeError` until the root partition's ID (1)
     /// returns to the target. Handles minted on either side of a switch go

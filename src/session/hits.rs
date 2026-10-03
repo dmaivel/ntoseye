@@ -622,7 +622,25 @@ pub fn resolve_watchpoint_stop(
     let (caller_matches, caller) =
         stopped_caller_matches(target, &breakpoint, current_thread, scope_dtb, rip);
     if !caller_matches {
-        declined("another hypercall, VM exit or caller");
+        // Which caller the hit resolved to tells a filter that never matches
+        // from a caller that never comes.
+        if step_trace_enabled() {
+            let found = caller.as_ref().map_or_else(
+                || "caller unknown".to_string(),
+                |caller| {
+                    format!(
+                        "partition {:#x} VP {} VTL{}, exit {}",
+                        caller.partition,
+                        caller.vp,
+                        caller.vtl,
+                        caller
+                            .state
+                            .map_or_else(|| "?".to_string(), |state| state.exit_reason.to_string())
+                    )
+                },
+            );
+            declined(&format!("another hypercall, VM exit or caller ({found})"));
+        }
         return Ok(WatchpointStopAction::Declined);
     }
     if breakpoints.record_hit(breakpoint.id)? == BreakpointHitDisposition::SkipPass {

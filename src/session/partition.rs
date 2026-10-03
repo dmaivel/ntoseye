@@ -27,8 +27,8 @@ pub struct PartitionView {
 impl Session {
     /// Show guest partition `partition` in place of the target: its memory
     /// through its EPT, its NT kernel's symbols, and its VPs as threads
-    /// (`p<partition>.<VP index + 1>`) with the registers they have now (see
-    /// [`Self::vp_registers`]). The target must be halted, and stays so; a
+    /// (`p<partition>.<VP index + 1>`) with the VTL0 registers they have now
+    /// (see [`Self::vp_registers`]). The target must be halted, and stays so; a
     /// view already shown is left first, and the root partition's ID only
     /// leaves it, as the root partition is the target itself.
     pub fn enter_partition(&mut self, partition: u64) -> Result<()> {
@@ -58,7 +58,16 @@ impl Session {
         let layout = self.backend.read_registers()?.len();
         let mut vps = Vec::with_capacity(indexes.len());
         for index in indexes {
-            let found = self.vp_registers(partition, index, None)?;
+            // The view is of VTL0 (its EPT, its kernel), so each VP's state
+            // is VTL0's even while the VP runs in VTL1, whose RIP and stack
+            // would be the partition's secure kernel's.
+            let found = self.vp_registers(partition, index, Some(0))?;
+            let id = format!("p{partition:x}.{:x}", index + 1);
+            if let Some(reason) = &found.missing {
+                self.notices.push(format!(
+                    "{id} shows only VTL0's RIP, RSP, flags, control and segment registers: {reason}"
+                ));
+            }
             let mut registers = vec![0u8; layout];
             for (name, value) in &found.registers {
                 // A register the vCPU's layout lacks is left out.
@@ -66,10 +75,7 @@ impl Session {
                     .register_map
                     .write_u64(name.as_str(), &mut registers, *value);
             }
-            vps.push(PartitionVp {
-                id: format!("p{partition:x}.{:x}", index + 1),
-                registers,
-            });
+            vps.push(PartitionVp { id, registers });
         }
         let first = vps
             .first()

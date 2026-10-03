@@ -1594,7 +1594,12 @@ impl Target {
             state.mode_based_execute(),
             runs,
         );
-        Target::with_kernel_dtb(Arc::new(phys), state.cr3 & self.arch().dtb_page_mask())
+        let target =
+            Target::with_kernel_dtb(Arc::new(phys), state.cr3 & self.arch().dtb_page_mask())?;
+        // Its VPs leave off in its hypercall page at every hypercall and VTL
+        // call, as the target's do in NT's.
+        target.register_hypercall_pages();
+        Ok(target)
     }
 
     /// The VPs of `partitions` whose register region the root of their

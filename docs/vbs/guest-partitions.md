@@ -8,7 +8,7 @@ A guest partition runs an operating system of its own: a Hyper-V VM, a WSL2 Linu
 
 - Its memory is read through the partition's EPT.
 - Its NT kernel is found from the page-table root of a VP in kernel mode, and its symbols are loaded.
-- Its VPs are the threads. {command}`~` lists them as `p<partition>.<VP index + 1>`, `~Ns` selects VP N, and each has the registers that {command}`!hvr` shows.
+- Its VPs are the threads. {command}`~` lists them as `p<partition>.<VP index + 1>`, `~Ns` selects VP N, and each has its VTL0 registers, as `!hvr <partition> <vp> 0` shows them. A VP that runs in VTL1 when the target halts has VTL0's RIP, RSP, flags, control and segment registers, without its general-purpose registers, and `.partition` says so. Frames in the partition's hypercall page read `hvcall!Hypercall`, as in the target's.
 
 {command}`lm`, {command}`!process`, {command}`.process`, {command}`!peb`, {command}`!thread`, {command}`dt`, {command}`db`, {command}`u` and {command}`k` then read that guest. The view is read-only, and the target stays halted while it is shown:
 
