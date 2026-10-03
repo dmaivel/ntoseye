@@ -2,6 +2,25 @@
 
 A guest partition runs an operating system of its own: a Hyper-V VM, a WSL2 Linux kernel, or a Windows Sandbox. `ntoseye` reads a guest through its partition's EPT, read-only: a Windows guest as a debug target with its own kernel's symbols, and any guest as raw memory and code.
 
+## Which partition is which
+
+The hypervisor does not name its partitions. Their IDs follow the order in which they were created, so they change when a VM, WSL2, or a Sandbox starts again. {command}`!hvpartitions` lists them, and these tell them apart:
+
+- {command}`.partition` `<id>` loads a Windows guest's kernel, and says that a Linux guest, such as WSL2's, runs none. It refuses a VM that is still in its firmware.
+- A Linux kernel runs in the top 2 GiB of the address space (`ffffffff8...` and above), and NT runs at `fffff8...`, so the guest RIPs that {command}`!hvvps` `<id>` shows give the kernel away.
+- A Windows Sandbox runs the host's own Windows image, so {command}`lmv` `m nt` in it shows the target's kernel PDB, while a Hyper-V VM runs whatever it installed.
+
+```text
+gdb:p01.01> .partition 5
+error: Windows hypervisor: partition 0x5 runs no Windows kernel: no NT image is mapped where its VPs run, as in a Linux guest such as WSL2's; !hvd and !hvu read any guest's memory and code
+gdb:p01.01> !hvvps 5
+VP  Address           CPU  VTL  Context           eVMCS      EPT pointer  Guest RIP         Last exit
+0   ffffe804c5038050       0*   ffffe804c5039000  22754d000  227c3105e    ffffffffbd1df02f  HLT
+...
+gdb:p01.01> .partition 4
+inspecting partition 0x4: nt at 0xfffff80586250000, VPs p4.1 p4.2 p4.3 p4.4
+```
+
 ## Inspecting a Windows guest partition
 
 {command}`.partition` `<partition-id>` inspects the Windows guest that a partition runs, such as a Windows Sandbox or a Hyper-V VM, in place of the target:
@@ -62,7 +81,7 @@ A vCPU that is running a guest partition's VP when the target halts shows that g
 
 ```text
 vCPU    RIP               Context             Symbol
-p01.03  00007c27330c4321  partition 0x4 VP 2  0x7c27330c4321
+p01.03  00007c27330c4321  partition 0x5 VP 2  0x7c27330c4321
 ```
 
 With that vCPU selected, {command}`!hvd` `<address>` reads that guest's memory and {command}`!hvu` `<address>` disassembles it, at that RIP for example; from another vCPU, pass the partition ID and VP index.

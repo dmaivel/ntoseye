@@ -1606,8 +1606,17 @@ impl Target {
             state.mode_based_execute(),
             runs,
         );
-        let target =
-            Target::with_kernel_dtb(Arc::new(phys), state.cr3 & self.arch().dtb_page_mask())?;
+        let target = match Target::with_kernel_dtb(
+            Arc::new(phys),
+            state.cr3 & self.arch().dtb_page_mask(),
+        ) {
+            Err(Error::NtoskrnlNotFound) => {
+                return Err(Error::Hypervisor(format!(
+                    "partition {id:#x} runs no Windows kernel: no NT image is mapped where its VPs run, as in a Linux guest such as WSL2's; !hvd and !hvu read any guest's memory and code"
+                )));
+            }
+            result => result?,
+        };
         // Its VPs leave off in its hypercall page at every hypercall and VTL
         // call, as the target's do in NT's.
         target.register_hypercall_pages();
