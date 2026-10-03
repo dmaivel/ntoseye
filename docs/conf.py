@@ -39,6 +39,9 @@ html_theme = "furo"
 # are `ntoseye.com/<path>/`, the URLs Cloudflare serves without a redirect.
 html_baseurl = "https://ntoseye.com/"
 html_static_path = ["_static"]
+# Cloudflare reads `_redirects` from the site's root, so old URLs of moved
+# pages keep working.
+html_extra_path = ["_redirects"]
 html_js_files = ["sidebar-scroll.js"]
 
 # Cloudflare serves /404.html for any missing path, at any depth, so its links

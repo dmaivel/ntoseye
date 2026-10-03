@@ -29,8 +29,9 @@ KDNET can connect to any physical or virtual machine that Windows can debug. Wit
 
 Because `ntoseye` reads memory itself, it can show things that the Windows debugger cannot:
 
-- The [secure kernel and trustlets](platforms/vbs.md) that virtualization-based security isolates in VTL1.
-- Where each processor was when it stopped inside the Windows hypervisor.
+- The [secure kernel and trustlets](vbs/secure-kernel.md) that virtualization-based security isolates in VTL1.
+- [Where each processor was](vbs/hypervisor-stops.md) when it stopped inside the Windows hypervisor.
+- The [guests that the Windows hypervisor runs](vbs/guest-partitions.md), such as a Windows Sandbox, with their own kernel's symbols.
 
 ## Symbols and source
 
@@ -98,8 +99,20 @@ using/drivers
 :hidden:
 :caption: Platform topics
 
-platforms/vbs
 platforms/wow64
+```
+
+```{toctree}
+:hidden:
+:caption: VBS and the Windows hypervisor
+
+Overview <vbs/index>
+vbs/secure-kernel
+vbs/partitions
+vbs/guest-partitions
+vbs/hypercalls
+vbs/hypervisor-stops
+vbs/internals
 ```
 
 ```{toctree}
@@ -132,7 +145,6 @@ reference/expressions
 :hidden:
 :caption: Internals
 
-internals/vbs
 internals/kd-reads
 Rust crate API (docs.rs) <https://docs.rs/ntoseye/latest/ntoseye/>
 ```

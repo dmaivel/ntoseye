@@ -4,7 +4,7 @@ You can edit, build, load, and debug a driver from the Linux host that runs the 
 
 The steps below that serve files to the guest or load unsigned code need a kernel debugger configured in the guest, either [KDNET](../setup/kdnet.md) or [KD over serial](../setup/kvm-qemu.md#kd-over-a-serial-socket). To debug a driver that already loads, the GDB stub is enough.
 
-If the guest uses VBS, turn it off unless you test the driver with Memory integrity. See [Should VBS be on?](../platforms/vbs.md#should-vbs-be-on).
+If the guest uses VBS, turn it off unless you test the driver with Memory integrity. See [Should VBS be on?](../vbs/index.md#should-vbs-be-on).
 
 ## Build
 

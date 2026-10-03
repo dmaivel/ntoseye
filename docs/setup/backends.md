@@ -16,7 +16,7 @@
 | Model-specific registers | Yes | Yes | No | No | No |
 | Reboot / forced crash | Yes | Yes | No | No | No |
 | Bugcheck stops | Reported by the target | Reported by the target | Trapped at `nt!KeBugCheckEx` | No | Read from the dump |
-| [VTL1 inspection](../platforms/vbs.md) (AMD64) | Host memory source only | Host memory source only | Yes | Yes | No |
+| [VTL1 inspection](../vbs/secure-kernel.md) (AMD64) | Host memory source only | Host memory source only | Yes | Yes | No |
 
 ## Hypervisor setup
 
@@ -85,4 +85,4 @@ A thread that is running on a processor at that moment has no stack to show, bec
 - the `gdb` backend
 - the `kd` and `kdnet` backends, while reads come from host memory
 
-Only the `gdb` backend can stop, step, and break in VTL1. The [VBS guide](../platforms/vbs.md) shows what each backend supports in VTL1.
+Only the `gdb` backend can stop, step, and break in VTL1. The [VBS overview](../vbs/index.md) shows what each backend supports in VTL1.

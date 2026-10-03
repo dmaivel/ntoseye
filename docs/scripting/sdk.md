@@ -81,7 +81,7 @@ print(hex(kernel_fn), proc_module.name, hex(proc_module.base))
 print(dbg.memory.read(kernel_fn, 16).hex())
 ```
 
-`dbg.symbols.import_image(path)` copies a PE file into the symbol cache under the key in its own header and returns its path there, as {command}`.fetchimage` `/f` does. Use it for an image that no symbol server has, such as the Windows hypervisor's `hvix64.exe`, whose stacks then unwind exactly ([VBS](../platforms/vbs.md)).
+`dbg.symbols.import_image(path)` copies a PE file into the symbol cache under the key in its own header and returns its path there, as {command}`.fetchimage` `/f` does. Use it for an image that no symbol server has, such as the Windows hypervisor's `hvix64.exe`, whose stacks then unwind exactly ([VBS](../vbs/hypervisor-stops.md)).
 
 To find a type, use `dbg.types[name]` or `proc.types[name]`. `Type.fields` maps names to `Field` layouts in offset order, and for an enum, `Type.values` maps member names to values. `.at(address)` makes a live cursor, and `.read()` returns a snapshot dictionary.
 
@@ -114,7 +114,7 @@ for ins in dbg.memory.disassemble(kernel_fn, 8):
 ## Secure kernel (VTL1)
 
 :::{important}
-VTL1 inspection is experimental. To see what it supports on which guests and hosts, read [VBS and the Windows hypervisor](../platforms/vbs.md).
+VTL1 inspection is experimental. To see what it supports on which guests and hosts, read [VBS and the Windows hypervisor](../vbs/index.md).
 :::
 
 When VBS runs, `dbg.secure_kernel` is the secure kernel, which ntoseye finds in host memory the first time you use it. This works with the `memory` and `gdb` backends, and with `kd` or `kdnet` when they read host memory. If VBS does not run, or if the backend cannot get to VTL1 memory, `dbg.secure_kernel` raises `NtoseyeError`.
@@ -166,7 +166,7 @@ They share the hardware slots and resolve only once, and you must make them agai
 
 `step()`, `step_over()`, `step_out()`, `run_to()`, and `trace_calls()` work at VTL1 stops. In secure-kernel code, their temporary breakpoints are debug-register breakpoints in free slots, so these functions never patch the code.
 
-ntoseye does not accept NT process and thread filters, software breakpoints, or data watches in secure modules. For more information, see [VTL1 limits and tested configuration](../platforms/vbs.md).
+ntoseye does not accept NT process and thread filters, software breakpoints, or data watches in secure modules. For more information, see [VTL1 limits](../vbs/secure-kernel.md#breakpoints-and-stepping-in-vtl1).
 
 ### Saved VTL state
 
@@ -184,7 +184,7 @@ Each `SavedVtlState` holds this data:
 - `evmcs`, the physical address of the Enlightened VMCS that ntoseye read the state from.
 - `hypercall`, for a `VMCALL` exit whose `general_registers` are known, the hypercall with its input decoded as {command}`!hvcall` shows it (a `DecodedHypercall`, below), else `None`.
 
-The list needs the `hv-evmcs` enlightenment on the VM, and is empty without it or when the saved state fails validation. For more information, see [where NT left off under the hypervisor](../platforms/vbs.md#where-nt-left-off-under-the-hypervisor).
+The list needs the `hv-evmcs` enlightenment on the VM, and is empty without it or when the saved state fails validation. For more information, see [where NT left off under the hypervisor](../vbs/hypervisor-stops.md#where-nt-left-off-under-the-hypervisor).
 
 Because ntoseye unwinds the NT thread on that vCPU from the saved VTL0 state, `backtrace()` walks the NT stack while `cpu.symbol` still gives a location in the hypervisor:
 
@@ -200,7 +200,7 @@ for cpu in dbg.cpus:
 
 A processor that runs a guest partition's VP, such as WSL2's, enters the hypervisor for that VP's exits. `cpu.serving` is that VP, as the stop header's `serving` line names it, or `None` when the processor runs one of the root partition's VPs. A `ServedVp` has `partition_id`, `vp_index`, `vtl`, `rip` (where that VTL left off), `current` (whether the processor handles this VP's exit now, rather than having run it last), `exit_reason` and `exit_reason_name`, `general_registers`, and `hypercall`, each as in `SavedVtlState`.
 
-A `DecodedHypercall` has the hypercall input value (`input_value`, RCX), `code`, `name` (the TLFS name, or `None`), `fast`, `variable_header_size` (in qwords), `nested`, `rep_start` and `rep_count`, and `input_gpa` and `output_gpa` (`None` for a fast call). `fields` lists the fields of the input as the Hyper-V TLFS lays them out, each a `HypercallField` with `name`, `offset`, `size`, `value`, and `meaning` (a name for the value, such as `HV_PARTITION_ID_SELF`, `VPs 0-3`, or a register's TLFS name, or `None`). `elements` lists a rep call's input list, each a `HypercallElement` with its `index` and its `fields`. `decoded` is `False` for a call whose layout ntoseye does not know, whose `fields` are then raw qwords (`Input[0]`, ...), and `unavailable` says why some of the input is missing: an unreadable input page, or an XMM fast call's XMM registers when their saved values are not known. `summary` is the one-line form of the stop header ([VBS](../platforms/vbs.md#hypercalls)).
+A `DecodedHypercall` has the hypercall input value (`input_value`, RCX), `code`, `name` (the TLFS name, or `None`), `fast`, `variable_header_size` (in qwords), `nested`, `rep_start` and `rep_count`, and `input_gpa` and `output_gpa` (`None` for a fast call). `fields` lists the fields of the input as the Hyper-V TLFS lays them out, each a `HypercallField` with `name`, `offset`, `size`, `value`, and `meaning` (a name for the value, such as `HV_PARTITION_ID_SELF`, `VPs 0-3`, or a register's TLFS name, or `None`). `elements` lists a rep call's input list, each a `HypercallElement` with its `index` and its `fields`. `decoded` is `False` for a call whose layout ntoseye does not know, whose `fields` are then raw qwords (`Input[0]`, ...), and `unavailable` says why some of the input is missing: an unreadable input page, or an XMM fast call's XMM registers when their saved values are not known. `summary` is the one-line form of the stop header ([VBS](../vbs/hypercalls.md#hypercall-breakpoints-and-decoding)).
 
 ```python
 bp = dbg.breakpoints.add_hypercall("HvCallFlushVirtualAddressList")
@@ -239,7 +239,7 @@ for ins in vtl.disassemble(vtl.rip, 4):  # where the guest's VP left off
     print(hex(ins.ip), ins.asm)
 ```
 
-This needs the `hv-evmcs` enlightenment or a vCPU that is stopped in the hypervisor, and an Intel host, and it raises `NtoseyeError` if ntoseye does not recognize the hypervisor build ([supported builds](../platforms/vbs.md#hypervisor-partitions-and-virtual-processors)). This feature is experimental.
+This needs the `hv-evmcs` enlightenment or a vCPU that is stopped in the hypervisor, and an Intel host, and it raises `NtoseyeError` if ntoseye does not recognize the hypervisor build ([supported builds](../vbs/partitions.md#how-ntoseye-finds-them)). This feature is experimental.
 
 `dbg.breakpoints.add_hypercall(call, partition=None, vp=None)` sets a breakpoint that stops on a hypercall, as {command}`!hvbp` does ([how](../using/breakpoints.md#hypercall-breakpoints)). `call` is a call code or a name (`"HvCallPostMessage"`, or `"HvCall0004"` for a code the TLFS does not name), `partition` a partition `id`, and `vp` a VP `index` in that partition. It also takes the keyword arguments of `add()` except `hardware`, `process`, and `thread`. ntoseye resumes past the hits of other callers and other codes before a `when=` callback runs, and a hit whose caller it cannot tell stops. A `condition=` sees the caller's registers and reads the caller's memory, as the condition of {command}`!hvbp` does, so `condition="$pqwo(rdx) == 0x102248000"` tests the first field of a slow call's input. `bp.hypercall` is the filter, a `HypercallFilter` with `code`, `name`, `partition`, and `vp`, or `None` for other breakpoints. It needs the `gdb` backend, and it raises `ValueError` for an unknown name, a `vp` without a `partition`, or a partition or VP that the hypervisor does not have. This feature is experimental.
 

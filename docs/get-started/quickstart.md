@@ -16,7 +16,7 @@ To see the current configuration, run `ntoseye status`. You can run it at any ti
 
 For all other targets, follow the [KDNET guide](../setup/kdnet.md), which does not need `configure`.
 
-If the guest runs VBS and your work does not need it, turn off VBS before you debug drivers or the kernel. For more information, see [Should VBS be on?](../platforms/vbs.md#should-vbs-be-on)
+If the guest runs VBS and your work does not need it, turn off VBS before you debug drivers or the kernel. For more information, see [Should VBS be on?](../vbs/index.md#should-vbs-be-on)
 
 ## Choosing a backend
 

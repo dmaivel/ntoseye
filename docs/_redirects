@@ -1,0 +1,6 @@
+# Cloudflare's redirects for pages that moved (conf.py copies this file into
+# the site). Rules match a path exactly, so each page has both forms.
+/platforms/vbs /vbs/ 301
+/platforms/vbs/ /vbs/ 301
+/internals/vbs /vbs/internals/ 301
+/internals/vbs/ /vbs/internals/ 301

@@ -21,7 +21,7 @@ A WinDbg-like Windows debugger for Linux and macOS, with support for kernel-mode
 - Public and private PDB symbols, source lines, and local variables
 - Conditional and deferred breakpoints, hardware watchpoints, and breakpoint commands
 - [KD/KDNET, QEMU GDB, and passive memory backends](https://ntoseye.com/setup/backends/)
-- [VBS secure-kernel (VTL1) and trustlet memory inspection](https://ntoseye.com/platforms/vbs/)
+- [VBS secure-kernel (VTL1) and trustlet memory inspection](https://ntoseye.com/vbs/secure-kernel/)
 - [Host-served driver images for driver development](https://ntoseye.com/using/kdfiles/)
 - [Python SDK](https://ntoseye.com/scripting/sdk/) and [custom commands](https://ntoseye.com/scripting/commands/)
 - [Editor integration over DAP](https://ntoseye.com/integrations/dap/)
@@ -149,7 +149,7 @@ The full documentation is at [ntoseye.com](https://ntoseye.com). The debugger al
 - [Using the REPL](https://ntoseye.com/using/repl/): command names, aliases
 - [Expressions](https://ntoseye.com/reference/expressions/): numbers and radix, operators, registers and pseudo-registers, symbols, types, locals
 - [Breakpoints and watchpoints](https://ntoseye.com/using/breakpoints/): the breakpoint grammar, conditions, scoping
-- [VBS and the Windows hypervisor](https://ntoseye.com/platforms/vbs/): VTL1 and trustlet inspection, stops in the hypervisor
+- [VBS and the Windows hypervisor](https://ntoseye.com/vbs/): VTL1 and trustlet inspection, the hypervisor's partitions, guests, and hypercalls, stops in the hypervisor
 - [WOW64 processes](https://ntoseye.com/platforms/wow64/)
 - [Memory and paging](https://ntoseye.com/using/memory/): memory sources, writes, paged-out memory
 - [Symbols and source](https://ntoseye.com/using/symbols/): private PDBs, `.sympath`/`.srcpath`, source breakpoints

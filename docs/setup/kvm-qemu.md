@@ -107,7 +107,7 @@ The `memory` backend needs no host or guest configuration. [Choosing a backend](
 
 ## Virtualization-based security (VBS)
 
-[Secure-kernel inspection](../platforms/vbs.md) needs VBS running in the guest, which in turn needs nested virtualization (`vmx`) in the VM. Other debugging works better with VBS off (see [Should VBS be on?](../platforms/vbs.md#should-vbs-be-on)). To check whether VBS runs, use `msinfo32` in the guest. Memory integrity (HVCI) is not necessary.
+[Secure-kernel inspection](../vbs/secure-kernel.md) needs VBS running in the guest, which in turn needs nested virtualization (`vmx`) in the VM. Other debugging works better with VBS off (see [Should VBS be on?](../vbs/index.md#should-vbs-be-on)). To check whether VBS runs, use `msinfo32` in the guest. Memory integrity (HVCI) is not necessary.
 
 We tested a Core i9-14900F host with a Windows 11 guest. On this host, the guest's hypervisor did not start with `<cpu mode="host-passthrough"/>`, but a custom Skylake model with `vmx` added works. The configuration below keeps the existing Hyper-V enlightenments and CPU topology, with Secure Boot off:
 
@@ -121,11 +121,11 @@ We tested a Core i9-14900F host with a Windows 11 guest. On this host, the guest
 
 For plain QEMU, use `-cpu Skylake-Client-v4,+vmx` and the existing `hv_*` flags. After you change the CPU model, power off the VM fully and start it again. The configuration above is only the one that we tested, and VBS might start with `host-passthrough` on other hosts.
 
-A vCPU can halt in the Windows hypervisor. To see [where NT left off](../platforms/vbs.md#where-nt-left-off-under-the-hypervisor) on such a vCPU, also enable the `hv-evmcs` enlightenment:
+A vCPU can halt in the Windows hypervisor. To see [where NT left off](../vbs/hypervisor-stops.md#where-nt-left-off-under-the-hypervisor) on such a vCPU, also enable the `hv-evmcs` enlightenment:
 
 - For libvirt, add `<evmcs state="on"/>` to the `<hyperv>` block. This element also needs `<vapic state="on"/>`.
 - For plain QEMU, add `hv-evmcs` and `hv-vapic` to `-cpu`.
 
 After you add the enlightenment, power off the VM and start it again.
 
-The [VBS guide](../platforms/vbs.md) explains how the `gdb` backend operates when Windows runs its own hypervisor, including stops inside the hypervisor, steps without the trap flag, and breakpoints in VTL1.
+The [VBS guide](../vbs/hypervisor-stops.md) explains how the `gdb` backend operates when Windows runs its own hypervisor, including stops inside the hypervisor, steps without the trap flag, and breakpoints in VTL1.
