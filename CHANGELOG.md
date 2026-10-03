@@ -10,7 +10,7 @@ Keeping this file:
 - A release with a theme opens with one or two sentences before the groups, saying what users can now do. A release without one goes straight to the groups.
 - Say what users can now do, or what went wrong and no longer does, not how. Name commands and SDK APIs in backticks as users type them.
 - Link only with absolute https://ntoseye.com/... URLs. The same text is shown in the GitHub release, in this file on GitHub, and on the docs site, which each resolve a relative link differently.
-- To release, rename "## Unreleased" to "## vX.Y.Z (YYYY-MM-DD)", the version in Cargo.toml. The release workflow refuses a tag whose version has no section here, or an empty one; dist publishes the section as the release notes and its heading as the release title.
+- To release, rename "## Unreleased" to "## vX.Y.Z (YYYY-MM-DD)", the version in Cargo.toml. The release workflow refuses a tag whose version has no section here, or an empty one; dist publishes the section as the release notes, under the tag as the release title.
 -->
 
 ## v0.45.0 (2026-10-03)

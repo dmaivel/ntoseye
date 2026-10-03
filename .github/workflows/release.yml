@@ -119,8 +119,8 @@ jobs:
             }
           fi
       # dist publishes CHANGELOG.md's section for the version as the release
-      # notes and its heading as the title, and with no section it publishes
-      # none without failing. Check with the parser dist 0.30.3 uses,
+      # notes (the release's title is its tag), and with no section it
+      # publishes none without failing. Check with the parser dist 0.30.3 uses,
       # parse-changelog 0.6.14: the file must parse on every run, and a tag
       # needs a section for its version with something in it.
       - name: Validate changelog
@@ -387,14 +387,16 @@ jobs:
       - name: Create GitHub Release
         env:
           PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
-          ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
           ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
           RELEASE_COMMIT: "${{ github.sha }}"
         run: |
           # Write and read notes from a file to avoid quoting breaking things
           echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
 
-          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+          # The title is the tag (v0.45.0), as every release's has been: dist's
+          # announcement_title is the changelog heading, whose date belongs in
+          # CHANGELOG.md, not in the title.
+          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "${{ needs.plan.outputs.tag }}" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
   publish-crate:
     needs:
