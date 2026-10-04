@@ -1389,6 +1389,32 @@ fn a_cleared_synthetic_module_takes_the_names_registered_next() {
     );
 }
 
+/// A refresh against the kernel's loader list forgets the modules no longer
+/// in it, and counts them as unloaded, but not a module ntoseye names
+/// itself in the same root, such as the hypercall page, which is in no
+/// loader list.
+#[test]
+fn a_loader_refresh_keeps_the_synthetic_modules() {
+    let store = SymbolStore::new();
+    let page = VirtAddr(0xffff_f805_171e_0000);
+    store.register_synthetic_module(
+        0x1000,
+        &ModuleInfo::new("hvcall".to_string(), page, 0x1000),
+        9,
+        &[("Hypercall".to_string(), 0)],
+        HashMap::from([(0, 3)]),
+    );
+    store.register_module_for_test(1, "unloaded", 0x1000);
+    let unloaded = VirtAddr(0x1000_0000 * 2);
+
+    assert_eq!(store.retain_modules_for_dtb(0x1000, &[]), 1);
+    assert!(store.find_module_for_address(0x1000, unloaded).is_none());
+    assert_eq!(
+        store.format_closest_symbol_for_address(0x1000, page),
+        Some("hvcall!Hypercall".to_string())
+    );
+}
+
 /// A minimal AMD64 PE file of the build `time_date_stamp`/`size_of_image`.
 fn pe_file(time_date_stamp: u32, size_of_image: u32) -> Vec<u8> {
     let mut file = vec![0u8; 0x200];

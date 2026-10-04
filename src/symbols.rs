@@ -1228,6 +1228,11 @@ impl SymbolStore {
         }
     }
 
+    /// Forget the modules of `dtb` that are not in `live_modules`, the
+    /// loader list now, and return how many. A synthetic module (see
+    /// [`Self::register_synthetic_module`]), such as the hypercall page, is
+    /// in no loader list and stays; a new boot clears it (see
+    /// [`Self::clear_synthetic_modules`]).
     pub fn retain_modules_for_dtb(&self, dtb: Dtb, live_modules: &[ModuleInfo]) -> usize {
         let live_bases = live_modules
             .iter()
@@ -1238,8 +1243,11 @@ impl SymbolStore {
             .modules
             .iter()
             .filter_map(|module| {
-                (module.dtb == dtb && !live_bases.contains(&module.base_address.0))
-                    .then_some(*module.key())
+                (module.dtb == dtb
+                    && !live_bases.contains(&module.base_address.0)
+                    // Only synthetic modules have extents.
+                    && !self.symbol_extents.contains_key(&module.guid))
+                .then_some(*module.key())
             })
             .collect();
         let removed = module_keys.len();
