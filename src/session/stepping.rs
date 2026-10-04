@@ -47,6 +47,9 @@ impl Session {
     /// on a watchpoint's hit another vCPU made while this one waited on them
     /// (see [`RunPast::Kept`]).
     pub fn step(&mut self) -> Result<ContinueOutcome> {
+        if self.partition().is_some() {
+            return self.partition_step();
+        }
         let (outcome, stepped) = self.step_once()?;
         if stepped == RunPast::Diverted {
             self.note_diverted();
@@ -143,6 +146,29 @@ impl Session {
             )));
         }
         Ok((ContinueOutcome::Step { rip }, stepped))
+    }
+
+    /// Step the thread on the VP selected in a partition view past its
+    /// instruction. The VP runs on whichever of the target's processors the
+    /// hypervisor gives it, which no single step of a vCPU follows, so the
+    /// target runs to every address the instruction can continue at, as the
+    /// partition's breakpoints on that thread with its stack no lower than
+    /// the instruction can leave it: an interrupt handler running the same
+    /// code deeper on the stack is resumed (see [`Self::run_to_any`]).
+    fn partition_step(&mut self) -> Result<ContinueOutcome> {
+        self.require_steppable_vcpu()?;
+        let (state, registers, bytes) = self.read_control()?;
+        let (successors, floor) = self.walk_continuation(&state, &registers, &bytes)?;
+        let frame = self.step_frame(StepStack::Any)?.map(|frame| StepFrame {
+            min_stack_pointer: floor,
+            ..frame
+        });
+        let sites: Vec<_> = successors
+            .into_iter()
+            .map(|address| (VirtAddr(address), frame.clone()))
+            .collect();
+        let cancel = Arc::clone(&self.target.interrupt);
+        self.run_to_any(&sites, None, &cancel)
     }
 
     /// Say that a step stopped where it was diverted (see [`Self::step_once`]).
@@ -461,6 +487,7 @@ impl Session {
         timeout: Option<Duration>,
         stop: impl Fn(u64, ControlFlow) -> bool,
     ) -> Result<ContinueOutcome> {
+        self.require_target_view("an instruction walk")?;
         self.require_steppable_vcpu()?;
         self.clear_selected_frame();
         let deadline = timeout.map(|timeout| Instant::now() + timeout);
@@ -697,6 +724,7 @@ impl Session {
                 "the instruction limit must be greater than zero".into(),
             ));
         }
+        self.require_target_view("a call trace")?;
         self.require_steppable_vcpu()?;
         let name = |target: &Target, state: &ControlState| {
             try_format_symbol_at(target, state.dtb, state.ip)
@@ -864,12 +892,7 @@ impl Session {
             {
                 continue;
             }
-            match self.breakpoints.add_temporary_code(
-                self.backend.as_mut(),
-                &self.target,
-                *address,
-                frame.clone(),
-            ) {
+            match self.add_temporary_code(*address, frame.clone()) {
                 Ok(id) => temporary.push(id),
                 Err(error) => {
                     self.remove_temporary(&temporary);
@@ -877,9 +900,12 @@ impl Session {
                 }
             }
         }
+        // A partition's thread is not the target's to read, which the run
+        // leaves the view to (its sites still take only that thread's hits).
         let followed = sites
             .iter()
-            .find_map(|(_, frame)| frame.as_ref().map(|frame| frame.thread.clone()));
+            .find_map(|(_, frame)| frame.as_ref().map(|frame| frame.thread.clone()))
+            .filter(|_| self.partition().is_none());
         let watch = followed
             .as_ref()
             .and_then(|thread| self.watch_followed(thread, &temporary));
@@ -981,7 +1007,9 @@ impl Session {
     /// sites armed throughout, without the field's offset or a free debug
     /// register.
     pub fn watch_followed(&mut self, thread: &ThreadScope, sites: &[u32]) -> Option<FollowWatch> {
-        if sites.is_empty() {
+        // A partition's thread is the guest's, whose state the target's
+        // kernel layout does not describe; its sites stay armed instead.
+        if sites.is_empty() || self.partition().is_some() {
             return None;
         }
         let offset = (self.target.guest().ok()?.ntoskrnl.types())
@@ -1068,9 +1096,8 @@ impl Session {
     /// manager, so a removal may be a no-op; its error is ignored.
     fn remove_temporary(&mut self, ids: &[u32]) {
         for &id in ids {
-            let _ = self
-                .breakpoints
-                .remove(self.backend.as_mut(), &self.target, id);
+            let (breakpoints, backend, target) = self.breakpoint_sites();
+            let _ = breakpoints.remove(backend, target, id);
         }
     }
 

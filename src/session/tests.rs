@@ -2197,13 +2197,7 @@ fn a_step_run_to_runs_past_a_deeper_call_of_the_same_code() {
         min_stack_pointer: Some(0x2000),
     };
     session
-        .breakpoints
-        .add_temporary_code(
-            session.backend.as_mut(),
-            &session.target,
-            VirtAddr(0x1000),
-            Some(frame),
-        )
+        .add_temporary_code(VirtAddr(0x1000), Some(frame))
         .unwrap();
     let hit_with_stack = |session: &mut Session, rsp| {
         let mut regs = session.backend.read_registers().unwrap();
@@ -2546,6 +2540,58 @@ fn a_resume_from_a_partition_view_runs_the_target() {
     session.resume().unwrap();
 
     assert_eq!(session.partition(), None);
+    assert_eq!(continues.load(Ordering::Relaxed), 1);
+}
+
+/// A step in a partition view runs the target to a debug register of the
+/// partition's on the stepping thread's next instruction. A hit there lower
+/// on the stack than the step can leave it, an interrupt handler running the
+/// same code, is resumed.
+#[test]
+fn a_partition_steps_site_takes_no_hit_deeper_on_the_stack() {
+    const SITE: u64 = 0xfffff805_86ac0f15;
+    let mut backend = MockBackend {
+        host_debug_registers: true,
+        ..MockBackend::default()
+    };
+    backend.set("dr6", 1);
+    backend.set("rip", SITE);
+    backend.set("rsp", 0x7ff8);
+    let (hardware, continues) = (
+        backend.hardware_writes.clone(),
+        Arc::clone(&backend.continues),
+    );
+    let mut session = session_with_mock(backend);
+    show_partition_4(&mut session);
+    let frame = StepFrame {
+        thread: ThreadScope {
+            ethread: VirtAddr(0xffff_8000_0000_1000),
+            tid: Some(4),
+        },
+        min_stack_pointer: Some(0x8000),
+    };
+
+    let id = session
+        .add_temporary_code(VirtAddr(SITE), Some(frame))
+        .unwrap();
+    let site = session.breakpoint(id).unwrap();
+    assert_eq!(
+        site.partition,
+        Some(PartitionFilter {
+            partition: 4,
+            vp: None,
+        })
+    );
+    assert!(site.temporary);
+    assert_eq!(*hardware.lock(), [(0, Some(SITE))]);
+    // The run that takes the hit leaves the view.
+    session.leave_partition();
+    let resolution = session.classify_stop_event(single_step_event()).unwrap();
+
+    assert!(
+        matches!(resolution, StopResolution::Resumed),
+        "{resolution:?}"
+    );
     assert_eq!(continues.load(Ordering::Relaxed), 1);
 }
 

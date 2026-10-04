@@ -617,6 +617,14 @@ pub fn resolve_watchpoint_stop(
         return Ok(WatchpointStopAction::Declined);
     }
     if let Some(filter) = breakpoint.partition {
+        // The stopped vCPU runs the guest's VP, so its stack is the VP's.
+        if breakpoint
+            .min_stack_pointer
+            .is_some_and(|min| sp.is_some_and(|sp| sp < min))
+        {
+            declined("the stack is not deep enough");
+            return Ok(WatchpointStopAction::Declined);
+        }
         let vp = match stopped_guest_vp(target, current_thread) {
             Ok(running) if !filter.matches(running) => {
                 declined(&format!("another partition or VP ({running:x?})"));

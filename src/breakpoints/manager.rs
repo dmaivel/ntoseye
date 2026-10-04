@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use super::BreakpointScope;
 use super::install::{BreakpointBackend, forget_site};
 use super::spec::CodeSite;
-use super::{Breakpoint, BreakpointConfig, BreakpointManager, StepFrame};
+use super::{Breakpoint, BreakpointConfig, BreakpointManager, PartitionFilter, StepFrame};
 #[cfg(test)]
 use super::{HardwareBreakpoint, install::BreakpointPatch};
 use crate::backend::MemoryOps;
@@ -121,27 +121,38 @@ impl BreakpointManager {
     }
 
     /// A one-shot breakpoint for a run to `address`; `frame` restricts it to
-    /// a step's execution.
+    /// a step's execution, and `partition` makes it a guest partition's (see
+    /// [`PartitionFilter`]), whose code only a debug register traps.
     pub fn add_temporary_code(
         &mut self,
         client: &mut dyn DebugBackend,
         debugger: &Target,
         address: VirtAddr,
         frame: Option<StepFrame>,
+        partition: Option<PartitionFilter>,
     ) -> Result<u32> {
         let config = BreakpointConfig {
-            // A user-space target is in the process the stop is in, whichever
-            // process inspection is attached to.
-            scope: (!Self::is_kernel_space(debugger.arch(), address))
-                .then(|| debugger.process_for_cr3(debugger.normalize_dtb(debugger.current_dtb())))
-                .flatten()
-                .map(|process| BreakpointScope::process(&process)),
+            scope: match partition {
+                // `debugger` is the target, whose processes are not the
+                // partition's: the step's thread alone says whose hit it is.
+                Some(_) => Some(BreakpointScope::Kernel),
+                // A user-space target is in the process the stop is in,
+                // whichever process inspection is attached to.
+                None => (!Self::is_kernel_space(debugger.arch(), address))
+                    .then(|| {
+                        debugger.process_for_cr3(debugger.normalize_dtb(debugger.current_dtb()))
+                    })
+                    .flatten()
+                    .map(|process| BreakpointScope::process(&process)),
+            },
             thread: frame.as_ref().map(|frame| frame.thread.clone()),
+            partition,
             ..BreakpointConfig::default()
         };
-        // Secure-kernel code is never patched: a run-to there (`p` over a
-        // call, `gu`) takes a debug-register slot for the run instead.
-        let (id, hardware) = if debugger.is_secure_address(address) {
+        // Secure-kernel code is never patched, and a partition's cannot be:
+        // a run-to there (`p` over a call, `gu`) takes a debug-register slot
+        // for the run instead.
+        let (id, hardware) = if partition.is_some() || debugger.is_secure_address(address) {
             let id = self.add_hardware_configured(
                 client,
                 debugger,

@@ -486,8 +486,8 @@ def test_a_guest_partition_reads_as_its_own_windows_read_only(halted: Debugger) 
 def test_a_guest_partitions_breakpoint_stops_in_its_view(halted: Debugger) -> None:
     """A hardware breakpoint set in a guest partition's view is the
     partition's: a run leaves the view, and the hit shows it again on the VP
-    that ran the code, its stack in the partition's NT; a software one is
-    refused there."""
+    that ran the code, its stack in the partition's NT, and a step from there
+    goes on in the same function; a software one is refused there."""
     if os.environ.get("NTOSEYE_TEST_BACKEND") != "gdb":
         pytest.skip("only a debug register the host programs traps in a guest partition")
     guest = select_windows_guest(halted)
@@ -506,6 +506,10 @@ def test_a_guest_partitions_breakpoint_stops_in_its_view(halted: Debugger) -> No
             assert stop.cpu.id in vps
             assert stop.rip == swap
             assert stop.cpu.backtrace(limit=1)[0].symbol == "nt!KiSwapContext"
+            step = halted.step()
+            assert isinstance(step, ntoseye.Stop.Step), step
+            assert halted.partition == guest.id
+            assert (step.symbol or "").startswith("nt!KiSwapContext+"), step.symbol
         finally:
             bp.delete()
     finally:

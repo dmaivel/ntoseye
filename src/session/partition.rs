@@ -9,6 +9,7 @@ use std::mem;
 
 use crate::breakpoints::{
     Breakpoint, BreakpointConfig, BreakpointHitDisposition, BreakpointManager, PartitionFilter,
+    StepFrame,
 };
 use crate::dbg_backend::{DebugBackend, StopEvent};
 use crate::error::{Error, Result};
@@ -145,6 +146,7 @@ impl Session {
         let mut target = self.target.partition_target(partition)?;
         // Handles minted for either guest name nothing in the other.
         target.share_generation(self.target.generation_counter());
+        target.share_interrupt(&self.target);
         target.invalidate_handles();
         Ok((target, ept_pointer))
     }
@@ -200,13 +202,13 @@ impl Session {
         self.partition_view.as_ref().map(|view| view.partition)
     }
 
-    /// Refuse `operation`, which runs the target, while a partition view is
-    /// shown: before anything a run prepares (traps, parked stops) is
-    /// touched, as that state is the target's.
+    /// Refuse `operation`, an instruction walk (`tc`, `pa`, `wt`), while a
+    /// partition view is shown: each step there is a run of the target to
+    /// the partition's breakpoints, too slow to walk with.
     pub fn require_target_view(&self, operation: &str) -> Result<()> {
         match self.partition() {
             Some(partition) => Err(Error::DebugInfo(format!(
-                "{operation} runs the target, and partition {partition:#x} is inspected read-only as the target halted; selecting the root partition (1) returns to the target"
+                "{operation} is not supported in partition {partition:#x}'s view, where each step runs the target to a breakpoint of the partition's; step with t, p or gu, run to an address with g <address>, or select the root partition (1) to return to the target"
             ))),
             None => Ok(()),
         }
@@ -235,12 +237,7 @@ impl Session {
         address: VirtAddr,
         mut config: BreakpointConfig,
     ) -> Result<BreakpointConfig> {
-        let (_, backend, _) = self.breakpoint_sites();
-        if !backend.hardware_breakpoints_trap_in_host() {
-            return Err(Error::Breakpoint(
-                "a guest partition's breakpoints need the gdb backend: only a debug register the host programs traps in a partition's code".into(),
-            ));
-        }
+        self.require_partition_traps()?;
         let vp = config.processor.take().map(u32::from);
         if let Some(vp) = vp
             && !self
@@ -259,6 +256,41 @@ impl Session {
         config.scope = Some(scope);
         config.partition = Some(PartitionFilter { partition, vp });
         Ok(config)
+    }
+
+    /// Refuse a guest partition's breakpoint, a step's among them, on a
+    /// backend whose debug registers the guest programs (KD): those trap in
+    /// the target's kernel, never in a partition's code.
+    fn require_partition_traps(&mut self) -> Result<()> {
+        let (_, backend, _) = self.breakpoint_sites();
+        if backend.hardware_breakpoints_trap_in_host() {
+            Ok(())
+        } else {
+            Err(Error::Breakpoint(
+                "a guest partition's breakpoints and steps need the gdb backend: only a debug register the host programs traps in a partition's code".into(),
+            ))
+        }
+    }
+
+    /// A one-shot breakpoint for a run to `address`, by the execution
+    /// `frame` names when given (see
+    /// [`BreakpointManager::add_temporary_code`]). In a partition view it is
+    /// the partition's, on its code: a step there runs the target to it, on
+    /// whichever VP the stepping thread is.
+    pub fn add_temporary_code(
+        &mut self,
+        address: VirtAddr,
+        frame: Option<StepFrame>,
+    ) -> Result<u32> {
+        let partition = self.partition().map(|partition| PartitionFilter {
+            partition,
+            vp: None,
+        });
+        if partition.is_some() {
+            self.require_partition_traps()?;
+        }
+        let (breakpoints, backend, target) = self.breakpoint_sites();
+        breakpoints.add_temporary_code(backend, target, address, frame, partition)
     }
 
     /// Surface the hit of `breakpoint`, partition `partition`'s, by its VP

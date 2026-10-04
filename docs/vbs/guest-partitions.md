@@ -31,8 +31,9 @@ inspecting partition 0x4: nt at 0xfffff80586250000, VPs p4.1 p4.2 p4.3 p4.4
 
 {command}`lm`, {command}`!process`, {command}`.process`, {command}`!peb`, {command}`!thread`, {command}`dt`, {command}`db`, {command}`u` and {command}`k` then read that guest. The target stays halted while the view is shown, and the guest is read-only:
 
-- Steps, register writes and memory writes are refused.
+- Register writes and memory writes are refused.
 - {command}`g` leaves the view and runs the target. A hit of one of the partition's breakpoints shows the view again (see [Breakpoints in a guest partition](#breakpoints-in-a-guest-partition)); any other stop shows the target.
+- {command}`t`, {command}`p`, {command}`gu` and {command}`g` `<address>` run the target too (see [Stepping in a guest partition](#stepping-in-a-guest-partition)).
 - {command}`bl` lists every breakpoint, the target's too.
 - `.partition 1`, the root partition's ID, returns to the target.
 
@@ -84,9 +85,40 @@ The partition's VPs run on the target's processors, and only a debug register tr
 - {command}`bp`, {command}`bu` and {command}`bm` are refused in the view: the gdb stub writes an `int3` through the target's page tables, and an `int3` it did not plant stops the guest, not the debugger.
 - The register traps any code at its address, so ntoseye resumes hits by the target's own VPs or another partition's, and stops only on the partition's. In the view, `/c <n>` limits the breakpoint to VP n, as the view numbers its processors.
 - `/p` and `/t` name the partition's processes and threads, and a condition reads its registers, memory and symbols, as a breakpoint in the target reads the target's. ntoseye checks a hit against them before it shows the view, in about 0.1 s, so a busy function with a false condition slows the guest.
-- Steps from a hit are refused, and so are the target's {command}`!hvbp` and {command}`!hvexit` in the view.
+- The target's {command}`!hvbp` and {command}`!hvexit` are refused in the view.
 
 In the SDK, `dbg.breakpoints.add(target, hardware=True)` and `dbg.breakpoints.watch(...)` set the partition's breakpoints while `dbg.select_partition(id)` shows it, and `bp.partition` names the partition. `dbg.run()` returns the hit with `dbg.partition` set to that partition.
+
+## Stepping in a guest partition
+
+In a partition's view, {command}`t`, {command}`p` and {command}`gu` step the thread on the selected VP, and {command}`g` `<address>` runs until any of the partition's VPs reaches the address. Each stop shows the view again:
+
+```text
+partition:p4.1> g nt!NtClose+0xa3
+VM running, waiting for stop (Ctrl+C to pause)...
+ BREAK  p4.1 dwm.exe (3832) at nt!NtClose+0xa3
+ └─ thread dwm.exe  state Running  ethread ffff810cc3a60080  pid 3832  tid 3944
+...
+ > fffff80586ac0fb3  e8 98 14 00 00     call 0xFFFFF80586AC2450 ; nt!ExpLookupHandleTableEntry
+
+partition:p4.1> p
+VM running, waiting for stop (Ctrl+C to pause)...
+ BREAK  p4.1 dwm.exe (3832) at nt!NtClose+0xa8
+ └─ thread dwm.exe  state Running  ethread ffff810cc3a60080  pid 3832  tid 3944
+...
+partition:p4.1> gu
+VM running, waiting for stop (Ctrl+C to pause)...
+ BREAK  p4.1 dwm.exe (3832) at nt!KiSystemServiceCopyEnd+0x25
+ └─ thread dwm.exe  state Running  ethread ffff810cc3a60080  pid 3832  tid 3944
+```
+
+The partition's VPs run on the target's processors, where the hypervisor moves them, so ntoseye cannot single-step one. A step runs the target instead, to debug registers of the partition's on every instruction that the current one can continue at, as for a breakpoint in the view:
+
+- The step follows the thread, not the VP, so it ends on whichever VP the thread runs on next. A hit by another thread, or by the same thread deeper on the stack than the step can take it (an interrupt handler that runs the same code), is resumed.
+- Each step takes about 0.25 s, so {command}`tc`, {command}`pc`, {command}`ta`, {command}`pa` and {command}`wt`, which step instruction by instruction, are refused in the view.
+- A conditional branch takes two of the four debug registers, so a step there fails while three breakpoints hold theirs.
+
+In the SDK, `dbg.step()`, `dbg.step_over()`, `dbg.step_out()` and `dbg.run_to(address)` do the same while the view is shown.
 
 ## Raw memory and code
 

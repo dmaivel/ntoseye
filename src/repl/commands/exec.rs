@@ -556,18 +556,25 @@ impl ReplState<'_> {
                                 continue;
                             }
 
-                            if breakpoint.hardware.is_some() {
+                            // A run-to's own site (`p` over a call, `gu`,
+                            // `g <address>`) is no cause to name, whether
+                            // patched or a debug register (the secure
+                            // kernel's and a guest partition's).
+                            if breakpoint.temporary {
+                                if !self.quiet_stops {
+                                    print_stop_separator();
+                                    print_break_context_at(self.ctx, None, None);
+                                }
+                            } else if breakpoint.hardware.is_some() {
                                 self.surface_hardware_breakpoint_hit(&breakpoint);
-                            } else if !(self.quiet_stops && breakpoint.temporary) {
+                            } else {
                                 print_stop_separator();
-                                let cause = (!breakpoint.temporary).then(|| {
-                                    format!(
-                                        "{} {}",
-                                        ui::muted("breakpoint"),
-                                        ui::bp_id(breakpoint.id)
-                                    )
-                                });
-                                print_break_context_at(self.ctx, None, cause);
+                                let cause = format!(
+                                    "{} {}",
+                                    ui::muted("breakpoint"),
+                                    ui::bp_id(breakpoint.id)
+                                );
+                                print_break_context_at(self.ctx, None, Some(cause));
                             }
                             break;
                         }
@@ -807,12 +814,7 @@ impl ReplState<'_> {
         }
 
         let followed = frame.as_ref().map(|frame| frame.thread.clone());
-        let temp_id = match self.ctx.breakpoints.add_temporary_code(
-            &mut *self.ctx.backend,
-            &self.ctx.target,
-            address,
-            frame,
-        ) {
+        let temp_id = match self.ctx.add_temporary_code(address, frame) {
             Ok(id) => id,
             Err(e) => {
                 error!(
@@ -848,10 +850,7 @@ impl ReplState<'_> {
 
         // Temporary sites are removed when the stop is consumed (a one-shot hit
         // clears itself); anything else left in place is a real problem.
-        if let Err(e) =
-            self.ctx
-                .breakpoints
-                .remove(&mut *self.ctx.backend, &self.ctx.target, temp_id)
+        if let Err(e) = self.ctx.remove_breakpoint(temp_id)
             && !matches!(e, Error::BPNotFound(_))
         {
             error!(

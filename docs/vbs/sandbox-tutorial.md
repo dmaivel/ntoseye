@@ -191,7 +191,7 @@ partition:p7.1> ba e1 nt!NtClose
 partition:p7.1> g
 ```
 
-Type a command in the Sandbox's Command Prompt, or move the mouse over its window, and the stop names the Sandbox process that closed a handle, such as `dwm.exe`, with its registers and its stack in the Sandbox's kernel. {command}`k`, {command}`r` and {command}`dt` read the Sandbox there. The target's own code at the same address does not stop: ntoseye resumes it. Only {command}`ba` works in the Sandbox, and steps are refused; [Breakpoints in a guest partition](guest-partitions.md#breakpoints-in-a-guest-partition) shows a whole stop and explains the limits. Clear the breakpoint with `bc *` before you go on.
+Type a command in the Sandbox's Command Prompt, or move the mouse over its window, and the stop names the Sandbox process that closed a handle, such as `dwm.exe`, with its registers and its stack in the Sandbox's kernel. {command}`k`, {command}`r` and {command}`dt` read the Sandbox there. The target's own code at the same address does not stop: ntoseye resumes it. From the stop, {command}`t`, {command}`p` and {command}`gu` step the Sandbox's thread. Only {command}`ba` sets breakpoints in the Sandbox; [Breakpoints in a guest partition](guest-partitions.md#breakpoints-in-a-guest-partition) shows a whole stop and explains the limits. Clear the breakpoint with `bc *` before you go on.
 
 ## Stop on a hypercall from the Sandbox
 
@@ -281,7 +281,7 @@ inspecting the target (the root partition)
 gdb:p01.02> q
 ```
 
-While the Sandbox is shown, the target stays halted: {command}`g` runs the target and leaves the Sandbox's view, and steps and writes are refused. `.partition 1` brings back the target, and {command}`q` detaches and lets the VM continue to run.
+While the Sandbox is shown, the target stays halted: {command}`g` runs the target and leaves the Sandbox's view, and writes are refused. `.partition 1` brings back the target, and {command}`q` detaches and lets the VM continue to run.
 
 ## From Python
 

@@ -337,10 +337,13 @@ impl Session {
     /// run hypervisor code, not the NT code the stop shows, and plant its
     /// temporary sites in the hypervisor's image. A vCPU that runs a guest
     /// partition's VP would run that guest, whose code NT's tables do not
-    /// map.
+    /// map. In a partition view the thread is the guest's VP, which a step
+    /// runs the target to the partition's breakpoints for.
     pub(super) fn require_steppable_vcpu(&mut self) -> Result<()> {
-        self.require_target_view("a step")?;
         self.require_live_register_context()?;
+        if self.partition().is_some() {
+            return Ok(());
+        }
         if self.vcpu_halted_in_hypervisor()? {
             return Err(Error::DebugInfo(format!(
                 "{} is halted in the Windows hypervisor: a step would run hypervisor code, not \

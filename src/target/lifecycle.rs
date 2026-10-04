@@ -222,6 +222,15 @@ impl Target {
         self.generation = counter;
     }
 
+    /// Take interrupt requests on `other`'s flag, the flag of the target this
+    /// one stands in for (a partition view's): a host raises that one (Ctrl+C
+    /// in the REPL), and work this target does, a run from the view among
+    /// it, must see it.
+    pub fn share_interrupt(&mut self, other: &Target) {
+        self.interrupt = Arc::clone(&other.interrupt);
+        self.interrupt_requests = Arc::clone(&other.interrupt_requests);
+    }
+
     /// Count a rebuild without one, so a host takes the handles it minted
     /// for stale: a partition view swaps another guest in under them.
     pub fn invalidate_handles(&self) {

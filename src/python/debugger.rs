@@ -101,12 +101,16 @@ impl Debugger {
     /// `types` and `threads` then read that guest, through its EPT, and the
     /// vCPUs are its VPs, with their VTL0 registers. The target stays
     /// halted, and the guest's memory and registers are read-only: writes
-    /// and steps raise `NtoseyeError`. `breakpoints.add(..., hardware=True)`
+    /// raise `NtoseyeError`. `breakpoints.add(..., hardware=True)`
     /// and `breakpoints.watch` set the partition's breakpoints, which stop
     /// only on its VPs (`processor=` names one) and need the gdb backend;
     /// software breakpoints raise. `run` leaves the view and runs the
     /// target, and a hit of the partition's breakpoint returns in its view,
-    /// on the VP that hit it. The root partition's ID (1) returns to the
+    /// on the VP that hit it. `step`, `step_over` and `step_out` step the
+    /// thread of the selected VP, and `run_to` runs until any of its VPs
+    /// reaches an address, each a run of the target to a breakpoint of the
+    /// partition's; `step(until=...)` and `trace_calls` raise. The root
+    /// partition's ID (1) returns to the
     /// target. Handles minted on either side of a switch go stale
     /// (`generation` advances). The target must be halted. This feature is
     /// experimental.
