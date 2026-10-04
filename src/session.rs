@@ -423,6 +423,9 @@ pub struct VpRegisters {
     pub source: String,
     /// Why the general-purpose registers are missing, when they are.
     pub missing: Option<String>,
+    /// The vCPU that runs the VP now, whose register file `registers` is;
+    /// `None` when they are an exit's or the hypervisor's record of them.
+    pub vcpu: Option<String>,
 }
 
 /// A backend execution context (vCPU) and the guest code it is currently

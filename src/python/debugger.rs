@@ -100,8 +100,10 @@ impl Debugger {
     /// `.partition` does: `memory`, `processes`, `modules`, `symbols`,
     /// `types` and `threads` then read that guest, through its EPT, and the
     /// vCPUs are its VPs, with their VTL0 registers. The target stays
-    /// halted, and the guest's memory and registers are read-only: writes
-    /// raise `NtoseyeError`. `breakpoints.add(..., hardware=True)`
+    /// halted. `memory.write` writes the guest's memory through its EPT, and
+    /// a register write goes to the target's vCPU that runs the selected VP at
+    /// the stop; a VP no vCPU runs has its registers in the hypervisor's
+    /// memory, and raises `NtoseyeError`. `breakpoints.add(..., hardware=True)`
     /// and `breakpoints.watch` set the partition's breakpoints, which stop
     /// only on its VPs (`processor=` names one) and need the gdb backend;
     /// software breakpoints raise. `run` leaves the view and runs the

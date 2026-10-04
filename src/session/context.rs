@@ -477,7 +477,12 @@ impl Session {
         {
             return Err(Error::DebugInfo("VTL1 registers are read-only".into()));
         }
+        // A partition view's VP is a vCPU's, which the write goes to first.
+        let before = self.partition().is_some().then(|| regs.clone());
         patch(&self.register_map, &mut regs)?;
+        if let Some(before) = before {
+            self.write_vp_registers(&before, &regs)?;
+        }
         self.backend.write_registers(&regs)?;
         let values = self.register_map.to_hashmap(&regs);
         // A live frame 0 selection is this register file; keep it, and the

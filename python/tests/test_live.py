@@ -455,10 +455,11 @@ def select_windows_guest(halted: Debugger) -> ntoseye.HypervisorPartition:
     pytest.skip("needs a guest partition running Windows, such as a Windows Sandbox")
 
 
-def test_a_guest_partition_reads_as_its_own_windows_read_only(halted: Debugger) -> None:
+def test_a_guest_partition_reads_as_its_own_windows(halted: Debugger) -> None:
     """`select_partition` shows a guest partition's Windows in place of the
     target: its own kernel and processes, its VPs as the vCPUs with stacks in
-    its NT, and nothing that writes; partition 1 brings the target back."""
+    its NT, and its memory written through its EPT; partition 1 brings the
+    target back."""
     root_nt = halted.symbols["nt!KeBugCheckEx"]
     guest = select_windows_guest(halted)
     try:
@@ -474,9 +475,15 @@ def test_a_guest_partition_reads_as_its_own_windows_read_only(halted: Debugger) 
         assert any(
             (frame.symbol or "").startswith("nt!") for cpu in cpus for frame in cpu.backtrace(limit=8)
         )
-        # The same byte back, so a write that got through would change nothing.
-        with pytest.raises(ntoseye.NtoseyeError):
-            halted.memory.write_u8(guest_nt, halted.memory.read_u8(guest_nt))
+        # Used only by a bugcheck, and restored before the guest runs again.
+        data = halted.symbols["nt!KiBugCheckData"]
+        original = halted.memory.read(data, 8)
+        try:
+            halted.memory.write(data, bytes(range(1, 9)))
+            assert halted.memory.read(data, 8) == bytes(range(1, 9))
+        finally:
+            halted.memory.write(data, original)
+        assert halted.memory.read(data, 8) == original
     finally:
         halted.select_partition(1)
     assert halted.partition is None

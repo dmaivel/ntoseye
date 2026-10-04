@@ -281,7 +281,7 @@ inspecting the target (the root partition)
 gdb:p01.02> q
 ```
 
-While the Sandbox is shown, the target stays halted: {command}`g` runs the target and leaves the Sandbox's view, and writes are refused. `.partition 1` brings back the target, and {command}`q` detaches and lets the VM continue to run.
+While the Sandbox is shown, the target stays halted, and {command}`g` runs the target and leaves the Sandbox's view. `.partition 1` brings back the target, and {command}`q` detaches and lets the VM continue to run.
 
 ## From Python
 

@@ -18,7 +18,7 @@ use crate::guest::ModuleInfo;
 use crate::kd::context::{REGISTER_BUFFER_SIZE, build_register_map};
 use crate::kd::context_arm64;
 use crate::memory::PAGE_SIZE;
-use crate::partition_backend::{PartitionBackend, PartitionVp};
+use crate::partition_backend::PartitionVp;
 use crate::target::SelectedFrame;
 use crate::types::{Arch, VirtAddr};
 use iced_x86::{Decoder, DecoderOptions};
@@ -2430,15 +2430,7 @@ fn exiting_from_a_partition_view_takes_the_targets_trap_out() {
         address: VirtAddr(0x1_4000),
         original: vec![0x48],
     });
-    let view = PartitionBackend::new(
-        session.register_map.clone(),
-        vec![PartitionVp {
-            id: "p4.1".to_string(),
-            registers: vec![0; REGISTER_BUFFER_SIZE],
-        }],
-    );
-    let partition_target = session_over_memory(0x1000, &[0; 0x100]).target;
-    session.show_partition(4, partition_target, Box::new(view), "p4.1".to_string());
+    show_partition_4(&mut session);
 
     session.cleanup_for_exit().unwrap();
 
@@ -2448,15 +2440,13 @@ fn exiting_from_a_partition_view_takes_the_targets_trap_out() {
 
 /// Show a view of partition 4, with one VP, over `session`'s target.
 fn show_partition_4(session: &mut Session) {
-    let view = PartitionBackend::new(
-        session.register_map.clone(),
-        vec![PartitionVp {
-            id: "p4.1".to_string(),
-            registers: vec![0; REGISTER_BUFFER_SIZE],
-        }],
-    );
     let partition_target = session_over_memory(0x1000, &[0; 0x100]).target;
-    session.show_partition(4, partition_target, Box::new(view), "p4.1".to_string());
+    let vps = vec![PartitionVp {
+        id: "p4.1".to_string(),
+        registers: vec![0; REGISTER_BUFFER_SIZE],
+        vcpu: None,
+    }];
+    session.show_partition(4, partition_target, vps, "p4.1".to_string());
 }
 
 /// Every breakpoint is the target's, also in a partition view: one set there
@@ -2541,6 +2531,51 @@ fn a_resume_from_a_partition_view_runs_the_target() {
 
     assert_eq!(session.partition(), None);
     assert_eq!(continues.load(Ordering::Relaxed), 1);
+}
+
+/// A register write to a VP in a partition view goes to the target's vCPU
+/// that runs it, and only the register written: the vCPU keeps those the
+/// view's copy lacks. A VP no vCPU runs is refused, its registers being the
+/// hypervisor's record of them.
+#[test]
+fn a_vps_register_write_goes_to_the_vcpu_that_runs_it() {
+    let mut backend = MockBackend::default().one_vcpu();
+    backend.set("rbx", 0x1111);
+    let mut session = session_with_mock(backend);
+    let file = |session: &Session, rax| {
+        let mut registers = vec![0; REGISTER_BUFFER_SIZE];
+        session
+            .register_map
+            .write_u64("rax", &mut registers, rax)
+            .unwrap();
+        registers
+    };
+    let vps = vec![
+        PartitionVp {
+            id: "p4.1".to_string(),
+            registers: file(&session, 1),
+            vcpu: Some("p01.01".to_string()),
+        },
+        PartitionVp {
+            id: "p4.2".to_string(),
+            registers: file(&session, 2),
+            vcpu: None,
+        },
+    ];
+    let partition_target = session_over_memory(0x1000, &[0; 0x100]).target;
+    session.show_partition(4, partition_target, vps, "p4.1".to_string());
+
+    session.write_register("rax", 0x42).unwrap();
+    let shown = session.read_registers().unwrap();
+    session.set_current_thread("p4.2").unwrap();
+    let refused = session.write_register("rax", 5);
+    session.leave_partition();
+    let vcpu = session.read_registers().unwrap();
+
+    let read = |registers: &[u8], name| session.register_map.read_u64(name, registers).unwrap();
+    assert_eq!(read(&shown, "rax"), 0x42);
+    assert!(refused.is_err());
+    assert_eq!((read(&vcpu, "rax"), read(&vcpu, "rbx")), (0x42, 0x1111));
 }
 
 /// A step in a partition view runs the target to a debug register of the

@@ -288,8 +288,7 @@ pub fn differences(first: &[Leaf], second: &[Leaf]) -> Vec<Difference> {
 
 /// The physical memory of a guest of the hypervisor, read through its EPT:
 /// each guest physical page is translated and read from host physical memory
-/// with `host`. Pages the EPT does not map are unreadable, and it is
-/// read-only.
+/// with `host`, and written there. Pages the EPT does not map can be neither.
 pub struct EptMemory<'a, B: MemoryOps<PhysAddr>> {
     host: &'a B,
     eptp: u64,
@@ -338,10 +337,25 @@ impl<B: MemoryOps<PhysAddr>> MemoryOps<PhysAddr> for EptMemory<'_, B> {
         Ok(())
     }
 
-    fn write_bytes(&self, _addr: PhysAddr, _buf: &[u8]) -> Result<()> {
-        Err(Error::Hypervisor(
-            "a guest partition's memory is read-only".to_string(),
-        ))
+    /// Write `buf` at guest physical `addr` through the host mapping, as the
+    /// target's own memory is written, whatever the EPT lets the guest do
+    /// with the page. Every page is translated first, so a write that
+    /// reaches one the EPT does not map writes nothing.
+    fn write_bytes(&self, addr: PhysAddr, buf: &[u8]) -> Result<()> {
+        let mut chunks = Vec::new();
+        let mut done = 0;
+        while done < buf.len() {
+            let gpa = addr.checked_add(done as u64).ok_or_else(|| {
+                Error::Hypervisor(format!("guest physical range at {addr:#x} wraps"))
+            })?;
+            let chunk = ((0x1000 - (gpa & 0xfff)) as usize).min(buf.len() - done);
+            chunks.push((self.host_address(gpa)?, done..done + chunk));
+            done += chunk;
+        }
+        for (host, range) in chunks {
+            self.host.write_bytes(host, &buf[range])?;
+        }
+        Ok(())
     }
 }
 
@@ -525,8 +539,14 @@ mod tests {
     }
 
     /// Host physical memory for [`EptMemory`]: page tables from `tables`,
-    /// and every other byte its own address's low byte.
-    struct Host(HashMap<u64, u64>);
+    /// and every other byte its own address's low byte; writes are recorded.
+    struct Host(HashMap<u64, u64>, std::cell::RefCell<Vec<(u64, Vec<u8>)>>);
+
+    impl Host {
+        fn new(tables: HashMap<u64, u64>) -> Self {
+            Self(tables, std::cell::RefCell::default())
+        }
+    }
 
     impl MemoryOps<PhysAddr> for Host {
         fn read_bytes(&self, addr: PhysAddr, buf: &mut [u8]) -> Result<()> {
@@ -540,8 +560,9 @@ mod tests {
             Ok(())
         }
 
-        fn write_bytes(&self, _addr: PhysAddr, _buf: &[u8]) -> Result<()> {
-            unreachable!()
+        fn write_bytes(&self, addr: PhysAddr, buf: &[u8]) -> Result<()> {
+            self.1.borrow_mut().push((addr, buf.to_vec()));
+            Ok(())
         }
     }
 
@@ -550,13 +571,33 @@ mod tests {
         let mut memory = tables(RWX, RWX);
         // GPA 0x20_2000 goes to host 0x9_9000, not after 0x20_1000's 0x7_7000.
         memory.insert(PT + 16, 0x9_9000 | RWX | WB);
-        let host = Host(memory);
+        let host = Host::new(memory);
         let guest = EptMemory::new(&host, eptp(PML4), false);
         let mut buf = [0u8; 4];
         guest.read_bytes(0x20_1ffe, &mut buf).unwrap();
         assert_eq!(buf, [0xfe, 0xff, 0x00, 0x01]);
         assert_eq!(guest.host_address(0x20_2010).unwrap(), 0x9_9010);
         assert!(guest.read_bytes(0x20_3000, &mut buf).is_err());
+    }
+
+    /// A write lands in host memory where the EPT puts each page it spans,
+    /// whatever the EPT lets the guest do there; one that reaches a page the
+    /// EPT does not map writes nothing.
+    #[test]
+    fn guest_memory_writes_land_where_the_ept_puts_each_page() {
+        // The guest may not write GPA 0x20_1000.
+        let mut memory = tables(RWX, READ | EXECUTE);
+        memory.insert(PT + 16, 0x9_9000 | RWX | WB);
+        let host = Host::new(memory);
+        let guest = EptMemory::new(&host, eptp(PML4), false);
+
+        guest.write_bytes(0x20_1ffe, &[1, 2, 3, 4]).unwrap();
+        assert_eq!(
+            *host.1.borrow(),
+            [(0x7_7ffe, vec![1, 2]), (0x9_9000, vec![3, 4])]
+        );
+        assert!(guest.write_bytes(0x20_2ffe, &[5, 6, 7]).is_err());
+        assert_eq!(host.1.borrow().len(), 2);
     }
 
     #[test]

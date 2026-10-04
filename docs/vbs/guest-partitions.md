@@ -29,9 +29,10 @@ inspecting partition 0x4: nt at 0xfffff80586250000, VPs p4.1 p4.2 p4.3 p4.4
 - Its NT kernel is found from the page-table root of a VP in kernel mode, and its symbols are loaded.
 - Its VPs are the threads. {command}`~` lists them as `p<partition>.<VP index + 1>`, `~Ns` selects VP N, and each has its VTL0 registers, as `!hvr <partition> <vp> 0` shows them. A VP that runs in VTL1 when the target halts has VTL0's RIP, RSP, flags, control and segment registers, without its general-purpose registers, and `.partition` says so. Frames in the partition's hypercall page read `hvcall!Hypercall`, as in the target's.
 
-{command}`lm`, {command}`!process`, {command}`.process`, {command}`!peb`, {command}`!thread`, {command}`dt`, {command}`db`, {command}`u` and {command}`k` then read that guest. The target stays halted while the view is shown, and the guest is read-only:
+{command}`lm`, {command}`!process`, {command}`.process`, {command}`!peb`, {command}`!thread`, {command}`dt`, {command}`db`, {command}`u` and {command}`k` then read that guest. The target stays halted while the view is shown:
 
-- Register writes and memory writes are refused.
+- Memory writes, such as {command}`eb` and {command}`ed`, go to the guest's memory through its EPT, whatever the EPT lets the guest itself do with the page.
+- A register write, such as `r rax=1`, goes to the target's vCPU that runs the VP at the stop, as a VP that hit a breakpoint is run. A VP that no vCPU runs has its registers in the hypervisor's memory, and a write to it is refused.
 - {command}`g` leaves the view and runs the target. A hit of one of the partition's breakpoints shows the view again (see [Breakpoints in a guest partition](#breakpoints-in-a-guest-partition)); any other stop shows the target.
 - {command}`t`, {command}`p`, {command}`gu` and {command}`g` `<address>` run the target too (see [Stepping in a guest partition](#stepping-in-a-guest-partition)).
 - {command}`bl` lists every breakpoint, the target's too.

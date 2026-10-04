@@ -5,13 +5,14 @@
 //! resume leaves the view, and a hit of one of the partition's breakpoints
 //! shows it again.
 
+use std::collections::HashMap;
 use std::mem;
 
 use crate::breakpoints::{
     Breakpoint, BreakpointConfig, BreakpointHitDisposition, BreakpointManager, PartitionFilter,
     StepFrame,
 };
-use crate::dbg_backend::{DebugBackend, StopEvent};
+use crate::dbg_backend::{DebugBackend, DebugCapability, StopEvent};
 use crate::error::{Error, Result};
 use crate::guest::HvPartition;
 use crate::partition_backend::{PartitionBackend, PartitionVp};
@@ -34,6 +35,10 @@ pub struct PartitionView {
     /// The partition's VTL0 EPT pointer, which keys its target when the
     /// view is left (see [`KeptPartition`]); `None` keeps none.
     ept_pointer: Option<u64>,
+    /// The target's vCPU that runs each VP at the stop, by the VP's thread
+    /// ID: a register write to the VP goes to it (see
+    /// [`Session::write_vp_registers`]).
+    vcpus: HashMap<String, String>,
 }
 
 /// A guest partition's target, kept from its last view for the next, and
@@ -97,14 +102,27 @@ impl Session {
                     .register_map
                     .write_u64(name.as_str(), &mut registers, *value);
             }
-            vps.push(PartitionVp { id, registers });
+            // A VP a vCPU runs has that vCPU's whole register file, the
+            // vector registers the map of values leaves out among it.
+            if let Some(vcpu) = &found.vcpu {
+                let file = self
+                    .backend
+                    .set_current_thread(vcpu)
+                    .and_then(|()| self.backend.read_registers());
+                self.backend.set_current_thread(&self.current_thread)?;
+                registers = file?;
+            }
+            vps.push(PartitionVp {
+                id,
+                registers,
+                vcpu: found.vcpu,
+            });
         }
         let first = vps
             .first()
             .map(|vp| vp.id.clone())
             .ok_or_else(|| Error::Hypervisor(format!("partition {partition:#x} has no VPs")))?;
-        let backend = Box::new(PartitionBackend::new(self.register_map.clone(), vps));
-        self.show_partition(partition, target, backend, first);
+        self.show_partition(partition, target, vps, first);
         if let Some(view) = &mut self.partition_view {
             view.ept_pointer = ept_pointer;
         }
@@ -162,21 +180,27 @@ impl Session {
         });
     }
 
-    /// Swap `target` and `backend`, partition `partition`'s, in for the
-    /// target's, and select `thread`.
+    /// Swap `target`, partition `partition`'s, and a backend over its `vps`
+    /// in for the target's, and select `thread`.
     pub fn show_partition(
         &mut self,
         partition: u64,
         target: Target,
-        backend: Box<dyn DebugBackend>,
+        vps: Vec<PartitionVp>,
         thread: String,
     ) {
+        let vcpus = vps
+            .iter()
+            .filter_map(|vp| Some((vp.id.clone(), vp.vcpu.clone()?)))
+            .collect();
+        let backend = Box::new(PartitionBackend::new(self.register_map.clone(), vps));
         self.partition_view = Some(PartitionView {
             partition,
             target: mem::replace(&mut self.target, target),
             backend: mem::replace(&mut self.backend, backend),
             thread: mem::replace(&mut self.current_thread, thread),
             ept_pointer: None,
+            vcpus,
         });
         self.refresh_context_for_current_thread();
     }
@@ -224,6 +248,55 @@ impl Session {
             Some(view) => (&mut self.breakpoints, view.backend.as_mut(), &view.target),
             None => (&mut self.breakpoints, self.backend.as_mut(), &self.target),
         }
+    }
+
+    /// Write `after`, the register file of the VP selected in a partition
+    /// view as patched from `before`, to the target's vCPU that runs the VP
+    /// at the stop, whose registers the VP's are: only the registers the two
+    /// differ in, so the vCPU keeps its own of any the view did not read. No
+    /// vCPU runs a VP whose registers are the hypervisor's record of them,
+    /// and that is refused. Nothing to do outside a view.
+    pub(super) fn write_vp_registers(&mut self, before: &[u8], after: &[u8]) -> Result<()> {
+        let Some(view) = &mut self.partition_view else {
+            return Ok(());
+        };
+        let vcpu = view.vcpus.get(&self.current_thread).cloned().ok_or_else(|| {
+            Error::DebugInfo(format!(
+                "no vCPU runs {} at the stop, so its registers are the hypervisor's record of them, which is not written",
+                self.current_thread
+            ))
+        })?;
+        let host = view.backend.as_mut();
+        if !host
+            .capabilities()
+            .iter()
+            .any(|entry| entry.capability == DebugCapability::WriteRegisters && entry.supported)
+        {
+            return Err(Error::RegisterWriteUnsupported);
+        }
+        let register_map = &self.register_map;
+        host.set_current_thread(&vcpu)?;
+        let written = host.read_registers().and_then(|mut live| {
+            for register in register_map.registers() {
+                let range = register.offset..register.offset + register.size;
+                if let (Some(old), Some(new)) =
+                    (before.get(range.clone()), after.get(range.clone()))
+                    && old != new
+                {
+                    live.get_mut(range)
+                        .ok_or_else(|| {
+                            Error::DebugInfo(format!(
+                                "{vcpu}'s register file has no {}",
+                                register.name
+                            ))
+                        })?
+                        .copy_from_slice(new);
+                }
+            }
+            host.write_registers(&live)
+        });
+        host.set_current_thread(&view.thread)?;
+        written
     }
 
     /// `config` for a debug-register breakpoint at `address` set in the view

@@ -1,8 +1,9 @@
 //! The backend of a view of a guest partition of the Windows hypervisor (a
 //! Windows Sandbox, a Hyper-V VM) that runs inside the target (`.partition`):
 //! its virtual processors are the threads, with the registers they had when
-//! the target halted, and nothing runs or changes through it. The target
-//! itself is controlled by the backend the view replaced.
+//! the target halted, and nothing runs through it. The target itself is
+//! controlled by the backend the view replaced, which a register write to a
+//! VP goes to first (see [`crate::session::Session::patch_registers`]).
 
 use std::time::Duration;
 
@@ -12,10 +13,14 @@ use crate::gdb::RegisterMap;
 
 /// One VP of the partition: its thread ID (`p<partition>.<VP index + 1>`,
 /// so its processor number is its VP index, as the guest numbers its
-/// processors) and its register file in `register_map`'s layout.
+/// processors), its register file in `register_map`'s layout, and the
+/// target's vCPU that runs it at the stop, whose registers those are.
 pub struct PartitionVp {
     pub id: String,
     pub registers: Vec<u8>,
+    /// `None` when no vCPU runs it: its registers are then the hypervisor's
+    /// record of them, which is not written.
+    pub vcpu: Option<String>,
 }
 
 pub struct PartitionBackend {
@@ -36,7 +41,7 @@ impl PartitionBackend {
     /// The refusal of `operation`, which a partition view does not support.
     pub fn read_only(operation: &str) -> Error {
         Error::DebugInfo(format!(
-            "a partition view does not support {operation}: it shows the partition read-only as the target halted; selecting the root partition (1) returns to the target"
+            "a partition view does not support {operation}; selecting the root partition (1) returns to the target"
         ))
     }
 }
@@ -54,6 +59,7 @@ impl DebugBackend for PartitionBackend {
         let mut capabilities = vec![
             BackendCapability::supported(DebugCapability::MemoryIntrospection),
             BackendCapability::supported(DebugCapability::ReadRegisters),
+            BackendCapability::supported(DebugCapability::WriteRegisters),
             BackendCapability::supported(DebugCapability::ThreadList),
             BackendCapability::supported(DebugCapability::ThreadSelection),
         ];
@@ -62,7 +68,6 @@ impl DebugBackend for PartitionBackend {
                 DebugCapability::ExecutionControl,
                 DebugCapability::InterruptTarget,
                 DebugCapability::SingleStep,
-                DebugCapability::WriteRegisters,
                 DebugCapability::KernelBreakpoints,
                 DebugCapability::UserModeBreakpoints,
                 DebugCapability::Watchpoints,
@@ -77,8 +82,18 @@ impl DebugBackend for PartitionBackend {
         Ok(self.vps[self.selected].registers.clone())
     }
 
-    fn write_registers(&mut self, _data: &[u8]) -> Result<()> {
-        Err(Self::read_only("register writes"))
+    /// The view's copy of the selected VP's registers, which the session
+    /// writes after the vCPU that runs the VP.
+    fn write_registers(&mut self, data: &[u8]) -> Result<()> {
+        let vp = &mut self.vps[self.selected];
+        if vp.vcpu.is_none() {
+            return Err(Error::DebugInfo(format!(
+                "no vCPU runs {} at the stop, so its registers are the hypervisor's record of them, which is not written",
+                vp.id
+            )));
+        }
+        vp.registers = data.to_vec();
+        Ok(())
     }
 
     fn set_breakpoint(&mut self, _addr: u64) -> Result<()> {

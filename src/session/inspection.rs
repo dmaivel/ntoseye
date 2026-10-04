@@ -821,6 +821,7 @@ impl Session {
                     "the general-purpose registers are shared by the VP's VTLs, and are VTL{}'s, the one it runs in",
                     selected.vtl
                 )),
+                vcpu: None,
             });
         }
         let root = owner.parent.is_none();
@@ -839,6 +840,7 @@ impl Session {
                 "its register block; it has no eVMCS state, so it has not run".to_string()
             },
             missing,
+            vcpu: None,
         })
     }
 
@@ -899,6 +901,7 @@ impl Session {
                     registers: caller.registers,
                     source: format!("the exit {thread} handles for it in the hypervisor"),
                     missing,
+                    vcpu: None,
                 }));
             }
             // A vCPU outside the hypervisor runs the guest VP its processor
@@ -914,6 +917,7 @@ impl Session {
                     registers: self.register_map.to_hashmap(&registers),
                     source: format!("{thread}, which runs it"),
                     missing: None,
+                    vcpu: Some(thread),
                 }));
             }
         }
