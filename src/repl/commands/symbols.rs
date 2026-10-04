@@ -5,6 +5,7 @@ use tabled::builder::Builder;
 
 use owo_colors::OwoColorize;
 
+use crate::breakpoints::BreakpointManager;
 use crate::error::Result;
 use crate::expr::{Expr, ExprValue};
 use crate::guest::ModuleInfo;
@@ -158,16 +159,16 @@ repl_command! {
 repl_command! {
     cmd_lm;
     names: ["lm"],
-    usage: "lm [m <pattern>] [v] [u|k] [t]",
+    usage: "lm [m <pattern>|a <address>] [v] [u|k] [t]",
     summary: "List loaded modules.",
-    details: "`m` applies a module-name glob, and `v m` prints verbose symbol information. `u` selects user modules, `k` selects kernel modules, and `t` adds timestamps.",
+    details: "`m` applies a module-name glob, and `v m` prints verbose symbol information. `a <address>` shows only the module that contains the address, a kernel module for a kernel address. `u` selects user modules, `k` selects kernel modules, and `t` adds timestamps.",
     completion: [None, Symbol, None, None],
 }
 
 repl_command! {
     cmd_lmv;
     names: ["lmv"],
-    usage: "lmv [m <pattern>|<name>] [u|k] [t]",
+    usage: "lmv [m <pattern>|a <address>|<name>] [u|k] [t]",
     summary: "Show the detailed symbol status and PDB identity of each module.",
     details: "This command is the same as `lm v` and uses the same filters, for example `lmv m nt`.",
 }
@@ -804,6 +805,7 @@ impl ReplState<'_> {
         let mut kernel = false;
         let mut timestamp = false;
         let mut glob_filter = false;
+        let mut containing = None;
         let mut index = 0;
         while index < invocation.argv.len() {
             let arg = invocation.arg(index).unwrap_or_default();
@@ -818,10 +820,28 @@ impl ReplState<'_> {
                     index += 1;
                     pattern = invocation.arg(index);
                 }
+                "a" => {
+                    index += 1;
+                    let Some(text) = invocation.arg(index) else {
+                        outln!("{}\n", command_help(invocation.name));
+                        return Ok(());
+                    };
+                    let Some(address) = self.eval_or_report(text) else {
+                        return Ok(());
+                    };
+                    containing = Some(address);
+                }
                 _ if pattern.is_none() => pattern = Some(arg),
                 _ => {}
             }
             index += 1;
+        }
+        // An address names its own list: a kernel address is in a kernel
+        // module even while a process is selected, as in WinDbg.
+        if let Some(address) = containing
+            && !user
+        {
+            kernel |= BreakpointManager::is_kernel_space(self.ctx.target.arch(), address);
         }
         let dtb = if kernel {
             self.ctx.target.kernel_dtb()
@@ -842,26 +862,27 @@ impl ReplState<'_> {
         match modules {
             Ok(modules) => {
                 let matches = |module: &ModuleInfo| {
-                    pattern.is_none_or(|pattern| {
-                        if glob_filter {
-                            glob_matches(pattern, &module.short_name, true)
-                                || glob_matches(pattern, &module.name, true)
-                                || module
-                                    .name
-                                    .rsplit(['\\', '/'])
-                                    .next()
-                                    .is_some_and(|name| glob_matches(pattern, name, true))
-                        } else {
-                            module
-                                .short_name
-                                .to_ascii_lowercase()
-                                .contains(&pattern.to_ascii_lowercase())
-                                || module
-                                    .name
+                    containing.is_none_or(|address| module.contains_address(address))
+                        && pattern.is_none_or(|pattern| {
+                            if glob_filter {
+                                glob_matches(pattern, &module.short_name, true)
+                                    || glob_matches(pattern, &module.name, true)
+                                    || module
+                                        .name
+                                        .rsplit(['\\', '/'])
+                                        .next()
+                                        .is_some_and(|name| glob_matches(pattern, name, true))
+                            } else {
+                                module
+                                    .short_name
                                     .to_ascii_lowercase()
                                     .contains(&pattern.to_ascii_lowercase())
-                        }
-                    })
+                                    || module
+                                        .name
+                                        .to_ascii_lowercase()
+                                        .contains(&pattern.to_ascii_lowercase())
+                            }
+                        })
                 };
                 if verbose {
                     let mut shown = 0;

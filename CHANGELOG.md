@@ -13,6 +13,12 @@ Keeping this file:
 - To release, rename "## Unreleased" to "## vX.Y.Z (YYYY-MM-DD)", the version in Cargo.toml. The release workflow refuses a tag whose version has no section here, or an empty one; dist publishes the section as the release notes, under the tag as the release title.
 -->
 
+## Unreleased
+
+### Added
+
+- `lm a <address>` shows only the module that contains an address, and finds a kernel module for a kernel address even while a process is selected, as in WinDbg.
+
 ## v0.45.0 (2026-10-03)
 
 ntoseye can now debug the Windows hypervisor itself on Intel hosts. It can walk hypervisor partitions and virtual processors, inspect and disassemble guest memory, including WSL2, decode hypercalls and break on them based on the caller, and unwind hypervisor stacks. Kernel module unloads can now stop the debugger too, just like module loads.
