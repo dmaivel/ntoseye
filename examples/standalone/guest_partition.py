@@ -3,8 +3,9 @@
 
 Each guest partition, such as a Windows Sandbox or a Hyper-V VM, runs a kernel
 of its own. `dbg.select_partition(id)` inspects a Windows guest in place of the
-target, read-only, until `select_partition(1)` returns to the target; handles
-minted on one side of a switch go stale on the other. A partition without a
+target, until `select_partition(1)` returns to the target; handles minted on
+one side of a switch go stale on the other. This script only reads the guests
+(`guest_break.py` breaks in one and steps it). A partition without a
 Windows kernel, such as WSL2's, is refused, and the script prints why. The
 host trims the memory of an idle guest, which then reads as not mapped, so use
 the process you want to read just before you run the script. Needs the `gdb`
