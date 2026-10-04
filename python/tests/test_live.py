@@ -498,6 +498,7 @@ def test_a_guest_partitions_breakpoint_stops_in_its_view(halted: Debugger) -> No
             halted.breakpoints.add(swap)
         bp = halted.breakpoints.add(swap, hardware=True)
         assert bp.partition is not None and bp.partition.partition == guest.id
+        deleted = False
         try:
             stop = halted.run(timeout=30.0)
             assert stop is not None and bp in stop.breakpoints, stop
@@ -506,12 +507,17 @@ def test_a_guest_partitions_breakpoint_stops_in_its_view(halted: Debugger) -> No
             assert stop.cpu.id in vps
             assert stop.rip == swap
             assert stop.cpu.backtrace(limit=1)[0].symbol == "nt!KiSwapContext"
+            # Every context switch runs it: left set, it stops the step on
+            # another VP's hit before the step's own site.
+            bp.delete()
+            deleted = True
             step = halted.step()
             assert isinstance(step, ntoseye.Stop.Step), step
             assert halted.partition == guest.id
             assert (step.symbol or "").startswith("nt!KiSwapContext+"), step.symbol
         finally:
-            bp.delete()
+            if not deleted:
+                bp.delete()
     finally:
         halted.select_partition(1)
     assert halted.partition is None

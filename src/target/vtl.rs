@@ -1292,13 +1292,37 @@ impl Target {
             processors,
             known,
         } = self.locate_hypervisor()?;
-        self.walk_partitions(guest, memory, &image, &processors, &known)
+        let root = memory.dtb();
+        let partitions = self.walk_partitions(guest, memory, &image, &processors, &known)?;
+        guest.keep_processor_vps(
+            root,
+            image.base_address.0,
+            hypervisor::ProcessorVps::new(&partitions),
+        );
+        Ok(partitions)
     }
 
     /// [`hypervisor::guest_vp_label`] for processor `number`, walking the
     /// partitions; `None` when they cannot be walked.
     pub fn guest_vp_label(&self, number: u16) -> Option<String> {
         hypervisor::guest_vp_label(&self.hypervisor_partitions().ok()?, number)
+    }
+
+    /// The guest partition's VP, as its partition's ID and its index, that
+    /// processor `number` runs, or `None` when it runs a root VP: what its
+    /// processor block names current ([`hypervisor::processor_guest_vp`]).
+    /// Read off the block with the last walk's VPs, a few reads, and walked
+    /// again when they do not tell (see [`hypervisor::ProcessorVps`]).
+    pub fn processor_running_vp(&self, number: u16) -> Result<Option<(u64, u32)>> {
+        let guest = self.guest()?;
+        if let Some(vp) = guest.known_processor_vp(u32::from(number), |root| {
+            HypervisorMemory(self.address_space(root))
+        }) {
+            return Ok((!vp.root).then_some((vp.partition, vp.index)));
+        }
+        let partitions = self.hypervisor_partitions()?;
+        Ok(hypervisor::processor_guest_vp(&partitions, number)
+            .map(|(partition, vp)| (partition, vp.index)))
     }
 
     /// The guest partition's virtual processor that processor `number`

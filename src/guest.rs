@@ -213,6 +213,11 @@ pub struct Guest {
     /// last partition walk: a hypercall breakpoint's hit names its caller by
     /// the eVMCS loaded on its processor without walking again.
     vp_slots: Mutex<HashMap<u64, hypervisor::VpSlot>>,
+    /// The processor blocks and VPs of the last partition walk, with the
+    /// hypervisor's root and image base it read them through: a partition
+    /// breakpoint's hit names the VP its processor runs without walking
+    /// again (see [`Self::known_processor_vp`]).
+    processor_vps: Mutex<Option<(Dtb, u64, hypervisor::ProcessorVps)>>,
     /// Where VPs keep their saved registers, by hypervisor image base, once
     /// calibrated. A calibration that failed is not kept: a later halt may
     /// have the mapped VPs it needs.
@@ -293,6 +298,7 @@ impl Guest {
             partition_layouts: Mutex::new(HashMap::new()),
             hypervisor_symbols: Mutex::new(HashMap::new()),
             vp_slots: Mutex::new(HashMap::new()),
+            processor_vps: Mutex::new(None),
             vp_register_layouts: Mutex::new(HashMap::new()),
         }
     }

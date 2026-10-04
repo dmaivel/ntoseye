@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use super::EvmcsState;
 use super::hv_layout::{PartitionLayout, Value};
 use crate::error::{Error, Result};
+use crate::types::Dtb;
 
 /// Children followed on one list before it counts as corrupt.
 const MAX_CHILDREN: usize = 4096;
@@ -569,7 +570,108 @@ pub fn own_loaded(loaded: &[(EvmcsState, VpSlot)]) -> Option<(EvmcsState, VpSlot
     }
 }
 
+/// A VP a partition walk found, as [`ProcessorVps`] keeps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KnownVp {
+    /// Its partition's structure, whose ID is read again to tell that the
+    /// partition still stands (see [`ProcessorVps::current`]).
+    pub partition_address: u64,
+    pub partition: u64,
+    /// The partition is the root partition.
+    pub root: bool,
+    pub index: u32,
+}
+
+/// The processor blocks and VPs a partition walk found, to name the VP a
+/// processor runs from its block alone: a walk reads every partition and
+/// VP, which is most of what a hit of a partition's breakpoint costs.
+#[derive(Debug, Clone, Default)]
+pub struct ProcessorVps {
+    /// Each processor's block, by processor number.
+    blocks: HashMap<u32, u64>,
+    /// Every VP, by its address.
+    vps: HashMap<u64, KnownVp>,
+}
+
+impl ProcessorVps {
+    pub fn new(partitions: &[HvPartition]) -> Self {
+        let mut known = Self::default();
+        for partition in partitions {
+            for vp in &partition.virtual_processors {
+                known.vps.insert(
+                    vp.address,
+                    KnownVp {
+                        partition_address: partition.address,
+                        partition: partition.id,
+                        root: partition.parent.is_none(),
+                        index: vp.index,
+                    },
+                );
+                for processor in &vp.processors {
+                    if let Some(number) = processor.number {
+                        known.blocks.insert(number, processor.block);
+                    }
+                }
+            }
+        }
+        known
+    }
+
+    /// The VP processor `number` runs now, as its block names it current
+    /// (see [`attach_processors`]), when the walk found that VP and its
+    /// partition still has the ID the walk read: a partition's memory is
+    /// freed with it and can hold another's. `None` when only a new walk
+    /// tells.
+    pub fn current(
+        &self,
+        layout: &PartitionLayout,
+        memory: &impl HvMemory,
+        number: u32,
+    ) -> Option<KnownVp> {
+        let block = *self.blocks.get(&number)?;
+        let vp = layout
+            .current_vp
+            .iter()
+            .filter_map(|value| eval(value, block, memory))
+            .find_map(|address| self.vps.get(&address))?;
+        (memory.u64_at(field(vp.partition_address, layout.id))? == vp.partition).then_some(*vp)
+    }
+}
+
 impl super::Guest {
+    /// Keep the processor blocks and VPs of a walk of the partitions of the
+    /// hypervisor image at `base`, read through its root `root` (see
+    /// [`Self::known_processor_vp`]).
+    pub fn keep_processor_vps(&self, root: Dtb, base: u64, vps: ProcessorVps) {
+        *self
+            .processor_vps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((root, base, vps));
+    }
+
+    /// [`ProcessorVps::current`] for processor `number` with the last
+    /// walk's, read through `memory` of the hypervisor's root; `None` when
+    /// no walk is kept or it does not tell.
+    pub fn known_processor_vp<M: HvMemory>(
+        &self,
+        number: u32,
+        memory: impl FnOnce(Dtb) -> M,
+    ) -> Option<KnownVp> {
+        let kept = self
+            .processor_vps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (root, base, vps) = kept.as_ref()?;
+        let layout = self
+            .partition_layouts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(base)?
+            .clone()
+            .ok()?;
+        vps.current(&layout, &memory(*root), number)
+    }
+
     /// The partition layout of the hypervisor image at `base`, derived by
     /// `derive` the first time and remembered for the boot, as a failure is.
     pub fn partition_layout(
@@ -763,6 +865,35 @@ mod tests {
         let found = partitions(&layout(), &Ram(ram), &[GS], &HashSet::new()).unwrap();
         assert_eq!(found[0].id, 1);
         assert_eq!(found.len(), 2);
+    }
+
+    /// What a processor runs is read off its block with the VPs a walk
+    /// found, root VPs and guest VPs alike, until its block names a VP the
+    /// walk did not find, or the partition the walk found the VP in has
+    /// another ID now: its memory was freed and holds another partition.
+    #[test]
+    fn a_processor_names_its_vp_from_the_last_walk_while_its_partition_stands() {
+        const CHILD_VP: u64 = 0xffff_e800_0050_0050;
+        let mut ram = tree();
+        ram.insert(GS + 8, 2);
+        ram.insert(GS + 0x358, CHILD_VP);
+        let found = partitions(&layout(), &Ram(ram.clone()), &[GS], &HashSet::new()).unwrap();
+        let known = ProcessorVps::new(&found);
+        let current = |ram: &HashMap<u64, u64>, number| {
+            known
+                .current(&layout(), &Ram(ram.clone()), number)
+                .map(|vp| (vp.partition, vp.root, vp.index))
+        };
+
+        assert_eq!(current(&ram, 2), Some((5, false, 0)));
+        ram.insert(GS + 0x358, 0xffff_e800_0038_9050);
+        assert_eq!(current(&ram, 2), Some((1, true, 1)));
+        ram.insert(GS + 0x358, 0xffff_e800_0077_0050);
+        assert_eq!(current(&ram, 2), None, "a VP the walk did not find");
+        ram.insert(GS + 0x358, CHILD_VP);
+        ram.insert(CHILD + 0x4550, 9);
+        assert_eq!(current(&ram, 2), None, "a partition that is not the walk's");
+        assert_eq!(current(&ram, 3), None, "a processor the walk did not find");
     }
 
     #[test]

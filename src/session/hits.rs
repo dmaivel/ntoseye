@@ -12,7 +12,6 @@ use crate::dbg_backend::{
 use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
 use crate::guest::hypercalls::HypercallCaller;
-use crate::guest::hypervisor::processor_guest_vp;
 use crate::kd::hwbp;
 use crate::session::context::{
     refresh_windows_thread_context_for_backend_thread, update_target_context_from_registers,
@@ -204,8 +203,7 @@ pub fn stopped_processor_matches(processor: Option<u16>, stopped: &str) -> bool 
 pub fn stopped_guest_vp(target: &Target, stopped: &str) -> Result<Option<(u64, u32)>> {
     let number = processor_index_from_backend_thread_id(stopped)
         .ok_or_else(|| Error::Hypervisor(format!("{stopped} names no processor")))?;
-    let partitions = target.hypervisor_partitions()?;
-    Ok(processor_guest_vp(&partitions, number).map(|(partition, vp)| (partition, vp.index)))
+    target.processor_running_vp(number)
 }
 
 /// Whether a hit reported on `stopped`, at `rip` on root `cr3`, is the

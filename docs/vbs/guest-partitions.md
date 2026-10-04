@@ -84,6 +84,7 @@ The partition's VPs run on the target's processors, and only a debug register tr
 - The breakpoint is a debug register of the target's processors, one of the four that {command}`ba` and the target's breakpoints share. It needs the gdb backend.
 - {command}`bp`, {command}`bu` and {command}`bm` are refused in the view: the gdb stub writes an `int3` through the target's page tables, and an `int3` it did not plant stops the guest, not the debugger.
 - The register traps any code at its address, so ntoseye resumes hits by the target's own VPs or another partition's, and stops only on the partition's. In the view, `/c <n>` limits the breakpoint to VP n, as the view numbers its processors.
+- A data watch, `ba w8` or `ba r8`, works the same way and stops after the access, as in the target. Each Windows maps `KUSER_SHARED_DATA` at `fffff78000000000` read-only and writes it through its own alias (`nt!MmWriteableSharedUserData`), so watch the alias for writes. A read of the shared address by the target's own Windows is resumed too, in a few milliseconds, but there are hundreds a second, and they slow the target.
 - `/p` and `/t` name the partition's processes and threads, and a condition reads its registers, memory and symbols, as a breakpoint in the target reads the target's. ntoseye checks a hit against them before it shows the view, in about 0.1 s, so a busy function with a false condition slows the guest.
 - The target's {command}`!hvbp` and {command}`!hvexit` are refused in the view.
 

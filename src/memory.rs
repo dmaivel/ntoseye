@@ -286,6 +286,11 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         }
     }
 
+    /// The page-table root this space walks (TTBR0 on AArch64).
+    pub fn dtb(&self) -> Dtb {
+        self.dtb
+    }
+
     /// AArch64 address space with separate TTBR0 (user) and TTBR1 (kernel)
     /// roots; the walk selects the root from the VA's bit 55.
     pub fn new_arm64(backend: &'a B, ttbr0: Dtb, ttbr1: Dtb) -> Self {
