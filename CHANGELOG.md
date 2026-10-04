@@ -19,6 +19,10 @@ Keeping this file:
 
 - `lm a <address>` shows only the module that contains an address, and finds a kernel module for a kernel address even while a process is selected, as in WinDbg.
 
+### Fixed
+
+- `!dlls`, `lm`, `!vad` and the SDK's `Process.modules` name a user-mode module whose loader entry's name is paged out, instead of showing `<unknown>`: the name comes from the file that the image's VAD maps. On a desktop guest, this was about 8% of the user-mode modules.
+
 ## v0.45.0 (2026-10-03)
 
 ntoseye can now debug the Windows hypervisor itself on Intel hosts. It can walk hypervisor partitions and virtual processors, inspect and disassemble guest memory, including WSL2, decode hypercalls and break on them based on the caller, and unwind hypervisor stacks. Kernel module unloads can now stop the debugger too, just like module loads.
