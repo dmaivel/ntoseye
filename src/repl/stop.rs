@@ -74,6 +74,9 @@ pub fn stop_exception_cause(
 /// diff (any backend).
 pub fn refresh_stop_caches_pre(session: &mut Session, caches: &ReplCaches) -> bool {
     caches.refresh_vcpus(&mut *session.backend);
+    // A resume left any partition view, and a partition breakpoint's hit
+    // shows one.
+    caches.refresh_partition(session.partition(), &session.target);
     let modules_changed = session.refresh_modules_on_stop();
     let report = session.take_module_refresh_report();
     if let Some(report) = report.as_ref().filter(|report| report.loaded != 0) {

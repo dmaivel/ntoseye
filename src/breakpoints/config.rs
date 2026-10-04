@@ -5,7 +5,8 @@
 use std::sync::Arc;
 
 use super::{
-    Breakpoint, BreakpointConfig, BreakpointManager, BreakpointScope, HypercallFilter, ThreadScope,
+    Breakpoint, BreakpointConfig, BreakpointManager, BreakpointScope, HypercallFilter,
+    PartitionFilter, ThreadScope,
 };
 use crate::error::{Error, Result};
 use crate::expr::Expr;
@@ -18,9 +19,13 @@ use crate::types::{Arch, VirtAddr};
 
 impl Breakpoint {
     /// What this breakpoint is restricted to: its address space, plus
-    /// whichever of `/t`, `/c` and a hypercall filter narrowed it further.
+    /// whichever of `/t`, `/c`, a hypercall filter and a guest partition
+    /// narrowed it further.
     pub fn scope_label(&self) -> String {
-        let mut label = self.scope.label();
+        let mut label = match &self.partition {
+            Some(partition) => format!("{}, {}", partition.label(), self.scope.label()),
+            None => self.scope.label(),
+        };
         if let Some(thread) = &self.thread {
             label.push_str(&format!(", {}", thread.label()));
         }
@@ -165,6 +170,25 @@ impl HypercallFilter {
     }
 }
 
+impl PartitionFilter {
+    /// Whether a hit on a processor whose current VP is `running`, a guest
+    /// partition's (its ID and VP index) or `None` for the target's own, is
+    /// this partition's, and its VP's when restricted to one.
+    pub fn matches(&self, running: Option<(u64, u32)>) -> bool {
+        running.is_some_and(|(partition, vp)| {
+            partition == self.partition && self.vp.is_none_or(|wanted| wanted == vp)
+        })
+    }
+
+    /// `partition 0x4 VP 2`.
+    pub fn label(&self) -> String {
+        match self.vp {
+            Some(vp) => format!("partition {:#x} VP {vp}", self.partition),
+            None => format!("partition {:#x}", self.partition),
+        }
+    }
+}
+
 impl BreakpointManager {
     /// The compiled condition for a configuration. A host may hand over the
     /// condition already parsed or as text; leaving text uncompiled would
@@ -180,6 +204,17 @@ impl BreakpointManager {
             .map(Expr::parse)
             .transpose()
             .map(|expr| expr.map(Arc::new))
+    }
+
+    /// The scope a breakpoint at `address` gets when none is given: the
+    /// kernel's for a kernel address, otherwise the process `debugger` is
+    /// attached to, if any.
+    pub fn automatic_scope(debugger: &Target, address: VirtAddr) -> BreakpointScope {
+        Self::scope_for_address(
+            debugger,
+            address,
+            &Self::scope_for_current_context(debugger),
+        )
     }
 
     pub(super) fn scope_for_current_context(debugger: &Target) -> BreakpointScope {
@@ -248,7 +283,8 @@ impl BreakpointManager {
 mod tests {
     use crate::breakpoints::test_backend::SlotRecorder;
     use crate::breakpoints::{
-        Breakpoint, BreakpointConfig, BreakpointManager, HypercallFilter, ThreadScope,
+        Breakpoint, BreakpointConfig, BreakpointManager, HypercallFilter, PartitionFilter,
+        ThreadScope,
     };
     use crate::guest::EvmcsState;
     use crate::guest::hypercall_input::decode_hypercall;
@@ -331,6 +367,21 @@ mod tests {
         assert!(filter.matches(Some(&caller(0x7, 0, unknown()))));
         assert!(!filter.matches(Some(&caller(0x1, 0, unknown()))));
         assert!(!filter.matches(Some(&caller(0x7, 0, HypercallInput::NotHypercall))));
+    }
+
+    /// A debug register traps the code at its address whoever runs it: a
+    /// partition breakpoint takes only its partition's VPs, and its VP's when
+    /// it names one, never the target's own (no guest VP) or another guest's.
+    #[test]
+    fn a_partition_filter_takes_only_its_partitions_vps() {
+        let any = PartitionFilter {
+            partition: 0x4,
+            vp: None,
+        };
+        let vp2 = PartitionFilter { vp: Some(2), ..any };
+        assert!(any.matches(Some((0x4, 0))) && any.matches(Some((0x4, 2))));
+        assert!(!any.matches(None) && !any.matches(Some((0x3, 2))));
+        assert!(vp2.matches(Some((0x4, 2))) && !vp2.matches(Some((0x4, 0))));
     }
 
     /// An exited thread's `_ETHREAD` can be given to a new thread: the new

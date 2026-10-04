@@ -865,6 +865,7 @@ mod tests {
                 ])),
                 user_commands: Arc::new(RwLock::new(Vec::new())),
                 aliases: Arc::new(RwLock::new(Vec::new())),
+                partition: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             },
         }
     }

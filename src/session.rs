@@ -25,7 +25,7 @@ use crate::exception_policy::ExceptionPolicyTable;
 use crate::gdb::RegisterMap;
 use crate::guest::{ModuleInfo, ModuleSymbolLoadReport, ProcessInfo};
 use crate::session::lifecycle::InstanceGuard;
-use crate::session::partition::PartitionView;
+use crate::session::partition::{KeptPartition, PartitionView};
 use crate::target::{ReloadReport, ServedVp, Target, TargetSelection, ThreadInfo};
 #[cfg(test)]
 use crate::triage::{TriageBlock, make_triage_dump};
@@ -356,6 +356,15 @@ pub enum WatchpointStopAction {
         breakpoint: Breakpoint,
         condition_error: Option<String>,
     },
+    /// A guest partition's breakpoint hit by one of its VPs, `vp` when the
+    /// hypervisor's partitions told which. Its thread filter, pass count and
+    /// condition are left to the partition's view (see
+    /// [`Session::partition_hit`]).
+    PartitionHit {
+        breakpoint: Breakpoint,
+        partition: u64,
+        vp: Option<u32>,
+    },
     /// A hit the watchpoint's filters, pass count or condition decline,
     /// still halted: a run resumes past it, a step ends where it was.
     Declined,
@@ -642,6 +651,10 @@ pub struct Session {
     /// (`.partition`) replaced, while the view is shown; see
     /// [`Self::enter_partition`].
     partition_view: Option<PartitionView>,
+    /// The target of the guest partition last shown, kept for its next view
+    /// and for checking its breakpoints' hits; see
+    /// [`Self::take_partition_target`].
+    kept_partition: Option<KeptPartition>,
     /// Per-target single-instance lock, held for the session's lifetime so a
     /// second ntoseye can't attach to the same backend resource. `Some` via
     /// [`Self::connect`] (every host's attach path), `None` via the unguarded

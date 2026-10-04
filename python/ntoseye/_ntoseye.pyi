@@ -1223,6 +1223,13 @@ class Breakpoint:
     @one_shot.setter
     def one_shot(self, /, one_shot: bool) -> None: ...
     @property
+    def partition(self, /) -> PartitionFilter |None:
+        """
+        The guest partition of the Windows hypervisor a breakpoint set in its
+        view (`Debugger.select_partition`) stops in, and the VP when
+        `processor=` named one. `None` for the target's own breakpoints.
+        """
+    @property
     def pass_count(self, /) -> int:
         """
         The requested number of hits before the breakpoint stops the target.
@@ -1335,6 +1342,13 @@ class BreakpointStatus(BaseRecord):
     def one_shot(self, /) -> bool:
         """
         Whether ntoseye removes the breakpoint after its first break.
+        """
+    @property
+    def partition(self, /) -> PartitionFilter |None:
+        """
+        The guest partition of the Windows hypervisor whose VPs a hit
+        must be on, for a breakpoint set in its view (`.partition`). None
+        for the target's own breakpoints.
         """
     @property
     def pass_count(self, /) -> int:
@@ -2317,12 +2331,17 @@ class Debugger:
         runs (a Windows Sandbox, a Hyper-V VM) in place of the target, as
         `.partition` does: `memory`, `processes`, `modules`, `symbols`,
         `types` and `threads` then read that guest, through its EPT, and the
-        vCPUs are its VPs, with their VTL0 registers. The view is
-        read-only and the target stays halted: running, stepping, breakpoints
-        and writes raise `NtoseyeError` until the root partition's ID (1)
-        returns to the target. Handles minted on either side of a switch go
-        stale (`generation` advances). The target must be halted. This
-        feature is experimental.
+        vCPUs are its VPs, with their VTL0 registers. The target stays
+        halted, and the guest's memory and registers are read-only: writes
+        and steps raise `NtoseyeError`. `breakpoints.add(..., hardware=True)`
+        and `breakpoints.watch` set the partition's breakpoints, which stop
+        only on its VPs (`processor=` names one) and need the gdb backend;
+        software breakpoints raise. `run` leaves the view and runs the
+        target, and a hit of the partition's breakpoint returns in its view,
+        on the VP that hit it. The root partition's ID (1) returns to the
+        target. Handles minted on either side of a switch go stale
+        (`generation` advances). The target must be halted. This feature is
+        experimental.
         """
     def step(self, /, until: Literal["call", "ret", "branch"] |None = None, timeout: float |None = None) -> Stop:
         """
@@ -8855,6 +8874,24 @@ class PageTableEntry(BaseRecord):
         """
     @property
     def writable(self, /) -> bool: ...
+
+@final
+class PartitionFilter(BaseRecord):
+    """
+    The guest partition a breakpoint set in its view (`.partition`)
+    stops in: a hit by any other VP than the partition's resumes.
+    """
+    @property
+    def partition(self, /) -> int:
+        """
+        The partition ID.
+        """
+    @property
+    def vp(self, /) -> int |None:
+        """
+        The VP index a hit must be on (`/c` in the view). None for any of
+        the partition's VPs.
+        """
 
 @final
 class PciBar(BaseRecord):

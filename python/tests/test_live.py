@@ -440,26 +440,27 @@ def test_a_cpu_walks_the_hypervisor_or_where_a_saved_vtl_left_off(halted: Debugg
             elsewhere.backtrace(vtl=0)
 
 
-def test_a_guest_partition_reads_as_its_own_windows_read_only(halted: Debugger) -> None:
-    """`select_partition` shows a guest partition's Windows in place of the
-    target: its own kernel and processes, its VPs as the vCPUs with stacks in
-    its NT, and nothing that runs or writes; partition 1 brings the target
-    back."""
+def select_windows_guest(halted: Debugger) -> ntoseye.HypervisorPartition:
+    """Show the first guest partition that runs Windows, or skip."""
     try:
         partitions = halted.hypervisor_partitions()
     except ntoseye.NtoseyeError as error:
         pytest.skip(f"no Windows hypervisor partitions on this target: {error}")
-    root_nt = halted.symbols["nt!KeBugCheckEx"]
-    guest = None
     for partition in partitions[1:]:
         try:
             halted.select_partition(partition.id)
         except ntoseye.NtoseyeError:
             continue  # no NT kernel there (WSL2), or a VM still in its firmware
-        guest = partition
-        break
-    if guest is None:
-        pytest.skip("needs a guest partition running Windows, such as a Windows Sandbox")
+        return partition
+    pytest.skip("needs a guest partition running Windows, such as a Windows Sandbox")
+
+
+def test_a_guest_partition_reads_as_its_own_windows_read_only(halted: Debugger) -> None:
+    """`select_partition` shows a guest partition's Windows in place of the
+    target: its own kernel and processes, its VPs as the vCPUs with stacks in
+    its NT, and nothing that writes; partition 1 brings the target back."""
+    root_nt = halted.symbols["nt!KeBugCheckEx"]
+    guest = select_windows_guest(halted)
     try:
         assert halted.partition == guest.id
         cpus = list(halted.cpus)
@@ -473,8 +474,6 @@ def test_a_guest_partition_reads_as_its_own_windows_read_only(halted: Debugger) 
         assert any(
             (frame.symbol or "").startswith("nt!") for cpu in cpus for frame in cpu.backtrace(limit=8)
         )
-        with pytest.raises(ntoseye.NtoseyeError, match="read-only"):
-            halted.run(timeout=1.0)
         # The same byte back, so a write that got through would change nothing.
         with pytest.raises(ntoseye.NtoseyeError):
             halted.memory.write_u8(guest_nt, halted.memory.read_u8(guest_nt))
@@ -482,6 +481,36 @@ def test_a_guest_partition_reads_as_its_own_windows_read_only(halted: Debugger) 
         halted.select_partition(1)
     assert halted.partition is None
     assert halted.symbols["nt!KeBugCheckEx"] == root_nt
+
+
+def test_a_guest_partitions_breakpoint_stops_in_its_view(halted: Debugger) -> None:
+    """A hardware breakpoint set in a guest partition's view is the
+    partition's: a run leaves the view, and the hit shows it again on the VP
+    that ran the code, its stack in the partition's NT; a software one is
+    refused there."""
+    if os.environ.get("NTOSEYE_TEST_BACKEND") != "gdb":
+        pytest.skip("only a debug register the host programs traps in a guest partition")
+    guest = select_windows_guest(halted)
+    try:
+        # Every context switch runs it, so even an idle guest does soon.
+        swap = halted.symbols["nt!KiSwapContext"]
+        with pytest.raises(ntoseye.NtoseyeError, match="only hardware breakpoints"):
+            halted.breakpoints.add(swap)
+        bp = halted.breakpoints.add(swap, hardware=True)
+        assert bp.partition is not None and bp.partition.partition == guest.id
+        try:
+            stop = halted.run(timeout=30.0)
+            assert stop is not None and bp in stop.breakpoints, stop
+            assert halted.partition == guest.id
+            vps = [f"p{guest.id:x}.{vp.index + 1:x}" for vp in guest.virtual_processors]
+            assert stop.cpu.id in vps
+            assert stop.rip == swap
+            assert stop.cpu.backtrace(limit=1)[0].symbol == "nt!KiSwapContext"
+        finally:
+            bp.delete()
+    finally:
+        halted.select_partition(1)
+    assert halted.partition is None
 
 
 def gdb_secure_kernel(halted: Debugger) -> ntoseye.SecureKernel:

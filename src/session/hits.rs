@@ -12,6 +12,7 @@ use crate::dbg_backend::{
 use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
 use crate::guest::hypercalls::HypercallCaller;
+use crate::guest::hypervisor::processor_guest_vp;
 use crate::kd::hwbp;
 use crate::session::context::{
     refresh_windows_thread_context_for_backend_thread, update_target_context_from_registers,
@@ -194,6 +195,17 @@ pub fn stopped_processor_matches(processor: Option<u16>, stopped: &str) -> bool 
         return true;
     };
     processor_index_from_backend_thread_id(stopped).is_none_or(|stopped| stopped == processor)
+}
+
+/// The guest partition's VP, as its partition's ID and its index, that the
+/// processor a stop was reported on (`stopped`) runs, or `None` when it runs
+/// the target's own: what the hypervisor's processor block names current.
+/// An error when the hypervisor's partitions cannot be walked.
+pub fn stopped_guest_vp(target: &Target, stopped: &str) -> Result<Option<(u64, u32)>> {
+    let number = processor_index_from_backend_thread_id(stopped)
+        .ok_or_else(|| Error::Hypervisor(format!("{stopped} names no processor")))?;
+    let partitions = target.hypervisor_partitions()?;
+    Ok(processor_guest_vp(&partitions, number).map(|(partition, vp)| (partition, vp.index)))
 }
 
 /// Whether a hit reported on `stopped`, at `rip` on root `cr3`, is the
@@ -603,6 +615,26 @@ pub fn resolve_watchpoint_stop(
     if !breakpoint.scope.matches_dtb(scope_dtb, target.arch()) {
         declined("another address space");
         return Ok(WatchpointStopAction::Declined);
+    }
+    if let Some(filter) = breakpoint.partition {
+        let vp = match stopped_guest_vp(target, current_thread) {
+            Ok(running) if !filter.matches(running) => {
+                declined(&format!("another partition or VP ({running:x?})"));
+                return Ok(WatchpointStopAction::Declined);
+            }
+            Ok(running) => running.map(|(_, vp)| vp),
+            // As for a hypercall breakpoint's unknown caller, a hit that
+            // cannot be told apart surfaces rather than being lost.
+            Err(error) => {
+                step_trace!("#{}: the stopped VP is unknown: {error}", breakpoint.id);
+                None
+            }
+        };
+        return Ok(WatchpointStopAction::PartitionHit {
+            breakpoint,
+            partition: filter.partition,
+            vp,
+        });
     }
     if let Some(thread) = breakpoint.thread.as_ref() {
         let stopped = refresh_windows_thread_context_for_backend_thread(target, current_thread);

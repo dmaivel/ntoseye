@@ -42,6 +42,7 @@ impl Session {
         symbol: Option<String>,
         config: BreakpointConfig,
     ) -> Result<u32> {
+        self.require_software_breakpoints()?;
         self.breakpoints
             .add_configured(self.backend.as_mut(), &self.target, addr, symbol, config)
     }
@@ -53,6 +54,7 @@ impl Session {
         symbol: String,
         config: BreakpointConfig,
     ) -> Result<u32> {
+        self.require_software_breakpoints()?;
         self.breakpoints
             .add_symbolic(self.backend.as_mut(), &self.target, symbol, config)
     }
@@ -65,6 +67,7 @@ impl Session {
         source: String,
         config: BreakpointConfig,
     ) -> Result<Vec<u32>> {
+        self.require_software_breakpoints()?;
         self.breakpoints
             .add_source(self.backend.as_mut(), &self.target, source, config)
     }
@@ -80,6 +83,7 @@ impl Session {
         config: BreakpointConfig,
         limit: usize,
     ) -> Result<PatternBreakpoints> {
+        self.require_software_breakpoints()?;
         let dtb = self.target.current_dtb();
         let names: Vec<String> = match pattern.split_once('!') {
             Some((module, query)) => self
@@ -381,7 +385,8 @@ impl Session {
     /// Watch data accesses at `addr` (global across guest address spaces),
     /// with an optional host-resolved display symbol. Hosts choose write or
     /// read/write behavior while the backend implementation remains private.
-    /// Returns the stop-point id.
+    /// In a partition view, the watch is the partition's (see
+    /// [`Self::add_hardware_breakpoint`]). Returns the stop-point id.
     pub fn add_watchpoint(
         &mut self,
         addr: VirtAddr,
@@ -390,15 +395,41 @@ impl Session {
         symbol: Option<String>,
         config: BreakpointConfig,
     ) -> Result<u32> {
-        self.breakpoints.add_hardware_configured(
-            self.backend.as_mut(),
-            &self.target,
-            addr,
-            access.into(),
-            len,
-            symbol,
-            config,
-        )
+        self.add_hardware_breakpoint(addr, access.into(), len, symbol, config)
+    }
+
+    /// Set a debug-register breakpoint or data watch (`ba`) at `addr`, with
+    /// an optional display `symbol`. Set in a partition view, it is the
+    /// partition's: `addr` is the partition's, a hit by any other VP than
+    /// the partition's is resumed, `/c` names a VP of it, and its thread
+    /// filter and condition are checked in its view at the hit (see
+    /// [`crate::breakpoints::PartitionFilter`]). Returns the id.
+    pub fn add_hardware_breakpoint(
+        &mut self,
+        addr: VirtAddr,
+        access: HwBreakpointAccess,
+        len: u8,
+        symbol: Option<String>,
+        config: BreakpointConfig,
+    ) -> Result<u32> {
+        let config = match self.partition() {
+            Some(partition) => self.partition_breakpoint_config(partition, addr, config)?,
+            None => config,
+        };
+        let (breakpoints, backend, target) = self.breakpoint_sites();
+        breakpoints.add_hardware_configured(backend, target, addr, access, len, symbol, config)
+    }
+
+    /// Refuse a software breakpoint (`bp`, `bu`, `bm`) while a partition
+    /// view is shown: one is planted through the target's page tables, never
+    /// the partition's, while a debug register traps the partition's code.
+    pub fn require_software_breakpoints(&self) -> Result<()> {
+        match self.partition() {
+            Some(partition) => Err(Error::Breakpoint(format!(
+                "partition {partition:#x} takes only hardware breakpoints (ba e1 <address>): a software breakpoint is planted through the target's page tables, not the partition's"
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// Set a hypercall breakpoint (`!hvbp`): a hardware execute breakpoint on
@@ -488,8 +519,8 @@ impl Session {
 
     /// Remove a breakpoint by id.
     pub fn remove_breakpoint(&mut self, id: u32) -> Result<()> {
-        self.breakpoints
-            .remove(self.backend.as_mut(), &self.target, id)
+        let (breakpoints, backend, target) = self.breakpoint_sites();
+        breakpoints.remove(backend, target, id)
     }
 
     /// Refuse a hypervisor breakpoint's caller filter that could never
@@ -526,15 +557,15 @@ impl Session {
 
     /// Re-arm a disabled breakpoint (re-patch its `int3`).
     pub fn enable_breakpoint(&mut self, id: u32) -> Result<()> {
-        self.breakpoints
-            .enable(self.backend.as_mut(), &self.target, id)
+        let (breakpoints, backend, target) = self.breakpoint_sites();
+        breakpoints.enable(backend, target, id)
     }
 
     /// Disable a breakpoint (restore the original byte) without forgetting it,
     /// so it can be re-enabled later.
     pub fn disable_breakpoint(&mut self, id: u32) -> Result<()> {
-        self.breakpoints
-            .disable(self.backend.as_mut(), &self.target, id)
+        let (breakpoints, backend, target) = self.breakpoint_sites();
+        breakpoints.disable(backend, target, id)
     }
 
     /// List all breakpoints.
@@ -550,8 +581,13 @@ impl Session {
     /// Put the original bytes of every debugger-owned site back into `buf`,
     /// read at `start` in the address space `dtb`: the manager's breakpoints
     /// and the session's own traps. Without this a view shows the debugger's
-    /// `int3` instead of the guest's code.
+    /// `int3` instead of the guest's code. A partition view's memory holds
+    /// none: its breakpoints are debug registers, and the sites are the
+    /// target's.
     pub fn mask_code(&self, start: VirtAddr, buf: &mut [u8], dtb: u64) {
+        if self.partition().is_some() {
+            return;
+        }
         self.breakpoints
             .mask_breakpoint_bytes(&self.target, start, buf, dtb);
         self.mask_traps(start, buf);
@@ -578,8 +614,8 @@ impl Session {
     /// removals remain managed so callers can retry and must not resume the
     /// target as if cleanup had succeeded.
     pub fn remove_all_breakpoints(&mut self) -> Result<()> {
-        self.breakpoints
-            .remove_all(self.backend.as_mut(), &self.target)
+        let (breakpoints, backend, target) = self.breakpoint_sites();
+        breakpoints.remove_all(backend, target)
     }
 
     /// Whether any debugger-owned site is installed in the guest. The traps
@@ -659,6 +695,11 @@ impl Session {
     }
 
     fn reconcile_deferred_breakpoints(&mut self) {
+        // Deferred breakpoints name the target's symbols; a partition view's
+        // are another kernel's, which would move them into the wrong guest.
+        if self.partition().is_some() {
+            return;
+        }
         // Read before reconciling: a fetch landing mid-reconcile is caught
         // next time rather than missed.
         self.symbols_reconciled_at = self.target.symbols.load_generation();

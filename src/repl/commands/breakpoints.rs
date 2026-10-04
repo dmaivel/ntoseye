@@ -768,6 +768,9 @@ impl ReplState<'_> {
             processor,
             hypercall: None,
             vm_exit: None,
+            // A breakpoint set in a partition view becomes the partition's
+            // when the session sets it.
+            partition: None,
             // `bu <symbol>` breaks at the symbol, as WinDbg does. Only a host
             // whose client expects arguments to be live (DAP) skips ahead.
             skip_prologue: false,
@@ -779,6 +782,7 @@ impl ReplState<'_> {
         invocation: &CommandInvocation<'_>,
         command: &str,
     ) -> Result<CodeBreakpointArgs> {
+        self.ctx.require_software_breakpoints()?;
         let parsed = parse_breakpoint_arguments(&invocation.argv, self.radix, command, false)?;
         let spec = parsed.target.clone();
         Ok(CodeBreakpointArgs {
@@ -951,15 +955,10 @@ impl ReplState<'_> {
             .symbols
             .format_closest_symbol_for_address(self.ctx.target.current_dtb(), address);
 
-        match self.ctx.breakpoints.add_hardware_configured(
-            &mut *self.ctx.backend,
-            &self.ctx.target,
-            address,
-            access,
-            len,
-            symbol.clone(),
-            config,
-        ) {
+        match self
+            .ctx
+            .add_hardware_breakpoint(address, access, len, symbol.clone(), config)
+        {
             Ok(id) => {
                 self.caches.refresh_breakpoints(&self.ctx.breakpoints);
                 let condition_label = condition
@@ -1297,11 +1296,10 @@ impl ReplState<'_> {
         let Some(ids) = self.selected_breakpoint_ids(&invocation, "bc") else {
             return Ok(());
         };
-        let backend = &mut *self.ctx.backend;
-        let target = &self.ctx.target;
+        let (breakpoints, backend, target) = self.ctx.breakpoint_sites();
         apply_breakpoint_updates(
             ids,
-            &mut self.ctx.breakpoints,
+            breakpoints,
             &self.caches,
             "cleared",
             |breakpoints, id| breakpoints.remove(backend, target, id),
@@ -1312,11 +1310,10 @@ impl ReplState<'_> {
         let Some(ids) = self.selected_breakpoint_ids(&invocation, "bd") else {
             return Ok(());
         };
-        let backend = &mut *self.ctx.backend;
-        let target = &self.ctx.target;
+        let (breakpoints, backend, target) = self.ctx.breakpoint_sites();
         apply_breakpoint_updates(
             ids,
-            &mut self.ctx.breakpoints,
+            breakpoints,
             &self.caches,
             "disabled",
             |breakpoints, id| breakpoints.disable(backend, target, id),
@@ -1327,11 +1324,10 @@ impl ReplState<'_> {
         let Some(ids) = self.selected_breakpoint_ids(&invocation, "be") else {
             return Ok(());
         };
-        let backend = &mut *self.ctx.backend;
-        let target = &self.ctx.target;
+        let (breakpoints, backend, target) = self.ctx.breakpoint_sites();
         apply_breakpoint_updates(
             ids,
-            &mut self.ctx.breakpoints,
+            breakpoints,
             &self.caches,
             "enabled",
             |breakpoints, id| breakpoints.enable(backend, target, id),

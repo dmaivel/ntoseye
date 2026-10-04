@@ -578,6 +578,18 @@ impl Breakpoint {
         Typed::new(py, filter.as_ref().map(view::execution::exit_filter))
     }
 
+    /// The guest partition of the Windows hypervisor a breakpoint set in its
+    /// view (`Debugger.select_partition`) stops in, and the VP when
+    /// `processor=` named one. `None` for the target's own breakpoints.
+    #[getter]
+    fn partition<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Typed<'py, Option<view::execution::PartitionFilter>>> {
+        let filter = self.require_snapshot(py)?.partition;
+        Typed::new(py, filter.as_ref().map(view::execution::partition_filter))
+    }
+
     /// The number of physical hits.
     #[getter]
     fn hit_count(&self, py: Python<'_>) -> PyResult<u64> {
@@ -1038,7 +1050,9 @@ fn scope_dtb(target: &Target, scope: Option<&BreakpointScope>) -> Dtb {
 
 /// Arm a one-byte debug-register execute breakpoint at `target`, resolved in
 /// the breakpoint's scope. A hardware site is an address, not a symbol
-/// identity, so a spec is kept only as its display symbol.
+/// identity, so a spec is kept only as its display symbol. Set in a
+/// partition view, it is the partition's (see
+/// [`Session::add_hardware_breakpoint`]).
 fn add_hardware_execute(
     session: &mut Session,
     target: Location,
@@ -1051,10 +1065,7 @@ fn add_hardware_execute(
         Location::Address(_) => None,
     };
     session
-        .breakpoints
-        .add_hardware_configured(
-            session.backend.as_mut(),
-            &session.target,
+        .add_hardware_breakpoint(
             VirtAddr(address),
             HwBreakpointAccess::Execute,
             1,

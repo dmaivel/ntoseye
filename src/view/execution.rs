@@ -147,6 +147,10 @@ shapes! {
         /// The VM exit a hit must be handling, and from which caller, for a
         /// VM-exit breakpoint (`!hvexit`). None for any other breakpoint.
         vm_exit: Option<ExitFilter>,
+        /// The guest partition of the Windows hypervisor whose VPs a hit
+        /// must be on, for a breakpoint set in its view (`.partition`). None
+        /// for the target's own breakpoints.
+        partition: Option<PartitionFilter>,
         /// The condition expression that a hit must satisfy.
         condition: Option<String>,
         /// The requested hit number. Both 0 and 1 break on the first hit.
@@ -190,6 +194,16 @@ shapes! {
         /// The caller's partition ID. None for any caller.
         partition: Option<u64>,
         /// The caller's VP index in `partition`. None for any VP.
+        vp: Option<u32>,
+    }
+
+    /// The guest partition a breakpoint set in its view (`.partition`)
+    /// stops in: a hit by any other VP than the partition's resumes.
+    PartitionFilter {
+        /// The partition ID.
+        partition: u64,
+        /// The VP index a hit must be on (`/c` in the view). None for any of
+        /// the partition's VPs.
         vp: Option<u32>,
     }
 
@@ -611,6 +625,14 @@ pub fn exit_filter(filter: &vm_exits::ExitFilter) -> ExitFilter {
     }
 }
 
+/// Which guest partition a breakpoint set in its view stops in.
+pub fn partition_filter(filter: &breakpoints::PartitionFilter) -> PartitionFilter {
+    PartitionFilter {
+        partition: filter.partition,
+        vp: filter.vp,
+    }
+}
+
 /// One code-breakpoint/data-watchpoint row.
 pub fn breakpoint(bp: &Breakpoint) -> BreakpointStatus {
     BreakpointStatus {
@@ -626,6 +648,7 @@ pub fn breakpoint(bp: &Breakpoint) -> BreakpointStatus {
         processor: bp.processor,
         hypercall: bp.hypercall.as_ref().map(hypercall_filter),
         vm_exit: bp.vm_exit.as_ref().map(exit_filter),
+        partition: bp.partition.as_ref().map(partition_filter),
         condition: bp.condition.clone(),
         pass_count: bp.pass_count,
         hit_count: bp.hit_count,

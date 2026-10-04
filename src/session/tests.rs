@@ -8,7 +8,8 @@ use super::stepping::{
 };
 use super::*;
 use crate::breakpoints::{
-    Breakpoint, BreakpointConfig, HardwareBreakpoint, HypercallFilter, StepFrame, ThreadScope,
+    Breakpoint, BreakpointConfig, HardwareBreakpoint, HypercallFilter, PartitionFilter, StepFrame,
+    ThreadScope,
 };
 use crate::dbg_backend::{ContinueDisposition, HwBreakpointAccess, TrapState, clear_trap_flag};
 use crate::dmp::{IMAGE_FILE_MACHINE_ARM64, structs::Header64};
@@ -74,6 +75,9 @@ pub struct MockBackend {
     site_writes: SiteWrites,
     /// `set_hardware_breakpoint` / `clear_hardware_breakpoint` calls.
     hardware_writes: HardwareWrites,
+    /// Debug registers are the host's, as a GDB stub programs them: they
+    /// trap whatever a processor runs, a guest partition's code included.
+    host_debug_registers: bool,
     /// Register fetches, so a test can prove a path avoided one.
     reads: usize,
     /// How long a register fetch takes: the debugger's own work between
@@ -159,6 +163,7 @@ impl Default for MockBackend {
             dropped_sites: Vec::new(),
             site_writes: Arc::new(Mutex::new(Vec::new())),
             hardware_writes: Arc::new(Mutex::new(Vec::new())),
+            host_debug_registers: false,
             reads: 0,
             register_read_delay: Duration::ZERO,
             reported_trap_state: None,
@@ -320,6 +325,12 @@ impl DebugBackend for MockBackend {
     fn clear_hardware_breakpoint(&mut self, slot: u8) -> Result<()> {
         self.hardware_writes.lock().push((slot, None));
         Ok(())
+    }
+    fn supports_watchpoints(&self) -> bool {
+        self.host_debug_registers
+    }
+    fn hardware_breakpoints_trap_in_host(&self) -> bool {
+        self.host_debug_registers
     }
     fn sites_dropped_by_stop(&self) -> Vec<u64> {
         self.dropped_sites.clone()
@@ -2439,6 +2450,103 @@ fn exiting_from_a_partition_view_takes_the_targets_trap_out() {
 
     assert_eq!(*sites.lock(), [(0x1_4000, false)]);
     assert_eq!(session.partition(), None);
+}
+
+/// Show a view of partition 4, with one VP, over `session`'s target.
+fn show_partition_4(session: &mut Session) {
+    let view = PartitionBackend::new(
+        session.register_map.clone(),
+        vec![PartitionVp {
+            id: "p4.1".to_string(),
+            registers: vec![0; REGISTER_BUFFER_SIZE],
+        }],
+    );
+    let partition_target = session_over_memory(0x1000, &[0; 0x100]).target;
+    session.show_partition(4, partition_target, Box::new(view), "p4.1".to_string());
+}
+
+/// Every breakpoint is the target's, also in a partition view: one set there
+/// is the partition's, on VP 0 when `/c 0` names it, and programmed into the
+/// target's debug registers; a software one is refused, as it would be
+/// planted through the target's page tables; and the target's own, set
+/// before, is listed and cleared there through the target's backend.
+#[test]
+fn a_partition_views_breakpoints_are_the_targets() {
+    let backend = MockBackend {
+        host_debug_registers: true,
+        allow_breakpoints: true,
+        ..MockBackend::default()
+    };
+    let (sites, hardware) = (backend.site_writes.clone(), backend.hardware_writes.clone());
+    let mut session = session_with_mock(backend);
+    let execute = |session: &mut Session, address, config| {
+        session.add_hardware_breakpoint(
+            VirtAddr(address),
+            HwBreakpointAccess::Execute,
+            1,
+            None,
+            config,
+        )
+    };
+    let targets = execute(
+        &mut session,
+        0xfffff805_d0930f10,
+        BreakpointConfig::default(),
+    )
+    .unwrap();
+    show_partition_4(&mut session);
+
+    let partitions = execute(
+        &mut session,
+        0xfffff805_86ac0f10,
+        BreakpointConfig {
+            processor: Some(0),
+            ..BreakpointConfig::default()
+        },
+    )
+    .unwrap();
+    let refused = session.add_breakpoint(VirtAddr(0x1010), None, BreakpointConfig::default());
+
+    let partition_of = |session: &Session, id| session.breakpoint(id).unwrap().partition;
+    assert_eq!(partition_of(&session, targets), None);
+    assert_eq!(
+        partition_of(&session, partitions),
+        Some(PartitionFilter {
+            partition: 4,
+            vp: Some(0),
+        })
+    );
+    assert_eq!(session.breakpoint(partitions).unwrap().processor, None);
+    assert!(refused.is_err());
+    assert_eq!(session.list_breakpoints().len(), 2);
+    session.remove_breakpoint(targets).unwrap();
+    session.remove_breakpoint(partitions).unwrap();
+    assert_eq!(
+        *hardware.lock(),
+        [
+            (0, Some(0xfffff805_d0930f10)),
+            (1, Some(0xfffff805_86ac0f10)),
+            (0, None),
+            (1, None),
+        ]
+    );
+    assert!(sites.lock().is_empty());
+    assert_eq!(session.partition(), Some(4));
+}
+
+/// A partition view shows the partition as the target halted, and what a
+/// resume runs is the target: the view is left, and the target resumed.
+#[test]
+fn a_resume_from_a_partition_view_runs_the_target() {
+    let backend = MockBackend::default();
+    let continues = Arc::clone(&backend.continues);
+    let mut session = session_with_mock(backend);
+    show_partition_4(&mut session);
+
+    session.resume().unwrap();
+
+    assert_eq!(session.partition(), None);
+    assert_eq!(continues.load(Ordering::Relaxed), 1);
 }
 
 /// Where the mock's `nt!DbgLoadImageSymbols` trap sits.

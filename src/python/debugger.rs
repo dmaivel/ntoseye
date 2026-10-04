@@ -99,12 +99,17 @@ impl Debugger {
     /// runs (a Windows Sandbox, a Hyper-V VM) in place of the target, as
     /// `.partition` does: `memory`, `processes`, `modules`, `symbols`,
     /// `types` and `threads` then read that guest, through its EPT, and the
-    /// vCPUs are its VPs, with their VTL0 registers. The view is
-    /// read-only and the target stays halted: running, stepping, breakpoints
-    /// and writes raise `NtoseyeError` until the root partition's ID (1)
-    /// returns to the target. Handles minted on either side of a switch go
-    /// stale (`generation` advances). The target must be halted. This
-    /// feature is experimental.
+    /// vCPUs are its VPs, with their VTL0 registers. The target stays
+    /// halted, and the guest's memory and registers are read-only: writes
+    /// and steps raise `NtoseyeError`. `breakpoints.add(..., hardware=True)`
+    /// and `breakpoints.watch` set the partition's breakpoints, which stop
+    /// only on its VPs (`processor=` names one) and need the gdb backend;
+    /// software breakpoints raise. `run` leaves the view and runs the
+    /// target, and a hit of the partition's breakpoint returns in its view,
+    /// on the VP that hit it. The root partition's ID (1) returns to the
+    /// target. Handles minted on either side of a switch go stale
+    /// (`generation` advances). The target must be halted. This feature is
+    /// experimental.
     fn select_partition(slf: &Bound<'_, Self>, partition_id: u64) -> PyResult<()> {
         let py = slf.py();
         namespace_owner(slf).with(py, |session| {

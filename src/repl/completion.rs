@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::ptr::NonNull;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
 
 use crate::breakpoints::BreakpointManager;
@@ -88,6 +89,10 @@ pub struct ReplCaches {
     pub expression_variables: Arc<RwLock<ExpressionVariableCache>>,
     pub user_commands: Arc<RwLock<UserCommandCache>>,
     pub aliases: Arc<RwLock<AliasCache>>,
+    /// The guest partition whose view the symbol and thread caches were
+    /// built for, or 0 for the target's: no partition has ID 0, which the
+    /// hypervisor reserves as invalid (see [`Self::refresh_partition`]).
+    pub partition: Arc<AtomicU64>,
 }
 
 impl ReplCaches {
@@ -147,9 +152,31 @@ impl ReplCaches {
         if *self.dtb.read().unwrap() == new_dtb {
             return;
         }
+        self.rebuild_symbol_context(debugger);
+    }
+
+    /// Rebuild the symbol and thread caches for the partition view shown
+    /// (`partition`, `None` for the target) when it is not the one they were
+    /// built for: `.partition` changes it, a resume leaves a view, and a
+    /// partition breakpoint's hit shows one. Its kernel is another, whose
+    /// page-table root can equal the target's, so the DTB check of
+    /// [`Self::refresh_symbol_context`] cannot tell them apart.
+    pub fn refresh_partition(&self, partition: Option<u64>, debugger: &Target) {
+        if self
+            .partition
+            .swap(partition.unwrap_or(0), Ordering::Relaxed)
+            == partition.unwrap_or(0)
+        {
+            return;
+        }
+        self.clear_threads();
+        self.rebuild_symbol_context(debugger);
+    }
+
+    fn rebuild_symbol_context(&self, debugger: &Target) {
         *self.symbols.write().unwrap() = debugger.current_symbol_index();
         *self.types.write().unwrap() = debugger.current_types_index();
-        *self.dtb.write().unwrap() = new_dtb;
+        *self.dtb.write().unwrap() = debugger.current_dtb();
     }
 
     pub fn refresh_expression_context(&self, debugger: &Target) {

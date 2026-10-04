@@ -27,9 +27,7 @@ impl GdbTarget<'_> {
         let config = BreakpointConfig::default();
         let added = self.session.with_target_halted(|session| match kind {
             PlantedKind::Software => session.add_breakpoint(VirtAddr(address), None, config),
-            PlantedKind::Hardware => session.breakpoints.add_hardware_configured(
-                session.backend.as_mut(),
-                &session.target,
+            PlantedKind::Hardware => session.add_hardware_breakpoint(
                 VirtAddr(address),
                 HwBreakpointAccess::Execute,
                 1,

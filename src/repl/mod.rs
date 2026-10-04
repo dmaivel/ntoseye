@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::ptr::null_mut;
 use std::sync::Arc;
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tabled::builder::Builder;
@@ -401,6 +401,7 @@ impl ReplStore {
             expression_variables: Arc::new(RwLock::new(Vec::new())),
             user_commands: Arc::new(RwLock::new(initial_user_commands())),
             aliases: Arc::new(RwLock::new(Vec::new())),
+            partition: Arc::new(AtomicU64::new(ctx.partition().unwrap_or(0))),
         };
         caches.refresh_expression_context(&ctx.target);
         let aliases = UserAliases::load();
@@ -813,6 +814,8 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         expression_variables: Arc::new(RwLock::new(Vec::new())),
         user_commands: Arc::new(RwLock::new(initial_user_commands())),
         aliases: Arc::new(RwLock::new(aliases.entries())),
+        // A session starts on the target; only `.partition` shows a view.
+        partition: Arc::new(AtomicU64::new(0)),
     };
     caches.refresh_expression_context(debugger);
 

@@ -17,6 +17,7 @@ Keeping this file:
 
 ### Added
 
+- Breakpoints in a Windows Sandbox or Hyper-V VM (experimental, gdb backend): `ba` in a `.partition` view sets a hardware breakpoint that stops only on that guest's VPs, `/c` in the view names one of them, and its `/p`, `/t` and condition read that guest. `g` from the view runs the target, and the hit shows the guest's view on the VP that hit it. In the SDK, `breakpoints.add(..., hardware=True)` after `select_partition()` does the same, and `Breakpoint.partition` names the guest. See https://ntoseye.com/vbs/guest-partitions/#breakpoints-in-a-guest-partition.
 - `lm a <address>` shows only the module that contains an address, and finds a kernel module for a kernel address even while a process is selected, as in WinDbg.
 
 ### Fixed

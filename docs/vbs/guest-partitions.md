@@ -29,10 +29,11 @@ inspecting partition 0x4: nt at 0xfffff80586250000, VPs p4.1 p4.2 p4.3 p4.4
 - Its NT kernel is found from the page-table root of a VP in kernel mode, and its symbols are loaded.
 - Its VPs are the threads. {command}`~` lists them as `p<partition>.<VP index + 1>`, `~Ns` selects VP N, and each has its VTL0 registers, as `!hvr <partition> <vp> 0` shows them. A VP that runs in VTL1 when the target halts has VTL0's RIP, RSP, flags, control and segment registers, without its general-purpose registers, and `.partition` says so. Frames in the partition's hypercall page read `hvcall!Hypercall`, as in the target's.
 
-{command}`lm`, {command}`!process`, {command}`.process`, {command}`!peb`, {command}`!thread`, {command}`dt`, {command}`db`, {command}`u` and {command}`k` then read that guest. The view is read-only, and the target stays halted while it is shown:
+{command}`lm`, {command}`!process`, {command}`.process`, {command}`!peb`, {command}`!thread`, {command}`dt`, {command}`db`, {command}`u` and {command}`k` then read that guest. The target stays halted while the view is shown, and the guest is read-only:
 
-- {command}`g`, steps, breakpoints, register writes and memory writes are refused.
-- The target's breakpoints are not listed, and they are kept as they were.
+- Steps, register writes and memory writes are refused.
+- {command}`g` leaves the view and runs the target. A hit of one of the partition's breakpoints shows the view again (see [Breakpoints in a guest partition](#breakpoints-in-a-guest-partition)); any other stop shows the target.
+- {command}`bl` lists every breakpoint, the target's too.
 - `.partition 1`, the root partition's ID, returns to the target.
 
 In the SDK, `dbg.select_partition(id)` switches and `dbg.partition` says which partition is inspected. Handles minted on one side of a switch raise `StaleHandleError` on the other.
@@ -51,6 +52,41 @@ partition:p4.1> k
 The guest must be 64-bit Windows: a partition with no VP in 4-level long-mode paging, such as a VM still in its firmware, is refused. A Linux guest, such as WSL2's, has no NT kernel to find. Use {command}`!hvd` and {command}`!hvu` for those.
 
 The host can trim a guest's memory, as it does a Windows Sandbox's while it idles, and a trimmed page is not mapped in the partition's EPT until the guest touches it again, so it reads as not mapped. {command}`lm` and {command}`!process` list the modules and processes past a loader entry or process on such a page, by walking their lists back from the end, and leave out only that one. The view reads only the memory that VTL0's EPT maps, so {command}`.vtl` `1` is refused: the partition's secure kernel is not in it.
+
+## Breakpoints in a guest partition
+
+In a partition's view, {command}`ba` sets a breakpoint of the partition's, and {command}`g` runs the target until the partition hits it. The hit shows the partition's view, with the VP that ran the code selected:
+
+```text
+partition:p4.1> ba e1 nt!NtClose
+hardware breakpoint #0 (execute 1b) set at fffff80586ac0f10 (nt!NtClose)
+
+partition:p4.1> bl
+ID  Status  Address           Pass Count   Process/Thread         Symbol               Condition  Action
+#0  e       fffff80586ac0f10  0001 (0001)  partition 0x4, global  watch e1 nt!NtClose  -          -
+
+partition:p4.1> g
+VM running, waiting for stop (Ctrl+C to pause)...
+ BREAK  p4.3 dwm.exe (3832) at nt!NtClose
+ ├─ hardware breakpoint #0 e1  nt!NtClose
+ └─ thread dwm.exe  state Running  ethread ffff810cc3a5d080  pid 3832  tid 3956
+...
+stack
+  #0  fffff80586ac0f10  nt!NtClose
+  #1  fffff80586911d55  nt!KiSystemServiceCopyEnd+0x25
+  #2  fffff80586900180  nt!KiServiceLinkage
+  #3  fffff8051d93c799  win32kbase!rimSignalReadComplete+0x209
+```
+
+The partition's VPs run on the target's processors, and only a debug register traps the partition's code there:
+
+- The breakpoint is a debug register of the target's processors, one of the four that {command}`ba` and the target's breakpoints share. It needs the gdb backend.
+- {command}`bp`, {command}`bu` and {command}`bm` are refused in the view: the gdb stub writes an `int3` through the target's page tables, and an `int3` it did not plant stops the guest, not the debugger.
+- The register traps any code at its address, so ntoseye resumes hits by the target's own VPs or another partition's, and stops only on the partition's. In the view, `/c <n>` limits the breakpoint to VP n, as the view numbers its processors.
+- `/p` and `/t` name the partition's processes and threads, and a condition reads its registers, memory and symbols, as a breakpoint in the target reads the target's. ntoseye checks a hit against them before it shows the view, in about 0.1 s, so a busy function with a false condition slows the guest.
+- Steps from a hit are refused, and so are the target's {command}`!hvbp` and {command}`!hvexit` in the view.
+
+In the SDK, `dbg.breakpoints.add(target, hardware=True)` and `dbg.breakpoints.watch(...)` set the partition's breakpoints while `dbg.select_partition(id)` shows it, and `bp.partition` names the partition. `dbg.run()` returns the hit with `dbg.partition` set to that partition.
 
 ## Raw memory and code
 

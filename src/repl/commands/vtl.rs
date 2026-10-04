@@ -126,7 +126,7 @@ repl_command! {
     names: [".partition"],
     usage: ".partition [partition-id]",
     summary: "Inspect the Windows guest that a Windows hypervisor partition runs (a Windows Sandbox, a Hyper-V VM) in place of the target, or show which is inspected.",
-    details: "With a partition ID, the session inspects that partition's guest instead of the target: its memory is read through the partition's EPT, its NT kernel is found from the page-table root of a VP in kernel mode, and its symbols are loaded, so lm, !process, dt, db, u, k and the other inspection commands read the guest. Its VPs are the threads (p<partition>.<VP index + 1>, so ~Ns selects VP N), with their VTL0 registers, as !hvr <partition> <vp> 0 shows them: a VP that runs in VTL1 has VTL0's RIP, RSP, flags, control and segment registers there, without its general-purpose registers. The view is read-only and the target stays halted: g, steps, breakpoints and writes are refused until you leave it. The root partition's ID (0x1) returns to the target. Without an ID, it shows which partition is inspected. The ID uses the current radix. Needs the VM's hv-evmcs enlightenment and a 64-bit Windows guest.",
+    details: "With a partition ID, the session inspects that partition's guest instead of the target: its memory is read through the partition's EPT, its NT kernel is found from the page-table root of a VP in kernel mode, and its symbols are loaded, so lm, !process, dt, db, u, k and the other inspection commands read the guest. Its VPs are the threads (p<partition>.<VP index + 1>, so ~Ns selects VP N), with their VTL0 registers, as !hvr <partition> <vp> 0 shows them: a VP that runs in VTL1 has VTL0's RIP, RSP, flags, control and segment registers there, without its general-purpose registers. The target stays halted while the view is shown, and the guest's memory and registers are read-only. ba sets a hardware breakpoint of the partition's, which stops only on its VPs (/c names a VP); bp, bu and bm are refused, and so are steps. g leaves the view and runs the target, and a hit of the partition's breakpoint shows the view again on the VP that hit it. bl lists every breakpoint, the target's too. The root partition's ID (0x1) returns to the target. Without an ID, it shows which partition is inspected. The ID uses the current radix. Needs the VM's hv-evmcs enlightenment and a 64-bit Windows guest; breakpoints need the gdb backend.",
     run_state: Halted,
 }
 
@@ -1655,8 +1655,8 @@ impl ReplState<'_> {
             return Ok(());
         };
         let result = self.ctx.enter_partition(arguments[0]);
-        self.caches.clear_threads();
-        self.caches.refresh_symbol_context(&self.ctx.target);
+        self.caches
+            .refresh_partition(self.ctx.partition(), &self.ctx.target);
         match result {
             Ok(()) => match self.ctx.partition() {
                 Some(partition) => {

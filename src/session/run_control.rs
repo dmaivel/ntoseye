@@ -236,7 +236,11 @@ impl Session {
     /// Resume with an explicit exception acknowledgment while preserving the
     /// same breakpoint step-over and cache invalidation prologue as [`Self::resume`].
     pub fn resume_with_disposition(&mut self, disposition: ContinueDisposition) -> Result<()> {
-        self.require_target_view("a resume")?;
+        // A partition view shows the partition as the target halted; the
+        // target is what runs, so a resume leaves the view before anything
+        // a run prepares (traps, parked stops) is touched, as that state is
+        // the target's. A hit of the partition's breakpoints shows it again.
+        self.leave_partition();
         self.target.selected_frame = None;
         self.module_refresh_report = None;
         // A bugcheck or module event can only happen while the guest runs, so

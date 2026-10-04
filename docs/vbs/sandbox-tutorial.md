@@ -182,9 +182,20 @@ stack
 
 The Command Prompt waits for you to type the next line, in `ReadConsoleW`, and the stack goes from `cmd!main` through `kernelbase` and `ntdll` into the Sandbox's kernel. If the stack ends at the first user-mode frame, the process's stack page was trimmed: use the process again and break in.
 
+## Break in the Sandbox's kernel
+
+A hardware breakpoint set while the Sandbox is shown is the Sandbox's. {command}`g` runs the target, and when one of the Sandbox's VPs reaches the address, ntoseye shows the Sandbox again, with that VP selected:
+
+```text
+partition:p7.1> ba e1 nt!NtClose
+partition:p7.1> g
+```
+
+Type a command in the Sandbox's Command Prompt, or move the mouse over its window, and the stop names the Sandbox process that closed a handle, such as `dwm.exe`, with its registers and its stack in the Sandbox's kernel. {command}`k`, {command}`r` and {command}`dt` read the Sandbox there. The target's own code at the same address does not stop: ntoseye resumes it. Only {command}`ba` works in the Sandbox, and steps are refused; [Breakpoints in a guest partition](guest-partitions.md#breakpoints-in-a-guest-partition) shows a whole stop and explains the limits. Clear the breakpoint with `bc *` before you go on.
+
 ## Stop on a hypercall from the Sandbox
 
-The Sandbox's VPs run only when the target's Windows runs them, so breakpoints go back in the target. `.partition 1` returns to it, and {command}`!hvbp` stops on a hypercall from one partition:
+A hypercall breakpoint is in the hypervisor, which is the target's, so set it from the target. `.partition 1` returns to it, and {command}`!hvbp` stops on a hypercall from one partition:
 
 ```text
 partition:p7.1> .partition 1
@@ -270,7 +281,7 @@ inspecting the target (the root partition)
 gdb:p01.02> q
 ```
 
-While the Sandbox is shown, {command}`g`, steps, breakpoints, and writes are refused, because the Sandbox runs only when the target runs. `.partition 1` brings back the target with its breakpoints, and {command}`q` detaches and lets the VM continue to run.
+While the Sandbox is shown, the target stays halted: {command}`g` runs the target and leaves the Sandbox's view, and steps and writes are refused. `.partition 1` brings back the target, and {command}`q` detaches and lets the VM continue to run.
 
 ## From Python
 

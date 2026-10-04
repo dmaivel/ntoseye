@@ -73,7 +73,10 @@ impl BreakpointManager {
         address: VirtAddr,
         config: &BreakpointConfig,
     ) -> bool {
-        let hypervisor = config.hypercall.is_some() || config.vm_exit.is_some();
+        // A hypervisor or guest partition breakpoint's address is no VTL1
+        // code of the target's, whatever its secure kernel maps there.
+        let hypervisor =
+            config.hypercall.is_some() || config.vm_exit.is_some() || config.partition.is_some();
         !hypervisor && (debugger.in_secure_address_space() || debugger.is_secure_address(address))
     }
 
@@ -120,14 +123,9 @@ impl BreakpointManager {
         self.ensure_site_available(address, true, None)?;
         let slot = self.free_hardware_slot(client, access)?;
         let automatic_scope = config.scope.is_none();
-        let fallback_scope = config
+        let scope = config
             .scope
-            .unwrap_or_else(|| Self::scope_for_current_context(debugger));
-        let scope = if automatic_scope {
-            Self::scope_for_address(debugger, address, &fallback_scope)
-        } else {
-            fallback_scope
-        };
+            .unwrap_or_else(|| Self::automatic_scope(debugger, address));
         client.set_hardware_breakpoint(slot, address.0, access, len)?;
 
         let id = self.next_id;
@@ -160,6 +158,7 @@ impl BreakpointManager {
                 min_stack_pointer: None,
                 hypercall: config.hypercall,
                 vm_exit: config.vm_exit,
+                partition: config.partition,
                 backend: BreakpointBackend::Hardware,
             },
         );

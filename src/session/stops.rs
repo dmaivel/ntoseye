@@ -303,7 +303,7 @@ impl Session {
 
     /// The stop of `breakpoint`'s watchpoint hit, reported by `event`,
     /// recorded as the stop the target is halted at.
-    fn watchpoint_hit(
+    pub(super) fn watchpoint_hit(
         &mut self,
         breakpoint: Breakpoint,
         event: StopEvent,
@@ -361,6 +361,18 @@ impl Session {
                 let resolution = self.watchpoint_hit(breakpoint, event, condition_error);
                 Ok(Some(self.continue_outcome_from_resolution(resolution)))
             }
+            WatchpointStopAction::PartitionHit {
+                breakpoint,
+                partition,
+                vp,
+            } => match self.partition_hit(breakpoint, partition, vp, event)? {
+                Some(resolution) => Ok(Some(self.continue_outcome_from_resolution(resolution))),
+                None => {
+                    self.current_thread = stepping;
+                    self.backend.set_current_thread(&self.current_thread)?;
+                    Ok(None)
+                }
+            },
             WatchpointStopAction::Declined | WatchpointStopAction::NotBreakpoint => {
                 self.current_thread = stepping;
                 self.backend.set_current_thread(&self.current_thread)?;
@@ -451,6 +463,17 @@ impl Session {
                 condition_error,
             } => {
                 return Ok(self.watchpoint_hit(breakpoint, event, condition_error));
+            }
+            WatchpointStopAction::PartitionHit {
+                breakpoint,
+                partition,
+                vp,
+            } => {
+                if let Some(resolution) = self.partition_hit(breakpoint, partition, vp, event)? {
+                    return Ok(resolution);
+                }
+                self.continue_backend(ContinueDisposition::Handled)?;
+                return Ok(StopResolution::Resumed);
             }
             WatchpointStopAction::Declined => {
                 self.continue_backend(ContinueDisposition::Handled)?;

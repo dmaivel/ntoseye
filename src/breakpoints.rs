@@ -85,6 +85,9 @@ pub struct Breakpoint {
     /// The VM-exit reason and caller a hit must be handling (`!hvexit`), if
     /// restricted.
     pub vm_exit: Option<ExitFilter>,
+    /// The guest partition of the Windows hypervisor whose code this is, set
+    /// in its view (`.partition`). See [`PartitionFilter`].
+    pub partition: Option<PartitionFilter>,
     /// Whether `scope` was inferred from the resolved address and the process
     /// selected when this breakpoint was created. Explicit `/p` scopes remain
     /// fixed across symbol re-resolution.
@@ -147,6 +150,20 @@ pub struct HypercallFilter {
     pub vp: Option<u32>,
 }
 
+/// A partition breakpoint's filter: the guest partition of the Windows
+/// hypervisor (a Windows Sandbox, a Hyper-V VM) a hit must be on, and the VP
+/// index in it, if restricted.
+///
+/// The breakpoint is a debug register of the target's processors, which
+/// traps whatever code a processor runs at its address: the partition's, or
+/// another partition's or the target's own mapped there. Which VP ran it is
+/// known only once the hit arrives, from the processor's current VP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PartitionFilter {
+    pub partition: u64,
+    pub vp: Option<u32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BreakpointHitDisposition {
     SkipPass,
@@ -172,6 +189,8 @@ pub struct BreakpointConfig {
     pub hypercall: Option<HypercallFilter>,
     /// Restrict hits to a VM-exit reason and its caller. See [`ExitFilter`].
     pub vm_exit: Option<ExitFilter>,
+    /// Make this a guest partition's breakpoint. See [`PartitionFilter`].
+    pub partition: Option<PartitionFilter>,
     /// Resolve a symbol breakpoint past the function's prologue. See
     /// [`BreakpointSpec::Symbol`].
     pub skip_prologue: bool,

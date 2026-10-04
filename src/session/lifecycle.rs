@@ -347,6 +347,7 @@ impl Session {
             unreported_module_change: false,
             last_event: None,
             partition_view: None,
+            kept_partition: None,
             _instance_guard: None,
         };
 
