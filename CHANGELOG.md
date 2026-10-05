@@ -13,7 +13,9 @@ Keeping this file:
 - To release, rename "## Unreleased" to "## vX.Y.Z (YYYY-MM-DD)", the version in Cargo.toml. The release workflow refuses a tag whose version has no section here, or an empty one; dist publishes the section as the release notes, under the tag as the release title.
 -->
 
-## Unreleased
+## v0.46.0 (2026-10-05)
+
+ntoseye can now debug inside a Windows Sandbox or Hyper-V VM on Intel hosts, not only read it: break on the guest's code and data, step its threads, and change its memory and registers.
 
 ### Added
 
