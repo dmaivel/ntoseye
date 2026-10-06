@@ -669,14 +669,16 @@ impl<'s, 'a> Browser<'s, 'a> {
 
     fn code_line(&self, index: usize, width: usize) -> TextNode<Msg> {
         let row = &self.code[index].row;
+        // ASCII markers: a shape the monospace font lacks comes from a
+        // fallback font at another width and shifts the row.
         let mut spans = vec![
             match self.breakpoints.get(&row.ip) {
-                Some(true) => span("● ", "error"),
-                Some(false) => span("○ ", MUTED),
+                Some(true) => span("* ", "error"),
+                Some(false) => span("* ", MUTED),
                 None => span("  ", ""),
             },
             if self.ip == Some(row.ip) {
-                span("▶ ", "info")
+                span("> ", "info")
             } else {
                 span("  ", "")
             },
