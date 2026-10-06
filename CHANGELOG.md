@@ -19,6 +19,10 @@ Keeping this file:
 
 - In Tern, Stencil's terminal, the REPL draws its results natively: a stop is a card with the registers folded, the code at the stop and the stack, and a bugcheck and `!analyze` are red cards; `k`, `lm`, `!process`, `ps`, `bl`, `~`, `!pte`, `vars` and the memory dumps (`db`, `dd`, `dq`, `dqs`, …) are tables; `dt`, `wt` and `!hvpartitions` are trees that fold; `r`, `u` and `uf` use Tern's colors, and a timer shows how long `g` has run. Other terminals, captured output and `.logopen` transcripts keep the text, `TERN_TSP=0` turns it off, and a Tern too old to draw the views gets text with a warning saying so ([details](https://ntoseye.com/using/repl/#in-tern)).
 
+### Fixed
+
+- When its terminal goes away (a closed pane or a dropped ssh session), the REPL now removes its breakpoints, leaves the guest running and exits, as `q` does. It used to spin a CPU core at its prompt and keep the guest halted under the debugger until it was killed.
+
 ## v0.46.0 (2026-10-05)
 
 ntoseye can now debug inside a Windows Sandbox or Hyper-V VM on Intel hosts, not only read it: break on the guest's code and data, step its threads, and change its memory and registers.

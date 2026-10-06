@@ -588,15 +588,45 @@ const TERMINATION_POLL: Duration = Duration::from_millis(100);
 #[cfg(all(unix, feature = "cli"))]
 fn bridge_termination_to_interrupt(interrupt: InterruptRequester) {
     std::thread::spawn(move || {
+        let mut woke = false;
         loop {
             // Re-raised every tick: a wait that takes the flag with `swap`
             // must not be the only one to see it.
             if termination_requested() {
                 interrupt.raise();
+                if !woke {
+                    woke = true;
+                    wake_line_editor();
+                }
             }
             std::thread::sleep(TERMINATION_POLL);
         }
     });
+}
+
+/// Hand the prompt an Enter on a fresh stdin, so a pending `read_line`
+/// returns and the prompt loop sees the termination request before running
+/// anything.
+///
+/// On a terminal that hung up (its pane closed, its ssh session dropped),
+/// reedline's reader, crossterm 0.29, retries the failing read forever: it
+/// treats any error but `WouldBlock` as "try again", so the process spins a
+/// core and never reaches the teardown, while the guest stays halted under
+/// the debugger. Reading the pipe instead gives it a key. The write end stays
+/// open, so no reader ever sees end of file.
+#[cfg(all(unix, feature = "cli"))]
+fn wake_line_editor() {
+    use std::os::fd::AsRawFd;
+
+    let Ok((reader, mut writer)) = io::pipe() else {
+        return;
+    };
+    if writer.write_all(b"\r").is_err() {
+        return;
+    }
+    // SAFETY: both descriptors are open; dup2 only replaces descriptor 0.
+    unsafe { libc::dup2(reader.as_raw_fd(), libc::STDIN_FILENO) };
+    std::mem::forget(writer);
 }
 
 #[cfg(feature = "cli")]

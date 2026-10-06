@@ -43,18 +43,22 @@ static STDOUT_STYLED: LazyLock<bool> = LazyLock::new(|| !*NO_COLOR && io::stdout
 static STDERR_STYLED: LazyLock<bool> = LazyLock::new(|| !*NO_COLOR && io::stderr().is_terminal());
 
 fn print_stdout(args: fmt::Arguments<'_>) {
+    // A failed write is dropped, not a panic like `print!`'s: a terminal
+    // that went away must not stop the teardown that releases the guest.
+    let mut stdout = io::stdout();
     if *STDOUT_STYLED {
-        print!("{args}");
+        let _ = stdout.write_fmt(args);
     } else {
-        print!("{}", strip_ansi(&args.to_string()));
+        let _ = stdout.write_all(strip_ansi(&args.to_string()).as_bytes());
     }
 }
 
 fn print_stderr(args: fmt::Arguments<'_>) {
+    let mut stderr = io::stderr();
     if *STDERR_STYLED {
-        eprint!("{args}");
+        let _ = stderr.write_fmt(args);
     } else {
-        eprint!("{}", strip_ansi(&args.to_string()));
+        let _ = stderr.write_all(strip_ansi(&args.to_string()).as_bytes());
     }
 }
 
