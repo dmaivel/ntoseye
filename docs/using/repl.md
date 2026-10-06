@@ -17,6 +17,18 @@ With `--plain-repl`, ntoseye reads commands line by line without completion or h
 
 ntoseye shows color only when the output goes to a terminal. If you redirect the output, or if `NO_COLOR` is set, the output is plain text.
 
+## In Tern
+
+In [Tern](https://stencil.so/tern), Stencil's terminal, the REPL draws its results natively instead of as text:
+
+- A stop is a card. Its ring shows why the target stopped: the accent for a breakpoint, amber for an exception, red for a bugcheck. The card holds the registers (folded), the code at the stop with the current instruction marked, and the stack.
+- {command}`k`, {command}`lm`, {command}`!process`, {command}`ps`, {command}`bl` and {command}`~` are tables. In a narrow pane, their less important columns hide first.
+- {command}`dt`, {command}`wt` and {command}`!hvpartitions` are trees that you can fold, and {command}`.help` folds by category.
+- {command}`r` is a register grid, and {command}`u`, {command}`ub` and {command}`uf` color instructions with Tern's syntax colors.
+- While {command}`g` waits for a stop, a timer shows how long the target has run.
+
+Other commands print text. ntoseye asks the terminal when the REPL starts, so this also works over ssh, but not inside tmux, screen or zellij. Output that a host captures (MCP, the Python SDK, the DAP console, `.foreach`) and `.logopen` transcripts are always text. For text in Tern, set `TERN_TSP=0` or use `--plain-repl`.
+
 ## Aliases
 
 To make an alias, use `alias <name> <expansion>`. In the expansion, you can use these variables:

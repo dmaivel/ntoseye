@@ -128,6 +128,49 @@ fn process_brief_row(process: &ProcessInfo, detail: &ProcessDetail) -> Vec<Strin
     ]
 }
 
+/// The `!process` table: one brief row per process.
+fn print_process_briefs(processes: &[ProcessInfo], details: &[ProcessDetail]) {
+    let mut builder = Builder::default();
+    builder.push_record(vec![
+        "PROCESS".to_string(),
+        "SessionId".to_string(),
+        "Cid".to_string(),
+        "Peb".to_string(),
+        "Wow64".to_string(),
+        "ParentCid".to_string(),
+        "DirBase".to_string(),
+        "ObjectTable".to_string(),
+        "HandleCount".to_string(),
+        "Image".to_string(),
+    ]);
+    for (process, detail) in processes.iter().zip(details) {
+        builder.push_record(process_brief_row(process, detail));
+    }
+    print_padded_table(builder);
+}
+
+/// `ps`: the short legacy list.
+fn print_ps(processes: &[ProcessInfo]) {
+    let mut builder = Builder::default();
+    builder.push_record(vec![
+        "Name".to_string(),
+        "PID".to_string(),
+        "EPROCESS".to_string(),
+        "DTB".to_string(),
+        "Wow64".to_string(),
+    ]);
+    for process in processes {
+        builder.push_record(vec![
+            process.name.to_string(),
+            format!("{}", ui::Value(process.pid)),
+            ui::addr(process.eprocess_va.0).to_string(),
+            ui::addr(process.dtb),
+            if process.is_wow64() { "x86" } else { "-" }.to_string(),
+        ]);
+    }
+    print_padded_table(builder);
+}
+
 fn print_process_detail(process: &ProcessInfo, detail: &ProcessDetail) {
     outln!("  VadRoot        {}", display_pointer(detail.vad_root));
     outln!("  Token         {}", display_pointer(detail.token));
@@ -321,27 +364,17 @@ impl ReplState<'_> {
             return Ok(());
         }
 
-        let mut builder = Builder::default();
-        builder.push_record(vec![
-            "PROCESS".to_string(),
-            "SessionId".to_string(),
-            "Cid".to_string(),
-            "Peb".to_string(),
-            "Wow64".to_string(),
-            "ParentCid".to_string(),
-            "DirBase".to_string(),
-            "ObjectTable".to_string(),
-            "HandleCount".to_string(),
-            "Image".to_string(),
-        ]);
         let details: Vec<ProcessDetail> = selected
             .iter()
             .map(|process| self.ctx.target.process_detail(process))
             .collect();
-        for (process, detail) in selected.iter().zip(&details) {
-            builder.push_record(process_brief_row(process, detail));
-        }
-        print_padded_table(builder);
+        #[cfg(feature = "cli")]
+        native::render(
+            || native::lists::processes(&selected, &details),
+            || print_process_briefs(&selected, &details),
+        );
+        #[cfg(not(feature = "cli"))]
+        print_process_briefs(&selected, &details);
 
         if flags & 1 != 0 || flags & 2 != 0 || flags & 4 != 0 {
             for (process, detail) in selected.iter().zip(&details) {
@@ -374,32 +407,17 @@ impl ReplState<'_> {
             .iter()
             .map(|process| (process.name.clone(), process.pid))
             .collect();
-        let mut builder = Builder::default();
-        builder.push_record(vec![
-            "Name".to_string(),
-            "PID".to_string(),
-            "EPROCESS".to_string(),
-            "DTB".to_string(),
-            "Wow64".to_string(),
-        ]);
-        let mut count = 0;
-        for process in processes {
-            if filter.is_some_and(|filter| !process_matches(&process, filter)) {
-                continue;
-            }
-            count += 1;
-            builder.push_record(vec![
-                process.name.to_string(),
-                format!("{}", ui::Value(process.pid)),
-                ui::addr(process.eprocess_va.0).to_string(),
-                ui::addr(process.dtb),
-                if process.is_wow64() { "x86" } else { "-" }.to_string(),
-            ]);
-        }
-        if count == 0 {
+        let shown = processes
+            .into_iter()
+            .filter(|process| filter.is_none_or(|filter| process_matches(process, filter)))
+            .collect::<Vec<_>>();
+        if shown.is_empty() {
             outln!("{}\n", "no matching processes".bright_black());
         } else {
-            print_padded_table(builder);
+            #[cfg(feature = "cli")]
+            native::render(|| native::lists::ps(&shown), || print_ps(&shown));
+            #[cfg(not(feature = "cli"))]
+            print_ps(&shown);
         }
         Ok(())
     }

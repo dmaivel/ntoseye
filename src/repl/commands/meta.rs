@@ -21,6 +21,41 @@ use crate::repl::*;
 const PRINTF_C_STRING_LIMIT: usize = 4096;
 const PRINTF_WIDE_STRING_LIMIT: usize = 2048;
 
+/// One group of the `.help` listing: a category's commands, the Python
+/// commands, or the user aliases.
+pub struct HelpGroup {
+    pub title: String,
+    pub entries: Vec<HelpEntry>,
+}
+
+/// One line of a [`HelpGroup`]: a name and what it does (a command's
+/// summary, a Python command's first help line, an alias's expansion).
+pub struct HelpEntry {
+    pub name: String,
+    pub summary: String,
+    /// The command's other names, comma-separated; empty when it has none.
+    pub aliases: String,
+}
+
+fn print_help_listing(groups: &[HelpGroup]) {
+    for group in groups {
+        outln!("{}", ui::label(&group.title));
+        for entry in &group.entries {
+            if entry.aliases.is_empty() {
+                outln!("  {:<24} {}", entry.name, entry.summary);
+            } else {
+                outln!(
+                    "  {:<24} {} (aliases: {})",
+                    entry.name,
+                    entry.summary,
+                    entry.aliases
+                );
+            }
+        }
+        outln!();
+    }
+}
+
 repl_command! {
     cmd_reload_scripts();
     names: ["reload-scripts"],
@@ -339,40 +374,56 @@ impl ReplState<'_> {
                 .or_default()
                 .insert(canonical, spec);
         }
-        for (category, specs) in groups {
-            outln!("{}", ui::label(category));
-            for (_, spec) in specs {
-                let aliases = spec.names[1..].join(", ");
-                if aliases.is_empty() {
-                    outln!("  {:<24} {}", spec.names[0], spec.summary);
-                } else {
-                    outln!(
-                        "  {:<24} {} (aliases: {})",
-                        spec.names[0],
-                        spec.summary,
-                        aliases
-                    );
-                }
-            }
-            outln!();
-        }
+        let mut listing: Vec<HelpGroup> = groups
+            .into_iter()
+            .map(|(category, specs)| HelpGroup {
+                title: category.to_string(),
+                entries: specs
+                    .into_values()
+                    .map(|spec| HelpEntry {
+                        name: spec.names[0].to_string(),
+                        summary: spec.summary.to_string(),
+                        aliases: spec.names[1..].join(", "),
+                    })
+                    .collect(),
+            })
+            .collect();
 
         let user_commands = self.caches.user_commands.read().unwrap().clone();
         if !user_commands.is_empty() {
-            outln!("{}", ui::label("python commands"));
-            for (name, help, _) in user_commands {
-                outln!("  {:<24} {}", name, help.lines().next().unwrap_or(""));
-            }
-            outln!();
+            listing.push(HelpGroup {
+                title: "python commands".to_string(),
+                entries: user_commands
+                    .into_iter()
+                    .map(|(name, help, _)| HelpEntry {
+                        summary: help.lines().next().unwrap_or("").to_string(),
+                        name,
+                        aliases: String::new(),
+                    })
+                    .collect(),
+            });
         }
         let aliases = self.aliases.entries();
         if !aliases.is_empty() {
-            outln!("{}", ui::label("user aliases"));
-            for (name, expansion) in aliases {
-                outln!("  {name:<24} {expansion}");
-            }
-            outln!();
+            listing.push(HelpGroup {
+                title: "user aliases".to_string(),
+                entries: aliases
+                    .into_iter()
+                    .map(|(name, expansion)| HelpEntry {
+                        name,
+                        summary: expansion,
+                        aliases: String::new(),
+                    })
+                    .collect(),
+            });
         }
+        #[cfg(feature = "cli")]
+        native::render(
+            || native::help::view(&listing),
+            || print_help_listing(&listing),
+        );
+        #[cfg(not(feature = "cli"))]
+        print_help_listing(&listing);
         Ok(())
     }
 

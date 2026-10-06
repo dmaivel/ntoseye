@@ -449,10 +449,16 @@ impl ReplState<'_> {
 
     pub fn wait_for_stop_after_resume(&mut self) -> Result<()> {
         if !self.quiet_stops && self.stop_wait.is_none() {
-            outln!(
-                "{}",
-                "VM running, waiting for stop (Ctrl+C to pause)...".bright_black()
-            );
+            let print = || {
+                outln!(
+                    "{}",
+                    "VM running, waiting for stop (Ctrl+C to pause)...".bright_black()
+                )
+            };
+            #[cfg(feature = "cli")]
+            native::running(print);
+            #[cfg(not(feature = "cli"))]
+            print();
         }
 
         self.ctx.target.interrupt.store(false, Ordering::SeqCst);
@@ -697,6 +703,10 @@ impl ReplState<'_> {
                 }
             }
         }
+        // A wait that ended without a result (an error, a spent budget)
+        // still stops the indicator.
+        #[cfg(feature = "cli")]
+        native::finish_running();
 
         Ok(())
     }
@@ -1017,6 +1027,12 @@ impl ReplState<'_> {
                 error!("watch-trace stopped after {count} instructions: {error}")
             }
         }
+        #[cfg(feature = "cli")]
+        native::render(
+            || native::trees::call_tree(&trace.root),
+            || render_trace_frame(&trace.root, 0),
+        );
+        #[cfg(not(feature = "cli"))]
         render_trace_frame(&trace.root, 0);
         Ok(())
     }

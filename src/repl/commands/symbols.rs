@@ -11,8 +11,9 @@ use crate::expr::{Expr, ExprValue};
 use crate::guest::ModuleInfo;
 use crate::layout::{FieldInfo, nested_layout_name};
 use crate::symbols::{
-    CodeFrame, LocalSourceState, ModuleSymbolStatus, SourceLocation, format_symbol_with_offset,
-    glob_matches, parse_source_paths, parse_symbol_sources,
+    CodeFrame, LocalSourceState, ModuleSymbolSource, ModuleSymbolStatus, PdbIdentity,
+    SourceLocation, format_symbol_with_offset, glob_matches, parse_source_paths,
+    parse_symbol_sources,
 };
 use crate::target::UserVar;
 use crate::types::VirtAddr;
@@ -884,123 +885,39 @@ impl ReplState<'_> {
                             }
                         })
                 };
-                if verbose {
-                    let mut shown = 0;
-                    for module in modules.iter().filter(|module| matches(module)) {
-                        shown += 1;
-                        let status = self
-                            .ctx
-                            .target
-                            .symbols
-                            .module_symbol_status(dtb, module.base_address);
-                        outln!("{} ({})", module.name, module.short_name);
-                        outln!(
-                            "  range   : {} - {}",
-                            ui::addr(module.base_address.0),
-                            ui::addr(module.end_address().0)
-                        );
-                        outln!(
-                            "  symbols : {}",
-                            status
-                                .as_ref()
-                                .map(|status| status.label().to_string())
-                                .unwrap_or_else(|| "unknown".to_string())
-                        );
-                        outln!(
-                            "  source  : {}",
-                            self.ctx
-                                .target
-                                .symbols
-                                .module_symbol_source(dtb, module.base_address)
-                                .map(|source| source.label().to_string())
-                                .unwrap_or_else(|| "-".to_string())
-                        );
-                        match self
-                            .ctx
-                            .target
-                            .symbols
-                            .module_pdb_identity(dtb, module.base_address)
-                        {
-                            Some(identity) => {
-                                outln!("  pdb guid: {:032X}", identity.guid);
-                                outln!("  pdb age : {}", identity.age);
-                            }
-                            None => outln!("  pdb     : -"),
-                        }
-                        if let Some(ModuleSymbolStatus::Failed(reason)) = status {
-                            outln!("  error   : {}", reason);
-                        }
-                        if timestamp {
-                            outln!(
-                                "  timestamp: {}",
-                                module
-                                    .time_date_stamp
-                                    .map(|stamp| format!("{stamp:#x}"))
-                                    .unwrap_or_else(|| "-".to_string())
-                            );
-                        }
-                        outln!();
-                    }
-                    if shown == 0 {
-                        outln!("{}\n", "no matching modules".bright_black());
-                    }
-                    return Ok(());
-                }
-                let mut builder = Builder::default();
-                let mut header = vec![
-                    "Start".to_string(),
-                    "End".to_string(),
-                    "Module".to_string(),
-                    "Version".to_string(),
-                    "Symbols".to_string(),
-                    "Source".to_string(),
-                ];
-                if timestamp {
-                    header.push("Timestamp".to_string());
-                }
-                header.push("Image".to_string());
-                builder.push_record(header);
-
-                let mut count = 0;
-                for module in modules {
-                    if !matches(&module) {
-                        continue;
-                    }
-                    count += 1;
-                    let mut row = vec![
-                        ui::addr(module.base_address.0).to_string(),
-                        ui::addr(module.end_address().0).to_string(),
-                        module.short_name.to_string(),
-                        module.file_version.as_deref().unwrap_or("-").to_string(),
-                        self.ctx
-                            .target
-                            .symbols
-                            .module_symbol_status(dtb, module.base_address)
-                            .map(|status| status.label().to_string())
-                            .unwrap_or_else(|| "unknown".to_string()),
-                        self.ctx
-                            .target
-                            .symbols
-                            .module_symbol_source(dtb, module.base_address)
-                            .map(|source| source.label().to_string())
-                            .unwrap_or_else(|| "-".to_string()),
-                    ];
-                    if timestamp {
-                        row.push(
-                            module
-                                .time_date_stamp
-                                .map(|stamp| format!("{stamp:#x}"))
-                                .unwrap_or_else(|| "-".to_string()),
-                        );
-                    }
-                    row.push(module.name);
-                    builder.push_record(row);
-                }
-
-                if count == 0 {
+                let symbols = &self.ctx.target.symbols;
+                let listings = modules
+                    .into_iter()
+                    .filter(|module| matches(module))
+                    .map(|module| ModuleListing {
+                        status: symbols.module_symbol_status(dtb, module.base_address),
+                        source: symbols.module_symbol_source(dtb, module.base_address),
+                        pdb: if verbose {
+                            symbols.module_pdb_identity(dtb, module.base_address)
+                        } else {
+                            None
+                        },
+                        module,
+                    })
+                    .collect::<Vec<_>>();
+                if listings.is_empty() {
                     outln!("{}\n", "no matching modules".bright_black());
+                } else if verbose {
+                    #[cfg(feature = "cli")]
+                    native::render(
+                        || native::lists::module_details(&listings, timestamp),
+                        || print_module_details(&listings, timestamp),
+                    );
+                    #[cfg(not(feature = "cli"))]
+                    print_module_details(&listings, timestamp);
                 } else {
-                    print_padded_table(builder);
+                    #[cfg(feature = "cli")]
+                    native::render(
+                        || native::lists::modules(&listings, timestamp),
+                        || print_modules(&listings, timestamp),
+                    );
+                    #[cfg(not(feature = "cli"))]
+                    print_modules(&listings, timestamp);
                 }
             }
             Err(e) => {
@@ -1009,6 +926,114 @@ impl ReplState<'_> {
         }
 
         Ok(())
+    }
+}
+
+/// A module `lm` lists with its symbols' state, gathered once for either
+/// renderer.
+pub struct ModuleListing {
+    pub module: ModuleInfo,
+    pub status: Option<ModuleSymbolStatus>,
+    pub source: Option<ModuleSymbolSource>,
+    /// The PDB identity, looked up only for `lm v`.
+    pub pdb: Option<PdbIdentity>,
+}
+
+/// The `lm` table: one row per module.
+fn print_modules(listings: &[ModuleListing], timestamp: bool) {
+    let mut builder = Builder::default();
+    let mut header = vec![
+        "Start".to_string(),
+        "End".to_string(),
+        "Module".to_string(),
+        "Version".to_string(),
+        "Symbols".to_string(),
+        "Source".to_string(),
+    ];
+    if timestamp {
+        header.push("Timestamp".to_string());
+    }
+    header.push("Image".to_string());
+    builder.push_record(header);
+
+    for listing in listings {
+        let module = &listing.module;
+        let mut row = vec![
+            ui::addr(module.base_address.0).to_string(),
+            ui::addr(module.end_address().0).to_string(),
+            module.short_name.to_string(),
+            module.file_version.as_deref().unwrap_or("-").to_string(),
+            listing
+                .status
+                .as_ref()
+                .map(|status| status.label().to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            listing
+                .source
+                .as_ref()
+                .map(|source| source.label().to_string())
+                .unwrap_or_else(|| "-".to_string()),
+        ];
+        if timestamp {
+            row.push(
+                module
+                    .time_date_stamp
+                    .map(|stamp| format!("{stamp:#x}"))
+                    .unwrap_or_else(|| "-".to_string()),
+            );
+        }
+        row.push(module.name.clone());
+        builder.push_record(row);
+    }
+    print_padded_table(builder);
+}
+
+/// `lm v`: each module's range and symbol details.
+fn print_module_details(listings: &[ModuleListing], timestamp: bool) {
+    for listing in listings {
+        let module = &listing.module;
+        outln!("{} ({})", module.name, module.short_name);
+        outln!(
+            "  range   : {} - {}",
+            ui::addr(module.base_address.0),
+            ui::addr(module.end_address().0)
+        );
+        outln!(
+            "  symbols : {}",
+            listing
+                .status
+                .as_ref()
+                .map(|status| status.label().to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+        outln!(
+            "  source  : {}",
+            listing
+                .source
+                .as_ref()
+                .map(|source| source.label().to_string())
+                .unwrap_or_else(|| "-".to_string())
+        );
+        match listing.pdb {
+            Some(identity) => {
+                outln!("  pdb guid: {:032X}", identity.guid);
+                outln!("  pdb age : {}", identity.age);
+            }
+            None => outln!("  pdb     : -"),
+        }
+        if let Some(ModuleSymbolStatus::Failed(reason)) = &listing.status {
+            outln!("  error   : {}", reason);
+        }
+        if timestamp {
+            outln!(
+                "  timestamp: {}",
+                module
+                    .time_date_stamp
+                    .map(|stamp| format!("{stamp:#x}"))
+                    .unwrap_or_else(|| "-".to_string())
+            );
+        }
+        outln!();
     }
 }
 

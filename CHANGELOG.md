@@ -13,6 +13,12 @@ Keeping this file:
 - To release, rename "## Unreleased" to "## vX.Y.Z (YYYY-MM-DD)", the version in Cargo.toml. The release workflow refuses a tag whose version has no section here, or an empty one; dist publishes the section as the release notes, under the tag as the release title.
 -->
 
+## Unreleased
+
+### Added
+
+- In Tern, Stencil's terminal, the REPL draws its results natively: a stop is a card with the registers folded, the code at the stop and the stack; `k`, `lm`, `!process`, `ps`, `bl` and `~` are tables; `dt`, `wt` and `!hvpartitions` are trees that fold; `r`, `u` and `uf` use Tern's colors, and a timer shows how long `g` has run. Other terminals, captured output and `.logopen` transcripts keep the text, and `TERN_TSP=0` turns it off ([details](https://ntoseye.com/using/repl/#in-tern)).
+
 ## v0.46.0 (2026-10-05)
 
 ntoseye can now debug inside a Windows Sandbox or Hyper-V VM on Intel hosts, not only read it: break on the guest's code and data, step its threads, and change its memory and registers.

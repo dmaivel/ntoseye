@@ -173,7 +173,7 @@ fn size_text(bytes: u64) -> String {
 
 /// The processors whose current VP a VP is, by number, or by processor
 /// block where the build keeps no number.
-fn processors_text(processors: &[HvProcessor]) -> String {
+pub fn processors_text(processors: &[HvProcessor]) -> String {
     processors
         .iter()
         .map(|processor| match processor.number {
@@ -182,6 +182,119 @@ fn processors_text(processors: &[HvProcessor]) -> String {
         })
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// A partition of the `!hvpartitions` tree, with its VPs and the
+/// partitions nested below it.
+pub struct PartitionNode<'a> {
+    pub partition: &'a HvPartition,
+    pub vps: Vec<VpNode<'a>>,
+    pub children: Vec<PartitionNode<'a>>,
+}
+
+/// A VP of a [`PartitionNode`], and the symbol where the VTL it runs left
+/// off, when it is the root partition's and the address resolves.
+pub struct VpNode<'a> {
+    pub vp: &'a HvVirtualProcessor,
+    pub symbol: Option<String>,
+}
+
+/// The guest state of the VTL that `vp` runs, or last ran, in.
+pub fn vp_state(vp: &HvVirtualProcessor) -> Option<EvmcsState> {
+    vp.vtls
+        .iter()
+        .find(|vtl| vtl.level == vp.vtl)
+        .and_then(|vtl| vtl.state)
+}
+
+/// The VTLs enabled on `vp` other than the one it runs, as ` (+VTL0 VTL1)`,
+/// or empty.
+pub fn other_vtls(vp: &HvVirtualProcessor) -> String {
+    let others: Vec<String> = vp
+        .vtls
+        .iter()
+        .filter(|vtl| vtl.level != vp.vtl)
+        .map(|vtl| format!("VTL{}", vtl.level))
+        .collect();
+    if others.is_empty() {
+        String::new()
+    } else {
+        format!(" (+{})", others.join(" "))
+    }
+}
+
+/// `node`'s partition with its privileges, its VPs, and its child
+/// partitions nested below it, as lines for a tree `depth` levels down.
+fn partition_tree(node: &PartitionNode<'_>, depth: usize) -> String {
+    let partition = node.partition;
+    let mut head = format!("{} {:#x}", ui::label("partition"), partition.id);
+    if partition.parent.is_none() {
+        head.push_str("  root");
+    }
+    head.push_str(&format!("  {}", ui::muted(&ui::addr(partition.address))));
+    let (names, unnamed) = privilege_names(partition.privileges);
+    let mut privileges = names.join(" ");
+    if unnamed != 0 {
+        privileges.push_str(&format!(" (+{unnamed:#x})"));
+    }
+    // The names hang under the first: "privileges " (11), the mask
+    // (16), and a separator (2), after the tree's indent and gutter.
+    let mut children = vec![wrapped_dim_tail(
+        format!(
+            "{} {:016x}  ",
+            ui::muted("privileges"),
+            partition.privileges
+        ),
+        29,
+        &privileges,
+        3 * (depth + 1) + 29,
+    )];
+    children.extend(node.vps.iter().map(|vp| vp_line(vp, 3 * (depth + 1))));
+    children.extend(
+        node.children
+            .iter()
+            .map(|child| partition_tree(child, depth + 1)),
+    );
+    std::iter::once(head)
+        .chain(event_children_lines("", &children))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// One VP in a partition tree: its processor, the VTL it runs (the other
+/// enabled ones after it), and where that VTL left off and why. A line too
+/// long for the terminal from column `col` puts the last exit on a line of
+/// its own, under where the VTL left off.
+fn vp_line(node: &VpNode<'_>, col: usize) -> String {
+    let vp = node.vp;
+    let mut head = format!("VP {}", vp.index);
+    let cpu = processors_text(&vp.processors);
+    if !cpu.is_empty() {
+        head.push_str(&format!("  CPU {cpu}"));
+    }
+    head.push_str(&format!("  VTL{}", vp.vtl));
+    let others = other_vtls(vp);
+    let styled_head = format!("{head}{}", ui::muted(&others));
+    let Some(state) = vp_state(vp) else {
+        return styled_head;
+    };
+    let (at, styled_at) = match &node.symbol {
+        Some(symbol) => (symbol.clone(), ui::symbol(symbol)),
+        None => (format!("{:016x}", state.rip), ui::addr(state.rip)),
+    };
+    let line = format!("{styled_head}  {styled_at}");
+    let Some(exit) = state.exit_reason_name() else {
+        return line;
+    };
+    let exit = format!("last exit {exit}");
+    // Measured plain: styling's escapes would count toward the width.
+    let plain = format!("{head}{others}  {at}  {exit}");
+    if wrap_prose(&plain, col).len() > 1 {
+        let hang = head.len() + others.len() + 2;
+        format!("{line}\n{}{}", " ".repeat(hang), ui::muted(&exit))
+    } else {
+        format!("{line}  {}", ui::muted(&exit))
+    }
 }
 
 /// A VP that a command's partition ID and VP index select.
@@ -682,131 +795,65 @@ impl ReplState<'_> {
         // Each partition under its parent, once: the root, then any whose
         // parent the walk did not find (or whose parents loop).
         let mut seen = HashSet::new();
+        let mut forest = Vec::new();
         for partition in &partitions {
             let orphan = partition
                 .parent
                 .is_none_or(|parent| !partitions.iter().any(|p| p.id == parent));
             if orphan && !seen.contains(&partition.id) {
-                outln!(
-                    "{}",
-                    self.partition_tree(partition, &partitions, 0, &mut seen)
-                );
+                forest.push(self.partition_node(partition, &partitions, &mut seen));
             }
         }
         for partition in &partitions {
             if !seen.contains(&partition.id) {
-                outln!(
-                    "{}",
-                    self.partition_tree(partition, &partitions, 0, &mut seen)
-                );
+                forest.push(self.partition_node(partition, &partitions, &mut seen));
             }
         }
-        outln!();
+        let print = || {
+            for node in &forest {
+                outln!("{}", partition_tree(node, 0));
+            }
+            outln!();
+        };
+        #[cfg(feature = "cli")]
+        native::render(|| native::trees::partitions(&forest), print);
+        #[cfg(not(feature = "cli"))]
+        print();
         Ok(())
     }
 
-    /// `partition` with its privileges, its VPs, and its child partitions
-    /// nested below it, as lines for a tree `depth` levels down. A partition
-    /// in `seen` is not shown again.
-    fn partition_tree(
+    /// `partition` with its VPs and its child partitions nested below it. A
+    /// partition in `seen` is not nested again.
+    fn partition_node<'a>(
         &self,
-        partition: &HvPartition,
-        partitions: &[HvPartition],
-        depth: usize,
+        partition: &'a HvPartition,
+        partitions: &'a [HvPartition],
         seen: &mut HashSet<u64>,
-    ) -> String {
+    ) -> PartitionNode<'a> {
         seen.insert(partition.id);
-        let mut head = format!("{} {:#x}", ui::label("partition"), partition.id);
-        if partition.parent.is_none() {
-            head.push_str("  root");
-        }
-        head.push_str(&format!("  {}", ui::muted(&ui::addr(partition.address))));
-        let (names, unnamed) = privilege_names(partition.privileges);
-        let mut privileges = names.join(" ");
-        if unnamed != 0 {
-            privileges.push_str(&format!(" (+{unnamed:#x})"));
-        }
-        // The names hang under the first: "privileges " (11), the mask
-        // (16), and a separator (2), after the tree's indent and gutter.
-        let mut children = vec![wrapped_dim_tail(
-            format!(
-                "{} {:016x}  ",
-                ui::muted("privileges"),
-                partition.privileges
-            ),
-            29,
-            &privileges,
-            3 * (depth + 1) + 29,
-        )];
         let root = partition.parent.is_none();
-        children.extend(
-            partition
-                .virtual_processors
-                .iter()
-                .map(|vp| self.vp_line(vp, root, 3 * (depth + 1))),
-        );
+        let vps = partition
+            .virtual_processors
+            .iter()
+            .map(|vp| VpNode {
+                vp,
+                // The root partition's VPs run NT and the secure kernel,
+                // whose symbols name where they left off.
+                symbol: vp_state(vp)
+                    .filter(|_| root)
+                    .and_then(|state| try_format_symbol_at(&self.ctx.target, state.cr3, state.rip)),
+            })
+            .collect();
+        let mut children = Vec::new();
         for child in partitions {
             if child.parent == Some(partition.id) && !seen.contains(&child.id) {
-                children.push(self.partition_tree(child, partitions, depth + 1, seen));
+                children.push(self.partition_node(child, partitions, seen));
             }
         }
-        std::iter::once(head)
-            .chain(event_children_lines("", &children))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    /// One VP in a partition tree: its processor, the VTL it runs (the
-    /// other enabled ones after it), and where that VTL left off and why.
-    /// The root partition's are named from NT's and the secure kernel's
-    /// symbols. A line too long for the terminal from column `col` puts the
-    /// last exit on a line of its own, under where the VTL left off.
-    fn vp_line(&self, vp: &HvVirtualProcessor, root: bool, col: usize) -> String {
-        let mut head = format!("VP {}", vp.index);
-        let cpu = processors_text(&vp.processors);
-        if !cpu.is_empty() {
-            head.push_str(&format!("  CPU {cpu}"));
-        }
-        head.push_str(&format!("  VTL{}", vp.vtl));
-        let others: Vec<String> = vp
-            .vtls
-            .iter()
-            .filter(|vtl| vtl.level != vp.vtl)
-            .map(|vtl| format!("VTL{}", vtl.level))
-            .collect();
-        let others = if others.is_empty() {
-            String::new()
-        } else {
-            format!(" (+{})", others.join(" "))
-        };
-        let state = vp
-            .vtls
-            .iter()
-            .find(|vtl| vtl.level == vp.vtl)
-            .and_then(|vtl| vtl.state);
-        let styled_head = format!("{head}{}", ui::muted(&others));
-        let Some(state) = state else {
-            return styled_head;
-        };
-        let symbol = root
-            .then(|| try_format_symbol_at(&self.ctx.target, state.cr3, state.rip))
-            .flatten();
-        let (at, styled_at) = match symbol {
-            Some(symbol) => (symbol.clone(), ui::symbol(&symbol)),
-            None => (format!("{:016x}", state.rip), ui::addr(state.rip)),
-        };
-        let line = format!("{styled_head}  {styled_at}");
-        let Some(exit) = state.exit_reason_name() else {
-            return line;
-        };
-        let exit = format!("last exit {exit}");
-        // Measured plain: styling's escapes would count toward the width.
-        let plain = format!("{head}{others}  {at}  {exit}");
-        if wrap_prose(&plain, col).len() > 1 {
-            let hang = head.len() + others.len() + 2;
-            format!("{line}\n{}{}", " ".repeat(hang), ui::muted(&exit))
-        } else {
-            format!("{line}  {}", ui::muted(&exit))
+        PartitionNode {
+            partition,
+            vps,
+            children,
         }
     }
 

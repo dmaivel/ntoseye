@@ -9,6 +9,7 @@ use crate::dbg_backend::{DebugCapability, processor_index_from_backend_thread_id
 use crate::error::{Error, Result};
 use crate::expr::Expr;
 use crate::repl::*;
+use crate::session::VcpuInfo;
 use crate::target::cpu::{
     CpuInfoDetail, CpuTriageInfo, DescriptorDetail, GdtDetail, GdtEntryDetail, IdtDetail,
     IdtEntryDetail, IrqlDetail, PcrDetail, PrcbDetail, ProcessorStateDetail,
@@ -1045,59 +1046,10 @@ impl ReplState<'_> {
 
         pb.finish_and_clear();
 
-        // Where the Symbol column starts: each column is as wide as its
-        // widest cell, plus two spaces. The lines below a vCPU wrap from
-        // there, after their three-column tree glyph.
-        let widest = |header: &str, cells: &mut dyn Iterator<Item = usize>| {
-            cells.fold(header.len(), usize::max) + 2
-        };
-        let symbol_column = widest(
-            "vCPU",
-            &mut vcpus.iter().map(|vcpu| vcpu.id.chars().count()),
-        ) + widest(
-            "RIP",
-            &mut vcpus.iter().map(|vcpu| match vcpu.rip {
-                Some(_) => 16,
-                None => "unavailable".len(),
-            }),
-        ) + widest(
-            "Context",
-            &mut vcpus.iter().map(|vcpu| vcpu.context.chars().count()),
-        );
-
-        let mut builder = Builder::default();
-        builder.push_record(vec!["vCPU", "RIP", "Context", "Symbol"]);
-        for vcpu in vcpus {
-            let (rip_cell, symbol_cell) = match vcpu.rip {
-                Some(rip) => (
-                    ui::addr(rip),
-                    vcpu.symbol.unwrap_or_else(|| format!("{rip:#x}")),
-                ),
-                None => (ui::muted("unavailable"), vcpu.error.unwrap_or_default()),
-            };
-            builder.push_record(vec![
-                vcpu.id.to_string(),
-                rip_cell.to_string(),
-                vcpu.context.to_string(),
-                symbol_cell,
-            ]);
-            // Below a vCPU in the hypervisor: where NT left off, and the
-            // guest VP the processor serves, as the stop header has them.
-            let mut children: Vec<String> = vcpu
-                .saved_vtl
-                .iter()
-                .filter(|saved| saved.summarized())
-                .map(|saved| format!("saved {}", saved.describe()))
-                .collect();
-            if let Some(served) = &vcpu.serving {
-                children.push(served_vp_lines(served, symbol_column + 3));
-            }
-            for line in event_children_lines("", &children) {
-                builder.push_record(vec![String::new(), String::new(), String::new(), line]);
-            }
-        }
-
-        print_padded_table(builder);
+        #[cfg(feature = "cli")]
+        native::render(|| native::lists::vcpus(&vcpus), || print_vcpus(&vcpus));
+        #[cfg(not(feature = "cli"))]
+        print_vcpus(&vcpus);
 
         Ok(())
     }
@@ -1147,6 +1099,67 @@ impl ReplState<'_> {
 
         Ok(())
     }
+}
+
+/// The vCPU list: what each vCPU runs, with the lines below a vCPU in the
+/// hypervisor.
+fn print_vcpus(vcpus: &[VcpuInfo]) {
+    // Where the Symbol column starts: each column is as wide as its
+    // widest cell, plus two spaces. The lines below a vCPU wrap from
+    // there, after their three-column tree glyph.
+    let widest = |header: &str, cells: &mut dyn Iterator<Item = usize>| {
+        cells.fold(header.len(), usize::max) + 2
+    };
+    let symbol_column = widest(
+        "vCPU",
+        &mut vcpus.iter().map(|vcpu| vcpu.id.chars().count()),
+    ) + widest(
+        "RIP",
+        &mut vcpus.iter().map(|vcpu| match vcpu.rip {
+            Some(_) => 16,
+            None => "unavailable".len(),
+        }),
+    ) + widest(
+        "Context",
+        &mut vcpus.iter().map(|vcpu| vcpu.context.chars().count()),
+    );
+
+    let mut builder = Builder::default();
+    builder.push_record(vec!["vCPU", "RIP", "Context", "Symbol"]);
+    for vcpu in vcpus {
+        let (rip_cell, symbol_cell) = match vcpu.rip {
+            Some(rip) => (
+                ui::addr(rip),
+                vcpu.symbol.clone().unwrap_or_else(|| format!("{rip:#x}")),
+            ),
+            None => (
+                ui::muted("unavailable"),
+                vcpu.error.clone().unwrap_or_default(),
+            ),
+        };
+        builder.push_record(vec![
+            vcpu.id.to_string(),
+            rip_cell.to_string(),
+            vcpu.context.to_string(),
+            symbol_cell,
+        ]);
+        // Below a vCPU in the hypervisor: where NT left off, and the
+        // guest VP the processor serves, as the stop header has them.
+        let mut children: Vec<String> = vcpu
+            .saved_vtl
+            .iter()
+            .filter(|saved| saved.summarized())
+            .map(|saved| format!("saved {}", saved.describe()))
+            .collect();
+        if let Some(served) = &vcpu.serving {
+            children.push(served_vp_lines(served, symbol_column + 3));
+        }
+        for line in event_children_lines("", &children) {
+            builder.push_record(vec![String::new(), String::new(), String::new(), line]);
+        }
+    }
+
+    print_padded_table(builder);
 }
 
 /// The guest VP a vCPU in the hypervisor serves, as a line below it in `~`:

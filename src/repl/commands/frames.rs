@@ -6,6 +6,7 @@ use crate::bugchecks::{bugcheck_trap_frame_address, looks_like_kernel_pointer};
 use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::diagnostics;
 use crate::error::{Error, Result};
+use crate::gdb::RegisterMap;
 use crate::session::ExceptionRecord;
 use crate::target::{SavedThreadRegisters, SelectedFrame, lookup_register};
 use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current, trap_frame_rip_symbol};
@@ -670,55 +671,21 @@ impl ReplState<'_> {
             outln!("@{name} = {}\n", ui::addr(value));
         }
 
-        print_registers(&self.ctx.register_map, &regs, false);
-        // Control registers match the GP-register cluster's
-        // styling; segment selectors are 16-bit, so render
-        // them as 4 digits rather than padding to 64-bit
-        let read_cr = |name: &str| -> String {
-            self.ctx
-                .register_map
-                .read_u64(name, &regs)
-                .map(ui::addr)
-                .unwrap_or_else(|_| "N/A".to_string())
-        };
-        let read_seg = |name: &str| -> String {
-            self.ctx
-                .register_map
-                .read_u64(name, &regs)
-                .map(|v| format!("{:04x}", v))
-                .unwrap_or_else(|_| "N/A".to_string())
-        };
-
-        outln!();
-        // The ARM64 maps answer `cr3` with TTBR1_EL1, the kernel's root.
-        if self.ctx.target.arch() == Arch::Arm64 {
-            outln!("  ttbr0 {}   ttbr1 {}", read_cr("ttbr0"), read_cr("cr3"));
-            outln!("  esr   {}   far   {}", read_cr("esr"), read_cr("far"));
-            outln!();
-            return Ok(());
-        }
-        outln!(
-            "  cr0 {}   cr2 {}   cr3 {}",
-            read_cr("cr0"),
-            read_cr("cr2"),
-            read_cr("cr3")
+        let register_map = &self.ctx.register_map;
+        let arch = self.ctx.target.arch();
+        let print_text = || print_register_grid(register_map, &regs, arch);
+        #[cfg(feature = "cli")]
+        native::render(
+            || {
+                native::frames::registers(
+                    &|name: &str| register_map.read_u64(name, &regs).ok(),
+                    arch == Arch::Arm64,
+                )
+            },
+            print_text,
         );
-        outln!("  cr4 {}   cr8 {}", read_cr("cr4"), read_cr("cr8"));
-        outln!();
-
-        outln!(
-            "  cs  {}   ds  {}   es  {}",
-            read_seg("cs"),
-            read_seg("ds"),
-            read_seg("es")
-        );
-        outln!(
-            "  fs  {}   gs  {}   ss  {}",
-            read_seg("fs"),
-            read_seg("gs"),
-            read_seg("ss")
-        );
-        outln!();
+        #[cfg(not(feature = "cli"))]
+        print_text();
 
         Ok(())
     }
@@ -777,11 +744,23 @@ impl ReplState<'_> {
                     return Ok(());
                 }
             };
-            print_stacktrace_data_with(&trace, frame_limit, false, columns);
             if invocation.name.eq_ignore_ascii_case("kp") {
+                print_stacktrace_data_with(&trace, frame_limit, false, columns);
                 self.print_stack_parameters(&trace, 0)?;
+                outln!();
+                return Ok(());
             }
-            outln!();
+            let print_text = || {
+                print_stacktrace_data_with(&trace, frame_limit, false, columns);
+                outln!();
+            };
+            #[cfg(feature = "cli")]
+            native::render(
+                || native::frames::stack(&trace, frame_limit, columns, 0, None),
+                print_text,
+            );
+            #[cfg(not(feature = "cli"))]
+            print_text();
             return Ok(());
         }
 
@@ -846,24 +825,41 @@ impl ReplState<'_> {
             .as_ref()
             .map(|frame| frame.index)
             .unwrap_or(0);
-        print_indexed_stacktrace(
-            &trace,
-            frame_limit,
-            offset,
-            columns,
-            self.ctx.target.selected_frame.as_ref().map(|_| offset),
-        );
-        if invocation.name.eq_ignore_ascii_case("kp") {
-            let plain = StackTrace {
-                frames: trace
-                    .frames
-                    .iter()
-                    .map(|frame| frame.frame.clone())
-                    .collect(),
-                truncated: trace.truncated,
+        let selected = self.ctx.target.selected_frame.as_ref().map(|_| offset);
+        if !invocation.name.eq_ignore_ascii_case("kp") {
+            let print_text = || {
+                print_indexed_stacktrace(&trace, frame_limit, offset, columns, selected);
+                outln!();
             };
-            self.print_stack_parameters(&plain, offset)?;
+            #[cfg(feature = "cli")]
+            native::render(
+                || {
+                    let plain = StackTrace {
+                        frames: trace
+                            .frames
+                            .iter()
+                            .map(|frame| frame.frame.clone())
+                            .collect(),
+                        truncated: trace.truncated,
+                    };
+                    native::frames::stack(&plain, frame_limit, columns, offset, selected)
+                },
+                print_text,
+            );
+            #[cfg(not(feature = "cli"))]
+            print_text();
+            return Ok(());
         }
+        print_indexed_stacktrace(&trace, frame_limit, offset, columns, selected);
+        let plain = StackTrace {
+            frames: trace
+                .frames
+                .iter()
+                .map(|frame| frame.frame.clone())
+                .collect(),
+            truncated: trace.truncated,
+        };
+        self.print_stack_parameters(&plain, offset)?;
         outln!();
 
         Ok(())
@@ -1033,6 +1029,58 @@ fn print_exception_record(address: u64, record: &ExceptionRecord) {
     for (index, value) in record.parameters.iter().enumerate() {
         outln!("  Parameter[{}]: {}", index, ui::addr(*value));
     }
+    outln!();
+}
+
+/// `r`'s text: the general-purpose grid, then the control and segment
+/// registers.
+fn print_register_grid(register_map: &RegisterMap, regs: &[u8], arch: Arch) {
+    print_registers(register_map, regs, false);
+    // Control registers match the GP-register cluster's
+    // styling; segment selectors are 16-bit, so render
+    // them as 4 digits rather than padding to 64-bit
+    let read_cr = |name: &str| -> String {
+        register_map
+            .read_u64(name, regs)
+            .map(ui::addr)
+            .unwrap_or_else(|_| "N/A".to_string())
+    };
+    let read_seg = |name: &str| -> String {
+        register_map
+            .read_u64(name, regs)
+            .map(|v| format!("{:04x}", v))
+            .unwrap_or_else(|_| "N/A".to_string())
+    };
+
+    outln!();
+    // The ARM64 maps answer `cr3` with TTBR1_EL1, the kernel's root.
+    if arch == Arch::Arm64 {
+        outln!("  ttbr0 {}   ttbr1 {}", read_cr("ttbr0"), read_cr("cr3"));
+        outln!("  esr   {}   far   {}", read_cr("esr"), read_cr("far"));
+        outln!();
+        return;
+    }
+    outln!(
+        "  cr0 {}   cr2 {}   cr3 {}",
+        read_cr("cr0"),
+        read_cr("cr2"),
+        read_cr("cr3")
+    );
+    outln!("  cr4 {}   cr8 {}", read_cr("cr4"), read_cr("cr8"));
+    outln!();
+
+    outln!(
+        "  cs  {}   ds  {}   es  {}",
+        read_seg("cs"),
+        read_seg("ds"),
+        read_seg("es")
+    );
+    outln!(
+        "  fs  {}   gs  {}   ss  {}",
+        read_seg("fs"),
+        read_seg("gs"),
+        read_seg("ss")
+    );
     outln!();
 }
 

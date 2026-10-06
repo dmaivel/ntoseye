@@ -48,6 +48,8 @@ use crate::symbols::ntoseye_home;
 use crate::target::InterruptRequester;
 #[cfg(feature = "cli")]
 use crate::target::Target;
+#[cfg(feature = "cli")]
+use crate::types::VirtAddr;
 use crate::ui;
 
 /// Set by [`note_termination`]; polled by the prompt loops so a termination
@@ -90,6 +92,8 @@ mod heap;
 #[cfg(feature = "cli")]
 mod line_editor;
 mod memory_view;
+#[cfg(feature = "cli")]
+pub mod native;
 mod remote;
 mod stop;
 
@@ -646,8 +650,37 @@ pub fn start_plain_repl(ctx: &mut Session) -> Result<()> {
     start_repl_with_mode(ctx, true)
 }
 
+/// The session's opening summary of the target's kernel.
+#[cfg(feature = "cli")]
+fn print_target(target: &native::session::Target) {
+    outln!("\n{}", ui::label("target"));
+    match (target.build, target.base) {
+        (Some(build), Some(base)) => {
+            outln!("  {} Windows {}", ui::muted("kernel"), build);
+            outln!("  {} {}", ui::muted("base  "), ui::addr(base));
+            outln!(
+                "  {} {}",
+                ui::muted("psmods"),
+                ui::addr_opt(VirtAddr(target.modules.unwrap_or(0)))
+            );
+        }
+        (None, Some(base)) => outln!("  {} {}", ui::muted("base  "), ui::addr(base)),
+        (_, None) => outln!(
+            "  {} {}",
+            ui::muted("kernel"),
+            ui::muted("unknown (ntoskrnl not found in dump)")
+        ),
+    }
+    outln!();
+}
+
 #[cfg(feature = "cli")]
 fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
+    // Before anything reads stdin, and before the first stop context, which
+    // Tern draws as a card.
+    if !plain {
+        native::detect();
+    }
     // Warnings the attach raised (unreadable PRCB contexts, a corrupt triage
     // signature, kernel discovery falling back) precede the banner.
     for notice in ctx.take_notices() {
@@ -701,41 +734,23 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     // Triage dumps may lack the ntoskrnl PE header needed for full kernel
     // discovery; a missing kernel is non-fatal and commands that need it
     // fail individually.
-    match debugger.startup_message_data() {
-        Ok(message_data) => {
-            outln!("\n{}", ui::label("target"));
-            outln!(
-                "  {} Windows {}",
-                ui::muted("kernel"),
-                message_data.build_number
-            );
-            outln!(
-                "  {} {}",
-                ui::muted("base  "),
-                ui::addr(message_data.base_address.0)
-            );
-            outln!(
-                "  {} {}",
-                ui::muted("psmods"),
-                ui::addr_opt(message_data.loaded_module_list)
-            );
-            outln!();
-        }
-        Err(Error::NtoskrnlNotFound) | Err(Error::AddressNotInDump(_)) => {
-            outln!("\n{}", ui::label("target"));
-            if let Some(base) = debugger.kernel_base() {
-                outln!("  {} {}", ui::muted("base  "), ui::addr(base.0));
-            } else {
-                outln!(
-                    "  {} {}",
-                    ui::muted("kernel"),
-                    ui::muted("unknown (ntoskrnl not found in dump)")
-                );
-            }
-            outln!();
-        }
+    let target = match debugger.startup_message_data() {
+        Ok(message_data) => native::session::Target {
+            build: Some(message_data.build_number),
+            base: Some(message_data.base_address.0),
+            modules: Some(message_data.loaded_module_list.0),
+        },
+        Err(Error::NtoskrnlNotFound) | Err(Error::AddressNotInDump(_)) => native::session::Target {
+            build: None,
+            base: debugger.kernel_base().map(|base| base.0),
+            modules: None,
+        },
         Err(e) => return Err(e),
-    }
+    };
+    native::render(
+        || native::session::target_card(&target),
+        || print_target(&target),
+    );
     let capabilities = client.capabilities();
     print_backend_capability_warning(&capabilities);
 
@@ -908,6 +923,9 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                 if termination_requested() {
                     break;
                 }
+                // A run that ended without a result to show still stops
+                // its indicator before the prompt.
+                native::finish_running();
                 let prompt = CustomPrompt::new(backend_label, &state.ctx.current_thread);
                 let sig =
                     match target_loan.lend(&state.ctx.target, || line_editor.read_line(&prompt)) {

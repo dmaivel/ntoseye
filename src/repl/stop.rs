@@ -14,8 +14,8 @@ use crate::target::{HYPERVISOR_CONTEXT, Target, ThreadInfo, kthread_state_name};
 use crate::types::VirtAddr;
 use crate::ui;
 use crate::unwind::{
-    UNKNOWN_CONTEXT, build_stacktrace_with_register_values, format_symbol,
-    resolve_thread_trace_context_at, saved_vtls,
+    StackTrace, ThreadTraceContext, UNKNOWN_CONTEXT, build_stacktrace_with_register_values,
+    format_symbol, resolve_thread_trace_context_at, saved_vtls,
 };
 
 use crate::repl::*;
@@ -353,27 +353,121 @@ pub fn print_break_context_for_bugcheck(session: &mut Session, info: Option<&Bug
 /// Windows hypervisor: its registers (the general-purpose ones only when
 /// they were recovered), the NT code it left off at, and its stack.
 fn print_saved_vtl0_context(session: &Session, saved: &HashMap<String, u64>) {
-    let debugger = &session.target;
     print_section("registers (saved VTL0)");
     print_sparse_registers(saved, None, 2);
+    let (trace, rip, stack) = saved_vtl0_code(session, saved);
+    print_disasm_context(session, &trace, rip);
+    print_stacktrace_data(&stack, BREAK_STACKTRACE_DISPLAY_LIMIT, true);
+}
+
+/// Where the saved VTL0 state left off: its trace context, its `rip` and
+/// its stack.
+fn saved_vtl0_code(
+    session: &Session,
+    saved: &HashMap<String, u64>,
+) -> (ThreadTraceContext, u64, StackTrace) {
+    let debugger = &session.target;
     let rip = saved.get("rip").copied().unwrap_or(0);
     let cr3 = saved
         .get(debugger.arch().dtb_register())
         .copied()
         .unwrap_or(0);
     let trace = resolve_thread_trace_context_at(debugger, cr3, rip);
-    print_disasm_context(session, &trace, rip);
     let stack = build_stacktrace_with_register_values(
         debugger,
         &session.register_map,
         saved,
         BREAK_STACKTRACE_PROBE_LIMIT,
     );
-    print_stacktrace_data(
-        &stack.into_stacktrace(),
+    (trace, rip, stack.into_stacktrace())
+}
+
+/// What a stop shows, gathered once for either renderer.
+struct StopContext {
+    thread: String,
+    context: String,
+    symbol: String,
+    /// Styled lines under the banner, the cause first.
+    children: Vec<String>,
+    regs: Vec<u8>,
+    /// The saved VTL0 registers a hypervisor stop inspects instead of the
+    /// vCPU's.
+    saved: Option<HashMap<String, u64>>,
+    trace: ThreadTraceContext,
+    rip: u64,
+}
+
+fn print_stop_text(session: &Session, stop: &StopContext) {
+    outln!(
+        "{}{}",
+        ui::badge("BREAK"),
+        ui::plate(&format!(
+            " {} {} at {} ",
+            ui::thread_id(&stop.thread),
+            stop.context,
+            ui::symbol(&stop.symbol)
+        ))
+    );
+    print_event_children(" ", &stop.children);
+    if let Some(saved) = &stop.saved {
+        print_saved_vtl0_context(session, saved);
+        outln!();
+        return;
+    }
+    print_registers(&session.register_map, &stop.regs, true);
+    print_disasm_context(session, &stop.trace, stop.rip);
+    print_stacktrace(
+        &session.target,
+        &session.register_map,
+        &stop.regs,
+        BREAK_STACKTRACE_PROBE_LIMIT,
         BREAK_STACKTRACE_DISPLAY_LIMIT,
         true,
     );
+    outln!();
+}
+
+#[cfg(feature = "cli")]
+fn stop_view(session: &Session, stop: &StopContext, tone: tern_sdk::ui::Tone) -> tern_sdk::View {
+    let (registers, rows, current, stack) = match &stop.saved {
+        Some(saved) => {
+            let (trace, rip, stack) = saved_vtl0_code(session, saved);
+            let grid = native::styled(|| print_sparse_registers(saved, None, 0));
+            (
+                ("registers (saved VTL0)", grid),
+                disasm_context_rows(session, &trace, rip),
+                rip,
+                stack,
+            )
+        }
+        None => {
+            let grid = native::styled(|| print_registers(&session.register_map, &stop.regs, false));
+            let stack = thread_stacktrace(
+                &session.target,
+                &session.register_map,
+                &stop.regs,
+                BREAK_STACKTRACE_PROBE_LIMIT,
+            );
+            (
+                ("registers", grid),
+                disasm_context_rows(session, &stop.trace, stop.rip),
+                stop.rip,
+                stack,
+            )
+        }
+    };
+    native::stop::stop_card(native::stop::Stop {
+        thread: &stop.thread,
+        context: &stop.context,
+        symbol: &stop.symbol,
+        tone,
+        details: &stop.children,
+        registers,
+        code: rows.as_deref().map_err(|note| note.trim().to_owned()),
+        current,
+        stack: &stack,
+        stack_limit: BREAK_STACKTRACE_DISPLAY_LIMIT,
+    })
 }
 
 /// `cause` is an optional pre-styled tree child naming why execution stopped
@@ -423,16 +517,11 @@ pub fn print_break_context_at(
         .flatten()
         .and_then(|number| debugger.guest_vp_label(number))
         .unwrap_or_else(|| trace.description.clone());
-
-    outln!(
-        "{}{}",
-        ui::badge("BREAK"),
-        ui::plate(&format!(
-            " {} {} at {} ",
-            ui::thread_id(&thread_id),
-            context,
-            ui::symbol(&symbol)
-        ))
+    #[cfg(feature = "cli")]
+    let tone = native::stop::tone(
+        cause.as_deref(),
+        display_rip.is_some(),
+        trace.description == HYPERVISOR_CONTEXT,
     );
 
     let mut children: Vec<String> = Vec::new();
@@ -511,28 +600,29 @@ pub fn print_break_context_at(
             ));
         }
     }
-    print_event_children(" ", &children);
-
-    if saved_context
-        && let Some(saved) = debugger
-            .selected_frame
-            .as_ref()
-            .map(|frame| frame.registers.clone())
-    {
-        print_saved_vtl0_context(session, &saved);
-        outln!();
-        return;
-    }
-
-    print_registers(&session.register_map, &regs, true);
-    print_disasm_context(session, &trace, context_rip);
-    print_stacktrace(
-        &session.target,
-        &session.register_map,
-        &regs,
-        BREAK_STACKTRACE_PROBE_LIMIT,
-        BREAK_STACKTRACE_DISPLAY_LIMIT,
-        true,
+    let saved = saved_context
+        .then(|| {
+            debugger
+                .selected_frame
+                .as_ref()
+                .map(|frame| frame.registers.clone())
+        })
+        .flatten();
+    let stop = StopContext {
+        thread: thread_id,
+        context,
+        symbol,
+        children,
+        regs,
+        saved,
+        trace,
+        rip: context_rip,
+    };
+    #[cfg(feature = "cli")]
+    native::render(
+        || stop_view(session, &stop, tone),
+        || print_stop_text(session, &stop),
     );
-    outln!();
+    #[cfg(not(feature = "cli"))]
+    print_stop_text(session, &stop);
 }

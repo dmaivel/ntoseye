@@ -1150,8 +1150,17 @@ impl ReplState<'_> {
         if let Some(end) = last_start {
             rows.retain(|row| row.ip < end);
         }
-        render_rows(&rows, |_| None);
-        outln!();
+        let print_text = || {
+            render_rows(&rows, |_| None);
+            outln!();
+        };
+        #[cfg(feature = "cli")]
+        native::render(
+            || native::frames::disasm(&rows, self.ctx.target.builtin_variable_value("ip")),
+            print_text,
+        );
+        #[cfg(not(feature = "cli"))]
+        print_text();
         self.disasm_cursor = DisasmCursor::after(&self.ctx.target, &rows);
 
         Ok(())
@@ -1191,8 +1200,17 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        render_rows(&rows, |_| None);
-        outln!();
+        let print_text = || {
+            render_rows(&rows, |_| None);
+            outln!();
+        };
+        #[cfg(feature = "cli")]
+        native::render(
+            || native::frames::disasm(&rows, self.ctx.target.builtin_variable_value("ip")),
+            print_text,
+        );
+        #[cfg(not(feature = "cli"))]
+        print_text();
         Ok(())
     }
 
@@ -1209,9 +1227,25 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        outln!("{}  {} bytes", ui::symbol(&symbol), len);
-        render_rows(&rows, |_| None);
-        outln!();
+        let print_text = || {
+            outln!("{}  {} bytes", ui::symbol(&symbol), len);
+            render_rows(&rows, |_| None);
+            outln!();
+        };
+        #[cfg(feature = "cli")]
+        native::render(
+            || {
+                native::frames::function(
+                    &symbol,
+                    len,
+                    &rows,
+                    self.ctx.target.builtin_variable_value("ip"),
+                )
+            },
+            print_text,
+        );
+        #[cfg(not(feature = "cli"))]
+        print_text();
 
         Ok(())
     }

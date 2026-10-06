@@ -575,6 +575,67 @@ fn recreate_breakpoint(bp: &Breakpoint) -> Option<(&'static str, ParsedBreakpoin
     ))
 }
 
+/// The `bl` table: one row per breakpoint.
+fn print_breakpoint_list(bps: &[&Breakpoint]) {
+    let mut builder = Builder::default();
+    builder.push_record(vec![
+        "ID".to_string(),
+        "Status".to_string(),
+        "Address".to_string(),
+        "Pass Count".to_string(),
+        "Process/Thread".to_string(),
+        "Symbol".to_string(),
+        "Condition".to_string(),
+        "Action".to_string(),
+    ]);
+
+    for bp in bps {
+        let pass_count = format!(
+            "{:04} ({:04})",
+            bp.remaining_pass_count.saturating_add(1),
+            bp.pass_count.max(1)
+        );
+        let symbol = match bp.hardware {
+            Some(hw) => format!(
+                "watch {}{} {}",
+                hw.access.letter(),
+                hw.len,
+                bp.specification().or(bp.symbol.as_deref()).unwrap_or("-")
+            ),
+            None => bp
+                .specification()
+                .or(bp.symbol.as_deref())
+                .unwrap_or("-")
+                .to_string(),
+        };
+        builder.push_record(vec![
+            ui::bp_id(bp.id),
+            match (bp.enabled, bp.awaiting_page_in()) {
+                // `o`: enabled and accepted by the target, but the opcode
+                // is owed until its page is resident.
+                (true, true) => "o",
+                (true, false) => "e",
+                (false, _) => "d",
+            }
+            .to_string(),
+            bp.resolved_address()
+                .map(|address| ui::addr(address.0))
+                .unwrap_or_else(|| "-".to_string()),
+            pass_count,
+            bp.scope_label(),
+            symbol,
+            bp.condition.as_deref().unwrap_or("-").to_string(),
+            bp.action.as_deref().unwrap_or("-").to_string(),
+        ]);
+    }
+
+    let mut table = builder.build();
+    table
+        .with(tabled::settings::Style::empty())
+        .with(Padding::new(0, 2, 0, 0));
+    outln!("{table}\n");
+}
+
 fn parse_breakpoint_id_selectors(args: &[&str]) -> Result<BreakpointIdSelection> {
     if args.is_empty() {
         return Err(Error::InvalidArgument("missing breakpoint ID".into()));
@@ -1211,63 +1272,13 @@ impl ReplState<'_> {
             return Ok(());
         }
 
-        let mut builder = Builder::default();
-        builder.push_record(vec![
-            "ID".to_string(),
-            "Status".to_string(),
-            "Address".to_string(),
-            "Pass Count".to_string(),
-            "Process/Thread".to_string(),
-            "Symbol".to_string(),
-            "Condition".to_string(),
-            "Action".to_string(),
-        ]);
-
-        for bp in bps {
-            let pass_count = format!(
-                "{:04} ({:04})",
-                bp.remaining_pass_count.saturating_add(1),
-                bp.pass_count.max(1)
-            );
-            let symbol = match bp.hardware {
-                Some(hw) => format!(
-                    "watch {}{} {}",
-                    hw.access.letter(),
-                    hw.len,
-                    bp.specification().or(bp.symbol.as_deref()).unwrap_or("-")
-                ),
-                None => bp
-                    .specification()
-                    .or(bp.symbol.as_deref())
-                    .unwrap_or("-")
-                    .to_string(),
-            };
-            builder.push_record(vec![
-                ui::bp_id(bp.id),
-                match (bp.enabled, bp.awaiting_page_in()) {
-                    // `o`: enabled and accepted by the target, but the opcode
-                    // is owed until its page is resident.
-                    (true, true) => "o",
-                    (true, false) => "e",
-                    (false, _) => "d",
-                }
-                .to_string(),
-                bp.resolved_address()
-                    .map(|address| ui::addr(address.0))
-                    .unwrap_or_else(|| "-".to_string()),
-                pass_count,
-                bp.scope_label(),
-                symbol,
-                bp.condition.as_deref().unwrap_or("-").to_string(),
-                bp.action.as_deref().unwrap_or("-").to_string(),
-            ]);
-        }
-
-        let mut table = builder.build();
-        table
-            .with(tabled::settings::Style::empty())
-            .with(Padding::new(0, 2, 0, 0));
-        outln!("{table}\n");
+        #[cfg(feature = "cli")]
+        native::render(
+            || native::lists::breakpoints(&bps),
+            || print_breakpoint_list(&bps),
+        );
+        #[cfg(not(feature = "cli"))]
+        print_breakpoint_list(&bps);
         Ok(())
     }
 

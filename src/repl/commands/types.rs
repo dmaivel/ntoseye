@@ -193,6 +193,130 @@ fn field_matches(name: &str, patterns: &[String], prefix_match: bool) -> bool {
     })
 }
 
+/// What `dt` shows for a type: its header, then its fields (or the
+/// records of a `-l` walk). Gathered once, then printed as text or drawn as
+/// a tree.
+pub struct DtDump {
+    pub type_name: String,
+    pub size: usize,
+    /// The instance's address; `None` for a layout.
+    pub address: Option<u64>,
+    pub body: DtBody,
+}
+
+pub enum DtBody {
+    /// The layout's fields, or one instance's.
+    Fields(Vec<DtEntry>),
+    /// `dt -l`: each record's address and fields, then the line saying
+    /// why the walk stopped early.
+    List {
+        records: Vec<(u64, Vec<DtEntry>)>,
+        stop: Option<String>,
+    },
+    /// `dt -l` could not walk: the error after the header.
+    Failed(String),
+}
+
+/// One line of a `dt` dump, with the lines nested under it.
+pub enum DtEntry {
+    /// A field, or an element of an array field.
+    Field(DtField),
+    /// A line about its level: a nested type that isn't found, an array
+    /// whose elements can't be shown, elements left out, a field path that
+    /// can't be read.
+    Note(String),
+    /// A field path that doesn't resolve, printed as an error.
+    Error(String),
+}
+
+pub struct DtField {
+    /// The field's offset; `None` for an array element.
+    pub offset: Option<u32>,
+    /// The field's name, a dotted path, or an element's `[index]`.
+    pub name: String,
+    pub type_name: String,
+    /// The field's size, with `-v`.
+    pub size: Option<usize>,
+    /// The decoded value, when `dt` has an address and the field is not a
+    /// nested structure or array.
+    pub value: Option<String>,
+    /// The value is a number (an integer or a bitfield), not a pointer,
+    /// an enum or a string.
+    pub numeric: bool,
+    /// A nested structure's fields or an array's elements.
+    pub children: Vec<DtEntry>,
+}
+
+impl DtField {
+    /// The field's line without its value, indented `indent` spaces.
+    fn label(&self, indent: usize) -> String {
+        // WinDbg pads a field offset to three hex digits and lets wider
+        // offsets grow naturally (`+0x000`, `+0x2e0`, `+0x1150`), so a
+        // layout dump lines up with the reference output people compare
+        // against and with anything grepping for `+0x000 `.
+        let mut label = " ".repeat(indent);
+        if let Some(offset) = self.offset {
+            label.push_str(&format!("+0x{offset:03x} "));
+        }
+        label.push_str(&format!("{} : {}", self.name, self.type_name));
+        if let Some(size) = self.size {
+            label.push_str(&format!(" [size {size}]"));
+        }
+        label
+    }
+}
+
+fn print_dt(dump: &DtDump) {
+    outln!(
+        "{} ({} bytes){}",
+        dump.type_name,
+        dump.size,
+        dump.address
+            .map(|address| format!(" @ {}", ui::addr(address)))
+            .unwrap_or_default()
+    );
+    match &dump.body {
+        DtBody::Fields(entries) => {
+            print_dt_entries(entries, 2);
+            outln!();
+        }
+        DtBody::List { records, stop } => {
+            for (record, entries) in records {
+                outln!("{} @ {}", dump.type_name, ui::addr(*record));
+                print_dt_entries(entries, 2);
+            }
+            if let Some(stop) = stop {
+                outln!("{stop}");
+            }
+        }
+        DtBody::Failed(message) => error!("{message}"),
+    }
+}
+
+fn print_dt_entries(entries: &[DtEntry], indent: usize) {
+    for entry in entries {
+        match entry {
+            DtEntry::Field(field) => {
+                match &field.value {
+                    Some(value) => outln!("{} = {}", field.label(indent), value),
+                    None => outln!("{}", field.label(indent)),
+                }
+                print_dt_entries(&field.children, indent + 2);
+            }
+            DtEntry::Note(note) => outln!("{}{}", " ".repeat(indent), note),
+            DtEntry::Error(message) => error!("{message}"),
+        }
+    }
+}
+
+fn print_enum(name: &str, variants: &[(String, i64)]) {
+    outln!("enum {} ({} values)", name, variants.len());
+    for (name, value) in variants {
+        outln!("  {:#x}  {}", value, name);
+    }
+    outln!();
+}
+
 impl ReplState<'_> {
     fn type_view(&self) -> TypeView<'_> {
         TypeView::new(self.ctx)
@@ -206,103 +330,81 @@ impl ReplState<'_> {
         self.type_view().lookup_enum(type_name)
     }
 
-    fn field_descriptor(
-        &self,
-        indent: usize,
-        name: &str,
-        field: &FieldInfo,
-        options: &DtOptions,
-    ) -> String {
-        let prefix = " ".repeat(indent);
-        let type_name = field.type_data.to_string();
-        // WinDbg pads a field offset to three hex digits and lets wider
-        // offsets grow naturally (`+0x000`, `+0x2e0`, `+0x1150`), so a layout
-        // dump lines up with the reference output people compare against and
-        // with anything grepping for `+0x000 `.
-        if options.verbose {
-            format!(
-                "{prefix}+0x{:03x} {name} : {type_name} [size {}]",
-                field.offset,
-                self.type_view().field_size(field)
-            )
-        } else {
-            format!("{prefix}+0x{:03x} {name} : {type_name}", field.offset)
-        }
-    }
-
-    fn print_field_value(
+    /// `field` at `address` as a dump entry: named `name`, at `offset`
+    /// (`None` for an array element, which `-v` shows no size for either),
+    /// with its value or, `depth` levels down, its nested fields.
+    fn field_entry(
         &self,
         address: VirtAddr,
         field: &FieldInfo,
-        label: &str,
+        name: String,
+        offset: Option<u32>,
         options: &DtOptions,
-        indent: usize,
         depth: usize,
-    ) {
+    ) -> DtEntry {
+        let mut entry = DtField {
+            offset,
+            name,
+            type_name: field.type_data.to_string(),
+            size: (offset.is_some() && options.verbose).then(|| self.type_view().field_size(field)),
+            value: None,
+            numeric: false,
+            children: Vec::new(),
+        };
         match &field.type_data {
-            // A nested layout prints its own fields rather than a value, but
+            // A nested layout shows its own fields rather than a value, but
             // the two Windows aggregates `TypeView` renders as text do not.
             ParsedType::Struct(type_name) | ParsedType::Union(type_name)
                 if !named_type(&field.type_data, "_UNICODE_STRING")
                     && !named_type(&field.type_data, "_LIST_ENTRY") =>
             {
-                outln!("{}", label);
                 if depth > 0 {
                     if let Some(type_info) = self.lookup_type(type_name) {
-                        self.print_struct_fields(
+                        entry.children = self.struct_entries(
                             type_info.as_ref(),
                             address,
                             options,
                             &[],
                             depth.saturating_sub(1),
-                            indent + 2,
                         );
                     } else {
-                        outln!(
-                            "{}<unavailable: type {} not found>",
-                            " ".repeat(indent + 2),
+                        entry.children.push(DtEntry::Note(format!(
+                            "<unavailable: type {} not found>",
                             type_name
-                        );
+                        )));
                     }
                 }
             }
-            // An array prints its elements, unless it is an inline C string.
+            // An array shows its elements, unless it is an inline C string.
             ParsedType::Array(_, _) if field.type_data.c_string_len().is_none() => {
-                outln!("{}", label);
-                self.print_array_elements(
-                    address,
-                    field,
-                    options,
-                    indent + 2,
-                    depth.saturating_sub(1),
-                );
+                entry.children =
+                    self.array_entries(address, field, options, depth.saturating_sub(1));
             }
             // Everything else has a text value: scalars, enums, bitfields,
             // `_UNICODE_STRING`, `_LIST_ENTRY` and C-string arrays.
             _ => {
                 if options.show_values {
-                    outln!(
-                        "{} = {}",
-                        label,
-                        self.type_view().value_text(address, field)
-                    );
-                } else {
-                    outln!("{}", label);
+                    entry.value = Some(self.type_view().value_text(address, field));
+                    entry.numeric = matches!(
+                        field.type_data,
+                        ParsedType::Primitive(_) | ParsedType::Bitfield { .. }
+                    ) && !named_type(&field.type_data, "_UNICODE_STRING")
+                        && !named_type(&field.type_data, "_LIST_ENTRY");
                 }
             }
         }
+        DtEntry::Field(entry)
     }
 
-    fn print_array_elements(
+    fn array_entries(
         &self,
         address: VirtAddr,
         field: &FieldInfo,
         options: &DtOptions,
-        indent: usize,
         depth: usize,
-    ) {
+    ) -> Vec<DtEntry> {
         let ParsedType::Array(inner, count) = &field.type_data else {
-            return;
+            return Vec::new();
         };
         let max_elements = options
             .array_limit
@@ -311,17 +413,16 @@ impl ReplState<'_> {
         let count_usize = *count as usize;
         let shown = count_usize.min(max_elements);
         if shown == 0 {
-            return;
+            return Vec::new();
         }
         let total_size = self.type_view().field_size(field);
         let Some(element_size) = self.type_view().element_stride(total_size, inner, *count) else {
-            outln!(
-                "{}[array elements unavailable: element size is unknown]",
-                " ".repeat(indent)
-            );
-            return;
+            return vec![DtEntry::Note(
+                "[array elements unavailable: element size is unknown]".to_string(),
+            )];
         };
 
+        let mut entries = Vec::with_capacity(shown + 1);
         for index in 0..shown {
             let element_address = address + (index.saturating_mul(element_size)) as u64;
             let element_field = FieldInfo {
@@ -329,42 +430,47 @@ impl ReplState<'_> {
                 size: element_size as u64,
                 type_data: inner.as_ref().clone(),
             };
-            let prefix = " ".repeat(indent);
-            self.print_field_value(
+            entries.push(self.field_entry(
                 element_address,
                 &element_field,
-                &format!("{}[{}] : {}", prefix, index, inner),
+                format!("[{index}]"),
+                None,
                 options,
-                indent,
                 depth.max(1),
-            );
+            ));
         }
         if shown < count_usize {
-            outln!(
-                "{}... {} array elements omitted",
-                " ".repeat(indent),
+            entries.push(DtEntry::Note(format!(
+                "... {} array elements omitted",
                 count_usize - shown
-            );
+            )));
         }
+        entries
     }
 
-    fn print_struct_fields(
+    fn struct_entries(
         &self,
         type_info: &TypeInfo,
         base: VirtAddr,
         options: &DtOptions,
         patterns: &[String],
         depth: usize,
-        indent: usize,
-    ) {
-        for (name, field) in type_info.fields_in_order() {
-            if !field_matches(name, patterns, options.prefix_match) {
-                continue;
-            }
-            let address = base + field.offset as u64;
-            let descriptor = self.field_descriptor(indent, name, field, options);
-            self.print_field_value(address, field, &descriptor, options, indent, depth);
-        }
+    ) -> Vec<DtEntry> {
+        type_info
+            .fields_in_order()
+            .into_iter()
+            .filter(|(name, _)| field_matches(name, patterns, options.prefix_match))
+            .map(|(name, field)| {
+                self.field_entry(
+                    base + field.offset as u64,
+                    field,
+                    name.to_string(),
+                    Some(field.offset),
+                    options,
+                    depth,
+                )
+            })
+            .collect()
     }
 
     fn resolve_field_path(
@@ -441,36 +547,31 @@ impl ReplState<'_> {
         Err("field path is empty".to_string())
     }
 
-    fn print_resolved_path(
+    fn resolved_path_entry(
         &self,
         root: &TypeInfo,
         base: VirtAddr,
         path: &[String],
         options: &DtOptions,
-    ) {
+    ) -> DtEntry {
         let resolved = match self.resolve_field_path(root, path) {
             Ok(path) => path,
-            Err(error) => {
-                error!("{}: {}", path.join("."), error);
-                return;
-            }
+            Err(error) => return DtEntry::Error(format!("{}: {}", path.join("."), error)),
         };
         let (address, field) = match self.runtime_field_address(base, &resolved) {
             Ok(value) => value,
             Err(error) => {
-                outln!("  {} : <unavailable: {}>", path.join("."), error);
-                return;
+                return DtEntry::Note(format!("{} : <unavailable: {}>", path.join("."), error));
             }
         };
-        let descriptor = self.field_descriptor(2, &path.join("."), &field, options);
-        self.print_field_value(
+        self.field_entry(
             address,
             &field,
-            &descriptor,
+            path.join("."),
+            Some(field.offset),
             options,
-            2,
             options.recursive_depth.max(1),
-        );
+        )
     }
 
     fn list_offsets(
@@ -549,15 +650,14 @@ impl ReplState<'_> {
             Some(type_info) => type_info,
             None => {
                 if let Some(variants) = self.lookup_enum(&parsed.type_name) {
-                    outln!(
-                        "enum {} ({} values)",
-                        unqualified_type_name(&parsed.type_name),
-                        variants.len()
+                    let name = unqualified_type_name(&parsed.type_name);
+                    #[cfg(feature = "cli")]
+                    native::render(
+                        || native::types::enum_view(name, &variants),
+                        || print_enum(name, &variants),
                     );
-                    for (name, value) in variants {
-                        outln!("  {:#x}  {}", value, name);
-                    }
-                    outln!();
+                    #[cfg(not(feature = "cli"))]
+                    print_enum(name, &variants);
                 } else {
                     error!(
                         "failed to get type information: type `{}` not found",
@@ -585,53 +685,15 @@ impl ReplState<'_> {
             parsed.field_patterns.clone()
         };
 
-        outln!(
-            "{} ({} bytes){}",
-            type_info.name,
-            type_info.size,
-            base.map(|address| format!(" @ {}", ui::addr(address.0)))
-                .unwrap_or_default()
-        );
-
-        if let Some(list_path) = parsed.options.list_field.as_ref() {
-            let Some(head) = base else {
-                error!("dt -l requires a nonzero list head address");
-                return Ok(());
-            };
-            let resolved = match self.resolve_field_path(type_info.as_ref(), list_path) {
-                Ok(path) => path,
-                Err(error) => {
-                    error!("dt -l {}: {}", list_path.join("."), error);
-                    return Ok(());
-                }
-            };
-            let (link_offset, next_offset, pointer_size) = match self.list_offsets(&resolved) {
-                Ok(offsets) => offsets,
-                Err(error) => {
-                    error!("dt -l {}: {}", list_path.join("."), error);
-                    return Ok(());
-                }
-            };
-            let (records, termination) =
-                self.collect_typed_list(head, link_offset, next_offset, pointer_size);
-            for record in records {
-                outln!("{} @ {}", type_info.name, ui::addr(record.0));
-                self.print_struct_fields(
-                    type_info.as_ref(),
-                    record,
-                    &parsed.options,
-                    &patterns,
-                    parsed.options.recursive_depth,
-                    2,
-                );
-            }
-            if let Some(stop) = termination.diagnostic() {
-                outln!("dt -l {}: list walk stopped: {stop}", list_path.join("."));
-            }
-            return Ok(());
-        }
-
-        if let Some(base) = base {
+        let body = if let Some(list_path) = parsed.options.list_field.as_ref() {
+            self.dt_list(
+                type_info.as_ref(),
+                base,
+                list_path,
+                &parsed.options,
+                &patterns,
+            )
+        } else if let Some(base) = base {
             let mut path_patterns = Vec::new();
             let mut glob_patterns = Vec::new();
             let had_patterns = !patterns.is_empty();
@@ -645,31 +707,91 @@ impl ReplState<'_> {
                     glob_patterns.push(pattern);
                 }
             }
-            for path in path_patterns {
-                self.print_resolved_path(type_info.as_ref(), base, &path, &parsed.options);
-            }
+            let mut entries: Vec<DtEntry> = path_patterns
+                .iter()
+                .map(|path| {
+                    self.resolved_path_entry(type_info.as_ref(), base, path, &parsed.options)
+                })
+                .collect();
             if !glob_patterns.is_empty() || !had_patterns {
-                self.print_struct_fields(
+                entries.extend(self.struct_entries(
                     type_info.as_ref(),
                     base,
                     &parsed.options,
                     &glob_patterns,
                     parsed.options.recursive_depth,
-                    2,
-                );
+                ));
             }
+            DtBody::Fields(entries)
         } else {
-            self.print_struct_fields(
+            DtBody::Fields(self.struct_entries(
                 type_info.as_ref(),
                 VirtAddr(0),
                 &parsed.options,
                 &patterns,
                 parsed.options.recursive_depth,
-                2,
-            );
-        }
-        outln!();
+            ))
+        };
+        let dump = DtDump {
+            type_name: type_info.name.clone(),
+            size: type_info.size,
+            address: base.map(|address| address.0),
+            body,
+        };
+        #[cfg(feature = "cli")]
+        native::render(|| native::types::view(&dump), || print_dt(&dump));
+        #[cfg(not(feature = "cli"))]
+        print_dt(&dump);
         Ok(())
+    }
+
+    /// `dt -l`: the records of the list `list_path` links, from `head`,
+    /// each with its fields.
+    fn dt_list(
+        &self,
+        type_info: &TypeInfo,
+        head: Option<VirtAddr>,
+        list_path: &[String],
+        options: &DtOptions,
+        patterns: &[String],
+    ) -> DtBody {
+        let Some(head) = head else {
+            return DtBody::Failed("dt -l requires a nonzero list head address".to_string());
+        };
+        let resolved = match self.resolve_field_path(type_info, list_path) {
+            Ok(path) => path,
+            Err(error) => {
+                return DtBody::Failed(format!("dt -l {}: {}", list_path.join("."), error));
+            }
+        };
+        let (link_offset, next_offset, pointer_size) = match self.list_offsets(&resolved) {
+            Ok(offsets) => offsets,
+            Err(error) => {
+                return DtBody::Failed(format!("dt -l {}: {}", list_path.join("."), error));
+            }
+        };
+        let (records, termination) =
+            self.collect_typed_list(head, link_offset, next_offset, pointer_size);
+        DtBody::List {
+            records: records
+                .into_iter()
+                .map(|record| {
+                    (
+                        record.0,
+                        self.struct_entries(
+                            type_info,
+                            record,
+                            options,
+                            patterns,
+                            options.recursive_depth,
+                        ),
+                    )
+                })
+                .collect(),
+            stop: termination
+                .diagnostic()
+                .map(|stop| format!("dt -l {}: list walk stopped: {stop}", list_path.join("."))),
+        }
     }
 
     fn cmd_dl(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {

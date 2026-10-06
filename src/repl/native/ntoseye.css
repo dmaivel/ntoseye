@@ -1,0 +1,17 @@
+/* ntoseye's own span tokens, colored from Tern's syntax palette so code
+   reads like Tern's highlighting and follows the theme. Set on every node:
+   a program sheet reaches only the elements inside its regions. */
+.sf {
+	--sf-p-ntSymbol: var(--tk-function);
+	--sf-p-ntMnemonic: var(--tk-keyword);
+	--sf-p-ntRegister: var(--tk-type);
+	--sf-p-ntNumber: var(--tk-number);
+	--sf-p-ntType: var(--tk-type);
+}
+
+/* The instruction a thread stands on. */
+[data-role='ntoseye.disasm'] > [data-mark='pick'] {
+	background: rgb(from var(--accent) r g b / 14%);
+	box-shadow: inset 2px 0 0 var(--accent);
+	border-radius: 3px;
+}

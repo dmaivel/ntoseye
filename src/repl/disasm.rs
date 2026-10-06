@@ -395,6 +395,19 @@ fn decode_disasm_context(
 
 pub fn print_disasm_context(session: &Session, trace: &ThreadTraceContext, rip: u64) {
     print_section("disasm");
+    match disasm_context_rows(session, trace, rip) {
+        Ok(rows) => render_rows(&rows, |ip| Some(ip == rip)),
+        Err(note) => outln!("{}", ui::muted(&note)),
+    }
+}
+
+/// The instructions a stop shows from `rip`, or the note saying why they
+/// can't be read.
+pub fn disasm_context_rows(
+    session: &Session,
+    trace: &ThreadTraceContext,
+    rip: u64,
+) -> std::result::Result<Vec<DisasmRow>, String> {
     let debugger = &session.target;
 
     let active_memory = debugger.address_space(trace.active_dtb);
@@ -408,15 +421,18 @@ pub fn print_disasm_context(session: &Session, trace: &ThreadTraceContext, rip: 
         Err(_) => code_memory.read_bytes(VirtAddr(rip), &mut bytes),
     };
     if let Err(error) = read {
-        outln!("{}", ui::muted(&non_resident_note(rip, &error)));
-        return;
+        return Err(non_resident_note(rip, &error));
     }
 
     session.mask_code(VirtAddr(rip), &mut bytes, trace.active_dtb);
 
     let resolve = |target: u64| format_symbol(debugger, trace, target);
-    let rows = decode_disasm_context(&bytes, rip, debugger.code_machine(VirtAddr(rip)), resolve);
-    render_rows(&rows, |ip| Some(ip == rip));
+    Ok(decode_disasm_context(
+        &bytes,
+        rip,
+        debugger.code_machine(VirtAddr(rip)),
+        resolve,
+    ))
 }
 
 /// Print the stack frames. `embedded` is true inside the break/status dump:
@@ -431,15 +447,26 @@ pub fn print_stacktrace(
     display_limit: usize,
     embedded: bool,
 ) {
-    let stacktrace = build_thread_stacktrace(
+    let stacktrace = thread_stacktrace(debugger, register_map, regs, build_limit);
+    print_stacktrace_data(&stacktrace, display_limit, embedded);
+}
+
+/// The stack of the selected thread from `regs`, walked `build_limit`
+/// frames deep.
+pub fn thread_stacktrace(
+    debugger: &Target,
+    register_map: &RegisterMap,
+    regs: &[u8],
+    build_limit: usize,
+) -> StackTrace {
+    build_thread_stacktrace(
         debugger,
         register_map,
         regs,
         debugger.windows_thread_selection.as_ref(),
         build_limit,
     )
-    .into_stacktrace();
-    print_stacktrace_data(&stacktrace, display_limit, embedded);
+    .into_stacktrace()
 }
 
 /// Render an already-collected stack trace in the same layout as [`print_stacktrace`].
