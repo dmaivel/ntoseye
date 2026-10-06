@@ -42,6 +42,10 @@ In Tern, press **F1** or **Alt+P** at the prompt to open the palette, a search s
 
 The palette opens on the tab for what you are typing. For the command word it shows the commands, with the selected command's help under the list, and your choice replaces the line. For an argument it shows the symbols, the types for {command}`dt`, or the processes for a command that takes one, and your choice replaces the word you started. So `u NtClo` and **Alt+P** finds `nt!NtClose`. With an empty line, a process becomes `.process /p <pid>`.
 
+### The browser
+
+In Tern, {command}`browse` or **F2** at the prompt opens a full-screen browser over the pane. It shows code at the instruction pointer or at the address you give, or memory if the address isn't executable, one pointer per row with the symbol it points into. Use the arrow keys to move the cursor, and **Shift+↑** and **Shift+↓** or **Space** to move a page. **Enter** follows the branch or call under the cursor, the memory that an instruction addresses (`[rip+…]`), or the pointer in a memory row, and **Backspace** goes back. **Tab** shows the same address as memory or as code, **G** goes to an address or expression, **B** sets or clears a breakpoint at the instruction under the cursor, and **.** goes to the instruction pointer. **Escape** closes the browser and leaves the pane as it was, with the breakpoints that you set or cleared listed under the prompt. Tern keeps **Page Up** and **Page Down** to scroll the view.
+
 ## Aliases
 
 To make an alias, use `alias <name> <expansion>`. In the expansion, you can use these variables:

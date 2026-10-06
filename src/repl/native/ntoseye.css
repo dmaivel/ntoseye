@@ -9,11 +9,13 @@
 	--sf-p-ntType: var(--tk-type);
 }
 
-/* The instruction a thread stands on. */
-[data-role='ntoseye.disasm'] > .sf {
+/* The instruction a thread stands on, and the browser's cursor. */
+[data-role='ntoseye.disasm'] > .sf,
+[data-role='ntoseye.browse'] > .sf {
 	padding-left: 6px;
 }
-[data-role='ntoseye.disasm'] > [data-mark='pick'] {
+[data-role='ntoseye.disasm'] > [data-mark='pick'],
+[data-role='ntoseye.browse'] > [data-mark='pick'] {
 	background: rgb(from var(--accent) r g b / 14%);
 	box-shadow: inset 2px 0 0 var(--accent);
 	border-radius: 3px;

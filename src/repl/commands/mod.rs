@@ -9,6 +9,7 @@ const BREAKPOINT_ACTION_RECURSION_LIMIT: usize = 4;
 pub mod address_space;
 pub mod analyze;
 pub mod breakpoints;
+pub mod browse;
 mod cpu;
 mod diagnostics;
 pub mod display;

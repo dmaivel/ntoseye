@@ -11,6 +11,7 @@
 //! first prompt.
 
 pub mod analyze;
+pub mod browser;
 pub mod bugcheck;
 pub mod code;
 pub mod frames;
