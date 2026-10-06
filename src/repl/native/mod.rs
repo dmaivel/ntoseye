@@ -49,7 +49,7 @@ static NEXT_SURFACE: AtomicU64 = AtomicU64::new(1);
 /// The surfaces' role: `data-surface` for the stylesheet's selectors.
 const ROLE: &str = "ntoseye";
 /// Token colors and the marks the kinds don't draw themselves.
-const STYLESHEET: &str = include_str!("ntoseye.css");
+pub const STYLESHEET: &str = include_str!("ntoseye.css");
 
 /// Ask the terminal whether it draws Tern surfaces. Called once by the
 /// interactive prompt before reedline starts reading, since the answer
@@ -90,11 +90,21 @@ pub fn detect() {
 /// session is open on a live terminal can then leave the terminal raw, since
 /// the teardown wakes the reader by replacing stdin; the guest matters more.
 pub fn connect<M>() -> Option<Session<M>> {
-    let options = Options::new()
+    connect_with(&[], false)
+}
+
+/// [`connect`], listing program `features` in the hello (`edit` for Tern's
+/// native editing in a field), with bracketed `paste` when asked: a paste
+/// then arrives as one key rather than as typed keys.
+pub fn connect_with<M>(features: &[&str], paste: bool) -> Option<Session<M>> {
+    let mut options = Options::new()
         .app("ntoseye")
         .version(env!("CARGO_PKG_VERSION"))
-        .bracketed_paste(false)
+        .bracketed_paste(paste)
         .kitty_keyboard(false);
+    for feature in features {
+        options = options.feature(*feature);
+    }
     let handlers = SignalHandlers::save();
     let session = Session::<M>::connect(options).ok().flatten();
     handlers.restore();
@@ -568,6 +578,8 @@ pub const TYPE: &str = "ntType";
 /// A value that changed since the target last stopped, such as a register a
 /// step wrote: the warning color, as the text renderer's yellow.
 pub const CHANGED: &str = "warning";
+/// A quoted string.
+pub const STRING: &str = "ntString";
 
 /// A span of `text` in `style` (space-separated tokens; empty is plain).
 pub fn span(text: impl Into<String>, style: &str) -> Span {

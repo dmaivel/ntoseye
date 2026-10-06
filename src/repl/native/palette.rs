@@ -10,9 +10,10 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use tern_sdk::keys::Key;
 use tern_sdk::ui::{
-    self, BadgeSpec, Icon, OrderEntry, PickerAction, PickerItem, PickerPreview, PickerSize,
+    self, BadgeSpec, Icon, OrderEntry, Picker, PickerAction, PickerItem, PickerPreview, PickerSize,
     PickerTab,
 };
+use tern_sdk::wire::Event;
 use tern_sdk::{Input, Node, Session, SurfaceOptions, View};
 
 use super::{ROLE, connect};
@@ -46,17 +47,25 @@ pub struct CommandEntry {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Commands,
+    History,
     Symbols,
     Types,
     Processes,
 }
 
 impl Tab {
-    const ALL: [Self; 4] = [Self::Commands, Self::Symbols, Self::Types, Self::Processes];
+    const ALL: [Self; 5] = [
+        Self::Commands,
+        Self::History,
+        Self::Symbols,
+        Self::Types,
+        Self::Processes,
+    ];
 
     fn id(self) -> &'static str {
         match self {
             Self::Commands => "commands",
+            Self::History => "history",
             Self::Symbols => "symbols",
             Self::Types => "types",
             Self::Processes => "processes",
@@ -66,6 +75,7 @@ impl Tab {
     fn label(self) -> &'static str {
         match self {
             Self::Commands => "Commands",
+            Self::History => "History",
             Self::Symbols => "Symbols",
             Self::Types => "Types",
             Self::Processes => "Processes",
@@ -75,6 +85,7 @@ impl Tab {
     fn noun(self) -> &'static str {
         match self {
             Self::Commands => "commands",
+            Self::History => "earlier lines",
             Self::Symbols => "symbols",
             Self::Types => "types",
             Self::Processes => "processes",
@@ -84,16 +95,6 @@ impl Tab {
     fn from_id(id: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|tab| tab.id() == id)
     }
-}
-
-/// What the picker's pointer gestures report.
-#[derive(Clone)]
-enum Msg {
-    Select(String),
-    Activate(String),
-    Close,
-    Insert,
-    Tab(String),
 }
 
 /// How many recent lines the Commands tab shows: before the commands with
@@ -108,15 +109,15 @@ const PAGE: isize = 10;
 /// Show the palette over the pane on `tab`, for the line being edited,
 /// `buffer`: the line to go on editing when something was picked, `None`
 /// when the palette was closed or Tern can't show it.
-pub fn run(catalog: &Catalog, buffer: &str, tab: Tab) -> Option<String> {
-    let mut session = connect::<Msg>()?;
-    let picked = pick(&mut session, catalog, buffer, tab);
+pub fn run(catalog: Catalog, buffer: &str, tab: Tab) -> Option<String> {
+    let mut session = connect::<()>()?;
+    let picked = pick(&mut session, Palette::new(catalog, buffer, tab));
     // Restores the terminal for the line editor whatever happened.
     let _ = session.close();
     picked
 }
 
-fn pick(session: &mut Session<Msg>, catalog: &Catalog, buffer: &str, tab: Tab) -> Option<String> {
+fn pick(session: &mut Session<()>, mut palette: Palette) -> Option<String> {
     let surface = session
         .open(
             SurfaceOptions::screen()
@@ -124,13 +125,13 @@ fn pick(session: &mut Session<Msg>, catalog: &Catalog, buffer: &str, tab: Tab) -
                 .keep(false),
         )
         .ok()?;
-    let mut palette = Palette::new(catalog, buffer, tab);
     loop {
-        session.render(surface, palette.view()).ok()?;
+        let view = View::new().layer([Node::from(palette.picker())]);
+        session.render(surface, view).ok()?;
         let outcome = match session.next(None).ok()?? {
             Input::Key(key) => palette.key(&key),
-            Input::Msg(msg, _) => palette.message(msg),
-            Input::Event(_) => Outcome::Continue,
+            Input::Event(event) => palette.event(&event),
+            Input::Msg(..) => Outcome::Continue,
         };
         match outcome {
             Outcome::Continue => {}
@@ -140,7 +141,8 @@ fn pick(session: &mut Session<Msg>, catalog: &Catalog, buffer: &str, tab: Tab) -
     }
 }
 
-enum Outcome {
+/// What a key or a pointer event did to the palette.
+pub enum Outcome {
     Continue,
     Close,
     Pick,
@@ -167,8 +169,10 @@ enum Pick {
     Word(String),
 }
 
-struct Palette<'a> {
-    catalog: &'a Catalog,
+/// The palette's state: a surface hosts its [`picker`](Self::picker) and
+/// feeds it keys and events.
+pub struct Palette {
+    catalog: Catalog,
     /// The line up to the word being typed, which the query replaces.
     head: String,
     tab: Tab,
@@ -178,10 +182,13 @@ struct Palette<'a> {
     matcher: Matcher,
 }
 
-impl<'a> Palette<'a> {
-    fn new(catalog: &'a Catalog, buffer: &str, tab: Tab) -> Self {
+impl Palette {
+    /// The palette on `tab` for the line being edited, `buffer`.
+    pub fn new(catalog: Catalog, buffer: &str, tab: Tab) -> Self {
         let buffer = buffer.trim_start();
+        // History searches the whole line; the other tabs the word typed.
         let (head, word) = match buffer.rfind(char::is_whitespace) {
+            _ if tab == Tab::History => ("", buffer),
             Some(at) => buffer.split_at(at + 1),
             None => ("", buffer),
         };
@@ -198,7 +205,7 @@ impl<'a> Palette<'a> {
         palette
     }
 
-    fn key(&mut self, key: &Key) -> Outcome {
+    pub fn key(&mut self, key: &Key) -> Outcome {
         if key.is("escape") || key.is("ctrl+c") || key.is("ctrl+g") {
             return Outcome::Close;
         }
@@ -238,26 +245,32 @@ impl<'a> Palette<'a> {
         Outcome::Continue
     }
 
-    fn message(&mut self, msg: Msg) -> Outcome {
-        match msg {
-            Msg::Select(id) => self.select(&id),
-            Msg::Activate(id) => {
-                self.select(&id);
+    /// A pointer event on the picker: a row clicked or double-clicked, a
+    /// tab or an action bar button.
+    pub fn event(&mut self, event: &Event) -> Outcome {
+        match event {
+            Event::Select(select) => self.select(&select.item),
+            Event::Activate(activate) => {
+                self.select(&activate.item);
                 return Outcome::Pick;
             }
-            Msg::Close => return Outcome::Close,
-            Msg::Insert => return Outcome::Pick,
-            Msg::Tab(id) => {
-                if let Some(tab) = Tab::from_id(&id) {
-                    self.switch(tab);
+            Event::Action(action) => match action.act.as_str() {
+                "close" => return Outcome::Close,
+                "insert" => return Outcome::Pick,
+                "tab" => {
+                    if let Some(tab) = action.value.as_deref().and_then(Tab::from_id) {
+                        self.switch(tab);
+                    }
                 }
-            }
+                _ => {}
+            },
+            _ => {}
         }
         Outcome::Continue
     }
 
     /// The line to go on editing, from the selected row.
-    fn picked(&self) -> Option<String> {
+    pub fn picked(&self) -> Option<String> {
         let row = self.rows.get(self.selected)?;
         Some(match &row.pick {
             Pick::Line(line) => line.clone(),
@@ -300,6 +313,7 @@ impl<'a> Palette<'a> {
         let pattern = Pattern::parse(&self.query, CaseMatching::Smart, Normalization::Smart);
         self.rows = match self.tab {
             Tab::Commands => self.command_rows(&pattern),
+            Tab::History => self.history_rows(&pattern),
             Tab::Symbols => self.index_rows(&pattern, &self.catalog.symbols.clone(), "s"),
             Tab::Types => self.index_rows(&pattern, &self.catalog.types.clone(), "t"),
             Tab::Processes => self.process_rows(&pattern),
@@ -315,7 +329,7 @@ impl<'a> Palette<'a> {
         let typed = !self.query.is_empty();
         let mut recent: Vec<(u32, Row)> = Vec::new();
         for (index, line) in self.catalog.recent.iter().enumerate() {
-            if let Some((score, hits)) = self.score(pattern, line) {
+            if let Some((score, hits)) = score(&mut self.matcher, pattern, line) {
                 recent.push((
                     score,
                     Row {
@@ -340,15 +354,15 @@ impl<'a> Palette<'a> {
 
         let mut commands: Vec<((u8, u32), Row)> = Vec::new();
         for (index, command) in self.catalog.commands.iter().enumerate() {
-            let named = self
-                .score(pattern, &command.name)
-                .map(|(score, hits)| ((0, score), hits));
+            let matcher = &mut self.matcher;
+            let named =
+                score(matcher, pattern, &command.name).map(|(score, hits)| ((0, score), hits));
             let rank = named.or_else(|| {
                 command
                     .aliases
                     .iter()
                     .chain([&command.summary])
-                    .filter_map(|text| self.score(pattern, text))
+                    .filter_map(|text| score(matcher, pattern, text))
                     .map(|(score, _)| score)
                     .max()
                     .map(|score| ((1, score), Vec::new()))
@@ -403,8 +417,7 @@ impl<'a> Palette<'a> {
         names
             .into_iter()
             .map(|name| {
-                let hits = self
-                    .score(pattern, &name)
+                let hits = score(&mut self.matcher, pattern, &name)
                     .map(|(_, hits)| hits)
                     .unwrap_or_default();
                 Row {
@@ -421,13 +434,40 @@ impl<'a> Palette<'a> {
             .collect()
     }
 
+    /// Every earlier line, newest first; with a query, best match first.
+    fn history_rows(&mut self, pattern: &Pattern) -> Vec<Row> {
+        let mut rows: Vec<(u32, Row)> = Vec::new();
+        for (index, line) in self.catalog.recent.iter().enumerate() {
+            let Some((score, hits)) = score(&mut self.matcher, pattern, line) else {
+                continue;
+            };
+            rows.push((
+                score,
+                Row {
+                    id: format!("h{index}"),
+                    group: None,
+                    label: line.clone(),
+                    detail: None,
+                    badges: Vec::new(),
+                    hits,
+                    icon: Some(Icon::History),
+                    pick: Pick::Line(line.clone()),
+                },
+            ));
+        }
+        if !self.query.is_empty() {
+            rows.sort_by_key(|(score, _)| Reverse(*score));
+        }
+        rows.into_iter().map(|(_, row)| row).collect()
+    }
+
     /// The processes by name; with no command typed, picking one switches
     /// to it.
     fn process_rows(&mut self, pattern: &Pattern) -> Vec<Row> {
         let switch = self.head.trim().is_empty();
         let mut rows: Vec<(u32, Row)> = Vec::new();
         for (name, pid) in &self.catalog.processes {
-            let Some((score, hits)) = self.score(pattern, name) else {
+            let Some((score, hits)) = score(&mut self.matcher, pattern, name) else {
                 continue;
             };
             let pick = if switch {
@@ -455,21 +495,8 @@ impl<'a> Palette<'a> {
         rows.into_iter().map(|(_, row)| row).collect()
     }
 
-    /// How well `text` matches, and where, as UTF-16 ranges.
-    fn score(&mut self, pattern: &Pattern, text: &str) -> Option<(u32, Vec<[usize; 2]>)> {
-        let mut chars = Vec::new();
-        let mut indices = Vec::new();
-        let score = pattern.indices(
-            Utf32Str::new(text, &mut chars),
-            &mut self.matcher,
-            &mut indices,
-        )?;
-        indices.sort_unstable();
-        indices.dedup();
-        Some((score, utf16_ranges(text, &indices)))
-    }
-
-    fn view(&self) -> View<Msg> {
+    /// The picker sheet, for a surface's `layer`.
+    pub fn picker(&self) -> Picker<()> {
         let mut items = Vec::with_capacity(self.rows.len());
         let mut order = Vec::with_capacity(self.rows.len() + 2);
         let mut group = None;
@@ -502,6 +529,7 @@ impl<'a> Palette<'a> {
             _ => format!("No {} match", self.tab.noun()),
         };
         let mut picker = ui::picker()
+            .key("palette")
             .size(PickerSize::Md)
             .preview(match self.tab {
                 Tab::Commands => PickerPreview::Below,
@@ -531,22 +559,15 @@ impl<'a> Palette<'a> {
                     primary: Some(true),
                     ..PickerAction::default()
                 },
-            ])
-            .on_select(|item| Msg::Select(item.to_owned()))
-            .on_activate(|item| Msg::Activate(item.to_owned()))
-            .on_action("close", Msg::Close)
-            .on_action("insert", Msg::Insert)
-            .on_action_with("tab", |action| {
-                Msg::Tab(action.value.clone().unwrap_or_default())
-            });
+            ]);
         if let Some(row) = self.rows.get(self.selected) {
             picker = picker.selected(row.id.clone()).children(self.preview(row));
         }
-        View::new().layer([Node::from(picker)])
+        picker
     }
 
     /// A command's help, or a recent line, under the list.
-    fn preview(&self, row: &Row) -> Vec<Node<Msg>> {
+    fn preview(&self, row: &Row) -> Vec<Node> {
         match &row.pick {
             Pick::Command(index) => {
                 let command = &self.catalog.commands[*index];
@@ -601,4 +622,14 @@ fn utf16_ranges(text: &str, indices: &[u32]) -> Vec<[usize; 2]> {
         }
     }
     ranges
+}
+
+/// How well `text` matches `pattern`, and where, as UTF-16 ranges.
+fn score(matcher: &mut Matcher, pattern: &Pattern, text: &str) -> Option<(u32, Vec<[usize; 2]>)> {
+    let mut chars = Vec::new();
+    let mut indices = Vec::new();
+    let score = pattern.indices(Utf32Str::new(text, &mut chars), matcher, &mut indices)?;
+    indices.sort_unstable();
+    indices.dedup();
+    Some((score, utf16_ranges(text, &indices)))
 }

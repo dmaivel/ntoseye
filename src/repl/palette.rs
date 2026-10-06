@@ -11,15 +11,23 @@ use super::{CompletionStrategy, ReplState, command_registry};
 pub const PALETTE_COMMAND: &str = "palette";
 
 /// How many distinct earlier lines the palette ranks.
-const RECENT_LINES: usize = 64;
+pub const RECENT_LINES: usize = 1000;
 
 impl ReplState<'_> {
     /// Show the palette for the line being edited, and put back what was
     /// picked. Closing it leaves the line as it was.
     pub fn open_palette(&mut self, line_editor: &mut Reedline) {
         let buffer = line_editor.current_buffer_contents().to_owned();
-        let catalog = Catalog {
-            recent: recent_lines(line_editor),
+        let catalog = self.palette_catalog(recent_lines(line_editor));
+        if let Some(line) = palette::run(catalog, &buffer, initial_tab(&buffer)) {
+            line_editor.run_edit_commands(&[EditCommand::Clear, EditCommand::InsertString(line)]);
+        }
+    }
+
+    /// What the palette offers, with `recent` as the recent lines.
+    pub fn palette_catalog(&self, recent: Vec<String>) -> Catalog {
+        Catalog {
+            recent,
             commands: self.palette_commands(),
             symbols: self.caches.symbols.clone(),
             types: self.caches.types.clone(),
@@ -34,9 +42,6 @@ impl ReplState<'_> {
                         .collect()
                 })
                 .unwrap_or_default(),
-        };
-        if let Some(line) = palette::run(&catalog, &buffer, initial_tab(&buffer)) {
-            line_editor.run_edit_commands(&[EditCommand::Clear, EditCommand::InsertString(line)]);
         }
     }
 
@@ -103,7 +108,7 @@ fn recent_lines(line_editor: &Reedline) -> Vec<String> {
 
 /// The tab for what is being typed: commands for the command word, and
 /// for an argument what that argument of the command completes as.
-fn initial_tab(buffer: &str) -> Tab {
+pub fn initial_tab(buffer: &str) -> Tab {
     let buffer = buffer.trim_start();
     let words: Vec<&str> = buffer.split_whitespace().collect();
     if !buffer.contains(char::is_whitespace) {

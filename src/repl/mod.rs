@@ -56,6 +56,10 @@ use crate::ui;
 /// signal leaves through the same teardown as `q`.
 #[cfg(feature = "cli")]
 static TERMINATION_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// Set while Tern's own prompt reads the line: it polls for termination
+/// itself, and its session needs the real terminal to close.
+#[cfg(feature = "cli")]
+pub static NATIVE_PROMPT: AtomicBool = AtomicBool::new(false);
 pub const BREAK_STACKTRACE_DISPLAY_LIMIT: usize = 6;
 pub const BREAK_STACKTRACE_PROBE_LIMIT: usize = 64;
 #[cfg(feature = "cli")]
@@ -98,6 +102,8 @@ pub mod native;
 mod palette;
 mod remote;
 mod stop;
+#[cfg(feature = "cli")]
+mod tern_prompt;
 
 pub use crate::exception_policy::*;
 pub use crate::repl_command;
@@ -596,7 +602,7 @@ fn bridge_termination_to_interrupt(interrupt: InterruptRequester) {
             // must not be the only one to see it.
             if termination_requested() {
                 interrupt.raise();
-                if !woke {
+                if !woke && !NATIVE_PROMPT.load(Ordering::SeqCst) {
                     woke = true;
                     wake_line_editor();
                 }
@@ -911,6 +917,12 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         }
     }
 
+    let mut tern_prompt =
+        native::active().then(|| tern_prompt::TernPrompt::new(line_editor.history()));
+    let mut prompt_completer = MyCompleter {
+        caches: caches.clone(),
+        target: target_loan.clone(),
+    };
     let mut state = ReplState {
         ctx,
         caches,
@@ -973,13 +985,36 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                 // A run that ended without a result to show still stops
                 // its indicator before the prompt.
                 native::finish_running();
-                let prompt = CustomPrompt::new(backend_label, &state.ctx.current_thread);
-                let sig = match target_loan.lend(&state.ctx.target, || {
-                    prompting(|| line_editor.read_line(&prompt))
-                }) {
-                    Ok(sig) => sig,
-                    Err(_) if termination_requested() => break,
-                    Err(error) => return Err(error.into()),
+                // In Tern the line is read in Tern's own field.
+                let native = match tern_prompt.as_mut() {
+                    Some(native) => native.read(
+                        &state,
+                        &mut prompt_completer,
+                        &target_loan,
+                        line_editor.history_mut(),
+                    ),
+                    None => tern_prompt::Read::Unavailable,
+                };
+                let sig = match native {
+                    tern_prompt::Read::Line(line) => Signal::Success(line),
+                    tern_prompt::Read::Interrupt => Signal::CtrlC,
+                    tern_prompt::Read::Quit => Signal::CtrlD,
+                    tern_prompt::Read::Clear => continue,
+                    tern_prompt::Read::Browse => {
+                        state.open_browser(None);
+                        continue;
+                    }
+                    tern_prompt::Read::Unavailable => {
+                        tern_prompt = None;
+                        let prompt = CustomPrompt::new(backend_label, &state.ctx.current_thread);
+                        match target_loan.lend(&state.ctx.target, || {
+                            prompting(|| line_editor.read_line(&prompt))
+                        }) {
+                            Ok(sig) => sig,
+                            Err(_) if termination_requested() => break,
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
                 };
                 if termination_requested() {
                     break;

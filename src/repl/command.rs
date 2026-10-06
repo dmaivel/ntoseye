@@ -118,6 +118,11 @@ impl CommandRegistry {
         self.by_name.get(name).copied()
     }
 
+    /// Whether some command's name starts with `prefix`.
+    pub fn has_prefix(&self, prefix: &str) -> bool {
+        self.by_name.keys().any(|name| name.starts_with(prefix))
+    }
+
     pub fn command_names(&self) -> Vec<(&'static str, &'static CommandSpec)> {
         let mut names: Vec<_> = self
             .by_name
