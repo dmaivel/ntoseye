@@ -6,6 +6,7 @@ use super::{
     DownloadJob, FORCE_DOWNLOADS, PdbIdentity, PdbRequest, SymbolSource, SymbolStore, server_urls,
 };
 use crate::error::{Error, Result};
+use crate::output;
 use dashmap::DashMap;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
@@ -338,7 +339,11 @@ pub fn download_jobs_parallel(jobs: Vec<DownloadJob>, quiet: bool) -> Vec<Result
     jobs.into_par_iter()
         .map(|job| {
             let mp = Arc::clone(&mp);
-            download_job(&job, mp.add(ProgressBar::new(0))).map(|_| job.path)
+            let bar = (!quiet)
+                .then(|| output::native_progress_bar(0, "downloading symbols"))
+                .flatten()
+                .unwrap_or_else(|| mp.add(ProgressBar::new(0)));
+            download_job(&job, bar).map(|_| job.path)
         })
         .collect::<Vec<_>>()
 }

@@ -7,6 +7,7 @@ use super::{DownloadJob, ImageFetch, SymbolSource, SymbolStore, server_urls};
 use crate::{
     error::{Error, Result},
     guest::ModuleInfo,
+    output,
     pe::{PeImage, image_file_identity, read_pe_image_from_file},
 };
 use indicatif::ProgressBar;
@@ -236,7 +237,7 @@ impl SymbolStore {
         let job = Self::build_image_download_job(image_file_name, time_date_stamp, size_of_image)?;
         match self.local_image(&job, time_date_stamp, size_of_image) {
             Some(local) => install_local_file(&local, &job.path)?,
-            None => download_job(&job, ProgressBar::new(0))?,
+            None => download_job(&job, output::progress_bar(0, "downloading symbols"))?,
         }
         Ok(job.path)
     }
@@ -366,7 +367,7 @@ impl SymbolStore {
                 match self.local_image(&job, time_date_stamp, size_of_image) {
                     Some(path) => path,
                     None if fetch == ImageFetch::Download => {
-                        download_job(&job, ProgressBar::new(0))?;
+                        download_job(&job, output::progress_bar(0, "downloading symbols"))?;
                         job.path.clone()
                     }
                     None => {

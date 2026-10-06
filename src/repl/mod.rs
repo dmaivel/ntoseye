@@ -38,7 +38,7 @@ use crate::error::Result;
 use crate::expr::NumberRadix;
 use crate::guest::ModuleSymbolLoadReport;
 #[cfg(feature = "cli")]
-use crate::output::log_input_line;
+use crate::output::{log_input_line, prompting};
 #[cfg(feature = "python")]
 use crate::python::embed;
 use crate::session::Session;
@@ -706,11 +706,6 @@ fn print_target(target: &native::session::Target) {
 
 #[cfg(feature = "cli")]
 fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
-    // Before anything reads stdin, and before the first stop context, which
-    // Tern draws as a card.
-    if !plain {
-        native::detect();
-    }
     // Warnings the attach raised (unreadable PRCB contexts, a corrupt triage
     // signature, kernel discovery falling back) precede the banner.
     for notice in ctx.take_notices() {
@@ -957,12 +952,13 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                 // its indicator before the prompt.
                 native::finish_running();
                 let prompt = CustomPrompt::new(backend_label, &state.ctx.current_thread);
-                let sig =
-                    match target_loan.lend(&state.ctx.target, || line_editor.read_line(&prompt)) {
-                        Ok(sig) => sig,
-                        Err(_) if termination_requested() => break,
-                        Err(error) => return Err(error.into()),
-                    };
+                let sig = match target_loan.lend(&state.ctx.target, || {
+                    prompting(|| line_editor.read_line(&prompt))
+                }) {
+                    Ok(sig) => sig,
+                    Err(_) if termination_requested() => break,
+                    Err(error) => return Err(error.into()),
+                };
                 if termination_requested() {
                     break;
                 }

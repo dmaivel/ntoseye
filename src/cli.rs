@@ -11,6 +11,7 @@ use crate::dap;
 use crate::gdbserver;
 #[cfg(feature = "mcp")]
 use crate::mcp;
+use crate::repl::native;
 use crate::{
     Backend, TargetSpec, configure, diagnostics,
     error::{Error, Result},
@@ -441,6 +442,11 @@ fn run(cli: Cli) -> Result<()> {
         Some(dump) => TargetSpec::Dump(dump.clone()),
         None => live_spec(&args, backend),
     };
+    // Before the attach, which already indexes symbols behind a progress
+    // bar that Tern draws natively, and before anything reads stdin.
+    if !plain_repl {
+        native::detect();
+    }
     let mut ctx = Session::open_with_progress(&spec, &mut |line| {
         crate::output::write_stderr_fmt(format_args!("{}\n", line.bright_black()));
     })?;

@@ -29,9 +29,9 @@ In [Tern](https://stencil.so/tern), Stencil's terminal, the REPL draws its resul
 - {command}`r` is a register grid, and {command}`u`, {command}`ub` and {command}`uf` color instructions with Tern's syntax colors.
 - {command}`ls` and {command}`lsa` show source in Tern's highlighting for the file's language, with line numbers and the current line marked, under a header that opens the file in Tern. A stop at a line of a file that {command}`.srcpath` finds shows that source in the card, and the disassembly folds under it.
 - While {command}`g` waits for a stop, a timer shows how long the target has run.
-- Long tasks, such as indexing symbols and writing a dump with {command}`.dump`, show a Tern progress bar.
+- Long tasks, such as downloading and indexing symbols and writing a dump with {command}`.dump`, show a Tern progress bar.
 
-Other commands print text. ntoseye asks the terminal when the REPL starts, so this also works over ssh, but not inside tmux, screen or zellij. Output that a host captures (MCP, the Python SDK, the DAP console, `.foreach`) and `.logopen` transcripts are always text. For text in Tern, set `TERN_TSP=0` or use `--plain-repl`.
+Other commands print text. ntoseye asks the terminal when it starts, so this also works over ssh, but not inside tmux, screen or zellij. Output that a host captures (MCP, the Python SDK, the DAP console, `.foreach`) and `.logopen` transcripts are always text. For text in Tern, set `TERN_TSP=0` or use `--plain-repl`.
 
 A Tern too old to draw these views, such as a session daemon still running the version from before an update, gets text, and ntoseye says so when it starts. To run the updated version, use **Restart Tern** in Tern's command palette.
 

@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use tern_sdk::ui::{self, Align, Gap, KvLayout, Span, Tone, Wrap};
+use tern_sdk::ui::{self, Align, Gap, Span, Tone, Wrap};
 use tern_sdk::{Node, View};
 
 use super::{MUTED, STRONG, addr, code, ran_row, source, span, spans, stack, symbol};
@@ -125,23 +125,30 @@ pub fn stop_card(stop: Stop<'_>) -> View {
     View::new().main([card])
 }
 
-/// `thread dwm.exe · state Running · ethread … · pid 3832 · tid 3956`.
-fn thread_line(thread: &ThreadInfo) -> ui::Kv<()> {
-    let mut line = ui::kv().layout(KvLayout::Inline).item(
+/// `thread dwm.exe  state Running  ethread …  pid 3832  tid 3956`: muted
+/// keys, evenly spaced, as the text renderer prints it.
+fn thread_line(thread: &ThreadInfo) -> ui::TextNode<()> {
+    let mut pairs = vec![(
         "thread",
         span(thread.process_name.as_deref().unwrap_or("unknown"), STRONG),
-    );
+    )];
     if let Some(state) = thread.state {
-        line = line.item("state", kthread_state_name(state));
+        pairs.push(("state", span(kthread_state_name(state), "")));
     }
-    line = line.item("ethread", addr(thread.ethread.0));
+    pairs.push(("ethread", addr(thread.ethread.0)));
     if let Some(pid) = thread.pid {
-        line = line.item("pid", pid.to_string());
+        pairs.push(("pid", span(pid.to_string(), "")));
     }
     if let Some(tid) = thread.tid {
-        line = line.item("tid", tid.to_string());
+        pairs.push(("tid", span(tid.to_string(), "")));
     }
-    line
+    let mut spans = Vec::new();
+    for (index, (key, value)) in pairs.into_iter().enumerate() {
+        let gap = if index == 0 { "" } else { "  " };
+        spans.push(span(format!("{gap}{key} "), MUTED));
+        spans.push(value);
+    }
+    ui::text(spans).wrap(Wrap::Word)
 }
 
 /// The chip for a stop's cause, and what the cause says beyond it:

@@ -17,7 +17,7 @@ use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock};
 
 use indicatif::{ProgressBar, WeakProgressBar};
@@ -56,6 +56,15 @@ pub fn set_progress_hook(hook: ProgressHook) {
     let _ = PROGRESS_HOOK.set(hook);
 }
 
+static TEXT_HOOK: OnceLock<fn()> = OnceLock::new();
+
+/// Run `hook` before each write of text to the terminal, ahead of
+/// [`printed`] counting it: the REPL ends a finished progress bar there,
+/// so the text takes the bar's row.
+pub fn set_text_hook(hook: fn()) {
+    let _ = TEXT_HOOK.set(hook);
+}
+
 static PRINTED: AtomicU64 = AtomicU64::new(0);
 
 /// How many times text has been written to the terminal: equal readings
@@ -68,18 +77,38 @@ pub fn printed() -> u64 {
 /// terminal when it can, else by indicatif on stderr. A host capturing the
 /// output gets indicatif's.
 pub fn progress_bar(len: u64, label: &'static str) -> ProgressBar {
-    match PROGRESS_HOOK.get() {
-        Some(hook) if !capturing() => {
-            let bar = ProgressBar::hidden();
-            bar.set_length(len);
-            hook(bar.downgrade(), label);
-            bar
-        }
-        _ => ProgressBar::new(len),
-    }
+    native_progress_bar(len, label).unwrap_or_else(|| ProgressBar::new(len))
+}
+
+/// A bar the REPL's terminal draws itself, labeled by its message or else
+/// `label`; `None` when it can't, so indicatif draws it (on its own or in a
+/// `MultiProgress`). Never while the line editor owns the screen: a
+/// surface opened there would move the cursor under it.
+pub fn native_progress_bar(len: u64, label: &'static str) -> Option<ProgressBar> {
+    let hook = PROGRESS_HOOK
+        .get()
+        .filter(|_| !capturing() && !PROMPTING.load(Ordering::Relaxed))?;
+    let bar = ProgressBar::hidden();
+    bar.set_length(len);
+    hook(bar.downgrade(), label);
+    Some(bar)
+}
+
+static PROMPTING: AtomicBool = AtomicBool::new(false);
+
+/// Run `f`, the line editor reading a line, with native progress bars off:
+/// a completion that builds the symbol index draws indicatif's instead.
+pub fn prompting<T>(f: impl FnOnce() -> T) -> T {
+    PROMPTING.store(true, Ordering::Relaxed);
+    let result = f();
+    PROMPTING.store(false, Ordering::Relaxed);
+    result
 }
 
 fn print_stdout(args: fmt::Arguments<'_>) {
+    if let Some(hook) = TEXT_HOOK.get() {
+        hook();
+    }
     PRINTED.fetch_add(1, Ordering::Relaxed);
     // A failed write is dropped, not a panic like `print!`'s: a terminal
     // that went away must not stop the teardown that releases the guest.
@@ -92,6 +121,9 @@ fn print_stdout(args: fmt::Arguments<'_>) {
 }
 
 fn print_stderr(args: fmt::Arguments<'_>) {
+    if let Some(hook) = TEXT_HOOK.get() {
+        hook();
+    }
     PRINTED.fetch_add(1, Ordering::Relaxed);
     let mut stderr = io::stderr();
     if *STDERR_STYLED {

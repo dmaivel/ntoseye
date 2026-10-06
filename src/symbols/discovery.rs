@@ -11,7 +11,7 @@ use crate::{
     backend::MemoryOps,
     error::{Error, Result},
     guest::{Image, ModuleInfo},
-    memory,
+    memory, output,
     pe::{
         headers::{self, DebugDirectoryEntry, read_debug_directory},
         read_pe_header_page, size_of_image,
@@ -19,7 +19,6 @@ use crate::{
     types::{Arch, Dtb, PhysAddr, VirtAddr},
 };
 use dashmap::mapref::entry::Entry;
-use indicatif::ProgressBar;
 use memmap2::Mmap;
 use pdb2::{FallibleIterator, TypeData};
 use pelite::{
@@ -142,7 +141,7 @@ impl SymbolStore {
         if let Some((job, guid)) =
             self.extract_download_job_from_memory(&object.memory(), object.base_address)?
         {
-            download_job(&job, ProgressBar::new(0))?;
+            download_job(&job, output::progress_bar(0, "downloading symbols"))?;
             self.ensure_pdb_loaded(job.expected_identity().unwrap(), &job.path)?;
 
             let module_key = Self::module_key(object.dtb(), object.base_address);
@@ -180,14 +179,14 @@ impl SymbolStore {
         size_of_image: u32,
     ) -> Result<Option<u128>> {
         let image_job = Self::build_image_download_job(name, time_date_stamp, size_of_image)?;
-        download_job(&image_job, ProgressBar::new(0))?;
+        download_job(&image_job, output::progress_bar(0, "downloading symbols"))?;
 
         let Some((pdb_job, guid)) = self.extract_download_job_from_image_file(&image_job.path)?
         else {
             return Ok(None);
         };
 
-        download_job(&pdb_job, ProgressBar::new(0))?;
+        download_job(&pdb_job, output::progress_bar(0, "downloading symbols"))?;
         self.ensure_pdb_loaded(pdb_job.expected_identity().unwrap(), &pdb_job.path)?;
 
         let module_key = Self::module_key(dtb, base_address);

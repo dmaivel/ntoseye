@@ -71,6 +71,7 @@ pub fn detect() {
     if capabilities.has_feature(wire::feature::FLOW) {
         let _ = CAPABILITIES.set(capabilities);
         output::set_progress_hook(follow_task);
+        output::set_text_hook(before_text);
     } else {
         // An update replaces Tern's binary while its session daemon keeps
         // running the old one, which may predate flow surfaces: without
@@ -98,7 +99,7 @@ pub fn render(view: impl FnOnce() -> View, text: impl FnOnce()) {
     };
     let bytes = Doc::from_view(view()).and_then(|doc| {
         let mut live = live();
-        live.task = None;
+        live.tasks.clear();
         // A result that didn't take the run leaves it in the scrollback.
         if let Some(started) = live.started.take() {
             live.end_with(View::new().main([ran_row(started.elapsed())]));
@@ -164,10 +165,10 @@ pub fn running(text: impl FnOnce()) {
 }
 
 /// End the live surface: the running indicator stops at how long the target
-/// ran and stays in the scrollback, and a task's progress bar goes.
+/// ran and stays in the scrollback, and tasks' progress bars go.
 pub fn finish_running() {
     let mut live = live();
-    live.task = None;
+    live.tasks.clear();
     let Some(started) = live.started.take() else {
         live.end();
         return;
@@ -191,39 +192,30 @@ pub fn ran_row(ran: Duration) -> Row<()> {
         .child(ui::elapsed().stopped(u64::try_from(ran.as_millis()).unwrap_or(u64::MAX)))
 }
 
-/// Follow a long task's progress bar in the live surface, polling it until
-/// it finishes or is dropped. The REPL's [`output::progress_bar`] hook.
+/// Follow a long task's progress bar in the live surface until it finishes
+/// or is dropped: the REPL's [`output::progress_bar`] hook. One poller
+/// redraws every bar shown at once, such as parallel downloads.
 fn follow_task(bar: WeakProgressBar, label: &'static str) {
-    let generation = {
-        let mut live = live();
-        live.generation += 1;
-        live.task = Some(Task {
-            bar,
-            label,
-            generation: live.generation,
-        });
-        live.generation
-    };
+    {
+        let mut state = live();
+        state.tasks.push(Task { bar, label });
+        if state.polling {
+            return;
+        }
+        state.polling = true;
+    }
     std::thread::spawn(move || {
         loop {
             // A first tick before drawing, so a quick task never flashes.
             std::thread::sleep(TASK_TICK);
-            let Some(capabilities) = CAPABILITIES.get() else {
-                return;
-            };
             let mut live = live();
-            let done = match &live.task {
-                Some(task) if task.generation == generation => {
-                    task.bar.upgrade().is_none_or(|bar| bar.is_finished())
-                }
-                // Replaced by a newer task, or ended by a result.
-                _ => return,
-            };
-            if done {
-                live.task = None;
+            live.tasks
+                .retain(|task| task.bar.upgrade().is_some_and(|bar| !bar.is_finished()));
+            if let Some(capabilities) = CAPABILITIES.get() {
+                let _ = live.show(capabilities);
             }
-            let _ = live.show(capabilities);
-            if done {
+            if live.tasks.is_empty() {
+                live.polling = false;
                 return;
             }
         }
@@ -233,16 +225,34 @@ fn follow_task(bar: WeakProgressBar, label: &'static str) {
 /// How often a task's bar is redrawn.
 const TASK_TICK: Duration = Duration::from_millis(100);
 
+/// Before text is printed: when the live surface shows only bars that have
+/// finished, it goes now rather than at the poller's next tick, so the text
+/// (a task's summary, say) takes its row instead of leaving it blank.
+fn before_text() {
+    let mut live = live();
+    if live.shown.is_none() || live.started.is_some() {
+        return;
+    }
+    if live
+        .tasks
+        .iter()
+        .all(|task| task.bar.upgrade().is_none_or(|bar| bar.is_finished()))
+    {
+        live.tasks.clear();
+        live.end();
+    }
+}
+
 /// The one surface left open while ntoseye works: Tern keeps a single live
-/// flow surface per screen, so the running indicator and a task's progress
+/// flow surface per screen, so the running indicator and the tasks' progress
 /// share it, and anything drawn after ends it first.
 struct Live {
     shown: Option<Shown>,
     /// When the target was resumed, while it runs.
     started: Option<Instant>,
-    task: Option<Task>,
-    /// Numbers the tasks, so a task's poller knows when it was replaced.
-    generation: u64,
+    tasks: Vec<Task>,
+    /// Whether a thread is redrawing the tasks.
+    polling: bool,
 }
 
 /// The open surface, the document it shows and its last frame's number.
@@ -256,15 +266,15 @@ struct Shown {
 
 struct Task {
     bar: WeakProgressBar,
+    /// What the row says when the bar has no message of its own.
     label: &'static str,
-    generation: u64,
 }
 
 static LIVE: Mutex<Live> = Mutex::new(Live {
     shown: None,
     started: None,
-    task: None,
-    generation: 0,
+    tasks: Vec::new(),
+    polling: false,
 });
 
 fn live() -> std::sync::MutexGuard<'static, Live> {
@@ -289,10 +299,16 @@ impl Live {
                     .into(),
             );
         }
-        if let Some(task) = &self.task
-            && let Some(bar) = task.bar.upgrade()
-        {
-            rows.push(task_row(task.label, bar.position(), bar.length()).into());
+        for task in &self.tasks {
+            let Some(bar) = task.bar.upgrade() else {
+                continue;
+            };
+            let message = bar.message();
+            let label = match message.trim() {
+                "" => task.label,
+                message => message,
+            };
+            rows.push(task_row(label, bar.position(), bar.length()).into());
         }
         (!rows.is_empty())
             .then(|| View::new().main([ui::col().role("ntoseye.live").children(rows)]))
@@ -328,11 +344,17 @@ impl Live {
         Ok(())
     }
 
-    /// Remove the surface from the pane.
+    /// Remove the surface from the pane. Its anchor row stays, empty, with
+    /// the cursor below it: when nothing was printed there since, the cursor
+    /// goes back up so the next output takes the row instead of leaving a
+    /// blank line.
     fn end(&mut self) {
         if let Some(shown) = self.shown.take()
-            && let Ok(bytes) = shown.surface.close(false)
+            && let Ok(mut bytes) = shown.surface.close(false)
         {
+            if shown.printed == output::printed() {
+                bytes.extend_from_slice(b"\x1b[A\r");
+            }
             write(&bytes);
         }
     }
