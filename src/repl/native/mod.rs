@@ -10,10 +10,14 @@
 //! keeps stdin to itself. The one read is the handshake, once, before the
 //! first prompt.
 
+pub mod analyze;
+pub mod bugcheck;
 pub mod code;
 pub mod frames;
 pub mod help;
+pub mod inspect;
 pub mod lists;
+pub mod memory;
 pub mod session;
 pub mod stack;
 pub mod stop;

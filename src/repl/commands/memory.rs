@@ -44,6 +44,43 @@ fn le_value(bytes: &[u8]) -> Option<u64> {
     }
 }
 
+/// What `dds`/`dqs` show of an item.
+pub enum SymbolValue {
+    /// The range ends inside the item.
+    Partial,
+    /// A byte of the item is unreadable.
+    Unreadable,
+    /// The value, and the symbol it resolves to.
+    Value { value: u64, symbol: Option<String> },
+}
+
+/// A `dds`/`dqs` row: an item's address and what it holds.
+pub struct SymbolValueRow {
+    pub address: VirtAddr,
+    pub value: SymbolValue,
+}
+
+/// `dds`/`dqs` as text: a line per item, values `item_size * 2` digits wide.
+fn print_symbol_values(rows: &[SymbolValueRow], item_size: usize) {
+    let width = item_size * 2;
+    for row in rows {
+        let address = ui::addr(row.address.0);
+        match &row.value {
+            SymbolValue::Partial => outln!("{address}  <partial>"),
+            SymbolValue::Unreadable => outln!("{address}  <unreadable>"),
+            SymbolValue::Value {
+                value,
+                symbol: Some(symbol),
+            } => outln!("{address}  {value:0width$x}  {}", ui::symbol(symbol)),
+            SymbolValue::Value {
+                value,
+                symbol: None,
+            } => outln!("{address}  {value:0width$x}"),
+        }
+    }
+    outln!();
+}
+
 repl_command! {
     cmd_pagein;
     names: [".pagein"],
@@ -414,7 +451,14 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        display_memory_with_validity(range.start, &data, Some(&valid), &mode);
+        let print_text = || display_memory_with_validity(range.start, &data, Some(&valid), &mode);
+        #[cfg(feature = "cli")]
+        native::render(
+            || native::memory::dump(range.start, &data, Some(&valid), &mode),
+            print_text,
+        );
+        #[cfg(not(feature = "cli"))]
+        print_text();
 
         Ok(())
     }
@@ -663,17 +707,32 @@ impl ReplState<'_> {
         &self,
         range: &AddressRange,
         item_size: usize,
-        mut visit: impl FnMut(&Self, VirtAddr, &[u8], bool, &ThreadTraceContext),
+        visit: impl FnMut(&Self, VirtAddr, &[u8], bool, &ThreadTraceContext),
     ) -> Result<()> {
+        if self.visit_symbol_items(range, item_size, visit) {
+            outln!();
+        }
+        Ok(())
+    }
+
+    /// Read `range` and hand `visit` each `item_size`-byte item, whether all
+    /// of it is readable, and the thread context to resolve symbols in;
+    /// `false` after saying why nothing was read.
+    fn visit_symbol_items(
+        &self,
+        range: &AddressRange,
+        item_size: usize,
+        mut visit: impl FnMut(&Self, VirtAddr, &[u8], bool, &ThreadTraceContext),
+    ) -> bool {
         if range.len() > MAX_DISPLAY_BYTES {
             error!("display range exceeds the maximum of {MAX_DISPLAY_BYTES:#x} bytes");
-            return Ok(());
+            return false;
         }
         let (data, valid) = match self.read_virtual_best_effort(range) {
             Ok(read) => read,
             Err(error) => {
                 error!("{error}");
-                return Ok(());
+                return false;
             }
         };
         let dtb = self.ctx.target.current_dtb();
@@ -687,8 +746,7 @@ impl ReplState<'_> {
                     .is_some_and(|bytes| bytes.iter().all(|ok| *ok));
             visit(self, address, chunk, readable, &trace);
         }
-        outln!();
-        Ok(())
+        true
     }
 
     fn display_symbol_values(
@@ -706,36 +764,39 @@ impl ReplState<'_> {
 
     /// `dds`/`dqs` over `range`: each value, and the symbol it resolves to.
     pub fn display_symbol_range(&self, range: &AddressRange, item_size: usize) -> Result<()> {
-        self.visit_symbol_range(
+        let mut rows = Vec::new();
+        let read = self.visit_symbol_items(
             range,
             item_size,
             |state, address, chunk, readable, trace| {
-                if chunk.len() != item_size {
-                    outln!("{}  <partial>", ui::addr(address.0));
-                    return;
-                }
-                if !readable {
-                    outln!("{}  <unreadable>", ui::addr(address.0));
-                    return;
-                }
-                let Some(value) = le_value(chunk) else {
-                    return;
-                };
-                let width = item_size * 2;
-                match try_format_symbol(&state.ctx.target, trace, value) {
-                    Some(symbol) => outln!(
-                        "{}  {:0width$x}  {}",
-                        ui::addr(address.0),
+                let value = if chunk.len() != item_size {
+                    SymbolValue::Partial
+                } else if !readable {
+                    SymbolValue::Unreadable
+                } else {
+                    let Some(value) = le_value(chunk) else {
+                        return;
+                    };
+                    SymbolValue::Value {
                         value,
-                        ui::symbol(&symbol),
-                        width = width
-                    ),
-                    None => {
-                        outln!("{}  {:0width$x}", ui::addr(address.0), value, width = width)
+                        symbol: try_format_symbol(&state.ctx.target, trace, value),
                     }
-                }
+                };
+                rows.push(SymbolValueRow { address, value });
             },
-        )
+        );
+        if !read {
+            return Ok(());
+        }
+        let print_text = || print_symbol_values(&rows, item_size);
+        #[cfg(feature = "cli")]
+        native::render(
+            || native::memory::symbol_values(&rows, item_size),
+            print_text,
+        );
+        #[cfg(not(feature = "cli"))]
+        print_text();
+        Ok(())
     }
 
     fn cmd_dds(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {

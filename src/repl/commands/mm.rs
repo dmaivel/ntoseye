@@ -10,8 +10,8 @@ use crate::repl::*;
 use crate::target::DiagnosticValue;
 use crate::target::mm::{
     LookasideDetail, LookasideListsDetail, MdlDetail, PfnDetail, PfnSelector, PoolBlockDetail,
-    PoolFindDetail, PoolType, PoolUsageDetail, PoolUsageSort, PoolValidationDetail, PteLevel,
-    PtovDetail, SystemPtesDetail, VmDetail, VtopDetail, VtopLevel,
+    PoolFindDetail, PoolPageDetail, PoolType, PoolUsageDetail, PoolUsageSort, PoolValidationDetail,
+    PteLevel, PteWalk, PtovDetail, SystemPtesDetail, VmDetail, VtopDetail, VtopLevel,
 };
 use crate::target::pool::tag_string;
 use crate::types::VirtAddr;
@@ -766,6 +766,29 @@ fn pte_level_cell(level: &PteLevel, invalid_pte_mask: u64) -> String {
     )
 }
 
+/// `!pte`: one column per level reached, under the VA and DTB.
+fn print_pte_walk(result: &PteWalk, invalid_pte_mask: u64) {
+    let header = format!(
+        "VA {}  DTB {}",
+        ui::addr(result.address.0),
+        ui::addr(result.dtb)
+    );
+    let mut builder = Builder::default();
+    let row_strings: Vec<String> = result
+        .levels()
+        .map(|level| pte_level_cell(level, invalid_pte_mask))
+        .collect();
+    builder.push_record(row_strings);
+
+    let mut table = builder.build();
+    table
+        .with(Panel::header(header))
+        .with(Modify::new(Rows::first()).with(Alignment::center()))
+        .with(tabled::settings::Style::empty());
+
+    outln!("{}\n", table);
+}
+
 impl ReplState<'_> {
     fn cmd_vm(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let flags = match invocation.arg(0) {
@@ -914,27 +937,14 @@ impl ReplState<'_> {
         };
         match self.ctx.target.pte_traverse(address) {
             Ok(result) => {
-                let header = format!(
-                    "VA {}  DTB {}",
-                    ui::addr(result.address.0),
-                    ui::addr(result.dtb)
-                );
-                let mut builder = Builder::default();
-
                 let mask = self.ctx.target.phys.invalid_pte_mask();
-                let row_strings: Vec<String> = result
-                    .levels()
-                    .map(|level| pte_level_cell(level, mask))
-                    .collect();
-                builder.push_record(row_strings);
-
-                let mut table = builder.build();
-                table
-                    .with(Panel::header(header))
-                    .with(Modify::new(Rows::first()).with(Alignment::center()))
-                    .with(tabled::settings::Style::empty());
-
-                outln!("{}\n", table);
+                #[cfg(feature = "cli")]
+                native::render(
+                    || native::inspect::pte(&result, mask),
+                    || print_pte_walk(&result, mask),
+                );
+                #[cfg(not(feature = "cli"))]
+                print_pte_walk(&result, mask);
             }
             Err(e) => {
                 error!("{}\n", e);
@@ -1017,84 +1027,95 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        if let Some(big) = &detail.big {
-            outln!("big pool @ {}", ui::addr(big.address.0));
-            outln!("  target        : {}", ui::addr(big.target.0));
-            outln!(
-                "  range         : {} - {} ({} bytes)",
-                ui::addr(big.address.0),
-                ui::addr(big.address.0.saturating_add(big.size)),
-                big.size
-            );
-            outln!("  offset        : 0x{:x} / 0x{:x}", big.offset, big.size);
-            outln!("  tag           : '{}' (0x{:08x})", big.tag_name, big.tag);
-            outln!("  table entry   : {}[{}]", ui::addr(big.entry.0), big.index);
-            outln!(
-                "  nonpaged      : {}",
-                if big.nonpaged { "yes" } else { "no" }
-            );
-            outln!("  pattern       : 0x{:x}", big.pattern);
-            outln!("  pool flags    : 0x{:x}", big.pool_flags);
-            outln!("  slush size    : 0x{:x}", big.slush_size);
-            return Ok(());
-        }
+        #[cfg(feature = "cli")]
+        native::render(
+            || native::inspect::pool(&detail, target),
+            || print_pool_page(&detail, target),
+        );
+        #[cfg(not(feature = "cli"))]
+        print_pool_page(&detail, target);
+        Ok(())
+    }
+}
 
-        outln!("pool page {}", ui::addr(detail.page.0));
-        outln!("  target        : {}", ui::addr(target.0));
-        if let Some(region) = &detail.region {
-            outln!(
-                "  region        : {} [{} - {}]",
-                region.name,
-                ui::addr(region.start.0),
-                ui::addr(region.end.0)
-            );
+/// `!pool`: the big-pool allocation holding `target`, or the pool page's
+/// blocks with the one holding `target` marked.
+fn print_pool_page(detail: &PoolPageDetail, target: VirtAddr) {
+    if let Some(big) = &detail.big {
+        outln!("big pool @ {}", ui::addr(big.address.0));
+        outln!("  target        : {}", ui::addr(big.target.0));
+        outln!(
+            "  range         : {} - {} ({} bytes)",
+            ui::addr(big.address.0),
+            ui::addr(big.address.0.saturating_add(big.size)),
+            big.size
+        );
+        outln!("  offset        : 0x{:x} / 0x{:x}", big.offset, big.size);
+        outln!("  tag           : '{}' (0x{:08x})", big.tag_name, big.tag);
+        outln!("  table entry   : {}[{}]", ui::addr(big.entry.0), big.index);
+        outln!(
+            "  nonpaged      : {}",
+            if big.nonpaged { "yes" } else { "no" }
+        );
+        outln!("  pattern       : 0x{:x}", big.pattern);
+        outln!("  pool flags    : 0x{:x}", big.pool_flags);
+        outln!("  slush size    : 0x{:x}", big.slush_size);
+        return;
+    }
+
+    outln!("pool page {}", ui::addr(detail.page.0));
+    outln!("  target        : {}", ui::addr(target.0));
+    if let Some(region) = &detail.region {
+        outln!(
+            "  region        : {} [{} - {}]",
+            region.name,
+            ui::addr(region.start.0),
+            ui::addr(region.end.0)
+        );
+    }
+    if let Some(idx) = detail.target_index {
+        outln!(
+            "  blocks in run : {} (target is #{})",
+            detail.blocks.len(),
+            idx + 1
+        );
+    }
+    outln!();
+    if detail.blocks.is_empty() {
+        outln!("  (no plausible pool block found for this address)");
+    } else {
+        outln!(
+            "    {:<16} {:<8} {:<8} {:<12} {:<6} tag",
+            "header",
+            "size",
+            "prev",
+            "state",
+            "type"
+        );
+        for block in &detail.blocks {
+            print_pool_block_row(block, None);
         }
         if let Some(idx) = detail.target_index {
-            outln!(
-                "  blocks in run : {} (target is #{})",
-                detail.blocks.len(),
-                idx + 1
-            );
-        }
-        outln!();
-        if detail.blocks.is_empty() {
-            outln!("  (no plausible pool block found for this address)");
-        } else {
-            outln!(
-                "    {:<16} {:<8} {:<8} {:<12} {:<6} tag",
-                "header",
-                "size",
-                "prev",
-                "state",
-                "type"
-            );
-            for block in &detail.blocks {
-                print_pool_block_row(block, None);
-            }
-            if let Some(idx) = detail.target_index {
-                let block = &detail.blocks[idx];
-                if let Some(offset) = block.target_offset {
-                    outln!(
-                        "  target offset : 0x{:x} into body (block @ {}, body @ {})",
-                        offset,
-                        ui::addr(block.header.0),
-                        ui::addr(block.body.0)
-                    );
-                }
+            let block = &detail.blocks[idx];
+            if let Some(offset) = block.target_offset {
+                outln!(
+                    "  target offset : 0x{:x} into body (block @ {}, body @ {})",
+                    offset,
+                    ui::addr(block.header.0),
+                    ui::addr(block.body.0)
+                );
             }
         }
+    }
 
-        if let Some(message) = &detail.message {
-            outln!("  {message}.");
-            outln!("  it may be segment heap, special pool, a mapped view, or image/stack.");
-            if let Some(hint) = &detail.segment_heap_hint {
-                outln!("  hint          : {}", hint);
-            }
-            if let Some(near) = &detail.near_symbol {
-                outln!("  near symbol   : {}", near);
-            }
+    if let Some(message) = &detail.message {
+        outln!("  {message}.");
+        outln!("  it may be segment heap, special pool, a mapped view, or image/stack.");
+        if let Some(hint) = &detail.segment_heap_hint {
+            outln!("  hint          : {}", hint);
         }
-
-        Ok(())
+        if let Some(near) = &detail.near_symbol {
+            outln!("  near symbol   : {}", near);
+        }
     }
 }

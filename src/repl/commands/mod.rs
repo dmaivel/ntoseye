@@ -7,7 +7,7 @@ const ALIAS_RECURSION_LIMIT: usize = 16;
 const BREAKPOINT_ACTION_RECURSION_LIMIT: usize = 4;
 
 mod address_space;
-mod analyze;
+pub mod analyze;
 pub mod breakpoints;
 mod cpu;
 mod diagnostics;
@@ -22,7 +22,7 @@ mod heap;
 mod image;
 pub mod memory;
 pub mod meta;
-mod mm;
+pub mod mm;
 mod object;
 mod physical;
 mod pnp;

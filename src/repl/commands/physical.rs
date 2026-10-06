@@ -113,7 +113,14 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        display_memory_with_validity(range.start, &data, Some(&valid), &mode);
+        let print_text = || display_memory_with_validity(range.start, &data, Some(&valid), &mode);
+        #[cfg(feature = "cli")]
+        native::render(
+            || native::memory::dump(range.start, &data, Some(&valid), &mode),
+            print_text,
+        );
+        #[cfg(not(feature = "cli"))]
+        print_text();
         Ok(())
     }
 

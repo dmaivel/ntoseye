@@ -3,12 +3,13 @@ use crate::cpu_state;
 use crate::dbg_backend::BugcheckInfo;
 use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix};
-use crate::target::{Target, wait_reason_name};
+use crate::target::{Target, ThreadInfo, wait_reason_name};
 use crate::triage_report::{
     BlackboxState, FailureSignatureSource, TRIAGE_BACKTRACE_LIMIT, TriageReport, WheaRecordState,
     exception_code_name, time::filetime_to_iso,
 };
 use crate::ui;
+use crate::unwind::StackTrace;
 
 use crate::repl::*;
 
@@ -29,14 +30,64 @@ repl_command! {
     details: "Uses the bugcheck that the stop reported. If there is none, it uses the bugcheck in nt!KiBugCheckData, as $bug_code and $bug_param1-4 do, and if there is none there, the bugcheck in the crash dump header. !analyze uses the same order.",
 }
 
-const ANALYZE_STACK_LIMIT: usize = 16;
-const ANALYZE_MODULE_LIMIT: usize = 16;
-const ANALYZE_UNLOADED_LIMIT: usize = 12;
-const ANALYZE_VERBOSE_MODULE_LIMIT: usize = 4096;
-const ANALYZE_VERBOSE_UNLOADED_LIMIT: usize = 4096;
+pub const ANALYZE_STACK_LIMIT: usize = 16;
+pub const ANALYZE_MODULE_LIMIT: usize = 16;
+pub const ANALYZE_UNLOADED_LIMIT: usize = 12;
+pub const ANALYZE_VERBOSE_MODULE_LIMIT: usize = 4096;
+pub const ANALYZE_VERBOSE_UNLOADED_LIMIT: usize = 4096;
 const ANALYZE_HANG_PROCESSOR_LIMIT: u16 = 256;
 const ANALYZE_HANG_THREAD_LIMIT: usize = 32;
+/// Frames shown per processor in `!analyze -hang`.
+pub const ANALYZE_HANG_STACK_LIMIT: usize = 8;
 const KTHREAD_STATE_WAITING: u8 = 5;
+
+/// What `!analyze -hang` found, gathered once for both renderers.
+pub struct HangReport {
+    /// One entry per processor, in order; empty when the count is unknown.
+    pub processors: Vec<HangProcessor>,
+    /// The waiting threads, most pending IRPs first, or why there are none.
+    pub waiting: std::result::Result<Vec<ThreadInfo>, String>,
+}
+
+pub struct HangProcessor {
+    pub processor: u16,
+    /// The thread running on it, or why it is unknown.
+    pub current: std::result::Result<HangThread, String>,
+}
+
+pub struct HangThread {
+    pub thread: ThreadInfo,
+    pub stack: std::result::Result<StackTrace, String>,
+}
+
+/// The text `source:` of a failure signature.
+pub fn signature_source(source: FailureSignatureSource) -> &'static str {
+    match source {
+        FailureSignatureSource::BugcheckFault => "bugcheck fault",
+        FailureSignatureSource::ExceptionAddress => "exception address",
+        FailureSignatureSource::CurrentInstruction => "current instruction",
+        FailureSignatureSource::TopFrame => "top frame",
+        FailureSignatureSource::CodeOnly => "code only",
+    }
+}
+
+pub fn machine_name(machine_image_type: u32) -> &'static str {
+    match machine_image_type {
+        0x014c => "I386",
+        0x8664 => "AMD64",
+        0xAA64 => "ARM64",
+        _ => "Unknown",
+    }
+}
+
+pub fn product_name(product_type: u32) -> &'static str {
+    match product_type {
+        1 => "Workstation",
+        2 => "DomainController",
+        3 => "Server",
+        _ => "Unknown",
+    }
+}
 
 #[derive(Default)]
 struct AnalyzeOptions {
@@ -115,8 +166,7 @@ fn print_bugcheck_header(analysis: &BugcheckAnalysis) {
     }
 }
 
-fn print_hang_report(state: &mut ReplState<'_>) {
-    print_section("hang analysis");
+fn gather_hang_report(state: &mut ReplState<'_>) -> HangReport {
     let processor_count = cpu_state::processor_count(&state.ctx.target)
         .ok()
         .or_else(|| {
@@ -129,17 +179,60 @@ fn print_hang_report(state: &mut ReplState<'_>) {
         })
         .unwrap_or(0)
         .min(ANALYZE_HANG_PROCESSOR_LIMIT);
-    if processor_count == 0 {
-        outln!("  {}", ui::muted("processor count unavailable"));
-    }
     let vcpus = state.ctx.processor_vcpus();
+    let mut processors = Vec::with_capacity(usize::from(processor_count));
     for processor in 0..processor_count {
-        match state
+        let current = match state
             .ctx
             .target
             .current_windows_thread_for_processor(processor)
         {
             Ok(thread) => {
+                let vcpu = vcpus.get(&processor).map(String::as_str);
+                let stack = state
+                    .ctx
+                    .backtrace_thread(&thread, vcpu, ANALYZE_HANG_STACK_LIMIT)
+                    .map(|trace| trace.stacktrace)
+                    .map_err(|error| error.to_string());
+                Ok(HangThread { thread, stack })
+            }
+            Err(error) => Err(error.to_string()),
+        };
+        processors.push(HangProcessor { processor, current });
+    }
+
+    let waiting = state
+        .ctx
+        .target
+        .enumerate_threads()
+        .map(|mut threads| {
+            threads.retain(|thread| thread.state == Some(KTHREAD_STATE_WAITING));
+            threads.sort_by_key(|thread| {
+                (
+                    std::cmp::Reverse(thread.pending_irps.as_ref().map_or(0, Vec::len)),
+                    std::cmp::Reverse(thread.wait_reason.unwrap_or(0)),
+                    thread.ethread.0,
+                )
+            });
+            threads.truncate(ANALYZE_HANG_THREAD_LIMIT);
+            threads
+        })
+        .map_err(|error| error.to_string());
+    HangReport {
+        processors,
+        waiting,
+    }
+}
+
+fn print_hang_report(report: &HangReport) {
+    print_section("hang analysis");
+    if report.processors.is_empty() {
+        outln!("  {}", ui::muted("processor count unavailable"));
+    }
+    for entry in &report.processors {
+        let processor = entry.processor;
+        match &entry.current {
+            Ok(HangThread { thread, stack }) => {
                 outln!(
                     "  cpu {}  {}  tid {} pid {}  {}",
                     processor,
@@ -154,9 +247,8 @@ fn print_hang_report(state: &mut ReplState<'_>) {
                         .unwrap_or_else(|| "?".into()),
                     thread.process_name.as_deref().unwrap_or("unknown")
                 );
-                let vcpu = vcpus.get(&processor).map(String::as_str);
-                match state.ctx.backtrace_thread(&thread, vcpu, 8) {
-                    Ok(trace) => print_stacktrace_data(&trace.stacktrace, 8, true),
+                match stack {
+                    Ok(trace) => print_stacktrace_data(trace, ANALYZE_HANG_STACK_LIMIT, true),
                     Err(error) => {
                         outln!("    {}", ui::muted(&format!("stack unavailable: {error}")))
                     }
@@ -171,7 +263,7 @@ fn print_hang_report(state: &mut ReplState<'_>) {
     }
 
     print_section("waiting threads by pending I/O");
-    let mut threads = match state.ctx.target.enumerate_threads() {
+    let threads = match &report.waiting {
         Ok(threads) => threads,
         Err(error) => {
             outln!(
@@ -181,15 +273,7 @@ fn print_hang_report(state: &mut ReplState<'_>) {
             return;
         }
     };
-    threads.retain(|thread| thread.state == Some(KTHREAD_STATE_WAITING));
-    threads.sort_by_key(|thread| {
-        (
-            std::cmp::Reverse(thread.pending_irps.as_ref().map_or(0, Vec::len)),
-            std::cmp::Reverse(thread.wait_reason.unwrap_or(0)),
-            thread.ethread.0,
-        )
-    });
-    for thread in threads.into_iter().take(ANALYZE_HANG_THREAD_LIMIT) {
+    for thread in threads {
         outln!(
             "  {} tid {} pid {} wait {} ({}) irps {}",
             ui::addr(thread.ethread.0),
@@ -387,13 +471,7 @@ fn print_crash_intelligence(report: &TriageReport) {
     if let Some(signature) = &report.failure_signature {
         print_section("failure signature");
         outln!("  {}", signature.bucket);
-        let source = match signature.source {
-            FailureSignatureSource::BugcheckFault => "bugcheck fault",
-            FailureSignatureSource::ExceptionAddress => "exception address",
-            FailureSignatureSource::CurrentInstruction => "current instruction",
-            FailureSignatureSource::TopFrame => "top frame",
-            FailureSignatureSource::CodeOnly => "code only",
-        };
+        let source = signature_source(signature.source);
         outln!("  {}", ui::muted(&format!("source: {source}")));
     }
 
@@ -614,12 +692,7 @@ fn print_dump_metadata(report: &TriageReport) {
 
     print_section("dump metadata");
     if let Some(info) = &report.system_info {
-        let machine = match info.machine_image_type {
-            0x014c => "I386",
-            0x8664 => "AMD64",
-            0xAA64 => "ARM64",
-            _ => "Unknown",
-        };
+        let machine = machine_name(info.machine_image_type);
         outln!(
             "  {} Windows {}.{}  {}  service-pack build {}",
             ui::muted("system "),
@@ -643,12 +716,7 @@ fn print_dump_metadata(report: &TriageReport) {
         outln!(
             "  {} {}  suite {:#x}",
             ui::muted("product"),
-            match info.product_type {
-                1 => "Workstation",
-                2 => "DomainController",
-                3 => "Server",
-                _ => "Unknown",
-            },
+            product_name(info.product_type),
             info.suite_mask
         );
     }
@@ -704,9 +772,22 @@ impl ReplState<'_> {
             }
         }
         if options.hang {
-            print_hang_report(self);
+            let report = gather_hang_report(self);
+            #[cfg(feature = "cli")]
+            native::render(
+                || native::analyze::hang(&report),
+                || print_hang_report(&report),
+            );
+            #[cfg(not(feature = "cli"))]
+            print_hang_report(&report);
         } else {
             let report = TriageReport::build(self.ctx);
+            #[cfg(feature = "cli")]
+            native::render(
+                || native::analyze::triage(&report, options.verbose),
+                || print_triage_report(&report, options.verbose),
+            );
+            #[cfg(not(feature = "cli"))]
             print_triage_report(&report, options.verbose);
         }
         outln!();

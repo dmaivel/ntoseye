@@ -27,6 +27,43 @@ const MAX_FRAME_INDEX: usize = 4095;
 /// that seed is the live vCPU file (a `.cxr`/`.trap` context is not).
 type SeededTrace = (RecoveredStackTrace, HashMap<String, u64>, bool);
 
+/// A selected frame's call site, resolved once for both renderers.
+pub struct FrameLine {
+    pub symbol: String,
+    /// `file:line` of the source line, when known.
+    pub location: Option<String>,
+    pub inline: bool,
+}
+
+/// The `.frame` text: the frame row, its frame base, and with
+/// `show_registers` the frame's registers.
+fn print_frame_line(line: &FrameLine, frame: &SelectedFrame, show_registers: bool) {
+    let tag = if line.inline {
+        format!("  {}", inline_tag())
+    } else {
+        String::new()
+    };
+    let location = line
+        .location
+        .as_ref()
+        .map(|location| format!("  [{location}]"))
+        .unwrap_or_default();
+    outln!(
+        "{} {} {}  {}{tag}{location}",
+        ui::muted(&format!("#{:02}", frame.index)),
+        ui::addr(frame.sp),
+        ui::addr(frame.ip),
+        ui::symbol(&line.symbol),
+    );
+    if let Some(base) = frame.frame_base {
+        outln!("  frame base {}", ui::addr(base));
+    }
+    if show_registers {
+        print_sparse_registers(&frame.registers, Some("  registers:"), 4);
+    }
+    outln!();
+}
+
 repl_command! {
     cmd_frame;
     names: [".frame", "frame"],
@@ -143,37 +180,37 @@ impl ReplState<'_> {
     }
 
     pub fn print_selected_frame(&self, frame: &SelectedFrame, show_registers: bool) {
+        print_frame_line(&self.frame_line(frame), frame, show_registers);
+    }
+
+    /// `.frame`: the selected frame, natively in Tern.
+    fn show_selected_frame(&self, frame: &SelectedFrame, show_registers: bool) {
+        let line = self.frame_line(frame);
+        #[cfg(feature = "cli")]
+        native::render(
+            || native::inspect::frame(&line, frame, show_registers),
+            || print_frame_line(&line, frame, show_registers),
+        );
+        #[cfg(not(feature = "cli"))]
+        print_frame_line(&line, frame, show_registers);
+    }
+
+    /// What `.frame` shows for `frame`: its symbol, inline tag and source line.
+    fn frame_line(&self, frame: &SelectedFrame) -> FrameLine {
         let target = &self.ctx.target;
-        let (symbol, location, tag) = match target.inline_frame(frame.code) {
-            Some(inline) => (
-                Some(inline.symbol),
-                inline.location,
-                format!("  {}", inline_tag()),
-            ),
+        let (symbol, location, inline) = match target.inline_frame(frame.code) {
+            Some(inline) => (Some(inline.symbol), inline.location, true),
             None => (
                 target.closest_symbol_current_context(VirtAddr(frame.ip)),
                 target.frame_source_location(frame.code),
-                String::new(),
+                false,
             ),
         };
-        let symbol = symbol.unwrap_or_else(|| format!("{:#x}", frame.ip));
-        let location = location
-            .map(|location| format!("  [{}:{}]", location.file, location.line))
-            .unwrap_or_default();
-        outln!(
-            "{} {} {}  {}{tag}{location}",
-            ui::muted(&format!("#{:02}", frame.index)),
-            ui::addr(frame.sp),
-            ui::addr(frame.ip),
-            ui::symbol(&symbol),
-        );
-        if let Some(base) = frame.frame_base {
-            outln!("  frame base {}", ui::addr(base));
+        FrameLine {
+            symbol: symbol.unwrap_or_else(|| format!("{:#x}", frame.ip)),
+            location: location.map(|location| format!("{}:{}", location.file, location.line)),
+            inline,
         }
-        if show_registers {
-            print_sparse_registers(&frame.registers, Some("  registers:"), 4);
-        }
-        outln!();
     }
 
     fn cmd_frame(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
@@ -197,7 +234,7 @@ impl ReplState<'_> {
 
         let Some(index) = index else {
             if let Some(frame) = self.ctx.target.selected_frame.as_ref() {
-                self.print_selected_frame(frame, show_registers);
+                self.show_selected_frame(frame, show_registers);
                 return Ok(());
             }
             let Some((recovered, seed, live)) = self.recovered_trace(1)? else {
@@ -208,7 +245,7 @@ impl ReplState<'_> {
                 error!("current frame is unavailable");
                 return Ok(());
             };
-            self.print_selected_frame(&selected, show_registers);
+            self.show_selected_frame(&selected, show_registers);
             return Ok(());
         };
         if index > MAX_FRAME_INDEX {
@@ -226,7 +263,7 @@ impl ReplState<'_> {
             return Ok(());
         };
         self.set_selected_frame(selected.clone());
-        self.print_selected_frame(&selected, show_registers);
+        self.show_selected_frame(&selected, show_registers);
         Ok(())
     }
 

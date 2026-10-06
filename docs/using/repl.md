@@ -22,7 +22,9 @@ ntoseye shows color only when the output goes to a terminal. If you redirect the
 In [Tern](https://stencil.so/tern), Stencil's terminal, the REPL draws its results natively instead of as text:
 
 - A stop is a card. Its ring shows why the target stopped: the accent for a breakpoint, amber for an exception, red for a bugcheck. The card holds the registers (folded), the code at the stop with the current instruction marked, and the stack.
-- {command}`k`, {command}`lm`, {command}`!process`, {command}`ps`, {command}`bl` and {command}`~` are tables. In a narrow pane, their less important columns hide first.
+- A bugcheck is a red card with the bugcheck's name and code, its parameters and what they mean, the faulting module and the trap frames. {command}`!analyze` shows its report as one card, with a section for each part of the report.
+- {command}`k`, {command}`lm`, {command}`!process`, {command}`ps`, {command}`bl`, {command}`~`, {command}`!pte` and {command}`vars` are tables. In a narrow pane, their less important columns hide first.
+- Memory dumps such as {command}`db`, {command}`dd` and {command}`dq` dim the zero values and show a byte that isn't printable as `·`, and {command}`dqs` lists the symbol of each value.
 - {command}`dt`, {command}`wt` and {command}`!hvpartitions` are trees that you can fold, and {command}`.help` folds by category.
 - {command}`r` is a register grid, and {command}`u`, {command}`ub` and {command}`uf` color instructions with Tern's syntax colors.
 - While {command}`g` waits for a stop, a timer shows how long the target has run.

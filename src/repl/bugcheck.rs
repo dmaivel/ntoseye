@@ -16,6 +16,8 @@ pub use crate::bugchecks::{
 pub use crate::trapframe::KtrapFrame;
 
 use super::disasm::{format_rflags, print_event_children, wrapped_dim_tail};
+#[cfg(feature = "cli")]
+use super::native;
 
 fn print_unresolved_bugcheck_data(failure: &CurrentBugcheckFailure) {
     fn slots_line(label: &str, data: &[u64; BUGCHECK_DATA_SLOTS]) -> String {
@@ -54,7 +56,18 @@ pub fn format_arg_value(value: u64) -> String {
 /// ([`analyze_bugcheck`]), so the REPL and the SDK/MCP never disagree on the
 /// name/arguments/responsible driver of a bugcheck.
 pub fn print_bugcheck_info(debugger: &Target, info: &BugcheckInfo) {
-    print_bugcheck_analysis(&analyze_bugcheck(debugger, info));
+    show_bugcheck_analysis(&analyze_bugcheck(debugger, info));
+}
+
+/// [`print_bugcheck_analysis`], as a card in Tern.
+fn show_bugcheck_analysis(analysis: &BugcheckAnalysis) {
+    #[cfg(feature = "cli")]
+    native::render(
+        || native::bugcheck::card(analysis),
+        || print_bugcheck_analysis(analysis),
+    );
+    #[cfg(not(feature = "cli"))]
+    print_bugcheck_analysis(analysis);
 }
 
 fn format_bugcheck_fault(fault: &BugcheckFault) -> String {
@@ -287,12 +300,26 @@ pub fn print_bugcheck_summary(debugger: &Target, info: Option<&BugcheckInfo>) {
 /// the live guest-memory view while the VM is frozen mid-bugcheck.
 pub fn print_bugcheck_summary_from_memory(debugger: &Target) {
     match resolve_current_bugcheck(debugger) {
-        CurrentBugcheckResolution::Resolved(analysis) => print_bugcheck_analysis(&analysis),
-        CurrentBugcheckResolution::SymbolUnavailable => outln!(
-            "{} guest is bugchecking (symbol nt!KiBugCheckData unavailable)",
-            ui::badge("BUGCHECK")
-        ),
+        CurrentBugcheckResolution::Resolved(analysis) => show_bugcheck_analysis(&analysis),
+        CurrentBugcheckResolution::SymbolUnavailable => {
+            let print_text = || {
+                outln!(
+                    "{} guest is bugchecking (symbol nt!KiBugCheckData unavailable)",
+                    ui::badge("BUGCHECK")
+                )
+            };
+            #[cfg(feature = "cli")]
+            native::render(native::bugcheck::symbol_unavailable, print_text);
+            #[cfg(not(feature = "cli"))]
+            print_text();
+        }
         CurrentBugcheckResolution::Unresolved(failure) => {
+            #[cfg(feature = "cli")]
+            native::render(
+                || native::bugcheck::unresolved(&failure),
+                || print_unresolved_bugcheck_data(&failure),
+            );
+            #[cfg(not(feature = "cli"))]
             print_unresolved_bugcheck_data(&failure);
         }
     }

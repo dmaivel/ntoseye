@@ -1,3 +1,5 @@
+use std::fmt;
+
 use owo_colors::OwoColorize;
 
 use crate::disasm::DisasmRow;
@@ -317,6 +319,16 @@ pub struct MemoryDisplayMode {
 }
 
 impl MemoryDisplayMode {
+    /// The bytes each row shows.
+    pub fn bytes_per_row(&self) -> usize {
+        self.bytes_per_row
+    }
+
+    /// Whether rows end in an ASCII column.
+    pub fn show_ascii(&self) -> bool {
+        self.show_ascii
+    }
+
     pub fn bytes() -> Self {
         Self {
             bytes_per_row: 16,
@@ -433,123 +445,176 @@ pub fn display_memory_with_validity(
             "{}  ",
             ui::addr((start_address + ((i * mode.bytes_per_row) as u64)).0)
         );
-
-        let items_per_row = mode.bytes_per_row / mode.item_size;
-        let mut printed = 0;
-
-        for item in chunk.chunks(mode.item_size) {
-            let item_start = i * mode.bytes_per_row + printed * mode.item_size;
-            let readable = validity.is_none_or(|valid| {
-                item.iter()
-                    .enumerate()
-                    .all(|(offset, _)| valid.get(item_start + offset).copied().unwrap_or(false))
-            });
-            if !readable {
-                match mode.item_format {
-                    ItemFormat::Bytes => out!("?? "),
-                    ItemFormat::Words => out!("???? "),
-                    ItemFormat::Dwords => out!("???????? "),
-                    ItemFormat::Qwords => out!("???????????????? "),
-                    ItemFormat::Binary => out!("???????? ?? "),
-                    ItemFormat::Floats => out!("{:>FLOAT_WIDTH$} ", "?"),
-                    ItemFormat::Doubles => out!("{:>DOUBLE_WIDTH$} ", "?"),
-                }
-                printed += 1;
-                continue;
-            }
-
-            match mode.item_format {
-                ItemFormat::Bytes => out!("{:02x} ", item[0]),
-                ItemFormat::Words => {
-                    if item.len() == 2 {
-                        let val = u16::from_le_bytes([item[0], item[1]]);
-                        out!("{:04x} ", val);
-                    } else {
-                        for byte in item {
-                            out!("{:02x}", byte);
-                        }
-                        out!("  ");
-                    }
-                }
-                ItemFormat::Dwords => {
-                    if item.len() == 4 {
-                        let val = u32::from_le_bytes([item[0], item[1], item[2], item[3]]);
-                        out!("{:08x} ", val);
-                    } else {
-                        for byte in item {
-                            out!("{:02x}", byte);
-                        }
-                        out!("   ");
-                    }
-                }
-                ItemFormat::Qwords => {
-                    if item.len() == 8 {
-                        let val = u64::from_le_bytes([
-                            item[0], item[1], item[2], item[3], item[4], item[5], item[6], item[7],
-                        ]);
-                        out!("{:016x} ", val);
-                    } else {
-                        for byte in item {
-                            out!("{:02x}", byte);
-                        }
-                        out!("   ");
-                    }
-                }
-                ItemFormat::Binary => {
-                    out!("{:08b}", item[0]);
-                    out!(" {:02x}", item[0]);
-                    out!(" ");
-                }
-                ItemFormat::Floats => match <[u8; 4]>::try_from(item) {
-                    Ok(bytes) => out!("{:>FLOAT_WIDTH$} ", format_float(f32::from_le_bytes(bytes))),
-                    Err(_) => out!("{:>FLOAT_WIDTH$} ", "?"),
-                },
-                ItemFormat::Doubles => match <[u8; 8]>::try_from(item) {
-                    Ok(bytes) => out!(
-                        "{:>DOUBLE_WIDTH$} ",
-                        format_float(f64::from_le_bytes(bytes))
-                    ),
-                    Err(_) => out!("{:>DOUBLE_WIDTH$} ", "?"),
-                },
-            }
-            printed += 1;
-        }
-
-        for _ in printed..items_per_row {
-            match mode.item_format {
-                ItemFormat::Bytes => out!("   "),
-                ItemFormat::Words => out!("     "),
-                ItemFormat::Dwords => out!("         "),
-                ItemFormat::Qwords => out!("                 "),
-                ItemFormat::Binary => out!("            "),
-                ItemFormat::Floats => out!("{:FLOAT_WIDTH$} ", ""),
-                ItemFormat::Doubles => out!("{:DOUBLE_WIDTH$} ", ""),
-            }
-        }
-
+        row_items(i, chunk, validity, mode, |_, text| out!("{text}"));
         if mode.show_ascii {
             out!(" ");
-            for (offset, byte) in chunk.iter().enumerate() {
-                let readable = validity.is_none_or(|valid| {
-                    valid
-                        .get(i * mode.bytes_per_row + offset)
-                        .copied()
-                        .unwrap_or(false)
-                });
-                if !readable {
-                    out!("?");
-                } else if byte.is_ascii_graphic() || *byte == b' ' {
-                    out!("{}", *byte as char);
-                } else {
-                    out!("{}", ".".bright_black());
-                }
-            }
+            row_ascii(i, chunk, validity, mode, |cell| match cell {
+                AsciiCell::Unreadable => out!("?"),
+                AsciiCell::Char(character) => out!("{character}"),
+                AsciiCell::Dot => out!("{}", ".".bright_black()),
+            });
         }
 
         outln!();
     }
 
     outln!();
+}
+
+/// What an item of a memory row shows, for the native view's styling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ItemKind {
+    /// A value with a nonzero byte.
+    Value,
+    /// A value whose bytes are all zero.
+    Zero,
+    /// Question marks: a byte of the item is unreadable, or the item is cut
+    /// short where its format needs all of it.
+    Unreadable,
+    /// The blank a short last row keeps in place of a missing item.
+    Padding,
+}
+
+/// What a byte of the ASCII column shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AsciiCell {
+    /// `?`: the byte is unreadable.
+    Unreadable,
+    /// A printable character or a space.
+    Char(char),
+    /// `.`: anything else.
+    Dot,
+}
+
+/// The items of row `row` of a listing, its bytes `chunk`, as the text
+/// renderer lays them out: `emit` gets each item's text, its trailing
+/// separator included, then the padding a short row keeps.
+pub fn row_items(
+    row: usize,
+    chunk: &[u8],
+    validity: Option<&[bool]>,
+    mode: &MemoryDisplayMode,
+    mut emit: impl FnMut(ItemKind, fmt::Arguments<'_>),
+) {
+    let items_per_row = mode.bytes_per_row / mode.item_size;
+    let mut printed = 0;
+
+    for item in chunk.chunks(mode.item_size) {
+        let item_start = row * mode.bytes_per_row + printed * mode.item_size;
+        printed += 1;
+        let readable = validity.is_none_or(|valid| {
+            item.iter()
+                .enumerate()
+                .all(|(offset, _)| valid.get(item_start + offset).copied().unwrap_or(false))
+        });
+        if !readable {
+            let kind = ItemKind::Unreadable;
+            match mode.item_format {
+                ItemFormat::Bytes => emit(kind, format_args!("?? ")),
+                ItemFormat::Words => emit(kind, format_args!("???? ")),
+                ItemFormat::Dwords => emit(kind, format_args!("???????? ")),
+                ItemFormat::Qwords => emit(kind, format_args!("???????????????? ")),
+                ItemFormat::Binary => emit(kind, format_args!("???????? ?? ")),
+                ItemFormat::Floats => emit(kind, format_args!("{:>FLOAT_WIDTH$} ", "?")),
+                ItemFormat::Doubles => emit(kind, format_args!("{:>DOUBLE_WIDTH$} ", "?")),
+            }
+            continue;
+        }
+
+        let kind = if item.iter().all(|byte| *byte == 0) {
+            ItemKind::Zero
+        } else {
+            ItemKind::Value
+        };
+        match mode.item_format {
+            ItemFormat::Bytes => emit(kind, format_args!("{:02x} ", item[0])),
+            ItemFormat::Words => match <[u8; 2]>::try_from(item) {
+                Ok(bytes) => emit(kind, format_args!("{:04x} ", u16::from_le_bytes(bytes))),
+                Err(_) => emit_partial(item, kind, "  ", &mut emit),
+            },
+            ItemFormat::Dwords => match <[u8; 4]>::try_from(item) {
+                Ok(bytes) => emit(kind, format_args!("{:08x} ", u32::from_le_bytes(bytes))),
+                Err(_) => emit_partial(item, kind, "   ", &mut emit),
+            },
+            ItemFormat::Qwords => match <[u8; 8]>::try_from(item) {
+                Ok(bytes) => emit(kind, format_args!("{:016x} ", u64::from_le_bytes(bytes))),
+                Err(_) => emit_partial(item, kind, "   ", &mut emit),
+            },
+            ItemFormat::Binary => emit(kind, format_args!("{:08b} {:02x} ", item[0], item[0])),
+            ItemFormat::Floats => match <[u8; 4]>::try_from(item) {
+                Ok(bytes) => emit(
+                    kind,
+                    format_args!("{:>FLOAT_WIDTH$} ", format_float(f32::from_le_bytes(bytes))),
+                ),
+                Err(_) => emit(ItemKind::Unreadable, format_args!("{:>FLOAT_WIDTH$} ", "?")),
+            },
+            ItemFormat::Doubles => match <[u8; 8]>::try_from(item) {
+                Ok(bytes) => emit(
+                    kind,
+                    format_args!(
+                        "{:>DOUBLE_WIDTH$} ",
+                        format_float(f64::from_le_bytes(bytes))
+                    ),
+                ),
+                Err(_) => emit(
+                    ItemKind::Unreadable,
+                    format_args!("{:>DOUBLE_WIDTH$} ", "?"),
+                ),
+            },
+        }
+    }
+
+    let kind = ItemKind::Padding;
+    for _ in printed..items_per_row {
+        match mode.item_format {
+            ItemFormat::Bytes => emit(kind, format_args!("   ")),
+            ItemFormat::Words => emit(kind, format_args!("     ")),
+            ItemFormat::Dwords => emit(kind, format_args!("         ")),
+            ItemFormat::Qwords => emit(kind, format_args!("                 ")),
+            ItemFormat::Binary => emit(kind, format_args!("            ")),
+            ItemFormat::Floats => emit(kind, format_args!("{:FLOAT_WIDTH$} ", "")),
+            ItemFormat::Doubles => emit(kind, format_args!("{:DOUBLE_WIDTH$} ", "")),
+        }
+    }
+}
+
+/// An item cut short by the range's end: its bytes, then `separator`.
+fn emit_partial(
+    item: &[u8],
+    kind: ItemKind,
+    separator: &str,
+    emit: &mut impl FnMut(ItemKind, fmt::Arguments<'_>),
+) {
+    for byte in item {
+        emit(kind, format_args!("{byte:02x}"));
+    }
+    emit(kind, format_args!("{separator}"));
+}
+
+/// The ASCII column of row `row` of a listing, its bytes `chunk`, a cell
+/// per byte.
+pub fn row_ascii(
+    row: usize,
+    chunk: &[u8],
+    validity: Option<&[bool]>,
+    mode: &MemoryDisplayMode,
+    mut emit: impl FnMut(AsciiCell),
+) {
+    for (offset, byte) in chunk.iter().enumerate() {
+        let readable = validity.is_none_or(|valid| {
+            valid
+                .get(row * mode.bytes_per_row + offset)
+                .copied()
+                .unwrap_or(false)
+        });
+        emit(if !readable {
+            AsciiCell::Unreadable
+        } else if byte.is_ascii_graphic() || *byte == b' ' {
+            AsciiCell::Char(*byte as char)
+        } else {
+            AsciiCell::Dot
+        });
+    }
 }
 
 #[cfg(test)]

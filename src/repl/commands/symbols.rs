@@ -394,50 +394,60 @@ impl ReplState<'_> {
         }
         let mut names: Vec<&String> = self.ctx.target.user_vars.keys().collect();
         names.sort();
-        if !names.is_empty() {
-            outln!("{}", ui::label("user"));
-            for name in names {
-                let var = &self.ctx.target.user_vars[name];
+        let user: Vec<(&str, &UserVar)> = names
+            .into_iter()
+            .map(|name| (name.as_str(), &self.ctx.target.user_vars[name]))
+            .collect();
+        let results = self.ctx.target.results.len();
+        let origin = self.ctx.target.results_origin.as_deref();
+        let print_text = || {
+            if !user.is_empty() {
+                outln!("{}", ui::label("user"));
+                for (name, var) in &user {
+                    outln!(
+                        "  ${:<16} {}   {}",
+                        name,
+                        ui::addr(var.value),
+                        ui::muted(&var.source)
+                    );
+                }
+            }
+            if results != 0 {
+                if !user.is_empty() {
+                    outln!();
+                }
+                let origin = origin
+                    .map(|cmd| format!("from: {}", cmd))
+                    .unwrap_or_default();
                 outln!(
-                    "  ${:<16} {}   {}",
-                    name,
-                    ui::addr(var.value),
-                    ui::muted(&var.source)
+                    "  {}   {}",
+                    ui::muted(&format!("$0..${}", results - 1)),
+                    ui::muted(&origin)
                 );
             }
-        }
-        if !self.ctx.target.results.is_empty() {
-            if !self.ctx.target.user_vars.is_empty() {
-                outln!();
+            if !builtins.is_empty() {
+                if !user.is_empty() || results != 0 {
+                    outln!();
+                }
+                outln!("{}", ui::label("builtins"));
+                for var in &builtins {
+                    outln!(
+                        "  ${:<16} {}   {}",
+                        var.name,
+                        ui::addr(var.value),
+                        ui::muted(var.source)
+                    );
+                }
             }
-            let origin = self
-                .ctx
-                .target
-                .results_origin
-                .as_deref()
-                .map(|cmd| format!("from: {}", cmd))
-                .unwrap_or_default();
-            outln!(
-                "  {}   {}",
-                ui::muted(&format!("$0..${}", self.ctx.target.results.len() - 1)),
-                ui::muted(&origin)
-            );
-        }
-        if !builtins.is_empty() {
-            if !self.ctx.target.user_vars.is_empty() || !self.ctx.target.results.is_empty() {
-                outln!();
-            }
-            outln!("{}", ui::label("builtins"));
-            for var in builtins {
-                outln!(
-                    "  ${:<16} {}   {}",
-                    var.name,
-                    ui::addr(var.value),
-                    ui::muted(var.source)
-                );
-            }
-        }
-        outln!();
+            outln!();
+        };
+        #[cfg(feature = "cli")]
+        native::render(
+            || native::inspect::vars(&user, results, origin, &builtins),
+            print_text,
+        );
+        #[cfg(not(feature = "cli"))]
+        print_text();
 
         Ok(())
     }
