@@ -29,6 +29,8 @@ In [Tern](https://stencil.so/tern), Stencil's terminal, the REPL draws its resul
 
 Other commands print text. ntoseye asks the terminal when the REPL starts, so this also works over ssh, but not inside tmux, screen or zellij. Output that a host captures (MCP, the Python SDK, the DAP console, `.foreach`) and `.logopen` transcripts are always text. For text in Tern, set `TERN_TSP=0` or use `--plain-repl`.
 
+A Tern too old to draw these views, such as a session daemon still running the version from before an update, gets text, and ntoseye says so when it starts. To run the updated version, use **Restart Tern** in Tern's command palette.
+
 ## Aliases
 
 To make an alias, use `alias <name> <expansion>`. In the expansion, you can use these variables:

@@ -62,8 +62,20 @@ pub fn detect() {
     let capabilities = session.caps().clone();
     // Closing restores the tty and drains the DA1 answer behind the reply,
     // so it never reaches reedline as typed text.
-    if session.close().is_ok() && capabilities.has_feature(wire::feature::FLOW) {
+    if session.close().is_err() {
+        return;
+    }
+    if capabilities.has_feature(wire::feature::FLOW) {
         let _ = CAPABILITIES.set(capabilities);
+    } else {
+        // An update replaces Tern's binary while its session daemon keeps
+        // running the old one, which may predate flow surfaces: without
+        // this, the text looks like ntoseye ignoring Tern.
+        diagnostics::print_warning(format!(
+            "Tern {} cannot draw ntoseye's views (no flow surfaces), so output stays text; \
+             update Tern, then use Restart Tern in its command palette",
+            capabilities.version
+        ));
     }
 }
 
