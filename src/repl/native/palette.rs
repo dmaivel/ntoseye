@@ -13,9 +13,9 @@ use tern_sdk::ui::{
     self, BadgeSpec, Icon, OrderEntry, PickerAction, PickerItem, PickerPreview, PickerSize,
     PickerTab,
 };
-use tern_sdk::{Input, Node, Options, Session, SurfaceOptions, View};
+use tern_sdk::{Input, Node, Session, SurfaceOptions, View};
 
-use super::ROLE;
+use super::{ROLE, connect};
 use crate::symbols::SymbolIndex;
 
 /// What the palette offers, gathered when it opens.
@@ -109,12 +109,7 @@ const PAGE: isize = 10;
 /// `buffer`: the line to go on editing when something was picked, `None`
 /// when the palette was closed or Tern can't show it.
 pub fn run(catalog: &Catalog, buffer: &str, tab: Tab) -> Option<String> {
-    let options = Options::new()
-        .app("ntoseye")
-        .version(env!("CARGO_PKG_VERSION"))
-        .bracketed_paste(false)
-        .kitty_keyboard(false);
-    let mut session = Session::<Msg>::connect(options).ok().flatten()?;
+    let mut session = connect::<Msg>()?;
     let picked = pick(&mut session, catalog, buffer, tab);
     // Restores the terminal for the line editor whatever happened.
     let _ = session.close();

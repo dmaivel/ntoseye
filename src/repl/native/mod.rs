@@ -55,12 +55,7 @@ const STYLESHEET: &str = include_str!("ntoseye.css");
 /// arrives on stdin; anything but Tern (or no tty, a multiplexer,
 /// `TERN_TSP=0`) leaves the text renderers on.
 pub fn detect() {
-    let options = Options::new()
-        .app("ntoseye")
-        .version(env!("CARGO_PKG_VERSION"))
-        .bracketed_paste(false)
-        .kitty_keyboard(false);
-    let Ok(Some(session)) = Session::<()>::connect(options) else {
+    let Some(session) = connect::<()>() else {
         return;
     };
     let capabilities = session.caps().clone();
@@ -82,6 +77,66 @@ pub fn detect() {
              update Tern, then use Restart Tern in its command palette",
             capabilities.version
         ));
+    }
+}
+
+/// A Tern session on the terminal, or `None` when it isn't Tern.
+///
+/// The SDK's raw mode makes SIGINT, SIGTERM, SIGHUP and SIGQUIT restore the
+/// terminal and kill the process, which would skip the teardown that removes
+/// breakpoints and resumes the guest; ntoseye's own handlers go back in
+/// place, and the session's close restores them again. A SIGTERM while a
+/// session is open on a live terminal can then leave the terminal raw, since
+/// the teardown wakes the reader by replacing stdin; the guest matters more.
+pub fn connect<M>() -> Option<Session<M>> {
+    let options = Options::new()
+        .app("ntoseye")
+        .version(env!("CARGO_PKG_VERSION"))
+        .bracketed_paste(false)
+        .kitty_keyboard(false);
+    let handlers = SignalHandlers::save();
+    let session = Session::<M>::connect(options).ok().flatten();
+    handlers.restore();
+    session
+}
+
+/// The dispositions of the signals the SDK's raw mode takes over.
+struct SignalHandlers {
+    #[cfg(unix)]
+    saved: Vec<(libc::c_int, libc::sigaction)>,
+}
+
+impl SignalHandlers {
+    #[cfg(unix)]
+    const SIGNALS: [libc::c_int; 4] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT];
+
+    fn save() -> Self {
+        #[cfg(unix)]
+        {
+            let saved = Self::SIGNALS
+                .into_iter()
+                .filter_map(|signal| {
+                    // SAFETY: a zeroed sigaction is valid; a null action only
+                    // reads the current disposition into `old`.
+                    unsafe {
+                        let mut old: libc::sigaction = std::mem::zeroed();
+                        (libc::sigaction(signal, std::ptr::null(), &mut old) == 0)
+                            .then_some((signal, old))
+                    }
+                })
+                .collect();
+            Self { saved }
+        }
+        #[cfg(not(unix))]
+        Self {}
+    }
+
+    fn restore(self) {
+        #[cfg(unix)]
+        for (signal, action) in &self.saved {
+            // SAFETY: puts back a disposition sigaction returned.
+            unsafe { libc::sigaction(*signal, action, std::ptr::null_mut()) };
+        }
     }
 }
 
