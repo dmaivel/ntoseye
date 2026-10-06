@@ -14,7 +14,7 @@ use std::time::Duration;
 use owo_colors::OwoColorize;
 use reedline::{Completer, History, HistoryItem, SearchDirection, SearchQuery, Suggestion};
 use tern_sdk::keys::Key;
-use tern_sdk::ui::{self, Anchor, Decor, Icon, OverlaySize, Side};
+use tern_sdk::ui::{self, Decor, Icon, Side};
 use tern_sdk::wire::{self, Edit, Event};
 use tern_sdk::{Input, Node, Session, Surface, SurfaceOptions, View};
 
@@ -22,6 +22,7 @@ use super::command::{
     command_registry, is_comment, parse_command, script_file_token, split_command_list,
 };
 use super::completion::ReplCaches;
+use super::native::completions::{POPUP_LIMIT, Popup, PopupKey};
 use super::native::palette::{Outcome, Palette, Tab};
 use super::native::{self, DIM, MNEMONIC, MUTED, NUMBER, REGISTER, STRING, SYMBOL, span};
 use super::palette::{RECENT_LINES, initial_tab};
@@ -34,10 +35,6 @@ use crate::output::prompting;
 const EDITOR: &str = "dock.ed";
 /// The surface's id: one at a time, removed before the command runs.
 const SURFACE: &str = "ntoseye.prompt";
-/// How many completions the popup lists.
-const POPUP_LIMIT: usize = 100;
-/// How many rows the popup shows before it scrolls.
-const POPUP_ROWS: u32 = 10;
 /// How many undo steps a line keeps.
 const UNDO_LIMIT: usize = 200;
 /// How often the prompt looks for a termination signal while it waits: the
@@ -248,42 +245,6 @@ struct Line<'a> {
     typing: bool,
 }
 
-/// The completions for the word at the caret, refilled as it changes.
-struct Popup {
-    suggestions: Vec<Suggestion>,
-    selected: usize,
-    /// The text the suggestions replace, as typed: what the list marks.
-    word: String,
-}
-
-impl Popup {
-    /// The popup over `suggestions` for `draft`, keeping `keep` selected
-    /// when it is still among them.
-    fn new(suggestions: Vec<Suggestion>, draft: &str, keep: Option<&str>) -> Self {
-        let word = suggestions
-            .first()
-            .and_then(|suggestion| {
-                let end = suggestion.span.end.min(draft.len());
-                draft.get(suggestion.span.start.min(end)..end)
-            })
-            .unwrap_or_default()
-            .to_owned();
-        let selected = keep
-            .and_then(|value| suggestions.iter().position(|s| s.value == value))
-            .unwrap_or(0);
-        Self {
-            suggestions,
-            selected,
-            word,
-        }
-    }
-
-    fn step(&mut self, by: isize) {
-        let count = self.suggestions.len() as isize;
-        self.selected = (self.selected as isize + by).rem_euclid(count) as usize;
-    }
-}
-
 impl<'a> Line<'a> {
     fn new(history: &'a [String]) -> Self {
         Self {
@@ -385,30 +346,17 @@ impl<'a> Line<'a> {
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx, typed: &mut bool) -> Option<Read> {
         if let Some(popup) = &mut self.popup {
-            if key.is("escape") {
-                self.popup = None;
-                return None;
-            }
-            if key.is("up") || key.is("shift+tab") || key.is("ctrl+p") {
-                popup.step(-1);
-                return None;
-            }
-            if key.is("down") || key.is("tab") || key.is("ctrl+n") {
-                popup.step(1);
-                return None;
-            }
-            if key.is("page_up") {
-                popup.step(-(POPUP_ROWS as isize));
-                return None;
-            }
-            if key.is("page_down") {
-                popup.step(POPUP_ROWS as isize);
-                return None;
-            }
-            if key.is("enter") {
-                let suggestion = popup.suggestions[popup.selected].clone();
-                self.apply(&suggestion);
-                return None;
+            match popup.key(key) {
+                PopupKey::Moved => return None,
+                PopupKey::Close => {
+                    self.popup = None;
+                    return None;
+                }
+                PopupKey::Take(suggestion) => {
+                    self.apply(&suggestion);
+                    return None;
+                }
+                PopupKey::Ignored => {}
             }
         }
         if key.is("enter") {
@@ -579,13 +527,7 @@ impl<'a> Line<'a> {
             return String::new();
         }
         if let Some(popup) = &self.popup {
-            return popup
-                .suggestions
-                .get(popup.selected)
-                .filter(|_| !popup.word.is_empty())
-                .and_then(|suggestion| suggestion.value.strip_prefix(popup.word.as_str()))
-                .unwrap_or_default()
-                .to_owned();
+            return popup.ghost().to_owned();
         }
         if self.draft.is_empty() {
             return String::new();
@@ -635,8 +577,8 @@ impl<'a> Line<'a> {
         let keep = self
             .popup
             .as_ref()
-            .and_then(|popup| popup.suggestions.get(popup.selected))
-            .map(|suggestion| suggestion.value.clone());
+            .and_then(Popup::selected_value)
+            .map(str::to_owned);
         let in_word = self.draft[..self.cursor]
             .chars()
             .next_back()
@@ -646,11 +588,7 @@ impl<'a> Line<'a> {
             return;
         }
         let suggestions = self.suggestions(ctx);
-        let popup = Popup::new(suggestions, &self.draft, keep.as_deref());
-        let done = matches!(popup.suggestions.as_slice(), [only] if only.value == popup.word);
-        if !popup.suggestions.is_empty() && !done {
-            self.popup = Some(popup);
-        }
+        self.popup = Popup::open(suggestions, &self.draft, keep.as_deref());
     }
 
     fn apply(&mut self, suggestion: &Suggestion) {
@@ -669,13 +607,7 @@ impl<'a> Line<'a> {
         let Some(popup) = &self.popup else {
             return;
         };
-        let suggestion = item
-            .rsplit('.')
-            .next()
-            .and_then(|key| key.strip_prefix('s'))
-            .and_then(|index| index.parse::<usize>().ok())
-            .and_then(|index| popup.suggestions.get(index))
-            .cloned();
+        let suggestion = popup.clicked(item).cloned();
         if let Some(suggestion) = suggestion {
             self.apply(&suggestion);
         }
@@ -752,51 +684,10 @@ impl<'a> Line<'a> {
         if let Some(palette) = &self.palette {
             view = view.layer(vec![Node::from(palette.picker())]);
         } else if let Some(popup) = &self.popup {
-            let mut list = ui::list()
-                .key("list")
-                .max_lines(POPUP_ROWS)
-                .filter(popup.word.clone())
-                .selected(format!("layer.popup.list.s{}", popup.selected));
-            for (index, suggestion) in popup.suggestions.iter().enumerate() {
-                let mut item = ui::item(suggestion.value.as_str()).key(format!("s{index}"));
-                if let Some(description) = &suggestion.description {
-                    // A kind sits at the row's end beside its icon; a
-                    // command's summary follows the name.
-                    item = match kind_icon(description) {
-                        Some(icon) => item.icon(icon).value(description.as_str()),
-                        None => item
-                            .detail(description.split_whitespace().collect::<Vec<_>>().join(" ")),
-                    };
-                }
-                list = list.child(item);
-            }
-            view = view.layer(vec![Node::from(
-                ui::overlay()
-                    .key("popup")
-                    .anchor(Anchor::Caret(EDITOR.to_owned()))
-                    .size(OverlaySize::Md)
-                    .child(list),
-            )]);
+            view = view.layer(vec![popup.overlay(EDITOR)]);
         }
         view
     }
-}
-
-/// The icon for what a completion is, from the completer's description.
-fn kind_icon(description: &str) -> Option<Icon> {
-    Some(match description {
-        "Symbol" => Icon::Code,
-        "Module" => Icon::Box,
-        "Type" | "Structure" => Icon::Braces,
-        "Field" => Icon::Hash,
-        "Local" | "Variable" | "Result" | "Builtin" => Icon::Tag,
-        "Register" => Icon::Binary,
-        "vCPU" => Icon::Cpu,
-        "Alias" => Icon::Link,
-        _ if description.contains(" (PID ") => Icon::Activity,
-        _ if description.contains(" @ 0x") => Icon::Pin,
-        _ => return None,
-    })
 }
 
 /// The field's decorations for `line`'s [`highlight`].

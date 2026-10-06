@@ -14,6 +14,7 @@ pub mod analyze;
 pub mod browser;
 pub mod bugcheck;
 pub mod code;
+pub mod completions;
 pub mod frames;
 pub mod help;
 pub mod inspect;

@@ -45,7 +45,18 @@ The palette opens on the tab for what you are typing. For the command word it sh
 
 ### The browser
 
-In Tern, {command}`browse` or **F2** at the prompt opens a full-screen browser over the pane. It shows code at the instruction pointer or at the address you give, or memory if the address isn't executable, one pointer per row with the symbol it points into. Use the arrow keys to move the cursor, and **Shift+↑** and **Shift+↓** or **Space** to move a page. **Enter** follows the branch or call under the cursor, the memory that an instruction addresses (`[rip+…]`), or the pointer in a memory row, and **Backspace** goes back. **Tab** shows the same address as memory or as code, **G** goes to an address or expression, **B** sets or clears a breakpoint at the instruction under the cursor, and **.** goes to the instruction pointer. **Escape** closes the browser and leaves the pane as it was, with the breakpoints that you set or cleared listed under the prompt. Tern keeps **Page Up** and **Page Down** to scroll the view.
+In Tern, {command}`browse` or **F2** at the prompt opens a full-screen browser over the pane. It shows code at the instruction pointer or at the address you give, or memory if the address isn't executable. **Escape** closes it and leaves the pane as it was, with the breakpoints that you set or cleared listed under the prompt.
+
+These keys work in code and in memory:
+
+- The arrow keys move the cursor, and **Shift+↑** and **Shift+↓** or **Space** move a page. Tern keeps **Page Up** and **Page Down** to scroll the view.
+- **Enter** follows the branch or call under the cursor, the memory that an instruction addresses (`[rip+…]`), or the pointer at the cursor in memory, and **Backspace** goes back.
+- **Tab** shows the same address as memory or as code, and **.** goes to the instruction pointer.
+- **G** goes to an address or expression, with the same completions as the prompt.
+- **/** finds text, bytes or a value after the cursor: `"text"`, `u"text"` for UTF-16, hex byte pairs such as `48 8b 05`, or an expression, whose value is found as a pointer. Each find searches 1 MB, and **N** finds the next match or searches the next 1 MB.
+- **B** sets or clears a breakpoint at the instruction under the cursor, or in memory a write watchpoint (`ba w`) on the bytes at the cursor, as wide as the address's alignment allows, up to 8 bytes.
+
+Memory shows 16 bytes a row in hex and as text, with a byte cursor. Bytes are colored by what they are: zero bytes dim, printable ASCII in the string color, other ASCII as a keyword, and watched bytes red. **←** and **→** move a byte, and **Home** and **End** go to the start and end of the row. **P** switches to one pointer a row with the symbol it points into, and back. Under the rows, the inspector shows what the bytes at the cursor are as little-endian integers (signed too when negative), floats, the symbol a pointer points into, a FILETIME, and the ASCII and UTF-16 strings that start there.
 
 ## Aliases
 

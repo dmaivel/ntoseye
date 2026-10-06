@@ -1,21 +1,26 @@
 //! The code and memory browser, `browse` or F2 at the prompt: a screen
 //! surface over the pane that pages through disassembly and memory, follows
-//! branches and pointers, and sets and clears breakpoints, then leaves the
-//! pane as it was.
+//! branches and pointers, finds bytes, and sets and clears breakpoints and
+//! watchpoints, then leaves the pane as it was.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
+use reedline::{Completer, Suggestion};
 use tern_sdk::keys::Key;
-use tern_sdk::ui::{self, Gap, Mark, Span, TextNode, Wrap};
-use tern_sdk::wire::RevealAt;
+use tern_sdk::ui::{self, Gap, KvLayout, Mark, Span, TextNode, Wrap};
+use tern_sdk::wire::{Event, RevealAt};
 use tern_sdk::{Input, Node, Session, SurfaceOptions, View};
 
-use super::{DIM, MUTED, ROLE, STYLESHEET, addr, code, connect, span, symbol};
+use super::completions::{POPUP_LIMIT, Popup, PopupKey};
+use super::memory::Runs;
+use super::{DIM, MNEMONIC, MUTED, ROLE, STRING, STYLESHEET, addr, code, connect, span, symbol};
 use crate::disasm::{DisasmRow, OperandKind, decode_code, disasm_formatter};
 use crate::expr::Expr;
 use crate::memory::read_page_chunks;
 use crate::output;
-use crate::repl::ReplState;
+use crate::repl::{MyCompleter, ReplState, TargetLoan};
+use crate::triage_report::time::filetime_to_iso;
 use crate::types::VirtAddr;
 use crate::unwind::{format_symbol, resolve_thread_trace_context, try_format_symbol};
 
@@ -42,25 +47,50 @@ impl Pane {
     }
 }
 
+/// How the memory pane lays a row out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Layout {
+    /// Sixteen bytes in hex and as text, with a byte cursor.
+    Bytes,
+    /// One pointer, its bytes as text and the symbol it points into.
+    Pointers,
+}
+
+impl Layout {
+    fn width(self) -> u64 {
+        match self {
+            Layout::Bytes => 16,
+            Layout::Pointers => POINTER,
+        }
+    }
+}
+
 /// Instructions decoded at a time on each side of where the cursor goes.
 const CODE_CHUNK: usize = 64;
-/// Memory rows, a pointer each, read at a time on each side.
-const MEMORY_CHUNK: usize = 128;
-/// How close the cursor comes to an end of the rows before more are read.
+/// Bytes of memory read at a time on each side of the cursor.
+const MEMORY_CHUNK: u64 = 1024;
+/// How close, in rows, the cursor comes to an end before more is read.
 const MARGIN: usize = 16;
-/// The most rows kept; past it the end away from the cursor is dropped.
+/// The most instructions kept; past it the end away from the cursor goes.
 const ROW_LIMIT: usize = 768;
+/// The most bytes of memory kept, likewise.
+const MEMORY_LIMIT: u64 = 6144;
 /// The widest byte column: eight bytes.
 const HEX_WIDTH: usize = 8 * 3 - 1;
-/// The width of a memory row: one pointer.
 const POINTER: u64 = 8;
+/// How far a find looks at a time; `n` goes on from where it stopped.
+const FIND_RANGE: usize = 1 << 20;
+/// How many characters the inspector's strings show.
+const STRING_PREVIEW: usize = 32;
+/// FILETIMEs from 1990 to 2100: a value in this range reads as a time.
+const PLAUSIBLE_FILETIME: std::ops::Range<u64> = 122_756_256_000_000_000..157_469_184_000_000_000;
 /// How long a rebuilt listing takes Tern to lay out.
-const LAYOUT_WAIT: std::time::Duration = std::time::Duration::from_millis(60);
+const LAYOUT_WAIT: Duration = Duration::from_millis(60);
 /// The rows' column's key under `main`.
 const ROWS_KEY: &str = "rows";
-/// The go-to field's key, and its id in the dock.
-const GOTO_KEY: &str = "goto";
-const GOTO: &str = "dock.goto";
+/// The input field's key, and its id in the dock.
+const FIELD_KEY: &str = "field";
+const FIELD: &str = "dock.field";
 
 /// What a click on a row reports: the row's address.
 #[derive(Clone)]
@@ -104,17 +134,23 @@ fn browse(session: &mut Session<Msg>, browser: &mut Browser<'_, '_>) -> Option<(
                 // below the first screen; until then the reveal is lost.
                 let _ = session.pump(LAYOUT_WAIT);
                 // The cursor a third of the way down, its lead-in above it.
-                let lead = browser.cursor.saturating_sub(page() / 3);
-                let _ = session.reveal(surface, &browser.row_id(lead), RevealAt::Start);
+                let id = browser.cursor_row_id(page() / 3);
+                let _ = session.reveal(surface, &id, RevealAt::Start);
             }
             Some(Scroll::Follow) => {
-                let _ = session.reveal(surface, &browser.row_id(browser.cursor), RevealAt::Nearest);
+                let id = browser.cursor_row_id(0);
+                let _ = session.reveal(surface, &id, RevealAt::Nearest);
             }
             None => {}
         }
-        if browser.focus_goto {
-            browser.focus_goto = false;
-            let _ = session.focus(surface, Some(GOTO));
+        if browser.focus_field {
+            browser.focus_field = false;
+            let _ = session.focus(surface, Some(FIELD));
+        }
+        // The frame above says a find is under way; it blocks until done.
+        if browser.search.is_some() {
+            browser.run_search();
+            continue;
         }
         let outcome = match session.next(None).ok()?? {
             Input::Key(key) => browser.key(&key),
@@ -125,6 +161,10 @@ fn browse(session: &mut Session<Msg>, browser: &mut Browser<'_, '_>) -> Option<(
             Input::Msg(Msg::Follow(address), _) => {
                 browser.select(address);
                 browser.follow();
+                Outcome::Continue
+            }
+            Input::Event(Event::Select(pick) | Event::Activate(pick)) => {
+                browser.pick_completion(&pick.item);
                 Outcome::Continue
             }
             Input::Event(_) => Outcome::Continue,
@@ -155,40 +195,100 @@ struct CodeRow {
     label: Option<String>,
 }
 
-/// A pointer-sized row of memory.
-struct MemoryRow {
-    address: u64,
-    bytes: [u8; POINTER as usize],
-    /// Whether every byte was read.
-    read: bool,
-    /// The symbol the value points into.
-    symbol: Option<String>,
+/// The memory read around the cursor: the byte at `start + i` is
+/// `data[i]`, read when `valid[i]`.
+#[derive(Default)]
+struct Memory {
+    start: u64,
+    data: Vec<u8>,
+    valid: Vec<bool>,
+    /// The symbol each read pointer-aligned value points into, by the
+    /// value's address.
+    symbols: HashMap<u64, String>,
+    /// The byte under the cursor.
+    cursor: u64,
 }
 
-impl MemoryRow {
-    fn value(&self) -> Option<u64> {
-        self.read.then(|| u64::from_le_bytes(self.bytes))
+impl Memory {
+    fn end(&self) -> u64 {
+        self.start.saturating_add(self.data.len() as u64)
     }
+
+    fn byte(&self, address: u64) -> Option<u8> {
+        let index = usize::try_from(address.checked_sub(self.start)?).ok()?;
+        self.valid.get(index).copied()?.then(|| self.data[index])
+    }
+
+    /// `N` bytes from `address`, when all were read.
+    fn bytes<const N: usize>(&self, address: u64) -> Option<[u8; N]> {
+        let mut bytes = [0; N];
+        for (offset, byte) in bytes.iter_mut().enumerate() {
+            *byte = self.byte(address.checked_add(offset as u64)?)?;
+        }
+        Some(bytes)
+    }
+
+    fn value(&self, address: u64) -> Option<u64> {
+        self.bytes::<8>(address).map(u64::from_le_bytes)
+    }
+}
+
+/// The field open in the dock, and the completions for what is typed.
+struct Field {
+    kind: FieldKind,
+    draft: String,
+    popup: Option<Popup>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FieldKind {
+    Goto,
+    Find,
+}
+
+/// A find: what to look for, and where the next `n` starts.
+struct Find {
+    pattern: Vec<u8>,
+    /// The pattern as typed, for notes.
+    label: String,
+    /// Where the last find left the cursor; `n` from there goes on at
+    /// `from`, from anywhere else at the cursor.
+    at: u64,
+    from: u64,
+}
+
+/// A find queued for after the frame that says it is under way.
+struct Search {
+    pattern: Vec<u8>,
+    label: String,
+    from: u64,
 }
 
 struct Browser<'s, 'a> {
     state: &'s mut ReplState<'a>,
+    completer: MyCompleter,
+    loan: TargetLoan,
     pane: Pane,
+    layout: Layout,
     code: Vec<CodeRow>,
-    memory: Vec<MemoryRow>,
+    /// The instruction under the cursor, an index into `code`.
     cursor: usize,
+    memory: Memory,
     /// Where Backspace goes back to.
     history: Vec<(Pane, u64)>,
-    /// The go-to field's text while it is open.
-    goto: Option<String>,
-    focus_goto: bool,
+    field: Option<Field>,
+    focus_field: bool,
     scroll: Option<Scroll>,
+    find: Option<Find>,
+    search: Option<Search>,
     /// The last thing said, under the rows.
     note: Option<String>,
     /// What the commands run printed, for the pane once the browser closes.
     record: Vec<String>,
     /// Breakpoint addresses, enabled or not.
     breakpoints: HashMap<u64, bool>,
+    /// The ranges data breakpoints watch.
+    watches: Vec<(u64, u64)>,
     /// The scope's instruction pointer.
     ip: Option<u64>,
 }
@@ -196,19 +296,30 @@ struct Browser<'s, 'a> {
 impl<'s, 'a> Browser<'s, 'a> {
     fn new(state: &'s mut ReplState<'a>) -> Self {
         let ip = state.ctx.target.builtin_variable_value("ip");
+        let completer = MyCompleter {
+            caches: state.caches.clone(),
+            target: TargetLoan::default(),
+        };
+        let loan = completer.target.clone();
         let mut browser = Self {
             state,
+            completer,
+            loan,
             pane: Pane::Code,
+            layout: Layout::Bytes,
             code: Vec::new(),
-            memory: Vec::new(),
             cursor: 0,
+            memory: Memory::default(),
             history: Vec::new(),
-            goto: None,
-            focus_goto: false,
+            field: None,
+            focus_field: false,
             scroll: None,
+            find: None,
+            search: None,
             note: None,
             record: Vec::new(),
             breakpoints: HashMap::new(),
+            watches: Vec::new(),
             ip,
         };
         browser.refresh_breakpoints();
@@ -216,13 +327,17 @@ impl<'s, 'a> Browser<'s, 'a> {
     }
 
     fn refresh_breakpoints(&mut self) {
-        self.breakpoints = self
-            .state
-            .ctx
-            .breakpoints
-            .list()
-            .into_iter()
+        let list = self.state.ctx.breakpoints.list();
+        self.breakpoints = list
+            .iter()
             .map(|breakpoint| (breakpoint.address.0, breakpoint.enabled))
+            .collect();
+        self.watches = list
+            .iter()
+            .filter_map(|breakpoint| {
+                let hardware = breakpoint.hardware.as_ref()?;
+                Some((breakpoint.address.0, u64::from(hardware.len)))
+            })
             .collect();
     }
 
@@ -230,14 +345,7 @@ impl<'s, 'a> Browser<'s, 'a> {
     fn here(&self) -> Option<u64> {
         match self.pane {
             Pane::Code => self.code.get(self.cursor).map(|row| row.row.ip),
-            Pane::Memory => self.memory.get(self.cursor).map(|row| row.address),
-        }
-    }
-
-    fn len(&self) -> usize {
-        match self.pane {
-            Pane::Code => self.code.len(),
-            Pane::Memory => self.memory.len(),
+            Pane::Memory => Some(self.memory.cursor),
         }
     }
 
@@ -259,20 +367,30 @@ impl<'s, 'a> Browser<'s, 'a> {
                     .collect();
             }
             Pane::Memory => {
-                let address = address & !(POINTER - 1);
-                let rows = self.read_rows(address, MEMORY_CHUNK * 2);
-                if !rows.iter().any(|row| row.read) {
+                let row = address & !15;
+                let start = row.saturating_sub(MEMORY_CHUNK);
+                let memory = self.read_memory(start, row.saturating_add(MEMORY_CHUNK));
+                if memory.byte(address).is_none() {
                     return Err(format!("cannot read memory at {address:#x}"));
                 }
-                let start = address.saturating_sub(MEMORY_CHUNK as u64 * POINTER);
-                let before = self.read_rows(start, ((address - start) / POINTER) as usize);
-                self.cursor = before.len();
-                self.memory = before.into_iter().chain(rows).collect();
+                self.memory = Memory {
+                    cursor: self.align(address),
+                    ..memory
+                };
             }
         }
         self.pane = pane;
         self.scroll = Some(Scroll::Jump);
         Ok(())
+    }
+
+    /// The cursor's address for the memory layout: a pointer's start in
+    /// the pointer layout.
+    fn align(&self, address: u64) -> u64 {
+        match self.layout {
+            Layout::Bytes => address,
+            Layout::Pointers => address & !(POINTER - 1),
+        }
     }
 
     /// [`go`](Self::go) somewhere new, remembering where the cursor was.
@@ -298,18 +416,29 @@ impl<'s, 'a> Browser<'s, 'a> {
     }
 
     fn select(&mut self, address: u64) {
-        let index = match self.pane {
-            Pane::Code => self.code.iter().position(|row| row.row.ip == address),
-            Pane::Memory => self.memory.iter().position(|row| row.address == address),
-        };
-        if let Some(index) = index {
-            self.cursor = index;
+        match self.pane {
+            Pane::Code => {
+                if let Some(index) = self.code.iter().position(|row| row.row.ip == address) {
+                    self.cursor = index;
+                }
+            }
+            Pane::Memory => self.memory.cursor = address,
         }
     }
 
-    fn move_by(&mut self, delta: isize) {
-        let last = self.len().saturating_sub(1);
-        self.cursor = self.cursor.saturating_add_signed(delta).min(last);
+    /// Move `rows` rows, or in memory also `bytes` bytes.
+    fn move_by(&mut self, rows: isize, bytes: isize) {
+        match self.pane {
+            Pane::Code => {
+                let last = self.code.len().saturating_sub(1);
+                self.cursor = self.cursor.saturating_add_signed(rows).min(last);
+            }
+            Pane::Memory => {
+                let step = rows as i64 * self.layout.width() as i64 + bytes as i64;
+                let cursor = self.memory.cursor.saturating_add_signed(step);
+                self.memory.cursor = self.align(cursor);
+            }
+        }
         self.load_more();
         self.scroll = Some(Scroll::Follow);
     }
@@ -340,24 +469,52 @@ impl<'s, 'a> Browser<'s, 'a> {
                 self.cursor -= trim(&mut self.code, self.cursor);
             }
             Pane::Memory => {
-                if self.cursor + MARGIN >= self.memory.len()
-                    && let Some(last) = self.memory.last()
-                    && let Some(next) = last.address.checked_add(POINTER)
-                {
-                    let rows = self.read_rows(next, MEMORY_CHUNK);
-                    self.memory.extend(rows);
+                let margin = MARGIN as u64 * self.layout.width();
+                let (start, end) = (self.memory.start, self.memory.end());
+                if self.memory.cursor.saturating_add(margin) >= end {
+                    let more = self.read_memory(end, end.saturating_add(MEMORY_CHUNK));
+                    self.memory.data.extend(more.data);
+                    self.memory.valid.extend(more.valid);
+                    self.memory.symbols.extend(more.symbols);
                 }
-                if self.cursor < MARGIN
-                    && let Some(first) = self.memory.first()
-                {
-                    let start = first.address.saturating_sub(MEMORY_CHUNK as u64 * POINTER);
-                    let rows = self.read_rows(start, ((first.address - start) / POINTER) as usize);
-                    self.cursor += rows.len();
-                    self.memory.splice(0..0, rows);
+                if self.memory.cursor < start.saturating_add(margin) && start > 0 {
+                    let mut more = self.read_memory(start.saturating_sub(MEMORY_CHUNK), start);
+                    more.data.extend(std::mem::take(&mut self.memory.data));
+                    more.valid.extend(std::mem::take(&mut self.memory.valid));
+                    more.symbols
+                        .extend(std::mem::take(&mut self.memory.symbols));
+                    more.cursor = self.memory.cursor;
+                    self.memory = more;
                 }
-                self.cursor -= trim(&mut self.memory, self.cursor);
+                self.trim_memory();
+                let last = self.memory.end().saturating_sub(1);
+                self.memory.cursor = self.memory.cursor.clamp(self.memory.start, last);
             }
         }
+    }
+
+    /// Drop the end of memory away from the cursor past [`MEMORY_LIMIT`],
+    /// keeping rows whole.
+    fn trim_memory(&mut self) {
+        let memory = &mut self.memory;
+        let excess = (memory.data.len() as u64).saturating_sub(MEMORY_LIMIT);
+        if excess == 0 {
+            return;
+        }
+        let middle = memory.start + memory.data.len() as u64 / 2;
+        if memory.cursor > middle {
+            let drop = excess.next_multiple_of(16) as usize;
+            memory.data.drain(..drop);
+            memory.valid.drain(..drop);
+            memory.start += drop as u64;
+        } else {
+            memory.data.truncate(MEMORY_LIMIT as usize);
+            memory.valid.truncate(MEMORY_LIMIT as usize);
+        }
+        let (start, end) = (memory.start, memory.end());
+        memory
+            .symbols
+            .retain(|&address, _| (start..end).contains(&address));
     }
 
     /// Up to `count` instructions from `address`, as far as memory reads.
@@ -396,36 +553,32 @@ impl<'s, 'a> Browser<'s, 'a> {
         CodeRow { row, label }
     }
 
-    /// `count` pointer rows from `address`, each marked read or not.
-    fn read_rows(&self, address: u64, count: usize) -> Vec<MemoryRow> {
+    /// The memory from `start` to `end`, a page at a time so one missing
+    /// page leaves the rest, with the symbols its pointers point into.
+    fn read_memory(&self, start: u64, end: u64) -> Memory {
         let session = &*self.state.ctx;
         let target = &session.target;
-        let length = count * POINTER as usize;
-        let Ok((data, valid)) = read_page_chunks(VirtAddr(address), length, |at, buf| {
+        let length = usize::try_from(end.saturating_sub(start)).unwrap_or(0);
+        let (data, valid) = read_page_chunks(VirtAddr(start), length, |at, buf| {
             session.read_masked(at, buf)
-        }) else {
-            return Vec::new();
+        })
+        .unwrap_or_else(|_| (vec![0; length], vec![false; length]));
+        let mut memory = Memory {
+            start,
+            data,
+            valid,
+            ..Memory::default()
         };
         let trace = resolve_thread_trace_context(target, target.current_dtb());
-        const WIDTH: usize = POINTER as usize;
-        data.as_chunks::<WIDTH>()
-            .0
-            .iter()
-            .zip(valid.as_chunks::<WIDTH>().0)
-            .enumerate()
-            .map(|(index, (bytes, valid))| {
-                let read = valid.iter().all(|&read| read);
-                let symbol = read
-                    .then(|| try_format_symbol(target, &trace, u64::from_le_bytes(*bytes)))
-                    .flatten();
-                MemoryRow {
-                    address: address.wrapping_add(index as u64 * POINTER),
-                    bytes: *bytes,
-                    read,
-                    symbol,
-                }
-            })
-            .collect()
+        let first = start.next_multiple_of(POINTER);
+        for address in (first..end.saturating_sub(POINTER - 1)).step_by(POINTER as usize) {
+            if let Some(value) = memory.value(address)
+                && let Some(name) = try_format_symbol(target, &trace, value)
+            {
+                memory.symbols.insert(address, name);
+            }
+        }
+        memory
     }
 
     /// Where Enter goes from the cursor: an instruction's branch target or
@@ -463,7 +616,7 @@ impl<'s, 'a> Browser<'s, 'a> {
                     .map(|value| (self.pane_for(value), value))
             }
             Pane::Memory => {
-                let value = self.memory.get(self.cursor)?.value()?;
+                let value = self.memory.value(self.memory.cursor)?;
                 self.points_somewhere(value)
                     .then(|| (self.pane_for(value), value))
             }
@@ -500,27 +653,39 @@ impl<'s, 'a> Browser<'s, 'a> {
         }
     }
 
-    /// Set a breakpoint at the instruction under the cursor, or clear the
-    /// one there, with the commands that do it at the prompt.
+    /// In code, set a breakpoint at the instruction under the cursor or
+    /// clear the one there; in memory, set a write watchpoint on the
+    /// cursor or clear the one watching it. Both with the commands that do
+    /// it at the prompt.
     fn toggle_breakpoint(&mut self) {
-        if self.pane != Pane::Code {
-            self.note = Some("breakpoints go on code; Tab shows it".into());
-            return;
-        }
-        let Some(ip) = self.here() else {
+        let Some(here) = self.here() else {
             return;
         };
-        let existing = self
-            .state
-            .ctx
-            .breakpoints
-            .list()
-            .into_iter()
-            .find(|breakpoint| breakpoint.address.0 == ip)
-            .map(|breakpoint| breakpoint.id);
-        let line = match existing {
-            Some(id) => format!("bc {id}"),
-            None => format!("bp {ip:#x}"),
+        let list = self.state.ctx.breakpoints.list();
+        let line = match self.pane {
+            Pane::Code => match list.iter().find(|breakpoint| breakpoint.address.0 == here) {
+                Some(breakpoint) => format!("bc {}", breakpoint.id),
+                None => format!("bp {here:#x}"),
+            },
+            Pane::Memory => {
+                let watching = list.iter().find(|breakpoint| {
+                    breakpoint.hardware.as_ref().is_some_and(|hardware| {
+                        let start = breakpoint.address.0;
+                        (start..start + u64::from(hardware.len)).contains(&here)
+                    })
+                });
+                match watching {
+                    Some(breakpoint) => format!("bc {}", breakpoint.id),
+                    // The widest size the address is aligned to.
+                    None => {
+                        let size = [8, 4, 2, 1]
+                            .into_iter()
+                            .find(|size| here % size == 0)
+                            .unwrap_or(1);
+                        format!("ba w{size} {here:#x}")
+                    }
+                }
+            }
         };
         let (result, text) = output::capture(|| self.state.dispatch_line(&line));
         let mut text = text.trim().to_owned();
@@ -534,62 +699,305 @@ impl<'s, 'a> Browser<'s, 'a> {
         self.refresh_breakpoints();
     }
 
-    fn goto_key(&mut self, key: &Key) -> Outcome {
-        let Some(draft) = &mut self.goto else {
-            return Outcome::Continue;
+    fn open_field(&mut self, kind: FieldKind) {
+        self.field = Some(Field {
+            kind,
+            draft: String::new(),
+            popup: None,
+        });
+        self.focus_field = true;
+    }
+
+    /// The completions for `draft` as an expression, the way `?` completes
+    /// its argument.
+    fn completions(&mut self, draft: &str) -> Vec<Suggestion> {
+        const PREFIX: &str = "? ";
+        let line = format!("{PREFIX}{draft}");
+        let (loan, completer) = (&self.loan, &mut self.completer);
+        let mut suggestions = loan.lend(&self.state.ctx.target, || {
+            completer.complete(&line, line.len())
+        });
+        suggestions.truncate(POPUP_LIMIT);
+        for suggestion in &mut suggestions {
+            suggestion.span.start = suggestion.span.start.saturating_sub(PREFIX.len());
+            suggestion.span.end = suggestion.span.end.saturating_sub(PREFIX.len());
+        }
+        suggestions
+    }
+
+    /// Refill the popup for the word the draft ends in: it follows typing,
+    /// and closes once the word ends.
+    fn refill(&mut self) {
+        let Some(field) = &self.field else {
+            return;
         };
+        let kind = field.kind;
+        let draft = field.draft.clone();
+        let keep = field
+            .popup
+            .as_ref()
+            .and_then(Popup::selected_value)
+            .map(str::to_owned);
+        let in_word = draft
+            .chars()
+            .next_back()
+            .is_some_and(|c| !c.is_whitespace());
+        let popup = if in_word && completes(kind, &draft) {
+            let suggestions = self.completions(&draft);
+            Popup::open(suggestions, &draft, keep.as_deref())
+        } else {
+            None
+        };
+        if let Some(field) = &mut self.field {
+            field.popup = popup;
+        }
+    }
+
+    fn apply(&mut self, suggestion: &Suggestion) {
+        let Some(field) = &mut self.field else {
+            return;
+        };
+        let end = suggestion.span.end.min(field.draft.len());
+        let start = suggestion.span.start.min(end);
+        field.draft.replace_range(start..end, &suggestion.value);
+        field.draft.truncate(start + suggestion.value.len());
+        field.popup = None;
+    }
+
+    /// A click on a completion takes it.
+    fn pick_completion(&mut self, item: &str) {
+        let suggestion = self
+            .field
+            .as_ref()
+            .and_then(|field| field.popup.as_ref())
+            .and_then(|popup| popup.clicked(item))
+            .cloned();
+        if let Some(suggestion) = suggestion {
+            self.apply(&suggestion);
+        }
+    }
+
+    fn field_key(&mut self, key: &Key) {
+        let Some(field) = &mut self.field else {
+            return;
+        };
+        if let Some(popup) = &mut field.popup {
+            match popup.key(key) {
+                PopupKey::Moved => return,
+                PopupKey::Close => {
+                    field.popup = None;
+                    return;
+                }
+                PopupKey::Take(suggestion) => {
+                    self.apply(&suggestion);
+                    return;
+                }
+                PopupKey::Ignored => {}
+            }
+        }
         if key.is("escape") || key.is("ctrl+c") {
-            self.goto = None;
-        } else if key.is("enter") {
-            let text = std::mem::take(draft);
-            self.goto = None;
-            if !text.trim().is_empty() {
-                match Expr::eval_with_radix(&text, &self.state.ctx.target, self.state.radix) {
+            self.field = None;
+            return;
+        }
+        if key.is("enter") {
+            if let Some(field) = self.field.take() {
+                self.submit(field.kind, field.draft.trim());
+            }
+            return;
+        }
+        if key.is("tab") {
+            let draft = field.draft.clone();
+            if !completes(field.kind, &draft) {
+                return;
+            }
+            let mut suggestions = self.completions(&draft);
+            if suggestions.len() == 1 {
+                let only = suggestions.remove(0);
+                self.apply(&only);
+            } else if let Some(field) = &mut self.field {
+                field.popup = Popup::open(suggestions, &draft, None);
+            }
+            return;
+        }
+        if key.is("right") || key.is("end") {
+            let ghost = field
+                .popup
+                .as_ref()
+                .map(|popup| popup.ghost().to_owned())
+                .unwrap_or_default();
+            field.draft.push_str(&ghost);
+            field.popup = None;
+            return;
+        }
+        if key.is("backspace") {
+            field.draft.pop();
+        } else if key.is("ctrl+u") {
+            field.draft.clear();
+        } else if key.name == "paste" {
+            let text = key.text.as_deref().unwrap_or_default();
+            field
+                .draft
+                .push_str(text.lines().next().unwrap_or_default());
+        } else if let Some(text) = key.typed() {
+            field.draft.push_str(text);
+        } else {
+            return;
+        }
+        self.refill();
+    }
+
+    fn submit(&mut self, kind: FieldKind, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        match kind {
+            FieldKind::Goto => {
+                match Expr::eval_with_radix(text, &self.state.ctx.target, self.state.radix) {
                     Ok(address) => self.jump(self.pane_for(address.0), address.0),
                     Err(error) => self.note = Some(error.to_string()),
                 }
             }
-        } else if key.is("backspace") {
-            draft.pop();
-        } else if key.is("ctrl+u") {
-            draft.clear();
-        } else if key.name == "paste" {
-            let text = key.text.as_deref().unwrap_or_default();
-            draft.push_str(text.lines().next().unwrap_or_default());
-        } else if let Some(text) = key.typed() {
-            draft.push_str(text);
+            FieldKind::Find => match self.pattern(text) {
+                Ok(pattern) => {
+                    let from = self.here().map_or(0, |here| here.wrapping_add(1));
+                    self.queue_search(pattern, text.to_owned(), from);
+                }
+                Err(error) => self.note = Some(error),
+            },
         }
-        Outcome::Continue
+    }
+
+    /// What to find for `text`: `"text"` as ASCII, `u"text"` as UTF-16,
+    /// hex byte pairs as bytes, else an expression's value as a pointer.
+    fn pattern(&self, text: &str) -> Result<Vec<u8>, String> {
+        if let Some(inner) = text.strip_prefix('u').and_then(quoted) {
+            return Ok(inner.encode_utf16().flat_map(u16::to_le_bytes).collect());
+        }
+        if let Some(inner) = quoted(text) {
+            return Ok(inner.as_bytes().to_vec());
+        }
+        if let Some(bytes) = hex_pairs(text) {
+            return Ok(bytes);
+        }
+        Expr::eval_with_radix(text, &self.state.ctx.target, self.state.radix)
+            .map(|value| value.0.to_le_bytes().to_vec())
+            .map_err(|error| error.to_string())
+    }
+
+    fn queue_search(&mut self, pattern: Vec<u8>, label: String, from: u64) {
+        self.note = Some(format!("finding {label} from {from:#x}…"));
+        self.search = Some(Search {
+            pattern,
+            label,
+            from,
+        });
+    }
+
+    /// `n`: the next match of the last find.
+    fn find_next(&mut self) {
+        let Some(find) = &self.find else {
+            self.note = Some("nothing to find again: / finds".into());
+            return;
+        };
+        let here = self.here().unwrap_or(0);
+        let from = if here == find.at {
+            find.from
+        } else {
+            here.wrapping_add(1)
+        };
+        self.queue_search(find.pattern.clone(), find.label.clone(), from);
+    }
+
+    fn run_search(&mut self) {
+        let Some(search) = self.search.take() else {
+            return;
+        };
+        let result = self
+            .state
+            .ctx
+            .search(VirtAddr(search.from), &search.pattern, FIND_RANGE);
+        match result {
+            Ok(result) => match result.matches.first() {
+                Some(&found) => {
+                    self.jump(self.pane, found);
+                    self.note = Some(format!("{} at {found:#x}", search.label));
+                    self.find = Some(Find {
+                        pattern: search.pattern,
+                        label: search.label,
+                        at: found,
+                        from: found.wrapping_add(1),
+                    });
+                }
+                None => {
+                    let end = search.from.saturating_add(FIND_RANGE as u64);
+                    self.note = Some(format!(
+                        "no {} from {:#x} to {end:#x}; n looks further",
+                        search.label, search.from
+                    ));
+                    self.find = Some(Find {
+                        pattern: search.pattern,
+                        label: search.label,
+                        at: self.here().unwrap_or(0),
+                        from: end,
+                    });
+                }
+            },
+            Err(error) => self.note = Some(error.to_string()),
+        }
     }
 
     fn key(&mut self, key: &Key) -> Outcome {
-        if self.goto.is_some() {
-            return self.goto_key(key);
+        if self.field.is_some() {
+            self.field_key(key);
+            return Outcome::Continue;
         }
         let typed = key.typed().unwrap_or_default();
         if key.is("escape") || key.is("ctrl+c") || typed == "q" {
             return Outcome::Close;
         }
         let page = page() as isize;
+        let memory = self.pane == Pane::Memory;
         if key.is("up") || typed == "k" {
-            self.move_by(-1);
+            self.move_by(-1, 0);
         } else if key.is("down") || typed == "j" {
-            self.move_by(1);
+            self.move_by(1, 0);
+        } else if memory && (key.is("left") || typed == "h") {
+            self.move_by(0, -1);
+        } else if memory && (key.is("right") || typed == "l") {
+            self.move_by(0, 1);
+        } else if memory && key.is("home") {
+            let row = self.memory.cursor & !(self.layout.width() - 1);
+            self.memory.cursor = row;
+            self.scroll = Some(Scroll::Follow);
+        } else if memory && key.is("end") {
+            let row = self.memory.cursor & !(self.layout.width() - 1);
+            self.memory.cursor = self.align(row + self.layout.width() - 1);
+            self.scroll = Some(Scroll::Follow);
         } else if key.is("shift+up") {
-            self.move_by(-page);
+            self.move_by(-page, 0);
         } else if key.is("shift+down") || key.is("space") {
-            self.move_by(page);
-        } else if key.is("enter") || key.is("right") {
+            self.move_by(page, 0);
+        } else if key.is("enter") {
             self.follow();
-        } else if key.is("backspace") || key.is("left") {
+        } else if key.is("backspace") {
             self.back();
         } else if key.is("tab") {
             if let Some(here) = self.here() {
                 self.jump(self.pane.other(), here);
             }
+        } else if memory && typed == "p" {
+            self.layout = match self.layout {
+                Layout::Bytes => Layout::Pointers,
+                Layout::Pointers => Layout::Bytes,
+            };
+            self.memory.cursor = self.align(self.memory.cursor);
+            self.scroll = Some(Scroll::Jump);
         } else if typed == "g" {
-            self.goto = Some(String::new());
-            self.focus_goto = true;
+            self.open_field(FieldKind::Goto);
+        } else if typed == "/" {
+            self.open_field(FieldKind::Find);
+        } else if typed == "n" {
+            self.find_next();
         } else if typed == "b" {
             self.toggle_breakpoint();
         } else if typed == "." {
@@ -601,21 +1009,23 @@ impl<'s, 'a> Browser<'s, 'a> {
         Outcome::Continue
     }
 
-    fn row_id(&self, index: usize) -> String {
-        format!("main.{ROWS_KEY}.{}", self.row_key(index))
-    }
-
-    fn row_key(&self, index: usize) -> String {
-        match self.pane {
+    /// The id of the row `above` rows above the cursor's.
+    fn cursor_row_id(&self, above: usize) -> String {
+        let key = match self.pane {
             Pane::Code => self
                 .code
-                .get(index)
-                .map_or_else(String::new, |row| format!("c{:x}", row.row.ip)),
-            Pane::Memory => self
-                .memory
-                .get(index)
-                .map_or_else(String::new, |row| format!("m{:x}", row.address)),
-        }
+                .get(self.cursor.saturating_sub(above))
+                .map_or_else(String::new, |row| code_key(row.row.ip)),
+            Pane::Memory => {
+                let width = self.layout.width();
+                let row = self.memory.cursor & !(width - 1);
+                let lead = row
+                    .saturating_sub(above as u64 * width)
+                    .max(self.memory.start);
+                memory_key(lead)
+            }
+        };
+        format!("main.{ROWS_KEY}.{key}")
     }
 
     fn view(&self) -> View<Msg> {
@@ -643,28 +1053,47 @@ impl<'s, 'a> Browser<'s, 'a> {
                 }
             }
             Pane::Memory => {
-                for index in 0..self.memory.len() {
-                    rows = rows.child(self.memory_line(index));
+                let width = self.layout.width();
+                let first = self.memory.start & !(width - 1);
+                for row in (first..self.memory.end()).step_by(width as usize) {
+                    rows = rows.child(self.memory_line(row));
                 }
             }
         }
         let mut dock: Vec<Node<Msg>> = Vec::new();
-        if let Some(draft) = &self.goto {
+        let mut view = View::new();
+        if let Some(field) = &self.field {
+            let (prompt, placeholder) = match field.kind {
+                FieldKind::Goto => ("go to ", "address or expression"),
+                FieldKind::Find => ("find ", "\"text\", u\"text\", hex bytes, or a pointer"),
+            };
+            let ghost = field
+                .popup
+                .as_ref()
+                .map(|popup| popup.ghost().to_owned())
+                .unwrap_or_default();
             dock.push(
                 ui::input()
-                    .key(GOTO_KEY)
-                    .text(draft.clone())
-                    .cursor(draft.encode_utf16().count())
-                    .prompt(vec![span("go to ", MUTED)])
-                    .placeholder("address or expression".to_owned())
+                    .key(FIELD_KEY)
+                    .text(field.draft.clone())
+                    .cursor(field.draft.encode_utf16().count())
+                    .prompt(vec![span(prompt, MUTED)])
+                    .placeholder(placeholder.to_owned())
+                    .ghost(ghost)
                     .into(),
             );
+            if let Some(popup) = &field.popup {
+                view = view.layer(vec![popup.overlay(FIELD)]);
+            }
+        }
+        if self.pane == Pane::Memory {
+            dock.extend(self.inspector());
         }
         dock.push(self.location().into());
-        dock.push(hints(self.pane).into());
+        dock.push(hints(self.pane, self.layout).into());
         // A child of `main`, not its root: the screen region is a fixed-height
         // column that would shrink every row to nothing.
-        View::new().main(vec![Node::from(rows)]).dock(dock)
+        view.main(vec![Node::from(rows)]).dock(dock)
     }
 
     fn code_line(&self, index: usize, width: usize) -> TextNode<Msg> {
@@ -690,51 +1119,216 @@ impl<'s, 'a> Browser<'s, 'a> {
             spans.push(span("  ; ", MUTED));
             spans.extend(symbol(comment));
         }
-        self.line(index, spans, row.ip)
+        self.line(code_key(row.ip), spans, row.ip, index == self.cursor)
     }
 
-    fn memory_line(&self, index: usize) -> TextNode<Msg> {
-        let row = &self.memory[index];
-        let mut spans = vec![addr(row.address), span("  ", "")];
-        match row.value() {
-            Some(value) => {
-                spans.push(span(
-                    format!("{value:016x}"),
-                    if value == 0 { DIM } else { "" },
-                ));
-                let ascii: String = row
-                    .bytes
-                    .iter()
-                    .map(|&byte| {
-                        if byte.is_ascii_graphic() || byte == b' ' {
-                            byte as char
-                        } else {
-                            '·'
-                        }
-                    })
-                    .collect();
-                spans.push(span(format!("  {ascii}"), MUTED));
-                if let Some(name) = &row.symbol {
-                    spans.push(span("  ", ""));
-                    spans.extend(symbol(name));
+    /// A byte's color: red where a watchpoint watches it, else by what it
+    /// is, as hexyl colors bytes: zero dim, printable ASCII as a string,
+    /// other ASCII as a keyword, the rest plain, unread muted.
+    fn byte_style(&self, address: u64) -> &'static str {
+        if self.watched(address) {
+            return "error";
+        }
+        match self.memory.byte(address) {
+            None => MUTED,
+            Some(0) => DIM,
+            Some(0x20..=0x7e) => STRING,
+            Some(0x01..=0x1f | 0x7f) => MNEMONIC,
+            Some(_) => "",
+        }
+    }
+
+    fn watched(&self, address: u64) -> bool {
+        self.watches
+            .iter()
+            .any(|&(start, len)| (start..start.saturating_add(len)).contains(&address))
+    }
+
+    fn memory_line(&self, row: u64) -> TextNode<Msg> {
+        let memory = &self.memory;
+        let width = self.layout.width();
+        let cursor = memory.cursor;
+        let mut runs = Runs::default();
+        runs.push_span(addr(row));
+        runs.push(MUTED, format_args!(" │ "));
+        match self.layout {
+            Layout::Bytes => {
+                for offset in 0..width {
+                    let address = row + offset;
+                    let style = self.byte_style(address);
+                    let gap = match offset {
+                        0 => "",
+                        8 => "  ",
+                        _ => " ",
+                    };
+                    runs.push(style, format_args!("{gap}"));
+                    let text = memory
+                        .byte(address)
+                        .map_or_else(|| "??".to_owned(), |byte| format!("{byte:02x}"));
+                    if address == cursor {
+                        runs.push_span(span(text, style).style("mark strong"));
+                    } else {
+                        runs.push(style, format_args!("{text}"));
+                    }
                 }
             }
-            None => spans.push(span("????????????????", MUTED)),
+            Layout::Pointers => {
+                let style = if self.watched(row) {
+                    "error"
+                } else {
+                    match memory.value(row) {
+                        None => MUTED,
+                        Some(0) => DIM,
+                        Some(_) => "",
+                    }
+                };
+                match memory.value(row) {
+                    Some(value) => runs.push(style, format_args!("{value:016x}")),
+                    None => runs.push(style, format_args!("????????????????")),
+                }
+            }
         }
-        self.line(index, spans, row.address)
+        runs.push(MUTED, format_args!(" │ "));
+        for offset in 0..width {
+            let address = row + offset;
+            let style = self.byte_style(address);
+            let glyph = match memory.byte(address) {
+                Some(byte @ 0x20..=0x7e) => byte as char,
+                Some(_) => '·',
+                None => ' ',
+            };
+            if address == cursor && self.layout == Layout::Bytes {
+                runs.push_span(span(glyph.to_string(), style).style("mark strong"));
+            } else {
+                runs.push(style, format_args!("{glyph}"));
+            }
+        }
+        let mut spans = runs.finish();
+        if self.layout == Layout::Pointers
+            && let Some(name) = memory.symbols.get(&row)
+        {
+            spans.push(span("  ", ""));
+            spans.extend(symbol(name));
+        }
+        let at_cursor = (row..row + width).contains(&cursor);
+        self.line(memory_key(row), spans, row, at_cursor)
     }
 
-    fn line(&self, index: usize, spans: Vec<Span>, address: u64) -> TextNode<Msg> {
+    fn line(&self, key: String, spans: Vec<Span>, address: u64, cursor: bool) -> TextNode<Msg> {
         let line = ui::text(spans)
             .wrap(Wrap::None)
-            .key(self.row_key(index))
+            .key(key)
             .on_click(Msg::Select(address))
             .on_dblclick(Msg::Follow(address));
-        if index == self.cursor {
-            line.mark(Mark::Pick)
-        } else {
-            line
-        }
+        if cursor { line.mark(Mark::Pick) } else { line }
+    }
+
+    /// The values the bytes at the cursor make, little-endian: integers in
+    /// hex and decimal (signed too when negative), floats, the symbol a
+    /// pointer points into, a FILETIME, and the strings that start there.
+    /// The integers on one line, the rest on another, each a dock row.
+    fn inspector(&self) -> [Node<Msg>; 2] {
+        let memory = &self.memory;
+        let at = memory.cursor;
+        let none = || vec![span("—", DIM)];
+        let integer = |hex: String, unsigned: u64, signed: i64| {
+            let mut spans = vec![span(hex, ""), span(format!(" {unsigned}"), MUTED)];
+            if signed < 0 {
+                spans.push(span(format!(" ({signed})"), MUTED));
+            }
+            spans
+        };
+        let mut kv = ui::kv().layout(KvLayout::Inline);
+        kv = kv.item(
+            "u8",
+            memory.bytes::<1>(at).map_or_else(none, |[byte]| {
+                integer(format!("{byte:#04x}"), byte.into(), (byte as i8).into())
+            }),
+        );
+        kv = kv.item(
+            "u16",
+            memory
+                .bytes::<2>(at)
+                .map(u16::from_le_bytes)
+                .map_or_else(none, |value| {
+                    integer(format!("{value:#06x}"), value.into(), (value as i16).into())
+                }),
+        );
+        kv = kv.item(
+            "u32",
+            memory
+                .bytes::<4>(at)
+                .map(u32::from_le_bytes)
+                .map_or_else(none, |value| {
+                    integer(
+                        format!("{value:#010x}"),
+                        value.into(),
+                        (value as i32).into(),
+                    )
+                }),
+        );
+        let quad = memory.value(at);
+        kv = kv.item(
+            "u64",
+            quad.map_or_else(none, |value| {
+                integer(format!("{value:#018x}"), value, value as i64)
+            }),
+        );
+        let integers = kv;
+        let mut kv = ui::kv().layout(KvLayout::Inline);
+        kv = kv.item(
+            "f32",
+            memory.bytes::<4>(at).map_or_else(none, |bytes| {
+                vec![span(float(f32::from_le_bytes(bytes).into()), "")]
+            }),
+        );
+        kv = kv.item(
+            "f64",
+            memory.bytes::<8>(at).map_or_else(none, |bytes| {
+                vec![span(float(f64::from_le_bytes(bytes)), "")]
+            }),
+        );
+        let target = &self.state.ctx.target;
+        let pointer = quad.and_then(|value| {
+            let trace = resolve_thread_trace_context(target, target.current_dtb());
+            try_format_symbol(target, &trace, value)
+        });
+        // Where Enter would go when the value has no symbol.
+        let pointer = match (pointer, quad) {
+            (Some(name), _) => symbol(&name),
+            (None, Some(value)) if self.points_somewhere(value) => {
+                vec![span(self.pane_for(value).name(), MUTED)]
+            }
+            _ => none(),
+        };
+        kv = kv.item("ptr", pointer);
+        let time = quad
+            .filter(|value| PLAUSIBLE_FILETIME.contains(value))
+            .and_then(filetime_to_iso);
+        kv = kv.item("time", time.map_or_else(none, |time| vec![span(time, "")]));
+        let ascii: String = (0..STRING_PREVIEW as u64)
+            .map_while(|offset| memory.byte(at + offset))
+            .take_while(|byte| (0x20..=0x7e).contains(byte))
+            .map(char::from)
+            .collect();
+        // Printable ASCII only: UTF-16 of anything else is mostly pointer
+        // bytes read as CJK.
+        let utf16: String = (0..STRING_PREVIEW as u64)
+            .map_while(|index| memory.bytes::<2>(at + index * 2).map(u16::from_le_bytes))
+            .take_while(|unit| (0x20..=0x7e).contains(unit))
+            .filter_map(|unit| char::from_u32(unit.into()))
+            .collect();
+        // One character is as likely chance as text.
+        let string = |text: String| {
+            if text.chars().count() < 2 {
+                none()
+            } else {
+                vec![span(format!("\"{text}\""), STRING)]
+            }
+        };
+        kv = kv.item("ascii", string(ascii));
+        let rest = kv.item("utf16", string(utf16));
+        [integers.into(), rest.into()]
     }
 
     /// The pane, where the cursor is, and the last note.
@@ -756,23 +1350,83 @@ impl<'s, 'a> Browser<'s, 'a> {
     }
 }
 
+fn code_key(ip: u64) -> String {
+    format!("c{ip:x}")
+}
+
+/// The text of a quoted string, without its closing quote when typed.
+fn quoted(text: &str) -> Option<&str> {
+    let inner = text.strip_prefix('"')?;
+    Some(inner.strip_suffix('"').unwrap_or(inner))
+}
+
+/// Hex byte pairs, `48 8b 05`, as bytes.
+fn hex_pairs(text: &str) -> Option<Vec<u8>> {
+    let bytes: Option<Vec<u8>> = text
+        .split_whitespace()
+        .map(|pair| {
+            (pair.len() == 2)
+                .then(|| u8::from_str_radix(pair, 16).ok())
+                .flatten()
+        })
+        .collect();
+    bytes.filter(|bytes| !bytes.is_empty())
+}
+
+/// Whether a field's draft is an expression, which completes: a find of
+/// text or bytes does not.
+fn completes(kind: FieldKind, draft: &str) -> bool {
+    kind == FieldKind::Goto
+        || !(draft.starts_with('"') || draft.starts_with("u\"") || hex_pairs(draft).is_some())
+}
+
+/// A float as the inspector shows it: plainly in a readable range, else in
+/// exponent form rather than hundreds of digits.
+fn float(value: f64) -> String {
+    let magnitude = value.abs();
+    if value == 0.0 || !value.is_finite() || (1e-4..1e15).contains(&magnitude) {
+        format!("{value}")
+    } else {
+        format!("{value:e}")
+    }
+}
+
+fn memory_key(row: u64) -> String {
+    format!("m{row:x}")
+}
+
 /// The keys, as keycaps with what they do.
-fn hints(pane: Pane) -> ui::Row<Msg> {
+fn hints(pane: Pane, layout: Layout) -> ui::Row<Msg> {
     let other = format!("to {}", pane.other().name());
-    let mut keys: Vec<(&[&str], &str)> = vec![
-        (&["↑", "↓"], "move"),
-        (&["⇧↑", "⇧↓"], "page"),
+    let mut keys: Vec<(&[&str], &str)> = vec![(&["↑", "↓"], "move")];
+    if pane == Pane::Memory {
+        keys = vec![(&["↑", "↓", "←", "→"], "move")];
+    }
+    keys.extend([
+        (&["⇧↑", "⇧↓"][..], "page"),
         (&["Enter"], "follow"),
         (&["⌫"], "back"),
         (&["Tab"], &other),
         (&["g"], "go to"),
-    ];
-    if pane == Pane::Code {
-        keys.push((&["b"], "breakpoint"));
+        (&["/"], "find"),
+        (&["n"], "next"),
+    ]);
+    match pane {
+        Pane::Code => keys.push((&["b"], "breakpoint")),
+        Pane::Memory => {
+            keys.push((&["b"], "watch writes"));
+            keys.push((
+                &["p"],
+                match layout {
+                    Layout::Bytes => "pointers",
+                    Layout::Pointers => "bytes",
+                },
+            ));
+        }
     }
     keys.push((&["."], "instruction pointer"));
     keys.push((&["Esc"], "close"));
-    let mut row = ui::row().gap(Gap::Sm);
+    let mut row = ui::row().gap(Gap::Sm).wrap(true);
     for (caps, what) in keys {
         row = row
             .child(ui::kbd(caps.iter().copied()))
@@ -812,6 +1466,6 @@ fn trim<T>(rows: &mut Vec<T>, cursor: usize) -> usize {
 fn page() -> usize {
     terminal_size::terminal_size()
         .map_or(24, |(_, terminal_size::Height(height))| usize::from(height))
-        .saturating_sub(4)
+        .saturating_sub(6)
         .max(4)
 }

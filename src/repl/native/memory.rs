@@ -16,14 +16,14 @@ use crate::types::VirtAddr;
 /// Spans built a run at a time: adjacent text in one style is one span, so
 /// a uniform row is a single span however many items it holds.
 #[derive(Default)]
-struct Runs {
+pub struct Runs {
     spans: Vec<Span>,
     text: String,
     style: &'static str,
 }
 
 impl Runs {
-    fn push(&mut self, style: &'static str, text: fmt::Arguments<'_>) {
+    pub fn push(&mut self, style: &'static str, text: fmt::Arguments<'_>) {
         if style != self.style && !self.text.is_empty() {
             self.flush();
         }
@@ -36,8 +36,16 @@ impl Runs {
             .push(span(std::mem::take(&mut self.text), self.style));
     }
 
+    /// A span of its own, such as one carrying a second style token.
+    pub fn push_span(&mut self, span: Span) {
+        if !self.text.is_empty() {
+            self.flush();
+        }
+        self.spans.push(span);
+    }
+
     /// The spans, without the separator the last item ends in.
-    fn finish(mut self) -> Vec<Span> {
+    pub fn finish(mut self) -> Vec<Span> {
         let end = self.text.trim_end().len();
         self.text.truncate(end);
         if !self.text.is_empty() {
