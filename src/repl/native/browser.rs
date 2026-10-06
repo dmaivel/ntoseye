@@ -21,8 +21,10 @@ use crate::memory::read_page_chunks;
 use crate::output;
 use crate::repl::{MyCompleter, ReplState, TargetLoan};
 use crate::triage_report::time::filetime_to_iso;
-use crate::types::VirtAddr;
-use crate::unwind::{format_symbol, resolve_thread_trace_context, try_format_symbol};
+use crate::types::{CodeMachine, VirtAddr};
+use crate::unwind::{
+    format_symbol, function_range, resolve_thread_trace_context, try_format_symbol,
+};
 
 /// What the browser shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +80,9 @@ const MEMORY_LIMIT: u64 = 6144;
 /// The widest byte column: eight bytes.
 const HEX_WIDTH: usize = 8 * 3 - 1;
 const POINTER: u64 = 8;
+/// The farthest from its function's or symbol's start a breakpoint's
+/// address is decoded to confirm an instruction starts there.
+const MAX_BOUNDARY_SCAN: u64 = 1 << 20;
 /// How far a find looks at a time; `n` goes on from where it stopped.
 const FIND_RANGE: usize = 1 << 20;
 /// How many characters the inspector's strings show.
@@ -672,7 +677,13 @@ impl<'s, 'a> Browser<'s, 'a> {
         let line = match self.pane {
             Pane::Code => match list.iter().find(|breakpoint| breakpoint.address.0 == here) {
                 Some(breakpoint) => format!("bc {}", breakpoint.id),
-                None => format!("bp {here:#x}"),
+                None => {
+                    if let Err(why) = self.instruction_start(here) {
+                        self.note = Some(why);
+                        return;
+                    }
+                    format!("bp {here:#x}")
+                }
             },
             Pane::Memory => {
                 let watching = list.iter().find(|breakpoint| {
@@ -713,6 +724,53 @@ impl<'s, 'a> Browser<'s, 'a> {
             popup: None,
         });
         self.focus_field = true;
+    }
+
+    /// Confirm an instruction starts at `ip` before a breakpoint goes
+    /// there: one planted inside an instruction corrupts it, and the listing
+    /// can be decoded from inside one (a go-to into its middle, or a
+    /// backward decode that guessed wrong). Decoding forward from the start
+    /// of the code around `ip`, its function's unwind entry or else its
+    /// symbol, must land on `ip`; `Err` says why it does not or cannot.
+    fn instruction_start(&self, ip: u64) -> Result<(), String> {
+        let session = &*self.state.ctx;
+        let target = &session.target;
+        let machine = target.code_machine(VirtAddr(ip));
+        if machine == CodeMachine::Arm64 {
+            return if ip.is_multiple_of(4) {
+                Ok(())
+            } else {
+                Err(format!("no breakpoint: {ip:#x} is not 4-byte aligned"))
+            };
+        }
+        let dtb = target.current_dtb();
+        let trace = resolve_thread_trace_context(target, dtb);
+        let start = function_range(target, &trace, ip)
+            .map(|(start, _)| start)
+            .or_else(|| {
+                let (_, _, offset) = target
+                    .symbols
+                    .find_closest_symbol_for_address(dtb, VirtAddr(ip))?;
+                Some(ip - u64::from(offset))
+            })
+            .filter(|start| ip - start <= MAX_BOUNDARY_SCAN)
+            .ok_or_else(|| {
+                format!(
+                    "no breakpoint: nothing near {ip:#x} says where instructions start \
+                     (bp at the prompt sets one anyway)"
+                )
+            })?;
+        let mut bytes = vec![0u8; (ip - start) as usize + machine.max_instruction_bytes()];
+        let read = session.read_masked_partial(VirtAddr(start), &mut bytes);
+        bytes.truncate(read);
+        let rows = decode_code(&bytes, start, None, machine, |_| String::new());
+        if rows.iter().any(|row| row.ip == ip) {
+            Ok(())
+        } else {
+            Err(format!(
+                "no breakpoint: {ip:#x} is inside an instruction (decoding from {start:#x})"
+            ))
+        }
     }
 
     /// The completions for `draft` as an expression, the way `?` completes
