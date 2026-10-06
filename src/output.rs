@@ -17,7 +17,10 @@ use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
-use std::sync::{LazyLock, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex, OnceLock};
+
+use indicatif::{ProgressBar, WeakProgressBar};
 
 thread_local! {
     /// The active captures, innermost last.
@@ -42,7 +45,42 @@ static NO_COLOR: LazyLock<bool> =
 static STDOUT_STYLED: LazyLock<bool> = LazyLock::new(|| !*NO_COLOR && io::stdout().is_terminal());
 static STDERR_STYLED: LazyLock<bool> = LazyLock::new(|| !*NO_COLOR && io::stderr().is_terminal());
 
+/// How the REPL draws a long task's progress itself (Tern's native bar),
+/// given a handle on the bar to poll and its label.
+pub type ProgressHook = fn(WeakProgressBar, &'static str);
+
+static PROGRESS_HOOK: OnceLock<ProgressHook> = OnceLock::new();
+
+/// Draw [`progress_bar`]s with `hook` from now on.
+pub fn set_progress_hook(hook: ProgressHook) {
+    let _ = PROGRESS_HOOK.set(hook);
+}
+
+static PRINTED: AtomicU64 = AtomicU64::new(0);
+
+/// How many times text has been written to the terminal: equal readings
+/// mean nothing was printed in between.
+pub fn printed() -> u64 {
+    PRINTED.load(Ordering::Relaxed)
+}
+
+/// A bar of `len` steps for work the user waits on: drawn by the REPL's
+/// terminal when it can, else by indicatif on stderr. A host capturing the
+/// output gets indicatif's.
+pub fn progress_bar(len: u64, label: &'static str) -> ProgressBar {
+    match PROGRESS_HOOK.get() {
+        Some(hook) if !capturing() => {
+            let bar = ProgressBar::hidden();
+            bar.set_length(len);
+            hook(bar.downgrade(), label);
+            bar
+        }
+        _ => ProgressBar::new(len),
+    }
+}
+
 fn print_stdout(args: fmt::Arguments<'_>) {
+    PRINTED.fetch_add(1, Ordering::Relaxed);
     // A failed write is dropped, not a panic like `print!`'s: a terminal
     // that went away must not stop the teardown that releases the guest.
     let mut stdout = io::stdout();
@@ -54,6 +92,7 @@ fn print_stdout(args: fmt::Arguments<'_>) {
 }
 
 fn print_stderr(args: fmt::Arguments<'_>) {
+    PRINTED.fetch_add(1, Ordering::Relaxed);
     let mut stderr = io::stderr();
     if *STDERR_STYLED {
         let _ = stderr.write_fmt(args);

@@ -6,6 +6,8 @@ use crate::backend::MemoryOps;
 use crate::error::Error;
 use crate::gdb::RegisterMap;
 use crate::gdb::registers::repeats_another_register;
+#[cfg(feature = "cli")]
+use crate::repl::native;
 use crate::session::Session;
 use crate::symbols::{LocalSourceState, SourceLocation};
 use crate::target::Target;
@@ -20,8 +22,12 @@ pub fn print_section(title: &str) {
     outln!("\n{}", ui::label(title));
 }
 
-/// Begin a stop block: a blank line.
+/// Begin a stop block: a blank line. A native stop card brings its own
+/// spacing.
 pub fn print_stop_separator() {
+    #[cfg(feature = "cli")]
+    native::omit(|| outln!());
+    #[cfg(not(feature = "cli"))]
     outln!();
 }
 

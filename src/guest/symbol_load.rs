@@ -8,6 +8,7 @@ use super::{
 };
 use crate::{
     error::Result,
+    output,
     phys::PhysMem,
     symbols::{
         DownloadJob, ModuleSymbolDiscovery, ModuleSymbolLoad, ModuleSymbolSource,
@@ -603,7 +604,7 @@ impl Guest {
             let pb = if quiet {
                 ProgressBar::hidden()
             } else {
-                ProgressBar::new(ready.len() as u64)
+                output::progress_bar(ready.len() as u64, "indexing symbols")
             };
             pb.set_style(
                 ProgressStyle::with_template("Indexing [{bar:40}] {pos}/{len}")

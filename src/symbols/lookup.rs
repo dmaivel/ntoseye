@@ -8,10 +8,10 @@ use super::{
 };
 use crate::{
     error::{Error, Result},
+    output,
     types::{Dtb, VirtAddr},
 };
 use dashmap::DashMap;
-use indicatif::ProgressBar;
 use pdb2::FallibleIterator;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use rayon::slice::ParallelSliceMut;
@@ -65,7 +65,7 @@ impl SymbolStore {
             .filter(|module| dtb.is_none_or(|filter_dtb| self.module_in_scope(module, filter_dtb)))
             .map(|module| (module.guid, module.short_name.clone()))
             .collect();
-        let progress = ProgressBar::new((modules.len() + 1) as u64);
+        let progress = output::progress_bar((modules.len() + 1) as u64, message);
         progress.set_style(task_progress_style());
         progress.set_message(message);
 

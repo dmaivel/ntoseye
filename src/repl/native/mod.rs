@@ -30,10 +30,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use indicatif::WeakProgressBar;
 use tern_sdk::reconcile::Doc;
-use tern_sdk::ui::{self, Gap, Span, SpinnerStyle, TextNode, Wrap};
+use tern_sdk::ui::{self, Basis, Bound, Extent, Gap, Row, Span, SpinnerStyle, TextNode, Wrap};
 use tern_sdk::wire::{self, Close, Encoder, Frame, Message, Open, Sheet};
-use tern_sdk::{Capabilities, Mode, Options, Session, View};
+use tern_sdk::{Capabilities, Mode, Node, Options, Session, View};
 
 use crate::diagnostics;
 use crate::output;
@@ -42,9 +43,6 @@ use crate::output;
 /// surfaces.
 static CAPABILITIES: OnceLock<Capabilities> = OnceLock::new();
 static NEXT_SURFACE: AtomicU64 = AtomicU64::new(1);
-/// The surface showing that the target runs, left open so Tern animates it
-/// while ntoseye waits for a stop.
-static RUNNING: Mutex<Option<Running>> = Mutex::new(None);
 
 /// The surfaces' role: `data-surface` for the stylesheet's selectors.
 const ROLE: &str = "ntoseye";
@@ -72,6 +70,7 @@ pub fn detect() {
     }
     if capabilities.has_feature(wire::feature::FLOW) {
         let _ = CAPABILITIES.set(capabilities);
+        output::set_progress_hook(follow_task);
     } else {
         // An update replaces Tern's binary while its session daemon keeps
         // running the old one, which may predate flow surfaces: without
@@ -97,20 +96,54 @@ pub fn render(view: impl FnOnce() -> View, text: impl FnOnce()) {
     let Some(capabilities) = drawing() else {
         return text();
     };
-    let surface = Surface::new(capabilities);
-    let bytes = match Doc::from_view(view()).and_then(|doc| surface.closed(&doc)) {
+    let bytes = Doc::from_view(view()).and_then(|doc| {
+        let mut live = live();
+        live.task = None;
+        // A result that didn't take the run leaves it in the scrollback.
+        if let Some(started) = live.started.take() {
+            live.end_with(View::new().main([ran_row(started.elapsed())]));
+        }
+        // The live surface becomes the result, so nothing is left where it
+        // was: unless text was printed since it opened, which would then
+        // show below the result.
+        match live.shown.take() {
+            Some(shown) if shown.printed == output::printed() => {
+                let mut bytes = shown.surface.next(shown.sequence + 1, &shown.doc, &doc)?;
+                bytes.extend(shown.surface.close(true)?);
+                Ok(bytes)
+            }
+            shown => {
+                if let Some(shown) = shown {
+                    write(&shown.surface.close(false)?);
+                }
+                Surface::new(capabilities).closed(&doc)
+            }
+        }
+    });
+    let bytes = match bytes {
         Ok(bytes) => bytes,
         Err(error) => {
             diagnostics::print_warning(format!("Tern view failed ({error}); showing text"));
             return text();
         }
     };
-    finish_running();
     if output::transcript_open() {
         // Run into a capture only to log: the capture swallows the text.
         let _ = output::capture_output(text);
     }
     write(&bytes);
+}
+
+/// Text only the text renderer shows, such as the blank line that sets a
+/// stop apart from the output above it: a native view brings its own
+/// spacing. A `.logopen` transcript still records it.
+pub fn omit(text: impl FnOnce()) {
+    if drawing().is_none() {
+        return text();
+    }
+    if output::transcript_open() {
+        let _ = output::capture_output(text);
+    }
 }
 
 /// Show that the target runs until the next result: a spinner and a timer
@@ -119,68 +152,223 @@ pub fn running(text: impl FnOnce()) {
     let Some(capabilities) = drawing() else {
         return text();
     };
-    finish_running();
-    let surface = Surface::new(capabilities);
-    let Ok(doc) = Doc::from_view(running_view(None)) else {
+    let mut live = live();
+    live.started = Some(Instant::now());
+    if live.show(capabilities).is_err() {
+        live.started = None;
         return text();
-    };
-    let Ok(bytes) = surface.open(&doc) else {
-        return text();
-    };
+    }
     if output::transcript_open() {
         let _ = output::capture_output(text);
     }
-    write(&bytes);
-    *RUNNING
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Running {
-        surface,
-        doc,
-        started: Instant::now(),
+}
+
+/// End the live surface: the running indicator stops at how long the target
+/// ran and stays in the scrollback, and a task's progress bar goes.
+pub fn finish_running() {
+    let mut live = live();
+    live.task = None;
+    let Some(started) = live.started.take() else {
+        live.end();
+        return;
+    };
+    let ran = View::new().main([ran_row(started.elapsed())]);
+    live.end_with(ran);
+}
+
+/// How long the target ran, for a view that shows the run itself, such as
+/// the stop card; the running indicator then turns into that view. `None`
+/// when the target wasn't running.
+pub fn take_run() -> Option<Duration> {
+    live().started.take().map(|started| started.elapsed())
+}
+
+/// `ran 1.4s`: a run's frozen timer.
+pub fn ran_row(ran: Duration) -> Row<()> {
+    ui::row()
+        .gap(Gap::Sm)
+        .child(ui::text([span("ran", MUTED)]))
+        .child(ui::elapsed().stopped(u64::try_from(ran.as_millis()).unwrap_or(u64::MAX)))
+}
+
+/// Follow a long task's progress bar in the live surface, polling it until
+/// it finishes or is dropped. The REPL's [`output::progress_bar`] hook.
+fn follow_task(bar: WeakProgressBar, label: &'static str) {
+    let generation = {
+        let mut live = live();
+        live.generation += 1;
+        live.task = Some(Task {
+            bar,
+            label,
+            generation: live.generation,
+        });
+        live.generation
+    };
+    std::thread::spawn(move || {
+        loop {
+            // A first tick before drawing, so a quick task never flashes.
+            std::thread::sleep(TASK_TICK);
+            let Some(capabilities) = CAPABILITIES.get() else {
+                return;
+            };
+            let mut live = live();
+            let done = match &live.task {
+                Some(task) if task.generation == generation => {
+                    task.bar.upgrade().is_none_or(|bar| bar.is_finished())
+                }
+                // Replaced by a newer task, or ended by a result.
+                _ => return,
+            };
+            if done {
+                live.task = None;
+            }
+            let _ = live.show(capabilities);
+            if done {
+                return;
+            }
+        }
     });
 }
 
-/// Stop the running indicator at how long the target ran, and leave it in
-/// the scrollback. Nothing when none is shown.
-pub fn finish_running() {
-    let running = RUNNING
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take();
-    let Some(running) = running else {
-        return;
-    };
-    let ran = running.started.elapsed();
-    if let Ok(bytes) = Doc::from_view(running_view(Some(ran)))
-        .and_then(|done| running.surface.update(&running.doc, &done))
-    {
+/// How often a task's bar is redrawn.
+const TASK_TICK: Duration = Duration::from_millis(100);
+
+/// The one surface left open while ntoseye works: Tern keeps a single live
+/// flow surface per screen, so the running indicator and a task's progress
+/// share it, and anything drawn after ends it first.
+struct Live {
+    shown: Option<Shown>,
+    /// When the target was resumed, while it runs.
+    started: Option<Instant>,
+    task: Option<Task>,
+    /// Numbers the tasks, so a task's poller knows when it was replaced.
+    generation: u64,
+}
+
+/// The open surface, the document it shows and its last frame's number.
+struct Shown {
+    surface: Surface,
+    doc: Doc,
+    sequence: u64,
+    /// [`output::printed`] when it opened.
+    printed: u64,
+}
+
+struct Task {
+    bar: WeakProgressBar,
+    label: &'static str,
+    generation: u64,
+}
+
+static LIVE: Mutex<Live> = Mutex::new(Live {
+    shown: None,
+    started: None,
+    task: None,
+    generation: 0,
+});
+
+fn live() -> std::sync::MutexGuard<'static, Live> {
+    LIVE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+impl Live {
+    /// The running indicator and the task's bar, or nothing to show.
+    fn view(&self) -> Option<View> {
+        let mut rows: Vec<Node> = Vec::new();
+        if self.started.is_some() {
+            rows.push(
+                ui::row()
+                    .gap(Gap::Sm)
+                    .child(
+                        ui::spinner()
+                            .style(SpinnerStyle::Orbit)
+                            .label([span("running", MUTED)]),
+                    )
+                    .child(ui::elapsed())
+                    .child(ui::text([span("Ctrl+C to pause", DIM)]))
+                    .into(),
+            );
+        }
+        if let Some(task) = &self.task
+            && let Some(bar) = task.bar.upgrade()
+        {
+            rows.push(task_row(task.label, bar.position(), bar.length()).into());
+        }
+        (!rows.is_empty())
+            .then(|| View::new().main([ui::col().role("ntoseye.live").children(rows)]))
+    }
+
+    /// Bring the surface up to date: open it, send the difference, or close
+    /// it when there is nothing left to show.
+    fn show(&mut self, capabilities: &Capabilities) -> Result<(), tern_sdk::Error> {
+        let Some(view) = self.view() else {
+            self.end();
+            return Ok(());
+        };
+        let doc = Doc::from_view(view)?;
+        match &mut self.shown {
+            Some(shown) => {
+                if shown.doc != doc {
+                    shown.sequence += 1;
+                    write(&shown.surface.next(shown.sequence, &shown.doc, &doc)?);
+                    shown.doc = doc;
+                }
+            }
+            None => {
+                let surface = Surface::new(capabilities);
+                write(&surface.open(&doc)?);
+                self.shown = Some(Shown {
+                    surface,
+                    doc,
+                    sequence: 1,
+                    printed: output::printed(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove the surface from the pane.
+    fn end(&mut self) {
+        if let Some(shown) = self.shown.take()
+            && let Ok(bytes) = shown.surface.close(false)
+        {
+            write(&bytes);
+        }
+    }
+
+    /// Leave `last` in the scrollback in place of the surface.
+    fn end_with(&mut self, last: View) {
+        let Some(shown) = self.shown.take() else {
+            return;
+        };
+        let Ok(doc) = Doc::from_view(last) else {
+            return;
+        };
+        let mut bytes = shown
+            .surface
+            .next(shown.sequence + 1, &shown.doc, &doc)
+            .unwrap_or_default();
+        bytes.extend(shown.surface.close(true).unwrap_or_default());
         write(&bytes);
     }
 }
 
-/// The indicator while the target runs, or, given how long it ran, after.
-fn running_view(ran: Option<Duration>) -> View {
-    let mut row = ui::row().gap(Gap::Sm).role("ntoseye.running");
-    row = match ran {
-        None => row
+/// `indexing symbols ━━━━━━──── 2/4`, or a spinner while the length is
+/// unknown.
+fn task_row(label: &str, position: u64, length: Option<u64>) -> Row<()> {
+    let row = ui::row().gap(Gap::Sm).child(ui::text([span(label, MUTED)]));
+    match length.filter(|&length| length > 0) {
+        Some(length) => row
             .child(
-                ui::spinner()
-                    .style(SpinnerStyle::Orbit)
-                    .label([span("running", MUTED)]),
+                ui::progress()
+                    .value(position.min(length) as f64 / length as f64)
+                    .basis(Basis::Content)
+                    .min(Bound::w(Extent::Ch(24.0))),
             )
-            .child(ui::elapsed())
-            .child(ui::text([span("Ctrl+C to pause", DIM)])),
-        Some(ran) => row
-            .child(ui::text([span("ran", MUTED)]))
-            .child(ui::elapsed().stopped(u64::try_from(ran.as_millis()).unwrap_or(u64::MAX))),
-    };
-    View::new().main([row])
-}
-
-struct Running {
-    surface: Surface,
-    doc: Doc,
-    started: Instant,
+            .child(ui::text([span(format!("{position}/{length}"), NUMBER)])),
+        None => row.child(ui::spinner().style(SpinnerStyle::Orbit)),
+    }
 }
 
 /// The capabilities, when this output reaches a Tern pane.
@@ -219,7 +407,7 @@ impl Surface {
     /// Open it with `doc` and close it at once, kept as output.
     fn closed(&self, doc: &Doc) -> Result<Vec<u8>, tern_sdk::Error> {
         let mut bytes = self.open(doc)?;
-        bytes.extend(self.close()?);
+        bytes.extend(self.close(true)?);
         Ok(bytes)
     }
 
@@ -244,12 +432,9 @@ impl Surface {
         Ok(bytes)
     }
 
-    /// The second frame, turning `from` into `to`, and the close.
-    fn update(&self, from: &Doc, to: &Doc) -> Result<Vec<u8>, tern_sdk::Error> {
-        let mut encoder = Encoder::new(self.limit);
-        let mut bytes = self.frame(&mut encoder, 2, from, to)?;
-        bytes.extend(self.close()?);
-        Ok(bytes)
+    /// Frame `sequence`, turning `from` into `to`.
+    fn next(&self, sequence: u64, from: &Doc, to: &Doc) -> Result<Vec<u8>, tern_sdk::Error> {
+        self.frame(&mut Encoder::new(self.limit), sequence, from, to)
     }
 
     fn frame(
@@ -266,10 +451,11 @@ impl Surface {
         }))
     }
 
-    fn close(&self) -> Result<Vec<u8>, tern_sdk::Error> {
+    /// Close it: kept in the scrollback as output, or removed.
+    fn close(&self, keep: bool) -> Result<Vec<u8>, tern_sdk::Error> {
         Encoder::new(self.limit).encode(&Message::Close(Close {
             id: self.id.clone(),
-            keep: true,
+            keep,
         }))
     }
 }

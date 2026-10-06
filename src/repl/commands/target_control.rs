@@ -3,8 +3,9 @@ use crate::diagnostics::print_warning;
 use crate::dump_writer::{collect_dump_metadata, write_kernel_dump};
 use crate::error::{Error, Result};
 use crate::kd::{KdFileMapping, kd_files, load_map_file};
+use crate::output;
 use crate::repl::*;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::ProgressStyle;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -241,7 +242,7 @@ impl ReplState<'_> {
             }
         };
         let memory = &*self.ctx.target.phys;
-        let progress = ProgressBar::new(total_pages);
+        let progress = output::progress_bar(total_pages, "writing dump");
         progress.set_style(
             ProgressStyle::with_template("Writing dump [{bar:40}] {pos}/{len}")?
                 .progress_chars("#-"),

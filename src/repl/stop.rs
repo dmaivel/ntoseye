@@ -387,14 +387,34 @@ struct StopContext {
     thread: String,
     context: String,
     symbol: String,
-    /// Styled lines under the banner, the cause first.
-    children: Vec<String>,
+    /// Why it stopped, styled.
+    cause: Option<String>,
+    /// Where a bugcheck stop parked, when its banner names the fault site.
+    stopped_at: Option<String>,
+    windows_thread: Option<ThreadInfo>,
+    /// The hypervisor's saved state and notes, styled.
+    notes: Vec<String>,
+    /// The stop card names a bugcheck in its chip.
+    #[cfg(feature = "cli")]
+    bugcheck: bool,
     regs: Vec<u8>,
     /// The saved VTL0 registers a hypervisor stop inspects instead of the
     /// vCPU's.
     saved: Option<HashMap<String, u64>>,
     trace: ThreadTraceContext,
     rip: u64,
+}
+
+impl StopContext {
+    /// The lines under the banner, as the text renderer lists them.
+    fn children(&self) -> Vec<String> {
+        let mut children = Vec::new();
+        children.extend(self.cause.clone());
+        children.extend(self.stopped_at.clone());
+        children.extend(self.windows_thread.as_ref().map(format_windows_thread));
+        children.extend(self.notes.iter().cloned());
+        children
+    }
 }
 
 fn print_stop_text(session: &Session, stop: &StopContext) {
@@ -408,7 +428,7 @@ fn print_stop_text(session: &Session, stop: &StopContext) {
             ui::symbol(&stop.symbol)
         ))
     );
-    print_event_children(" ", &stop.children);
+    print_event_children(" ", &stop.children());
     if let Some(saved) = &stop.saved {
         print_saved_vtl0_context(session, saved);
         outln!();
@@ -429,19 +449,23 @@ fn print_stop_text(session: &Session, stop: &StopContext) {
 
 #[cfg(feature = "cli")]
 fn stop_view(session: &Session, stop: &StopContext, tone: tern_sdk::ui::Tone) -> tern_sdk::View {
+    let ran = native::take_run();
+    let lines: Vec<String> = stop.stopped_at.iter().chain(&stop.notes).cloned().collect();
     let (registers, rows, current, stack) = match &stop.saved {
         Some(saved) => {
             let (trace, rip, stack) = saved_vtl0_code(session, saved);
             let grid = native::styled(|| print_sparse_registers(saved, None, 0));
             (
-                ("registers (saved VTL0)", grid),
+                ("registers (saved VTL0)", native::block(&grid).into()),
                 disasm_context_rows(session, &trace, rip),
                 rip,
                 stack,
             )
         }
         None => {
-            let grid = native::styled(|| print_registers(&session.register_map, &stop.regs, false));
+            let grid = native::frames::register_grid(&|name: &str| {
+                session.register_map.read_u64(name, &stop.regs).ok()
+            });
             let stack = thread_stacktrace(
                 &session.target,
                 &session.register_map,
@@ -449,7 +473,7 @@ fn stop_view(session: &Session, stop: &StopContext, tone: tern_sdk::ui::Tone) ->
                 BREAK_STACKTRACE_PROBE_LIMIT,
             );
             (
-                ("registers", grid),
+                ("registers", grid.into()),
                 disasm_context_rows(session, &stop.trace, stop.rip),
                 stop.rip,
                 stack,
@@ -461,12 +485,16 @@ fn stop_view(session: &Session, stop: &StopContext, tone: tern_sdk::ui::Tone) ->
         context: &stop.context,
         symbol: &stop.symbol,
         tone,
-        details: &stop.children,
+        cause: stop.cause.as_deref(),
+        bugcheck: stop.bugcheck,
+        windows_thread: stop.windows_thread.as_ref(),
+        lines: &lines,
         registers,
         code: rows.as_deref().map_err(|note| note.trim().to_owned()),
         current,
         stack: &stack,
         stack_limit: BREAK_STACKTRACE_DISPLAY_LIMIT,
+        ran,
     })
 }
 
@@ -524,23 +552,15 @@ pub fn print_break_context_at(
         trace.description == HYPERVISOR_CONTEXT,
     );
 
-    let mut children: Vec<String> = Vec::new();
-    if let Some(cause) = cause {
-        children.push(cause);
-    }
     // Bugcheck stops park at the break inside KeBugCheck, not at the fault
     // site the banner names.
-    if display_rip.is_some_and(|display_rip| display_rip != rip) {
-        let stop_symbol = format_symbol(debugger, &trace, rip);
-        children.push(format!(
-            "{} {}",
-            ui::muted("stopped at"),
-            ui::symbol(&stop_symbol)
-        ));
-    }
-    if let Some(thread) = windows_thread {
-        children.push(format_windows_thread(&thread));
-    }
+    let stopped_at = display_rip
+        .is_some_and(|display_rip| display_rip != rip)
+        .then(|| {
+            let stop_symbol = format_symbol(debugger, &trace, rip);
+            format!("{} {}", ui::muted("stopped at"), ui::symbol(&stop_symbol))
+        });
+    let mut children: Vec<String> = Vec::new();
     // At a stop in the Windows hypervisor NT is what is inspected: where it
     // left off becomes the context, `.cxr` returns to the hypervisor's.
     let saved_context = debugger.select_saved_vtl0(&thread_id);
@@ -612,7 +632,12 @@ pub fn print_break_context_at(
         thread: thread_id,
         context,
         symbol,
-        children,
+        cause,
+        stopped_at,
+        windows_thread,
+        notes: children,
+        #[cfg(feature = "cli")]
+        bugcheck: display_rip.is_some(),
         regs,
         saved,
         trace,

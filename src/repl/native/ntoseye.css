@@ -10,6 +10,9 @@
 }
 
 /* The instruction a thread stands on. */
+[data-role='ntoseye.disasm'] > .sf {
+	padding-left: 6px;
+}
 [data-role='ntoseye.disasm'] > [data-mark='pick'] {
 	background: rgb(from var(--accent) r g b / 14%);
 	box-shadow: inset 2px 0 0 var(--accent);

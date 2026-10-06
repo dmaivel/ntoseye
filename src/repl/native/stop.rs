@@ -1,13 +1,16 @@
-//! A stop as one card: where it stopped in the head, why under it, then the
-//! registers (folded), the code at the stop and the stack. The ring's tone
-//! says what kind of stop it is at a glance.
+//! A stop as one card. The head says where it stopped, a chip in the
+//! card's tone why, and how long the target ran; under it the thread, then
+//! the registers (folded), the source or code at the stop and the stack.
 
-use tern_sdk::View;
-use tern_sdk::ui::{self, Tone, Wrap};
+use std::time::Duration;
 
-use super::{MUTED, STRONG, block, code, source, span, spans, stack, symbol};
+use tern_sdk::ui::{self, Align, Gap, KvLayout, Span, Tone, Wrap};
+use tern_sdk::{Node, View};
+
+use super::{MUTED, STRONG, addr, code, ran_row, source, span, spans, stack, symbol};
 use crate::disasm::DisasmRow;
 use crate::repl::StackColumns;
+use crate::target::{ThreadInfo, kthread_state_name};
 use crate::unwind::StackTrace;
 
 /// What a stop shows, as the text renderer gathers it.
@@ -17,30 +20,64 @@ pub struct Stop<'a> {
     /// The process context, `dwm.exe (3832)`, or `hypervisor`.
     pub context: &'a str,
     pub symbol: &'a str,
-    /// The ring: what kind of stop this is.
+    /// The ring and the chip: what kind of stop this is.
     pub tone: Tone,
-    /// Styled lines under the head: the cause first, then the thread and
-    /// notes.
-    pub details: &'a [String],
-    /// The section's title and the styled register grid.
-    pub registers: (&'a str, String),
+    /// Why it stopped, styled: `breakpoint #3`, `exception 0x80000003 at
+    /// …`. A bugcheck has none.
+    pub cause: Option<&'a str>,
+    pub bugcheck: bool,
+    /// The Windows thread the stop is on.
+    pub windows_thread: Option<&'a ThreadInfo>,
+    /// Further styled lines: where a bugcheck stopped, the hypervisor's
+    /// saved state.
+    pub lines: &'a [String],
+    /// The section's title and its registers.
+    pub registers: (&'a str, Node),
     /// The code at `current`, or why it can't be shown.
     pub code: Result<&'a [DisasmRow], String>,
     pub current: u64,
     pub stack: &'a StackTrace,
     pub stack_limit: usize,
+    /// How long the target ran to reach the stop.
+    pub ran: Option<Duration>,
 }
 
 pub fn stop_card(stop: Stop<'_>) -> View {
-    let mut head = vec![
+    let mut place = vec![
         span(stop.thread, "info"),
         span(format!(" {} ", stop.context), STRONG),
         span("at ", MUTED),
     ];
-    head.extend(symbol(stop.symbol));
+    place.extend(symbol(stop.symbol));
 
-    let mut card = ui::card().head(head).tone(stop.tone).role("ntoseye.stop");
-    for line in stop.details {
+    let cause = stop.cause.map(spans).unwrap_or_default();
+    let (chip, rest) = chip(&cause, stop.bugcheck);
+    let mut head = ui::row()
+        .key("head")
+        .gap(Gap::Sm)
+        .align(Align::Center)
+        .child(ui::text(place).wrap(Wrap::None).grow(1.0));
+    if let Some(chip) = chip {
+        head = head.child(ui::badge(chip).tone(stop.tone.clone()));
+    }
+    if let Some(ran) = stop.ran {
+        head = head.child(ran_row(ran));
+    }
+
+    // The card's own key names its head child: `main.stop.head`.
+    let mut card = ui::card()
+        .key("stop")
+        .head("main.stop.head")
+        .tone(stop.tone)
+        .role("ntoseye.stop")
+        .child(head);
+    if !rest.is_empty() {
+        card = card.child(ui::text(rest).wrap(Wrap::Word));
+    }
+    if let Some(thread) = stop.windows_thread {
+        card = card.child(thread_line(thread));
+    }
+    for line in stop.lines {
         card = card.child(ui::text(spans(line)).wrap(Wrap::Word));
     }
     let (title, registers) = stop.registers;
@@ -49,9 +86,9 @@ pub fn stop_card(stop: Stop<'_>) -> View {
             .head(title)
             .collapsible(true)
             .collapsed(true)
-            .child(block(&registers)),
+            .child(registers),
     );
-    let listing: tern_sdk::Node = match stop.code {
+    let listing: Node = match stop.code {
         Ok(rows) => code::listing(rows, Some(stop.current)).into(),
         Err(note) => ui::text([span(note, MUTED)]).into(),
     };
@@ -88,6 +125,68 @@ pub fn stop_card(stop: Stop<'_>) -> View {
     View::new().main([card])
 }
 
+/// `thread dwm.exe · state Running · ethread … · pid 3832 · tid 3956`.
+fn thread_line(thread: &ThreadInfo) -> ui::Kv<()> {
+    let mut line = ui::kv().layout(KvLayout::Inline).item(
+        "thread",
+        span(thread.process_name.as_deref().unwrap_or("unknown"), STRONG),
+    );
+    if let Some(state) = thread.state {
+        line = line.item("state", kthread_state_name(state));
+    }
+    line = line.item("ethread", addr(thread.ethread.0));
+    if let Some(pid) = thread.pid {
+        line = line.item("pid", pid.to_string());
+    }
+    if let Some(tid) = thread.tid {
+        line = line.item("tid", tid.to_string());
+    }
+    line
+}
+
+/// The chip for a stop's cause, and what the cause says beyond it:
+/// `breakpoint #3` alone, `hardware breakpoint #0` then `e1 nt!NtClose`,
+/// `exception 0x80000003` then `at fffff…`, `module load` then the module.
+fn chip(cause: &[Span], bugcheck: bool) -> (Option<String>, Vec<Span>) {
+    if cause.is_empty() {
+        return (bugcheck.then(|| "bugcheck".to_owned()), Vec::new());
+    }
+    let plain: String = cause.iter().map(|span| span.t.as_str()).collect();
+    let words: Vec<&str> = plain.split_whitespace().collect();
+    let taken = match words.as_slice() {
+        ["exception", _, ..] | ["module", "load" | "unload", ..] => 2,
+        _ => match words.iter().position(|word| word.starts_with('#')) {
+            Some(id) => id + 1,
+            None => 1,
+        },
+    };
+    let chip = words[..taken.min(words.len())].join(" ");
+    // Drop the chip's words from the styled cause, keeping the rest's style.
+    let mut skip = plain
+        .split_whitespace()
+        .take(taken)
+        .map(|word| plain.find(word).map_or(0, |at| at + word.len()))
+        .max()
+        .unwrap_or(0);
+    let mut rest = Vec::new();
+    for span in cause {
+        let text = &span.t;
+        if skip >= text.len() {
+            skip -= text.len();
+            continue;
+        }
+        let mut kept = span.clone();
+        kept.t = text[skip..].to_owned();
+        skip = 0;
+        rest.push(kept);
+    }
+    if let Some(first) = rest.first_mut() {
+        first.t = first.t.trim_start().to_owned();
+    }
+    rest.retain(|span| !span.t.is_empty());
+    (Some(chip), rest)
+}
+
 /// The ring for a stop: an error for a bugcheck, a warning for an
 /// exception, the accent for a breakpoint or watchpoint, info for a module
 /// event and the hypervisor, neutral for a step or a break-in.
@@ -107,5 +206,39 @@ pub fn tone(cause: Option<&str>, bugcheck: bool, hypervisor: bool) -> Tone {
         Some(_) => Tone::Accent,
         None if hypervisor => Tone::Pending,
         None => Tone::Neutral,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plain(spans: &[Span]) -> String {
+        spans.iter().map(|span| span.t.as_str()).collect()
+    }
+
+    #[test]
+    fn the_chip_takes_the_kind_and_the_rest_keeps_the_detail() {
+        let cases = [
+            ("breakpoint #3", "breakpoint #3", ""),
+            (
+                "hardware breakpoint #0 e1  nt!NtClose",
+                "hardware breakpoint #0",
+                "e1  nt!NtClose",
+            ),
+            (
+                "exception 0x80000003 at fffff804a115dfb0",
+                "exception 0x80000003",
+                "at fffff804a115dfb0",
+            ),
+            ("module load foo.sys", "module load", "foo.sys"),
+        ];
+        for (cause, want_chip, want_rest) in cases {
+            let (chip, rest) = chip(&spans(cause), false);
+            assert_eq!(chip.as_deref(), Some(want_chip), "{cause}");
+            assert_eq!(plain(&rest), want_rest, "{cause}");
+        }
+        assert_eq!(chip(&[], true).0.as_deref(), Some("bugcheck"));
+        assert_eq!(chip(&[], false).0, None);
     }
 }

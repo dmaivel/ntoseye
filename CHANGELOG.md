@@ -17,7 +17,7 @@ Keeping this file:
 
 ### Added
 
-- In Tern, Stencil's terminal, the REPL draws its results natively: a stop is a card with the registers folded, the code at the stop and the stack, and a bugcheck and `!analyze` are red cards; `k`, `lm`, `!process`, `ps`, `bl`, `~`, `!pte`, `vars` and the memory dumps (`db`, `dd`, `dq`, `dqs`, …) are tables; `dt`, `wt` and `!hvpartitions` are trees that fold; `r`, `u` and `uf` use Tern's colors; `ls`, `lsa` and a stop at a source line show the source highlighted with its line marked; and a timer shows how long `g` has run. Other terminals, captured output and `.logopen` transcripts keep the text, `TERN_TSP=0` turns it off, and a Tern too old to draw the views gets text with a warning saying so ([details](https://ntoseye.com/using/repl/#in-tern)).
+- In Tern, Stencil's terminal, the REPL draws its results natively: a stop is a card that names why it stopped in a chip and holds the thread, the registers folded, the code at the stop and the stack, and a bugcheck and `!analyze` are red cards; `k`, `lm`, `!process`, `ps`, `bl`, `~`, `!pte`, `vars` and the memory dumps (`db`, `dd`, `dq`, `dqs`, …) are tables; `dt`, `wt` and `!hvpartitions` are trees that fold; `r`, `u` and `uf` use Tern's colors; `ls`, `lsa` and a stop at a source line show the source highlighted with its line marked; and a timer shows how long `g` has run, and long tasks such as indexing symbols and `.dump` show a progress bar. Other terminals, captured output and `.logopen` transcripts keep the text, `TERN_TSP=0` turns it off, and a Tern too old to draw the views gets text with a warning saying so ([details](https://ntoseye.com/using/repl/#in-tern)).
 
 ### Fixed
 

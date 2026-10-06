@@ -7,7 +7,7 @@ use tern_sdk::View;
 use tern_sdk::ui::{self, Column, Span, TableRow, TextAlign, Truncate};
 
 use super::{MUTED, NUMBER, STRONG, addr, span, symbol};
-use crate::breakpoints::Breakpoint;
+use crate::breakpoints::{Breakpoint, BreakpointScope};
 use crate::guest::ProcessInfo;
 use crate::repl::commands::symbols::ModuleListing;
 use crate::session::VcpuInfo;
@@ -158,8 +158,50 @@ pub fn module_details(modules: &[ModuleListing], timestamp: bool) -> View {
 }
 
 /// `!process`: a row per process with its `_EPROCESS` fields, the image name
-/// carrying the table.
+/// carrying the table. A field no process has gets no column.
 pub fn processes(processes: &[ProcessInfo], details: &[ProcessDetail]) -> View {
+    let any = |has: fn(&ProcessInfo, &ProcessDetail) -> bool| {
+        processes
+            .iter()
+            .zip(details)
+            .any(|(process, detail)| has(process, detail))
+    };
+    let optional = [
+        (
+            any(|_, detail| detail.session_id.is_some()),
+            Column::new("session", "Session")
+                .align(TextAlign::End)
+                .priority(4.0),
+        ),
+        (
+            any(|_, detail| detail.parent_pid.is_some()),
+            Column::new("parent", "Parent")
+                .align(TextAlign::End)
+                .priority(6.0),
+        ),
+        (
+            any(|_, detail| detail.handle_count.is_some()),
+            Column::new("handles", "Handles")
+                .align(TextAlign::End)
+                .priority(5.0),
+        ),
+        (
+            any(|_, detail| detail.peb.is_some_and(|peb| !peb.is_zero())),
+            Column::new("peb", "Peb").priority(3.0),
+        ),
+        (
+            any(|process, _| process.wow64_peb.is_some_and(|peb| !peb.is_zero())),
+            Column::new("wow64", "Wow64").priority(1.0),
+        ),
+        (
+            any(|_, detail| detail.directory_table_base.is_some()),
+            Column::new("dirbase", "DirBase").priority(2.0),
+        ),
+        (
+            any(|_, detail| detail.object_table.is_some_and(|table| !table.is_zero())),
+            Column::new("objects", "ObjectTable").priority(1.0),
+        ),
+    ];
     let mut table = ui::table()
         .col(
             Column::new("pid", "PID")
@@ -172,26 +214,12 @@ pub fn processes(processes: &[ProcessInfo], details: &[ProcessDetail]) -> View {
                 .truncate(Truncate::End)
                 .priority(10.0),
         )
-        .col(Column::new("eprocess", "EPROCESS").priority(7.0))
-        .col(
-            Column::new("session", "Session")
-                .align(TextAlign::End)
-                .priority(4.0),
-        )
-        .col(
-            Column::new("parent", "Parent")
-                .align(TextAlign::End)
-                .priority(6.0),
-        )
-        .col(
-            Column::new("handles", "Handles")
-                .align(TextAlign::End)
-                .priority(5.0),
-        )
-        .col(Column::new("peb", "Peb").priority(3.0))
-        .col(Column::new("wow64", "Wow64").priority(1.0))
-        .col(Column::new("dirbase", "DirBase").priority(2.0))
-        .col(Column::new("objects", "ObjectTable").priority(1.0));
+        .col(Column::new("eprocess", "EPROCESS").priority(7.0));
+    for (shown, column) in optional {
+        if shown {
+            table = table.col(column);
+        }
+    }
     for (process, detail) in processes.iter().zip(details) {
         table = table.row(
             TableRow::new(format!("{:x}", process.eprocess_va.0))
@@ -256,6 +284,9 @@ pub fn ps(processes: &[ProcessInfo]) -> View {
 /// `bl`: a row per breakpoint, its state colored, the site carrying the
 /// table and the condition and command hiding first.
 pub fn breakpoints(breakpoints: &[&Breakpoint]) -> View {
+    // Columns no breakpoint uses go: a pass count, a process or thread
+    // filter, a condition, a command.
+    let any = |has: fn(&Breakpoint) -> bool| breakpoints.iter().any(|bp| has(bp));
     let mut table = ui::table()
         .col(Column::new("id", "ID").align(TextAlign::End).priority(9.0))
         .col(Column::new("state", "State").priority(8.0))
@@ -265,23 +296,31 @@ pub fn breakpoints(breakpoints: &[&Breakpoint]) -> View {
                 .grow(1.0)
                 .truncate(Truncate::End)
                 .priority(10.0),
-        )
-        .col(
+        );
+    if any(|bp| bp.pass_count > 1 || bp.remaining_pass_count > 0) {
+        table = table.col(
             Column::new("passes", "Passes")
                 .align(TextAlign::End)
                 .priority(2.0),
-        )
-        .col(Column::new("scope", "Process/Thread").priority(4.0))
-        .col(
+        );
+    }
+    if any(|bp| !unscoped(bp)) {
+        table = table.col(Column::new("scope", "Process/Thread").priority(4.0));
+    }
+    if any(|bp| bp.condition.is_some()) {
+        table = table.col(
             Column::new("condition", "Condition")
                 .truncate(Truncate::End)
                 .priority(1.0),
-        )
-        .col(
+        );
+    }
+    if any(|bp| bp.action.is_some()) {
+        table = table.col(
             Column::new("action", "Action")
                 .truncate(Truncate::End)
                 .priority(1.0),
         );
+    }
     for bp in breakpoints {
         // `pending`: enabled and accepted by the target, but the opcode is
         // owed until its page is resident (the text list's `o`).
@@ -400,4 +439,14 @@ pub fn vcpus(vcpus: &[VcpuInfo]) -> View {
         }
     }
     View::new().main([table])
+}
+
+/// A breakpoint any thread anywhere stops at: what `bl` labels `global`.
+fn unscoped(bp: &Breakpoint) -> bool {
+    bp.scope == BreakpointScope::Kernel
+        && bp.partition.is_none()
+        && bp.thread.is_none()
+        && bp.processor.is_none()
+        && bp.hypercall.is_none()
+        && bp.vm_exit.is_none()
 }

@@ -59,6 +59,43 @@ pub fn registers(read: &dyn Fn(&str) -> Option<u64>, arm64: bool) -> View {
         }
     };
     let cell = |name: &'static str| -> RegisterCell { (name, value(name)) };
+    let segment = |name: &'static str| -> RegisterCell {
+        let value = match read(name) {
+            Some(value) => span(format!("{value:04x}"), ""),
+            None => span("N/A", MUTED),
+        };
+        (name, vec![value])
+    };
+    let trailer: Vec<Vec<RegisterCell>> = if arm64 {
+        vec![
+            vec![cell("ttbr0"), ("ttbr1", value("cr3"))],
+            vec![cell("esr"), cell("far")],
+        ]
+    } else {
+        vec![
+            vec![cell("cr0"), cell("cr2"), cell("cr3")],
+            vec![cell("cr4"), cell("cr8")],
+            vec![segment("cs"), segment("ds"), segment("es")],
+            vec![segment("fs"), segment("gs"), segment("ss")],
+        ]
+    };
+
+    View::new().main([ui::col()
+        .role("ntoseye.registers")
+        .child(register_grid(read))
+        .child(register_table(&trailer))])
+}
+
+/// The general-purpose registers in the text grid's rows, flags decoded:
+/// `r`'s first table, and the registers a stop card shows.
+pub fn register_grid(read: &dyn Fn(&str) -> Option<u64>) -> Table<()> {
+    let value = |name: &str| -> Vec<Span> {
+        match read(name) {
+            Some(value) => vec![addr(value)],
+            None => vec![span("N/A", MUTED)],
+        }
+    };
+    let cell = |name: &'static str| -> RegisterCell { (name, value(name)) };
     let flags = |names: Vec<&str>| -> Option<Span> {
         (!names.is_empty()).then(|| span(format!("  {}", names.join(" ")), MUTED))
     };
@@ -104,34 +141,7 @@ pub fn registers(read: &dyn Fn(&str) -> Option<u64>, arm64: bool) -> View {
         rows.push(vec![cell("r14"), cell("r15"), ("rfl", rfl)]);
         rows
     };
-
-    let segment = |name: &'static str| -> RegisterCell {
-        let value = match read(name) {
-            Some(value) => span(format!("{value:04x}"), ""),
-            None => span("N/A", MUTED),
-        };
-        (name, vec![value])
-    };
-    let trailer: Vec<Vec<RegisterCell>> = if arm64 {
-        vec![
-            vec![cell("ttbr0"), ("ttbr1", value("cr3"))],
-            vec![cell("esr"), cell("far")],
-        ]
-    } else {
-        vec![
-            vec![cell("cr0"), cell("cr2"), cell("cr3")],
-            vec![cell("cr4"), cell("cr8")],
-            vec![segment("cs"), segment("ds"), segment("es")],
-            vec![segment("fs"), segment("gs"), segment("ss")],
-        ]
-    };
-
-    View::new().main(
-        ui::col()
-            .role("ntoseye.registers")
-            .child(register_table(&grid))
-            .child(register_table(&trailer)),
-    )
+    register_table(&grid)
 }
 
 /// Rows of (name, value) cells as a table with no header: a name column
