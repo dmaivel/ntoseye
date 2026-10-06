@@ -434,7 +434,7 @@ impl<'a> Line<'a> {
             self.complete(ctx);
         } else if key.is("f2") {
             return Some(Read::Browse);
-        } else if key.is("f1") || key.is("alt+p") {
+        } else if key.is("alt+p") {
             self.open_palette(ctx.state, initial_tab(&self.draft));
         } else if key.is("ctrl+r") {
             self.open_palette(ctx.state, Tab::History);
@@ -718,7 +718,7 @@ impl<'a> Line<'a> {
         } else {
             &[
                 ("Tab", "complete"),
-                ("F1", "palette"),
+                ("Alt+P", "palette"),
                 ("F2", "browse"),
                 ("Ctrl+R", "history"),
             ]

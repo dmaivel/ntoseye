@@ -836,19 +836,14 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         ]),
     );
 
-    // F1 or Alt+P opens the command palette and F2 the browser, which only
-    // Tern can draw.
+    // Alt+P opens the command palette and F2 the browser, which only Tern can
+    // draw. Tern keeps F1 for itself.
     if native::active() {
-        for (modifiers, key) in [
-            (KeyModifiers::NONE, KeyCode::F(1)),
-            (KeyModifiers::ALT, KeyCode::Char('p')),
-        ] {
-            keybindings.add_binding(
-                modifiers,
-                key,
-                ReedlineEvent::ExecuteHostCommand(palette::PALETTE_COMMAND.to_owned()),
-            );
-        }
+        keybindings.add_binding(
+            KeyModifiers::ALT,
+            KeyCode::Char('p'),
+            ReedlineEvent::ExecuteHostCommand(palette::PALETTE_COMMAND.to_owned()),
+        );
         // F2 opens the code and memory browser at the instruction pointer.
         keybindings.add_binding(
             KeyModifiers::NONE,

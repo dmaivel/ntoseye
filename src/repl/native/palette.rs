@@ -1,4 +1,4 @@
-//! The command palette, F1 at the prompt: Tern's picker over the commands
+//! The command palette, Alt+P at the prompt: Tern's picker over the commands
 //! and recent lines, the symbol and type indexes and the processes, in a
 //! screen surface of its own so the pane is left as it was. It hands back
 //! the line to go on editing.

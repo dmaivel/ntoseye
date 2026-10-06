@@ -1,13 +1,13 @@
 //! The command palette's REPL side: what it offers, which tab it opens on,
 //! and putting the picked line back in the prompt. Tern draws it
-//! ([`native::palette`]); F1 opens it, bound only in Tern.
+//! ([`native::palette`]); Alt+P opens it, bound only in Tern.
 
 use reedline::{EditCommand, Reedline, SearchDirection, SearchQuery};
 
 use super::native::palette::{self, Catalog, CommandEntry, Tab};
 use super::{CompletionStrategy, ReplState, command_registry};
 
-/// The host command F1 sends the REPL loop.
+/// The host command Alt+P sends the REPL loop.
 pub const PALETTE_COMMAND: &str = "palette";
 
 /// How many distinct earlier lines the palette ranks.
