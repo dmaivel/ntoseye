@@ -19,6 +19,7 @@ pub mod inspect;
 pub mod lists;
 pub mod memory;
 pub mod session;
+pub mod source;
 pub mod stack;
 pub mod stop;
 pub mod trees;

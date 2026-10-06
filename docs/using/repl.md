@@ -27,6 +27,7 @@ In [Tern](https://stencil.so/tern), Stencil's terminal, the REPL draws its resul
 - Memory dumps such as {command}`db`, {command}`dd` and {command}`dq` dim the zero values and show a byte that isn't printable as `·`, and {command}`dqs` lists the symbol of each value.
 - {command}`dt`, {command}`wt` and {command}`!hvpartitions` are trees that you can fold, and {command}`.help` folds by category.
 - {command}`r` is a register grid, and {command}`u`, {command}`ub` and {command}`uf` color instructions with Tern's syntax colors.
+- {command}`ls` and {command}`lsa` show source in Tern's highlighting for the file's language, with line numbers and the current line marked, under a header that opens the file in Tern. A stop at a line of a file that {command}`.srcpath` finds shows that source in the card, and the disassembly folds under it.
 - While {command}`g` waits for a stop, a timer shows how long the target has run.
 
 Other commands print text. ntoseye asks the terminal when the REPL starts, so this also works over ssh, but not inside tmux, screen or zellij. Output that a host captures (MCP, the Python SDK, the DAP console, `.foreach`) and `.logopen` transcripts are always text. For text in Tern, set `TERN_TSP=0` or use `--plain-repl`.

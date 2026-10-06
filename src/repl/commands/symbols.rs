@@ -611,16 +611,26 @@ impl ReplState<'_> {
             return first;
         }
         let last = (first as usize + count as usize - 1).min(lines.len());
-        outln!("{}:", path.display());
-        for number in first as usize..=last {
-            let mark = if Some(number as u32) == current {
-                '>'
-            } else {
-                ' '
-            };
-            outln!("{mark}{number:>6}: {}", lines[number - 1]);
-        }
-        outln!();
+        let shown = &lines[first as usize - 1..last];
+        let print_text = || {
+            outln!("{}:", path.display());
+            for (number, line) in (first as usize..).zip(shown) {
+                let mark = if Some(number as u32) == current {
+                    '>'
+                } else {
+                    ' '
+                };
+                outln!("{mark}{number:>6}: {line}");
+            }
+            outln!();
+        };
+        #[cfg(feature = "cli")]
+        native::render(
+            || native::source::view(path, shown, first, current),
+            print_text,
+        );
+        #[cfg(not(feature = "cli"))]
+        print_text();
         let next = last as u32 + 1;
         self.source_cursor = Some((path.to_path_buf(), next));
         next

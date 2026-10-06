@@ -5,7 +5,7 @@
 use tern_sdk::View;
 use tern_sdk::ui::{self, Tone, Wrap};
 
-use super::{MUTED, STRONG, block, code, span, spans, stack, symbol};
+use super::{MUTED, STRONG, block, code, source, span, spans, stack, symbol};
 use crate::disasm::DisasmRow;
 use crate::repl::StackColumns;
 use crate::unwind::StackTrace;
@@ -55,7 +55,25 @@ pub fn stop_card(stop: Stop<'_>) -> View {
         Ok(rows) => code::listing(rows, Some(stop.current)).into(),
         Err(note) => ui::text([span(note, MUTED)]).into(),
     };
-    card = card.child(ui::section().head("code").collapsible(true).child(listing));
+    // At a line of a file on this machine, the source leads and the
+    // instructions fold under it.
+    let lines = stop
+        .stack
+        .frames
+        .first()
+        .and_then(|frame| frame.source_location.as_ref())
+        .and_then(source::around);
+    let folded = lines.is_some();
+    if let Some(lines) = lines {
+        card = card.child(ui::section().head("source").collapsible(true).child(lines));
+    }
+    card = card.child(
+        ui::section()
+            .head("disassembly")
+            .collapsible(true)
+            .collapsed(folded)
+            .child(listing),
+    );
     card = card.child(
         ui::section()
             .head("stack")
