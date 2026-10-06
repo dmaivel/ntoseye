@@ -982,11 +982,23 @@ impl ReplState<'_> {
             Ok(frame) => {
                 let symbol = trap_frame_rip_symbol(&self.ctx.target, &frame)
                     .unwrap_or_else(|| format!("{:#x}", frame.instruction_pointer()));
-                print_ktrap_frame(&frame, Some(&symbol));
                 let registers = registers_from_trap_frame(&frame);
                 let selected = self.select_register_values(0, registers);
-                outln!("selected trap context frame 00 at {}", ui::addr(selected));
+                let print_text = || {
+                    print_ktrap_frame(&frame, Some(&symbol));
+                    outln!("selected trap context frame 00 at {}", ui::addr(selected));
+                };
+                #[cfg(feature = "cli")]
+                native::render(
+                    || native::frames::trap(&frame, Some(&symbol), selected),
+                    print_text,
+                );
+                #[cfg(not(feature = "cli"))]
+                print_text();
                 self.warn_if_user_frame_is_out_of_view(frame.instruction_pointer());
+                #[cfg(feature = "cli")]
+                native::omit(|| outln!());
+                #[cfg(not(feature = "cli"))]
                 outln!();
             }
             Err(e) => {

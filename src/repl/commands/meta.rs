@@ -357,10 +357,15 @@ impl ReplState<'_> {
                 outln!("alias {name} {expansion}\n");
                 return Ok(());
             }
-            if command_registry().get(name).is_none() {
-                error!("unknown command '{name}'");
-            } else {
-                outln!("{}\n", command_help(name));
+            match command_registry().get(name) {
+                None => error!("unknown command '{name}'"),
+                Some(spec) => {
+                    let print_text = || outln!("{}\n", spec_help(spec));
+                    #[cfg(feature = "cli")]
+                    native::render(|| native::help::command(spec), print_text);
+                    #[cfg(not(feature = "cli"))]
+                    print_text();
+                }
             }
             return Ok(());
         }

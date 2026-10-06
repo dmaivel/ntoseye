@@ -154,7 +154,11 @@ pub fn command_help(name: &str) -> String {
     let Some(spec) = command_registry().get(name) else {
         return "invalid usage".to_string();
     };
+    spec_help(spec)
+}
 
+/// A command's summary, usage and details as text.
+pub fn spec_help(spec: &CommandSpec) -> String {
     let mut help = format!("{}\n(usage: {})", spec.summary, spec.usage);
     if let Some(detail) = spec.details {
         help.push('\n');

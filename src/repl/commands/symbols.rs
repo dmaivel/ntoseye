@@ -199,7 +199,7 @@ impl ReplState<'_> {
             None => self.caches.symbols.read().unwrap().search(query, X_LIMIT),
         };
         let truncated = names.len() >= X_LIMIT;
-        let mut hits: Vec<u64> = Vec::new();
+        let mut matches: Vec<(u64, String)> = Vec::new();
         for name in &names {
             let bare = name
                 .rsplit_once('!')
@@ -209,31 +209,48 @@ impl ReplState<'_> {
                 if !seen.insert((candidate.module.to_ascii_lowercase(), candidate.address.0)) {
                     continue;
                 }
-                outln!(
-                    "{}  {}",
-                    ui::addr(candidate.address.0),
-                    ui::symbol(&format!("{}!{}", candidate.module, bare))
-                );
-                hits.push(candidate.address.0);
+                matches.push((
+                    candidate.address.0,
+                    format!("{}!{}", candidate.module, bare),
+                ));
             }
         }
-        if hits.is_empty() {
+        if matches.is_empty() {
             outln!("no symbols match '{}'", query);
-        } else {
+            outln!();
+            self.ctx.target.set_results(Vec::new(), self.line.clone());
+            return Ok(());
+        }
+        let print_text = || {
+            for (address, label) in &matches {
+                outln!("{}  {}", ui::addr(*address), ui::symbol(label));
+            }
             outln!(
                 "\n{} {}{} (in $0..${})",
-                hits.len(),
-                if hits.len() == 1 { "symbol" } else { "symbols" },
+                matches.len(),
+                if matches.len() == 1 {
+                    "symbol"
+                } else {
+                    "symbols"
+                },
                 if truncated {
                     ", truncated; refine query"
                 } else {
                     ""
                 },
-                hits.len() - 1
+                matches.len() - 1
             );
-        }
+            outln!();
+        };
+        #[cfg(feature = "cli")]
+        native::render(
+            || native::lists::symbol_matches(&matches, truncated),
+            print_text,
+        );
+        #[cfg(not(feature = "cli"))]
+        print_text();
+        let hits = matches.iter().map(|(address, _)| *address).collect();
         self.ctx.target.set_results(hits, self.line.clone());
-        outln!();
 
         Ok(())
     }

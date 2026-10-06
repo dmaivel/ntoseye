@@ -3,15 +3,19 @@
 //! secondary addresses and the rarely set columns hide first in a narrow
 //! pane.
 
-use tern_sdk::View;
 use tern_sdk::ui::{self, Column, Span, TableRow, TextAlign, Truncate};
+use tern_sdk::{Node, View};
 
 use super::{MUTED, NUMBER, STRONG, addr, span, symbol};
 use crate::breakpoints::{Breakpoint, BreakpointScope};
-use crate::guest::ProcessInfo;
+use crate::guest::{ModuleInfo, ProcessInfo};
+use crate::repl::commands::address_space::{
+    PAGE_SHIFT, format_region_size, vad_protection_label, vad_type_label,
+};
 use crate::repl::commands::symbols::ModuleListing;
 use crate::session::VcpuInfo;
 use crate::symbols::ModuleSymbolStatus;
+use crate::target::mm::{MemoryRegionInfo, VadType};
 use crate::target::sched::ProcessDetail;
 use crate::types::VirtAddr;
 
@@ -449,4 +453,173 @@ fn unscoped(bp: &Breakpoint) -> bool {
         && bp.processor.is_none()
         && bp.hypercall.is_none()
         && bp.vm_exit.is_none()
+}
+
+/// `x`: a row per match with the result variable it lands in (`$3`), its
+/// address and the symbol, then how many matched.
+pub fn symbol_matches(matches: &[(u64, String)], truncated: bool) -> View {
+    let mut table = ui::table()
+        .col(Column::new("n", "$").align(TextAlign::End).priority(3.0))
+        .col(Column::new("address", "Address").priority(2.0))
+        .col(
+            Column::new("symbol", "Symbol")
+                .grow(1.0)
+                .truncate(Truncate::End)
+                .priority(4.0),
+        );
+    for (index, (address, label)) in matches.iter().enumerate() {
+        table = table.row(
+            TableRow::new(index.to_string())
+                .cell("n", span(format!("${index}"), MUTED))
+                .cell("address", addr(*address))
+                .cell("symbol", symbol(label)),
+        );
+    }
+    let count = matches.len();
+    let mut summary = vec![span(
+        format!("{count} {}", if count == 1 { "symbol" } else { "symbols" }),
+        MUTED,
+    )];
+    if truncated {
+        summary.push(span(", truncated; refine the query", "warning"));
+    }
+    View::new().main([Node::from(table), ui::text(summary).into()])
+}
+
+/// `!vad` and `vmmap`: the process, then a row per region. Memory that is
+/// both writable and executable stands out, except an image's copy-on-write
+/// sections, which every mapped binary has. `!vad` keeps the VAD node and
+/// its depth, `vmmap` the region's size; a column no region fills is left
+/// out.
+pub fn regions(process: &ProcessInfo, regions: &[&MemoryRegionInfo], is_vad: bool) -> View {
+    let head = ui::text([
+        span("process ", MUTED),
+        span(&process.name, STRONG),
+        span(format!(" ({})", process.pid), MUTED),
+    ]);
+    let mut table = ui::table();
+    table = if is_vad {
+        table
+            .col(Column::new("vad", "VAD").priority(2.0))
+            .col(
+                Column::new("level", "Level")
+                    .align(TextAlign::End)
+                    .priority(1.0),
+            )
+            .col(
+                Column::new("start", "Start VPN")
+                    .align(TextAlign::End)
+                    .priority(9.0),
+            )
+            .col(
+                Column::new("end", "End VPN")
+                    .align(TextAlign::End)
+                    .priority(8.0),
+            )
+    } else {
+        table
+            .col(Column::new("start", "Start").priority(9.0))
+            .col(Column::new("end", "End").priority(8.0))
+            .col(
+                Column::new("size", "Size")
+                    .align(TextAlign::End)
+                    .priority(6.0),
+            )
+    };
+    if regions.iter().any(|region| region.commit_charge.is_some()) {
+        table = table.col(
+            Column::new("commit", "Commit")
+                .align(TextAlign::End)
+                .priority(3.0),
+        );
+    }
+    table = table
+        .col(Column::new("type", "Type").priority(5.0))
+        .col(Column::new("protect", "Protect").priority(7.0));
+    if regions.iter().any(|region| region.details.is_some()) {
+        table = table.col(
+            Column::new("file", if is_vad { "File" } else { "Details" })
+                .grow(1.0)
+                .truncate(Truncate::Start)
+                .priority(4.0),
+        );
+    }
+    for region in regions {
+        let protection = vad_protection_label(region.protection);
+        let image = region.vad_type == Some(VadType::ImageMap);
+        let tone = if protection == "x/rw" || (protection == "x/cow" && !image) {
+            "warning"
+        } else {
+            ""
+        };
+        let mut row = TableRow::new(format!("{:x}", region.start.0));
+        row = if is_vad {
+            row.cell(
+                "vad",
+                span(format!("{:016x}", region.node_address.0), MUTED),
+            )
+            .cell("level", span(region.level.to_string(), MUTED))
+            .cell(
+                "start",
+                span(format!("{:#x}", region.start.0 >> PAGE_SHIFT), ""),
+            )
+            .cell(
+                "end",
+                span(
+                    format!("{:#x}", region.end.0.saturating_sub(1) >> PAGE_SHIFT),
+                    "",
+                ),
+            )
+        } else {
+            row.cell("start", addr(region.start.0))
+                .cell("end", span(format!("{:016x}", region.end.0), MUTED))
+                .cell("size", span(format_region_size(region.size()), NUMBER))
+        };
+        table = table.row(
+            row.cell("commit", decimal(region.commit_charge))
+                .cell("type", span(vad_type_label(region), ""))
+                .cell("protect", span(protection, tone))
+                .cell(
+                    "file",
+                    match region.details.as_deref() {
+                        Some(details) => span(details, ""),
+                        None => none(),
+                    },
+                ),
+        );
+    }
+    View::new().main([Node::from(head), table.into()])
+}
+
+/// `vmmap` with no process attached: the kernel's modules as regions.
+pub fn kernel_regions(modules: &[ModuleInfo]) -> View {
+    let mut table = ui::table()
+        .col(Column::new("start", "Start").priority(5.0))
+        .col(Column::new("end", "End").priority(2.0))
+        .col(
+            Column::new("size", "Size")
+                .align(TextAlign::End)
+                .priority(3.0),
+        )
+        .col(Column::new("module", "Module").priority(6.0))
+        .col(
+            Column::new("image", "Image")
+                .grow(1.0)
+                .truncate(Truncate::Start)
+                .priority(4.0),
+        );
+    for module in modules {
+        table = table.row(
+            TableRow::new(format!("{:x}", module.base_address.0))
+                .cell("start", addr(module.base_address.0))
+                .cell(
+                    "end",
+                    span(format!("{:016x}", module.end_address().0), MUTED),
+                )
+                .cell("size", span(format_region_size(module.size as u64), NUMBER))
+                .cell("module", span(&module.short_name, STRONG))
+                .cell("image", span(&module.name, MUTED)),
+        );
+    }
+    View::new().main([table])
 }

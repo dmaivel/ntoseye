@@ -295,7 +295,8 @@ impl Live {
                             .label([span("running", MUTED)]),
                     )
                     .child(ui::elapsed())
-                    .child(ui::text([span("Ctrl+C to pause", DIM)]))
+                    .child(ui::kbd(["Ctrl", "C"]))
+                    .child(ui::text([span("to pause", DIM)]))
                     .into(),
             );
         }

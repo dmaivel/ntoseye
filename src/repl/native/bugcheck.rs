@@ -6,7 +6,7 @@
 use tern_sdk::ui::{self, Span, Tone, Wrap};
 use tern_sdk::{Node, View};
 
-use super::{MUTED, NUMBER, STRONG, addr, block, span, spans, styled, symbol};
+use super::{MUTED, NUMBER, STRONG, addr, frames, span, spans, styled, symbol};
 use crate::bugchecks::{
     BUGCHECK_DATA_SLOTS, BugcheckAnalysis, BugcheckFault, BugcheckTrapFrame, CurrentBugcheckFailure,
 };
@@ -76,20 +76,24 @@ fn fault_spans(fault: &BugcheckFault) -> Vec<Span> {
     value
 }
 
-/// A trap frame: its first line (`trap frame @ … (kind)`) as a folded
-/// section's head over the register grid, or the decode failure alone.
+/// A trap frame: `trap frame <address>  <kind>` as a folded section's head
+/// over its registers, or the decode failure alone.
 pub fn trap_frame_node(trap_frame: &BugcheckTrapFrame) -> Node {
-    let text = styled(|| print_bugcheck_trap_frame(trap_frame));
-    let text = text.trim_end_matches('\n');
-    match text.split_once('\n') {
-        Some((head, grid)) => ui::section()
-            .head(spans(head))
-            .collapsible(true)
-            .collapsed(true)
-            .child(block(grid))
-            .into(),
-        None => ui::text(spans(text)).wrap(Wrap::Word).into(),
+    let Some(frame) = &trap_frame.frame else {
+        let text = styled(|| print_bugcheck_trap_frame(trap_frame));
+        return ui::text(spans(text.trim_end_matches('\n')))
+            .wrap(Wrap::Word)
+            .into();
+    };
+    let mut head = vec![span("trap frame ", ""), addr(trap_frame.address)];
+    if let Some(kind) = frame.amd64().and_then(|frame| frame.kind) {
+        head.push(span(format!("  {}", kind.as_str()), MUTED));
     }
+    let mut section = ui::section().head(head).collapsible(true).collapsed(true);
+    for node in frames::trap_frame(frame, trap_frame.rip_symbol.as_deref()) {
+        section = section.child(node);
+    }
+    section.into()
 }
 
 /// The guest bugchecks, but `nt!KiBugCheckData` has no symbol.

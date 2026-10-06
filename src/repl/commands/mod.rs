@@ -6,7 +6,7 @@ use crate::types::VirtAddr;
 const ALIAS_RECURSION_LIMIT: usize = 16;
 const BREAKPOINT_ACTION_RECURSION_LIMIT: usize = 4;
 
-mod address_space;
+pub mod address_space;
 pub mod analyze;
 pub mod breakpoints;
 mod cpu;

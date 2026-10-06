@@ -8,6 +8,7 @@ use owo_colors::OwoColorize;
 
 use crate::error::Result;
 use crate::expr::Expr;
+use crate::guest::ModuleInfo;
 use crate::memory::PAGE_SIZE;
 use crate::target::mm::{
     MemoryRegionInfo, VadProtection, VadType, VprotDetail, memory_state_name, memory_type_name,
@@ -18,7 +19,7 @@ use crate::ui;
 
 use crate::repl::*;
 
-const PAGE_SHIFT: u32 = PAGE_SIZE.trailing_zeros();
+pub const PAGE_SHIFT: u32 = PAGE_SIZE.trailing_zeros();
 const BYTES_PER_KIB: u64 = 1024;
 const BYTES_PER_MIB: u64 = BYTES_PER_KIB * 1024;
 
@@ -48,7 +49,7 @@ repl_command! {
     completion: Expression,
 }
 
-fn format_region_size(size: u64) -> String {
+pub fn format_region_size(size: u64) -> String {
     if size >= BYTES_PER_MIB {
         format!("{:#x} ({} MiB)", size, size / BYTES_PER_MIB)
     } else if size >= BYTES_PER_KIB {
@@ -58,7 +59,7 @@ fn format_region_size(size: u64) -> String {
     }
 }
 
-fn vad_protection_label(protection: Option<VadProtection>) -> String {
+pub fn vad_protection_label(protection: Option<VadProtection>) -> String {
     let label = match protection {
         Some(VadProtection::NoAccess) => "none",
         Some(VadProtection::ReadOnly) => "r",
@@ -74,7 +75,7 @@ fn vad_protection_label(protection: Option<VadProtection>) -> String {
     label.to_string()
 }
 
-fn vad_type_label(region: &MemoryRegionInfo) -> String {
+pub fn vad_type_label(region: &MemoryRegionInfo) -> String {
     match region.vad_type {
         Some(VadType::ImageMap) => "image".to_string(),
         Some(_) if region.private_memory == Some(true) => "private".to_string(),
@@ -106,6 +107,64 @@ fn region_matches_filter(
             .is_some_and(|details| details.to_ascii_lowercase().contains(&filter))
         || vad_type_label(region).contains(&filter)
         || vad_protection_label(region.protection).contains(&filter)
+}
+
+/// `!vad` and `vmmap`'s text table of `regions`.
+fn region_table(regions: &[&MemoryRegionInfo], is_vad: bool) -> Builder {
+    let mut builder = Builder::default();
+    if is_vad {
+        builder.push_record(vec![
+            "VAD".to_string(),
+            "Level".to_string(),
+            "Start VPN".to_string(),
+            "End VPN".to_string(),
+            "Commit".to_string(),
+            "Type/Protection".to_string(),
+            "File".to_string(),
+        ]);
+    } else {
+        builder.push_record(vec![
+            "Start".to_string(),
+            "End".to_string(),
+            "Size".to_string(),
+            "Protect".to_string(),
+            "Type".to_string(),
+            "Commit".to_string(),
+            "Details".to_string(),
+        ]);
+    }
+    for region in regions {
+        let commit = region
+            .commit_charge
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        if is_vad {
+            builder.push_record(vec![
+                ui::addr(region.node_address.0),
+                region.level.to_string(),
+                format!("{:#x}", region.start.0 >> PAGE_SHIFT),
+                format!("{:#x}", region.end.0.saturating_sub(1) >> PAGE_SHIFT),
+                commit,
+                format!(
+                    "{}/{}",
+                    vad_type_label(region),
+                    vad_protection_label(region.protection)
+                ),
+                region.details.as_deref().unwrap_or("-").to_string(),
+            ]);
+        } else {
+            builder.push_record(vec![
+                ui::addr(region.start.0).to_string(),
+                ui::addr(region.end.0).to_string(),
+                format_region_size(region.size()).to_string(),
+                vad_protection_label(region.protection).to_string(),
+                vad_type_label(region).to_string(),
+                commit,
+                region.details.as_deref().unwrap_or("-").to_string(),
+            ]);
+        }
+    }
+    builder
 }
 
 impl ReplState<'_> {
@@ -150,79 +209,30 @@ impl ReplState<'_> {
                 }
             };
 
-            let mut builder = Builder::default();
-            if is_vad {
-                builder.push_record(vec![
-                    "VAD".to_string(),
-                    "Level".to_string(),
-                    "Start VPN".to_string(),
-                    "End VPN".to_string(),
-                    "Commit".to_string(),
-                    "Type/Protection".to_string(),
-                    "File".to_string(),
-                ]);
-            } else {
-                builder.push_record(vec![
-                    "Start".to_string(),
-                    "End".to_string(),
-                    "Size".to_string(),
-                    "Protect".to_string(),
-                    "Type".to_string(),
-                    "Commit".to_string(),
-                    "Details".to_string(),
-                ]);
-            }
-
-            let mut shown = 0usize;
-            for region in regions
+            let shown: Vec<&MemoryRegionInfo> = regions
                 .iter()
                 .filter(|region| is_vad || region_matches_filter(region, filter, filter_address))
-            {
-                shown += 1;
-                if is_vad {
-                    builder.push_record(vec![
-                        ui::addr(region.node_address.0),
-                        region.level.to_string(),
-                        format!("{:#x}", region.start.0 >> PAGE_SHIFT),
-                        format!("{:#x}", region.end.0.saturating_sub(1) >> PAGE_SHIFT),
-                        region
-                            .commit_charge
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "-".to_string()),
-                        format!(
-                            "{}/{}",
-                            vad_type_label(region),
-                            vad_protection_label(region.protection)
-                        ),
-                        region.details.as_deref().unwrap_or("-").to_string(),
-                    ]);
-                } else {
-                    builder.push_record(vec![
-                        ui::addr(region.start.0).to_string(),
-                        ui::addr(region.end.0).to_string(),
-                        format_region_size(region.size()).to_string(),
-                        vad_protection_label(region.protection).to_string(),
-                        vad_type_label(region).to_string(),
-                        region
-                            .commit_charge
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "-".to_string()),
-                        region.details.as_deref().unwrap_or("-").to_string(),
-                    ]);
-                }
-            }
-
-            if shown == 0 {
+                .collect();
+            if shown.is_empty() {
                 outln!("{}\n", "no matching memory regions".bright_black());
-            } else {
+                return Ok(());
+            }
+            let print_text = || {
                 outln!(
                     "{} {} ({})",
                     ui::label("process"),
                     process.name,
                     ui::Value(process.pid)
                 );
-                print_padded_table(builder);
-            }
+                print_padded_table(region_table(&shown, is_vad));
+            };
+            #[cfg(feature = "cli")]
+            native::render(
+                || native::lists::regions(&process, &shown, is_vad),
+                print_text,
+            );
+            #[cfg(not(feature = "cli"))]
+            print_text();
             return Ok(());
         }
 
@@ -238,45 +248,51 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        let mut builder = Builder::default();
-        builder.push_record(vec![
-            "Start".to_string(),
-            "End".to_string(),
-            "Size".to_string(),
-            "Module".to_string(),
-            "Image".to_string(),
-        ]);
-        let mut shown = 0usize;
-        for module in modules {
-            let matches = filter.is_none_or(|filter| {
-                module
-                    .short_name
-                    .to_ascii_lowercase()
-                    .contains(&filter.to_ascii_lowercase())
-                    || module
-                        .name
+        let shown: Vec<ModuleInfo> = modules
+            .into_iter()
+            .filter(|module| {
+                filter.is_none_or(|filter| {
+                    module
+                        .short_name
                         .to_ascii_lowercase()
                         .contains(&filter.to_ascii_lowercase())
-                    || filter_address.is_some_and(|address| module.contains_address(address))
-            });
-            if !matches {
-                continue;
-            }
-            shown += 1;
-            builder.push_record(vec![
-                ui::addr(module.base_address.0).to_string(),
-                ui::addr(module.end_address().0).to_string(),
-                format_region_size(module.size as u64).to_string(),
-                module.short_name.to_string(),
-                module.name,
-            ]);
-        }
+                        || module
+                            .name
+                            .to_ascii_lowercase()
+                            .contains(&filter.to_ascii_lowercase())
+                        || filter_address.is_some_and(|address| module.contains_address(address))
+                })
+            })
+            .collect();
 
-        if shown == 0 {
+        if shown.is_empty() {
             outln!("no matching kernel regions\n");
-        } else {
-            print_padded_table(builder);
+            return Ok(());
         }
+        let print_text = || {
+            let mut builder = Builder::default();
+            builder.push_record(vec![
+                "Start".to_string(),
+                "End".to_string(),
+                "Size".to_string(),
+                "Module".to_string(),
+                "Image".to_string(),
+            ]);
+            for module in &shown {
+                builder.push_record(vec![
+                    ui::addr(module.base_address.0).to_string(),
+                    ui::addr(module.end_address().0).to_string(),
+                    format_region_size(module.size as u64).to_string(),
+                    module.short_name.to_string(),
+                    module.name.clone(),
+                ]);
+            }
+            print_padded_table(builder);
+        };
+        #[cfg(feature = "cli")]
+        native::render(|| native::lists::kernel_regions(&shown), print_text);
+        #[cfg(not(feature = "cli"))]
+        print_text();
         Ok(())
     }
 

@@ -11,6 +11,7 @@ use super::{MUTED, STRONG, addr, code, ran_row, source, span, spans, stack, symb
 use crate::disasm::DisasmRow;
 use crate::repl::StackColumns;
 use crate::target::{ThreadInfo, kthread_state_name};
+use crate::triage_report::exception_code_name;
 use crate::unwind::StackTrace;
 
 /// What a stop shows, as the text renderer gathers it.
@@ -58,7 +59,11 @@ pub fn stop_card(stop: Stop<'_>) -> View {
         .align(Align::Center)
         .child(ui::text(place).wrap(Wrap::None).grow(1.0));
     if let Some(chip) = chip {
-        head = head.child(ui::badge(chip).tone(stop.tone.clone()));
+        let mut badge = ui::badge(chip.as_str()).tone(stop.tone.clone());
+        if let Some(name) = exception_name(&chip) {
+            badge = badge.title(name);
+        }
+        head = head.child(badge);
     }
     if let Some(ran) = stop.ran {
         head = head.child(ran_row(ran));
@@ -214,6 +219,14 @@ pub fn tone(cause: Option<&str>, bugcheck: bool, hypervisor: bool) -> Tone {
         None if hypervisor => Tone::Pending,
         None => Tone::Neutral,
     }
+}
+
+/// `STATUS_ACCESS_VIOLATION` for the chip `exception 0xc0000005`: the
+/// chip's tooltip. `None` for any other chip, or a code with no name.
+fn exception_name(chip: &str) -> Option<&'static str> {
+    let code = chip.strip_prefix("exception 0x")?;
+    let name = exception_code_name(u32::from_str_radix(code, 16).ok()?);
+    (name != "unknown").then_some(name)
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@ use crate::cpu_state;
 use crate::dbg_backend::{DebugCapability, processor_index_from_backend_thread_id};
 use crate::error::{Error, Result};
 use crate::expr::Expr;
+use crate::output;
 use crate::repl::*;
 use crate::session::VcpuInfo;
 use crate::target::cpu::{
@@ -1024,15 +1025,17 @@ impl ReplState<'_> {
     }
 
     fn cmd_vcpus(&mut self) -> Result<()> {
-        let pb = ProgressBar::new_spinner();
-        pb.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.black.bright} {msg}")
-                .unwrap(),
-        );
-
-        pb.set_message(format!("{}", "Waiting on GDB...".bright_black()));
-        pb.enable_steady_tick(Duration::from_millis(100));
+        let pb = output::native_progress_bar(0, "reading the vCPUs").unwrap_or_else(|| {
+            let pb = ProgressBar::new_spinner();
+            pb.set_style(
+                ProgressStyle::default_spinner()
+                    .template("{spinner:.black.bright} {msg}")
+                    .unwrap(),
+            );
+            pb.set_message(format!("{}", "Waiting on GDB...".bright_black()));
+            pb.enable_steady_tick(Duration::from_millis(100));
+            pb
+        });
 
         let vcpus = match self.ctx.vcpus() {
             Ok(vcpus) => vcpus,

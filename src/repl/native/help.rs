@@ -5,6 +5,7 @@ use tern_sdk::View;
 use tern_sdk::ui::{self, Column, Node, TableRow, Truncate};
 
 use super::{MUTED, STRONG, span};
+use crate::repl::CommandSpec;
 use crate::repl::commands::meta::HelpGroup;
 
 pub fn view(groups: &[HelpGroup]) -> View {
@@ -46,4 +47,22 @@ pub fn view(groups: &[HelpGroup]) -> View {
         )
     });
     View::new().main(sections.collect::<Vec<Node>>())
+}
+
+/// `.help <command>`: the command and its other names, what it does, its
+/// usage, and the details as Markdown, so their `code` reads as code.
+pub fn command(spec: &CommandSpec) -> View {
+    let mut head = vec![span(spec.names[0], STRONG)];
+    if spec.names.len() > 1 {
+        head.push(span(format!("  {}", spec.names[1..].join(", ")), MUTED));
+    }
+    let mut card = ui::card()
+        .head(head)
+        .role("ntoseye.help")
+        .child(ui::md(spec.summary))
+        .child(ui::code(spec.usage));
+    if let Some(details) = spec.details {
+        card = card.child(ui::md(details));
+    }
+    View::new().main([card])
 }
