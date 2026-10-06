@@ -36,6 +36,12 @@ Other commands print text. ntoseye asks the terminal when it starts, so this als
 
 A Tern too old to draw these views, such as a session daemon still running the version from before an update, gets text, and ntoseye says so when it starts. To run the updated version, use **Restart Tern** in Tern's command palette.
 
+### The palette
+
+In Tern, press **F1** or **Alt+P** at the prompt to open the palette, a search sheet over the pane. Its tabs list the commands with your recent lines, the symbols, the types and the processes. Type to search, use the arrow keys or the mouse to choose, press **Tab** to change tabs, and press **Enter** to put your choice in the prompt, or **Escape** to close the palette without a change.
+
+The palette opens on the tab for what you are typing. For the command word it shows the commands, with the selected command's help under the list, and your choice replaces the line. For an argument it shows the symbols, the types for {command}`dt`, or the processes for a command that takes one, and your choice replaces the word you started. So `u NtClo` and **Alt+P** finds `nt!NtClose`. With an empty line, a process becomes `.process /p <pid>`.
+
 ## Aliases
 
 To make an alias, use `alias <name> <expansion>`. In the expansion, you can use these variables:

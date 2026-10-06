@@ -94,6 +94,8 @@ mod line_editor;
 mod memory_view;
 #[cfg(feature = "cli")]
 pub mod native;
+#[cfg(feature = "cli")]
+mod palette;
 mod remote;
 mod stop;
 
@@ -828,6 +830,19 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         ]),
     );
 
+    // F1 or Alt+P opens the command palette, which only Tern can draw.
+    if native::active() {
+        for (modifiers, key) in [
+            (KeyModifiers::NONE, KeyCode::F(1)),
+            (KeyModifiers::ALT, KeyCode::Char('p')),
+        ] {
+            keybindings.add_binding(
+                modifiers,
+                key,
+                ReedlineEvent::ExecuteHostCommand(palette::PALETTE_COMMAND.to_owned()),
+            );
+        }
+    }
     let edit_mode = Box::new(Emacs::new(keybindings));
 
     let initial_vcpus = if supports_capability(&capabilities, DebugCapability::ThreadList) {
@@ -977,6 +992,9 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                     }
                     Signal::CtrlD => {
                         break;
+                    }
+                    Signal::HostCommand(command) if command == palette::PALETTE_COMMAND => {
+                        state.open_palette(&mut line_editor);
                     }
                     Signal::CtrlC => {
                         if had_content.load(Ordering::Relaxed) {

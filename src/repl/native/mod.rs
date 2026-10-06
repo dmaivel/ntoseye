@@ -18,6 +18,7 @@ pub mod help;
 pub mod inspect;
 pub mod lists;
 pub mod memory;
+pub mod palette;
 pub mod session;
 pub mod source;
 pub mod stack;
