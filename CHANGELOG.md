@@ -19,6 +19,8 @@ Keeping this file:
 
 - In Tern, Stencil's terminal, the REPL draws its results natively: a stop is a card that names why it stopped in a chip and holds the thread, the registers folded, the code at the stop and the stack, and a bugcheck and `!analyze` are red cards; `.trap` is a card with its registers and the kind of entry that built it; `k`, `lm`, `!process`, `ps`, `bl`, `~`, `x`, `!vad`, `vmmap`, `!pte`, `vars` and the memory dumps (`db`, `dd`, `dq`, `dqs`, …) are tables; `.help <command>` is a card; `dt`, `wt` and `!hvpartitions` are trees that fold; `r`, `u` and `uf` use Tern's colors; `ls`, `lsa` and a stop at a source line show the source highlighted with its line marked; and a timer shows how long `g` has run, and long tasks such as downloading and indexing symbols and `.dump` show a progress bar. F1 or Alt+P opens a palette that searches the commands and recent lines, the symbols, the types and the processes, and puts the choice in the prompt. Other terminals, captured output and `.logopen` transcripts keep the text, `TERN_TSP=0` turns it off, and a Tern too old to draw the views gets text with a warning saying so ([details](https://ntoseye.com/using/repl/#in-tern)).
 
+- After a stop on the same thread as the one before, the stop display marks the registers that changed since: yellow in the register grid, and in Tern the folded registers name them (`registers rsp rip changed`) and show their values in amber.
+
 ### Fixed
 
 - When its terminal goes away (a closed pane or a dropped ssh session), the REPL now removes its breakpoints, leaves the guest running and exits, as `q` does. It used to spin a CPU core at its prompt and keep the guest halted under the debugger until it was killed.

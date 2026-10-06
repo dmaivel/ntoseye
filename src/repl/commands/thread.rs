@@ -465,7 +465,7 @@ impl ReplState<'_> {
                                 return Ok(());
                             }
                         };
-                        print_registers(&self.ctx.register_map, &regs, false);
+                        print_registers(&self.ctx.register_map, &regs, None, false);
                     }
                 }
                 Some(_) if numeric_action.is_some() => {}

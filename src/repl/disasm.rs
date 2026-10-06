@@ -206,10 +206,21 @@ pub fn print_sparse_registers(
     }
 }
 
-pub fn print_registers(register_map: &RegisterMap, regs: &[u8], embedded: bool) {
+/// The general-purpose registers in `regs`, as a grid. With `before`, the
+/// register file of the previous stop on the same thread, the values that
+/// changed since stand out.
+pub fn print_registers(
+    register_map: &RegisterMap,
+    regs: &[u8],
+    before: Option<&[u8]>,
+    embedded: bool,
+) {
     let read_reg_value = |name: &str| register_map.read_u64(name, regs);
     let styled_value = |name: &str| -> String {
         match read_reg_value(name) {
+            Ok(value) if changed(register_map, name, value, before) => {
+                ui::changed(&ui::addr(value))
+            }
             Ok(value) => ui::addr(value),
             Err(_) => ui::muted(&format!("{:<16}", "N/A")),
         }
@@ -292,6 +303,13 @@ pub fn print_registers(register_map: &RegisterMap, regs: &[u8], embedded: bool) 
         styled_value("eflags"),
         format_rflags(rflags)
     );
+}
+
+/// Whether register `name`, now `value`, held something else in `before`.
+pub fn changed(register_map: &RegisterMap, name: &str, value: u64, before: Option<&[u8]>) -> bool {
+    before
+        .and_then(|before| register_map.read_u64(name, before).ok())
+        .is_some_and(|was| was != value)
 }
 
 // Decoding lives in core; the REPL owns the *rendering*

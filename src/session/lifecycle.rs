@@ -348,6 +348,7 @@ impl Session {
             last_event: None,
             partition_view: None,
             kept_partition: None,
+            shown_stop: None,
             _instance_guard: None,
         };
 

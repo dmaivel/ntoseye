@@ -3,7 +3,7 @@
 use tern_sdk::View;
 use tern_sdk::ui::{self, Align, Column, Gap, Node, Span, Table, TableRow, Wrap};
 
-use super::{MUTED, addr, code, span, stack, symbol};
+use super::{CHANGED, MUTED, addr, code, span, stack, symbol};
 use crate::disasm::DisasmRow;
 use crate::repl::{StackColumns, format_rflags};
 use crate::trapframe::{KtrapFrame, KtrapFrameData, TrapKind};
@@ -83,15 +83,20 @@ pub fn registers(read: &dyn Fn(&str) -> Option<u64>, arm64: bool) -> View {
 
     View::new().main([ui::col()
         .role("ntoseye.registers")
-        .child(register_grid(read))
+        .child(register_grid(read, &|_| false))
         .child(register_table(&trailer))])
 }
 
 /// The general-purpose registers in the text grid's rows, flags decoded:
-/// `r`'s first table, and the registers a stop card shows.
-pub fn register_grid(read: &dyn Fn(&str) -> Option<u64>) -> Table<()> {
+/// `r`'s first table, and the registers a stop card shows, those `changed`
+/// since the last stop standing out.
+pub fn register_grid(
+    read: &dyn Fn(&str) -> Option<u64>,
+    changed: &dyn Fn(&str) -> bool,
+) -> Table<()> {
     let value = |name: &str| -> Vec<Span> {
         match read(name) {
+            Some(value) if changed(name) => vec![addr(value).style(CHANGED)],
             Some(value) => vec![addr(value)],
             None => vec![span("N/A", MUTED)],
         }
@@ -144,6 +149,31 @@ pub fn register_grid(read: &dyn Fn(&str) -> Option<u64>) -> Table<()> {
     };
     register_table(&grid)
 }
+
+/// The general-purpose registers `changed` since the last stop, in the
+/// grid's order.
+pub fn changed_registers(
+    read: &dyn Fn(&str) -> Option<u64>,
+    changed: &dyn Fn(&str) -> bool,
+) -> Vec<&'static str> {
+    let names: &[&'static str] = if read("pc").is_some() {
+        &ARM64_GRID
+    } else {
+        &X64_GRID
+    };
+    names.iter().copied().filter(|name| changed(name)).collect()
+}
+
+/// The registers of the grid, by architecture, in reading order.
+const X64_GRID: [&str; 18] = [
+    "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rsp", "rbp", "rip", "r8", "r9", "r10", "r11", "r12",
+    "r13", "r14", "r15", "eflags",
+];
+const ARM64_GRID: [&str; 34] = [
+    "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14",
+    "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27",
+    "x28", "fp", "lr", "sp", "pc", "cpsr",
+];
 
 /// Rows of (name, value) cells as a table with no header: a name column
 /// and a value column per pair, the rightmost pair hiding first.

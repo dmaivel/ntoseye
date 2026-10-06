@@ -9,7 +9,7 @@ use crate::dbg_backend::{
 use crate::error::Result;
 use crate::guest::ModuleInfo;
 use crate::session::stops::module_event_line;
-use crate::session::{ContinueOutcome, Session, StopResolution};
+use crate::session::{ContinueOutcome, Session, ShownStop, StopResolution};
 use crate::target::{HYPERVISOR_CONTEXT, Target, ThreadInfo, kthread_state_name};
 use crate::types::VirtAddr;
 use crate::ui;
@@ -398,6 +398,9 @@ struct StopContext {
     #[cfg(feature = "cli")]
     bugcheck: bool,
     regs: Vec<u8>,
+    /// The register file of the previous stop on the same thread, when the
+    /// display marks what changed since.
+    before: Option<Vec<u8>>,
     /// The saved VTL0 registers a hypervisor stop inspects instead of the
     /// vCPU's.
     saved: Option<HashMap<String, u64>>,
@@ -434,7 +437,12 @@ fn print_stop_text(session: &Session, stop: &StopContext) {
         outln!();
         return;
     }
-    print_registers(&session.register_map, &stop.regs, true);
+    print_registers(
+        &session.register_map,
+        &stop.regs,
+        stop.before.as_deref(),
+        true,
+    );
     print_disasm_context(session, &stop.trace, stop.rip);
     print_stacktrace(
         &session.target,
@@ -456,16 +464,31 @@ fn stop_view(session: &Session, stop: &StopContext, tone: tern_sdk::ui::Tone) ->
             let (trace, rip, stack) = saved_vtl0_code(session, saved);
             let grid = native::styled(|| print_sparse_registers(saved, None, 0));
             (
-                ("registers (saved VTL0)", native::block(&grid).into()),
+                (
+                    vec![native::span("registers (saved VTL0)", "")],
+                    native::block(&grid).into(),
+                ),
                 disasm_context_rows(session, &trace, rip),
                 rip,
                 stack,
             )
         }
         None => {
-            let grid = native::frames::register_grid(&|name: &str| {
-                session.register_map.read_u64(name, &stop.regs).ok()
-            });
+            let map = &session.register_map;
+            let read = |name: &str| map.read_u64(name, &stop.regs).ok();
+            let changed = |name: &str| {
+                read(name).is_some_and(|value| changed(map, name, value, stop.before.as_deref()))
+            };
+            let grid = native::frames::register_grid(&read, &changed);
+            // Folded by default, the section's head names what changed.
+            let names = native::frames::changed_registers(&read, &changed);
+            let mut head = vec![native::span("registers", "")];
+            if !names.is_empty() {
+                head.push(native::span(
+                    format!("  {} changed", names.join(" ")),
+                    native::MUTED,
+                ));
+            }
             let stack = thread_stacktrace(
                 &session.target,
                 &session.register_map,
@@ -473,7 +496,7 @@ fn stop_view(session: &Session, stop: &StopContext, tone: tern_sdk::ui::Tone) ->
                 BREAK_STACKTRACE_PROBE_LIMIT,
             );
             (
-                ("registers", grid.into()),
+                (head, grid.into()),
                 disasm_context_rows(session, &stop.trace, stop.rip),
                 stop.rip,
                 stack,
@@ -628,6 +651,19 @@ pub fn print_break_context_at(
                 .map(|frame| frame.registers.clone())
         })
         .flatten();
+    // The previous stop's registers count only on the same vCPU and the
+    // same Windows thread: a stop elsewhere would mark nearly everything.
+    let ethread = windows_thread.as_ref().map_or(0, |thread| thread.ethread.0);
+    let before = session
+        .shown_stop
+        .take()
+        .filter(|shown| shown.thread == thread_id && shown.ethread == ethread)
+        .map(|shown| shown.regs);
+    session.shown_stop = Some(ShownStop {
+        thread: thread_id.clone(),
+        ethread,
+        regs: regs.clone(),
+    });
     let stop = StopContext {
         thread: thread_id,
         context,
@@ -639,6 +675,7 @@ pub fn print_break_context_at(
         #[cfg(feature = "cli")]
         bugcheck: display_rip.is_some(),
         regs,
+        before,
         saved,
         trace,
         rip: context_rip,

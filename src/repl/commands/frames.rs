@@ -1084,7 +1084,7 @@ fn print_exception_record(address: u64, record: &ExceptionRecord) {
 /// `r`'s text: the general-purpose grid, then the control and segment
 /// registers.
 fn print_register_grid(register_map: &RegisterMap, regs: &[u8], arch: Arch) {
-    print_registers(register_map, regs, false);
+    print_registers(register_map, regs, None, false);
     // Control registers match the GP-register cluster's
     // styling; segment selectors are 16-bit, so render
     // them as 4 digits rather than padding to 64-bit

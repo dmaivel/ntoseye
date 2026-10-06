@@ -566,6 +566,16 @@ pub enum ThreadContext {
     Parked,
 }
 
+/// A stop's register file as a host showed it; see [`Session::shown_stop`].
+#[derive(Debug, Clone)]
+pub struct ShownStop {
+    /// The vCPU, `p1.2`.
+    pub thread: String,
+    /// The Windows thread's ETHREAD, zero where no Windows thread runs.
+    pub ethread: u64,
+    pub regs: Vec<u8>,
+}
+
 /// The root owner of a live debugging session: the introspection context, the
 /// backend that drives the target, and the session state layered on top.
 pub struct Session {
@@ -658,6 +668,10 @@ pub struct Session {
     /// and for checking its breakpoints' hits; see
     /// [`Self::take_partition_target`].
     kept_partition: Option<KeptPartition>,
+    /// The register file the last stop display showed: a host that shows
+    /// stops marks the registers that changed by the next stop on the same
+    /// thread. Hosts that show no stops leave it unset.
+    pub shown_stop: Option<ShownStop>,
     /// Per-target single-instance lock, held for the session's lifetime so a
     /// second ntoseye can't attach to the same backend resource. `Some` via
     /// [`Self::connect`] (every host's attach path), `None` via the unguarded

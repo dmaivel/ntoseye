@@ -32,8 +32,8 @@ pub struct Stop<'a> {
     /// Further styled lines: where a bugcheck stopped, the hypervisor's
     /// saved state.
     pub lines: &'a [String],
-    /// The section's title and its registers.
-    pub registers: (&'a str, Node),
+    /// The section's head and its registers.
+    pub registers: (Vec<Span>, Node),
     /// The code at `current`, or why it can't be shown.
     pub code: Result<&'a [DisasmRow], String>,
     pub current: u64,

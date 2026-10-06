@@ -564,6 +564,9 @@ pub const REGISTER: &str = "ntRegister";
 pub const IMMEDIATE: &str = "ntNumber";
 /// A type name.
 pub const TYPE: &str = "ntType";
+/// A value that changed since the target last stopped, such as a register a
+/// step wrote: the warning color, as the text renderer's yellow.
+pub const CHANGED: &str = "warning";
 
 /// A span of `text` in `style` (space-separated tokens; empty is plain).
 pub fn span(text: impl Into<String>, style: &str) -> Span {

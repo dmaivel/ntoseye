@@ -94,6 +94,12 @@ pub fn disasm_asm(tokens: &[AsmToken]) -> String {
     out
 }
 
+/// A value that changed since the target last stopped, such as a register
+/// a step wrote: yellow like the current-instruction cursor.
+pub fn changed(text: &str) -> String {
+    text.yellow().to_string()
+}
+
 /// A breakpoint identifier accent, e.g. `#3` in cyan. Used consistently across
 /// every breakpoint message (set/hit/cleared/disabled/enabled).
 pub fn bp_id(id: impl Display) -> String {
