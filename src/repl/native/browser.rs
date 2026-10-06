@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use reedline::{Completer, Suggestion};
 use tern_sdk::keys::Key;
-use tern_sdk::ui::{self, Gap, KvLayout, Mark, Span, TextNode, Wrap};
+use tern_sdk::ui::{self, Align, Gap, Mark, Span, TextNode, Wrap};
 use tern_sdk::wire::{Event, RevealAt};
 use tern_sdk::{Input, Node, Session, SurfaceOptions, View};
 
@@ -82,12 +82,19 @@ const POINTER: u64 = 8;
 const FIND_RANGE: usize = 1 << 20;
 /// How many characters the inspector's strings show.
 const STRING_PREVIEW: usize = 32;
+/// The inspector's label column, and the column its numbers align right
+/// in: as wide as the widest, `-9223372036854775808`.
+const LABEL_WIDTH: usize = 6;
+const VALUE_WIDTH: usize = 20;
 /// FILETIMEs from 1990 to 2100: a value in this range reads as a time.
 const PLAUSIBLE_FILETIME: std::ops::Range<u64> = 122_756_256_000_000_000..157_469_184_000_000_000;
 /// How long a rebuilt listing takes Tern to lay out.
 const LAYOUT_WAIT: Duration = Duration::from_millis(60);
-/// The rows' column's key under `main`.
+/// The keys of the row under `main`, the rows' column in it and the
+/// inspector beside them.
+const SPLIT_KEY: &str = "split";
 const ROWS_KEY: &str = "rows";
+const INSPECTOR_KEY: &str = "inspector";
 /// The input field's key, and its id in the dock.
 const FIELD_KEY: &str = "field";
 const FIELD: &str = "dock.field";
@@ -1025,7 +1032,7 @@ impl<'s, 'a> Browser<'s, 'a> {
                 memory_key(lead)
             }
         };
-        format!("main.{ROWS_KEY}.{key}")
+        format!("main.{SPLIT_KEY}.{ROWS_KEY}.{key}")
     }
 
     fn view(&self) -> View<Msg> {
@@ -1086,14 +1093,18 @@ impl<'s, 'a> Browser<'s, 'a> {
                 view = view.layer(vec![popup.overlay(FIELD)]);
             }
         }
-        if self.pane == Pane::Memory {
-            dock.extend(self.inspector());
-        }
         dock.push(self.location().into());
         dock.push(hints(self.pane, self.layout).into());
+        // In memory, the inspector beside the rows; in code the rows take
+        // the width, so the cursor's mark runs across the pane.
+        let split = ui::row().key(SPLIT_KEY).gap(Gap::Lg).align(Align::Start);
+        let split = match self.pane {
+            Pane::Memory => split.child(rows).child(self.inspector()),
+            Pane::Code => split.child(rows.grow(1.0)),
+        };
         // A child of `main`, not its root: the screen region is a fixed-height
         // column that would shrink every row to nothing.
-        view.main(vec![Node::from(rows)]).dock(dock)
+        view.main(vec![Node::from(split)]).dock(dock)
     }
 
     fn code_line(&self, index: usize, width: usize) -> TextNode<Msg> {
@@ -1223,89 +1234,62 @@ impl<'s, 'a> Browser<'s, 'a> {
         if cursor { line.mark(Mark::Pick) } else { line }
     }
 
-    /// The values the bytes at the cursor make, little-endian: integers in
-    /// hex and decimal (signed too when negative), floats, the symbol a
-    /// pointer points into, a FILETIME, and the strings that start there.
-    /// The integers on one line, the rest on another, each a dock row.
-    fn inspector(&self) -> [Node<Msg>; 2] {
+    /// The values the bytes at the cursor make, little-endian, as a column
+    /// beside the memory rows, as ImHex's data inspector shows them: a row
+    /// per reading, the label, the hex of an unsigned integer, and the value
+    /// right-aligned to one edge, so moving the cursor changes the values and
+    /// nothing moves. Then the symbol a pointer points into, a FILETIME, and
+    /// the strings that start there.
+    fn inspector(&self) -> ui::Col<Msg> {
         let memory = &self.memory;
         let at = memory.cursor;
-        let none = || vec![span("—", DIM)];
-        let integer = |hex: String, unsigned: u64, signed: i64| {
-            let mut spans = vec![span(hex, ""), span(format!(" {unsigned}"), MUTED)];
-            if signed < 0 {
-                spans.push(span(format!(" ({signed})"), MUTED));
-            }
-            spans
-        };
-        let mut kv = ui::kv().layout(KvLayout::Inline);
-        kv = kv.item(
-            "u8",
-            memory.bytes::<1>(at).map_or_else(none, |[byte]| {
-                integer(format!("{byte:#04x}"), byte.into(), (byte as i8).into())
-            }),
-        );
-        kv = kv.item(
-            "u16",
-            memory
-                .bytes::<2>(at)
-                .map(u16::from_le_bytes)
-                .map_or_else(none, |value| {
-                    integer(format!("{value:#06x}"), value.into(), (value as i16).into())
-                }),
-        );
-        kv = kv.item(
-            "u32",
-            memory
-                .bytes::<4>(at)
-                .map(u32::from_le_bytes)
-                .map_or_else(none, |value| {
-                    integer(
-                        format!("{value:#010x}"),
-                        value.into(),
-                        (value as i32).into(),
-                    )
-                }),
-        );
+        let byte = memory.bytes::<1>(at).map(|[byte]| u64::from(byte));
+        let word = memory
+            .bytes::<2>(at)
+            .map(|bytes| u64::from(u16::from_le_bytes(bytes)));
+        let dword = memory
+            .bytes::<4>(at)
+            .map(|bytes| u64::from(u32::from_le_bytes(bytes)));
         let quad = memory.value(at);
-        kv = kv.item(
-            "u64",
-            quad.map_or_else(none, |value| {
-                integer(format!("{value:#018x}"), value, value as i64)
-            }),
-        );
-        let integers = kv;
-        let mut kv = ui::kv().layout(KvLayout::Inline);
-        kv = kv.item(
-            "f32",
-            memory.bytes::<4>(at).map_or_else(none, |bytes| {
-                vec![span(float(f32::from_le_bytes(bytes).into()), "")]
-            }),
-        );
-        kv = kv.item(
-            "f64",
-            memory.bytes::<8>(at).map_or_else(none, |bytes| {
-                vec![span(float(f64::from_le_bytes(bytes)), "")]
-            }),
-        );
+
+        let mut panel = ui::col().key(INSPECTOR_KEY).role("ntoseye.inspector");
+        for (bits, value) in [(8, byte), (16, word), (32, dword), (64, quad)] {
+            let hex = value.map(|value| format!("{value:#0width$x}", width = 2 + bits / 4));
+            let unsigned = value.map(|value| value.to_string());
+            // The value as the signed integer of its size.
+            let signed = value.map(|value| {
+                let shift = 64 - bits;
+                (((value << shift) as i64) >> shift).to_string()
+            });
+            panel = panel
+                .child(number_row(&format!("u{bits}"), hex, unsigned))
+                .child(number_row(&format!("i{bits}"), None, signed));
+        }
+        let single = dword.map(|bits| float(f32::from_bits(bits as u32).into()));
+        panel = panel
+            .child(number_row("f32", None, single))
+            .child(number_row(
+                "f64",
+                None,
+                quad.map(|bits| float(f64::from_bits(bits))),
+            ));
+
         let target = &self.state.ctx.target;
-        let pointer = quad.and_then(|value| {
+        let name = quad.and_then(|value| {
             let trace = resolve_thread_trace_context(target, target.current_dtb());
             try_format_symbol(target, &trace, value)
         });
         // Where Enter would go when the value has no symbol.
-        let pointer = match (pointer, quad) {
+        let pointer = match (name, quad) {
             (Some(name), _) => symbol(&name),
             (None, Some(value)) if self.points_somewhere(value) => {
                 vec![span(self.pane_for(value).name(), MUTED)]
             }
-            _ => none(),
+            _ => vec![span("—", DIM)],
         };
-        kv = kv.item("ptr", pointer);
         let time = quad
             .filter(|value| PLAUSIBLE_FILETIME.contains(value))
             .and_then(filetime_to_iso);
-        kv = kv.item("time", time.map_or_else(none, |time| vec![span(time, "")]));
         let ascii: String = (0..STRING_PREVIEW as u64)
             .map_while(|offset| memory.byte(at + offset))
             .take_while(|byte| (0x20..=0x7e).contains(byte))
@@ -1321,14 +1305,20 @@ impl<'s, 'a> Browser<'s, 'a> {
         // One character is as likely chance as text.
         let string = |text: String| {
             if text.chars().count() < 2 {
-                none()
+                vec![span("—", DIM)]
             } else {
                 vec![span(format!("\"{text}\""), STRING)]
             }
         };
-        kv = kv.item("ascii", string(ascii));
-        let rest = kv.item("utf16", string(utf16));
-        [integers.into(), rest.into()]
+        let none = || vec![span("—", DIM)];
+        panel
+            .child(text_row("ptr", pointer))
+            .child(text_row(
+                "time",
+                time.map_or_else(none, |time| vec![span(time, "")]),
+            ))
+            .child(text_row("ascii", string(ascii)))
+            .child(text_row("utf16", string(utf16)))
     }
 
     /// The pane, where the cursor is, and the last note.
@@ -1380,14 +1370,40 @@ fn completes(kind: FieldKind, draft: &str) -> bool {
         || !(draft.starts_with('"') || draft.starts_with("u\"") || hex_pairs(draft).is_some())
 }
 
-/// A float as the inspector shows it: plainly in a readable range, else in
-/// exponent form rather than hundreds of digits.
+/// An inspector row for a number: the label, the hex of an unsigned
+/// integer in a column as wide as a quadword's, and the value right-aligned
+/// to [`VALUE_WIDTH`], or a dash where the bytes were not read.
+fn number_row(label: &str, hex: Option<String>, value: Option<String>) -> TextNode<Msg> {
+    let hex = hex.unwrap_or_default();
+    let value = match value {
+        Some(value) => span(format!("{value:>VALUE_WIDTH$}"), ""),
+        None => span(format!("{:>VALUE_WIDTH$}", "—"), DIM),
+    };
+    ui::text(vec![
+        span(format!("{label:<LABEL_WIDTH$}"), MUTED),
+        span(format!("{hex:<18}  "), MUTED),
+        value,
+    ])
+    .wrap(Wrap::None)
+}
+
+/// An inspector row for text: the label and the text as it is.
+fn text_row(label: &str, value: Vec<Span>) -> TextNode<Msg> {
+    let mut spans = vec![span(format!("{label:<LABEL_WIDTH$}"), MUTED)];
+    spans.extend(value);
+    ui::text(spans).wrap(Wrap::None)
+}
+
+/// A float as the inspector shows it: four decimals in a readable range,
+/// else exponent form, never hundreds of digits.
 fn float(value: f64) -> String {
     let magnitude = value.abs();
-    if value == 0.0 || !value.is_finite() || (1e-4..1e15).contains(&magnitude) {
+    if value == 0.0 || !value.is_finite() {
         format!("{value}")
+    } else if (1e-3..1e7).contains(&magnitude) {
+        format!("{value:.4}")
     } else {
-        format!("{value:e}")
+        format!("{value:.4e}")
     }
 }
 

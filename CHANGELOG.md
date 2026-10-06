@@ -21,7 +21,7 @@ Keeping this file:
 
 - After a stop on the same thread as the one before, the stop display marks the registers that changed since: yellow in the register grid, and in Tern the folded registers name them (`registers rsp rip changed`) and show their values in amber.
 - `display <expression>` shows the expression's value at the end of every stop, marked when it changed since the last stop, as gdb's `display` does; `display` alone lists the displays and `undisplay` removes them. In Tern they are a table in the stop card.
-- In Tern, `browse` or F2 at the prompt opens a full-screen code and memory browser. It pages through disassembly, and through memory as a hex view with a byte cursor, bytes colored by kind and an inspector of the values at the cursor, or as pointers with their symbols. Enter follows branches, `[rip+…]` operands and pointers and Backspace goes back, `g` goes to an expression with completions, `/` finds text, bytes or a pointer, and `b` sets or clears breakpoints in code and write watchpoints in memory.
+- In Tern, `browse` or F2 at the prompt opens a full-screen code and memory browser. It pages through disassembly, and through memory as a hex view with a byte cursor, bytes colored by kind and an inspector beside it of the values at the cursor, or as pointers with their symbols. Enter follows branches, `[rip+…]` operands and pointers and Backspace goes back, `g` goes to an expression with completions, `/` finds text, bytes or a pointer, and `b` sets or clears breakpoints in code and write watchpoints in memory.
 
 ### Fixed
 

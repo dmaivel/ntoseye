@@ -21,3 +21,14 @@
 	box-shadow: inset 2px 0 0 var(--accent);
 	border-radius: 3px;
 }
+
+/* The browser's inspector, beside the memory rows: it stays in view as
+   they scroll, at its own width. */
+[data-role='ntoseye.inspector'] {
+	position: sticky;
+	top: 0;
+	align-self: flex-start;
+	flex-shrink: 0;
+	padding-left: 16px;
+	border-left: 1px solid rgb(from currentColor r g b / 12%);
+}

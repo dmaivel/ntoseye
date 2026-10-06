@@ -56,7 +56,7 @@ These keys work in code and in memory:
 - **/** finds text, bytes or a value after the cursor: `"text"`, `u"text"` for UTF-16, hex byte pairs such as `48 8b 05`, or an expression, whose value is found as a pointer. Each find searches 1 MB, and **N** finds the next match or searches the next 1 MB.
 - **B** sets or clears a breakpoint at the instruction under the cursor, or in memory a write watchpoint (`ba w`) on the bytes at the cursor, as wide as the address's alignment allows, up to 8 bytes.
 
-Memory shows 16 bytes a row in hex and as text, with a byte cursor. Bytes are colored by what they are: zero bytes dim, printable ASCII in the string color, other ASCII as a keyword, and watched bytes red. **←** and **→** move a byte, and **Home** and **End** go to the start and end of the row. **P** switches to one pointer a row with the symbol it points into, and back. Under the rows, the inspector shows what the bytes at the cursor are as little-endian integers (signed too when negative), floats, the symbol a pointer points into, a FILETIME, and the ASCII and UTF-16 strings that start there.
+Memory shows 16 bytes a row in hex and as text, with a byte cursor. Bytes are colored by what they are: zero bytes dim, printable ASCII in the string color, other ASCII as a keyword, and watched bytes red. **←** and **→** move a byte, and **Home** and **End** go to the start and end of the row. **P** switches to one pointer a row with the symbol it points into, and back. Beside the rows, the inspector shows what the bytes at the cursor are: little-endian integers of each size, unsigned with their hex and signed, floats, the symbol a pointer points into, a FILETIME, and the ASCII and UTF-16 strings that start there. It stays in view as the rows scroll.
 
 ## Aliases
 
