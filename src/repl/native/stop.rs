@@ -140,6 +140,44 @@ pub fn stop_card(stop: Stop<'_>) -> View {
     View::new().main([card])
 }
 
+/// The stop after the guest rebooted: where it stopped, a `reboot` chip,
+/// and what was reloaded. Only the kernel is known this early in boot, so
+/// there is no thread, code or stack to show.
+pub fn reboot_card(thread: &str, pc: Option<u64>, at: Option<&str>, coherent: bool) -> View {
+    let mut place = vec![
+        span(thread, "info"),
+        span(" kernel ", STRONG),
+        span("at ", MUTED),
+    ];
+    match (pc, at) {
+        (Some(_), Some(name)) => place.extend(symbol(name)),
+        (Some(pc), None) => place.push(addr(pc)),
+        (None, _) => place.push(span("unknown", MUTED)),
+    }
+    let mut head = ui::row()
+        .key("head")
+        .gap(Gap::Sm)
+        .align(Align::Center)
+        .child(ui::text(place).wrap(Wrap::None).grow(1.0))
+        .child(ui::badge("reboot").tone(Tone::Info));
+    if let Some(ran) = super::take_run() {
+        head = head.child(ran_row(ran));
+    }
+    let note = if coherent {
+        "kernel reloaded"
+    } else {
+        "kernel reloaded, module list not available yet (continue to finish)"
+    };
+    let card = ui::card()
+        .key("stop")
+        .head("main.stop.head")
+        .tone(Tone::Info)
+        .role("ntoseye.stop")
+        .child(head)
+        .child(ui::text([span(note, MUTED)]).wrap(Wrap::Word));
+    View::new().main([card])
+}
+
 /// `thread dwm.exe  state Running  ethread …  pid 3832  tid 3956`: muted
 /// keys, evenly spaced, as the text renderer prints it.
 fn thread_line(thread: &ThreadInfo) -> ui::TextNode<()> {

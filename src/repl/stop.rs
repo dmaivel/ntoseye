@@ -257,15 +257,31 @@ pub fn print_target_reload(
     pc: Option<u64>,
     coherent: bool,
 ) {
-    let location = pc.map_or_else(
-        || "unknown".bright_black().to_string(),
-        |pc| {
-            debugger
-                .symbols
-                .format_closest_symbol_for_address(debugger.kernel_dtb(), VirtAddr(pc))
-                .map_or_else(|| ui::addr(pc), |symbol| ui::symbol(&symbol))
-        },
+    let symbol = pc.and_then(|pc| {
+        debugger
+            .symbols
+            .format_closest_symbol_for_address(debugger.kernel_dtb(), VirtAddr(pc))
+    });
+    #[cfg(feature = "cli")]
+    native::render(
+        || native::stop::reboot_card(current_thread, pc, symbol.as_deref(), coherent),
+        || print_target_reload_text(current_thread, pc, symbol.as_deref(), coherent),
     );
+    #[cfg(not(feature = "cli"))]
+    print_target_reload_text(current_thread, pc, symbol.as_deref(), coherent);
+}
+
+fn print_target_reload_text(
+    current_thread: &str,
+    pc: Option<u64>,
+    symbol: Option<&str>,
+    coherent: bool,
+) {
+    let location = match (pc, symbol) {
+        (None, _) => "unknown".bright_black().to_string(),
+        (Some(_), Some(symbol)) => ui::symbol(symbol),
+        (Some(pc), None) => ui::addr(pc),
+    };
     outln!(
         "{}{}",
         ui::badge("BREAK"),
