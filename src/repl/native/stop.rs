@@ -41,6 +41,8 @@ pub struct Stop<'a> {
     pub stack_limit: usize,
     /// How long the target ran to reach the stop.
     pub ran: Option<Duration>,
+    /// The `display` expressions' values, when there are any.
+    pub displays: Option<Node>,
 }
 
 pub fn stop_card(stop: Stop<'_>) -> View {
@@ -127,6 +129,14 @@ pub fn stop_card(stop: Stop<'_>) -> View {
                 StackColumns::default(),
             )),
     );
+    if let Some(displays) = stop.displays {
+        card = card.child(
+            ui::section()
+                .head("display")
+                .collapsible(true)
+                .child(displays),
+        );
+    }
     View::new().main([card])
 }
 

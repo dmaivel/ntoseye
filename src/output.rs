@@ -346,7 +346,7 @@ pub fn capture_styled<R>(f: impl FnOnce() -> R) -> (R, String) {
 
 /// Remove ANSI escape sequences: CSI (`ESC [ … final`) and OSC (`ESC ] … BEL`
 /// / `ESC \`), which is everything `owo_colors` emits.
-fn strip_ansi(text: &str) -> String {
+pub fn strip_ansi(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {

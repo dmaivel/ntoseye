@@ -5,6 +5,8 @@ use tern_sdk::ui::{self, Align, Column, Gap, Node, Span, Table, TableRow, Wrap};
 
 use super::{CHANGED, MUTED, addr, code, span, stack, symbol};
 use crate::disasm::DisasmRow;
+use crate::output::strip_ansi;
+use crate::repl::commands::display;
 use crate::repl::{StackColumns, format_rflags};
 use crate::trapframe::{KtrapFrame, KtrapFrameData, TrapKind};
 use crate::unwind::StackTrace;
@@ -148,6 +150,53 @@ pub fn register_grid(
         rows
     };
     register_table(&grid)
+}
+
+/// The `display` expressions' values as a table: number, expression,
+/// value; a changed value in the warning color, an error muted.
+pub fn displays(shown: &[display::Shown]) -> Node {
+    let mut table = ui::table()
+        .col(Column::new("n", "#"))
+        .col(Column::new("expr", "Expression"))
+        .col(Column::new("value", "Value"));
+    for shown in shown {
+        let changed = |span: Span| {
+            if shown.changed {
+                span.style(CHANGED)
+            } else {
+                span
+            }
+        };
+        let value: Vec<Span> = match &shown.value {
+            Ok(display::Value::Raw {
+                value,
+                symbol: name,
+            }) => {
+                let mut spans = vec![changed(addr(*value))];
+                if let Some(name) = name {
+                    spans.push(span("  ", ""));
+                    spans.extend(symbol(name));
+                }
+                spans
+            }
+            Ok(display::Value::Typed { type_name, text }) => vec![
+                span(format!("{type_name} "), MUTED),
+                changed(ui::span(strip_ansi(text))),
+            ],
+            Ok(display::Value::Aggregate { type_name, address }) => vec![
+                span(format!("{type_name} at "), MUTED),
+                changed(addr(*address)),
+            ],
+            Err(error) => vec![span(error.clone(), MUTED)],
+        };
+        table = table.row(
+            TableRow::new(shown.id.to_string())
+                .cell("n", span(shown.id.to_string(), MUTED))
+                .cell("expr", ui::span(shown.expr.clone()))
+                .cell("value", value),
+        );
+    }
+    table.into()
 }
 
 /// The general-purpose registers `changed` since the last stop, in the

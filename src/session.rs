@@ -22,6 +22,7 @@ use crate::dbg_backend::{
 use crate::disasm::ControlFlow;
 use crate::error::{Error, Result};
 use crate::exception_policy::ExceptionPolicyTable;
+use crate::expr::NumberRadix;
 use crate::gdb::RegisterMap;
 use crate::guest::{ModuleInfo, ModuleSymbolLoadReport, ProcessInfo};
 use crate::session::lifecycle::InstanceGuard;
@@ -566,6 +567,17 @@ pub enum ThreadContext {
     Parked,
 }
 
+/// An expression a host shows at every stop (`display`), in the radix it
+/// was entered in.
+#[derive(Debug, Clone)]
+pub struct Display {
+    pub id: u32,
+    pub expr: String,
+    pub radix: NumberRadix,
+    /// Its value at the last stop that showed it, for marking a change.
+    pub last: Option<u64>,
+}
+
 /// A stop's register file as a host showed it; see [`Session::shown_stop`].
 #[derive(Debug, Clone)]
 pub struct ShownStop {
@@ -672,6 +684,8 @@ pub struct Session {
     /// stops marks the registers that changed by the next stop on the same
     /// thread. Hosts that show no stops leave it unset.
     pub shown_stop: Option<ShownStop>,
+    /// The expressions the stop display shows at every stop.
+    pub displays: Vec<Display>,
     /// Per-target single-instance lock, held for the session's lifetime so a
     /// second ntoseye can't attach to the same backend resource. `Some` via
     /// [`Self::connect`] (every host's attach path), `None` via the unguarded

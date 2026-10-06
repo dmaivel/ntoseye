@@ -8,6 +8,7 @@ use crate::dbg_backend::{
 };
 use crate::error::Result;
 use crate::guest::ModuleInfo;
+use crate::repl::commands::display;
 use crate::session::stops::module_event_line;
 use crate::session::{ContinueOutcome, Session, ShownStop, StopResolution};
 use crate::target::{HYPERVISOR_CONTEXT, Target, ThreadInfo, kthread_state_name};
@@ -401,6 +402,8 @@ struct StopContext {
     /// The register file of the previous stop on the same thread, when the
     /// display marks what changed since.
     before: Option<Vec<u8>>,
+    /// The `display` expressions, evaluated at this stop.
+    displays: Vec<display::Shown>,
     /// The saved VTL0 registers a hypervisor stop inspects instead of the
     /// vCPU's.
     saved: Option<HashMap<String, u64>>,
@@ -434,6 +437,7 @@ fn print_stop_text(session: &Session, stop: &StopContext) {
     print_event_children(" ", &stop.children());
     if let Some(saved) = &stop.saved {
         print_saved_vtl0_context(session, saved);
+        print_displays(&stop.displays);
         outln!();
         return;
     }
@@ -452,7 +456,17 @@ fn print_stop_text(session: &Session, stop: &StopContext) {
         BREAK_STACKTRACE_DISPLAY_LIMIT,
         true,
     );
+    print_displays(&stop.displays);
     outln!();
+}
+
+/// The `display` expressions under a stop, in a section of their own.
+fn print_displays(shown: &[display::Shown]) {
+    if shown.is_empty() {
+        return;
+    }
+    print_section("display");
+    display::print(shown);
 }
 
 #[cfg(feature = "cli")]
@@ -518,6 +532,7 @@ fn stop_view(session: &Session, stop: &StopContext, tone: tern_sdk::ui::Tone) ->
         stack: &stack,
         stack_limit: BREAK_STACKTRACE_DISPLAY_LIMIT,
         ran,
+        displays: (!stop.displays.is_empty()).then(|| native::frames::displays(&stop.displays)),
     })
 }
 
@@ -664,6 +679,7 @@ pub fn print_break_context_at(
         ethread,
         regs: regs.clone(),
     });
+    let displays = display::evaluate(session, true);
     let stop = StopContext {
         thread: thread_id,
         context,
@@ -676,6 +692,7 @@ pub fn print_break_context_at(
         bugcheck: display_rip.is_some(),
         regs,
         before,
+        displays,
         saved,
         trace,
         rip: context_rip,

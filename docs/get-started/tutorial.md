@@ -175,7 +175,7 @@ For more information about registers, pseudo-registers, casts, and members, see 
 
 ## Step
 
-{command}`p` steps over one instruction, and {command}`gu` runs until the current function returns. At each stop, `ntoseye` shows a stop header again, and when the stop is on the same thread as the one before, the registers that changed since are yellow:
+{command}`p` steps over one instruction, and {command}`gu` runs until the current function returns. At each stop, `ntoseye` shows a stop header again, and when the stop is on the same thread as the one before, the registers that changed since are yellow. To follow a value while you step, {command}`display` shows it at the end of every stop, also yellow when it changed, until you remove it with {command}`undisplay`:
 
 ```text
 kdnet:p1.1> p

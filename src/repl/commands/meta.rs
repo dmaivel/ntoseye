@@ -688,6 +688,8 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("!wmitrace.logsave", "analysis"),
     ("!wmitrace.strdump", "analysis"),
     ("?", "symbols, types, and expressions"),
+    ("display", "symbols, types, and expressions"),
+    ("undisplay", "symbols, types, and expressions"),
     ("dt", "symbols, types, and expressions"),
     ("dv", "symbols, types, and expressions"),
     ("ln", "symbols, types, and expressions"),

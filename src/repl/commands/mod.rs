@@ -11,6 +11,7 @@ pub mod analyze;
 pub mod breakpoints;
 mod cpu;
 mod diagnostics;
+pub mod display;
 mod etw;
 mod exceptions;
 pub mod exec;
