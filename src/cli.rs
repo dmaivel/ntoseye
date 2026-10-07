@@ -1,4 +1,4 @@
-use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use owo_colors::OwoColorize;
 use std::ffi::OsString;
 use std::mem::take;
@@ -90,6 +90,13 @@ struct TargetOptions {
     /// {server}/{filename}/{guid}{age}/{filename}
     #[arg(long, global = true)]
     pdb_server: Vec<String>,
+
+    /// Append a local directory to the symbol path, which you can give more
+    /// than once. ntoseye looks for PDB files (bare or in symbol-store
+    /// layout) in these directories after checking the cache and before
+    /// contacting symbol servers
+    #[arg(long, global = true)]
+    sympath_append: Vec<PathBuf>,
 
     /// Download the symbols again
     #[arg(long = "force-download-symbols", global = true)]
@@ -308,13 +315,42 @@ fn reference_json() -> String {
 /// Run the CLI on `args` (the program name first) and return the process
 /// exit status. The wheel's `ntoseye` script calls this with `sys.argv`.
 pub fn run_with_args(args: impl IntoIterator<Item = OsString>) -> i32 {
-    match run(Cli::parse_from(args)) {
+    let cli = parse_cli(args).unwrap_or_else(|error| error.exit());
+    match run(cli) {
         Ok(()) => 0,
         Err(error) => {
             diagnostics::print_error(error);
             1
         }
     }
+}
+
+fn parse_cli(args: impl IntoIterator<Item = OsString>) -> std::result::Result<Cli, clap::Error> {
+    // Clap replaces a global argument's parent values with its subcommand
+    // values, even for ArgAction::Append. Parse this option separately at
+    // each level, then combine the paths in command-line order.
+    let command = Cli::command().mut_arg("sympath_append", |arg| arg.global(false));
+    let symbol_path_arg = command
+        .get_arguments()
+        .find(|arg| arg.get_id() == "sympath_append")
+        .expect("sympath_append is a target option")
+        .clone();
+    let matches = command
+        .mut_subcommands(|subcommand| subcommand.arg(symbol_path_arg.clone()))
+        .try_get_matches_from(args)?;
+    let paths = std::iter::once(&matches)
+        .chain(matches.subcommand().map(|(_, matches)| matches))
+        .flat_map(|matches| {
+            matches
+                .get_many::<PathBuf>("sympath_append")
+                .into_iter()
+                .flatten()
+        })
+        .cloned()
+        .collect();
+    let mut cli = Cli::from_arg_matches(&matches)?;
+    cli.target.sympath_append = paths;
+    Ok(cli)
 }
 
 fn run(cli: Cli) -> Result<()> {
@@ -378,6 +414,7 @@ fn run(cli: Cli) -> Result<()> {
         })?;
 
     let pdb_servers = take(&mut args.pdb_server);
+    let sympath_append = take(&mut args.sympath_append);
     symbols::NO_PDB_FROM_MEMORY
         .set(args.no_pdb_from_memory)
         .map_err(|_| {
@@ -386,6 +423,11 @@ fn run(cli: Cli) -> Result<()> {
     if !pdb_servers.is_empty() {
         symbols::PDB_SERVERS.set(pdb_servers).map_err(|_| {
             Error::DebugInfo("PDB server list was initialized before startup".into())
+        })?;
+    }
+    if !sympath_append.is_empty() {
+        symbols::SYMPATH_APPEND.set(sympath_append).map_err(|_| {
+            Error::DebugInfo("sympath-append list was initialized before startup".into())
         })?;
     }
 
@@ -507,7 +549,69 @@ fn server_startup_spec(
 mod tests {
     use clap::CommandFactory;
 
-    use super::Cli;
+    use super::{Cli, parse_cli};
+
+    #[test]
+    fn symbol_paths_accumulate_across_subcommands() {
+        let commands = [
+            "configure",
+            "status",
+            #[cfg(feature = "mcp")]
+            "mcp",
+            #[cfg(feature = "dap")]
+            "dap",
+            #[cfg(feature = "gdbserver")]
+            "gdbserver",
+        ];
+        let paths = ["symbols one", "status", "symbols-three"];
+        for command in commands {
+            for position in 0..=paths.len() {
+                let mut args = vec!["ntoseye".to_string()];
+                for index in 0..=paths.len() {
+                    if index == position {
+                        args.push(command.to_string());
+                    }
+                    if let Some(path) = paths.get(index) {
+                        if index % 2 == 0 {
+                            args.extend(["--sympath-append".to_string(), path.to_string()]);
+                        } else {
+                            args.push(format!("--sympath-append={path}"));
+                        }
+                    }
+                }
+                let cli = parse_cli(args.into_iter().map(Into::into)).unwrap();
+                assert_eq!(
+                    cli.target.sympath_append,
+                    paths.map(std::path::PathBuf::from),
+                    "{command} at position {position}",
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symbol_paths_preserve_non_utf8_paths_across_subcommands() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        use std::path::PathBuf;
+
+        let first = OsString::from_vec(b"symbols-\xff".to_vec());
+        let second = OsString::from_vec(b"symbols-\xfe".to_vec());
+        let cli = parse_cli([
+            "ntoseye".into(),
+            "--sympath-append".into(),
+            first.clone(),
+            "status".into(),
+            "--sympath-append".into(),
+            second.clone(),
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.target.sympath_append,
+            [PathBuf::from(first), PathBuf::from(second)],
+        );
+    }
 
     #[test]
     fn command_definition_is_valid() {
@@ -519,8 +623,6 @@ mod tests {
     #[cfg(feature = "gdbserver")]
     #[test]
     fn target_options_parse_before_and_after_the_subcommand() {
-        use clap::Parser;
-
         let options = [
             "--backend",
             "kdnet",
@@ -534,13 +636,23 @@ mod tests {
             "https://symbols.example",
             "--force-download-symbols",
         ];
-        let after = Cli::try_parse_from(["ntoseye", "gdbserver"].into_iter().chain(options))
-            .unwrap()
-            .target;
-        let before =
-            Cli::try_parse_from(["ntoseye"].into_iter().chain(options).chain(["gdbserver"]))
-                .unwrap()
-                .target;
+        let after = parse_cli(
+            ["ntoseye", "gdbserver"]
+                .into_iter()
+                .chain(options)
+                .map(Into::into),
+        )
+        .unwrap()
+        .target;
+        let before = parse_cli(
+            ["ntoseye"]
+                .into_iter()
+                .chain(options)
+                .chain(["gdbserver"])
+                .map(Into::into),
+        )
+        .unwrap()
+        .target;
         for target in [after, before] {
             assert_eq!(target.backend, Some(crate::Backend::KdNet));
             assert_eq!(target.connect.as_deref(), Some("0.0.0.0:50000"));

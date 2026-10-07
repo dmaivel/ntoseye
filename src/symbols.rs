@@ -27,6 +27,10 @@ pub static FORCE_DOWNLOADS: OnceLock<bool> = OnceLock::new();
 
 pub static PDB_SERVERS: OnceLock<Vec<String>> = OnceLock::new();
 
+/// Additional local directories appended to the symbol path by
+/// `--sympath-append`.
+pub static SYMPATH_APPEND: OnceLock<Vec<PathBuf>> = OnceLock::new();
+
 /// Set by `--no-pdb-from-memory`: never rebuild a missing PDB from the
 /// guest's memory (see `crate::guest::recover_pdbs`).
 pub static NO_PDB_FROM_MEMORY: OnceLock<bool> = OnceLock::new();
@@ -60,6 +64,14 @@ static DEFAULT_SYMBOL_SOURCES: LazyLock<Vec<SymbolSource>> = LazyLock::new(|| {
             .map(|s| SymbolSource::Http(s.to_string())),
     );
     sources.push(SymbolSource::Http(DEFAULT_SYMBOL_SERVER.to_string()));
+    sources.extend(
+        SYMPATH_APPEND
+            .get()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(SymbolSource::LocalDirectory),
+    );
     sources
 });
 
