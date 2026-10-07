@@ -19,44 +19,95 @@ ntoseye shows color only when the output goes to a terminal. If you redirect the
 
 ## In Tern
 
-In [Tern](https://stencil.so/tern), Stencil's terminal, the REPL draws its results natively instead of as text. This support is experimental: it follows a young protocol that is still changing, so a Tern update can change how it looks or turn parts of it back into text until ntoseye catches up. Other terminals aren't affected, and `TERN_TSP=0` or `--plain-repl` turns it off.
+[Tern](https://stencil.so/tern) is Stencil's terminal. When you run ntoseye in it, the REPL uses Tern's own interface: you type in a real input field, and stops, stacks, memory dumps and other results appear as cards, tables and trees instead of plain text. Other terminals aren't affected.
 
-- The prompt is Tern's own input field at the bottom of the pane, under a status bar with the backend, the thread, whether the target is running, and the keys. **Tab** opens the completions in a popup at the caret, which narrows as you type. The line is colored as you type it, with an unknown command in red. The newest earlier line that starts with what you typed shows dim after the caret, and **→** or **End** takes it. **↑** and **↓** go through the history, **Ctrl+Z** undoes, and a pasted block becomes one line of commands separated by `;`.
-- A stop is a card. A chip in its head says why the target stopped, such as `breakpoint #0`, `exception 0xC0000005` or `bugcheck`, in the color of the card's ring: the accent for a breakpoint, amber for an exception, red for a bugcheck. Hover over an exception's chip to see the name of its status code. Beside the chip is how long the target ran. The card holds the thread, the registers (folded), the code at the stop with the current instruction marked, and the stack. After a stop on the same thread, the folded registers name the registers that changed since that stop, such as `registers rsp rip changed`, and open with those values in amber. The {command}`display` expressions are a table at the end of the card, with the values that changed in amber. The first stop after the guest reboots is a card with a `reboot` chip that says whether the module list is available yet.
-- A bugcheck is a red card with the bugcheck's name and code, its parameters and what they mean, the faulting module and the trap frames. {command}`!analyze` shows its report as one card, with a section for each part of the report.
-- {command}`.trap` is a card with a chip for the kind of entry that built the frame, such as `system call` or `exception`. A register that the entry doesn't save shows `-`, and the chip's tooltip says which ones. Trap frames in a bugcheck card use the same layout.
-- {command}`k`, {command}`lm`, {command}`!process`, {command}`ps`, {command}`bl`, {command}`~`, {command}`x`, {command}`!vad`, {command}`vmmap`, {command}`!pte` and {command}`vars` are tables. In a narrow pane, their less important columns hide first, and a column that no row fills is left out. {command}`x` shows the `$n` variable that holds each match, and {command}`!vad` and {command}`vmmap` highlight memory that is both writable and executable, except the copy-on-write sections that every image has.
-- Memory dumps such as {command}`db`, {command}`dd` and {command}`dq` dim the zero values and show a byte that isn't printable as `·`, and {command}`dqs` lists the symbol of each value.
-- {command}`dt`, {command}`wt` and {command}`!hvpartitions` are trees that you can fold, and {command}`.help` folds by category. `.help <command>` is a card with the command's usage and details.
-- {command}`r` is a register grid, and {command}`u`, {command}`ub` and {command}`uf` color instructions with Tern's syntax colors. To copy an instruction line, right-click it and choose **Copy**.
-- {command}`ls` and {command}`lsa` show source in Tern's highlighting for the file's language, with line numbers and the current line marked, under a header that opens the file in Tern. A stop at a line of a file that {command}`.srcpath` finds shows that source in the card, and the disassembly folds under it.
-- While {command}`g` waits for a stop, a timer shows how long the target has run.
-- Long tasks, such as downloading and indexing symbols and writing a dump with {command}`.dump`, show a Tern progress bar.
+Tern support is experimental. It's built on a protocol that is still changing, so a Tern update can change how things look, or turn some views back into text until ntoseye catches up.
 
-Other commands print text. ntoseye asks the terminal when it starts, so this also works over ssh, but not inside tmux, screen or zellij. Output that a host captures (MCP, the Python SDK, the DAP console, `.foreach`) and `.logopen` transcripts are always text. For text in Tern, set `TERN_TSP=0` or use `--plain-repl`.
+### The prompt
 
-A Tern too old to draw these views, such as a session daemon still running the version from before an update, gets text, and ntoseye says so when it starts. To run the updated version, use **Restart Tern** in Tern's command palette.
+You type commands in Tern's input field at the bottom of the pane. The status bar above it shows the backend, the current thread, whether the target is running, and the main keys.
+
+- **Tab** shows completions in a popup at the cursor, and the list narrows as you keep typing.
+- The line is colored as you type, and a command name that doesn't exist turns red.
+- If an earlier line starts with what you've typed, the rest of the most recent one appears dimmed after the cursor. Press **→** or **End** to accept it.
+- **↑** and **↓** step through your history, and **Ctrl+Z** undoes.
+- When you paste several lines, they become one line, with `;` between the commands.
+- **Alt+P** opens the [palette](#the-palette), **Ctrl+R** opens it on your history, and **F2** opens the [browser](#the-browser).
+
+If Tern doesn't answer when the prompt opens, ntoseye switches to its regular line editor for the rest of the session. Restart ntoseye to get Tern's input field back.
+
+### What results look like
+
+**Stops** are cards. A chip at the top says why the target stopped, such as `breakpoint #0`, `exception 0xC0000005` or `bugcheck`, and the card's border matches it: your theme's accent color for a breakpoint, amber for an exception, red for a bugcheck. Hover over an exception chip to see the name of its status code. Next to the chip is how long the target ran.
+
+The card shows the thread, the registers (folded), the code at the stop with the current instruction marked, and the stack. When the stop is on the same thread as the one before, the registers' heading names the ones that changed, such as `registers rsp rip changed`, and their values are amber when you open it. Your {command}`display` expressions are in a table at the end, with changed values in amber. If the stop is at a line of a source file that {command}`.srcpath` can find, the card shows that source and folds the disassembly under it. The first stop after the guest reboots has a `reboot` chip and says whether the module list is available yet.
+
+Other results:
+
+- A **bugcheck** is a red card with the bugcheck's name and code, what its parameters mean, the faulting module and the trap frames. {command}`!analyze` shows its report as one card, with a section for each part.
+- {command}`.trap` shows a card whose chip says what kind of entry built the frame, such as `system call` or `exception`. A register that kind of entry doesn't save shows `-`, and the chip's tooltip lists them. Trap frames in a bugcheck card look the same.
+- {command}`k`, {command}`lm`, {command}`!process`, {command}`ps`, {command}`bl`, {command}`~`, {command}`x`, {command}`!vad`, {command}`vmmap`, {command}`!pte` and {command}`vars` show **tables**. In a narrow pane the least important columns are hidden first, and columns with nothing in them are left out. {command}`x` shows the `$n` variable that holds each match, and {command}`!vad` and {command}`vmmap` highlight memory that is both writable and executable, apart from the copy-on-write sections every image has.
+- **Memory dumps** such as {command}`db`, {command}`dd` and {command}`dq` dim zero values and show unprintable bytes as `·`, and {command}`dqs` shows the symbol for each value.
+- {command}`dt`, {command}`wt` and {command}`!hvpartitions` show **trees** you can fold, and {command}`.help` groups the commands into categories you can fold. `.help <command>` shows a card with the command's usage and details.
+- {command}`r` shows a register grid, and {command}`u`, {command}`ub` and {command}`uf` color instructions with Tern's syntax colors. To copy an instruction, right-click its line and choose **Copy**.
+- {command}`ls` and {command}`lsa` show source highlighted for its language, with line numbers and the current line marked, under a header that opens the file in Tern.
+- While {command}`g` waits for a stop, a timer shows how long the target has been running.
+- Long tasks, such as downloading and indexing symbols or writing a dump with {command}`.dump`, show a progress bar.
+
+Commands that aren't listed here print text as usual.
+
+### When you get text instead
+
+ntoseye checks for Tern when it starts. This works over ssh, but not inside tmux, screen or zellij. To get plain text in Tern, set `TERN_TSP=0`. `--plain-repl` also gives you text, but without completion or history.
+
+Output that another program captures (MCP, the Python SDK, the DAP console and `.foreach`) is always text, and so are `.logopen` transcripts.
+
+If your Tern is too old to draw these views, you get text, and ntoseye tells you so when it starts. Usually this means Tern's session daemon is still running the version from before an update. Choose **Restart Tern** in Tern's command palette to switch to the new one.
 
 ### The palette
 
-In Tern, press **Alt+P** at the prompt to open the palette, a search sheet over the pane. Its tabs list the commands with your recent lines, all your earlier lines, the symbols, the types and the processes. **Ctrl+R** opens it on the earlier lines. Type to search, use the arrow keys or the mouse to choose, press **Tab** to change tabs, and press **Enter** to put your choice in the prompt, or **Escape** to close the palette without a change.
+Press **Alt+P** at the prompt to open the palette, a searchable list over the pane. Its tabs list the commands (with your recent lines), your whole history, the symbols, the types and the processes. **Ctrl+R** opens it on your history.
 
-The palette opens on the tab for what you are typing. For the command word it shows the commands, with the selected command's help under the list, and your choice replaces the line. For an argument it shows the symbols, the types for {command}`dt`, or the processes for a command that takes one, and your choice replaces the word you started. So `u NtClo` and **Alt+P** finds `nt!NtClose`. With an empty line, a process becomes `.process /p <pid>`.
+Type to search, choose with the arrow keys or the mouse, and press **Tab** to change tabs. **Enter** puts your choice in the prompt, and **Escape** closes the palette without changing anything.
+
+The palette opens on the tab that fits what you're typing:
+
+- On the command name, it shows the commands, with help for the selected one under the list. Your choice replaces the line.
+- On an argument, it shows the symbols, the types for {command}`dt`, or the processes for a command that takes one. Your choice replaces the word you started, so typing `u NtClo` and pressing **Alt+P** finds `nt!NtClose`.
+- With nothing typed, picking a process puts `.process /p <pid>` in the prompt.
 
 ### The browser
 
-In Tern, {command}`browse` or **F2** at the prompt opens a full-screen browser over the pane. It shows code at the instruction pointer or at the address you give, or memory if the address isn't executable. **Escape** closes it and leaves the pane as it was, with the breakpoints that you set or cleared listed under the prompt.
+{command}`browse`, or **F2** at the prompt, opens a full-screen browser over the pane. It starts at the instruction pointer, or at the address you give: in code if that address is executable, otherwise in memory. In code, `*` marks a breakpoint (red when it's enabled) and `>` marks the instruction pointer. Press **Escape** to close the browser. The pane is left as it was, and any breakpoints you set or cleared are listed under the prompt.
 
-These keys work in code and in memory:
+| Key | What it does |
+| --- | --- |
+| **↑** **↓** | Move the cursor. You can also click a row. |
+| **Shift+↑** **Shift+↓** or **Space** | Move a page. Tern keeps **Page Up** and **Page Down** for scrolling the view. |
+| **Enter** | Follow the branch or call under the cursor, the memory an instruction addresses (`[rip+…]`), or the pointer at the cursor. |
+| **Backspace** | Go back. |
+| **Tab** | Show the same address as memory or as code. |
+| **.** | Go to the instruction pointer. |
+| **G** | Go to an address or expression, with the same completions as the prompt. |
+| **/** and **N** | Find, and find the next match. |
+| **B** | Set or clear a breakpoint in code, or a write watchpoint in memory. |
+| **Escape** | Stop a find in progress, or close the browser. |
 
-- The arrow keys move the cursor, and **Shift+↑** and **Shift+↓** or **Space** move a page. Tern keeps **Page Up** and **Page Down** to scroll the view.
-- **Enter** follows the branch or call under the cursor, the memory that an instruction addresses (`[rip+…]`), or the pointer at the cursor in memory, and **Backspace** goes back.
-- **Tab** shows the same address as memory or as code, and **.** goes to the instruction pointer.
-- **G** goes to an address or expression, with the same completions as the prompt.
-- **/** finds text, bytes or a value after the cursor: `"text"`, `u"text"` for UTF-16, hex byte pairs such as `48 8b 05`, or an expression, whose value is found as a pointer. Each find searches 1 MB, showing how far it got, and **N** finds the next match or searches the next 1 MB. **Escape** stops a find in progress, and **N** then goes on from where it stopped.
-- **B** sets or clears a breakpoint at the instruction under the cursor, or in memory a write watchpoint (`ba w`) on the bytes at the cursor, as wide as the address's alignment allows, up to 8 bytes. A breakpoint goes only where an instruction starts: decoding from the start of the function around the address, or of its symbol, must reach it. So a listing decoded from the middle of an instruction, after a go-to into it, can't plant one that corrupts the code. Where nothing says where instructions start, {command}`bp` at the prompt still sets one.
+**Finding.** After **/**, type what to look for:
 
-Memory shows 16 bytes a row in hex and as text, with a byte cursor. Bytes are colored by what they are: zero bytes dim, printable ASCII in the string color, other ASCII as a keyword, and watched bytes red. **←** and **→** move a byte, and **Home** and **End** go to the start and end of the row. **P** switches to one pointer a row with the symbol it points into, and back. Beside the rows, the inspector shows what the bytes at the cursor are: little-endian integers of each size, unsigned with their hex and signed, floats, the symbol a pointer points into, a FILETIME, and the ASCII and UTF-16 strings that start there. It stays in view as the rows scroll.
+- `"text"` for ASCII text, or `u"text"` for UTF-16
+- hex bytes, such as `48 8b 05`
+- an expression, whose value is looked for as a pointer. For example, `poi(nt!PsInitialSystemProcess)` finds references to the System process.
+
+A find searches the next 1 MB after the cursor and shows how far it has got. **N** finds the next match, or searches the next 1 MB if there wasn't one. **Escape** stops a find early, and **N** carries on from where it stopped.
+
+**Breakpoints and watchpoints.** In code, **B** sets a breakpoint on the instruction under the cursor, or clears the one that's there. The browser only sets a breakpoint where an instruction really starts: it decodes from the start of the function (or symbol) around the address and checks that it lands there. If you go to an address in the middle of an instruction, the listing from there shows instructions that don't exist, and a breakpoint on one would corrupt the real code. When the browser can't tell where instructions start, use {command}`bp` at the prompt instead.
+
+In memory, **B** sets a write watchpoint (`ba w`) on the bytes at the cursor, as wide as the address's alignment allows, up to 8 bytes, or clears the one that covers them. Watched bytes are red.
+
+**Memory.** Memory is shown 16 bytes a row, in hex and as text, with a cursor on one byte. Bytes are colored by kind: zeros are dimmed, printable ASCII is in the string color, control characters are in the keyword color, and watched bytes are red. **←** and **→** move one byte, and **Home** and **End** go to the start and end of the row. **P** switches to one pointer a row, with the symbol each one points into, and back.
+
+Beside the rows, the inspector shows what the bytes at the cursor could be: little-endian integers of each size (unsigned with their hex, and signed), floats, the symbol a pointer points into, a date if the value looks like a FILETIME, and any ASCII or UTF-16 string that starts there. It stays in view as you scroll.
 
 ## Aliases
 
