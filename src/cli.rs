@@ -325,32 +325,41 @@ pub fn run_with_args(args: impl IntoIterator<Item = OsString>) -> i32 {
     }
 }
 
+/// The target options that can be given more than once.
+const REPEATABLE_TARGET_OPTIONS: [&str; 2] = ["pdb_server", "sympath_append"];
+
 fn parse_cli(args: impl IntoIterator<Item = OsString>) -> std::result::Result<Cli, clap::Error> {
-    // Clap replaces a global argument's parent values with its subcommand
-    // values, even for ArgAction::Append. Parse this option separately at
-    // each level, then combine the paths in command-line order.
-    let command = Cli::command().mut_arg("sympath_append", |arg| arg.global(false));
-    let symbol_path_arg = command
-        .get_arguments()
-        .find(|arg| arg.get_id() == "sympath_append")
-        .expect("sympath_append is a target option")
-        .clone();
-    let matches = command
-        .mut_subcommands(|subcommand| subcommand.arg(symbol_path_arg.clone()))
-        .try_get_matches_from(args)?;
-    let paths = std::iter::once(&matches)
-        .chain(matches.subcommand().map(|(_, matches)| matches))
-        .flat_map(|matches| {
-            matches
-                .get_many::<PathBuf>("sympath_append")
-                .into_iter()
-                .flatten()
-        })
-        .cloned()
-        .collect();
+    // Clap replaces a global argument's values from before the subcommand
+    // with those after it, even for ArgAction::Append. Parse each repeatable
+    // option as an ordinary argument at both levels instead, then join its
+    // values in command-line order.
+    let mut command = Cli::command();
+    for id in REPEATABLE_TARGET_OPTIONS {
+        command = command.mut_arg(id, |arg| arg.global(false));
+        let arg = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == id)
+            .expect("repeatable options are target options")
+            .clone();
+        command = command.mut_subcommands(|subcommand| subcommand.arg(arg.clone()));
+    }
+    let matches = command.try_get_matches_from(args)?;
     let mut cli = Cli::from_arg_matches(&matches)?;
-    cli.target.sympath_append = paths;
+    cli.target.pdb_server = values_at_every_level(&matches, "pdb_server");
+    cli.target.sympath_append = values_at_every_level(&matches, "sympath_append");
     Ok(cli)
+}
+
+/// The values of `id` before the subcommand, then those after it.
+fn values_at_every_level<T: Clone + Send + Sync + 'static>(
+    matches: &clap::ArgMatches,
+    id: &str,
+) -> Vec<T> {
+    std::iter::once(matches)
+        .chain(matches.subcommand().map(|(_, matches)| matches))
+        .flat_map(|matches| matches.get_many::<T>(id).into_iter().flatten())
+        .cloned()
+        .collect()
 }
 
 fn run(cli: Cli) -> Result<()> {
@@ -552,7 +561,7 @@ mod tests {
     use super::{Cli, parse_cli};
 
     #[test]
-    fn symbol_paths_accumulate_across_subcommands() {
+    fn repeated_target_options_accumulate_across_subcommands() {
         let commands = [
             "configure",
             "status",
@@ -574,8 +583,10 @@ mod tests {
                     if let Some(path) = paths.get(index) {
                         if index % 2 == 0 {
                             args.extend(["--sympath-append".to_string(), path.to_string()]);
+                            args.extend(["--pdb-server".to_string(), path.to_string()]);
                         } else {
                             args.push(format!("--sympath-append={path}"));
+                            args.push(format!("--pdb-server={path}"));
                         }
                     }
                 }
@@ -583,6 +594,10 @@ mod tests {
                 assert_eq!(
                     cli.target.sympath_append,
                     paths.map(std::path::PathBuf::from),
+                    "{command} at position {position}",
+                );
+                assert_eq!(
+                    cli.target.pdb_server, paths,
                     "{command} at position {position}",
                 );
             }
