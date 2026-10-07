@@ -85,6 +85,11 @@ const POINTER: u64 = 8;
 const MAX_BOUNDARY_SCAN: u64 = 1 << 20;
 /// How far a find looks at a time; `n` goes on from where it stopped.
 const FIND_RANGE: usize = 1 << 20;
+/// How long a look for Escape between find steps waits: past the SDK's
+/// 30 ms for a lone ESC byte to count as the key.
+const ESCAPE_WAIT: Duration = Duration::from_millis(40);
+/// How much of it a find reads between looks for Escape and redraws.
+const FIND_STEP: usize = 64 << 10;
 /// How many characters the inspector's strings show.
 const STRING_PREVIEW: usize = 32;
 /// The inspector's label column, and the column its numbers align right
@@ -103,6 +108,18 @@ const INSPECTOR_KEY: &str = "inspector";
 /// The input field's key, and its id in the dock.
 const FIELD_KEY: &str = "field";
 const FIELD: &str = "dock.field";
+
+impl Search {
+    fn progress(&self) -> String {
+        format!(
+            "finding {} from {:#x}: {} of {} KiB, Esc stops",
+            self.label,
+            self.from,
+            self.done >> 10,
+            FIND_RANGE >> 10
+        )
+    }
+}
 
 /// What a click on a row reports: the row's address.
 #[derive(Clone)]
@@ -159,9 +176,14 @@ fn browse(session: &mut Session<Msg>, browser: &mut Browser<'_, '_>) -> Option<(
             browser.focus_field = false;
             let _ = session.focus(surface, Some(FIELD));
         }
-        // The frame above says a find is under way; it blocks until done.
+        // A find goes a step at a time, each frame saying how far it got,
+        // and Escape between steps stops it; other keys meanwhile are
+        // dropped.
         if browser.search.is_some() {
-            browser.run_search();
+            browser.search_step();
+            if browser.search.is_some() && escape_pending(session) {
+                browser.stop_search();
+            }
             continue;
         }
         let outcome = match session.next(None).ok()?? {
@@ -185,6 +207,19 @@ fn browse(session: &mut Session<Msg>, browser: &mut Browser<'_, '_>) -> Option<(
             return Some(());
         }
     }
+}
+
+/// Whether Escape (or Ctrl+C) came in since the last look; other input
+/// meanwhile is dropped. A lone ESC byte stays undecided until a short
+/// quiet tells it from the start of a sequence, so this waits that long.
+fn escape_pending(session: &mut Session<Msg>) -> bool {
+    let mut escape = false;
+    while let Ok(Some(input)) = session.next(Some(ESCAPE_WAIT)) {
+        if let Input::Key(key) = input {
+            escape |= key.is("escape") || key.is("ctrl+c");
+        }
+    }
+    escape
 }
 
 #[derive(PartialEq, Eq)]
@@ -269,11 +304,13 @@ struct Find {
     from: u64,
 }
 
-/// A find queued for after the frame that says it is under way.
+/// A find under way, a step at a time.
 struct Search {
     pattern: Vec<u8>,
     label: String,
     from: u64,
+    /// How much of [`FIND_RANGE`] from `from` is searched.
+    done: usize,
 }
 
 struct Browser<'s, 'a> {
@@ -950,12 +987,14 @@ impl<'s, 'a> Browser<'s, 'a> {
     }
 
     fn queue_search(&mut self, pattern: Vec<u8>, label: String, from: u64) {
-        self.note = Some(format!("finding {label} from {from:#x}…"));
-        self.search = Some(Search {
+        let search = Search {
             pattern,
             label,
             from,
-        });
+            done: 0,
+        };
+        self.note = Some(search.progress());
+        self.search = Some(search);
     }
 
     /// `n`: the next match of the last find.
@@ -973,42 +1012,74 @@ impl<'s, 'a> Browser<'s, 'a> {
         self.queue_search(find.pattern.clone(), find.label.clone(), from);
     }
 
-    fn run_search(&mut self) {
-        let Some(search) = self.search.take() else {
+    /// One [`FIND_STEP`] of the find under way: the first match ends it,
+    /// as does the end of [`FIND_RANGE`] with none.
+    fn search_step(&mut self) {
+        let Some(mut search) = self.search.take() else {
             return;
         };
+        let start = search.from.wrapping_add(search.done as u64);
+        let step = FIND_STEP.min(FIND_RANGE - search.done);
+        // On past the step by the pattern less a byte: a match that starts
+        // in it and ends past it is the step's.
+        let length = step + search.pattern.len() - 1;
         let result = self
             .state
             .ctx
-            .search(VirtAddr(search.from), &search.pattern, FIND_RANGE);
-        match result {
-            Ok(result) => match result.matches.first() {
-                Some(&found) => {
-                    self.jump(self.pane, found);
-                    self.note = Some(format!("{} at {found:#x}", search.label));
-                    self.find = Some(Find {
-                        pattern: search.pattern,
-                        label: search.label,
-                        at: found,
-                        from: found.wrapping_add(1),
-                    });
-                }
-                None => {
-                    let end = search.from.saturating_add(FIND_RANGE as u64);
-                    self.note = Some(format!(
-                        "no {} from {:#x} to {end:#x}; n looks further",
-                        search.label, search.from
-                    ));
-                    self.find = Some(Find {
-                        pattern: search.pattern,
-                        label: search.label,
-                        at: self.here().unwrap_or(0),
-                        from: end,
-                    });
-                }
-            },
-            Err(error) => self.note = Some(error.to_string()),
+            .search(VirtAddr(start), &search.pattern, length);
+        let found = match result {
+            Ok(result) => result.matches.first().copied(),
+            Err(error) => {
+                self.note = Some(error.to_string());
+                return;
+            }
+        };
+        if let Some(found) = found {
+            self.jump(self.pane, found);
+            self.note = Some(format!("{} at {found:#x}", search.label));
+            self.find = Some(Find {
+                pattern: search.pattern,
+                label: search.label,
+                at: found,
+                from: found.wrapping_add(1),
+            });
+            return;
         }
+        search.done += step;
+        if search.done < FIND_RANGE {
+            self.note = Some(search.progress());
+            self.search = Some(search);
+            return;
+        }
+        let end = search.from.saturating_add(FIND_RANGE as u64);
+        self.note = Some(format!(
+            "no {} from {:#x} to {end:#x}; n looks further",
+            search.label, search.from
+        ));
+        self.find = Some(Find {
+            pattern: search.pattern,
+            label: search.label,
+            at: self.here().unwrap_or(0),
+            from: end,
+        });
+    }
+
+    /// Escape during a find: stop it where it got to, for `n` to go on.
+    fn stop_search(&mut self) {
+        let Some(search) = self.search.take() else {
+            return;
+        };
+        let reached = search.from.wrapping_add(search.done as u64);
+        self.note = Some(format!(
+            "stopped finding {} at {reached:#x}; n goes on from there",
+            search.label
+        ));
+        self.find = Some(Find {
+            pattern: search.pattern,
+            label: search.label,
+            at: self.here().unwrap_or(0),
+            from: reached,
+        });
     }
 
     fn key(&mut self, key: &Key) -> Outcome {
