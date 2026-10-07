@@ -2,7 +2,7 @@
 
 ## The symbol path and cache
 
-At the start, the symbol path contains the managed cache, `~/.ntoseye/symbols`, then any servers that you give with `--pdb-server` or `NTOSEYE_PDB_SERVERS`, and then Microsoft's public symbol server.
+At the start, the symbol path contains the managed cache, `~/.ntoseye/symbols`, then any servers that you give with `--pdb-server` or `NTOSEYE_PDB_SERVERS`, then Microsoft's public symbol server, and then any directories that you give with `--sympath-append`. ntoseye looks in the cache and in every local directory before it asks a server, so a PDB in one of your directories is used without a download, although the directory comes last in the list.
 
 The cache is a symbol store in the layout that `symstore` writes and that SymSrv, IDA's PDB loader, Ghidra, and rizin read:
 
@@ -25,6 +25,8 @@ To add the directory that contains the PDB, use {command}`.sympath+`. The `+` ke
 ```text
 .sympath+ <directory-containing-the-pdb>
 ```
+
+To have the directory in the path from the start, for example a driver's build output, give it with `--sympath-append <directory>` instead. You can give `--sympath-append` more than once.
 
 {command}`.srcpath` sets the host directory that contains the source tree:
 

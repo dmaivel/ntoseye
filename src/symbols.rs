@@ -49,7 +49,9 @@ pub fn pdb_from_memory_enabled() -> bool {
 const DEFAULT_SYMBOL_SERVER: &str = "https://msdl.microsoft.com/download/symbols";
 
 /// The symbol path a store starts with: the cache, then `--pdb-server` and
-/// `NTOSEYE_PDB_SERVERS` entries ahead of Microsoft's server.
+/// `NTOSEYE_PDB_SERVERS` entries ahead of Microsoft's server, then the
+/// `--sympath-append` directories. Local sources are searched before any
+/// server whatever their position (see `resolve_local_sources`).
 static DEFAULT_SYMBOL_SOURCES: LazyLock<Vec<SymbolSource>> = LazyLock::new(|| {
     let mut sources = vec![SymbolSource::Cache];
     let servers = PDB_SERVERS.get().cloned().unwrap_or_default();

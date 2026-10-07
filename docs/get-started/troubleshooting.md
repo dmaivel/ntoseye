@@ -48,7 +48,7 @@ See [UTM](../setup/utm.md#gdb-stub).
 **{command}`lm` shows a module's symbols as `failed`,** or its frames stay `module+offset`. Microsoft did not publish a PDB for that build, or the download failed. To fix it, do one of the following:
 
 - Add your own symbol server before the Microsoft server. Use `--pdb-server <url>` or `NTOSEYE_PDB_SERVERS="<url>;<url>"`. You can use `--pdb-server` more than once.
-- Set {command}`.sympath` to a location with local PDBs.
+- Add a directory with local PDBs: give `--sympath-append <directory>` at the start, or use {command}`.sympath+` in the REPL.
 
 See [Symbols and source](../using/symbols.md).
 

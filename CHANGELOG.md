@@ -15,6 +15,10 @@ Keeping this file:
 
 ## Unreleased
 
+### Added
+
+- `--sympath-append <directory>` adds a directory of local PDBs to the symbol path from the start, such as a driver's build output. ntoseye finds a PDB there both as a plain file and in symbol-store layout, and you can give the option more than once.
+
 ### Fixed
 
 - `--pdb-server` given both before and after a subcommand, as in `ntoseye --pdb-server <a> mcp --pdb-server <b>`, now uses every server. It used to keep only the servers after the subcommand.
