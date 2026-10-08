@@ -1,6 +1,8 @@
 //! Kernel object inspectors: driver and device objects, IRPs, object
 //! headers, and the notify-callback and system-service tables.
 
+use std::collections::HashMap;
+
 use tabled::builder::Builder;
 
 use owo_colors::OwoColorize;
@@ -8,7 +10,12 @@ use owo_colors::OwoColorize;
 use crate::error::Result;
 use crate::expr::Expr;
 use crate::target::irpfind::{IrpFindArgs, IrpFindDetail};
-use crate::target::{irp_major_function_name, kthread_state_name, wait_reason_name};
+use crate::target::object::{
+    IrpInfo, SL_INVOKE_ON_CANCEL, SL_INVOKE_ON_ERROR, SL_INVOKE_ON_SUCCESS, SL_PENDING_RETURNED,
+};
+use crate::target::{
+    irp_major_function_name, irp_minor_function_name, kthread_state_name, wait_reason_name,
+};
 use crate::types::VirtAddr;
 use crate::ui;
 
@@ -40,8 +47,9 @@ repl_command! {
 repl_command! {
     cmd_irp;
     names: ["!irp", "irp"],
-    usage: "!irp <address-expression>",
-    summary: "Show an IRP and its current IO_STACK_LOCATION.",
+    usage: "!irp <address-expression> [detail]",
+    summary: "Show an IRP and its I/O stack locations.",
+    details: "Shows the IRP as WinDbg does: which stack location is current, the MDL, system buffer and thread, then each location from the lowest driver's up, the current one marked with > and a run of locations the IRP has not reached as one unused line. A location shows its major and minor function, flags and control, device and file, its completion routine and context with when the routine runs (Success, Error, Cancel) and whether its driver returned pending, the device's driver, and four arguments. The driver of the location below it in the list set that completion routine. With a second argument, such as 1, it first shows the IRP's status, requestor mode, user event and user buffer.",
     completion: Expression,
 }
 
@@ -295,7 +303,6 @@ impl ReplState<'_> {
         let Some(addr) = self.eval_or_report(expr) else {
             return Ok(());
         };
-
         let irp = match self.ctx.target.inspect_irp(addr) {
             Ok(irp) => irp,
             Err(e) => {
@@ -303,55 +310,149 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-
-        let mode = if irp.requestor_mode == 0 {
-            "KernelMode"
+        let (count, location) = (irp.stack_count, irp.current_location);
+        if (1..=count).contains(&location) {
+            let at = irp.current_stack().map_or_else(
+                || "unreadable".to_string(),
+                |current| format!("= {:#x}", current.address.0),
+            );
+            outln!("Irp is active with {count} stacks {location} is current ({at})");
+        } else if usize::from(location) == usize::from(count) + 1 {
+            outln!("Irp is completed with {count} stacks");
         } else {
-            "UserMode"
-        };
-
-        outln!("irp {}", ui::addr(irp.address.0));
-        outln!("  type          : {:#x}", irp.irp_type);
-        outln!("  size          : {:#x}", irp.size);
-        outln!("  stack count   : {}", irp.stack_count);
-        outln!("  current loc   : {}", irp.current_location);
-        outln!(
-            "  pending       : {}",
-            if irp.pending_returned { "yes" } else { "no" }
-        );
-        outln!("  requestor mode: {} ({:#x})", mode, irp.requestor_mode);
-        if let Some(status) = irp.io_status {
-            outln!("  io status     : {:#x}", status);
+            outln!("Irp has {count} stacks and an invalid current location {location}");
         }
-        outln!("  user event    : {}", ui::addr(irp.user_event.0));
-        outln!("  user buffer   : {}", ui::addr(irp.user_buffer.0));
-        outln!("  mdl           : {}", ui::addr(irp.mdl_address.0));
-        outln!("  thread        : {}", ui::addr(irp.thread.0));
-
-        match irp.current_stack {
-            Some(ios) => {
-                outln!("  current stack : {}", ui::addr(ios.address.0));
-                outln!(
-                    "    major       : IRP_MJ_{} ({:#x})",
-                    irp_major_function_name(ios.major_function),
-                    ios.major_function
-                );
-                outln!("    minor       : {:#x}", ios.minor_function);
-                outln!("    device      : {}", ui::addr(ios.device_object.0));
-                outln!("    file        : {}", ui::addr(ios.file_object.0));
-                let completion = self
-                    .ctx
-                    .target
-                    .closest_symbol_current_context(ios.completion_routine)
-                    .unwrap_or_else(|| format!("{:#x}", ios.completion_routine.0));
-                outln!("    completion  : {}", completion);
-                outln!("    context     : {}", ui::addr(ios.context.0));
+        let mdl = if irp.mdl_address.is_zero() {
+            "No Mdl".to_string()
+        } else {
+            format!("Mdl = {}", ui::addr(irp.mdl_address.0))
+        };
+        let system_buffer = if irp.system_buffer.is_zero() {
+            "No System Buffer".to_string()
+        } else {
+            format!("System Buffer = {}", ui::addr(irp.system_buffer.0))
+        };
+        outln!(
+            " {mdl}: {system_buffer}: Thread {}:  Irp stack trace.",
+            ui::addr(irp.thread.0)
+        );
+        if invocation.arg(1).is_some() {
+            self.print_irp_detail(&irp);
+        }
+        outln!("     cmd  flg cl Device   File     Completion-Context");
+        let mut drivers = HashMap::new();
+        let mut index = 0;
+        while let Some(ios) = irp.stack.get(index) {
+            // Locations below the current one that the IRP has not reached
+            // are empty; a run of them is one line.
+            let unused = irp.stack[index..]
+                .iter()
+                .take_while(|ios| ios.is_unused())
+                .count();
+            if unused > 0 {
+                let (first, last) = (index + 1, index + unused);
+                let marker = if (first..=last).contains(&usize::from(location)) {
+                    '>'
+                } else {
+                    ' '
+                };
+                if first == last {
+                    outln!("{marker}[{first}: unused]");
+                } else {
+                    outln!("{marker}[{first}-{last}: unused]");
+                }
+                index += unused;
+                continue;
             }
-            None => outln!("  current stack : {}", "unavailable".bright_black()),
+            index += 1;
+            let marker = if index == usize::from(location) {
+                '>'
+            } else {
+                ' '
+            };
+            let minor = irp_minor_function_name(ios.major_function, ios.minor_function)
+                .map_or_else(|| "N/A".to_string(), |name| format!("IRP_MN_{name}"));
+            outln!(
+                "{marker}[IRP_MJ_{}({:x}), {minor}({:x})]",
+                irp_major_function_name(ios.major_function),
+                ios.major_function,
+                ios.minor_function
+            );
+            let control = ios.control;
+            let mut when: Vec<&str> = [
+                (SL_INVOKE_ON_SUCCESS, "Success"),
+                (SL_INVOKE_ON_ERROR, "Error"),
+                (SL_INVOKE_ON_CANCEL, "Cancel"),
+            ]
+            .into_iter()
+            .filter(|(bit, _)| control & bit != 0)
+            .map(|(_, name)| name)
+            .collect();
+            if control & SL_PENDING_RETURNED != 0 {
+                when.push("pending");
+            }
+            outln!(
+                "{:>13x} {:>2x} {:08x} {:08x} {:08x}-{:08x} {}",
+                ios.flags,
+                control,
+                ios.device_object.0,
+                ios.file_object.0,
+                ios.completion_routine.0,
+                ios.context.0,
+                when.join(" ")
+            );
+            let driver = (!ios.device_object.is_zero())
+                .then(|| {
+                    drivers
+                        .entry(ios.device_object)
+                        .or_insert_with(|| self.ctx.target.device_driver_name(ios.device_object))
+                        .clone()
+                })
+                .flatten()
+                .unwrap_or_default();
+            let routine = if ios.completion_routine.is_zero() {
+                String::new()
+            } else {
+                self.fmt_kernel_symbol(ios.completion_routine)
+            };
+            if !driver.is_empty() || !routine.is_empty() {
+                outln!("               {driver}  {routine}");
+            }
+            let [a1, a2, a3, a4] = ios.arguments;
+            outln!("                        Args: {a1:08x} {a2:08x} {a3:08x} {a4:08x}");
+        }
+        if irp.stack.len() < usize::from(count) {
+            outln!(
+                "{}",
+                ui::muted(&format!(
+                    "locations {} to {count} could not be read",
+                    irp.stack.len() + 1
+                ))
+            );
         }
         outln!();
-
         Ok(())
+    }
+
+    /// The IRP's own fields that `!irp <address> 1` shows, as WinDbg's
+    /// detail form does.
+    fn print_irp_detail(&self, irp: &IrpInfo) {
+        outln!(
+            "IoStatus.Status = {}",
+            irp.io_status
+                .map_or_else(|| "?".to_string(), |status| format!("{status:08x}"))
+        );
+        outln!(
+            "RequestorMode = {}",
+            if irp.requestor_mode == 0 {
+                "KernelMode"
+            } else {
+                "UserMode"
+            }
+        );
+        outln!("PendingReturned = {}", u8::from(irp.pending_returned));
+        outln!("UserEvent = {}", ui::addr(irp.user_event.0));
+        outln!("UserBuffer = {}", ui::addr(irp.user_buffer.0));
     }
 
     fn cmd_irps(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
@@ -461,7 +562,7 @@ impl ReplState<'_> {
                     irp.current_location,
                     irp.stack_count
                 );
-            } else if let Some(stack) = &irp.current_stack {
+            } else if let Some(stack) = irp.current_stack() {
                 outln!(
                     "{head} irpStack: ({:>2x},{:>2x})  {} [{}]  {}  IRP_MJ_{}",
                     stack.major_function,
@@ -508,7 +609,7 @@ impl ReplState<'_> {
                     ui::addr(irp.user_buffer.0),
                     ui::addr(irp.mdl_address.0)
                 );
-                if let Some(stack) = irp.current_stack.as_ref().filter(|_| !entry.completed()) {
+                if let Some(stack) = irp.current_stack().filter(|_| !entry.completed()) {
                     outln!(
                         "    stack location {}  FileObject {}  CompletionRoutine {}  Context {}",
                         ui::addr(stack.address.0),

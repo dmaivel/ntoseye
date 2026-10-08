@@ -508,6 +508,55 @@ pub fn irp_major_function_name(major: u8) -> &'static str {
     }
 }
 
+/// Name for an `IRP_MN_*` minor function code of `major` (without the
+/// `IRP_MN_` prefix), for the major functions whose minor codes have names:
+/// Plug and Play, power, WMI, and SCSI. `None` for the rest, whose minor
+/// code is unused or the driver's own.
+pub fn irp_minor_function_name(major: u8, minor: u8) -> Option<&'static str> {
+    Some(match (major, minor) {
+        (0x1b, 0x00) => "START_DEVICE",
+        (0x1b, 0x01) => "QUERY_REMOVE_DEVICE",
+        (0x1b, 0x02) => "REMOVE_DEVICE",
+        (0x1b, 0x03) => "CANCEL_REMOVE_DEVICE",
+        (0x1b, 0x04) => "STOP_DEVICE",
+        (0x1b, 0x05) => "QUERY_STOP_DEVICE",
+        (0x1b, 0x06) => "CANCEL_STOP_DEVICE",
+        (0x1b, 0x07) => "QUERY_DEVICE_RELATIONS",
+        (0x1b, 0x08) => "QUERY_INTERFACE",
+        (0x1b, 0x09) => "QUERY_CAPABILITIES",
+        (0x1b, 0x0a) => "QUERY_RESOURCES",
+        (0x1b, 0x0b) => "QUERY_RESOURCE_REQUIREMENTS",
+        (0x1b, 0x0c) => "QUERY_DEVICE_TEXT",
+        (0x1b, 0x0d) => "FILTER_RESOURCE_REQUIREMENTS",
+        (0x1b, 0x0f) => "READ_CONFIG",
+        (0x1b, 0x10) => "WRITE_CONFIG",
+        (0x1b, 0x11) => "EJECT",
+        (0x1b, 0x12) => "SET_LOCK",
+        (0x1b, 0x13) => "QUERY_ID",
+        (0x1b, 0x14) => "QUERY_PNP_DEVICE_STATE",
+        (0x1b, 0x15) => "QUERY_BUS_INFORMATION",
+        (0x1b, 0x16) => "DEVICE_USAGE_NOTIFICATION",
+        (0x1b, 0x17) => "SURPRISE_REMOVAL",
+        (0x1b, 0x18) => "QUERY_LEGACY_BUS_INFORMATION",
+        (0x16, 0x00) => "WAIT_WAKE",
+        (0x16, 0x01) => "POWER_SEQUENCE",
+        (0x16, 0x02) => "SET_POWER",
+        (0x16, 0x03) => "QUERY_POWER",
+        (0x17, 0x00) => "QUERY_ALL_DATA",
+        (0x17, 0x01) => "QUERY_SINGLE_INSTANCE",
+        (0x17, 0x02) => "CHANGE_SINGLE_INSTANCE",
+        (0x17, 0x03) => "CHANGE_SINGLE_ITEM",
+        (0x17, 0x04) => "ENABLE_EVENTS",
+        (0x17, 0x05) => "DISABLE_EVENTS",
+        (0x17, 0x06) => "ENABLE_COLLECTION",
+        (0x17, 0x07) => "DISABLE_COLLECTION",
+        (0x17, 0x08) => "REGINFO",
+        (0x17, 0x09) => "EXECUTE_METHOD",
+        (0x0f, 0x01) => "SCSI_CLASS",
+        _ => return None,
+    })
+}
+
 /// The one process-filter policy shared by `ps` (REPL), the `processes` MCP
 /// tool, and the Python SDK: a numeric filter is an exact pid, anything else is
 /// a case-insensitive name substring.

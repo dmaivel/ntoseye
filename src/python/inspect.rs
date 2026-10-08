@@ -56,7 +56,7 @@ impl Inspect {
         "<Inspect namespace>".to_string()
     }
 
-    /// Decode an in-flight `_IRP` and its current I/O stack location (`!irp`).
+    /// Decode an in-flight `_IRP` and its I/O stack locations (`!irp`).
     fn irp<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Typed<'py, view::object::Irp>> {
         self.typed(py, |session| {
             let detail = session.target.inspect_irp(VirtAddr(address)).map_err(err)?;

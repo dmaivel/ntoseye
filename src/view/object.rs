@@ -17,7 +17,10 @@ use crate::target::object::{
     ObjectDetail, ResourceDetail, ResourceListSummary, ResourceOwner as ResourceOwnerInfo,
     SsdtTable as SsdtTableInfo,
 };
-use crate::target::{Target, irp_major_function_name, kthread_state_name, wait_reason_name};
+use crate::target::{
+    Target, irp_major_function_name, irp_minor_function_name, kthread_state_name,
+    wait_reason_name,
+};
 use crate::types::VirtAddr;
 
 shapes! {
@@ -29,14 +32,29 @@ shapes! {
         /// The name of the major function (`IRP_MJ_READ`, ...).
         major_function_name: String,
         minor_function: u8,
+        /// The name of the minor function (`IRP_MN_START_DEVICE`, ...), for
+        /// Plug and Play, power, WMI, and SCSI requests.
+        minor_function_name: Option<String>,
+        /// `Flags`, the request's `SL_*` flags.
+        flags: Hex<u8>,
+        /// `Control`: `SL_PENDING_RETURNED` (0x01) and when the completion
+        /// routine runs, `SL_INVOKE_ON_CANCEL` (0x20), `SL_INVOKE_ON_SUCCESS`
+        /// (0x40) and `SL_INVOKE_ON_ERROR` (0x80).
+        control: Hex<u8>,
+        /// `Parameters.Others.Argument1` to `Argument4`: the first four
+        /// words of the request's parameters, such as a read's length and
+        /// offset or an IOCTL's buffer lengths and code.
+        arguments: Vec<Hex<u64>>,
         device_object: VirtAddr,
         file_object: VirtAddr,
+        /// The completion routine that the driver of the next location up
+        /// set for when this location's driver completes the IRP.
         completion_routine: VirtAddr,
         /// The context argument of the completion routine.
         context: VirtAddr,
     }
 
-    /// An `_IRP` and its current I/O stack location (`!irp`).
+    /// An `_IRP` and its I/O stack locations (`!irp`).
     Irp {
         address: VirtAddr,
         /// `Type`, which is `IO_TYPE_IRP` (6) for a valid IRP.
@@ -55,8 +73,13 @@ shapes! {
         user_event: VirtAddr,
         user_buffer: VirtAddr,
         mdl_address: VirtAddr,
+        /// `AssociatedIrp.SystemBuffer`, the copy of the data for buffered I/O.
+        system_buffer: VirtAddr,
         /// `Tail.Overlay.Thread`, the thread that issued the IRP.
         thread: VirtAddr,
+        /// Every stack location, from location 1 (the lowest driver's) to
+        /// `stack_count`, ending early at one ntoseye cannot read.
+        stack: Vec<IoStackLocation>,
         /// None if the current location is out of range or ntoseye cannot read it.
         current_stack: Option<IoStackLocation>,
     }
@@ -591,6 +614,11 @@ fn io_stack(s: &IoStackLocationInfo) -> IoStackLocation {
         major_function: s.major_function,
         major_function_name: format!("IRP_MJ_{}", irp_major_function_name(s.major_function)),
         minor_function: s.minor_function,
+        minor_function_name: irp_minor_function_name(s.major_function, s.minor_function)
+            .map(|name| format!("IRP_MN_{name}")),
+        flags: s.flags,
+        control: s.control,
+        arguments: s.arguments.to_vec(),
         device_object: s.device_object,
         file_object: s.file_object,
         completion_routine: s.completion_routine,
@@ -598,7 +626,7 @@ fn io_stack(s: &IoStackLocationInfo) -> IoStackLocation {
     }
 }
 
-/// `_IRP` plus its current `_IO_STACK_LOCATION`.
+/// `_IRP` and its `_IO_STACK_LOCATION`s.
 pub fn irp(irp: &IrpInfo) -> Irp {
     Irp {
         address: irp.address,
@@ -612,8 +640,10 @@ pub fn irp(irp: &IrpInfo) -> Irp {
         user_event: irp.user_event,
         user_buffer: irp.user_buffer,
         mdl_address: irp.mdl_address,
+        system_buffer: irp.system_buffer,
         thread: irp.thread,
-        current_stack: irp.current_stack.as_ref().map(io_stack),
+        stack: irp.stack.iter().map(io_stack).collect(),
+        current_stack: irp.current_stack().map(io_stack),
     }
 }
 

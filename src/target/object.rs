@@ -26,7 +26,7 @@ pub struct DriverObjectInfo {
     pub driver_unload: VirtAddr,
 }
 
-/// A decoded `_IRP` plus its current `_IO_STACK_LOCATION` (when resolvable).
+/// A decoded `_IRP` and its `_IO_STACK_LOCATION`s.
 #[derive(Debug, Clone)]
 pub struct IrpInfo {
     pub address: VirtAddr,
@@ -40,19 +40,72 @@ pub struct IrpInfo {
     pub user_event: VirtAddr,
     pub user_buffer: VirtAddr,
     pub mdl_address: VirtAddr,
+    /// `AssociatedIrp.SystemBuffer`, the buffered-I/O copy of the data.
+    pub system_buffer: VirtAddr,
     pub thread: VirtAddr,
-    pub current_stack: Option<IoStackLocationInfo>,
+    /// Locations 1 to `StackCount` in order, the lowest driver's first;
+    /// empty when `StackCount` is implausible. A location that cannot be
+    /// read ends the list.
+    pub stack: Vec<IoStackLocationInfo>,
 }
+
+impl IrpInfo {
+    /// The location that `CurrentLocation` names, if the IRP has not
+    /// completed and ntoseye read it.
+    pub fn current_stack(&self) -> Option<&IoStackLocationInfo> {
+        usize::from(self.current_location)
+            .checked_sub(1)
+            .and_then(|index| self.stack.get(index))
+    }
+}
+
+/// The most stack locations read for one IRP. The I/O manager allocates a
+/// few dozen at most, so a larger `StackCount` is garbage.
+const MAX_IRP_STACK_COUNT: u8 = 0x40;
+
+/// `SL_PENDING_RETURNED`: the driver of this location returned
+/// `STATUS_PENDING`.
+pub const SL_PENDING_RETURNED: u8 = 0x01;
+/// `SL_INVOKE_ON_CANCEL`, `SL_INVOKE_ON_SUCCESS` and `SL_INVOKE_ON_ERROR`:
+/// when the location's completion routine runs.
+pub const SL_INVOKE_ON_CANCEL: u8 = 0x20;
+pub const SL_INVOKE_ON_SUCCESS: u8 = 0x40;
+pub const SL_INVOKE_ON_ERROR: u8 = 0x80;
 
 #[derive(Debug, Clone)]
 pub struct IoStackLocationInfo {
     pub address: VirtAddr,
     pub major_function: u8,
     pub minor_function: u8,
+    /// `Flags`: the `SL_*` flags of the request, such as
+    /// `SL_OVERRIDE_VERIFY_VOLUME`.
+    pub flags: u8,
+    /// `Control`: `SL_PENDING_RETURNED` and the `SL_INVOKE_ON_*` bits.
+    pub control: u8,
+    /// `Parameters.Others.Argument1` to `Argument4`, which overlay the
+    /// first four pointer-sized words of every request's parameters.
+    pub arguments: [u64; 4],
     pub device_object: VirtAddr,
     pub file_object: VirtAddr,
     pub completion_routine: VirtAddr,
     pub context: VirtAddr,
+}
+
+impl IoStackLocationInfo {
+    /// Whether nothing was ever written to the location: a driver below
+    /// the current one that the IRP has not reached. A request a driver
+    /// got always names its device.
+    pub fn is_unused(&self) -> bool {
+        self.device_object.is_zero()
+            && self.file_object.is_zero()
+            && self.completion_routine.is_zero()
+            && self.context.is_zero()
+            && self.major_function == 0
+            && self.minor_function == 0
+            && self.flags == 0
+            && self.control == 0
+            && self.arguments == [0; 4]
+    }
 }
 
 /// A decoded `_DRIVER_OBJECT`: header fields, its `DeviceObject`/`NextDevice`
@@ -563,9 +616,9 @@ impl Target {
         Ok(drivers)
     }
 
-    /// Decode the `_IRP` at `address` along with its current I/O stack
-    /// location. Field widths come from the PDB layout; the current stack slot
-    /// is `irp + sizeof(_IRP) + (CurrentLocation - 1) * sizeof(_IO_STACK_LOCATION)`.
+    /// Decode the `_IRP` at `address` and its I/O stack locations, which
+    /// follow it: location N is at `irp + sizeof(_IRP) + (N - 1) *
+    /// sizeof(_IO_STACK_LOCATION)`.
     pub fn inspect_irp(&self, address: VirtAddr) -> Result<IrpInfo> {
         self.irp_info(&self.kernel_struct("_IRP", address)?)
     }
@@ -578,60 +631,89 @@ impl Target {
             .embedded("IoStatus")
             .and_then(|s| s.read_field::<u32>("Status"))
             .ok();
-
-        let current_location: u8 = irp.read_field("CurrentLocation")?;
-        let current_stack = self
-            .read_current_io_stack(address, current_location)
-            .ok()
-            .flatten();
-
+        let stack_count: u8 = irp.read_field("StackCount")?;
+        let system_buffer = irp
+            .embedded("AssociatedIrp")
+            .and_then(|associated| associated.read_pointer("SystemBuffer"))
+            .unwrap_or(VirtAddr(0));
         Ok(IrpInfo {
             address,
             irp_type: irp.read_field("Type")?,
             size: irp.read_field("Size")?,
-            stack_count: irp.read_field("StackCount")?,
-            current_location,
+            stack_count,
+            current_location: irp.read_field("CurrentLocation")?,
             pending_returned: irp.read_field::<u8>("PendingReturned")? != 0,
             requestor_mode: irp.read_field("RequestorMode")?,
             io_status,
             user_event: irp.read_field("UserEvent")?,
             user_buffer: irp.read_field("UserBuffer")?,
             mdl_address: irp.read_field("MdlAddress")?,
+            system_buffer,
             thread: irp_thread(irp),
-            current_stack,
+            stack: self.read_io_stack(address, stack_count).unwrap_or_default(),
         })
     }
 
-    fn read_current_io_stack(
-        &self,
-        irp: VirtAddr,
-        current_location: u8,
-    ) -> Result<Option<IoStackLocationInfo>> {
-        // A valid current location is 1..=StackCount; clamp generously so a
-        // garbage value can't compute a wild address.
-        if current_location == 0 || current_location as u64 > 0x40 {
-            return Ok(None);
+    /// The `stack_count` stack locations after the `_IRP` at `irp`, up to
+    /// the first that cannot be read.
+    fn read_io_stack(&self, irp: VirtAddr, stack_count: u8) -> Result<Vec<IoStackLocationInfo>> {
+        // The I/O manager allocates at most a few dozen; a larger count is
+        // garbage and must not drive reads far past the IRP.
+        if stack_count > MAX_IRP_STACK_COUNT {
+            return Ok(Vec::new());
         }
         let types = self.guest()?.ntoskrnl.types();
         let irp_size = types.layout("_IRP")?.size as u64;
-        let stack_size = types.layout("_IO_STACK_LOCATION")?.size as u64;
-        let addr = irp + irp_size + (current_location as u64 - 1) * stack_size;
+        let layout = types.layout("_IO_STACK_LOCATION")?;
+        let stack_size = layout.size as u64;
+        let mut stack = Vec::with_capacity(usize::from(stack_count));
+        for index in 0..u64::from(stack_count) {
+            let address = irp + irp_size + index * stack_size;
+            let ios = types
+                .struct_with_layout(Arc::clone(&layout), address)
+                .prefetch();
+            let read = || -> Result<IoStackLocationInfo> {
+                let others = ios.embedded("Parameters")?.embedded("Others")?;
+                let argument = |name| others.read_uint(name);
+                Ok(IoStackLocationInfo {
+                    address,
+                    major_function: ios.read_field("MajorFunction")?,
+                    minor_function: ios.read_field("MinorFunction")?,
+                    flags: ios.read_field("Flags")?,
+                    control: ios.read_field("Control")?,
+                    arguments: [
+                        argument("Argument1")?,
+                        argument("Argument2")?,
+                        argument("Argument3")?,
+                        argument("Argument4")?,
+                    ],
+                    device_object: ios.read_field("DeviceObject")?,
+                    file_object: ios.read_field("FileObject")?,
+                    completion_routine: ios.read_field("CompletionRoutine")?,
+                    context: ios.read_field("Context")?,
+                })
+            };
+            match read() {
+                Ok(location) => stack.push(location),
+                Err(_) => break,
+            }
+        }
+        Ok(stack)
+    }
 
-        let Ok(ios) = self
-            .kernel_struct("_IO_STACK_LOCATION", addr)
-            .map(StructRef::prefetch)
-        else {
-            return Ok(None);
-        };
-        Ok(Some(IoStackLocationInfo {
-            address: addr,
-            major_function: ios.read_field("MajorFunction")?,
-            minor_function: ios.read_field("MinorFunction")?,
-            device_object: ios.read_field("DeviceObject")?,
-            file_object: ios.read_field("FileObject")?,
-            completion_routine: ios.read_field("CompletionRoutine")?,
-            context: ios.read_field("Context")?,
-        }))
+    /// The name of the driver whose device object is at `device`, such as
+    /// `\Driver\disk`; `None` when it cannot be read or is empty.
+    pub fn device_driver_name(&self, device: VirtAddr) -> Option<String> {
+        let types = self.guest().ok()?.ntoskrnl.types();
+        let driver = types
+            .struct_at("_DEVICE_OBJECT", device)
+            .and_then(|device| device.read_pointer("DriverObject"))
+            .ok()?;
+        types
+            .struct_at("_DRIVER_OBJECT", driver)
+            .and_then(|driver| driver.unicode_string("DriverName"))
+            .ok()
+            .filter(|name| !name.is_empty())
     }
 
     fn read_device_link(&self, device: VirtAddr) -> Result<DeviceLink> {
@@ -1626,6 +1708,50 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::types::VirtAddr;
+
+    fn irp_with(stack_count: u8, current_location: u8, readable: u8) -> IrpInfo {
+        let location = |number: u8| IoStackLocationInfo {
+            address: VirtAddr(0x1000 + u64::from(number) * 0x48),
+            major_function: 3,
+            minor_function: 0,
+            flags: 0,
+            control: 0,
+            arguments: [0; 4],
+            device_object: VirtAddr(0x2000 + u64::from(number)),
+            file_object: VirtAddr(0),
+            completion_routine: VirtAddr(0),
+            context: VirtAddr(0),
+        };
+        IrpInfo {
+            address: VirtAddr(0x1000),
+            irp_type: 6,
+            size: 0,
+            stack_count,
+            current_location,
+            pending_returned: false,
+            requestor_mode: 0,
+            io_status: None,
+            user_event: VirtAddr(0),
+            user_buffer: VirtAddr(0),
+            mdl_address: VirtAddr(0),
+            system_buffer: VirtAddr(0),
+            thread: VirtAddr(0),
+            stack: (1..=readable).map(location).collect(),
+        }
+    }
+
+    /// `CurrentLocation` counts from 1, the lowest driver's location; 0
+    /// and one past `StackCount` (completed) name none, and neither does a
+    /// location past the ones that could be read.
+    #[test]
+    fn the_current_stack_location_counts_from_one() {
+        let device = |irp: &IrpInfo| irp.current_stack().map(|ios| ios.device_object.0);
+        assert_eq!(device(&irp_with(3, 1, 3)), Some(0x2001));
+        assert_eq!(device(&irp_with(3, 3, 3)), Some(0x2003));
+        assert_eq!(device(&irp_with(3, 0, 3)), None);
+        assert_eq!(device(&irp_with(3, 4, 3)), None);
+        assert_eq!(device(&irp_with(3, 3, 2)), None);
+    }
 
     #[test]
     fn object_directory_two_entry_cycle_emits_each_entry_once() {

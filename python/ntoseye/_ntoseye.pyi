@@ -6557,7 +6557,7 @@ class Inspect:
         """
     def irp(self, /, address: int) -> Irp:
         """
-        Decode an in-flight `_IRP` and its current I/O stack location (`!irp`).
+        Decode an in-flight `_IRP` and its I/O stack locations (`!irp`).
         """
     def irp_find(self, /, pool_type: str = "nonpaged", restart: int |None = None, criteria: str |None = None, value: int = 0) -> IrpFindResult:
         """
@@ -6828,16 +6828,39 @@ class IoStackLocation(BaseRecord):
     @property
     def address(self, /) -> int: ...
     @property
-    def completion_routine(self, /) -> int: ...
+    def arguments(self, /) -> list[int]:
+        """
+        `Parameters.Others.Argument1` to `Argument4`: the first four
+        words of the request's parameters, such as a read's length and
+        offset or an IOCTL's buffer lengths and code.
+        """
+    @property
+    def completion_routine(self, /) -> int:
+        """
+        The completion routine that the driver of the next location up
+        set for when this location's driver completes the IRP.
+        """
     @property
     def context(self, /) -> int:
         """
         The context argument of the completion routine.
         """
     @property
+    def control(self, /) -> int:
+        """
+        `Control`: `SL_PENDING_RETURNED` (0x01) and when the completion
+        routine runs, `SL_INVOKE_ON_CANCEL` (0x20), `SL_INVOKE_ON_SUCCESS`
+        (0x40) and `SL_INVOKE_ON_ERROR` (0x80).
+        """
+    @property
     def device_object(self, /) -> int: ...
     @property
     def file_object(self, /) -> int: ...
+    @property
+    def flags(self, /) -> int:
+        """
+        `Flags`, the request's `SL_*` flags.
+        """
     @property
     def major_function(self, /) -> int:
         """
@@ -6850,6 +6873,12 @@ class IoStackLocation(BaseRecord):
         """
     @property
     def minor_function(self, /) -> int: ...
+    @property
+    def minor_function_name(self, /) -> str |None:
+        """
+        The name of the minor function (`IRP_MN_START_DEVICE`, ...), for
+        Plug and Play, power, WMI, and SCSI requests.
+        """
 
 @final
 class IoWorkItem(BaseRecord):
@@ -6966,7 +6995,7 @@ class IpiState(BaseRecord):
 @final
 class Irp(BaseRecord):
     """
-    An `_IRP` and its current I/O stack location (`!irp`).
+    An `_IRP` and its I/O stack locations (`!irp`).
     """
     @property
     def address(self, /) -> int: ...
@@ -7001,7 +7030,18 @@ class Irp(BaseRecord):
         `Size` in bytes, including the stack locations.
         """
     @property
+    def stack(self, /) -> list[IoStackLocation]:
+        """
+        Every stack location, from location 1 (the lowest driver's) to
+        `stack_count`, ending early at one ntoseye cannot read.
+        """
+    @property
     def stack_count(self, /) -> int: ...
+    @property
+    def system_buffer(self, /) -> int:
+        """
+        `AssociatedIrp.SystemBuffer`, the copy of the data for buffered I/O.
+        """
     @property
     def thread(self, /) -> int:
         """

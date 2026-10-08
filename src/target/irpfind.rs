@@ -403,24 +403,14 @@ impl Target {
         {
             return None;
         }
-        let driver = info.current_stack.as_ref().and_then(|stack| {
+        let driver = info.current_stack().and_then(|stack| {
             let device = stack.device_object;
             if device.is_zero() {
                 return None;
             }
             drivers
                 .entry(device)
-                .or_insert_with(|| {
-                    let driver = types
-                        .struct_at("_DEVICE_OBJECT", device)
-                        .and_then(|device| device.read_pointer("DriverObject"))
-                        .ok()?;
-                    types
-                        .struct_at("_DRIVER_OBJECT", driver)
-                        .and_then(|driver| driver.unicode_string("DriverName"))
-                        .ok()
-                        .filter(|name| !name.is_empty())
-                })
+                .or_insert_with(|| self.device_driver_name(device))
                 .clone()
         });
         Some(IrpFindEntry {

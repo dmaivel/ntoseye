@@ -34,6 +34,7 @@ ntoseye can now show where a driver's I/O is stuck, in its virtio queues, StorPo
 - Over MCP, and in the SDK with a time limit, a command that needs a halted target fails at once while the target runs with nothing set to stop it (no breakpoint or `sxe ld`), and a plain `g` then resumes without waiting out the time limit.
 - The MCP server marks a result as an error (`isError`) when any command on its line reported one.
 - The MCP server draws stops compactly: a step on the same thread shows the changed registers and the next instructions, about 100 tokens instead of 350. See [how stops look](https://ntoseye.com/integrations/mcp/#how-stops-look).
+- `!irp` shows every stack location, as WinDbg does: each driver's major and minor function, device and file, the completion routine with when it runs and whether the driver returned pending, and its arguments, the current location marked. `!irp <address> 1` adds the IRP's status, requestor mode and user buffers. In the SDK, `Irp.stack` lists the locations, which gain `flags`, `control`, `arguments` and `minor_function_name`.
 
 ### Fixed
 
