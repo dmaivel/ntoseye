@@ -35,6 +35,7 @@ mod sched;
 mod script;
 mod security;
 mod shell;
+mod storport;
 pub mod symbols;
 mod target_control;
 mod thread;

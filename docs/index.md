@@ -93,6 +93,7 @@ using/dumps
 using/kdfiles
 using/kmdf
 using/virtio
+using/storport
 using/drivers
 ```
 

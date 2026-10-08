@@ -30,6 +30,7 @@ pub mod pnp;
 pub mod pool;
 pub mod sched;
 pub mod security;
+pub mod storport;
 mod symbols;
 pub mod usermode;
 mod variables;
