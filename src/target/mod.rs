@@ -8,6 +8,7 @@ use parking_lot::Mutex;
 pub mod alpc;
 mod context;
 pub mod cpu;
+pub mod dbgprint;
 pub mod etw;
 pub mod fltmgr;
 pub mod fs;

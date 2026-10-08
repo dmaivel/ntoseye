@@ -16,8 +16,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::TargetSpec;
 use crate::breakpoints::{Breakpoint, BreakpointManager, StepFrame};
 use crate::dbg_backend::{
-    BackendCapability, BugcheckInfo, DebugBackend, DebugOutputPage, LastEvent, ModuleEvent,
-    StopEvent,
+    BackendCapability, BugcheckInfo, DebugBackend, DebugCapability, DebugLog, DebugOutputPage,
+    LastEvent, ModuleEvent, StopEvent,
 };
 use crate::disasm::ControlFlow;
 use crate::error::{Error, Result};
@@ -27,6 +27,7 @@ use crate::gdb::RegisterMap;
 use crate::guest::{ModuleInfo, ModuleSymbolLoadReport, ProcessInfo};
 use crate::session::lifecycle::InstanceGuard;
 use crate::session::partition::{KeptPartition, PartitionView};
+use crate::target::dbgprint::{PrintCursor, prints_between};
 use crate::target::{ReloadReport, ServedVp, Target, TargetSelection, ThreadInfo};
 #[cfg(test)]
 use crate::triage::{TriageBlock, make_triage_dump};
@@ -610,6 +611,27 @@ pub struct ShownStop {
     pub symbol: String,
 }
 
+/// Lines the kernel printed to its DbgPrint buffer, read for a backend
+/// without KD's stream (see [`Session::read_debug_output`]).
+struct KernelPrints {
+    log: DebugLog,
+    /// Where the buffer's writer was at the last poll; `None` before the
+    /// first.
+    cursor: std::sync::Mutex<Option<PrintCursor>>,
+}
+
+impl Default for KernelPrints {
+    fn default() -> Self {
+        Self {
+            log: DebugLog::new(KERNEL_PRINT_LINES),
+            cursor: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+/// Lines of read DbgPrint output kept, as KD keeps of its stream.
+const KERNEL_PRINT_LINES: usize = 4096;
+
 /// The root owner of a live debugging session: the introspection context, the
 /// backend that drives the target, and the session state layered on top.
 pub struct Session {
@@ -714,6 +736,10 @@ pub struct Session {
     pub brief_stops: bool,
     /// The expressions the stop display shows at every stop.
     pub displays: Vec<Display>,
+    /// Guest debug output read from the kernel's DbgPrint buffer, for a
+    /// backend without KD's debug-print stream. See
+    /// [`Self::read_debug_output`].
+    kernel_prints: KernelPrints,
     /// Per-target single-instance lock, held for the session's lifetime so a
     /// second ntoseye can't attach to the same backend resource. `Some` via
     /// [`Self::connect`] (every host's attach path), `None` via the unguarded
@@ -724,16 +750,67 @@ pub struct Session {
 impl Session {
     /// The backend's capability matrix (what the current transport supports), so
     /// a host can report unsupported operations up front instead of by failure.
+    /// Debug output is supported wherever the kernel's DbgPrint buffer can
+    /// be read, which a backend without KD's stream reads it from.
     pub fn capabilities(&self) -> Vec<BackendCapability> {
-        self.backend.capabilities()
+        let mut capabilities = self.backend.capabilities();
+        if !self.backend_streams_debug_output() && self.target.kernel_print_position().is_ok() {
+            for capability in &mut capabilities {
+                if capability.capability == DebugCapability::DebugOutput {
+                    capability.supported = true;
+                }
+            }
+        }
+        capabilities
     }
 
     /// Read captured guest debug output (DbgPrint) at or after `since_seq`.
     /// Snapshot+cursor: pass the previous page's `next_seq` to poll only new
-    /// lines. Empty on backends without a native debug stream (gdb/memory); see
-    /// [`DebugCapability::DebugOutput`](crate::dbg_backend::DebugCapability::DebugOutput).
+    /// lines. A backend without KD's debug-print stream (gdb, memory) gets
+    /// them from the kernel's DbgPrint buffer, read here, so its lines carry
+    /// the time they were read rather than printed.
     pub fn read_debug_output(&self, since_seq: u64) -> DebugOutputPage {
-        self.backend.read_debug_output(since_seq)
+        if self.backend_streams_debug_output() {
+            return self.backend.read_debug_output(since_seq);
+        }
+        self.poll_kernel_prints();
+        self.kernel_prints.log.read_since(since_seq)
+    }
+
+    /// Whether the backend delivers debug output itself, as KD does.
+    pub fn backend_streams_debug_output(&self) -> bool {
+        self.backend.capabilities().iter().any(|capability| {
+            capability.capability == DebugCapability::DebugOutput && capability.supported
+        })
+    }
+
+    /// Record what the kernel printed to its DbgPrint buffer since the last
+    /// poll. The first poll only notes where the writer is, so the output
+    /// starts with what is printed after the session attached; `!dbgprint`
+    /// shows what came before. An unreadable buffer records nothing.
+    pub fn poll_kernel_prints(&self) {
+        let Ok(position) = self.target.kernel_print_position() else {
+            return;
+        };
+        let mut cursor = self.kernel_prints.cursor.lock().unwrap();
+        let Some(from) = cursor.replace(position.cursor) else {
+            return;
+        };
+        if from == position.cursor {
+            return;
+        }
+        let Ok(buffer) = self.target.kernel_print_buffer(&position) else {
+            *cursor = Some(from);
+            return;
+        };
+        let since = prints_between(&buffer, from, position.cursor);
+        if since.lost {
+            self.kernel_prints.log.record(
+                b"[ntoseye: the kernel's DbgPrint buffer wrapped before it was read; older lines are lost]\n",
+            );
+        }
+        let text: Vec<u8> = since.bytes.into_iter().filter(|byte| *byte != 0).collect();
+        self.kernel_prints.log.record(&text);
     }
 
     /// This session's process-unique identity (see the `id` field).

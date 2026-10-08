@@ -512,6 +512,20 @@ impl ReplState<'_> {
             .is_some_and(|budget| budget.deadline.is_some())
     }
 
+    /// Print what the guest printed with DbgPrint since the last call, for a
+    /// backend without KD's stream, as KD's prints arrive at the terminal
+    /// while the target runs. Remote hosts read it themselves.
+    pub fn print_kernel_prints(&mut self) {
+        if self.context != DispatchContext::Interactive || self.ctx.backend_streams_debug_output() {
+            return;
+        }
+        let page = self.ctx.read_debug_output(self.printed_debug_seq);
+        self.printed_debug_seq = page.next_seq;
+        for line in page.lines {
+            eprintln!("{}", line.text);
+        }
+    }
+
     pub fn wait_for_stop_after_resume(&mut self) -> Result<()> {
         if !self.quiet_stops && self.stop_wait.is_none() {
             let print = || {
@@ -529,6 +543,7 @@ impl ReplState<'_> {
         self.ctx.target.interrupt.store(false, Ordering::SeqCst);
 
         loop {
+            self.print_kernel_prints();
             let interrupt_requested = self.ctx.target.interrupt.swap(false, Ordering::SeqCst);
             // A Ctrl+C breaks in, and again past any hit a filter declines
             // meanwhile: on code the whole system runs those arrive first,

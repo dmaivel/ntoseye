@@ -352,6 +352,7 @@ impl Session {
             compact_stops: false,
             brief_stops: false,
             displays: Vec::new(),
+            kernel_prints: Default::default(),
             _instance_guard: None,
         };
 
@@ -359,6 +360,11 @@ impl Session {
         // (important for dump sessions where no stop event fires).
         if has_register_context {
             session.refresh_context_for_current_thread();
+        }
+        // Debug output read from the kernel's buffer starts after attach,
+        // as KD's stream does.
+        if !session.backend_streams_debug_output() {
+            session.poll_kernel_prints();
         }
 
         // Repair what a dead session left before planting anything: a trap

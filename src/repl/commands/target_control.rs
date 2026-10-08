@@ -67,7 +67,8 @@ repl_command! {
     cmd_dbgprint;
     names: ["!dbgprint", "dbgprint"],
     usage: "!dbgprint [count]",
-    summary: "Show captured guest debug output (DbgPrint).",
+    summary: "Show guest debug output (DbgPrint).",
+    details: "Shows the last count lines, 50 by default, or all with 0. Over kd and kdnet, it shows what the KD stream delivered since ntoseye attached. On the other backends, including a crash dump, it shows the kernel's own DbgPrint buffer (KdPrintCircularBuffer), as WinDbg's !dbgprint does, which also holds what was printed before ntoseye attached. The buffer is 4 KB by default and keeps only the newest output. A print that the debug filter drops (nt!Kd_DEFAULT_Mask, Kd_<component>_Mask) reaches neither.",
 }
 
 fn target_control_available(state: &ReplState<'_>) -> bool {
@@ -294,9 +295,11 @@ impl ReplState<'_> {
         Ok(())
     }
 
-    /// Show captured guest debug output (DbgPrint). The stream also prints live
-    /// to the terminal as it arrives; this shows the retained history, last
-    /// `count` lines (default 50, or all retained when `count` is 0).
+    /// Show guest debug output (DbgPrint), the last `count` lines (default
+    /// 50, or all when `count` is 0): over KD what its stream delivered, and
+    /// on other backends what the kernel's own DbgPrint buffer holds,
+    /// including what was printed before ntoseye attached, as WinDbg's
+    /// `!dbgprint` shows.
     fn cmd_dbgprint(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         const DEFAULT_TAIL: usize = 50;
         let count = match invocation.arg(0) {
@@ -306,6 +309,9 @@ impl ReplState<'_> {
             None => DEFAULT_TAIL,
         };
 
+        if !self.ctx.backend_streams_debug_output() {
+            return self.print_kernel_print_buffer(count);
+        }
         let page = self.ctx.read_debug_output(0);
         if page.lines.is_empty() {
             outln!("{}\n", ui::muted("no debug output captured"));
@@ -326,6 +332,47 @@ impl ReplState<'_> {
         }
         outln!();
 
+        Ok(())
+    }
+
+    /// The last `count` lines of the kernel's DbgPrint buffer (all when 0),
+    /// oldest first.
+    fn print_kernel_print_buffer(&mut self, count: usize) -> Result<()> {
+        let target = &self.ctx.target;
+        let position = target.kernel_print_position()?;
+        let buffer = target.kernel_print_buffer(&position)?;
+        let bytes = crate::target::dbgprint::chronological(&buffer, position.cursor);
+        let text = String::from_utf8_lossy(&bytes).replace('\0', "");
+        let lines: Vec<&str> = text
+            .lines()
+            .map(|line| line.trim_end_matches('\r'))
+            .filter(|line| !line.is_empty())
+            .collect();
+        let wrapped = match position.cursor.rollovers {
+            0 => "not wrapped yet".to_string(),
+            1 => "wrapped once, so it starts mid-way".to_string(),
+            n => format!("wrapped {n} times, so it starts mid-way"),
+        };
+        outln!(
+            "{}",
+            ui::muted(&format!(
+                "kernel DbgPrint buffer at {:#x}, {} bytes, {wrapped}",
+                position.buffer.0, position.size
+            ))
+        );
+        if lines.is_empty() {
+            outln!("{}\n", ui::muted("the buffer is empty"));
+            return Ok(());
+        }
+        let start = if count == 0 {
+            0
+        } else {
+            lines.len().saturating_sub(count)
+        };
+        for line in &lines[start..] {
+            outln!("{line}");
+        }
+        outln!();
         Ok(())
     }
 }

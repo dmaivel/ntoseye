@@ -67,11 +67,10 @@ These functions are not available in this mode:
 - registers
 - execution-context selection
 - breakpoints
-- debug output
 - bugcheck stops
 - reload detection
 
-To see the backend's full feature matrix, run {command}`capabilities` in the REPL.
+To see the backend's full feature matrix, run {command}`capabilities` in the REPL. Debug output is available, read from the kernel's DbgPrint buffer as with the `gdb` backend ([Debug output](../using/drivers.md#debug-output)).
 
 You can still read threads. {command}`!thread`, {command}`!stacks`, {command}`!findstack`, {command}`!uniqstack`, and {command}`!process` with flag 4 walk the stack of each thread from the data that the thread saved on its kernel stack when it last stopped running. {command}`.thread` selects a thread the same way, and {command}`k`, {command}`.frame`, and {command}`r` of a selected frame then operate on that thread's stack. Each walk reads the stack again, as it is at that time.
 

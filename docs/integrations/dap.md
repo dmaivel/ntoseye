@@ -181,7 +181,7 @@ If the PDB exists only inside the guest, ntoseye can read it from guest memory i
 | Memory view | virtual reads and writes |
 | Modules view | {command}`lm` |
 | Exception info | the stop's NTSTATUS, or the bugcheck code and its four parameters |
-| Output console | guest `DbgPrint` output over KD and KDNET, shown when it arrives |
+| Output console | guest `DbgPrint` output, shown when it arrives over KD and KDNET, and read from the kernel's DbgPrint buffer with the other backends |
 
 ### Threads and stacks
 

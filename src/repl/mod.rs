@@ -314,6 +314,10 @@ pub struct ReplState<'a> {
     /// How many command lists are being dispatched, one inside another (a
     /// loop's body, an alias): the outermost is the line the user sent.
     pub line_depth: usize,
+    /// The next line of debug output read from the kernel's DbgPrint
+    /// buffer to print, for a backend without KD's stream, which prints
+    /// its own (see [`ReplState::print_kernel_prints`]).
+    pub printed_debug_seq: u64,
 }
 
 /// An optional deadline plus a host-owned cancel flag (client disconnect,
@@ -504,6 +508,7 @@ impl<'a> ReplState<'a> {
             follow_watch: None,
             unseen_stop_rendered: false,
             line_depth: 0,
+            printed_debug_seq: 0,
         }
     }
 
@@ -941,6 +946,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         follow_watch: None,
         unseen_stop_rendered: false,
         line_depth: 0,
+        printed_debug_seq: 0,
     };
     // An error ends the prompt, not the cleanup below: breakpoints left
     // planted in a guest that resumes without a debugger crash it.

@@ -57,7 +57,7 @@ After a reboot, the target stops, and over KD it stops at the first boot notific
 
 ### Debug output
 
-ntoseye appends the guest debug output (`DbgPrint`) captured since the previous call to the result, as lines that start with `[dbgprint] ...`.
+ntoseye appends the guest debug output (`DbgPrint`) printed since the previous call to the result, as lines that start with `[dbgprint] ...`. Over KD and KDNET the lines come from the debugger connection; with the other backends ntoseye reads them from the kernel's DbgPrint buffer at each call. {command}`!dbgprint` shows the last lines again, and on the other backends also the output from before ntoseye attached. See [Debug output](../using/drivers.md#debug-output).
 
 ### Long results
 
