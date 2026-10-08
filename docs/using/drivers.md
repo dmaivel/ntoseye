@@ -52,6 +52,8 @@ Over KD, {command}`.kdfiles` makes the guest get the image from the host each ti
 
 To load the new build, run `sc stop mydriver` and then `sc start mydriver`. Stopping the driver needs a `DriverUnload` routine. The guest also writes the new build over its own copy on disk. See [Driver replacement map](kdfiles.md).
 
+When `ntoseye` detaches from KD, it tells the kernel that the debugger has gone (`nt!KdDebuggerNotPresent`), as a boot without a debugger does. Without this, the kernel waits for the absent debugger at the next debug print and at every driver load, which asks the debugger for a replacement image, and the guest hangs until a debugger attaches again. A debugger that attaches later is found as before.
+
 ## Symbols
 
 `ntoseye` needs the private PDB of the driver, which is the PDB that the linker wrote next to the `.sys` file. Where it looks for the PDB depends on where you built the driver.

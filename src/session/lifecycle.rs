@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use single_instance::SingleInstance;
 
+use crate::backend::MemoryOps;
 use crate::breakpoints::{BreakpointManager, SiteJournal, breakpoint_opcode};
 use crate::bugchecks::plausible_bugcheck_code;
 use crate::dbg_backend::{BugcheckInfo, DebugBackend, DebugCapability};
@@ -432,7 +433,43 @@ impl Session {
         let cleanup = self
             .remove_all_breakpoints()
             .and_then(|()| self.disarm_traps());
+        if cleanup.is_ok() {
+            self.mark_kd_debugger_absent();
+        }
         prepare_backend_after_cleanup(self.backend.as_mut(), cleanup)
+    }
+
+    /// Tell the kernel its KD debugger is leaving, by setting
+    /// `nt!KdDebuggerNotPresent` as a boot without a debugger leaves it.
+    /// Otherwise its next debug print, and every driver load, which asks the
+    /// debugger for a replacement image (`KdPullRemoteFile`, behind
+    /// `.kdfiles`), waits for an answer from a debugger that is gone, and the
+    /// guest hangs. A debugger that attaches later sends a break-in, which
+    /// clears the flag. Best effort: a target where it cannot be written is
+    /// left as it was.
+    fn mark_kd_debugger_absent(&mut self) {
+        if !matches!(self.backend.name(), "kd" | "kdnet") {
+            return;
+        }
+        let Some(address) = self
+            .target
+            .guest()
+            .ok()
+            .and_then(|guest| guest.ntoskrnl.symbol("KdDebuggerNotPresent").ok())
+            .map(|symbol| symbol.address())
+        else {
+            return;
+        };
+        let write = |session: &Self| {
+            session
+                .target
+                .kernel_address_space()
+                .write_bytes(address, &[1])
+        };
+        // Over a KD memory source a write needs the target halted.
+        if write(self).is_err() && self.backend.is_running() && self.interrupt().is_ok() {
+            let _ = write(self);
+        }
     }
 }
 

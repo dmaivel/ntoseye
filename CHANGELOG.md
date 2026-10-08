@@ -30,6 +30,7 @@ Keeping this file:
 
 ### Fixed
 
+- Detaching from KD no longer leaves the guest to hang at its next driver load or debug print. The kernel still believed a debugger was attached and waited for it, in `KdPullRemoteFile` or `KdSendPacket`, until one attached again; ntoseye now marks the debugger absent (`nt!KdDebuggerNotPresent`) as it detaches.
 - `break` on a halted target only says so, instead of failing, so `break; bp ...; g` runs in either state.
 - `r rcx, rdx, r8` shows each of the registers on one line, as in WinDbg. It used to print its usage.
 - `ba /p <pid> e1 user32!PeekMessageW` resolves the symbol in that process, loading its symbols as `bp /p` and `bu /p` do. It used to need `.process /p` first.
