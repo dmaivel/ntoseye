@@ -577,6 +577,7 @@ def test_saved_general_registers_are_the_exits(halted: Debugger) -> None:
         try:
             stop = halted.run(timeout=10.0)
         finally:
+            halted.interrupt()
             entry.delete()
         assert isinstance(stop, Stop.Breakpoint)
         exiting = stop.cpu
@@ -593,6 +594,7 @@ def test_saved_general_registers_are_the_exits(halted: Debugger) -> None:
         try:
             stop = halted.run(timeout=10.0)
         finally:
+            halted.interrupt()
             stored.delete()
         assert isinstance(stop, Stop.Breakpoint) and stop.cpu.id == exiting.id
         saved = next(saved for saved in stop.cpu.saved_vtl if saved.current)
@@ -632,6 +634,8 @@ def test_hypercall_breakpoint_stops_only_for_its_call_and_caller(halted: Debugge
             assert (hypercall.code, hypercall.partition, hypercall.vp) == (0x000B, root.id, index)
             for _ in range(ATTEMPTS * 3):
                 stop = halted.run(timeout=10.0)
+                who = "the root" if index is None else f"the root's VP {index}"
+                assert stop is not None, f"no synthetic IPI from {who} in 10 s"
                 assert isinstance(stop, Stop.Breakpoint) and bp in stop.breakpoints
                 saved = next((saved for saved in stop.cpu.saved_vtl if saved.current), None)
                 if saved is None or saved.general_registers is None:
@@ -641,6 +645,7 @@ def test_hypercall_breakpoint_stops_only_for_its_call_and_caller(halted: Debugge
                     assert stop.cpu == halted.cpus[index]
                 callers.append(stop.cpu)
         finally:
+            halted.interrupt()
             bp.delete()
         assert callers, "no stop had a known caller"
         return callers
@@ -692,6 +697,7 @@ def test_a_hypercall_stop_decodes_the_call_from_the_callers_registers(halted: De
             assert served is None or not served.current
             decoded += 1
     finally:
+        halted.interrupt()
         bp.delete()
     assert decoded > 0, "no stop had the caller's registers"
 
@@ -760,6 +766,7 @@ def test_flush_gva_ranges_decode_in_the_format_their_flags_select(halted: Debugg
                 assert gva >> 47 in (0, 0x1FFFF), f"GvaRange {field.value:#x} is not canonical"
                 extended += bool(flags & EXTENDED_RANGES)
     finally:
+        halted.interrupt()
         bp.delete()
     if not extended:
         pytest.skip("the root partition's flushes did not use the extended range format")
