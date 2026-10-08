@@ -1,6 +1,6 @@
 # Guest partitions
 
-A guest partition runs an operating system of its own: a Hyper-V VM, a WSL2 Linux kernel, or a Windows Sandbox. `ntoseye` reads a guest through its partition's EPT, read-only: a Windows guest as a debug target with its own kernel's symbols, and any guest as raw memory and code.
+A guest partition runs an operating system of its own: a Hyper-V VM, a WSL2 Linux kernel, or a Windows Sandbox. `ntoseye` reaches a guest through its partition's EPT. It debugs a Windows guest as a target of its own, with its kernel's symbols, breakpoints, steps, and memory and register writes, and it reads any guest as raw memory and code.
 
 ## Which partition is which
 
