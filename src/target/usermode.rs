@@ -1106,6 +1106,13 @@ impl Target {
         actual: &[u8],
     ) -> Option<SelfPatchMatch> {
         let base = module.base_address;
+        let expected_ip = preferred_base
+            .wrapping_add(section.rva as u64)
+            .wrapping_add(offset as u64);
+        let actual_ip = base
+            .0
+            .wrapping_add(section.rva as u64)
+            .wrapping_add(offset as u64);
         if expected.len() == 6
             && actual.len() == 6
             && (expected.starts_with(&[0xff, 0x15]) || expected.starts_with(&[0xff, 0x25]))
@@ -1122,18 +1129,8 @@ impl Target {
             && expected[0] == actual[0]
             && matches!(expected[0], 0xe8 | 0xe9)
             && let (Some(expected_target), Some(actual_target)) = (
-                rel32_target(
-                    preferred_base
-                        .wrapping_add(section.rva as u64)
-                        .wrapping_add(offset as u64),
-                    expected,
-                ),
-                rel32_target(
-                    base.0
-                        .wrapping_add(section.rva as u64)
-                        .wrapping_add(offset as u64),
-                    actual,
-                ),
+                rel32_target(expected_ip, expected),
+                rel32_target(actual_ip, actual),
             )
         {
             let expected_target =
@@ -1162,7 +1159,37 @@ impl Target {
                 });
             }
         }
+        // The kernel also picks its CFG dispatch routine for the CPU by
+        // rewriting the displacement of a RIP-relative operand, such as
+        // KiSystemStartup's `lea rcx, [rip+...]` that fills
+        // __guard_dispatch_icall_fptr. Both ends must start a dispatch
+        // routine of the module, so code pointed anywhere else still counts.
+        if self.arch() == Arch::Amd64
+            && let Some((expected_target, actual_target)) =
+                rip_relative_retarget(expected, expected_ip, actual, actual_ip)
+            && self.starts_dispatch_routine(
+                rebase_module_target(expected_target, preferred_base, base.0, module.size),
+                module,
+            )
+            && self.starts_dispatch_routine(actual_target, module)
+        {
+            return Some(SelfPatchMatch {
+                kind: SelfPatchKind::Retpoline,
+                function: self.self_patch_function_note(base, section.rva, offset),
+            });
+        }
         None
+    }
+
+    /// Whether `address` is the first byte of one of `module`'s retpoline or
+    /// CFG dispatch routines.
+    fn starts_dispatch_routine(&self, address: u64, module: &ModuleInfo) -> bool {
+        self.nearest_symbol_current_context(VirtAddr(address))
+            .is_some_and(|(owner, name, offset)| {
+                offset == 0
+                    && owner.eq_ignore_ascii_case(&module.short_name)
+                    && is_retpoline_target(Some(&name))
+            })
     }
 
     fn closest_symbol_name(&self, address: u64) -> Option<String> {
@@ -1327,6 +1354,41 @@ fn rel32_target(address: u64, bytes: &[u8]) -> Option<u64> {
             .wrapping_add(5)
             .wrapping_add_signed(i64::from(displacement))
     })
+}
+
+/// The addresses the RIP-relative memory operand of `expected` (at
+/// `expected_ip`) and of `actual` (at `actual_ip`) refer to, when the two
+/// are the same instruction but for that operand's 4-byte displacement.
+fn rip_relative_retarget(
+    expected: &[u8],
+    expected_ip: u64,
+    actual: &[u8],
+    actual_ip: u64,
+) -> Option<(u64, u64)> {
+    let decode = |bytes: &[u8], ip: u64| {
+        let mut decoder = Decoder::with_ip(64, bytes, ip, DecoderOptions::NONE);
+        let instruction = decoder.decode();
+        let offsets = decoder.get_constant_offsets(&instruction);
+        (instruction, offsets)
+    };
+    let (disk, offsets) = decode(expected, expected_ip);
+    let (live, _) = decode(actual, actual_ip);
+    if disk.is_invalid()
+        || disk.code() != live.code()
+        || disk.len() != expected.len()
+        || live.len() != actual.len()
+        || !disk.is_ip_rel_memory_operand()
+        || offsets.displacement_size() != 4
+    {
+        return None;
+    }
+    let field = offsets.displacement_offset()..offsets.displacement_offset() + 4;
+    let only_displacement = expected
+        .iter()
+        .zip(actual)
+        .enumerate()
+        .all(|(index, (disk, live))| disk == live || field.contains(&index));
+    only_displacement.then(|| (disk.ip_rel_memory_address(), live.ip_rel_memory_address()))
 }
 
 fn rebase_module_target(address: u64, preferred_base: u64, actual_base: u64, size: u32) -> u64 {
@@ -1611,7 +1673,7 @@ fn is_region_rebase_literal(expected: &[u8], live: &[u8], offset: usize) -> bool
 
 #[cfg(test)]
 mod tests {
-    use super::{is_region_rebase, is_region_rebase_literal};
+    use super::{is_region_rebase, is_region_rebase_literal, rip_relative_retarget};
 
     /// `mov rax, imm64`.
     fn mov_rax(value: u64) -> Vec<u8> {
@@ -1683,5 +1745,41 @@ mod tests {
         ));
         // The HAL's EL2 init slot, a physical address written at boot.
         assert!(!is_region_rebase_literal(&code(0), &code(0x4014_686c), 8));
+    }
+
+    /// KiSystemStartup's `lea rcx, [rip+...]` in ntoskrnl 26200, on disk
+    /// (a _guard_dispatch_icall thunk) and after boot
+    /// (KscpCfgDispatchUserCallTargetEsSmep), at the preferred and the
+    /// loaded base: only a displacement change is a retarget.
+    #[test]
+    fn a_retarget_changes_only_the_rip_relative_displacement() {
+        let (disk_ip, live_ip) = (0x1_40b5_9522, 0xffff_f802_cddc_9522);
+        let disk = [0x48, 0x8d, 0x0d, 0x07, 0x4b, 0x07, 0x00];
+        let live = [0x48, 0x8d, 0x0d, 0x37, 0x32, 0x07, 0x00];
+        assert_eq!(
+            rip_relative_retarget(&disk, disk_ip, &live, live_ip),
+            Some((disk_ip + 7 + 0x74b07, live_ip + 7 + 0x73237))
+        );
+
+        // lea rdx: another register is another instruction.
+        let other_register = [0x48, 0x8d, 0x15, 0x37, 0x32, 0x07, 0x00];
+        assert_eq!(
+            rip_relative_retarget(&disk, disk_ip, &other_register, live_ip),
+            None
+        );
+        // mov rax, [rcx+0x10]: a displacement, but not from RIP.
+        let not_rip = [0x48, 0x8b, 0x81, 0x10, 0x00, 0x00, 0x00];
+        let moved = [0x48, 0x8b, 0x81, 0x20, 0x00, 0x00, 0x00];
+        assert_eq!(
+            rip_relative_retarget(&not_rip, disk_ip, &moved, live_ip),
+            None
+        );
+        // call rel32 is a branch, which the call/jmp rule covers.
+        let call = [0xe8, 0x07, 0x4b, 0x07, 0x00];
+        let retargeted = [0xe8, 0x37, 0x32, 0x07, 0x00];
+        assert_eq!(
+            rip_relative_retarget(&call, disk_ip, &retargeted, live_ip),
+            None
+        );
     }
 }

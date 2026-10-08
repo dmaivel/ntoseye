@@ -61,6 +61,7 @@ ntoseye can now show where a driver's I/O is stuck, in its virtio queues, StorPo
 - In Tern, a completion list of more than 100 entries, such as Tab on an empty prompt, ends in a row that says how many it leaves out, instead of stopping at `!timer` as if that were all; typing narrows the list, and Enter on that row opens the palette to search them all.
 - In the browser's go-to field, typing past the end of a name, such as the `)` of `poi(nt!PsInitialSystemProcess)`, no longer opens a list of every symbol for Enter to take.
 - WPP messages in `!wdfkd.wdflogdump` and `!wmitrace.logdump` show list values and status codes as WinDbg does: `0x00000002(DPC)` instead of `DPC`, `STATUS_SUCCESS` instead of `0x0(STATUS_SUCCESS)`, an unknown status as `NTSTATUS=C0DE0001`, and an HRESULT by name, such as `S_OK` or the Win32 error it wraps.
+- `!chkimg nt` no longer reports 2 genuine mismatched bytes in `nt!KiSystemStartup` on recent Windows 11 builds such as 26200. The kernel rewrites a `lea` there at boot to pick the CFG dispatch routine for the CPU, and `!chkimg` now counts that as a retpoline self-patch, but only when both the old and the new target start a dispatch routine, so code pointed anywhere else is still reported.
 
 ## v0.47.0 (2026-10-07)
 
