@@ -14,6 +14,7 @@ use crate::error::Error;
 use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::memory::PAGE_SIZE;
 use crate::pe;
+use crate::target::ReloadScope;
 use crate::target::image::DhParts;
 use crate::target::object::DriverObjectInfo;
 use crate::types::{Dtb, VirtAddr};
@@ -328,7 +329,7 @@ impl Module {
         let report = self.owner.with_in(py, &self.context(), |session| {
             session
                 .target
-                .reload_module_symbols(Some(&name))
+                .reload_module_symbols(ReloadScope::Current, Some(&name))
                 .map_err(err)
         })?;
         Typed::new(py, view::module::module_symbol_report(&report))

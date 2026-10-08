@@ -15,10 +15,23 @@ use crate::{
     symbols::{
         CodeFrame, InlineFrame, LocalVariableLocation, ProcedureLocal, SourceLineExtent,
         SourceLocation, SymbolCandidate, SymbolIndex, SymbolStore, format_symbol_with_offset,
+        glob_matches,
     },
     types::{Dtb, VirtAddr},
     unwind::frame_base_for_register_values,
 };
+
+/// Which modules [`Target::reload_module_symbols`] reloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReloadScope {
+    /// The inspection scope's, as `lm` lists them: the selected process's
+    /// user-mode modules, else the kernel's.
+    Current,
+    /// The kernel's, whichever process is selected (`.reload /n`).
+    Kernel,
+    /// The selected process's user-mode modules (`.reload /user`).
+    User,
+}
 
 impl Target {
     pub fn kernel_modules(&self) -> Result<Vec<ModuleInfo>> {
@@ -208,28 +221,43 @@ impl Target {
             .load_missing_kernel_module_symbols(&self.phys, &self.symbols)
     }
 
-    /// Re-run source selection and symbol indexing for all modules in the
-    /// current inspection scope, or for one exact module/short name.
+    /// Re-run source selection and symbol indexing for the modules of
+    /// `scope`, or for those whose short or image name `pattern` matches,
+    /// with `*` and `?` as wildcards; a pattern without them names one
+    /// module exactly.
     pub fn reload_module_symbols(
         &self,
-        module_name: Option<&str>,
+        scope: ReloadScope,
+        pattern: Option<&str>,
     ) -> Result<ModuleSymbolLoadReport> {
-        let mut modules = self.modules()?;
-        if let Some(name) = module_name {
+        let (mut modules, dtb) = match scope {
+            ReloadScope::Current => (self.modules()?, self.process_dtb()),
+            ReloadScope::Kernel => (self.kernel_modules()?, self.kernel_dtb()),
+            ReloadScope::User => {
+                let process = self.process.as_ref().ok_or_else(|| {
+                    Error::DebugInfo(
+                        "no process is selected; .process /p <process> selects the one whose \
+                         user-mode modules to reload"
+                            .into(),
+                    )
+                })?;
+                (self.guest()?.process_modules(process)?, self.process_dtb())
+            }
+        };
+        if let Some(pattern) = pattern {
             modules.retain(|module| {
-                module.short_name.eq_ignore_ascii_case(name)
+                glob_matches(pattern, &module.short_name, true)
                     || module
                         .name
                         .rsplit(['\\', '/'])
                         .next()
-                        .is_some_and(|image| image.eq_ignore_ascii_case(name))
+                        .is_some_and(|image| glob_matches(pattern, image, true))
             });
             if modules.is_empty() {
-                return Err(Error::DebugInfo(format!("module not found: {name}")));
+                return Err(Error::DebugInfo(format!("module not found: {pattern}")));
             }
         }
 
-        let dtb = self.process_dtb();
         let bases = modules
             .iter()
             .map(|module| module.base_address)
@@ -238,7 +266,7 @@ impl Target {
         // An explicit reload asks the sources again, whatever failed before.
         self.symbols.forget_unavailable();
 
-        if self.in_secure_scope() {
+        if scope == ReloadScope::Current && self.in_secure_scope() {
             return Guest::load_module_symbols(
                 &self.phys,
                 &self.symbols,

@@ -47,6 +47,7 @@ pub use memory::{
     CompareResult, ExpressionMemory, ExpressionScope, MAX_SEARCH_BYTES, MAX_SEARCH_MATCHES,
     SearchResult, SearchStop,
 };
+pub use symbols::ReloadScope;
 pub use vtl::{
     BreakpointStop, CodeExtent, ForeignCode, ForeignModules, GuestCode, HYPERVISOR_CONTEXT,
     SavedVtlContext, ServedVp, VP_STATE_REGISTERS, exit_registers,

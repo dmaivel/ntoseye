@@ -32,6 +32,7 @@ use crate::layout::ParsedType;
 use crate::repl::ReplStore;
 use crate::session::{ContinueOutcome, Session, StepMode};
 use crate::symbols::{CodeFrame, SourceLocation, parse_source_paths, parse_symbol_sources};
+use crate::target::ReloadScope;
 use crate::termination;
 use crate::types::{Dtb, VirtAddr};
 use crate::typeview::Expand;
@@ -608,7 +609,7 @@ impl Server {
         }
         let report = session
             .target
-            .reload_module_symbols(None)
+            .reload_module_symbols(ReloadScope::Current, None)
             .map_err(|error| error.to_string())?;
         let message = format!(
             "ntoseye: symbols reloaded from the configured path: {}/{} modules loaded, {} failed\n",

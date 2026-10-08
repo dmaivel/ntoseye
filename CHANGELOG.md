@@ -50,6 +50,7 @@ ntoseye can now show where a driver's I/O is stuck, in its virtio queues, StorPo
 - Messages name a command as you typed it. Over MCP and the SDK, an unknown command points to `help`, `dx` and `??` point to `dt` and `?`, and a notice raised by several background symbol fetches shows once.
 - The MCP `command` tool no longer advertises a `format=json` argument it does not take, and the tools carry MCP annotations (read-only, destructive, idempotent) for clients' permission prompts.
 - `--pdb-server` given both before and after a subcommand uses every server, not only those after it.
+- `.reload /f` and `.reload /v` work, as in WinDbg, instead of looking for a module named `/f`. `/n` reloads only the kernel's modules and `/user` only the selected process's, and the module can be a pattern such as `vio*`.
 
 ## v0.47.0 (2026-10-07)
 

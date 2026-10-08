@@ -9,6 +9,7 @@ use crate::breakpoints::BreakpointSpec;
 use crate::expr::Expr;
 use crate::session::Session;
 use crate::symbols::{CodeFrame, parse_source_paths, parse_symbol_sources};
+use crate::target::ReloadScope;
 use crate::types::{Dtb, VirtAddr};
 use crate::view::shape::Typed;
 use crate::view::{self};
@@ -191,7 +192,10 @@ impl Symbols {
         py: Python<'py>,
     ) -> PyResult<Typed<'py, view::module::SymbolReloadReport>> {
         let report = scoped(py, &self.owner, &self.space, |session| {
-            let report = session.target.reload_module_symbols(None).map_err(err)?;
+            let report = session
+                .target
+                .reload_module_symbols(ReloadScope::Current, None)
+                .map_err(err)?;
             session
                 .breakpoints
                 .resolve_symbolic(session.backend.as_mut(), &session.target)

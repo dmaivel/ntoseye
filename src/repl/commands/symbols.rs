@@ -15,7 +15,7 @@ use crate::symbols::{
     SourceLocation, format_symbol_with_offset, glob_matches, parse_source_paths,
     parse_symbol_sources,
 };
-use crate::target::UserVar;
+use crate::target::{ReloadScope, UserVar};
 use crate::types::VirtAddr;
 use crate::typeview::TypeView;
 use crate::ui;
@@ -137,8 +137,9 @@ repl_command! {
 repl_command! {
     cmd_reload_symbols;
     names: [".reload"],
-    usage: ".reload [module]",
-    summary: "Reload symbols for one module or for all modules in the current scope.",
+    usage: ".reload [/f] [/v] [/n | /user] [module]",
+    summary: "Reload symbols for the modules in the current scope, or for the modules a name or pattern names.",
+    details: "Asks the symbol path again for each module's PDB, whatever failed before, and loads it at once. The current scope's modules are the selected process's user-mode modules, else the kernel's; /n reloads the kernel's and /user the selected process's. A module is a name such as nt or viostor.sys, or a pattern with * and ? such as vio*. /f and /v are accepted as in WinDbg: ntoseye always loads at once, and lm shows each module's symbol status.",
 }
 
 repl_command! {
@@ -788,7 +789,45 @@ impl ReplState<'_> {
     }
 
     fn cmd_reload_symbols(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.reload_symbols(invocation.arg(0));
+        let mut scope = ReloadScope::Current;
+        let mut module = None;
+        for arg in invocation.argv.iter().map(|arg| arg.as_ref()) {
+            let option = arg.strip_prefix('/').or_else(|| arg.strip_prefix('-'));
+            match option.map(str::to_ascii_lowercase).as_deref() {
+                None if module.is_none() => module = Some(arg),
+                Some("f" | "v") => {}
+                Some("n") if scope != ReloadScope::User => scope = ReloadScope::Kernel,
+                Some("user") if scope != ReloadScope::Kernel => scope = ReloadScope::User,
+                Some("n" | "user") => {
+                    error!(
+                        ".reload: /n reloads only the kernel's modules and /user only the process's; give one"
+                    );
+                    return Ok(());
+                }
+                Some("u") => {
+                    error!(
+                        ".reload /u is not supported: ntoseye loads the symbols of every loaded \
+                         kernel module again at the next stop, and it does not lock PDB files, so \
+                         a rebuilt driver's PDB can replace one on disk; .reload <module> loads \
+                         the new one"
+                    );
+                    return Ok(());
+                }
+                Some("?") => {
+                    outln!("{}\n", command_help(invocation.name));
+                    return Ok(());
+                }
+                Some(_) => {
+                    error!(".reload: unknown option '{arg}'; it takes /f, /v, /n and /user");
+                    return Ok(());
+                }
+                None => {
+                    outln!("{}\n", command_help(invocation.name));
+                    return Ok(());
+                }
+            }
+        }
+        self.reload_symbols(scope, module);
         Ok(())
     }
 
@@ -797,7 +836,7 @@ impl ReplState<'_> {
             outln!("{}\n", command_help("ld"));
             return Ok(());
         };
-        self.reload_symbols(Some(module));
+        self.reload_symbols(ReloadScope::Current, Some(module));
         Ok(())
     }
 
@@ -822,8 +861,8 @@ impl ReplState<'_> {
         Ok(())
     }
 
-    fn reload_symbols(&mut self, module: Option<&str>) {
-        match self.ctx.target.reload_module_symbols(module) {
+    fn reload_symbols(&mut self, scope: ReloadScope, module: Option<&str>) {
+        match self.ctx.target.reload_module_symbols(scope, module) {
             Ok(report) => {
                 print_module_symbol_report(&report);
                 *self.caches.symbols.write().unwrap() = self.ctx.target.current_symbol_index();
