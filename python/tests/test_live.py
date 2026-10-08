@@ -4,6 +4,7 @@ live guest (see `conftest.py`)."""
 from __future__ import annotations
 
 import os
+import re
 import signal
 import threading
 import time
@@ -965,3 +966,44 @@ def test_a_vm_exit_breakpoint_stops_on_its_reason_from_its_caller(halted: Debugg
             assert caller.read(caller.registers["rip"], 2) == b"\x0f\x32"
     finally:
         bp.delete()
+
+
+# The virtio-win drivers built on its shared VirtIO library.
+VIRTIO_WIN_DRIVERS = (
+    "vioser",
+    "balloon",
+    "viosock",
+    "viorng",
+    "vioinput",
+    "viofs",
+    "viomem",
+    "netkvm",
+    "viostor",
+    "vioscsi",
+    "viogpudo",
+)
+
+
+def test_virtio_win_queues_read_and_compare_between_looks(halted: Debugger) -> None:
+    """A loaded virtio-win driver whose PDB has the VirtIO library's types
+    shows its device's queues: `!virtio` finds the device through the
+    driver's own state and reads each queue by the library's field names,
+    which no unit test reaches, so a rename in a new virtio-win build fails
+    here rather than going unnoticed. A second look, after the guest ran,
+    compares every such device's queues with the first."""
+    drivers = [
+        name
+        for name in VIRTIO_WIN_DRIVERS
+        if halted.modules.get(name) is not None and halted.types.get(f"{name}!virtio_device") is not None
+    ]
+    if not drivers:
+        pytest.skip("no loaded virtio-win driver with its private PDB")
+    halted.command("!virtio")
+    assert halted.run(timeout=2.0) is None
+    halted.interrupt()
+    functions = re.split(r"^(?=[0-9a-f]{2}:[0-9a-f]{2}\.\d  )", halted.command("!virtio"), flags=re.M)
+    for name in drivers:
+        devices = [text for text in functions if f"({name})" in text]
+        assert devices, f"{name}'s device was not found"
+        for text in devices:
+            assert "  Moved: " in text, f"{name}'s queues were not read:\n{text}"
