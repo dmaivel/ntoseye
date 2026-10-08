@@ -606,6 +606,8 @@ pub struct ShownStop {
     /// The Windows thread's ETHREAD, zero where no Windows thread runs.
     pub ethread: u64,
     pub regs: Vec<u8>,
+    /// Where it stopped, as the banner named it (`nt!NtClose+0x5`).
+    pub symbol: String,
 }
 
 /// The root owner of a live debugging session: the introspection context, the
@@ -704,6 +706,12 @@ pub struct Session {
     /// stops marks the registers that changed by the next stop on the same
     /// thread. Hosts that show no stops leave it unset.
     pub shown_stop: Option<ShownStop>,
+    /// The host draws stops compactly to spare an agent's context (MCP): a
+    /// stop on the thread of the one before shows only what changed.
+    pub compact_stops: bool,
+    /// With [`Self::compact_stops`], draw stops as their banner only: a
+    /// stop in the middle of a line, whose detail the rest of it carries.
+    pub brief_stops: bool,
     /// The expressions the stop display shows at every stop.
     pub displays: Vec<Display>,
     /// Per-target single-instance lock, held for the session's lifetime so a

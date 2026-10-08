@@ -115,6 +115,8 @@ fn spawn_session(
         let mut actor = match Session::open_with_progress(&spec, &mut |line| eprintln!("{line}")) {
             Ok(mut ctx) => {
                 let processors = ctx.backend.thread_list().map(|t| t.len()).unwrap_or(1);
+                // An agent reads every stop; a step shows what changed.
+                ctx.compact_stops = true;
                 let _ = ready_tx.send(Ok(processors));
                 Actor {
                     ctx,

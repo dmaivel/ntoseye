@@ -232,18 +232,39 @@ impl ReplState<'_> {
             }
         };
 
+        // The line the user sent is the outermost list, and a stop in its
+        // middle is drawn brief for a compact host (see
+        // [`Session::brief_stops`]): the rest of the line carries on from it.
+        let outermost = self.line_depth == 0;
+        self.line_depth += 1;
+        let flow = self.dispatch_commands(&commands, depth, outermost);
+        self.line_depth -= 1;
+        if outermost {
+            self.ctx.brief_stops = false;
+        }
+        flow
+    }
+
+    fn dispatch_commands(
+        &mut self,
+        commands: &[&str],
+        depth: usize,
+        outermost: bool,
+    ) -> Result<Flow> {
         // A command that reports an error ends the list, as in WinDbg: what
         // follows usually depends on it, as `g` depends on the `bp` before
         // it, and running on would resume a target nothing is set to stop.
-        let mut commands = commands.into_iter();
-        while let Some(command) = commands.next() {
+        for (index, command) in commands.iter().enumerate() {
+            let rest = &commands[index + 1..];
+            if outermost {
+                self.ctx.brief_stops = !rest.is_empty();
+            }
             let errors = errors_reported();
             match self.dispatch_one(command, depth)? {
                 Flow::Continue => {}
                 flow => return Ok(flow),
             }
             if errors_reported() != errors {
-                let rest = commands.collect::<Vec<_>>();
                 if !rest.is_empty() {
                     outln!(
                         "{}",

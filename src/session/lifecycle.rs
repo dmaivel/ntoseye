@@ -349,6 +349,8 @@ impl Session {
             partition_view: None,
             kept_partition: None,
             shown_stop: None,
+            compact_stops: false,
+            brief_stops: false,
             displays: Vec::new(),
             _instance_guard: None,
         };

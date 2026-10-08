@@ -312,6 +312,40 @@ pub fn changed(register_map: &RegisterMap, name: &str, value: u64, before: Optio
         .is_some_and(|was| was != value)
 }
 
+/// The general-purpose registers, in the order the grid shows them.
+const AMD64_REGISTERS: [&str; 18] = [
+    "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rsp", "rbp", "rip", "r8", "r9", "r10", "r11", "r12",
+    "r13", "r14", "r15", "eflags",
+];
+const ARM64_EXTRA_REGISTERS: [&str; 5] = ["fp", "lr", "sp", "pc", "cpsr"];
+
+/// The general-purpose registers that changed since `before`, on one line
+/// as `name=value` pairs: what a compact stop shows after a step.
+pub fn print_changed_registers(register_map: &RegisterMap, regs: &[u8], before: Option<&[u8]>) {
+    let arm64 = register_map.read_u64("pc", regs).is_ok();
+    let arm64_names = (0..=28)
+        .map(|index| format!("x{index}"))
+        .chain(ARM64_EXTRA_REGISTERS.map(String::from));
+    let names: Vec<String> = if arm64 {
+        arm64_names.collect()
+    } else {
+        AMD64_REGISTERS.map(String::from).to_vec()
+    };
+    let pairs: Vec<String> = names
+        .iter()
+        .filter_map(|name| {
+            let value = register_map.read_u64(name, regs).ok()?;
+            changed(register_map, name, value, before)
+                .then(|| format!("{name}={}", ui::addr(value)))
+        })
+        .collect();
+    if pairs.is_empty() {
+        outln!("{}", ui::muted("no register changed"));
+    } else {
+        outln!("{} {}", ui::muted("changed"), pairs.join("  "));
+    }
+}
+
 // Decoding lives in core; the REPL owns the *rendering*
 // (`format_disasm_line`/`render_rows` below).
 pub use crate::disasm::{
@@ -418,9 +452,14 @@ fn decode_disasm_context(
 }
 
 pub fn print_disasm_context(session: &Session, trace: &ThreadTraceContext, rip: u64) {
+    print_disasm_lines(session, trace, rip, DISASM_CONTEXT_INSTRUCTIONS);
+}
+
+/// [`print_disasm_context`] with at most `count` instructions.
+pub fn print_disasm_lines(session: &Session, trace: &ThreadTraceContext, rip: u64, count: usize) {
     print_section("disasm");
     match disasm_context_rows(session, trace, rip) {
-        Ok(rows) => render_rows(&rows, |ip| Some(ip == rip)),
+        Ok(rows) => render_rows(&rows[..rows.len().min(count)], |ip| Some(ip == rip)),
         Err(note) => outln!("{}", ui::muted(&note)),
     }
 }

@@ -30,6 +30,16 @@ The `command` tool works like a WinDbg prompt, with one difference: a call never
 - A multi-step command ({command}`pa`, {command}`pt`, {command}`gu`, {command}`wt`) can take longer than the time limit. The target then keeps running to its next stop, and the next command that needs a halted target collects that stop.
 - An empty `line` runs no command and only waits.
 
+### How stops look
+
+Every stop costs the agent tokens, so the server draws stops more compactly than the REPL:
+
+- The first stop, and a stop on another thread, show everything: the banner, the registers, the next instructions, and the stack.
+- A stop on the same thread as the one before, such as after {command}`p` or {command}`t`, shows the banner, the registers that changed on one line, the next three instructions, and the stack only when the function changed. A step then costs about 100 tokens instead of about 350.
+- A stop in the middle of a line, such as the one that {command}`break` causes in `break; bp ...; g`, shows only its banner, because the rest of the line carries on from it.
+
+{command}`r` and {command}`k` show the registers and the stack in full at any time.
+
 ### The trailer
 
 The trailer takes one of two forms:

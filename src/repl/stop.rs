@@ -425,6 +425,32 @@ struct StopContext {
     saved: Option<HashMap<String, u64>>,
     trace: ThreadTraceContext,
     rip: u64,
+    /// How much of it the text renderer draws.
+    detail: StopDetail,
+}
+
+/// How much of a stop a compact host draws (see [`Session::compact_stops`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StopDetail {
+    /// The whole card: banner, registers, code and stack.
+    Full,
+    /// After a stop on the same thread, such as a step: the banner, the
+    /// registers that changed, the next few instructions, and the stack
+    /// only when the function changed.
+    Changes { stack: bool },
+    /// The banner alone, for a stop in the middle of a line.
+    Banner,
+}
+
+/// Instructions a compact stop shows after a step.
+const COMPACT_DISASM_INSTRUCTIONS: usize = 3;
+
+/// The function part of a stop's symbol: `nt!NtClose+0x5` is in
+/// `nt!NtClose`.
+fn function_of(symbol: &str) -> &str {
+    symbol
+        .rsplit_once('+')
+        .map_or(symbol, |(function, _)| function)
 }
 
 impl StopContext {
@@ -451,6 +477,30 @@ fn print_stop_text(session: &Session, stop: &StopContext) {
         ))
     );
     print_event_children(" ", &stop.children());
+    match stop.detail {
+        StopDetail::Full => {}
+        StopDetail::Banner => {
+            outln!();
+            return;
+        }
+        StopDetail::Changes { stack } => {
+            print_changed_registers(&session.register_map, &stop.regs, stop.before.as_deref());
+            print_disasm_lines(session, &stop.trace, stop.rip, COMPACT_DISASM_INSTRUCTIONS);
+            if stack {
+                print_stacktrace(
+                    &session.target,
+                    &session.register_map,
+                    &stop.regs,
+                    BREAK_STACKTRACE_PROBE_LIMIT,
+                    BREAK_STACKTRACE_DISPLAY_LIMIT,
+                    true,
+                );
+            }
+            print_displays(&stop.displays);
+            outln!();
+            return;
+        }
+    }
     if let Some(saved) = &stop.saved {
         print_saved_vtl0_context(session, saved);
         print_displays(&stop.displays);
@@ -685,15 +735,27 @@ pub fn print_break_context_at(
     // The previous stop's registers count only on the same vCPU and the
     // same Windows thread: a stop elsewhere would mark nearly everything.
     let ethread = windows_thread.as_ref().map_or(0, |thread| thread.ethread.0);
-    let before = session
+    let previous = session
         .shown_stop
         .take()
-        .filter(|shown| shown.thread == thread_id && shown.ethread == ethread)
-        .map(|shown| shown.regs);
+        .filter(|shown| shown.thread == thread_id && shown.ethread == ethread);
+    let detail = if !session.compact_stops {
+        StopDetail::Full
+    } else if session.brief_stops {
+        StopDetail::Banner
+    } else if let Some(previous) = previous.as_ref().filter(|_| saved.is_none()) {
+        StopDetail::Changes {
+            stack: function_of(&previous.symbol) != function_of(&symbol),
+        }
+    } else {
+        StopDetail::Full
+    };
+    let before = previous.map(|shown| shown.regs);
     session.shown_stop = Some(ShownStop {
         thread: thread_id.clone(),
         ethread,
         regs: regs.clone(),
+        symbol: symbol.clone(),
     });
     let displays = display::evaluate(session, true);
     let stop = StopContext {
@@ -712,6 +774,7 @@ pub fn print_break_context_at(
         saved,
         trace,
         rip: context_rip,
+        detail,
     };
     #[cfg(feature = "cli")]
     native::render(
