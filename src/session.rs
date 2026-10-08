@@ -742,12 +742,15 @@ impl Session {
     }
 
     /// Drain the diagnostics core and backend raised since the last drain, in
-    /// the order they happened. Hosts call this at each output boundary.
+    /// the order they happened, each once: several background fetches can
+    /// raise the same line. Hosts call this at each output boundary.
     pub fn take_notices(&mut self) -> Vec<String> {
         let mut notices = std::mem::take(&mut self.target.notices);
         notices.extend(self.target.symbols.take_notices());
         notices.append(&mut self.notices);
         notices.extend(self.backend.take_notices());
+        let mut seen = std::collections::HashSet::new();
+        notices.retain(|notice| seen.insert(notice.clone()));
         notices
     }
 }

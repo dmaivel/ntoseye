@@ -282,8 +282,9 @@ impl ReplState<'_> {
     /// refusal of host commands and of run control, then a remote host's
     /// wait for the halt the command needs (against the target's state right
     /// now, so a `break` earlier on the line counts), then the run-state
-    /// check. `None` means run it.
-    fn admit(&mut self, spec: &CommandSpec) -> Result<Option<Flow>> {
+    /// check. `None` means run it. `typed` is the name as the user wrote it,
+    /// which messages repeat (`k`, not the canonical `kn`).
+    fn admit(&mut self, spec: &CommandSpec, typed: &str) -> Result<Option<Flow>> {
         if let Some(reason) = self.host_command_denial(spec) {
             error!("{reason}");
             return Ok(Some(Flow::Denied));
@@ -296,7 +297,7 @@ impl ReplState<'_> {
             error!("{reason}");
             return Ok(Some(Flow::Denied));
         }
-        if let Some(flow) = self.gate_remote_command(spec)? {
+        if let Some(flow) = self.gate_remote_command(spec, typed)? {
             return Ok(Some(flow));
         }
         if !check_run_state(self, spec) {
@@ -310,7 +311,7 @@ impl ReplState<'_> {
         // selector glued on, so it never matches a registered name.
         if line.trim_start().starts_with('~') {
             if let Some(spec) = command_registry().get("~")
-                && let Some(flow) = self.admit(spec)?
+                && let Some(flow) = self.admit(spec, "~")?
             {
                 return Ok(flow);
             }
@@ -319,7 +320,7 @@ impl ReplState<'_> {
         // Script files (`$<`, `$$>a<`...) glue the file name on too.
         if let Some((token, operand)) = script_file_token(line.trim_start()) {
             if let Some(spec) = command_registry().get("$<")
-                && let Some(flow) = self.admit(spec)?
+                && let Some(flow) = self.admit(spec, token)?
             {
                 return Ok(flow);
             }
@@ -357,7 +358,7 @@ impl ReplState<'_> {
                 self.cmd_pseudo_register(slot, value);
                 return Ok(Flow::Continue);
             }
-            if let Some(flow) = self.admit(spec)? {
+            if let Some(flow) = self.admit(spec, parsed.name)? {
                 return Ok(flow);
             }
             match spec.handler {

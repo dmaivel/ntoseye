@@ -467,10 +467,22 @@ impl ReplState<'_> {
             return Ok(());
         }
 
-        error!(
-            "unknown command '{}' (try pressing tab to see available commands)",
-            invocation.name
-        );
+        let hint = match invocation.name {
+            "dx" => {
+                ": ntoseye has no dx; `dt <type> <address>` shows typed data and `?` \
+                 evaluates an expression"
+            }
+            "??" => {
+                ": ntoseye has no C++ evaluator; `?` evaluates a MASM expression, with \
+                 casts and fields (`? ((nt!_EPROCESS*)@rcx)->UniqueProcessId`), and `dt` \
+                 shows typed data"
+            }
+            _ if self.context == DispatchContext::Interactive => {
+                " (try pressing tab to see available commands)"
+            }
+            _ => " (`help` lists the commands)",
+        };
+        error!("unknown command '{}'{hint}", invocation.name);
 
         Ok(())
     }

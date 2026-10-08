@@ -228,7 +228,7 @@ impl ReplState<'_> {
     /// client has not seen; the SDK has no such gate because the stop is
     /// exposed as `dbg.stop`. Returns the flow to report instead of running
     /// the command; `None` means run it now.
-    pub fn gate_remote_command(&mut self, spec: &CommandSpec) -> Result<Option<Flow>> {
+    pub fn gate_remote_command(&mut self, spec: &CommandSpec, typed: &str) -> Result<Option<Flow>> {
         let client = match self.context {
             DispatchContext::Remote(client)
                 if matches!(client, RemoteClient::Mcp | RemoteClient::Sdk) =>
@@ -237,7 +237,7 @@ impl ReplState<'_> {
             }
             _ => return Ok(None),
         };
-        let name = spec.names[0];
+        let name = typed;
         let moves = spec.run != RunEffect::None;
         let needs_halt = crate::repl::command::needs_halt(self, spec);
         if self.ctx.backend.is_running() && (moves || needs_halt) {
