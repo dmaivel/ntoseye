@@ -380,18 +380,7 @@ fn decode(argument: &TmfArgument, args: &mut &[u8], pointer_size: u8) -> Result<
         }
         Item::NtStatus | Item::HResult | Item::WinError => {
             let value = le_uint(take(args, 4, index, item)?) as u32;
-            let name = match item {
-                Item::NtStatus => ntstatus_name(value),
-                Item::WinError => win32_error_name(value),
-                _ => None,
-            };
-            let rendered = match (item, name) {
-                (Item::WinError, Some(name)) => format!("{value}({name})"),
-                (Item::WinError, None) => value.to_string(),
-                (_, Some(name)) => format!("{value:#x}({name})"),
-                (_, None) => format!("{value:#010x}"),
-            };
-            both(u64::from(value), 4, rendered)
+            both(u64::from(value), 4, status_text(item, value))
         }
         Item::IpAddr => {
             let bytes = take(args, 4, index, item)?;
@@ -411,10 +400,10 @@ fn decode(argument: &TmfArgument, args: &mut &[u8], pointer_size: u8) -> Result<
         }
         Item::List { size, names } => {
             let value = le_uint(take(args, usize::from(*size), index, item)?);
-            let name = names
-                .iter()
-                .find(|(v, _)| *v == value)
-                .map_or_else(|| value.to_string(), |(_, name)| name.clone());
+            let name = names.iter().find(|(v, _)| *v == value).map_or_else(
+                || format!("!0x{value:X}!"),
+                |(_, name)| format!("{value:#010x}({name})"),
+            );
             both(value, *size, name)
         }
         Item::Enum { def, .. } => {
@@ -431,6 +420,43 @@ fn decode(argument: &TmfArgument, args: &mut &[u8], pointer_size: u8) -> Result<
             return Err(format!("argument {index} has unsupported type {name}"));
         }
     })
+}
+
+/// An `ItemNTSTATUS`, `ItemHRESULT` or `ItemWINERROR` value as WinDbg's
+/// trace formatter writes it: a named value as `0x%08x(NAME)` (`%d(NAME)`
+/// for a Win32 error), success by name, and any other value tagged with its
+/// type. An HRESULT that wraps an NTSTATUS or a Win32 error takes that name.
+fn status_text(item: &Item, value: u32) -> String {
+    match item {
+        Item::NtStatus => match (value, ntstatus_name(value)) {
+            (0, _) => "STATUS_SUCCESS".into(),
+            (_, Some(name)) => format!("{value:#010x}({name})"),
+            (_, None) => format!("NTSTATUS={value:08X}"),
+        },
+        Item::WinError => match win32_error_name(value) {
+            Some(name) => format!("{}({name})", value as i32),
+            None => format!("WINERROR={value:8X}"),
+        },
+        _ if value & 0x8000_0000 == 0 => match value {
+            0 => "S_OK".into(),
+            1 => "S_FALSE".into(),
+            _ => format!("{value:#010x}"),
+        },
+        _ => {
+            // FACILITY_NT_BIT, or FACILITY_WIN32 (7).
+            let name = if value & 0x1000_0000 != 0 {
+                ntstatus_name(value & !0x1000_0000)
+            } else if value & 0x1fff_0000 == 0x0007_0000 {
+                win32_error_name(value & 0xffff)
+            } else {
+                None
+            };
+            match name {
+                Some(name) => format!("{value:#010x}({name})"),
+                None => format!("HRESULT={value:8X}"),
+            }
+        }
+    }
 }
 
 /// A printf conversion: `[flags][width][.precision][length]type`.
@@ -839,7 +865,7 @@ mod tests {
         assert_eq!(
             format_message(&message, &args(2, 5), 8).unwrap(),
             "WDFDEVICE 0xFFFFE00100001000 !devobj 0xFFFFE00100002000 IRP_MJ_POWER, \
-             IRP_MN_SET_POWER IRP 0xFFFFE00100003000 for 5 (S4)"
+             0x00000002(IRP_MN_SET_POWER) IRP 0xFFFFE00100003000 for 5 (S4)"
         );
         message.resolve_enums(|name| {
             (name == "_SYSTEM_POWER_STATE").then(|| {
@@ -855,13 +881,13 @@ mod tests {
         assert_eq!(
             format_message(&message, &args(3, 5), 8).unwrap(),
             "WDFDEVICE 0xFFFFE00100001000 !devobj 0xFFFFE00100002000 IRP_MJ_POWER, \
-             IRP_MN_QUERY_POWER IRP 0xFFFFE00100003000 for PowerSystemHibernate (S4)"
+             0x00000003(IRP_MN_QUERY_POWER) IRP 0xFFFFE00100003000 for PowerSystemHibernate (S4)"
         );
-        // Values outside the list or enum render as numbers.
+        // A value outside the list is marked; one outside the enum is a number.
         assert_eq!(
             format_message(&message, &args(9, 2), 8).unwrap(),
             "WDFDEVICE 0xFFFFE00100001000 !devobj 0xFFFFE00100002000 IRP_MJ_POWER, \
-             9 IRP 0xFFFFE00100003000 for 2 (S4)"
+             !0x9! IRP 0xFFFFE00100003000 for 2 (S4)"
         );
 
         // Explicit list values restart the numbering.
@@ -883,8 +909,8 @@ mod tests {
         ]);
         assert_eq!(
             format_message(&scan, &args, 8).unwrap(),
-            "entry 0000000000000010 modified in last scan, mod state  ModificationRemove,\
-             desc state DescriptionNotPresent"
+            "entry 0000000000000010 modified in last scan, mod state  \
+             0x00000002(ModificationRemove),desc state 0x00000004(DescriptionNotPresent)"
         );
     }
 
@@ -975,7 +1001,55 @@ mod tests {
         );
         assert_eq!(
             format_message(&capability, &args(0xc0de_0001), 8).unwrap(),
-            "Could not retrieve capability {04030201-0605-0807-090a-0b0c0d0e0f10}, 0xc0de0001"
+            "Could not retrieve capability {04030201-0605-0807-090a-0b0c0d0e0f10}, \
+             NTSTATUS=C0DE0001"
+        );
+        // Success has no number, and a small named status is zero-padded.
+        assert_eq!(
+            format_message(&capability, &args(0), 8).unwrap(),
+            "Could not retrieve capability {04030201-0605-0807-090a-0b0c0d0e0f10}, STATUS_SUCCESS"
+        );
+        assert_eq!(
+            format_message(&capability, &args(0x103), 8).unwrap(),
+            "Could not retrieve capability {04030201-0605-0807-090a-0b0c0d0e0f10}, \
+             0x00000103(STATUS_PENDING)"
+        );
+    }
+
+    #[test]
+    fn names_hresults_and_win32_errors_as_windbg_does() {
+        let message = parse(
+            r#"TMF:
+            9a6a6e04-7244-37de-5241-9476d4968249 Test // SRC=test.c MJ= MN=
+            #typev test_c1 10 "%0hr %10!s! error %11!s!" //   LEVEL=TRACE_LEVEL_ERROR FLAGS=TEST
+            {
+            Arg, ItemHRESULT -- 10
+            Arg, ItemWINERROR -- 11
+            }"#,
+        );
+        let text = |hr: u32, error: u32| {
+            format_message(
+                &message,
+                &concat(&[&hr.to_le_bytes(), &error.to_le_bytes()]),
+                8,
+            )
+            .unwrap()
+        };
+        assert_eq!(text(0, 5), "hr S_OK error 5(ERROR_ACCESS_DENIED)");
+        assert_eq!(text(1, 0xdead), "hr S_FALSE error WINERROR=    DEAD");
+        assert_eq!(text(0x10, 2), "hr 0x00000010 error 2(ERROR_FILE_NOT_FOUND)");
+        // HRESULT_FROM_WIN32 and HRESULT_FROM_NT take the wrapped code's name.
+        assert_eq!(
+            text(0x8007_0005, 5),
+            "hr 0x80070005(ERROR_ACCESS_DENIED) error 5(ERROR_ACCESS_DENIED)"
+        );
+        assert_eq!(
+            text(0xd000_0034, 5),
+            "hr 0xd0000034(STATUS_OBJECT_NAME_NOT_FOUND) error 5(ERROR_ACCESS_DENIED)"
+        );
+        assert_eq!(
+            text(0x8000_4005, 5),
+            "hr HRESULT=80004005 error 5(ERROR_ACCESS_DENIED)"
         );
     }
 
