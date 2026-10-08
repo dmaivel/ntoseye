@@ -17,7 +17,7 @@ pub enum DumpType {
     // Old dump types from `dbgeng.dll`.
     Full = 0x1,
     Bmp = 0x5,
-    /// (22H2+) Produced by `TaskMgr > System > Create live kernel Memory Dump`.
+    /// Bitmap kernel dump (`SDMPDUMP`): a bugcheck's kernel or automatic memory dump, or a live kernel dump.
     LiveKernelMemory = 0x6,
     /// Produced by `.dump /k`.
     KernelMemory = 0x8,
