@@ -479,6 +479,25 @@ impl ReplState<'_> {
             return Ok(());
         }
 
+        // A remote host's bounded wait for a stop no breakpoint will cause
+        // only spends its budget; an empty line waits for one anyway.
+        if self.stop_wait.is_some()
+            && !self
+                .ctx
+                .breakpoints
+                .list()
+                .iter()
+                .any(|breakpoint| breakpoint.enabled)
+        {
+            outln!(
+                "{}",
+                ui::muted(
+                    "the target runs on: no breakpoint is set to stop it, so this does not wait \
+                     (an empty line waits for a stop anyway)"
+                )
+            );
+            return Ok(());
+        }
         self.wait_for_stop_after_resume()
     }
 

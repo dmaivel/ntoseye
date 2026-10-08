@@ -23,7 +23,7 @@ Keeping this file:
 ### Changed
 
 - A command that reports an error ends its line, as in WinDbg, and the commands that did not run are named, so `bp ...; g` no longer resumes the guest after the breakpoint failed.
-- Over MCP and the SDK, a command that needs a halted target fails at once when the target runs and no breakpoint is set, instead of waiting out the time limit for a stop nothing will cause. An empty line still waits.
+- Over MCP and the SDK, a command that needs a halted target fails at once when the target runs and no breakpoint is set, and a plain `g` with no breakpoint set resumes without waiting, instead of waiting out the time limit for a stop nothing will cause. An empty line still waits.
 - The MCP server marks a result as an error (`isError`) when a command on its line reported one, not only when it did not run a command.
 - The MCP server draws stops compactly. A step on the same thread shows the registers that changed, the next three instructions, and the stack only when the function changed, about 100 tokens instead of 350, and a stop in the middle of a line, such as the one `break` causes in `break; bp ...; g`, shows only its banner. See [how stops look](https://ntoseye.com/integrations/mcp/#how-stops-look).
 
