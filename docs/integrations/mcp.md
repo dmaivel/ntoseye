@@ -126,6 +126,27 @@ If `ntoseye` is not in `PATH`, use an absolute path for `command` (for example, 
 
 Closing the server's stdin, or sending it `SIGINT`, `SIGTERM`, or `SIGHUP`, detaches the target the same way as `close`: ntoseye removes the installed breakpoints and resumes the guest before the server exits. `SIGKILL` prevents this cleanup and leaves the breakpoint entries installed. For more information, refer to [breakpoint recovery](../using/breakpoints.md).
 
+### Common agent integrations
+
+```bash
+# Claude Code
+claude mcp add -s user ntoseye -- ntoseye mcp
+
+# Codex
+codex mcp add ntoseye -- ntoseye mcp
+
+# VS Code
+code --add-mcp '{"name":"ntoseye","command":"ntoseye","args":["mcp"]}'
+
+# OpenCode
+opencode mcp add ntoseye --global -- ntoseye mcp
+
+# Factory Droid
+droid mcp add ntoseye ntoseye mcp
+
+# omp: the mcpServers entry above in ~/.omp/agent/mcp.json, or /mcp add in a session
+```
+
 ## Streamable HTTP
 
 Some web MCP clients connect over the network instead of starting a subprocess. For these clients, use `--http`:
