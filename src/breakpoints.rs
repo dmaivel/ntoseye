@@ -101,6 +101,9 @@ pub struct Breakpoint {
     pub one_shot: bool,
     pub action: Option<String>,
     pub temporary: bool,
+    /// Set with `bp /a` or `bu /a`: without confirming that an instruction
+    /// starts at the address.
+    pub unchecked: bool,
     /// Transport-specific breakpoint state; hosts use [`Self::watchpoint`] for
     /// the semantic data-watch metadata.
     pub hardware: Option<HardwareBreakpoint>,
@@ -194,6 +197,9 @@ pub struct BreakpointConfig {
     /// Resolve a symbol breakpoint past the function's prologue. See
     /// [`BreakpointSpec::Symbol`].
     pub skip_prologue: bool,
+    /// The address was not confirmed to start an instruction (`bp /a`,
+    /// `bu /a`). Kept so `.bpcmds` can set the breakpoint again.
+    pub unchecked: bool,
 }
 
 #[derive(Default)]

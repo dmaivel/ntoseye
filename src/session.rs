@@ -152,6 +152,26 @@ pub struct TerminatedRead {
     pub unreadable: bool,
 }
 
+/// Whether an instruction starts at an address. See
+/// [`Session::instruction_boundary`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstructionBoundary {
+    /// An instruction starts there.
+    Start,
+    /// The address is inside the instruction that starts at `instruction`,
+    /// decoding from `from`, where the code around it starts.
+    Inside {
+        instruction: VirtAddr,
+        from: VirtAddr,
+    },
+    /// Neither unwind data nor a symbol close enough says where the code
+    /// around the address starts.
+    NoAnchor,
+    /// The code from `from`, where the code around the address starts, to
+    /// past the address cannot be read.
+    Unreadable { from: VirtAddr },
+}
+
 impl ContinueOutcome {
     /// A hit on `breakpoint` at `rip`.
     fn breakpoint_hit(breakpoint: &Breakpoint, rip: u64, condition_error: Option<String>) -> Self {

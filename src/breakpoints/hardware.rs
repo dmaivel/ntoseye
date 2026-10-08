@@ -152,6 +152,7 @@ impl BreakpointManager {
                 one_shot: config.one_shot,
                 action: config.action,
                 temporary: false,
+                unchecked: config.unchecked,
                 hardware: Some(HardwareBreakpoint { access, len, slot }),
                 thread: config.thread,
                 processor: config.processor,

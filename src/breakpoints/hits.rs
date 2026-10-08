@@ -137,6 +137,7 @@ mod tests {
                 one_shot: false,
                 action: None,
                 temporary: false,
+                unchecked: false,
                 hardware: None,
                 backend: BreakpointBackend::Kernel {
                     original: Some(BreakpointPatch::single(0x90)),
@@ -183,6 +184,7 @@ mod tests {
                 one_shot: false,
                 action: None,
                 temporary: false,
+                unchecked: false,
                 hardware: None,
                 backend: BreakpointBackend::GuestMemoryPatch {
                     original: BreakpointPatch::single(0x90),

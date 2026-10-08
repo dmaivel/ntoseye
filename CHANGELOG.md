@@ -19,6 +19,10 @@ Keeping this file:
 
 - `--sympath-append <directory>` adds a directory of local PDBs to the symbol path from the start, such as a driver's build output. ntoseye finds a PDB there both as a plain file and in symbol-store layout, and you can give the option more than once.
 
+### Changed
+
+- **Breaking:** `bp` and `bu` refuse an address inside an instruction, where the breakpoint corrupted the instruction and could crash the guest, and name the instruction that the address is inside. They also refuse an address where nothing says where instructions start or whose code cannot be read, and `bu` refuses an offset into a symbol that does not resolve yet. `bp /a` and `bu /a` set those without the check. See [where a code breakpoint can go](https://ntoseye.com/using/breakpoints/#where-a-code-breakpoint-can-go).
+
 ### Fixed
 
 - `--pdb-server` given both before and after a subcommand, as in `ntoseye --pdb-server <a> mcp --pdb-server <b>`, now uses every server. It used to keep only the servers after the subcommand.

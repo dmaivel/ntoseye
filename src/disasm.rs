@@ -1051,6 +1051,30 @@ fn x86_bitness(machine: CodeMachine) -> Option<u32> {
     }
 }
 
+/// The start of the instruction of `machine` code that contains `ip`,
+/// decoding forward from `bytes` at `start`: `ip` itself when an instruction
+/// starts there. `None` when `bytes` ends before `ip`.
+pub fn instruction_containing(
+    machine: CodeMachine,
+    bytes: &[u8],
+    start: u64,
+    ip: u64,
+) -> Option<u64> {
+    let Some(bitness) = x86_bitness(machine) else {
+        // ARM64 instructions are four aligned bytes.
+        return Some(ip & !3);
+    };
+    let mut decoder = Decoder::with_ip(bitness, bytes, start, DecoderOptions::NONE);
+    while decoder.can_decode() {
+        let at = decoder.ip();
+        let _ = decoder.decode();
+        if decoder.ip() > ip {
+            return Some(at);
+        }
+    }
+    None
+}
+
 /// Decode `count` instructions of `machine` code ending exactly at
 /// `end_addr`.
 ///

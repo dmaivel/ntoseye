@@ -96,12 +96,32 @@ impl BreakpointManager {
         Ok(ids)
     }
 
-    fn resolution_dtb(debugger: &Target, scope: Option<&BreakpointScope>) -> Dtb {
+    /// The address space a breakpoint in `scope` resolves and is written in.
+    pub fn resolution_dtb(debugger: &Target, scope: Option<&BreakpointScope>) -> Dtb {
         match scope {
             Some(BreakpointScope::Process { dtb, .. }) => *dtb,
             Some(BreakpointScope::Kernel) => debugger.kernel_dtb(),
             None => debugger.current_dtb(),
         }
+    }
+
+    /// Resolve `name`, a `[module!]symbol[+offset]`, as [`Self::add_symbolic`]
+    /// does, loading a process scope's module symbols on demand: its address
+    /// and the offset applied, or `None` while it does not resolve.
+    pub fn resolve_symbol_in_scope(
+        debugger: &Target,
+        name: &str,
+        scope: Option<&BreakpointScope>,
+    ) -> Result<Option<(VirtAddr, i64)>> {
+        let dtb = Self::resolution_dtb(debugger, scope);
+        if let Some(resolved) = BreakpointSpec::resolve_symbol_offset(debugger, dtb, name)? {
+            return Ok(Some(resolved));
+        }
+        let module = name.split_once('!').map(|(module, _)| module.trim());
+        if !Self::load_scope_symbols(debugger, scope, module)? {
+            return Ok(None);
+        }
+        BreakpointSpec::resolve_symbol_offset(debugger, dtb, name)
     }
 
     /// A process-scoped specification that did not resolve: read that

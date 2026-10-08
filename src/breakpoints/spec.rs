@@ -107,7 +107,7 @@ impl BreakpointSpec {
 
     /// Split `symbol+0x29` or `symbol-8` into its symbol and signed offset.
     /// The offset is a hexadecimal numeric literal.
-    fn split_symbol_offset(name: &str) -> Option<(&str, i64)> {
+    pub fn split_symbol_offset(name: &str) -> Option<(&str, i64)> {
         let (separator, position) = ['+', '-']
             .into_iter()
             .filter_map(|separator| name.rfind(separator).map(|at| (separator, at)))

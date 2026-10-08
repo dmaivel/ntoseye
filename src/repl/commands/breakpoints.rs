@@ -16,26 +16,29 @@ use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix, parse_number_literal_text};
 use crate::guest::hypercalls;
 use crate::guest::vm_exits::{self, ExitFilter};
+use crate::session::InstructionBoundary;
 use crate::target::decimal_pid_literal;
 use crate::ui;
 
 use crate::repl::commands::thread::ThreadResolution;
 use crate::repl::*;
-use crate::types::VirtAddr;
+use crate::types::{Dtb, VirtAddr};
 
 repl_command! {
     cmd_bp;
     names: ["bp"],
-    usage: "bp [/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <address> [<passes>] [if <expr>] [do <commands>]",
+    usage: "bp [/1] [/a] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <address> [<passes>] [if <expr>] [do <commands>]",
     summary: "Set a breakpoint.",
+    details: "The breakpoint replaces the first byte of the instruction at the address, so an instruction must start there. ntoseye confirms one by the symbol at the address, or by decoding from the start of the function around it, and refuses an address inside an instruction. When nothing near the address says where instructions start, or that code cannot be read, bp refuses too, and /a sets the breakpoint without the check.",
     completion: Expression,
     run_state: Halted,
 }
 repl_command! {
     cmd_bu;
     names: ["bu"],
-    usage: "bu [/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <symbol> [<passes>] [if <expr>] [do <commands>]",
+    usage: "bu [/1] [/a] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <symbol> [<passes>] [if <expr>] [do <commands>]",
     summary: "Set a deferred symbolic breakpoint.",
+    details: "A symbol with an offset, such as mydriver!DriverEntry+0x20, must name the start of an instruction, which ntoseye checks as bp does. Until the symbol resolves nothing says where its instructions start, so bu refuses an offset then, and /a defers the breakpoint without the check.",
     completion: Expression,
     run_state: Halted,
 }
@@ -179,6 +182,8 @@ struct ParsedBreakpointArgs {
     target: String,
     access_spec: Option<String>,
     one_shot: bool,
+    /// `/a`: without confirming an instruction starts at the address.
+    unchecked: bool,
     pid: Option<u64>,
     thread: Option<u64>,
     processor: Option<u16>,
@@ -212,11 +217,12 @@ fn parse_pid_text(value: &str, radix: NumberRadix) -> Result<u64> {
     }
 }
 
-/// The options a breakpoint command starts with (`/1`, `/p`, `/t`, `/c`,
-/// `/w`).
+/// The options a breakpoint command starts with (`/1`, `/a`, `/p`, `/t`,
+/// `/c`, `/w`).
 #[derive(Default)]
 struct BreakpointOptions {
     one_shot: bool,
+    unchecked: bool,
     pid: Option<u64>,
     thread: Option<u64>,
     processor: Option<u16>,
@@ -238,6 +244,16 @@ fn parse_breakpoint_options(
             "/1" => {
                 options.one_shot = true;
                 index += 1;
+            }
+            // Only a software breakpoint's site needs an instruction start.
+            "/a" if matches!(command, "bp" | "bu") => {
+                options.unchecked = true;
+                index += 1;
+            }
+            "/a" => {
+                return Err(Error::InvalidArgument(format!(
+                    "{command}: /a applies to bp and bu"
+                )));
             }
             "/p" => {
                 let pid_text = argv.get(index + 1).ok_or_else(|| {
@@ -313,6 +329,7 @@ fn parse_breakpoint_arguments(
         target,
         access_spec,
         one_shot: options.one_shot,
+        unchecked: options.unchecked,
         pid: options.pid,
         thread: options.thread,
         processor: options.processor,
@@ -480,6 +497,9 @@ fn breakpoint_command_line(command: &str, args: &ParsedBreakpointArgs) -> String
     if args.one_shot {
         line.push_str(" /1");
     }
+    if args.unchecked {
+        line.push_str(" /a");
+    }
     if let Some(pid) = args.pid {
         line.push_str(&format!(" /p {pid}"));
     }
@@ -537,6 +557,7 @@ fn recreate_breakpoint(bp: &Breakpoint) -> Option<(&'static str, ParsedBreakpoin
                 target,
                 access_spec: None,
                 one_shot: bp.one_shot,
+                unchecked: false,
                 pid: None,
                 thread: None,
                 processor: bp.processor,
@@ -565,6 +586,7 @@ fn recreate_breakpoint(bp: &Breakpoint) -> Option<(&'static str, ParsedBreakpoin
             target,
             access_spec,
             one_shot: bp.one_shot,
+            unchecked: bp.unchecked,
             pid,
             thread: bp.thread.as_ref().map(|thread| thread.ethread.0),
             processor: bp.processor,
@@ -835,6 +857,7 @@ impl ReplState<'_> {
             // `bu <symbol>` breaks at the symbol, as WinDbg does. Only a host
             // whose client expects arguments to be live (DAP) skips ahead.
             skip_prologue: false,
+            unchecked: parsed.unchecked,
         })
     }
 
@@ -874,46 +897,18 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        let spec = args.spec.clone();
-        if BreakpointSpec::source(&spec, 0).is_some() {
-            match self.ctx.breakpoints.add_source(
-                &mut *self.ctx.backend,
-                &self.ctx.target,
-                args.spec,
-                args.config,
-            ) {
-                Ok(ids) => {
-                    self.caches.refresh_breakpoints(&self.ctx.breakpoints);
-                    if ids.len() == 1 {
-                        let deferred = self
-                            .ctx
-                            .breakpoints
-                            .list()
-                            .into_iter()
-                            .find(|bp| bp.id == ids[0])
-                            .is_some_and(|bp| bp.deferred());
-                        if deferred {
-                            outln!(
-                                "source breakpoint {} deferred until '{}' resolves\n",
-                                ui::bp_id(ids[0]),
-                                spec
-                            );
-                        } else {
-                            outln!(
-                                "source breakpoint {} set for '{}'\n",
-                                ui::bp_id(ids[0]),
-                                spec
-                            );
-                        }
-                    } else {
-                        outln!("{} source breakpoints set for '{}'\n", ids.len(), spec);
-                    }
-                }
-                Err(error) => error!("{error}"),
-            }
+        if BreakpointSpec::source(&args.spec, 0).is_some() {
+            self.set_source_breakpoint(args);
+            return Ok(());
+        }
+        if !args.config.unchecked
+            && let Err(error) = self.check_symbol_site(&args)
+        {
+            error!("{error}");
             return Ok(());
         }
 
+        let spec = args.spec.clone();
         let result = self.ctx.breakpoints.add_symbolic(
             &mut *self.ctx.backend,
             &self.ctx.target,
@@ -936,6 +931,116 @@ impl ReplState<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Set a source breakpoint on each address `file:line` has (`bu`).
+    fn set_source_breakpoint(&mut self, args: CodeBreakpointArgs) {
+        let spec = args.spec.clone();
+        match self.ctx.breakpoints.add_source(
+            &mut *self.ctx.backend,
+            &self.ctx.target,
+            args.spec,
+            args.config,
+        ) {
+            Ok(ids) => {
+                self.caches.refresh_breakpoints(&self.ctx.breakpoints);
+                if ids.len() == 1 {
+                    let deferred = self
+                        .ctx
+                        .breakpoints
+                        .list()
+                        .into_iter()
+                        .find(|bp| bp.id == ids[0])
+                        .is_some_and(|bp| bp.deferred());
+                    if deferred {
+                        outln!(
+                            "source breakpoint {} deferred until '{}' resolves\n",
+                            ui::bp_id(ids[0]),
+                            spec
+                        );
+                    } else {
+                        outln!(
+                            "source breakpoint {} set for '{}'\n",
+                            ui::bp_id(ids[0]),
+                            spec
+                        );
+                    }
+                } else {
+                    outln!("{} source breakpoints set for '{}'\n", ids.len(), spec);
+                }
+            }
+            Err(error) => error!("{error}"),
+        }
+    }
+
+    /// Refuse `bu`'s symbol unless an instruction starts where it resolves.
+    /// A symbol's own start always does and an offset into one is checked,
+    /// but nothing says where the instructions of a symbol that does not
+    /// resolve yet start.
+    fn check_symbol_site(&self, args: &CodeBreakpointArgs) -> Result<()> {
+        let target = &self.ctx.target;
+        let scope = args.config.scope.as_ref();
+        match BreakpointManager::resolve_symbol_in_scope(target, &args.spec, scope)? {
+            Some((_, 0)) => Ok(()),
+            Some((address, _)) => self.require_instruction_start(
+                BreakpointManager::resolution_dtb(target, scope),
+                address,
+                "bu",
+            ),
+            None => match BreakpointSpec::split_symbol_offset(&args.spec) {
+                Some((symbol, offset)) if offset != 0 => Err(Error::Breakpoint(format!(
+                    "{} does not resolve yet, so ntoseye cannot confirm that an instruction \
+                     starts at {}; bu /a defers the breakpoint without the check",
+                    symbol.trim(),
+                    args.spec
+                ))),
+                _ => Ok(()),
+            },
+        }
+    }
+
+    /// Refuse a software breakpoint at `address` in the address space `dtb`
+    /// unless an instruction starts there (see
+    /// [`Session::instruction_boundary`]). `command` names the command that
+    /// sets one without the check.
+    fn require_instruction_start(&self, dtb: Dtb, address: VirtAddr, command: &str) -> Result<()> {
+        let symbols = &self.ctx.target.symbols;
+        let name = |address: VirtAddr| {
+            symbols
+                .format_closest_symbol_for_address(dtb, address)
+                .unwrap_or_else(|| format!("{:#x}", address.0))
+        };
+        let unconfirmed = match self.ctx.instruction_boundary(dtb, address) {
+            InstructionBoundary::Start => return Ok(()),
+            InstructionBoundary::Inside { instruction, from } => {
+                let decoding = if from == instruction {
+                    String::new()
+                } else {
+                    format!(", decoding from {}", name(from))
+                };
+                return Err(Error::Breakpoint(format!(
+                    "{} is inside the instruction at {}{decoding}; a breakpoint there would \
+                     corrupt that instruction",
+                    name(address),
+                    name(instruction)
+                )));
+            }
+            InstructionBoundary::NoAnchor => {
+                format!(
+                    "nothing near {} says where instructions start",
+                    name(address)
+                )
+            }
+            InstructionBoundary::Unreadable { from } => format!(
+                "the code from {} to {} cannot be read",
+                name(from),
+                name(address)
+            ),
+        };
+        Err(Error::Breakpoint(format!(
+            "{unconfirmed}, so ntoseye cannot confirm that an instruction starts there; \
+             {command} /a sets the breakpoint without the check"
+        )))
     }
 
     fn cmd_bm(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
@@ -1181,6 +1286,12 @@ impl ReplState<'_> {
             Some(BreakpointScope::Process { dtb, .. }) => *dtb,
             _ => self.ctx.target.current_dtb(),
         };
+        if !args.config.unchecked
+            && let Err(error) = self.require_instruction_start(label_dtb, address, "bp")
+        {
+            error!("{error}");
+            return Ok(());
+        }
         let symbol = self
             .ctx
             .target
@@ -1536,6 +1647,8 @@ mod tests {
             target: "0xfffff80000001000".to_string(),
             access_spec: Some("w4".to_string()),
             one_shot: true,
+            // `ba` takes no `/a`.
+            unchecked: false,
             pid: Some(7952),
             thread: Some(0xffffe0000badf00d),
             processor: Some(3),
@@ -1547,6 +1660,7 @@ mod tests {
             target: "nt!NtClose".to_string(),
             access_spec: None,
             one_shot: false,
+            unchecked: true,
             pid: None,
             thread: None,
             processor: None,

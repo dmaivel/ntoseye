@@ -11,14 +11,15 @@ use crate::bugchecks::{
 };
 use crate::bytes;
 use crate::dbg_backend::processor_index_from_backend_thread_id;
-use crate::disasm::{DisasmRow, decode_code, decode_preceding};
+use crate::disasm::{DisasmRow, decode_code, decode_preceding, instruction_containing};
 use crate::error::{Error, Result};
 use crate::guest::hypervisor::{HvPartition, HvVirtualProcessor, processor_guest_vp};
 use crate::kd::{context, context_arm64};
 use crate::memory::{PAGE_SIZE, read_page_chunks};
 use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::{
-    ContinueOutcome, ExceptionRecord, PageInReport, Session, TerminatedRead, VpRegisters,
+    ContinueOutcome, ExceptionRecord, InstructionBoundary, PageInReport, Session, TerminatedRead,
+    VpRegisters,
 };
 use crate::target::usermode::ImageCheckDetail;
 use crate::target::{CompareResult, SearchResult, ThreadInfo, exit_registers};
@@ -39,6 +40,10 @@ pub(super) const DBG_STATUS_WORKER: u64 = 7;
 /// worker. The work is a DPC and a work item behind one resume; a second is
 /// already generous, and the guest may be busy.
 const PAGE_IN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The farthest before an address the code around it may start for
+/// [`Session::instruction_boundary`] to decode up to the address.
+const MAX_BOUNDARY_SCAN: u64 = 1 << 20;
 
 impl Session {
     /// Read `buf` at `address` in the current inspection space, falling back
@@ -270,6 +275,66 @@ impl Session {
                 .unwrap_or_default()
         };
         Ok(decode_code(&buf, addr.0, Some(count), machine, resolve))
+    }
+
+    /// Whether an instruction starts at `ip` in the address space `dtb`. A
+    /// software breakpoint needs one: its `int3` replaces an instruction's
+    /// first byte, and written inside an instruction it changes what the
+    /// processor decodes there. A symbol at `ip` confirms a start; otherwise
+    /// the code is decoded forward from where the code around `ip` starts,
+    /// its function's unwind entry or else its symbol, and must land on `ip`.
+    pub fn instruction_boundary(&self, dtb: Dtb, ip: VirtAddr) -> InstructionBoundary {
+        let target = &self.target;
+        let machine = target.code_machine(ip);
+        if machine == CodeMachine::Arm64 {
+            let instruction = VirtAddr(ip.0 & !3);
+            return if instruction == ip {
+                InstructionBoundary::Start
+            } else {
+                InstructionBoundary::Inside {
+                    instruction,
+                    from: instruction,
+                }
+            };
+        }
+        let symbol = target.symbols.find_closest_symbol_for_address(dtb, ip);
+        if symbol.as_ref().is_some_and(|(_, _, offset)| *offset == 0) {
+            return InstructionBoundary::Start;
+        }
+        let trace = resolve_thread_trace_context(target, dtb);
+        let Some(from) = function_range(target, &trace, ip.0)
+            .map(|(start, _)| start)
+            .or_else(|| symbol.map(|(_, _, offset)| ip.0 - u64::from(offset)))
+            .filter(|start| {
+                ip.0.checked_sub(*start)
+                    .is_some_and(|distance| distance <= MAX_BOUNDARY_SCAN)
+            })
+        else {
+            return InstructionBoundary::NoAnchor;
+        };
+        if from == ip.0 {
+            return InstructionBoundary::Start;
+        }
+        // Every instruction that starts before `ip` ends in this window, so
+        // none is cut short.
+        let mut bytes = vec![0u8; (ip.0 - from) as usize + machine.max_instruction_bytes()];
+        let unreadable = InstructionBoundary::Unreadable {
+            from: VirtAddr(from),
+        };
+        if self
+            .read_masked_in(dtb, VirtAddr(from), &mut bytes)
+            .is_err()
+        {
+            return unreadable;
+        }
+        match instruction_containing(machine, &bytes, from, ip.0) {
+            Some(start) if start == ip.0 => InstructionBoundary::Start,
+            Some(start) => InstructionBoundary::Inside {
+                instruction: VirtAddr(start),
+                from: VirtAddr(from),
+            },
+            None => unreadable,
+        }
     }
 
     /// Disassemble the runtime function containing `addr`. Returns its start
