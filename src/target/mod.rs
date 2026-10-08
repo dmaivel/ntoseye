@@ -33,6 +33,7 @@ pub mod security;
 mod symbols;
 pub mod usermode;
 mod variables;
+pub mod virtio;
 mod vtl;
 pub mod wdf;
 pub mod workqueue;

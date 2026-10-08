@@ -92,6 +92,7 @@ using/bugchecks
 using/dumps
 using/kdfiles
 using/kmdf
+using/virtio
 using/drivers
 ```
 

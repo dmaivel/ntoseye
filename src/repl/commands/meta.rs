@@ -680,6 +680,8 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("!vpb", "objects and I/O"),
     ("!pcitree", "objects and I/O"),
     ("!pci", "objects and I/O"),
+    ("!virtio", "objects and I/O"),
+    ("!vring", "objects and I/O"),
     ("ssdt", "objects and I/O"),
     ("!wdfkd.wdfdevice", "objects and I/O"),
     ("!wdfkd.wdfdriverinfo", "objects and I/O"),
