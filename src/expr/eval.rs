@@ -14,6 +14,20 @@ use crate::types::{Dtb, VirtAddr};
 use std::cmp::Ordering;
 use std::sync::Arc;
 
+/// The type of a pseudo-register that holds the address of a kernel
+/// structure, as WinDbg's C++ evaluator types them (`@$proc` is an
+/// `_EPROCESS *`), so `@$proc->UniqueProcessId` and `dx @$thread` read it.
+fn pseudo_register_type(name: &str) -> Option<&'static str> {
+    Some(match name.to_ascii_lowercase().as_str() {
+        "proc" | "process" | "eprocess" => "nt!_EPROCESS",
+        "thread" | "ethread" => "nt!_ETHREAD",
+        "kthread" => "nt!_KTHREAD",
+        "teb" => "nt!_TEB",
+        "peb" => "nt!_PEB",
+        _ => return None,
+    })
+}
+
 impl Expr {
     /// Resolve an expression to a value that retains its type and storage
     /// class. Numeric consumers should call [`ExprValue::scalar`], while
@@ -264,9 +278,18 @@ impl Expr {
         }
         match context.builtin_variable(name) {
             Some(Some(value)) => {
-                return Ok(ExprValue::Raw {
-                    value: VirtAddr(value),
-                    address: None,
+                return Ok(match pseudo_register_type(name) {
+                    Some(type_name) => ExprValue::Immediate {
+                        value: VirtAddr(value),
+                        type_data: ParsedType::Pointer(Box::new(ParsedType::Struct(
+                            type_name.into(),
+                        ))),
+                        byte_size: Some(8),
+                    },
+                    None => ExprValue::Raw {
+                        value: VirtAddr(value),
+                        address: None,
+                    },
                 });
             }
             // Distinguish unavailable state from an unknown register name.

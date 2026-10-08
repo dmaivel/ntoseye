@@ -16,7 +16,7 @@
 
 | In WinDbg | In ntoseye |
 | --- | --- |
-| `dx`, `??`, `@@c++( )` | Use typed MASM expressions, for example `ev ((nt!_EPROCESS*)@$proc)->UniqueProcessId`, or use {command}`dt`. Member access gives the value of the field, not its address. There is no C++ evaluator, so `ntoseye` does not scale pointer arithmetic. |
+| `dx` with the data model, `??`, `@@c++( )` | {command}`dx` shows a typed expression and its fields, such as `dx -r1 ((nt!_EPROCESS*)@rcx)->Pcb`, but not the data model (`@$curprocess`, `Debugger.*`, `.Where`): use `@$proc` and `@$thread`, which are typed, or the Python SDK. For `??`, use {command}`dx` or a typed expression with {command}`ev`, such as `ev @$proc->UniqueProcessId`. Member access gives the value of the field, not its address. There is no C++ evaluator, so `ntoseye` does not scale pointer arithmetic. |
 | `!name` for a symbol in any module | Use `module!name`. In `ntoseye`, a leading `!` negates the value, and `!name` alone shows a message that the name is ambiguous. |
 | `x` exact wildcard match | {command}`x` does a fuzzy search. `*` and `?` are still wildcards, and `^`, `$`, `'`, `!`, and spaces make the search narrower. |
 | `as Name Text` with `${Name}` substituted in later commands | {command}`as` defines a command alias. For example, type `as ubp bp ${1}; g`, then type `ubp nt!NtCreateFile`. `${1}`, `${2}`, ... and `${*}` are the arguments of the alias. |

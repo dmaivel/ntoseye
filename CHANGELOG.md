@@ -25,6 +25,7 @@ ntoseye can now show where a driver's I/O is stuck, in its virtio queues, StorPo
 - Guest debug output (`DbgPrint`) with the `gdb` and `memory` backends, as over KD: the REPL prints it while the target runs, MCP results carry it as `[dbgprint]`, and DAP shows it in its console. `!dbgprint` shows the kernel's whole buffer on every backend and in crash dumps, including output from before ntoseye attached. See [debug output](https://ntoseye.com/using/drivers/#debug-output).
 - `--sympath-append <directory>` adds local PDBs, such as a driver's build output, to the symbol path from the start, as plain files or in symbol-store layout.
 - The MCP server pages results over about 24,000 characters, such as `x nt!*`, and the new `output` tool reads the rest or searches it without running the command again. See [long results](https://ntoseye.com/integrations/mcp/#long-results).
+- `dx` shows a typed expression's value and its fields, as WinDbg's `dx` lays them out, such as `dx -r1 (*((nt!_IO_STACK_LOCATION *)0xffff...))` or `dx @$proc->UniqueProcessId`, with `-r` for the depth. The debugger data model (`@$curprocess`, `Debugger.*`, `.Where`) is not supported, and `dx` says what to use instead. See [dx](https://ntoseye.com/reference/expressions/#dx).
 
 ### Changed
 
@@ -34,6 +35,7 @@ ntoseye can now show where a driver's I/O is stuck, in its virtio queues, StorPo
 - Over MCP, and in the SDK with a time limit, a command that needs a halted target fails at once while the target runs with nothing set to stop it (no breakpoint or `sxe ld`), and a plain `g` then resumes without waiting out the time limit.
 - The MCP server marks a result as an error (`isError`) when any command on its line reported one.
 - The MCP server draws stops compactly: a step on the same thread shows the changed registers and the next instructions, about 100 tokens instead of 350. See [how stops look](https://ntoseye.com/integrations/mcp/#how-stops-look).
+- `$proc`, `$thread`, `$kthread`, `$teb` and `$peb` are typed pointers (`nt!_EPROCESS *` and so on), as in WinDbg's C++ expressions, so `? @$proc->UniqueProcessId` reads the field, and `?` shows them with their type.
 - `!irp` shows every stack location, as WinDbg does: each driver's major and minor function, device and file, the completion routine with when it runs and whether the driver returned pending, and its arguments, the current location marked. `!irp <address> 1` adds the IRP's status, requestor mode and user buffers. In the SDK, `Irp.stack` lists the locations, which gain `flags`, `control`, `arguments` and `minor_function_name`.
 
 ### Fixed
@@ -47,7 +49,7 @@ ntoseye can now show where a driver's I/O is stuck, in its virtio queues, StorPo
 - `r rcx, rdx, r8` shows those registers on one line, as in WinDbg, instead of its usage.
 - An address in a module without loaded symbols reads `module+offset`, as in WinDbg, in `ln`, `callbacks`, `!drvobj`, work items and MSR values.
 - `!process` shows the handle count, times, pool quota and working set on recent Windows 11 builds such as 26200, instead of `-`.
-- Messages name a command as you typed it. Over MCP and the SDK, an unknown command points to `help`, `dx` and `??` point to `dt` and `?`, and a notice raised by several background symbol fetches shows once.
+- Messages name a command as you typed it. Over MCP and the SDK, an unknown command points to `help`, `??` points to `dx` and `?`, and a notice raised by several background symbol fetches shows once.
 - The MCP `command` tool no longer advertises a `format=json` argument it does not take, and the tools carry MCP annotations (read-only, destructive, idempotent) for clients' permission prompts.
 - `--pdb-server` given both before and after a subcommand uses every server, not only those after it.
 - `.reload /f` and `.reload /v` work, as in WinDbg, instead of looking for a module named `/f`. `/n` reloads only the kernel's modules and `/user` only the selected process's, and the module can be a pattern such as `vio*`.

@@ -1,8 +1,8 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use crate::error::Result;
-use crate::expr::Expr;
+use crate::error::{Error, Result};
+use crate::expr::{Expr, ExprValue, NumberRadix};
 use crate::layout::{
     FieldInfo, ParsedType, TypeInfo, abi_layout, find_field, le_uint, named_type,
     nested_layout_name, unqualified_type_name,
@@ -26,6 +26,15 @@ repl_command! {
     summary: "Show a type layout or a decoded structure.",
     details: "-r expands nested structures, -a expands bounded arrays, and -v shows field sizes. -y matches names by case-insensitive prefix, and -l <field> walks a LIST_ENTRY field. ntoseye looks for a bare type name in the kernel PDB first, and then in the modules of the current address space. If the PDB of a module defines a member type, ntoseye names the type with that module (wdf01000!_WDF_DRIVER_GLOBALS) and expands it from that PDB. If the PDB only declares the type (a driver's _EPROCESS*), ntoseye resolves it as a bare name. Nested field paths use dots, and field patterns support * and ?. With -l, the given address is the first element, as in WinDbg, so the walk includes all nodes until it returns to that address. In memory, a list head and a record link look the same, so if you start at a list head instead of at `poi(ListHead)`, the command shows the head as one pseudo-record and does not drop a real record. If the list is empty, its link points to itself, and the command shows nothing. The walk keeps the entries that it collected, and reports null links, cycles, unreadable links, and when it reaches the entry limit.",
     completion: Type,
+}
+
+repl_command! {
+    cmd_dx;
+    names: ["dx"],
+    usage: "dx [-r<depth>] <expression>",
+    summary: "Show a typed expression's value and its fields.",
+    details: "Evaluates an expression with casts, ->, ., [] and *, such as dx -r1 (*((nt!_IO_STACK_LOCATION *)0xffff...)) or dx ((nt!_EPROCESS*)@rcx)->UniqueProcessId, and shows its value with its type, then its fields -r levels deep (1 by default, -r0 for the value alone), following a pointer to a structure to the structure. Numbers are decimal unless written with 0x, as in C++. @$proc, @$thread, @$teb and @$peb are typed pointers. The debugger data model (@$curprocess, @$curthread, Debugger.*, and queries such as .Where) is not supported; the Python SDK answers those queries. -nv is accepted as in WinDbg.",
+    completion: Expression,
 }
 
 repl_command! {
@@ -304,6 +313,111 @@ fn print_dt_entries(entries: &[DtEntry], indent: usize) {
                 print_dt_entries(&field.children, indent + 2);
             }
             DtEntry::Note(note) => outln!("{}{}", " ".repeat(indent), note),
+            DtEntry::Error(message) => error!("{message}"),
+        }
+    }
+}
+
+/// What `dx` refuses: the debugger data model, which only WinDbg has.
+const DX_DATA_MODEL: &str = "the debugger data model (@$curprocess, @$curthread, Debugger.*, and \
+     queries such as .Where) is not supported: dx evaluates typed expressions. @$proc and \
+     @$thread are the current process and thread as _EPROCESS * and _ETHREAD *, and the Python \
+     SDK queries processes, threads and modules";
+
+/// `dx`'s depth (`-r<n>`, 1 without it) and the expression after its
+/// options. `-nv` and `-v` change nothing here; any other option is
+/// refused by name. A `-` followed by a digit starts the expression.
+fn parse_dx_args(raw: &str) -> std::result::Result<(usize, &str), String> {
+    let mut depth = 1;
+    let mut rest = raw.trim_start();
+    while let Some(option) = rest.strip_prefix('-') {
+        if option.starts_with(|ch: char| ch.is_ascii_digit()) {
+            break;
+        }
+        let end = option.find(char::is_whitespace).unwrap_or(option.len());
+        let (flag, after) = option.split_at(end);
+        match flag {
+            "nv" | "v" => {}
+            _ if flag.starts_with('r') => {
+                let digits = &flag[1..];
+                depth = if digits.is_empty() {
+                    1
+                } else {
+                    digits
+                        .parse()
+                        .map_err(|_| format!("'-{flag}' takes a depth, as in -r2"))?
+                };
+            }
+            _ => {
+                return Err(format!(
+                    "option '-{flag}' is not supported; dx takes -r<depth> and -nv"
+                ));
+            }
+        }
+        rest = after.trim_start();
+    }
+    Ok((depth.min(MAX_RECURSION_DEPTH), rest.trim_end()))
+}
+
+/// Whether `text` asks for the debugger data model rather than a typed
+/// expression.
+fn uses_data_model(text: &str) -> bool {
+    const QUERIES: [&str; 9] = [
+        ".Where(",
+        ".Select(",
+        ".First(",
+        ".Count(",
+        ".OrderBy(",
+        ".Take(",
+        ".Any(",
+        ".All(",
+        ".Flatten(",
+    ];
+    text.contains("@$cur")
+        || text.trim_start().starts_with("Debugger")
+        || text.contains("=>")
+        || QUERIES.iter().any(|query| text.contains(query))
+}
+
+/// `dx`'s output: the expression with its value and type, then its fields,
+/// as WinDbg's `dx` lays them out.
+fn print_dx(root: &DtField) {
+    match (&root.value, root.type_name.is_empty()) {
+        (Some(value), true) => outln!("{} : {value}", root.name),
+        (Some(value), false) => outln!("{} : {value} [Type: {}]", root.name, root.type_name),
+        (None, _) => outln!("{} [Type: {}]", root.name, root.type_name),
+    }
+    print_dx_entries(&root.children, 4);
+    outln!();
+}
+
+fn print_dx_entries(entries: &[DtEntry], indent: usize) {
+    let width = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            DtEntry::Field(field) => Some(field.name.len()),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    for entry in entries {
+        match entry {
+            DtEntry::Field(field) => {
+                let mut line = " ".repeat(indent);
+                if let Some(offset) = field.offset {
+                    line.push_str(&format!("[+0x{offset:03x}] "));
+                }
+                line.push_str(&format!("{:<width$}", field.name));
+                match &field.value {
+                    Some(value) => {
+                        line.push_str(&format!(" : {value} [Type: {}]", field.type_name))
+                    }
+                    None => line.push_str(&format!(" [Type: {}]", field.type_name)),
+                }
+                outln!("{line}");
+                print_dx_entries(&field.children, indent + 4);
+            }
+            DtEntry::Note(note) => outln!("{}{note}", " ".repeat(indent)),
             DtEntry::Error(message) => error!("{message}"),
         }
     }
@@ -632,6 +746,106 @@ impl ReplState<'_> {
             );
         }
         (records, cursor.finish())
+    }
+
+    fn cmd_dx(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        let (depth, text) = match parse_dx_args(invocation.raw_tail) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                error!("dx: {message}");
+                return Ok(());
+            }
+        };
+        if text.is_empty() {
+            outln!("{}\n", command_help(invocation.name));
+            return Ok(());
+        }
+        if uses_data_model(text) {
+            error!("dx: {DX_DATA_MODEL}");
+            return Ok(());
+        }
+        let root = Expr::parse_with_radix(text, NumberRadix::Decimal)
+            .and_then(|expr| expr.evaluate(&self.ctx.target))
+            .and_then(|value| self.dx_root(text, &value, depth));
+        match root {
+            Ok(root) => print_dx(&root),
+            Err(error) => error!("dx: {error}"),
+        }
+        Ok(())
+    }
+
+    /// The `dx` tree of `value`, named `text`: its value and type, and its
+    /// fields `depth` levels deep, those of the structure a pointer names
+    /// for a pointer.
+    fn dx_root(&self, text: &str, value: &ExprValue, depth: usize) -> Result<DtField> {
+        let options = DtOptions {
+            recursive_depth: depth,
+            show_values: true,
+            ..DtOptions::default()
+        };
+        let Some(type_data) = value.type_data().cloned() else {
+            let raw = value.scalar(&self.ctx.target)?;
+            return Ok(DtField {
+                offset: None,
+                name: text.to_string(),
+                type_name: String::new(),
+                size: None,
+                value: Some(format!("{:#x}", raw.0)),
+                numeric: true,
+                children: Vec::new(),
+            });
+        };
+        let byte_size = value.byte_size();
+        let mut root = match value.address() {
+            Ok(address) => {
+                let field = FieldInfo {
+                    offset: 0,
+                    size: byte_size.unwrap_or_default(),
+                    type_data: type_data.clone(),
+                };
+                match self.field_entry(address, &field, text.to_string(), None, &options, depth) {
+                    DtEntry::Field(field) => field,
+                    DtEntry::Note(message) | DtEntry::Error(message) => {
+                        return Err(Error::InvalidExpression(message));
+                    }
+                }
+            }
+            // A register or an immediate, such as a cast or @$proc, has a
+            // value but no storage to read it from.
+            Err(_) => {
+                let scalar = value.scalar(&self.ctx.target)?;
+                DtField {
+                    offset: None,
+                    name: text.to_string(),
+                    type_name: type_data.to_string(),
+                    size: None,
+                    value: Some(
+                        self.type_view()
+                            .scalar_text(scalar.0, &type_data, byte_size),
+                    ),
+                    numeric: false,
+                    children: Vec::new(),
+                }
+            }
+        };
+        if depth == 0 {
+            root.children.clear();
+        } else if let ParsedType::Pointer(pointee) = &type_data
+            && let Some(layout) = nested_layout_name(pointee)
+        {
+            let target = value.scalar(&self.ctx.target)?;
+            if !target.is_zero() {
+                root.children = match self.lookup_type(&layout) {
+                    Some(type_info) => {
+                        self.struct_entries(type_info.as_ref(), target, &options, &[], depth - 1)
+                    }
+                    None => vec![DtEntry::Note(format!(
+                        "<unavailable: type {layout} not found>"
+                    ))],
+                };
+            }
+        }
+        Ok(root)
     }
 
     fn cmd_dt(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
@@ -991,6 +1205,22 @@ mod tests {
             write_u64(&mut memory, offset, value);
         }
         session_over_memory(0x1000, &memory)
+    }
+
+    /// `-r<n>` sets the depth (1 without it, and for a bare `-r`), `-nv`
+    /// changes nothing, a `-` before a digit begins the expression, and any
+    /// other option is refused by name rather than read as the expression.
+    #[test]
+    fn dx_options_set_the_depth_and_leave_the_expression() {
+        assert_eq!(
+            parse_dx_args(" -r2 -nv (*((nt!_EPROCESS *)0x10)) "),
+            Ok((2, "(*((nt!_EPROCESS *)0x10))"))
+        );
+        assert_eq!(parse_dx_args("@$proc"), Ok((1, "@$proc")));
+        assert_eq!(parse_dx_args("-r0 @$thread"), Ok((0, "@$thread")));
+        assert_eq!(parse_dx_args("-r @rcx"), Ok((1, "@rcx")));
+        assert_eq!(parse_dx_args("-1 + 2"), Ok((1, "-1 + 2")));
+        assert!(parse_dx_args("-g @$curprocess").is_err_and(|message| message.contains("'-g'")));
     }
 
     #[test]

@@ -104,6 +104,8 @@ Write a pseudo-register as `$name` or in the WinDbg form `@$name`. These pseudo-
 
 `$peb` is the user-mode PEB of the process context, which `ntoseye` reads from the `_EPROCESS` of that process. A stop in the System context has no PEB, so the expression gives an error and does not return zero.
 
+As in WinDbg's C++ expressions, the pseudo-registers that hold the address of a kernel structure are typed pointers: `$proc`, `$process` and `$eprocess` are `nt!_EPROCESS *`, `$thread` and `$ethread` are `nt!_ETHREAD *`, `$kthread` is `nt!_KTHREAD *`, `$teb` is `nt!_TEB *`, and `$peb` is `nt!_PEB *`. So `? @$proc->UniqueProcessId` reads the field, and arithmetic such as `@$proc+0x1d0` still adds bytes.
+
 `$exentry` is the PE entry point of the image that the process context runs. `$iment` gives the same value for the base of that image.
 
 `ntoseye` does not accept these WinDbg spellings:
@@ -144,6 +146,35 @@ ev ((dword*)@rax)[0n3]
 ```text
 dt _EPROCESS poi(nt!PsInitialSystemProcess) UniqueProcessId
 ```
+
+## dx
+
+{command}`dx` evaluates a typed expression and shows its value with its type, then its fields, as WinDbg's `dx` lays them out. `-r<depth>` sets how many levels of fields it shows: 1 by default, and `-r0` for the value alone. For a pointer to a structure, it shows the structure's fields. Numbers in a `dx` expression are decimal unless written with `0x`, as in C++. This is the stack location of a mouse read that `!irp` showed:
+
+```text
+dx -r1 (*((nt!_IO_STACK_LOCATION *)0xffffa002d212fa18))
+(*((nt!_IO_STACK_LOCATION *)0xffffa002d212fa18)) [Type: nt!_IO_STACK_LOCATION]
+    [+0x000] MajorFunction     : 0x3 [Type: UCHAR]
+    [+0x001] MinorFunction     : 0x0 [Type: UCHAR]
+    [+0x002] Flags             : 0x0 [Type: UCHAR]
+    [+0x003] Control           : 0xe1 [Type: UCHAR]
+    [+0x008] Parameters        [Type: <unnamed-tag>]
+    [+0x028] DeviceObject      : 0xffffa002d212d060 [Type: _DEVICE_OBJECT*]
+    [+0x030] FileObject        : 0xffffa002d46e0930 [Type: _FILE_OBJECT*]
+    [+0x038] CompletionRoutine : 0xfffff802758f3090 [Type: LONG (*)(_DEVICE_OBJECT*, _IRP*, void*)]
+    [+0x040] Context           : 0xffffa002d1fbdd70 [Type: void*]
+```
+
+A field gives its value, and a pseudo-register its typed pointer:
+
+```text
+dx ((nt!_EPROCESS*)@$proc)->ImageFileName
+((nt!_EPROCESS*)@$proc)->ImageFileName : "Idle" [Type: UCHAR[15]]
+dx -r0 @$thread
+@$thread : 0xfffff80588e625c0 [Type: nt!_ETHREAD*]
+```
+
+`ntoseye` has no debugger data model, so `dx` does not take `@$curprocess`, `@$curthread`, `Debugger.*` or queries such as `.Where`, and says so. Use `@$proc` and `@$thread` for the current process and thread, and the [Python SDK](../scripting/sdk.md) to query processes, threads and modules.
 
 ## Locals
 

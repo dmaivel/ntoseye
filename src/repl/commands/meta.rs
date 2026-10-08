@@ -468,14 +468,10 @@ impl ReplState<'_> {
         }
 
         let hint = match invocation.name {
-            "dx" => {
-                ": ntoseye has no dx; `dt <type> <address>` shows typed data and `?` \
-                 evaluates an expression"
-            }
             "??" => {
-                ": ntoseye has no C++ evaluator; `?` evaluates a MASM expression, with \
-                 casts and fields (`? ((nt!_EPROCESS*)@rcx)->UniqueProcessId`), and `dt` \
-                 shows typed data"
+                ": `dx` shows a typed expression and its fields \
+                 (`dx ((nt!_EPROCESS*)@rcx)->UniqueProcessId`), and `?` evaluates an \
+                 expression"
             }
             _ if self.context == DispatchContext::Interactive => {
                 " (try pressing tab to see available commands)"
@@ -711,6 +707,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("display", "symbols, types, and expressions"),
     ("undisplay", "symbols, types, and expressions"),
     ("dt", "symbols, types, and expressions"),
+    ("dx", "symbols, types, and expressions"),
     ("dv", "symbols, types, and expressions"),
     ("ln", "symbols, types, and expressions"),
     ("set", "symbols, types, and expressions"),
