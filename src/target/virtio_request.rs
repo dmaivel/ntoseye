@@ -531,7 +531,8 @@ fn scsi_event(event: &[u8]) -> Option<String> {
 fn net_packet(bytes: &RequestBytes, modern: bool, returned: bool) -> Option<String> {
     // A received packet is in what the device wrote, a sent one in what
     // the driver wrote.
-    let (head, total) = if bytes.out_total > 0 {
+    let sent = bytes.out_total > 0;
+    let (head, total) = if sent {
         (&bytes.out_head, bytes.out_total)
     } else if returned {
         (
@@ -577,7 +578,10 @@ fn net_packet(bytes: &RequestBytes, modern: bool, returned: bool) -> Option<Stri
             u16_at(head, 4)?
         ));
     }
-    if header >= 12
+    // The device sets num_buffers on a received packet; on a sent one the
+    // field is unused, and drivers leave whatever was there.
+    if !sent
+        && header >= 12
         && let Some(buffers) = u16_at(head, 10).filter(|buffers| *buffers > 1)
     {
         parts.push(format!("{buffers} buffers"));
@@ -1040,10 +1044,12 @@ mod tests {
     }
 
     /// A sent packet's header, after which its frame starts: the 12-byte
-    /// header of a modern device, its offload fields, and the IP flow.
+    /// header of a modern device, its offload fields, and the IP flow. Its
+    /// num_buffers is unused on transmit; NetKVM leaves stale bytes there,
+    /// as these, read from a live send, are.
     #[test]
     fn a_net_packet_decodes_header_offloads_and_flow() {
-        let mut packet = vec![1, 1, 54, 0, 0xa8, 0x05, 34, 0, 16, 0, 0, 0];
+        let mut packet = vec![1, 1, 54, 0, 0xa8, 0x05, 34, 0, 16, 0, 0xba, 0xc4];
         packet.extend(ipv4_tcp_frame());
         let sent = RequestBytes {
             out_head: packet,
@@ -1093,6 +1099,13 @@ mod tests {
         assert_eq!(
             describe(RequestKind::NetPacket { modern: true }, &received, true).as_deref(),
             Some("net IPv4 ICMP destination unreachable 10.240.166.237 -> 10.0.2.16, 138 bytes")
+        );
+        let mut merged = received.clone();
+        merged.in_head[10] = 3;
+        assert!(
+            describe(RequestKind::NetPacket { modern: true }, &merged, true)
+                .is_some_and(|text| text.ends_with(", 3 buffers")),
+            "a received packet over merged buffers says how many"
         );
     }
 

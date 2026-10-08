@@ -138,13 +138,20 @@ These lines were read from the guest:
 
 ```text
       blk write sector 0xafaf8, 584 KiB -> OK
+      blk read sector 0x0, 8 KiB -> IOERR
       scsi target 0 lun 0 WRITE(10) LBA 0xad9f8, 8 blocks
+      scsi target 0 lun 0 READ(10) LBA 0x0, 16 blocks -> CHECK CONDITION, sense ABORTED COMMAND 00/06
       scsi target 32 lun 0 REPORT LUNS -> BAD_TARGET
+      net IPv4 TCP 192.168.122.50:5556 -> 192.168.122.1:46952, 62330 bytes, checksum offload (start 34, offset 16), segmentation TCPv4 size 1448
       net IPv4 ICMP echo reply 10.0.2.2 -> 10.0.2.16, 74 bytes
       net control promiscuous off -> OK
 ```
 
-The second request is still with a throttled device, so it has no answer yet. The third is Windows probing a SCSI target that does not exist. The fourth is a received frame. A receive buffer that the device has not filled yet has nothing to decode, so a receive queue's buffers with the device show no line.
+The two failed reads come from disks whose QEMU backend was set to fail every read (`blkdebug` with `inject-error`). virtio-blk reports `IOERR`. Through virtio-scsi, QEMU reports the same host I/O error as a CHECK CONDITION with ABORTED COMMAND and ASC/ASCQ 00/06 (I/O process terminated).
+
+The SCSI write without an answer is still with a throttled device. `REPORT LUNS -> BAD_TARGET` is Windows probing a SCSI target that does not exist.
+
+The TCP line is one large send that NetKVM hands the device to segment: 62330 bytes in segments of 1448, with the device filling in the TCP checksum at offset 16 from the start of the TCP header at byte 34. After it comes a received frame. A receive buffer that the device has not filled yet has nothing to decode, so a receive queue's buffers with the device show no line.
 
 For a packed ring, `!vring` decodes the buffers that the device holds. The device reuses a returned buffer's slot for its answer, so returned buffers are counted but not decoded.
 
