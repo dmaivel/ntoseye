@@ -8,6 +8,7 @@ use crate::dbg_backend::{ContinueDisposition, ModuleEvent};
 use crate::diagnostics;
 use crate::disasm::ControlFlow;
 use crate::error::{Error, Result};
+use crate::exception_policy::ExceptionPolicyMode;
 use crate::expr::Expr;
 use crate::guest::ModuleInfo;
 use crate::session::{
@@ -248,17 +249,12 @@ impl ReplState<'_> {
             // with Ctrl+C as at the prompt.
             let can_stop = !self.stop_wait_bounded()
                 || self.ctx.backend.has_pending_stop()
-                || self
-                    .ctx
-                    .breakpoints
-                    .list()
-                    .iter()
-                    .any(|breakpoint| breakpoint.enabled);
+                || self.stop_is_set();
             if !can_stop {
                 outln!(
-                    "'{name}' was not run: the target is running and no breakpoint is set to \
-                     stop it. `break` halts it (`break; {name}` on one line), and an empty line \
-                     waits for a stop anyway."
+                    "'{name}' was not run: the target is running and no breakpoint or event \
+                     filter is set to stop it. `break` halts it (`break; {name}` on one line), \
+                     and an empty line waits for a stop anyway."
                 );
                 return Ok(Some(Flow::Denied));
             }
@@ -481,27 +477,37 @@ impl ReplState<'_> {
             return Ok(());
         }
 
-        // A remote host's bounded wait for a stop no breakpoint will cause
+        // A remote host's bounded wait for a stop nothing is set to cause
         // only spends its budget; an empty line waits for one anyway, and a
         // wait with no limit waits, ended by Ctrl+C as at the prompt.
-        if self.stop_wait_bounded()
-            && !self
-                .ctx
-                .breakpoints
-                .list()
-                .iter()
-                .any(|breakpoint| breakpoint.enabled)
-        {
+        if self.stop_wait_bounded() && !self.stop_is_set() {
             outln!(
                 "{}",
                 ui::muted(
-                    "the target runs on: no breakpoint is set to stop it, so this does not wait \
-                     (an empty line waits for a stop anyway)"
+                    "the target runs on: no breakpoint or event filter is set to stop it, so \
+                     this does not wait (an empty line waits for a stop anyway)"
                 )
             );
             return Ok(());
         }
         self.wait_for_stop_after_resume()
+    }
+
+    /// Whether something the user set will stop the target: an enabled
+    /// breakpoint, or a module load or unload filter that breaks (`sxe ld`,
+    /// `sxe ud:<module>`). What stops it unasked, a bugcheck or a
+    /// `DbgBreakPoint` over KD, does not count.
+    fn stop_is_set(&self) -> bool {
+        self.ctx
+            .breakpoints
+            .list()
+            .iter()
+            .any(|breakpoint| breakpoint.enabled)
+            || self
+                .ctx
+                .exception_policies
+                .module_event_entries()
+                .any(|policy| policy.mode == ExceptionPolicyMode::Break)
     }
 
     /// Whether this dispatch's wait for a stop has a time limit: an MCP

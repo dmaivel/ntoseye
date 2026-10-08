@@ -1372,8 +1372,28 @@ mod tests {
         let (result, text) = capture(|| state.dispatch_line(HALTED_PROBE));
         assert_eq!(result.unwrap(), Flow::Denied);
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
-        assert!(text.contains("no breakpoint is set"), "{text:?}");
+        assert!(!text.contains(HALTED_PROBE_RAN), "{text:?}");
         assert!(state.ctx.backend.is_running());
+    }
+
+    /// A module load filter that breaks is set to stop the target as a
+    /// breakpoint is, so the command waits for the stop and then runs.
+    #[test]
+    fn halted_only_command_waits_when_a_load_filter_breaks() {
+        let mut backend = MockBackend::default().running();
+        backend.queue_interrupt(breakpoint_event(0x1000));
+        let mut session = session_with_mock(backend);
+        session.exception_policies.set_module_event(
+            crate::dbg_backend::ModuleEvent::Load,
+            None,
+            crate::exception_policy::ExceptionPolicyMode::Break,
+            None,
+        );
+        let mut state = remote_state(&mut session, 5_000);
+        let (result, text) = capture(|| state.dispatch_line(HALTED_PROBE));
+        result.unwrap();
+        assert!(text.contains(HALTED_PROBE_RAN), "{text:?}");
+        assert!(!state.ctx.backend.is_running());
     }
 
     #[test]
