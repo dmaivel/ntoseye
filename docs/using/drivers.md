@@ -129,6 +129,10 @@ To list these names, use {command}`x` `mydriver!*`, and to set breakpoints on th
 
 Windows filters debug output by component and level before either path sees it. `DbgPrint` and `KdPrint` use the default component at the info level, which is filtered out unless you enable it, for example with `ed nt!Kd_DEFAULT_Mask 0xffffffff` or, at boot, the `Debug Print Filter` registry key. See Microsoft's [Reading and Filtering Debugging Messages](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/reading-and-filtering-debugging-messages).
 
+## When it hangs
+
+If the guest stops making progress without crashing, break in and look at where the driver's threads wait with {command}`!stacks` and {command}`!thread`. For a virtio device, {command}`!virtio` shows whether each queue has buffers with the device or buffers that the device returned and the driver has not taken back. See [Virtio devices](virtio.md).
+
 ## When it crashes
 
 A bugcheck stops the session at the crash and shows the faulting frame and `!analyze`. See [Bugchecks](bugchecks.md).
