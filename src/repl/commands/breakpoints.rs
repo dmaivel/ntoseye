@@ -1105,8 +1105,6 @@ impl ReplState<'_> {
             );
             return Ok(());
         }
-        let addr_str = parsed.target.as_str();
-
         let (access, len) = match parse_hw_breakpoint_spec(spec_str) {
             Ok(parsed) => parsed,
             Err(e) => {
@@ -1114,9 +1112,7 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        let Some(address) = self.eval_or_report(addr_str) else {
-            return Ok(());
-        };
+        let addr_str = parsed.target.clone();
         let condition = parsed.condition.clone();
         let config = match self.breakpoint_config(parsed) {
             Ok(config) => config,
@@ -1125,12 +1121,26 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-
+        // A user-mode symbol under `/p` is the process's, as for `bp`.
+        let address = match Expr::eval_with_radix(&addr_str, &self.ctx.target, self.radix) {
+            Ok(address) => address,
+            Err(error) => match self.resolve_symbol_in_scope(&addr_str, config.scope.as_ref()) {
+                Some(address) => address,
+                None => {
+                    error!("{error}");
+                    return Ok(());
+                }
+            },
+        };
+        let label_dtb = match config.scope.as_ref() {
+            Some(BreakpointScope::Process { dtb, .. }) => *dtb,
+            _ => self.ctx.target.current_dtb(),
+        };
         let symbol = self
             .ctx
             .target
             .symbols
-            .format_closest_symbol_for_address(self.ctx.target.current_dtb(), address);
+            .format_closest_symbol_for_address(label_dtb, address);
 
         match self
             .ctx
