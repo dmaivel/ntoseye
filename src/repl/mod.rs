@@ -1493,4 +1493,19 @@ mod tests {
         assert!(text.contains("already halted"), "{text:?}");
         assert!(text.contains(HALTED_PROBE_RAN), "bd did not run: {text:?}");
     }
+
+    /// As in WinDbg, `r` shows the registers a list names, separated by
+    /// commas or spaces, on one line.
+    #[test]
+    fn r_shows_each_register_a_list_names() {
+        let mut session = session_with_mock(MockBackend::default().one_vcpu());
+        let mut state = ReplState::for_oneshot(&mut session);
+        let (result, text) = capture(|| state.dispatch_line("r rax, rbx @rcx"));
+        result.unwrap();
+        assert!(
+            text.starts_with("rax=") && text.contains("  rbx=") && text.contains("  rcx="),
+            "{text:?}"
+        );
+        assert_eq!(text.lines().count(), 1, "{text:?}");
+    }
 }

@@ -23,6 +23,20 @@ use crate::repl::*;
 
 const MAX_FRAME_INDEX: usize = 4095;
 
+/// The registers `r` names, `rcx, rdx` or `rcx rdx`, as the register map
+/// spells them: no `@`, lowercase, and `efl`/`rflags` as `eflags`.
+fn register_list(tail: &str) -> Vec<String> {
+    tail.split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|name| !name.is_empty())
+        .map(
+            |name| match name.trim_start_matches('@').to_ascii_lowercase().as_str() {
+                "efl" | "rflags" => "eflags".to_string(),
+                name => name.to_string(),
+            },
+        )
+        .collect()
+}
+
 /// A recovered trace, the registers its walk was seeded from, and whether
 /// that seed is the live vCPU file (a `.cxr`/`.trap` context is not).
 type SeededTrace = (RecoveredStackTrace, HashMap<String, u64>, bool);
@@ -121,9 +135,9 @@ repl_command! {
 repl_command! {
     cmd_registers;
     names: ["r", "registers"],
-    usage: "r [register[=expression]]",
+    usage: "r [register[, register...] | register=expression]",
     summary: "Show the CPU registers, or set the value of one register.",
-    details: "r shows a 128-bit register (xmm0, ARM64 v0) at full width, and you set it through its 64-bit halves (xmm0l/xmm0h, v0l/v0h). For a vCPU stopped in VTL1, r shows the VTL1 registers as read-only. The .vtl 1 memory view has no registers.",
+    details: "As in WinDbg, r rcx, rdx, r8 shows several registers on one line. r shows a 128-bit register (xmm0, ARM64 v0) at full width, and you set it through its 64-bit halves (xmm0l/xmm0h, v0l/v0h). For a vCPU stopped in VTL1, r shows the VTL1 registers as read-only. The .vtl 1 memory view has no registers.",
     run_state: HaltedOrParkedThread,
 }
 
@@ -600,25 +614,17 @@ impl ReplState<'_> {
                 );
                 return Ok(());
             }
-            if !tail.is_empty() && tail.split_whitespace().count() != 1 {
-                outln!("{}\n", command_help(invocation.name));
-                return Ok(());
-            }
             outln!("registers (frame {})", frame.index);
             if !tail.is_empty() {
-                let name = tail.trim_start_matches('@');
-                let lowered_name = name.to_ascii_lowercase();
-                let requested = match lowered_name.as_str() {
-                    "efl" | "rflags" => "eflags",
-                    name => name,
-                };
-                if let Some(value) = lookup_register(&frame.registers, requested) {
-                    outln!("{}={}", requested, ui::addr(value));
-                } else {
-                    error!(
-                        "register not recovered in frame {}: {}",
-                        frame.index, requested
-                    );
+                let mut shown = Vec::new();
+                for name in register_list(tail) {
+                    match lookup_register(&frame.registers, &name) {
+                        Some(value) => shown.push(format!("{name}={}", ui::addr(value))),
+                        None => error!("register not recovered in frame {}: {name}", frame.index),
+                    }
+                }
+                if !shown.is_empty() {
+                    outln!("{}", shown.join("  "));
                 }
             } else {
                 print_sparse_registers(&frame.registers, None, 2);
@@ -659,24 +665,21 @@ impl ReplState<'_> {
         if !invocation.raw_tail.trim().is_empty() {
             let tail = invocation.raw_tail.trim();
             let Some((name, expression)) = tail.split_once('=') else {
-                if tail.split_whitespace().count() != 1 {
-                    outln!("{}\n", command_help(invocation.name));
-                    return Ok(());
-                }
-                let requested_name = tail.trim_start_matches('@').to_ascii_lowercase();
-                let name = match requested_name.as_str() {
-                    "efl" | "rflags" => "eflags",
-                    name => name,
-                };
-                match self.ctx.register_map.read_u64(name, &regs) {
-                    Ok(value) => outln!("{name}={}", ui::addr(value)),
-                    Err(Error::RegisterTooWide(_)) => {
-                        match self.ctx.register_map.read_u128(name, &regs) {
-                            Ok(value) => outln!("{name}={value:032x}"),
-                            Err(e) => error!("{e}"),
+                let mut shown = Vec::new();
+                for name in register_list(tail) {
+                    match self.ctx.register_map.read_u64(&name, &regs) {
+                        Ok(value) => shown.push(format!("{name}={}", ui::addr(value))),
+                        Err(Error::RegisterTooWide(_)) => {
+                            match self.ctx.register_map.read_u128(&name, &regs) {
+                                Ok(value) => shown.push(format!("{name}={value:032x}")),
+                                Err(e) => error!("{e}"),
+                            }
                         }
+                        Err(e) => error!("{e}"),
                     }
-                    Err(e) => error!("{e}"),
+                }
+                if !shown.is_empty() {
+                    outln!("{}", shown.join("  "));
                 }
                 return Ok(());
             };
