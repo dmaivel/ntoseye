@@ -5,7 +5,11 @@
 //! resuming command waits up to `timeout_ms` for the next stop and otherwise
 //! hands control back with the target running, a halted-only command sent
 //! while it runs waits for that stop first, `break` interrupts. Guest debug output and a run-state trailer
-//! ride along with every result. `open`/`close` manage the single session slot.
+//! ride along with every result. A long result shows its first page, and
+//! `output` reads the rest (see [`output`]). `open`/`close` manage the single
+//! session slot.
+
+mod output;
 
 use rmcp::{
     ErrorData as McpError, ServiceExt,
@@ -33,6 +37,11 @@ use crate::kd::KdMemorySource;
 use crate::repl::{RemoteClient, ReplStore, StopWaitBudget, run_remote_command};
 use crate::session::{RunStatus, Session};
 use crate::{Backend, TargetSpec};
+
+use self::output::OutputStore;
+
+/// The long results of one client's `command` calls, for its `output` calls.
+type SharedOutputs = Arc<std::sync::Mutex<OutputStore>>;
 
 /// The session actor's state: the (`!Send`) session plus the REPL state the
 /// `command` tool keeps between calls (built on first use).
@@ -237,6 +246,9 @@ struct NtoseyeMcp {
     /// Flipped on shutdown so an in-flight bounded wait bails out promptly
     /// and the actor can run cleanup (resume the VM) before exit.
     interrupt: Arc<AtomicBool>,
+    /// Kept here, not on the session actor, so `output` answers while a
+    /// long wait holds the actor, and after `close`.
+    outputs: SharedOutputs,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, schemars::JsonSchema)]
@@ -278,6 +290,25 @@ struct CommandArgs {
         description = "How long the call may wait for the target to stop before returning with it still running (default 10000, max 300000; 0 = default): a resuming command (g, p, gu, pa, ...) waits for the stop it causes, and a halted-only command (k, r, bp, ...) issued while the target runs waits for the stop before running. Command loops (.for, .while, .foreach, !for_each_*, scripts) and .sleep stop when it elapses; other commands that work on a running target ignore it."
     )]
     timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct OutputArgs {
+    #[schemars(description = "The id in a paged `command` result's `[output <id>: ...]` footer.")]
+    id: u64,
+    #[schemars(
+        description = "How many lines to skip: the offset the previous page's footer names, or one a filtered line starts with. Default 0."
+    )]
+    offset: Option<u64>,
+    #[schemars(
+        description = "The most lines to return. A page also ends at about 24k characters."
+    )]
+    limit: Option<u64>,
+    #[schemars(
+        description = "Return only the lines that contain this text, ignoring case, each after its offset."
+    )]
+    filter: Option<String>,
 }
 
 /// A tool failure from the session, classified so a guest memory fault stays
@@ -380,8 +411,14 @@ fn status_trailer(status: &RunStatus) -> String {
 }
 
 /// Run one line through the shared remote REPL dispatch: its output, the
-/// guest's debug output since the last call, and the run-state trailer.
-fn run_command(actor: &mut Actor, line: &str, budget: StopWaitBudget) -> CallToolResult {
+/// guest's debug output since the last call, paged to fit, and the run-state
+/// trailer.
+fn run_command(
+    actor: &mut Actor,
+    line: &str,
+    budget: StopWaitBudget,
+    outputs: &std::sync::Mutex<OutputStore>,
+) -> CallToolResult {
     let remote = run_remote_command(
         &mut actor.ctx,
         &mut actor.repl,
@@ -395,9 +432,7 @@ fn run_command(actor: &mut Actor, line: &str, budget: StopWaitBudget) -> CallToo
     for line in &page.lines {
         text.push_str(&format!("[dbgprint] {}\n", line.text));
     }
-    if !text.is_empty() && !text.ends_with('\n') {
-        text.push('\n');
-    }
+    let mut text = outputs.lock().unwrap().fit(&text);
     text.push_str(&status_trailer(&remote.status));
     let content = vec![ContentBlock::text(text)];
     if remote.ok {
@@ -414,6 +449,7 @@ impl NtoseyeMcp {
             session,
             tool_router: Self::tool_router(),
             interrupt,
+            outputs: SharedOutputs::default(),
         }
     }
 
@@ -485,14 +521,42 @@ impl NtoseyeMcp {
                 }
             })
         };
+        let outputs = self.outputs.clone();
         let result = self
             .run(move |actor| {
                 let budget = StopWaitBudget::new(Duration::from_millis(timeout_ms), cancel);
-                Ok(run_command(actor, &line, budget))
+                Ok(run_command(actor, &line, budget, &outputs))
             })
             .await;
         watcher.abort();
         result
+    }
+
+    #[tool(
+        description = "Read more of a long `command` result. A result over about 24k characters shows its first page and ends with an `[output <id>: ...]` footer; this returns the lines from `offset` on, or with `filter` only the lines that contain that text (ignoring case), each after its offset, so a long listing such as `x nt!*` or `!process 0 7` is searched instead of run again. The server keeps the latest long results in memory, and reading them needs no session."
+    )]
+    async fn output(
+        &self,
+        Parameters(OutputArgs {
+            id,
+            offset,
+            limit,
+            filter,
+        }): Parameters<OutputArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let to_usize = |value: u64| usize::try_from(value).unwrap_or(usize::MAX);
+        let text = self
+            .outputs
+            .lock()
+            .unwrap()
+            .read(
+                id,
+                offset.map_or(0, to_usize),
+                limit.map(to_usize),
+                filter.as_deref(),
+            )
+            .map_err(invalid_params)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 
     #[tool(
@@ -656,7 +720,10 @@ impl rmcp::ServerHandler for NtoseyeMcp {
                  `break; bu /p <pid> user32!PeekMessageW; g` resolves the symbol in that \
                  process without a prior `.process /p`. A backtrace through a module \
                  whose PDB is not cached shows `module+offset` and fetches it in the \
-                 background; run `k` again for the names. After a \
+                 background; run `k` again for the names. A result over about 24k \
+                 characters shows its first page and an `[output <id>: ...]` footer: \
+                 the `output` tool reads on, or finds lines with a filter, without \
+                 running the command again. After a \
                  reboot the target stops (over KD, at the new kernel's first boot \
                  notification) and the trailer says boot in progress until its module \
                  list exists: kernel \

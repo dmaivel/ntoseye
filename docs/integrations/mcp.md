@@ -9,6 +9,7 @@ If the agent's harness keeps a Python kernel alive between calls, such as oh-my-
 | Tool | Purpose |
 | --- | --- |
 | `command` | Runs one REPL line and returns its text with a `[target ...]` trailer. A `;` separates commands, and {command}`help` lists them. The arguments are `line` and `timeout_ms` (default 10 s, maximum 5 min). |
+| `output` | Reads more of a long `command` result: the lines from `offset`, or only the lines that contain `filter`. The arguments are `id`, `offset`, `limit`, and `filter`. |
 | `open` / `close` | `open` attaches to a target using `backend`, `connect`, and, for `kdnet`, `key`. For a crash dump, use `backend: dump` with the dump path as `connect`. `close` releases the target. The server holds one session at a time. |
 
 ## Run control
@@ -46,6 +47,18 @@ After a reboot, the target stops, and over KD it stops at the first boot notific
 ### Debug output
 
 ntoseye appends the guest debug output (`DbgPrint`) captured since the previous call to the result, as lines that start with `[dbgprint] ...`.
+
+### Long results
+
+A listing such as `x nt!*`, `!vad` or `!process 0 7` can run to megabytes, which would fill an agent's context in one call. A result longer than about 24,000 characters (roughly 12,000 tokens of debugger output) shows only its first page, followed by a footer and the trailer:
+
+```text
+[output 3: 35123 lines, offsets 0-611 shown; the output tool reads on from offset 612, or with a filter finds lines in it]
+```
+
+The `output` tool reads the rest without running the command again: `{"id": 3, "offset": 612}` returns the next page, and `{"id": 3, "filter": "explorer"}` returns only the lines that contain `explorer`, each after its offset, so that a later call can read around a match. The server keeps the latest long results in memory, up to 64 MB, for as long as it runs, and reading them needs no session. ntoseye writes no files for them, so they also work for a client that has no access to the host's file system.
+
+ntoseye also removes the spaces that pad table rows at their ends from every result.
 
 ### Breakpoint example
 

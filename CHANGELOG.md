@@ -18,6 +18,7 @@ Keeping this file:
 ### Added
 
 - `--sympath-append <directory>` adds a directory of local PDBs to the symbol path from the start, such as a driver's build output. ntoseye finds a PDB there both as a plain file and in symbol-store layout, and you can give the option more than once.
+- The MCP server pages long results. A result over about 24,000 characters, such as `x nt!*` or `!process 0 7`, shows its first page, and the new `output` tool reads the rest or finds lines in it without running the command again, so one listing no longer fills an agent's context. Results also lose the spaces that padded table rows at their ends. See [long results](https://ntoseye.com/integrations/mcp/#long-results).
 
 ### Fixed
 
