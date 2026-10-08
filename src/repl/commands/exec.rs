@@ -5,6 +5,7 @@ use owo_colors::OwoColorize;
 use crate::breakpoints::Breakpoint;
 use crate::breakpoints::StepFrame;
 use crate::dbg_backend::{ContinueDisposition, ModuleEvent};
+use crate::diagnostics;
 use crate::disasm::ControlFlow;
 use crate::error::{Error, Result};
 use crate::expr::Expr;
@@ -23,7 +24,7 @@ repl_command! {
     names: ["g", "continue"],
     usage: "g [address]",
     summary: "Resume VM execution.",
-    details: "With an address, g runs to a temporary breakpoint at that address. In secure-kernel code, this breakpoint uses a debug register, and ntoseye never patches the code. The .vtl 1 memory view accepts only g without an address, which leaves the view before it resumes the VM. To stop in VTL1, use `ba e1`.",
+    details: "With an address, g runs to a temporary breakpoint at that address. ntoseye checks that an instruction starts there as bp does: it refuses an address inside an instruction and warns when it cannot check. In secure-kernel code, this breakpoint uses a debug register, and ntoseye never patches the code. The .vtl 1 memory view accepts only g without an address, which leaves the view before it resumes the VM. To stop in VTL1, use `ba e1`.",
     completion: Expression,
     run: Run,
 }
@@ -352,9 +353,24 @@ impl ReplState<'_> {
             return self.continue_vm_with_disposition(disposition);
         }
         match Expr::eval_with_radix(expression, &self.ctx.target, self.radix) {
-            Ok(address) => self
-                .run_to_temporary_code_breakpoint_with_disposition(address, None, disposition)
-                .map(|_| ()),
+            Ok(address) => {
+                // Secure-kernel code and a partition's take a debug register
+                // for the run, which writes nothing.
+                let patched =
+                    self.ctx.partition().is_none() && !self.ctx.target.is_secure_address(address);
+                let check = patched
+                    .then(|| self.check_instruction_start(self.ctx.target.current_dtb(), address));
+                match check {
+                    Some(Ok(Some(warning))) => diagnostics::print_warning(warning),
+                    Some(Err(error)) => {
+                        error!("{error}");
+                        return Ok(());
+                    }
+                    Some(Ok(None)) | None => {}
+                }
+                self.run_to_temporary_code_breakpoint_with_disposition(address, None, disposition)
+                    .map(|_| ())
+            }
             Err(error) => {
                 error!("invalid {} address: {error}", invocation.name);
                 Ok(())

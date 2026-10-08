@@ -21,7 +21,7 @@ Keeping this file:
 
 ### Fixed
 
-- `bp` and `bu` refuse an address inside an instruction, where the breakpoint corrupted the instruction and could crash the guest, and name the instruction that the address is inside. Where ntoseye cannot check an address, such as code with nothing near it that says where instructions start, they set the breakpoint and warn. `/a` skips the check. See [where a code breakpoint can go](https://ntoseye.com/using/breakpoints/#where-a-code-breakpoint-can-go).
+- `bp`, `bu` and `g <address>` refuse an address inside an instruction, where the breakpoint corrupted the instruction and could crash the guest, and name the instruction that the address is inside. Where ntoseye cannot check an address, such as code with nothing near it that says where instructions start, they set the breakpoint and warn. `/a` skips the check for `bp` and `bu`. See [where a code breakpoint can go](https://ntoseye.com/using/breakpoints/#where-a-code-breakpoint-can-go).
 - `bp <file>:<line>` sets a source breakpoint, as `bu` does. It used to fail with an expression error.
 - `--pdb-server` given both before and after a subcommand, as in `ntoseye --pdb-server <a> mcp --pdb-server <b>`, now uses every server. It used to keep only the servers after the subcommand.
 

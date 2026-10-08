@@ -1014,7 +1014,8 @@ impl ReplState<'_> {
     /// an instruction, where the breakpoint would corrupt it. Where nothing
     /// confirms an instruction start, the breakpoint is set, as other
     /// debuggers set any address they are given, with a warning saying so.
-    fn check_instruction_start(&self, dtb: Dtb, address: VirtAddr) -> Result<Option<String>> {
+    /// Shared by `bp`, `bu` and `g <address>`.
+    pub fn check_instruction_start(&self, dtb: Dtb, address: VirtAddr) -> Result<Option<String>> {
         let symbols = &self.ctx.target.symbols;
         let name = |address: VirtAddr| {
             symbols
