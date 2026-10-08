@@ -70,11 +70,15 @@ impl Popup {
     /// The popup for `draft` worth showing as it is typed: not when nothing
     /// matches, the one match is what was typed, or nothing is typed of the
     /// word, such as after `(`, where every symbol would match and Enter
-    /// would take the first.
+    /// would take the first; nor for a number (a word that starts with a
+    /// digit, as no symbol does), which fuzzy-matches symbols such as
+    /// `…,0,1>` that Enter would take for it.
     pub fn open(suggestions: Vec<Suggestion>, draft: &str, keep: Option<&str>) -> Option<Self> {
         let popup = Self::new(suggestions, draft, keep);
         let done = matches!(popup.suggestions.as_slice(), [only] if only.value == popup.word);
-        (!popup.suggestions.is_empty() && !done && !popup.word.is_empty()).then_some(popup)
+        let number = popup.word.starts_with(|c: char| c.is_ascii_digit());
+        (!popup.suggestions.is_empty() && !done && !popup.word.is_empty() && !number)
+            .then_some(popup)
     }
 
     fn step(&mut self, by: isize) {
@@ -244,6 +248,14 @@ mod tests {
         }
         let typed = Popup::open(word, "nt", None).expect("a word opens the popup");
         assert_eq!((typed.word.as_str(), typed.more), ("nt", 0));
+
+        // A number is not completed as it is typed; Tab still lists.
+        let mut number = completions(3, 0);
+        for suggestion in &mut number {
+            suggestion.span = Span::new(0, 4);
+        }
+        assert!(Popup::open(number.clone(), "0x10", None).is_none());
+        assert_eq!(Popup::new(number, "0x10", None).suggestions.len(), 3);
     }
 
     /// Down from the last completion shown lands on the row that counts
