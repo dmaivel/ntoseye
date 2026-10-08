@@ -4,9 +4,10 @@ use tabled::builder::Builder;
 
 use crate::error::Result;
 use crate::target::virtio::{
-    DescChain, MAX_LISTED_CHAINS, SplitRing, VRING_AVAIL_F_NO_INTERRUPT, VRING_DESC_F_INDIRECT,
-    VRING_DESC_F_NEXT, VRING_DESC_F_WRITE, VRING_USED_F_NO_NOTIFY, VirtQueue, VirtioDriver,
-    VirtioFunction, queue_verdict, virtio_type_name,
+    DescChain, MAX_LISTED_CHAINS, PackedQueueState, PackedRing, SplitRing,
+    VRING_AVAIL_F_NO_INTERRUPT, VRING_DESC_F_INDIRECT, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE,
+    VRING_USED_F_NO_NOTIFY, VirtQueue, VirtioDriver, VirtioFunction, packed_verdict, queue_verdict,
+    virtio_type_name,
 };
 use crate::types::VirtAddr;
 use crate::ui;
@@ -18,7 +19,7 @@ repl_command! {
     names: ["!virtio", "virtio"],
     usage: "!virtio [<virtio_device> [module]]",
     summary: "List the virtio devices and the state of their virtqueues.",
-    details: "Without an argument, lists the virtio PCI functions that pci.sys knows, with the device type and the service that drives each, so it works on every backend. For a virtio-win driver whose private PDB is loaded, it finds the driver's virtio_device in the context of the device's WDFDEVICE and shows each queue: its size, the avail index the driver published, the used index the device returned, the used index up to which the driver took buffers back, the free descriptors, and a state: the buffers the device holds, the ones it returned that the driver has not taken back, the ones the driver added but has not published, and the ones it did not kick (notify the device about). A queue that stops moving while it has buffers with the device points to the device, and one with buffers returned but not taken back points to the driver's interrupt or DPC. With an address, shows the virtio_device there, typed by the module you give or by a loaded module whose PDB has the virtio-win types. !vring shows one queue's ring and its buffers.",
+    details: "Without an argument, lists the virtio PCI functions that pci.sys knows, with the device type and the service that drives each, so it works on every backend. For a virtio-win driver whose private PDB is loaded, it finds the driver's virtio_device in its per-device state (a KMDF device context, a StorPort miniport's device extension, or an NDIS adapter context) and shows each queue: its size, the avail index or position the driver published, the used index the device returned (split rings), where the driver takes buffers back next, the free descriptors, and a state: the buffers the device holds, the ones it returned that the driver has not taken back, and for split rings the ones the driver added but has not published or kicked (notified the device about). A queue that stops moving while it has buffers with the device points to the device, and one with buffers returned but not taken back points to the driver's interrupt or DPC. With an address, shows the virtio_device there, typed by the module you give or by the driver its operations table is in. !vring shows one queue's ring and its buffers.",
     completion: Expression,
 }
 
@@ -26,8 +27,8 @@ repl_command! {
     cmd_vring;
     names: ["!vring", "vring"],
     usage: "!vring <virtqueue> [module] | !vring /r <size> <desc> <avail> <used>",
-    summary: "Show a split virtqueue's ring and the buffers the device holds.",
-    details: "Shows the ring of the virtio-win virtqueue at the address (a virtqueue_split, as !virtio lists them), typed by the module you give or by a loaded module whose PDB has the virtio-win types: the ring addresses, the flags (the driver's NO_INTERRUPT, the device's NO_NOTIFY), the indexes and the state as !virtio shows them, and each buffer the device holds, from its avail entry, with its descriptor chain: each descriptor's guest-physical address, length, and flags (W for a buffer the device writes, N for one that continues, I for an indirect table). With /r, it reads a ring of the size at the kernel addresses of its descriptor table, avail ring, and used ring, for a driver without a PDB. It lists at most 64 buffers.",
+    summary: "Show a virtqueue's ring and its outstanding buffers.",
+    details: "Shows the ring of the virtio-win virtqueue at the address, as !virtio lists them, typed by the module you give or by the driver its add_buf routine is in, split or packed as its device negotiated. For a split ring: the ring addresses, the flags (the driver's NO_INTERRUPT, the device's NO_NOTIFY), the indexes and the state as !virtio shows them, each buffer the device holds, from its avail entry, and each buffer it returned that the driver has not taken back, from its used element, with the bytes the device wrote. For a packed ring: the descriptor ring and event structures, the driver's positions and wrap counters, and the buffers the device holds, read from the position where the driver takes buffers back next. Each descriptor shows its guest-physical address, length, and flags (W for a buffer the device writes, N for one that continues, I for an indirect table, whose descriptors and bytes out and in it sums). With /r, it reads a split ring of the size at the kernel addresses of its descriptor table, avail ring, and used ring, for a driver without a PDB. It lists at most 64 buffers of each kind.",
     completion: Expression,
 }
 
@@ -43,7 +44,9 @@ impl ReplState<'_> {
         let Some(address) = self.eval_or_report(address) else {
             return Ok(());
         };
-        let Some(module) = self.virtio_module(invocation.arg(1)) else {
+        let Some(module) =
+            self.virtio_module(invocation.arg(1), address, "virtio_device", "device")
+        else {
             return Ok(());
         };
         match self.ctx.target.virtio_device(&module, address) {
@@ -88,15 +91,26 @@ impl ReplState<'_> {
                 let Some(address) = self.eval_or_report(address) else {
                     return Ok(());
                 };
-                let Some(module) = self.virtio_module(args.get(1).copied()) else {
+                let Some(module) =
+                    self.virtio_module(args.get(1).copied(), address, "virtqueue", "add_buf")
+                else {
                     return Ok(());
                 };
-                let queue = self.ctx.target.virtqueue(&module, address, false, 0);
+                let packed = self
+                    .ctx
+                    .target
+                    .virtqueue_is_packed(&module, address)
+                    .unwrap_or(false);
+                let queue = self.ctx.target.virtqueue(&module, address, packed, 0);
+                if let (Some(state), Some(ring)) = (&queue.packed, &queue.packed_ring) {
+                    print_packed_ring(&self.ctx.target, &queue, state, ring);
+                    return Ok(());
+                }
                 match (queue.ring, &queue.error) {
                     (Some(ring), _) => (Some(queue), ring),
                     (None, error) => {
                         error!(
-                            "!vring: {:#x} is not a virtqueue_split of {module}: {}",
+                            "!vring: {:#x} is not a virtqueue of {module}: {}",
                             address.0,
                             error.as_deref().unwrap_or("the queue has no split ring")
                         );
@@ -113,11 +127,25 @@ impl ReplState<'_> {
         Ok(())
     }
 
-    /// The module whose PDB types virtio-win structures: `named`, or the
-    /// first loaded module that has them. `None` after saying why not.
-    fn virtio_module(&self, named: Option<&str>) -> Option<String> {
+    /// The module whose PDB types the virtio-win `type_name` at `address`:
+    /// `named`, else the driver its `pointer` field leads into, else the
+    /// first loaded module with the types. `None` after saying why not.
+    fn virtio_module(
+        &self,
+        named: Option<&str>,
+        address: VirtAddr,
+        type_name: &str,
+        pointer: &str,
+    ) -> Option<String> {
         if let Some(named) = named {
             return Some(named.to_string());
+        }
+        if let Some(owner) = self
+            .ctx
+            .target
+            .virtio_module_of(address, type_name, pointer)
+        {
+            return Some(owner);
         }
         let modules = self.ctx.target.virtio_modules();
         match modules.first() {
@@ -197,7 +225,12 @@ fn print_queues(queues: &[VirtQueue], with_rings: bool) {
         "virtqueue",
     ];
     if with_rings {
-        header.extend(["desc", "avail", "used"]);
+        // A device's queues are all split or all packed.
+        if queues.iter().any(|queue| queue.packed.is_some()) {
+            header.extend(["desc", "driver event", "device event"]);
+        } else {
+            header.extend(["desc", "avail", "used"]);
+        }
     }
     builder.push_record(header);
     for queue in queues {
@@ -214,11 +247,14 @@ fn print_queues(queues: &[VirtQueue], with_rings: bool) {
                 ]);
             }
             (None, Some(packed), _) => row.extend([
-                "-".into(),
+                packed.next_avail.to_string(),
                 "-".into(),
                 packed.last_used.to_string(),
                 packed.free.to_string(),
-                ui::muted("packed ring"),
+                queue
+                    .packed_ring
+                    .as_ref()
+                    .map_or_else(|| ui::muted("packed ring"), packed_verdict),
             ]),
             (None, None, error) => row.extend([
                 String::new(),
@@ -229,12 +265,20 @@ fn print_queues(queues: &[VirtQueue], with_rings: bool) {
             ]),
         }
         row.push(ui::addr(queue.address.0));
-        if with_rings && let Some(ring) = &queue.ring {
-            row.extend([
-                ui::addr(ring.desc.0),
-                ui::addr(ring.avail.0),
-                ui::addr(ring.used.0),
-            ]);
+        if with_rings {
+            if let Some(ring) = &queue.ring {
+                row.extend([
+                    ui::addr(ring.desc.0),
+                    ui::addr(ring.avail.0),
+                    ui::addr(ring.used.0),
+                ]);
+            } else if let Some(packed) = &queue.packed {
+                row.extend([
+                    ui::addr(packed.desc.0),
+                    ui::addr(packed.driver_event.0),
+                    ui::addr(packed.device_event.0),
+                ]);
+            }
         }
         builder.push_record(row);
     }
@@ -253,6 +297,77 @@ fn flag_names(flags: u16) -> String {
         }
     }
     if names.is_empty() { "-".into() } else { names }
+}
+
+/// A packed queue: the driver's positions and lap bits, the ring's state,
+/// and the buffers the device holds.
+fn print_packed_ring(
+    target: &crate::target::Target,
+    queue: &VirtQueue,
+    state: &PackedQueueState,
+    ring: &PackedRing,
+) {
+    let lap = |wrap: bool| if wrap { 1 } else { 0 };
+    outln!(
+        "virtqueue {}  queue {}  size {}  packed",
+        ui::addr(queue.address.0),
+        queue.index,
+        queue.size
+    );
+    outln!(
+        "  desc {}  driver event {}  device event {}",
+        ui::addr(state.desc.0),
+        ui::addr(state.driver_event.0),
+        ui::addr(state.device_event.0)
+    );
+    outln!(
+        "  driver: next avail {} (lap {})  taken back to {} (lap {})  {} free",
+        state.next_avail,
+        lap(state.avail_wrap),
+        state.last_used,
+        lap(state.used_wrap),
+        state.free
+    );
+    outln!("  state: {}", packed_verdict(ring));
+    if let Some(why) = &ring.broken {
+        outln!(
+            "  {}",
+            ui::muted(&format!("the ring stopped reading: {why}"))
+        );
+    }
+    if ring.chains.is_empty() {
+        outln!();
+        return;
+    }
+    outln!();
+    outln!("{}", ui::label("Buffers with the device"));
+    for chain in &ring.chains {
+        let descriptors: Vec<String> = chain
+            .descriptors
+            .iter()
+            .map(|(position, desc)| {
+                format!(
+                    "[{position}] id {} {:#x} len {:#x} {}{}",
+                    desc.id,
+                    desc.addr,
+                    desc.len,
+                    flag_names(desc.flags),
+                    indirect_note(target, desc.flags, desc.addr, desc.len, true)
+                )
+            })
+            .collect();
+        outln!("  {}", descriptors.join(" -> "));
+    }
+    if ring.with_device as usize > ring.chains.len() {
+        outln!(
+            "  {}",
+            ui::muted(&format!(
+                "... {} more",
+                ring.with_device as usize - ring.chains.len()
+            ))
+        );
+    }
+    outln!();
 }
 
 fn print_ring(target: &crate::target::Target, queue: Option<&VirtQueue>, ring: &SplitRing) {
@@ -294,43 +409,83 @@ fn print_ring(target: &crate::target::Target, queue: Option<&VirtQueue>, ring: &
     }
     outln!("  state: {}", queue_verdict(ring, driver));
     let chains = target.split_ring_outstanding(ring, MAX_LISTED_CHAINS);
-    if chains.is_empty() {
+    if !chains.is_empty() {
         outln!();
-        return;
+        outln!("{}", ui::label("Buffers with the device"));
+        for chain in &chains {
+            print_chain(target, &format!("avail[{}]", chain.avail_index), chain);
+        }
+        print_more(usize::from(ring.with_device()), chains.len());
     }
-    outln!();
-    outln!("{}", ui::label("Buffers with the device"));
-    for chain in &chains {
-        print_chain(chain);
-    }
-    if usize::from(ring.with_device()) > chains.len() {
-        outln!(
-            "  {}",
-            ui::muted(&format!(
-                "... {} more",
-                usize::from(ring.with_device()) - chains.len()
-            ))
-        );
+    if let Some(driver) = driver {
+        let returned = target.split_ring_returned(ring, driver.last_used, MAX_LISTED_CHAINS);
+        if !returned.is_empty() {
+            outln!();
+            outln!("{}", ui::label("Returned, not yet taken back"));
+            for buffer in &returned {
+                print_chain(
+                    target,
+                    &format!("used[{}] wrote {:#x}", buffer.used_index, buffer.written),
+                    &buffer.chain,
+                );
+            }
+            print_more(
+                usize::from(ring.used_idx.wrapping_sub(driver.last_used)),
+                returned.len(),
+            );
+        }
     }
     outln!();
 }
 
-fn print_chain(chain: &DescChain) {
+/// The count past the `shown` of `total` that a list left out.
+fn print_more(total: usize, shown: usize) {
+    if total > shown {
+        outln!("  {}", ui::muted(&format!("... {} more", total - shown)));
+    }
+}
+
+/// What the indirect table an `I` descriptor names holds, or nothing for
+/// a direct descriptor.
+fn indirect_note(
+    target: &crate::target::Target,
+    flags: u16,
+    addr: u64,
+    len: u32,
+    packed: bool,
+) -> String {
+    if flags & VRING_DESC_F_INDIRECT == 0 {
+        return String::new();
+    }
+    match target.read_indirect_table(addr, len, packed) {
+        Ok(table) => format!(
+            " ({} descriptor{}, out {:#x}, in {:#x})",
+            table.descriptors,
+            if table.descriptors == 1 { "" } else { "s" },
+            table.out_bytes,
+            table.in_bytes
+        ),
+        Err(error) => ui::muted(&format!(" (table unreadable: {error})")),
+    }
+}
+
+/// One buffer: `label`, its head, and its descriptors.
+fn print_chain(target: &crate::target::Target, label: &str, chain: &DescChain) {
     let descriptors: Vec<String> = chain
         .descriptors
         .iter()
         .map(|(index, desc)| {
             format!(
-                "[{index}] {:#x} len {:#x} {}",
+                "[{index}] {:#x} len {:#x} {}{}",
                 desc.addr,
                 desc.len,
-                flag_names(desc.flags)
+                flag_names(desc.flags),
+                indirect_note(target, desc.flags, desc.addr, desc.len, false)
             )
         })
         .collect();
     outln!(
-        "  avail[{}] head {}: {}{}",
-        chain.avail_index,
+        "  {label} head {}: {}{}",
         chain.head,
         descriptors.join(" -> "),
         chain
