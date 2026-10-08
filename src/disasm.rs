@@ -1052,8 +1052,9 @@ fn x86_bitness(machine: CodeMachine) -> Option<u32> {
 }
 
 /// The start of the instruction of `machine` code that contains `ip`,
-/// decoding forward from `bytes` at `start`: `ip` itself when an instruction
-/// starts there. `None` when `bytes` ends before `ip`.
+/// decoding forward from `bytes` at `start`, which is at or before `ip`:
+/// `ip` itself when an instruction starts there. `None` when `bytes` ends
+/// before decoding gets to `ip`.
 pub fn instruction_containing(
     machine: CodeMachine,
     bytes: &[u8],
@@ -1065,14 +1066,19 @@ pub fn instruction_containing(
         return Some(ip & !3);
     };
     let mut decoder = Decoder::with_ip(bitness, bytes, start, DecoderOptions::NONE);
-    while decoder.can_decode() {
+    loop {
         let at = decoder.ip();
+        if at == ip {
+            return Some(at);
+        }
+        if !decoder.can_decode() {
+            return None;
+        }
         let _ = decoder.decode();
         if decoder.ip() > ip {
             return Some(at);
         }
     }
-    None
 }
 
 /// Decode `count` instructions of `machine` code ending exactly at
@@ -1229,6 +1235,37 @@ mod tests {
             immediate: Some(value),
             ..operand(OperandKind::Immediate, text)
         }
+    }
+
+    /// A breakpoint address inside an instruction is placed in the
+    /// instruction it is part of, and one at an instruction's first byte is
+    /// its own start, up to and including the end of the bytes decoded.
+    #[test]
+    fn instruction_containing_finds_the_instruction_an_address_is_part_of() {
+        // A prologue like nt!NtClose's: mov [rsp+0x18], rbx (5 bytes), push
+        // rbp (1), push r12 (2).
+        let prologue = [0x48, 0x89, 0x5c, 0x24, 0x18, 0x55, 0x41, 0x54];
+        let containing =
+            |bytes: &[u8], ip| instruction_containing(CodeMachine::Amd64, bytes, 0x1000, ip);
+        for (ip, start) in [
+            (0x1000, 0x1000),
+            (0x1001, 0x1000),
+            (0x1004, 0x1000),
+            (0x1005, 0x1005),
+            (0x1006, 0x1006),
+            (0x1007, 0x1006),
+            (0x1008, 0x1008),
+        ] {
+            assert_eq!(containing(&prologue, ip), Some(start), "{ip:#x}");
+        }
+        // Decoding that stops short of the address says nothing about it.
+        assert_eq!(containing(&prologue[..5], 0x1006), None);
+        assert_eq!(containing(&prologue[..3], 0x1004), None);
+        // ARM64 instructions are four aligned bytes.
+        assert_eq!(
+            instruction_containing(CodeMachine::Arm64, &[], 0x1000, 0x1006),
+            Some(0x1004)
+        );
     }
 
     #[test]
