@@ -27,7 +27,7 @@ Tern support is experimental. It's built on a protocol that is still changing, s
 
 You type commands in Tern's input field at the bottom of the pane. The status bar above it shows the backend, the current thread, whether the target is running, and the main keys.
 
-- **Tab** shows completions in a popup at the cursor, and the list narrows as you keep typing.
+- **Tab** shows completions in a popup at the cursor, and the list narrows as you keep typing. The popup lists up to 100. When there are more, such as every command on an empty line, its last row says how many. Keep typing to narrow the list, or choose that row (or press **Alt+P**) to search them all in the [palette](#the-palette).
 - The line is colored as you type, and a command name that doesn't exist turns red.
 - If an earlier line starts with what you've typed, the rest of the most recent one appears dimmed after the cursor. Press **→** or **End** to accept it.
 - **↑** and **↓** step through your history, and **Ctrl+Z** undoes.

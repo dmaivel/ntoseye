@@ -22,7 +22,7 @@ use super::command::{
     command_registry, is_comment, parse_command, script_file_token, split_command_list,
 };
 use super::completion::ReplCaches;
-use super::native::completions::{POPUP_LIMIT, Popup, PopupKey};
+use super::native::completions::{Popup, PopupKey};
 use super::native::palette::{Outcome, Palette, Tab};
 use super::native::{self, DIM, MNEMONIC, MUTED, NUMBER, REGISTER, STRING, SYMBOL, span};
 use super::palette::{RECENT_LINES, initial_tab};
@@ -356,6 +356,10 @@ impl<'a> Line<'a> {
                     self.apply(&suggestion);
                     return None;
                 }
+                PopupKey::More => {
+                    self.open_palette(ctx.state, initial_tab(&self.draft));
+                    return None;
+                }
                 PopupKey::Ignored => {}
             }
         }
@@ -553,11 +557,8 @@ impl<'a> Line<'a> {
     fn suggestions(&self, ctx: &mut Ctx) -> Vec<Suggestion> {
         let (draft, cursor) = (self.draft.as_str(), self.cursor);
         let completer = &mut *ctx.completer;
-        let mut suggestions = ctx
-            .loan
-            .lend(&ctx.state.ctx.target, || completer.complete(draft, cursor));
-        suggestions.truncate(POPUP_LIMIT);
-        suggestions
+        ctx.loan
+            .lend(&ctx.state.ctx.target, || completer.complete(draft, cursor))
     }
 
     /// Tab: one completion is taken, several open the popup.
@@ -684,7 +685,7 @@ impl<'a> Line<'a> {
         if let Some(palette) = &self.palette {
             view = view.layer(vec![Node::from(palette.picker())]);
         } else if let Some(popup) = &self.popup {
-            view = view.layer(vec![popup.overlay(EDITOR)]);
+            view = view.layer(vec![popup.overlay(EDITOR, true)]);
         }
         view
     }

@@ -16,6 +16,10 @@ use crate::ui;
 
 use crate::repl::*;
 
+/// The most symbols or types one completion search returns: past it the
+/// completer stops looking, so a list this long may leave matches out.
+pub const SEARCH_LIMIT: usize = 1024;
+
 /// The REPL prompt, e.g. `kd:p1.1>`: transport muted, thread in the cyan
 /// identity accent. Rebuilt each read_line so it tracks thread switches.
 #[derive(Clone)]
@@ -290,7 +294,7 @@ impl MyCompleter {
 
             CompletionStrategy::Type => {
                 let types = self.caches.types.read().unwrap();
-                let results = types.search(input.prefix, 1024);
+                let results = types.search(input.prefix, SEARCH_LIMIT);
                 make_suggestions(results, "Structure", input.span_start, input.pos)
             }
 
@@ -478,7 +482,10 @@ impl MyCompleter {
             append_unique(&mut suggestions, self.complete_cast_types(input));
         }
         append_unique(&mut suggestions, self.complete_locals(input));
-        append_unique(&mut suggestions, self.complete_symbol_names(input, 1024));
+        append_unique(
+            &mut suggestions,
+            self.complete_symbol_names(input, SEARCH_LIMIT),
+        );
         suggestions
     }
 
@@ -599,7 +606,7 @@ impl MyCompleter {
             }
         }
 
-        self.complete_symbol_names(input, 1024)
+        self.complete_symbol_names(input, SEARCH_LIMIT)
     }
 
     fn complete_cast_types(&self, input: CompletionInput<'_>) -> Vec<Suggestion> {

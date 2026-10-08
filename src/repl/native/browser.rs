@@ -12,7 +12,7 @@ use tern_sdk::ui::{self, Align, Gap, Mark, Span, TextNode, Wrap};
 use tern_sdk::wire::{Event, RevealAt};
 use tern_sdk::{Input, Node, Session, SurfaceOptions, View};
 
-use super::completions::{POPUP_LIMIT, Popup, PopupKey};
+use super::completions::{Popup, PopupKey};
 use super::memory::Runs;
 use super::{DIM, MNEMONIC, MUTED, ROLE, STRING, STYLESHEET, addr, code, connect, span, symbol};
 use crate::disasm::{DisasmRow, OperandKind, decode_code, disasm_formatter};
@@ -763,7 +763,6 @@ impl<'s, 'a> Browser<'s, 'a> {
         let mut suggestions = loan.lend(&self.state.ctx.target, || {
             completer.complete(&line, line.len())
         });
-        suggestions.truncate(POPUP_LIMIT);
         for suggestion in &mut suggestions {
             suggestion.span.start = suggestion.span.start.saturating_sub(PREFIX.len());
             suggestion.span.end = suggestion.span.end.saturating_sub(PREFIX.len());
@@ -838,6 +837,8 @@ impl<'s, 'a> Browser<'s, 'a> {
                     self.apply(&suggestion);
                     return;
                 }
+                // The fields have no palette: typing narrows the list.
+                PopupKey::More => return,
                 PopupKey::Ignored => {}
             }
         }
@@ -860,8 +861,10 @@ impl<'s, 'a> Browser<'s, 'a> {
             if suggestions.len() == 1 {
                 let only = suggestions.remove(0);
                 self.apply(&only);
-            } else if let Some(field) = &mut self.field {
-                field.popup = Popup::open(suggestions, &draft, None);
+            } else if let Some(field) = &mut self.field
+                && !suggestions.is_empty()
+            {
+                field.popup = Some(Popup::new(suggestions, &draft, None));
             }
             return;
         }
@@ -1163,7 +1166,7 @@ impl<'s, 'a> Browser<'s, 'a> {
                     .into(),
             );
             if let Some(popup) = &field.popup {
-                view = view.layer(vec![popup.overlay(FIELD)]);
+                view = view.layer(vec![popup.overlay(FIELD, false)]);
             }
         }
         dock.push(self.location().into());
