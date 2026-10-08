@@ -626,8 +626,7 @@ fn parse_msr(state: &ReplState<'_>, text: &str) -> Result<u32> {
 fn render_msr_value(target: &Target, value: u64) -> String {
     let raw = ui::addr(value).to_string();
     target
-        .symbols
-        .format_closest_symbol_for_address(target.kernel_dtb(), VirtAddr(value))
+        .format_code_address(target.kernel_dtb(), VirtAddr(value))
         .map(|symbol| format!("{raw} ({symbol})"))
         .unwrap_or(raw)
 }

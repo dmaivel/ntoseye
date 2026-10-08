@@ -151,8 +151,7 @@ impl ReplState<'_> {
         let dtb = self.ctx.target.kernel_dtb();
         self.ctx
             .target
-            .symbols
-            .format_closest_symbol_for_address(dtb, a)
+            .format_code_address(dtb, a)
             .map(|s| ui::symbol(&s))
             .unwrap_or_else(|| ui::addr(a.0))
     }
@@ -634,8 +633,7 @@ impl ReplState<'_> {
             let target = self
                 .ctx
                 .target
-                .symbols
-                .format_closest_symbol_for_address(dtb, c.function)
+                .format_code_address(dtb, c.function)
                 .unwrap_or_else(|| format!("0x{:x}", c.function.0));
             if let Some(f) = &filter
                 && !target.to_lowercase().contains(f)

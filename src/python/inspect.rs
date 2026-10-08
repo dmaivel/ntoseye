@@ -310,10 +310,7 @@ impl Inspect {
             Ok(callbacks
                 .iter()
                 .map(|callback| {
-                    let symbol = session
-                        .target
-                        .symbols
-                        .format_closest_symbol_for_address(dtb, callback.function);
+                    let symbol = session.target.format_code_address(dtb, callback.function);
                     view::object::notify_callback(callback, symbol)
                 })
                 .collect::<Vec<_>>())

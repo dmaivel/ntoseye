@@ -649,9 +649,7 @@ pub fn driver_object(target: &Target, d: &DriverObjectDetail) -> DriverObject {
                 index,
                 name: format!("IRP_MJ_{}", irp_major_function_name(index as u8)),
                 routine: *routine,
-                symbol: target
-                    .symbols
-                    .format_closest_symbol_for_address(dtb, *routine),
+                symbol: target.format_code_address(dtb, *routine),
             })
             .collect(),
     }

@@ -200,6 +200,33 @@ impl Target {
             })
     }
 
+    /// `module!symbol+offset` for `address` in the address space `dtb`, or
+    /// `module+offset` in a module whose symbols are not loaded, as WinDbg
+    /// names it: from the kernel's module list, or the current process's
+    /// when `dtb` is its address space. `None` outside every module.
+    pub fn format_code_address(&self, dtb: Dtb, address: VirtAddr) -> Option<String> {
+        if let Some(symbol) = self.symbols.format_closest_symbol_for_address(dtb, address) {
+            return Some(symbol);
+        }
+        let contains = |module: &ModuleInfo| module.contains_address(address);
+        let module = self
+            .kernel_modules()
+            .ok()
+            .and_then(|modules| modules.into_iter().find(contains))
+            .or_else(|| {
+                let mask = self.arch().dtb_page_mask();
+                (dtb & mask == self.current_dtb() & mask)
+                    .then(|| self.modules().ok())
+                    .flatten()
+                    .and_then(|modules| modules.into_iter().find(contains))
+            })?;
+        Some(format!(
+            "{}+{:#x}",
+            module.short_name,
+            address.0 - module.base_address.0
+        ))
+    }
+
     /// The image `!dh` names: a module name first, otherwise the address
     /// `eval` makes of `text`, which is either inside a loaded module or the
     /// base of an image no loader list names (it must start with `MZ`).

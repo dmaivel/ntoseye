@@ -273,7 +273,20 @@ impl ReplState<'_> {
                     .set_results(vec![(addr - offset as u64).0], self.line.clone());
             }
             None => {
-                outln!("no symbol found for {}\n", ui::addr(addr.0));
+                // A module without symbols still says where the address is,
+                // as WinDbg's `module+offset`.
+                let dtb = self.ctx.target.current_dtb();
+                match self.ctx.target.format_code_address(dtb, addr) {
+                    Some(label) => {
+                        outln!(
+                            "{}  {}  {}\n",
+                            ui::addr(addr.0),
+                            ui::symbol(&label),
+                            ui::muted("(no symbols loaded for this module)")
+                        );
+                    }
+                    None => outln!("no symbol found for {}\n", ui::addr(addr.0)),
+                }
             }
         }
 

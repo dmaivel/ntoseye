@@ -214,10 +214,7 @@ impl Target {
                     .into(),
             ));
         }
-        let symbol = |address: VirtAddr| {
-            self.symbols
-                .format_closest_symbol_for_address(ntos.dtb(), address)
-        };
+        let symbol = |address: VirtAddr| self.format_code_address(ntos.dtb(), address);
 
         let mut detail = ExQueueDetail {
             flags,
