@@ -68,7 +68,7 @@ repl_command! {
     names: ["!dbgprint", "dbgprint"],
     usage: "!dbgprint [count]",
     summary: "Show guest debug output (DbgPrint).",
-    details: "Shows the last count lines, 50 by default, or all with 0. Over kd and kdnet, it shows what the KD stream delivered since ntoseye attached. On the other backends, including a crash dump, it shows the kernel's own DbgPrint buffer (KdPrintCircularBuffer), as WinDbg's !dbgprint does, which also holds what was printed before ntoseye attached. The buffer is 4 KB by default and keeps only the newest output. A print that the debug filter drops (nt!Kd_DEFAULT_Mask, Kd_<component>_Mask) reaches neither.",
+    details: "Shows the last count lines, 50 by default, or all with 0. Over kd and kdnet, it shows what the KD stream delivered since ntoseye attached, and before anything arrived, the kernel's buffer. On the other backends, including a crash dump, it shows the kernel's own DbgPrint buffer (KdPrintCircularBuffer), as WinDbg's !dbgprint does, which also holds what was printed before ntoseye attached. The buffer is 4 KB by default and keeps only the newest output. A print that the debug filter drops (nt!Kd_DEFAULT_Mask, Kd_<component>_Mask) reaches neither.",
 }
 
 fn target_control_available(state: &ReplState<'_>) -> bool {
@@ -314,7 +314,12 @@ impl ReplState<'_> {
         }
         let page = self.ctx.read_debug_output(0);
         if page.lines.is_empty() {
-            outln!("{}\n", ui::muted("no debug output captured"));
+            // Nothing printed since attach: what the kernel printed before
+            // it, such as the drivers that failed at boot, is in its buffer.
+            outln!("{}", ui::muted("no debug output since ntoseye attached"));
+            if self.print_kernel_print_buffer(count).is_err() {
+                outln!();
+            }
             return Ok(());
         }
 

@@ -124,7 +124,7 @@ To list these names, use {command}`x` `mydriver!*`, and to set breakpoints on th
 
 `DbgPrint`, `DbgPrintEx` and `KdPrint` output appears in the REPL while the target runs, and {command}`!dbgprint` shows the last lines again:
 
-- Over KD and KDNET, the output comes from the debugger connection, as soon as the driver prints it.
+- Over KD and KDNET, the output comes from the debugger connection, as soon as the driver prints it. Until something arrives, {command}`!dbgprint` shows the kernel's DbgPrint buffer instead, with what was printed before `ntoseye` attached.
 - With the `gdb` and `memory` backends, and in a crash dump, `ntoseye` reads the kernel's own DbgPrint buffer (`nt!KdPrintCircularBuffer`), the one that WinDbg's `!dbgprint` shows. The REPL prints new lines about ten times a second while the target runs, and the MCP server and DAP clients get them with each result. On these backends, {command}`!dbgprint` also shows the output from before `ntoseye` attached, such as the messages of drivers that failed to start at boot. The buffer holds 4 KB by default and keeps the newest output; if the guest prints more than that between two reads, `ntoseye` notes that older lines are lost.
 
 Windows filters debug output by component and level before either path sees it. `DbgPrint` and `KdPrint` use the default component at the info level, which is filtered out unless you enable it, for example with `ed nt!Kd_DEFAULT_Mask 0xffffffff` or, at boot, the `Debug Print Filter` registry key. See Microsoft's [Reading and Filtering Debugging Messages](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/reading-and-filtering-debugging-messages).
