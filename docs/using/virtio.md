@@ -186,3 +186,22 @@ To use {command}`!vring` with a split ring of a driver that has no PDB, give the
 ```
 
 Without the driver's state, it shows only the buffers that the device holds, and cannot name the queue.
+
+## From scripts
+
+In the [Python SDK](../scripting/sdk.md), `dbg.inspect.virtio()` returns the devices that {command}`!virtio` lists, each queue with its indexes, state, signalling and ring addresses, and `dbg.inspect.vring(address)` returns a queue's ring with the buffers that the device holds or returned, their descriptors, and the decoded request of each. A queue's `progress` holds counters that only grow, modulo `modulus`, so two calls show what moved in between, as the Moved column does:
+
+```python
+def ports(dbg):
+    serial = next(d for d in dbg.inspect.virtio() if d.kind == "console")
+    return {q.name: q.progress for q in serial.driver.queues if q.progress}
+
+before = ports(dbg)
+dbg.run(timeout=5.0)
+dbg.interrupt()
+for name, now in ports(dbg).items():
+    moved = (now.published - before[name].published) % now.modulus
+    print(name, "published", moved)
+```
+
+The SDK reads what the guest holds at each call and keeps nothing between calls, so a script that waits for a stall compares the counters itself.

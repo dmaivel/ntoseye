@@ -32,6 +32,22 @@ pub enum RequestKind {
     Vsock,
 }
 
+impl RequestKind {
+    /// The name `!vring /r ... /t` takes for it ([`request_kind_named`]).
+    pub fn name(self) -> &'static str {
+        match self {
+            RequestKind::Block => "blk",
+            RequestKind::ScsiRequest => "scsi",
+            RequestKind::ScsiControl => "scsi-control",
+            RequestKind::ScsiEvent => "scsi-event",
+            RequestKind::NetPacket { .. } => "net",
+            RequestKind::NetControl => "net-control",
+            RequestKind::Gpu => "gpu",
+            RequestKind::Vsock => "vsock",
+        }
+    }
+}
+
 /// What the buffers of queue `index` of a device of type `virtio_id` with
 /// `queues` queues hold. `transitional` devices may use the legacy header.
 pub fn request_kind(

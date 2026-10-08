@@ -1245,6 +1245,40 @@ impl Inspect {
         })
     }
 
+    /// List the virtio PCI functions (`!virtio`), with the state of each
+    /// queue where the driver's private PDB types it. A queue's `progress`
+    /// counters only grow, so two calls show what moved in between.
+    fn virtio<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Typed<'py, Vec<view::virtio::VirtioDevice>>> {
+        self.typed(py, |session| {
+            let functions = session.target.virtio_functions().map_err(err)?;
+            Ok(view::virtio::virtio_devices(&functions))
+        })
+    }
+
+    /// Read the virtio-win virtqueue at `address` (`!vring`): its ring, the
+    /// buffers the device holds or returned, and the request each carries.
+    /// `module` names the driver whose PDB types it, by default the one its
+    /// `add_buf` routine is in.
+    #[pyo3(signature = (address, module=None))]
+    fn vring<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+        module: Option<String>,
+    ) -> PyResult<Typed<'py, view::virtio::VirtioRing>> {
+        self.typed(py, move |session| {
+            let target = &session.target;
+            let queue = target
+                .virtqueue_at(module.as_deref(), VirtAddr(address))
+                .map_err(err)?;
+            let device = target.virtqueue_device(queue.address);
+            Ok(view::virtio::virtio_ring(target, &queue, device))
+        })
+    }
+
     /// Read the data of the crash dump's block tagged `tag` (`.enumtag`), a
     /// GUID with or without braces, such as the one a driver passes to
     /// `KeRegisterBugCheckReasonCallback` for its secondary dump data.

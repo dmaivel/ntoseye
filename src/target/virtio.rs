@@ -1496,6 +1496,80 @@ impl Target {
                 .then_some(owner)
         })
     }
+
+    /// The module whose PDB types the virtio-win `type_name` at `address`:
+    /// `named`, else the driver its `pointer` field leads into, else the
+    /// first loaded module with the types.
+    pub fn virtio_module_for(
+        &self,
+        named: Option<&str>,
+        address: VirtAddr,
+        type_name: &str,
+        pointer: &str,
+    ) -> Result<String> {
+        if let Some(named) = named {
+            return Ok(named.to_string());
+        }
+        if let Some(owner) = self.virtio_module_of(address, type_name, pointer) {
+            return Ok(owner);
+        }
+        self.virtio_modules().into_iter().next().ok_or_else(|| {
+            Error::DebugInfo(
+                "no loaded module's symbols have the virtio-win types (virtio_device); load the \
+                 driver's private PDB (.sympath+ <directory>), or name the module after the \
+                 address"
+                    .into(),
+            )
+        })
+    }
+
+    /// The virtio-win virtqueue at `address`, typed by the module `named`
+    /// or, without one, by the driver its `add_buf` routine is in, split or
+    /// packed as its device negotiated.
+    pub fn virtqueue_at(&self, named: Option<&str>, address: VirtAddr) -> Result<VirtQueue> {
+        let module = self.virtio_module_for(named, address, "virtqueue", "add_buf")?;
+        let packed = self.virtqueue_is_packed(&module, address).unwrap_or(false);
+        let queue = self.virtqueue(&module, address, packed, 0);
+        match &queue.error {
+            Some(error) => Err(Error::DebugInfo(format!(
+                "{:#x} is not a virtqueue of {module}: {error}",
+                address.0
+            ))),
+            None => Ok(queue),
+        }
+    }
+
+    /// The function whose driver set up the queue at `address`: its device
+    /// type and whether it is transitional, and how many queues it set up,
+    /// which name the queue and say what its buffers hold.
+    pub fn virtqueue_device(&self, address: VirtAddr) -> Option<(u16, bool, u32)> {
+        self.virtio_functions()
+            .ok()?
+            .into_iter()
+            .find_map(|function| {
+                let driver = function.driver?;
+                driver
+                    .queues
+                    .iter()
+                    .any(|queue| queue.address == address)
+                    .then(|| {
+                        (
+                            function.virtio_id,
+                            function.transitional,
+                            queue_count(&driver.queues),
+                        )
+                    })
+            })
+    }
+}
+
+/// How many queues a device set up, from its highest queue index.
+pub fn queue_count(queues: &[VirtQueue]) -> u32 {
+    queues
+        .iter()
+        .map(|queue| queue.index + 1)
+        .max()
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

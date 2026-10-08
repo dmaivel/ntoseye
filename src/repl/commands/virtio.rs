@@ -10,8 +10,8 @@ use crate::target::Target;
 use crate::target::virtio::{
     DescChain, MAX_LISTED_CHAINS, PackedQueueState, PackedRing, QueueMovement, QueueProgress,
     QueueRole, Signal, SplitRing, VRING_DESC_F_INDIRECT, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE,
-    VirtQueue, VirtioDriver, VirtioFunction, packed_verdict, queue_movement, queue_role,
-    queue_verdict, split_signals, virtio_type_name,
+    VirtQueue, VirtioDriver, VirtioFunction, packed_verdict, queue_count, queue_movement,
+    queue_role, queue_verdict, split_signals, virtio_type_name,
 };
 use crate::target::virtio_request::{RequestKind, request_kind, request_kind_named};
 use crate::types::VirtAddr;
@@ -140,10 +140,17 @@ impl ReplState<'_> {
         let Some(address) = self.eval_or_report(address) else {
             return Ok(());
         };
-        let Some(module) =
-            self.virtio_module(invocation.arg(1), address, "virtio_device", "device")
-        else {
-            return Ok(());
+        let module = match self.ctx.target.virtio_module_for(
+            invocation.arg(1),
+            address,
+            "virtio_device",
+            "device",
+        ) {
+            Ok(module) => module,
+            Err(error) => {
+                error!("!virtio: {error}");
+                return Ok(());
+            }
         };
         match self.ctx.target.virtio_device(&module, address) {
             Ok(driver) => {
@@ -207,35 +214,25 @@ impl ReplState<'_> {
                 let Some(address) = self.eval_or_report(address) else {
                     return Ok(());
                 };
-                let Some(module) =
-                    self.virtio_module(args.get(1).copied(), address, "virtqueue", "add_buf")
-                else {
-                    return Ok(());
-                };
-                let packed = self
-                    .ctx
-                    .target
-                    .virtqueue_is_packed(&module, address)
-                    .unwrap_or(false);
-                let queue = self.ctx.target.virtqueue(&module, address, packed, 0);
-                if let Some(error) = &queue.error {
-                    error!(
-                        "!vring: {:#x} is not a virtqueue of {module}: {error}",
-                        address.0
-                    );
-                    return Ok(());
+                match self.ctx.target.virtqueue_at(args.get(1).copied(), address) {
+                    Ok(queue) => queue,
+                    Err(error) => {
+                        error!("!vring: {error}");
+                        return Ok(());
+                    }
                 }
-                queue
             }
             _ => {
                 outln!("{}\n", command_help(invocation.name));
                 return Ok(());
             }
         };
-        let (device, queues) = queue_device_of(&self.ctx.target, queue.address);
-        let virtio_id = device.map(|(id, _)| id);
-        let kind = device
-            .and_then(|(id, transitional)| request_kind(id, queue.index, queues, transitional));
+        let device = self.ctx.target.virtqueue_device(queue.address);
+        let virtio_id = device.map(|(id, _, _)| id);
+        let queues = device.map_or(0, |(_, _, queues)| queues);
+        let kind = device.and_then(|(id, transitional, queues)| {
+            request_kind(id, queue.index, queues, transitional)
+        });
         let now = LookTime::now(&self.ctx.target);
         let look = self.virtio_seen.look(&queue, virtio_id, queues, now);
         match (&queue.ring, &queue.packed, &queue.packed_ring) {
@@ -252,40 +249,6 @@ impl ReplState<'_> {
         }
         Ok(())
     }
-
-    /// The module whose PDB types the virtio-win `type_name` at `address`:
-    /// `named`, else the driver its `pointer` field leads into, else the
-    /// first loaded module with the types. `None` after saying why not.
-    fn virtio_module(
-        &self,
-        named: Option<&str>,
-        address: VirtAddr,
-        type_name: &str,
-        pointer: &str,
-    ) -> Option<String> {
-        if let Some(named) = named {
-            return Some(named.to_string());
-        }
-        if let Some(owner) = self
-            .ctx
-            .target
-            .virtio_module_of(address, type_name, pointer)
-        {
-            return Some(owner);
-        }
-        let modules = self.ctx.target.virtio_modules();
-        match modules.first() {
-            Some(module) => Some(module.clone()),
-            None => {
-                error!(
-                    "no loaded module's symbols have the virtio-win types (virtio_device); load \
-                     the driver's private PDB (.sympath+ <directory>), or name the module after \
-                     the address"
-                );
-                None
-            }
-        }
-    }
 }
 
 /// The virtio device type of the function whose driver `matches`.
@@ -296,40 +259,6 @@ fn device_type_of(target: &Target, matches: impl Fn(&VirtioDriver) -> bool) -> O
         .into_iter()
         .find(|function| function.driver.as_ref().is_some_and(&matches))
         .map(|function| function.virtio_id)
-}
-
-/// The device type of the function that owns the queue at `address` and
-/// whether it is transitional, and how many queues it set up, for naming
-/// the queue and reading its requests.
-fn queue_device_of(target: &Target, address: VirtAddr) -> (Option<(u16, bool)>, u32) {
-    target
-        .virtio_functions()
-        .ok()
-        .into_iter()
-        .flatten()
-        .find_map(|function| {
-            let driver = function.driver?;
-            driver
-                .queues
-                .iter()
-                .any(|queue| queue.address == address)
-                .then(|| {
-                    (
-                        Some((function.virtio_id, function.transitional)),
-                        queue_count(&driver.queues),
-                    )
-                })
-        })
-        .unwrap_or((None, 0))
-}
-
-/// How many queues a device set up, from its highest queue index.
-fn queue_count(queues: &[VirtQueue]) -> u32 {
-    queues
-        .iter()
-        .map(|queue| queue.index + 1)
-        .max()
-        .unwrap_or(0)
 }
 
 fn location(function: &VirtioFunction) -> String {

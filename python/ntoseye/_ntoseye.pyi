@@ -6765,6 +6765,12 @@ class Inspect:
         Get the target, kernel, symbol, processor, and debugger version
         information (`vertarget`).
         """
+    def virtio(self, /) -> list[VirtioDevice]:
+        """
+        List the virtio PCI functions (`!virtio`), with the state of each
+        queue where the driver's private PDB types it. A queue's `progress`
+        counters only grow, so two calls show what moved in between.
+        """
     def vm(self, /, include_processes: bool = True) -> VmStatistics:
         """
         Get the system memory, pool, PTE, and page-file counters (`!vm`).
@@ -6772,6 +6778,13 @@ class Inspect:
     def vpb(self, /, address: int) -> Vpb:
         """
         Decode a volume parameter block (`!vpb`).
+        """
+    def vring(self, /, address: int, module: str |None = None) -> VirtioRing:
+        """
+        Read the virtio-win virtqueue at `address` (`!vring`): its ring, the
+        buffers the device holds or returned, and the request each carries.
+        `module` names the driver whose PDB types it, by default the one its
+        `add_buf` routine is in.
         """
     def wdf_device(self, /, handle: int) -> WdfDevice:
         """
@@ -13439,6 +13452,336 @@ class VerifierSuspectDriver(BaseRecord):
     def unloads(self, /) -> int:
         """
         The number of times that the driver unloaded.
+        """
+
+@final
+class VirtioBuffer(BaseRecord):
+    """
+    One buffer: its descriptors and the request it carries.
+    """
+    @property
+    def broken(self, /) -> str |None:
+        """
+        Why walking the chain stopped early.
+        """
+    @property
+    def descriptors(self, /) -> list[VirtioDescriptor]: ...
+    @property
+    def head(self, /) -> int:
+        """
+        The head descriptor's index (split) or the buffer ID (packed).
+        """
+    @property
+    def position(self, /) -> int:
+        """
+        The avail entry (split, with the device), the used element
+        (returned), or the ring position (packed).
+        """
+    @property
+    def request(self, /) -> str |None:
+        """
+        The request and, once the device returned it, its answer, decoded
+        from the virtio specification's layouts.
+        """
+    @property
+    def written(self, /) -> int |None:
+        """
+        The bytes the device wrote, for a returned buffer.
+        """
+
+@final
+class VirtioDescriptor(BaseRecord):
+    """
+    One descriptor of a buffer.
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The buffer's guest-physical address.
+        """
+    @property
+    def device_writes(self, /) -> bool: ...
+    @property
+    def flags(self, /) -> int: ...
+    @property
+    def in_bytes(self, /) -> int |None: ...
+    @property
+    def index(self, /) -> int:
+        """
+        Its index in the table (split) or its ring position (packed).
+        """
+    @property
+    def indirect_descriptors(self, /) -> int |None:
+        """
+        For an indirect table: how many descriptors it holds and the
+        bytes the driver gives the device and the device may write.
+        """
+    @property
+    def length(self, /) -> int: ...
+    @property
+    def out_bytes(self, /) -> int |None: ...
+
+@final
+class VirtioDevice(BaseRecord):
+    """
+    A virtio PCI function (`!virtio`).
+    """
+    @property
+    def device_id(self, /) -> int: ...
+    @property
+    def driver(self, /) -> VirtioDriverState |None:
+        """
+        What its virtio-win driver shows of it, with the driver's private
+        PDB. None when `driver_missing` says why not.
+        """
+    @property
+    def driver_missing(self, /) -> str |None: ...
+    @property
+    def kind(self, /) -> str:
+        """
+        The specification's name of the type, such as `net` or `block`.
+        """
+    @property
+    def location(self, /) -> str:
+        """
+        `bb:dd.f`.
+        """
+    @property
+    def pdo(self, /) -> int: ...
+    @property
+    def service(self, /) -> str |None:
+        """
+        The service that drives it.
+        """
+    @property
+    def transitional(self, /) -> bool:
+        """
+        Whether the device also offers the legacy interface.
+        """
+    @property
+    def virtio_id(self, /) -> int:
+        """
+        The virtio device type: 1 net, 2 block, 3 console, 8 SCSI, ...
+        """
+
+@final
+class VirtioDriverState(BaseRecord):
+    """
+    A device as its virtio-win driver sees it.
+    """
+    @property
+    def device(self, /) -> int:
+        """
+        The `virtio_device`.
+        """
+    @property
+    def event_idx(self, /) -> bool:
+        """
+        Whether the device and driver negotiated the event index feature.
+        """
+    @property
+    def module(self, /) -> str:
+        """
+        The driver module whose PDB types its structures.
+        """
+    @property
+    def msix(self, /) -> bool: ...
+    @property
+    def packed(self, /) -> bool: ...
+    @property
+    def queues(self, /) -> list[Virtqueue]: ...
+
+@final
+class VirtioProgress(BaseRecord):
+    """
+    A queue's counters at one look, which only grow modulo `modulus`;
+    the difference between two looks is what moved.
+    """
+    @property
+    def completed(self, /) -> int |None:
+        """
+        Buffers the device returned (split rings).
+        """
+    @property
+    def modulus(self, /) -> int: ...
+    @property
+    def published(self, /) -> int:
+        """
+        Buffers the driver handed the device.
+        """
+    @property
+    def taken_back(self, /) -> int:
+        """
+        Buffers the driver took back.
+        """
+
+@final
+class VirtioRing(BaseRecord):
+    """
+    A virtqueue's ring and the buffers outstanding in it (`!vring`).
+    """
+    @property
+    def broken(self, /) -> str |None:
+        """
+        Why reading a packed ring stopped early.
+        """
+    @property
+    def queue(self, /) -> Virtqueue: ...
+    @property
+    def request_kind(self, /) -> str |None:
+        """
+        What its buffers hold, for decoding: `blk`, `scsi`, `net`, ...
+        """
+    @property
+    def returned(self, /) -> list[VirtioBuffer]:
+        """
+        Buffers the device returned that the driver has not taken back
+        (split rings), at most 64.
+        """
+    @property
+    def with_device(self, /) -> list[VirtioBuffer]:
+        """
+        Buffers the device holds, at most 64.
+        """
+
+@final
+class VirtioSignal(BaseRecord):
+    """
+    When one side of a queue wants to be signalled.
+    """
+    @property
+    def kind(self, /) -> str:
+        """
+        `on` (after every buffer), `off`, `after` (the event index), or
+        `at` (a packed ring position).
+        """
+    @property
+    def lap(self, /) -> bool |None:
+        """
+        The lap for `at`.
+        """
+    @property
+    def value(self, /) -> int |None:
+        """
+        The index for `after`, the position for `at`.
+        """
+
+@final
+class Virtqueue(BaseRecord):
+    """
+    One virtqueue and where its traffic stands.
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The `virtqueue_split` or `virtqueue_packed`.
+        """
+    @property
+    def avail(self, /) -> int |None:
+        """
+        The avail index the driver published (split), or the position it
+        fills next (packed).
+        """
+    @property
+    def desc(self, /) -> int |None:
+        """
+        The descriptor table.
+        """
+    @property
+    def device_area(self, /) -> int |None:
+        """
+        The used ring (split) or the device's event suppression structure
+        (packed).
+        """
+    @property
+    def driver_area(self, /) -> int |None:
+        """
+        The avail ring (split) or the driver's event suppression structure
+        (packed).
+        """
+    @property
+    def error(self, /) -> str |None:
+        """
+        Why the queue could not be read.
+        """
+    @property
+    def free(self, /) -> int |None:
+        """
+        The descriptors the driver has not given out.
+        """
+    @property
+    def index(self, /) -> int: ...
+    @property
+    def interrupt_due(self, /) -> bool:
+        """
+        Whether an interrupt was due for the returned buffers (split).
+        """
+    @property
+    def interrupts(self, /) -> VirtioSignal |None:
+        """
+        When the driver wants interrupts.
+        """
+    @property
+    def name(self, /) -> str |None:
+        """
+        Its name where the virtio specification fixes it, such as `rx 0`
+        or `request 2`.
+        """
+    @property
+    def notifications(self, /) -> VirtioSignal |None:
+        """
+        When the device wants notifications.
+        """
+    @property
+    def packed(self, /) -> bool: ...
+    @property
+    def progress(self, /) -> VirtioProgress |None:
+        """
+        Counters that only grow, to compare two looks with.
+        """
+    @property
+    def returned(self, /) -> int |None:
+        """
+        Buffers the device returned that the driver has not taken back.
+        """
+    @property
+    def role(self, /) -> str |None:
+        """
+        `device_fills` for a queue whose buffers wait until the device has
+        something (receive, events), `requests` for one whose buffers
+        carry requests.
+        """
+    @property
+    def size(self, /) -> int: ...
+    @property
+    def state(self, /) -> str:
+        """
+        What these mean together, as `!virtio` says it.
+        """
+    @property
+    def taken_back(self, /) -> int |None:
+        """
+        Where the driver takes buffers back next.
+        """
+    @property
+    def unkicked(self, /) -> int |None:
+        """
+        Buffers added since the driver last notified the device (split).
+        """
+    @property
+    def unpublished(self, /) -> int |None:
+        """
+        Buffers the driver added but has not published (split).
+        """
+    @property
+    def used(self, /) -> int |None:
+        """
+        The used index up to which the device returned buffers (split).
+        """
+    @property
+    def with_device(self, /) -> int |None:
+        """
+        Buffers the device holds.
         """
 
 @final
