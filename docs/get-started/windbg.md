@@ -26,7 +26,8 @@
 | `a` (assemble), `.fnret`, `!for_each_local` | Not available. `ntoseye` does not assemble code, and public symbols do not contain return types or local types. To write bytes, use {command}`eb`. |
 | `!wdfkd.*` (KMDF) | `ntoseye` has {command}`!wdfkd.wdfldr`, {command}`!wdfkd.wdfdriverinfo`, {command}`!wdfkd.wdfhandle`, {command}`!wdfkd.wdfdevice`, {command}`!wdfkd.wdfqueue`, and {command}`!wdfkd.wdflogdump`, which use `Wdf01000.pdb`. The other `!wdfkd` commands and UMDF are not available. See [KMDF drivers](../using/kmdf.md). |
 | `!storagekd.*` (StorPort) | `ntoseye` has {command}`!storagekd.storadapter` and {command}`!storagekd.storunit`, which use `storport.pdb`. The other `!storagekd` commands are not available. See [StorPort adapters](../using/storport.md). |
-| `!rcdrkd.*`, `!ndiskd.*`, `!apic`, `!ioapic`, `!sysinfo` | Not available. |
+| `!ndiskd.*` (NDIS) | `ntoseye` has {command}`!ndiskd.miniports`, {command}`!ndiskd.miniport`, and {command}`!ndiskd.minidriver`, which use `ndis.pdb`. The other `!ndiskd` commands are not available. See [Network miniports](../using/ndis.md). |
+| `!rcdrkd.*`, `!apic`, `!ioapic`, `!sysinfo` | Not available. |
 | `~` lists threads of a user-mode process | {command}`~` lists the processors (vCPUs), and `~Ns` selects a processor. For Windows threads, use {command}`threads` and {command}`!thread`. |
 
 ## Behaves differently

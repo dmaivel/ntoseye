@@ -24,6 +24,7 @@ mod list;
 mod memory;
 pub mod meta;
 pub mod mm;
+pub mod ndis;
 pub mod object;
 pub mod pci;
 pub mod pnp;

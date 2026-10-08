@@ -26,6 +26,7 @@ mod image;
 pub mod memory;
 pub mod meta;
 pub mod mm;
+mod ndis;
 mod object;
 mod physical;
 mod pnp;
