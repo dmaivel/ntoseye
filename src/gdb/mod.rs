@@ -46,6 +46,25 @@ pub fn append_packet(out: &mut Vec<u8>, body: &[u8]) {
     ]);
 }
 
+/// Whether `bytes`, the start of what the stub sent, holds a stop reply
+/// (`S`, `T`, `W`, `X` or `N`) after any acks and whole console-output
+/// packets (`O`).
+fn holds_stop_reply(mut bytes: &[u8]) -> bool {
+    loop {
+        while let [b'+', rest @ ..] = bytes {
+            bytes = rest;
+        }
+        match bytes {
+            [b'$', kind, ..] if b"STWXN".contains(kind) => return true,
+            [b'$', b'O', rest @ ..] => match rest.iter().position(|&byte| byte == b'#') {
+                Some(end) if rest.len() >= end + 3 => bytes = &rest[end + 3..],
+                _ => return false,
+            },
+            _ => return false,
+        }
+    }
+}
+
 /// Trace one packet. `direction` is `->` for bytes ntoseye sends to `peer`
 /// and `<-` for bytes it receives.
 pub fn trace_packet(peer: &str, direction: &str, bytes: &[u8]) {
@@ -1505,6 +1524,31 @@ impl DebugBackend for GdbClient {
         self.halts.is_running()
     }
 
+    /// A stop reply waiting to be read while the target runs. The stub sends
+    /// it unprompted and nothing reads it until the next wait, so without
+    /// this check a target that hit a breakpoint between waits reads as
+    /// running, and a hit that should be absorbed (another process's, a pass
+    /// count, a false condition) leaves it frozen until a host waits. Only a
+    /// stop packet counts, past any console output (`O`) before it: that is no
+    /// stop, and draining it with a blocking wait would hang until a real one.
+    fn has_pending_stop(&self) -> bool {
+        if !self.halts.is_running() {
+            return false;
+        }
+        let buffered = self.stream.buffer();
+        if !buffered.is_empty() {
+            return holds_stop_reply(buffered);
+        }
+        let socket = self.stream.get_ref();
+        if socket.set_nonblocking(true).is_err() {
+            return false;
+        }
+        let mut head = [0u8; 512];
+        let peeked = socket.peek(&mut head);
+        let _ = socket.set_nonblocking(false);
+        matches!(peeked, Ok(len) if holds_stop_reply(&head[..len]))
+    }
+
     fn supports_pci_config(&self) -> bool {
         true
     }
@@ -1540,7 +1584,7 @@ mod tests {
 
     use super::{
         GdbClient, HW_BREAKPOINT_SLOTS, HaltCache, PacketReadState, RegisterMap, StopReply,
-        StubFeatures, append_packet, description_arch,
+        StubFeatures, append_packet, description_arch, holds_stop_reply,
     };
     use crate::dbg_backend::DebugBackend;
     use crate::gdb::registers::RegisterInfo;
@@ -1634,6 +1678,45 @@ mod tests {
             regnum: 0x43,
         }]);
         (client, received)
+    }
+
+    /// A stop the stub sent while the target ran is pending before anything
+    /// waits for it, even behind console output; console output alone is
+    /// not, and a halted target has none.
+    #[test]
+    fn a_stop_reply_waiting_on_the_socket_is_pending() {
+        let (mut client, _) = client_over_stub(|packet, _| {
+            match packet {
+                "console" => "O6869",
+                _ => "T05thread:p01.02;",
+            }
+            .to_string()
+        });
+        let prompt = |client: &mut GdbClient, body: &str| {
+            let mut packet = Vec::new();
+            append_packet(&mut packet, body.as_bytes());
+            client.stream.get_mut().write_all(&packet).unwrap();
+            thread::sleep(Duration::from_millis(100));
+        };
+        assert!(!client.has_pending_stop());
+        prompt(&mut client, "console");
+        assert!(!client.has_pending_stop(), "console output is no stop");
+        prompt(&mut client, "stop");
+        assert!(client.has_pending_stop());
+        client.halts.set_running(false);
+        assert!(!client.has_pending_stop());
+    }
+
+    #[test]
+    fn a_stop_reply_is_found_past_acks_and_whole_console_packets_only() {
+        assert!(holds_stop_reply(b"+$T05thread:p01.02;#00"));
+        assert!(holds_stop_reply(b"$O6869#9a$S05#b8"));
+        assert!(!holds_stop_reply(b"$O6869#9a"));
+        // A console packet still arriving hides what follows it.
+        assert!(!holds_stop_reply(b"$O6869"));
+        assert!(!holds_stop_reply(b"$"));
+        assert!(!holds_stop_reply(b"$E01#a6"));
+        assert!(!holds_stop_reply(b""));
     }
 
     /// Within one halt a thread is selected and its registers read once; a
