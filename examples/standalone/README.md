@@ -19,6 +19,7 @@ The scripts about the Windows hypervisor's partitions use `gdb`, and need the VM
 | `kernel_snapshot.py` | Version, pool usage, and sessions. It also inspects CPUs with `kd` or `gdb` and reads MSRs with `kd`, and `--dump` writes a dump and opens it again. |
 | `pci_devices.py` | All PCI functions in `lspci` style, and the BARs, capabilities, and command/status flags of a vendor/device that you select (`kd` or `gdb`). |
 | `kernel_hooks.py` | SSDT entries outside `nt`/`win32k`, notify callbacks by owning module, and IDT gates outside NT, read from `Diagnostic` fields. It exits with code 1 if it flags an item. |
+| `virtio_watch.py` | Two looks at every virtio queue a set time apart (read-only): what each queue's driver published, the device completed, and the driver took back in between, and the queues that `!virtio` would call stuck. `--vring` lists the requests that a stuck queue holds. It exits with code 1 if it flags a queue, and needs the private PDBs of the virtio-win drivers. |
 | `breakpoint_trace.py` | A breakpoint handle, typed stops, and a `run()` loop. |
 | `step_and_handles.py` | `step()`, live `Breakpoint` handles, and the writable `enabled` property. |
 | `scoped_breakpoint.py` | Process-scoped, conditional, pass-counted, and one-shot breakpoints; `step_out()` and `run_to()`. |

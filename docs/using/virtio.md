@@ -204,4 +204,4 @@ for name, now in ports(dbg).items():
     print(name, "published", moved)
 ```
 
-The SDK reads what the guest holds at each call and keeps nothing between calls, so a script that waits for a stall compares the counters itself.
+The SDK reads what the guest holds at each call and keeps nothing between calls, so a script that waits for a stall compares the counters itself. [`virtio_watch.py`](https://github.com/dmaivel/ntoseye/blob/master/examples/standalone/virtio_watch.py) does that for every queue, with the same rules as {command}`!virtio`, and exits with code 1 when a queue is stuck, so you can run it from a test harness while the guest runs.
