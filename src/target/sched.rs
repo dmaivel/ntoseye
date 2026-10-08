@@ -8,7 +8,7 @@ use crate::cpu_state::{MAX_PROCESSORS, kpcr_for_processor, kprcb_for_processor, 
 use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
 use crate::kuser_shared::KuserSharedData;
-use crate::layout::{ParsedType, StructRef, TypeInfo};
+use crate::layout::{ParsedType, StructRef, TypeInfo, Types};
 use crate::symbols::glob_matches;
 use crate::target::{
     DiagnosticValue, ListTermination, Target, ThreadInfo, bounded_list_walk, fast_ref_address,
@@ -502,6 +502,48 @@ fn read_first_uint(root: &StructRef<'_>, paths: &[&[&str]]) -> Option<u64> {
         }
         current.read_uint(field).ok()
     })
+}
+
+/// A handle table's open handles: its `HandleCount`, or on builds that
+/// count them per free list (`FreeLists[n].HandleCount`, 24H2), the sum.
+fn handle_table_count(table: &StructRef<'_>, types: Types<'_>) -> Option<u64> {
+    if let Ok(count) = table.read_uint("HandleCount") {
+        return Some(count);
+    }
+    let field = table.layout().field("FreeLists").ok()?;
+    let ParsedType::Array(element, lists) = &field.type_data else {
+        return None;
+    };
+    let ParsedType::Struct(name) = element.as_ref() else {
+        return None;
+    };
+    let layout = types.layout(name.as_str()).ok()?;
+    let first = table.addr() + u64::from(field.offset);
+    (0..u64::from(*lists))
+        .map(|index| {
+            types
+                .struct_with_layout(layout.clone(), first + index * layout.size as u64)
+                .read_uint("HandleCount")
+                .ok()
+        })
+        .sum()
+}
+
+/// Element `index` of the integer array field `name`.
+fn read_uint_element(root: &StructRef<'_>, name: &str, index: usize) -> Option<u64> {
+    let field = root.layout().field(name).ok()?;
+    let ParsedType::Array(_, count) = &field.type_data else {
+        return None;
+    };
+    let count = usize::try_from(*count)
+        .ok()
+        .filter(|count| index < *count)?;
+    let width = usize::try_from(field.size).ok()? / count;
+    let bytes = root.read_field_bytes(name, width * count).ok()?;
+    let element = bytes.get(index * width..(index + 1) * width)?;
+    let mut value = [0u8; 8];
+    value.get_mut(..width)?.copy_from_slice(element);
+    Some(u64::from_le_bytes(value))
 }
 
 /// `InheritedFromUniqueProcessId`, or `ParentCid` on builds without it; the
@@ -1333,16 +1375,16 @@ impl Target {
         let eprocess = eprocess.prefetch();
         let field = |paths: &[&[&str]]| read_first_uint(&eprocess, paths);
         let pointer = |name: &str| field(&[&[name]]).map(VirtAddr);
-        let vm = |name: &str| field(&[&["Vm", name], &[name]]);
+        // Newer builds keep the counters in `Vm.Instance`.
+        let vm = |name: &str| field(&[&["Vm", name], &["Vm", "Instance", name], &[name]]);
 
         let object_table = pointer("ObjectTable");
         let handle_count = object_table
             .and_then(|table| {
-                types
+                let table = types
                     .struct_at("_HANDLE_TABLE", VirtAddr(table.0 & !0xf))
-                    .ok()?
-                    .read_uint("HandleCount")
-                    .ok()
+                    .ok()?;
+                handle_table_count(&table, types)
             })
             .or_else(|| field(&[&["HandleCount"]]));
         ProcessDetail {
@@ -1355,16 +1397,20 @@ impl Target {
             vad_root: field(&[&["VadRoot", "Root"], &["VadRoot"]]).map(VirtAddr),
             token: field(&[&["Token"]]).map(fast_ref_address),
             create_time: field(&[&["CreateTime"]]),
-            user_time: field(&[&["UserTime"]]),
-            kernel_time: field(&[&["KernelTime"]]),
+            user_time: field(&[&["Pcb", "UserTime"], &["UserTime"]]),
+            kernel_time: field(&[&["Pcb", "KernelTime"], &["KernelTime"]]),
+            // `ProcessQuotaUsage` is indexed by PS_QUOTA_TYPE: nonpaged
+            // pool, then paged pool.
             quota_paged_pool: field(&[
                 &["QuotaUsage", "PagedPool"],
                 &["QuotaUsage", "PagedPoolUsage"],
-            ]),
+            ])
+            .or_else(|| read_uint_element(&eprocess, "ProcessQuotaUsage", 1)),
             quota_nonpaged_pool: field(&[
                 &["QuotaUsage", "NonPagedPool"],
                 &["QuotaUsage", "NonPagedPoolUsage"],
-            ]),
+            ])
+            .or_else(|| read_uint_element(&eprocess, "ProcessQuotaUsage", 0)),
             working_set_size: vm("WorkingSetSize"),
             commit_charge: vm("PagefileUsage").or_else(|| vm("CommitCharge")),
             peak_virtual_size: vm("PeakVirtualSize"),
