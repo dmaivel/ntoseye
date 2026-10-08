@@ -41,6 +41,14 @@ pub const MAX_LISTED_CHAINS: usize = 64;
 const UNSIZED_CONTEXT_SCAN: u64 = 64 << 10;
 /// The most of a context that is searched when its size is known.
 const MAX_CONTEXT_SCAN: u64 = 1 << 20;
+/// How much of a structure a context points to is searched for an
+/// embedded `virtio_device`.
+const POINTED_BLOCK_SCAN: usize = 4 << 10;
+/// The most pointers a context search follows into other structures.
+const MAX_FOLLOWED_POINTERS: usize = 512;
+/// How many dxgkrnl callbacks after the device handle mark a display
+/// miniport's copy of its `DXGKRNL_INTERFACE`.
+const DISPLAY_CALLBACKS: usize = 4;
 
 /// The virtio device ID of PCI device `device_id`, and whether it is a
 /// transitional device (one that also offers the legacy interface).
@@ -505,16 +513,28 @@ fn plausible_device(header: &[u8], fields: DeviceFields) -> bool {
 }
 
 /// The driver's `virtio_device` in its context, `bytes` read at `base`:
-/// one embedded in it or one a pointer in it names, whichever comes first,
-/// confirmed by `is_device`. Taking them in order of offset finds the
-/// driver's own before anything past the end of its allocation, so a
-/// context of unknown size can be read past its end.
+/// one embedded in it, one a pointer in it names, or one embedded in a
+/// structure a pointer in it names (read through `read_block`), whichever
+/// comes first, confirmed by `is_device`. Taking them in order of offset
+/// finds the driver's own before anything past the end of its allocation,
+/// so a context of unknown size can be read past its end.
 pub fn locate_device(
     bytes: &[u8],
     base: u64,
     fields: DeviceFields,
     mut is_device: impl FnMut(u64) -> bool,
+    mut read_block: impl FnMut(u64) -> Vec<u8>,
 ) -> Option<u64> {
+    let embedded_in = |block: &[u8], at: u64, is_device: &mut dyn FnMut(u64) -> bool| {
+        (0..block.len().saturating_sub(7))
+            .step_by(8)
+            .filter(|offset| {
+                block.len() - offset >= fields.size && plausible_device(&block[*offset..], fields)
+            })
+            .map(|offset| at + offset as u64)
+            .find(|address| is_device(*address))
+    };
+    let mut followed = std::collections::HashSet::new();
     for offset in (0..bytes.len().saturating_sub(7)).step_by(8) {
         let here = &bytes[offset..];
         if here.len() >= fields.size && plausible_device(here, fields) {
@@ -524,16 +544,41 @@ pub fn locate_device(
             }
         }
         let pointer = u64::from_le_bytes(here[..8].try_into().unwrap_or_default());
-        if kernel_address(pointer) && is_device(pointer) {
+        if !kernel_address(pointer) {
+            continue;
+        }
+        if is_device(pointer) {
             return Some(pointer);
+        }
+        let inside = (base..base + bytes.len() as u64).contains(&pointer);
+        if !inside && followed.len() < MAX_FOLLOWED_POINTERS && followed.insert(pointer) {
+            let block = read_block(pointer);
+            if let Some(address) = embedded_in(&block, pointer, &mut is_device) {
+                return Some(address);
+            }
         }
     }
     None
 }
 
+/// Whether `block` holds a display miniport's copy of its
+/// `DXGKRNL_INTERFACE`: the device handle dxgkrnl gave it, the adapter's
+/// FDO, followed by dxgkrnl's callbacks.
+pub fn holds_display_interface(block: &[u8], fdo: u64, in_dxgkrnl: impl Fn(u64) -> bool) -> bool {
+    let qwords: Vec<u64> = block
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|chunk| u64::from_le_bytes(*chunk))
+        .collect();
+    qwords
+        .windows(1 + DISPLAY_CALLBACKS)
+        .any(|run| run[0] == fdo && run[1..].iter().all(|callback| in_dxgkrnl(*callback)))
+}
+
 /// A driver's per-device state that holds its `virtio_device`: a KMDF
-/// device context, a StorPort miniport's device extension, or an NDIS
-/// miniport's adapter context.
+/// device context, a StorPort miniport's device extension, an NDIS
+/// miniport's adapter context, or a display miniport's device context.
 struct DriverContext {
     address: VirtAddr,
     size: Option<u64>,
@@ -649,11 +694,11 @@ impl Target {
                  it (.sympath+ <build directory>)"
             )));
         }
-        let contexts = self.driver_contexts(&service, fdo, pdo);
+        let contexts = self.driver_contexts(&module, &service, fdo, pdo);
         if contexts.is_empty() {
             return Err(fail(format!(
-                "{module} keeps no device state ntoseye can find: it is not a KMDF, StorPort \
-                 or NDIS driver of this device"
+                "{module} keeps no device state ntoseye can find: it is not a KMDF, StorPort, \
+                 NDIS or display (WDDM) driver of this device"
             )));
         }
         for context in &contexts {
@@ -671,9 +716,16 @@ impl Target {
         Err(fail(format!("no virtio_device in {}", searched.join(", "))))
     }
 
-    /// The per-device state `service` keeps for the device whose FDO is
-    /// `fdo` and PDO `pdo`, from whichever framework drives it.
-    fn driver_contexts(&self, service: &str, fdo: VirtAddr, pdo: VirtAddr) -> Vec<DriverContext> {
+    /// The per-device state `service`, whose image is `module`, keeps for
+    /// the device whose FDO is `fdo` and PDO `pdo`, from whichever
+    /// framework drives it.
+    fn driver_contexts(
+        &self,
+        module: &str,
+        service: &str,
+        fdo: VirtAddr,
+        pdo: VirtAddr,
+    ) -> Vec<DriverContext> {
         let mut contexts = Vec::new();
         if let Ok(info) = self.wdf_driver_info(service)
             && let Some(handle) = info
@@ -727,7 +779,45 @@ impl Target {
                 }
             }
         }
+        if let Some(context) = self.display_miniport_context(module, fdo) {
+            contexts.push(context);
+        }
         contexts
+    }
+
+    /// The device context a display miniport (`module`) gave dxgkrnl for
+    /// the adapter whose FDO is `fdo`: the structure dxgkrnl's device
+    /// extension points to that holds the miniport's copy of its
+    /// `DXGKRNL_INTERFACE`. dxgkrnl's own structures have no public types,
+    /// so it is recognised by that copy, which names the FDO. Only for a
+    /// driver whose PDB has the display interface types.
+    fn display_miniport_context(&self, module: &str, fdo: VirtAddr) -> Option<DriverContext> {
+        let types = self.guest().ok()?.ntoskrnl.types();
+        types.layout(format!("{module}!_DXGKRNL_INTERFACE")).ok()?;
+        let dxgkrnl = self.module_named("dxgkrnl")?;
+        let code = dxgkrnl.base_address.0..dxgkrnl.base_address.0 + u64::from(dxgkrnl.size);
+        let object = types.struct_at("_DEVICE_OBJECT", fdo).ok()?;
+        let header = types.layout("_DEVICE_OBJECT").ok()?.size as u64;
+        let extension = object.read_pointer("DeviceExtension").ok()?;
+        let length = object.read_uint("Size").ok()?.checked_sub(header)?;
+        let bytes = self.read_readable(extension, length.min(MAX_CONTEXT_SCAN) as usize);
+        let mut seen = std::collections::HashSet::new();
+        bytes
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|chunk| u64::from_le_bytes(*chunk))
+            .filter(|pointer| kernel_address(*pointer) && seen.insert(*pointer))
+            .take(MAX_FOLLOWED_POINTERS)
+            .find(|pointer| {
+                let block = self.read_readable(VirtAddr(*pointer), POINTED_BLOCK_SCAN);
+                holds_display_interface(&block, fdo.0, |callback| code.contains(&callback))
+            })
+            .map(|context| DriverContext {
+                address: VirtAddr(context),
+                size: None,
+                what: format!("the device context of display adapter FDO {:#x}", fdo.0),
+            })
     }
 
     /// The `virtio_device` in `context`, typed by `module`'s PDB.
@@ -743,9 +833,13 @@ impl Target {
             .size
             .map_or(UNSIZED_CONTEXT_SCAN, |size| size.min(MAX_CONTEXT_SCAN));
         let bytes = self.read_readable(context.address, len as usize);
-        locate_device(&bytes, context.address.0, fields, |address| {
-            self.is_virtio_device(module, VirtAddr(address), context.address)
-        })
+        locate_device(
+            &bytes,
+            context.address.0,
+            fields,
+            |address| self.is_virtio_device(module, VirtAddr(address), context.address),
+            |pointer| self.read_readable(VirtAddr(pointer), POINTED_BLOCK_SCAN),
+        )
         .map(VirtAddr)
     }
 
@@ -1127,8 +1221,8 @@ mod tests {
     use super::{
         DeviceFields, DriverQueueState, PackedDesc, PackedQueueState, SplitRing, VRING_DESC_F_NEXT,
         VRING_DESC_F_WRITE, VRING_PACKED_DESC_F_AVAIL, VRING_PACKED_DESC_F_USED, VringDesc,
-        indirect_table, locate_device, outstanding_heads, queue_verdict, read_packed_ring,
-        walk_chain,
+        holds_display_interface, indirect_table, locate_device, outstanding_heads, queue_verdict,
+        read_packed_ring, walk_chain,
     };
     use crate::types::VirtAddr;
 
@@ -1275,14 +1369,17 @@ mod tests {
     fn a_device_is_found_embedded_or_behind_a_pointer() {
         let embedded = context(0x100, Some(0x40), None);
         assert_eq!(
-            locate_device(&embedded, BASE, FIELDS, |at| at == BASE + 0x40),
+            locate_device(&embedded, BASE, FIELDS, |at| at == BASE + 0x40, no_block),
             Some(BASE + 0x40)
         );
-        assert_eq!(locate_device(&embedded, BASE, FIELDS, |_| false), None);
+        assert_eq!(
+            locate_device(&embedded, BASE, FIELDS, |_| false, no_block),
+            None
+        );
         let elsewhere = BASE + 0x5_0000;
         let pointed = context(0x100, None, Some((0x20, elsewhere)));
         assert_eq!(
-            locate_device(&pointed, BASE, FIELDS, |at| at == elsewhere),
+            locate_device(&pointed, BASE, FIELDS, |at| at == elsewhere, no_block),
             Some(elsewhere)
         );
     }
@@ -1295,9 +1392,77 @@ mod tests {
         let own = BASE + 0x5_0000;
         let bytes = context(0x200, Some(0x180), Some((0x08, own)));
         assert_eq!(
-            locate_device(&bytes, BASE, FIELDS, |at| at == own || at == BASE + 0x180),
+            locate_device(
+                &bytes,
+                BASE,
+                FIELDS,
+                |at| at == own || at == BASE + 0x180,
+                no_block
+            ),
             Some(own)
         );
+    }
+
+    fn no_block(_: u64) -> Vec<u8> {
+        Vec::new()
+    }
+
+    /// A device embedded in a structure the context points to is found
+    /// through that pointer, before a device embedded further on in the
+    /// context, as viogpudo's sits in the adapter object its context names.
+    #[test]
+    fn a_device_embedded_behind_a_pointer_is_found_in_offset_order() {
+        let adapter = BASE + 0x7_0000;
+        let bytes = context(0x400, Some(0x300), Some((0x10, adapter)));
+        let block = context(0x200, Some(0x128), None);
+        let read = |at: u64| {
+            if at == adapter {
+                block.clone()
+            } else {
+                Vec::new()
+            }
+        };
+        assert_eq!(
+            locate_device(
+                &bytes,
+                BASE,
+                FIELDS,
+                |at| at == adapter + 0x128 || at == BASE + 0x300,
+                read
+            ),
+            Some(adapter + 0x128)
+        );
+    }
+
+    /// A display miniport's copy of its interface is the FDO followed by
+    /// dxgkrnl's callbacks; the FDO alone, or followed by other code, is not.
+    #[test]
+    fn a_display_interface_names_the_fdo_then_dxgkrnl_callbacks() {
+        let fdo = 0xffff_c108_ba18_c030;
+        let dxgkrnl = |at: u64| (0xffff_f803_8177_0000..0xffff_f803_81c7_d000).contains(&at);
+        let block = |values: &[u64]| -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect()
+        };
+        let callbacks = [
+            0xffff_f803_81b3_8750,
+            0xffff_f803_81b6_a740,
+            0xffff_f803_817f_1fa0,
+            0xffff_f803_8177_1000,
+        ];
+        let mut copy = vec![0x0000_300e_0000_0100, fdo];
+        copy.extend(callbacks);
+        assert!(holds_display_interface(&block(&copy), fdo, dxgkrnl));
+        assert!(!holds_display_interface(
+            &block(&[0, fdo, 0, 0, 0, 0]),
+            fdo,
+            dxgkrnl
+        ));
+        let mut elsewhere = vec![fdo];
+        elsewhere.extend([0xffff_f804_0000_1000; 4]);
+        assert!(!holds_display_interface(&block(&elsewhere), fdo, dxgkrnl));
     }
 
     fn ring(avail_idx: u16, used_idx: u16) -> SplitRing {

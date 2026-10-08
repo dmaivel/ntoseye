@@ -30,8 +30,9 @@ For the queues, `ntoseye` needs the driver's private PDB. The drivers of the vir
 - a KMDF driver (vioser, viosock, balloon, viofs, vioinput, viorng): the contexts of the WDFDEVICE that the driver created for the device, as {command}`!wdfkd.wdfhandle` shows them
 - a StorPort miniport (viostor, vioscsi): the miniport's device extension, as {command}`!storagekd.storadapter` shows it
 - an NDIS miniport (NetKVM): the adapter context, as {command}`!ndiskd.miniport` shows it
+- a display miniport (viogpudo): the device context that the driver gave dxgkrnl. dxgkrnl's own structures have no public types, so `ntoseye` recognizes the context by the driver's copy of its `DXGKRNL_INTERFACE`, which names the adapter's FDO.
 
-It accepts a `virtio_device` there, embedded or behind a pointer, when the device's queues point back at it, which the VirtIO library guarantees. So it does not depend on the names of the driver's own types.
+It accepts a `virtio_device` there, embedded, behind a pointer, or embedded in a structure that a pointer names (as viogpudo keeps it in its adapter object), when the device's queues point back at it, which the VirtIO library guarantees. So it does not depend on the names of the driver's own types.
 
 ## Reading a queue
 
