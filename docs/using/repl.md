@@ -101,7 +101,7 @@ The palette opens on the tab that fits what you're typing:
 
 A find searches the next 1 MB after the cursor and shows how far it has got. **N** finds the next match, or searches the next 1 MB if there wasn't one. **Escape** stops a find early, and **N** carries on from where it stopped.
 
-**Breakpoints and watchpoints.** In code, **B** sets a breakpoint on the instruction under the cursor with {command}`bp`, or clears the one that's there. If you go to an address in the middle of an instruction, the listing from there shows instructions that don't exist, and a breakpoint on one would corrupt the real code. {command}`bp` refuses such an address, and the note under the listing says which instruction the address is inside ([where a code breakpoint can go](breakpoints.md#where-a-code-breakpoint-can-go)). When nothing says where the instructions start, use `bp /a` at the prompt instead.
+**Breakpoints and watchpoints.** In code, **B** sets a breakpoint on the instruction under the cursor with {command}`bp`, or clears the one that's there. If you go to an address in the middle of an instruction, the listing from there shows instructions that don't exist, and a breakpoint on one would corrupt the real code. {command}`bp` refuses such an address, and the note under the listing says which instruction the address is inside ([where a code breakpoint can go](breakpoints.md#where-a-code-breakpoint-can-go)). When nothing says where the instructions start, {command}`bp` sets the breakpoint, and the note warns that it could not check.
 
 In memory, **B** sets a write watchpoint (`ba w`) on the bytes at the cursor, as wide as the address's alignment allows, up to 8 bytes, or clears the one that covers them. Watched bytes are red.
 

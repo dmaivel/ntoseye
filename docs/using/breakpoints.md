@@ -3,7 +3,7 @@
 All breakpoint commands share one grammar, which follows WinDbg. A code breakpoint command starts with its options:
 
 - `/1`: one-shot.
-- `/a`: set a {command}`bp` or {command}`bu` breakpoint without confirming that an instruction starts at its address ([below](#where-a-code-breakpoint-can-go)). WinDbg has `/a` only on {command}`bm`, for locations that it would otherwise skip.
+- `/a`: set a {command}`bp` or {command}`bu` breakpoint without checking that an instruction starts at its address ([below](#where-a-code-breakpoint-can-go)). WinDbg has `/a` only on {command}`bm`, for locations that it would otherwise skip.
 - `/p <pid>`: process scope.
 - `/t <ethread>`: thread scope.
 - `/c <processor>`: processor scope. WinDbg does not have this option.
@@ -40,18 +40,20 @@ A `file:line` target sets a source breakpoint, with {command}`bp` as with {comma
 
 ## Where a code breakpoint can go
 
-A software breakpoint replaces the first byte of an instruction. Inside an instruction, it changes the bytes that the processor decodes there, and the guest can crash when it runs that code. {command}`bp` and {command}`bu` therefore confirm that an instruction starts at the address:
+A software breakpoint replaces the first byte of an instruction. Inside an instruction, it changes the bytes that the processor decodes there, and the guest can crash when it runs that code. {command}`bp` and {command}`bu` therefore check that an instruction starts at the address, which WinDbg and gdb leave to you:
 
 - The start of a symbol, such as `nt!NtClose`, is the start of an instruction.
 - For any other address, such as `nt!NtClose+0x40`, ntoseye decodes from the start of the function around it, which it takes from the module's unwind data or else from the nearest symbol before it. If decoding does not land on the address, ntoseye refuses it and names the instruction that the address is inside, so you can set the breakpoint there instead.
 
-If nothing near the address says where its instructions start, or that code cannot be read, ntoseye cannot check the address, and {command}`bp` refuses it too. The same goes for a {command}`bu` with an offset into a symbol that does not resolve yet, such as `mydriver!DriverEntry+0x20` before the driver loads. To set such a breakpoint without the check, add `/a`.
+If nothing near the address says where its instructions start, or that code cannot be read, ntoseye cannot check the address. It sets the breakpoint, as other debuggers do, and warns that it could not confirm an instruction start. The same goes for a {command}`bu` with an offset into a symbol that does not resolve yet, such as `mydriver!DriverEntry+0x20` before the driver loads.
+
+`/a` skips the check, for code where decoding from the function's start is wrong about an address, such as code that jumps into the middle of its own instructions.
 
 A `ba e1` breakpoint does not write to memory, so it needs no check.
 
 ## Breakpoints on non-resident pages
 
-You can set a kernel code breakpoint on a page that is not resident. KD records the site and writes the breakpoint when the page comes into memory, and until then {command}`bl` shows `o` (owed). At an offset into a function whose code is not resident, ntoseye cannot read the code to confirm an instruction start, so add `/a`.
+You can set a kernel code breakpoint on a page that is not resident. KD records the site and writes the breakpoint when the page comes into memory, and until then {command}`bl` shows `o` (owed). At an offset into a function whose code is not resident, ntoseye cannot read the code to confirm an instruction start, so it warns that it could not check.
 
 A user-space code breakpoint needs resident memory. If the page is not resident, set the breakpoint after the code has run, or use `ba e1 <address>`, which does not write to memory.
 

@@ -12,6 +12,7 @@ use crate::breakpoints::{
     HypercallFilter, ThreadScope,
 };
 use crate::dbg_backend::HwBreakpointAccess;
+use crate::diagnostics;
 use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix, parse_number_literal_text};
 use crate::guest::hypercalls;
@@ -29,7 +30,7 @@ repl_command! {
     names: ["bp"],
     usage: "bp [/1] [/a] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <address|file:line> [<passes>] [if <expr>] [do <commands>]",
     summary: "Set a breakpoint.",
-    details: "The breakpoint replaces the first byte of the instruction at the address, so an instruction must start there. ntoseye confirms one by the symbol at the address, or by decoding from the start of the function around it, and refuses an address inside an instruction. When nothing near the address says where instructions start, or that code cannot be read, bp refuses too, and /a sets the breakpoint without the check. A file:line sets a source breakpoint, as bu does.",
+    details: "The breakpoint replaces the first byte of the instruction at the address, so an instruction must start there. ntoseye confirms one by the symbol at the address, or by decoding from the start of the function around it, and refuses an address inside an instruction. When nothing near the address says where instructions start, or that code cannot be read, bp sets the breakpoint and warns that it could not check. /a skips the check. A file:line sets a source breakpoint, as bu does.",
     completion: Expression,
     run_state: Halted,
 }
@@ -38,7 +39,7 @@ repl_command! {
     names: ["bu"],
     usage: "bu [/1] [/a] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <symbol|file:line> [<passes>] [if <expr>] [do <commands>]",
     summary: "Set a deferred symbolic breakpoint.",
-    details: "A symbol with an offset, such as mydriver!DriverEntry+0x20, must name the start of an instruction, which ntoseye checks as bp does. Until the symbol resolves nothing says where its instructions start, so bu refuses an offset then, and /a defers the breakpoint without the check. A file:line sets a source breakpoint on each address the line has.",
+    details: "A symbol with an offset, such as mydriver!DriverEntry+0x20, must name the start of an instruction, which ntoseye checks as bp does. Until the symbol resolves nothing says where its instructions start, so bu sets the breakpoint and warns that it could not check. /a skips the check. A file:line sets a source breakpoint on each address the line has.",
     completion: Expression,
     run_state: Halted,
 }
@@ -901,12 +902,17 @@ impl ReplState<'_> {
             self.set_source_breakpoint(args);
             return Ok(());
         }
-        if !args.config.unchecked
-            && let Err(error) = self.check_symbol_site(&args)
-        {
-            error!("{error}");
-            return Ok(());
-        }
+        let warning = if args.config.unchecked {
+            None
+        } else {
+            match self.check_symbol_site(&args) {
+                Ok(warning) => warning,
+                Err(error) => {
+                    error!("{error}");
+                    return Ok(());
+                }
+            }
+        };
 
         let spec = args.spec.clone();
         let result = self.ctx.breakpoints.add_symbolic(
@@ -915,6 +921,11 @@ impl ReplState<'_> {
             args.spec,
             args.config,
         );
+        if result.is_ok()
+            && let Some(warning) = warning
+        {
+            diagnostics::print_warning(warning);
+        }
         if let Some(id) = self.report_breakpoint_result(result, "symbolic breakpoint") {
             let bp = self
                 .ctx
@@ -974,37 +985,36 @@ impl ReplState<'_> {
         }
     }
 
-    /// Refuse `bu`'s symbol unless an instruction starts where it resolves.
-    /// A symbol's own start always does and an offset into one is checked,
-    /// but nothing says where the instructions of a symbol that does not
-    /// resolve yet start.
-    fn check_symbol_site(&self, args: &CodeBreakpointArgs) -> Result<()> {
+    /// Check that an instruction starts where `bu`'s symbol resolves, as
+    /// [`Self::check_instruction_start`] does. A symbol's own start always
+    /// is one, but an offset into a symbol that does not resolve yet cannot
+    /// be checked, which the warning says.
+    fn check_symbol_site(&self, args: &CodeBreakpointArgs) -> Result<Option<String>> {
         let target = &self.ctx.target;
         let scope = args.config.scope.as_ref();
         match BreakpointManager::resolve_symbol_in_scope(target, &args.spec, scope)? {
-            Some((_, 0)) => Ok(()),
-            Some((address, _)) => self.require_instruction_start(
-                BreakpointManager::resolution_dtb(target, scope),
-                address,
-                "bu",
-            ),
+            Some((_, 0)) => Ok(None),
+            Some((address, _)) => self
+                .check_instruction_start(BreakpointManager::resolution_dtb(target, scope), address),
             None => match BreakpointSpec::split_symbol_offset(&args.spec) {
-                Some((symbol, offset)) if offset != 0 => Err(Error::Breakpoint(format!(
-                    "{} does not resolve yet, so ntoseye cannot confirm that an instruction \
-                     starts at {}; bu /a defers the breakpoint without the check",
+                Some((symbol, offset)) if offset != 0 => Ok(Some(format!(
+                    "{} does not resolve yet, so ntoseye could not check that an instruction \
+                     starts at {}",
                     symbol.trim(),
                     args.spec
                 ))),
-                _ => Ok(()),
+                _ => Ok(None),
             },
         }
     }
 
-    /// Refuse a software breakpoint at `address` in the address space `dtb`
-    /// unless an instruction starts there (see
-    /// [`Session::instruction_boundary`]). `command` names the command that
-    /// sets one without the check.
-    fn require_instruction_start(&self, dtb: Dtb, address: VirtAddr, command: &str) -> Result<()> {
+    /// Check that an instruction starts at `address` in the address space
+    /// `dtb` before a software breakpoint goes there (see
+    /// [`Session::instruction_boundary`]). `Err` refuses an address inside
+    /// an instruction, where the breakpoint would corrupt it. Where nothing
+    /// confirms an instruction start, the breakpoint is set, as other
+    /// debuggers set any address they are given, with a warning saying so.
+    fn check_instruction_start(&self, dtb: Dtb, address: VirtAddr) -> Result<Option<String>> {
         let symbols = &self.ctx.target.symbols;
         let name = |address: VirtAddr| {
             symbols
@@ -1012,7 +1022,7 @@ impl ReplState<'_> {
                 .unwrap_or_else(|| format!("{:#x}", address.0))
         };
         let unconfirmed = match self.ctx.instruction_boundary(dtb, address) {
-            InstructionBoundary::Start => return Ok(()),
+            InstructionBoundary::Start => return Ok(None),
             InstructionBoundary::Inside { instruction, from } => {
                 let decoding = if from == instruction {
                     String::new()
@@ -1038,9 +1048,8 @@ impl ReplState<'_> {
                 name(address)
             ),
         };
-        Err(Error::Breakpoint(format!(
-            "{unconfirmed}, so ntoseye cannot confirm that an instruction starts there; \
-             {command} /a sets the breakpoint without the check"
+        Ok(Some(format!(
+            "{unconfirmed}, so ntoseye could not confirm that an instruction starts there"
         )))
     }
 
@@ -1293,12 +1302,17 @@ impl ReplState<'_> {
             Some(BreakpointScope::Process { dtb, .. }) => *dtb,
             _ => self.ctx.target.current_dtb(),
         };
-        if !args.config.unchecked
-            && let Err(error) = self.require_instruction_start(label_dtb, address, "bp")
-        {
-            error!("{error}");
-            return Ok(());
-        }
+        let warning = if args.config.unchecked {
+            None
+        } else {
+            match self.check_instruction_start(label_dtb, address) {
+                Ok(warning) => warning,
+                Err(error) => {
+                    error!("{error}");
+                    return Ok(());
+                }
+            }
+        };
         let symbol = self
             .ctx
             .target
@@ -1319,6 +1333,10 @@ impl ReplState<'_> {
                     .list()
                     .into_iter()
                     .find(|bp| bp.id == id);
+                // First, so the browser's note, a result's first line, says it.
+                if let Some(warning) = warning {
+                    diagnostics::print_warning(warning);
+                }
                 outln!(
                     "breakpoint {} set at {}{}{}\n",
                     ui::bp_id(id),
