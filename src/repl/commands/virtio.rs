@@ -13,6 +13,7 @@ use crate::target::virtio::{
     VirtQueue, VirtioDriver, VirtioFunction, packed_verdict, queue_movement, queue_role,
     queue_verdict, split_signals, virtio_type_name,
 };
+use crate::target::virtio_request::{RequestKind, request_kind, request_kind_named};
 use crate::types::VirtAddr;
 use crate::ui;
 
@@ -30,9 +31,9 @@ repl_command! {
 repl_command! {
     cmd_vring;
     names: ["!vring", "vring"],
-    usage: "!vring <virtqueue> [module] | !vring /r <size> <desc> <avail> <used>",
+    usage: "!vring <virtqueue> [module] | !vring /r <size> <desc> <avail> <used> [/t <kind>]",
     summary: "Show a virtqueue's ring, its signalling, and its outstanding buffers.",
-    details: "Shows the ring of the virtio-win virtqueue at the address, as !virtio lists them, typed by the module you give or by the driver its add_buf routine is in, split or packed as its device negotiated. For a split ring: the ring addresses, the indexes and the state as !virtio shows them, each buffer the device holds, from its avail entry, and each buffer it returned that the driver has not taken back, from its used element, with the bytes the device wrote. For a packed ring: the descriptor ring and event structures, the driver's positions and wrap counters, and the buffers the device holds, read from the position where the driver takes buffers back next. Both show when the driver wants interrupts and the device wants notifications: always, never (NO_INTERRUPT, NO_NOTIFY, or a disabled event structure), or after an index or position (the event index feature); for a split ring, whether an interrupt was due for the returned buffers; and what moved since the last look at the queue. Each descriptor shows its guest-physical address, length, and flags (W for a buffer the device writes, N for one that continues, I for an indirect table, whose descriptors and bytes out and in it sums). With /r, it reads a split ring of the size at the kernel addresses of its descriptor table, avail ring, and used ring, for a driver without a PDB. It lists at most 64 buffers of each kind.",
+    details: "Shows the ring of the virtio-win virtqueue at the address, as !virtio lists them, typed by the module you give or by the driver its add_buf routine is in, split or packed as its device negotiated. For a split ring: the ring addresses, the indexes and the state as !virtio shows them, each buffer the device holds, from its avail entry, and each buffer it returned that the driver has not taken back, from its used element, with the bytes the device wrote. For a packed ring: the descriptor ring and event structures, the driver's positions and wrap counters, and the buffers the device holds, read from the position where the driver takes buffers back next. Both show when the driver wants interrupts and the device wants notifications: always, never (NO_INTERRUPT, NO_NOTIFY, or a disabled event structure), or after an index or position (the event index feature); for a split ring, whether an interrupt was due for the returned buffers; and what moved since the last look at the queue. Each descriptor shows its guest-physical address, length, and flags (W for a buffer the device writes, N for one that continues, I for an indirect table, whose descriptors and bytes out and in it sums). Under each buffer, a line says what it asks the device and, for a returned one, what the device answered, from the request layouts of the virtio specification: a virtio-blk request's type, sector, and length with its status; a virtio-scsi command (READ(10) LBA and blocks, INQUIRY, task management) with the SCSI status and sense or the virtio response; a virtio-net packet's offload fields and IP flow, and a control command with its ack; a virtio-gpu command and its response; a vsock packet's operation and ports. With /r, it reads a split ring of the size at the kernel addresses of its descriptor table, avail ring, and used ring, for a driver without a PDB, and /t blk, scsi, scsi-control, scsi-event, net, net-control, gpu, or vsock says what its buffers hold. It lists at most 64 buffers of each kind.",
     completion: Expression,
 }
 
@@ -149,7 +150,24 @@ impl ReplState<'_> {
     fn cmd_vring(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let args: Vec<&str> = invocation.argv.iter().map(|arg| arg.as_ref()).collect();
         let queue = match args.as_slice() {
-            ["/r", size, desc, avail, used] => {
+            ["/r", size, desc, avail, used, rest @ ..] => {
+                let kind = match rest {
+                    [] => None,
+                    ["/t", name] => match request_kind_named(name) {
+                        Some(kind) => Some(kind),
+                        None => {
+                            error!(
+                                "!vring: unknown request kind '{name}'; use blk, scsi, \
+                                 scsi-control, scsi-event, net, net-control, gpu or vsock"
+                            );
+                            return Ok(());
+                        }
+                    },
+                    _ => {
+                        outln!("{}\n", command_help(invocation.name));
+                        return Ok(());
+                    }
+                };
                 let mut values = Vec::new();
                 for text in [size, desc, avail, used] {
                     let Some(VirtAddr(value)) = self.eval_or_report(text) else {
@@ -167,7 +185,7 @@ impl ReplState<'_> {
                     VirtAddr(values[2]),
                     VirtAddr(values[3]),
                 ) {
-                    Ok(ring) => print_ring(&self.ctx.target, None, &ring, None),
+                    Ok(ring) => print_ring(&self.ctx.target, None, &ring, None, kind),
                     Err(error) => error!("!vring: {error}"),
                 }
                 return Ok(());
@@ -201,13 +219,18 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        let (virtio_id, queues) = queue_device_of(&self.ctx.target, queue.address);
+        let (device, queues) = queue_device_of(&self.ctx.target, queue.address);
+        let virtio_id = device.map(|(id, _)| id);
+        let kind = device
+            .and_then(|(id, transitional)| request_kind(id, queue.index, queues, transitional));
         let now = LookTime::now(&self.ctx.target);
         let look = self.virtio_seen.look(&queue, virtio_id, queues, now);
         match (&queue.ring, &queue.packed, &queue.packed_ring) {
-            (Some(ring), _, _) => print_ring(&self.ctx.target, Some(&queue), ring, Some(&look)),
+            (Some(ring), _, _) => {
+                print_ring(&self.ctx.target, Some(&queue), ring, Some(&look), kind)
+            }
             (None, Some(state), Some(ring)) => {
-                print_packed_ring(&self.ctx.target, &queue, state, ring, &look)
+                print_packed_ring(&self.ctx.target, &queue, state, ring, &look, kind)
             }
             _ => error!(
                 "!vring: {:#x} has neither a split nor a packed ring",
@@ -262,9 +285,10 @@ fn device_type_of(target: &Target, matches: impl Fn(&VirtioDriver) -> bool) -> O
         .map(|function| function.virtio_id)
 }
 
-/// The device type of the function that owns the queue at `address`, and
-/// how many queues it set up, for naming the queue.
-fn queue_device_of(target: &Target, address: VirtAddr) -> (Option<u16>, u32) {
+/// The device type of the function that owns the queue at `address` and
+/// whether it is transitional, and how many queues it set up, for naming
+/// the queue and reading its requests.
+fn queue_device_of(target: &Target, address: VirtAddr) -> (Option<(u16, bool)>, u32) {
     target
         .virtio_functions()
         .ok()
@@ -276,7 +300,12 @@ fn queue_device_of(target: &Target, address: VirtAddr) -> (Option<u16>, u32) {
                 .queues
                 .iter()
                 .any(|queue| queue.address == address)
-                .then(|| (Some(function.virtio_id), queue_count(&driver.queues)))
+                .then(|| {
+                    (
+                        Some((function.virtio_id, function.transitional)),
+                        queue_count(&driver.queues),
+                    )
+                })
         })
         .unwrap_or((None, 0))
 }
@@ -626,6 +655,7 @@ fn print_packed_ring(
     state: &PackedQueueState,
     ring: &PackedRing,
     look: &QueueLook,
+    kind: Option<RequestKind>,
 ) {
     let lap = |wrap: bool| if wrap { 1 } else { 0 };
     outln!(
@@ -686,6 +716,11 @@ fn print_packed_ring(
             })
             .collect();
         outln!("  {}", descriptors.join(" -> "));
+        let parts = chain
+            .descriptors
+            .iter()
+            .map(|(_, desc)| (desc.addr, desc.len, desc.flags));
+        print_request(target, kind, parts, true, false, None);
     }
     print_more(ring.with_device as usize, ring.chains.len());
     outln!();
@@ -698,6 +733,7 @@ fn print_ring(
     queue: Option<&VirtQueue>,
     ring: &SplitRing,
     look: Option<&QueueLook>,
+    kind: Option<RequestKind>,
 ) {
     match (queue, look) {
         (Some(queue), Some(look)) => outln!(
@@ -757,6 +793,7 @@ fn print_ring(
         outln!("{}", ui::label("Buffers with the device"));
         for chain in &chains {
             print_chain(target, &format!("avail[{}]", chain.avail_index), chain);
+            print_request(target, kind, split_parts(chain), false, false, None);
         }
         print_more(usize::from(ring.with_device()), chains.len());
     }
@@ -770,6 +807,14 @@ fn print_ring(
                     target,
                     &format!("used[{}] wrote {:#x}", buffer.used_index, buffer.written),
                     &buffer.chain,
+                );
+                print_request(
+                    target,
+                    kind,
+                    split_parts(&buffer.chain),
+                    false,
+                    true,
+                    Some(buffer.written),
                 );
             }
             print_more(
@@ -785,6 +830,32 @@ fn print_ring(
 fn print_more(total: usize, shown: usize) {
     if total > shown {
         outln!("  {}", ui::muted(&format!("... {} more", total - shown)));
+    }
+}
+
+/// A split chain's descriptors as (address, length, flags).
+fn split_parts(chain: &DescChain) -> impl Iterator<Item = (u64, u32, u16)> + '_ {
+    chain
+        .descriptors
+        .iter()
+        .map(|(_, desc)| (desc.addr, desc.len, desc.flags))
+}
+
+/// Under a buffer's descriptors, what the request asks and, once the
+/// device `returned` it, what it answered.
+fn print_request(
+    target: &Target,
+    kind: Option<RequestKind>,
+    descriptors: impl IntoIterator<Item = (u64, u32, u16)>,
+    packed: bool,
+    returned: bool,
+    written: Option<u32>,
+) {
+    let Some(kind) = kind else {
+        return;
+    };
+    if let Some(text) = target.describe_request(kind, descriptors, packed, returned, written) {
+        outln!("      {text}");
     }
 }
 
