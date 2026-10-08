@@ -241,11 +241,13 @@ impl ReplState<'_> {
         let moves = spec.run != RunEffect::None;
         let needs_halt = crate::repl::command::needs_halt(self, spec);
         if self.ctx.backend.is_running() && (moves || needs_halt) {
-            // Waiting out the budget for a stop no breakpoint will cause
+            // Waiting out a time limit for a stop no breakpoint will cause
             // only spends it. The guest can still stop by itself (a
             // bugcheck, a `DbgBreakPoint` over KD), which an empty line
-            // waits for.
-            let can_stop = self.ctx.backend.has_pending_stop()
+            // waits for, as does a wait with no limit, which a caller ends
+            // with Ctrl+C as at the prompt.
+            let can_stop = !self.stop_wait_bounded()
+                || self.ctx.backend.has_pending_stop()
                 || self
                     .ctx
                     .breakpoints
@@ -480,8 +482,9 @@ impl ReplState<'_> {
         }
 
         // A remote host's bounded wait for a stop no breakpoint will cause
-        // only spends its budget; an empty line waits for one anyway.
-        if self.stop_wait.is_some()
+        // only spends its budget; an empty line waits for one anyway, and a
+        // wait with no limit waits, ended by Ctrl+C as at the prompt.
+        if self.stop_wait_bounded()
             && !self
                 .ctx
                 .breakpoints
@@ -499,6 +502,14 @@ impl ReplState<'_> {
             return Ok(());
         }
         self.wait_for_stop_after_resume()
+    }
+
+    /// Whether this dispatch's wait for a stop has a time limit: an MCP
+    /// call's, or an SDK call given a timeout.
+    fn stop_wait_bounded(&self) -> bool {
+        self.stop_wait
+            .as_ref()
+            .is_some_and(|budget| budget.deadline.is_some())
     }
 
     pub fn wait_for_stop_after_resume(&mut self) -> Result<()> {
