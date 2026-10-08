@@ -556,21 +556,17 @@ fn print_crash_intelligence(report: &TriageReport) {
     if !report.blackboxes.is_empty() {
         print_section("blackbox streams");
         for blackbox in &report.blackboxes {
-            let size = blackbox
-                .size
-                .map(|size| format!(", {size:#x} bytes"))
-                .unwrap_or_default();
             match &blackbox.state {
-                BlackboxState::PresentUnparsed => {
-                    outln!(
-                        "  {}{}  {}",
-                        blackbox.name,
-                        size,
-                        ui::muted("present, unparsed")
-                    );
+                BlackboxState::Decoded { summary } => outln!(
+                    "  {:<9} {summary}  {}",
+                    blackbox.name,
+                    ui::muted(&format!("({})", blackbox.command))
+                ),
+                BlackboxState::Malformed { reason } => {
+                    outln!("  {:<9} {}", blackbox.name, ui::muted(reason));
                 }
-                BlackboxState::Unavailable { reason } => {
-                    outln!("  {}{}  {}", blackbox.name, size, ui::muted(reason));
+                BlackboxState::Absent => {
+                    outln!("  {:<9} {}", blackbox.name, ui::muted("not in this dump"));
                 }
             }
         }

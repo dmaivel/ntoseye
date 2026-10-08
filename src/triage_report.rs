@@ -156,17 +156,20 @@ pub enum BlackboxKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlackboxState {
-    /// No stream directory/payload was exposed, so absence cannot be asserted.
-    Unavailable { reason: String },
-    /// Stream metadata is recorded, but no documented payload parser is
-    /// available. Presence and size remain directly recorded facts.
-    PresentUnparsed,
+    /// The dump has the block, and it decodes; `summary` says what it holds.
+    Decoded { summary: String },
+    /// The dump has the block, but it does not decode.
+    Malformed { reason: String },
+    /// The dump has no block for the blackbox.
+    Absent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlackboxFinding {
     pub kind: BlackboxKind,
     pub name: String,
+    /// The command that shows the whole record, such as `!blackboxpnp`.
+    pub command: &'static str,
     pub size: Option<u64>,
     pub state: BlackboxState,
 }
@@ -266,7 +269,7 @@ impl TriageReport {
         dump: Option<&DmpInfo>,
     ) -> Self {
         let blackboxes = dump
-            .map(|d| blackbox_findings(&d.blackbox_streams))
+            .map(|d| blackbox_findings(&d.tagged_blocks))
             .unwrap_or_default();
         let mut report = Self {
             status,
@@ -491,7 +494,7 @@ mod tests {
             }],
             triage_process_snapshot: Some(vec![1, 2]),
             triage_thread_snapshot: Some(vec![3, 4]),
-            blackbox_streams: Vec::new(),
+            tagged_blocks: Vec::new(),
             triage_prcb_info: Some(TriagePrcbInfo {
                 current_thread: 0xffff_8000_1234_0000,
                 processor_number: 1,

@@ -24,6 +24,38 @@ So can the MCP server, which can load a dump in two ways:
 - Give `--dump` when you start the server: `ntoseye mcp --dump /path/to/MEMORY.DMP`.
 - Start the server with `ntoseye mcp` and no flags, and let the client load a dump later with the `open` tool, with `backend: dump` and `connect` set to the dump path.
 
+## Tagged data and blackboxes
+
+When Windows writes a BSOD dump, it calls the bugcheck callbacks that drivers and the kernel registered, and each can add a block of data to the dump, tagged with a GUID. {command}`.enumtag` lists them, as in WinDbg, with their size, who writes them, and their first bytes:
+
+```text
+{F57308DF-CC45-4E01-AD76-29A4EBB010EC} - 0xc8 bytes  nt!PopBlackBoxBsdGuid: boot status data (!blackboxbsd)
+  C8 00 00 00 01 00 00 00 00 1E 01 00 00 00 00 00  ................
+  00 00 00 00 00 00 00 00 03 00 0C C0 00 00 40 00  ..............@.
+  ...
+```
+
+A Windows 11 dump holds about twenty of these blocks, from the kernel, KMDF, StorPort, the display stack, pci.sys and the SMBIOS driver. `ntoseye` names each tag that Windows writes. For a driver's own tag, it looks for the GUID's bytes in the images of the kernel modules and names the global that holds it. `.enumtag <tag>` shows every byte of one block. Full, kernel and triage dumps carry these blocks. A live dump that the system takes without a bugcheck has none.
+
+Five of the blocks are Windows' blackboxes, which these commands decode as WinDbg does:
+
+| Command | Shows |
+| --- | --- |
+| {command}`!blackboxbsd` | The boot status data (`bootstat.dat`): whether the last boot succeeded and shut down, the boot IDs of the last successful and abnormal shutdowns, and the power and feature configuration state. |
+| {command}`!blackboxntfs` | NTFS's slow I/O timeouts, with the IRP, SCB and waiting thread, and its oplock break timeouts, with the processes involved. |
+| {command}`!blackboxpnp` | The Plug and Play event in progress or the last one: the device, its problem code, and the veto. |
+| {command}`!blackboxwinlogon` | What winlogon was doing. |
+| {command}`!blackboxpci` | The PCI functions with their command and status registers. |
+
+{command}`analyze` summarizes the first four in one line each.
+
+A driver can add its own data the same way, with `KeRegisterBugCheckReasonCallback` and `KbCallbackSecondaryDumpData`. To decode it in a script, read the block with the SDK:
+
+```python
+blocks = dbg.inspect.version().dump.tagged_blocks
+data = dbg.inspect.read_tagged("{12345678-1234-1234-1234-123456789abc}")
+```
+
 ## Writing a dump from a live target
 
 To write a dump from a live halted target, use the WinDbg-compatible command:

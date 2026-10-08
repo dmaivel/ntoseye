@@ -24,7 +24,7 @@ use std::sync::{Arc, OnceLock};
 
 use crate::layout::{EnumDef, le_uint, utf16le_lossy};
 use crate::ntstatus::{ntstatus_name, win32_error_name};
-use crate::target::etw::format_guid;
+use crate::target::etw::{format_guid, parse_guid};
 
 /// A message's identity: its message GUID's in-memory bytes and its number.
 pub type MessageKey = ([u8; 16], u16);
@@ -180,26 +180,6 @@ fn parse_number(text: &str) -> Option<u64> {
         Some(hex) => u64::from_str_radix(hex, 16).ok(),
         None => text.parse().ok(),
     }
-}
-
-/// `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` as a GUID's in-memory bytes.
-fn parse_guid(text: &str) -> Option<[u8; 16]> {
-    let parts: Vec<&str> = text.split('-').collect();
-    let [d1, d2, d3, d4, d5] = parts[..] else {
-        return None;
-    };
-    if (d1.len(), d2.len(), d3.len(), d4.len(), d5.len()) != (8, 4, 4, 4, 12) {
-        return None;
-    }
-    let mut guid = [0u8; 16];
-    guid[..4].copy_from_slice(&u32::from_str_radix(d1, 16).ok()?.to_le_bytes());
-    guid[4..6].copy_from_slice(&u16::from_str_radix(d2, 16).ok()?.to_le_bytes());
-    guid[6..8].copy_from_slice(&u16::from_str_radix(d3, 16).ok()?.to_le_bytes());
-    let tail = format!("{d4}{d5}");
-    for (i, byte) in guid[8..].iter_mut().enumerate() {
-        *byte = u8::from_str_radix(tail.get(i * 2..i * 2 + 2)?, 16).ok()?;
-    }
-    Some(guid)
 }
 
 /// The value of `KEY=value` in a `//` trailer, keys matched without case.

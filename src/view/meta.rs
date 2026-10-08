@@ -170,6 +170,22 @@ shapes! {
         /// Whether the triage data of the dump overflowed.
         triage_overflowed: bool,
         kernel_base: Option<VirtAddr>,
+        /// The blocks that bugcheck callbacks added to the dump (`.enumtag`);
+        /// `Inspect.read_tagged` reads one.
+        tagged_blocks: Vec<TaggedBlock>,
+    }
+
+    /// A tagged data block of a crash dump.
+    TaggedBlock {
+        /// The GUID tag, `{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}`.
+        tag: String,
+        /// The data's size in bytes.
+        size: u64,
+        /// For a tag Windows writes, the global that holds it, such as
+        /// `nt!PopBlackBoxPnpGuid`.
+        owner: Option<&'static str>,
+        /// For a tag Windows writes, what the block holds.
+        holds: Option<&'static str>,
     }
 
     /// The version data of the target (`vertarget`), with the build,
@@ -384,6 +400,16 @@ fn target_dump(dump: &TargetDumpMetadata) -> TargetDump {
         exception_code: dump.exception_code,
         triage_overflowed: dump.triage_overflowed,
         kernel_base: dump.kernel_base,
+        tagged_blocks: dump
+            .tagged_blocks
+            .iter()
+            .map(|block| TaggedBlock {
+                tag: block.tag.clone(),
+                size: block.size,
+                owner: block.owner,
+                holds: block.holds,
+            })
+            .collect(),
     }
 }
 

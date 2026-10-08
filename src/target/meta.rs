@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use crate::backend::MemoryOps;
 use crate::cpu_state::processor_count;
+use crate::dmp::tagged::known_tag;
 use crate::error::{Error, Result};
 use crate::guest::{Guest, ModuleInfo};
 use crate::kuser_shared::KuserSharedData;
@@ -648,6 +649,18 @@ pub struct TargetDumpMetadata {
     pub exception_code: Option<u32>,
     pub triage_overflowed: bool,
     pub kernel_base: Option<VirtAddr>,
+    /// The dump's tagged data blocks (`.enumtag`).
+    pub tagged_blocks: Vec<TaggedBlockInfo>,
+}
+
+/// One tagged data block of a dump: its tag, size, and, for a tag Windows
+/// writes, the global that holds it and what the block holds.
+#[derive(Debug, Clone)]
+pub struct TaggedBlockInfo {
+    pub tag: String,
+    pub size: u64,
+    pub owner: Option<&'static str>,
+    pub holds: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -796,6 +809,19 @@ fn dump_metadata(target: &Target, kernel_base: Option<VirtAddr>) -> Option<Targe
                 .filter(|value| *value != 0)
                 .map(VirtAddr)
                 .or(kernel_base),
+            tagged_blocks: info
+                .tagged_blocks
+                .iter()
+                .map(|block| {
+                    let known = known_tag(&block.tag);
+                    TaggedBlockInfo {
+                        tag: block.tag_text(),
+                        size: block.data.len() as u64,
+                        owner: known.map(|known| known.owner),
+                        holds: known.map(|known| known.holds),
+                    }
+                })
+                .collect(),
         }
     })
 }

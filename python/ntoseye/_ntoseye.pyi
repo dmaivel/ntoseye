@@ -1115,13 +1115,19 @@ class BigPoolAllocation(BaseRecord):
 @final
 class BlackboxStream(BaseRecord):
     """
-    A blackbox stream (pnp, ntfs, bsd, winlogon) of a crash dump, whose
-    payload ntoseye does not parse.
+    A blackbox record (pnp, ntfs, bsd, winlogon) of a crash dump: a block
+    of its tagged data that ntoseye decodes as WinDbg's `!blackbox*`
+    commands do.
     """
     @property
     def available(self, /) -> bool:
         """
-        `True` if the payload is available. Always `False`.
+        `True` if the block decodes.
+        """
+    @property
+    def command(self, /) -> str:
+        """
+        The command that shows the whole record, such as `!blackboxpnp`.
         """
     @property
     def kind(self, /) -> str:
@@ -1131,28 +1137,33 @@ class BlackboxStream(BaseRecord):
     @property
     def name(self, /) -> str:
         """
-        The stream's recorded name.
+        `PnP`, `NTFS`, `BSD`, or `Winlogon`.
         """
     @property
     def parsed(self, /) -> bool:
         """
-        `True` if ntoseye parsed the payload. Always `False`.
+        `True` if the block decodes.
         """
     @property
     def present(self, /) -> bool |None:
         """
-        `True` if the dump records the stream. `None` if the dump has no
-        stream directory that shows this.
+        `True` if the dump has the block.
         """
     @property
-    def reason(self, /) -> str:
+    def reason(self, /) -> str |None:
         """
-        The reason that the payload is not available.
+        Why the record does not decode, or that the dump has none. None
+        if it decodes.
         """
     @property
     def size(self, /) -> int |None:
         """
-        The stream's size in bytes, when recorded.
+        The block's size in bytes. None if the dump has no block.
+        """
+    @property
+    def summary(self, /) -> str |None:
+        """
+        What the record holds, in one line. None if it does not decode.
         """
 
 class Breakpoint:
@@ -6659,6 +6670,13 @@ class Inspect:
         Get the processors that own or wait for each numbered queued spinlock
         (`!qlocks`).
         """
+    def read_tagged(self, /, tag: str) -> bytes:
+        """
+        Read the data of the crash dump's block tagged `tag` (`.enumtag`), a
+        GUID with or without braces, such as the one a driver passes to
+        `KeRegisterBugCheckReasonCallback` for its secondary dump data.
+        `target.dump.tagged_blocks` lists the blocks.
+        """
     def ready(self, /, processor: int |None = None) -> ReadyQueues:
         """
         Read the dispatcher ready queues, up to a limit, for all processors or
@@ -12043,6 +12061,33 @@ class SystemPtes(BaseRecord):
     def used(self, /) -> int: ...
 
 @final
+class TaggedBlock(BaseRecord):
+    """
+    A tagged data block of a crash dump.
+    """
+    @property
+    def holds(self, /) -> str |None:
+        """
+        For a tag Windows writes, what the block holds.
+        """
+    @property
+    def owner(self, /) -> str |None:
+        """
+        For a tag Windows writes, the global that holds it, such as
+        `nt!PopBlackBoxPnpGuid`.
+        """
+    @property
+    def size(self, /) -> int:
+        """
+        The data's size in bytes.
+        """
+    @property
+    def tag(self, /) -> str:
+        """
+        The GUID tag, `{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}`.
+        """
+
+@final
 class TargetDump(BaseRecord):
     """
     The data that a crash dump header records.
@@ -12087,6 +12132,12 @@ class TargetDump(BaseRecord):
     def system_time(self, /) -> int |None:
         """
         The time when the dump was taken (FILETIME).
+        """
+    @property
+    def tagged_blocks(self, /) -> list[TaggedBlock]:
+        """
+        The blocks that bugcheck callbacks added to the dump (`.enumtag`);
+        `Inspect.read_tagged` reads one.
         """
     @property
     def triage_overflowed(self, /) -> bool:

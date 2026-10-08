@@ -161,6 +161,32 @@ pub fn format_guid(guid: &[u8; 16]) -> String {
     )
 }
 
+/// A GUID's in-memory bytes from its text: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`,
+/// with or without braces, and with the last hyphen left out as WinDbg's
+/// `.enumtag` prints it.
+pub fn parse_guid(text: &str) -> Option<[u8; 16]> {
+    let text = text.trim().trim_start_matches('{').trim_end_matches('}');
+    let parts: Vec<&str> = text.split('-').collect();
+    let (d1, d2, d3, tail) = match parts[..] {
+        [d1, d2, d3, d4, d5] if d4.len() == 4 && d5.len() == 12 => {
+            (d1, d2, d3, format!("{d4}{d5}"))
+        }
+        [d1, d2, d3, d45] if d45.len() == 16 => (d1, d2, d3, d45.to_string()),
+        _ => return None,
+    };
+    if (d1.len(), d2.len(), d3.len()) != (8, 4, 4) {
+        return None;
+    }
+    let mut guid = [0u8; 16];
+    guid[..4].copy_from_slice(&u32::from_str_radix(d1, 16).ok()?.to_le_bytes());
+    guid[4..6].copy_from_slice(&u16::from_str_radix(d2, 16).ok()?.to_le_bytes());
+    guid[6..8].copy_from_slice(&u16::from_str_radix(d3, 16).ok()?.to_le_bytes());
+    for (i, byte) in guid[8..].iter_mut().enumerate() {
+        *byte = u8::from_str_radix(tail.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(guid)
+}
+
 /// A FILETIME as `YYYY-MM-DD HH:MM:SS.fffffff` UTC, to the 100 ns tick.
 pub fn format_filetime_precise(filetime: u64) -> Option<String> {
     let iso = filetime_to_iso(filetime)?;

@@ -2,6 +2,7 @@ use crate::bytes::{read_u16, read_u32, read_u64};
 #[cfg(test)]
 use crate::dmp::IMAGE_FILE_MACHINE_AMD64;
 use crate::dmp::structs::{ExceptionRecord64, Header64, KdDebuggerData64};
+use crate::dmp::tagged::tagged_blocks_at;
 use crate::dmp::{
     DmpContext, DmpException, DmpInfo, DmpSystemInfo, IMAGE_FILE_MACHINE_ARM64, UnloadedDriver,
     clamp_processors,
@@ -47,7 +48,6 @@ const EXCEPTION_INFORMATION: usize = offset_of!(ExceptionRecord64, exception_inf
 // TRIAGE_DUMP64 field offsets (within the triage header, relative to 0x2000).
 // Layout confirmed against Singularity RDK Dump.h and nforest/dumplib.
 const TRIAGE_SERVICE_PACK_BUILD: usize = 0x00;
-#[cfg(test)]
 const TRIAGE_SIZE_OF_DUMP: usize = 0x04;
 const TRIAGE_VALID_OFFSET: usize = 0x08;
 const TRIAGE_CONTEXT_OFFSET: usize = 0x0C;
@@ -332,7 +332,9 @@ pub fn parse_triage(mmap: &[u8]) -> Result<(DmpInfo, Vec<TriageBlock>)> {
         exception,
         system_info,
         unloaded_drivers,
-        blackbox_streams: Vec::new(),
+        // The tagged blocks follow the triage data, which `SizeOfDump`
+        // bounds; the `TRGD` signature at `ValidOffset` is its last word.
+        tagged_blocks: tagged_blocks_at(mmap, read_u32(triage_hdr, TRIAGE_SIZE_OF_DUMP) as usize),
         triage_process_snapshot,
         triage_thread_snapshot,
         triage_prcb_info: debugger_data

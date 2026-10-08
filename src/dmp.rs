@@ -31,9 +31,11 @@ use crate::types::{Arch, PhysAddr, VirtAddr};
 
 pub mod parse;
 pub mod structs;
+pub mod tagged;
 
 use parse::ParsedDump;
 use structs::{Context, KdDebuggerData64};
+use tagged::{TaggedBlock, tagged_blocks_at};
 
 pub const IMAGE_FILE_MACHINE_AMD64: u32 = 0x8664;
 pub const IMAGE_FILE_MACHINE_ARM64: u32 = 0xaa64;
@@ -137,14 +139,6 @@ pub struct UnloadedDriver {
     pub name: String,
     pub start_address: u64,
     pub end_address: u64,
-}
-/// Metadata for a named secondary/blackbox stream. The current kdmp-parser
-/// exposes no stream payload API, so this intentionally records only facts a
-/// parser can prove without inventing a payload schema.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DmpBlackboxStream {
-    pub name: String,
-    pub size: u64,
 }
 
 impl DmpContext {
@@ -427,7 +421,8 @@ pub struct DmpInfo {
     pub exception: Option<DmpException>,
     pub system_info: Option<DmpSystemInfo>,
     pub unloaded_drivers: Vec<UnloadedDriver>,
-    pub blackbox_streams: Vec<DmpBlackboxStream>,
+    /// The blocks bugcheck callbacks added to the dump (see [`tagged`]).
+    pub tagged_blocks: Vec<TaggedBlock>,
     pub triage_process_snapshot: Option<Vec<u8>>,
     pub triage_thread_snapshot: Option<Vec<u8>>,
     pub triage_prcb_info: Option<TriagePrcbInfo>,
@@ -490,6 +485,15 @@ impl DmpMem {
         // `PhysmemMap` is a `BTreeMap` keyed by GPA, so this is already sorted
         // ascending -- which `lookup` relies on for its binary search.
         let pages: Vec<(u64, u64)> = parsed.physmem.into_iter().collect();
+        // Page contents are packed in file order, so the tagged blocks start
+        // right after the page with the highest file offset.
+        let tagged_blocks = pages
+            .iter()
+            .map(|(_, offset)| *offset)
+            .max()
+            .and_then(|last| usize::try_from(last).ok())
+            .map(|last| tagged_blocks_at(&mmap, last + PAGE_SIZE))
+            .unwrap_or_default();
 
         let context = if hdr.machine_image_type == IMAGE_FILE_MACHINE_ARM64 {
             DmpContext::from_arm64_bytes(&hdr.context_record_buffer)
@@ -578,7 +582,7 @@ impl DmpMem {
             exception,
             system_info,
             unloaded_drivers: Vec::new(),
-            blackbox_streams: Vec::new(),
+            tagged_blocks,
             triage_process_snapshot: None,
             triage_thread_snapshot: None,
             triage_prcb_info: None,
@@ -1199,7 +1203,7 @@ mod tests {
             exception: None,
             system_info: None,
             unloaded_drivers: Vec::new(),
-            blackbox_streams: Vec::new(),
+            tagged_blocks: Vec::new(),
             triage_process_snapshot: None,
             triage_thread_snapshot: None,
             triage_prcb_info: None,

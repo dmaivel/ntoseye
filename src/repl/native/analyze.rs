@@ -231,11 +231,13 @@ pub fn triage(report: &TriageReport, verbose: bool) -> View {
                     .align(TextAlign::End)
                     .priority(2.0),
             )
-            .col(Column::new("state", "State").priority(3.0));
+            .col(Column::new("state", "Holds").grow(2.0).priority(3.0))
+            .col(Column::new("command", "Command").priority(1.0));
         for (index, blackbox) in report.blackboxes.iter().enumerate() {
-            let state = match &blackbox.state {
-                BlackboxState::PresentUnparsed => "present, unparsed",
-                BlackboxState::Unavailable { reason } => reason.as_str(),
+            let (state, style) = match &blackbox.state {
+                BlackboxState::Decoded { summary } => (summary.as_str(), ""),
+                BlackboxState::Malformed { reason } => (reason.as_str(), MUTED),
+                BlackboxState::Absent => ("not in this dump", MUTED),
             };
             table = table.row(
                 TableRow::new(index.to_string())
@@ -247,7 +249,8 @@ pub fn triage(report: &TriageReport, verbose: bool) -> View {
                             |size| span(format!("{size:#x} bytes"), NUMBER),
                         ),
                     )
-                    .cell("state", span(state, MUTED)),
+                    .cell("state", span(state, style))
+                    .cell("command", span(blackbox.command, MUTED)),
             );
         }
         card = card.child(section("blackbox streams", false).child(table));

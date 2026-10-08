@@ -194,24 +194,29 @@ shapes! {
         kind: &'static str,
     }
 
-    /// A blackbox stream (pnp, ntfs, bsd, winlogon) of a crash dump, whose
-    /// payload ntoseye does not parse.
+    /// A blackbox record (pnp, ntfs, bsd, winlogon) of a crash dump: a block
+    /// of its tagged data that ntoseye decodes as WinDbg's `!blackbox*`
+    /// commands do.
     BlackboxStream {
         /// `pnp`, `ntfs`, `bsd`, or `winlogon`.
         kind: &'static str,
-        /// The stream's recorded name.
+        /// `PnP`, `NTFS`, `BSD`, or `Winlogon`.
         name: String,
-        /// The stream's size in bytes, when recorded.
+        /// The command that shows the whole record, such as `!blackboxpnp`.
+        command: &'static str,
+        /// The block's size in bytes. None if the dump has no block.
         size: Option<u64>,
-        /// `True` if the dump records the stream. `None` if the dump has no
-        /// stream directory that shows this.
+        /// `True` if the dump has the block.
         present: Option<bool>,
-        /// `True` if the payload is available. Always `False`.
+        /// `True` if the block decodes.
         available: bool,
-        /// `True` if ntoseye parsed the payload. Always `False`.
+        /// `True` if the block decodes.
         parsed: bool,
-        /// The reason that the payload is not available.
-        reason: String,
+        /// What the record holds, in one line. None if it does not decode.
+        summary: Option<String>,
+        /// Why the record does not decode, or that the dump has none. None
+        /// if it decodes.
+        reason: Option<String>,
     }
 
     /// A driver that the system unloaded recently, as the crash dump records
@@ -449,20 +454,20 @@ fn blackbox(blackbox: &BlackboxFinding) -> BlackboxStream {
         BlackboxKind::Bsd => "bsd",
         BlackboxKind::Winlogon => "winlogon",
     };
-    let (present, reason) = match &blackbox.state {
-        BlackboxState::Unavailable { reason } => (None, reason.clone()),
-        BlackboxState::PresentUnparsed => (
-            Some(true),
-            "stream payload is not exposed by the dump parser".to_string(),
-        ),
+    let (present, summary, reason) = match &blackbox.state {
+        BlackboxState::Decoded { summary } => (true, Some(summary.clone()), None),
+        BlackboxState::Malformed { reason } => (true, None, Some(reason.clone())),
+        BlackboxState::Absent => (false, None, Some("not in this dump".to_string())),
     };
     BlackboxStream {
         kind,
         name: blackbox.name.clone(),
+        command: blackbox.command,
         size: blackbox.size,
-        present,
-        available: false,
-        parsed: false,
+        present: Some(present),
+        available: summary.is_some(),
+        parsed: summary.is_some(),
+        summary,
         reason,
     }
 }

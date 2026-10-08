@@ -1,4 +1,5 @@
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 
 use super::args::{ApcTarget, DeviceArg, FltFilterArg, LoggerArg, ObjectArg};
 use super::context::{Context, in_context};
@@ -11,6 +12,7 @@ use crate::bugchecks::{bugcheck_from_dump_info, current_bugcheck};
 use crate::error::Error;
 use crate::expr::NumberRadix;
 use crate::session::Session;
+use crate::target::etw::parse_guid;
 use crate::target::irpfind::{IrpCriteria, IrpPool};
 use crate::target::mm::{PfnSelector, PoolType, PoolUsageSort};
 use crate::target::pci::{PCI_EXTENDED_CONFIG_SIZE, PciQuery, PciRawRange};
@@ -1241,5 +1243,28 @@ impl Inspect {
             let report = TriageReport::build(session);
             Ok(view::triage::triage_report(&report, usize::MAX))
         })
+    }
+
+    /// Read the data of the crash dump's block tagged `tag` (`.enumtag`), a
+    /// GUID with or without braces, such as the one a driver passes to
+    /// `KeRegisterBugCheckReasonCallback` for its secondary dump data.
+    /// `target.dump.tagged_blocks` lists the blocks.
+    fn read_tagged<'py>(&self, py: Python<'py>, tag: &str) -> PyResult<Bound<'py, PyBytes>> {
+        let Some(guid) = parse_guid(tag) else {
+            return Err(raise(format!("{tag:?} is not a GUID")));
+        };
+        let data = self.owner.with_in(py, &Context::default(), |session| {
+            let dump = session
+                .target
+                .phys
+                .dmp_info()
+                .ok_or_else(|| raise("tagged data is in crash dumps; this target is live"))?;
+            dump.tagged_blocks
+                .iter()
+                .find(|block| block.tag == guid)
+                .map(|block| block.data.clone())
+                .ok_or_else(|| raise(format!("the dump has no block tagged {tag}")))
+        })?;
+        Ok(PyBytes::new(py, &data))
     }
 }

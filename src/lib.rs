@@ -129,6 +129,7 @@ impl TargetSpec {
 pub mod output;
 
 pub mod backend;
+pub mod blackbox;
 pub mod breakpoints;
 pub mod bugchecks;
 pub mod bytes;
