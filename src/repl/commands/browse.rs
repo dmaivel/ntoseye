@@ -9,7 +9,7 @@ repl_command! {
     names: ["browse"],
     usage: "browse [<address>]",
     summary: "Browse code and memory in Tern.",
-    details: "Opens a full-screen browser over the pane, at the address or else at the instruction pointer: code when the address is executable, else memory as pointers with the symbols they point into. The arrow keys and Page Up and Page Down move. Enter follows a branch, the memory an instruction addresses, or a pointer, and Backspace goes back. Tab shows the other of code and memory at the same address, g goes to an expression, b sets or clears a breakpoint, . goes to the instruction pointer, and Escape closes the browser. F2 at the prompt opens it at the instruction pointer. Only Tern can show it.",
+    details: "Opens a full-screen browser over the pane, at the address or else at the instruction pointer: code when the address is executable, with the registers and the stack beside it, else memory as bytes with an inspector of the values at the cursor. The arrow keys and Shift+Up and Shift+Down move. Enter follows a branch, the memory an instruction addresses, or a pointer, and Backspace goes back. Tab shows the other of code and memory at the same address, g goes to an expression, / finds, b sets or clears a breakpoint or a write watchpoint, . goes to the instruction pointer, and Escape closes the browser. F10, F11, Shift+F11 and F5 step and run the target as p, t, gu and g do, F7 runs to the cursor, and Escape breaks in; what a run changed is highlighted. In code, [ and ] show the caller's frame and back, and r hides the registers and stack. In memory, t reads the memory as a type, as dt does: its fields open in place with the arrow keys, and Enter follows a pointer as its type or a list link to the next record. F2 at the prompt opens the browser at the instruction pointer. Only Tern can show it.",
     completion: Expression,
     style: ExpressionTail,
 }
@@ -53,11 +53,16 @@ impl ReplState<'_> {
             };
             match browser::run(self, address, pane) {
                 Ok(record) => {
-                    for text in &record {
+                    for text in &record.lines {
                         outln!("{text}");
                     }
-                    if !record.is_empty() {
+                    if !record.lines.is_empty() {
                         outln!();
+                    }
+                    // Where the runs from the browser left the target, as
+                    // the prompt shows a stop.
+                    if record.ran && !self.ctx.backend.is_running() {
+                        print_break_context_at(self.ctx, None, None);
                     }
                 }
                 Err(error) => error!("{error}"),

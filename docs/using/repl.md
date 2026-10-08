@@ -78,7 +78,7 @@ The palette opens on the tab that fits what you're typing:
 
 ### The browser
 
-{command}`browse`, or **F2** at the prompt, opens a full-screen browser over the pane. It starts at the instruction pointer, or at the address you give: in code if that address is executable, otherwise in memory. In code, `*` marks a breakpoint (red when it's enabled) and `>` marks the instruction pointer. Press **Escape** to close the browser. The pane is left as it was, and any breakpoints you set or cleared are listed under the prompt.
+{command}`browse`, or **F2** at the prompt, opens a full-screen browser over the pane. It starts at the instruction pointer, or at the address you give: in code if that address is executable, otherwise in memory. In code, `*` marks a breakpoint (red when it's enabled) and `>` marks the instruction pointer, and the registers and the stack are beside the code. You can step and run the target from the browser with WinDbg's keys. Press **Escape** to close the browser. The pane is left as it was. Any breakpoints you set or cleared are listed under the prompt, and so is the last place the target stopped if you ran it.
 
 | Key | What it does |
 | --- | --- |
@@ -91,6 +91,13 @@ The palette opens on the tab that fits what you're typing:
 | **G** | Go to an address or expression, with the same completions as the prompt. |
 | **/** and **N** | Find, and find the next match. |
 | **B** | Set or clear a breakpoint in code, or a write watchpoint in memory. |
+| **F10** **F11** | Step over or into, as {command}`p` and {command}`t` do. |
+| **Shift+F11** | Step out, as {command}`gu` does. |
+| **F5** | Run, as {command}`g` does. **Escape** or **Ctrl+C** breaks in. |
+| **F7** or **Ctrl+F10** | Run to the instruction under the cursor. |
+| **[** **]** | Show the caller's frame, or go back toward the innermost frame. |
+| **R** | Hide or show the registers and the stack. |
+| **T** | Read the memory at the cursor as a type. |
 | **Escape** | Stop a find in progress, or close the browser. |
 
 **Finding.** After **/**, type what to look for:
@@ -108,6 +115,22 @@ In memory, **B** sets a write watchpoint (`ba w`) on the bytes at the cursor, as
 **Memory.** Memory is shown 16 bytes a row, in hex and as text, with a cursor on one byte. Bytes are colored by kind: zeros are dimmed, printable ASCII is in the string color, control characters are in the keyword color, and watched bytes are red. **←** and **→** move one byte, and **Home** and **End** go to the start and end of the row. **P** switches to one pointer a row, with the symbol each one points into, and back.
 
 Beside the rows, the inspector shows what the bytes at the cursor could be: little-endian integers of each size (unsigned with their hex, and signed), floats, the symbol a pointer points into, a date if the value looks like a FILETIME, and any ASCII or UTF-16 string that starts there. It stays in view as you scroll.
+
+**Running the target.** **F10**, **F11**, **Shift+F11** and **F5** step and run the target as {command}`p`, {command}`t`, {command}`gu` and {command}`g` do at the prompt, and **F7** runs to the instruction under the cursor, as `g <address>` does. While the target runs, the note under the listing says so, and **Escape** or **Ctrl+C** breaks in. When the target stops, the code follows the instruction pointer, and what the run changed is tinted: registers, bytes in memory, and fields in a typed view. A backend that can't run the target, such as a dump, doesn't offer these keys.
+
+**Registers and stack.** Beside the code are the registers of the current context, two to a row, with the flags that are set in `eflags` under them, and the stack. Click a register's value to browse where it points. **[** shows the caller's frame: the code moves to where that frame is, marked with a dim `>`, and the registers are the ones the stack walk recovered for the frame, with a dash for the rest, as {command}`.frame` shows them. **]** goes back toward the innermost frame, and you can also click a frame. **R** hides the registers and the stack, and shows them again.
+
+**Memory as a type.** In memory, **T** reads the memory at the cursor as a type from a loaded PDB, as {command}`dt` does, with the same completions as {command}`dt`. When the cursor is on a kernel object, such as a process or a thread, the type is filled in for you. To read the record that the field at the cursor belongs to, give the type and the field, such as `_ETHREAD.ThreadListEntry`.
+
+Each row is a field: its offset, name, type and value. A pointer shows the symbol it points into, or the type it points to. A flags word that the PDB also declares bit by bit lists the bits that are set, such as `DefaultPagePriority=0x5`, and opens to show each bit. Zero values are dimmed.
+
+| Key | What it does in a typed view |
+| --- | --- |
+| **→** **←** | Open a nested structure, array, list link or flags word in place, or close it. On a field that is closed, **←** goes to the field it's in. |
+| **Enter** | Open or close a structure or an array. On a pointer, go to what it points to, as its type when the PDB has it. On a list link (`_LIST_ENTRY`), go to the next record of the same type with the same fields open, so that you can walk a list such as `ActiveProcessLinks` one record at a time. |
+| **B** | Set a write watchpoint on the field, as wide as the field, or clear it. |
+| **P** | Show the field's memory as bytes. **Backspace** comes back. |
+| **T** | Choose another type. With no type, the memory shows as bytes again. |
 
 ## Aliases
 

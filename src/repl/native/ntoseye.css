@@ -22,6 +22,13 @@
 	border-radius: 3px;
 }
 
+/* What a run from the browser changed, a byte, a field or a register
+   (`warning mark`): a warning-tinted highlight, apart from the plain one
+   of the cursor's byte, with the text keeping its color. */
+.sf-t-mark.sf-t-warning {
+	background: rgb(from var(--warn) r g b / 26%);
+}
+
 /* The browser's inspector, beside the memory rows: it stays in view as
    they scroll, at its own width. */
 [data-role='ntoseye.inspector'] {
