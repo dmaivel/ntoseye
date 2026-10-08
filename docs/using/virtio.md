@@ -55,6 +55,8 @@ The state lists what is outstanding:
 
 To see whether a queue moves, run the command again after the target ran for a while.
 
+In the list, three or more queues in a row that no buffer has gone through since the driver set them up are one row, such as `8-63  128  0  -  0  -  never used (56 queues)` for the queues of virtio-serial's unopened ports. {command}`!virtio` with the device's address lists each of them.
+
 ## A queue's buffers
 
 {command}`!vring` `<virtqueue>` shows the ring addresses, the flags that turn off interrupts or notifications, the indexes, each buffer that the device holds, and each buffer that it returned and the driver has not taken back, with their descriptor chains. This sample was taken with the guest stopped in vioscsi's interrupt routine, while it wrote to the disk:

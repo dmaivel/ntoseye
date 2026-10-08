@@ -233,7 +233,36 @@ fn print_queues(queues: &[VirtQueue], with_rings: bool) {
         }
     }
     builder.push_record(header);
-    for queue in queues {
+    let mut index = 0;
+    while index < queues.len() {
+        // A device such as virtio-serial sets up dozens of queues it never
+        // uses; in the list, a run of them is one row.
+        let unused = queues[index..]
+            .iter()
+            .take_while(|queue| never_used(queue))
+            .count();
+        if !with_rings && unused >= 3 {
+            let run = &queues[index..index + unused];
+            let size = run[0].size;
+            builder.push_record(vec![
+                format!("  {}-{}", run[0].index, run[unused - 1].index),
+                if run.iter().all(|queue| queue.size == size) {
+                    size.to_string()
+                } else {
+                    "-".into()
+                },
+                "0".into(),
+                "-".into(),
+                "0".into(),
+                "-".into(),
+                format!("never used ({unused} queues)"),
+                "-".into(),
+            ]);
+            index += unused;
+            continue;
+        }
+        let queue = &queues[index];
+        index += 1;
         let mut row = vec![format!("  {}", queue.index), queue.size.to_string()];
         match (&queue.ring, &queue.packed, &queue.error) {
             (Some(ring), _, _) => {
@@ -283,6 +312,29 @@ fn print_queues(queues: &[VirtQueue], with_rings: bool) {
         builder.push_record(row);
     }
     print_padded_table(builder);
+}
+
+/// Whether no buffer has gone through the queue since the driver set it
+/// up.
+fn never_used(queue: &VirtQueue) -> bool {
+    match (
+        &queue.ring,
+        &queue.driver,
+        &queue.packed,
+        &queue.packed_ring,
+    ) {
+        (Some(ring), Some(driver), _, _) => {
+            ring.avail_idx == 0 && ring.used_idx == 0 && driver.avail_idx == 0
+        }
+        (None, _, Some(packed), Some(ring)) => {
+            packed.next_avail == 0
+                && packed.last_used == 0
+                && packed.free == queue.size
+                && ring.with_device == 0
+                && ring.returned == 0
+        }
+        _ => false,
+    }
 }
 
 fn flag_names(flags: u16) -> String {
