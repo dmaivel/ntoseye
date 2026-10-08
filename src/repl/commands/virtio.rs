@@ -24,7 +24,7 @@ repl_command! {
     names: ["!virtio", "virtio"],
     usage: "!virtio [<virtio_device> [module]]",
     summary: "List the virtio devices and the state of their virtqueues.",
-    details: "Without an argument, lists the virtio PCI functions that pci.sys knows, with the device type and the service that drives each, so it works on every backend. For a virtio-win driver whose private PDB is loaded, it finds the driver's virtio_device in its per-device state (a KMDF device context, a StorPort miniport's device extension, an NDIS adapter context, or a display miniport's device context) and shows each queue: its name where the virtio specification fixes it (rx 0, request 0, control), its size, the avail index or position the driver published, the used index the device returned (split rings), where the driver takes buffers back next, the free descriptors, what moved since the last look, and a state: the buffers the device holds, the ones it returned that the driver has not taken back, and for split rings the ones the driver added but has not published or kicked (notified the device about). From the second look on, the state also says when returned buffers were not taken back since, and when a request queue's device returned nothing since. With an address, shows the virtio_device there, typed by the module you give or by the driver its operations table is in. !vring shows one queue's ring, its buffers, and its interrupt and notification suppression.",
+    details: "Lists the virtio PCI functions with their device type and driver. With a virtio-win driver's private PDB loaded, it also shows each queue's indexes and state: what the device holds, what it returned that the driver has not taken back, and what the driver has not published or kicked. Moved compares with the previous look in guest time, and from the second look the state names a queue that did not move. With an address, shows the virtio_device there, typed by the module you give or by the driver that owns it. See the virtio devices guide.",
     completion: Expression,
 }
 
@@ -33,15 +33,28 @@ repl_command! {
     names: ["!vring", "vring"],
     usage: "!vring <virtqueue> [module] | !vring /r <size> <desc> <avail> <used> [/t <kind>]",
     summary: "Show a virtqueue's ring, its signalling, and its outstanding buffers.",
-    details: "Shows the ring of the virtio-win virtqueue at the address, as !virtio lists them, typed by the module you give or by the driver its add_buf routine is in, split or packed as its device negotiated. For a split ring: the ring addresses, the indexes and the state as !virtio shows them, each buffer the device holds, from its avail entry, and each buffer it returned that the driver has not taken back, from its used element, with the bytes the device wrote. For a packed ring: the descriptor ring and event structures, the driver's positions and wrap counters, and the buffers the device holds, read from the position where the driver takes buffers back next. Both show when the driver wants interrupts and the device wants notifications: always, never (NO_INTERRUPT, NO_NOTIFY, or a disabled event structure), or after an index or position (the event index feature); for a split ring, whether an interrupt was due for the returned buffers; and what moved since the last look at the queue. Each descriptor shows its guest-physical address, length, and flags (W for a buffer the device writes, N for one that continues, I for an indirect table, whose descriptors and bytes out and in it sums). Under each buffer, a line says what it asks the device and, for a returned one, what the device answered, from the request layouts of the virtio specification: a virtio-blk request's type, sector, and length with its status; a virtio-scsi command (READ(10) LBA and blocks, INQUIRY, task management) with the SCSI status and sense or the virtio response; a virtio-net packet's offload fields and IP flow, and a control command with its ack; a virtio-gpu command and its response; a vsock packet's operation and ports. With /r, it reads a split ring of the size at the kernel addresses of its descriptor table, avail ring, and used ring, for a driver without a PDB, and /t blk, scsi, scsi-control, scsi-event, net, net-control, gpu, or vsock says what its buffers hold. It lists at most 64 buffers of each kind.",
+    details: "Give a virtqueue address that !virtio lists. Shows the ring's indexes and state, when the driver wants interrupts and the device wants notifications (and for a split ring whether an interrupt was due), and up to 64 buffers the device holds or returned, with their descriptors (W device-writable, N continues, I indirect table). Under each buffer, a line decodes the request and the device's answer from the virtio specification's layouts, such as a block sector and status or a SCSI command and its sense. /r reads a split ring from its size and kernel addresses for a driver without a PDB, and /t names what its buffers hold: blk, scsi, scsi-control, scsi-event, net, net-control, gpu, or vsock. See the virtio devices guide.",
     completion: Expression,
 }
 
-/// What `!virtio` and `!vring` last saw of each queue, by the queue's
-/// address, with the time of that look, so the next look can say what
-/// moved.
+/// What `!virtio` and `!vring` last saw of each queue, by [`ring_key`],
+/// with the time of that look, so the next look can say what moved.
 #[derive(Default)]
-pub struct VirtioSeen(HashMap<u64, (LookTime, QueueProgress)>);
+pub struct VirtioSeen(HashMap<(u64, u64), (LookTime, QueueProgress)>);
+
+/// A queue as the last-look record knows it: its address and its
+/// descriptor ring's. A driver that sets its device up again, after a
+/// reset or a reinstall, can get a queue at the same address, and its
+/// counts start over; the new ring rarely lands where the old one was,
+/// so the next look starts afresh instead of comparing with the old one.
+fn ring_key(queue: &VirtQueue) -> (u64, u64) {
+    let desc = match (&queue.ring, &queue.packed) {
+        (Some(ring), _) => ring.desc.0,
+        (None, Some(packed)) => packed.desc.0,
+        (None, None) => 0,
+    };
+    (queue.address.0, desc)
+}
 
 /// When a look was: the guest's interrupt time, which advances only while
 /// the guest runs, else the host's clock.
@@ -95,7 +108,7 @@ impl VirtioSeen {
             split_signals(ring, queue.driver.as_ref(), queue.event_idx).interrupt_due
         });
         let movement = QueueProgress::of(queue).and_then(|progress| {
-            let (at, before) = self.0.insert(queue.address.0, (now, progress))?;
+            let (at, before) = self.0.insert(ring_key(queue), (now, progress))?;
             let seconds = at.seconds_until(now);
             let role = name.as_ref().map(|(_, role)| *role);
             let mut moved = queue_movement(&before, &progress, role, interrupt_due, seconds);
@@ -902,4 +915,65 @@ fn print_chain(target: &Target, label: &str, chain: &DescChain) {
             .map(|why| ui::muted(&format!("  ({why})")))
             .unwrap_or_default()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LookTime, VirtioSeen};
+    use crate::target::virtio::{DriverQueueState, SplitRing, VirtQueue};
+    use crate::types::VirtAddr;
+
+    /// An idle queue at a fixed address whose ring is at `desc`, with
+    /// every index at `index`.
+    fn queue(desc: u64, index: u16) -> VirtQueue {
+        VirtQueue {
+            index: 0,
+            address: VirtAddr(0xffff_b482_5525_1000),
+            size: 256,
+            driver: Some(DriverQueueState {
+                avail_idx: index,
+                last_used: index,
+                free: 256,
+                unkicked: 0,
+            }),
+            ring: Some(SplitRing {
+                size: 256,
+                desc: VirtAddr(desc),
+                avail: VirtAddr(desc + 0x1000),
+                used: VirtAddr(desc + 0x1240),
+                avail_flags: 0,
+                avail_idx: index,
+                used_flags: 0,
+                used_idx: index,
+                used_event: None,
+                avail_event: None,
+            }),
+            packed: None,
+            packed_ring: None,
+            event_idx: false,
+            error: None,
+        }
+    }
+
+    /// A queue set up again at the same address, its counts back at zero,
+    /// is a first look, not some 60,000 buffers moved.
+    #[test]
+    fn a_queue_set_up_again_at_the_same_address_starts_afresh() {
+        let mut seen = VirtioSeen::default();
+        seen.look(&queue(0x1000_0000, 5000), Some(2), 1, LookTime::Guest(0));
+        let later = seen.look(
+            &queue(0x1000_0000, 5100),
+            Some(2),
+            1,
+            LookTime::Guest(10_000_000),
+        );
+        assert_eq!(later.movement.map(|(_, moved)| moved.published), Some(100));
+        let reset = seen.look(
+            &queue(0x2000_0000, 0),
+            Some(2),
+            1,
+            LookTime::Guest(20_000_000),
+        );
+        assert!(reset.movement.is_none());
+    }
 }
