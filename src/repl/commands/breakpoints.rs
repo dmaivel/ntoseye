@@ -27,18 +27,18 @@ use crate::types::{Dtb, VirtAddr};
 repl_command! {
     cmd_bp;
     names: ["bp"],
-    usage: "bp [/1] [/a] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <address> [<passes>] [if <expr>] [do <commands>]",
+    usage: "bp [/1] [/a] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <address|file:line> [<passes>] [if <expr>] [do <commands>]",
     summary: "Set a breakpoint.",
-    details: "The breakpoint replaces the first byte of the instruction at the address, so an instruction must start there. ntoseye confirms one by the symbol at the address, or by decoding from the start of the function around it, and refuses an address inside an instruction. When nothing near the address says where instructions start, or that code cannot be read, bp refuses too, and /a sets the breakpoint without the check.",
+    details: "The breakpoint replaces the first byte of the instruction at the address, so an instruction must start there. ntoseye confirms one by the symbol at the address, or by decoding from the start of the function around it, and refuses an address inside an instruction. When nothing near the address says where instructions start, or that code cannot be read, bp refuses too, and /a sets the breakpoint without the check. A file:line sets a source breakpoint, as bu does.",
     completion: Expression,
     run_state: Halted,
 }
 repl_command! {
     cmd_bu;
     names: ["bu"],
-    usage: "bu [/1] [/a] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <symbol> [<passes>] [if <expr>] [do <commands>]",
+    usage: "bu [/1] [/a] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <symbol|file:line> [<passes>] [if <expr>] [do <commands>]",
     summary: "Set a deferred symbolic breakpoint.",
-    details: "A symbol with an offset, such as mydriver!DriverEntry+0x20, must name the start of an instruction, which ntoseye checks as bp does. Until the symbol resolves nothing says where its instructions start, so bu refuses an offset then, and /a defers the breakpoint without the check.",
+    details: "A symbol with an offset, such as mydriver!DriverEntry+0x20, must name the start of an instruction, which ntoseye checks as bp does. Until the symbol resolves nothing says where its instructions start, so bu refuses an offset then, and /a defers the breakpoint without the check. A file:line sets a source breakpoint on each address the line has.",
     completion: Expression,
     run_state: Halted,
 }
@@ -933,7 +933,8 @@ impl ReplState<'_> {
         Ok(())
     }
 
-    /// Set a source breakpoint on each address `file:line` has (`bu`).
+    /// Set a source breakpoint on each address `file:line` has (`bu` and
+    /// `bp` given a source line).
     fn set_source_breakpoint(&mut self, args: CodeBreakpointArgs) {
         let spec = args.spec.clone();
         match self.ctx.breakpoints.add_source(
@@ -1275,6 +1276,12 @@ impl ReplState<'_> {
             Err(error) => {
                 match self.resolve_symbol_in_scope(&args.spec, args.config.scope.as_ref()) {
                     Some(address) => address,
+                    // `bp queue.c:42` is a source line, which only fails as
+                    // an expression.
+                    None if BreakpointSpec::source(&args.spec, 0).is_some() => {
+                        self.set_source_breakpoint(args);
+                        return Ok(());
+                    }
                     None => {
                         error!("{error}");
                         return Ok(());

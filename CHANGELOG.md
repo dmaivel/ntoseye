@@ -25,6 +25,7 @@ Keeping this file:
 
 ### Fixed
 
+- `bp <file>:<line>` sets a source breakpoint, as `bu` does. It used to fail with an expression error.
 - `--pdb-server` given both before and after a subcommand, as in `ntoseye --pdb-server <a> mcp --pdb-server <b>`, now uses every server. It used to keep only the servers after the subcommand.
 
 ## v0.47.0 (2026-10-07)

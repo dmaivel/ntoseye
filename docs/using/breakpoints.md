@@ -34,6 +34,8 @@ ba w8 nt!KiBalanceSetManagerLastCheckTick
 
 A target is a symbol name as the PDB records it, including C++ template arguments and Rust generic arguments, for example `bp mydriver!mydriver::impl$0::tally<u32>` and `bp nt!ST_STORE<SM_TRAITS>::StStart`. Inside the argument list, you can use a space only after a comma.
 
+A `file:line` target sets a source breakpoint, with {command}`bp` as with {command}`bu`. See [Symbols and source](symbols.md).
+
 {command}`bm` sets breakpoints only on code symbols, so it skips any data, such as vtables, that the pattern also matches.
 
 ## Where a code breakpoint can go
