@@ -90,9 +90,15 @@ impl Target {
                     .collect()
             });
 
-        if let Some(ref guest) = guest {
-            let _ = guest.load_all_kernel_module_symbols(&phys, &symbols);
-        } else if let Some(ref modules) = triage_modules {
+        // A triage dump seldom holds PsLoadedModuleList even when it holds
+        // the kernel; its driver list names the modules then, as it does for
+        // `kernel_modules()`.
+        let loaded = guest.as_ref().is_some_and(|guest| {
+            guest
+                .load_all_kernel_module_symbols(&phys, &symbols)
+                .is_ok()
+        });
+        if !loaded && let Some(modules) = &triage_modules {
             let arch = phys
                 .dmp_info()
                 .and_then(DmpInfo::arch)
