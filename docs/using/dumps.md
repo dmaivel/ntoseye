@@ -51,6 +51,8 @@ Five of the blocks are Windows' blackboxes, which these commands decode as WinDb
 
 {command}`analyze` summarizes the first four in one line each.
 
+KMDF adds two blocks: a copy of one driver's In-Flight Recorder log, and the list of KMDF drivers. {command}`!wdfkd.wdfcrashdump` shows both. See [KMDF drivers in a crash dump](kmdf.md#in-a-crash-dump).
+
 A driver can add its own data the same way, with `KeRegisterBugCheckReasonCallback` and `KbCallbackSecondaryDumpData`. To decode it in a script, read the block with the SDK:
 
 ```python

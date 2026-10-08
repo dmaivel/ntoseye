@@ -303,10 +303,11 @@ shapes! {
     }
 
     /// The In-Flight Recorder log of a client driver, oldest record first
-    /// (`!wdfkd.wdflogdump`).
+    /// (`!wdfkd.wdflogdump`, `!wdfkd.wdfcrashdump`).
     WdfLog {
         driver: String,
-        /// The `_FX_DRIVER_GLOBALS`.
+        /// The `_FX_DRIVER_GLOBALS`; 0 in a crash dump that does not list
+        /// the driver.
         globals: VirtAddr,
         /// The `_WDF_IFR_HEADER`.
         header: VirtAddr,
@@ -328,6 +329,21 @@ shapes! {
         end: &'static str,
         /// The item that failed validation, when `end` is `corrupt`.
         corruption: Option<String>,
+    }
+
+    /// A KMDF client driver as Wdf01000 recorded it in a crash dump
+    /// (`!wdfkd.wdfcrashdump loader`).
+    WdfDumpDriver {
+        /// None for an entry without a printable name.
+        name: Option<String>,
+        /// The driver's `_FX_DRIVER_GLOBALS` at the crash.
+        globals: VirtAddr,
+        /// The major KMDF version that it bound to.
+        major: u32,
+        /// The minor KMDF version that it bound to.
+        minor: u32,
+        /// The build number of the KMDF version that it bound to.
+        build: u32,
     }
 }
 
@@ -538,7 +554,21 @@ fn log_record(entry: &target::WdfLogEntry) -> WdfLogRecord {
     }
 }
 
-/// Render `!wdfkd.wdflogdump`.
+/// Render `!wdfkd.wdfcrashdump loader`.
+pub fn dump_drivers(drivers: &[target::WdfDumpDriver]) -> Vec<WdfDumpDriver> {
+    drivers
+        .iter()
+        .map(|driver| WdfDumpDriver {
+            name: driver.name.clone(),
+            globals: driver.globals,
+            major: driver.major,
+            minor: driver.minor,
+            build: driver.build,
+        })
+        .collect()
+}
+
+/// Render `!wdfkd.wdflogdump` and `!wdfkd.wdfcrashdump`.
 pub fn log(detail: &target::WdfLogDump) -> WdfLog {
     let (end, corruption) = match &detail.end {
         target::IfrEnd::Empty => ("empty", None),

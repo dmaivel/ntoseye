@@ -9,8 +9,8 @@ use crate::error::Result;
 use crate::repl::*;
 use crate::target::etw::{format_filetime_precise, format_guid};
 use crate::target::wdf::{
-    IfrEnd, WdfClient, WdfDeviceDetail, WdfDriverInfo, WdfEnumValue, WdfLoader, WdfLogDump,
-    WdfObject, WdfObjectRef, WdfQueueDetail, WdfRequestList,
+    IfrEnd, WdfClient, WdfDeviceDetail, WdfDriverInfo, WdfDumpDriver, WdfEnumValue, WdfLoader,
+    WdfLogDump, WdfObject, WdfObjectRef, WdfQueueDetail, WdfRequestList,
 };
 use crate::types::VirtAddr;
 use crate::ui;
@@ -66,6 +66,15 @@ repl_command! {
     summary: "Show the In-Flight Recorder log of a KMDF driver, oldest record first.",
     details: "Reads the IFR log of the driver (_FX_DRIVER_GLOBALS.WdfLogHeader). The command walks the records back from the newest record along PrevOffset, and stops at the first record written or at records that newer records overwrote. For each record, it shows the sequence number, the UTC time (only when the log keeps timestamps), the function, and the message. The command formats the message from the trace message format (TMF) annotations in the PDB for Wdf01000. For a record with a message that no loaded PDB declares, or with arguments that do not fit the message, it shows the message GUID, the message number, and the argument bytes. The command checks the header (its GUID, base, and size) and each record (signature, length, position, and sequence), and the walk stops at the first item that fails a check, with the reason.",
     completion: Driver,
+}
+
+repl_command! {
+    cmd_wdfkd_wdfcrashdump;
+    names: ["!wdfkd.wdfcrashdump"],
+    usage: "!wdfkd.wdfcrashdump [log | loader]",
+    summary: "Show the KMDF data in a crash dump: one driver's In-Flight Recorder log, or the client drivers.",
+    details: "When Windows writes a crash dump, Wdf01000 copies one client driver's In-Flight Recorder log into the dump's tagged data (WdfDumpGuid): the log of the driver whose code the bugcheck parameters point to, or of a driver set to keep its log in minidumps, or else of the last KMDF driver that ran on the processor that crashed. A minidump has no other copy of the log. Without an argument or with log, the command shows that log, oldest record first, as !wdfkd.wdflogdump shows a log in memory. With loader, it lists the client drivers that Wdf01000 recorded (WdfDumpGuid2), with the KMDF version each bound to and its _FX_DRIVER_GLOBALS; the first entry is the framework itself. The command needs the PDB for Wdf01000.",
+    completion: None,
 }
 
 /// A labeled line of a detail view.
@@ -541,4 +550,41 @@ impl ReplState<'_> {
         }
         Ok(())
     }
+
+    fn cmd_wdfkd_wdfcrashdump(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        match invocation.arg(0).map(str::to_ascii_lowercase).as_deref() {
+            None | Some("log") => match self.ctx.target.wdf_crash_log() {
+                Ok(log) => print_log(&log),
+                Err(error) => error!("{error}"),
+            },
+            Some("loader") => match self.ctx.target.wdf_crash_drivers() {
+                Ok(drivers) => print_dump_drivers(&drivers),
+                Err(error) => error!("{error}"),
+            },
+            Some(other) => error!("!wdfkd.wdfcrashdump: '{other}' is neither log nor loader"),
+        }
+        Ok(())
+    }
+}
+
+fn print_dump_drivers(drivers: &[WdfDumpDriver]) {
+    let mut builder = Builder::default();
+    builder.push_record(["ImageName", "Version", "FxGlobals"]);
+    for driver in drivers {
+        builder.push_record([
+            driver
+                .name
+                .clone()
+                .unwrap_or_else(|| "<missing name>".into()),
+            format!("v{}.{}({:04})", driver.major, driver.minor, driver.build),
+            if driver.globals.0 == 0 {
+                String::new()
+            } else {
+                ui::addr(driver.globals.0).to_string()
+            },
+        ]);
+    }
+    print_padded_table(builder);
+    outln!("{}", ui::muted(&format!("({} drivers)", drivers.len())));
+    outln!();
 }

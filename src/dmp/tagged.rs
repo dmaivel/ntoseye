@@ -146,12 +146,12 @@ const KNOWN_TAGS: &[(&str, &str, &str)] = &[
     (
         "{54c84888-01d1-4c1e-bed6-282c98241303}",
         "wdf01000!WdfDumpGuid",
-        "KMDF crash data",
+        "KMDF driver's IFR log (!wdfkd.wdfcrashdump)",
     ),
     (
         "{f87e4a4c-c5a1-4d2f-bff0-d5de63a5e4c3}",
         "wdf01000!WdfDumpGuid2",
-        "KMDF crash data",
+        "KMDF client drivers (!wdfkd.wdfcrashdump loader)",
     ),
     (
         "{c939c73b-17dc-4a44-904c-e2d987f52649}",

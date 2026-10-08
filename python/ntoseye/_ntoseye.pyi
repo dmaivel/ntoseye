@@ -6776,6 +6776,18 @@ class Inspect:
         `module` names the driver whose PDB types it, by default the one its
         `add_buf` routine is in.
         """
+    def wdf_crash_drivers(self, /) -> list[WdfDumpDriver]:
+        """
+        List the KMDF client drivers that KMDF recorded in a crash dump, with
+        their version and globals (`!wdfkd.wdfcrashdump loader`).
+        """
+    def wdf_crash_log(self, /) -> WdfLog:
+        """
+        Get the In-Flight Recorder log of the one KMDF client driver that
+        KMDF copied into a crash dump (`!wdfkd.wdfcrashdump`): the driver
+        that the bugcheck parameters point to, or else the last one that ran
+        on the processor that crashed. A minidump has no other copy of it.
+        """
     def wdf_device(self, /, handle: int) -> WdfDevice:
         """
         Get the device objects, state machines, and queues of a WDFDEVICE
@@ -14318,6 +14330,38 @@ class WdfDriverInfo(BaseRecord):
         """
 
 @final
+class WdfDumpDriver(BaseRecord):
+    """
+    A KMDF client driver as Wdf01000 recorded it in a crash dump
+    (`!wdfkd.wdfcrashdump loader`).
+    """
+    @property
+    def build(self, /) -> int:
+        """
+        The build number of the KMDF version that it bound to.
+        """
+    @property
+    def globals(self, /) -> int:
+        """
+        The driver's `_FX_DRIVER_GLOBALS` at the crash.
+        """
+    @property
+    def major(self, /) -> int:
+        """
+        The major KMDF version that it bound to.
+        """
+    @property
+    def minor(self, /) -> int:
+        """
+        The minor KMDF version that it bound to.
+        """
+    @property
+    def name(self, /) -> str |None:
+        """
+        None for an entry without a printable name.
+        """
+
+@final
 class WdfHandle(BaseRecord):
     """
     A WDF handle and the object it names (`!wdfkd.wdfhandle`).
@@ -14412,7 +14456,7 @@ class WdfLoader(BaseRecord):
 class WdfLog(BaseRecord):
     """
     The In-Flight Recorder log of a client driver, oldest record first
-    (`!wdfkd.wdflogdump`).
+    (`!wdfkd.wdflogdump`, `!wdfkd.wdfcrashdump`).
     """
     @property
     def base(self, /) -> int:
@@ -14440,7 +14484,8 @@ class WdfLog(BaseRecord):
     @property
     def globals(self, /) -> int:
         """
-        The `_FX_DRIVER_GLOBALS`.
+        The `_FX_DRIVER_GLOBALS`; 0 in a crash dump that does not list
+        the driver.
         """
     @property
     def header(self, /) -> int:

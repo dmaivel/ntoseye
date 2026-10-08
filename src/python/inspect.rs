@@ -874,6 +874,29 @@ impl Inspect {
         })
     }
 
+    /// Get the In-Flight Recorder log of the one KMDF client driver that
+    /// KMDF copied into a crash dump (`!wdfkd.wdfcrashdump`): the driver
+    /// that the bugcheck parameters point to, or else the last one that ran
+    /// on the processor that crashed. A minidump has no other copy of it.
+    fn wdf_crash_log<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::wdf::WdfLog>> {
+        self.typed(py, |session| {
+            let detail = session.target.wdf_crash_log().map_err(err)?;
+            Ok(view::wdf::log(&detail))
+        })
+    }
+
+    /// List the KMDF client drivers that KMDF recorded in a crash dump, with
+    /// their version and globals (`!wdfkd.wdfcrashdump loader`).
+    fn wdf_crash_drivers<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Typed<'py, Vec<view::wdf::WdfDumpDriver>>> {
+        self.typed(py, |session| {
+            let drivers = session.target.wdf_crash_drivers().map_err(err)?;
+            Ok(view::wdf::dump_drivers(&drivers))
+        })
+    }
+
     /// Get the system memory, pool, PTE, and page-file counters (`!vm`).
     #[pyo3(signature = (include_processes=true))]
     fn vm<'py>(

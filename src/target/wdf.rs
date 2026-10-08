@@ -8,7 +8,7 @@ use std::sync::Arc;
 use super::{ListCursor, ListTermination, Target, bounded_list_walk};
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
-use crate::layout::{StructRef, TypeInfo, Types};
+use crate::layout::{StructRef, TypeInfo, Types, le_uint};
 use crate::symbols::format_symbol_with_offset;
 use crate::types::VirtAddr;
 use crate::wpp::{TmfMessage, format_message};
@@ -34,6 +34,16 @@ const IFR_MAX_MESSAGE_SIZE: usize = 256;
 /// the `Guid` of every IFR header.
 const WDF_TRACE_GUID: [u8; 16] = [
     0x9d, 0x4c, 0x4d, 0x54, 0x2c, 0x94, 0xd5, 0x46, 0xbf, 0x50, 0xdf, 0x5c, 0xd9, 0x52, 0x4a, 0x50,
+];
+/// `WdfDumpGuid` ({54c84888-01d1-4c1e-bed6-282c98241303}) as stored in
+/// memory: the tag of the IFR log Wdf01000 copies into a crash dump.
+const WDF_DUMP_LOG_GUID: [u8; 16] = [
+    0x88, 0x48, 0xc8, 0x54, 0xd1, 0x01, 0x1e, 0x4c, 0xbe, 0xd6, 0x28, 0x2c, 0x98, 0x24, 0x13, 0x03,
+];
+/// `WdfDumpGuid2` ({f87e4a4c-c5a1-4d2f-bff0-d5de63a5e4c3}) as stored in
+/// memory: the tag of Wdf01000's list of client drivers in a crash dump.
+const WDF_DUMP_DRIVERS_GUID: [u8; 16] = [
+    0x4c, 0x4a, 0x7e, 0xf8, 0xa1, 0xc5, 0x2f, 0x4d, 0xbf, 0xf0, 0xd5, 0xde, 0x63, 0xa5, 0xe4, 0xc3,
 ];
 
 /// The class each `FX_OBJECT_TYPES` value is an instance of, where one class
@@ -283,6 +293,20 @@ pub struct WdfLogEntry {
     pub message: Option<Arc<TmfMessage>>,
     /// The message with its arguments, or why it could not be formatted.
     pub text: std::result::Result<String, String>,
+}
+
+/// A client driver as Wdf01000 recorded it in a crash dump
+/// (`!wdfkd.wdfcrashdump loader`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WdfDumpDriver {
+    /// `None` for an entry without a printable name.
+    pub name: Option<String>,
+    /// The driver's `_FX_DRIVER_GLOBALS` at the crash.
+    pub globals: VirtAddr,
+    /// The KMDF version that it bound to: major, minor, and build.
+    pub major: u32,
+    pub minor: u32,
+    pub build: u32,
 }
 
 /// A client driver's In-Flight Recorder log (`!wdfkd.wdflogdump`).
@@ -1816,17 +1840,7 @@ impl Target {
             Error::DebugInfo(format!("{name} has no IFR log (WdfLogHeader is null)"))
         })?;
         let header_layout = wdf.layout("_WDF_IFR_HEADER")?;
-        let record_layout = wdf.layout("_WDF_IFR_RECORD")?;
-        let layout = IfrRecordLayout {
-            size: record_layout.size,
-            signature: record_layout.field_offset("Signature")? as usize,
-            length: record_layout.field_offset("Length")? as usize,
-            sequence: record_layout.field_offset("Sequence")? as usize,
-            prev_offset: record_layout.field_offset("PrevOffset")? as usize,
-            message_number: record_layout.field_offset("MessageNumber")? as usize,
-            message_guid: record_layout.field_offset("MessageGuid")? as usize,
-            timestamp: record_layout.field_offset("TimeStamp")? as usize,
-        };
+        let layout = ifr_record_layout(wdf.types)?;
         let ifr = wdf.at(&header_layout, header);
         let bad =
             |why: String| Error::DebugInfo(format!("{name}'s IFR header {:#x}: {why}", header.0));
@@ -1850,24 +1864,6 @@ impl Target {
         let mut log = vec![0u8; size as usize];
         self.kernel_address_space().read_bytes(base, &mut log)?;
         let walk = walk_ifr(&log, usize::from(current), usize::from(previous), &layout);
-        let entries = walk
-            .records
-            .into_iter()
-            .map(|record| {
-                let message = self
-                    .symbols
-                    .wpp_message(&record.message_guid, record.message_number);
-                let text = match &message {
-                    Some(message) => format_message(message, &record.args, wdf.pointer_size),
-                    None => Err("no loaded PDB declares this message".into()),
-                };
-                WdfLogEntry {
-                    record,
-                    message,
-                    text,
-                }
-            })
-            .collect();
         Ok(WdfLogDump {
             driver: name,
             globals: client.globals,
@@ -1878,10 +1874,176 @@ impl Target {
             previous,
             sequence: ifr.read_uint("Sequence")? as u32 as i32,
             use_timestamps: ifr.read_uint("UseTimeStamp")? != 0,
-            entries,
+            entries: self.wdf_log_entries(walk.records, wdf.pointer_size),
             end: walk.end,
         })
     }
+
+    /// Each IFR record with the TMF message a loaded PDB declares for it,
+    /// formatted with its arguments.
+    fn wdf_log_entries(&self, records: Vec<IfrRecord>, pointer_size: u8) -> Vec<WdfLogEntry> {
+        records
+            .into_iter()
+            .map(|record| {
+                let message = self
+                    .symbols
+                    .wpp_message(&record.message_guid, record.message_number);
+                let text = match &message {
+                    Some(message) => format_message(message, &record.args, pointer_size),
+                    None => Err("no loaded PDB declares this message".into()),
+                };
+                WdfLogEntry {
+                    record,
+                    message,
+                    text,
+                }
+            })
+            .collect()
+    }
+
+    /// The data of the dump's KMDF block tagged `tag`, which `what` names in
+    /// the error when the dump has none.
+    fn wdf_crash_block(&self, tag: &[u8; 16], what: &str) -> Result<Arc<[u8]>> {
+        let dump = self.phys.dmp_info().ok_or_else(|| {
+            Error::DebugInfo("KMDF's crash dump data is in crash dumps; this target is live".into())
+        })?;
+        dump.tagged_blocks
+            .iter()
+            .find(|block| &block.tag == tag)
+            .map(|block| Arc::clone(&block.data))
+            .ok_or_else(|| Error::DebugInfo(format!("the dump has no KMDF {what}")))
+    }
+
+    /// `!wdfkd.wdfcrashdump loader`: the KMDF client drivers that
+    /// Wdf01000 recorded in the dump (`WdfDumpGuid2`), an array of
+    /// `_FX_DUMP_DRIVER_INFO_ENTRY`.
+    pub fn wdf_crash_drivers(&self) -> Result<Vec<WdfDumpDriver>> {
+        let data = self.wdf_crash_block(&WDF_DUMP_DRIVERS_GUID, "driver list (WdfDumpGuid2)")?;
+        let entry = wdf_layout(
+            self.types_in(self.kernel_dtb()),
+            "_FX_DUMP_DRIVER_INFO_ENTRY",
+        )?;
+        let globals_at = entry.field_offset("FxDriverGlobals")? as usize;
+        let version_at = entry.field_offset("Version")? as usize;
+        let name = entry.field("DriverName")?;
+        let (name_at, name_len) = (name.offset as usize, name.size as usize);
+        let pointer_size = usize::from(entry.pointer_size);
+        if entry.size == 0
+            || name_at + name_len > entry.size
+            || version_at + 12 > entry.size
+            || globals_at + pointer_size > entry.size
+        {
+            return Err(Error::DebugInfo(
+                "Wdf01000's _FX_DUMP_DRIVER_INFO_ENTRY does not hold its fields".into(),
+            ));
+        }
+        Ok(data
+            .chunks_exact(entry.size)
+            .map(|bytes| WdfDumpDriver {
+                name: driver_name(&bytes[name_at..name_at + name_len])
+                    .ok()
+                    .flatten(),
+                globals: VirtAddr(le_uint(&bytes[globals_at..globals_at + pointer_size])),
+                major: read_u32(bytes, version_at),
+                minor: read_u32(bytes, version_at + 4),
+                build: read_u32(bytes, version_at + 8),
+            })
+            .collect())
+    }
+
+    /// `!wdfkd.wdfcrashdump`: the IFR log that Wdf01000's bugcheck callback
+    /// copied into the dump (`WdfDumpGuid`), its `_WDF_IFR_HEADER` and the
+    /// log area after it: the log of the driver the bugcheck parameters
+    /// point to, or else of the last driver that ran on the crashing
+    /// processor. The record walk is `!wdfkd.wdflogdump`'s.
+    pub fn wdf_crash_log(&self) -> Result<WdfLogDump> {
+        let data = self.wdf_crash_block(&WDF_DUMP_LOG_GUID, "IFR log (WdfDumpGuid)")?;
+        let types = self.types_in(self.kernel_dtb());
+        let header = wdf_layout(types, "_WDF_IFR_HEADER")?;
+        let field = |name: &str| -> Result<usize> { Ok(header.field_offset(name)? as usize) };
+        let bad = |why: String| Error::DebugInfo(format!("KMDF's crash dump log: {why}"));
+        if data.len() < header.size {
+            return Err(bad(format!(
+                "{:#x} bytes do not hold its {:#x}-byte header",
+                data.len(),
+                header.size
+            )));
+        }
+        let guid_at = field("Guid")?;
+        if data[guid_at..guid_at + 16] != WDF_TRACE_GUID {
+            return Err(bad("the header's Guid is not WdfTraceGuid".into()));
+        }
+        let pointer_size = header.pointer_size;
+        let base_at = field("Base")?;
+        let base = VirtAddr(le_uint(&data[base_at..base_at + usize::from(pointer_size)]));
+        let size = u64::from(read_u32(&data, field("Size")?));
+        let log = &data[header.size..];
+        if size == 0 || size > IFR_MAX_LOG_SIZE || size > log.len() as u64 {
+            return Err(bad(format!(
+                "Size {size:#x} is not a log size, or more than the {:#x} bytes copied",
+                log.len()
+            )));
+        }
+        let log = &log[..size as usize];
+        // `Offset` is `{USHORT Current; USHORT Previous}` read as one LONG.
+        let offset = read_u32(&data, field("Offset")?);
+        let (current, previous) = (offset as u16, (offset >> 16) as u16);
+        let name = header.field("DriverName")?;
+        let name_at = name.offset as usize;
+        let driver = driver_name(&data[name_at..name_at + name.size as usize])
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        // The loader block names the driver's globals; the log's own header
+        // does not.
+        let globals = self
+            .wdf_crash_drivers()
+            .ok()
+            .and_then(|drivers| {
+                drivers.into_iter().find(|entry| {
+                    entry
+                        .name
+                        .as_deref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(&driver))
+                })
+            })
+            .map_or(VirtAddr(0), |entry| entry.globals);
+        let walk = walk_ifr(
+            log,
+            usize::from(current),
+            usize::from(previous),
+            &ifr_record_layout(types)?,
+        );
+        Ok(WdfLogDump {
+            driver,
+            globals,
+            header: VirtAddr(base.0.wrapping_sub(header.size as u64)),
+            base,
+            size,
+            current,
+            previous,
+            sequence: read_u32(&data, field("Sequence")?) as i32,
+            use_timestamps: data[field("UseTimeStamp")?] != 0,
+            entries: self.wdf_log_entries(walk.records, pointer_size),
+            end: walk.end,
+        })
+    }
+}
+
+/// Where `_WDF_IFR_RECORD`'s fields sit in Wdf01000's PDB.
+fn ifr_record_layout(types: Types<'_>) -> Result<IfrRecordLayout> {
+    let record = wdf_layout(types, "_WDF_IFR_RECORD")?;
+    let at = |name: &str| -> Result<usize> { Ok(record.field_offset(name)? as usize) };
+    Ok(IfrRecordLayout {
+        size: record.size,
+        signature: at("Signature")?,
+        length: at("Length")?,
+        sequence: at("Sequence")?,
+        prev_offset: at("PrevOffset")?,
+        message_number: at("MessageNumber")?,
+        message_guid: at("MessageGuid")?,
+        timestamp: at("TimeStamp")?,
+    })
 }
 
 /// The value `variants` gives `name`.

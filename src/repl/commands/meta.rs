@@ -690,6 +690,7 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("!storagekd.storadapter", "objects and I/O"),
     ("!storagekd.storunit", "objects and I/O"),
     ("ssdt", "objects and I/O"),
+    ("!wdfkd.wdfcrashdump", "objects and I/O"),
     ("!wdfkd.wdfdevice", "objects and I/O"),
     ("!wdfkd.wdfdriverinfo", "objects and I/O"),
     ("!wdfkd.wdfhandle", "objects and I/O"),

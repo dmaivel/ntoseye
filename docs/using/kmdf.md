@@ -10,6 +10,7 @@ The `!wdfkd.*` commands read the Kernel-Mode Driver Framework's own state from `
 | {command}`!wdfkd.wdfdevice` `<WDFDEVICE>` | A device's WDM device objects, its PnP, power, and power policy states, and its queues. |
 | {command}`!wdfkd.wdfqueue` `<WDFQUEUE>` | A queue's dispatch type, state, and callbacks, the requests that wait in it, and the requests that the driver owns. |
 | {command}`!wdfkd.wdflogdump` `<driver>` | A driver's IFR log, with the oldest record first. |
+| {command}`!wdfkd.wdfcrashdump` `[loader]` | In a crash dump, the IFR log that KMDF saved of one driver, or with `loader`, the client drivers that KMDF recorded. |
 
 To name a driver, use the name that {command}`!wdfkd.wdfldr` shows. The name is not case-sensitive, and the commands ignore a trailing `.sys`.
 
@@ -66,6 +67,29 @@ The walk ends at the first record that KMDF wrote, or where newer records overwr
 
 If a check fails, the walk stops and reports the corruption, but keeps the records that it already read.
 
+## In a crash dump
+
+When Windows writes a crash dump, KMDF adds two blocks of its own to the dump's [tagged data](dumps.md#tagged-data-and-blackboxes). One is a copy of a single client driver's IFR log. KMDF picks the driver whose code the bugcheck parameters point to, or a driver that is set to keep its log in minidumps. If there is no such driver, it picks the last KMDF driver that ran on the processor that crashed. A minidump holds no other copy of an IFR log.
+
+{command}`!wdfkd.wdfcrashdump` shows that log in the same way that {command}`!wdfkd.wdflogdump` shows a log in memory, with the same checks:
+
+```text
+IFR log of wtd (IFR header ffff9888a1377000, 0xfb8 bytes, sequence 1, timestamps)
+1: 2026-10-06 06:43:00.2720777 FxIFRStart - FxIFR logging started
+(1 records; reached the first record written)
+```
+
+The other block lists the client drivers, with the KMDF version that each one bound to and its `_FX_DRIVER_GLOBALS`. `!wdfkd.wdfcrashdump loader` shows the list, and the first entry is KMDF itself. These are the first lines of the list from a Windows 11 guest:
+
+```text
+ImageName              Version      FxGlobals
+Wdf01000               v1.35(0000)
+PRM                    v1.15(0000)  ffff9888994e5750
+acpiex                 v1.15(0000)  ffff988899cf0240
+```
+
+The command needs `Wdf01000.pdb`. In a minidump, `ntoseye` finds the PDB from the timestamp and size of `Wdf01000.sys` in the dump's driver list.
+
 ## From Python
 
 `dbg.inspect` has one method for each command, and each method returns the decoded fields as typed records:
@@ -76,6 +100,7 @@ If a check fails, the walk stops and reports the corruption, but keeps the recor
 - `wdf_device(handle)` for {command}`!wdfkd.wdfdevice`
 - `wdf_queue(handle)` for {command}`!wdfkd.wdfqueue`
 - `wdf_log(driver)` for {command}`!wdfkd.wdflogdump`
+- `wdf_crash_log()` and `wdf_crash_drivers()` for {command}`!wdfkd.wdfcrashdump`
 
 ```python
 for client in dbg.inspect.wdf_loader().clients:
