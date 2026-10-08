@@ -17,6 +17,7 @@ use crate::exception_policy::ExceptionPolicyTable;
 use crate::gdb::GdbClient;
 use crate::kd::{KdBackend, KdMemorySource};
 use crate::memory_backend::MemoryBackend;
+use crate::notice::Notice;
 use crate::phys::{HaltClock, PhysMem};
 use crate::session::{ContinueOutcome, Session, StopResolution};
 use crate::symbols::ntoseye_home;
@@ -265,17 +266,17 @@ impl Session {
             repair.failed += found.failed;
         }
         if repair.restored != 0 {
-            self.notices.push(format!(
+            self.notices.push(Notice::info(format!(
                 "restored {} breakpoint instruction(s) a previous session left in guest memory",
                 repair.restored
-            ));
+            )));
         }
         if repair.failed != 0 {
-            self.notices.push(format!(
+            self.notices.push(Notice::warning(format!(
                 "{} breakpoint instruction(s) a previous session left in guest memory could not \
                  be restored; they are retried on the next attach",
                 repair.failed
-            ));
+            )));
         }
         self.target.site_journal = Some(journal);
     }

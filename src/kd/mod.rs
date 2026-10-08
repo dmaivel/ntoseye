@@ -15,6 +15,7 @@ use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
 use crate::kd::framing::KdFraming;
 use crate::memory::TranslationCache;
+use crate::notice::Notice;
 use crate::types::{Arch, Dtb, KernelLocation, VirtAddr};
 
 macro_rules! kd_trace {
@@ -370,7 +371,7 @@ pub struct KdBackend {
     translations: Arc<TranslationCache>,
     /// Operator-facing diagnostics raised mid-operation, drained by the
     /// session through [`DebugBackend::take_notices`].
-    notices: Vec<String>,
+    notices: Vec<Notice>,
     /// Table handles reclaimed from dead sessions; see
     /// [`restore_unowned_breakpoint_handles`](breakpoints::restore_unowned_breakpoint_handles).
     released_handles: HashSet<u32>,
@@ -674,9 +675,9 @@ impl DebugBackend for KdBackend {
         self.debug_log.read_since(since_seq)
     }
 
-    fn take_notices(&mut self) -> Vec<String> {
+    fn take_notices(&mut self) -> Vec<Notice> {
         let mut notices = std::mem::take(&mut self.notices);
-        notices.extend(kd_files().take_served());
+        notices.extend(kd_files().take_served().into_iter().map(Notice::info));
         notices
     }
 

@@ -901,7 +901,7 @@ pub trait DebugBackend {
     /// Drain operator-facing diagnostics the backend raised mid-operation
     /// (e.g. breakpoint table entries it reclaimed from a dead session).
     /// Default empty; the session forwards them to the host.
-    fn take_notices(&mut self) -> Vec<String> {
+    fn take_notices(&mut self) -> Vec<crate::notice::Notice> {
         Vec::new()
     }
 

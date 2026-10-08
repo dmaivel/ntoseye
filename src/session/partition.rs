@@ -15,6 +15,7 @@ use crate::breakpoints::{
 use crate::dbg_backend::{DebugBackend, DebugCapability, StopEvent};
 use crate::error::{Error, Result};
 use crate::guest::HvPartition;
+use crate::notice::Notice;
 use crate::partition_backend::{PartitionBackend, PartitionVp};
 use crate::session::context::{
     refresh_windows_thread_context_for_backend_thread, update_target_context_from_registers,
@@ -91,9 +92,9 @@ impl Session {
             let found = self.vp_registers(partition, index, Some(0))?;
             let id = vp_thread_id(partition, index);
             if let Some(reason) = &found.missing {
-                self.notices.push(format!(
+                self.notices.push(Notice::warning(format!(
                     "{id} shows only VTL0's RIP, RSP, flags, control and segment registers: {reason}"
-                ));
+                )));
             }
             let mut registers = vec![0u8; layout];
             for (name, value) in &found.registers {
@@ -437,10 +438,10 @@ impl Session {
         });
         if let Err(error) = shown {
             self.leave_partition();
-            self.notices.push(format!(
+            self.notices.push(Notice::warning(format!(
                 "breakpoint {} hit in partition {partition:#x}, whose view cannot be shown: {error}",
                 breakpoint.id
-            ));
+            )));
         }
         Ok(Some(self.watchpoint_hit(
             breakpoint,

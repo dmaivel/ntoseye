@@ -152,7 +152,7 @@ impl KdBackend {
             &HashSet::new(),
             &mut released_handles,
         )) {
-            progress(&notice);
+            progress(&notice.text);
         }
 
         // A target left waiting on a debugger that died mid-breakpoint reports

@@ -2268,12 +2268,14 @@ class Debugger:
         """
         Loaded kernel modules: `modules["nt"]`, iteration, `.at(addr)`.
         """
-    def notices(self, /) -> list[str]:
+    def notices(self, /) -> list[Notice]:
         """
-        Remove and return the diagnostics that the debugger raised since the
-        last call, such as a breakpoint that failed to re-arm, a breakpoint slot
-        that was reclaimed, or host memory that no longer matched after a
-        reload.
+        Remove and return what the debugger reported since the last call, in
+        order. Each notice has a `level`: `"warning"` for something that did
+        not work as it should, such as a breakpoint that failed to re-arm or
+        host memory that no longer matched after a reload, or `"info"` for
+        status, such as a background symbol fetch finishing, a breakpoint
+        slot that was reclaimed, or the `ModLoad:` line of an `sxn ld` filter.
         """
     @property
     def partition(self, /) -> int |None:
@@ -8400,6 +8402,22 @@ class NameIterator:
     """
     def __iter__(self, /) -> NameIterator: ...
     def __next__(self, /) -> str: ...
+
+@final
+class Notice(BaseRecord):
+    """
+    Something the debugger reported beside a command's result.
+    """
+    @property
+    def level(self, /) -> str:
+        """
+        `"info"` for status, such as a background symbol fetch
+        finishing or a `ModLoad:` line of an `sxn ld` filter, or
+        `"warning"` for something that did not work as it should, such as
+        a breakpoint that failed to re-arm.
+        """
+    @property
+    def text(self, /) -> str: ...
 
 @final
 class NotifyCallback(BaseRecord):

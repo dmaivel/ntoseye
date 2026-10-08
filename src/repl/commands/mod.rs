@@ -1,4 +1,4 @@
-use crate::diagnostics::{errors_reported, print_warning};
+use crate::diagnostics::{errors_reported, print_notice};
 use crate::expr::Expr;
 use crate::repl::*;
 use crate::types::VirtAddr;
@@ -60,11 +60,11 @@ impl ReplState<'_> {
         flow
     }
 
-    /// Print the diagnostics the core raised since the last boundary, so a
+    /// Print the notices the core raised since the last boundary, so a
     /// breakpoint that failed to re-arm during a stop is not lost silently.
     pub fn flush_notices(&mut self) {
         for notice in self.ctx.take_notices() {
-            print_warning(notice);
+            print_notice(&notice);
         }
     }
 

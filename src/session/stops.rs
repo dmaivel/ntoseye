@@ -752,7 +752,10 @@ impl Session {
         {
             ExceptionPolicyMode::Break => Some(module),
             ExceptionPolicyMode::Notify => {
-                self.notices.push(module_event_line(kind, &module));
+                self.notices
+                    .push(crate::notice::Notice::info(module_event_line(
+                        kind, &module,
+                    )));
                 None
             }
             ExceptionPolicyMode::SecondChance | ExceptionPolicyMode::Ignore => None,

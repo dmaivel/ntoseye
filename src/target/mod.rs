@@ -141,7 +141,7 @@ pub struct Target {
     /// Diagnostics raised while building or reloading the target (kernel
     /// discovery that fell back to bare memory access). Never printed here;
     /// the session forwards them to the host.
-    pub notices: Vec<String>,
+    pub notices: Vec<crate::notice::Notice>,
     /// Bumped each time [`Self::reload_guest`] rebuilds the guest. Hosts stamp
     /// the handles they hand out with it, so an address from before a reboot
     /// is refused instead of read through the new kernel's layout.

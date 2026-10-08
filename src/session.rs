@@ -25,6 +25,7 @@ use crate::exception_policy::ExceptionPolicyTable;
 use crate::expr::NumberRadix;
 use crate::gdb::RegisterMap;
 use crate::guest::{ModuleInfo, ModuleSymbolLoadReport, ProcessInfo};
+use crate::notice::Notice;
 use crate::session::lifecycle::InstanceGuard;
 use crate::session::partition::{KeptPartition, PartitionView};
 use crate::target::dbgprint::{PrintCursor, prints_between};
@@ -702,7 +703,7 @@ pub struct Session {
     /// breakpoint that failed to re-arm at a stop, host memory that stopped
     /// matching the guest after a reload). Core never prints; the host drains
     /// these at its next output boundary via [`Self::take_notices`].
-    notices: Vec<String>,
+    notices: Vec<Notice>,
     /// The symbol store's load generation as of the last deferred-breakpoint
     /// reconcile, so a load this session did not perform itself (a background
     /// fetch, a lazy frame load, a process attach) still re-resolves `bu`
@@ -821,7 +822,7 @@ impl Session {
     /// Drain the diagnostics core and backend raised since the last drain, in
     /// the order they happened, each once: several background fetches can
     /// raise the same line. Hosts call this at each output boundary.
-    pub fn take_notices(&mut self) -> Vec<String> {
+    pub fn take_notices(&mut self) -> Vec<Notice> {
         let mut notices = std::mem::take(&mut self.target.notices);
         notices.extend(self.target.symbols.take_notices());
         notices.append(&mut self.notices);

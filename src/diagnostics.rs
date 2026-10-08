@@ -3,6 +3,7 @@ use std::fmt::Display;
 
 use owo_colors::OwoColorize;
 
+use crate::notice::{Notice, NoticeLevel};
 use crate::output;
 
 thread_local! {
@@ -53,6 +54,23 @@ pub fn eprint_note(message: impl Display) {
         &"note:".bright_cyan().bold().to_string(),
         &message.to_string(),
     );
+}
+
+pub fn print_note(message: impl Display) {
+    print_labeled_stdout(
+        "note:",
+        &"note:".bright_cyan().bold().to_string(),
+        &message.to_string(),
+    );
+}
+
+/// Print a notice labelled by its level: `note:` for status, `warning:`
+/// for a warning.
+pub fn print_notice(notice: &Notice) {
+    match notice.level {
+        NoticeLevel::Info => print_note(&notice.text),
+        NoticeLevel::Warning => print_warning(&notice.text),
+    }
 }
 
 fn print_labeled_stdout(label: &str, styled_label: &str, message: &str) {

@@ -22,6 +22,7 @@ use crate::dbg_backend::{
 use crate::disasm::{ControlFlow, classify};
 use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
+use crate::notice::Notice;
 use crate::session::breakpoints::event_word;
 use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::hits::{reported_watch_hit, stack_pointer};
@@ -106,9 +107,9 @@ impl Session {
             .breakpoints
             .refresh_enabled(self.backend.as_mut(), &self.target)
         {
-            self.notices.push(format!(
+            self.notices.push(Notice::warning(format!(
                 "failed to re-arm breakpoints after the step: {error}"
-            ));
+            )));
         }
         if stepped == RunPast::Kept {
             if let Some(outcome) = self.kept_watch_hit()? {
@@ -173,12 +174,12 @@ impl Session {
 
     /// Say that a step stopped where it was diverted (see [`Self::step_once`]).
     fn note_diverted(&mut self) {
-        self.notices.push(format!(
+        self.notices.push(Notice::warning(format!(
             "{} did not reach the next instruction within {RUN_PAST_TIMEOUT:?} of running \
              alone: it took an interrupt first, and stopped in the handler (or in another \
              thread it switched to); resume with g to let it finish",
             self.current_thread
-        ));
+        )));
     }
 
     /// Step the current thread past the debugger site its PC is on: one of
@@ -226,10 +227,10 @@ impl Session {
             plant_target_site(self.backend.as_mut(), &self.target, trap.address, original)
         {
             self.module_traps.remove(index);
-            self.notices.push(format!(
+            self.notices.push(Notice::warning(format!(
                 "failed to re-arm the module-{} trap: {error}",
                 event_word(event)
-            ));
+            )));
         }
         // Interrupted on the trap itself, the thread returns to it and hits
         // it again; that hit is this event, not a new one.

@@ -3022,7 +3022,7 @@ fn a_module_trap_hit_a_notify_filter_names_reports_and_resumes() {
         assert_eq!(continues.load(Ordering::Relaxed), 1);
         let notices = session.take_notices();
         assert!(
-            notices.iter().any(|notice| notice.starts_with(line)),
+            notices.iter().any(|notice| notice.text.starts_with(line)),
             "{event:?}: {notices:?}"
         );
     }

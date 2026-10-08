@@ -6,6 +6,7 @@ use crate::bugchecks::looks_like_kernel_pointer;
 use crate::dbg_backend::StopEvent;
 use crate::error::Result;
 use crate::kd::{kd_files, trace_enabled};
+use crate::notice::Notice;
 use crate::session::{STATUS_BREAKPOINT, Session, TargetReloadOutcome};
 use crate::target::{ReloadReport, Target};
 use crate::types::VirtAddr;
@@ -249,10 +250,10 @@ impl Session {
         if report.is_ok()
             && let Err(error) = backend.revalidate_host_memory(&target.phys)
         {
-            self.notices.push(format!(
+            self.notices.push(Notice::warning(format!(
                 "host memory no longer matches the target after the reload ({error}); every \
                  read through it is now suspect - reattach with --memory-source kd"
-            ));
+            )));
         }
         let breakpoint_error = if report.is_ok() {
             // Before re-resolving breakpoints: a stub may plant them through

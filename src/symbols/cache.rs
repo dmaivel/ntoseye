@@ -7,6 +7,7 @@ use super::{DownloadJob, ImageFetch, SymbolSource, SymbolStore, server_urls};
 use crate::{
     error::{Error, Result},
     guest::ModuleInfo,
+    notice::Notice,
     output,
     pe::{PeImage, image_file_identity, read_pe_image_from_file},
 };
@@ -306,7 +307,7 @@ impl SymbolStore {
                 "could not start the background fetch of {image_file_name}: {error}"
             )));
         }
-        self.push_notice(format!("fetching {name} in the background"));
+        self.push_notice(Notice::info(format!("fetching {name} in the background")));
         Ok(None)
     }
 
@@ -330,10 +331,12 @@ impl SymbolStore {
                             store.image_fetches.lock().remove(&job.path);
                             let name = &job.filename;
                             store.push_notice(match outcome {
-                                Ok(()) => format!("background fetch finished for {name}"),
-                                Err(error) => {
-                                    format!("background fetch failed for {name}: {error}")
+                                Ok(()) => {
+                                    Notice::info(format!("background fetch finished for {name}"))
                                 }
+                                Err(error) => Notice::warning(format!(
+                                    "background fetch failed for {name}: {error}"
+                                )),
                             });
                         }
                     })?;

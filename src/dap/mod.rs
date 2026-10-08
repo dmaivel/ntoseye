@@ -447,7 +447,11 @@ impl Server {
             return;
         };
         for notice in session.take_notices() {
-            self.emit_output("important", format!("{notice}\n"));
+            let category = match notice.level {
+                crate::notice::NoticeLevel::Warning => "important",
+                crate::notice::NoticeLevel::Info => "console",
+            };
+            self.emit_output(category, format!("{notice}\n"));
         }
         let Some(session) = self.session.as_ref() else {
             return;

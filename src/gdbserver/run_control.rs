@@ -54,7 +54,11 @@ impl GdbTarget<'_> {
     fn flush_console(&mut self, client: &mut Client) -> io::Result<()> {
         let mut text = String::new();
         for notice in self.session.take_notices() {
-            text.push_str(&notice);
+            text.push_str(match notice.level {
+                crate::notice::NoticeLevel::Warning => "warning: ",
+                crate::notice::NoticeLevel::Info => "note: ",
+            });
+            text.push_str(&notice.text);
             text.push('\n');
         }
         let page = self.session.read_debug_output(self.debug_seq);

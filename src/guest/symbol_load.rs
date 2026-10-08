@@ -8,6 +8,7 @@ use super::{
 };
 use crate::{
     error::Result,
+    notice::Notice,
     output,
     phys::PhysMem,
     symbols::{
@@ -290,11 +291,11 @@ impl Guest {
                 ModuleSymbolStatus::Fetching,
             );
         }
-        symbols.push_notice(format!(
+        symbols.push_notice(Notice::info(format!(
             "fetching symbols for {} in the background; frames there show module+offset \
              until it finishes (lm shows `fetching`)",
             names.join(", ")
-        ));
+        )));
 
         let store = Arc::clone(symbols);
         let spawned = std::thread::Builder::new()
@@ -317,12 +318,12 @@ impl Guest {
                         ),
                     );
                 }
-                symbols.push_notice(format!(
+                symbols.push_notice(Notice::info(format!(
                     "background symbol fetch finished for {}: {} loaded, {} failed",
                     names.join(", "),
                     report.loaded,
                     report.failed + report.no_pdb
-                ));
+                )));
             });
         if let Err(error) = spawned {
             let error = error.to_string();
@@ -332,7 +333,9 @@ impl Guest {
                 symbols.set_module_symbol_status(dtb, base_address, status.clone());
                 report.record_status(&status);
             }
-            symbols.push_notice(format!("could not start background symbol fetch: {error}"));
+            symbols.push_notice(Notice::warning(format!(
+                "could not start background symbol fetch: {error}"
+            )));
         }
         report
     }
@@ -492,10 +495,10 @@ impl Guest {
                     .install_pdb_bytes(&bytes)
                     .map_err(|error| error.to_string())
             }) {
-                Ok(()) => symbols.push_notice(format!(
+                Ok(()) => symbols.push_notice(Notice::info(format!(
                     "rebuilt {recorded} for {} from guest memory",
                     load.module.name
-                )),
+                ))),
                 Err(reason) => load.memory_recovery = Some(reason),
             }
         }

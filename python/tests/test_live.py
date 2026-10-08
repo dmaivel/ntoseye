@@ -909,7 +909,7 @@ def secure_step_scenario(halted: Debugger, address: int) -> bool:
         step = halted.step()
         assert isinstance(step, Stop.Step)
         assert step.rip != address
-        if any(DIVERTED in notice for notice in halted.notices()):
+        if any(DIVERTED in notice.text for notice in halted.notices()):
             return False
         assert (step.symbol or "").startswith("securekernel!")
         out = halted.step_out()

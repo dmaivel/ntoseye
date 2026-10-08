@@ -235,7 +235,7 @@ impl DebugBackend for KdBackendHandle {
         self.lock().read_debug_output(since_seq)
     }
 
-    fn take_notices(&mut self) -> Vec<String> {
+    fn take_notices(&mut self) -> Vec<crate::notice::Notice> {
         self.lock().take_notices()
     }
 

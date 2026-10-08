@@ -1,8 +1,9 @@
-//! Debug-backend [`View`] builders: the capability matrix and
-//! captured guest debug output.
+//! Debug-backend [`View`] builders: the capability matrix, captured guest
+//! debug output, and the debugger's notices.
 
 use super::shape::shapes;
 use crate::dbg_backend::{self, DebugLine, DebugOutputPage};
+use crate::notice;
 
 shapes! {
     /// A captured line of guest debug output (DbgPrint, kernel printf).
@@ -32,6 +33,16 @@ shapes! {
         label: &'static str,
         supported: bool,
     }
+
+    /// Something the debugger reported beside a command's result.
+    Notice {
+        /// `"info"` for status, such as a background symbol fetch
+        /// finishing or a `ModLoad:` line of an `sxn ld` filter, or
+        /// `"warning"` for something that did not work as it should, such as
+        /// a breakpoint that failed to re-arm.
+        level: &'static str,
+        text: String,
+    }
 }
 
 /// A page of captured guest debug output plus the cursor for the next poll.
@@ -58,5 +69,13 @@ pub fn capability(capability: &dbg_backend::BackendCapability) -> BackendCapabil
         capability: capability.capability.name(),
         label: capability.capability.label(),
         supported: capability.supported,
+    }
+}
+
+/// One notice.
+pub fn notice(notice: &notice::Notice) -> Notice {
+    Notice {
+        level: notice.level.name(),
+        text: notice.text.clone(),
     }
 }

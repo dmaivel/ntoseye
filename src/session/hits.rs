@@ -13,6 +13,7 @@ use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
 use crate::guest::hypercalls::HypercallCaller;
 use crate::kd::hwbp;
+use crate::notice::Notice;
 use crate::session::context::{
     refresh_windows_thread_context_for_backend_thread, update_target_context_from_registers,
 };
@@ -86,9 +87,9 @@ impl Session {
                     .breakpoints
                     .refresh_enabled(self.backend.as_mut(), &self.target)
                 {
-                    self.notices.push(format!(
+                    self.notices.push(Notice::warning(format!(
                         "failed to re-arm breakpoints at this stop: {error}"
-                    ));
+                    )));
                 }
 
                 self.breakpoints.mark_one_shot_hit(bp.id)?;

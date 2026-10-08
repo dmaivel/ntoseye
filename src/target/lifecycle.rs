@@ -63,9 +63,9 @@ impl Target {
                 // (e.g. a symbol download error while offline), not just a
                 // missing kernel; identity-mapped access still works.
                 Err(e) if info.is_triage => {
-                    notices.push(format!(
+                    notices.push(crate::notice::Notice::warning(format!(
                         "kernel discovery failed ({e}); continuing without kernel context"
-                    ));
+                    )));
                     None
                 }
                 Err(e) => return Err(e),
@@ -171,7 +171,7 @@ impl Target {
         symbols: Arc<SymbolStore>,
         guest: Option<Guest>,
         triage_modules_cache: Option<Vec<ModuleInfo>>,
-        notices: Vec<String>,
+        notices: Vec<crate::notice::Notice>,
     ) -> Self {
         Self {
             phys,

@@ -403,12 +403,15 @@ impl Debugger {
         Typed::new(py, view::backend::debug_log(&page))
     }
 
-    /// Remove and return the diagnostics that the debugger raised since the
-    /// last call, such as a breakpoint that failed to re-arm, a breakpoint slot
-    /// that was reclaimed, or host memory that no longer matched after a
-    /// reload.
-    fn notices(&self) -> PyResult<Vec<String>> {
-        self.with_session(|session| Ok(session.take_notices()))
+    /// Remove and return what the debugger reported since the last call, in
+    /// order. Each notice has a `level`: `"warning"` for something that did
+    /// not work as it should, such as a breakpoint that failed to re-arm or
+    /// host memory that no longer matched after a reload, or `"info"` for
+    /// status, such as a background symbol fetch finishing, a breakpoint
+    /// slot that was reclaimed, or the `ModLoad:` line of an `sxn ld` filter.
+    fn notices<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<view::backend::Notice>>> {
+        let notices = self.with_session(|session| Ok(session.take_notices()))?;
+        Typed::new(py, notices.iter().map(view::backend::notice).collect())
     }
 
     /// Remove all breakpoints, let the target run, and end the session. This

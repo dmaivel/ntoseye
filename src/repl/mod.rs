@@ -726,7 +726,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     // Warnings the attach raised (unreadable PRCB contexts, a corrupt triage
     // signature, kernel discovery falling back) precede the banner.
     for notice in ctx.take_notices() {
-        diagnostics::print_warning(notice);
+        diagnostics::print_notice(&notice);
     }
     let debugger: &mut Target = &mut ctx.target;
     let client: &mut dyn DebugBackend = ctx.backend.as_mut();

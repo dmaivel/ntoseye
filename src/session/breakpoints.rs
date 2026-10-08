@@ -17,6 +17,7 @@ use crate::exception_policy::ExceptionPolicyMode;
 use crate::expr::Expr;
 use crate::guest::vm_exits::ExitFilter;
 use crate::guest::{ModuleSymbolLoadReport, hypercalls};
+use crate::notice::Notice;
 use crate::partition_backend::PartitionBackend;
 use crate::session::{ModuleTrap, Session, TrapSite};
 use crate::types::{Arch, VirtAddr};
@@ -232,10 +233,10 @@ impl Session {
             if let Err(error) =
                 lift_target_site(self.backend.as_mut(), &self.target, trap.site.address)
             {
-                self.notices.push(format!(
+                self.notices.push(Notice::warning(format!(
                     "failed to lift the module-{} trap: {error}",
                     event_word(event)
-                ));
+                )));
                 kept.push(trap);
             }
         }
@@ -314,16 +315,17 @@ impl Session {
             (!original.is_empty()).then_some(original.as_slice()),
         ) {
             Ok(()) => {
-                self.notices.push(format!(
+                self.notices.push(Notice::info(format!(
                     "armed {what} at {symbol} ({:#x}); the {} backend {needs}",
                     address.0,
                     self.backend.name()
-                ));
+                )));
                 Some(TrapSite { address, original })
             }
             Err(error) => {
-                self.notices
-                    .push(format!("failed to arm {what} at {symbol}: {error}"));
+                self.notices.push(Notice::warning(format!(
+                    "failed to arm {what} at {symbol}: {error}"
+                )));
                 None
             }
         }
@@ -664,9 +666,9 @@ impl Session {
                 changed
             }
             Err(error) => {
-                self.notices.push(format!(
+                self.notices.push(Notice::warning(format!(
                     "failed to refresh module symbols after module change: {error}"
-                ));
+                )));
                 false
             }
         };
@@ -707,9 +709,9 @@ impl Session {
             .breakpoints
             .reconcile_symbolic_after_module_refresh(self.backend.as_mut(), &self.target)
         {
-            self.notices.push(format!(
+            self.notices.push(Notice::warning(format!(
                 "failed to reconcile breakpoints after module refresh: {error}"
-            ));
+            )));
         }
     }
 

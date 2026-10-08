@@ -22,6 +22,7 @@ use crate::kd::context;
 use crate::kd::context_arm64;
 use crate::layout::{ParsedType, TypeInfo};
 use crate::memory::PAGE_SIZE;
+use crate::notice::Notice;
 use crate::target::Target;
 use crate::triage::{
     TriageBlock, TriageDriver, TriagePrcbInfo, is_triage_dump, parse_drivers, parse_triage,
@@ -718,7 +719,7 @@ pub struct DmpBackend {
     debugger_data_hint: Option<DebuggerDataCandidate>,
     /// Dump-integrity and per-CPU context warnings raised while opening,
     /// drained by the session through [`DebugBackend::take_notices`].
-    notices: Vec<String>,
+    notices: Vec<Notice>,
 }
 
 impl DmpBackend {
@@ -768,9 +769,10 @@ impl DmpBackend {
             triage_crash_info: None,
             notices: (!info.triage_signature_valid)
                 .then(|| {
-                    "triage dump DGRT integrity signature mismatch; the dump may be truncated \
-                     or corrupt"
-                        .to_string()
+                    Notice::warning(
+                        "triage dump DGRT integrity signature mismatch; the dump may be \
+                         truncated or corrupt",
+                    )
                 })
                 .into_iter()
                 .collect(),
@@ -806,31 +808,33 @@ impl DmpBackend {
             let prcb = match cpu_state::kprcb_for_processor(target, index) {
                 Ok(prcb) => prcb,
                 Err(error) => {
-                    self.notices
-                        .push(format!("KiProcessorBlock[{i}] unavailable: {error}"));
+                    self.notices.push(Notice::warning(format!(
+                        "KiProcessorBlock[{i}] unavailable: {error}"
+                    )));
                     continue;
                 }
             };
             let context_ptr = match context_pointer(prcb) {
                 Ok(context_ptr) if !context_ptr.is_zero() => context_ptr,
                 Ok(_) => {
-                    self.notices
-                        .push(format!("PRCB[{i}] Context pointer is null, skipping"));
+                    self.notices.push(Notice::warning(format!(
+                        "PRCB[{i}] Context pointer is null, skipping"
+                    )));
                     continue;
                 }
                 Err(error) => {
-                    self.notices.push(format!(
+                    self.notices.push(Notice::warning(format!(
                         "failed to read {context_label}[{i}] context pointer: {error}"
-                    ));
+                    )));
                     continue;
                 }
             };
 
             let mut ctx_buf = vec![0u8; context_size];
             if let Err(error) = memory.read_bytes(context_ptr, &mut ctx_buf) {
-                self.notices.push(format!(
+                self.notices.push(Notice::warning(format!(
                     "failed to read {context_label}[{i}] context: {error}"
-                ));
+                )));
                 continue;
             }
             self.per_cpu_registers[i][..context_size].copy_from_slice(&ctx_buf);
@@ -995,15 +999,15 @@ impl DebugBackend for DmpBackend {
     fn registers_are_context(&self) -> bool {
         true
     }
-    fn take_notices(&mut self) -> Vec<String> {
+    fn take_notices(&mut self) -> Vec<Notice> {
         std::mem::take(&mut self.notices)
     }
     fn initialize_from_target(&mut self, target: &Target) {
         if self.header_context.is_arm64() {
             if let Err(e) = self.read_arm64_prcb_contexts(target) {
-                self.notices.push(format!(
+                self.notices.push(Notice::warning(format!(
                     "could not read ARM64 PRCB ContextFrame contexts from dump: {e}"
-                ));
+                )));
             }
             self.select_crash_processor();
         } else {
@@ -1013,8 +1017,9 @@ impl DebugBackend for DmpBackend {
             if let Some(offset) = offset {
                 self.prcb_context_offset = Some(offset);
                 if let Err(e) = self.read_prcb_contexts(target, offset) {
-                    self.notices
-                        .push(format!("could not read PRCB contexts from dump: {e}"));
+                    self.notices.push(Notice::warning(format!(
+                        "could not read PRCB contexts from dump: {e}"
+                    )));
                 }
                 self.select_crash_processor();
             }

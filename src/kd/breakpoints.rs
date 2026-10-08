@@ -6,6 +6,7 @@ use std::collections::HashSet;
 
 use crate::error::{Error, Result};
 use crate::kd::framing::KdFraming;
+use crate::notice::Notice;
 use crate::types::Arch;
 
 use super::transport::KdTransport;
@@ -99,12 +100,12 @@ pub(super) fn restore_unowned_breakpoint_handles(
 
 /// Word reclaimed table entries for the operator. A stranded entry is
 /// invisible to them but costs a breakpoint slot for the rest of the boot.
-pub(super) fn reclaimed_breakpoints_notice(reclaimed: usize) -> Option<String> {
+pub(super) fn reclaimed_breakpoints_notice(reclaimed: usize) -> Option<Notice> {
     (reclaimed != 0).then(|| {
-        format!(
+        Notice::info(format!(
             "released {reclaimed} breakpoint table entr{} stranded by an earlier session",
             if reclaimed == 1 { "y" } else { "ies" }
-        )
+        ))
     })
 }
 

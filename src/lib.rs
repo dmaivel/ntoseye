@@ -160,6 +160,7 @@ pub mod layout;
 pub mod mcp;
 pub mod memory;
 pub mod memory_backend;
+pub mod notice;
 pub mod ntstatus;
 pub mod partition_backend;
 pub mod pe;

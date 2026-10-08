@@ -233,7 +233,7 @@ pub struct SymbolStore {
     /// Lines the store wants the host to see at its next output boundary:
     /// background fetch start/finish. Drained by
     /// [`crate::session::Session::take_notices`].
-    notices: Mutex<Vec<String>>,
+    notices: Mutex<Vec<crate::notice::Notice>>,
     /// Module images being downloaded by [`SymbolStore::image_or_fetch_later`],
     /// so a repeated request does not start a second download.
     image_fetches: Mutex<HashSet<PathBuf>>,
@@ -818,11 +818,11 @@ impl SymbolStore {
         self.load_generation.load(Ordering::Acquire)
     }
 
-    pub fn push_notice(&self, notice: String) {
+    pub fn push_notice(&self, notice: crate::notice::Notice) {
         self.notices.lock().push(notice);
     }
 
-    pub fn take_notices(&self) -> Vec<String> {
+    pub fn take_notices(&self) -> Vec<crate::notice::Notice> {
         std::mem::take(&mut *self.notices.lock())
     }
 
