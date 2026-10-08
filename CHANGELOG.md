@@ -31,7 +31,7 @@ ntoseye can now show where a driver's I/O is stuck, in its virtio queues, StorPo
 ### Changed
 
 - **Breaking:** In the SDK, `Debugger.notices()` returns `Notice` records with a `level` (`"info"` or `"warning"`) and the `text`, instead of strings.
-- **Breaking:** In the SDK, a `BlackboxStream` of the triage report has a `summary` of what it holds, and its `reason` is `None` when it decodes.
+- **Breaking:** In the SDK, a `BlackboxStream` of the triage report has a `summary` of what it holds, its `reason` is `None` when it decodes, and `present` is a plain `bool`; `available` and `parsed`, which were always `False`, are gone (a record decodes when `summary` is set).
 - Notices say what they are: status lines, such as a background symbol fetch finishing, print as `note:`, and only something that went wrong, such as a breakpoint that failed to re-arm, as `warning:`, in the REPL, over MCP and on the gdbserver console. DAP shows warnings as important output.
 - A command that fails ends its line, as in WinDbg, and names the commands that did not run, so `bp ...; g` no longer resumes the guest after a failed breakpoint.
 - Over MCP, and in the SDK with a time limit, a command that needs a halted target fails at once while the target runs with nothing set to stop it (no breakpoint or `sxe ld`), and a plain `g` then resumes without waiting out the time limit.

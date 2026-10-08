@@ -1120,11 +1120,6 @@ class BlackboxStream(BaseRecord):
     commands do.
     """
     @property
-    def available(self, /) -> bool:
-        """
-        `True` if the block decodes.
-        """
-    @property
     def command(self, /) -> str:
         """
         The command that shows the whole record, such as `!blackboxpnp`.
@@ -1140,12 +1135,7 @@ class BlackboxStream(BaseRecord):
         `PnP`, `NTFS`, `BSD`, or `Winlogon`.
         """
     @property
-    def parsed(self, /) -> bool:
-        """
-        `True` if the block decodes.
-        """
-    @property
-    def present(self, /) -> bool |None:
+    def present(self, /) -> bool:
         """
         `True` if the dump has the block.
         """

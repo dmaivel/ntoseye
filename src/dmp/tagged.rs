@@ -9,6 +9,8 @@
 //! triage data (`SizeOfDump`) of a minidump. A header that is not a block
 //! header ends it, as WinDbg stops there too.
 
+use std::sync::Arc;
+
 use crate::bytes::read_u32;
 use crate::target::etw::format_guid;
 
@@ -17,11 +19,11 @@ const FILE_HEADER_SIZE: usize = 0x10;
 const BLOCK_HEADER_SIZE: usize = 0x20;
 
 /// One block: the GUID its writer tags it with, as it lies in memory, and
-/// its data.
+/// its data, read once from the dump and shared by every reader.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaggedBlock {
     pub tag: [u8; 16],
-    pub data: Vec<u8>,
+    pub data: Arc<[u8]>,
 }
 
 impl TaggedBlock {
@@ -71,7 +73,7 @@ pub fn parse_tagged_blocks(region: &[u8]) -> Vec<TaggedBlock> {
         };
         blocks.push(TaggedBlock {
             tag,
-            data: data.to_vec(),
+            data: Arc::from(data),
         });
         offset = start + data_size + post_pad;
     }
@@ -219,6 +221,8 @@ pub fn known_tag(tag: &[u8; 16]) -> Option<KnownTag> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::{TaggedBlock, known_tag, parse_tagged_blocks, tagged_blocks_at};
     use crate::target::etw::parse_guid;
 
@@ -259,11 +263,11 @@ mod tests {
             [
                 TaggedBlock {
                     tag: parse_guid(bsd).unwrap(),
-                    data: vec![0xc8, 0, 0, 0, 1],
+                    data: Arc::from([0xc8, 0, 0, 0, 1].as_slice()),
                 },
                 TaggedBlock {
                     tag: parse_guid(crashdmp).unwrap(),
-                    data: Vec::new(),
+                    data: Arc::from([].as_slice()),
                 },
             ]
         );

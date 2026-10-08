@@ -2,11 +2,13 @@
 //! in it (`!blackboxbsd`, `!blackboxntfs`, `!blackboxpnp`,
 //! `!blackboxwinlogon`, `!blackboxpci`), as WinDbg shows them.
 
+use std::sync::Arc;
+
 use crate::blackbox::{
     BSD_TAG, BootStatus, NTFS_OPLOCK_BREAK_TIMEOUT, NTFS_SLOW_IO_TIMEOUT, NTFS_TAG, PCI_TAG,
     PNP_TAG, WINLOGON_TAG, decode_boot_status, decode_ntfs, decode_pci, decode_pnp,
     decode_winlogon, feature_configuration_state_name, ntfs_break_reason_name,
-    ntfs_record_kind_name, pci_command_flags, pci_status_flags, tagged_data,
+    ntfs_record_kind_name, pci_command_flags, pci_status_flags, tagged_block,
 };
 use crate::dmp::tagged::{TaggedBlock, known_tag};
 use crate::error::Result;
@@ -89,13 +91,13 @@ impl ReplState<'_> {
 
     /// The data of the block tagged `tag`, or a message that the dump has
     /// none.
-    fn blackbox_block(&self, command: &str, tag: &str, what: &str) -> Option<Vec<u8>> {
+    fn blackbox_block(&self, command: &str, tag: &str, what: &str) -> Option<Arc<[u8]>> {
         let blocks = self.tagged_blocks(command)?;
-        let data = tagged_data(blocks, tag);
-        if data.is_none() {
+        let block = tagged_block(blocks, tag);
+        if block.is_none() {
             error!("{command}: the dump has no {what}");
         }
-        data.map(<[u8]>::to_vec)
+        block.map(|block| Arc::clone(&block.data))
     }
 
     fn cmd_enumtag(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
@@ -109,7 +111,7 @@ impl ReplState<'_> {
                 }
             },
         };
-        let Some(blocks) = self.tagged_blocks(".enumtag").map(<[TaggedBlock]>::to_vec) else {
+        let Some(blocks) = self.tagged_blocks(".enumtag") else {
             return Ok(());
         };
         let mut shown = 0;

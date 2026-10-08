@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
@@ -1296,7 +1298,7 @@ impl Inspect {
             dump.tagged_blocks
                 .iter()
                 .find(|block| block.tag == guid)
-                .map(|block| block.data.clone())
+                .map(|block| Arc::clone(&block.data))
                 .ok_or_else(|| raise(format!("the dump has no block tagged {tag}")))
         })?;
         Ok(PyBytes::new(py, &data))

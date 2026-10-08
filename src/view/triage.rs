@@ -207,11 +207,7 @@ shapes! {
         /// The block's size in bytes. None if the dump has no block.
         size: Option<u64>,
         /// `True` if the dump has the block.
-        present: Option<bool>,
-        /// `True` if the block decodes.
-        available: bool,
-        /// `True` if the block decodes.
-        parsed: bool,
+        present: bool,
         /// What the record holds, in one line. None if it does not decode.
         summary: Option<String>,
         /// Why the record does not decode, or that the dump has none. None
@@ -464,9 +460,7 @@ fn blackbox(blackbox: &BlackboxFinding) -> BlackboxStream {
         name: blackbox.name.clone(),
         command: blackbox.command,
         size: blackbox.size,
-        present: Some(present),
-        available: summary.is_some(),
-        parsed: summary.is_some(),
+        present,
         summary,
         reason,
     }

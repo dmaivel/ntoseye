@@ -15,13 +15,15 @@ pub const PNP_TAG: &str = "{b7631941-532a-4cd6-b1b1-edb5917d4557}";
 pub const WINLOGON_TAG: &str = "{80cc79cf-a719-4af1-bf97-fe29ff76ebc1}";
 pub const PCI_TAG: &str = "{9276c055-eb87-425c-b8b5-04e4d247f6cd}";
 
+/// The block tagged `tag`.
+pub fn tagged_block<'a>(blocks: &'a [TaggedBlock], tag: &str) -> Option<&'a TaggedBlock> {
+    let tag = parse_guid(tag)?;
+    blocks.iter().find(|block| block.tag == tag)
+}
+
 /// The data of the block tagged `tag`.
 pub fn tagged_data<'a>(blocks: &'a [TaggedBlock], tag: &str) -> Option<&'a [u8]> {
-    let tag = parse_guid(tag)?;
-    blocks
-        .iter()
-        .find(|block| block.tag == tag)
-        .map(|block| block.data.as_slice())
+    tagged_block(blocks, tag).map(|block| &*block.data)
 }
 
 fn u8_at(data: &[u8], offset: usize) -> u8 {
