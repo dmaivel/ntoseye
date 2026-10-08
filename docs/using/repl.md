@@ -11,7 +11,7 @@ Command names follow WinDbg. The first name is the canonical name, and these fri
 - {command}`ni`
 - {command}`finish`
 
-The [command reference](../reference/commands/index.md) lists every command, and `.hh <command>` shows the same help in the REPL. The [expression reference](../reference/expressions.md) describes expressions, registers, and symbol syntax. You can put several commands on one line if you separate them with semicolons.
+The [command reference](../reference/commands/index.md) lists every command, and `.hh <command>` shows the same help in the REPL. The [expression reference](../reference/expressions.md) describes expressions, registers, and symbol syntax. You can put several commands on one line if you separate them with semicolons. As in WinDbg, a command that reports an error ends the line, and ntoseye names the commands it did not run, so `bp nt!NoSuchName; g` does not resume the target.
 
 With `--plain-repl`, ntoseye reads commands line by line without completion or history, so you can pipe a command file into it.
 

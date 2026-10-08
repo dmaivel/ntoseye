@@ -1045,7 +1045,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                         if state.ctx.backend.is_running() {
                             state.interrupt_running_vm()?;
                         } else {
-                            error!("VM is already paused");
+                            outln!("{}", ui::muted("the target is already halted"));
                         }
                     }
                     _ => {}
@@ -1104,6 +1104,7 @@ mod tests {
     use crate::repl::{Flow, ReplState};
     use crate::session::tests::{MockBackend, breakpoint_event, session_with_mock};
     use crate::session::{Session, session_over_memory};
+    use crate::types::VirtAddr;
 
     use super::{
         bugcheck_fault_ip, looks_like_kernel_pointer, parse_byte_pattern, plausible_bugcheck_code,
@@ -1321,6 +1322,9 @@ mod tests {
         let mut backend = MockBackend::default().running();
         backend.queue_interrupt(breakpoint_event(0x1000));
         let mut session = session_with_mock(backend);
+        session
+            .breakpoints
+            .insert_for_test(0, VirtAddr(0x1000), true, None);
         let mut state = remote_state(&mut session, 5_000);
         let (result, text) = capture(|| state.dispatch_line(HALTED_PROBE));
         assert_eq!(result.unwrap(), Flow::Continue);
@@ -1332,6 +1336,9 @@ mod tests {
     #[test]
     fn halted_only_command_is_not_run_on_a_target_still_running() {
         let mut session = session_with_mock(MockBackend::default().running());
+        session
+            .breakpoints
+            .insert_for_test(0, VirtAddr(0x1000), true, None);
         let mut state = remote_state(&mut session, 150);
         let (result, text) = capture(|| state.dispatch_line(HALTED_PROBE));
         assert_eq!(result.unwrap(), Flow::Denied);
@@ -1343,11 +1350,29 @@ mod tests {
         assert!(state.ctx.backend.is_running());
     }
 
+    /// With no breakpoint set, nothing the debugger set up will stop the
+    /// target, so a halted-only command says so at once instead of waiting
+    /// out the budget.
+    #[test]
+    fn halted_only_command_fails_at_once_when_nothing_is_set_to_stop_the_target() {
+        let mut session = session_with_mock(MockBackend::default().running());
+        let mut state = remote_state(&mut session, 5_000);
+        let started = std::time::Instant::now();
+        let (result, text) = capture(|| state.dispatch_line(HALTED_PROBE));
+        assert_eq!(result.unwrap(), Flow::Denied);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(text.contains("no breakpoint is set"), "{text:?}");
+        assert!(state.ctx.backend.is_running());
+    }
+
     #[test]
     fn resuming_command_is_refused_against_the_stop_it_waited_for() {
         let mut backend = MockBackend::default().running();
         backend.queue_interrupt(breakpoint_event(0x1000));
         let mut session = session_with_mock(backend);
+        session
+            .breakpoints
+            .insert_for_test(0, VirtAddr(0x1000), true, None);
         let mut state = remote_state(&mut session, 5_000);
         let (result, text) = capture(|| state.dispatch_line("g"));
         assert_eq!(result.unwrap(), Flow::Denied);
@@ -1425,5 +1450,42 @@ mod tests {
             state.ctx.backend.is_running(),
             "g after break did not resume"
         );
+    }
+
+    /// A command that reports an error ends its line, so a resume after a
+    /// failed breakpoint does not run, and the remote result says it failed.
+    #[test]
+    fn a_failed_command_ends_the_line_and_the_result_reports_it() {
+        let mut session = session_with_mock(MockBackend::default());
+        let mut store = None;
+        let remote = super::remote::run_remote_command(
+            &mut session,
+            &mut store,
+            super::RemoteClient::Mcp,
+            "nosuchcommand; g",
+            super::StopWaitBudget::new(
+                std::time::Duration::from_millis(150),
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            ),
+        );
+        assert!(remote.reported_error, "{}", remote.text);
+        assert!(
+            remote.text.contains("not run after that error: g"),
+            "{}",
+            remote.text
+        );
+        assert!(!session.backend.is_running(), "g ran after the error");
+    }
+
+    /// `break` on a halted target has nothing to do and is no error, so
+    /// `break; bp ...; g` runs on whichever state it starts in.
+    #[test]
+    fn break_on_a_halted_target_lets_the_line_run_on() {
+        let mut session = session_with_mock(MockBackend::default());
+        let mut state = remote_state(&mut session, 150);
+        let (result, text) = capture(|| state.dispatch_line("break; bd"));
+        assert_eq!(result.unwrap(), Flow::Continue);
+        assert!(text.contains("already halted"), "{text:?}");
+        assert!(text.contains(HALTED_PROBE_RAN), "bd did not run: {text:?}");
     }
 }

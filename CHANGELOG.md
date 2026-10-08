@@ -20,8 +20,15 @@ Keeping this file:
 - `--sympath-append <directory>` adds a directory of local PDBs to the symbol path from the start, such as a driver's build output. ntoseye finds a PDB there both as a plain file and in symbol-store layout, and you can give the option more than once.
 - The MCP server pages long results. A result over about 24,000 characters, such as `x nt!*` or `!process 0 7`, shows its first page, and the new `output` tool reads the rest or finds lines in it without running the command again, so one listing no longer fills an agent's context. Results also lose the spaces that padded table rows at their ends. See [long results](https://ntoseye.com/integrations/mcp/#long-results).
 
+### Changed
+
+- A command that reports an error ends its line, as in WinDbg, and the commands that did not run are named, so `bp ...; g` no longer resumes the guest after the breakpoint failed.
+- Over MCP and the SDK, a command that needs a halted target fails at once when the target runs and no breakpoint is set, instead of waiting out the time limit for a stop nothing will cause. An empty line still waits.
+- The MCP server marks a result as an error (`isError`) when a command on its line reported one, not only when it did not run a command.
+
 ### Fixed
 
+- `break` on a halted target only says so, instead of failing, so `break; bp ...; g` runs in either state.
 - `bp`, `bu` and `g <address>` refuse an address inside an instruction, where the breakpoint corrupted the instruction and could crash the guest, and name the instruction that the address is inside. Where ntoseye cannot check an address, such as code with nothing near it that says where instructions start, they set the breakpoint and warn. `/a` skips the check for `bp` and `bu`. See [where a code breakpoint can go](https://ntoseye.com/using/breakpoints/#where-a-code-breakpoint-can-go).
 - `bp <file>:<line>` sets a source breakpoint, as `bu` does. It used to fail with an expression error.
 - `--pdb-server` given both before and after a subcommand, as in `ntoseye --pdb-server <a> mcp --pdb-server <b>`, now uses every server. It used to keep only the servers after the subcommand.

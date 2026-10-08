@@ -241,6 +241,25 @@ impl ReplState<'_> {
         let moves = spec.run != RunEffect::None;
         let needs_halt = crate::repl::command::needs_halt(self, spec);
         if self.ctx.backend.is_running() && (moves || needs_halt) {
+            // Waiting out the budget for a stop no breakpoint will cause
+            // only spends it. The guest can still stop by itself (a
+            // bugcheck, a `DbgBreakPoint` over KD), which an empty line
+            // waits for.
+            let can_stop = self.ctx.backend.has_pending_stop()
+                || self
+                    .ctx
+                    .breakpoints
+                    .list()
+                    .iter()
+                    .any(|breakpoint| breakpoint.enabled);
+            if !can_stop {
+                outln!(
+                    "'{name}' was not run: the target is running and no breakpoint is set to \
+                     stop it. `break` halts it (`break; {name}` on one line), and an empty line \
+                     waits for a stop anyway."
+                );
+                return Ok(Some(Flow::Denied));
+            }
             self.collect_stop()?;
             if self.ctx.backend.is_running() {
                 outln!("'{name}' was not run.");

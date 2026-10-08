@@ -478,6 +478,7 @@ fn skip_ws(s: &str, pos: usize) -> usize {
 }
 
 pub fn report_command_parse_error(line: &str, err: CommandParseError) {
+    crate::diagnostics::note_error();
     let start = err.span.start.min(line.len());
     let end = err.span.end.min(line.len()).max(start + 1);
     outln!("{line}");
@@ -512,8 +513,11 @@ pub fn check_run_state(state: &ReplState<'_>, spec: &CommandSpec) -> bool {
             }
             return false;
         }
+        // `break` on a halted target has nothing to do, which is what it
+        // was asked for: `break; bp ...; g` holds whichever state it starts
+        // in.
         Some(RunState::Running) if !state.ctx.backend.is_running() => {
-            error!("VM is already paused");
+            outln!("{}", crate::ui::muted("the target is already halted"));
             return false;
         }
         _ => {}

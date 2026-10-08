@@ -435,7 +435,7 @@ fn run_command(
     let mut text = outputs.lock().unwrap().fit(&text);
     text.push_str(&status_trailer(&remote.status));
     let content = vec![ContentBlock::text(text)];
-    if remote.ok {
+    if remote.ok && !remote.reported_error {
         CallToolResult::success(content)
     } else {
         CallToolResult::error(content)

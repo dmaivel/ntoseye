@@ -1,7 +1,8 @@
-use crate::diagnostics::print_warning;
+use crate::diagnostics::{errors_reported, print_warning};
 use crate::expr::Expr;
 use crate::repl::*;
 use crate::types::VirtAddr;
+use crate::ui;
 
 const ALIAS_RECURSION_LIMIT: usize = 16;
 const BREAKPOINT_ACTION_RECURSION_LIMIT: usize = 4;
@@ -231,10 +232,25 @@ impl ReplState<'_> {
             }
         };
 
-        for command in commands {
+        // A command that reports an error ends the list, as in WinDbg: what
+        // follows usually depends on it, as `g` depends on the `bp` before
+        // it, and running on would resume a target nothing is set to stop.
+        let mut commands = commands.into_iter();
+        while let Some(command) = commands.next() {
+            let errors = errors_reported();
             match self.dispatch_one(command, depth)? {
                 Flow::Continue => {}
                 flow => return Ok(flow),
+            }
+            if errors_reported() != errors {
+                let rest = commands.collect::<Vec<_>>();
+                if !rest.is_empty() {
+                    outln!(
+                        "{}",
+                        ui::muted(&format!("not run after that error: {}", rest.join("; ")))
+                    );
+                }
+                return Ok(Flow::Continue);
             }
             self.caches.refresh_expression_context(&self.ctx.target);
         }

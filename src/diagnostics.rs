@@ -1,10 +1,29 @@
+use std::cell::Cell;
 use std::fmt::Display;
 
 use owo_colors::OwoColorize;
 
 use crate::output;
 
+thread_local! {
+    /// Errors reported on this thread. Commands report a failure and return
+    /// normally, so a dispatcher compares this count around a command to
+    /// tell whether it failed.
+    static ERRORS_REPORTED: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many errors this thread has reported.
+pub fn errors_reported() -> u64 {
+    ERRORS_REPORTED.with(Cell::get)
+}
+
+/// Count an error that is shown some other way than [`print_error`].
+pub fn note_error() {
+    ERRORS_REPORTED.with(|count| count.set(count.get() + 1));
+}
+
 pub fn print_error(message: impl Display) {
+    note_error();
     print_labeled_stderr(
         "error:",
         &"error:".bright_red().bold().to_string(),

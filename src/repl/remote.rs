@@ -1,3 +1,4 @@
+use crate::diagnostics;
 use crate::output;
 use crate::session::{RunStatus, Session};
 
@@ -8,6 +9,10 @@ use super::{DispatchContext, Flow, RemoteClient, ReplState, ReplStore, StopWaitB
 /// host.
 pub struct RemoteCommandResult {
     pub ok: bool,
+    /// A command on the line reported an error, though the line ran to its
+    /// end or to that command. The SDK returns the text either way; MCP
+    /// marks the result an error.
+    pub reported_error: bool,
     pub text: String,
     pub status: RunStatus,
 }
@@ -27,6 +32,7 @@ pub fn run_remote_command(
     state.stop_wait = Some(budget);
     state.line = line.trim().to_string();
 
+    let errors = diagnostics::errors_reported();
     let (flow, mut text) = output::capture(|| {
         let line = state.line.clone();
         if let Some(flow) = state.begin_remote_line(&line)? {
@@ -48,8 +54,14 @@ pub fn run_remote_command(
     // it in this result rather than deferring it to the next remote call.
     let (_, late) = output::capture(|| state.surface_parked_stop());
     text.push_str(&late);
+    let reported_error = diagnostics::errors_reported() != errors;
 
-    let result = RemoteCommandResult { ok, text, status };
+    let result = RemoteCommandResult {
+        ok,
+        reported_error,
+        text,
+        status,
+    };
     *store_slot = Some(state.detach());
     result
 }
