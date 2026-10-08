@@ -80,12 +80,256 @@ pub fn virtio_type_name(id: u16) -> &'static str {
         18 => "input",
         19 => "vsock",
         20 => "crypto",
-        24 => "pmem",
+        23 => "iommu",
+        24 => "mem",
+        25 => "sound",
         26 => "fs",
         27 => "pmem",
-        29 => "mem",
-        34 => "sound",
         _ => "unknown",
+    }
+}
+
+/// What the driver uses a queue for, which says whether buffers waiting
+/// with the device are normal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueRole {
+    /// The driver hands the device buffers to fill when it has something:
+    /// received packets, events, statistics. Buffers wait there on purpose.
+    DeviceFills,
+    /// The driver hands the device requests to complete, which should not
+    /// wait long.
+    Requests,
+}
+
+/// The specification's name and role of queue `index` of a device of type
+/// `virtio_id` that set up `queues` queues, where the specification fixes
+/// them.
+pub fn queue_role(virtio_id: u16, index: u32, queues: u32) -> Option<(String, QueueRole)> {
+    use QueueRole::{DeviceFills, Requests};
+    let pair = |index: u32, rx: &str, tx: &str| {
+        if index.is_multiple_of(2) {
+            (rx.to_string(), DeviceFills)
+        } else {
+            (tx.to_string(), Requests)
+        }
+    };
+    Some(match (virtio_id, index) {
+        // receiveq/transmitq pairs, then controlq when there is one.
+        (1, _) if queues % 2 == 1 && index == queues - 1 => ("control".into(), Requests),
+        (1, _) => pair(
+            index,
+            &format!("rx {}", index / 2),
+            &format!("tx {}", index / 2),
+        ),
+        (2, _) => (format!("request {index}"), Requests),
+        // port 0's pair, the control pair, then a pair for each port.
+        (3, 0 | 1) => pair(index, "port 0 rx", "port 0 tx"),
+        (3, 2 | 3) => pair(index, "control rx", "control tx"),
+        (3, _) => {
+            let port = index / 2 - 1;
+            pair(
+                index,
+                &format!("port {port} rx"),
+                &format!("port {port} tx"),
+            )
+        }
+        (4 | 9 | 27, 0) => ("request".into(), Requests),
+        (5, 0) => ("inflate".into(), Requests),
+        (5, 1) => ("deflate".into(), Requests),
+        (5, 2) => ("statistics".into(), DeviceFills),
+        (8, 0) => ("control".into(), Requests),
+        (8, 1) => ("event".into(), DeviceFills),
+        (8, _) => (format!("request {}", index - 2), Requests),
+        (16, 0) => ("control".into(), Requests),
+        (16, 1) => ("cursor".into(), Requests),
+        (18, 0) => ("event".into(), DeviceFills),
+        (18, 1) => ("status".into(), Requests),
+        (19, 0) => ("rx".into(), DeviceFills),
+        (19, 1) => ("tx".into(), Requests),
+        (19, 2) => ("event".into(), DeviceFills),
+        (24, 0) => ("guest request".into(), Requests),
+        (26, 0) => ("hiprio".into(), Requests),
+        (26, _) => (format!("request {}", index - 1), Requests),
+        _ => return None,
+    })
+}
+
+/// When one side of a queue asks the other to signal it: the driver asks
+/// the device for interrupts, the device asks the driver for
+/// notifications (kicks).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signal {
+    /// After every buffer.
+    On,
+    /// Never: the side set the flag that turns signals off.
+    Off,
+    /// Once a split ring's index passes this one (`used_event` or
+    /// `avail_event`, with the event index feature).
+    After(u16),
+    /// Once a packed ring reaches this position in this lap.
+    At { position: u16, lap: bool },
+}
+
+/// A split queue's signalling: whether the device interrupts the driver
+/// and the driver notifies the device, and whether an interrupt was due
+/// for the buffers the device returned that the driver has not taken back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SplitSignals {
+    pub interrupts: Signal,
+    pub notifications: Signal,
+    pub interrupt_due: bool,
+}
+
+/// The signalling of split ring `ring`, whose driver negotiated the event
+/// index feature when `event_idx`. An interrupt was due when the device
+/// returned buffers since the driver last took any back and moved its
+/// used index past where the driver asked to be interrupted, the test the
+/// device itself makes (`vring_need_event`).
+pub fn split_signals(
+    ring: &SplitRing,
+    driver: Option<&DriverQueueState>,
+    event_idx: bool,
+) -> SplitSignals {
+    let interrupts = match (event_idx, ring.used_event) {
+        (true, Some(event)) => Signal::After(event),
+        _ if ring.avail_flags & VRING_AVAIL_F_NO_INTERRUPT != 0 => Signal::Off,
+        _ => Signal::On,
+    };
+    let notifications = match (event_idx, ring.avail_event) {
+        (true, Some(event)) => Signal::After(event),
+        _ if ring.used_flags & VRING_USED_F_NO_NOTIFY != 0 => Signal::Off,
+        _ => Signal::On,
+    };
+    let interrupt_due = driver.is_some_and(|driver| {
+        let returned = ring.used_idx.wrapping_sub(driver.last_used);
+        returned != 0
+            && match interrupts {
+                Signal::On => true,
+                Signal::Off | Signal::At { .. } => false,
+                Signal::After(event) => {
+                    ring.used_idx.wrapping_sub(event).wrapping_sub(1) < returned
+                }
+            }
+    });
+    SplitSignals {
+        interrupts,
+        notifications,
+        interrupt_due,
+    }
+}
+
+/// A packed ring's event suppression structure as one side wrote it.
+pub fn packed_signal(flags: u16, off_wrap: u16) -> Signal {
+    match flags {
+        0 => Signal::On,
+        1 => Signal::Off,
+        _ => Signal::At {
+            position: off_wrap & 0x7fff,
+            lap: off_wrap & 0x8000 != 0,
+        },
+    }
+}
+
+/// Where a queue's traffic stood at one look, as counters that only grow,
+/// modulo `modulus`: the buffers the driver handed the device, the ones the
+/// device returned (split rings, whose used index says so), and the ones
+/// the driver took back; with how many were with the device and returned
+/// but not taken back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueProgress {
+    pub published: u32,
+    pub completed: Option<u32>,
+    pub taken_back: u32,
+    pub modulus: u32,
+    pub with_device: u32,
+    pub returned: u32,
+}
+
+impl QueueProgress {
+    /// The progress of `queue`; a packed ring's positions count laps too.
+    pub fn of(queue: &VirtQueue) -> Option<Self> {
+        if let (Some(ring), Some(driver)) = (&queue.ring, &queue.driver) {
+            return Some(Self {
+                published: u32::from(ring.avail_idx),
+                completed: Some(u32::from(ring.used_idx)),
+                taken_back: u32::from(driver.last_used),
+                modulus: 1 << 16,
+                with_device: u32::from(ring.with_device()),
+                returned: u32::from(ring.used_idx.wrapping_sub(driver.last_used)),
+            });
+        }
+        let (state, ring) = (queue.packed.as_ref()?, queue.packed_ring.as_ref()?);
+        let size = queue.size;
+        let linear = |position: u16, wrap: bool| u32::from(position) + if wrap { size } else { 0 };
+        Some(Self {
+            published: linear(state.next_avail, state.avail_wrap),
+            completed: None,
+            taken_back: linear(state.last_used, state.used_wrap),
+            modulus: size * 2,
+            with_device: ring.with_device,
+            returned: ring.returned,
+        })
+    }
+
+    fn since(&self, before: u32, now: u32) -> u32 {
+        (now + self.modulus - before % self.modulus) % self.modulus
+    }
+}
+
+/// What moved on a queue between two looks, and what did not move that
+/// should have.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueMovement {
+    pub published: u32,
+    pub completed: Option<u32>,
+    pub taken_back: u32,
+    /// Buffers the device returned that the driver still has not taken
+    /// back, or, on a request queue, requests the device still has not
+    /// returned any of.
+    pub stall: Option<String>,
+}
+
+/// Compare two looks at a queue `seconds` apart. Returned buffers should
+/// be taken back promptly on any queue, and a request queue's device
+/// should return what it holds; a queue whose device fills buffers when
+/// it has something (receive, events) holds them on purpose.
+pub fn queue_movement(
+    before: &QueueProgress,
+    now: &QueueProgress,
+    role: Option<QueueRole>,
+    interrupt_due: bool,
+    seconds: f64,
+) -> QueueMovement {
+    let published = now.since(before.published, now.published);
+    let completed = before
+        .completed
+        .zip(now.completed)
+        .map(|(before, after)| now.since(before, after));
+    let taken_back = now.since(before.taken_back, now.taken_back);
+    let stall = if before.returned != 0 && now.returned != 0 && taken_back == 0 {
+        Some(format!(
+            "not taken back for {seconds:.1} s{}",
+            if interrupt_due {
+                ", though an interrupt was due"
+            } else {
+                ""
+            }
+        ))
+    } else if role == Some(QueueRole::Requests)
+        && before.with_device != 0
+        && now.with_device != 0
+        && completed.unwrap_or(taken_back) == 0
+        && now.returned == 0
+    {
+        Some(format!("the device returned nothing for {seconds:.1} s"))
+    } else {
+        None
+    };
+    QueueMovement {
+        published,
+        completed,
+        taken_back,
+        stall,
     }
 }
 
@@ -115,6 +359,11 @@ pub struct VirtioDriver {
     /// The `virtio_device`.
     pub device: VirtAddr,
     pub packed: bool,
+    /// The device and driver use event indexes to suppress signals
+    /// (`VIRTIO_RING_F_EVENT_IDX`, virtio-win's `event_suppression_enabled`).
+    pub event_idx: bool,
+    /// Interrupts come by MSI-X, one vector per queue or shared.
+    pub msix: bool,
     pub queues: Vec<VirtQueue>,
 }
 
@@ -132,6 +381,8 @@ pub struct VirtQueue {
     pub packed: Option<PackedQueueState>,
     /// A packed queue's ring, read against the driver's bookkeeping.
     pub packed_ring: Option<PackedRing>,
+    /// The device and driver use event indexes (see [`VirtioDriver`]).
+    pub event_idx: bool,
     /// Why the queue or its ring could not be read.
     pub error: Option<String>,
 }
@@ -156,6 +407,10 @@ pub struct PackedQueueState {
     /// The driver's and the device's event suppression structures.
     pub driver_event: VirtAddr,
     pub device_event: VirtAddr,
+    /// When the driver wants interrupts, from its event suppression
+    /// structure, and when the device wants notifications, from its own.
+    pub interrupts: Signal,
+    pub notifications: Signal,
 }
 
 /// One packed ring descriptor.
@@ -330,6 +585,12 @@ pub struct SplitRing {
     pub avail_idx: u16,
     pub used_flags: u16,
     pub used_idx: u16,
+    /// With the event index feature: the used index after which the
+    /// driver wants an interrupt (the slot after the avail ring's entries),
+    /// and the avail index after which the device wants a notification
+    /// (the slot after the used ring's). `None` where unreadable.
+    pub used_event: Option<u16>,
+    pub avail_event: Option<u16>,
 }
 
 impl SplitRing {
@@ -929,6 +1190,8 @@ impl Target {
             module: module.to_string(),
             device: address,
             packed,
+            event_idx: device.read_uint("event_suppression_enabled")? != 0,
+            msix: device.read_uint("msix_used")? != 0,
             queues,
         })
     }
@@ -951,16 +1214,31 @@ impl Target {
             ring: None,
             packed: None,
             packed_ring: None,
+            event_idx: false,
             error: None,
         };
         let result = (|| -> Result<()> {
             let types = self.guest()?.ntoskrnl.types();
+            let device = types
+                .struct_at(&format!("{module}!virtqueue"), address)?
+                .read_pointer("vdev")?;
+            queue.event_idx = types
+                .struct_at(&format!("{module}!virtio_device"), device)?
+                .read_uint("event_suppression_enabled")?
+                != 0;
             if packed {
                 let packed = types.struct_at(&format!("{module}!virtqueue_packed"), address)?;
                 queue.index = packed.embedded("vq")?.read_uint("index")? as u32;
                 let shared = packed.embedded("packed")?;
                 let vring = shared.embedded("vring")?;
                 queue.size = vring.read_uint("num")? as u32;
+                let driver_event = vring.read_pointer("driver")?;
+                let device_event = vring.read_pointer("device")?;
+                let memory = self.kernel_address_space();
+                let event = |at: VirtAddr| -> Result<Signal> {
+                    let raw = memory.read::<u32>(at)?;
+                    Ok(packed_signal((raw >> 16) as u16, raw as u16))
+                };
                 let state = PackedQueueState {
                     free: packed.read_uint("num_free")? as u32,
                     last_used: packed.read_uint("last_used_idx")? as u16,
@@ -969,8 +1247,10 @@ impl Target {
                     avail_wrap: shared.read_uint("avail_wrap_counter")? != 0,
                     desc: vring.read_pointer("desc")?,
                     desc_state: shared.read_pointer("desc_state")?,
-                    driver_event: vring.read_pointer("driver")?,
-                    device_event: vring.read_pointer("device")?,
+                    driver_event,
+                    device_event,
+                    interrupts: event(driver_event)?,
+                    notifications: event(device_event)?,
                 };
                 queue.packed = Some(state);
                 queue.packed_ring = Some(self.packed_ring(module, queue.size, &state)?);
@@ -1027,6 +1307,8 @@ impl Target {
             avail_idx: u16::from_le_bytes([avail_head[2], avail_head[3]]),
             used_flags: u16::from_le_bytes([used_head[0], used_head[1]]),
             used_idx: u16::from_le_bytes([used_head[2], used_head[3]]),
+            used_event: memory.read::<u16>(avail + (4 + u64::from(size) * 2)).ok(),
+            avail_event: memory.read::<u16>(used + (4 + u64::from(size) * 8)).ok(),
         })
     }
 
@@ -1219,10 +1501,11 @@ impl Target {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeviceFields, DriverQueueState, PackedDesc, PackedQueueState, SplitRing, VRING_DESC_F_NEXT,
-        VRING_DESC_F_WRITE, VRING_PACKED_DESC_F_AVAIL, VRING_PACKED_DESC_F_USED, VringDesc,
-        holds_display_interface, indirect_table, locate_device, outstanding_heads, queue_verdict,
-        read_packed_ring, walk_chain,
+        DeviceFields, DriverQueueState, PackedDesc, PackedQueueState, QueueProgress, QueueRole,
+        Signal, SplitRing, VRING_AVAIL_F_NO_INTERRUPT, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE,
+        VRING_PACKED_DESC_F_AVAIL, VRING_PACKED_DESC_F_USED, VringDesc, holds_display_interface,
+        indirect_table, locate_device, outstanding_heads, packed_signal, queue_movement,
+        queue_role, queue_verdict, read_packed_ring, split_signals, walk_chain,
     };
     use crate::types::VirtAddr;
 
@@ -1281,6 +1564,8 @@ mod tests {
             desc_state: VirtAddr(0),
             driver_event: VirtAddr(0),
             device_event: VirtAddr(0),
+            interrupts: Signal::On,
+            notifications: Signal::On,
         }
     }
 
@@ -1475,7 +1760,124 @@ mod tests {
             avail_idx,
             used_flags: 0,
             used_idx,
+            used_event: None,
+            avail_event: None,
         }
+    }
+
+    /// Queue names follow the specification's layout: virtio-net's pairs
+    /// end with a control queue only when the count is odd, virtio-serial
+    /// puts the control pair after port 0's, virtio-scsi's requests come
+    /// after control and event.
+    #[test]
+    fn queues_are_named_by_the_specification_layout() {
+        let name =
+            |virtio_id, index, queues| queue_role(virtio_id, index, queues).map(|(name, _)| name);
+        assert_eq!(name(1, 2, 3).as_deref(), Some("control"));
+        assert_eq!(name(1, 2, 4).as_deref(), Some("rx 1"));
+        assert_eq!(name(1, 3, 4).as_deref(), Some("tx 1"));
+        assert_eq!(name(3, 3, 64).as_deref(), Some("control tx"));
+        assert_eq!(name(3, 4, 64).as_deref(), Some("port 1 rx"));
+        assert_eq!(name(3, 63, 64).as_deref(), Some("port 30 tx"));
+        assert_eq!(name(8, 2, 6).as_deref(), Some("request 0"));
+        assert_eq!(
+            queue_role(1, 0, 3).map(|(_, role)| role),
+            Some(QueueRole::DeviceFills)
+        );
+        assert_eq!(name(42, 0, 1), None);
+    }
+
+    /// With the event index, an interrupt is due once the used index passes
+    /// `used_event`, as the device decides it; without, whenever buffers
+    /// came back, unless the driver turned interrupts off.
+    #[test]
+    fn an_interrupt_is_due_when_the_used_index_passed_the_drivers_event() {
+        let driver = |last_used| DriverQueueState {
+            avail_idx: 9,
+            last_used,
+            free: 0,
+            unkicked: 0,
+        };
+        let with_event = |used_event| SplitRing {
+            used_event: Some(used_event),
+            ..ring(9, 7)
+        };
+        let due = |ring: &SplitRing, last_used, event_idx| {
+            split_signals(ring, Some(&driver(last_used)), event_idx).interrupt_due
+        };
+        assert!(due(&with_event(5), 3, true), "used 7 passed event 5");
+        assert!(!due(&with_event(9), 3, true), "event 9 is not reached");
+        assert!(
+            due(&with_event(0xfffe), 0xfffd, true),
+            "used 7 passed event 0xfffe across the wrap"
+        );
+        assert!(!due(&ring(9, 7), 7, false), "nothing came back");
+        assert!(due(&ring(9, 7), 3, false));
+        let off = SplitRing {
+            avail_flags: VRING_AVAIL_F_NO_INTERRUPT,
+            ..ring(9, 7)
+        };
+        assert!(!due(&off, 3, false));
+        assert_eq!(
+            split_signals(&with_event(5), None, true).interrupts,
+            Signal::After(5)
+        );
+    }
+
+    #[test]
+    fn a_packed_event_structure_decodes_its_flags_and_position() {
+        assert_eq!(packed_signal(0, 0), Signal::On);
+        assert_eq!(packed_signal(1, 0x8005), Signal::Off);
+        assert_eq!(
+            packed_signal(2, 0x8005),
+            Signal::At {
+                position: 5,
+                lap: true
+            }
+        );
+    }
+
+    fn progress(published: u32, completed: u32, taken_back: u32) -> QueueProgress {
+        QueueProgress {
+            published,
+            completed: Some(completed),
+            taken_back,
+            modulus: 1 << 16,
+            with_device: published.wrapping_sub(completed) & 0xffff,
+            returned: completed.wrapping_sub(taken_back) & 0xffff,
+        }
+    }
+
+    /// Between two looks: counters move across the 16-bit wrap; returned
+    /// buffers left where they were are a stall on any queue, and requests
+    /// the device keeps are one only on a request queue.
+    #[test]
+    fn movement_between_looks_names_what_did_not_move() {
+        let moved = queue_movement(
+            &progress(0xfffe, 0xfffe, 0xfffe),
+            &progress(3, 3, 3),
+            None,
+            false,
+            2.0,
+        );
+        assert_eq!(
+            (moved.published, moved.completed, moved.taken_back),
+            (5, Some(5), 5)
+        );
+        assert_eq!(moved.stall, None);
+        let reaped_not = queue_movement(&progress(9, 9, 8), &progress(9, 9, 8), None, true, 12.0);
+        assert_eq!(
+            reaped_not.stall.as_deref(),
+            Some("not taken back for 12.0 s, though an interrupt was due")
+        );
+        let held = progress(9, 5, 5);
+        let requests = queue_movement(&held, &held, Some(QueueRole::Requests), false, 3.0);
+        assert_eq!(
+            requests.stall.as_deref(),
+            Some("the device returned nothing for 3.0 s")
+        );
+        let receive = queue_movement(&held, &held, Some(QueueRole::DeviceFills), false, 3.0);
+        assert_eq!(receive.stall, None);
     }
 
     /// The device holds what the driver published past what it returned,

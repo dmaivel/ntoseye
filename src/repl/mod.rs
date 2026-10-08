@@ -318,6 +318,9 @@ pub struct ReplState<'a> {
     /// buffer to print, for a backend without KD's stream, which prints
     /// its own (see [`ReplState::print_kernel_prints`]).
     pub printed_debug_seq: u64,
+    /// What `!virtio` and `!vring` last saw of each queue, to show what
+    /// moved since.
+    pub virtio_seen: commands::virtio::VirtioSeen,
 }
 
 /// An optional deadline plus a host-owned cancel flag (client disconnect,
@@ -400,6 +403,7 @@ pub struct ReplStore {
     source_cursor: Option<(PathBuf, u32)>,
     disasm_search: DisasmSearch,
     disasm_cursor: Option<DisasmCursor>,
+    virtio_seen: commands::virtio::VirtioSeen,
 }
 
 impl ReplStore {
@@ -433,6 +437,7 @@ impl ReplStore {
             source_cursor: None,
             disasm_search: DisasmSearch::default(),
             disasm_cursor: None,
+            virtio_seen: Default::default(),
         }
     }
 
@@ -509,6 +514,7 @@ impl<'a> ReplState<'a> {
             unseen_stop_rendered: false,
             line_depth: 0,
             printed_debug_seq: 0,
+            virtio_seen: store.virtio_seen,
         }
     }
 
@@ -523,6 +529,7 @@ impl<'a> ReplState<'a> {
             source_cursor: self.source_cursor,
             disasm_search: self.disasm_search,
             disasm_cursor: self.disasm_cursor,
+            virtio_seen: self.virtio_seen,
         }
     }
 
@@ -947,6 +954,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         unseen_stop_rendered: false,
         line_depth: 0,
         printed_debug_seq: 0,
+        virtio_seen: Default::default(),
     };
     // An error ends the prompt, not the cleanup below: breakpoints left
     // planted in a guest that resumes without a debugger crash it.

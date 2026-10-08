@@ -43,7 +43,7 @@ mod thread;
 pub mod types;
 mod usermode;
 mod verifier;
-mod virtio;
+pub mod virtio;
 pub mod vtl;
 mod wdf;
 

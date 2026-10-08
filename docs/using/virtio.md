@@ -4,24 +4,30 @@
 
 ## Devices
 
-{command}`!virtio` without an argument lists the virtio PCI functions that pci.sys knows, with the device type and the service that drives each. It reads only guest memory, so it works on every backend, including the `memory` backend and crash dumps.
+{command}`!virtio` without an argument lists the virtio PCI functions that pci.sys knows, with the device type and the service that drives each. It reads only guest memory, so it works on every backend, including the `memory` backend and crash dumps. This sample was taken while the guest wrote to the virtio-blk disk:
 
 ```text
-0a:00.0  net  1af4:1041  netkvm  pdo 0xffffc88844775060
-  virtio_device ffffc8884cdf20f0 (netkvm), packed rings
-  #  Size  Avail  Used  Driver  Free  State                virtqueue
-  0  256   139    -     139     0     256 with the device  ffffc8884f8cf000
-  1  256   18     -     18      256   idle                 ffffc888517f5000
-  2  64    55     -     55      64    idle                 ffffc8884f1f5970
+0a:00.0  net  1af4:1041  netkvm  pdo 0xffffa002d58e1060
+  virtio_device ffffa002d481c0f0 (netkvm), packed rings, event index, MSI-X
+  #  Queue    Size  Avail  Used  Driver  Free  Moved  State                virtqueue
+  0  rx 0     256   80     -     80      0     +0/+0  256 with the device  ffffa002dc253000
+  1  tx 0     256   175    -     175     256   +0/+0  idle                 ffffa002d1adb000
+  2  control  64    36     -     36      64    +0/+0  idle                 ffffa002d87fb660
 
-0b:00.0  block  1af4:1042  viostor  pdo 0xffffc888447164b0
-  virtio_device ffffc88847d25010 (viostor), split rings
-  #  Size  Avail  Used  Driver  Free  State                           virtqueue
-  0  256   185    185   184     255   1 returned, not yet taken back  ffffa200d5425000
-  1  256   244    244   244     256   idle                            ffffa200d54258c0
-  2  256   133    133   133     256   idle                            ffffa200d5426180
-  3  256   146    146   146     256   idle                            ffffa200d5426a40
+  Moved: positions filled/taken back since the last look, 10.1 s of guest time ago
+
+0b:00.0  block  1af4:1042  viostor  pdo 0xffffa002d8df6060
+  virtio_device ffffa002d7e8c010 (viostor), split rings, event index, MSI-X
+  #  Queue      Size  Avail  Used  Driver  Free  Moved      State                           virtqueue
+  0  request 0  256   2233   2233  2233    256   +215/+215  idle                            ffffb482a58cc000
+  1  request 1  256   2194   2194  2193    255   +306/+306  1 returned, not yet taken back  ffffb482a58cc8c0
+  2  request 2  256   1212   1212  1212    256   +120/+120  idle                            ffffb482a58cd180
+  3  request 3  256   2105   2105  2105    256   +242/+242  idle                            ffffb482a58cda40
+
+  Moved: avail/used since the last look, 10.1 s of guest time ago
 ```
+
+The line under the function names the features that change how the queues work: packed or split rings, the event index, which lets each side say when it wants to be signalled, and MSI-X interrupts.
 
 For the queues, `ntoseye` needs the driver's private PDB. The drivers of the virtio-win project share the VirtIO library, and its structures (`virtio_device`, `virtqueue_split`, `virtqueue_packed`) are in each driver's private PDB but not in a public one. The virtio-win ISO has the PDB next to each driver, for example `NetKVM/w11/amd64/netkvm.pdb` and `viostor/w11/amd64/viostor.pdb`, and your own build writes it next to the `.sys` file. Add that directory to the symbol path with `--sympath-append` at the start or {command}`.sympath+` in the REPL. The PDB must come from the same build as the driver that runs. See [Symbols and source](symbols.md).
 
@@ -40,11 +46,13 @@ Each queue row shows these values:
 
 | Column | Split ring | Packed ring |
 | --- | --- | --- |
+| Queue | What the queue is for, where the virtio specification fixes it: `rx 0`, `tx 0`, and `control` for a network device, `request 0` for a block device, `port 1 rx` for a serial device. | The same. |
 | Size | The number of descriptors in the ring. | The same. |
 | Avail | The avail index that the driver published to the device. | The position that the driver fills next. |
 | Used | The used index up to which the device returned buffers. | `-`: the device does not publish one. |
 | Driver | The used index up to which the driver took buffers back. | The position where the driver takes buffers back next. |
 | Free | The descriptors that the driver has not given out. | The same. |
+| Moved | What the driver published and the device returned since the last look. | The positions the driver filled and took back since the last look. |
 | State | What these mean together. | What the ring's descriptors say, read from the driver's position. |
 
 The state lists what is outstanding:
@@ -54,51 +62,75 @@ The state lists what is outstanding:
 - **added, not yet published** (split rings): buffers that the driver added that the device cannot see yet.
 - **not kicked** (split rings): buffers that the driver added without notifying the device.
 
-To see whether a queue moves, run the command again after the target ran for a while.
-
 In the list, three or more queues in a row that no buffer has gone through since the driver set them up are one row, such as `8-63  128  0  -  0  -  never used (56 queues)` for the queues of virtio-serial's unopened ports. {command}`!virtio` with the device's address lists each of them.
+
+## Is it stuck?
+
+`ntoseye` remembers what each look showed, so the next {command}`!virtio` or {command}`!vring` shows what moved since. The first look shows `-` in the Moved column. The time between looks is the guest's own time, which stops while the guest is stopped, so two looks at the same breakpoint show nothing moved and claim nothing.
+
+From the second look on, the state also names what did not move:
+
+- **not taken back for N s**: the device returned buffers before the last look, and the driver has not taken any back since. When an interrupt was due for them, the state adds that too, and the next place to look is the driver's interrupt routine and DPC.
+- **the device returned nothing for N s**: on a queue that carries requests, such as a transmit, request, or control queue, the device held buffers at both looks and returned none in between. The next place to look is the device side, in QEMU. A receive or event queue holds buffers on purpose, so it is never named this way.
+
+Let the guest run for a few seconds between the looks. The commands read a running guest, so with the guest running, two calls a few seconds apart are enough, over MCP too.
 
 ## A queue's buffers
 
-{command}`!vring` `<virtqueue>` shows the ring addresses, the flags that turn off interrupts or notifications, the indexes, each buffer that the device holds, and each buffer that it returned and the driver has not taken back, with their descriptor chains. This sample was taken with the guest stopped in vioscsi's interrupt routine, while it wrote to the disk:
+{command}`!vring` `<virtqueue>` shows the ring addresses, the indexes, when each side wants to be signalled, what moved since the last look, each buffer that the device holds, and each buffer that it returned and the driver has not taken back, with their descriptor chains. This sample was taken with the guest stopped in viostor's interrupt routine while it wrote to the disk:
 
 ```text
-virtqueue ffffa200d65d4a40  queue 3  size 256
-  desc ffffa200d65cd000  avail ffffa200d65ce000  used ffffa200d65ce240
-  avail idx 313  used idx 313  driver: published 313  taken back to 312  255 free  0 not kicked
+virtqueue ffffb482a58cc000  queue 0 (request 0)  size 256
+  desc ffffb482a58c4000  avail ffffb482a58c5000  used ffffb482a58c5240
+  avail idx 527  used idx 527  driver: published 527  taken back to 526  255 free  0 not kicked
+  interrupts: after used idx 526 (event index); one was due for the returned buffers
+  notifications: after avail idx 527 (event index)
   state: 1 returned, not yet taken back
+  moved since the last look 0.0 s of guest time ago: avail +0, used +0, taken back +0
 
 Returned, not yet taken back
-  used[312] wrote 0x8406c head 1: [1] 0x278c565c8 len 0x30 I (3 descriptors, out 0x84033, in 0x6c)
+  used[526] wrote 0x1 head 2: [2] 0x279181528 len 0x490 I (73 descriptors, out 0x47010, in 0x1)
 ```
 
-Each descriptor shows its guest-physical address, its length, and its flags: `W` for a buffer that the device writes, `N` for a buffer that continues in the next descriptor, and `I` for a table of indirect descriptors. For an indirect descriptor, `!vring` reads the table and shows how many descriptors it has, how many bytes the driver gives the device (out), and how many the device can write (in). In the sample, the request is a 0x33-byte SCSI command and 0x84000 bytes of data, and the device's response has room for 0x6c bytes. A returned buffer also shows how many bytes the device wrote. To read a buffer, use the physical-memory commands, for example `!db 278c565c8`.
+**interrupts** says when the driver wants the device to interrupt it, and **notifications** says when the device wants the driver to notify it (kick) about new buffers:
 
-`ntoseye` finds the driver whose PDB describes a queue or device from the code and data it points to. To use a different module's PDB, name it after the address, for example `!vring ffffa200d65d4a40 vioscsi`.
+- `on`: after every buffer.
+- `off`: never, because the side set the flag that turns signals off (`NO_INTERRUPT` or `NO_NOTIFY` on a split ring). A driver that turns interrupts off must poll the queue.
+- `after used idx N` or `after avail idx N`: with the event index feature, once the other side's index passes N.
+- `at position N in lap L`: on a packed ring, once the other side reaches that position.
+
+For a split ring, `!vring` also checks the returned buffers against the driver's request, as the device does. In the sample, the driver asked for an interrupt after used index 526 and the device moved to 527, so an interrupt was due, and the guest is stopped in it. Buffers returned without an interrupt due, with interrupts on, point to a driver that did not ask for one.
+
+Each descriptor shows its guest-physical address, its length, and its flags: `W` for a buffer that the device writes, `N` for a buffer that continues in the next descriptor, and `I` for a table of indirect descriptors. For an indirect descriptor, `!vring` reads the table and shows how many descriptors it has, how many bytes the driver gives the device (out), and how many the device can write (in). In the sample, the request is a write of 0x47000 bytes with its 0x10-byte header, and the device wrote its one-byte status. A returned buffer also shows how many bytes the device wrote. To read a buffer, use the physical-memory commands, for example `!db 279181528`.
+
+`ntoseye` finds the driver whose PDB describes a queue or device from the code and data it points to. To use a different module's PDB, name it after the address, for example `!vring ffffb482a58cc000 viostor`.
 
 ### Packed rings
 
 A device and driver can agree on packed rings instead of split rings, for example with `packed=on` on a QEMU virtio device. For a packed queue, {command}`!vring` shows the driver's positions and wrap counters, and walks the descriptors from the position where the driver takes buffers back next: first the buffers that the device used, then the buffers that it still holds.
 
 ```text
-virtqueue ffffc8884f8cf000  queue 0  size 256  packed
-  desc ffffa200d721b000  driver event ffffa200d721c000  device event ffffa200d721c004
-  driver: next avail 140 (lap 0)  taken back to 140 (lap 1)  0 free
+virtqueue ffffa002dc253000  queue 0 (rx 0)  size 256  packed
+  desc ffffb482a542f000  driver event ffffb482a5430000  device event ffffb482a5430004
+  driver: next avail 80 (lap 0)  taken back to 80 (lap 1)  0 free
+  interrupts: at position 80 in lap 1
+  notifications: off (the device disabled them)
   state: 256 with the device
+  moved since the last look 0.1 s of guest time ago: filled +0, taken back +0
 
 Buffers with the device
-  [140] id 17 0x278a33000 len 0x10 I (1 descriptor, out 0x0, in 0x5fa)
-  [141] id 123 0x2789c8000 len 0x10 I (1 descriptor, out 0x0, in 0x5fa)
+  [80] id 13 0x27991f000 len 0x10 I (1 descriptor, out 0x0, in 0x5fa)
+  [81] id 67 0x278c0d000 len 0x10 I (1 descriptor, out 0x0, in 0x5fa)
 ```
 
-Each line starts with the descriptor's position in the ring and the buffer ID. This is NetKVM's receive queue, so every descriptor is a buffer for one incoming frame.
+Each buffer line starts with the descriptor's position in the ring and the buffer ID. This is NetKVM's receive queue, so every descriptor is a buffer for one incoming frame. The driver wants an interrupt when the device uses the position it takes back next, and the device, which holds a buffer in every slot, wants no notifications.
 
 ### Without a PDB
 
 To use {command}`!vring` with a split ring of a driver that has no PDB, give the ring's size and the kernel addresses of its descriptor table, avail ring, and used ring with `/r`:
 
 ```text
-!vring /r 0n256 ffffa200d541d000 ffffa200d541e000 ffffa200d541e240
+!vring /r 0n256 ffffb482a58c4000 ffffb482a58c5000 ffffb482a58c5240
 ```
 
-Without the driver's state, it cannot tell which buffers the driver has taken back.
+Without the driver's state, it cannot tell which buffers the driver has taken back, or name the queue.
