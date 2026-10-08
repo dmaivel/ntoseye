@@ -88,7 +88,7 @@ PRM                    v1.15(0000)  ffff9888994e5750
 acpiex                 v1.15(0000)  ffff988899cf0240
 ```
 
-The command needs `Wdf01000.pdb`. In a minidump, `ntoseye` finds the PDB from the timestamp and size of `Wdf01000.sys` in the dump's driver list.
+The command needs `Wdf01000.pdb`. `ntoseye` loads it when the dump opens, in a minidump as in a kernel dump.
 
 ## From Python
 
