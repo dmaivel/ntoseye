@@ -73,6 +73,24 @@ From the second look on, the state also names what did not move:
 - **not taken back for N s**: the device returned buffers before the last look, and the driver has not taken any back since. When an interrupt was due for them, the state adds that too, and the next place to look is the driver's interrupt routine and DPC.
 - **the device returned nothing for N s**: on a queue that carries requests, such as a transmit, request, or control queue, the device held buffers at both looks and returned none in between. The next place to look is the device side, in QEMU. A receive or event queue holds buffers on purpose, so it is never named this way.
 
+This sample was taken with QEMU throttling the virtio-blk disk's writes to one byte a second (`block_set_io_throttle`) while the guest wrote to it. The device holds two writes, and five seconds of guest time later it still has not returned them:
+
+```text
+  #  Queue      Size  Avail  Used  Driver  Free  Moved  State                                                     virtqueue
+  0  request 0  256   3939   3939  3939    256   +0/+0  idle                                                      ffffb482a58cc000
+  1  request 1  256   4009   4009  4009    256   +0/+0  idle                                                      ffffb482a58cc8c0
+  2  request 2  256   1803   1801  1801    254   +0/+0  2 with the device; the device returned nothing for 5.1 s  ffffb482a58cd180
+  3  request 3  256   3356   3356  3356    256   +0/+0  idle                                                      ffffb482a58cda40
+```
+
+{command}`!vring` on the queue then shows the two requests the device holds, a 4 KiB write and a 64 KiB write with their headers:
+
+```text
+Buffers with the device
+  avail[1801] head 0: [0] 0x279172528 len 0x30 I (3 descriptors, out 0x1010, in 0x1)
+  avail[1802] head 1: [1] 0x279177528 len 0x120 I (18 descriptors, out 0x10010, in 0x1)
+```
+
 Let the guest run for a few seconds between the looks. The commands read a running guest, so with the guest running, two calls a few seconds apart are enough, over MCP too.
 
 ## A queue's buffers
