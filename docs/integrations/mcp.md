@@ -18,7 +18,7 @@ The `command` tool works like a WinDbg prompt, with one difference: a call never
 
 ### Commands and the target state
 
-- A resuming command ({command}`g`, {command}`gh`, {command}`gn`, {command}`p`, {command}`t`, {command}`gu`, {command}`pa`, {command}`wt`, {command}`.reboot`, ...) resumes the target and waits up to `timeout_ms` for the next stop. The result shows the stop the same way the REPL does, with the breakpoint banner, the registers, and the stack. If the target does not stop in time, the result ends with `[target running]`, and the target keeps running without losing any data.
+- A resuming command ({command}`g`, {command}`gh`, {command}`gn`, {command}`p`, {command}`t`, {command}`gu`, {command}`pa`, {command}`wt`, {command}`.reboot`, ...) resumes the target and waits up to `timeout_ms` for the next stop, which the result shows ([how stops look](#how-stops-look)). If the target does not stop in time, the result ends with `[target running]`, and the target keeps running without losing any data. A plain {command}`g` with no breakpoint set does not wait, because nothing would stop the guest.
 - A command that needs a halted target ({command}`k`, {command}`r`, {command}`bp`, {command}`t`, ...) and arrives while the target runs waits up to `timeout_ms` for the stop, shows it, and then runs, the same way WinDbg queues input that you type at a running debuggee. If the target is still running when the time limit ends, the result reports this and ntoseye does not run the command. To wait longer, send the command again.
 - Memory, process, module, and struct commands do not wait. They work on a running target when the memory comes from the host, as with the default `--memory-source auto` on a local VM and with the memory and gdb backends. When the session reads memory over KD, these commands fail with a message that gives the reason.
 - A resuming command sent while the target runs also waits for the stop, but ntoseye then shows the stop and does not run the command in this call, so the agent sees the stop before the target continues past it.
@@ -79,6 +79,8 @@ A typical breakpoint flow is:
 2. Send {command}`k`. If {command}`g` returned while the target still ran, {command}`k` waits for the breakpoint.
 
 For a user-mode breakpoint, give the process, and ntoseye resolves the symbol in that process: `break; bu /p <pid> user32!PeekMessageW; g`. You do not need a `.process /p` first, because the debugger loads the symbols of that module itself. For more information, refer to [symbols](../using/symbols.md).
+
+The `gdb` backend cannot write a breakpoint into user-space memory, so with it, use a debug register instead: `break; ba /p <pid> e1 user32!PeekMessageW; g`.
 
 When a backtrace goes through a module whose PDB is not in the cache yet, ntoseye shows those frames as `module+offset` and gets the PDB in the background without making the call wait. A later {command}`k` shows the names.
 

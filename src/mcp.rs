@@ -491,7 +491,14 @@ impl NtoseyeMcp {
     }
 
     #[tool(
-        description = "Run one line of ntoseye's WinDbg-style REPL (`;` separates commands) and return its output (styling stripped) followed by a `[target ...]` trailer with the run state. This is the whole debugger: `help` lists every command; `help <cmd>` explains one. Common: `!process 0 0` / `!process <pid|name>` (processes), `.process /p <pid>` / `.process 0` (address-space scope), `lm` (modules), `dt <type> [addr]` (struct layout/read), `x <mod>!<pat>` (symbols), `dq/dd/db <addr> [l<n>]` (memory), `u <addr>` (disassemble), `k` (backtrace; halted), `r` (registers; halted), `bp/bl/bc/bd/be` (breakpoints; halted), `!analyze`. Run control has REPL semantics, bounded by timeout_ms: `g`/`p`/`t`/`gu`/`pa`... resume and wait for the next stop, which is rendered like the REPL renders it; if none arrives the result ends with `[target running]` and the target keeps running. Like typing at a running WinDbg, a halted-only command (`k`, `r`, `bp`, ...) or another resuming command sent while the target runs waits up to timeout_ms for the stop first, then runs (a resuming one is instead refused once, so the stop is seen before it is continued past); `break` interrupts. Each command on a `;` line is admitted against the target's state at that point, so to set a breakpoint on a freely running guest send `break; bp <addr>; g` as one line rather than waiting for a stop that will not come. A stop that happened between calls is rendered at the top of the next result. Guest DbgPrint lines captured since the previous call are appended as `[dbgprint] ...`. format=json returns {ok, output, result, target, debug_output} with a typed `result` for commands that have a structured decoding."
+        description = "Run one line of ntoseye's WinDbg-style REPL (`;` separates commands) and return its text (styling stripped) followed by a `[target ...]` trailer with the run state. This is the whole debugger: `help` lists every command; `help <cmd>` explains one. Common: `!process 0 0` / `!process <pid|name>` (processes), `.process /p <pid>` / `.process 0` (address-space scope), `lm` (modules), `dt <type> [addr]` (struct layout/read), `x <mod>!<pat>` (symbols), `dq/dd/db <addr> [l<n>]` (memory), `u <addr>` (disassemble), `k` (backtrace; halted), `r` (registers; halted), `bp/bl/bc/bd/be` (breakpoints; halted), `!analyze`. Run control is bounded by timeout_ms: `g`/`p`/`t`/`gu`/`pa`... resume and wait for the next stop; if none arrives the result ends with `[target running]` and the target keeps running. A step on the same thread shows only what changed. Like typing at a running WinDbg, a halted-only command (`k`, `r`, `bp`, ...) or another resuming command sent while the target runs waits for the stop a breakpoint causes, then runs (a resuming one is instead refused once, so the stop is seen before it is continued past); with no breakpoint set it is refused at once, so send `break` first (an empty line waits anyway). Each command on a `;` line is admitted against the target's state at that point, so `break; bp <addr>; g` works as one line. A command that reports an error ends its line, and the result is then an error. A stop that happened between calls is shown at the top of the next result. A result over about 24k characters shows its first page and an `[output <id>: ...]` footer for the `output` tool. Guest DbgPrint lines captured since the previous call are appended as `[dbgprint] ...`.",
+        annotations(
+            title = "Run a debugger command",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn command(
         &self,
@@ -535,7 +542,12 @@ impl NtoseyeMcp {
     }
 
     #[tool(
-        description = "Read more of a long `command` result. A result over about 24k characters shows its first page and ends with an `[output <id>: ...]` footer; this returns the lines from `offset` on, or with `filter` only the lines that contain that text (ignoring case), each after its offset, so a long listing such as `x nt!*` or `!process 0 7` is searched instead of run again. The server keeps the latest long results in memory, and reading them needs no session."
+        description = "Read more of a long `command` result. A result over about 24k characters shows its first page and ends with an `[output <id>: ...]` footer; this returns the lines from `offset` on, or with `filter` only the lines that contain that text (ignoring case), each after its offset, so a long listing such as `x nt!*` or `!process 0 7` is searched instead of run again. The server keeps the latest long results in memory, and reading them needs no session.",
+        annotations(
+            title = "Read a long result",
+            read_only_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn output(
         &self,
@@ -562,7 +574,14 @@ impl NtoseyeMcp {
     }
 
     #[tool(
-        description = "Attach to a target: a live Windows VM over kd/kdnet/gdb/memory, or a crash dump (backend=dump, connect=<path>). Must be called before other tools when the server was started without --connect/--dump. Only one session can be active at a time. Returns {status:\"connected\", backend, connect, processors}."
+        description = "Attach to a target: a live Windows VM over kd/kdnet/gdb/memory, or a crash dump (backend=dump, connect=<path>). Must be called before other tools when the server was started without --connect/--dump. Only one session can be active at a time. Returns {status:\"connected\", backend, connect, processors}.",
+        annotations(
+            title = "Attach to a target",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn open(
         &self,
@@ -640,7 +659,14 @@ impl NtoseyeMcp {
     }
 
     #[tool(
-        description = "Close the active debugger session (restores breakpoints and resumes the guest) so a new one can be opened. Returns {status:\"closed\"}, or {status:\"pending\", warning} if the shutdown timed out (retry shortly). Cancels an in-progress open if one is pending."
+        description = "Close the active debugger session (restores breakpoints and resumes the guest) so a new one can be opened. Returns {status:\"closed\"}, or {status:\"pending\", warning} if the shutdown timed out (retry shortly). Cancels an in-progress open if one is pending.",
+        annotations(
+            title = "Detach from the target",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn close(&self) -> Result<CallToolResult, McpError> {
         let tx = {
@@ -712,15 +738,18 @@ impl rmcp::ServerHandler for NtoseyeMcp {
                  registers, backtraces, stepping, and breakpoint changes need the VM \
                  halted (`break` first, or be stopped at a breakpoint). Resuming commands \
                  (`g`, `p`, `t`, `gu`, ...) wait up to timeout_ms for the next stop and \
-                 render it; if the trailer says running, the next halted-only command \
-                 (`k`, `r`, ...) waits for the stop before running, so just carry on (no \
-                 stop is lost between calls). To set a breakpoint on a freely running \
-                 guest, halt it on the same line: `break; bp nt!NtCreateFile; g`, then \
-                 `k` once it hits (a bare `bp` while the guest runs only waits for a \
-                 stop that nothing will cause). A user-mode symbol like \
+                 render it; if the trailer says running and a breakpoint is set, the \
+                 next halted-only command (`k`, `r`, ...) waits for its stop before \
+                 running, so just carry on (no stop is lost between calls); with no \
+                 breakpoint set, such a command is refused at once. To set a breakpoint \
+                 on a freely running guest, halt it on the same line: \
+                 `break; bp nt!NtCreateFile; g`, then `k` once it hits. A command that \
+                 reports an error ends its line. A user-mode symbol like \
                  `user32!PeekMessageW` lives in a process, so name it: \
                  `break; bu /p <pid> user32!PeekMessageW; g` resolves the symbol in that \
-                 process without a prior `.process /p`. A backtrace through a module \
+                 process without a prior `.process /p`. The gdb backend cannot patch \
+                 user space, so there use a debug register instead: \
+                 `break; ba /p <pid> e1 user32!PeekMessageW; g`. A backtrace through a module \
                  whose PDB is not cached shows `module+offset` and fetches it in the \
                  background; run `k` again for the names. A result over about 24k \
                  characters shows its first page and an `[output <id>: ...]` footer: \
