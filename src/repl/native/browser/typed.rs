@@ -97,6 +97,8 @@ pub struct Row {
     /// A flags word's bits that are set, by name, with the value of a
     /// field wider than a bit: `PrimaryTokenFrozen DefaultPagePriority=5`.
     pub set: String,
+    /// A bitfield's position and width in the word at `address`.
+    pub bits: Option<(u8, u8)>,
 }
 
 impl Row {
@@ -106,6 +108,13 @@ impl Row {
             self.kind,
             Kind::Aggregate | Kind::Array | Kind::Link | Kind::Flags
         )
+    }
+
+    /// Whether `e` writes the row: a number, a pointer or a flags word of
+    /// 1, 2, 4 or 8 bytes, or a bit of one.
+    pub fn writable(&self) -> bool {
+        matches!(self.kind, Kind::Scalar | Kind::Pointer | Kind::Flags)
+            && matches!(self.size, 1 | 2 | 4 | 8)
     }
 }
 
@@ -342,6 +351,7 @@ fn flags_rows(
         kind: Kind::Flags,
         pointee: None,
         set,
+        bits: None,
     });
     if !open.contains(&path) {
         return;
@@ -421,6 +431,10 @@ fn value_rows(
         kind,
         pointee,
         set: String::new(),
+        bits: match &field.type_data {
+            ParsedType::Bitfield { pos, len, .. } => Some((*pos, *len)),
+            _ => None,
+        },
     });
     if !is_open {
         return;
@@ -476,6 +490,7 @@ fn value_rows(
                     kind: Kind::Note,
                     pointee: None,
                     set: String::new(),
+                    bits: None,
                 });
             }
         }

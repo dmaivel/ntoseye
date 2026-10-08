@@ -91,6 +91,7 @@ The palette opens on the tab that fits what you're typing:
 | **G** | Go to an address or expression, with the same completions as the prompt. |
 | **/** and **N** | Find, and find the next match. |
 | **B** | Set or clear a breakpoint in code, or a write watchpoint in memory. |
+| **E** | Write the instruction's bytes, the byte or pointer at the cursor, or the field in a typed view. |
 | **F10** **F11** | Step over or into, as {command}`p` and {command}`t` do. |
 | **Shift+F11** | Step out, as {command}`gu` does. |
 | **F5** | Run, as {command}`g` does. **Escape** or **Ctrl+C** breaks in. |
@@ -112,6 +113,8 @@ A find searches the next 1 MB after the cursor and shows how far it has got. **N
 
 In memory, **B** sets a write watchpoint (`ba w`) on the bytes at the cursor, as wide as the address's alignment allows, up to 8 bytes, or clears the one that covers them. Watched bytes are red.
 
+**Writing memory.** **E** opens a field under the listing that holds what is under the cursor: the instruction's bytes in code, the byte at the cursor in memory, or the pointer when memory shows pointers. Change it and press **Enter** to write it with {command}`eb` or {command}`eq`, as the prompt would, or **Escape** to leave it. The bytes, fields and code are read again, and what changed is tinted. A crash dump can't be written, so the browser doesn't offer the key there.
+
 **Memory.** Memory is shown 16 bytes a row, in hex and as text, with a cursor on one byte. Bytes are colored by kind: zeros are dimmed, printable ASCII is in the string color, control characters are in the keyword color, and watched bytes are red. **←** and **→** move one byte, and **Home** and **End** go to the start and end of the row. **P** switches to one pointer a row, with the symbol each one points into, and back.
 
 Beside the rows, the inspector shows what the bytes at the cursor could be: little-endian integers of each size (unsigned with their hex, and signed), floats, the symbol a pointer points into, a date if the value looks like a FILETIME, and any ASCII or UTF-16 string that starts there. It stays in view as you scroll.
@@ -119,6 +122,8 @@ Beside the rows, the inspector shows what the bytes at the cursor could be: litt
 **Running the target.** **F10**, **F11**, **Shift+F11** and **F5** step and run the target as {command}`p`, {command}`t`, {command}`gu` and {command}`g` do at the prompt, and **F7** runs to the instruction under the cursor, as `g <address>` does. While the target runs, the note under the listing says so, and **Escape** or **Ctrl+C** breaks in. When the target stops, the code follows the instruction pointer, and what the run changed is tinted: registers, bytes in memory, and fields in a typed view. A backend that can't run the target, such as a dump, doesn't offer these keys.
 
 **Registers and stack.** Beside the code are the registers of the current context, two to a row, with the flags that are set in `eflags` under them, and the stack. Click a register's value to browse where it points. **[** shows the caller's frame: the code moves to where that frame is, marked with a dim `>`, and the registers are the ones the stack walk recovered for the frame, with a dash for the rest, as {command}`.frame` shows them. **]** goes back toward the innermost frame, and you can also click a frame. **R** hides the registers and the stack, and shows them again.
+
+**Source lines.** With a module's private PDB, the code shows each source line above the instructions compiled from it, as WinDbg's mixed mode does: the file and line number, and the text of the line when {command}`.srcpath` finds the file that was compiled, as the stop card does.
 
 **Memory as a type.** In memory, **T** reads the memory at the cursor as a type from a loaded PDB, as {command}`dt` does, with the same completions as {command}`dt`. When the cursor is on a kernel object, such as a process or a thread, the type is filled in for you. To read the record that the field at the cursor belongs to, give the type and the field, such as `_ETHREAD.ThreadListEntry`.
 
@@ -129,6 +134,7 @@ Each row is a field: its offset, name, type and value. A pointer shows the symbo
 | **→** **←** | Open a nested structure, array, list link or flags word in place, or close it. On a field that is closed, **←** goes to the field it's in. |
 | **Enter** | Open or close a structure or an array. On a pointer, go to what it points to, as its type when the PDB has it. On a list link (`_LIST_ENTRY`), go to the next record of the same type with the same fields open, so that you can walk a list such as `ActiveProcessLinks` one record at a time. |
 | **B** | Set a write watchpoint on the field, as wide as the field, or clear it. |
+| **E** | Write the field, when it's a number, a pointer or a flags word, with {command}`eb`, {command}`ew`, {command}`ed` or {command}`eq` for its size. On one of a flags word's bits, type the bits' new value: only those bits change, and the rest of the word stays as it is. |
 | **P** | Show the field's memory as bytes. **Backspace** comes back. |
 | **T** | Choose another type. With no type, the memory shows as bytes again. |
 

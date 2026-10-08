@@ -5,6 +5,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::time::Duration;
 
 mod typed;
@@ -24,10 +25,12 @@ use super::{
 };
 use crate::dbg_backend::DebugCapability;
 use crate::disasm::{DisasmRow, OperandKind, decode_code, disasm_formatter};
-use crate::expr::Expr;
+use crate::expr::{Expr, NumberRadix};
 use crate::memory::read_page_chunks;
 use crate::output;
 use crate::repl::{MyCompleter, ReplState, TargetLoan};
+use crate::session::Session as DebugSession;
+use crate::symbols::{LocalSourceState, SourceLocation};
 use crate::triage_report::time::filetime_to_iso;
 use crate::types::VirtAddr;
 use crate::unwind::{format_symbol, resolve_thread_trace_context, try_format_symbol};
@@ -336,6 +339,8 @@ enum Scroll {
 struct CodeRow {
     row: DisasmRow,
     label: Option<String>,
+    /// The source line the instruction is part of, with a private PDB.
+    source: Option<SourceLocation>,
 }
 
 /// The memory read around the cursor: the byte at `start + i` is
@@ -389,6 +394,44 @@ enum FieldKind {
     Find,
     /// The type to read the memory at the cursor as.
     Type,
+    /// The new value of what is under the cursor.
+    Write(Write),
+}
+
+/// What `e` writes: `width` bytes at `address`, a list of bytes when
+/// `width` is 1, or the bitfield (position, width) `bits` of that word.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Write {
+    address: u64,
+    width: usize,
+    bits: Option<(u8, u8)>,
+}
+
+impl Write {
+    /// The command that writes `width` bytes: `eb` writes a list.
+    fn command(self) -> &'static str {
+        match self.width {
+            2 => "ew",
+            4 => "ed",
+            8 => "eq",
+            _ => "eb",
+        }
+    }
+
+    /// The field's prompt: the command and address, or the bits.
+    fn prompt(self) -> String {
+        match self.bits {
+            Some((pos, 1)) => format!("bit {pos} of {:x} = ", self.address),
+            Some((pos, len)) => format!("bits {pos}-{} of {:x} = ", pos + len - 1, self.address),
+            None => format!("{} {:x} ", self.command(), self.address),
+        }
+    }
+
+    /// A list of bytes, where completing a hex byte as a symbol would
+    /// take the symbol on Enter.
+    fn bytes(self) -> bool {
+        self.width == 1 && self.bits.is_none()
+    }
 }
 
 /// Where Backspace goes back to: a pane at an address, or a typed view as
@@ -454,6 +497,11 @@ struct Browser<'s, 'a> {
     ip: Option<u64>,
     /// Whether the backend can run the target: not a dump's or `memory`'s.
     can_run: bool,
+    /// Whether `e` can write memory: not a crash dump's.
+    can_write: bool,
+    /// The lines of the source files code shows, read once each; `None`
+    /// where a file can't be read.
+    sources: RefCell<HashMap<PathBuf, Option<Vec<String>>>>,
     /// The registers and stack beside the code; `r` hides them.
     context: Option<Context>,
     show_context: bool,
@@ -486,6 +534,7 @@ impl<'s, 'a> Browser<'s, 'a> {
             state.ctx.backend.capabilities().iter().any(|entry| {
                 entry.capability == DebugCapability::ExecutionControl && entry.supported
             });
+        let can_write = !state.ctx.target.phys.is_dump();
         let completer = MyCompleter {
             caches: state.caches.clone(),
             target: TargetLoan::default(),
@@ -513,6 +562,8 @@ impl<'s, 'a> Browser<'s, 'a> {
             watches: Vec::new(),
             ip,
             can_run,
+            can_write,
+            sources: RefCell::new(HashMap::new()),
             context: None,
             show_context: true,
             changed_bytes: HashSet::new(),
@@ -1036,7 +1087,44 @@ impl<'s, 'a> Browser<'s, 'a> {
             .find_closest_symbol_for_address(target.current_dtb(), VirtAddr(row.ip))
             .filter(|(_, _, offset)| *offset == 0)
             .map(|(module, name, _)| format!("{module}!{name}"));
-        CodeRow { row, label }
+        let source = target.source_location(VirtAddr(row.ip));
+        CodeRow { row, label, source }
+    }
+
+    /// A source line over the instructions compiled from it: the file and
+    /// line, and the line's text when the file is the one the PDB names.
+    fn source_line(&self, location: &SourceLocation, ip: u64) -> TextNode<Msg> {
+        let file = location
+            .file
+            .rsplit(['\\', '/'])
+            .next()
+            .unwrap_or(&location.file);
+        // Under the addresses, past the breakpoint and pointer marks; the
+        // line number padded so a function's lines start in one column.
+        let mut spans = vec![span(format!("    {file}:{:<4}", location.line), MUTED)];
+        if let Some(text) = self.source_text(location) {
+            spans.push(span(format!("  {text}"), STRONG));
+        }
+        ui::text(spans).wrap(Wrap::None).key(format!("s{ip:x}"))
+    }
+
+    /// The text of `location`'s line, from its local file when that is the
+    /// one compiled, as the stop's source shows.
+    fn source_text(&self, location: &SourceLocation) -> Option<String> {
+        let local = location
+            .local
+            .as_ref()
+            .filter(|local| local.state == LocalSourceState::Found)?;
+        let mut sources = self.sources.borrow_mut();
+        let lines = sources.entry(local.path.clone()).or_insert_with(|| {
+            std::fs::read_to_string(&local.path).ok().map(|text| {
+                text.lines()
+                    .map(|line| line.replace('\t', "    ").trim_end().to_owned())
+                    .collect()
+            })
+        });
+        let index = usize::try_from(location.line.checked_sub(1)?).ok()?;
+        lines.as_ref()?.get(index).cloned()
     }
 
     /// The memory from `start` to `end`, a page at a time so one missing
@@ -1268,7 +1356,7 @@ impl<'s, 'a> Browser<'s, 'a> {
     /// argument, a type the way `dt` does.
     fn completions(&mut self, kind: FieldKind, draft: &str) -> Vec<Suggestion> {
         let prefix = match kind {
-            FieldKind::Goto | FieldKind::Find => "? ",
+            FieldKind::Goto | FieldKind::Find | FieldKind::Write(_) => "? ",
             FieldKind::Type => "dt ",
         };
         let line = format!("{prefix}{draft}");
@@ -1300,7 +1388,9 @@ impl<'s, 'a> Browser<'s, 'a> {
             .chars()
             .next_back()
             .is_some_and(|c| !c.is_whitespace());
-        let popup = if in_word && completes(kind, &draft) {
+        // A value completes on Tab only, so Enter writes what was typed.
+        let as_typed = !matches!(kind, FieldKind::Write(_));
+        let popup = if in_word && as_typed && completes(kind, &draft) {
             let suggestions = self.completions(kind, &draft);
             Popup::open(suggestions, &draft, keep.as_deref())
         } else {
@@ -1435,6 +1525,162 @@ impl<'s, 'a> Browser<'s, 'a> {
                 Err(error) => self.note = Some(error),
             },
             FieldKind::Type => self.view_as(text),
+            FieldKind::Write(write) => self.write(write, text),
+        }
+    }
+
+    /// Open the field to write what is under the cursor, holding its value:
+    /// an instruction's bytes, the byte or pointer at the cursor, or a
+    /// field's number, pointer, flags word or bits.
+    fn start_write(&mut self) {
+        if !self.can_write {
+            self.note = Some("a crash dump is read-only".into());
+            return;
+        }
+        let session = &*self.state.ctx;
+        let unreadable = |address: u64| format!("cannot read {address:#x}");
+        let (write, value) = match self.pane {
+            Pane::Code => {
+                let Some(row) = self.code.get(self.cursor) else {
+                    return;
+                };
+                let mut bytes = vec![0u8; row.row.length];
+                if session
+                    .read_masked(VirtAddr(row.row.ip), &mut bytes)
+                    .is_err()
+                {
+                    self.note = Some(unreadable(row.row.ip));
+                    return;
+                }
+                let write = Write {
+                    address: row.row.ip,
+                    width: 1,
+                    bits: None,
+                };
+                (write, bytes)
+            }
+            Pane::Memory if let Some(typed) = &self.typed => {
+                let Some(row) = typed.row() else {
+                    return;
+                };
+                if !row.writable() {
+                    self.note = Some(format!(
+                        "e writes a number, a pointer or a flags word: open {} to write what it holds",
+                        row.name
+                    ));
+                    return;
+                }
+                let Some(word) = read_word(session, row.address, row.size) else {
+                    self.note = Some(unreadable(row.address));
+                    return;
+                };
+                let value = match row.bits {
+                    Some((pos, len)) => word >> pos & bit_mask(len),
+                    None => word,
+                };
+                let write = Write {
+                    address: row.address,
+                    width: row.size,
+                    bits: row.bits,
+                };
+                (write, value.to_le_bytes()[..row.size].to_vec())
+            }
+            Pane::Memory => {
+                let at = self.memory.cursor;
+                let width = match self.layout {
+                    Layout::Bytes => 1,
+                    Layout::Pointers => POINTER as usize,
+                };
+                let Some(bytes) = (0..width as u64)
+                    .map(|offset| self.memory.byte(at + offset))
+                    .collect::<Option<Vec<u8>>>()
+                else {
+                    self.note = Some(unreadable(at));
+                    return;
+                };
+                let write = Write {
+                    address: at,
+                    width,
+                    bits: None,
+                };
+                (write, bytes)
+            }
+        };
+        // In the radix the command reads, with 0x where that is not hex.
+        let prefix = if self.state.radix == NumberRadix::Hexadecimal {
+            ""
+        } else {
+            "0x"
+        };
+        let draft = if write.bytes() {
+            value
+                .iter()
+                .map(|byte| format!("{prefix}{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        } else {
+            let mut word = [0u8; 8];
+            word[..value.len().min(8)].copy_from_slice(&value[..value.len().min(8)]);
+            format!("{:#x}", u64::from_le_bytes(word))
+        };
+        self.open_field_with(FieldKind::Write(write), draft);
+    }
+
+    /// Write `text` as `write` says, through the prompt's `eb`, `ew`, `ed`
+    /// or `eq`, then read the memory, fields and code again, marking what
+    /// changed.
+    fn write(&mut self, write: Write, text: &str) {
+        let line = match write.bits {
+            None => format!("{} {:#x} {text}", write.command(), write.address),
+            Some((pos, len)) => {
+                let target = &self.state.ctx.target;
+                let value = match Expr::eval_with_radix(text, target, self.state.radix) {
+                    Ok(value) => value.0,
+                    Err(error) => {
+                        self.note = Some(error.to_string());
+                        return;
+                    }
+                };
+                let mask = bit_mask(len);
+                if value & !mask != 0 {
+                    self.note = Some(format!(
+                        "{value:#x} does not fit in {len} bit{}",
+                        if len == 1 { "" } else { "s" }
+                    ));
+                    return;
+                }
+                // The other bits of the word as they are now.
+                let Some(word) = read_word(&*self.state.ctx, write.address, write.width) else {
+                    self.note = Some(format!("cannot read {:#x}", write.address));
+                    return;
+                };
+                let word = word & !(mask << pos) | value << pos;
+                format!("{} {:#x} {word:#x}", write.command(), write.address)
+            }
+        };
+        let (result, text) = output::capture(|| self.state.dispatch_line(&line));
+        let text = text.trim().to_owned();
+        let session = &*self.state.ctx;
+        if let Some(typed) = &mut self.typed {
+            typed.read(session);
+        }
+        self.reread_memory();
+        if self.pane == Pane::Code
+            && let Some(here) = self.here()
+            && let Err(error) = self.go(Pane::Code, here)
+        {
+            self.note = Some(error);
+            return;
+        }
+        self.note = Some(match result {
+            Err(error) => error.to_string(),
+            Ok(_) => text
+                .lines()
+                .next()
+                .map_or_else(|| line.clone(), str::to_owned),
+        });
+        if !text.is_empty() {
+            self.record.push(text);
         }
     }
 
@@ -1677,6 +1923,8 @@ impl<'s, 'a> Browser<'s, 'a> {
             self.find_next();
         } else if typed == "b" {
             self.toggle_breakpoint();
+        } else if typed == "e" {
+            self.start_write();
         } else if !memory && (typed == "[" || typed == "]") {
             // Out to the caller's frame, or back in.
             let frame = self.context.as_ref().map_or(0, |context| context.frame);
@@ -1733,6 +1981,8 @@ impl<'s, 'a> Browser<'s, 'a> {
                     .max()
                     .unwrap_or(0)
                     .min(HEX_WIDTH);
+                // A source line shows once, over its first instruction.
+                let mut line = None;
                 for (index, row) in self.code.iter().enumerate() {
                     if let Some(label) = &row.label {
                         let mut spans = symbol(label);
@@ -1743,6 +1993,16 @@ impl<'s, 'a> Browser<'s, 'a> {
                                 .key(format!("l{:x}", row.row.ip)),
                         );
                     }
+                    let here = row
+                        .source
+                        .as_ref()
+                        .map(|source| (source.file.as_str(), source.line));
+                    if let Some(source) = &row.source
+                        && here != line
+                    {
+                        rows = rows.child(self.source_line(source, row.row.ip));
+                    }
+                    line = here;
                     rows = rows.child(self.code_line(index, width));
                 }
             }
@@ -1764,11 +2024,22 @@ impl<'s, 'a> Browser<'s, 'a> {
         let mut view = View::new();
         if let Some(field) = &self.field {
             let (prompt, placeholder) = match field.kind {
-                FieldKind::Goto => ("go to ", "address or expression"),
-                FieldKind::Find => ("find ", "\"text\", u\"text\", hex bytes, or a pointer"),
+                FieldKind::Goto => ("go to ".to_owned(), "address or expression"),
+                FieldKind::Find => (
+                    "find ".to_owned(),
+                    "\"text\", u\"text\", hex bytes, or a pointer",
+                ),
                 FieldKind::Type => (
-                    "type ",
+                    "type ".to_owned(),
                     "a type such as nt!_EPROCESS, or Type.Field for the record this field is in; empty for bytes",
+                ),
+                FieldKind::Write(write) => (
+                    write.prompt(),
+                    if write.bytes() {
+                        "bytes, such as 90 90"
+                    } else {
+                        "a value or an expression"
+                    },
                 ),
             };
             let ghost = field
@@ -1791,7 +2062,16 @@ impl<'s, 'a> Browser<'s, 'a> {
             }
         }
         dock.push(self.location().into());
-        dock.push(hints(self.pane, self.layout, self.typed.is_some(), self.can_run).into());
+        dock.push(
+            hints(
+                self.pane,
+                self.layout,
+                self.typed.is_some(),
+                self.can_run,
+                self.can_write,
+            )
+            .into(),
+        );
         // Beside memory's bytes and pointers, the inspector; code and typed
         // fields take the width, their values already decoded, so the
         // cursor's mark runs across the pane.
@@ -2339,8 +2619,27 @@ fn hex_pairs(text: &str) -> Option<Vec<u8>> {
 /// Whether a field's draft completes: an expression or a type does, a find
 /// of text or bytes does not.
 fn completes(kind: FieldKind, draft: &str) -> bool {
-    kind != FieldKind::Find
-        || !(draft.starts_with('"') || draft.starts_with("u\"") || hex_pairs(draft).is_some())
+    match kind {
+        FieldKind::Find => {
+            !(draft.starts_with('"') || draft.starts_with("u\"") || hex_pairs(draft).is_some())
+        }
+        FieldKind::Write(write) => !write.bytes(),
+        FieldKind::Goto | FieldKind::Type => true,
+    }
+}
+
+/// The `size`-byte little-endian number at `address`, as code reads it.
+fn read_word(session: &DebugSession, address: u64, size: usize) -> Option<u64> {
+    let mut word = [0u8; 8];
+    session
+        .read_masked(VirtAddr(address), word.get_mut(..size)?)
+        .ok()?;
+    Some(u64::from_le_bytes(word))
+}
+
+/// The low `len` bits.
+fn bit_mask(len: u8) -> u64 {
+    u64::MAX >> (64 - u32::from(len.clamp(1, 64)))
 }
 
 /// An inspector row for a number: the label, the hex of an unsigned
@@ -2420,9 +2719,9 @@ fn clip(text: &str, width: usize) -> String {
 }
 
 /// The keys, as keycaps with what they do.
-fn hints(pane: Pane, layout: Layout, typed: bool, can_run: bool) -> ui::Row<Msg> {
+fn hints(pane: Pane, layout: Layout, typed: bool, can_run: bool, can_write: bool) -> ui::Row<Msg> {
     if pane == Pane::Memory && typed {
-        return keycaps(&[
+        let mut keys: Vec<(&[&str], &str)> = vec![
             (&["↑", "↓"], "move"),
             (&["→", "←"], "open, close"),
             (&["Enter"], "follow"),
@@ -2430,11 +2729,17 @@ fn hints(pane: Pane, layout: Layout, typed: bool, can_run: bool) -> ui::Row<Msg>
             (&["t"], "type"),
             (&["p"], "bytes"),
             (&["b"], "watch writes"),
-            (&["Tab"], "to code"),
+        ];
+        if can_write {
+            keys.push((&["e"], "write"));
+        }
+        keys.extend([
+            (&["Tab"][..], "to code"),
             (&["g"], "go to"),
             (&["/"], "find"),
             (&["Esc"], "close"),
         ]);
+        return keycaps(&keys);
     }
     let other = format!("to {}", pane.other().name());
     let mut keys: Vec<(&[&str], &str)> = vec![(&["↑", "↓"], "move")];
@@ -2467,6 +2772,9 @@ fn hints(pane: Pane, layout: Layout, typed: bool, can_run: bool) -> ui::Row<Msg>
             ));
             keys.push((&["t"], "as a type"));
         }
+    }
+    if can_write {
+        keys.push((&["e"], "write"));
     }
     keys.push((&["."], "instruction pointer"));
     if can_run {
