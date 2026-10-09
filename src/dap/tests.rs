@@ -5,6 +5,7 @@ use std::rc::Rc;
 use super::memory::MAX_DISASSEMBLE_INSTRUCTIONS;
 use super::variables::VARIABLES_BASE;
 use super::*;
+use crate::exception_policy::ExceptionPolicyMode;
 use crate::expr::Expr;
 use crate::guest::ProcessInfo;
 use crate::kd::context::{OFFSET_RIP, OFFSET_RSP};
@@ -687,6 +688,55 @@ fn instruction_and_data_breakpoints_honor_hit_conditions() {
             "{request} breakpoint ignored its hit condition: {body}"
         );
     }
+}
+
+#[test]
+fn exception_filters_become_first_and_second_chance_policy() {
+    let session = session_over_memory(0x1000, &[0u8; 0x40]);
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, _sink) = server_with_sink(Some(session), rx);
+    const AV: u32 = 0xc000_0005;
+    const DZ: u32 = 0xc000_0094;
+
+    // A checked filter breaks at the first chance; an unchecked one only at
+    // the second.
+    server
+        .on_set_exception_breakpoints(&json!({"filters": ["av"]}))
+        .expect("filters apply");
+    let policies = &server.session.as_ref().unwrap().exception_policies;
+    assert_eq!(policies.mode_for(AV), Some(ExceptionPolicyMode::Break));
+    assert_eq!(
+        policies.mode_for(DZ),
+        Some(ExceptionPolicyMode::SecondChance)
+    );
+
+    // A later request replaces the earlier one.
+    server
+        .on_set_exception_breakpoints(&json!({"filters": ["dz"]}))
+        .expect("filters apply");
+    let policies = &server.session.as_ref().unwrap().exception_policies;
+    assert_eq!(
+        policies.mode_for(AV),
+        Some(ExceptionPolicyMode::SecondChance)
+    );
+    assert_eq!(policies.mode_for(DZ), Some(ExceptionPolicyMode::Break));
+
+    // An unknown filter or a condition is refused, and changes nothing.
+    assert!(
+        server
+            .on_set_exception_breakpoints(&json!({"filters": ["bogus"]}))
+            .is_err()
+    );
+    assert!(
+        server
+            .on_set_exception_breakpoints(&json!({
+                "filters": [],
+                "filterOptions": [{"filterId": "av", "condition": "x"}],
+            }))
+            .is_err()
+    );
+    let policies = &server.session.as_ref().unwrap().exception_policies;
+    assert_eq!(policies.mode_for(DZ), Some(ExceptionPolicyMode::Break));
 }
 
 #[test]

@@ -245,7 +245,9 @@ Data breakpoints use {command}`ba` on variable storage, including fields and arr
 
 No DAP breakpoint type names a hypercall's caller, so set a [hypercall breakpoint](../using/breakpoints.md#hypercall-breakpoints) with {command}`!hvbp` in the Debug Console. The client's continue honors its filter, and its hit is reported as a breakpoint stop.
 
-ntoseye does not support exception breakpoints, so configure the exception policy with {command}`sx` commands in the console. When `sxe ld` causes a stop at a module load, the adapter reports it with the reason `module load`, and the console shows the stop's `ModLoad:` line. A stop from `sxe ud` has the reason `module unload`, with its `Unload module` line.
+The editor's exception breakpoints set the exception policy that the {command}`sx` commands set. The adapter offers access violation, illegal instruction, integer divide by zero, and stack overflow, checked by default: a checked one stops at the first chance (`sxe`), and an unchecked one only at the second (`sxd`), when no handler took the exception. Module load and module unload, unchecked by default, stop at each driver or module that loads or unloads (`sxe ld`, `sxe ud`). Each change in the editor replaces the policy of all six, so set any other exception's policy, a module filter such as `sxe ld:mydriver`, or a command to run at the stop, with {command}`sx` commands in the console. Conditions on exception breakpoints are refused.
+
+When a module load stops, the adapter reports it with the reason `module load`, and the console shows the stop's `ModLoad:` line. A module unload stop has the reason `module unload`, with its `Unload module` line.
 
 All breakpoint types accept conditions and hit counts. `hitCondition` must be a decimal pass count, so values such as `>5` or `0x10` are not valid. Breakpoint conditions in the editor also use decimal literals, while conditions in the console use the session radix.
 

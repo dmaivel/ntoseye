@@ -6,8 +6,9 @@ use std::result;
 use serde_json::{Value, json};
 
 use crate::breakpoints::{Breakpoint, BreakpointConfig};
-use crate::dbg_backend::WatchpointAccess;
+use crate::dbg_backend::{ModuleEvent, WatchpointAccess};
 use crate::error::Result;
+use crate::exception_policy::ExceptionPolicyMode;
 use crate::session::Session;
 use crate::types::VirtAddr;
 
@@ -267,23 +268,132 @@ impl Server {
         value
     }
 
-    /// Accept an empty filter list; reject unsupported exception filters.
-    pub(super) fn on_set_exception_breakpoints(args: &Value) -> Handled {
-        for field in ["filters", "filterOptions", "exceptionOptions"] {
+    /// Apply the client's exception filters as `sx` policy: a checked
+    /// exception filter breaks at the first chance (`sxe`), an unchecked one
+    /// only at the second (`sxd`); a checked module event stops at each load
+    /// or unload (`sxe ld`), an unchecked one does not (`sxi ld`).
+    /// Conditions on filters are refused.
+    pub(super) fn on_set_exception_breakpoints(&mut self, args: &Value) -> Handled {
+        for field in ["filterOptions", "exceptionOptions"] {
             let requested = args
                 .get(field)
                 .and_then(Value::as_array)
                 .is_some_and(|entries| !entries.is_empty());
             if requested {
                 return Err(format!(
-                    "exception breakpoints are not supported; '{field}' cannot be honored. \
-                     Use the REPL's `sx` commands for exception policy"
+                    "exception filters take no conditions; '{field}' cannot be honored. Use the \
+                     console's `sx` commands, such as `sxe -c \"<command>\" av`"
                 ));
             }
         }
-        Ok(Some(json!({"breakpoints": []})))
+        let checked: Vec<&str> = args
+            .get("filters")
+            .and_then(Value::as_array)
+            .map(|filters| filters.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if let Some(unknown) = checked
+            .iter()
+            .find(|name| !EXCEPTION_FILTERS.iter().any(|filter| filter.name == **name))
+        {
+            return Err(format!("unknown exception filter '{unknown}'"));
+        }
+        let session = self.session()?;
+        let mut breakpoints = Vec::new();
+        for filter in EXCEPTION_FILTERS {
+            let on = checked.contains(&filter.name);
+            match filter.event {
+                FilterEvent::Exception(code) => session.exception_policies.set(
+                    code,
+                    if on {
+                        ExceptionPolicyMode::Break
+                    } else {
+                        ExceptionPolicyMode::SecondChance
+                    },
+                ),
+                FilterEvent::Module(event) => session
+                    .set_module_event_filter(
+                        event,
+                        None,
+                        if on {
+                            ExceptionPolicyMode::Break
+                        } else {
+                            ExceptionPolicyMode::Ignore
+                        },
+                        None,
+                    )
+                    .map_err(|error| error.to_string())?,
+            }
+            if on {
+                breakpoints.push(json!({"verified": true}));
+            }
+        }
+        Ok(Some(json!({"breakpoints": breakpoints})))
     }
 }
+
+/// What an exception filter governs.
+#[derive(Clone, Copy)]
+pub enum FilterEvent {
+    Exception(u32),
+    Module(ModuleEvent),
+}
+
+/// An exception filter the adapter offers, by its `sx` name.
+pub struct ExceptionFilter {
+    pub name: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub event: FilterEvent,
+    /// Checked unless the client changes it: exceptions break as they do
+    /// without a policy, and module events do not stop.
+    pub default: bool,
+}
+
+/// The filters the adapter offers in `exceptionBreakpointFilters`.
+pub const EXCEPTION_FILTERS: &[ExceptionFilter] = &[
+    ExceptionFilter {
+        name: "av",
+        label: "Access violation",
+        description: "STATUS_ACCESS_VIOLATION (0xC0000005): break at the first chance, or only at the second when unchecked (sxe/sxd av)",
+        event: FilterEvent::Exception(0xc000_0005),
+        default: true,
+    },
+    ExceptionFilter {
+        name: "ii",
+        label: "Illegal instruction",
+        description: "STATUS_ILLEGAL_INSTRUCTION (0xC000001D) (sxe/sxd ii)",
+        event: FilterEvent::Exception(0xc000_001d),
+        default: true,
+    },
+    ExceptionFilter {
+        name: "dz",
+        label: "Integer divide by zero",
+        description: "STATUS_INTEGER_DIVIDE_BY_ZERO (0xC0000094) (sxe/sxd dz)",
+        event: FilterEvent::Exception(0xc000_0094),
+        default: true,
+    },
+    ExceptionFilter {
+        name: "sov",
+        label: "Stack overflow",
+        description: "STATUS_STACK_OVERFLOW (0xC00000FD) (sxe/sxd sov)",
+        event: FilterEvent::Exception(0xc000_00fd),
+        default: true,
+    },
+    ExceptionFilter {
+        name: "ld",
+        label: "Module load",
+        description: "Stop when a driver or module loads (sxe ld)",
+        event: FilterEvent::Module(ModuleEvent::Load),
+        default: false,
+    },
+    ExceptionFilter {
+        name: "ud",
+        label: "Module unload",
+        description: "Stop when a driver or module unloads (sxe ud)",
+        event: FilterEvent::Module(ModuleEvent::Unload),
+        default: false,
+    },
+];
 
 /// Translate a DAP breakpoint's condition and hit condition into ntoseye's
 /// breakpoint configuration. `hitCondition` is a plain pass count, matching

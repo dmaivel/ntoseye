@@ -23,6 +23,7 @@ Keeping this file:
 - `dx` reads the core of the debugger data model: `Debugger.Sessions`, `@$cursession`, `@$curprocess`, and `@$curthread`, their processes, threads, and modules indexed as in WinDbg, `.Count()`, and `KernelObject`, which reads on as a typed expression, such as `dx @$curprocess.KernelObject.UniqueProcessId`. Queries with lambdas (`.Where`) are still not supported. See [dx](https://ntoseye.com/reference/expressions/#the-debugger-data-model).
 - `!apic` shows the local APIC of the processor that entered the debugger over KD, in xAPIC or x2APIC mode: its ID, priorities, LVT, timer, ICR, and the vectors in service and requested. `!ioapic` shows each I/O APIC and PIC line the HAL set up, with its vector, IRQL, trigger, polarity, and target, on every backend and in kernel dumps.
 - `!sysinfo machineid` and `!sysinfo smbios` read the machine's SMBIOS table: the BIOS, system, and baseboard identity, and the processor and memory structures. `!sysinfo cpuinfo` shows the processor as `!cpuinfo` does.
+- The DAP adapter offers exception breakpoints: access violation, illegal instruction, divide by zero, and stack overflow break at the first chance when checked and the second when not, and module load and unload stop when checked. See [breakpoints in DAP](https://ntoseye.com/integrations/dap/#breakpoints).
 
 ### Changed
 

@@ -539,7 +539,7 @@ impl Server {
             "setInstructionBreakpoints" => self.on_set_instruction_breakpoints(&request.arguments),
             "dataBreakpointInfo" => self.on_data_breakpoint_info(&request.arguments),
             "setDataBreakpoints" => self.on_set_data_breakpoints(&request.arguments),
-            "setExceptionBreakpoints" => Self::on_set_exception_breakpoints(&request.arguments),
+            "setExceptionBreakpoints" => self.on_set_exception_breakpoints(&request.arguments),
             "exceptionInfo" => self.on_exception_info(),
             "readMemory" => self.on_read_memory(&request.arguments),
             "writeMemory" => self.on_write_memory(&request.arguments),
@@ -727,6 +727,15 @@ fn capabilities() -> Value {
         "supportTerminateDebuggee": false,
         "supportsRestartRequest": false,
         "supportsStepBack": false,
+        "exceptionBreakpointFilters": breakpoints::EXCEPTION_FILTERS
+            .iter()
+            .map(|filter| json!({
+                "filter": filter.name,
+                "label": filter.label,
+                "description": filter.description,
+                "default": filter.default,
+            }))
+            .collect::<Vec<_>>(),
     })
 }
 
