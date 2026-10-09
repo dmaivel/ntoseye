@@ -194,6 +194,14 @@ impl DebugBackend for KdBackendHandle {
         self.lock().read_io_port(port, size)
     }
 
+    fn read_device_memory(&mut self, processor: u16, address: u64, buf: &mut [u8]) -> Result<()> {
+        self.lock().read_device_memory(processor, address, buf)
+    }
+
+    fn serving_processor(&self) -> Option<u16> {
+        self.lock().serving_processor()
+    }
+
     fn write_io_port(&mut self, port: u64, size: u8, value: u32) -> Result<()> {
         self.lock().write_io_port(port, size, value)
     }

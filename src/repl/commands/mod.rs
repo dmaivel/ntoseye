@@ -26,6 +26,7 @@ mod fs;
 mod hardware;
 mod heap;
 mod image;
+mod interrupts;
 pub mod memory;
 pub mod meta;
 pub mod mm;

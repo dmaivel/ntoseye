@@ -156,7 +156,7 @@ fn processor_count(state: &mut ReplState<'_>) -> u16 {
         .unwrap_or(1)
 }
 
-fn parse_processor(state: &mut ReplState<'_>, text: Option<&str>) -> Result<u16> {
+pub fn parse_processor(state: &mut ReplState<'_>, text: Option<&str>) -> Result<u16> {
     let count = processor_count(state);
     let processor = match text {
         Some(text) => {
@@ -543,7 +543,7 @@ fn print_selectors(detail: &GdtDetail, selectors: impl Iterator<Item = u16>) {
     outln!();
 }
 
-fn print_cpuinfo(detail: &CpuInfoDetail) {
+pub fn print_cpuinfo(detail: &CpuInfoDetail) {
     if detail.source == "triage-dump PRCB metadata" {
         outln!("CPU information from triage-dump PRCB metadata");
         outln!("  processor number    : {}", detail.processor);

@@ -957,6 +957,29 @@ pub trait DebugBackend {
         Err(Error::NotSupported)
     }
 
+    /// Read device registers at physical address `address` on `processor`,
+    /// mapped uncached, with one access of `buf.len()` bytes: KD asks the
+    /// target (`DbgKdReadPhysicalMemoryApi`, uncached), which reads on the
+    /// [`Self::serving_processor`], so a register each processor has its
+    /// own of, such as the local APIC's, is that processor's. Host memory, a
+    /// GDB stub's physical reads, and a dump reach RAM only.
+    fn read_device_memory(
+        &mut self,
+        _processor: u16,
+        _address: u64,
+        _buf: &mut [u8],
+    ) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    /// The processor that executes what the target is asked to do while it
+    /// is halted: under KD, the one that entered the debugger, whatever
+    /// processor a request names, so an MSR or a device register read is
+    /// that processor's. `None` for a backend that reads none.
+    fn serving_processor(&self) -> Option<u16> {
+        None
+    }
+
     /// Whether the transport can read PCI configuration space (`!pci`). KD
     /// asks the HAL (`DbgKdGetBusDataApi`); a QEMU GDB stub reads the ECAM
     /// window in its physical-memory mode. Host memory and a dump hold only

@@ -500,6 +500,7 @@ pub fn read_virtual_memory<T: Read + Write>(
         processor,
         addr,
         len,
+        DBGKD_CACHING_UNKNOWN,
     )
 }
 
@@ -517,6 +518,32 @@ pub fn read_physical_memory<T: Read + Write>(
         processor,
         addr,
         len,
+        DBGKD_CACHING_UNKNOWN,
+    )
+}
+
+/// `DBGKD_CACHING_*`: how the target maps a physical page it reads, passed
+/// in the request's `ActualBytesRead`.
+pub const DBGKD_CACHING_UNKNOWN: u32 = 0;
+pub const DBGKD_CACHING_UNCACHED: u32 = 2;
+
+/// `DbgKdReadPhysicalMemoryApi` with the page mapped uncached, for device
+/// registers: the target reads them on `processor` itself, so a
+/// per-processor register (the local APIC) is that processor's.
+pub fn read_physical_memory_uncached<T: Read + Write>(
+    framing: &mut KdFraming<T>,
+    processor: u16,
+    addr: u64,
+    len: u32,
+) -> Result<Vec<u8>> {
+    read_memory(
+        framing,
+        DBGKD_READ_PHYSICAL_MEMORY,
+        "physical",
+        processor,
+        addr,
+        len,
+        DBGKD_CACHING_UNCACHED,
     )
 }
 
@@ -529,10 +556,12 @@ fn read_memory<T: Read + Write>(
     processor: u16,
     addr: u64,
     len: u32,
+    caching: u32,
 ) -> Result<Vec<u8>> {
     let mut header = make_header(api, processor);
     write_u64(&mut header, UNION_OFFSET, addr);
     write_u32(&mut header, UNION_OFFSET + 8, len);
+    write_u32(&mut header, UNION_OFFSET + 12, caching);
     let (parsed, reply_header, data) = send_manipulate(framing, &header, &[])?;
     check_status(&parsed, api)?;
     let actual = read_u32(&reply_header, UNION_OFFSET + 12);

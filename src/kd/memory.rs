@@ -96,6 +96,26 @@ impl KdBackend {
         Ok(())
     }
 
+    /// Device registers at physical `addr`, read by the target on
+    /// `processor` with the page mapped uncached, in one access.
+    pub fn read_device_bytes(&mut self, processor: u16, addr: u64, buf: &mut [u8]) -> Result<()> {
+        self.require_remote_memory_stopped()?;
+        let len = u32::try_from(buf.len())
+            .map_err(|_| Error::Kd("device read exceeds KD's length field".into()))?;
+        let data = with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
+            api::read_physical_memory_uncached(framing, processor, addr, len)
+        })?;
+        if data.len() != buf.len() {
+            return Err(Error::Kd(format!(
+                "device read at {addr:#x}: the target read {} of {} bytes",
+                data.len(),
+                buf.len()
+            )));
+        }
+        buf.copy_from_slice(&data);
+        Ok(())
+    }
+
     /// Page-table entries for the host page walk, a line of them per
     /// request: a walk of adjacent pages shares its upper-level entries and
     /// its run of PTEs, so the four reads a page costs become closer to one.

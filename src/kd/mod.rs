@@ -559,6 +559,15 @@ impl DebugBackend for KdBackend {
         })
     }
 
+    fn read_device_memory(&mut self, processor: u16, address: u64, buf: &mut [u8]) -> Result<()> {
+        self.validate_processor(processor)?;
+        self.read_device_bytes(processor, address, buf)
+    }
+
+    fn serving_processor(&self) -> Option<u16> {
+        Some(self.last_stop_processor)
+    }
+
     fn write_io_port(&mut self, port: u64, size: u8, value: u32) -> Result<()> {
         let processor = self.current_processor;
         with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
