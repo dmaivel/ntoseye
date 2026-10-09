@@ -13,7 +13,7 @@ Keeping this file:
 - To release, rename "## Unreleased" to "## vX.Y.Z (YYYY-MM-DD)", the version in Cargo.toml. The release workflow refuses a tag whose version has no section here, or an empty one; dist publishes the section as the release notes, under the tag as the release title.
 -->
 
-## Unreleased
+## v0.48.0 (2026-10-08)
 
 ntoseye can now show where a driver's I/O is stuck, in its virtio queues, StorPort adapters or NDIS miniports, and gets more out of a crash dump: the blackboxes, the KMDF log and the ETW sessions that Windows saves in it, and `dx` as WinDbg lays it out. In Tern, the browser now steps the target and reads memory as types.
 
