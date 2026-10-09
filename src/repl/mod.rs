@@ -1108,8 +1108,10 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
 
     let leave_running_on_exit =
         breakpoint_cleanup_succeeded && (resume_on_exit || state.ctx.backend.is_running());
-    if let Err(e) = state.ctx.backend.prepare_for_exit(leave_running_on_exit) {
-        error!("failed to prepare backend for exit: {e}");
+    match state.ctx.backend.prepare_for_exit(leave_running_on_exit) {
+        Ok(()) if leave_running_on_exit => state.ctx.mark_kd_debugger_absent(),
+        Ok(()) => {}
+        Err(e) => error!("failed to prepare backend for exit: {e}"),
     }
 
     prompt

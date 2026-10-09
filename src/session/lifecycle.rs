@@ -434,10 +434,10 @@ impl Session {
         let cleanup = self
             .remove_all_breakpoints()
             .and_then(|()| self.disarm_traps());
-        if cleanup.is_ok() {
-            self.mark_kd_debugger_absent();
-        }
-        prepare_backend_after_cleanup(self.backend.as_mut(), cleanup)
+        // Past this, the sites are restored and the target resumed.
+        prepare_backend_after_cleanup(self.backend.as_mut(), cleanup)?;
+        self.mark_kd_debugger_absent();
+        Ok(())
     }
 
     /// Tell the kernel its KD debugger is leaving, by setting
@@ -445,10 +445,17 @@ impl Session {
     /// Otherwise its next debug print, and every driver load, which asks the
     /// debugger for a replacement image (`KdPullRemoteFile`, behind
     /// `.kdfiles`), waits for an answer from a debugger that is gone, and the
-    /// guest hangs. A debugger that attaches later sends a break-in, which
-    /// clears the flag. Best effort: a target where it cannot be written is
-    /// left as it was.
-    fn mark_kd_debugger_absent(&mut self) {
+    /// guest hangs until KD gives up on it, more than a minute for a driver
+    /// load. A debugger that attaches later sends a break-in, which clears
+    /// the flag.
+    ///
+    /// Call it once the target runs on its own: the kernel marks its debugger
+    /// present again on every packet it receives, so the continue that resumes
+    /// a halted target would undo a flag set before it. That needs guest
+    /// memory the host writes while the target runs; over a KD memory source,
+    /// which reaches memory only through a halted target, the flag is left as
+    /// it is.
+    pub fn mark_kd_debugger_absent(&self) {
         if !matches!(self.backend.name(), "kd" | "kdnet") {
             return;
         }
@@ -461,16 +468,10 @@ impl Session {
         else {
             return;
         };
-        let write = |session: &Self| {
-            session
-                .target
-                .kernel_address_space()
-                .write_bytes(address, &[1])
-        };
-        // Over a KD memory source a write needs the target halted.
-        if write(self).is_err() && self.backend.is_running() && self.interrupt().is_ok() {
-            let _ = write(self);
-        }
+        let _ = self
+            .target
+            .kernel_address_space()
+            .write_bytes(address, &[1]);
     }
 }
 

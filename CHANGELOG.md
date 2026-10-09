@@ -46,7 +46,7 @@ ntoseye can now show where a driver's I/O is stuck, in its virtio queues, StorPo
 
 ### Fixed
 
-- Detaching from KD no longer leaves the guest hanging at its next driver load or debug print, waiting for a debugger it believed was still attached.
+- Detaching from KD no longer leaves the guest hanging, for more than a minute, at its next driver load or debug print, waiting for a debugger it believed was still attached. This covers quitting the REPL as well as closing an MCP, SDK or DAP session, and a detach with breakpoints set or the target halted.
 - With the `gdb` backend, a breakpoint hit that ntoseye passes over itself (another process's under `/p`, a pass count, a false condition) no longer leaves the guest frozen between MCP, SDK or DAP calls while the status says it runs.
 - `bp`, `bu` and `g <address>` refuse an address inside an instruction, which corrupted it and could crash the guest, and name that instruction; where ntoseye cannot tell, they warn, and `/a` skips the check. See [where a code breakpoint can go](https://ntoseye.com/using/breakpoints/#where-a-code-breakpoint-can-go).
 - `bp <file>:<line>` sets a source breakpoint, as `bu` does, instead of failing.
