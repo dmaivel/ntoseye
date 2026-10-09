@@ -177,7 +177,30 @@ dx (unsigned long *)&((nt!_EPROCESS*)@$proc)->Flags
     0x144d0c01 [Type: unsigned long]
 ```
 
-`ntoseye` has no debugger data model, so `dx` does not take `@$curprocess`, `@$curthread`, `Debugger.*` or queries such as `.Where`, and says so. Use `@$proc` and `@$thread` for the current process and thread, and the [Python SDK](../scripting/sdk.md) to query processes, threads and modules. Nor does it have WinDbg's NatVis views, which summarize some types on their line (`Driver "\Driver\mouclass"` for a `_DRIVER_OBJECT`, `{134357425713268397}` for a `_LARGE_INTEGER`) and replace some expansions with their own lists: `dx` shows the type's fields, as WinDbg's `dx -nv` does. A `_UNICODE_STRING` still reads as its text.
+### The debugger data model
+
+`dx` also reads the core of WinDbg's debugger data model: `Debugger.Sessions`, `@$cursession`, `@$curprocess`, and `@$curthread`. A session has `Processes`, indexed by process ID. A process has `Name`, `Id`, `Threads`, indexed by thread ID, `Modules`, indexed from 0 (the kernel's modules for the System process), and `KernelObject`. A thread has `Id` and `KernelObject`, and a module has `Name`, `BaseAddress`, and `Size`. `.Count()` counts a collection, and an index is decimal unless written with `0x`, as in C++:
+
+```text
+dx @$curprocess
+@$curprocess                 : Idle
+    KernelObject     [Type: _EPROCESS]
+    Name             : Idle
+    Id               : 0x0
+    Threads
+    Modules
+dx @$curprocess.Threads.Count()
+@$curprocess.Threads.Count() : 0xc
+dx Debugger.Sessions[0].Processes[4].Modules[0]
+Debugger.Sessions[0].Processes[4].Modules[0]                 : \SystemRoot\system32\ntoskrnl.exe
+    Name             : \SystemRoot\system32\ntoskrnl.exe
+    BaseAddress      : 0xfffff80692820000
+    Size             : 0x1450000
+```
+
+`KernelObject` is the typed `_EPROCESS` or `_ETHREAD`, and an expression reads on from it as from any typed value, such as `dx @$curprocess.KernelObject.UniqueProcessId`. `-r2` and deeper expand the objects under the first level, a `KernelObject` into its fields.
+
+Queries that take a lambda, such as `.Where(p => p.Name == "lsass.exe")` or `.Select`, are not supported, and `dx` says so: index a collection, count it, or use the [Python SDK](../scripting/sdk.md) to filter processes, threads, and modules. Nor does `ntoseye` have WinDbg's NatVis views, which summarize some types on their line (`Driver "\Driver\mouclass"` for a `_DRIVER_OBJECT`, `{134357425713268397}` for a `_LARGE_INTEGER`) and replace some expansions with their own lists: `dx` shows the type's fields, as WinDbg's `dx -nv` does. A `_UNICODE_STRING` still reads as its text.
 
 ## Locals
 

@@ -16,6 +16,7 @@ mod cpu;
 mod diagnostics;
 pub mod display;
 mod dx;
+mod dx_model;
 mod etw;
 mod exceptions;
 pub mod exec;

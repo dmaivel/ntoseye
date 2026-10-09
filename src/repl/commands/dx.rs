@@ -1,5 +1,6 @@
 //! `dx`: a typed expression's value and its fields, laid out as WinDbg's
-//! `dx` lays them out, without the debugger data model or NatVis.
+//! `dx` lays them out, and the core of the debugger data model
+//! (`dx_model`); queries with lambdas and NatVis are not supported.
 
 use std::sync::Arc;
 
@@ -12,6 +13,9 @@ use crate::layout::{
 use crate::types::VirtAddr;
 use crate::typeview::TypeView;
 
+use super::dx_model::{
+    self as model, ModelResult, ModelValue, is_model_expression, uses_lambda_query,
+};
 use super::types::MAX_RECURSION_DEPTH;
 use crate::repl::*;
 
@@ -20,15 +24,14 @@ repl_command! {
     names: ["dx"],
     usage: "dx [-r<depth>] <expression>",
     summary: "Show a typed expression's value and its fields.",
-    details: "Evaluates an expression with casts, ->, ., [] and *, such as dx -r1 (*((nt!_IO_STACK_LOCATION *)0xffff...)) or dx ((nt!_EPROCESS*)@rcx)->UniqueProcessId, and shows its value with its type, then its fields -r levels deep (1 by default, -r0 for the value alone), following a pointer to a structure to the structure. Types read as in WinDbg (unsigned long, _EPROCESS *), and a cast takes them as WinDbg writes them, such as (unsigned long *). A pointer to a number shows the number it points to, a char or wchar_t pointer its string, and a function pointer the function. Numbers are decimal unless written with 0x, as in C++. @$proc, @$thread, @$teb and @$peb are typed pointers. The debugger data model (@$curprocess, @$curthread, Debugger.*, and queries such as .Where) and NatVis views (such as a driver object's) are not supported; the Python SDK answers those queries. -nv is accepted as in WinDbg.",
+    details: "Evaluates an expression with casts, ->, ., [] and *, such as dx -r1 (*((nt!_IO_STACK_LOCATION *)0xffff...)) or dx ((nt!_EPROCESS*)@rcx)->UniqueProcessId, and shows its value with its type, then its fields -r levels deep (1 by default, -r0 for the value alone), following a pointer to a structure to the structure. Types read as in WinDbg (unsigned long, _EPROCESS *), and a cast takes them as WinDbg writes them, such as (unsigned long *). A pointer to a number shows the number it points to, a char or wchar_t pointer its string, and a function pointer the function. Numbers are decimal unless written with 0x, as in C++. @$proc, @$thread, @$teb and @$peb are typed pointers. The debugger data model's objects read as in WinDbg: Debugger.Sessions, @$cursession, @$curprocess, and @$curthread, a session's Processes (indexed by process ID), a process's Name, Id, Threads (indexed by thread ID), and Modules (indexed from 0), a thread's Id, a module's Name, BaseAddress, and Size, and .Count() on a collection, such as dx @$curprocess.Threads.Count() or dx Debugger.Sessions[0].Processes[4].Modules. KernelObject is the typed _EPROCESS or _ETHREAD, which reads on as a typed expression: dx @$curprocess.KernelObject.Pcb. Queries with lambdas (.Where, .Select) and NatVis views (such as a driver object's) are not supported; the Python SDK answers those queries. -nv is accepted as in WinDbg.",
     completion: Expression,
 }
 
-/// What `dx` refuses: the debugger data model, which only WinDbg has.
-const DX_DATA_MODEL: &str = "the debugger data model (@$curprocess, @$curthread, Debugger.*, and \
-     queries such as .Where) is not supported: dx evaluates typed expressions. @$proc and \
-     @$thread are the current process and thread as _EPROCESS * and _ETHREAD *, and the Python \
-     SDK queries processes, threads and modules";
+/// What `dx` refuses: the data model's queries with lambdas.
+const DX_QUERIES: &str = "queries with lambdas (.Where, .Select, .First, .OrderBy and the like) \
+     are not supported; index a collection ([pid], [tid], [n]) or count it with .Count(), and \
+     use the Python SDK to filter processes, threads and modules";
 
 /// The elements `dx` lists of an array before its `[...]` line.
 const MAX_DX_ELEMENTS: u32 = 100;
@@ -73,26 +76,6 @@ fn parse_dx_args(raw: &str) -> std::result::Result<(usize, &str), String> {
         rest = after.trim_start();
     }
     Ok((depth.min(MAX_RECURSION_DEPTH), rest.trim_end()))
-}
-
-/// Whether `text` asks for the debugger data model rather than a typed
-/// expression.
-fn uses_data_model(text: &str) -> bool {
-    const QUERIES: [&str; 9] = [
-        ".Where(",
-        ".Select(",
-        ".First(",
-        ".Count(",
-        ".OrderBy(",
-        ".Take(",
-        ".Any(",
-        ".All(",
-        ".Flatten(",
-    ];
-    text.contains("@$cur")
-        || text.trim_start().starts_with("Debugger")
-        || text.contains("=>")
-        || QUERIES.iter().any(|query| text.contains(query))
 }
 
 /// One line of `dx` output and the lines under it.
@@ -239,19 +222,91 @@ impl ReplState<'_> {
             outln!("{}\n", command_help(invocation.name));
             return Ok(());
         }
-        if uses_data_model(text) {
-            error!("dx: {DX_DATA_MODEL}");
+        if uses_lambda_query(text) {
+            error!("dx: {DX_QUERIES}");
             return Ok(());
         }
-        let root = Expr::parse_with_radix(text, NumberRadix::Decimal).and_then(|expr| {
-            let value = expr.evaluate(&self.ctx.target)?;
-            self.dx_root(text, &expr, &value, depth)
-        });
+        let root = if is_model_expression(text) {
+            match model::evaluate(&self.ctx.target, text) {
+                Ok(ModelResult::Value(value)) => Ok(self.dx_model_line(text, &value, depth)),
+                Ok(ModelResult::Typed { expression }) => self.dx_typed(text, &expression, depth),
+                Err(error) => Err(error),
+            }
+        } else {
+            self.dx_typed(text, text, depth)
+        };
         match root {
             Ok(root) => print_dx(&root),
             Err(error) => error!("dx: {error}"),
         }
         Ok(())
+    }
+
+    /// The `dx` tree of the typed expression `expression`, named `name`.
+    fn dx_typed(&self, name: &str, expression: &str, depth: usize) -> Result<DxLine> {
+        let expr = Expr::parse_with_radix(expression, NumberRadix::Decimal)?;
+        let value = expr.evaluate(&self.ctx.target)?;
+        self.dx_root(name, &expr, &value, depth)
+    }
+
+    /// The `dx` tree of a data model value named `name`: its summary, then
+    /// `depth` levels of its properties or a collection's elements. A
+    /// `KernelObject` property is its typed object.
+    fn dx_model_line(&self, name: &str, value: &ModelValue, depth: usize) -> DxLine {
+        let target = &self.ctx.target;
+        let collection = model::is_collection(value);
+        let properties = model::properties(value);
+        let mut line = DxLine {
+            name: Some(name.to_string()),
+            value: model::summary(value),
+            expandable: collection || !properties.is_empty(),
+            ..DxLine::default()
+        };
+        if depth == 0 {
+            return line;
+        }
+        if collection {
+            match model::elements(target, value) {
+                Ok(elements) => {
+                    for (key, element) in elements {
+                        line.children.push(self.dx_model_line(
+                            &format!("[{key:#x}]"),
+                            &element,
+                            depth - 1,
+                        ));
+                    }
+                }
+                Err(error) => line.children.push(DxLine {
+                    value: Some(error.to_string()),
+                    ..DxLine::default()
+                }),
+            }
+            return line;
+        }
+        for property in properties {
+            let child = match model::property(value, property) {
+                Ok(ModelResult::Value(child)) => self.dx_model_line(property, &child, depth - 1),
+                Ok(ModelResult::Typed { expression }) => self
+                    .dx_typed(property, &expression, depth - 1)
+                    .map(|mut typed| {
+                        // WinDbg shows a kernel object by its type alone.
+                        typed.value = None;
+                        typed
+                    })
+                    .unwrap_or_else(|error| DxLine {
+                        name: Some(property.to_string()),
+                        value: Some(error.to_string()),
+                        ..DxLine::default()
+                    }),
+                Err(error) => DxLine {
+                    name: Some(property.to_string()),
+                    value: Some(error.to_string()),
+                    ..DxLine::default()
+                },
+            };
+            line.children.push(child);
+        }
+        line
     }
 
     /// The `dx` tree of `value`, the result of `expr`, written `text`.
