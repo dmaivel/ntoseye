@@ -371,14 +371,15 @@ fn event(e: &etw::EtwEvent) -> EtwEvent {
 
 /// `!wmitrace.logdump`: a logger's in-memory events, oldest first.
 pub fn event_dump(dump: &EtwEventDumpDetail) -> EtwEventDump {
+    let decoded = &dump.events;
     EtwEventDump {
         logger: logger(&dump.logger),
-        buffers_walked: dump.buffers_walked,
+        buffers_walked: decoded.buffers_walked,
         list_stop: dump.list_stop.clone(),
-        total_events: dump.total_events,
+        total_events: decoded.total_events,
         qpc_frequency: dump.qpc_frequency,
         cpu_mhz: dump.cpu_mhz,
-        issues: dump
+        issues: decoded
             .issues
             .iter()
             .map(|issue| EtwEventIssue {
@@ -387,7 +388,7 @@ pub fn event_dump(dump: &EtwEventDumpDetail) -> EtwEventDump {
                 reason: issue.reason.clone(),
             })
             .collect(),
-        message_format_note: dump.message_format_note.clone(),
-        events: dump.events.iter().map(event).collect(),
+        message_format_note: decoded.message_format_note.clone(),
+        events: decoded.events.iter().map(event).collect(),
     }
 }

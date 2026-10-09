@@ -60,6 +60,57 @@ blocks = dbg.inspect.version().dump.tagged_blocks
 data = dbg.inspect.read_tagged("{12345678-1234-1234-1234-123456789abc}")
 ```
 
+## ETW sessions in a minidump
+
+In a live target or a full or kernel dump, the `!wmitrace` commands read the ETW trace sessions from kernel memory. A minidump does not hold that memory. But for each session that is started with `EVENT_TRACE_ADDTO_TRIAGE_DUMP`, the kernel saves the trace buffers in the dump as tagged data, `nt!EtwSecondaryDumpDataGuid` in {command}`.enumtag`. On Windows 11 these sessions are EventLog-System, WiFiSession, CldFltLog and the session of the RDP display driver. In a minidump, the `!wmitrace` commands read these sessions instead. {command}`!wmitrace.strdump` lists them:
+
+```text
+4 loggers in the dump's ETW data (0x294ec bytes, nt!EtwSecondaryDumpDataGuid)
+
+Id    Name                                         Mode        BufSize  Clock        Buffers  Data     StartTime
+0x0a  EventLog-System                              0x98800180  64 KB    SystemTime   2        0x13b0   2026-10-06 06:42:28.6372592
+0x0d  Microsoft-Windows-Rdp-Graphics-RdpIdd-Trace  0x80800002  64 KB    PerfCounter  8        0x240    2026-10-06 06:42:28.6498837
+0x15  WiFiSession                                  0x80800002  80 KB    PerfCounter  8        0x27cf0  2026-10-06 06:42:28.6535093
+0x1d  CldFltLog                                    0x90800002  4 KB     SystemTime   2        0x90     2026-10-06 06:42:57.0344948
+```
+
+The kernel saves every buffer of the session, the same buffers that a kernel dump of the same crash holds in memory, and cuts each one after its last event. `!wmitrace.strdump <logger>` lists the buffers at their offsets in the tagged data:
+
+```text
+Logger 0x15 'WiFiSession' in the dump's ETW data
+  8 buffers of 0x14000 bytes
+
+Offset    State           Cpu  Sequence  Saved  Current  Data    Refs
++0x172a   GeneralLogging  2    1         0x0    0x80d0   0x80d0  15
++0x97fa   GeneralLogging  3    2         0x0    0xa468   0xa468  15
++0x13c62  GeneralLogging  1    3         0x0    0xae68   0xae68  15
++0x1eaca  GeneralLogging  0    4         0x0    0xa830   0xa830  15
++0x292fa  Free            0    5         0x0    0x48     0x48    0
++0x29342  Free            0    6         0x0    0x48     0x48    0
++0x2938a  Free            0    7         0x0    0x48     0x48    0
++0x293d2  Free            0    8         0x0    0x48     0x48    0
+```
+
+{command}`!wmitrace.logdump` decodes the events of these buffers, as it decodes them in memory:
+
+```text
+Logger 0x0a 'EventLog-System' in the dump's ETW data
+  18 events in 2 buffers (SystemTime clock), showing the last 1
+
+[0]0004.2358::2026-10-06 18:29:29.5234029 event {67dc0d66-3695-47c0-9642-33f76f7bd7ad} id 0 v0 opcode 0 task 0 level 5 keyword 0x0
+    extended SID (0xc bytes) 010100000000000512000000
+    extended PROV_TRAITS (0x38 bytes) 38004d6963726f736f66742e57696e646f77732e48797065722d562e566d5377...
+    extended EVENT_SCHEMA_TL (0x36 bytes) 36008000576f726b4974656d20436f6d706c6574656400576f726b6572526f75...
+    0000  43 00 74 00 72 00 6c 00 4d 00 65 00 73 00 73 00  C.t.r.l.M.e.s.s.
+    0010  61 00 67 00 65 00 73 00 57 00 6f 00 72 00 6b 00  a.g.e.s.W.o.r.k.
+    0020  49 00 74 00 65 00 6d 00 00 00 3f 01 00 00 00 00  I.t.e.m...?.....
+    0030  00 00                                            ..
+```
+
+{command}`!wmitrace.logsave` saves the buffers of a session as an .etl file. The tagged data records only some fields of each session. {command}`!wmitrace.logger` shows them: the logger mode, the buffer size, the number of buffers, the clock type, and the start time. The counters of the session are only in a full or kernel dump.
+
+WinDbg's `!wmitrace.strdump` lists only the first of these sessions in a minidump, and its `!wmitrace.logdump` and `!wmitrace.logsave` cannot read the buffers.
+
 ## Writing a dump from a live target
 
 To write a dump from a live halted target, use the WinDbg-compatible command:

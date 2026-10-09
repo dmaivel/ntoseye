@@ -20,7 +20,9 @@ use std::sync::Arc;
 
 use crate::backend::MemoryOps;
 use crate::bugchecks::looks_like_kernel_pointer;
-use crate::bytes::{get_u16, get_u32, get_u64, write_u16, write_u32, write_u64};
+use crate::bytes::{
+    get_u16, get_u32, get_u64, read_u16, read_u32, read_u64, write_u16, write_u32, write_u64,
+};
 use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix};
 use crate::kuser_shared::KuserSharedData;
@@ -29,6 +31,8 @@ use crate::target::{ListCursor, Target};
 use crate::triage_report::time::filetime_to_iso;
 use crate::types::VirtAddr;
 use crate::wpp::{TmfMessage, format_message};
+
+pub mod dump;
 
 /// Most `GlobalList` nodes walked for one logger; a logger's `MaximumBuffers`
 /// is far below this.
@@ -299,6 +303,8 @@ pub struct EtwLoggerTable {
 /// One trace buffer (`_WMI_BUFFER_HEADER`) of a logger.
 #[derive(Debug, Clone)]
 pub struct EtwBuffer {
+    /// The buffer's kernel address or, for a buffer out of a minidump's ETW
+    /// data (see [`dump`]), the offset of its header in that block.
     pub address: VirtAddr,
     pub state: u32,
     pub state_name: String,
@@ -456,6 +462,7 @@ pub fn format_message_record(
 /// An event with the buffer it came from and its time.
 #[derive(Debug, Clone)]
 pub struct EtwEvent {
+    /// The [`EtwBuffer::address`] of its buffer.
     pub buffer: VirtAddr,
     pub processor: u16,
     /// FILETIME, when the logger's clock converts to one.
@@ -469,6 +476,7 @@ pub struct EtwEvent {
 /// A buffer whose events could not all be decoded.
 #[derive(Debug, Clone)]
 pub struct EtwBufferIssue {
+    /// The [`EtwBuffer::address`] of the buffer.
     pub buffer: VirtAddr,
     pub offset: u32,
     pub reason: String,
@@ -478,18 +486,24 @@ pub struct EtwBufferIssue {
 #[derive(Debug, Clone)]
 pub struct EtwEventDump {
     pub logger: EtwLogger,
-    pub buffers_walked: usize,
     /// Why the `GlobalList` walk ended before returning to its head.
     pub list_stop: Option<String>,
-    /// Buffers skipped whole (compressed) and walks that stopped early.
-    pub issues: Vec<EtwBufferIssue>,
-    /// Events found before `-t` kept the most recent.
-    pub total_events: usize,
-    pub events: Vec<EtwEvent>,
     /// QPC frequency used for PerfCounter timestamps.
     pub qpc_frequency: Option<u64>,
     /// Processor speed used for CpuCycle timestamps.
     pub cpu_mhz: Option<u64>,
+    pub events: EtwEvents,
+}
+
+/// Events decoded out of a logger's buffers, oldest first.
+#[derive(Debug, Clone)]
+pub struct EtwEvents {
+    pub buffers_walked: usize,
+    /// Buffers skipped whole (compressed) and walks that stopped early.
+    pub issues: Vec<EtwBufferIssue>,
+    /// Events found before `most_recent` kept the newest.
+    pub total_events: usize,
+    pub events: Vec<EtwEvent>,
     /// Why some WPP messages have no `message_format`; `None` when every
     /// one has.
     pub message_format_note: Option<String>,
@@ -936,9 +950,98 @@ fn select_logger<'t>(
     })
 }
 
+/// Decodes the events of a logger's buffers one buffer at a time, wherever
+/// their bytes come from.
+#[derive(Default)]
+struct EventCollector {
+    /// Each event with the time it sorts by.
+    events: Vec<(u64, EtwEvent)>,
+    issues: Vec<EtwBufferIssue>,
+    walked: usize,
+}
+
+impl EventCollector {
+    /// Whether `buffer` holds events to decode; a compressed one is noted
+    /// as skipped.
+    fn wants(&mut self, types: &EtwTypes, buffer: &EtwBuffer) -> bool {
+        if types.is_compressed(buffer) {
+            self.issues.push(EtwBufferIssue {
+                buffer: buffer.address,
+                offset: 0,
+                reason: "buffer is compressed".into(),
+            });
+            return false;
+        }
+        buffer.data_end as usize > types.offsets.size
+    }
+
+    /// Decode `data`, the bytes of `buffer` from its header to its data end.
+    fn add(
+        &mut self,
+        target: &Target,
+        types: &EtwTypes,
+        time: &TimeBase,
+        buffer: &EtwBuffer,
+        data: &[u8],
+    ) {
+        self.walked += 1;
+        let (records, stop) =
+            decode_buffer_records(data, types.offsets.size, data.len(), &types.event_header);
+        if let Some(stop) = stop {
+            self.issues.push(EtwBufferIssue {
+                buffer: buffer.address,
+                offset: stop.offset,
+                reason: stop.reason,
+            });
+        }
+        // A WPP message without a timestamp sorts after the record before it
+        // in its buffer.
+        let mut previous = 0;
+        self.events.extend(records.into_iter().map(|record| {
+            let order = record.timestamp.unwrap_or(previous);
+            previous = order;
+            let message_format = format_message_record(
+                &record,
+                |guid, number| target.symbols.wpp_message(guid, number),
+                types.buffer.pointer_size,
+            );
+            let event = EtwEvent {
+                buffer: buffer.address,
+                processor: buffer.processor,
+                system_time: record.timestamp.and_then(|t| time.system_time(t)),
+                record,
+                message_format,
+            };
+            (order, event)
+        }));
+    }
+
+    /// The events in time order; `most_recent` keeps only that many of the
+    /// newest.
+    fn finish(mut self, most_recent: Option<usize>) -> EtwEvents {
+        self.events
+            .sort_by_key(|(order, event)| (*order, event.buffer.0, event.record.offset));
+        let total_events = self.events.len();
+        let events: Vec<EtwEvent> = self
+            .events
+            .into_iter()
+            .skip(most_recent.map_or(0, |count| total_events.saturating_sub(count)))
+            .map(|(_, event)| event)
+            .collect();
+        EtwEvents {
+            buffers_walked: self.walked,
+            issues: self.issues,
+            total_events,
+            message_format_note: message_format_note(&events),
+            events,
+        }
+    }
+}
+
 struct EtwTypes {
     logger: Arc<TypeInfo>,
     buffer: Arc<TypeInfo>,
+    offsets: BufferHeaderOffsets,
     event_header: EventHeaderLayout,
     /// `_ETW_BUFFER_STATE`'s variants; empty when the PDB lacks the enum.
     buffer_states: Vec<(String, i64)>,
@@ -952,15 +1055,56 @@ impl EtwTypes {
             .find(|(variant, _)| variant == name)
             .map(|(_, value)| *value)
     }
+
+    fn is_compressed(&self, buffer: &EtwBuffer) -> bool {
+        self.buffer_state("EtwBufferStateCompressed") == Some(i64::from(buffer.state))
+    }
+
+    /// The buffer at `address` with the header fields `header` and
+    /// `data_end` bytes of header and events.
+    fn buffer(&self, address: VirtAddr, header: &BufferHeader, data_end: u32) -> EtwBuffer {
+        etw_buffer(&self.buffer_states, address, header, data_end)
+    }
+}
+
+/// The buffer at `address` with the header fields `header` and `data_end`
+/// bytes of header and events; `buffer_states` names its state.
+fn etw_buffer(
+    buffer_states: &[(String, i64)],
+    address: VirtAddr,
+    header: &BufferHeader,
+    data_end: u32,
+) -> EtwBuffer {
+    EtwBuffer {
+        address,
+        state: header.state,
+        state_name: buffer_states
+            .iter()
+            .find(|(_, value)| *value == i64::from(header.state))
+            .map(|(name, _)| name.trim_start_matches("EtwBufferState").to_string())
+            .unwrap_or_else(|| format!("{:#x}", header.state)),
+        processor: header.processor,
+        sequence_number: header.sequence_number,
+        timestamp: header.timestamp,
+        saved_offset: header.saved_offset,
+        current_offset: header.current_offset,
+        reference_count: header.reference_count,
+        data_end,
+    }
 }
 
 impl Target {
     fn etw_types(&self) -> Result<EtwTypes> {
         let guest = self.guest()?;
         let types = guest.ntoskrnl.types();
+        let buffer = types.layout("_WMI_BUFFER_HEADER")?;
         Ok(EtwTypes {
             logger: types.layout("_WMI_LOGGER_CONTEXT")?,
-            buffer: types.layout("_WMI_BUFFER_HEADER")?,
+            offsets: BufferHeaderOffsets::from_pdb(
+                &buffer,
+                &*types.layout("_ETW_BUFFER_CONTEXT")?,
+            )?,
+            buffer,
             event_header: EventHeaderLayout::from_pdb(
                 &*types.layout("_EVENT_HEADER")?,
                 &*types.layout("_EVENT_DESCRIPTOR")?,
@@ -1181,49 +1325,21 @@ impl Target {
         if !looks_like_kernel_pointer(address.0) {
             return Err(Error::DebugInfo("not a kernel address".into()));
         }
-        let header = self
-            .guest()?
-            .ntoskrnl
-            .types()
-            .struct_with_layout(types.buffer.clone(), address)
-            .prefetch();
-        let buffer_size: u32 = header.read_field("BufferSize")?;
-        let context = header.embedded("ClientContext")?;
-        let logger_id: u16 = context.read_field("LoggerId")?;
-        if buffer_size != logger.buffer_size || u32::from(logger_id) != logger.logger_id {
-            return Err(Error::DebugInfo(format!(
-                "BufferSize {buffer_size:#x}, LoggerId {logger_id:#x}"
-            )));
-        }
-        let state: u32 = header.read_field("State")?;
-        let saved_offset: u32 = header.read_field("SavedOffset")?;
-        let current_offset: u32 = header.read_field("CurrentOffset")?;
+        let mut raw = [0u8; MAX_BUFFER_HEADER_SIZE];
+        let raw = &mut raw[..types.offsets.size];
+        self.kernel_address_space().read_bytes(address, raw)?;
+        let header = types.offsets.header(raw);
+        header.check_owner(logger.buffer_size, logger.logger_id)?;
         // SavedOffset is set when a buffer is switched out and counts the
         // valid bytes; a processor's current buffer has only its live
         // CurrentOffset, which a failed reservation can push past the end.
-        let data_end = if saved_offset != 0 {
-            saved_offset
+        let data_end = if header.saved_offset != 0 {
+            header.saved_offset
         } else {
-            current_offset
+            header.current_offset
         }
-        .min(buffer_size);
-        Ok(EtwBuffer {
-            address,
-            state,
-            state_name: types
-                .buffer_states
-                .iter()
-                .find(|(_, value)| *value == i64::from(state))
-                .map(|(name, _)| name.trim_start_matches("EtwBufferState").to_string())
-                .unwrap_or_else(|| format!("{state:#x}")),
-            processor: context.read_field("ProcessorIndex")?,
-            sequence_number: header.read_field("SequenceNumber")?,
-            timestamp: header.read_field("TimeStamp")?,
-            saved_offset,
-            current_offset,
-            reference_count: header.read_field("ReferenceCount")?,
-            data_end,
-        })
+        .min(header.buffer_size);
+        Ok(types.buffer(address, &header, data_end))
     }
 
     /// `!wmitrace.logdump`: the events in the buffers of the logger `text`
@@ -1249,88 +1365,34 @@ impl Target {
             qpc_frequency,
             cpu_mhz,
         };
-        let header_size = types.buffer.size;
-        let compressed = types.buffer_state("EtwBufferStateCompressed");
         let memory = self.kernel_address_space();
-        // Each event with the time it sorts by.
-        let mut events = Vec::new();
-        let mut issues = Vec::new();
-        let mut walked = 0;
+        let mut collector = EventCollector::default();
         // read_etw_buffers bounded BufferSize, and every data_end by it.
         let mut data = vec![0u8; logger.buffer_size as usize];
         for buffer in &buffers {
             if self.interrupted() {
                 return Err(Error::DebugInfo("interrupted".into()));
             }
-            if compressed == Some(i64::from(buffer.state)) {
-                issues.push(EtwBufferIssue {
-                    buffer: buffer.address,
-                    offset: 0,
-                    reason: "buffer is compressed".into(),
-                });
+            if !collector.wants(&types, buffer) {
                 continue;
             }
             let end = buffer.data_end as usize;
-            if end <= header_size {
-                continue;
-            }
             if let Err(e) = memory.read_bytes(buffer.address, &mut data[..end]) {
-                issues.push(EtwBufferIssue {
+                collector.issues.push(EtwBufferIssue {
                     buffer: buffer.address,
                     offset: 0,
                     reason: format!("unreadable: {e}"),
                 });
                 continue;
             }
-            walked += 1;
-            let (records, stop) =
-                decode_buffer_records(&data, header_size, end, &types.event_header);
-            if let Some(stop) = stop {
-                issues.push(EtwBufferIssue {
-                    buffer: buffer.address,
-                    offset: stop.offset,
-                    reason: stop.reason,
-                });
-            }
-            // A WPP message without a timestamp sorts after the record
-            // before it in its buffer.
-            let mut previous = 0;
-            events.extend(records.into_iter().map(|record| {
-                let order = record.timestamp.unwrap_or(previous);
-                previous = order;
-                let message_format = format_message_record(
-                    &record,
-                    |guid, number| self.symbols.wpp_message(guid, number),
-                    types.buffer.pointer_size,
-                );
-                let event = EtwEvent {
-                    buffer: buffer.address,
-                    processor: buffer.processor,
-                    system_time: record.timestamp.and_then(|t| time.system_time(t)),
-                    record,
-                    message_format,
-                };
-                (order, event)
-            }));
+            collector.add(self, &types, &time, buffer, &data[..end]);
         }
-        events.sort_by_key(|(order, event)| (*order, event.buffer.0, event.record.offset));
-        let total_events = events.len();
-        let events: Vec<EtwEvent> = events
-            .into_iter()
-            .skip(most_recent.map_or(0, |count| total_events.saturating_sub(count)))
-            .map(|(_, event)| event)
-            .collect();
-        let message_format_note = message_format_note(&events);
         Ok(EtwEventDump {
             logger,
-            buffers_walked: walked,
             list_stop,
-            issues,
-            total_events,
-            events,
             qpc_frequency,
             cpu_mhz,
-            message_format_note,
+            events: collector.finish(most_recent),
         })
     }
 
@@ -1351,10 +1413,13 @@ impl Target {
 /// `!wmitrace.logsave`: a logger's in-memory buffers as an .etl file.
 #[derive(Debug, Clone)]
 pub struct EtwLogFile {
-    pub logger: EtwLogger,
+    pub logger_id: u32,
+    pub name: Option<String>,
+    pub buffer_size: u32,
     /// Buffers with events written after the header buffer.
     pub buffers: usize,
-    /// Why the `GlobalList` walk ended before returning to its head.
+    /// Why the `GlobalList` walk, or the walk of the dump's ETW data, ended
+    /// early.
     pub list_stop: Option<String>,
     /// Buffers left out (unreadable) and buffers cut short before a record
     /// that does not decode.
@@ -1376,6 +1441,74 @@ struct LogFileSystem {
     end_time: u64,
     /// UTC minus local time, in minutes.
     time_zone_bias: i32,
+}
+
+fn kuser_missing(what: &str) -> Error {
+    Error::DebugInfo(format!("KUSER_SHARED_DATA.{what} is unreadable"))
+}
+
+impl LogFileSystem {
+    /// The fields `KUSER_SHARED_DATA` holds; the rest are zero, for the
+    /// caller to fill in.
+    fn from_kuser(kuser: &KuserSharedData) -> Result<Self> {
+        Ok(Self {
+            major_version: kuser
+                .nt_major_version()
+                .ok_or_else(|| kuser_missing("NtMajorVersion"))? as u8,
+            minor_version: kuser
+                .nt_minor_version()
+                .ok_or_else(|| kuser_missing("NtMinorVersion"))? as u8,
+            build_number: (kuser
+                .nt_build_number()
+                .ok_or_else(|| kuser_missing("NtBuildNumber"))?
+                & 0xffff) as u32,
+            processors: 0,
+            timer_resolution: 0,
+            cpu_mhz: 0,
+            boot_time: 0,
+            qpc_frequency: 0,
+            end_time: kuser
+                .system_time()
+                .ok_or_else(|| kuser_missing("SystemTime"))?,
+            time_zone_bias: (kuser
+                .time_zone_bias()
+                .ok_or_else(|| kuser_missing("TimeZoneBias"))?
+                / 600_000_000) as i32,
+        })
+    }
+}
+
+/// The logger fields the logfile header event records.
+struct LogFileLogger<'a> {
+    logger_id: u32,
+    name: &'a str,
+    log_file_name: &'a str,
+    buffer_size: u32,
+    logger_mode: u32,
+    maximum_file_size: u32,
+    events_lost: u32,
+    log_buffers_lost: u32,
+    clock: EtwClock,
+    reference_system_time: u64,
+    reference_clock: u64,
+}
+
+impl<'a> From<&'a EtwLogger> for LogFileLogger<'a> {
+    fn from(logger: &'a EtwLogger) -> Self {
+        Self {
+            logger_id: logger.logger_id,
+            name: logger.name.as_deref().unwrap_or_default(),
+            log_file_name: logger.log_file_name.as_deref().unwrap_or_default(),
+            buffer_size: logger.buffer_size,
+            logger_mode: logger.logger_mode,
+            maximum_file_size: logger.maximum_file_size,
+            events_lost: logger.events_lost,
+            log_buffers_lost: logger.log_buffers_lost,
+            clock: logger.clock,
+            reference_system_time: logger.reference_system_time,
+            reference_clock: logger.reference_clock,
+        }
+    }
 }
 
 /// `WMI_LOG_TYPE_HEADER`: the hook id of the logfile header event.
@@ -1403,12 +1536,20 @@ fn utf16z(text: &str) -> Vec<u8> {
         .collect()
 }
 
-/// Offsets in `_WMI_BUFFER_HEADER` that an .etl buffer's header needs.
-struct BufferHeaderOffsets {
+/// Largest `_WMI_BUFFER_HEADER` read (0x48 bytes since Windows 8).
+const MAX_BUFFER_HEADER_SIZE: usize = 0x100;
+
+/// The `_WMI_BUFFER_HEADER` fields ntoseye reads and writes, at their PDB
+/// offsets.
+pub struct BufferHeaderOffsets {
     size: usize,
     buffer_size: usize,
     saved_offset: usize,
     current_offset: usize,
+    reference_count: usize,
+    timestamp: usize,
+    sequence_number: usize,
+    processor: usize,
     logger_id: usize,
     state: usize,
     offset: usize,
@@ -1416,21 +1557,76 @@ struct BufferHeaderOffsets {
     buffer_type: usize,
 }
 
+/// The fields of one `_WMI_BUFFER_HEADER`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BufferHeader {
+    buffer_size: u32,
+    saved_offset: u32,
+    current_offset: u32,
+    reference_count: i32,
+    timestamp: u64,
+    sequence_number: i64,
+    processor: u16,
+    logger_id: u16,
+    state: u32,
+}
+
+impl BufferHeader {
+    /// Whether the buffer is one of the logger with `buffer_size` and
+    /// `logger_id`, as each buffer records both.
+    fn check_owner(&self, buffer_size: u32, logger_id: u32) -> Result<()> {
+        if self.buffer_size != buffer_size || u32::from(self.logger_id) != logger_id {
+            return Err(Error::DebugInfo(format!(
+                "BufferSize {:#x}, LoggerId {:#x}",
+                self.buffer_size, self.logger_id
+            )));
+        }
+        Ok(())
+    }
+}
+
 impl BufferHeaderOffsets {
     fn from_pdb(buffer: &TypeInfo, context: &TypeInfo) -> Result<Self> {
         let off =
             |ti: &TypeInfo, name: &str| -> Result<usize> { Ok(ti.field(name)?.offset as usize) };
+        if buffer.size > MAX_BUFFER_HEADER_SIZE {
+            return Err(Error::DebugInfo(format!(
+                "_WMI_BUFFER_HEADER is {:#x} bytes; ntoseye reads one of at most {MAX_BUFFER_HEADER_SIZE:#x}",
+                buffer.size
+            )));
+        }
+        let client_context = off(buffer, "ClientContext")?;
         Ok(Self {
             size: buffer.size,
             buffer_size: off(buffer, "BufferSize")?,
             saved_offset: off(buffer, "SavedOffset")?,
             current_offset: off(buffer, "CurrentOffset")?,
-            logger_id: off(buffer, "ClientContext")? + off(context, "LoggerId")?,
+            reference_count: off(buffer, "ReferenceCount")?,
+            timestamp: off(buffer, "TimeStamp")?,
+            sequence_number: off(buffer, "SequenceNumber")?,
+            processor: client_context + off(context, "ProcessorIndex")?,
+            logger_id: client_context + off(context, "LoggerId")?,
             state: off(buffer, "State")?,
             offset: off(buffer, "Offset")?,
             buffer_flag: off(buffer, "BufferFlag")?,
             buffer_type: off(buffer, "BufferType")?,
         })
+    }
+
+    /// The header fields of `bytes`, which hold at least the `size` bytes of
+    /// a header (every offset lies below it).
+    fn header(&self, bytes: &[u8]) -> BufferHeader {
+        BufferHeader {
+            buffer_size: read_u32(bytes, self.buffer_size),
+            saved_offset: read_u32(bytes, self.saved_offset),
+            current_offset: read_u32(bytes, self.current_offset),
+            reference_count: read_u32(bytes, self.reference_count) as i32,
+            timestamp: read_u64(bytes, self.timestamp),
+            sequence_number: read_u64(bytes, self.sequence_number) as i64,
+            processor: read_u16(bytes, self.processor),
+            logger_id: read_u16(bytes, self.logger_id),
+            state: read_u32(bytes, self.state),
+        }
     }
 
     /// Mark `buffer` as flushed with `used` valid bytes, as the logger
@@ -1453,15 +1649,15 @@ impl BufferHeaderOffsets {
 /// `buffer` is one zeroed trace buffer of the logger's `BufferSize`.
 fn write_logfile_header_buffer(
     buffer: &mut [u8],
-    logger: &EtwLogger,
+    logger: &LogFileLogger,
     system: &LogFileSystem,
     offsets: &BufferHeaderOffsets,
     flush_state: u32,
     buffers_written: u32,
 ) -> Result<()> {
     let size = buffer.len();
-    let logger_name = utf16z(logger.name.as_deref().unwrap_or_default());
-    let file_name = utf16z(logger.log_file_name.as_deref().unwrap_or_default());
+    let logger_name = utf16z(logger.name);
+    let file_name = utf16z(logger.log_file_name);
     let event_size = 0x20 + TRACE_LOGFILE_HEADER64_SIZE + logger_name.len() + file_name.len();
     let event = offsets.size;
     let used = align8(event + event_size);
@@ -1538,17 +1734,53 @@ impl Target {
         let types = self.etw_types()?;
         let (buffers, list_stop) = self.read_etw_buffers(&types, &logger)?;
         let guest = self.guest()?;
-        let kernel = guest.ntoskrnl.types();
-        let offsets =
-            BufferHeaderOffsets::from_pdb(&types.buffer, &*kernel.layout("_ETW_BUFFER_CONTEXT")?)?;
+        let kuser = KuserSharedData::new(self);
+        let system = LogFileSystem {
+            processors: u32::from(crate::cpu_state::processor_count(self)?),
+            timer_resolution: guest.ntoskrnl.symbol("KeMaximumIncrement")?.read()?,
+            cpu_mhz: self.processor_mhz()? as u32,
+            boot_time: guest.ntoskrnl.symbol("KeBootTime")?.read()?,
+            qpc_frequency: kuser
+                .qpc_frequency()
+                .ok_or_else(|| kuser_missing("QpcFrequency"))?,
+            ..LogFileSystem::from_kuser(&kuser)?
+        };
+        let memory = self.kernel_address_space();
+        let (buffers, issues, bytes) = self.write_etl(
+            &types,
+            &LogFileLogger::from(&logger),
+            &system,
+            &buffers,
+            |buffer, slot| memory.read_bytes(buffer.address, slot),
+        )?;
+        Ok(EtwLogFile {
+            logger_id: logger.logger_id,
+            name: logger.name,
+            buffer_size: logger.buffer_size,
+            buffers,
+            list_stop,
+            issues,
+            bytes,
+        })
+    }
+
+    /// An .etl file of `buffers`: a header buffer, then each buffer that
+    /// holds events, its data filled in by `read`, sealed after its last
+    /// record that decodes. Returns the data buffers written, the buffers
+    /// left out or cut short, and the file.
+    fn write_etl(
+        &self,
+        types: &EtwTypes,
+        logger: &LogFileLogger,
+        system: &LogFileSystem,
+        buffers: &[EtwBuffer],
+        mut read: impl FnMut(&EtwBuffer, &mut [u8]) -> Result<()>,
+    ) -> Result<(usize, Vec<EtwBufferIssue>, Vec<u8>)> {
+        let offsets = &types.offsets;
         let flush_state = types.buffer_state("EtwBufferStateFlush").ok_or_else(|| {
             Error::DebugInfo("_ETW_BUFFER_STATE has no EtwBufferStateFlush in the PDB".into())
         })? as u32;
-        let compressed = types.buffer_state("EtwBufferStateCompressed");
-        if let Some(buffer) = buffers
-            .iter()
-            .find(|buffer| Some(i64::from(buffer.state)) == compressed)
-        {
+        if let Some(buffer) = buffers.iter().find(|buffer| types.is_compressed(buffer)) {
             return Err(Error::DebugInfo(format!(
                 "buffer {:#x} of logger {:#x} is compressed; an .etl of it would need \
                  the logger's compression state",
@@ -1556,40 +1788,10 @@ impl Target {
             )));
         }
 
-        let kuser = KuserSharedData::new(self);
-        let missing =
-            |what: &str| Error::DebugInfo(format!("KUSER_SHARED_DATA.{what} is unreadable"));
-        let system = LogFileSystem {
-            major_version: kuser
-                .nt_major_version()
-                .ok_or_else(|| missing("NtMajorVersion"))? as u8,
-            minor_version: kuser
-                .nt_minor_version()
-                .ok_or_else(|| missing("NtMinorVersion"))? as u8,
-            build_number: (kuser
-                .nt_build_number()
-                .ok_or_else(|| missing("NtBuildNumber"))?
-                & 0xffff) as u32,
-            processors: u32::from(crate::cpu_state::processor_count(self)?),
-            timer_resolution: guest.ntoskrnl.symbol("KeMaximumIncrement")?.read()?,
-            cpu_mhz: self.processor_mhz()? as u32,
-            boot_time: guest.ntoskrnl.symbol("KeBootTime")?.read()?,
-            qpc_frequency: kuser
-                .qpc_frequency()
-                .ok_or_else(|| missing("QpcFrequency"))?,
-            end_time: kuser.system_time().ok_or_else(|| missing("SystemTime"))?,
-            time_zone_bias: (kuser
-                .time_zone_bias()
-                .ok_or_else(|| missing("TimeZoneBias"))?
-                / 600_000_000) as i32,
-        };
-
         // The whole file in one allocation: the header buffer first, filled
         // in once the data buffers are counted, then each data buffer read
-        // in place. read_etw_buffers bounded BufferSize, and every data_end
-        // by it.
+        // in place. The callers bounded BufferSize, and every data_end by it.
         let size = logger.buffer_size as usize;
-        let memory = self.kernel_address_space();
         let with_data: Vec<&EtwBuffer> = buffers
             .iter()
             .filter(|b| b.data_end as usize > offsets.size)
@@ -1614,7 +1816,7 @@ impl Target {
             let slot = &mut bytes[start..];
             // The rest of the buffer is sealed with 0xff: read only the data.
             let end = buffer.data_end as usize;
-            if let Err(e) = memory.read_bytes(buffer.address, &mut slot[..end]) {
+            if let Err(e) = read(buffer, &mut slot[..end]) {
                 issues.push(EtwBufferIssue {
                     buffer: buffer.address,
                     offset: 0,
@@ -1647,19 +1849,13 @@ impl Target {
         }
         write_logfile_header_buffer(
             &mut bytes[..size],
-            &logger,
-            &system,
-            &offsets,
+            logger,
+            system,
+            offsets,
             flush_state,
             data_buffers + 1,
         )?;
-        Ok(EtwLogFile {
-            logger,
-            buffers: data_buffers as usize,
-            list_stop,
-            issues,
-            bytes,
-        })
+        Ok((data_buffers as usize, issues, bytes))
     }
 }
 
@@ -1984,12 +2180,16 @@ mod tests {
     }
 
     /// `_WMI_BUFFER_HEADER` offsets of the 26200 kernel PDB.
-    fn buffer_offsets() -> BufferHeaderOffsets {
+    pub fn buffer_offsets() -> BufferHeaderOffsets {
         BufferHeaderOffsets {
             size: 0x48,
             buffer_size: 0,
             saved_offset: 4,
             current_offset: 8,
+            reference_count: 0xc,
+            timestamp: 0x10,
+            sequence_number: 0x18,
+            processor: 0x28,
             logger_id: 0x2a,
             state: 0x2c,
             offset: 0x30,
@@ -2052,7 +2252,15 @@ mod tests {
         let logger = logger(0x1_0000);
         let offsets = buffer_offsets();
         let mut buffer = vec![0u8; 0x1_0000];
-        write_logfile_header_buffer(&mut buffer, &logger, &SYSTEM, &offsets, 2, 7).unwrap();
+        write_logfile_header_buffer(
+            &mut buffer,
+            &LogFileLogger::from(&logger),
+            &SYSTEM,
+            &offsets,
+            2,
+            7,
+        )
+        .unwrap();
 
         let names = utf16z("ntoseyetest").len() + utf16z(r"C:\Windows\Temp\ntoseyetest.etl").len();
         let event_size = 0x20 + TRACE_LOGFILE_HEADER64_SIZE + names;
@@ -2087,9 +2295,10 @@ mod tests {
         let offsets = buffer_offsets();
         for size in [0, 0x20, 0x48, 0x100] {
             let mut buffer = vec![0u8; size];
+            let logger = logger(size as u32);
             let result = write_logfile_header_buffer(
                 &mut buffer,
-                &logger(size as u32),
+                &LogFileLogger::from(&logger),
                 &SYSTEM,
                 &offsets,
                 2,

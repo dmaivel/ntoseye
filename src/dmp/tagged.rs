@@ -131,7 +131,7 @@ const KNOWN_TAGS: &[(&str, &str, &str)] = &[
     (
         "{2b88b710-1c93-4f7c-b06c-655ecc50decc}",
         "nt!EtwSecondaryDumpDataGuid",
-        "ETW buffers",
+        "ETW sessions' buffers (!wmitrace.strdump)",
     ),
     (
         "{b0692a5e-6b7b-4073-8a7c-604e35032970}",
