@@ -361,6 +361,49 @@ fn test_parse_cast_primitive() {
     );
 }
 
+/// A cast takes C's spelling of a primitive, as WinDbg's `dx` writes it,
+/// and keeps the type: `(unsigned long *)` is a pointer to `ULONG`. A C
+/// keyword can only be a type, so `(int)-5` casts `-5`, while a name in
+/// parentheses before `-` is still a subtraction.
+#[test]
+fn test_parse_c_primitive_casts() {
+    let primitive = |name: &str| ExprType::Primitive(name.to_string());
+    assert_eq!(
+        Expr::parse("(unsigned long *)0x10").unwrap(),
+        Expr::Cast(lit(0x10), ExprType::Pointer(Box::new(primitive("ULONG"))))
+    );
+    assert_eq!(
+        Expr::parse("(unsigned  __int64)7").unwrap(),
+        Expr::Cast(lit(7), primitive("ULONGLONG"))
+    );
+    assert_eq!(
+        Expr::parse("(char)65").unwrap(),
+        Expr::Cast(lit(65), primitive("CHAR"))
+    );
+    assert_eq!(
+        Expr::parse("(void **)0x10").unwrap(),
+        Expr::Cast(
+            lit(0x10),
+            ExprType::Pointer(Box::new(ExprType::Pointer(Box::new(primitive("void")))))
+        )
+    );
+    assert_eq!(
+        Expr::parse("(int)-5").unwrap(),
+        Expr::Cast(
+            Box::new(Expr::Unary(ExprUnaryOp::Negate, lit(5))),
+            primitive("INT")
+        )
+    );
+    assert_eq!(
+        Expr::parse("(count)-5").unwrap(),
+        Expr::Binary(
+            Box::new(Expr::Symbol("count".to_string())),
+            ExprBinaryOp::Sub,
+            lit(5)
+        )
+    );
+}
+
 #[test]
 fn test_parse_cast_struct() {
     let expr = Expr::parse("(EPROCESS)PsInitialSystemProcess").unwrap();

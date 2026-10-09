@@ -85,3 +85,80 @@ fn unnamed_aggregates_are_keyed_by_field_list_and_shown_by_pdb_name() {
     assert_eq!(aggregate_display_name("_A#B"), "_A#B");
     assert_eq!(aggregate_display_name("ntdll32!_PEB"), "ntdll32!_PEB");
 }
+
+/// `dx` writes the C names WinDbg does, verified against kd.exe on a
+/// Windows 11 26200 kernel dump: primitives, a structure without its
+/// module, pointers, arrays, and function pointers with their convention.
+#[test]
+fn windbg_type_names_follow_dx() {
+    let primitive = |name: &str| ParsedType::Primitive(name.to_string());
+    let pointer = |inner: ParsedType| ParsedType::Pointer(Box::new(inner));
+    let array = |inner: ParsedType, count| ParsedType::Array(Box::new(inner), count);
+    let named = |name: &str| ParsedType::Struct(name.to_string());
+
+    for (pdb, windbg) in [
+        ("CHAR", "char"),
+        ("UCHAR", "unsigned char"),
+        ("WCHAR", "wchar_t"),
+        ("SHORT", "short"),
+        ("USHORT", "unsigned short"),
+        ("INT", "int"),
+        ("UINT", "unsigned int"),
+        ("LONG", "long"),
+        ("ULONG", "unsigned long"),
+        ("LONGLONG", "__int64"),
+        ("ULONGLONG", "unsigned __int64"),
+        ("void", "void"),
+        ("bool", "bool"),
+    ] {
+        assert_eq!(windbg_type_name(&primitive(pdb)), windbg, "{pdb}");
+    }
+    assert_eq!(windbg_type_name(&named("nt!_EPROCESS")), "_EPROCESS");
+    assert_eq!(
+        windbg_type_name(&named("nt!<unnamed-tag>#1124")),
+        "<unnamed-tag>"
+    );
+    assert_eq!(windbg_type_name(&pointer(primitive("void"))), "void *");
+    assert_eq!(
+        windbg_type_name(&pointer(pointer(named("_EPROCESS")))),
+        "_EPROCESS * *"
+    );
+    assert_eq!(
+        windbg_type_name(&array(primitive("UCHAR"), 15)),
+        "unsigned char [15]"
+    );
+    assert_eq!(
+        windbg_type_name(&array(array(primitive("ULONG"), 256), 2)),
+        "unsigned long [2][256]"
+    );
+    assert_eq!(
+        windbg_type_name(&array(pointer(named("_KAPC_STATE")), 2)),
+        "_KAPC_STATE * [2]"
+    );
+    assert_eq!(
+        windbg_type_name(&pointer(array(primitive("UCHAR"), 15))),
+        "unsigned char (*)[15]"
+    );
+    let dispatch = ParsedType::Function(
+        Box::new(primitive("LONG")),
+        vec![pointer(named("_DEVICE_OBJECT")), pointer(named("_IRP"))],
+    );
+    assert_eq!(
+        windbg_type_name(&pointer(dispatch.clone())),
+        "long (__cdecl*)(_DEVICE_OBJECT *,_IRP *)"
+    );
+    assert_eq!(
+        windbg_type_name(&dispatch),
+        "long __cdecl(_DEVICE_OBJECT *,_IRP *)"
+    );
+    assert_eq!(
+        windbg_type_name(&array(pointer(dispatch), 28)),
+        "long (__cdecl* [28])(_DEVICE_OBJECT *,_IRP *)"
+    );
+    let bits = ParsedType::Bitfield {
+        underlying: Box::new(primitive("ULONG")),
+        pos: 3,
+        len: 2,
+    };
+    assert_eq!(windbg_type_name(&bits), "unsigned long");
+}

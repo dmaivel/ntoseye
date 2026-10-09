@@ -711,6 +711,7 @@ impl Expr {
             ExprType::Word => ParsedType::Primitive("USHORT".into()),
             ExprType::Dword => ParsedType::Primitive("ULONG".into()),
             ExprType::Qword => ParsedType::Primitive("ULONGLONG".into()),
+            ExprType::Primitive(name) => ParsedType::Primitive(name.clone()),
             ExprType::Struct(name) => ParsedType::Struct(name.clone()),
             ExprType::Pointer(inner) => {
                 ParsedType::Pointer(Box::new(Self::expr_type_to_parsed(inner)))
@@ -724,6 +725,8 @@ impl Expr {
             ExprType::Word => Ok(2),
             ExprType::Dword => Ok(4),
             ExprType::Qword | ExprType::Pointer(_) => Ok(8),
+            ExprType::Primitive(name) => primitive_size(name)
+                .ok_or_else(|| Error::InvalidExpression(format!("{name} has no value to cast to"))),
             ExprType::Struct(name) => Self::find_type(context, name)
                 .map(|info| info.size as u64)
                 .filter(|size| *size != 0)
@@ -920,6 +923,7 @@ impl Expr {
             ExprType::Word => "word".to_string(),
             ExprType::Dword => "dword".to_string(),
             ExprType::Qword => "qword".to_string(),
+            ExprType::Primitive(name) => name.clone(),
             ExprType::Struct(name) => {
                 if name.starts_with('_') {
                     name.clone()

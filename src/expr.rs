@@ -19,6 +19,9 @@ pub enum ExprType {
     Word,
     Dword,
     Qword,
+    /// A C or Windows primitive (`unsigned long`, `char`, `void`), by the
+    /// name the PDB gives it (`ULONG`, `CHAR`, `void`).
+    Primitive(String),
     /// struct/union type by name
     Struct(String),
     /// pointer to a type

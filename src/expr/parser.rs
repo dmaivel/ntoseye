@@ -26,6 +26,9 @@ impl Expr {
             s = stripped.trim_end();
             pointer = true;
         }
+        if c_primitive(s).is_some() {
+            return true;
+        }
         match s.split_once('!') {
             // `(nt!Symbol)` is a parenthesized symbol, so a module-qualified
             // type is only taken as a cast when it is a pointer type.
@@ -43,20 +46,42 @@ impl Expr {
         }
 
         match type_str.to_lowercase().as_str() {
-            "byte" | "u8" | "uchar" | "char" | "boolean" | "uint8_t" | "int8_t" => {
-                Ok(ExprType::Byte)
+            "byte" | "u8" | "uint8_t" | "int8_t" => Ok(ExprType::Byte),
+            "word" | "u16" | "uint16_t" | "int16_t" => Ok(ExprType::Word),
+            "dword" | "u32" | "uint32_t" | "int32_t" => Ok(ExprType::Dword),
+            "qword" | "u64" | "dword64" | "pvoid" | "size_t" | "uint64_t" | "int64_t" | "usize" => {
+                Ok(ExprType::Qword)
             }
-            "word" | "u16" | "ushort" | "short" | "wchar" | "uint16_t" | "int16_t" => {
-                Ok(ExprType::Word)
-            }
-            "dword" | "u32" | "ulong" | "long" | "uint" | "int" | "uint32_t" | "int32_t" => {
-                Ok(ExprType::Dword)
-            }
-            "qword" | "u64" | "dword64" | "ulong64" | "longlong" | "ulonglong" | "pvoid"
-            | "size_t" | "uint64_t" | "int64_t" | "usize" => Ok(ExprType::Qword),
-            _ => Ok(ExprType::Struct(type_str.to_string())),
+            _ => Ok(match c_primitive(type_str) {
+                Some(name) => ExprType::Primitive(name.to_string()),
+                None => ExprType::Struct(type_str.to_string()),
+            }),
         }
     }
+}
+
+/// The PDB name of a C or Windows primitive type as a cast spells it
+/// (`unsigned long` and `ULONG` are both `ULONG`), so a cast's type reads
+/// as a field of that type does.
+fn c_primitive(type_str: &str) -> Option<&'static str> {
+    let words: Vec<&str> = type_str.split_whitespace().collect();
+    let name = match words.join(" ").to_lowercase().as_str() {
+        "char" | "signed char" => "CHAR",
+        "unsigned char" | "uchar" | "boolean" => "UCHAR",
+        "wchar_t" | "wchar" => "WCHAR",
+        "short" | "signed short" | "short int" => "SHORT",
+        "unsigned short" | "unsigned short int" | "ushort" => "USHORT",
+        "int" | "signed int" | "signed" => "INT",
+        "unsigned int" | "unsigned" | "uint" => "UINT",
+        "long" | "signed long" | "long int" => "LONG",
+        "unsigned long" | "unsigned long int" | "ulong" => "ULONG",
+        "__int64" | "long long" | "signed long long" | "longlong" | "long64" => "LONGLONG",
+        "unsigned __int64" | "unsigned long long" | "ulonglong" | "ulong64" => "ULONGLONG",
+        "void" => "void",
+        "bool" => "bool",
+        _ => return None,
+    };
+    Some(name)
 }
 
 type ExprInput<'a> = Stateful<LocatingSlice<&'a str>, NumberRadix>;
@@ -560,7 +585,11 @@ fn parse_range_valid(input: &mut ExprInput<'_>) -> ParseResult<Expr> {
 fn parse_cast(input: &mut ExprInput<'_>) -> ParseResult<Expr> {
     let expr_type = parse_cast_type.parse_next(input)?;
     ws0.parse_next(input)?;
-    peek(parse_operand_start).parse_next(input)?;
+    // `(name)-5` is a subtraction from a symbol, but a C keyword such as
+    // `int` can only be a type, so `(int)-5` casts `-5` as in C.
+    if !(matches!(expr_type, ExprType::Primitive(_)) && input.as_ref().starts_with('-')) {
+        peek(parse_operand_start).parse_next(input)?;
+    }
     let base = parse_prefix.parse_next(input).map_err(ErrMode::cut)?;
     Ok(Expr::Cast(Box::new(base), expr_type))
 }

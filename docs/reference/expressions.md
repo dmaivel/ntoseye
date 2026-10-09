@@ -149,32 +149,35 @@ dt _EPROCESS poi(nt!PsInitialSystemProcess) UniqueProcessId
 
 ## dx
 
-{command}`dx` evaluates a typed expression and shows its value with its type, then its fields, as WinDbg's `dx` lays them out. `-r<depth>` sets how many levels of fields it shows: 1 by default, and `-r0` for the value alone. For a pointer to a structure, it shows the structure's fields. Numbers in a `dx` expression are decimal unless written with `0x`, as in C++. This is the stack location of a mouse read that `!irp` showed:
+{command}`dx` evaluates a typed expression and shows its value with its type, then its fields, as WinDbg's `dx` lays them out: the fields in the order the PDB declares them, a bitfield's bits beside its offset, and types in WinDbg's C spelling, such as `unsigned long` and `_DEVICE_OBJECT *`. `-r<depth>` sets how many levels of fields it shows: 1 by default, and `-r0` for the value alone. For a pointer to a structure, it shows the structure's fields. Numbers in a `dx` expression are decimal unless written with `0x`, as in C++. This is the stack location of a mouse read that `!irp` showed in a crash dump:
 
 ```text
-dx -r1 (*((nt!_IO_STACK_LOCATION *)0xffffa002d212fa18))
-(*((nt!_IO_STACK_LOCATION *)0xffffa002d212fa18)) [Type: nt!_IO_STACK_LOCATION]
-    [+0x000] MajorFunction     : 0x3 [Type: UCHAR]
-    [+0x001] MinorFunction     : 0x0 [Type: UCHAR]
-    [+0x002] Flags             : 0x0 [Type: UCHAR]
-    [+0x003] Control           : 0xe1 [Type: UCHAR]
-    [+0x008] Parameters        [Type: <unnamed-tag>]
-    [+0x028] DeviceObject      : 0xffffa002d212d060 [Type: _DEVICE_OBJECT*]
-    [+0x030] FileObject        : 0xffffa002d46e0930 [Type: _FILE_OBJECT*]
-    [+0x038] CompletionRoutine : 0xfffff802758f3090 [Type: LONG (*)(_DEVICE_OBJECT*, _IRP*, void*)]
-    [+0x040] Context           : 0xffffa002d1fbdd70 [Type: void*]
+dx -r1 (*((nt!_IO_STACK_LOCATION *)0xffff9888a0c64cb0))
+(*((nt!_IO_STACK_LOCATION *)0xffff9888a0c64cb0))                 [Type: _IO_STACK_LOCATION]
+    [+0x000] MajorFunction    : 0x3 [Type: unsigned char]
+    [+0x001] MinorFunction    : 0x0 [Type: unsigned char]
+    [+0x002] Flags            : 0x0 [Type: unsigned char]
+    [+0x003] Control          : 0x1 [Type: unsigned char]
+    [+0x008] Parameters       [Type: <unnamed-tag>]
+    [+0x028] DeviceObject     : 0xffff9888a0a71060 [Type: _DEVICE_OBJECT *]
+    [+0x030] FileObject       : 0xffff9888a3bae6d0 [Type: _FILE_OBJECT *]
+    [+0x038] CompletionRoutine : 0x0 : 0x0 [Type: long (__cdecl*)(_DEVICE_OBJECT *,_IRP *,void *)]
+    [+0x040] Context          : 0x0 [Type: void *]
 ```
 
-A field gives its value, and a pseudo-register its typed pointer:
+A field gives its value, and a pseudo-register its typed pointer. As in WinDbg, a pointer to a number shows the number it points to, a `char *` or `wchar_t *` its string, and a function pointer the function, and a cast takes a type as C writes it:
 
 ```text
-dx ((nt!_EPROCESS*)@$proc)->ImageFileName
-((nt!_EPROCESS*)@$proc)->ImageFileName : "Idle" [Type: UCHAR[15]]
+dx ((nt!_EPROCESS*)@$proc)->UniqueProcessId
+((nt!_EPROCESS*)@$proc)->UniqueProcessId : 0x8d8 [Type: void *]
 dx -r0 @$thread
-@$thread : 0xfffff80588e625c0 [Type: nt!_ETHREAD*]
+@$thread                 : 0xffff9888a3f4e080 [Type: _ETHREAD *]
+dx (unsigned long *)&((nt!_EPROCESS*)@$proc)->Flags
+(unsigned long *)&((nt!_EPROCESS*)@$proc)->Flags                 : 0xffff9888a3f022b4 : 0x144d0c01 [Type: unsigned long *]
+    0x144d0c01 [Type: unsigned long]
 ```
 
-`ntoseye` has no debugger data model, so `dx` does not take `@$curprocess`, `@$curthread`, `Debugger.*` or queries such as `.Where`, and says so. Use `@$proc` and `@$thread` for the current process and thread, and the [Python SDK](../scripting/sdk.md) to query processes, threads and modules.
+`ntoseye` has no debugger data model, so `dx` does not take `@$curprocess`, `@$curthread`, `Debugger.*` or queries such as `.Where`, and says so. Use `@$proc` and `@$thread` for the current process and thread, and the [Python SDK](../scripting/sdk.md) to query processes, threads and modules. Nor does it have WinDbg's NatVis views, which summarize some types on their line (`Driver "\Driver\mouclass"` for a `_DRIVER_OBJECT`, `{134357425713268397}` for a `_LARGE_INTEGER`) and replace some expansions with their own lists: `dx` shows the type's fields, as WinDbg's `dx -nv` does. A `_UNICODE_STRING` still reads as its text.
 
 ## Locals
 

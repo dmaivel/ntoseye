@@ -733,7 +733,7 @@ fn type_lookup_prefers_the_kernel_unless_qualified() {
     let layout = |name: &str, size| TypeInfo {
         name: name.to_string(),
         size,
-        fields: HashMap::new(),
+        fields: Default::default(),
         pointer_size: 8,
     };
     store.inject_module_for_test(kernel, vec![layout("_PEB", 2008)], &[]);
@@ -775,7 +775,7 @@ fn nested_types_name_the_module_that_defines_them() {
     let layout = |name: &str, size| TypeInfo {
         name: name.to_string(),
         size,
-        fields: HashMap::new(),
+        fields: Default::default(),
         pointer_size: 8,
     };
     store.set_kernel(Some(kernel), kernel_dtb);

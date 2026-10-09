@@ -1,8 +1,9 @@
 //! PDB type layouts: the parsed type model, name queries over it, and
 //! cursors that read typed structs out of guest memory.
 
-use std::collections::HashMap;
 use std::fmt;
+
+use indexmap::IndexMap;
 
 use crate::error::{Error, Result};
 
@@ -144,7 +145,9 @@ impl FieldInfo {
 pub struct TypeInfo {
     pub name: String,
     pub size: usize,
-    pub fields: HashMap<String, FieldInfo>,
+    /// The fields in the order the PDB declares them, which is how WinDbg's
+    /// `dx` lists them; [`Self::fields_in_order`] gives `dt`'s order.
+    pub fields: IndexMap<String, FieldInfo>,
     /// Width of a pointer in the PDB this layout came from: 4 for a 32-bit
     /// module (a WOW64 process's ntdll), 8 otherwise. Pointer fields are
     /// already sized by it; list links and other implicit pointers use it.
@@ -373,6 +376,89 @@ pub fn unqualified_type_name(type_name: &str) -> &str {
         .rsplit_once('!')
         .map(|(_, name)| name)
         .unwrap_or(type_name)
+}
+
+/// The C name WinDbg's `dx` writes for a primitive the PDB names (`ULONG`
+/// is `unsigned long`, `ULONGLONG` is `unsigned __int64`); any other name
+/// as it is.
+pub fn windbg_primitive_name(name: &str) -> &str {
+    match name {
+        "CHAR" => "char",
+        "UCHAR" => "unsigned char",
+        "WCHAR" => "wchar_t",
+        "SHORT" => "short",
+        "USHORT" => "unsigned short",
+        "INT" => "int",
+        "UINT" => "unsigned int",
+        "LONG" => "long",
+        "ULONG" => "unsigned long",
+        "LONGLONG" => "__int64",
+        "ULONGLONG" => "unsigned __int64",
+        "INT128" => "__int128",
+        "UINT128" => "unsigned __int128",
+        _ => name,
+    }
+}
+
+/// Whether the PDB primitive `name` is a signed integer, which `dx` shows
+/// in decimal.
+pub fn is_signed_primitive(name: &str) -> bool {
+    matches!(
+        name,
+        "CHAR" | "SHORT" | "INT" | "LONG" | "LONGLONG" | "INT128"
+    )
+}
+
+/// How WinDbg's `dx` writes a type: C names for primitives, no module on a
+/// structure, `T *` for a pointer, `T [n]` for an array, and
+/// `long (__cdecl*)(_DEVICE_OBJECT *,_IRP *)` for a function pointer. A
+/// bitfield is its underlying type; `dx` shows its bits with the offset.
+pub fn windbg_type_name(type_data: &ParsedType) -> String {
+    windbg_declaration(type_data, "")
+}
+
+/// `type_data` declaring `declarator`: the part of a C declaration that
+/// wraps the base type, built from the outside in (` *`, ` [2]`).
+fn windbg_declaration(type_data: &ParsedType, declarator: &str) -> String {
+    match type_data {
+        ParsedType::Primitive(name) => format!("{}{declarator}", windbg_primitive_name(name)),
+        ParsedType::Struct(name) | ParsedType::Union(name) | ParsedType::Enum(name) => {
+            let name = unqualified_type_name(aggregate_display_name(name));
+            format!("{name}{declarator}")
+        }
+        ParsedType::Pointer(inner) => match inner.as_ref() {
+            ParsedType::Function(ret_type, args) => {
+                windbg_function(ret_type, args, &format!("(__cdecl*{declarator})"))
+            }
+            _ => windbg_declaration(inner, &format!(" *{declarator}")),
+        },
+        ParsedType::Array(inner, count) => {
+            let declarator = if declarator.is_empty() {
+                format!(" [{count}]")
+            } else if declarator.ends_with(']') {
+                // `T [2][256]`: the outer dimension first.
+                format!("{declarator}[{count}]")
+            } else {
+                // A pointer to an array: `unsigned char (*)[15]`.
+                format!(" ({})[{count}]", declarator.trim_start())
+            };
+            windbg_declaration(inner, &declarator)
+        }
+        ParsedType::Bitfield { underlying, .. } => windbg_declaration(underlying, declarator),
+        ParsedType::Function(ret_type, args) => {
+            windbg_function(ret_type, args, &format!("__cdecl{declarator}"))
+        }
+        ParsedType::Unknown => format!("<?>{declarator}"),
+    }
+}
+
+fn windbg_function(ret_type: &ParsedType, args: &[ParsedType], declarator: &str) -> String {
+    let args: Vec<String> = args.iter().map(windbg_type_name).collect();
+    format!(
+        "{} {declarator}({})",
+        windbg_type_name(ret_type),
+        args.join(",")
+    )
 }
 
 /// Return the layout name nested inside a parsed type, including the two

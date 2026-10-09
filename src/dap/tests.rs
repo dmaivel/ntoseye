@@ -135,7 +135,7 @@ fn one_object_keeps_one_reference_however_often_it_is_asked_for() {
             name: "_NODE".to_string(),
             pointer_size: 8,
             size: 8,
-            fields: HashMap::new(),
+            fields: Default::default(),
         }],
         &[],
     );

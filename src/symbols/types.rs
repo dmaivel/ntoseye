@@ -7,7 +7,9 @@ use crate::{
     types::Dtb,
 };
 use pdb2::{FallibleIterator, PrimitiveKind, TypeData, TypeFinder, TypeIndex};
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
+
+use indexmap::IndexMap;
 
 /// A pdb2 enum-constant value, widened to `i64` (enum tags are small).
 fn variant_to_i64(v: &pdb2::Variant) -> i64 {
@@ -260,8 +262,10 @@ impl SymbolStore {
                     PrimitiveKind::RChar32 => "char32_t",
                     PrimitiveKind::Short | PrimitiveKind::I16 => "SHORT",
                     PrimitiveKind::UShort | PrimitiveKind::U16 => "USHORT",
-                    PrimitiveKind::Long | PrimitiveKind::I32 => "LONG",
-                    PrimitiveKind::ULong | PrimitiveKind::U32 => "ULONG",
+                    PrimitiveKind::Long => "LONG",
+                    PrimitiveKind::ULong => "ULONG",
+                    PrimitiveKind::I32 => "INT",
+                    PrimitiveKind::U32 => "UINT",
                     PrimitiveKind::Quad | PrimitiveKind::I64 => "LONGLONG",
                     PrimitiveKind::UQuad | PrimitiveKind::U64 => "ULONGLONG",
                     PrimitiveKind::Octa => "INT128",
@@ -350,7 +354,7 @@ impl SymbolStore {
         type_finder: &pdb2::TypeFinder<'p>,
         field_index: pdb2::TypeIndex,
         prefix: &NestedTypePrefix,
-        fields_map: &mut HashMap<String, FieldInfo>,
+        fields_map: &mut IndexMap<String, FieldInfo>,
     ) -> pdb2::Result<()> {
         let field_item = type_finder.find(field_index)?;
 
@@ -382,7 +386,7 @@ impl SymbolStore {
                         else {
                             continue;
                         };
-                        let mut inherited = HashMap::new();
+                        let mut inherited = IndexMap::new();
                         self.process_field_list(
                             guid,
                             type_finder,
@@ -438,7 +442,7 @@ impl SymbolStore {
             let Some(_) = iter.next().ok()? else { break };
             type_finder.update(&iter);
         }
-        let mut fields = HashMap::new();
+        let mut fields = IndexMap::new();
         let prefix = self.nested_type_prefix(guid);
         let parsed =
             match self.process_field_list(guid, &type_finder, field_index, &prefix, &mut fields) {

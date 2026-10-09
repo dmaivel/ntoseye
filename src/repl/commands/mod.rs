@@ -15,6 +15,7 @@ pub mod browse;
 mod cpu;
 mod diagnostics;
 pub mod display;
+mod dx;
 mod etw;
 mod exceptions;
 pub mod exec;

@@ -941,7 +941,7 @@ fn what_is(address: VirtAddr, extension: VirtAddr) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use indexmap::IndexMap;
 
     use super::*;
     use crate::layout::FieldInfo;
@@ -961,7 +961,7 @@ mod tests {
     /// The first bytes of storport's `_FLAGS`: bitfields over single bytes,
     /// two whole-byte fields, and the 64-bit view of all of them.
     fn flags_layout() -> TypeInfo {
-        let mut fields = HashMap::new();
+        let mut fields = IndexMap::new();
         fields.insert(
             "AsUlonglong".to_string(),
             FieldInfo {

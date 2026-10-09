@@ -517,7 +517,7 @@ fn quote_bounded(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use indexmap::IndexMap;
 
     use super::*;
     use crate::session::session_over_memory;
@@ -642,7 +642,7 @@ mod tests {
                 name: "_NODE".to_string(),
                 pointer_size: 4,
                 size: 4,
-                fields: HashMap::new(),
+                fields: IndexMap::new(),
             }],
             &[],
         );
@@ -678,7 +678,7 @@ mod tests {
                 name: "_NODE".to_string(),
                 pointer_size: 8,
                 size: 1,
-                fields: HashMap::new(),
+                fields: IndexMap::new(),
             }],
             &[],
         );

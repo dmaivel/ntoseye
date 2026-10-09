@@ -556,12 +556,12 @@ pub fn read_ktrap_frame_at_or_current(
 mod tests {
     use super::*;
     use crate::layout::{FieldInfo, ParsedType};
-    use std::collections::HashMap;
+    use indexmap::IndexMap;
 
     /// A miniature `_KTRAP_FRAME` layout: enough fields, PDB-shaped, with the
     /// sub-8-byte sizes the real type uses for segments/flags/mode/irql.
     fn test_layout() -> TypeInfo {
-        let mut fields = HashMap::new();
+        let mut fields = IndexMap::new();
         let mut add = |name: &str, offset: u32, size: u64| {
             fields.insert(
                 name.to_string(),
@@ -637,7 +637,7 @@ mod tests {
             match exception_active {
                 Some(value) => buf[0x02] = value,
                 None => {
-                    layout.fields.remove("ExceptionActive");
+                    layout.fields.shift_remove("ExceptionActive");
                 }
             }
             buf[0x00] = 1; // PreviousMode: stale unless a system call wrote it
@@ -718,7 +718,7 @@ mod tests {
 
     #[test]
     fn decodes_arm64_fields_from_named_arrays() {
-        let mut fields = HashMap::new();
+        let mut fields = IndexMap::new();
         let mut add = |name: &str, offset: u32, size: u64| {
             fields.insert(
                 name.to_string(),
@@ -787,7 +787,7 @@ mod tests {
     #[test]
     fn missing_field_is_an_error_not_a_zero() {
         let mut layout = test_layout();
-        layout.fields.remove("Rip");
+        layout.fields.shift_remove("Rip");
         let buf = vec![0u8; layout.size];
         assert!(matches!(
             KtrapFrame::decode(&layout, 0, &buf, None),
@@ -797,7 +797,7 @@ mod tests {
 
     #[test]
     fn absent_arm64_optional_fields_are_unavailable_not_zero() {
-        let mut fields = HashMap::new();
+        let mut fields = IndexMap::new();
         for (name, offset, size) in [
             ("X", 0x00, 19 * 8),
             ("Lr", 0x98, 8),
@@ -871,7 +871,7 @@ mod tests {
 
     #[test]
     fn switch_frame_seed_uses_only_pdb_described_fields() {
-        let mut fields = HashMap::new();
+        let mut fields = IndexMap::new();
         fields.insert(
             "Rbp".to_string(),
             FieldInfo {
@@ -913,7 +913,7 @@ mod tests {
             name: KSWITCH_FRAME_TYPE.to_string(),
             pointer_size: 8,
             size: 8,
-            fields: HashMap::new(),
+            fields: IndexMap::new(),
         };
         assert!(matches!(
             decode_kswitch_frame(&layout, VirtAddr(0x1000), &[0; 8]),
