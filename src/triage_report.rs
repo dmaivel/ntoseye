@@ -201,8 +201,19 @@ pub struct TriageReport {
     pub verifier: Option<VerifierFinding>,
     pub whea: Option<WheaFinding>,
     pub blackboxes: Vec<BlackboxFinding>,
+    /// The KMDF driver whose In-Flight Recorder log the dump holds.
+    pub kmdf_log: Option<KmdfLogFinding>,
     /// Best-effort collection failures that did not prevent the report.
     pub warnings: Vec<String>,
+}
+
+/// The client driver whose In-Flight Recorder log Wdf01000 copied into a
+/// crash dump, and how many records it holds (`!wdfkd.wdfcrashdump` shows
+/// them).
+#[derive(Debug, Clone)]
+pub struct KmdfLogFinding {
+    pub driver: String,
+    pub records: usize,
 }
 
 impl TriageReport {
@@ -251,6 +262,14 @@ impl TriageReport {
             session.target.phys.dmp_info(),
         );
         report.warnings = warnings;
+        report.kmdf_log = session
+            .target
+            .wdf_crash_log()
+            .ok()
+            .map(|log| KmdfLogFinding {
+                driver: log.driver,
+                records: log.entries.len(),
+            });
         if let Some(address) = report.whea.as_ref().and_then(|whea| whea.record_address) {
             report.whea = Some(WheaFinding {
                 record_address: Some(address),
@@ -288,6 +307,7 @@ impl TriageReport {
             verifier: None,
             whea: None,
             blackboxes,
+            kmdf_log: None,
             warnings: Vec::new(),
         };
         report.failure_signature = failure_signature(&report);

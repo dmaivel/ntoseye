@@ -81,6 +81,13 @@ IFR log of wtd (IFR header ffff9888a1377000, 0xfb8 bytes, sequence 1, timestamps
 
 The records are the ones that WinDbg's `!wdfkd.wdfcrashdump` shows, with two exceptions where WinDbg's walk is wrong. WinDbg shows a log's only record twice, and it leaves out the oldest record that survives in a log that has wrapped. The times are in UTC, while WinDbg shows them in the local time of the computer that runs it.
 
+{command}`analyze` names the driver whose log the dump holds, so you know to look:
+
+```text
+KMDF log
+  wtd's In-Flight Recorder log, 1 record  (!wdfkd.wdfcrashdump)
+```
+
 The other block lists the client drivers, with the KMDF version that each one bound to and its `_FX_DRIVER_GLOBALS`. `!wdfkd.wdfcrashdump loader` shows the list, and the first entry is KMDF itself. These are the first lines of the list from a Windows 11 guest:
 
 ```text

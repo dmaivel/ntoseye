@@ -5,8 +5,8 @@ use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix};
 use crate::target::{Target, ThreadInfo, wait_reason_name};
 use crate::triage_report::{
-    BlackboxState, FailureSignatureSource, TRIAGE_BACKTRACE_LIMIT, TriageReport, WheaRecordState,
-    exception_code_name, time::filetime_to_iso,
+    BlackboxState, FailureSignatureSource, KmdfLogFinding, TRIAGE_BACKTRACE_LIMIT, TriageReport,
+    WheaRecordState, exception_code_name, time::filetime_to_iso,
 };
 use crate::ui;
 use crate::unwind::StackTrace;
@@ -571,6 +571,25 @@ fn print_crash_intelligence(report: &TriageReport) {
             }
         }
     }
+
+    if let Some(log) = &report.kmdf_log {
+        print_section("KMDF log");
+        outln!(
+            "  {}  {}",
+            kmdf_log_summary(log),
+            ui::muted("(!wdfkd.wdfcrashdump)")
+        );
+    }
+}
+
+/// `wtd's In-Flight Recorder log, 1 record`.
+pub fn kmdf_log_summary(log: &KmdfLogFinding) -> String {
+    format!(
+        "{}'s In-Flight Recorder log, {} record{}",
+        log.driver,
+        log.records,
+        if log.records == 1 { "" } else { "s" }
+    )
 }
 
 fn print_report_modules(report: &TriageReport, verbose: bool) {

@@ -11,7 +11,7 @@ use crate::repl::StackColumns;
 use crate::repl::commands::analyze::{
     ANALYZE_HANG_STACK_LIMIT, ANALYZE_MODULE_LIMIT, ANALYZE_UNLOADED_LIMIT,
     ANALYZE_VERBOSE_MODULE_LIMIT, ANALYZE_VERBOSE_UNLOADED_LIMIT, HangReport, HangThread,
-    machine_name, product_name, signature_source,
+    kmdf_log_summary, machine_name, product_name, signature_source,
 };
 use crate::target::{ThreadInfo, wait_reason_name};
 use crate::triage_report::{
@@ -254,6 +254,13 @@ pub fn triage(report: &TriageReport, verbose: bool) -> View {
             );
         }
         card = card.child(section("blackbox streams", false).child(table));
+    }
+
+    if let Some(log) = &report.kmdf_log {
+        card = card.child(section("KMDF log", false).child(ui::text([
+            span(kmdf_log_summary(log), ""),
+            span("  !wdfkd.wdfcrashdump", MUTED),
+        ])));
     }
 
     card = card.child(loaded_modules(report, verbose));
