@@ -67,6 +67,44 @@ The walk ends at the first record that KMDF wrote, or where newer records overwr
 
 If a check fails, the walk stops and reports the corruption, but keeps the records that it already read.
 
+## The WPP recorder (`!rcdrkd`)
+
+The IFR above holds KMDF's own messages. A driver's own WPP trace messages go to the WPP recorder, WppRecorder.sys, when the driver is built with the recorder turned on in its WPP settings, as many inbox drivers are (usbxhci, usbhub3, pci, acpi, hidclass, ndis, and others). The recorder keeps in-flight logs for each driver in the same record format as the IFR.
+
+{command}`!rcdrkd.rcdrloglist` without an argument lists the drivers the recorder serves:
+
+```text
+Context           Driver            Image                               Logs
+ffffa08e683bfa40  usbxhci           fffff807d8890000  usbxhci           10
+ffffa08e683bed50  ucx01000          fffff807d8960000  ucx01000          1
+ffffa08e619bee20  pci               fffff80624dd0000  pci               35
+```
+
+With a driver, by its name with or without `.sys`, it lists that driver's logs. A driver can create a log per device or per queue, and each log has a normal partition and an error partition, which keeps the messages logged at error level for longer:
+
+```text
+!rcdrkd.rcdrloglist usbxhci
+WPP recorder logs of usbxhci  context ffffa08e683bfa40  image fffff807d8890000  usbxhci
+Log               Identifier      Size   Partitions                                            Notes
+ffffa08e688f31e0                  0x0    normal 0x0/0x0 of 0x0, error 0x0/0x0 of 0x0           default timestamps
+ffffa08e68966ae0  00 1b36 000d    0x400  normal 0x258/0x234 of 0x338, error 0x48/0x24 of 0xc8  timestamps
+ffffa08e68a3c9f0  00 CMD          0x400  normal 0x198/0x15c of 0x338, error 0x0/0x0 of 0xc8    timestamps
+```
+
+{command}`!rcdrkd.rcdrlogdump` shows a driver's records, from all of its logs and both partitions, merged in the order the driver logged them. Each record shows its sequence number, the log it is in when the driver has more than one, its time when the log keeps timestamps, and its message:
+
+```text
+!rcdrkd.rcdrlogdump usbxhci
+WPP recorder log of usbxhci (10 logs, sequence 1364)
+386: [00 1b36 000d error] 2026-10-09 23:52:21.5923790 Velocity for Feature_RetryStopEpOnSuccessWithStateNotStopped (60982130) is enabled
+865: [00 INT00] 2026-10-09 23:52:21.9650709 [  1] SlotId  1 EndpointId  0 ED 0 Pointer 27fff9a00        Length 0        CC_SUCCESS TT_COMMAND_COMPLETION_EVENT
+896: [00 CMD] 2026-10-09 23:52:21.9978283 Completed Crb 0xFFFFA08E68F6FE30 found: TT_ADDRESS_DEVICE_COMMAND CC_SUCCESS CycleBit 1 SlotId 1
+```
+
+`-a <log>` shows one log only. As with {command}`!wdfkd.wdflogdump`, the messages come from the TMF annotations in a loaded PDB: some of Microsoft's public PDBs carry them, as usbxhci's does, and for your own driver, add its private PDB to the symbol path. A record without one shows its message GUID, number, and argument bytes.
+
+The recorder keeps no list of the drivers it serves. It registers a bugcheck callback for each driver so that the logs reach a crash dump, and the commands find each driver through that callback, so they need the PDB for WppRecorder.sys, which ntoseye downloads like any other.
+
 ## In a crash dump
 
 When Windows writes a crash dump, KMDF adds two blocks of its own to the dump's [tagged data](dumps.md#tagged-data-and-blackboxes). One is a copy of a single client driver's IFR log. KMDF picks the driver whose code the bugcheck parameters point to, or a driver that is set to keep its log in minidumps. If there is no such driver, it picks the last KMDF driver that ran on the processor that crashed. A minidump holds no other copy of an IFR log.

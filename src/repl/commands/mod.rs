@@ -34,6 +34,7 @@ mod physical;
 mod pnp;
 pub mod process;
 mod process_objects;
+mod rcdr;
 mod sched;
 mod script;
 mod security;

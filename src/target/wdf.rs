@@ -1880,8 +1880,9 @@ impl Target {
     }
 
     /// Each IFR record with the TMF message a loaded PDB declares for it,
-    /// formatted with its arguments.
-    fn wdf_log_entries(&self, records: Vec<IfrRecord>, pointer_size: u8) -> Vec<WdfLogEntry> {
+    /// formatted with its arguments. The WPP recorder's records are KMDF's
+    /// too, so `!rcdrkd` formats them here.
+    pub fn wdf_log_entries(&self, records: Vec<IfrRecord>, pointer_size: u8) -> Vec<WdfLogEntry> {
         records
             .into_iter()
             .map(|record| {

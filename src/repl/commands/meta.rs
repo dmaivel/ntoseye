@@ -699,6 +699,8 @@ const COMMAND_CATEGORIES: &[(&str, &str)] = &[
     ("!storagekd.storlogsrb", "objects and I/O"),
     ("!storagekd.storsrb", "objects and I/O"),
     ("!storagekd.storclass", "objects and I/O"),
+    ("!rcdrkd.rcdrloglist", "objects and I/O"),
+    ("!rcdrkd.rcdrlogdump", "objects and I/O"),
     ("ssdt", "objects and I/O"),
     ("!wdfkd.wdfcrashdump", "objects and I/O"),
     ("!wdfkd.wdfdevice", "objects and I/O"),

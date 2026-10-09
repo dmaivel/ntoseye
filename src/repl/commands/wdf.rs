@@ -10,7 +10,7 @@ use crate::repl::*;
 use crate::target::etw::{format_filetime_precise, format_guid};
 use crate::target::wdf::{
     IfrEnd, WdfClient, WdfDeviceDetail, WdfDriverInfo, WdfDumpDriver, WdfEnumValue, WdfLoader,
-    WdfLogDump, WdfObject, WdfObjectRef, WdfQueueDetail, WdfRequestList,
+    WdfLogDump, WdfLogEntry, WdfObject, WdfObjectRef, WdfQueueDetail, WdfRequestList,
 };
 use crate::types::VirtAddr;
 use crate::ui;
@@ -424,6 +424,40 @@ fn print_queue(queue: &WdfQueueDetail) {
     print_requests("Driver owned requests", &queue.driver_owned);
 }
 
+/// An IFR record as one line: its sequence number, its time when it has
+/// one, and its message formatted, or the message's GUID and number and
+/// its argument bytes when no loaded PDB declares it.
+pub fn ifr_entry_line(entry: &WdfLogEntry) -> String {
+    let record = &entry.record;
+    let time = record
+        .timestamp
+        .and_then(format_filetime_precise)
+        .map(|time| format!("{time} "))
+        .unwrap_or_default();
+    match &entry.text {
+        Ok(text) => {
+            let function = entry
+                .message
+                .as_ref()
+                .and_then(|message| message.function.as_deref())
+                .map(|function| format!("{function} - "))
+                .unwrap_or_default();
+            format!("{}: {time}{function}{text}", record.sequence)
+        }
+        Err(why) => {
+            let args: String = record.args.iter().map(|b| format!("{b:02x}")).collect();
+            format!(
+                "{}: {time}{} #{} {}  {}",
+                record.sequence,
+                format_guid(&record.message_guid),
+                record.message_number,
+                ui::muted(&format!("({why})")),
+                args
+            )
+        }
+    }
+}
+
 fn print_log(log: &WdfLogDump) {
     outln!(
         "{} {} (IFR header {}, {:#x} bytes, sequence {}{})",
@@ -439,34 +473,7 @@ fn print_log(log: &WdfLogDump) {
         }
     );
     for entry in &log.entries {
-        let record = &entry.record;
-        let time = record
-            .timestamp
-            .and_then(format_filetime_precise)
-            .map(|time| format!("{time} "))
-            .unwrap_or_default();
-        match &entry.text {
-            Ok(text) => {
-                let function = entry
-                    .message
-                    .as_ref()
-                    .and_then(|message| message.function.as_deref())
-                    .map(|function| format!("{function} - "))
-                    .unwrap_or_default();
-                outln!("{}: {time}{function}{text}", record.sequence);
-            }
-            Err(why) => {
-                let args: String = record.args.iter().map(|b| format!("{b:02x}")).collect();
-                outln!(
-                    "{}: {time}{} #{} {}  {}",
-                    record.sequence,
-                    format_guid(&record.message_guid),
-                    record.message_number,
-                    ui::muted(&format!("({why})")),
-                    args
-                );
-            }
-        }
+        outln!("{}", ifr_entry_line(entry));
     }
     match &log.end {
         IfrEnd::Corrupt(why) => error!("{why}"),

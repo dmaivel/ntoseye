@@ -30,6 +30,7 @@ pub mod object;
 pub mod pci;
 pub mod pnp;
 pub mod pool;
+pub mod rcdr;
 pub mod sched;
 pub mod security;
 pub mod srb;
