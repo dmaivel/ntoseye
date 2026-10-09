@@ -7,6 +7,7 @@
 //! the adapter's extension, so one walk finds every adapter in the guest.
 
 use std::collections::HashSet;
+use std::ops::Range;
 use std::sync::Arc;
 
 use super::{Target, bounded_list_walk};
@@ -208,6 +209,81 @@ pub struct StorRequest {
     pub srb: VirtAddr,
     /// The processor whose pending queue holds it.
     pub processor: u32,
+}
+
+/// An entry of an adapter's internal log (`_RAID_LOG_ENTRY`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorLogEntry {
+    /// The entry's number: storport numbers them from 1 as it writes them.
+    pub number: u64,
+    /// When storport wrote it, as a FILETIME (UTC).
+    pub time: u64,
+    /// `_DBG_LOG_REASON`.
+    pub reason: StorEnum,
+    pub parameters: [u64; 4],
+}
+
+/// A StorPort adapter's internal log (`!storagekd.storloglist`): a ring of
+/// `RaidLogListSize` entries that storport writes as it starts, completes,
+/// pauses, and resumes requests.
+#[derive(Debug, Clone)]
+pub struct StorLog {
+    pub adapter: VirtAddr,
+    pub driver_name: String,
+    /// The ring (`RaidLogList`) and its size.
+    pub ring: VirtAddr,
+    pub size: u32,
+    /// The number of the newest entry, which is how many storport wrote.
+    pub newest: u64,
+    /// The entries still in the ring, oldest first.
+    pub entries: Vec<StorLogEntry>,
+}
+
+/// A request as a log entry of storport's request path records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorLogRequest {
+    pub irp: VirtAddr,
+    pub srb: VirtAddr,
+    /// The CDB's operation code.
+    pub opcode: u8,
+    /// `SrbStatus`: `SRB_STATUS_PENDING` until the miniport completes the
+    /// request.
+    pub srb_status: u8,
+}
+
+/// The reasons whose entries log a request: storport's request path passes
+/// the IRP as the first parameter, the SRB as the third, and the CDB's
+/// operation code and the SRB status in bits 16-23 and 8-15 of the fourth.
+const REQUEST_LOG_REASONS: &[&str] = &[
+    "LogCallMiniportStartIo",
+    "LogMiniportCompletion",
+    "LogCallMiniportBuildIo",
+];
+
+/// The request `entry` logs, for an entry of storport's request path.
+pub fn log_request(entry: &StorLogEntry) -> Option<StorLogRequest> {
+    let reason = entry.reason.name.as_deref()?;
+    if !REQUEST_LOG_REASONS.contains(&reason) {
+        return None;
+    }
+    let [irp, _, srb, packed] = entry.parameters;
+    Some(StorLogRequest {
+        irp: VirtAddr(irp),
+        srb: VirtAddr(srb),
+        opcode: (packed >> 16) as u8,
+        srb_status: (packed >> 8) as u8,
+    })
+}
+
+/// The numbers of the entries a ring of `size` slots holds when entry
+/// `newest` is the last written, oldest first: storport writes entry `n`
+/// to slot `n % size` and starts at 1.
+pub fn log_ring_numbers(newest: u64, size: u32) -> Range<u64> {
+    let size = u64::from(size);
+    if size == 0 {
+        return 1..1;
+    }
+    newest.saturating_sub(size - 1).max(1)..newest + 1
 }
 
 /// What a unit's queue state means, in words: the requests the miniport
@@ -593,6 +669,78 @@ impl Target {
                 what_is(address, extension)
             ))),
         }
+    }
+
+    /// The internal log of the adapter at `address`: its extension, or its
+    /// FDO.
+    pub fn storport_log(&self, address: VirtAddr) -> Result<StorLog> {
+        let stor = self.stor_types()?;
+        let extension = match self.stor_resolve(&stor, address)? {
+            RaidObject::Adapter(extension) => extension,
+            RaidObject::Unit(extension) => {
+                return Err(Error::DebugInfo(format!(
+                    "{} a StorPort unit; storport logs per adapter, so give its adapter",
+                    what_is(address, extension)
+                )));
+            }
+        };
+        let adapter = stor.at(&stor.adapter, extension);
+        let driver_layout = stor.layout("_RAID_DRIVER_EXTENSION")?;
+        let driver_ref = stor.at(&driver_layout, adapter.read_pointer("Driver")?);
+        let driver_name =
+            self.stor_driver_name(driver_ref.read_pointer("DriverObject")?, &driver_ref);
+        let ring = adapter.read_pointer("RaidLogList")?;
+        let size = adapter.read_uint("RaidLogListSize")? as u32;
+        let newest = adapter.read_uint("RaidLogListIndex")?;
+        let entry_layout = stor.layout("_RAID_LOG_ENTRY")?;
+        let entry_size = entry_layout.size as u64;
+        let mut entries = Vec::new();
+        if !ring.is_zero() && size > 0 {
+            let mut bytes = vec![0u8; (entry_size * u64::from(size)) as usize];
+            self.kernel_address_space()
+                .read_bytes(ring, &mut bytes)
+                .map_err(|error| {
+                    Error::DebugInfo(format!("the log ring at {:#x}: {error}", ring.0))
+                })?;
+            let reasons = self.stor_enum_variants("_DBG_LOG_REASON");
+            let field = |name: &str| {
+                entry_layout
+                    .field_offset(name)
+                    .map(|offset| offset as usize)
+            };
+            let reason_at = field("Reason")?;
+            let time_at = field("Timestamp")?;
+            let parameter_at = [
+                field("Parameter1")?,
+                field("Parameter2")?,
+                field("Parameter3")?,
+                field("Parameter4")?,
+            ];
+            for number in log_ring_numbers(newest, size) {
+                let slot = (number % u64::from(size) * entry_size) as usize;
+                let entry = &bytes[slot..slot + entry_size as usize];
+                let u64_at = |at: usize| le_uint(&entry[at..at + 8]);
+                let time = u64_at(time_at);
+                // A slot storport has not written yet holds zeros.
+                if time == 0 {
+                    continue;
+                }
+                entries.push(StorLogEntry {
+                    number,
+                    time,
+                    reason: stor_enum(&reasons, le_uint(&entry[reason_at..reason_at + 4])),
+                    parameters: parameter_at.map(u64_at),
+                });
+            }
+        }
+        Ok(StorLog {
+            adapter: extension,
+            driver_name,
+            ring,
+            size,
+            newest,
+            entries,
+        })
     }
 
     fn stor_adapter_at(&self, stor: &StorTypes<'_>, extension: VirtAddr) -> Result<StorAdapter> {
@@ -1038,6 +1186,18 @@ mod tests {
         assert_eq!(inquiry_text(b"HARDDISK\0garbage"), "HARDDISK");
         assert_eq!(inquiry_text(b"2.5+"), "2.5+");
         assert_eq!(inquiry_text(b"\0\0\0"), "");
+    }
+
+    #[test]
+    fn log_ring_holds_the_last_size_entries_from_one() {
+        // Nothing written yet; slot 0 stays empty until the ring wraps.
+        assert!(log_ring_numbers(0, 256).is_empty());
+        assert_eq!(log_ring_numbers(8, 256), 1..9);
+        // The ring is full once the newest entry reaches its size, and
+        // from then on drops the oldest.
+        assert_eq!(log_ring_numbers(256, 256), 1..257);
+        assert_eq!(log_ring_numbers(0x106_8568, 256), 0x106_8469..0x106_8569);
+        assert!(log_ring_numbers(5, 0).is_empty());
     }
 
     #[test]

@@ -18,6 +18,11 @@ Keeping this file:
 ### Added
 
 - `!ndiskd.filter`, `!ndiskd.filterdriver`, and `!ndiskd.protocol` list the guest's NDIS filter modules, filter drivers, and protocol drivers, and show one with its miniport, stack neighbors, and context, or its bindings. `!ndiskd.oid` shows every OID request a miniport or filter has not completed, and `!ndiskd.nbl` decodes a NET_BUFFER_LIST, its NET_BUFFERs, and with `-data` the frame bytes, read through the MDLs. See [network miniports](https://ntoseye.com/using/ndis/).
+- `!storagekd.storloglist` shows the last 256 events StorPort logged for an adapter: each request it built, started, and saw completed, with its IRP, SRB, and command, and pauses, resumes, timeouts, and resets; `!storagekd.storlogirp` and `!storagekd.storlogsrb` show one request's entries. `!storagekd.storsrb` decodes an SRB, extended or legacy, with its command, status, address, and sense data, and `!storagekd.storclass` lists the disks and other class devices with the requests classpnp has in flight and the last errors it logged. See [StorPort adapters](https://ntoseye.com/using/storport/).
+
+### Changed
+
+- `!storagekd.storunit` names the command of each request the miniport holds, such as `WRITE(10) LBA 0x64b500, 8 blocks`.
 
 ## v0.48.0 (2026-10-08)
 

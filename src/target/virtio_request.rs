@@ -386,7 +386,7 @@ pub fn scsi_command(cdb: &[u8]) -> Option<String> {
 }
 
 /// A SCSI status byte's name.
-fn scsi_status(status: u8) -> String {
+pub fn scsi_status(status: u8) -> String {
     match status {
         0x00 => "GOOD".into(),
         0x02 => "CHECK CONDITION".into(),

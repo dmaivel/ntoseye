@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use parking_lot::Mutex;
 
 pub mod alpc;
+pub mod classpnp;
 mod context;
 pub mod cpu;
 pub mod dbgprint;
@@ -31,6 +32,7 @@ pub mod pnp;
 pub mod pool;
 pub mod sched;
 pub mod security;
+pub mod srb;
 pub mod storport;
 mod symbols;
 pub mod usermode;

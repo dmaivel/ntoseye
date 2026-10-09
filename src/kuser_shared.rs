@@ -36,6 +36,12 @@ impl<'a> KuserSharedData<'a> {
         self.u64_field("SystemTime")
     }
 
+    /// The tick count `KeQueryTickCount` returns, in clock interrupts
+    /// (`KeMaximumIncrement` 100 ns units each).
+    pub fn tick_count(&self) -> Option<u64> {
+        self.u64_field("TickCountQuad")
+    }
+
     /// UTC minus local time, in 100 ns units (the low 64 bits of the
     /// `KSYSTEM_TIME`).
     pub fn time_zone_bias(&self) -> Option<i64> {
