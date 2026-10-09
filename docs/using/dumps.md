@@ -111,6 +111,8 @@ Logger 0x0a 'EventLog-System' in the dump's ETW data
 
 WinDbg's `!wmitrace.strdump` lists only the first of these sessions in a minidump, and its `!wmitrace.logdump` and `!wmitrace.logsave` cannot read the buffers.
 
+In the [Python SDK](../scripting/sdk.md), `inspect.etw_crash_sessions()` lists these sessions with their buffers, and `inspect.etw_crash_events(logger, count=None)` decodes the events of one, by its name or logger ID, oldest first. They read the sessions that Windows saved in a kernel or full dump too, while `etw_loggers()` and `etw_events()` read every session from the dump's memory.
+
 ## Writing a dump from a live target
 
 To write a dump from a live halted target, use the WinDbg-compatible command:

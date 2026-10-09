@@ -7,6 +7,7 @@ use crate::target::etw::{
     EtwLoggerTable as EtwLoggerTableDetail, event_trace_group_name, extended_type_name,
     format_filetime_precise, format_guid, logger_mode_names,
 };
+use crate::target::etw::dump::{EtwDumpData, EtwDumpLogger};
 
 shapes! {
     /// An active ETW trace session, decoded from its `_WMI_LOGGER_CONTEXT`.
@@ -220,6 +221,70 @@ shapes! {
         message_format_note: Option<String>,
         events: Vec<EtwEvent>,
     }
+
+    /// An ETW trace session that Windows saved in a crash dump, as the
+    /// session's header in the dump records it.
+    EtwCrashSession {
+        logger_id: u32,
+        name: String,
+        logger_mode: Hex<u32>,
+        /// The `EVENT_TRACE_*_MODE` bits that are set in `logger_mode`.
+        logger_mode_names: Vec<&'static str>,
+        /// Bytes per buffer.
+        buffer_size: u32,
+        /// `ClockType` (`EVENT_TRACE_CLOCK_*`).
+        clock_type: u32,
+        /// The name of what the event timestamps count.
+        clock: &'static str,
+        /// `StartTime`, a FILETIME.
+        start_time: u64,
+        /// `start_time` as UTC (`YYYY-MM-DD HH:MM:SS.fffffff`). `None` if it is
+        /// out of range.
+        start_time_utc: Option<String>,
+        /// The buffers saved of the session. A buffer's `address` is the
+        /// offset of its header in the dump's ETW data.
+        buffers: Vec<EtwBuffer>,
+    }
+
+    /// The ETW trace sessions that Windows saved as it wrote a crash dump
+    /// (tagged data `nt!EtwSecondaryDumpDataGuid`): the sessions started
+    /// with `EVENT_TRACE_ADDTO_TRIAGE_DUMP`, such as EventLog-System.
+    EtwCrashData {
+        /// Bytes of the ETW data.
+        size: usize,
+        /// `KeMaximumIncrement`, the clock interrupt interval in 100 ns.
+        timer_resolution: u32,
+        /// `NtBuildNumber`.
+        build_number: Hex<u32>,
+        /// `EtwCPUSpeedInMHz`.
+        cpu_mhz: u32,
+        /// `EtwpBootTime`, a FILETIME.
+        boot_time: u64,
+        /// `boot_time` as UTC. `None` if it is out of range.
+        boot_time_utc: Option<String>,
+        /// `EtwPerfFreq`, the QPC frequency of PerfCounter timestamps.
+        perf_frequency: u64,
+        sessions: Vec<EtwCrashSession>,
+        /// Why the walk of the data stopped before its end. `None` if it read
+        /// all of it.
+        stop: Option<String>,
+    }
+
+    /// The events of a session that Windows saved in a crash dump, oldest
+    /// first.
+    EtwCrashEvents {
+        session: EtwCrashSession,
+        buffers_walked: usize,
+        /// The number of events found before a count kept the most recent.
+        total_events: usize,
+        /// The buffers that ntoseye skipped fully (compressed), and the walks
+        /// that stopped early.
+        issues: Vec<EtwEventIssue>,
+        /// Why some WPP messages have no `text`. `None` if all messages have
+        /// `text`.
+        message_format_note: Option<String>,
+        events: Vec<EtwEvent>,
+    }
 }
 
 fn guid(value: Option<&[u8; 16]>) -> Option<String> {
@@ -379,15 +444,61 @@ pub fn event_dump(dump: &EtwEventDumpDetail) -> EtwEventDump {
         total_events: decoded.total_events,
         qpc_frequency: dump.qpc_frequency,
         cpu_mhz: dump.cpu_mhz,
-        issues: decoded
-            .issues
-            .iter()
-            .map(|issue| EtwEventIssue {
-                buffer: issue.buffer,
-                offset: issue.offset,
-                reason: issue.reason.clone(),
-            })
-            .collect(),
+        issues: issues(decoded),
+        message_format_note: decoded.message_format_note.clone(),
+        events: decoded.events.iter().map(event).collect(),
+    }
+}
+
+fn issues(decoded: &etw::EtwEvents) -> Vec<EtwEventIssue> {
+    decoded
+        .issues
+        .iter()
+        .map(|issue| EtwEventIssue {
+            buffer: issue.buffer,
+            offset: issue.offset,
+            reason: issue.reason.clone(),
+        })
+        .collect()
+}
+
+fn crash_session(session: &EtwDumpLogger) -> EtwCrashSession {
+    EtwCrashSession {
+        logger_id: session.logger_id,
+        name: session.name.clone(),
+        logger_mode: session.logger_mode,
+        logger_mode_names: logger_mode_names(session.logger_mode),
+        buffer_size: session.buffer_size,
+        clock_type: session.clock.raw(),
+        clock: session.clock.name(),
+        start_time: session.start_time,
+        start_time_utc: filetime(Some(session.start_time)),
+        buffers: session.buffers.iter().map(buffer).collect(),
+    }
+}
+
+/// The ETW sessions a crash dump saved.
+pub fn crash_data(data: &EtwDumpData) -> EtwCrashData {
+    EtwCrashData {
+        size: data.size(),
+        timer_resolution: data.timer_resolution,
+        build_number: data.build_number,
+        cpu_mhz: data.cpu_mhz,
+        boot_time: data.boot_time,
+        boot_time_utc: filetime(Some(data.boot_time)),
+        perf_frequency: data.perf_frequency,
+        sessions: data.loggers.iter().map(crash_session).collect(),
+        stop: data.stop.clone(),
+    }
+}
+
+/// The events of `session`, one of the sessions a crash dump saved.
+pub fn crash_events(session: &EtwDumpLogger, decoded: &etw::EtwEvents) -> EtwCrashEvents {
+    EtwCrashEvents {
+        session: crash_session(session),
+        buffers_walked: decoded.buffers_walked,
+        total_events: decoded.total_events,
+        issues: issues(decoded),
         message_format_note: decoded.message_format_note.clone(),
         events: decoded.events.iter().map(event).collect(),
     }

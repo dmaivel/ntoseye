@@ -288,20 +288,37 @@ impl Target {
     /// sessions from; `None` for a live target and a full or kernel dump,
     /// whose memory holds the sessions themselves.
     pub fn etw_dump_data(&self) -> Result<Option<EtwDumpData>> {
-        let Some(dump) = self.phys.dmp_info().filter(|dump| dump.is_triage) else {
+        if !self.phys.dmp_info().is_some_and(|dump| dump.is_triage) {
             return Ok(None);
-        };
+        }
+        self.etw_crash_data().map(Some)
+    }
+
+    /// The ETW sessions Windows saved in a crash dump, of any kind, as
+    /// tagged data: the SDK's `etw_crash_sessions()`.
+    pub fn etw_crash_data(&self) -> Result<EtwDumpData> {
+        let dump = self.phys.dmp_info().ok_or_else(|| {
+            Error::DebugInfo(
+                "Windows saves ETW sessions as it writes a crash dump; a live target's \
+                 sessions are in its memory, which etw_loggers() and !wmitrace read"
+                    .into(),
+            )
+        })?;
         let block = dump
             .tagged_blocks
             .iter()
             .find(|block| block.tag == ETW_DUMP_DATA_TAG)
             .ok_or_else(|| {
-                Error::DebugInfo(
+                Error::DebugInfo(if dump.is_triage {
                     "a minidump does not hold the kernel's ETW sessions, only the tagged data \
                      nt!EtwSecondaryDumpDataGuid of those that log to triage dumps, and this \
                      one has none"
-                        .into(),
-                )
+                        .into()
+                } else {
+                    "this dump has no tagged data nt!EtwSecondaryDumpDataGuid, the ETW \
+                     sessions that log to triage dumps"
+                        .into()
+                })
             })?;
         let types = self.etw_types()?;
         parse_dump_data(
@@ -309,7 +326,6 @@ impl Target {
             &types.offsets,
             &types.buffer_states,
         )
-        .map(Some)
     }
 
     /// `!wmitrace.logdump` in a minidump: the events in `logger`'s buffers,

@@ -1197,6 +1197,43 @@ impl Inspect {
         })
     }
 
+    /// List the ETW trace sessions that Windows saved as it wrote a crash
+    /// dump, and their buffers (`!wmitrace.strdump` in a minidump): the
+    /// sessions started with `EVENT_TRACE_ADDTO_TRIAGE_DUMP`, such as
+    /// EventLog-System. A minidump has no other copy of them; in a kernel or
+    /// full dump, `etw_loggers()` reads every session from memory.
+    fn etw_crash_sessions<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Typed<'py, view::etw::EtwCrashData>> {
+        self.typed(py, |session| {
+            let data = session.target.etw_crash_data().map_err(err)?;
+            Ok(view::etw::crash_data(&data))
+        })
+    }
+
+    /// Decode the events of an ETW trace session that Windows saved in a
+    /// crash dump, oldest first (`!wmitrace.logdump` in a minidump).
+    /// `logger` is the logger ID or the session name, and `count` keeps
+    /// only the most recent events.
+    #[pyo3(signature = (logger, count=None))]
+    fn etw_crash_events<'py>(
+        &self,
+        py: Python<'py>,
+        logger: LoggerArg,
+        count: Option<usize>,
+    ) -> PyResult<Typed<'py, view::etw::EtwCrashEvents>> {
+        self.typed(py, |session| {
+            let target = &session.target;
+            let data = target.etw_crash_data().map_err(err)?;
+            let saved = target
+                .etw_dump_logger(&data, &logger.text(), NumberRadix::Hexadecimal)
+                .map_err(err)?;
+            let events = target.etw_dump_events(&data, saved, count).map_err(err)?;
+            Ok(view::etw::crash_events(saved, &events))
+        })
+    }
+
     /// Decode a PnP device node (`!devnode`), and optionally its subtree up to
     /// a limit.
     #[pyo3(signature = (node=None, recurse=false))]

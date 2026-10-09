@@ -3257,6 +3257,137 @@ class EtwBuffer(BaseRecord):
         """
 
 @final
+class EtwCrashData(BaseRecord):
+    """
+    The ETW trace sessions that Windows saved as it wrote a crash dump
+    (tagged data `nt!EtwSecondaryDumpDataGuid`): the sessions started
+    with `EVENT_TRACE_ADDTO_TRIAGE_DUMP`, such as EventLog-System.
+    """
+    @property
+    def boot_time(self, /) -> int:
+        """
+        `EtwpBootTime`, a FILETIME.
+        """
+    @property
+    def boot_time_utc(self, /) -> str |None:
+        """
+        `boot_time` as UTC. `None` if it is out of range.
+        """
+    @property
+    def build_number(self, /) -> int:
+        """
+        `NtBuildNumber`.
+        """
+    @property
+    def cpu_mhz(self, /) -> int:
+        """
+        `EtwCPUSpeedInMHz`.
+        """
+    @property
+    def perf_frequency(self, /) -> int:
+        """
+        `EtwPerfFreq`, the QPC frequency of PerfCounter timestamps.
+        """
+    @property
+    def sessions(self, /) -> list[EtwCrashSession]: ...
+    @property
+    def size(self, /) -> int:
+        """
+        Bytes of the ETW data.
+        """
+    @property
+    def stop(self, /) -> str |None:
+        """
+        Why the walk of the data stopped before its end. `None` if it read
+        all of it.
+        """
+    @property
+    def timer_resolution(self, /) -> int:
+        """
+        `KeMaximumIncrement`, the clock interrupt interval in 100 ns.
+        """
+
+@final
+class EtwCrashEvents(BaseRecord):
+    """
+    The events of a session that Windows saved in a crash dump, oldest
+    first.
+    """
+    @property
+    def buffers_walked(self, /) -> int: ...
+    @property
+    def events(self, /) -> list[EtwEvent]: ...
+    @property
+    def issues(self, /) -> list[EtwEventIssue]:
+        """
+        The buffers that ntoseye skipped fully (compressed), and the walks
+        that stopped early.
+        """
+    @property
+    def message_format_note(self, /) -> str |None:
+        """
+        Why some WPP messages have no `text`. `None` if all messages have
+        `text`.
+        """
+    @property
+    def session(self, /) -> EtwCrashSession: ...
+    @property
+    def total_events(self, /) -> int:
+        """
+        The number of events found before a count kept the most recent.
+        """
+
+@final
+class EtwCrashSession(BaseRecord):
+    """
+    An ETW trace session that Windows saved in a crash dump, as the
+    session's header in the dump records it.
+    """
+    @property
+    def buffer_size(self, /) -> int:
+        """
+        Bytes per buffer.
+        """
+    @property
+    def buffers(self, /) -> list[EtwBuffer]:
+        """
+        The buffers saved of the session. A buffer's `address` is the
+        offset of its header in the dump's ETW data.
+        """
+    @property
+    def clock(self, /) -> str:
+        """
+        The name of what the event timestamps count.
+        """
+    @property
+    def clock_type(self, /) -> int:
+        """
+        `ClockType` (`EVENT_TRACE_CLOCK_*`).
+        """
+    @property
+    def logger_id(self, /) -> int: ...
+    @property
+    def logger_mode(self, /) -> int: ...
+    @property
+    def logger_mode_names(self, /) -> list[str]:
+        """
+        The `EVENT_TRACE_*_MODE` bits that are set in `logger_mode`.
+        """
+    @property
+    def name(self, /) -> str: ...
+    @property
+    def start_time(self, /) -> int:
+        """
+        `StartTime`, a FILETIME.
+        """
+    @property
+    def start_time_utc(self, /) -> str |None:
+        """
+        `start_time` as UTC (`YYYY-MM-DD HH:MM:SS.fffffff`). `None` if it is
+        out of range.
+        """
+
+@final
 class EtwEvent(BaseRecord):
     """
     An event record that ntoseye decoded from a trace buffer. A field is
@@ -6491,6 +6622,21 @@ class Inspect:
         """
         List the trace buffers on the GlobalList of an ETW trace session
         (`!wmitrace.strdump logger`).
+        """
+    def etw_crash_events(self, /, logger: int |str, count: int |None = None) -> EtwCrashEvents:
+        """
+        Decode the events of an ETW trace session that Windows saved in a
+        crash dump, oldest first (`!wmitrace.logdump` in a minidump).
+        `logger` is the logger ID or the session name, and `count` keeps
+        only the most recent events.
+        """
+    def etw_crash_sessions(self, /) -> EtwCrashData:
+        """
+        List the ETW trace sessions that Windows saved as it wrote a crash
+        dump, and their buffers (`!wmitrace.strdump` in a minidump): the
+        sessions started with `EVENT_TRACE_ADDTO_TRIAGE_DUMP`, such as
+        EventLog-System. A minidump has no other copy of them; in a kernel or
+        full dump, `etw_loggers()` reads every session from memory.
         """
     def etw_events(self, /, logger: int |str, count: int |None = None) -> EtwEventDump:
         """
