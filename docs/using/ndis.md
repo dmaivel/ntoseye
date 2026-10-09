@@ -1,8 +1,8 @@
 # Network miniports (`!ndiskd.*`)
 
-The {command}`!ndiskd.miniports`, {command}`!ndiskd.miniport`, and {command}`!ndiskd.minidriver` commands show what NDIS knows about the guest's network adapters: each miniport's state and link, the miniport driver behind it, the filter drivers stacked on it, the protocols bound to it, and the OID request it is working on. They help you when you develop a miniport driver, such as NetKVM, the virtio-win driver for virtio-net devices, and an adapter does not come up, stops passing traffic, or does not finish a pause, a reset, or an OID request.
+The `!ndiskd` commands show what NDIS knows about the guest's network adapters: each miniport's state and link, the miniport driver behind it, the filter drivers stacked on it, the protocols bound to it, the OID requests nobody has completed, and the NET_BUFFER_LISTs that carry its frames. They help you when you develop a miniport, filter, or protocol driver, such as NetKVM, the virtio-win driver for virtio-net devices, and an adapter does not come up, stops passing traffic, or does not finish a pause, a reset, or an OID request.
 
-The commands have the names of the commands in WinDbg's `ndiskd` extension. They read ndis.sys's own structures (`_NDIS_MINIPORT_BLOCK`, `_NDIS_M_DRIVER_BLOCK`, `_NDIS_FILTER_BLOCK`, `_NDIS_OPEN_BLOCK`, `_NDIS_OID_REQUEST`) with the types in the public PDB of ndis.sys, so they need that PDB, which ntoseye downloads like any other. They read only guest memory, so they work on every backend and in crash dumps.
+The commands have the names of the commands in WinDbg's `ndiskd` extension. They read ndis.sys's own structures (`_NDIS_MINIPORT_BLOCK`, `_NDIS_M_DRIVER_BLOCK`, `_NDIS_FILTER_BLOCK`, `_NDIS_FILTER_DRIVER_BLOCK`, `_NDIS_PROTOCOL_BLOCK`, `_NDIS_OPEN_BLOCK`, `_NDIS_OID_REQUEST`, `_NET_BUFFER_LIST`) with the types in the public PDB of ndis.sys, so they need that PDB, which ntoseye downloads like any other. They read only guest memory, so they work on every backend and in crash dumps.
 
 ## Miniports
 
@@ -117,3 +117,104 @@ ffffc88843a491a0  e1i68x64  Running  Connected 1 Gbps  D0     6        Intel(R) 
 ```
 
 The module is the loaded image that the driver's code is in, the name that its PDB's types go by in {command}`dt`.
+
+## Filter modules and filter drivers
+
+{command}`!ndiskd.filter` without an address lists every filter module, on every miniport, from ndis.sys's global list of filters:
+
+```text
+Filter            State    Driver        Miniport          Name
+ffffa08e68eb3550  Running  wfplwfs.sys   ffffa08e6898d1a0  Intel(R) 82574L Gigabit Network Connection #2-WFP 802.3 MAC Layer LightWeight Filter-0000
+ffffa08e68eaf010  Running  pacer.sys     ffffa08e6898d1a0  Intel(R) 82574L Gigabit Network Connection #2-QoS Packet Scheduler-0000
+ffffa08e68f1f4e0  Running  wfplwfs.sys   ffffa08e6898d1a0  Intel(R) 82574L Gigabit Network Connection #2-WFP Native MAC Layer LightWeight Filter-0000
+```
+
+With the address of a filter module, it shows the module:
+
+```text
+Filter               ffffa08e68eaf010  Intel(R) 82574L Gigabit Network Connection #2-QoS Packet Scheduler-0000
+Filter driver        ffffa08e686cac40  QoS Packet Scheduler (pacer.sys)
+Miniport             ffffa08e6898d1a0  Intel(R) 82574L Gigabit Network Connection #2
+Module context       ffffa08e68ac3ce0  (dt pacer!<context type> ffffa08e68ac3ce0)
+Stack                higher ffffa08e68eb3550, lower ffffa08e68f1f4e0
+
+State                Running
+Link                 Connected, 1 Gbps transmit, 1 Gbps receive
+IfIndex              26
+References           1
+Dropped              0 receive NBLs, 0 send NBLs, 0 status indications
+Pending OID          none
+Flags                0x10
+```
+
+- **Module context** is the context that your filter driver passed to `NdisFSetAttributes`, the `FilterModuleContext` that NDIS gives back to each of your handlers. Read it with your driver's private PDB and {command}`dt`.
+- **Stack** names the filter modules above and below this one on the miniport's stack. The bottom module's lower neighbor is the miniport itself.
+- **Link** is the link state that the filter last saw indicated from below, which can differ from the miniport's own while an indication is on its way up.
+- **Dropped** counts the NBLs and status indications that NDIS dropped because the filter module was not running. A count that grows while the filter should be running points at a pause or restart that did not finish.
+
+{command}`!ndiskd.filterdriver` lists the filter drivers that registered with NDIS, with the friendly name, service, and image of each and how many filter modules it has. With the address of a filter driver block, it shows the driver's unique name (the GUID in its INF), `DRIVER_OBJECT`, the module its code is in, its driver context, and its filter modules, one for each miniport it is attached to.
+
+## Protocols
+
+{command}`!ndiskd.protocol` lists the protocol drivers, such as TCPIP and TCPIP6, with the number of miniports each has bound to. With the address of a protocol block, it shows the protocol and its bindings:
+
+```text
+Protocol block       ffffa08e6830fa40  TCPIP
+Image                tcpip.sys
+NDIS version         6.89
+Driver version       0.0
+Driver context       fffff806264a7dd0
+BindAdapterHandlerEx fffff806263824f0  tcpip!FlBindAdapter
+Flags                0x0
+
+Bindings (2)
+Open              Miniport          Context           Name
+ffffa08e6c6638a0  ffffa08e6f0a5000  ffffa08e6cefb010  Hyper-V Virtual Ethernet Adapter
+ffffa08e68f1c8a0  ffffa08e6898d1a0  ffffa08e68f6b850  Intel(R) 82574L Gigabit Network Connection #2
+```
+
+Each binding is an `_NDIS_OPEN_BLOCK`, with the miniport that the protocol opened and the protocol's own binding context.
+
+{command}`!ndiskd.protocol`, {command}`!ndiskd.filter`, and {command}`!ndiskd.filterdriver` accept an address that is not on NDIS's list only when it has the NDIS object header of that kind of block, as {command}`!ndiskd.miniport` does.
+
+## Pending OID requests
+
+{command}`!ndiskd.oid` reads the pending OID request of every miniport and every filter module. For each one that has not completed, it shows whether a miniport or a filter module owns it, the owner's address and name, and the request as {command}`!ndiskd.miniport` shows it: the `_NDIS_OID_REQUEST`, its type, the OID by its `ntddndis.h` name, and its buffer. When nothing is pending, it says how many it checked:
+
+```text
+No pending OID requests on 3 miniports and 7 filter modules.
+```
+
+NDIS passes each miniport and filter one OID request at a time, apart from direct OID requests, so a request that stays in this list holds up the ones behind it, and a pause or a reset of that adapter waits for it.
+
+## NET_BUFFER_LISTs
+
+{command}`!ndiskd.nbl` decodes a `_NET_BUFFER_LIST`, for example the one in `rdx` at a breakpoint on `ndis!NdisMIndicateReceiveNetBufferLists` or on your driver's send handler:
+
+```text
+NBL                  ffffa08e68bc69f0
+Next                 none
+Parent               none
+Source               ffffa08e6898d1a0  miniport Intel(R) 82574L Gigabit Network Connection #2
+Pool                 ffffa08e68bc3a00
+Context              none
+Flags                0x200010c, NblFlags 0x0
+Status               0x0 (STATUS_SUCCESS)
+Child references     0
+
+NET_BUFFERs (1)
+NET_BUFFER        Length  Offset  Current MDL       MDL offset  MDL chain
+ffffa08e68bc6b70  0xdb    0x0     ffffa08e68b8a250  0x0         ffffa08e68b8a250
+```
+
+**Source** is the NBL's `SourceHandle` with what it is: a miniport, a filter module, or a protocol's binding, which ntoseye tells apart by the NDIS object header at the handle. `NblFlags` shows the `NDIS_NBL_FLAGS_*` bits by name, such as `IS_IPV4` and `IS_TCP`. Each NET_BUFFER shows its data length, its offset from the start of its MDL chain (the bytes before it are backfill), and the MDL and offset where its data starts.
+
+`-chain` lists every NBL on the `Next` chain from the address, with its NET_BUFFERs, bytes, status, and source. `-data` dumps each NET_BUFFER's data by offset into the frame, up to 64 KiB of it:
+
+```text
+Data of NET_BUFFER ffffa08e68bc6b70 (0xdb bytes)
+0000  52 54 00 a5 ee 27 52 55 0a 00 02 02 08 00 45 00  RT...'RU......E.
+0010  00 cd 18 6d 00 00 40 11 49 a2 0a 00 02 03 0a 00  ...m..@.I.......
+```
+
+ntoseye reads the data through each MDL's PFNs, so a buffer that is not mapped into system space reads too.
