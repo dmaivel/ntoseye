@@ -131,6 +131,10 @@ pub struct MockBackend {
     selected: String,
     /// A stop the next wait returns at once, before any other.
     immediate_stop: Option<StopEvent>,
+    /// Each processor's MSRs and 32-bit device registers by physical
+    /// address; a read of any other faults, as on hardware.
+    msrs: HashMap<(u16, u32), u64>,
+    device_registers: HashMap<(u16, u64), u32>,
 }
 
 /// Where processor 0 stands after a mock step or run: its IP and stack
@@ -185,6 +189,8 @@ impl Default for MockBackend {
             parked_resumes: Arc::new(AtomicUsize::new(0)),
             selected: String::new(),
             immediate_stop: None,
+            msrs: HashMap::new(),
+            device_registers: HashMap::new(),
         }
     }
 }
@@ -241,6 +247,18 @@ impl MockBackend {
 
     pub fn with_pending_stop(mut self) -> Self {
         self.pending_stop = true;
+        self
+    }
+
+    /// Give `processor` MSR `msr`, read as `value`.
+    pub fn with_msr(mut self, processor: u16, msr: u32, value: u64) -> Self {
+        self.msrs.insert((processor, msr), value);
+        self
+    }
+
+    /// Give `processor` a 32-bit device register at physical `address`.
+    pub fn with_device_register(mut self, processor: u16, address: u64, value: u32) -> Self {
+        self.device_registers.insert((processor, address), value);
         self
     }
 
@@ -511,6 +529,24 @@ impl DebugBackend for MockBackend {
     }
     fn has_pending_stop(&self) -> bool {
         self.pending_stop
+    }
+    fn supports_msr(&self) -> bool {
+        !self.msrs.is_empty()
+    }
+    fn read_msr(&mut self, processor: u16, msr: u32) -> Result<u64> {
+        self.msrs
+            .get(&(processor, msr))
+            .copied()
+            .ok_or_else(|| Error::Kd(format!("#GP reading MSR {msr:#x} on {processor}")))
+    }
+    fn read_device_memory(&mut self, processor: u16, address: u64, buf: &mut [u8]) -> Result<()> {
+        let value = self
+            .device_registers
+            .get(&(processor, address))
+            .filter(|_| buf.len() == 4)
+            .ok_or_else(|| Error::Kd(format!("no register at {address:#x} on {processor}")))?;
+        buf.copy_from_slice(&value.to_le_bytes());
+        Ok(())
     }
 
     fn take_modules_changed(&mut self) -> bool {

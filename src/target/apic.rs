@@ -614,6 +614,7 @@ impl Target {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::tests::{MockBackend, session_with_mock};
 
     #[test]
     fn lvt_entries_decode_mode_mask_and_trigger() {
@@ -675,5 +676,79 @@ mod tests {
         assert_eq!(ApicRegister::Icr.msr(0), 0x830);
         assert_eq!(ApicRegister::Irr.msr(7), 0x827);
         assert_eq!(ApicRegister::TimerDivide.msr(0), 0x83e);
+    }
+
+    /// Processor 0 is an xAPIC bootstrap processor with nothing else to
+    /// read, so a read that lands on it rather than the processor asked
+    /// for fails the test.
+    fn backend_with_bsp() -> MockBackend {
+        MockBackend::default().with_msr(0, IA32_APIC_BASE, 0xfee0_0900)
+    }
+
+    #[test]
+    fn an_x2apic_reads_through_msrs_with_its_whole_id_and_one_icr() {
+        let mut backend = backend_with_bsp().with_msr(
+            2,
+            IA32_APIC_BASE,
+            0xfee0_0000 | APIC_BASE_ENABLE | APIC_BASE_X2APIC,
+        );
+        for (register, index) in apic_words(true) {
+            backend = backend.with_msr(2, register.msr(index), 0);
+        }
+        let backend = backend
+            // An x2APIC ID past 8 bits, which xAPIC's top byte cannot hold.
+            .with_msr(2, 0x802, 0x105)
+            // Five LVT entries past the first: thermal, but no CMCI.
+            .with_msr(2, 0x803, 0x0005_0014)
+            // One 64-bit ICR: a fixed IPI on 0xfd to x2APIC ID 3.
+            .with_msr(2, 0x830, 0x0000_0003_0000_40fd)
+            .with_msr(2, 0x833, 0x0001_0000)
+            // Vector 0xd1 in service: bit 17 of ISR word 6.
+            .with_msr(2, 0x816, 1 << 17)
+            .with_msr(2, 0x83e, 0b1011);
+        let mut session = session_with_mock(backend);
+
+        let apic = session.local_apic(2).unwrap();
+
+        assert!(apic.x2apic && apic.enabled() && !apic.bsp());
+        assert_eq!(apic.id, 0x105);
+        assert_eq!(decode_icr(apic.icr, apic.x2apic).destination, 3);
+        assert_eq!(bitmap_vectors(&apic.isr), [0xd1]);
+        assert_eq!(timer_divisor(apic.timer_divide), 1);
+        let lvt: HashMap<_, _> = apic.lvt.into_iter().collect();
+        assert!(lvt["Thermal"].as_ref().is_some_and(|entry| entry.masked));
+        assert!(lvt["CMCI"].is_none());
+    }
+
+    #[test]
+    fn an_xapic_reads_its_registers_at_its_base_on_its_processor() {
+        let base = 0xfee0_0000;
+        let mut backend = backend_with_bsp().with_msr(1, IA32_APIC_BASE, base | APIC_BASE_ENABLE);
+        for (register, index) in apic_words(false) {
+            let address = base + register as u64 + u64::from(index) * 0x10;
+            backend = backend.with_device_register(1, address, 0);
+        }
+        let backend = backend
+            // The ID in the top byte.
+            .with_device_register(1, base + 0x20, 0x0100_0000)
+            // Six LVT entries past the first: CMCI too.
+            .with_device_register(1, base + 0x30, 0x0006_0014)
+            .with_device_register(1, base + 0x2f0, 0x0000_00f2)
+            // The ICR's halves: an IPI on 0xfd to APIC ID 3.
+            .with_device_register(1, base + 0x300, 0x0000_40fd)
+            .with_device_register(1, base + 0x310, 0x0300_0000)
+            // Vector 0x2f requested: bit 15 of IRR word 1.
+            .with_device_register(1, base + 0x210, 1 << 15);
+        let mut session = session_with_mock(backend);
+
+        let apic = session.local_apic(1).unwrap();
+
+        assert!(!apic.x2apic && apic.enabled() && !apic.bsp());
+        assert_eq!(apic.id, 1);
+        assert_eq!(apic.icr, 0x0300_0000_0000_40fd);
+        assert_eq!(decode_icr(apic.icr, apic.x2apic).destination, 3);
+        assert_eq!(bitmap_vectors(&apic.irr), [0x2f]);
+        let lvt: HashMap<_, _> = apic.lvt.into_iter().collect();
+        assert_eq!(lvt["CMCI"].as_ref().map(|entry| entry.vector), Some(0xf2));
     }
 }
