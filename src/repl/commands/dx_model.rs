@@ -154,9 +154,9 @@ pub fn properties(value: &ModelValue) -> &'static [&'static str] {
 
 /// The value line of an object or collection: what WinDbg shows after its
 /// name.
-pub fn summary(value: &ModelValue) -> Option<String> {
+pub fn summary(target: &Target, value: &ModelValue) -> Option<String> {
     match value {
-        ModelValue::Process(process) => Some(process.name.clone()),
+        ModelValue::Process(process) => Some(process_name(target, process)),
         ModelValue::Thread(thread) => Some(format!(
             "{} TID {:#x} (ETHREAD {:#x})",
             thread.process_name.as_deref().unwrap_or("?"),
@@ -167,6 +167,34 @@ pub fn summary(value: &ModelValue) -> Option<String> {
         ModelValue::Scalar(text) => Some(text.clone()),
         _ => None,
     }
+}
+
+/// A process's name as the data model gives it: the file name of its
+/// image, from `SeAuditProcessCreationInfo`, which keeps the whole name
+/// where `ImageFileName` keeps 15 characters; `ImageFileName` for a
+/// process without an image file, such as System.
+pub fn process_name(target: &Target, process: &ProcessInfo) -> String {
+    let full = || -> Option<String> {
+        let types = target.types_in(target.kernel_dtb());
+        let audit = types
+            .struct_at("_EPROCESS", process.eprocess_va)
+            .ok()?
+            .embedded("SeAuditProcessCreationInfo")
+            .ok()?
+            .read_pointer("ImageFileName")
+            .ok()?;
+        if audit.is_zero() {
+            return None;
+        }
+        let path = types
+            .struct_at("_OBJECT_NAME_INFORMATION", audit)
+            .ok()?
+            .unicode_string("Name")
+            .ok()?;
+        let file = path.rsplit('\\').next()?.to_string();
+        (!file.is_empty()).then_some(file)
+    };
+    full().unwrap_or_else(|| process.name.clone())
 }
 
 /// The current process, as `@$curprocess` names it.
@@ -222,7 +250,7 @@ pub fn is_collection(value: &ModelValue) -> bool {
 
 /// The property `name` of `value`: a model value, or the typed kernel
 /// object `KernelObject` names.
-pub fn property(value: &ModelValue, name: &str) -> Result<ModelResult> {
+pub fn property(target: &Target, value: &ModelValue, name: &str) -> Result<ModelResult> {
     let model = |value| Ok(ModelResult::Value(value));
     let typed = |type_name: &str, address: u64| {
         Ok(ModelResult::Typed {
@@ -234,7 +262,9 @@ pub fn property(value: &ModelValue, name: &str) -> Result<ModelResult> {
         (ModelValue::Session, "Processes") => model(ModelValue::Processes),
         (ModelValue::Session, "Id") => model(ModelValue::Scalar("0x0".into())),
         (ModelValue::Process(process), "KernelObject") => typed("_EPROCESS", process.eprocess_va.0),
-        (ModelValue::Process(process), "Name") => model(ModelValue::Scalar(process.name.clone())),
+        (ModelValue::Process(process), "Name") => {
+            model(ModelValue::Scalar(process_name(target, process)))
+        }
         (ModelValue::Process(process), "Id") => {
             model(ModelValue::Scalar(format!("{:#x}", process.pid)))
         }
@@ -296,7 +326,7 @@ pub fn evaluate(target: &Target, text: &str) -> Result<ModelResult> {
                 )));
             }
             Accessor::Invalid(message) => return Err(Error::InvalidExpression(message)),
-            Accessor::Property(name) => match property(&value, name)? {
+            Accessor::Property(name) => match property(target, &value, name)? {
                 ModelResult::Value(next) => next,
                 ModelResult::Typed { expression } => {
                     // The rest of the expression reads the typed object.

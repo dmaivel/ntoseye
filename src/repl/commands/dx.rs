@@ -258,7 +258,7 @@ impl ReplState<'_> {
         let properties = model::properties(value);
         let mut line = DxLine {
             name: Some(name.to_string()),
-            value: model::summary(value),
+            value: model::summary(target, value),
             expandable: collection || !properties.is_empty(),
             ..DxLine::default()
         };
@@ -284,7 +284,7 @@ impl ReplState<'_> {
             return line;
         }
         for property in properties {
-            let child = match model::property(value, property) {
+            let child = match model::property(target, value, property) {
                 Ok(ModelResult::Value(child)) => self.dx_model_line(property, &child, depth - 1),
                 Ok(ModelResult::Typed { expression }) => self
                     .dx_typed(property, &expression, depth - 1)
