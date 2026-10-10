@@ -38,12 +38,7 @@ pub enum ModelValue {
     /// `Debugger.Utility`, and its `Collections`, which has `FromListEntry`.
     Utility,
     Collections,
-    /// An integer: an unsigned one, such as an ID, shows in hex, and a
-    /// signed one, such as a literal, in decimal, as in WinDbg.
-    Int {
-        value: i128,
-        unsigned: bool,
-    },
+    Int(Integer),
     Text(String),
     Bool(bool),
     /// A collection a query made, keyed as `dx` shows it.
@@ -56,10 +51,40 @@ pub enum ModelValue {
 
 impl ModelValue {
     pub fn unsigned(value: u64) -> Self {
-        Self::Int {
-            value: i128::from(value),
-            unsigned: true,
+        Self::Int(Integer::new(i128::from(value), true, true))
+    }
+}
+
+/// An integer with its C type: 32 or 64 bits (`wide`), signed or not. An
+/// unsigned one, such as an ID or a count, shows in hex, and a signed one,
+/// such as a literal's arithmetic, in decimal, as in WinDbg.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Integer {
+    pub value: i128,
+    pub unsigned: bool,
+    pub wide: bool,
+}
+
+impl Integer {
+    /// `value` wrapped to the type's width and sign, as C wraps it.
+    pub fn new(value: i128, unsigned: bool, wide: bool) -> Self {
+        let value = match (wide, unsigned) {
+            (true, true) => i128::from(value as u64),
+            (true, false) => i128::from(value as i64),
+            (false, true) => i128::from(value as u32),
+            (false, false) => i128::from(value as i32),
+        };
+        Self {
+            value,
+            unsigned,
+            wide,
         }
+    }
+
+    /// As `dx` writes it: decimal when signed or asked for (`, d`), else
+    /// hex.
+    pub fn text(self, decimal: bool) -> String {
+        int_text(self.value, self.unsigned, decimal)
     }
 }
 
@@ -105,11 +130,12 @@ pub fn properties(value: &ModelValue) -> Vec<String> {
         ModelValue::Session => &["Processes", "Id"],
         ModelValue::Process(_) => &["KernelObject", "Name", "Id", "Threads", "Modules", "Io"],
         ModelValue::Thread(_) => &["KernelObject", "Id"],
-        ModelValue::Module(_) => &["Name", "BaseAddress", "Size"],
+        ModelValue::Module(_) => &["BaseAddress", "Name", "Size"],
         ModelValue::Io(_) => &["Handles"],
         ModelValue::Handle(_) => &["Handle", "Type", "GrantedAccess", "Object"],
         ModelValue::ObjectHeader { .. } => &["ObjectName", "UnderlyingObject"],
         ModelValue::Utility => &["Collections"],
+        ModelValue::Text(_) => &["Length"],
         ModelValue::Object(fields) => {
             return fields.iter().map(|(name, _)| name.clone()).collect();
         }
@@ -130,7 +156,7 @@ pub fn summary(target: &Target, value: &ModelValue, decimal: bool) -> Option<Str
             thread.ethread.0
         )),
         ModelValue::Module(module) => Some(module.path.clone().unwrap_or(module.name.clone())),
-        ModelValue::Int { value, unsigned } => Some(int_text(*value, *unsigned, decimal)),
+        ModelValue::Int(integer) => Some(integer.text(decimal)),
         ModelValue::Text(text) => Some(text.clone()),
         ModelValue::Bool(value) => Some(value.to_string()),
         _ => None,
@@ -246,8 +272,9 @@ pub fn property(target: &Target, value: &ModelValue, name: &str) -> Result<Model
         (ModelValue::Debugger, "Sessions") => ModelValue::Sessions,
         (ModelValue::Debugger, "Utility") => ModelValue::Utility,
         (ModelValue::Utility, "Collections") => ModelValue::Collections,
+        (ModelValue::Text(text), "Length") => ModelValue::unsigned(text.chars().count() as u64),
         (ModelValue::Session, "Processes") => ModelValue::Processes,
-        (ModelValue::Session, "Id") => ModelValue::unsigned(0),
+        (ModelValue::Session, "Id") => ModelValue::Int(Integer::new(0, false, false)),
         (ModelValue::Process(process), "KernelObject") => {
             kernel_object("_EPROCESS", process.eprocess_va.0)
         }

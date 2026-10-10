@@ -16,7 +16,7 @@ use crate::layout::{ParsedType, is_signed_primitive};
 use crate::target::Target;
 use crate::types::VirtAddr;
 
-use super::dx_model::{self as model, ModelValue, ROOTS};
+use super::dx_model::{self as model, Integer, ModelValue, ROOTS};
 
 /// The most entries `FromListEntry` walks before it stops.
 const MAX_LIST_ENTRIES: usize = 1 << 20;
@@ -70,7 +70,7 @@ const PRIMITIVE_TYPES: [&str; 14] = [
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
     Name(String),
-    Int { value: i128, unsigned: bool },
+    Int(Integer),
     Str(String),
     Punct(&'static str),
 }
@@ -97,8 +97,10 @@ fn name_char(ch: char) -> bool {
 }
 
 /// A C++ integer literal: hex with `0x`, decimal otherwise (or with `0n`),
-/// with WinDbg's backtick separators and `u`/`l` suffixes. A literal is
-/// signed unless it is too large for an `__int64` or has a `u` suffix.
+/// with WinDbg's backtick separators and `u`/`l` suffixes. As in WinDbg's
+/// `dx`, a literal is an `int` when it fits one and an `__int64` (wrapping,
+/// so `0xffffffffffffffff` is -1) when not, and a `u` suffix makes it
+/// unsigned.
 fn parse_int(text: &str) -> Result<Token> {
     let clean: String = text.chars().filter(|ch| *ch != '`').collect();
     let lower = clean.to_ascii_lowercase();
@@ -111,10 +113,17 @@ fn parse_int(text: &str) -> Result<Token> {
     };
     let value = u64::from_str_radix(digits, radix)
         .map_err(|_| invalid(format!("{text} is not a number")))?;
-    Ok(Token::Int {
-        value: i128::from(value),
-        unsigned: value > i64::MAX as u64 || lower.contains('u'),
-    })
+    let unsigned = lower.contains('u');
+    let narrow = if unsigned {
+        u32::try_from(value).is_ok()
+    } else {
+        i32::try_from(value).is_ok()
+    };
+    Ok(Token::Int(Integer::new(
+        i128::from(value),
+        unsigned,
+        !narrow,
+    )))
 }
 
 fn tokenize(text: &str) -> Result<Vec<Token>> {
@@ -195,7 +204,7 @@ pub fn is_query(text: &str) -> bool {
 
 #[derive(Debug, Clone)]
 enum Node {
-    Int { value: i128, unsigned: bool },
+    Int(Integer),
     Str(String),
     Bool(bool),
     Name(String),
@@ -324,10 +333,10 @@ impl Parser {
             if self.eat(op) {
                 let operand = self.unary()?;
                 return Ok(match (op, operand) {
-                    ("-", Node::Int { value, unsigned }) => Node::Int {
-                        value: -value,
-                        unsigned,
-                    },
+                    // `-2147483648` is an `__int64` before it is negated.
+                    ("-", Node::Int(integer)) => {
+                        Node::Int(Integer::new(-integer.value, integer.unsigned, integer.wide))
+                    }
                     (op, operand) => Node::Unary(op, Box::new(operand)),
                 });
             }
@@ -373,7 +382,7 @@ impl Parser {
         }
         let operand_follows = matches!(
             self.peek_at(length),
-            Some(Token::Name(_) | Token::Int { .. } | Token::Str(_))
+            Some(Token::Name(_) | Token::Int(_) | Token::Str(_))
                 | Some(Token::Punct("(" | "*" | "&" | "-" | "~" | "!"))
         );
         operand_follows.then(|| {
@@ -430,7 +439,7 @@ impl Parser {
             .ok_or_else(|| invalid("the expression ends early"))?;
         self.at += 1;
         Ok(match token {
-            Token::Int { value, unsigned } => Node::Int { value, unsigned },
+            Token::Int(integer) => Node::Int(integer),
             Token::Str(text) => Node::Str(text),
             Token::Name(name) if name == "true" => Node::Bool(true),
             Token::Name(name) if name == "false" => Node::Bool(false),
@@ -448,8 +457,8 @@ impl Parser {
         })
     }
 
-    /// The fields of `new { Name = value, p.Id }`; a field without a name
-    /// takes the last name of its path, as in C#.
+    /// The fields of `new { Name = value, Id = p.Id }`. Each takes a name,
+    /// as in WinDbg, which does not name a field after its path as C# does.
     fn object(&mut self) -> Result<Node> {
         let mut fields = Vec::new();
         if self.eat("}") {
@@ -460,23 +469,14 @@ impl Parser {
                 (self.peek(), self.peek_at(1)),
                 (Some(Token::Name(_)), Some(Token::Punct("=")))
             );
-            let field = if named {
-                let name = self.name()?;
-                self.at += 1;
-                (name, self.expression()?)
-            } else {
-                let value = self.expression()?;
-                let name = match &value {
-                    Node::Member(_, name) | Node::Name(name) => name.clone(),
-                    _ => {
-                        return Err(invalid(
-                            "a field of new { } needs a name, as in new { Name = ... }",
-                        ));
-                    }
-                };
-                (name, value)
-            };
-            fields.push(field);
+            if !named {
+                return Err(invalid(
+                    "a field of new { } takes a name, as in new { Name = p.Name }",
+                ));
+            }
+            let name = self.name()?;
+            self.at += 1;
+            fields.push((name, self.expression()?));
             if self.eat("}") {
                 return Ok(Node::New(fields));
             }
@@ -488,7 +488,7 @@ impl Parser {
 fn describe(token: &Token) -> String {
     match token {
         Token::Name(name) => format!("'{name}'"),
-        Token::Int { value, .. } => format!("'{value}'"),
+        Token::Int(integer) => format!("'{}'", integer.value),
         Token::Str(text) => format!("\"{text}\""),
         Token::Punct(punct) => format!("'{punct}'"),
     }
@@ -526,10 +526,7 @@ pub fn evaluate(target: &Target, text: &str) -> Result<ModelValue> {
 impl Evaluator<'_> {
     fn eval(&self, node: &Node, scope: &mut Scope) -> Result<ModelValue> {
         match node {
-            Node::Int { value, unsigned } => Ok(ModelValue::Int {
-                value: *value,
-                unsigned: *unsigned,
-            }),
+            Node::Int(integer) => Ok(ModelValue::Int(*integer)),
             Node::Str(text) => Ok(ModelValue::Text(text.clone())),
             Node::Bool(value) => Ok(ModelValue::Bool(*value)),
             Node::Name(name) => {
@@ -592,7 +589,7 @@ impl Evaluator<'_> {
                     Ok(ModelValue::Typed(format!("(({type_name})({operand}))")))
                 }
                 other => {
-                    let (value, _) = self.number(&other)?;
+                    let value = self.number(&other)?.value;
                     Ok(ModelValue::Typed(format!(
                         "(({type_name}){:#x})",
                         value as u64
@@ -631,9 +628,6 @@ impl Evaluator<'_> {
                     format!("({expression}).{name}")
                 }))
             }
-            ModelValue::Text(text) if name == "Length" => {
-                Ok(ModelValue::unsigned(text.chars().count() as u64))
-            }
             ModelValue::ObjectHeader { header, .. }
                 if !matches!(name, "ObjectName" | "UnderlyingObject") =>
             {
@@ -651,7 +645,7 @@ impl Evaluator<'_> {
     }
 
     fn index(&self, object: &ModelValue, index: &ModelValue) -> Result<ModelValue> {
-        let (key, _) = self.number(index)?;
+        let key = self.number(index)?.value;
         if let ModelValue::Typed(expression) = object {
             return Ok(ModelValue::Typed(format!("({expression})[{key}]")));
         }
@@ -831,18 +825,18 @@ impl Evaluator<'_> {
                 if let Some(error) = error {
                     return Err(error);
                 }
+                // The elements keep their keys in their new order.
                 ModelValue::List(
                     keyed
                         .into_iter()
-                        .enumerate()
-                        .map(|(index, (_, element, _))| (index as u64, element))
+                        .map(|(key, element, _)| (key, element))
                         .collect(),
                 )
             }
             "Take" | "Skip" => {
                 arity(&[1])?;
                 let count = self.eval(&args[0], scope)?;
-                let (count, _) = self.number(&count)?;
+                let count = self.number(&count)?.value;
                 let count = usize::try_from(count.max(0)).unwrap_or(usize::MAX);
                 ModelValue::List(if method == "Take" {
                     elements.into_iter().take(count).collect()
@@ -919,7 +913,7 @@ impl Evaluator<'_> {
                     other => other.address()?,
                 }
             }
-            other => VirtAddr(self.number(&other)?.0 as u64),
+            other => VirtAddr(self.number(&other)?.value as u64),
         };
         // The link's offset in the record, as `&((T *)0)->Field` reads it.
         let offset = self
@@ -947,12 +941,13 @@ impl Evaluator<'_> {
         Ok(ModelValue::List(records))
     }
 
-    /// A number from an integer, a Boolean, or a typed scalar, with whether
-    /// it is unsigned.
-    fn number(&self, value: &ModelValue) -> Result<(i128, bool)> {
+    /// A number from an integer, a Boolean, or a typed scalar, typed as C
+    /// types it: a typed value keeps its sign, and takes 64 bits when it is
+    /// wider than an `int`.
+    fn number(&self, value: &ModelValue) -> Result<Integer> {
         match value {
-            ModelValue::Int { value, unsigned } => Ok((*value, *unsigned)),
-            ModelValue::Bool(value) => Ok((i128::from(*value), false)),
+            ModelValue::Int(integer) => Ok(*integer),
+            ModelValue::Bool(value) => Ok(Integer::new(i128::from(*value), false, false)),
             ModelValue::Typed(expression) => {
                 let value = self.typed(expression)?;
                 let raw = value.scalar(self.target)?.0;
@@ -960,12 +955,14 @@ impl Evaluator<'_> {
                     Some(ParsedType::Primitive(name)) => is_signed_primitive(name),
                     _ => false,
                 };
-                if !signed {
-                    return Ok((i128::from(raw), true));
-                }
-                let bits = value.byte_size().unwrap_or(8).clamp(1, 8) * 8;
-                let shift = 64 - bits;
-                Ok((i128::from(((raw << shift) as i64) >> shift), false))
+                let size = value.byte_size().unwrap_or(8).clamp(1, 8);
+                let raw = if signed {
+                    let shift = 64 - size * 8;
+                    i128::from(((raw << shift) as i64) >> shift)
+                } else {
+                    i128::from(raw)
+                };
+                Ok(Integer::new(raw, !signed, size > 4))
             }
             _ => Err(invalid("this value is not a number")),
         }
@@ -974,7 +971,7 @@ impl Evaluator<'_> {
     fn truth(&self, value: &ModelValue) -> Result<bool> {
         match value {
             ModelValue::Bool(value) => Ok(*value),
-            other => Ok(self.number(other)?.0 != 0),
+            other => Ok(self.number(other)?.value != 0),
         }
     }
 
@@ -987,17 +984,21 @@ impl Evaluator<'_> {
         if op == "!" {
             return Ok(ModelValue::Bool(!self.truth(&operand)?));
         }
-        let (value, unsigned) = self.number(&operand)?;
+        let integer = self.number(&operand)?;
         let result = match op {
-            "-" => -value,
-            "~" => !value,
+            "-" => -integer.value,
+            "~" => !integer.value,
             _ => {
                 return Err(invalid(format!(
                     "'{op}' reads a typed value, not a data model one"
                 )));
             }
         };
-        Ok(int(result, unsigned))
+        Ok(ModelValue::Int(Integer::new(
+            result,
+            integer.unsigned,
+            integer.wide,
+        )))
     }
 
     fn binary(&self, op: &str, left: &Node, right: &Node, scope: &mut Scope) -> Result<ModelValue> {
@@ -1012,6 +1013,12 @@ impl Evaluator<'_> {
         }
         let left = self.eval(left, scope)?;
         let right = self.eval(right, scope)?;
+        // As in WinDbg, a string is never equal to anything but a string.
+        if matches!(op, "==" | "!=")
+            && matches!(left, ModelValue::Text(_)) != matches!(right, ModelValue::Text(_))
+        {
+            return Ok(ModelValue::Bool(op == "!="));
+        }
         if matches!(op, "==" | "!=" | "<" | ">" | "<=" | ">=") {
             let order = self.compare(&left, &right)?;
             return Ok(ModelValue::Bool(match op {
@@ -1028,9 +1035,18 @@ impl Evaluator<'_> {
         {
             return Ok(ModelValue::Text(format!("{left}{right}")));
         }
-        let (a, a_unsigned) = self.number(&left)?;
-        let (b, b_unsigned) = self.number(&right)?;
+        let left = self.number(&left)?;
+        let right = self.number(&right)?;
+        let (a, b) = (left.value, right.value);
         let shift = || u32::try_from(b).ok().filter(|bits| *bits < 64);
+        // A shift keeps its left operand's type; anything else is unsigned
+        // when either side is, as WinDbg's `(unsigned char)x & 0xF` is, and
+        // 64 bits when either side is.
+        let (unsigned, wide) = if matches!(op, "<<" | ">>") {
+            (left.unsigned, left.wide)
+        } else {
+            (left.unsigned || right.unsigned, left.wide || right.wide)
+        };
         let value = match op {
             "+" => a + b,
             "-" => a - b,
@@ -1045,31 +1061,30 @@ impl Evaluator<'_> {
             ">>" => a >> shift().ok_or_else(|| invalid("a shift takes 0 to 63 bits"))?,
             _ => return Err(invalid(format!("'{op}' is not an operator dx evaluates"))),
         };
-        Ok(int(value, a_unsigned || b_unsigned))
+        Ok(ModelValue::Int(Integer::new(value, unsigned, wide)))
     }
 
-    /// The order of two values: strings by their characters, numbers by
-    /// value, Booleans false first.
+    /// The order of two values: strings by their characters, and numbers
+    /// by value, as unsigned ones when either is, so `-1 < 0u` is false as
+    /// in C.
     fn compare(&self, left: &ModelValue, right: &ModelValue) -> Result<Ordering> {
         match (left, right) {
             (ModelValue::Text(left), ModelValue::Text(right)) => Ok(left.cmp(right)),
             (ModelValue::Text(_), _) | (_, ModelValue::Text(_)) => {
                 Err(invalid("a string compares only with a string"))
             }
-            _ => Ok(self.number(left)?.0.cmp(&self.number(right)?.0)),
+            _ => {
+                let (left, right) = (self.number(left)?, self.number(right)?);
+                if left.unsigned || right.unsigned {
+                    let wide = left.wide || right.wide;
+                    let as_unsigned =
+                        |integer: Integer| Integer::new(integer.value, true, wide).value;
+                    Ok(as_unsigned(left).cmp(&as_unsigned(right)))
+                } else {
+                    Ok(left.value.cmp(&right.value))
+                }
+            }
         }
-    }
-}
-
-/// An integer wrapped to 64 bits, unsigned or signed.
-fn int(value: i128, unsigned: bool) -> ModelValue {
-    ModelValue::Int {
-        value: if unsigned {
-            i128::from(value as u64)
-        } else {
-            i128::from(value as i64)
-        },
-        unsigned,
     }
 }
 
@@ -1097,14 +1112,8 @@ mod tests {
         assert_eq!(
             tokens("0xfffff801`00000000 10 \"a\\\"b\""),
             [
-                Token::Int {
-                    value: 0xffff_f801_0000_0000,
-                    unsigned: true
-                },
-                Token::Int {
-                    value: 10,
-                    unsigned: false
-                },
+                Token::Int(Integer::new(0xffff_f801_0000_0000, false, true)),
+                Token::Int(Integer::new(10, false, false)),
                 Token::Str("a\"b".into()),
             ]
         );
@@ -1148,7 +1157,9 @@ mod tests {
             parsed("p.Name.ToLower().Contains(\"svc\")")
                 .starts_with("Call(Call(Member(Name(\"p\"), \"Name\"), \"ToLower\", [])")
         );
-        assert!(parsed("new { p.Name, Pid = p.Id }").starts_with("New([(\"Name\""));
+        assert!(parsed("new { Name = p.Name, Pid = p.Id }").starts_with("New([(\"Name\""));
+        // WinDbg names no field after its path, as C# does.
+        assert!(parse("new { p.Name }").is_err());
     }
 
     /// A lambda's parameter may be written in parentheses, and a lambda is
@@ -1172,7 +1183,7 @@ mod tests {
             .into_iter()
             .map(|(name, value)| {
                 let text = match value {
-                    ModelValue::Int { value, unsigned } => model::int_text(value, unsigned, false),
+                    ModelValue::Int(integer) => integer.text(false),
                     ModelValue::Text(text) => format!("{text:?}"),
                     ModelValue::Bool(value) => value.to_string(),
                     _ => "?".to_string(),
@@ -1182,10 +1193,12 @@ mod tests {
             .collect()
     }
 
-    /// Integers keep C's types: a literal is signed, an unsigned operand
-    /// makes the result unsigned and 64 bits wide, and `~0xF` masks an
-    /// address as WinDbg's queries use it. `&&` and `?:` take a string
-    /// comparison, and `+` joins strings.
+    /// Integers keep the types WinDbg's `dx` gives them, each checked
+    /// against it: a literal is an `int`, or an `__int64` when it does not
+    /// fit one, and wraps as one; `u` makes it unsigned; an unsigned
+    /// operand makes the result unsigned, so `-1 < 0u` is false; and `~0xF`
+    /// masks an address. A string is never equal to a number, and `+`
+    /// joins strings.
     #[test]
     fn operators_keep_c_integer_types_and_compare_strings() {
         let pairs = |list: &[(&str, &str)]| {
@@ -1196,30 +1209,36 @@ mod tests {
         assert_eq!(
             fields(
                 "new { A = 10 + 0x10, B = 0xffff828eb87d82dfu & ~0xF, C = 1 - 2, D = 0u - 1, \
-                 E = 7 / 2 }"
+                 E = 5 / 2, F = 0x7fffffff + 1, G = 0xffffffffffffffff, H = 0xffffffff, \
+                 I = -1 < 0u }"
             ),
             pairs(&[
                 ("A", "26"),
                 ("B", "0xffff828eb87d82d0"),
                 ("C", "-1"),
-                ("D", "0xffffffffffffffff"),
-                ("E", "3"),
+                ("D", "0xffffffff"),
+                ("E", "2"),
+                ("F", "-2147483648"),
+                ("G", "-1"),
+                ("H", "4294967295"),
+                ("I", "false"),
             ])
         );
         assert_eq!(
             fields(
                 "new { S = \"lsass.exe\".ToUpper() + \"!\", T = \"a\" < \"b\" && 2 > 1 ? \"yes\" : \"no\", \
-                 L = \"explorer\".Length, N = !(\"x\".StartsWith(\"x\")) }"
+                 L = \"explorer\".Length, N = !(\"x\".StartsWith(\"x\")), Q = \"5\" == 5 }"
             ),
             pairs(&[
                 ("S", "\"LSASS.EXE!\""),
                 ("T", "\"yes\""),
                 ("L", "0x8"),
                 ("N", "false"),
+                ("Q", "false"),
             ])
         );
         let session = crate::session::session_over_memory(0x1000, &[0; 0x10]);
         assert!(evaluate(&session.target, "new { A = 1 / 0 }").is_err());
-        assert!(evaluate(&session.target, "new { A = \"x\" == 1 }").is_err());
+        assert!(evaluate(&session.target, "new { A = \"x\" < 1 }").is_err());
     }
 }

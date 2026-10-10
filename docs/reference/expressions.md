@@ -179,11 +179,11 @@ dx (unsigned long *)&((nt!_EPROCESS*)@$proc)->Flags
 
 ### The debugger data model
 
-`dx` also reads WinDbg's debugger data model: `Debugger.Sessions`, `@$cursession`, `@$curprocess`, and `@$curthread`. A session has `Processes`, indexed by process ID. A process has `Name`, `Id`, `Threads`, indexed by thread ID, `Modules`, indexed from 0 (the kernel's modules for the System process), `Io.Handles`, indexed by handle, and `KernelObject`. A thread has `Id` and `KernelObject`, and a module has `Name`, `BaseAddress`, and `Size`. `.Count()` counts a collection, and an index is decimal unless written with `0x`, as in C++:
+`dx` also reads WinDbg's debugger data model: `Debugger.Sessions`, `@$cursession`, `@$curprocess`, and `@$curthread`. A session has `Processes`, indexed by process ID. A process has `Name`, `Id`, `Threads`, indexed by thread ID, `Modules`, indexed from 0 (the kernel's modules for the System process), `Io.Handles`, indexed by handle, and `KernelObject`. A thread has `Id` and `KernelObject`, a module has `BaseAddress`, `Name`, and `Size`, and a string has `Length`. `.Count()` counts a collection, and an index is decimal unless written with `0x`, as in C++:
 
 ```text
 dx @$curprocess
-@$curprocess                 : Idle
+@$curprocess     : Idle
     KernelObject     [Type: _EPROCESS]
     Name             : Idle
     Id               : 0x0
@@ -193,9 +193,9 @@ dx @$curprocess
 dx @$curprocess.Threads.Count()
 @$curprocess.Threads.Count() : 0xc
 dx Debugger.Sessions[0].Processes[4].Modules[0]
-Debugger.Sessions[0].Processes[4].Modules[0]                 : \SystemRoot\system32\ntoskrnl.exe
-    Name             : \SystemRoot\system32\ntoskrnl.exe
+Debugger.Sessions[0].Processes[4].Modules[0] : \SystemRoot\system32\ntoskrnl.exe
     BaseAddress      : 0xfffff801dc570000
+    Name             : \SystemRoot\system32\ntoskrnl.exe
     Size             : 0x1450000
 ```
 
@@ -205,54 +205,64 @@ A handle has `Handle`, `Type`, `GrantedAccess`, and `Object`, its `_OBJECT_HEADE
 
 ### Queries
 
-A collection takes WinDbg's LINQ queries, each with a lambda (`p => ...`) where it needs one: `Where`, `Select`, `SelectMany`, `First`, `Last`, `Any`, `All`, `Count`, `OrderBy`, `OrderByDescending`, `Take`, and `Skip`. `new { Name = p.Name, PID = p.Id }` makes an object with those fields, and `new { p.Name }` names a field after its property. Strings compare with `==` and `<`, join with `+`, and have `Contains`, `StartsWith`, `EndsWith`, `ToLower`, `ToUpper`, and `Length`. A lambda's typed values, such as a `KernelObject`'s fields, work with C++'s operators and casts, and a typed pointer's fields read with `.` as with `->`. `Where`, `Select`, `Take`, and `Skip` keep the elements' keys, while `OrderBy` and `SelectMany` number them from 0:
+A collection takes WinDbg's LINQ queries, each with a lambda (`p => ...`) where it needs one: `Where`, `Select`, `SelectMany`, `First`, `Last`, `Any`, `All`, `Count`, `OrderBy`, `OrderByDescending`, `Take`, and `Skip`. `new { Name = p.Name, PID = p.Id }` makes an object with those fields, each named as WinDbg requires. Strings compare with `==` and `<` (a string is never equal to a number), join with `+`, and have `Contains`, `StartsWith`, `EndsWith`, `ToLower`, `ToUpper`, and `Length`. A lambda's typed values, such as a `KernelObject`'s fields, work with C++'s operators and casts, and a typed pointer's fields read with `.` as with `->`. Integers take the types WinDbg's `dx` gives them: a literal is an `int`, or an `__int64` when it does not fit one, an unsigned operand makes the result unsigned, and an unsigned result shows in hex, a signed one in decimal. As in WinDbg, the elements keep their keys through `Where`, `Select`, `OrderBy`, `Take`, and `Skip`, and `SelectMany` numbers them from 0:
 
 ```text
 dx -r2 @$cursession.Processes.Select(p => new {Name = p.Name, PID = p.Id, SignatureLevel = p.KernelObject.SignatureLevel & 0xF}).OrderBy(p => p.SignatureLevel).Take(2)
-@$cursession.Processes.Select(p => new {Name = p.Name, PID = p.Id, SignatureLevel = p.KernelObject.SignatureLevel & 0xF}).OrderBy(p => p.SignatureLevel).Take(2)                 
-    [0x0]           
+@$cursession.Processes.Select(p => new {Name = p.Name, PID = p.Id, SignatureLevel = p.KernelObject.SignatureLevel & 0xF}).OrderBy(p => p.SignatureLevel).Take(2)
+    [0x84]
         Name             : Secure System
         PID              : 0x84
         SignatureLevel   : 0x0
-    [0x1]           
+    [0xac]
         Name             : Registry
         PID              : 0xac
         SignatureLevel   : 0x0
 dx Debugger.Sessions[0].Processes.Where(p => p.Name == "explorer.exe").First().Io.Handles.Where(h => h.Type == "File").Select(h => h.Object.UnderlyingObject.FileName).Take(3)
-Debugger.Sessions[0].Processes.Where(p => p.Name == "explorer.exe").First().Io.Handles.Where(h => h.Type == "File").Select(h => h.Object.UnderlyingObject.FileName).Take(3)                 
+Debugger.Sessions[0].Processes.Where(p => p.Name == "explorer.exe").First().Io.Handles.Where(h => h.Type == "File").Select(h => h.Object.UnderlyingObject.FileName).Take(3)
     [0x54]           : "\Windows\System32" [Type: _UNICODE_STRING]
     [0x14c]          : "" [Type: _UNICODE_STRING]
     [0x1c0]          : "\Windows\en-US\explorer.exe.mui" [Type: _UNICODE_STRING]
 ```
 
-A query reads a property of each element, not of the collection: `.Where(...).First().KernelObject` reads the first match's, and `.Select(p => p.KernelObject)` each one's. `GroupBy`, `Distinct`, aggregates such as `Sum`, functions of your own, and JavaScript are not supported, and `dx` names the queries it has.
+A query reads a property of each element, not of the collection, as in WinDbg: `.Where(...).First().KernelObject` reads the first match's, and `.Select(p => p.KernelObject)` each one's. `GroupBy`, `Distinct`, aggregates such as `Sum`, functions of your own, and JavaScript are not supported, and `dx` names the queries it has.
 
 `Debugger.Utility.Collections.FromListEntry(head, "nt!_EPROCESS", "ActiveProcessLinks")` walks the `_LIST_ENTRY` list at `head` and gives each record on it as the type named, whose field the link is, so a query runs over any kernel list:
 
 ```text
 dx -r2 Debugger.Utility.Collections.FromListEntry(*(nt!_LIST_ENTRY*)&nt!PsActiveProcessHead, "nt!_EPROCESS", "ActiveProcessLinks").Select(p => new {Name = (char*)p.ImageFileName, Pid = p.UniqueProcessId}).Take(2)
-Debugger.Utility.Collections.FromListEntry(*(nt!_LIST_ENTRY*)&nt!PsActiveProcessHead, "nt!_EPROCESS", "ActiveProcessLinks").Select(p => new {Name = (char*)p.ImageFileName, Pid = p.UniqueProcessId}).Take(2)                 
-    [0x0]           
+Debugger.Utility.Collections.FromListEntry(*(nt!_LIST_ENTRY*)&nt!PsActiveProcessHead, "nt!_EPROCESS", "ActiveProcessLinks").Select(p => new {Name = (char*)p.ImageFileName, Pid = p.UniqueProcessId}).Take(2)
+    [0x0]
         Name             : 0xffffd48c4a6be378 : "System" [Type: char *]
         Pid              : 0x4 [Type: void *]
-    [0x1]           
+    [0x1]
         Name             : 0xffffd48c4a7aa378 : "Secure System" [Type: char *]
         Pid              : 0x84 [Type: void *]
 ```
 
-`dx -g` shows a collection as a grid, a row for each element and a column for each of its fields:
+`dx -g` shows a collection as a grid, a row for each element and a column for each of its fields, framed as WinDbg's console frames it:
 
 ```text
-dx -g Debugger.Sessions[0].Processes.Where(p => p.Name == "explorer.exe").First().Io.Handles.Select(h => new { h.Type, h.Object.ObjectName }).Where(o => o.ObjectName != "").Take(4)
-Debugger.Sessions[0].Processes.Where(p => p.Name == "explorer.exe").First().Io.Handles.Select(h => new { h.Type, h.Object.ObjectName }).Where(o => o.ObjectName != "").Take(4)                 
-            Type       ObjectName
-    [0x48]  Directory  KnownDlls
-    [0x68]  Mutant     SM0:5164:304:WilStaging_02
-    [0x6c]  Directory  BaseNamedObjects
-    [0x70]  Semaphore  SM0:5164:304:WilStaging_02_p0
+dx -g Debugger.Sessions[0].Processes.Where(p => p.Name == "explorer.exe").First().Io.Handles.Select(h => new { Type = h.Type, Name = h.Object.ObjectName }).Where(o => o.Name != "").Take(4)
+===============================================================
+=           = Type         = Name                             =
+===============================================================
+= [0x48]    - Directory    - KnownDlls                        =
+= [0x68]    - Mutant       - SM0:5164:304:WilStaging_02       =
+= [0x6c]    - Directory    - BaseNamedObjects                 =
+= [0x70]    - Semaphore    - SM0:5164:304:WilStaging_02_p0    =
+===============================================================
 ```
 
-As in WinDbg, `dx` lists the first 100 elements of a collection and then `[...]`. A format after the expression changes that: `, <count>` lists that many, and `, d` shows the data model's integers and keys in decimal, as in `dx @$cursession.Processes, d`.
+As in WinDbg, `dx` lists the first 100 elements of a collection and then `[...]`. A format after the expression changes that: `, <count>` lists that many, and `, d` shows the data model's integers and keys in decimal:
+
+```text
+dx -r1 @$cursession.Processes.Take(3), d
+@$cursession.Processes.Take(3), d
+    [4]              : System
+    [132]            : Secure System
+    [172]            : Registry
+```
 
 `ntoseye` does not have WinDbg's NatVis views, which summarize some types on their line (`Driver "\Driver\mouclass"` for a `_DRIVER_OBJECT`, `{134357425713268397}` for a `_LARGE_INTEGER`) and replace some expansions with their own lists: `dx` shows the type's fields, as WinDbg's `dx -nv` does. A `_UNICODE_STRING` still reads as its text.
 

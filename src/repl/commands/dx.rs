@@ -23,7 +23,7 @@ repl_command! {
     names: ["dx"],
     usage: "dx [-r<depth>] [-g] <expression>[, d | , <count>]",
     summary: "Show a typed expression's value and its fields.",
-    details: "Evaluates an expression with casts, ->, ., [] and *, such as dx -r1 (*((nt!_IO_STACK_LOCATION *)0xffff...)) or dx ((nt!_EPROCESS*)@rcx)->UniqueProcessId, and shows its value with its type, then its fields -r levels deep (1 by default, -r0 for the value alone), following a pointer to a structure to the structure. Types read as in WinDbg (unsigned long, _EPROCESS *), and a cast takes them as WinDbg writes them, such as (unsigned long *). A pointer to a number shows the number it points to, a char or wchar_t pointer its string, and a function pointer the function. Numbers are decimal unless written with 0x, as in C++. @$proc, @$thread, @$teb and @$peb are typed pointers. The debugger data model's objects read as in WinDbg: Debugger.Sessions, @$cursession, @$curprocess, and @$curthread, a session's Processes (indexed by process ID), a process's Name, Id, Threads (indexed by thread ID), Modules (indexed from 0), and Io.Handles (indexed by handle, each with its Type and Object), a thread's Id, and a module's Name, BaseAddress, and Size. KernelObject is the typed _EPROCESS or _ETHREAD, which reads on as a typed expression: dx @$curprocess.KernelObject.Pcb. A collection takes .Count() and the queries Where, Select, SelectMany, First, Last, Any, All, OrderBy, OrderByDescending, Take, and Skip with lambdas, as in dx @$cursession.Processes.Where(p => p.Name.Contains(\"svchost\")).Select(p => new { p.Name, p.Id }), and Debugger.Utility.Collections.FromListEntry(head, \"nt!_EPROCESS\", \"ActiveProcessLinks\") walks a kernel list. -g shows a collection as a grid, and a format after the expression lists more elements than 100 (, 500) or shows the model's numbers in decimal (, d). NatVis views (such as a driver object's) are not supported. -nv is accepted as in WinDbg.",
+    details: "Evaluates an expression with casts, ->, ., [] and *, such as dx -r1 (*((nt!_IO_STACK_LOCATION *)0xffff...)) or dx ((nt!_EPROCESS*)@rcx)->UniqueProcessId, and shows its value with its type, then its fields -r levels deep (1 by default, -r0 for the value alone), following a pointer to a structure to the structure. Types read as in WinDbg (unsigned long, _EPROCESS *), and a cast takes them as WinDbg writes them, such as (unsigned long *). A pointer to a number shows the number it points to, a char or wchar_t pointer its string, and a function pointer the function. Numbers are decimal unless written with 0x, as in C++. @$proc, @$thread, @$teb and @$peb are typed pointers. The debugger data model's objects read as in WinDbg: Debugger.Sessions, @$cursession, @$curprocess, and @$curthread, a session's Processes (indexed by process ID), a process's Name, Id, Threads (indexed by thread ID), Modules (indexed from 0), and Io.Handles (indexed by handle, each with its Type and Object), a thread's Id, and a module's BaseAddress, Name, and Size. KernelObject is the typed _EPROCESS or _ETHREAD, which reads on as a typed expression: dx @$curprocess.KernelObject.Pcb. A collection takes .Count() and the queries Where, Select, SelectMany, First, Last, Any, All, OrderBy, OrderByDescending, Take, and Skip with lambdas, as in dx @$cursession.Processes.Where(p => p.Name.Contains(\"svchost\")).Select(p => new { Name = p.Name, Id = p.Id }), and Debugger.Utility.Collections.FromListEntry(head, \"nt!_EPROCESS\", \"ActiveProcessLinks\") walks a kernel list. -g shows a collection as a grid, and a format after the expression lists more elements than 100 (, 500) or shows the model's numbers in decimal (, d). NatVis views (such as a driver object's) are not supported. -nv is accepted as in WinDbg.",
     completion: Expression,
 }
 
@@ -41,12 +41,17 @@ const NAME_WIDTH: usize = 16;
 /// The widest a `dx -g` cell gets before it is cut short.
 const MAX_GRID_CELL: usize = 48;
 
+/// The spaces WinDbg pads a `dx -g` column with past its widest cell.
+const GRID_PADDING: usize = 3;
+
 /// What `dx` was asked: its depth (`-r<n>`, 1 without it), whether to show
 /// a collection as a grid (`-g`), the expression, and the format after it.
 #[derive(Debug, PartialEq)]
 struct DxArgs<'a> {
     depth: usize,
     grid: bool,
+    /// The expression with its format, as the root line names it.
+    name: &'a str,
     text: &'a str,
     format: DxFormat,
 }
@@ -94,10 +99,12 @@ fn parse_dx_args(raw: &str) -> std::result::Result<DxArgs<'_>, String> {
         }
         rest = after.trim_start();
     }
-    let (text, format) = split_format(rest.trim_end())?;
+    let name = rest.trim_end();
+    let (text, format) = split_format(name)?;
     Ok(DxArgs {
         depth: depth.min(MAX_RECURSION_DEPTH),
         grid,
+        name,
         text,
         format,
     })
@@ -143,7 +150,7 @@ fn split_format(text: &str) -> std::result::Result<(&str, DxFormat), String> {
 }
 
 /// One line of `dx` output and the lines under it.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 struct DxLine {
     /// `[+0x1f0]`, or `[+0x1f0 ( 3: 0)]` for a bitfield; `None` for the
     /// root, an array element and a pointer's target.
@@ -212,9 +219,9 @@ fn print_dx(root: &DxLine) {
     outln!();
 }
 
-/// A collection as a grid (`dx -g`): a row for each element, a column for
-/// each of their fields. A value whose elements have no fields shows as
-/// `dx` shows it.
+/// A collection as a grid (`dx -g`), framed as WinDbg's console frames it:
+/// a row for each element, a column for each of their fields. A value
+/// whose elements have no fields shows as `dx` shows it.
 fn print_dx_grid(root: &DxLine) {
     let mut columns: Vec<&str> = Vec::new();
     for row in &root.children {
@@ -267,24 +274,26 @@ fn print_dx_grid(root: &DxLine) {
                 .map(|row| row[column].chars().count())
                 .max()
                 .unwrap_or(0)
+                + GRID_PADDING
         })
         .collect();
-    outln!(
-        "{}",
-        root_text(&DxLine {
-            children: Vec::new(),
-            ..root.clone()
-        })
-    );
-    for row in rows {
-        let line = row
+    let border = "=".repeat(1 + widths.iter().map(|width| width + 3).sum::<usize>());
+    // The header's columns part with `=`, a row's with `-`.
+    let line = |row: &[String], separator: &str| {
+        let cells: Vec<String> = row
             .iter()
             .zip(&widths)
-            .map(|(cell, width)| format!("{cell:<width$}"))
-            .collect::<Vec<_>>()
-            .join("  ");
-        outln!("    {}", line.trim_end());
+            .map(|(cell, width)| format!(" {cell:<width$} "))
+            .collect();
+        format!("={}=", cells.join(separator))
+    };
+    outln!("{border}");
+    outln!("{}", line(&rows[0], "="));
+    outln!("{border}");
+    for row in &rows[1..] {
+        outln!("{}", line(row, "-"));
     }
+    outln!("{border}");
     outln!();
 }
 
@@ -372,12 +381,12 @@ impl ReplState<'_> {
         let root = if dx_query::is_query(text) {
             match dx_query::evaluate(&self.ctx.target, text) {
                 // A typed result fails as a typed expression does.
-                Ok(ModelValue::Typed(expression)) => self.dx_typed(text, &expression, depth),
-                Ok(value) => Ok(self.dx_model_line(text, &value, depth, &args.format)),
+                Ok(ModelValue::Typed(expression)) => self.dx_typed(args.name, &expression, depth),
+                Ok(value) => Ok(self.dx_model_line(args.name, &value, depth, &args.format)),
                 Err(error) => Err(error),
             }
         } else {
-            self.dx_typed(text, text, depth)
+            self.dx_typed(args.name, text, depth)
         };
         match root {
             Ok(root) if args.grid => print_dx_grid(&root),
@@ -446,10 +455,11 @@ impl ReplState<'_> {
         }
         let collection = model::is_collection(value);
         let properties = model::properties(value);
+        // A model object's root pads its name as a scalar's does, whatever
+        // is under it: `@$curprocess     : cmd.exe`.
         let mut line = DxLine {
             name: Some(name.to_string()),
             value: model::summary(target, value, format.decimal),
-            expandable: collection || !properties.is_empty(),
             ..DxLine::default()
         };
         if depth == 0 {
