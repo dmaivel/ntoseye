@@ -37,6 +37,7 @@ Keeping this file:
 - Over KD, `rdmsr` and `wrmsr` read and write the processor selected with `/p` or `~Ns`, and the SDK's `cpu.msr` its own processor, instead of the one that reported the stop.
 - `!handle` reads a process's handle table in a kernel dump that lacks the process's own page directories, such as lsass.exe's under VBS, instead of failing with `Bad virtual address`: the table is kernel memory, read through the kernel's.
 - Ctrl+C stops `!process 0 7` and the other thread listings of `!process` at the next thread, with `interrupted after N thread(s)`, instead of walking every thread's stack first.
+- Tab completion offers the symbols and types of a PDB that loaded after the session started, such as a driver's whose symbols load when first needed or a download that finished, instead of only after `.reload` or a switch of process.
 
 ## v0.48.0 (2026-10-08)
 

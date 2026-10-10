@@ -93,6 +93,9 @@ pub struct ReplCaches {
     /// built for, or 0 for the target's: no partition has ID 0, which the
     /// hypervisor reserves as invalid (see [`Self::refresh_partition`]).
     pub partition: Arc<AtomicU64>,
+    /// The symbol store's load generation when `symbols` and `types` were
+    /// built (see [`Self::refresh_loaded_symbols`]).
+    pub indexed_at: Arc<AtomicU64>,
 }
 
 impl ReplCaches {
@@ -173,10 +176,23 @@ impl ReplCaches {
         self.rebuild_symbol_context(debugger);
     }
 
-    fn rebuild_symbol_context(&self, debugger: &Target) {
+    /// Rebuild the symbol and type indexes when PDBs loaded since they were
+    /// built: a module whose symbols load when first needed, or a download
+    /// that finished, so completion offers its names.
+    pub fn refresh_loaded_symbols(&self, debugger: &Target) {
+        if debugger.symbols.load_generation() != self.indexed_at.load(Ordering::Acquire) {
+            self.rebuild_symbol_context(debugger);
+        }
+    }
+
+    pub fn rebuild_symbol_context(&self, debugger: &Target) {
+        // Read first: a load during the rebuild then shows as a newer
+        // generation, and the next refresh picks it up.
+        let generation = debugger.symbols.load_generation();
         *self.symbols.write().unwrap() = debugger.current_symbol_index();
         *self.types.write().unwrap() = debugger.current_types_index();
         *self.dtb.write().unwrap() = debugger.current_dtb();
+        self.indexed_at.store(generation, Ordering::Release);
     }
 
     pub fn refresh_expression_context(&self, debugger: &Target) {

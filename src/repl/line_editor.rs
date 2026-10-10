@@ -105,6 +105,43 @@ pub struct MyCompleter {
     pub target: TargetLoan,
 }
 
+/// One completion of a REPL line, for a host that draws its own list:
+/// `value` replaces the line's bytes in `span`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineCompletion {
+    pub value: String,
+    /// What it is: `Symbol`, `Type`, `Field`, a command's summary.
+    pub description: Option<String>,
+    pub span: std::ops::Range<usize>,
+    /// A space follows it (a command name), so the next argument starts.
+    pub append_space: bool,
+}
+
+impl ReplStore {
+    /// Complete `line` at byte offset `cursor` as the prompt's Tab does, with
+    /// the session's target lent for what it enumerates on demand (processes,
+    /// locals, fields).
+    pub fn complete(&self, session: &Session, line: &str, cursor: usize) -> Vec<LineCompletion> {
+        if !line.is_char_boundary(cursor) {
+            return Vec::new();
+        }
+        let mut completer = MyCompleter {
+            caches: self.caches.clone(),
+            target: TargetLoan::default(),
+        };
+        let loan = completer.target.clone();
+        loan.lend(&session.target, || completer.complete(line, cursor))
+            .into_iter()
+            .map(|suggestion| LineCompletion {
+                value: suggestion.value,
+                description: suggestion.description,
+                span: suggestion.span.start..suggestion.span.end,
+                append_space: suggestion.append_whitespace,
+            })
+            .collect()
+    }
+}
+
 #[derive(Clone, Copy)]
 struct CompletionInput<'a> {
     raw_prefix: &'a str,
@@ -167,6 +204,13 @@ fn completion_arg_index(text_before_cursor: &str) -> usize {
 
 impl Completer for MyCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
+        // PDBs that loaded since the indexes were built (a module whose
+        // symbols load when first needed, a finished download) join them.
+        self.target.with(|target| {
+            if let Some(target) = target {
+                self.caches.refresh_loaded_symbols(target);
+            }
+        });
         let text_before_cursor = &line[..pos];
         let parsed = match parse_command(text_before_cursor) {
             Ok(parsed) => parsed,
@@ -851,6 +895,48 @@ mod tests {
     use crate::target::object::DriverObjectInfo;
     use crate::types::VirtAddr;
 
+    #[test]
+    fn tab_offers_names_from_a_pdb_that_loaded_after_the_indexes_were_built() {
+        let session = crate::session::session_over_memory(0x1000, &[0u8; 8]);
+        let dtb = session.target.current_dtb();
+        session.target.symbols.set_kernel(Some(1), dtb);
+        session
+            .target
+            .symbols
+            .register_module_for_test(1, "late", dtb);
+        // The REPL's indexes are built here, before the module's PDB loads.
+        let store = ReplStore::new(&session, DispatchContext::Interactive);
+        session.target.symbols.inject_module_for_test(
+            1,
+            vec![crate::layout::TypeInfo {
+                name: "_LATE_LAYOUT".to_string(),
+                pointer_size: 8,
+                size: 8,
+                fields: Default::default(),
+            }],
+            &[("LateRoutine", 0x10)],
+        );
+
+        let line = "dt _LATE_L";
+        let types: Vec<String> = store
+            .complete(&session, line, line.len())
+            .into_iter()
+            .map(|completion| completion.value)
+            .collect();
+        assert_eq!(types, ["_LATE_LAYOUT"]);
+
+        let line = "bp LateRou";
+        let symbols: Vec<String> = store
+            .complete(&session, line, line.len())
+            .into_iter()
+            .map(|completion| completion.value)
+            .collect();
+        assert!(
+            symbols.contains(&"late!LateRoutine".to_string()),
+            "{symbols:?}"
+        );
+    }
+
     fn completer() -> MyCompleter {
         MyCompleter {
             target: TargetLoan::default(),
@@ -873,6 +959,7 @@ mod tests {
                 user_commands: Arc::new(RwLock::new(Vec::new())),
                 aliases: Arc::new(RwLock::new(Vec::new())),
                 partition: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                indexed_at: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             },
         }
     }

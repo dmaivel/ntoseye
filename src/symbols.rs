@@ -1035,6 +1035,25 @@ impl SymbolStore {
         types: Vec<TypeInfo>,
         symbols: &[(&str, u32)],
     ) {
+        // The names completion searches, as a PDB's load indexes them.
+        let sorted = |mut names: Vec<String>| {
+            names.sort_unstable();
+            names.dedup();
+            SymbolIndex::from_names(names)
+        };
+        self.index_types.insert(
+            guid,
+            sorted(
+                types
+                    .iter()
+                    .map(|type_info| type_info.name.clone())
+                    .collect(),
+            ),
+        );
+        self.index.insert(
+            guid,
+            sorted(symbols.iter().map(|(name, _)| name.to_string()).collect()),
+        );
         for type_info in types {
             self.type_cache
                 .insert((guid, type_info.name.clone()), Some(Arc::new(type_info)));

@@ -316,6 +316,12 @@ impl Target {
                 .collect(),
             None => self.current_symbol_index().search(query, limit),
         };
+        self.symbol_matches(names)
+    }
+
+    /// Module-qualified names (`nt!KeBugCheckEx`) as search results, each
+    /// with its module and address when they are unambiguous.
+    pub fn symbol_matches(&self, names: Vec<String>) -> Vec<SymbolSearchMatch> {
         names
             .into_iter()
             .map(|qualified| {

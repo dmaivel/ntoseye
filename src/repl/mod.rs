@@ -115,6 +115,8 @@ pub use completion::*;
 pub use disasm::*;
 pub use heap::*;
 #[cfg(feature = "cli")]
+pub use line_editor::LineCompletion;
+#[cfg(feature = "cli")]
 use line_editor::{CustomPrompt, MyCompleter, TrackingHighlighter};
 pub use memory_view::*;
 pub use remote::*;
@@ -410,6 +412,7 @@ impl ReplStore {
     /// Fresh REPL state for `ctx`: caches seeded from the current symbol
     /// context, persisted aliases loaded, default exception policies and radix.
     pub fn new(ctx: &Session, context: DispatchContext) -> Self {
+        let indexed_at = ctx.target.symbols.load_generation();
         let caches = ReplCaches {
             symbols: Arc::new(RwLock::new(ctx.target.current_symbol_index())),
             types: Arc::new(RwLock::new(ctx.target.current_types_index())),
@@ -425,6 +428,7 @@ impl ReplStore {
             user_commands: Arc::new(RwLock::new(initial_user_commands())),
             aliases: Arc::new(RwLock::new(Vec::new())),
             partition: Arc::new(AtomicU64::new(ctx.partition().unwrap_or(0))),
+            indexed_at: Arc::new(AtomicU64::new(indexed_at)),
         };
         caches.refresh_expression_context(&ctx.target);
         let aliases = UserAliases::load();
@@ -446,6 +450,29 @@ impl ReplStore {
     /// typed in the console applies there too.
     pub fn radix(&self) -> NumberRadix {
         self.radix
+    }
+
+    /// Type names matching `query`, best first, from the index `dt`
+    /// completes from: a host's search box (the GUI's palette) shares it.
+    pub fn search_types(&self, session: &Session, query: &str, limit: usize) -> Vec<String> {
+        self.caches.refresh_loaded_symbols(&session.target);
+        self.caches.types.read().unwrap().search(query, limit)
+    }
+
+    /// Module-qualified symbol names matching `query`, best first, from the
+    /// index symbol completion uses; `module!query` searches that module.
+    pub fn search_symbols(&self, session: &Session, query: &str, limit: usize) -> Vec<String> {
+        if let Some((module, query)) = query.split_once('!') {
+            return self
+                .caches
+                .symbol_store
+                .search_symbols_in_module(session.target.current_dtb(), module, query, limit)
+                .into_iter()
+                .map(|name| format!("{module}!{name}"))
+                .collect();
+        }
+        self.caches.refresh_loaded_symbols(&session.target);
+        self.caches.symbols.read().unwrap().search(query, limit)
     }
 }
 
@@ -878,6 +905,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     // Process and driver lists are never walked ahead of use: completions
     // enumerate them on demand through the target loan below, and listing
     // commands refresh the fallback snapshots as a side effect.
+    let indexed_at = debugger.symbols.load_generation();
     let caches = ReplCaches {
         symbols: Arc::new(RwLock::new(debugger.current_symbol_index())),
         types: Arc::new(RwLock::new(debugger.current_types_index())),
@@ -895,6 +923,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         aliases: Arc::new(RwLock::new(aliases.entries())),
         // A session starts on the target; only `.partition` shows a view.
         partition: Arc::new(AtomicU64::new(0)),
+        indexed_at: Arc::new(AtomicU64::new(indexed_at)),
     };
     caches.refresh_expression_context(debugger);
 

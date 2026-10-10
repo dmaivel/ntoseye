@@ -865,8 +865,7 @@ impl ReplState<'_> {
         match self.ctx.target.reload_module_symbols(scope, module) {
             Ok(report) => {
                 print_module_symbol_report(&report);
-                *self.caches.symbols.write().unwrap() = self.ctx.target.current_symbol_index();
-                *self.caches.types.write().unwrap() = self.ctx.target.current_types_index();
+                self.caches.rebuild_symbol_context(&self.ctx.target);
                 if let Err(err) = self
                     .ctx
                     .breakpoints
