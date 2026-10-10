@@ -337,18 +337,31 @@ def test_hypercall_table_matches_the_tlfs(halted: Debugger) -> None:
 
 def test_vmcs_fields_agree_with_the_saved_state(halted: Debugger) -> None:
     """The eVMCS fields read by name hold what ntoseye reads from the same page
-    for each VTL: its EPT pointer and the RIP where it left off."""
+    for each VTL: its EPT pointer and the RIP where it left off.
+
+    Over KD the processors keep running the debugger's own code (the serial
+    transport, the freeze loop) while the target is halted, so the hypervisor
+    rewrites a VTL's guest RIP between two reads of the page; the RIP is
+    compared on fresh reads until a pair agrees."""
     try:
         vp = halted.hypervisor_partitions()[0].virtual_processors[0]
     except ntoseye.NtoseyeError as error:
         pytest.skip(f"no Windows hypervisor partitions on this target: {error}")
-    vtls = [vtl for vtl in vp.vtls.values() if vtl.vmcs is not None and vtl.rip is not None]
+    vtls = [key for key, vtl in vp.vtls.items() if vtl.vmcs is not None and vtl.rip is not None]
     if not vtls:
         pytest.skip("needs the hv-evmcs enlightenment")
-    for vtl in vtls:
-        fields = vtl.vmcs_fields()
-        assert fields.revision_id == 1
-        assert (fields.ept_pointer, fields.guest_rip) == (vtl.ept_pointer, vtl.rip)
+    for key in vtls:
+        pairs: list[tuple[int, int | None]] = []
+        for _ in range(20):
+            vtl = halted.hypervisor_partitions()[0].virtual_processors[0].vtls[key]
+            fields = vtl.vmcs_fields()
+            assert fields.revision_id == 1
+            assert fields.ept_pointer == vtl.ept_pointer
+            pairs.append((fields.guest_rip, vtl.rip))
+            if fields.guest_rip == vtl.rip:
+                break
+        else:
+            pytest.fail(f"VTL{key}'s guest RIP never matched in 20 reads: {pairs}")
 
 
 def test_child_partition_memory_reads_agree_three_ways(halted: Debugger) -> None:
