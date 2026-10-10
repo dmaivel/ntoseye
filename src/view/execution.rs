@@ -466,9 +466,10 @@ shapes! {
     /// and the call tree.
     CallTrace {
         /// `returned`, `limit`, `interrupted`, `breakpoint`, `diverted`, or
-        /// `failed`. `diverted` means that an interrupt diverted a step and the
-        /// traced thread is not known. Any value other than `returned` means
-        /// that the tree is partial.
+        /// `failed`. `interrupted` means Ctrl+C or the `timeout` ended it.
+        /// `diverted` means that an interrupt diverted a step and the traced
+        /// thread is not known. Any value other than `returned` means that
+        /// the tree is partial.
         end: &'static str,
         /// A description of the failure, for `failed`.
         error: Option<String>,

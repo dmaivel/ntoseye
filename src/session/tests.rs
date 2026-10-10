@@ -26,7 +26,7 @@ use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// DR6.BS (bit 14): a status bit outside B0-B3 that the functions under
 /// test must leave untouched.
@@ -1739,7 +1739,7 @@ fn step_loops_stop_at_a_diverted_step() {
         .unwrap();
     assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1030 }));
 
-    let trace = diverted_session().trace_calls(1_000).unwrap();
+    let trace = diverted_session().trace_calls(1_000, None).unwrap();
     assert_eq!(trace.end, CallTraceEnd::Diverted);
     assert_eq!(trace.instructions, 0);
 }
@@ -2004,10 +2004,32 @@ fn a_call_trace_follows_its_thread_past_a_step_that_switched_it_out() {
         &[at(0x1001, 0x2000, OTHER), at(0x1001, 0x2000, WALKED)],
     );
 
-    let trace = session.trace_calls(2).unwrap();
+    let trace = session.trace_calls(2, None).unwrap();
     assert_eq!(trace.end, CallTraceEnd::Limit);
     assert_eq!(trace.instructions, 2);
     assert_eq!(continues.load(Ordering::Relaxed), 2);
+}
+
+/// A call trace whose thread never reaches the instruction a step left it
+/// short of, while other threads keep reaching it first, ends as
+/// interrupted when its time limit runs out instead of waiting on the
+/// thread forever.
+#[test]
+fn a_call_trace_ends_at_its_time_limit_while_other_threads_take_its_site() {
+    let at = |rip, rsp, ethread| Landing { rip, rsp, ethread };
+    let (mut session, continues) = walk_session(
+        &[at(0x1030, 0x8000, OTHER)],
+        &[at(0x1001, 0x2000, OTHER); 64],
+    );
+
+    let started = Instant::now();
+    let trace = session
+        .trace_calls(100, Some(Duration::from_millis(300)))
+        .unwrap();
+    assert_eq!(trace.end, CallTraceEnd::Interrupted);
+    assert_eq!(trace.instructions, 0);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(continues.load(Ordering::Relaxed) > 0);
 }
 
 /// A step that reached the next instruction stays in the walk even when it

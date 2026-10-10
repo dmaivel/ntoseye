@@ -320,7 +320,7 @@ A step-until walk (`until=` or `run_to(step=)`) also follows the thread that it 
 
 These functions, and also `step(until=...)` and `step_over(until=...)`, have a `timeout=` argument in seconds. When the timeout expires, the function interrupts the target at its current location and returns that stop, a `Stop.Interrupt`. A `Stop.Step` from a walk means it got where it was going. Under VBS, an interrupted vCPU can be in the Windows hypervisor, where steps are refused until the target resumes.
 
-`trace_calls()` records the call tree until the current function returns, the same as {command}`wt`.
+`trace_calls()` records the call tree until the current function returns, the same as {command}`wt`. Because it follows its thread too, a trace can wait a long time on a busy guest when other threads keep reaching an instruction before the traced one. `trace_calls(timeout=...)` ends it as `interrupted` when the time runs out, with the target halted where the trace got to and the tree it recorded so far.
 
 ### Stops
 

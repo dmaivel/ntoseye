@@ -338,13 +338,17 @@ impl Debugger {
     /// Trace calls until the current function returns (`wt`), single-stepping
     /// at most `limit` instructions. Returns `{end, error, instructions,
     /// root}`, where `root` is the call tree and `end` gives the reason that
-    /// tracing stopped.
-    #[pyo3(signature = (limit=10_000))]
+    /// tracing stopped. With `timeout` (seconds), a trace that is still
+    /// running then ends as `interrupted`, halted where it got to: a step
+    /// that follows the traced thread waits for it to run the instruction,
+    /// which can take long when other threads keep reaching it first.
+    #[pyo3(signature = (limit=10_000, timeout=None))]
     fn trace_calls<'py>(
         slf: &Bound<'py, Self>,
         limit: usize,
+        timeout: Option<f64>,
     ) -> PyResult<Typed<'py, view::execution::CallTrace>> {
-        runcontrol::trace_calls(slf, limit)
+        runcontrol::trace_calls(slf, limit, timeout)
     }
 
     /// Break into the running target and return the stop that results.

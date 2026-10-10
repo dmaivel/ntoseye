@@ -715,11 +715,12 @@ impl Session {
     /// the frame (a retpoline) is not taken for a return. The trace follows
     /// the Windows thread it started in, as a walk does (see
     /// [`Self::step_until`]): a step an interrupt diverted runs until that
-    /// thread has executed the instruction. An interrupt request
-    /// ([`Target::interrupt`]), a breakpoint, a diverted step whose thread is
-    /// not known, or a failed step ends the trace early; [`CallTrace::end`]
-    /// says which.
-    pub fn trace_calls(&mut self, limit: usize) -> Result<CallTrace> {
+    /// thread has executed the instruction, which can take long when other
+    /// threads keep reaching the instruction first. An interrupt request
+    /// ([`Target::interrupt`]) or `timeout` (both `Interrupted`), a
+    /// breakpoint, a diverted step whose thread is not known, or a failed
+    /// step ends the trace early; [`CallTrace::end`] says which.
+    pub fn trace_calls(&mut self, limit: usize, timeout: Option<Duration>) -> Result<CallTrace> {
         if limit == 0 {
             return Err(Error::InvalidArgument(
                 "the instruction limit must be greater than zero".into(),
@@ -740,6 +741,9 @@ impl Session {
         let walked = windows_thread_on_backend_thread(&self.target, &self.current_thread)
             .map(|thread| ThreadScope::new(&thread));
         let cancel = Arc::clone(&self.target.interrupt);
+        let deadline = timeout.map(|timeout| Instant::now() + timeout);
+        let remaining =
+            || deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
         // Each open frame with the stack pointer it was entered with.
         let mut stack = vec![(frame(name(&self.target, &current)), current.sp)];
         let mut instructions = 0usize;
@@ -751,25 +755,33 @@ impl Session {
             if self.target.interrupt.swap(false, Ordering::SeqCst) {
                 break CallTraceEnd::Interrupted;
             }
+            // A time limit ends the trace as Ctrl+C does, the target halted
+            // where the trace got to.
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                break CallTraceEnd::Interrupted;
+            }
             match self.walk_step(&current, &registers, &bytes, walked.as_ref()) {
                 Ok(WalkStep::At(_)) => {}
-                Ok(WalkStep::Follow(sites)) => match self.run_to_any(&sites, None, &cancel) {
-                    Ok(ContinueOutcome::Step { .. }) => {}
-                    // Cancelled: the target is halted where it was.
-                    Ok(ContinueOutcome::Running) => {
-                        cancel.store(false, Ordering::SeqCst);
-                        break CallTraceEnd::Interrupted;
-                    }
-                    Ok(ContinueOutcome::Breakpoint { .. }) => break CallTraceEnd::Breakpoint,
-                    Ok(_) => {
-                        break CallTraceEnd::Failed(
-                            "the target stopped on an exception while the traced thread was \
+                Ok(WalkStep::Follow(sites)) => {
+                    match self.run_to_any(&sites, remaining(), &cancel) {
+                        Ok(ContinueOutcome::Step { .. }) => {}
+                        // Cancelled or out of time: the target is halted where
+                        // it was.
+                        Ok(ContinueOutcome::Running) => {
+                            cancel.store(false, Ordering::SeqCst);
+                            break CallTraceEnd::Interrupted;
+                        }
+                        Ok(ContinueOutcome::Breakpoint { .. }) => break CallTraceEnd::Breakpoint,
+                        Ok(_) => {
+                            break CallTraceEnd::Failed(
+                                "the target stopped on an exception while the traced thread was \
                              switched out"
-                                .into(),
-                        );
+                                    .into(),
+                            );
+                        }
+                        Err(error) => break CallTraceEnd::Failed(error.to_string()),
                     }
-                    Err(error) => break CallTraceEnd::Failed(error.to_string()),
-                },
+                }
                 Ok(WalkStep::Stop(ContinueOutcome::Breakpoint { .. })) => {
                     break CallTraceEnd::Breakpoint;
                 }

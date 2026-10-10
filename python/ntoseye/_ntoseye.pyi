@@ -1734,9 +1734,10 @@ class CallTrace(BaseRecord):
     def end(self, /) -> str:
         """
         `returned`, `limit`, `interrupted`, `breakpoint`, `diverted`, or
-        `failed`. `diverted` means that an interrupt diverted a step and the
-        traced thread is not known. Any value other than `returned` means
-        that the tree is partial.
+        `failed`. `interrupted` means Ctrl+C or the `timeout` ended it.
+        `diverted` means that an interrupt diverted a step and the traced
+        thread is not known. Any value other than `returned` means that
+        the tree is partial.
         """
     @property
     def error(self, /) -> str |None:
@@ -2641,12 +2642,15 @@ class Debugger:
         """
         All Windows threads, keyed by TID: `threads[tid]`, `.at(ethread)`.
         """
-    def trace_calls(self, /, limit: int = 10000) -> CallTrace:
+    def trace_calls(self, /, limit: int = 10000, timeout: float |None = None) -> CallTrace:
         """
         Trace calls until the current function returns (`wt`), single-stepping
         at most `limit` instructions. Returns `{end, error, instructions,
         root}`, where `root` is the call tree and `end` gives the reason that
-        tracing stopped.
+        tracing stopped. With `timeout` (seconds), a trace that is still
+        running then ends as `interrupted`, halted where it got to: a step
+        that follows the traced thread waits for it to run the instruction,
+        which can take long when other threads keep reaching it first.
         """
     @property
     def types(self, /) -> Types:

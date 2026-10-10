@@ -29,6 +29,7 @@ Keeping this file:
 ### Changed
 
 - `!storagekd.storunit` names the command of each request the miniport holds, such as `WRITE(10) LBA 0x64b500, 8 blocks`.
+- The SDK's `trace_calls()` takes `timeout=`: a trace that waits on its thread while other threads keep reaching its next instruction first then ends as `interrupted`, halted where it got to, rather than running on with no end. See [steps](https://ntoseye.com/scripting/sdk/#steps).
 
 ### Fixed
 

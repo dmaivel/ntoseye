@@ -374,11 +374,13 @@ impl UntilFlow {
 pub fn trace_calls<'py>(
     dbg: &Bound<'py, Debugger>,
     limit: usize,
+    timeout: Option<f64>,
 ) -> PyResult<Typed<'py, view::execution::CallTrace>> {
     reject_condition_mutation()?;
+    let timeout = timeout_arg(timeout)?;
     let trace = dbg.get().with_session(|session| {
         require_halted(session, "trace_calls")?;
-        session.trace_calls(limit).map_err(err)
+        session.trace_calls(limit, timeout).map_err(err)
     })?;
     prune_conditions(dbg)?;
     Typed::new(dbg.py(), view::execution::call_trace(&trace))

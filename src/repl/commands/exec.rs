@@ -1103,7 +1103,8 @@ impl ReplState<'_> {
     }
 
     fn watch_trace(&mut self, limit: usize) -> Result<()> {
-        let trace = match self.ctx.trace_calls(limit) {
+        // Ctrl+C ends `wt`; it has no time limit of its own.
+        let trace = match self.ctx.trace_calls(limit, None) {
             Ok(trace) => trace,
             Err(error) => {
                 error!("{error}");
