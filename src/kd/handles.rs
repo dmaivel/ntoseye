@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::backend::MemoryOps;
 use crate::dbg_backend::{
     BackendCapability, ContinueDisposition, DebugBackend, DebugOutputPage, HwBreakpointAccess,
-    PciConfigAddress, StopEvent, TebPath, TrapState,
+    PciConfigAddress, ProcessorRead, StopEvent, TebPath, TrapState,
 };
 use crate::debugger_data::DebuggerDataCandidate;
 use crate::error::Result;
@@ -198,8 +198,12 @@ impl DebugBackend for KdBackendHandle {
         self.lock().read_device_memory(processor, address, buf)
     }
 
-    fn serving_processor(&self) -> Option<u16> {
-        self.lock().serving_processor()
+    fn read_on_processor(
+        &mut self,
+        processor: u16,
+        reads: &[ProcessorRead],
+    ) -> Result<Vec<Result<u64>>> {
+        self.lock().read_on_processor(processor, reads)
     }
 
     fn write_io_port(&mut self, port: u64, size: u8, value: u32) -> Result<()> {

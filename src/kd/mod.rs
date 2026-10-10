@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use crate::bytes;
 use crate::dbg_backend::{
     BackendCapability, BugcheckInfo, ContinueDisposition, DebugBackend, DebugCapability, DebugLog,
-    DebugOutputPage, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, PciConfigAddress, StopEvent, TebPath,
-    TrapState,
+    DebugOutputPage, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, PciConfigAddress, ProcessorRead,
+    StopEvent, TebPath, TrapState,
 };
 use crate::debugger_data::DebuggerDataCandidate;
 use crate::error::{Error, Result};
@@ -540,12 +540,12 @@ impl DebugBackend for KdBackend {
 
     fn read_msr(&mut self, processor: u16, msr: u32) -> Result<u64> {
         self.validate_processor(processor)?;
-        self.read_msr_value(processor, msr)
+        self.on_processor(processor, |kd| kd.read_msr_value(processor, msr))
     }
 
     fn write_msr(&mut self, processor: u16, msr: u32, value: u64) -> Result<()> {
         self.validate_processor(processor)?;
-        self.write_msr_value(processor, msr, value)
+        self.on_processor(processor, |kd| kd.write_msr_value(processor, msr, value))
     }
 
     fn supports_io_ports(&self) -> bool {
@@ -561,11 +561,30 @@ impl DebugBackend for KdBackend {
 
     fn read_device_memory(&mut self, processor: u16, address: u64, buf: &mut [u8]) -> Result<()> {
         self.validate_processor(processor)?;
-        self.read_device_bytes(processor, address, buf)
+        self.on_processor(processor, |kd| {
+            kd.read_device_bytes(processor, address, buf)
+        })
     }
 
-    fn serving_processor(&self) -> Option<u16> {
-        Some(self.last_stop_processor)
+    fn read_on_processor(
+        &mut self,
+        processor: u16,
+        reads: &[ProcessorRead],
+    ) -> Result<Vec<Result<u64>>> {
+        self.validate_processor(processor)?;
+        self.on_processor(processor, |kd| {
+            Ok(reads
+                .iter()
+                .map(|read| match *read {
+                    ProcessorRead::Msr(msr) => kd.read_msr_value(processor, msr),
+                    ProcessorRead::Device(address) => {
+                        let mut bytes = [0u8; 4];
+                        kd.read_device_bytes(processor, address, &mut bytes)
+                            .map(|()| u64::from(u32::from_le_bytes(bytes)))
+                    }
+                })
+                .collect())
+        })
     }
 
     fn write_io_port(&mut self, port: u64, size: u8, value: u32) -> Result<()> {

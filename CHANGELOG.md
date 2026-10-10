@@ -21,13 +21,17 @@ Keeping this file:
 - `!storagekd.storloglist` shows the last 256 events StorPort logged for an adapter: each request it built, started, and saw completed, with its IRP, SRB, and command, and pauses, resumes, timeouts, and resets; `!storagekd.storlogirp` and `!storagekd.storlogsrb` show one request's entries. `!storagekd.storsrb` decodes an SRB, extended or legacy, with its command, status, address, and sense data, and `!storagekd.storclass` lists the disks and other class devices with the requests classpnp has in flight and the last errors it logged. See [StorPort adapters](https://ntoseye.com/using/storport/).
 - `!rcdrkd.rcdrloglist` and `!rcdrkd.rcdrlogdump` read the WPP recorder's in-flight logs of drivers such as usbxhci, pci, and your own, formatted from the TMF annotations in loaded PDBs. See [the WPP recorder](https://ntoseye.com/using/kmdf/#the-wpp-recorder-rcdrkd).
 - `dx` reads the core of the debugger data model: `Debugger.Sessions`, `@$cursession`, `@$curprocess`, and `@$curthread`, their processes, threads, and modules indexed as in WinDbg, `.Count()`, and `KernelObject`, which reads on as a typed expression, such as `dx @$curprocess.KernelObject.UniqueProcessId`. Queries with lambdas (`.Where`) are still not supported. See [dx](https://ntoseye.com/reference/expressions/#the-debugger-data-model).
-- `!apic` shows the local APIC of the processor that entered the debugger over KD, in xAPIC or x2APIC mode: its ID, priorities, LVT, timer, ICR, and the vectors in service and requested. `!ioapic` shows each I/O APIC and PIC line the HAL set up, with its vector, IRQL, trigger, polarity, and target, on every backend and in kernel dumps.
+- `!apic [processor]` shows a processor's local APIC over KD, in xAPIC or x2APIC mode: its ID, priorities, LVT, timer, ICR, and the vectors in service and requested. `!ioapic` shows each I/O APIC and PIC line the HAL set up, with its vector, IRQL, trigger, polarity, and target, on every backend and in kernel dumps.
 - `!sysinfo machineid` and `!sysinfo smbios` read the machine's SMBIOS table: the BIOS, system, and baseboard identity, and the processor and memory structures. `!sysinfo cpuinfo` shows the processor as `!cpuinfo` does.
 - The DAP adapter offers exception breakpoints: access violation, illegal instruction, divide by zero, and stack overflow break at the first chance when checked and the second when not, and module load and unload stop when checked. See [breakpoints in DAP](https://ntoseye.com/integrations/dap/#breakpoints).
 
 ### Changed
 
 - `!storagekd.storunit` names the command of each request the miniport holds, such as `WRITE(10) LBA 0x64b500, 8 blocks`.
+
+### Fixed
+
+- Over KD, `rdmsr` and `wrmsr` read and write the processor selected with `/p` or `~Ns`, and the SDK's `cpu.msr` its own processor, instead of the one that reported the stop.
 
 ## v0.48.0 (2026-10-08)
 

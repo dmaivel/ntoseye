@@ -18,9 +18,10 @@ use crate::ui;
 repl_command! {
     cmd_apic;
     names: ["!apic", "apic"],
-    usage: "!apic",
+    usage: "!apic [processor]",
     summary: "Show a processor's local APIC: its ID, priorities, LVT, timer, and pending vectors.",
-    details: "Reads the local APIC of the processor that entered the debugger: in x2APIC mode through its MSRs (0x800-0x83f), in xAPIC mode through its registers at the physical address IA32_APIC_BASE names, read uncached. Both need a backend that reads MSRs and device registers: kd or kdnet. KD runs every such read on the processor that entered the debugger, whichever processor ~Ns selects, so that is the APIC shown. Shows the APIC ID and version, whether it is the bootstrap processor, the task and processor priorities, the spurious-interrupt vector register, the logical destination, the interrupt command register as an IPI (vector, delivery mode, destination), each local vector table entry (timer, LINT0, LINT1, error, performance counter, thermal, CMCI) with its vector, delivery mode, trigger, and mask, the timer's counts and divisor, the error status, and the vectors in service (ISR), requested (IRR), and level-triggered (TMR).",
+    details: "Reads the local APIC of the selected processor, or of the processor you give: in x2APIC mode through its MSRs (0x800-0x83f), in xAPIC mode through its registers at the physical address IA32_APIC_BASE names, read uncached. Both need a backend that reads MSRs and device registers: kd or kdnet. The target reads them on the processor that stopped it, so for another processor ntoseye switches the target to it and back, as rdmsr /p does. Shows the APIC ID and version, whether it is the bootstrap processor, the task and processor priorities, the spurious-interrupt vector register, the logical destination, the interrupt command register as an IPI (vector, delivery mode, destination), each local vector table entry (timer, LINT0, LINT1, error, performance counter, thermal, CMCI) with its vector, delivery mode, trigger, and mask, the timer's counts and divisor, the error status, and the vectors in service (ISR), requested (IRR), and level-triggered (TMR).",
+    completion: Expression,
     run_state: Halted,
 }
 
@@ -334,28 +335,15 @@ fn print_smbios(table: &SmbiosTable) {
 
 impl ReplState<'_> {
     fn cmd_apic(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if !invocation.argv.is_empty() {
-            error!(
-                "!apic takes no arguments: it shows the local APIC of the processor that \
-                 entered the debugger, the only one KD reads registers on"
-            );
-            return Ok(());
-        }
-        let selected = parse_processor(self, None).ok();
-        match self.ctx.local_apic() {
-            Ok(apic) => {
-                if selected.is_some_and(|selected| selected != apic.processor) {
-                    outln!(
-                        "{}",
-                        ui::muted(&format!(
-                            "(processor {} entered the debugger; KD reads only its APIC, not \
-                             the selected processor's)",
-                            apic.processor
-                        ))
-                    );
-                }
-                print_apic(&apic)
+        let processor = match parse_processor(self, invocation.arg(0)) {
+            Ok(processor) => processor,
+            Err(error) => {
+                error!("!apic: {error}");
+                return Ok(());
             }
+        };
+        match self.ctx.local_apic(processor) {
+            Ok(apic) => print_apic(&apic),
             Err(error) => error!("!apic: {error}"),
         }
         Ok(())

@@ -3,9 +3,11 @@
 //! programmed them, from the HAL's own record of each controller
 //! (`nt!HalpRegisteredInterruptControllers`).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::backend::MemoryOps;
+use crate::dbg_backend::ProcessorRead;
 use crate::error::{Error, Result};
 use crate::layout::{TypeInfo, Types};
 use crate::session::Session;
@@ -43,7 +45,7 @@ const MAX_LINE_RANGES: usize = 256;
 const MAX_LINES: i64 = 4096;
 
 /// A register of the local APIC by its xAPIC offset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ApicRegister {
     Id = 0x20,
     Version = 0x30,
@@ -74,6 +76,43 @@ impl ApicRegister {
     pub fn msr(self, index: u32) -> u32 {
         X2APIC_MSR_BASE + (self as u32 >> 4) + index
     }
+}
+
+/// The words `!apic` reads, each a register and its index: the eight
+/// words of each bitmap, and an xAPIC's ICR as its low and high halves,
+/// where x2APIC's is one 64-bit MSR.
+fn apic_words(x2apic: bool) -> Vec<(ApicRegister, u32)> {
+    use ApicRegister::*;
+    let mut words: Vec<(ApicRegister, u32)> = [
+        Id,
+        Version,
+        Tpr,
+        Ppr,
+        Ldr,
+        Svr,
+        Esr,
+        Icr,
+        LvtTimer,
+        LvtLint0,
+        LvtLint1,
+        LvtError,
+        LvtPerf,
+        LvtThermal,
+        Cmci,
+        TimerInitial,
+        TimerCurrent,
+        TimerDivide,
+    ]
+    .into_iter()
+    .map(|register| (register, 0))
+    .collect();
+    if !x2apic {
+        words.push((Icr, 1));
+    }
+    for register in [Isr, Tmr, Irr] {
+        words.extend((0..8).map(|index| (register, index)));
+    }
+    words
 }
 
 /// A local vector table entry, decoded (Intel SDM vol. 3, 11.5.1).
@@ -224,53 +263,16 @@ impl LocalApic {
 }
 
 impl Session {
-    /// One local APIC register of `processor`, or word `index` of a bitmap
-    /// register: an MSR in x2APIC mode, else the 32-bit register at its
-    /// offset in the APIC page at `base`, which the target reads on that
-    /// processor. An xAPIC ICR is two registers, and an xAPIC ID is in the
-    /// top byte.
-    fn apic_register(
-        &mut self,
-        processor: u16,
-        base: Option<u64>,
-        register: ApicRegister,
-        index: u32,
-    ) -> Result<u64> {
-        let Some(base) = base else {
-            return self.read_msr(processor, register.msr(index));
-        };
-        let mut mmio = |offset: u64| -> Result<u64> {
-            let mut bytes = [0u8; 4];
-            self.backend
-                .read_device_memory(processor, base + offset, &mut bytes)?;
-            Ok(u64::from(u32::from_le_bytes(bytes)))
-        };
-        let offset = register as u64 + u64::from(index) * 0x10;
-        Ok(match register {
-            ApicRegister::Icr => mmio(offset)? | mmio(offset + 0x10)? << 32,
-            ApicRegister::Id => mmio(offset)? >> 24,
-            _ => mmio(offset)?,
-        })
-    }
-
-    /// The local APIC of the processor that entered the debugger, the only
-    /// one the target reads MSRs and device registers on, which needs a
-    /// backend that reads them (KD): in x2APIC mode through its MSRs, in
-    /// xAPIC mode through its registers at the physical base
-    /// `IA32_APIC_BASE` names, read uncached.
-    pub fn local_apic(&mut self) -> Result<LocalApic> {
+    /// The local APIC of `processor`, which needs a backend that reads MSRs
+    /// and device registers on a given processor (KD): in x2APIC mode
+    /// through its MSRs, in xAPIC mode through its registers at the
+    /// physical base `IA32_APIC_BASE` names, read uncached.
+    pub fn local_apic(&mut self, processor: u16) -> Result<LocalApic> {
         if self.target.arch() != Arch::Amd64 {
             return Err(Error::DebugInfo(
                 "!apic reads an x86 local APIC; an ARM64 target has a GIC".into(),
             ));
         }
-        let processor = self.backend.serving_processor().ok_or_else(|| {
-            Error::DebugInfo(
-                "!apic reads the local APIC through MSRs and device registers, which this \
-                 backend cannot read; attach over KD (kd or kdnet)"
-                    .into(),
-            )
-        })?;
         if self.backend.is_running() {
             return Err(Error::TargetRunning(
                 "the local APIC is read on a halted processor.",
@@ -288,19 +290,51 @@ impl Session {
             })?;
         let x2apic = apic_base & APIC_BASE_X2APIC != 0;
         let base = (!x2apic).then_some(apic_base & APIC_BASE_ADDRESS);
+        let words = apic_words(x2apic);
+        let reads: Vec<ProcessorRead> = words
+            .iter()
+            .map(|&(register, index)| match base {
+                None => ProcessorRead::Msr(register.msr(index)),
+                Some(base) => {
+                    ProcessorRead::Device(base + register as u64 + u64::from(index) * 0x10)
+                }
+            })
+            .collect();
+        let results = self
+            .backend
+            .read_on_processor(processor, &reads)
+            .map_err(|error| apic_read_error(base, error))?;
+        let mut values: HashMap<(ApicRegister, u32), Result<u64>> =
+            words.into_iter().zip(results).collect();
+        let mut word = |register: ApicRegister, index: u32| -> Result<u64> {
+            values
+                .remove(&(register, index))
+                .unwrap_or(Err(Error::NotSupported))
+                .map_err(|error| apic_read_error(base, error))
+        };
         let mut bitmap = |register: ApicRegister| -> Result<[u32; 8]> {
-            let mut words = [0u32; 8];
-            for (index, word) in words.iter_mut().enumerate() {
-                *word = self.apic_register(processor, base, register, index as u32)? as u32;
+            let mut bits = [0u32; 8];
+            for (index, value) in bits.iter_mut().enumerate() {
+                *value = word(register, index as u32)? as u32;
             }
-            Ok(words)
+            Ok(bits)
         };
         let (isr, tmr, irr) = (
-            bitmap(ApicRegister::Isr).map_err(|error| apic_read_error(base, error))?,
+            bitmap(ApicRegister::Isr)?,
             bitmap(ApicRegister::Tmr)?,
             bitmap(ApicRegister::Irr)?,
         );
-        let mut read = |register: ApicRegister| self.apic_register(processor, base, register, 0);
+        // An xAPIC keeps its ID in the top byte and its ICR in two
+        // registers; x2APIC's ID MSR is the whole ID and its ICR MSR 64 bits.
+        let id = word(ApicRegister::Id, 0)?;
+        let id = if x2apic { id } else { id >> 24 };
+        let icr = word(ApicRegister::Icr, 0)?;
+        let icr = if x2apic {
+            icr
+        } else {
+            icr | word(ApicRegister::Icr, 1)? << 32
+        };
+        let mut read = |register: ApicRegister| word(register, 0);
         let version = read(ApicRegister::Version)? as u32;
         let max_lvt = (version >> 16) & 0xff;
         let mut lvt = Vec::new();
@@ -336,14 +370,14 @@ impl Session {
             processor,
             apic_base,
             x2apic,
-            id: read(ApicRegister::Id)? as u32,
+            id: id as u32,
             version,
             tpr: read(ApicRegister::Tpr)? as u32,
             ppr: read(ApicRegister::Ppr)? as u32,
             ldr: read(ApicRegister::Ldr)? as u32,
             svr: read(ApicRegister::Svr)? as u32,
             esr: read(ApicRegister::Esr).ok().map(|value| value as u32),
-            icr: read(ApicRegister::Icr)?,
+            icr,
             isr,
             tmr,
             irr,

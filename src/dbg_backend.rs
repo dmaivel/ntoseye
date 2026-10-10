@@ -257,6 +257,16 @@ pub enum ModuleEvent {
     Unload,
 }
 
+/// A register read that runs on a given processor
+/// ([`DebugBackend::read_on_processor`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessorRead {
+    /// A model-specific register.
+    Msr(u32),
+    /// The 32-bit device register at a physical address, read uncached.
+    Device(u64),
+}
+
 impl ModuleEvent {
     /// The event as `sx` spells it: `ld` or `ud`.
     pub fn filter_name(self) -> &'static str {
@@ -959,10 +969,10 @@ pub trait DebugBackend {
 
     /// Read device registers at physical address `address` on `processor`,
     /// mapped uncached, with one access of `buf.len()` bytes: KD asks the
-    /// target (`DbgKdReadPhysicalMemoryApi`, uncached), which reads on the
-    /// [`Self::serving_processor`], so a register each processor has its
-    /// own of, such as the local APIC's, is that processor's. Host memory, a
-    /// GDB stub's physical reads, and a dump reach RAM only.
+    /// target (`DbgKdReadPhysicalMemoryApi`, uncached) with `processor`
+    /// holding it, so a register each processor has its own of, such as the
+    /// local APIC's, is `processor`'s. Host memory, a GDB stub's physical
+    /// reads, and a dump reach RAM only.
     fn read_device_memory(
         &mut self,
         _processor: u16,
@@ -972,12 +982,25 @@ pub trait DebugBackend {
         Err(Error::NotSupported)
     }
 
-    /// The processor that executes what the target is asked to do while it
-    /// is halted: under KD, the one that entered the debugger, whatever
-    /// processor a request names, so an MSR or a device register read is
-    /// that processor's. `None` for a backend that reads none.
-    fn serving_processor(&self) -> Option<u16> {
-        None
+    /// Several MSR and 32-bit device-register reads on `processor`, each
+    /// with its own result: KD switches to the processor once for all of
+    /// them rather than once per read.
+    fn read_on_processor(
+        &mut self,
+        processor: u16,
+        reads: &[ProcessorRead],
+    ) -> Result<Vec<Result<u64>>> {
+        Ok(reads
+            .iter()
+            .map(|read| match *read {
+                ProcessorRead::Msr(msr) => self.read_msr(processor, msr),
+                ProcessorRead::Device(address) => {
+                    let mut bytes = [0u8; 4];
+                    self.read_device_memory(processor, address, &mut bytes)
+                        .map(|()| u64::from(u32::from_le_bytes(bytes)))
+                }
+            })
+            .collect())
     }
 
     /// Whether the transport can read PCI configuration space (`!pci`). KD

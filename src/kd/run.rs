@@ -412,6 +412,48 @@ impl KdBackend {
         self.continue_preserving_dr7(owner, api::DBG_CONTINUE, false)
     }
 
+    /// Run `request` with `processor` holding the target. The target runs
+    /// an MSR access or a device read on the processor that reported the
+    /// stop, whatever processor the request names, so for another one the
+    /// host switches to it, which reports `STATUS_WAKE_SYSTEM_DEBUGGER`,
+    /// sends the request, and switches back, so the stop's owner reports
+    /// again and still holds the target. Both reports drop the breakpoint
+    /// sites in their windows, which the next resume re-arms
+    /// (`sites_dropped_by_stop`). On ARM64, where a switched-to processor
+    /// reports from its freeze rather than its own state, it is refused.
+    pub(super) fn on_processor<T>(
+        &mut self,
+        processor: u16,
+        request: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        let owner = self.last_stop_processor;
+        if processor == owner {
+            return request(self);
+        }
+        if self.arch == Arch::Arm64 {
+            return Err(Error::Kd(format!(
+                "{} stopped the target, and on ARM64 the target reads registers only on that \
+                 processor",
+                thread_id_for(owner)
+            )));
+        }
+        kd_trace!(
+            "kd: switching from p{} to p{} for a register read",
+            owner + 1,
+            processor + 1
+        );
+        with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
+            api::switch_processor(framing, processor)
+        })?;
+        self.adopt_report_from(processor)?;
+        let result = request(self);
+        with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
+            api::switch_processor(framing, owner)
+        })?;
+        self.adopt_report_from(owner)?;
+        result
+    }
+
     /// Receive the state change `processor` reports while the target stays
     /// halted, adopt its register report, and note its PC: the report
     /// deleted the breakpoint-table entries in its window. A report from
