@@ -17,6 +17,7 @@ mod diagnostics;
 pub mod display;
 mod dx;
 mod dx_model;
+mod dx_query;
 mod etw;
 mod exceptions;
 pub mod exec;

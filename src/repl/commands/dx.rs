@@ -1,6 +1,6 @@
 //! `dx`: a typed expression's value and its fields, laid out as WinDbg's
-//! `dx` lays them out, and the core of the debugger data model
-//! (`dx_model`); queries with lambdas and NatVis are not supported.
+//! `dx` lays them out, and the debugger data model (`dx_model`) with its
+//! queries (`dx_query`); NatVis is not supported.
 
 use std::sync::Arc;
 
@@ -13,27 +13,22 @@ use crate::layout::{
 use crate::types::VirtAddr;
 use crate::typeview::TypeView;
 
-use super::dx_model::{
-    self as model, ModelResult, ModelValue, is_model_expression, uses_lambda_query,
-};
+use super::dx_model::{self as model, ModelValue};
+use super::dx_query;
 use super::types::MAX_RECURSION_DEPTH;
 use crate::repl::*;
 
 repl_command! {
     cmd_dx;
     names: ["dx"],
-    usage: "dx [-r<depth>] <expression>",
+    usage: "dx [-r<depth>] [-g] <expression>[, d | , <count>]",
     summary: "Show a typed expression's value and its fields.",
-    details: "Evaluates an expression with casts, ->, ., [] and *, such as dx -r1 (*((nt!_IO_STACK_LOCATION *)0xffff...)) or dx ((nt!_EPROCESS*)@rcx)->UniqueProcessId, and shows its value with its type, then its fields -r levels deep (1 by default, -r0 for the value alone), following a pointer to a structure to the structure. Types read as in WinDbg (unsigned long, _EPROCESS *), and a cast takes them as WinDbg writes them, such as (unsigned long *). A pointer to a number shows the number it points to, a char or wchar_t pointer its string, and a function pointer the function. Numbers are decimal unless written with 0x, as in C++. @$proc, @$thread, @$teb and @$peb are typed pointers. The debugger data model's objects read as in WinDbg: Debugger.Sessions, @$cursession, @$curprocess, and @$curthread, a session's Processes (indexed by process ID), a process's Name, Id, Threads (indexed by thread ID), and Modules (indexed from 0), a thread's Id, a module's Name, BaseAddress, and Size, and .Count() on a collection, such as dx @$curprocess.Threads.Count() or dx Debugger.Sessions[0].Processes[4].Modules. KernelObject is the typed _EPROCESS or _ETHREAD, which reads on as a typed expression: dx @$curprocess.KernelObject.Pcb. Queries with lambdas (.Where, .Select) and NatVis views (such as a driver object's) are not supported; the Python SDK answers those queries. -nv is accepted as in WinDbg.",
+    details: "Evaluates an expression with casts, ->, ., [] and *, such as dx -r1 (*((nt!_IO_STACK_LOCATION *)0xffff...)) or dx ((nt!_EPROCESS*)@rcx)->UniqueProcessId, and shows its value with its type, then its fields -r levels deep (1 by default, -r0 for the value alone), following a pointer to a structure to the structure. Types read as in WinDbg (unsigned long, _EPROCESS *), and a cast takes them as WinDbg writes them, such as (unsigned long *). A pointer to a number shows the number it points to, a char or wchar_t pointer its string, and a function pointer the function. Numbers are decimal unless written with 0x, as in C++. @$proc, @$thread, @$teb and @$peb are typed pointers. The debugger data model's objects read as in WinDbg: Debugger.Sessions, @$cursession, @$curprocess, and @$curthread, a session's Processes (indexed by process ID), a process's Name, Id, Threads (indexed by thread ID), Modules (indexed from 0), and Io.Handles (indexed by handle, each with its Type and Object), a thread's Id, and a module's Name, BaseAddress, and Size. KernelObject is the typed _EPROCESS or _ETHREAD, which reads on as a typed expression: dx @$curprocess.KernelObject.Pcb. A collection takes .Count() and the queries Where, Select, SelectMany, First, Last, Any, All, OrderBy, OrderByDescending, Take, and Skip with lambdas, as in dx @$cursession.Processes.Where(p => p.Name.Contains(\"svchost\")).Select(p => new { p.Name, p.Id }), and Debugger.Utility.Collections.FromListEntry(head, \"nt!_EPROCESS\", \"ActiveProcessLinks\") walks a kernel list. -g shows a collection as a grid, and a format after the expression lists more elements than 100 (, 500) or shows the model's numbers in decimal (, d). NatVis views (such as a driver object's) are not supported. -nv is accepted as in WinDbg.",
     completion: Expression,
 }
 
-/// What `dx` refuses: the data model's queries with lambdas.
-const DX_QUERIES: &str = "queries with lambdas (.Where, .Select, .First, .OrderBy and the like) \
-     are not supported; index a collection ([pid], [tid], [n]) or count it with .Count(), and \
-     use the Python SDK to filter processes, threads and modules";
-
-/// The elements `dx` lists of an array before its `[...]` line.
+/// The elements `dx` lists of an array or a collection before its `[...]`
+/// line.
 const MAX_DX_ELEMENTS: u32 = 100;
 
 /// The longest string `dx` reads for a `char *`, a `wchar_t *` or a
@@ -43,11 +38,34 @@ const MAX_DX_STRING: usize = 2048;
 /// The width `dx` pads a name to before its value.
 const NAME_WIDTH: usize = 16;
 
-/// `dx`'s depth (`-r<n>`, 1 without it) and the expression after its
-/// options. `-nv` and `-v` change nothing here; any other option is
-/// refused by name. A `-` followed by a digit starts the expression.
-fn parse_dx_args(raw: &str) -> std::result::Result<(usize, &str), String> {
+/// The widest a `dx -g` cell gets before it is cut short.
+const MAX_GRID_CELL: usize = 48;
+
+/// What `dx` was asked: its depth (`-r<n>`, 1 without it), whether to show
+/// a collection as a grid (`-g`), the expression, and the format after it.
+#[derive(Debug, PartialEq)]
+struct DxArgs<'a> {
+    depth: usize,
+    grid: bool,
+    text: &'a str,
+    format: DxFormat,
+}
+
+/// A format specifier after the expression: `, d` shows the data model's
+/// integers and keys in decimal, and `, <count>` lists that many elements
+/// of a collection rather than [`MAX_DX_ELEMENTS`].
+#[derive(Debug, Default, PartialEq)]
+struct DxFormat {
+    decimal: bool,
+    limit: Option<usize>,
+}
+
+/// `dx`'s options and expression. `-nv` and `-v` change nothing here; any
+/// other option is refused by name. A `-` followed by a digit starts the
+/// expression.
+fn parse_dx_args(raw: &str) -> std::result::Result<DxArgs<'_>, String> {
     let mut depth = 1;
+    let mut grid = false;
     let mut rest = raw.trim_start();
     while let Some(option) = rest.strip_prefix('-') {
         if option.starts_with(|ch: char| ch.is_ascii_digit()) {
@@ -57,6 +75,7 @@ fn parse_dx_args(raw: &str) -> std::result::Result<(usize, &str), String> {
         let (flag, after) = option.split_at(end);
         match flag {
             "nv" | "v" => {}
+            "g" => grid = true,
             _ if flag.starts_with('r') => {
                 let digits = &flag[1..];
                 depth = if digits.is_empty() {
@@ -69,17 +88,62 @@ fn parse_dx_args(raw: &str) -> std::result::Result<(usize, &str), String> {
             }
             _ => {
                 return Err(format!(
-                    "option '-{flag}' is not supported; dx takes -r<depth> and -nv"
+                    "option '-{flag}' is not supported; dx takes -r<depth>, -g, and -nv"
                 ));
             }
         }
         rest = after.trim_start();
     }
-    Ok((depth.min(MAX_RECURSION_DEPTH), rest.trim_end()))
+    let (text, format) = split_format(rest.trim_end())?;
+    Ok(DxArgs {
+        depth: depth.min(MAX_RECURSION_DEPTH),
+        grid,
+        text,
+        format,
+    })
+}
+
+/// The expression and its format specifier: the text after the last comma
+/// outside brackets and strings.
+fn split_format(text: &str) -> std::result::Result<(&str, DxFormat), String> {
+    let mut nesting = 0i32;
+    let mut quoted = false;
+    let mut comma = None;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '"' => quoted = !quoted,
+            '(' | '[' | '{' if !quoted => nesting += 1,
+            ')' | ']' | '}' if !quoted => nesting -= 1,
+            ',' if !quoted && nesting == 0 => comma = Some(index),
+            _ => {}
+        }
+    }
+    let Some(comma) = comma else {
+        return Ok((text, DxFormat::default()));
+    };
+    let spec = text[comma + 1..].trim();
+    let mut format = DxFormat::default();
+    match spec {
+        "d" => format.decimal = true,
+        "x" => {}
+        _ => {
+            let count = match spec.strip_prefix("0x") {
+                Some(hex) => usize::from_str_radix(hex, 16).ok(),
+                None => spec.parse().ok(),
+            };
+            format.limit = Some(count.ok_or_else(|| {
+                format!(
+                    "format specifier ', {spec}' is not supported; dx takes , d, , x, and an \
+                     element count"
+                )
+            })?);
+        }
+    }
+    Ok((text[..comma].trim_end(), format))
 }
 
 /// One line of `dx` output and the lines under it.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct DxLine {
     /// `[+0x1f0]`, or `[+0x1f0 ( 3: 0)]` for a bitfield; `None` for the
     /// root, an array element and a pointer's target.
@@ -148,6 +212,82 @@ fn print_dx(root: &DxLine) {
     outln!();
 }
 
+/// A collection as a grid (`dx -g`): a row for each element, a column for
+/// each of their fields. A value whose elements have no fields shows as
+/// `dx` shows it.
+fn print_dx_grid(root: &DxLine) {
+    let mut columns: Vec<&str> = Vec::new();
+    for row in &root.children {
+        for cell in &row.children {
+            if let Some(name) = cell.name.as_deref()
+                && !columns.contains(&name)
+            {
+                columns.push(name);
+            }
+        }
+    }
+    if columns.is_empty() {
+        print_dx(root);
+        return;
+    }
+    let cell_text = |cell: &DxLine| {
+        let mut text = cell
+            .value
+            .clone()
+            .or_else(|| {
+                cell.type_name
+                    .as_ref()
+                    .map(|name| format!("[Type: {name}]"))
+            })
+            .unwrap_or_default();
+        if text.chars().count() > MAX_GRID_CELL {
+            text = text.chars().take(MAX_GRID_CELL - 3).collect::<String>() + "...";
+        }
+        text
+    };
+    let mut rows = vec![
+        std::iter::once(String::new())
+            .chain(columns.iter().map(|name| name.to_string()))
+            .collect::<Vec<_>>(),
+    ];
+    for row in &root.children {
+        let mut cells = vec![row.name.clone().unwrap_or_default()];
+        cells.extend(columns.iter().map(|column| {
+            row.children
+                .iter()
+                .find(|cell| cell.name.as_deref() == Some(column))
+                .map(cell_text)
+                .unwrap_or_default()
+        }));
+        rows.push(cells);
+    }
+    let widths: Vec<usize> = (0..=columns.len())
+        .map(|column| {
+            rows.iter()
+                .map(|row| row[column].chars().count())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    outln!(
+        "{}",
+        root_text(&DxLine {
+            children: Vec::new(),
+            ..root.clone()
+        })
+    );
+    for row in rows {
+        let line = row
+            .iter()
+            .zip(&widths)
+            .map(|(cell, width)| format!("{cell:<width$}"))
+            .collect::<Vec<_>>()
+            .join("  ");
+        outln!("    {}", line.trim_end());
+    }
+    outln!();
+}
+
 fn print_dx_children(lines: &[DxLine], indent: usize) {
     for line in lines {
         outln!("{}", child_text(line, indent));
@@ -211,31 +351,36 @@ enum Place {
 
 impl ReplState<'_> {
     fn cmd_dx(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let (depth, text) = match parse_dx_args(invocation.raw_tail) {
+        let args = match parse_dx_args(invocation.raw_tail) {
             Ok(parsed) => parsed,
             Err(message) => {
                 error!("dx: {message}");
                 return Ok(());
             }
         };
+        let text = args.text;
         if text.is_empty() {
             outln!("{}\n", command_help(invocation.name));
             return Ok(());
         }
-        if uses_lambda_query(text) {
-            error!("dx: {DX_QUERIES}");
-            return Ok(());
-        }
-        let root = if is_model_expression(text) {
-            match model::evaluate(&self.ctx.target, text) {
-                Ok(ModelResult::Value(value)) => Ok(self.dx_model_line(text, &value, depth)),
-                Ok(ModelResult::Typed { expression }) => self.dx_typed(text, &expression, depth),
+        // A grid shows each element's fields, so it reads two levels.
+        let depth = if args.grid {
+            args.depth.max(2)
+        } else {
+            args.depth
+        };
+        let root = if dx_query::is_query(text) {
+            match dx_query::evaluate(&self.ctx.target, text) {
+                // A typed result fails as a typed expression does.
+                Ok(ModelValue::Typed(expression)) => self.dx_typed(text, &expression, depth),
+                Ok(value) => Ok(self.dx_model_line(text, &value, depth, &args.format)),
                 Err(error) => Err(error),
             }
         } else {
             self.dx_typed(text, text, depth)
         };
         match root {
+            Ok(root) if args.grid => print_dx_grid(&root),
             Ok(root) => print_dx(&root),
             Err(error) => error!("dx: {error}"),
         }
@@ -250,15 +395,60 @@ impl ReplState<'_> {
     }
 
     /// The `dx` tree of a data model value named `name`: its summary, then
-    /// `depth` levels of its properties or a collection's elements. A
-    /// `KernelObject` property is its typed object.
-    fn dx_model_line(&self, name: &str, value: &ModelValue, depth: usize) -> DxLine {
+    /// `depth` levels of its properties or a collection's elements. A typed
+    /// value, such as a `KernelObject` property, is its typed tree.
+    fn dx_model_line(
+        &self,
+        name: &str,
+        value: &ModelValue,
+        depth: usize,
+        format: &DxFormat,
+    ) -> DxLine {
         let target = &self.ctx.target;
+        let failed = |error: Error| DxLine {
+            name: Some(name.to_string()),
+            value: Some(error.to_string()),
+            ..DxLine::default()
+        };
+        match value {
+            ModelValue::Typed(expression) => {
+                return self
+                    .dx_typed(name, expression, depth)
+                    .unwrap_or_else(failed);
+            }
+            // A handle's object is its typed header, with the object's name
+            // and the object itself before the header's fields.
+            ModelValue::ObjectHeader { header, .. } => {
+                let expression = format!("(*((nt!_OBJECT_HEADER *){:#x}))", header.0);
+                let mut line = match self.dx_typed(name, &expression, depth) {
+                    Ok(line) => line,
+                    Err(error) => return failed(error),
+                };
+                if depth > 0 {
+                    let extra =
+                        model::properties(value)
+                            .into_iter()
+                            .map(|property| match model::property(target, value, &property) {
+                                Ok(child) => {
+                                    self.dx_model_line(&property, &child, depth - 1, format)
+                                }
+                                Err(error) => DxLine {
+                                    name: Some(property),
+                                    value: Some(error.to_string()),
+                                    ..DxLine::default()
+                                },
+                            });
+                    line.children.splice(0..0, extra);
+                }
+                return line;
+            }
+            _ => {}
+        }
         let collection = model::is_collection(value);
         let properties = model::properties(value);
         let mut line = DxLine {
             name: Some(name.to_string()),
-            value: model::summary(target, value),
+            value: model::summary(target, value, format.decimal),
             expandable: collection || !properties.is_empty(),
             ..DxLine::default()
         };
@@ -268,12 +458,22 @@ impl ReplState<'_> {
         if collection {
             match model::elements(target, value) {
                 Ok(elements) => {
-                    for (key, element) in elements {
+                    let limit = format.limit.unwrap_or(MAX_DX_ELEMENTS as usize);
+                    let more = elements.len() > limit;
+                    for (key, element) in elements.into_iter().take(limit) {
+                        let key = model::int_text(i128::from(key), true, format.decimal);
                         line.children.push(self.dx_model_line(
-                            &format!("[{key:#x}]"),
+                            &format!("[{key}]"),
                             &element,
                             depth - 1,
+                            format,
                         ));
+                    }
+                    if more {
+                        line.children.push(DxLine {
+                            name: Some("[...]".to_string()),
+                            ..DxLine::default()
+                        });
                     }
                 }
                 Err(error) => line.children.push(DxLine {
@@ -284,22 +484,10 @@ impl ReplState<'_> {
             return line;
         }
         for property in properties {
-            let child = match model::property(target, value, property) {
-                Ok(ModelResult::Value(child)) => self.dx_model_line(property, &child, depth - 1),
-                Ok(ModelResult::Typed { expression }) => self
-                    .dx_typed(property, &expression, depth - 1)
-                    .map(|mut typed| {
-                        // WinDbg shows a kernel object by its type alone.
-                        typed.value = None;
-                        typed
-                    })
-                    .unwrap_or_else(|error| DxLine {
-                        name: Some(property.to_string()),
-                        value: Some(error.to_string()),
-                        ..DxLine::default()
-                    }),
+            let child = match model::property(target, value, &property) {
+                Ok(child) => self.dx_model_line(&property, &child, depth - 1, format),
                 Err(error) => DxLine {
-                    name: Some(property.to_string()),
+                    name: Some(property),
                     value: Some(error.to_string()),
                     ..DxLine::default()
                 },
@@ -736,20 +924,56 @@ fn decode_string(bytes: &[u8], unit: usize) -> String {
 mod tests {
     use super::*;
 
-    /// `-r<n>` sets the depth (1 without it, and for a bare `-r`), `-nv`
-    /// changes nothing, a `-` before a digit begins the expression, and any
-    /// other option is refused by name rather than read as the expression.
+    /// `-r<n>` sets the depth (1 without it, and for a bare `-r`), `-g` asks
+    /// for a grid, `-nv` changes nothing, a `-` before a digit begins the
+    /// expression, and any other option is refused by name rather than read
+    /// as the expression.
     #[test]
     fn dx_options_set_the_depth_and_leave_the_expression() {
+        let parsed = |raw| parse_dx_args(raw).map(|args| (args.depth, args.grid, args.text));
         assert_eq!(
-            parse_dx_args(" -r2 -nv (*((nt!_EPROCESS *)0x10)) "),
-            Ok((2, "(*((nt!_EPROCESS *)0x10))"))
+            parsed(" -r2 -nv (*((nt!_EPROCESS *)0x10)) "),
+            Ok((2, false, "(*((nt!_EPROCESS *)0x10))"))
         );
-        assert_eq!(parse_dx_args("@$proc"), Ok((1, "@$proc")));
-        assert_eq!(parse_dx_args("-r0 @$thread"), Ok((0, "@$thread")));
-        assert_eq!(parse_dx_args("-r @rcx"), Ok((1, "@rcx")));
-        assert_eq!(parse_dx_args("-1 + 2"), Ok((1, "-1 + 2")));
-        assert!(parse_dx_args("-g @$curprocess").is_err_and(|message| message.contains("'-g'")));
+        assert_eq!(parsed("@$proc"), Ok((1, false, "@$proc")));
+        assert_eq!(parsed("-r0 @$thread"), Ok((0, false, "@$thread")));
+        assert_eq!(parsed("-r @rcx"), Ok((1, false, "@rcx")));
+        assert_eq!(parsed("-1 + 2"), Ok((1, false, "-1 + 2")));
+        assert_eq!(
+            parsed("-g @$cursession.Processes"),
+            Ok((1, true, "@$cursession.Processes"))
+        );
+        assert!(parsed("-h @$curprocess").is_err_and(|message| message.contains("'-h'")));
+    }
+
+    /// The format follows the last comma outside brackets and strings: a
+    /// comma inside a query's arguments or a string is the expression's.
+    #[test]
+    fn dx_formats_follow_the_last_top_level_comma() {
+        let parsed = |raw| parse_dx_args(raw).map(|args| (args.text, args.format));
+        assert_eq!(
+            parsed("@$cursession.Processes, d"),
+            Ok((
+                "@$cursession.Processes",
+                DxFormat {
+                    decimal: true,
+                    limit: None
+                }
+            ))
+        );
+        assert_eq!(
+            parsed("@$cursession.Processes, 0x200"),
+            Ok((
+                "@$cursession.Processes",
+                DxFormat {
+                    decimal: false,
+                    limit: Some(0x200)
+                }
+            ))
+        );
+        let query = "Debugger.Utility.Collections.FromListEntry(h, \"a,b\", \"c\")";
+        assert_eq!(parsed(query), Ok((query, DxFormat::default())));
+        assert!(parsed("@$curprocess, su").is_err_and(|message| message.contains("', su'")));
     }
 
     /// Values read as kd.exe's `dx` writes them on the same dump: signed

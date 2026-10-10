@@ -1,17 +1,19 @@
-//! The part of WinDbg's debugger data model that `dx` reads: `Debugger`,
-//! `@$cursession`, `@$curprocess`, and `@$curthread`, their sessions,
-//! processes, threads, and modules, indexed as WinDbg indexes them, and
-//! `.Count()` on a collection. A `KernelObject` property is the typed
-//! `_EPROCESS` or `_ETHREAD`, which `dx` reads on from there as any typed
-//! expression. Queries with lambdas (`.Where(p => ...)`) are not part of
-//! this model.
+//! The objects of WinDbg's debugger data model that `dx` reads:
+//! `Debugger`, `@$cursession`, `@$curprocess`, and `@$curthread`, their
+//! sessions, processes, threads, modules, and handles, indexed as WinDbg
+//! indexes them, `Debugger.Utility.Collections`, and the values a query
+//! makes (numbers, strings, lists, and `new { ... }` objects). A
+//! `KernelObject` property is the typed `_EPROCESS` or `_ETHREAD`, which
+//! `dx` reads on as a typed expression. `dx_query` evaluates the language
+//! over these objects.
 
 use crate::error::{Error, Result};
 use crate::guest::{ModuleInfo, ProcessInfo};
-use crate::target::{Target, ThreadInfo};
+use crate::target::object::HandleEntryDetail;
+use crate::target::{DiagnosticValue, Target, ThreadInfo};
 use crate::types::VirtAddr;
 
-/// The data model objects `dx` can show.
+/// A data model value.
 #[derive(Clone)]
 pub enum ModelValue {
     Debugger,
@@ -23,138 +25,102 @@ pub enum ModelValue {
     Thread(ThreadInfo),
     Modules(ProcessInfo),
     Module(ModuleInfo),
-    /// A number or a string, shown as is.
-    Scalar(String),
+    /// A process's `Io`, which holds its `Handles`.
+    Io(ProcessInfo),
+    Handles(ProcessInfo),
+    Handle(Box<HandleEntryDetail>),
+    /// A handle's `Object`: its `_OBJECT_HEADER`, with the object type's
+    /// name.
+    ObjectHeader {
+        header: VirtAddr,
+        kind: Option<String>,
+    },
+    /// `Debugger.Utility`, and its `Collections`, which has `FromListEntry`.
+    Utility,
+    Collections,
+    /// An integer: an unsigned one, such as an ID, shows in hex, and a
+    /// signed one, such as a literal, in decimal, as in WinDbg.
+    Int {
+        value: i128,
+        unsigned: bool,
+    },
+    Text(String),
+    Bool(bool),
+    /// A collection a query made, keyed as `dx` shows it.
+    List(Vec<(u64, ModelValue)>),
+    /// `new { Name = ..., ... }`.
+    Object(Vec<(String, ModelValue)>),
+    /// A typed value, as the expression `dx` evaluates for it.
+    Typed(String),
 }
 
-/// What a data model expression comes to: a model value, or a kernel
-/// object as the typed expression `dx` evaluates, with the rest of the
-/// expression after it.
-pub enum ModelResult {
-    Value(ModelValue),
-    Typed { expression: String },
-}
-
-/// One accessor of a path: `.Name`, `[key]`, or `.Count()`; `Typed` marks
-/// where text that is not a model accessor starts (`->`, an operator), and
-/// `Invalid` an accessor that does not parse, which is an error unless a
-/// typed kernel object before it reads it.
-#[derive(Debug, PartialEq, Eq)]
-enum Accessor<'a> {
-    Property(&'a str),
-    Index(u64),
-    Count,
-    Typed,
-    Invalid(String),
+impl ModelValue {
+    pub fn unsigned(value: u64) -> Self {
+        Self::Int {
+            value: i128::from(value),
+            unsigned: true,
+        }
+    }
 }
 
 /// The roots a data model expression starts at.
-const ROOTS: [&str; 4] = ["Debugger", "@$cursession", "@$curprocess", "@$curthread"];
+pub const ROOTS: [&str; 4] = ["Debugger", "@$cursession", "@$curprocess", "@$curthread"];
 
-/// The queries over collections that take a lambda, which this model does
-/// not evaluate.
-const LAMBDA_QUERIES: [&str; 8] = [
-    ".Where(",
-    ".Select(",
-    ".First(",
-    ".OrderBy(",
-    ".Take(",
-    ".Any(",
-    ".All(",
-    ".Flatten(",
+/// The kernel structure under the object header of each object type that
+/// `UnderlyingObject` reads, as WinDbg types it.
+const OBJECT_BODIES: [(&str, &str); 17] = [
+    ("Process", "_EPROCESS"),
+    ("Thread", "_ETHREAD"),
+    ("File", "_FILE_OBJECT"),
+    ("Event", "_KEVENT"),
+    ("Mutant", "_KMUTANT"),
+    ("Semaphore", "_KSEMAPHORE"),
+    ("Timer", "_ETIMER"),
+    ("Section", "_SECTION"),
+    ("Key", "_CM_KEY_BODY"),
+    ("Token", "_TOKEN"),
+    ("Job", "_EJOB"),
+    ("Directory", "_OBJECT_DIRECTORY"),
+    ("SymbolicLink", "_OBJECT_SYMBOLIC_LINK"),
+    ("Device", "_DEVICE_OBJECT"),
+    ("Driver", "_DRIVER_OBJECT"),
+    ("ALPC Port", "_ALPC_PORT"),
+    ("IoCompletion", "_KQUEUE"),
 ];
 
-/// Whether `text` starts at a data model root.
-pub fn is_model_expression(text: &str) -> bool {
-    ROOTS.iter().any(|root| {
-        text.strip_prefix(root)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['.', '[', ' ']))
-    })
-}
-
-/// Whether `text` asks for a query this model does not evaluate.
-pub fn uses_lambda_query(text: &str) -> bool {
-    text.contains("=>") || LAMBDA_QUERIES.iter().any(|query| text.contains(query))
-}
-
-/// An index as a C++ number: decimal unless written with `0x`.
-fn parse_index(text: &str) -> Option<u64> {
-    let text = text.trim();
-    match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
-        Some(hex) => u64::from_str_radix(hex, 16).ok(),
-        None => text.parse().ok(),
+/// An integer as `dx` writes it: decimal when signed or asked for (`, d`),
+/// else hex.
+pub fn int_text(value: i128, unsigned: bool, decimal: bool) -> String {
+    if decimal || !unsigned || value < 0 {
+        value.to_string()
+    } else {
+        format!("{value:#x}")
     }
-}
-
-/// The root of `text` and the accessors after it with where each starts,
-/// up to the first that is not a model accessor.
-fn split_path(text: &str) -> Result<(&str, Vec<(Accessor<'_>, usize)>)> {
-    let text = text.trim();
-    let root = ROOTS
-        .iter()
-        .copied()
-        .find(|root| text.starts_with(root))
-        .ok_or_else(|| Error::InvalidExpression(format!("{text} is not a data model path")))?;
-    let mut accessors = Vec::new();
-    let mut at = root.len();
-    while at < text.len() {
-        let rest = &text[at..];
-        if let Some(after) = rest.strip_prefix(".Count()") {
-            accessors.push((Accessor::Count, at));
-            at = text.len() - after.len();
-        } else if let Some(property) = rest.strip_prefix('.') {
-            let end = property
-                .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
-                .unwrap_or(property.len());
-            if end == 0 {
-                accessors.push((
-                    Accessor::Invalid(format!("expected a property name after '.' in {text}")),
-                    at,
-                ));
-                break;
-            }
-            accessors.push((Accessor::Property(&property[..end]), at));
-            at += 1 + end;
-        } else if let Some(index) = rest.strip_prefix('[') {
-            let parsed = index
-                .find(']')
-                .and_then(|end| parse_index(&index[..end]).map(|value| (value, end)));
-            let Some((value, end)) = parsed else {
-                accessors.push((
-                    Accessor::Invalid(format!(
-                        "{rest} is not an index; the data model indexes processes and threads \
-                         by ID and modules from 0, with a number"
-                    )),
-                    at,
-                ));
-                break;
-            };
-            accessors.push((Accessor::Index(value), at));
-            at += 2 + end;
-        } else {
-            // Anything else (`->`, an operator) is for a typed value.
-            accessors.push((Accessor::Typed, at));
-            break;
-        }
-    }
-    Ok((root, accessors))
 }
 
 /// The properties an object shows, in WinDbg's order.
-pub fn properties(value: &ModelValue) -> &'static [&'static str] {
-    match value {
-        ModelValue::Debugger => &["Sessions"],
+pub fn properties(value: &ModelValue) -> Vec<String> {
+    let names: &[&str] = match value {
+        ModelValue::Debugger => &["Sessions", "Utility"],
         ModelValue::Session => &["Processes", "Id"],
-        ModelValue::Process(_) => &["KernelObject", "Name", "Id", "Threads", "Modules"],
+        ModelValue::Process(_) => &["KernelObject", "Name", "Id", "Threads", "Modules", "Io"],
         ModelValue::Thread(_) => &["KernelObject", "Id"],
         ModelValue::Module(_) => &["Name", "BaseAddress", "Size"],
+        ModelValue::Io(_) => &["Handles"],
+        ModelValue::Handle(_) => &["Handle", "Type", "GrantedAccess", "Object"],
+        ModelValue::ObjectHeader { .. } => &["ObjectName", "UnderlyingObject"],
+        ModelValue::Utility => &["Collections"],
+        ModelValue::Object(fields) => {
+            return fields.iter().map(|(name, _)| name.clone()).collect();
+        }
         _ => &[],
-    }
+    };
+    names.iter().map(|name| name.to_string()).collect()
 }
 
 /// The value line of an object or collection: what WinDbg shows after its
 /// name.
-pub fn summary(target: &Target, value: &ModelValue) -> Option<String> {
+pub fn summary(target: &Target, value: &ModelValue, decimal: bool) -> Option<String> {
     match value {
         ModelValue::Process(process) => Some(process_name(target, process)),
         ModelValue::Thread(thread) => Some(format!(
@@ -164,7 +130,9 @@ pub fn summary(target: &Target, value: &ModelValue) -> Option<String> {
             thread.ethread.0
         )),
         ModelValue::Module(module) => Some(module.path.clone().unwrap_or(module.name.clone())),
-        ModelValue::Scalar(text) => Some(text.clone()),
+        ModelValue::Int { value, unsigned } => Some(int_text(*value, *unsigned, decimal)),
+        ModelValue::Text(text) => Some(text.clone()),
+        ModelValue::Bool(value) => Some(value.to_string()),
         _ => None,
     }
 }
@@ -233,11 +201,19 @@ pub fn elements(target: &Target, value: &ModelValue) -> Result<Vec<(u64, ModelVa
             .enumerate()
             .map(|(index, module)| (index as u64, ModelValue::Module(module)))
             .collect(),
+        ModelValue::Handles(process) => target
+            .enumerate_process_handles(process.clone(), usize::MAX)?
+            .entries
+            .into_iter()
+            .map(|entry| (entry.handle, ModelValue::Handle(Box::new(entry))))
+            .collect(),
+        ModelValue::List(elements) => elements.clone(),
         _ => Vec::new(),
     })
 }
 
-/// Whether `value` is a collection, which `[key]` and `.Count()` take.
+/// Whether `value` is a collection, which `[key]`, `.Count()`, and the
+/// queries take.
 pub fn is_collection(value: &ModelValue) -> bool {
     matches!(
         value,
@@ -245,58 +221,110 @@ pub fn is_collection(value: &ModelValue) -> bool {
             | ModelValue::Processes
             | ModelValue::Threads(_)
             | ModelValue::Modules(_)
+            | ModelValue::Handles(_)
+            | ModelValue::List(_)
     )
 }
 
-/// The property `name` of `value`: a model value, or the typed kernel
-/// object `KernelObject` names.
-pub fn property(target: &Target, value: &ModelValue, name: &str) -> Result<ModelResult> {
-    let model = |value| Ok(ModelResult::Value(value));
-    let typed = |type_name: &str, address: u64| {
-        Ok(ModelResult::Typed {
-            expression: format!("(*((nt!{type_name} *){address:#x}))"),
-        })
-    };
-    match (value, name) {
-        (ModelValue::Debugger, "Sessions") => model(ModelValue::Sessions),
-        (ModelValue::Session, "Processes") => model(ModelValue::Processes),
-        (ModelValue::Session, "Id") => model(ModelValue::Scalar("0x0".into())),
-        (ModelValue::Process(process), "KernelObject") => typed("_EPROCESS", process.eprocess_va.0),
-        (ModelValue::Process(process), "Name") => {
-            model(ModelValue::Scalar(process_name(target, process)))
-        }
-        (ModelValue::Process(process), "Id") => {
-            model(ModelValue::Scalar(format!("{:#x}", process.pid)))
-        }
-        (ModelValue::Process(process), "Threads") => model(ModelValue::Threads(process.clone())),
-        (ModelValue::Process(process), "Modules") => model(ModelValue::Modules(process.clone())),
-        (ModelValue::Thread(thread), "KernelObject") => typed("_ETHREAD", thread.ethread.0),
-        (ModelValue::Thread(thread), "Id") => model(ModelValue::Scalar(format!(
-            "{:#x}",
-            thread.tid.unwrap_or_default()
-        ))),
-        (ModelValue::Module(module), "Name") => model(ModelValue::Scalar(
-            module.path.clone().unwrap_or(module.name.clone()),
-        )),
-        (ModelValue::Module(module), "BaseAddress") => {
-            model(ModelValue::Scalar(format!("{:#x}", module.base_address.0)))
-        }
-        (ModelValue::Module(module), "Size") => {
-            model(ModelValue::Scalar(format!("{:#x}", module.size)))
-        }
-        _ => {
-            let known = properties(value);
-            Err(Error::InvalidExpression(if known.is_empty() {
-                format!("this value has no property {name}")
-            } else {
-                format!("no property {name}; this object has {}", known.join(", "))
-            }))
-        }
+/// A kernel structure at `address`, as the typed expression `dx` reads.
+pub fn kernel_object(type_name: &str, address: u64) -> ModelValue {
+    ModelValue::Typed(format!("(*((nt!{type_name} *){address:#x}))"))
+}
+
+/// The value of a handle field, or why it is not known.
+fn handle_field<T: Clone>(field: &DiagnosticValue<T>) -> Result<T> {
+    match field {
+        DiagnosticValue::Available(value) => Ok(value.clone()),
+        DiagnosticValue::Unavailable(error) => Err(Error::InvalidExpression(error.clone())),
     }
 }
 
-/// The root value of a data model expression.
-fn root(target: &Target, name: &str) -> Result<ModelValue> {
+/// The property `name` of the model object `value`. A typed value's fields
+/// are `dx_query`'s, which reads them through the expression evaluator.
+pub fn property(target: &Target, value: &ModelValue, name: &str) -> Result<ModelValue> {
+    Ok(match (value, name) {
+        (ModelValue::Debugger, "Sessions") => ModelValue::Sessions,
+        (ModelValue::Debugger, "Utility") => ModelValue::Utility,
+        (ModelValue::Utility, "Collections") => ModelValue::Collections,
+        (ModelValue::Session, "Processes") => ModelValue::Processes,
+        (ModelValue::Session, "Id") => ModelValue::unsigned(0),
+        (ModelValue::Process(process), "KernelObject") => {
+            kernel_object("_EPROCESS", process.eprocess_va.0)
+        }
+        (ModelValue::Process(process), "Name") => ModelValue::Text(process_name(target, process)),
+        (ModelValue::Process(process), "Id") => ModelValue::unsigned(process.pid),
+        (ModelValue::Process(process), "Threads") => ModelValue::Threads(process.clone()),
+        (ModelValue::Process(process), "Modules") => ModelValue::Modules(process.clone()),
+        (ModelValue::Process(process), "Io") => ModelValue::Io(process.clone()),
+        (ModelValue::Io(process), "Handles") => ModelValue::Handles(process.clone()),
+        (ModelValue::Thread(thread), "KernelObject") => kernel_object("_ETHREAD", thread.ethread.0),
+        (ModelValue::Thread(thread), "Id") => ModelValue::unsigned(thread.tid.unwrap_or_default()),
+        (ModelValue::Module(module), "Name") => {
+            ModelValue::Text(module.path.clone().unwrap_or(module.name.clone()))
+        }
+        (ModelValue::Module(module), "BaseAddress") => ModelValue::unsigned(module.base_address.0),
+        (ModelValue::Module(module), "Size") => ModelValue::unsigned(u64::from(module.size)),
+        (ModelValue::Handle(handle), "Handle") => ModelValue::unsigned(handle.handle),
+        (ModelValue::Handle(handle), "Type") => {
+            ModelValue::Text(handle_field(&handle.type_name)?.unwrap_or_default())
+        }
+        (ModelValue::Handle(handle), "GrantedAccess") => {
+            ModelValue::unsigned(u64::from(handle_field(&handle.granted_access)?))
+        }
+        (ModelValue::Handle(handle), "Object") => ModelValue::ObjectHeader {
+            header: handle_field(&handle.object)?,
+            kind: handle_field(&handle.type_name).ok().flatten(),
+        },
+        (ModelValue::ObjectHeader { header, .. }, "ObjectName") => ModelValue::Text(
+            target
+                .inspect_object_header(*header + object_body_offset(target)?)?
+                .name
+                .unwrap_or_default(),
+        ),
+        (ModelValue::ObjectHeader { header, kind }, "UnderlyingObject") => {
+            let kind = kind.as_deref().unwrap_or_default();
+            let body = OBJECT_BODIES
+                .iter()
+                .find(|(name, _)| *name == kind)
+                .map(|(_, body)| *body)
+                .ok_or_else(|| {
+                    Error::InvalidExpression(format!(
+                        "no structure is known for a {kind} object; read its _OBJECT_HEADER's \
+                         Body"
+                    ))
+                })?;
+            kernel_object(body, header.0 + object_body_offset(target)?)
+        }
+        (ModelValue::Object(fields), _) => fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.clone())
+            .ok_or_else(|| no_property(value, name))?,
+        _ => return Err(no_property(value, name)),
+    })
+}
+
+/// `_OBJECT_HEADER.Body`'s offset: where an object starts after its header.
+fn object_body_offset(target: &Target) -> Result<u64> {
+    target
+        .guest()?
+        .ntoskrnl
+        .types()
+        .layout("_OBJECT_HEADER")?
+        .field_offset("Body")
+}
+
+fn no_property(value: &ModelValue, name: &str) -> Error {
+    let known = properties(value);
+    Error::InvalidExpression(if known.is_empty() {
+        format!("this value has no property {name}")
+    } else {
+        format!("no property {name}; this object has {}", known.join(", "))
+    })
+}
+
+/// The root value `name`, one of [`ROOTS`].
+pub fn root(target: &Target, name: &str) -> Result<ModelValue> {
     Ok(match name {
         "Debugger" => ModelValue::Debugger,
         "@$cursession" => ModelValue::Session,
@@ -307,119 +335,26 @@ fn root(target: &Target, name: &str) -> Result<ModelValue> {
             })?;
             ModelValue::Thread(target.thread_info_from_ethread(VirtAddr(ethread))?)
         }
-        _ => unreachable!("split_path returns one of ROOTS"),
+        _ => {
+            return Err(Error::InvalidExpression(format!(
+                "{name} is not a data model root"
+            )));
+        }
     })
-}
-
-/// Evaluate the data model expression `text`.
-pub fn evaluate(target: &Target, text: &str) -> Result<ModelResult> {
-    let text = text.trim();
-    let (root_name, accessors) = split_path(text)?;
-    let mut value = root(target, root_name)?;
-    for (accessor, at) in accessors {
-        value = match accessor {
-            Accessor::Typed => {
-                return Err(Error::InvalidExpression(format!(
-                    "'{}' does not apply to a data model object; use .KernelObject for the \
-                     typed kernel object",
-                    &text[at..]
-                )));
-            }
-            Accessor::Invalid(message) => return Err(Error::InvalidExpression(message)),
-            Accessor::Property(name) => match property(target, &value, name)? {
-                ModelResult::Value(next) => next,
-                ModelResult::Typed { expression } => {
-                    // The rest of the expression reads the typed object.
-                    let rest = &text[at + 1 + name.len()..];
-                    return Ok(ModelResult::Typed {
-                        expression: format!("{expression}{rest}"),
-                    });
-                }
-            },
-            Accessor::Index(key) => {
-                if !is_collection(&value) {
-                    return Err(Error::InvalidExpression(format!(
-                        "'{}' indexes a value that is not a collection",
-                        &text[at..]
-                    )));
-                }
-                elements(target, &value)?
-                    .into_iter()
-                    .find(|(element_key, _)| *element_key == key)
-                    .map(|(_, element)| element)
-                    .ok_or_else(|| {
-                        Error::InvalidExpression(format!(
-                            "the collection has no element [{key:#x}]"
-                        ))
-                    })?
-            }
-            Accessor::Count => {
-                if !is_collection(&value) {
-                    return Err(Error::InvalidExpression(
-                        ".Count() counts a collection; this value is not one".into(),
-                    ));
-                }
-                ModelValue::Scalar(format!("{:#x}", elements(target, &value)?.len()))
-            }
-        };
-    }
-    Ok(ModelResult::Value(value))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// IDs, counts, and addresses are unsigned and show in hex; a literal's
+    /// arithmetic is signed and shows in decimal; `, d` shows every integer
+    /// in decimal.
     #[test]
-    fn paths_split_into_properties_indexes_and_counts() {
-        let (root, accessors) =
-            split_path("Debugger.Sessions[0].Processes[0x4].Threads.Count()").unwrap();
-        assert_eq!(root, "Debugger");
-        let accessors: Vec<_> = accessors
-            .into_iter()
-            .map(|(accessor, _)| accessor)
-            .collect();
-        assert_eq!(
-            accessors,
-            [
-                Accessor::Property("Sessions"),
-                Accessor::Index(0),
-                Accessor::Property("Processes"),
-                Accessor::Index(4),
-                Accessor::Property("Threads"),
-                Accessor::Count,
-            ]
-        );
-        // A decimal index stays decimal, as in C++.
-        let (_, accessors) = split_path("@$curprocess.Threads[10]").unwrap();
-        assert_eq!(accessors[1].0, Accessor::Index(10));
-    }
-
-    #[test]
-    fn a_typed_tail_stops_the_path_where_it_starts() {
-        let text = "@$curprocess.KernelObject->Pcb";
-        let (_, accessors) = split_path(text).unwrap();
-        assert_eq!(accessors[0].0, Accessor::Property("KernelObject"));
-        // `->` is not a model accessor; the path records where it begins.
-        assert_eq!(accessors[1], (Accessor::Typed, 25));
-        // A typed index after KernelObject need not be a number; elsewhere
-        // it is an error once the evaluation reaches it.
-        let (_, accessors) = split_path("@$curthread.KernelObject.Tcb.WaitBlock[i]").unwrap();
-        assert!(matches!(accessors.last(), Some((Accessor::Invalid(_), _))));
-        let (_, accessors) = split_path("@$curprocess.").unwrap();
-        assert!(matches!(accessors.last(), Some((Accessor::Invalid(_), _))));
-    }
-
-    #[test]
-    fn roots_need_a_boundary_after_them() {
-        assert!(is_model_expression("@$curprocess"));
-        assert!(is_model_expression("@$curprocess.Name"));
-        assert!(is_model_expression("Debugger.Sessions"));
-        assert!(!is_model_expression("DebuggerData"));
-        assert!(!is_model_expression("@$proc->UniqueProcessId"));
-        assert!(uses_lambda_query(
-            "@$curprocess.Threads.Where(t => t.Id == 4)"
-        ));
-        assert!(!uses_lambda_query("@$curprocess.Threads.Count()"));
+    fn integers_show_as_windbg_types_them() {
+        assert_eq!(int_text(0x2a4, true, false), "0x2a4");
+        assert_eq!(int_text(26, false, false), "26");
+        assert_eq!(int_text(-16, false, false), "-16");
+        assert_eq!(int_text(0x2a4, true, true), "676");
     }
 }

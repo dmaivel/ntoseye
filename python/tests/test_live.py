@@ -1080,3 +1080,23 @@ def test_storage_and_network_records_agree_with_their_lists(halted: Debugger) ->
     for miniport in miniports:
         found = inspect.ndis_miniport(miniport.address)
         assert found.listed and found.miniport.name == miniport.name
+
+
+def test_dx_queries_agree_with_the_sdk(halted: Debugger) -> None:
+    """`dx`'s queries over the data model find the processes the SDK lists:
+    a `Where` on a name keeps their IDs as keys and a `Select` reads them,
+    `FromListEntry` over `nt!PsActiveProcessHead` walks as many records as
+    the session has processes."""
+    name = "svchost.exe"
+    pids = sorted(p.pid for p in halted.processes.find(name))
+    assert pids, f"no {name}"
+    out = halted.command(f'dx @$cursession.Processes.Where(p => p.Name == "{name}").Select(p => p.Id), {len(pids)}')
+    rows = re.findall(r"^\s+\[0x([0-9a-f]+)\]\s+: 0x([0-9a-f]+)$", out, flags=re.M)
+    assert sorted(int(key, 16) for key, _ in rows) == pids
+    assert all(key == value for key, value in rows)
+
+    count = halted.command(
+        "dx Debugger.Utility.Collections.FromListEntry(*(nt!_LIST_ENTRY*)&nt!PsActiveProcessHead, "
+        '"nt!_EPROCESS", "ActiveProcessLinks").Count(), d'
+    )
+    assert count.split(":")[-1].strip() == str(len(list(halted.processes)))
