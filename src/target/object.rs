@@ -998,7 +998,10 @@ impl Target {
         &self,
         process: ProcessInfo,
     ) -> Result<(ProcessInfo, VirtAddr, VirtAddr, u8, usize, Arc<TypeInfo>)> {
-        let types = self.guest()?.ntoskrnl.types_in(process.dtb);
+        // The `_EPROCESS` and its handle table are kernel memory, which the
+        // kernel's DTB maps even where a dump lacks the process's own page
+        // directory.
+        let types = self.guest()?.ntoskrnl.types_in(self.kernel_dtb());
         let eprocess = types.struct_at("_EPROCESS", process.eprocess_va)?;
         let table: VirtAddr = eprocess.read_field("ObjectTable")?;
         if table.is_zero() {

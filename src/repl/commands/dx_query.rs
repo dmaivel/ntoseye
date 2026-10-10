@@ -629,7 +629,7 @@ impl Evaluator<'_> {
                 }))
             }
             ModelValue::ObjectHeader { header, .. }
-                if !matches!(name, "ObjectName" | "UnderlyingObject") =>
+                if !matches!(name, "ObjectName" | "ObjectType" | "UnderlyingObject") =>
             {
                 Ok(ModelValue::Typed(format!(
                     "(*((nt!_OBJECT_HEADER *){:#x})).{name}",

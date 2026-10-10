@@ -34,6 +34,7 @@ Keeping this file:
 ### Fixed
 
 - Over KD, `rdmsr` and `wrmsr` read and write the processor selected with `/p` or `~Ns`, and the SDK's `cpu.msr` its own processor, instead of the one that reported the stop.
+- `!handle` reads a process's handle table in a kernel dump that lacks the process's own page directories, such as lsass.exe's under VBS, instead of failing with `Bad virtual address`: the table is kernel memory, read through the kernel's.
 
 ## v0.48.0 (2026-10-08)
 

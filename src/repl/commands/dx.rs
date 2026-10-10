@@ -2,6 +2,7 @@
 //! `dx` lays them out, and the debugger data model (`dx_model`) with its
 //! queries (`dx_query`); NatVis is not supported.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::error::{Error, Result};
@@ -10,6 +11,7 @@ use crate::layout::{
     ParsedType, TypeInfo, abi_layout, bitfield_value, is_signed_primitive, named_type,
     nested_layout_name, utf16le_lossy, windbg_type_name,
 };
+use crate::target::ThreadInfo;
 use crate::types::VirtAddr;
 use crate::typeview::TypeView;
 
@@ -63,6 +65,14 @@ struct DxArgs<'a> {
 struct DxFormat {
     decimal: bool,
     limit: Option<usize>,
+}
+
+/// What one `dx` command shows the data model with: its format, and which
+/// vCPU runs each running thread (`ETHREAD` to vCPU), read once when a
+/// thread's line first needs it.
+struct DxView {
+    format: DxFormat,
+    running: Option<HashMap<u64, String>>,
 }
 
 /// `dx`'s options and expression. `-nv` and `-v` change nothing here; any
@@ -172,10 +182,11 @@ struct DxLine {
 /// a scalar's pads to the name column.
 fn root_text(line: &DxLine) -> String {
     let name = line.name.as_deref().unwrap_or_default();
-    let mut text = if line.expandable {
-        format!("{name} {:NAME_WIDTH$}", "")
-    } else {
-        format!("{name:<NAME_WIDTH$}")
+    let mut text = match (line.expandable, &line.value, &line.type_name) {
+        // Nothing follows: WinDbg leaves one space less.
+        (true, None, None) => format!("{name}{:NAME_WIDTH$}", ""),
+        (true, _, _) => format!("{name} {:NAME_WIDTH$}", ""),
+        (false, _, _) => format!("{name:<NAME_WIDTH$}"),
     };
     match (&line.value, line.expandable) {
         (Some(value), true) => text.push_str(&format!(": {value}")),
@@ -378,11 +389,15 @@ impl ReplState<'_> {
         } else {
             args.depth
         };
+        let mut view = DxView {
+            format: args.format,
+            running: None,
+        };
         let root = if dx_query::is_query(text) {
             match dx_query::evaluate(&self.ctx.target, text) {
                 // A typed result fails as a typed expression does.
                 Ok(ModelValue::Typed(expression)) => self.dx_typed(args.name, &expression, depth),
-                Ok(value) => Ok(self.dx_model_line(args.name, &value, depth, &args.format)),
+                Ok(value) => Ok(self.dx_model_line(args.name, &value, depth, &mut view)),
                 Err(error) => Err(error),
             }
         } else {
@@ -407,13 +422,12 @@ impl ReplState<'_> {
     /// `depth` levels of its properties or a collection's elements. A typed
     /// value, such as a `KernelObject` property, is its typed tree.
     fn dx_model_line(
-        &self,
+        &mut self,
         name: &str,
         value: &ModelValue,
         depth: usize,
-        format: &DxFormat,
+        view: &mut DxView,
     ) -> DxLine {
-        let target = &self.ctx.target;
         let failed = |error: Error| DxLine {
             name: Some(name.to_string()),
             value: Some(error.to_string()),
@@ -425,8 +439,9 @@ impl ReplState<'_> {
                     .dx_typed(name, expression, depth)
                     .unwrap_or_else(failed);
             }
-            // A handle's object is its typed header, with the object's name
-            // and the object itself before the header's fields.
+            // A handle's object is its typed header, followed, as in
+            // WinDbg, by a named object's name (quoted), its type, and the
+            // object as its own type.
             ModelValue::ObjectHeader { header, .. } => {
                 let expression = format!("(*((nt!_OBJECT_HEADER *){:#x}))", header.0);
                 let mut line = match self.dx_typed(name, &expression, depth) {
@@ -434,20 +449,25 @@ impl ReplState<'_> {
                     Err(error) => return failed(error),
                 };
                 if depth > 0 {
-                    let extra =
-                        model::properties(value)
-                            .into_iter()
-                            .map(|property| match model::property(target, value, &property) {
-                                Ok(child) => {
-                                    self.dx_model_line(&property, &child, depth - 1, format)
-                                }
-                                Err(error) => DxLine {
-                                    name: Some(property),
-                                    value: Some(error.to_string()),
-                                    ..DxLine::default()
-                                },
-                            });
-                    line.children.splice(0..0, extra);
+                    for property in model::properties(value) {
+                        let child = model::property(&self.ctx.target, value, &property);
+                        line.children.push(match (property.as_str(), child) {
+                            ("ObjectName", Ok(ModelValue::Text(object_name))) => DxLine {
+                                name: Some(property),
+                                value: Some(format!("\"{object_name}\"")),
+                                ..DxLine::default()
+                            },
+                            ("ObjectName", _) => continue,
+                            (_, Ok(child)) => {
+                                self.dx_model_line(&property, &child, depth - 1, view)
+                            }
+                            (_, Err(error)) => DxLine {
+                                name: Some(property),
+                                value: Some(error.to_string()),
+                                ..DxLine::default()
+                            },
+                        });
+                    }
                 }
                 return line;
             }
@@ -455,28 +475,38 @@ impl ReplState<'_> {
         }
         let collection = model::is_collection(value);
         let properties = model::properties(value);
-        // A model object's root pads its name as a scalar's does, whatever
-        // is under it: `@$curprocess     : cmd.exe`.
+        // A model object or collection stands apart from its value, as a
+        // structure does; a string, number, or Boolean pads as a scalar,
+        // with a string's `Length` under it.
+        let scalar = matches!(
+            value,
+            ModelValue::Text(_) | ModelValue::Int(_) | ModelValue::Bool(_)
+        );
+        let summary = match value {
+            ModelValue::Thread(thread) => self.thread_location(thread, view),
+            _ => None,
+        };
         let mut line = DxLine {
             name: Some(name.to_string()),
-            value: model::summary(target, value, format.decimal),
+            value: summary.or_else(|| model::summary(&self.ctx.target, value, view.format.decimal)),
+            expandable: !scalar,
             ..DxLine::default()
         };
         if depth == 0 {
             return line;
         }
         if collection {
-            match model::elements(target, value) {
+            match model::elements(&self.ctx.target, value) {
                 Ok(elements) => {
-                    let limit = format.limit.unwrap_or(MAX_DX_ELEMENTS as usize);
+                    let limit = view.format.limit.unwrap_or(MAX_DX_ELEMENTS as usize);
                     let more = elements.len() > limit;
                     for (key, element) in elements.into_iter().take(limit) {
-                        let key = model::int_text(i128::from(key), true, format.decimal);
+                        let key = model::int_text(i128::from(key), true, view.format.decimal);
                         line.children.push(self.dx_model_line(
                             &format!("[{key}]"),
                             &element,
                             depth - 1,
-                            format,
+                            view,
                         ));
                     }
                     if more {
@@ -494,8 +524,8 @@ impl ReplState<'_> {
             return line;
         }
         for property in properties {
-            let child = match model::property(target, value, &property) {
-                Ok(child) => self.dx_model_line(&property, &child, depth - 1, format),
+            let child = match model::property(&self.ctx.target, value, &property) {
+                Ok(child) => self.dx_model_line(&property, &child, depth - 1, view),
                 Err(error) => DxLine {
                     name: Some(property),
                     value: Some(error.to_string()),
@@ -505,6 +535,29 @@ impl ReplState<'_> {
             line.children.push(child);
         }
         line
+    }
+
+    /// Where `thread` is, as WinDbg's data model summarizes a thread:
+    /// `nt!KiSwapContext+0x76 (fffff801`dcc264d6)`, from the processor's
+    /// registers for a running thread and from its saved context-switch
+    /// frame for one switched out. `None` when its stack does not read.
+    fn thread_location(&mut self, thread: &ThreadInfo, view: &mut DxView) -> Option<String> {
+        let running = view.running.get_or_insert_with(|| {
+            self.ctx
+                .active_thread_map()
+                .into_iter()
+                .map(|(ethread, (vcpu, _))| (ethread, vcpu))
+                .collect()
+        });
+        let vcpu = running.get(&thread.ethread.0).cloned();
+        let trace = self.ctx.backtrace_thread(thread, vcpu.as_deref(), 1).ok()?;
+        let frame = trace.stacktrace.frames.first()?;
+        Some(format!(
+            "{} ({:08x}`{:08x})",
+            frame.symbol,
+            frame.ip >> 32,
+            frame.ip & 0xffff_ffff
+        ))
     }
 
     /// The `dx` tree of `value`, the result of `expr`, written `text`.
@@ -1054,6 +1107,12 @@ mod tests {
         assert_eq!(
             root_text(&line("10 + 0x10", Some("26"), None, false)),
             "10 + 0x10        : 26"
+        );
+        // A collection with nothing after its name, as kd.exe prints
+        // `Debugger.Sessions`: sixteen spaces, one fewer than before a value.
+        assert_eq!(
+            root_text(&line("Debugger.Sessions", None, None, true)),
+            format!("Debugger.Sessions{}", " ".repeat(16))
         );
         let mut field = line(
             "Flink",

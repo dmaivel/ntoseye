@@ -179,29 +179,39 @@ dx (unsigned long *)&((nt!_EPROCESS*)@$proc)->Flags
 
 ### The debugger data model
 
-`dx` also reads WinDbg's debugger data model: `Debugger.Sessions`, `@$cursession`, `@$curprocess`, and `@$curthread`. A session has `Processes`, indexed by process ID. A process has `Name`, `Id`, `Threads`, indexed by thread ID, `Modules`, indexed from 0 (the kernel's modules for the System process), `Io.Handles`, indexed by handle, and `KernelObject`. A thread has `Id` and `KernelObject`, a module has `BaseAddress`, `Name`, and `Size`, and a string has `Length`. `.Count()` counts a collection, and an index is decimal unless written with `0x`, as in C++:
+`dx` also reads WinDbg's debugger data model: `Debugger.Sessions`, `@$cursession`, `@$curprocess`, and `@$curthread`. A session has `Processes`, indexed by process ID, the Idle process first as in WinDbg. A process has `Name`, `Id`, `Threads`, indexed by thread ID, `Modules`, indexed from 0, `Io.Handles`, indexed by handle, and `KernelObject`. A thread has `Id` and `KernelObject`, and its line says where it is, as WinDbg's does: the instruction a running thread's processor is at, or where a waiting thread's context switch will return. A module has `BaseAddress`, `Name`, and `Size`, and a string has `Length`. `.Count()` counts a collection, and an index is decimal unless written with `0x`, as in C++:
 
 ```text
 dx @$curprocess
-@$curprocess     : Idle
+@$curprocess                 : svchost.exe
     KernelObject     [Type: _EPROCESS]
-    Name             : Idle
-    Id               : 0x0
+    Name             : svchost.exe
+    Id               : 0xcbc
     Threads
     Modules
     Io
 dx @$curprocess.Threads.Count()
-@$curprocess.Threads.Count() : 0xc
-dx Debugger.Sessions[0].Processes[4].Modules[0]
-Debugger.Sessions[0].Processes[4].Modules[0] : \SystemRoot\system32\ntoskrnl.exe
-    BaseAddress      : 0xfffff801dc570000
-    Name             : \SystemRoot\system32\ntoskrnl.exe
-    Size             : 0x1450000
+@$curprocess.Threads.Count() : 0x18
+dx -r1 Debugger.Sessions[0].Processes[4].Threads.Take(2)
+Debugger.Sessions[0].Processes[4].Threads.Take(2)
+    [0xc]            : nt!KiSwapContext+0x76 (fffff806`791064d6)
+    [0x10]           : nt!KiSwapContext+0x76 (fffff806`791064d6)
 ```
 
 `KernelObject` is the typed `_EPROCESS` or `_ETHREAD`, and an expression reads on from it as from any typed value, such as `dx @$curprocess.KernelObject.UniqueProcessId`. `-r2` and deeper expand the objects under the first level, a `KernelObject` into its fields.
 
-A handle has `Handle`, `Type`, `GrantedAccess`, and `Object`, its `_OBJECT_HEADER`, whose `ObjectName` is the object's name and `UnderlyingObject` the object as its type, such as a `_FILE_OBJECT` for a file or an `_EPROCESS` for a process.
+A handle has `Handle`, `Type`, `GrantedAccess`, and `Object`, its `_OBJECT_HEADER`. After the header's fields come, as in WinDbg, a named object's `ObjectName`, its `ObjectType`, and `UnderlyingObject`, the object as its type, such as a `_FILE_OBJECT` for a file or an `_EPROCESS` for a process. This is a handle of lsass.exe in a kernel dump:
+
+```text
+dx -r1 @$cursession.Processes.Where(p => p.Name == "lsass.exe").First().Io.Handles.Where(h => h.Type == "Event").First()
+@$cursession.Processes.Where(p => p.Name == "lsass.exe").First().Io.Handles.Where(h => h.Type == "Event").First()
+    Handle           : 0x4
+    Type             : Event
+    GrantedAccess    : 0x1f0003
+    Object           [Type: _OBJECT_HEADER]
+```
+
+Where `ntoseye` differs from WinDbg: `GrantedAccess` is the access mask in hex, where WinDbg names the rights (`Delete | ReadControl | ... | QueryState | ModifyState`); a process's `Modules` are its own user-mode modules, and the kernel's only for a process that has none (System, Idle, vmmem), where WinDbg lists the kernel's for every process; and a process or thread has no `Index`, `Handle`, `Environment`, `Devices`, `Stack`, or `Registers`.
 
 ### Queries
 
@@ -210,13 +220,13 @@ A collection takes WinDbg's LINQ queries, each with a lambda (`p => ...`) where 
 ```text
 dx -r2 @$cursession.Processes.Select(p => new {Name = p.Name, PID = p.Id, SignatureLevel = p.KernelObject.SignatureLevel & 0xF}).OrderBy(p => p.SignatureLevel).Take(2)
 @$cursession.Processes.Select(p => new {Name = p.Name, PID = p.Id, SignatureLevel = p.KernelObject.SignatureLevel & 0xF}).OrderBy(p => p.SignatureLevel).Take(2)
+    [0x0]
+        Name             : Idle
+        PID              : 0x0
+        SignatureLevel   : 0x0
     [0x84]
         Name             : Secure System
         PID              : 0x84
-        SignatureLevel   : 0x0
-    [0xac]
-        Name             : Registry
-        PID              : 0xac
         SignatureLevel   : 0x0
 dx Debugger.Sessions[0].Processes.Where(p => p.Name == "explorer.exe").First().Io.Handles.Where(h => h.Type == "File").Select(h => h.Object.UnderlyingObject.FileName).Take(3)
 Debugger.Sessions[0].Processes.Where(p => p.Name == "explorer.exe").First().Io.Handles.Where(h => h.Type == "File").Select(h => h.Object.UnderlyingObject.FileName).Take(3)
@@ -259,9 +269,9 @@ As in WinDbg, `dx` lists the first 100 elements of a collection and then `[...]`
 ```text
 dx -r1 @$cursession.Processes.Take(3), d
 @$cursession.Processes.Take(3), d
+    [0]              : Idle
     [4]              : System
     [132]            : Secure System
-    [172]            : Registry
 ```
 
 `ntoseye` does not have WinDbg's NatVis views, which summarize some types on their line (`Driver "\Driver\mouclass"` for a `_DRIVER_OBJECT`, `{134357425713268397}` for a `_LARGE_INTEGER`) and replace some expansions with their own lists: `dx` shows the type's fields, as WinDbg's `dx -nv` does. A `_UNICODE_STRING` still reads as its text.

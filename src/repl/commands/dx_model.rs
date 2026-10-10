@@ -133,7 +133,7 @@ pub fn properties(value: &ModelValue) -> Vec<String> {
         ModelValue::Module(_) => &["BaseAddress", "Name", "Size"],
         ModelValue::Io(_) => &["Handles"],
         ModelValue::Handle(_) => &["Handle", "Type", "GrantedAccess", "Object"],
-        ModelValue::ObjectHeader { .. } => &["ObjectName", "UnderlyingObject"],
+        ModelValue::ObjectHeader { .. } => &["ObjectName", "ObjectType", "UnderlyingObject"],
         ModelValue::Utility => &["Collections"],
         ModelValue::Text(_) => &["Length"],
         ModelValue::Object(fields) => {
@@ -198,10 +198,16 @@ fn current_process(target: &Target) -> Result<ProcessInfo> {
         .ok_or_else(|| Error::InvalidExpression("no process owns the current context".into()))
 }
 
-/// A process's modules: the kernel's for the System process, which has no
-/// user-mode loader list, else its own.
+/// A process's modules: its own user-mode modules, or the kernel's for a
+/// process with no user-mode loader list (System, Idle, a minimal process
+/// such as vmmem), as WinDbg lists the kernel's for every process.
 fn process_modules(target: &Target, process: &ProcessInfo) -> Result<Vec<ModuleInfo>> {
-    if process.pid == 4 {
+    let no_peb = target
+        .types_in(target.kernel_dtb())
+        .struct_at("_EPROCESS", process.eprocess_va)
+        .and_then(|eprocess| eprocess.read_pointer("Peb"))
+        .is_ok_and(|peb| peb.is_zero());
+    if process.pid <= 4 || no_peb {
         return target.kernel_modules();
     }
     target.guest()?.process_modules(process)
@@ -212,11 +218,27 @@ fn process_modules(target: &Target, process: &ProcessInfo) -> Result<Vec<ModuleI
 pub fn elements(target: &Target, value: &ModelValue) -> Result<Vec<(u64, ModelValue)>> {
     Ok(match value {
         ModelValue::Sessions => vec![(0, ModelValue::Session)],
-        ModelValue::Processes => target
-            .matching_processes(None)?
-            .into_iter()
-            .map(|process| (process.pid, ModelValue::Process(process)))
-            .collect(),
+        ModelValue::Processes => {
+            // WinDbg lists the Idle process first, which is on no process
+            // list.
+            let guest = target.guest()?;
+            let idle = guest
+                .ntoskrnl
+                .symbol("PsIdleProcess")
+                .and_then(|symbol| symbol.read::<VirtAddr>())
+                .and_then(|eprocess| guest.process_at(eprocess))
+                .ok();
+            let listed = target.matching_processes(None)?;
+            let idle = idle.filter(|idle| {
+                !listed
+                    .iter()
+                    .any(|process| process.eprocess_va == idle.eprocess_va)
+            });
+            idle.into_iter()
+                .chain(listed)
+                .map(|process| (process.pid, ModelValue::Process(process)))
+                .collect()
+        }
         ModelValue::Threads(process) => target
             .enumerate_threads_for_process_info(process)?
             .into_iter()
@@ -302,12 +324,17 @@ pub fn property(target: &Target, value: &ModelValue, name: &str) -> Result<Model
             header: handle_field(&handle.object)?,
             kind: handle_field(&handle.type_name).ok().flatten(),
         },
+        // As in WinDbg, only a named object has an `ObjectName`.
         (ModelValue::ObjectHeader { header, .. }, "ObjectName") => ModelValue::Text(
             target
                 .inspect_object_header(*header + object_body_offset(target)?)?
                 .name
-                .unwrap_or_default(),
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| Error::InvalidExpression("the object has no name".into()))?,
         ),
+        (ModelValue::ObjectHeader { kind, .. }, "ObjectType") => {
+            ModelValue::Text(kind.clone().unwrap_or_default())
+        }
         (ModelValue::ObjectHeader { header, kind }, "UnderlyingObject") => {
             let kind = kind.as_deref().unwrap_or_default();
             let body = OBJECT_BODIES
