@@ -218,3 +218,21 @@ Data of NET_BUFFER ffffa08e68bc6b70 (0xdb bytes)
 ```
 
 ntoseye reads the data through each MDL's PFNs, so a buffer that is not mapped into system space reads too.
+
+## From Python
+
+`dbg.inspect` has one method for each command, and each method returns the decoded fields as typed records:
+
+- `ndis_miniports()` and `ndis_miniport(address)` for {command}`!ndiskd.miniports` and {command}`!ndiskd.miniport`
+- `ndis_minidrivers()` and `ndis_minidriver(address)` for {command}`!ndiskd.minidriver`
+- `ndis_filters()` and `ndis_filter(address)` for {command}`!ndiskd.filter`
+- `ndis_filter_drivers()` and `ndis_filter_driver(address)` for {command}`!ndiskd.filterdriver`
+- `ndis_protocols()` and `ndis_protocol(address)` for {command}`!ndiskd.protocol`
+- `ndis_oids()` for {command}`!ndiskd.oid`
+- `ndis_nbl(address)`, `ndis_nbl_chain(address)`, and `ndis_nbl_data(address)` for {command}`!ndiskd.nbl` and its `-chain` and `-data`; `ndis_nbl_data` returns each NET_BUFFER's data as `bytes`
+
+```python
+for miniport in dbg.inspect.ndis_miniports().miniports:
+    detail = dbg.inspect.ndis_miniport(miniport.address)
+    print(miniport.friendly_name, miniport.media_connect, [f.name for f in detail.filters])
+```

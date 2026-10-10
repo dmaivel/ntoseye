@@ -148,6 +148,8 @@ The command needs `Wdf01000.pdb`. `ntoseye` loads it when the dump opens, in a m
 - `wdf_queue(handle)` for {command}`!wdfkd.wdfqueue`
 - `wdf_log(driver)` for {command}`!wdfkd.wdflogdump`
 - `wdf_crash_log()` and `wdf_crash_drivers()` for {command}`!wdfkd.wdfcrashdump`
+- `rcdr_drivers()` and `rcdr_logs(driver)` for {command}`!rcdrkd.rcdrloglist`
+- `rcdr_log(driver, log=None)` for {command}`!rcdrkd.rcdrlogdump`, whose records are the same `WdfLogRecord`s as `wdf_log`'s, each with the log and partition it came from
 
 ```python
 for client in dbg.inspect.wdf_loader().clients:

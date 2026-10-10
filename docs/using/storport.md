@@ -176,3 +176,24 @@ Age           P/T/L    Command                           SRB status             
 A transfer packet is in flight when it is on none of classpnp's free lists: those of each NUMA node, those of each processor, and the one packet it keeps for forward progress. Each row shows the IRP that classpnp sent down, the client's IRP that the packet serves, the SRB with its command and status, and how many retries classpnp has left for it. A packet whose retries fell below the device's limit failed at least once.
 
 The error log keeps classpnp's last 16 errors, each with its age from the guest's tick count, the port, path, target, and LUN (`-` for a port classpnp did not know), the command, the SRB and SCSI status, the sense key and additional sense code and qualifier, and whether the request was paging I/O, was retried, or went unhandled.
+
+## From Python
+
+`dbg.inspect` has one method for each command, and each method returns the decoded fields as typed records:
+
+- `storport_adapters()` and `storport_adapter(address)` for {command}`!storagekd.storadapter`
+- `storport_unit(address)` for {command}`!storagekd.storunit`
+- `storport_log(address)` for {command}`!storagekd.storloglist`
+- `srb(address)` for {command}`!storagekd.storsrb`
+- `class_devices()` and `class_device(address)` for {command}`!storagekd.storclass`
+
+An adapter's and a unit's `io` is the verdict of the I/O state column, such as `idle` or `1 with the miniport`. A log entry of the request path has its IRP, SRB, command, and SRB status as fields:
+
+```python
+for driver in dbg.inspect.storport_adapters().drivers:
+    for entry in driver.adapters:
+        if entry.adapter is None:
+            continue
+        for logged in dbg.inspect.storport_log(entry.extension).entries[-5:]:
+            print(logged.number, logged.event, logged.command, logged.srb_status)
+```

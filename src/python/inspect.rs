@@ -1341,6 +1341,363 @@ impl Inspect {
         })
     }
 
+    /// List the NDIS miniports on `ndis!ndisMiniportList`
+    /// (`!ndiskd.miniports`).
+    fn ndis_miniports<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Typed<'py, view::ndis::NdisMiniports>> {
+        self.typed(py, |session| {
+            let list = session.target.ndis_miniports().map_err(err)?;
+            Ok(view::ndis::miniports(&list))
+        })
+    }
+
+    /// Read the NDIS miniport at `address` with its driver, filter stack,
+    /// bindings, and pending OID request (`!ndiskd.miniport`).
+    fn ndis_miniport<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Typed<'py, view::ndis::NdisMiniportDetail>> {
+        self.typed(py, move |session| {
+            let detail = session
+                .target
+                .ndis_miniport(VirtAddr(address))
+                .map_err(err)?;
+            Ok(view::ndis::miniport_detail(&detail))
+        })
+    }
+
+    /// List the NDIS miniport drivers (`!ndiskd.minidriver`).
+    fn ndis_minidrivers<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Typed<'py, view::ndis::NdisDrivers>> {
+        self.typed(py, |session| {
+            let list = session.target.ndis_minidrivers().map_err(err)?;
+            Ok(view::ndis::drivers(&list))
+        })
+    }
+
+    /// Read the NDIS miniport driver block at `address` and its miniports
+    /// (`!ndiskd.minidriver <address>`).
+    fn ndis_minidriver<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Typed<'py, view::ndis::NdisMinidriver>> {
+        self.typed(py, move |session| {
+            let (driver, miniports) = session
+                .target
+                .ndis_minidriver(VirtAddr(address))
+                .map_err(err)?;
+            Ok(view::ndis::minidriver(&driver, &miniports))
+        })
+    }
+
+    /// List the NDIS filter modules of every miniport (`!ndiskd.filter`).
+    fn ndis_filters<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::ndis::NdisFilters>> {
+        self.typed(py, |session| {
+            let list = session.target.ndis_filters_all().map_err(err)?;
+            Ok(view::ndis::filters(&list))
+        })
+    }
+
+    /// Read the NDIS filter module at `address` (`!ndiskd.filter <address>`).
+    fn ndis_filter<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Typed<'py, view::ndis::NdisFilterDetail>> {
+        self.typed(py, move |session| {
+            let detail = session
+                .target
+                .ndis_filter_detail(VirtAddr(address))
+                .map_err(err)?;
+            Ok(view::ndis::filter_detail(&detail))
+        })
+    }
+
+    /// List the NDIS filter drivers (`!ndiskd.filterdriver`).
+    fn ndis_filter_drivers<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Typed<'py, view::ndis::NdisFilterDrivers>> {
+        self.typed(py, |session| {
+            let list = session.target.ndis_filter_drivers().map_err(err)?;
+            Ok(view::ndis::filter_drivers(&list))
+        })
+    }
+
+    /// Read the NDIS filter driver block at `address` and its filter
+    /// modules (`!ndiskd.filterdriver <address>`).
+    fn ndis_filter_driver<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Typed<'py, view::ndis::NdisFilterDriverDetail>> {
+        self.typed(py, move |session| {
+            let (driver, filters) = session
+                .target
+                .ndis_filter_driver_detail(VirtAddr(address))
+                .map_err(err)?;
+            Ok(view::ndis::filter_driver_detail(&driver, &filters))
+        })
+    }
+
+    /// List the NDIS protocol drivers (`!ndiskd.protocol`).
+    fn ndis_protocols<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Typed<'py, view::ndis::NdisProtocols>> {
+        self.typed(py, |session| {
+            let list = session.target.ndis_protocols().map_err(err)?;
+            Ok(view::ndis::protocols(&list))
+        })
+    }
+
+    /// Read the NDIS protocol block at `address` and its bindings
+    /// (`!ndiskd.protocol <address>`).
+    fn ndis_protocol<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Typed<'py, view::ndis::NdisProtocolDetail>> {
+        self.typed(py, move |session| {
+            let detail = session
+                .target
+                .ndis_protocol_detail(VirtAddr(address))
+                .map_err(err)?;
+            Ok(view::ndis::protocol_detail(&detail))
+        })
+    }
+
+    /// The OID requests that miniports and filter modules have not
+    /// completed (`!ndiskd.oid`).
+    fn ndis_oids<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::ndis::NdisPendingOids>> {
+        self.typed(py, |session| {
+            let oids = session.target.ndis_pending_oids().map_err(err)?;
+            Ok(view::ndis::pending_oids(&oids))
+        })
+    }
+
+    /// Decode the NET_BUFFER_LIST at `address` and its NET_BUFFERs
+    /// (`!ndiskd.nbl`).
+    fn ndis_nbl<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Typed<'py, view::ndis::NdisNbl>> {
+        self.typed(py, move |session| {
+            let nbl = session.target.ndis_nbl(VirtAddr(address)).map_err(err)?;
+            Ok(view::ndis::nbl(&nbl))
+        })
+    }
+
+    /// Decode the NET_BUFFER_LISTs on the `Next` chain from `address`
+    /// (`!ndiskd.nbl -chain`).
+    fn ndis_nbl_chain<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Typed<'py, view::ndis::NdisNblChain>> {
+        self.typed(py, move |session| {
+            let (nbls, stopped) = session
+                .target
+                .ndis_nbl_chain(VirtAddr(address))
+                .map_err(err)?;
+            Ok(view::ndis::nbl_chain(&nbls, &stopped))
+        })
+    }
+
+    /// The data of each NET_BUFFER of the NET_BUFFER_LIST at `address`, up
+    /// to `max_bytes` of each, read through its MDLs' PFNs
+    /// (`!ndiskd.nbl -data`).
+    #[pyo3(signature = (address, max_bytes=0x10000))]
+    fn ndis_nbl_data<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+        max_bytes: usize,
+    ) -> PyResult<Vec<Bound<'py, PyBytes>>> {
+        let frames = self
+            .owner
+            .with_in(py, &Context::default(), move |session| {
+                let nbl = session.target.ndis_nbl(VirtAddr(address)).map_err(err)?;
+                nbl.net_buffers
+                    .iter()
+                    .map(|nb| {
+                        session
+                            .target
+                            .ndis_net_buffer_data(nb, max_bytes)
+                            .map_err(err)
+                    })
+                    .collect::<PyResult<Vec<Vec<u8>>>>()
+            })?;
+        Ok(frames.iter().map(|frame| PyBytes::new(py, frame)).collect())
+    }
+
+    /// List StorPort's drivers, their adapters, and their units
+    /// (`!storagekd.storadapter`).
+    fn storport_adapters<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Typed<'py, view::storage::StorDrivers>> {
+        self.typed(py, |session| {
+            let drivers = session.target.storport_drivers().map_err(err)?;
+            Ok(view::storage::drivers(&drivers))
+        })
+    }
+
+    /// Read the StorPort adapter whose extension or FDO is at `address`
+    /// (`!storagekd.storadapter <address>`).
+    fn storport_adapter<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Typed<'py, view::storage::StorAdapter>> {
+        self.typed(py, move |session| {
+            let adapter = session
+                .target
+                .storport_adapter(VirtAddr(address))
+                .map_err(err)?;
+            Ok(view::storage::adapter(&adapter))
+        })
+    }
+
+    /// Read the StorPort unit whose extension or PDO is at `address`, with
+    /// its queue and the requests the miniport holds
+    /// (`!storagekd.storunit`).
+    fn storport_unit<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Typed<'py, view::storage::StorUnit>> {
+        self.typed(py, move |session| {
+            let unit = session
+                .target
+                .storport_unit(VirtAddr(address))
+                .map_err(err)?;
+            Ok(view::storage::unit_detail(&unit))
+        })
+    }
+
+    /// Read the internal log of the StorPort adapter whose extension or FDO
+    /// is at `address`, oldest entry first (`!storagekd.storloglist`).
+    fn storport_log<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Typed<'py, view::storage::StorLog>> {
+        self.typed(py, move |session| {
+            let log = session
+                .target
+                .storport_log(VirtAddr(address))
+                .map_err(err)?;
+            Ok(view::storage::log(&log))
+        })
+    }
+
+    /// Decode the SRB at `address`, extended or legacy
+    /// (`!storagekd.storsrb`).
+    fn srb<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Typed<'py, view::storage::Srb>> {
+        self.typed(py, move |session| {
+            let srb = session.target.decode_srb(VirtAddr(address)).map_err(err)?;
+            Ok(view::storage::srb(&srb))
+        })
+    }
+
+    /// List the storage class devices on `classpnp!AllFdosList`
+    /// (`!storagekd.storclass`).
+    fn class_devices<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Typed<'py, view::storage::ClassDevices>> {
+        self.typed(py, |session| {
+            let list = session.target.classpnp_devices().map_err(err)?;
+            Ok(view::storage::class_devices(&list))
+        })
+    }
+
+    /// Read the class device whose FDO, device extension, or private data
+    /// is at `address`, with its requests in flight and its error log
+    /// (`!storagekd.storclass <address>`).
+    fn class_device<'py>(
+        &self,
+        py: Python<'py>,
+        address: u64,
+    ) -> PyResult<Typed<'py, view::storage::ClassDeviceDetail>> {
+        self.typed(py, move |session| {
+            let detail = session
+                .target
+                .classpnp_device(VirtAddr(address))
+                .map_err(err)?;
+            Ok(view::storage::class_device_detail(&detail))
+        })
+    }
+
+    /// List the drivers the WPP recorder keeps logs for
+    /// (`!rcdrkd.rcdrloglist`).
+    fn rcdr_drivers<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::rcdr::RcdrDrivers>> {
+        self.typed(py, |session| {
+            let list = session.target.rcdr_drivers().map_err(err)?;
+            Ok(view::rcdr::drivers(&list))
+        })
+    }
+
+    /// List the WPP recorder logs of `driver`, by its name with or without
+    /// `.sys` (`!rcdrkd.rcdrloglist <driver>`).
+    fn rcdr_logs<'py>(
+        &self,
+        py: Python<'py>,
+        driver: String,
+    ) -> PyResult<Typed<'py, view::rcdr::RcdrLogs>> {
+        self.typed(py, move |session| {
+            let (owner, logs) = session.target.rcdr_logs(&driver).map_err(err)?;
+            Ok(view::rcdr::logs(&owner, &logs))
+        })
+    }
+
+    /// Read the records of `driver`'s WPP recorder logs, merged oldest
+    /// first, or of the one log whose `_WPP_AUTOLOG_HEADER` is at `log`
+    /// (`!rcdrkd.rcdrlogdump`).
+    #[pyo3(signature = (driver, log=None))]
+    fn rcdr_log<'py>(
+        &self,
+        py: Python<'py>,
+        driver: String,
+        log: Option<u64>,
+    ) -> PyResult<Typed<'py, view::rcdr::RcdrDump>> {
+        self.typed(py, move |session| {
+            let dump = session
+                .target
+                .rcdr_log_dump(&driver, log.map(VirtAddr))
+                .map_err(err)?;
+            Ok(view::rcdr::dump(&dump))
+        })
+    }
+
+    /// List the interrupt controllers the HAL registered and the lines it
+    /// set up on each (`!ioapic`).
+    fn interrupt_controllers<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Typed<'py, view::machine::HalControllers>> {
+        self.typed(py, |session| {
+            let list = session.target.hal_interrupt_controllers().map_err(err)?;
+            Ok(view::machine::controllers(&list))
+        })
+    }
+
+    /// Read the SMBIOS table the kernel found at boot (`!sysinfo smbios`).
+    fn smbios<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::machine::SmbiosTable>> {
+        self.typed(py, |session| {
+            let table = session.target.smbios_table().map_err(err)?;
+            Ok(view::machine::smbios_table(&table))
+        })
+    }
+
     /// Read the data of the crash dump's block tagged `tag` (`.enumtag`), a
     /// GUID with or without braces, such as the one a driver passes to
     /// `KeRegisterBugCheckReasonCallback` for its secondary dump data.

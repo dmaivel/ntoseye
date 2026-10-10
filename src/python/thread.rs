@@ -1093,6 +1093,18 @@ impl Cpu {
         Typed::new(py, view::cpu::gdt(&detail))
     }
 
+    /// Read this processor's local APIC (`!apic`): through its x2APIC MSRs,
+    /// or its xAPIC registers. Needs the kd or kdnet backend, which
+    /// switches the target to this processor for the reads.
+    fn apic<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::machine::LocalApic>> {
+        let processor = self.processor()?;
+        let context = self.context();
+        let detail = self.owner.with_in(py, &context, |session| {
+            session.local_apic(processor).map_err(err)
+        })?;
+        Typed::new(py, view::machine::local_apic(&detail))
+    }
+
     /// Read the processor vendor, family, model, speed, and feature bits (`!cpuinfo`).
     fn info<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::cpu::CpuInfo>> {
         let processor = self.processor()?;

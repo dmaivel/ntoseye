@@ -1007,3 +1007,63 @@ def test_virtio_win_queues_read_and_compare_between_looks(halted: Debugger) -> N
         assert devices, f"{name}'s device was not found"
         for text in devices:
             assert "  Moved: " in text, f"{name}'s queues were not read:\n{text}"
+
+
+def test_each_processor_reads_its_own_msrs_and_apic(halted: Debugger) -> None:
+    """KD runs an MSR or device read on the processor that reported the stop,
+    whatever processor the request names, so ntoseye switches the target to
+    the asked processor for the read and back. Each processor's GS base is
+    its own KPCR, only processor 0's APIC base has the bootstrap bit, and
+    each local APIC has its own ID."""
+    if os.environ.get("NTOSEYE_TEST_BACKEND") not in {"kd", "kdnet"}:
+        pytest.skip("MSR and APIC reads need a kd backend")
+    cpus = list(halted.cpus)
+    if len(cpus) < 2:
+        pytest.skip("needs a guest with more than one processor")
+    ids = set()
+    for index, cpu in enumerate(cpus):
+        assert cpu.msr["IA32_GS_BASE"] + 0x180 == cpu.pcr().kprcb, f"processor {index}"
+        bsp = bool(cpu.msr["IA32_APIC_BASE"] & 0x100)
+        assert bsp == (index == 0), f"processor {index}"
+        apic = cpu.apic()
+        assert apic.processor == index
+        assert apic.bootstrap_processor == bsp
+        ids.add(apic.id)
+    assert len(ids) == len(cpus)
+
+
+def test_storage_and_network_records_agree_with_their_lists(halted: Debugger) -> None:
+    """Each StorPort adapter reads the same through its extension and its
+    FDO, each of its units through its extension and its PDO, each class
+    device through its private data and its FDO, and each NDIS miniport
+    through its own address, with the name its list gives."""
+    inspect = halted.inspect
+    adapters = [
+        entry.adapter
+        for driver in inspect.storport_adapters().drivers
+        for entry in driver.adapters
+        if entry.adapter is not None
+    ]
+    assert adapters, "no StorPort adapter"
+    for adapter in adapters:
+        assert inspect.storport_adapter(adapter.fdo).extension == adapter.extension
+        log = inspect.storport_log(adapter.fdo)
+        numbers = [entry.number for entry in log.entries]
+        assert numbers == sorted(numbers) and (not numbers or numbers[-1] == log.newest)
+        for entry in adapter.units:
+            if entry.unit is None:
+                continue
+            unit = inspect.storport_unit(entry.unit.device_object)
+            assert (unit.extension, unit.adapter) == (entry.extension, adapter.extension)
+    devices = inspect.class_devices().devices
+    assert devices, "no class device"
+    for device in devices:
+        detail = inspect.class_device(device.private_data)
+        assert detail.device.private_data == device.private_data
+        if device.fdo is not None:
+            assert inspect.class_device(device.fdo).device.private_data == device.private_data
+    miniports = inspect.ndis_miniports().miniports
+    assert miniports, "no NDIS miniport"
+    for miniport in miniports:
+        found = inspect.ndis_miniport(miniport.address)
+        assert found.listed and found.miniport.name == miniport.name

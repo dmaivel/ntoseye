@@ -66,6 +66,8 @@ A process has views that use its own address space:
 
 Use these views directly, without selecting or attaching to a global process.
 
+`dbg.cpus` is keyed by processor number. A `Cpu` decodes its processor's state: `pcr()`, `prcb()`, `irql()`, `idt()`, `gdt()`, and `info()`. With `kd` or `kdnet`, `cpu.msr["IA32_LSTAR"]` reads a model-specific register and `cpu.apic()` the local APIC, as {command}`rdmsr` `/p` and {command}`!apic` do: KD runs these reads on the processor that reported the stop, so ntoseye switches the target to the processor you asked for and back. `dbg.inspect.interrupt_controllers()` returns the interrupt controllers and lines that {command}`!ioapic` shows, and `dbg.inspect.smbios()` the SMBIOS structures of {command}`!sysinfo` `smbios`, each with its fields by the specification's names.
+
 Handles such as `Process`, `Module`, `Thread`, `Frame`, and struct cursors are stamped with the target generation. After a reboot (`Stop.Reboot`), discard the old handles and query them again, because an old handle raises `ntoseye.StaleHandleError` when you use it. Old handles stay hashable and printable, so a set or dict that holds them continues to work.
 
 If your code caches raw addresses, use `dbg.generation` to detect a rebuild. `Breakpoint` handles are not stamped: breakpoints stay after a reboot, and ntoseye resolves symbolic breakpoints again in the new kernel.

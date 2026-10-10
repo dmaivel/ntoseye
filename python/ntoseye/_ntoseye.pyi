@@ -757,6 +757,69 @@ class ApcThread(BaseRecord):
         """
 
 @final
+class ApicIcr(BaseRecord):
+    """
+    The interrupt command register.
+    """
+    @property
+    def delivery(self, /) -> str: ...
+    @property
+    def destination(self, /) -> int: ...
+    @property
+    def level_assert(self, /) -> bool: ...
+    @property
+    def level_triggered(self, /) -> bool: ...
+    @property
+    def logical(self, /) -> bool: ...
+    @property
+    def pending(self, /) -> bool: ...
+    @property
+    def raw(self, /) -> int: ...
+    @property
+    def shorthand(self, /) -> str:
+        """
+        `none`, `self`, `all`, or `all-but-self`.
+        """
+    @property
+    def vector(self, /) -> int: ...
+
+@final
+class ApicLvt(BaseRecord):
+    """
+    A local vector table entry.
+    """
+    @property
+    def active_low(self, /) -> bool: ...
+    @property
+    def delivery(self, /) -> str:
+        """
+        `Fixed`, `SMI`, `NMI`, `INIT`, `ExtINT`, or the mode in hex.
+        """
+    @property
+    def level(self, /) -> bool: ...
+    @property
+    def masked(self, /) -> bool: ...
+    @property
+    def name(self, /) -> str:
+        """
+        `Timer`, `LINT0`, `LINT1`, `Error`, `PerfMon`, `Thermal`, or
+        `CMCI`.
+        """
+    @property
+    def pending(self, /) -> bool: ...
+    @property
+    def raw(self, /) -> int: ...
+    @property
+    def remote_irr(self, /) -> bool: ...
+    @property
+    def timer_mode(self, /) -> str |None:
+        """
+        The timer's mode: `one-shot`, `periodic`, or `TSC-deadline`.
+        """
+    @property
+    def vector(self, /) -> int: ...
+
+@final
 class Arm64EpilogScope(BaseRecord):
     """
     One ARM64 epilog scope.
@@ -1710,6 +1773,185 @@ class CallTraceFrame(BaseRecord):
         """
 
 @final
+class ClassDevice(BaseRecord):
+    """
+    A storage class device (`!storagekd.storclass`).
+    """
+    @property
+    def boot_device(self, /) -> bool: ...
+    @property
+    def bus_type(self, /) -> str |None: ...
+    @property
+    def device_number(self, /) -> int |None: ...
+    @property
+    def driver(self, /) -> str |None:
+        """
+        The class driver's service name (`disk`).
+        """
+    @property
+    def extension(self, /) -> int |None: ...
+    @property
+    def fdo(self, /) -> int |None:
+        """
+        `None` when no transfer packet names the FDO.
+        """
+    @property
+    def in_flight(self, /) -> list[ClassTransferPacket]: ...
+    @property
+    def packets_free(self, /) -> int: ...
+    @property
+    def packets_stopped(self, /) -> list[str]: ...
+    @property
+    def packets_total(self, /) -> int:
+        """
+        The transfer packets on `AllTransferPacketsList`, and those on a
+        free list.
+        """
+    @property
+    def private_data(self, /) -> int:
+        """
+        `_CLASS_PRIVATE_FDO_DATA`, its entry on `classpnp!AllFdosList`.
+        """
+    @property
+    def product(self, /) -> str |None: ...
+    @property
+    def removable(self, /) -> bool: ...
+    @property
+    def revision(self, /) -> str |None: ...
+    @property
+    def serial(self, /) -> str |None: ...
+    @property
+    def vendor(self, /) -> str |None: ...
+
+@final
+class ClassDeviceDetail(BaseRecord):
+    """
+    One class device in detail.
+    """
+    @property
+    def bytes_per_sector(self, /) -> int: ...
+    @property
+    def device(self, /) -> ClassDevice: ...
+    @property
+    def error_count(self, /) -> int: ...
+    @property
+    def errors(self, /) -> list[ClassError]:
+        """
+        The errors still in the 16-entry log, oldest first.
+        """
+    @property
+    def length(self, /) -> int:
+        """
+        Bytes.
+        """
+    @property
+    def lower_device(self, /) -> int: ...
+    @property
+    def lower_pdo(self, /) -> int: ...
+    @property
+    def max_retries(self, /) -> int: ...
+    @property
+    def timeout(self, /) -> int:
+        """
+        Seconds.
+        """
+
+@final
+class ClassDevices(BaseRecord):
+    """
+    The class devices on `classpnp!AllFdosList`.
+    """
+    @property
+    def devices(self, /) -> list[ClassDevice]: ...
+    @property
+    def stopped(self, /) -> str |None: ...
+    @property
+    def unreadable(self, /) -> list[ClassUnreadable]: ...
+
+@final
+class ClassError(BaseRecord):
+    """
+    An error classpnp logged (`_CLASS_ERROR_LOG_DATA`).
+    """
+    @property
+    def age_ms(self, /) -> int |None:
+        """
+        Milliseconds from the error to the guest's current tick count.
+        """
+    @property
+    def cdb(self, /) -> list[int]: ...
+    @property
+    def command(self, /) -> str |None: ...
+    @property
+    def lun(self, /) -> int: ...
+    @property
+    def paging(self, /) -> bool: ...
+    @property
+    def path(self, /) -> int: ...
+    @property
+    def port(self, /) -> int |None:
+        """
+        `None` where classpnp did not know the port.
+        """
+    @property
+    def retried(self, /) -> bool: ...
+    @property
+    def scsi_status(self, /) -> int: ...
+    @property
+    def sense(self, /) -> str |None: ...
+    @property
+    def srb_status(self, /) -> int: ...
+    @property
+    def srb_status_text(self, /) -> str: ...
+    @property
+    def target(self, /) -> int: ...
+    @property
+    def tick(self, /) -> int: ...
+    @property
+    def unhandled(self, /) -> bool: ...
+
+@final
+class ClassTransferPacket(BaseRecord):
+    """
+    A transfer packet classpnp has in flight.
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def irp(self, /) -> int:
+        """
+        The IRP classpnp sent down, and the client's IRP it serves.
+        """
+    @property
+    def original_irp(self, /) -> int: ...
+    @property
+    def request(self, /) -> Srb |None:
+        """
+        The SRB, decoded.
+        """
+    @property
+    def request_error(self, /) -> str |None:
+        """
+        Why `request` does not decode.
+        """
+    @property
+    def retries_left(self, /) -> int: ...
+    @property
+    def srb(self, /) -> int: ...
+    @property
+    def timed_out(self, /) -> bool: ...
+
+@final
+class ClassUnreadable(BaseRecord):
+    """
+    A class device whose private data does not read.
+    """
+    @property
+    def error(self, /) -> str: ...
+    @property
+    def private_data(self, /) -> int: ...
+
+@final
 class CodeViewRecord(BaseRecord):
     """
     A CodeView debug record, which identifies the PDB that the image was built with.
@@ -1809,6 +2051,12 @@ class Cpu:
     def __eq__(self, other: object, /) -> bool: ...
     def __hash__(self, /) -> int: ...
     def __repr__(self, /) -> str: ...
+    def apic(self, /) -> LocalApic:
+        """
+        Read this processor's local APIC (`!apic`): through its x2APIC MSRs,
+        or its xAPIC registers. Needs the kd or kdnet backend, which
+        switches the target to this processor for the reads.
+        """
     def backtrace(self, /, limit: int = 64, vtl: int |None = None) -> list[Frame]:
         """
         Walk this processor's stack from its own registers, whatever `.thread`,
@@ -4706,6 +4954,113 @@ class GlobalFlags(BaseRecord):
         """
 
 @final
+class HalController(BaseRecord):
+    """
+    An interrupt controller the HAL registered
+    (`_REGISTERED_INTERRUPT_CONTROLLER`).
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def kind(self, /) -> str:
+        """
+        `_KNOWN_CONTROLLER_TYPE` without its prefix (`Apic`, `Pic`).
+        """
+    @property
+    def max_line(self, /) -> int: ...
+    @property
+    def min_line(self, /) -> int: ...
+    @property
+    def problem(self, /) -> str |None: ...
+    @property
+    def ranges(self, /) -> list[HalLineRange]: ...
+    @property
+    def ranges_stopped(self, /) -> str |None: ...
+    @property
+    def resource_id(self, /) -> str: ...
+    @property
+    def unit_id(self, /) -> int: ...
+
+@final
+class HalControllers(BaseRecord):
+    """
+    The interrupt controllers on `nt!HalpRegisteredInterruptControllers`
+    (`!ioapic`).
+    """
+    @property
+    def controllers(self, /) -> list[HalController]: ...
+    @property
+    def stopped(self, /) -> str |None: ...
+    @property
+    def unreadable(self, /) -> list[HalUnreadable]: ...
+
+@final
+class HalLine(BaseRecord):
+    """
+    A line of an interrupt controller as the HAL set it up
+    (`_INTERRUPT_LINE_STATE`).
+    """
+    @property
+    def flags(self, /) -> int: ...
+    @property
+    def gsi(self, /) -> int |None:
+        """
+        The global system interrupt, for a pin.
+        """
+    @property
+    def irql(self, /) -> int:
+        """
+        The IRQL its interrupt runs at.
+        """
+    @property
+    def level(self, /) -> bool: ...
+    @property
+    def line(self, /) -> int: ...
+    @property
+    def polarity(self, /) -> str: ...
+    @property
+    def target(self, /) -> str:
+        """
+        `_INTERRUPT_TARGET_TYPE` without its prefix, with its ID.
+        """
+    @property
+    def vector(self, /) -> int: ...
+
+@final
+class HalLineRange(BaseRecord):
+    """
+    A range of a controller's lines (`_INTERRUPT_LINES`).
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def gsi_base(self, /) -> int |None: ...
+    @property
+    def kind(self, /) -> str:
+        """
+        `_INTERRUPT_LINE_TYPE` without its prefix (`StandardPin`).
+        """
+    @property
+    def lines(self, /) -> list[HalLine]:
+        """
+        The lines the HAL set up.
+        """
+    @property
+    def max_line(self, /) -> int: ...
+    @property
+    def min_line(self, /) -> int: ...
+
+@final
+class HalUnreadable(BaseRecord):
+    """
+    A controller that does not read.
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def error(self, /) -> str: ...
+
+@final
 class HandleEntry(BaseRecord):
     """
     A handle-table entry (`!handle <handle>`).
@@ -6591,6 +6946,17 @@ class Inspect:
         """
         List the process, thread, and image notification callbacks.
         """
+    def class_device(self, /, address: int) -> ClassDeviceDetail:
+        """
+        Read the class device whose FDO, device extension, or private data
+        is at `address`, with its requests in flight and its error log
+        (`!storagekd.storclass <address>`).
+        """
+    def class_devices(self, /) -> ClassDevices:
+        """
+        List the storage class devices on `classpnp!AllFdosList`
+        (`!storagekd.storclass`).
+        """
     def context_record(self, /, address: int) -> Frame:
         """
         Decode a CONTEXT record and return its register set as a `Frame` (`.cxr`).
@@ -6697,6 +7063,11 @@ class Inspect:
         Decode `nt!NtGlobalFlag` and the `_PEB.NtGlobalFlag` of the current
         process into GFlags names (`!gflag`).
         """
+    def interrupt_controllers(self, /) -> HalControllers:
+        """
+        List the interrupt controllers the HAL registered and the lines it
+        set up on each (`!ioapic`).
+        """
     def ipi(self, /, processor: int |None = None) -> IpiState:
         """
         Get the interprocessor-interrupt state of all processors or of one
@@ -6744,6 +7115,72 @@ class Inspect:
         """
         Get the memory-use counters of the system and of each process, up to a
         limit (`!memusage`).
+        """
+    def ndis_filter(self, /, address: int) -> NdisFilterDetail:
+        """
+        Read the NDIS filter module at `address` (`!ndiskd.filter <address>`).
+        """
+    def ndis_filter_driver(self, /, address: int) -> NdisFilterDriverDetail:
+        """
+        Read the NDIS filter driver block at `address` and its filter
+        modules (`!ndiskd.filterdriver <address>`).
+        """
+    def ndis_filter_drivers(self, /) -> NdisFilterDrivers:
+        """
+        List the NDIS filter drivers (`!ndiskd.filterdriver`).
+        """
+    def ndis_filters(self, /) -> NdisFilters:
+        """
+        List the NDIS filter modules of every miniport (`!ndiskd.filter`).
+        """
+    def ndis_minidriver(self, /, address: int) -> NdisMinidriver:
+        """
+        Read the NDIS miniport driver block at `address` and its miniports
+        (`!ndiskd.minidriver <address>`).
+        """
+    def ndis_minidrivers(self, /) -> NdisDrivers:
+        """
+        List the NDIS miniport drivers (`!ndiskd.minidriver`).
+        """
+    def ndis_miniport(self, /, address: int) -> NdisMiniportDetail:
+        """
+        Read the NDIS miniport at `address` with its driver, filter stack,
+        bindings, and pending OID request (`!ndiskd.miniport`).
+        """
+    def ndis_miniports(self, /) -> NdisMiniports:
+        """
+        List the NDIS miniports on `ndis!ndisMiniportList`
+        (`!ndiskd.miniports`).
+        """
+    def ndis_nbl(self, /, address: int) -> NdisNbl:
+        """
+        Decode the NET_BUFFER_LIST at `address` and its NET_BUFFERs
+        (`!ndiskd.nbl`).
+        """
+    def ndis_nbl_chain(self, /, address: int) -> NdisNblChain:
+        """
+        Decode the NET_BUFFER_LISTs on the `Next` chain from `address`
+        (`!ndiskd.nbl -chain`).
+        """
+    def ndis_nbl_data(self, /, address: int, max_bytes: int = 65536) -> list[bytes]:
+        """
+        The data of each NET_BUFFER of the NET_BUFFER_LIST at `address`, up
+        to `max_bytes` of each, read through its MDLs' PFNs
+        (`!ndiskd.nbl -data`).
+        """
+    def ndis_oids(self, /) -> NdisPendingOids:
+        """
+        The OID requests that miniports and filter modules have not
+        completed (`!ndiskd.oid`).
+        """
+    def ndis_protocol(self, /, address: int) -> NdisProtocolDetail:
+        """
+        Read the NDIS protocol block at `address` and its bindings
+        (`!ndiskd.protocol <address>`).
+        """
+    def ndis_protocols(self, /) -> NdisProtocols:
+        """
+        List the NDIS protocol drivers (`!ndiskd.protocol`).
         """
     def object(self, /, object: int |str) -> ExecutiveObject:
         """
@@ -6806,6 +7243,22 @@ class Inspect:
         Get the processors that own or wait for each numbered queued spinlock
         (`!qlocks`).
         """
+    def rcdr_drivers(self, /) -> RcdrDrivers:
+        """
+        List the drivers the WPP recorder keeps logs for
+        (`!rcdrkd.rcdrloglist`).
+        """
+    def rcdr_log(self, /, driver: str, log: int |None = None) -> RcdrDump:
+        """
+        Read the records of `driver`'s WPP recorder logs, merged oldest
+        first, or of the one log whose `_WPP_AUTOLOG_HEADER` is at `log`
+        (`!rcdrkd.rcdrlogdump`).
+        """
+    def rcdr_logs(self, /, driver: str) -> RcdrLogs:
+        """
+        List the WPP recorder logs of `driver`, by its name with or without
+        `.sys` (`!rcdrkd.rcdrloglist <driver>`).
+        """
     def read_tagged(self, /, tag: str) -> bytes:
         """
         Read the data of the crash dump's block tagged `tag` (`.enumtag`), a
@@ -6846,6 +7299,15 @@ class Inspect:
         Decode a SID into its string form, authority, and well-known name
         (`!sid`).
         """
+    def smbios(self, /) -> SmbiosTable:
+        """
+        Read the SMBIOS table the kernel found at boot (`!sysinfo smbios`).
+        """
+    def srb(self, /, address: int) -> Srb:
+        """
+        Decode the SRB at `address`, extended or legacy
+        (`!storagekd.storsrb`).
+        """
     def ssdt(self, /) -> list[SsdtTable]:
         """
         Get the kernel SSDT, and the win32k shadow table if it is initialized
@@ -6855,6 +7317,27 @@ class Inspect:
         """
         Get the thread states, wait reasons, and stacks, up to a limit
         (`!stacks`).
+        """
+    def storport_adapter(self, /, address: int) -> StorAdapter:
+        """
+        Read the StorPort adapter whose extension or FDO is at `address`
+        (`!storagekd.storadapter <address>`).
+        """
+    def storport_adapters(self, /) -> StorDrivers:
+        """
+        List StorPort's drivers, their adapters, and their units
+        (`!storagekd.storadapter`).
+        """
+    def storport_log(self, /, address: int) -> StorLog:
+        """
+        Read the internal log of the StorPort adapter whose extension or FDO
+        is at `address`, oldest entry first (`!storagekd.storloglist`).
+        """
+    def storport_unit(self, /, address: int) -> StorUnit:
+        """
+        Read the StorPort unit whose extension or PDO is at `address`, with
+        its queue and the requests the miniport holds
+        (`!storagekd.storunit`).
         """
     def system_ptes(self, /, free_runs: bool = False) -> SystemPtes:
         """
@@ -7883,6 +8366,77 @@ class LoaderTerminations(BaseRecord):
         """
 
 @final
+class LocalApic(BaseRecord):
+    """
+    A processor's local APIC (`!apic`).
+    """
+    @property
+    def apic_base(self, /) -> int:
+        """
+        `IA32_APIC_BASE`.
+        """
+    @property
+    def bootstrap_processor(self, /) -> bool: ...
+    @property
+    def enabled(self, /) -> bool: ...
+    @property
+    def esr(self, /) -> int |None:
+        """
+        `None` when the error status does not read.
+        """
+    @property
+    def icr(self, /) -> ApicIcr: ...
+    @property
+    def id(self, /) -> int: ...
+    @property
+    def irr(self, /) -> list[int]: ...
+    @property
+    def isr(self, /) -> list[int]:
+        """
+        The vectors in service, requested, and level-triggered.
+        """
+    @property
+    def ldr(self, /) -> int: ...
+    @property
+    def lvt(self, /) -> list[ApicLvt]:
+        """
+        The LVT entries the APIC implements.
+        """
+    @property
+    def lvt_missing(self, /) -> list[str]:
+        """
+        The ones it does not (the thermal or CMCI entry).
+        """
+    @property
+    def ppr(self, /) -> int: ...
+    @property
+    def processor(self, /) -> int: ...
+    @property
+    def software_enabled(self, /) -> bool: ...
+    @property
+    def svr(self, /) -> int:
+        """
+        The spurious-interrupt vector register.
+        """
+    @property
+    def timer_current(self, /) -> int: ...
+    @property
+    def timer_divisor(self, /) -> int: ...
+    @property
+    def timer_initial(self, /) -> int: ...
+    @property
+    def tmr(self, /) -> list[int]: ...
+    @property
+    def tpr(self, /) -> int: ...
+    @property
+    def version(self, /) -> int: ...
+    @property
+    def x2apic(self, /) -> bool:
+        """
+        In x2APIC mode, read through MSRs; else through its registers.
+        """
+
+@final
 class LocalVariableLocation(BaseRecord):
     """
     The location of a local variable.
@@ -8621,6 +9175,679 @@ class NameIterator:
     """
     def __iter__(self, /) -> NameIterator: ...
     def __next__(self, /) -> str: ...
+
+@final
+class NdisBinding(BaseRecord):
+    """
+    A protocol's binding, with the miniport it opened.
+    """
+    @property
+    def context(self, /) -> int:
+        """
+        `ProtocolBindingContext`.
+        """
+    @property
+    def miniport(self, /) -> int: ...
+    @property
+    def miniport_name(self, /) -> str |None: ...
+    @property
+    def open(self, /) -> int:
+        """
+        The `_NDIS_OPEN_BLOCK`.
+        """
+
+@final
+class NdisDriver(BaseRecord):
+    """
+    A miniport driver (`_NDIS_M_DRIVER_BLOCK`).
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def driver_object(self, /) -> int: ...
+    @property
+    def driver_version(self, /) -> str |None:
+        """
+        Its own version, from its NDIS 6 characteristics.
+        """
+    @property
+    def image_name(self, /) -> str: ...
+    @property
+    def miniports(self, /) -> list[int]:
+        """
+        Its miniports, on its `MiniportQueue`.
+        """
+    @property
+    def miniports_stopped(self, /) -> str |None: ...
+    @property
+    def module(self, /) -> str |None:
+        """
+        The loaded module the driver's code is in, the name its PDB's
+        types go by.
+        """
+    @property
+    def ndis_version(self, /) -> str:
+        """
+        The NDIS version it registered with (`6.50`).
+        """
+    @property
+    def service_name(self, /) -> str: ...
+
+@final
+class NdisDrivers(BaseRecord):
+    """
+    The miniport drivers on `ndis!ndisMiniDriverList`.
+    """
+    @property
+    def drivers(self, /) -> list[NdisDriver]: ...
+    @property
+    def stopped(self, /) -> str |None: ...
+    @property
+    def unreadable(self, /) -> list[NdisUnreadable]: ...
+
+@final
+class NdisFilter(BaseRecord):
+    """
+    A filter module on a miniport's stack (`_NDIS_FILTER_BLOCK`).
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def context(self, /) -> int:
+        """
+        `FilterModuleContext`, the filter driver's own context.
+        """
+    @property
+    def driver(self, /) -> int:
+        """
+        The `_NDIS_FILTER_DRIVER_BLOCK`.
+        """
+    @property
+    def driver_image(self, /) -> str |None: ...
+    @property
+    def miniport(self, /) -> int: ...
+    @property
+    def miniport_name(self, /) -> str |None: ...
+    @property
+    def name(self, /) -> str |None:
+        """
+        `FilterFriendlyName`.
+        """
+    @property
+    def pending_oid(self, /) -> NdisOidRequest |None:
+        """
+        The OID request the filter has not completed.
+        """
+    @property
+    def pending_oid_error(self, /) -> str |None:
+        """
+        Why `pending_oid` does not decode.
+        """
+    @property
+    def state(self, /) -> str: ...
+
+@final
+class NdisFilterDetail(BaseRecord):
+    """
+    One filter module in detail (`!ndiskd.filter`).
+    """
+    @property
+    def driver_name(self, /) -> str |None:
+        """
+        The filter driver's friendly name.
+        """
+    @property
+    def dropped_receive_nbls(self, /) -> int:
+        """
+        What NDIS dropped because the filter was not running.
+        """
+    @property
+    def dropped_send_nbls(self, /) -> int: ...
+    @property
+    def dropped_status_indications(self, /) -> int: ...
+    @property
+    def filter(self, /) -> NdisFilter: ...
+    @property
+    def flags(self, /) -> int: ...
+    @property
+    def higher(self, /) -> int:
+        """
+        The filter modules above and below it; null at the top and at the
+        bottom.
+        """
+    @property
+    def if_index(self, /) -> int: ...
+    @property
+    def listed(self, /) -> bool:
+        """
+        Whether it is on `ndis!ndisGlobalFilterList`.
+        """
+    @property
+    def lower(self, /) -> int: ...
+    @property
+    def media_connect(self, /) -> str:
+        """
+        The link the filter last saw indicated from below.
+        """
+    @property
+    def rcv_link_speed(self, /) -> int: ...
+    @property
+    def references(self, /) -> int |None: ...
+    @property
+    def xmit_link_speed(self, /) -> int: ...
+
+@final
+class NdisFilterDriver(BaseRecord):
+    """
+    A filter driver (`_NDIS_FILTER_DRIVER_BLOCK`).
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def context(self, /) -> int:
+        """
+        `FilterDriverContext`.
+        """
+    @property
+    def driver_object(self, /) -> int: ...
+    @property
+    def driver_version(self, /) -> str: ...
+    @property
+    def filters(self, /) -> list[int]:
+        """
+        Its filter modules, one for each miniport it is attached to.
+        """
+    @property
+    def filters_stopped(self, /) -> str |None: ...
+    @property
+    def flags(self, /) -> int: ...
+    @property
+    def friendly_name(self, /) -> str: ...
+    @property
+    def image_name(self, /) -> str: ...
+    @property
+    def module(self, /) -> str |None: ...
+    @property
+    def ndis_version(self, /) -> str: ...
+    @property
+    def service_name(self, /) -> str: ...
+    @property
+    def unique_name(self, /) -> str:
+        """
+        The filter's GUID.
+        """
+
+@final
+class NdisFilterDriverDetail(BaseRecord):
+    """
+    A filter driver and its filter modules (`!ndiskd.filterdriver`).
+    """
+    @property
+    def driver(self, /) -> NdisFilterDriver: ...
+    @property
+    def filters(self, /) -> list[NdisFilter]: ...
+    @property
+    def unreadable(self, /) -> list[NdisUnreadable]: ...
+
+@final
+class NdisFilterDrivers(BaseRecord):
+    """
+    The filter drivers on `ndis!ndisFilterDriverList`.
+    """
+    @property
+    def drivers(self, /) -> list[NdisFilterDriver]: ...
+    @property
+    def stopped(self, /) -> str |None: ...
+    @property
+    def unreadable(self, /) -> list[NdisUnreadable]: ...
+
+@final
+class NdisFilters(BaseRecord):
+    """
+    The filter modules on `ndis!ndisGlobalFilterList`.
+    """
+    @property
+    def filters(self, /) -> list[NdisFilter]: ...
+    @property
+    def stopped(self, /) -> str |None: ...
+    @property
+    def unreadable(self, /) -> list[NdisUnreadable]: ...
+
+@final
+class NdisMinidriver(BaseRecord):
+    """
+    A miniport driver and its miniports (`!ndiskd.minidriver`).
+    """
+    @property
+    def driver(self, /) -> NdisDriver: ...
+    @property
+    def miniports(self, /) -> list[NdisMiniport]: ...
+    @property
+    def unreadable(self, /) -> list[NdisUnreadable]: ...
+
+@final
+class NdisMiniport(BaseRecord):
+    """
+    A miniport as `!ndiskd.miniports` lists it (`_NDIS_MINIPORT_BLOCK`).
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def connected(self, /) -> bool: ...
+    @property
+    def driver(self, /) -> int:
+        """
+        The `_NDIS_M_DRIVER_BLOCK`.
+        """
+    @property
+    def driver_name(self, /) -> str |None:
+        """
+        The miniport driver's service name.
+        """
+    @property
+    def friendly_name(self, /) -> str |None:
+        """
+        The adapter's friendly name.
+        """
+    @property
+    def if_index(self, /) -> int: ...
+    @property
+    def media_connect(self, /) -> str: ...
+    @property
+    def name(self, /) -> str:
+        """
+        `MiniportName`, the adapter's device name.
+        """
+    @property
+    def pnp_state(self, /) -> str: ...
+    @property
+    def power(self, /) -> str:
+        """
+        The device power state (`D0`).
+        """
+    @property
+    def rcv_link_speed(self, /) -> int: ...
+    @property
+    def state(self, /) -> str:
+        """
+        `Running`, `Pausing`, `Paused`, `Restarting`, `Initializing`, or
+        `Halted`.
+        """
+    @property
+    def xmit_link_speed(self, /) -> int:
+        """
+        Bits per second; `0xffffffffffffffff` when the miniport has not
+        reported one.
+        """
+
+@final
+class NdisMiniportDetail(BaseRecord):
+    """
+    One miniport in detail (`!ndiskd.miniport`).
+    """
+    @property
+    def adapter_context(self, /) -> int:
+        """
+        `MiniportAdapterContext`, the miniport driver's own context.
+        """
+    @property
+    def device_object(self, /) -> int:
+        """
+        The FDO NDIS created; null for a virtual miniport.
+        """
+    @property
+    def driver(self, /) -> NdisDriver |None: ...
+    @property
+    def driver_error(self, /) -> str |None:
+        """
+        Why `driver` is `None`.
+        """
+    @property
+    def duplex(self, /) -> str: ...
+    @property
+    def filters(self, /) -> list[NdisFilter]:
+        """
+        The filter stack, top first.
+        """
+    @property
+    def filters_stopped(self, /) -> str |None: ...
+    @property
+    def flags(self, /) -> int: ...
+    @property
+    def instance_id(self, /) -> str |None: ...
+    @property
+    def internal_resets(self, /) -> int: ...
+    @property
+    def listed(self, /) -> bool:
+        """
+        Whether it is on `ndis!ndisMiniportList`.
+        """
+    @property
+    def medium(self, /) -> str: ...
+    @property
+    def miniport(self, /) -> NdisMiniport: ...
+    @property
+    def miniport_resets(self, /) -> int: ...
+    @property
+    def ndis_version(self, /) -> str: ...
+    @property
+    def net_luid(self, /) -> int: ...
+    @property
+    def num_opens(self, /) -> int: ...
+    @property
+    def opens(self, /) -> list[NdisOpen]: ...
+    @property
+    def opens_stopped(self, /) -> str |None: ...
+    @property
+    def oper_status(self, /) -> str: ...
+    @property
+    def pdo(self, /) -> int: ...
+    @property
+    def pending_oid(self, /) -> NdisOidRequest |None: ...
+    @property
+    def pending_oid_error(self, /) -> str |None: ...
+    @property
+    def pending_return_nbls(self, /) -> int:
+        """
+        `PendingReturnNBLCount`.
+        """
+    @property
+    def physical_medium(self, /) -> str: ...
+    @property
+    def pnp_flags(self, /) -> int: ...
+    @property
+    def references(self, /) -> int |None: ...
+    @property
+    def reset_status(self, /) -> int:
+        """
+        `ResetStatus`, the NTSTATUS of the last reset.
+        """
+
+@final
+class NdisMiniports(BaseRecord):
+    """
+    The miniports on `ndis!ndisMiniportList`.
+    """
+    @property
+    def miniports(self, /) -> list[NdisMiniport]: ...
+    @property
+    def stopped(self, /) -> str |None:
+        """
+        Why the walk stopped before the end of the list.
+        """
+    @property
+    def unreadable(self, /) -> list[NdisUnreadable]: ...
+
+@final
+class NdisNbl(BaseRecord):
+    """
+    A `_NET_BUFFER_LIST` (`!ndiskd.nbl`).
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def child_ref_count(self, /) -> int: ...
+    @property
+    def context(self, /) -> int: ...
+    @property
+    def flags(self, /) -> int: ...
+    @property
+    def nbl_flag_names(self, /) -> list[str]:
+        """
+        The `NDIS_NBL_FLAGS_*` names of `nbl_flags`, without the prefix.
+        """
+    @property
+    def nbl_flags(self, /) -> int: ...
+    @property
+    def net_buffers(self, /) -> list[NdisNetBuffer]: ...
+    @property
+    def net_buffers_stopped(self, /) -> str |None: ...
+    @property
+    def next(self, /) -> int: ...
+    @property
+    def parent(self, /) -> int: ...
+    @property
+    def pool(self, /) -> int: ...
+    @property
+    def source(self, /) -> str |None:
+        """
+        What `source_handle` is, when NDIS knows it.
+        """
+    @property
+    def source_handle(self, /) -> int:
+        """
+        The NDIS handle of the miniport, filter module, or binding that
+        owns it on its way.
+        """
+    @property
+    def status(self, /) -> int: ...
+    @property
+    def status_name(self, /) -> str |None: ...
+
+@final
+class NdisNblChain(BaseRecord):
+    """
+    The NBLs on a `Next` chain.
+    """
+    @property
+    def nbls(self, /) -> list[NdisNbl]: ...
+    @property
+    def stopped(self, /) -> str |None: ...
+
+@final
+class NdisNetBuffer(BaseRecord):
+    """
+    A `_NET_BUFFER`.
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def current_mdl(self, /) -> int:
+        """
+        The MDL the data starts in, and where in it.
+        """
+    @property
+    def current_mdl_offset(self, /) -> int: ...
+    @property
+    def data_length(self, /) -> int: ...
+    @property
+    def data_offset(self, /) -> int:
+        """
+        Where the data starts from the start of `mdl_chain`.
+        """
+    @property
+    def mdl_chain(self, /) -> int: ...
+    @property
+    def next(self, /) -> int: ...
+
+@final
+class NdisOidRequest(BaseRecord):
+    """
+    An `_NDIS_OID_REQUEST`.
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def buffer(self, /) -> int: ...
+    @property
+    def buffer_length(self, /) -> int:
+        """
+        `InformationBufferLength`, or a method request's input length.
+        """
+    @property
+    def method_id(self, /) -> int |None:
+        """
+        A method request's `MethodId`.
+        """
+    @property
+    def oid(self, /) -> int: ...
+    @property
+    def oid_name(self, /) -> str |None:
+        """
+        The `ntddndis.h` name of the OID.
+        """
+    @property
+    def output_length(self, /) -> int |None:
+        """
+        A method request's `OutputBufferLength`.
+        """
+    @property
+    def port(self, /) -> int: ...
+    @property
+    def request_type(self, /) -> str:
+        """
+        `QueryInformation`, `SetInformation`, `Method`, ...
+        """
+    @property
+    def timeout(self, /) -> int:
+        """
+        Seconds; 0 lets NDIS pick one.
+        """
+
+@final
+class NdisOpen(BaseRecord):
+    """
+    A protocol's binding to a miniport (`_NDIS_OPEN_BLOCK`).
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def context(self, /) -> int:
+        """
+        `ProtocolBindingContext`.
+        """
+    @property
+    def protocol(self, /) -> int:
+        """
+        The `_NDIS_PROTOCOL_BLOCK`.
+        """
+    @property
+    def protocol_name(self, /) -> str |None: ...
+
+@final
+class NdisPendingOid(BaseRecord):
+    """
+    An OID request a miniport or filter module has not completed.
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The miniport or filter block.
+        """
+    @property
+    def error(self, /) -> str |None:
+        """
+        Why `request` does not decode.
+        """
+    @property
+    def name(self, /) -> str |None: ...
+    @property
+    def owner(self, /) -> str:
+        """
+        `miniport` or `filter`.
+        """
+    @property
+    def request(self, /) -> NdisOidRequest |None: ...
+
+@final
+class NdisPendingOids(BaseRecord):
+    """
+    The pending OID requests of every miniport and filter module
+    (`!ndiskd.oid`).
+    """
+    @property
+    def filters(self, /) -> int: ...
+    @property
+    def miniports(self, /) -> int:
+        """
+        How many miniports and filter modules were checked.
+        """
+    @property
+    def pending(self, /) -> list[NdisPendingOid]: ...
+    @property
+    def problems(self, /) -> list[str]:
+        """
+        Why a walk stopped short, or a block that did not read.
+        """
+
+@final
+class NdisProtocol(BaseRecord):
+    """
+    A protocol driver (`_NDIS_PROTOCOL_BLOCK`).
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def bind_handler(self, /) -> int:
+        """
+        `BindAdapterHandlerEx`.
+        """
+    @property
+    def context(self, /) -> int:
+        """
+        `ProtocolDriverContext`.
+        """
+    @property
+    def driver_version(self, /) -> str: ...
+    @property
+    def flags(self, /) -> int: ...
+    @property
+    def image_name(self, /) -> str |None: ...
+    @property
+    def name(self, /) -> str: ...
+    @property
+    def ndis_version(self, /) -> str: ...
+    @property
+    def opens(self, /) -> list[int]:
+        """
+        Its bindings (`_NDIS_OPEN_BLOCK`), on its `OpenQueue`.
+        """
+    @property
+    def opens_stopped(self, /) -> str |None: ...
+
+@final
+class NdisProtocolDetail(BaseRecord):
+    """
+    One protocol driver in detail (`!ndiskd.protocol`).
+    """
+    @property
+    def bind_handler_name(self, /) -> str |None:
+        """
+        `BindAdapterHandlerEx` as a symbol.
+        """
+    @property
+    def bindings(self, /) -> list[NdisBinding]: ...
+    @property
+    def bindings_stopped(self, /) -> str |None: ...
+    @property
+    def listed(self, /) -> bool:
+        """
+        Whether it is on `ndis!ndisProtocolList`.
+        """
+    @property
+    def protocol(self, /) -> NdisProtocol: ...
+
+@final
+class NdisProtocols(BaseRecord):
+    """
+    The protocol drivers on `ndis!ndisProtocolList`.
+    """
+    @property
+    def protocols(self, /) -> list[NdisProtocol]: ...
+    @property
+    def stopped(self, /) -> str |None: ...
+    @property
+    def unreadable(self, /) -> list[NdisUnreadable]: ...
+
+@final
+class NdisUnreadable(BaseRecord):
+    """
+    A block a list names but that does not read.
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def error(self, /) -> str: ...
 
 @final
 class Notice(BaseRecord):
@@ -10615,6 +11842,182 @@ class QueuedLocks(BaseRecord):
         """
 
 @final
+class RcdrDriver(BaseRecord):
+    """
+    A driver the WPP recorder serves (`_WPP_AUTOLOG_CONTEXT`).
+    """
+    @property
+    def context(self, /) -> int: ...
+    @property
+    def default_log(self, /) -> int:
+        """
+        The log `WppRecorderLogGetDefault` returns.
+        """
+    @property
+    def image(self, /) -> int: ...
+    @property
+    def image_size(self, /) -> int: ...
+    @property
+    def logs(self, /) -> list[int]:
+        """
+        The `_WPP_AUTOLOG_HEADER` of each of its logs.
+        """
+    @property
+    def logs_stopped(self, /) -> str |None: ...
+    @property
+    def name(self, /) -> str:
+        """
+        `FileBaseName`: the image name without its extension.
+        """
+    @property
+    def sequence(self, /) -> int:
+        """
+        The last sequence number a record of its logs took.
+        """
+
+@final
+class RcdrDrivers(BaseRecord):
+    """
+    The drivers the recorder serves (`!rcdrkd.rcdrloglist`).
+    """
+    @property
+    def drivers(self, /) -> list[RcdrDriver]: ...
+    @property
+    def stopped(self, /) -> str |None:
+        """
+        Why the walk of the bugcheck callback list stopped short.
+        """
+    @property
+    def unreadable(self, /) -> list[RcdrUnreadable]: ...
+
+@final
+class RcdrDump(BaseRecord):
+    """
+    A driver's records from its logs, oldest first
+    (`!rcdrkd.rcdrlogdump`).
+    """
+    @property
+    def driver(self, /) -> RcdrDriver: ...
+    @property
+    def ends(self, /) -> list[RcdrWalkEnd]: ...
+    @property
+    def logs(self, /) -> list[RcdrLog]: ...
+    @property
+    def records(self, /) -> list[RcdrRecord]: ...
+
+@final
+class RcdrLog(BaseRecord):
+    """
+    A recorder log (`_WPP_AUTOLOG_HEADER`).
+    """
+    @property
+    def default(self, /) -> bool:
+        """
+        Whether it is the driver's default log.
+        """
+    @property
+    def deleted(self, /) -> bool: ...
+    @property
+    def header(self, /) -> int: ...
+    @property
+    def id_number(self, /) -> int: ...
+    @property
+    def identifier(self, /) -> str:
+        """
+        `LogIdentifier`, with its append value when the driver set one.
+        """
+    @property
+    def partitions(self, /) -> list[RcdrPartition]: ...
+    @property
+    def size(self, /) -> int: ...
+    @property
+    def timestamps(self, /) -> bool:
+        """
+        Records are 'L2', with a timestamp.
+        """
+
+@final
+class RcdrLogs(BaseRecord):
+    """
+    A driver's logs (`!rcdrkd.rcdrloglist <driver>`).
+    """
+    @property
+    def driver(self, /) -> RcdrDriver: ...
+    @property
+    def logs(self, /) -> list[RcdrLog]: ...
+    @property
+    def unreadable(self, /) -> list[RcdrUnreadable]: ...
+
+@final
+class RcdrPartition(BaseRecord):
+    """
+    A partition of a log: the ring its records go to.
+    """
+    @property
+    def base(self, /) -> int: ...
+    @property
+    def current(self, /) -> int:
+        """
+        Where the next record goes, and the newest record.
+        """
+    @property
+    def name(self, /) -> str:
+        """
+        `normal` or `error`.
+        """
+    @property
+    def previous(self, /) -> int: ...
+    @property
+    def size(self, /) -> int: ...
+
+@final
+class RcdrRecord(BaseRecord):
+    """
+    A record of a recorder log.
+    """
+    @property
+    def log(self, /) -> int:
+        """
+        The log's `_WPP_AUTOLOG_HEADER` and identifier.
+        """
+    @property
+    def log_identifier(self, /) -> str: ...
+    @property
+    def partition(self, /) -> str:
+        """
+        `normal` or `error`.
+        """
+    @property
+    def record(self, /) -> WdfLogRecord: ...
+
+@final
+class RcdrUnreadable(BaseRecord):
+    """
+    A recorder context that does not read.
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def error(self, /) -> str: ...
+
+@final
+class RcdrWalkEnd(BaseRecord):
+    """
+    How the walk of one partition ended.
+    """
+    @property
+    def corruption(self, /) -> str |None: ...
+    @property
+    def end(self, /) -> str:
+        """
+        `empty`, `first_record`, `overwritten`, or `corrupt`.
+        """
+    @property
+    def log(self, /) -> int: ...
+    @property
+    def partition(self, /) -> str: ...
+
+@final
 class ReadyQueue(BaseRecord):
     """
     The ready list of one processor for one priority.
@@ -11469,6 +12872,69 @@ class SidAndAttributes(BaseRecord):
     def sid(self, /) -> str: ...
 
 @final
+class SmbiosField(BaseRecord):
+    """
+    A field of an SMBIOS structure, by the specification's name.
+    """
+    @property
+    def name(self, /) -> str: ...
+    @property
+    def value(self, /) -> str: ...
+
+@final
+class SmbiosStructure(BaseRecord):
+    """
+    An SMBIOS structure.
+    """
+    @property
+    def fields(self, /) -> list[SmbiosField]:
+        """
+        The fields `!sysinfo smbios` decodes for its type.
+        """
+    @property
+    def formatted(self, /) -> list[int]:
+        """
+        The formatted area, its header included.
+        """
+    @property
+    def handle(self, /) -> int: ...
+    @property
+    def kind(self, /) -> int:
+        """
+        The structure type (0 BIOS, 1 system, 4 processor, 17 memory
+        device, ...).
+        """
+    @property
+    def kind_name(self, /) -> str: ...
+    @property
+    def strings(self, /) -> list[str]:
+        """
+        The strings, string 1 first.
+        """
+
+@final
+class SmbiosTable(BaseRecord):
+    """
+    The SMBIOS table the kernel found at boot (`!sysinfo smbios`).
+    """
+    @property
+    def length(self, /) -> int: ...
+    @property
+    def physical_address(self, /) -> int: ...
+    @property
+    def stopped(self, /) -> str |None:
+        """
+        Why the parse stopped before End-of-Table.
+        """
+    @property
+    def structures(self, /) -> list[SmbiosStructure]: ...
+    @property
+    def version(self, /) -> str:
+        """
+        The version the entry point gave (`2.8`).
+        """
+
+@final
 class SourceLocation(BaseRecord):
     """
     PDB source metadata for an address.
@@ -11517,6 +12983,106 @@ class SpecialRegistersArea(BaseRecord):
         """
         The size of the structure in bytes.
         """
+
+@final
+class Srb(BaseRecord):
+    """
+    An SRB (`!storagekd.storsrb`).
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def cdb(self, /) -> list[int]: ...
+    @property
+    def class_context(self, /) -> int |None: ...
+    @property
+    def command(self, /) -> str |None:
+        """
+        The CDB's command, with its LBA and block count when it has them.
+        """
+    @property
+    def data_buffer(self, /) -> int: ...
+    @property
+    def data_transfer_length(self, /) -> int: ...
+    @property
+    def ex_data(self, /) -> list[SrbExData]: ...
+    @property
+    def extended(self, /) -> bool:
+        """
+        A `STORAGE_REQUEST_BLOCK`, rather than a `SCSI_REQUEST_BLOCK`.
+        """
+    @property
+    def flag_names(self, /) -> list[str]: ...
+    @property
+    def flags(self, /) -> int: ...
+    @property
+    def function(self, /) -> int: ...
+    @property
+    def function_name(self, /) -> str |None: ...
+    @property
+    def lun(self, /) -> int |None: ...
+    @property
+    def miniport_context(self, /) -> int |None: ...
+    @property
+    def next_srb(self, /) -> int: ...
+    @property
+    def original_request(self, /) -> int:
+        """
+        `OriginalRequest`: the IRP.
+        """
+    @property
+    def path(self, /) -> int |None: ...
+    @property
+    def port(self, /) -> int |None:
+        """
+        An extended SRB's port; a legacy one has none.
+        """
+    @property
+    def port_context(self, /) -> int |None: ...
+    @property
+    def priority(self, /) -> int |None: ...
+    @property
+    def request_tag(self, /) -> int |None: ...
+    @property
+    def scsi_status(self, /) -> int |None: ...
+    @property
+    def sense(self, /) -> str |None:
+        """
+        The sense data, decoded, when `AUTOSENSE_VALID` says it is valid.
+        """
+    @property
+    def sense_buffer(self, /) -> int: ...
+    @property
+    def sense_length(self, /) -> int: ...
+    @property
+    def srb_status(self, /) -> int: ...
+    @property
+    def srb_status_text(self, /) -> str:
+        """
+        The status by name, with `QUEUE_FROZEN` and `AUTOSENSE_VALID`.
+        """
+    @property
+    def target(self, /) -> int |None: ...
+    @property
+    def timeout(self, /) -> int:
+        """
+        Seconds.
+        """
+
+@final
+class SrbExData(BaseRecord):
+    """
+    One block of an extended SRB's extended data.
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def kind(self, /) -> str:
+        """
+        `_SRBEXDATATYPE` without its prefix (`ScsiCdb16`).
+        """
+    @property
+    def length(self, /) -> int: ...
 
 @final
 class SsdtEntry(BaseRecord):
@@ -11784,6 +13350,349 @@ class Stop:
         def __new__(cls, /, _context: _StopContext) -> Stop.Step: ...
         @property
         def _context(self, /) -> _StopContext: ...
+
+@final
+class StorAdapter(BaseRecord):
+    """
+    A StorPort adapter (`_RAID_ADAPTER_EXTENSION`).
+    """
+    @property
+    def adapter_id(self, /) -> str |None: ...
+    @property
+    def busy_count(self, /) -> int: ...
+    @property
+    def device_name(self, /) -> str:
+        """
+        The FDO's full name, its `Device` directory included
+        (`RaidPort0`).
+        """
+    @property
+    def device_power(self, /) -> StorEnumValue: ...
+    @property
+    def driver(self, /) -> int:
+        """
+        The `_RAID_DRIVER_EXTENSION`.
+        """
+    @property
+    def driver_name(self, /) -> str: ...
+    @property
+    def driver_object(self, /) -> int: ...
+    @property
+    def dump_paths(self, /) -> int: ...
+    @property
+    def extension(self, /) -> int: ...
+    @property
+    def fdo(self, /) -> int: ...
+    @property
+    def flags(self, /) -> list[str]: ...
+    @property
+    def gateways(self, /) -> list[StorGateway]: ...
+    @property
+    def gateways_error(self, /) -> str |None: ...
+    @property
+    def hiber_paths(self, /) -> int: ...
+    @property
+    def hw_device_extension(self, /) -> int:
+        """
+        The miniport's own device extension (`HwDeviceExtension`).
+        """
+    @property
+    def hw_device_extension_size(self, /) -> int |None: ...
+    @property
+    def interface(self, /) -> StorEnumValue: ...
+    @property
+    def io(self, /) -> str:
+        """
+        What holds the adapter's requests: `idle`, `2 with the miniport`,
+        `paused`, ...
+        """
+    @property
+    def lower(self, /) -> int: ...
+    @property
+    def lu_extension_size(self, /) -> int |None: ...
+    @property
+    def miniport_name(self, /) -> str |None: ...
+    @property
+    def paging_paths(self, /) -> int: ...
+    @property
+    def pause_count(self, /) -> int: ...
+    @property
+    def pci_location(self, /) -> str |None:
+        """
+        `bb:dd.f` of a PCI adapter.
+        """
+    @property
+    def pdo(self, /) -> int: ...
+    @property
+    def port_number(self, /) -> int: ...
+    @property
+    def state(self, /) -> StorEnumValue: ...
+    @property
+    def system_power(self, /) -> StorEnumValue: ...
+    @property
+    def units(self, /) -> list[StorUnitEntry]: ...
+    @property
+    def units_stopped(self, /) -> str |None: ...
+    @property
+    def virtual_miniport(self, /) -> bool: ...
+
+@final
+class StorAdapterEntry(BaseRecord):
+    """
+    An adapter on a driver's list, or why it is not shown.
+    """
+    @property
+    def adapter(self, /) -> StorAdapter |None: ...
+    @property
+    def error(self, /) -> str |None: ...
+    @property
+    def extension(self, /) -> int: ...
+
+@final
+class StorDriver(BaseRecord):
+    """
+    A driver that called `StorPortInitialize`.
+    """
+    @property
+    def adapters(self, /) -> list[StorAdapterEntry]: ...
+    @property
+    def driver_object(self, /) -> int: ...
+    @property
+    def extension(self, /) -> int: ...
+    @property
+    def name(self, /) -> str:
+        """
+        The service name (`storahci`).
+        """
+    @property
+    def stopped(self, /) -> str |None: ...
+
+@final
+class StorDrivers(BaseRecord):
+    """
+    storport's drivers and their adapters (`!storagekd.storadapter`).
+    """
+    @property
+    def drivers(self, /) -> list[StorDriver]: ...
+    @property
+    def port_data(self, /) -> int:
+        """
+        `storport!RaidpPortData`.
+        """
+    @property
+    def stopped(self, /) -> str |None: ...
+
+@final
+class StorEnumValue(BaseRecord):
+    """
+    A value of one of storport's enums, with its name when the PDB has
+    one.
+    """
+    @property
+    def name(self, /) -> str |None: ...
+    @property
+    def value(self, /) -> int: ...
+
+@final
+class StorGateway(BaseRecord):
+    """
+    An adapter's I/O gateway (`_STOR_IO_GATEWAY`).
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def busy(self, /) -> int: ...
+    @property
+    def outstanding(self, /) -> int:
+        """
+        Requests the miniport holds, and the most the gateway lets it.
+        """
+    @property
+    def outstanding_max(self, /) -> int: ...
+    @property
+    def paused(self, /) -> int: ...
+    @property
+    def pending(self, /) -> int:
+        """
+        Requests waiting for the gateway.
+        """
+
+@final
+class StorLog(BaseRecord):
+    """
+    An adapter's internal log (`!storagekd.storloglist`).
+    """
+    @property
+    def adapter(self, /) -> int: ...
+    @property
+    def driver_name(self, /) -> str: ...
+    @property
+    def entries(self, /) -> list[StorLogEntry]:
+        """
+        The entries still in the ring, oldest first.
+        """
+    @property
+    def newest(self, /) -> int:
+        """
+        The number of the newest entry.
+        """
+    @property
+    def ring(self, /) -> int:
+        """
+        The ring (`RaidLogList`) and its size.
+        """
+    @property
+    def size(self, /) -> int: ...
+
+@final
+class StorLogEntry(BaseRecord):
+    """
+    An entry of an adapter's log (`_RAID_LOG_ENTRY`).
+    """
+    @property
+    def command(self, /) -> str |None: ...
+    @property
+    def event(self, /) -> str |None:
+        """
+        `_DBG_LOG_REASON` without its `Log` prefix.
+        """
+    @property
+    def event_value(self, /) -> int: ...
+    @property
+    def irp(self, /) -> int |None:
+        """
+        For an entry of the request path: its IRP, SRB, CDB operation
+        code, command, and SRB status.
+        """
+    @property
+    def number(self, /) -> int:
+        """
+        storport numbers entries from 1 as it writes them.
+        """
+    @property
+    def opcode(self, /) -> int |None: ...
+    @property
+    def parameters(self, /) -> list[int]: ...
+    @property
+    def srb(self, /) -> int |None: ...
+    @property
+    def srb_status(self, /) -> str |None: ...
+    @property
+    def time(self, /) -> int:
+        """
+        When storport wrote it, a FILETIME (UTC).
+        """
+    @property
+    def time_utc(self, /) -> str |None: ...
+
+@final
+class StorQueue(BaseRecord):
+    """
+    A unit's device queue (`_EXTENDED_DEVICE_QUEUE`).
+    """
+    @property
+    def busy_count(self, /) -> int: ...
+    @property
+    def bypass_count(self, /) -> int: ...
+    @property
+    def bypass_waiting(self, /) -> int: ...
+    @property
+    def depth(self, /) -> int: ...
+    @property
+    def frozen(self, /) -> bool: ...
+    @property
+    def locked(self, /) -> bool: ...
+    @property
+    def pause_count(self, /) -> int: ...
+    @property
+    def power_locked(self, /) -> bool: ...
+    @property
+    def untagged(self, /) -> bool: ...
+    @property
+    def waiting(self, /) -> int:
+        """
+        Requests waiting because the queue is full or held.
+        """
+    @property
+    def waiting_stopped(self, /) -> list[str]: ...
+
+@final
+class StorRequest(BaseRecord):
+    """
+    A request the miniport holds (`_EXTENDED_REQUEST_BLOCK`).
+    """
+    @property
+    def irp(self, /) -> int: ...
+    @property
+    def processor(self, /) -> int:
+        """
+        The processor whose pending queue holds it.
+        """
+    @property
+    def srb(self, /) -> int: ...
+    @property
+    def xrb(self, /) -> int: ...
+
+@final
+class StorUnit(BaseRecord):
+    """
+    A logical unit (`_RAID_UNIT_EXTENSION`).
+    """
+    @property
+    def adapter(self, /) -> int: ...
+    @property
+    def device_object(self, /) -> int: ...
+    @property
+    def device_power(self, /) -> StorEnumValue: ...
+    @property
+    def extension(self, /) -> int: ...
+    @property
+    def flags(self, /) -> list[str]: ...
+    @property
+    def io(self, /) -> str:
+        """
+        What holds the unit's requests, as `!storagekd.storunit` says it:
+        `idle`, `1 with the miniport`, `frozen`, ...
+        """
+    @property
+    def lu_extension(self, /) -> int:
+        """
+        The miniport's per-unit extension; null when it asked for none.
+        """
+    @property
+    def lun(self, /) -> int: ...
+    @property
+    def max_queue_depth(self, /) -> int: ...
+    @property
+    def path(self, /) -> int: ...
+    @property
+    def product(self, /) -> str: ...
+    @property
+    def queue(self, /) -> StorQueue: ...
+    @property
+    def requests(self, /) -> list[StorRequest]: ...
+    @property
+    def requests_stopped(self, /) -> list[str]: ...
+    @property
+    def revision(self, /) -> str: ...
+    @property
+    def state(self, /) -> StorEnumValue: ...
+    @property
+    def target(self, /) -> int: ...
+    @property
+    def vendor(self, /) -> str: ...
+
+@final
+class StorUnitEntry(BaseRecord):
+    """
+    A unit on an adapter's list, or why it is not shown.
+    """
+    @property
+    def error(self, /) -> str |None: ...
+    @property
+    def extension(self, /) -> int: ...
+    @property
+    def unit(self, /) -> StorUnit |None: ...
 
 @final
 class Struct:

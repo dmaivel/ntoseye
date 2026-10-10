@@ -534,7 +534,7 @@ pub fn queue(detail: &target::WdfQueueDetail) -> WdfQueue {
     }
 }
 
-fn log_record(entry: &target::WdfLogEntry) -> WdfLogRecord {
+pub fn log_record(entry: &target::WdfLogEntry) -> WdfLogRecord {
     let record = &entry.record;
     let message = entry.message.as_deref();
     WdfLogRecord {
