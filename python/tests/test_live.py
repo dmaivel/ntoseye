@@ -142,11 +142,12 @@ def test_run_to_symbol_stops_there(halted: Debugger) -> None:
 def test_trace_calls_returns_a_call_tree(halted: Debugger) -> None:
     for _ in range(ATTEMPTS):
         require_single_step(halted)
-        # gdb single-steps at a few hundred instructions a second. A step the
-        # trace follows its thread through can wait on that thread while
-        # others keep reaching the instruction first, so a busy guest gets
-        # another attempt from where the last one stopped.
-        trace = halted.trace_calls(limit=2_000, timeout=30.0)
+        # gdb single-steps at a few hundred instructions a second, KDCOM at a
+        # few dozen, so 2,000 take about a minute. A step the trace follows
+        # its thread through can wait on that thread while others keep
+        # reaching the instruction first, so a busy guest gets another
+        # attempt from where the last one stopped.
+        trace = halted.trace_calls(limit=2_000, timeout=120.0)
         if trace.end not in ("diverted", "interrupted") and not (
             trace.end == "failed"
             and any(
