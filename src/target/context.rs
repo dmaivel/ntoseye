@@ -282,7 +282,12 @@ impl Target {
 
     /// Strip everything the architecture's dtb register carries besides the
     /// page-table base frame: a PCID on AMD64, an ASID on ARM64.
+    /// [`DTB_IDENTITY`], the root of a dump served by virtual address, is no
+    /// register value and stays as it is: symbols are keyed by it.
     pub fn normalize_dtb(&self, dtb: u64) -> Dtb {
+        if dtb == DTB_IDENTITY {
+            return dtb;
+        }
         dtb & self.arch().dtb_page_mask()
     }
 
@@ -589,11 +594,15 @@ impl Target {
 mod tests {
     use super::{decide_bitness, select_thread_process_dtb, thread_owner_matches};
     use crate::guest::{ModuleInfo, ProcessInfo};
+    use crate::memory::DTB_IDENTITY;
     use crate::session::session_over_memory;
+    use crate::symbols::CodeFrame;
+    use crate::target::SelectedFrame;
     use crate::target::process_by_name;
     use crate::target::{CODE_BITNESS_AMD64, CODE_BITNESS_X86, sample_thread};
     use crate::types::CodeMachine;
     use crate::types::VirtAddr;
+    use std::collections::HashMap;
 
     #[test]
     fn code_bitness_prefers_explicit_context_and_wow64_images() {
@@ -627,6 +636,32 @@ mod tests {
             decide_bitness(None, None, false, &[], VirtAddr(0x7fff_0000)),
             CODE_BITNESS_AMD64
         );
+    }
+
+    #[test]
+    fn selecting_a_frame_keeps_an_identity_root() {
+        let mut session = session_over_memory(0x1000, &[0x90; 0x40]);
+        let target = &mut session.target;
+        target.set_context_dtb_override(0x7002);
+        assert_eq!(target.current_dtb(), 0x7000);
+        // A frame of a dump served by virtual address, as DAP selects one,
+        // keeps that space's root, which its modules' symbols are keyed by.
+        target.select_frame(SelectedFrame {
+            index: 0,
+            ip: 0x1000,
+            sp: 0x2000,
+            code: CodeFrame {
+                address: VirtAddr(0x1000),
+                inline_depth: 0,
+            },
+            frame_base: None,
+            registers: HashMap::new(),
+            seed_registers: HashMap::new(),
+            seed_live: true,
+            dtb: Some(DTB_IDENTITY),
+            thread: None,
+        });
+        assert_eq!(target.current_dtb(), DTB_IDENTITY);
     }
 
     #[test]

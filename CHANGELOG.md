@@ -13,6 +13,12 @@ Keeping this file:
 - To release, rename "## Unreleased" to "## vX.Y.Z (YYYY-MM-DD)", the version in Cargo.toml. The release workflow refuses a tag whose version has no section here, or an empty one; dist publishes the section as the release notes, under the tag as the release title.
 -->
 
+## Unreleased
+
+### Fixed
+
+- In the DAP adapter, selecting a stack frame of a user-mode or kernel minidump no longer stops the Debug Console, watches, and hovers from resolving module names, symbols, and types, such as `? kernelbase` and `dt ntdll!_TEB`, until the session ends; on a user-mode minidump, `!gle`, `!teb`, and `!peb` said ntdll's PDB was not loaded.
+
 ## v0.49.0 (2026-10-11)
 
 ntoseye now opens Windows user-mode minidumps, such as procdump and Windows Error Reporting write, and analyzes the exception in them. For drivers, it shows what a power hang is stuck on, a KMDF driver's requests and I/O targets, NDIS filters and protocols, StorPort's request log, and the registry as the hives in memory hold it; `dx` reads WinDbg's data model with its queries.
