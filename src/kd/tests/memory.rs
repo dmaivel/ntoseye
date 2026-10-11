@@ -15,7 +15,7 @@ use crate::kd::framing::{
 use crate::kd::memory::KD_VIRTUAL_LINE;
 use crate::kd::registers::{KSPECIAL_REGISTERS_CR3_OFFSET, KSPECIAL_REGISTERS_MIN_SIZE};
 use crate::layout::{FieldInfo, ParsedType, TypeInfo};
-use crate::memory::PAGE_SIZE;
+use crate::memory::{AddressSpace, PAGE_SIZE};
 use crate::phys::PhysMem;
 use crate::symbols::SymbolStore;
 
@@ -114,6 +114,47 @@ fn kd_memory_rejects_reads_while_target_runs() {
     };
     let error = memory.read_bytes(0x1000, &mut [0u8; 8]).unwrap_err();
     assert!(matches!(error, Error::TargetRunning(_)), "{error}");
+}
+
+/// The target refuses to read a resident page its own access would fault
+/// on, as ARM64 Windows does a page whose access flag it cleared to age it.
+/// The page tables still map the page, so the read walks them and reads
+/// the frame; a page nothing maps stays a bad address.
+#[test]
+fn a_page_the_target_refuses_is_read_through_its_frame() {
+    const ROOT: u64 = 0x1000;
+    const MAPPED: u64 = 0xffff_8000_0000_0000;
+    const UNMAPPED: u64 = 0xffff_8080_0000_0000;
+    // The four tables at 0x1000-0x4fff and the frame at 0x5000, all
+    // physical: no virtual region holds MAPPED, so the target refuses it.
+    let mut physical = vec![0u8; 0x5000];
+    let entry = |table: u64, index: u64| (table - ROOT + index * 8) as usize;
+    put_u64(&mut physical, entry(0x1000, 256), 0x2000 | 0b11);
+    put_u64(&mut physical, entry(0x2000, 0), 0x3000 | 0b11);
+    put_u64(&mut physical, entry(0x3000, 0), 0x4000 | 0b11);
+    put_u64(&mut physical, entry(0x4000, 0), 0x5000 | 0b11);
+    put_u64(&mut physical, 0x4000, 0x1122_3344_5566_7788);
+
+    let (kernel, host) = UnixStream::pair().unwrap();
+    let mut backend = kd_backend_with_framing(host);
+    backend.link.halt();
+    backend.exit_prepared = true;
+    let translations = Arc::clone(&backend.translations);
+    let phys = PhysMem::remote(KdMemory {
+        inner: Arc::new(Mutex::new(backend)),
+        translations,
+    });
+    let worker = serve_virtual_memory(kernel, vec![(ROOT, physical)]);
+
+    let space = AddressSpace::new(&phys, ROOT);
+    assert_eq!(
+        space.read::<u64>(VirtAddr(MAPPED)).unwrap(),
+        0x1122_3344_5566_7788
+    );
+    let error = space.read::<u64>(VirtAddr(UNMAPPED)).unwrap_err();
+    assert!(matches!(error, Error::BadVirtualAddress(_)), "{error}");
+    drop(phys);
+    worker.join().unwrap();
 }
 
 /// A halted fake kernel serving `DbgKd{Read,Write}VirtualMemory` and

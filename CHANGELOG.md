@@ -18,6 +18,7 @@ Keeping this file:
 ### Fixed
 
 - In the DAP adapter, selecting a stack frame of a user-mode or kernel minidump no longer stops the Debug Console, watches, and hovers from resolving module names, symbols, and types, such as `? kernelbase` and `dt ntdll!_TEB`, until the session ends; on a user-mode minidump, `!gle`, `!teb`, and `!peb` said ntdll's PDB was not loaded.
+- With `--memory-source kd`, as an ARM64 guest under UTM uses, memory that Windows has not touched lately reads as it is, instead of as `??` or `Bad virtual address`: Windows clears a resident page's access flag to age it and its debugger then refuses the page, so ntoseye reads the page through its page tables. On such a guest, `!reg` could not read any key, because the master hive's base block was one of these pages.
 
 ## v0.49.0 (2026-10-11)
 

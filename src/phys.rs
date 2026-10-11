@@ -371,7 +371,14 @@ impl MemoryOps<PhysAddr> for PhysMem {
     fn read_virtual_direct(&self, addr: VirtAddr, root: Dtb, buf: &mut [u8]) -> Option<Result<()>> {
         match &self.source {
             Source::Remote(_) if self.in_pte_self_map(addr) => None,
-            Source::Remote(kd) => kd.read_virtual_direct(addr, root, buf),
+            // The target refuses a resident page its own access would fault
+            // on, such as an ARM64 page whose access flag Windows cleared to
+            // age it; the walk reads such a page's frame, and reports a page
+            // nothing maps as the refusal did.
+            Source::Remote(kd) => match kd.read_virtual_direct(addr, root, buf) {
+                Some(Err(Error::BadVirtualAddress(_) | Error::PartialRead(_))) => None,
+                result => result,
+            },
             // One process, one address space: the root names nothing here.
             Source::UserDump(dump) => Some(dump.read_virtual(addr, buf)),
             // A host mapping is there to be read directly; that is the whole
