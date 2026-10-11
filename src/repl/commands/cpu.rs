@@ -223,7 +223,10 @@ fn render_descriptor(value: &DiagnosticValue<DescriptorDetail>) -> String {
     })
 }
 
-fn print_pcr(detail: &PcrDetail) {
+/// An ARM64 `_KPCR` embeds its PRCB, which the first line names, and has
+/// no descriptor tables or TSS, so those rows are AMD64's alone.
+fn print_pcr(detail: &PcrDetail, arch: Arch) {
+    let amd64 = arch == Arch::Amd64;
     outln!(
         "KPCR for processor {} at {} (KPRCB {})",
         detail.processor,
@@ -235,11 +238,13 @@ fn print_pcr(detail: &PcrDetail) {
         "KdVersionBlock",
         diagnostic_addr(&detail.kd_version_block)
     );
-    outln!(
-        "  {:<20}: {}",
-        "CurrentPrcb",
-        diagnostic_addr(&detail.current_prcb)
-    );
+    if amd64 {
+        outln!(
+            "  {:<20}: {}",
+            "CurrentPrcb",
+            diagnostic_addr(&detail.current_prcb)
+        );
+    }
     outln!("  {:<20}: {}", "Irql", render_decimal(&detail.irql));
     outln!("  {:<20}: {}", "Self", diagnostic_addr(&detail.self_pcr));
     outln!("  KPRCB fields:");
@@ -258,9 +263,11 @@ fn print_pcr(detail: &PcrDetail) {
         "IdleThread",
         diagnostic_addr(&detail.idle_thread)
     );
-    outln!("  {:<20}: {}", "IDTR", render_descriptor(&detail.idtr));
-    outln!("  {:<20}: {}", "GDTR", render_descriptor(&detail.gdtr));
-    outln!("  {:<20}: {}", "TssBase", diagnostic_addr(&detail.tss_base));
+    if amd64 {
+        outln!("  {:<20}: {}", "IDTR", render_descriptor(&detail.idtr));
+        outln!("  {:<20}: {}", "GDTR", render_descriptor(&detail.gdtr));
+        outln!("  {:<20}: {}", "TssBase", diagnostic_addr(&detail.tss_base));
+    }
 }
 
 fn print_special_registers(value: &SpecialRegistersDetail) {
@@ -735,7 +742,7 @@ impl ReplState<'_> {
             }
         };
         match self.ctx.inspect_pcr(processor) {
-            Ok(detail) => print_pcr(&detail),
+            Ok(detail) => print_pcr(&detail, self.ctx.target.arch()),
             Err(error) => error!("{error}"),
         }
         Ok(())
