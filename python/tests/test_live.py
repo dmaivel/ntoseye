@@ -1034,6 +1034,8 @@ def test_each_processor_reads_its_own_msrs_and_apic(halted: Debugger) -> None:
     each local APIC has its own ID."""
     if os.environ.get("NTOSEYE_TEST_BACKEND") not in {"kd", "kdnet"}:
         pytest.skip("MSR and APIC reads need a kd backend")
+    if halted.inspect.version().architecture == "ARM64":
+        pytest.skip("MSRs and the local APIC are AMD64's")
     cpus = list(halted.cpus)
     if len(cpus) < 2:
         pytest.skip("needs a guest with more than one processor")

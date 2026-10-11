@@ -38,7 +38,7 @@ def results(dbg: Debugger) -> list[tuple[object, str, Callable[[], object]]]:
     service_key = inspect.registry_key(service)
     service_cell = service_key.cell
     assert service_cell is not None
-    return [
+    found: list[tuple[object, str, Callable[[], object]]] = [
         (inspect, "vm", inspect.vm),
         (inspect, "version", inspect.version),
         (inspect, "time", inspect.time),
@@ -52,8 +52,11 @@ def results(dbg: Debugger) -> list[tuple[object, str, Callable[[], object]]]:
         (inspect, "teb", lambda: inspect.teb(thread)),
         (cpu, "pcr", cpu.pcr),
         (cpu, "prcb", cpu.prcb),
-        (cpu, "gdt", cpu.gdt),
-        (cpu, "idt", cpu.idt),
+    ]
+    # An ARM64 processor has no descriptor tables.
+    if inspect.version().architecture != "ARM64":
+        found += [(cpu, "gdt", cpu.gdt), (cpu, "idt", cpu.idt)]
+    return found + [
         (hypervisor_cpu, "saved_vtl", lambda: hypervisor_cpu.saved_vtl),
         (hypervisor_cpu, "serving", lambda: hypervisor_cpu.serving),
         (user, "token", user.token),
@@ -176,7 +179,11 @@ def driver_results(dbg: Debugger) -> list[tuple[object, str, Callable[[], object
         found.append((inspect, "device_power", lambda: inspect.device_power(pdo)))
     if held is not None:
         found.append((inspect, "wdf_request", lambda: inspect.wdf_request(held)))
-    if os.environ.get("NTOSEYE_TEST_BACKEND") in {"kd", "kdnet"}:
+    # The local APIC is AMD64's.
+    if (
+        os.environ.get("NTOSEYE_TEST_BACKEND") in {"kd", "kdnet"}
+        and inspect.version().architecture != "ARM64"
+    ):
         cpu = list(dbg.cpus)[-1]
         found.append((cpu, "apic", cpu.apic))
     return found
