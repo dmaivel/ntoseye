@@ -879,19 +879,13 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         ]),
     );
 
-    // Alt+P opens the command palette and F2 the browser, which only Tern can
-    // draw. Tern keeps F1 for itself.
+    // Alt+P opens the command palette, which only Tern can draw. Tern keeps
+    // F1 for itself.
     if native::active() {
         keybindings.add_binding(
             KeyModifiers::ALT,
             KeyCode::Char('p'),
             ReedlineEvent::ExecuteHostCommand(palette::PALETTE_COMMAND.to_owned()),
-        );
-        // F2 opens the code and memory browser at the instruction pointer.
-        keybindings.add_binding(
-            KeyModifiers::NONE,
-            KeyCode::F(2),
-            ReedlineEvent::ExecuteHostCommand(commands::browse::BROWSE_COMMAND.to_owned()),
         );
     }
     let edit_mode = Box::new(Emacs::new(keybindings));
@@ -1043,10 +1037,6 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                     tern_prompt::Read::Interrupt => Signal::CtrlC,
                     tern_prompt::Read::Quit => Signal::CtrlD,
                     tern_prompt::Read::Clear => continue,
-                    tern_prompt::Read::Browse => {
-                        state.open_browser(None);
-                        continue;
-                    }
                     tern_prompt::Read::Unavailable => {
                         tern_prompt = None;
                         let prompt = CustomPrompt::new(backend_label, &state.ctx.current_thread);
@@ -1080,9 +1070,6 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                     }
                     Signal::HostCommand(command) if command == palette::PALETTE_COMMAND => {
                         state.open_palette(&mut line_editor);
-                    }
-                    Signal::HostCommand(command) if command == commands::browse::BROWSE_COMMAND => {
-                        state.open_browser(None);
                     }
                     Signal::CtrlC => {
                         if had_content.load(Ordering::Relaxed) {

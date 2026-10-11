@@ -11,7 +11,6 @@ pub mod address_space;
 pub mod analyze;
 mod blackbox;
 pub mod breakpoints;
-pub mod browse;
 mod cpu;
 mod diagnostics;
 pub mod display;

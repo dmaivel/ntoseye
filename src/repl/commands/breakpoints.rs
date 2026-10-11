@@ -1344,7 +1344,7 @@ impl ReplState<'_> {
                     .list()
                     .into_iter()
                     .find(|bp| bp.id == id);
-                // First, so the browser's note, a result's first line, says it.
+                // Before the result, so the warning is not lost below it.
                 if let Some(warning) = warning {
                     diagnostics::print_warning(warning);
                 }

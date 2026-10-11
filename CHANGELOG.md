@@ -40,6 +40,10 @@ Keeping this file:
 - Ctrl+C stops `!process 0 7` and the other thread listings of `!process` at the next thread, with `interrupted after N thread(s)`, instead of walking every thread's stack first.
 - Tab completion offers the symbols and types of a PDB that loaded after the session started, such as a driver's whose symbols load when first needed or a download that finished, instead of only after `.reload` or a switch of process.
 
+### Removed
+
+- **Breaking:** `browse` and its F2 key in Tern are gone. Tern draws what commands print, and adds no features of its own: use `u`, `db`/`dq`, `dt`, `k`, and `r` at the prompt, or the disassembly and memory views of an editor over the [DAP adapter](https://ntoseye.com/integrations/dap/).
+
 ## v0.48.0 (2026-10-08)
 
 ntoseye can now show where a driver's I/O is stuck, in its virtio queues, StorPort adapters or NDIS miniports, and gets more out of a crash dump: the blackboxes, the KMDF log and the ETW sessions that Windows saves in it, and `dx` as WinDbg lays it out. In Tern, the browser now steps the target and reads memory as types.

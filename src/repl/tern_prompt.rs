@@ -51,8 +51,6 @@ pub enum Read {
     Quit,
     /// Ctrl+L: the screen was cleared, read again.
     Clear,
-    /// F2: open the browser, then go on editing the line.
-    Browse,
     /// Tern didn't answer: use the line editor.
     Unavailable,
 }
@@ -64,8 +62,6 @@ pub struct TernPrompt {
     /// Keys typed after the Enter that ended a line, for the next one: the
     /// session that read them closes before the command runs.
     ahead: VecDeque<Key>,
-    /// The line and caret F2 left, to go on editing after the browser.
-    kept: Option<(String, usize)>,
 }
 
 /// What reading a line consults.
@@ -86,7 +82,6 @@ impl TernPrompt {
         Self {
             history,
             ahead: VecDeque::new(),
-            kept: None,
         }
     }
 
@@ -165,10 +160,6 @@ impl TernPrompt {
         let _ = session.stylesheet(surface, "ntoseye", Some(native::STYLESHEET));
         let ahead = &mut self.ahead;
         let mut line = Line::new(&self.history);
-        if let Some((draft, cursor)) = self.kept.take() {
-            line.draft = draft;
-            line.cursor = cursor;
-        }
         let mut focused = false;
         let read = loop {
             session.render(surface, line.view(ctx)).ok()?;
@@ -191,9 +182,6 @@ impl TernPrompt {
                 focused = false;
             }
             if let Some(read) = line.input(input, ctx) {
-                if matches!(read, Read::Browse) {
-                    self.kept = Some((line.draft.clone(), line.cursor));
-                }
                 break read;
             }
         };
@@ -384,8 +372,6 @@ impl<'a> Line<'a> {
             self.undo();
         } else if key.is("tab") {
             self.complete(ctx);
-        } else if key.is("f2") {
-            return Some(Read::Browse);
         } else if key.is("alt+p") {
             self.open_palette(ctx.state, initial_tab(&self.draft));
         } else if key.is("ctrl+r") {
@@ -652,7 +638,6 @@ impl<'a> Line<'a> {
             &[
                 ("Tab", "complete"),
                 ("Alt+P", "palette"),
-                ("F2", "browse"),
                 ("Ctrl+R", "history"),
             ]
         };

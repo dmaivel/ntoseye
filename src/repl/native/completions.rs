@@ -1,5 +1,4 @@
-//! The completion popup a Tern input field shows at its caret: the Tern
-//! prompt's and the browser's go-to and find fields share it.
+//! The completion popup the Tern prompt's input field shows at its caret.
 
 use reedline::Suggestion;
 use tern_sdk::Node;

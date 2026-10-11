@@ -533,12 +533,7 @@ impl ReplState<'_> {
     }
 
     pub fn wait_for_stop_after_resume(&mut self) -> Result<()> {
-        // The browser says it runs, and that Esc breaks in, itself.
-        #[cfg(feature = "cli")]
-        let browsing = native::browser::running();
-        #[cfg(not(feature = "cli"))]
-        let browsing = false;
-        if !self.quiet_stops && self.stop_wait.is_none() && !browsing {
+        if !self.quiet_stops && self.stop_wait.is_none() {
             let print = || {
                 outln!(
                     "{}",
@@ -555,12 +550,6 @@ impl ReplState<'_> {
 
         loop {
             self.print_kernel_prints();
-            // Run from the browser, the terminal is raw: its Esc or Ctrl+C
-            // is a key the browser's session reads, not SIGINT.
-            #[cfg(feature = "cli")]
-            if native::browser::break_requested() {
-                self.ctx.target.interrupt.store(true, Ordering::SeqCst);
-            }
             let interrupt_requested = self.ctx.target.interrupt.swap(false, Ordering::SeqCst);
             // A Ctrl+C breaks in, and again past any hit a filter declines
             // meanwhile: on code the whole system runs those arrive first,
