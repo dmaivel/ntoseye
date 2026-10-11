@@ -23,9 +23,9 @@ const MAX_PROCESS_THREADS: usize = 512;
 repl_command! {
     cmd_process;
     names: ["!process"],
-    usage: "!process [eprocess|pid|0] [flags] [image-name]",
+    usage: "!process [eprocess|pid|image-name|0] [flags] [image-name]",
     summary: "List or inspect Windows processes.",
-    details: "`!process 0 0` lists all processes. Bit 1 adds process details, bit 2 adds threads, and bit 4 adds the stack of each thread. `ps` keeps its short legacy list format.",
+    details: "`!process 0 0` lists all processes. Bit 1 adds process details, bit 2 adds threads, and bit 4 adds the stack of each thread. An image name in place of the process shows every process whose name contains it or matches it as a glob, as the last argument filters: `!process explorer.exe` shows explorer.exe, and `!process svchost 0` lists each svchost.exe. `ps` keeps its short legacy list format.",
     completion: [Process, None, Process],
 }
 
@@ -87,6 +87,14 @@ fn parse_process_arguments<'a>(
         flags: args.get(1).copied(),
         image: args.get(2).copied(),
     })
+}
+
+/// Whether `!process` takes `process` for an image name: as a glob, whole,
+/// or contained in its name, ignoring case.
+fn image_matches(process: &ProcessInfo, filter: &str) -> bool {
+    glob_matches(filter, &process.name, true)
+        || process.name.eq_ignore_ascii_case(filter)
+        || process_matches(process, filter)
 }
 
 pub(super) fn display_decimal(value: Option<u64>) -> String {
@@ -348,26 +356,31 @@ impl ReplState<'_> {
             .map(|process| (process.name.clone(), process.pid))
             .collect();
 
-        let mut selected = if let Some(selector) = parsed.selector {
-            if selector == "0" {
-                processes.clone()
-            } else {
-                self.process_for_selector(selector, &processes)
-                    .into_iter()
-                    .collect()
-            }
-        } else {
-            self.ctx.target.current_process().into_iter().collect()
+        let mut selected = match parsed.selector {
+            Some("0") => processes.clone(),
+            Some(selector) => match self.process_for_selector(selector, &processes) {
+                Some(process) => vec![process],
+                // Neither an EPROCESS nor a PID: an image name, matched as
+                // the last argument matches one.
+                None => processes
+                    .iter()
+                    .filter(|process| image_matches(process, selector))
+                    .cloned()
+                    .collect(),
+            },
+            None => self.ctx.target.current_process().into_iter().collect(),
         };
         if let Some(filter) = parsed.image {
-            selected.retain(|process| {
-                glob_matches(filter, &process.name, true)
-                    || process.name.eq_ignore_ascii_case(filter)
-                    || process_matches(process, filter)
-            });
+            selected.retain(|process| image_matches(process, filter));
         }
         if selected.is_empty() {
-            error!("no matching process");
+            match (parsed.selector, parsed.image) {
+                (Some(selector), None) if selector != "0" => error!(
+                    "no process has the EPROCESS, PID, or image name '{selector}'; `!process 0 0` \
+                     lists them"
+                ),
+                _ => error!("no matching process"),
+            }
             return Ok(());
         }
 

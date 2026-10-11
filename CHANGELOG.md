@@ -31,6 +31,7 @@ Keeping this file:
 
 - `!storagekd.storunit` names the command of each request the miniport holds, such as `WRITE(10) LBA 0x64b500, 8 blocks`.
 - The SDK's `trace_calls()` takes `timeout=`: a trace that waits on its thread while other threads keep reaching its next instruction first then ends as `interrupted`, halted where it got to, rather than running on with no end. See [steps](https://ntoseye.com/scripting/sdk/#steps).
+- `!process` takes an image name in place of the process: `!process explorer.exe` shows explorer.exe, and `!process svchost 0` lists each svchost.exe, as `.process explorer.exe` already took one. A selector that names no process now says so, rather than `no matching process`. See [!process](https://ntoseye.com/reference/commands/processes-and-modules/#command-bang-process).
 
 ### Fixed
 
