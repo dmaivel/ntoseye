@@ -22,7 +22,7 @@ use crate::session::{
     VpRegisters,
 };
 use crate::target::usermode::ImageCheckDetail;
-use crate::target::{CompareResult, SearchResult, ThreadInfo, exit_registers};
+use crate::target::{CompareResult, SearchResult, SelectedFrame, ThreadInfo, exit_registers};
 use crate::types::{Arch, CodeMachine, Dtb, VirtAddr};
 use crate::unwind::{
     FunctionEntryDetail, RecoveredStackTrace, StackTrace, ThreadStackSource, ThreadStackTrace,
@@ -112,6 +112,15 @@ impl Session {
                 parameters: Vec::new(),
             });
         }
+        if let Some(exception) = self.target.user_exception() {
+            return Some(ExceptionRecord {
+                code: exception.code,
+                flags: exception.flags,
+                nested: exception.record,
+                address: exception.address,
+                parameters: exception.parameters.clone(),
+            });
+        }
         let exception = self.target.phys.dmp_info()?.exception.as_ref()?;
         Some(ExceptionRecord {
             code: exception.code,
@@ -120,6 +129,28 @@ impl Session {
             address: exception.address,
             parameters: exception.parameters.clone(),
         })
+    }
+
+    /// `.ecxr` on a user-mode minidump: switch to the thread the exception
+    /// was raised on and select the exception's CONTEXT, which the dump
+    /// stores beside the record. Returns the selection and the thread's id.
+    pub fn select_user_exception_context(&mut self) -> Result<(SelectedFrame, String)> {
+        let info = self
+            .target
+            .user_dump_info()
+            .ok_or_else(|| Error::DebugInfo("this target is not a user-mode minidump".into()))?;
+        let exception = info
+            .exception
+            .as_ref()
+            .ok_or_else(|| Error::DebugInfo("the minidump records no exception".into()))?;
+        let thread = info.backend_thread_id(exception.thread_id);
+        let registers = self.target.user_exception_registers(&self.register_map)?;
+        if self.current_thread != thread {
+            self.set_current_thread(&thread)?;
+        }
+        let selected = SelectedFrame::from_registers(0, registers);
+        self.select_frame(selected.clone());
+        Ok((selected, thread))
     }
 
     /// Read guest virtual memory in the inspection address space

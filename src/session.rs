@@ -451,6 +451,29 @@ pub struct VpRegisters {
     pub vcpu: Option<String>,
 }
 
+/// A thread a user-mode minidump captured, as `~` lists it.
+#[derive(Debug, Clone)]
+pub struct UserThreadSummary {
+    /// Position in the dump's thread list: what `~Ns` selects.
+    pub index: usize,
+    /// Backend thread id (`<pid>.<tid>`).
+    pub id: String,
+    pub tid: u32,
+    pub suspend_count: u32,
+    pub teb: u64,
+    pub name: Option<String>,
+    /// Instruction pointer of the thread's captured context.
+    pub rip: Option<u64>,
+    /// Nearest symbol to `rip`, if one resolved.
+    pub symbol: Option<String>,
+    /// Why the thread has no usable context, if it has none.
+    pub error: Option<String>,
+    /// The thread selected for inspection.
+    pub current: bool,
+    /// The thread the dump's exception was raised on.
+    pub exception: bool,
+}
+
 /// A backend execution context (vCPU) and the guest code it is currently
 /// running. `symbol` is `None` when nothing resolves (render the raw `rip`);
 /// `error` is set when the vCPU's register context couldn't be read at all.

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use super::{ExpressionScope, ReloadReport, StartupMessage, Target};
+use super::{ExpressionScope, ReloadReport, StartupMessage, Target, UserProcess};
 use crate::{
     backend::MemoryOps,
     debugger_data::{
@@ -15,6 +15,7 @@ use crate::{
     error::{Error, Result},
     guest::{Guest, ModuleInfo, PdbRecovery, SessionSpace},
     memory::DTB_IDENTITY,
+    notice::Notice,
     phys::PhysMem,
     symbols::SymbolStore,
     types::{Arch, Dtb, KernelLocation, VirtAddr},
@@ -170,6 +171,37 @@ impl Target {
         ))
     }
 
+    /// Build a target over the user-mode minidump `phys` reads. No kernel is
+    /// looked for; the dump's modules are listed, and their PDBs loaded, by
+    /// the CodeView records its module list holds.
+    pub fn with_user_dump(phys: Arc<PhysMem>) -> Result<Self> {
+        let info = phys
+            .user_dump()
+            .ok_or_else(|| {
+                Error::DebugInfo("the memory source is not a user-mode minidump".into())
+            })?
+            .info();
+        let modules = info.module_infos();
+        let arch = info.arch;
+        let notices = info.notes.iter().cloned().map(Notice::warning).collect();
+        let symbols = Arc::new(SymbolStore::new());
+        let _ = Guest::load_module_symbols(
+            &phys,
+            &symbols,
+            modules.clone(),
+            DTB_IDENTITY,
+            SessionSpace::Load,
+            arch,
+            PdbRecovery::Automatic,
+        );
+        let mut target = Self::from_parts(phys, symbols, None, None, notices);
+        target.user_process = Some(UserProcess {
+            modules,
+            thread: None,
+        });
+        Ok(target)
+    }
+
     /// A target over `phys` and `guest`, with every view and selection at
     /// its default.
     fn from_parts(
@@ -188,6 +220,7 @@ impl Target {
             secure_root: None,
             effmach: None,
             triage_modules_cache,
+            user_process: None,
             context_dtb_override: None,
             registers: None,
             expression_scope: ExpressionScope::Context,

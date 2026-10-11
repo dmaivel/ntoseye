@@ -295,9 +295,17 @@ struct StackTracer<'a> {
     /// Stack pages read during this trace, by page address; `None` is a
     /// page the target refused. Without this every 8-byte slot the walk or
     /// the scan looks at is its own request over the transport.
-    stack_pages: RefCell<HashMap<u64, Option<Box<[u8]>>>>,
+    stack_pages: RefCell<HashMap<u64, Option<StackPage>>>,
     /// The kernel object, whose image is shared across traces.
     kernel: Option<&'a Image>,
+}
+
+/// A stack page a trace read. A user-mode minidump may hold only part of a
+/// page (a stack is captured from its stack pointer up).
+struct StackPage {
+    bytes: Box<[u8]>,
+    /// Which bytes were read; `None` when all were.
+    valid: Option<Box<[bool]>>,
 }
 
 /// Whose page-table root a thread runs on.
@@ -358,6 +366,20 @@ pub fn resolve_thread_trace_context(debugger: &Target, cr3: u64) -> ThreadTraceC
 /// [`resolve_thread_trace_context`], walking a process root's own module
 /// list (its PEB loader list) only when `process_modules` asks for it.
 fn thread_trace_context(debugger: &Target, cr3: u64, process_modules: bool) -> ThreadTraceContext {
+    // A user dump's threads all run in its one process, whose modules the
+    // dump lists; a captured register file holds no page-table root.
+    if let (Some(info), Some(modules)) = (debugger.user_dump_info(), debugger.user_modules()) {
+        return ThreadTraceContext {
+            description: info.process_label(),
+            active_dtb: DTB_IDENTITY,
+            kernel_dtb: DTB_IDENTITY,
+            process_dtb: Some(DTB_IDENTITY),
+            kernel_modules: Vec::new(),
+            process_modules: modules.to_vec(),
+            foreign_image: None,
+            hypervisor: None,
+        };
+    }
     let cr3_masked = cr3 & debugger.arch().dtb_page_mask();
     let kernel_dtb = debugger.kernel_dtb();
     match root_owner(debugger, cr3_masked) {

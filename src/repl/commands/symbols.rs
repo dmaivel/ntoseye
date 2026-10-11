@@ -940,7 +940,9 @@ impl ReplState<'_> {
         let modules = if kernel {
             self.ctx.target.kernel_modules_with_versions()
         } else if user {
-            if self.ctx.target.attached_process().is_none() {
+            if self.ctx.target.attached_process().is_none()
+                && self.ctx.target.user_modules().is_none()
+            {
                 Ok(Vec::new())
             } else {
                 self.ctx.target.modules_with_versions()

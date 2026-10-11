@@ -49,6 +49,8 @@ use crate::target::InterruptRequester;
 #[cfg(feature = "cli")]
 use crate::target::Target;
 #[cfg(feature = "cli")]
+use crate::triage_report::time::filetime_to_iso;
+#[cfg(feature = "cli")]
 use crate::types::VirtAddr;
 use crate::ui;
 
@@ -755,6 +757,61 @@ fn print_target(target: &native::session::Target) {
     outln!();
 }
 
+/// What a user-mode minidump captured, for the session's opening summary;
+/// `None` for a kernel target.
+#[cfg(feature = "cli")]
+fn user_dump_summary(target: &Target) -> Option<native::session::UserDump> {
+    let dump = target.user_dump()?;
+    let info = dump.info();
+    let system = &info.system;
+    let mut version = format!(
+        "Windows {}.{}.{} {}",
+        system.major_version,
+        system.minor_version,
+        system.build_number,
+        info.arch.label()
+    );
+    if let Some(build) = &info.build_string {
+        version.push_str(&format!(" ({build})"));
+    }
+    let captured: u64 = dump.memory_ranges().iter().map(|range| range.length).sum();
+    Some(native::session::UserDump {
+        process: info.process_label(),
+        system: version,
+        written: filetime_to_iso((u64::from(info.time_date_stamp) + 11_644_473_600) * 10_000_000),
+        threads: info.threads.len(),
+        modules: info.modules.len(),
+        memory: format!(
+            "{} ranges, {} KiB",
+            dump.memory_ranges().len(),
+            captured / 1024
+        ),
+        exception: target.user_exception_summary(),
+    })
+}
+
+/// The session's opening summary of a user-mode minidump.
+#[cfg(feature = "cli")]
+fn print_user_dump_target(dump: &native::session::UserDump) {
+    outln!("\n{}", ui::label("user-mode minidump"));
+    outln!("  {} {}", ui::muted("process  "), dump.process);
+    outln!("  {} {}", ui::muted("system   "), dump.system);
+    if let Some(written) = &dump.written {
+        outln!("  {} {}", ui::muted("written  "), written);
+    }
+    outln!(
+        "  {} {} threads, {} modules",
+        ui::muted("captured "),
+        dump.threads,
+        dump.modules
+    );
+    outln!("  {} {}", ui::muted("memory   "), dump.memory);
+    if let Some(exception) = &dump.exception {
+        outln!("  {} {}", ui::muted("exception"), exception);
+    }
+    outln!();
+}
+
 #[cfg(feature = "cli")]
 fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     // Warnings the attach raised (unreadable PRCB contexts, a corrupt triage
@@ -807,33 +864,52 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     print_python_commands_notice();
     print_alias_load_failures(&alias_report);
 
-    // Triage dumps may lack the ntoskrnl PE header needed for full kernel
-    // discovery; a missing kernel is non-fatal and commands that need it
-    // fail individually.
-    let target = match debugger.startup_message_data() {
-        Ok(message_data) => native::session::Target {
-            build: Some(message_data.build_number),
-            base: Some(message_data.base_address.0),
-            modules: Some(message_data.loaded_module_list.0),
-        },
-        Err(Error::NtoskrnlNotFound) | Err(Error::AddressNotInDump(_)) => native::session::Target {
-            build: None,
-            base: debugger.kernel_base().map(|base| base.0),
-            modules: None,
-        },
-        Err(e) => return Err(e),
-    };
-    native::render(
-        || native::session::target_card(&target),
-        || print_target(&target),
-    );
+    if let Some(dump) = user_dump_summary(debugger) {
+        native::render(
+            || native::session::user_dump_card(&dump),
+            || print_user_dump_target(&dump),
+        );
+    } else {
+        // Triage dumps may lack the ntoskrnl PE header needed for full kernel
+        // discovery; a missing kernel is non-fatal and commands that need it
+        // fail individually.
+        let target = match debugger.startup_message_data() {
+            Ok(message_data) => native::session::Target {
+                build: Some(message_data.build_number),
+                base: Some(message_data.base_address.0),
+                modules: Some(message_data.loaded_module_list.0),
+            },
+            Err(Error::NtoskrnlNotFound) | Err(Error::AddressNotInDump(_)) => {
+                native::session::Target {
+                    build: None,
+                    base: debugger.kernel_base().map(|base| base.0),
+                    modules: None,
+                }
+            }
+            Err(e) => return Err(e),
+        };
+        native::render(
+            || native::session::target_card(&target),
+            || print_target(&target),
+        );
+    }
     let capabilities = client.capabilities();
     print_backend_capability_warning(&capabilities);
 
     let has_register_context = supports_capability(&capabilities, DebugCapability::ReadRegisters);
 
     if has_register_context {
-        print_break_context(ctx);
+        // A user dump written for an exception stops on the thread that
+        // raised it; `.ecxr` selects the exception's own context.
+        let cause = ctx.target.user_exception().map(|exception| {
+            format!(
+                "{} {:#x}  {}",
+                ui::muted("exception"),
+                exception.code,
+                ui::muted(".ecxr selects its context, .exr -1 shows its record")
+            )
+        });
+        print_break_context_at(ctx, None, cause);
     }
     let debugger: &mut Target = &mut ctx.target;
     let client: &mut dyn DebugBackend = ctx.backend.as_mut();

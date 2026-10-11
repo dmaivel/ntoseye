@@ -648,6 +648,8 @@ pub enum ModuleSymbolSource {
     Image,
     /// Remembered from an earlier session (see `ModuleIdentities`).
     Identity,
+    /// The CodeView record a dump's module list holds for the module.
+    Record,
 }
 
 impl ModuleSymbolSource {
@@ -656,6 +658,7 @@ impl ModuleSymbolSource {
             Self::Memory => "memory",
             Self::Image => "image",
             Self::Identity => "cached",
+            Self::Record => "dump",
         }
     }
 }

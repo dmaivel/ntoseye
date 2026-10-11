@@ -4,6 +4,7 @@ use crate::{
     error::{Error, Result},
     layout::ParsedType,
     memory::{DTB_IDENTITY, SectionLayout, SectionViews},
+    pe::headers::CodeView,
     phys::PhysMem,
     symbols::SymbolStore,
     target::ListTermination,
@@ -76,6 +77,10 @@ pub struct ModuleInfo {
     pub checksum: Option<u32>,
     pub file_version: Option<String>,
     pub product_version: Option<String>,
+    /// The image's CodeView record when the module list itself records it
+    /// (a user-mode minidump's module stream), so its PDB is known without
+    /// reading the image.
+    pub codeview: Option<CodeView>,
 }
 
 impl ModuleInfo {
@@ -93,6 +98,7 @@ impl ModuleInfo {
             checksum: None,
             file_version: None,
             product_version: None,
+            codeview: None,
         }
     }
 

@@ -20,6 +20,7 @@ repl_command! {
     summary: "Decode the process environment block and process parameters of the current process.",
     details: "If you do not give an address, the command uses EPROCESS.Peb of the current process: the one that .process selected, else the owner of the current thread. It decodes the process parameters with their PDB layouts. To list the loader modules, use !dlls.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -29,6 +30,7 @@ repl_command! {
     summary: "Decode a thread environment block.",
     details: "If you do not give an address, the command uses the teb pseudo-register of the current thread.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -38,6 +40,7 @@ repl_command! {
     summary: "List the modules in the loader lists of the current process.",
     details: "The current process is the one that .process selected, else the owner of the current thread. With -c <address>, the command shows only the module that contains that address. The module walk has a limit, and also stops if it finds a cycle in a list.",
     completion: [None, Expression],
+    target: Kernel,
 }
 
 repl_command! {
@@ -46,6 +49,7 @@ repl_command! {
     usage: "!gle",
     summary: "Show the last Win32 error value and the last NT status value of the current thread.",
     completion: None,
+    target: Kernel,
 }
 
 repl_command! {

@@ -27,6 +27,7 @@ repl_command! {
     summary: "List or inspect Windows processes.",
     details: "`!process 0 0` lists all processes. Bit 1 adds process details, bit 2 adds threads, and bit 4 adds the stack of each thread. An image name in place of the process shows every process whose name contains it or matches it as a glob, as the last argument filters: `!process explorer.exe` shows explorer.exe, and `!process svchost 0` lists each svchost.exe. `ps` keeps its short legacy list format.",
     completion: [Process, None, Process],
+    target: Kernel,
 }
 
 repl_command! {
@@ -35,6 +36,7 @@ repl_command! {
     usage: "ps [filter]",
     summary: "List running processes.",
     completion: Process,
+    target: Kernel,
 }
 
 repl_command! {
@@ -52,6 +54,7 @@ repl_command! {
     summary: "Select a process address space to inspect.",
     details: "In this debugger, `/i` is the same as attach. `/p` and `/r` select the same non-invasive context. With no argument, the command prints the current process context.",
     completion: Process,
+    target: Kernel,
 }
 
 repl_command! {

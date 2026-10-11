@@ -17,6 +17,7 @@ repl_command! {
     summary: "List a limited number of handles of the selected process, or show one handle.",
     details: "Without an argument, the command scans up to 256 handle-table slots. With a handle, it shows the object, type, name, access mask, and attributes, if it can decode them.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -42,6 +43,7 @@ repl_command! {
     summary: "Show one ERESOURCE, or list the resources in the system resource list.",
     details: "Without an argument, the command uses ExpSystemResourcesList and shows up to 256 entries without scanning memory. If the symbol or the list metadata is not available, it cannot list the resources.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -51,6 +53,7 @@ repl_command! {
     summary: "Show the system memory-use counters and the counters of a limited number of processes.",
     details: "The command uses validated memory-manager globals, KDBG fields, or recognized public getter code, and EPROCESS.Vm counters. It does not scan physical memory, and it does not walk all VADs.",
     completion: Expression,
+    target: Kernel,
 }
 
 pub const DEFAULT_MEMORY_PROCESS_LIMIT: usize = 64;

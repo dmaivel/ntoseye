@@ -395,6 +395,9 @@ impl Guest {
                         ),
                         None if !plan.is_ready(symbols, &load)
                             && pdb_from_memory_enabled()
+                            // Rebuilding walks the kernel's file cache,
+                            // which a user-mode minidump does not hold.
+                            && !phys.is_user_dump()
                             && load.job.recorded_pdb_path().is_some() =>
                         {
                             from_memory.push(load)

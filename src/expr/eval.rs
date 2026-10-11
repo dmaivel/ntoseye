@@ -17,11 +17,15 @@ use std::sync::Arc;
 /// The type of a pseudo-register that holds the address of a kernel
 /// structure, as WinDbg's C++ evaluator types them (`@$proc` is an
 /// `_EPROCESS *`), so `@$proc->UniqueProcessId` and `dx @$thread` read it.
-fn pseudo_register_type(name: &str) -> Option<&'static str> {
+/// A user-mode minidump has no kernel PDB: its TEB and PEB are typed from
+/// ntdll's.
+fn pseudo_register_type(name: &str, user_dump: bool) -> Option<&'static str> {
     Some(match name.to_ascii_lowercase().as_str() {
         "proc" | "process" | "eprocess" => "nt!_EPROCESS",
         "thread" | "ethread" => "nt!_ETHREAD",
         "kthread" => "nt!_KTHREAD",
+        "teb" if user_dump => "ntdll!_TEB",
+        "peb" if user_dump => "ntdll!_PEB",
         "teb" => "nt!_TEB",
         "peb" => "nt!_PEB",
         _ => return None,
@@ -278,19 +282,21 @@ impl Expr {
         }
         match context.builtin_variable(name) {
             Some(Some(value)) => {
-                return Ok(match pseudo_register_type(name) {
-                    Some(type_name) => ExprValue::Immediate {
-                        value: VirtAddr(value),
-                        type_data: ParsedType::Pointer(Box::new(ParsedType::Struct(
-                            type_name.into(),
-                        ))),
-                        byte_size: Some(8),
+                return Ok(
+                    match pseudo_register_type(name, context.user_dump().is_some()) {
+                        Some(type_name) => ExprValue::Immediate {
+                            value: VirtAddr(value),
+                            type_data: ParsedType::Pointer(Box::new(ParsedType::Struct(
+                                type_name.into(),
+                            ))),
+                            byte_size: Some(8),
+                        },
+                        None => ExprValue::Raw {
+                            value: VirtAddr(value),
+                            address: None,
+                        },
                     },
-                    None => ExprValue::Raw {
-                        value: VirtAddr(value),
-                        address: None,
-                    },
-                });
+                );
             }
             // Distinguish unavailable state from an unknown register name.
             Some(None) => {

@@ -836,19 +836,29 @@ impl Target {
             .dmp_info()
             .and_then(|info| info.system_info.as_ref());
         let kuser = KuserSharedData::new(self);
-        let major = dump_info
-            .map(|info| info.major_version as u64)
+        // A user dump records its system in SystemInfoStream; it has no
+        // kernel or KUSER_SHARED_DATA to ask.
+        let user_system = self.user_dump_info().map(|info| &info.system);
+        let major = user_system
+            .map(|system| u64::from(system.major_version))
+            .or_else(|| dump_info.map(|info| info.major_version as u64))
             .filter(|value| *value != 0)
             .or_else(|| kuser.nt_major_version());
-        let minor = dump_info
-            .map(|info| info.minor_version as u64)
-            .filter(|value| *value != 0)
-            .or_else(|| kuser.nt_minor_version());
-        let build = symbol_build_number(self)
+        let minor = match user_system {
+            Some(system) => Some(u64::from(system.minor_version)),
+            None => dump_info
+                .map(|info| info.minor_version as u64)
+                .filter(|value| *value != 0)
+                .or_else(|| kuser.nt_minor_version()),
+        };
+        let build = user_system
+            .map(|system| u64::from(system.build_number))
+            .or_else(|| symbol_build_number(self))
             .or_else(|| kuser.nt_build_number())
             .map(|value| value & 0xffff);
-        let product = dump_info
-            .map(|info| info.product_type as u64)
+        let product = user_system
+            .map(|system| u64::from(system.product_type))
+            .or_else(|| dump_info.map(|info| info.product_type as u64))
             .filter(|value| *value != 0)
             .or_else(|| kuser.nt_product_type());
         let time = target_time(self, &kuser);
@@ -905,11 +915,14 @@ impl Target {
             pdb_guid: identity.map(|identity| format!("{:032X}", identity.guid)),
             pdb_age: identity.map(|identity| identity.age),
         });
-        let processors = processor_count(self).ok().or_else(|| {
-            self.phys
-                .dmp_info()
-                .map(|info| info.number_processors as u16)
-        });
+        let processors = match user_system {
+            Some(system) => Some(u16::from(system.number_of_processors)),
+            None => processor_count(self).ok().or_else(|| {
+                self.phys
+                    .dmp_info()
+                    .map(|info| info.number_processors as u16)
+            }),
+        };
         let dump = dump_metadata(self, base);
         Ok(TargetVersionDetail {
             major_version: major,

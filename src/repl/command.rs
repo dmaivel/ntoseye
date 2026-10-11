@@ -21,8 +21,20 @@ pub struct CommandSpec {
     pub run_state: Option<RunState>,
     pub run: RunEffect,
     pub style: CommandStyle,
+    pub target: TargetRequirement,
     pub flow: Flow,
     pub handler: CommandHandler,
+}
+
+/// What a command needs of the target besides its run state. A halted
+/// user-mode minidump passes every run-state check, so a command that reads
+/// kernel structures says so here and is refused there with one message,
+/// whatever name or alias runs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TargetRequirement {
+    Any,
+    /// A Windows kernel: a live target or a kernel dump.
+    Kernel,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -570,6 +582,7 @@ macro_rules! repl_command {
         $(, run_state: $run_state:ident)?
         $(, run: $run:ident)?
         $(, style: $style:ident)?
+        $(, target: $target:ident)?
         , flow: $flow:ident
         $(,)?
     ) => {
@@ -584,6 +597,7 @@ macro_rules! repl_command {
             $(, run_state: $run_state)?
             $(, run: $run)?
             $(, style: $style)?
+            $(, target: $target)?
             , flow: $flow,
         }
     };
@@ -599,6 +613,7 @@ macro_rules! repl_command {
         $(, run_state: $run_state:ident)?
         $(, run: $run:ident)?
         $(, style: $style:ident)?
+        $(, target: $target:ident)?
         $(, flow: $flow:ident)?
         $(,)?
     ) => {
@@ -613,6 +628,7 @@ macro_rules! repl_command {
                 run_state: $crate::repl_command!(@run_state $($run_state)?),
                 run: $crate::repl_command!(@run $($run)?),
                 style: $crate::repl_command!(@style $($style)?),
+                target: $crate::repl_command!(@target $($target)?),
                 flow: $crate::repl_command!(@flow $($flow)?),
                 handler: $handler,
             };
@@ -658,6 +674,10 @@ macro_rules! repl_command {
     (@style StructuredArgs) => { $crate::repl::CommandStyle::StructuredArgs };
     (@style RawTail) => { $crate::repl::CommandStyle::RawTail };
     (@style ExpressionTail) => { $crate::repl::CommandStyle::ExpressionTail };
+
+    (@target) => { $crate::repl::TargetRequirement::Any };
+    (@target Any) => { $crate::repl::TargetRequirement::Any };
+    (@target Kernel) => { $crate::repl::TargetRequirement::Kernel };
 
     (@flow) => { $crate::repl::Flow::Continue };
     (@flow Continue) => { $crate::repl::Flow::Continue };

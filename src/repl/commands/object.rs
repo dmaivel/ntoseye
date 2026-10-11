@@ -34,6 +34,7 @@ repl_command! {
     usage: "!drvobj <driver-object-expression-or-name>",
     summary: "Show a DRIVER_OBJECT with its device chain and dispatch table.",
     completion: Driver,
+    target: Kernel,
 }
 
 repl_command! {
@@ -42,6 +43,7 @@ repl_command! {
     usage: "!devobj <device-object-expression>",
     summary: "Show a DEVICE_OBJECT and its attached stack.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -77,6 +79,7 @@ repl_command! {
     summary: "Show an executive object header and body, and list the entries of a directory.",
     details: "A path that starts with `\\` is the name of an object in the object namespace (`!object \\`, `!object \\Driver\\ACPI`). The command looks up the path from the root directory and ignores case. It does not follow symbolic links in the path. For a directory, the command lists the entries and their types.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {

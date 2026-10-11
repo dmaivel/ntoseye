@@ -142,6 +142,11 @@ impl Target {
     /// than as a register that does not exist.
     pub fn builtin_variable(&self, name: &str) -> Option<Option<u64>> {
         let name = name.trim_start_matches('$').to_ascii_lowercase();
+        // A user dump has no kernel thread to read these from; the dump
+        // records them for its threads and process.
+        if let Some(value) = self.user_dump_pseudo_register(&name) {
+            return Some(value);
+        }
         // A selected thread answers first, but only when it has the value:
         // otherwise the attached inspection context below may still know it.
         let thread = self.current_thread_pseudo_register_slot(&name);

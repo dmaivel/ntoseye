@@ -35,6 +35,7 @@ pub enum ReloadScope {
 
 impl Target {
     pub fn kernel_modules(&self) -> Result<Vec<ModuleInfo>> {
+        self.require_kernel()?;
         match self.guest() {
             // The triage snapshot only substitutes when one exists; live
             // enumeration failures propagate instead of being remapped to
@@ -60,8 +61,12 @@ impl Target {
 
     /// Loaded modules in the current inspection scope: the attached process's
     /// user-mode modules when attached to a process, otherwise the kernel module
-    /// list. Shared by the REPL `lm`, the SDK, and MCP.
+    /// list; a user-mode minidump's own module list. Shared by the REPL `lm`,
+    /// the SDK, and MCP.
     pub fn modules(&self) -> Result<Vec<ModuleInfo>> {
+        if let Some(modules) = self.user_modules() {
+            return Ok(modules.to_vec());
+        }
         if self.in_secure_address_space() {
             return self.secure_kernel()?.modules(self.guest()?);
         }
@@ -233,6 +238,10 @@ impl Target {
         let (mut modules, dtb) = match scope {
             ReloadScope::Current => (self.modules()?, self.process_dtb()),
             ReloadScope::Kernel => (self.kernel_modules()?, self.kernel_dtb()),
+            // A user dump's one process is always the scope.
+            ReloadScope::User if self.user_modules().is_some() => {
+                (self.modules()?, self.process_dtb())
+            }
             ReloadScope::User => {
                 let process = self.process.as_ref().ok_or_else(|| {
                     Error::DebugInfo(

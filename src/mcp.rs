@@ -329,6 +329,7 @@ impl From<Error> for ToolError {
         match e {
             Error::BadVirtualAddress(_)
             | Error::AddressNotInDump(_)
+            | Error::NotCaptured { .. }
             | Error::BadPhysicalAddress(_)
             | Error::PartialRead(_)
             | Error::PartialWrite(_)

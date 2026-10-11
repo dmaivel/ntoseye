@@ -16,6 +16,7 @@ repl_command! {
     usage: "!db <address> [L<count>|length|end]",
     summary: "Show guest-physical memory as bytes.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -24,6 +25,7 @@ repl_command! {
     usage: "!dw <address> [L<count>|length|end]",
     summary: "Show guest-physical memory as words.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -32,6 +34,7 @@ repl_command! {
     usage: "!dd <address> [L<count>|length|end]",
     summary: "Show guest-physical memory as doublewords.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -40,6 +43,7 @@ repl_command! {
     usage: "!dq <address> [L<count>|length|end]",
     summary: "Show guest-physical memory as quadwords.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -48,6 +52,7 @@ repl_command! {
     usage: "!eb <address> <value...>",
     summary: "Write one or more bytes to guest-physical memory.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -56,6 +61,7 @@ repl_command! {
     usage: "!ed <address> <value...>",
     summary: "Write one or more doublewords to guest-physical memory.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -73,6 +79,7 @@ repl_command! {
     summary: "Search guest-physical memory for a pointer-sized value.",
     details: "The command compares each pointer-aligned quadword in the PFN range, which is all RAM by default. With no delta, it lists a quadword if it equals the value or differs from it by one bit. With a delta, it lists a quadword if it is within delta of the value or differs from value - delta by one bit. WinDbg's !search uses the same rules. Each hit shows its PFN, its offset, and the value, and from the PFN database, the PTE that maps the page and the virtual address that this PTE maps. The virtual address is blank when the PTE is not in the self-map. The command skips and counts the pages that it cannot read, and the search stops after 4096 hits or when you press Ctrl+C.",
     completion: Expression,
+    target: Kernel,
 }
 
 impl ReplState<'_> {

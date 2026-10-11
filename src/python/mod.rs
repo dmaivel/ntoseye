@@ -140,6 +140,7 @@ pub fn err(core: Error) -> PyErr {
         Error::InvalidArgument(message) => return PyValueError::new_err(message),
         Error::BadVirtualAddress(_)
         | Error::AddressNotInDump(_)
+        | Error::NotCaptured { .. }
         | Error::BadPhysicalAddress(_)
         | Error::PartialRead(_)
         | Error::PartialWrite(_)

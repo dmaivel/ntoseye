@@ -21,7 +21,8 @@ use crate::notice::Notice;
 use crate::phys::{HaltClock, PhysMem};
 use crate::session::{ContinueOutcome, Session, StopResolution};
 use crate::symbols::ntoseye_home;
-use crate::target::Target;
+use crate::target::{Target, TargetKind};
+use crate::userdump::{self, UserDump, UserDumpBackend};
 use crate::{Backend, TargetSpec};
 
 /// How long [`Session::halt_for_exit`] gives an already-pending stop to land
@@ -64,6 +65,9 @@ impl Session {
         spec.validate()?;
         match spec {
             TargetSpec::Dump(path) => {
+                if userdump::file_is_minidump(path)? {
+                    return Self::open_user_dump(path);
+                }
                 let phys = Arc::new(PhysMem::dmp(path)?);
                 let info = phys
                     .dmp_info()
@@ -136,6 +140,16 @@ impl Session {
         let mut session = Self::new_with_target(Target::with_phys(phys)?, backend, target)?;
         session._instance_guard = guard;
         Ok(session)
+    }
+
+    /// Open a Windows user-mode minidump: its threads are the backend's
+    /// contexts, its captured memory the address space, and no kernel is
+    /// looked for. Read-only, so no instance lock is taken.
+    fn open_user_dump(path: &std::path::Path) -> Result<Self> {
+        let dump = UserDump::open(path)?;
+        let backend = UserDumpBackend::new(dump.info());
+        let target = Target::with_user_dump(Arc::new(PhysMem::minidump(dump)))?;
+        Self::new_with_target(target, Box::new(backend), None)
     }
 
     /// Connect KD/KDNET, select a validated memory source, and build the
@@ -295,8 +309,13 @@ impl Session {
         mut backend: Box<dyn DebugBackend>,
         journal: Option<&str>,
     ) -> Result<Self> {
-        let debugger_data_hint = backend.target_debugger_data_hint().ok().flatten();
-        target.refresh_debugger_data(debugger_data_hint);
+        // A user dump has no kernel: no debugger data, DbgPrint buffer, or
+        // kernel functions to trap.
+        let kernel = target.kind() == TargetKind::Kernel;
+        if kernel {
+            let debugger_data_hint = backend.target_debugger_data_hint().ok().flatten();
+            target.refresh_debugger_data(debugger_data_hint);
+        }
         backend.initialize_from_target(&target);
         // ARM64 register snapshots expose TTBR1 via the synthetic `cr3` slot;
         // hand the resolved kernel root to the backend so it can fill it.
@@ -365,7 +384,7 @@ impl Session {
         }
         // Debug output read from the kernel's buffer starts after attach,
         // as KD's stream does.
-        if !session.backend_streams_debug_output() {
+        if kernel && !session.backend_streams_debug_output() {
             session.poll_kernel_prints();
         }
 
@@ -378,7 +397,9 @@ impl Session {
         // about them in the attach output alongside the capability warning
         // that explains why they are needed, instead of beside an unrelated
         // stop.
-        session.arm_traps();
+        if kernel {
+            session.arm_traps();
+        }
 
         // A crash dump sits at its bugcheck: that is the stop it is halted at.
         if let Some(dump) = session.target.phys.dmp_info()
@@ -392,6 +413,17 @@ impl Session {
             session.current_stop = Some(ContinueOutcome::Bugcheck {
                 rip: Some(session.current_rip()).filter(|&rip| rip != 0),
                 info: Some(info),
+            });
+        }
+        // A user dump written for an exception sits at that exception.
+        if let Some(exception) = session.target.user_exception() {
+            let (code, address) = (exception.code, exception.address);
+            session.target.last_exception_code = Some(code);
+            session.current_stop = Some(ContinueOutcome::Stopped {
+                rip: address,
+                exception_code: Some(code),
+                first_chance: None,
+                exception_address: Some(address),
             });
         }
 

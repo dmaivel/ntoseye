@@ -183,6 +183,7 @@ pub mod typeview;
 #[cfg(feature = "repl")]
 pub mod ui;
 pub mod unwind;
+pub mod userdump;
 #[cfg(any(feature = "mcp", feature = "python"))]
 pub mod view;
 pub mod wpp;

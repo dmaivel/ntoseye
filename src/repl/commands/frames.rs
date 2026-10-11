@@ -463,6 +463,18 @@ impl ReplState<'_> {
     }
 
     fn cmd_ecxr(&mut self) -> Result<()> {
+        // A user dump stores the exception's CONTEXT in its ExceptionStream.
+        if self.ctx.target.user_dump().is_some() {
+            match self.ctx.select_user_exception_context() {
+                Ok((selected, thread)) => {
+                    self.caches.refresh_symbol_context(&self.ctx.target);
+                    outln!("exception context of thread {}", ui::thread_id(&thread));
+                    self.print_selected_frame(&selected, false);
+                }
+                Err(error) => error!("{error}"),
+            }
+            return Ok(());
+        }
         if let Some(info) = self
             .ctx
             .last_event
@@ -713,13 +725,16 @@ impl ReplState<'_> {
 
         let register_map = &self.ctx.register_map;
         let arch = self.ctx.target.arch();
-        let print_text = || print_register_grid(register_map, &regs, arch);
+        // A user dump's contexts record no control registers.
+        let control = self.ctx.target.user_dump().is_none();
+        let print_text = || print_register_grid(register_map, &regs, arch, control);
         #[cfg(feature = "cli")]
         native::render(
             || {
                 native::frames::registers(
                     &|name: &str| register_map.read_u64(name, &regs).ok(),
                     arch == Arch::Arm64,
+                    control,
                 )
             },
             print_text,
@@ -1084,9 +1099,9 @@ fn print_exception_record(address: u64, record: &ExceptionRecord) {
     outln!();
 }
 
-/// `r`'s text: the general-purpose grid, then the control and segment
-/// registers.
-fn print_register_grid(register_map: &RegisterMap, regs: &[u8], arch: Arch) {
+/// `r`'s text: the general-purpose grid, then the control (when `control`)
+/// and segment registers.
+fn print_register_grid(register_map: &RegisterMap, regs: &[u8], arch: Arch, control: bool) {
     print_registers(register_map, regs, None, false);
     // Control registers match the GP-register cluster's
     // styling; segment selectors are 16-bit, so render
@@ -1107,19 +1122,23 @@ fn print_register_grid(register_map: &RegisterMap, regs: &[u8], arch: Arch) {
     outln!();
     // The ARM64 maps answer `cr3` with TTBR1_EL1, the kernel's root.
     if arch == Arch::Arm64 {
-        outln!("  ttbr0 {}   ttbr1 {}", read_cr("ttbr0"), read_cr("cr3"));
-        outln!("  esr   {}   far   {}", read_cr("esr"), read_cr("far"));
-        outln!();
+        if control {
+            outln!("  ttbr0 {}   ttbr1 {}", read_cr("ttbr0"), read_cr("cr3"));
+            outln!("  esr   {}   far   {}", read_cr("esr"), read_cr("far"));
+            outln!();
+        }
         return;
     }
-    outln!(
-        "  cr0 {}   cr2 {}   cr3 {}",
-        read_cr("cr0"),
-        read_cr("cr2"),
-        read_cr("cr3")
-    );
-    outln!("  cr4 {}   cr8 {}", read_cr("cr4"), read_cr("cr8"));
-    outln!();
+    if control {
+        outln!(
+            "  cr0 {}   cr2 {}   cr3 {}",
+            read_cr("cr0"),
+            read_cr("cr2"),
+            read_cr("cr3")
+        );
+        outln!("  cr4 {}   cr8 {}", read_cr("cr4"), read_cr("cr8"));
+        outln!();
+    }
 
     outln!(
         "  cs  {}   ds  {}   es  {}",

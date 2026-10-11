@@ -40,6 +40,7 @@ pub mod smbios;
 pub mod srb;
 pub mod storport;
 mod symbols;
+pub mod userdump;
 pub mod usermode;
 mod variables;
 pub mod virtio;
@@ -55,6 +56,7 @@ pub use memory::{
     SearchResult, SearchStop,
 };
 pub use symbols::ReloadScope;
+pub use userdump::{TargetKind, UserProcess};
 pub use vtl::{
     BreakpointStop, CodeExtent, ForeignCode, ForeignModules, GuestCode, HYPERVISOR_CONTEXT,
     SavedVtlContext, ServedVp, VP_STATE_REGISTERS, exit_registers,
@@ -109,6 +111,9 @@ pub struct Target {
     /// address; `None` follows the context and the image.
     pub effmach: Option<CodeMachine>,
     triage_modules_cache: Option<Vec<ModuleInfo>>,
+    /// The captured process of a user-mode minidump; `None` for a kernel
+    /// target.
+    user_process: Option<UserProcess>,
     context_dtb_override: Option<Dtb>,
     pub registers: Option<HashMap<String, u64>>,
     /// Whose memory expressions read, which a hypercall breakpoint's
@@ -853,9 +858,13 @@ pub struct AttachReport {
 
 impl Target {
     /// Access the guest, returning `Err(NtoskrnlNotFound)` when no kernel was
-    /// discovered (e.g. triage dumps that don't contain the kernel PE header).
+    /// discovered (e.g. triage dumps that don't contain the kernel PE header),
+    /// and `Err(KernelRequired)` on a user-mode minidump, which has none.
     pub fn guest(&self) -> Result<&Guest> {
-        self.guest.as_ref().ok_or(Error::NtoskrnlNotFound)
+        self.guest.as_ref().ok_or_else(|| match self.kind() {
+            TargetKind::Kernel => Error::NtoskrnlNotFound,
+            TargetKind::UserDump => Error::KernelRequired,
+        })
     }
 
     pub fn kernel_base(&self) -> Option<VirtAddr> {
@@ -899,7 +908,8 @@ impl Target {
     }
 
     /// Guest architecture: the discovered kernel's, else a dump's declared
-    /// machine type, else AMD64.
+    /// machine type (a kernel dump's header, a user dump's system info),
+    /// else AMD64.
     pub fn arch(&self) -> Arch {
         match &self.guest {
             Some(guest) => guest.ntoskrnl.arch(),
@@ -907,6 +917,7 @@ impl Target {
                 .phys
                 .dmp_info()
                 .and_then(DmpInfo::arch)
+                .or_else(|| self.user_dump_arch())
                 .unwrap_or(Arch::Amd64),
         }
     }

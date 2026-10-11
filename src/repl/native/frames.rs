@@ -53,8 +53,9 @@ type RegisterCell = (&'static str, Vec<Span>);
 /// then the control and segment registers in a second such table.
 /// `read` answers a register by name; `arm64` picks the trailer's layout as
 /// the text renderer does (`Target::arch`), the grid's layout follows
-/// whether the map has `pc`.
-pub fn registers(read: &dyn Fn(&str) -> Option<u64>, arm64: bool) -> View {
+/// whether the map has `pc`. `control` is false for a context that records
+/// no control registers (a user-mode minidump's).
+pub fn registers(read: &dyn Fn(&str) -> Option<u64>, arm64: bool, control: bool) -> View {
     let value = |name: &str| -> Vec<Span> {
         match read(name) {
             Some(value) => vec![addr(value)],
@@ -69,19 +70,18 @@ pub fn registers(read: &dyn Fn(&str) -> Option<u64>, arm64: bool) -> View {
         };
         (name, vec![value])
     };
-    let trailer: Vec<Vec<RegisterCell>> = if arm64 {
-        vec![
-            vec![cell("ttbr0"), ("ttbr1", value("cr3"))],
-            vec![cell("esr"), cell("far")],
-        ]
-    } else {
-        vec![
-            vec![cell("cr0"), cell("cr2"), cell("cr3")],
-            vec![cell("cr4"), cell("cr8")],
-            vec![segment("cs"), segment("ds"), segment("es")],
-            vec![segment("fs"), segment("gs"), segment("ss")],
-        ]
-    };
+    let mut trailer: Vec<Vec<RegisterCell>> = Vec::new();
+    if control && arm64 {
+        trailer.push(vec![cell("ttbr0"), ("ttbr1", value("cr3"))]);
+        trailer.push(vec![cell("esr"), cell("far")]);
+    } else if control {
+        trailer.push(vec![cell("cr0"), cell("cr2"), cell("cr3")]);
+        trailer.push(vec![cell("cr4"), cell("cr8")]);
+    }
+    if !arm64 {
+        trailer.push(vec![segment("cs"), segment("ds"), segment("es")]);
+        trailer.push(vec![segment("fs"), segment("gs"), segment("ss")]);
+    }
 
     View::new().main([ui::col()
         .role("ntoseye.registers")

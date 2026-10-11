@@ -10,7 +10,7 @@ use crate::error::{Error, Result};
 use crate::expr::Expr;
 use crate::output;
 use crate::repl::*;
-use crate::session::VcpuInfo;
+use crate::session::{UserThreadSummary, VcpuInfo};
 use crate::target::cpu::{
     CpuInfoDetail, CpuTriageInfo, DescriptorDetail, GdtDetail, GdtEntryDetail, IdtDetail,
     IdtEntryDetail, IrqlDetail, PcrDetail, PrcbDetail, ProcessorStateDetail,
@@ -61,6 +61,7 @@ repl_command! {
     summary: "Show the main KPCR data of the selected processor.",
     details: "Shows the KPCR and KPRCB addresses, the thread pointers, the descriptor registers, the TSS, and the available IRQL fields. On AMD64 Windows, kernel GS usually points to the KPCR, and backend GS-base registers are optional.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -70,6 +71,7 @@ repl_command! {
     summary: "Show the main KPRCB data of the selected processor.",
     details: "Shows the processor number, the thread pointers, the DPC and interrupt counters, and the available ProcessorState metadata of the selected KPRCB.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -79,6 +81,7 @@ repl_command! {
     summary: "Show the current IRQL of a processor.",
     details: "Shows the current IRQL and the Windows level name of the selected processor. At a KD break-in, this is the IRQL that the debugger sees, which can be different from the level before the break-in.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -88,6 +91,7 @@ repl_command! {
     summary: "Decode one IDT entry or the bounded 256-entry IDT.",
     details: "Shows one IDT vector or all 256 entries, with the handler, selector, gate type, DPL, presence, non-nt hooks, and KiIsrThunk chain hints of each entry.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -96,6 +100,7 @@ repl_command! {
     usage: "!gdt",
     summary: "Decode the bounded GDT of the current processor.",
     details: "Shows the bounded GDT entries of the selected processor, with the base, limit, privilege, mode, and presence of each entry.",
+    target: Kernel,
 }
 
 repl_command! {
@@ -105,6 +110,7 @@ repl_command! {
     summary: "Decode segment selectors from the GDT of the current processor.",
     details: "Shows each selector from the first to the last, in steps of 8 as WinDbg does. For each selector, it shows the descriptor base, limit, type, privilege level, size (Bg/Nb), granularity (Pg/By), presence (P/NP), long mode (Lo/Nl), and attribute flags. If a selector refers to an LDT (bit 2 set), dg reports this and does not decode the selector. 64-bit Windows has no LDT.",
     completion: [Expression, Expression],
+    target: Kernel,
 }
 
 repl_command! {
@@ -113,6 +119,7 @@ repl_command! {
     usage: "!cpuinfo",
     summary: "Show processor identification, speed, and feature bits.",
     details: "Shows the processor number, vendor, family, model, stepping, speed, and feature bits if they are available. For a field that is not available, ntoseye uses the triage-dump metadata.",
+    target: Kernel,
 }
 
 repl_command! {
@@ -888,6 +895,10 @@ impl ReplState<'_> {
 
     pub fn cmd_tilde(&mut self, line: &str) -> Result<Flow> {
         let body = line.trim().strip_prefix('~').unwrap_or_default();
+        if self.ctx.target.user_dump().is_some() {
+            self.cmd_tilde_user_dump(body, line);
+            return Ok(Flow::Continue);
+        }
         if body.is_empty() {
             self.cmd_vcpus()?;
             return Ok(Flow::Continue);
@@ -1023,7 +1034,119 @@ impl ReplState<'_> {
         Ok(Flow::Continue)
     }
 
+    /// `~` on a user-mode minidump, over its captured threads as WinDbg's
+    /// user-mode `~` does: `~` lists them; `~N`, `~~[tid]`, `~.` (the
+    /// current thread), `~#` (the exception's), and `~*` name threads, which
+    /// are listed, or with `s` selected, with `k` or `r` shown.
+    fn cmd_tilde_user_dump(&mut self, body: &str, line: &str) {
+        const USAGE: &str = "expected ~, ~N, ~~[tid], ~., ~#, or ~*, then s, k, or r";
+        let Some(threads) = self.ctx.user_threads() else {
+            return;
+        };
+        if body.is_empty() {
+            print_user_threads(&threads);
+            return;
+        }
+        let (selected, suffix): (Vec<UserThreadSummary>, &str) = if let Some(rest) =
+            body.strip_prefix('*')
+        {
+            (threads.clone(), rest)
+        } else if let Some(rest) = body.strip_prefix('.') {
+            (
+                threads
+                    .iter()
+                    .filter(|thread| thread.current)
+                    .cloned()
+                    .collect(),
+                rest,
+            )
+        } else if let Some(rest) = body.strip_prefix('#') {
+            let Some(thread) = threads.iter().find(|thread| thread.exception) else {
+                error!("the minidump records no exception, so no thread raised one");
+                return;
+            };
+            (vec![thread.clone()], rest)
+        } else if let Some(rest) = body.strip_prefix("~[") {
+            let Some((expression, rest)) = rest.split_once(']') else {
+                error!("'{line}' has no closing ']'; {USAGE}");
+                return;
+            };
+            let Some(tid) = self.eval_or_report(expression) else {
+                return;
+            };
+            let Some(thread) = threads.iter().find(|thread| u64::from(thread.tid) == tid.0) else {
+                error!("the minidump has no thread with id {:#x}", tid.0);
+                return;
+            };
+            (vec![thread.clone()], rest)
+        } else {
+            let digits = body.chars().take_while(|ch| ch.is_ascii_digit()).count();
+            let Some(index) = body[..digits].parse::<usize>().ok() else {
+                error!("invalid thread selector '{line}'; {USAGE}");
+                return;
+            };
+            let Some(thread) = threads.get(index) else {
+                error!(
+                    "thread {index} out of range (the minidump holds {} threads)",
+                    threads.len()
+                );
+                return;
+            };
+            (vec![thread.clone()], &body[digits..])
+        };
+        match suffix.trim() {
+            "" => print_user_threads(&selected),
+            "s" => {
+                let [thread] = selected.as_slice() else {
+                    error!("'{line}' names {} threads; s selects one", selected.len());
+                    return;
+                };
+                match self.ctx.set_current_thread(&thread.id) {
+                    Ok(()) => {
+                        self.caches.refresh_symbol_context(&self.ctx.target);
+                        outln!(
+                            "switched to thread {} ({})\n",
+                            thread.index,
+                            ui::thread_id(&thread.id)
+                        );
+                    }
+                    Err(error) => error!("failed to switch thread: {error}"),
+                }
+            }
+            action @ ("k" | "r") => {
+                let original = self.ctx.current_thread.clone();
+                for thread in &selected {
+                    if selected.len() > 1 {
+                        outln!(
+                            "{}",
+                            ui::muted(&format!("thread {} ({})", thread.index, thread.id))
+                        );
+                    }
+                    if let Err(error) = self.ctx.set_current_thread(&thread.id) {
+                        error!("failed to switch to thread {}: {error}", thread.id);
+                        continue;
+                    }
+                    self.caches.refresh_symbol_context(&self.ctx.target);
+                    if let Err(error) = self.dispatch_line(action) {
+                        error!("thread {} command failed: {error}", thread.id);
+                    }
+                }
+                if let Err(error) = self.ctx.set_current_thread(&original) {
+                    error!("failed to restore thread {original}: {error}");
+                } else {
+                    self.caches.refresh_symbol_context(&self.ctx.target);
+                }
+            }
+            other => error!("unsupported thread command '{other}'; {USAGE}"),
+        }
+    }
+
     fn cmd_vcpus(&mut self) -> Result<()> {
+        // A user dump's contexts are its captured threads.
+        if let Some(threads) = self.ctx.user_threads() {
+            print_user_threads(&threads);
+            return Ok(());
+        }
         let pb = output::native_progress_bar(0, "reading the vCPUs").unwrap_or_else(|| {
             let pb = ProgressBar::new_spinner();
             pb.set_style(
@@ -1101,6 +1224,36 @@ impl ReplState<'_> {
 
         Ok(())
     }
+}
+
+/// A user-mode minidump's thread list, as WinDbg's `~` shows it: `.` marks
+/// the current thread and `#` the exception's.
+fn print_user_threads(threads: &[UserThreadSummary]) {
+    let mut builder = Builder::default();
+    builder.push_record(["", "#", "Id", "Suspend", "Teb", "Symbol", "Name"]);
+    for thread in threads {
+        let marker = match (thread.current, thread.exception) {
+            (true, _) => ".",
+            (false, true) => "#",
+            (false, false) => "",
+        };
+        let symbol = match (thread.rip, &thread.symbol, &thread.error) {
+            (Some(_), Some(symbol), _) => symbol.clone(),
+            (Some(rip), None, _) => format!("{rip:#x}"),
+            (None, _, Some(error)) => ui::muted(&format!("no context: {error}")).to_string(),
+            (None, _, None) => ui::muted("no context").to_string(),
+        };
+        builder.push_record([
+            marker.to_string(),
+            thread.index.to_string(),
+            thread.id.clone(),
+            thread.suspend_count.to_string(),
+            ui::addr(thread.teb).to_string(),
+            symbol,
+            thread.name.clone().unwrap_or_default(),
+        ]);
+    }
+    print_padded_table(builder);
 }
 
 /// The vCPU list: what each vCPU runs, with the lines below a vCPU in the

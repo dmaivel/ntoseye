@@ -30,6 +30,7 @@ repl_command! {
     summary: "Show the VAD tree of a process.",
     details: "Select a process by PID or EPROCESS expression. With no argument, the command uses the current process context, which you can select with `.process /p <pid>`. `vmmap [address|filter]` keeps the flat region view of the attached process, and shows the kernel modules when no process is attached. The VAD walk has a limit, and it skips the entries that it cannot read and continues the listing.",
     completion: [Process, None],
+    target: Kernel,
 }
 
 repl_command! {
@@ -38,6 +39,7 @@ repl_command! {
     usage: "!address <address-expression>",
     summary: "Show the module and section, or the VAD region, that an address belongs to.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -47,6 +49,7 @@ repl_command! {
     summary: "Show the VirtualQuery data for a user address.",
     details: "The command shows the region, state, protection, and type of a user address, as VirtualQuery reports them. It looks up the address in the current process context, which you can select with `.process /p <pid>`. The VAD that holds the address gives AllocationBase, AllocationProtect, and Type, and the state and protection of each page come from its PTE. For a page without a PTE, they come from the VAD (private memory) or from its prototype PTE (a section view). RegionSize runs from the page of the address to the first page that differs. An address that is not in a VAD is MEM_FREE up to the next VAD. The scan stops after 262,144 page-table steps.",
     completion: Expression,
+    target: Kernel,
 }
 
 pub fn format_region_size(size: u64) -> String {

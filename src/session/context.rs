@@ -8,13 +8,14 @@ use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
 use crate::guest::hypervisor::guest_vp_label;
 use crate::memory::DTB_IDENTITY;
-use crate::session::{Selection, Session, ThreadContext, VcpuInfo};
+use crate::session::{Selection, Session, ThreadContext, UserThreadSummary, VcpuInfo};
 use crate::target::{HYPERVISOR_CONTEXT, SelectedFrame, Target, ThreadInfo};
 use crate::types::VirtAddr;
 use crate::unwind::{
-    UNKNOWN_CONTEXT, guest_vp_running, halted_in_windows_hypervisor,
+    UNKNOWN_CONTEXT, guest_vp_running, halted_in_windows_hypervisor, resolve_thread_trace_context,
     resolve_thread_trace_context_at, saved_vtls, try_format_symbol,
 };
+use crate::userdump::register_buffer;
 
 pub(super) fn update_target_context_from_registers(
     target: &mut Target,
@@ -500,6 +501,42 @@ impl Session {
         Ok(())
     }
 
+    /// The threads a user-mode minidump captured, each with where its
+    /// context stopped. `None` on a kernel target.
+    pub fn user_threads(&self) -> Option<Vec<UserThreadSummary>> {
+        let info = self.target.user_dump_info()?;
+        let exception_thread = info.exception.as_ref().map(|exception| exception.thread_id);
+        let ip = self.target.instruction_pointer_register();
+        let trace = resolve_thread_trace_context(&self.target, 0);
+        Some(
+            info.threads
+                .iter()
+                .enumerate()
+                .map(|(index, thread)| {
+                    let id = info.backend_thread_id(thread.tid);
+                    let rip = thread.context.as_ref().ok().and_then(|raw| {
+                        self.register_map
+                            .read_u64(ip, &register_buffer(info.arch, raw))
+                            .ok()
+                    });
+                    UserThreadSummary {
+                        index,
+                        current: id.eq_ignore_ascii_case(&self.current_thread),
+                        id,
+                        tid: thread.tid,
+                        suspend_count: thread.suspend_count,
+                        teb: thread.teb,
+                        name: thread.name.clone(),
+                        symbol: rip.and_then(|rip| try_format_symbol(&self.target, &trace, rip)),
+                        rip,
+                        error: thread.context.as_ref().err().cloned(),
+                        exception: exception_thread == Some(thread.tid),
+                    }
+                })
+                .collect(),
+        )
+    }
+
     /// Inspect every backend execution context (vCPU): its RIP, the address space
     /// it is running in (kernel / a process / unknown), and the nearest symbol.
     /// Selects each vCPU in turn to read its register file, then restores the
@@ -763,6 +800,13 @@ pub fn refresh_windows_thread_context_for_backend_thread(
     debugger: &mut Target,
     thread_id: &str,
 ) -> Option<ThreadInfo> {
+    // A user dump's backend threads are its captured threads, which have no
+    // kernel thread object to walk.
+    if debugger.user_dump().is_some() {
+        debugger.select_user_thread(thread_id);
+        debugger.clear_current_windows_thread_context();
+        return None;
+    }
     let thread = windows_thread_on_backend_thread(debugger, thread_id);
     match thread.clone() {
         Some(thread) => debugger.set_current_windows_thread_context(thread),

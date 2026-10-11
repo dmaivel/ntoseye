@@ -214,6 +214,16 @@ impl SymbolStore {
         module: &ModuleInfo,
         arch: Arch,
     ) -> Result<ModuleSymbolDiscovery> {
+        // A module list that records the CodeView record names the PDB
+        // whether or not the image's pages can be read.
+        if let Some(headers::CodeView::Rsds { guid, age, path }) = &module.codeview {
+            let (job, guid) = self.build_download_job(path, guid_to_u128(*guid), *age)?;
+            return Ok(ModuleSymbolDiscovery::Ready {
+                job,
+                guid,
+                source: ModuleSymbolSource::Record,
+            });
+        }
         if let Some(reference) =
             ModuleIdentity::of(module).and_then(|identity| self.module_identities().get(&identity))
         {
@@ -238,6 +248,7 @@ impl SymbolStore {
             Ok(None) => Self::plan_image_fallback(&addr_space, module_name, base_address),
             Err(Error::BadVirtualAddress(_))
             | Err(Error::AddressNotInDump(_))
+            | Err(Error::NotCaptured { .. })
             | Err(Error::PartialRead(_))
             | Err(Error::DebugInfo(_)) => {
                 Self::plan_image_fallback(&addr_space, module_name, base_address)

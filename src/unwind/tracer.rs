@@ -7,12 +7,12 @@ use std::sync::Arc;
 
 use pelite::pe64::{Pe, PeView, image::IMAGE_SCN_MEM_EXECUTE};
 
-use super::{CachedModule, OwnedModule, StackTracer, ThreadTraceContext};
+use super::{CachedModule, OwnedModule, StackPage, StackTracer, ThreadTraceContext};
 use crate::{
     backend::MemoryOps,
     error::{Error, Result},
     guest::{Image, ModuleInfo},
-    memory::PAGE_SIZE,
+    memory::{PAGE_SIZE, read_page_chunks},
     pe::{CodeLayout, PeImage, pe_headers_end},
     symbols::ImageFetch,
     target::Target,
@@ -47,16 +47,26 @@ impl<'a> StackTracer<'a> {
             let take = (bytes.len() - done).min(PAGE_SIZE - offset);
             let mut pages = self.stack_pages.borrow_mut();
             let cached = pages.entry(page).or_insert_with(|| {
-                let mut buf = vec![0u8; PAGE_SIZE];
-                self.memory
-                    .read_bytes(VirtAddr(page), &mut buf)
-                    .ok()
-                    .map(|()| buf.into_boxed_slice())
+                let (bytes, valid) = read_page_chunks(VirtAddr(page), PAGE_SIZE, |at, buf| {
+                    self.memory.read_bytes(at, buf)
+                })
+                .ok()?;
+                if !valid.contains(&true) {
+                    return None;
+                }
+                Some(StackPage {
+                    bytes: bytes.into_boxed_slice(),
+                    valid: valid.contains(&false).then(|| valid.into_boxed_slice()),
+                })
             });
-            let Some(data) = cached else {
+            let Some(data) = cached.as_ref().filter(|data| {
+                data.valid
+                    .as_ref()
+                    .is_none_or(|valid| valid[offset..offset + take].iter().all(|byte| *byte))
+            }) else {
                 return Err(Error::BadVirtualAddress(VirtAddr(at)));
             };
-            bytes[done..done + take].copy_from_slice(&data[offset..offset + take]);
+            bytes[done..done + take].copy_from_slice(&data.bytes[offset..offset + take]);
             done += take;
         }
         Ok(u64::from_le_bytes(bytes))

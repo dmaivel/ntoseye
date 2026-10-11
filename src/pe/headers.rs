@@ -182,7 +182,7 @@ const IMPORT_DESCRIPTOR_SIZE: usize = 20;
 /// Real images carry a handful of debug entries; the size is guest data.
 const MAX_DEBUG_DIRECTORY_BYTES: usize = 0x1000;
 /// A CodeView record is a GUID, an age, and a PDB path.
-const MAX_CODEVIEW_BYTES: usize = 0x1000;
+pub const MAX_CODEVIEW_BYTES: usize = 0x1000;
 /// Bounds on guest-controlled import tables: ntoskrnl imports from about a
 /// dozen modules, a few hundred functions each.
 const MAX_IMPORT_DESCRIPTORS: usize = 4096;

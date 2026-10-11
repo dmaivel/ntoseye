@@ -94,6 +94,20 @@ pub enum Error {
     #[error("Ntoskrnl not found")]
     NtoskrnlNotFound,
 
+    /// A kernel operation on a user-mode minidump.
+    #[error("this needs a kernel target; a user-mode minidump holds one process and no kernel")]
+    KernelRequired,
+
+    /// A physical-memory or page-table operation on a user-mode minidump.
+    #[error(
+        "a user-mode minidump holds captured process memory by virtual address; it has no \
+         physical memory or page tables"
+    )]
+    NoPhysicalMemory,
+
+    #[error("unsupported dump: {0}")]
+    UnsupportedDump(String),
+
     #[error("secure kernel (VTL1): {0}")]
     SecureKernel(String),
 
@@ -206,6 +220,15 @@ pub enum Error {
 
     #[error("Address {0:x} is not captured in the triage dump's memory snapshot")]
     AddressNotInDump(VirtAddr),
+
+    /// A read of a user-mode minidump's memory reached `address`, which the
+    /// dump did not capture; the bytes before it were read. `resumes` is
+    /// where captured memory starts again, `None` when nothing above does.
+    #[error("Address {address:x} is not in the minidump's captured memory")]
+    NotCaptured {
+        address: VirtAddr,
+        resumes: Option<VirtAddr>,
+    },
 
     #[error("Bad physical address: {0:x}")]
     BadPhysicalAddress(PhysAddr),

@@ -24,6 +24,7 @@ repl_command! {
     summary: "Show a first-pass crash triage report.",
     details: "Without -v, the command shows the short verdict: the bugcheck line, the failure signature, the culprit, the verifier and WHEA findings, and the relevant modules. -v adds the full bugcheck arguments, the faulting context, the stack, and all modules. For a DRIVER_POWER_STATE_FAILURE (0x9F), the report names what is stuck: for subtype 0x3, the blocked IRP, the driver whose stack location it is pending in, which becomes the culprit, the device stack of the PDO, and the power IRP worker threads with their stacks; for 0x4, the thread that holds the PnP lock and its stack; for 0x1, 0x2, and 0x500, the driver of the device or driver object in the parameters. -show decodes a bugcheck code when there is no crash, and for a 0x9F reads what its parameters point to in the target. -hang triages the waits on each processor.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {

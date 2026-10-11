@@ -307,6 +307,12 @@ impl ReplState<'_> {
             error!("{reason}");
             return Ok(Some(Flow::Denied));
         }
+        if spec.target == TargetRequirement::Kernel
+            && let Err(error) = self.ctx.target.require_kernel()
+        {
+            error!("{typed}: {error}");
+            return Ok(Some(Flow::Continue));
+        }
         if let Some(flow) = self.gate_remote_command(spec, typed)? {
             return Ok(Some(flow));
         }

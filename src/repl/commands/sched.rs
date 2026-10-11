@@ -24,6 +24,7 @@ repl_command! {
     summary: "Show the thread that runs on each processor.",
     details: "-i includes idle threads, and -t adds a short kernel stack, with a frame limit, for each processor.",
     completion: None,
+    target: Kernel,
 }
 
 repl_command! {
@@ -33,6 +34,7 @@ repl_command! {
     summary: "List the dispatcher ready queues of all processors or of one processor.",
     details: "The command reads DispatcherReadyListHead from each _KPRCB, or ReadyListHead on newer builds. Each queue walk has an entry limit and, like `dt -l`, reports null links, cycles, unreadable links, and when it reaches its entry limit.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -42,6 +44,7 @@ repl_command! {
     summary: "List the deferred procedure calls that are queued on each processor.",
     details: "The command walks the two _KPRCB DpcData queues. Each walk detects cycles and has an entry limit.",
     completion: None,
+    target: Kernel,
 }
 
 repl_command! {
@@ -60,6 +63,7 @@ repl_command! {
     summary: "List the kernel timers or decode one _KTIMER.",
     details: "Without an address, the command walks _KPRCB.TimerTable.TimerEntries. With an address, it decodes one timer and its DPC.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -69,6 +73,7 @@ repl_command! {
     summary: "List the kernel and user APCs of the selected thread, a process, or all threads.",
     details: "With no argument, the command uses the current Windows thread. With *, it lists the APCs of all threads, in a walk that has a limit.",
     completion: [Expression],
+    target: Kernel,
 }
 
 repl_command! {
@@ -78,6 +83,7 @@ repl_command! {
     summary: "Show the state, wait reason, and top stack symbol of each thread.",
     details: "Level 0 shows one frame. Levels 1 and 2 add the full stacks, with a frame limit. The optional filter matches process or stack symbols.",
     completion: [None, Process],
+    target: Kernel,
 }
 
 repl_command! {

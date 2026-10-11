@@ -1333,6 +1333,7 @@ fn is_skippable_section_read_error(error: &Error) -> bool {
         Error::BadVirtualAddress(_)
             | Error::PartialRead(_)
             | Error::AddressNotInDump(_)
+            | Error::NotCaptured { .. }
             | Error::BadPhysicalAddress(_)
     )
 }

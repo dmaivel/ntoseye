@@ -32,6 +32,8 @@ pub fn for_each_page_chunk(
 
 /// Read a byte range page by page, preserving holes in `valid`. Unreadable
 /// pages are skipped; a running-target refusal applies to the whole range.
+/// A user-mode minidump captures memory at byte granularity, so a page it
+/// holds only part of keeps the parts it holds.
 pub fn read_page_chunks(
     start: VirtAddr,
     length: usize,
@@ -44,10 +46,43 @@ pub fn read_page_chunks(
         if running.is_err() {
             return;
         }
-        match read(address, &mut data[offset..offset + chunk_len]) {
-            Ok(()) => valid[offset..offset + chunk_len].fill(true),
-            Err(error @ Error::TargetRunning(_)) => running = Err(error),
-            Err(_) => {}
+        let mut from = 0usize;
+        while from < chunk_len {
+            match read(
+                address + from as u64,
+                &mut data[offset + from..offset + chunk_len],
+            ) {
+                Ok(()) => {
+                    valid[offset + from..offset + chunk_len].fill(true);
+                    break;
+                }
+                Err(error @ Error::TargetRunning(_)) => {
+                    running = Err(error);
+                    break;
+                }
+                // The bytes before the hole were read; read on from where
+                // the capture resumes, if that is in this chunk.
+                Err(Error::NotCaptured {
+                    address: missing,
+                    resumes,
+                }) => {
+                    let within = |at: VirtAddr| {
+                        at.0.checked_sub(address.0)
+                            .filter(|delta| *delta <= chunk_len as u64)
+                            .map(|delta| delta as usize)
+                    };
+                    let read_to = within(missing).unwrap_or(from).max(from);
+                    valid[offset + from..offset + read_to].fill(true);
+                    match resumes
+                        .and_then(within)
+                        .filter(|next| *next > read_to && *next < chunk_len)
+                    {
+                        Some(next) => from = next,
+                        None => break,
+                    }
+                }
+                Err(_) => break,
+            }
         }
     });
     running.map(|()| (data, valid))

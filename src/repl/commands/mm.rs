@@ -26,6 +26,7 @@ repl_command! {
     summary: "Show virtual-memory statistics.",
     details: "The command shows system memory, pool, PTE, page-file, and process usage. The flags follow WinDbg: bit 0 omits the per-process rows, and the command accepts bits 1, 2, and 3 but ignores them. If the command cannot read a counter, it still shows the other counters.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -35,6 +36,7 @@ repl_command! {
     summary: "Decode an _MMPFN entry.",
     details: "A plain value is a page-frame number. Use -a to read the value as a physical address.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -44,6 +46,7 @@ repl_command! {
     summary: "Translate a virtual address with an explicit directory base.",
     details: "The command shows each AMD64 page-table level and the final physical address. A directory base of zero uses the current context, and for a large page, the walk stops at its leaf level.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -53,6 +56,7 @@ repl_command! {
     summary: "Find the virtual addresses in the current directory base that map a physical address.",
     details: "The command walks the page tables in reverse and detects cycles in them. The walk stops after 32 mappings or 65,536 table pages.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -62,6 +66,7 @@ repl_command! {
     summary: "Show pool tracker usage by tag.",
     details: "The command adds up the usage from the tag table of each processor. The flags follow WinDbg: bit 1 (2) sorts by nonpaged bytes, bit 2 (4) sorts by paged bytes, and bit 0 (1) shows the alloc/free columns. The tag match is case-sensitive and supports * and ?.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -71,6 +76,7 @@ repl_command! {
     summary: "Find pool blocks with a matching tag.",
     details: "The command reads the mapped pages of the pool ranges and the big-page table. On Windows 10 1803 and later, the pool ranges are the fixed regions in MiState.Vs.SystemVaRegions. On earlier builds, they come from MmNonPagedPoolStart and related symbols. The optional type selects nonpaged (0) or paged (1) pool. The scan stops after 1,024 matches, and you can interrupt it.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -88,6 +94,7 @@ repl_command! {
     usage: "!pte <address>",
     summary: "Show the page table entries for an address.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -96,6 +103,7 @@ repl_command! {
     usage: "!pool <address-expression>",
     summary: "Show the pool page that contains an address.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -123,6 +131,7 @@ repl_command! {
     summary: "Show system PTE usage from the memory manager's bitmap allocators.",
     details: "Windows 10 and later allocate system PTEs from _MI_SYSTEM_PTE_TYPE bitmap allocators in MiState. These allocators are Vs.SystemPteInfo (the SystemPtes region) and the system-view, non-cached-mapping, and kernel-stack allocators of SystemPtes. For each allocator, the command shows the VA range that it serves, TotalSystemPtes, TotalFreeSystemPtes, the PTEs in use, and PteFailures, and from the bitmap, the number of free blocks and the largest free block. The command reads all of the bitmap, up to 2^27 bits, a limit that only a corrupt SizeOfBitMap exceeds. If the free count from the bitmap differs from the counter, the target made an allocation between the reads. All counts are in PTEs, and each bit of the system-view bitmap covers 16 PTEs. The flags follow WinDbg. 0x1 lists each free block with its first PTE, the address that it maps, and its length, up to 256 free blocks for each allocator. 0x4 (PTEs that map locked pages) needs the TrackPtes tracking of the kernel, and shows which allocators track but does not list the tracked mappings. The command ignores 0x2, 0x8, and 0x10, which select Windows 2000/XP/Vista lists that these allocators replaced. On a build without these allocators, the command gives an error.",
     completion: Expression,
+    target: Kernel,
 }
 
 fn print_pool_validation(detail: &PoolValidationDetail, level: u64) {
