@@ -74,6 +74,7 @@ pub(super) fn build_recovered_stacktrace_seeded(
         // A frame that returns to its own address is a recursive call when
         // the stack moved, and a walk going nowhere when it did not.
         if context.rip == previous_rip && context.rsp == previous_rsp {
+            unwind_trace!("unwind: frame returns to itself without moving -> scan");
             break;
         }
         // Nothing runs in the never-mapped first 64 KiB or at a non-canonical
@@ -81,6 +82,7 @@ pub(super) fn build_recovered_stacktrace_seeded(
         // wrong (a context short of registers, a stale slot), and the stack is
         // scanned from here instead of listing it as a frame.
         if !could_be_return_address(context.rip, debugger.arch()) {
+            unwind_trace!("unwind: {:#x} is no return address -> scan", context.rip);
             break;
         }
         // An x64 return pops its address, so sp always climbs; an ARM64 leaf
@@ -90,6 +92,10 @@ pub(super) fn build_recovered_stacktrace_seeded(
             Arch::Arm64 => context.rsp < previous_rsp,
         };
         if !stack_switch && stack_regressed {
+            unwind_trace!(
+                "unwind: sp went from {previous_rsp:#x} back to {:#x} -> scan",
+                context.rsp
+            );
             break;
         }
         seen.insert(context.rip);

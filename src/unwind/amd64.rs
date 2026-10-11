@@ -711,9 +711,9 @@ impl UnwindBytes for PeImage {
 /// The code and unwind data of a dynamic function table, read from the
 /// address space above the table's base. A read that reaches memory the
 /// target cannot serve is `None`, as a paged-out image block is.
-struct DynamicCode<'s, 'a> {
-    memory: &'s AddressSpace<'a, PhysMem>,
-    base: u64,
+pub(super) struct DynamicCode<'s, 'a> {
+    pub(super) memory: &'s AddressSpace<'a, PhysMem>,
+    pub(super) base: u64,
 }
 
 impl UnwindBytes for DynamicCode<'_, '_> {

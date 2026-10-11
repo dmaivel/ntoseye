@@ -5,7 +5,9 @@
 
 use std::ops::Range;
 
-use super::amd64::{EntryLookup, HandlerDetail, RuntimeFunctionDetail, UnwindDetail};
+use super::amd64::{
+    DynamicCode, EntryLookup, HandlerDetail, RuntimeFunctionDetail, UnwindBytes, UnwindDetail,
+};
 use super::{RegisterContext, StackTracer, Unwound, image_u32, runtime_functions};
 use crate::{
     kd::context_arm64::{OFFSET_PC, OFFSET_SP, OFFSET_X0},
@@ -124,7 +126,7 @@ struct Xdata {
     codes: Vec<u8>,
 }
 
-fn read_program(image: &PeImage, unwind_data: u32) -> Option<Program> {
+fn read_program(image: &impl UnwindBytes, unwind_data: u32) -> Option<Program> {
     match unwind_data & 0b11 {
         0 => read_xdata(image, unwind_data as usize).map(Program::Full),
         1 | 2 => Some(Program::Packed(unwind_data)),
@@ -132,7 +134,7 @@ fn read_program(image: &PeImage, unwind_data: u32) -> Option<Program> {
     }
 }
 
-fn read_xdata(image: &PeImage, at: usize) -> Option<Xdata> {
+fn read_xdata(image: &impl UnwindBytes, at: usize) -> Option<Xdata> {
     let header = image_u32(&image.read(at, 4)?, 0)?;
     let mut epilog_count = (header >> 22) & 0x1f;
     let mut code_words = header >> 27;
@@ -987,7 +989,7 @@ impl StackTracer<'_> {
             .module_containing(pc)
             .map(|module| module.info.base_address.0)
         else {
-            return Resolve::Leaf;
+            return self.resolve_dynamic_arm64(pc);
         };
         let Some((image, layout)) = self.module_code(pc) else {
             return Resolve::Holed;
@@ -1003,6 +1005,32 @@ impl StackTracer<'_> {
         resolved
     }
 
+    /// `pc` in code no module holds, such as JIT-compiled code, by the user
+    /// dump's dynamic function tables, whose unwind data is in process
+    /// memory above each table's base.
+    fn resolve_dynamic_arm64(&self, pc: u64) -> Resolve {
+        let Some((base, function)) = self.dynamic_function(pc) else {
+            return Resolve::Leaf;
+        };
+        unwind_trace!("unwind: dynamic function table base={base:#x}");
+        let code = DynamicCode {
+            memory: &self.memory,
+            base,
+        };
+        match read_program(&code, function.unwind_data) {
+            Some(program) => Resolve::Function {
+                base,
+                function: Arm64Function {
+                    begin: function.begin,
+                    end: function.end,
+                    unwind_data: function.unwind_data,
+                },
+                program,
+            },
+            None => Resolve::Holed,
+        }
+    }
+
     /// Where a frame's function and unwind state are looked up: a frame
     /// returned into is suspended in the call 4 bytes before its pc, and a
     /// call that ends a function returns into the next one.
@@ -1016,10 +1044,13 @@ impl StackTracer<'_> {
 
     pub fn unwind_once_arm64(&mut self, context: &mut RegisterContext) -> Unwound {
         let pc = Self::arm64_lookup_pc(context);
+        let sp = context.rsp;
         unwind_trace!(
-            "unwind: pc={:#x} sp={:#x} after_call={}",
+            "unwind: pc={:#x} sp={:#x} fp={:x?} lr={:x?} after_call={}",
             context.rip,
             context.rsp,
+            context.regs[FP],
+            context.regs[LR],
             context.after_call
         );
         let resume = match self.resolve_arm64(pc) {
@@ -1059,6 +1090,7 @@ impl StackTracer<'_> {
         match resume {
             Resume::Return => {
                 let Some(lr) = context.regs[LR] else {
+                    unwind_trace!("unwind: lr is not known -> stop");
                     return Unwound::Stop;
                 };
                 // A thread's initial frame saves a zero lr: the stack ends.
@@ -1069,7 +1101,15 @@ impl StackTracer<'_> {
                     };
                 }
                 let return_address = strip_pac(lr);
-                if return_address == context.rip || !self.is_executable_address(return_address) {
+                // A return to the frame's own address is a recursive call
+                // when the unwind moved up the stack, and a walk going
+                // nowhere when it did not.
+                if return_address == context.rip && context.rsp <= sp {
+                    unwind_trace!("unwind: returns to its own pc without moving -> stop");
+                    return Unwound::Stop;
+                }
+                if !self.is_executable_address(return_address) {
+                    unwind_trace!("unwind: lr {return_address:#x} is no code -> stop");
                     return Unwound::Stop;
                 }
                 context.rip = return_address;

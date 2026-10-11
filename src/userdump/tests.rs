@@ -627,6 +627,113 @@ fn function_tables_follow_their_padding_and_resolve_code_outside_modules() {
     );
 }
 
+/// An ARM64 entry records no end: a packed entry's length is in its unwind
+/// data, and an `.xdata` entry's in its header in process memory, so an
+/// entry whose header the dump did not capture covers nothing.
+#[test]
+fn arm64_function_tables_take_their_lengths_from_the_unwind_data() {
+    const BASE: u64 = 0x7ff8_0000_0000;
+    let mut builder = Builder::new(3);
+    builder.system_info(ARM64, WIN32_NT);
+    // The .xdata header at BASE + 0x800: a 0x20-instruction function.
+    let header = builder.blob(&u32s(&[0x20, 0]));
+    let mut list = u32s(&[1]);
+    list.extend(u64s(&[BASE + 0x800]));
+    list.extend(u32s(&[8, header]));
+    builder.stream(5, &list);
+
+    let mut stream = u32s(&[24, 32, 0, 8, 1, 0]);
+    stream.extend(u64s(&[BASE, BASE + 0x1_0000, BASE]));
+    stream.extend(u32s(&[3, 0]));
+    // Packed (flag 1), 0x10 instructions.
+    stream.extend(u32s(&[0x100, 1 | 0x10 << 2]));
+    // .xdata at 0x800, captured.
+    stream.extend(u32s(&[0x200, 0x800]));
+    // .xdata at 0x900, not captured.
+    stream.extend(u32s(&[0x300, 0x900]));
+    builder.stream(13, &stream);
+    let dump = open(&builder.finish()).unwrap();
+    let info = dump.info();
+
+    let unwind_data = |address: u64| {
+        info.dynamic_function(address)
+            .map(|(base, function)| (base, function.unwind_data))
+    };
+    assert_eq!(unwind_data(BASE + 0x13c), Some((BASE, 0x41)));
+    assert_eq!(unwind_data(BASE + 0x140), None);
+    assert_eq!(unwind_data(BASE + 0x27c), Some((BASE, 0x800)));
+    assert_eq!(unwind_data(BASE + 0x280), None);
+    assert_eq!(unwind_data(BASE + 0x300), None);
+    assert!(
+        info.notes
+            .iter()
+            .any(|note| note.contains("1 of its 3 entries"))
+    );
+}
+
+/// A stack in ARM64 code no module holds, which a dynamic function table
+/// describes (`stp fp, lr, [sp, #-16]!; mov fp, sp`, packed): the walk
+/// unwinds by the table, and through a recursive call, whose frame returns
+/// to the same call site as the one before it, until the zero lr that ends
+/// the thread's stack.
+#[test]
+fn an_arm64_stack_unwinds_through_jit_code_and_recursion() {
+    use crate::kd::context_arm64;
+    use crate::phys::PhysMem;
+    use crate::target::Target;
+    use crate::unwind::{FrameSource, build_stacktrace_with_register_values};
+    use std::sync::Arc;
+
+    const BASE: u64 = 0x7ff8_0000_0000;
+    const STACK: u64 = 0x50_0000;
+    // The function at BASE + 0x100 calls itself at +0x130.
+    const RETURN: u64 = BASE + 0x134;
+    let mut builder = Builder::new(3);
+    builder.system_info(ARM64, WIN32_NT);
+    // Three frame records: the stopped frame's, the recursive call's, and
+    // the outermost one's, whose saved lr is zero.
+    let stack = builder.blob(&u64s(&[STACK + 0x10, RETURN, STACK + 0x20, RETURN, 0, 0]));
+    let mut list = u32s(&[1]);
+    list.extend(u64s(&[STACK]));
+    list.extend(u32s(&[0x30, stack]));
+    builder.stream(5, &list);
+    let mut table = u32s(&[24, 32, 0, 8, 1, 0]);
+    table.extend(u64s(&[BASE, BASE + 0x1_0000, BASE]));
+    table.extend(u32s(&[1, 0]));
+    // Packed (flag 1): 0x10 instructions, CR = 3 (fp and lr saved as a
+    // pair, fp set), a 16-byte frame.
+    table.extend(u32s(&[0x100, 1 | 0x10 << 2 | 3 << 21 | 1 << 23]));
+    builder.stream(13, &table);
+    let dump = open(&builder.finish()).unwrap();
+    let target = Target::with_user_dump(Arc::new(PhysMem::minidump(dump))).unwrap();
+
+    let values = HashMap::from([
+        ("pc".to_string(), BASE + 0x120),
+        ("sp".to_string(), STACK),
+        ("fp".to_string(), STACK),
+        ("lr".to_string(), RETURN),
+    ]);
+    let trace = build_stacktrace_with_register_values(
+        &target,
+        &context_arm64::build_register_map(),
+        &values,
+        8,
+    );
+    let frames: Vec<_> = trace
+        .frames
+        .iter()
+        .map(|frame| (frame.frame.ip, frame.frame.sp, frame.frame.source))
+        .collect();
+    assert_eq!(
+        frames,
+        [
+            (BASE + 0x120, STACK, FrameSource::Current),
+            (RETURN, STACK + 0x10, FrameSource::Unwind),
+            (RETURN, STACK + 0x20, FrameSource::Unwind),
+        ]
+    );
+}
+
 #[test]
 fn misc_info_records_process_times_and_the_time_zone_in_effect() {
     let mut builder = Builder::new(2);

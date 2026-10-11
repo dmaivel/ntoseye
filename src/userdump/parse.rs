@@ -71,6 +71,9 @@ const MAX_HANDLES: u32 = 0x100_0000;
 const MAX_FUNCTION_TABLES: u32 = 0x10_0000;
 /// An AMD64 `RUNTIME_FUNCTION`: begin, end, and unwind-data offsets.
 const AMD64_RUNTIME_FUNCTION_SIZE: u32 = 12;
+/// An ARM64 `RUNTIME_FUNCTION`: begin and unwind-data offsets; the length
+/// is in the packed unwind data or the `.xdata` header.
+const ARM64_RUNTIME_FUNCTION_SIZE: u32 = 8;
 /// The longest `MINIDUMP_STRING` read, in bytes: a module path or thread
 /// name is far shorter.
 const MAX_STRING_BYTES: u32 = 0x1_0000;
@@ -536,7 +539,7 @@ pub fn parse(data: &[u8]) -> Result<ParsedUserDump> {
         info.regions = Some(parse_memory_info_list(bytes, &mut notes));
     }
     if let Some(bytes) = directory.stream(data, FUNCTION_TABLE_STREAM, &mut notes) {
-        info.function_tables = parse_function_tables(bytes, arch, &mut notes);
+        info.function_tables = parse_function_tables(data, bytes, arch, &memory, &mut notes);
     }
 
     info.notes = notes;
@@ -639,6 +642,14 @@ impl MemoryMap {
                 offset,
             })
             .collect()
+    }
+
+    /// The `u32` at `address` in the captured memory recorded so far.
+    fn read_u32(&self, data: &[u8], address: u64) -> Option<u32> {
+        let (start, (length, offset)) = self.ranges.range(..=address).next_back()?;
+        let within = address - start;
+        (within.checked_add(4)? <= *length).then_some(())?;
+        read_at(data, offset.checked_add(within)?)
     }
 }
 
@@ -1244,18 +1255,25 @@ fn parse_memory_info_list(stream: &[u8], notes: &mut Vec<String>) -> Vec<MemoryR
     regions
 }
 
-/// The dynamic function tables of `FunctionTableStream`. Only AMD64 tables
-/// are read: they are what the AMD64 unwinder uses for code outside every
-/// module.
-fn parse_function_tables(stream: &[u8], arch: Arch, notes: &mut Vec<String>) -> Vec<FunctionTable> {
+/// The dynamic function tables of `FunctionTableStream`: the unwind entries
+/// for code outside every module, such as JIT-compiled code. An ARM64
+/// entry records no end; its length is in its packed unwind data, or in its
+/// `.xdata` header in process memory, read from `memory`.
+fn parse_function_tables(
+    data: &[u8],
+    stream: &[u8],
+    arch: Arch,
+    memory: &MemoryMap,
+    notes: &mut Vec<String>,
+) -> Vec<FunctionTable> {
     let Some(header) = read_at::<RawFunctionTableHeader>(stream, 0) else {
         notes.push("FunctionTableStream header is truncated; its tables are not used".into());
         return Vec::new();
     };
-    if arch != Arch::Amd64 {
-        notes.push("FunctionTableStream is only used on AMD64; its tables are not used".into());
-        return Vec::new();
-    }
+    let runtime_function_size = match arch {
+        Arch::Amd64 => AMD64_RUNTIME_FUNCTION_SIZE,
+        Arch::Arm64 => ARM64_RUNTIME_FUNCTION_SIZE,
+    };
     let (header_size, descriptor_size, native_size, entry_size) = (
         header.size_of_header,
         header.size_of_descriptor,
@@ -1264,7 +1282,7 @@ fn parse_function_tables(stream: &[u8], arch: Arch, notes: &mut Vec<String>) -> 
     );
     if (header_size as usize) < size_of::<RawFunctionTableHeader>()
         || (descriptor_size as usize) < size_of::<RawFunctionTableDescriptor>()
-        || entry_size < AMD64_RUNTIME_FUNCTION_SIZE
+        || entry_size < runtime_function_size
     {
         notes.push(format!(
             "FunctionTableStream has header size {header_size:#x}, descriptor size \
@@ -1304,11 +1322,30 @@ fn parse_function_tables(stream: &[u8], arch: Arch, notes: &mut Vec<String>) -> 
         let mut entries: Vec<DynamicFunction> = (0..entry_count)
             .filter_map(|entry| {
                 let at = entries_at + entry * u64::from(entry_size);
-                Some(DynamicFunction {
-                    begin: read_at(stream, at)?,
-                    end: read_at(stream, at + 4)?,
-                    unwind_data: read_at(stream, at + 8)?,
-                })
+                match arch {
+                    Arch::Amd64 => Some(DynamicFunction {
+                        begin: read_at(stream, at)?,
+                        end: read_at(stream, at + 4)?,
+                        unwind_data: read_at(stream, at + 8)?,
+                    }),
+                    Arch::Arm64 => {
+                        let begin: u32 = read_at(stream, at)?;
+                        let unwind_data: u32 = read_at(stream, at + 4)?;
+                        let instructions = match unwind_data & 0b11 {
+                            0 => {
+                                let xdata = base.checked_add(u64::from(unwind_data))?;
+                                memory.read_u32(data, xdata)? & 0x3ffff
+                            }
+                            1 | 2 => (unwind_data >> 2) & 0x7ff,
+                            _ => return None,
+                        };
+                        Some(DynamicFunction {
+                            begin,
+                            end: begin.checked_add(instructions.checked_mul(4)?)?,
+                            unwind_data,
+                        })
+                    }
+                }
             })
             .filter(|entry| entry.begin < entry.end)
             .collect();
@@ -1326,7 +1363,8 @@ fn parse_function_tables(stream: &[u8], arch: Arch, notes: &mut Vec<String>) -> 
         if dropped > 0 {
             notes.push(format!(
                 "function table {minimum:#x}-{maximum:#x}: {dropped} of its {entry_count} entries \
-                 are empty or overlap another ({malformed} empty); they are not used"
+                 are empty, overlap another, or have unwind data the dump did not capture \
+                 ({malformed} empty or not captured); they are not used"
             ));
         }
         tables.push(FunctionTable {

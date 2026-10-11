@@ -22,6 +22,8 @@ Keeping this file:
 - `uf` disassembles a leaf function, which has no unwind data, such as `nt!KeQueryActiveProcessorCount` on ARM64: from its symbol, as far as its control flow reaches before the next symbol, instead of failing with `no runtime-function entry contains`.
 - `!pcr` on an ARM64 target leaves out `CurrentPrcb`, `IDTR`, `GDTR`, and `TssBase`, which an ARM64 KPCR does not have, instead of listing them as unavailable.
 - The `__imp_` import symbols an ARM64X image's PDB records, such as mscoree.dll's on ARM64 Windows, no longer name the first bytes of the image: their offsets reach past the end of the image, and they are skipped.
+- On an ARM64 user-mode minidump, `k` unwinds through JIT-compiled code, such as .NET's, by the dump's dynamic function tables, as on AMD64, instead of scanning the stack from the first JIT frame on.
+- On ARM64, `k` unwinds through a recursive call, a frame that returns to the same call site as the one before it, instead of stopping there and scanning the stack.
 
 ## v0.49.0 (2026-10-11)
 
