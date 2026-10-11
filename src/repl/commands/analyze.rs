@@ -5,12 +5,16 @@ use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix};
 use crate::target::{Target, ThreadInfo, wait_reason_name};
 use crate::triage_report::{
-    BlackboxState, FailureSignatureSource, KmdfLogFinding, TRIAGE_BACKTRACE_LIMIT, TriageReport,
-    WheaRecordState, exception_code_name, time::filetime_to_iso,
+    BlackboxState, FailureSignatureSource, KmdfLogFinding, POWER_THREAD_STACK_LIMIT,
+    PowerFailureFinding, PowerThreadRole, TRIAGE_BACKTRACE_LIMIT, TriageReport, WheaRecordState,
+    exception_code_name, power_failure_finding, time::filetime_to_iso,
 };
 use crate::ui;
 use crate::unwind::StackTrace;
 
+use super::power::{
+    duration_text, holder_text, print_power_irp_list, print_power_worker_list, request_text,
+};
 use crate::repl::*;
 
 repl_command! {
@@ -18,7 +22,7 @@ repl_command! {
     names: ["!analyze", "analyze"],
     usage: "!analyze [-v] [-show <bugcheck-code> [p1 p2 p3 p4]] [-hang]",
     summary: "Show a first-pass crash triage report.",
-    details: "Without -v, the command shows the short verdict: the bugcheck line, the failure signature, the culprit, the verifier and WHEA findings, and the relevant modules. -v adds the full bugcheck arguments, the faulting context, the stack, and all modules. -show decodes a bugcheck code when there is no crash, and -hang triages the waits on each processor.",
+    details: "Without -v, the command shows the short verdict: the bugcheck line, the failure signature, the culprit, the verifier and WHEA findings, and the relevant modules. -v adds the full bugcheck arguments, the faulting context, the stack, and all modules. For a DRIVER_POWER_STATE_FAILURE (0x9F), the report names what is stuck: for subtype 0x3, the blocked IRP, the driver whose stack location it is pending in, which becomes the culprit, the device stack of the PDO, and the power IRP worker threads with their stacks; for 0x4, the thread that holds the PnP lock and its stack; for 0x1, 0x2, and 0x500, the driver of the device or driver object in the parameters. -show decodes a bugcheck code when there is no crash, and for a 0x9F reads what its parameters point to in the target. -hang triages the waits on each processor.",
     completion: Expression,
 }
 
@@ -67,6 +71,7 @@ pub fn signature_source(source: FailureSignatureSource) -> &'static str {
         FailureSignatureSource::ExceptionAddress => "exception address",
         FailureSignatureSource::CurrentInstruction => "current instruction",
         FailureSignatureSource::TopFrame => "top frame",
+        FailureSignatureSource::PowerFailureDriver => "driver the 0x9F names",
         FailureSignatureSource::CodeOnly => "code only",
     }
 }
@@ -580,6 +585,141 @@ fn print_crash_intelligence(report: &TriageReport) {
             ui::muted("(!wdfkd.wdfcrashdump)")
         );
     }
+
+    if let Some(power) = &report.power {
+        print_power_failure(power);
+    }
+}
+
+/// The 0x9F section of `!analyze`: what is stuck, and the threads involved.
+fn print_power_failure(finding: &PowerFailureFinding) {
+    let failure = &finding.failure;
+    print_section("power failure");
+    outln!("  subtype {:#x}: {}", failure.subtype, failure.description);
+    if let Some(culprit) = &failure.culprit {
+        outln!(
+            "  {} {} {}",
+            ui::muted("driver     "),
+            ui::symbol(&culprit.driver.label()),
+            culprit.reason
+        );
+    }
+    if let Some(blocked) = &failure.blocked_irp {
+        outln!(
+            "  {} {}  {}",
+            ui::muted("blocked IRP"),
+            ui::addr(blocked.irp.0),
+            ui::muted("(!irp)")
+        );
+        match &blocked.holder {
+            Ok(holder) => {
+                outln!(
+                    "  {} {}",
+                    ui::muted("request    "),
+                    request_text(
+                        holder.major_function,
+                        holder.minor_function,
+                        holder.state.as_ref()
+                    )
+                );
+                outln!("  {} {}", ui::muted("pending in "), holder_text(holder));
+            }
+            Err(error) => outln!(
+                "  {} {}",
+                ui::muted("pending in "),
+                ui::muted(&format!("unknown: {error}"))
+            ),
+        }
+        if let Some(data) = &blocked.data {
+            let pending = data.pending.map_or_else(
+                || format!("watchdog {}", data.watchdog.label()),
+                |pending| format!("{} since the watchdog was armed", duration_text(pending)),
+            );
+            outln!(
+                "  {} {}  {}",
+                ui::muted("pending for"),
+                pending,
+                ui::muted(&format!("POP_IRP_DATA {}", ui::addr(data.data.0)))
+            );
+        }
+    }
+    if let Some(device) = failure.device {
+        outln!(
+            "  {} {}  {}",
+            ui::muted("device     "),
+            ui::addr(device.0),
+            ui::muted("(!devstack, !podev)")
+        );
+    }
+    match &failure.stack {
+        Some(Ok(stack)) => {
+            let holder = failure
+                .blocked_irp
+                .as_ref()
+                .and_then(|blocked| blocked.holder.as_ref().ok())
+                .map(|holder| holder.device);
+            for entry in &stack.entries {
+                let marker = if Some(entry.device_object) == holder {
+                    ">"
+                } else {
+                    " "
+                };
+                outln!(
+                    "   {marker} {}  {:<20} {}",
+                    ui::addr(entry.device_object.0),
+                    entry.driver_name,
+                    entry.object_name
+                );
+            }
+            if holder.is_some() {
+                outln!("  {}", ui::muted("> holds the blocked IRP"));
+            }
+        }
+        Some(Err(error)) => outln!(
+            "  {} {}",
+            ui::muted("stack      "),
+            ui::muted(&format!("unavailable: {error}"))
+        ),
+        None => {}
+    }
+    if let Some(seconds) = failure.timeout_seconds {
+        outln!("  {} {} s", ui::muted("timeout    "), seconds);
+    }
+    if let Some(owner) = failure.pnp_lock_owner {
+        outln!(
+            "  {} {}  {}",
+            ui::muted("PnP lock   "),
+            ui::addr(owner.0),
+            ui::muted("thread holding it (!thread)")
+        );
+    }
+    if let Some(irps) = &failure.irps {
+        print_power_irp_list(irps, "  ");
+    }
+    if let Some(workers) = &failure.workers {
+        print_power_worker_list(workers, "  ");
+    }
+    for thread in &finding.threads {
+        let role = match thread.role {
+            PowerThreadRole::PnpLockOwner => "PnP lock owner".to_string(),
+            PowerThreadRole::IrpWorker { irp, .. } if irp.is_zero() => {
+                "IRP worker, waiting for work".to_string()
+            }
+            PowerThreadRole::IrpWorker { irp, device } => format!(
+                "IRP worker, IRP {} device {}",
+                ui::addr(irp.0),
+                ui::addr(device.0)
+            ),
+        };
+        outln!("  thread {}  {}", ui::addr(thread.thread.0), role);
+        match &thread.stack {
+            Ok(trace) => print_stacktrace_data(trace, POWER_THREAD_STACK_LIMIT, false),
+            Err(error) => outln!("  {}", ui::muted(&format!("stack unavailable: {error}"))),
+        }
+    }
+    for note in &failure.notes {
+        outln!("  {}", ui::muted(note));
+    }
 }
 
 /// `wtd's In-Flight Recorder log, 1 record`.
@@ -781,6 +921,17 @@ impl ReplState<'_> {
         };
         if let Some(info) = &options.show {
             print_bugcheck_info(&self.ctx.target, info);
+            // The structures a 0x9F's parameters point to, read from the
+            // target as for a real stop.
+            if let Some(finding) = power_failure_finding(self.ctx, info.code, &info.parameters) {
+                #[cfg(feature = "cli")]
+                native::render(
+                    || native::analyze::power_failure(&finding),
+                    || print_power_failure(&finding),
+                );
+                #[cfg(not(feature = "cli"))]
+                print_power_failure(&finding);
+            }
             if !options.verbose && !options.hang {
                 outln!();
                 return Ok(());

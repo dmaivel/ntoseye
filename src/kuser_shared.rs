@@ -32,6 +32,21 @@ impl<'a> KuserSharedData<'a> {
         self.u64_field("InterruptTime")
     }
 
+    /// The interrupt time the system spent asleep or hibernated, which
+    /// `KeQueryUnbiasedInterruptTime` subtracts from `InterruptTime`.
+    fn interrupt_time_bias(&self) -> Option<u64> {
+        self.u64_field("InterruptTimeBias")
+    }
+
+    /// `KeQueryUnbiasedInterruptTime`: the time since boot without the
+    /// time spent asleep, in 100 ns units.
+    pub fn unbiased_interrupt_time(&self) -> Option<u64> {
+        Some(
+            self.interrupt_time()?
+                .wrapping_sub(self.interrupt_time_bias()?),
+        )
+    }
+
     pub fn system_time(&self) -> Option<u64> {
         self.u64_field("SystemTime")
     }

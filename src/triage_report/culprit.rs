@@ -2,8 +2,8 @@
 //! and names a non-kernel culprit when the evidence supports one.
 
 use super::{
-    CulpritAttribution, CulpritConfidence, CulpritEvidence, CulpritEvidenceKind, TriageReport,
-    canonical_module_component, evidence_module_for_address, names_match,
+    CulpritAttribution, CulpritConfidence, CulpritEvidence, CulpritEvidenceKind, PowerThreadRole,
+    TriageReport, canonical_module_component, evidence_module_for_address, names_match,
 };
 use crate::bugchecks::module_filename;
 
@@ -59,6 +59,50 @@ pub(super) fn culprit_attribution(report: &TriageReport) -> Option<CulpritAttrib
                     kind: CulpritEvidenceKind::BugcheckFaultAddress,
                     detail: format!("bugcheck fault address resolves to {module}"),
                     address: Some(fault.ip),
+                },
+            );
+        }
+    }
+    if let Some(power) = &report.power {
+        if let Some(culprit) = &power.failure.culprit
+            && let Some(module) = culprit.driver.module.as_deref()
+        {
+            add_culprit_evidence(
+                &mut candidates,
+                module,
+                CulpritConfidence::High,
+                CulpritEvidence {
+                    kind: CulpritEvidenceKind::PowerFailureDriver,
+                    detail: format!("{} {}", culprit.driver.label(), culprit.reason),
+                    address: Some(culprit.device.0),
+                },
+            );
+        }
+        // The first frame outside the kernel on the stack of the thread
+        // that holds the PnP lock: the driver it waits in or for.
+        let owner_frame = power
+            .threads
+            .iter()
+            .filter(|thread| thread.role == PowerThreadRole::PnpLockOwner)
+            .filter_map(|thread| thread.stack.as_ref().ok())
+            .flat_map(|stack| stack.frames.iter())
+            .find_map(|frame| {
+                evidence_module_for_address(report, frame.ip)
+                    .filter(|module| !is_kernel_module(module))
+                    .map(|module| (frame, module))
+            });
+        if let Some((frame, module)) = owner_frame {
+            add_culprit_evidence(
+                &mut candidates,
+                module,
+                CulpritConfidence::Medium,
+                CulpritEvidence {
+                    kind: CulpritEvidenceKind::PnpLockOwnerStack,
+                    detail: format!(
+                        "the thread holding the PnP lock runs {} in {module}",
+                        frame.symbol
+                    ),
+                    address: Some(frame.ip),
                 },
             );
         }

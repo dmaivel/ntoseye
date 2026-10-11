@@ -1260,6 +1260,40 @@ impl Inspect {
         })
     }
 
+    /// Get the system power action in progress, the power IRPs the power
+    /// manager has allocated, and its IRP worker threads (`!poaction`).
+    fn power_action<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::power::PowerAction>> {
+        self.typed(py, |session| {
+            let detail = session.target.power_action().map_err(err)?;
+            Ok(view::power::power_action(&detail))
+        })
+    }
+
+    /// Get a device object's power state and the power IRPs sent to its
+    /// stack (`!podev`).
+    fn device_power<'py>(
+        &self,
+        py: Python<'py>,
+        device: DeviceArg<'_>,
+    ) -> PyResult<Typed<'py, view::power::DevicePower>> {
+        let address = match device {
+            DeviceArg::Device(device) => {
+                device
+                    .owner
+                    .require_argument_of(py, &self.owner, "device")?;
+                device.address
+            }
+            DeviceArg::Address(address) => address,
+        };
+        self.typed(py, |session| {
+            let detail = session
+                .target
+                .device_power(VirtAddr(address))
+                .map_err(err)?;
+            Ok(view::power::device_power(&detail))
+        })
+    }
+
     /// Get the Driver Verifier configuration and statistics (`!verifier`).
     fn verifier<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::meta::Verifier>> {
         self.typed(py, |session| {

@@ -34,6 +34,7 @@ mod ndis;
 mod object;
 mod physical;
 mod pnp;
+pub mod power;
 pub mod process;
 mod process_objects;
 mod rcdr;

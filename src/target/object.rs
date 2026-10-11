@@ -8,7 +8,7 @@ use crate::bugchecks::looks_like_kernel_pointer;
 use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix};
 use crate::guest::{Guest, ProcessInfo};
-use crate::layout::{StructRef, TypeInfo};
+use crate::layout::{StructRef, TypeInfo, Types};
 use crate::memory::PAGE_SIZE;
 use crate::types::VirtAddr;
 
@@ -401,6 +401,56 @@ fn select_object_header_candidate(
     }
 }
 
+/// The `stack_count` stack locations after the `_IRP` at `irp`, read in
+/// `types`, up to the first that cannot be read.
+fn read_io_stack(
+    types: Types<'_>,
+    irp: VirtAddr,
+    stack_count: u8,
+) -> Result<Vec<IoStackLocationInfo>> {
+    // The I/O manager allocates at most a few dozen; a larger count is
+    // garbage and must not drive reads far past the IRP.
+    if stack_count > MAX_IRP_STACK_COUNT {
+        return Ok(Vec::new());
+    }
+    let irp_size = types.layout("_IRP")?.size as u64;
+    let layout = types.layout("_IO_STACK_LOCATION")?;
+    let stack_size = layout.size as u64;
+    let mut stack = Vec::with_capacity(usize::from(stack_count));
+    for index in 0..u64::from(stack_count) {
+        let address = irp + irp_size + index * stack_size;
+        let ios = types
+            .struct_with_layout(Arc::clone(&layout), address)
+            .prefetch();
+        let read = || -> Result<IoStackLocationInfo> {
+            let others = ios.embedded("Parameters")?.embedded("Others")?;
+            let argument = |name| others.read_uint(name);
+            Ok(IoStackLocationInfo {
+                address,
+                major_function: ios.read_field("MajorFunction")?,
+                minor_function: ios.read_field("MinorFunction")?,
+                flags: ios.read_field("Flags")?,
+                control: ios.read_field("Control")?,
+                arguments: [
+                    argument("Argument1")?,
+                    argument("Argument2")?,
+                    argument("Argument3")?,
+                    argument("Argument4")?,
+                ],
+                device_object: ios.read_field("DeviceObject")?,
+                file_object: ios.read_field("FileObject")?,
+                completion_routine: ios.read_field("CompletionRoutine")?,
+                context: ios.read_field("Context")?,
+            })
+        };
+        match read() {
+            Ok(location) => stack.push(location),
+            Err(_) => break,
+        }
+    }
+    Ok(stack)
+}
+
 impl Target {
     /// Open a fluent cursor over a kernel struct (ntoskrnl's layout, read
     /// through ntoskrnl's address space).
@@ -650,55 +700,8 @@ impl Target {
             mdl_address: irp.read_field("MdlAddress")?,
             system_buffer,
             thread: irp_thread(irp),
-            stack: self.read_io_stack(address, stack_count).unwrap_or_default(),
+            stack: read_io_stack(irp.types(), address, stack_count).unwrap_or_default(),
         })
-    }
-
-    /// The `stack_count` stack locations after the `_IRP` at `irp`, up to
-    /// the first that cannot be read.
-    fn read_io_stack(&self, irp: VirtAddr, stack_count: u8) -> Result<Vec<IoStackLocationInfo>> {
-        // The I/O manager allocates at most a few dozen; a larger count is
-        // garbage and must not drive reads far past the IRP.
-        if stack_count > MAX_IRP_STACK_COUNT {
-            return Ok(Vec::new());
-        }
-        let types = self.guest()?.ntoskrnl.types();
-        let irp_size = types.layout("_IRP")?.size as u64;
-        let layout = types.layout("_IO_STACK_LOCATION")?;
-        let stack_size = layout.size as u64;
-        let mut stack = Vec::with_capacity(usize::from(stack_count));
-        for index in 0..u64::from(stack_count) {
-            let address = irp + irp_size + index * stack_size;
-            let ios = types
-                .struct_with_layout(Arc::clone(&layout), address)
-                .prefetch();
-            let read = || -> Result<IoStackLocationInfo> {
-                let others = ios.embedded("Parameters")?.embedded("Others")?;
-                let argument = |name| others.read_uint(name);
-                Ok(IoStackLocationInfo {
-                    address,
-                    major_function: ios.read_field("MajorFunction")?,
-                    minor_function: ios.read_field("MinorFunction")?,
-                    flags: ios.read_field("Flags")?,
-                    control: ios.read_field("Control")?,
-                    arguments: [
-                        argument("Argument1")?,
-                        argument("Argument2")?,
-                        argument("Argument3")?,
-                        argument("Argument4")?,
-                    ],
-                    device_object: ios.read_field("DeviceObject")?,
-                    file_object: ios.read_field("FileObject")?,
-                    completion_routine: ios.read_field("CompletionRoutine")?,
-                    context: ios.read_field("Context")?,
-                })
-            };
-            match read() {
-                Ok(location) => stack.push(location),
-                Err(_) => break,
-            }
-        }
-        Ok(stack)
     }
 
     /// The name of the driver whose device object is at `device`, such as

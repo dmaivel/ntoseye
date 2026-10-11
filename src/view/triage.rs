@@ -4,13 +4,15 @@
 use super::bugcheck::{Bugcheck, bugcheck};
 use super::execution::{run_status, stack_frames};
 use super::module::module;
+use super::pnp::device_stack;
+use super::power::{power_driver, power_irp, power_irp_holder, power_irp_list, power_worker_list};
 use super::shape::{Diag, Hex, shapes};
 use crate::dmp::{self, DmpException, DmpSystemInfo, TriageCrashInfo};
 use crate::triage::TriagePrcbInfo;
 use crate::triage_report::{
     BlackboxFinding, BlackboxKind, BlackboxState, CulpritAttribution, CulpritConfidence,
-    CulpritEvidenceKind, FailureCodeKind, FailureSignatureSource, WheaRecordState,
-    WheaSectionKind, exception_code_name, time::filetime_to_iso,
+    CulpritEvidenceKind, FailureCodeKind, FailureSignatureSource, PowerFailureFinding as PowerDetail,
+    PowerThreadRole, WheaRecordState, WheaSectionKind, exception_code_name, time::filetime_to_iso,
 };
 use crate::triage_report::{
     FailureSignature as SignatureDetail, TriageReport as ReportDetail,
@@ -94,8 +96,8 @@ shapes! {
         /// The bugcheck or exception code.
         code: Hex<u32>,
         /// The source of the failing location: `bugcheck_fault`,
-        /// `exception_address`, `current_instruction`, `top_frame`, or
-        /// `code_only`.
+        /// `exception_address`, `current_instruction`, `top_frame`,
+        /// `power_failure_driver` (the driver a 0x9F names), or `code_only`.
         source: &'static str,
         /// The module at the failing location.
         module: Option<String>,
@@ -121,7 +123,8 @@ shapes! {
     CulpritEvidence {
         /// `recorded_broken_driver`, `recorded_bugcheck_driver`,
         /// `bugcheck_fault_address`, `exception_address`,
-        /// `current_instruction`, or `top_frame`.
+        /// `current_instruction`, `top_frame`, `power_failure_driver`, or
+        /// `pnp_lock_owner_stack`.
         kind: &'static str,
         detail: String,
         /// The address that the evidence uses, if the evidence is an address.
@@ -223,6 +226,63 @@ shapes! {
         end_address: Hex,
     }
 
+    /// The IRP that a 0x9F/0x3 names, and where it is pending.
+    BlockedPowerIrp {
+        irp: Hex,
+        /// The driver of the IRP's current stack location.
+        holder: Diag<super::power::PowerIrpHolder>,
+        /// The IRP's entry on the power IRP list. `None` when it is not on
+        /// the list.
+        data: Option<super::power::PowerIrp>,
+    }
+
+    /// The driver that a DRIVER_POWER_STATE_FAILURE names, and why.
+    PowerFailureCulprit {
+        driver: super::power::PowerDriver,
+        /// The device object that ties the driver to the failure.
+        device: Hex,
+        reason: String,
+    }
+
+    /// A thread that a DRIVER_POWER_STATE_FAILURE names, with its stack.
+    PowerFailureThread {
+        /// `irp_worker` or `pnp_lock_owner`.
+        role: &'static str,
+        thread: Hex,
+        /// For an IRP worker, the IRP it is passing to a driver; 0 while it
+        /// waits.
+        irp: Option<Hex>,
+        device: Option<Hex>,
+        stack: Diag<Vec<super::execution::StackFrame>>,
+    }
+
+    /// What a DRIVER_POWER_STATE_FAILURE (0x9F) names as stuck.
+    PowerFailure {
+        /// Parameter 1.
+        subtype: Hex,
+        description: &'static str,
+        /// The device object that the parameters name.
+        device: Option<Hex>,
+        /// The stack of `device`.
+        device_stack: Option<Diag<super::pnp::DeviceStack>>,
+        /// 0x3: the blocked IRP.
+        blocked_irp: Option<BlockedPowerIrp>,
+        /// 0x3: the power IRPs on the list that `TRIAGE_9F_POWER` names.
+        irps: Option<super::power::PowerIrpList>,
+        /// 0x3: the IRP worker threads on the list that `TRIAGE_9F_POWER`
+        /// names.
+        workers: Option<super::power::PowerWorkerList>,
+        /// 0x4: the thread that holds the PnP lock.
+        pnp_lock_owner: Option<Hex>,
+        /// 0x4: the timeout in seconds.
+        timeout_seconds: Option<u64>,
+        culprit: Option<PowerFailureCulprit>,
+        /// The IRP worker threads and the PnP lock owner, with their stacks.
+        threads: Vec<PowerFailureThread>,
+        /// What could not be read, and why.
+        notes: Vec<String>,
+    }
+
     /// The one-shot crash triage report (`!analyze`), with the run status, the
     /// bugcheck or exception, the backtrace, the modules, the dump records,
     /// and the findings.
@@ -262,6 +322,8 @@ shapes! {
         /// The hardware error record of a WHEA bugcheck.
         whea: Option<WheaFinding>,
         blackboxes: Vec<BlackboxStream>,
+        /// What a DRIVER_POWER_STATE_FAILURE names as stuck.
+        power: Option<PowerFailure>,
         /// Failures in best-effort data collection that did not stop the
         /// report.
         warnings: Vec<String>,
@@ -341,6 +403,7 @@ fn failure_signature(signature: &SignatureDetail) -> FailureSignature {
         FailureSignatureSource::ExceptionAddress => "exception_address",
         FailureSignatureSource::CurrentInstruction => "current_instruction",
         FailureSignatureSource::TopFrame => "top_frame",
+        FailureSignatureSource::PowerFailureDriver => "power_failure_driver",
         FailureSignatureSource::CodeOnly => "code_only",
     };
     FailureSignature {
@@ -374,6 +437,8 @@ fn culprit(culprit: &CulpritAttribution) -> Culprit {
                     CulpritEvidenceKind::ExceptionAddress => "exception_address",
                     CulpritEvidenceKind::CurrentInstruction => "current_instruction",
                     CulpritEvidenceKind::TopFrame => "top_frame",
+                    CulpritEvidenceKind::PowerFailureDriver => "power_failure_driver",
+                    CulpritEvidenceKind::PnpLockOwnerStack => "pnp_lock_owner_stack",
                 },
                 detail: evidence.detail.clone(),
                 address: evidence.address,
@@ -474,6 +539,63 @@ fn unloaded_driver(driver: &dmp::UnloadedDriver) -> UnloadedDriver {
     }
 }
 
+fn power_failure(finding: &PowerDetail) -> PowerFailure {
+    let failure = &finding.failure;
+    let diagnostic = |value: &std::result::Result<_, String>| match value {
+        Ok(stack) => DiagnosticValue::Available(device_stack(stack)),
+        Err(error) => DiagnosticValue::unavailable(error.clone()),
+    };
+    PowerFailure {
+        subtype: failure.subtype,
+        description: failure.description,
+        device: failure.device.map(|device| device.0),
+        device_stack: failure.stack.as_ref().map(diagnostic),
+        blocked_irp: failure.blocked_irp.as_ref().map(|blocked| BlockedPowerIrp {
+            irp: blocked.irp.0,
+            holder: match &blocked.holder {
+                Ok(holder) => DiagnosticValue::Available(power_irp_holder(holder)),
+                Err(error) => DiagnosticValue::unavailable(error.clone()),
+            },
+            data: blocked.data.as_ref().map(power_irp),
+        }),
+        irps: failure.irps.as_ref().map(power_irp_list),
+        workers: failure.workers.as_ref().map(power_worker_list),
+        pnp_lock_owner: failure.pnp_lock_owner.map(|thread| thread.0),
+        timeout_seconds: failure.timeout_seconds,
+        culprit: failure
+            .culprit
+            .as_ref()
+            .map(|culprit| PowerFailureCulprit {
+                driver: power_driver(&culprit.driver),
+                device: culprit.device.0,
+                reason: culprit.reason.clone(),
+            }),
+        threads: finding
+            .threads
+            .iter()
+            .map(|thread| {
+                let (role, irp, device) = match thread.role {
+                    PowerThreadRole::IrpWorker { irp, device } => {
+                        ("irp_worker", Some(irp.0), Some(device.0))
+                    }
+                    PowerThreadRole::PnpLockOwner => ("pnp_lock_owner", None, None),
+                };
+                PowerFailureThread {
+                    role,
+                    thread: thread.thread.0,
+                    irp,
+                    device,
+                    stack: match &thread.stack {
+                        Ok(trace) => DiagnosticValue::Available(stack_frames(&trace.frames)),
+                        Err(error) => DiagnosticValue::unavailable(error.clone()),
+                    },
+                }
+            })
+            .collect(),
+        notes: failure.notes.clone(),
+    }
+}
+
 /// Canonical structured crash-triage shape used by MCP and Python. The caller
 /// chooses its module cap; all other collections are already bounded by the
 /// presentation-free report builder.
@@ -508,6 +630,7 @@ pub fn triage_report(report: &ReportDetail, module_limit: usize) -> TriageReport
         verifier: report.verifier.as_ref().map(verifier),
         whea: report.whea.as_ref().map(whea),
         blackboxes: report.blackboxes.iter().map(blackbox).collect(),
+        power: report.power.as_ref().map(power_failure),
         warnings: report.warnings.clone(),
     }
 }

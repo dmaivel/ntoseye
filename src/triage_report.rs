@@ -2,6 +2,7 @@
 
 mod blackbox;
 mod culprit;
+mod power;
 mod signature;
 pub mod time;
 mod verifier;
@@ -17,6 +18,10 @@ use crate::types::VirtAddr;
 use crate::unwind::StackTrace;
 use blackbox::blackbox_findings;
 use culprit::culprit_attribution;
+pub use power::{
+    POWER_THREAD_STACK_LIMIT, PowerFailureFinding, PowerFailureThread, PowerThreadRole,
+    power_failure_finding,
+};
 use signature::failure_signature;
 use verifier::verifier_finding;
 use whea::{decode_whea_record, whea_without_memory};
@@ -34,6 +39,10 @@ pub enum FailureSignatureSource {
     ExceptionAddress,
     CurrentInstruction,
     TopFrame,
+    /// The driver a DRIVER_POWER_STATE_FAILURE names: the one that holds
+    /// the blocked power IRP, or the one whose device or driver object the
+    /// parameters give.
+    PowerFailureDriver,
     CodeOnly,
 }
 
@@ -65,6 +74,10 @@ pub enum CulpritEvidenceKind {
     ExceptionAddress,
     CurrentInstruction,
     TopFrame,
+    /// A DRIVER_POWER_STATE_FAILURE names the driver.
+    PowerFailureDriver,
+    /// The thread that holds the PnP lock in a 0x9F/0x4 runs in the module.
+    PnpLockOwnerStack,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,6 +216,8 @@ pub struct TriageReport {
     pub blackboxes: Vec<BlackboxFinding>,
     /// The KMDF driver whose In-Flight Recorder log the dump holds.
     pub kmdf_log: Option<KmdfLogFinding>,
+    /// What a DRIVER_POWER_STATE_FAILURE names as stuck.
+    pub power: Option<PowerFailureFinding>,
     /// Best-effort collection failures that did not prevent the report.
     pub warnings: Vec<String>,
 }
@@ -276,6 +291,14 @@ impl TriageReport {
                 state: decode_whea_record(&session.target.context_memory(), address),
             });
         }
+        report.power = report.bugcheck.as_ref().and_then(|bugcheck| {
+            let parameters: Vec<u64> = bugcheck.args.iter().map(|arg| arg.value).collect();
+            power_failure_finding(session, bugcheck.code, &parameters)
+        });
+        if report.power.is_some() {
+            report.failure_signature = failure_signature(&report);
+            report.culprit = culprit_attribution(&report);
+        }
         report
     }
 
@@ -308,6 +331,7 @@ impl TriageReport {
             whea: None,
             blackboxes,
             kmdf_log: None,
+            power: None,
             warnings: Vec::new(),
         };
         report.failure_signature = failure_signature(&report);
@@ -416,6 +440,7 @@ mod tests {
     use crate::kd::context::REGISTER_BUFFER_SIZE;
     use crate::session::RunStatus;
     use crate::symbols::CodeFrame;
+    use crate::target::power::{DeviceDriver, PowerCulprit, PowerFailure};
     use crate::triage::TriageDriver;
     use crate::types::VirtAddr;
     use crate::unwind::{FrameSource, StackFrame};
@@ -793,6 +818,138 @@ mod tests {
         assert_eq!(
             unknown.subcode_description,
             "unknown verifier subcode 0xdead"
+        );
+    }
+
+    const NT_BASE: u64 = 0xffff_f800_0000_0000;
+    const DRIVER_BASE: u64 = 0xffff_f800_1000_0000;
+
+    fn frame(ip: u64, symbol: &str) -> StackFrame {
+        StackFrame {
+            sp: 0x8000,
+            ip,
+            symbol: symbol.into(),
+            source: FrameSource::Unwind,
+            source_location: None,
+            machine_frame: None,
+            code: CodeFrame::at(VirtAddr(ip)),
+            inline: false,
+        }
+    }
+
+    fn power_modules() -> Vec<ModuleInfo> {
+        vec![
+            ModuleInfo::new("ntoskrnl.exe".into(), VirtAddr(NT_BASE), 0x10_0000),
+            ModuleInfo::new("stuck.sys".into(), VirtAddr(DRIVER_BASE), 0x1_0000),
+        ]
+    }
+
+    fn power_failure(subtype: u64, culprit: Option<&str>) -> PowerFailure {
+        PowerFailure {
+            subtype,
+            description: "",
+            device: None,
+            stack: None,
+            blocked_irp: None,
+            irps: None,
+            workers: None,
+            pnp_lock_owner: None,
+            timeout_seconds: None,
+            culprit: culprit.map(|module| PowerCulprit {
+                driver: DeviceDriver {
+                    driver_object: VirtAddr(0xffff_9000_0000_2000),
+                    name: "\\Driver\\stuck".into(),
+                    driver_start: VirtAddr(DRIVER_BASE),
+                    module: Some(module.into()),
+                },
+                device: VirtAddr(0xffff_9000_0000_1000),
+                reason: "holds the blocked power IRP".into(),
+            }),
+            notes: Vec::new(),
+        }
+    }
+
+    /// A 0x9F report as `build` completes it: the power finding read, then
+    /// the signature and culprit worked out again with it.
+    fn power_report(subtype: u64, finding: PowerFailureFinding) -> TriageReport {
+        let trace = StackTrace {
+            frames: vec![
+                frame(NT_BASE + 0x100, "nt!KeBugCheckEx"),
+                frame(NT_BASE + 0x200, "nt!PopIrpWatchdogBugcheck+0x1f0"),
+            ],
+            truncated: 0,
+        };
+        let mut report = TriageReport::assemble(
+            status(false, Some(NT_BASE + 0x100)),
+            Some(bugcheck(0x9f, [subtype, 0, 0, 0], None)),
+            Some(trace),
+            power_modules(),
+            None,
+            None,
+        );
+        report.power = Some(finding);
+        report.failure_signature = failure_signature(&report);
+        report.culprit = culprit_attribution(&report);
+        report
+    }
+
+    #[test]
+    fn a_0x9f_is_bucketed_on_the_driver_it_names_not_the_watchdog_stack() {
+        let report = power_report(
+            3,
+            PowerFailureFinding {
+                failure: power_failure(3, Some("stuck.sys")),
+                threads: Vec::new(),
+            },
+        );
+
+        let signature = report.failure_signature.unwrap();
+        assert_eq!(signature.bucket, "bugcheck:0000009f|subtype:3|module:stuck");
+        assert_eq!(signature.source, FailureSignatureSource::PowerFailureDriver);
+        let culprit = report.culprit.unwrap();
+        assert_eq!(culprit.module, "stuck.sys");
+        assert_eq!(culprit.confidence, CulpritConfidence::High);
+        assert_eq!(
+            culprit.evidence[0].kind,
+            CulpritEvidenceKind::PowerFailureDriver
+        );
+        assert_eq!(culprit.evidence[0].address, Some(0xffff_9000_0000_1000));
+    }
+
+    #[test]
+    fn a_0x9f_0x4_suspects_the_first_driver_on_the_pnp_lock_owners_stack() {
+        let owner = StackTrace {
+            frames: vec![
+                frame(NT_BASE + 0x300, "nt!KeWaitForSingleObject+0x846"),
+                frame(DRIVER_BASE + 0x1234, "stuck!WaitForDevice+0x40"),
+                frame(NT_BASE + 0x400, "nt!IopfCallDriver+0x53"),
+            ],
+            truncated: 0,
+        };
+        let report = power_report(
+            4,
+            PowerFailureFinding {
+                failure: power_failure(4, None),
+                threads: vec![PowerFailureThread {
+                    role: PowerThreadRole::PnpLockOwner,
+                    thread: VirtAddr(0xffff_9000_0000_3000),
+                    stack: Ok(owner),
+                }],
+            },
+        );
+
+        let culprit = report.culprit.unwrap();
+        assert_eq!(culprit.module, "stuck.sys");
+        assert_eq!(culprit.confidence, CulpritConfidence::Medium);
+        assert_eq!(
+            culprit.evidence[0].kind,
+            CulpritEvidenceKind::PnpLockOwnerStack
+        );
+        assert_eq!(culprit.evidence[0].address, Some(DRIVER_BASE + 0x1234));
+        // Only a driver the parameters name buckets the failure.
+        assert_eq!(
+            report.failure_signature.unwrap().bucket,
+            "bugcheck:0000009f|subtype:4|symbol:nt!kebugcheckex"
         );
     }
 }

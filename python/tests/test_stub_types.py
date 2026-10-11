@@ -82,9 +82,10 @@ def hypervisor_results(dbg: Debugger) -> list[tuple[object, str, Callable[[], ob
 
 
 def driver_results(dbg: Debugger) -> list[tuple[object, str, Callable[[], object]]]:
-    """NDIS, StorPort, classpnp, the WPP recorder, and the HAL's interrupt
-    controllers and SMBIOS table, on a guest with a NIC and a StorPort disk;
-    the local APIC on the kd backends, which switch processors for it."""
+    """NDIS, StorPort, classpnp, the WPP recorder, the power manager, and the
+    HAL's interrupt controllers and SMBIOS table, on a guest with a NIC and a
+    StorPort disk; the local APIC on the kd backends, which switch processors
+    for it."""
     inspect = dbg.inspect
     miniport = inspect.ndis_miniports().miniports[0]
     minidriver = inspect.ndis_minidrivers().drivers[0]
@@ -100,6 +101,11 @@ def driver_results(dbg: Debugger) -> list[tuple[object, str, Callable[[], object
     unit = next(entry.extension for entry in adapter.units if entry.unit is not None)
     disk = inspect.class_devices().devices[0]
     recorded = inspect.rcdr_drivers().drivers[0].name
+    # A PDO with a power IRP outstanding, such as a USB device's wait/wake.
+    power_irps = inspect.power_action().irps.value
+    pdo: int | None = None
+    if power_irps is not None:
+        pdo = next((irp.value.pdo for irp in power_irps.irps if irp.value is not None), None)
     found: list[tuple[object, str, Callable[[], object]]] = [
         (inspect, "ndis_miniports", inspect.ndis_miniports),
         (inspect, "ndis_miniport", lambda: inspect.ndis_miniport(miniport.address)),
@@ -122,9 +128,12 @@ def driver_results(dbg: Debugger) -> list[tuple[object, str, Callable[[], object
         (inspect, "rcdr_log", lambda: inspect.rcdr_log(recorded)),
         (inspect, "interrupt_controllers", inspect.interrupt_controllers),
         (inspect, "smbios", inspect.smbios),
+        (inspect, "power_action", inspect.power_action),
     ]
     if filters:
         found.append((inspect, "ndis_filter", lambda: inspect.ndis_filter(filters[0].address)))
+    if pdo is not None:
+        found.append((inspect, "device_power", lambda: inspect.device_power(pdo)))
     if os.environ.get("NTOSEYE_TEST_BACKEND") in {"kd", "kdnet"}:
         cpu = list(dbg.cpus)[-1]
         found.append((cpu, "apic", cpu.apic))

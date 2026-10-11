@@ -1219,6 +1219,25 @@ class BlackboxStream(BaseRecord):
         What the record holds, in one line. None if it does not decode.
         """
 
+@final
+class BlockedPowerIrp(BaseRecord):
+    """
+    The IRP that a 0x9F/0x3 names, and where it is pending.
+    """
+    @property
+    def data(self, /) -> PowerIrp |None:
+        """
+        The IRP's entry on the power IRP list. `None` when it is not on
+        the list.
+        """
+    @property
+    def holder(self, /) -> Diagnostic[PowerIrpHolder]:
+        """
+        The driver of the IRP's current stack location.
+        """
+    @property
+    def irp(self, /) -> int: ...
+
 class Breakpoint:
     """
     A breakpoint handle. Because a breakpoint stays when ntoseye builds the
@@ -2343,7 +2362,8 @@ class CulpritEvidence(BaseRecord):
         """
         `recorded_broken_driver`, `recorded_bugcheck_driver`,
         `bugcheck_fault_address`, `exception_address`,
-        `current_instruction`, or `top_frame`.
+        `current_instruction`, `top_frame`, `power_failure_driver`, or
+        `pnp_lock_owner_stack`.
         """
 
 @final
@@ -2854,6 +2874,32 @@ class DevNodeHistoryState(BaseRecord):
     def state_name(self, /) -> str: ...
 
 @final
+class DevNodePower(BaseRecord):
+    """
+    The power fields of the device node of a device's stack.
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def current_state(self, /) -> str:
+        """
+        The device state of the PDO, as PnP records it.
+        """
+    @property
+    def fx_device(self, /) -> int:
+        """
+        The device's `_POP_FX_DEVICE`, or 0 when its driver did not
+        register with the power framework.
+        """
+    @property
+    def fx_pending_irp(self, /) -> int |None:
+        """
+        The device power IRP the power framework has outstanding.
+        """
+    @property
+    def instance_path(self, /) -> str: ...
+
+@final
 class DevNodeSummary(BaseRecord):
     """
     The identity and state of a device node, as the subtree and triage
@@ -2923,6 +2969,29 @@ class Device:
     def to_dict(self, /) -> dict[str, Any]: ...
 
 @final
+class DeviceNotifyState(BaseRecord):
+    """
+    The device notification pass of a system power action
+    (`PopAction.DevState`).
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def cancelled(self, /) -> bool: ...
+    @property
+    def failed_device(self, /) -> int: ...
+    @property
+    def irp_minor(self, /) -> int: ...
+    @property
+    def status(self, /) -> int: ...
+    @property
+    def system_state(self, /) -> str: ...
+    @property
+    def thread(self, /) -> int: ...
+    @property
+    def waking(self, /) -> bool: ...
+
+@final
 class DeviceObject(BaseRecord):
     """
     A `_DEVICE_OBJECT` and the devices attached above it (`!devobj`).
@@ -2960,6 +3029,65 @@ class DeviceObject(BaseRecord):
     def via_pointer(self, /) -> bool:
         """
         Whether the argument pointed to a pointer to the device object.
+        """
+
+@final
+class DevicePower(BaseRecord):
+    """
+    A device object's power state (`!podev`).
+    """
+    @property
+    def device(self, /) -> int: ...
+    @property
+    def device_state(self, /) -> str:
+        """
+        The last device state the driver set with `PoSetPowerState`.
+        """
+    @property
+    def devnode(self, /) -> Diagnostic[DevNodePower] |None:
+        """
+        The device node of the stack. `None` when there is none.
+        """
+    @property
+    def driver(self, /) -> Diagnostic[PowerDriver]: ...
+    @property
+    def extension(self, /) -> int:
+        """
+        The `_DEVOBJ_EXTENSION`.
+        """
+    @property
+    def flags(self, /) -> int:
+        """
+        `DEVICE_OBJECT.Flags`.
+        """
+    @property
+    def idle(self, /) -> Diagnostic[PowerIdleDetection] |None:
+        """
+        The idle detection the driver registered. `None` when it did
+        not.
+        """
+    @property
+    def irps(self, /) -> Diagnostic[list[PowerIrp]]:
+        """
+        The power IRPs on `nt!PopIrpList` sent to the device's stack.
+        """
+    @property
+    def power_flags(self, /) -> int: ...
+    @property
+    def power_inrush(self, /) -> bool:
+        """
+        `DO_POWER_INRUSH`: the device draws inrush current at power-up.
+        """
+    @property
+    def power_pagable(self, /) -> bool:
+        """
+        `DO_POWER_PAGABLE`: the driver handles power IRPs at
+        PASSIVE_LEVEL.
+        """
+    @property
+    def system_state(self, /) -> str:
+        """
+        The last system state the driver set with `PoSetPowerState`.
         """
 
 @final
@@ -4347,8 +4475,8 @@ class FailureSignature(BaseRecord):
     def source(self, /) -> str:
         """
         The source of the failing location: `bugcheck_fault`,
-        `exception_address`, `current_instruction`, `top_frame`, or
-        `code_only`.
+        `exception_address`, `current_instruction`, `top_frame`,
+        `power_failure_driver` (the driver a 0x9F names), or `code_only`.
         """
     @property
     def symbol(self, /) -> str |None:
@@ -6974,6 +7102,11 @@ class Inspect:
         """
         Return a handle for the `_DEVICE_OBJECT` at `address` (`!devobj`).
         """
+    def device_power(self, /, device: Device |int) -> DevicePower:
+        """
+        Get a device object's power state and the power IRPs sent to its
+        stack (`!podev`).
+        """
     def device_stack(self, /, device_or_node: Device |int) -> DeviceStack:
         """
         Decode the device stack that contains a device object or devnode
@@ -7241,6 +7374,11 @@ class Inspect:
         """
         Check the block headers of the pool page that contains `address`, and
         return the first inconsistency (`!poolval`).
+        """
+    def power_action(self, /) -> PowerAction:
+        """
+        Get the system power action in progress, the power IRPs the power
+        manager has allocated, and its IRP worker threads (`!poaction`).
         """
     def queued_locks(self, /) -> QueuedLocks:
         """
@@ -11420,6 +11558,419 @@ class PortRange(BaseRecord):
     def last(self, /) -> int: ...
 
 @final
+class PowerAction(BaseRecord):
+    """
+    The system power action, the power IRPs, and the IRP worker threads
+    (`!poaction`).
+    """
+    @property
+    def action(self, /) -> str:
+        """
+        The action, such as `None`, `Sleep`, or `Hibernate`.
+        """
+    @property
+    def action_worker_thread(self, /) -> int: ...
+    @property
+    def address(self, /) -> int:
+        """
+        `nt!PopAction`.
+        """
+    @property
+    def current_system_state(self, /) -> str: ...
+    @property
+    def devices(self, /) -> Diagnostic[DeviceNotifyState] |None:
+        """
+        The device notification pass in progress. `None` when there is
+        none.
+        """
+    @property
+    def effective_system_state(self, /) -> str: ...
+    @property
+    def flag_names(self, /) -> list[str]:
+        """
+        The `POWER_ACTION_*` flags, such as `QUERY_ALLOWED`.
+        """
+    @property
+    def flags(self, /) -> int: ...
+    @property
+    def hiber_context(self, /) -> int: ...
+    @property
+    def irp_minor(self, /) -> int: ...
+    @property
+    def irps(self, /) -> Diagnostic[PowerIrpList]:
+        """
+        The power IRPs on `nt!PopIrpList`.
+        """
+    @property
+    def lightest_state(self, /) -> str: ...
+    @property
+    def next_system_state(self, /) -> str: ...
+    @property
+    def shutdown(self, /) -> bool: ...
+    @property
+    def state(self, /) -> int: ...
+    @property
+    def state_name(self, /) -> str |None:
+        """
+        `Idle`, `NewRequest`, `Callout`, or `SetSystemState`.
+        """
+    @property
+    def status(self, /) -> int: ...
+    @property
+    def system_state(self, /) -> str:
+        """
+        The system state being entered.
+        """
+    @property
+    def updates(self, /) -> int: ...
+    @property
+    def waking(self, /) -> bool: ...
+    @property
+    def workers(self, /) -> Diagnostic[PowerWorkerList]:
+        """
+        The IRP worker threads on `nt!PopIrpThreadList`.
+        """
+
+@final
+class PowerDriver(BaseRecord):
+    """
+    A driver, found from one of its device objects or its driver object.
+    """
+    @property
+    def driver_object(self, /) -> int: ...
+    @property
+    def driver_start(self, /) -> int: ...
+    @property
+    def module(self, /) -> str |None:
+        """
+        The loaded module that holds `driver_start`, such as
+        `viostor.sys`.
+        """
+    @property
+    def name(self, /) -> str:
+        """
+        The driver object's name, as `!drvobj` shows it; empty when it
+        has none.
+        """
+
+@final
+class PowerFailure(BaseRecord):
+    """
+    What a DRIVER_POWER_STATE_FAILURE (0x9F) names as stuck.
+    """
+    @property
+    def blocked_irp(self, /) -> BlockedPowerIrp |None:
+        """
+        0x3: the blocked IRP.
+        """
+    @property
+    def culprit(self, /) -> PowerFailureCulprit |None: ...
+    @property
+    def description(self, /) -> str: ...
+    @property
+    def device(self, /) -> int |None:
+        """
+        The device object that the parameters name.
+        """
+    @property
+    def device_stack(self, /) -> Diagnostic[DeviceStack] |None:
+        """
+        The stack of `device`.
+        """
+    @property
+    def irps(self, /) -> PowerIrpList |None:
+        """
+        0x3: the power IRPs on the list that `TRIAGE_9F_POWER` names.
+        """
+    @property
+    def notes(self, /) -> list[str]:
+        """
+        What could not be read, and why.
+        """
+    @property
+    def pnp_lock_owner(self, /) -> int |None:
+        """
+        0x4: the thread that holds the PnP lock.
+        """
+    @property
+    def subtype(self, /) -> int:
+        """
+        Parameter 1.
+        """
+    @property
+    def threads(self, /) -> list[PowerFailureThread]:
+        """
+        The IRP worker threads and the PnP lock owner, with their stacks.
+        """
+    @property
+    def timeout_seconds(self, /) -> int |None:
+        """
+        0x4: the timeout in seconds.
+        """
+    @property
+    def workers(self, /) -> PowerWorkerList |None:
+        """
+        0x3: the IRP worker threads on the list that `TRIAGE_9F_POWER`
+        names.
+        """
+
+@final
+class PowerFailureCulprit(BaseRecord):
+    """
+    The driver that a DRIVER_POWER_STATE_FAILURE names, and why.
+    """
+    @property
+    def device(self, /) -> int:
+        """
+        The device object that ties the driver to the failure.
+        """
+    @property
+    def driver(self, /) -> PowerDriver: ...
+    @property
+    def reason(self, /) -> str: ...
+
+@final
+class PowerFailureThread(BaseRecord):
+    """
+    A thread that a DRIVER_POWER_STATE_FAILURE names, with its stack.
+    """
+    @property
+    def device(self, /) -> int |None: ...
+    @property
+    def irp(self, /) -> int |None:
+        """
+        For an IRP worker, the IRP it is passing to a driver; 0 while it
+        waits.
+        """
+    @property
+    def role(self, /) -> str:
+        """
+        `irp_worker` or `pnp_lock_owner`.
+        """
+    @property
+    def stack(self, /) -> Diagnostic[list[StackFrame]]: ...
+    @property
+    def thread(self, /) -> int: ...
+
+@final
+class PowerIdleDetection(BaseRecord):
+    """
+    The idle detection a driver registered with
+    `PoRegisterDeviceForIdleDetection`.
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The `_DEVICE_OBJECT_POWER_EXTENSION`.
+        """
+    @property
+    def busy_count(self, /) -> int: ...
+    @property
+    def busy_reference(self, /) -> int: ...
+    @property
+    def conservation_idle_time(self, /) -> int:
+        """
+        Seconds idle before the power manager powers the device down,
+        on battery.
+        """
+    @property
+    def current_state(self, /) -> str: ...
+    @property
+    def idle_count(self, /) -> int: ...
+    @property
+    def idle_state(self, /) -> str:
+        """
+        The device state requested when the device idles.
+        """
+    @property
+    def idle_type(self, /) -> str: ...
+    @property
+    def performance_idle_time(self, /) -> int:
+        """
+        Seconds idle before the power manager powers the device down,
+        on AC power.
+        """
+    @property
+    def total_busy_count(self, /) -> int: ...
+
+@final
+class PowerIrp(BaseRecord):
+    """
+    A power IRP the power manager allocated (`_POP_IRP_DATA`).
+    """
+    @property
+    def current_device(self, /) -> int:
+        """
+        The device the power manager passed it to last, or 0.
+        """
+    @property
+    def data(self, /) -> int:
+        """
+        The `_POP_IRP_DATA`.
+        """
+    @property
+    def holder(self, /) -> Diagnostic[PowerIrpHolder]:
+        """
+        Where the IRP is pending now.
+        """
+    @property
+    def irp(self, /) -> int: ...
+    @property
+    def minor_function(self, /) -> int: ...
+    @property
+    def minor_name(self, /) -> str |None:
+        """
+        `IRP_MN_SET_POWER`, `IRP_MN_QUERY_POWER`, `IRP_MN_WAIT_WAKE`, or
+        `IRP_MN_POWER_SEQUENCE`.
+        """
+    @property
+    def pdo(self, /) -> int: ...
+    @property
+    def pending_ms(self, /) -> int |None:
+        """
+        How long ago the watchdog was armed, in milliseconds. `None` when
+        the watchdog never ran or the current time is unreadable.
+        """
+    @property
+    def state(self, /) -> PowerStateValue:
+        """
+        The requested state; for a wait/wake IRP, the deepest system
+        state it can wake the system from.
+        """
+    @property
+    def system_transition(self, /) -> bool:
+        """
+        Whether the IRP is part of a system power transition.
+        """
+    @property
+    def target_device(self, /) -> int:
+        """
+        The device that the IRP was sent to, the top of the PDO's stack.
+        """
+    @property
+    def watchdog(self, /) -> str:
+        """
+        The watchdog state: `Disabled`, `Enabled`, or `Completed`.
+        """
+
+@final
+class PowerIrpHolder(BaseRecord):
+    """
+    Where an IRP is pending: the driver of its current stack location.
+    """
+    @property
+    def device(self, /) -> int: ...
+    @property
+    def driver(self, /) -> Diagnostic[PowerDriver]: ...
+    @property
+    def location(self, /) -> int:
+        """
+        `CurrentLocation`, counted from 1 as `!irp` does.
+        """
+    @property
+    def major_function(self, /) -> int: ...
+    @property
+    def minor_function(self, /) -> int: ...
+    @property
+    def pending_returned(self, /) -> bool:
+        """
+        Whether the location's driver returned `STATUS_PENDING`.
+        """
+    @property
+    def stack_count(self, /) -> int: ...
+    @property
+    def stack_location(self, /) -> int: ...
+    @property
+    def state(self, /) -> PowerStateValue |None:
+        """
+        The state that the location's power request asks for.
+        """
+
+@final
+class PowerIrpList(BaseRecord):
+    """
+    The power IRPs on a list of `_POP_IRP_DATA`.
+    """
+    @property
+    def head(self, /) -> int: ...
+    @property
+    def head_name(self, /) -> str |None:
+        """
+        The symbol of the head, such as `nt!PopIrpList`.
+        """
+    @property
+    def irps(self, /) -> list[Diagnostic[PowerIrp]]:
+        """
+        Each entry, or why it does not decode.
+        """
+    @property
+    def stopped(self, /) -> str |None:
+        """
+        Why the walk stopped before the head.
+        """
+
+@final
+class PowerStateValue(BaseRecord):
+    """
+    A power state.
+    """
+    @property
+    def kind(self, /) -> str:
+        """
+        `system` or `device`.
+        """
+    @property
+    def name(self, /) -> str:
+        """
+        The state's name, such as `Working`, `Hibernate`, or `D3`, or the
+        value in hex when the PDB has no name for it.
+        """
+    @property
+    def value(self, /) -> int: ...
+
+@final
+class PowerWorker(BaseRecord):
+    """
+    A thread that passes power IRPs to drivers.
+    """
+    @property
+    def device(self, /) -> int: ...
+    @property
+    def driver(self, /) -> str |None:
+        """
+        The driver of `device`.
+        """
+    @property
+    def irp(self, /) -> int:
+        """
+        The IRP that it is passing to a driver, or 0 while it waits.
+        """
+    @property
+    def is_static(self, /) -> bool:
+        """
+        Whether the power manager keeps the thread when there is no work.
+        """
+    @property
+    def thread(self, /) -> int: ...
+
+@final
+class PowerWorkerList(BaseRecord):
+    """
+    The power IRP worker threads on a list of `_POP_IRP_WORKER_ENTRY`.
+    """
+    @property
+    def head(self, /) -> int: ...
+    @property
+    def head_name(self, /) -> str |None:
+        """
+        The symbol of the head, such as `nt!PopIrpThreadList`.
+        """
+    @property
+    def stopped(self, /) -> str |None: ...
+    @property
+    def workers(self, /) -> list[Diagnostic[PowerWorker]]: ...
+
+@final
 class Prcb(BaseRecord):
     """
     Selected `_KPRCB` fields of a processor (`!prcb`).
@@ -14894,6 +15445,11 @@ class TriageReport(BaseRecord):
     def modules_total(self, /) -> int:
         """
         The number of loaded modules.
+        """
+    @property
+    def power(self, /) -> PowerFailure |None:
+        """
+        What a DRIVER_POWER_STATE_FAILURE names as stuck.
         """
     @property
     def prcb(self, /) -> TriagePrcb |None:

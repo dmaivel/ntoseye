@@ -6,16 +6,19 @@
 use tern_sdk::ui::{self, Column, Section, Span, TableRow, TextAlign, Tone, Truncate, Wrap};
 use tern_sdk::{Node, View};
 
-use super::{MUTED, NUMBER, STRONG, addr, bugcheck, span, stack, symbol};
+use super::{MUTED, NUMBER, STRONG, SYMBOL, addr, bugcheck, span, stack, symbol};
 use crate::repl::StackColumns;
 use crate::repl::commands::analyze::{
     ANALYZE_HANG_STACK_LIMIT, ANALYZE_MODULE_LIMIT, ANALYZE_UNLOADED_LIMIT,
     ANALYZE_VERBOSE_MODULE_LIMIT, ANALYZE_VERBOSE_UNLOADED_LIMIT, HangReport, HangThread,
     kmdf_log_summary, machine_name, product_name, signature_source,
 };
+use crate::repl::commands::power::{duration_text, request_text};
+use crate::target::power::power_minor_name;
 use crate::target::{ThreadInfo, wait_reason_name};
 use crate::triage_report::{
-    BlackboxState, TRIAGE_BACKTRACE_LIMIT, TriageReport, WheaRecordState, exception_code_name,
+    BlackboxState, POWER_THREAD_STACK_LIMIT, PowerFailureFinding, PowerThreadRole,
+    TRIAGE_BACKTRACE_LIMIT, TriageReport, WheaRecordState, exception_code_name,
     time::filetime_to_iso,
 };
 
@@ -261,6 +264,10 @@ pub fn triage(report: &TriageReport, verbose: bool) -> View {
             span(kmdf_log_summary(log), ""),
             span("  !wdfkd.wdfcrashdump", MUTED),
         ])));
+    }
+
+    if let Some(power) = &report.power {
+        card = card.child(power_section(power));
     }
 
     card = card.child(loaded_modules(report, verbose));
@@ -694,4 +701,258 @@ fn optional(value: Option<u64>) -> String {
     value
         .map(|value| value.to_string())
         .unwrap_or_else(|| "?".into())
+}
+
+/// `!analyze -show 9f ...`: what the parameters of a 0x9F point to.
+pub fn power_failure(finding: &PowerFailureFinding) -> View {
+    let card = ui::card()
+        .head([span("DRIVER_POWER_STATE_FAILURE", STRONG)])
+        .tone(Tone::Error)
+        .role("ntoseye.analyze")
+        .child(power_section(finding));
+    View::new().main([card])
+}
+
+/// What a DRIVER_POWER_STATE_FAILURE names as stuck, and the threads
+/// involved with their stacks.
+fn power_section(finding: &PowerFailureFinding) -> Section<()> {
+    let failure = &finding.failure;
+    let mut kv = ui::kv().item(
+        "subtype",
+        [
+            span(format!("{:#x}", failure.subtype), NUMBER),
+            span(format!("  {}", failure.description), ""),
+        ],
+    );
+    if let Some(culprit) = &failure.culprit {
+        kv = kv.item(
+            "driver",
+            [
+                span(culprit.driver.label(), SYMBOL),
+                span(format!("  {}", culprit.reason), ""),
+            ],
+        );
+    }
+    let holder_device = failure
+        .blocked_irp
+        .as_ref()
+        .and_then(|blocked| blocked.holder.as_ref().ok())
+        .map(|holder| holder.device);
+    if let Some(blocked) = &failure.blocked_irp {
+        kv = kv.item("blocked IRP", addr(blocked.irp.0));
+        match &blocked.holder {
+            Ok(holder) => {
+                kv = kv.item(
+                    "request",
+                    span(
+                        request_text(
+                            holder.major_function,
+                            holder.minor_function,
+                            holder.state.as_ref(),
+                        ),
+                        "",
+                    ),
+                );
+                let driver = match &holder.driver {
+                    Ok(driver) => span(driver.label(), SYMBOL),
+                    Err(error) => span(format!("driver unreadable: {error}"), MUTED),
+                };
+                kv = kv.item(
+                    "pending in",
+                    [
+                        driver,
+                        span("  device ", MUTED),
+                        addr(holder.device.0),
+                        span(
+                            format!(
+                                "  stack location {} of {}",
+                                holder.location, holder.stack_count
+                            ),
+                            "",
+                        ),
+                    ],
+                );
+            }
+            Err(error) => kv = kv.item("pending in", span(format!("unknown: {error}"), MUTED)),
+        }
+        if let Some(data) = &blocked.data {
+            let pending = data.pending.map_or_else(
+                || format!("watchdog {}", data.watchdog.label()),
+                |pending| format!("{} since the watchdog was armed", duration_text(pending)),
+            );
+            kv = kv.item("pending for", span(pending, ""));
+        }
+    }
+    if let Some(device) = failure.device {
+        kv = kv.item("device", addr(device.0));
+    }
+    if let Some(seconds) = failure.timeout_seconds {
+        kv = kv.item("timeout", span(format!("{seconds} s"), NUMBER));
+    }
+    if let Some(owner) = failure.pnp_lock_owner {
+        kv = kv.item(
+            "PnP lock",
+            [addr(owner.0), span("  thread holding it", MUTED)],
+        );
+    }
+    let mut power = section("power failure", false).child(kv);
+
+    match &failure.stack {
+        Some(Ok(stack)) => {
+            let mut table = ui::table()
+                .col(Column::new("device", "Device").priority(4.0))
+                .col(Column::new("driver", "Driver").priority(3.0))
+                .col(
+                    Column::new("name", "Name")
+                        .grow(1.0)
+                        .truncate(Truncate::End)
+                        .priority(2.0),
+                )
+                .col(Column::new("holds", "").priority(1.0));
+            for entry in &stack.entries {
+                let holds = Some(entry.device_object) == holder_device;
+                table = table.row(
+                    TableRow::new(entry.device_object.0.to_string())
+                        .cell("device", addr(entry.device_object.0))
+                        .cell("driver", span(&entry.driver_name, SYMBOL))
+                        .cell("name", span(&entry.object_name, ""))
+                        .cell(
+                            "holds",
+                            span(if holds { "holds the IRP" } else { "" }, STRONG),
+                        ),
+                );
+            }
+            power = power.child(table);
+        }
+        Some(Err(error)) => power = power.child(note(format!("device stack unavailable: {error}"))),
+        None => {}
+    }
+
+    if let Some(irps) = &failure.irps
+        && !irps.entries.is_empty()
+    {
+        let mut table = ui::table()
+            .col(Column::new("irp", "IRP").priority(4.0))
+            .col(Column::new("request", "Request").priority(3.0))
+            .col(Column::new("pdo", "PDO").priority(2.0))
+            .col(
+                Column::new("holder", "Pending in")
+                    .grow(1.0)
+                    .truncate(Truncate::End)
+                    .priority(3.0),
+            );
+        for entry in &irps.entries {
+            let row = TableRow::new(entry.data.0.to_string());
+            table = table.row(match &entry.irp {
+                Ok(irp) => row
+                    .cell("irp", addr(irp.irp.0))
+                    .cell(
+                        "request",
+                        span(
+                            format!(
+                                "{} {}",
+                                power_minor_name(irp.minor_function).unwrap_or("?"),
+                                irp.state.label()
+                            ),
+                            "",
+                        ),
+                    )
+                    .cell("pdo", addr(irp.pdo.0))
+                    .cell(
+                        "holder",
+                        match &irp.holder {
+                            Ok(holder) => span(
+                                holder
+                                    .driver
+                                    .as_ref()
+                                    .map_or_else(|error| error.clone(), |driver| driver.label()),
+                                SYMBOL,
+                            ),
+                            Err(error) => span(error, MUTED),
+                        },
+                    ),
+                Err(error) => row
+                    .cell("irp", addr(entry.data.0))
+                    .cell("holder", span(error, MUTED)),
+            });
+        }
+        power = power.child(table);
+    }
+
+    if let Some(workers) = &failure.workers {
+        let mut table = ui::table()
+            .col(Column::new("thread", "Worker thread").priority(4.0))
+            .col(Column::new("kind", "Kind").priority(2.0))
+            .col(Column::new("irp", "IRP").priority(3.0))
+            .col(
+                Column::new("device", "Device")
+                    .grow(1.0)
+                    .truncate(Truncate::End)
+                    .priority(3.0),
+            );
+        for entry in &workers.entries {
+            let row = TableRow::new(entry.entry.0.to_string());
+            table = table.row(match &entry.worker {
+                Ok(worker) => row
+                    .cell("thread", addr(worker.thread.0))
+                    .cell(
+                        "kind",
+                        span(
+                            if worker.is_static {
+                                "static"
+                            } else {
+                                "dynamic"
+                            },
+                            MUTED,
+                        ),
+                    )
+                    .cell(
+                        "irp",
+                        if worker.irp.is_zero() {
+                            span("waiting", MUTED)
+                        } else {
+                            addr(worker.irp.0)
+                        },
+                    )
+                    .cell(
+                        "device",
+                        span(worker.driver.clone().unwrap_or_default(), SYMBOL),
+                    ),
+                Err(error) => row
+                    .cell("thread", addr(entry.entry.0))
+                    .cell("device", span(error, MUTED)),
+            });
+        }
+        power = power.child(table);
+    }
+
+    for thread in &finding.threads {
+        let role = match thread.role {
+            PowerThreadRole::PnpLockOwner => "  holds the PnP lock".to_string(),
+            PowerThreadRole::IrpWorker { irp, .. } if irp.is_zero() => {
+                "  IRP worker, waiting for work".to_string()
+            }
+            PowerThreadRole::IrpWorker { irp, device } => {
+                format!("  IRP worker, IRP {:016x} device {:016x}", irp.0, device.0)
+            }
+        };
+        power = power.child(ui::text([
+            span("thread ", MUTED),
+            addr(thread.thread.0),
+            span(role, ""),
+        ]));
+        power = match &thread.stack {
+            Ok(trace) => power.child(stack::table(
+                trace,
+                POWER_THREAD_STACK_LIMIT,
+                false,
+                StackColumns::default(),
+            )),
+            Err(error) => power.child(note(format!("stack unavailable: {error}"))),
+        };
+    }
+    for text in &failure.notes {
+        power = power.child(note(text.clone()));
+    }
+    power
 }

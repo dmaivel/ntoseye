@@ -266,6 +266,12 @@ impl<'a> StructRef<'a> {
         &self.ti
     }
 
+    /// The type namespace and address space this cursor reads in, for the
+    /// structures that lie next to it in memory.
+    pub fn types(&self) -> Types<'a> {
+        self.types
+    }
+
     /// Wrap a freshly resolved layout at `base`, carrying this cursor's context.
     fn with(&self, ti: Arc<TypeInfo>, base: VirtAddr) -> StructRef<'a> {
         self.types.struct_with_layout(ti, base)

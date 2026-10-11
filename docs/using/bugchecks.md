@@ -157,6 +157,75 @@ For your own driver, give `ntoseye` its PDB so that these frames show names and 
 
 You can examine the rest of the target as at any other stop, for example the thread that crashed with {command}`!thread`, and memory with {command}`dt` and the `d*` commands.
 
+## Power hangs
+
+When a driver does not finish a power request, Windows bugchecks with DRIVER_POWER_STATE_FAILURE (0x9F). Parameter 1 says what went wrong. In the most common case, subtype 0x3, the power manager armed a watchdog when it sent a power IRP to a device, and the watchdog expired before the IRP completed. Parameter 2 is then the PDO of the device's stack, parameter 3 a `TRIAGE_9F_POWER` block that names the kernel's power IRP and worker thread lists, and parameter 4 the IRP.
+
+For a 0x9F, {command}`!analyze` adds a `power failure` section that names what is stuck:
+
+- For 0x3: the blocked IRP, the request in its current stack location, the driver whose stack location it is pending in, how long ago the watchdog was armed, the device stack of the PDO with that driver's device marked, every power IRP the power manager has allocated, and the power IRP worker threads with their stacks. The IRP and thread lists are the ones that `TRIAGE_9F_POWER` names, `nt!PopIrpList` and `nt!PopIrpThreadList`. The driver that holds the IRP becomes the culprit with high confidence, and the failure signature is `bugcheck:0000009f|subtype:3|module:<driver>`.
+- For 0x4, a power transition that timed out waiting for PnP: the thread that holds the PnP lock, and its stack. The first driver on that stack becomes the culprit, with medium confidence.
+- For 0x1, 0x2, and 0x500: the driver of the device object or driver object in the parameters, which becomes the culprit, and the device's stack.
+
+The IRP's current stack location belongs to the lowest driver the IRP has reached. If that driver returned `STATUS_PENDING`, as `(returned STATUS_PENDING)` shows, it took the request and has not completed it. Look at what it waits for: {command}`!irp` shows the whole IRP, {command}`!devstack` the stack, and {command}`!stacks` or {command}`!thread` the driver's threads.
+
+`!analyze -show 9f` reads what the parameters point to in the target, so you can try it on any power IRP that {command}`!poaction` lists. This guest has no bugcheck; the IRP is a wait/wake request that USBHUB3 holds, as a bus driver does until its device signals a wake. Parameter 3 is not a `TRIAGE_9F_POWER` block here, so `ntoseye` walks the kernel's lists, and says so:
+
+```text
+mem:1> !analyze -show 9f 3 ffffb28a86bae780 0 ffffb28a8c5cd010
+...
+power failure
+  subtype 0x3: a device blocked a power IRP for too long
+  driver      \Driver\USBHUB3 (UsbHub3.sys) holds the blocked power IRP 0xffffb28a8c5cd010 in stack location 11 of 14
+  blocked IRP ffffb28a8c5cd010  (!irp)
+  request     IRP_MJ_POWER IRP_MN_WAIT_WAKE Working
+  pending in  \Driver\USBHUB3 (UsbHub3.sys)  device ffffb28a86bae780  stack location 11 of 14  (returned STATUS_PENDING)
+  pending for watchdog Disabled  POP_IRP_DATA ffffb28a8a2ae010
+  device      ffffb28a86bae780  (!devstack, !podev)
+     ffffb28a86e51060  \Driver\HidUsb       _HID00000000
+   > ffffb28a86bae780  \Driver\USBHUB3      USBPDO-1
+  > holds the blocked IRP
+  Allocated power IRPs (nt!PopIrpList fffff802bd60bcb0)
+  ...
+  IRP worker threads (nt!PopIrpThreadList fffff802bd6087b0)
+    THREAD ffffb28a7f721040 (static)  waiting for work
+    THREAD ffffb28a7f6f9040 (static)  waiting for work
+  thread ffffb28a7f721040  IRP worker, waiting for work
+#0  fffffc01d5414800  fffff802bcdb64d6  nt!KiSwapContext+0x76
+...
+  parameter 3 (0x0) is not a readable TRIAGE_9F_POWER: Bad virtual address: 0; walked nt!PopIrpList and nt!PopIrpThreadList
+```
+
+A wait/wake IRP stays pending by design, and its watchdog does not run. A set-power or query-power IRP that has been pending in a driver for many seconds is the hang.
+
+### Power state without a crash
+
+To look at a power transition that is slow or stuck before the watchdog fires, use these commands at any stop, or with the `memory` backend while the guest runs:
+
+- {command}`!poaction` shows the system power action in progress (`nt!PopAction`): the action, its state and flags, the system state being entered, and the device notification pass when one runs. Then it lists every power IRP the power manager has allocated, from `nt!PopIrpList`: the PDO, the device it was sent to, the minor function and the requested state, the driver it is pending in, and how long ago its watchdog was armed. Last, it lists the power IRP worker threads from `nt!PopIrpThreadList`, with the IRP and device each one is passing on.
+- {command}`!podev` shows the power state of one device object: the system and device states that its driver last set with `PoSetPowerState`, the idle detection it registered, the device state that PnP records for the stack, whether the driver registered with the power framework, and the power IRPs sent to the device's stack.
+- {command}`!popolicy` shows the system power policy in effect (`SYSTEM_POWER_POLICY` at `nt!PopPolicy`): the actions for the buttons, the lid, idling, and overheating, the sleep states, and the timeouts.
+
+```text
+mem:1> !podev ffffb28a86bae780
+Device object ffffb28a86bae780 is for:
+  \Driver\USBHUB3 (UsbHub3.sys)
+  Flags 00003044 DO_POWER_PAGABLE
+DevObjExtension: ffffb28a86bae8f8
+PowerFlags: 00000030 => SystemState=Unspecified DeviceState=D2
+Idle detection: not registered
+DevNode ffffb28a86e31bb0 "USB\VID_0627&PID_0001\28754-0000:00:02.1:00.0-1"
+  CurrentPowerState: D2
+  Power framework: ffffb28a86e54560
+Power IRPs for the stack (nt!PopIrpList):
+  IRP ffffb28a8c5cd010  IRP_MN_WAIT_WAKE Working  PDO ffffb28a86bae780
+    sent to    ffffb28a86e51060
+    pending in \Driver\USBHUB3 (UsbHub3.sys)  device ffffb28a86bae780  stack location 11 of 14  (returned STATUS_PENDING)
+    watchdog   Disabled  POP_IRP_DATA ffffb28a8a2ae010
+```
+
+This USB tablet is selectively suspended in D2, as Device Manager's power data for it also shows.
+
 ## Decode a code without a crash
 
 `!analyze -show` decodes a bugcheck code and arguments that you got from a different source, such as a photo of a blue screen or an event log entry.
@@ -198,4 +267,4 @@ For a crash inside a driver, as in the example on this page, use [NotMyFault](ht
 
 ## From scripts
 
-In the [Python SDK](../scripting/sdk.md), a bugcheck comes as a `Stop.Bugcheck` whose `info` holds the code, the arguments, and the culprit. `dbg.inspect.bugcheck()` returns the same data for the current stop, and `dbg.inspect.triage()` returns the full `!analyze` report.
+In the [Python SDK](../scripting/sdk.md), a bugcheck comes as a `Stop.Bugcheck` whose `info` holds the code, the arguments, and the culprit. `dbg.inspect.bugcheck()` returns the same data for the current stop, and `dbg.inspect.triage()` returns the full `!analyze` report, with a 0x9F's findings in `power`. `dbg.inspect.power_action()` and `dbg.inspect.device_power(device)` return what {command}`!poaction` and {command}`!podev` show.

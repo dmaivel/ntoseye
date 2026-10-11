@@ -8,11 +8,12 @@ use super::{
 
 pub(super) fn failure_signature(report: &TriageReport) -> Option<FailureSignature> {
     let (code_kind, code, mut components) = if let Some(bugcheck) = &report.bugcheck {
-        (
-            FailureCodeKind::Bugcheck,
-            bugcheck.code,
-            vec![format!("bugcheck:{:08x}", bugcheck.code)],
-        )
+        let mut components = vec![format!("bugcheck:{:08x}", bugcheck.code)];
+        // Each 0x9F subtype is a different failure.
+        if let Some(power) = &report.power {
+            components.push(format!("subtype:{:x}", power.failure.subtype));
+        }
+        (FailureCodeKind::Bugcheck, bugcheck.code, components)
     } else if let Some(exception) = &report.exception {
         (
             FailureCodeKind::Exception,
@@ -45,6 +46,10 @@ pub(super) fn failure_signature(report: &TriageReport) -> Option<FailureSignatur
                 )
             })
     });
+    // A DRIVER_POWER_STATE_FAILURE names its driver in its parameters
+    // rather than a fault address; that outranks the stack, which is the
+    // power manager's watchdog.
+    let bugcheck_module = bugcheck_module.or_else(|| power_failure_module(report));
     let exception_symbol = report.exception.as_ref().and_then(|exception| {
         report.backtrace.as_ref().and_then(|trace| {
             trace
@@ -124,6 +129,17 @@ fn stable_symbol(symbol: &str) -> Option<String> {
         canonical_module_component(module),
         function.to_ascii_lowercase()
     ))
+}
+
+/// The module of the driver a DRIVER_POWER_STATE_FAILURE names.
+fn power_failure_module(report: &TriageReport) -> Option<(String, FailureSignatureSource)> {
+    let culprit = report.power.as_ref()?.failure.culprit.as_ref()?;
+    culprit.driver.module.as_deref().map(|module| {
+        (
+            canonical_module_component(module),
+            FailureSignatureSource::PowerFailureDriver,
+        )
+    })
 }
 
 fn best_signature_module(report: &TriageReport) -> Option<(String, FailureSignatureSource)> {

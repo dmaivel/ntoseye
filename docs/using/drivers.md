@@ -135,6 +135,8 @@ Windows filters debug output by component and level before either path sees it. 
 
 If the guest stops making progress without crashing, break in and look at where the driver's threads wait with {command}`!stacks` and {command}`!thread`. For a virtio device, {command}`!virtio` shows whether each queue has buffers with the device or buffers that the device returned and the driver has not taken back. See [Virtio devices](virtio.md).
 
+If a sleep, a shutdown, or a device power-down does not finish, {command}`!poaction` lists the power IRPs in flight with the driver each one is pending in and how long it has been there, and {command}`!podev` shows the power state of your device. If the hang ends in DRIVER_POWER_STATE_FAILURE (0x9F), {command}`!analyze` names the driver that holds the IRP. See [Power hangs](bugchecks.md#power-hangs).
+
 ## When it crashes
 
 A bugcheck stops the session at the crash and shows the faulting frame and `!analyze`. See [Bugchecks](bugchecks.md).
