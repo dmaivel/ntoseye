@@ -475,7 +475,47 @@ impl MyCompleter {
             }
 
             CompletionStrategy::Alias => self.complete_aliases(input),
+            CompletionStrategy::RegistryKey => self.complete_registry_key(input),
         }
+    }
+
+    /// A registry path: the roots, then the subkeys of the key before the
+    /// last backslash, each with a backslash after it.
+    fn complete_registry_key(&self, input: CompletionInput<'_>) -> Vec<Suggestion> {
+        const ROOTS: [&str; 5] = ["HKLM\\", "HKU\\", "HKCR\\", "HKCC\\", "\\REGISTRY\\"];
+        // A path with spaces is quoted; keep the quote that opens it.
+        let (quote, typed) = match input.raw_prefix.strip_prefix('"') {
+            Some(typed) => ("\"", typed),
+            None => ("", input.raw_prefix),
+        };
+        let candidates: Vec<String> = match typed.rfind('\\') {
+            Some(at) if at > 0 => {
+                let parent = &typed[..at];
+                self.target
+                    .with(|target| {
+                        target.and_then(|target| target.registry_subkey_names(parent).ok())
+                    })
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|name| format!("{parent}\\{name}\\"))
+                    .collect()
+            }
+            _ => ROOTS.iter().map(|root| root.to_string()).collect(),
+        };
+        candidates
+            .into_iter()
+            .filter(|candidate| completion_name_matches(candidate, typed))
+            .map(|candidate| Suggestion {
+                value: format!("{quote}{candidate}"),
+                description: Some("registry key".to_string()),
+                style: None,
+                extra: None,
+                match_indices: None,
+                span: Span::new(input.arg_start, input.pos),
+                append_whitespace: false,
+                display_override: None,
+            })
+            .collect()
     }
 
     fn complete_aliases(&self, input: CompletionInput<'_>) -> Vec<Suggestion> {

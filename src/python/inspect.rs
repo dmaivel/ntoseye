@@ -18,6 +18,7 @@ use crate::target::etw::parse_guid;
 use crate::target::irpfind::{IrpCriteria, IrpPool};
 use crate::target::mm::{PfnSelector, PoolType, PoolUsageSort};
 use crate::target::pci::{PCI_EXTENDED_CONFIG_SIZE, PciQuery, PciRawRange};
+use crate::target::registry::names_equal;
 use crate::target::sched::{ApcSelector, UniqStackScope};
 use crate::target::zombies::ZombieKinds;
 use crate::triage_report::TriageReport;
@@ -1771,6 +1772,87 @@ impl Inspect {
         self.typed(py, |session| {
             let table = session.target.smbios_table().map_err(err)?;
             Ok(view::machine::smbios_table(&table))
+        })
+    }
+
+    /// List the registry hives loaded in kernel memory, with where each is
+    /// mounted and the file it was loaded from (`!reg hivelist`).
+    fn registry_hives<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Typed<'py, view::registry::RegistryHives>> {
+        self.typed(py, |session| {
+            let list = session.target.registry_hives().map_err(err)?;
+            Ok(view::registry::hives(&list))
+        })
+    }
+
+    /// Read the registry key at `path`, a full path such as
+    /// `HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip` or
+    /// `\\REGISTRY\\MACHINE\\...`, with its subkeys and its values, each
+    /// value's data typed by its type (`!reg querykey`).
+    fn registry_key<'py>(
+        &self,
+        py: Python<'py>,
+        path: String,
+    ) -> PyResult<Typed<'py, view::registry::RegistryKey>> {
+        self.typed(py, move |session| {
+            let key = session.target.registry_key(&path).map_err(err)?;
+            Ok(view::registry::key(&key))
+        })
+    }
+
+    /// Read the value `name` of the registry key at `path`; `""` names the
+    /// key's default value. Its `data` is a `str`, a `list[str]`, an `int`,
+    /// or `bytes`, by the value's type (`!reg querykey <path> -v <name>`).
+    fn registry_value<'py>(
+        &self,
+        py: Python<'py>,
+        path: String,
+        name: String,
+    ) -> PyResult<Typed<'py, view::registry::RegistryValue>> {
+        self.typed(py, move |session| {
+            let key = session.target.registry_key(&path).map_err(err)?;
+            key.values
+                .iter()
+                .flatten()
+                .find(|value| names_equal(&value.name, &name))
+                .map(view::registry::value)
+                .ok_or_else(|| raise(format!("{} has no readable value named {name:?}", key.path)))
+        })
+    }
+
+    /// Read the registry key whose key node (`_CM_KEY_NODE`) is at `node`
+    /// in the hive at `hive` (`!reg keyinfo`).
+    fn registry_key_at<'py>(
+        &self,
+        py: Python<'py>,
+        hive: u64,
+        node: u64,
+    ) -> PyResult<Typed<'py, view::registry::RegistryKey>> {
+        self.typed(py, move |session| {
+            let key = session
+                .target
+                .registry_key_at(VirtAddr(hive), VirtAddr(node))
+                .map_err(err)?;
+            Ok(view::registry::key(&key))
+        })
+    }
+
+    /// Find where cell index `cell` of the hive at `hive` is, through the
+    /// hive's cell map (`!reg cellindex`).
+    fn registry_cell<'py>(
+        &self,
+        py: Python<'py>,
+        hive: u64,
+        cell: u32,
+    ) -> PyResult<Typed<'py, view::registry::RegistryCell>> {
+        self.typed(py, move |session| {
+            let location = session
+                .target
+                .registry_cell(VirtAddr(hive), cell)
+                .map_err(err)?;
+            Ok(view::registry::cell(&location))
         })
     }
 

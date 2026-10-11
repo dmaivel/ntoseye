@@ -7413,6 +7413,34 @@ class Inspect:
         Read the dispatcher ready queues, up to a limit, for all processors or
         for one processor (`!ready`).
         """
+    def registry_cell(self, /, hive: int, cell: int) -> RegistryCell:
+        """
+        Find where cell index `cell` of the hive at `hive` is, through the
+        hive's cell map (`!reg cellindex`).
+        """
+    def registry_hives(self, /) -> RegistryHives:
+        """
+        List the registry hives loaded in kernel memory, with where each is
+        mounted and the file it was loaded from (`!reg hivelist`).
+        """
+    def registry_key(self, /, path: str) -> RegistryKey:
+        """
+        Read the registry key at `path`, a full path such as
+        `HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip` or
+        `\\REGISTRY\\MACHINE\\...`, with its subkeys and its values, each
+        value's data typed by its type (`!reg querykey`).
+        """
+    def registry_key_at(self, /, hive: int, node: int) -> RegistryKey:
+        """
+        Read the registry key whose key node (`_CM_KEY_NODE`) is at `node`
+        in the hive at `hive` (`!reg keyinfo`).
+        """
+    def registry_value(self, /, path: str, name: str) -> RegistryValue:
+        """
+        Read the value `name` of the registry key at `path`; `""` names the
+        key's default value. Its `data` is a `str`, a `list[str]`, an `int`,
+        or `bytes`, by the value's type (`!reg querykey <path> -v <name>`).
+        """
     def resource(self, /, address: int) -> ExecutiveResource:
         """
         Decode an executive resource (`!locks address`).
@@ -12710,6 +12738,305 @@ class Registers:
     def to_dict(self, /) -> dict[str, int]:
         """
         The registers as a plain `dict`, sorted by name.
+        """
+
+@final
+class RegistryCell(BaseRecord):
+    """
+    Where a cell of a hive is (`!reg cellindex`).
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The cell: its size field, which its data follows.
+        """
+    @property
+    def block(self, /) -> int |None: ...
+    @property
+    def cell(self, /) -> int: ...
+    @property
+    def directory(self, /) -> int |None:
+        """
+        The cell map directory and table indexes and the offset in the
+        block, from the cell index; `None` in a flat hive.
+        """
+    @property
+    def hive(self, /) -> int: ...
+    @property
+    def map_entry(self, /) -> int |None:
+        """
+        The block's `_HMAP_ENTRY`, and where it maps the block: its
+        place in the bin that holds it.
+        """
+    @property
+    def offset(self, /) -> int |None: ...
+    @property
+    def size(self, /) -> Diagnostic[int]:
+        """
+        The size field: negative for a cell in use.
+        """
+    @property
+    def table(self, /) -> int |None: ...
+    @property
+    def volatile(self, /) -> bool: ...
+
+@final
+class RegistryCellError(BaseRecord):
+    """
+    A subkey or value cell that does not read.
+    """
+    @property
+    def cell(self, /) -> int: ...
+    @property
+    def error(self, /) -> str: ...
+
+@final
+class RegistryHive(BaseRecord):
+    """
+    A loaded hive (`_CMHIVE`).
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def base_block(self, /) -> int:
+        """
+        `_HHIVE.BaseBlock`, and the end of the file name it records.
+        """
+    @property
+    def base_block_name(self, /) -> str |None: ...
+    @property
+    def file(self, /) -> str |None:
+        """
+        The file it was loaded from.
+        """
+    @property
+    def flags(self, /) -> int:
+        """
+        `_HHIVE.HiveFlags`.
+        """
+    @property
+    def flat(self, /) -> bool:
+        """
+        The hive is one block of memory, without a cell map.
+        """
+    @property
+    def master(self, /) -> bool:
+        """
+        The master hive, whose root is `\\REGISTRY`.
+        """
+    @property
+    def mount(self, /) -> str |None:
+        """
+        Where it is mounted, such as `\\REGISTRY\\MACHINE\\SYSTEM`.
+        """
+    @property
+    def root_cell(self, /) -> Diagnostic[int]:
+        """
+        The cell of its root key.
+        """
+    @property
+    def stable_length(self, /) -> int:
+        """
+        The bytes of its stable and volatile storage, and their cell
+        maps (`_HMAP_DIRECTORY`).
+        """
+    @property
+    def stable_map(self, /) -> int: ...
+    @property
+    def version(self, /) -> int:
+        """
+        `_HHIVE.Version`, the hive format's minor version.
+        """
+    @property
+    def volatile_length(self, /) -> int: ...
+    @property
+    def volatile_map(self, /) -> int: ...
+
+@final
+class RegistryHives(BaseRecord):
+    """
+    The loaded hives (`!reg hivelist`).
+    """
+    @property
+    def hives(self, /) -> list[RegistryHive]: ...
+    @property
+    def stopped(self, /) -> str |None:
+        """
+        Why the walk of `nt!CmpHiveListHead` stopped short.
+        """
+    @property
+    def unreadable(self, /) -> list[RegistryUnreadable]: ...
+
+@final
+class RegistryKey(BaseRecord):
+    """
+    A key with its subkeys and values (`!reg querykey`).
+    """
+    @property
+    def cell(self, /) -> int |None:
+        """
+        Its cell; `None` for a key read by the address of its node.
+        """
+    @property
+    def flag_names(self, /) -> list[str]:
+        """
+        The `KEY_*` names of `flags`.
+        """
+    @property
+    def flags(self, /) -> int: ...
+    @property
+    def hive(self, /) -> int: ...
+    @property
+    def key_values(self, /) -> list[RegistryValue]: ...
+    @property
+    def last_write(self, /) -> int:
+        """
+        A FILETIME, and as UTC.
+        """
+    @property
+    def last_write_utc(self, /) -> str |None: ...
+    @property
+    def links(self, /) -> list[RegistryLink]:
+        """
+        The symbolic links the path went through.
+        """
+    @property
+    def name(self, /) -> str: ...
+    @property
+    def node(self, /) -> int: ...
+    @property
+    def path(self, /) -> str:
+        """
+        Its full path, with the names as the hives store them.
+        """
+    @property
+    def problems(self, /) -> list[str]:
+        """
+        Subkey indexes and value lists that do not read, and counts that
+        do not match.
+        """
+    @property
+    def subkey_count(self, /) -> int:
+        """
+        The subkeys and values the key node counts.
+        """
+    @property
+    def subkeys(self, /) -> list[RegistrySubkey]: ...
+    @property
+    def unreadable_subkeys(self, /) -> list[RegistryCellError]: ...
+    @property
+    def unreadable_values(self, /) -> list[RegistryCellError]: ...
+    @property
+    def value_count(self, /) -> int: ...
+
+@final
+class RegistryLink(BaseRecord):
+    """
+    A symbolic link a path went through: the link's path and the path
+    its `SymbolicLinkValue` holds.
+    """
+    @property
+    def path(self, /) -> str: ...
+    @property
+    def target(self, /) -> str: ...
+
+@final
+class RegistrySubkey(BaseRecord):
+    """
+    A subkey as its parent lists it.
+    """
+    @property
+    def cell(self, /) -> int: ...
+    @property
+    def flags(self, /) -> int:
+        """
+        `_CM_KEY_NODE.Flags`.
+        """
+    @property
+    def last_write(self, /) -> int:
+        """
+        A FILETIME, and as UTC.
+        """
+    @property
+    def last_write_utc(self, /) -> str |None: ...
+    @property
+    def mount_point(self, /) -> bool:
+        """
+        A hive is mounted at the key.
+        """
+    @property
+    def name(self, /) -> str: ...
+    @property
+    def node(self, /) -> int:
+        """
+        Its key node (`_CM_KEY_NODE`).
+        """
+    @property
+    def subkey_count(self, /) -> int: ...
+    @property
+    def symbolic_link(self, /) -> bool:
+        """
+        The key is a symbolic link.
+        """
+    @property
+    def value_count(self, /) -> int: ...
+    @property
+    def volatile(self, /) -> bool: ...
+
+@final
+class RegistryUnreadable(BaseRecord):
+    """
+    A hive that does not read.
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def error(self, /) -> str: ...
+
+@final
+class RegistryValue(BaseRecord):
+    """
+    A value (`_CM_KEY_VALUE`).
+    """
+    @property
+    def cell(self, /) -> int: ...
+    @property
+    def data(self, /) -> Diagnostic[str |list[str] |int |bytes]:
+        """
+        The data decoded by the value's type.
+        """
+    @property
+    def length(self, /) -> int:
+        """
+        The data's length in bytes.
+        """
+    @property
+    def name(self, /) -> str:
+        """
+        Empty for the default value.
+        """
+    @property
+    def node(self, /) -> int: ...
+    @property
+    def raw(self, /) -> Diagnostic[bytes]:
+        """
+        The data's bytes.
+        """
+    @property
+    def storage(self, /) -> str:
+        """
+        Where the data is: `inline` in the value record, in a `cell`,
+        or in `big` data segments.
+        """
+    @property
+    def type(self, /) -> int:
+        """
+        `REG_*`.
+        """
+    @property
+    def type_name(self, /) -> str |None:
+        """
+        The type's name; `None` for a type Windows does not define.
         """
 
 @final

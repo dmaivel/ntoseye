@@ -25,6 +25,8 @@ pub enum CompletionStrategy {
     Breakpoint,
     Driver,
     Alias,
+    /// A full registry key path, completed one key at a time.
+    RegistryKey,
 }
 
 impl CompletionStrategy {
@@ -40,6 +42,7 @@ impl CompletionStrategy {
             "breakpoint" => Self::Breakpoint,
             "driver" => Self::Driver,
             "alias" => Self::Alias,
+            "registry-key" => Self::RegistryKey,
             _ => return None,
         })
     }

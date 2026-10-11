@@ -640,6 +640,7 @@ macro_rules! repl_command {
     (@completion_strategy Breakpoint) => { $crate::repl::CompletionStrategy::Breakpoint };
     (@completion_strategy Driver) => { $crate::repl::CompletionStrategy::Driver };
     (@completion_strategy Alias) => { $crate::repl::CompletionStrategy::Alias };
+    (@completion_strategy RegistryKey) => { $crate::repl::CompletionStrategy::RegistryKey };
 
     (@details) => { None };
     (@details $details:expr) => { Some($details) };

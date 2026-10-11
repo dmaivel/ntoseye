@@ -34,6 +34,7 @@ Thread = _Completion("thread")
 Vcpu = _Completion("vcpu")
 Breakpoint = _Completion("breakpoint")
 Alias = _Completion("alias")
+RegistryKey = _Completion("registry-key")
 
 
 try:
@@ -84,4 +85,5 @@ __all__ = [
     "Vcpu",
     "Breakpoint",
     "Alias",
+    "RegistryKey",
 ]

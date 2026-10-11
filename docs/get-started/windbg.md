@@ -30,6 +30,7 @@
 | `!rcdrkd.*` (WPP recorder) | `ntoseye` has {command}`!rcdrkd.rcdrloglist` and {command}`!rcdrkd.rcdrlogdump`, which format messages from the TMF annotations in loaded PDBs instead of `.tmf` files. See [The WPP recorder](../using/kmdf.md#the-wpp-recorder-rcdrkd). |
 | `!apic`, `!ioapic` | {command}`!apic` needs `kd` or `kdnet` and shows the APIC of the selected processor, or of the processor you give (`!apic 2`). {command}`!ioapic` shows the I/O APIC lines as the HAL recorded them, from kernel memory, rather than reading the I/O APIC's registers. |
 | `!sysinfo` | {command}`!sysinfo` takes `machineid`, `smbios`, and `cpuinfo`. |
+| `!reg` | {command}`!reg` has `hivelist`, `querykey` (`q`), `keyinfo`, and `cellindex`. `querykey` reads the hives themselves, so it shows any key, not only the keys that the kernel has cached, and `-v <value>` shows one value in full. The other `!reg` subcommands, such as `kcb` and `openkeys`, are not available. See [The registry](../using/registry.md). |
 | `~` lists threads of a user-mode process | {command}`~` lists the processors (vCPUs), and `~Ns` selects a processor. For Windows threads, use {command}`threads` and {command}`!thread`. |
 
 ## Behaves differently

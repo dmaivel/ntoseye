@@ -17,8 +17,9 @@
 //! things together: the value its builder supplies ([`ViewValue::Source`]: a
 //! `Hex<u16>` field takes a `u16`), how it renders ([`ViewValue::view`]), and
 //! its SDK type ([`ViewValue::HINT`], which the stub prints). The scalars,
-//! the wrappers ([`Hex`], [`Diag`], [`Metric`], [`Keyed`], `Option`, `Vec`,
-//! `Box`), declared shapes and [`unions!`] enums are the only `ViewValue`s,
+//! the wrappers ([`Hex`], [`Diag`], [`Metric`], [`Keyed`], [`Bytes`],
+//! `Option`, `Vec`, `Box`), declared shapes and [`unions!`] enums are the
+//! only `ViewValue`s,
 //! all implemented in this file (the last two by its macros). Each impl's `HINT`
 //! must name the Python type `view::to_py` makes of its `view`;
 //! the `hints` test below checks each one with no guest (a new wrapper
@@ -88,6 +89,10 @@ pub struct Metric<T>(PhantomData<T>);
 /// attributes are its keys. Takes the `(key, value)` pairs.
 pub struct Keyed<T>(PhantomData<T>);
 
+/// Raw bytes, such as a registry value's data: `bytes` in the SDK. Takes
+/// the bytes.
+pub struct Bytes;
+
 macro_rules! scalars {
     ($($t:ty => |$v:ident| $view:expr, $hint:literal;)*) => {$(
         impl ViewValue for $t {
@@ -140,6 +145,15 @@ impl<T: ViewValue> ViewValue for Keyed<T> {
     #[cfg(feature = "python-stubs")]
     const HINT: pyo3::inspect::PyStaticExpr =
         <crate::python::record::Record as pyo3::PyTypeInfo>::TYPE_HINT;
+}
+
+impl ViewValue for Bytes {
+    type Source = Vec<u8>;
+    fn view(bytes: Vec<u8>) -> View {
+        View::Bytes(bytes)
+    }
+    #[cfg(feature = "python-stubs")]
+    const HINT: pyo3::inspect::PyStaticExpr = pyo3::type_hint_identifier!("builtins", "bytes");
 }
 
 impl<T: ViewValue> ViewValue for Option<T> {
@@ -619,6 +633,7 @@ mod hints {
             source: None,
         },
         keyed: Keyed<Diag<Hex>> = vec![("a", DiagnosticValue::Available(7))],
+        raw: Bytes = vec![1, 2, 3],
         number: Either = Either::Number(8),
         either_nested: Either = Either::Nested(Inner { id: 9 }),
     }

@@ -31,6 +31,11 @@ def results(dbg: Debugger) -> list[tuple[object, str, Callable[[], object]]]:
     heap = next(iter(user.heaps))
     kernel = dbg.modules["nt"]
     thread = next(t for t in user.threads if t.teb is not None)
+    # A service key holds text, string list, number, and binary values.
+    service = r"HKLM\SYSTEM\CurrentControlSet\Services\LanmanServer"
+    service_key = inspect.registry_key(service)
+    service_cell = service_key.cell
+    assert service_cell is not None
     return [
         (inspect, "vm", inspect.vm),
         (inspect, "version", inspect.version),
@@ -56,6 +61,15 @@ def results(dbg: Debugger) -> list[tuple[object, str, Callable[[], object]]]:
         (kernel, "headers", lambda: kernel.headers(exports=True, imports=True)),
         (kernel, "image_info", kernel.image_info),
         (thread, "inspect", thread.inspect),
+        (inspect, "registry_hives", inspect.registry_hives),
+        (inspect, "registry_key", lambda: inspect.registry_key(service)),
+        (inspect, "registry_value", lambda: inspect.registry_value(service, "DependOnService")),
+        (
+            inspect,
+            "registry_key_at",
+            lambda: inspect.registry_key_at(service_key.hive, service_key.subkeys[0].node),
+        ),
+        (inspect, "registry_cell", lambda: inspect.registry_cell(service_key.hive, service_cell)),
     ]
 
 

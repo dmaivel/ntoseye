@@ -21,7 +21,7 @@ macro_rules! view_modules {
     };
 }
 
-view_modules!([$] backend, bugcheck, cpu, etw, execution, fs, hardware, heap, hypervisor, list, machine, meta, mm, module, ndis, object, pnp, power, process, rcdr, sched, security, storage, symbols, triage, usermode, virtio, wdf);
+view_modules!([$] backend, bugcheck, cpu, etw, execution, fs, hardware, heap, hypervisor, list, machine, meta, mm, module, ndis, object, pnp, power, process, rcdr, registry, sched, security, storage, symbols, triage, usermode, virtio, wdf);
 
 /// One step of [`with_shape_classes!`]: asks the next module for its classes
 /// (its `shape_classes!`), then emits the module once none are left.
@@ -68,6 +68,8 @@ pub enum View {
     Int(i64),
     Bool(bool),
     Str(String),
+    /// Raw bytes: `bytes` in the SDK.
+    Bytes(Vec<u8>),
     Null,
     List(Vec<View>),
     /// An ordered key/value object (insertion order is preserved on render).
@@ -117,12 +119,13 @@ pub fn to_py<'py>(
     use crate::python::record::{BaseRecord, Record, diagnostic_class};
     use pyo3::IntoPyObjectExt;
     use pyo3::prelude::*;
-    use pyo3::types::{PyDict, PyList};
+    use pyo3::types::{PyBytes, PyDict, PyList};
     Ok(match v {
         View::Hex(n) | View::Num(n) => n.into_bound_py_any(py)?,
         View::Int(n) => n.into_bound_py_any(py)?,
         View::Bool(b) => b.into_bound_py_any(py)?,
         View::Str(s) => s.as_str().into_bound_py_any(py)?,
+        View::Bytes(bytes) => PyBytes::new(py, bytes).into_any(),
         View::Null => py.None().into_bound(py),
         View::List(items) => {
             let list = PyList::empty(py);

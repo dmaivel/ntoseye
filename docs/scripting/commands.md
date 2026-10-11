@@ -48,6 +48,7 @@ The markers are:
 - `Vcpu`
 - `Breakpoint`
 - `Alias`
+- `RegistryKey`, for a full registry key path, completed one key at a time as for {command}`!reg`
 
 If a parameter does not have a marker, the REPL does not complete it.
 

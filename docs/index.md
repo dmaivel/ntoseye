@@ -95,6 +95,7 @@ using/kmdf
 using/virtio
 using/storport
 using/ndis
+using/registry
 using/drivers
 ```
 

@@ -38,6 +38,7 @@ pub mod power;
 pub mod process;
 mod process_objects;
 mod rcdr;
+mod registry;
 mod sched;
 mod script;
 mod security;

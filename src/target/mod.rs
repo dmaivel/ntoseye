@@ -33,6 +33,7 @@ pub mod pnp;
 pub mod pool;
 pub mod power;
 pub mod rcdr;
+pub mod registry;
 pub mod sched;
 pub mod security;
 pub mod smbios;
