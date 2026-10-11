@@ -25,6 +25,7 @@ Keeping this file:
 - `!sysinfo machineid` and `!sysinfo smbios` read the machine's SMBIOS table: the BIOS, system, and baseboard identity, and the processor and memory structures. `!sysinfo cpuinfo` shows the processor as `!cpuinfo` does.
 - The SDK returns what these commands show as typed records: `dbg.inspect.ndis_miniports()` and the other `ndis_*` methods, with `ndis_nbl_data()` for a NET_BUFFER_LIST's frames as `bytes`; `storport_adapters()`, `storport_unit()`, `storport_log()`, `srb()`, and `class_devices()`; `rcdr_drivers()`, `rcdr_logs()`, and `rcdr_log()`; `interrupt_controllers()` and `smbios()`; and `cpu.apic()`. See [NDIS](https://ntoseye.com/using/ndis/#from-python), [StorPort](https://ntoseye.com/using/storport/#from-python), and [the WPP recorder](https://ntoseye.com/using/kmdf/#from-python) from Python.
 - The DAP adapter offers exception breakpoints: access violation, illegal instruction, divide by zero, and stack overflow break at the first chance when checked and the second when not, and module load and unload stop when checked. See [breakpoints in DAP](https://ntoseye.com/integrations/dap/#breakpoints).
+- `--srcpath <directory>` maps a driver's source tree from the start of the session, as `.srcpath+` does, and can be given more than once. See [private PDBs and local source](https://ntoseye.com/using/symbols/#private-pdbs-and-local-source).
 
 ### Changed
 
@@ -35,6 +36,7 @@ Keeping this file:
 
 - Over KD, `rdmsr` and `wrmsr` read and write the processor selected with `/p` or `~Ns`, and the SDK's `cpu.msr` its own processor, instead of the one that reported the stop.
 - `!handle` reads a process's handle table in a kernel dump that lacks the process's own page directories, such as lsass.exe's under VBS, instead of failing with `Bad virtual address`: the table is kernel memory, read through the kernel's.
+- Ctrl+C stops `!process 0 7` and the other thread listings of `!process` at the next thread, with `interrupted after N thread(s)`, instead of walking every thread's stack first.
 
 ## v0.48.0 (2026-10-08)
 

@@ -98,6 +98,14 @@ struct TargetOptions {
     #[arg(long, global = true)]
     sympath_append: Vec<PathBuf>,
 
+    /// Map source files the PDBs record to a local copy, which you can give
+    /// more than once: a local root that holds the source tree, or
+    /// recorded-prefix=local-root, as `.srcpath+` takes it. `ls`, the stop
+    /// card, and the disassembly use these mappings from the start of the
+    /// session
+    #[arg(long, global = true)]
+    srcpath: Vec<String>,
+
     /// Download the symbols again
     #[arg(long = "force-download-symbols", global = true)]
     redownload_symbols: bool,
@@ -326,7 +334,7 @@ pub fn run_with_args(args: impl IntoIterator<Item = OsString>) -> i32 {
 }
 
 /// The target options that can be given more than once.
-const REPEATABLE_TARGET_OPTIONS: [&str; 2] = ["pdb_server", "sympath_append"];
+const REPEATABLE_TARGET_OPTIONS: [&str; 3] = ["pdb_server", "sympath_append", "srcpath"];
 
 fn parse_cli(args: impl IntoIterator<Item = OsString>) -> std::result::Result<Cli, clap::Error> {
     // Clap replaces a global argument's values from before the subcommand
@@ -347,6 +355,7 @@ fn parse_cli(args: impl IntoIterator<Item = OsString>) -> std::result::Result<Cl
     let mut cli = Cli::from_arg_matches(&matches)?;
     cli.target.pdb_server = values_at_every_level(&matches, "pdb_server");
     cli.target.sympath_append = values_at_every_level(&matches, "sympath_append");
+    cli.target.srcpath = values_at_every_level(&matches, "srcpath");
     Ok(cli)
 }
 
@@ -424,6 +433,7 @@ fn run(cli: Cli) -> Result<()> {
 
     let pdb_servers = take(&mut args.pdb_server);
     let sympath_append = take(&mut args.sympath_append);
+    let srcpath = take(&mut args.srcpath);
     symbols::NO_PDB_FROM_MEMORY
         .set(args.no_pdb_from_memory)
         .map_err(|_| {
@@ -438,6 +448,13 @@ fn run(cli: Cli) -> Result<()> {
         symbols::SYMPATH_APPEND.set(sympath_append).map_err(|_| {
             Error::DebugInfo("sympath-append list was initialized before startup".into())
         })?;
+    }
+    if !srcpath.is_empty() {
+        symbols::SOURCE_PATHS
+            .set(symbols::parse_source_paths(&srcpath))
+            .map_err(|_| {
+                Error::DebugInfo("source path list was initialized before startup".into())
+            })?;
     }
 
     if args.dump.is_some() && args.connect.is_some() {
@@ -584,9 +601,11 @@ mod tests {
                         if index % 2 == 0 {
                             args.extend(["--sympath-append".to_string(), path.to_string()]);
                             args.extend(["--pdb-server".to_string(), path.to_string()]);
+                            args.extend(["--srcpath".to_string(), path.to_string()]);
                         } else {
                             args.push(format!("--sympath-append={path}"));
                             args.push(format!("--pdb-server={path}"));
+                            args.push(format!("--srcpath={path}"));
                         }
                     }
                 }
@@ -598,6 +617,10 @@ mod tests {
                 );
                 assert_eq!(
                     cli.target.pdb_server, paths,
+                    "{command} at position {position}",
+                );
+                assert_eq!(
+                    cli.target.srcpath, paths,
                     "{command} at position {position}",
                 );
             }

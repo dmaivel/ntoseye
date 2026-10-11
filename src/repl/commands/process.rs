@@ -255,12 +255,14 @@ impl ReplState<'_> {
         }
     }
 
-    fn print_process_threads(&mut self, process: &ProcessInfo, include_stack: bool) {
+    /// The threads of `process`, with their stacks when asked; false when an
+    /// interrupt cut the list short.
+    fn print_process_threads(&mut self, process: &ProcessInfo, include_stack: bool) -> bool {
         let mut threads = match self.ctx.target.enumerate_threads_for_process_info(process) {
             Ok(threads) => threads,
             Err(error) => {
                 error!("  thread list unavailable: {}", error);
-                return;
+                return true;
             }
         };
         let truncated = threads.len() > MAX_PROCESS_THREADS;
@@ -271,7 +273,11 @@ impl ReplState<'_> {
         } else {
             HashMap::new()
         };
-        for thread in &threads {
+        for (index, thread) in threads.iter().enumerate() {
+            if self.ctx.target.interrupted() {
+                outln!("  interrupted after {index} thread(s)");
+                return false;
+            }
             print_thread_extended_detail(&self.ctx.target, thread);
             if include_stack {
                 let vcpu = active.get(&thread.ethread.0).map(|(vcpu, _)| vcpu.as_str());
@@ -295,6 +301,7 @@ impl ReplState<'_> {
         if truncated {
             outln!("  thread list truncated at {MAX_PROCESS_THREADS} entries");
         }
+        true
     }
 
     fn cmd_process(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
@@ -387,8 +394,10 @@ impl ReplState<'_> {
                 if flags & 1 != 0 {
                     print_process_detail(process, detail);
                 }
-                if flags & 2 != 0 || flags & 4 != 0 {
-                    self.print_process_threads(process, flags & 4 != 0);
+                if (flags & 2 != 0 || flags & 4 != 0)
+                    && !self.print_process_threads(process, flags & 4 != 0)
+                {
+                    break;
                 }
             }
         }

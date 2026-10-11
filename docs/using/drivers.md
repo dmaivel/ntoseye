@@ -94,6 +94,8 @@ A PDB records the source paths from the time of the build, and {command}`.srcpat
 .srcpath /home/me/mydriver
 ```
 
+To map the sources from the start of the session, give the same directory with `--srcpath /home/me/mydriver`.
+
 If you edited a file after the build, `ntoseye` reports that the file is not the compiled source and does not show it with incorrect lines.
 
 A mapping `<recorded-prefix>=<local-root>` replaces the prefix that the PDB records and does not use suffix matching. You usually do not need one, but use a mapping if suffix matching can find the wrong file in a checkout, which can occur when two files under the root end in the same path:

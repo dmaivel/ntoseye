@@ -35,6 +35,12 @@ To have the directory in the path from the start, for example a driver's build o
 .srcpath /home/me/src/MyDriver
 ```
 
+To have the source tree in the path from the start, give it with `--srcpath <directory>` instead. `--srcpath` takes the same entries as {command}`.srcpath+`, including a `<recorded-prefix>=<local-root>` mapping, and you can give it more than once:
+
+```text
+ntoseye --sympath-append /home/me/symbols/mydriver --srcpath /home/me/src/MyDriver
+```
+
 ### How ntoseye finds a source file
 
 The PDB records source paths such as `C:\Users\me\source\repos\MyDriver\src\queue.c`. ntoseye maps each such path to a file under the source directory, using the longest trailing part of the path that names a file in that directory. For example, it selects `/home/me/src/MyDriver/src/queue.c` before `/home/me/src/MyDriver/queue.c`.

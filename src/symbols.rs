@@ -31,6 +31,9 @@ pub static PDB_SERVERS: OnceLock<Vec<String>> = OnceLock::new();
 /// `--sympath-append`.
 pub static SYMPATH_APPEND: OnceLock<Vec<PathBuf>> = OnceLock::new();
 
+/// Source path mappings a session starts with, from `--srcpath`.
+pub static SOURCE_PATHS: OnceLock<Vec<SourcePathMapping>> = OnceLock::new();
+
 /// Set by `--no-pdb-from-memory`: never rebuild a missing PDB from the
 /// guest's memory (see `crate::guest::recover_pdbs`).
 pub static NO_PDB_FROM_MEMORY: OnceLock<bool> = OnceLock::new();
@@ -782,7 +785,7 @@ impl SymbolStore {
             module_status: DashMap::new(),
             module_source: DashMap::new(),
             sources: RwLock::new(DEFAULT_SYMBOL_SOURCES.clone()),
-            source_paths: RwLock::new(Vec::new()),
+            source_paths: RwLock::new(SOURCE_PATHS.get().cloned().unwrap_or_default()),
             kernel_guid: Mutex::new(None),
             kernel_dtb: Mutex::new(None),
             secure_roots: Mutex::new(None),
