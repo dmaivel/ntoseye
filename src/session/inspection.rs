@@ -11,7 +11,9 @@ use crate::bugchecks::{
 };
 use crate::bytes;
 use crate::dbg_backend::processor_index_from_backend_thread_id;
-use crate::disasm::{DisasmRow, decode_code, decode_preceding, instruction_containing};
+use crate::disasm::{
+    DisasmRow, decode_code, decode_preceding, function_extent, instruction_containing,
+};
 use crate::error::{Error, Result};
 use crate::guest::hypervisor::{HvPartition, HvVirtualProcessor, processor_guest_vp};
 use crate::kd::{context, context_arm64};
@@ -368,16 +370,16 @@ impl Session {
         }
     }
 
-    /// Disassemble the runtime function containing `addr`. Returns its start
-    /// symbol, byte length, and decoded rows.
+    /// Disassemble the function containing `addr`: the one its runtime
+    /// function entry describes, or else a leaf, which has none (see
+    /// [`Self::leaf_function_range`]). Returns its start symbol, byte
+    /// length, and decoded rows.
     pub fn disassemble_function(&self, addr: VirtAddr) -> Result<(String, usize, Vec<DisasmRow>)> {
         let dtb = self.target.current_dtb();
         let trace = resolve_thread_trace_context(&self.target, dtb);
-        let Some((start, end)) = function_range(&self.target, &trace, addr.0) else {
-            return Err(Error::DebugInfo(format!(
-                "no runtime-function entry contains {:#x}",
-                addr.0
-            )));
+        let (start, end) = match function_range(&self.target, &trace, addr.0) {
+            Some(range) => range,
+            None => self.leaf_function_range(dtb, addr)?,
         };
         let len = end
             .checked_sub(start)
@@ -398,6 +400,38 @@ impl Session {
         let machine = self.target.code_machine(VirtAddr(start));
         let rows = decode_code(&bytes, start, None, machine, resolve);
         Ok((format_symbol(&self.target, &trace, start), len, rows))
+    }
+
+    /// The function containing `addr` that no runtime function entry
+    /// describes, a leaf: from its symbol, as far as its control flow
+    /// reaches before the next symbol.
+    fn leaf_function_range(&self, dtb: Dtb, addr: VirtAddr) -> Result<(u64, u64)> {
+        const MAX_LEAF_BYTES: u64 = 64 * 1024;
+        let (start, limit) = self.target.symbols.symbol_span(dtb, addr).ok_or_else(|| {
+            Error::DebugInfo(format!(
+                "no runtime-function entry or symbol contains {:#x}",
+                addr.0
+            ))
+        })?;
+        let span = (limit.0 - start.0).min(MAX_LEAF_BYTES) as usize;
+        let (code, valid) =
+            read_page_chunks(start, span, |address, buf| self.read_masked(address, buf))?;
+        let readable = valid.iter().position(|valid| !valid).unwrap_or(span);
+        let machine = self.target.code_machine(start);
+        let length = function_extent(&code[..readable], start.0, machine).ok_or_else(|| {
+            Error::DebugInfo(format!(
+                "no runtime-function entry contains {:#x}, and no code decodes at its symbol {:#x}",
+                addr.0, start.0
+            ))
+        })?;
+        let end = start.0 + length as u64;
+        if addr.0 >= end {
+            return Err(Error::DebugInfo(format!(
+                "no runtime-function entry contains {:#x}, and the code of its symbol at {:#x} ends at {end:#x}",
+                addr.0, start.0
+            )));
+        }
+        Ok((start.0, end))
     }
 
     /// The bugcheck the target is in: the one its stop reported (a target

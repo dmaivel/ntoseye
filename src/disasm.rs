@@ -1051,6 +1051,97 @@ fn x86_bitness(machine: CodeMachine) -> Option<u32> {
     }
 }
 
+/// How a [`function_extent`] walk goes on past one instruction.
+enum Flow {
+    /// To the next instruction.
+    Next,
+    /// To the next instruction and to a branch target.
+    Fork(u64),
+    /// To a branch target only.
+    Jump(u64),
+    /// Nowhere: a return, an indirect branch, a trap, or no instruction.
+    End,
+}
+
+/// The length of the function of `machine` code at the start of `code`,
+/// mapped at `start`, by its control flow, as `uf` finds a function no
+/// unwind entry describes (a leaf): every instruction reachable from
+/// `start` through fall-through and branches, up to the end of the last.
+/// `code` reaches no further than the function can (the next symbol), so a
+/// branch out of it is a tail call, not followed; calls are not followed.
+/// `None` when the first instruction does not decode.
+pub fn function_extent(code: &[u8], start: u64, machine: CodeMachine) -> Option<usize> {
+    const MAX_INSTRUCTIONS: usize = 1 << 16;
+    let end = start + code.len() as u64;
+    let flow_at = |ip: u64| -> Option<(u64, Flow)> {
+        let bytes = code.get(usize::try_from(ip - start).ok()?..)?;
+        match x86_bitness(machine) {
+            Some(bitness) => {
+                let mut decoder = Decoder::with_ip(bitness, bytes, ip, DecoderOptions::NONE);
+                let instruction = decoder.decode();
+                if instruction.is_invalid() {
+                    return None;
+                }
+                let flow = match instruction.flow_control() {
+                    FlowControl::ConditionalBranch => Flow::Fork(instruction.near_branch_target()),
+                    FlowControl::UnconditionalBranch if instruction.is_jmp_short_or_near() => {
+                        Flow::Jump(instruction.near_branch_target())
+                    }
+                    FlowControl::Next | FlowControl::Call | FlowControl::IndirectCall => Flow::Next,
+                    _ => Flow::End,
+                };
+                Some((instruction.next_ip(), flow))
+            }
+            None => {
+                let word = u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?);
+                let instruction = decode(word, ip).ok()?;
+                let target = instruction.operands().iter().find_map(|op| match op {
+                    bad64::Operand::Label(imm) => Some(arm64_imm(*imm) as u64),
+                    _ => None,
+                });
+                let mnemonic = instruction.op().mnem();
+                let flow = match (mnemonic, target) {
+                    ("b", Some(target)) => Flow::Jump(target),
+                    ("cbz" | "cbnz" | "tbz" | "tbnz", Some(target)) => Flow::Fork(target),
+                    (_, Some(target)) if mnemonic.starts_with("b.") => Flow::Fork(target),
+                    _ if mnemonic.starts_with("ret")
+                        || mnemonic == "br"
+                        || mnemonic.starts_with("bra")
+                        || mnemonic.starts_with("eret")
+                        || mnemonic == "brk"
+                        || mnemonic == "udf" =>
+                    {
+                        Flow::End
+                    }
+                    _ => Flow::Next,
+                };
+                Some((ip + 4, flow))
+            }
+        }
+    };
+    flow_at(start)?;
+    let inside = |ip: u64| (start..end).contains(&ip);
+    let mut pending = vec![start];
+    let mut seen = std::collections::HashSet::new();
+    let mut last = start;
+    while let Some(ip) = pending.pop() {
+        if !inside(ip) || !seen.insert(ip) || seen.len() > MAX_INSTRUCTIONS {
+            continue;
+        }
+        let Some((next, flow)) = flow_at(ip) else {
+            continue;
+        };
+        last = last.max(next.min(end));
+        match flow {
+            Flow::Next => pending.push(next),
+            Flow::Fork(target) => pending.extend([next, target]),
+            Flow::Jump(target) => pending.push(target),
+            Flow::End => {}
+        }
+    }
+    usize::try_from(last - start).ok()
+}
+
 /// The start of the instruction of `machine` code that contains `ip`,
 /// decoding forward from `bytes` at `start`, which is at or before `ip`:
 /// `ip` itself when an instruction starts there. `None` when `bytes` ends
@@ -1598,6 +1689,39 @@ mod tests {
             checked >= 500,
             "corpus only produced {checked} decodable instructions"
         );
+    }
+
+    #[test]
+    fn function_extent_follows_branches_to_the_last_reachable_instruction() {
+        let words = |words: &[u32]| {
+            words
+                .iter()
+                .flat_map(|w| w.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        // nt!KeQueryActiveProcessorCount's shape: a leaf with a forward cbz
+        // over its body to its tail, then padding and the next function.
+        let leaf = words(&[
+            0xb4000080, // cbz x0, +0x10
+            0xd2800021, // mov x1, #1
+            0xf9000001, // str x1, [x0]
+            0x14000001, // b +4 (to the tail)
+            0x52800020, // mov w0, #1
+            0xd65f03c0, // ret
+            0x00000000, // udf #0 (padding)
+            0xd503201f, // nop (the next function)
+        ]);
+        assert_eq!(
+            function_extent(&leaf, 0x1000, CodeMachine::Arm64),
+            Some(0x18)
+        );
+        // A branch out of the span is a tail call, and the function ends there.
+        let tail = words(&[0xd503201f, 0x14000010]); // nop; b +0x40
+        assert_eq!(function_extent(&tail, 0x1000, CodeMachine::Arm64), Some(8));
+        // x86: jz over a body to a ret; the int3 padding after it is not code.
+        let x86 = [0x74, 0x03, 0x48, 0xff, 0xc0, 0xc3, 0xcc, 0xcc];
+        assert_eq!(function_extent(&x86, 0x1000, CodeMachine::Amd64), Some(6));
+        assert_eq!(function_extent(&[0x06], 0x1000, CodeMachine::Amd64), None);
     }
 
     #[test]

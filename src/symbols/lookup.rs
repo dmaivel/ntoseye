@@ -271,6 +271,24 @@ impl SymbolStore {
             .map(|(module, name, offset)| format_symbol_with_offset(&module, &name, offset))
     }
 
+    /// The span of the symbol `address` is in, as
+    /// [`Self::find_closest_symbol_for_address`] finds it: from the symbol
+    /// to the module's next symbol, or to the module's end after its last.
+    /// A public PDB gives a function no length, so this is the most code
+    /// the symbol can name.
+    pub fn symbol_span(&self, dtb: Dtb, address: VirtAddr) -> Option<(VirtAddr, VirtAddr)> {
+        let module = self.find_module_for_address(dtb, address)?;
+        let (_, offset) = self.closest_symbol(module.guid, module.base_address, address)?;
+        let start = address.0 - u64::from(offset);
+        let start_rva = u32::try_from(start - module.base_address.0).ok()?;
+        let entries = self.symbol_addresses.get(&module.guid)?;
+        let next = entries.partition_point(|entry| entry.rva <= start_rva);
+        let end = entries.get(next).map_or(module.end_address().0, |entry| {
+            module.base_address.0 + u64::from(entry.rva)
+        });
+        Some((VirtAddr(start), VirtAddr(end)))
+    }
+
     pub fn find_module_for_address(&self, dtb: Dtb, address: VirtAddr) -> Option<LoadedModule> {
         self.modules
             .iter()

@@ -236,6 +236,7 @@ repl_command! {
     names: ["uf"],
     usage: "uf [address]",
     summary: "Disassemble the function that contains an address.",
+    details: "The function's runtime function entry gives its extent. A leaf function has none, so uf reads it from its symbol for as far as its control flow reaches before the next symbol: it follows the branches inside the function, and treats a branch past the next symbol as a tail call.",
     completion: Expression,
 }
 
