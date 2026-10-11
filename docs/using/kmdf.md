@@ -7,8 +7,11 @@ The `!wdfkd.*` commands read the Kernel-Mode Driver Framework's own state from `
 | {command}`!wdfkd.wdfldr` | All KMDF client drivers, with each driver's name, the KMDF version that it bound to, its `_FX_DRIVER_GLOBALS`, WDFDRIVER handle, and `DRIVER_OBJECT`, and whether it has an In-Flight Recorder (IFR) log. |
 | {command}`!wdfkd.wdfdriverinfo` `<driver>` | One client driver and each of its device objects, with the WDFDEVICE for each device object. |
 | {command}`!wdfkd.wdfhandle` `<handle>` | The object behind a handle: its type, size, reference count, state, owner, parent, and contexts. |
-| {command}`!wdfkd.wdfdevice` `<WDFDEVICE>` | A device's WDM device objects, its PnP, power, and power policy states, and its queues. |
+| {command}`!wdfkd.wdfobject` `<handle or FxObject>` | What {command}`!wdfkd.wdfhandle` shows, and the children of the object. Use it for the types that have no command of their own. |
+| {command}`!wdfkd.wdfdevice` `<WDFDEVICE>` | A device's WDM device objects, its PnP, power, and power policy states, its queues, and its I/O targets. |
 | {command}`!wdfkd.wdfqueue` `<WDFQUEUE>` | A queue's dispatch type, state, and callbacks, the requests that wait in it, and the requests that the driver owns. |
+| {command}`!wdfkd.wdfrequest` `<WDFREQUEST>` | A request's IRP and current stack location, its queue, whether it can be canceled, and the I/O target that it was sent to. |
+| {command}`!wdfkd.wdfiotarget` `<WDFIOTARGET>` | An I/O target's state, the device object that it sends to, and the requests sent to it. |
 | {command}`!wdfkd.wdflogdump` `<driver>` | A driver's IFR log, with the oldest record first. |
 | {command}`!wdfkd.wdfcrashdump` `[loader]` | In a crash dump, the IFR log that KMDF saved of one driver, or with `loader`, the client drivers that KMDF recorded. |
 
@@ -23,7 +26,10 @@ A typical walk starts at the driver list and follows the handles down:
 !wdfkd.wdfdriverinfo kmdfsample
 !wdfkd.wdfdevice 00003ef5edcba988
 !wdfkd.wdfqueue 00003ef5edcb1238
+!wdfkd.wdfrequest 00003ef5edcb5678
 ```
+
+{command}`!wdfkd.wdfhandle` ends with the command that shows the object in full, such as `!wdfkd.wdfrequest` for a WDFREQUEST, or `!wdfkd.wdfobject` for a type that has no command of its own, such as a WDFMEMORY or a WDFTIMER.
 
 ## Handles
 
@@ -44,6 +50,90 @@ Before a command shows an object, it checks the object's `FxObject` header, and 
 If a check fails, the command gives the reason and does not show the object. The same checks apply to each object that a command reaches through a list or a pointer. When one of these objects fails, the list ends at that object, and the output shows where and why.
 
 The client driver list is an exception, because its integrity comes from its links: the Blink of each entry must point back to the entry before it. A client whose name or `FxDriver` fails the checks therefore stays in the list, and the list shows the problem.
+
+{command}`!wdfkd.wdfobject` also takes the address of an `FxObject`. It lists the children of the object, which the object deletes with itself. Some children are the framework's own objects, such as the packages of a device, and have no handle.
+
+## Requests and I/O targets
+
+A request that a driver has not completed is on a list of its queue or of the I/O target that the driver sent it to. {command}`!wdfkd.wdfqueue` lists the requests of a queue with their WDFREQUEST handles:
+
+```text
+!wdfkd.wdfqueue 00004d757979dfd8
+...
+Driver cancelable requests (1)
+   WDFREQUEST 00004d7578be4348  FxRequest ffffb28a8741bcb0  IRP ffffb28a8c811a30
+Driver owned requests (1)
+   WDFREQUEST 00004d7578be4348  FxRequest ffffb28a8741bcb0  IRP ffffb28a8c811a30
+```
+
+{command}`!wdfkd.wdfrequest` shows the request. For its IRP, it shows the current stack location with the major function, the device object, and the buffer lengths of a read, a write, or a device control. To see all of the stack locations of the IRP, pass the IRP to {command}`!irp`. The command also shows the queue that the request came from and whether the request can be canceled: here the balloon driver marked its request cancelable, and the cancel routine is the driver's own:
+
+```text
+!wdfkd.wdfrequest 00004d7578be4348
+WDFREQUEST             00004d7578be4348
+FxRequest              ffffb28a8741bcb0
+Driver                 BALLOON  (globals ffffb28a86827dd0)
+Reference count        2
+Object state           FxObjectStateCreated (0x1)
+Parent                 none
+IRP                    ffffb28a8c811a30  (!irp)
+Current location       3 of 3: IRP_MJ_WRITE
+  Device               ffffb28a86861a30  \Driver\BALLOON  (!devobj)
+  Parameters           length 0x64
+  File object          ffffb28a8a8787e0
+  System buffer        ffffb28a8ccdc780
+IRP allocated by       REQUEST_ALLOCATED_FROM_IO (0x0)
+IRP references         0
+Completed              no
+Canceled               no
+Presented              yes
+Completion state       FxRequestCompletionStateQueue (0x1)
+Queue                  ffffb28a86862020  handle 00004d757979dfd8  FX_TYPE_QUEUE  (!wdfkd.wdfqueue)
+Cancelable             yes, the driver marked it cancelable
+EvtRequestCancel       fffff807c3142bd0  balloon!BalloonEvtRequestCancel
+I/O target             none
+Target flags           0x0
+```
+
+A request that the driver forwarded or sent down shows the I/O target that it went to, the completion routine that the driver set, and the context of that routine. The current stack location is then the one of the driver below, which has the request now.
+
+{command}`!wdfkd.wdfdevice` lists the I/O targets of a device. The default target of an FDO sends to the next device object down its stack:
+
+```text
+I/O targets
+WDFIOTARGET       FxIoTarget        Kind   State    Target device
+00004d75797c0f88  ffffb28a8683f070  local  Started  ffffb28a8610dbd0  default
+```
+
+{command}`!wdfkd.wdfiotarget` shows a target: whether it is local, in the device's own stack, or remote, opened by the driver with `WdfIoTargetOpen`, and its state. It also shows the device object that the target sends to and the driver of that device object, and then the requests on its lists:
+
+- the requests sent to the target that it has not completed
+- the requests sent while the target was stopped, with `WDF_REQUEST_SEND_OPTION_IGNORE_TARGET_STATE`
+- the requests that the target holds until it starts again
+
+Each request shows its WDFREQUEST handle and IRP. A request without a handle is the framework's own, such as the request that a synchronous send such as `WdfIoTargetSendIoctlSynchronously` builds when the driver passes no request.
+
+```text
+!wdfkd.wdfiotarget 00004d75797c0f88
+WDFIOTARGET            00004d75797c0f88
+FxIoTarget             ffffb28a8683f070
+Driver                 BALLOON  (globals ffffb28a86827dd0)
+Kind                   local, the default I/O target  (FX_TYPE_IO_TARGET)
+State                  WdfIoTargetStarted (0x1)
+Device                 ffffb28a86828520  handle 00004d75797d7ad8  FX_TYPE_DEVICE  (!wdfkd.wdfdevice)
+In stack               yes
+In-stack device        ffffb28a86861a30
+Target device          ffffb28a8610dbd0  \Driver\ACPI  (!devobj)
+Target PDO             ffffb28a8610d060
+I/O count              1
+Stack size             2
+
+Sent requests (0)
+Requests sent ignoring the target state (0)
+Pended requests (0)
+```
+
+A request on a list of a target must name that target as the target that it was sent to, and a list stops at the first request that does not, with the reason.
 
 ## The In-Flight Recorder
 
@@ -144,8 +234,11 @@ The command needs `Wdf01000.pdb`. `ntoseye` loads it when the dump opens, in a m
 - `wdf_loader()` for {command}`!wdfkd.wdfldr`
 - `wdf_driver_info(driver)` for {command}`!wdfkd.wdfdriverinfo`
 - `wdf_handle(handle)` for {command}`!wdfkd.wdfhandle`
+- `wdf_object(object)` for {command}`!wdfkd.wdfobject`, with a handle or an `FxObject` address
 - `wdf_device(handle)` for {command}`!wdfkd.wdfdevice`
 - `wdf_queue(handle)` for {command}`!wdfkd.wdfqueue`
+- `wdf_request(handle)` for {command}`!wdfkd.wdfrequest`
+- `wdf_io_target(handle)` for {command}`!wdfkd.wdfiotarget`
 - `wdf_log(driver)` for {command}`!wdfkd.wdflogdump`
 - `wdf_crash_log()` and `wdf_crash_drivers()` for {command}`!wdfkd.wdfcrashdump`
 - `rcdr_drivers()` and `rcdr_logs(driver)` for {command}`!rcdrkd.rcdrloglist`
@@ -156,4 +249,18 @@ for client in dbg.inspect.wdf_loader().clients:
     print(client.name, client.version)
 for record in dbg.inspect.wdf_log("kmdfsample").records:
     print(record.sequence, record.function, record.text or record.error)
+```
+
+To follow each request that a device's queues hold to its IRP and to the target that it was sent to:
+
+```python
+inspect = dbg.inspect
+device = inspect.wdf_device(0x00003EF5EDCBA988)
+for summary in device.queues:
+    queue = inspect.wdf_queue(summary.handle)
+    for entry in queue.pending + queue.driver_owned:
+        request = inspect.wdf_request(entry.handle)
+        location = request.irp_detail.current if request.irp_detail else None
+        print(hex(request.handle), location and location.major_function_name,
+              request.target and request.target.handle)
 ```

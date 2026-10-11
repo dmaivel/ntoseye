@@ -860,6 +860,48 @@ impl Inspect {
         })
     }
 
+    /// Get a KMDF object's header, contexts, and children
+    /// (`!wdfkd.wdfobject`). Pass its handle or the address of its
+    /// `FxObject`; raise an exception if the value names no live KMDF
+    /// object.
+    fn wdf_object<'py>(
+        &self,
+        py: Python<'py>,
+        object: u64,
+    ) -> PyResult<Typed<'py, view::wdf::WdfObject>> {
+        self.typed(py, |session| {
+            let detail = session.target.wdf_object(object).map_err(err)?;
+            Ok(view::wdf::object(&detail))
+        })
+    }
+
+    /// Get a WDFREQUEST: its IRP and current stack location, the queue it
+    /// came from, the I/O target it was sent to, and its cancel and
+    /// completion routines (`!wdfkd.wdfrequest`).
+    fn wdf_request<'py>(
+        &self,
+        py: Python<'py>,
+        handle: u64,
+    ) -> PyResult<Typed<'py, view::wdf::WdfRequestDetail>> {
+        self.typed(py, |session| {
+            let detail = session.target.wdf_request(handle).map_err(err)?;
+            Ok(view::wdf::request(&detail))
+        })
+    }
+
+    /// Get a WDFIOTARGET: its state, the device object it sends to, and
+    /// the requests sent to it (`!wdfkd.wdfiotarget`).
+    fn wdf_io_target<'py>(
+        &self,
+        py: Python<'py>,
+        handle: u64,
+    ) -> PyResult<Typed<'py, view::wdf::WdfIoTarget>> {
+        self.typed(py, |session| {
+            let detail = session.target.wdf_io_target(handle).map_err(err)?;
+            Ok(view::wdf::io_target(&detail))
+        })
+    }
+
     /// Get the In-Flight Recorder log of a KMDF client driver, oldest record
     /// first (`!wdfkd.wdflogdump`). A record whose TMF message a loaded PDB
     /// declares is formatted from that message.

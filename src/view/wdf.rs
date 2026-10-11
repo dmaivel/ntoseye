@@ -1,8 +1,10 @@
 //! Neutral value-tree views for KMDF (`!wdfkd.*`): client drivers, handles,
-//! devices, queues, and In-Flight Recorder logs.
+//! objects, devices, queues, requests, I/O targets, and In-Flight Recorder
+//! logs.
 
 use super::shape::{Hex, shapes};
 use crate::target::etw::{format_filetime_precise, format_guid};
+use crate::target::irp_major_function_name;
 use crate::target::wdf as target;
 use crate::types::VirtAddr;
 
@@ -145,6 +147,17 @@ shapes! {
         contexts_stopped: Option<String>,
     }
 
+    /// A KMDF object with its children (`!wdfkd.wdfobject`).
+    WdfObject {
+        /// The object, as `!wdfkd.wdfhandle` shows it.
+        object: WdfHandle,
+        /// The objects on `m_ChildListHead`.
+        children: Vec<WdfObjectRef>,
+        /// Why the walk of the child list stopped before the list head.
+        /// `None` if the walk completed.
+        children_stopped: Option<String>,
+    }
+
     /// A device's queue.
     WdfQueueSummary {
         /// The WDFQUEUE handle.
@@ -206,6 +219,34 @@ shapes! {
         default_child_list: Option<Hex>,
         /// An FDO's static child list (WDFCHILDLIST).
         static_child_list: Option<Hex>,
+        /// An FDO's default I/O target (WDFIOTARGET), the next device object
+        /// down its stack.
+        default_io_target: Option<Hex>,
+        /// An FDO's self I/O target (WDFIOTARGET), the top of its own stack.
+        self_io_target: Option<Hex>,
+        /// The device's I/O targets (`m_IoTargetsList`).
+        io_targets: Vec<WdfIoTargetSummary>,
+        /// Why the walk of the I/O target list stopped before the list head.
+        /// `None` if the walk completed.
+        io_targets_stopped: Option<String>,
+    }
+
+    /// One of a device's I/O targets.
+    WdfIoTargetSummary {
+        /// The WDFIOTARGET handle.
+        handle: Hex,
+        /// The `FxIoTarget`.
+        address: VirtAddr,
+        /// Its `FX_OBJECT_TYPES` name.
+        type_name: String,
+        /// `local`, `remote`, `self`, `USB device`, or `USB pipe`.
+        kind: &'static str,
+        /// `_WDF_IO_TARGET_STATE`.
+        state: WdfState,
+        /// The device object that it sends requests to.
+        target_device: VirtAddr,
+        /// Whether it is the device's default I/O target.
+        is_default: bool,
     }
 
     /// A request on a queue's list.
@@ -272,6 +313,175 @@ shapes! {
         driver_owned: Vec<WdfRequest>,
         /// Why the walk stopped early. `None` if the walk completed.
         driver_owned_stopped: Option<String>,
+    }
+
+    /// The buffer lengths in a stack location's parameters. Each is `None`
+    /// when the major function has no such field.
+    WdfIoParameters {
+        /// A read's or write's `Length`.
+        length: Option<Hex<u32>>,
+        /// A device control's `InputBufferLength`.
+        input_length: Option<Hex<u32>>,
+        /// A device control's `OutputBufferLength`.
+        output_length: Option<Hex<u32>>,
+        /// A device control's `IoControlCode`.
+        io_control_code: Option<Hex<u32>>,
+    }
+
+    /// The stack location that an IRP's `CurrentLocation` names.
+    WdfIrpLocation {
+        /// The location number, counted from 1 as `!irp` does.
+        number: u8,
+        /// The `_IO_STACK_LOCATION`.
+        address: VirtAddr,
+        /// The `IRP_MJ_*` code.
+        major_function: u8,
+        /// The name of the major function (`IRP_MJ_READ`, ...).
+        major_function_name: String,
+        minor_function: u8,
+        device_object: VirtAddr,
+        /// The name of the device object's driver.
+        driver: Option<String>,
+        file_object: VirtAddr,
+        parameters: WdfIoParameters,
+    }
+
+    /// The IRP that a request carries.
+    WdfRequestIrp {
+        address: VirtAddr,
+        stack_count: u8,
+        current_location: u8,
+        /// `AssociatedIrp.SystemBuffer`.
+        system_buffer: VirtAddr,
+        user_buffer: VirtAddr,
+        mdl_address: VirtAddr,
+        /// `None` when `CurrentLocation` names no stack location, because
+        /// the IRP has left every driver of the stack.
+        current: Option<WdfIrpLocation>,
+    }
+
+    /// A WDFREQUEST with its IRP, its queue, and the I/O target it was sent
+    /// to (`!wdfkd.wdfrequest`).
+    WdfRequestDetail {
+        handle: Hex,
+        /// The `FxRequest`.
+        address: VirtAddr,
+        /// The owning driver's name, when it has one.
+        driver: Option<String>,
+        /// The owning driver's `_FX_DRIVER_GLOBALS`.
+        globals: VirtAddr,
+        refcount: i32,
+        /// `m_ObjectState` (`FxObjectState`).
+        object_state: WdfState,
+        parent: Option<WdfObjectRef>,
+        /// The IRP (`m_Irp`). Null for a request without an IRP.
+        irp: VirtAddr,
+        /// The IRP, decoded. `None` if `irp` is null or not a live IRP.
+        irp_detail: Option<WdfRequestIrp>,
+        /// Why `irp` is not a live IRP.
+        irp_problem: Option<String>,
+        /// `m_IrpAllocation` (`FxRequestAllocationSource`): whether the IRP
+        /// came from the I/O manager (`REQUEST_ALLOCATED_FROM_IO`) or the
+        /// framework or the driver allocated it.
+        irp_allocation: WdfState,
+        /// `m_IrpReferenceCount`.
+        irp_reference_count: i32,
+        completed: bool,
+        canceled: bool,
+        /// Whether its queue has presented it to the driver.
+        presented: bool,
+        /// `m_TargetFlags`.
+        target_flags: Hex,
+        /// The `FxRequestTargetFlags` set in `target_flags`.
+        target_flag_names: Vec<String>,
+        /// `m_VerifierFlags`, which KMDF keeps only with the verifier on.
+        verifier_flags: Hex,
+        /// The `FxRequestVerifierFlags` set in `verifier_flags`.
+        verifier_flag_names: Vec<String>,
+        /// `m_CompletionState` (`FxRequestCompletionState`).
+        completion_state: WdfState,
+        /// The queue that it came from or is in (`m_IoQueue`).
+        queue: Option<WdfObjectRef>,
+        /// The cancel-safe queue (`FxIrpQueue`) that holds its IRP. Null if
+        /// none does, and the request cannot be canceled.
+        irp_queue: VirtAddr,
+        /// Which queue `irp_queue` is: `pending` (its queue's waiting
+        /// requests), `driver_cancelable` (the driver marked it
+        /// cancelable), or `target_pended` (its I/O target holds it until
+        /// the target starts). `None` if `irp_queue` is null or none of
+        /// these.
+        irp_queue_role: Option<&'static str>,
+        /// The driver's `EvtRequestCancel`.
+        cancel_routine: Option<WdfCallback>,
+        /// The I/O target that it was sent to (`m_Target`).
+        target: Option<WdfObjectRef>,
+        /// The completion routine set for its send.
+        completion_routine: Option<WdfCallback>,
+        /// The completion routine's context.
+        completion_context: VirtAddr,
+    }
+
+    /// A request on one of an I/O target's lists.
+    WdfTargetRequest {
+        /// The `FxRequest`.
+        address: VirtAddr,
+        /// The WDFREQUEST handle. `None` for the framework's own request
+        /// that has no handle, such as a synchronous send's.
+        handle: Option<Hex>,
+        irp: VirtAddr,
+    }
+
+    /// A WDFIOTARGET with the device object that it sends to and the
+    /// requests sent to it (`!wdfkd.wdfiotarget`).
+    WdfIoTarget {
+        handle: Hex,
+        /// The `FxIoTarget`.
+        address: VirtAddr,
+        /// The owning driver's name, when it has one.
+        driver: Option<String>,
+        /// The owning driver's `_FX_DRIVER_GLOBALS`.
+        globals: VirtAddr,
+        /// Its `FX_OBJECT_TYPES` name.
+        type_name: String,
+        /// `local` (in the device's own stack), `remote` (opened by the
+        /// driver), `self`, `USB device`, or `USB pipe`.
+        kind: &'static str,
+        /// Whether it is its device's default I/O target.
+        is_default: bool,
+        /// `_WDF_IO_TARGET_STATE`.
+        state: WdfState,
+        /// A remote target's `FxIoTargetRemoteOpenState`.
+        open_state: Option<WdfState>,
+        /// The WDFDEVICE that it belongs to.
+        device: Option<WdfObjectRef>,
+        /// Whether the target is in the device's own stack.
+        in_stack: bool,
+        /// The device's own device object.
+        in_stack_device: VirtAddr,
+        /// The device object that it sends requests to.
+        target_device: VirtAddr,
+        /// The name of `target_device`'s driver.
+        target_driver: Option<String>,
+        target_pdo: VirtAddr,
+        file_object: VirtAddr,
+        /// `m_IoCount`: one for the target and one for each request in
+        /// flight.
+        io_count: i32,
+        /// `m_TargetStackSize`.
+        stack_size: i32,
+        /// Requests sent and not completed.
+        sent: Vec<WdfTargetRequest>,
+        /// Why the walk stopped early. `None` if the walk completed.
+        sent_stopped: Option<String>,
+        /// Requests sent while the target was not started, with
+        /// `WDF_REQUEST_SEND_OPTION_IGNORE_TARGET_STATE`.
+        ignored: Vec<WdfTargetRequest>,
+        /// Why the walk stopped early. `None` if the walk completed.
+        ignored_stopped: Option<String>,
+        /// Requests that the target holds until it starts.
+        pended: Vec<WdfTargetRequest>,
+        /// Why the walk stopped early. `None` if the walk completed.
+        pended_stopped: Option<String>,
     }
 
     /// An In-Flight Recorder record.
@@ -444,6 +654,15 @@ pub fn handle(detail: &target::WdfObject) -> WdfHandle {
     }
 }
 
+/// Render `!wdfkd.wdfobject`.
+pub fn object(detail: &target::WdfObjectDetail) -> WdfObject {
+    WdfObject {
+        object: handle(&detail.object),
+        children: detail.children.iter().map(object_ref).collect(),
+        children_stopped: detail.children_stopped.clone(),
+    }
+}
+
 /// Render `!wdfkd.wdfdevice`.
 pub fn device(detail: &target::WdfDeviceDetail) -> WdfDevice {
     WdfDevice {
@@ -481,6 +700,22 @@ pub fn device(detail: &target::WdfDeviceDetail) -> WdfDevice {
         queues_stopped: detail.queues_stopped.clone(),
         default_child_list: detail.default_child_list,
         static_child_list: detail.static_child_list,
+        default_io_target: detail.default_io_target,
+        self_io_target: detail.self_io_target,
+        io_targets: detail
+            .io_targets
+            .iter()
+            .map(|target| WdfIoTargetSummary {
+                handle: target.handle,
+                address: target.address,
+                type_name: target.type_name.clone(),
+                kind: target.kind,
+                state: state(&target.state),
+                target_device: target.target_device,
+                is_default: target.is_default,
+            })
+            .collect(),
+        io_targets_stopped: detail.io_targets_stopped.clone(),
     }
 }
 
@@ -516,21 +751,125 @@ pub fn queue(detail: &target::WdfQueueDetail) -> WdfQueue {
         driver_cancelable_count: detail.driver_cancelable_count,
         driver_owned_count: detail.driver_owned_count,
         two_phase_completions: detail.two_phase_completions,
-        callbacks: detail
-            .callbacks
-            .iter()
-            .map(|callback| WdfCallback {
-                name: callback.name,
-                address: callback.address,
-                symbol: callback.symbol.clone(),
-            })
-            .collect(),
+        callbacks: detail.callbacks.iter().map(callback).collect(),
         pending: requests(&detail.pending),
         pending_stopped: detail.pending.stopped.clone(),
         driver_cancelable: requests(&detail.driver_cancelable),
         driver_cancelable_stopped: detail.driver_cancelable.stopped.clone(),
         driver_owned: requests(&detail.driver_owned),
         driver_owned_stopped: detail.driver_owned.stopped.clone(),
+    }
+}
+
+fn callback(callback: &target::WdfCallback) -> WdfCallback {
+    WdfCallback {
+        name: callback.name,
+        address: callback.address,
+        symbol: callback.symbol.clone(),
+    }
+}
+
+fn request_irp(irp: &target::WdfRequestIrp) -> WdfRequestIrp {
+    WdfRequestIrp {
+        address: irp.address,
+        stack_count: irp.stack_count,
+        current_location: irp.current_location,
+        system_buffer: irp.system_buffer,
+        user_buffer: irp.user_buffer,
+        mdl_address: irp.mdl_address,
+        current: irp.current.as_ref().map(|location| WdfIrpLocation {
+            number: location.number,
+            address: location.address,
+            major_function: location.major_function,
+            major_function_name: format!(
+                "IRP_MJ_{}",
+                irp_major_function_name(location.major_function)
+            ),
+            minor_function: location.minor_function,
+            device_object: location.device_object,
+            driver: location.driver.clone(),
+            file_object: location.file_object,
+            parameters: WdfIoParameters {
+                length: location.parameters.length,
+                input_length: location.parameters.input_length,
+                output_length: location.parameters.output_length,
+                io_control_code: location.parameters.io_control_code,
+            },
+        }),
+    }
+}
+
+/// Render `!wdfkd.wdfrequest`.
+pub fn request(detail: &target::WdfRequestDetail) -> WdfRequestDetail {
+    WdfRequestDetail {
+        handle: detail.handle,
+        address: detail.address,
+        driver: detail.driver.clone(),
+        globals: detail.globals,
+        refcount: detail.refcount,
+        object_state: state(&detail.object_state),
+        parent: detail.parent.as_ref().map(object_ref),
+        irp: detail.irp,
+        irp_detail: detail.irp_detail.as_ref().map(request_irp),
+        irp_problem: detail.irp_problem.clone(),
+        irp_allocation: state(&detail.irp_allocation),
+        irp_reference_count: detail.irp_reference_count,
+        completed: detail.completed,
+        canceled: detail.canceled,
+        presented: detail.presented,
+        target_flags: detail.target_flags,
+        target_flag_names: detail.target_flag_names.clone(),
+        verifier_flags: detail.verifier_flags,
+        verifier_flag_names: detail.verifier_flag_names.clone(),
+        completion_state: state(&detail.completion_state),
+        queue: detail.queue.as_ref().map(object_ref),
+        irp_queue: detail.irp_queue,
+        irp_queue_role: detail.irp_queue_role.map(target::WdfIrpQueueRole::name),
+        cancel_routine: detail.cancel_routine.as_ref().map(callback),
+        target: detail.target.as_ref().map(object_ref),
+        completion_routine: detail.completion_routine.as_ref().map(callback),
+        completion_context: detail.completion_context,
+    }
+}
+
+fn target_requests(list: &target::WdfTargetRequestList) -> Vec<WdfTargetRequest> {
+    list.requests
+        .iter()
+        .map(|request| WdfTargetRequest {
+            address: request.address,
+            handle: request.handle,
+            irp: request.irp,
+        })
+        .collect()
+}
+
+/// Render `!wdfkd.wdfiotarget`.
+pub fn io_target(detail: &target::WdfIoTargetDetail) -> WdfIoTarget {
+    WdfIoTarget {
+        handle: detail.handle,
+        address: detail.address,
+        driver: detail.driver.clone(),
+        globals: detail.globals,
+        type_name: detail.type_name.clone(),
+        kind: detail.kind,
+        is_default: detail.is_default,
+        state: state(&detail.state),
+        open_state: detail.open_state.as_ref().map(state),
+        device: detail.device.as_ref().map(object_ref),
+        in_stack: detail.in_stack,
+        in_stack_device: detail.in_stack_device,
+        target_device: detail.target_device,
+        target_driver: detail.target_driver.clone(),
+        target_pdo: detail.target_pdo,
+        file_object: detail.file_object,
+        io_count: detail.io_count,
+        stack_size: detail.stack_size.into(),
+        sent: target_requests(&detail.sent),
+        sent_stopped: detail.sent.stopped.clone(),
+        ignored: target_requests(&detail.ignored),
+        ignored_stopped: detail.ignored.stopped.clone(),
+        pended: target_requests(&detail.pended),
+        pended_stopped: detail.pended.stopped.clone(),
     }
 }
 

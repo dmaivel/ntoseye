@@ -7576,6 +7576,11 @@ class Inspect:
         (`!wdfkd.wdfhandle`), or raise an exception if the value is not the
         handle of a live KMDF object.
         """
+    def wdf_io_target(self, /, handle: int) -> WdfIoTarget:
+        """
+        Get a WDFIOTARGET: its state, the device object it sends to, and
+        the requests sent to it (`!wdfkd.wdfiotarget`).
+        """
     def wdf_loader(self, /) -> WdfLoader:
         """
         Get the KMDF client drivers on the driver list of
@@ -7587,10 +7592,23 @@ class Inspect:
         first (`!wdfkd.wdflogdump`). A record whose TMF message a loaded PDB
         declares is formatted from that message.
         """
+    def wdf_object(self, /, object: int) -> WdfObject:
+        """
+        Get a KMDF object's header, contexts, and children
+        (`!wdfkd.wdfobject`). Pass its handle or the address of its
+        `FxObject`; raise an exception if the value names no live KMDF
+        object.
+        """
     def wdf_queue(self, /, handle: int) -> WdfQueue:
         """
         Get the configuration, state, callbacks, and requests of a WDFQUEUE
         (`!wdfkd.wdfqueue`).
+        """
+    def wdf_request(self, /, handle: int) -> WdfRequestDetail:
+        """
+        Get a WDFREQUEST: its IRP and current stack location, the queue it
+        came from, the I/O target it was sent to, and its cancel and
+        completion routines (`!wdfkd.wdfrequest`).
         """
     def work_queues(self, /, include_stacks: bool = False, queue_types: Sequence[str] |None = None) -> WorkQueues:
         """
@@ -16807,6 +16825,12 @@ class WdfDevice(BaseRecord):
         An FDO's default child list (WDFCHILDLIST).
         """
     @property
+    def default_io_target(self, /) -> int |None:
+        """
+        An FDO's default I/O target (WDFIOTARGET), the next device object
+        down its stack.
+        """
+    @property
     def default_queue(self, /) -> int |None:
         """
         The default queue's WDFQUEUE handle.
@@ -16832,6 +16856,17 @@ class WdfDevice(BaseRecord):
         """
     @property
     def handle(self, /) -> int: ...
+    @property
+    def io_targets(self, /) -> list[WdfIoTargetSummary]:
+        """
+        The device's I/O targets (`m_IoTargetsList`).
+        """
+    @property
+    def io_targets_stopped(self, /) -> str |None:
+        """
+        Why the walk of the I/O target list stopped before the list head.
+        `None` if the walk completed.
+        """
     @property
     def kind(self, /) -> str:
         """
@@ -16879,6 +16914,11 @@ class WdfDevice(BaseRecord):
         """
         Why the walk of the queue list stopped before the list head. `None`
         if the walk completed.
+        """
+    @property
+    def self_io_target(self, /) -> int |None:
+        """
+        An FDO's self I/O target (WDFIOTARGET), the top of its own stack.
         """
     @property
     def static_child_list(self, /) -> int |None:
@@ -17048,6 +17088,234 @@ class WdfHandle(BaseRecord):
         """
 
 @final
+class WdfIoParameters(BaseRecord):
+    """
+    The buffer lengths in a stack location's parameters. Each is `None`
+    when the major function has no such field.
+    """
+    @property
+    def input_length(self, /) -> int |None:
+        """
+        A device control's `InputBufferLength`.
+        """
+    @property
+    def io_control_code(self, /) -> int |None:
+        """
+        A device control's `IoControlCode`.
+        """
+    @property
+    def length(self, /) -> int |None:
+        """
+        A read's or write's `Length`.
+        """
+    @property
+    def output_length(self, /) -> int |None:
+        """
+        A device control's `OutputBufferLength`.
+        """
+
+@final
+class WdfIoTarget(BaseRecord):
+    """
+    A WDFIOTARGET with the device object that it sends to and the
+    requests sent to it (`!wdfkd.wdfiotarget`).
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The `FxIoTarget`.
+        """
+    @property
+    def device(self, /) -> WdfObjectRef |None:
+        """
+        The WDFDEVICE that it belongs to.
+        """
+    @property
+    def driver(self, /) -> str |None:
+        """
+        The owning driver's name, when it has one.
+        """
+    @property
+    def file_object(self, /) -> int: ...
+    @property
+    def globals(self, /) -> int:
+        """
+        The owning driver's `_FX_DRIVER_GLOBALS`.
+        """
+    @property
+    def handle(self, /) -> int: ...
+    @property
+    def ignored(self, /) -> list[WdfTargetRequest]:
+        """
+        Requests sent while the target was not started, with
+        `WDF_REQUEST_SEND_OPTION_IGNORE_TARGET_STATE`.
+        """
+    @property
+    def ignored_stopped(self, /) -> str |None:
+        """
+        Why the walk stopped early. `None` if the walk completed.
+        """
+    @property
+    def in_stack(self, /) -> bool:
+        """
+        Whether the target is in the device's own stack.
+        """
+    @property
+    def in_stack_device(self, /) -> int:
+        """
+        The device's own device object.
+        """
+    @property
+    def io_count(self, /) -> int:
+        """
+        `m_IoCount`: one for the target and one for each request in
+        flight.
+        """
+    @property
+    def is_default(self, /) -> bool:
+        """
+        Whether it is its device's default I/O target.
+        """
+    @property
+    def kind(self, /) -> str:
+        """
+        `local` (in the device's own stack), `remote` (opened by the
+        driver), `self`, `USB device`, or `USB pipe`.
+        """
+    @property
+    def open_state(self, /) -> WdfState |None:
+        """
+        A remote target's `FxIoTargetRemoteOpenState`.
+        """
+    @property
+    def pended(self, /) -> list[WdfTargetRequest]:
+        """
+        Requests that the target holds until it starts.
+        """
+    @property
+    def pended_stopped(self, /) -> str |None:
+        """
+        Why the walk stopped early. `None` if the walk completed.
+        """
+    @property
+    def sent(self, /) -> list[WdfTargetRequest]:
+        """
+        Requests sent and not completed.
+        """
+    @property
+    def sent_stopped(self, /) -> str |None:
+        """
+        Why the walk stopped early. `None` if the walk completed.
+        """
+    @property
+    def stack_size(self, /) -> int:
+        """
+        `m_TargetStackSize`.
+        """
+    @property
+    def state(self, /) -> WdfState:
+        """
+        `_WDF_IO_TARGET_STATE`.
+        """
+    @property
+    def target_device(self, /) -> int:
+        """
+        The device object that it sends requests to.
+        """
+    @property
+    def target_driver(self, /) -> str |None:
+        """
+        The name of `target_device`'s driver.
+        """
+    @property
+    def target_pdo(self, /) -> int: ...
+    @property
+    def type_name(self, /) -> str:
+        """
+        Its `FX_OBJECT_TYPES` name.
+        """
+
+@final
+class WdfIoTargetSummary(BaseRecord):
+    """
+    One of a device's I/O targets.
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The `FxIoTarget`.
+        """
+    @property
+    def handle(self, /) -> int:
+        """
+        The WDFIOTARGET handle.
+        """
+    @property
+    def is_default(self, /) -> bool:
+        """
+        Whether it is the device's default I/O target.
+        """
+    @property
+    def kind(self, /) -> str:
+        """
+        `local`, `remote`, `self`, `USB device`, or `USB pipe`.
+        """
+    @property
+    def state(self, /) -> WdfState:
+        """
+        `_WDF_IO_TARGET_STATE`.
+        """
+    @property
+    def target_device(self, /) -> int:
+        """
+        The device object that it sends requests to.
+        """
+    @property
+    def type_name(self, /) -> str:
+        """
+        Its `FX_OBJECT_TYPES` name.
+        """
+
+@final
+class WdfIrpLocation(BaseRecord):
+    """
+    The stack location that an IRP's `CurrentLocation` names.
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The `_IO_STACK_LOCATION`.
+        """
+    @property
+    def device_object(self, /) -> int: ...
+    @property
+    def driver(self, /) -> str |None:
+        """
+        The name of the device object's driver.
+        """
+    @property
+    def file_object(self, /) -> int: ...
+    @property
+    def major_function(self, /) -> int:
+        """
+        The `IRP_MJ_*` code.
+        """
+    @property
+    def major_function_name(self, /) -> str:
+        """
+        The name of the major function (`IRP_MJ_READ`, ...).
+        """
+    @property
+    def minor_function(self, /) -> int: ...
+    @property
+    def number(self, /) -> int:
+        """
+        The location number, counted from 1 as `!irp` does.
+        """
+    @property
+    def parameters(self, /) -> WdfIoParameters: ...
+
+@final
 class WdfLoader(BaseRecord):
     """
     The KMDF client drivers on `FxLibraryGlobals.FxDriverGlobalsList`
@@ -17191,6 +17459,28 @@ class WdfLogRecord(BaseRecord):
     def timestamp_utc(self, /) -> str |None:
         """
         `timestamp` as UTC (`YYYY-MM-DD HH:MM:SS.fffffff`).
+        """
+
+@final
+class WdfObject(BaseRecord):
+    """
+    A KMDF object with its children (`!wdfkd.wdfobject`).
+    """
+    @property
+    def children(self, /) -> list[WdfObjectRef]:
+        """
+        The objects on `m_ChildListHead`.
+        """
+    @property
+    def children_stopped(self, /) -> str |None:
+        """
+        Why the walk of the child list stopped before the list head.
+        `None` if the walk completed.
+        """
+    @property
+    def object(self, /) -> WdfHandle:
+        """
+        The object, as `!wdfkd.wdfhandle` shows it.
         """
 
 @final
@@ -17383,6 +17673,167 @@ class WdfRequest(BaseRecord):
     def irp(self, /) -> int: ...
 
 @final
+class WdfRequestDetail(BaseRecord):
+    """
+    A WDFREQUEST with its IRP, its queue, and the I/O target it was sent
+    to (`!wdfkd.wdfrequest`).
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The `FxRequest`.
+        """
+    @property
+    def cancel_routine(self, /) -> WdfCallback |None:
+        """
+        The driver's `EvtRequestCancel`.
+        """
+    @property
+    def canceled(self, /) -> bool: ...
+    @property
+    def completed(self, /) -> bool: ...
+    @property
+    def completion_context(self, /) -> int:
+        """
+        The completion routine's context.
+        """
+    @property
+    def completion_routine(self, /) -> WdfCallback |None:
+        """
+        The completion routine set for its send.
+        """
+    @property
+    def completion_state(self, /) -> WdfState:
+        """
+        `m_CompletionState` (`FxRequestCompletionState`).
+        """
+    @property
+    def driver(self, /) -> str |None:
+        """
+        The owning driver's name, when it has one.
+        """
+    @property
+    def globals(self, /) -> int:
+        """
+        The owning driver's `_FX_DRIVER_GLOBALS`.
+        """
+    @property
+    def handle(self, /) -> int: ...
+    @property
+    def irp(self, /) -> int:
+        """
+        The IRP (`m_Irp`). Null for a request without an IRP.
+        """
+    @property
+    def irp_allocation(self, /) -> WdfState:
+        """
+        `m_IrpAllocation` (`FxRequestAllocationSource`): whether the IRP
+        came from the I/O manager (`REQUEST_ALLOCATED_FROM_IO`) or the
+        framework or the driver allocated it.
+        """
+    @property
+    def irp_detail(self, /) -> WdfRequestIrp |None:
+        """
+        The IRP, decoded. `None` if `irp` is null or not a live IRP.
+        """
+    @property
+    def irp_problem(self, /) -> str |None:
+        """
+        Why `irp` is not a live IRP.
+        """
+    @property
+    def irp_queue(self, /) -> int:
+        """
+        The cancel-safe queue (`FxIrpQueue`) that holds its IRP. Null if
+        none does, and the request cannot be canceled.
+        """
+    @property
+    def irp_queue_role(self, /) -> str |None:
+        """
+        Which queue `irp_queue` is: `pending` (its queue's waiting
+        requests), `driver_cancelable` (the driver marked it
+        cancelable), or `target_pended` (its I/O target holds it until
+        the target starts). `None` if `irp_queue` is null or none of
+        these.
+        """
+    @property
+    def irp_reference_count(self, /) -> int:
+        """
+        `m_IrpReferenceCount`.
+        """
+    @property
+    def object_state(self, /) -> WdfState:
+        """
+        `m_ObjectState` (`FxObjectState`).
+        """
+    @property
+    def parent(self, /) -> WdfObjectRef |None: ...
+    @property
+    def presented(self, /) -> bool:
+        """
+        Whether its queue has presented it to the driver.
+        """
+    @property
+    def queue(self, /) -> WdfObjectRef |None:
+        """
+        The queue that it came from or is in (`m_IoQueue`).
+        """
+    @property
+    def refcount(self, /) -> int: ...
+    @property
+    def target(self, /) -> WdfObjectRef |None:
+        """
+        The I/O target that it was sent to (`m_Target`).
+        """
+    @property
+    def target_flag_names(self, /) -> list[str]:
+        """
+        The `FxRequestTargetFlags` set in `target_flags`.
+        """
+    @property
+    def target_flags(self, /) -> int:
+        """
+        `m_TargetFlags`.
+        """
+    @property
+    def verifier_flag_names(self, /) -> list[str]:
+        """
+        The `FxRequestVerifierFlags` set in `verifier_flags`.
+        """
+    @property
+    def verifier_flags(self, /) -> int:
+        """
+        `m_VerifierFlags`, which KMDF keeps only with the verifier on.
+        """
+
+@final
+class WdfRequestIrp(BaseRecord):
+    """
+    The IRP that a request carries.
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def current(self, /) -> WdfIrpLocation |None:
+        """
+        `None` when `CurrentLocation` names no stack location, because
+        the IRP has left every driver of the stack.
+        """
+    @property
+    def current_location(self, /) -> int: ...
+    @property
+    def mdl_address(self, /) -> int: ...
+    @property
+    def stack_count(self, /) -> int: ...
+    @property
+    def system_buffer(self, /) -> int:
+        """
+        `AssociatedIrp.SystemBuffer`.
+        """
+    @property
+    def user_buffer(self, /) -> int: ...
+
+@final
 class WdfState(BaseRecord):
     """
     A PDB enum value and its name.
@@ -17394,6 +17845,25 @@ class WdfState(BaseRecord):
         """
     @property
     def value(self, /) -> int: ...
+
+@final
+class WdfTargetRequest(BaseRecord):
+    """
+    A request on one of an I/O target's lists.
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The `FxRequest`.
+        """
+    @property
+    def handle(self, /) -> int |None:
+        """
+        The WDFREQUEST handle. `None` for the framework's own request
+        that has no handle, such as a synchronous send's.
+        """
+    @property
+    def irp(self, /) -> int: ...
 
 @final
 class WdfVersion(BaseRecord):

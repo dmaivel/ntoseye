@@ -1,7 +1,7 @@
 //! KMDF (`!wdfkd.*`): the client drivers Wdf01000 keeps on
 //! `FxLibraryGlobals.FxDriverGlobalsList`, the objects their handles name,
-//! their devices and queues, and their In-Flight Recorder logs, decoded with
-//! Wdf01000's own PDB types.
+//! their devices, queues, requests, and I/O targets, and their In-Flight
+//! Recorder logs, decoded with Wdf01000's own PDB types.
 
 use std::sync::Arc;
 
@@ -17,8 +17,17 @@ const MAX_DRIVERS: usize = 512;
 const MAX_DEVICES: usize = 256;
 const MAX_QUEUES: usize = 256;
 const MAX_REQUESTS: usize = 1024;
+const MAX_CHILDREN: usize = 4096;
+const MAX_IO_TARGETS: usize = 256;
 const MAX_CONTEXTS: usize = 16;
 const MAX_CONTEXT_NAME: usize = 256;
+
+/// `_IRP.Type` of a live IRP (`IO_TYPE_IRP`); `IoFreeIrp` clears it.
+const IO_TYPE_IRP: u16 = 6;
+const IRP_MJ_READ: u8 = 0x03;
+const IRP_MJ_WRITE: u8 = 0x04;
+const IRP_MJ_DEVICE_CONTROL: u8 = 0x0e;
+const IRP_MJ_INTERNAL_DEVICE_CONTROL: u8 = 0x0f;
 
 /// `FxHandleFlagMask`: the low handle bits KMDF keeps for flags.
 const HANDLE_FLAG_MASK: u64 = 0x7;
@@ -55,6 +64,20 @@ const TYPE_CLASSES: &[(&str, &str)] = &[
     ("FX_TYPE_QUEUE", "FxIoQueue"),
     ("FX_TYPE_REQUEST", "FxRequest"),
     ("FX_TYPE_CHILD_LIST", "FxChildList"),
+    ("FX_TYPE_IO_TARGET", "FxIoTarget"),
+    ("FX_TYPE_IO_TARGET_REMOTE", "FxIoTargetRemote"),
+    ("FX_TYPE_IO_TARGET_SELF", "FxIoTargetSelf"),
+    ("FX_TYPE_IO_TARGET_USB_DEVICE", "FxUsbDevice"),
+    ("FX_TYPE_IO_TARGET_USB_PIPE", "FxUsbPipe"),
+];
+
+/// The `FX_OBJECT_TYPES` of I/O targets: classes derived from `FxIoTarget`.
+const IO_TARGET_TYPES: &[&str] = &[
+    "FX_TYPE_IO_TARGET",
+    "FX_TYPE_IO_TARGET_REMOTE",
+    "FX_TYPE_IO_TARGET_SELF",
+    "FX_TYPE_IO_TARGET_USB_DEVICE",
+    "FX_TYPE_IO_TARGET_USB_PIPE",
 ];
 
 /// A PDB enum value and its name, when the enum has one for it.
@@ -182,6 +205,17 @@ pub struct WdfObject {
     pub contexts_stopped: Option<String>,
 }
 
+/// An object with its children (`!wdfkd.wdfobject`).
+#[derive(Debug, Clone)]
+pub struct WdfObjectDetail {
+    pub object: WdfObject,
+    /// The objects on `m_ChildListHead`, each of which names this object as
+    /// its `m_ParentObject`.
+    pub children: Vec<WdfObjectRef>,
+    /// Why the child list walk stopped short of its head.
+    pub children_stopped: Option<String>,
+}
+
 /// A queue of a device.
 #[derive(Debug, Clone)]
 pub struct WdfQueueSummary {
@@ -227,6 +261,31 @@ pub struct WdfDeviceDetail {
     /// An FDO's `m_DefaultDeviceList` and `m_StaticDeviceList` (WDFCHILDLIST).
     pub default_child_list: Option<u64>,
     pub static_child_list: Option<u64>,
+    /// An FDO's default I/O target (`FxPkgFdo.m_DefaultTarget`), the next
+    /// device object down its stack.
+    pub default_io_target: Option<u64>,
+    /// An FDO's self I/O target (`FxPkgFdo.m_SelfTarget`), its own top.
+    pub self_io_target: Option<u64>,
+    /// The I/O targets on `m_IoTargetsList`.
+    pub io_targets: Vec<WdfIoTargetSummary>,
+    pub io_targets_stopped: Option<String>,
+}
+
+/// One of a device's I/O targets.
+#[derive(Debug, Clone)]
+pub struct WdfIoTargetSummary {
+    pub handle: u64,
+    pub address: VirtAddr,
+    /// The `FX_OBJECT_TYPES` name.
+    pub type_name: String,
+    /// See [`WdfIoTargetDetail::kind`].
+    pub kind: &'static str,
+    /// `m_State` (`_WDF_IO_TARGET_STATE`).
+    pub state: WdfEnumValue,
+    /// `m_TargetDevice`.
+    pub target_device: VirtAddr,
+    /// Whether it is the device's default I/O target.
+    pub is_default: bool,
 }
 
 /// A request on one of a queue's lists.
@@ -283,6 +342,187 @@ pub struct WdfQueueDetail {
     pub driver_cancelable: WdfRequestList,
     /// Requests presented to the driver (`m_DriverOwned`).
     pub driver_owned: WdfRequestList,
+}
+
+/// The buffer lengths in a stack location's `Parameters` for its major
+/// function: a read's or write's `Length`, a device control's buffer
+/// lengths and control code. `None` where the major function has no such
+/// field.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WdfIoParameters {
+    pub length: Option<u32>,
+    pub input_length: Option<u32>,
+    pub output_length: Option<u32>,
+    pub io_control_code: Option<u32>,
+}
+
+/// The stack location an IRP's `CurrentLocation` names.
+#[derive(Debug, Clone)]
+pub struct WdfIrpLocation {
+    /// Counted from 1, as `!irp` does.
+    pub number: u8,
+    pub address: VirtAddr,
+    pub major_function: u8,
+    pub minor_function: u8,
+    pub device_object: VirtAddr,
+    /// The name of the device object's driver.
+    pub driver: Option<String>,
+    pub file_object: VirtAddr,
+    pub parameters: WdfIoParameters,
+}
+
+/// The IRP a request carries.
+#[derive(Debug, Clone)]
+pub struct WdfRequestIrp {
+    pub address: VirtAddr,
+    pub stack_count: u8,
+    pub current_location: u8,
+    /// `AssociatedIrp.SystemBuffer`.
+    pub system_buffer: VirtAddr,
+    pub user_buffer: VirtAddr,
+    pub mdl_address: VirtAddr,
+    /// `None` when `CurrentLocation` names no location: the IRP has left
+    /// every driver of the stack.
+    pub current: Option<WdfIrpLocation>,
+}
+
+/// Which `FxIrpQueue` a request's `m_IrpQueue` is, the cancel-safe queue
+/// that holds its IRP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WdfIrpQueueRole {
+    /// Its queue's `m_Queue`: it waits to be presented.
+    Pending,
+    /// Its queue's `m_DriverCancelable`: the driver marked it cancelable.
+    DriverCancelable,
+    /// Its I/O target's `m_PendedQueue`: the target was not started when
+    /// the driver sent it.
+    TargetPended,
+}
+
+impl WdfIrpQueueRole {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::DriverCancelable => "driver_cancelable",
+            Self::TargetPended => "target_pended",
+        }
+    }
+}
+
+/// A WDFREQUEST (`!wdfkd.wdfrequest`).
+#[derive(Debug, Clone)]
+pub struct WdfRequestDetail {
+    pub handle: u64,
+    pub address: VirtAddr,
+    pub driver: Option<String>,
+    pub globals: VirtAddr,
+    pub refcount: i32,
+    /// `m_ObjectState` (`FxObjectState`).
+    pub object_state: WdfEnumValue,
+    pub parent: Option<WdfObjectRef>,
+    /// `m_Irp.m_Irp`; null for a request without an IRP.
+    pub irp: VirtAddr,
+    /// The IRP decoded; `None` when it is null or failed its checks.
+    pub irp_detail: Option<WdfRequestIrp>,
+    /// Why `irp` is not a live IRP.
+    pub irp_problem: Option<String>,
+    /// `m_IrpAllocation` (`FxRequestAllocationSource`): whether the IRP
+    /// came from the I/O manager or the framework or driver allocated it.
+    pub irp_allocation: WdfEnumValue,
+    /// `m_IrpReferenceCount`.
+    pub irp_reference_count: i32,
+    pub completed: bool,
+    pub canceled: bool,
+    /// `m_Presented`: the queue has presented it to the driver.
+    pub presented: bool,
+    /// `m_TargetFlags` and its `FxRequestTargetFlags`.
+    pub target_flags: u64,
+    pub target_flag_names: Vec<String>,
+    /// `m_VerifierFlags` and its `FxRequestVerifierFlags`; KMDF keeps
+    /// them only with the verifier on.
+    pub verifier_flags: u64,
+    pub verifier_flag_names: Vec<String>,
+    /// `m_CompletionState` (`FxRequestCompletionState`).
+    pub completion_state: WdfEnumValue,
+    /// The queue it came from or is in (`m_IoQueue`).
+    pub queue: Option<WdfObjectRef>,
+    /// `m_IrpQueue`: the cancel-safe queue that holds its IRP; null when
+    /// none does and the request cannot be canceled.
+    pub irp_queue: VirtAddr,
+    /// Which queue `irp_queue` is; `None` when it is null or none of its
+    /// queue's or target's.
+    pub irp_queue_role: Option<WdfIrpQueueRole>,
+    /// The driver's `EvtRequestCancel` (`m_CancelRoutine`).
+    pub cancel_routine: Option<WdfCallback>,
+    /// The I/O target it was sent to (`m_Target`).
+    pub target: Option<WdfObjectRef>,
+    /// The driver's completion routine (`m_CompletionRoutine`) and its
+    /// context (`m_TargetCompletionContext`).
+    pub completion_routine: Option<WdfCallback>,
+    pub completion_context: VirtAddr,
+}
+
+/// A request on one of an I/O target's lists.
+#[derive(Debug, Clone)]
+pub struct WdfTargetRequest {
+    pub address: VirtAddr,
+    /// `None` for a request without a handle: the framework's own, such as
+    /// the one a synchronous send builds on the sender's stack.
+    pub handle: Option<u64>,
+    pub irp: VirtAddr,
+}
+
+/// A request list of an I/O target and why its walk stopped short.
+#[derive(Debug, Clone, Default)]
+pub struct WdfTargetRequestList {
+    pub requests: Vec<WdfTargetRequest>,
+    pub stopped: Option<String>,
+}
+
+/// A WDFIOTARGET (`!wdfkd.wdfiotarget`).
+#[derive(Debug, Clone)]
+pub struct WdfIoTargetDetail {
+    pub handle: u64,
+    pub address: VirtAddr,
+    pub driver: Option<String>,
+    pub globals: VirtAddr,
+    /// The `FX_OBJECT_TYPES` name.
+    pub type_name: String,
+    /// `local` (a target in the device's own stack), `remote` (one the
+    /// driver opened), `self`, `USB device`, or `USB pipe`.
+    pub kind: &'static str,
+    /// Whether it is its device's default I/O target.
+    pub is_default: bool,
+    /// `m_State` (`_WDF_IO_TARGET_STATE`).
+    pub state: WdfEnumValue,
+    /// A remote target's `m_OpenState` (`FxIoTargetRemoteOpenState`).
+    pub open_state: Option<WdfEnumValue>,
+    /// The WDFDEVICE it belongs to (`m_DeviceBase`).
+    pub device: Option<WdfObjectRef>,
+    /// `m_InStack`: the target is in the device's own stack.
+    pub in_stack: bool,
+    /// `m_InStackDevice`: the device's own device object.
+    pub in_stack_device: VirtAddr,
+    /// `m_TargetDevice`, the device object requests are sent to.
+    pub target_device: VirtAddr,
+    /// The name of `target_device`'s driver.
+    pub target_driver: Option<String>,
+    /// `m_TargetPdo`.
+    pub target_pdo: VirtAddr,
+    /// `m_TargetFileObject`.
+    pub file_object: VirtAddr,
+    /// `m_IoCount`: one for the target itself and one for each request in
+    /// flight.
+    pub io_count: i32,
+    /// `m_TargetStackSize`.
+    pub stack_size: i8,
+    /// Requests sent and not yet completed (`m_SentIoListHead`).
+    pub sent: WdfTargetRequestList,
+    /// Requests sent while the target was not started, with
+    /// `WDF_REQUEST_SEND_OPTION_IGNORE_TARGET_STATE` (`m_IgnoredIoListHead`).
+    pub ignored: WdfTargetRequestList,
+    /// Requests held until the target starts (`m_PendedQueue`).
+    pub pended: WdfTargetRequestList,
 }
 
 /// One IFR record and its formatted message.
@@ -556,6 +796,93 @@ fn read_u16(bytes: &[u8], at: usize) -> u16 {
     u16::from_le_bytes([bytes[at], bytes[at + 1]])
 }
 
+/// Why the object with `header`, on the child list of `parent`, is not a
+/// child of it; `None` when it is. A child need not have a handle: the
+/// framework's internal objects have none.
+fn child_problem(
+    header: &ObjectHeader,
+    type_name: Option<&str>,
+    parent: VirtAddr,
+) -> Option<String> {
+    if type_name.is_none() {
+        return Some(format!(
+            "m_Type {:#x} is no FX_OBJECT_TYPES value",
+            header.type_value
+        ));
+    }
+    if header.parent != parent {
+        return Some(format!(
+            "its m_ParentObject is {:#x}, not this object",
+            header.parent.0
+        ));
+    }
+    None
+}
+
+/// Why the object with `header`, on a list of the I/O target `target`, is
+/// not a request sent to it (`m_Target` is `sent_to`); `None` when it is.
+/// A request without a handle (`m_ObjectSize` 0) is the framework's own,
+/// such as a synchronous send's; one with a handle is checked as any
+/// object is.
+fn sent_request_problem(
+    header: &ObjectHeader,
+    type_name: Option<&str>,
+    sent_to: VirtAddr,
+    target: VirtAddr,
+) -> Option<String> {
+    if type_name != Some("FX_TYPE_REQUEST") {
+        return Some(format!(
+            "m_Type {:#x} is not FX_TYPE_REQUEST",
+            header.type_value
+        ));
+    }
+    if header.refcount < 0 {
+        return Some(format!("m_Refcnt {} is negative", header.refcount));
+    }
+    if sent_to != target {
+        return Some(format!("its m_Target is {:#x}, not this target", sent_to.0));
+    }
+    None
+}
+
+/// What kind of I/O target an object of the `FX_OBJECT_TYPES` `type_name`
+/// is, `in_stack` when its `m_InStack` is set. KMDF creates a remote target
+/// (`FxIoTargetRemote`) with the type `FX_TYPE_IO_TARGET`, as it does a
+/// device's local one, so only `m_InStack` tells the two apart: the
+/// default target is in the device's own stack, and a target that the
+/// driver opens is not.
+fn io_target_kind(type_name: &str, in_stack: bool) -> &'static str {
+    match type_name {
+        "FX_TYPE_IO_TARGET_SELF" => "self",
+        "FX_TYPE_IO_TARGET_USB_DEVICE" => "USB device",
+        "FX_TYPE_IO_TARGET_USB_PIPE" => "USB pipe",
+        _ if in_stack => "local",
+        _ => "remote",
+    }
+}
+
+/// The buffer lengths of a stack location of major function `major`;
+/// `read(member, field)` reads `Parameters.<member>.<field>`.
+fn io_parameters(major: u8, mut read: impl FnMut(&str, &str) -> Option<u32>) -> WdfIoParameters {
+    match major {
+        IRP_MJ_READ => WdfIoParameters {
+            length: read("Read", "Length"),
+            ..WdfIoParameters::default()
+        },
+        IRP_MJ_WRITE => WdfIoParameters {
+            length: read("Write", "Length"),
+            ..WdfIoParameters::default()
+        },
+        IRP_MJ_DEVICE_CONTROL | IRP_MJ_INTERNAL_DEVICE_CONTROL => WdfIoParameters {
+            input_length: read("DeviceIoControl", "InputBufferLength"),
+            output_length: read("DeviceIoControl", "OutputBufferLength"),
+            io_control_code: read("DeviceIoControl", "IoControlCode"),
+            ..WdfIoParameters::default()
+        },
+        _ => WdfIoParameters::default(),
+    }
+}
+
 fn read_u32(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
 }
@@ -813,6 +1140,24 @@ struct CheckedObject {
 /// Each client's globals and name, what object ownership is checked against.
 type ClientNames = Vec<(VirtAddr, Option<String>)>;
 
+/// The name of the client among `clients` that owns `object` (`None` for
+/// one without a name); Err when no registered client does.
+fn wdf_owner(
+    object: &CheckedObject,
+    clients: &ClientNames,
+) -> std::result::Result<Option<String>, String> {
+    clients
+        .iter()
+        .find(|(globals, _)| *globals == object.header.globals)
+        .map(|(_, name)| name.clone())
+        .ok_or_else(|| {
+            format!(
+                "object {:#x}: m_Globals {:#x} is no registered KMDF client's",
+                object.address.0, object.header.globals.0
+            )
+        })
+}
+
 impl Target {
     fn wdf_types(&self) -> Result<WdfTypes<'_>> {
         let types = self.types_in(self.kernel_dtb());
@@ -995,30 +1340,43 @@ impl Target {
         let object = self
             .wdf_check_object(wdf, address)
             .map_err(|why| refuse(format!("object {:#x}: {why}", address.0)))?;
-        let driver = clients
-            .iter()
-            .find(|(globals, _)| *globals == object.header.globals)
-            .map(|(_, name)| name.clone())
-            .ok_or_else(|| {
-                refuse(format!(
-                    "object {:#x}: m_Globals {:#x} is no registered KMDF client's",
-                    address.0, object.header.globals.0
-                ))
-            })?;
+        let driver = wdf_owner(&object, clients).map_err(refuse)?;
         Ok((object, offset, driver))
     }
 
-    /// Resolve `handle` to a checked object of type `expected`.
+    /// Resolve `value`, a handle or the address of an `FxObject`, to its
+    /// checked object, its handle, and the offset an offset handle
+    /// subtracted.
+    fn wdf_resolve_object(
+        &self,
+        wdf: &WdfTypes<'_>,
+        value: u64,
+        clients: &ClientNames,
+    ) -> Result<(CheckedObject, u64, Option<u16>, Option<String>)> {
+        if !is_kernel_address(value, wdf.pointer_size) {
+            let (object, offset, driver) = self.wdf_resolve_handle(wdf, value, clients)?;
+            return Ok((object, value, offset, driver));
+        }
+        let refuse =
+            |why: String| Error::DebugInfo(format!("{value:#x} is not a KMDF object: {why}"));
+        let object = self
+            .wdf_check_object(wdf, VirtAddr(value))
+            .map_err(refuse)?;
+        let driver = wdf_owner(&object, clients).map_err(refuse)?;
+        Ok((object, wdf.handle(VirtAddr(value)), None, driver))
+    }
+
+    /// Resolve `handle` to a checked object of one of the types `expected`.
     fn wdf_typed_handle(
         &self,
         wdf: &WdfTypes<'_>,
         handle: u64,
-        expected: &str,
+        expected: &[&str],
         what: &str,
     ) -> Result<(CheckedObject, Option<String>)> {
         let clients = self.wdf_client_names(wdf)?;
         let (object, offset, driver) = self.wdf_resolve_handle(wdf, handle, &clients)?;
-        if offset.is_some() || object.type_name != expected {
+        if offset.is_some() || !expected.contains(&object.type_name.as_str()) {
             return Err(Error::DebugInfo(format!(
                 "{handle:#x} is not a {what}: it names a {} at {:#x}",
                 object.type_name, object.address.0
@@ -1360,8 +1718,35 @@ impl Target {
         let wdf = self.wdf_types()?;
         let clients = self.wdf_client_names(&wdf)?;
         let (object, offset, driver) = self.wdf_resolve_handle(&wdf, handle, &clients)?;
+        self.wdf_object_view(&wdf, object, handle, offset, driver)
+    }
+
+    /// `!wdfkd.wdfobject <handle | FxObject>`: an object and its children.
+    pub fn wdf_object(&self, value: u64) -> Result<WdfObjectDetail> {
+        let wdf = self.wdf_types()?;
+        let clients = self.wdf_client_names(&wdf)?;
+        let (object, handle, offset, driver) = self.wdf_resolve_object(&wdf, value, &clients)?;
+        let address = object.address;
+        let object = self.wdf_object_view(&wdf, object, handle, offset, driver)?;
+        let (children, children_stopped) = self.wdf_children(&wdf, address)?;
+        Ok(WdfObjectDetail {
+            object,
+            children,
+            children_stopped,
+        })
+    }
+
+    /// A checked object's header, owner, parent, and contexts.
+    fn wdf_object_view(
+        &self,
+        wdf: &WdfTypes<'_>,
+        object: CheckedObject,
+        handle: u64,
+        offset: Option<u16>,
+        driver: Option<String>,
+    ) -> Result<WdfObject> {
         let header = object.header;
-        let (contexts, contexts_stopped) = self.wdf_contexts(&wdf, &object)?;
+        let (contexts, contexts_stopped) = self.wdf_contexts(wdf, &object)?;
         Ok(WdfObject {
             handle,
             address: object.address,
@@ -1375,10 +1760,51 @@ impl Target {
             flag_names: flag_names(&self.wdf_enum("FXOBJECT_FLAGS"), u64::from(header.flags)),
             globals: header.globals,
             driver,
-            parent: self.wdf_object_ref(&wdf, header.parent),
+            parent: self.wdf_object_ref(wdf, header.parent),
             contexts,
             contexts_stopped,
         })
+    }
+
+    /// The objects on `object`'s `m_ChildListHead`, linked through their
+    /// `m_ChildEntry`. A child that does not name `object` as its parent
+    /// ends the list.
+    fn wdf_children(
+        &self,
+        wdf: &WdfTypes<'_>,
+        object: VirtAddr,
+    ) -> Result<(Vec<WdfObjectRef>, Option<String>)> {
+        let head = object + wdf.object.field_offset("m_ChildListHead")?;
+        let entry_offset = wdf.object.field_offset("m_ChildEntry")?;
+        let memory = self.kernel_address_space();
+        let (links, termination) =
+            bounded_list_walk(head, MAX_CHILDREN, |link| memory.read::<VirtAddr>(link));
+        let mut stopped = termination.diagnostic();
+        let mut children = Vec::with_capacity(links.len());
+        for link in links {
+            let child = link - entry_offset;
+            let header = self
+                .wdf_object_header(wdf, child)
+                .map_err(|error| format!("its FxObject header is unreadable: {error}"))
+                .and_then(|header| {
+                    match child_problem(&header, wdf.type_name(header.type_value), object) {
+                        Some(problem) => Err(problem),
+                        None => Ok(header),
+                    }
+                });
+            match header {
+                Ok(header) => children.push(WdfObjectRef {
+                    address: child,
+                    handle: (header.object_size != 0).then(|| wdf.handle(child)),
+                    type_name: wdf.type_name(header.type_value).map(String::from),
+                }),
+                Err(why) => {
+                    stopped = Some(format!("{:#x}: {why}", child.0));
+                    break;
+                }
+            }
+        }
+        Ok((children, stopped))
     }
 
     /// The object's context headers, along `NextHeader`; the first one's
@@ -1551,7 +1977,7 @@ impl Target {
     pub fn wdf_device(&self, handle: u64) -> Result<WdfDeviceDetail> {
         let wdf = self.wdf_types()?;
         let (object, driver) =
-            self.wdf_typed_handle(&wdf, handle, "FX_TYPE_DEVICE", "WDFDEVICE")?;
+            self.wdf_typed_handle(&wdf, handle, &["FX_TYPE_DEVICE"], "WDFDEVICE")?;
         let address = object.address;
         let device = wdf.at(&wdf.layout("FxDevice")?, address);
         let mx = |field: &str| -> Result<VirtAddr> {
@@ -1584,6 +2010,9 @@ impl Target {
         } else {
             (None, None)
         };
+        let (default_target, self_target) = self.wdf_fdo_targets(&wdf, kind, pkg_pnp)?;
+        let (io_targets, io_targets_stopped) =
+            self.wdf_device_io_targets(&wdf, address, default_target)?;
         let pkg_io = device.read_pointer("m_PkgIo")?;
         let (default_queue, queues, queues_stopped) = if pkg_io.is_zero() {
             (VirtAddr(0), Vec::new(), None)
@@ -1630,11 +2059,109 @@ impl Target {
             queues_stopped,
             default_child_list,
             static_child_list,
+            default_io_target: (!default_target.is_zero()).then(|| wdf.handle(default_target)),
+            self_io_target: (!self_target.is_zero()).then(|| wdf.handle(self_target)),
+            io_targets,
+            io_targets_stopped,
         })
     }
 
+    /// An FDO's or filter's default and self I/O targets
+    /// (`FxPkgFdo.m_DefaultTarget` and `m_SelfTarget`); null for a device
+    /// of another `kind`, which has neither.
+    fn wdf_fdo_targets(
+        &self,
+        wdf: &WdfTypes<'_>,
+        kind: &str,
+        pkg_pnp: VirtAddr,
+    ) -> Result<(VirtAddr, VirtAddr)> {
+        if !matches!(kind, "FDO" | "filter") {
+            return Ok((VirtAddr(0), VirtAddr(0)));
+        }
+        let fdo = wdf.at(&wdf.layout("FxPkgFdo")?, pkg_pnp);
+        Ok((
+            fdo.read_pointer("m_DefaultTarget")?,
+            fdo.read_pointer("m_SelfTarget")?,
+        ))
+    }
+
+    /// The I/O targets on the `FxDevice` `device`'s `m_IoTargetsList`, whose
+    /// `FxTransactionedEntry`s are each target's `m_TransactionedEntry`: an
+    /// entry whose `m_TransactionedObject` is not the target that holds it,
+    /// or a target that does not check out, ends the list.
+    fn wdf_device_io_targets(
+        &self,
+        wdf: &WdfTypes<'_>,
+        device: VirtAddr,
+        default_target: VirtAddr,
+    ) -> Result<(Vec<WdfIoTargetSummary>, Option<String>)> {
+        let target_layout = wdf.layout("FxIoTarget")?;
+        let entry_layout = wdf.layout("FxTransactionedEntry")?;
+        let head = device
+            + wdf.layout("FxDevice")?.field_offset("m_IoTargetsList")?
+            + wdf
+                .layout("FxSpinLockTransactionedList")?
+                .field_offset("m_ListHead")?;
+        let link_offset = entry_layout.field_offset("m_ListLink")?;
+        let entry_offset = target_layout.field_offset("m_TransactionedEntry")?;
+        let states = self.wdf_enum("_WDF_IO_TARGET_STATE");
+        let memory = self.kernel_address_space();
+        let (links, termination) =
+            bounded_list_walk(head, MAX_IO_TARGETS, |link| memory.read::<VirtAddr>(link));
+        let mut stopped = termination.diagnostic();
+        let mut targets = Vec::with_capacity(links.len());
+        for link in links {
+            let entry = link - link_offset;
+            let summary = wdf
+                .at(&entry_layout, entry)
+                .read_pointer("m_TransactionedObject")
+                .map_err(|error| format!("entry {:#x} is unreadable: {error}", entry.0))
+                .and_then(|object| {
+                    if object + entry_offset != entry {
+                        return Err(format!(
+                            "entry {:#x} names object {:#x}, not the target that holds it",
+                            entry.0, object.0
+                        ));
+                    }
+                    let checked = self
+                        .wdf_check_object(wdf, object)
+                        .map_err(|why| format!("{:#x}: {why}", object.0))?;
+                    if !IO_TARGET_TYPES.contains(&checked.type_name.as_str()) {
+                        return Err(format!(
+                            "{:#x}: a {}, not an I/O target",
+                            object.0, checked.type_name
+                        ));
+                    }
+                    let target = wdf.at(&target_layout, object);
+                    let read = || -> Result<WdfIoTargetSummary> {
+                        Ok(WdfIoTargetSummary {
+                            handle: wdf.handle(object),
+                            address: object,
+                            kind: io_target_kind(
+                                &checked.type_name,
+                                target.read_uint("m_InStack")? != 0,
+                            ),
+                            type_name: checked.type_name.clone(),
+                            state: enum_value(&states, target.read_uint("m_State")?),
+                            target_device: target.read_pointer("m_TargetDevice")?,
+                            is_default: object == default_target,
+                        })
+                    };
+                    read().map_err(|error| format!("{:#x}: {error}", object.0))
+                });
+            match summary {
+                Ok(summary) => targets.push(summary),
+                Err(why) => {
+                    stopped = Some(why);
+                    break;
+                }
+            }
+        }
+        Ok((targets, stopped))
+    }
+
     /// The request at `address`, checked to be an `FxRequest`.
-    fn wdf_request(
+    fn wdf_request_ref(
         &self,
         wdf: &WdfTypes<'_>,
         request_layout: &Arc<TypeInfo>,
@@ -1656,15 +2183,16 @@ impl Target {
         })
     }
 
-    /// The requests whose IRPs are on the `FxIrpQueue` at `irp_queue`: each
-    /// IRP's `Tail.Overlay.DriverContext[3]` is its request's
-    /// `m_CsqContext`, whose `Irp` must be the IRP again.
-    fn wdf_irp_queue_requests(
+    /// The requests whose IRPs are on the `FxIrpQueue` at `irp_queue`, each
+    /// as `check` takes it: each IRP's `Tail.Overlay.DriverContext[3]` is
+    /// its request's `m_CsqContext`, whose `Irp` must be the IRP again.
+    fn wdf_irp_queue_walk<T>(
         &self,
         wdf: &WdfTypes<'_>,
         request_layout: &Arc<TypeInfo>,
         irp_queue: VirtAddr,
-    ) -> Result<WdfRequestList> {
+        mut check: impl FnMut(VirtAddr) -> std::result::Result<T, String>,
+    ) -> Result<(Vec<T>, Option<String>)> {
         let nt = self.guest()?.ntoskrnl.types();
         let irp_layout = nt.layout("_IRP")?;
         let overlay = nt
@@ -1682,10 +2210,8 @@ impl Target {
         let memory = self.kernel_address_space();
         let (links, termination) =
             bounded_list_walk(head, MAX_REQUESTS, |link| memory.read::<VirtAddr>(link));
-        let mut list = WdfRequestList {
-            requests: Vec::new(),
-            stopped: termination.diagnostic(),
-        };
+        let mut stopped = termination.diagnostic();
+        let mut requests = Vec::with_capacity(links.len());
         for link in links {
             let irp = link - list_offset;
             let request = memory
@@ -1702,47 +2228,59 @@ impl Target {
                             csq.0, back.0
                         ));
                     }
-                    self.wdf_request(wdf, request_layout, csq - csq_offset)
+                    check(csq - csq_offset)
                 });
             match request {
-                Ok(request) => list.requests.push(request),
+                Ok(request) => requests.push(request),
                 Err(why) => {
-                    list.stopped = Some(format!("IRP {:#x}: {why}", irp.0));
+                    stopped = Some(format!("IRP {:#x}: {why}", irp.0));
                     break;
                 }
             }
         }
-        Ok(list)
+        Ok((requests, stopped))
     }
 
     /// The requests on the `_LIST_ENTRY` at `head`, linked through
-    /// `FxRequest`'s `link` field.
-    fn wdf_request_list(
+    /// `FxRequest`'s `link` field, each as `check` takes it.
+    fn wdf_request_link_walk<T>(
         &self,
-        wdf: &WdfTypes<'_>,
         request_layout: &Arc<TypeInfo>,
         head: VirtAddr,
         link: &str,
-    ) -> Result<WdfRequestList> {
+        mut check: impl FnMut(VirtAddr) -> std::result::Result<T, String>,
+    ) -> Result<(Vec<T>, Option<String>)> {
         let link_offset = request_layout.field_offset(link)?;
         let memory = self.kernel_address_space();
         let (links, termination) =
             bounded_list_walk(head, MAX_REQUESTS, |link| memory.read::<VirtAddr>(link));
-        let mut list = WdfRequestList {
-            requests: Vec::new(),
-            stopped: termination.diagnostic(),
-        };
+        let mut stopped = termination.diagnostic();
+        let mut requests = Vec::with_capacity(links.len());
         for entry in links {
             let address = entry - link_offset;
-            match self.wdf_request(wdf, request_layout, address) {
-                Ok(request) => list.requests.push(request),
+            match check(address) {
+                Ok(request) => requests.push(request),
                 Err(why) => {
-                    list.stopped = Some(format!("{:#x}: {why}", address.0));
+                    stopped = Some(format!("{:#x}: {why}", address.0));
                     break;
                 }
             }
         }
-        Ok(list)
+        Ok((requests, stopped))
+    }
+
+    /// A queue's requests on its `FxIrpQueue` at `irp_queue`.
+    fn wdf_queue_irp_requests(
+        &self,
+        wdf: &WdfTypes<'_>,
+        request_layout: &Arc<TypeInfo>,
+        irp_queue: VirtAddr,
+    ) -> Result<WdfRequestList> {
+        let (requests, stopped) =
+            self.wdf_irp_queue_walk(wdf, request_layout, irp_queue, |address| {
+                self.wdf_request_ref(wdf, request_layout, address)
+            })?;
+        Ok(WdfRequestList { requests, stopped })
     }
 
     /// `!wdfkd.wdfqueue <handle>`: a WDFQUEUE's configuration, state, and
@@ -1759,7 +2297,8 @@ impl Target {
             ("EvtIoCanceledOnQueue", "m_IoCanceledOnQueue"),
         ];
         let wdf = self.wdf_types()?;
-        let (object, driver) = self.wdf_typed_handle(&wdf, handle, "FX_TYPE_QUEUE", "WDFQUEUE")?;
+        let (object, driver) =
+            self.wdf_typed_handle(&wdf, handle, &["FX_TYPE_QUEUE"], "WDFQUEUE")?;
         let address = object.address;
         let queue_layout = wdf.layout("FxIoQueue")?;
         let irp_queue = wdf.layout("FxIrpQueue")?;
@@ -1815,19 +2354,305 @@ impl Target {
             driver_owned_count: queue.read_uint("m_DriverIoCount")? as u32 as i32,
             two_phase_completions: queue.read_uint("m_TwoPhaseCompletions")? as u32 as i32,
             callbacks,
-            pending: self.wdf_irp_queue_requests(&wdf, &request_layout, field("m_Queue")?)?,
-            driver_cancelable: self.wdf_irp_queue_requests(
+            pending: self.wdf_queue_irp_requests(&wdf, &request_layout, field("m_Queue")?)?,
+            driver_cancelable: self.wdf_queue_irp_requests(
                 &wdf,
                 &request_layout,
                 field("m_DriverCancelable")?,
             )?,
-            driver_owned: self.wdf_request_list(
-                &wdf,
-                &request_layout,
-                field("m_DriverOwned")?,
-                "m_OwnerListEntry2",
-            )?,
+            driver_owned: {
+                let (requests, stopped) = self.wdf_request_link_walk(
+                    &request_layout,
+                    field("m_DriverOwned")?,
+                    "m_OwnerListEntry2",
+                    |address| self.wdf_request_ref(&wdf, &request_layout, address),
+                )?;
+                WdfRequestList { requests, stopped }
+            },
         })
+    }
+
+    /// `!wdfkd.wdfrequest <handle>`: a WDFREQUEST, its IRP, and where it
+    /// is: its queue, the I/O target it was sent to, and the callbacks set
+    /// for its cancellation and completion.
+    pub fn wdf_request(&self, handle: u64) -> Result<WdfRequestDetail> {
+        let wdf = self.wdf_types()?;
+        let (object, driver) =
+            self.wdf_typed_handle(&wdf, handle, &["FX_TYPE_REQUEST"], "WDFREQUEST")?;
+        let address = object.address;
+        let request = wdf.at(&wdf.layout("FxRequest")?, address);
+        let irp = request.embedded("m_Irp")?.read_pointer("m_Irp")?;
+        let (irp_detail, irp_problem) = if irp.is_zero() {
+            (None, None)
+        } else {
+            match self.wdf_request_irp(irp) {
+                Ok(detail) => (Some(detail), None),
+                Err(why) => (None, Some(why)),
+            }
+        };
+        let queue = request.read_pointer("m_IoQueue")?;
+        let target = request.read_pointer("m_Target")?;
+        let irp_queue = request.read_pointer("m_IrpQueue")?;
+        let irp_queue_role = if irp_queue.is_zero() {
+            None
+        } else {
+            let queue_layout = wdf.layout("FxIoQueue")?;
+            let pended = wdf.layout("FxIoTarget")?.field_offset("m_PendedQueue")?;
+            let mut candidates = Vec::new();
+            if !queue.is_zero() {
+                candidates.push((
+                    queue + queue_layout.field_offset("m_Queue")?,
+                    WdfIrpQueueRole::Pending,
+                ));
+                candidates.push((
+                    queue + queue_layout.field_offset("m_DriverCancelable")?,
+                    WdfIrpQueueRole::DriverCancelable,
+                ));
+            }
+            if !target.is_zero() {
+                candidates.push((target + pended, WdfIrpQueueRole::TargetPended));
+            }
+            candidates
+                .into_iter()
+                .find(|(address, _)| *address == irp_queue)
+                .map(|(_, role)| role)
+        };
+        let callback = |name: &'static str, field: &str, member: &str| -> Result<_> {
+            let routine = request.embedded(field)?.read_pointer(member)?;
+            Ok((!routine.is_zero()).then(|| WdfCallback {
+                name,
+                address: routine,
+                symbol: self.wdf_symbol(routine),
+            }))
+        };
+        let target_flags = request.read_uint("m_TargetFlags")?;
+        let verifier_flags = request.read_uint("m_VerifierFlags")? & 0xffff;
+        Ok(WdfRequestDetail {
+            handle,
+            address,
+            driver,
+            globals: object.header.globals,
+            refcount: object.header.refcount,
+            object_state: enum_value(&wdf.object_states, u64::from(object.header.state)),
+            parent: self.wdf_object_ref(&wdf, object.header.parent),
+            irp,
+            irp_detail,
+            irp_problem,
+            irp_allocation: enum_value(
+                &self.wdf_enum("FxRequestAllocationSource"),
+                request.read_uint("m_IrpAllocation")?,
+            ),
+            irp_reference_count: request.read_uint("m_IrpReferenceCount")? as u32 as i32,
+            completed: request.read_uint("m_Completed")? != 0,
+            canceled: request.read_uint("m_Canceled")? != 0,
+            presented: request.read_uint("m_Presented")? != 0,
+            target_flags,
+            target_flag_names: flag_names(&self.wdf_enum("FxRequestTargetFlags"), target_flags),
+            verifier_flags,
+            verifier_flag_names: flag_names(
+                &self.wdf_enum("FxRequestVerifierFlags"),
+                verifier_flags,
+            ),
+            completion_state: enum_value(
+                &self.wdf_enum("FxRequestCompletionState"),
+                request.read_uint("m_CompletionState")?,
+            ),
+            queue: self.wdf_object_ref(&wdf, queue),
+            irp_queue,
+            irp_queue_role,
+            cancel_routine: callback("EvtRequestCancel", "m_CancelRoutine", "m_Cancel")?,
+            target: self.wdf_object_ref(&wdf, target),
+            completion_routine: callback(
+                "EvtRequestCompletionRoutine",
+                "m_CompletionRoutine",
+                "m_Completion",
+            )?,
+            completion_context: request.read_pointer("m_TargetCompletionContext")?,
+        })
+    }
+
+    /// The IRP at `irp` and its current stack location; Err says why it is
+    /// not a live IRP.
+    fn wdf_request_irp(&self, irp: VirtAddr) -> std::result::Result<WdfRequestIrp, String> {
+        let info = self
+            .inspect_irp(irp)
+            .map_err(|error| format!("IRP {:#x} is unreadable: {error}", irp.0))?;
+        if info.irp_type != IO_TYPE_IRP {
+            return Err(format!(
+                "IRP {:#x} has Type {:#x}, not IO_TYPE_IRP: it was freed or reused",
+                irp.0, info.irp_type
+            ));
+        }
+        let current = info.current_stack().map(|location| WdfIrpLocation {
+            number: info.current_location,
+            address: location.address,
+            major_function: location.major_function,
+            minor_function: location.minor_function,
+            device_object: location.device_object,
+            driver: (!location.device_object.is_zero())
+                .then(|| self.device_driver_name(location.device_object))
+                .flatten(),
+            file_object: location.file_object,
+            parameters: self.wdf_io_parameters(location.address, location.major_function),
+        });
+        Ok(WdfRequestIrp {
+            address: irp,
+            stack_count: info.stack_count,
+            current_location: info.current_location,
+            system_buffer: info.system_buffer,
+            user_buffer: info.user_buffer,
+            mdl_address: info.mdl_address,
+            current,
+        })
+    }
+
+    /// The buffer lengths of the `_IO_STACK_LOCATION` at `location`.
+    fn wdf_io_parameters(&self, location: VirtAddr, major: u8) -> WdfIoParameters {
+        let Ok(guest) = self.guest() else {
+            return WdfIoParameters::default();
+        };
+        let Ok(parameters) = guest
+            .ntoskrnl
+            .types()
+            .struct_at("_IO_STACK_LOCATION", location)
+            .and_then(|location| location.embedded("Parameters"))
+        else {
+            return WdfIoParameters::default();
+        };
+        io_parameters(major, |member, field| {
+            parameters
+                .embedded(member)
+                .and_then(|member| member.read_uint(field))
+                .ok()
+                .map(|value| value as u32)
+        })
+    }
+
+    /// The request at `address` on a list of the I/O target `target`, as
+    /// [`sent_request_problem`] checks it.
+    fn wdf_sent_request(
+        &self,
+        wdf: &WdfTypes<'_>,
+        request_layout: &Arc<TypeInfo>,
+        address: VirtAddr,
+        target: VirtAddr,
+    ) -> std::result::Result<WdfTargetRequest, String> {
+        let header = self
+            .wdf_object_header(wdf, address)
+            .map_err(|error| format!("its FxObject header is unreadable: {error}"))?;
+        let request = wdf.at(request_layout, address);
+        let sent_to = request
+            .read_pointer("m_Target")
+            .map_err(|error| error.to_string())?;
+        if let Some(problem) =
+            sent_request_problem(&header, wdf.type_name(header.type_value), sent_to, target)
+        {
+            return Err(problem);
+        }
+        let handle = if header.object_size == 0 {
+            None
+        } else {
+            self.wdf_check_object(wdf, address)?;
+            Some(wdf.handle(address))
+        };
+        let irp = request
+            .embedded("m_Irp")
+            .and_then(|irp| irp.read_pointer("m_Irp"))
+            .map_err(|error| error.to_string())?;
+        Ok(WdfTargetRequest {
+            address,
+            handle,
+            irp,
+        })
+    }
+
+    /// `!wdfkd.wdfiotarget <handle>`: a WDFIOTARGET, the device object it
+    /// sends to, and the requests sent to it.
+    pub fn wdf_io_target(&self, handle: u64) -> Result<WdfIoTargetDetail> {
+        let wdf = self.wdf_types()?;
+        let (object, driver) =
+            self.wdf_typed_handle(&wdf, handle, IO_TARGET_TYPES, "WDFIOTARGET")?;
+        let address = object.address;
+        let target_layout = wdf.layout("FxIoTarget")?;
+        let request_layout = wdf.layout("FxRequestBase")?;
+        let target = wdf.at(&target_layout, address);
+        let field =
+            |name: &str| -> Result<VirtAddr> { Ok(address + target_layout.field_offset(name)?) };
+        let list = |head: &str| -> Result<WdfTargetRequestList> {
+            let (requests, stopped) = self.wdf_request_link_walk(
+                &request_layout,
+                field(head)?,
+                "m_ListEntry",
+                |request| self.wdf_sent_request(&wdf, &request_layout, request, address),
+            )?;
+            Ok(WdfTargetRequestList { requests, stopped })
+        };
+        let (pended, pended_stopped) =
+            self.wdf_irp_queue_walk(&wdf, &request_layout, field("m_PendedQueue")?, |request| {
+                self.wdf_sent_request(&wdf, &request_layout, request, address)
+            })?;
+        let in_stack = target.read_uint("m_InStack")? != 0;
+        let kind = io_target_kind(&object.type_name, in_stack);
+        let remote_layout = wdf.layout("FxIoTargetRemote")?;
+        // Only an object as large as an FxIoTargetRemote has its fields.
+        let open_state =
+            if kind == "remote" && usize::from(object.header.object_size) >= remote_layout.size {
+                let remote = wdf.at(&remote_layout, address);
+                Some(enum_value(
+                    &self.wdf_enum("FxIoTargetRemoteOpenState"),
+                    remote.read_uint("m_OpenState")?,
+                ))
+            } else {
+                None
+            };
+        let device = object.header.device;
+        let default_target = self.wdf_default_target(&wdf, device);
+        let target_device = target.read_pointer("m_TargetDevice")?;
+        Ok(WdfIoTargetDetail {
+            handle,
+            address,
+            driver,
+            globals: object.header.globals,
+            kind,
+            is_default: default_target == Some(address),
+            type_name: object.type_name,
+            state: enum_value(
+                &self.wdf_enum("_WDF_IO_TARGET_STATE"),
+                target.read_uint("m_State")?,
+            ),
+            open_state,
+            device: self.wdf_object_ref(&wdf, device),
+            in_stack,
+            in_stack_device: target.read_pointer("m_InStackDevice")?,
+            target_device,
+            target_driver: (!target_device.is_zero())
+                .then(|| self.device_driver_name(target_device))
+                .flatten(),
+            target_pdo: target.read_pointer("m_TargetPdo")?,
+            file_object: target.read_pointer("m_TargetFileObject")?,
+            io_count: target.read_uint("m_IoCount")? as u32 as i32,
+            stack_size: target.read_uint("m_TargetStackSize")? as u8 as i8,
+            sent: list("m_SentIoListHead")?,
+            ignored: list("m_IgnoredIoListHead")?,
+            pended: WdfTargetRequestList {
+                requests: pended,
+                stopped: pended_stopped,
+            },
+        })
+    }
+
+    /// The default I/O target of the WDFDEVICE at `device`; `None` when it
+    /// is not a device that checks out or has none.
+    fn wdf_default_target(&self, wdf: &WdfTypes<'_>, device: VirtAddr) -> Option<VirtAddr> {
+        let checked = self.wdf_check_object(wdf, device).ok()?;
+        if checked.type_name != "FX_TYPE_DEVICE" {
+            return None;
+        }
+        let fx_device = wdf.at(&wdf.layout("FxDevice").ok()?, device);
+        let kind = self.wdf_device_kind(wdf, &fx_device).ok()?;
+        let pkg_pnp = fx_device.read_pointer("m_PkgPnp").ok()?;
+        let (default_target, _) = self.wdf_fdo_targets(wdf, kind, pkg_pnp).ok()?;
+        (!default_target.is_zero()).then_some(default_target)
     }
 
     /// `!wdfkd.wdflogdump <driver>`: a client driver's IFR log, oldest
@@ -2344,6 +3169,116 @@ mod tests {
         let mut dead = header(0x1000, 0x70);
         dead.refcount = -1;
         assert!(problem(dead, rules(Some("FX_TYPE_OBJECT"), None)).contains("negative"));
+    }
+
+    #[test]
+    fn children_must_name_their_parent() {
+        let parent = VirtAddr(0xffff_c10a_0000_1000);
+        // The framework's own children, such as an FxPkgIo, have no handle.
+        let mut child = header(0x1100, 0);
+        child.parent = parent;
+        assert_eq!(
+            child_problem(&child, Some("FX_TYPE_PACKAGE_IO"), parent),
+            None
+        );
+        let why = child_problem(&child, Some("FX_TYPE_PACKAGE_IO"), VirtAddr(0x2000)).unwrap();
+        assert!(why.contains("0xffffc10a00001000"), "{why}");
+        assert!(
+            child_problem(&child, None, parent)
+                .unwrap()
+                .contains("m_Type 0x1100")
+        );
+    }
+
+    #[test]
+    fn target_lists_hold_requests_sent_to_that_target() {
+        let target = VirtAddr(0xffff_c10a_0000_2000);
+        // A synchronous send's request lives on the sender's stack, with
+        // no handle.
+        let sync = header(0x1008, 0);
+        assert_eq!(
+            sent_request_problem(&sync, Some("FX_TYPE_REQUEST"), target, target),
+            None
+        );
+        let created = header(0x1008, 0x170);
+        assert_eq!(
+            sent_request_problem(&created, Some("FX_TYPE_REQUEST"), target, target),
+            None
+        );
+        let elsewhere = sent_request_problem(
+            &created,
+            Some("FX_TYPE_REQUEST"),
+            VirtAddr(0xffff_c10a_0000_3000),
+            target,
+        )
+        .unwrap();
+        assert!(
+            elsewhere.contains("m_Target is 0xffffc10a00003000"),
+            "{elsewhere}"
+        );
+        assert!(
+            sent_request_problem(
+                &header(0x1003, 0x400),
+                Some("FX_TYPE_QUEUE"),
+                target,
+                target
+            )
+            .unwrap()
+            .contains("not FX_TYPE_REQUEST")
+        );
+        let mut released = created;
+        released.refcount = -1;
+        assert!(
+            sent_request_problem(&released, Some("FX_TYPE_REQUEST"), target, target)
+                .unwrap()
+                .contains("negative")
+        );
+    }
+
+    #[test]
+    fn io_parameters_follow_the_major_function() {
+        // `Parameters` is a union: each major function reads its own member.
+        let read = |member: &str, field: &str| -> Option<u32> {
+            Some(match (member, field) {
+                ("Read", "Length") => 0x200,
+                ("Write", "Length") => 0x400,
+                ("DeviceIoControl", "InputBufferLength") => 0x10,
+                ("DeviceIoControl", "OutputBufferLength") => 0x20,
+                ("DeviceIoControl", "IoControlCode") => 0x0022_2003,
+                _ => return None,
+            })
+        };
+        assert_eq!(io_parameters(IRP_MJ_READ, read).length, Some(0x200));
+        assert_eq!(
+            io_parameters(IRP_MJ_WRITE, read),
+            WdfIoParameters {
+                length: Some(0x400),
+                ..WdfIoParameters::default()
+            }
+        );
+        assert_eq!(
+            io_parameters(IRP_MJ_INTERNAL_DEVICE_CONTROL, read),
+            WdfIoParameters {
+                length: None,
+                input_length: Some(0x10),
+                output_length: Some(0x20),
+                io_control_code: Some(0x0022_2003),
+            }
+        );
+        // IRP_MJ_CREATE has no buffer lengths.
+        assert_eq!(io_parameters(0, read), WdfIoParameters::default());
+    }
+
+    #[test]
+    fn remote_targets_share_the_local_type_and_differ_in_m_in_stack() {
+        assert_eq!(io_target_kind("FX_TYPE_IO_TARGET", true), "local");
+        assert_eq!(io_target_kind("FX_TYPE_IO_TARGET", false), "remote");
+        // The derived classes' types win over m_InStack.
+        assert_eq!(
+            io_target_kind("FX_TYPE_IO_TARGET_USB_PIPE", true),
+            "USB pipe"
+        );
+        assert_eq!(io_target_kind("FX_TYPE_IO_TARGET_SELF", false), "self");
     }
 
     #[test]
