@@ -29,6 +29,7 @@ repl_command! {
     summary: "List the StorPort adapters, or show one adapter and its units.",
     details: "Without an argument, walks storport's driver list (storport!RaidpPortData) and each driver's adapters, and shows one line per adapter: the miniport driver, the adapter extension (_RAID_ADAPTER_EXTENSION), the FDO, the PnP state, the port device name, the PCI location, the number of units, and the I/O state. With the address of an adapter extension or of its FDO, shows the adapter: its driver, device objects, PnP and power state, the miniport's own device extension (the HwDeviceExtension that StorPort passes to every Hw routine, which you read with dt and the miniport's private PDB) and its size, the flags (_FLAGS, _FLAGS2), the paging and crash-dump path counts, each I/O gateway's outstanding and waiting requests, and each unit with its bus/target/LUN, PDO, state, inquiry product, and I/O state. The command needs storport's PDB. It stops each list at the head, a null or repeated link, or 256 drivers or adapters, and says why it stopped early. Adapters of storport's native NVMe path are listed but not decoded.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -38,6 +39,7 @@ repl_command! {
     summary: "Show a StorPort logical unit, its queue, and the requests the miniport holds.",
     details: "Give the address of a unit extension (_RAID_UNIT_EXTENSION), as !storagekd.storadapter lists them, or of the unit's PDO. Shows the unit's bus/target/LUN, the inquiry vendor, product and revision, the adapter, the PnP and power state, the flags, the miniport's per-unit extension (StorPortGetLogicalUnit), and its device queue: the depth, whether it is frozen or locked, the pause and busy counts, and the requests waiting in storport. Then it lists each request that storport handed to the miniport and has not seen completed, from the unit's per-processor pending queues, with its _EXTENDED_REQUEST_BLOCK, IRP and SRB; use !irp on the IRP. It lists at most 256 requests and says why a list stopped early.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -47,6 +49,7 @@ repl_command! {
     summary: "Show a StorPort adapter's internal log of requests, pauses, and resumes.",
     details: "Give the address of an adapter extension or of its FDO, as !storagekd.storadapter lists them. StorPort keeps a ring of its last 256 events for each adapter (RaidLogList): requests it builds, starts, and sees completed, pauses and resumes of the adapter and its units, busy and ready notifications, timeouts, resets, and PnP and power IRPs. Each entry shows its number, its time (UTC), the event, and for a request its IRP, SRB, command, and SRB status, or else the four parameters StorPort logged, a code address by symbol. Without a range, the command shows the last 50 entries; <start> shows entries from that number, <start> <end> that range, and L <count> how many.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -56,6 +59,7 @@ repl_command! {
     summary: "Show the entries of a StorPort adapter's log that name an IRP.",
     details: "Shows the entries of the adapter's internal log, as !storagekd.storloglist shows them, whose request is the IRP you give, or that log it as a parameter: when StorPort built, started, and saw the request completed.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -65,6 +69,7 @@ repl_command! {
     summary: "Show the entries of a StorPort adapter's log that name an SRB.",
     details: "Shows the entries of the adapter's internal log, as !storagekd.storloglist shows them, whose request carries the SRB you give, or that log it as a parameter.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -74,6 +79,7 @@ repl_command! {
     summary: "Decode an SRB: its function, status, command, address, data, and sense.",
     details: "Decodes a STORAGE_REQUEST_BLOCK (an extended SRB, which StorPort, classpnp, and miniports use on Windows 8 and later) or a legacy SCSI_REQUEST_BLOCK with storport's public PDB: the SRB function, the SRB status with QUEUE_FROZEN and AUTOSENSE_VALID, the SCSI status, the command its CDB holds with its LBA and block count, the port, path, target, and LUN, the data buffer and length, the IRP (OriginalRequest), the flags by SRB_FLAGS_ name, the timeout, tag, and priority, the sense data when AUTOSENSE_VALID says it is valid, the class, port, and miniport contexts, and an extended SRB's extended data blocks. An address whose Function and Signature, or Length, are not an SRB's is refused.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -83,6 +89,7 @@ repl_command! {
     summary: "List the storage class devices (disks, CD-ROMs), or show one with its requests and errors.",
     details: "Without an argument, walks classpnp!AllFdosList and shows each class device that classpnp drives for disk.sys, cdrom.sys, and the other class drivers: its FDO, class driver, device number, bus, vendor and product, and how many of its transfer packets are in flight. With the address of an FDO, its device extension, or its private data, shows the device: its identity and serial number, bus, lower device and PDO, capacity and sector size, timeout and retry limit, ErrorCount, each request in flight (a transfer packet that is not on classpnp's free lists) with its IRP, the client's IRP, the SRB, the command, and the retries, and the last 16 errors classpnp logged, each with its age, address, command, SRB and SCSI status, and sense key and code. The command needs the PDB for classpnp.sys.",
     completion: Expression,
+    target: Kernel,
 }
 
 impl ReplState<'_> {

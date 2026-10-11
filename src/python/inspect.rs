@@ -9,6 +9,7 @@ use super::handle::Owner;
 use super::module::Device;
 use super::process::Process;
 use super::thread::{Frame, Thread, process_for_thread, trap_frame_view};
+use super::userdump::{UserProcess, UserThread};
 use super::{err, raise};
 use crate::bugchecks::{bugcheck_from_dump_info, current_bugcheck};
 use crate::error::Error;
@@ -30,10 +31,27 @@ use crate::view::shape::{Typed, ViewValue};
 use crate::view::{self};
 
 /// System-wide reports and helpers that decode an object at an address
-/// (`dbg.inspect`). The results are typed `Record`s.
+/// (`dbg.inspect`). The results are typed `Record`s. On a user-mode
+/// minidump, which has no kernel, only `peb`, `teb`, `version`, `time`,
+/// `triage`, `bugcheck`, `exception_record`, and `context_record` apply; the
+/// others raise `NtoseyeError`.
 #[pyclass(module = "ntoseye")]
 pub struct Inspect {
     pub owner: Owner,
+}
+
+/// A process `peb()` decodes: a kernel target's, or a user dump's one.
+#[derive(FromPyObject)]
+pub enum ProcessArg<'py> {
+    Kernel(PyRef<'py, Process>),
+    User(PyRef<'py, UserProcess>),
+}
+
+/// A thread `teb()` decodes: a kernel target's, or a user dump's.
+#[derive(FromPyObject)]
+pub enum ThreadArg<'py> {
+    Kernel(PyRef<'py, Thread>),
+    User(PyRef<'py, UserThread>),
 }
 
 impl Inspect {
@@ -41,8 +59,24 @@ impl Inspect {
         Inspect { owner }
     }
 
-    /// Run `build` in the session and return its result as the SDK does.
+    /// Run `build` in the session and return its result as the SDK does. It
+    /// reads the kernel, so a user-mode minidump refuses it.
     fn typed<'py, T: ViewValue>(
+        &self,
+        py: Python<'py>,
+        build: impl FnOnce(&mut Session) -> PyResult<T::Source> + Send,
+    ) -> PyResult<Typed<'py, T>>
+    where
+        T::Source: Send,
+    {
+        self.typed_any(py, |session| {
+            session.target.require_kernel().map_err(err)?;
+            build(session)
+        })
+    }
+
+    /// [`Self::typed`] for a report that applies to every target.
+    fn typed_any<'py, T: ViewValue>(
         &self,
         py: Python<'py>,
         build: impl FnOnce(&mut Session) -> PyResult<T::Source> + Send,
@@ -583,18 +617,30 @@ impl Inspect {
     }
 
     /// Decode the PEB of a process, with its parameters and loader-list heads
-    /// (`!peb`).
+    /// (`!peb`): a kernel target's `Process`, or a user-mode minidump's
+    /// `UserProcess`.
     #[pyo3(signature = (process, address=None))]
     fn peb<'py>(
         &self,
         py: Python<'py>,
-        process: PyRef<'_, Process>,
+        process: ProcessArg<'_>,
         address: Option<u64>,
     ) -> PyResult<Typed<'py, view::usermode::Peb>> {
-        process
-            .owner
-            .require_argument_of(py, &self.owner, "process")?;
-        let context = Context::process(process.info.clone());
+        let context = match &process {
+            ProcessArg::Kernel(process) => {
+                process
+                    .owner
+                    .require_argument_of(py, &self.owner, "process")?;
+                Context::process(process.info.clone())
+            }
+            // The dump's one address space is the default scope.
+            ProcessArg::User(process) => {
+                process
+                    .owner
+                    .require_argument_of(py, &self.owner, "process")?;
+                Context::default()
+            }
+        };
         let detail = self.owner.with_in(py, &context, |session| {
             session
                 .target
@@ -605,14 +651,32 @@ impl Inspect {
         Typed::new(py, detail)
     }
 
-    /// Decode the TEB of a thread and its WOW64 companion (`!teb`).
+    /// Decode the TEB of a thread and its WOW64 companion (`!teb`): a kernel
+    /// target's `Thread`, or a user-mode minidump's `UserThread`.
     #[pyo3(signature = (thread, address=None))]
     fn teb<'py>(
         &self,
         py: Python<'py>,
-        thread: PyRef<'_, Thread>,
+        thread: ThreadArg<'_>,
         address: Option<u64>,
     ) -> PyResult<Typed<'py, view::usermode::Teb>> {
+        let thread = match thread {
+            ThreadArg::Kernel(thread) => thread,
+            ThreadArg::User(thread) => {
+                thread
+                    .owner()
+                    .require_argument_of(py, &self.owner, "thread")?;
+                let context = Context::vcpu(thread.backend_id().to_string());
+                let detail = self.owner.with_in(py, &context, |session| {
+                    session
+                        .target
+                        .inspect_teb(address.map(VirtAddr))
+                        .map(|detail| view::usermode::teb(&detail))
+                        .map_err(err)
+                })?;
+                return Typed::new(py, detail);
+            }
+        };
         thread
             .owner
             .require_argument_of(py, &self.owner, "thread")?;
@@ -712,7 +776,7 @@ impl Inspect {
         py: Python<'py>,
         address: u64,
     ) -> PyResult<Typed<'py, view::bugcheck::ExceptionRecord>> {
-        self.typed(py, |session| {
+        self.typed_any(py, |session| {
             let record = session
                 .read_exception_record(VirtAddr(address))
                 .map_err(err)?;
@@ -1348,7 +1412,7 @@ impl Inspect {
     /// Get the target, kernel, symbol, processor, and debugger version
     /// information (`vertarget`).
     fn version<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::meta::TargetVersion>> {
-        self.typed(py, |session| {
+        self.typed_any(py, |session| {
             let detail = session.target_version().map_err(err)?;
             Ok(view::meta::target_version(&detail))
         })
@@ -1356,7 +1420,7 @@ impl Inspect {
 
     /// Get the target system time and uptime (`.time`).
     fn time<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::meta::TargetTime>> {
-        self.typed(py, |session| {
+        self.typed_any(py, |session| {
             let detail = session.target.target_time().map_err(err)?;
             Ok(view::meta::target_time(&detail))
         })
@@ -1378,7 +1442,7 @@ impl Inspect {
 
     /// Make the structured one-shot crash and debug report (`!analyze`).
     fn triage<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::triage::TriageReport>> {
-        self.typed(py, |session| {
+        self.typed_any(py, |session| {
             let report = TriageReport::build(session);
             Ok(view::triage::triage_report(&report, usize::MAX))
         })
@@ -1865,6 +1929,7 @@ impl Inspect {
             return Err(raise(format!("{tag:?} is not a GUID")));
         };
         let data = self.owner.with_in(py, &Context::default(), |session| {
+            session.target.require_kernel().map_err(err)?;
             let dump = session
                 .target
                 .phys

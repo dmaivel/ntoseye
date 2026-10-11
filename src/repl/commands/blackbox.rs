@@ -26,6 +26,7 @@ repl_command! {
     summary: "List the tagged data blocks that bugcheck callbacks added to the crash dump.",
     details: "Each block shows its GUID tag, its size, who writes it, and its first bytes; with a tag, every byte of that block. A tag that Windows writes names its global and what it holds, such as nt!PopBlackBoxPnpGuid, the PnP blackbox that !blackboxpnp decodes. For another tag, such as a driver's KBUGCHECK_REASON_CALLBACK data, ntoseye looks for its bytes in the kernel modules' images and names the global that holds it, when the dump has the image and its symbols are loaded. The SDK reads a block with Debugger.read_tagged.",
     completion: None,
+    target: Kernel,
 }
 
 repl_command! {
@@ -35,6 +36,7 @@ repl_command! {
     summary: "Show the boot status data (bootstat.dat) the crash dump recorded.",
     details: "Whether the last boot succeeded and shut down, the boot IDs of the last successful and abnormal shutdowns, the power transition and power button state, and the feature configuration state, as WinDbg's !blackboxbsd shows them.",
     completion: None,
+    target: Kernel,
 }
 
 repl_command! {
@@ -44,6 +46,7 @@ repl_command! {
     summary: "Show the NTFS slow I/O and oplock break timeouts the crash dump recorded.",
     details: "Each record shows its type and length; a slow I/O timeout its IRP, SCB, and waiting thread, and an oplock break timeout its reason (the NTFS routine), IRP, SCB, and the owning and breaking processes, as WinDbg's !blackboxntfs shows them.",
     completion: None,
+    target: Kernel,
 }
 
 repl_command! {
@@ -53,6 +56,7 @@ repl_command! {
     summary: "Show the PnP event the crash dump recorded.",
     details: "The PnP activity, its time, the event, whether it was in progress, the device's problem code, the veto, and the device instance ID, as WinDbg's !blackboxpnp shows them.",
     completion: None,
+    target: Kernel,
 }
 
 repl_command! {
@@ -61,6 +65,7 @@ repl_command! {
     usage: "!blackboxwinlogon",
     summary: "Show what winlogon was doing when the crash dump was written.",
     completion: None,
+    target: Kernel,
 }
 
 repl_command! {
@@ -70,6 +75,7 @@ repl_command! {
     summary: "List the PCI functions pci.sys recorded in the crash dump, with their command and status.",
     details: "Each function shows its bus, device, and function, its vendor and device IDs and revision, and its command and status registers with their flags as WinDbg's !blackboxpci shows them: i (I/O), m (memory), b (bus master), v (VGA palette snoop), p (parity), s (SERR) for the command, and c (capability list), 6 (66 MHz), P (master data parity error), A (signaled target abort), S (signaled system error) for the status. WinDbg prints the command register's value as the status value; ntoseye prints the status register's.",
     completion: None,
+    target: Kernel,
 }
 
 /// How many 16-byte lines `.enumtag` shows of each block without a tag.

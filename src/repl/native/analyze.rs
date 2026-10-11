@@ -9,17 +9,21 @@ use tern_sdk::{Node, View};
 use super::{MUTED, NUMBER, STRONG, SYMBOL, addr, bugcheck, span, stack, symbol};
 use crate::repl::StackColumns;
 use crate::repl::commands::analyze::{
-    ANALYZE_HANG_STACK_LIMIT, ANALYZE_MODULE_LIMIT, ANALYZE_UNLOADED_LIMIT,
+    ANALYZE_HANG_STACK_LIMIT, ANALYZE_MODULE_LIMIT, ANALYZE_STACK_LIMIT, ANALYZE_UNLOADED_LIMIT,
     ANALYZE_VERBOSE_MODULE_LIMIT, ANALYZE_VERBOSE_UNLOADED_LIMIT, HangReport, HangThread,
-    kmdf_log_summary, machine_name, product_name, signature_source,
+    USER_DUMP_NOT_APPLICABLE, code_owner_text, codeview_path, culprit_caller_text, culprit_label,
+    kmdf_log_summary, machine_name, product_name, signature_source, user_captured_text,
+    user_detail_modules, user_exception_verdict, user_no_culprit_text, user_process_label,
+    user_stack_heading, user_system_text,
 };
 use crate::repl::commands::power::{duration_text, request_text};
 use crate::target::power::power_minor_name;
 use crate::target::{ThreadInfo, wait_reason_name};
 use crate::triage_report::{
-    BlackboxState, POWER_THREAD_STACK_LIMIT, PowerFailureFinding, PowerThreadRole,
-    TRIAGE_BACKTRACE_LIMIT, TriageReport, WheaRecordState, exception_code_name,
-    time::filetime_to_iso,
+    BlackboxState, CulpritSubject, POWER_THREAD_STACK_LIMIT, PowerFailureFinding, PowerThreadRole,
+    TRIAGE_BACKTRACE_LIMIT, TriageReport, UserDumpTriage, UserExceptionFinding, WheaRecordState,
+    exception_code_name,
+    time::{filetime_to_iso, unix_time_to_iso},
 };
 
 fn section(title: &str, collapsed: bool) -> Section<()> {
@@ -35,6 +39,9 @@ fn note(text: impl Into<String>) -> Node {
 
 /// The triage report, `!analyze [-v]`.
 pub fn triage(report: &TriageReport, verbose: bool) -> View {
+    if let Some(user) = &report.user {
+        return user_triage(report, user, verbose);
+    }
     let tone = if report.bugcheck.is_some() {
         Tone::Error
     } else if report.exception.is_some() {
@@ -61,30 +68,8 @@ pub fn triage(report: &TriageReport, verbose: bool) -> View {
         card = card.child(bugcheck_section);
     }
 
-    if let Some(culprit) = &report.culprit
-        && !culprit.evidence.is_empty()
-    {
-        let mut table = ui::table()
-            .col(Column::new("kind", "Evidence").priority(3.0))
-            .col(Column::new("address", "Address").priority(2.0))
-            .col(
-                Column::new("detail", "Detail")
-                    .grow(1.0)
-                    .truncate(Truncate::End)
-                    .priority(4.0),
-            );
-        for (index, evidence) in culprit.evidence.iter().enumerate() {
-            table = table.row(
-                TableRow::new(index.to_string())
-                    .cell("kind", span(format!("{:?}", evidence.kind), MUTED))
-                    .cell(
-                        "address",
-                        evidence.address.map_or_else(|| span("", ""), addr),
-                    )
-                    .cell("detail", span(&evidence.detail, "")),
-            );
-        }
-        card = card.child(section("culprit evidence", false).child(table));
+    if let Some(evidence) = culprit_evidence(report) {
+        card = card.child(evidence);
     }
 
     if verbose {
@@ -303,15 +288,277 @@ fn summary(report: &TriageReport) -> Option<Node> {
         any = true;
     }
     if let Some(culprit) = &report.culprit {
-        let mut value = symbol(&culprit.module);
+        let mut value = match &culprit.subject {
+            CulpritSubject::Module(module) => symbol(module),
+            CulpritSubject::DynamicCode(_) => vec![span(culprit_label(culprit), STRONG)],
+        };
         value.push(span(
             format!("  {:?} confidence", culprit.confidence).to_ascii_lowercase(),
             MUTED,
         ));
         kv = kv.item("culprit", value);
+        if let Some(caller) = culprit_caller_text(culprit) {
+            kv = kv.item("caller", span(caller, MUTED));
+        }
         any = true;
     }
     any.then(|| kv.into())
+}
+
+/// The culprit's evidence, as a table. `None` without a culprit.
+fn culprit_evidence(report: &TriageReport) -> Option<Section<()>> {
+    let culprit = report.culprit.as_ref()?;
+    if culprit.evidence.is_empty() {
+        return None;
+    }
+    let mut table = ui::table()
+        .col(Column::new("kind", "Evidence").priority(3.0))
+        .col(Column::new("address", "Address").priority(2.0))
+        .col(
+            Column::new("detail", "Detail")
+                .grow(1.0)
+                .truncate(Truncate::End)
+                .priority(4.0),
+        );
+    for (index, evidence) in culprit.evidence.iter().enumerate() {
+        table = table.row(
+            TableRow::new(index.to_string())
+                .cell("kind", span(format!("{:?}", evidence.kind), MUTED))
+                .cell(
+                    "address",
+                    evidence.address.map_or_else(|| span("", ""), addr),
+                )
+                .cell("detail", span(&evidence.detail, "")),
+        );
+    }
+    Some(section("culprit evidence", false).child(table))
+}
+
+/// `!analyze [-v]` on a user-mode minidump: the exception, decoded, the
+/// frames from it to the code it is blamed on, the process, and the
+/// signature and culprit; `-v` adds the whole stack, the exception's
+/// registers, and the faulting and culprit modules' details.
+fn user_triage(report: &TriageReport, user: &UserDumpTriage, verbose: bool) -> View {
+    let (tone, verdict) = match &user.exception {
+        Some(exception) => (
+            Tone::Warning,
+            span(user_exception_verdict(exception), STRONG),
+        ),
+        None => (
+            Tone::Neutral,
+            span(
+                "no exception: the dump records none (it was not written for a crash)",
+                MUTED,
+            ),
+        ),
+    };
+    let mut card = ui::card()
+        .head([span("crash analysis  ", MUTED), verdict])
+        .tone(tone)
+        .role("ntoseye.analyze");
+
+    if let Some(summary) = summary(report) {
+        card = card.child(section("summary", false).child(summary));
+    }
+    if let Some(exception) = &user.exception {
+        card = match culprit_evidence(report) {
+            Some(evidence) => card.child(evidence),
+            None => {
+                card.child(section("culprit", false).child(note(user_no_culprit_text(exception))))
+            }
+        };
+        card = card.child(user_exception_section(exception));
+        if !verbose && let Some(frames) = user_faulting_frames(report, exception) {
+            card = card.child(frames);
+        }
+    }
+
+    let process = &user.process;
+    let mut kv = ui::kv()
+        .item("process", span(user_process_label(process), STRONG))
+        .item("system", span(user_system_text(process), ""));
+    if let Some(time) = unix_time_to_iso(u64::from(process.dump_time)) {
+        kv = kv.item("written", span(time, ""));
+    }
+    if let Some(time) = process
+        .create_time
+        .and_then(|time| unix_time_to_iso(u64::from(time)))
+    {
+        kv = kv.item("created", span(time, ""));
+    }
+    if let Some((user_time, kernel_time)) = process.cpu_times {
+        kv = kv.item(
+            "cpu time",
+            span(
+                format!("{user_time} s user, {kernel_time} s kernel"),
+                NUMBER,
+            ),
+        );
+    }
+    kv = kv.item("captured", span(user_captured_text(process), ""));
+    card = card.child(section("process", false).child(kv));
+
+    if user.exception.is_none() || verbose {
+        let title = user.stack_thread.as_ref().map_or_else(
+            || "stack".to_string(),
+            |thread| format!("stack, {}", user_stack_heading(thread)),
+        );
+        let stack_section = section(&title, false);
+        card = card.child(match &report.backtrace {
+            Some(trace) => stack_section.child(stack::table(
+                trace,
+                if verbose {
+                    TRIAGE_BACKTRACE_LIMIT
+                } else {
+                    ANALYZE_STACK_LIMIT
+                },
+                false,
+                StackColumns::default(),
+            )),
+            None => stack_section.child(note("unavailable")),
+        });
+    }
+    if verbose && !user.exception_registers.is_empty() {
+        let mut kv = ui::kv();
+        for (name, value) in &user.exception_registers {
+            kv = kv.item(name.as_str(), addr(*value));
+        }
+        card = card.child(section("exception registers", true).child(kv));
+    }
+
+    if !report.warnings.is_empty() {
+        let mut warnings = section("warnings", false);
+        for warning in &report.warnings {
+            warnings = warnings.child(ui::text([span(warning, "warning")]).wrap(Wrap::Word));
+        }
+        card = card.child(warnings);
+    }
+
+    if verbose {
+        for module in user_detail_modules(report, user) {
+            let mut kv = ui::kv().item(
+                "range",
+                [
+                    addr(module.base_address.0),
+                    span("-", MUTED),
+                    addr(module.end_address().0),
+                ],
+            );
+            if let Some(path) = &module.path {
+                kv = kv.item("path", span(path, ""));
+            }
+            if let Some(version) = &module.file_version {
+                kv = kv.item("version", span(version, ""));
+            }
+            if let Some(stamp) = module.time_date_stamp {
+                kv = kv.item("time", span(format!("{stamp:#x}"), NUMBER));
+            }
+            if let Some(checksum) = module.checksum {
+                kv = kv.item("checksum", span(format!("{checksum:#x}"), NUMBER));
+            }
+            if let Some(codeview) = &module.codeview {
+                kv = kv.item("pdb", span(codeview_path(codeview), ""));
+            }
+            card = card.child(section(&format!("module {}", module.name), true).child(kv));
+        }
+    }
+    card = card.child(loaded_modules(report, verbose));
+    if let Some(unloaded) = unloaded_modules(report, verbose) {
+        card = card.child(unloaded);
+    }
+    if verbose {
+        card = card.child(note(USER_DUMP_NOT_APPLICABLE));
+    }
+    View::new().main([card])
+}
+
+/// A user dump's exception record, decoded.
+fn user_exception_section(exception: &UserExceptionFinding) -> Section<()> {
+    let mut flags = vec![span(format!("{:#x}", exception.flags), NUMBER)];
+    if !exception.flag_names.is_empty() {
+        flags.push(span(
+            format!("  {}", exception.flag_names.join(" | ")),
+            MUTED,
+        ));
+    }
+    let mut address = vec![addr(exception.address), span("  ", "")];
+    address.extend(symbol(&exception.symbol));
+    let mut thread = vec![span(&exception.thread, "info")];
+    if let Some(name) = &exception.thread_name {
+        thread.push(span(format!(" ({name})"), MUTED));
+    }
+    let mut kv = ui::kv()
+        .item(
+            "code",
+            [
+                span(format!("{:#010x}", exception.code), NUMBER),
+                span("  ", ""),
+                span(exception.name, STRONG),
+            ],
+        )
+        .item("flags", flags)
+        .item("address", address)
+        .item(
+            "module",
+            span(code_owner_text(&exception.address_owner), ""),
+        )
+        .item("thread", thread);
+    if let Some(summary) = &exception.summary {
+        kv = kv.item("meaning", span(summary, ""));
+    }
+    if exception.parameters.is_empty() {
+        kv = kv.item("params", span("none", MUTED));
+    }
+    for (index, parameter) in exception.parameters.iter().enumerate() {
+        let mut value = vec![addr(parameter.value)];
+        if let Some(label) = parameter.label {
+            value.push(span(format!("  {label}"), MUTED));
+        }
+        if let Some(meaning) = &parameter.meaning {
+            value.push(span(format!(": {meaning}"), ""));
+        }
+        kv = kv.item(format!("param {}", index + 1), value);
+    }
+    if exception.record != 0 {
+        kv = kv.item(
+            "chained",
+            [addr(exception.record), span("  (.exr reads it)", MUTED)],
+        );
+    }
+    section("exception", false).child(kv)
+}
+
+/// The frames from the exception to the code it is blamed on, and what
+/// holds that code. `None` without a stack.
+fn user_faulting_frames(
+    report: &TriageReport,
+    exception: &UserExceptionFinding,
+) -> Option<Section<()>> {
+    let trace = report.backtrace.as_ref()?;
+    let start = exception.faulting_frame.unwrap_or(0);
+    let end = exception
+        .blamed_frame
+        .as_ref()
+        .map_or(start, |frame| frame.index);
+    let mut kv = ui::kv();
+    for (index, frame) in trace.frames.iter().enumerate().take(end + 1).skip(start) {
+        let mut value = vec![addr(frame.ip), span("  ", "")];
+        value.extend(symbol(&frame.symbol));
+        kv = kv.item(format!("#{index}"), value);
+    }
+    let blamed = match &exception.blamed_frame {
+        Some(frame) => format!(
+            "#{} is the first frame outside the system modules: {}",
+            frame.index,
+            code_owner_text(&frame.owner)
+        ),
+        None => "every frame of the stack is in a system module".into(),
+    };
+    Some(
+        section("faulting frames", false)
+            .child(kv)
+            .child(note(blamed)),
+    )
 }
 
 /// Where the fault happened and in what context (`-v`): the fault's trap

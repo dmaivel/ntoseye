@@ -6,9 +6,9 @@ use super::context::Space;
 use super::handle::{Debugger, Owner};
 use super::module::Module;
 use super::process::Process;
-use super::raise;
 use super::record::PlainDict;
 use super::thread::{Cpu, Thread};
+use super::{err, raise};
 use crate::breakpoints::Breakpoint as CoreBreakpoint;
 use crate::bugchecks::{analyze_bugcheck, bugcheck_from_dump_info, current_bugcheck};
 use crate::guest::ProcessInfo;
@@ -166,10 +166,15 @@ impl Stop {
             .map(|info| Process::from_owner(context.owner.clone_ref(py), info)))
     }
 
-    /// The processor that stopped.
+    /// The processor that stopped. A user-mode minidump has no processors,
+    /// so this raises `NtoseyeError` there; `Debugger.user_dump.threads`
+    /// holds its threads.
     #[getter]
     fn cpu(&self, py: Python<'_>) -> PyResult<Cpu> {
         let context = self.check_context(py)?;
+        context
+            .owner
+            .with(py, |session| session.target.require_kernel().map_err(err))?;
         Ok(Cpu::from_owner(
             context.owner.clone_ref(py),
             context.cpu_id.clone(),

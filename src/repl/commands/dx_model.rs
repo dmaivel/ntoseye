@@ -382,8 +382,13 @@ pub fn root(target: &Target, name: &str) -> Result<ModelValue> {
     Ok(match name {
         "Debugger" => ModelValue::Debugger,
         "@$cursession" => ModelValue::Session,
-        "@$curprocess" => ModelValue::Process(current_process(target)?),
+        // Both model a kernel object (EPROCESS, ETHREAD).
+        "@$curprocess" => {
+            target.require_kernel()?;
+            ModelValue::Process(current_process(target)?)
+        }
         "@$curthread" => {
+            target.require_kernel()?;
             let ethread = target.builtin_variable_value("thread").ok_or_else(|| {
                 Error::InvalidExpression("no thread is current in this context".into())
             })?;

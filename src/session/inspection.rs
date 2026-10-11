@@ -509,7 +509,7 @@ impl Session {
             return Ok((recovered.stacktrace, seed, false));
         }
         let registers = self.read_registers()?;
-        let seed = self.register_map.to_hashmap(&registers);
+        let seed = self.target.register_values(&self.register_map, &registers);
         let trace = build_thread_stacktrace(
             &self.target,
             &self.register_map,

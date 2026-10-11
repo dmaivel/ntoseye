@@ -8,8 +8,10 @@ use super::handle::{Owner, require_halted};
 use super::symbols::load_scope_symbols;
 use super::{MAX_READ_LEN, err, raise};
 use crate::backend::MemoryOps;
+use crate::error::Error;
 use crate::layout::utf16le_lossy;
 use crate::memory::pattern_offsets;
+use crate::session::Session;
 use crate::target::MAX_SEARCH_BYTES;
 use crate::target::{CODE_BITNESS_X86, StringDescriptor};
 use crate::types::VirtAddr;
@@ -104,6 +106,16 @@ fn check_read_len(n: usize) -> PyResult<()> {
         return Err(raise(format!(
             "read length {n} exceeds cap {MAX_READ_LEN} (0x{MAX_READ_LEN:x})"
         )));
+    }
+    Ok(())
+}
+
+/// Refuse a page-table operation on a user-mode minidump, whose memory is
+/// keyed by virtual address with no physical address behind it: its
+/// translation would name the virtual address itself.
+fn require_page_tables(session: &Session) -> PyResult<()> {
+    if session.target.user_dump().is_some() {
+        return Err(err(Error::NoPhysicalMemory));
     }
     Ok(())
 }
@@ -315,6 +327,7 @@ impl Memory {
         self.space.require_virtual()?;
         let context = self.space.context();
         self.owner.with_in(py, &context, |session| {
+            require_page_tables(session)?;
             session
                 .target
                 .virt_to_phys(None, VirtAddr(addr))
@@ -330,6 +343,7 @@ impl Memory {
     ) -> PyResult<Typed<'py, view::mm::AddressTranslation>> {
         self.space.require_virtual()?;
         let detail = self.owner.with_in(py, &self.space.context(), |session| {
+            require_page_tables(session)?;
             let dtb = self.space.dtb(&session.target)?;
             session.target.vtop(dtb, VirtAddr(addr)).map_err(err)
         })?;
@@ -347,15 +361,18 @@ impl Memory {
         self.space.require_nt("ptov")?;
         let context = self.space.context();
         let detail = self.owner.with_in(py, &context, |session| {
+            require_page_tables(session)?;
             session.target.ptov(physical).map_err(err)
         })?;
         Typed::new(py, view::mm::ptov(&detail))
     }
 
-    /// The directory-table base that this space uses.
+    /// The directory-table base that this space uses. A user-mode minidump
+    /// has none, and raises `NtoseyeError`.
     #[getter]
     fn dtb(&self, py: Python<'_>) -> PyResult<u64> {
         self.owner.with_in(py, &self.space.context(), |session| {
+            require_page_tables(session)?;
             self.space.dtb(&session.target)
         })
     }
@@ -373,6 +390,7 @@ impl Memory {
             Space::Physical | Space::Secure(_) | Space::Root(_) => unreachable!(),
         };
         self.owner.with_in(py, &context, |session| {
+            session.target.require_kernel().map_err(err)?;
             require_halted(session, "page_in")?;
             let report = session.page_in(VirtAddr(addr), process).map_err(err)?;
             if !report.from_worker {
@@ -385,7 +403,8 @@ impl Memory {
     }
 
     /// Describe the loaded module, kernel region, or process VAD that contains
-    /// `addr`.
+    /// `addr`. A user-mode minidump has no VADs and raises `NtoseyeError`;
+    /// `Debugger.user_dump.region(addr)` describes its region.
     fn describe<'py>(
         &self,
         py: Python<'py>,
@@ -395,6 +414,12 @@ impl Memory {
         self.space.require_nt("describe")?;
         let context = self.space.context();
         let detail = self.owner.with_in(py, &context, |session| {
+            if session.target.user_dump().is_some() {
+                return Err(raise(
+                    "a user-mode minidump has no VADs or kernel regions; \
+                     Debugger.user_dump.region(address) describes its memory",
+                ));
+            }
             session.target.describe_address(VirtAddr(addr)).map_err(err)
         })?;
         Typed::new(py, view::mm::address_description(&detail))

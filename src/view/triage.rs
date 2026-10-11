@@ -10,9 +10,12 @@ use super::shape::{Diag, Hex, shapes};
 use crate::dmp::{self, DmpException, DmpSystemInfo, TriageCrashInfo};
 use crate::triage::TriagePrcbInfo;
 use crate::triage_report::{
-    BlackboxFinding, BlackboxKind, BlackboxState, CulpritAttribution, CulpritConfidence,
-    CulpritEvidenceKind, FailureCodeKind, FailureSignatureSource, PowerFailureFinding as PowerDetail,
-    PowerThreadRole, WheaRecordState, WheaSectionKind, exception_code_name, time::filetime_to_iso,
+    BlackboxFinding, BlackboxKind, BlackboxState, CodeOwner as CodeOwnerDetail,
+    CulpritAttribution, CulpritConfidence, CulpritEvidenceKind, CulpritSubject, FailureCodeKind,
+    FailureSignatureSource, PowerFailureFinding as PowerDetail, PowerThreadRole,
+    UserDumpTriage as UserDumpDetail, UserExceptionFinding, UserExceptionKind, UserFrame,
+    UserStackSource, WheaRecordState, WheaSectionKind, exception_code_name,
+    time::{filetime_to_iso, unix_time_to_iso},
 };
 use crate::triage_report::{
     FailureSignature as SignatureDetail, TriageReport as ReportDetail,
@@ -97,7 +100,9 @@ shapes! {
         code: Hex<u32>,
         /// The source of the failing location: `bugcheck_fault`,
         /// `exception_address`, `current_instruction`, `top_frame`,
-        /// `power_failure_driver` (the driver a 0x9F names), or `code_only`.
+        /// `power_failure_driver` (the driver a 0x9F names),
+        /// `first_non_system_frame` (on a user-mode minidump, the first frame
+        /// outside the system modules), or `code_only`.
         source: &'static str,
         /// The module at the failing location.
         module: Option<String>,
@@ -109,22 +114,42 @@ shapes! {
         bucket: String,
     }
 
-    /// The module that the available evidence identifies as the cause of the
-    /// crash.
+    /// What the available evidence identifies as the cause of the crash: a
+    /// module, or on a user-mode minidump, generated code no module holds.
     Culprit {
-        module: String,
+        /// `module`, or `dynamic_code` (JIT-compiled or generated code that
+        /// a dynamic function table covers; see `dynamic_code`).
+        kind: &'static str,
+        /// The module. `None` for `dynamic_code`.
+        module: Option<String>,
+        /// The generated code, for `dynamic_code`.
+        dynamic_code: Option<CulpritDynamicCode>,
         /// `low`, `medium`, or `high`.
         confidence: &'static str,
-        /// The evidence that points to the module.
+        /// The evidence that points to the culprit.
         evidence: Vec<CulpritEvidence>,
+    }
+
+    /// Generated code a culprit attribution names: no module holds it, and
+    /// a dynamic function table the process registered covers it.
+    CulpritDynamicCode {
+        /// The blamed frame's address.
+        address: Hex,
+        /// The start of the dynamic function table's range.
+        table_start: Hex,
+        /// The end (exclusive) of the table's range.
+        table_end: Hex,
+        /// The first frame further out that a module holds: the module
+        /// code that called into the generated code.
+        caller: Option<UserTriageFrame>,
     }
 
     /// One item of evidence for a culprit attribution.
     CulpritEvidence {
         /// `recorded_broken_driver`, `recorded_bugcheck_driver`,
         /// `bugcheck_fault_address`, `exception_address`,
-        /// `current_instruction`, `top_frame`, `power_failure_driver`, or
-        /// `pnp_lock_owner_stack`.
+        /// `current_instruction`, `top_frame`, `power_failure_driver`,
+        /// `pnp_lock_owner_stack`, or `first_non_system_frame`.
         kind: &'static str,
         detail: String,
         /// The address that the evidence uses, if the evidence is an address.
@@ -314,8 +339,10 @@ shapes! {
         /// target is not a dump.
         triage_overflowed: Option<bool>,
         failure_signature: Option<FailureSignature>,
-        /// The module that the evidence identifies as the cause. `None` if
-        /// the evidence does not identify a non-kernel module.
+        /// What the evidence identifies as the cause: a module, or on a
+        /// user-mode minidump, JIT-compiled code. `None` if the evidence
+        /// identifies neither a non-kernel (or, on a user dump, non-system)
+        /// module nor generated code.
         culprit: Option<Culprit>,
         /// The Driver Verifier violation of a verifier bugcheck.
         verifier: Option<VerifierFinding>,
@@ -324,9 +351,147 @@ shapes! {
         blackboxes: Vec<BlackboxStream>,
         /// What a DRIVER_POWER_STATE_FAILURE names as stuck.
         power: Option<PowerFailure>,
+        /// What a user-mode minidump adds: the process, the exception
+        /// decoded, and the frame the failure is blamed on. `None` for a
+        /// kernel target, whose bugcheck and kernel findings do not apply to
+        /// a user dump.
+        user: Option<UserTriage>,
         /// Failures in best-effort data collection that did not stop the
         /// report.
         warnings: Vec<String>,
+    }
+
+    /// The triage of a user-mode minidump.
+    UserTriage {
+        process: UserTriageProcess,
+        /// The exception the dump was written for. `None` if it records
+        /// none.
+        exception: Option<UserTriageException>,
+        /// The thread whose stack `backtrace` is. `None` if no thread is
+        /// selected.
+        stack_thread: Option<UserTriageStackThread>,
+        /// The general-purpose registers of the exception's context, in
+        /// display order. Empty without an exception or when its context is
+        /// unusable.
+        exception_registers: Vec<UserTriageRegister>,
+    }
+
+    /// The captured process, as the dump's streams record it.
+    UserTriageProcess {
+        /// The executable's file name.
+        name: Option<String>,
+        pid: Option<u32>,
+        /// `AMD64` or `ARM64`.
+        arch: &'static str,
+        major_version: u32,
+        minor_version: u32,
+        build_number: u32,
+        /// The full build string (`MINIDUMP_MISC_INFO_4.BuildString`).
+        build_string: Option<String>,
+        /// When the dump was written (ISO 8601 UTC).
+        dump_time: Option<String>,
+        /// When the process was created (ISO 8601 UTC).
+        create_time: Option<String>,
+        /// User-mode time the process had run, in seconds.
+        user_time_secs: Option<u32>,
+        /// Kernel-mode time the process had run, in seconds.
+        kernel_time_secs: Option<u32>,
+        threads: usize,
+        modules: usize,
+        unloaded_modules: usize,
+        /// `None` if the dump has no handle stream.
+        handles: Option<usize>,
+    }
+
+    /// The thread a user dump report's stack belongs to.
+    UserTriageStackThread {
+        tid: u32,
+        /// The id as `~` lists it (`<pid>.<tid>` in hex).
+        id: String,
+        name: Option<String>,
+        /// `exception_context` (walked from the exception's CONTEXT) or
+        /// `thread_context` (the selected thread's).
+        source: &'static str,
+    }
+
+    /// A register of the exception's context.
+    UserTriageRegister {
+        name: String,
+        value: Hex,
+    }
+
+    /// The exception a user-mode minidump was written for, decoded.
+    UserTriageException {
+        code: Hex<u32>,
+        /// `ntstatus`, `cpp_exception`, `clr_exception`, `well_known`,
+        /// `application_defined` (customer bit set, no name), or `unknown`.
+        kind: &'static str,
+        /// The code's name, or what kind of code it is when it has none.
+        name: &'static str,
+        flags: Hex<u32>,
+        /// The `EXCEPTION_*` flags set, with unknown bits in hex.
+        flag_names: Vec<String>,
+        /// The address of a chained exception record; 0 for none.
+        record: Hex,
+        address: Hex,
+        symbol: String,
+        /// What holds the exception address: the faulting module.
+        module: UserTriageCodeOwner,
+        parameters: Vec<UserTriageExceptionParameter>,
+        /// What the parameters say in one line, such as `write to 0x10`.
+        summary: Option<String>,
+        thread_id: u32,
+        /// The faulting thread's id as `~` lists it.
+        thread: String,
+        thread_name: Option<String>,
+        /// The index in `backtrace` of the frame at the exception address.
+        faulting_frame: Option<usize>,
+        /// The first frame from the faulting one outward outside the system
+        /// modules (ntdll, kernelbase, the C++ and .NET runtimes): the code
+        /// the failure is blamed on. `None` if every frame is in a system
+        /// module.
+        blamed_frame: Option<UserTriageFrame>,
+        /// When `blamed_frame` is in no module, the first frame further out
+        /// that a module holds: the module code that called into it.
+        module_caller: Option<UserTriageFrame>,
+    }
+
+    /// One `ExceptionInformation` entry of a user dump's exception.
+    UserTriageExceptionParameter {
+        value: Hex,
+        /// What the entry is for the code (`access`, `address`,
+        /// `ThrowInfo`, ...). `None` if the code defines no meaning.
+        label: Option<&'static str>,
+        /// The value decoded (`write`, a status name, a module).
+        meaning: Option<String>,
+    }
+
+    /// What holds a code address of a user dump.
+    UserTriageCodeOwner {
+        /// `module`, `dynamic_code` (no module; a dynamic function table
+        /// covers it, as for JIT-compiled code), or `unowned`.
+        kind: &'static str,
+        module: Option<String>,
+        /// Whether the module is part of Windows or a language runtime.
+        system: bool,
+        /// For `unowned`, the memory region as the dump's memory-info list
+        /// records it.
+        region: Option<String>,
+        /// For `dynamic_code`, the range of the dynamic function table that
+        /// covers the address.
+        table_start: Option<Hex>,
+        table_end: Option<Hex>,
+    }
+
+    /// A frame of a user dump report's stack.
+    UserTriageFrame {
+        /// The frame's index in `backtrace`.
+        index: usize,
+        ip: Hex,
+        symbol: String,
+        /// How the frame was recovered (`unwind`, `scan`, ...).
+        source: &'static str,
+        owner: UserTriageCodeOwner,
     }
 }
 
@@ -404,6 +569,7 @@ fn failure_signature(signature: &SignatureDetail) -> FailureSignature {
         FailureSignatureSource::CurrentInstruction => "current_instruction",
         FailureSignatureSource::TopFrame => "top_frame",
         FailureSignatureSource::PowerFailureDriver => "power_failure_driver",
+        FailureSignatureSource::FirstNonSystemFrame => "first_non_system_frame",
         FailureSignatureSource::CodeOnly => "code_only",
     };
     FailureSignature {
@@ -423,8 +589,23 @@ fn culprit(culprit: &CulpritAttribution) -> Culprit {
         CulpritConfidence::Medium => "medium",
         CulpritConfidence::High => "high",
     };
+    let (kind, module, dynamic_code) = match &culprit.subject {
+        CulpritSubject::Module(module) => ("module", Some(module.clone()), None),
+        CulpritSubject::DynamicCode(code) => (
+            "dynamic_code",
+            None,
+            Some(CulpritDynamicCode {
+                address: code.address,
+                table_start: code.table_start,
+                table_end: code.table_end,
+                caller: code.caller.as_ref().map(user_frame),
+            }),
+        ),
+    };
     Culprit {
-        module: culprit.module.clone(),
+        kind,
+        module,
+        dynamic_code,
         confidence,
         evidence: culprit
             .evidence
@@ -439,6 +620,7 @@ fn culprit(culprit: &CulpritAttribution) -> Culprit {
                     CulpritEvidenceKind::TopFrame => "top_frame",
                     CulpritEvidenceKind::PowerFailureDriver => "power_failure_driver",
                     CulpritEvidenceKind::PnpLockOwnerStack => "pnp_lock_owner_stack",
+                    CulpritEvidenceKind::FirstNonSystemFrame => "first_non_system_frame",
                 },
                 detail: evidence.detail.clone(),
                 address: evidence.address,
@@ -631,6 +813,132 @@ pub fn triage_report(report: &ReportDetail, module_limit: usize) -> TriageReport
         whea: report.whea.as_ref().map(whea),
         blackboxes: report.blackboxes.iter().map(blackbox).collect(),
         power: report.power.as_ref().map(power_failure),
+        user: report.user.as_ref().map(user_dump_triage),
         warnings: report.warnings.clone(),
+    }
+}
+
+fn code_owner(owner: &CodeOwnerDetail) -> UserTriageCodeOwner {
+    match owner {
+        CodeOwnerDetail::Module { name, system } => UserTriageCodeOwner {
+            kind: "module",
+            module: Some(name.clone()),
+            system: *system,
+            region: None,
+            table_start: None,
+            table_end: None,
+        },
+        CodeOwnerDetail::DynamicCode {
+            table_start,
+            table_end,
+        } => UserTriageCodeOwner {
+            kind: "dynamic_code",
+            module: None,
+            system: false,
+            region: None,
+            table_start: Some(*table_start),
+            table_end: Some(*table_end),
+        },
+        CodeOwnerDetail::Unowned { region } => UserTriageCodeOwner {
+            kind: "unowned",
+            module: None,
+            system: false,
+            region: region.clone(),
+            table_start: None,
+            table_end: None,
+        },
+    }
+}
+
+fn user_frame(frame: &UserFrame) -> UserTriageFrame {
+    UserTriageFrame {
+        index: frame.index,
+        ip: frame.ip,
+        symbol: frame.symbol.clone(),
+        source: frame.source.as_str(),
+        owner: code_owner(&frame.owner),
+    }
+}
+
+fn user_exception(exception: &UserExceptionFinding) -> UserTriageException {
+    UserTriageException {
+        code: exception.code,
+        kind: match exception.kind {
+            UserExceptionKind::Ntstatus => "ntstatus",
+            UserExceptionKind::CppException => "cpp_exception",
+            UserExceptionKind::ClrException => "clr_exception",
+            UserExceptionKind::WellKnown => "well_known",
+            UserExceptionKind::ApplicationDefined => "application_defined",
+            UserExceptionKind::Unknown => "unknown",
+        },
+        name: exception.name,
+        flags: exception.flags,
+        flag_names: exception.flag_names.clone(),
+        record: exception.record,
+        address: exception.address,
+        symbol: exception.symbol.clone(),
+        module: code_owner(&exception.address_owner),
+        parameters: exception
+            .parameters
+            .iter()
+            .map(|parameter| UserTriageExceptionParameter {
+                value: parameter.value,
+                label: parameter.label,
+                meaning: parameter.meaning.clone(),
+            })
+            .collect(),
+        summary: exception.summary.clone(),
+        thread_id: exception.thread_id,
+        thread: exception.thread.clone(),
+        thread_name: exception.thread_name.clone(),
+        faulting_frame: exception.faulting_frame,
+        blamed_frame: exception.blamed_frame.as_ref().map(user_frame),
+        module_caller: exception.module_caller.as_ref().map(user_frame),
+    }
+}
+
+fn user_dump_triage(user: &UserDumpDetail) -> UserTriage {
+    let process = &user.process;
+    UserTriage {
+        process: UserTriageProcess {
+            name: process.name.clone(),
+            pid: process.pid,
+            arch: process.arch.label(),
+            major_version: process.major_version,
+            minor_version: process.minor_version,
+            build_number: process.build_number,
+            build_string: process.build_string.clone(),
+            dump_time: unix_time_to_iso(u64::from(process.dump_time)),
+            create_time: process
+                .create_time
+                .and_then(|time| unix_time_to_iso(u64::from(time))),
+            user_time_secs: process.cpu_times.map(|(user, _)| user),
+            kernel_time_secs: process.cpu_times.map(|(_, kernel)| kernel),
+            threads: process.threads,
+            modules: process.modules,
+            unloaded_modules: process.unloaded_modules,
+            handles: process.handles,
+        },
+        exception: user.exception.as_ref().map(user_exception),
+        stack_thread: user
+            .stack_thread
+            .as_ref()
+            .map(|thread| UserTriageStackThread {
+                tid: thread.tid,
+                id: thread.id.clone(),
+                name: thread.name.clone(),
+                source: match thread.source {
+                    UserStackSource::ExceptionContext => "exception_context",
+                    UserStackSource::ThreadContext => "thread_context",
+                },
+            }),
+        exception_registers: user
+            .exception_registers
+            .iter()
+            .map(|(name, value)| UserTriageRegister {
+                name: name.clone(),
+                value: *value,
+            })
+            .collect(),
     }
 }

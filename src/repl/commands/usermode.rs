@@ -18,9 +18,8 @@ repl_command! {
     names: ["!peb", "peb"],
     usage: "!peb [address]",
     summary: "Decode the process environment block and process parameters of the current process.",
-    details: "If you do not give an address, the command uses EPROCESS.Peb of the current process: the one that .process selected, else the owner of the current thread. It decodes the process parameters with their PDB layouts. To list the loader modules, use !dlls.",
+    details: "If you do not give an address, the command uses EPROCESS.Peb of the current process: the one that .process selected, else the owner of the current thread. On a user-mode minidump it uses the PEB that the selected thread's TEB names, and the layouts of the dump's ntdll. It decodes the process parameters with their PDB layouts. To list the loader modules, use !dlls.",
     completion: Expression,
-    target: Kernel,
 }
 
 repl_command! {
@@ -28,9 +27,8 @@ repl_command! {
     names: ["!teb", "teb"],
     usage: "!teb [address]",
     summary: "Decode a thread environment block.",
-    details: "If you do not give an address, the command uses the teb pseudo-register of the current thread.",
+    details: "If you do not give an address, the command uses the teb pseudo-register of the current thread. On a user-mode minidump it uses the TEB of the selected thread (~<n>s), and the layouts of the dump's ntdll.",
     completion: Expression,
-    target: Kernel,
 }
 
 repl_command! {
@@ -38,9 +36,8 @@ repl_command! {
     names: ["!dlls", "dlls"],
     usage: "!dlls [-c <address>]",
     summary: "List the modules in the loader lists of the current process.",
-    details: "The current process is the one that .process selected, else the owner of the current thread. With -c <address>, the command shows only the module that contains that address. The module walk has a limit, and also stops if it finds a cycle in a list.",
+    details: "The current process is the one that .process selected, else the owner of the current thread; on a user-mode minidump, its one process, as far as the dump captured the loader's lists (lm lists the dump's own module list). With -c <address>, the command shows only the module that contains that address. The module walk has a limit, and also stops if it finds a cycle in a list.",
     completion: [None, Expression],
-    target: Kernel,
 }
 
 repl_command! {
@@ -49,7 +46,6 @@ repl_command! {
     usage: "!gle",
     summary: "Show the last Win32 error value and the last NT status value of the current thread.",
     completion: None,
-    target: Kernel,
 }
 
 repl_command! {

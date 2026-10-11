@@ -71,7 +71,9 @@ pub(super) fn build_recovered_stacktrace_seeded(
             reached_end = true;
             break;
         }
-        if context.rip == previous_rip {
+        // A frame that returns to its own address is a recursive call when
+        // the stack moved, and a walk going nowhere when it did not.
+        if context.rip == previous_rip && context.rsp == previous_rsp {
             break;
         }
         // Nothing runs in the never-mapped first 64 KiB or at a non-canonical

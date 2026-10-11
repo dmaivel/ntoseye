@@ -71,6 +71,7 @@ repl_command! {
     summary: "Set a breakpoint that stops on a hypercall to the Windows hypervisor, optionally only from one partition or VP.",
     details: "Sets a hardware execute breakpoint on the hypercall's handler, which the hypervisor's hypercall table gives (see !hvcalls), so it needs the gdb backend and a free debug register. The call is a call code, in the current radix, or its name: the TLFS name (HvCallPostMessage) or the name x hv!* shows (HvCall0004). Many codes share a handler, HvCallUnimplemented's for every code that is not implemented, so at each hit ntoseye reads the caller's call code from its RCX and resumes the target without a stop when it is another. The caller is the VP whose exit the processor handles: the guest partition's VP it serves, or the root partition's VP. With a partition ID, and a VP index in it, the breakpoint stops only for that caller; the IDs use the current radix, and ntoseye refuses a partition or VP that the hypervisor does not have. A hit whose caller ntoseye cannot tell, or whose caller matches but whose registers it cannot read, stops, so the filter does not hide a hit. /1, /c, /w, if, and do work as for ba; a condition sees the caller's registers at its VMCALL (as !hvcall decodes them), not the hypervisor's at the handler, and stops the hit with an error when they are not known. The command takes no pass count: set it with bpp. bl shows the filter. Needs the VM's hv-evmcs enlightenment. Example: !hvbp HvCallSendSyntheticClusterIpi 3; g",
     run_state: Halted,
+    target: Kernel,
 }
 
 repl_command! {
@@ -80,6 +81,7 @@ repl_command! {
     summary: "Set a breakpoint that stops on a VM exit to the Windows hypervisor by its reason, optionally only from one partition or VP.",
     details: "Sets a hardware execute breakpoint on the hypervisor's VM-exit entry point (hv!VmExitEntry, the host RIP of every eVMCS), so it needs the gdb backend, the VM's hv-evmcs enlightenment and a free debug register. The reason is a basic exit reason (Intel SDM Appendix C), as a decimal or 0x number, or a name as !hvvps shows it: cpuid, rdmsr, wrmsr, io_instruction, ept_violation, vmcall, hlt. Every exit enters there, so at each hit ntoseye reads the reason from the eVMCS the processor has loaded and resumes the target without a stop when it is another; the guest runs far slower while the breakpoint is set. With a guest partition's ID it rarely stops: that partition's VPs run only when the root partition's NT runs them, which it barely does then; !hvbp stops on a guest's hypercalls without slowing the rest. The caller is the VP whose exit it is, as for !hvbp: with a partition ID, and a VP index in it, the breakpoint stops only for that caller. The condition is evaluated on the caller's registers at its exit and reads the caller's memory. Example: !hvexit cpuid 6 if @rax==0x40000000",
     run_state: Halted,
+    target: Kernel,
 }
 
 repl_command! {

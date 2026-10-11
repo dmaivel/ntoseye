@@ -1,5 +1,6 @@
-//! Threads and stack frames: the vCPU list, stack walks, and installing
-//! the frame a request names as the session's inspection context.
+//! Threads and stack frames: the vCPU list (a user dump's threads), stack
+//! walks, and installing the frame a request names as the session's
+//! inspection context.
 
 use std::collections::HashMap;
 use std::mem::replace;
@@ -7,6 +8,8 @@ use std::result;
 
 use serde_json::{Value, json};
 
+use crate::error::Result;
+use crate::session::{Session, UserThreadSummary};
 use crate::symbols::CodeFrame;
 use crate::target::SelectedFrame;
 use crate::types::VirtAddr;
@@ -17,41 +20,131 @@ use super::{FrameRef, Handled, RunState, Server, arg_i64, source_value};
 /// Frames cached per stop; stackTrace paging slices this walk.
 const STACK_FRAME_LIMIT: usize = 256;
 
+/// A thread as the client sees it: its DAP id and the backend context (a
+/// vCPU, or a user dump's thread) it names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DapThread {
+    pub id: i64,
+    pub backend: String,
+}
+
+/// DAP ids for backend contexts: a user dump's threads by their thread id,
+/// as a client lists a process's threads, and vCPUs by position from 1.
+/// `tid` names a context's thread id; when one has none, is 0, or repeats
+/// another's (a damaged thread list), every context keeps its position
+/// instead, since two threads cannot share an id.
+pub fn dap_threads(backend: Vec<String>, tid: impl Fn(&str) -> Option<u32>) -> Vec<DapThread> {
+    let tids: Option<Vec<i64>> = backend
+        .iter()
+        .map(|id| tid(id).filter(|tid| *tid != 0).map(i64::from))
+        .collect();
+    let ids = match tids {
+        Some(tids)
+            if tids
+                .iter()
+                .enumerate()
+                .all(|(index, tid)| !tids[..index].contains(tid)) =>
+        {
+            tids
+        }
+        _ => (1..=backend.len() as i64).collect(),
+    };
+    ids.into_iter()
+        .zip(backend)
+        .map(|(id, backend)| DapThread { id, backend })
+        .collect()
+}
+
+/// A user dump's thread as a client lists it: `10f4.cc4 "name"
+/// ntdll!NtWaitForSingleObject+0x14`, marked when it raised the dump's
+/// exception.
+fn user_thread_label(thread: &UserThreadSummary) -> String {
+    let mut label = thread.id.clone();
+    if let Some(name) = &thread.name {
+        label.push_str(&format!(" {name:?}"));
+    }
+    match (&thread.symbol, thread.rip, &thread.error) {
+        (Some(symbol), _, _) => label.push_str(&format!(" {symbol}")),
+        (None, Some(rip), _) => label.push_str(&format!(" {rip:#x}")),
+        (None, None, Some(error)) => label.push_str(&format!(" <{error}>")),
+        _ => {}
+    }
+    if thread.exception {
+        label.push_str(" (exception)");
+    }
+    label
+}
+
+/// The backend contexts the client's threads are, with each one's label:
+/// a user dump's captured threads, or the vCPUs.
+fn thread_table(session: &mut Session) -> Result<Vec<(String, String)>> {
+    if let Some(threads) = session.user_threads() {
+        return Ok(threads
+            .iter()
+            .map(|thread| (thread.id.clone(), user_thread_label(thread)))
+            .collect());
+    }
+    Ok(session
+        .vcpus()?
+        .into_iter()
+        .map(|vcpu| {
+            let label = vcpu.label();
+            (vcpu.id, label)
+        })
+        .collect())
+}
+
 impl Server {
-    /// Rebuild the vCPU list, announcing additions and removals so a client's
-    /// thread view survives a reboot changing the processor count.
+    /// Rebuild the thread list, announcing additions and removals so a
+    /// client's thread view survives a reboot changing the processor count.
     pub(super) fn sync_threads(&mut self) {
         let Some(session) = self.session.as_mut() else {
             return;
         };
-        let ids: Vec<String> = match session.vcpus() {
-            Ok(vcpus) => vcpus.into_iter().map(|vcpu| vcpu.id).collect(),
+        let ids: Vec<String> = match thread_table(session) {
+            Ok(threads) => threads.into_iter().map(|(id, _)| id).collect(),
             Err(_) => vec![session.current_thread.clone()],
         };
         self.set_threads(ids);
     }
 
-    /// Install the vCPU list, announcing additions and removals.
+    /// Install the thread list, announcing additions and removals.
     fn set_threads(&mut self, ids: Vec<String>) {
-        if ids == self.threads {
+        let threads = match self
+            .session
+            .as_ref()
+            .and_then(|session| session.target.user_dump_info())
+        {
+            Some(info) => dap_threads(ids, |id| {
+                info.thread_for_backend_id(id).map(|thread| thread.tid)
+            }),
+            None => dap_threads(ids, |_| None),
+        };
+        if threads == self.threads {
             return;
         }
-        let previous = replace(&mut self.threads, ids);
-        for index in previous.len()..self.threads.len() {
-            self.send_event(
-                "thread",
-                json!({"reason": "started", "threadId": index as i64 + 1}),
-            );
+        let previous = replace(&mut self.threads, threads);
+        let started: Vec<i64> = self
+            .threads
+            .iter()
+            .map(|thread| thread.id)
+            .filter(|id| !previous.iter().any(|thread| thread.id == *id))
+            .collect();
+        for id in started {
+            self.send_event("thread", json!({"reason": "started", "threadId": id}));
         }
-        for index in (self.threads.len()..previous.len()).rev() {
-            self.send_event(
-                "thread",
-                json!({"reason": "exited", "threadId": index as i64 + 1}),
-            );
+        let exited: Vec<i64> = previous
+            .iter()
+            .rev()
+            .map(|thread| thread.id)
+            .filter(|id| !self.threads.iter().any(|thread| thread.id == *id))
+            .collect();
+        for id in exited {
+            self.send_event("thread", json!({"reason": "exited", "threadId": id}));
         }
     }
 
-    /// The backend vCPU the client's `thread` id names.
+    /// The backend context the client's `thread` id names.
     fn resolve_thread(&mut self, thread: i64) -> result::Result<String, String> {
         // Report a missing target before a missing thread: without a session
         // the thread table is empty for that reason, not because the client
@@ -76,19 +169,18 @@ impl Server {
     }
 
     fn backend_thread_id(&self, thread: i64) -> Option<String> {
-        usize::try_from(thread)
-            .ok()
-            .and_then(|index| index.checked_sub(1))
-            .and_then(|index| self.threads.get(index))
-            .cloned()
+        self.threads
+            .iter()
+            .find(|entry| entry.id == thread)
+            .map(|entry| entry.backend.clone())
     }
 
     pub(super) fn dap_thread_id(&self, backend_id: &str) -> i64 {
         self.threads
             .iter()
-            .position(|id| id == backend_id)
-            .map(|index| index as i64 + 1)
-            .unwrap_or(1)
+            .find(|entry| entry.backend == backend_id)
+            .or_else(|| self.threads.first())
+            .map_or(1, |entry| entry.id)
     }
 
     pub(super) fn on_threads(&mut self) -> Handled {
@@ -98,18 +190,16 @@ impl Server {
             let threads = self
                 .threads
                 .iter()
-                .enumerate()
-                .map(|(index, id)| json!({"id": index as i64 + 1, "name": format!("{id} (running)")}))
+                .map(|thread| json!({"id": thread.id, "name": format!("{} (running)", thread.backend)}))
                 .collect::<Vec<_>>();
             return Ok(Some(json!({"threads": threads})));
         }
         let session = self.session()?;
-        let vcpus = session.vcpus().map_err(|error| error.to_string())?;
-        self.set_threads(vcpus.iter().map(|vcpu| vcpu.id.clone()).collect());
-        let threads = vcpus
+        let table = thread_table(session).map_err(|error| error.to_string())?;
+        self.set_threads(table.iter().map(|(id, _)| id.clone()).collect());
+        let threads = table
             .iter()
-            .enumerate()
-            .map(|(index, vcpu)| json!({"id": index as i64 + 1, "name": vcpu.label()}))
+            .map(|(id, label)| json!({"id": self.dap_thread_id(id), "name": label}))
             .collect::<Vec<_>>();
         Ok(Some(json!({"threads": threads})))
     }

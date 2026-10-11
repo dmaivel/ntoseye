@@ -47,6 +47,7 @@ repl_command! {
     summary: "Serve driver images from host files using a driver replacement map.",
     details: "Without arguments, .kdfiles shows the mappings and serving statistics. A path loads a WinDbg map file of three-line records: `map`, the target name, and the host path. -m adds a mapping, -d removes one, and -c clears the map. Target names match case-insensitively on path suffix boundaries, and a bare filename matches any directory. Changes apply at the next driver load, so the guest can load a rebuilt driver without you copying it into the guest. See the driver replacement map guide.",
     completion: None,
+    target: Kernel,
 }
 
 repl_command! {
@@ -69,6 +70,7 @@ repl_command! {
     usage: "!dbgprint [count]",
     summary: "Show guest debug output (DbgPrint).",
     details: "Shows the last count lines, 50 by default, or all with 0. Over kd and kdnet, it shows what the KD stream delivered since ntoseye attached, and before anything arrived, the kernel's buffer. On the other backends, including a crash dump, it shows the kernel's own DbgPrint buffer (KdPrintCircularBuffer), as WinDbg's !dbgprint does, which also holds what was printed before ntoseye attached. The buffer is 4 KB by default and keeps only the newest output. A print that the debug filter drops (nt!Kd_DEFAULT_Mask, Kd_<component>_Mask) reaches neither.",
+    target: Kernel,
 }
 
 fn target_control_available(state: &ReplState<'_>) -> bool {
@@ -290,7 +292,16 @@ impl ReplState<'_> {
     }
 
     fn cmd_capabilities(&mut self) -> Result<()> {
-        print_backend_capabilities(&self.ctx.capabilities());
+        // A user dump's "contexts" are its threads, and what it cannot do
+        // is what a snapshot of one process lacks.
+        let note = self.ctx.target.user_dump_info().map(|info| {
+            format!(
+                "user-mode minidump of {}: a static snapshot of one process, whose contexts are its {} captured threads; its memory is read-only, with no physical addresses or page tables, and no kernel",
+                info.process_label(),
+                info.threads.len()
+            )
+        });
+        print_backend_capabilities(&self.ctx.capabilities(), note.as_deref());
 
         Ok(())
     }

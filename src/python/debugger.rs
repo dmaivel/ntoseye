@@ -23,6 +23,7 @@ use super::symbols::Location;
 use super::symbols::{self, Symbols};
 use super::thread::{Cpus, Threads};
 use super::types::Types;
+use super::userdump::UserDump;
 use super::{err, raise, runcontrol, runner};
 use crate::dbg_backend::ContinueDisposition;
 use crate::dump_writer::{collect_dump_metadata, write_kernel_dump};
@@ -37,34 +38,52 @@ fn namespace_owner(slf: &Bound<'_, Debugger>) -> Owner {
 impl Debugger {
     /// Kernel virtual memory, read through the page tables of the kernel. User
     /// addresses are not mapped here, so read them through `process.memory`.
+    /// On a user-mode minidump, the captured process's memory.
     #[getter]
     fn memory(slf: &Bound<'_, Self>) -> Memory {
         Memory::new(namespace_owner(slf), Space::Kernel)
     }
 
-    /// Guest-physical memory, without address translation.
+    /// Guest-physical memory, without address translation. A user-mode
+    /// minidump has none, and its reads raise `NtoseyeError`.
     #[getter]
     fn physical(slf: &Bound<'_, Self>) -> Memory {
         Memory::new(namespace_owner(slf), Space::Physical)
     }
 
     /// Kernel-scope symbols: `symbols["nt!KeBugCheckEx"]`, `nearest(addr)`,
-    /// `search(query)`, and the symbol and source paths.
+    /// `search(query)`, and the symbol and source paths. On a user-mode
+    /// minidump, the symbols of the dump's modules.
     #[getter]
     fn symbols(slf: &Bound<'_, Self>) -> Symbols {
         Symbols::new(namespace_owner(slf), Space::Kernel)
     }
 
-    /// Kernel-scope PDB types: `types["_EPROCESS"].at(addr)`.
+    /// Kernel-scope PDB types: `types["_EPROCESS"].at(addr)`. On a user-mode
+    /// minidump, the types of the dump's modules' PDBs (`types["ntdll!_PEB"]`).
     #[getter]
     fn types(slf: &Bound<'_, Self>) -> Types {
         Types::new(namespace_owner(slf), Space::Kernel)
     }
 
-    /// Loaded kernel modules: `modules["nt"]`, iteration, `.at(addr)`.
+    /// Loaded kernel modules: `modules["nt"]`, iteration, `.at(addr)`. On a
+    /// user-mode minidump, the modules the dump lists.
     #[getter]
     fn modules(slf: &Bound<'_, Self>) -> Modules {
         Modules::kernel(namespace_owner(slf))
+    }
+
+    /// The process, threads, and exception a user-mode minidump captured,
+    /// or `None` on a kernel target. A user-mode minidump has no kernel, so
+    /// `processes`, `threads`, `cpus`, `drivers`, `physical`, and the
+    /// kernel's `inspect` reports raise `NtoseyeError` on it.
+    #[getter]
+    fn user_dump(slf: &Bound<'_, Self>) -> PyResult<Option<UserDump>> {
+        let owner = namespace_owner(slf);
+        let user_dump = slf
+            .get()
+            .with_session(|session| Ok(session.target.user_dump().is_some()))?;
+        Ok(user_dump.then_some(UserDump { owner }))
     }
 
     /// The VBS secure kernel (VTL1), with read-only `memory`, `symbols`,
@@ -238,7 +257,8 @@ impl Debugger {
     }
 
     /// Evaluate a debugger (MASM) expression in kernel scope to an integer,
-    /// using the registers of the stopped vCPU.
+    /// using the registers of the stopped vCPU (on a user-mode minidump, of
+    /// the selected thread).
     fn eval(slf: &Bound<'_, Self>, expr: &str) -> PyResult<u64> {
         symbols::eval(slf.py(), &namespace_owner(slf), &Space::Kernel, expr)
     }
@@ -368,9 +388,13 @@ impl Debugger {
 
     /// Rebuild the guest state now (find the kernel again). Stops already do
     /// this when the backend reports a reload, and this function forces a
-    /// rebuild.
+    /// rebuild. A user-mode minidump has no kernel to find, and raises
+    /// `NtoseyeError`.
     fn reload(&self) -> PyResult<()> {
-        self.with_session(|session| session.reload().map_err(err))
+        self.with_session(|session| {
+            session.target.require_kernel().map_err(err)?;
+            session.reload().map_err(err)
+        })
     }
 
     /// Write a full `PAGEDU64` kernel dump of the halted target to `path`
@@ -453,10 +477,20 @@ impl Debugger {
             return "<ntoseye.Debugger closed>".to_string();
         }
         match self.with_session(|session| {
-            Ok((session.backend.is_running(), session.current_thread.clone()))
+            Ok((
+                session.backend.is_running(),
+                session.current_thread.clone(),
+                session
+                    .target
+                    .user_dump_info()
+                    .map(|info| info.process_label()),
+            ))
         }) {
-            Ok((true, _)) => "<ntoseye.Debugger running>".to_string(),
-            Ok((false, vcpu)) => format!("<ntoseye.Debugger halted vcpu={vcpu}>"),
+            Ok((true, _, _)) => "<ntoseye.Debugger running>".to_string(),
+            Ok((false, thread, Some(process))) => {
+                format!("<ntoseye.Debugger user dump {process} thread={thread}>")
+            }
+            Ok((false, vcpu, None)) => format!("<ntoseye.Debugger halted vcpu={vcpu}>"),
             Err(_) => "<ntoseye.Debugger>".to_string(),
         }
     }

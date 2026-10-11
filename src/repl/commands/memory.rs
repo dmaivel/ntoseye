@@ -89,6 +89,7 @@ repl_command! {
     details: "Because the guest does the work, ntoseye resumes the target, which halts again at nt!DbgBreakPointWithStatus and not at its earlier location. `/p` attaches the worker to a process first, which user-space addresses need.",
     completion: [None, Expression],
     run_state: Halted,
+    target: Kernel,
 }
 
 repl_command! {

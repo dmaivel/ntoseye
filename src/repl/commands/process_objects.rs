@@ -24,6 +24,7 @@ repl_command! {
     summary: "Show a job object and the processes in it.",
     details: "Shows a job object. The address can be a job, or a process or thread, for which the command shows its job. If you do not give an address, or give 0, the command shows the job of the current process. Flag 1 (the default) shows the accounting, limits, and flags of the job, and also the child jobs, the parent and root job, and the silo state. Flag 2 lists the processes assigned to the job (from ProcessListHead).",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -33,6 +34,7 @@ repl_command! {
     summary: "Show or change nt!NtGlobalFlag, and show the PEB flags of the current process.",
     details: "Without an argument, the command decodes nt!NtGlobalFlag and the _PEB.NtGlobalFlag of the current process and shows the bits by their GFlags names. `+` sets bits and `-` clears bits, from a value or from one flag that you name by its three-letter abbreviation (`!gflag +ust`). A value without `+` or `-` replaces nt!NtGlobalFlag. Each change is one 4-byte write to nt!NtGlobalFlag, the same write that `ed` makes, and the command does not change the PEB copy. `-?` lists the flags and their abbreviations.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -42,6 +44,7 @@ repl_command! {
     summary: "List exited processes and threads that still have references.",
     details: "Scans nonpaged pool for process (`Proc`) and thread (`Thre`) objects, and finds the header of each object by its decoded type. The command lists the processes that have ExitTime set and the threads in the Terminated state. For each object, it shows the handle count and the pointer count: whatever still holds these references keeps the object in memory. Flag 1 (the default) lists processes, 2 lists threads, and 3 lists both. The scan stops after 4096 processes or 4096 threads, or when you press Ctrl+C.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -51,6 +54,7 @@ repl_command! {
     summary: "Show the stacks that handle tracing recorded for the handles of a process.",
     details: "Reads the ring of traces (open, close, bad reference) in the DebugInfo of the process handle table and shows the newest trace first. If handle is 0 or not given, the command shows the traces of all handles, and if max-traces is 0 or not given, it shows all traces. The process can be an EPROCESS address, a PID, or a name, and the default is the current process. Handle tracing must be on for the process before you use the command. The Handles check of Application Verifier or NtSetInformationProcess(ProcessHandleTracing) turns tracing on, and if it is off, !htrace shows a message. User-mode frames resolve after the modules of the process are loaded (.process /p). The command does not have the user-mode forms that change tracing (-enable, -disable, -snapshot, -diff).",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -60,6 +64,7 @@ repl_command! {
     summary: "Show an ALPC port, an ALPC message, or the ports that a process holds.",
     details: "/p decodes an _ALPC_PORT from its object body or header. It shows the kind, owner, and state flags of the port, and the connection, server, and client ports of its communication info. It also shows the queues of the port with the messages on them, and the threads on the wait queue. For a connection port, /p also lists the connections. /m decodes a _KALPC_MESSAGE and shows the IDs, type, sizes, and state of the message, its owner and queue ports, and the waiting and server threads. /lpp walks the handle table of a process to find ALPC ports. The process can be an EPROCESS address, a PID, or a name, and the default is the current process. /lpp first shows the connection ports that the process owns and, for each connection, the server and client ports and the client process. Then it shows the ports that the process is connected to. The number after a port is the count of its queued messages in the main, large-message, and pending queues.",
     completion: Expression,
+    target: Kernel,
 }
 
 impl ReplState<'_> {

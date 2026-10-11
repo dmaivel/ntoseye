@@ -297,6 +297,24 @@ impl ReplState<'_> {
 
     fn cmd_lastevent(&mut self) -> Result<()> {
         let Some(last) = &self.ctx.last_event else {
+            if let Some(info) = self.ctx.target.user_dump_info()
+                && let Some(exception) = &info.exception
+            {
+                // A minidump runs nothing; its event is the exception it was
+                // written for, which does not record the chance.
+                let alias = exception_alias(exception.code)
+                    .map(|alias| format!(" ({alias})"))
+                    .unwrap_or_default();
+                outln!("Last event (the minidump's exception record):");
+                outln!("  code:        {:#010x}{alias}", exception.code);
+                outln!("  chance:      unavailable");
+                outln!("  address:     {}", ui::addr(exception.address));
+                outln!(
+                    "  thread:      {}\n",
+                    info.backend_thread_id(exception.thread_id)
+                );
+                return Ok(());
+            }
             outln!("No target event has been observed.\n");
             return Ok(());
         };

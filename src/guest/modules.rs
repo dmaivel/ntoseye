@@ -6,7 +6,7 @@ use crate::{
     backend::MemoryOps,
     bytes::{read_u16, read_u32},
     error::{Error, Result},
-    layout::{StructRef, utf16le_lossy},
+    layout::{StructRef, Types, utf16le_lossy},
     memory,
     pe::read_pe_version_info,
     target::{ListCursor, ListTermination, links_back_to},
@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 const MAX_LOADER_MODULES: usize = 1000;
 /// The name of a loader entry whose name cannot be read.
-const UNKNOWN_MODULE_NAME: &str = "<unknown>";
+pub const UNKNOWN_MODULE_NAME: &str = "<unknown>";
 /// How deep a VAD tree search goes: the AVL tree of even a 65,536-VAD
 /// process is at most 23 levels deep, so a longer path is a corrupt tree.
 const MAX_VAD_DEPTH: usize = 64;
@@ -126,6 +126,120 @@ fn read_unicode32(memory: &impl MemoryOps<VirtAddr>, length: usize, buffer: u32)
     Some(utf16le_lossy(&bytes))
 }
 
+/// Walk the native `InLoadOrderModuleList` of the `_PEB_LDR_DATA` at `ldr`,
+/// decoding each entry with `entry_type` (`_LDR_DATA_TABLE_ENTRY`, qualified
+/// when the layouts are not the kernel's). Bounded at
+/// [`MAX_LOADER_MODULES`]; the walk's end is reported, not hidden.
+pub fn walk_loader_list(
+    types: Types<'_>,
+    memory: &impl MemoryOps<VirtAddr>,
+    ldr: &StructRef<'_>,
+    entry_type: &str,
+) -> Result<(Vec<ModuleInfo>, ListTermination)> {
+    let mut modules = Vec::new();
+    if ldr.addr().is_zero() {
+        return Ok((modules, ListTermination::Null));
+    }
+    let head = ldr.embedded("InLoadOrderModuleList")?.addr();
+    let layout = types.layout(entry_type)?;
+    let link_offset = layout.field_offset("InLoadOrderLinks")?;
+    let pointer_size = usize::from(layout.pointer_size);
+    let mut cursor = ListCursor::new(head, MAX_LOADER_MODULES);
+    cursor.advance(
+        read_loader_pointer(memory, head, pointer_size).map_err(|error| error.to_string()),
+    );
+    while let Some(link) = cursor.take_current() {
+        let record_address = VirtAddr(link.0.wrapping_sub(link_offset));
+        let record = types
+            .struct_with_layout(Arc::clone(&layout), record_address)
+            .prefetch();
+        match module_info_from_record(&record) {
+            Ok(Some(module)) => modules.push(module),
+            Ok(None) => {}
+            Err(error) => {
+                cursor.advance(Err(error.to_string()));
+                break;
+            }
+        }
+        cursor.advance(
+            read_loader_pointer(memory, record_address + link_offset, pointer_size)
+                .map_err(|error| error.to_string()),
+        );
+    }
+    Ok((modules, cursor.finish()))
+}
+
+/// Walk the 32-bit loader list of a WOW64 process from its `PEB32.Ldr`.
+/// The entry layout is the fixed x86 ABI (unchanged since Windows 2000):
+/// `DllBase` +0x18, `EntryPoint` +0x1c, `SizeOfImage` +0x20, `FullDllName`
+/// +0x24, `BaseDllName` +0x2c, `TimeDateStamp` +0x44.
+pub fn walk_loader_list32(
+    memory: &impl MemoryOps<VirtAddr>,
+    ldr: u32,
+) -> (Vec<ModuleInfo>, ListTermination) {
+    const IN_LOAD_ORDER_MODULE_LIST: u64 = 0x0c;
+    const ENTRY_LEN: usize = 0x48;
+
+    if ldr == 0 {
+        return (Vec::new(), ListTermination::Null);
+    }
+    let head = VirtAddr(u64::from(ldr) + IN_LOAD_ORDER_MODULE_LIST);
+    let mut cursor = ListCursor::new(head, MAX_LOADER_MODULES);
+    cursor.advance(read_loader_pointer(memory, head, 4).map_err(|error| error.to_string()));
+    let mut modules = Vec::new();
+    while let Some(current) = cursor.take_current() {
+        let mut entry = [0u8; ENTRY_LEN];
+        if let Err(error) = memory.read_bytes(current, &mut entry) {
+            cursor.advance(Err(error.to_string()));
+            break;
+        }
+        let u32_at = |offset| read_u32(&entry, offset);
+        cursor.advance(Ok(VirtAddr(u64::from(u32_at(0)))));
+
+        let dll_base = u32_at(0x18);
+        if dll_base == 0 {
+            continue;
+        }
+        let name = read_unicode32(memory, usize::from(read_u16(&entry, 0x2c)), u32_at(0x30))
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| UNKNOWN_MODULE_NAME.to_string());
+        let mut module = ModuleInfo::new(name, VirtAddr(u64::from(dll_base)), u32_at(0x20))
+            .with_time_date_stamp(u32_at(0x44));
+        module.path = read_unicode32(memory, usize::from(read_u16(&entry, 0x24)), u32_at(0x28))
+            .filter(|path| !path.is_empty());
+        module.is_32bit = true;
+        let entry_point = u32_at(0x1c);
+        if entry_point != 0 {
+            module.entry_point = Some(VirtAddr(u64::from(entry_point)));
+        }
+        modules.push(module);
+    }
+    (modules, cursor.finish())
+}
+
+/// Merge a WOW64 process's 32-bit loader list into its native one. Both
+/// lists carry the executable itself (one mapping, x86 code) and an ntdll
+/// (two: the 32-bit copy is addressed as `ntdll32!`, as WinDbg's wow64exts
+/// does).
+pub fn merge_wow64_modules(modules: &mut Vec<ModuleInfo>, modules32: Vec<ModuleInfo>) {
+    for mut module in modules32 {
+        if let Some(native) = modules
+            .iter_mut()
+            .find(|native| native.base_address == module.base_address)
+        {
+            native.is_32bit = true;
+            continue;
+        }
+        if modules
+            .iter()
+            .any(|native| native.short_name == module.short_name)
+        {
+            module.short_name.push_str("32");
+        }
+        modules.push(module);
+    }
+}
+
 impl Guest {
     pub fn process_modules(&self, info: &ProcessInfo) -> Result<Vec<ModuleInfo>> {
         self.process_modules_detail(info)
@@ -150,39 +264,9 @@ impl Guest {
             return Err(Error::MissingPEB);
         }
         let ldr = peb.follow("Ldr")?;
-        let mut modules = Vec::new();
-        let termination = if ldr.addr().is_zero() {
-            ListTermination::Null
-        } else {
-            let head = ldr.embedded("InLoadOrderModuleList")?.addr();
-            let layout = types.layout("_LDR_DATA_TABLE_ENTRY")?;
-            let link_offset = layout.field_offset("InLoadOrderLinks")?;
-            let pointer_size = usize::from(layout.pointer_size);
-            let memory = self.ntoskrnl.memory_in(info.dtb);
-            let mut cursor = ListCursor::new(head, MAX_LOADER_MODULES);
-            cursor.advance(
-                read_loader_pointer(&memory, head, pointer_size).map_err(|error| error.to_string()),
-            );
-            while let Some(link) = cursor.take_current() {
-                let record_address = VirtAddr(link.0.wrapping_sub(link_offset));
-                let record = types
-                    .struct_with_layout(Arc::clone(&layout), record_address)
-                    .prefetch();
-                match module_info_from_record(&record) {
-                    Ok(Some(module)) => modules.push(module),
-                    Ok(None) => {}
-                    Err(error) => {
-                        cursor.advance(Err(error.to_string()));
-                        break;
-                    }
-                }
-                cursor.advance(
-                    read_loader_pointer(&memory, record_address + link_offset, pointer_size)
-                        .map_err(|error| error.to_string()),
-                );
-            }
-            cursor.finish()
-        };
+        let memory = self.ntoskrnl.memory_in(info.dtb);
+        let (mut modules, termination) =
+            walk_loader_list(types, &memory, &ldr, "_LDR_DATA_TABLE_ENTRY")?;
         self.name_from_mapped_images(info, &mut modules);
 
         let mut wow64_termination = None;
@@ -190,25 +274,7 @@ impl Guest {
             let (mut modules32, termination32) = self.process_modules32(info.dtb, peb32)?;
             self.name_from_mapped_images(info, &mut modules32);
             wow64_termination = Some(termination32);
-            // Both lists carry the executable itself (one mapping, x86 code)
-            // and an ntdll (two: the 32-bit copy is addressed as `ntdll32!`,
-            // as WinDbg's wow64exts does).
-            for mut module in modules32 {
-                if let Some(native) = modules
-                    .iter_mut()
-                    .find(|native| native.base_address == module.base_address)
-                {
-                    native.is_32bit = true;
-                    continue;
-                }
-                if modules
-                    .iter()
-                    .any(|native| native.short_name == module.short_name)
-                {
-                    module.short_name.push_str("32");
-                }
-                modules.push(module);
-            }
+            merge_wow64_modules(&mut modules, modules32);
         }
 
         Ok(ProcessModulesDetail {
@@ -302,57 +368,17 @@ impl Guest {
 
     /// The 32-bit loader list of a WOW64 process. `_PEB_LDR_DATA32` and
     /// `_LDR_DATA_TABLE_ENTRY32` are not in the kernel's PDB and the 32-bit
-    /// ntdll's is not loaded before this walk finds it, so the entry layout
-    /// is the fixed x86 ABI (unchanged since Windows 2000): `DllBase` +0x18,
-    /// `EntryPoint` +0x1c, `SizeOfImage` +0x20, `FullDllName` +0x24,
-    /// `BaseDllName` +0x2c, `TimeDateStamp` +0x44.
+    /// ntdll's is not loaded before this walk finds it, so the walk uses the
+    /// fixed x86 layout (see [`walk_loader_list32`]).
     fn process_modules32(
         &self,
         dtb: Dtb,
         peb32: VirtAddr,
     ) -> Result<(Vec<ModuleInfo>, ListTermination)> {
-        const IN_LOAD_ORDER_MODULE_LIST: u64 = 0x0c;
-        const ENTRY_LEN: usize = 0x48;
-
         let types = self.ntoskrnl.types_in(dtb);
         let ldr: u32 = types.struct_at("_PEB32", peb32)?.read_field("Ldr")?;
-        if ldr == 0 {
-            return Ok((Vec::new(), ListTermination::Null));
-        }
         let memory = self.ntoskrnl.memory_in(dtb);
-        let head = VirtAddr(u64::from(ldr) + IN_LOAD_ORDER_MODULE_LIST);
-        let mut cursor = ListCursor::new(head, MAX_LOADER_MODULES);
-        cursor.advance(read_loader_pointer(&memory, head, 4).map_err(|error| error.to_string()));
-        let mut modules = Vec::new();
-        while let Some(current) = cursor.take_current() {
-            let mut entry = [0u8; ENTRY_LEN];
-            if let Err(error) = memory.read_bytes(current, &mut entry) {
-                cursor.advance(Err(error.to_string()));
-                break;
-            }
-            let u32_at = |offset| read_u32(&entry, offset);
-            cursor.advance(Ok(VirtAddr(u64::from(u32_at(0)))));
-
-            let dll_base = u32_at(0x18);
-            if dll_base == 0 {
-                continue;
-            }
-            let name = read_unicode32(&memory, usize::from(read_u16(&entry, 0x2c)), u32_at(0x30))
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| UNKNOWN_MODULE_NAME.to_string());
-            let mut module = ModuleInfo::new(name, VirtAddr(u64::from(dll_base)), u32_at(0x20))
-                .with_time_date_stamp(u32_at(0x44));
-            module.path =
-                read_unicode32(&memory, usize::from(read_u16(&entry, 0x24)), u32_at(0x28))
-                    .filter(|path| !path.is_empty());
-            module.is_32bit = true;
-            let entry_point = u32_at(0x1c);
-            if entry_point != 0 {
-                module.entry_point = Some(VirtAddr(u64::from(entry_point)));
-            }
-            modules.push(module);
-        }
-        Ok((modules, cursor.finish()))
+        Ok(walk_loader_list32(&memory, ldr))
     }
 
     pub fn kernel_modules(&self) -> Result<Vec<ModuleInfo>> {

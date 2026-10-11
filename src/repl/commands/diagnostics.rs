@@ -6,18 +6,21 @@ use crate::error::Result;
 use crate::repl::*;
 use crate::target::mm::SystemMemorySummary;
 use crate::target::object::ResourceDetail;
-use crate::target::{DiagnosticMetric, DiagnosticValue, ListTermination};
+use crate::target::usermode::handles::{
+    handle_attribute_names, handle_type_counts, handle_type_label,
+};
+use crate::target::{DiagnosticMetric, DiagnosticValue, ListTermination, TargetKind};
 use crate::types::VirtAddr;
 use crate::ui;
+use crate::userdump::UserHandle;
 
 repl_command! {
     cmd_handle;
     names: ["!handle"],
-    usage: "!handle [handle-expression]",
+    usage: "!handle [handle-expression [flags [type]]]",
     summary: "List a limited number of handles of the selected process, or show one handle.",
-    details: "Without an argument, the command scans up to 256 handle-table slots. With a handle, it shows the object, type, name, access mask, and attributes, if it can decode them.",
+    details: "Without an argument, the command scans up to 256 handle-table slots. With a handle, it shows the object, type, name, access mask, and attributes, if it can decode them. On a user-mode minidump it lists the handles the dump's handle data records, as Windows reported them when the dump was written, with a count of each type; it has no objects to show. There, a handle of 0 selects every handle, flags choose what to show (1 type, 2 access, attributes, and counts, 4 name; the default shows all), and a type, such as File, keeps only handles of that type.",
     completion: Expression,
-    target: Kernel,
 }
 
 repl_command! {
@@ -26,6 +29,7 @@ repl_command! {
     usage: "!token",
     summary: "Show the primary token of the selected or current process.",
     details: "The command shows the token IDs, user and groups, privileges, type, impersonation level, and flags. It gets each field independently, and if the metadata or memory for a field is missing, it shows this in that field.",
+    target: Kernel,
 }
 
 repl_command! {
@@ -34,6 +38,7 @@ repl_command! {
     usage: "!fileobj <address-expression>",
     summary: "Decode a FILE_OBJECT and its relations to its device and name.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -161,6 +166,44 @@ fn diagnostic_opt_string(value: &DiagnosticValue<Option<String>>) -> String {
     }
 }
 
+/// `!handle`'s flags on a user-mode minidump, as WinDbg's user-mode flags:
+/// the handle's type; its access, attributes, and counts; its object's
+/// name; and object-specific information, which a minidump does not record.
+const SHOW_TYPE: u64 = 0x1;
+const SHOW_BASIC: u64 = 0x2;
+const SHOW_NAME: u64 = 0x4;
+const SHOW_OBJECT: u64 = 0x8;
+
+/// One handle of a user-mode minidump's handle data, with the groups of
+/// fields `show` selects (`!handle`'s flags).
+fn print_user_handle(entry: &UserHandle, show: u64) {
+    outln!("handle {:#x}", entry.handle);
+    if show & SHOW_TYPE != 0 {
+        outln!("  type          : {}", handle_type_label(entry));
+    }
+    if show & SHOW_BASIC != 0 {
+        outln!("  access        : {:#x}", entry.granted_access);
+        let names = handle_attribute_names(entry.attributes);
+        if names.is_empty() {
+            outln!("  attributes    : {:#x}", entry.attributes);
+        } else {
+            outln!(
+                "  attributes    : {:#x} ({})",
+                entry.attributes,
+                names.join(" | ")
+            );
+        }
+        outln!("  handle count  : {}", entry.handle_count);
+        outln!("  pointer count : {}", entry.pointer_count);
+    }
+    if show & SHOW_NAME != 0 {
+        outln!(
+            "  name          : {}",
+            entry.object_name.as_deref().unwrap_or("-")
+        );
+    }
+}
+
 fn print_resource(detail: &ResourceDetail) {
     outln!("ERESOURCE {}", ui::addr(detail.address.0));
     outln!(
@@ -198,6 +241,13 @@ fn print_resource(detail: &ResourceDetail) {
 
 impl ReplState<'_> {
     fn cmd_handle(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        if self.ctx.target.kind() == TargetKind::UserDump {
+            return self.cmd_handle_user_dump(&invocation);
+        }
+        if invocation.argv.len() > 1 {
+            error!("!handle: flags and a type apply to a user-mode minidump's handle data");
+            return Ok(());
+        }
         if let Some(expression) = invocation.arg(0) {
             let Some(VirtAddr(handle)) = self.eval_or_report(expression) else {
                 return Ok(());
@@ -251,6 +301,131 @@ impl ReplState<'_> {
             }
             Err(error) => error!("{error}"),
         }
+        Ok(())
+    }
+
+    /// `!handle` on a user-mode minidump, over the handles its handle data
+    /// records: `!handle [handle [flags [type]]]`, as WinDbg takes it in
+    /// user mode.
+    fn cmd_handle_user_dump(&mut self, invocation: &CommandInvocation<'_>) -> Result<()> {
+        if invocation.argv.len() > 3 {
+            outln!("{}\n", command_help("!handle"));
+            return Ok(());
+        }
+        let handle = match invocation.arg(0) {
+            Some(expression) => match self.eval_or_report(expression) {
+                Some(VirtAddr(handle)) => handle,
+                None => return Ok(()),
+            },
+            None => 0,
+        };
+        let show = match invocation.arg(1) {
+            Some(expression) => match self.eval_or_report(expression) {
+                Some(VirtAddr(flags)) => flags,
+                None => return Ok(()),
+            },
+            None => SHOW_TYPE | SHOW_BASIC | SHOW_NAME,
+        };
+        if show & !(SHOW_TYPE | SHOW_BASIC | SHOW_NAME | SHOW_OBJECT) != 0 {
+            error!(
+                "!handle: flags {show:#x}: only 1 (type), 2 (access, attributes, counts), 4 (name), and 8 (object) are defined"
+            );
+            return Ok(());
+        }
+        let type_filter = invocation.arg(2);
+        let handles = match self.ctx.target.user_handles() {
+            Ok(handles) => handles,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
+        let shown: Vec<&UserHandle> = handles
+            .iter()
+            .filter(|entry| handle == 0 || entry.handle == handle)
+            .filter(|entry| {
+                type_filter
+                    .is_none_or(|filter| handle_type_label(entry).eq_ignore_ascii_case(filter))
+            })
+            .collect();
+        if show & SHOW_OBJECT != 0 {
+            outln!(
+                "{}",
+                ui::muted("object-specific information is not recorded in a user-mode minidump")
+            );
+        }
+        if handle != 0 {
+            let Some(entry) = shown.first() else {
+                match type_filter {
+                    Some(filter) => error!(
+                        "handle {handle:#x} of type {filter} is not in the minidump's handle data"
+                    ),
+                    None => error!("handle {handle:#x} is not in the minidump's handle data"),
+                }
+                return Ok(());
+            };
+            print_user_handle(entry, show);
+            outln!();
+            return Ok(());
+        }
+
+        let process = self
+            .ctx
+            .target
+            .user_dump_info()
+            .map(|info| info.process_label())
+            .unwrap_or_default();
+        outln!(
+            "handles: {process}, {} of {} the minidump records{}",
+            shown.len(),
+            handles.len(),
+            type_filter
+                .map(|filter| format!(" (type {filter})"))
+                .unwrap_or_default()
+        );
+        if shown.is_empty() {
+            outln!();
+            return Ok(());
+        }
+        let mut header = vec!["Handle"];
+        if show & SHOW_TYPE != 0 {
+            header.push("Type");
+        }
+        if show & SHOW_BASIC != 0 {
+            header.extend(["Access", "Attributes", "Handles", "Pointers"]);
+        }
+        if show & SHOW_NAME != 0 {
+            header.push("Name");
+        }
+        let mut builder = Builder::default();
+        builder.push_record(header);
+        for entry in &shown {
+            let mut row = vec![format!("{:#x}", entry.handle)];
+            if show & SHOW_TYPE != 0 {
+                row.push(handle_type_label(entry).to_string());
+            }
+            if show & SHOW_BASIC != 0 {
+                row.extend([
+                    format!("{:#x}", entry.granted_access),
+                    format!("{:#x}", entry.attributes),
+                    entry.handle_count.to_string(),
+                    entry.pointer_count.to_string(),
+                ]);
+            }
+            if show & SHOW_NAME != 0 {
+                row.push(entry.object_name.clone().unwrap_or_else(|| "-".to_string()));
+            }
+            builder.push_record(row);
+        }
+        print_padded_table(builder);
+
+        let mut summary = Builder::default();
+        summary.push_record(["Type", "Handles"]);
+        for (type_name, count) in handle_type_counts(shown.iter().copied()) {
+            summary.push_record([type_name, count.to_string()]);
+        }
+        outln!("{}", ui::label("by type"));
+        print_padded_table(summary);
         Ok(())
     }
 

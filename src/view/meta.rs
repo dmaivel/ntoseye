@@ -5,8 +5,9 @@ use super::list::{ListEnd, list_termination};
 use crate::types::VirtAddr;
 use crate::target::ListTermination;
 use crate::target::meta::{
-    ErrorCodeDetail, TargetDumpMetadata, TargetKernelDetail, TargetTimeDetail, TargetVersionDetail,
-    VerifierDetail, VerifierDriverDetail, VerifierDriverSummary as DriverSummaryDetail,
+    ErrorCodeDetail, TargetDumpMetadata, TargetKernelDetail, TargetTimeDetail,
+    TargetUserDumpDetail, TargetVersionDetail, UserDumpTimeDetail, VerifierDetail,
+    VerifierDriverDetail, VerifierDriverSummary as DriverSummaryDetail,
     VerifierStatistics as StatisticsDetail, VerifierSuspectDriver as SuspectDriverDetail,
 };
 
@@ -214,9 +215,33 @@ shapes! {
         backend: Option<String>,
         /// The crash dump header. `None` for a live target.
         dump: Option<TargetDump>,
+        /// What a user-mode minidump records of its process and how it was
+        /// written. `None` for a kernel target.
+        user_dump: Option<TargetUserDump>,
     }
 
-    /// The UTC time and uptime of the target (`.time`).
+    /// A user-mode minidump's process and header.
+    TargetUserDump {
+        process_name: Option<String>,
+        process_id: Option<u32>,
+        /// `ProcessorLevel`: on AMD64, the processor family.
+        processor_level: u16,
+        /// `ProcessorRevision`: on AMD64, the model (high byte) and stepping
+        /// (low byte).
+        processor_revision: Hex<u16>,
+        service_pack: Option<String>,
+        /// The `MINIDUMP_TYPE` flags the dump was written with.
+        flags: Hex,
+        /// `flags` as `MINIDUMP_TYPE` names (`MiniDumpWithFullMemory`, ...).
+        flag_names: Vec<String>,
+        threads: usize,
+        modules: usize,
+        /// The code of the exception the dump was written for.
+        exception_code: Option<Hex<u32>>,
+    }
+
+    /// The UTC time and uptime of the target (`.time`). A user-mode minidump
+    /// records neither: its `user_dump` says when it was written instead.
     TargetTime {
         /// The UTC time of the target (FILETIME).
         system_time: Option<Hex>,
@@ -229,6 +254,34 @@ shapes! {
         uptime_seconds: Option<u64>,
         /// The uptime as formatted text.
         uptime: Option<String>,
+        /// When a user-mode minidump was written, and its process's times.
+        /// `None` for a kernel target.
+        user_dump: Option<UserDumpTime>,
+    }
+
+    /// When a user-mode minidump was written (its header), and how long its
+    /// process had run (`MiscInfoStream`), where it records them.
+    UserDumpTime {
+        /// When the dump was written, in seconds since 1970 (UTC).
+        written: u32,
+        /// `written` as ISO 8601 UTC.
+        written_iso: Option<String>,
+        /// `written` in the system's time zone.
+        written_local: Option<String>,
+        /// The name of that zone's period in effect.
+        time_zone: Option<String>,
+        /// When the process started, in seconds since 1970 (UTC).
+        process_created: Option<u32>,
+        /// `process_created` as ISO 8601 UTC.
+        process_created_iso: Option<String>,
+        /// From the process's start to the dump, in seconds.
+        process_uptime_seconds: Option<u64>,
+        /// `process_uptime_seconds` as formatted text.
+        process_uptime: Option<String>,
+        /// User-mode time the process had run, in seconds.
+        user_time_seconds: Option<u32>,
+        /// Kernel-mode time the process had run, in seconds.
+        kernel_time_seconds: Option<u32>,
     }
 
     /// A decoded NTSTATUS, Win32, or HRESULT code (`!error`).
@@ -431,6 +484,37 @@ pub fn target_version(detail: &TargetVersionDetail) -> TargetVersion {
         time: target_time(&detail.time),
         backend: detail.backend.clone(),
         dump: detail.dump.as_ref().map(target_dump),
+        user_dump: detail.user_dump.as_ref().map(target_user_dump),
+    }
+}
+
+fn target_user_dump(detail: &TargetUserDumpDetail) -> TargetUserDump {
+    TargetUserDump {
+        process_name: detail.process_name.clone(),
+        process_id: detail.process_id,
+        processor_level: detail.processor_level,
+        processor_revision: detail.processor_revision,
+        service_pack: detail.service_pack.clone(),
+        flags: detail.flags,
+        flag_names: detail.flag_names.clone(),
+        threads: detail.threads,
+        modules: detail.modules,
+        exception_code: detail.exception_code,
+    }
+}
+
+fn user_dump_time(detail: &UserDumpTimeDetail) -> UserDumpTime {
+    UserDumpTime {
+        written: detail.written,
+        written_iso: detail.written_iso.clone(),
+        written_local: detail.written_local.clone(),
+        time_zone: detail.time_zone.clone(),
+        process_created: detail.process_created,
+        process_created_iso: detail.process_created_iso.clone(),
+        process_uptime_seconds: detail.process_uptime_seconds,
+        process_uptime: detail.process_uptime.clone(),
+        user_time_seconds: detail.user_time_seconds,
+        kernel_time_seconds: detail.kernel_time_seconds,
     }
 }
 
@@ -442,6 +526,7 @@ pub fn target_time(detail: &TargetTimeDetail) -> TargetTime {
         interrupt_time: detail.interrupt_time,
         uptime_seconds: detail.uptime_seconds,
         uptime: detail.uptime.clone(),
+        user_dump: detail.user_dump.as_ref().map(user_dump_time),
     }
 }
 

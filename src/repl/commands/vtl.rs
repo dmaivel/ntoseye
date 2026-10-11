@@ -26,6 +26,7 @@ repl_command! {
     usage: ".vtl [0|1 [pid]]",
     summary: "Select NT (VTL0) or secure-kernel (VTL1) memory inspection, or show which one is active.",
     details: "VTL1 requires AMD64 direct host memory. `.vtl 1` changes the scope of reads and symbols, but does not change the VTL of the CPU. With no argument, `.vtl` shows the current scope. `.vtl 0` goes back to the NT kernel. After `.vtl 1`, it returns to the view the stop selected, which at a stop in the Windows hypervisor is where NT left off; otherwise, at a stop in VTL1 or in the Windows hypervisor, it selects the address space of the vCPU, where you use `.vtlcxr` or `.thread` to select NT. `.vtl 1` selects the system address space of the secure kernel, and `.vtl 1 <pid>` selects the address space of a trustlet by its NT PID, which is always decimal. The VTL1 scope is a read-only memory view. Registers, stepping, software breakpoints, writes, and NT-specific extensions need .vtl 0. To stop in VTL1, set a hardware execute breakpoint there (`ba e1 securekernel!<function>`, GDB backends), and then resume with a plain `g`, which first goes back to the live context. A vCPU stopped in VTL1 shows its real registers, stack, and memory. With no argument, `.vtl` also shows whether reads follow such a live stop or the manual view.",
+    target: Kernel,
 }
 
 repl_command! {
@@ -34,6 +35,7 @@ repl_command! {
     usage: "!trustlets",
     summary: "List the validated VTL1 processes with their NT identities and address-space roots.",
     details: "Reads SkpsProcessList through the page tables of the secure kernel. Each row shows the secure-kernel process object, the NT PID and image name, the trustlet ID, and the address-space root. If the internal layout is not supported, the command gives an error and does not guess offsets. The command does not change the scope.",
+    target: Kernel,
 }
 
 repl_command! {
@@ -42,6 +44,7 @@ repl_command! {
     usage: "!hvpartitions",
     summary: "Show the partitions of the Windows hypervisor as a tree, with their virtual processors.",
     details: "Walks the hypervisor's partition objects from its processor blocks, which come from the eVMCS pages (the VM's hv-evmcs enlightenment) or from a vCPU stopped in the hypervisor. Each child partition is below its parent, with its partition ID and object, and below each partition are its privilege mask (HV_PARTITION_PRIVILEGE_MASK) with the TLFS names, then each VP: the processor whose current VP it is, the VTL it runs or last ran in (the other enabled VTLs after it), the guest RIP where that VTL left off, named from symbols for the root partition's VPs, and why it last left for the hypervisor. !hvvps shows each VTL of a partition's VPs in full. hvix64 has no public symbols, so the offsets are read off the hypervisor's own code and each object is validated before it is shown; if the layout is not recognized, the command gives an error and does not guess offsets. Intel hosts only.",
+    target: Kernel,
 }
 
 repl_command! {
@@ -50,6 +53,7 @@ repl_command! {
     usage: "!hvvps [partition-id]",
     summary: "List the virtual processors of a Windows hypervisor partition (the root by default).",
     details: "Each row is one VTL enabled on a VP, and * marks the VTL the VP runs or last ran in. CPU is the processor whose current VP it is (the one that runs it, or ran it last), by number, or by processor block on builds before 10.0.19041, which keep no number there. The row shows the hypervisor's context object for the VTL and, when found, the physical address of the VTL's eVMCS with the EPT pointer (the root of the VTL's second-level address translation), the guest RIP where the VTL left off, and why it last left for the hypervisor. The eVMCS columns need the VM's hv-evmcs enlightenment. The partition ID uses the current radix. See !hvpartitions for where the objects come from.",
+    target: Kernel,
 }
 
 repl_command! {
@@ -58,6 +62,7 @@ repl_command! {
     usage: "!hvept [-v] <address> [partition-id [vp-index]]",
     summary: "Translate a guest physical address through each VTL's EPT (second-level address translation) of a Windows hypervisor VP.",
     details: "Walks the extended page tables that each enabled VTL's eVMCS names, by default for the VP the current vCPU's processor runs (with -v the root partition's), or the root partition's VP 0. The address is guest physical, or with -v virtual in the current address space (the .process or VTL1 scope), which the command translates through the guest's page tables first; that space is the root partition's, so -v takes only a root partition VP. Each row shows the VTL, its EPT pointer, the host physical address, the access that every level of the walk allows (r, w, and x, where x is supervisor-mode execute when the VTL uses mode-based execute control), user-mode execute under that control, the page size, and the memory type, or the level where the walk found no entry. This is how memory integrity (HVCI) and the secure kernel set page permissions that NT cannot change. The address and IDs use the current radix. Needs the VM's hv-evmcs enlightenment. See !hvpartitions for where the objects come from.",
+    target: Kernel,
 }
 
 repl_command! {
@@ -66,6 +71,7 @@ repl_command! {
     usage: "!hveptdiff [partition-id [vp-index]]",
     summary: "List the guest physical ranges that VTL0's and VTL1's EPTs of a Windows hypervisor VP map differently.",
     details: "Walks the whole EPT of VTL0 and of VTL1 of a VP, by default the one the current vCPU's processor runs (a guest partition's first), else the root partition's VP 0, and lists each range of guest physical memory that the two map with different access, or that only one of them maps, with the access in each (r, w, x, and u for user-mode execute under mode-based execute control). Adjacent ranges that differ the same way are merged. These are the pages that the secure kernel and memory integrity (HVCI) protect from NT. The IDs use the current radix. Needs VBS and the VM's hv-evmcs enlightenment.",
+    target: Kernel,
 }
 
 repl_command! {
@@ -74,6 +80,7 @@ repl_command! {
     usage: "!hvcalls [-a]",
     summary: "List the hypercalls the Windows hypervisor implements, from its hypercall table.",
     details: "Reads the hypervisor's hypercall table and shows, for each call code, the name the Hyper-V TLFS gives it (when the TLFS documents it), whether it is a simple or a rep call (var marks a variable-size input header), the sizes of its fixed input and output and of each rep element, and its handler in the hv image. Codes that share the handler of the reserved code 0 are not implemented; -a lists them too. Needs the VM's hv-evmcs enlightenment or a vCPU stopped in the hypervisor.",
+    target: Kernel,
 }
 
 repl_command! {
@@ -83,6 +90,7 @@ repl_command! {
     summary: "Decode the hypercall that the current vCPU's processor handles in the Windows hypervisor.",
     details: "For a vCPU halted in the Windows hypervisor, for example on a breakpoint on a hypercall handler (ba e1 hv!HvCallFlushVirtualAddressList), shows the hypercall of the VMCALL exit that its processor handles: the caller (a VTL of the root partition, or the guest partition's VP that the processor serves), the call code with its TLFS name, the flags (fast, variable header size, nested), a rep call's start and count, the GPAs of the input and output, and each field of the input as the Hyper-V TLFS lays it out, with names for special values, processor sets, flags, and the common register names, then each element of a rep call's input list. A slow call's input is read at its GPA through the EPT of the calling VTL. A fast call's input is RDX and R8, then, for an XMM fast call, XMM0 to XMM5 as the hypervisor's VM-exit entry code saved them; when they are not known, it says what is missing. A call whose layout ntoseye does not know shows its input as raw qwords. The command needs the general-purpose registers of the exit, which ntoseye reads where the hypervisor's VM-exit entry code saved them, so it explains why when the vCPU is still on the entry or the last exit was not a VMCALL. Needs the VM's hv-evmcs enlightenment.",
     run_state: Halted,
+    target: Kernel,
 }
 
 repl_command! {
@@ -91,6 +99,7 @@ repl_command! {
     usage: "!hvvmcs [-msr|-io] [partition-id [vp-index [vtl]]]",
     summary: "Show the eVMCS of a VTL of a Windows hypervisor VP, or the MSRs and I/O ports it intercepts.",
     details: "Reads the Enlightened VMCS of a VTL, by default the VP the current vCPU's processor runs (a guest partition's first, else the root partition's) and the VTL it runs in, and shows each field with its offset and value. With -msr, it shows the MSRs whose reads and writes the VTL's MSR bitmap intercepts, with the architectural MSRs each range holds, and then the architectural MSRs the VTL reads and writes without an exit; MSRs outside the bitmap's 0x0-0x1fff and 0xc0000000-0xc0001fff always exit. With -io the I/O ports its I/O bitmaps intercept, or that every access is intercepted when the VM-execution controls do not use the bitmaps. The layout is the Hyper-V TLFS's, so this does not depend on the hypervisor build. The IDs use the current radix. Needs the VM's hv-evmcs enlightenment.",
+    target: Kernel,
 }
 
 repl_command! {
@@ -99,6 +108,7 @@ repl_command! {
     usage: "!hvd [-p] [-b|-d|-q] [<partition-id> <vp-index>] <address> [range]",
     summary: "Display the memory of a Windows hypervisor partition's guest (a Hyper-V VM, WSL2, Windows Sandbox).",
     details: "Reads the guest's memory through the EPT of the VTL its VP runs in, as its eVMCS names them: guest virtual memory through the VP's page tables (its CR3), or with -p guest physical memory. Without a partition and VP it reads the guest VP that the current vCPU's processor runs, as ~ and a stop in the hypervisor name it. -b shows bytes (the default), -d dwords, and -q qwords. The range is L<count>, an end address, or a byte length, as for db. Unreadable pages show as ??. The memory is read-only, and ntoseye has no symbols for the guest. The numbers use the current radix. Needs the VM's hv-evmcs enlightenment.",
+    target: Kernel,
 }
 
 repl_command! {
@@ -107,6 +117,7 @@ repl_command! {
     usage: "!hvu [-p] [<partition-id> <vp-index>] <address> [range]",
     summary: "Disassemble the memory of a Windows hypervisor partition's guest (a Hyper-V VM, WSL2, Windows Sandbox).",
     details: "Reads the guest's memory as !hvd does: guest virtual memory through the page tables (CR3) and EPT of the VTL its VP runs in, or with -p guest physical memory through the EPT. Without a partition and VP it reads the guest VP that the current vCPU's processor runs. The code decodes in the mode the VTL left off in, by its eVMCS: 64-bit in IA-32e mode with a 64-bit code segment, else 32-bit; real mode and 16-bit code give an error. The range is as for u: L<count> instructions (8 by default), or an end address or byte length, listing every instruction that starts before the range ends. The listing stops at the first unreadable page and says where. ntoseye has no symbols for the guest, so branch targets and RIP-relative operands show as addresses. The numbers use the current radix. Needs the VM's hv-evmcs enlightenment.",
+    target: Kernel,
 }
 
 /// How two VTLs' access to a range differs: VTL0's, then VTL1's.
@@ -119,6 +130,7 @@ repl_command! {
     summary: "Show the registers of a VTL of a Windows hypervisor VP, whether or not a processor runs it.",
     details: "By default the VP the current vCPU's processor runs (a guest partition's first, else the root partition's) and the VTL it runs in. For a VP that a vCPU runs now, they are that vCPU's; for one whose exit a vCPU in the hypervisor handles, those of that exit; otherwise those the VP saved at its last exit, read from its register block through the descriptor of its register region, which no processor maps while the VP does not run. The VP resumes with them but for what the hypervisor writes as the exit's result, such as a hypercall's status in RAX. RIP, RSP, flags, control and segment registers come from the VTL's eVMCS. The general-purpose registers are shared by a VP's VTLs and belong to the one it runs in; another VTL shows its eVMCS state only. The IDs use the current radix. Needs the VM's hv-evmcs enlightenment; builds before 10.0.17763 keep the saved registers on the processor's stack, so a VP no processor runs has none there.",
     run_state: Halted,
+    target: Kernel,
 }
 
 repl_command! {
@@ -128,6 +140,7 @@ repl_command! {
     summary: "Inspect the Windows guest that a Windows hypervisor partition runs (a Windows Sandbox, a Hyper-V VM) in place of the target, or show which is inspected.",
     details: "With a partition ID, the session inspects that partition's guest instead of the target: its memory is read through the partition's EPT, its NT kernel is found from the page-table root of a VP in kernel mode, and its symbols are loaded, so lm, !process, dt, db, u, k and the other inspection commands read the guest. Its VPs are the threads (p<partition>.<VP index + 1>, so ~Ns selects VP N), with their VTL0 registers, as !hvr <partition> <vp> 0 shows them: a VP that runs in VTL1 has VTL0's RIP, RSP, flags, control and segment registers there, without its general-purpose registers. The target stays halted while the view is shown. eb, ed and the other writes go to the guest's memory through its EPT, and r <register>=<value> to the vCPU that runs the selected VP at the stop; a VP no vCPU runs has its registers in the hypervisor's memory, and is refused. ba sets a hardware breakpoint of the partition's, which stops only on its VPs (/c names a VP); bp, bu and bm are refused. g leaves the view and runs the target, and a hit of the partition's breakpoint shows the view again on the VP that hit it. t, p and gu step the thread of the selected VP, on whichever VP it runs next, and g <address> runs until any of the partition's VPs reaches the address: each is a run of the target to a breakpoint of the partition's. Walks (tc, pa, wt) are refused. bl lists every breakpoint, the target's too. The root partition's ID (0x1) returns to the target. Without an ID, it shows which partition is inspected. The ID uses the current radix. Needs the VM's hv-evmcs enlightenment and a 64-bit Windows guest; breakpoints and steps need the gdb backend.",
     run_state: Halted,
+    target: Kernel,
 }
 
 /// `registers` three to a row in [`VP_STATE_REGISTERS`] order, as `r` lays

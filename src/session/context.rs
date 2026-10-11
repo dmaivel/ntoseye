@@ -28,7 +28,7 @@ pub(super) fn update_target_context_from_registers(
         target.clear_context_dtb_override();
         return;
     };
-    target.registers = Some(register_map.to_hashmap(&registers));
+    target.registers = Some(target.register_values(register_map, &registers));
     match register_map.read_u64(target.arch().dtb_register(), &registers) {
         // For triage dumps all modules are loaded with DTB_IDENTITY and
         // memory reads use identity mapping, so the context DTB from the

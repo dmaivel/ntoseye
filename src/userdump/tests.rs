@@ -430,3 +430,226 @@ fn arm64_threads_and_the_exception_stream_carry_their_contexts() {
     assert!(backend.set_current_thread("300").is_err());
     assert!(backend.write_registers(&registers).is_err());
 }
+
+/// A `MINIDUMP_HANDLE_DESCRIPTOR`, padded to `size` bytes (40 for
+/// `MINIDUMP_HANDLE_DESCRIPTOR_2`).
+fn handle_descriptor(handle: u64, names: (u32, u32), counts: [u32; 4], size: usize) -> Vec<u8> {
+    let mut record = u64s(&[handle]);
+    record.extend(u32s(&[names.0, names.1]));
+    record.extend(u32s(&counts));
+    record.resize(size, 0);
+    record
+}
+
+#[test]
+fn handle_data_reads_both_descriptor_sizes_and_keeps_a_handle_whose_name_is_unreadable() {
+    for size in [32usize, 40] {
+        let mut builder = Builder::new(2);
+        builder.system_info(AMD64, WIN32_NT);
+        let file = builder.string("File");
+        let path = builder.string("\\Device\\HarddiskVolume3\\Windows");
+        let mut stream = u32s(&[16, size as u32, 3, 0]);
+        stream.extend(handle_descriptor(
+            4,
+            (file, path),
+            [0, 0x10_0020, 1, 32769],
+            size,
+        ));
+        // An object name outside the file.
+        stream.extend(handle_descriptor(
+            8,
+            (file, 0x7fff_0000),
+            [2, 0x1f_0003, 1, 2],
+            size,
+        ));
+        // The third descriptor is cut off by the stream's end.
+        stream.extend(vec![0u8; size / 2]);
+        builder.stream(12, &stream);
+        let dump = open(&builder.finish()).unwrap();
+        let info = dump.info();
+        let handles = info.handles.as_ref().unwrap();
+
+        assert_eq!(handles.len(), 2, "descriptor size {size}");
+        assert_eq!(handles[0].handle, 4);
+        assert_eq!(handles[0].type_name.as_deref(), Some("File"));
+        assert_eq!(
+            handles[0].object_name.as_deref(),
+            Some("\\Device\\HarddiskVolume3\\Windows")
+        );
+        assert_eq!(handles[0].granted_access, 0x10_0020);
+        assert_eq!(
+            (handles[0].handle_count, handles[0].pointer_count),
+            (1, 32769)
+        );
+        assert_eq!(handles[1].attributes, 2);
+        assert_eq!(handles[1].object_name, None);
+        assert!(
+            info.notes
+                .iter()
+                .any(|note| note.contains("handle 0x8 object name"))
+        );
+        assert!(
+            info.notes
+                .iter()
+                .any(|note| note.contains("holds 2 of its 3"))
+        );
+    }
+
+    // A descriptor size too small for the record is refused as a whole; a
+    // dump without the stream has no handle list at all.
+    let mut builder = Builder::new(2);
+    builder.system_info(AMD64, WIN32_NT);
+    builder.stream(12, &u32s(&[16, 24, 1, 0, 0, 0, 0, 0, 0, 0]));
+    let dump = open(&builder.finish()).unwrap();
+    assert_eq!(dump.info().handles.as_deref().map(<[_]>::len), Some(0));
+    let mut builder = Builder::new(1);
+    builder.system_info(AMD64, WIN32_NT);
+    assert!(open(&builder.finish()).unwrap().info().handles.is_none());
+}
+
+#[test]
+fn memory_info_regions_are_sorted_and_overlaps_and_empty_regions_dropped() {
+    let mut builder = Builder::new(2);
+    builder.system_info(AMD64, WIN32_NT);
+    let region = |base: u64, size: u64, state: u32, protect: u32, kind: u32| {
+        let mut entry = u64s(&[base, base]);
+        entry.extend(u32s(&[protect, 0]));
+        entry.extend(u64s(&[size]));
+        entry.extend(u32s(&[state, protect, kind, 0]));
+        entry
+    };
+    let mut stream = u32s(&[16, 48]);
+    stream.extend(u64s(&[4]));
+    stream.extend(region(0x20000, 0x3000, 0x1000, 0x04, 0x20000));
+    stream.extend(region(0x10000, 0x10000, 0x10000, 0x01, 0));
+    // Overlaps the region at 0x20000.
+    stream.extend(region(0x21000, 0x1000, 0x1000, 0x20, 0x100_0000));
+    stream.extend(region(0x40000, 0, 0x1000, 0x04, 0x20000));
+    builder.stream(16, &stream);
+    let dump = open(&builder.finish()).unwrap();
+    let info = dump.info();
+    let regions = info.regions.as_ref().unwrap();
+
+    assert_eq!(
+        regions.iter().map(|region| region.base).collect::<Vec<_>>(),
+        [0x10000, 0x20000]
+    );
+    assert_eq!(
+        info.region(0x22fff).map(|region| region.base),
+        Some(0x20000)
+    );
+    assert_eq!(
+        info.region(0x1ffff).map(|region| region.state),
+        Some(0x10000)
+    );
+    assert!(info.region(0x23000).is_none());
+    assert!(info.notes.iter().any(|note| note.contains("invalid size")));
+    assert!(info.notes.iter().any(|note| note.contains("overlapping")));
+}
+
+#[test]
+fn function_tables_follow_their_padding_and_resolve_code_outside_modules() {
+    let mut builder = Builder::new(2);
+    builder.system_info(AMD64, WIN32_NT);
+    let native = vec![0xaau8; 136];
+    let descriptor = |minimum: u64, maximum: u64, base: u64, count: u32, pad: u32| {
+        let mut bytes = u64s(&[minimum, maximum, base]);
+        bytes.extend(u32s(&[count, pad]));
+        bytes.extend_from_slice(&native);
+        bytes
+    };
+    // A header followed by 4 bytes of padding, as dbghelp writes it.
+    let mut stream = u32s(&[24, 32, 136, 12, 3, 4, 0]);
+    // Entries out of order, one empty and one overlapping its neighbour;
+    // then 4 bytes of padding.
+    stream.extend(descriptor(
+        0x7ff8_0000_0020,
+        0x7ff8_0001_0000,
+        0x7ff8_0000_0020,
+        4,
+        4,
+    ));
+    stream.extend(u32s(&[0x200, 0x280, 0x900]));
+    stream.extend(u32s(&[0x100, 0x180, 0x800]));
+    stream.extend(u32s(&[0x300, 0x300, 0xa00]));
+    stream.extend(u32s(&[0x150, 0x1a0, 0xb00]));
+    stream.extend(u32s(&[0]));
+    // No padding after this one.
+    stream.extend(descriptor(
+        0x7ff8_0002_0000,
+        0x7ff8_0003_0000,
+        0x7ff8_0002_0000,
+        1,
+        0,
+    ));
+    stream.extend(u32s(&[0x10, 0x40, 0x1000]));
+    // Claims more entries than the stream holds.
+    stream.extend(descriptor(
+        0x7ff8_0004_0000,
+        0x7ff8_0005_0000,
+        0x7ff8_0004_0000,
+        99,
+        0,
+    ));
+    builder.stream(13, &stream);
+    let dump = open(&builder.finish()).unwrap();
+    let info = dump.info();
+
+    assert_eq!(info.function_tables.len(), 2);
+    assert_eq!(
+        info.function_tables[0]
+            .entries
+            .iter()
+            .map(|entry| entry.begin)
+            .collect::<Vec<_>>(),
+        [0x100, 0x200]
+    );
+    let (base, function) = info.dynamic_function(0x7ff8_0000_0020 + 0x17f).unwrap();
+    assert_eq!(base, 0x7ff8_0000_0020);
+    assert_eq!(function.unwind_data, 0x800);
+    assert_eq!(
+        info.dynamic_function(0x7ff8_0002_0030)
+            .map(|(_, function)| function.unwind_data),
+        Some(0x1000)
+    );
+    // Between entries, and in the table that was dropped.
+    assert!(info.dynamic_function(0x7ff8_0000_0020 + 0x1c0).is_none());
+    assert!(info.dynamic_function(0x7ff8_0004_0010).is_none());
+    assert!(
+        info.notes
+            .iter()
+            .any(|note| note.contains("2 of its 4 entries"))
+    );
+    assert!(
+        info.notes
+            .iter()
+            .any(|note| note.contains("more than the stream holds"))
+    );
+}
+
+#[test]
+fn misc_info_records_process_times_and_the_time_zone_in_effect() {
+    let mut builder = Builder::new(2);
+    builder.system_info(AMD64, WIN32_NT);
+    let mut misc = vec![0u8; 232];
+    // MISC1_PROCESS_ID | MISC1_PROCESS_TIMES | MISC3_TIMEZONE.
+    misc[..24].copy_from_slice(&u32s(&[232, 0x43, 0x10f4, 1_791_700_000, 12, 3]));
+    misc[56..60].copy_from_slice(&2u32.to_le_bytes());
+    misc[60..64].copy_from_slice(&300i32.to_le_bytes());
+    let name = |text: &str| -> Vec<u8> { text.encode_utf16().flat_map(u16::to_le_bytes).collect() };
+    let standard = name("Eastern Standard Time");
+    misc[64..64 + standard.len()].copy_from_slice(&standard);
+    let daylight = name("Eastern Daylight Time");
+    misc[148..148 + daylight.len()].copy_from_slice(&daylight);
+    misc[228..232].copy_from_slice(&(-60i32).to_le_bytes());
+    builder.stream(15, &misc);
+    let dump = open(&builder.finish()).unwrap();
+    let info = dump.info();
+
+    assert_eq!(info.process_id, Some(0x10f4));
+    assert_eq!(info.process_create_time, Some(1_791_700_000));
+    assert_eq!(info.process_cpu_times, Some((12, 3)));
+    let zone = info.time_zone.as_ref().unwrap();
+    assert_eq!(zone.bias, 240);
+    assert_eq!(zone.name, "Eastern Daylight Time");
+}

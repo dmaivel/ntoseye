@@ -1,8 +1,11 @@
-//! DAP server for a single kernel-debugging session.
+//! DAP server for a single debugging session: a kernel target, or a
+//! user-mode minidump.
 //!
 //! The `!Send` session stays on its owning thread; a reader thread queues client
 //! messages and cancels blocking runs. Responses precede their stop events.
-//! DAP threads are vCPUs, and stops halt the whole target.
+//! DAP threads are vCPUs (a user dump's threads, by thread id), and stops
+//! halt the whole target. A user dump never runs: run control, breakpoints,
+//! and writes are refused, and the capabilities say so.
 
 mod breakpoints;
 mod data_breakpoints;
@@ -40,6 +43,7 @@ use crate::{Backend, TargetSpec};
 
 use breakpoints::BreakpointState;
 use run_control::StepRequest;
+use stack::DapThread;
 use wire::{ClientMessage, Request};
 
 const IDLE_TICK: Duration = Duration::from_millis(20);
@@ -47,6 +51,9 @@ const RUN_POLL: Duration = Duration::from_millis(50);
 
 /// Why a request that needs a target cannot be served.
 const NO_TARGET: &str = "no target is attached; send a launch or attach request";
+
+/// Why a user-mode minidump refuses to run, step, or change.
+const SNAPSHOT: &str = "a user-mode minidump is a static snapshot";
 
 /// Whether the guest is running, halted, or the client has detached.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -162,8 +169,8 @@ struct Server {
     rx: Receiver<ClientMessage>,
     seq: i64,
     state: RunState,
-    /// Backend vCPU ids, indexed by `DAP thread id` minus one.
-    threads: Vec<String>,
+    /// The client's threads and the backend contexts they name.
+    threads: Vec<DapThread>,
     frames: Vec<FrameRef>,
     vars: Vec<VarRef>,
     /// Reverse index over `vars`, so the same guest object asked about twice
@@ -501,7 +508,41 @@ impl Server {
         self.session.as_mut().ok_or_else(|| NO_TARGET.to_string())
     }
 
+    /// Whether the target is a user-mode minidump, which never runs.
+    fn user_dump(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.target.user_dump().is_some())
+    }
+
+    /// Refuse `operation` (running, stepping, or a write) on a user-mode
+    /// minidump.
+    fn refuse_on_user_dump(&self, operation: &str) -> result::Result<(), String> {
+        if self.user_dump() {
+            return Err(format!("{SNAPSHOT}; {operation} is not available"));
+        }
+        Ok(())
+    }
+
     fn dispatch(&mut self, request: Request) {
+        // A user dump never runs, so no breakpoint can verify; each one the
+        // client asks for is answered unverified, with the reason.
+        if self.user_dump()
+            && matches!(
+                request.command.as_str(),
+                "setBreakpoints"
+                    | "setFunctionBreakpoints"
+                    | "setInstructionBreakpoints"
+                    | "setDataBreakpoints"
+            )
+        {
+            let result = breakpoints::unverified(
+                &request.arguments,
+                &format!("{SNAPSHOT}; breakpoints never hit"),
+            );
+            self.respond(&request, result);
+            return;
+        }
         let result = match request.command.as_str() {
             "initialize" => self.on_initialize(&request.arguments),
             "launch" | "attach" => self.on_attach(&request.arguments),
@@ -545,6 +586,9 @@ impl Server {
             "writeMemory" => self.on_write_memory(&request.arguments),
             "disassemble" => self.on_disassemble(&request.arguments),
             "modules" => self.on_modules(&request.arguments),
+            "setExpression" => self
+                .refuse_on_user_dump("setting an expression")
+                .and(Err("unsupported request 'setExpression'".to_string())),
             other => Err(format!("unsupported request '{other}'")),
         };
         // Run control answers its own request before emitting `stopped`, so
@@ -565,7 +609,12 @@ impl Server {
         self.lines_start_at_1 = arg_bool(args, "linesStartAt1").unwrap_or(true);
         self.columns_start_at_1 = arg_bool(args, "columnsStartAt1").unwrap_or(true);
         self.supports_invalidated = arg_bool(args, "supportsInvalidatedEvent").unwrap_or(false);
-        Ok(Some(capabilities()))
+        let mut capabilities = capabilities();
+        // A target named on the command line is already open.
+        if self.user_dump() {
+            merge(&mut capabilities, snapshot_capabilities());
+        }
+        Ok(Some(capabilities))
     }
 
     fn on_attach(&mut self, args: &Value) -> Handled {
@@ -585,6 +634,14 @@ impl Server {
         self.session = Some(session);
         self.repl = None;
         self.debug_seq = 0;
+        // `initialize` advertised a kernel target's capabilities before the
+        // target was named.
+        if self.user_dump() {
+            self.send_event(
+                "capabilities",
+                json!({"capabilities": snapshot_capabilities()}),
+            );
+        }
         self.apply_symbol_arguments(args)?;
         self.send_event("initialized", json!({}));
         Ok(None)
@@ -737,6 +794,31 @@ fn capabilities() -> Value {
             }))
             .collect::<Vec<_>>(),
     })
+}
+
+/// What a user-mode minidump changes in [`capabilities`]: it never runs and
+/// cannot be written, so no breakpoint, step granularity, write, or
+/// exception filter applies.
+fn snapshot_capabilities() -> Value {
+    json!({
+        "supportsFunctionBreakpoints": false,
+        "supportsConditionalBreakpoints": false,
+        "supportsHitConditionalBreakpoints": false,
+        "supportsLogPoints": false,
+        "supportsInstructionBreakpoints": false,
+        "supportsDataBreakpoints": false,
+        "supportsSetVariable": false,
+        "supportsSteppingGranularity": false,
+        "supportsWriteMemoryRequest": false,
+        "exceptionBreakpointFilters": [],
+    })
+}
+
+/// Overwrite `base`'s fields with `overrides`'.
+fn merge(base: &mut Value, overrides: Value) {
+    if let (Some(base), Value::Object(overrides)) = (base.as_object_mut(), overrides) {
+        base.extend(overrides);
+    }
 }
 
 /// Make the server's cancel flag the session's interrupt request. A single

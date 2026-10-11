@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 
 use linkme::distributed_slice;
 
-use crate::dbg_backend::halt_unreachable_reason;
+use crate::dbg_backend::{DebugCapability, halt_unreachable_reason};
 use crate::error::Result;
 use crate::repl::{CompletionStrategy, Flow, ReplState, error};
 
@@ -530,6 +530,21 @@ pub fn check_run_state(state: &ReplState<'_>, spec: &CommandSpec) -> bool {
         // in.
         Some(RunState::Running) if !state.ctx.backend.is_running() => {
             outln!("{}", crate::ui::muted("the target is already halted"));
+            return false;
+        }
+        // Halted without execution control is a static snapshot (a crash
+        // dump): a command that would run or step it could only fail on the
+        // way, or report a stop that never happened.
+        _ if spec.run != RunEffect::None
+            && !state.ctx.backend.is_running()
+            && !state.ctx.backend.capabilities().iter().any(|entry| {
+                entry.capability == DebugCapability::ExecutionControl && entry.supported
+            }) =>
+        {
+            error!(
+                "the {} backend cannot run or step the target",
+                state.ctx.backend.name()
+            );
             return false;
         }
         _ => {}

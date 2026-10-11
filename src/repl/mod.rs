@@ -170,10 +170,15 @@ pub fn print_module_symbol_report(report: &ModuleSymbolLoadReport) {
     }
 }
 
-pub fn print_backend_capabilities(capabilities: &[BackendCapability]) {
+/// The capability matrix, after `note` (what the target is, when that
+/// explains the matrix).
+pub fn print_backend_capabilities(capabilities: &[BackendCapability], note: Option<&str>) {
     const COLUMNS: usize = 4;
 
     outln!("{}", "capabilities".bold());
+    if let Some(note) = note {
+        outln!("  {}", ui::muted(note));
+    }
 
     let mut builder = Builder::default();
     for chunk in capabilities.chunks(COLUMNS) {

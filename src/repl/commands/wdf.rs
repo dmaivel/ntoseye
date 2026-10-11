@@ -24,6 +24,7 @@ repl_command! {
     usage: "!wdfkd.wdfldr",
     summary: "List the KMDF client drivers.",
     details: "Walks the list at Wdf01000!FxLibraryGlobals.FxDriverGlobalsList. For each client driver, it shows the name, the KMDF version that the driver bound to (WdfBindInfo), the _FX_DRIVER_GLOBALS, the WDFDRIVER handle, the DRIVER_OBJECT, and whether the driver has an In-Flight Recorder log. The command needs the PDB for Wdf01000. The walk continues only while the Blink of each entry points back to the entry before it. A client has an empty DriverName if it bound to KMDF but did not create an FxDriver, and the command then lists the client by the name of its DRIVER_OBJECT, which you also use with !wdfkd.wdfdriverinfo and !wdfkd.wdflogdump. When a client name is not printable, or the FxDriver of a client fails the checks of its type, owner, or handle, the command lists the client with the problem.",
+    target: Kernel,
 }
 
 repl_command! {
@@ -33,6 +34,7 @@ repl_command! {
     summary: "Show a KMDF client driver and its WDF devices.",
     details: "Give the driver name as !wdfkd.wdfldr lists it. The name is not case-sensitive, and `.sys` is optional. The command shows the DRIVER_OBJECT, the FxDriver, the WDFDRIVER handle, the _FX_DRIVER_GLOBALS, the KMDF version, the registry path, and the image. Then it shows each device object on the DeviceObject/NextDevice chain of the driver object, with the related WDFDEVICE and its kind and PnP state. A device object links to its WDFDEVICE through its DeviceExtension, which KMDF sets to point to the first context of the device. The command checks the context header, the type and owner of the object, and the device object of the FxDevice, and if a check fails, it lists the device object with the reason.",
     completion: Driver,
+    target: Kernel,
 }
 
 repl_command! {
@@ -42,6 +44,7 @@ repl_command! {
     summary: "Decode a WDF handle and show its object.",
     details: "A handle is the address of its object, XORed with ~7. An offset handle has bit 0 set and points to a WDFOBJECT_OFFSET value inside the object, which the command subtracts from the address that the handle points to. The command shows the FxObject, its type (FX_OBJECT_TYPES), size, reference count, state (FxObjectState), flags, owning driver, and parent, and each context with its type name, size, and address. Then it names the command that shows the object in full: !wdfkd.wdfdevice, !wdfkd.wdfqueue, !wdfkd.wdfrequest, or !wdfkd.wdfiotarget for those types, !wdfkd.wdfdriverinfo for a WDFDRIVER, and !wdfkd.wdfobject, which adds the children of the object, for any other type. It shows an error if the value does not decode to a kernel address, or if the type, state, size, context header, or owning driver of the object is not valid.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -51,6 +54,7 @@ repl_command! {
     summary: "Show a KMDF object's header, contexts, and children.",
     details: "Give a handle, as for !wdfkd.wdfhandle, or the address of an FxObject. The command shows what !wdfkd.wdfhandle shows: the handle, the type (FX_OBJECT_TYPES), size, reference count, state (FxObjectState), flags (FXOBJECT_FLAGS), owning driver, and parent, and each context with its type name, size, and address. Then it lists the children of the object (m_ChildListHead), each with its handle and type. The framework's own children, such as the packages of a device, have no handle. Use the command for an object whose type has no command of its own, such as a WDFMEMORY, WDFTIMER, or WDFWORKITEM. The object must pass the same checks as for !wdfkd.wdfhandle, and the list of children stops at a child whose m_ParentObject is not this object.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -60,6 +64,7 @@ repl_command! {
     summary: "Show a WDFDEVICE and its device objects, state machines, queues, and I/O targets.",
     details: "Shows the kind of the device (FDO, filter, PDO, or control), its WDM device object, the device object that it is attached to, and the PDO of the stack. It also shows the current states of the PnP, power, and power policy state machines (_WDF_DEVICE_PNP_STATE, _WDF_DEVICE_POWER_STATE, _WDF_DEVICE_POWER_POLICY_STATE), and the device and system power states. For a PDO, it shows the parent device, and for an FDO, the child lists and the default and self I/O targets. For each queue of the I/O package, it shows the dispatch type, the power management, and the counts of pending and driver-owned requests, and it marks the default queue. For each I/O target of the device (m_IoTargetsList), it shows the WDFIOTARGET handle, the kind of target, its state, and the device object that it sends to, and it marks the default target. Pass a WDFQUEUE to !wdfkd.wdfqueue and a WDFIOTARGET to !wdfkd.wdfiotarget.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -69,6 +74,7 @@ repl_command! {
     summary: "Show a WDFQUEUE and its configuration, state, callbacks, and requests.",
     details: "Shows the dispatch type of the queue, the state bits (_FX_IO_QUEUE_STATE), the power state, and the power management. It also shows the execution level, the synchronization scope, the request counts, and the Evt callbacks that the driver set. Then it shows the requests on three lists: the requests that wait in the queue, the requests that the driver marked cancelable, and the requests presented to the driver. For each request, it shows the WDFREQUEST handle, which you pass to !wdfkd.wdfrequest, the FxRequest, and the IRP. If a request is not valid, the command stops that list at the request and shows the reason.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -78,6 +84,7 @@ repl_command! {
     summary: "Show a WDFREQUEST, its IRP, its queue, and the I/O target it was sent to.",
     details: "Shows the FxRequest, its owning driver, parent, reference count, and object state. For the IRP of the request, it shows the current stack location: the major and minor function, the device object and its driver, and the buffer lengths of a read, a write, or a device control with its control code. It also shows the system buffer, the user buffer, and the MDL of the IRP; pass the IRP to !irp for all of its stack locations. If the IRP was freed or reused, the command shows why it is not a live IRP. The command shows whether the IRP came from the I/O manager or the framework or the driver allocated it (FxRequestAllocationSource), whether the request is completed or canceled, and whether its queue presented it to the driver. It shows the queue that the request came from or waits in (m_IoQueue) and the cancel-safe queue that holds the IRP: the requests that wait in the queue, the requests that the driver marked cancelable with its EvtRequestCancel routine, which the command shows, or the requests that an I/O target holds until it starts. A request that none of these holds cannot be canceled. For a request that the driver sent, it shows the I/O target (m_Target), the completion routine and its context, and the target flags (FxRequestTargetFlags). KMDF sets the verifier flags (FxRequestVerifierFlags) only when its verifier is on for the driver.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -87,6 +94,7 @@ repl_command! {
     summary: "Show a WDFIOTARGET, the device object it sends to, and the requests sent to it.",
     details: "Shows the kind of the target: local (in the device's own stack, as the default target is), remote (a target that the driver opened with WdfIoTargetOpen), self, or a USB device or USB pipe, and whether it is the default I/O target of its device. It shows the state (_WDF_IO_TARGET_STATE), the open state of a remote target, the WDFDEVICE that the target belongs to, the device object that the target sends requests to and the driver of that device object, the PDO of that stack, the file object, the I/O count, and the stack size. Then it lists the requests on three lists: the requests sent to the target and not completed (m_SentIoListHead), the requests sent with WDF_REQUEST_SEND_OPTION_IGNORE_TARGET_STATE while the target was not started (m_IgnoredIoListHead), and the requests that the target holds until it starts (m_PendedQueue). For each request, it shows the WDFREQUEST handle, the FxRequest, and the IRP. A request without a handle is the framework's own, such as the request that a synchronous send builds. A list stops at a request whose m_Target is not this target, with the reason.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -96,6 +104,7 @@ repl_command! {
     summary: "Show the In-Flight Recorder log of a KMDF driver, oldest record first.",
     details: "Reads the IFR log of the driver (_FX_DRIVER_GLOBALS.WdfLogHeader). The command walks the records back from the newest record along PrevOffset, and stops at the first record written or at records that newer records overwrote. For each record, it shows the sequence number, the UTC time (only when the log keeps timestamps), the function, and the message. The command formats the message from the trace message format (TMF) annotations in the PDB for Wdf01000. For a record with a message that no loaded PDB declares, or with arguments that do not fit the message, it shows the message GUID, the message number, and the argument bytes. The command checks the header (its GUID, base, and size) and each record (signature, length, position, and sequence), and the walk stops at the first item that fails a check, with the reason.",
     completion: Driver,
+    target: Kernel,
 }
 
 repl_command! {
@@ -105,6 +114,7 @@ repl_command! {
     summary: "Show the KMDF data in a crash dump: one driver's In-Flight Recorder log, or the client drivers.",
     details: "When Windows writes a crash dump, Wdf01000 copies one client driver's In-Flight Recorder log into the dump's tagged data (WdfDumpGuid): the log of the driver whose code the bugcheck parameters point to, or of a driver set to keep its log in minidumps, or else of the last KMDF driver that ran on the processor that crashed. A minidump has no other copy of the log. Without an argument or with log, the command shows that log, oldest record first, as !wdfkd.wdflogdump shows a log in memory. Unlike WinDbg, it shows a log's only record once, and it keeps the oldest record that survives in a log that has wrapped. With loader, it lists the client drivers that Wdf01000 recorded (WdfDumpGuid2), with the KMDF version each bound to and its _FX_DRIVER_GLOBALS; the first entry is the framework itself. The command needs the PDB for Wdf01000.",
     completion: None,
+    target: Kernel,
 }
 
 /// A labeled line of a detail view.

@@ -72,6 +72,30 @@ Handles such as `Process`, `Module`, `Thread`, `Frame`, and struct cursors are s
 
 If your code caches raw addresses, use `dbg.generation` to detect a rebuild. `Breakpoint` handles are not stamped: breakpoints stay after a reboot, and ntoseye resolves symbolic breakpoints again in the new kernel.
 
+### User-mode minidumps
+
+The `dmp` backend also opens a Windows [user-mode minidump](../using/dumps.md#user-mode-minidumps) of one process. It has no kernel, so it has no `Process` or `Thread` objects, which stand for EPROCESS and ETHREAD. `dbg.user_dump` holds the process and threads the dump records instead, and is `None` on a kernel target:
+
+```python
+with ntoseye.attach("dmp", "powershell-exception.dmp") as dbg:
+    dump = dbg.user_dump
+    print(dump.process.name, dump.process.pid)          # powershell.exe 4340
+    for thread in dump.threads:                         # UserThread, keyed by TID
+        print(hex(thread.tid), thread.name, thread.backtrace(3)[0])
+    exception = dump.exception                          # UserDumpException or None
+    print(hex(exception.code), exception.symbol)        # 0xe0d7e5e1 kernelbase!RaiseException+0x8a
+    frame = dump.exception_context()                    # the .ecxr registers, as a Frame
+    report = dbg.inspect.triage()                       # what !analyze reports
+    print(report.failure_signature.bucket, report.culprit.kind)
+```
+
+- `dump.process` has the PID, the image name, the PEB as an `ntdll!_PEB` cursor, and `memory`, `modules`, and `threads` views. `dbg.memory`, `dbg.symbols`, `dbg.types`, and `dbg.modules` are the process's too.
+- `dump.threads[tid]` is a `UserThread`: its TID, name, TEB (an `ntdll!_TEB` cursor), captured stack range, suspend count and priority, what the dump's thread-info stream records (start address, creation and exit times, CPU times, exit status, affinity), `registers`, `backtrace()`, and `last_error()`. `dump.current_thread` is the thread selected for inspection and `dump.exception_thread` the one that raised the exception.
+- `dump.handles` lists the recorded handles, `dump.regions` the address-space regions with their use, and `dump.region(address)` the one holding an address; each is `None` when the dump does not record it. `dump.unloaded_modules` lists the modules the process had unloaded, and `dump.notes` what the parser dropped and why.
+- `dbg.inspect.peb()` and `dbg.inspect.teb()` take `dump.process` and a `UserThread`. `dbg.inspect.version().user_dump` and `dbg.inspect.time().user_dump` hold what {command}`vertarget` and {command}`.time` show. `dbg.inspect.triage()` returns the report of {command}`analyze`: `report.user` holds the exception, the process, and the faulting stack, and `report.culprit` is a module, or, with `kind` `dynamic_code`, JIT-compiled code that no module holds.
+
+Kernel APIs, such as `dbg.processes`, `dbg.threads`, `dbg.cpus`, `dbg.drivers`, and the kernel reports of `dbg.inspect`, raise `NtoseyeError` with `this needs a kernel target`. `dbg.physical` and address translation raise `NtoseyeError` too, because the dump has no physical memory or page tables. Run control, breakpoints, and writes are refused as in a kernel dump.
+
 ## Memory, symbols, and types
 
 Each memory object uses one specific address space: `dbg.memory` is kernel virtual memory, `proc.memory` is the virtual memory of that process, and `dbg.physical` is physical memory without translation.

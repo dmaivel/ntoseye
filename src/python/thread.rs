@@ -284,6 +284,7 @@ impl Thread {
                     owner.clone_ref(py),
                     Some(self.info.clone()),
                     process.clone(),
+                    None,
                     index,
                     frame,
                     live_thread,
@@ -367,6 +368,9 @@ pub struct Frame {
     owner: Owner,
     thread_info: Option<ThreadInfo>,
     process_info: Option<ProcessInfo>,
+    /// The backend context (a user dump's thread) the walk was seeded from,
+    /// for a frame that has no Windows thread object.
+    vcpu: Option<String>,
     index: usize,
     ip: u64,
     sp: u64,
@@ -398,6 +402,7 @@ impl Frame {
             owner,
             thread_info: thread,
             process_info: None,
+            vcpu: None,
             index,
             ip,
             sp,
@@ -412,10 +417,11 @@ impl Frame {
         })
     }
 
-    fn from_recovered(
+    pub fn from_recovered(
         owner: Owner,
         thread_info: Option<ThreadInfo>,
         process_info: Option<ProcessInfo>,
+        vcpu: Option<String>,
         index: usize,
         recovered: RecoveredFrame,
         live_thread: bool,
@@ -425,6 +431,7 @@ impl Frame {
             owner,
             thread_info,
             process_info,
+            vcpu,
             index,
             ip: frame.ip,
             sp: frame.sp,
@@ -444,13 +451,14 @@ impl Frame {
     }
 
     fn context(&self) -> Context {
+        let selectable = self.thread_info.is_some() || self.vcpu.is_some();
         Context {
             process: self.process_info.clone(),
             secure: None,
             root: None,
-            vcpu: None,
+            vcpu: self.vcpu.clone(),
             thread: self.thread_info.clone(),
-            frame: (self.live_thread && self.thread_info.is_some()).then_some(self.index),
+            frame: (self.live_thread && selectable).then_some(self.index),
         }
     }
 
@@ -543,7 +551,7 @@ impl Frame {
     #[getter]
     fn locals(&self, py: Python<'_>) -> PyResult<IndexMap<String, Option<u64>>> {
         self.owner.check(py)?;
-        if self.thread_info.is_none() {
+        if self.thread_info.is_none() && self.vcpu.is_none() {
             return Ok(IndexMap::new());
         }
         let context = self.context();
@@ -595,6 +603,7 @@ impl Frame {
         other.extract::<PyRef<'_, Frame>>().is_ok_and(|other| {
             self.owner.same_debugger(&other.owner)
                 && self.ethread() == other.ethread()
+                && self.vcpu == other.vcpu
                 && self.index == other.index
                 && self.ip == other.ip
         })
@@ -602,7 +611,7 @@ impl Frame {
 
     fn __hash__(&self) -> isize {
         self.owner
-            .identity_hash((self.ethread(), self.index, self.ip))
+            .identity_hash((self.ethread(), &self.vcpu, self.index, self.ip))
     }
 
     fn __repr__(&self) -> String {
@@ -625,6 +634,16 @@ pub struct Registers {
 }
 
 impl Registers {
+    /// The register file of the backend context `context` selects, read when
+    /// asked (`values` `None`), or a fixed read-only snapshot.
+    pub fn new(owner: Owner, context: Context, values: Option<HashMap<String, u64>>) -> Self {
+        Registers {
+            owner,
+            context,
+            values,
+        }
+    }
+
     /// Register values by name. A live file adds 128-bit registers at full
     /// width (`xmm0`, `v0`) beside their 64-bit halves; a recovered frame
     /// holds only what unwinding recovered.
@@ -750,6 +769,8 @@ impl Cpus {
 
     fn ids(&self, py: Python<'_>) -> PyResult<Vec<String>> {
         self.owner.with(py, |session| {
+            // A user dump's backend contexts are its threads, not processors.
+            session.target.require_kernel().map_err(err)?;
             require_halted(session, "vcpus")?;
             Ok(session
                 .vcpus()
@@ -822,6 +843,7 @@ impl Cpu {
 
     fn current_info(&self, py: Python<'_>) -> PyResult<VcpuInfo> {
         self.owner.with(py, |session| {
+            session.target.require_kernel().map_err(err)?;
             require_halted(session, "vcpus")?;
             session
                 .vcpus()
@@ -955,6 +977,7 @@ impl Cpu {
                     owner.clone_ref(py),
                     thread.clone(),
                     process.clone(),
+                    None,
                     index,
                     frame,
                     false,

@@ -86,6 +86,7 @@ repl_command! {
     summary: "List or decode GENERAL_LOOKASIDE caches.",
     details: "With no argument, the command walks the exported nonpaged and paged lookaside lists and detects cycles. With an address, it decodes only that entry.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -113,6 +114,7 @@ repl_command! {
     summary: "Check the block headers of the pool page that contains an address.",
     details: "The command reports the page as VALID or INVALID, with the first inconsistency. The blocks of a classic pool page must make a chain from the start of the page to its end, in which the PreviousSize of each block matches the BlockSize of the block before it. Segment-heap pages (Windows 10 1903 and later) have no PreviousSize chain, so on these pages the inconsistency is a block whose BlockSize runs over the header of another block. The PoolType of a classic block must also identify the pool (paged or nonpaged) that holds the page. A level of 1 or more also lists all block headers. The command does not do the single-bit-error scan of WinDbg.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -122,6 +124,7 @@ repl_command! {
     summary: "Decode a memory descriptor list and the page frames it describes.",
     details: "The command shows the _MDL header and the PFN array that follows it. The header fields are Next, Size, MdlFlags by MDL_* name, Process, MappedSystemVa, StartVa, ByteCount, and ByteOffset. By default, the PFN count is the number of pages that ByteCount spans from ByteOffset, and a pfn-count overrides this value. In both cases, the count cannot be more than the slots that Size leaves after the header. If the Size, ByteOffset, or span of the header cannot describe an MDL, the command gives an error. The command does not follow Next, so for a chained MDL, run !mdl on the Next address.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {

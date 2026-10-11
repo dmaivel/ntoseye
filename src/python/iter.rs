@@ -10,6 +10,7 @@ use super::breakpoints::Breakpoint;
 use super::module::{Driver, Module};
 use super::process::{Heap, Process};
 use super::thread::{Cpu, Thread};
+use super::userdump::UserThread;
 use crate::view::execution::py::ExceptionPolicy;
 use crate::view::mm::py::MemoryRegion;
 
@@ -59,6 +60,10 @@ typed_iterator! {
 typed_iterator! {
     /// Iterator over `dbg.cpus`.
     CpuIterator(Py<Cpu>)
+}
+typed_iterator! {
+    /// Iterator over `dbg.user_dump.threads`.
+    UserThreadIterator(UserThread)
 }
 typed_iterator! {
     /// Iterator over `dbg.breakpoints`.

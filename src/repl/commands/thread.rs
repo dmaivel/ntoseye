@@ -36,6 +36,7 @@ repl_command! {
     usage: "threads [filter]",
     summary: "List the Windows threads, with an optional filter by process, PID, TID, or ETHREAD.",
     completion: Process,
+    target: Kernel,
 }
 
 repl_command! {

@@ -10,12 +10,18 @@ use crate::error::Result;
 use crate::expr::Expr;
 use crate::guest::ModuleInfo;
 use crate::memory::PAGE_SIZE;
+use crate::target::TargetKind;
 use crate::target::mm::{
-    MemoryRegionInfo, VadProtection, VadType, VprotDetail, memory_state_name, memory_type_name,
-    page_protection_name,
+    MEM_FREE, MemoryRegionInfo, VadProtection, VadType, VprotDetail, memory_state_name,
+    memory_type_name, page_protection_name,
+};
+use crate::target::usermode::address::{
+    AddressSummary, CapturedRange, SummaryRow, UserRegion, human_size, state_label, summarize,
+    type_label,
 };
 use crate::types::VirtAddr;
 use crate::ui;
+use crate::userdump::MemoryRegion;
 
 use crate::repl::*;
 
@@ -36,10 +42,10 @@ repl_command! {
 repl_command! {
     cmd_address;
     names: ["!address", "address"],
-    usage: "!address <address-expression>",
+    usage: "!address [-summary | address-expression]",
     summary: "Show the module and section, or the VAD region, that an address belongs to.",
+    details: "On a user-mode minidump the command uses the regions that the dump's memory-info list records. Without an argument, it lists them with their state, protection, type, allocation base, usage, and how much of each the dump captured, followed by a summary by usage, type, state, and protection; -summary shows only the summary. With an address, it shows the region that holds it. Usage comes from the dump's modules, its threads' stacks and TEBs, the PEB, and the heaps in the PEB's ProcessHeaps array; it is <unknown> for any other region. A dump without a memory-info list shows the memory ranges it captured instead.",
     completion: Expression,
-    target: Kernel,
 }
 
 repl_command! {
@@ -47,9 +53,8 @@ repl_command! {
     names: ["!vprot", "vprot"],
     usage: "!vprot <address>",
     summary: "Show the VirtualQuery data for a user address.",
-    details: "The command shows the region, state, protection, and type of a user address, as VirtualQuery reports them. It looks up the address in the current process context, which you can select with `.process /p <pid>`. The VAD that holds the address gives AllocationBase, AllocationProtect, and Type, and the state and protection of each page come from its PTE. For a page without a PTE, they come from the VAD (private memory) or from its prototype PTE (a section view). RegionSize runs from the page of the address to the first page that differs. An address that is not in a VAD is MEM_FREE up to the next VAD. The scan stops after 262,144 page-table steps.",
+    details: "The command shows the region, state, protection, and type of a user address, as VirtualQuery reports them. It looks up the address in the current process context, which you can select with `.process /p <pid>`. The VAD that holds the address gives AllocationBase, AllocationProtect, and Type, and the state and protection of each page come from its PTE. For a page without a PTE, they come from the VAD (private memory) or from its prototype PTE (a section view). RegionSize runs from the page of the address to the first page that differs. An address that is not in a VAD is MEM_FREE up to the next VAD. The scan stops after 262,144 page-table steps. On a user-mode minidump the command reads the region from the dump's memory-info list, which records what VirtualQuery returned when the dump was written; RegionSize runs from the page of the address to the end of that region.",
     completion: Expression,
-    target: Kernel,
 }
 
 pub fn format_region_size(size: u64) -> String {
@@ -304,6 +309,19 @@ impl ReplState<'_> {
         let Some(address) = self.eval_or_report(expr) else {
             return Ok(());
         };
+        if let Some(info) = self.ctx.target.user_dump_info() {
+            if info.regions.is_none() {
+                error!("!vprot: the minidump has no memory-info list");
+            } else if let Some(region) = info.region(address.0) {
+                print_virtual_query(&VirtualQuery::in_user_dump_region(region, address.0), false);
+            } else {
+                error!(
+                    "!vprot: the minidump's memory-info list has no region holding {}",
+                    ui::addr(address.0)
+                );
+            }
+            return Ok(());
+        }
         let Some(process) = self.ctx.target.current_process() else {
             error!("!vprot needs a process context (.process /p <pid>)");
             return Ok(());
@@ -316,6 +334,9 @@ impl ReplState<'_> {
     }
 
     fn cmd_address(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+        if self.ctx.target.kind() == TargetKind::UserDump {
+            return self.cmd_address_user_dump(&invocation);
+        }
         let Some(expr) = invocation.arg(0) else {
             outln!("{}\n", command_help("address"));
             return Ok(());
@@ -379,6 +400,272 @@ impl ReplState<'_> {
 
         Ok(())
     }
+
+    /// `!address` on a user-mode minidump: its memory-info list, or the
+    /// ranges it captured when it has none.
+    fn cmd_address_user_dump(&mut self, invocation: &CommandInvocation<'_>) -> Result<()> {
+        if invocation.argv.len() > 1 {
+            outln!("{}\n", command_help("address"));
+            return Ok(());
+        }
+        let summary_only = invocation.arg(0) == Some("-summary");
+        let address = match invocation.arg(0) {
+            Some(expression) if !summary_only => match self.eval_or_report(expression) {
+                Some(address) => Some(address),
+                None => return Ok(()),
+            },
+            _ => None,
+        };
+        let has_regions = self
+            .ctx
+            .target
+            .user_dump_info()
+            .is_some_and(|info| info.regions.is_some());
+        if !has_regions {
+            return self.print_captured_ranges(address);
+        }
+        let map = match self.ctx.target.user_address_map() {
+            Ok(map) => map,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
+        if let Some(address) = address {
+            match map.region_at(address.0) {
+                Some(region) => self.print_user_region(address, region),
+                None => outln!(
+                    "address {}: not in any region the minidump's memory-info list records\n",
+                    ui::addr(address.0)
+                ),
+            }
+            return Ok(());
+        }
+        if !summary_only {
+            print_padded_table(user_region_table(&map.regions));
+            outln!();
+        }
+        print_address_summary(&summarize(&map.regions));
+        Ok(())
+    }
+
+    fn print_user_region(&self, address: VirtAddr, entry: &UserRegion) {
+        let region = &entry.region;
+        let captured = self
+            .ctx
+            .target
+            .user_dump()
+            .is_some_and(|dump| dump.read_virtual(address, &mut [0u8; 1]).is_ok());
+        outln!("address {}", ui::addr(address.0));
+        outln!("  Usage:             {}", usage_cell(entry));
+        outln!("  BaseAddress:       {}", ui::addr(region.base));
+        outln!("  EndAddress:        {}", ui::addr(entry.end()));
+        outln!(
+            "  RegionSize:        {:016x} ({})",
+            region.size,
+            human_size(region.size)
+        );
+        outln!(
+            "  State:             {:08x}  {}",
+            region.state,
+            state_label(region.state)
+        );
+        outln!(
+            "  Protect:           {:08x}  {}",
+            region.protect,
+            page_protection_name(region.protect)
+        );
+        outln!(
+            "  Type:              {:08x}  {}",
+            region.kind,
+            type_label(region.kind)
+        );
+        outln!("  AllocationBase:    {}", ui::addr(region.allocation_base));
+        outln!(
+            "  AllocationProtect: {:08x}  {}",
+            region.allocation_protect,
+            page_protection_name(region.allocation_protect)
+        );
+        outln!(
+            "  Captured:          {} of the region; this address {}",
+            captured_cell(entry),
+            if captured {
+                "is captured"
+            } else {
+                "is not captured"
+            }
+        );
+        outln!();
+    }
+
+    /// What `!address` shows of a dump without a memory-info list: the
+    /// ranges it captured, or the one holding `address`.
+    fn print_captured_ranges(&self, address: Option<VirtAddr>) -> Result<()> {
+        outln!(
+            "{}",
+            ui::muted(
+                "the minidump records no memory-info list (MemoryInfoListStream): region state, protection, and type are not known"
+            )
+        );
+        let ranges = match self.ctx.target.user_captured_ranges() {
+            Ok(ranges) => ranges,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
+        if let Some(address) = address {
+            match ranges
+                .iter()
+                .find(|range| address.0.wrapping_sub(range.start) < range.length)
+            {
+                Some(range) => outln!(
+                    "address {}: in the captured range {} - {} ({}), {}\n",
+                    ui::addr(address.0),
+                    ui::addr(range.start),
+                    ui::addr(range.start.saturating_add(range.length)),
+                    human_size(range.length),
+                    captured_usage_cell(range)
+                ),
+                None => outln!(
+                    "address {}: not in the memory the minidump captured\n",
+                    ui::addr(address.0)
+                ),
+            }
+            return Ok(());
+        }
+        let total: u64 = ranges.iter().map(|range| range.length).sum();
+        outln!(
+            "captured memory: {} ranges, {}",
+            ranges.len(),
+            human_size(total)
+        );
+        let mut builder = Builder::default();
+        builder.push_record(["Start", "End", "Size", "Usage"]);
+        for range in &ranges {
+            builder.push_record([
+                ui::addr(range.start).to_string(),
+                ui::addr(range.start.saturating_add(range.length)).to_string(),
+                format!("{:#x}", range.length),
+                captured_usage_cell(range),
+            ]);
+        }
+        print_padded_table(builder);
+        Ok(())
+    }
+}
+
+fn usage_cell(entry: &UserRegion) -> String {
+    match &entry.detail {
+        Some(detail) => format!("{} [{detail}]", entry.usage.label()),
+        None => entry.usage.label().to_string(),
+    }
+}
+
+fn captured_usage_cell(range: &CapturedRange) -> String {
+    match &range.detail {
+        Some(detail) => format!("{} [{detail}]", range.usage.label()),
+        None => range.usage.label().to_string(),
+    }
+}
+
+/// How much of a region the dump holds: `all`, `none`, or the bytes.
+fn captured_cell(entry: &UserRegion) -> String {
+    match entry.captured {
+        0 => "none".to_string(),
+        bytes if bytes == entry.region.size => "all".to_string(),
+        bytes => format!("{bytes:#x} bytes"),
+    }
+}
+
+/// `!address`'s region list on a user-mode minidump.
+fn user_region_table(regions: &[UserRegion]) -> Builder {
+    let mut builder = Builder::default();
+    builder.push_record([
+        "Base",
+        "End",
+        "Size",
+        "Type",
+        "State",
+        "Protect",
+        "AllocBase",
+        "Usage",
+        "Captured",
+    ]);
+    for entry in regions {
+        let region = &entry.region;
+        let free = region.state == MEM_FREE;
+        builder.push_record([
+            ui::addr(region.base).to_string(),
+            ui::addr(entry.end()).to_string(),
+            format!("{:#x}", region.size),
+            type_label(region.kind),
+            state_label(region.state),
+            page_protection_name(region.protect),
+            if free {
+                String::new()
+            } else {
+                ui::addr(region.allocation_base).to_string()
+            },
+            usage_cell(entry),
+            if free {
+                String::new()
+            } else {
+                captured_cell(entry)
+            },
+        ]);
+    }
+    builder
+}
+
+/// One section of `!address`'s summary, each row's share of the regions in
+/// use (`busy`; none for free regions) and of all of them (`total`).
+fn print_summary_section(title: &str, rows: &[SummaryRow], total: u64, busy: u64) {
+    let percent = |size: u64, of: u64| {
+        if of == 0 {
+            "-".to_string()
+        } else {
+            format!("{:.2}%", size as f64 * 100.0 / of as f64)
+        }
+    };
+    let mut builder = Builder::default();
+    builder.push_record([title, "Regions", "Size", "", "% busy", "% total"]);
+    for row in rows {
+        let free = row.label == "Free" || row.label == "MEM_FREE";
+        builder.push_record([
+            row.label.clone(),
+            row.regions.to_string(),
+            format!("{:#x}", row.size),
+            human_size(row.size),
+            if free {
+                String::new()
+            } else {
+                percent(row.size, busy)
+            },
+            percent(row.size, total),
+        ]);
+    }
+    print_padded_table(builder);
+}
+
+fn print_address_summary(summary: &AddressSummary) {
+    let busy = summary.busy;
+    print_summary_section("Usage", &summary.by_usage, summary.total, busy);
+    print_summary_section("Type (in use)", &summary.by_type, summary.total, busy);
+    print_summary_section("State", &summary.by_state, summary.total, busy);
+    print_summary_section(
+        "Protect (committed)",
+        &summary.by_protect,
+        summary.total,
+        busy,
+    );
+    outln!(
+        "total {:#x} ({}), in use {:#x} ({})\n",
+        summary.total,
+        human_size(summary.total),
+        summary.busy,
+        human_size(summary.busy)
+    );
 }
 
 fn print_vprot(detail: &VprotDetail) {
@@ -388,17 +675,61 @@ fn print_vprot(detail: &VprotDetail) {
         detail.process.name,
         ui::Value(detail.process.pid)
     );
-    outln!("BaseAddress:       {}", ui::addr(detail.base_address.0));
-    outln!("AllocationBase:    {}", ui::addr(detail.allocation_base.0));
+    print_virtual_query(
+        &VirtualQuery {
+            base_address: detail.base_address.0,
+            allocation_base: detail.allocation_base.0,
+            allocation_protect: detail.allocation_protect,
+            region_size: detail.region_size,
+            state: detail.state,
+            protect: detail.protect,
+            kind: detail.kind,
+        },
+        detail.truncated,
+    );
+}
+
+/// The `MEMORY_BASIC_INFORMATION` fields `!vprot` shows.
+struct VirtualQuery {
+    base_address: u64,
+    allocation_base: u64,
+    allocation_protect: u32,
+    region_size: u64,
+    state: u32,
+    protect: u32,
+    kind: u32,
+}
+
+impl VirtualQuery {
+    /// What VirtualQuery reports for `address` in a region of a minidump's
+    /// memory-info list: the region from the address's page on.
+    fn in_user_dump_region(region: &MemoryRegion, address: u64) -> Self {
+        let page = address & !(PAGE_SIZE as u64 - 1);
+        let base_address = page.max(region.base);
+        Self {
+            base_address,
+            allocation_base: region.allocation_base,
+            allocation_protect: region.allocation_protect,
+            region_size: region.base + region.size - base_address,
+            state: region.state,
+            protect: region.protect,
+            kind: region.kind,
+        }
+    }
+}
+
+fn print_virtual_query(query: &VirtualQuery, truncated: bool) {
+    outln!("BaseAddress:       {}", ui::addr(query.base_address));
+    outln!("AllocationBase:    {}", ui::addr(query.allocation_base));
     outln!(
         "AllocationProtect: {:08x}  {}",
-        detail.allocation_protect,
-        page_protection_name(detail.allocation_protect)
+        query.allocation_protect,
+        page_protection_name(query.allocation_protect)
     );
     outln!(
         "RegionSize:        {:016x}{}",
-        detail.region_size,
-        if detail.truncated {
+        query.region_size,
+        if truncated {
             "  (scan bound reached; at least this much)"
         } else {
             ""
@@ -406,18 +737,18 @@ fn print_vprot(detail: &VprotDetail) {
     );
     outln!(
         "State:             {:08x}  {}",
-        detail.state,
-        memory_state_name(detail.state)
+        query.state,
+        memory_state_name(query.state)
     );
     outln!(
         "Protect:           {:08x}  {}",
-        detail.protect,
-        page_protection_name(detail.protect)
+        query.protect,
+        page_protection_name(query.protect)
     );
     outln!(
         "Type:              {:08x}  {}",
-        detail.kind,
-        memory_type_name(detail.kind)
+        query.kind,
+        memory_type_name(query.kind)
     );
     outln!();
 }
@@ -446,5 +777,28 @@ mod tests {
         assert_eq!(vad_type_label(&region(0, false)), "mapped");
         assert_eq!(vad_type_label(&region(3, true)), "private");
         assert_eq!(vad_type_label(&region(3, false)), "vad:3");
+    }
+
+    #[test]
+    fn user_dump_virtual_query_starts_at_the_address_page() {
+        let region = MemoryRegion {
+            base: 0x7ff6_0000_0000,
+            allocation_base: 0x7ff5_ffff_0000,
+            allocation_protect: 0x80,
+            size: 0x5000,
+            state: 0x1000,
+            protect: 0x20,
+            kind: 0x100_0000,
+        };
+        let middle = VirtualQuery::in_user_dump_region(&region, 0x7ff6_0000_2345);
+        assert_eq!(middle.base_address, 0x7ff6_0000_2000);
+        assert_eq!(middle.region_size, 0x3000);
+        assert_eq!(middle.allocation_base, 0x7ff5_ffff_0000);
+        let first = VirtualQuery::in_user_dump_region(&region, 0x7ff6_0000_0010);
+        assert_eq!(first.base_address, region.base);
+        assert_eq!(first.region_size, region.size);
+        let last = VirtualQuery::in_user_dump_region(&region, 0x7ff6_0000_4fff);
+        assert_eq!(last.base_address, 0x7ff6_0000_4000);
+        assert_eq!(last.region_size, 0x1000);
     }
 }

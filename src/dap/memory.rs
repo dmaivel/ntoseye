@@ -50,6 +50,7 @@ impl Server {
     }
 
     pub(super) fn on_write_memory(&mut self, args: &Value) -> Handled {
+        self.refuse_on_user_dump("writing memory")?;
         let reference = arg_str(args, "memoryReference")
             .ok_or_else(|| "missing memoryReference".to_string())?;
         let base = parse_address(&reference)?;

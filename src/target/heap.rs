@@ -1681,6 +1681,17 @@ fn segment_heap_detail(
 
 impl Target {
     fn heap_context(&self) -> Result<(Dtb, VirtAddr, bool)> {
+        // A user-mode minidump is its one process: the selected thread's TEB
+        // names the PEB, and the captured memory serves every root.
+        if let Some(peb) = self.user_dump_pseudo_register("peb") {
+            let peb = peb.ok_or_else(|| {
+                Error::DebugInfo(
+                    "the PEB's address is unknown: the minidump does not hold the selected thread's TEB"
+                        .into(),
+                )
+            })?;
+            return Ok((self.current_dtb(), VirtAddr(peb), false));
+        }
         let process = self.attached_process().ok_or_else(|| {
             Error::DebugInfo("this command requires an attached user process".into())
         })?;

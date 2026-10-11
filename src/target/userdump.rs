@@ -164,3 +164,20 @@ impl Target {
         self.user_dump_info().map(|info| info.arch)
     }
 }
+
+impl Target {
+    /// The named values of a register buffer: on a user-mode minidump only
+    /// the registers its CONTEXT records (see [`context_registers`]), so the
+    /// empty control-register slots past it are not shown as zeroes;
+    /// elsewhere every register the map names.
+    pub fn register_values(
+        &self,
+        register_map: &RegisterMap,
+        registers: &[u8],
+    ) -> HashMap<String, u64> {
+        match self.user_dump_info() {
+            Some(info) => context_registers(info.arch, register_map, registers),
+            None => register_map.to_hashmap(registers),
+        }
+    }
+}

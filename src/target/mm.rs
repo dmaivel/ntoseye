@@ -22,7 +22,9 @@ mod vad;
 mod vm;
 mod vprot;
 
-pub use vprot::{memory_state_name, memory_type_name, page_protection_name};
+pub use vprot::{
+    MEM_COMMIT, MEM_FREE, MEM_IMAGE, memory_state_name, memory_type_name, page_protection_name,
+};
 
 const MAX_MI_FIELDS: usize = 64;
 

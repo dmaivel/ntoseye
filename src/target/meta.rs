@@ -13,8 +13,9 @@ use crate::ntstatus::{ntstatus_name, win32_error_name};
 use crate::session::Session;
 use crate::symbols::ModuleSymbolStatus;
 use crate::target::{DiagnosticValue, ListCursor, ListTermination, Target};
-use crate::triage_report::time::filetime_to_iso;
+use crate::triage_report::time::{filetime_to_iso, unix_time_to_iso};
 use crate::types::VirtAddr;
+use crate::userdump::UserDumpInfo;
 
 const VERIFIER_LEVEL_FLAGS: &[(u64, &str)] = &[
     (0x0000_0001, "Special pool"),
@@ -679,6 +680,28 @@ pub struct TargetVersionDetail {
     pub time: TargetTimeDetail,
     pub backend: Option<String>,
     pub dump: Option<TargetDumpMetadata>,
+    /// What a user-mode minidump records of its process and how it was
+    /// written; `None` for a kernel target.
+    pub user_dump: Option<TargetUserDumpDetail>,
+}
+
+/// A user-mode minidump's process and header, for `vertarget`.
+#[derive(Debug, Clone)]
+pub struct TargetUserDumpDetail {
+    pub process_name: Option<String>,
+    pub process_id: Option<u32>,
+    /// `SystemInfoStream.ProcessorLevel` and `ProcessorRevision`: on AMD64
+    /// the family, and the model (high byte) and stepping (low byte).
+    pub processor_level: u16,
+    pub processor_revision: u16,
+    pub service_pack: Option<String>,
+    /// `MINIDUMP_HEADER.Flags`: the `MINIDUMP_TYPE` it was written with.
+    pub flags: u64,
+    /// [`minidump_type_names`] of `flags`.
+    pub flag_names: Vec<String>,
+    pub threads: usize,
+    pub modules: usize,
+    pub exception_code: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -688,6 +711,138 @@ pub struct TargetTimeDetail {
     pub interrupt_time: Option<u64>,
     pub uptime_seconds: Option<u64>,
     pub uptime: Option<String>,
+    /// What a user-mode minidump records of time; `None` for a kernel
+    /// target. A user dump records no system time or system uptime, so the
+    /// fields above stay `None` for one.
+    pub user_dump: Option<UserDumpTimeDetail>,
+}
+
+/// When a user-mode minidump was written and how long its process had run,
+/// from its header and `MiscInfoStream`.
+#[derive(Debug, Clone)]
+pub struct UserDumpTimeDetail {
+    /// `MINIDUMP_HEADER.TimeDateStamp`, seconds since 1970 (UTC).
+    pub written: u32,
+    pub written_iso: Option<String>,
+    /// `written` in the system's time zone, `2026-10-11T08:17:41+02:00`.
+    pub written_local: Option<String>,
+    /// The name of that zone's period in effect.
+    pub time_zone: Option<String>,
+    pub process_created: Option<u32>,
+    pub process_created_iso: Option<String>,
+    /// From process creation to the dump.
+    pub process_uptime_seconds: Option<u64>,
+    pub process_uptime: Option<String>,
+    /// User-mode and kernel-mode time the process had run, in seconds.
+    pub user_time_seconds: Option<u32>,
+    pub kernel_time_seconds: Option<u32>,
+}
+
+/// `MINIDUMP_TYPE` flags, by bit.
+const MINIDUMP_TYPES: [(u64, &str); 25] = [
+    (0x1, "MiniDumpWithDataSegs"),
+    (0x2, "MiniDumpWithFullMemory"),
+    (0x4, "MiniDumpWithHandleData"),
+    (0x8, "MiniDumpFilterMemory"),
+    (0x10, "MiniDumpScanMemory"),
+    (0x20, "MiniDumpWithUnloadedModules"),
+    (0x40, "MiniDumpWithIndirectlyReferencedMemory"),
+    (0x80, "MiniDumpFilterModulePaths"),
+    (0x100, "MiniDumpWithProcessThreadData"),
+    (0x200, "MiniDumpWithPrivateReadWriteMemory"),
+    (0x400, "MiniDumpWithoutOptionalData"),
+    (0x800, "MiniDumpWithFullMemoryInfo"),
+    (0x1000, "MiniDumpWithThreadInfo"),
+    (0x2000, "MiniDumpWithCodeSegs"),
+    (0x4000, "MiniDumpWithoutAuxiliaryState"),
+    (0x8000, "MiniDumpWithFullAuxiliaryState"),
+    (0x1_0000, "MiniDumpWithPrivateWriteCopyMemory"),
+    (0x2_0000, "MiniDumpIgnoreInaccessibleMemory"),
+    (0x4_0000, "MiniDumpWithTokenInformation"),
+    (0x8_0000, "MiniDumpWithModuleHeaders"),
+    (0x10_0000, "MiniDumpFilterTriage"),
+    (0x20_0000, "MiniDumpWithAvxXStateContext"),
+    (0x40_0000, "MiniDumpWithIptTrace"),
+    (0x80_0000, "MiniDumpScanInaccessiblePartialPages"),
+    (0x100_0000, "MiniDumpFilterWriteCombinedMemory"),
+];
+
+/// The `MINIDUMP_TYPE` names of `flags` in bit order (`MiniDumpNormal` for
+/// none), with any bit Windows does not define kept as its value.
+pub fn minidump_type_names(flags: u64) -> Vec<String> {
+    if flags == 0 {
+        return vec!["MiniDumpNormal".to_string()];
+    }
+    let mut names: Vec<String> = MINIDUMP_TYPES
+        .iter()
+        .filter(|(bit, _)| flags & bit != 0)
+        .map(|(_, name)| (*name).to_string())
+        .collect();
+    let known = MINIDUMP_TYPES.iter().fold(0, |mask, (bit, _)| mask | bit);
+    if flags & !known != 0 {
+        names.push(format!("{:#x}", flags & !known));
+    }
+    names
+}
+
+/// Seconds since 1970 (UTC) as ISO-8601 local time in a zone `bias` minutes
+/// behind UTC (`TIME_ZONE_INFORMATION`'s sign: UTC = local + bias).
+pub fn unix_to_local_iso(seconds: u64, bias: i32) -> Option<String> {
+    let local = seconds.checked_add_signed(-i64::from(bias) * 60)?;
+    let utc = unix_time_to_iso(local)?;
+    let offset = -i64::from(bias);
+    let sign = if offset < 0 { '-' } else { '+' };
+    let offset = offset.unsigned_abs();
+    Some(format!(
+        "{}{sign}{:02}:{:02}",
+        utc.strip_suffix('Z')?,
+        offset / 60,
+        offset % 60
+    ))
+}
+
+fn user_dump_time(info: &UserDumpInfo) -> UserDumpTimeDetail {
+    let written = info.time_date_stamp;
+    let process_uptime_seconds = info
+        .process_create_time
+        .and_then(|created| written.checked_sub(created))
+        .map(u64::from);
+    UserDumpTimeDetail {
+        written,
+        written_iso: unix_time_to_iso(u64::from(written)),
+        written_local: info
+            .time_zone
+            .as_ref()
+            .and_then(|zone| unix_to_local_iso(u64::from(written), zone.bias)),
+        time_zone: info.time_zone.as_ref().map(|zone| zone.name.clone()),
+        process_created: info.process_create_time,
+        process_created_iso: info
+            .process_create_time
+            .and_then(|created| unix_time_to_iso(u64::from(created))),
+        process_uptime_seconds,
+        process_uptime: process_uptime_seconds.map(format_uptime),
+        user_time_seconds: info.process_cpu_times.map(|(user, _)| user),
+        kernel_time_seconds: info.process_cpu_times.map(|(_, kernel)| kernel),
+    }
+}
+
+fn user_dump_detail(info: &UserDumpInfo) -> TargetUserDumpDetail {
+    TargetUserDumpDetail {
+        process_name: info.process_name().map(str::to_string),
+        process_id: info.process_id,
+        processor_level: info.system.processor_level,
+        processor_revision: info.system.processor_revision,
+        service_pack: info
+            .system
+            .service_pack
+            .clone()
+            .filter(|text| !text.is_empty()),
+        flags: info.flags,
+        flag_names: minidump_type_names(info.flags),
+        threads: info.threads.len(),
+        modules: info.modules.len(),
+        exception_code: info.exception.as_ref().map(|exception| exception.code),
+    }
 }
 
 fn dump_system_time(target: &Target) -> Option<u64> {
@@ -724,6 +879,16 @@ fn uptime_seconds(target: &Target, interrupt_time: Option<u64>) -> Option<u64> {
 }
 
 fn target_time(target: &Target, kuser: &KuserSharedData<'_>) -> TargetTimeDetail {
+    if let Some(info) = target.user_dump_info() {
+        return TargetTimeDetail {
+            system_time: None,
+            system_time_iso: None,
+            interrupt_time: None,
+            uptime_seconds: None,
+            uptime: None,
+            user_dump: Some(user_dump_time(info)),
+        };
+    }
     let system_time = system_time(target, kuser);
     let interrupt_time = kuser.interrupt_time();
     let uptime_seconds = uptime_seconds(target, interrupt_time);
@@ -733,6 +898,7 @@ fn target_time(target: &Target, kuser: &KuserSharedData<'_>) -> TargetTimeDetail
         interrupt_time,
         uptime_seconds,
         uptime: uptime_seconds.map(format_uptime),
+        user_dump: None,
     }
 }
 
@@ -924,11 +1090,17 @@ impl Target {
             }),
         };
         let dump = dump_metadata(self, base);
+        let user_info = self.user_dump_info();
+        // A user dump's MiscInfo build string is the system's build lab.
+        let build_lab = match user_info {
+            Some(info) => info.build_string.clone().filter(|text| !text.is_empty()),
+            None => shared_build_lab(self),
+        };
         Ok(TargetVersionDetail {
             major_version: major,
             minor_version: minor,
             build_number: build,
-            build_lab: shared_build_lab(self),
+            build_lab,
             architecture: self.arch().label().to_string(),
             processors,
             product: product_label(product),
@@ -945,6 +1117,7 @@ impl Target {
             time,
             backend: None,
             dump,
+            user_dump: user_info.map(user_dump_detail),
         })
     }
 
@@ -1122,5 +1295,47 @@ mod tests {
         assert_eq!(ntstatus.kind, "NTSTATUS");
         assert_eq!(ntstatus.name, "STATUS_ACCESS_VIOLATION");
         assert_eq!(ntstatus.severity.as_deref(), Some("error"));
+    }
+
+    #[test]
+    fn minidump_types_decode_in_bit_order_with_normal_for_none() {
+        assert_eq!(minidump_type_names(0), ["MiniDumpNormal"]);
+        assert_eq!(
+            minidump_type_names(0x1826),
+            [
+                "MiniDumpWithFullMemory",
+                "MiniDumpWithHandleData",
+                "MiniDumpWithUnloadedModules",
+                "MiniDumpWithFullMemoryInfo",
+                "MiniDumpWithThreadInfo",
+            ]
+        );
+        assert_eq!(
+            minidump_type_names(0x2_0000_0004),
+            ["MiniDumpWithHandleData", "0x200000000"]
+        );
+    }
+
+    #[test]
+    fn local_time_applies_the_bias_and_writes_its_offset() {
+        // 2026-10-11T06:17:41Z.
+        let written = 1_791_699_461;
+        assert_eq!(
+            unix_to_local_iso(written, -120).as_deref(),
+            Some("2026-10-11T08:17:41+02:00")
+        );
+        assert_eq!(
+            unix_to_local_iso(written, 330).as_deref(),
+            Some("2026-10-11T00:47:41-05:30")
+        );
+        // West of UTC, across midnight.
+        assert_eq!(
+            unix_to_local_iso(written, 420).as_deref(),
+            Some("2026-10-10T23:17:41-07:00")
+        );
+        assert_eq!(
+            unix_to_local_iso(written, 0).as_deref(),
+            Some("2026-10-11T06:17:41+00:00")
+        );
     }
 }

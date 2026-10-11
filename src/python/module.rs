@@ -63,7 +63,9 @@ impl Modules {
     fn infos(&self, py: Python<'_>) -> PyResult<Vec<ModuleInfo>> {
         let kernel = matches!(self.space, Space::Kernel);
         self.owner.with_in(py, &self.space.context(), |session| {
-            if kernel {
+            // A user-mode minidump's one address space lists the dump's
+            // modules, as `lm` does.
+            if kernel && session.target.user_dump().is_none() {
                 session.target.kernel_modules_with_versions()
             } else {
                 // The scope's own list: the process's loader lists, or the

@@ -133,7 +133,9 @@ impl<'a> StackTracer<'a> {
 
     pub(super) fn is_executable_address(&mut self, address: u64) -> bool {
         let Some(module) = self.module_containing(address) else {
-            return false;
+            // Code no module holds is executable where a dynamic function
+            // table describes it.
+            return self.target.arch() == Arch::Amd64 && self.dynamic_function(address).is_some();
         };
 
         let rva = (address - module.info.base_address.0) as u32;

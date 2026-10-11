@@ -3,14 +3,18 @@ use crate::cpu_state;
 use crate::dbg_backend::BugcheckInfo;
 use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix};
+use crate::guest::ModuleInfo;
+use crate::pe::headers::CodeView;
 use crate::target::{Target, ThreadInfo, wait_reason_name};
 use crate::triage_report::{
-    BlackboxState, FailureSignatureSource, KmdfLogFinding, POWER_THREAD_STACK_LIMIT,
-    PowerFailureFinding, PowerThreadRole, TRIAGE_BACKTRACE_LIMIT, TriageReport, WheaRecordState,
-    exception_code_name, power_failure_finding, time::filetime_to_iso,
+    BlackboxState, CodeOwner, CulpritAttribution, CulpritSubject, FailureSignatureSource,
+    KmdfLogFinding, POWER_THREAD_STACK_LIMIT, PowerFailureFinding, PowerThreadRole,
+    TRIAGE_BACKTRACE_LIMIT, TriageReport, UserDumpTriage, UserExceptionFinding, UserProcessSummary,
+    UserStackSource, UserStackThread, WheaRecordState, exception_code_name, power_failure_finding,
+    time::{filetime_to_iso, unix_time_to_iso},
 };
 use crate::ui;
-use crate::unwind::StackTrace;
+use crate::unwind::{FrameSource, StackTrace};
 
 use super::power::{
     duration_text, holder_text, print_power_irp_list, print_power_worker_list, request_text,
@@ -22,9 +26,8 @@ repl_command! {
     names: ["!analyze", "analyze"],
     usage: "!analyze [-v] [-show <bugcheck-code> [p1 p2 p3 p4]] [-hang]",
     summary: "Show a first-pass crash triage report.",
-    details: "Without -v, the command shows the short verdict: the bugcheck line, the failure signature, the culprit, the verifier and WHEA findings, and the relevant modules. -v adds the full bugcheck arguments, the faulting context, the stack, and all modules. For a DRIVER_POWER_STATE_FAILURE (0x9F), the report names what is stuck: for subtype 0x3, the blocked IRP, the driver whose stack location it is pending in, which becomes the culprit, the device stack of the PDO, and the power IRP worker threads with their stacks; for 0x4, the thread that holds the PnP lock and its stack; for 0x1, 0x2, and 0x500, the driver of the device or driver object in the parameters. -show decodes a bugcheck code when there is no crash, and for a 0x9F reads what its parameters point to in the target. -hang triages the waits on each processor.",
+    details: "Without -v, the command shows the short verdict: the bugcheck line, the failure signature, the culprit, the verifier and WHEA findings, and the relevant modules. -v adds the full bugcheck arguments, the faulting context, the stack, and all modules. For a DRIVER_POWER_STATE_FAILURE (0x9F), the report names what is stuck: for subtype 0x3, the blocked IRP, the driver whose stack location it is pending in, which becomes the culprit, the device stack of the PDO, and the power IRP worker threads with their stacks; for 0x4, the thread that holds the PnP lock and its stack; for 0x1, 0x2, and 0x500, the driver of the device or driver object in the parameters. -show decodes a bugcheck code when there is no crash, and for a 0x9F reads what its parameters point to in the target. -hang triages the waits on each processor. On a user-mode minidump, the report is the exception the dump was written for: its code, flags, and decoded parameters, the faulting thread and module, the stack from the exception's context, and the first frame outside the system modules (ntdll, kernelbase, the C++ and .NET runtimes), which the signature and the culprit name; -v adds the whole stack, the exception's registers, the faulting and culprit modules' details, and all modules. -show and -hang need a kernel.",
     completion: Expression,
-    target: Kernel,
 }
 
 repl_command! {
@@ -33,6 +36,7 @@ repl_command! {
     usage: ".bugcheck",
     summary: "Show the bugcheck code and its four parameters.",
     details: "Uses the bugcheck that the stop reported. If there is none, it uses the bugcheck in nt!KiBugCheckData, as $bug_code and $bug_param1-4 do, and if there is none there, the bugcheck in the crash dump header. !analyze uses the same order.",
+    target: Kernel,
 }
 
 pub const ANALYZE_STACK_LIMIT: usize = 16;
@@ -73,6 +77,7 @@ pub fn signature_source(source: FailureSignatureSource) -> &'static str {
         FailureSignatureSource::CurrentInstruction => "current instruction",
         FailureSignatureSource::TopFrame => "top frame",
         FailureSignatureSource::PowerFailureDriver => "driver the 0x9F names",
+        FailureSignatureSource::FirstNonSystemFrame => "first frame outside system modules",
         FailureSignatureSource::CodeOnly => "code only",
     }
 }
@@ -299,6 +304,10 @@ fn print_hang_report(report: &HangReport) {
 }
 
 fn print_triage_report(report: &TriageReport, verbose: bool) {
+    if let Some(user) = &report.user {
+        print_user_triage_report(report, user, verbose);
+        return;
+    }
     outln!("{}", ui::label("crash analysis"));
 
     match &report.bugcheck {
@@ -483,11 +492,18 @@ fn print_crash_intelligence(report: &TriageReport) {
 
     if let Some(culprit) = &report.culprit {
         print_section("culprit attribution");
+        let subject = match &culprit.subject {
+            CulpritSubject::Module(module) => ui::symbol(module),
+            CulpritSubject::DynamicCode(_) => culprit_label(culprit),
+        };
         outln!(
             "  {}  {}",
-            ui::symbol(&culprit.module),
+            subject,
             ui::muted(&format!("{:?} confidence", culprit.confidence).to_ascii_lowercase())
         );
+        if let Some(caller) = culprit_caller_text(culprit) {
+            outln!("  {caller}");
+        }
         for evidence in &culprit.evidence {
             match evidence.address {
                 Some(address) => outln!(
@@ -888,6 +904,420 @@ fn print_dump_metadata(report: &TriageReport) {
     }
 }
 
+/// The one-line verdict of a user dump's exception: `exception 0xc0000005 at
+/// app!Parse+0x12 on thread 1f40.1a2c: STATUS_ACCESS_VIOLATION`.
+pub fn user_exception_verdict(exception: &UserExceptionFinding) -> String {
+    format!(
+        "exception {:#010x} at {} on thread {}: {}",
+        exception.code, exception.symbol, exception.thread, exception.name
+    )
+}
+
+/// What holds a code address, in words: a module (marked when it is a
+/// system one), or why no module does.
+pub fn code_owner_text(owner: &CodeOwner) -> String {
+    match owner {
+        CodeOwner::Module { name, system: true } => format!("{name} (system module)"),
+        CodeOwner::Module { name, .. } => name.clone(),
+        CodeOwner::DynamicCode {
+            table_start,
+            table_end,
+        } => format!(
+            "JIT-compiled or generated code in no module (dynamic function table \
+             {table_start:#x}-{table_end:#x})"
+        ),
+        CodeOwner::Unowned {
+            region: Some(region),
+        } => format!("code in no module ({region})"),
+        CodeOwner::Unowned { region: None } => "code in no module".into(),
+    }
+}
+
+/// What a culprit attribution names: a module, or `JIT-compiled code at
+/// 0x7ff89b6c6a48 (dynamic function table 0x7ff89b6c0020-0x7ff89b740000, no
+/// module)`.
+pub fn culprit_label(culprit: &CulpritAttribution) -> String {
+    match &culprit.subject {
+        CulpritSubject::Module(module) => module.clone(),
+        CulpritSubject::DynamicCode(code) => format!(
+            "JIT-compiled code at {:#x} (dynamic function table {:#x}-{:#x}, no module)",
+            code.address, code.table_start, code.table_end
+        ),
+    }
+}
+
+/// For a culprit in generated code, the module code that called into it:
+/// `called from #4 system.core.ni+0x5ecdfa (System.Core.ni.dll)`.
+pub fn culprit_caller_text(culprit: &CulpritAttribution) -> Option<String> {
+    let CulpritSubject::DynamicCode(code) = &culprit.subject else {
+        return None;
+    };
+    Some(match &code.caller {
+        Some(caller) => match &caller.owner {
+            CodeOwner::Module { name, .. } => {
+                format!("called from #{} {} ({name})", caller.index, caller.symbol)
+            }
+            _ => format!("called from #{} {}", caller.index, caller.symbol),
+        },
+        None => "called from no frame a module holds".into(),
+    })
+}
+
+/// `exception context of thread 10f4.cc4 (Main)`, the heading of a user
+/// dump report's stack.
+pub fn user_stack_heading(thread: &UserStackThread) -> String {
+    let context = match thread.source {
+        UserStackSource::ExceptionContext => "exception context of thread",
+        UserStackSource::ThreadContext => "thread",
+    };
+    match &thread.name {
+        Some(name) => format!("{context} {} ({name})", thread.id),
+        None => format!("{context} {}", thread.id),
+    }
+}
+
+/// `Windows 10.0.26200 AMD64 (26100.1.amd64fre...)`.
+pub fn user_system_text(process: &UserProcessSummary) -> String {
+    let mut text = format!(
+        "Windows {}.{}.{} {}",
+        process.major_version,
+        process.minor_version,
+        process.build_number,
+        process.arch.label()
+    );
+    if let Some(build) = &process.build_string {
+        text.push_str(&format!(" ({build})"));
+    }
+    text
+}
+
+/// `20 threads, 91 modules, 3 unloaded modules, 512 handles`.
+pub fn user_captured_text(process: &UserProcessSummary) -> String {
+    let mut text = format!(
+        "{} threads, {} modules, {} unloaded modules",
+        process.threads, process.modules, process.unloaded_modules
+    );
+    match process.handles {
+        Some(handles) => text.push_str(&format!(", {handles} handles")),
+        None => text.push_str(", no handle data"),
+    }
+    text
+}
+
+/// `powershell.exe (pid 4340)`.
+pub fn user_process_label(process: &UserProcessSummary) -> String {
+    let name = process.name.as_deref().unwrap_or("unknown process");
+    match process.pid {
+        Some(pid) => format!("{name} (pid {pid})"),
+        None => name.to_string(),
+    }
+}
+
+/// What `-v` leaves out of a user dump report, because a user dump has no
+/// kernel to read it from.
+pub const USER_DUMP_NOT_APPLICABLE: &str = "not in a user-mode minidump: bugcheck, trap frame, processor, verifier, WHEA, power, blackbox, and KMDF findings (they need a kernel)";
+
+fn print_user_triage_report(report: &TriageReport, user: &UserDumpTriage, verbose: bool) {
+    outln!("{}", ui::label("crash analysis"));
+    match &user.exception {
+        Some(exception) => print_user_exception(report, exception, verbose),
+        None => outln!(
+            "{}",
+            ui::muted("no exception: the dump records none (it was not written for a crash)")
+        ),
+    }
+
+    print_user_process(&user.process);
+
+    if user.exception.is_none() || verbose {
+        match &user.stack_thread {
+            Some(thread) => print_section(&format!("stack, {}", user_stack_heading(thread))),
+            None => print_section("stack"),
+        }
+        match &report.backtrace {
+            Some(trace) => {
+                let limit = if verbose {
+                    TRIAGE_BACKTRACE_LIMIT
+                } else {
+                    ANALYZE_STACK_LIMIT
+                };
+                for (number, frame) in trace.frames.iter().take(limit).enumerate() {
+                    outln!(
+                        "  {}",
+                        format_stack_frame(Some(number), frame, false, false)
+                    );
+                }
+                let hidden = trace.frames.len().saturating_sub(limit) + trace.truncated;
+                if hidden > 0 {
+                    outln!("  {}", more_frames(hidden));
+                }
+            }
+            None => outln!("  {}", ui::muted("unavailable")),
+        }
+    }
+    if verbose && !user.exception_registers.is_empty() {
+        print_section("exception registers");
+        for row in user.exception_registers.chunks(3) {
+            let cells: Vec<String> = row
+                .iter()
+                .map(|(name, value)| {
+                    format!("{} {}", ui::muted(&format!("{name:<6}")), ui::addr(*value))
+                })
+                .collect();
+            outln!("  {}", cells.join("   "));
+        }
+    }
+
+    if !report.warnings.is_empty() {
+        print_section("warnings");
+        for warning in &report.warnings {
+            outln!("  {}", ui::muted(warning));
+        }
+    }
+
+    print_crash_intelligence(report);
+    if let Some(exception) = &user.exception
+        && report.culprit.is_none()
+    {
+        print_section("culprit attribution");
+        outln!("  {}", ui::muted(&user_no_culprit_text(exception)));
+    }
+    if verbose {
+        print_user_module_details(report, user);
+    }
+    print_report_modules(report, verbose);
+    if verbose {
+        outln!();
+        outln!("{}", ui::muted(USER_DUMP_NOT_APPLICABLE));
+    }
+}
+
+/// Why a user dump report names no culprit.
+pub fn user_no_culprit_text(exception: &UserExceptionFinding) -> String {
+    match &exception.blamed_frame {
+        Some(frame) => format!(
+            "none: frame #{} ({:#x}) is the first outside the system modules: {}",
+            frame.index,
+            frame.ip,
+            code_owner_text(&frame.owner)
+        ),
+        None => "none: every frame of the faulting stack is in a system module".into(),
+    }
+}
+
+fn print_user_exception(report: &TriageReport, exception: &UserExceptionFinding, verbose: bool) {
+    outln!("{}", user_exception_verdict(exception));
+    print_section("exception");
+    outln!(
+        "  {} {:#010x}  {}",
+        ui::muted("code   "),
+        exception.code,
+        exception.name
+    );
+    let flags = if exception.flag_names.is_empty() {
+        String::new()
+    } else {
+        format!("  {}", exception.flag_names.join(" | "))
+    };
+    outln!("  {} {:#x}{flags}", ui::muted("flags  "), exception.flags);
+    outln!(
+        "  {} {}  {}",
+        ui::muted("address"),
+        ui::addr(exception.address),
+        ui::symbol(&exception.symbol)
+    );
+    outln!(
+        "  {} {}",
+        ui::muted("module "),
+        code_owner_text(&exception.address_owner)
+    );
+    let thread_name = exception
+        .thread_name
+        .as_deref()
+        .map(|name| format!(" ({name})"))
+        .unwrap_or_default();
+    outln!(
+        "  {} {}{thread_name}",
+        ui::muted("thread "),
+        ui::thread_id(&exception.thread)
+    );
+    if let Some(summary) = &exception.summary {
+        outln!("  {} {}", ui::muted("meaning"), summary);
+    }
+    if exception.parameters.is_empty() {
+        outln!("  {} {}", ui::muted("params "), ui::muted("none"));
+    }
+    for (index, parameter) in exception.parameters.iter().enumerate() {
+        let label = parameter
+            .label
+            .map(|label| format!("  {label}"))
+            .unwrap_or_default();
+        let meaning = parameter
+            .meaning
+            .as_deref()
+            .map(|meaning| format!(": {meaning}"))
+            .unwrap_or_default();
+        outln!(
+            "  {} {}{label}{meaning}",
+            ui::muted(&format!("param {}", index + 1)),
+            ui::addr(parameter.value)
+        );
+    }
+    if exception.record != 0 {
+        outln!(
+            "  {} {}  {}",
+            ui::muted("chained"),
+            ui::addr(exception.record),
+            ui::muted("(.exr reads it)")
+        );
+    }
+
+    if verbose {
+        return;
+    }
+    // The frames from the fault to the code it is blamed on; -v shows the
+    // whole stack instead.
+    let Some(trace) = &report.backtrace else {
+        return;
+    };
+    print_section("faulting frames");
+    let start = exception.faulting_frame.unwrap_or(0);
+    let end = exception
+        .blamed_frame
+        .as_ref()
+        .map_or(start, |frame| frame.index);
+    for (index, frame) in trace.frames.iter().enumerate().take(end + 1).skip(start) {
+        let source = if frame.source == FrameSource::Scan {
+            format!("  {}", ui::muted("[scan]"))
+        } else {
+            String::new()
+        };
+        outln!(
+            "  #{index:<2} {}  {}{source}",
+            ui::addr(frame.ip),
+            ui::symbol(&frame.symbol)
+        );
+    }
+    match &exception.blamed_frame {
+        Some(frame) => outln!(
+            "  {}",
+            ui::muted(&format!(
+                "#{} is the first frame outside the system modules: {}",
+                frame.index,
+                code_owner_text(&frame.owner)
+            ))
+        ),
+        None => outln!(
+            "  {}",
+            ui::muted("every frame of the stack is in a system module")
+        ),
+    }
+}
+
+fn print_user_process(process: &UserProcessSummary) {
+    print_section("process");
+    outln!(
+        "  {} {}",
+        ui::muted("process "),
+        user_process_label(process)
+    );
+    outln!("  {} {}", ui::muted("system  "), user_system_text(process));
+    if let Some(time) = unix_time_to_iso(u64::from(process.dump_time)) {
+        outln!("  {} {}", ui::muted("written "), time);
+    }
+    if let Some(time) = process
+        .create_time
+        .and_then(|time| unix_time_to_iso(u64::from(time)))
+    {
+        outln!("  {} {}", ui::muted("created "), time);
+    }
+    if let Some((user, kernel)) = process.cpu_times {
+        outln!(
+            "  {} {user} s user, {kernel} s kernel",
+            ui::muted("cpu time")
+        );
+    }
+    outln!(
+        "  {} {}",
+        ui::muted("captured"),
+        user_captured_text(process)
+    );
+}
+
+/// The modules whose details `-v` shows on a user dump: the faulting
+/// module, then the culprit's when it is another (for a culprit in
+/// generated code, the module that called into it).
+pub fn user_detail_modules<'a>(
+    report: &'a TriageReport,
+    user: &UserDumpTriage,
+) -> Vec<&'a ModuleInfo> {
+    let mut names: Vec<&str> = Vec::new();
+    if let Some(CodeOwner::Module { name, .. }) = user
+        .exception
+        .as_ref()
+        .map(|exception| &exception.address_owner)
+    {
+        names.push(name);
+    }
+    let culprit_modules = report.culprit.iter().flat_map(|culprit| {
+        let caller = match &culprit.subject {
+            CulpritSubject::DynamicCode(code) => {
+                code.caller.as_ref().and_then(|caller| match &caller.owner {
+                    CodeOwner::Module { name, .. } => Some(name.as_str()),
+                    _ => None,
+                })
+            }
+            CulpritSubject::Module(_) => None,
+        };
+        culprit.module().into_iter().chain(caller)
+    });
+    for name in culprit_modules {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+        .iter()
+        .filter_map(|name| report.modules.iter().find(|module| module.name == *name))
+        .collect()
+}
+
+/// The details of the faulting module and the culprit's (`-v`): path,
+/// version, timestamp, checksum, and PDB.
+fn print_user_module_details(report: &TriageReport, user: &UserDumpTriage) {
+    for module in user_detail_modules(report, user) {
+        print_section(&format!("module {}", module.name));
+        outln!(
+            "  {} {}-{}",
+            ui::muted("range   "),
+            ui::addr(module.base_address.0),
+            ui::addr(module.end_address().0)
+        );
+        if let Some(path) = &module.path {
+            outln!("  {} {}", ui::muted("path    "), path);
+        }
+        if let Some(version) = &module.file_version {
+            outln!("  {} {}", ui::muted("version "), version);
+        }
+        if let Some(stamp) = module.time_date_stamp {
+            outln!("  {} {stamp:#x}", ui::muted("time    "));
+        }
+        if let Some(checksum) = module.checksum {
+            outln!("  {} {checksum:#x}", ui::muted("checksum"));
+        }
+        if let Some(pdb) = module.codeview.as_ref().map(codeview_path) {
+            outln!("  {} {}", ui::muted("pdb     "), pdb);
+        }
+    }
+}
+
+/// The PDB path a CodeView record names.
+pub fn codeview_path(codeview: &CodeView) -> &str {
+    match codeview {
+        CodeView::Rsds { path, .. } | CodeView::Nb10 { path, .. } => path,
+    }
+}
+
 impl ReplState<'_> {
     fn cmd_bugcheck(&mut self) -> Result<()> {
         let Some(analysis) = self.ctx.bugcheck() else {
@@ -920,6 +1350,18 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
+        // -show and -hang read kernel structures; the report itself does not.
+        let kernel_option = if options.show.is_some() {
+            Some("-show")
+        } else {
+            options.hang.then_some("-hang")
+        };
+        if let Some(option) = kernel_option
+            && let Err(error) = self.ctx.target.require_kernel()
+        {
+            error!("{} {option}: {error}", invocation.name);
+            return Ok(());
+        }
         if let Some(info) = &options.show {
             print_bugcheck_info(&self.ctx.target, info);
             // The structures a 0x9F's parameters point to, read from the

@@ -947,7 +947,11 @@ pub fn build_stacktrace_with_context(
     regs: &[u8],
     limit: usize,
 ) -> RecoveredStackTrace {
-    build_stacktrace_from_values(debugger, register_map.to_hashmap(regs), limit)
+    build_stacktrace_from_values(
+        debugger,
+        debugger.register_values(register_map, regs),
+        limit,
+    )
 }
 
 /// [`build_stacktrace_with_context`] for the registers of `thread`, the
@@ -982,7 +986,11 @@ pub fn build_stacktrace_with_register_values(
 ) -> RecoveredStackTrace {
     let mut values = register_map.supplied_values(values);
     let dtb_name = debugger.arch().dtb_register();
-    if values.get(dtb_name).is_none_or(|dtb| *dtb == 0) && register_map.contains(dtb_name) {
+    // A user dump's one address space has no page-table root to name.
+    if debugger.user_dump().is_none()
+        && values.get(dtb_name).is_none_or(|dtb| *dtb == 0)
+        && register_map.contains(dtb_name)
+    {
         values.insert(dtb_name.to_string(), debugger.current_dtb());
     }
     build_stacktrace_from_values(debugger, values, limit)
@@ -1651,6 +1659,41 @@ mod tests {
             [
                 (FRAMED_RIP, FrameSource::Current),
                 (RETURN_ADDRESS, FrameSource::Scan)
+            ]
+        );
+    }
+
+    /// A function that called itself returns to its own call site: the
+    /// unwind lists both frames and goes on to the outer caller, as the
+    /// stack moved between them.
+    #[test]
+    fn a_recursive_call_unwinds_through_both_frames() {
+        let outer_rbp = CALLER_RBP - FRAMED_RBP;
+        let session = frame_pointer_session_with(&[
+            (8, FRAMED_RIP),
+            (outer_rbp as usize, 0),
+            (outer_rbp as usize + 8, RETURN_ADDRESS),
+        ]);
+        let seed = registers(&[
+            ("rip", FRAMED_RIP),
+            ("rsp", FRAMED_RSP),
+            ("rbp", FRAMED_RBP),
+        ]);
+
+        let trace =
+            build_stacktrace_with_register_values(&session.target, &session.register_map, &seed, 3);
+
+        let frames: Vec<_> = trace
+            .frames
+            .iter()
+            .map(|frame| (frame.frame.ip, frame.frame.sp, frame.frame.source))
+            .collect();
+        assert_eq!(
+            frames,
+            [
+                (FRAMED_RIP, FRAMED_RSP, FrameSource::Current),
+                (FRAMED_RIP, FRAMED_RBP + 16, FrameSource::Unwind),
+                (RETURN_ADDRESS, CALLER_RBP + 16, FrameSource::Unwind),
             ]
         );
     }

@@ -1,4 +1,17 @@
-//! Windows FILETIME to ISO-8601 conversion.
+//! Windows FILETIME and Unix time to ISO-8601 conversion.
+
+/// Seconds between 1601-01-01 (the FILETIME epoch) and 1970-01-01.
+const FILETIME_UNIX_EPOCH_SECONDS: u64 = 11_644_473_600;
+
+/// Convert seconds since 1970-01-01 UTC (a minidump's `time_t` fields) to an
+/// ISO-8601 UTC timestamp.
+pub fn unix_time_to_iso(seconds: u64) -> Option<String> {
+    filetime_to_iso(
+        seconds
+            .checked_add(FILETIME_UNIX_EPOCH_SECONDS)?
+            .checked_mul(10_000_000)?,
+    )
+}
 
 /// Convert a Windows FILETIME value to an ISO-8601 UTC timestamp.
 pub fn filetime_to_iso(ft: u64) -> Option<String> {

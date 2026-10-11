@@ -16,6 +16,7 @@ repl_command! {
     usage: "!poaction",
     summary: "Show the system power action and the power IRPs in flight.",
     details: "Shows nt!PopAction: the power action in progress, its state and flags, and the system state being entered, with the device notification pass when one runs. Then lists every power IRP the power manager has allocated, from nt!PopIrpList: its PDO, the device it was sent to, its minor function and the power state it asks for, where it is pending now (the driver of its current stack location), and how long the drivers have had it when the power IRP watchdog runs. Last come the threads that pass power IRPs to drivers, from nt!PopIrpThreadList, with the IRP and device each is working on.",
+    target: Kernel,
 }
 
 repl_command! {
@@ -25,6 +26,7 @@ repl_command! {
     summary: "Show the power state of a device object.",
     details: "Shows the device's driver and power flags, the system and device power states its driver last set with PoSetPowerState (from the PowerFlags of its DEVOBJ_EXTENSION), the idle detection the driver registered, if any, the device state PnP records in the device node of the stack, whether the driver registered with the power framework and the device power IRP that it has outstanding, and the power IRPs on nt!PopIrpList sent to any device of the stack.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -34,6 +36,7 @@ repl_command! {
     summary: "Show the system power policy in effect.",
     details: "Decodes the SYSTEM_POWER_POLICY that nt!PopPolicy points to, or the one at the address you give: the action for the power button, the sleep button, closing the lid, idling, and overheating, with each action's flags and notification events, the idle timeout and sensitivity, the lightest and deepest sleep states, the display and disk timeouts, the throttling settings, and the battery discharge levels.",
     completion: Expression,
+    target: Kernel,
 }
 
 /// A time in 100 ns units, in seconds to a tenth.

@@ -15,6 +15,7 @@ repl_command! {
     summary: "Show a PnP device node and, optionally, its subtree.",
     details: "Shows the instance path, the service, the state and state history, the flags, the problem code, and the pending IRP of a device node. If you do not give a node, or give 0, the command shows the root device node. Use -r, or a trailing 1 as in WinDbg, to walk the subtree of the node, with one node on each line.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -24,6 +25,7 @@ repl_command! {
     summary: "Show the device stack for a DEVICE_OBJECT or device node.",
     details: "The argument can be any DEVICE_OBJECT in the stack, or the DEVICE_NODE of the stack. The command shows the stack from the top filter down to the PDO, with the !DevObj, !DrvObj, !DevExt, and object name of each device, and a `>` marks the argument. After the stack, the command shows the device node of the PDO.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -31,6 +33,7 @@ repl_command! {
     names: ["!pnptriage", "pnptriage"],
     usage: "!pnptriage",
     summary: "Show the PnP device nodes that have problems, pending IRPs, or incomplete starts.",
+    target: Kernel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

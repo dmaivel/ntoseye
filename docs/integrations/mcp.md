@@ -10,7 +10,7 @@ If the agent's harness keeps a Python kernel alive between calls, such as oh-my-
 | --- | --- |
 | `command` | Runs one REPL line and returns its text with a `[target ...]` trailer. A `;` separates commands, and {command}`help` lists them. The arguments are `line` and `timeout_ms` (default 10 s, maximum 5 min). |
 | `output` | Reads more of a long `command` result: the lines from `offset`, or only the lines that contain `filter`. The arguments are `id`, `offset`, `limit`, and `filter`. |
-| `open` / `close` | `open` attaches to a target using `backend`, `connect`, and, for `kdnet`, `key`. For a crash dump, use `backend: dump` with the dump path as `connect`. `close` releases the target. The server holds one session at a time. |
+| `open` / `close` | `open` attaches to a target using `backend`, `connect`, and, for `kdnet`, `key`. For a crash dump or a [user-mode minidump](#user-mode-minidumps), use `backend: dump` with the dump path as `connect`. `close` releases the target. The server holds one session at a time. |
 
 ## Run control
 
@@ -42,10 +42,11 @@ Every stop costs the agent tokens, so the server draws stops more compactly than
 
 ### The trailer
 
-The trailer takes one of two forms:
+The trailer takes one of three forms:
 
 - `[target running]`
 - `[target halted @ <vcpu> <rip> <symbol> | process <name> (<pid>) | scope <name> (<pid>)]`
+- `[minidump <name> (pid <pid>), <n> threads | thread ~<n> <pid>.<tid> <rip> <symbol> | exception <code> on ~<n> <pid>.<tid>]`, for a [user-mode minidump](#user-mode-minidumps)
 
 In the halted form, `process` is the process whose page tables the stopped vCPU has loaded, and `scope` is the {command}`.process` inspection scope that memory commands read through. The scope stays after the target resumes, so `process` and `scope` can differ.
 
@@ -89,6 +90,24 @@ When a backtrace goes through a module whose PDB is not in the cache yet, ntosey
 The server reads `--backend`, `--connect`, `--kdnet-key`, and `--dump` to attach at launch, so you must set up the VM and its debug transport the same way as for the REPL. For more information, refer to [Choosing a backend](../setup/backends.md). Without these options, the server starts with no target, and the client attaches with `open`.
 
 The guest runs freely between calls. When a breakpoint on a shared page stops the wrong process, ntoseye absorbs the hit in the background and lets the guest continue, so the guest does not stay frozen.
+
+## User-mode minidumps
+
+`open` with `backend: dump` also opens a Windows [user-mode minidump](../using/dumps.md#user-mode-minidumps), and its result describes the process and its threads instead of processors:
+
+```json
+{"backend": "dump", "connect": "powershell-exception.dmp", "status": "connected",
+ "target": "user-mode minidump", "process": "powershell.exe (pid 4340)", "threads": 20,
+ "thread": "10f4.cc4", "exception": "0xe0d7e5e1 at kernelbase!RaiseException+0x8a on thread 10f4.cc4"}
+```
+
+The trailer names the selected thread and the exception:
+
+```text
+[minidump powershell.exe (pid 4340), 20 threads | thread ~17 10f4.cc4 0x7ff9493c2d14 ntdll!NtGetContextThread+0x14 | exception 0xe0d7e5e1 on ~17 10f4.cc4]
+```
+
+{command}`~` lists the threads and `~<n>s` selects one, and `.ecxr; k` shows the stack of the exception. Commands that need a kernel, run control, breakpoints, and writes return an error result (`isError`), such as `!process: this needs a kernel target; a user-mode minidump holds one process and no kernel` or `the minidump backend cannot run or step the target`.
 
 ## stdio (default)
 

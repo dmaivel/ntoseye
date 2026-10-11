@@ -250,7 +250,9 @@ impl BreakpointManager {
             .any(|c| c.capability == capability && c.supported)
         {
             Ok(())
-        } else if let Some(address) = address.filter(|_| user_space) {
+        } else if let Some(address) =
+            address.filter(|_| user_space && client.supports_watchpoints())
+        {
             Err(Error::Breakpoint(format!(
                 "this backend cannot plant a software breakpoint in user space ({:#x}); a hardware breakpoint (ba e1) can stop there",
                 address.0

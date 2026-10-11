@@ -132,14 +132,87 @@ pub struct UserDumpInfo {
     pub process_id: Option<u32>,
     /// Process creation, in seconds since 1970 (UTC).
     pub process_create_time: Option<u32>,
+    /// User-mode and kernel-mode time the process had run, in seconds, as
+    /// `(user, kernel)`.
+    pub process_cpu_times: Option<(u32, u32)>,
+    /// The time zone the system was in when the dump was written.
+    pub time_zone: Option<UserTimeZone>,
     /// `MINIDUMP_MISC_INFO_4.BuildString`.
     pub build_string: Option<String>,
     pub threads: Vec<UserThread>,
     pub modules: Vec<UserModule>,
     pub unloaded_modules: Vec<UnloadedModule>,
     pub exception: Option<UserException>,
+    /// `HandleDataStream`, `None` when the dump has none.
+    pub handles: Option<Vec<UserHandle>>,
+    /// `MemoryInfoListStream`, sorted by base, `None` when the dump has none.
+    pub regions: Option<Vec<MemoryRegion>>,
+    /// `FunctionTableStream`: the dynamic function tables (code no module
+    /// holds, such as JIT-compiled code) the process had registered.
+    pub function_tables: Vec<FunctionTable>,
     /// What was dropped or cut short while parsing, and why.
     pub notes: Vec<String>,
+}
+
+/// `MINIDUMP_MISC_INFO_3.TimeZone`, with `TimeZoneId` choosing the bias in
+/// effect when the dump was written.
+#[derive(Debug, Clone)]
+pub struct UserTimeZone {
+    /// Minutes to add to local time to get UTC, daylight saving included
+    /// when it was in effect.
+    pub bias: i32,
+    /// The zone's name for the period in effect (`StandardName` or
+    /// `DaylightName`).
+    pub name: String,
+}
+
+/// A handle the process held (`MINIDUMP_HANDLE_DESCRIPTOR` or
+/// `MINIDUMP_HANDLE_DESCRIPTOR_2`), as the dump records it.
+#[derive(Debug, Clone)]
+pub struct UserHandle {
+    pub handle: u64,
+    pub type_name: Option<String>,
+    pub object_name: Option<String>,
+    pub attributes: u32,
+    pub granted_access: u32,
+    pub handle_count: u32,
+    pub pointer_count: u32,
+}
+
+/// `MINIDUMP_MEMORY_INFO`: one region of the address space, as
+/// `VirtualQueryEx` reported it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryRegion {
+    pub base: u64,
+    pub allocation_base: u64,
+    pub allocation_protect: u32,
+    pub size: u64,
+    /// `MEM_COMMIT`, `MEM_RESERVE`, or `MEM_FREE`.
+    pub state: u32,
+    pub protect: u32,
+    /// `MEM_IMAGE`, `MEM_MAPPED`, `MEM_PRIVATE`, or 0 for a free region.
+    pub kind: u32,
+}
+
+/// A dynamic function table (`MINIDUMP_FUNCTION_TABLE_DESCRIPTOR`): the
+/// unwind entries for code at `minimum..maximum`, relative to `base`. The
+/// entries' unwind data is in process memory, not in the stream.
+#[derive(Debug, Clone)]
+pub struct FunctionTable {
+    pub minimum: u64,
+    pub maximum: u64,
+    pub base: u64,
+    /// Sorted by `begin`.
+    pub entries: Vec<DynamicFunction>,
+}
+
+/// An AMD64 `RUNTIME_FUNCTION` of a dynamic function table: offsets from
+/// the table's base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DynamicFunction {
+    pub begin: u32,
+    pub end: u32,
+    pub unwind_data: u32,
 }
 
 /// A captured range of process memory and where its bytes are in the file.
@@ -190,6 +263,28 @@ impl UserDumpInfo {
 
     pub fn thread(&self, tid: u32) -> Option<&UserThread> {
         self.threads.iter().find(|thread| thread.tid == tid)
+    }
+
+    /// The dynamic function covering `address`, with the base of its table:
+    /// what unwinds code no module holds.
+    pub fn dynamic_function(&self, address: u64) -> Option<(u64, DynamicFunction)> {
+        self.function_tables
+            .iter()
+            .filter(|table| (table.minimum..table.maximum).contains(&address))
+            .find_map(|table| {
+                let offset = u32::try_from(address.checked_sub(table.base)?).ok()?;
+                let index = table.entries.partition_point(|entry| entry.begin <= offset);
+                let entry = table.entries.get(index.checked_sub(1)?)?;
+                (offset < entry.end).then_some((table.base, *entry))
+            })
+    }
+
+    /// The region of the memory-info list holding `address`.
+    pub fn region(&self, address: u64) -> Option<&MemoryRegion> {
+        let regions = self.regions.as_deref()?;
+        let index = regions.partition_point(|region| region.base <= address);
+        let region = regions.get(index.checked_sub(1)?)?;
+        (address - region.base < region.size).then_some(region)
     }
 
     /// The index `~` lists `tid` at.

@@ -1,7 +1,8 @@
 """Results from a live guest hold what the checked-in stub says they do: every
 property of every result class, recursively, including what each
 `Diagnostic` holds, and each result has exactly the fields its class
-declares (see `conftest.py`)."""
+declares (see `conftest.py`). `NTOSEYE_TEST_USER_DUMP`, the path of a
+Windows user-mode minidump, checks a user dump's results the same way."""
 
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
 from stubcheck import Checker, returns
 
 import ntoseye
@@ -188,3 +190,37 @@ def test_results_match_their_stub_types(halted: Debugger) -> None:
     assert checker.errors == []
     # The sample must keep exercising every kind of field.
     assert checker.forms >= {"class", "Record", "available", "unavailable", "source"}
+
+
+def user_dump_results(dbg: Debugger) -> list[tuple[object, str, Callable[[], object]]]:
+    """A user-mode minidump's results: its own records, and the reports
+    that read its process, thread, and exception."""
+    user = dbg.user_dump
+    assert user is not None
+    inspect = dbg.inspect
+    thread = user.exception_thread or user.current_thread
+    assert thread is not None
+    return [
+        (user, "exception", lambda: user.exception),
+        (user, "handles", lambda: user.handles),
+        (user, "regions", lambda: user.regions),
+        (user, "unloaded_modules", lambda: user.unloaded_modules),
+        (inspect, "version", inspect.version),
+        (inspect, "time", inspect.time),
+        (inspect, "triage", inspect.triage),
+        (inspect, "peb", lambda: inspect.peb(user.process)),
+        (inspect, "teb", lambda: inspect.teb(thread)),
+        (thread, "last_error", thread.last_error),
+    ]
+
+
+def test_user_dump_results_match_their_stub_types() -> None:
+    path = os.environ.get("NTOSEYE_TEST_USER_DUMP")
+    if not path:
+        pytest.skip("set NTOSEYE_TEST_USER_DUMP to a user-mode minidump to check its results")
+    with ntoseye.attach("dmp", path) as dbg:
+        checker = Checker(CLASSES)
+        for owner, method, call in user_dump_results(dbg):
+            cls = type(owner).__name__
+            checker.value(call(), returns(CLASSES[cls], method), f"{cls}.{method}()")
+        assert checker.errors == []

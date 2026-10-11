@@ -52,12 +52,16 @@ impl Target {
 
     /// Translate `address` using `directory_base`, or the current inspection
     /// context when it is `None` (or explicitly zero). Returns `None` when no
-    /// present mapping exists.
+    /// present mapping exists. A user-mode minidump has no physical
+    /// addresses to translate to.
     pub fn virt_to_phys(
         &self,
         directory_base: Option<u64>,
         address: VirtAddr,
     ) -> Result<Option<u64>> {
+        if self.user_dump().is_some() {
+            return Err(Error::NoPhysicalMemory);
+        }
         let dtb = directory_base
             .filter(|value| *value != 0)
             .map(|value| value & self.arch().dtb_page_mask())

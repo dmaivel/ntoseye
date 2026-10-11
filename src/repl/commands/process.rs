@@ -45,6 +45,7 @@ repl_command! {
     usage: "attach <pid>",
     summary: "Attach to a process by PID.",
     completion: Process,
+    target: Kernel,
 }
 
 repl_command! {
@@ -62,6 +63,7 @@ repl_command! {
     names: ["detach"],
     usage: "detach",
     summary: "Detach from the current process.",
+    target: Kernel,
 }
 
 repl_command! {
@@ -70,6 +72,7 @@ repl_command! {
     usage: ".context <dtb>",
     summary: "Set the translation base that inspection uses.",
     completion: Expression,
+    target: Kernel,
 }
 
 struct ProcessArguments<'a> {

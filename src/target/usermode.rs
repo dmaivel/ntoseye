@@ -2,14 +2,20 @@ use std::fs;
 
 use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
-use crate::guest::{ModuleInfo, ProcessInfo};
-use crate::layout::StructRef;
+use crate::guest::{
+    ModuleInfo, ProcessInfo, ProcessModulesDetail, UNKNOWN_MODULE_NAME, merge_wow64_modules,
+    walk_loader_list, walk_loader_list32,
+};
+use crate::layout::{StructRef, Types};
 use crate::ntstatus::{ntstatus_name, win32_error_name};
 use crate::pe::{image_base, read_pe_header_page, size_of_image};
-use crate::target::{DiagnosticValue, ListTermination, Target};
-use crate::types::{Arch, VirtAddr};
+use crate::target::{DiagnosticValue, ListTermination, Target, TargetKind};
+use crate::types::{Arch, Dtb, VirtAddr};
 use iced_x86::{Code, Decoder, DecoderOptions};
 use pelite::{PeView, Wrap};
+
+pub mod address;
+pub mod handles;
 
 const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
 const IMAGE_SCN_MEM_DISCARDABLE: u32 = 0x0200_0000;
@@ -363,6 +369,40 @@ fn teb32_address(teb: VirtAddr, wow_teb_offset: Option<i32>) -> Option<VirtAddr>
     Some(VirtAddr(teb.0.wrapping_add_signed(offset)))
 }
 
+/// Where `!peb`, `!teb`, and `!dlls` read and which layouts decode what they
+/// read. A kernel target reads through a process's page tables with the
+/// kernel's layouts; a user-mode minidump has one address space and no
+/// kernel, so its layouts come from the PDB of its own ntdll.
+#[derive(Clone, Copy)]
+struct UserModeTypes<'a> {
+    types: Types<'a>,
+    /// The module whose PDB holds the layouts, `None` for the kernel's.
+    module: Option<&'static str>,
+}
+
+impl<'a> UserModeTypes<'a> {
+    /// `name` as this view resolves it: qualified with its module unless it
+    /// names one already (`ntdll32!_PEB`).
+    fn qualified(self, name: &str) -> String {
+        match self.module {
+            Some(module) if !name.contains('!') => format!("{module}!{name}"),
+            _ => name.to_string(),
+        }
+    }
+
+    fn struct_at(self, name: &str, address: VirtAddr) -> Result<StructRef<'a>> {
+        let name = self.qualified(name);
+        self.types
+            .struct_at(&name, address)
+            .map_err(|error| match (error, self.module) {
+                (Error::StructNotFound(_), Some(module)) => Error::DebugInfo(format!(
+                    "{name} has no layout: {module}'s PDB is not loaded or does not define it"
+                )),
+                (error, _) => error,
+            })
+    }
+}
+
 fn read_tib_pointer(teb: &StructRef<'_>, field: &str) -> Result<VirtAddr> {
     teb.embedded("NtTib")?.read_pointer(field)
 }
@@ -447,12 +487,97 @@ fn make_unavailable_peb32(address: VirtAddr, error: impl ToString) -> Peb32Detai
 }
 
 impl Target {
-    /// Decode the native `_PEB`, its process-parameter strings/pointers, and
-    /// loader-list heads. Each `DiagnosticValue` records the field-specific
-    /// layout or memory error when that field is unavailable; a WOW64 PEB is
-    /// included when the current process has one and no explicit address was
-    /// requested.
-    pub fn inspect_peb(&self, address: Option<VirtAddr>) -> Result<PebDetail> {
+    /// The address space and layouts a TEB or PEB of `dtb` is read with.
+    fn user_mode_types(&self, dtb: Dtb) -> Result<UserModeTypes<'_>> {
+        Ok(match self.kind() {
+            TargetKind::Kernel => UserModeTypes {
+                types: self.guest()?.ntoskrnl.types_in(dtb),
+                module: None,
+            },
+            TargetKind::UserDump => UserModeTypes {
+                types: self.types_in(dtb),
+                module: Some("ntdll"),
+            },
+        })
+    }
+
+    /// Fail unless a user-mode minidump captured `what` at `address`; a
+    /// kernel target's memory is not checked up front.
+    fn require_captured(&self, address: VirtAddr, what: &str) -> Result<()> {
+        if self.kind() == TargetKind::Kernel {
+            return Ok(());
+        }
+        match self.context_memory().read::<u8>(address) {
+            Ok(_) => Ok(()),
+            Err(Error::NotCaptured { .. }) => Err(Error::DebugInfo(format!(
+                "the minidump did not capture the {what} at {:#x}",
+                address.0
+            ))),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The TEB of the captured thread selected for inspection.
+    fn user_teb(&self) -> Result<VirtAddr> {
+        let thread = self.user_thread().ok_or_else(|| {
+            Error::DebugInfo("no captured thread is selected; select one with ~<n>s".into())
+        })?;
+        match thread.teb {
+            0 => Err(Error::DebugInfo(format!(
+                "the minidump records no TEB for thread {:x}",
+                thread.tid
+            ))),
+            teb => Ok(VirtAddr(teb)),
+        }
+    }
+
+    /// The PEB a user-mode minidump's TEB names (`TEB.ProcessEnvironmentBlock`).
+    fn user_peb(&self, view: UserModeTypes<'_>, teb: VirtAddr) -> Result<VirtAddr> {
+        self.require_captured(teb, "TEB")?;
+        let peb = view
+            .struct_at("_TEB", teb)?
+            .read_pointer("ProcessEnvironmentBlock")?;
+        if peb.is_zero() {
+            return Err(Error::MissingPEB);
+        }
+        Ok(peb)
+    }
+
+    /// The 32-bit PEB of a WOW64 thread's TEB: `TEB32.ProcessEnvironmentBlock`
+    /// of the TEB `TEB.WowTebOffset` places beside it. `None` for a native
+    /// thread or when either TEB is unreadable.
+    fn user_wow64_peb(&self, view: UserModeTypes<'_>, teb: VirtAddr) -> Option<VirtAddr> {
+        let offset = view
+            .struct_at("_TEB", teb)
+            .ok()?
+            .read_field::<i32>("WowTebOffset")
+            .ok()?;
+        let teb32 = teb32_address(teb, Some(offset))?;
+        let peb32 = view
+            .struct_at("_TEB32", teb32)
+            .ok()?
+            .read_field::<u32>("ProcessEnvironmentBlock")
+            .ok()?;
+        (peb32 != 0).then(|| VirtAddr::from(peb32))
+    }
+
+    /// The root, the default PEB (`address` when given), and the WOW64 PEB
+    /// of the process `!peb` and `!dlls` decode: on a kernel target the
+    /// current process's (`EPROCESS.Peb`), on a user-mode minidump its one
+    /// process's, through the selected thread's TEB.
+    fn peb_scope(&self, address: Option<VirtAddr>) -> Result<(Dtb, VirtAddr, Option<VirtAddr>)> {
+        if self.kind() == TargetKind::UserDump {
+            let dtb = self.current_dtb();
+            let view = self.user_mode_types(dtb)?;
+            return match address {
+                Some(address) => Ok((dtb, address, None)),
+                None => {
+                    let teb = self.user_teb()?;
+                    let peb = self.user_peb(view, teb)?;
+                    Ok((dtb, peb, self.user_wow64_peb(view, teb)))
+                }
+            };
+        }
         let process = current_process(self)?;
         let dtb = process.dtb;
         let peb_address = if let Some(address) = address {
@@ -469,7 +594,19 @@ impl Target {
             }
             peb.addr()
         };
-        let types = self.guest()?.ntoskrnl.types_in(dtb);
+        Ok((dtb, peb_address, process.wow64_peb))
+    }
+
+    /// Decode the native `_PEB`, its process-parameter strings/pointers, and
+    /// loader-list heads. Each `DiagnosticValue` records the field-specific
+    /// layout or memory error when that field is unavailable; a WOW64 PEB is
+    /// included when the current process has one and no explicit address was
+    /// requested. On a user-mode minidump the PEB is the one the selected
+    /// thread's TEB names, decoded with ntdll's layouts.
+    pub fn inspect_peb(&self, address: Option<VirtAddr>) -> Result<PebDetail> {
+        let (dtb, peb_address, wow64_peb) = self.peb_scope(address)?;
+        let types = self.user_mode_types(dtb)?;
+        self.require_captured(peb_address, "PEB")?;
         let peb_ref = types.struct_at("_PEB", peb_address)?.prefetch();
 
         let image_base_address =
@@ -505,7 +642,7 @@ impl Target {
         };
 
         let peb32 = if address.is_none() {
-            process.wow64_peb.map(|peb32| self.decode_peb32(dtb, peb32))
+            wow64_peb.map(|peb32| self.decode_peb32(dtb, peb32))
         } else {
             None
         };
@@ -566,8 +703,8 @@ impl Target {
     }
 
     fn decode_peb32(&self, dtb: u64, address: VirtAddr) -> Peb32Detail {
-        let types = match self.guest() {
-            Ok(guest) => guest.ntoskrnl.types_in(dtb),
+        let types = match self.user_mode_types(dtb) {
+            Ok(types) => types,
             Err(error) => return make_unavailable_peb32(address, error),
         };
         let peb_ref = match types.struct_at("_PEB32", address) {
@@ -649,23 +786,30 @@ impl Target {
 
     /// Decode the selected/default native TEB and its WOW64 companion. The
     /// default address is the selected Windows thread's `teb` pseudo-register;
-    /// every independently unreadable field carries its own diagnostic error.
+    /// on a user-mode minidump, the selected captured thread's TEB. Every
+    /// independently unreadable field carries its own diagnostic error.
     pub fn inspect_teb(&self, address: Option<VirtAddr>) -> Result<TebDetail> {
-        let dtb = teb_dtb(self)?;
-        let teb_address = match address {
-            Some(address) => address,
-            None => self
-                .current_thread_pseudo_register("teb")
-                .filter(|address| *address != 0)
-                .map(VirtAddr)
-                .ok_or_else(|| {
-                    Error::DebugInfo(
-                        "current thread has no teb pseudo-register; select a user thread first"
-                            .into(),
-                    )
-                })?,
+        let (dtb, teb_address) = match (self.kind(), address) {
+            (TargetKind::UserDump, address) => (
+                self.current_dtb(),
+                address.map_or_else(|| self.user_teb(), Ok)?,
+            ),
+            (TargetKind::Kernel, Some(address)) => (teb_dtb(self)?, address),
+            (TargetKind::Kernel, None) => (
+                teb_dtb(self)?,
+                self.current_thread_pseudo_register("teb")
+                    .filter(|address| *address != 0)
+                    .map(VirtAddr)
+                    .ok_or_else(|| {
+                        Error::DebugInfo(
+                            "current thread has no teb pseudo-register; select a user thread first"
+                                .into(),
+                        )
+                    })?,
+            ),
         };
-        let types = self.guest()?.ntoskrnl.types_in(dtb);
+        let types = self.user_mode_types(dtb)?;
+        self.require_captured(teb_address, "TEB")?;
         let teb_ref = types.struct_at("_TEB", teb_address)?.prefetch();
         let wow_teb_offset =
             DiagnosticValue::from_result(teb_ref.read_field::<i32>("WowTebOffset"));
@@ -724,8 +868,8 @@ impl Target {
     }
 
     fn decode_teb32(&self, dtb: u64, address: VirtAddr) -> Teb32Detail {
-        let types = match self.guest() {
-            Ok(guest) => guest.ntoskrnl.types_in(dtb),
+        let types = match self.user_mode_types(dtb) {
+            Ok(types) => types,
             Err(error) => return make_unavailable_teb32(address, error),
         };
         let teb_ref = match types.struct_at("_TEB32", address) {
@@ -808,10 +952,17 @@ impl Target {
     /// Walk the current process's native and (when present) WOW64 loader
     /// lists, bounded at 1000 entries and reporting list termination rather
     /// than hiding a partial/corrupt walk. `containing` filters after the two
-    /// lists are merged, matching `!dlls -c`.
+    /// lists are merged, matching `!dlls -c`. On a user-mode minidump the
+    /// lists are walked from the PEB the selected thread's TEB names, as far
+    /// as the dump captured them.
     pub fn loader_modules(&self, containing: Option<VirtAddr>) -> Result<LoaderModulesDetail> {
-        let process = current_process(self)?;
-        let detail = self.guest()?.process_modules_detail(&process)?;
+        let detail = match self.kind() {
+            TargetKind::Kernel => {
+                let process = current_process(self)?;
+                self.guest()?.process_modules_detail(&process)?
+            }
+            TargetKind::UserDump => self.user_loader_modules()?,
+        };
         let modules = detail
             .modules
             .into_iter()
@@ -822,6 +973,60 @@ impl Target {
             modules,
             termination: detail.termination,
             wow64_termination: detail.wow64_termination,
+        })
+    }
+
+    /// A user-mode minidump's loader lists. An entry whose name is not
+    /// captured is named after the module the dump's module list records at
+    /// its base.
+    fn user_loader_modules(&self) -> Result<ProcessModulesDetail> {
+        // Without the loader's lists, the dump's own module list still names
+        // every module.
+        let point_to_lm = |error: Error| match error {
+            Error::DebugInfo(text) => Error::DebugInfo(format!(
+                "{text}; lm lists the modules the dump's module list records"
+            )),
+            error => error,
+        };
+        let (dtb, peb, wow64_peb) = self.peb_scope(None).map_err(point_to_lm)?;
+        let types = self.user_mode_types(dtb)?;
+        let memory = self.context_memory();
+        self.require_captured(peb, "PEB").map_err(point_to_lm)?;
+        let ldr = types.struct_at("_PEB", peb)?.follow("Ldr")?;
+        if !ldr.addr().is_zero() {
+            self.require_captured(ldr.addr(), "loader data (PEB.Ldr)")
+                .map_err(point_to_lm)?;
+        }
+        let (mut modules, termination) = walk_loader_list(
+            types.types,
+            &memory,
+            &ldr,
+            &types.qualified("_LDR_DATA_TABLE_ENTRY"),
+        )?;
+        let mut wow64_termination = None;
+        if let Some(peb32) = wow64_peb {
+            let ldr32 = types.struct_at("_PEB32", peb32)?.read_field::<u32>("Ldr")?;
+            let (modules32, termination32) = walk_loader_list32(&memory, ldr32);
+            wow64_termination = Some(termination32);
+            merge_wow64_modules(&mut modules, modules32);
+        }
+        let recorded = self.user_modules().unwrap_or_default();
+        for module in modules
+            .iter_mut()
+            .filter(|module| module.name == UNKNOWN_MODULE_NAME)
+        {
+            if let Some(known) = recorded
+                .iter()
+                .find(|known| known.base_address == module.base_address)
+            {
+                module.name = known.name.clone();
+                module.short_name = known.short_name.clone();
+            }
+        }
+        Ok(ProcessModulesDetail {
+            modules,
+            termination,
+            wow64_termination,
         })
     }
 

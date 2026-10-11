@@ -136,7 +136,7 @@ Kernel debugging does not start a process, so `launch` and `attach` do the same 
 | `connect` | KD socket path, KDNET listen address, or GDB address. |
 | `kdnetKey` | KDNET encryption key (four base-36 components). |
 | `memorySource` | `auto` (default), `host`, or `kd`, for KD and KDNET only. |
-| `dump` | Opens a crash dump instead of attaching to a live VM, and has priority over the live options. |
+| `dump` | Opens a crash dump or a [user-mode minidump](#user-mode-minidumps) instead of attaching to a live VM, and has priority over the live options. |
 | `symbolPath` | Directories or symbol servers to add to the end of the symbol path, in {command}`.sympath` syntax. |
 | `sourcePath` | Source-path mappings to add to the end of the source path, in {command}`.srcpath` syntax. |
 
@@ -203,6 +203,12 @@ The stacks of other vCPUs start from their own registers, and showing them in th
 For a vCPU halted in the Windows hypervisor, whose stack starts where VTL0 (or, after {command}`.vtlcxr` `1`, VTL1) left off, the call stack shows the hypervisor's own frames first, as the call chain runs, then a label frame (`VTL0, as the hypervisor saved it`), then the frames of that saved state. Each frame keeps the registers and the address space of its own walk, so the Registers pane and expressions show the hypervisor's state for its frames and the guest's for the others. The label has no registers. After {command}`.cxr` in the console, the stack is the hypervisor's alone.
 
 Clients that support `supportsInvalidatedEvent` refresh their panes automatically. With other clients, you refresh the panes manually.
+
+### User-mode minidumps
+
+With a Windows [user-mode minidump](../using/dumps.md#user-mode-minidumps), the DAP threads are the dump's threads, with their thread IDs as DAP thread IDs, and each is named by its `<pid>.<tid>`, its thread name when the dump records one, and its symbol. When the dump records an exception, the session stops with the reason `exception` on the thread that raised it, `exceptionInfo` describes the exception record, and that thread's call stack starts at the exception's context, as after {command}`.ecxr`; a dump without one stops with the reason `entry`. Call stacks, scopes, variables, watches, the Debug Console, the memory view, and the modules view work as on a kernel target.
+
+A user-mode minidump never runs and is read-only, so continue and the step requests fail, breakpoints of every type stay unverified, and writes to memory, registers, and variables fail. With `ntoseye dap --dump <file>`, the `initialize` response already leaves out these capabilities; a dump opened by `launch` or `attach` withdraws them with a `capabilities` event.
 
 ### Locals, registers, and watches
 

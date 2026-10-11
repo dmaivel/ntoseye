@@ -21,7 +21,7 @@ macro_rules! view_modules {
     };
 }
 
-view_modules!([$] backend, bugcheck, cpu, etw, execution, fs, hardware, heap, hypervisor, list, machine, meta, mm, module, ndis, object, pnp, power, process, rcdr, registry, sched, security, storage, symbols, triage, usermode, virtio, wdf);
+view_modules!([$] backend, bugcheck, cpu, etw, execution, fs, hardware, heap, hypervisor, list, machine, meta, mm, module, ndis, object, pnp, power, process, rcdr, registry, sched, security, storage, symbols, triage, userdump, usermode, virtio, wdf);
 
 /// One step of [`with_shape_classes!`]: asks the next module for its classes
 /// (its `shape_classes!`), then emits the module once none are left.

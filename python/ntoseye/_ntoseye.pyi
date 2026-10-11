@@ -2329,8 +2329,8 @@ class CrashContext(BaseRecord):
 @final
 class Culprit(BaseRecord):
     """
-    The module that the available evidence identifies as the cause of the
-    crash.
+    What the available evidence identifies as the cause of the crash: a
+    module, or on a user-mode minidump, generated code no module holds.
     """
     @property
     def confidence(self, /) -> str:
@@ -2338,12 +2338,54 @@ class Culprit(BaseRecord):
         `low`, `medium`, or `high`.
         """
     @property
-    def evidence(self, /) -> list[CulpritEvidence]:
+    def dynamic_code(self, /) -> CulpritDynamicCode |None:
         """
-        The evidence that points to the module.
+        The generated code, for `dynamic_code`.
         """
     @property
-    def module(self, /) -> str: ...
+    def evidence(self, /) -> list[CulpritEvidence]:
+        """
+        The evidence that points to the culprit.
+        """
+    @property
+    def kind(self, /) -> str:
+        """
+        `module`, or `dynamic_code` (JIT-compiled or generated code that
+        a dynamic function table covers; see `dynamic_code`).
+        """
+    @property
+    def module(self, /) -> str |None:
+        """
+        The module. `None` for `dynamic_code`.
+        """
+
+@final
+class CulpritDynamicCode(BaseRecord):
+    """
+    Generated code a culprit attribution names: no module holds it, and
+    a dynamic function table the process registered covers it.
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The blamed frame's address.
+        """
+    @property
+    def caller(self, /) -> UserTriageFrame |None:
+        """
+        The first frame further out that a module holds: the module
+        code that called into the generated code.
+        """
+    @property
+    def table_end(self, /) -> int:
+        """
+        The end (exclusive) of the table's range.
+        """
+    @property
+    def table_start(self, /) -> int:
+        """
+        The start of the dynamic function table's range.
+        """
 
 @final
 class CulpritEvidence(BaseRecord):
@@ -2362,8 +2404,8 @@ class CulpritEvidence(BaseRecord):
         """
         `recorded_broken_driver`, `recorded_bugcheck_driver`,
         `bugcheck_fault_address`, `exception_address`,
-        `current_instruction`, `top_frame`, `power_failure_driver`, or
-        `pnp_lock_owner_stack`.
+        `current_instruction`, `top_frame`, `power_failure_driver`,
+        `pnp_lock_owner_stack`, or `first_non_system_frame`.
         """
 
 @final
@@ -2487,7 +2529,8 @@ class Debugger:
     def eval(self, /, expr: str) -> int:
         """
         Evaluate a debugger (MASM) expression in kernel scope to an integer,
-        using the registers of the stopped vCPU.
+        using the registers of the stopped vCPU (on a user-mode minidump, of
+        the selected thread).
         """
     @property
     def exceptions(self, /) -> Exceptions:
@@ -2532,11 +2575,13 @@ class Debugger:
         """
         Kernel virtual memory, read through the page tables of the kernel. User
         addresses are not mapped here, so read them through `process.memory`.
+        On a user-mode minidump, the captured process's memory.
         """
     @property
     def modules(self, /) -> Modules:
         """
-        Loaded kernel modules: `modules["nt"]`, iteration, `.at(addr)`.
+        Loaded kernel modules: `modules["nt"]`, iteration, `.at(addr)`. On a
+        user-mode minidump, the modules the dump lists.
         """
     def notices(self, /) -> list[Notice]:
         """
@@ -2556,7 +2601,8 @@ class Debugger:
     @property
     def physical(self, /) -> Memory:
         """
-        Guest-physical memory, without address translation.
+        Guest-physical memory, without address translation. A user-mode
+        minidump has none, and its reads raise `NtoseyeError`.
         """
     @property
     def processes(self, /) -> Processes:
@@ -2571,7 +2617,8 @@ class Debugger:
         """
         Rebuild the guest state now (find the kernel again). Stops already do
         this when the backend reports a reload, and this function forces a
-        rebuild.
+        rebuild. A user-mode minidump has no kernel to find, and raises
+        `NtoseyeError`.
         """
     def run(self, /, timeout: float |None = None, *, disposition: Literal["handled", "not_handled"] = ...) -> Stop |None:
         """
@@ -2655,7 +2702,8 @@ class Debugger:
     def symbols(self, /) -> Symbols:
         """
         Kernel-scope symbols: `symbols["nt!KeBugCheckEx"]`, `nearest(addr)`,
-        `search(query)`, and the symbol and source paths.
+        `search(query)`, and the symbol and source paths. On a user-mode
+        minidump, the symbols of the dump's modules.
         """
     @property
     def threads(self, /) -> Threads:
@@ -2675,7 +2723,16 @@ class Debugger:
     @property
     def types(self, /) -> Types:
         """
-        Kernel-scope PDB types: `types["_EPROCESS"].at(addr)`.
+        Kernel-scope PDB types: `types["_EPROCESS"].at(addr)`. On a user-mode
+        minidump, the types of the dump's modules' PDBs (`types["ntdll!_PEB"]`).
+        """
+    @property
+    def user_dump(self, /) -> UserDump |None:
+        """
+        The process, threads, and exception a user-mode minidump captured,
+        or `None` on a kernel target. A user-mode minidump has no kernel, so
+        `processes`, `threads`, `cpus`, `drivers`, `physical`, and the
+        kernel's `inspect` reports raise `NtoseyeError` on it.
         """
     def wait(self, /, timeout: float |None = None) -> Stop |None:
         """
@@ -4476,7 +4533,9 @@ class FailureSignature(BaseRecord):
         """
         The source of the failing location: `bugcheck_fault`,
         `exception_address`, `current_instruction`, `top_frame`,
-        `power_failure_driver` (the driver a 0x9F names), or `code_only`.
+        `power_failure_driver` (the driver a 0x9F names),
+        `first_non_system_frame` (on a user-mode minidump, the first frame
+        outside the system modules), or `code_only`.
         """
     @property
     def symbol(self, /) -> str |None:
@@ -7040,7 +7099,10 @@ class InFlightIrp(BaseRecord):
 class Inspect:
     """
     System-wide reports and helpers that decode an object at an address
-    (`dbg.inspect`). The results are typed `Record`s.
+    (`dbg.inspect`). The results are typed `Record`s. On a user-mode
+    minidump, which has no kernel, only `peb`, `teb`, `version`, `time`,
+    `triage`, `bugcheck`, `exception_record`, and `context_record` apply; the
+    others raise `NtoseyeError`.
     """
     def __repr__(self, /) -> str: ...
     def acl(self, /, address: int) -> Acl:
@@ -7343,10 +7405,11 @@ class Inspect:
         """
         Get the PCI bus hierarchy that pci.sys tracks (`!pcitree`).
         """
-    def peb(self, /, process: Process, address: int |None = None) -> Peb:
+    def peb(self, /, process: Process |UserProcess, address: int |None = None) -> Peb:
         """
         Decode the PEB of a process, with its parameters and loader-list heads
-        (`!peb`).
+        (`!peb`): a kernel target's `Process`, or a user-mode minidump's
+        `UserProcess`.
         """
     def pfn(self, /, value: int, physical_address: bool = False) -> Pfn:
         """
@@ -7515,9 +7578,10 @@ class Inspect:
         allocator (`!sysptes`). `free_runs` lists the free blocks of each
         allocator.
         """
-    def teb(self, /, thread: Thread, address: int |None = None) -> Teb:
+    def teb(self, /, thread: Thread |UserThread, address: int |None = None) -> Teb:
         """
-        Decode the TEB of a thread and its WOW64 companion (`!teb`).
+        Decode the TEB of a thread and its WOW64 companion (`!teb`): a kernel
+        target's `Thread`, or a user-mode minidump's `UserThread`.
         """
     def time(self, /) -> TargetTime:
         """
@@ -8777,7 +8841,8 @@ class Memory:
     def describe(self, /, addr: int) -> AddressDescription:
         """
         Describe the loaded module, kernel region, or process VAD that contains
-        `addr`.
+        `addr`. A user-mode minidump has no VADs and raises `NtoseyeError`;
+        `Debugger.user_dump.region(addr)` describes its region.
         """
     def disassemble(self, /, addr: int, count: int) -> list[DisassembledInstruction]:
         """
@@ -8794,7 +8859,8 @@ class Memory:
     @property
     def dtb(self, /) -> int:
         """
-        The directory-table base that this space uses.
+        The directory-table base that this space uses. A user-mode minidump
+        has none, and raises `NtoseyeError`.
         """
     def function_entry(self, /, addr: int) -> FunctionEntry:
         """
@@ -14093,7 +14159,9 @@ class Stop:
     @property
     def cpu(self, /) -> Cpu:
         """
-        The processor that stopped.
+        The processor that stopped. A user-mode minidump has no processors,
+        so this raises `NtoseyeError` there; `Debugger.user_dump.threads`
+        holds its threads.
         """
     @property
     def process(self, /) -> Process |None:
@@ -15160,7 +15228,8 @@ class TargetKernel(BaseRecord):
 @final
 class TargetTime(BaseRecord):
     """
-    The UTC time and uptime of the target (`.time`).
+    The UTC time and uptime of the target (`.time`). A user-mode minidump
+    records neither: its `user_dump` says when it was written instead.
     """
     @property
     def interrupt_time(self, /) -> int |None:
@@ -15188,6 +15257,54 @@ class TargetTime(BaseRecord):
         """
         Seconds since boot.
         """
+    @property
+    def user_dump(self, /) -> UserDumpTime |None:
+        """
+        When a user-mode minidump was written, and its process's times.
+        `None` for a kernel target.
+        """
+
+@final
+class TargetUserDump(BaseRecord):
+    """
+    A user-mode minidump's process and header.
+    """
+    @property
+    def exception_code(self, /) -> int |None:
+        """
+        The code of the exception the dump was written for.
+        """
+    @property
+    def flag_names(self, /) -> list[str]:
+        """
+        `flags` as `MINIDUMP_TYPE` names (`MiniDumpWithFullMemory`, ...).
+        """
+    @property
+    def flags(self, /) -> int:
+        """
+        The `MINIDUMP_TYPE` flags the dump was written with.
+        """
+    @property
+    def modules(self, /) -> int: ...
+    @property
+    def process_id(self, /) -> int |None: ...
+    @property
+    def process_name(self, /) -> str |None: ...
+    @property
+    def processor_level(self, /) -> int:
+        """
+        `ProcessorLevel`: on AMD64, the processor family.
+        """
+    @property
+    def processor_revision(self, /) -> int:
+        """
+        `ProcessorRevision`: on AMD64, the model (high byte) and stepping
+        (low byte).
+        """
+    @property
+    def service_pack(self, /) -> str |None: ...
+    @property
+    def threads(self, /) -> int: ...
 
 @final
 class TargetVersion(BaseRecord):
@@ -15246,6 +15363,12 @@ class TargetVersion(BaseRecord):
         """
     @property
     def time(self, /) -> TargetTime: ...
+    @property
+    def user_dump(self, /) -> TargetUserDump |None:
+        """
+        What a user-mode minidump records of its process and how it was
+        written. `None` for a kernel target.
+        """
 
 @final
 class Teb(BaseRecord):
@@ -15770,8 +15893,10 @@ class TriageReport(BaseRecord):
     @property
     def culprit(self, /) -> Culprit |None:
         """
-        The module that the evidence identifies as the cause. `None` if
-        the evidence does not identify a non-kernel module.
+        What the evidence identifies as the cause: a module, or on a
+        user-mode minidump, JIT-compiled code. `None` if the evidence
+        identifies neither a non-kernel (or, on a user dump, non-system)
+        module nor generated code.
         """
     @property
     def exception(self, /) -> DumpException |None:
@@ -15819,6 +15944,14 @@ class TriageReport(BaseRecord):
         """
     @property
     def unloaded_drivers(self, /) -> list[UnloadedDriver]: ...
+    @property
+    def user(self, /) -> UserTriage |None:
+        """
+        What a user-mode minidump adds: the process, the exception
+        decoded, and the frame the failure is blamed on. `None` for a
+        kernel target, whose bugcheck and kernel findings do not apply to
+        a user dump.
+        """
     @property
     def verifier(self, /) -> VerifierFinding |None:
         """
@@ -16071,6 +16204,740 @@ class UnwindHandler(BaseRecord):
         """
     @property
     def symbol(self, /) -> str: ...
+
+@final
+class UserDump:
+    """
+    A user-mode minidump (`dbg.user_dump`): the captured process, its
+    threads, the exception the dump was written for, and the handle,
+    memory-region, and unloaded-module records the dump holds. The system
+    it ran on and when it was written are `dbg.inspect.version()` and
+    `dbg.inspect.time()`.
+    """
+    def __repr__(self, /) -> str: ...
+    @property
+    def current_thread(self, /) -> UserThread |None:
+        """
+        The thread selected for inspection, which a debugger opens on the
+        exception's thread when the dump records an exception.
+        """
+    @property
+    def exception(self, /) -> UserDumpException |None:
+        """
+        The exception the dump was written for, or `None` when it records
+        none.
+        """
+    def exception_context(self, /) -> Frame:
+        """
+        The registers at the exception (`.ecxr`), from the CONTEXT the dump
+        stores beside the exception record, as a read-only `Frame`. Raises
+        `NtoseyeError` when the dump records no exception or its context is
+        unusable.
+        """
+    @property
+    def exception_thread(self, /) -> UserThread |None:
+        """
+        The thread that raised the dump's exception, or `None` when the dump
+        records no exception (or its thread is not in the thread list).
+        """
+    @property
+    def handles(self, /) -> list[UserDumpHandle] |None:
+        """
+        The handles the process held, as the dump records them, or `None`
+        when the dump has no handle data.
+        """
+    @property
+    def notes(self, /) -> list[str]:
+        """
+        What ntoseye dropped or cut short while reading the dump, and why.
+        """
+    @property
+    def process(self, /) -> UserProcess:
+        """
+        The captured process.
+        """
+    def region(self, /, address: int) -> UserDumpRegion |None:
+        """
+        The region holding `address`, or `None` when no region holds it or
+        the dump has no memory-info list.
+        """
+    @property
+    def regions(self, /) -> list[UserDumpRegion] |None:
+        """
+        The regions of the process's address space, by base, each with what
+        uses it (`!address`), or `None` when the dump has no memory-info list.
+        A region's bytes read only where the dump captured them.
+        """
+    @property
+    def threads(self, /) -> UserThreads:
+        """
+        The captured threads, by thread id: `threads[tid]`, iteration in the
+        dump's order.
+        """
+    @property
+    def unloaded_modules(self, /) -> list[UserDumpUnloadedModule]:
+        """
+        The modules the process had unloaded.
+        """
+
+@final
+class UserDumpException(BaseRecord):
+    """
+    The exception a user-mode minidump was written for (`ExceptionStream`).
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        Where the exception was raised.
+        """
+    @property
+    def code(self, /) -> int:
+        """
+        The exception code (an NTSTATUS, or an application's own code).
+        """
+    @property
+    def code_name(self, /) -> str |None:
+        """
+        The NTSTATUS name of `code`, when it is one ntoseye knows.
+        """
+    @property
+    def context_error(self, /) -> str |None:
+        """
+        Why the exception's CONTEXT is unusable, `None` when it is.
+        """
+    @property
+    def flags(self, /) -> int: ...
+    @property
+    def parameters(self, /) -> list[int]: ...
+    @property
+    def record(self, /) -> int:
+        """
+        The address of a chained `EXCEPTION_RECORD`, 0 for none.
+        """
+    @property
+    def symbol(self, /) -> str |None:
+        """
+        `address` as `module!function+offset`, when it resolves.
+        """
+    @property
+    def thread_id(self, /) -> int:
+        """
+        The thread that raised it.
+        """
+
+@final
+class UserDumpHandle(BaseRecord):
+    """
+    A handle the process held, as `HandleDataStream` records it. The dump
+    names no object address.
+    """
+    @property
+    def attribute_names(self, /) -> list[str]:
+        """
+        `attributes` as `OBJ_*` names.
+        """
+    @property
+    def attributes(self, /) -> int:
+        """
+        `OBJ_*` attribute flags.
+        """
+    @property
+    def granted_access(self, /) -> int: ...
+    @property
+    def handle(self, /) -> int: ...
+    @property
+    def handle_count(self, /) -> int: ...
+    @property
+    def object_name(self, /) -> str |None: ...
+    @property
+    def pointer_count(self, /) -> int: ...
+    @property
+    def type_name(self, /) -> str |None: ...
+
+@final
+class UserDumpRegion(BaseRecord):
+    """
+    A region of the process's address space, as `VirtualQueryEx`
+    reported it (`MemoryInfoListStream`), with what the dump shows uses it
+    (`!address`).
+    """
+    @property
+    def allocation_base(self, /) -> int: ...
+    @property
+    def allocation_protect(self, /) -> int: ...
+    @property
+    def allocation_protect_name(self, /) -> str:
+        """
+        `allocation_protect` as `PAGE_*` names.
+        """
+    @property
+    def base(self, /) -> int: ...
+    @property
+    def captured(self, /) -> int:
+        """
+        How many of the region's bytes the dump captured; the rest do not
+        read.
+        """
+    @property
+    def detail(self, /) -> str |None:
+        """
+        The module, thread, or heap `usage` names.
+        """
+    @property
+    def kind(self, /) -> int:
+        """
+        The region's type: `MEM_IMAGE`, `MEM_MAPPED`, or `MEM_PRIVATE`; 0 for
+        a free region.
+        """
+    @property
+    def kind_name(self, /) -> str:
+        """
+        `kind`'s name, empty for a free region.
+        """
+    @property
+    def protect(self, /) -> int: ...
+    @property
+    def protect_name(self, /) -> str:
+        """
+        `protect` as `PAGE_*` names; empty for a free or reserved region.
+        """
+    @property
+    def size(self, /) -> int: ...
+    @property
+    def state(self, /) -> int: ...
+    @property
+    def state_name(self, /) -> str:
+        """
+        `MEM_COMMIT`, `MEM_RESERVE`, or `MEM_FREE`.
+        """
+    @property
+    def usage(self, /) -> str:
+        """
+        What uses the region: `Image`, `Stack`, `TEB`, `PEB`, `Heap`,
+        `Free`, or `<unknown>`.
+        """
+
+@final
+class UserDumpTime(BaseRecord):
+    """
+    When a user-mode minidump was written (its header), and how long its
+    process had run (`MiscInfoStream`), where it records them.
+    """
+    @property
+    def kernel_time_seconds(self, /) -> int |None:
+        """
+        Kernel-mode time the process had run, in seconds.
+        """
+    @property
+    def process_created(self, /) -> int |None:
+        """
+        When the process started, in seconds since 1970 (UTC).
+        """
+    @property
+    def process_created_iso(self, /) -> str |None:
+        """
+        `process_created` as ISO 8601 UTC.
+        """
+    @property
+    def process_uptime(self, /) -> str |None:
+        """
+        `process_uptime_seconds` as formatted text.
+        """
+    @property
+    def process_uptime_seconds(self, /) -> int |None:
+        """
+        From the process's start to the dump, in seconds.
+        """
+    @property
+    def time_zone(self, /) -> str |None:
+        """
+        The name of that zone's period in effect.
+        """
+    @property
+    def user_time_seconds(self, /) -> int |None:
+        """
+        User-mode time the process had run, in seconds.
+        """
+    @property
+    def written(self, /) -> int:
+        """
+        When the dump was written, in seconds since 1970 (UTC).
+        """
+    @property
+    def written_iso(self, /) -> str |None:
+        """
+        `written` as ISO 8601 UTC.
+        """
+    @property
+    def written_local(self, /) -> str |None:
+        """
+        `written` in the system's time zone.
+        """
+
+@final
+class UserDumpUnloadedModule(BaseRecord):
+    """
+    A module the process had unloaded (`UnloadedModuleListStream`).
+    """
+    @property
+    def base(self, /) -> int: ...
+    @property
+    def checksum(self, /) -> int: ...
+    @property
+    def name(self, /) -> str: ...
+    @property
+    def size(self, /) -> int: ...
+    @property
+    def time_date_stamp(self, /) -> int: ...
+
+@final
+class UserProcess:
+    """
+    The process a user-mode minidump captured (`dbg.user_dump.process`). It
+    is the only one, so it has no EPROCESS or page-table root; `memory`,
+    `modules`, and `threads` are the dump's.
+    """
+    def __repr__(self, /) -> str: ...
+    @property
+    def memory(self, /) -> Memory:
+        """
+        The process's memory: every captured range, by virtual address.
+        """
+    @property
+    def modules(self, /) -> Modules:
+        """
+        The modules the dump lists.
+        """
+    @property
+    def name(self, /) -> str |None:
+        """
+        The executable's file name, from the first module the dump lists.
+        """
+    @property
+    def peb(self, /) -> Struct |None:
+        """
+        The `ntdll!_PEB` cursor, found through the selected thread's TEB, or
+        `None` when the dump holds neither.
+        """
+    @property
+    def pid(self, /) -> int |None:
+        """
+        The process id, when the dump records it.
+        """
+    @property
+    def threads(self, /) -> UserThreads:
+        """
+        The captured threads.
+        """
+    def to_dict(self, /) -> dict[str, Any]: ...
+
+@final
+class UserThread:
+    """
+    One thread a user-mode minidump captured, identified by its thread id.
+    Its registers are the context the dump recorded for it; nothing about it
+    can be changed.
+    """
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self, /) -> int: ...
+    def __repr__(self, /) -> str: ...
+    @property
+    def affinity(self, /) -> int |None:
+        """
+        The thread's processor affinity mask, when the dump records thread
+        info.
+        """
+    def backtrace(self, /, limit: int = 64) -> list[Frame]:
+        """
+        Recover the thread's stack from its recorded registers.
+        """
+    @property
+    def create_time(self, /) -> int |None:
+        """
+        When the thread started, as a FILETIME, when the dump records thread
+        info.
+        """
+    @property
+    def exception(self, /) -> bool:
+        """
+        Whether this thread raised the exception the dump was written for.
+        """
+    @property
+    def exit_status(self, /) -> int |None:
+        """
+        The thread's exit status, when the dump records thread info.
+        """
+    @property
+    def exit_time(self, /) -> int |None:
+        """
+        When the thread exited, as a FILETIME (0 while it runs), when the
+        dump records thread info.
+        """
+    @property
+    def id(self, /) -> str:
+        """
+        The backend's id for the thread, `<pid>.<tid>` in hex as WinDbg
+        writes it (just `<tid>` when the dump records no process id).
+        """
+    @property
+    def index(self, /) -> int:
+        """
+        The thread's position in the dump's thread list, which `~N` names.
+        """
+    @property
+    def kernel_time(self, /) -> int |None:
+        """
+        Kernel-mode time the thread had run, in 100 ns units, when the dump
+        records thread info.
+        """
+    def last_error(self, /) -> LastError:
+        """
+        Decode the Win32 last-error and NTSTATUS values of the thread (`!gle`).
+        """
+    @property
+    def name(self, /) -> str |None:
+        """
+        The thread's description (`SetThreadDescription`), when the dump
+        records one.
+        """
+    @property
+    def priority(self, /) -> int: ...
+    @property
+    def priority_class(self, /) -> int: ...
+    @property
+    def registers(self, /) -> Registers:
+        """
+        The registers the dump recorded for the thread, read-only. Reading
+        one raises `NtoseyeError` when the thread's context is unusable.
+        """
+    @property
+    def stack(self, /) -> tuple[int, int] |None:
+        """
+        The captured stack as `(start, size)`, or `None` when the dump holds
+        none of it.
+        """
+    @property
+    def start_address(self, /) -> int |None:
+        """
+        The thread's start address, when the dump records thread info.
+        """
+    @property
+    def suspend_count(self, /) -> int: ...
+    @property
+    def teb(self, /) -> Struct |None:
+        """
+        The `ntdll!_TEB` cursor, or `None` when the dump records no TEB.
+        """
+    @property
+    def tid(self, /) -> int:
+        """
+        The thread id.
+        """
+    def to_dict(self, /) -> dict[str, Any]:
+        """
+        The thread as a plain `dict`.
+        """
+    @property
+    def user_time(self, /) -> int |None:
+        """
+        User-mode time the thread had run, in 100 ns units, when the dump
+        records thread info.
+        """
+
+@final
+class UserThreadIterator:
+    """
+    Iterator over `dbg.user_dump.threads`.
+    """
+    def __iter__(self, /) -> UserThreadIterator: ...
+    def __next__(self, /) -> UserThread: ...
+
+@final
+class UserThreads:
+    """
+    The threads of a user-mode minidump (`dbg.user_dump.threads`), by
+    thread id.
+    """
+    def __contains__(self, tid: int, /) -> bool: ...
+    def __getitem__(self, tid: int, /) -> UserThread:
+        """
+        Get the thread with a TID, or raise `KeyError` if no thread has that
+        TID.
+        """
+    def __iter__(self, /) -> UserThreadIterator: ...
+    def __len__(self, /) -> int: ...
+    def __repr__(self, /) -> str: ...
+    def get(self, /, tid: int) -> UserThread |None:
+        """
+        Get the thread with a TID, or `None` if no thread has that TID.
+        """
+
+@final
+class UserTriage(BaseRecord):
+    """
+    The triage of a user-mode minidump.
+    """
+    @property
+    def exception(self, /) -> UserTriageException |None:
+        """
+        The exception the dump was written for. `None` if it records
+        none.
+        """
+    @property
+    def exception_registers(self, /) -> list[UserTriageRegister]:
+        """
+        The general-purpose registers of the exception's context, in
+        display order. Empty without an exception or when its context is
+        unusable.
+        """
+    @property
+    def process(self, /) -> UserTriageProcess: ...
+    @property
+    def stack_thread(self, /) -> UserTriageStackThread |None:
+        """
+        The thread whose stack `backtrace` is. `None` if no thread is
+        selected.
+        """
+
+@final
+class UserTriageCodeOwner(BaseRecord):
+    """
+    What holds a code address of a user dump.
+    """
+    @property
+    def kind(self, /) -> str:
+        """
+        `module`, `dynamic_code` (no module; a dynamic function table
+        covers it, as for JIT-compiled code), or `unowned`.
+        """
+    @property
+    def module(self, /) -> str |None: ...
+    @property
+    def region(self, /) -> str |None:
+        """
+        For `unowned`, the memory region as the dump's memory-info list
+        records it.
+        """
+    @property
+    def system(self, /) -> bool:
+        """
+        Whether the module is part of Windows or a language runtime.
+        """
+    @property
+    def table_end(self, /) -> int |None: ...
+    @property
+    def table_start(self, /) -> int |None:
+        """
+        For `dynamic_code`, the range of the dynamic function table that
+        covers the address.
+        """
+
+@final
+class UserTriageException(BaseRecord):
+    """
+    The exception a user-mode minidump was written for, decoded.
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def blamed_frame(self, /) -> UserTriageFrame |None:
+        """
+        The first frame from the faulting one outward outside the system
+        modules (ntdll, kernelbase, the C++ and .NET runtimes): the code
+        the failure is blamed on. `None` if every frame is in a system
+        module.
+        """
+    @property
+    def code(self, /) -> int: ...
+    @property
+    def faulting_frame(self, /) -> int |None:
+        """
+        The index in `backtrace` of the frame at the exception address.
+        """
+    @property
+    def flag_names(self, /) -> list[str]:
+        """
+        The `EXCEPTION_*` flags set, with unknown bits in hex.
+        """
+    @property
+    def flags(self, /) -> int: ...
+    @property
+    def kind(self, /) -> str:
+        """
+        `ntstatus`, `cpp_exception`, `clr_exception`, `well_known`,
+        `application_defined` (customer bit set, no name), or `unknown`.
+        """
+    @property
+    def module(self, /) -> UserTriageCodeOwner:
+        """
+        What holds the exception address: the faulting module.
+        """
+    @property
+    def module_caller(self, /) -> UserTriageFrame |None:
+        """
+        When `blamed_frame` is in no module, the first frame further out
+        that a module holds: the module code that called into it.
+        """
+    @property
+    def name(self, /) -> str:
+        """
+        The code's name, or what kind of code it is when it has none.
+        """
+    @property
+    def parameters(self, /) -> list[UserTriageExceptionParameter]: ...
+    @property
+    def record(self, /) -> int:
+        """
+        The address of a chained exception record; 0 for none.
+        """
+    @property
+    def summary(self, /) -> str |None:
+        """
+        What the parameters say in one line, such as `write to 0x10`.
+        """
+    @property
+    def symbol(self, /) -> str: ...
+    @property
+    def thread(self, /) -> str:
+        """
+        The faulting thread's id as `~` lists it.
+        """
+    @property
+    def thread_id(self, /) -> int: ...
+    @property
+    def thread_name(self, /) -> str |None: ...
+
+@final
+class UserTriageExceptionParameter(BaseRecord):
+    """
+    One `ExceptionInformation` entry of a user dump's exception.
+    """
+    @property
+    def label(self, /) -> str |None:
+        """
+        What the entry is for the code (`access`, `address`,
+        `ThrowInfo`, ...). `None` if the code defines no meaning.
+        """
+    @property
+    def meaning(self, /) -> str |None:
+        """
+        The value decoded (`write`, a status name, a module).
+        """
+    @property
+    def value(self, /) -> int: ...
+
+@final
+class UserTriageFrame(BaseRecord):
+    """
+    A frame of a user dump report's stack.
+    """
+    @property
+    def index(self, /) -> int:
+        """
+        The frame's index in `backtrace`.
+        """
+    @property
+    def ip(self, /) -> int: ...
+    @property
+    def owner(self, /) -> UserTriageCodeOwner: ...
+    @property
+    def source(self, /) -> str:
+        """
+        How the frame was recovered (`unwind`, `scan`, ...).
+        """
+    @property
+    def symbol(self, /) -> str: ...
+
+@final
+class UserTriageProcess(BaseRecord):
+    """
+    The captured process, as the dump's streams record it.
+    """
+    @property
+    def arch(self, /) -> str:
+        """
+        `AMD64` or `ARM64`.
+        """
+    @property
+    def build_number(self, /) -> int: ...
+    @property
+    def build_string(self, /) -> str |None:
+        """
+        The full build string (`MINIDUMP_MISC_INFO_4.BuildString`).
+        """
+    @property
+    def create_time(self, /) -> str |None:
+        """
+        When the process was created (ISO 8601 UTC).
+        """
+    @property
+    def dump_time(self, /) -> str |None:
+        """
+        When the dump was written (ISO 8601 UTC).
+        """
+    @property
+    def handles(self, /) -> int |None:
+        """
+        `None` if the dump has no handle stream.
+        """
+    @property
+    def kernel_time_secs(self, /) -> int |None:
+        """
+        Kernel-mode time the process had run, in seconds.
+        """
+    @property
+    def major_version(self, /) -> int: ...
+    @property
+    def minor_version(self, /) -> int: ...
+    @property
+    def modules(self, /) -> int: ...
+    @property
+    def name(self, /) -> str |None:
+        """
+        The executable's file name.
+        """
+    @property
+    def pid(self, /) -> int |None: ...
+    @property
+    def threads(self, /) -> int: ...
+    @property
+    def unloaded_modules(self, /) -> int: ...
+    @property
+    def user_time_secs(self, /) -> int |None:
+        """
+        User-mode time the process had run, in seconds.
+        """
+
+@final
+class UserTriageRegister(BaseRecord):
+    """
+    A register of the exception's context.
+    """
+    @property
+    def name(self, /) -> str: ...
+    @property
+    def value(self, /) -> int: ...
+
+@final
+class UserTriageStackThread(BaseRecord):
+    """
+    The thread a user dump report's stack belongs to.
+    """
+    @property
+    def id(self, /) -> str:
+        """
+        The id as `~` lists it (`<pid>.<tid>` in hex).
+        """
+    @property
+    def name(self, /) -> str |None: ...
+    @property
+    def source(self, /) -> str:
+        """
+        `exception_context` (walked from the exception's CONTEXT) or
+        `thread_context` (the selected thread's).
+        """
+    @property
+    def tid(self, /) -> int: ...
 
 @final
 class VcpuStatus(BaseRecord):
@@ -18573,9 +19440,11 @@ def attach(backend: Literal["kd", "kdnet", "gdb", "memory", "dmp"] = ..., connec
     
     `backend` is one of `"kd"` (default), `"kdnet"`, `"gdb"`, `"memory"`, or
     `"dmp"`. `connect` is the backend target: a socket path or address for
-    kd/kdnet/gdb, or the dump file path for dmp. Without `connect`, the function
-    uses the default of the backend, but dmp has no default and needs a path.
-    kdnet needs `key`. `memory_source` is `auto`, `host`, or `kd` for KD/KDNET.
+    kd/kdnet/gdb, or the dump file path for dmp: a kernel crash dump, or a
+    Windows user-mode minidump, whose process and threads `Debugger.user_dump`
+    holds. Without `connect`, the function uses the default of the backend,
+    but dmp has no default and needs a path. kdnet needs `key`.
+    `memory_source` is `auto`, `host`, or `kd` for KD/KDNET.
     
     For kd/kdnet/gdb, the function takes an instance lock for the target before
     it makes the backend, so a second live attach to the same target fails

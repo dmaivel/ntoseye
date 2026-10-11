@@ -6,7 +6,7 @@ To analyse a Windows kernel crash dump (`.dmp`) offline, without a running VM, u
 ntoseye --dump /path/to/MEMORY.DMP
 ```
 
-`ntoseye` supports full dumps, kernel dumps, and kernel triage dumps (small dumps or minidumps).
+`ntoseye` supports full dumps, kernel dumps, and kernel triage dumps (small dumps or minidumps). The same option opens a Windows user-mode minidump of one process; see [user-mode minidumps](#user-mode-minidumps).
 
 A BSOD dump automatically gives you the crash registers, the stack trace, and the bugcheck analysis. A live system dump (bugcheck 0x161) contains memory but no exception context.
 
@@ -112,6 +112,140 @@ Logger 0x0a 'EventLog-System' in the dump's ETW data
 WinDbg's `!wmitrace.strdump` lists only the first of these sessions in a minidump, and its `!wmitrace.logdump` and `!wmitrace.logsave` cannot read the buffers.
 
 In the [Python SDK](../scripting/sdk.md), `inspect.etw_crash_sessions()` lists these sessions with their buffers, and `inspect.etw_crash_events(logger, count=None)` decodes the events of one, by its name or logger ID, oldest first. They read the sessions that Windows saved in a kernel or full dump too, while `etw_loggers()` and `etw_events()` read every session from the dump's memory.
+
+## User-mode minidumps
+
+A user-mode minidump (`MDMP`) holds one process: its threads with their registers, its modules, and as much of its memory as the writer captured. `--dump` recognizes one by its signature and opens it on its own terms. There is no kernel, no physical memory, and no page tables, and ntoseye does not invent them:
+
+```bash
+ntoseye --dump powershell-exception.dmp
+```
+
+```text
+user-mode minidump
+  process   powershell.exe (pid 4340)
+  system    Windows 10.0.26200 AMD64 (26100.1.amd64fre.ge_release.240331-1435)
+  written   2026-10-11T06:17:41Z
+  captured  20 threads, 91 modules
+  memory    1655 ranges, 259276 KiB
+  exception 0xe0d7e5e1 at kernelbase!RaiseException+0x8a on thread 10f4.cc4
+```
+
+ntoseye opens Windows minidumps of AMD64 and ARM64 processes, whatever wrote them. Minidumps that Breakpad and Crashpad write on Linux, macOS, and Android use the same container but describe another operating system; ntoseye refuses them by name:
+
+```text
+error: unsupported dump: this is a Linux minidump (platform 0x8201), as Breakpad and Crashpad write; ntoseye opens Windows minidumps
+```
+
+### Writing one
+
+Any of these writes a minidump of a running process in the guest. A dump with full memory (`MiniDumpWithFullMemory`) lets every command below read what it needs; a small one holds the thread stacks and little else.
+
+- [ProcDump](https://learn.microsoft.com/sysinternals/downloads/procdump): `procdump -ma <name or pid>` writes a full dump now, and `procdump -ma -e <name or pid>` waits for an unhandled exception and writes the dump with its exception record.
+- Task Manager: on the **Details** tab, right-click the process and choose **Create memory dump file**. It writes a full dump to `%LOCALAPPDATA%\Temp` and shows the path.
+- Windows Error Reporting: under `HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps`, set `DumpType` (DWORD) to `2` for full dumps and, optionally, `DumpFolder` (REG_EXPAND_SZ). Each process that crashes from then on leaves a dump with its exception record, by default in `%LOCALAPPDATA%\CrashDumps`.
+- A program can write its own with `MiniDumpWriteDump`.
+
+Copy the file to the host as for a kernel dump.
+
+### What works
+
+The commands that look at one process work on the dump's own records:
+
+- {command}`lm` lists the modules from the dump's module list and loads their PDBs from the CodeView records there, even when a module's code was not captured. {command}`~` lists the threads with their names, and `~<n>s` selects one.
+- {command}`r`, {command}`k`, and {command}`.frame` show the selected thread. {command}`.ecxr` selects the context of the exception the dump was written for, and {command}`.exr` `-1` shows its record. The stack walk uses each module's unwind data, fetching the image from the symbol server when its unwind data was not captured, and the dump's dynamic function tables for code that no module holds, such as .NET's JIT-compiled methods:
+
+  ```text
+  minidump:10f4.cc4> .ecxr; k
+  *00 0000005ceb90e270  00007ff946b741ca  kernelbase!RaiseException+0x8a
+   01 0000005ceb90e370  00007ff89b6c6a48  0x7ff89b6c6a48
+   02 0000005ceb90e420  00007ff89b6c6914  0x7ff89b6c6914
+   03 0000005ceb90e460  00007ff89b7931ef  0x7ff89b7931ef
+   04 0000005ceb90e4d0  00007ff8f860cdfa  system.core.ni+0x5ecdfa
+   05 0000005ceb90e580  00007ff8f733a15a  system.management.automation.ni+0x144a15a
+  ...
+   22 0000005ceb90edc0  00007ff8fae81b43  clr!CallDescrWorkerInternal+0x83
+  ...
+   32 0000005ceb90f8b0  00007ff948eccd87  kernel32!BaseThreadInitThunk+0x17
+   33 0000005ceb90f8e0  00007ff94930caec  ntdll!RtlUserThreadStart+0x2c
+  ```
+
+- Memory commands, {command}`u`, {command}`dt`, {command}`dx`, {command}`x`, {command}`ln`, and {command}`s` read the captured memory, and say so when an address was not captured. `$teb` and `$peb` point to the selected thread's TEB and the process's PEB.
+- {command}`analyze` reports the exception: its code and name, its flags and parameters (an access violation's read, write, or execute and its address, and the parameters of C++ and CLR exceptions), the faulting thread's stack, the module the exception was raised in, a failure signature, and the culprit, the first frame outside the system modules. `!analyze -v` adds the whole stack, the exception's registers, and every module. A dump written without an exception says so and shows the process and the current thread's stack instead.
+
+  ```text
+  exception
+    code    0xe0d7e5e1  application-defined code (customer bit set), no standard name
+    flags   0x80  EXCEPTION_SOFTWARE_ORIGINATE
+    address 00007ff946b741ca  kernelbase!RaiseException+0x8a
+    module  KERNELBASE.dll (system module)
+    thread  10f4.cc4
+    params  none
+
+  failure signature
+    exception:e0d7e5e1|symbol:kernelbase!raiseexception
+    source: exception address
+
+  culprit attribution
+    JIT-compiled code at 0x7ff89b6c6a48 (dynamic function table 0x7ff89b6c0020-0x7ff89b740000, no module)  low confidence
+    called from #4 system.core.ni+0x5ecdfa (System.Core.ni.dll)
+  ```
+
+- {command}`!teb`, {command}`!peb`, and {command}`!gle` read the selected thread's TEB, and the PEB it points to, with the layouts from ntdll's PDB. {command}`!dlls` walks the loader's module lists in the PEB.
+- {command}`!handle` lists the handles the dump recorded (`MiniDumpWithHandleData`): each one's type, object name, granted access, attributes, and handle and pointer counts, with a count by type. `!handle <handle> <flags> <type>` takes WinDbg's user-mode flags. The dump records no object addresses, so none are shown.
+- {command}`!address` lists the regions of the address space the dump recorded (`MiniDumpWithFullMemoryInfo`), with their state, protection, type, allocation base, and use: a module image, a thread's stack or TEB, the PEB, or a heap from the PEB's heap list. `!address <address>` shows the region holding an address, and `!address -summary` the totals:
+
+  ```text
+  minidump:e24.278c> !address @rsp
+  address 000000f35cfaf788
+    Usage:             Stack [~0; e24.278c]
+    BaseAddress:       000000f35cfaa000
+    EndAddress:        000000f35cfb0000
+    RegionSize:        0000000000006000 (24.000 KiB)
+    State:             00001000  MEM_COMMIT
+    Protect:           00000004  PAGE_READWRITE
+    Type:              00020000  MEM_PRIVATE
+    AllocationBase:    000000f35cf30000
+    AllocationProtect: 00000004  PAGE_READWRITE
+    Captured:          all of the region; this address is captured
+  ```
+
+- {command}`!vprot` shows the same region as `VirtualQuery` would, and {command}`!heap` walks the process's heaps.
+- {command}`.time` shows when the dump was written, in UTC and in the time zone the dump records, and the process's creation time, uptime, and CPU time. A user-mode minidump records no system time or system uptime, and `.time` says so rather than guessing. {command}`vertarget` shows the Windows version, the processors, the process, and the kinds of data the dump was written with:
+
+  ```text
+  target time
+    dump written 2026-10-11T06:17:41Z (0x6acb2a05)
+    local time 2026-10-10T23:17:41-07:00 (Pacific Daylight Time)
+    process created 2026-10-11T06:17:37Z
+    process uptime 0d 00:00:04 (4 seconds)
+    process CPU time user 0 s, kernel 0 s
+    system time and uptime not recorded in a user-mode minidump
+  ```
+
+A small dump (`MiniDumpNormal`) holds the stacks but not the TEBs, the PEB, the handles, or the region list. The commands that need them name what the dump lacks:
+
+```text
+minidump:e24.278c> !teb
+error: the minidump did not capture the TEB at 0xf35d172000
+minidump:e24.278c> !handle
+error: the minidump records no handle data (HandleDataStream)
+```
+
+Without the region list, `!address` lists the ranges of memory the dump captured instead, each with its use where it is known.
+
+### What is refused
+
+The dump is a snapshot of a process that no longer runs, so execution control, breakpoints, and writes to memory or registers are refused, as in a kernel dump. Commands that read kernel structures, such as {command}`!process`, {command}`!thread`, {command}`!pcr`, {command}`!pte`, {command}`!pool`, {command}`!object`, and {command}`!drvobj`, and commands that read physical memory, refuse with one message:
+
+```text
+minidump:e24.278c> !pcr
+error: !pcr: this needs a kernel target; a user-mode minidump holds one process and no kernel
+```
+
+On a user-mode minidump, {command}`help` leaves these commands out of its list and says how many there are; `help <command>` still describes any of them.
+
+The [Python SDK](../scripting/sdk.md#user-mode-minidumps), the [MCP server](../integrations/mcp.md), and the [DAP adapter](../integrations/dap.md#user-mode-minidumps) open user-mode minidumps the same way as kernel dumps.
 
 ## Writing a dump from a live target
 

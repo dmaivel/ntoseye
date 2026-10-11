@@ -25,6 +25,7 @@ repl_command! {
     usage: "!ndiskd.miniports",
     summary: "List the NDIS miniports (network adapters).",
     details: "Walks ndis!ndisMiniportList and shows one line per miniport: the address of its _NDIS_MINIPORT_BLOCK, which !ndiskd.miniport takes, the service of its miniport driver, the miniport state (Running, Pausing, Paused, Restarting, Initializing, Halted), the media connect state with the transmit link speed (and the receive speed when it differs), the device power state, the interface index, and the friendly name. Virtual miniports, such as Hyper-V's adapters, are on the list too. The command needs the PDB for ndis.sys.",
+    target: Kernel,
 }
 
 repl_command! {
@@ -34,6 +35,7 @@ repl_command! {
     summary: "Show an NDIS miniport: its driver, state, filter stack, bindings, and pending OID.",
     details: "Give the address that !ndiskd.miniports lists. The command shows the device name and instance ID, the miniport driver with its image and versions, the adapter context (MiniportAdapterContext, the driver's own context, which you can dt with the driver's PDB), the FDO and PDO (none for a virtual miniport), the miniport, PnP, and power states, the medium and link, the interface index and NetLuid, the reference count, the reset counts and the status of the last reset, the pending OID request with its OID, type, and buffer, and PendingReturnNBLCount. Then it shows the filter stack from the top down along each filter's LowerFilter link, with each filter's state, driver image, module context, and pending OID request, and the protocols bound to the miniport. A filter whose HigherFilter does not lead back ends the stack walk with the reason. Without an address, the command lists the miniports as !ndiskd.miniports does.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -43,6 +45,7 @@ repl_command! {
     summary: "List the NDIS miniport drivers, or show one and its miniports.",
     details: "Without an address, walks ndis!ndisMiniDriverList and shows each miniport driver's _NDIS_M_DRIVER_BLOCK, service name, image, NDIS version, driver version, and number of miniports. With the address of a driver block, as this list or !ndiskd.miniport shows it, the command shows the driver's DRIVER_OBJECT, the module its code is in, its versions, and its miniports.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -52,6 +55,7 @@ repl_command! {
     summary: "List the NDIS protocol drivers, or show one and its bindings.",
     details: "Without an address, walks ndis!ndisProtocolList and shows each protocol's _NDIS_PROTOCOL_BLOCK, name, image, NDIS version, driver version, and number of bindings. With the address of a protocol block, as this list or !ndiskd.miniport shows it, the command shows the protocol's driver context, flags, and BindAdapterHandlerEx, and each binding (_NDIS_OPEN_BLOCK) with the miniport it opened and the protocol's binding context. The command needs the PDB for ndis.sys.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -61,6 +65,7 @@ repl_command! {
     summary: "List the NDIS filter drivers, or show one and its filter modules.",
     details: "Without an address, walks ndis!ndisFilterDriverList and shows each filter driver's _NDIS_FILTER_DRIVER_BLOCK, friendly name, service, image, NDIS version, driver version, and number of filter modules. With the address of a filter driver block, the command shows the driver's unique name (its GUID), DRIVER_OBJECT, the module its code is in, its driver context and flags, and its filter modules, one for each miniport it is attached to. The command needs the PDB for ndis.sys.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -70,6 +75,7 @@ repl_command! {
     summary: "List the NDIS filter modules, or show one.",
     details: "Without an address, walks ndis!ndisGlobalFilterList and shows each filter module of every miniport: its _NDIS_FILTER_BLOCK, state, driver image, miniport, and name. With the address of a filter block, as this list or !ndiskd.miniport shows it, the command shows the filter driver, the miniport, the filter modules above and below it on the miniport's stack, the module context (FilterModuleContext, which you can dt with the driver's PDB), the link the filter last saw indicated, the reference count, the NBLs and status indications NDIS dropped because the filter was not running, and the pending OID request. The command needs the PDB for ndis.sys.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {
@@ -78,6 +84,7 @@ repl_command! {
     usage: "!ndiskd.oid",
     summary: "Show the OID requests that miniports and filters have not completed.",
     details: "Reads the PendingOidRequest of every miniport on ndis!ndisMiniportList and every filter module on ndis!ndisGlobalFilterList, and shows each request with its owner, type, OID by its ntddndis.h name, and buffer. NDIS passes a miniport or filter one OID request at a time, apart from direct OID requests, so a request that stays here holds up the ones behind it. The command needs the PDB for ndis.sys.",
+    target: Kernel,
 }
 
 repl_command! {
@@ -87,6 +94,7 @@ repl_command! {
     summary: "Show a NET_BUFFER_LIST and its NET_BUFFERs.",
     details: "Shows the _NET_BUFFER_LIST at the address: its next and parent NBLs, its source handle with the miniport, filter module, or binding it names, its pool, context, Flags and NblFlags (by NDIS_NBL_FLAGS_ name), status, and child reference count, and each NET_BUFFER with its data length, data offset, current MDL and offset into it, and MDL chain. -chain lists every NBL on the Next chain from the address, with its NET_BUFFERs, bytes, source, and status. -data dumps each NET_BUFFER's data, up to 64 KiB of it, read through the MDLs' PFNs, so a buffer that is not mapped into system space reads too. The command needs the PDB for ndis.sys.",
     completion: Expression,
+    target: Kernel,
 }
 
 /// A labeled line of a detail view.

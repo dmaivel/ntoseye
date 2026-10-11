@@ -122,6 +122,7 @@ repl_command! {
     summary: "Select the VTL0 or VTL1 context that the Windows hypervisor saved for a vCPU halted in the hypervisor.",
     details: "Use this command for a vCPU that stopped in the Windows hypervisor (VBS). It reads the saved state of each VTL of the virtual processor from the Enlightened VMCS page of that VTL, lists these states, and selects the VTL0 state, so that r, k, and u show where NT left off. The VM must expose hv-evmcs, and at the first use in each boot, the command scans host RAM for the pages. The context has RIP, RSP, flags, control registers, and segment registers from the Enlightened VMCS. For the current VTL it also has the other general-purpose registers, read where the hypervisor's VM-exit entry code saved them (experimental), and the command says why when they are missing. .vtlcxr 1 selects the saved VTL1 state instead, in the secure kernel's address space with its symbols, which it loads first as .vtl 1 does: k walks the secure kernel's stack from where VTL1 left off, usually its VTL return, and the context is read-only, as at a VTL1 stop: .vtlcxr goes back to the VTL0 state. Its general-purpose registers are known only when VTL1 made the hypervisor's last exit. A stop in the hypervisor selects the VTL0 state automatically. .cxr goes back to the registers of the hypervisor, and .vtlcxr then selects the VTL0 state again. See 'Where NT left off under the hypervisor' in the VBS guide.",
     run_state: Halted,
+    target: Kernel,
 }
 
 repl_command! {
@@ -167,6 +168,7 @@ repl_command! {
     summary: "Decode and show a _KTRAP_FRAME.",
     details: "Without an address, .trap uses the saved trap frame of the current thread. Because a trap frame does not identify a process, ntoseye resolves a user-mode frame in the selected process, and shows a warning if the frame address is outside all modules of that process. Before you use .trap, select the thread or process that owns the frame (`.thread`, `.process /p`).",
     completion: Expression,
+    target: Kernel,
 }
 
 impl ReplState<'_> {
@@ -547,7 +549,11 @@ impl ReplState<'_> {
 
     fn live_register_values(&mut self) -> Option<HashMap<String, u64>> {
         match self.ctx.read_registers() {
-            Ok(registers) => Some(self.ctx.register_map.to_hashmap(&registers)),
+            Ok(registers) => Some(
+                self.ctx
+                    .target
+                    .register_values(&self.ctx.register_map, &registers),
+            ),
             Err(error) => {
                 error!("failed to read registers: {}", error);
                 None
@@ -672,7 +678,11 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-        self.ctx.target.registers = Some(self.ctx.register_map.to_hashmap(&regs));
+        self.ctx.target.registers = Some(
+            self.ctx
+                .target
+                .register_values(&self.ctx.register_map, &regs),
+        );
 
         if !invocation.raw_tail.trim().is_empty() {
             let tail = invocation.raw_tail.trim();

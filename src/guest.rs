@@ -42,6 +42,7 @@ pub use hypervisor::{
     HvMemory, HvPartition, HvProcessor, HvVirtualProcessor, HvVtl, privilege_names,
 };
 pub use image::{Image, SymbolRef};
+pub use modules::{UNKNOWN_MODULE_NAME, merge_wow64_modules, walk_loader_list, walk_loader_list32};
 pub use secure_kernel::{SecureKernel, TrustletInfo};
 
 /// A process's identity and the root (`dtb`) of its address space.

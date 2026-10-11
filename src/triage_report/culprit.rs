@@ -2,10 +2,13 @@
 //! and names a non-kernel culprit when the evidence supports one.
 
 use super::{
-    CulpritAttribution, CulpritConfidence, CulpritEvidence, CulpritEvidenceKind, PowerThreadRole,
-    TriageReport, canonical_module_component, evidence_module_for_address, names_match,
+    CodeOwner, CulpritAttribution, CulpritConfidence, CulpritEvidence, CulpritEvidenceKind,
+    CulpritSubject, DynamicCodeCulprit, PowerThreadRole, TriageReport, canonical_module_component,
+    evidence_module_for_address, names_match,
 };
 use crate::bugchecks::module_filename;
+use crate::guest::ModuleInfo;
+use crate::unwind::FrameSource;
 
 #[derive(Debug)]
 struct CulpritCandidate {
@@ -165,7 +168,7 @@ pub(super) fn culprit_attribution(report: &TriageReport) -> Option<CulpritAttrib
             || (candidate.confidence == CulpritConfidence::High && candidate.evidence.len() > 1)
     })?;
     Some(CulpritAttribution {
-        module: candidate.module,
+        subject: CulpritSubject::Module(candidate.module),
         confidence: candidate.confidence,
         evidence: candidate.evidence,
     })
@@ -204,4 +207,100 @@ fn is_kernel_module(name: &str) -> bool {
         canonical_module_component(name).as_str(),
         "nt" | "ntoskrnl" | "ntkrnlmp" | "ntkrnlpa" | "ntkrpamp"
     )
+}
+
+/// Whether a user-mode module is part of Windows or of a language runtime:
+/// code that raises, dispatches, and rethrows exceptions on behalf of its
+/// caller (`RaiseException`, `_CxxThrowException`, the CLR's throw
+/// helpers), so a fault reported in it is blamed on the code that called
+/// it.
+pub fn is_user_system_module(name: &str) -> bool {
+    matches!(
+        ModuleInfo::derive_short_name(name).as_str(),
+        "ntdll"
+            | "kernelbase"
+            | "kernel32"
+            | "wow64"
+            | "wow64win"
+            | "wow64cpu"
+            | "user32"
+            | "win32u"
+            | "gdi32"
+            | "gdi32full"
+            | "combase"
+            | "ole32"
+            | "oleaut32"
+            | "rpcrt4"
+            | "sechost"
+            | "advapi32"
+            | "msvcrt"
+            | "ucrtbase"
+            | "msvcp_win"
+            | "vcruntime140"
+            | "vcruntime140_1"
+            | "msvcp140"
+            | "clr"
+            | "coreclr"
+            | "mscorwks"
+    )
+}
+
+/// The culprit of a user-mode minidump's exception: the first frame outside
+/// the system modules on the faulting thread's stack. In a module, that
+/// module; in generated code a dynamic function table covers (JIT-compiled
+/// code), that code, with low confidence: no module or symbol says what it
+/// is. None when that frame is in memory nothing describes as code, or
+/// every frame is in a system module.
+pub fn user_culprit_attribution(report: &TriageReport) -> Option<CulpritAttribution> {
+    let exception = report.user.as_ref()?.exception.as_ref()?;
+    let frame = exception.blamed_frame.as_ref()?;
+    let (subject, place) = match &frame.owner {
+        CodeOwner::Module {
+            name,
+            system: false,
+        } => (CulpritSubject::Module(name.clone()), name.clone()),
+        CodeOwner::DynamicCode {
+            table_start,
+            table_end,
+        } => (
+            CulpritSubject::DynamicCode(DynamicCodeCulprit {
+                address: frame.ip,
+                table_start: *table_start,
+                table_end: *table_end,
+                caller: exception.module_caller.clone(),
+            }),
+            "JIT-compiled code".to_string(),
+        ),
+        _ => return None,
+    };
+    let evidence = if Some(frame.index) == exception.faulting_frame {
+        CulpritEvidence {
+            kind: CulpritEvidenceKind::ExceptionAddress,
+            detail: format!("exception address resolves to {place}"),
+            address: Some(exception.address),
+        }
+    } else {
+        CulpritEvidence {
+            kind: CulpritEvidenceKind::FirstNonSystemFrame,
+            detail: format!(
+                "frame #{} {} is the first outside the system modules, in {place}",
+                frame.index, frame.symbol
+            ),
+            address: Some(frame.ip),
+        }
+    };
+    // A frame found by scanning the stack for return addresses may not be
+    // a caller at all; generated code has no module or symbol to say what
+    // it is.
+    let confidence =
+        if frame.source == FrameSource::Scan || matches!(subject, CulpritSubject::DynamicCode(_)) {
+            CulpritConfidence::Low
+        } else {
+            CulpritConfidence::Medium
+        };
+    Some(CulpritAttribution {
+        subject,
+        confidence,
+        evidence: vec![evidence],
+    })
 }

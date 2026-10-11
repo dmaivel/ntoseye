@@ -79,8 +79,8 @@ struct TargetOptions {
     #[arg(long, global = true)]
     memory_source: Option<KdMemorySource>,
 
-    /// Open a Windows kernel crash dump (.dmp) for offline analysis instead of
-    /// attaching to a live VM
+    /// Open a Windows kernel crash dump or user-mode minidump (.dmp) for
+    /// offline analysis instead of attaching to a live VM
     #[arg(long, global = true)]
     dump: Option<PathBuf>,
 

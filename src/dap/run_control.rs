@@ -30,6 +30,12 @@ impl Server {
     /// way every other stop follows the run-control request that produced it.
     pub(super) fn on_configuration_done(&mut self, request: &Request) -> Handled {
         self.configured = true;
+        if self.user_dump() {
+            self.respond(request, Ok(None));
+            self.state = RunState::Halted;
+            self.report_user_dump_stop();
+            return Ok(None);
+        }
         let status = self.session()?.run_status();
         let running = status.running;
         let rip = status.rip.unwrap_or(0);
@@ -44,6 +50,7 @@ impl Server {
     }
 
     pub(super) fn on_continue(&mut self, request: &Request) -> Handled {
+        self.refuse_on_user_dump("continue")?;
         let result = self.session()?.resume().map_err(|error| error.to_string());
         match result {
             Ok(()) => {
@@ -94,6 +101,7 @@ impl Server {
     }
 
     pub(super) fn on_step(&mut self, request: &Request, step: StepRequest) -> Handled {
+        self.refuse_on_user_dump("stepping")?;
         let instruction_granularity =
             arg_str(&request.arguments, "granularity").as_deref() == Some("instruction");
         if let Some(thread) = arg_i64(&request.arguments, "threadId")
@@ -256,6 +264,64 @@ impl Server {
 
     pub(super) fn report_stop(&mut self, outcome: ContinueOutcome) {
         self.report_stop_as(outcome, None);
+    }
+
+    /// Report where a user-mode minidump stands: at its exception, on the
+    /// thread that raised it, when it records one, with the exception's
+    /// context selected (`.ecxr`) so that thread's stack, scopes, and
+    /// expressions start where the exception was raised; else at the
+    /// selected thread's captured context.
+    fn report_user_dump_stop(&mut self) {
+        self.invalidate_stop_state();
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        let selected = session
+            .target
+            .user_exception()
+            .is_some()
+            .then(|| session.select_user_exception_context());
+        let target = &session.target;
+        let stop = match (target.user_exception(), target.user_exception_summary()) {
+            (Some(exception), Some(summary)) => {
+                let parameters = exception
+                    .parameters
+                    .iter()
+                    .map(|parameter| format!("{parameter:#x}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                StopInfo {
+                    reason: "exception",
+                    description: format!("exception {summary}"),
+                    exception_id: Some(format!("{:#010x}", exception.code)),
+                    detail: Some(format!(
+                        "exception record: code {:#010x}, flags {:#x}, address {:#x}, parameters [{parameters}]",
+                        exception.code, exception.flags, exception.address
+                    )),
+                    breakpoint_id: None,
+                }
+            }
+            _ => StopInfo {
+                reason: "entry",
+                description: format!(
+                    "user-mode minidump of {}",
+                    target
+                        .user_dump_info()
+                        .map(|info| info.process_label())
+                        .unwrap_or_default()
+                ),
+                exception_id: None,
+                detail: None,
+                breakpoint_id: None,
+            },
+        };
+        if let Some(Err(error)) = selected {
+            self.emit_output(
+                "important",
+                format!("the exception's context cannot be selected; its thread shows its own: {error}\n"),
+            );
+        }
+        self.publish_stop(stop, None);
     }
 
     /// The stop a `sxe ld` or `sxe ud` filter surfaced, with WinDbg's
@@ -460,6 +526,11 @@ impl Server {
             }
         }
 
+        self.publish_stop(stop, forced_reason);
+    }
+
+    /// Tell the client about `stop`, on the current thread.
+    fn publish_stop(&mut self, stop: StopInfo, forced_reason: Option<&'static str>) {
         self.sync_threads();
         let thread_id = self
             .session

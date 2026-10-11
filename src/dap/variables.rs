@@ -313,6 +313,7 @@ impl Server {
     }
 
     pub(super) fn on_set_variable(&mut self, args: &Value) -> Handled {
+        self.refuse_on_user_dump("setting a variable")?;
         let reference = arg_i64(args, "variablesReference")
             .ok_or_else(|| "missing variablesReference".to_string())?;
         let name = arg_str(args, "name").ok_or_else(|| "missing name".to_string())?;

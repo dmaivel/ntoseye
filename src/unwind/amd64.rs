@@ -1,6 +1,7 @@
 //! AMD64 exception-directory unwinding: `.pdata` lookup, `UNWIND_INFO`
 //! parsing, and applying unwind codes to step a frame to its caller.
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use pelite::pe64::image::{
@@ -12,8 +13,12 @@ use pelite::pe64::image::{
 use super::{
     AMD64_REGISTER_NAMES, RegisterContext, StackTracer, Unwound, image_u32, runtime_functions,
 };
+use crate::backend::MemoryOps;
+use crate::memory::AddressSpace;
 use crate::pe::{CodeLayout, PeImage};
+use crate::phys::PhysMem;
 use crate::types::{CodeMachine, VirtAddr};
+use crate::userdump::DynamicFunction;
 
 // cap on chained unwind entries followed per frame, guarding against cyclic or
 // corrupt unwind data
@@ -170,7 +175,7 @@ impl StackTracer<'_> {
         else {
             return None;
         };
-        let unwind = parse_unwind_info(&image, unwind_data)?;
+        let unwind = parse_unwind_info(&*image, unwind_data)?;
         let body = u64::from(begin) + u64::from(unwind.size_of_prolog);
         (body < u64::from(end)).then_some(base + body)
     }
@@ -183,6 +188,21 @@ impl StackTracer<'_> {
             .module_containing(context.rip)
             .map(|module| module.info.base_address.0)
         else {
+            if let Some((base, function)) = self.dynamic_function(context.rip) {
+                unwind_trace!("unwind: dynamic function table base={base:#x}");
+                let code = DynamicCode {
+                    memory: &self.memory,
+                    base,
+                };
+                return self.unwind_by_codes(
+                    context,
+                    &code,
+                    base,
+                    function.unwind_data,
+                    function.begin,
+                    function.end,
+                );
+            }
             unwind_trace!("unwind: no module for rip -> leaf");
             return self.unwind_leaf(context);
         };
@@ -239,7 +259,7 @@ impl StackTracer<'_> {
                 end,
             );
         }
-        self.unwind_by_codes(context, &image, base_address, unwind_data, begin, end)
+        self.unwind_by_codes(context, &*image, base_address, unwind_data, begin, end)
     }
 
     /// Step a caller frame of the Windows hypervisor (one stopped at a
@@ -292,9 +312,9 @@ impl StackTracer<'_> {
     /// (`begin..end`, whose `UNWIND_INFO` is at `unwind_data`), its chained
     /// parents' included.
     fn unwind_by_codes(
-        &mut self,
+        &self,
         context: &mut RegisterContext,
-        image: &PeImage,
+        image: &impl UnwindBytes,
         base_address: u64,
         mut unwind_data: u32,
         begin: u32,
@@ -635,7 +655,14 @@ impl StackTracer<'_> {
             .module_containing(context.rip)
             .map(|module| module.info.base_address.0)
         else {
-            return fallback;
+            let (base, function) = self.dynamic_function(context.rip)?;
+            let code = DynamicCode {
+                memory: &self.memory,
+                base,
+            };
+            return parse_unwind_info(&code, function.unwind_data)
+                .and_then(|info| frame_register_value(context, &info))
+                .or(fallback);
         };
         let Some((image, layout)) = self.module_code(context.rip) else {
             return fallback;
@@ -645,15 +672,56 @@ impl StackTracer<'_> {
         else {
             return fallback;
         };
-        parse_unwind_info(&image, unwind_data)
-            .and_then(|info| {
-                if info.frame_register == 0 {
-                    Some(context.rsp)
-                } else {
-                    context.get(info.frame_register)
-                }
-            })
+        parse_unwind_info(&*image, unwind_data)
+            .and_then(|info| frame_register_value(context, &info))
             .or(fallback)
+    }
+
+    /// The entry of the user dump's dynamic function tables covering
+    /// `address`, with its table's base: unwind data for code no module
+    /// holds, such as JIT-compiled code.
+    pub fn dynamic_function(&self, address: u64) -> Option<(u64, DynamicFunction)> {
+        self.target.user_dump_info()?.dynamic_function(address)
+    }
+}
+
+/// The value of the register a function's frame is addressed by: its frame
+/// register, or RSP when it has none.
+fn frame_register_value(context: &RegisterContext, info: &ParsedUnwindInfo) -> Option<u64> {
+    if info.frame_register == 0 {
+        Some(context.rsp)
+    } else {
+        context.get(info.frame_register)
+    }
+}
+
+/// What a function's unwind data and code are read from, by offset from the
+/// base its runtime function is relative to: a module image by RVA, or
+/// process memory above a dynamic function table's base.
+pub trait UnwindBytes {
+    fn read(&self, offset: usize, len: usize) -> Option<Cow<'_, [u8]>>;
+}
+
+impl UnwindBytes for PeImage {
+    fn read(&self, offset: usize, len: usize) -> Option<Cow<'_, [u8]>> {
+        PeImage::read(self, offset, len)
+    }
+}
+
+/// The code and unwind data of a dynamic function table, read from the
+/// address space above the table's base. A read that reaches memory the
+/// target cannot serve is `None`, as a paged-out image block is.
+struct DynamicCode<'s, 'a> {
+    memory: &'s AddressSpace<'a, PhysMem>,
+    base: u64,
+}
+
+impl UnwindBytes for DynamicCode<'_, '_> {
+    fn read(&self, offset: usize, len: usize) -> Option<Cow<'_, [u8]>> {
+        let address = self.base.checked_add(u64::try_from(offset).ok()?)?;
+        let mut bytes = vec![0u8; len];
+        self.memory.read_bytes(VirtAddr(address), &mut bytes).ok()?;
+        Some(Cow::Owned(bytes))
     }
 }
 
@@ -711,7 +779,7 @@ pub(super) const RUNTIME_FUNCTION_SIZE: usize = 12;
 /// Entry `index` of the AMD64 exception directory at `pdata`, `None` when it
 /// is paged out.
 pub(super) fn runtime_function_at(
-    image: &PeImage,
+    image: &impl UnwindBytes,
     pdata: usize,
     index: usize,
 ) -> Option<RUNTIME_FUNCTION> {
@@ -759,8 +827,8 @@ pub(super) fn lookup_runtime_function(
     Lookup::Missing
 }
 
-fn parse_unwind_info(image: &PeImage, unwind_rva: u32) -> Option<ParsedUnwindInfo> {
-    // every read goes through `PeImage::read`, so unwind data that lands in a
+fn parse_unwind_info(image: &impl UnwindBytes, unwind_rva: u32) -> Option<ParsedUnwindInfo> {
+    // every read goes through `UnwindBytes::read`, so unwind data that lands in a
     // paged-out hole returns None (fall back to scan) rather than being parsed as
     // zeros and fabricating a frame
     let offset = unwind_rva as usize;

@@ -29,8 +29,11 @@ impl SymbolStore {
     /// PDBs a type name resolves against from `dtb`, in preference order. A
     /// `module!` qualifier names the module (`nt` is the kernel); a bare name
     /// tries the kernel first, then the modules of that address space, so a
-    /// name both define (`_PEB`, `_LIST_ENTRY`) gets the kernel's layout. A
-    /// WOW64 process's 32-bit layouts are reached by qualifier (`ntdll32!_PEB`).
+    /// name both define (`_PEB`, `_LIST_ENTRY`) gets the kernel's layout.
+    /// Without a kernel PDB (a user-mode minidump), ntdll's takes its place:
+    /// other modules' PDBs can carry the public, mostly reserved `_PEB` of
+    /// `winternl.h`. A WOW64 process's 32-bit layouts are reached by
+    /// qualifier (`ntdll32!_PEB`).
     /// Nested type names carry the qualifier of the PDB that defines them (see
     /// [`NestedTypePrefix`]).
     fn type_lookup_guids<'n>(&self, dtb: Dtb, type_name: &'n str) -> (Vec<u128>, &'n str) {
@@ -52,11 +55,22 @@ impl SymbolStore {
             return (guids, name);
         }
         let mut guids: Vec<u128> = kernel_guid.into_iter().collect();
-        guids.extend(
-            self.modules
-                .iter()
-                .filter(|module| module.dtb == dtb && Some(module.guid) != kernel_guid)
+        let in_space = self
+            .modules
+            .iter()
+            .filter(|module| module.dtb == dtb && Some(module.guid) != kernel_guid);
+        let ntdll = match kernel_guid {
+            Some(_) => None,
+            None => in_space
+                .clone()
+                .find(|module| module.short_name.eq_ignore_ascii_case("ntdll"))
                 .map(|module| module.guid),
+        };
+        guids.extend(ntdll);
+        guids.extend(
+            in_space
+                .map(|module| module.guid)
+                .filter(|guid| Some(*guid) != ntdll),
         );
         (guids, type_name)
     }

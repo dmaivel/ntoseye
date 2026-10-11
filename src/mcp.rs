@@ -23,6 +23,7 @@ use rmcp::{
     transport::stdio,
 };
 use serde::Deserialize;
+use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -91,17 +92,34 @@ fn cleanup_session(ctx: &mut Session) {
     }
 }
 
+/// What `open` reports of the contexts a session has: a user-mode minidump's
+/// process, threads, selected thread, and exception, or a kernel target's
+/// processor count.
+fn opened_contexts(ctx: &mut Session) -> Value {
+    let Some(info) = ctx.target.user_dump_info() else {
+        let processors = ctx.backend.thread_list().map(|t| t.len()).unwrap_or(1);
+        return json!({ "processors": processors });
+    };
+    json!({
+        "target": "user-mode minidump",
+        "process": info.process_label(),
+        "threads": info.threads.len(),
+        "thread": ctx.current_thread,
+        "exception": ctx.target.user_exception_summary(),
+    })
+}
+
 /// Spawn the actor thread that owns the session. The backend is constructed
 /// *on this thread* so the non-`Send` state never crosses a thread boundary.
-/// Returns the sender the handlers use to reach it and the ticker's coalescing
-/// flag.
+/// Returns the sender the handlers use to reach it, the ticker's coalescing
+/// flag, and [`opened_contexts`].
 fn spawn_session(
     spec: TargetSpec,
-) -> anyhow::Result<(mpsc::UnboundedSender<Command>, Arc<AtomicBool>, usize)> {
-    // The processor count rides back with the ready signal because it can
-    // only be asked for while the target is halted, which it stops being at
-    // the end of this function.
-    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<usize, String>>();
+) -> anyhow::Result<(mpsc::UnboundedSender<Command>, Arc<AtomicBool>, Value)> {
+    // The contexts ride back with the ready signal because a processor count
+    // can only be asked for while the target is halted, which it stops being
+    // at the end of this function.
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<Value, String>>();
     let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
 
     // Coalesces the background `Service` nudges: the ticker only enqueues one
@@ -114,10 +132,10 @@ fn spawn_session(
         let is_dump = matches!(spec, TargetSpec::Dump(_));
         let mut actor = match Session::open_with_progress(&spec, &mut |line| eprintln!("{line}")) {
             Ok(mut ctx) => {
-                let processors = ctx.backend.thread_list().map(|t| t.len()).unwrap_or(1);
+                let contexts = opened_contexts(&mut ctx);
                 // An agent reads every stop; a step shows what changed.
                 ctx.compact_stops = true;
-                let _ = ready_tx.send(Ok(processors));
+                let _ = ready_tx.send(Ok(contexts));
                 Actor {
                     ctx,
                     repl: None,
@@ -164,7 +182,7 @@ fn spawn_session(
     });
 
     match ready_rx.recv() {
-        Ok(Ok(processors)) => Ok((tx, service_pending, processors)),
+        Ok(Ok(contexts)) => Ok((tx, service_pending, contexts)),
         Ok(Err(e)) => Err(anyhow::anyhow!("failed to attach: {e}")),
         Err(_) => Err(anyhow::anyhow!("session thread exited before attaching")),
     }
@@ -267,7 +285,7 @@ enum BackendArg {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct OpenArgs {
     #[schemars(
-        description = "What to attach to: kd (KD over Unix socket), kdnet (KDNET over encrypted UDP), gdb (GDB remote stub), memory (physical memory only, no debug transport), or dump (a Windows kernel crash dump file)"
+        description = "What to attach to: kd (KD over Unix socket), kdnet (KDNET over encrypted UDP), gdb (GDB remote stub), memory (physical memory only, no debug transport), or dump (a Windows kernel crash dump or user-mode minidump file)"
     )]
     backend: BackendArg,
     #[schemars(
@@ -413,6 +431,39 @@ fn status_trailer(status: &RunStatus) -> String {
     line
 }
 
+/// [`status_trailer`] on a user-mode minidump, which has threads rather than
+/// processors and never runs: the process, the selected thread and where its
+/// context stopped, and the exception the dump was written for. `None` on a
+/// kernel target.
+fn user_dump_trailer(ctx: &Session, status: &RunStatus) -> Option<String> {
+    let info = ctx.target.user_dump_info()?;
+    let position = |id: &str| {
+        info.thread_for_backend_id(id)
+            .and_then(|thread| info.thread_index(thread.tid))
+            .map_or_else(|| id.to_string(), |index| format!("~{index} {id}"))
+    };
+    let mut line = format!(
+        "[minidump {}, {} threads | thread {}",
+        info.process_label(),
+        info.threads.len(),
+        position(&status.current_thread)
+    );
+    match (status.rip, status.symbol.as_deref()) {
+        (Some(rip), Some(symbol)) => line.push_str(&format!(" {rip:#x} {symbol}")),
+        (Some(rip), None) => line.push_str(&format!(" {rip:#x}")),
+        (None, _) => {}
+    }
+    if let Some(exception) = &info.exception {
+        line.push_str(&format!(
+            " | exception {:#010x} on {}",
+            exception.code,
+            position(&info.backend_thread_id(exception.thread_id))
+        ));
+    }
+    line.push(']');
+    Some(line)
+}
+
 /// Run one line through the shared remote REPL dispatch: its output, the
 /// guest's debug output since the last call, paged to fit, and the run-state
 /// trailer.
@@ -436,7 +487,9 @@ fn run_command(
         text.push_str(&format!("[dbgprint] {}\n", line.text));
     }
     let mut text = outputs.lock().unwrap().fit(&text);
-    text.push_str(&status_trailer(&remote.status));
+    let trailer = user_dump_trailer(&actor.ctx, &remote.status)
+        .unwrap_or_else(|| status_trailer(&remote.status));
+    text.push_str(&trailer);
     let content = vec![ContentBlock::text(text)];
     if remote.ok && !remote.reported_error {
         CallToolResult::success(content)
@@ -492,7 +545,7 @@ impl NtoseyeMcp {
     }
 
     #[tool(
-        description = "Run one line of ntoseye's WinDbg-style REPL (`;` separates commands) and return its text (styling stripped) followed by a `[target ...]` trailer with the run state. This is the whole debugger: `help` lists every command; `help <cmd>` explains one. Common: `!process 0 0` / `!process <pid|name>` (processes), `.process /p <pid>` / `.process 0` (address-space scope), `lm` (modules), `dt <type> [addr]` (struct layout/read), `x <mod>!<pat>` (symbols), `dq/dd/db <addr> [l<n>]` (memory), `u <addr>` (disassemble), `k` (backtrace; halted), `r` (registers; halted), `bp/bl/bc/bd/be` (breakpoints; halted), `!analyze`. Run control is bounded by timeout_ms: `g`/`p`/`t`/`gu`/`pa`... resume and wait for the next stop; if none arrives the result ends with `[target running]` and the target keeps running. A step on the same thread shows only what changed. Like typing at a running WinDbg, a halted-only command (`k`, `r`, `bp`, ...) or another resuming command sent while the target runs waits for the stop a breakpoint causes, then runs (a resuming one is instead refused once, so the stop is seen before it is continued past); with no breakpoint set it is refused at once, so send `break` first (an empty line waits anyway). Each command on a `;` line is admitted against the target's state at that point, so `break; bp <addr>; g` works as one line. A command that reports an error ends its line, and the result is then an error. A stop that happened between calls is shown at the top of the next result. A result over about 24k characters shows its first page and an `[output <id>: ...]` footer for the `output` tool. Guest DbgPrint lines captured since the previous call are appended as `[dbgprint] ...`.",
+        description = "Run one line of ntoseye's WinDbg-style REPL (`;` separates commands) and return its text (styling stripped) followed by a `[target ...]` trailer with the run state (`[minidump ...]` on a user-mode minidump: its process, thread count, selected thread, and exception). This is the whole debugger: `help` lists every command; `help <cmd>` explains one. Common: `!process 0 0` / `!process <pid|name>` (processes), `.process /p <pid>` / `.process 0` (address-space scope), `lm` (modules), `dt <type> [addr]` (struct layout/read), `x <mod>!<pat>` (symbols), `dq/dd/db <addr> [l<n>]` (memory), `u <addr>` (disassemble), `k` (backtrace; halted), `r` (registers; halted), `bp/bl/bc/bd/be` (breakpoints; halted), `!analyze`. Run control is bounded by timeout_ms: `g`/`p`/`t`/`gu`/`pa`... resume and wait for the next stop; if none arrives the result ends with `[target running]` and the target keeps running. A step on the same thread shows only what changed. Like typing at a running WinDbg, a halted-only command (`k`, `r`, `bp`, ...) or another resuming command sent while the target runs waits for the stop a breakpoint causes, then runs (a resuming one is instead refused once, so the stop is seen before it is continued past); with no breakpoint set it is refused at once, so send `break` first (an empty line waits anyway). Each command on a `;` line is admitted against the target's state at that point, so `break; bp <addr>; g` works as one line. A command that reports an error ends its line, and the result is then an error. A stop that happened between calls is shown at the top of the next result. A result over about 24k characters shows its first page and an `[output <id>: ...]` footer for the `output` tool. Guest DbgPrint lines captured since the previous call are appended as `[dbgprint] ...`.",
         annotations(
             title = "Run a debugger command",
             read_only_hint = false,
@@ -575,7 +628,7 @@ impl NtoseyeMcp {
     }
 
     #[tool(
-        description = "Attach to a target: a live Windows VM over kd/kdnet/gdb/memory, or a crash dump (backend=dump, connect=<path>). Must be called before other tools when the server was started without --connect/--dump. Only one session can be active at a time. Returns {status:\"connected\", backend, connect, processors}.",
+        description = "Attach to a target: a live Windows VM over kd/kdnet/gdb/memory, or a dump file (backend=dump, connect=<path>): a kernel crash dump, or a Windows user-mode minidump (one process's modules, threads, and memory, with no kernel; it never runs, so run control, breakpoints, and writes are refused, as are kernel commands). Must be called before other tools when the server was started without --connect/--dump. Only one session can be active at a time. Returns {status:\"connected\", backend, connect, processors}; for a user-mode minidump {status, backend, connect, target, process, threads, thread (the selected one), exception (or null)} instead of processors.",
         annotations(
             title = "Attach to a target",
             read_only_hint = false,
@@ -638,7 +691,7 @@ impl NtoseyeMcp {
         );
 
         let opening = OpeningGuard::claim(&self.session)?;
-        let (tx, service_pending, processors) =
+        let (tx, service_pending, contexts) =
             tokio::task::spawn_blocking(move || spawn_session(spec))
                 .await
                 .map_err(|e| McpError::internal_error(format!("spawn_blocking failed: {e}"), None))?
@@ -651,12 +704,15 @@ impl NtoseyeMcp {
             spawn_service_ticker(tx_for_ticker, service_pending);
         }
 
-        Ok(CallToolResult::structured(serde_json::json!({
+        let mut result = json!({
             "status": "connected",
             "backend": label,
             "connect": connect,
-            "processors": processors,
-        })))
+        });
+        if let (Some(result), Value::Object(contexts)) = (result.as_object_mut(), contexts) {
+            result.extend(contexts);
+        }
+        Ok(CallToolResult::structured(result))
     }
 
     #[tool(
@@ -732,9 +788,15 @@ impl rmcp::ServerHandler for NtoseyeMcp {
             ))
             .with_instructions(
                 "ntoseye: a WinDbg-like kernel debugger for a Windows VM (KVM/QEMU, \
-                 VMware, UTM) or a crash dump. Drive it with the `command` tool, which \
+                 VMware, UTM), a kernel crash dump, or a Windows user-mode minidump. \
+                 Drive it with the `command` tool, which \
                  runs one REPL line in WinDbg-style syntax and returns its text plus a \
-                 `[target ...]` trailer; `help` lists commands. The guest runs freely by \
+                 `[target ...]` trailer; `help` lists commands. A user-mode minidump \
+                 holds one process and no kernel: its trailer is `[minidump ...]`, naming \
+                 the selected thread and the exception; `~` lists its threads and `~Ns` \
+                 selects one; `k`, `r`, `.ecxr`, `.exr -1`, `!analyze`, `lm`, `dt`, and \
+                 memory commands work; it never runs, and kernel commands are refused. \
+                 The guest runs freely by \
                  default: memory, process, module, and struct commands work live, while \
                  registers, backtraces, stepping, and breakpoint changes need the VM \
                  halted (`break` first, or be stopped at a breakpoint). Resuming commands \
@@ -851,7 +913,7 @@ pub fn run(
                 }
             };
             eprintln!("ntoseye-mcp: attaching ({label})...");
-            let (tx, service_pending, _processors) = spawn_session(spec)?;
+            let (tx, service_pending, _contexts) = spawn_session(spec)?;
             *session.lock().unwrap() = SessionSlot::Active(tx.clone());
             if needs_ticker {
                 spawn_service_ticker(tx, service_pending);

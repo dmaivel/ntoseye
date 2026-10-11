@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::IsTerminal;
 
 use crate::backend::MemoryOps;
@@ -8,11 +8,11 @@ use crate::layout::utf16le_nul_terminated;
 use crate::output;
 #[cfg(feature = "python")]
 use crate::python::embed;
-use crate::target::Target;
 use crate::target::meta::{
-    ErrorCodeDetail, TargetTimeDetail, TargetVersionDetail, decode_error_code,
-    decode_error_code_as_ntstatus,
+    ErrorCodeDetail, TargetTimeDetail, TargetUserDumpDetail, TargetVersionDetail,
+    UserDumpTimeDetail, decode_error_code, decode_error_code_as_ntstatus,
 };
+use crate::target::{Target, TargetKind};
 use crate::triage_report::time::filetime_to_iso;
 use crate::types::{Arch, CodeMachine, VirtAddr};
 
@@ -372,8 +372,16 @@ impl ReplState<'_> {
 
         let mut groups: BTreeMap<&'static str, BTreeMap<&'static str, &'static CommandSpec>> =
             BTreeMap::new();
+        // A user-mode minidump refuses every kernel command, so the listing
+        // leaves them out; `help <command>` still describes each.
+        let user_dump = self.ctx.target.kind() == TargetKind::UserDump;
+        let mut hidden = BTreeSet::new();
         for (_, spec) in command_registry().command_names() {
             let canonical = spec.names[0];
+            if user_dump && spec.target == TargetRequirement::Kernel {
+                hidden.insert(canonical);
+                continue;
+            }
             groups
                 .entry(command_category(canonical))
                 .or_default()
@@ -429,6 +437,15 @@ impl ReplState<'_> {
         );
         #[cfg(not(feature = "cli"))]
         print_help_listing(&listing);
+        if !hidden.is_empty() {
+            outln!(
+                "{}\n",
+                ui::muted(&format!(
+                    "{} commands that need a kernel target are not listed: this is a user-mode minidump",
+                    hidden.len()
+                ))
+            );
+        }
         Ok(())
     }
 
@@ -893,6 +910,10 @@ fn print_target_version(detail: &TargetVersionDetail) {
             .unwrap_or_default()
     );
     outln!("  {} {}", ui::muted("arch"), detail.architecture);
+    if let Some(user_dump) = &detail.user_dump {
+        print_user_dump_version(detail, user_dump);
+        return;
+    }
     if let Some(kernel) = &detail.kernel {
         match kernel.size {
             Some(size) => outln!(
@@ -1019,6 +1040,10 @@ fn print_target_version(detail: &TargetVersionDetail) {
 
 fn print_target_time(detail: &TargetTimeDetail) {
     outln!("{}", ui::label("target time"));
+    if let Some(user_dump) = &detail.user_dump {
+        print_user_dump_time(user_dump);
+        return;
+    }
     match (detail.system_time, detail.system_time_iso.as_deref()) {
         (Some(raw), Some(iso)) => outln!("  {} {} ({raw:#x})", ui::muted("system time"), iso),
         (Some(raw), None) => outln!("  {} unavailable ({raw:#x})", ui::muted("system time")),
@@ -1032,6 +1057,118 @@ fn print_target_time(detail: &TargetTimeDetail) {
         ),
         _ => outln!("  {} unavailable", ui::muted("uptime")),
     }
+}
+
+/// `vertarget` past the version line on a user-mode minidump: what its
+/// SystemInfo, MiscInfo, and header record. It has no kernel to describe.
+fn print_user_dump_version(detail: &TargetVersionDetail, user_dump: &TargetUserDumpDetail) {
+    let processor = if detail.architecture == "AMD64" {
+        format!(
+            "family {}, model {:#x}, stepping {:#x}",
+            user_dump.processor_level,
+            user_dump.processor_revision >> 8,
+            user_dump.processor_revision & 0xff
+        )
+    } else {
+        format!(
+            "level {}, revision {:#x}",
+            user_dump.processor_level, user_dump.processor_revision
+        )
+    };
+    outln!(
+        "  {} {} ({processor})",
+        ui::muted("processors"),
+        detail
+            .processors
+            .map_or_else(|| "unknown".to_string(), |value| value.to_string())
+    );
+    outln!("  {} {}", ui::muted("product"), detail.product);
+    if let Some(service_pack) = &user_dump.service_pack {
+        outln!("  {} {}", ui::muted("service pack"), service_pack);
+    }
+    let process = user_dump.process_name.as_deref().unwrap_or("unknown");
+    match user_dump.process_id {
+        Some(pid) => outln!("  {} {process} (pid {pid})", ui::muted("process")),
+        None => outln!("  {} {process}", ui::muted("process")),
+    }
+    outln!(
+        "  {} user-mode minidump, {} threads, {} modules",
+        ui::muted("dump"),
+        user_dump.threads,
+        user_dump.modules
+    );
+    outln!(
+        "  {} {:#x} ({})",
+        ui::muted("dump type"),
+        user_dump.flags,
+        user_dump.flag_names.join(" | ")
+    );
+    if let Some(time) = &detail.time.user_dump {
+        outln!(
+            "  {} {}",
+            ui::muted("dump written"),
+            time.written_iso.as_deref().unwrap_or("unknown")
+        );
+    }
+    outln!(
+        "  {} {}",
+        ui::muted("exception"),
+        user_dump.exception_code.map_or_else(
+            || "none recorded".to_string(),
+            |code| format!("{code:#010x}")
+        )
+    );
+    outln!(
+        "  {} {}",
+        ui::muted("backend"),
+        detail.backend.as_deref().unwrap_or("unknown")
+    );
+    outln!("  {} {}", ui::muted("ntoseye"), detail.debugger_version);
+    outln!("  {} {}", ui::muted("symbol path"), detail.symbol_path);
+}
+
+/// `.time` on a user-mode minidump: when it was written and how long its
+/// process had run. It records no system clock or system uptime.
+fn print_user_dump_time(detail: &UserDumpTimeDetail) {
+    let written = detail.written_iso.as_deref().unwrap_or("out of range");
+    outln!(
+        "  {} {written} ({:#x})",
+        ui::muted("dump written"),
+        detail.written
+    );
+    if let Some(local) = &detail.written_local {
+        outln!(
+            "  {} {local}{}",
+            ui::muted("local time"),
+            detail
+                .time_zone
+                .as_deref()
+                .filter(|zone| !zone.is_empty())
+                .map(|zone| format!(" ({zone})"))
+                .unwrap_or_default()
+        );
+    }
+    match detail.process_created_iso.as_deref() {
+        Some(created) => outln!("  {} {created}", ui::muted("process created")),
+        None => outln!("  {} not recorded", ui::muted("process created")),
+    }
+    if let (Some(seconds), Some(uptime)) = (detail.process_uptime_seconds, &detail.process_uptime) {
+        outln!(
+            "  {} {uptime} ({seconds} seconds)",
+            ui::muted("process uptime")
+        );
+    }
+    match (detail.user_time_seconds, detail.kernel_time_seconds) {
+        (Some(user), Some(kernel)) => outln!(
+            "  {} user {user} s, kernel {kernel} s",
+            ui::muted("process CPU time")
+        ),
+        _ => outln!("  {} not recorded", ui::muted("process CPU time")),
+    }
+    outln!(
+        "  {} not recorded in a user-mode minidump",
+        ui::muted("system time and uptime")
+    );
 }
 
 fn parse_printf_tail(text: &str) -> Option<(String, Vec<String>)> {

@@ -70,6 +70,7 @@ repl_command! {
     usage: "!eq <address> <value...>",
     summary: "Write one or more quadwords to guest-physical memory.",
     completion: Expression,
+    target: Kernel,
 }
 
 repl_command! {

@@ -768,6 +768,45 @@ fn type_lookup_prefers_the_kernel_unless_qualified() {
 }
 
 #[test]
+fn type_lookup_without_a_kernel_prefers_ntdll() {
+    // A user-mode minidump: no kernel PDB, and CRT PDBs that carry the
+    // public `winternl.h` `_PEB` (712 bytes) beside ntdll's real one.
+    let store = SymbolStore::new();
+    let dtb = 0x1000;
+    let layout = |name: &str, size| TypeInfo {
+        name: name.to_string(),
+        size,
+        fields: Default::default(),
+        pointer_size: 8,
+    };
+    let modules = [
+        ("vcruntime140.dll", 0x11, 0x7ff9_1000_0000_u64, 712),
+        ("ntdll.dll", 0x10, 0x7ff9_4926_0000, 2008),
+        ("ucrtbase.dll", 0x12, 0x7ff9_4680_0000, 712),
+        ("msvcrt.dll", 0x13, 0x7ff9_47f3_0000, 712),
+    ];
+    for (name, guid, base, peb_size) in modules {
+        store.inject_module_for_test(guid, vec![layout("_PEB", peb_size)], &[]);
+        let module = ModuleInfo::new(name.to_string(), VirtAddr(base), 0x1000);
+        store.modules.insert(
+            (dtb, base),
+            LoadedModule {
+                name: module.name,
+                short_name: module.short_name,
+                guid,
+                base_address: VirtAddr(base),
+                size: 0x1000,
+                dtb,
+            },
+        );
+    }
+
+    let size = |name: &str| store.find_type_across_modules(dtb, name).map(|t| t.size);
+    assert_eq!(size("_PEB"), Some(2008));
+    assert_eq!(size("msvcrt!_PEB"), Some(712));
+}
+
+#[test]
 fn nested_types_name_the_module_that_defines_them() {
     let store = SymbolStore::new();
     let (kernel_dtb, user_dtb) = (0x2000, 0x1000);

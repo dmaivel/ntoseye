@@ -42,6 +42,7 @@ repl_command! {
     details: "Reads one model-specific register on the selected processor, or on another processor that you select with /p. The dump and memory backends show that MSR access is unavailable.",
     completion: [None, Expression, Expression],
     run_state: Halted,
+    target: Kernel,
 }
 
 repl_command! {
@@ -52,6 +53,7 @@ repl_command! {
     details: "Writes one model-specific register on the current processor. You can use a common IA32_* name instead of the numeric MSR.",
     completion: [Expression, Expression],
     run_state: Halted,
+    target: Kernel,
 }
 
 repl_command! {
@@ -138,6 +140,7 @@ repl_command! {
     summary: "Switch to a different vCPU context.",
     completion: Vcpu,
     run_state: Halted,
+    target: Kernel,
 }
 
 fn current_processor(state: &ReplState<'_>) -> u16 {

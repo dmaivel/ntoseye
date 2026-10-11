@@ -5,6 +5,7 @@ mod culprit;
 mod power;
 mod signature;
 pub mod time;
+mod user;
 mod verifier;
 mod whea;
 
@@ -23,6 +24,10 @@ pub use power::{
     power_failure_finding,
 };
 use signature::failure_signature;
+pub use user::{
+    CodeOwner, ExceptionParameter, UserDumpTriage, UserExceptionFinding, UserExceptionKind,
+    UserFrame, UserProcessSummary, UserStackSource, UserStackThread,
+};
 use verifier::verifier_finding;
 use whea::{decode_whea_record, whea_without_memory};
 
@@ -43,6 +48,9 @@ pub enum FailureSignatureSource {
     /// the blocked power IRP, or the one whose device or driver object the
     /// parameters give.
     PowerFailureDriver,
+    /// On a user-mode minidump, the first frame outside the system modules,
+    /// which called the system code that raised the exception.
+    FirstNonSystemFrame,
     CodeOnly,
 }
 
@@ -78,6 +86,9 @@ pub enum CulpritEvidenceKind {
     PowerFailureDriver,
     /// The thread that holds the PnP lock in a 0x9F/0x4 runs in the module.
     PnpLockOwnerStack,
+    /// On a user-mode minidump, the first frame outside the system modules
+    /// on the faulting thread's stack is in the module.
+    FirstNonSystemFrame,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,9 +102,40 @@ pub struct CulpritEvidence {
 /// sufficient to name a non-kernel culprit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CulpritAttribution {
-    pub module: String,
+    pub subject: CulpritSubject,
     pub confidence: CulpritConfidence,
     pub evidence: Vec<CulpritEvidence>,
+}
+
+/// What a culprit attribution names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CulpritSubject {
+    Module(String),
+    /// On a user-mode minidump, code no module holds that a dynamic
+    /// function table covers: JIT-compiled or otherwise generated code.
+    DynamicCode(DynamicCodeCulprit),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DynamicCodeCulprit {
+    /// The blamed frame's address.
+    pub address: u64,
+    /// The dynamic function table covering it, `table_start..table_end`.
+    pub table_start: u64,
+    pub table_end: u64,
+    /// The first frame further out that a module holds: the module code
+    /// that called into the generated code.
+    pub caller: Option<UserFrame>,
+}
+
+impl CulpritAttribution {
+    /// The module the attribution names; `None` for generated code.
+    pub fn module(&self) -> Option<&str> {
+        match &self.subject {
+            CulpritSubject::Module(module) => Some(module),
+            CulpritSubject::DynamicCode(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,6 +260,9 @@ pub struct TriageReport {
     pub kmdf_log: Option<KmdfLogFinding>,
     /// What a DRIVER_POWER_STATE_FAILURE names as stuck.
     pub power: Option<PowerFailureFinding>,
+    /// What a user-mode minidump adds: the process, the exception decoded,
+    /// and the frame the failure is blamed on. `None` for a kernel target.
+    pub user: Option<UserDumpTriage>,
     /// Best-effort collection failures that did not prevent the report.
     pub warnings: Vec<String>,
 }
@@ -237,6 +282,11 @@ impl TriageReport {
     /// Enumeration and unwinding are best-effort so a partial or live target
     /// still produces the directly available crash/status data.
     pub fn build(session: &mut Session) -> Self {
+        // A user dump has no kernel to read a bugcheck, kernel modules, or
+        // any of the kernel findings from.
+        if let Some(report) = user::build(session) {
+            return report;
+        }
         let status = session.run_status();
         let mut bugcheck = session.bugcheck();
         let mut warnings = Vec::new();
@@ -332,6 +382,7 @@ impl TriageReport {
             blackboxes,
             kmdf_log: None,
             power: None,
+            user: None,
             warnings: Vec::new(),
         };
         report.failure_signature = failure_signature(&report);
@@ -442,7 +493,7 @@ mod tests {
     use crate::symbols::CodeFrame;
     use crate::target::power::{DeviceDriver, PowerCulprit, PowerFailure};
     use crate::triage::TriageDriver;
-    use crate::types::VirtAddr;
+    use crate::types::{Arch, VirtAddr};
     use crate::unwind::{FrameSource, StackFrame};
 
     fn bugcheck(
@@ -758,7 +809,7 @@ mod tests {
         );
 
         let culprit = report.culprit.unwrap();
-        assert_eq!(culprit.module, "sample.sys");
+        assert_eq!(culprit.module(), Some("sample.sys"));
         assert_eq!(culprit.confidence, CulpritConfidence::High);
         assert_eq!(
             culprit.evidence[0].kind,
@@ -907,7 +958,7 @@ mod tests {
         assert_eq!(signature.bucket, "bugcheck:0000009f|subtype:3|module:stuck");
         assert_eq!(signature.source, FailureSignatureSource::PowerFailureDriver);
         let culprit = report.culprit.unwrap();
-        assert_eq!(culprit.module, "stuck.sys");
+        assert_eq!(culprit.module(), Some("stuck.sys"));
         assert_eq!(culprit.confidence, CulpritConfidence::High);
         assert_eq!(
             culprit.evidence[0].kind,
@@ -939,7 +990,7 @@ mod tests {
         );
 
         let culprit = report.culprit.unwrap();
-        assert_eq!(culprit.module, "stuck.sys");
+        assert_eq!(culprit.module(), Some("stuck.sys"));
         assert_eq!(culprit.confidence, CulpritConfidence::Medium);
         assert_eq!(
             culprit.evidence[0].kind,
@@ -950,6 +1001,193 @@ mod tests {
         assert_eq!(
             report.failure_signature.unwrap().bucket,
             "bugcheck:0000009f|subtype:4|symbol:nt!kebugcheckex"
+        );
+    }
+
+    const APP_BASE: u64 = 0x1_4000_0000;
+    const KERNELBASE_BASE: u64 = 0x7ff9_4000_0000;
+    const JIT_TABLE: (u64, u64) = (0x7ff8_9b6c_0020, 0x7ff8_9b74_0000);
+
+    /// A user-dump report whose exception was raised at `frames[0]`, with
+    /// the frame analysis `user::build` makes.
+    fn user_report(frames: Vec<StackFrame>) -> TriageReport {
+        let modules = vec![
+            ModuleInfo::new("app.exe".into(), VirtAddr(APP_BASE), 0x10_0000),
+            ModuleInfo::new(
+                "KERNELBASE.dll".into(),
+                VirtAddr(KERNELBASE_BASE),
+                0x40_0000,
+            ),
+        ];
+        let owner = |address: u64| match modules
+            .iter()
+            .find(|module| module.contains_address(VirtAddr(address)))
+        {
+            Some(module) => CodeOwner::Module {
+                name: module.name.clone(),
+                system: culprit::is_user_system_module(&module.name),
+            },
+            None => CodeOwner::DynamicCode {
+                table_start: JIT_TABLE.0,
+                table_end: JIT_TABLE.1,
+            },
+        };
+        let trace = StackTrace {
+            frames,
+            truncated: 0,
+        };
+        let address = trace.frames[0].ip;
+        let blamed_frame = user::blamed_frame(&trace, 0, owner);
+        let module_caller = blamed_frame
+            .as_ref()
+            .and_then(|blamed| user::module_caller(&trace, blamed, owner));
+        let exception = UserExceptionFinding {
+            code: 0xE06D_7363,
+            kind: UserExceptionKind::CppException,
+            name: "C++ exception",
+            flags: 1,
+            flag_names: Vec::new(),
+            record: 0,
+            address,
+            symbol: trace.frames[0].symbol.clone(),
+            address_owner: owner(address),
+            parameters: Vec::new(),
+            summary: None,
+            thread_id: 0x1a2c,
+            thread: "1f40.1a2c".into(),
+            thread_name: None,
+            faulting_frame: Some(0),
+            blamed_frame,
+            module_caller,
+        };
+        let mut report =
+            TriageReport::assemble(status(false, None), None, Some(trace), modules, None, None);
+        report.user = Some(UserDumpTriage {
+            process: UserProcessSummary {
+                name: Some("app.exe".into()),
+                pid: Some(0x1f40),
+                arch: Arch::Amd64,
+                major_version: 10,
+                minor_version: 0,
+                build_number: 26200,
+                build_string: None,
+                dump_time: 0,
+                create_time: None,
+                cpu_times: None,
+                threads: 1,
+                modules: 2,
+                unloaded_modules: 0,
+                handles: None,
+            },
+            exception: Some(exception),
+            stack_thread: None,
+            exception_registers: Vec::new(),
+        });
+        report.failure_signature = signature::user_failure_signature(&report);
+        report.culprit = culprit::user_culprit_attribution(&report);
+        report
+    }
+
+    fn user_frame(ip: u64, symbol: &str, source: FrameSource) -> StackFrame {
+        StackFrame {
+            source,
+            ..frame(ip, symbol)
+        }
+    }
+
+    #[test]
+    fn a_user_raise_buckets_and_blames_the_caller_outside_the_system_modules() {
+        let report = user_report(vec![
+            user_frame(
+                KERNELBASE_BASE + 0x1000,
+                "kernelbase!RaiseException+0x8a",
+                FrameSource::Current,
+            ),
+            user_frame(APP_BASE + 0x2040, "app!Parse+0x40", FrameSource::Unwind),
+        ]);
+
+        let signature = report.failure_signature.unwrap();
+        assert_eq!(signature.bucket, "exception:e06d7363|symbol:app!parse");
+        assert_eq!(
+            signature.source,
+            FailureSignatureSource::FirstNonSystemFrame
+        );
+        let culprit = report.culprit.unwrap();
+        assert_eq!(culprit.module(), Some("app.exe"));
+        assert_eq!(culprit.confidence, CulpritConfidence::Medium);
+        assert_eq!(
+            culprit.evidence[0].kind,
+            CulpritEvidenceKind::FirstNonSystemFrame
+        );
+        assert_eq!(culprit.evidence[0].address, Some(APP_BASE + 0x2040));
+    }
+
+    #[test]
+    fn a_user_fault_in_the_application_is_blamed_on_the_exception_address() {
+        let report = user_report(vec![user_frame(
+            APP_BASE + 0x10,
+            "app!Write+0x10",
+            FrameSource::Current,
+        )]);
+
+        let signature = report.failure_signature.unwrap();
+        assert_eq!(signature.bucket, "exception:e06d7363|symbol:app!write");
+        assert_eq!(signature.source, FailureSignatureSource::ExceptionAddress);
+        let culprit = report.culprit.unwrap();
+        assert_eq!(
+            culprit.evidence[0].kind,
+            CulpritEvidenceKind::ExceptionAddress
+        );
+    }
+
+    #[test]
+    fn a_user_raise_from_jit_code_blames_that_code_and_buckets_on_the_raise() {
+        let report = user_report(vec![
+            user_frame(
+                KERNELBASE_BASE + 0x1000,
+                "kernelbase!RaiseException+0x8a",
+                FrameSource::Current,
+            ),
+            user_frame(0x7ff8_9b6c_6a48, "0x7ff89b6c6a48", FrameSource::Unwind),
+            user_frame(0x7ff8_9b6c_6914, "0x7ff89b6c6914", FrameSource::Unwind),
+            user_frame(APP_BASE + 0x2040, "app!Main+0x40", FrameSource::Unwind),
+        ]);
+
+        // The JIT frame is the caller: the application frame further out
+        // is not promoted over it, only named as what called into it.
+        let culprit = report.culprit.unwrap();
+        assert_eq!(culprit.module(), None);
+        assert_eq!(culprit.confidence, CulpritConfidence::Low);
+        let CulpritSubject::DynamicCode(code) = &culprit.subject else {
+            panic!("expected a dynamic-code culprit");
+        };
+        assert_eq!(code.address, 0x7ff8_9b6c_6a48);
+        assert_eq!((code.table_start, code.table_end), JIT_TABLE);
+        assert_eq!(code.caller.as_ref().map(|caller| caller.index), Some(3));
+        let signature = report.failure_signature.unwrap();
+        assert_eq!(
+            signature.bucket,
+            "exception:e06d7363|symbol:kernelbase!raiseexception"
+        );
+        assert_eq!(signature.source, FailureSignatureSource::ExceptionAddress);
+    }
+
+    #[test]
+    fn a_user_culprit_found_by_scanning_has_low_confidence_and_a_symbolless_one_buckets_by_module()
+    {
+        let report = user_report(vec![
+            user_frame(
+                KERNELBASE_BASE + 0x1000,
+                "kernelbase!RaiseException+0x8a",
+                FrameSource::Current,
+            ),
+            user_frame(APP_BASE + 0x2040, "app+0x2040", FrameSource::Scan),
+        ]);
+
+        assert_eq!(report.culprit.unwrap().confidence, CulpritConfidence::Low);
+        assert_eq!(
+            report.failure_signature.unwrap().bucket,
+            "exception:e06d7363|module:app"
         );
     }
 }

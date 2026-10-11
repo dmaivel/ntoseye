@@ -14,6 +14,7 @@ repl_command! {
     usage: "!verifier [module]",
     summary: "Show the Driver Verifier status, statistics, and verified drivers.",
     details: "Without a module, shows the verifier level and its decoded options, the aggregate (global) counters, and the configured driver list. The list contains the verified drivers from ViTargetDriversAvl and the configured drivers that are not loaded, from VfSuspectDriversList. With a module, shows the verified-driver counters and the image details of that driver: image, signing level, and load counts.",
+    target: Kernel,
 }
 
 fn diagnostic_error<T>(value: &DiagnosticValue<T>) -> Option<&str> {

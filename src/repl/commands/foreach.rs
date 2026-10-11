@@ -56,6 +56,7 @@ repl_command! {
     summary: "Run commands once for each process in the target.",
     details: "In CommandString, ntoseye replaces each whole-word `@#Process` with the EPROCESS address of the process, and `${@#Process}` anywhere. To use several commands, separate them with `;` and put the string in quotes. Without CommandString, the command runs `!process @#Process 0` for each process. The loop does not change the process context (`.process`, `$proc`), but `.process /p @#Process` in CommandString does, and this change stays after the loop. The loop uses the processes that `ps` shows, in the same order. Ctrl+C stops the loop. If the session does not permit a command (for example, a resume in a breakpoint action), the loop stops and the rest of the command line does not run. If a command only shows an error, the loop continues.",
     style: ExpressionTail,
+    target: Kernel,
 }
 
 repl_command! {
@@ -65,6 +66,7 @@ repl_command! {
     summary: "Run commands once for each thread in the target, or in the `.process` process.",
     details: "In CommandString, ntoseye replaces each whole-word `@#Thread` with the ETHREAD address of the thread, and `${@#Thread}` anywhere. To use several commands, separate them with `;` and put the string in quotes. Without CommandString, the command runs `!thread @#Thread 2` for each thread. If you select a process with `.process`, the loop uses only the threads of that process, and otherwise each thread that `threads` shows. The loop does not change the thread context (`.thread`, `$thread`). Ctrl+C stops the loop. If the session does not permit a command (for example, a resume in a breakpoint action), the loop stops and the rest of the command line does not run. If a command only shows an error, the loop continues.",
     style: ExpressionTail,
+    target: Kernel,
 }
 
 repl_command! {

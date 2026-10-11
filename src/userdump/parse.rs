@@ -10,8 +10,9 @@ use std::collections::{BTreeMap, HashMap};
 use zerocopy::{FromBytes, Immutable, KnownLayout};
 
 use super::{
-    MemoryRange, UnloadedModule, UserDumpInfo, UserException, UserModule, UserSystemInfo,
-    UserThread, UserThreadInfo,
+    DynamicFunction, FunctionTable, MemoryRange, MemoryRegion, UnloadedModule, UserDumpInfo,
+    UserException, UserHandle, UserModule, UserSystemInfo, UserThread, UserThreadInfo,
+    UserTimeZone,
 };
 use crate::error::{Error, Result};
 use crate::kd::{context, context_arm64};
@@ -30,8 +31,11 @@ const MEMORY_LIST_STREAM: u32 = 5;
 const EXCEPTION_STREAM: u32 = 6;
 const SYSTEM_INFO_STREAM: u32 = 7;
 const MEMORY64_LIST_STREAM: u32 = 9;
+const HANDLE_DATA_STREAM: u32 = 12;
+const FUNCTION_TABLE_STREAM: u32 = 13;
 const UNLOADED_MODULE_LIST_STREAM: u32 = 14;
 const MISC_INFO_STREAM: u32 = 15;
+const MEMORY_INFO_LIST_STREAM: u32 = 16;
 const THREAD_INFO_LIST_STREAM: u32 = 17;
 const THREAD_NAME_LIST_STREAM: u32 = 24;
 
@@ -42,7 +46,16 @@ const PROCESSOR_ARCHITECTURE_ARM64: u16 = 12;
 
 const MISC1_PROCESS_ID: u32 = 0x1;
 const MISC1_PROCESS_TIMES: u32 = 0x2;
+const MISC3_TIMEZONE: u32 = 0x40;
 const MISC4_BUILDSTRING: u32 = 0x100;
+/// `MINIDUMP_MISC_INFO_3.TimeZoneId` and the `TIME_ZONE_INFORMATION` that
+/// follows it.
+const MISC_INFO_TIME_ZONE_ID: usize = 56;
+const MISC_INFO_TIME_ZONE: usize = 60;
+const TIME_ZONE_INFORMATION_SIZE: usize = 172;
+const TIME_ZONE_ID_UNKNOWN: u32 = 0;
+const TIME_ZONE_ID_STANDARD: u32 = 1;
+const TIME_ZONE_ID_DAYLIGHT: u32 = 2;
 /// `MINIDUMP_MISC_INFO_4.BuildString`: 260 UTF-16 units after the 232 bytes
 /// of `MINIDUMP_MISC_INFO_3`.
 const MISC_INFO_BUILD_STRING: usize = 232;
@@ -54,6 +67,10 @@ const MAX_STREAMS: u32 = 0x1000;
 const MAX_THREADS: u32 = 0x10_0000;
 const MAX_MODULES: u32 = 0x10_0000;
 const MAX_MEMORY_RANGES: u64 = 0x100_0000;
+const MAX_HANDLES: u32 = 0x100_0000;
+const MAX_FUNCTION_TABLES: u32 = 0x10_0000;
+/// An AMD64 `RUNTIME_FUNCTION`: begin, end, and unwind-data offsets.
+const AMD64_RUNTIME_FUNCTION_SIZE: u32 = 12;
 /// The longest `MINIDUMP_STRING` read, in bytes: a module path or thread
 /// name is far shorter.
 const MAX_STRING_BYTES: u32 = 0x1_0000;
@@ -211,6 +228,76 @@ struct RawThreadName {
     name_rva: u64,
 }
 
+#[derive(FromBytes, Immutable, KnownLayout)]
+#[repr(C, packed)]
+struct RawHandleDataHeader {
+    size_of_header: u32,
+    size_of_descriptor: u32,
+    number_of_descriptors: u32,
+    reserved: u32,
+}
+
+/// `MINIDUMP_HANDLE_DESCRIPTOR`; `MINIDUMP_HANDLE_DESCRIPTOR_2` appends an
+/// object-information RVA, which this does not read.
+#[derive(FromBytes, Immutable, KnownLayout)]
+#[repr(C, packed)]
+struct RawHandleDescriptor {
+    handle: u64,
+    type_name_rva: u32,
+    object_name_rva: u32,
+    attributes: u32,
+    granted_access: u32,
+    handle_count: u32,
+    pointer_count: u32,
+}
+
+#[derive(FromBytes, Immutable, KnownLayout)]
+#[repr(C, packed)]
+struct RawMemoryInfoListHeader {
+    size_of_header: u32,
+    size_of_entry: u32,
+    number_of_entries: u64,
+}
+
+#[derive(FromBytes, Immutable, KnownLayout)]
+#[repr(C, packed)]
+struct RawMemoryInfo {
+    base_address: u64,
+    allocation_base: u64,
+    allocation_protect: u32,
+    alignment1: u32,
+    region_size: u64,
+    state: u32,
+    protect: u32,
+    kind: u32,
+    alignment2: u32,
+}
+
+#[derive(FromBytes, Immutable, KnownLayout)]
+#[repr(C, packed)]
+struct RawFunctionTableHeader {
+    size_of_header: u32,
+    size_of_descriptor: u32,
+    size_of_native_descriptor: u32,
+    size_of_function_entry: u32,
+    number_of_descriptors: u32,
+    /// Padding between the header and the first descriptor.
+    size_of_align_pad: u32,
+}
+
+/// `MINIDUMP_FUNCTION_TABLE_DESCRIPTOR`, which is followed by the native
+/// table descriptor, `entry_count` function entries, and `size_of_align_pad`
+/// bytes of padding.
+#[derive(FromBytes, Immutable, KnownLayout)]
+#[repr(C, packed)]
+struct RawFunctionTableDescriptor {
+    minimum_address: u64,
+    maximum_address: u64,
+    base_address: u64,
+    entry_count: u32,
+    size_of_align_pad: u32,
+}
+
 fn invalid(message: impl Into<String>) -> Error {
     Error::InvalidDump(message.into())
 }
@@ -324,8 +411,11 @@ fn stream_name(kind: u32) -> &'static str {
         EXCEPTION_STREAM => "ExceptionStream",
         SYSTEM_INFO_STREAM => "SystemInfoStream",
         MEMORY64_LIST_STREAM => "Memory64ListStream",
+        HANDLE_DATA_STREAM => "HandleDataStream",
+        FUNCTION_TABLE_STREAM => "FunctionTableStream",
         UNLOADED_MODULE_LIST_STREAM => "UnloadedModuleListStream",
         MISC_INFO_STREAM => "MiscInfoStream",
+        MEMORY_INFO_LIST_STREAM => "MemoryInfoListStream",
         THREAD_INFO_LIST_STREAM => "ThreadInfoListStream",
         THREAD_NAME_LIST_STREAM => "ThreadNamesStream",
         _ => "stream",
@@ -398,11 +488,16 @@ pub fn parse(data: &[u8]) -> Result<ParsedUserDump> {
         system,
         process_id: None,
         process_create_time: None,
+        process_cpu_times: None,
+        time_zone: None,
         build_string: None,
         threads: Vec::new(),
         modules: Vec::new(),
         unloaded_modules: Vec::new(),
         exception: None,
+        handles: None,
+        regions: None,
+        function_tables: Vec::new(),
         notes: Vec::new(),
     };
     let mut memory = MemoryMap::default();
@@ -433,6 +528,15 @@ pub fn parse(data: &[u8]) -> Result<ParsedUserDump> {
     }
     if let Some(bytes) = directory.stream(data, MISC_INFO_STREAM, &mut notes) {
         parse_misc_info(bytes, &mut info, &mut notes);
+    }
+    if let Some(bytes) = directory.stream(data, HANDLE_DATA_STREAM, &mut notes) {
+        info.handles = Some(parse_handle_data(data, bytes, &mut notes));
+    }
+    if let Some(bytes) = directory.stream(data, MEMORY_INFO_LIST_STREAM, &mut notes) {
+        info.regions = Some(parse_memory_info_list(bytes, &mut notes));
+    }
+    if let Some(bytes) = directory.stream(data, FUNCTION_TABLE_STREAM, &mut notes) {
+        info.function_tables = parse_function_tables(bytes, arch, &mut notes);
     }
 
     info.notes = notes;
@@ -993,10 +1097,244 @@ fn parse_misc_info(stream: &[u8], info: &mut UserDumpInfo, notes: &mut Vec<Strin
     }
     if flags & MISC1_PROCESS_TIMES != 0 {
         info.process_create_time = Some(raw.process_create_time);
+        info.process_cpu_times = Some((raw.process_user_time, raw.process_kernel_time));
+    }
+    if flags & MISC3_TIMEZONE != 0 && size >= MISC_INFO_TIME_ZONE + TIME_ZONE_INFORMATION_SIZE {
+        info.time_zone = parse_time_zone(
+            read_at(stream, MISC_INFO_TIME_ZONE_ID as u64).unwrap_or(0),
+            &stream[MISC_INFO_TIME_ZONE..MISC_INFO_TIME_ZONE + TIME_ZONE_INFORMATION_SIZE],
+        );
     }
     let build_end = MISC_INFO_BUILD_STRING + MISC_INFO_BUILD_STRING_UNITS * 2;
     if flags & MISC4_BUILDSTRING != 0 && size >= build_end {
         let build = fixed_utf16(&stream[MISC_INFO_BUILD_STRING..build_end]);
         info.build_string = (!build.is_empty()).then_some(build);
     }
+}
+
+/// The zone a `TIME_ZONE_INFORMATION` describes in the period `id` names:
+/// `Bias`, plus `StandardBias` or `DaylightBias`. An unknown period
+/// (`TIME_ZONE_ID_UNKNOWN`, no daylight saving) takes the standard one.
+fn parse_time_zone(id: u32, zone: &[u8]) -> Option<UserTimeZone> {
+    // Bias, StandardName[32], StandardDate, StandardBias, DaylightName[32],
+    // DaylightDate, DaylightBias.
+    let bias: i32 = read_at(zone, 0)?;
+    let (name, extra) = match id {
+        TIME_ZONE_ID_UNKNOWN | TIME_ZONE_ID_STANDARD => {
+            (fixed_utf16(zone.get(4..68)?), read_at::<i32>(zone, 84)?)
+        }
+        TIME_ZONE_ID_DAYLIGHT => (fixed_utf16(zone.get(88..152)?), read_at::<i32>(zone, 168)?),
+        _ => return None,
+    };
+    Some(UserTimeZone {
+        bias: bias.checked_add(extra)?,
+        name,
+    })
+}
+
+fn parse_handle_data(data: &[u8], stream: &[u8], notes: &mut Vec<String>) -> Vec<UserHandle> {
+    let Some(header) = read_at::<RawHandleDataHeader>(stream, 0) else {
+        notes.push("HandleDataStream header is truncated; no handles are listed".into());
+        return Vec::new();
+    };
+    let (header_size, entry_size) = (header.size_of_header, header.size_of_descriptor);
+    if (header_size as usize) < size_of::<RawHandleDataHeader>()
+        || (entry_size as usize) < size_of::<RawHandleDescriptor>()
+    {
+        notes.push(format!(
+            "HandleDataStream has header size {header_size:#x} and descriptor size \
+             {entry_size:#x}, too small for its records; no handles are listed"
+        ));
+        return Vec::new();
+    }
+    let count = header.number_of_descriptors.min(MAX_HANDLES);
+    let string = |rva: u32, what: &str, handle: u64, notes: &mut Vec<String>| match rva {
+        0 => None,
+        rva => match read_string(data, u64::from(rva)) {
+            Ok(text) => (!text.is_empty()).then_some(text),
+            Err(error) => {
+                notes.push(format!("handle {handle:#x} {what}: {error}"));
+                None
+            }
+        },
+    };
+    let mut handles = Vec::with_capacity(count as usize);
+    for index in 0..u64::from(count) {
+        let offset = u64::from(header_size) + index * u64::from(entry_size);
+        let Some(raw) = read_at::<RawHandleDescriptor>(stream, offset) else {
+            notes.push(format!(
+                "HandleDataStream holds {index} of its {count} descriptors; the rest are not \
+                 listed"
+            ));
+            break;
+        };
+        let handle = raw.handle;
+        handles.push(UserHandle {
+            handle,
+            type_name: string(raw.type_name_rva, "type name", handle, notes),
+            object_name: string(raw.object_name_rva, "object name", handle, notes),
+            attributes: raw.attributes,
+            granted_access: raw.granted_access,
+            handle_count: raw.handle_count,
+            pointer_count: raw.pointer_count,
+        });
+    }
+    handles
+}
+
+fn parse_memory_info_list(stream: &[u8], notes: &mut Vec<String>) -> Vec<MemoryRegion> {
+    let Some(header) = read_at::<RawMemoryInfoListHeader>(stream, 0) else {
+        notes.push("MemoryInfoListStream header is truncated; no regions are listed".into());
+        return Vec::new();
+    };
+    let (header_size, entry_size) = (header.size_of_header, header.size_of_entry);
+    if (header_size as usize) < size_of::<RawMemoryInfoListHeader>()
+        || (entry_size as usize) < size_of::<RawMemoryInfo>()
+    {
+        notes.push(format!(
+            "MemoryInfoListStream has header size {header_size:#x} and entry size \
+             {entry_size:#x}, too small for its records; no regions are listed"
+        ));
+        return Vec::new();
+    }
+    let count = header.number_of_entries.min(MAX_MEMORY_RANGES);
+    let mut regions = Vec::new();
+    for index in 0..count {
+        let offset = u64::from(header_size) + index * u64::from(entry_size);
+        let Some(raw) = read_at::<RawMemoryInfo>(stream, offset) else {
+            notes.push(format!(
+                "MemoryInfoListStream holds {index} of its {count} regions; the rest are not \
+                 listed"
+            ));
+            break;
+        };
+        let (base, size) = (raw.base_address, raw.region_size);
+        if size == 0 || base.checked_add(size - 1).is_none() {
+            notes.push(format!(
+                "memory region at {base:#x} has an invalid size {size:#x}; not listed"
+            ));
+            continue;
+        }
+        regions.push(MemoryRegion {
+            base,
+            allocation_base: raw.allocation_base,
+            allocation_protect: raw.allocation_protect,
+            size,
+            state: raw.state,
+            protect: raw.protect,
+            kind: raw.kind,
+        });
+    }
+    regions.sort_by_key(|region| region.base);
+    let before = regions.len();
+    let mut end = 0u64;
+    regions.retain(|region| {
+        let keep = region.base >= end;
+        if keep {
+            end = region.base + region.size;
+        }
+        keep
+    });
+    if regions.len() < before {
+        notes.push(format!(
+            "MemoryInfoListStream has {} regions overlapping earlier ones; they are not listed",
+            before - regions.len()
+        ));
+    }
+    regions
+}
+
+/// The dynamic function tables of `FunctionTableStream`. Only AMD64 tables
+/// are read: they are what the AMD64 unwinder uses for code outside every
+/// module.
+fn parse_function_tables(stream: &[u8], arch: Arch, notes: &mut Vec<String>) -> Vec<FunctionTable> {
+    let Some(header) = read_at::<RawFunctionTableHeader>(stream, 0) else {
+        notes.push("FunctionTableStream header is truncated; its tables are not used".into());
+        return Vec::new();
+    };
+    if arch != Arch::Amd64 {
+        notes.push("FunctionTableStream is only used on AMD64; its tables are not used".into());
+        return Vec::new();
+    }
+    let (header_size, descriptor_size, native_size, entry_size) = (
+        header.size_of_header,
+        header.size_of_descriptor,
+        header.size_of_native_descriptor,
+        header.size_of_function_entry,
+    );
+    if (header_size as usize) < size_of::<RawFunctionTableHeader>()
+        || (descriptor_size as usize) < size_of::<RawFunctionTableDescriptor>()
+        || entry_size < AMD64_RUNTIME_FUNCTION_SIZE
+    {
+        notes.push(format!(
+            "FunctionTableStream has header size {header_size:#x}, descriptor size \
+             {descriptor_size:#x}, and entry size {entry_size:#x}, too small for its records; \
+             its tables are not used"
+        ));
+        return Vec::new();
+    }
+    let count = header.number_of_descriptors.min(MAX_FUNCTION_TABLES);
+    let mut offset = u64::from(header_size) + u64::from(header.size_of_align_pad);
+    let mut tables = Vec::new();
+    for index in 0..count {
+        let Some(raw) = read_at::<RawFunctionTableDescriptor>(stream, offset) else {
+            notes.push(format!(
+                "FunctionTableStream holds {index} of its {count} tables; the rest are not used"
+            ));
+            break;
+        };
+        let (minimum, maximum, base) = (raw.minimum_address, raw.maximum_address, raw.base_address);
+        let entries_at = offset + u64::from(descriptor_size) + u64::from(native_size);
+        let entry_count = u64::from(raw.entry_count);
+        let entries_end = entries_at + entry_count * u64::from(entry_size);
+        if entries_end > stream.len() as u64 {
+            notes.push(format!(
+                "function table {minimum:#x}-{maximum:#x} has {entry_count} entries, more than \
+                 the stream holds; it and the tables after it are not used"
+            ));
+            break;
+        }
+        offset = entries_end + u64::from(raw.size_of_align_pad);
+        if minimum >= maximum {
+            notes.push(format!(
+                "function table {minimum:#x}-{maximum:#x} covers no addresses; not used"
+            ));
+            continue;
+        }
+        let mut entries: Vec<DynamicFunction> = (0..entry_count)
+            .filter_map(|entry| {
+                let at = entries_at + entry * u64::from(entry_size);
+                Some(DynamicFunction {
+                    begin: read_at(stream, at)?,
+                    end: read_at(stream, at + 4)?,
+                    unwind_data: read_at(stream, at + 8)?,
+                })
+            })
+            .filter(|entry| entry.begin < entry.end)
+            .collect();
+        let malformed = entry_count as usize - entries.len();
+        entries.sort_by_key(|entry| entry.begin);
+        let mut end = 0u32;
+        entries.retain(|entry| {
+            let keep = entry.begin >= end;
+            if keep {
+                end = entry.end;
+            }
+            keep
+        });
+        let dropped = entry_count as usize - entries.len();
+        if dropped > 0 {
+            notes.push(format!(
+                "function table {minimum:#x}-{maximum:#x}: {dropped} of its {entry_count} entries \
+                 are empty or overlap another ({malformed} empty); they are not used"
+            ));
+        }
+        tables.push(FunctionTable {
+            minimum,
+            maximum,
+            base,
+            entries,
+        });
+    }
+    tables
 }

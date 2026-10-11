@@ -421,7 +421,7 @@ fn walking_another_vcpu_keeps_the_consoles_context() {
     ));
     let (_tx, rx) = mpsc::channel();
     let (mut server, _sink) = server_with_sink(Some(session), rx);
-    server.threads = vec!["p01.01".to_string(), "p01.02".to_string()];
+    server.threads = stack::dap_threads(vec!["p01.01".to_string(), "p01.02".to_string()], |_| None);
 
     server.on_stack_trace(&json!({"threadId": 2})).unwrap();
 
@@ -1155,4 +1155,78 @@ fn a_label_frame_shows_as_a_label_and_has_no_scopes() {
     );
     assert!(server.on_scopes(&json!({"frameId": 2})).is_err());
     assert!(server.on_scopes(&json!({"frameId": 1})).is_ok());
+}
+
+fn thread_ids(threads: &[stack::DapThread]) -> Vec<i64> {
+    threads.iter().map(|thread| thread.id).collect()
+}
+
+#[test]
+fn a_user_dumps_threads_are_named_by_their_thread_ids() {
+    let ids = vec!["10f4.7c4".to_string(), "10f4.cc4".to_string()];
+    let tid = |id: &str| u32::from_str_radix(id.rsplit('.').next()?, 16).ok();
+
+    let threads = stack::dap_threads(ids.clone(), tid);
+
+    assert_eq!(thread_ids(&threads), [0x7c4, 0xcc4]);
+    assert_eq!(threads[1].backend, "10f4.cc4");
+    // vCPUs have no thread id and keep their positions.
+    assert_eq!(thread_ids(&stack::dap_threads(ids, |_| None)), [1, 2]);
+}
+
+#[test]
+fn a_thread_list_that_repeats_a_thread_id_keeps_positions() {
+    // Two threads cannot share a DAP id, and neither can be told apart by
+    // its thread id; nor can a thread whose id is 0, or that has none.
+    for tids in [[0x10, 0x10, 0x20], [0x10, 0, 0x20]] {
+        let ids: Vec<String> = (0..tids.len()).map(|index| index.to_string()).collect();
+        let tid = |id: &str| id.parse::<usize>().ok().map(|index| tids[index]);
+
+        assert_eq!(
+            thread_ids(&stack::dap_threads(ids, tid)),
+            [1, 2, 3],
+            "{tids:?}"
+        );
+    }
+    let ids = vec!["a".to_string(), "b".to_string()];
+    let tid = |id: &str| (id == "a").then_some(0x10);
+    assert_eq!(thread_ids(&stack::dap_threads(ids, tid)), [1, 2]);
+}
+
+#[test]
+fn a_changed_thread_list_announces_threads_by_their_ids() {
+    let mut session = session_with_mock(MockBackend::default().one_vcpu());
+    session.current_thread = "p01.01".to_string();
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, sink) = server_with_sink(Some(session), rx);
+    server.threads = vec![
+        stack::DapThread {
+            id: 1,
+            backend: "p01.01".to_string(),
+        },
+        stack::DapThread {
+            id: 2,
+            backend: "p01.02".to_string(),
+        },
+    ];
+
+    server.sync_threads();
+
+    // The session's one vCPU replaces both: 1 stays, 2 exits.
+    let events: Vec<(Value, Value)> = decode_sink(&sink)
+        .into_iter()
+        .filter(|message| message["event"] == "thread")
+        .map(|message| {
+            (
+                message["body"]["reason"].clone(),
+                message["body"]["threadId"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(events, [(json!("exited"), json!(2))]);
+    assert_eq!(
+        server.dap_thread_id("p01.02"),
+        1,
+        "an unknown context falls back to the first thread"
+    );
 }

@@ -476,6 +476,19 @@ fn refused_breakpoint(message: String, line: Option<i64>) -> Value {
     row
 }
 
+/// Answer a `set*Breakpoints` request without installing anything: every
+/// breakpoint it names is unverified, for `reason`.
+pub fn unverified(args: &Value, reason: &str) -> Handled {
+    let rows: Vec<Value> = args
+        .get("breakpoints")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|entry| refused_breakpoint(reason.to_string(), arg_i64(entry, "line")))
+        .collect();
+    Ok(Some(json!({"breakpoints": rows})))
+}
+
 /// Compile log placeholders into a `.printf` action followed by `gc`.
 fn log_point_action(message: &str) -> result::Result<String, String> {
     let mut format = String::new();

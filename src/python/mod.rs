@@ -47,6 +47,7 @@ pub mod symbols;
 mod tests;
 pub mod thread;
 pub mod types;
+pub mod userdump;
 
 use args::{AttachBackend, MemorySource};
 use handle::Actor;
@@ -148,6 +149,13 @@ pub fn err(core: Error) -> PyErr {
         | Error::InvalidRange => ErrorKind::MemoryAccess,
         Error::TargetRunning(_) => ErrorKind::TargetRunning,
         Error::SymbolNotFound(_) => ErrorKind::SymbolNotFound,
+        // Only a user-mode minidump refuses so: point at what it does have.
+        Error::KernelRequired => {
+            return error(
+                ErrorKind::Ntoseye,
+                format!("{core}; Debugger.user_dump has its process and threads"),
+            );
+        }
         _ => ErrorKind::Ntoseye,
     };
     error(kind, core)
@@ -187,9 +195,11 @@ pub fn view_dict<'py, T: ViewValue<Source = T>>(
 ///
 /// `backend` is one of `"kd"` (default), `"kdnet"`, `"gdb"`, `"memory"`, or
 /// `"dmp"`. `connect` is the backend target: a socket path or address for
-/// kd/kdnet/gdb, or the dump file path for dmp. Without `connect`, the function
-/// uses the default of the backend, but dmp has no default and needs a path.
-/// kdnet needs `key`. `memory_source` is `auto`, `host`, or `kd` for KD/KDNET.
+/// kd/kdnet/gdb, or the dump file path for dmp: a kernel crash dump, or a
+/// Windows user-mode minidump, whose process and threads `Debugger.user_dump`
+/// holds. Without `connect`, the function uses the default of the backend,
+/// but dmp has no default and needs a path. kdnet needs `key`.
+/// `memory_source` is `auto`, `host`, or `kd` for KD/KDNET.
 ///
 /// For kd/kdnet/gdb, the function takes an instance lock for the target before
 /// it makes the backend, so a second live attach to the same target fails
@@ -275,6 +285,7 @@ pub mod _ntoseye {
     use super::iter::{
         BreakpointIterator, CpuIterator, DriverIterator, ExceptionPolicyIterator, HeapIterator,
         MemoryRegionIterator, ModuleIterator, NameIterator, ProcessIterator, ThreadIterator,
+        UserThreadIterator,
     };
     #[pymodule_export]
     use super::memory::Memory;
@@ -296,6 +307,8 @@ pub mod _ntoseye {
     use super::thread::{Cpu, Cpus, Frame, Msrs, Registers, Thread, Threads};
     #[pymodule_export]
     use super::types::{Struct, Type, Types};
+    #[pymodule_export]
+    use super::userdump::{UserDump, UserProcess, UserThread, UserThreads};
     #[pymodule_export]
     use super::{attach, decode_error};
 
