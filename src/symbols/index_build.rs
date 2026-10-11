@@ -592,6 +592,7 @@ fn parse_public_symbols(
     rvas: &mut HashMap<String, Vec<IndexedSymbol>>,
     diagnostics: &mut Vec<SymbolIndexDiagnostic>,
 ) -> Result<()> {
+    let offset_limit = section_offset_limit(pdb);
     let symbol_table = pdb.global_symbols()?;
     let mut symbols = symbol_table.iter();
     while let Some(symbol) = symbols.next()? {
@@ -602,7 +603,9 @@ fn parse_public_symbols(
                 } else {
                     data.name.to_string().into()
                 };
-                if let Some(rva) = data.offset.to_rva(address_map) {
+                if data.offset.offset <= offset_limit
+                    && let Some(rva) = data.offset.to_rva(address_map)
+                {
                     insert_symbol_rva(rvas, name.clone(), rva.0, SymbolVisibility::Public, None);
                 }
                 strings.push(name);
@@ -617,6 +620,29 @@ fn parse_public_symbols(
         }
     }
     Ok(())
+}
+
+/// The most a section offset in `pdb` can be: the extent of the image its
+/// section headers describe, as no section reaches past it. pdb2 adds a
+/// section's address and an offset without checking, and an ARM64X image's
+/// PDB (mscoree.pdb on ARM64) records its `__imp_` publics at minus their
+/// section's address: the sum wraps past 4 GiB, which panics where overflow
+/// is checked and otherwise names the image's first bytes after imports.
+pub(super) fn section_offset_limit(pdb: &mut pdb2::PDB<'static, Cursor<&'static [u8]>>) -> u32 {
+    pdb.sections()
+        .ok()
+        .flatten()
+        .and_then(|sections| {
+            sections
+                .iter()
+                .map(|section| {
+                    section
+                        .virtual_address
+                        .saturating_add(section.virtual_size.max(section.size_of_raw_data))
+                })
+                .max()
+        })
+        .unwrap_or(u32::MAX)
 }
 
 /// Named structs, unions, and enums from the type stream, keeping each

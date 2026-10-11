@@ -321,11 +321,13 @@ impl SymbolStore {
         let Ok(address_map) = pdb_lock.address_map() else {
             return Vec::new();
         };
+        let offset_limit = super::index_build::section_offset_limit(&mut pdb_lock);
         let mut symbols = symbol_table.iter();
         let mut records = Vec::new();
         while let Ok(Some(symbol)) = symbols.next() {
             if let Ok(pdb2::SymbolData::Public(data)) = symbol.parse()
                 && data.name.to_string() == symbol_name
+                && data.offset.offset <= offset_limit
                 && let Some(rva) = data.offset.to_rva(&address_map)
             {
                 records.push(IndexedSymbol {

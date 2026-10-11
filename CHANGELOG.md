@@ -21,6 +21,7 @@ Keeping this file:
 - With `--memory-source kd`, as an ARM64 guest under UTM uses, memory that Windows has not touched lately reads as it is, instead of as `??` or `Bad virtual address`: Windows clears a resident page's access flag to age it and its debugger then refuses the page, so ntoseye reads the page through its page tables. On such a guest, `!reg` could not read any key, because the master hive's base block was one of these pages.
 - `uf` disassembles a leaf function, which has no unwind data, such as `nt!KeQueryActiveProcessorCount` on ARM64: from its symbol, as far as its control flow reaches before the next symbol, instead of failing with `no runtime-function entry contains`.
 - `!pcr` on an ARM64 target leaves out `CurrentPrcb`, `IDTR`, `GDTR`, and `TssBase`, which an ARM64 KPCR does not have, instead of listing them as unavailable.
+- The `__imp_` import symbols an ARM64X image's PDB records, such as mscoree.dll's on ARM64 Windows, no longer name the first bytes of the image: their offsets reach past the end of the image, and they are skipped.
 
 ## v0.49.0 (2026-10-11)
 
