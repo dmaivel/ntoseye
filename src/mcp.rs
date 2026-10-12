@@ -841,6 +841,40 @@ fn is_loopback_host(host: &str) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
+/// The host part of a `Host` header: `[::1]:8080` -> `::1`, `127.0.0.2:80`
+/// -> `127.0.0.2`.
+fn authority_host(authority: &str) -> &str {
+    if let Some(rest) = authority.strip_prefix('[') {
+        return rest.split_once(']').map_or(rest, |(host, _port)| host);
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if port.bytes().all(|b| b.is_ascii_digit()) => host,
+        _ => authority,
+    }
+}
+
+/// DNS-rebinding protection: only answer requests addressed to a loopback
+/// host (localhost, 127.0.0.0/8, ::1/128).
+async fn require_loopback_host(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let host = request
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| request.uri().authority().map(|a| a.as_str()));
+    match host {
+        Some(host) if is_loopback_host(authority_host(host)) => next.run(request).await,
+        _ => (
+            axum::http::StatusCode::FORBIDDEN,
+            "Forbidden: Host header is not allowed",
+        )
+            .into_response(),
+    }
+}
+
 fn is_loopback_http_bind(addr: &str) -> bool {
     if let Ok(socket) = addr.parse::<std::net::SocketAddr>() {
         return socket.ip().is_loopback();
@@ -1040,10 +1074,15 @@ async fn serve_http(
     use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
     let template = NtoseyeMcp::new(session, interrupt);
+    // rmcp's own Host check accepts only the literal names localhost,
+    // 127.0.0.1 and ::1; `require_loopback_host` checks the whole loopback
+    // range instead.
+    let config = rmcp::transport::streamable_http_server::StreamableHttpServerConfig::default()
+        .disable_allowed_hosts();
     let service = StreamableHttpService::new(
         move || Ok(template.clone()),
         LocalSessionManager::default().into(),
-        Default::default(),
+        config,
     );
 
     // Methods/headers stay permissive for the Streamable HTTP handshake.
@@ -1062,6 +1101,7 @@ async fn serve_http(
 
     let router = axum::Router::new()
         .nest_service("/mcp", service)
+        .layer(axum::middleware::from_fn(require_loopback_host))
         .layer(cors);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, router).await?;
@@ -1071,6 +1111,30 @@ async fn serve_http(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loopback_host_headers() {
+        for host in [
+            "localhost",
+            "localhost:8080",
+            "127.0.0.1:8080",
+            "127.0.0.2:8080",
+            "127.1.2.3",
+            "[::1]:8080",
+            "[::1]",
+        ] {
+            assert!(is_loopback_host(authority_host(host)), "{host}");
+        }
+        for host in [
+            "example.com",
+            "example.com:8080",
+            "10.0.0.1:8080",
+            "[::2]:8080",
+            "127.0.0.1.example.com",
+        ] {
+            assert!(!is_loopback_host(authority_host(host)), "{host}");
+        }
+    }
 
     fn empty_mcp() -> NtoseyeMcp {
         NtoseyeMcp::new(
