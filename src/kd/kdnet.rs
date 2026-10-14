@@ -22,6 +22,9 @@ const CONTROL_RESPONSE_SIZE: usize = 322;
 /// Offset within a target poke of the host port its data channel is bound
 /// to, big-endian; zero until the target has accepted a host response.
 const POKE_HOST_PORT_OFFSET: usize = 86;
+/// kdnet.dll increments the first eight bytes of its client key before every
+/// offer, keepalives included, and matches a response only on the rest.
+const OFFER_COUNTER_SIZE: usize = 8;
 const MAX_DATAGRAM_SIZE: usize = 8192;
 const MAX_KD_STREAM_SIZE: usize = 4017;
 const CHANNEL_DATA: u8 = 0;
@@ -39,7 +42,9 @@ struct SessionState {
     control_key: [u8; 32],
     hmac_key: [u8; 32],
     data_key: RwLock<Option<[u8; 32]>>,
-    client_key: RwLock<Option<[u8; 32]>>,
+    /// The answered offer's client key past its offer counter, which stays
+    /// the same in every later offer from that session.
+    client_key: RwLock<Option<[u8; 32 - OFFER_COUNTER_SIZE]>>,
     control_sequence: AtomicU64,
     peer: RwLock<Option<SocketAddr>>,
     version: AtomicU8,
@@ -292,6 +297,8 @@ impl KdNetStream {
         let client_key: &[u8; 32] = plaintext[METADATA_SIZE + 2..METADATA_SIZE + 2 + 32]
             .try_into()
             .unwrap();
+        let session_key: [u8; 32 - OFFER_COUNTER_SIZE] =
+            client_key[OFFER_COUNTER_SIZE..].try_into().unwrap();
         let sequence = metadata >> 8;
         let rollover = read_lock(&self.state.data_key)?.is_some();
         if rollover {
@@ -304,9 +311,11 @@ impl KdNetStream {
             if host_port != 0 {
                 // Suspend can change a NAT mapping without restarting the
                 // target. Follow its authenticated keepalive without rekeying
-                // or resetting KD ids. The client key identifies this session;
-                // the sequence keeps queued old-port pokes from moving it back.
-                let current_session = *read_lock(&self.state.client_key)? == Some(*client_key);
+                // or resetting KD ids. The client key past its offer counter
+                // identifies this session; the sequence, which kdnet.dll
+                // raises with every keepalive, keeps queued old-port pokes
+                // from moving it back.
+                let current_session = *read_lock(&self.state.client_key)? == Some(session_key);
                 let last_sequence = self.state.control_sequence.load(Ordering::Relaxed);
                 if current_session && sequence > last_sequence {
                     self.state
@@ -361,7 +370,7 @@ impl KdNetStream {
 
         *write_lock(&self.state.peer)? = Some(source);
         *write_lock(&self.state.data_key)? = Some(data_key);
-        *write_lock(&self.state.client_key)? = Some(*client_key);
+        *write_lock(&self.state.client_key)? = Some(session_key);
         self.state
             .control_sequence
             .store(sequence, Ordering::Relaxed);
@@ -672,7 +681,9 @@ mod tests {
         keepalive_datagram(client_byte, sequence, 0, key, hmac_key)
     }
 
-    /// A poke from a target whose data channel is bound to `host_port`.
+    /// A poke from a target whose data channel is bound to `host_port`. Like
+    /// kdnet.dll, it counts offers in the client key's first eight bytes; the
+    /// sequence stands in for that count.
     fn keepalive_datagram(
         client_byte: u8,
         sequence: u64,
@@ -684,6 +695,7 @@ mod tests {
         body[0] = 1;
         body[1] = 1;
         body[2..34].fill(client_byte);
+        body[2..2 + OFFER_COUNTER_SIZE].copy_from_slice(&sequence.to_le_bytes());
         body[POKE_HOST_PORT_OFFSET..POKE_HOST_PORT_OFFSET + 2]
             .copy_from_slice(&host_port.to_be_bytes());
         create_packet(&body, sequence, CHANNEL_CONTROL, 5, key, hmac_key, false).unwrap()
