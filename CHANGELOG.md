@@ -17,6 +17,7 @@ Keeping this file:
 
 ### Fixed
 
+- With KDNET, a target resumed from a suspend that changed its UDP source port, as a NAT mapping can, keeps its session: `g` and break-ins reach it instead of going to the old port.
 - MCP HTTP clients can connect using any address in `127.0.0.0/8`, such as `127.0.0.2`, instead of receiving HTTP 403; non-loopback and malformed Host authorities are rejected.
 - In the DAP adapter, selecting a stack frame of a user-mode or kernel minidump no longer stops the Debug Console, watches, and hovers from resolving module names, symbols, and types, such as `? kernelbase` and `dt ntdll!_TEB`, until the session ends; on a user-mode minidump, `!gle`, `!teb`, and `!peb` said ntdll's PDB was not loaded.
 - With `--memory-source kd`, as an ARM64 guest under UTM uses, memory that Windows has not touched lately reads as it is, instead of as `??` or `Bad virtual address`: Windows clears a resident page's access flag to age it and its debugger then refuses the page, so ntoseye reads the page through its page tables. On such a guest, `!reg` could not read any key, because the master hive's base block was one of these pages.
