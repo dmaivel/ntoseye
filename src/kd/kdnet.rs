@@ -39,6 +39,8 @@ struct SessionState {
     control_key: [u8; 32],
     hmac_key: [u8; 32],
     data_key: RwLock<Option<[u8; 32]>>,
+    client_key: RwLock<Option<[u8; 32]>>,
+    control_sequence: AtomicU64,
     peer: RwLock<Option<SocketAddr>>,
     version: AtomicU8,
     /// Never rewound: the target drops any datagram whose sequence does not
@@ -91,6 +93,8 @@ impl KdNetStream {
                 control_key,
                 hmac_key,
                 data_key: RwLock::new(None),
+                client_key: RwLock::new(None),
+                control_sequence: AtomicU64::new(0),
                 peer: RwLock::new(None),
                 version: AtomicU8::new(0),
                 send_sequence: AtomicU64::new(1),
@@ -266,7 +270,8 @@ impl KdNetStream {
         // A restarted target keeps its address but picks a new source port, so
         // a poke from a different host is a different machine - two guests
         // sharing a KDNET key, say - and must not take over the session.
-        if let Some(peer) = *read_lock(&self.state.peer)?
+        let peer = *read_lock(&self.state.peer)?;
+        if let Some(peer) = peer
             && peer.ip() != source.ip()
         {
             kd_trace!("kdnet: ignoring poke from {source}; session belongs to {peer}");
@@ -284,6 +289,10 @@ impl KdNetStream {
         if metadata & HOST_DIRECTION != 0 {
             return Err(invalid_data("KDNET control packet has wrong direction"));
         }
+        let client_key: &[u8; 32] = plaintext[METADATA_SIZE + 2..METADATA_SIZE + 2 + 32]
+            .try_into()
+            .unwrap();
+        let sequence = metadata >> 8;
         let rollover = read_lock(&self.state.data_key)?.is_some();
         if rollover {
             // A target that accepted a response has a data channel, and its
@@ -293,13 +302,32 @@ impl KdNetStream {
             let host_port =
                 u16::from_be_bytes(plaintext[port_field..port_field + 2].try_into().unwrap());
             if host_port != 0 {
+                // Suspend can change a NAT mapping without restarting the
+                // target. Follow its authenticated keepalive without rekeying
+                // or resetting KD ids. The client key identifies this session;
+                // the sequence keeps queued old-port pokes from moving it back.
+                let current_session = *read_lock(&self.state.client_key)? == Some(*client_key);
+                let last_sequence = self.state.control_sequence.load(Ordering::Relaxed);
+                if current_session && sequence > last_sequence {
+                    self.state
+                        .control_sequence
+                        .store(sequence, Ordering::Relaxed);
+                    if peer != Some(source) {
+                        kd_trace!(
+                            "kdnet: peer endpoint changed from {peer:?} to {source}; keeping session"
+                        );
+                        *write_lock(&self.state.peer)? = Some(source);
+                    }
+                } else if peer != Some(source) {
+                    kd_trace!(
+                        "kdnet: ignoring changed endpoint {source}: current_session={current_session} \
+                         control_sequence={sequence} last_sequence={last_sequence}"
+                    );
+                }
                 return Ok(());
             }
             kd_trace!("kdnet: poke from a target without a data channel; renegotiating");
         }
-
-        let client_key: &[u8] = &plaintext[METADATA_SIZE + 2..METADATA_SIZE + 2 + 32];
-        let sequence = metadata >> 8;
 
         let mut response = [0u8; CONTROL_RESPONSE_SIZE];
         response[0] = 1;
@@ -333,6 +361,10 @@ impl KdNetStream {
 
         *write_lock(&self.state.peer)? = Some(source);
         *write_lock(&self.state.data_key)? = Some(data_key);
+        *write_lock(&self.state.client_key)? = Some(*client_key);
+        self.state
+            .control_sequence
+            .store(sequence, Ordering::Relaxed);
         self.state.version.store(version, Ordering::Relaxed);
         if rollover {
             self.state.generation.fetch_add(1, Ordering::Relaxed);
@@ -613,6 +645,7 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     use super::*;
+    use crate::kd::api;
     use crate::kd::framing::{
         INITIAL_PACKET_ID, KdFraming, PACKET_TYPE_KD_STATE_CHANGE64,
         PACKET_TYPE_KD_STATE_MANIPULATE, data_packet,
@@ -898,9 +931,24 @@ mod tests {
             let response = recv_datagram(&target).expect("reboot poke answered");
             let rolled = derive_data_key(key, &open_datagram(response, key, &hmac_key).unwrap());
             assert_ne!(rolled, first_key, "rollover must mint a new data key");
+            let moved = UdpSocket::bind("127.0.0.1:0").unwrap();
+            // An old-session poke must not advance the new session's control
+            // sequence past the fresh keepalive from its changed endpoint.
+            target
+                .send_to(
+                    &keepalive_datagram(0x11, 100, host_addr.port(), key, &hmac_key),
+                    host_addr,
+                )
+                .unwrap();
+            moved
+                .send_to(
+                    &keepalive_datagram(0x22, 2, host_addr.port(), key, &hmac_key),
+                    host_addr,
+                )
+                .unwrap();
             let data =
                 create_packet(&after_reboot, 1, CHANNEL_DATA, 5, rolled, &hmac_key, false).unwrap();
-            target.send_to(&data, host_addr).unwrap();
+            moved.send_to(&data, host_addr).unwrap();
         });
 
         let mut bridged = vec![0u8; expected_before.len() + 1];
@@ -918,6 +966,250 @@ mod tests {
             "a rollover tells the KD layer to restart its packet ids"
         );
         target_thread.join().unwrap();
+    }
+
+    #[test]
+    fn continue_after_a_peer_port_change_keeps_the_session_and_reaches_the_target() {
+        let (key, hmac_key) = test_keys();
+        let host = KdNetStream::bind("127.0.0.1:0", "1.2.3.4").unwrap();
+        let host_addr = host.local_addr();
+        let generation = host.session_generation();
+        let mut framing = KdFraming::new(KdTransport::Network(host));
+        framing.use_kdnet_packet_ids(Arc::clone(&generation));
+        framing
+            .transport_mut()
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let original = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let moved = UdpSocket::bind("127.0.0.1:0").unwrap();
+        original
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        moved
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let target_thread = std::thread::spawn(move || {
+            original
+                .send_to(&poke_datagram(0x11, 1, key, &hmac_key), host_addr)
+                .unwrap();
+            let response = recv_datagram(&original).expect("initial poke answered");
+            let data_key = derive_data_key(key, &open_datagram(response, key, &hmac_key).unwrap());
+            original
+                .send_to(
+                    &create_packet(
+                        &kd_data_packet_with_id(0x20, b"paused"),
+                        1,
+                        CHANNEL_DATA,
+                        5,
+                        data_key,
+                        &hmac_key,
+                        false,
+                    )
+                    .unwrap(),
+                    host_addr,
+                )
+                .unwrap();
+            recv_datagram(&original).expect("stop ACKed");
+            let probe = recv_datagram(&original).expect("pre-idle request");
+            let probe = open_datagram(probe, data_key, &hmac_key).unwrap();
+            let probe_id = Header::peek(&probe).unwrap().packet_id;
+            original
+                .send_to(
+                    &create_packet(
+                        &framing::control_packet(framing::PACKET_TYPE_KD_ACKNOWLEDGE, probe_id),
+                        2,
+                        CHANNEL_DATA,
+                        5,
+                        data_key,
+                        &hmac_key,
+                        false,
+                    )
+                    .unwrap(),
+                    host_addr,
+                )
+                .unwrap();
+            moved
+                .send_to(
+                    &keepalive_datagram(0x11, 2, host_addr.port(), key, &hmac_key),
+                    host_addr,
+                )
+                .unwrap();
+            ready_tx.send(()).unwrap();
+
+            let request = recv_datagram(&moved).expect("ContinueApi2 reaches the new endpoint");
+            assert_eq!(request[5], CHANNEL_DATA, "a port change must not rekey");
+            let request = open_datagram(request, data_key, &hmac_key).unwrap();
+            let header = Header::peek(&request).unwrap();
+            assert_eq!(
+                header.packet_id, 0x8000_0002,
+                "keep the pre-idle KD packet stream"
+            );
+            assert_eq!(
+                u32::from_le_bytes(
+                    request[framing::HEADER_SIZE..framing::HEADER_SIZE + 4]
+                        .try_into()
+                        .unwrap()
+                ),
+                api::DBGKD_CONTINUE_API2
+            );
+            moved
+                .send_to(
+                    &create_packet(
+                        &framing::control_packet(
+                            framing::PACKET_TYPE_KD_ACKNOWLEDGE,
+                            header.packet_id,
+                        ),
+                        3,
+                        CHANNEL_DATA,
+                        5,
+                        data_key,
+                        &hmac_key,
+                        false,
+                    )
+                    .unwrap(),
+                    host_addr,
+                )
+                .unwrap();
+        });
+
+        assert_eq!(framing.recv_data().unwrap().payload, b"paused");
+        let mut probe = [0u8; api::MANIPULATE_HEADER_SIZE];
+        probe[0..4].copy_from_slice(&api::DBGKD_GET_VERSION.to_le_bytes());
+        probe[6..8].copy_from_slice(&1u16.to_le_bytes());
+        framing
+            .send_data(PACKET_TYPE_KD_STATE_MANIPULATE, &probe)
+            .unwrap();
+        ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        framing
+            .transport_mut()
+            .set_read_timeout(Some(Duration::from_millis(40)))
+            .unwrap();
+        let continued = api::continue_api2(&mut framing, 1, api::DBG_CONTINUE, false, 0x400);
+        target_thread.join().unwrap();
+        continued.expect("the resumed target must ACK ContinueApi2");
+        assert_eq!(generation.load(Ordering::Relaxed), 0);
+        assert!(
+            !framing.take_peer_reset_seen(),
+            "a port change is not a target reload"
+        );
+    }
+
+    #[test]
+    fn keepalive_port_changes_require_the_current_session_and_a_fresh_sequence() {
+        let (key, hmac_key) = test_keys();
+        let mut host = KdNetStream::bind("127.0.0.1:0", "1.2.3.4").unwrap();
+        host.set_read_timeout(Some(Duration::from_millis(40)))
+            .unwrap();
+        let host_addr = host.local_addr();
+        let original = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let moved = UdpSocket::bind("127.0.0.1:0").unwrap();
+        original
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        moved
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut breakin = host.try_clone().unwrap();
+        let mut scratch = [0u8; 8];
+        original
+            .send_to(&poke_datagram(0x11, 1, key, &hmac_key), host_addr)
+            .unwrap();
+        assert!(host.read(&mut scratch).is_err(), "poke yields no KD bytes");
+        let response = recv_datagram(&original).expect("initial poke answered");
+        let data_key = derive_data_key(key, &open_datagram(response, key, &hmac_key).unwrap());
+
+        // Another target sharing the control key cannot move this session.
+        moved
+            .send_to(
+                &keepalive_datagram(0x22, 100, host_addr.port(), key, &hmac_key),
+                host_addr,
+            )
+            .unwrap();
+        let error = host.read(&mut scratch).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            ErrorKind::WouldBlock | ErrorKind::TimedOut
+        ));
+        assert_eq!(
+            *read_lock(&host.state.peer).unwrap(),
+            Some(original.local_addr().unwrap())
+        );
+        assert_eq!(*read_lock(&host.state.data_key).unwrap(), Some(data_key));
+        assert_eq!(host.session_generation().load(Ordering::Relaxed), 0);
+
+        // A matching client key is insufficient without authentication.
+        moved
+            .send_to(
+                &keepalive_datagram(0x11, 101, host_addr.port(), key, &[0x42; 32]),
+                host_addr,
+            )
+            .unwrap();
+        let error = host.read(&mut scratch).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            ErrorKind::WouldBlock | ErrorKind::TimedOut
+        ));
+        assert_eq!(
+            *read_lock(&host.state.peer).unwrap(),
+            Some(original.local_addr().unwrap())
+        );
+        assert_eq!(*read_lock(&host.state.data_key).unwrap(), Some(data_key));
+        assert_eq!(host.session_generation().load(Ordering::Relaxed), 0);
+
+        moved
+            .send_to(
+                &keepalive_datagram(0x11, 3, host_addr.port(), key, &hmac_key),
+                host_addr,
+            )
+            .unwrap();
+        let error = host.read(&mut scratch).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            ErrorKind::WouldBlock | ErrorKind::TimedOut
+        ));
+        assert_eq!(
+            *read_lock(&host.state.peer).unwrap(),
+            Some(moved.local_addr().unwrap())
+        );
+        assert_eq!(*read_lock(&host.state.data_key).unwrap(), Some(data_key));
+        assert_eq!(host.session_generation().load(Ordering::Relaxed), 0);
+
+        // Queued and replayed pokes must not restore the old endpoint.
+        for sequence in 2..=3 {
+            original
+                .send_to(
+                    &keepalive_datagram(0x11, sequence, host_addr.port(), key, &hmac_key),
+                    host_addr,
+                )
+                .unwrap();
+            let error = host.read(&mut scratch).unwrap_err();
+            assert!(matches!(
+                error.kind(),
+                ErrorKind::WouldBlock | ErrorKind::TimedOut
+            ));
+            assert_eq!(
+                *read_lock(&host.state.peer).unwrap(),
+                Some(moved.local_addr().unwrap())
+            );
+            assert_eq!(*read_lock(&host.state.data_key).unwrap(), Some(data_key));
+            assert_eq!(host.session_generation().load(Ordering::Relaxed), 0);
+        }
+
+        // The foreground's cloned writer must follow the pump's peer update.
+        breakin.write_all(&[BREAKIN_BYTE]).unwrap();
+        breakin.flush().unwrap();
+        let packet = recv_datagram(&moved).expect("break-in reaches the new endpoint");
+        assert_eq!(packet[5], CHANNEL_DATA, "no keepalive may rekey the target");
+        assert_eq!(
+            open_datagram(packet, data_key, &hmac_key).unwrap(),
+            [BREAKIN_BYTE]
+        );
+        original.set_nonblocking(true).unwrap();
+        assert!(
+            recv_datagram(&original).is_none(),
+            "nothing is sent to the old endpoint"
+        );
     }
 
     #[test]
