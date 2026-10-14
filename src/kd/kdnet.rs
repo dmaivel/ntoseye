@@ -70,6 +70,9 @@ pub struct KdNetStream {
     datagram: Vec<u8>,
     received_datagrams: u64,
     encoded: Vec<u8>,
+    /// `encoded` was sent and no data datagram has come back since, so it
+    /// may have gone to an endpoint the target has left.
+    unanswered: bool,
     outbound: Vec<u8>,
     /// A break-in written before the target had negotiated a session; sent
     /// the moment it has one, so attach does not wait for the next attempt.
@@ -110,6 +113,7 @@ impl KdNetStream {
             datagram: vec![0u8; MAX_DATAGRAM_SIZE],
             received_datagrams: 0,
             encoded: Vec::with_capacity(MAX_DATAGRAM_SIZE),
+            unanswered: false,
             outbound: Vec::with_capacity(MAX_KD_STREAM_SIZE),
             deferred_breakin: false,
             read_timeout: None,
@@ -125,6 +129,7 @@ impl KdNetStream {
             datagram: vec![0u8; MAX_DATAGRAM_SIZE],
             received_datagrams: 0,
             encoded: Vec::with_capacity(MAX_DATAGRAM_SIZE),
+            unanswered: false,
             outbound: Vec::with_capacity(MAX_KD_STREAM_SIZE),
             deferred_breakin: false,
             // The dup shares one socket, so it shares the timeout already set
@@ -207,9 +212,21 @@ impl KdNetStream {
                     let handled = decrypt_payload(datagram, self.state.control_key)
                         .and_then(|()| verify_authentication(datagram, &self.state.hmac_key))
                         .and_then(|()| self.handle_control_packet(datagram, source, version));
-                    if let Err(err) = handled {
-                        kd_trace!("kdnet: dropping control datagram from {source}: {err}");
-                        continue;
+                    let moved = match handled {
+                        Ok(moved) => moved,
+                        Err(err) => {
+                            kd_trace!("kdnet: dropping control datagram from {source}: {err}");
+                            continue;
+                        }
+                    };
+                    if moved && self.unanswered {
+                        // A stopped target is only read from while a request
+                        // waits, so that request went out before the move was
+                        // seen. Resending it now spares the KD layer its
+                        // retransmit timeout; if the old endpoint delivered
+                        // it after all, the target drops the repeated sequence.
+                        kd_trace!("kdnet: resending the unanswered datagram to {source}");
+                        self.socket.send_to(&self.encoded, source)?;
                     }
                     if self.deferred_breakin && read_lock(&self.state.data_key)?.is_some() {
                         self.deferred_breakin = false;
@@ -233,6 +250,7 @@ impl KdNetStream {
                         kd_trace!("kdnet: dropping stale-session datagram: {err}");
                         continue;
                     }
+                    self.unanswered = false;
                 }
                 other => {
                     kd_trace!("kdnet: dropping datagram on unknown channel {other:#x}");
@@ -266,12 +284,13 @@ impl KdNetStream {
         }
     }
 
+    /// Returns whether the datagram moved the session to a new endpoint.
     fn handle_control_packet(
         &self,
         datagram: &[u8],
         source: SocketAddr,
         version: u8,
-    ) -> io::Result<()> {
+    ) -> io::Result<bool> {
         // A restarted target keeps its address but picks a new source port, so
         // a poke from a different host is a different machine - two guests
         // sharing a KDNET key, say - and must not take over the session.
@@ -280,7 +299,7 @@ impl KdNetStream {
             && peer.ip() != source.ip()
         {
             kd_trace!("kdnet: ignoring poke from {source}; session belongs to {peer}");
-            return Ok(());
+            return Ok(false);
         }
         let payload_end = datagram
             .len()
@@ -326,6 +345,7 @@ impl KdNetStream {
                             "kdnet: peer endpoint changed from {peer:?} to {source}; keeping session"
                         );
                         *write_lock(&self.state.peer)? = Some(source);
+                        return Ok(true);
                     }
                 } else if peer != Some(source) {
                     kd_trace!(
@@ -333,7 +353,7 @@ impl KdNetStream {
                          control_sequence={sequence} last_sequence={last_sequence}"
                     );
                 }
-                return Ok(());
+                return Ok(false);
             }
             kd_trace!("kdnet: poke from a target without a data channel; renegotiating");
         }
@@ -378,7 +398,7 @@ impl KdNetStream {
         if rollover {
             self.state.generation.fetch_add(1, Ordering::Relaxed);
         }
-        Ok(())
+        Ok(false)
     }
 
     /// Ask the target to offer now rather than on its three-second timer:
@@ -491,6 +511,7 @@ impl Write for KdNetStream {
         )?;
         let sent = self.socket.send_to(&self.encoded, peer)?;
         self.outbound.clear();
+        self.unanswered = true;
         if sent != self.encoded.len() {
             return Err(io::Error::new(
                 ErrorKind::WriteZero,
@@ -998,7 +1019,7 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
         moved
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let target_thread = std::thread::spawn(move || {
@@ -1050,6 +1071,13 @@ mod tests {
             ready_tx.send(()).unwrap();
 
             let request = recv_datagram(&moved).expect("ContinueApi2 reaches the new endpoint");
+            // ContinueApi2 goes to the old port before the queued keepalive is
+            // read. Reaching the new one as the same datagram means it was
+            // resent on the move; a KD retransmit, after the read timeout,
+            // would carry a fresh sequence.
+            let first_try =
+                recv_datagram(&original).expect("ContinueApi2 first tried the old port");
+            let resent_on_move = request == first_try;
             assert_eq!(request[5], CHANNEL_DATA, "a port change must not rekey");
             let request = open_datagram(request, data_key, &hmac_key).unwrap();
             let header = Header::peek(&request).unwrap();
@@ -1083,6 +1111,7 @@ mod tests {
                     host_addr,
                 )
                 .unwrap();
+            assert!(resent_on_move, "ContinueApi2 waited for a KD retransmit");
         });
 
         assert_eq!(framing.recv_data().unwrap().payload, b"paused");
@@ -1093,10 +1122,6 @@ mod tests {
             .send_data(PACKET_TYPE_KD_STATE_MANIPULATE, &probe)
             .unwrap();
         ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        framing
-            .transport_mut()
-            .set_read_timeout(Some(Duration::from_millis(40)))
-            .unwrap();
         let continued = api::continue_api2(&mut framing, 1, api::DBG_CONTINUE, false, 0x400);
         target_thread.join().unwrap();
         continued.expect("the resumed target must ACK ContinueApi2");
