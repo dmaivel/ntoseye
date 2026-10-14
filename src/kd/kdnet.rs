@@ -1155,82 +1155,35 @@ mod tests {
         assert!(host.read(&mut scratch).is_err(), "poke yields no KD bytes");
         let response = recv_datagram(&original).expect("initial poke answered");
         let data_key = derive_data_key(key, &open_datagram(response, key, &hmac_key).unwrap());
+        let original_addr = original.local_addr().unwrap();
+        let moved_addr = moved.local_addr().unwrap();
 
-        // Another target sharing the control key cannot move this session.
-        moved
-            .send_to(
-                &keepalive_datagram(0x22, 100, host_addr.port(), key, &hmac_key),
+        // No keepalive yields KD bytes or rekeys; each returns the endpoint
+        // the session belongs to afterwards.
+        let mut keepalive = |from: &UdpSocket, client_byte: u8, sequence: u64, hmac: &[u8; 32]| {
+            from.send_to(
+                &keepalive_datagram(client_byte, sequence, host_addr.port(), key, hmac),
                 host_addr,
             )
             .unwrap();
-        let error = host.read(&mut scratch).unwrap_err();
-        assert!(matches!(
-            error.kind(),
-            ErrorKind::WouldBlock | ErrorKind::TimedOut
-        ));
-        assert_eq!(
-            *read_lock(&host.state.peer).unwrap(),
-            Some(original.local_addr().unwrap())
-        );
-        assert_eq!(*read_lock(&host.state.data_key).unwrap(), Some(data_key));
-        assert_eq!(host.session_generation().load(Ordering::Relaxed), 0);
-
-        // A matching client key is insufficient without authentication.
-        moved
-            .send_to(
-                &keepalive_datagram(0x11, 101, host_addr.port(), key, &[0x42; 32]),
-                host_addr,
-            )
-            .unwrap();
-        let error = host.read(&mut scratch).unwrap_err();
-        assert!(matches!(
-            error.kind(),
-            ErrorKind::WouldBlock | ErrorKind::TimedOut
-        ));
-        assert_eq!(
-            *read_lock(&host.state.peer).unwrap(),
-            Some(original.local_addr().unwrap())
-        );
-        assert_eq!(*read_lock(&host.state.data_key).unwrap(), Some(data_key));
-        assert_eq!(host.session_generation().load(Ordering::Relaxed), 0);
-
-        moved
-            .send_to(
-                &keepalive_datagram(0x11, 3, host_addr.port(), key, &hmac_key),
-                host_addr,
-            )
-            .unwrap();
-        let error = host.read(&mut scratch).unwrap_err();
-        assert!(matches!(
-            error.kind(),
-            ErrorKind::WouldBlock | ErrorKind::TimedOut
-        ));
-        assert_eq!(
-            *read_lock(&host.state.peer).unwrap(),
-            Some(moved.local_addr().unwrap())
-        );
-        assert_eq!(*read_lock(&host.state.data_key).unwrap(), Some(data_key));
-        assert_eq!(host.session_generation().load(Ordering::Relaxed), 0);
-
-        // Queued and replayed pokes must not restore the old endpoint.
-        for sequence in 2..=3 {
-            original
-                .send_to(
-                    &keepalive_datagram(0x11, sequence, host_addr.port(), key, &hmac_key),
-                    host_addr,
-                )
-                .unwrap();
             let error = host.read(&mut scratch).unwrap_err();
             assert!(matches!(
                 error.kind(),
                 ErrorKind::WouldBlock | ErrorKind::TimedOut
             ));
-            assert_eq!(
-                *read_lock(&host.state.peer).unwrap(),
-                Some(moved.local_addr().unwrap())
-            );
             assert_eq!(*read_lock(&host.state.data_key).unwrap(), Some(data_key));
             assert_eq!(host.session_generation().load(Ordering::Relaxed), 0);
+            read_lock(&host.state.peer).unwrap().unwrap()
+        };
+
+        // Another target sharing the control key cannot move this session.
+        assert_eq!(keepalive(&moved, 0x22, 100, &hmac_key), original_addr);
+        // A matching client key is insufficient without authentication.
+        assert_eq!(keepalive(&moved, 0x11, 101, &[0x42; 32]), original_addr);
+        assert_eq!(keepalive(&moved, 0x11, 3, &hmac_key), moved_addr);
+        // Queued and replayed pokes must not restore the old endpoint.
+        for sequence in 2..=3 {
+            assert_eq!(keepalive(&original, 0x11, sequence, &hmac_key), moved_addr);
         }
 
         // The foreground's cloned writer must follow the pump's peer update.
