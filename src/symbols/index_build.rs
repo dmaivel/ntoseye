@@ -9,6 +9,7 @@ use crate::error::{Error, Result};
 use crate::layout::aggregate_key;
 use crate::wpp::{MessageKey, TmfMessage};
 use pdb2::{AddressMap, FallibleIterator, StringTable, TypeData, TypeIndex};
+use rayon::slice::ParallelSliceMut;
 use rustc_hash::FxHashMap;
 use std::{
     collections::HashMap,
@@ -82,7 +83,9 @@ fn address_index(rvas: &FxHashMap<String, Vec<IndexedSymbol>>) -> Vec<AddressEnt
                 .map(move |record| (record.rva, rank(record.visibility), name, &record.compiland))
         })
         .collect();
-    entries.sort_unstable();
+    // No two records of a name share an RVA, visibility and compiland (see
+    // `insert_symbol_rva`), so no two entries compare equal.
+    entries.par_sort_unstable();
     entries
         .into_iter()
         .map(|(rva, _, name, _)| AddressEntry {
@@ -207,11 +210,6 @@ impl SymbolStore {
             &mut diagnostics,
         )?;
 
-        strings.sort();
-        strings.dedup();
-        source_lines.sort_by_key(|line| line.rva);
-        procedures.sort_by_key(|procedure| procedure.rva);
-
         let mut type_strings: Vec<String> = Vec::new();
         let mut enum_strings: Vec<String> = Vec::new();
         let mut struct_defs: HashMap<String, (u64, TypeIndex)> = HashMap::new();
@@ -222,11 +220,6 @@ impl SymbolStore {
             &mut struct_defs,
             &mut diagnostics,
         )?;
-
-        type_strings.sort();
-        type_strings.dedup();
-        enum_strings.sort();
-        enum_strings.dedup();
 
         Ok(ParsedIndexData {
             strings,
@@ -252,8 +245,23 @@ impl SymbolStore {
     /// shard it already held and park on a non-reentrant lock forever, with
     /// every other worker piling onto the same shard. Parsing therefore
     /// finishes and releases both locks before any parallel work starts.
+    /// That includes sorting what it parsed, which for a large PDB's
+    /// hundred thousand names took as long as parsing its public symbols.
     fn build_index(&self, guid: u128) -> Result<()> {
-        let parsed = self.parse_index_data(guid)?;
+        let mut parsed = self.parse_index_data(guid)?;
+        // Equal names are the same name, so an unstable sort orders them as
+        // a stable one would. Lines and procedures sharing an RVA keep the
+        // order the PDB lists them in.
+        for names in [
+            &mut parsed.strings,
+            &mut parsed.type_strings,
+            &mut parsed.enum_strings,
+        ] {
+            names.par_sort_unstable();
+            names.dedup();
+        }
+        parsed.source_lines.par_sort_by_key(|line| line.rva);
+        parsed.procedures.par_sort_by_key(|procedure| procedure.rva);
 
         // Publish every derived index together only after all mandatory PDB
         // streams have been parsed. A fatal type/public stream error must not
