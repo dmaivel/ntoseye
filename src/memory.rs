@@ -235,7 +235,6 @@ pub struct AddressSpace<'a, B: MemoryOps<PhysAddr>> {
 pub struct Translation {
     pub address: PhysAddr,
     pub large: bool,
-    pub writable: bool,
     pub user: bool,
     /// Effective execute-never for the selected address-space half: AMD64 NX,
     /// AArch64 PXN for TTBR1 addresses, or AArch64 UXN for TTBR0 addresses.
@@ -272,7 +271,6 @@ impl Translation {
         Self {
             address: pdpte.huge_page_frame() + va.huge_page_offset(),
             large: true,
-            writable: pml4e.is_writable() && pdpte.is_writable(),
             user: pml4e.is_user() && pdpte.is_user(),
             nx: pml4e.is_nx() || pdpte.is_nx(),
             uxn: false,
@@ -289,7 +287,6 @@ impl Translation {
         Self {
             address: pde.large_page_frame() + va.large_page_offset(),
             large: true,
-            writable: pml4e.is_writable() && pdpte.is_writable() && pde.is_writable(),
             user: pml4e.is_user() && pdpte.is_user() && pde.is_user(),
             nx: pml4e.is_nx() || pdpte.is_nx() || pde.is_nx(),
             uxn: false,
@@ -307,10 +304,6 @@ impl Translation {
         Self {
             address: pte.page_frame() + va.page_offset(),
             large: false,
-            writable: pml4e.is_writable()
-                && pdpte.is_writable()
-                && pde.is_writable()
-                && pte.is_writable(),
             user: pml4e.is_user() && pdpte.is_user() && pde.is_user() && pte.is_user(),
             nx: pml4e.is_nx() || pdpte.is_nx() || pde.is_nx() || pte.is_nx(),
             uxn: false,
@@ -325,7 +318,6 @@ impl Translation {
         Self {
             address: pte.page_frame() + va.page_offset(),
             large: false,
-            writable: false,
             user: false,
             nx: false,
             uxn: false,
@@ -339,7 +331,6 @@ impl Translation {
         Self {
             address: frame + va.page_offset(),
             large: false,
-            writable: false,
             user: false,
             nx: false,
             uxn: false,
@@ -361,7 +352,6 @@ impl Translation {
         Self {
             address,
             large,
-            writable: leaf.arm64_is_writable(),
             user: leaf.arm64_is_user(),
             nx: if va.0 & (1 << 55) != 0 {
                 leaf.arm64_is_pxn()
@@ -614,7 +604,6 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
             return Ok(Some(Translation {
                 address: va.0,
                 large: false,
-                writable: false,
                 user: false,
                 nx: false,
                 uxn: false,
@@ -1153,16 +1142,16 @@ mod tests {
         const PXN: u64 = 1 << 53;
         const UXN: u64 = 1 << 54;
 
-        // A thread's TEB: user, writable, never executed.
+        // A thread's TEB: user, never executed.
         let teb = read(USER | UXN | PXN, 0x26f_4000);
         assert_eq!(teb.address, 0x6000);
-        assert!(teb.user && teb.writable && teb.nx);
-        // User code: user, read-only, executable at EL0.
+        assert!(teb.user && teb.nx);
+        // User code: user, executable at EL0.
         let code = read(USER | READ_ONLY | PXN, 0x7762_0000);
-        assert!(code.user && !code.writable && !code.nx);
-        // Kernel code: EL1 only, read-only, executable at EL1.
+        assert!(code.user && !code.nx);
+        // Kernel code: EL1 only, executable at EL1.
         let kernel = read(READ_ONLY | UXN, 0xffff_f803_3f0e_b000);
-        assert!(!kernel.user && !kernel.writable && !kernel.nx && kernel.uxn);
+        assert!(!kernel.user && !kernel.nx && kernel.uxn);
     }
 
     struct CachingPhysMem {

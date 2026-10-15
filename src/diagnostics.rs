@@ -48,14 +48,6 @@ pub fn eprint_warning(message: impl Display) {
     );
 }
 
-pub fn eprint_note(message: impl Display) {
-    print_labeled_stderr(
-        "note:",
-        &"note:".bright_cyan().bold().to_string(),
-        &message.to_string(),
-    );
-}
-
 pub fn print_note(message: impl Display) {
     print_labeled_stdout(
         "note:",

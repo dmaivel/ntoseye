@@ -438,14 +438,6 @@ pub fn loader_module(detail: &LoaderModuleDetail) -> LoaderModule {
     }
 }
 
-pub fn loader_modules(detail: &LoaderModulesDetail) -> LoaderModules {
-    LoaderModules {
-        modules: detail.modules.iter().map(loader_module).collect(),
-        termination: list_termination(&detail.termination),
-        wow64_termination: detail.wow64_termination.as_ref().map(list_termination),
-    }
-}
-
 /// How a process's native and WOW64 loader lists ended.
 pub fn loader_terminations(detail: &LoaderModulesDetail) -> LoaderTerminations {
     LoaderTerminations {

@@ -707,21 +707,6 @@ impl Target {
         Ok(decode_idt(self, location.processor, descriptor, vector))
     }
 
-    /// Decode the bounded AMD64 GDT from a descriptor read from target memory.
-    /// Raw, base, limit, type, privilege, presence, mode, and granularity
-    /// fields retain individual entry read failures; `truncated` reports when
-    /// the descriptor exceeds the 256-entry bound.
-    pub fn inspect_gdt(&self, processor: u16) -> Result<GdtDetail> {
-        if self.arch() == Arch::Arm64 {
-            return Err(Error::DebugInfo(
-                "!gdt is not defined on ARM64 targets".into(),
-            ));
-        }
-        let location = cpu_location(self, processor)?;
-        let descriptor = descriptor_from_target(self, &location, DescriptorTable::Gdt)?;
-        Ok(decode_gdt(self, location.processor, descriptor))
-    }
-
     /// Decode vendor, family/model/stepping, speed, and `_KPRCB` feature
     /// fields. Each PDB/memory read is independent; triage PRCB metadata is
     /// used as a complete fallback when the processor block cannot be found.

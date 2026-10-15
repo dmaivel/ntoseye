@@ -4,8 +4,7 @@
 use std::collections::HashSet;
 use std::result;
 
-use super::Target;
-use crate::{error::Result, memory::MemoryOps, types::VirtAddr};
+use crate::{error::Result, types::VirtAddr};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListTermination {
@@ -188,31 +187,6 @@ where
         }
     }
     links
-}
-
-impl Target {
-    /// Walk an intrusive `_LIST_ENTRY` from `head` (the list-head address) in
-    /// the current address space, returning each record's base
-    /// (`link_addr - link_offset`). Bounded (max 1000) and cycle-stopping,
-    /// mirroring the engine's `Types::list_at`; a bad link truncates the walk
-    /// rather than discarding the records already collected. Shared by the SDK
-    /// and MCP list walking; the typed cursor walk (`StructRef::list`) is the
-    /// richer form.
-    pub fn walk_list(&self, head: VirtAddr, link_offset: u64) -> Result<Vec<u64>> {
-        const MAX: usize = 1000;
-        let mem = self.context_memory();
-        let mut cursor = ListCursor::new(head, MAX);
-        cursor.advance(Ok(mem.read::<VirtAddr>(head)?));
-        let mut out = Vec::new();
-        while let Some(current) = cursor.take_current() {
-            out.push(current.0.wrapping_sub(link_offset));
-            cursor.advance(
-                mem.read::<VirtAddr>(current)
-                    .map_err(|error| error.to_string()),
-            );
-        }
-        Ok(out)
-    }
 }
 
 #[cfg(test)]

@@ -22,14 +22,9 @@ const KDBG_LIST_LIMIT: usize = 64;
 const KERN_BASE_OFFSET: usize = offset_of!(KdDebuggerData64, kern_base);
 const PS_LOADED_MODULE_LIST_OFFSET: usize = offset_of!(KdDebuggerData64, ps_loaded_module_list);
 const PS_ACTIVE_PROCESS_HEAD_OFFSET: usize = offset_of!(KdDebuggerData64, ps_active_process_head);
-const PSP_CID_TABLE_OFFSET: usize = offset_of!(KdDebuggerData64, psp_cid_table);
 const MM_NUMBER_OF_PHYSICAL_PAGES_OFFSET: usize =
     offset_of!(KdDebuggerData64, mm_number_of_physical_pages);
-const MM_MAXIMUM_NONPAGED_POOL_IN_BYTES_OFFSET: usize =
-    offset_of!(KdDebuggerData64, mm_maximum_non_paged_pool_in_bytes);
 const MM_PAGE_SIZE_OFFSET: usize = offset_of!(KdDebuggerData64, mm_page_size);
-const MM_SIZE_OF_PAGED_POOL_IN_BYTES_OFFSET: usize =
-    offset_of!(KdDebuggerData64, mm_size_of_paged_pool_in_bytes);
 const MM_TOTAL_COMMIT_LIMIT_OFFSET: usize = offset_of!(KdDebuggerData64, mm_total_commit_limit);
 const MM_TOTAL_COMMITTED_PAGES_OFFSET: usize =
     offset_of!(KdDebuggerData64, mm_total_committed_pages);
@@ -93,24 +88,12 @@ impl DebuggerDataBlock {
         self.pointer_at(PS_ACTIVE_PROCESS_HEAD_OFFSET)
     }
 
-    pub fn psp_cid_table(&self) -> Option<MetadataValue<VirtAddr>> {
-        self.pointer_at(PSP_CID_TABLE_OFFSET)
-    }
-
     pub fn mm_number_of_physical_pages_address(&self) -> Option<MetadataValue<VirtAddr>> {
         self.pointer_at(MM_NUMBER_OF_PHYSICAL_PAGES_OFFSET)
     }
 
-    pub fn mm_maximum_nonpaged_pool_in_bytes_address(&self) -> Option<MetadataValue<VirtAddr>> {
-        self.pointer_at(MM_MAXIMUM_NONPAGED_POOL_IN_BYTES_OFFSET)
-    }
-
     pub fn mm_page_size(&self) -> Option<MetadataValue<u64>> {
         self.value_at(MM_PAGE_SIZE_OFFSET)
-    }
-
-    pub fn mm_size_of_paged_pool_in_bytes_address(&self) -> Option<MetadataValue<VirtAddr>> {
-        self.pointer_at(MM_SIZE_OF_PAGED_POOL_IN_BYTES_OFFSET)
     }
 
     pub fn mm_total_commit_limit_address(&self) -> Option<MetadataValue<VirtAddr>> {
@@ -123,10 +106,6 @@ impl DebuggerDataBlock {
 
     pub fn mm_available_pages_address(&self) -> Option<MetadataValue<VirtAddr>> {
         self.pointer_at(MM_AVAILABLE_PAGES_OFFSET)
-    }
-
-    pub fn mm_resident_available_pages_address(&self) -> Option<MetadataValue<VirtAddr>> {
-        self.pointer_at(MM_RESIDENT_AVAILABLE_PAGES_OFFSET)
     }
 
     fn pointer_at(&self, offset: usize) -> Option<MetadataValue<VirtAddr>> {

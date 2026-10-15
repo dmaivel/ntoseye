@@ -39,10 +39,6 @@ impl SymbolStore {
         self.merged_index(&self.index_types, dtb, false, "Building type completions")
     }
 
-    pub fn merged_enum_index(&self, dtb: Option<Dtb>) -> SymbolIndex {
-        self.merged_index(&self.index_enums, dtb, false, "Building enum completions")
-    }
-
     /// Merge the per-module indexes in `source` that are visible from `dtb`
     /// (all modules when `None`) into one searchable index. `qualify` prefixes
     /// each name with its module's short name, which symbol completion needs

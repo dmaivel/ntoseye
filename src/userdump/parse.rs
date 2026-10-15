@@ -879,8 +879,6 @@ fn merge_thread_info(stream: &[u8], threads: &mut [UserThread], notes: &mut Vec<
         let tid = raw.thread_id;
         if let Some(thread) = threads.iter_mut().find(|thread| thread.tid == tid) {
             thread.info = Some(UserThreadInfo {
-                dump_flags: raw.dump_flags,
-                dump_error: raw.dump_error,
                 exit_status: raw.exit_status,
                 create_time: raw.create_time,
                 exit_time: raw.exit_time,

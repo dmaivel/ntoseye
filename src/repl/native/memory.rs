@@ -36,14 +36,6 @@ impl Runs {
             .push(span(std::mem::take(&mut self.text), self.style));
     }
 
-    /// A span of its own, such as one carrying a second style token.
-    pub fn push_span(&mut self, span: Span) {
-        if !self.text.is_empty() {
-            self.flush();
-        }
-        self.spans.push(span);
-    }
-
     /// The spans, without the separator the last item ends in.
     pub fn finish(mut self) -> Vec<Span> {
         let end = self.text.trim_end().len();

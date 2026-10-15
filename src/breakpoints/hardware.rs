@@ -37,32 +37,6 @@ impl Breakpoint {
 }
 
 impl BreakpointManager {
-    /// Set a hardware (debug-register) breakpoint. String conditions use the
-    /// core decimal expression contract.
-    pub fn add_hardware(
-        &mut self,
-        client: &mut dyn DebugBackend,
-        debugger: &Target,
-        address: VirtAddr,
-        access: HwBreakpointAccess,
-        len: u8,
-        symbol: Option<String>,
-        condition: Option<String>,
-    ) -> Result<u32> {
-        self.add_hardware_configured(
-            client,
-            debugger,
-            address,
-            access,
-            len,
-            symbol,
-            BreakpointConfig {
-                condition,
-                ..BreakpointConfig::default()
-            },
-        )
-    }
-
     /// Whether a hardware breakpoint at `address` with `config` is a VTL1
     /// one, held to VTL1's rules: one in the secure kernel, or set while
     /// the scope is VTL1's. A hypercall or VM-exit breakpoint is on the

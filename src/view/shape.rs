@@ -313,7 +313,7 @@ pub const fn is_reserved_property(name: &str) -> bool {
 }
 
 /// Declare result shapes (see the module docs): each becomes a plain
-/// struct (build it, then [`into_view`](ViewValue::view) it) and, in the SDK,
+/// struct (build it, then [`view`](ViewValue::view) it) and, in the SDK,
 /// a same-named `BaseRecord` subclass in the invoking module's `py`
 /// submodule, with a property per field. Doc comments on the struct and its
 /// fields document the class and its properties.
@@ -362,14 +362,6 @@ macro_rules! shapes {
             )*
 
             impl $name {
-                /// Render this shape (see [`ViewValue`]); inherent so callers
-                /// need no trait import.
-                ///
-                /// [`ViewValue`]: $crate::view::shape::ViewValue
-                pub fn into_view(self) -> $crate::view::View {
-                    <Self as $crate::view::shape::ViewValue>::view(self)
-                }
-
                 /// This shape as its SDK class, for a handle Rust keeps.
                 #[cfg(feature = "python")]
                 #[allow(dead_code)] // most shapes only reach Python as `Typed`
@@ -554,7 +546,7 @@ mod tests {
             failed: DiagnosticValue::unavailable("paged out"),
             work_items: 1,
         };
-        let View::Shaped(shaped) = sample.into_view() else {
+        let View::Shaped(shaped) = Sample::view(sample) else {
             panic!("a shape renders as View::Shaped");
         };
         let keys: Vec<&str> = shaped.fields.iter().map(|(key, _)| *key).collect();
@@ -570,7 +562,6 @@ mod tests {
 /// the type its hint (which the stub prints) declares. Needs `python-stubs`,
 /// which compiles the hints.
 #[cfg(all(test, feature = "python-stubs", feature = "python-embed"))]
-#[allow(dead_code)] // `into_view` goes unused: these shapes only reach Python
 mod hints {
     use pyo3::prelude::*;
     use pyo3::types::PyDict;

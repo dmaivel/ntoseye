@@ -117,8 +117,6 @@ pub use completion::*;
 pub use disasm::*;
 pub use heap::*;
 #[cfg(feature = "cli")]
-pub use line_editor::LineCompletion;
-#[cfg(feature = "cli")]
 use line_editor::{CustomPrompt, MyCompleter, TrackingHighlighter};
 pub use memory_view::*;
 pub use remote::*;
@@ -231,14 +229,6 @@ pub fn print_backend_capability_warning(capabilities: &[BackendCapability]) {
         "selected backend has reduced capabilities; run `capabilities` for details",
     );
     outln!();
-}
-
-pub fn print_plain_table(builder: Builder) {
-    let mut table = builder.build();
-    table
-        .with(tabled::settings::Style::empty())
-        .with(Padding::zero());
-    outln!("{table}\n");
 }
 
 pub fn print_padded_table(builder: Builder) {

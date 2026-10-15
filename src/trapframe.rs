@@ -193,13 +193,6 @@ impl KtrapFrame {
         }
     }
 
-    pub fn stack_pointer(&self) -> u64 {
-        match &self.data {
-            KtrapFrameData::Amd64(frame) => frame.rsp,
-            KtrapFrameData::Arm64(frame) => frame.sp,
-        }
-    }
-
     pub fn amd64(&self) -> Option<&Amd64TrapFrame> {
         match &self.data {
             KtrapFrameData::Amd64(frame) => Some(frame),
@@ -207,7 +200,8 @@ impl KtrapFrame {
         }
     }
 
-    pub fn arm64(&self) -> Option<&Arm64TrapFrame> {
+    #[cfg(test)]
+    fn arm64(&self) -> Option<&Arm64TrapFrame> {
         match &self.data {
             KtrapFrameData::Amd64(_) => None,
             KtrapFrameData::Arm64(frame) => Some(frame),
@@ -772,7 +766,6 @@ mod tests {
         assert_eq!(arm.esr, Some(0x1234_5678));
         assert_eq!(arm.fault_address, Some(0x4000));
         assert_eq!(frame.instruction_pointer(), arm.pc);
-        assert_eq!(frame.stack_pointer(), arm.sp);
 
         let registers = SavedThreadRegisters::from(&frame);
         assert_eq!(registers.get("pc"), Some(arm.pc));

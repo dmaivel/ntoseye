@@ -107,6 +107,7 @@ pub fn status_for_disposition(disposition: ContinueDisposition) -> u32 {
         ContinueDisposition::NotHandled => DBG_EXCEPTION_NOT_HANDLED,
     }
 }
+#[cfg(test)]
 pub const STATUS_SUCCESS: u32 = 0x0000_0000;
 
 /// Build a zeroed manipulate-state request header
@@ -228,16 +229,8 @@ fn check_status(header: &ManipulateHeader, api: u32) -> Result<()> {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Version {
-    pub major: u16,
-    pub minor: u16,
-    pub protocol_version: u8,
-    pub kd_secondary_version: u8,
     pub flags: u16,
     pub machine_type: u16,
-    pub max_packet_type: u8,
-    pub max_state_change: u8,
-    pub max_manipulate: u8,
-    pub simulation: u8,
     pub kern_base: u64,
     pub ps_loaded_module_list: u64,
     pub debugger_data_list: u64,
@@ -250,16 +243,8 @@ pub fn get_version<T: Read + Write>(framing: &mut KdFraming<T>, processor: u16) 
 
     let u = UNION_OFFSET;
     Ok(Version {
-        major: read_u16(&reply_header, u),
-        minor: read_u16(&reply_header, u + 2),
-        protocol_version: reply_header[u + 4],
-        kd_secondary_version: reply_header[u + 5],
         flags: read_u16(&reply_header, u + 6),
         machine_type: read_u16(&reply_header, u + 8),
-        max_packet_type: reply_header[u + 10],
-        max_state_change: reply_header[u + 11],
-        max_manipulate: reply_header[u + 12],
-        simulation: reply_header[u + 13],
         kern_base: read_u64(&reply_header, u + 16),
         ps_loaded_module_list: read_u64(&reply_header, u + 24),
         debugger_data_list: read_u64(&reply_header, u + 32),
@@ -844,8 +829,6 @@ mod tests {
 
         let mut framing = KdFraming::new(Loopback::new(stream));
         let v = get_version(&mut framing, 0).unwrap();
-        assert_eq!(v.major, 10);
-        assert_eq!(v.protocol_version, 6);
         assert_eq!(v.machine_type, 0x8664);
         assert_eq!(v.kern_base, 0xfffff80012345000);
         assert_eq!(v.ps_loaded_module_list, 0xfffff80087654321);

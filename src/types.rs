@@ -142,14 +142,6 @@ pub enum CodeMachine {
 }
 
 impl CodeMachine {
-    /// The processor's own instruction set.
-    pub const fn native(arch: Arch) -> Self {
-        match arch {
-            Arch::Amd64 => Self::Amd64,
-            Arch::Arm64 => Self::Arm64,
-        }
-    }
-
     pub const fn label(self) -> &'static str {
         match self {
             Self::X86 => "x86",

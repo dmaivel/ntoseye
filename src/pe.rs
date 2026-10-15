@@ -310,11 +310,6 @@ pub struct CodeLayout {
 }
 
 impl CodeLayout {
-    /// The machine the image's header names.
-    pub fn machine(&self) -> CodeMachine {
-        self.machine
-    }
-
     pub fn machine_at(&self, rva: u32) -> CodeMachine {
         let index = self.ranges.partition_point(|&(start, _, _)| start <= rva);
         index

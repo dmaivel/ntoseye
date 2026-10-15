@@ -155,15 +155,6 @@ impl Image {
         Ok(SymbolRef { obj: self, rva })
     }
 
-    pub fn closest_symbol(&self, address: VirtAddr) -> Result<(String, u32)> {
-        let guid = self.guid.ok_or(Error::ExpectedSymbols)?;
-        let result = self
-            .symbols
-            .closest_symbol(guid, self.base_address, address)
-            .ok_or(Error::UnknownAddress(address))?;
-        Ok(result)
-    }
-
     /// The module's headers, read once from guest memory. Directories past
     /// the headers are not in the view; see [`image`](Self::image) for those.
     pub fn view(&mut self) -> Option<PeView<'_>> {

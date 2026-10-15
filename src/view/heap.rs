@@ -565,40 +565,6 @@ fn busy_state(busy: bool) -> &'static str {
     if busy { "busy" } else { "free" }
 }
 
-fn heap_summary_stats(stats: &target::HeapSummaryStats) -> HeapStats {
-    HeapStats {
-        flags: stats.flags,
-        reserved: stats.reserved,
-        committed: stats.committed,
-        free: stats.free,
-        segments: stats.segments,
-        virtual_blocks: stats.virtual_blocks,
-        front_end: stats.front_end,
-        front_end_type: stats.front_end_type,
-        vs_subsegments: stats.vs_subsegments,
-        lfh_subsegments: stats.lfh_subsegments,
-        page_allocations: stats.page_allocations,
-        large_allocations: stats.large_allocations,
-    }
-}
-
-pub fn heap_summary(summary: &target::HeapSummaryDetail) -> HeapSummary {
-    HeapSummary {
-        peb: summary.peb,
-        truncated: summary.truncated,
-        heaps: summary
-            .heaps
-            .iter()
-            .map(|item| HeapOverview {
-                index: item.index,
-                address: item.address,
-                kind: heap_kind(item.kind),
-                stats: item.stats.map(heap_summary_stats),
-            })
-            .collect(),
-    }
-}
-
 fn nt_entry(entry: &target::NtEntry) -> NtHeapEntry {
     NtHeapEntry {
         address: entry.address,

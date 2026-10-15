@@ -322,13 +322,6 @@ pub enum WatchpointAccess {
 }
 
 impl WatchpointAccess {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Write => "write",
-            Self::ReadWrite => "read/write",
-        }
-    }
-
     pub fn name(self) -> &'static str {
         match self {
             Self::Write => "write",

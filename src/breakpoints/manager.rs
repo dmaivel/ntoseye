@@ -86,25 +86,6 @@ impl BreakpointManager {
         );
     }
 
-    pub fn add(
-        &mut self,
-        client: &mut dyn DebugBackend,
-        debugger: &Target,
-        address: VirtAddr,
-        symbol: Option<String>,
-        condition: Option<String>,
-    ) -> Result<u32> {
-        self.add_code_configured(
-            client,
-            debugger,
-            CodeSite::Address { address, symbol },
-            BreakpointConfig {
-                condition,
-                ..BreakpointConfig::default()
-            },
-        )
-    }
-
     pub fn add_configured(
         &mut self,
         client: &mut dyn DebugBackend,

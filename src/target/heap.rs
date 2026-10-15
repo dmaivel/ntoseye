@@ -56,16 +56,6 @@ pub enum HeapKind {
     Unknown(u32),
 }
 
-impl HeapKind {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Nt => "nt",
-            Self::Segment => "segment",
-            Self::Unknown(_) => "unknown",
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct ProcessHeap {
     pub index: usize,
@@ -1279,7 +1269,6 @@ pub struct HeapSummaryStats {
     pub segments: u64,
     pub virtual_blocks: u64,
     pub front_end: Option<VirtAddr>,
-    pub front_end_type: u8,
     pub vs_subsegments: u64,
     pub lfh_subsegments: u64,
     pub page_allocations: u64,
@@ -1433,7 +1422,6 @@ fn heap_summary_stats(
                 segments: nt.segments.len() as u64,
                 virtual_blocks: nt.virtual_blocks.len() as u64,
                 front_end: nt.front_end,
-                front_end_type: nt.front_end_type,
                 vs_subsegments: 0,
                 lfh_subsegments: 0,
                 page_allocations: 0,
@@ -1463,7 +1451,6 @@ fn heap_summary_stats(
                         .sum(),
                     virtual_blocks: 0,
                     front_end: None,
-                    front_end_type: 0,
                     vs_subsegments: count(RangeKind::Vs),
                     lfh_subsegments: count(RangeKind::Lfh),
                     page_allocations: count(RangeKind::Direct),

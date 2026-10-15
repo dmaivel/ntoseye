@@ -25,7 +25,6 @@ const OFF_MAJOR_VERSION: usize = offset_of!(Header64, major_version);
 const OFF_MINOR_VERSION: usize = offset_of!(Header64, minor_version);
 const OFF_DIRECTORY_TABLE_BASE: usize = offset_of!(Header64, directory_table_base);
 const OFF_PS_LOADED_MODULE_LIST: usize = offset_of!(Header64, ps_loaded_module_list);
-const OFF_PS_ACTIVE_PROCESS_HEAD: usize = offset_of!(Header64, ps_active_process_head);
 const OFF_MACHINE_IMAGE_TYPE: usize = offset_of!(Header64, machine_image_type);
 const OFF_NUMBER_PROCESSORS: usize = offset_of!(Header64, number_processors);
 const OFF_BUG_CHECK_CODE: usize = offset_of!(Header64, bug_check_code);
@@ -83,7 +82,6 @@ const DATA_BLOCK_SIZE: usize = 16;
 const DRIVER_ENTRY_SIZE: usize = 0x90;
 const DRIVER_OFF_NAME_OFFSET: usize = 0x00;
 const DRIVER_OFF_DLL_BASE: usize = 0x38;
-const DRIVER_OFF_ENTRY_POINT: usize = 0x40;
 const DRIVER_OFF_SIZE_OF_IMAGE: usize = 0x48;
 const DRIVER_OFF_CHECKSUM: usize = 0x80;
 const DRIVER_OFF_TIME_DATE_STAMP: usize = 0x88;
@@ -108,7 +106,6 @@ pub struct TriageBlock {
 pub struct TriageDriver {
     pub name: String,
     pub base: u64,
-    pub entry_point: u64,
     pub size: u32,
     pub checksum: u32,
     pub time_date_stamp: u32,
@@ -323,7 +320,6 @@ pub fn parse_triage(mmap: &[u8]) -> Result<(DmpInfo, Vec<TriageBlock>)> {
         number_processors: clamp_processors(number_processors),
         is_triage: true,
         ps_loaded_module_list: read_u64(mmap, OFF_PS_LOADED_MODULE_LIST),
-        ps_active_process_head: read_u64(mmap, OFF_PS_ACTIVE_PROCESS_HEAD),
         debugger_data_block: match read_u64(mmap, OFF_KD_DEBUGGER_DATA_BLOCK) {
             0 => None,
             address => Some(address),
@@ -388,7 +384,6 @@ pub fn parse_drivers(mmap: &[u8]) -> Vec<TriageDriver> {
             break;
         }
 
-        let entry_point = read_u64(mmap, entry_off + DRIVER_OFF_ENTRY_POINT);
         let size = read_u32(mmap, entry_off + DRIVER_OFF_SIZE_OF_IMAGE);
         let checksum = read_u32(mmap, entry_off + DRIVER_OFF_CHECKSUM);
         let time_date_stamp = read_u32(mmap, entry_off + DRIVER_OFF_TIME_DATE_STAMP);
@@ -403,7 +398,6 @@ pub fn parse_drivers(mmap: &[u8]) -> Vec<TriageDriver> {
         drivers.push(TriageDriver {
             name,
             base,
-            entry_point,
             size,
             checksum,
             time_date_stamp,

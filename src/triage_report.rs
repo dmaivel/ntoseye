@@ -559,12 +559,10 @@ mod tests {
             number_processors: 2,
             is_triage: true,
             ps_loaded_module_list: 0,
-            ps_active_process_head: 0,
             debugger_data_block: None,
             triage_drivers: vec![TriageDriver {
                 name: "sample.sys".into(),
                 base: 0xffff_f800_1000_0000,
-                entry_point: 0xffff_f800_1000_1000,
                 size: 0x4000,
                 checksum: 0,
                 time_date_stamp: 0x1234,

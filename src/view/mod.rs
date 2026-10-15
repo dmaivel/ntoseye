@@ -82,13 +82,6 @@ pub enum View {
     Diagnostic(Box<DiagnosticView>),
 }
 
-impl View {
-    /// A list of rendered values: `View::list(stack_frames(&trace.frames))`.
-    pub fn list<T: shape::ViewValue<Source = T>>(items: impl IntoIterator<Item = T>) -> View {
-        View::List(items.into_iter().map(T::view).collect())
-    }
-}
-
 pub struct DiagnosticView {
     pub value: Option<View>,
     pub error: Option<String>,

@@ -378,7 +378,8 @@ impl FileIoReply {
         }
     }
 
-    pub fn status(&self) -> u32 {
+    #[cfg(test)]
+    fn status(&self) -> u32 {
         read_u32(&self.header, 4)
     }
 

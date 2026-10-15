@@ -23,10 +23,6 @@ impl ThreadInfo {
         })?;
         Some((register.read)(self))
     }
-
-    pub fn pseudo_register_value(&self, name: &str) -> Option<u64> {
-        self.pseudo_register(name).flatten()
-    }
 }
 
 /// A thread pseudo-register: the names it answers to, the `vars` source
@@ -446,12 +442,12 @@ mod tests {
     fn thread_pseudo_registers_are_case_insensitive_and_optional() {
         let mut thread = sample_thread();
         assert_eq!(
-            thread.pseudo_register_value("TrapFrame"),
+            thread.pseudo_register("TrapFrame").flatten(),
             thread.trap_frame.map(|addr| addr.0)
         );
         thread.teb = None;
-        assert_eq!(thread.pseudo_register_value("TEB"), None);
-        assert_eq!(thread.pseudo_register_value("unknown"), None);
+        assert_eq!(thread.pseudo_register("TEB"), Some(None));
+        assert_eq!(thread.pseudo_register("unknown"), None);
     }
 
     #[test]
@@ -489,7 +485,8 @@ mod tests {
 
         for name in NAMES {
             let value = thread
-                .pseudo_register_value(name)
+                .pseudo_register(name)
+                .flatten()
                 .unwrap_or_else(|| panic!("{name} should resolve for the sample thread"));
             assert_eq!(session.target.builtin_variable_value(name), Some(value));
             assert!(

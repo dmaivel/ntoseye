@@ -135,9 +135,6 @@ pub enum Error {
     #[error("Unsupported target architecture: {0}")]
     UnsupportedArchitecture(String),
 
-    #[error("No symbol found near {0:x}")]
-    UnknownAddress(VirtAddr),
-
     #[error("Process '{0}' not found")]
     ProcessNotFound(u64),
 

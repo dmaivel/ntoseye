@@ -125,7 +125,6 @@ pub struct SessionProcessDetail {
 pub struct SessionProcessesDetail {
     pub selected_session: Option<u64>,
     pub detailed: bool,
-    pub image_glob: Option<String>,
     pub processes: Vec<SessionProcessDetail>,
     pub process_count: usize,
     pub truncated: bool,
@@ -808,14 +807,11 @@ impl Target {
             Some(selector) => self.resolve_session_selector(selector, &processes)?,
             None => self.current_session_id(&processes),
         };
-        let image_glob = image_glob.map(str::to_string);
         let processes: Vec<_> = processes
             .into_iter()
             .filter(|(process, process_session)| {
                 selected_session.is_none_or(|id| *process_session == Some(id))
-                    && image_glob
-                        .as_deref()
-                        .is_none_or(|pattern| glob_matches(pattern, &process.name, true))
+                    && image_glob.is_none_or(|pattern| glob_matches(pattern, &process.name, true))
             })
             .map(|(process, session)| SessionProcessDetail { process, session })
             .collect();
@@ -823,7 +819,6 @@ impl Target {
         Ok(SessionProcessesDetail {
             selected_session,
             detailed,
-            image_glob,
             processes,
             process_count,
             truncated,

@@ -506,10 +506,6 @@ impl Target {
     pub fn current_types_index(&self) -> SymbolIndex {
         self.symbols.merged_types_index(Some(self.current_dtb()))
     }
-
-    pub fn current_enums_index(&self) -> SymbolIndex {
-        self.symbols.merged_enum_index(Some(self.current_dtb()))
-    }
 }
 
 #[cfg(test)]

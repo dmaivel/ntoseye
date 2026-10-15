@@ -406,7 +406,6 @@ pub struct DmpInfo {
     pub is_triage: bool,
     pub ps_loaded_module_list: u64,
     pub debugger_data_block: Option<u64>,
-    pub ps_active_process_head: u64,
     pub triage_drivers: Vec<TriageDriver>,
     pub exception: Option<DmpException>,
     pub system_info: Option<DmpSystemInfo>,
@@ -555,7 +554,6 @@ impl DmpMem {
             number_processors: clamp_processors(hdr.number_processors),
             is_triage: false,
             ps_loaded_module_list: hdr.ps_loaded_module_list,
-            ps_active_process_head: hdr.ps_active_process_head,
             debugger_data_block: (hdr.kd_debugger_data_block != 0)
                 .then_some(hdr.kd_debugger_data_block),
             triage_drivers: Vec::new(),
@@ -991,7 +989,6 @@ mod tests {
             number_processors: 1,
             is_triage: false,
             ps_loaded_module_list: 0,
-            ps_active_process_head: 0,
             debugger_data_block: None,
             triage_drivers: Vec::new(),
             exception: None,

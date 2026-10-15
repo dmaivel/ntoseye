@@ -176,6 +176,7 @@ impl ExceptionPolicyTable {
         self.policies.iter().map(|(&code, policy)| (code, policy))
     }
 
+    #[cfg(test)]
     pub fn mode_for(&self, code: u32) -> Option<ExceptionPolicyMode> {
         self.policies.get(&code).map(|policy| policy.mode)
     }

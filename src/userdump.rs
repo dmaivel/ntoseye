@@ -49,8 +49,6 @@ pub struct UserSystemInfo {
 /// `ThreadInfoListStream` entry: what the kernel knew of the thread.
 #[derive(Debug, Clone)]
 pub struct UserThreadInfo {
-    pub dump_flags: u32,
-    pub dump_error: u32,
     pub exit_status: u32,
     pub create_time: u64,
     pub exit_time: u64,
