@@ -12,14 +12,14 @@ use pyo3::{PyTypeInfo, type_hint_identifier, type_hint_subscript};
 
 use super::module::Device;
 use super::process::Process;
-#[cfg(feature = "python-stubs")]
-use super::stop::Stop;
 use super::thread::{Cpu, Thread};
 use crate::Backend;
 use crate::dbg_backend::{ContinueDisposition, WatchpointAccess};
 use crate::exception_policy::ExceptionPolicyMode;
 use crate::kd::KdMemorySource;
-use crate::session::StepMode;
+#[cfg(feature = "python-stubs")]
+use crate::session::driver::StopPy;
+use crate::session::{StepMode, WalkUntil};
 
 /// A string argument restricted to fixed spellings, typed as
 /// `typing.Literal[...]` in the stubs.
@@ -82,20 +82,12 @@ literal_arg! {
     }
 }
 
-/// The instruction class a `step(until=...)` walk stops before.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum UntilFlow {
-    Call,
-    Return,
-    Branch,
-}
-
 literal_arg! {
-    /// `step(until=...)`.
-    Until(UntilFlow) {
-        "call" => UntilFlow::Call,
-        "ret" => UntilFlow::Return,
-        "branch" => UntilFlow::Branch,
+    /// `step(until=...)`: the instruction class the walk stops before.
+    Until(WalkUntil) {
+        "call" => WalkUntil::Call,
+        "ret" => WalkUntil::Return,
+        "branch" => WalkUntil::Branch,
     }
 }
 
@@ -135,7 +127,7 @@ impl<'a, 'py> FromPyObject<'a, 'py> for WhenCallback {
     const INPUT_TYPE: PyStaticExpr = type_hint_subscript!(
         type_hint_identifier!("collections.abc", "Callable"),
         PyStaticExpr::List {
-            elts: &[<Stop as PyTypeInfo>::TYPE_HINT]
+            elts: &[<StopPy as PyTypeInfo>::TYPE_HINT]
         },
         type_hint_identifier!("builtins", "object")
     );

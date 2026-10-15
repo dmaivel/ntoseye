@@ -45,13 +45,13 @@ fn a_crash_dump_stops_at_its_bugcheck() {
         r#"
 with ntoseye.attach("dmp", DUMP) as dbg:
     stop = dbg.stop
-    assert isinstance(stop, Stop.Bugcheck), repr(stop)
     assert isinstance(stop, Stop)
+    assert stop.kind == "bugcheck", repr(stop)
     assert stop.rip == PAGE + 0x678, hex(stop.rip)
-    assert stop.info is not None and stop.info.code == 0x50, stop.info
+    assert stop.bugcheck is not None and stop.bugcheck.code == 0x50, stop.bugcheck
     # Reading the current stop consumes nothing.
     for again in (dbg.stop, dbg.wait(0), dbg.interrupt()):
-        assert isinstance(again, Stop.Bugcheck), repr(again)
+        assert again.kind == "bugcheck", repr(again)
 "#,
     );
 }

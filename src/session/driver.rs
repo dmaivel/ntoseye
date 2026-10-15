@@ -7,8 +7,11 @@
 //! and policy commands through the session's [`ActionRunner`]. Hosts only map
 //! a [`Stop`] to their own rendering or protocol.
 
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+use ntoseye_macros::record;
 
 use crate::breakpoints::{Breakpoint, StepFrame};
 use crate::dbg_backend::{BugcheckInfo, ContinueDisposition, HwBreakpointAccess, ModuleEvent};
@@ -232,8 +235,8 @@ pub trait ActionRunner {
 }
 
 /// Why the target stopped, with the context it stopped in, snapshotted at
-/// the stop.
-#[derive(Debug, Clone)]
+/// the stop. `kind` says which of the optional parts it has.
+#[record]
 pub struct Stop {
     pub kind: StopKind,
     /// The backend thread that stopped: a vCPU (`p1.2`), or a user dump's
@@ -241,6 +244,7 @@ pub struct Stop {
     pub cpu: String,
     /// Where it stopped. A bugcheck's fault site is in `bugcheck`, a
     /// breakpoint's address in `breakpoint`, an exception's in `exception`.
+    #[record(hex)]
     pub rip: Option<u64>,
     /// The nearest symbol to `rip`, named in the stopped vCPU's own address
     /// space.
@@ -266,8 +270,9 @@ pub struct Stop {
     pub reload: Option<ReloadStop>,
 }
 
-/// The kind of a [`Stop`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The kind of a [`Stop`], named in snake case.
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub enum StopKind {
     /// A breakpoint or watchpoint hit.
     Breakpoint,
@@ -291,11 +296,12 @@ pub enum StopKind {
 }
 
 /// A breakpoint hit that stopped the target.
-#[derive(Debug, Clone)]
+#[record]
 pub struct BreakpointHit {
     pub id: u32,
     pub kind: HitKind,
     /// The planted or watched address, not necessarily where it stopped.
+    #[record(hex)]
     pub address: u64,
     /// A debug-register breakpoint's access and length.
     pub access: Option<HwBreakpointAccess>,
@@ -309,8 +315,9 @@ pub struct BreakpointHit {
     pub condition_error: Option<String>,
 }
 
-/// What a breakpoint watches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What a breakpoint watches, named in snake case.
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub enum HitKind {
     /// A patched (software) code breakpoint.
     Code,
@@ -325,24 +332,57 @@ pub enum HitKind {
 }
 
 /// A Windows exception that stopped the target.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub struct ExceptionStop {
     /// The NTSTATUS code.
+    #[record(hex)]
     pub code: u32,
     /// Whether this is the first chance; `None` when the transport does not
     /// say.
     pub first_chance: Option<bool>,
     /// The exception record's address, when the transport gives one.
+    #[record(hex)]
     pub address: Option<u64>,
 }
 
 /// A reboot the debugger rebuilt its state for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub struct ReloadStop {
     /// The new kernel's base.
+    #[record(hex)]
     pub kernel_base: Option<u64>,
     /// Whether the kernel's module list exists yet.
     pub coherent: bool,
+}
+
+impl fmt::Display for StopKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            StopKind::Breakpoint => "breakpoint",
+            StopKind::Exception => "exception",
+            StopKind::Interrupt => "interrupt",
+            StopKind::Step => "step",
+            StopKind::ModuleLoad => "module_load",
+            StopKind::ModuleUnload => "module_unload",
+            StopKind::Bugcheck => "bugcheck",
+            StopKind::Reload => "reload",
+            StopKind::Entry => "entry",
+        })
+    }
+}
+
+impl fmt::Display for HitKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            HitKind::Code => "code",
+            HitKind::Hardware => "hardware",
+            HitKind::Watch => "watch",
+            HitKind::Hypercall => "hypercall",
+            HitKind::VmExit => "vm_exit",
+        })
+    }
 }
 
 impl BreakpointHit {
@@ -780,6 +820,24 @@ impl Session {
         }
         let outcome = self.halted_outcome();
         Ok(Some(self.current_snapshot(outcome)))
+    }
+
+    /// Record that the host's own condition for the breakpoint hit the target
+    /// is halted at failed to evaluate (a Python `when=` callback that
+    /// raised): the hit surfaces with `error`, as a failed `condition=` does.
+    /// The stop as it now reads; `None` when no stop was snapshotted.
+    pub fn fail_stop_condition(&mut self, error: String) -> Option<Stop> {
+        if let Some(ContinueOutcome::Breakpoint {
+            condition_error, ..
+        }) = &mut self.current_stop
+        {
+            *condition_error = Some(error.clone());
+        }
+        let stop = self.stop_snapshot.as_mut()?;
+        if let Some(hit) = &mut stop.breakpoint {
+            hit.condition_error = Some(error);
+        }
+        Some(stop.clone())
     }
 
     /// A stop for a run whose end the backend never reported (its wait

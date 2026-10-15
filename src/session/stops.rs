@@ -1,8 +1,7 @@
 //! Stop ingestion: classifying raw backend stops, waiting for the next
 //! meaningful one, and tracking the stop the target is halted at.
 
-use std::sync::atomic::AtomicBool;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::breakpoints::{Breakpoint, BreakpointManager};
 use crate::dbg_backend::{
@@ -19,7 +18,7 @@ use crate::session::context::{
 use crate::session::hits::{resolve_watchpoint_stop, rewind_thread_off_breakpoint};
 use crate::session::reload::ReloadDisposition;
 use crate::session::{
-    BreakpointStopAction, Cancel, CancelBehavior, ContinueOutcome, RunStatus, STATUS_BREAKPOINT,
+    BreakpointStopAction, Cancel, ContinueOutcome, RunStatus, STATUS_BREAKPOINT,
     STATUS_SINGLE_STEP, Session, StopResolution, WatchpointStopAction,
 };
 use crate::target::{BreakpointStop, HYPERVISOR_CONTEXT, ThreadInfo};
@@ -547,23 +546,6 @@ impl Session {
         };
         self.record_visible_stop(&resolution);
         Ok(resolution)
-    }
-
-    /// Migration wrapper over the driver's wait for the Python SDK until it
-    /// moves onto [`Session::run`]: a hosted wait of at most `timeout` that
-    /// hands back a running target when it elapses or `cancel` is raised.
-    pub fn wait_for_stop_bounded(
-        &mut self,
-        timeout: Option<Duration>,
-        cancel: &AtomicBool,
-    ) -> Result<ContinueOutcome> {
-        let cancel = Cancel {
-            flag: Some(cancel),
-            deadline: timeout.map(|timeout| Instant::now() + timeout),
-            behavior: CancelBehavior::ReturnRunning,
-            tick: None,
-        };
-        self.wait_stop(&cancel, true)
     }
 
     /// Block until the backend produces a meaningful stop, routing every raw

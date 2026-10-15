@@ -3,7 +3,6 @@
 //! debugger-worker page-in.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use crate::bugchecks::{
@@ -11,7 +10,7 @@ use crate::bugchecks::{
 };
 use crate::bytes;
 use crate::cpu_context::{amd64, arm64};
-use crate::dbg_backend::processor_index_from_backend_thread_id;
+use crate::dbg_backend::{ContinueDisposition, processor_index_from_backend_thread_id};
 use crate::disasm::{
     DisasmRow, decode_code, decode_preceding, function_extent, instruction_containing,
 };
@@ -20,7 +19,8 @@ use crate::guest::hypervisor::{HvPartition, HvVirtualProcessor, processor_guest_
 use crate::memory::{self, MemoryOps, PAGE_SIZE, ScanFault, TerminatedRead, read_page_chunks};
 use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::{
-    ContinueOutcome, ExceptionRecord, InstructionBoundary, PageInReport, Session, VpRegisters,
+    Cancel, ExceptionRecord, InstructionBoundary, Motion, PageInReport, RunOutcome, Session,
+    VpRegisters,
 };
 use crate::target::meta::TargetVersionDetail;
 use crate::target::usermode::ImageCheckDetail;
@@ -807,16 +807,17 @@ impl Session {
         // The worker signals completion at the same address KD break-ins land
         // on, which the transport would otherwise dismiss as its own noise.
         self.backend.surface_next_break_at(Some(worker_break.0));
-        self.resume()?;
-        let cancel = AtomicBool::new(false);
-        let outcome = self.wait_for_stop_bounded(Some(PAGE_IN_TIMEOUT), &cancel);
+        let resume = Motion::Continue {
+            disposition: ContinueDisposition::Handled,
+        };
+        let outcome = self.run(resume, &Cancel::within(PAGE_IN_TIMEOUT));
         self.backend.surface_next_break_at(None);
         match outcome? {
-            ContinueOutcome::Running => Err(Error::DebugInfo(format!(
+            RunOutcome::Running => Err(Error::DebugInfo(format!(
                 "the debugger worker did not report within {}s; the target is still running",
                 PAGE_IN_TIMEOUT.as_secs()
             ))),
-            _ => Ok(self.page_in_result(address, worker_break)),
+            RunOutcome::Stopped(_) => Ok(self.page_in_result(address, worker_break)),
         }
     }
 

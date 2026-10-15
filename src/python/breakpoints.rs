@@ -826,8 +826,8 @@ impl Exceptions {
     /// module filter: `"ld"` or `"ld:<module>"` for loads, `"ud"` or
     /// `"ud:<module>"` for unloads. The module name is not case-sensitive, the
     /// extension is optional, and `*`/`?` globs work. A `"break"` load filter
-    /// stops as `Stop.ModuleLoad` before the module entry point runs, and a
-    /// `"break"` unload filter stops as `Stop.ModuleUnload` after the driver's
+    /// stops (kind `"module_load"`) before the module entry point runs, and a
+    /// `"break"` unload filter stops (kind `"module_unload"`) after the driver's
     /// unload routine, while the module is still listed. A `"notify"` filter
     /// adds a `ModLoad:` or `Unload module` line to the queue in
     /// `dbg.notices()`. `disposition` does not apply to `ld` or `ud`.
@@ -977,6 +977,13 @@ fn build_config(
     if condition.is_some() && when.is_some() {
         return Err(PyValueError::new_err(
             "condition and when are mutually exclusive",
+        ));
+    }
+    // The session runs an action when the hit surfaces, before a `when=`
+    // callback could decline it; the callback can act itself.
+    if action.is_some() && when.is_some() {
+        return Err(PyValueError::new_err(
+            "action and when are mutually exclusive; act in the when callback",
         ));
     }
     let callback = when.map(|WhenCallback(callback)| callback);

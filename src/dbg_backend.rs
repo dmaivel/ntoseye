@@ -1,7 +1,10 @@
 use std::collections::VecDeque;
+use std::fmt;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use ntoseye_macros::record;
 
 use crate::debugger_data::DebuggerDataCandidate;
 use crate::error::{Error, Result};
@@ -141,9 +144,14 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A bugcheck's code and its four parameters, and the driver the transport
+/// names for it.
+#[record]
+#[derive(PartialEq, Eq)]
 pub struct BugcheckInfo {
+    #[record(hex)]
     pub code: u32,
+    #[record(hex)]
     pub parameters: [u64; 4],
     pub driver: Option<String>,
 }
@@ -281,8 +289,9 @@ impl ModuleEvent {
 
 /// What memory access a hardware (debug-register) breakpoint traps on. The x86
 /// debug registers have no read-only condition, so a "read" watch is really
-/// read/write ([`Self::ReadWrite`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// read/write ([`Self::ReadWrite`]). Named in snake case.
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub enum HwBreakpointAccess {
     /// Instruction execution at the address (DR7 R/W = 00, length forced to 1).
     Execute,
@@ -308,6 +317,16 @@ impl HwBreakpointAccess {
             Self::Write => 'w',
             Self::ReadWrite => 'r',
         }
+    }
+}
+
+impl fmt::Display for HwBreakpointAccess {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Execute => "execute",
+            Self::Write => "write",
+            Self::ReadWrite => "read_write",
+        })
     }
 }
 

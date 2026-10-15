@@ -1,9 +1,6 @@
 //! Resuming the target and breaking in: the resume prologue, exception
 //! dispositions, interrupts, and edits made with the target briefly halted.
 
-use std::sync::atomic::AtomicBool;
-use std::time::Duration;
-
 use crate::dbg_backend::{ContinueDisposition, DebugCapability, StopEvent};
 use crate::error::{Error, Result};
 use crate::session::{ContinueOutcome, STATUS_BREAKPOINT, Session, StopResolution};
@@ -74,43 +71,6 @@ impl Session {
             })
     }
 
-    /// [`Self::interrupt`] keeping the classification: a breakpoint hit that
-    /// races the break-in is reported as that breakpoint (with its action and
-    /// condition result) rather than as a bare `STATUS_BREAKPOINT` stop. A
-    /// target that is not running is not broken into (KD would wait out its
-    /// break-in timeout): a stop parked by [`Self::with_target_halted`] or
-    /// [`Self::service_idle`] is surfaced, and a halted target reports the
-    /// stop it is halted at ([`Self::current_stop`]), or its pc.
-    pub fn interrupt_outcome(&mut self) -> Result<ContinueOutcome> {
-        if let Some(stop) = self.stop_without_breakin() {
-            return Ok(stop);
-        }
-        self.interrupt_classified()
-            .map(|(resolution, _)| self.continue_outcome_from_resolution(resolution))
-    }
-
-    /// Migration wrapper over the driver's halt for the Python SDK until it
-    /// moves onto [`Session::run`] with [`crate::session::Motion::Break`].
-    pub fn interrupt_requested(&mut self) -> Result<ContinueOutcome> {
-        if let Some(stop) = self.stop_without_breakin() {
-            return Ok(stop);
-        }
-        let outcome = self.halt()?;
-        self.note_stop(&outcome);
-        Ok(outcome)
-    }
-
-    /// The stop an interrupt reports without breaking in: a parked stop, or
-    /// the one a halted target is at. `None` when the target must be broken
-    /// into.
-    fn stop_without_breakin(&mut self) -> Option<ContinueOutcome> {
-        if let Some(parked) = self.parked_stop.take() {
-            return Some(parked);
-        }
-        (!self.backend.is_running() && !self.backend.has_pending_stop())
-            .then(|| self.halted_outcome())
-    }
-
     /// The stop a halted target is at, or a bare halt at its pc when it has
     /// not stopped since it last moved (attached halted).
     pub fn halted_outcome(&mut self) -> ContinueOutcome {
@@ -143,7 +103,7 @@ impl Session {
     /// interrupts nor resumes the backend. If it is running, this method breaks
     /// in, runs `edit`, and resumes afterward unless the interrupt exposed a
     /// genuine pending stop. Such a stop is left halted and parked for the next
-    /// [`Self::wait_for_stop_bounded`], while an edit error still resumes an
+    /// wait ([`Self::run`]), while an edit error still resumes an
     /// otherwise ordinary break-in before returning the error. This primitive is
     /// shared by hosts that edit breakpoint state; it emits no notifications.
     pub fn with_target_halted<T>(
@@ -286,20 +246,5 @@ impl Session {
         self.target.clear_context_dtb_override();
         self.target.clear_current_windows_thread_context();
         self.parked_windows_thread = None;
-    }
-
-    /// Migration wrapper over the driver's continue for the Python SDK until
-    /// it moves onto [`Session::run`]: `cancel` or an elapsed `timeout` hands
-    /// back the target still running.
-    pub fn continue_until_break(
-        &mut self,
-        timeout: Option<Duration>,
-        cancel: &AtomicBool,
-        disposition: ContinueDisposition,
-    ) -> Result<ContinueOutcome> {
-        if !self.backend.is_running() {
-            self.resume_with_disposition(disposition)?;
-        }
-        self.wait_for_stop_bounded(timeout, cancel)
     }
 }

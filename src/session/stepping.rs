@@ -871,25 +871,6 @@ impl Session {
         }))
     }
 
-    /// Migration wrapper over [`Self::run_to_any`] for the Python SDK until it
-    /// moves onto [`Session::run`]: `cancel` or an elapsed `timeout` halts the
-    /// target where it is.
-    pub fn run_to(
-        &mut self,
-        address: VirtAddr,
-        frame: Option<StepFrame>,
-        timeout: Option<Duration>,
-        cancel: &AtomicBool,
-    ) -> Result<ContinueOutcome> {
-        let cancel = Cancel {
-            flag: Some(cancel),
-            deadline: timeout.map(|timeout| Instant::now() + timeout),
-            behavior: CancelBehavior::Halt,
-            tick: None,
-        };
-        self.run_to_any(&[(address, frame)], ContinueDisposition::Handled, &cancel)
-    }
-
     /// Run until whichever of `sites` is reached first, each by the
     /// execution its frame names, resuming with `disposition`. A site where a
     /// breakpoint is already set in the current context needs no temporary

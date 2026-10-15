@@ -41,7 +41,6 @@ pub mod record;
 pub mod runcontrol;
 pub mod runner;
 pub mod secure;
-pub mod stop;
 pub mod symbols;
 #[cfg(test)]
 mod tests;
@@ -297,8 +296,6 @@ pub mod _ntoseye {
     use super::hypervisor::{HypercallCaller, HypervisorPartition, HypervisorVtl, VirtualProcessor};
     #[pymodule_export]
     use super::secure::{SecureKernel, Trustlet};
-    #[pymodule_export]
-    use super::stop::{Stop, StopContext};
     #[pymodule_export]
     use super::symbols::Symbols;
     #[pymodule_export]

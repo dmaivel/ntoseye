@@ -72,8 +72,8 @@ impl ProcessInfo {
     }
 }
 
-/// module metadata from PEB LDR list
-#[derive(Debug, Clone)]
+/// A loaded module (kernel or process image), as its loader list records it.
+#[record]
 pub struct ModuleInfo {
     pub name: String,
     pub short_name: String,
@@ -83,13 +83,16 @@ pub struct ModuleInfo {
     /// From a WOW64 process's 32-bit loader list: x86 code, 4-byte pointers.
     pub is_32bit: bool,
     pub entry_point: Option<VirtAddr>,
+    #[record(hex)]
     pub time_date_stamp: Option<u32>,
+    #[record(hex)]
     pub checksum: Option<u32>,
     pub file_version: Option<String>,
     pub product_version: Option<String>,
     /// The image's CodeView record when the module list itself records it
     /// (a user-mode minidump's module stream), so its PDB is known without
     /// reading the image.
+    #[record(skip)]
     pub codeview: Option<CodeView>,
 }
 

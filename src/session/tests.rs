@@ -27,7 +27,7 @@ use iced_x86::{Decoder, DecoderOptions};
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, Instant};
 
 /// DR6.BS (bit 14): a status bit outside B0-B3 that the functions under
@@ -954,9 +954,8 @@ fn with_target_halted_parks_a_genuine_pending_breakpoint() {
 
     assert_eq!(continues.load(Ordering::Relaxed), 0);
     assert!(!session.backend.is_running());
-    let cancel = AtomicBool::new(false);
     assert!(matches!(
-        session.wait_for_stop_bounded(Some(Duration::ZERO), &cancel),
+        session.wait_stop(&Cancel::poll(), true),
         Ok(ContinueOutcome::Breakpoint { id: 1, .. })
     ));
 }
@@ -1612,10 +1611,9 @@ fn a_watchpoint_hit_while_a_resume_leaves_its_site_is_the_next_stop() {
         .insert_for_test(1, VirtAddr(0x1000), true, None);
 
     let outcome = session
-        .continue_until_break(
-            Some(Duration::from_secs(1)),
-            &AtomicBool::new(false),
+        .continue_stop(
             ContinueDisposition::Handled,
+            &Cancel::within(Duration::from_secs(1)),
         )
         .unwrap();
     assert!(
@@ -1661,10 +1659,9 @@ fn a_resume_with_a_stop_kept_reports_it_without_leaving_a_site() {
     );
 
     let outcome = session
-        .continue_until_break(
-            Some(Duration::from_secs(1)),
-            &AtomicBool::new(false),
+        .continue_stop(
             ContinueDisposition::Handled,
+            &Cancel::within(Duration::from_secs(1)),
         )
         .unwrap();
     assert!(

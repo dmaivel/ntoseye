@@ -43,9 +43,9 @@ const SIGNAL_POLL: Duration = Duration::from_millis(100);
 ///
 /// You can use it from any Python thread, and the session thread runs the calls
 /// one at a time. A call that waits (`run()`, `wait()`) releases the GIL.
-/// Ctrl+C (`KeyboardInterrupt`) during a call stops a wait, step, or trace
-/// early and raises the exception, and during a `command()` that resumes the
-/// target it breaks in, as in the REPL. Between calls the session continues to
+/// Ctrl+C (`KeyboardInterrupt`) during a call that runs or waits on the
+/// target breaks in, as in the REPL, and raises the exception; the target is
+/// left halted where it was. Between calls the session continues to
 /// service the guest, resuming breakpoint hits in the wrong process and hits
 /// with a false condition so the guest does not stay frozen. A debugger that
 /// ntoseye gives to a REPL custom command is valid only on the REPL thread, and
