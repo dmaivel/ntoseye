@@ -9,6 +9,7 @@ use crate::error::{Error, Result};
 use crate::layout::aggregate_key;
 use crate::wpp::{MessageKey, TmfMessage};
 use pdb2::{AddressMap, FallibleIterator, StringTable, TypeData, TypeIndex};
+use rustc_hash::FxHashMap;
 use std::{
     collections::HashMap,
     io::Cursor,
@@ -20,10 +21,10 @@ use std::{
 /// runs with no lock held.
 struct ParsedIndexData {
     strings: Vec<String>,
-    rvas: HashMap<String, Vec<IndexedSymbol>>,
+    rvas: FxHashMap<String, Vec<IndexedSymbol>>,
     source_lines: Vec<SourceLineEntry>,
     procedures: Vec<ProcedureSpan>,
-    source_checksums: HashMap<String, SourceChecksum>,
+    source_checksums: FxHashMap<String, SourceChecksum>,
     type_strings: Vec<String>,
     enum_strings: Vec<String>,
     struct_defs: HashMap<String, (u64, TypeIndex)>,
@@ -49,7 +50,7 @@ pub(super) fn undecorate_x86(name: &str) -> &str {
 }
 
 pub(super) fn insert_symbol_rva(
-    rvas: &mut HashMap<String, Vec<IndexedSymbol>>,
+    rvas: &mut FxHashMap<String, Vec<IndexedSymbol>>,
     name: String,
     rva: u32,
     visibility: SymbolVisibility,
@@ -68,7 +69,7 @@ pub(super) fn insert_symbol_rva(
     });
 }
 
-fn address_index(rvas: &HashMap<String, Vec<IndexedSymbol>>) -> Vec<AddressEntry> {
+fn address_index(rvas: &FxHashMap<String, Vec<IndexedSymbol>>) -> Vec<AddressEntry> {
     let rank = |visibility| match visibility {
         SymbolVisibility::Public => 0u8,
         SymbolVisibility::Private => 1,
@@ -172,10 +173,10 @@ impl SymbolStore {
         };
 
         let mut strings = Vec::new();
-        let mut rvas: HashMap<String, Vec<IndexedSymbol>> = HashMap::new();
+        let mut rvas = FxHashMap::default();
         let mut source_lines = Vec::new();
         let mut procedures = Vec::new();
-        let mut source_checksums = HashMap::new();
+        let mut source_checksums = FxHashMap::default();
         let mut wpp_messages = HashMap::new();
 
         // Module streams contain private procedures and addressable data that
@@ -278,7 +279,7 @@ impl SymbolStore {
     pub(super) fn publish_symbol_rvas(
         &self,
         guid: u128,
-        rvas: HashMap<String, Vec<IndexedSymbol>>,
+        rvas: FxHashMap<String, Vec<IndexedSymbol>>,
     ) {
         self.symbol_addresses.insert(guid, address_index(&rvas));
         self.symbol_rvas.insert(guid, rvas);
@@ -295,10 +296,10 @@ fn parse_module_streams(
     address_map: &AddressMap<'_>,
     string_table: Option<&StringTable<'_>>,
     strings: &mut Vec<String>,
-    rvas: &mut HashMap<String, Vec<IndexedSymbol>>,
+    rvas: &mut FxHashMap<String, Vec<IndexedSymbol>>,
     source_lines: &mut Vec<SourceLineEntry>,
     procedures: &mut Vec<ProcedureSpan>,
-    source_checksums: &mut HashMap<String, SourceChecksum>,
+    source_checksums: &mut FxHashMap<String, SourceChecksum>,
     wpp_messages: &mut HashMap<MessageKey, Arc<TmfMessage>>,
     diagnostics: &mut Vec<SymbolIndexDiagnostic>,
 ) {
@@ -453,9 +454,12 @@ fn parse_module_streams(
                             if let Ok(file) = strings_table.get(file_info.name)
                                 && let Some(checksum) = recorded_checksum(&file_info.checksum)
                             {
-                                source_checksums
-                                    .entry(file.to_string().into())
-                                    .or_insert(checksum);
+                                // Most modules name the same headers, so
+                                // only a file not seen yet costs a String.
+                                let file = file.to_string();
+                                if !source_checksums.contains_key(file.as_ref()) {
+                                    source_checksums.insert(file.into_owned(), checksum);
+                                }
                             }
                         }
                         Ok(None) => break,
@@ -589,7 +593,7 @@ fn parse_public_symbols(
     address_map: &AddressMap<'_>,
     x86: bool,
     strings: &mut Vec<String>,
-    rvas: &mut HashMap<String, Vec<IndexedSymbol>>,
+    rvas: &mut FxHashMap<String, Vec<IndexedSymbol>>,
     diagnostics: &mut Vec<SymbolIndexDiagnostic>,
 ) -> Result<()> {
     let offset_limit = section_offset_limit(pdb);

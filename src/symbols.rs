@@ -10,6 +10,7 @@ use crate::{
 use dashmap::DashMap;
 use memmap2::Mmap;
 use pdb2::TypeIndex;
+use rustc_hash::FxHashMap;
 use spin::{Mutex, RwLock};
 use std::{
     collections::{HashMap, HashSet},
@@ -154,7 +155,9 @@ pub struct SymbolStore {
     /// GUID -> symbol name -> every address-bearing PDB record. Private/static
     /// duplicates retain their compiland identity; resolution prefers public
     /// records when present but never collapses distinct candidate addresses.
-    symbol_rvas: DashMap<u128, HashMap<String, Vec<IndexedSymbol>>>,
+    /// Hashed with FxHash, not the DoS-resistant default: indexing a PDB
+    /// hashes every name in it, which with SipHash was a third of the work.
+    symbol_rvas: DashMap<u128, FxHashMap<String, Vec<IndexedSymbol>>>,
     /// GUID -> the same records sorted by RVA, for address-to-symbol lookups.
     symbol_addresses: DashMap<u128, Vec<AddressEntry>>,
     /// GUID -> the length of the function each symbol begins, by RVA, for
@@ -167,7 +170,7 @@ pub struct SymbolStore {
     procedures: DashMap<u128, Vec<ProcedureSpan>>,
     /// GUID -> recorded source file -> the checksum the compiler recorded for
     /// its contents. Files without one have no entry.
-    source_checksums: DashMap<u128, HashMap<String, SourceChecksum>>,
+    source_checksums: DashMap<u128, FxHashMap<String, SourceChecksum>>,
     /// Digests of local source files, by path, with the modification time
     /// and length they were computed at.
     local_source_digests: Mutex<HashMap<PathBuf, LocalSourceDigest>>,

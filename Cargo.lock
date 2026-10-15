@@ -1665,6 +1665,7 @@ dependencies = [
  "reedline",
  "reqwest",
  "rmcp",
+ "rustc-hash",
  "schemars",
  "serde",
  "serde_json",
