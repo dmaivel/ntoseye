@@ -733,36 +733,18 @@ impl<'a> PowerReader<'a> {
 
     /// Walk a list of `_POP_IRP_DATA` from `head`.
     pub fn irp_list(&self, head: VirtAddr, head_name: Option<&'static str>) -> PowerIrpList {
-        let mut list = PowerIrpList {
+        let (entries, stopped) = self.collect_list(head, "_POP_IRP_DATA", MAX_POWER_IRPS, |data| {
+            PowerIrpEntry {
+                data: data.addr(),
+                irp: self.power_irp(data).map_err(|error| error.to_string()),
+            }
+        });
+        PowerIrpList {
             head,
             head_name,
-            entries: Vec::new(),
-            stopped: None,
-        };
-        let records = match self.types.list_at(head, "_POP_IRP_DATA", "Link") {
-            Ok(records) => records,
-            Err(error) => {
-                list.stopped = Some(error.to_string());
-                return list;
-            }
-        };
-        for record in records {
-            if list.entries.len() >= MAX_POWER_IRPS {
-                list.stopped = Some(format!("stopped after {MAX_POWER_IRPS} entries"));
-                break;
-            }
-            match record {
-                Ok(data) => list.entries.push(PowerIrpEntry {
-                    data: data.addr(),
-                    irp: self.power_irp(&data).map_err(|error| error.to_string()),
-                }),
-                Err(error) => {
-                    list.stopped = Some(format!("unreadable link: {error}"));
-                    break;
-                }
-            }
+            entries,
+            stopped,
         }
-        list
     }
 
     fn worker(&self, entry: &StructRef<'_>) -> Result<PowerWorker> {
@@ -778,36 +760,48 @@ impl<'a> PowerReader<'a> {
 
     /// Walk a list of `_POP_IRP_WORKER_ENTRY` from `head`.
     pub fn worker_list(&self, head: VirtAddr, head_name: Option<&'static str>) -> PowerWorkerList {
-        let mut list = PowerWorkerList {
+        let (entries, stopped) =
+            self.collect_list(head, "_POP_IRP_WORKER_ENTRY", MAX_IRP_WORKERS, |entry| {
+                PowerWorkerEntry {
+                    entry: entry.addr(),
+                    worker: self.worker(entry).map_err(|error| error.to_string()),
+                }
+            });
+        PowerWorkerList {
             head,
             head_name,
-            entries: Vec::new(),
-            stopped: None,
-        };
-        let records = match self.types.list_at(head, "_POP_IRP_WORKER_ENTRY", "Link") {
+            entries,
+            stopped,
+        }
+    }
+
+    /// The records of the `record_type` list at `head`, linked through
+    /// `Link`, each made into an entry by `entry`; at most `cap` of them. The
+    /// second value says why the walk stopped short: an unresolved layout, the
+    /// cap, or an unreadable link. A record that fails to decode is the
+    /// entry's business and does not stop the walk.
+    fn collect_list<T>(
+        &self,
+        head: VirtAddr,
+        record_type: &str,
+        cap: usize,
+        entry: impl Fn(&StructRef<'a>) -> T,
+    ) -> (Vec<T>, Option<String>) {
+        let records = match self.types.list_at(head, record_type, "Link") {
             Ok(records) => records,
-            Err(error) => {
-                list.stopped = Some(error.to_string());
-                return list;
-            }
+            Err(error) => return (Vec::new(), Some(error.to_string())),
         };
+        let mut entries = Vec::new();
         for record in records {
-            if list.entries.len() >= MAX_IRP_WORKERS {
-                list.stopped = Some(format!("stopped after {MAX_IRP_WORKERS} entries"));
-                break;
+            if entries.len() >= cap {
+                return (entries, Some(format!("stopped after {cap} entries")));
             }
             match record {
-                Ok(entry) => list.entries.push(PowerWorkerEntry {
-                    entry: entry.addr(),
-                    worker: self.worker(&entry).map_err(|error| error.to_string()),
-                }),
-                Err(error) => {
-                    list.stopped = Some(format!("unreadable link: {error}"));
-                    break;
-                }
+                Ok(record) => entries.push(entry(&record)),
+                Err(error) => return (entries, Some(format!("unreadable link: {error}"))),
             }
         }
-        list
+        (entries, None)
     }
 
     fn power_action(&self, address: VirtAddr) -> Result<PowerAction> {
