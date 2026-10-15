@@ -89,29 +89,13 @@ impl Session {
             .map(|(resolution, _)| self.continue_outcome_from_resolution(resolution))
     }
 
-    /// [`Self::interrupt_outcome`] for a host that asked for the break-in and
-    /// reports it as such: the break-in the interrupt itself caused comes back
-    /// as a `Stopped` without an exception code. A parked stop, or a pending
-    /// guest exception (a real `int 3`) the break-in collected, keeps its code.
+    /// Migration wrapper over the driver's halt for the Python SDK until it
+    /// moves onto [`Session::run`] with [`crate::session::Motion::Break`].
     pub fn interrupt_requested(&mut self) -> Result<ContinueOutcome> {
         if let Some(stop) = self.stop_without_breakin() {
             return Ok(stop);
         }
-        let (resolution, own_breakin_candidate) = self.interrupt_classified()?;
-        let own_breakin = self.is_own_breakin(&resolution, own_breakin_candidate);
-        let mut outcome = self.continue_outcome_from_resolution(resolution);
-        if own_breakin
-            && let ContinueOutcome::Stopped {
-                exception_code,
-                first_chance,
-                exception_address,
-                ..
-            } = &mut outcome
-        {
-            *exception_code = None;
-            *first_chance = None;
-            *exception_address = None;
-        }
+        let outcome = self.halt()?;
         self.note_stop(&outcome);
         Ok(outcome)
     }
@@ -143,7 +127,7 @@ impl Session {
     /// `stop_is_assisted_refresh_breakin`: a STATUS_BREAKPOINT that classified
     /// as an ordinary stop and is not on one of our sites. A stop the backend
     /// already had pending (`candidate` false) wins even with the same status.
-    fn is_own_breakin(&self, resolution: &StopResolution, candidate: bool) -> bool {
+    pub fn is_own_breakin(&self, resolution: &StopResolution, candidate: bool) -> bool {
         let StopResolution::Stopped { event, .. } = resolution else {
             return false;
         };
@@ -213,7 +197,7 @@ impl Session {
         self.target.breakpoint_stop = None;
         self.parked_windows_thread = None;
         self.parked_stop = None;
-        self.current_stop = None;
+        self.set_current_stop(None);
         self.module_refresh_report = None;
     }
 
@@ -256,7 +240,7 @@ impl Session {
         // observe is now spent; drop it so a later `wait_for_stop` doesn't replay
         // a stale event.
         self.parked_stop = None;
-        self.current_stop = None;
+        self.set_current_stop(None);
         // If a post-reboot rediscovery is still pending only because the module
         // list wasn't up yet, finish it from memory before continuing. We are
         // halted, so the next `continue` starts the pump with the reconnect-assist
@@ -304,13 +288,9 @@ impl Session {
         self.parked_windows_thread = None;
     }
 
-    /// Resume the VM (unless already running, in which case no exception
-    /// acknowledgment is sent) with `disposition`, then wait up to `timeout`
-    /// for a meaningful stop; wrong-process int3 hits and false conditional
-    /// breakpoints are stepped over silently. `None` waits indefinitely;
-    /// `cancel` or an elapsed timeout returns [`ContinueOutcome::Running`]
-    /// with the VM left running. Non-resuming observation is
-    /// [`Self::wait_for_stop_bounded`].
+    /// Migration wrapper over the driver's continue for the Python SDK until
+    /// it moves onto [`Session::run`]: `cancel` or an elapsed `timeout` hands
+    /// back the target still running.
     pub fn continue_until_break(
         &mut self,
         timeout: Option<Duration>,

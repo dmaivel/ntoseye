@@ -20,6 +20,8 @@ use crate::memory::MemoryOps;
 use crate::memory_backend::MemoryBackend;
 use crate::notice::Notice;
 use crate::phys::{HaltClock, PhysMem};
+#[cfg(feature = "repl")]
+use crate::repl::ReplActions;
 use crate::session::{ContinueOutcome, Session, StopResolution};
 use crate::symbols::ntoseye_home;
 use crate::target::{Target, TargetKind};
@@ -414,6 +416,12 @@ impl Session {
             parked_stop: None,
             pending_walk: None,
             current_stop: None,
+            stop_snapshot: None,
+            halt_requested: false,
+            #[cfg(feature = "repl")]
+            action_runner: Some(Box::new(ReplActions)),
+            #[cfg(not(feature = "repl"))]
+            action_runner: None,
             module_refresh_report: None,
             notices: Vec::new(),
             symbols_reconciled_at: 0,
@@ -462,21 +470,22 @@ impl Session {
                 parameters: dump.bug_check_parameters,
                 driver: None,
             };
-            session.current_stop = Some(ContinueOutcome::Bugcheck {
-                rip: Some(session.current_rip()).filter(|&rip| rip != 0),
+            let rip = Some(session.current_rip()).filter(|&rip| rip != 0);
+            session.set_current_stop(Some(ContinueOutcome::Bugcheck {
+                rip,
                 info: Some(info),
-            });
+            }));
         }
         // A user dump written for an exception sits at that exception.
         if let Some(exception) = session.target.user_exception() {
             let (code, address) = (exception.code, exception.address);
             session.target.last_exception_code = Some(code);
-            session.current_stop = Some(ContinueOutcome::Stopped {
+            session.set_current_stop(Some(ContinueOutcome::Stopped {
                 rip: address,
                 exception_code: Some(code),
                 first_chance: None,
                 exception_address: Some(address),
-            });
+            }));
         }
 
         Ok(session)

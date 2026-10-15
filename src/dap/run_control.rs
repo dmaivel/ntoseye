@@ -2,18 +2,18 @@
 //! and reporting each stop to the client.
 
 use std::result;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use serde_json::json;
 
-use crate::dbg_backend::ModuleEvent;
+use crate::dbg_backend::{ContinueDisposition, ModuleEvent};
 use crate::disasm::{fallthrough_run_end, instruction_length};
 use crate::guest::ModuleInfo;
 use crate::output;
-use crate::repl::{DispatchContext, ReplState, ReplStore};
 use crate::session::stops::module_event_line;
-use crate::session::{ContinueOutcome, StepMode, StepStack};
+use crate::session::{
+    Cancel, ExceptionStop, Motion, ReloadStop, RunOutcome, StepMode, StepStack, Stop, StopKind,
+};
 use crate::triage_report::exception_code_name;
 use crate::types::VirtAddr;
 
@@ -36,24 +36,45 @@ impl Server {
             self.report_user_dump_stop();
             return Ok(None);
         }
-        let status = self.session()?.run_status();
-        let running = status.running;
-        let rip = status.rip.unwrap_or(0);
+        // A check that does not wait: a halted target reports the stop it
+        // is halted at, a stop already caught surfaces.
+        let outcome = self.drive(Motion::Wait, &Cancel::poll());
         self.respond(request, Ok(None));
-        if running {
-            self.state = RunState::Running;
-        } else {
-            self.state = RunState::Halted;
-            self.report_stop(ContinueOutcome::Halted { rip });
+        match outcome {
+            Ok(RunOutcome::Stopped(stop)) => self.report_stop(stop),
+            Ok(RunOutcome::Running) => self.state = RunState::Running,
+            Err(message) => {
+                self.emit_output("stderr", format!("{message}\n"));
+                self.state = RunState::Running;
+            }
         }
         Ok(None)
     }
 
+    /// Run `motion` on the session, sending what breakpoint actions print to
+    /// the Debug Console.
+    pub fn drive(
+        &mut self,
+        motion: Motion,
+        cancel: &Cancel<'_>,
+    ) -> result::Result<RunOutcome, String> {
+        let session = self.session()?;
+        let (outcome, text) = output::capture(|| session.run(motion, cancel));
+        if !text.is_empty() {
+            self.emit_output("stdout", text);
+        }
+        outcome.map_err(|error| error.to_string())
+    }
+
     pub(super) fn on_continue(&mut self, request: &Request) -> Handled {
         self.refuse_on_user_dump("continue")?;
-        let result = self.session()?.resume().map_err(|error| error.to_string());
-        match result {
-            Ok(()) => {
+        // Resume and take a stop already waiting; the rest arrive while the
+        // loop services the running target.
+        let continue_ = Motion::Continue {
+            disposition: ContinueDisposition::Handled,
+        };
+        match self.drive(continue_, &Cancel::poll()) {
+            Ok(outcome) => {
                 self.invalidate_stop_state();
                 self.state = RunState::Running;
                 self.respond(request, Ok(Some(json!({"allThreadsContinued": true}))));
@@ -61,6 +82,9 @@ impl Server {
                     "continued",
                     json!({"threadId": 1, "allThreadsContinued": true}),
                 );
+                if let RunOutcome::Stopped(stop) = outcome {
+                    self.report_stop(stop);
+                }
             }
             Err(message) => self.respond(request, Err(message)),
         }
@@ -76,24 +100,12 @@ impl Server {
             self.respond(request, Ok(None));
             return Ok(None);
         }
-        let result = self
-            .session()?
-            .interrupt_outcome()
-            .map_err(|error| error.to_string());
-        match result {
+        match self.drive(Motion::Break, &Cancel::NEVER) {
             Ok(outcome) => {
                 self.respond(request, Ok(None));
-                // A break-in arrives as `STATUS_BREAKPOINT` and a target found
-                // halted has no event; both are the pause the client asked
-                // for (the exception detail stays for `exceptionInfo`). A
-                // breakpoint, bugcheck, or reboot the break-in raced is
-                // reported as itself.
-                let forced = matches!(
-                    outcome,
-                    ContinueOutcome::Stopped { .. } | ContinueOutcome::Halted { .. }
-                )
-                .then_some("pause");
-                self.report_stop_as(outcome, forced);
+                if let RunOutcome::Stopped(stop) = outcome {
+                    self.report_stop(stop);
+                }
             }
             Err(message) => self.respond(request, Err(message)),
         }
@@ -111,11 +123,10 @@ impl Server {
             return Ok(None);
         }
         self.invalidate_stop_state();
-        let outcome = self.run_step(step, instruction_granularity);
-        match outcome {
-            Ok(outcome) => {
+        match self.run_step(step, instruction_granularity) {
+            Ok(stop) => {
                 self.respond(request, Ok(None));
-                self.report_stop(outcome);
+                self.report_stop(stop);
             }
             Err(message) => {
                 self.respond(request, Err(message));
@@ -123,16 +134,26 @@ impl Server {
                 // so re-announce that stop to keep the client's view live. A
                 // target that reports no pc has no stop to re-announce, and
                 // inventing one would park the client at 0x0.
-                if let Some(rip) = self
+                if let Some(stop) = self
                     .session
                     .as_mut()
-                    .and_then(|session| session.run_status().rip)
+                    .and_then(|session| session.halted_stop().ok().flatten())
+                    .filter(|stop| stop.rip.is_some())
                 {
-                    self.report_stop(ContinueOutcome::Halted { rip });
+                    self.report_stop(stop);
                 }
             }
         }
         Ok(None)
+    }
+
+    /// Run a step motion to its stop. A step always ends halted: a `pause`
+    /// (the session's interrupt request) halts it where it is.
+    fn step_motion(&mut self, motion: Motion) -> result::Result<Stop, String> {
+        match self.drive(motion, &Cancel::NEVER)? {
+            RunOutcome::Stopped(stop) => Ok(stop),
+            RunOutcome::Running => Err("the target is still running".to_string()),
+        }
     }
 
     /// Step by source line, or by instruction when requested or unmapped.
@@ -140,14 +161,10 @@ impl Server {
         &mut self,
         step: StepRequest,
         instruction_granularity: bool,
-    ) -> result::Result<ContinueOutcome, String> {
+    ) -> result::Result<Stop, String> {
         let mode = match step {
             StepRequest::Step(mode) => mode,
-            StepRequest::Out => {
-                let cancel = Arc::clone(&self.cancel);
-                let session = self.session()?;
-                return session.step_out(&cancel).map_err(|error| error.to_string());
-            }
+            StepRequest::Out => return self.step_motion(Motion::StepOut),
         };
 
         let (mut rip, start) = {
@@ -162,49 +179,48 @@ impl Server {
             return self.step_once(mode);
         }
 
+        let mut last = None;
         for _ in 0..STEP_LINE_BUDGET {
-            let outcome = self.advance_within_line(mode, rip)?;
-            if !matches!(outcome, ContinueOutcome::Step { .. }) {
-                return Ok(outcome);
+            let stop = self.advance_within_line(mode, rip)?;
+            if stop.kind != StopKind::Step || self.cancel.load(Ordering::Relaxed) {
+                return Ok(stop);
             }
-            if self.cancel.load(Ordering::Relaxed) {
-                return Ok(outcome);
-            }
+            rip = stop.rip.unwrap_or(0);
             let session = self.session()?;
-            rip = session.run_status().rip.unwrap_or(0);
             match session.target.source_location(VirtAddr(rip)) {
                 // Left line-mapped code (a call into a module without private
                 // symbols): stop here rather than running on blindly.
-                None => return Ok(outcome),
+                None => return Ok(stop),
                 Some(location) => {
                     if start
                         .as_ref()
                         .is_none_or(|(file, line)| location.line != *line || location.file != *file)
                     {
-                        return Ok(outcome);
+                        return Ok(stop);
                     }
                 }
             }
+            last = Some(stop);
         }
-        Ok(ContinueOutcome::Step { rip })
+        last.ok_or_else(|| "the step budget ran out".to_string())
     }
 
     /// Run through a fall-through range, or single-step if no range can be used.
-    fn advance_within_line(
-        &mut self,
-        mode: StepMode,
-        rip: u64,
-    ) -> result::Result<ContinueOutcome, String> {
+    fn advance_within_line(&mut self, mode: StepMode, rip: u64) -> result::Result<Stop, String> {
         let Some(end) = self.coalescible_line_end(rip)? else {
             return self.step_once(mode);
         };
-        let cancel = Arc::clone(&self.cancel);
-        let session = self.session()?;
-        let frame = session
+        let frame = self
+            .session()?
             .step_frame(StepStack::Any)
             .map_err(|error| error.to_string())?;
-        match session.run_to(end, frame, None, &cancel) {
-            Ok(outcome) => Ok(outcome),
+        let run = Motion::RunTo {
+            address: end,
+            frame,
+            disposition: ContinueDisposition::Handled,
+        };
+        match self.step_motion(run) {
+            Ok(stop) => Ok(stop),
             // The temporary breakpoint could not be written (a non-resident or
             // read-only page at that address). Stepping needs no breakpoint.
             Err(_) => self.step_once(mode),
@@ -251,19 +267,11 @@ impl Server {
         Ok(Some(VirtAddr(run_end)))
     }
 
-    fn step_once(&mut self, mode: StepMode) -> result::Result<ContinueOutcome, String> {
-        let cancel = Arc::clone(&self.cancel);
-        let session = self.session()?;
-        match mode {
-            StepMode::Into => session.step().map_err(|error| error.to_string()),
-            StepMode::Over => session
-                .step_over(&cancel)
-                .map_err(|error| error.to_string()),
-        }
-    }
-
-    pub(super) fn report_stop(&mut self, outcome: ContinueOutcome) {
-        self.report_stop_as(outcome, None);
+    fn step_once(&mut self, mode: StepMode) -> result::Result<Stop, String> {
+        self.step_motion(match mode {
+            StepMode::Into => Motion::Step,
+            StepMode::Over => Motion::StepOver,
+        })
     }
 
     /// Report where a user-mode minidump stands: at its exception, on the
@@ -321,7 +329,7 @@ impl Server {
                 format!("the exception's context cannot be selected; its thread shows its own: {error}\n"),
             );
         }
-        self.publish_stop(stop, None);
+        self.publish_stop(stop);
     }
 
     /// The stop a `sxe ld` or `sxe ud` filter surfaced, with WinDbg's
@@ -342,119 +350,97 @@ impl Server {
         }
     }
 
-    /// Report a stop to the client. `forced_reason` overrides the DAP stop
-    /// reason without touching the description or exception detail, for stops
-    /// whose transport encoding hides the real cause (a break-in is delivered
-    /// as a breakpoint exception).
-    fn report_stop_as(&mut self, outcome: ContinueOutcome, forced_reason: Option<&'static str>) {
-        // A cancelled run: `run_to` halts the target to remove its temporary
-        // breakpoint before reporting `Running`, so the client's `pause` has
-        // its stop. Only a target still running (the halt failed) stays on
-        // its run.
-        let (outcome, forced_reason) = match outcome {
-            ContinueOutcome::Running => {
-                let halted_rip = self
-                    .session
-                    .as_mut()
-                    .filter(|session| !session.backend.is_running())
-                    .and_then(|session| session.run_status().rip);
-                match halted_rip {
-                    Some(rip) => (ContinueOutcome::Halted { rip }, Some("pause")),
-                    None => {
-                        self.invalidate_stop_state();
-                        self.state = RunState::Running;
-                        return;
-                    }
-                }
-            }
-            outcome => (outcome, forced_reason),
-        };
+    /// Report a stop to the client: the DAP reason for its kind, a requested
+    /// break-in (or a target found halted for a `pause`) as `pause`.
+    pub(super) fn report_stop(&mut self, stop: Stop) {
         self.invalidate_stop_state();
         self.state = RunState::Halted;
         self.cancel.store(false, Ordering::Relaxed);
         self.drain_debug_output();
         self.reconcile_breakpoints();
 
-        let mut action = None;
-        let stop = match outcome {
-            ContinueOutcome::Running => unreachable!("a running target was reported above"),
-            ContinueOutcome::Breakpoint {
-                id,
-                address,
-                symbol,
-                rip,
-                condition_error,
-                action: breakpoint_action,
-                ..
-            } => {
-                action = breakpoint_action;
-                let where_ = symbol.unwrap_or_else(|| format!("{rip:#x}"));
-                if let Some(error) = condition_error {
+        let rip = stop.rip.unwrap_or(0);
+        let info = match stop.kind {
+            StopKind::Breakpoint => {
+                let hit = stop.breakpoint.as_ref();
+                let id = hit.map_or(0, |hit| hit.id);
+                if let Some(error) = hit.and_then(|hit| hit.condition_error.as_deref()) {
                     self.emit_output(
                         "important",
                         format!("breakpoint {id} condition failed: {error}\n"),
                     );
                 }
+                let where_ = hit
+                    .and_then(|hit| hit.symbol.clone())
+                    .unwrap_or_else(|| format!("{rip:#x}"));
                 StopInfo {
                     reason: "breakpoint",
                     description: format!("breakpoint {id} at {where_}"),
                     exception_id: None,
-                    detail: Some(format!("address {address:#x}")),
-                    breakpoint_id: Some(id),
+                    detail: hit.map(|hit| format!("address {:#x}", hit.address)),
+                    breakpoint_id: hit.map(|hit| hit.id),
                 }
             }
-            ContinueOutcome::Step { rip } => StopInfo {
+            StopKind::Step => StopInfo {
                 reason: "step",
                 description: format!("step to {rip:#x}"),
                 exception_id: None,
                 detail: None,
                 breakpoint_id: None,
             },
-            ContinueOutcome::ModuleLoad { module, rip } => {
-                self.module_event_stop(ModuleEvent::Load, &module, rip)
+            StopKind::ModuleLoad | StopKind::ModuleUnload => {
+                let event = if stop.kind == StopKind::ModuleLoad {
+                    ModuleEvent::Load
+                } else {
+                    ModuleEvent::Unload
+                };
+                match &stop.module {
+                    Some(module) => self.module_event_stop(event, module, rip),
+                    None => StopInfo {
+                        reason: "pause",
+                        description: format!("halted at {rip:#x}"),
+                        exception_id: None,
+                        detail: None,
+                        breakpoint_id: None,
+                    },
+                }
             }
-            ContinueOutcome::ModuleUnload { module, rip } => {
-                self.module_event_stop(ModuleEvent::Unload, &module, rip)
-            }
-            ContinueOutcome::Halted { rip } => StopInfo {
-                reason: "entry",
+            StopKind::Entry | StopKind::Interrupt => StopInfo {
+                reason: if stop.kind == StopKind::Entry {
+                    "entry"
+                } else {
+                    "pause"
+                },
                 description: format!("halted at {rip:#x}"),
                 exception_id: None,
                 detail: None,
                 breakpoint_id: None,
             },
-            ContinueOutcome::Stopped {
-                rip,
-                exception_code,
-                first_chance,
-                exception_address,
-            } => match exception_code {
-                Some(code) => {
-                    let name = exception_code_name(code);
-                    let chance = match first_chance {
-                        Some(true) => " (first chance)",
-                        Some(false) => " (second chance)",
-                        None => "",
-                    };
-                    StopInfo {
-                        reason: "exception",
-                        description: format!("{name} ({code:#x}){chance} at {rip:#x}"),
-                        exception_id: Some(format!("{code:#010x}")),
-                        detail: exception_address
-                            .map(|address| format!("exception record address {address:#x}")),
-                        breakpoint_id: None,
-                    }
-                }
-                None => StopInfo {
-                    reason: "pause",
-                    description: format!("halted at {rip:#x}"),
-                    exception_id: None,
-                    detail: None,
+            StopKind::Exception => {
+                let exception = stop.exception.unwrap_or(ExceptionStop {
+                    code: 0,
+                    first_chance: None,
+                    address: None,
+                });
+                let code = exception.code;
+                let name = exception_code_name(code);
+                let chance = match exception.first_chance {
+                    Some(true) => " (first chance)",
+                    Some(false) => " (second chance)",
+                    None => "",
+                };
+                StopInfo {
+                    reason: "exception",
+                    description: format!("{name} ({code:#x}){chance} at {rip:#x}"),
+                    exception_id: Some(format!("{code:#010x}")),
+                    detail: exception
+                        .address
+                        .map(|address| format!("exception record address {address:#x}")),
                     breakpoint_id: None,
-                },
-            },
-            ContinueOutcome::Bugcheck { rip, info } => {
-                let detail = match &info {
+                }
+            }
+            StopKind::Bugcheck => {
+                let detail = match &stop.bugcheck {
                     Some(info) => format!(
                         "bugcheck {:#x} ({:#x}, {:#x}, {:#x}, {:#x})",
                         info.code,
@@ -472,7 +458,7 @@ impl Server {
                 );
                 StopInfo {
                     reason: "exception",
-                    description: match rip {
+                    description: match stop.rip {
                         Some(rip) => format!("{detail} at {rip:#x}"),
                         None => detail.clone(),
                     },
@@ -481,19 +467,20 @@ impl Server {
                     breakpoint_id: None,
                 }
             }
-            ContinueOutcome::TargetReloaded {
-                kernel_base,
-                coherent,
-                ..
-            } => {
-                let base = kernel_base
+            StopKind::Reload => {
+                let reload = stop.reload.unwrap_or(ReloadStop {
+                    kernel_base: None,
+                    coherent: true,
+                });
+                let base = reload
+                    .kernel_base
                     .map(|base| format!("{base:#x}"))
                     .unwrap_or_else(|| "unknown".to_string());
                 self.emit_output(
                     "important",
                     format!(
                         "target rebooted; nt base {base}{}\n",
-                        if coherent {
+                        if reload.coherent {
                             ""
                         } else {
                             " (early boot: module and process enumeration not yet available)"
@@ -509,28 +496,11 @@ impl Server {
                 }
             }
         };
-
-        // A breakpoint command action belongs to the frontend. Running it here
-        // keeps `bp ... do "..."` (typed in the console) working, including a
-        // trailing `gc` that resumes the target.
-        if let Some(action) = action {
-            self.run_breakpoint_action(&action);
-            if self
-                .session
-                .as_ref()
-                .is_some_and(|session| session.backend.is_running())
-            {
-                self.state = RunState::Running;
-                self.last_stop = Some(stop);
-                return;
-            }
-        }
-
-        self.publish_stop(stop, forced_reason);
+        self.publish_stop(info);
     }
 
     /// Tell the client about `stop`, on the current thread.
-    fn publish_stop(&mut self, stop: StopInfo, forced_reason: Option<&'static str>) {
+    fn publish_stop(&mut self, stop: StopInfo) {
         self.sync_threads();
         let thread_id = self
             .session
@@ -539,7 +509,7 @@ impl Server {
             .map(|id| self.dap_thread_id(&id))
             .unwrap_or(1);
         let mut body = json!({
-            "reason": forced_reason.unwrap_or(stop.reason),
+            "reason": stop.reason,
             "threadId": thread_id,
             "allThreadsStopped": true,
             "description": stop.description,
@@ -555,40 +525,6 @@ impl Server {
         }
         self.last_stop = Some(stop);
         self.send_event("stopped", body);
-    }
-
-    /// Run the breakpoint command action, sending output to the Debug Console.
-    /// A trailing `gc` resumes without reporting a stop.
-    fn run_breakpoint_action(&mut self, action: &str) {
-        let Some(session) = self.session.as_mut() else {
-            return;
-        };
-        let store = ReplStore::new(session, DispatchContext::BreakpointAction);
-        let mut state = ReplState::attach(session, store);
-        state.line = action.to_string();
-        let (result, text) = output::capture(|| state.dispatch_breakpoint_action(action));
-        drop(state.detach());
-        if !text.is_empty() {
-            self.emit_output("stdout", text);
-        }
-        match result {
-            // The action asked to resume (`...; gc`). Nothing else will do it:
-            // the client was never told the target stopped.
-            Ok(true) => {
-                if let Some(session) = self.session.as_mut()
-                    && let Err(error) = session.resume()
-                {
-                    self.emit_output(
-                        "stderr",
-                        format!("breakpoint action could not resume the target: {error}\n"),
-                    );
-                }
-            }
-            Ok(false) => {}
-            Err(error) => {
-                self.emit_output("stderr", format!("breakpoint action failed: {error}\n"));
-            }
-        }
     }
 
     pub(super) fn on_exception_info(&mut self) -> Handled {

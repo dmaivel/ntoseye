@@ -1,16 +1,12 @@
 use std::collections::HashMap;
-use std::time::Duration;
 
 use owo_colors::OwoColorize;
 
-use crate::dbg_backend::{
-    BugcheckInfo, ModuleEvent, StopEvent, processor_index_from_backend_thread_id,
-};
-use crate::error::Result;
+use crate::dbg_backend::{BugcheckInfo, ModuleEvent, processor_index_from_backend_thread_id};
 use crate::guest::ModuleInfo;
 use crate::repl::commands::display;
 use crate::session::stops::module_event_line;
-use crate::session::{ContinueOutcome, Session, ShownStop, StopResolution};
+use crate::session::{BreakpointHit, HitKind, Session, ShownStop, Stop, StopKind};
 use crate::target::{HYPERVISOR_CONTEXT, Target, ThreadInfo, kthread_state_name};
 use crate::types::VirtAddr;
 use crate::ui;
@@ -20,8 +16,6 @@ use crate::unwind::{
 };
 
 use crate::repl::*;
-
-pub const REPL_STOP_POLL: Duration = Duration::from_millis(100);
 
 pub const STATUS_BREAKPOINT: u32 = 0x8000_0003;
 
@@ -98,141 +92,97 @@ pub fn refresh_stop_caches_post(debugger: &Target, caches: &ReplCaches) {
     caches.refresh_expression_context(debugger);
 }
 
-/// Render a stop after [`Session::classify_stop_event`] has completed all
-/// backend and debugger-state transitions.
-pub fn print_async_stop_resolution(
-    session: &mut Session,
-    caches: &ReplCaches,
-    resolution: StopResolution,
-) {
+/// Render a stop [`Session::run`] reported: the cause the break banner
+/// names, then the stopped context. Every REPL path that surfaces a stop
+/// (a wait, a step, a parked stop, a break-in) renders it here.
+pub fn print_stop(session: &mut Session, caches: &ReplCaches, stop: &Stop) {
     session.target.selected_frame = None;
     refresh_stop_caches_pre(session, caches);
     refresh_stop_caches_post(&session.target, caches);
     refresh_windows_thread_context_for_backend_thread(&mut session.target, &session.current_thread);
 
+    if let Some(error) = stop
+        .breakpoint
+        .as_ref()
+        .and_then(|hit| hit.condition_error.as_deref())
+    {
+        error!("breakpoint condition failed: {error}");
+    }
     print_stop_separator();
-    match resolution {
-        StopResolution::Resumed | StopResolution::ModulesChanged => {}
-        StopResolution::Breakpoint {
-            breakpoint,
-            condition_error,
-            ..
-        } => {
-            if let Some(error) = condition_error {
-                error!("breakpoint condition failed: {error}");
-            }
-            let label = if breakpoint.hardware.is_some() {
-                "watchpoint"
-            } else {
-                "breakpoint"
-            };
-            let mut cause = format!("{} {}", ui::muted(label), ui::bp_id(breakpoint.id));
-            if breakpoint.hardware.is_some() {
-                cause.push_str(&format!(" at {}", ui::addr(breakpoint.address.0)));
-                if let Some(symbol) = breakpoint.symbol.as_deref() {
-                    cause.push_str(&format!(" ({})", ui::symbol(symbol)));
-                }
-            }
-            print_break_context_at(session, None, (!breakpoint.temporary).then_some(cause));
-        }
-        StopResolution::ModuleLoad { module, .. } => {
-            print_module_event_stop(session, ModuleEvent::Load, &module)
-        }
-        StopResolution::ModuleUnload { module, .. } => {
-            print_module_event_stop(session, ModuleEvent::Unload, &module)
-        }
-        StopResolution::Bugcheck { event } => {
-            print_bugcheck_summary(&session.target, event.bugcheck.as_ref());
-            outln!();
-            print_break_context_for_bugcheck(session, event.bugcheck.as_ref());
-        }
-        StopResolution::TargetReloaded { event, coherent } => {
-            caches.clear_threads();
-            print_target_reload(
-                &session.target,
-                &session.current_thread,
-                event.program_counter,
-                coherent,
-            );
-        }
-        StopResolution::Stopped { event, .. } => {
-            let cause = stop_exception_cause(event.exception_code, event.program_counter);
+    match stop.kind {
+        StopKind::Breakpoint => {
+            let cause = stop.breakpoint.as_ref().map(breakpoint_cause);
             print_break_context_at(session, None, cause);
         }
+        StopKind::ModuleLoad | StopKind::ModuleUnload => {
+            let event = if stop.kind == StopKind::ModuleLoad {
+                ModuleEvent::Load
+            } else {
+                ModuleEvent::Unload
+            };
+            match &stop.module {
+                Some(module) => print_module_event_stop(session, event, module),
+                None => print_break_context(session),
+            }
+        }
+        StopKind::Bugcheck => {
+            print_bugcheck_summary(&session.target, stop.bugcheck.as_ref());
+            outln!();
+            print_break_context_for_bugcheck(session, stop.bugcheck.as_ref());
+        }
+        StopKind::Reload => {
+            caches.clear_threads();
+            let coherent = stop.reload.is_none_or(|reload| reload.coherent);
+            print_target_reload(&session.target, &session.current_thread, stop.rip, coherent);
+        }
+        StopKind::Exception => {
+            let cause = stop
+                .exception
+                .and_then(|exception| stop_exception_cause(Some(exception.code), stop.rip));
+            print_break_context_at(session, None, cause);
+        }
+        StopKind::Interrupt | StopKind::Step | StopKind::Entry => print_break_context(session),
     }
 }
 
-/// Render a stop the session already classified and parked (see
-/// [`Session::take_parked_stop`]) the way the continue loop would have,
-/// so a request/response host's stops read like the interactive REPL's.
-pub fn print_parked_outcome(session: &mut Session, caches: &ReplCaches, outcome: ContinueOutcome) {
-    session.target.selected_frame = None;
-    refresh_stop_caches_pre(session, caches);
-    refresh_stop_caches_post(&session.target, caches);
-    refresh_windows_thread_context_for_backend_thread(&mut session.target, &session.current_thread);
-
-    match outcome {
-        ContinueOutcome::Running | ContinueOutcome::Halted { .. } => (),
-        ContinueOutcome::Breakpoint {
-            id,
-            temporary,
-            condition_error,
-            ..
-        } => {
-            print_stop_separator();
-            if let Some(error) = condition_error {
-                error!("breakpoint condition failed: {error}");
-            }
-            let cause = session.breakpoint(id).map(|breakpoint| {
-                let label = if breakpoint.hardware.is_some() {
-                    "watchpoint"
-                } else {
-                    "breakpoint"
-                };
-                let mut cause = format!("{} {}", ui::muted(label), ui::bp_id(id));
-                if breakpoint.hardware.is_some() {
-                    cause.push_str(&format!(" at {}", ui::addr(breakpoint.address.0)));
-                    if let Some(symbol) = breakpoint.symbol.as_deref() {
-                        cause.push_str(&format!(" ({})", ui::symbol(symbol)));
-                    }
-                }
-                cause
-            });
-            print_break_context_at(session, None, cause.filter(|_| !temporary));
+/// The cause a breakpoint hit's banner names: `breakpoint #3`, or what a
+/// debug-register breakpoint watches (`hardware breakpoint #2 w8  nt!Foo`).
+/// The address it watches is unrelated to `rip` for a data watch, so the
+/// cause keeps the watched symbol while the banner shows where execution
+/// stopped.
+fn breakpoint_cause(hit: &BreakpointHit) -> String {
+    let (kind, detail) = match hit.kind {
+        HitKind::Code => {
+            return format!("{} {}", ui::muted("breakpoint"), ui::bp_id(hit.id));
         }
-        ContinueOutcome::ModuleLoad { module, .. } => {
-            print_stop_separator();
-            print_module_event_stop(session, ModuleEvent::Load, &module);
-        }
-        ContinueOutcome::ModuleUnload { module, .. } => {
-            print_stop_separator();
-            print_module_event_stop(session, ModuleEvent::Unload, &module);
-        }
-        ContinueOutcome::Bugcheck { info, .. } => {
-            print_stop_separator();
-            print_bugcheck_summary(&session.target, info.as_ref());
-            outln!();
-            print_break_context_for_bugcheck(session, info.as_ref());
-        }
-        ContinueOutcome::TargetReloaded { rip, coherent, .. } => {
-            print_stop_separator();
-            caches.clear_threads();
-            print_target_reload(&session.target, &session.current_thread, rip, coherent);
-        }
-        ContinueOutcome::Stopped {
-            rip,
-            exception_code,
-            ..
-        } => {
-            print_stop_separator();
-            let cause = stop_exception_cause(exception_code, Some(rip));
-            print_break_context_at(session, None, cause);
-        }
-        ContinueOutcome::Step { .. } => {
-            print_stop_separator();
-            print_break_context(session);
-        }
-    }
+        // A hypercall or VM-exit breakpoint is named for what it stops on;
+        // the stop's children name the caller and its exit.
+        HitKind::Hypercall => ("hypercall breakpoint", String::new()),
+        HitKind::VmExit => (
+            "VM-exit breakpoint",
+            hit.exit_reason
+                .as_deref()
+                .map(|reason| format!(" {reason}"))
+                .unwrap_or_default(),
+        ),
+        HitKind::Hardware | HitKind::Watch => (
+            "hardware breakpoint",
+            hit.access
+                .zip(hit.length)
+                .map(|(access, length)| format!(" {}{length}", access.letter()))
+                .unwrap_or_default(),
+        ),
+    };
+    format!(
+        "{} {}{}{}",
+        ui::muted(kind),
+        ui::bp_id(hit.id),
+        detail.bright_black(),
+        hit.symbol
+            .as_ref()
+            .map(|symbol| format!("  {}", ui::symbol(symbol)))
+            .unwrap_or_default()
+    )
 }
 
 /// Render a stop at a module load or unload a `sxe ld`/`sxe ud` filter
@@ -298,61 +248,6 @@ fn print_target_reload_text(
     };
     print_event_children(" ", &[ui::muted(message)]);
     outln!();
-}
-
-/// Drain one stop the running target has already reported. Returns whether a
-/// stop was surfaced to the user; a noise stop that was resumed (or an
-/// exception a policy continued) leaves the target running and returns
-/// `false`, so callers that want a stop keep going and break in.
-pub fn surface_pending_stop(session: &mut Session, caches: &ReplCaches) -> Result<bool> {
-    let Some(event) = session.backend.try_wait_for_stop(REPL_STOP_POLL)? else {
-        return Ok(false);
-    };
-    let resolution = session.classify_stop_event(event)?;
-    if matches!(
-        resolution,
-        StopResolution::Resumed | StopResolution::ModulesChanged
-    ) {
-        return Ok(false);
-    }
-
-    if let StopResolution::Stopped { event, .. } = &resolution
-        && continue_exception_policy(session, event)?
-    {
-        return Ok(false);
-    }
-
-    print_async_stop_resolution(session, caches, resolution);
-    Ok(true)
-}
-
-/// Apply a command-free automatic continue for an exception stop.
-pub fn continue_exception_policy(session: &mut Session, event: &StopEvent) -> Result<bool> {
-    let ExceptionPolicyAction::Continue {
-        notify,
-        disposition,
-        command: None,
-    } = session.exception_policies.action_for(event)
-    else {
-        return Ok(false);
-    };
-    if notify {
-        let chance = match event.first_chance {
-            Some(true) => "first chance",
-            Some(false) => "second chance",
-            None => "unknown chance",
-        };
-        outln!(
-            "Exception {:#010x} ({chance}); continuing",
-            event.exception_code.unwrap_or_default()
-        );
-    }
-    session.target.selected_frame = None;
-    session
-        .backend
-        .continue_execution_with_disposition(disposition)?;
-    session.record_continuation_disposition(disposition);
-    Ok(true)
 }
 
 pub use crate::session::stepping::step_one_and_clear_tf;

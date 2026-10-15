@@ -66,6 +66,7 @@ macro_rules! step_trace {
 
 pub mod breakpoints;
 pub mod context;
+pub mod driver;
 pub mod hardware;
 pub mod hits;
 pub mod inspection;
@@ -76,6 +77,11 @@ pub mod run_control;
 pub mod scheduler;
 pub mod stepping;
 pub mod stops;
+
+pub use driver::{
+    ActionRunner, BreakpointHit, Cancel, CancelBehavior, ExceptionStop, HitKind, Motion,
+    ReloadStop, RunOutcome, Stop, StopKind, WalkUntil,
+};
 
 /// How [`Session::continue_until_break`] returned: a stop worth surfacing, or a
 /// timeout with the VM still running (the caller polls again). Hosts render it.
@@ -662,9 +668,8 @@ pub struct Session {
     pub register_map: RegisterMap,
     pub current_thread: String,
     /// Per-exception-code stop policy (`sxe`/`sxd`/`sxn`/`sxi`). Session state
-    /// so every host shares one table: the REPL loop applies it (including
-    /// its `-c` commands), and the shared [`Self::wait_for_stop_bounded`]
-    /// auto-continues the command-free `Continue` policies for the SDK/MCP.
+    /// so every host shares one table: the run driver ([`Self::run`]) applies
+    /// it for every host, `-c` commands and `notify` notices included.
     /// Its module-load filters (`sx* ld`) are applied by
     /// [`Self::classify_stop_event`] for every host.
     pub exception_policies: ExceptionPolicyTable,
@@ -710,6 +715,14 @@ pub struct Session {
     /// when the target moves. Unlike `parked_stop` it is not consumed by
     /// reading it, so any host can ask "where are we stopped, and why".
     current_stop: Option<ContinueOutcome>,
+    /// The [`Stop`] for `current_stop`, snapshotted when it surfaced.
+    stop_snapshot: Option<Stop>,
+    /// Set while a run's stop is the halt the host or the interrupt request
+    /// asked for: its breakpoint action may not resume past it.
+    halt_requested: bool,
+    /// Runs breakpoint actions and filter commands for every host; see
+    /// [`ActionRunner`]. Taken while one runs.
+    action_runner: Option<Box<dyn ActionRunner>>,
     /// The most recent per-stop module refresh report, retained so the REPL can
     /// render its existing module-symbol summary after the core reconciles
     /// breakpoints. Other hosts simply leave it unconsumed.

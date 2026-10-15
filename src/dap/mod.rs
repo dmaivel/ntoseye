@@ -33,7 +33,7 @@ use crate::error::{Error, Result};
 use crate::kd::KdMemorySource;
 use crate::layout::ParsedType;
 use crate::repl::ReplStore;
-use crate::session::{ContinueOutcome, Session, StepMode};
+use crate::session::{Cancel, Motion, RunOutcome, Session, StepMode};
 use crate::symbols::{CodeFrame, SourceLocation, parse_source_paths, parse_symbol_sources};
 use crate::target::ReloadScope;
 use crate::termination;
@@ -363,15 +363,15 @@ impl Server {
         }
         match self.state {
             RunState::Running => {
-                let cancel = Arc::clone(&self.cancel);
-                let outcome = self
-                    .session
-                    .as_mut()
-                    .map(|session| session.wait_for_stop_bounded(Some(RUN_POLL), &cancel));
-                match outcome {
-                    Some(Ok(ContinueOutcome::Running)) | None => {}
-                    Some(Ok(outcome)) => self.report_stop(outcome),
-                    Some(Err(error)) => {
+                // A `pause` (or a disconnect) the reader flagged is the
+                // request's to answer, before the stop it causes.
+                if self.cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                match self.drive(Motion::Wait, &Cancel::within(RUN_POLL)) {
+                    Ok(RunOutcome::Running) => {}
+                    Ok(RunOutcome::Stopped(stop)) => self.report_stop(stop),
+                    Err(error) => {
                         self.emit_output("stderr", format!("target wait failed: {error}\n"));
                         // Stop polling a transport that just failed, instead
                         // of repeating the same error every tick. The client
@@ -380,12 +380,9 @@ impl Server {
                         // a stop its view stays on a run that can never end,
                         // and `pause` would then answer from the halted
                         // shortcut without an event either.
-                        let rip = self
-                            .session
-                            .as_mut()
-                            .and_then(|session| session.run_status().rip)
-                            .unwrap_or(0);
-                        self.report_stop(ContinueOutcome::Halted { rip });
+                        if let Some(stop) = self.session.as_mut().map(Session::unreported_stop) {
+                            self.report_stop(stop);
+                        }
                     }
                 }
             }

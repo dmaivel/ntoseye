@@ -14,11 +14,12 @@ use gdbstub::target::ext::base::multithread::{
     MultiThreadSingleStep, MultiThreadSingleStepOps,
 };
 
-use crate::dbg_backend::ModuleEvent;
+use crate::dbg_backend::{ContinueDisposition, ModuleEvent};
 use crate::gdb::trace_packet;
+use crate::output;
 use crate::repl::STATUS_BREAKPOINT;
-use crate::session::ContinueOutcome;
 use crate::session::stops::module_event_line;
+use crate::session::{Cancel, Motion, RunOutcome, Stop, StopKind};
 use crate::triage_report::exception_code_name;
 
 use super::connection::Client;
@@ -81,14 +82,32 @@ impl GdbTarget<'_> {
         client.console(&text)
     }
 
+    /// Run `motion` on the session, queueing what breakpoint actions print
+    /// for the client's console. A run that fails is reported as a stop, so
+    /// the client sees why instead of waiting on a run that can never end.
+    fn drive(&mut self, motion: Motion, cancel: &Cancel<'_>) -> Option<Stop> {
+        let (outcome, text) = output::capture(|| self.session.run(motion, cancel));
+        if !text.is_empty() {
+            self.note(text.trim_end().to_string());
+        }
+        match outcome {
+            Ok(RunOutcome::Stopped(stop)) => Some(stop),
+            Ok(RunOutcome::Running) => None,
+            Err(error) => {
+                self.note(format!("the target cannot run: {error}"));
+                self.resume_refused = true;
+                Some(self.session.unreported_stop())
+            }
+        }
+    }
+
     /// Wait for the resumed target to stop, for the client to send
     /// something, or for a termination signal.
     pub(super) fn wait(&mut self, client: &mut Client) -> io::Result<Wait> {
         loop {
-            let refused = take(&mut self.resume_refused);
-            if let Some(outcome) = self.pending.take()
-                && let Some(reason) = self.stop_reason(outcome, refused)
-            {
+            if let Some(stop) = self.pending.take() {
+                let refused = take(&mut self.resume_refused);
+                let reason = self.stop_reason(stop, refused);
                 self.flush_console(client)?;
                 return Ok(Wait::Stopped(reason));
             }
@@ -100,69 +119,38 @@ impl GdbTarget<'_> {
                 trace_packet("client", "<-", &[byte]);
                 return Ok(Wait::Data(byte));
             }
-            let outcome = self
-                .session
-                .wait_for_stop_bounded(Some(RUN_POLL), &self.cancel);
-            let outcome = match outcome {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    // Report a stop rather than leave the client waiting on a
-                    // run that can never end.
-                    self.note(format!("target wait failed: {error}"));
-                    ContinueOutcome::Halted { rip: 0 }
-                }
-            };
+            self.pending = self.drive(Motion::Wait, &Cancel::within(RUN_POLL));
             self.flush_console(client)?;
-            if let Some(reason) = self.stop_reason(outcome, false) {
-                self.flush_console(client)?;
-                return Ok(Wait::Stopped(reason));
-            }
         }
     }
 
     /// Break in for the client's interrupt.
     pub(super) fn interrupt(&mut self) -> Option<MultiThreadStopReason<u64>> {
         self.cancel.store(false, Ordering::SeqCst);
-        let outcome = self.session.interrupt_outcome().unwrap_or_else(|error| {
-            self.note(format!("break-in failed: {error}"));
-            ContinueOutcome::Halted { rip: 0 }
-        });
-        // Nothing to report if the target kept running; the client keeps
-        // waiting and may interrupt again.
-        self.stop_reason(outcome, true)
+        let stop = self
+            .drive(Motion::Break, &Cancel::NEVER)
+            .unwrap_or_else(|| self.session.unreported_stop());
+        self.resume_refused = false;
+        Some(self.stop_reason(stop, true))
     }
 
-    /// Translate a session stop into a stop reply, or `None` when the target
-    /// is still running (a breakpoint action resumed it). `interrupted` marks
-    /// the break-in the client asked for, which gdb expects as `SIGINT`, and
-    /// a resume that failed, which must not look like a finished step.
-    fn stop_reason(
-        &mut self,
-        outcome: ContinueOutcome,
-        interrupted: bool,
-    ) -> Option<MultiThreadStopReason<u64>> {
-        let signal = match outcome {
-            ContinueOutcome::Running => return None,
-            ContinueOutcome::Breakpoint {
-                id,
-                symbol,
-                rip,
-                action,
-                condition_error,
-                ..
-            } => {
-                if let Some(error) = condition_error {
-                    self.note(format!("breakpoint {id} condition failed: {error}"));
-                }
-                if let Some(action) = action
-                    && self.run_breakpoint_action(&action)
-                {
-                    return None;
+    /// Translate a session stop into a stop reply. `interrupted` marks the
+    /// break-in the client asked for, which gdb expects as `SIGINT`, and a
+    /// resume that failed, which must not look like a finished step.
+    fn stop_reason(&mut self, stop: Stop, interrupted: bool) -> MultiThreadStopReason<u64> {
+        let rip = stop.rip.unwrap_or(0);
+        let signal = match stop.kind {
+            StopKind::Breakpoint => {
+                let Some(hit) = stop.breakpoint else {
+                    return self.signal(Signal::SIGTRAP);
+                };
+                if let Some(error) = &hit.condition_error {
+                    self.note(format!("breakpoint {} condition failed: {error}", hit.id));
                 }
                 self.sync_threads();
                 let tid = self.current_tid();
-                if let Some(planted) = self.planted.iter().find(|planted| planted.id == id) {
-                    return Some(match planted.kind {
+                if let Some(planted) = self.planted.iter().find(|planted| planted.id == hit.id) {
+                    return match planted.kind {
                         PlantedKind::Software => MultiThreadStopReason::SwBreak(tid),
                         PlantedKind::Hardware => MultiThreadStopReason::HwBreak(tid),
                         PlantedKind::Watch { kind, .. } => MultiThreadStopReason::Watch {
@@ -170,34 +158,34 @@ impl GdbTarget<'_> {
                             kind,
                             addr: planted.address,
                         },
-                    });
+                    };
                 }
                 // Set with `monitor bp`: the client has no record of it.
-                let place = symbol.unwrap_or_else(|| format!("{rip:#x}"));
-                self.note(format!("breakpoint {id} hit at {place}"));
+                let place = hit.symbol.unwrap_or_else(|| format!("{rip:#x}"));
+                self.note(format!("breakpoint {} hit at {place}", hit.id));
                 Signal::SIGTRAP
             }
-            ContinueOutcome::Step { .. } => Signal::SIGTRAP,
-            ContinueOutcome::ModuleLoad { module, .. } => {
-                self.note(module_event_line(ModuleEvent::Load, &module));
+            StopKind::Step => Signal::SIGTRAP,
+            StopKind::ModuleLoad | StopKind::ModuleUnload => {
+                let event = if stop.kind == StopKind::ModuleLoad {
+                    ModuleEvent::Load
+                } else {
+                    ModuleEvent::Unload
+                };
+                if let Some(module) = &stop.module {
+                    self.note(module_event_line(event, module));
+                }
                 Signal::SIGTRAP
             }
-            ContinueOutcome::ModuleUnload { module, .. } => {
-                self.note(module_event_line(ModuleEvent::Unload, &module));
-                Signal::SIGTRAP
-            }
-            ContinueOutcome::Halted { .. } if interrupted => Signal::SIGINT,
-            ContinueOutcome::Halted { .. } => Signal::SIGTRAP,
-            ContinueOutcome::Stopped {
-                rip,
-                exception_code,
-                first_chance,
-                ..
-            } => match exception_code {
-                None | Some(STATUS_BREAKPOINT) if interrupted => Signal::SIGINT,
-                None => Signal::SIGTRAP,
-                Some(code) => {
-                    let chance = match first_chance {
+            StopKind::Entry | StopKind::Interrupt if interrupted => Signal::SIGINT,
+            StopKind::Entry | StopKind::Interrupt => Signal::SIGTRAP,
+            StopKind::Exception => match stop.exception {
+                Some(exception) if interrupted && exception.code == STATUS_BREAKPOINT => {
+                    Signal::SIGINT
+                }
+                Some(exception) => {
+                    let code = exception.code;
+                    let chance = match exception.first_chance {
                         Some(true) => " (first chance)",
                         Some(false) => " (second chance)",
                         None => "",
@@ -206,9 +194,10 @@ impl GdbTarget<'_> {
                     self.note(format!("{name} ({code:#010x}){chance} at {rip:#x}"));
                     exception_signal(code)
                 }
+                None => Signal::SIGTRAP,
             },
-            ContinueOutcome::Bugcheck { rip, info } => {
-                let detail = match info {
+            StopKind::Bugcheck => {
+                let detail = match stop.bugcheck {
                     Some(info) => format!(
                         "bugcheck {:#x} ({:#x}, {:#x}, {:#x}, {:#x})",
                         info.code,
@@ -219,22 +208,20 @@ impl GdbTarget<'_> {
                     ),
                     None => "bugcheck (code unavailable from the transport)".to_string(),
                 };
-                match rip {
+                match stop.rip {
                     Some(rip) => self.note(format!("{detail} at {rip:#x}")),
                     None => self.note(detail),
                 }
                 self.note("run `monitor !analyze -v` for the full triage");
                 Signal::SIGABRT
             }
-            ContinueOutcome::TargetReloaded {
-                kernel_base,
-                coherent,
-                ..
-            } => {
-                let base = kernel_base
+            StopKind::Reload => {
+                let reload = stop.reload;
+                let base = reload
+                    .and_then(|reload| reload.kernel_base)
                     .map(|base| format!("{base:#x}"))
                     .unwrap_or_else(|| "unknown".to_string());
-                let early = if coherent {
+                let early = if reload.is_none_or(|reload| reload.coherent) {
                     ""
                 } else {
                     " (early boot: modules and processes are not available yet)"
@@ -245,11 +232,16 @@ impl GdbTarget<'_> {
                 Signal::SIGTRAP
             }
         };
+        self.signal(signal)
+    }
+
+    /// `signal` on the thread that stopped.
+    fn signal(&mut self, signal: Signal) -> MultiThreadStopReason<u64> {
         self.sync_threads();
-        Some(MultiThreadStopReason::SignalWithThread {
+        MultiThreadStopReason::SignalWithThread {
             tid: self.current_tid(),
             signal,
-        })
+        }
     }
 }
 
@@ -273,20 +265,22 @@ impl MultiThreadResume for GdbTarget<'_> {
         self.cancel.store(false, Ordering::SeqCst);
         // A failed resume is reported as a stop, so the client sees the
         // reason instead of waiting forever or dropping the connection.
-        let outcome = match self.step_thread.take() {
-            Some(tid) => self
-                .select(tid)
-                .and_then(|()| self.session.step())
-                .map(Some),
-            None => self.session.resume().map(|()| None),
-        };
-        self.pending = match outcome {
-            Ok(pending) => pending,
-            Err(error) => {
-                self.note(format!("the target cannot run: {error}"));
-                self.resume_refused = true;
-                Some(ContinueOutcome::Halted { rip: 0 })
-            }
+        self.pending = match self.step_thread.take() {
+            Some(tid) => match self.select(tid) {
+                Ok(()) => self.drive(Motion::Step, &Cancel::NEVER),
+                Err(error) => {
+                    self.note(format!("the target cannot run: {error}"));
+                    self.resume_refused = true;
+                    Some(self.session.unreported_stop())
+                }
+            },
+            // Resume and take a stop already waiting; the wait takes the rest.
+            None => self.drive(
+                Motion::Continue {
+                    disposition: ContinueDisposition::Handled,
+                },
+                &Cancel::poll(),
+            ),
         };
         Ok(())
     }

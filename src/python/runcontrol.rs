@@ -17,7 +17,10 @@ use crate::breakpoints::StepFrame;
 use crate::dbg_backend::ContinueDisposition;
 use crate::disasm::ControlFlow;
 use crate::error::Result as CoreResult;
-use crate::session::{ContinueOutcome, STEP_UNTIL_LIMIT, Session, StepKind, StepMode, StepStack};
+use crate::session::{
+    Cancel, CancelBehavior, ContinueOutcome, STEP_UNTIL_LIMIT, Session, StepKind, StepMode,
+    StepStack,
+};
 use crate::types::VirtAddr;
 use crate::view;
 use crate::view::shape::Typed;
@@ -249,9 +252,9 @@ pub fn run_to(
         Some(mode) => {
             let stop = |ip, _| ip == address;
             if std::mem::replace(&mut resumed, true) {
-                session.resume_step_until(mode, STEP_UNTIL_LIMIT, remaining, stop)
+                session.resume_step_until(mode, STEP_UNTIL_LIMIT, &halt_within(remaining), stop)
             } else {
-                session.step_until(mode, STEP_UNTIL_LIMIT, remaining, stop)
+                session.step_until(mode, STEP_UNTIL_LIMIT, &halt_within(remaining), stop)
             }
         }
     })
@@ -337,9 +340,9 @@ fn step_to_flow(
     settle_stop(dbg, timeout, move |session, remaining| {
         let stop = |_, flow| kind.matches(flow);
         if std::mem::replace(&mut resumed, true) {
-            session.resume_step_until(mode, STEP_UNTIL_LIMIT, remaining, stop)
+            session.resume_step_until(mode, STEP_UNTIL_LIMIT, &halt_within(remaining), stop)
         } else {
-            session.step_until(mode, STEP_UNTIL_LIMIT, remaining, stop)
+            session.step_until(mode, STEP_UNTIL_LIMIT, &halt_within(remaining), stop)
         }
     })
 }
@@ -380,10 +383,22 @@ pub fn trace_calls<'py>(
     let timeout = timeout_arg(timeout)?;
     let trace = dbg.get().with_session(|session| {
         require_halted(session, "trace_calls")?;
-        session.trace_calls(limit, timeout).map_err(err)
+        session
+            .trace_calls(limit, &halt_within(timeout))
+            .map_err(err)
     })?;
     prune_conditions(dbg)?;
     Typed::new(dbg.py(), view::execution::call_trace(&trace))
+}
+
+/// A cancellation that halts the target once `timeout` elapses.
+fn halt_within(timeout: Option<Duration>) -> Cancel<'static> {
+    Cancel {
+        flag: None,
+        deadline: timeout.map(|timeout| Instant::now() + timeout),
+        behavior: CancelBehavior::Halt,
+        tick: None,
+    }
 }
 
 pub fn interrupt(dbg: &Bound<'_, Debugger>) -> PyResult<Py<Stop>> {

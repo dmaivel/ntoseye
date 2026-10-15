@@ -42,7 +42,6 @@ use crate::output::{log_input_line, prompting};
 #[cfg(feature = "python")]
 use crate::python::embed;
 use crate::session::Session;
-use crate::session::stepping::FollowWatch;
 use crate::symbols::ntoseye_home;
 #[cfg(all(unix, feature = "cli"))]
 use crate::target::InterruptRequester;
@@ -112,7 +111,7 @@ pub use crate::repl_command;
 pub use aliases::*;
 pub use bugcheck::*;
 pub use command::*;
-pub use commands::{command_reference_json, json_string};
+pub use commands::{ReplActions, command_reference_json, json_string};
 pub use completion::*;
 pub use disasm::*;
 pub use heap::*;
@@ -284,9 +283,6 @@ pub struct ReplState<'a> {
     pub line: String,
     /// Who is dispatching; decides which [`RunEffect`]s a command may have.
     pub context: DispatchContext,
-    /// Set while a multi-step command (`pa`, `pt`, `wt`...) drives the
-    /// target: intermediate stops are not rendered, only the final one.
-    pub quiet_stops: bool,
     /// Where `ls` continues: the file and the line after the last one listed.
     pub source_cursor: Option<(PathBuf, u32)>,
     /// The pattern and address `#` continues with.
@@ -300,9 +296,6 @@ pub struct ReplState<'a> {
     /// keeps running and the host collects the stop on a later call with
     /// [`ReplState::collect_stop`].
     pub stop_wait: Option<StopWaitBudget>,
-    /// The watch on the thread a step's run-to site waits for, whose stops
-    /// the continue loop takes (see [`Session::watch_followed`]).
-    pub follow_watch: Option<FollowWatch>,
     /// Set once this dispatch rendered a stop the remote client has not seen
     /// (parked between calls, or collected while waiting for a halt), so a
     /// resume later on the same line is refused once rather than continuing
@@ -315,7 +308,7 @@ pub struct ReplState<'a> {
     pub line_depth: usize,
     /// The next line of debug output read from the kernel's DbgPrint
     /// buffer to print, for a backend without KD's stream, which prints
-    /// its own (see [`ReplState::print_kernel_prints`]).
+    /// its own: the interactive prompt prints them while a run waits.
     pub printed_debug_seq: u64,
     /// What `!virtio` and `!vring` last saw of each queue, to show what
     /// moved since.
@@ -529,12 +522,10 @@ impl<'a> ReplState<'a> {
             breakable_loop: false,
             line: String::new(),
             context: store.context,
-            quiet_stops: false,
             source_cursor: store.source_cursor,
             disasm_search: store.disasm_search,
             disasm_cursor: store.disasm_cursor,
             stop_wait: None,
-            follow_watch: None,
             unseen_stop_rendered: false,
             line_depth: 0,
             printed_debug_seq: 0,
@@ -1044,12 +1035,10 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         breakable_loop: false,
         line: String::new(),
         context: DispatchContext::Interactive,
-        quiet_stops: false,
         source_cursor: None,
         disasm_search: DisasmSearch::default(),
         disasm_cursor: None,
         stop_wait: None,
-        follow_watch: None,
         unseen_stop_rendered: false,
         line_depth: 0,
         printed_debug_seq: 0,

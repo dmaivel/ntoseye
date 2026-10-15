@@ -10,8 +10,8 @@ use crate::exception_policy::ExceptionPolicyMode;
 use crate::expr::Expr;
 use crate::guest::ProcessInfo;
 use crate::layout::{FieldInfo, TypeInfo};
-use crate::session::session_over_memory;
 use crate::session::tests::{MockBackend, session_with_mock};
+use crate::session::{StopKind, session_over_memory};
 use crate::symbols::{
     CodeFrame, LocalSource, LocalSourceState, LocalVariableLocation, ProcedureLocal,
 };
@@ -65,16 +65,18 @@ fn a_short_backward_decode_keeps_the_reference_at_its_offset() {
 }
 
 #[test]
-fn a_cancelled_run_that_left_the_target_halted_is_a_pause_stop() {
-    // `run_to` halts the target to lift its temporary breakpoint before
-    // reporting `Running` for a cancelled step; that halt is the stop the
-    // client's `pause` asked for.
-    let session = session_over_memory(0x1000, &[0x90u8; 0x40]);
+fn an_interrupt_stop_is_a_pause_stop() {
+    // A `pause` that cancels a step halts the target where it is, which the
+    // driver reports as an interrupt: the stop the client's `pause` asked
+    // for.
+    let mut session = session_over_memory(0x1000, &[0x90u8; 0x40]);
+    let mut stop = session.unreported_stop();
+    stop.kind = StopKind::Interrupt;
     let (_tx, rx) = mpsc::channel();
     let (mut server, sink) = server_with_sink(Some(session), rx);
     server.state = RunState::Running;
 
-    server.report_stop(ContinueOutcome::Running);
+    server.report_stop(stop);
 
     assert!(matches!(server.state, RunState::Halted));
     let messages = decode_sink(&sink);

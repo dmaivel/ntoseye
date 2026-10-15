@@ -1,11 +1,50 @@
 use crate::diagnostics::{errors_reported, print_notice};
 use crate::expr::Expr;
 use crate::repl::*;
+use crate::session::{ActionRunner, Session};
 use crate::types::VirtAddr;
 use crate::ui;
 
 const ALIAS_RECURSION_LIMIT: usize = 16;
 const BREAKPOINT_ACTION_RECURSION_LIMIT: usize = 4;
+
+/// The REPL dispatcher as every session's [`ActionRunner`]: breakpoint `do`
+/// actions and filter `-c` commands run in a REPL of their own over the
+/// session, with the user's saved aliases and the session's pseudo-registers,
+/// whichever host drives the run. Output goes where the host's output goes.
+pub struct ReplActions;
+
+impl ReplActions {
+    fn with_state<T>(session: &mut Session, line: &str, f: impl FnOnce(&mut ReplState) -> T) -> T {
+        let store = ReplStore::new(session, DispatchContext::BreakpointAction);
+        let mut state = ReplState::attach(session, store);
+        state.line = line.to_string();
+        let result = f(&mut state);
+        drop(state.detach());
+        result
+    }
+}
+
+impl ActionRunner for ReplActions {
+    fn breakpoint_action(&mut self, session: &mut Session, action: &str) -> bool {
+        Self::with_state(session, action, |state| {
+            state
+                .dispatch_breakpoint_action(action)
+                .unwrap_or_else(|error| {
+                    error!("breakpoint action failed: {error}");
+                    false
+                })
+        })
+    }
+
+    fn event_command(&mut self, session: &mut Session, command: &str) {
+        Self::with_state(session, command, |state| {
+            if let Err(error) = state.dispatch_exception_command(command) {
+                error!("exception command failed: {error}");
+            }
+        })
+    }
+}
 
 pub mod address_space;
 pub mod analyze;

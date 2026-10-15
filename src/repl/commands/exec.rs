@@ -1,19 +1,17 @@
-use std::sync::atomic::Ordering;
+use std::cell::Cell;
+use std::time::Duration;
 
 use owo_colors::OwoColorize;
 
-use crate::breakpoints::Breakpoint;
-use crate::breakpoints::StepFrame;
-use crate::dbg_backend::{ContinueDisposition, ModuleEvent};
+use crate::dbg_backend::ContinueDisposition;
 use crate::diagnostics;
-use crate::disasm::ControlFlow;
+use crate::diagnostics::print_notice;
 use crate::error::{Error, Result};
 use crate::exception_policy::ExceptionPolicyMode;
 use crate::expr::Expr;
-use crate::guest::ModuleInfo;
 use crate::session::{
-    CallTraceEnd, CallTraceFrame, ContinueOutcome, STEP_UNTIL_LIMIT, StepKind, StepMode, StepStack,
-    StopResolution,
+    CallTraceEnd, CallTraceFrame, Cancel, CancelBehavior, Motion, RunOutcome, Session, StepMode,
+    StopKind, WalkUntil,
 };
 use crate::types::VirtAddr;
 use crate::ui;
@@ -188,20 +186,129 @@ fn render_trace_frame(frame: &CallTraceFrame, depth: usize) {
     }
 }
 
+/// How long `g` on a running target waits for a stop it already reported.
+const PENDING_STOP_POLL: Duration = Duration::from_millis(100);
+
+/// The cancellation of a run a dispatch drives within its stop `budget`: a
+/// remote client's budget hands the target back running when it is spent;
+/// the interactive prompt (no budget) waits for a stop or Ctrl+C (the
+/// session's interrupt request, which halts).
+fn budget_cancel<'a>(
+    budget: Option<&'a StopWaitBudget>,
+    tick: Option<&'a dyn Fn(&mut Session)>,
+) -> Cancel<'a> {
+    Cancel {
+        flag: budget.map(|budget| &*budget.cancel),
+        deadline: budget.and_then(|budget| budget.deadline),
+        behavior: CancelBehavior::ReturnRunning,
+        tick,
+    }
+}
+
 impl ReplState<'_> {
+    /// Run `motion` through the session's driver within this dispatch's
+    /// stop budget, printing what arrives while it runs: guest prints (for a
+    /// backend without KD's stream), notices, and, for a run that waits at
+    /// the prompt and `announce`s it, the running indicator. Breakpoint
+    /// actions print as they run.
+    fn drive(&mut self, motion: Motion, announce: bool) -> Result<RunOutcome> {
+        let announce = announce && self.stop_wait.is_none();
+        let announced = Cell::new(false);
+        let printed = Cell::new(self.printed_debug_seq);
+        let interactive = self.context == DispatchContext::Interactive;
+        let tick = |session: &mut Session| {
+            if announce && !announced.get() && session.backend.is_running() {
+                announced.set(true);
+                let print = || {
+                    outln!(
+                        "{}",
+                        "VM running, waiting for stop (Ctrl+C to pause)...".bright_black()
+                    )
+                };
+                #[cfg(feature = "cli")]
+                native::running(print);
+                #[cfg(not(feature = "cli"))]
+                print();
+            }
+            if interactive && !session.backend_streams_debug_output() {
+                let page = session.read_debug_output(printed.get());
+                printed.set(page.next_seq);
+                for line in page.lines {
+                    eprintln!("{}", line.text);
+                }
+            }
+            for notice in session.take_notices() {
+                print_notice(&notice);
+            }
+        };
+        self.clear_selected_frame();
+        let cancel = budget_cancel(self.stop_wait.as_ref(), Some(&tick));
+        let outcome = self.ctx.run(motion, &cancel);
+        self.printed_debug_seq = printed.get();
+        if announced.get() {
+            // A wait that ended without a stop (an error, a spent budget)
+            // still stops the indicator.
+            #[cfg(feature = "cli")]
+            native::finish_running();
+            // Past the `^C` the terminal echoed.
+            if let Ok(RunOutcome::Stopped(stop)) = &outcome
+                && stop.kind == StopKind::Interrupt
+            {
+                outln!();
+            }
+        }
+        outcome
+    }
+
+    /// Render what a run ended on: its stop, or that a remote client's
+    /// budget handed the target back still running. `failure` names what
+    /// failed for an error.
+    fn report_run(&mut self, outcome: Result<RunOutcome>, failure: &str) {
+        match outcome {
+            Ok(RunOutcome::Stopped(stop)) => {
+                print_stop(self.ctx, &self.caches, &stop);
+                self.flush_notices();
+            }
+            Ok(RunOutcome::Running) => self.print_still_running(),
+            Err(error) => {
+                error!("{failure}: {error}");
+                if self.ctx.backend.is_running() {
+                    outln!(
+                        "{}",
+                        ui::muted("target still running; use `break` to try again")
+                    );
+                }
+            }
+        }
+    }
+
+    /// Say that a remote client's stop budget ran out with the target still
+    /// running, and how to go on.
+    fn print_still_running(&self) {
+        let hint = if self.context == DispatchContext::Remote(RemoteClient::Sdk) {
+            "target still running; `dbg.wait()` to keep waiting, or `dbg.interrupt()` to \
+             break in"
+        } else {
+            "target still running; call again to keep waiting, or `break` to interrupt"
+        };
+        outln!("{}", ui::muted(hint));
+    }
+
+    /// Wait for and render the next stop of a target this command set
+    /// running (a reboot, a crash).
+    pub fn wait_for_stop_after_resume(&mut self) -> Result<()> {
+        let outcome = self.drive(Motion::Wait, true);
+        self.report_run(outcome, "error waiting for stop");
+        Ok(())
+    }
+
     /// Collect the next stop for a host that hands control back while the
     /// target runs: a stop the idle servicer already parked is rendered at
     /// once; otherwise wait (within [`ReplState::stop_wait`]) for one and
     /// render it. A halted target with nothing pending returns immediately.
     pub fn collect_stop(&mut self) -> Result<()> {
-        if self.surface_parked_stop() {
-            return Ok(());
-        }
-        if self.ctx.backend.is_running() {
-            self.clear_selected_frame();
-            let waited = self.wait_for_stop_after_resume();
-            self.flush_notices();
-            return waited;
+        if self.ctx.backend.is_running() || self.ctx.stop_pending() {
+            self.wait_for_stop_after_resume()?;
         }
         Ok(())
     }
@@ -275,63 +382,38 @@ impl ReplState<'_> {
         Ok(None)
     }
 
-    /// Render a stop the idle servicer parked since the last dispatch, if
-    /// any, without waiting. Returns whether one was rendered; a remote host
-    /// then refuses to resume past it on this call.
+    /// Render a stop the idle servicer parked (or the backend caught) since
+    /// the last dispatch, if any, without waiting: its action runs first, and
+    /// one that resumes leaves nothing to render. Returns whether one was
+    /// rendered; a remote host then refuses to resume past it on this call.
     pub fn surface_parked_stop(&mut self) -> bool {
-        let Some(outcome) = self.ctx.take_parked_stop() else {
+        if !self.ctx.stop_pending() {
             return false;
-        };
+        }
         self.clear_selected_frame();
-        print_parked_outcome(self.ctx, &self.caches, outcome);
-        self.flush_notices();
-        self.unseen_stop_rendered = true;
-        true
+        let cancel = Cancel::poll();
+        match self.ctx.run(Motion::Wait, &cancel) {
+            Ok(RunOutcome::Stopped(stop)) => {
+                print_stop(self.ctx, &self.caches, &stop);
+                self.flush_notices();
+                self.unseen_stop_rendered = true;
+                true
+            }
+            Ok(RunOutcome::Running) => {
+                self.flush_notices();
+                false
+            }
+            Err(error) => {
+                error!("error collecting the stop: {error}");
+                false
+            }
+        }
     }
 
     pub fn interrupt_running_vm(&mut self) -> Result<()> {
         self.clear_selected_frame();
-        let had_pending_stop = self.ctx.backend.has_pending_stop();
-        let mut apply_pending_exception_policy = had_pending_stop;
-        let mut outcome = match self.ctx.interrupt_outcome() {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                error!("failed to interrupt: {error}");
-                return Ok(());
-            }
-        };
-
-        // A pending stop whose exception policy continues without a command
-        // is continued, then broken into again, so the requested pause still
-        // ends on a visible stop.
-        if had_pending_stop
-            && matches!(&outcome, ContinueOutcome::Stopped { .. })
-            && let Some(event) = self.ctx.last_event.as_ref().map(|last| last.stop.clone())
-            && continue_exception_policy(self.ctx, &event)?
-        {
-            apply_pending_exception_policy = false;
-            outcome = match self.ctx.interrupt_outcome() {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    error!("failed to interrupt: {error}");
-                    return Ok(());
-                }
-            };
-        }
-
-        let surfaced = !matches!(
-            &outcome,
-            ContinueOutcome::Running | ContinueOutcome::Halted { .. }
-        );
-        print_parked_outcome(self.ctx, &self.caches, outcome);
-
-        if apply_pending_exception_policy
-            && surfaced
-            && let Err(error) = self.apply_buffered_exception_policy()
-        {
-            error!("failed to apply exception policy: {error}");
-        }
-
+        let outcome = self.ctx.run(Motion::Break, &Cancel::NEVER);
+        self.report_run(outcome, "failed to interrupt");
         Ok(())
     }
 
@@ -369,128 +451,80 @@ impl ReplState<'_> {
         if expression.is_empty() {
             return self.continue_vm_with_disposition(disposition);
         }
-        match Expr::eval_with_radix(expression, &self.ctx.target, self.radix) {
-            Ok(address) => {
-                // Secure-kernel code and a partition's take a debug register
-                // for the run, which writes nothing.
-                let patched =
-                    self.ctx.partition().is_none() && !self.ctx.target.is_secure_address(address);
-                let check = patched
-                    .then(|| self.check_instruction_start(self.ctx.target.current_dtb(), address));
-                match check {
-                    Some(Ok(Some(warning))) => diagnostics::print_warning(warning),
-                    Some(Err(error)) => {
-                        error!("{error}");
-                        return Ok(());
-                    }
-                    Some(Ok(None)) | None => {}
-                }
-                self.run_to_temporary_code_breakpoint_with_disposition(address, None, disposition)
-                    .map(|_| ())
-            }
+        let address = match Expr::eval_with_radix(expression, &self.ctx.target, self.radix) {
+            Ok(address) => address,
             Err(error) => {
                 error!("invalid {} address: {error}", invocation.name);
-                Ok(())
+                return Ok(());
             }
-        }
-    }
-
-    /// Run the `-c` commands of the `sxe ld` or `sxe ud` filter that stopped
-    /// at `event` for `module`.
-    fn run_module_event_command(&mut self, event: ModuleEvent, module: &ModuleInfo) -> Result<()> {
-        let command = self
-            .ctx
-            .exception_policies
-            .module_event_policy(event, &module.name)
-            .and_then(|policy| policy.command.clone());
-        self.run_exception_policy_command(command.as_deref())
-    }
-
-    fn run_exception_policy_command(&mut self, command: Option<&str>) -> Result<()> {
-        if let Some(command) = command {
-            self.dispatch_exception_command(command)?;
-        }
-        Ok(())
-    }
-
-    /// A pending stop is rendered by the asynchronous stop helper before it can
-    /// hand control back here. Commands still run, and an explicit continue
-    /// outcome is applied afterward; command-free auto-continues were already
-    /// completed by the helper.
-    fn apply_buffered_exception_policy(&mut self) -> Result<()> {
-        match self.ctx.current_stop().cloned() {
-            Some(ContinueOutcome::ModuleLoad { module, .. }) => {
-                return self.run_module_event_command(ModuleEvent::Load, &module);
-            }
-            Some(ContinueOutcome::ModuleUnload { module, .. }) => {
-                return self.run_module_event_command(ModuleEvent::Unload, &module);
-            }
-            _ => {}
-        }
-        let Some(event) = self.ctx.last_event.as_ref().map(|last| last.stop.clone()) else {
-            return Ok(());
         };
-        match self.ctx.exception_policies.action_for(&event) {
-            ExceptionPolicyAction::Surface {
-                command: Some(command),
-            } => self.run_exception_policy_command(Some(&command)),
-            ExceptionPolicyAction::Continue {
-                notify,
-                disposition,
-                command: Some(command),
-            } => {
-                self.run_exception_policy_command(Some(&command))?;
-                if notify {
-                    outln!(
-                        "Exception {:#010x}; continuing",
-                        event.exception_code.unwrap_or_default()
-                    );
-                }
-                self.ctx
-                    .backend
-                    .continue_execution_with_disposition(disposition)?;
-                self.ctx.record_continuation_disposition(disposition);
-                Ok(())
+        // Secure-kernel code and a partition's take a debug register for the
+        // run, which writes nothing.
+        let patched = self.ctx.partition().is_none() && !self.ctx.target.is_secure_address(address);
+        let check =
+            patched.then(|| self.check_instruction_start(self.ctx.target.current_dtb(), address));
+        match check {
+            Some(Ok(Some(warning))) => diagnostics::print_warning(warning),
+            Some(Err(error)) => {
+                error!("{error}");
+                return Ok(());
             }
-            ExceptionPolicyAction::Surface { command: None }
-            | ExceptionPolicyAction::Continue { command: None, .. } => Ok(()),
+            Some(Ok(None)) | None => {}
         }
+        if self.ctx.backend.is_running() {
+            error!("VM is running");
+            return Ok(());
+        }
+        let motion = Motion::RunTo {
+            address,
+            frame: None,
+            disposition,
+        };
+        let outcome = self.drive(motion, true);
+        self.report_run(
+            outcome,
+            &format!("failed to run to {}", ui::addr(address.0)),
+        );
+        Ok(())
     }
 
     fn continue_vm_with_disposition(&mut self, disposition: ContinueDisposition) -> Result<()> {
         self.clear_selected_frame();
         if self.ctx.backend.is_running() {
-            match surface_pending_stop(self.ctx, &self.caches) {
-                Ok(true) => {
-                    if let Err(error) = self.apply_buffered_exception_policy() {
-                        error!("failed to apply exception policy: {error}");
-                    }
+            // A stop the target already reported is rendered; otherwise the
+            // target keeps the run it is on.
+            let cancel = Cancel::within(PENDING_STOP_POLL);
+            match self.ctx.run(Motion::Wait, &cancel) {
+                Ok(RunOutcome::Stopped(stop)) => {
+                    print_stop(self.ctx, &self.caches, &stop);
+                    self.flush_notices();
                 }
-                Ok(false) => error!("VM is running"),
+                Ok(RunOutcome::Running) => error!("VM is running"),
                 Err(e) => error!("error checking running VM: {e}"),
             }
             return Ok(());
         }
 
-        if let Err(e) = self.ctx.resume_with_disposition(disposition) {
-            error!("failed to continue: {e}");
-            return Ok(());
-        }
-
+        let motion = Motion::Continue { disposition };
         // A remote host's bounded wait for a stop nothing is set to cause
         // only spends its budget; an empty line waits for one anyway, and a
         // wait with no limit waits, ended by Ctrl+C as at the prompt.
         if self.stop_wait_bounded() && !self.stop_is_set() {
-            outln!(
-                "{}",
-                ui::muted(
-                    "the target runs on: no breakpoint or event filter is set to stop it, so \
-                     this does not wait (an empty line waits for a stop anyway)"
-                )
-            );
+            match self.ctx.run(motion, &Cancel::poll()) {
+                Ok(RunOutcome::Running) => outln!(
+                    "{}",
+                    ui::muted(
+                        "the target runs on: no breakpoint or event filter is set to stop it, so \
+                         this does not wait (an empty line waits for a stop anyway)"
+                    )
+                ),
+                outcome => self.report_run(outcome, "failed to continue"),
+            }
             return Ok(());
         }
-        self.wait_for_stop_after_resume()
+        let outcome = self.drive(motion, true);
+        self.report_run(outcome, "failed to continue");
+        Ok(())
     }
 
     /// Whether something the user set will stop the target: an enabled
@@ -518,369 +552,10 @@ impl ReplState<'_> {
             .is_some_and(|budget| budget.deadline.is_some())
     }
 
-    /// Print what the guest printed with DbgPrint since the last call, for a
-    /// backend without KD's stream, as KD's prints arrive at the terminal
-    /// while the target runs. Remote hosts read it themselves.
-    pub fn print_kernel_prints(&mut self) {
-        if self.context != DispatchContext::Interactive || self.ctx.backend_streams_debug_output() {
-            return;
-        }
-        let page = self.ctx.read_debug_output(self.printed_debug_seq);
-        self.printed_debug_seq = page.next_seq;
-        for line in page.lines {
-            eprintln!("{}", line.text);
-        }
-    }
-
-    pub fn wait_for_stop_after_resume(&mut self) -> Result<()> {
-        if !self.quiet_stops && self.stop_wait.is_none() {
-            let print = || {
-                outln!(
-                    "{}",
-                    "VM running, waiting for stop (Ctrl+C to pause)...".bright_black()
-                )
-            };
-            #[cfg(feature = "cli")]
-            native::running(print);
-            #[cfg(not(feature = "cli"))]
-            print();
-        }
-
-        self.ctx.target.interrupt.store(false, Ordering::SeqCst);
-
-        loop {
-            self.print_kernel_prints();
-            let interrupt_requested = self.ctx.target.interrupt.swap(false, Ordering::SeqCst);
-            // A Ctrl+C breaks in, and again past any hit a filter declines
-            // meanwhile: on code the whole system runs those arrive first,
-            // and resuming past one lost the Ctrl+C.
-            let stop_result = if interrupt_requested {
-                outln!();
-                self.ctx
-                    .interrupt_classified()
-                    .map(|(resolution, _)| Some(Ok(resolution)))
-            } else {
-                self.ctx
-                    .backend
-                    .try_wait_for_stop(REPL_STOP_POLL)
-                    .map(|event| event.map(|event| self.ctx.classify_stop_event(event)))
-            };
-
-            match stop_result {
-                Ok(Some(classified)) => {
-                    let resolution = match classified {
-                        // A stream of absorbed hits (a temporary site other
-                        // threads reach) must not outlast the budget either.
-                        Ok(StopResolution::Resumed | StopResolution::ModulesChanged) => {
-                            // An `sxn ld` line reads as the load happens.
-                            self.flush_notices();
-                            if self.stop_budget_spent() {
-                                break;
-                            }
-                            continue;
-                        }
-                        Ok(resolution) => resolution,
-                        Err(error) => {
-                            error!("failed to classify stop: {error}");
-                            break;
-                        }
-                    };
-
-                    // The thread a run-to waits for changed state: its site
-                    // is armed only while the thread is about to run.
-                    if let StopResolution::Breakpoint { breakpoint, .. } = &resolution
-                        && let Some(watch) = self
-                            .follow_watch
-                            .as_ref()
-                            .filter(|watch| watch.id == breakpoint.id)
-                    {
-                        if let Err(error) = self.ctx.follow_watch_hit(watch) {
-                            error!("{error}");
-                            break;
-                        }
-                        if interrupt_requested {
-                            print_stop_separator();
-                            print_break_context_at(self.ctx, None, None);
-                            break;
-                        }
-                        if let Err(error) = self
-                            .ctx
-                            .resume_with_disposition(ContinueDisposition::Handled)
-                        {
-                            error!("failed to continue: {error}");
-                            break;
-                        }
-                        continue;
-                    }
-
-                    refresh_stop_caches_pre(self.ctx, &self.caches);
-                    refresh_stop_caches_post(&self.ctx.target, &self.caches);
-                    refresh_windows_thread_context_for_backend_thread(
-                        &mut self.ctx.target,
-                        &self.ctx.current_thread,
-                    );
-
-                    match resolution {
-                        StopResolution::Resumed | StopResolution::ModulesChanged => {
-                            unreachable!("handled above")
-                        }
-                        StopResolution::Breakpoint {
-                            breakpoint,
-                            condition_error,
-                            ..
-                        } => {
-                            if let Some(error) = condition_error {
-                                error!("breakpoint condition failed: {error}");
-                            }
-                            if let Some(action) = breakpoint.action.as_deref()
-                                && self.dispatch_breakpoint_action(action)?
-                                // A Ctrl+C this pass took breaks in at the hit
-                                // instead of being lost to the action's resume.
-                                && !interrupt_requested
-                            {
-                                if let Err(error) = self
-                                    .ctx
-                                    .resume_with_disposition(ContinueDisposition::Handled)
-                                {
-                                    error!("failed to continue after breakpoint action: {error}");
-                                    break;
-                                }
-                                continue;
-                            }
-
-                            // A run-to's own site (`p` over a call, `gu`,
-                            // `g <address>`) is no cause to name, whether
-                            // patched or a debug register (the secure
-                            // kernel's and a guest partition's).
-                            if breakpoint.temporary {
-                                if !self.quiet_stops {
-                                    print_stop_separator();
-                                    print_break_context_at(self.ctx, None, None);
-                                }
-                            } else if breakpoint.hardware.is_some() {
-                                self.surface_hardware_breakpoint_hit(&breakpoint);
-                            } else {
-                                print_stop_separator();
-                                let cause = format!(
-                                    "{} {}",
-                                    ui::muted("breakpoint"),
-                                    ui::bp_id(breakpoint.id)
-                                );
-                                print_break_context_at(self.ctx, None, Some(cause));
-                            }
-                            break;
-                        }
-                        StopResolution::ModuleLoad { module, .. } => {
-                            print_stop_separator();
-                            print_module_event_stop(self.ctx, ModuleEvent::Load, &module);
-                            if let Err(error) =
-                                self.run_module_event_command(ModuleEvent::Load, &module)
-                            {
-                                error!("module load command failed: {error}");
-                            }
-                            break;
-                        }
-                        StopResolution::ModuleUnload { module, .. } => {
-                            print_stop_separator();
-                            print_module_event_stop(self.ctx, ModuleEvent::Unload, &module);
-                            if let Err(error) =
-                                self.run_module_event_command(ModuleEvent::Unload, &module)
-                            {
-                                error!("module unload command failed: {error}");
-                            }
-                            break;
-                        }
-                        StopResolution::Bugcheck { event } => {
-                            print_stop_separator();
-                            print_bugcheck_summary(&self.ctx.target, event.bugcheck.as_ref());
-                            outln!();
-                            print_break_context_for_bugcheck(self.ctx, event.bugcheck.as_ref());
-                            break;
-                        }
-                        StopResolution::TargetReloaded { event, coherent } => {
-                            print_stop_separator();
-                            self.caches.clear_threads();
-                            print_target_reload(
-                                &self.ctx.target,
-                                &self.ctx.current_thread,
-                                event.program_counter,
-                                coherent,
-                            );
-                            break;
-                        }
-                        StopResolution::Stopped { event, .. } => {
-                            match self.ctx.exception_policies.action_for(&event) {
-                                ExceptionPolicyAction::Surface { command } => {
-                                    if let Err(error) =
-                                        self.run_exception_policy_command(command.as_deref())
-                                    {
-                                        error!("exception command failed: {error}");
-                                    }
-                                }
-                                ExceptionPolicyAction::Continue {
-                                    notify,
-                                    disposition,
-                                    command,
-                                } => {
-                                    if let Err(error) =
-                                        self.run_exception_policy_command(command.as_deref())
-                                    {
-                                        error!("exception command failed: {error}");
-                                    } else {
-                                        if notify {
-                                            let code = event.exception_code.unwrap_or_default();
-                                            let address =
-                                                event.exception_address.or(event.program_counter);
-                                            let chance = match event.first_chance {
-                                                Some(true) => "first chance",
-                                                Some(false) => "second chance",
-                                                None => "unknown chance",
-                                            };
-                                            let location = address
-                                                .map(|address| format!(" at {address:#x}"))
-                                                .unwrap_or_default();
-                                            outln!(
-                                                "Exception {code:#010x} ({chance}){location}; continuing"
-                                            );
-                                        }
-                                        match self
-                                            .ctx
-                                            .backend
-                                            .continue_execution_with_disposition(disposition)
-                                        {
-                                            Ok(()) => {
-                                                self.ctx
-                                                    .record_continuation_disposition(disposition);
-                                                continue;
-                                            }
-                                            Err(error) => {
-                                                error!(
-                                                    "failed to continue after exception: {error}"
-                                                );
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            print_stop_separator();
-                            let cause =
-                                stop_exception_cause(event.exception_code, event.program_counter);
-                            print_break_context_at(self.ctx, None, cause);
-                            break;
-                        }
-                    }
-                }
-                Ok(None) => {
-                    if self.stop_budget_spent() {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    error!("error waiting for stop: {e}");
-                    if self.ctx.backend.is_running() {
-                        outln!(
-                            "{}",
-                            ui::muted("target still running; use `break` to try again")
-                        );
-                    }
-                    break;
-                }
-            }
-        }
-        // A wait that ended without a result (an error, a spent budget)
-        // still stops the indicator.
-        #[cfg(feature = "cli")]
-        native::finish_running();
-
-        Ok(())
-    }
-
-    /// Whether a remote client's stop budget has run out, saying so: the
-    /// target is left running.
-    fn stop_budget_spent(&self) -> bool {
-        if !self
-            .stop_wait
-            .as_ref()
-            .is_some_and(StopWaitBudget::exhausted)
-        {
-            return false;
-        }
-        let hint = if self.context == DispatchContext::Remote(RemoteClient::Sdk) {
-            "target still running; `dbg.wait()` to keep waiting, or `dbg.interrupt()` to \
-             break in"
-        } else {
-            "target still running; call again to keep waiting, or `break` to interrupt"
-        };
-        outln!("{}", ui::muted(hint));
-        true
-    }
-
-    /// Print a hardware (DR) breakpoint hit, mirroring the software-breakpoint
-    /// `Hit` rendering. The address the breakpoint watches is unrelated to
-    /// `rip` for data watches, so the cause child keeps the watched symbol
-    /// while the BREAK banner shows where execution actually stopped.
-    fn surface_hardware_breakpoint_hit(&mut self, bp: &Breakpoint) {
-        print_stop_separator();
-        // A hypercall or VM-exit breakpoint is named for what it stops on;
-        // the stop's children name the caller and its exit.
-        let (kind, access) = match (bp.hypercall, bp.vm_exit) {
-            (Some(_), _) => ("hypercall breakpoint", String::new()),
-            (None, Some(filter)) => ("VM-exit breakpoint", format!(" {}", filter.label())),
-            (None, None) => (
-                "hardware breakpoint",
-                bp.hardware
-                    .map(|hw| format!(" {}{}", hw.access.letter(), hw.len))
-                    .unwrap_or_default(),
-            ),
-        };
-        let cause = format!(
-            "{} {}{}{}",
-            ui::muted(kind),
-            ui::bp_id(bp.id),
-            access.bright_black(),
-            bp.symbol
-                .as_ref()
-                .map(|s| format!("  {}", ui::symbol(s)))
-                .unwrap_or_default()
-        );
-        print_break_context_at(self.ctx, None, Some(cause));
-    }
-
     fn single_step(&mut self) -> Result<()> {
-        if let Err(e) = self.single_step_checked() {
-            error!("failed to step: {e}");
-        }
-
+        let outcome = self.drive(Motion::Step, false);
+        self.report_run(outcome, "failed to step");
         Ok(())
-    }
-
-    fn single_step_checked(&mut self) -> Result<()> {
-        let outcome = self.ctx.step()?;
-
-        if self.quiet_stops {
-            return Ok(());
-        }
-        if matches!(outcome, ContinueOutcome::Step { .. }) {
-            print_stop_separator();
-            print_break_context(self.ctx);
-        } else {
-            print_parked_outcome(self.ctx, &self.caches, outcome);
-        }
-
-        Ok(())
-    }
-
-    /// Run a step to `address`: stop there only for the stepping thread,
-    /// with its stack where `stack` requires.
-    fn run_step_to(&mut self, address: VirtAddr, stack: StepStack) -> Result<bool> {
-        let frame = self.ctx.step_frame(stack)?;
-        self.run_to_temporary_code_breakpoint_with_disposition(
-            address,
-            frame,
-            ContinueDisposition::Handled,
-        )
     }
 
     fn current_ip(&mut self) -> Option<u64> {
@@ -893,102 +568,41 @@ impl ReplState<'_> {
         })
     }
 
-    fn run_to_temporary_code_breakpoint_with_disposition(
-        &mut self,
-        address: VirtAddr,
-        frame: Option<StepFrame>,
-        disposition: ContinueDisposition,
-    ) -> Result<bool> {
-        if self
-            .ctx
-            .breakpoints
-            .enabled_breakpoint_id_for_current_context(&self.ctx.target, address)
-            .is_some()
-        {
-            self.continue_vm_with_disposition(disposition)?;
-            return Ok(self.current_ip() == Some(address.0));
-        }
-
-        let followed = frame.as_ref().map(|frame| frame.thread.clone());
-        let temp_id = match self.ctx.add_temporary_code(address, frame) {
-            Ok(id) => id,
-            Err(e) => {
-                error!(
-                    "failed to set temporary breakpoint at {}: {}",
-                    ui::addr(address.0),
-                    e
-                );
-                return Ok(false);
+    fn cmd_p(&mut self) -> Result<()> {
+        let motion = match self.ctx.plan(Motion::StepOver) {
+            Ok(motion) => motion,
+            Err(error) => {
+                // Stepping *over* needs the instruction decoded to know
+                // whether it is a call, and the instruction cannot be read
+                // while its page is out. `t` executes the fetch instead of
+                // reading it, which is what brings the page in.
+                match (&error, self.current_ip()) {
+                    (Error::BadVirtualAddress(_) | Error::AddressNotInDump(_), Some(ip)) => error!(
+                        "the page holding {} is not resident, so the instruction cannot be \
+                         decoded to step over it; `t` single-steps through the fetch",
+                        ui::addr(ip)
+                    ),
+                    _ => error!("failed to decode current instruction: {}", error),
+                }
+                return Ok(());
             }
         };
-        if let Some(stale) = self.follow_watch.take() {
-            self.ctx.end_follow_watch(stale);
-        }
-        // The site is armed only while the stepping thread is about to run.
-        // Not for a bounded wait: it hands back a running target, and no
-        // stop is left to end the watch at.
-        self.follow_watch = followed
-            .filter(|_| self.stop_wait.is_none())
-            .and_then(|thread| self.ctx.watch_followed(&thread, &[temp_id]));
-        self.caches.refresh_breakpoints(&self.ctx.breakpoints);
-
-        let result = self.continue_vm_with_disposition(disposition);
-
-        // A bounded wait that elapsed leaves the target running toward the
-        // temporary site; it is consumed by its own hit, so leave it armed
-        // (and a watch to the continue loop, which takes its stops).
-        if self.ctx.backend.is_running() {
-            return result.map(|_| false);
-        }
-        if let Some(watch) = self.follow_watch.take() {
-            self.ctx.end_follow_watch(watch);
-        }
-
-        // Temporary sites are removed when the stop is consumed (a one-shot hit
-        // clears itself); anything else left in place is a real problem.
-        if let Err(e) = self.ctx.remove_breakpoint(temp_id)
-            && !matches!(e, Error::BPNotFound(_))
-        {
-            error!(
-                "failed to remove temporary breakpoint at {}: {e}",
-                ui::addr(address.0)
-            );
-        }
-        self.caches.refresh_breakpoints(&self.ctx.breakpoints);
-
-        result.map(|_| {
-            let reached = self.current_ip() == Some(address.0);
-            if reached {
-                self.ctx
-                    .note_stop(&ContinueOutcome::Step { rip: address.0 });
-            }
-            reached
-        })
-    }
-
-    fn cmd_p(&mut self) -> Result<()> {
-        if let Err(error) = self.step_over_once() {
-            // Stepping *over* needs the instruction decoded to know whether it
-            // is a call, and the instruction cannot be read while its page is
-            // out. `t` executes the fetch instead of reading it, which is what
-            // brings the page in.
-            match (&error, self.current_ip()) {
-                (Error::BadVirtualAddress(_) | Error::AddressNotInDump(_), Some(ip)) => error!(
-                    "the page holding {} is not resident, so the instruction cannot be \
-                     decoded to step over it; `t` single-steps through the fetch",
-                    ui::addr(ip)
-                ),
-                _ => error!("failed to decode current instruction: {}", error),
-            }
-        }
+        let outcome = self.drive(motion, true);
+        self.report_run(outcome, "failed to step over");
         Ok(())
     }
 
-    fn step_over_once(&mut self) -> Result<bool> {
-        match self.ctx.step_over_target()? {
-            StepKind::Single => self.single_step_checked().map(|_| true),
-            StepKind::RunTo(target) => self.run_step_to(target, StepStack::CallReturn),
-        }
+    fn cmd_gu(&mut self) -> Result<()> {
+        let motion = match self.ctx.plan(Motion::StepOut) {
+            Ok(motion) => motion,
+            Err(error) => {
+                error!("{error}");
+                return Ok(());
+            }
+        };
+        let outcome = self.drive(motion, true);
+        self.report_run(outcome, "failed to step out");
+        Ok(())
     }
 
     fn required_address(
@@ -1004,74 +618,56 @@ impl ReplState<'_> {
         self.eval_or_report(expression)
     }
 
-    fn step_until(
-        &mut self,
-        mode: StepMode,
-        stop: impl Fn(u64, ControlFlow) -> bool,
-    ) -> Result<()> {
-        // A remote client's budget ends the walk where it is.
-        let remaining = self
-            .stop_wait
-            .as_ref()
-            .and_then(|budget| budget.deadline)
-            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
-        match self.ctx.step_until(mode, STEP_UNTIL_LIMIT, remaining, stop) {
-            Ok(ContinueOutcome::Step { .. }) => self.print_current_stop(),
-            Ok(outcome) => print_parked_outcome(self.ctx, &self.caches, outcome),
+    /// Walk into or over calls until `until` holds; a remote client's budget
+    /// ends the walk where it is.
+    fn step_until(&mut self, mode: StepMode, until: WalkUntil) -> Result<()> {
+        match self.drive(Motion::walk(mode, until), false) {
             Err(error @ Error::StepLimit(_)) => {
                 error!("{error}");
-                self.print_current_stop();
+                print_stop_separator();
+                print_break_context(self.ctx);
             }
-            Err(error) => error!("failed while stepping: {error}"),
+            outcome => self.report_run(outcome, "failed while stepping"),
         }
         Ok(())
     }
 
-    fn print_current_stop(&mut self) {
-        print_stop_separator();
-        print_break_context(self.ctx);
-    }
-
-    fn step_until_flow(&mut self, wanted: ControlFlow, mode: StepMode) -> Result<()> {
-        self.step_until(mode, move |_, flow| flow == wanted)
-    }
-
     fn cmd_pa(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         if let Some(address) = self.required_address(&invocation, "pa") {
-            self.step_until(StepMode::Over, move |ip, _| ip == address.0)?;
+            self.step_until(StepMode::Over, WalkUntil::Address(address))?;
         }
         Ok(())
     }
 
     fn cmd_ta(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         if let Some(address) = self.required_address(&invocation, "ta") {
-            self.step_until(StepMode::Into, move |ip, _| ip == address.0)?;
+            self.step_until(StepMode::Into, WalkUntil::Address(address))?;
         }
         Ok(())
     }
 
     fn cmd_pc(&mut self) -> Result<()> {
-        self.step_until_flow(ControlFlow::Call, StepMode::Over)
+        self.step_until(StepMode::Over, WalkUntil::Call)
     }
 
     fn cmd_tc(&mut self) -> Result<()> {
-        self.step_until_flow(ControlFlow::Call, StepMode::Into)
+        self.step_until(StepMode::Into, WalkUntil::Call)
     }
 
     fn cmd_pt(&mut self) -> Result<()> {
-        self.step_until_flow(ControlFlow::Ret, StepMode::Over)
+        self.step_until(StepMode::Over, WalkUntil::Return)
     }
 
     fn cmd_tt(&mut self) -> Result<()> {
-        self.step_until_flow(ControlFlow::Ret, StepMode::Into)
+        self.step_until(StepMode::Into, WalkUntil::Return)
     }
 
     fn cmd_ph(&mut self) -> Result<()> {
-        self.step_until_flow(ControlFlow::Branch, StepMode::Over)
+        self.step_until(StepMode::Over, WalkUntil::Branch)
     }
 
     fn cmd_th(&mut self) -> Result<()> {
-        self.step_until_flow(ControlFlow::Branch, StepMode::Into)
+        self.step_until(StepMode::Into, WalkUntil::Branch)
     }
 
     fn cmd_wt(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
@@ -1092,8 +688,11 @@ impl ReplState<'_> {
     }
 
     fn watch_trace(&mut self, limit: usize) -> Result<()> {
-        // Ctrl+C ends `wt`; it has no time limit of its own.
-        let trace = match self.ctx.trace_calls(limit, None) {
+        // Ctrl+C or a remote client's budget ends `wt`, halted where it got to.
+        let cancel =
+            budget_cancel(self.stop_wait.as_ref(), None).with_behavior(CancelBehavior::Halt);
+        let trace = self.ctx.trace_calls(limit, &cancel);
+        let trace = match trace {
             Ok(trace) => trace,
             Err(error) => {
                 error!("{error}");
@@ -1122,17 +721,5 @@ impl ReplState<'_> {
         #[cfg(not(feature = "cli"))]
         render_trace_frame(&trace.root, 0);
         Ok(())
-    }
-
-    fn cmd_gu(&mut self) -> Result<()> {
-        match self.ctx.step_out_target() {
-            Ok(target) => self
-                .run_step_to(target, StepStack::FunctionReturn)
-                .map(|_| ()),
-            Err(e) => {
-                error!("{}", e);
-                Ok(())
-            }
-        }
     }
 }
