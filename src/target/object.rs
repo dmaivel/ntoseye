@@ -1,6 +1,5 @@
 //! Object-manager inspectors: names, directories, driver/device objects, IRPs, handles, file objects, resources, object headers, notify callbacks, SSDT.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::bugchecks::looks_like_kernel_pointer;
@@ -9,6 +8,7 @@ use crate::expr::{Expr, NumberRadix};
 use crate::guest::{Guest, ProcessInfo};
 use crate::layout::{StructRef, TypeInfo, Types};
 use crate::memory::{MemoryOps, PAGE_SIZE};
+use crate::symbols::format_symbol_with_offset;
 use crate::types::VirtAddr;
 
 use super::{
@@ -552,15 +552,12 @@ impl Target {
     }
 
     fn walk_object_directory_bucket(
-        mut entry: VirtAddr,
+        entry: VirtAddr,
         mut visit: impl FnMut(VirtAddr) -> Result<VirtAddr>,
     ) -> Result<()> {
-        let mut visited = HashSet::new();
-        for _ in 0..4096 {
-            if entry.is_zero() || !visited.insert(entry.0) {
-                break;
-            }
-            entry = visit(entry)?;
+        let mut cursor = ListCursor::from_first(entry, 4096);
+        while let Some(current) = cursor.take_current() {
+            cursor.advance(Ok(visit(current)?));
         }
         Ok(())
     }
@@ -1499,14 +1496,10 @@ impl Target {
             let target = VirtAddr((base.0 as i64 + offset) as u64);
             let resolved = self.symbols.find_closest_symbol_for_address(dtb, target);
             let (symbol, module) = match resolved {
-                Some((module, name, off)) => {
-                    let sym = if off == 0 {
-                        format!("{module}!{name}")
-                    } else {
-                        format!("{module}!{name}+{off:#x}")
-                    };
-                    (Some(sym), Some(module))
-                }
+                Some((module, name, off)) => (
+                    Some(format_symbol_with_offset(&module, &name, off)),
+                    Some(module),
+                ),
                 None => (None, None),
             };
             entries.push(SsdtEntry {

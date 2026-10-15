@@ -1,6 +1,6 @@
 //! sched: structured inspector data (shared by the REPL, Python SDK, and MCP).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::cpu_state::{kpcr_for_processor, kprcb_for_processor, processor_count};
@@ -11,7 +11,8 @@ use crate::layout::{ParsedType, StructRef, TypeInfo, Types};
 use crate::memory::MemoryOps;
 use crate::symbols::glob_matches;
 use crate::target::{
-    DiagnosticValue, ListTermination, Target, ThreadInfo, bounded_list_walk, fast_ref_address,
+    DiagnosticValue, ListCursor, ListTermination, Target, ThreadInfo, bounded_list_walk,
+    fast_ref_address,
 };
 use crate::types::{MAX_PROCESSORS, VirtAddr};
 
@@ -1465,17 +1466,12 @@ impl Target {
         let head = eprocess.addr() + thread_list_head_offset;
 
         let mut threads = Vec::new();
-        let mut visited = HashSet::new();
-        let mut current: VirtAddr = memory.read(head)?;
-
-        for _ in 0..16384 {
-            if current.is_zero() || current == head || !visited.insert(current.0) {
-                break;
-            }
-
+        let mut cursor = ListCursor::new(head, 16384);
+        cursor.advance(Ok(memory.read(head)?));
+        while let Some(current) = cursor.take_current() {
             let ethread = current - thread_list_entry_offset;
             threads.push(self.thread_info_from_ethread_with_hint(ethread, Some(process))?);
-            current = memory.read(current)?;
+            cursor.advance(Ok(memory.read(current)?));
         }
 
         Ok(threads)
@@ -1640,19 +1636,12 @@ impl Target {
         let irp_layout = self.guest.as_ref()?.ntoskrnl.types().layout("_IRP").ok()?;
         let thread_list_entry_offset = irp_layout.field_offset("ThreadListEntry").ok()?;
         let head = ethread + irp_list_offset;
-        let mut current: VirtAddr = memory.read(head).ok()?;
+        let mut cursor = ListCursor::new(head, 256);
+        cursor.advance(Ok(memory.read(head).ok()?));
         let mut irps = Vec::new();
-        let mut visited = HashSet::new();
-
-        for _ in 0..256 {
-            if current.is_zero() || current == head || !visited.insert(current.0) {
-                break;
-            }
+        while let Some(current) = cursor.take_current() {
             irps.push(current - thread_list_entry_offset);
-            current = match memory.read(current) {
-                Ok(next) => next,
-                Err(_) => break,
-            };
+            cursor.advance(memory.read(current).map_err(|error| error.to_string()));
         }
 
         Some(irps)
