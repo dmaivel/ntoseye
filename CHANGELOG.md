@@ -13,6 +13,12 @@ Keeping this file:
 - To release, rename "## Unreleased" to "## vX.Y.Z (YYYY-MM-DD)", the version in Cargo.toml. The release workflow refuses a tag whose version has no section here, or an empty one; dist publishes the section as the release notes, under the tag as the release title.
 -->
 
+## Unreleased
+
+### Changed
+
+- `q` exits sooner, by 0.2 s on a minidump of a process with many modules loaded.
+
 ## v0.49.1 (2026-10-14)
 
 ### Fixed
