@@ -1,8 +1,9 @@
 use crate::bytes::{read_u16, read_u32, read_u64};
 use crate::cpu_context::{amd64, arm64};
+use crate::debugger_data::KdDebuggerData64;
 #[cfg(test)]
 use crate::dmp::IMAGE_FILE_MACHINE_AMD64;
-use crate::dmp::structs::{ExceptionRecord64, Header64, KdDebuggerData64};
+use crate::dmp::structs::{ExceptionRecord64, Header64};
 use crate::dmp::tagged::tagged_blocks_at;
 use crate::dmp::{
     DmpContext, DmpException, DmpInfo, DmpSystemInfo, IMAGE_FILE_MACHINE_ARM64, UnloadedDriver,

@@ -16,7 +16,7 @@ use crate::dbg_backend::{
     BackendCapability, DebugBackend, DebugCapability, RegisterMap, StopEvent,
     processor_index_from_backend_thread_id,
 };
-use crate::debugger_data::{DebuggerDataCandidate, MetadataSource};
+use crate::debugger_data::{DebuggerDataCandidate, KdDebuggerData64, MetadataSource};
 use crate::error::{Error, Result};
 use crate::layout::{ParsedType, TypeInfo};
 use crate::memory::PAGE_SIZE;
@@ -32,7 +32,7 @@ pub mod structs;
 pub mod tagged;
 
 use parse::ParsedDump;
-use structs::{Context, KdDebuggerData64};
+use structs::Context;
 use tagged::{TaggedBlock, tagged_blocks_at};
 
 pub const IMAGE_FILE_MACHINE_AMD64: u32 = 0x8664;
