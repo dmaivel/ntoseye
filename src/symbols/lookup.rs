@@ -394,6 +394,6 @@ impl SymbolStore {
             return None;
         }
         let first = entries.partition_point(|entry| entry.rva < rva);
-        Some((entries[first].name.clone(), offset))
+        Some((entries[first].name.to_string(), offset))
     }
 }

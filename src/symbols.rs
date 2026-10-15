@@ -11,6 +11,7 @@ use dashmap::DashMap;
 use memmap2::Mmap;
 use pdb2::TypeIndex;
 use rustc_hash::FxHashMap;
+use smallvec::{SmallVec, smallvec};
 use spin::{Mutex, RwLock};
 use std::{
     collections::{HashMap, HashSet},
@@ -107,6 +108,15 @@ struct IndexedSymbol {
     compiland: Option<String>,
 }
 
+/// Every record of one name. Nearly every name has exactly one, which is
+/// kept inline: a PDB has a hundred thousand names, and a heap block for
+/// each one's records was a tenth of indexing it.
+type SymbolRecords = SmallVec<[IndexedSymbol; 1]>;
+
+/// Symbol name -> its records, for one PDB. The name is shared with the
+/// PDB's [`AddressEntry`] list rather than copied into it.
+type SymbolRvas = FxHashMap<Arc<str>, SymbolRecords>;
+
 /// One address-bearing record of the RVA-sorted index behind
 /// [`SymbolStore::closest_symbol`]. Records sharing an RVA are ordered by
 /// the resolution preference (public first, then name, then compiland), so
@@ -114,7 +124,7 @@ struct IndexedSymbol {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AddressEntry {
     rva: u32,
-    name: String,
+    name: Arc<str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,7 +167,7 @@ pub struct SymbolStore {
     /// records when present but never collapses distinct candidate addresses.
     /// Hashed with FxHash, not the DoS-resistant default: indexing a PDB
     /// hashes every name in it, which with SipHash was a third of the work.
-    symbol_rvas: DashMap<u128, FxHashMap<String, Vec<IndexedSymbol>>>,
+    symbol_rvas: DashMap<u128, SymbolRvas>,
     /// GUID -> the same records sorted by RVA, for address-to-symbol lookups.
     symbol_addresses: DashMap<u128, Vec<AddressEntry>>,
     /// GUID -> the length of the function each symbol begins, by RVA, for
@@ -970,8 +980,8 @@ impl SymbolStore {
                     .iter()
                     .map(|(name, rva)| {
                         (
-                            name.clone(),
-                            vec![IndexedSymbol {
+                            Arc::from(name.as_str()),
+                            smallvec![IndexedSymbol {
                                 rva: *rva,
                                 visibility: SymbolVisibility::Public,
                                 compiland: None,
@@ -1070,8 +1080,8 @@ impl SymbolStore {
                 .iter()
                 .map(|(name, rva)| {
                     (
-                        name.to_string(),
-                        vec![IndexedSymbol {
+                        Arc::from(*name),
+                        smallvec![IndexedSymbol {
                             rva: *rva,
                             visibility: SymbolVisibility::Public,
                             compiland: None,

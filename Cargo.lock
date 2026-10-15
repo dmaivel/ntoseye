@@ -1673,6 +1673,7 @@ dependencies = [
  "sha1",
  "sha2",
  "single-instance",
+ "smallvec",
  "spin",
  "subtle",
  "tabled",

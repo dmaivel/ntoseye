@@ -3,7 +3,8 @@
 
 use super::{
     AddressEntry, IndexedSymbol, ProcedureSpan, SourceChecksum, SourceLineEntry, SourceLocation,
-    SymbolIndex, SymbolIndexDiagnostic, SymbolStore, SymbolVisibility, source::recorded_checksum,
+    SymbolIndex, SymbolIndexDiagnostic, SymbolRvas, SymbolStore, SymbolVisibility,
+    source::recorded_checksum,
 };
 use crate::error::{Error, Result};
 use crate::layout::aggregate_key;
@@ -22,7 +23,7 @@ use std::{
 /// indexes from it (which is parallel) runs with no lock held.
 struct ParsedSymbols {
     strings: Vec<String>,
-    rvas: FxHashMap<String, Vec<IndexedSymbol>>,
+    rvas: SymbolRvas,
     source_lines: Vec<SourceLineEntry>,
     procedures: Vec<ProcedureSpan>,
     source_checksums: FxHashMap<String, SourceChecksum>,
@@ -57,13 +58,17 @@ pub(super) fn undecorate_x86(name: &str) -> &str {
 }
 
 pub(super) fn insert_symbol_rva(
-    rvas: &mut FxHashMap<String, Vec<IndexedSymbol>>,
-    name: String,
+    rvas: &mut SymbolRvas,
+    name: &str,
     rva: u32,
     visibility: SymbolVisibility,
     compiland: Option<String>,
 ) {
-    let records = rvas.entry(name).or_default();
+    // Only a name not seen yet costs a copy of it.
+    let records = match rvas.get_mut(name) {
+        Some(records) => records,
+        None => rvas.entry(Arc::from(name)).or_default(),
+    };
     if records.iter().any(|record| {
         record.rva == rva && record.visibility == visibility && record.compiland == compiland
     }) {
@@ -76,12 +81,12 @@ pub(super) fn insert_symbol_rva(
     });
 }
 
-fn address_index(rvas: &FxHashMap<String, Vec<IndexedSymbol>>) -> Vec<AddressEntry> {
+fn address_index(rvas: &SymbolRvas) -> Vec<AddressEntry> {
     let rank = |visibility| match visibility {
         SymbolVisibility::Public => 0u8,
         SymbolVisibility::Private => 1,
     };
-    let mut entries: Vec<(u32, u8, &String, &Option<String>)> = rvas
+    let mut entries: Vec<(u32, u8, &Arc<str>, &Option<String>)> = rvas
         .iter()
         .flat_map(|(name, records)| {
             records
@@ -96,7 +101,7 @@ fn address_index(rvas: &FxHashMap<String, Vec<IndexedSymbol>>) -> Vec<AddressEnt
         .into_iter()
         .map(|(rva, _, name, _)| AddressEntry {
             rva,
-            name: name.clone(),
+            name: Arc::clone(name),
         })
         .collect()
 }
@@ -298,11 +303,7 @@ impl SymbolStore {
         Ok(())
     }
 
-    pub(super) fn publish_symbol_rvas(
-        &self,
-        guid: u128,
-        rvas: FxHashMap<String, Vec<IndexedSymbol>>,
-    ) {
+    pub(super) fn publish_symbol_rvas(&self, guid: u128, rvas: SymbolRvas) {
         self.symbol_addresses.insert(guid, address_index(&rvas));
         self.symbol_rvas.insert(guid, rvas);
     }
@@ -318,7 +319,7 @@ fn parse_module_streams(
     address_map: &AddressMap<'_>,
     string_table: Option<&StringTable<'_>>,
     strings: &mut Vec<String>,
-    rvas: &mut FxHashMap<String, Vec<IndexedSymbol>>,
+    rvas: &mut SymbolRvas,
     source_lines: &mut Vec<SourceLineEntry>,
     procedures: &mut Vec<ProcedureSpan>,
     source_checksums: &mut FxHashMap<String, SourceChecksum>,
@@ -433,7 +434,7 @@ fn parse_module_streams(
                         {
                             insert_symbol_rva(
                                 rvas,
-                                name.clone(),
+                                &name,
                                 rva.0,
                                 SymbolVisibility::Private,
                                 Some(compiland.clone()),
@@ -615,7 +616,7 @@ fn parse_public_symbols(
     address_map: &AddressMap<'_>,
     x86: bool,
     strings: &mut Vec<String>,
-    rvas: &mut FxHashMap<String, Vec<IndexedSymbol>>,
+    rvas: &mut SymbolRvas,
     diagnostics: &mut Vec<SymbolIndexDiagnostic>,
 ) -> Result<()> {
     let offset_limit = section_offset_limit(pdb);
@@ -632,7 +633,7 @@ fn parse_public_symbols(
                 if data.offset.offset <= offset_limit
                     && let Some(rva) = data.offset.to_rva(address_map)
                 {
-                    insert_symbol_rva(rvas, name.clone(), rva.0, SymbolVisibility::Public, None);
+                    insert_symbol_rva(rvas, &name, rva.0, SymbolVisibility::Public, None);
                 }
                 strings.push(name);
             }

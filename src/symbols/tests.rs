@@ -218,14 +218,14 @@ fn duplicate_private_symbols_remain_candidates_while_public_symbols_take_precede
     let mut symbols = FxHashMap::default();
     insert_symbol_rva(
         &mut symbols,
-        "duplicate".to_string(),
+        "duplicate",
         0x100,
         SymbolVisibility::Private,
         Some("first.obj".to_string()),
     );
     insert_symbol_rva(
         &mut symbols,
-        "duplicate".to_string(),
+        "duplicate",
         0x200,
         SymbolVisibility::Private,
         Some("second.obj".to_string()),
@@ -234,7 +234,7 @@ fn duplicate_private_symbols_remain_candidates_while_public_symbols_take_precede
 
     insert_symbol_rva(
         &mut symbols,
-        "duplicate".to_string(),
+        "duplicate",
         0x300,
         SymbolVisibility::Public,
         None,
@@ -264,8 +264,8 @@ fn symbol_resolution_reports_distinct_private_candidates() {
     store.publish_symbol_rvas(
         1,
         FxHashMap::from_iter([(
-            "worker".to_string(),
-            vec![
+            "worker".into(),
+            smallvec![
                 IndexedSymbol {
                     rva: 0x100,
                     visibility: SymbolVisibility::Private,
@@ -312,8 +312,8 @@ fn public_symbol_is_the_unique_resolution_for_a_duplicate_name() {
     store.publish_symbol_rvas(
         1,
         FxHashMap::from_iter([(
-            "worker".to_string(),
-            vec![
+            "worker".into(),
+            smallvec![
                 IndexedSymbol {
                     rva: 0x100,
                     visibility: SymbolVisibility::Private,
@@ -342,7 +342,7 @@ fn closest_symbol_picks_nearest_lower_record_and_prefers_public_at_ties() {
     let mut insert = |name: &str, rva, visibility, compiland: Option<&str>| {
         insert_symbol_rva(
             &mut rvas,
-            name.to_string(),
+            name,
             rva,
             visibility,
             compiland.map(str::to_string),
