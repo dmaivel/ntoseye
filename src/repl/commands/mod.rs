@@ -228,19 +228,22 @@ impl ReplState<'_> {
         let name = spec.names[0];
         match self.context {
             DispatchContext::Interactive => None,
-            DispatchContext::BreakpointAction if spec.run != RunEffect::None => Some(format!(
-                "run-control command '{name}' must not appear inside a breakpoint action; \
+            DispatchContext::BreakpointAction if spec.effects.run != RunEffect::None => {
+                Some(format!(
+                    "run-control command '{name}' must not appear inside a breakpoint action; \
                  use 'g' or 'gc' (no address) to continue"
-            )),
+                ))
+            }
             DispatchContext::ExceptionCommand
-                if spec.run != RunEffect::None || spec.run_state == Some(RunState::Running) =>
+                if spec.effects.run != RunEffect::None
+                    || spec.effects.state == RunState::Running =>
             {
                 Some(format!(
                     "run-control command '{name}' must not appear inside an exception command; \
                      use the policy's -f break, -f gh, or -f gn"
                 ))
             }
-            DispatchContext::Remote(RemoteClient::Dap) if spec.run == RunEffect::Run => {
+            DispatchContext::Remote(RemoteClient::Dap) if spec.effects.run == RunEffect::Run => {
                 Some(format!(
                     "'{name}' would block this session until the next stop; use the client's \
                  continue or step controls instead"
@@ -258,7 +261,7 @@ impl ReplState<'_> {
             )),
             // The client caches registers and memory for the stop it was last
             // told about; only its own resume packets may move the target.
-            DispatchContext::Remote(RemoteClient::Gdb) if spec.run != RunEffect::None => {
+            DispatchContext::Remote(RemoteClient::Gdb) if spec.effects.run != RunEffect::None => {
                 Some(format!(
                     "'{name}' would move the target behind the GDB client; use the client's \
                      continue or step controls instead"
@@ -330,9 +333,10 @@ impl ReplState<'_> {
     /// The per-command policy every dispatch path shares: the context's
     /// refusal of host commands and of run control, then a remote host's
     /// wait for the halt the command needs (against the target's state right
-    /// now, so a `break` earlier on the line counts), then the run-state
-    /// check. `None` means run it. `typed` is the name as the user wrote it,
-    /// which messages repeat (`k`, not the canonical `kn`).
+    /// now, so a `break` earlier on the line counts), then the command's
+    /// [`Effects`] through [`crate::session::Session::admit`], which the
+    /// Python SDK shares. `None` means run it. `typed` is the name as the
+    /// user wrote it, which messages repeat (`k`, not the canonical `kn`).
     fn admit(&mut self, spec: &CommandSpec, typed: &str) -> Result<Option<Flow>> {
         if let Some(reason) = self.host_command_denial(spec) {
             error!("{reason}");
@@ -346,25 +350,21 @@ impl ReplState<'_> {
             error!("{reason}");
             return Ok(Some(Flow::Denied));
         }
-        if spec.target == TargetRequirement::Kernel
-            && let Err(error) = self.ctx.target.require_kernel()
-        {
-            error!("{typed}: {error}");
-            return Ok(Some(Flow::Continue));
-        }
         if let Some(flow) = self.gate_remote_command(spec, typed)? {
             return Ok(Some(flow));
         }
-        if !check_run_state(self, spec) {
+        if let Err(refusal) = self.ctx.admit(&spec.effects) {
+            report_refusal(typed, refusal);
             return Ok(Some(Flow::Continue));
         }
         Ok(None)
     }
 
     fn dispatch_one(&mut self, line: &str, depth: usize) -> Result<Flow> {
-        // WinDbg processor syntax (`~`, `~2s`, `~*k`) is one token with the
-        // selector glued on, so it never matches a registered name.
-        if line.trim_start().starts_with('~') {
+        // WinDbg processor syntax (`~2s`, `~*k`) is one token with the
+        // selector glued on, so it never matches a registered name; a bare
+        // `~` is the listing, which is.
+        if line.trim_start().starts_with('~') && line.trim() != "~" {
             if let Some(spec) = command_registry().get("~")
                 && let Some(flow) = self.admit(spec, "~")?
             {

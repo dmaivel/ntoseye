@@ -100,7 +100,7 @@ cli = ["repl", "dep:ctrlc", "dep:clap", "dep:dialoguer", "dep:mimalloc", "dep:nu
 mcp = ["repl", "dep:rmcp", "dep:schemars", "dep:serde", "dep:serde_json", "dep:tokio", "dep:tokio-util", "dep:axum", "dep:tower-http", "dep:anyhow"]
 dap = ["repl", "dep:serde_json", "dep:base64"]
 gdbserver = ["repl", "dep:gdbstub"]
-python = ["repl", "dep:pyo3"]
+python = ["repl", "dep:pyo3", "pyo3/multiple-pymethods"]
 python-embed = ["python", "pyo3/auto-initialize", "dep:pyo3-build-config"]
 python-extension = ["python", "pyo3/extension-module"]
 # Emit PyO3 introspection data, from which `maturin` generates the SDK's type

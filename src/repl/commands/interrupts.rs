@@ -18,6 +18,7 @@ use crate::ui;
 repl_command! {
     cmd_apic;
     names: ["!apic", "apic"],
+    category: "cpu",
     usage: "!apic [processor]",
     summary: "Show a processor's local APIC: its ID, priorities, LVT, timer, and pending vectors.",
     details: "Reads the local APIC of the selected processor, or of the processor you give: in x2APIC mode through its MSRs (0x800-0x83f), in xAPIC mode through its registers at the physical address IA32_APIC_BASE names, read uncached. Both need a backend that reads MSRs and device registers: kd or kdnet. The target reads them on the processor that stopped it, so for another processor ntoseye switches the target to it and back, as rdmsr /p does. Shows the APIC ID and version, whether it is the bootstrap processor, the task and processor priorities, the spurious-interrupt vector register, the logical destination, the interrupt command register as an IPI (vector, delivery mode, destination), each local vector table entry (timer, LINT0, LINT1, error, performance counter, thermal, CMCI) with its vector, delivery mode, trigger, and mask, the timer's counts and divisor, the error status, and the vectors in service (ISR), requested (IRR), and level-triggered (TMR).",
@@ -29,6 +30,7 @@ repl_command! {
 repl_command! {
     cmd_ioapic();
     names: ["!ioapic", "ioapic"],
+    category: "cpu",
     usage: "!ioapic",
     summary: "Show the I/O APIC and PIC lines as the HAL set them up.",
     details: "Walks the HAL's registered interrupt controllers (nt!HalpRegisteredInterruptControllers) and shows each one, an I/O APIC or a legacy PIC, with its unit ID, ACPI resource ID, line range, and any problem the HAL recorded, then each line the HAL set up, from its own record of the line (_INTERRUPT_LINE_STATE): the line and its global system interrupt, the vector, the IRQL, edge or level trigger, polarity, and the processor target. This is what the HAL programmed into the redirection entries, read from kernel memory, so it works on every backend and in a kernel dump; it does not read the I/O APIC's registers.",
@@ -38,6 +40,7 @@ repl_command! {
 repl_command! {
     cmd_sysinfo;
     names: ["!sysinfo", "sysinfo"],
+    category: "cpu",
     usage: "!sysinfo machineid | smbios | cpuinfo",
     summary: "Show the machine's SMBIOS identity, its SMBIOS tables, or its processor.",
     details: "Reads the SMBIOS table the kernel found at boot (nt!WmipSMBiosTablePhysicalAddress) from physical memory. machineid shows the BIOS vendor, version, and date, and the system's and baseboard's manufacturer, product, and version, as WinDbg's !sysinfo machineid does. smbios lists every structure in the table with its type, handle, and length, and decodes the BIOS, system, baseboard, enclosure, processor, memory array, memory device, and mapped address structures. cpuinfo shows the current processor as !cpuinfo does.",

@@ -22,6 +22,7 @@ const MAX_DL_WORDS: usize = 64;
 repl_command! {
     cmd_dt;
     names: ["dt"],
+    category: "symbols, types, and expressions",
     usage: "dt [-r[N]] [-a[N]] [-v] [-y] [-l <field>] [module!]<type> [address] [field-pattern...]",
     summary: "Show a type layout or a decoded structure.",
     details: "-r expands nested structures, -a expands bounded arrays, and -v shows field sizes. -y matches names by case-insensitive prefix, and -l <field> walks a LIST_ENTRY field. ntoseye looks for a bare type name in the kernel PDB first, and then in the modules of the current address space. If the PDB of a module defines a member type, ntoseye names the type with that module (wdf01000!_WDF_DRIVER_GLOBALS) and expands it from that PDB. If the PDB only declares the type (a driver's _EPROCESS*), ntoseye resolves it as a bare name. Nested field paths use dots, and field patterns support * and ?. With -l, the given address is the first element, as in WinDbg, so the walk includes all nodes until it returns to that address. In memory, a list head and a record link look the same, so if you start at a list head instead of at `poi(ListHead)`, the command shows the head as one pseudo-record and does not drop a real record. If the list is empty, its link points to itself, and the command shows nothing. The walk keeps the entries that it collected, and reports null links, cycles, unreadable links, and when it reaches the entry limit.",
@@ -31,6 +32,7 @@ repl_command! {
 repl_command! {
     cmd_dl;
     names: ["dl"],
+    category: "memory and disassembly",
     usage: "dl [-b] <address> <maxcount> [size]",
     summary: "Dump a bounded _LIST_ENTRY chain.",
     details: "By default, the walk follows Flink, and -b follows Blink. The optional size is the number of pointer-sized words that the command shows for each element, 2 by default. The given address is the first element, as in WinDbg, so the walk includes all nodes until it returns to that address. In memory, a list head and a record link look the same, so if you start at a list head instead of at `poi(ListHead)`, the command shows the head as one pseudo-record and does not drop a real record. If the list is empty, its link points to itself, and the command shows nothing. The walk keeps the entries that it collected, and reports null links, cycles, unreadable links, and when it reaches the entry limit. It does not report when it reaches the requested maxcount.",
@@ -40,6 +42,7 @@ repl_command! {
 repl_command! {
     cmd_list_command -> Flow;
     names: ["!list"],
+    category: "objects and I/O",
     usage: "!list -t [module!]<type>.<field> -x \"<commands>\" <address>",
     summary: "Run commands for each element of a typed LIST_ENTRY chain.",
     details: "Each command can get the element address as $extret, @extret, or @$extret. The walk stops at the head, at a repeated link, or after 4096 elements. The given address is the first element, as in WinDbg, so the walk includes all nodes until it returns to that address. In memory, a list head and a record link look the same, so if you start at a list head instead of at `poi(ListHead)`, the command uses the head as one pseudo-record and does not drop a real record. If the list is empty, its link points to itself, and the command runs nothing. The walk keeps the entries that it collected, and reports null links, cycles, unreadable links, and when it reaches the entry limit. Ctrl+C stops the commands between elements. A command that the session does not accept, for example a resume inside a breakpoint action, stops the element commands and the rest of the command line, but a command that only reports an error does not stop them.",

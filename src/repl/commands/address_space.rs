@@ -32,6 +32,7 @@ const BYTES_PER_MIB: u64 = BYTES_PER_KIB * 1024;
 repl_command! {
     cmd_vmmap;
     names: ["!vad", "vmmap"],
+    category: "processes and modules",
     usage: "!vad [pid|eprocess]",
     summary: "Show the VAD tree of a process.",
     details: "Select a process by PID or EPROCESS expression. With no argument, the command uses the current process context, which you can select with `.process /p <pid>`. `vmmap [address|filter]` keeps the flat region view of the attached process, and shows the kernel modules when no process is attached. The VAD walk has a limit, and it skips the entries that it cannot read and continues the listing.",
@@ -42,6 +43,7 @@ repl_command! {
 repl_command! {
     cmd_address;
     names: ["!address", "address"],
+    category: "memory and disassembly",
     usage: "!address [-summary | address-expression]",
     summary: "Show the module and section, or the VAD region, that an address belongs to.",
     details: "On a user-mode minidump the command uses the regions that the dump's memory-info list records. Without an argument, it lists them with their state, protection, type, allocation base, usage, and how much of each the dump captured, followed by a summary by usage, type, state, and protection; -summary shows only the summary. With an address, it shows the region that holds it. Usage comes from the dump's modules, its threads' stacks and TEBs, the PEB, and the heaps in the PEB's ProcessHeaps array; it is <unknown> for any other region. A dump without a memory-info list shows the memory ranges it captured instead.",
@@ -51,6 +53,7 @@ repl_command! {
 repl_command! {
     cmd_vprot;
     names: ["!vprot", "vprot"],
+    category: "memory manager",
     usage: "!vprot <address>",
     summary: "Show the VirtualQuery data for a user address.",
     details: "The command shows the region, state, protection, and type of a user address, as VirtualQuery reports them. It looks up the address in the current process context, which you can select with `.process /p <pid>`. The VAD that holds the address gives AllocationBase, AllocationProtect, and Type, and the state and protection of each page come from its PTE. For a page without a PTE, they come from the VAD (private memory) or from its prototype PTE (a section view). RegionSize runs from the page of the address to the first page that differs. An address that is not in a VAD is MEM_FREE up to the next VAD. The scan stops after 262,144 page-table steps. On a user-mode minidump the command reads the region from the dump's memory-info list, which records what VirtualQuery returned when the dump was written; RegionSize runs from the page of the address to the end of that region.",

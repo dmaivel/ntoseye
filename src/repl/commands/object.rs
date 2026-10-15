@@ -24,6 +24,7 @@ use crate::repl::*;
 repl_command! {
     cmd_drivers;
     names: ["drivers"],
+    category: "processes and modules",
     usage: "drivers [filter]",
     summary: "List the driver objects in the \\Driver object directory.",
     target: Kernel,
@@ -32,6 +33,7 @@ repl_command! {
 repl_command! {
     cmd_drvobj;
     names: ["!drvobj", "drvobj"],
+    category: "objects and I/O",
     usage: "!drvobj <driver-object-expression-or-name>",
     summary: "Show a DRIVER_OBJECT with its device chain and dispatch table.",
     completion: Driver,
@@ -41,6 +43,7 @@ repl_command! {
 repl_command! {
     cmd_devobj;
     names: ["!devobj", "devobj"],
+    category: "objects and I/O",
     usage: "!devobj <device-object-expression>",
     summary: "Show a DEVICE_OBJECT and its attached stack.",
     completion: Expression,
@@ -50,6 +53,7 @@ repl_command! {
 repl_command! {
     cmd_irp;
     names: ["!irp", "irp"],
+    category: "objects and I/O",
     usage: "!irp <address-expression> [detail]",
     summary: "Show an IRP and its I/O stack locations.",
     details: "Shows the IRP as WinDbg does: which stack location is current, the MDL, system buffer and thread, then each location from the lowest driver's up, the current one marked with > and a run of locations the IRP has not reached as one unused line. A location shows its major and minor function, flags and control, device and file, its completion routine and context with when the routine runs (Success, Error, Cancel) and whether its driver returned pending, the device's driver, and four arguments. The driver of the location below it in the list set that completion routine. With a second argument, such as 1, it first shows the IRP's status, requestor mode, user event and user buffer.",
@@ -60,6 +64,7 @@ repl_command! {
 repl_command! {
     cmd_irps;
     names: ["irps"],
+    category: "objects and I/O",
     usage: "irps [process-filter|driver-filter]",
     summary: "Find the in-flight IRPs in thread IrpLists and device CurrentIrp fields.",
     completion: Process,
@@ -69,6 +74,7 @@ repl_command! {
 repl_command! {
     cmd_irpfind;
     names: ["!irpfind", "irpfind"],
+    category: "objects and I/O",
     usage: "!irpfind [-v] [pool-type [restart-address [criteria data]]]",
     summary: "Scan pool for the IRPs that IoAllocateIrp allocates.",
     details: "Scans the pool region for 16-byte-aligned _POOL_HEADERs with the tag Irp. On Windows 10 1803 and later, the region comes from MiState.Vs.SystemVaRegions, and otherwise it is MmNonPagedPoolStart/End or MmPagedPoolStart/End. The scan walks the page tables and reads only mapped pages, and big allocations come from PoolBigPageTable. The command counts a block only if its body is a live _IRP. In a live _IRP, Type is 6 (IoFreeIrp clears it), and Size is the header plus whole stack locations and at least IoSizeOfIrp(StackCount). A lookaside IRP keeps its larger packet size. CurrentLocation is at most StackCount + 1. For each IRP, the command shows its thread (Tail.Overlay.Thread), the process of its MDL, and the major function, minor function, device, and owning driver of the current stack location. If CurrentLocation is more than StackCount, the IRP shows as complete. -v also shows the pool header, I/O status, PendingReturned, UserEvent, UserBuffer, and OriginalFileObject, and also the file object and completion routine of the current location. pool-type is 0 (nonpaged, the default) or 1 (paged). The command does not accept 2 (special) or 4 (session), because these pool types have no region of their own on these builds. restart-address continues a scan from that page. The criteria are the same as in WinDbg: arg (Argument1-4 of a stack location), device (DeviceObject of a stack location), fileobject (Tail.Overlay.OriginalFileObject), mdlprocess (MdlAddress->Process), thread (Tail.Overlay.Thread), and userevent (UserEvent). Use 0 as the restart address to scan the whole pool. The scan stops after 4,096 IRPs, or when you press Ctrl-C, and then shows the command that continues the scan, with the criteria. The scan checks the big-pool allocations last. If the scan gets to the limit in the big-pool allocations, the command shows a message. A restart cannot get to the remaining big-pool allocations. A driver can build IRPs in its own allocations (IoInitializeIrp). These IRPs have the tag of that driver, so the scan does not find them. Use irps to list the IRPs in thread IrpLists.",
@@ -79,6 +85,7 @@ repl_command! {
 repl_command! {
     cmd_object;
     names: ["!object", "object"],
+    category: "objects and I/O",
     usage: "!object <path|object-expression>",
     summary: "Show an executive object header and body, and list the entries of a directory.",
     details: "A path that starts with `\\` is the name of an object in the object namespace (`!object \\`, `!object \\Driver\\ACPI`). The command looks up the path from the root directory and ignores case. It does not follow symbolic links in the path. For a directory, the command lists the entries and their types.",
@@ -89,6 +96,7 @@ repl_command! {
 repl_command! {
     cmd_callbacks;
     names: ["callbacks"],
+    category: "objects and I/O",
     usage: "callbacks [symbol-filter]",
     summary: "List the process, thread, and image notification callbacks.",
     completion: Symbol,
@@ -98,6 +106,7 @@ repl_command! {
 repl_command! {
     cmd_ssdt();
     names: ["ssdt"],
+    category: "objects and I/O",
     usage: "ssdt",
     summary: "Show the SSDT and the shadow SSDT.",
     target: Kernel,

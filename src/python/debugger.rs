@@ -10,6 +10,7 @@ use pyo3::{PyTraverseError, PyVisit};
 
 use super::args::{Disposition, Step, Until};
 use super::breakpoints::{Breakpoints, Exceptions};
+use super::command::admit;
 use super::context::Space;
 use super::handle::{Debugger, Owner, require_halted};
 use super::hypervisor::HypervisorPartition;
@@ -27,6 +28,7 @@ use super::{err, raise, runcontrol, runner};
 use crate::dbg_backend::ContinueDisposition;
 use crate::dump_writer::{collect_dump_metadata, write_kernel_dump};
 use crate::session::Stop;
+use crate::session::effects::Effects;
 use crate::view;
 use crate::view::record::Typed;
 
@@ -395,7 +397,7 @@ impl Debugger {
     /// `NtoseyeError`.
     fn reload(&self) -> PyResult<()> {
         self.with_session(|session| {
-            session.target.require_kernel().map_err(err)?;
+            admit(session, &Effects::KERNEL, "Debugger.reload")?;
             session.reload().map_err(err)
         })
     }

@@ -27,6 +27,7 @@ use crate::{Backend, TargetSpec};
 
 pub mod args;
 pub mod breakpoints;
+pub mod command;
 pub mod context;
 pub mod debugger;
 pub mod embed;

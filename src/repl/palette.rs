@@ -5,7 +5,7 @@
 use reedline::{EditCommand, Reedline, SearchDirection, SearchQuery};
 
 use super::native::palette::{self, Catalog, CommandEntry, Tab};
-use super::{CompletionStrategy, ReplState, TargetRequirement, command_registry};
+use super::{CompletionStrategy, ReplState, TargetScope, command_registry};
 use crate::target::TargetKind;
 
 /// The host command Alt+P sends the REPL loop.
@@ -56,7 +56,7 @@ impl ReplState<'_> {
         let user_dump = self.ctx.target.kind() == TargetKind::UserDump;
         for (_, spec) in command_registry().command_names() {
             if !seen.insert(spec.names[0])
-                || (user_dump && spec.target == TargetRequirement::Kernel)
+                || (user_dump && spec.effects.target == TargetScope::Kernel)
             {
                 continue;
             }

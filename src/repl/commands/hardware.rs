@@ -19,6 +19,7 @@ use crate::ui;
 repl_command! {
     cmd_qlocks;
     names: ["!qlocks", "qlocks"],
+    category: "cpu",
     usage: "!qlocks",
     summary: "Show which processors own or wait for each numbered queued spinlock.",
     details: "Reads the _KPRCB.LockQueue entries of each processor, which hold one _KSPIN_LOCK_QUEUE for each _KSPIN_LOCK_QUEUE_NUMBER lock. The table has the same layout as in WinDbg, with one row for each lock and one column for each processor. O marks the owner, and 1-n marks the wait order, which the command finds by following the queue links from the owner. C marks an entry whose owner or wait bits do not agree with the links. The table shows only the numbered locks (KeAcquireQueuedSpinLock). In-stack queued spinlocks are on the stacks of the callers that acquire them.",
@@ -28,6 +29,7 @@ repl_command! {
 repl_command! {
     cmd_ipi;
     names: ["!ipi", "ipi"],
+    category: "cpu",
     usage: "!ipi [processor]",
     summary: "Show the interprocessor interrupt (IPI) state of one processor or of all processors.",
     details: "For each processor, shows the IPI fields that its _KPRCB has on this Windows build. IpiFrozen is the freeze state that the debugger and KeFreezeExecution control (Running, Frozen, Freeze owner, ...). TargetCount and PacketBarrier apply to the processor as a sender and show the targets that did not finish its packet yet. The command also shows SelfIpiRequestSummary and IpiFrame, the trap frame of the IPI that the processor services now. Windows 10 and later builds have one mailbox for each sender, and on these builds the command also shows the requests that are in the queue of the processor and are not taken yet. For each request, it shows the sender, the request type, and for a packet, the worker routine and parameters. The request type (packet, TB flush, or cache flush) comes from RequestSummary. For the processor as a sender, the command also shows the processors whose queues still hold its request.",
@@ -38,6 +40,7 @@ repl_command! {
 repl_command! {
     cmd_pcitree;
     names: ["!pcitree", "pcitree"],
+    category: "objects and I/O",
     usage: "!pcitree",
     summary: "Show the PCI bus hierarchy that pci.sys tracks, with the functions on each bus.",
     details: "Reads the pci.sys segment list (pci!PciSegmentList), the root buses of each segment, and the functions and child buses of each bus. The data comes from the extensions of the driver (pci!_PCI_BUS and pci!_PCI_DEVICE), which exist on Windows 8 and later. Because the command reads only guest memory, it works on all backends. A bus line shows the bus number and the FDO extension. A function line shows the device and function number, the vendor and device ID, the PDO extension (devext), the PDO (devstack, for !devstack), and the class code and name. The secondary bus of a bridge follows the bridge and is indented. The JSON output also has the PnP instance path of each function.",
@@ -47,6 +50,7 @@ repl_command! {
 repl_command! {
     cmd_pci;
     names: ["!pci", "pci"],
+    category: "objects and I/O",
     usage: "!pci [flags] [bus [device [function [min max]]]]",
     summary: "Read and decode PCI configuration space.",
     details: "Scans a bus (0 by default) in the same way as WinDbg. The command reads function 0 of each device, and functions 1-7 when function 0 is multi-function, and prints one line for each function. The line shows device:function, vendor:device.revision, the command and status registers, the class, and the subsystem IDs or, for a bridge, the primary->secondary-subordinate buses. Cmd letters: i I/O space, m memory space, b bus master, w memory write and invalidate, p parity error response, s SERR. Sts letters: c capability list, 6 66 MHz, p master data parity error, A signaled target abort, s signaled system error. All arguments are hex. Flags: 0x1 is verbose and decodes the full header, including the class code, the header type, the command and status bits by name, the BARs, the expansion ROM, the bridge bus numbers, the interrupt pin and line, and the capability lists. 0x2 scans buses 0 through bus. 0x4 shows the raw bytes of the 64-byte header, and 0x8 shows the same bytes as dwords. 0x40 shows the capability lists (the PCI capabilities, and the extended capabilities of a PCI Express function). 0x100 shows the raw bytes of the 256-byte configuration space. If you give a device and a function, min and max dump that range, which can include extended space (0-0xfff). Configuration space contains device registers and is not RAM, so the command reads it through the backend. Over kd/kdnet, the HAL reads it (DbgKdGetBusDataApi, segment 0). Over gdb, the QEMU stub reads the ECAM page of the function in its physical-memory mode, and the command finds this page from the ACPI MCFG table that the HAL keeps. The memory and dump backends cannot read configuration space, but !pcitree works on them. The target must be halted.",
@@ -61,6 +65,7 @@ const PORT_WRITE_DETAILS: &str = "Writes the value to the port (a byte for ob, a
 repl_command! {
     cmd_ib;
     names: ["ib"],
+    category: "memory and disassembly",
     usage: "ib <port>",
     summary: "Read a byte from an I/O port.",
     details: PORT_READ_DETAILS,
@@ -71,6 +76,7 @@ repl_command! {
 repl_command! {
     cmd_ob;
     names: ["ob"],
+    category: "memory and disassembly",
     usage: "ob <port> <value>",
     summary: "Write a byte to an I/O port.",
     details: PORT_WRITE_DETAILS,
@@ -81,6 +87,7 @@ repl_command! {
 repl_command! {
     cmd_iw;
     names: ["iw"],
+    category: "memory and disassembly",
     usage: "iw <port>",
     summary: "Read a word from an I/O port.",
     details: PORT_READ_DETAILS,
@@ -91,6 +98,7 @@ repl_command! {
 repl_command! {
     cmd_ow;
     names: ["ow"],
+    category: "memory and disassembly",
     usage: "ow <port> <value>",
     summary: "Write a word to an I/O port.",
     details: PORT_WRITE_DETAILS,
@@ -101,6 +109,7 @@ repl_command! {
 repl_command! {
     cmd_id;
     names: ["id"],
+    category: "memory and disassembly",
     usage: "id <port>",
     summary: "Read a dword from an I/O port.",
     details: PORT_READ_DETAILS,
@@ -111,6 +120,7 @@ repl_command! {
 repl_command! {
     cmd_od;
     names: ["od"],
+    category: "memory and disassembly",
     usage: "od <port> <value>",
     summary: "Write a dword to an I/O port.",
     details: PORT_WRITE_DETAILS,

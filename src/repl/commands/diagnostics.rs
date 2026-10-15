@@ -17,6 +17,7 @@ use crate::userdump::UserHandle;
 repl_command! {
     cmd_handle;
     names: ["!handle"],
+    category: "objects and I/O",
     usage: "!handle [handle-expression [flags [type]]]",
     summary: "List a limited number of handles of the selected process, or show one handle.",
     details: "Without an argument, the command scans up to 256 handle-table slots. With a handle, it shows the object, type, name, access mask, and attributes, if it can decode them. On a user-mode minidump it lists the handles the dump's handle data records, as Windows reported them when the dump was written, with a count of each type; it has no objects to show. There, a handle of 0 selects every handle, flags choose what to show (1 type, 2 access, attributes, and counts, 4 name; the default shows all), and a type, such as File, keeps only handles of that type.",
@@ -26,6 +27,7 @@ repl_command! {
 repl_command! {
     cmd_token();
     names: ["!token"],
+    category: "security",
     usage: "!token",
     summary: "Show the primary token of the selected or current process.",
     details: "The command shows the token IDs, user and groups, privileges, type, impersonation level, and flags. It gets each field independently, and if the metadata or memory for a field is missing, it shows this in that field.",
@@ -35,6 +37,7 @@ repl_command! {
 repl_command! {
     cmd_fileobj;
     names: ["!fileobj"],
+    category: "objects and I/O",
     usage: "!fileobj <address-expression>",
     summary: "Decode a FILE_OBJECT and its relations to its device and name.",
     completion: Expression,
@@ -44,6 +47,7 @@ repl_command! {
 repl_command! {
     cmd_locks;
     names: ["!locks"],
+    category: "objects and I/O",
     usage: "!locks [resource-address-expression]",
     summary: "Show one ERESOURCE, or list the resources in the system resource list.",
     details: "Without an argument, the command uses ExpSystemResourcesList and shows up to 256 entries without scanning memory. If the symbol or the list metadata is not available, it cannot list the resources.",
@@ -54,6 +58,7 @@ repl_command! {
 repl_command! {
     cmd_memusage;
     names: ["!memusage"],
+    category: "memory manager",
     usage: "!memusage [process-limit]",
     summary: "Show the system memory-use counters and the counters of a limited number of processes.",
     details: "The command uses validated memory-manager globals, KDBG fields, or recognized public getter code, and EPROCESS.Vm counters. It does not scan physical memory, and it does not walk all VADs.",

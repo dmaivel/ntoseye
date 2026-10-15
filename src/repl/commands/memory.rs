@@ -84,6 +84,7 @@ fn print_symbol_values(rows: &[SymbolValueRow], item_size: usize) {
 repl_command! {
     cmd_pagein;
     names: [".pagein"],
+    category: "memory and disassembly",
     usage: ".pagein [/p <pid|eprocess>] <address>",
     summary: "Make a paged-out address resident with the debugger worker in the guest.",
     details: "Because the guest does the work, ntoseye resumes the target, which halts again at nt!DbgBreakPointWithStatus and not at its earlier location. `/p` attaches the worker to a process first, which user-space addresses need.",
@@ -95,6 +96,7 @@ repl_command! {
 repl_command! {
     cmd_db;
     names: ["db"],
+    category: "memory and disassembly",
     usage: "db <address> [L<count>|length|end]",
     summary: "Show memory as bytes.",
     completion: Expression,
@@ -103,6 +105,7 @@ repl_command! {
 repl_command! {
     cmd_dw;
     names: ["dw"],
+    category: "memory and disassembly",
     usage: "dw <address> [L<count>|length|end]",
     summary: "Show memory as words (2 bytes).",
     completion: Expression,
@@ -111,6 +114,7 @@ repl_command! {
 repl_command! {
     cmd_dw_ascii;
     names: ["dW"],
+    category: "memory and disassembly",
     usage: "dW <address> [L<count>|length|end]",
     summary: "Show memory as words with an ASCII column.",
     completion: Expression,
@@ -119,6 +123,7 @@ repl_command! {
 repl_command! {
     cmd_dc;
     names: ["dc"],
+    category: "memory and disassembly",
     usage: "dc <address> [L<count>|length|end]",
     summary: "Show memory as doublewords with an ASCII column.",
     completion: Expression,
@@ -127,6 +132,7 @@ repl_command! {
 repl_command! {
     cmd_dd;
     names: ["dd"],
+    category: "memory and disassembly",
     usage: "dd <address> [L<count>|length|end]",
     summary: "Show memory as doublewords (4 bytes).",
     completion: Expression,
@@ -135,6 +141,7 @@ repl_command! {
 repl_command! {
     cmd_dq;
     names: ["dq"],
+    category: "memory and disassembly",
     usage: "dq <address> [L<count>|length|end]",
     summary: "Show memory as quadwords (8 bytes).",
     completion: Expression,
@@ -143,6 +150,7 @@ repl_command! {
 repl_command! {
     cmd_dp;
     names: ["dp"],
+    category: "memory and disassembly",
     usage: "dp <address> [L<count>|length|end]",
     summary: "Show memory as pointer-sized values.",
     completion: Expression,
@@ -151,6 +159,7 @@ repl_command! {
 repl_command! {
     cmd_dds;
     names: ["dds"],
+    category: "memory and disassembly",
     usage: "dds <address> [L<count>|length|end]",
     summary: "Show memory as doublewords, and the symbol of each value that resolves to one.",
     completion: Expression,
@@ -159,6 +168,7 @@ repl_command! {
 repl_command! {
     cmd_dqs;
     names: ["dqs", "dps"],
+    category: "memory and disassembly",
     usage: "dqs <address> [L<count>|length|end]",
     summary: "Show memory as quadwords, and the symbol of each value that resolves to one.",
     details: "Use it for raw stack triage. If the unwinder cannot find the return addresses, dqs @rsp finds them in the raw stack.",
@@ -168,6 +178,7 @@ repl_command! {
 repl_command! {
     cmd_dyb;
     names: ["dyb"],
+    category: "memory and disassembly",
     usage: "dyb <address> [L<count>|length|end]",
     summary: "Show memory as binary values with their bytes.",
     completion: Expression,
@@ -176,6 +187,7 @@ repl_command! {
 repl_command! {
     cmd_dpp;
     names: ["dpp", "dqp", "ddp", "dqa", "dpa", "dda", "dqu", "dpu", "ddu"],
+    category: "memory and disassembly",
     usage: "dpp|ddp|dqa|dda|dqu|ddu <address> [L<count>|length|end]",
     summary: "Show pointers and the data that each pointer points to.",
     details: "After each pointer, d*p shows the value, d*a the ASCII string, and d*u the UTF-16 string at that pointer. dd* reads doubleword pointers, and dq* and its dp* aliases read quadwords. d*p also shows symbols.",
@@ -185,6 +197,7 @@ repl_command! {
 repl_command! {
     cmd_df;
     names: ["df", "dD"],
+    category: "memory and disassembly",
     usage: "df|dD <address> [L<count>|length|end]",
     summary: "Show memory as single-precision (df, 4-byte) or double-precision (dD, 8-byte) floating-point numbers.",
     completion: Expression,
@@ -193,6 +206,7 @@ repl_command! {
 repl_command! {
     cmd_da;
     names: ["da"],
+    category: "memory and disassembly",
     usage: "da <address> [max-chars]",
     summary: "Show a NUL-terminated ASCII string.",
     completion: Expression,
@@ -201,6 +215,7 @@ repl_command! {
 repl_command! {
     cmd_du;
     names: ["du"],
+    category: "memory and disassembly",
     usage: "du <address> [max-chars]",
     summary: "Show a NUL-terminated UTF-16 string (for example, a UNICODE_STRING Buffer).",
     completion: Expression,
@@ -209,6 +224,7 @@ repl_command! {
 repl_command! {
     cmd_ds;
     names: ["ds"],
+    category: "memory and disassembly",
     usage: "ds <address>",
     summary: "Show an ANSI_STRING descriptor and its buffer.",
     completion: [Expression, None],
@@ -217,6 +233,7 @@ repl_command! {
 repl_command! {
     cmd_ds_unicode;
     names: ["dS"],
+    category: "memory and disassembly",
     usage: "dS <address>",
     summary: "Show a UNICODE_STRING descriptor and its buffer.",
     completion: [Expression, None],
@@ -225,6 +242,7 @@ repl_command! {
 repl_command! {
     cmd_disasm;
     names: ["u", "disasm"],
+    category: "memory and disassembly",
     usage: "u [address [L<count>|length|end]]",
     summary: "Disassemble memory at a symbol or address.",
     details: "`L<count>` sets the number of instructions, 8 by default. If you give an end address, the command shows all instructions that start at or before that address. If you do not give an address, the command continues after the last instruction that the previous u showed. After the target runs or steps, or when you select another frame, thread, or process, it starts at the instruction pointer instead.",
@@ -234,6 +252,7 @@ repl_command! {
 repl_command! {
     cmd_uf;
     names: ["uf"],
+    category: "memory and disassembly",
     usage: "uf [address]",
     summary: "Disassemble the function that contains an address.",
     details: "The function's runtime function entry gives its extent. A leaf function has none, so uf reads it from its symbol for as far as its control flow reaches before the next symbol: it follows the branches inside the function, and treats a branch past the next symbol as a tail call.",
@@ -243,6 +262,7 @@ repl_command! {
 repl_command! {
     cmd_ub;
     names: ["ub"],
+    category: "memory and disassembly",
     usage: "ub <address> [L<count>]",
     summary: "Disassemble the instructions that end at an address.",
     completion: Expression,
@@ -251,6 +271,7 @@ repl_command! {
 repl_command! {
     cmd_disasm_search;
     names: ["#"],
+    category: "memory and disassembly",
     usage: "# [pattern] [address [L<count>]]",
     summary: "Search the disassembly for the next instruction that matches a pattern.",
     details: "The pattern can match any part of the address, bytes, or text of an instruction, where the text is the mnemonic, the operands, and the resolved symbol. The match is not case-sensitive, and you can use `*` and `?` wildcards. To include spaces, put the pattern in quotes (`# \"mov*cr3\" nt!KiSwapContext`). The command shows the first match. If you do not give an address, the search continues after the last match, and the first search starts at the instruction pointer. If you do not give a pattern, the command uses the last pattern again, so a bare `#` finds the next occurrence. `L<count>` sets the maximum number of instructions to search. Without it, the search continues until it finds a match, reaches an unreadable page, or searches 1,048,576 instructions, and you can also stop it with Ctrl+C.",
@@ -260,6 +281,7 @@ repl_command! {
 repl_command! {
     cmd_eb;
     names: ["eb"],
+    category: "memory and disassembly",
     usage: "eb <address> <value...>",
     summary: "Write one or more bytes to memory.",
     completion: Expression,
@@ -268,6 +290,7 @@ repl_command! {
 repl_command! {
     cmd_ew;
     names: ["ew"],
+    category: "memory and disassembly",
     usage: "ew <address> <value...>",
     summary: "Write one or more words (2 bytes) to memory.",
     completion: Expression,
@@ -276,6 +299,7 @@ repl_command! {
 repl_command! {
     cmd_ed;
     names: ["ed"],
+    category: "memory and disassembly",
     usage: "ed <address> <value...>",
     summary: "Write one or more doublewords (4 bytes) to memory.",
     completion: Expression,
@@ -284,6 +308,7 @@ repl_command! {
 repl_command! {
     cmd_eq;
     names: ["eq"],
+    category: "memory and disassembly",
     usage: "eq <address> <value...>",
     summary: "Write one or more quadwords (8 bytes) to memory.",
     completion: Expression,
@@ -292,6 +317,7 @@ repl_command! {
 repl_command! {
     cmd_ef;
     names: ["ef", "eD"],
+    category: "memory and disassembly",
     usage: "ef|eD <address> <number...>",
     summary: "Write single-precision (ef, 4-byte) or double-precision (eD, 8-byte) floating-point numbers to memory.",
     details: "The numbers are decimal floating-point literals (`ef @rcx 1.5 -2 3e-4`), whatever the radix setting.",
@@ -301,6 +327,7 @@ repl_command! {
 repl_command! {
     cmd_ea;
     names: ["ea"],
+    category: "memory and disassembly",
     usage: "ea <address> \"text\"",
     summary: "Write an ANSI string to memory.",
     completion: Expression,
@@ -309,6 +336,7 @@ repl_command! {
 repl_command! {
     cmd_eu;
     names: ["eu"],
+    category: "memory and disassembly",
     usage: "eu <address> \"text\"",
     summary: "Write a UTF-16 string to memory.",
     completion: Expression,
@@ -317,6 +345,7 @@ repl_command! {
 repl_command! {
     cmd_eza;
     names: ["eza"],
+    category: "memory and disassembly",
     usage: "eza <address> \"text\"",
     summary: "Write a NUL-terminated ANSI string to memory.",
     completion: Expression,
@@ -325,6 +354,7 @@ repl_command! {
 repl_command! {
     cmd_ezu;
     names: ["ezu"],
+    category: "memory and disassembly",
     usage: "ezu <address> \"text\"",
     summary: "Write a NUL-terminated UTF-16 string to memory.",
     completion: Expression,
@@ -333,6 +363,7 @@ repl_command! {
 repl_command! {
     cmd_writemem;
     names: [".writemem"],
+    category: "memory and disassembly",
     usage: ".writemem <file> <address> <L<len>|end>",
     summary: "Write a virtual memory range to a file.",
     completion: [None, Expression, Expression],
@@ -341,6 +372,7 @@ repl_command! {
 repl_command! {
     cmd_readmem;
     names: [".readmem"],
+    category: "memory and disassembly",
     usage: ".readmem <file> <address> <L<len>|end>",
     summary: "Read a file into a virtual memory range.",
     completion: [None, Expression, Expression],
@@ -349,6 +381,7 @@ repl_command! {
 repl_command! {
     cmd_formats;
     names: [".formats"],
+    category: "symbols, types, and expressions",
     usage: ".formats <expression>",
     summary: "Show an expression in common numeric formats.",
     completion: Expression,
@@ -358,6 +391,7 @@ repl_command! {
 repl_command! {
     cmd_f;
     names: ["f"],
+    category: "memory and disassembly",
     usage: "f <address> <L<count>|end> <pattern>",
     summary: "Fill memory with a repeated byte pattern.",
     details: "The pattern is bytes, in the same format as for `s`: `90`, `48 89 5c`, `48895c`, or `\\x48\\x89`. The command repeats the pattern to fill the range (`f @rsp L20 cc`).",
@@ -367,6 +401,7 @@ repl_command! {
 repl_command! {
     cmd_s;
     names: ["s"],
+    category: "memory and disassembly",
     usage: "s [-b|-w|-d|-q|-a|-u] <address> <L<count>|end> <pattern>",
     summary: "Search memory for bytes, values, or a string.",
     details: "-b (the default) searches for bytes: `4d 5a`, `4d5a`, or `\\x4d\\x5a`. -w, -d, and -q search for 2-, 4-, and 8-byte values (`s -d @rsp L100 0 1`). -a and -u search for an ASCII or UTF-16 string (`s -a nt L?1000000 \"This program\"`). `L<count>` sets the number of elements of the search type. The search skips unreadable pages, scans up to 1 GiB, and stops after 4096 matches or when you press Ctrl+C.",
@@ -376,6 +411,7 @@ repl_command! {
 repl_command! {
     cmd_c;
     names: ["c"],
+    category: "memory and disassembly",
     usage: "c <address> <L<count>|end> <address2>",
     summary: "Compare two memory ranges byte by byte.",
     details: "The command compares the range with the same number of bytes at <address2>. It lists each byte that is different, as `<address> <byte> - <address2> <byte>` (`c nt L1000 poi(@$t0)`). If an offset is unreadable in one of the ranges, the command skips and counts it. It compares up to 1 GiB and stops after 4096 differences or when you press Ctrl+C.",
@@ -385,6 +421,7 @@ repl_command! {
 repl_command! {
     cmd_m;
     names: ["m"],
+    category: "memory and disassembly",
     usage: "m <address> <L<count>|end> <destination>",
     summary: "Copy a memory range to another address.",
     details: "The command reads the full range before it writes, so overlapping ranges copy as if through a buffer (`m @rsp L20 @rsp+8`). If this session set a breakpoint in the range, the command copies the original byte that the breakpoint replaced. It copies up to 16 MiB, and if a byte of the range is unreadable, it writes nothing.",

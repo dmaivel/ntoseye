@@ -8,17 +8,37 @@ use std::time::{Duration, Instant};
 
 use pyo3::prelude::*;
 
-use super::handle::{Debugger, require_halted};
+use super::command::admit;
+use super::handle::Debugger;
 use super::symbols::Location;
 use super::{err, raise, timeout_arg};
 use crate::dbg_backend::ContinueDisposition;
 use crate::output;
+use crate::session::effects::{Effects, RunEffect, RunState};
 use crate::session::{
     Cancel, CancelBehavior, Motion, RunOutcome, Session, StepMode, Stop, StopKind, WalkUntil,
 };
 use crate::types::VirtAddr;
 use crate::view;
 use crate::view::record::Typed;
+
+/// What the run-control methods need, as the REPL's run commands declare
+/// it (`g`; `t`/`p`; `gu`, `pa`, `wt`, `.reboot`, `.crash`), so
+/// [`admit`] refuses them as it refuses those.
+const RESUME: Effects = Effects {
+    run: RunEffect::Run,
+    ..Effects::NONE
+};
+const STEP: Effects = Effects {
+    state: RunState::Halted,
+    run: RunEffect::Step,
+    ..Effects::NONE
+};
+const HALTED_RUN: Effects = Effects {
+    state: RunState::Halted,
+    run: RunEffect::Run,
+    ..Effects::NONE
+};
 
 thread_local! {
     static IN_CONDITION: Cell<bool> = const { Cell::new(false) };
@@ -189,6 +209,8 @@ fn prune_conditions(dbg: &Bound<'_, Debugger>) -> PyResult<()> {
 /// and stays the current stop, which the next wait reports.
 pub fn cont(dbg: &Bound<'_, Debugger>, disposition: ContinueDisposition) -> PyResult<()> {
     reject_condition_mutation()?;
+    dbg.get()
+        .with_session(|session| admit(session, &RESUME, "cont"))?;
     drive(
         dbg,
         Motion::Continue { disposition },
@@ -205,6 +227,8 @@ pub fn run<'py>(
 ) -> PyResult<Option<Typed<'py, Stop>>> {
     reject_condition_mutation()?;
     let timeout = timeout_arg(timeout)?;
+    dbg.get()
+        .with_session(|session| admit(session, &RESUME, "run"))?;
     settle(
         dbg,
         Motion::Continue { disposition },
@@ -230,7 +254,7 @@ pub fn run_to<'py>(
     reject_condition_mutation()?;
     let timeout = timeout_arg(timeout)?;
     let address = dbg.get().with_session(|session| {
-        require_halted(session, "run_to")?;
+        admit(session, &HALTED_RUN, "run_to")?;
         location
             .resolve(session, session.target.current_dtb())
             .map(VirtAddr)
@@ -254,7 +278,7 @@ pub fn step<'py>(
     reject_condition_mutation()?;
     let timeout = timeout_arg(timeout)?;
     dbg.get()
-        .with_session(|session| require_halted(session, "step"))?;
+        .with_session(|session| admit(session, &STEP, "step"))?;
     let motion = until.map_or(Motion::Step, |until| Motion::walk(StepMode::Into, until));
     settle_stop(dbg, motion, timeout)
 }
@@ -267,7 +291,7 @@ pub fn step_over<'py>(
     reject_condition_mutation()?;
     let timeout = timeout_arg(timeout)?;
     dbg.get()
-        .with_session(|session| require_halted(session, "step_over"))?;
+        .with_session(|session| admit(session, &STEP, "step_over"))?;
     let motion = until.map_or(Motion::StepOver, |until| {
         Motion::walk(StepMode::Over, until)
     });
@@ -281,7 +305,7 @@ pub fn step_out<'py>(
     reject_condition_mutation()?;
     let timeout = timeout_arg(timeout)?;
     dbg.get()
-        .with_session(|session| require_halted(session, "step_out"))?;
+        .with_session(|session| admit(session, &STEP, "step_out"))?;
     settle_stop(dbg, Motion::StepOut, timeout)
 }
 
@@ -294,7 +318,7 @@ pub fn trace_calls<'py>(
     let timeout = timeout_arg(timeout)?;
     let deadline = timeout.map(|timeout| Instant::now() + timeout);
     let trace = dbg.get().with_session(move |session: &mut Session| {
-        require_halted(session, "trace_calls")?;
+        admit(session, &HALTED_RUN, "trace_calls")?;
         let cancel = Cancel {
             flag: None,
             deadline,
@@ -318,7 +342,7 @@ pub fn interrupt<'py>(dbg: &Bound<'py, Debugger>) -> PyResult<Typed<'py, Stop>> 
 pub fn reboot(dbg: &Bound<'_, Debugger>) -> PyResult<()> {
     reject_condition_mutation()?;
     dbg.get().with_session(|session| {
-        require_halted(session, "reboot")?;
+        admit(session, &HALTED_RUN, "reboot")?;
         session.request_reboot().map_err(err)
     })?;
     prune_conditions(dbg)
@@ -327,7 +351,7 @@ pub fn reboot(dbg: &Bound<'_, Debugger>) -> PyResult<()> {
 pub fn crash(dbg: &Bound<'_, Debugger>) -> PyResult<()> {
     reject_condition_mutation()?;
     dbg.get().with_session(|session| {
-        require_halted(session, "crash")?;
+        admit(session, &HALTED_RUN, "crash")?;
         session.request_crash().map_err(err)
     })?;
     prune_conditions(dbg)

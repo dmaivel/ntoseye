@@ -24,6 +24,7 @@ use crate::repl::*;
 repl_command! {
     cmd_analyze;
     names: ["!analyze", "analyze"],
+    category: "analysis",
     usage: "!analyze [-v] [-show <bugcheck-code> [p1 p2 p3 p4]] [-hang]",
     summary: "Show a first-pass crash triage report.",
     details: "Without -v, the command shows the short verdict: the bugcheck line, the failure signature, the culprit, the verifier and WHEA findings, and the relevant modules. -v adds the full bugcheck arguments, the faulting context, the stack, and all modules. For a DRIVER_POWER_STATE_FAILURE (0x9F), the report names what is stuck: for subtype 0x3, the blocked IRP, the driver whose stack location it is pending in, which becomes the culprit, the device stack of the PDO, and the power IRP worker threads with their stacks; for 0x4, the thread that holds the PnP lock and its stack; for 0x1, 0x2, and 0x500, the driver of the device or driver object in the parameters. -show decodes a bugcheck code when there is no crash, and for a 0x9F reads what its parameters point to in the target. -hang triages the waits on each processor. On a user-mode minidump, the report is the exception the dump was written for: its code, flags, and decoded parameters, the faulting thread and module, the stack from the exception's context, and the first frame outside the system modules (ntdll, kernelbase, the C++ and .NET runtimes), which the signature and the culprit name; -v adds the whole stack, the exception's registers, the faulting and culprit modules' details, and all modules. -show and -hang need a kernel.",
@@ -33,6 +34,7 @@ repl_command! {
 repl_command! {
     cmd_bugcheck();
     names: [".bugcheck"],
+    category: "analysis",
     usage: ".bugcheck",
     summary: "Show the bugcheck code and its four parameters.",
     details: "Uses the bugcheck that the stop reported. If there is none, it uses the bugcheck in nt!KiBugCheckData, as $bug_code and $bug_param1-4 do, and if there is none there, the bugcheck in the crash dump header. !analyze uses the same order.",

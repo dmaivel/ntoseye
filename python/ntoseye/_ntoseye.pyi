@@ -7258,10 +7258,14 @@ class Inspect:
         """
     def job(self, /, address: int |None = None) -> Job:
         """
-        Decode a job object (`!job`). The result has the accounting, limits,
-        flags, nesting, and the processes that are assigned to the job.
-        `address` is the job or a process or thread whose job to decode, and
-        `None` selects the job of the current process.
+        Show a job object and the processes in it.
+        
+        Shows a job object. The address can be a job, or a process or thread, for
+        which the command shows its job. If you do not give an address, or give 0,
+        the command shows the job of the current process. Flag 1 (the default)
+        shows the accounting, limits, and flags of the job, and also the child
+        jobs, the parent and root job, and the silo state. Flag 2 lists the
+        processes assigned to the job (from ProcessListHead).
         """
     def lookaside(self, /, address: int) -> LookasideList:
         """
@@ -12182,6 +12186,17 @@ class Process:
         """
         The heaps in the PEB of this process.
         """
+    def inspect(self, /) -> ProcessDetail:
+        """
+        List or inspect Windows processes.
+        
+        `!process 0 0` lists all processes. Bit 1 adds process details, bit 2
+        adds threads, and bit 4 adds the stack of each thread. An image name in
+        place of the process shows every process whose name contains it or
+        matches it as a glob, as the last argument filters: `!process
+        explorer.exe` shows explorer.exe, and `!process svchost 0` lists each
+        svchost.exe. `ps` keeps its short legacy list format.
+        """
     @property
     def memory(self, /) -> Memory:
         """
@@ -12262,6 +12277,60 @@ class Process:
         """
         True if this process has a WOW64 (32-bit) PEB.
         """
+
+@final
+class ProcessDetail(BaseRecord):
+    """
+    A process as `!process` shows it: its identity and the layout-sensitive
+    `_EPROCESS` fields. Each field is `None` when this build's layout lacks
+    it or its read failed.
+    """
+    @property
+    def commit_charge(self, /) -> int |None: ...
+    @property
+    def create_time(self, /) -> int |None:
+        """
+        `CreateTime` as a FILETIME.
+        """
+    @property
+    def debug_port(self, /) -> int |None: ...
+    @property
+    def directory_table_base(self, /) -> int |None: ...
+    @property
+    def handle_count(self, /) -> int |None: ...
+    @property
+    def job(self, /) -> int |None: ...
+    @property
+    def kernel_time(self, /) -> int |None: ...
+    @property
+    def object_table(self, /) -> int |None: ...
+    @property
+    def parent_pid(self, /) -> int |None: ...
+    @property
+    def peak_virtual_size(self, /) -> int |None: ...
+    @property
+    def peb(self, /) -> int |None:
+        """
+        The `_PEB`.
+        """
+    @property
+    def private_page_count(self, /) -> int |None: ...
+    @property
+    def process(self, /) -> ProcessInfo: ...
+    @property
+    def quota_nonpaged_pool(self, /) -> int |None: ...
+    @property
+    def quota_paged_pool(self, /) -> int |None: ...
+    @property
+    def session_id(self, /) -> int |None: ...
+    @property
+    def token(self, /) -> int |None: ...
+    @property
+    def user_time(self, /) -> int |None: ...
+    @property
+    def vad_root(self, /) -> int |None: ...
+    @property
+    def working_set_size(self, /) -> int |None: ...
 
 @final
 class ProcessGlobalFlags(BaseRecord):
@@ -15380,10 +15449,19 @@ class Thread:
         """
         The `_ETHREAD` address, which identifies the thread.
         """
-    def inspect(self, /) -> ThreadInfo:
+    def inspect(self, /) -> ThreadDetail:
         """
-        Get the thread as the walk read it: its identity, state, scheduling
-        details and stack bounds (`!thread`).
+        Show a Windows thread and, optionally, its kernel stack.
+        
+        You can also use the legacy `thread <tid> k|r [count]` forms. A numeric
+        flags value selects the detail and stack output, and count sets the
+        maximum number of stack frames (32 by default, or 16 for `k`). The command
+        shows `-` for a field that is not available. If the vCPU of a running
+        thread is halted in the Windows hypervisor (VBS), the command shows the
+        thread from the VTL0 state that the hypervisor saved, and `.thread`
+        selects the thread in the same way. While the target runs, the command
+        shows the thread but does not select it, and a thread that runs on a
+        processor has no stack.
         """
     @property
     def kthread(self, /) -> int:
@@ -15438,6 +15516,34 @@ class Thread:
         """
         The reason the thread waits, as a `_KWAIT_REASON` member (`IntEnum`).
         """
+
+@final
+class ThreadDetail(BaseRecord):
+    """
+    A thread as `!thread` shows it: the thread, the vCPU running it, and the
+    `_ETHREAD`/`_KTHREAD` fields the listing adds. Each field is `None` when
+    this build's layout lacks it or its read failed.
+    """
+    @property
+    def cpu(self, /) -> str |None:
+        """
+        The vCPU running the thread (`p1.2`), or `None` when it is not
+        running.
+        """
+    @property
+    def kernel_time(self, /) -> int |None: ...
+    @property
+    def quantum_target(self, /) -> int |None: ...
+    @property
+    def ready_time(self, /) -> int |None: ...
+    @property
+    def thread(self, /) -> ThreadInfo: ...
+    @property
+    def user_time(self, /) -> int |None: ...
+    @property
+    def wait_time(self, /) -> int |None: ...
+    @property
+    def win32_thread(self, /) -> int |None: ...
 
 @final
 class ThreadInfo(BaseRecord):

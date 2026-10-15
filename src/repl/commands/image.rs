@@ -15,6 +15,7 @@ use crate::ui;
 repl_command! {
     cmd_dh;
     names: ["!dh", "dh"],
+    category: "processes and modules",
     usage: "!dh [-f] [-s] [-e] [-i] [-a] <module|address>",
     summary: "Show the headers of a mapped PE image.",
     details: "The argument is a module name, an address, or an image base. A module name is `nt`, `hal`, `ntdll`, or the image name of the module, and ntoseye looks for it in the `.process` module list first, and then in the kernel module list. An address can be any address inside a loaded module. An image base can be the base of an image that no loader list contains, if that image starts with MZ. With no options, the command shows the file and section headers, as WinDbg does. -f: the file header, the optional header (entry point, image base, subsystem, DLL characteristics, stack and heap sizes), and the data directories (RVA and size). For the security directory, the value is a file offset. -s: the section table with decoded flags, and the debug directory with its CodeView PDB name, GUID, and age. -e: the export directory and all exports (ordinal, RVA, name or forwarder). -i: each import descriptor and its imports (hint and name or ordinal), with the address that the loader bound in the IAT. If a descriptor has no import name table, the command shows only the bound addresses, because its IAT no longer contains names. -a: all of these. You can combine options (`-fs`, `-f -i`). If ntoseye cannot read a directory, it shows the directory as unavailable and shows the other data. For example, the import table of a driver is in its INIT section, and Windows discards that section after load. The same applies to an import name or a module name that ntoseye cannot read. The command reads the headers from memory as they are mapped, so the values are the ones that the loader left there.",
@@ -24,6 +25,7 @@ repl_command! {
 repl_command! {
     cmd_lmi;
     names: ["!lmi", "lmi"],
+    category: "processes and modules",
     usage: "!lmi <module|address>",
     summary: "Show the image identity, debug directory, and symbol state of a loaded module.",
     details: "The argument is a module name as for !dh (`nt`, `ntdll`, an image name), or any address inside the module. From the mapped headers, the command shows the base, image name and path, machine, time stamp, size, checksum, and characteristics. It also shows the debug directory with the CodeView PDB name, GUID, and age. Last, it shows whether symbols are loaded, where they come from, and the local PDB file.",

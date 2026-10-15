@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressStyle};
+use ntoseye_macros::command;
 use owo_colors::OwoColorize;
 use tabled::builder::Builder;
 
@@ -10,6 +11,7 @@ use crate::error::{Error, Result};
 use crate::expr::Expr;
 use crate::output;
 use crate::repl::*;
+use crate::session::Session;
 use crate::session::{UserThreadSummary, VcpuInfo};
 use crate::target::cpu::{
     CpuInfoDetail, CpuTriageInfo, DescriptorDetail, GdtDetail, GdtEntryDetail, IdtDetail,
@@ -37,6 +39,7 @@ enum TildeSelector {
 repl_command! {
     cmd_rdmsr;
     names: ["rdmsr"],
+    category: "cpu",
     usage: "rdmsr [/p <processor>] <msr>",
     summary: "Read a model-specific register from a halted processor.",
     details: "Reads one model-specific register on the selected processor, or on another processor that you select with /p. The dump and memory backends show that MSR access is unavailable.",
@@ -48,6 +51,7 @@ repl_command! {
 repl_command! {
     cmd_wrmsr;
     names: ["wrmsr"],
+    category: "cpu",
     usage: "wrmsr <msr> <value>",
     summary: "Write a model-specific register on the current processor.",
     details: "Writes one model-specific register on the current processor. You can use a common IA32_* name instead of the numeric MSR.",
@@ -59,6 +63,7 @@ repl_command! {
 repl_command! {
     cmd_pcr;
     names: ["!pcr", "pcr"],
+    category: "cpu",
     usage: "!pcr [processor]",
     summary: "Show the main KPCR data of the selected processor.",
     details: "Shows the KPCR and KPRCB addresses, the thread pointers, the descriptor registers, the TSS, and the available IRQL fields. On AMD64 Windows, kernel GS usually points to the KPCR, and backend GS-base registers are optional.",
@@ -69,6 +74,7 @@ repl_command! {
 repl_command! {
     cmd_prcb;
     names: ["!prcb", "prcb"],
+    category: "cpu",
     usage: "!prcb [processor]",
     summary: "Show the main KPRCB data of the selected processor.",
     details: "Shows the processor number, the thread pointers, the DPC and interrupt counters, and the available ProcessorState metadata of the selected KPRCB.",
@@ -79,6 +85,7 @@ repl_command! {
 repl_command! {
     cmd_irql;
     names: ["!irql", "irql"],
+    category: "cpu",
     usage: "!irql [processor]",
     summary: "Show the current IRQL of a processor.",
     details: "Shows the current IRQL and the Windows level name of the selected processor. At a KD break-in, this is the IRQL that the debugger sees, which can be different from the level before the break-in.",
@@ -89,6 +96,7 @@ repl_command! {
 repl_command! {
     cmd_idt;
     names: ["!idt", "idt"],
+    category: "cpu",
     usage: "!idt [vector]",
     summary: "Decode one IDT entry or the bounded 256-entry IDT.",
     details: "Shows one IDT vector or all 256 entries, with the handler, selector, gate type, DPL, presence, non-nt hooks, and KiIsrThunk chain hints of each entry.",
@@ -99,6 +107,7 @@ repl_command! {
 repl_command! {
     cmd_gdt;
     names: ["!gdt", "gdt"],
+    category: "cpu",
     usage: "!gdt",
     summary: "Decode the bounded GDT of the current processor.",
     details: "Shows the bounded GDT entries of the selected processor, with the base, limit, privilege, mode, and presence of each entry.",
@@ -108,6 +117,7 @@ repl_command! {
 repl_command! {
     cmd_dg;
     names: ["dg"],
+    category: "cpu",
     usage: "dg <first-selector> [last-selector]",
     summary: "Decode segment selectors from the GDT of the current processor.",
     details: "Shows each selector from the first to the last, in steps of 8 as WinDbg does. For each selector, it shows the descriptor base, limit, type, privilege level, size (Bg/Nb), granularity (Pg/By), presence (P/NP), long mode (Lo/Nl), and attribute flags. If a selector refers to an LDT (bit 2 set), dg reports this and does not decode the selector. 64-bit Windows has no LDT.",
@@ -118,6 +128,7 @@ repl_command! {
 repl_command! {
     cmd_cpuinfo;
     names: ["!cpuinfo", "cpuinfo"],
+    category: "cpu",
     usage: "!cpuinfo",
     summary: "Show processor identification, speed, and feature bits.",
     details: "Shows the processor number, vendor, family, model, stepping, speed, and feature bits if they are available. For a field that is not available, ntoseye uses the triage-dump metadata.",
@@ -125,17 +136,9 @@ repl_command! {
 }
 
 repl_command! {
-    cmd_vcpus();
-    names: ["~", "vcpus"],
-    usage: "~",
-    summary: "List vCPU contexts and their RIP values.",
-    details: "`~Ns` selects processor N (zero-based), and `t` and `p` then step that processor. The vCPU id that the list shows also works in place of N (`~p01.03s`, `~p01.03k`). Over `kd` and `kdnet` on an AMD64 target, the other processors run during the step, as in WinDbg. On an ARM64 target, only the processor that stopped the target can step over `kd` or `kdnet`. If a vCPU halted in the Windows hypervisor (VBS), the list also shows where its VTL0 execution stopped, from the saved state of the hypervisor. `~Ns` on that vCPU selects the VTL0 context, and `.cxr` selects the hypervisor registers. A vCPU stopped on the hypervisor's VM-exit entry from outside shows its saved state as `(may be one exit behind)` and keeps the hypervisor registers: KVM writes that state when it enters the hypervisor, so it can still describe the previous exit. A breakpoint on the entry fires after that write, so a vCPU stopped on one shows the current exit.",
-    run_state: Halted,
-}
-
-repl_command! {
     cmd_vcpu;
     names: ["vcpu"],
+    category: "processes and modules",
     usage: "vcpu <id>",
     summary: "Switch to a different vCPU context.",
     completion: Vcpu,
@@ -905,10 +908,6 @@ impl ReplState<'_> {
             self.cmd_tilde_user_dump(body, line);
             return Ok(Flow::Continue);
         }
-        if body.is_empty() {
-            self.cmd_vcpus()?;
-            return Ok(Flow::Continue);
-        }
         // A processor is named by its number or by the vCPU id `~` lists
         // (`p01.03`): hex digits and dots after the `p`, which no action
         // letter is.
@@ -1147,44 +1146,6 @@ impl ReplState<'_> {
         }
     }
 
-    fn cmd_vcpus(&mut self) -> Result<()> {
-        // A user dump's contexts are its captured threads.
-        if let Some(threads) = self.ctx.user_threads() {
-            print_user_threads(&threads);
-            return Ok(());
-        }
-        let pb = output::native_progress_bar(0, "reading the vCPUs").unwrap_or_else(|| {
-            let pb = ProgressBar::new_spinner();
-            pb.set_style(
-                ProgressStyle::default_spinner()
-                    .template("{spinner:.black.bright} {msg}")
-                    .unwrap(),
-            );
-            pb.set_message(format!("{}", "Waiting on GDB...".bright_black()));
-            pb.enable_steady_tick(Duration::from_millis(100));
-            pb
-        });
-
-        let vcpus = match self.ctx.vcpus() {
-            Ok(vcpus) => vcpus,
-            Err(e) => {
-                pb.finish_and_clear();
-                error!("{}", e);
-                return Ok(());
-            }
-        };
-        self.caches.refresh_vcpus(self.ctx.backend.as_mut());
-
-        pb.finish_and_clear();
-
-        #[cfg(feature = "cli")]
-        native::render(|| native::lists::vcpus(&vcpus), || print_vcpus(&vcpus));
-        #[cfg(not(feature = "cli"))]
-        print_vcpus(&vcpus);
-
-        Ok(())
-    }
-
     fn cmd_vcpu(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         let requested = require_arg!(invocation, 0, "vcpu");
 
@@ -1229,6 +1190,73 @@ impl ReplState<'_> {
         outln!("switched to vCPU {}\n", self.ctx.current_thread);
 
         Ok(())
+    }
+}
+
+/// List vCPU contexts and their RIP values.
+///
+/// `~Ns` selects processor N (zero-based), and `t` and `p` then step that
+/// processor. The vCPU id that the list shows also works in place of N
+/// (`~p01.03s`, `~p01.03k`). Over `kd` and `kdnet` on an AMD64 target, the
+/// other processors run during the step, as in WinDbg. On an ARM64 target,
+/// only the processor that stopped the target can step over `kd` or `kdnet`.
+/// If a vCPU halted in the Windows hypervisor (VBS), the list also shows
+/// where its VTL0 execution stopped, from the saved state of the hypervisor.
+/// `~Ns` on that vCPU selects the VTL0 context, and `.cxr` selects the
+/// hypervisor registers. A vCPU stopped on the hypervisor's VM-exit entry
+/// from outside shows its saved state as `(may be one exit behind)` and keeps
+/// the hypervisor registers: KVM writes that state when it enters the
+/// hypervisor, so it can still describe the previous exit. A breakpoint on
+/// the entry fires after that write, so a vCPU stopped on one shows the
+/// current exit.
+#[command(
+    names = ["~", "vcpus"],
+    category = "processes and modules",
+    kind = Query,
+    state = Halted,
+    python = none,
+    usage = "~"
+)]
+fn vcpus(session: &mut Session) -> Result<Contexts> {
+    // A user dump's contexts are its captured threads.
+    if let Some(threads) = session.user_threads() {
+        return Ok(Contexts::UserThreads(threads));
+    }
+    let pb = output::native_progress_bar(0, "reading the vCPUs").unwrap_or_else(|| {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.black.bright} {msg}")
+                .unwrap(),
+        );
+        pb.set_message(format!("{}", "Waiting on GDB...".bright_black()));
+        pb.enable_steady_tick(Duration::from_millis(100));
+        pb
+    });
+    let vcpus = session.vcpus();
+    pb.finish_and_clear();
+    vcpus.map(Contexts::Vcpus)
+}
+
+/// The register contexts `~` lists.
+enum Contexts {
+    Vcpus(Vec<VcpuInfo>),
+    /// A user-mode minidump's captured threads.
+    UserThreads(Vec<UserThreadSummary>),
+}
+
+impl Render for Contexts {
+    fn render(&self, repl: &mut ReplState<'_>, (): ()) {
+        match self {
+            Self::UserThreads(threads) => print_user_threads(threads),
+            Self::Vcpus(vcpus) => {
+                repl.caches.refresh_vcpus(repl.ctx.backend.as_mut());
+                #[cfg(feature = "cli")]
+                native::render(|| native::lists::vcpus(vcpus), || print_vcpus(vcpus));
+                #[cfg(not(feature = "cli"))]
+                print_vcpus(vcpus);
+            }
+        }
     }
 }
 

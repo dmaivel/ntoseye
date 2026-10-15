@@ -3,14 +3,16 @@
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
+use super::command::admit;
 use super::context::Space;
-use super::handle::{Owner, require_halted};
+use super::handle::Owner;
 use super::symbols::load_scope_symbols;
 use super::{MAX_READ_LEN, err, raise};
 use crate::error::Error;
 use crate::layout::utf16le_lossy;
 use crate::memory::{MemoryOps, pattern_offsets};
 use crate::session::Session;
+use crate::session::effects::Effects;
 use crate::target::MAX_SEARCH_BYTES;
 use crate::target::{CODE_BITNESS_X86, StringDescriptor};
 use crate::types::VirtAddr;
@@ -389,8 +391,7 @@ impl Memory {
             Space::Physical | Space::Secure(_) | Space::Root(_) => unreachable!(),
         };
         self.owner.with_in(py, &context, |session| {
-            session.target.require_kernel().map_err(err)?;
-            require_halted(session, "page_in")?;
+            admit(session, &Effects::KERNEL_HALTED, "page_in")?;
             let report = session.page_in(VirtAddr(addr), process).map_err(err)?;
             if !report.from_worker {
                 return Err(raise(

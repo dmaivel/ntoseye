@@ -22,6 +22,7 @@ use crate::repl::*;
 repl_command! {
     cmd_virtio;
     names: ["!virtio", "virtio"],
+    category: "objects and I/O",
     usage: "!virtio [<virtio_device> [module]]",
     summary: "List the virtio devices and the state of their virtqueues.",
     details: "Lists the virtio PCI functions with their device type and driver. With a virtio-win driver's private PDB loaded, it also shows each queue's indexes and state: what the device holds, what it returned that the driver has not taken back, and what the driver has not published or kicked. Moved compares with the previous look in guest time, and from the second look the state names a queue that did not move. With an address, shows the virtio_device there, typed by the module you give or by the driver that owns it. See the virtio devices guide.",
@@ -32,6 +33,7 @@ repl_command! {
 repl_command! {
     cmd_vring;
     names: ["!vring", "vring"],
+    category: "objects and I/O",
     usage: "!vring <virtqueue> [module] | !vring /r <size> <desc> <avail> <used> [/t <kind>]",
     summary: "Show a virtqueue's ring, its signalling, and its outstanding buffers.",
     details: "Give a virtqueue address that !virtio lists. Shows the ring's indexes and state, when the driver wants interrupts and the device wants notifications (and for a split ring whether an interrupt was due), and up to 64 buffers the device holds or returned, with their descriptors (W device-writable, N continues, I indirect table). Under each buffer, a line decodes the request and the device's answer from the virtio specification's layouts, such as a block sector and status or a SCSI command and its sense. /r reads a split ring from its size and kernel addresses for a driver without a PDB, and /t names what its buffers hold: blk, scsi, scsi-control, scsi-event, net, net-control, gpu, or vsock. See the virtio devices guide.",

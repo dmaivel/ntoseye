@@ -21,6 +21,7 @@ use crate::repl::*;
 repl_command! {
     continue_vm;
     names: ["g", "continue"],
+    category: "execution and stack",
     usage: "g [address]",
     summary: "Resume VM execution.",
     details: "With an address, g runs to a temporary breakpoint at that address. ntoseye checks that an instruction starts there as bp does: it refuses an address inside an instruction and warns when it cannot check. In secure-kernel code, this breakpoint uses a debug register, and ntoseye never patches the code. The .vtl 1 memory view accepts only g without an address, which leaves the view before it resumes the VM. To stop in VTL1, use `ba e1`.",
@@ -31,6 +32,7 @@ repl_command! {
 repl_command! {
     continue_handled;
     names: ["gh"],
+    category: "execution and stack",
     usage: "gh [address]",
     summary: "Resume and mark the current exception handled.",
     completion: Expression,
@@ -40,6 +42,7 @@ repl_command! {
 repl_command! {
     continue_not_handled;
     names: ["gn"],
+    category: "execution and stack",
     usage: "gn [address]",
     summary: "Resume and pass the current exception to Windows (KD only).",
     completion: Expression,
@@ -49,6 +52,7 @@ repl_command! {
 repl_command! {
     interrupt_running_vm();
     names: ["break"],
+    category: "execution and stack",
     usage: "break",
     summary: "Break in and pause VM execution.",
     run_state: Running,
@@ -57,6 +61,7 @@ repl_command! {
 repl_command! {
     single_step();
     names: ["t", "si"],
+    category: "execution and stack",
     usage: "t",
     summary: "Step one instruction (step into).",
     run_state: Halted,
@@ -66,6 +71,7 @@ repl_command! {
 repl_command! {
     cmd_p();
     names: ["p", "ni"],
+    category: "execution and stack",
     usage: "p or ni",
     summary: "Step over the current instruction.",
     details: "If the instruction is a call, p runs to the instruction after the call and stops there only when the thread that you step returns from that call. Other threads that get to the address, and deeper calls of the same code, continue to run.",
@@ -76,6 +82,7 @@ repl_command! {
 repl_command! {
     cmd_gu();
     names: ["gu", "finish"],
+    category: "execution and stack",
     usage: "gu or finish",
     summary: "Run until the current function returns.",
     details: "gu stops at the return address only when the thread that you step returns from this call. Other threads that get to the address, and deeper calls of the same function, continue to run.",
@@ -86,6 +93,7 @@ repl_command! {
 repl_command! {
     cmd_pa;
     names: ["pa"],
+    category: "execution and stack",
     usage: "pa <address>",
     summary: "Step over repeatedly until execution gets to an address.",
     completion: Expression,
@@ -95,6 +103,7 @@ repl_command! {
 repl_command! {
     cmd_ta;
     names: ["ta"],
+    category: "execution and stack",
     usage: "ta <address>",
     summary: "Step into repeatedly until execution gets to an address.",
     completion: Expression,
@@ -105,6 +114,7 @@ repl_command! {
 repl_command! {
     cmd_pc();
     names: ["pc"],
+    category: "execution and stack",
     usage: "pc",
     summary: "Step over until the next call instruction.",
     completion: None,
@@ -115,6 +125,7 @@ repl_command! {
 repl_command! {
     cmd_tc();
     names: ["tc"],
+    category: "execution and stack",
     usage: "tc",
     summary: "Step into until the next call instruction.",
     completion: None,
@@ -125,6 +136,7 @@ repl_command! {
 repl_command! {
     cmd_pt();
     names: ["pt"],
+    category: "execution and stack",
     usage: "pt",
     summary: "Step over until the next return instruction.",
     completion: None,
@@ -135,6 +147,7 @@ repl_command! {
 repl_command! {
     cmd_tt();
     names: ["tt"],
+    category: "execution and stack",
     usage: "tt",
     summary: "Step into until the next return instruction.",
     completion: None,
@@ -145,6 +158,7 @@ repl_command! {
 repl_command! {
     cmd_ph();
     names: ["ph"],
+    category: "execution and stack",
     usage: "ph",
     summary: "Step over until the next branch instruction.",
     completion: None,
@@ -155,6 +169,7 @@ repl_command! {
 repl_command! {
     cmd_th();
     names: ["th"],
+    category: "execution and stack",
     usage: "th",
     summary: "Step into until the next branch instruction.",
     completion: None,
@@ -165,6 +180,7 @@ repl_command! {
 repl_command! {
     cmd_wt;
     names: ["wt"],
+    category: "execution and stack",
     usage: "wt [count]",
     summary: "Watch and trace calls until the current function returns.",
     completion: Expression,
@@ -346,8 +362,8 @@ impl ReplState<'_> {
             _ => return Ok(None),
         };
         let name = typed;
-        let moves = spec.run != RunEffect::None;
-        let needs_halt = crate::repl::command::needs_halt(self, spec);
+        let moves = spec.effects.run != RunEffect::None;
+        let needs_halt = spec.effects.needs_halt(self.ctx);
         if self.ctx.backend.is_running() && (moves || needs_halt) {
             // Waiting out a time limit for a stop no breakpoint will cause
             // only spends it. The guest can still stop by itself (a

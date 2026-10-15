@@ -59,6 +59,7 @@ fn print_help_listing(groups: &[HelpGroup]) {
 repl_command! {
     cmd_reload_scripts();
     names: ["reload-scripts"],
+    category: "session",
     usage: "reload-scripts",
     summary: "Reload custom commands and aliases.",
 }
@@ -66,6 +67,7 @@ repl_command! {
 repl_command! {
     cmd_radix;
     names: ["n"],
+    category: "symbols, types, and expressions",
     usage: "n [8|10|16]",
     summary: "Show or set the default numeric radix for REPL expressions.",
 }
@@ -73,6 +75,7 @@ repl_command! {
 repl_command! {
     cmd_effmach;
     names: [".effmach"],
+    category: "processes and modules",
     usage: ".effmach [x86|amd64|arm64|auto|.]",
     summary: "Show or set the effective code machine.",
     details: "With no argument, shows the selected machine. x86, amd64, and arm64 (on an ARM64 target only) make u, ub, uf, and editor disassembly decode all code as that instruction set, and auto or . goes back to selection by context and image. This selection covers the x86 images of a WOW64 program and, on ARM64, also an emulated x64 image and the x64 ranges of an ARM64X/ARM64EC hybrid. x86 also makes ds/dS read 32-bit (WOW64) string descriptors.",
@@ -81,6 +84,7 @@ repl_command! {
 repl_command! {
     cmd_version();
     names: ["vertarget", "version"],
+    category: "target control",
     usage: "vertarget",
     summary: "Show version information for the target, kernel, symbols, processor, and debugger.",
 }
@@ -88,6 +92,7 @@ repl_command! {
 repl_command! {
     cmd_time();
     names: [".time"],
+    category: "target control",
     usage: ".time",
     summary: "Show the target UTC time and the system uptime.",
 }
@@ -95,6 +100,7 @@ repl_command! {
 repl_command! {
     cmd_echo;
     names: [".echo", "echo"],
+    category: "session",
     usage: ".echo <text>",
     summary: "Print text without evaluating expressions in it.",
     style: ExpressionTail,
@@ -103,6 +109,7 @@ repl_command! {
 repl_command! {
     cmd_echotime();
     names: [".echotime"],
+    category: "session",
     usage: ".echotime",
     summary: "Print the current date and time of the host in UTC.",
 }
@@ -110,6 +117,7 @@ repl_command! {
 repl_command! {
     cmd_printf;
     names: [".printf"],
+    category: "session",
     usage: ".printf \"format\" [, argument]...",
     summary: "Format debugger values with WinDbg-style printf specifiers.",
     details: "Put the arguments after the format and separate them with commas, as in WinDbg (`.printf \"%p %d\\n\", poi(@rcx + 8), @$t0`). If each argument is one word, you can separate them with spaces.",
@@ -120,6 +128,7 @@ repl_command! {
 repl_command! {
     cmd_cls();
     names: [".cls"],
+    category: "session",
     usage: ".cls",
     summary: "Clear the terminal screen if stdout is a terminal.",
 }
@@ -127,6 +136,7 @@ repl_command! {
 repl_command! {
     cmd_logopen;
     names: [".logopen"],
+    category: "session",
     usage: ".logopen <file>",
     summary: "Start a debugger transcript and replace any existing file.",
 }
@@ -134,6 +144,7 @@ repl_command! {
 repl_command! {
     cmd_logappend;
     names: [".logappend"],
+    category: "session",
     usage: ".logappend <file>",
     summary: "Start a debugger transcript and append it to the file.",
 }
@@ -141,6 +152,7 @@ repl_command! {
 repl_command! {
     cmd_logclose();
     names: [".logclose"],
+    category: "session",
     usage: ".logclose",
     summary: "Close the debugger transcript.",
 }
@@ -148,6 +160,7 @@ repl_command! {
 repl_command! {
     cmd_help;
     names: [".hh", "help", ".help"],
+    category: "session",
     usage: ".hh [command]",
     summary: "List commands or show detailed help for one command.",
 }
@@ -155,6 +168,7 @@ repl_command! {
 repl_command! {
     cmd_error;
     names: ["!error", "!ntstatus"],
+    category: "analysis",
     usage: "!error <code>",
     summary: "Decode an NTSTATUS, Win32, or HRESULT error code.",
     completion: Expression,
@@ -162,6 +176,7 @@ repl_command! {
 
 repl_command! {
     names: ["q", "quit", "qd"],
+    category: "session",
     usage: "q",
     summary: "Exit, remove the breakpoints of this session, and leave the guest running.",
     details: "This is the WinDbg qd command (quit and detach), and ntoseye also accepts qd. If this session halted the guest, q resumes it. If q cannot remove a breakpoint from the guest, it leaves the guest halted, because if q resumed that guest, the breakpoint could trap when there is no debugger.",
@@ -378,12 +393,12 @@ impl ReplState<'_> {
         let mut hidden = BTreeSet::new();
         for (_, spec) in command_registry().command_names() {
             let canonical = spec.names[0];
-            if user_dump && spec.target == TargetRequirement::Kernel {
+            if user_dump && spec.effects.target == TargetScope::Kernel {
                 hidden.insert(canonical);
                 continue;
             }
             groups
-                .entry(command_category(canonical))
+                .entry(spec.category)
                 .or_default()
                 .insert(canonical, spec);
         }
@@ -501,345 +516,20 @@ impl ReplState<'_> {
     }
 }
 
-const COMMAND_CATEGORIES: &[(&str, &str)] = &[
-    ("dS", "memory and disassembly"),
-    ("dW", "memory and disassembly"),
-    ("da", "memory and disassembly"),
-    ("db", "memory and disassembly"),
-    ("dc", "memory and disassembly"),
-    ("dd", "memory and disassembly"),
-    ("dds", "memory and disassembly"),
-    ("df", "memory and disassembly"),
-    ("dl", "memory and disassembly"),
-    ("dq", "memory and disassembly"),
-    ("dp", "memory and disassembly"),
-    ("dpp", "memory and disassembly"),
-    ("dqs", "memory and disassembly"),
-    ("ds", "memory and disassembly"),
-    ("du", "memory and disassembly"),
-    ("dw", "memory and disassembly"),
-    ("dyb", "memory and disassembly"),
-    ("eb", "memory and disassembly"),
-    ("ed", "memory and disassembly"),
-    ("ef", "memory and disassembly"),
-    ("eq", "memory and disassembly"),
-    ("ew", "memory and disassembly"),
-    ("ea", "memory and disassembly"),
-    ("eu", "memory and disassembly"),
-    ("eza", "memory and disassembly"),
-    ("ezu", "memory and disassembly"),
-    ("c", "memory and disassembly"),
-    ("f", "memory and disassembly"),
-    ("m", "memory and disassembly"),
-    ("s", "memory and disassembly"),
-    ("u", "memory and disassembly"),
-    ("ub", "memory and disassembly"),
-    ("#", "memory and disassembly"),
-    ("uf", "memory and disassembly"),
-    ("!db", "memory and disassembly"),
-    ("!dd", "memory and disassembly"),
-    ("!dq", "memory and disassembly"),
-    ("!dw", "memory and disassembly"),
-    ("!eb", "memory and disassembly"),
-    ("!ed", "memory and disassembly"),
-    ("!eq", "memory and disassembly"),
-    ("!search", "memory and disassembly"),
-    ("ib", "memory and disassembly"),
-    ("iw", "memory and disassembly"),
-    ("id", "memory and disassembly"),
-    ("ob", "memory and disassembly"),
-    ("ow", "memory and disassembly"),
-    ("od", "memory and disassembly"),
-    ("break", "execution and stack"),
-    ("g", "execution and stack"),
-    ("gh", "execution and stack"),
-    ("gn", "execution and stack"),
-    ("gu", "execution and stack"),
-    ("kn", "execution and stack"),
-    ("kd", "execution and stack"),
-    ("pa", "execution and stack"),
-    ("p", "execution and stack"),
-    ("pc", "execution and stack"),
-    ("ph", "execution and stack"),
-    ("pt", "execution and stack"),
-    ("r", "execution and stack"),
-    ("t", "execution and stack"),
-    ("ta", "execution and stack"),
-    ("tc", "execution and stack"),
-    ("th", "execution and stack"),
-    ("tt", "execution and stack"),
-    ("wt", "execution and stack"),
-    ("!analyze", "analysis"),
-    (".bugcheck", "analysis"),
-    (".enumtag", "analysis"),
-    ("!blackboxbsd", "analysis"),
-    ("!blackboxntfs", "analysis"),
-    ("!blackboxpci", "analysis"),
-    ("!blackboxpnp", "analysis"),
-    ("!blackboxwinlogon", "analysis"),
-    ("!apc", "execution and stack"),
-    ("!stacks", "execution and stack"),
-    ("!findstack", "execution and stack"),
-    ("!uniqstack", "execution and stack"),
-    ("!process", "processes and modules"),
-    (".vtl", "processes and modules"),
-    ("!trustlets", "processes and modules"),
-    ("!hvpartitions", "processes and modules"),
-    ("!hvvps", "processes and modules"),
-    ("!hvept", "processes and modules"),
-    ("!hveptdiff", "processes and modules"),
-    ("!hvcalls", "processes and modules"),
-    ("!hvcall", "processes and modules"),
-    ("!hvvmcs", "processes and modules"),
-    ("!hvr", "processes and modules"),
-    (".partition", "processes and modules"),
-    ("!hvd", "processes and modules"),
-    ("!hvu", "processes and modules"),
-    ("!session", "processes and modules"),
-    ("!sprocess", "processes and modules"),
-    ("!thread", "processes and modules"),
-    ("!vad", "processes and modules"),
-    (".effmach", "processes and modules"),
-    ("~", "processes and modules"),
-    ("attach", "processes and modules"),
-    ("detach", "processes and modules"),
-    ("drivers", "processes and modules"),
-    ("ld", "processes and modules"),
-    ("lm", "processes and modules"),
-    ("!dh", "processes and modules"),
-    ("lmv", "processes and modules"),
-    ("!lmi", "processes and modules"),
-    ("ps", "processes and modules"),
-    ("!for_each_process", "processes and modules"),
-    ("!for_each_thread", "processes and modules"),
-    ("!for_each_module", "processes and modules"),
-    ("threads", "processes and modules"),
-    ("vcpu", "processes and modules"),
-    ("!dlls", "user mode"),
-    ("!heap", "user mode"),
-    ("!peb", "user mode"),
-    ("!teb", "user mode"),
-    ("!gle", "user mode"),
-    ("ba", "breakpoints and events"),
-    ("bc", "breakpoints and events"),
-    ("bd", "breakpoints and events"),
-    ("be", "breakpoints and events"),
-    ("bl", "breakpoints and events"),
-    (".bpcmds", "breakpoints and events"),
-    ("gc", "breakpoints and events"),
-    ("bm", "breakpoints and events"),
-    ("bp", "breakpoints and events"),
-    ("bpc", "breakpoints and events"),
-    ("bpp", "breakpoints and events"),
-    ("br", "breakpoints and events"),
-    ("bs", "breakpoints and events"),
-    ("bsc", "breakpoints and events"),
-    ("bu", "breakpoints and events"),
-    ("!hvbp", "breakpoints and events"),
-    ("!hvexit", "breakpoints and events"),
-    ("sx", "breakpoints and events"),
-    ("sxd", "breakpoints and events"),
-    ("sxe", "breakpoints and events"),
-    ("sxi", "breakpoints and events"),
-    ("sxn", "breakpoints and events"),
-    ("sxr", "breakpoints and events"),
-    ("rdmsr", "cpu"),
-    ("wrmsr", "cpu"),
-    ("!cpuinfo", "cpu"),
-    ("!gdt", "cpu"),
-    ("dg", "cpu"),
-    ("!idt", "cpu"),
-    ("!irql", "cpu"),
-    ("!pcr", "cpu"),
-    ("!prcb", "cpu"),
-    ("!dpcs", "cpu"),
-    ("!exqueue", "cpu"),
-    ("!ready", "cpu"),
-    ("!running", "cpu"),
-    ("!timer", "cpu"),
-    ("!ca", "memory manager"),
-    ("!filecache", "memory manager"),
-    ("!qlocks", "cpu"),
-    ("!ipi", "cpu"),
-    ("!apic", "cpu"),
-    ("!ioapic", "cpu"),
-    ("!sysinfo", "cpu"),
-    ("!lookaside", "memory manager"),
-    ("!mdl", "memory manager"),
-    ("!memusage", "memory manager"),
-    ("!pfn", "memory manager"),
-    ("!pool", "memory manager"),
-    ("!poolfind", "memory manager"),
-    ("!poolused", "memory manager"),
-    ("!poolval", "memory manager"),
-    ("!pte", "memory manager"),
-    ("!ptov", "memory manager"),
-    ("!sysptes", "memory manager"),
-    ("!vm", "memory manager"),
-    ("!vprot", "memory manager"),
-    ("!vtop", "memory manager"),
-    ("callbacks", "objects and I/O"),
-    ("!alpc", "objects and I/O"),
-    ("!devnode", "objects and I/O"),
-    ("!devobj", "objects and I/O"),
-    ("!devstack", "objects and I/O"),
-    ("!drvobj", "objects and I/O"),
-    ("!fileobj", "objects and I/O"),
-    ("!fltkd.filters", "objects and I/O"),
-    ("!fltkd.instances", "objects and I/O"),
-    ("!fltkd.volumes", "objects and I/O"),
-    ("!handle", "objects and I/O"),
-    ("!htrace", "objects and I/O"),
-    ("!irp", "objects and I/O"),
-    ("!irpfind", "objects and I/O"),
-    ("!job", "processes and modules"),
-    ("!zombies", "processes and modules"),
-    ("!list", "objects and I/O"),
-    ("!locks", "objects and I/O"),
-    ("!object", "objects and I/O"),
-    ("!pnptriage", "objects and I/O"),
-    ("!poaction", "objects and I/O"),
-    ("!podev", "objects and I/O"),
-    ("!popolicy", "objects and I/O"),
-    ("!vpb", "objects and I/O"),
-    ("!pcitree", "objects and I/O"),
-    ("!pci", "objects and I/O"),
-    ("!ndiskd.minidriver", "objects and I/O"),
-    ("!ndiskd.miniport", "objects and I/O"),
-    ("!ndiskd.miniports", "objects and I/O"),
-    ("!ndiskd.protocol", "objects and I/O"),
-    ("!ndiskd.filterdriver", "objects and I/O"),
-    ("!ndiskd.filter", "objects and I/O"),
-    ("!ndiskd.oid", "objects and I/O"),
-    ("!ndiskd.nbl", "objects and I/O"),
-    ("!virtio", "objects and I/O"),
-    ("!vring", "objects and I/O"),
-    ("!storagekd.storadapter", "objects and I/O"),
-    ("!storagekd.storunit", "objects and I/O"),
-    ("!storagekd.storloglist", "objects and I/O"),
-    ("!storagekd.storlogirp", "objects and I/O"),
-    ("!storagekd.storlogsrb", "objects and I/O"),
-    ("!storagekd.storsrb", "objects and I/O"),
-    ("!storagekd.storclass", "objects and I/O"),
-    ("!rcdrkd.rcdrloglist", "objects and I/O"),
-    ("!rcdrkd.rcdrlogdump", "objects and I/O"),
-    ("!reg", "objects and I/O"),
-    ("ssdt", "objects and I/O"),
-    ("!wdfkd.wdfcrashdump", "objects and I/O"),
-    ("!wdfkd.wdfdevice", "objects and I/O"),
-    ("!wdfkd.wdfdriverinfo", "objects and I/O"),
-    ("!wdfkd.wdfhandle", "objects and I/O"),
-    ("!wdfkd.wdfiotarget", "objects and I/O"),
-    ("!wdfkd.wdfldr", "objects and I/O"),
-    ("!wdfkd.wdflogdump", "objects and I/O"),
-    ("!wdfkd.wdfobject", "objects and I/O"),
-    ("!wdfkd.wdfqueue", "objects and I/O"),
-    ("!wdfkd.wdfrequest", "objects and I/O"),
-    ("!acl", "security"),
-    ("!objsd", "security"),
-    ("!sd", "security"),
-    ("!sid", "security"),
-    ("!token", "security"),
-    ("!chkimg", "analysis"),
-    ("!error", "analysis"),
-    ("!gflag", "analysis"),
-    ("!verifier", "analysis"),
-    ("!wmitrace.logdump", "analysis"),
-    ("!wmitrace.logger", "analysis"),
-    ("!wmitrace.logsave", "analysis"),
-    ("!wmitrace.strdump", "analysis"),
-    ("?", "symbols, types, and expressions"),
-    ("display", "symbols, types, and expressions"),
-    ("undisplay", "symbols, types, and expressions"),
-    ("dt", "symbols, types, and expressions"),
-    ("dx", "symbols, types, and expressions"),
-    ("dv", "symbols, types, and expressions"),
-    ("ln", "symbols, types, and expressions"),
-    ("set", "symbols, types, and expressions"),
-    ("unset", "symbols, types, and expressions"),
-    ("vars", "symbols, types, and expressions"),
-    ("x", "symbols, types, and expressions"),
-    (".frame", "execution and stack"),
-    ("!for_each_frame", "execution and stack"),
-    (".fnent", "execution and stack"),
-    (".cxr", "execution and stack"),
-    (".ecxr", "execution and stack"),
-    (".exr", "execution and stack"),
-    (".trap", "execution and stack"),
-    (".vtlcxr", "execution and stack"),
-    (".thread", "execution and stack"),
-    (".process", "processes and modules"),
-    (".context", "processes and modules"),
-    (".readmem", "memory and disassembly"),
-    (".writemem", "memory and disassembly"),
-    (".pagein", "memory and disassembly"),
-    ("!address", "memory and disassembly"),
-    (".reload", "symbols, types, and expressions"),
-    (".sympath", "symbols, types, and expressions"),
-    (".sympath+", "symbols, types, and expressions"),
-    (".symfix", "symbols, types, and expressions"),
-    (".srcpath", "symbols, types, and expressions"),
-    (".srcpath+", "symbols, types, and expressions"),
-    (".fetchimage", "symbols, types, and expressions"),
-    ("ls", "symbols, types, and expressions"),
-    ("lsa", "symbols, types, and expressions"),
-    (".formats", "symbols, types, and expressions"),
-    ("n", "symbols, types, and expressions"),
-    ("irps", "objects and I/O"),
-    (".crash", "target control"),
-    (".reboot", "target control"),
-    (".dump", "target control"),
-    (".kdfiles", "target control"),
-    (".lastevent", "target control"),
-    (".time", "target control"),
-    ("vertarget", "target control"),
-    ("status", "target control"),
-    ("capabilities", "target control"),
-    ("!dbgprint", "target control"),
-    (".cls", "session"),
-    (".echo", "session"),
-    (".echotime", "session"),
-    (".printf", "session"),
-    (".foreach", "session"),
-    (".if", "session"),
-    (".elsif", "session"),
-    (".else", "session"),
-    (".while", "session"),
-    (".for", "session"),
-    (".do", "session"),
-    (".break", "session"),
-    (".continue", "session"),
-    (".block", "session"),
-    ("j", "session"),
-    ("$<", "session"),
-    ("$$", "session"),
-    (".sleep", "session"),
-    (".hh", "session"),
-    (".logopen", "session"),
-    (".logappend", "session"),
-    (".logclose", "session"),
-    (".shell", "session"),
-    ("ad", "session"),
-    ("al", "session"),
-    ("as", "session"),
-    ("reload-scripts", "session"),
-    ("q", "session"),
-];
-
 /// Every built-in command's help as JSON, for the documentation site's
 /// generated reference: `[{"category", "names", "usage", "summary",
 /// "details"}]` (`details` may be null), grouped as `.hh` groups them and
 /// sorted by category, then canonical name.
 pub fn command_reference_json() -> String {
     let mut specs: Vec<&CommandSpec> = COMMANDS.iter().collect();
-    specs.sort_by_key(|spec| (command_category(spec.names[0]), spec.names[0]));
+    specs.sort_by_key(|spec| (spec.category, spec.names[0]));
     let entries: Vec<String> = specs
         .into_iter()
         .map(|spec| {
             let names: Vec<String> = spec.names.iter().map(|name| json_string(name)).collect();
             format!(
                 "{{\"category\":{},\"names\":[{}],\"usage\":{},\"summary\":{},\"details\":{}}}",
-                json_string(command_category(spec.names[0])),
+                json_string(spec.category),
                 names.join(","),
                 json_string(spec.usage),
                 json_string(spec.summary),
@@ -871,22 +561,6 @@ pub fn json_string(value: &str) -> String {
     }
     out.push('"');
     out
-}
-
-fn command_category(name: &str) -> &'static str {
-    if let Some((_, category)) = COMMAND_CATEGORIES
-        .iter()
-        .find(|(canonical, _)| *canonical == name)
-    {
-        return category;
-    }
-    if name.starts_with('.') {
-        "dot commands"
-    } else if name.starts_with('!') {
-        "extension commands"
-    } else {
-        "general"
-    }
 }
 
 fn print_target_version(detail: &TargetVersionDetail) {
@@ -1393,28 +1067,5 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result, "index=28 %");
-    }
-
-    #[test]
-    fn every_command_has_an_explicit_category() {
-        let canonical: Vec<&str> = COMMANDS.iter().map(|spec| spec.names[0]).collect();
-        let uncategorized: Vec<&str> = canonical
-            .iter()
-            .copied()
-            .filter(|name| !COMMAND_CATEGORIES.iter().any(|(key, _)| key == name))
-            .collect();
-        assert!(
-            uncategorized.is_empty(),
-            "commands missing from COMMAND_CATEGORIES: {uncategorized:?}"
-        );
-        let stale: Vec<&str> = COMMAND_CATEGORIES
-            .iter()
-            .map(|(key, _)| *key)
-            .filter(|key| !canonical.contains(key))
-            .collect();
-        assert!(
-            stale.is_empty(),
-            "COMMAND_CATEGORIES keys that are no command's canonical name: {stale:?}"
-        );
     }
 }

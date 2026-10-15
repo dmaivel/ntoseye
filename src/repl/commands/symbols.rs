@@ -25,6 +25,7 @@ use crate::repl::*;
 repl_command! {
     cmd_x;
     names: ["x"],
+    category: "symbols, types, and expressions",
     usage: "x <query>  or  x <module>!<query>",
     summary: "Search for symbols by fuzzy name match.",
     details: "`*` and `?` are glob characters. The operators are `^` prefix, `$` suffix, `'` exact match, and `!` negation. If you separate terms with spaces, a symbol must match all the terms.",
@@ -34,6 +35,7 @@ repl_command! {
 repl_command! {
     cmd_ln;
     names: ["ln"],
+    category: "symbols, types, and expressions",
     usage: "ln <address>",
     summary: "List the symbol nearest to an address.",
     completion: Expression,
@@ -42,6 +44,7 @@ repl_command! {
 repl_command! {
     cmd_ev;
     names: ["?", "ev"],
+    category: "symbols, types, and expressions",
     usage: "? <expression>",
     summary: "Evaluate an expression.",
     details: "Memory read functions and their sizes in bytes: by() 1, wo() 2, dwo() 4, qwo()/poi() 8. `&expr` gives the address of `expr`. `->` and `.` give field values.",
@@ -52,6 +55,7 @@ repl_command! {
 repl_command! {
     cmd_set;
     names: ["set"],
+    category: "symbols, types, and expressions",
     usage: "set $<name> <expression>",
     summary: "Define a convenience variable that you can use in expressions as $<name>.",
     completion: [None, Expression],
@@ -60,6 +64,7 @@ repl_command! {
 repl_command! {
     cmd_vars();
     names: ["vars"],
+    category: "symbols, types, and expressions",
     usage: "vars",
     summary: "List the defined convenience variables and result slots.",
 }
@@ -67,6 +72,7 @@ repl_command! {
 repl_command! {
     cmd_unset;
     names: ["unset"],
+    category: "symbols, types, and expressions",
     usage: "unset $<name>",
     summary: "Remove a convenience variable.",
 }
@@ -74,6 +80,7 @@ repl_command! {
 repl_command! {
     cmd_sympath;
     names: [".sympath"],
+    category: "symbols, types, and expressions",
     usage: ".sympath [<directory|http-server> ...]",
     summary: "Show or replace the ordered symbol source path.",
 }
@@ -81,6 +88,7 @@ repl_command! {
 repl_command! {
     cmd_sympath_append;
     names: [".sympath+"],
+    category: "symbols, types, and expressions",
     usage: ".sympath+ <directory|http-server> ...",
     summary: "Add entries to the end of the ordered symbol source path.",
 }
@@ -88,6 +96,7 @@ repl_command! {
 repl_command! {
     cmd_symfix();
     names: [".symfix"],
+    category: "symbols, types, and expressions",
     usage: ".symfix",
     summary: "Set the symbol source path back to the defaults, the ntoseye cache and the Microsoft symbol server.",
 }
@@ -95,6 +104,7 @@ repl_command! {
 repl_command! {
     cmd_srcpath;
     names: [".srcpath"],
+    category: "symbols, types, and expressions",
     usage: ".srcpath [<local-root|recorded-prefix=local-root> ...]",
     summary: "Show or replace the ordered local source path mappings.",
     details: "A local root contains the source tree, and a recorded path such as C:\\Users\\me\\repos\\MyDriver\\src\\queue.c maps to a file under the root. ntoseye uses the longest trailing part of the recorded path that names a file under the root, so root/src/queue.c comes before root/queue.c. It tries an exact match first, and then a match that ignores case. A recorded-prefix=local-root mapping replaces the recorded prefix with the local root. If the PDB records the checksum of a source file, ntoseye shows only a file with that checksum, and reports a file with a different checksum as not the compiled source.",
@@ -103,6 +113,7 @@ repl_command! {
 repl_command! {
     cmd_srcpath_append;
     names: [".srcpath+"],
+    category: "symbols, types, and expressions",
     usage: ".srcpath+ <local-root|recorded-prefix=local-root> ...",
     summary: "Add local source path mappings to the end of the list.",
     details: "ntoseye tries the mappings in order, as .srcpath describes.",
@@ -111,6 +122,7 @@ repl_command! {
 repl_command! {
     cmd_ls;
     names: ["ls"],
+    category: "symbols, types, and expressions",
     usage: "ls [.] [first][,count]",
     summary: "List source lines of the file for the current scope.",
     details: "With no arguments, the command continues after the lines that the previous ls or lsa showed, and `.` starts again at the current line. `first` is a line number, and `count` is 10 by default. The file is the file of the source line of the selected frame, which for an inline frame is in the inlined function. ntoseye finds the file through .srcpath.",
@@ -119,6 +131,7 @@ repl_command! {
 repl_command! {
     cmd_lsa;
     names: ["lsa"],
+    category: "symbols, types, and expressions",
     usage: "lsa [address][,first][,count]",
     summary: "List source lines around an address.",
     details: "By default, the command uses the source line of the selected frame, and shows twelve lines in total, starting five lines before that line. If you give an address, the command uses the line of the innermost frame at that address, which is the inlined function if a function is inlined there. `first` is an offset from that line, with a negative value for lines before it. The command marks the line with `>`.",
@@ -128,6 +141,7 @@ repl_command! {
 repl_command! {
     cmd_dv;
     names: ["dv"],
+    category: "symbols, types, and expressions",
     usage: "dv [address]",
     summary: "Show the locals and parameters of the selected frame.",
     details: "Each frame shows only its own variables. For an inline frame, these are the variables of the inlined function, and the frame that contains the inlined call shows the variables of its procedure but not those of the calls that are inlined into it. Without an address, the command uses the frame that .frame selected or, if no frame is selected, the innermost frame at the stop. With an address, it uses the innermost frame at that address.",
@@ -137,6 +151,7 @@ repl_command! {
 repl_command! {
     cmd_reload_symbols;
     names: [".reload"],
+    category: "symbols, types, and expressions",
     usage: ".reload [/f] [/v] [/n | /user] [module]",
     summary: "Reload symbols for the modules in the current scope, or for the modules a name or pattern names.",
     details: "Asks the symbol path again for each module's PDB, whatever failed before, and loads it at once. The current scope's modules are the selected process's user-mode modules, else the kernel's; /n reloads the kernel's and /user the selected process's. A module is a name such as nt or viostor.sys, or a pattern with * and ? such as vio*. /f and /v are accepted as in WinDbg: ntoseye always loads at once, and lm shows each module's symbol status.",
@@ -145,6 +160,7 @@ repl_command! {
 repl_command! {
     cmd_ld;
     names: ["ld"],
+    category: "processes and modules",
     usage: "ld <module>",
     summary: "Force ntoseye to select the symbol source and index the symbols for one module.",
 }
@@ -152,6 +168,7 @@ repl_command! {
 repl_command! {
     cmd_fetchimage;
     names: [".fetchimage"],
+    category: "symbols, types, and expressions",
     usage: ".fetchimage <module>  or  .fetchimage /f <file>",
     summary: "Download the PE file of a loaded module into the symbol cache, or copy a file into it, and print its path.",
     details: "The command finds the file by the TimeDateStamp and SizeOfImage values in the mapped PE header of the module. These values are the symbol-server key, so the file is the same build that is running, and a disassembler database that you make from this file rebases onto the live module. A copy in a local directory on the symbol path, at its root or in symbol-store layout, is used before a symbol server. `/f` copies a PE file that you have into the cache under the key in its own header, with the name of its PDB, so ntoseye finds it for the module that runs that build. Use it for the Windows hypervisor, which Microsoft's symbol server does not have: copy C:\\Windows\\System32\\hvix64.exe from the guest and run `.fetchimage /f hvix64.exe`, after which the stacks of a vCPU in the hypervisor unwind through the file's unwind data.",
@@ -161,6 +178,7 @@ repl_command! {
 repl_command! {
     cmd_lm;
     names: ["lm"],
+    category: "processes and modules",
     usage: "lm [m <pattern>|a <address>] [v] [u|k] [t]",
     summary: "List loaded modules.",
     details: "`m` applies a module-name glob, and `v m` prints verbose symbol information. `a <address>` shows only the module that contains the address, a kernel module for a kernel address. `u` selects user modules, `k` selects kernel modules, and `t` adds timestamps.",
@@ -170,6 +188,7 @@ repl_command! {
 repl_command! {
     cmd_lmv;
     names: ["lmv"],
+    category: "processes and modules",
     usage: "lmv [m <pattern>|a <address>|<name>] [u|k] [t]",
     summary: "Show the detailed symbol status and PDB identity of each module.",
     details: "This command is the same as `lm v` and uses the same filters, for example `lmv m nt`.",
