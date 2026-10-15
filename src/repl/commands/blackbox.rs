@@ -144,18 +144,8 @@ impl ReplState<'_> {
                 ENUMTAG_PREVIEW_LINES
             };
             for line in block.data.chunks(16).take(lines) {
-                let hex: Vec<String> = line.iter().map(|byte| format!("{byte:02X}")).collect();
-                let text: String = line
-                    .iter()
-                    .map(|&byte| {
-                        if byte.is_ascii_graphic() || byte == b' ' {
-                            byte as char
-                        } else {
-                            '.'
-                        }
-                    })
-                    .collect();
-                outln!("  {:<47}  {text}", hex.join(" "));
+                let (hex, text) = hex_ascii_row(line, HexCase::Upper);
+                outln!("  {hex:<47}  {text}");
             }
             let rest = block.data.len().saturating_sub(16 * lines);
             if rest > 0 {

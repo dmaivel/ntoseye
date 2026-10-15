@@ -1,4 +1,4 @@
-use std::fmt;
+use std::fmt::{self, Write as _};
 
 use owo_colors::OwoColorize;
 
@@ -609,12 +609,49 @@ pub fn row_ascii(
         });
         emit(if !readable {
             AsciiCell::Unreadable
-        } else if byte.is_ascii_graphic() || *byte == b' ' {
+        } else if is_printable(*byte) {
             AsciiCell::Char(*byte as char)
         } else {
             AsciiCell::Dot
         });
     }
+}
+
+/// Whether a byte shows as itself in an ASCII column.
+fn is_printable(byte: u8) -> bool {
+    byte.is_ascii_graphic() || byte == b' '
+}
+
+/// How a byte shows in an ASCII column: itself when printable, else `.`.
+pub fn ascii_char(byte: u8) -> char {
+    if is_printable(byte) {
+        byte as char
+    } else {
+        '.'
+    }
+}
+
+/// The case of a hex dump's digits.
+#[derive(Clone, Copy, Debug)]
+pub enum HexCase {
+    Upper,
+    Lower,
+}
+
+/// One row of a hex dump: `bytes` as two-digit hex separated by spaces, and
+/// as their ASCII column. Offsets, indentation and padding are the caller's.
+pub fn hex_ascii_row(bytes: &[u8], case: HexCase) -> (String, String) {
+    let mut hex = String::with_capacity(bytes.len() * 3);
+    for (index, byte) in bytes.iter().enumerate() {
+        if index > 0 {
+            hex.push(' ');
+        }
+        let _ = match case {
+            HexCase::Upper => write!(hex, "{byte:02X}"),
+            HexCase::Lower => write!(hex, "{byte:02x}"),
+        };
+    }
+    (hex, bytes.iter().map(|&byte| ascii_char(byte)).collect())
 }
 
 #[cfg(test)]

@@ -9,6 +9,7 @@ use crate::layout::utf16le_lossy;
 use crate::memory::{MemoryOps, PAGE_SIZE, for_each_page_chunk, read_page_chunks};
 use crate::symbols::glob_matches;
 use crate::target::{CODE_BITNESS_X86, MAX_SEARCH_MATCHES, SearchStop, StringDescriptor};
+use crate::triage_report::time::days_to_ymd;
 use crate::types::{CodeMachine, VirtAddr};
 use crate::ui;
 use crate::unwind::{
@@ -1990,17 +1991,7 @@ fn checked_display_string_count(max_chars: u64, char_size: usize) -> Result<usiz
 }
 
 fn format_characters(value: u64) -> String {
-    value
-        .to_le_bytes()
-        .into_iter()
-        .map(|byte| {
-            if byte.is_ascii_graphic() || byte == b' ' {
-                byte as char
-            } else {
-                '.'
-            }
-        })
-        .collect()
+    value.to_le_bytes().into_iter().map(ascii_char).collect()
 }
 
 /// Format a proleptic-Gregorian UTC timestamp without pulling a date/time
@@ -2012,18 +2003,7 @@ fn format_unix_timestamp(seconds: i64, nanos: u32) -> String {
     let hour = day_seconds / 3_600;
     let minute = (day_seconds % 3_600) / 60;
     let second = day_seconds % 60;
-
-    // Howard Hinnant's civil_from_days algorithm, shifted from 1970-01-01.
-    let z = days + 719_468;
-    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = mp + if mp < 10 { 3 } else { -9 };
-    let year = year + if month <= 2 { 1 } else { 0 };
+    let (year, month, day) = days_to_ymd(days);
     if nanos == 0 {
         format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}")
     } else {

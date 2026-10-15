@@ -31,8 +31,9 @@ pub fn filetime_to_iso(ft: u64) -> Option<String> {
     Some(format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z"))
 }
 
-fn days_to_ymd(mut days: i64) -> (i64, i64, i64) {
-    // Civil days since 1970-01-01 to (year, month, day).
+/// The proleptic-Gregorian (year, month, day) `days` days after 1970-01-01,
+/// by Howard Hinnant's civil_from_days; `days` may be negative.
+pub fn days_to_ymd(mut days: i64) -> (i64, i64, i64) {
     days += 719_468;
     let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
     let doe = days - era * 146_097;

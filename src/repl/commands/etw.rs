@@ -700,18 +700,8 @@ fn print_event(event: &EtwEvent) {
     }
     let shown = &record.payload[..record.payload.len().min(PAYLOAD_DISPLAY_BYTES)];
     for (row, chunk) in shown.chunks(16).enumerate() {
-        let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
-        let ascii: String = chunk
-            .iter()
-            .map(|&b| {
-                if b.is_ascii_graphic() || b == b' ' {
-                    b as char
-                } else {
-                    '.'
-                }
-            })
-            .collect();
-        outln!("    {:04x}  {:<47}  {}", row * 16, hex.join(" "), ascii);
+        let (hex, ascii) = hex_ascii_row(chunk, HexCase::Lower);
+        outln!("    {:04x}  {hex:<47}  {ascii}", row * 16);
     }
     if record.payload.len() > shown.len() {
         outln!(

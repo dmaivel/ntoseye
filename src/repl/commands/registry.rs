@@ -122,18 +122,8 @@ fn data_preview(value: &RegValue, truncated: &mut bool) -> String {
 /// Every byte, 16 to a line with their offset and ASCII.
 fn print_hex_dump(bytes: &[u8]) {
     for (line, chunk) in bytes.chunks(16).enumerate() {
-        let hex: Vec<String> = chunk.iter().map(|byte| format!("{byte:02X}")).collect();
-        let text: String = chunk
-            .iter()
-            .map(|&byte| {
-                if byte.is_ascii_graphic() || byte == b' ' {
-                    byte as char
-                } else {
-                    '.'
-                }
-            })
-            .collect();
-        outln!("  {:06x}  {:<47}  {text}", line * 16, hex.join(" "));
+        let (hex, text) = hex_ascii_row(chunk, HexCase::Upper);
+        outln!("  {:06x}  {hex:<47}  {text}", line * 16);
     }
 }
 
