@@ -10,8 +10,6 @@ mod sections;
 
 pub use sections::{SectionLayout, SectionViews};
 
-/// x64 page-table entry physical-address field: bits 51:12 (MAXPHYADDR = 52).
-pub const PFN_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 pub const PAGE_SIZE: usize = 0x1000; // 4KiB
 
 /// Visit a byte range in chunks that never cross a virtual-memory page.
@@ -99,13 +97,6 @@ pub fn pattern_offsets<'a>(
         .enumerate()
         .filter_map(move |(offset, window)| (window == pattern).then_some(offset))
 }
-
-pub const PAGE_SHIFT: u32 = 12;
-pub const PTE_SHIFT: u8 = 12;
-pub const PDE_SHIFT: u8 = 21;
-pub const PDPTE_SHIFT: u8 = 30;
-pub const PML4E_SHIFT: u8 = 39;
-pub const PT_INDEX_MASK: u64 = 0x1FF;
 
 /// Sentinel DTB: `AddressSpace` skips page-table translation and treats
 /// virtual addresses as physical. Used by triage dumps, which only contain

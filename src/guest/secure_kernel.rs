@@ -15,11 +15,11 @@ use super::{
 use crate::{
     backend::MemoryOps,
     error::{Error, Result},
-    memory::{AddressSpace, PAGE_SIZE, PFN_MASK},
+    memory::{AddressSpace, PAGE_SIZE},
     phys::PhysMem,
     symbols::SymbolStore,
     target::bounded_list_walk,
-    types::{Arch, Dtb, PhysAddr, VirtAddr},
+    types::{Arch, Dtb, PFN_MASK, PhysAddr, VirtAddr},
 };
 
 const NX: u64 = 1 << 63;

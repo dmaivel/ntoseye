@@ -1,9 +1,15 @@
-use crate::memory::{
-    PAGE_SHIFT, PDE_SHIFT, PDPTE_SHIFT, PFN_MASK, PML4E_SHIFT, PT_INDEX_MASK, PTE_SHIFT,
-};
 use std::fmt;
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 use zerocopy::{FromBytes, Immutable, IntoBytes};
+
+/// x64 page-table entry physical-address field: bits 51:12 (MAXPHYADDR = 52).
+pub const PFN_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+pub const PAGE_SHIFT: u32 = 12;
+pub const PTE_SHIFT: u8 = 12;
+pub const PDE_SHIFT: u8 = 21;
+pub const PDPTE_SHIFT: u8 = 30;
+pub const PML4E_SHIFT: u8 = 39;
+pub const PT_INDEX_MASK: u64 = 0x1FF;
 
 #[derive(
     Default,
