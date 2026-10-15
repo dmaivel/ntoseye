@@ -6,6 +6,7 @@ use crate::ui;
 repl_command! {
     cmd_sxe;
     names: ["sxe"],
+    category: "breakpoints and events",
     usage: "sxe [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]|ud[:<module>]>",
     summary: "Break when an exception occurs or a kernel module loads or unloads.",
     details: "-c runs commands at the stop, and -f sets an explicit final action: break, handled, or not handled. `sxe ld` stops when a kernel image loads, and `sxe ld:<module>` stops when that module loads. The module name is case-insensitive, the extension is optional, and you can use `*`/`?` globs. The stop occurs after ntoseye lists the module and arms its deferred breakpoints, and before its entry point runs. `sxe ud` and `sxe ud:<module>` stop when a kernel image unloads, after its driver's unload routine has run and while the image is still in the module list. `-c` works with `sxe ld` and `sxe ud`, but `-f` does not apply to them. `sxn ld` prints a `ModLoad:` line and continues, `sxn ud` prints an `Unload module` line and continues, and `sxd` and `sxi` let the load or unload continue with no output. A named filter has precedence over bare `ld` or `ud`.",
@@ -14,6 +15,7 @@ repl_command! {
 repl_command! {
     cmd_sxd;
     names: ["sxd"],
+    category: "breakpoints and events",
     usage: "sxd [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]|ud[:<module>]>",
     summary: "Pass first-chance exceptions and break on second chance.",
     details: "-c runs commands at the stop, and -f sets an explicit final action: break, handled, or not handled. `sxd ld[:<module>]` and `sxd ud[:<module>]` let the load or unload continue with no output. See sxe.",
@@ -22,6 +24,7 @@ repl_command! {
 repl_command! {
     cmd_sxn;
     names: ["sxn"],
+    category: "breakpoints and events",
     usage: "sxn [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]|ud[:<module>]>",
     summary: "Show a notification for exceptions and pass them without a break.",
     details: "-c runs commands at the stop, and -f sets an explicit final action: break, handled, or not handled. `sxn ld[:<module>]` prints a `ModLoad:` line at the load and continues, and `sxn ud[:<module>]` prints an `Unload module` line at the unload and continues. See sxe.",
@@ -30,6 +33,7 @@ repl_command! {
 repl_command! {
     cmd_sxi;
     names: ["sxi"],
+    category: "breakpoints and events",
     usage: "sxi [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]|ud[:<module>]>",
     summary: "Pass exceptions without a break or a notification.",
     details: "-c runs commands at the stop, and -f sets an explicit final action: break, handled, or not handled. `sxi ld[:<module>]` and `sxi ud[:<module>]` let the load or unload continue with no output. See sxe.",
@@ -38,6 +42,7 @@ repl_command! {
 repl_command! {
     cmd_sx();
     names: ["sx", "sxl"],
+    category: "breakpoints and events",
     usage: "sx or sxl",
     summary: "List the configured exception policies and module load and unload filters.",
 }
@@ -45,6 +50,7 @@ repl_command! {
 repl_command! {
     cmd_sxr();
     names: ["sxr"],
+    category: "breakpoints and events",
     usage: "sxr",
     summary: "Reset exception policies to the default break behavior, and clear module load and unload filters.",
 }
@@ -52,6 +58,7 @@ repl_command! {
 repl_command! {
     cmd_lastevent();
     names: [".lastevent"],
+    category: "target control",
     usage: ".lastevent",
     summary: "Show the most recent target event that ntoseye observed.",
 }
@@ -67,8 +74,8 @@ fn validate_exception_command(command: &str) -> std::result::Result<(), String> 
         };
         let is_run_control = parsed.name == "gc"
             || command_registry().get(parsed.name).is_some_and(|spec| {
-                spec.run != RunEffect::None
-                    || spec.run_state == Some(RunState::Running)
+                spec.effects.run != RunEffect::None
+                    || spec.effects.state == RunState::Running
                     || spec.flow == Flow::Quit
             });
         if is_run_control {

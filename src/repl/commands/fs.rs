@@ -17,6 +17,7 @@ use crate::ui;
 repl_command! {
     cmd_ca;
     names: ["!ca", "ca"],
+    category: "memory manager",
     usage: "!ca <control-area>",
     summary: "Decode the control area of a section, with its segment and subsections.",
     details: "Shows the section, PFN, mapped-view, and user reference counts, the _MMSECTION_FLAGS that are set, and the backing file object and its name. It also shows the segment (PTE count, size, committed pages, and prototype PTEs) and, for each subsection, the base PTE, the PTE count, the starting sector, the sector count, and the protection. The command reads up to 1,024 subsections along NextSubsection, starting from the subsection after the control area, and stops at a subsection that points to a different control area. To find a control area, use the SectionObjectPointer of a file object or the Subsection of a VAD.",
@@ -27,6 +28,7 @@ repl_command! {
 repl_command! {
     cmd_vpb;
     names: ["!vpb", "vpb"],
+    category: "objects and I/O",
     usage: "!vpb <vpb>",
     summary: "Decode a volume parameter block.",
     details: "Shows the VPB_* flags, the volume device of the mounted file system, and the storage device below it, with their object names. It also shows the reference count, the serial number, and the volume label. The Vpb field of a device object points to the VPB. If the Type at the address is not IO_TYPE_VPB, the command shows an error.",
@@ -37,6 +39,7 @@ repl_command! {
 repl_command! {
     cmd_filecache();
     names: ["!filecache", "filecache"],
+    category: "memory manager",
     usage: "!filecache",
     summary: "Show the views that the cache manager has mapped, for each file.",
     details: "Walks the VACB arrays (CcVacbArrays) to find the views in use, and groups the views by shared cache map. For each file, the command shows its name, the mapped 256 KB views, the pages of these views that are present in memory, the dirty pages, the file size, and the open count, with the file that has the most present data first. The summary shows the VACBs in use and free, and the bytes mapped and present. The command lists up to 1,024 files, and you can interrupt the walk.",
@@ -46,6 +49,7 @@ repl_command! {
 repl_command! {
     cmd_fltkd_filters();
     names: ["!fltkd.filters"],
+    category: "objects and I/O",
     usage: "!fltkd.filters",
     summary: "List the registered minifilters and their instances.",
     details: "Walks each filter manager frame in fltmgr!FltGlobals and its registered filters. For each filter, the command shows its altitude and its attached instances, with their names and altitudes. The command uses the types from the PDB of fltmgr.",
@@ -55,6 +59,7 @@ repl_command! {
 repl_command! {
     cmd_fltkd_instances;
     names: ["!fltkd.instances"],
+    category: "objects and I/O",
     usage: "!fltkd.instances [filter]",
     summary: "List minifilter instances with their filter and volume.",
     details: "Lists each instance of each registered filter. To list the instances of one filter, give its name (`WdFilter`) or its _FLT_FILTER address. For each instance, the command shows its name, altitude, filter, and the volume that it is attached to.",
@@ -65,6 +70,7 @@ repl_command! {
 repl_command! {
     cmd_fltkd_volumes();
     names: ["!fltkd.volumes"],
+    category: "objects and I/O",
     usage: "!fltkd.volumes",
     summary: "List the volumes that the filter manager is attached to, with their instances.",
     details: "Walks the attached volumes of each filter manager frame. For each volume, the command shows the device name, the file-system type, and the attached instances with their names and altitudes.",

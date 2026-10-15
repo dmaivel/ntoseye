@@ -13,6 +13,7 @@ use std::sync::atomic::Ordering;
 repl_command! {
     cmd_reboot();
     names: [".reboot", "reboot", ".restart", "restart"],
+    category: "target control",
     usage: ".reboot",
     summary: "Reboot the debug target and reload its kernel context.",
     details: "ntoseye sends the reboot without confirmation, and handles the next KD state-change through the normal target-reload path.",
@@ -23,6 +24,7 @@ repl_command! {
 repl_command! {
     cmd_crash();
     names: [".crash", "crash"],
+    category: "target control",
     usage: ".crash",
     summary: "Force a MANUALLY_INITIATED_CRASH (bugcheck 0xE2).",
     details: "Windows first writes its crash dump, which often takes a minute, and the target ignores break-ins during this time. Then Windows reboots or, if automatic restart is disabled, breaks in. Ctrl+C stops the wait.",
@@ -33,6 +35,7 @@ repl_command! {
 repl_command! {
     cmd_dump;
     names: [".dump", "dump"],
+    category: "target control",
     usage: ".dump [/f] [/ma] <file>",
     summary: "Write a full PAGEDU64 kernel dump from the halted target.",
     details: ".dump accepts both /f and /ma as WinDbg-compatible full-dump switches. ntoseye writes the dump as a stream, page by page, and you can cancel it with Ctrl+C.",
@@ -43,6 +46,7 @@ repl_command! {
 repl_command! {
     cmd_kdfiles;
     names: [".kdfiles"],
+    category: "target control",
     usage: ".kdfiles [<map-file>] [-m <target> <host>] [-d <target>] [-c]",
     summary: "Serve driver images from host files using a driver replacement map.",
     details: "Without arguments, .kdfiles shows the mappings and serving statistics. A path loads a WinDbg map file of three-line records: `map`, the target name, and the host path. -m adds a mapping, -d removes one, and -c clears the map. Target names match case-insensitively on path suffix boundaries, and a bare filename matches any directory. Changes apply at the next driver load, so the guest can load a rebuilt driver without you copying it into the guest. See the driver replacement map guide.",
@@ -53,6 +57,7 @@ repl_command! {
 repl_command! {
     cmd_status();
     names: ["status"],
+    category: "target control",
     usage: "status",
     summary: "Show the current VM status.",
 }
@@ -60,6 +65,7 @@ repl_command! {
 repl_command! {
     cmd_capabilities();
     names: ["capabilities"],
+    category: "target control",
     usage: "capabilities",
     summary: "Show the backend capabilities.",
 }
@@ -67,6 +73,7 @@ repl_command! {
 repl_command! {
     cmd_dbgprint;
     names: ["!dbgprint", "dbgprint"],
+    category: "target control",
     usage: "!dbgprint [count]",
     summary: "Show guest debug output (DbgPrint).",
     details: "Shows the last count lines, 50 by default, or all with 0. Over kd and kdnet, it shows what the KD stream delivered since ntoseye attached, and before anything arrived, the kernel's buffer. On the other backends, including a crash dump, it shows the kernel's own DbgPrint buffer (KdPrintCircularBuffer), as WinDbg's !dbgprint does, which also holds what was printed before ntoseye attached. The buffer is 4 KB by default and keeps only the newest output. A print that the debug filter drops (nt!Kd_DEFAULT_Mask, Kd_<component>_Mask) reaches neither.",

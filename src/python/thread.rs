@@ -8,6 +8,7 @@ use pyo3::exceptions::{PyAttributeError, PyIndexError, PyKeyError, PyTypeError, 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyInt};
 
+use super::command::admit;
 use super::context::{Context, Space};
 use super::handle::{Owner, require_halted};
 use super::hypervisor::HypercallCaller;
@@ -20,6 +21,7 @@ use super::{err, view_dict};
 use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::guest::ProcessInfo;
 use crate::session::context::windows_thread_on_backend_thread;
+use crate::session::effects::Effects;
 use crate::session::{Session, VcpuInfo};
 use crate::symbols::CodeFrame;
 use crate::target::sched::ApcSelector;
@@ -171,6 +173,12 @@ impl Thread {
             ..Context::default()
         }
     }
+
+    /// The context a call on this thread runs in: the thread, in its
+    /// process's address space.
+    pub(super) fn thread_context(&self, py: Python<'_>) -> PyResult<Context> {
+        Ok(self.context(self.process_info(py)?))
+    }
 }
 
 #[pymethods]
@@ -321,13 +329,6 @@ impl Thread {
             Ok(view::usermode::last_error(&detail))
         })?;
         Typed::new(py, view)
-    }
-
-    /// Get the thread as the walk read it: its identity, state, scheduling
-    /// details and stack bounds (`!thread`).
-    fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, ThreadInfo>> {
-        self.owner.check(py)?;
-        Typed::of(py, &self.info)
     }
 
     /// The thread as a plain `dict`.
@@ -765,8 +766,7 @@ impl Cpus {
     fn ids(&self, py: Python<'_>) -> PyResult<Vec<String>> {
         self.owner.with(py, |session| {
             // A user dump's backend contexts are its threads, not processors.
-            session.target.require_kernel().map_err(err)?;
-            require_halted(session, "vcpus")?;
+            admit(session, &Effects::KERNEL_HALTED, "vcpus")?;
             Ok(session
                 .vcpus()
                 .map_err(err)?
@@ -838,8 +838,7 @@ impl Cpu {
 
     fn current_info(&self, py: Python<'_>) -> PyResult<VcpuInfo> {
         self.owner.with(py, |session| {
-            session.target.require_kernel().map_err(err)?;
-            require_halted(session, "vcpus")?;
+            admit(session, &Effects::KERNEL_HALTED, "vcpus")?;
             session
                 .vcpus()
                 .map_err(err)?

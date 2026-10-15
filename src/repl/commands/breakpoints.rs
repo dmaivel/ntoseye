@@ -28,6 +28,7 @@ use crate::types::{Dtb, VirtAddr};
 repl_command! {
     cmd_bp;
     names: ["bp"],
+    category: "breakpoints and events",
     usage: "bp [/1] [/a] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <address|file:line> [<passes>] [if <expr>] [do <commands>]",
     summary: "Set a breakpoint.",
     details: "The breakpoint replaces the first byte of the instruction at the address, so an instruction must start there. ntoseye confirms one by the symbol at the address, or by decoding from the start of the function around it, and refuses an address inside an instruction. When nothing near the address says where instructions start, or that code cannot be read, bp sets the breakpoint and warns that it could not check. /a skips the check. A file:line sets a source breakpoint, as bu does.",
@@ -37,6 +38,7 @@ repl_command! {
 repl_command! {
     cmd_bu;
     names: ["bu"],
+    category: "breakpoints and events",
     usage: "bu [/1] [/a] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <symbol|file:line> [<passes>] [if <expr>] [do <commands>]",
     summary: "Set a deferred symbolic breakpoint.",
     details: "A symbol with an offset, such as mydriver!DriverEntry+0x20, must name the start of an instruction, which ntoseye checks as bp does. Until the symbol resolves nothing says where its instructions start, so bu sets the breakpoint and warns that it could not check. /a skips the check. A file:line sets a source breakpoint on each address the line has.",
@@ -47,6 +49,7 @@ repl_command! {
 repl_command! {
     cmd_bm;
     names: ["bm"],
+    category: "breakpoints and events",
     usage: "bm [/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <symbol-pattern> [<passes>] [if <expr>] [do <commands>]",
     summary: "Set deferred symbolic breakpoints on the symbols that match a pattern.",
     details: "Only code symbols match, so bm skips the data symbols that the pattern also matches.",
@@ -57,6 +60,7 @@ repl_command! {
 repl_command! {
     cmd_ba;
     names: ["ba"],
+    category: "breakpoints and events",
     usage: "ba [/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <access><size> <address> [<passes>] [if <expr>] [do <commands>]",
     summary: "Set a hardware (debug-register) breakpoint.",
     details: "The access is e=execute, r=read/write, or w=write, and the size is 1, 2, 4, or 8 bytes. An execute breakpoint has size 1. The command is not available on a dump or on the `memory` backend. Example: ba w4 nt!MyGlobal. In VTL1 (the .vtl 1 view or a vCPU stopped in VTL1), ntoseye accepts only `ba e1`, and only on GDB backends. This breakpoint is global, so you cannot use /p or /t, which name NT processes and threads. Example: .vtl 1; ba e1 securekernel!SkeSelectProcessAddressSpace; g",
@@ -67,6 +71,7 @@ repl_command! {
 repl_command! {
     cmd_hvbp;
     names: ["!hvbp"],
+    category: "breakpoints and events",
     usage: "!hvbp [/1] [/c <processor>] [/w \"<expr>\"] <code|name> [partition-id [vp-index]] [if <expr>] [do <commands>]",
     summary: "Set a breakpoint that stops on a hypercall to the Windows hypervisor, optionally only from one partition or VP.",
     details: "Sets a hardware execute breakpoint on the hypercall's handler, which the hypervisor's hypercall table gives (see !hvcalls), so it needs the gdb backend and a free debug register. The call is a call code, in the current radix, or its name: the TLFS name (HvCallPostMessage) or the name x hv!* shows (HvCall0004). Many codes share a handler, HvCallUnimplemented's for every code that is not implemented, so at each hit ntoseye reads the caller's call code from its RCX and resumes the target without a stop when it is another. The caller is the VP whose exit the processor handles: the guest partition's VP it serves, or the root partition's VP. With a partition ID, and a VP index in it, the breakpoint stops only for that caller; the IDs use the current radix, and ntoseye refuses a partition or VP that the hypervisor does not have. A hit whose caller ntoseye cannot tell, or whose caller matches but whose registers it cannot read, stops, so the filter does not hide a hit. /1, /c, /w, if, and do work as for ba; a condition sees the caller's registers at its VMCALL (as !hvcall decodes them), not the hypervisor's at the handler, and stops the hit with an error when they are not known. The command takes no pass count: set it with bpp. bl shows the filter. Needs the VM's hv-evmcs enlightenment. Example: !hvbp HvCallSendSyntheticClusterIpi 3; g",
@@ -77,6 +82,7 @@ repl_command! {
 repl_command! {
     cmd_hvexit;
     names: ["!hvexit"],
+    category: "breakpoints and events",
     usage: "!hvexit [/1] [/c <processor>] [/w \"<expr>\"] <reason> [partition-id [vp-index]] [if <expr>] [do <commands>]",
     summary: "Set a breakpoint that stops on a VM exit to the Windows hypervisor by its reason, optionally only from one partition or VP.",
     details: "Sets a hardware execute breakpoint on the hypervisor's VM-exit entry point (hv!VmExitEntry, the host RIP of every eVMCS), so it needs the gdb backend, the VM's hv-evmcs enlightenment and a free debug register. The reason is a basic exit reason (Intel SDM Appendix C), as a decimal or 0x number, or a name as !hvvps shows it: cpuid, rdmsr, wrmsr, io_instruction, ept_violation, vmcall, hlt. Every exit enters there, so at each hit ntoseye reads the reason from the eVMCS the processor has loaded and resumes the target without a stop when it is another; the guest runs far slower while the breakpoint is set. With a guest partition's ID it rarely stops: that partition's VPs run only when the root partition's NT runs them, which it barely does then; !hvbp stops on a guest's hypercalls without slowing the rest. The caller is the VP whose exit it is, as for !hvbp: with a partition ID, and a VP index in it, the breakpoint stops only for that caller. The condition is evaluated on the caller's registers at its exit and reads the caller's memory. Example: !hvexit cpuid 6 if @rax==0x40000000",
@@ -87,6 +93,7 @@ repl_command! {
 repl_command! {
     cmd_bl();
     names: ["bl"],
+    category: "breakpoints and events",
     usage: "bl",
     summary: "List all breakpoints.",
     details: "The status column shows `e` for enabled, `d` for disabled, or `o` for owed. An owed breakpoint is a kernel code breakpoint that waits for its page to become resident.",
@@ -95,6 +102,7 @@ repl_command! {
 repl_command! {
     cmd_bpcmds();
     names: [".bpcmds"],
+    category: "breakpoints and events",
     usage: ".bpcmds",
     summary: "Print the commands that set the current breakpoints again.",
     details: "The output has one line for each breakpoint, in ID order. An address breakpoint shows as `bp <address>`, a symbolic or source breakpoint as `bu <symbol>` (as `bm` creates it), a hardware breakpoint as `ba <access><size> <address>`, and a hypercall breakpoint as `!hvbp <code> [partition-id [vp-index]]`, without its pass count, which !hvbp does not take. Each line also has the /1, /p, /t, and /c options of the breakpoint, its condition (as /w), its pass count, and its command string. To set the same breakpoints again, run the lines, either by pasting them or by saving them to a file for `$$<`. WinDbg puts a breakpoint ID in each line, but these lines have none because the ntoseye bp command does not take one, so the new breakpoints get new IDs. A disabled breakpoint comes back enabled.",
@@ -103,6 +111,7 @@ repl_command! {
 repl_command! {
     cmd_gc -> Flow;
     names: ["gc"],
+    category: "breakpoints and events",
     usage: "gc",
     summary: "Resume from the breakpoint that runs the current command string.",
     details: "Use this command only in the command string of a breakpoint, where it stops the command string and resumes the target. You can put it at the end (`bp nt!NtClose \"r rcx; gc\"`) or in a branch (`bp nt!NtClose \"j (@rcx == 0) '' ; 'gc'\"`), and the commands after it do not run. A plain `g` in the command string does the same, as in WinDbg scripts, but ntoseye does not accept `g <address>` or other run control there.",
@@ -111,6 +120,7 @@ repl_command! {
 repl_command! {
     cmd_bc;
     names: ["bc"],
+    category: "breakpoints and events",
     usage: "bc <id|id-id|*>",
     summary: "Clear one or more breakpoints by ID.",
     completion: Breakpoint,
@@ -120,6 +130,7 @@ repl_command! {
 repl_command! {
     cmd_bd;
     names: ["bd"],
+    category: "breakpoints and events",
     usage: "bd <id|id-id|*>",
     summary: "Disable one or more breakpoints by ID.",
     completion: Breakpoint,
@@ -129,6 +140,7 @@ repl_command! {
 repl_command! {
     cmd_be;
     names: ["be"],
+    category: "breakpoints and events",
     usage: "be <id|id-id|*>",
     summary: "Enable one or more breakpoints by ID.",
     completion: Breakpoint,
@@ -137,6 +149,7 @@ repl_command! {
 repl_command! {
     cmd_bpc;
     names: ["bpc"],
+    category: "breakpoints and events",
     usage: "bpc <id> <condition|clear>",
     summary: "Change or clear a breakpoint condition.",
     completion: [Breakpoint, Expression],
@@ -145,6 +158,7 @@ repl_command! {
 repl_command! {
     cmd_bsc;
     names: ["bsc"],
+    category: "breakpoints and events",
     usage: "bsc <id> <condition> [\"commands\"]",
     summary: "Set the condition and the commands of a breakpoint together.",
     details: "This is the WinDbg update-conditional-breakpoint command. The breakpoint stops only when <condition> is nonzero, and then runs the quoted commands. Use semicolons between the commands (`bsc 0 @rcx==4 \"k; g\"`). If you do not give commands, bsc removes the current commands of the breakpoint.",
@@ -154,6 +168,7 @@ repl_command! {
 repl_command! {
     cmd_bs;
     names: ["bs", "bpa"],
+    category: "breakpoints and events",
     usage: "bs <id> <commands|clear>",
     summary: "Set or clear the command action of a breakpoint.",
     completion: Breakpoint,
@@ -162,6 +177,7 @@ repl_command! {
 repl_command! {
     cmd_br;
     names: ["br"],
+    category: "breakpoints and events",
     usage: "br <id> <newid>",
     summary: "Change the ID of a breakpoint.",
     completion: Breakpoint,
@@ -170,6 +186,7 @@ repl_command! {
 repl_command! {
     cmd_bpp;
     names: ["bpp"],
+    category: "breakpoints and events",
     usage: "bpp <id> <passes>",
     summary: "Reset the pass count of a breakpoint.",
     completion: Breakpoint,

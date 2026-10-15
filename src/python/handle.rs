@@ -16,12 +16,13 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
+use super::command::admit;
 use super::context::{Context, in_context};
-use super::{ErrorKind, err, error, raise};
-use crate::dbg_backend::halt_unreachable_reason;
+use super::{ErrorKind, error, raise};
 use crate::error::{Error, Result as CoreResult};
 use crate::repl::ReplStore;
 use crate::session::Session;
+use crate::session::effects::Effects;
 use crate::target::InterruptRequester;
 
 /// How often an idle owner thread services the guest (see [`Actor`]); the
@@ -371,22 +372,7 @@ impl Debugger {
 /// Require a halted target before an operation that reads registers or
 /// patches guest/backend state, raising `TargetRunningError` otherwise.
 pub fn require_halted(session: &mut Session, operation: &str) -> PyResult<()> {
-    // KD can leave is_running() stale-true while the VM is physically halted
-    // (a caught-but-undrained stop); settle it first.
-    session.settle_pending_stop().map_err(err)?;
-    if !session.backend.is_running() {
-        return Ok(());
-    }
-    Err(match halt_unreachable_reason(&*session.backend) {
-        Some(reason) => error(
-            ErrorKind::TargetRunning,
-            format!("{operation} needs a halted target; {reason}"),
-        ),
-        None => error(
-            ErrorKind::TargetRunning,
-            format!("{operation} requires the VM to be halted; call interrupt() first"),
-        ),
-    })
+    admit(session, &Effects::HALTED, operation)
 }
 
 /// How a handle reaches its debugger. A `stamped` owner remembers the target

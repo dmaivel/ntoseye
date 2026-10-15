@@ -16,6 +16,7 @@ use super::diagnostics::{diagnostic_addr, diagnostic_cell};
 repl_command! {
     cmd_peb;
     names: ["!peb", "peb"],
+    category: "user mode",
     usage: "!peb [address]",
     summary: "Decode the process environment block and process parameters of the current process.",
     details: "If you do not give an address, the command uses EPROCESS.Peb of the current process: the one that .process selected, else the owner of the current thread. On a user-mode minidump it uses the PEB that the selected thread's TEB names, and the layouts of the dump's ntdll. It decodes the process parameters with their PDB layouts. To list the loader modules, use !dlls.",
@@ -25,6 +26,7 @@ repl_command! {
 repl_command! {
     cmd_teb;
     names: ["!teb", "teb"],
+    category: "user mode",
     usage: "!teb [address]",
     summary: "Decode a thread environment block.",
     details: "If you do not give an address, the command uses the teb pseudo-register of the current thread. On a user-mode minidump it uses the TEB of the selected thread (~<n>s), and the layouts of the dump's ntdll.",
@@ -34,6 +36,7 @@ repl_command! {
 repl_command! {
     cmd_dlls;
     names: ["!dlls", "dlls"],
+    category: "user mode",
     usage: "!dlls [-c <address>]",
     summary: "List the modules in the loader lists of the current process.",
     details: "The current process is the one that .process selected, else the owner of the current thread; on a user-mode minidump, its one process, as far as the dump captured the loader's lists (lm lists the dump's own module list). With -c <address>, the command shows only the module that contains that address. The module walk has a limit, and also stops if it finds a cycle in a list.",
@@ -43,6 +46,7 @@ repl_command! {
 repl_command! {
     cmd_gle();
     names: ["!gle", "gle"],
+    category: "user mode",
     usage: "!gle",
     summary: "Show the last Win32 error value and the last NT status value of the current thread.",
     completion: None,
@@ -51,6 +55,7 @@ repl_command! {
 repl_command! {
     cmd_chkimg;
     names: ["!chkimg", "chkimg"],
+    category: "analysis",
     usage: "!chkimg [-d] [-v] [-nospec] <module>",
     summary: "Compare the executable sections of a module with the cached on-disk image.",
     details: "Compares the .text, PAGE*, and INIT executable sections after applying the DIR64/HIGHLOW relocations, and skips discardable and paged-out sections. The command counts known kernel self-patches separately: import optimization, retpoline, KiPatchSelf retargets, and the addresses of the kernel VA regions that the kernel moves at boot. With -nospec, the command does not show this breakdown and reports the self-patches as ordinary mismatches. -d prints byte diffs, up to a limit, and -v prints the results for each section.",

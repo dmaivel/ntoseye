@@ -14,6 +14,7 @@ use crate::unwind::try_format_symbol_at;
 repl_command! {
     cmd_display;
     names: ["display"],
+    category: "symbols, types, and expressions",
     usage: "display [<expression>]",
     summary: "Show an expression's value at every stop.",
     details: "Each stop then ends with the display's value, marked when it changed since the last stop. The expression keeps the radix it was entered in. Without an expression, display lists the displays with their values now. undisplay removes them.",
@@ -24,6 +25,7 @@ repl_command! {
 repl_command! {
     cmd_undisplay;
     names: ["undisplay"],
+    category: "symbols, types, and expressions",
     usage: "undisplay <number>... | *",
     summary: "Stop showing displays at every stop.",
     completion: None,

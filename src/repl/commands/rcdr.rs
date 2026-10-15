@@ -14,6 +14,7 @@ use crate::ui;
 repl_command! {
     cmd_rcdrkd_rcdrloglist;
     names: ["!rcdrkd.rcdrloglist"],
+    category: "objects and I/O",
     usage: "!rcdrkd.rcdrloglist [<driver>]",
     summary: "List the drivers the WPP recorder keeps logs for, or one driver's logs.",
     details: "WppRecorder.sys keeps in-flight logs for each driver built with WPP's recorder, such as the inbox USB, storage, and network drivers, and KMDF drivers' own WPP messages. Without an argument, lists those drivers: each one's recorder context (_WPP_AUTOLOG_CONTEXT), name, image base, and number of logs. With a driver, given by its name (with or without .sys) or its context, lists its logs: each _WPP_AUTOLOG_HEADER, its identifier, size, and the offsets of its normal and error partitions, and marks the default log and a deleted one. The recorder keeps no list of its drivers; the command finds each through the bugcheck callback the recorder registers for it, so it needs the PDB for WppRecorder.sys.",
@@ -24,6 +25,7 @@ repl_command! {
 repl_command! {
     cmd_rcdrkd_rcdrlogdump;
     names: ["!rcdrkd.rcdrlogdump"],
+    category: "objects and I/O",
     usage: "!rcdrkd.rcdrlogdump <driver> [-a <log>]",
     summary: "Show a driver's WPP recorder log records, oldest first.",
     details: "Walks each of the driver's recorder logs, both the normal and the error partition, back from the newest record, and shows the records of all of them merged in the order the driver logged them (their sequence numbers come from one counter per driver). -a shows only the log whose _WPP_AUTOLOG_HEADER you give, as !rcdrkd.rcdrloglist lists it. Each record shows its sequence number, its time when the log keeps timestamps, the log it is in, and its message formatted from the trace message format (TMF) annotations in a loaded PDB, or else the message GUID and number and the argument bytes. Microsoft's public PDBs carry no TMF annotations; add your driver's private PDB to the symbol path for its messages. The walk is !wdfkd.wdflogdump's: the records share KMDF's IFR format.",

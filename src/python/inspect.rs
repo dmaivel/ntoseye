@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use super::args::{ApcTarget, DeviceArg, FltFilterArg, LoggerArg, ObjectArg};
+use super::command::admit;
 use super::context::{Context, in_context};
 use super::handle::Owner;
 use super::module::Device;
@@ -15,9 +16,9 @@ use crate::bugchecks::{bugcheck_from_dump_info, current_bugcheck};
 use crate::error::Error;
 use crate::expr::NumberRadix;
 use crate::session::Session;
+use crate::session::effects::Effects;
 use crate::target::etw::parse_guid;
 use crate::target::irpfind::{IrpCriteria, IrpPool};
-use crate::target::job::Job;
 use crate::target::mm::{PfnSelector, PoolType, PoolUsageSort};
 use crate::target::pci::{PCI_EXTENDED_CONFIG_SIZE, PciQuery, PciRawRange};
 use crate::target::registry::names_equal;
@@ -68,7 +69,7 @@ impl Inspect {
         build: impl FnOnce(&mut Session) -> PyResult<T> + Send,
     ) -> PyResult<Typed<'py, T, M>> {
         self.typed_any(py, |session| {
-            session.target.require_kernel().map_err(err)?;
+            admit(session, &Effects::KERNEL, "Inspect")?;
             build(session)
         })
     }
@@ -216,19 +217,6 @@ impl Inspect {
         self.typed(py, |session| {
             let detail = session.target.global_flags().map_err(err)?;
             Ok(view::process::global_flags(&detail))
-        })
-    }
-
-    /// Decode a job object (`!job`). The result has the accounting, limits,
-    /// flags, nesting, and the processes that are assigned to the job.
-    /// `address` is the job or a process or thread whose job to decode, and
-    /// `None` selects the job of the current process.
-    #[pyo3(signature = (address=None))]
-    fn job<'py>(&self, py: Python<'py>, address: Option<u64>) -> PyResult<Typed<'py, Job>> {
-        self.typed(py, |session| {
-            let target = &session.target;
-            let job = target.job_address(address.map(VirtAddr)).map_err(err)?;
-            target.inspect_job(job).map_err(err)
         })
     }
 
@@ -1919,7 +1907,7 @@ impl Inspect {
             return Err(raise(format!("{tag:?} is not a GUID")));
         };
         let data = self.owner.with_in(py, &Context::default(), |session| {
-            session.target.require_kernel().map_err(err)?;
+            admit(session, &Effects::KERNEL, "Inspect.read_tagged")?;
             let dump = session
                 .target
                 .phys

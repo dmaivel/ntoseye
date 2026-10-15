@@ -15,6 +15,7 @@ use crate::ui;
 repl_command! {
     cmd_heap;
     names: ["!heap", "heap"],
+    category: "user mode",
     usage: "!heap [-s] [-h|-a <heap>] [-x <address>] [-p -a <address>]",
     summary: "Summarize, walk, or search the user-mode heaps of the attached process, or of a user-mode minidump's process.",
     details: "With no arguments or with -s, the command lists each heap in the PEB with its kind and sizes. -h decodes the segments of one heap, and -a does the same and also lists each entry, chunk, and block. -x finds the block that contains an address, and -p -a does the same search. To identify a heap, use its index in the PEB list or its address. The command decodes NT heaps, including legacy-LFH blocks, and segment heaps, including VS, LFH, page, and large allocations. It gets the encoding keys from ntdll symbols. For NT heaps, it uses _HEAP.Encoding and finds legacy-LFH blocks through their user block regions. For segment heaps, it uses the keys in ntdll!RtlpHpHeapGlobals. In a WOW64 process, the command shows the 32-bit heaps and decodes them with the layouts and keys of ntdll32.",

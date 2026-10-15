@@ -42,6 +42,7 @@ const DEBUG_SYMTYPE_DEFERRED: u64 = 5;
 repl_command! {
     cmd_foreach -> Flow;
     names: [".foreach"],
+    category: "session",
     usage: ".foreach [/pS n] [/ps n] ( Variable { InCommands } ) { OutCommands } | .foreach [options] /s ( Variable \"InString\" ) { OutCommands } | .foreach [options] /f ( Variable \"InFile\" ) { OutCommands }",
     summary: "Run commands once for each token of a command's output, a string, or a file.",
     details: "InCommands run first, with their output hidden. ntoseye shows their errors and warnings and does not use them as tokens. It splits the output (or InString, or the text of InFile) into tokens at spaces, tabs, and line breaks, and then runs OutCommands once for each token. In each run, the token replaces each whole-word occurrence of Variable, which must stand alone between spaces, or at the start or end of OutCommands. The token replaces `${Variable}` anywhere, also inside other text. If a token contains `;` or a quote, ntoseye inserts it as a quoted string, so the token cannot end its command and start a new one. /pS n skips the first n tokens, and /ps n skips n tokens after each token that the loop uses. For example, `.foreach /pS 2 /ps 4` uses the 3rd, 8th, 13th token, and so on. The skip counts are expressions in the current radix. OutCommands can contain several commands separated by `;`, another `.foreach`, or `!for_each_*`. Ctrl+C stops the loop. If the session does not permit a command (for example, a resume in a breakpoint action), the loop stops and the rest of the command line does not run. If a command only shows an error, the loop continues.",
@@ -52,6 +53,7 @@ repl_command! {
 repl_command! {
     cmd_for_each_process -> Flow;
     names: ["!for_each_process"],
+    category: "processes and modules",
     usage: "!for_each_process [\"CommandString\"]",
     summary: "Run commands once for each process in the target.",
     details: "In CommandString, ntoseye replaces each whole-word `@#Process` with the EPROCESS address of the process, and `${@#Process}` anywhere. To use several commands, separate them with `;` and put the string in quotes. Without CommandString, the command runs `!process @#Process 0` for each process. The loop does not change the process context (`.process`, `$proc`), but `.process /p @#Process` in CommandString does, and this change stays after the loop. The loop uses the processes that `ps` shows, in the same order. Ctrl+C stops the loop. If the session does not permit a command (for example, a resume in a breakpoint action), the loop stops and the rest of the command line does not run. If a command only shows an error, the loop continues.",
@@ -62,6 +64,7 @@ repl_command! {
 repl_command! {
     cmd_for_each_thread -> Flow;
     names: ["!for_each_thread"],
+    category: "processes and modules",
     usage: "!for_each_thread [\"CommandString\"]",
     summary: "Run commands once for each thread in the target, or in the `.process` process.",
     details: "In CommandString, ntoseye replaces each whole-word `@#Thread` with the ETHREAD address of the thread, and `${@#Thread}` anywhere. To use several commands, separate them with `;` and put the string in quotes. Without CommandString, the command runs `!thread @#Thread 2` for each thread. If you select a process with `.process`, the loop uses only the threads of that process, and otherwise each thread that `threads` shows. The loop does not change the thread context (`.thread`, `$thread`). Ctrl+C stops the loop. If the session does not permit a command (for example, a resume in a breakpoint action), the loop stops and the rest of the command line does not run. If a command only shows an error, the loop continues.",
@@ -72,6 +75,7 @@ repl_command! {
 repl_command! {
     cmd_for_each_module -> Flow;
     names: ["!for_each_module"],
+    category: "processes and modules",
     usage: "!for_each_module [\"CommandString\"]",
     summary: "Run commands once for each loaded module that `lm` shows.",
     details: "The loop uses the modules of the current scope, in `lm` order. These are the modules of the `.process` process or, without one, the kernel modules (or the secure kernel modules under `.vtl 1`). CommandString can use the following aliases, which ntoseye replaces as whole words, or anywhere as `${@#Name}`. Alias names are case-sensitive. The aliases are @#ModuleIndex (the 0-based position), @#ModuleName (the `module!` name that `lm` shows), @#ImageName (the image name that `lm` shows), @#LoadedImageName (the full path from the loader if known, else the image name), @#SymbolFileName (the local PDB of the symbols, else the image name), @#Base, @#End, @#Size, @#TimeDateStamp, @#Checksum, @#FileVersion, @#ProductVersion, @#Flags (DEBUG_MODULE_USER_MODE for a process module), @#SymbolType (DEBUG_SYMTYPE_PDB, _DEFERRED while ntoseye gets the symbols, else _NONE), and @#ModuleNameSize, @#ImageNameSize, @#LoadedImageNameSize, @#SymbolFileNameSize (the string length plus one). If a value contains `;` or a quote, ntoseye inserts it as a quoted string, so the value cannot end its command and start a new one. Numbers are hex with a 0x prefix, so they are the same in all radixes. If a module does not have a value that an alias uses (for example, no timestamp or no version resource), ntoseye shows an error and skips the module. Without CommandString, the command runs `.echo @#ModuleIndex : @#Base @#End @#ModuleName @#ImageName  @#LoadedImageName`. Ctrl+C stops the loop. If the session does not permit a command (for example, a resume in a breakpoint action), the loop stops and the rest of the command line does not run. If a command only shows an error, the loop continues.",
@@ -81,6 +85,7 @@ repl_command! {
 repl_command! {
     cmd_for_each_frame -> Flow;
     names: ["!for_each_frame"],
+    category: "execution and stack",
     usage: "!for_each_frame [\"CommandString\"]",
     summary: "Run commands once for each frame of the current stack, with that frame selected.",
     details: "The loop uses the stack that `k` shows, up to 256 frames. For each frame, ntoseye shows the frame as `.frame` does and makes it the local context, as `.frame N` does, so `r`, `dv`, and `@$frame` use that frame. Then CommandString runs. To use several commands, separate them with `;` and put the string in quotes. After the loop, the local context is the same as before. Without CommandString, the command lists the frames and their indexes. Ctrl+C stops the loop. If the session does not permit a command (for example, a resume in a breakpoint action), the loop stops and the rest of the command line does not run. If a command only shows an error, the loop continues.",

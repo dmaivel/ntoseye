@@ -163,12 +163,9 @@ pub fn module_details(modules: &[ModuleListing], timestamp: bool) -> View {
 
 /// `!process`: a row per process with its `_EPROCESS` fields, the image name
 /// carrying the table. A field no process has gets no column.
-pub fn processes(processes: &[ProcessInfo], details: &[ProcessDetail]) -> View {
+pub fn processes(details: &[ProcessDetail]) -> View {
     let any = |has: fn(&ProcessInfo, &ProcessDetail) -> bool| {
-        processes
-            .iter()
-            .zip(details)
-            .any(|(process, detail)| has(process, detail))
+        details.iter().any(|detail| has(&detail.process, detail))
     };
     let optional = [
         (
@@ -224,7 +221,8 @@ pub fn processes(processes: &[ProcessInfo], details: &[ProcessDetail]) -> View {
             table = table.col(column);
         }
     }
-    for (process, detail) in processes.iter().zip(details) {
+    for detail in details {
+        let process = &detail.process;
         table = table.row(
             TableRow::new(format!("{:x}", process.eprocess.0))
                 .cell("pid", span(process.pid.to_string(), NUMBER))

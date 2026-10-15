@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use ntoseye_macros::record;
+
 use crate::cpu_state::{kpcr_for_processor, kprcb_for_processor, processor_count};
 use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
@@ -448,13 +450,17 @@ pub fn group_stacks(
     groups
 }
 
-/// `!process` columns and details. Each field is `None` when this build's
-/// layout lacks it or its read failed.
-#[derive(Debug, Clone, Default)]
+/// A process as `!process` shows it: its identity and the layout-sensitive
+/// `_EPROCESS` fields. Each field is `None` when this build's layout lacks
+/// it or its read failed.
+#[record]
 pub struct ProcessDetail {
+    pub process: ProcessInfo,
     pub session_id: Option<u32>,
+    /// The `_PEB`.
     pub peb: Option<VirtAddr>,
     pub parent_pid: Option<u64>,
+    #[record(hex)]
     pub directory_table_base: Option<u64>,
     pub object_table: Option<VirtAddr>,
     pub handle_count: Option<u64>,
@@ -474,10 +480,15 @@ pub struct ProcessDetail {
     pub job: Option<VirtAddr>,
 }
 
-/// Extended thread details. Each field is `None` when this build's layout
-/// lacks it or its read failed.
-#[derive(Debug, Clone, Default)]
-pub struct ThreadExtendedDetail {
+/// A thread as `!thread` shows it: the thread, the vCPU running it, and the
+/// `_ETHREAD`/`_KTHREAD` fields the listing adds. Each field is `None` when
+/// this build's layout lacks it or its read failed.
+#[record]
+pub struct ThreadDetail {
+    pub thread: ThreadInfo,
+    /// The vCPU running the thread (`p1.2`), or `None` when it is not
+    /// running.
+    pub cpu: Option<String>,
     pub win32_thread: Option<VirtAddr>,
     pub user_time: Option<u64>,
     pub kernel_time: Option<u64>,
@@ -1360,20 +1371,37 @@ impl Target {
 
     /// Read the layout-sensitive `_EPROCESS` fields `!process` reports,
     /// trying each build's field names in turn.
-    pub fn process_detail(&self, process: &ProcessInfo) -> ProcessDetail {
+    pub fn process_detail(&self, process: ProcessInfo) -> ProcessDetail {
         let session_id = self.process_session_id(process.eprocess);
-        let unavailable = || ProcessDetail {
-            session_id,
-            ..ProcessDetail::default()
+        let eprocess = self.guest().ok().and_then(|guest| {
+            let types = guest.ntoskrnl.types_in(process.dtb);
+            let eprocess = types.struct_at("_EPROCESS", process.eprocess).ok()?;
+            Some((types, eprocess.prefetch()))
+        });
+        let Some((types, eprocess)) = eprocess else {
+            return ProcessDetail {
+                process,
+                session_id,
+                peb: None,
+                parent_pid: None,
+                directory_table_base: None,
+                object_table: None,
+                handle_count: None,
+                vad_root: None,
+                token: None,
+                create_time: None,
+                user_time: None,
+                kernel_time: None,
+                quota_paged_pool: None,
+                quota_nonpaged_pool: None,
+                working_set_size: None,
+                commit_charge: None,
+                peak_virtual_size: None,
+                private_page_count: None,
+                debug_port: None,
+                job: None,
+            };
         };
-        let Ok(guest) = self.guest() else {
-            return unavailable();
-        };
-        let types = guest.ntoskrnl.types_in(process.dtb);
-        let Ok(eprocess) = types.struct_at("_EPROCESS", process.eprocess) else {
-            return unavailable();
-        };
-        let eprocess = eprocess.prefetch();
         let field = |paths: &[&[&str]]| read_first_uint(&eprocess, paths);
         let pointer = |name: &str| field(&[&[name]]).map(VirtAddr);
         // Newer builds keep the counters in `Vm.Instance`.
@@ -1420,26 +1448,32 @@ impl Target {
                 .or_else(|| field(&[&["NumberOfPrivatePages"]])),
             debug_port: pointer("DebugPort"),
             job: pointer("Job"),
+            process,
         }
     }
 
     /// Read the extended `_KTHREAD`/`_ETHREAD` fields shown by thread
-    /// listings, through the owning process's address space.
-    pub fn thread_extended_detail(&self, thread: &ThreadInfo) -> ThreadExtendedDetail {
-        let Ok(guest) = self.guest() else {
-            return ThreadExtendedDetail::default();
-        };
+    /// listings, through the owning process's address space. `cpu` is the
+    /// vCPU running it, which the caller knows from the session.
+    pub fn thread_detail(&self, thread: ThreadInfo, cpu: Option<String>) -> ThreadDetail {
+        let guest = self.guest().ok();
         let dtb = self
-            .thread_process_dtb(thread)
+            .thread_process_dtb(&thread)
             .unwrap_or_else(|| self.current_dtb());
-        let types = guest.ntoskrnl.types_in(dtb);
-        let ethread = types.struct_at("_ETHREAD", thread.ethread).ok();
-        let kthread = types.struct_at("_KTHREAD", thread.kthread).ok();
+        let types = guest.map(|guest| guest.ntoskrnl.types_in(dtb));
+        let ethread = types
+            .as_ref()
+            .and_then(|types| types.struct_at("_ETHREAD", thread.ethread).ok());
+        let kthread = types
+            .as_ref()
+            .and_then(|types| types.struct_at("_KTHREAD", thread.kthread).ok());
         let read = |root: &Option<StructRef<'_>>, name: &str| {
             root.as_ref()
                 .and_then(|root| read_first_uint(root, &[&[name]]))
         };
-        ThreadExtendedDetail {
+        ThreadDetail {
+            thread,
+            cpu,
             win32_thread: read(&ethread, "Win32Thread").map(VirtAddr),
             user_time: read(&kthread, "UserTime").or_else(|| read(&ethread, "UserTime")),
             kernel_time: read(&kthread, "KernelTime").or_else(|| read(&ethread, "KernelTime")),

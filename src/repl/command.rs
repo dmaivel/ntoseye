@@ -5,61 +5,62 @@ use std::sync::OnceLock;
 
 use linkme::distributed_slice;
 
-use crate::dbg_backend::{DebugCapability, halt_unreachable_reason};
 use crate::error::Result;
 use crate::repl::{CompletionStrategy, Flow, ReplState, error};
+use crate::session::effects::{Effects, Refusal};
+use crate::ui;
 
 #[distributed_slice]
 pub static COMMANDS: [CommandSpec];
 
+/// One command: its names and help (the REPL's `help`, the docs' command
+/// reference), how its arguments complete, what it needs and changes
+/// ([`Effects`], which [`crate::session::Session::admit`] enforces), and its
+/// handler. `#[command]` and `repl_command!` both register one in
+/// [`COMMANDS`].
 pub struct CommandSpec {
     pub names: &'static [&'static str],
+    /// The `help` listing's and the command reference's group.
+    pub category: &'static str,
+    /// `None` for a `repl_command!`, which does not declare it.
+    pub kind: Option<CommandKind>,
     pub usage: &'static str,
     pub summary: &'static str,
     pub details: Option<&'static str>,
     pub completion: CompletionSpec,
-    pub run_state: Option<RunState>,
-    pub run: RunEffect,
+    pub effects: Effects,
     pub style: CommandStyle,
-    pub target: TargetRequirement,
     pub flow: Flow,
     pub handler: CommandHandler,
 }
 
-/// What a command needs of the target besides its run state. A halted
-/// user-mode minidump passes every run-state check, so a command that reads
-/// kernel structures says so here and is refused there with one message,
-/// whatever name or alias runs it.
+/// What a `#[command]` does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TargetRequirement {
-    Any,
-    /// A Windows kernel: a live target or a kernel dump.
-    Kernel,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RunState {
-    Halted,
-    /// Halted, unless the context is a parked Windows thread (`.thread`)
-    /// and no vCPU's registers: its stack, frames, and their recovered
-    /// registers are read from memory, which a running target (and the
-    /// memory backend, which always runs) serves live.
-    HaltedOrParkedThread,
-    Running,
-}
-
-/// What a command does to target execution, so dispatch contexts that must
-/// not let a command move the target (breakpoint actions, exception
-/// commands, a remote host with its own run-control) can refuse it by
-/// metadata rather than by a name list that aliases can bypass.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RunEffect {
-    /// Leaves execution state alone (or only pauses it).
-    None,
-    /// Executes one instruction and returns promptly.
-    Step,
-    /// Resumes until the next stop; may block indefinitely.
+pub enum CommandKind {
+    /// Reads state and returns a record.
+    Query,
+    /// Changes guest, debugger or symbol state and returns what changed.
+    Action,
+    /// Resumes or steps the target.
     Run,
+    /// Acts on the REPL itself (aliases, scripting, output); no SDK form.
+    Host,
+}
+
+/// How a `#[command]`'s result reads in the REPL. `O` is the command's
+/// render options, its `#[arg(render)]` arguments (one value, or a tuple
+/// in order): the WinDbg flags that only choose what the text shows, which
+/// the record never depends on. The text goes through `outln!`, which the
+/// host captures; the REPL state is there for what only the REPL keeps
+/// (completion caches, the inspection selection) and for text that
+/// composes further reads, such as a thread's stack.
+pub trait Render<O = ()> {
+    fn render(&self, repl: &mut ReplState<'_>, options: O);
+}
+
+/// An action that printed what it did as it went.
+impl Render for () {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -502,55 +503,47 @@ pub fn report_command_parse_error(line: &str, err: CommandParseError) {
     );
 }
 
-/// Whether `spec` needs the target halted now, given the selected context.
-pub fn needs_halt(state: &ReplState<'_>, spec: &CommandSpec) -> bool {
-    match spec.run_state {
-        Some(RunState::Halted) => true,
-        Some(RunState::HaltedOrParkedThread) => state.ctx.parked_windows_thread().is_none(),
-        Some(RunState::Running) | None => false,
-    }
-}
-
-pub fn check_run_state(state: &ReplState<'_>, spec: &CommandSpec) -> bool {
-    match spec.run_state {
-        _ if needs_halt(state, spec) && state.ctx.backend.is_running() => {
-            let or_thread = if spec.run_state == Some(RunState::HaltedOrParkedThread) {
+/// Report why [`crate::session::Session::admit`] refused a command run as
+/// `typed`, worded as the REPL always has.
+pub fn report_refusal(typed: &str, refusal: Refusal) {
+    match refusal {
+        Refusal::KernelRequired(error) => error!("{typed}: {error}"),
+        Refusal::Running {
+            unreachable,
+            or_parked_thread,
+        } => {
+            let or_thread = if or_parked_thread {
                 ", or a thread selected with `.thread`"
             } else {
                 ""
             };
-            match halt_unreachable_reason(&*state.ctx.backend) {
+            match unreachable {
                 Some(reason) => error!("this command needs a halted target{or_thread}; {reason}"),
                 None => error!("VM is running; this command needs a halted target{or_thread}"),
             }
-            return false;
         }
         // `break` on a halted target has nothing to do, which is what it
         // was asked for: `break; bp ...; g` holds whichever state it starts
         // in.
-        Some(RunState::Running) if !state.ctx.backend.is_running() => {
-            outln!("{}", crate::ui::muted("the target is already halted"));
-            return false;
+        Refusal::AlreadyHalted => {
+            outln!("{}", ui::muted("the target is already halted"))
         }
-        // Halted without execution control is a static snapshot (a crash
-        // dump): a command that would run or step it could only fail on the
-        // way, or report a stop that never happened.
-        _ if spec.run != RunEffect::None
-            && !state.ctx.backend.is_running()
-            && !state.ctx.backend.capabilities().iter().any(|entry| {
-                entry.capability == DebugCapability::ExecutionControl && entry.supported
-            }) =>
-        {
-            error!(
-                "the {} backend cannot run or step the target",
-                state.ctx.backend.name()
-            );
-            return false;
+        Refusal::NoExecutionControl { backend } => {
+            error!("the {backend} backend cannot run or step the target")
         }
-        _ => {}
+        Refusal::StaticDump => error!("{typed} is not applicable to a static crash dump"),
+        Refusal::Unsupported {
+            capability,
+            backend,
+        } => error!(
+            "{typed} needs {} support, which the {backend} backend lacks",
+            capability.label()
+        ),
+        Refusal::ReadOnlyVtl1 => error!(
+            "'{typed}' is unavailable in the .vtl 1 memory view, which is read-only; use .vtl 0 \
+             first"
+        ),
     }
-
-    true
 }
 
 #[macro_export]
@@ -590,6 +583,7 @@ macro_rules! repl_command {
 
     (
         names: [$($name:expr),+ $(,)?],
+        category: $category:expr,
         usage: $usage:expr,
         summary: $summary:expr
         $(, details: $details:expr)?
@@ -605,6 +599,7 @@ macro_rules! repl_command {
             @register
             $crate::repl::CommandHandler::NoArgs(|_state| Ok(()));
             names: [$($name),+],
+            category: $category,
             usage: $usage,
             summary: $summary
             $(, details: $details)?
@@ -621,6 +616,7 @@ macro_rules! repl_command {
         @register
         $handler:expr;
         names: [$($name:expr),+ $(,)?],
+        category: $category:expr,
         usage: $usage:expr,
         summary: $summary:expr
         $(, details: $details:expr)?
@@ -636,14 +632,19 @@ macro_rules! repl_command {
             #[linkme::distributed_slice($crate::repl::COMMANDS)]
             static COMMAND: $crate::repl::CommandSpec = $crate::repl::CommandSpec {
                 names: &[$($name),+],
+                category: $category,
+                kind: None,
                 usage: $usage,
                 summary: $summary,
                 details: $crate::repl_command!(@details $($details)?),
                 completion: $crate::repl_command!(@completion $($completion)?),
-                run_state: $crate::repl_command!(@run_state $($run_state)?),
-                run: $crate::repl_command!(@run $($run)?),
+                effects: $crate::session::effects::Effects {
+                    target: $crate::repl_command!(@target $($target)?),
+                    state: $crate::repl_command!(@run_state $($run_state)?),
+                    run: $crate::repl_command!(@run $($run)?),
+                    ..$crate::session::effects::Effects::NONE
+                },
                 style: $crate::repl_command!(@style $($style)?),
-                target: $crate::repl_command!(@target $($target)?),
                 flow: $crate::repl_command!(@flow $($flow)?),
                 handler: $handler,
             };
@@ -676,23 +677,25 @@ macro_rules! repl_command {
     (@details) => { None };
     (@details $details:expr) => { Some($details) };
 
-    (@run_state) => { None };
-    (@run_state Halted) => { Some($crate::repl::RunState::Halted) };
-    (@run_state HaltedOrParkedThread) => { Some($crate::repl::RunState::HaltedOrParkedThread) };
-    (@run_state Running) => { Some($crate::repl::RunState::Running) };
+    (@run_state) => { $crate::session::effects::RunState::Any };
+    (@run_state Halted) => { $crate::session::effects::RunState::Halted };
+    (@run_state HaltedOrParkedThread) => {
+        $crate::session::effects::RunState::HaltedOrParkedThread
+    };
+    (@run_state Running) => { $crate::session::effects::RunState::Running };
 
-    (@run) => { $crate::repl::RunEffect::None };
-    (@run Step) => { $crate::repl::RunEffect::Step };
-    (@run Run) => { $crate::repl::RunEffect::Run };
+    (@run) => { $crate::session::effects::RunEffect::None };
+    (@run Step) => { $crate::session::effects::RunEffect::Step };
+    (@run Run) => { $crate::session::effects::RunEffect::Run };
 
     (@style) => { $crate::repl::CommandStyle::StructuredArgs };
     (@style StructuredArgs) => { $crate::repl::CommandStyle::StructuredArgs };
     (@style RawTail) => { $crate::repl::CommandStyle::RawTail };
     (@style ExpressionTail) => { $crate::repl::CommandStyle::ExpressionTail };
 
-    (@target) => { $crate::repl::TargetRequirement::Any };
-    (@target Any) => { $crate::repl::TargetRequirement::Any };
-    (@target Kernel) => { $crate::repl::TargetRequirement::Kernel };
+    (@target) => { $crate::session::effects::TargetScope::Any };
+    (@target Any) => { $crate::session::effects::TargetScope::Any };
+    (@target Kernel) => { $crate::session::effects::TargetScope::Kernel };
 
     (@flow) => { $crate::repl::Flow::Continue };
     (@flow Continue) => { $crate::repl::Flow::Continue };

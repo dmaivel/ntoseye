@@ -17,6 +17,7 @@ const MAX_SESSION_DISPLAY: usize = 64;
 repl_command! {
     cmd_sd;
     names: ["!sd", "sd"],
+    category: "security",
     usage: "!sd <address> [1]",
     summary: "Decode a SECURITY_DESCRIPTOR and its ACLs.",
     details: "Decodes a self-relative or absolute security descriptor, and decodes each SID and each ACE separately. The optional 1 adds the names of well-known SIDs.",
@@ -27,6 +28,7 @@ repl_command! {
 repl_command! {
     cmd_acl;
     names: ["!acl", "acl"],
+    category: "security",
     usage: "!acl <address>",
     summary: "Decode an ACL and its ACEs.",
     completion: Expression,
@@ -35,6 +37,7 @@ repl_command! {
 repl_command! {
     cmd_sid;
     names: ["!sid", "sid"],
+    category: "security",
     usage: "!sid <address>",
     summary: "Decode a SID in guest memory.",
     completion: Expression,
@@ -43,6 +46,7 @@ repl_command! {
 repl_command! {
     cmd_objsd;
     names: ["!objsd", "objsd"],
+    category: "security",
     usage: "!objsd <object>",
     summary: "Decode the security descriptor that an object header references.",
     details: "The command masks the low four bits of the OBJECT_HEADER.SecurityDescriptor fast reference before it decodes the descriptor.",
@@ -53,6 +57,7 @@ repl_command! {
 repl_command! {
     cmd_session;
     names: ["!session", "session"],
+    category: "processes and modules",
     usage: "!session [-s <id>]",
     summary: "List the sessions and the processes in each session.",
     details: "The command reads session IDs from _EPROCESS.Session and _MM_SESSION_SPACE, or from the primary token if session space is opaque. Use -s -1 for the current session. The process walk stops at 4096 entries.",
@@ -63,6 +68,7 @@ repl_command! {
 repl_command! {
     cmd_sprocess;
     names: ["!sprocess", "sprocess"],
+    category: "processes and modules",
     usage: "!sprocess [session] [flags] [image]",
     summary: "List the processes in a session.",
     details: "The session is a signed decimal number. -1 and -2 select the current session, and -4 selects all sessions. If you do not give a session, the command uses the session of the attached process, if it is known. Flags default to 0 (brief output), and any non-zero value selects detailed output. The optional image argument is a glob that ignores case.",

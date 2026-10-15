@@ -6,6 +6,7 @@ use std::sync::{Mutex, RwLock};
 
 use crate::breakpoints::BreakpointManager;
 use crate::dbg_backend::DebugBackend;
+use crate::guest::ProcessInfo;
 use crate::symbols::{SymbolIndex, SymbolStore};
 use crate::target::object::DriverObjectInfo;
 use crate::target::{Target, ThreadInfo};
@@ -123,6 +124,14 @@ impl ReplCaches {
             return processes;
         }
         self.processes.read().unwrap().clone()
+    }
+
+    /// Remember `processes` for completion, as a listing just read them.
+    pub fn remember_processes(&self, processes: &[ProcessInfo]) {
+        *self.processes.write().unwrap() = processes
+            .iter()
+            .map(|process| (process.name.clone(), process.pid))
+            .collect();
     }
 
     /// Driver objects for completion; same on-demand policy as

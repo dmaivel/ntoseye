@@ -274,6 +274,7 @@ pub fn splice_value(value: &str) -> Cow<'_, str> {
 repl_command! {
     cmd_aliases();
     names: ["al", "aliases"],
+    category: "session",
     usage: "al",
     summary: "List command aliases.",
 }
@@ -281,6 +282,7 @@ repl_command! {
 repl_command! {
     cmd_alias;
     names: ["as", "alias"],
+    category: "session",
     usage: "as <name> <expansion>",
     summary: "Define a command alias.",
     style: RawTail,
@@ -289,6 +291,7 @@ repl_command! {
 repl_command! {
     cmd_unalias;
     names: ["ad", "unalias"],
+    category: "session",
     usage: "ad <name>",
     summary: "Remove a command alias.",
     completion: Alias,
