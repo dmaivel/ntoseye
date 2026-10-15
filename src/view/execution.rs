@@ -524,14 +524,6 @@ shapes! {
         expression: String,
         value: VirtAddr,
     }
-
-    /// One register of the current context (`r`).
-    RegisterValue {
-        name: String,
-        /// An int, or a `0x`-prefixed 32-digit hex string for a vector
-        /// register.
-        value: RegisterContent,
-    }
 }
 
 unions! {
@@ -540,16 +532,6 @@ unions! {
         Amd64(Amd64UnwindInfo),
         Packed(Arm64PackedUnwind),
         Xdata(Arm64XdataUnwind),
-    }
-}
-
-unions! {
-    /// A register's value: an address-width value, or a vector register too
-    /// wide for an int's hex rendering.
-    RegisterContent {
-        Scalar(Hex),
-        /// A 128-bit value, as `0x` and 32 hex digits.
-        Wide(String),
     }
 }
 

@@ -24,6 +24,10 @@ Keeping this file:
 - Indexing a module's symbols is faster, so a dump with many modules opens about a third sooner: a PowerShell minidump opens with `--plain-repl` in 0.22 s instead of 0.29 s, and a charmap minidump in 0.10 s instead of 0.15 s.
 - The `ntoseye` command and the Python package allocate memory with mimalloc, which makes opening a dump, `k`, and symbol searches about 15% faster. Indexing symbols takes more memory at its peak: about 1.3 GiB instead of 1.0 GiB for an ARM64 PowerShell minidump with 95 modules.
 
+### Removed
+
+- The Python SDK no longer defines `HeapSummary`, `HeapOverview`, `HeapStats`, `LoaderModules`, and `RegisterValue`. No SDK method returned them; they were left over from MCP's removed JSON output. `Heap.inspect()` still returns `HeapDetail`, and `Module.inspect()` still returns `ModuleDetail`.
+
 ## v0.49.1 (2026-10-14)
 
 ### Fixed

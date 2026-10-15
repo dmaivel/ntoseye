@@ -177,16 +177,6 @@ shapes! {
         product_version: Option<String>,
     }
 
-    /// The modules on a process's loader lists (`!dlls`), and how the walks
-    /// ended.
-    LoaderModules {
-        modules: Vec<LoaderModule>,
-        /// How the native loader-list walk ended.
-        termination: ListEnd,
-        /// How the WOW64 loader-list walk ended. `None` for a native process.
-        wow64_termination: Option<ListEnd>,
-    }
-
     /// How a process's native and WOW64 loader-list walks ended.
     LoaderTerminations {
         termination: ListEnd,

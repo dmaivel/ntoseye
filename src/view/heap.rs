@@ -1,63 +1,10 @@
 //! Heap [`View`] builders for the structured inspectors.
 
-use super::shape::{Diag, Hex, shapes, unions};
+use super::shape::{Hex, shapes, unions};
 use crate::target::heap::{self as target, BlockMatch, HeapKind, SegmentSubsegment};
 use crate::types::VirtAddr;
 
 shapes! {
-    /// A process's PEB heap list (`!heap` / `!heap -s`).
-    HeapSummary {
-        /// The process environment block that ntoseye read the list from.
-        peb: VirtAddr,
-        /// Whether the list is longer than the walk limit, which leaves it
-        /// incomplete.
-        truncated: bool,
-        heaps: Vec<HeapOverview>,
-    }
-
-    /// One heap in the PEB list, with its usage totals.
-    HeapOverview {
-        /// Position in the PEB heap list.
-        index: usize,
-        address: VirtAddr,
-        /// `nt`, `segment`, or `unknown (<signature>)`.
-        kind: String,
-        /// Unavailable if ntoseye cannot read the heap signature, layout, memory,
-        /// or symbols.
-        stats: Diag<HeapStats>,
-    }
-
-    /// The usage totals of one heap.
-    HeapStats {
-        /// `_HEAP.Flags` (NT heap) or `GlobalFlags` (segment heap).
-        flags: Hex<u32>,
-        /// Reserved bytes.
-        reserved: u64,
-        /// Committed bytes.
-        committed: u64,
-        /// Free bytes: the free blocks of an NT heap, or the free committed
-        /// pages of a segment heap.
-        free: u64,
-        /// The number of NT-heap segments or segment-heap page segments.
-        segments: u64,
-        /// The number of NT-heap virtually allocated blocks. 0 for a segment heap.
-        virtual_blocks: u64,
-        /// The address of the NT-heap front end (LFH). None if the heap has no
-        /// front end or is a segment heap.
-        front_end: Option<VirtAddr>,
-        /// The NT-heap `FrontEndHeapType`. 0 for a segment heap.
-        front_end_type: u8,
-        /// The number of segment-heap VS page ranges. 0 for an NT heap.
-        vs_subsegments: u64,
-        /// The number of segment-heap LFH page ranges. 0 for an NT heap.
-        lfh_subsegments: u64,
-        /// The number of segment-heap ranges allocated directly from a segment.
-        /// 0 for an NT heap.
-        page_allocations: u64,
-        /// The number of segment-heap large allocations. 0 for an NT heap.
-        large_allocations: u64,
-    }
-
     /// One decoded heap (`!heap -h|-a <heap>`, `Heap.inspect()`).
     HeapDetail {
         /// Position in the PEB heap list.

@@ -5860,30 +5860,6 @@ class HeapMatchVsChunk(BaseRecord):
         """
 
 @final
-class HeapOverview(BaseRecord):
-    """
-    One heap in the PEB list, with its usage totals.
-    """
-    @property
-    def address(self, /) -> int: ...
-    @property
-    def index(self, /) -> int:
-        """
-        Position in the PEB heap list.
-        """
-    @property
-    def kind(self, /) -> str:
-        """
-        `nt`, `segment`, or `unknown (<signature>)`.
-        """
-    @property
-    def stats(self, /) -> Diagnostic[HeapStats]:
-        """
-        Unavailable if ntoseye cannot read the heap signature, layout, memory,
-        or symbols.
-        """
-
-@final
 class HeapPageRange(BaseRecord):
     """
     A page range (`_HEAP_PAGE_RANGE_DESCRIPTOR`) of a page segment.
@@ -5942,94 +5918,6 @@ class HeapPageRange(BaseRecord):
     def unused_bytes(self, /) -> int:
         """
         The number of unused bytes at the end of the range.
-        """
-
-@final
-class HeapStats(BaseRecord):
-    """
-    The usage totals of one heap.
-    """
-    @property
-    def committed(self, /) -> int:
-        """
-        Committed bytes.
-        """
-    @property
-    def flags(self, /) -> int:
-        """
-        `_HEAP.Flags` (NT heap) or `GlobalFlags` (segment heap).
-        """
-    @property
-    def free(self, /) -> int:
-        """
-        Free bytes: the free blocks of an NT heap, or the free committed
-        pages of a segment heap.
-        """
-    @property
-    def front_end(self, /) -> int |None:
-        """
-        The address of the NT-heap front end (LFH). None if the heap has no
-        front end or is a segment heap.
-        """
-    @property
-    def front_end_type(self, /) -> int:
-        """
-        The NT-heap `FrontEndHeapType`. 0 for a segment heap.
-        """
-    @property
-    def large_allocations(self, /) -> int:
-        """
-        The number of segment-heap large allocations. 0 for an NT heap.
-        """
-    @property
-    def lfh_subsegments(self, /) -> int:
-        """
-        The number of segment-heap LFH page ranges. 0 for an NT heap.
-        """
-    @property
-    def page_allocations(self, /) -> int:
-        """
-        The number of segment-heap ranges allocated directly from a segment.
-        0 for an NT heap.
-        """
-    @property
-    def reserved(self, /) -> int:
-        """
-        Reserved bytes.
-        """
-    @property
-    def segments(self, /) -> int:
-        """
-        The number of NT-heap segments or segment-heap page segments.
-        """
-    @property
-    def virtual_blocks(self, /) -> int:
-        """
-        The number of NT-heap virtually allocated blocks. 0 for a segment heap.
-        """
-    @property
-    def vs_subsegments(self, /) -> int:
-        """
-        The number of segment-heap VS page ranges. 0 for an NT heap.
-        """
-
-@final
-class HeapSummary(BaseRecord):
-    """
-    A process's PEB heap list (`!heap` / `!heap -s`).
-    """
-    @property
-    def heaps(self, /) -> list[HeapOverview]: ...
-    @property
-    def peb(self, /) -> int:
-        """
-        The process environment block that ntoseye read the list from.
-        """
-    @property
-    def truncated(self, /) -> bool:
-        """
-        Whether the list is longer than the walk limit, which leaves it
-        incomplete.
         """
 
 @final
@@ -8583,25 +8471,6 @@ class LoaderModule(BaseRecord):
         """
         The link timestamp from the PE header. `None` if ntoseye cannot read
         the header.
-        """
-
-@final
-class LoaderModules(BaseRecord):
-    """
-    The modules on a process's loader lists (`!dlls`), and how the walks
-    ended.
-    """
-    @property
-    def modules(self, /) -> list[LoaderModule]: ...
-    @property
-    def termination(self, /) -> ListEnd:
-        """
-        How the native loader-list walk ended.
-        """
-    @property
-    def wow64_termination(self, /) -> ListEnd |None:
-        """
-        How the WOW64 loader-list walk ended. `None` for a native process.
         """
 
 @final
@@ -12759,20 +12628,6 @@ class Regions:
     def at(self, /, addr: int) -> MemoryRegion |None:
         """
         Find the VAD region that contains `addr`, or return `None`.
-        """
-
-@final
-class RegisterValue(BaseRecord):
-    """
-    One register of the current context (`r`).
-    """
-    @property
-    def name(self, /) -> str: ...
-    @property
-    def value(self, /) -> int |str:
-        """
-        An int, or a `0x`-prefixed 32-digit hex string for a vector
-        register.
         """
 
 @final
