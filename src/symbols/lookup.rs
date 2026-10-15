@@ -73,10 +73,13 @@ impl SymbolStore {
             .into_par_iter()
             .map(|(guid, short)| {
                 let names = match source.get(&guid) {
+                    // `concat` sizes each name once; `format!` went through
+                    // the formatting machinery and grew the String, and was
+                    // most of this merge.
                     Some(index) if qualify => index
                         .names
                         .iter()
-                        .map(|name| format!("{short}!{name}"))
+                        .map(|name| [short.as_str(), "!", name].concat())
                         .collect(),
                     Some(index) => index.names.clone(),
                     None => Vec::new(),
