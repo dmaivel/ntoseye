@@ -11,7 +11,7 @@ use crate::layout::{ParsedType, StructRef, TypeInfo, Types};
 use crate::memory::MemoryOps;
 use crate::symbols::glob_matches;
 use crate::target::{
-    DiagnosticValue, ListCursor, ListTermination, Target, ThreadInfo, bounded_list_walk,
+    DiagnosticValue, ListCursor, ListTermination, Target, ThreadInfo, bounded_record_list_walk,
     fast_ref_address,
 };
 use crate::types::{MAX_PROCESSORS, VirtAddr};
@@ -638,12 +638,16 @@ fn read_list_next(target: &Target, address: VirtAddr) -> Result<VirtAddr> {
         .read_field("Flink")
 }
 
-pub fn walk_list_nodes(
+/// The records of the kernel `_LIST_ENTRY` list at `head`, each
+/// `link_offset` before its link (0 when the link starts the record), at
+/// most `limit` and never more than [`MAX_LIST_ENTRIES`].
+pub fn walk_list_records(
     target: &Target,
     head: VirtAddr,
+    link_offset: u64,
     limit: usize,
 ) -> (Vec<VirtAddr>, ListTermination) {
-    bounded_list_walk(head, limit.min(MAX_LIST_ENTRIES), |address| {
+    bounded_record_list_walk(head, link_offset, limit.min(MAX_LIST_ENTRIES), |address| {
         read_list_next(target, address)
     })
 }
@@ -805,12 +809,10 @@ impl Target {
                 }
                 let head = prcb + u64::from(ready_field.offset) + priority as u64 * stride;
                 let remaining = MAX_LIST_ENTRIES - total;
-                let (nodes, termination) = walk_list_nodes(self, head, remaining);
-                let mut entries = Vec::with_capacity(nodes.len());
-                for node in nodes {
-                    let kthread = thread_link_offset
-                        .map(|offset| node - offset)
-                        .unwrap_or(node);
+                let (kthreads, termination) =
+                    walk_list_records(self, head, thread_link_offset.unwrap_or(0), remaining);
+                let mut entries = Vec::with_capacity(kthreads.len());
+                for kthread in kthreads {
                     let thread = match thread_link_offset {
                         Some(_) => DiagnosticValue::from_result(
                             self.thread_info_from_ethread(kthread - ethread_tcb_offset),
@@ -955,14 +957,14 @@ impl Target {
                 let data = prcb + u64::from(dpc_data.offset) + queue as u64 * data_stride;
                 let head = data + u64::from(dpc_list.offset);
                 let remaining = MAX_LIST_ENTRIES - total;
-                let (nodes, termination) = walk_list_nodes(self, head, remaining);
+                let (dpcs, termination) =
+                    walk_list_records(self, head, dpc_link_offset.unwrap_or(0), remaining);
                 let termination = match termination {
                     ListTermination::Null if singly_linked => ListTermination::Head,
                     other => other,
                 };
-                let mut entries = Vec::with_capacity(nodes.len());
-                for node in nodes {
-                    let dpc = dpc_link_offset.map(|offset| node - offset).unwrap_or(node);
+                let mut entries = Vec::with_capacity(dpcs.len());
+                for dpc in dpcs {
                     let routine = self.pointer_field("_KDPC", dpc, routine_field);
                     let context = self.pointer_field("_KDPC", dpc, context_field);
                     let importance = importance_field
@@ -1252,16 +1254,14 @@ impl Target {
                     + bucket as u64 * entry_stride
                     + u64::from(entry.offset);
                 let remaining = MAX_LIST_ENTRIES - total;
-                let (nodes, termination) = walk_list_nodes(self, head, remaining);
+                let (timers, termination) =
+                    walk_list_records(self, head, timer_link_offset.unwrap_or(0), remaining);
                 terminations.push(TimerBucketTermination {
                     processor,
                     bucket: bucket as u16,
                     termination: termination.clone(),
                 });
-                for node in nodes {
-                    let timer = timer_link_offset
-                        .map(|offset| node - offset)
-                        .unwrap_or(node);
+                for timer in timers {
                     let detail = if timer_link_offset.is_some() {
                         self.decode_timer_with_context(timer, &timer_layout, keys, &trace)
                     } else {

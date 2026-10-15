@@ -5,7 +5,7 @@
 
 use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
-use crate::target::sched::walk_list_nodes;
+use crate::target::sched::walk_list_records;
 use crate::target::{ListTermination, Target};
 use crate::types::VirtAddr;
 
@@ -193,8 +193,7 @@ impl Target {
                     ListTermination::Corrupt(format!("no {head} list")),
                 );
             };
-            let (links, termination) = walk_list_nodes(self, address + head, limit);
-            (links.into_iter().map(|at| at - link).collect(), termination)
+            walk_list_records(self, address + head, link, limit)
         };
         let (eprocesses, process_termination) = list(
             "ProcessListHead",

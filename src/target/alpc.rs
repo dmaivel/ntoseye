@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
 use crate::layout::{StructRef, Types};
-use crate::target::sched::walk_list_nodes;
+use crate::target::sched::walk_list_records;
 use crate::target::{DiagnosticValue, ListTermination, Target};
 use crate::types::VirtAddr;
 
@@ -433,11 +433,10 @@ impl Target {
                 ListTermination::Corrupt("no CommunicationList".into()),
             );
         };
-        let (links, termination) = walk_list_nodes(self, info + link, MAX_LIST_ENTRIES);
-        let connections = links
+        let (infos, termination) = walk_list_records(self, info + link, link, MAX_LIST_ENTRIES);
+        let connections = infos
             .into_iter()
-            .map(|at| {
-                let communication_info = at - link;
+            .map(|communication_info| {
                 let info = types
                     .struct_at("_ALPC_COMMUNICATION_INFO", communication_info)
                     .map(StructRef::prefetch);
@@ -490,9 +489,7 @@ impl Target {
                     types.layout(record).and_then(|ti| ti.field_offset(link)),
                 ) {
                     (Ok(head), Ok(link)) => {
-                        let (links, termination) =
-                            walk_list_nodes(self, body + head, MAX_LIST_ENTRIES);
-                        (links.into_iter().map(|at| at - link).collect(), termination)
+                        walk_list_records(self, body + head, link, MAX_LIST_ENTRIES)
                     }
                     _ => (
                         Vec::new(),

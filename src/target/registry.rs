@@ -26,7 +26,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::{DiagnosticValue, Target, bounded_list_walk};
+use super::{DiagnosticValue, Target, bounded_record_list_walk};
 use crate::error::{Error, Result};
 use crate::layout::{TypeInfo, Types, utf16le_lossy, utf16le_nul_terminated};
 use crate::memory::{AddressSpace, MemoryOps};
@@ -783,11 +783,11 @@ fn read_hive_list(
     master: Option<VirtAddr>,
 ) -> Result<HiveList> {
     let link = types.layout("_CMHIVE")?.field_offset("HiveList")?;
-    let (links, termination) = bounded_list_walk(head, MAX_HIVES, |at| memory.read::<VirtAddr>(at));
-    let hives = links
+    let (addresses, termination) =
+        bounded_record_list_walk(head, link, MAX_HIVES, |at| memory.read::<VirtAddr>(at));
+    let hives = addresses
         .into_iter()
-        .map(|link_at| {
-            let address = link_at - link;
+        .map(|address| {
             read_hive(types, address, master == Some(address))
                 .map_err(|error| (address, error.to_string()))
         })

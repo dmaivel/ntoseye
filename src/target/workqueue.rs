@@ -9,7 +9,7 @@
 use crate::error::{Error, Result};
 use crate::layout::Types;
 use crate::memory::MemoryOps;
-use crate::target::sched::walk_list_nodes;
+use crate::target::sched::walk_list_records;
 use crate::target::{DiagnosticValue, ListTermination, Target, ThreadInfo};
 use crate::types::VirtAddr;
 use crate::unwind::StackFrame;
@@ -146,9 +146,9 @@ impl Target {
             .layout("_EPARTITION")?
             .field_offset("ActivePartitionLinks");
         if let (Ok(head), Ok(links)) = (ntos.symbol("PspActivePartitionListHead"), links) {
-            let (nodes, _) = walk_list_nodes(self, head.address(), MAX_PARTITIONS);
-            if !nodes.is_empty() {
-                return Ok(nodes.into_iter().map(|node| node - links).collect());
+            let (partitions, _) = walk_list_records(self, head.address(), links, MAX_PARTITIONS);
+            if !partitions.is_empty() {
+                return Ok(partitions);
             }
         }
         Ok(vec![ntos.symbol("PspSystemPartition")?.read()?])
@@ -294,20 +294,18 @@ impl Target {
                     let mut priorities = Vec::new();
                     for (priority, &current_count) in counts.iter().enumerate() {
                         let head = pri.addr() + entry_lists + priority as u64 * entry_size;
-                        let (nodes, termination) =
-                            walk_list_nodes(self, head, MAX_ITEMS_PER_PRIORITY);
-                        pending += nodes.len() as u64;
+                        let (work_items, termination) =
+                            walk_list_records(self, head, item_link, MAX_ITEMS_PER_PRIORITY);
+                        pending += work_items.len() as u64;
                         let shown = priority_filter
                             .as_ref()
                             .is_none_or(|selected| selected.contains(&(priority as u8)));
-                        if !shown || (nodes.is_empty() && current_count == 0) {
+                        if !shown || (work_items.is_empty() && current_count == 0) {
                             continue;
                         }
-                        let items = nodes
+                        let items = work_items
                             .into_iter()
-                            .map(|link| {
-                                work_item(types, link - item_link, io_item, io_work_item, &symbol)
-                            })
+                            .map(|item| work_item(types, item, io_item, io_work_item, &symbol))
                             .collect();
                         priorities.push(WorkQueuePriority {
                             priority: priority as u8,
@@ -321,19 +319,20 @@ impl Target {
                             termination,
                         });
                     }
-                    let (links, threads_termination) =
-                        walk_list_nodes(self, pri.addr() + thread_list, MAX_THREADS_PER_QUEUE);
-                    let threads = links
+                    let (kthreads, threads_termination) = walk_list_records(
+                        self,
+                        pri.addr() + thread_list,
+                        queue_link,
+                        MAX_THREADS_PER_QUEUE,
+                    );
+                    let threads = kthreads
                         .into_iter()
-                        .map(|link| {
-                            let kthread = link - queue_link;
-                            WorkerThread {
-                                kthread,
-                                thread: DiagnosticValue::from_result(
-                                    self.thread_info_from_ethread(kthread - tcb),
-                                ),
-                                stack: None,
-                            }
+                        .map(|kthread| WorkerThread {
+                            kthread,
+                            thread: DiagnosticValue::from_result(
+                                self.thread_info_from_ethread(kthread - tcb),
+                            ),
+                            stack: None,
                         })
                         .collect();
                     let queue_index: u32 = work_queue.read_field("QueueIndex")?;

@@ -12,7 +12,7 @@ use crate::target::sched::{
     ApcDetail, ApcLayout, ApcListDetail, ApcSelector, ApcThread, FindStackDetail, FindStackThread,
     MAX_LIST_ENTRIES, RunningDetail, StackThreadDetail, StacksDetail, UniqStackDetail,
     UniqStackScope, UnwalkedThread, findstack_level_error, frame_symbol_matches, group_stacks,
-    select_threads, walk_list_nodes,
+    select_threads, walk_list_records,
 };
 use crate::target::workqueue::ExQueueDetail;
 use crate::target::{DiagnosticValue, ListTermination, ThreadInfo};
@@ -201,13 +201,14 @@ impl Session {
                         let head =
                             state_base + layout.heads_offset + index as u64 * layout.head_stride;
                         let remaining = MAX_LIST_ENTRIES - total;
-                        let (nodes, stop) = walk_list_nodes(&self.target, head, remaining);
+                        let (apcs, stop) = walk_list_records(
+                            &self.target,
+                            head,
+                            layout.link_offset.unwrap_or(0),
+                            remaining,
+                        );
                         *termination = stop;
-                        for node in nodes {
-                            let apc = layout
-                                .link_offset
-                                .map(|offset| node - offset)
-                                .unwrap_or(node);
+                        for apc in apcs {
                             entries.push(self.decode_apc(apc, layout, &trace));
                             total += 1;
                             if total >= MAX_LIST_ENTRIES {

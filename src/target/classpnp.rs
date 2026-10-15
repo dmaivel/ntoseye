@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::{Target, bounded_list_walk};
+use super::{Target, bounded_record_list_walk};
 use crate::bytes::before_nul;
 use crate::cpu_state::processor_count;
 use crate::error::{Error, Result};
@@ -186,12 +186,11 @@ impl Target {
             })?;
         let link = class.private.field_offset("AllFdosListEntry")?;
         let memory = self.kernel_address_space();
-        let (links, termination) =
-            bounded_list_walk(head, MAX_CLASS_DEVICES, |at| memory.read::<VirtAddr>(at));
-        Ok((
-            links.into_iter().map(|at| at - link).collect(),
-            termination.diagnostic(),
-        ))
+        let (privates, termination) =
+            bounded_record_list_walk(head, link, MAX_CLASS_DEVICES, |at| {
+                memory.read::<VirtAddr>(at)
+            });
+        Ok((privates, termination.diagnostic()))
     }
 
     /// The storage class devices on `classpnp!AllFdosList`.
@@ -393,14 +392,15 @@ impl Target {
         let mut packets = ClassPackets::default();
         let all = private.addr() + private.layout().field_offset("AllTransferPacketsList")?;
         let list_link = class.packet.field_offset("AllPktsListEntry")?;
-        let (links, termination) =
-            bounded_list_walk(all, MAX_TRANSFER_PACKETS, |at| memory.read::<VirtAddr>(at));
+        let (all_packets, termination) =
+            bounded_record_list_walk(all, list_link, MAX_TRANSFER_PACKETS, |at| {
+                memory.read::<VirtAddr>(at)
+            });
         packets.stopped.extend(
             termination
                 .diagnostic()
                 .map(|why| format!("packet list: {why}")),
         );
-        let all_packets: Vec<VirtAddr> = links.into_iter().map(|at| at - list_link).collect();
 
         // classpnp frees a packet to its processor's list, and moves packets
         // between those and the per-node lists; a packet on neither, nor

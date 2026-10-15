@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use super::{Target, bounded_list_walk};
+use super::{Target, bounded_list_walk, bounded_record_list_walk};
 use crate::bytes::c_string_lossy;
 use crate::error::{Error, Result};
 use crate::layout::{TypeInfo, Types, le_uint};
@@ -175,14 +175,14 @@ impl Target {
         let link = header.field_offset("LogListEntry")?;
         let head = address + context.layout().field_offset("LogListHead")?;
         let memory = self.kernel_address_space();
-        let (links, termination) =
-            bounded_list_walk(head, MAX_LOGS, |at| memory.read::<VirtAddr>(at));
+        let (logs, termination) =
+            bounded_record_list_walk(head, link, MAX_LOGS, |at| memory.read::<VirtAddr>(at));
         Ok(RcdrDriver {
             context: address,
             name: c_string_lossy(&context.read_field_bytes("FileBaseName", 64)?),
             image: context.read_pointer("ImageAddress")?,
             image_size: context.read_uint("ImageSize")? as u32,
-            logs: links.into_iter().map(|at| at - link).collect(),
+            logs,
             logs_stopped: termination.diagnostic(),
             default_log: context.read_pointer("DefaultAutoLogHeader")?,
             sequence: context.read_uint("Sequence")? as u32 as i32,

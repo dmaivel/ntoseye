@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::{Target, bounded_list_walk};
+use super::{Target, bounded_record_list_walk};
 use crate::error::{Error, Result};
 use crate::layout::{StructRef, TypeInfo, Types};
 use crate::memory::MemoryOps;
@@ -149,12 +149,10 @@ impl Target {
         limit: usize,
     ) -> (Vec<VirtAddr>, Option<String>) {
         let memory = self.kernel_address_space();
-        let (links, termination) =
-            bounded_list_walk(head, limit, |link| memory.read::<VirtAddr>(link));
-        (
-            links.into_iter().map(|link| link - link_offset).collect(),
-            termination.diagnostic(),
-        )
+        let (records, termination) = bounded_record_list_walk(head, link_offset, limit, |link| {
+            memory.read::<VirtAddr>(link)
+        });
+        (records, termination.diagnostic())
     }
 
     /// Walk `FltGlobals.FrameList`, decoding each frame's records with

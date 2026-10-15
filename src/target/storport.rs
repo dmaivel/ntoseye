@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
 
-use super::{Target, bounded_list_walk};
+use super::{Target, bounded_record_list_walk};
 use crate::bytes::before_nul;
 use crate::error::{Error, Result};
 use crate::layout::{ParsedType, StructRef, TypeInfo, Types, le_uint, utf16le_nul_terminated};
@@ -406,14 +406,18 @@ fn enum_value(variants: &[(String, i64)], name: &str) -> Option<u64> {
         .map(|(_, value)| *value as u64)
 }
 
-/// Each link from `head` in a bounded walk, and why it stopped short.
+/// Each record from `head` in a bounded walk, its link `link_offset` into
+/// it, and why the walk stopped short.
 fn walk(
     memory: &impl MemoryOps<VirtAddr>,
     head: VirtAddr,
+    link_offset: u64,
     limit: usize,
 ) -> (Vec<VirtAddr>, Option<String>) {
-    let (links, termination) = bounded_list_walk(head, limit, |link| memory.read::<VirtAddr>(link));
-    (links, termination.diagnostic())
+    let (records, termination) = bounded_record_list_walk(head, link_offset, limit, |link| {
+        memory.read::<VirtAddr>(link)
+    });
+    (records, termination.diagnostic())
 }
 
 /// The kinds of object storport's extensions say they are.
@@ -523,10 +527,9 @@ impl Target {
         let head = list.addr() + list.layout().field_offset("List")?;
         let driver_layout = stor.layout("_RAID_DRIVER_EXTENSION")?;
         let link = driver_layout.field_offset("DriverLink")?;
-        let (links, stopped) = walk(&memory, head, MAX_DRIVERS);
+        let (extensions, stopped) = walk(&memory, head, link, MAX_DRIVERS);
         let mut drivers = Vec::new();
-        for driver_link in links {
-            let extension = driver_link - link;
+        for extension in extensions {
             drivers.push(self.stor_driver(&stor, &driver_layout, extension)?);
         }
         Ok(StorPortDrivers {
@@ -549,10 +552,10 @@ impl Target {
         let head = list.addr() + list.layout().field_offset("List")?;
         let link = stor.adapter.field_offset("NextAdapter")?;
         let memory = self.kernel_address_space();
-        let (links, stopped) = walk(&memory, head, MAX_ADAPTERS);
-        let adapters = links
+        let (extensions, stopped) = walk(&memory, head, link, MAX_ADAPTERS);
+        let adapters = extensions
             .into_iter()
-            .map(|adapter_link| self.stor_adapter_entry(stor, adapter_link, link))
+            .map(|extension| self.stor_adapter_entry(stor, extension))
             .collect();
         Ok(StorDriver {
             extension,
@@ -588,13 +591,7 @@ impl Target {
     /// The adapter on a driver's adapter list at `link`. An adapter of
     /// storport's native NVMe path has a different layout, which these
     /// commands do not read.
-    fn stor_adapter_entry(
-        &self,
-        stor: &StorTypes<'_>,
-        link: VirtAddr,
-        offset: u64,
-    ) -> AdapterEntry {
-        let extension = link - offset;
+    fn stor_adapter_entry(&self, stor: &StorTypes<'_>, extension: VirtAddr) -> AdapterEntry {
         let adapter = self
             .stor_object_type(stor, extension)
             .map_err(|error| format!("its ObjectType is unreadable: {error}"))
@@ -801,11 +798,10 @@ impl Target {
         let head = unit_list.addr() + unit_list.layout().field_offset("List")?;
         let link = stor.unit.field_offset("NextUnit")?;
         let memory = self.kernel_address_space();
-        let (links, units_stopped) = walk(&memory, head, MAX_UNITS);
-        let units = links
+        let (extensions, units_stopped) = walk(&memory, head, link, MAX_UNITS);
+        let units = extensions
             .into_iter()
-            .map(|unit_link| {
-                let extension = unit_link - link;
+            .map(|extension| {
                 let unit = self
                     .stor_object_type(stor, extension)
                     .map_err(|error| format!("its ObjectType is unreadable: {error}"))
@@ -905,11 +901,11 @@ impl Target {
         let mut waiting_stopped = Vec::new();
         let mut count_list = |field: &str| -> Result<usize> {
             let head = device_queue.addr() + device_queue.layout().field_offset(field)?;
-            let (links, stopped) = walk(&memory, head, MAX_WAITING);
+            let (entries, stopped) = walk(&memory, head, 0, MAX_WAITING);
             if let Some(stopped) = stopped {
                 waiting_stopped.push(format!("{field}: {stopped}"));
             }
-            Ok(links.len())
+            Ok(entries.len())
         };
         let waiting = count_list("DeviceOverflowList")?;
         let bypass_waiting = count_list("ByPassList")?;
@@ -1000,12 +996,12 @@ impl Target {
             let sub = base + processor * subqueue.size as u64;
             for &(field, offset) in &lists {
                 let head = sub + subqueue.field_offset(field)?;
-                let (links, why) = walk(&memory, head, MAX_LISTED_REQUESTS);
+                let (xrbs, why) = walk(&memory, head, offset, MAX_LISTED_REQUESTS);
                 if let Some(why) = why {
                     stopped.push(format!("processor {processor} {field}: {why}"));
                 }
-                for link in links {
-                    let xrb = stor.at(&xrb_layout, link - offset);
+                for address in xrbs {
+                    let xrb = stor.at(&xrb_layout, address);
                     let owner = xrb.read_pointer("Unit");
                     if owner.as_ref().ok() != Some(&unit) {
                         stopped.push(format!(

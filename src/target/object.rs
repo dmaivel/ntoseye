@@ -12,7 +12,8 @@ use crate::symbols::format_symbol_with_offset;
 use crate::types::VirtAddr;
 
 use super::{
-    DiagnosticValue, ListCursor, ListTermination, Target, bounded_list_walk, fast_ref_address,
+    DiagnosticValue, ListCursor, ListTermination, Target, bounded_record_list_walk,
+    fast_ref_address,
 };
 
 #[derive(Debug, Clone)]
@@ -1259,11 +1260,12 @@ impl Target {
         let layout = guest.ntoskrnl.types().layout("_ERESOURCE")?;
         let link_offset = layout.field_offset("SystemResourcesList")?;
         let memory = self.kernel_address_space();
-        let (links, termination) =
-            bounded_list_walk(head, limit, |link| memory.read::<VirtAddr>(link));
-        let resources = links
+        let (records, termination) = bounded_record_list_walk(head, link_offset, limit, |link| {
+            memory.read::<VirtAddr>(link)
+        });
+        let resources = records
             .into_iter()
-            .map(|link| self.inspect_resource(link - link_offset))
+            .map(|resource| self.inspect_resource(resource))
             .collect::<Result<Vec<_>>>()?;
         Ok(ResourceListSummary {
             head,
@@ -1624,10 +1626,9 @@ impl Target {
 
             // Walk the process thread list (ETHREAD.ThreadListEntry).
             let head = p.eprocess_va + head_off;
-            let (thread_links, _) = bounded_list_walk(head, 4096, |link| mem.read(link));
-            for node in thread_links {
-                let ethread = node - link_off;
-
+            let (ethreads, _) =
+                bounded_record_list_walk(head, link_off, 4096, |link| mem.read(link));
+            for ethread in ethreads {
                 let tid = cid_off
                     .zip(unique_thread_off)
                     .and_then(|(c, u)| mem.read::<u64>(ethread + c + u).ok());
@@ -1635,10 +1636,11 @@ impl Target {
                 let wait = wait_off.and_then(|o| mem.read::<u8>(ethread + tcb_off + o).ok());
 
                 // Walk this thread's IrpList (IRP.ThreadListEntry).
-                let (irp_links, _) =
-                    bounded_list_walk(ethread + list_off, 256, |link| mem.read(link));
-                for inode in irp_links {
-                    let irp = inode - rec_off;
+                let (irps, _) =
+                    bounded_record_list_walk(ethread + list_off, rec_off, 256, |link| {
+                        mem.read(link)
+                    });
+                for irp in irps {
                     if let Some((sc, cl)) = self.plausible_irp(irp) {
                         out.push(IrpHit {
                             irp,

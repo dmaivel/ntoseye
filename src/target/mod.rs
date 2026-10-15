@@ -50,7 +50,9 @@ pub mod wdf;
 pub mod workqueue;
 pub mod zombies;
 
-pub use list::{ListCursor, ListTermination, bounded_list_walk, links_back_to};
+pub use list::{
+    ListCursor, ListTermination, bounded_list_walk, bounded_record_list_walk, links_back_to,
+};
 pub use memory::{
     CompareResult, ExpressionMemory, ExpressionScope, MAX_SEARCH_BYTES, MAX_SEARCH_MATCHES,
     SearchResult, SearchStop,

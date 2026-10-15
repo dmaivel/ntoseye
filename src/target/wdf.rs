@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use super::{ListCursor, ListTermination, Target, bounded_list_walk};
+use super::{ListCursor, ListTermination, Target, bounded_list_walk, bounded_record_list_walk};
 use crate::bytes::before_nul;
 use crate::error::{Error, Result};
 use crate::layout::{StructRef, TypeInfo, Types, le_uint};
@@ -1778,12 +1778,13 @@ impl Target {
         let head = object + wdf.object.field_offset("m_ChildListHead")?;
         let entry_offset = wdf.object.field_offset("m_ChildEntry")?;
         let memory = self.kernel_address_space();
-        let (links, termination) =
-            bounded_list_walk(head, MAX_CHILDREN, |link| memory.read::<VirtAddr>(link));
+        let (records, termination) =
+            bounded_record_list_walk(head, entry_offset, MAX_CHILDREN, |link| {
+                memory.read::<VirtAddr>(link)
+            });
         let mut stopped = termination.diagnostic();
-        let mut children = Vec::with_capacity(links.len());
-        for link in links {
-            let child = link - entry_offset;
+        let mut children = Vec::with_capacity(records.len());
+        for child in records {
             let header = self
                 .wdf_object_header(wdf, child)
                 .map_err(|error| format!("its FxObject header is unreadable: {error}"))
@@ -2107,12 +2108,13 @@ impl Target {
         let entry_offset = target_layout.field_offset("m_TransactionedEntry")?;
         let states = self.wdf_enum("_WDF_IO_TARGET_STATE");
         let memory = self.kernel_address_space();
-        let (links, termination) =
-            bounded_list_walk(head, MAX_IO_TARGETS, |link| memory.read::<VirtAddr>(link));
+        let (entries, termination) =
+            bounded_record_list_walk(head, link_offset, MAX_IO_TARGETS, |link| {
+                memory.read::<VirtAddr>(link)
+            });
         let mut stopped = termination.diagnostic();
-        let mut targets = Vec::with_capacity(links.len());
-        for link in links {
-            let entry = link - link_offset;
+        let mut targets = Vec::with_capacity(entries.len());
+        for entry in entries {
             let summary = wdf
                 .at(&entry_layout, entry)
                 .read_pointer("m_TransactionedObject")
@@ -2209,12 +2211,13 @@ impl Target {
         let csq_offset = request_layout.field_offset("m_CsqContext")?;
         let head = irp_queue + wdf.layout("FxIrpQueue")?.field_offset("m_Queue")?;
         let memory = self.kernel_address_space();
-        let (links, termination) =
-            bounded_list_walk(head, MAX_REQUESTS, |link| memory.read::<VirtAddr>(link));
+        let (irps, termination) =
+            bounded_record_list_walk(head, list_offset, MAX_REQUESTS, |link| {
+                memory.read::<VirtAddr>(link)
+            });
         let mut stopped = termination.diagnostic();
-        let mut requests = Vec::with_capacity(links.len());
-        for link in links {
-            let irp = link - list_offset;
+        let mut requests = Vec::with_capacity(irps.len());
+        for irp in irps {
             let request = memory
                 .read::<VirtAddr>(irp + context_offset)
                 .map_err(|error| error.to_string())
@@ -2253,12 +2256,13 @@ impl Target {
     ) -> Result<(Vec<T>, Option<String>)> {
         let link_offset = request_layout.field_offset(link)?;
         let memory = self.kernel_address_space();
-        let (links, termination) =
-            bounded_list_walk(head, MAX_REQUESTS, |link| memory.read::<VirtAddr>(link));
+        let (addresses, termination) =
+            bounded_record_list_walk(head, link_offset, MAX_REQUESTS, |link| {
+                memory.read::<VirtAddr>(link)
+            });
         let mut stopped = termination.diagnostic();
-        let mut requests = Vec::with_capacity(links.len());
-        for entry in links {
-            let address = entry - link_offset;
+        let mut requests = Vec::with_capacity(addresses.len());
+        for address in addresses {
             match check(address) {
                 Ok(request) => requests.push(request),
                 Err(why) => {

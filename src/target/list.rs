@@ -118,22 +118,40 @@ impl ListCursor {
     }
 }
 
+/// The links of the intrusive list at `head`, at most `limit`, each
+/// followed with `read_next`, and why the walk ended. For callers that check
+/// a link before taking its record; [`bounded_record_list_walk`] yields the
+/// records.
 pub fn bounded_list_walk<F>(
     head: VirtAddr,
+    limit: usize,
+    read_next: F,
+) -> (Vec<VirtAddr>, ListTermination)
+where
+    F: FnMut(VirtAddr) -> Result<VirtAddr>,
+{
+    bounded_record_list_walk(head, 0, limit, read_next)
+}
+
+/// [`bounded_list_walk`] yielding each entry's record, `link_offset` bytes
+/// before its link (`CONTAINING_RECORD`), rather than the link.
+pub fn bounded_record_list_walk<F>(
+    head: VirtAddr,
+    link_offset: u64,
     limit: usize,
     mut read_next: F,
 ) -> (Vec<VirtAddr>, ListTermination)
 where
     F: FnMut(VirtAddr) -> Result<VirtAddr>,
 {
-    let mut links = Vec::new();
+    let mut records = Vec::new();
     let mut cursor = ListCursor::new(head, limit);
     cursor.advance(read_next(head).map_err(|error| error.to_string()));
     while let Some(current) = cursor.take_current() {
-        links.push(current);
+        records.push(current - link_offset);
         cursor.advance(read_next(current).map_err(|error| error.to_string()));
     }
-    (links, cursor.finish())
+    (records, cursor.finish())
 }
 
 /// The links of the entries at the end of a doubly linked intrusive list
