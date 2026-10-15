@@ -22,6 +22,7 @@ Keeping this file:
 - `s` searches about ten times faster: 256 MiB of a user-mode minidump's address space in 45 ms instead of 420 ms.
 - `--plain-repl`, the MCP server, the DAP adapter and the Python SDK start sooner: they build the symbol and type name indexes behind completion and symbol search when a search first needs them, not when the session starts. Opening a PowerShell minidump with `--plain-repl` takes 0.29 s instead of 0.39 s.
 - Indexing a module's symbols is faster, so a dump with many modules opens about a third sooner: a PowerShell minidump opens with `--plain-repl` in 0.22 s instead of 0.29 s, and a charmap minidump in 0.10 s instead of 0.15 s.
+- The `ntoseye` command and the Python package allocate memory with mimalloc, which makes opening a dump, `k`, and symbol searches about 15% faster. Indexing symbols takes more memory at its peak: about 1.3 GiB instead of 1.0 GiB for an ARM64 PowerShell minidump with 95 modules.
 
 ## v0.49.1 (2026-10-14)
 
