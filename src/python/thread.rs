@@ -28,7 +28,7 @@ use crate::trapframe::{read_ktrap_frame_at_or_current, trap_frame_rip_symbol};
 use crate::types::VirtAddr;
 use crate::unwind::{RecoveredFrame, StackFrame, halted_in_windows_hypervisor};
 use crate::view;
-use crate::view::shape::Typed;
+use crate::view::record::Typed;
 
 /// A collection of threads: `dbg.threads` (all threads) or `proc.threads`.
 #[pyclass(module = "ntoseye")]
@@ -337,7 +337,7 @@ impl Thread {
         let active = self.cpu_id(py)?;
         view_dict(
             py,
-            view::process::thread_summary(&self.info, active.as_deref()),
+            &view::process::thread_summary(&self.info, active.as_deref()),
         )
     }
 
@@ -1140,7 +1140,7 @@ impl Cpu {
 
     /// The processor as a plain `dict`.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        view_dict(py, view::execution::vcpu(&self.current_info(py)?))
+        view_dict(py, &view::execution::vcpu(&self.current_info(py)?))
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {

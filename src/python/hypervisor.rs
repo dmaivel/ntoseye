@@ -19,7 +19,7 @@ use crate::view::hypervisor::{
     VpRegisters, decoded_hypercall, ept_difference, ept_mapping, hypervisor_processor,
     io_intercepts, msr_intercepts, vp_registers,
 };
-use crate::view::shape::{Hex, Keyed, Typed};
+use crate::view::record::{Hex, Keyed, Typed};
 
 /// A partition of the Windows hypervisor, as it was when listed.
 #[pyclass(module = "ntoseye", frozen)]
@@ -154,7 +154,7 @@ fn vp_dict<'py>(py: Python<'py>, vp: &HvVirtualProcessor) -> PyResult<Bound<'py,
     let processors = vp
         .processors
         .iter()
-        .map(|processor| view_dict(py, hypervisor_processor(processor)))
+        .map(|processor| view_dict(py, &hypervisor_processor(processor)))
         .collect::<PyResult<Vec<_>>>()?;
     dict.set_item("processors", processors)?;
     dict.set_item("vtl", vp.vtl)?;
@@ -452,14 +452,16 @@ impl HypervisorVtl {
     /// (`guest_rip`, `msr_bitmap`, ...), as `!hvvmcs` shows them:
     /// `fields.guest_rip` or `fields["guest_rip"]`. Raises `NtoseyeError`
     /// without the VTL's eVMCS.
-    fn vmcs_fields<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Keyed<Hex>>> {
+    fn vmcs_fields<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Keyed<u64>, Hex>> {
         let vmcs = self.read_vmcs(py)?;
         Typed::new(
             py,
-            evmcs_fields::field_values(&vmcs)
-                .into_iter()
-                .map(|(name, _, _, value)| (name, value))
-                .collect(),
+            Keyed(
+                evmcs_fields::field_values(&vmcs)
+                    .into_iter()
+                    .map(|(name, _, _, value)| (name, value))
+                    .collect(),
+            ),
         )
     }
 
@@ -644,7 +646,7 @@ impl HypercallCaller {
         dict.set_item("vtl", self.info.vtl)?;
         dict.set_item("registers", self.info.registers.clone())?;
         let hypercall = match self.info.input.call() {
-            Some(call) => Some(view_dict(py, decoded_hypercall(call))?),
+            Some(call) => Some(view_dict(py, &decoded_hypercall(call))?),
             None => None,
         };
         dict.set_item("hypercall", hypercall)?;

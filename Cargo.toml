@@ -1,5 +1,5 @@
 [workspace]
-members = ["python"]
+members = ["python", "macros"]
 
 [workspace.package]
 version = "0.49.1"
@@ -58,6 +58,8 @@ sha1 = "0.10"
 sha2 = "0.10"
 subtle = "2.6"
 indexmap = "2.14.0"
+# Published with the same version, before this crate.
+ntoseye-macros = { version = "=0.49.1", path = "macros" }
 
 pyo3 = { version = "0.29.2", features = ["abi3-py39", "indexmap"], optional = true }
 
@@ -107,6 +109,9 @@ python-stubs = ["python", "pyo3/experimental-inspect"]
 
 [build-dependencies]
 pyo3-build-config = { version = "0.29.2", optional = true }
+# build.rs reads the sources for the `#[record]` classes the SDK exports.
+quote = "1"
+syn = { version = "2", features = ["full"] }
 
 [dev-dependencies]
 parking_lot = "0.12"

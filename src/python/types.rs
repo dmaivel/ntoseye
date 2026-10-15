@@ -25,7 +25,7 @@ use crate::layout::{
 use crate::memory::MemoryOps;
 use crate::target::{CODE_BITNESS_AMD64, CODE_BITNESS_X86};
 use crate::types::{Dtb, VirtAddr};
-use crate::view::shape::Typed;
+use crate::view::record::Typed;
 use crate::view::symbols;
 
 fn lookup_field<'a>(
@@ -230,7 +230,7 @@ impl Type {
         dict.set_item("size", self.size())?;
         let fields = PyDict::new(py);
         for (name, field) in self.field_views() {
-            fields.set_item(name, view_dict(py, field)?)?;
+            fields.set_item(name, view_dict(py, &field)?)?;
         }
         dict.set_item("fields", fields)?;
         if let Definition::Enum(def) = &self.definition {

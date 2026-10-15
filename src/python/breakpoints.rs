@@ -28,7 +28,7 @@ use crate::session::Session;
 use crate::target::Target;
 use crate::types::{Dtb, VirtAddr};
 use crate::view;
-use crate::view::shape::Typed;
+use crate::view::record::Typed;
 
 /// The code breakpoints and data watchpoints, with their IDs as keys
 /// (`dbg.breakpoints`).
@@ -780,7 +780,10 @@ impl Breakpoint {
 
     /// Get the breakpoint state as a plain `dict`.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        view_dict(py, view::execution::breakpoint(&self.require_snapshot(py)?))
+        view_dict(
+            py,
+            &view::execution::breakpoint(&self.require_snapshot(py)?),
+        )
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -871,7 +874,7 @@ impl Exceptions {
     fn module_events(
         &self,
         py: Python<'_>,
-    ) -> PyResult<Vec<Py<view::execution::py::ModuleEventPolicy>>> {
+    ) -> PyResult<Vec<Py<view::execution::ModuleEventPolicyPy>>> {
         let rows = self.owner.with(py, |session| {
             Ok(session
                 .exception_policies

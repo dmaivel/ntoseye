@@ -2,165 +2,195 @@
 //! local APIC (`!apic`), the interrupt controllers the HAL registered
 //! (`!ioapic`), and the SMBIOS table (`!sysinfo`).
 
-use super::shape::{Hex, shapes};
+use ntoseye_macros::record;
+
 use crate::target::apic::{self, bitmap_vectors, decode_icr, timer_divisor};
 use crate::target::smbios::{self, structure_fields, structure_name};
 use crate::types::VirtAddr;
 
-shapes! {
-    /// A local vector table entry.
-    ApicLvt {
-        /// `Timer`, `LINT0`, `LINT1`, `Error`, `PerfMon`, `Thermal`, or
-        /// `CMCI`.
-        name: &'static str,
-        raw: Hex<u32>,
-        vector: Hex<u8>,
-        /// `Fixed`, `SMI`, `NMI`, `INIT`, `ExtINT`, or the mode in hex.
-        delivery: String,
-        pending: bool,
-        active_low: bool,
-        remote_irr: bool,
-        level: bool,
-        masked: bool,
-        /// The timer's mode: `one-shot`, `periodic`, or `TSC-deadline`.
-        timer_mode: Option<&'static str>,
-    }
+/// A local vector table entry.
+#[record]
+pub struct ApicLvt {
+    /// `Timer`, `LINT0`, `LINT1`, `Error`, `PerfMon`, `Thermal`, or
+    /// `CMCI`.
+    pub name: &'static str,
+    #[record(hex)]
+    pub raw: u32,
+    #[record(hex)]
+    pub vector: u8,
+    /// `Fixed`, `SMI`, `NMI`, `INIT`, `ExtINT`, or the mode in hex.
+    pub delivery: String,
+    pub pending: bool,
+    pub active_low: bool,
+    pub remote_irr: bool,
+    pub level: bool,
+    pub masked: bool,
+    /// The timer's mode: `one-shot`, `periodic`, or `TSC-deadline`.
+    pub timer_mode: Option<&'static str>,
+}
 
-    /// The interrupt command register.
-    ApicIcr {
-        raw: Hex,
-        vector: Hex<u8>,
-        delivery: String,
-        logical: bool,
-        pending: bool,
-        level_assert: bool,
-        level_triggered: bool,
-        /// `none`, `self`, `all`, or `all-but-self`.
-        shorthand: &'static str,
-        destination: Hex<u32>,
-    }
+/// The interrupt command register.
+#[record]
+pub struct ApicIcr {
+    #[record(hex)]
+    pub raw: u64,
+    #[record(hex)]
+    pub vector: u8,
+    pub delivery: String,
+    pub logical: bool,
+    pub pending: bool,
+    pub level_assert: bool,
+    pub level_triggered: bool,
+    /// `none`, `self`, `all`, or `all-but-self`.
+    pub shorthand: &'static str,
+    #[record(hex)]
+    pub destination: u32,
+}
 
-    /// A processor's local APIC (`!apic`).
-    LocalApic {
-        processor: u16,
-        /// `IA32_APIC_BASE`.
-        apic_base: Hex,
-        /// In x2APIC mode, read through MSRs; else through its registers.
-        x2apic: bool,
-        bootstrap_processor: bool,
-        enabled: bool,
-        id: Hex<u32>,
-        version: Hex<u32>,
-        tpr: Hex<u32>,
-        ppr: Hex<u32>,
-        ldr: Hex<u32>,
-        /// The spurious-interrupt vector register.
-        svr: Hex<u32>,
-        software_enabled: bool,
-        /// `None` when the error status does not read.
-        esr: Option<Hex<u32>>,
-        icr: ApicIcr,
-        /// The LVT entries the APIC implements.
-        lvt: Vec<ApicLvt>,
-        /// The ones it does not (the thermal or CMCI entry).
-        lvt_missing: Vec<&'static str>,
-        timer_initial: Hex<u32>,
-        timer_current: Hex<u32>,
-        timer_divisor: u32,
-        /// The vectors in service, requested, and level-triggered.
-        isr: Vec<u8>,
-        irr: Vec<u8>,
-        tmr: Vec<u8>,
-    }
+/// A processor's local APIC (`!apic`).
+#[record]
+pub struct LocalApic {
+    pub processor: u16,
+    /// `IA32_APIC_BASE`.
+    #[record(hex)]
+    pub apic_base: u64,
+    /// In x2APIC mode, read through MSRs; else through its registers.
+    pub x2apic: bool,
+    pub bootstrap_processor: bool,
+    pub enabled: bool,
+    #[record(hex)]
+    pub id: u32,
+    #[record(hex)]
+    pub version: u32,
+    #[record(hex)]
+    pub tpr: u32,
+    #[record(hex)]
+    pub ppr: u32,
+    #[record(hex)]
+    pub ldr: u32,
+    /// The spurious-interrupt vector register.
+    #[record(hex)]
+    pub svr: u32,
+    pub software_enabled: bool,
+    /// `None` when the error status does not read.
+    #[record(hex)]
+    pub esr: Option<u32>,
+    pub icr: ApicIcr,
+    /// The LVT entries the APIC implements.
+    pub lvt: Vec<ApicLvt>,
+    /// The ones it does not (the thermal or CMCI entry).
+    pub lvt_missing: Vec<&'static str>,
+    #[record(hex)]
+    pub timer_initial: u32,
+    #[record(hex)]
+    pub timer_current: u32,
+    pub timer_divisor: u32,
+    /// The vectors in service, requested, and level-triggered.
+    pub isr: Vec<u8>,
+    pub irr: Vec<u8>,
+    pub tmr: Vec<u8>,
+}
 
-    /// A line of an interrupt controller as the HAL set it up
-    /// (`_INTERRUPT_LINE_STATE`).
-    HalLine {
-        line: i64,
-        /// The global system interrupt, for a pin.
-        gsi: Option<u64>,
-        vector: Hex<u32>,
-        /// The IRQL its interrupt runs at.
-        irql: u32,
-        level: bool,
-        polarity: String,
-        /// `_INTERRUPT_TARGET_TYPE` without its prefix, with its ID.
-        target: String,
-        flags: Hex<u32>,
-    }
+/// A line of an interrupt controller as the HAL set it up
+/// (`_INTERRUPT_LINE_STATE`).
+#[record]
+pub struct HalLine {
+    pub line: i64,
+    /// The global system interrupt, for a pin.
+    pub gsi: Option<u64>,
+    #[record(hex)]
+    pub vector: u32,
+    /// The IRQL its interrupt runs at.
+    pub irql: u32,
+    pub level: bool,
+    pub polarity: String,
+    /// `_INTERRUPT_TARGET_TYPE` without its prefix, with its ID.
+    pub target: String,
+    #[record(hex)]
+    pub flags: u32,
+}
 
-    /// A range of a controller's lines (`_INTERRUPT_LINES`).
-    HalLineRange {
-        address: VirtAddr,
-        /// `_INTERRUPT_LINE_TYPE` without its prefix (`StandardPin`).
-        kind: String,
-        min_line: i64,
-        max_line: i64,
-        gsi_base: Option<u64>,
-        /// The lines the HAL set up.
-        lines: Vec<HalLine>,
-    }
+/// A range of a controller's lines (`_INTERRUPT_LINES`).
+#[record]
+pub struct HalLineRange {
+    pub address: VirtAddr,
+    /// `_INTERRUPT_LINE_TYPE` without its prefix (`StandardPin`).
+    pub kind: String,
+    pub min_line: i64,
+    pub max_line: i64,
+    pub gsi_base: Option<u64>,
+    /// The lines the HAL set up.
+    pub lines: Vec<HalLine>,
+}
 
-    /// An interrupt controller the HAL registered
-    /// (`_REGISTERED_INTERRUPT_CONTROLLER`).
-    HalController {
-        address: VirtAddr,
-        /// `_KNOWN_CONTROLLER_TYPE` without its prefix (`Apic`, `Pic`).
-        kind: String,
-        unit_id: Hex<u32>,
-        resource_id: String,
-        min_line: i64,
-        max_line: i64,
-        problem: Option<String>,
-        ranges: Vec<HalLineRange>,
-        ranges_stopped: Option<String>,
-    }
+/// An interrupt controller the HAL registered
+/// (`_REGISTERED_INTERRUPT_CONTROLLER`).
+#[record]
+pub struct HalController {
+    pub address: VirtAddr,
+    /// `_KNOWN_CONTROLLER_TYPE` without its prefix (`Apic`, `Pic`).
+    pub kind: String,
+    #[record(hex)]
+    pub unit_id: u32,
+    pub resource_id: String,
+    pub min_line: i64,
+    pub max_line: i64,
+    pub problem: Option<String>,
+    pub ranges: Vec<HalLineRange>,
+    pub ranges_stopped: Option<String>,
+}
 
-    /// A controller that does not read.
-    HalUnreadable {
-        address: VirtAddr,
-        error: String,
-    }
+/// A controller that does not read.
+#[record]
+pub struct HalUnreadable {
+    pub address: VirtAddr,
+    pub error: String,
+}
 
-    /// The interrupt controllers on `nt!HalpRegisteredInterruptControllers`
-    /// (`!ioapic`).
-    HalControllers {
-        controllers: Vec<HalController>,
-        unreadable: Vec<HalUnreadable>,
-        stopped: Option<String>,
-    }
+/// The interrupt controllers on `nt!HalpRegisteredInterruptControllers`
+/// (`!ioapic`).
+#[record]
+pub struct HalControllers {
+    pub controllers: Vec<HalController>,
+    pub unreadable: Vec<HalUnreadable>,
+    pub stopped: Option<String>,
+}
 
-    /// A field of an SMBIOS structure, by the specification's name.
-    SmbiosField {
-        name: &'static str,
-        value: String,
-    }
+/// A field of an SMBIOS structure, by the specification's name.
+#[record]
+pub struct SmbiosField {
+    pub name: &'static str,
+    pub value: String,
+}
 
-    /// An SMBIOS structure.
-    SmbiosStructure {
-        /// The structure type (0 BIOS, 1 system, 4 processor, 17 memory
-        /// device, ...).
-        kind: u8,
-        kind_name: &'static str,
-        handle: Hex<u16>,
-        /// The formatted area, its header included.
-        formatted: Vec<u8>,
-        /// The strings, string 1 first.
-        strings: Vec<String>,
-        /// The fields `!sysinfo smbios` decodes for its type.
-        fields: Vec<SmbiosField>,
-    }
+/// An SMBIOS structure.
+#[record]
+pub struct SmbiosStructure {
+    /// The structure type (0 BIOS, 1 system, 4 processor, 17 memory
+    /// device, ...).
+    pub kind: u8,
+    pub kind_name: &'static str,
+    #[record(hex)]
+    pub handle: u16,
+    /// The formatted area, its header included.
+    pub formatted: Vec<u8>,
+    /// The strings, string 1 first.
+    pub strings: Vec<String>,
+    /// The fields `!sysinfo smbios` decodes for its type.
+    pub fields: Vec<SmbiosField>,
+}
 
-    /// The SMBIOS table the kernel found at boot (`!sysinfo smbios`).
-    SmbiosTable {
-        physical_address: Hex,
-        length: u32,
-        /// The version the entry point gave (`2.8`).
-        version: String,
-        structures: Vec<SmbiosStructure>,
-        /// Why the parse stopped before End-of-Table.
-        stopped: Option<String>,
-    }
+/// The SMBIOS table the kernel found at boot (`!sysinfo smbios`).
+#[record]
+pub struct SmbiosTable {
+    #[record(hex)]
+    pub physical_address: u64,
+    pub length: u32,
+    /// The version the entry point gave (`2.8`).
+    pub version: String,
+    pub structures: Vec<SmbiosStructure>,
+    /// Why the parse stopped before End-of-Table.
+    pub stopped: Option<String>,
 }
 
 pub fn local_apic(apic: &apic::LocalApic) -> LocalApic {

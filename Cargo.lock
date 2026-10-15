@@ -1673,6 +1673,7 @@ dependencies = [
  "memmap2",
  "mimalloc",
  "nix 0.31.3",
+ "ntoseye-macros",
  "nu-ansi-term",
  "nucleo-matcher",
  "owo-colors",
@@ -1681,6 +1682,7 @@ dependencies = [
  "pelite",
  "pyo3",
  "pyo3-build-config",
+ "quote",
  "rayon",
  "reedline",
  "reqwest",
@@ -1695,6 +1697,7 @@ dependencies = [
  "smallvec",
  "spin",
  "subtle",
+ "syn 2.0.118",
  "tabled",
  "terminal_size",
  "tern-sdk",
@@ -1705,6 +1708,15 @@ dependencies = [
  "tower-http 0.7.0",
  "winnow",
  "zerocopy",
+]
+
+[[package]]
+name = "ntoseye-macros"
+version = "0.49.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
 ]
 
 [[package]]

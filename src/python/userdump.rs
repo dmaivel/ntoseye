@@ -19,7 +19,7 @@ use super::{err, raise};
 use crate::session::Session;
 use crate::userdump::{UserDumpInfo, UserThread as DumpThread, UserThreadInfo};
 use crate::view;
-use crate::view::shape::Typed;
+use crate::view::record::Typed;
 
 /// Why a user-dump handle cannot be served: the debugger's target is not
 /// one (a borrowed debugger whose REPL opened something else).

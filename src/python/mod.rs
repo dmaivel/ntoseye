@@ -21,7 +21,7 @@ use crate::error::Error;
 use crate::kd::KdMemorySource;
 use crate::session::Session;
 use crate::target::meta::decode_error_code;
-use crate::view::shape::{Typed, ViewValue};
+use crate::view::record::{ToView, Typed};
 use crate::view::{self, PyShape};
 use crate::{Backend, TargetSpec};
 
@@ -181,11 +181,8 @@ pub fn timeout_arg(timeout: Option<f64>) -> PyResult<Option<Duration>> {
 
 /// A value as a plain `dict`: an entity's `to_dict()`, with its records and
 /// diagnostics converted.
-pub fn view_dict<'py, T: ViewValue<Source = T>>(
-    py: Python<'py>,
-    value: T,
-) -> PyResult<PlainDict<'py>> {
-    view::to_py(py, &T::view(value), PyShape::Plain)?
+pub fn view_dict<'py, T: ToView>(py: Python<'py>, value: &T) -> PyResult<PlainDict<'py>> {
+    view::to_py(py, &value.to_view(), PyShape::Plain)?
         .cast_into::<PyDict>()
         .map(PlainDict)
         .map_err(|e| raise(e.to_string()))
@@ -264,10 +261,11 @@ fn cli_main(py: Python<'_>) -> PyResult<i32> {
 
 // The one list of what the SDK exports: the wheel's `PyInit__ntoseye`, the
 // REPL's embedded interpreter, and PyO3's introspection (the generated
-// `_ntoseye.pyi`) all read it. `with_shape_classes!` adds every result class
-// the views declare. Exceptions and the package re-exports live in
-// `ntoseye/__init__.py`.
-crate::view::with_shape_classes! {
+// `_ntoseye.pyi`) all read it. `with_record_classes!` (written by build.rs)
+// adds every `#[record]` class. Exceptions and the package re-exports live
+// in `ntoseye/__init__.py`.
+include!(concat!(env!("OUT_DIR"), "/record_classes.rs"));
+with_record_classes! {
 /// The native module of the ntoseye SDK. Import from `ntoseye`, which
 /// re-exports all of it.
 #[pymodule]

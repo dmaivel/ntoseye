@@ -11,7 +11,7 @@ use crate::session::Session;
 use crate::symbols::{CodeFrame, parse_source_paths, parse_symbol_sources};
 use crate::target::ReloadScope;
 use crate::types::{Dtb, VirtAddr};
-use crate::view::shape::Typed;
+use crate::view::record::Typed;
 use crate::view::{self};
 
 /// Symbol lookup in one address space (`dbg.symbols`, `proc.symbols`).

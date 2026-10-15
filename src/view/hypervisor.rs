@@ -2,219 +2,252 @@
 //! processors, EPTs, and hypercall table, the guest VP a processor serves,
 //! and the hypercall a VP made.
 
+use super::record::Keyed;
+use ntoseye_macros::record;
+
 use std::collections::HashMap;
 
-use super::shape::{Hex, Keyed, shapes};
-use crate::guest::{EXIT_GPRS, HvProcessor};
 use crate::guest::ept::{Difference, EptMapping as EptInfo};
 use crate::guest::evmcs_fields::{self, IoIntercepts as IoInfo, MsrIntercepts as MsrInfo};
 use crate::guest::hv_layout::HypercallEntry;
 use crate::guest::hypercall_input::{self, DecodedHypercall as Decoded};
 use crate::guest::hypercalls::tlfs_hypercall;
+use crate::guest::{EXIT_GPRS, HvProcessor};
 use crate::session;
 use crate::target::{ServedVp as Served, VP_STATE_REGISTERS};
 use crate::types::VirtAddr;
 
-shapes! {
-    /// A logical processor whose current VP a VP is: the one that runs it, or
-    /// ran it last.
-    HypervisorProcessor {
-        /// The processor number, or None on builds before 10.0.19041.
-        number: Option<u32>,
-        /// The processor block (the processor's GS base in the hypervisor).
-        block: VirtAddr,
-    }
+/// A logical processor whose current VP a VP is: the one that runs it, or
+/// ran it last.
+#[record]
+pub struct HypervisorProcessor {
+    /// The processor number, or None on builds before 10.0.19041.
+    pub number: Option<u32>,
+    /// The processor block (the processor's GS base in the hypervisor).
+    pub block: VirtAddr,
+}
 
-    /// The registers of one VTL of a Windows hypervisor VP (`!hvr`).
-    VpRegisters {
-        /// RIP, RSP, flags, control and segment registers, and the
-        /// general-purpose ones when they are known.
-        registers: Keyed<Hex>,
-        /// Where they are from: a vCPU that runs the VP now, the exit a vCPU
-        /// in the hypervisor handles for it, or its last exit.
-        source: String,
-        /// Why the general-purpose registers are missing, when they are.
-        missing: Option<String>,
-    }
+/// The registers of one VTL of a Windows hypervisor VP (`!hvr`).
+#[record]
+pub struct VpRegisters {
+    /// RIP, RSP, flags, control and segment registers, and the
+    /// general-purpose ones when they are known.
+    #[record(hex)]
+    pub registers: Keyed<u64>,
+    /// Where they are from: a vCPU that runs the VP now, the exit a vCPU
+    /// in the hypervisor handles for it, or its last exit.
+    pub source: String,
+    /// Why the general-purpose registers are missing, when they are.
+    pub missing: Option<String>,
+}
 
-    /// Where a guest physical address goes through one VTL's EPT, and the
-    /// access that every level of the walk allows.
-    EptMapping {
-        host_physical: Hex,
-        /// The size of the mapping page: 4 KiB, 2 MiB, or 1 GiB.
-        page_size: Hex,
-        read: bool,
-        write: bool,
-        /// Execute access: supervisor-mode only when `user_execute` is not
-        /// None.
-        execute: bool,
-        /// User-mode execute access when the VTL uses mode-based execute
-        /// control, else None.
-        user_execute: Option<bool>,
-        /// The EPT memory type (0 UC, 1 WC, 4 WT, 5 WP, 6 WB).
-        memory_type: u8,
-        /// The entry of each level of the walk, from the PML4 down.
-        entries: Vec<Hex>,
-    }
+/// Where a guest physical address goes through one VTL's EPT, and the
+/// access that every level of the walk allows.
+#[record]
+pub struct EptMapping {
+    #[record(hex)]
+    pub host_physical: u64,
+    /// The size of the mapping page: 4 KiB, 2 MiB, or 1 GiB.
+    #[record(hex)]
+    pub page_size: u64,
+    pub read: bool,
+    pub write: bool,
+    /// Execute access: supervisor-mode only when `user_execute` is not
+    /// None.
+    pub execute: bool,
+    /// User-mode execute access when the VTL uses mode-based execute
+    /// control, else None.
+    pub user_execute: Option<bool>,
+    /// The EPT memory type (0 UC, 1 WC, 4 WT, 5 WP, 6 WB).
+    pub memory_type: u8,
+    /// The entry of each level of the walk, from the PML4 down.
+    #[record(hex)]
+    pub entries: Vec<u64>,
+}
 
-    /// A guest physical range that VTL0's and VTL1's EPTs map differently.
-    EptDifference {
-        start: Hex,
-        /// The end of the range (exclusive).
-        end: Hex,
-        /// VTL0's access as `r-x`-style text, with `u` for user-mode execute
-        /// under mode-based execute control, or None where VTL0 maps nothing.
-        vtl0: Option<String>,
-        /// VTL1's access, as `vtl0` gives VTL0's.
-        vtl1: Option<String>,
-    }
+/// A guest physical range that VTL0's and VTL1's EPTs map differently.
+#[record]
+pub struct EptDifference {
+    #[record(hex)]
+    pub start: u64,
+    /// The end of the range (exclusive).
+    #[record(hex)]
+    pub end: u64,
+    /// VTL0's access as `r-x`-style text, with `u` for user-mode execute
+    /// under mode-based execute control, or None where VTL0 maps nothing.
+    pub vtl0: Option<String>,
+    /// VTL1's access, as `vtl0` gives VTL0's.
+    pub vtl1: Option<String>,
+}
 
-    /// A range of MSRs whose accesses exit, with the architectural MSRs (or
-    /// blocks, such as `x2APIC`) that ntoseye names in it.
-    MsrRange {
-        first: Hex<u32>,
-        last: Hex<u32>,
-        names: Vec<&'static str>,
-    }
+/// A range of MSRs whose accesses exit, with the architectural MSRs (or
+/// blocks, such as `x2APIC`) that ntoseye names in it.
+#[record]
+pub struct MsrRange {
+    #[record(hex)]
+    pub first: u32,
+    #[record(hex)]
+    pub last: u32,
+    pub names: Vec<&'static str>,
+}
 
-    /// Which RDMSRs and WRMSRs of a VTL exit (`!hvvmcs -msr`). MSRs outside
-    /// the bitmap's 0x0-0x1fff and 0xc0000000-0xc0001fff always exit.
-    MsrIntercepts {
-        /// Whether every RDMSR and WRMSR exits: the controls use no MSR
-        /// bitmap, and the lists are empty.
-        every: bool,
-        /// The MSR bitmap's physical address, or None without one.
-        bitmap: Option<Hex>,
-        /// The MSR ranges whose reads exit.
-        read: Vec<MsrRange>,
-        /// The MSR ranges whose writes exit.
-        write: Vec<MsrRange>,
-        /// The MSRs ntoseye names that the VTL reads without an exit.
-        read_without_exit: Vec<&'static str>,
-        /// The MSRs ntoseye names that the VTL writes without an exit.
-        write_without_exit: Vec<&'static str>,
-    }
+/// Which RDMSRs and WRMSRs of a VTL exit (`!hvvmcs -msr`). MSRs outside
+/// the bitmap's 0x0-0x1fff and 0xc0000000-0xc0001fff always exit.
+#[record]
+pub struct MsrIntercepts {
+    /// Whether every RDMSR and WRMSR exits: the controls use no MSR
+    /// bitmap, and the lists are empty.
+    pub every: bool,
+    /// The MSR bitmap's physical address, or None without one.
+    #[record(hex)]
+    pub bitmap: Option<u64>,
+    /// The MSR ranges whose reads exit.
+    pub read: Vec<MsrRange>,
+    /// The MSR ranges whose writes exit.
+    pub write: Vec<MsrRange>,
+    /// The MSRs ntoseye names that the VTL reads without an exit.
+    pub read_without_exit: Vec<&'static str>,
+    /// The MSRs ntoseye names that the VTL writes without an exit.
+    pub write_without_exit: Vec<&'static str>,
+}
 
-    /// A range of I/O ports whose accesses exit.
-    PortRange {
-        first: Hex<u32>,
-        last: Hex<u32>,
-    }
+/// A range of I/O ports whose accesses exit.
+#[record]
+pub struct PortRange {
+    #[record(hex)]
+    pub first: u32,
+    #[record(hex)]
+    pub last: u32,
+}
 
-    /// Which I/O instructions of a VTL exit (`!hvvmcs -io`).
-    IoIntercepts {
-        /// Whether every I/O instruction exits: the controls use no I/O
-        /// bitmaps but unconditional I/O exiting.
-        every: bool,
-        /// The port ranges whose accesses exit, through I/O bitmaps A and B.
-        /// Empty with `every`, and when no I/O instruction exits.
-        ports: Vec<PortRange>,
-    }
+/// Which I/O instructions of a VTL exit (`!hvvmcs -io`).
+#[record]
+pub struct IoIntercepts {
+    /// Whether every I/O instruction exits: the controls use no I/O
+    /// bitmaps but unconditional I/O exiting.
+    pub every: bool,
+    /// The port ranges whose accesses exit, through I/O bitmaps A and B.
+    /// Empty with `every`, and when no I/O instruction exits.
+    pub ports: Vec<PortRange>,
+}
 
-    /// One call code of the hypervisor's hypercall table.
-    Hypercall {
-        code: Hex<u16>,
-        /// The TLFS name, or None for a code that the TLFS does not list.
-        name: Option<&'static str>,
-        /// Whether the call has its own handler, not the reserved code 0's.
-        implemented: bool,
-        /// Whether the call is a rep hypercall.
-        rep: bool,
-        /// Whether the call takes a variable-size header.
-        variable_header: bool,
-        input_size: u16,
-        input_element_size: u16,
-        output_size: u16,
-        output_element_size: u16,
-        handler: VirtAddr,
-    }
+/// One call code of the hypervisor's hypercall table.
+#[record]
+pub struct Hypercall {
+    #[record(hex)]
+    pub code: u16,
+    /// The TLFS name, or None for a code that the TLFS does not list.
+    pub name: Option<&'static str>,
+    /// Whether the call has its own handler, not the reserved code 0's.
+    pub implemented: bool,
+    /// Whether the call is a rep hypercall.
+    pub rep: bool,
+    /// Whether the call takes a variable-size header.
+    pub variable_header: bool,
+    pub input_size: u16,
+    pub input_element_size: u16,
+    pub output_size: u16,
+    pub output_element_size: u16,
+    pub handler: VirtAddr,
+}
 
-    /// One field of a hypercall's input, as the Hyper-V TLFS lays it out.
-    HypercallField {
-        /// The TLFS parameter name, with its member for a structure
-        /// (`ProcessorSet.ValidBanksMask`) and its index for an array
-        /// (`Message[2]`); `Input[n]` for the raw qwords of a call whose
-        /// layout ntoseye does not know.
-        name: String,
-        /// The offset in the input, from its first byte.
-        offset: u16,
-        /// The size in bytes, at most 8.
-        size: u8,
-        value: Hex,
-        /// What the value means, where it has a name or stands for a set
-        /// (`HV_PARTITION_ID_SELF`, `VPs 0-3`, a register's TLFS name).
-        meaning: Option<String>,
-    }
+/// One field of a hypercall's input, as the Hyper-V TLFS lays it out.
+#[record]
+pub struct HypercallField {
+    /// The TLFS parameter name, with its member for a structure
+    /// (`ProcessorSet.ValidBanksMask`) and its index for an array
+    /// (`Message[2]`); `Input[n]` for the raw qwords of a call whose
+    /// layout ntoseye does not know.
+    pub name: String,
+    /// The offset in the input, from its first byte.
+    pub offset: u16,
+    /// The size in bytes, at most 8.
+    pub size: u8,
+    #[record(hex)]
+    pub value: u64,
+    /// What the value means, where it has a name or stands for a set
+    /// (`HV_PARTITION_ID_SELF`, `VPs 0-3`, a register's TLFS name).
+    pub meaning: Option<String>,
+}
 
-    /// One element of a rep hypercall's input list.
-    HypercallElement {
-        index: u16,
-        fields: Vec<HypercallField>,
-    }
+/// One element of a rep hypercall's input list.
+#[record]
+pub struct HypercallElement {
+    pub index: u16,
+    pub fields: Vec<HypercallField>,
+}
 
-    /// The hypercall of a VMCALL exit, with its input decoded as the Hyper-V
-    /// TLFS lays it out (`!hvcall`).
-    DecodedHypercall {
-        /// The hypercall input value (RCX).
-        input_value: Hex,
-        code: Hex<u16>,
-        /// The TLFS name, or None for a code that the TLFS does not list.
-        name: Option<&'static str>,
-        /// Whether the input is in registers (RDX, R8, and XMM0 to XMM5)
-        /// rather than in memory.
-        fast: bool,
-        /// The size of the variable input header, in qwords.
-        variable_header_size: u16,
-        /// Whether the call is for the L0 hypervisor of a nested environment.
-        nested: bool,
-        rep_count: u16,
-        /// The first rep element still to process; those before it are done.
-        rep_start: u16,
-        /// The guest physical address of the input (RDX), for a call whose
-        /// input is in memory.
-        input_gpa: Option<Hex>,
-        /// The guest physical address of the output (R8), for a call whose
-        /// input is in memory.
-        output_gpa: Option<Hex>,
-        /// Whether ntoseye knows the layout of the call's input. When it does
-        /// not, `fields` holds the input as raw qwords: RDX and R8 for a fast
-        /// call, else the first 8 qwords of the input.
-        decoded: bool,
-        fields: Vec<HypercallField>,
-        /// A rep call's input list, each element up to the rep count.
-        elements: Vec<HypercallElement>,
-        /// Why some of the input is missing: an unreadable input page, input
-        /// in XMM registers, or input past the end of its page.
-        unavailable: Option<String>,
-        /// The call on one line, as the stop header shows it.
-        summary: String,
-    }
+/// The hypercall of a VMCALL exit, with its input decoded as the Hyper-V
+/// TLFS lays it out (`!hvcall`).
+#[record]
+pub struct DecodedHypercall {
+    /// The hypercall input value (RCX).
+    #[record(hex)]
+    pub input_value: u64,
+    #[record(hex)]
+    pub code: u16,
+    /// The TLFS name, or None for a code that the TLFS does not list.
+    pub name: Option<&'static str>,
+    /// Whether the input is in registers (RDX, R8, and XMM0 to XMM5)
+    /// rather than in memory.
+    pub fast: bool,
+    /// The size of the variable input header, in qwords.
+    pub variable_header_size: u16,
+    /// Whether the call is for the L0 hypervisor of a nested environment.
+    pub nested: bool,
+    pub rep_count: u16,
+    /// The first rep element still to process; those before it are done.
+    pub rep_start: u16,
+    /// The guest physical address of the input (RDX), for a call whose
+    /// input is in memory.
+    #[record(hex)]
+    pub input_gpa: Option<u64>,
+    /// The guest physical address of the output (R8), for a call whose
+    /// input is in memory.
+    #[record(hex)]
+    pub output_gpa: Option<u64>,
+    /// Whether ntoseye knows the layout of the call's input. When it does
+    /// not, `fields` holds the input as raw qwords: RDX and R8 for a fast
+    /// call, else the first 8 qwords of the input.
+    pub decoded: bool,
+    pub fields: Vec<HypercallField>,
+    /// A rep call's input list, each element up to the rep count.
+    pub elements: Vec<HypercallElement>,
+    /// Why some of the input is missing: an unreadable input page, input
+    /// in XMM registers, or input past the end of its page.
+    pub unavailable: Option<String>,
+    /// The call on one line, as the stop header shows it.
+    pub summary: String,
+}
 
-    /// The guest partition's virtual processor that a processor in the
-    /// Windows hypervisor runs or last ran: the VP whose exit it handles, or
-    /// which it is about to enter.
-    ServedVp {
-        partition_id: Hex,
-        vp_index: u32,
-        /// The VTL the VP runs in.
-        vtl: u8,
-        /// Where the VTL left off, when the partition walk read its state.
-        rip: Option<VirtAddr>,
-        /// Whether the processor's VP assist page names this VTL's eVMCS: the
-        /// processor handles this VP's exit, or is about to enter it.
-        current: bool,
-        /// The VM-exit reason of the VTL's last exit.
-        exit_reason: Option<Hex<u32>>,
-        /// The name of the exit reason (`HLT`, `VMCALL`, ...), if it is a
-        /// common reason.
-        exit_reason_name: Option<&'static str>,
-        /// The guest's general-purpose registers other than `rsp` at the last
-        /// exit, as `SavedVtlState.general_registers`. None when they are not
-        /// known.
-        general_registers: Option<Keyed<Hex>>,
-        /// The hypercall of a VMCALL exit whose registers are known.
-        hypercall: Option<DecodedHypercall>,
-    }
+/// The guest partition's virtual processor that a processor in the
+/// Windows hypervisor runs or last ran: the VP whose exit it handles, or
+/// which it is about to enter.
+#[record]
+pub struct ServedVp {
+    #[record(hex)]
+    pub partition_id: u64,
+    pub vp_index: u32,
+    /// The VTL the VP runs in.
+    pub vtl: u8,
+    /// Where the VTL left off, when the partition walk read its state.
+    pub rip: Option<VirtAddr>,
+    /// Whether the processor's VP assist page names this VTL's eVMCS: the
+    /// processor handles this VP's exit, or is about to enter it.
+    pub current: bool,
+    /// The VM-exit reason of the VTL's last exit.
+    #[record(hex)]
+    pub exit_reason: Option<u32>,
+    /// The name of the exit reason (`HLT`, `VMCALL`, ...), if it is a
+    /// common reason.
+    pub exit_reason_name: Option<&'static str>,
+    /// The guest's general-purpose registers other than `rsp` at the last
+    /// exit, as `SavedVtlState.general_registers`. None when they are not
+    /// known.
+    #[record(hex)]
+    pub general_registers: Option<Keyed<u64>>,
+    /// The hypercall of a VMCALL exit whose registers are known.
+    pub hypercall: Option<DecodedHypercall>,
 }
 
 pub fn hypervisor_processor(processor: &HvProcessor) -> HypervisorProcessor {
@@ -361,7 +394,7 @@ pub fn vp_registers(found: &session::VpRegisters) -> VpRegisters {
 }
 
 /// An exit's general-purpose registers, in [`EXIT_GPRS`] order.
-pub fn exit_registers(registers: &HashMap<&'static str, u64>) -> Vec<(&'static str, u64)> {
+pub fn exit_registers(registers: &HashMap<&'static str, u64>) -> Keyed<u64> {
     EXIT_GPRS
         .iter()
         .filter_map(|name| Some((*name, *registers.get(name)?)))

@@ -1,6 +1,6 @@
 //! Attribute-shaped results: every [`View::Object`](crate::view::View) the SDK
-//! returns is a [`Record`] (`frame.ip`, `thread.state_name`), every declared
-//! shape ([`shapes!`](crate::view::shape::shapes)) its own [`BaseRecord`]
+//! returns is a [`Record`] (`frame.ip`, `thread.state_name`), every
+//! `#[record]` (see [`crate::view::record`]) its own [`BaseRecord`]
 //! subclass with a property per field, and every field that can fail to read
 //! on its own is the package's generic `Diagnostic` (`peb.ldr.value`,
 //! `if peb.ldr:`). Records keep dict access (`record["ip"]`, `to_dict()`) for

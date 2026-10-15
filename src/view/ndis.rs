@@ -2,347 +2,382 @@
 //! modules, filter drivers, protocols, pending OID requests, and
 //! NET_BUFFER_LISTs.
 
-use super::shape::{Hex, shapes};
+use ntoseye_macros::record;
+
 use crate::ntstatus::ntstatus_name;
 use crate::target::ndis as target;
 use crate::target::ndis::{NdisOidOwner, nbl_flag_names, oid_name};
 use crate::types::VirtAddr;
 
-shapes! {
-    /// A block a list names but that does not read.
-    NdisUnreadable {
-        address: VirtAddr,
-        error: String,
-    }
+/// A block a list names but that does not read.
+#[record]
+pub struct NdisUnreadable {
+    pub address: VirtAddr,
+    pub error: String,
+}
 
-    /// A miniport as `!ndiskd.miniports` lists it (`_NDIS_MINIPORT_BLOCK`).
-    NdisMiniport {
-        address: VirtAddr,
-        /// `MiniportName`, the adapter's device name.
-        name: String,
-        /// The adapter's friendly name.
-        friendly_name: Option<String>,
-        /// The `_NDIS_M_DRIVER_BLOCK`.
-        driver: VirtAddr,
-        /// The miniport driver's service name.
-        driver_name: Option<String>,
-        /// `Running`, `Pausing`, `Paused`, `Restarting`, `Initializing`, or
-        /// `Halted`.
-        state: String,
-        pnp_state: String,
-        media_connect: String,
-        connected: bool,
-        /// Bits per second; `0xffffffffffffffff` when the miniport has not
-        /// reported one.
-        xmit_link_speed: u64,
-        rcv_link_speed: u64,
-        /// The device power state (`D0`).
-        power: String,
-        if_index: u32,
-    }
+/// A miniport as `!ndiskd.miniports` lists it (`_NDIS_MINIPORT_BLOCK`).
+#[record]
+pub struct NdisMiniport {
+    pub address: VirtAddr,
+    /// `MiniportName`, the adapter's device name.
+    pub name: String,
+    /// The adapter's friendly name.
+    pub friendly_name: Option<String>,
+    /// The `_NDIS_M_DRIVER_BLOCK`.
+    pub driver: VirtAddr,
+    /// The miniport driver's service name.
+    pub driver_name: Option<String>,
+    /// `Running`, `Pausing`, `Paused`, `Restarting`, `Initializing`, or
+    /// `Halted`.
+    pub state: String,
+    pub pnp_state: String,
+    pub media_connect: String,
+    pub connected: bool,
+    /// Bits per second; `0xffffffffffffffff` when the miniport has not
+    /// reported one.
+    pub xmit_link_speed: u64,
+    pub rcv_link_speed: u64,
+    /// The device power state (`D0`).
+    pub power: String,
+    pub if_index: u32,
+}
 
-    /// The miniports on `ndis!ndisMiniportList`.
-    NdisMiniports {
-        miniports: Vec<NdisMiniport>,
-        unreadable: Vec<NdisUnreadable>,
-        /// Why the walk stopped before the end of the list.
-        stopped: Option<String>,
-    }
+/// The miniports on `ndis!ndisMiniportList`.
+#[record]
+pub struct NdisMiniports {
+    pub miniports: Vec<NdisMiniport>,
+    pub unreadable: Vec<NdisUnreadable>,
+    /// Why the walk stopped before the end of the list.
+    pub stopped: Option<String>,
+}
 
-    /// An `_NDIS_OID_REQUEST`.
-    NdisOidRequest {
-        address: VirtAddr,
-        /// `QueryInformation`, `SetInformation`, `Method`, ...
-        request_type: String,
-        oid: Hex<u32>,
-        /// The `ntddndis.h` name of the OID.
-        oid_name: Option<&'static str>,
-        port: u32,
-        /// Seconds; 0 lets NDIS pick one.
-        timeout: u32,
-        buffer: VirtAddr,
-        /// `InformationBufferLength`, or a method request's input length.
-        buffer_length: u32,
-        /// A method request's `OutputBufferLength`.
-        output_length: Option<u32>,
-        /// A method request's `MethodId`.
-        method_id: Option<Hex<u32>>,
-    }
+/// An `_NDIS_OID_REQUEST`.
+#[record]
+pub struct NdisOidRequest {
+    pub address: VirtAddr,
+    /// `QueryInformation`, `SetInformation`, `Method`, ...
+    pub request_type: String,
+    #[record(hex)]
+    pub oid: u32,
+    /// The `ntddndis.h` name of the OID.
+    pub oid_name: Option<&'static str>,
+    pub port: u32,
+    /// Seconds; 0 lets NDIS pick one.
+    pub timeout: u32,
+    pub buffer: VirtAddr,
+    /// `InformationBufferLength`, or a method request's input length.
+    pub buffer_length: u32,
+    /// A method request's `OutputBufferLength`.
+    pub output_length: Option<u32>,
+    /// A method request's `MethodId`.
+    #[record(hex)]
+    pub method_id: Option<u32>,
+}
 
-    /// A filter module on a miniport's stack (`_NDIS_FILTER_BLOCK`).
-    NdisFilter {
-        address: VirtAddr,
-        /// `FilterFriendlyName`.
-        name: Option<String>,
-        /// The `_NDIS_FILTER_DRIVER_BLOCK`.
-        driver: VirtAddr,
-        driver_image: Option<String>,
-        miniport: VirtAddr,
-        miniport_name: Option<String>,
-        state: String,
-        /// `FilterModuleContext`, the filter driver's own context.
-        context: VirtAddr,
-        /// The OID request the filter has not completed.
-        pending_oid: Option<NdisOidRequest>,
-        /// Why `pending_oid` does not decode.
-        pending_oid_error: Option<String>,
-    }
+/// A filter module on a miniport's stack (`_NDIS_FILTER_BLOCK`).
+#[record]
+pub struct NdisFilter {
+    pub address: VirtAddr,
+    /// `FilterFriendlyName`.
+    pub name: Option<String>,
+    /// The `_NDIS_FILTER_DRIVER_BLOCK`.
+    pub driver: VirtAddr,
+    pub driver_image: Option<String>,
+    pub miniport: VirtAddr,
+    pub miniport_name: Option<String>,
+    pub state: String,
+    /// `FilterModuleContext`, the filter driver's own context.
+    pub context: VirtAddr,
+    /// The OID request the filter has not completed.
+    pub pending_oid: Option<NdisOidRequest>,
+    /// Why `pending_oid` does not decode.
+    pub pending_oid_error: Option<String>,
+}
 
-    /// A protocol's binding to a miniport (`_NDIS_OPEN_BLOCK`).
-    NdisOpen {
-        address: VirtAddr,
-        /// The `_NDIS_PROTOCOL_BLOCK`.
-        protocol: VirtAddr,
-        protocol_name: Option<String>,
-        /// `ProtocolBindingContext`.
-        context: VirtAddr,
-    }
+/// A protocol's binding to a miniport (`_NDIS_OPEN_BLOCK`).
+#[record]
+pub struct NdisOpen {
+    pub address: VirtAddr,
+    /// The `_NDIS_PROTOCOL_BLOCK`.
+    pub protocol: VirtAddr,
+    pub protocol_name: Option<String>,
+    /// `ProtocolBindingContext`.
+    pub context: VirtAddr,
+}
 
-    /// A miniport driver (`_NDIS_M_DRIVER_BLOCK`).
-    NdisDriver {
-        address: VirtAddr,
-        service_name: String,
-        image_name: String,
-        /// The loaded module the driver's code is in, the name its PDB's
-        /// types go by.
-        module: Option<String>,
-        driver_object: VirtAddr,
-        /// The NDIS version it registered with (`6.50`).
-        ndis_version: String,
-        /// Its own version, from its NDIS 6 characteristics.
-        driver_version: Option<String>,
-        /// Its miniports, on its `MiniportQueue`.
-        miniports: Vec<VirtAddr>,
-        miniports_stopped: Option<String>,
-    }
+/// A miniport driver (`_NDIS_M_DRIVER_BLOCK`).
+#[record]
+pub struct NdisDriver {
+    pub address: VirtAddr,
+    pub service_name: String,
+    pub image_name: String,
+    /// The loaded module the driver's code is in, the name its PDB's
+    /// types go by.
+    pub module: Option<String>,
+    pub driver_object: VirtAddr,
+    /// The NDIS version it registered with (`6.50`).
+    pub ndis_version: String,
+    /// Its own version, from its NDIS 6 characteristics.
+    pub driver_version: Option<String>,
+    /// Its miniports, on its `MiniportQueue`.
+    pub miniports: Vec<VirtAddr>,
+    pub miniports_stopped: Option<String>,
+}
 
-    /// One miniport in detail (`!ndiskd.miniport`).
-    NdisMiniportDetail {
-        miniport: NdisMiniport,
-        /// Whether it is on `ndis!ndisMiniportList`.
-        listed: bool,
-        ndis_version: String,
-        /// `MiniportAdapterContext`, the miniport driver's own context.
-        adapter_context: VirtAddr,
-        driver: Option<NdisDriver>,
-        /// Why `driver` is `None`.
-        driver_error: Option<String>,
-        /// The FDO NDIS created; null for a virtual miniport.
-        device_object: VirtAddr,
-        pdo: VirtAddr,
-        instance_id: Option<String>,
-        medium: String,
-        physical_medium: String,
-        duplex: String,
-        oper_status: String,
-        net_luid: Hex,
-        flags: Hex<u32>,
-        pnp_flags: Hex<u32>,
-        references: Option<u64>,
-        /// `ResetStatus`, the NTSTATUS of the last reset.
-        reset_status: Hex<u32>,
-        internal_resets: u64,
-        miniport_resets: u64,
-        pending_oid: Option<NdisOidRequest>,
-        pending_oid_error: Option<String>,
-        /// `PendingReturnNBLCount`.
-        pending_return_nbls: u32,
-        /// The filter stack, top first.
-        filters: Vec<NdisFilter>,
-        filters_stopped: Option<String>,
-        num_opens: u32,
-        opens: Vec<NdisOpen>,
-        opens_stopped: Option<String>,
-    }
+/// One miniport in detail (`!ndiskd.miniport`).
+#[record]
+pub struct NdisMiniportDetail {
+    pub miniport: NdisMiniport,
+    /// Whether it is on `ndis!ndisMiniportList`.
+    pub listed: bool,
+    pub ndis_version: String,
+    /// `MiniportAdapterContext`, the miniport driver's own context.
+    pub adapter_context: VirtAddr,
+    pub driver: Option<NdisDriver>,
+    /// Why `driver` is `None`.
+    pub driver_error: Option<String>,
+    /// The FDO NDIS created; null for a virtual miniport.
+    pub device_object: VirtAddr,
+    pub pdo: VirtAddr,
+    pub instance_id: Option<String>,
+    pub medium: String,
+    pub physical_medium: String,
+    pub duplex: String,
+    pub oper_status: String,
+    #[record(hex)]
+    pub net_luid: u64,
+    #[record(hex)]
+    pub flags: u32,
+    #[record(hex)]
+    pub pnp_flags: u32,
+    pub references: Option<u64>,
+    /// `ResetStatus`, the NTSTATUS of the last reset.
+    #[record(hex)]
+    pub reset_status: u32,
+    pub internal_resets: u64,
+    pub miniport_resets: u64,
+    pub pending_oid: Option<NdisOidRequest>,
+    pub pending_oid_error: Option<String>,
+    /// `PendingReturnNBLCount`.
+    pub pending_return_nbls: u32,
+    /// The filter stack, top first.
+    pub filters: Vec<NdisFilter>,
+    pub filters_stopped: Option<String>,
+    pub num_opens: u32,
+    pub opens: Vec<NdisOpen>,
+    pub opens_stopped: Option<String>,
+}
 
-    /// The miniport drivers on `ndis!ndisMiniDriverList`.
-    NdisDrivers {
-        drivers: Vec<NdisDriver>,
-        unreadable: Vec<NdisUnreadable>,
-        stopped: Option<String>,
-    }
+/// The miniport drivers on `ndis!ndisMiniDriverList`.
+#[record]
+pub struct NdisDrivers {
+    pub drivers: Vec<NdisDriver>,
+    pub unreadable: Vec<NdisUnreadable>,
+    pub stopped: Option<String>,
+}
 
-    /// A miniport driver and its miniports (`!ndiskd.minidriver`).
-    NdisMinidriver {
-        driver: NdisDriver,
-        miniports: Vec<NdisMiniport>,
-        unreadable: Vec<NdisUnreadable>,
-    }
+/// A miniport driver and its miniports (`!ndiskd.minidriver`).
+#[record]
+pub struct NdisMinidriver {
+    pub driver: NdisDriver,
+    pub miniports: Vec<NdisMiniport>,
+    pub unreadable: Vec<NdisUnreadable>,
+}
 
-    /// The filter modules on `ndis!ndisGlobalFilterList`.
-    NdisFilters {
-        filters: Vec<NdisFilter>,
-        unreadable: Vec<NdisUnreadable>,
-        stopped: Option<String>,
-    }
+/// The filter modules on `ndis!ndisGlobalFilterList`.
+#[record]
+pub struct NdisFilters {
+    pub filters: Vec<NdisFilter>,
+    pub unreadable: Vec<NdisUnreadable>,
+    pub stopped: Option<String>,
+}
 
-    /// One filter module in detail (`!ndiskd.filter`).
-    NdisFilterDetail {
-        filter: NdisFilter,
-        /// Whether it is on `ndis!ndisGlobalFilterList`.
-        listed: bool,
-        /// The filter driver's friendly name.
-        driver_name: Option<String>,
-        /// The filter modules above and below it; null at the top and at the
-        /// bottom.
-        higher: VirtAddr,
-        lower: VirtAddr,
-        /// The link the filter last saw indicated from below.
-        media_connect: String,
-        xmit_link_speed: u64,
-        rcv_link_speed: u64,
-        if_index: u32,
-        flags: Hex<u32>,
-        references: Option<u64>,
-        /// What NDIS dropped because the filter was not running.
-        dropped_receive_nbls: i32,
-        dropped_send_nbls: i32,
-        dropped_status_indications: u32,
-    }
+/// One filter module in detail (`!ndiskd.filter`).
+#[record]
+pub struct NdisFilterDetail {
+    pub filter: NdisFilter,
+    /// Whether it is on `ndis!ndisGlobalFilterList`.
+    pub listed: bool,
+    /// The filter driver's friendly name.
+    pub driver_name: Option<String>,
+    /// The filter modules above and below it; null at the top and at the
+    /// bottom.
+    pub higher: VirtAddr,
+    pub lower: VirtAddr,
+    /// The link the filter last saw indicated from below.
+    pub media_connect: String,
+    pub xmit_link_speed: u64,
+    pub rcv_link_speed: u64,
+    pub if_index: u32,
+    #[record(hex)]
+    pub flags: u32,
+    pub references: Option<u64>,
+    /// What NDIS dropped because the filter was not running.
+    pub dropped_receive_nbls: i32,
+    pub dropped_send_nbls: i32,
+    pub dropped_status_indications: u32,
+}
 
-    /// A filter driver (`_NDIS_FILTER_DRIVER_BLOCK`).
-    NdisFilterDriver {
-        address: VirtAddr,
-        friendly_name: String,
-        /// The filter's GUID.
-        unique_name: String,
-        service_name: String,
-        image_name: String,
-        module: Option<String>,
-        driver_object: VirtAddr,
-        /// `FilterDriverContext`.
-        context: VirtAddr,
-        flags: Hex<u32>,
-        ndis_version: String,
-        driver_version: String,
-        /// Its filter modules, one for each miniport it is attached to.
-        filters: Vec<VirtAddr>,
-        filters_stopped: Option<String>,
-    }
+/// A filter driver (`_NDIS_FILTER_DRIVER_BLOCK`).
+#[record]
+pub struct NdisFilterDriver {
+    pub address: VirtAddr,
+    pub friendly_name: String,
+    /// The filter's GUID.
+    pub unique_name: String,
+    pub service_name: String,
+    pub image_name: String,
+    pub module: Option<String>,
+    pub driver_object: VirtAddr,
+    /// `FilterDriverContext`.
+    pub context: VirtAddr,
+    #[record(hex)]
+    pub flags: u32,
+    pub ndis_version: String,
+    pub driver_version: String,
+    /// Its filter modules, one for each miniport it is attached to.
+    pub filters: Vec<VirtAddr>,
+    pub filters_stopped: Option<String>,
+}
 
-    /// The filter drivers on `ndis!ndisFilterDriverList`.
-    NdisFilterDrivers {
-        drivers: Vec<NdisFilterDriver>,
-        unreadable: Vec<NdisUnreadable>,
-        stopped: Option<String>,
-    }
+/// The filter drivers on `ndis!ndisFilterDriverList`.
+#[record]
+pub struct NdisFilterDrivers {
+    pub drivers: Vec<NdisFilterDriver>,
+    pub unreadable: Vec<NdisUnreadable>,
+    pub stopped: Option<String>,
+}
 
-    /// A filter driver and its filter modules (`!ndiskd.filterdriver`).
-    NdisFilterDriverDetail {
-        driver: NdisFilterDriver,
-        filters: Vec<NdisFilter>,
-        unreadable: Vec<NdisUnreadable>,
-    }
+/// A filter driver and its filter modules (`!ndiskd.filterdriver`).
+#[record]
+pub struct NdisFilterDriverDetail {
+    pub driver: NdisFilterDriver,
+    pub filters: Vec<NdisFilter>,
+    pub unreadable: Vec<NdisUnreadable>,
+}
 
-    /// A protocol driver (`_NDIS_PROTOCOL_BLOCK`).
-    NdisProtocol {
-        address: VirtAddr,
-        name: String,
-        image_name: Option<String>,
-        ndis_version: String,
-        driver_version: String,
-        /// `ProtocolDriverContext`.
-        context: VirtAddr,
-        flags: Hex<u32>,
-        /// `BindAdapterHandlerEx`.
-        bind_handler: VirtAddr,
-        /// Its bindings (`_NDIS_OPEN_BLOCK`), on its `OpenQueue`.
-        opens: Vec<VirtAddr>,
-        opens_stopped: Option<String>,
-    }
+/// A protocol driver (`_NDIS_PROTOCOL_BLOCK`).
+#[record]
+pub struct NdisProtocol {
+    pub address: VirtAddr,
+    pub name: String,
+    pub image_name: Option<String>,
+    pub ndis_version: String,
+    pub driver_version: String,
+    /// `ProtocolDriverContext`.
+    pub context: VirtAddr,
+    #[record(hex)]
+    pub flags: u32,
+    /// `BindAdapterHandlerEx`.
+    pub bind_handler: VirtAddr,
+    /// Its bindings (`_NDIS_OPEN_BLOCK`), on its `OpenQueue`.
+    pub opens: Vec<VirtAddr>,
+    pub opens_stopped: Option<String>,
+}
 
-    /// The protocol drivers on `ndis!ndisProtocolList`.
-    NdisProtocols {
-        protocols: Vec<NdisProtocol>,
-        unreadable: Vec<NdisUnreadable>,
-        stopped: Option<String>,
-    }
+/// The protocol drivers on `ndis!ndisProtocolList`.
+#[record]
+pub struct NdisProtocols {
+    pub protocols: Vec<NdisProtocol>,
+    pub unreadable: Vec<NdisUnreadable>,
+    pub stopped: Option<String>,
+}
 
-    /// A protocol's binding, with the miniport it opened.
-    NdisBinding {
-        /// The `_NDIS_OPEN_BLOCK`.
-        open: VirtAddr,
-        miniport: VirtAddr,
-        miniport_name: Option<String>,
-        /// `ProtocolBindingContext`.
-        context: VirtAddr,
-    }
+/// A protocol's binding, with the miniport it opened.
+#[record]
+pub struct NdisBinding {
+    /// The `_NDIS_OPEN_BLOCK`.
+    pub open: VirtAddr,
+    pub miniport: VirtAddr,
+    pub miniport_name: Option<String>,
+    /// `ProtocolBindingContext`.
+    pub context: VirtAddr,
+}
 
-    /// One protocol driver in detail (`!ndiskd.protocol`).
-    NdisProtocolDetail {
-        protocol: NdisProtocol,
-        /// Whether it is on `ndis!ndisProtocolList`.
-        listed: bool,
-        /// `BindAdapterHandlerEx` as a symbol.
-        bind_handler_name: Option<String>,
-        bindings: Vec<NdisBinding>,
-        bindings_stopped: Option<String>,
-    }
+/// One protocol driver in detail (`!ndiskd.protocol`).
+#[record]
+pub struct NdisProtocolDetail {
+    pub protocol: NdisProtocol,
+    /// Whether it is on `ndis!ndisProtocolList`.
+    pub listed: bool,
+    /// `BindAdapterHandlerEx` as a symbol.
+    pub bind_handler_name: Option<String>,
+    pub bindings: Vec<NdisBinding>,
+    pub bindings_stopped: Option<String>,
+}
 
-    /// An OID request a miniport or filter module has not completed.
-    NdisPendingOid {
-        /// `miniport` or `filter`.
-        owner: &'static str,
-        /// The miniport or filter block.
-        address: VirtAddr,
-        name: Option<String>,
-        request: Option<NdisOidRequest>,
-        /// Why `request` does not decode.
-        error: Option<String>,
-    }
+/// An OID request a miniport or filter module has not completed.
+#[record]
+pub struct NdisPendingOid {
+    /// `miniport` or `filter`.
+    pub owner: &'static str,
+    /// The miniport or filter block.
+    pub address: VirtAddr,
+    pub name: Option<String>,
+    pub request: Option<NdisOidRequest>,
+    /// Why `request` does not decode.
+    pub error: Option<String>,
+}
 
-    /// The pending OID requests of every miniport and filter module
-    /// (`!ndiskd.oid`).
-    NdisPendingOids {
-        pending: Vec<NdisPendingOid>,
-        /// How many miniports and filter modules were checked.
-        miniports: usize,
-        filters: usize,
-        /// Why a walk stopped short, or a block that did not read.
-        problems: Vec<String>,
-    }
+/// The pending OID requests of every miniport and filter module
+/// (`!ndiskd.oid`).
+#[record]
+pub struct NdisPendingOids {
+    pub pending: Vec<NdisPendingOid>,
+    /// How many miniports and filter modules were checked.
+    pub miniports: usize,
+    pub filters: usize,
+    /// Why a walk stopped short, or a block that did not read.
+    pub problems: Vec<String>,
+}
 
-    /// A `_NET_BUFFER`.
-    NdisNetBuffer {
-        address: VirtAddr,
-        next: VirtAddr,
-        /// The MDL the data starts in, and where in it.
-        current_mdl: VirtAddr,
-        current_mdl_offset: u32,
-        data_length: u32,
-        /// Where the data starts from the start of `mdl_chain`.
-        data_offset: u32,
-        mdl_chain: VirtAddr,
-    }
+/// A `_NET_BUFFER`.
+#[record]
+pub struct NdisNetBuffer {
+    pub address: VirtAddr,
+    pub next: VirtAddr,
+    /// The MDL the data starts in, and where in it.
+    pub current_mdl: VirtAddr,
+    pub current_mdl_offset: u32,
+    pub data_length: u32,
+    /// Where the data starts from the start of `mdl_chain`.
+    pub data_offset: u32,
+    pub mdl_chain: VirtAddr,
+}
 
-    /// A `_NET_BUFFER_LIST` (`!ndiskd.nbl`).
-    NdisNbl {
-        address: VirtAddr,
-        next: VirtAddr,
-        parent: VirtAddr,
-        context: VirtAddr,
-        pool: VirtAddr,
-        /// The NDIS handle of the miniport, filter module, or binding that
-        /// owns it on its way.
-        source_handle: VirtAddr,
-        /// What `source_handle` is, when NDIS knows it.
-        source: Option<String>,
-        flags: Hex<u32>,
-        nbl_flags: Hex<u32>,
-        /// The `NDIS_NBL_FLAGS_*` names of `nbl_flags`, without the prefix.
-        nbl_flag_names: Vec<String>,
-        child_ref_count: i32,
-        status: Hex<u32>,
-        status_name: Option<&'static str>,
-        net_buffers: Vec<NdisNetBuffer>,
-        net_buffers_stopped: Option<String>,
-    }
+/// A `_NET_BUFFER_LIST` (`!ndiskd.nbl`).
+#[record]
+pub struct NdisNbl {
+    pub address: VirtAddr,
+    pub next: VirtAddr,
+    pub parent: VirtAddr,
+    pub context: VirtAddr,
+    pub pool: VirtAddr,
+    /// The NDIS handle of the miniport, filter module, or binding that
+    /// owns it on its way.
+    pub source_handle: VirtAddr,
+    /// What `source_handle` is, when NDIS knows it.
+    pub source: Option<String>,
+    #[record(hex)]
+    pub flags: u32,
+    #[record(hex)]
+    pub nbl_flags: u32,
+    /// The `NDIS_NBL_FLAGS_*` names of `nbl_flags`, without the prefix.
+    pub nbl_flag_names: Vec<String>,
+    pub child_ref_count: i32,
+    #[record(hex)]
+    pub status: u32,
+    pub status_name: Option<&'static str>,
+    pub net_buffers: Vec<NdisNetBuffer>,
+    pub net_buffers_stopped: Option<String>,
+}
 
-    /// The NBLs on a `Next` chain.
-    NdisNblChain {
-        nbls: Vec<NdisNbl>,
-        stopped: Option<String>,
-    }
+/// The NBLs on a `Next` chain.
+#[record]
+pub struct NdisNblChain {
+    pub nbls: Vec<NdisNbl>,
+    pub stopped: Option<String>,
 }
 
 fn version_text((major, minor): (u8, u8)) -> String {

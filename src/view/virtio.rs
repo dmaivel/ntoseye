@@ -1,7 +1,8 @@
 //! Virtio devices, their queues, and a queue's buffers (`!virtio`,
 //! `!vring`) as SDK records.
 
-use super::shape::{Hex, shapes};
+use ntoseye_macros::record;
+
 use crate::target::Target;
 use crate::target::virtio::{
     DescChain, MAX_LISTED_CHAINS, PackedChain, QueueProgress, QueueRole, Signal,
@@ -11,162 +12,171 @@ use crate::target::virtio::{
 use crate::target::virtio_request::request_kind;
 use crate::types::VirtAddr;
 
-shapes! {
-    /// A virtio PCI function (`!virtio`).
-    VirtioDevice {
-        /// `bb:dd.f`.
-        location: String,
-        /// The virtio device type: 1 net, 2 block, 3 console, 8 SCSI, ...
-        virtio_id: u16,
-        /// The specification's name of the type, such as `net` or `block`.
-        kind: &'static str,
-        device_id: Hex<u16>,
-        /// Whether the device also offers the legacy interface.
-        transitional: bool,
-        /// The service that drives it.
-        service: Option<String>,
-        pdo: VirtAddr,
-        /// What its virtio-win driver shows of it, with the driver's private
-        /// PDB. None when `driver_missing` says why not.
-        driver: Option<VirtioDriverState>,
-        driver_missing: Option<String>,
-    }
+/// A virtio PCI function (`!virtio`).
+#[record]
+pub struct VirtioDevice {
+    /// `bb:dd.f`.
+    pub location: String,
+    /// The virtio device type: 1 net, 2 block, 3 console, 8 SCSI, ...
+    pub virtio_id: u16,
+    /// The specification's name of the type, such as `net` or `block`.
+    pub kind: &'static str,
+    #[record(hex)]
+    pub device_id: u16,
+    /// Whether the device also offers the legacy interface.
+    pub transitional: bool,
+    /// The service that drives it.
+    pub service: Option<String>,
+    pub pdo: VirtAddr,
+    /// What its virtio-win driver shows of it, with the driver's private
+    /// PDB. None when `driver_missing` says why not.
+    pub driver: Option<VirtioDriverState>,
+    pub driver_missing: Option<String>,
+}
 
-    /// A device as its virtio-win driver sees it.
-    VirtioDriverState {
-        /// The driver module whose PDB types its structures.
-        module: String,
-        /// The `virtio_device`.
-        device: VirtAddr,
-        packed: bool,
-        /// Whether the device and driver negotiated the event index feature.
-        event_idx: bool,
-        msix: bool,
-        queues: Vec<Virtqueue>,
-    }
+/// A device as its virtio-win driver sees it.
+#[record]
+pub struct VirtioDriverState {
+    /// The driver module whose PDB types its structures.
+    pub module: String,
+    /// The `virtio_device`.
+    pub device: VirtAddr,
+    pub packed: bool,
+    /// Whether the device and driver negotiated the event index feature.
+    pub event_idx: bool,
+    pub msix: bool,
+    pub queues: Vec<Virtqueue>,
+}
 
-    /// One virtqueue and where its traffic stands.
-    Virtqueue {
-        index: u32,
-        /// Its name where the virtio specification fixes it, such as `rx 0`
-        /// or `request 2`.
-        name: Option<String>,
-        /// `device_fills` for a queue whose buffers wait until the device has
-        /// something (receive, events), `requests` for one whose buffers
-        /// carry requests.
-        role: Option<&'static str>,
-        /// The `virtqueue_split` or `virtqueue_packed`.
-        address: VirtAddr,
-        size: u32,
-        packed: bool,
-        /// The avail index the driver published (split), or the position it
-        /// fills next (packed).
-        avail: Option<u16>,
-        /// The used index up to which the device returned buffers (split).
-        used: Option<u16>,
-        /// Where the driver takes buffers back next.
-        taken_back: Option<u16>,
-        /// The descriptors the driver has not given out.
-        free: Option<u32>,
-        /// Buffers the driver added but has not published (split).
-        unpublished: Option<u16>,
-        /// Buffers added since the driver last notified the device (split).
-        unkicked: Option<u32>,
-        /// Buffers the device holds.
-        with_device: Option<u32>,
-        /// Buffers the device returned that the driver has not taken back.
-        returned: Option<u32>,
-        /// What these mean together, as `!virtio` says it.
-        state: String,
-        /// When the driver wants interrupts.
-        interrupts: Option<VirtioSignal>,
-        /// When the device wants notifications.
-        notifications: Option<VirtioSignal>,
-        /// Whether an interrupt was due for the returned buffers (split).
-        interrupt_due: bool,
-        /// Counters that only grow, to compare two looks with.
-        progress: Option<VirtioProgress>,
-        /// The descriptor table.
-        desc: Option<VirtAddr>,
-        /// The avail ring (split) or the driver's event suppression structure
-        /// (packed).
-        driver_area: Option<VirtAddr>,
-        /// The used ring (split) or the device's event suppression structure
-        /// (packed).
-        device_area: Option<VirtAddr>,
-        /// Why the queue could not be read.
-        error: Option<String>,
-    }
+/// One virtqueue and where its traffic stands.
+#[record]
+pub struct Virtqueue {
+    pub index: u32,
+    /// Its name where the virtio specification fixes it, such as `rx 0`
+    /// or `request 2`.
+    pub name: Option<String>,
+    /// `device_fills` for a queue whose buffers wait until the device has
+    /// something (receive, events), `requests` for one whose buffers
+    /// carry requests.
+    pub role: Option<&'static str>,
+    /// The `virtqueue_split` or `virtqueue_packed`.
+    pub address: VirtAddr,
+    pub size: u32,
+    pub packed: bool,
+    /// The avail index the driver published (split), or the position it
+    /// fills next (packed).
+    pub avail: Option<u16>,
+    /// The used index up to which the device returned buffers (split).
+    pub used: Option<u16>,
+    /// Where the driver takes buffers back next.
+    pub taken_back: Option<u16>,
+    /// The descriptors the driver has not given out.
+    pub free: Option<u32>,
+    /// Buffers the driver added but has not published (split).
+    pub unpublished: Option<u16>,
+    /// Buffers added since the driver last notified the device (split).
+    pub unkicked: Option<u32>,
+    /// Buffers the device holds.
+    pub with_device: Option<u32>,
+    /// Buffers the device returned that the driver has not taken back.
+    pub returned: Option<u32>,
+    /// What these mean together, as `!virtio` says it.
+    pub state: String,
+    /// When the driver wants interrupts.
+    pub interrupts: Option<VirtioSignal>,
+    /// When the device wants notifications.
+    pub notifications: Option<VirtioSignal>,
+    /// Whether an interrupt was due for the returned buffers (split).
+    pub interrupt_due: bool,
+    /// Counters that only grow, to compare two looks with.
+    pub progress: Option<VirtioProgress>,
+    /// The descriptor table.
+    pub desc: Option<VirtAddr>,
+    /// The avail ring (split) or the driver's event suppression structure
+    /// (packed).
+    pub driver_area: Option<VirtAddr>,
+    /// The used ring (split) or the device's event suppression structure
+    /// (packed).
+    pub device_area: Option<VirtAddr>,
+    /// Why the queue could not be read.
+    pub error: Option<String>,
+}
 
-    /// When one side of a queue wants to be signalled.
-    VirtioSignal {
-        /// `on` (after every buffer), `off`, `after` (the event index), or
-        /// `at` (a packed ring position).
-        kind: &'static str,
-        /// The index for `after`, the position for `at`.
-        value: Option<u16>,
-        /// The lap for `at`.
-        lap: Option<bool>,
-    }
+/// When one side of a queue wants to be signalled.
+#[record]
+pub struct VirtioSignal {
+    /// `on` (after every buffer), `off`, `after` (the event index), or
+    /// `at` (a packed ring position).
+    pub kind: &'static str,
+    /// The index for `after`, the position for `at`.
+    pub value: Option<u16>,
+    /// The lap for `at`.
+    pub lap: Option<bool>,
+}
 
-    /// A queue's counters at one look, which only grow modulo `modulus`;
-    /// the difference between two looks is what moved.
-    VirtioProgress {
-        /// Buffers the driver handed the device.
-        published: u32,
-        /// Buffers the device returned (split rings).
-        completed: Option<u32>,
-        /// Buffers the driver took back.
-        taken_back: u32,
-        modulus: u32,
-    }
+/// A queue's counters at one look, which only grow modulo `modulus`;
+/// the difference between two looks is what moved.
+#[record]
+pub struct VirtioProgress {
+    /// Buffers the driver handed the device.
+    pub published: u32,
+    /// Buffers the device returned (split rings).
+    pub completed: Option<u32>,
+    /// Buffers the driver took back.
+    pub taken_back: u32,
+    pub modulus: u32,
+}
 
-    /// A virtqueue's ring and the buffers outstanding in it (`!vring`).
-    VirtioRing {
-        queue: Virtqueue,
-        /// What its buffers hold, for decoding: `blk`, `scsi`, `net`, ...
-        request_kind: Option<&'static str>,
-        /// Buffers the device holds, at most 64.
-        with_device: Vec<VirtioBuffer>,
-        /// Buffers the device returned that the driver has not taken back
-        /// (split rings), at most 64.
-        returned: Vec<VirtioBuffer>,
-        /// Why reading a packed ring stopped early.
-        broken: Option<String>,
-    }
+/// A virtqueue's ring and the buffers outstanding in it (`!vring`).
+#[record]
+pub struct VirtioRing {
+    pub queue: Virtqueue,
+    /// What its buffers hold, for decoding: `blk`, `scsi`, `net`, ...
+    pub request_kind: Option<&'static str>,
+    /// Buffers the device holds, at most 64.
+    pub with_device: Vec<VirtioBuffer>,
+    /// Buffers the device returned that the driver has not taken back
+    /// (split rings), at most 64.
+    pub returned: Vec<VirtioBuffer>,
+    /// Why reading a packed ring stopped early.
+    pub broken: Option<String>,
+}
 
-    /// One buffer: its descriptors and the request it carries.
-    VirtioBuffer {
-        /// The avail entry (split, with the device), the used element
-        /// (returned), or the ring position (packed).
-        position: u16,
-        /// The head descriptor's index (split) or the buffer ID (packed).
-        head: u16,
-        /// The bytes the device wrote, for a returned buffer.
-        written: Option<u32>,
-        descriptors: Vec<VirtioDescriptor>,
-        /// The request and, once the device returned it, its answer, decoded
-        /// from the virtio specification's layouts.
-        request: Option<String>,
-        /// Why walking the chain stopped early.
-        broken: Option<String>,
-    }
+/// One buffer: its descriptors and the request it carries.
+#[record]
+pub struct VirtioBuffer {
+    /// The avail entry (split, with the device), the used element
+    /// (returned), or the ring position (packed).
+    pub position: u16,
+    /// The head descriptor's index (split) or the buffer ID (packed).
+    pub head: u16,
+    /// The bytes the device wrote, for a returned buffer.
+    pub written: Option<u32>,
+    pub descriptors: Vec<VirtioDescriptor>,
+    /// The request and, once the device returned it, its answer, decoded
+    /// from the virtio specification's layouts.
+    pub request: Option<String>,
+    /// Why walking the chain stopped early.
+    pub broken: Option<String>,
+}
 
-    /// One descriptor of a buffer.
-    VirtioDescriptor {
-        /// Its index in the table (split) or its ring position (packed).
-        index: u16,
-        /// The buffer's guest-physical address.
-        address: Hex,
-        length: u32,
-        flags: Hex<u16>,
-        device_writes: bool,
-        /// For an indirect table: how many descriptors it holds and the
-        /// bytes the driver gives the device and the device may write.
-        indirect_descriptors: Option<u64>,
-        out_bytes: Option<u64>,
-        in_bytes: Option<u64>,
-    }
+/// One descriptor of a buffer.
+#[record]
+pub struct VirtioDescriptor {
+    /// Its index in the table (split) or its ring position (packed).
+    pub index: u16,
+    /// The buffer's guest-physical address.
+    #[record(hex)]
+    pub address: u64,
+    pub length: u32,
+    #[record(hex)]
+    pub flags: u16,
+    pub device_writes: bool,
+    /// For an indirect table: how many descriptors it holds and the
+    /// bytes the driver gives the device and the device may write.
+    pub indirect_descriptors: Option<u64>,
+    pub out_bytes: Option<u64>,
+    pub in_bytes: Option<u64>,
 }
 
 fn signal(signal: Signal) -> VirtioSignal {
@@ -230,7 +240,8 @@ pub fn virtqueue(queue: &VirtQueue, virtio_id: Option<u16>, queues: u32) -> Virt
         view.unpublished = driver.map(|driver| driver.avail_idx.wrapping_sub(ring.avail_idx));
         view.unkicked = driver.map(|driver| driver.unkicked);
         view.with_device = Some(u32::from(ring.with_device()));
-        view.returned = driver.map(|driver| u32::from(ring.used_idx.wrapping_sub(driver.last_used)));
+        view.returned =
+            driver.map(|driver| u32::from(ring.used_idx.wrapping_sub(driver.last_used)));
         view.state = queue_verdict(ring, driver);
         view.interrupts = Some(signal(signals.interrupts));
         view.notifications = Some(signal(signals.notifications));
@@ -295,7 +306,14 @@ pub fn virtio_devices(functions: &[VirtioFunction]) -> Vec<VirtioDevice> {
 }
 
 /// One descriptor, with what its indirect table holds.
-fn descriptor(target: &Target, index: u16, addr: u64, len: u32, flags: u16, packed: bool) -> VirtioDescriptor {
+fn descriptor(
+    target: &Target,
+    index: u16,
+    addr: u64,
+    len: u32,
+    flags: u16,
+    packed: bool,
+) -> VirtioDescriptor {
     let table = (flags & VRING_DESC_F_INDIRECT != 0)
         .then(|| target.read_indirect_table(addr, len, packed).ok())
         .flatten();
@@ -313,8 +331,13 @@ fn descriptor(target: &Target, index: u16, addr: u64, len: u32, flags: u16, pack
 
 /// The ring of `queue`, whose device `device` is (type, transitional, queue
 /// count) when known, with its outstanding buffers and their requests.
-pub fn virtio_ring(target: &Target, queue: &VirtQueue, device: Option<(u16, bool, u32)>) -> VirtioRing {
-    let kind = device.and_then(|(id, transitional, queues)| request_kind(id, queue.index, queues, transitional));
+pub fn virtio_ring(
+    target: &Target,
+    queue: &VirtQueue,
+    device: Option<(u16, bool, u32)>,
+) -> VirtioRing {
+    let kind = device
+        .and_then(|(id, transitional, queues)| request_kind(id, queue.index, queues, transitional));
     let split_buffer = |chain: &DescChain, position: u16, written: Option<u32>| VirtioBuffer {
         position,
         head: chain.head,
@@ -327,7 +350,10 @@ pub fn virtio_ring(target: &Target, queue: &VirtQueue, device: Option<(u16, bool
         request: kind.and_then(|kind| {
             target.describe_request(
                 kind,
-                chain.descriptors.iter().map(|(_, desc)| (desc.addr, desc.len, desc.flags)),
+                chain
+                    .descriptors
+                    .iter()
+                    .map(|(_, desc)| (desc.addr, desc.len, desc.flags)),
                 false,
                 written.is_some(),
                 written,
@@ -342,12 +368,17 @@ pub fn virtio_ring(target: &Target, queue: &VirtQueue, device: Option<(u16, bool
         descriptors: chain
             .descriptors
             .iter()
-            .map(|(position, desc)| descriptor(target, *position, desc.addr, desc.len, desc.flags, true))
+            .map(|(position, desc)| {
+                descriptor(target, *position, desc.addr, desc.len, desc.flags, true)
+            })
             .collect(),
         request: kind.and_then(|kind| {
             target.describe_request(
                 kind,
-                chain.descriptors.iter().map(|(_, desc)| (desc.addr, desc.len, desc.flags)),
+                chain
+                    .descriptors
+                    .iter()
+                    .map(|(_, desc)| (desc.addr, desc.len, desc.flags)),
                 true,
                 false,
                 None,
@@ -368,7 +399,9 @@ pub fn virtio_ring(target: &Target, queue: &VirtQueue, device: Option<(u16, bool
                     target
                         .split_ring_returned(ring, driver.last_used, MAX_LISTED_CHAINS)
                         .iter()
-                        .map(|buffer| split_buffer(&buffer.chain, buffer.used_index, Some(buffer.written)))
+                        .map(|buffer| {
+                            split_buffer(&buffer.chain, buffer.used_index, Some(buffer.written))
+                        })
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -382,7 +415,11 @@ pub fn virtio_ring(target: &Target, queue: &VirtQueue, device: Option<(u16, bool
         (None, None) => (Vec::new(), Vec::new(), None),
     };
     VirtioRing {
-        queue: virtqueue(queue, device.map(|(id, _, _)| id), device.map_or(0, |(_, _, queues)| queues)),
+        queue: virtqueue(
+            queue,
+            device.map(|(id, _, _)| id),
+            device.map_or(0, |(_, _, queues)| queues),
+        ),
         request_kind: kind.map(|kind| kind.name()),
         with_device,
         returned,

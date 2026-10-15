@@ -20,7 +20,7 @@ use crate::error::Result as CoreResult;
 use crate::session::{ContinueOutcome, STEP_UNTIL_LIMIT, Session, StepKind, StepMode, StepStack};
 use crate::types::VirtAddr;
 use crate::view;
-use crate::view::shape::Typed;
+use crate::view::record::Typed;
 
 thread_local! {
     static IN_CONDITION: Cell<bool> = const { Cell::new(false) };

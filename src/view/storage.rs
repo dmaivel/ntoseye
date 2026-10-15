@@ -1,330 +1,360 @@
 //! Storage (`!storagekd.*`) as SDK records: StorPort's drivers, adapters,
 //! units, and adapter log, SRBs, and classpnp's class devices.
 
-use super::shape::{Hex, shapes};
+use ntoseye_macros::record;
+
 use crate::target::classpnp::{self, ClassDevice as TargetClassDevice};
 use crate::target::etw::format_filetime_precise;
 use crate::target::srb::{self, srb_flag_names, srb_function_name, srb_status_text};
-use crate::target::storport::{
-    self, StorEnum, adapter_verdict, log_request, unit_verdict,
-};
+use crate::target::storport::{self, StorEnum, adapter_verdict, log_request, unit_verdict};
 use crate::target::virtio_request::scsi_command;
 use crate::types::VirtAddr;
 
-shapes! {
-    /// A value of one of storport's enums, with its name when the PDB has
-    /// one.
-    StorEnumValue {
-        value: Hex,
-        name: Option<String>,
-    }
+/// A value of one of storport's enums, with its name when the PDB has
+/// one.
+#[record]
+pub struct StorEnumValue {
+    #[record(hex)]
+    pub value: u64,
+    pub name: Option<String>,
+}
 
-    /// An adapter's I/O gateway (`_STOR_IO_GATEWAY`).
-    StorGateway {
-        address: VirtAddr,
-        /// Requests the miniport holds, and the most the gateway lets it.
-        outstanding: u32,
-        outstanding_max: u32,
-        /// Requests waiting for the gateway.
-        pending: u32,
-        busy: u32,
-        paused: i32,
-    }
+/// An adapter's I/O gateway (`_STOR_IO_GATEWAY`).
+#[record]
+pub struct StorGateway {
+    pub address: VirtAddr,
+    /// Requests the miniport holds, and the most the gateway lets it.
+    pub outstanding: u32,
+    pub outstanding_max: u32,
+    /// Requests waiting for the gateway.
+    pub pending: u32,
+    pub busy: u32,
+    pub paused: i32,
+}
 
-    /// A request the miniport holds (`_EXTENDED_REQUEST_BLOCK`).
-    StorRequest {
-        xrb: VirtAddr,
-        irp: VirtAddr,
-        srb: VirtAddr,
-        /// The processor whose pending queue holds it.
-        processor: u32,
-    }
+/// A request the miniport holds (`_EXTENDED_REQUEST_BLOCK`).
+#[record]
+pub struct StorRequest {
+    pub xrb: VirtAddr,
+    pub irp: VirtAddr,
+    pub srb: VirtAddr,
+    /// The processor whose pending queue holds it.
+    pub processor: u32,
+}
 
-    /// A unit's device queue (`_EXTENDED_DEVICE_QUEUE`).
-    StorQueue {
-        depth: i32,
-        pause_count: i32,
-        busy_count: i32,
-        frozen: bool,
-        locked: bool,
-        untagged: bool,
-        power_locked: bool,
-        bypass_count: i32,
-        /// Requests waiting because the queue is full or held.
-        waiting: usize,
-        bypass_waiting: usize,
-        waiting_stopped: Vec<String>,
-    }
+/// A unit's device queue (`_EXTENDED_DEVICE_QUEUE`).
+#[record]
+pub struct StorQueue {
+    pub depth: i32,
+    pub pause_count: i32,
+    pub busy_count: i32,
+    pub frozen: bool,
+    pub locked: bool,
+    pub untagged: bool,
+    pub power_locked: bool,
+    pub bypass_count: i32,
+    /// Requests waiting because the queue is full or held.
+    pub waiting: usize,
+    pub bypass_waiting: usize,
+    pub waiting_stopped: Vec<String>,
+}
 
-    /// A logical unit (`_RAID_UNIT_EXTENSION`).
-    StorUnit {
-        extension: VirtAddr,
-        device_object: VirtAddr,
-        adapter: VirtAddr,
-        path: u8,
-        target: u8,
-        lun: u8,
-        vendor: String,
-        product: String,
-        revision: String,
-        state: StorEnumValue,
-        device_power: StorEnumValue,
-        flags: Vec<String>,
-        /// The miniport's per-unit extension; null when it asked for none.
-        lu_extension: VirtAddr,
-        max_queue_depth: u32,
-        queue: StorQueue,
-        /// What holds the unit's requests, as `!storagekd.storunit` says it:
-        /// `idle`, `1 with the miniport`, `frozen`, ...
-        io: String,
-        requests: Vec<StorRequest>,
-        requests_stopped: Vec<String>,
-    }
+/// A logical unit (`_RAID_UNIT_EXTENSION`).
+#[record]
+pub struct StorUnit {
+    pub extension: VirtAddr,
+    pub device_object: VirtAddr,
+    pub adapter: VirtAddr,
+    pub path: u8,
+    pub target: u8,
+    pub lun: u8,
+    pub vendor: String,
+    pub product: String,
+    pub revision: String,
+    pub state: StorEnumValue,
+    pub device_power: StorEnumValue,
+    pub flags: Vec<String>,
+    /// The miniport's per-unit extension; null when it asked for none.
+    pub lu_extension: VirtAddr,
+    pub max_queue_depth: u32,
+    pub queue: StorQueue,
+    /// What holds the unit's requests, as `!storagekd.storunit` says it:
+    /// `idle`, `1 with the miniport`, `frozen`, ...
+    pub io: String,
+    pub requests: Vec<StorRequest>,
+    pub requests_stopped: Vec<String>,
+}
 
-    /// A unit on an adapter's list, or why it is not shown.
-    StorUnitEntry {
-        extension: VirtAddr,
-        unit: Option<StorUnit>,
-        error: Option<String>,
-    }
+/// A unit on an adapter's list, or why it is not shown.
+#[record]
+pub struct StorUnitEntry {
+    pub extension: VirtAddr,
+    pub unit: Option<StorUnit>,
+    pub error: Option<String>,
+}
 
-    /// A StorPort adapter (`_RAID_ADAPTER_EXTENSION`).
-    StorAdapter {
-        extension: VirtAddr,
-        /// The `_RAID_DRIVER_EXTENSION`.
-        driver: VirtAddr,
-        driver_object: VirtAddr,
-        driver_name: String,
-        fdo: VirtAddr,
-        pdo: VirtAddr,
-        lower: VirtAddr,
-        /// The FDO's full name, its `Device` directory included
-        /// (`RaidPort0`).
-        device_name: String,
-        port_number: u32,
-        miniport_name: Option<String>,
-        adapter_id: Option<String>,
-        state: StorEnumValue,
-        flags: Vec<String>,
-        interface: StorEnumValue,
-        /// `bb:dd.f` of a PCI adapter.
-        pci_location: Option<String>,
-        virtual_miniport: bool,
-        /// The miniport's own device extension (`HwDeviceExtension`).
-        hw_device_extension: VirtAddr,
-        hw_device_extension_size: Option<Hex>,
-        lu_extension_size: Option<Hex>,
-        system_power: StorEnumValue,
-        device_power: StorEnumValue,
-        paging_paths: u32,
-        dump_paths: u32,
-        hiber_paths: u32,
-        pause_count: u32,
-        busy_count: u32,
-        /// What holds the adapter's requests: `idle`, `2 with the miniport`,
-        /// `paused`, ...
-        io: String,
-        gateways: Vec<StorGateway>,
-        gateways_error: Option<String>,
-        units: Vec<StorUnitEntry>,
-        units_stopped: Option<String>,
-    }
+/// A StorPort adapter (`_RAID_ADAPTER_EXTENSION`).
+#[record]
+pub struct StorAdapter {
+    pub extension: VirtAddr,
+    /// The `_RAID_DRIVER_EXTENSION`.
+    pub driver: VirtAddr,
+    pub driver_object: VirtAddr,
+    pub driver_name: String,
+    pub fdo: VirtAddr,
+    pub pdo: VirtAddr,
+    pub lower: VirtAddr,
+    /// The FDO's full name, its `Device` directory included
+    /// (`RaidPort0`).
+    pub device_name: String,
+    pub port_number: u32,
+    pub miniport_name: Option<String>,
+    pub adapter_id: Option<String>,
+    pub state: StorEnumValue,
+    pub flags: Vec<String>,
+    pub interface: StorEnumValue,
+    /// `bb:dd.f` of a PCI adapter.
+    pub pci_location: Option<String>,
+    pub virtual_miniport: bool,
+    /// The miniport's own device extension (`HwDeviceExtension`).
+    pub hw_device_extension: VirtAddr,
+    #[record(hex)]
+    pub hw_device_extension_size: Option<u64>,
+    #[record(hex)]
+    pub lu_extension_size: Option<u64>,
+    pub system_power: StorEnumValue,
+    pub device_power: StorEnumValue,
+    pub paging_paths: u32,
+    pub dump_paths: u32,
+    pub hiber_paths: u32,
+    pub pause_count: u32,
+    pub busy_count: u32,
+    /// What holds the adapter's requests: `idle`, `2 with the miniport`,
+    /// `paused`, ...
+    pub io: String,
+    pub gateways: Vec<StorGateway>,
+    pub gateways_error: Option<String>,
+    pub units: Vec<StorUnitEntry>,
+    pub units_stopped: Option<String>,
+}
 
-    /// An adapter on a driver's list, or why it is not shown.
-    StorAdapterEntry {
-        extension: VirtAddr,
-        adapter: Option<StorAdapter>,
-        error: Option<String>,
-    }
+/// An adapter on a driver's list, or why it is not shown.
+#[record]
+pub struct StorAdapterEntry {
+    pub extension: VirtAddr,
+    pub adapter: Option<StorAdapter>,
+    pub error: Option<String>,
+}
 
-    /// A driver that called `StorPortInitialize`.
-    StorDriver {
-        extension: VirtAddr,
-        driver_object: VirtAddr,
-        /// The service name (`storahci`).
-        name: String,
-        adapters: Vec<StorAdapterEntry>,
-        stopped: Option<String>,
-    }
+/// A driver that called `StorPortInitialize`.
+#[record]
+pub struct StorDriver {
+    pub extension: VirtAddr,
+    pub driver_object: VirtAddr,
+    /// The service name (`storahci`).
+    pub name: String,
+    pub adapters: Vec<StorAdapterEntry>,
+    pub stopped: Option<String>,
+}
 
-    /// storport's drivers and their adapters (`!storagekd.storadapter`).
-    StorDrivers {
-        /// `storport!RaidpPortData`.
-        port_data: VirtAddr,
-        drivers: Vec<StorDriver>,
-        stopped: Option<String>,
-    }
+/// storport's drivers and their adapters (`!storagekd.storadapter`).
+#[record]
+pub struct StorDrivers {
+    /// `storport!RaidpPortData`.
+    pub port_data: VirtAddr,
+    pub drivers: Vec<StorDriver>,
+    pub stopped: Option<String>,
+}
 
-    /// An entry of an adapter's log (`_RAID_LOG_ENTRY`).
-    StorLogEntry {
-        /// storport numbers entries from 1 as it writes them.
-        number: u64,
-        /// When storport wrote it, a FILETIME (UTC).
-        time: u64,
-        time_utc: Option<String>,
-        /// `_DBG_LOG_REASON` without its `Log` prefix.
-        event: Option<String>,
-        event_value: Hex,
-        parameters: Vec<Hex>,
-        /// For an entry of the request path: its IRP, SRB, CDB operation
-        /// code, command, and SRB status.
-        irp: Option<VirtAddr>,
-        srb: Option<VirtAddr>,
-        opcode: Option<Hex<u8>>,
-        command: Option<String>,
-        srb_status: Option<String>,
-    }
+/// An entry of an adapter's log (`_RAID_LOG_ENTRY`).
+#[record]
+pub struct StorLogEntry {
+    /// storport numbers entries from 1 as it writes them.
+    pub number: u64,
+    /// When storport wrote it, a FILETIME (UTC).
+    pub time: u64,
+    pub time_utc: Option<String>,
+    /// `_DBG_LOG_REASON` without its `Log` prefix.
+    pub event: Option<String>,
+    #[record(hex)]
+    pub event_value: u64,
+    #[record(hex)]
+    pub parameters: Vec<u64>,
+    /// For an entry of the request path: its IRP, SRB, CDB operation
+    /// code, command, and SRB status.
+    pub irp: Option<VirtAddr>,
+    pub srb: Option<VirtAddr>,
+    #[record(hex)]
+    pub opcode: Option<u8>,
+    pub command: Option<String>,
+    pub srb_status: Option<String>,
+}
 
-    /// An adapter's internal log (`!storagekd.storloglist`).
-    StorLog {
-        adapter: VirtAddr,
-        driver_name: String,
-        /// The ring (`RaidLogList`) and its size.
-        ring: VirtAddr,
-        size: u32,
-        /// The number of the newest entry.
-        newest: u64,
-        /// The entries still in the ring, oldest first.
-        entries: Vec<StorLogEntry>,
-    }
+/// An adapter's internal log (`!storagekd.storloglist`).
+#[record]
+pub struct StorLog {
+    pub adapter: VirtAddr,
+    pub driver_name: String,
+    /// The ring (`RaidLogList`) and its size.
+    pub ring: VirtAddr,
+    pub size: u32,
+    /// The number of the newest entry.
+    pub newest: u64,
+    /// The entries still in the ring, oldest first.
+    pub entries: Vec<StorLogEntry>,
+}
 
-    /// One block of an extended SRB's extended data.
-    SrbExData {
-        address: VirtAddr,
-        /// `_SRBEXDATATYPE` without its prefix (`ScsiCdb16`).
-        kind: String,
-        length: u32,
-    }
+/// One block of an extended SRB's extended data.
+#[record]
+pub struct SrbExData {
+    pub address: VirtAddr,
+    /// `_SRBEXDATATYPE` without its prefix (`ScsiCdb16`).
+    pub kind: String,
+    pub length: u32,
+}
 
-    /// An SRB (`!storagekd.storsrb`).
-    Srb {
-        address: VirtAddr,
-        /// A `STORAGE_REQUEST_BLOCK`, rather than a `SCSI_REQUEST_BLOCK`.
-        extended: bool,
-        function: Hex<u32>,
-        function_name: Option<&'static str>,
-        srb_status: Hex<u8>,
-        /// The status by name, with `QUEUE_FROZEN` and `AUTOSENSE_VALID`.
-        srb_status_text: String,
-        scsi_status: Option<Hex<u8>>,
-        flags: Hex<u32>,
-        flag_names: Vec<String>,
-        /// An extended SRB's port; a legacy one has none.
-        port: Option<u16>,
-        path: Option<u8>,
-        target: Option<u8>,
-        lun: Option<u8>,
-        data_transfer_length: u32,
-        data_buffer: VirtAddr,
-        /// Seconds.
-        timeout: u32,
-        /// `OriginalRequest`: the IRP.
-        original_request: VirtAddr,
-        next_srb: VirtAddr,
-        request_tag: Option<Hex<u32>>,
-        priority: Option<u16>,
-        cdb: Vec<u8>,
-        /// The CDB's command, with its LBA and block count when it has them.
-        command: Option<String>,
-        sense_buffer: VirtAddr,
-        sense_length: u8,
-        /// The sense data, decoded, when `AUTOSENSE_VALID` says it is valid.
-        sense: Option<String>,
-        class_context: Option<VirtAddr>,
-        port_context: Option<VirtAddr>,
-        miniport_context: Option<VirtAddr>,
-        ex_data: Vec<SrbExData>,
-    }
+/// An SRB (`!storagekd.storsrb`).
+#[record]
+pub struct Srb {
+    pub address: VirtAddr,
+    /// A `STORAGE_REQUEST_BLOCK`, rather than a `SCSI_REQUEST_BLOCK`.
+    pub extended: bool,
+    #[record(hex)]
+    pub function: u32,
+    pub function_name: Option<&'static str>,
+    #[record(hex)]
+    pub srb_status: u8,
+    /// The status by name, with `QUEUE_FROZEN` and `AUTOSENSE_VALID`.
+    pub srb_status_text: String,
+    #[record(hex)]
+    pub scsi_status: Option<u8>,
+    #[record(hex)]
+    pub flags: u32,
+    pub flag_names: Vec<String>,
+    /// An extended SRB's port; a legacy one has none.
+    pub port: Option<u16>,
+    pub path: Option<u8>,
+    pub target: Option<u8>,
+    pub lun: Option<u8>,
+    pub data_transfer_length: u32,
+    pub data_buffer: VirtAddr,
+    /// Seconds.
+    pub timeout: u32,
+    /// `OriginalRequest`: the IRP.
+    pub original_request: VirtAddr,
+    pub next_srb: VirtAddr,
+    #[record(hex)]
+    pub request_tag: Option<u32>,
+    pub priority: Option<u16>,
+    pub cdb: Vec<u8>,
+    /// The CDB's command, with its LBA and block count when it has them.
+    pub command: Option<String>,
+    pub sense_buffer: VirtAddr,
+    pub sense_length: u8,
+    /// The sense data, decoded, when `AUTOSENSE_VALID` says it is valid.
+    pub sense: Option<String>,
+    pub class_context: Option<VirtAddr>,
+    pub port_context: Option<VirtAddr>,
+    pub miniport_context: Option<VirtAddr>,
+    pub ex_data: Vec<SrbExData>,
+}
 
-    /// A transfer packet classpnp has in flight.
-    ClassTransferPacket {
-        address: VirtAddr,
-        /// The IRP classpnp sent down, and the client's IRP it serves.
-        irp: VirtAddr,
-        original_irp: VirtAddr,
-        srb: VirtAddr,
-        /// The SRB, decoded.
-        request: Option<Srb>,
-        /// Why `request` does not decode.
-        request_error: Option<String>,
-        retries_left: u8,
-        timed_out: bool,
-    }
+/// A transfer packet classpnp has in flight.
+#[record]
+pub struct ClassTransferPacket {
+    pub address: VirtAddr,
+    /// The IRP classpnp sent down, and the client's IRP it serves.
+    pub irp: VirtAddr,
+    pub original_irp: VirtAddr,
+    pub srb: VirtAddr,
+    /// The SRB, decoded.
+    pub request: Option<Srb>,
+    /// Why `request` does not decode.
+    pub request_error: Option<String>,
+    pub retries_left: u8,
+    pub timed_out: bool,
+}
 
-    /// A storage class device (`!storagekd.storclass`).
-    ClassDevice {
-        /// `_CLASS_PRIVATE_FDO_DATA`, its entry on `classpnp!AllFdosList`.
-        private_data: VirtAddr,
-        /// `None` when no transfer packet names the FDO.
-        fdo: Option<VirtAddr>,
-        extension: Option<VirtAddr>,
-        /// The class driver's service name (`disk`).
-        driver: Option<String>,
-        device_number: Option<u32>,
-        vendor: Option<String>,
-        product: Option<String>,
-        revision: Option<String>,
-        serial: Option<String>,
-        bus_type: Option<String>,
-        removable: bool,
-        boot_device: bool,
-        /// The transfer packets on `AllTransferPacketsList`, and those on a
-        /// free list.
-        packets_total: u64,
-        packets_free: u64,
-        in_flight: Vec<ClassTransferPacket>,
-        packets_stopped: Vec<String>,
-    }
+/// A storage class device (`!storagekd.storclass`).
+#[record]
+pub struct ClassDevice {
+    /// `_CLASS_PRIVATE_FDO_DATA`, its entry on `classpnp!AllFdosList`.
+    pub private_data: VirtAddr,
+    /// `None` when no transfer packet names the FDO.
+    pub fdo: Option<VirtAddr>,
+    pub extension: Option<VirtAddr>,
+    /// The class driver's service name (`disk`).
+    pub driver: Option<String>,
+    pub device_number: Option<u32>,
+    pub vendor: Option<String>,
+    pub product: Option<String>,
+    pub revision: Option<String>,
+    pub serial: Option<String>,
+    pub bus_type: Option<String>,
+    pub removable: bool,
+    pub boot_device: bool,
+    /// The transfer packets on `AllTransferPacketsList`, and those on a
+    /// free list.
+    pub packets_total: u64,
+    pub packets_free: u64,
+    pub in_flight: Vec<ClassTransferPacket>,
+    pub packets_stopped: Vec<String>,
+}
 
-    /// A class device whose private data does not read.
-    ClassUnreadable {
-        private_data: VirtAddr,
-        error: String,
-    }
+/// A class device whose private data does not read.
+#[record]
+pub struct ClassUnreadable {
+    pub private_data: VirtAddr,
+    pub error: String,
+}
 
-    /// The class devices on `classpnp!AllFdosList`.
-    ClassDevices {
-        devices: Vec<ClassDevice>,
-        unreadable: Vec<ClassUnreadable>,
-        stopped: Option<String>,
-    }
+/// The class devices on `classpnp!AllFdosList`.
+#[record]
+pub struct ClassDevices {
+    pub devices: Vec<ClassDevice>,
+    pub unreadable: Vec<ClassUnreadable>,
+    pub stopped: Option<String>,
+}
 
-    /// An error classpnp logged (`_CLASS_ERROR_LOG_DATA`).
-    ClassError {
-        tick: u64,
-        /// Milliseconds from the error to the guest's current tick count.
-        age_ms: Option<u64>,
-        /// `None` where classpnp did not know the port.
-        port: Option<u32>,
-        path: u8,
-        target: u8,
-        lun: u8,
-        paging: bool,
-        retried: bool,
-        unhandled: bool,
-        srb_status: Hex<u8>,
-        srb_status_text: String,
-        scsi_status: Hex<u8>,
-        cdb: Vec<u8>,
-        command: Option<String>,
-        sense: Option<String>,
-    }
+/// An error classpnp logged (`_CLASS_ERROR_LOG_DATA`).
+#[record]
+pub struct ClassError {
+    pub tick: u64,
+    /// Milliseconds from the error to the guest's current tick count.
+    pub age_ms: Option<u64>,
+    /// `None` where classpnp did not know the port.
+    pub port: Option<u32>,
+    pub path: u8,
+    pub target: u8,
+    pub lun: u8,
+    pub paging: bool,
+    pub retried: bool,
+    pub unhandled: bool,
+    #[record(hex)]
+    pub srb_status: u8,
+    pub srb_status_text: String,
+    #[record(hex)]
+    pub scsi_status: u8,
+    pub cdb: Vec<u8>,
+    pub command: Option<String>,
+    pub sense: Option<String>,
+}
 
-    /// One class device in detail.
-    ClassDeviceDetail {
-        device: ClassDevice,
-        lower_device: VirtAddr,
-        lower_pdo: VirtAddr,
-        bytes_per_sector: u32,
-        /// Bytes.
-        length: u64,
-        /// Seconds.
-        timeout: u32,
-        max_retries: u8,
-        error_count: u32,
-        /// The errors still in the 16-entry log, oldest first.
-        errors: Vec<ClassError>,
-    }
+/// One class device in detail.
+#[record]
+pub struct ClassDeviceDetail {
+    pub device: ClassDevice,
+    pub lower_device: VirtAddr,
+    pub lower_pdo: VirtAddr,
+    pub bytes_per_sector: u32,
+    /// Bytes.
+    pub length: u64,
+    /// Seconds.
+    pub timeout: u32,
+    pub max_retries: u8,
+    pub error_count: u32,
+    /// The errors still in the 16-entry log, oldest first.
+    pub errors: Vec<ClassError>,
 }
 
 fn enum_value(value: &StorEnum) -> StorEnumValue {

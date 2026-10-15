@@ -26,8 +26,8 @@ use crate::triage_report::TriageReport;
 use crate::types::VirtAddr;
 use crate::view::hardware;
 use crate::view::mm;
+use crate::view::record::{ToView, Typed};
 use crate::view::sched;
-use crate::view::shape::{Typed, ViewValue};
 use crate::view::{self};
 
 /// System-wide reports and helpers that decode an object at an address
@@ -61,14 +61,11 @@ impl Inspect {
 
     /// Run `build` in the session and return its result as the SDK does. It
     /// reads the kernel, so a user-mode minidump refuses it.
-    fn typed<'py, T: ViewValue>(
+    fn typed<'py, T: ToView<M> + Send, M>(
         &self,
         py: Python<'py>,
-        build: impl FnOnce(&mut Session) -> PyResult<T::Source> + Send,
-    ) -> PyResult<Typed<'py, T>>
-    where
-        T::Source: Send,
-    {
+        build: impl FnOnce(&mut Session) -> PyResult<T> + Send,
+    ) -> PyResult<Typed<'py, T, M>> {
         self.typed_any(py, |session| {
             session.target.require_kernel().map_err(err)?;
             build(session)
@@ -76,14 +73,11 @@ impl Inspect {
     }
 
     /// [`Self::typed`] for a report that applies to every target.
-    fn typed_any<'py, T: ViewValue>(
+    fn typed_any<'py, T: ToView<M> + Send, M>(
         &self,
         py: Python<'py>,
-        build: impl FnOnce(&mut Session) -> PyResult<T::Source> + Send,
-    ) -> PyResult<Typed<'py, T>>
-    where
-        T::Source: Send,
-    {
+        build: impl FnOnce(&mut Session) -> PyResult<T> + Send,
+    ) -> PyResult<Typed<'py, T, M>> {
         let value = self.owner.with_in(py, &Context::default(), build)?;
         Typed::new(py, value)
     }

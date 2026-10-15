@@ -1,23 +1,23 @@
 //! How a guest linked-list walk ended, shared by every decoding that walks
 //! one.
 
-use super::shape::shapes;
+use ntoseye_macros::record;
+
 use crate::target::ListTermination;
 use crate::types::VirtAddr;
 
-shapes! {
-    /// The end condition of a guest linked-list walk.
-    ListEnd {
-        /// `head` (the walk came back to the list head), `null`, `cycle` (a
-        /// loop that does not go through the head), `bound` (the walk reached
-        /// its limit), or `corrupt`.
-        kind: &'static str,
-        /// The address where a cycle closed.
-        address: Option<VirtAddr>,
-        /// The problem with a corrupt link. Some walks also set this for a null
-        /// link.
-        error: Option<String>,
-    }
+/// The end condition of a guest linked-list walk.
+#[record]
+pub struct ListEnd {
+    /// `head` (the walk came back to the list head), `null`, `cycle` (a
+    /// loop that does not go through the head), `bound` (the walk reached
+    /// its limit), or `corrupt`.
+    pub kind: &'static str,
+    /// The address where a cycle closed.
+    pub address: Option<VirtAddr>,
+    /// The problem with a corrupt link. Some walks also set this for a null
+    /// link.
+    pub error: Option<String>,
 }
 
 /// How a guest linked-list walk ended.

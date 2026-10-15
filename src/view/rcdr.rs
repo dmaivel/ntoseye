@@ -1,103 +1,116 @@
 //! The WPP recorder (`!rcdrkd.*`) as SDK records: the drivers it serves,
 //! their logs, and the records of those logs.
 
-use super::shape::{Hex, shapes};
+use ntoseye_macros::record;
+
 use super::wdf::{WdfLogRecord, log_record};
 use crate::target::rcdr as target;
 use crate::target::wdf::IfrEnd;
 use crate::types::VirtAddr;
 
-shapes! {
-    /// A driver the WPP recorder serves (`_WPP_AUTOLOG_CONTEXT`).
-    RcdrDriver {
-        context: VirtAddr,
-        /// `FileBaseName`: the image name without its extension.
-        name: String,
-        image: VirtAddr,
-        image_size: Hex<u32>,
-        /// The `_WPP_AUTOLOG_HEADER` of each of its logs.
-        logs: Vec<VirtAddr>,
-        logs_stopped: Option<String>,
-        /// The log `WppRecorderLogGetDefault` returns.
-        default_log: VirtAddr,
-        /// The last sequence number a record of its logs took.
-        sequence: i32,
-    }
+/// A driver the WPP recorder serves (`_WPP_AUTOLOG_CONTEXT`).
+#[record]
+pub struct RcdrDriver {
+    pub context: VirtAddr,
+    /// `FileBaseName`: the image name without its extension.
+    pub name: String,
+    pub image: VirtAddr,
+    #[record(hex)]
+    pub image_size: u32,
+    /// The `_WPP_AUTOLOG_HEADER` of each of its logs.
+    pub logs: Vec<VirtAddr>,
+    pub logs_stopped: Option<String>,
+    /// The log `WppRecorderLogGetDefault` returns.
+    pub default_log: VirtAddr,
+    /// The last sequence number a record of its logs took.
+    pub sequence: i32,
+}
 
-    /// A recorder context that does not read.
-    RcdrUnreadable {
-        address: VirtAddr,
-        error: String,
-    }
+/// A recorder context that does not read.
+#[record]
+pub struct RcdrUnreadable {
+    pub address: VirtAddr,
+    pub error: String,
+}
 
-    /// The drivers the recorder serves (`!rcdrkd.rcdrloglist`).
-    RcdrDrivers {
-        drivers: Vec<RcdrDriver>,
-        unreadable: Vec<RcdrUnreadable>,
-        /// Why the walk of the bugcheck callback list stopped short.
-        stopped: Option<String>,
-    }
+/// The drivers the recorder serves (`!rcdrkd.rcdrloglist`).
+#[record]
+pub struct RcdrDrivers {
+    pub drivers: Vec<RcdrDriver>,
+    pub unreadable: Vec<RcdrUnreadable>,
+    /// Why the walk of the bugcheck callback list stopped short.
+    pub stopped: Option<String>,
+}
 
-    /// A partition of a log: the ring its records go to.
-    RcdrPartition {
-        /// `normal` or `error`.
-        name: &'static str,
-        base: VirtAddr,
-        size: Hex<u32>,
-        /// Where the next record goes, and the newest record.
-        current: Hex<u16>,
-        previous: Hex<u16>,
-    }
+/// A partition of a log: the ring its records go to.
+#[record]
+pub struct RcdrPartition {
+    /// `normal` or `error`.
+    pub name: &'static str,
+    pub base: VirtAddr,
+    #[record(hex)]
+    pub size: u32,
+    /// Where the next record goes, and the newest record.
+    #[record(hex)]
+    pub current: u16,
+    #[record(hex)]
+    pub previous: u16,
+}
 
-    /// A recorder log (`_WPP_AUTOLOG_HEADER`).
-    RcdrLog {
-        header: VirtAddr,
-        /// `LogIdentifier`, with its append value when the driver set one.
-        identifier: String,
-        id_number: u16,
-        size: Hex<u32>,
-        deleted: bool,
-        /// Records are 'L2', with a timestamp.
-        timestamps: bool,
-        /// Whether it is the driver's default log.
-        default: bool,
-        partitions: Vec<RcdrPartition>,
-    }
+/// A recorder log (`_WPP_AUTOLOG_HEADER`).
+#[record]
+pub struct RcdrLog {
+    pub header: VirtAddr,
+    /// `LogIdentifier`, with its append value when the driver set one.
+    pub identifier: String,
+    pub id_number: u16,
+    #[record(hex)]
+    pub size: u32,
+    pub deleted: bool,
+    /// Records are 'L2', with a timestamp.
+    pub timestamps: bool,
+    /// Whether it is the driver's default log.
+    pub default: bool,
+    pub partitions: Vec<RcdrPartition>,
+}
 
-    /// A driver's logs (`!rcdrkd.rcdrloglist <driver>`).
-    RcdrLogs {
-        driver: RcdrDriver,
-        logs: Vec<RcdrLog>,
-        unreadable: Vec<RcdrUnreadable>,
-    }
+/// A driver's logs (`!rcdrkd.rcdrloglist <driver>`).
+#[record]
+pub struct RcdrLogs {
+    pub driver: RcdrDriver,
+    pub logs: Vec<RcdrLog>,
+    pub unreadable: Vec<RcdrUnreadable>,
+}
 
-    /// A record of a recorder log.
-    RcdrRecord {
-        /// The log's `_WPP_AUTOLOG_HEADER` and identifier.
-        log: VirtAddr,
-        log_identifier: String,
-        /// `normal` or `error`.
-        partition: &'static str,
-        record: WdfLogRecord,
-    }
+/// A record of a recorder log.
+#[record]
+pub struct RcdrRecord {
+    /// The log's `_WPP_AUTOLOG_HEADER` and identifier.
+    pub log: VirtAddr,
+    pub log_identifier: String,
+    /// `normal` or `error`.
+    pub partition: &'static str,
+    pub record: WdfLogRecord,
+}
 
-    /// How the walk of one partition ended.
-    RcdrWalkEnd {
-        log: VirtAddr,
-        partition: &'static str,
-        /// `empty`, `first_record`, `overwritten`, or `corrupt`.
-        end: &'static str,
-        corruption: Option<String>,
-    }
+/// How the walk of one partition ended.
+#[record]
+pub struct RcdrWalkEnd {
+    pub log: VirtAddr,
+    pub partition: &'static str,
+    /// `empty`, `first_record`, `overwritten`, or `corrupt`.
+    pub end: &'static str,
+    pub corruption: Option<String>,
+}
 
-    /// A driver's records from its logs, oldest first
-    /// (`!rcdrkd.rcdrlogdump`).
-    RcdrDump {
-        driver: RcdrDriver,
-        logs: Vec<RcdrLog>,
-        records: Vec<RcdrRecord>,
-        ends: Vec<RcdrWalkEnd>,
-    }
+/// A driver's records from its logs, oldest first
+/// (`!rcdrkd.rcdrlogdump`).
+#[record]
+pub struct RcdrDump {
+    pub driver: RcdrDriver,
+    pub logs: Vec<RcdrLog>,
+    pub records: Vec<RcdrRecord>,
+    pub ends: Vec<RcdrWalkEnd>,
 }
 
 fn driver(driver: &target::RcdrDriver) -> RcdrDriver {

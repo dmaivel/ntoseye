@@ -1,7 +1,8 @@
 //! The registry (`!reg`) as SDK records: the loaded hives, and keys with
 //! their subkeys and values, each value's data typed by its type.
 
-use super::shape::{Bytes, Diag, Hex, shapes, unions};
+use ntoseye_macros::record;
+
 use crate::target::DiagnosticValue;
 use crate::target::etw::format_filetime_precise;
 use crate::target::registry::{self as target, KEY_HIVE_EXIT, KEY_SYM_LINK, RegData};
@@ -10,164 +11,185 @@ use crate::types::VirtAddr;
 /// The cell index bit that selects volatile storage.
 const VOLATILE: u32 = 0x8000_0000;
 
-unions! {
-    /// A value's data by its type: `str` for REG_SZ, REG_EXPAND_SZ, and
-    /// REG_LINK, `list[str]` for REG_MULTI_SZ, `int` for REG_DWORD,
-    /// REG_DWORD_BIG_ENDIAN, and REG_QWORD, and `bytes` for every other
-    /// type and for a number whose data is not its size.
-    RegistryData {
-        Text(String),
-        Strings(Vec<String>),
-        Number(u64),
-        Raw(Bytes),
-    }
+/// A value's data by its type: `str` for REG_SZ, REG_EXPAND_SZ, and
+/// REG_LINK, `list[str]` for REG_MULTI_SZ, `int` for REG_DWORD,
+/// REG_DWORD_BIG_ENDIAN, and REG_QWORD, and `bytes` for every other
+/// type and for a number whose data is not its size.
+#[record]
+pub enum RegistryData {
+    Text(String),
+    Strings(Vec<String>),
+    Number(u64),
+    Raw(#[record(bytes)] Vec<u8>),
 }
 
-shapes! {
-    /// A loaded hive (`_CMHIVE`).
-    RegistryHive {
-        address: VirtAddr,
-        /// The master hive, whose root is `\\REGISTRY`.
-        master: bool,
-        /// Where it is mounted, such as `\\REGISTRY\\MACHINE\\SYSTEM`.
-        mount: Option<String>,
-        /// The file it was loaded from.
-        file: Option<String>,
-        /// `_HHIVE.BaseBlock`, and the end of the file name it records.
-        base_block: VirtAddr,
-        base_block_name: Option<String>,
-        /// The cell of its root key.
-        root_cell: Diag<Hex<u32>>,
-        /// `_HHIVE.Version`, the hive format's minor version.
-        version: u32,
-        /// `_HHIVE.HiveFlags`.
-        flags: Hex<u32>,
-        /// The hive is one block of memory, without a cell map.
-        flat: bool,
-        /// The bytes of its stable and volatile storage, and their cell
-        /// maps (`_HMAP_DIRECTORY`).
-        stable_length: Hex<u32>,
-        stable_map: VirtAddr,
-        volatile_length: Hex<u32>,
-        volatile_map: VirtAddr,
-    }
+/// A loaded hive (`_CMHIVE`).
+#[record]
+pub struct RegistryHive {
+    pub address: VirtAddr,
+    /// The master hive, whose root is `\\REGISTRY`.
+    pub master: bool,
+    /// Where it is mounted, such as `\\REGISTRY\\MACHINE\\SYSTEM`.
+    pub mount: Option<String>,
+    /// The file it was loaded from.
+    pub file: Option<String>,
+    /// `_HHIVE.BaseBlock`, and the end of the file name it records.
+    pub base_block: VirtAddr,
+    pub base_block_name: Option<String>,
+    /// The cell of its root key.
+    #[record(hex)]
+    pub root_cell: DiagnosticValue<u32>,
+    /// `_HHIVE.Version`, the hive format's minor version.
+    pub version: u32,
+    /// `_HHIVE.HiveFlags`.
+    #[record(hex)]
+    pub flags: u32,
+    /// The hive is one block of memory, without a cell map.
+    pub flat: bool,
+    /// The bytes of its stable and volatile storage, and their cell
+    /// maps (`_HMAP_DIRECTORY`).
+    #[record(hex)]
+    pub stable_length: u32,
+    pub stable_map: VirtAddr,
+    #[record(hex)]
+    pub volatile_length: u32,
+    pub volatile_map: VirtAddr,
+}
 
-    /// A hive that does not read.
-    RegistryUnreadable {
-        address: VirtAddr,
-        error: String,
-    }
+/// A hive that does not read.
+#[record]
+pub struct RegistryUnreadable {
+    pub address: VirtAddr,
+    pub error: String,
+}
 
-    /// The loaded hives (`!reg hivelist`).
-    RegistryHives {
-        hives: Vec<RegistryHive>,
-        unreadable: Vec<RegistryUnreadable>,
-        /// Why the walk of `nt!CmpHiveListHead` stopped short.
-        stopped: Option<String>,
-    }
+/// The loaded hives (`!reg hivelist`).
+#[record]
+pub struct RegistryHives {
+    pub hives: Vec<RegistryHive>,
+    pub unreadable: Vec<RegistryUnreadable>,
+    /// Why the walk of `nt!CmpHiveListHead` stopped short.
+    pub stopped: Option<String>,
+}
 
-    /// A symbolic link a path went through: the link's path and the path
-    /// its `SymbolicLinkValue` holds.
-    RegistryLink {
-        path: String,
-        target: String,
-    }
+/// A symbolic link a path went through: the link's path and the path
+/// its `SymbolicLinkValue` holds.
+#[record]
+pub struct RegistryLink {
+    pub path: String,
+    pub target: String,
+}
 
-    /// A subkey as its parent lists it.
-    RegistrySubkey {
-        name: String,
-        cell: Hex<u32>,
-        /// Its key node (`_CM_KEY_NODE`).
-        node: VirtAddr,
-        /// `_CM_KEY_NODE.Flags`.
-        flags: Hex<u16>,
-        volatile: bool,
-        /// The key is a symbolic link.
-        symbolic_link: bool,
-        /// A hive is mounted at the key.
-        mount_point: bool,
-        /// A FILETIME, and as UTC.
-        last_write: u64,
-        last_write_utc: Option<String>,
-        subkey_count: u32,
-        value_count: u32,
-    }
+/// A subkey as its parent lists it.
+#[record]
+pub struct RegistrySubkey {
+    pub name: String,
+    #[record(hex)]
+    pub cell: u32,
+    /// Its key node (`_CM_KEY_NODE`).
+    pub node: VirtAddr,
+    /// `_CM_KEY_NODE.Flags`.
+    #[record(hex)]
+    pub flags: u16,
+    pub volatile: bool,
+    /// The key is a symbolic link.
+    pub symbolic_link: bool,
+    /// A hive is mounted at the key.
+    pub mount_point: bool,
+    /// A FILETIME, and as UTC.
+    pub last_write: u64,
+    pub last_write_utc: Option<String>,
+    pub subkey_count: u32,
+    pub value_count: u32,
+}
 
-    /// A value (`_CM_KEY_VALUE`).
-    RegistryValue {
-        /// Empty for the default value.
-        name: String,
-        /// `REG_*`.
-        r#type: Hex<u32>,
-        /// The type's name; `None` for a type Windows does not define.
-        type_name: Option<&'static str>,
-        cell: Hex<u32>,
-        node: VirtAddr,
-        /// The data's length in bytes.
-        length: u32,
-        /// Where the data is: `inline` in the value record, in a `cell`,
-        /// or in `big` data segments.
-        storage: &'static str,
-        /// The data decoded by the value's type.
-        data: Diag<RegistryData>,
-        /// The data's bytes.
-        raw: Diag<Bytes>,
-    }
+/// A value (`_CM_KEY_VALUE`).
+#[record]
+pub struct RegistryValue {
+    /// Empty for the default value.
+    pub name: String,
+    /// `REG_*`.
+    #[record(hex)]
+    pub r#type: u32,
+    /// The type's name; `None` for a type Windows does not define.
+    pub type_name: Option<&'static str>,
+    #[record(hex)]
+    pub cell: u32,
+    pub node: VirtAddr,
+    /// The data's length in bytes.
+    pub length: u32,
+    /// Where the data is: `inline` in the value record, in a `cell`,
+    /// or in `big` data segments.
+    pub storage: &'static str,
+    /// The data decoded by the value's type.
+    pub data: DiagnosticValue<RegistryData>,
+    /// The data's bytes.
+    #[record(bytes)]
+    pub raw: DiagnosticValue<Vec<u8>>,
+}
 
-    /// A subkey or value cell that does not read.
-    RegistryCellError {
-        cell: Hex<u32>,
-        error: String,
-    }
+/// A subkey or value cell that does not read.
+#[record]
+pub struct RegistryCellError {
+    #[record(hex)]
+    pub cell: u32,
+    pub error: String,
+}
 
-    /// A key with its subkeys and values (`!reg querykey`).
-    RegistryKey {
-        /// Its full path, with the names as the hives store them.
-        path: String,
-        hive: VirtAddr,
-        /// Its cell; `None` for a key read by the address of its node.
-        cell: Option<Hex<u32>>,
-        node: VirtAddr,
-        name: String,
-        flags: Hex<u16>,
-        /// The `KEY_*` names of `flags`.
-        flag_names: Vec<&'static str>,
-        /// A FILETIME, and as UTC.
-        last_write: u64,
-        last_write_utc: Option<String>,
-        /// The symbolic links the path went through.
-        links: Vec<RegistryLink>,
-        /// The subkeys and values the key node counts.
-        subkey_count: u32,
-        value_count: u32,
-        subkeys: Vec<RegistrySubkey>,
-        key_values: Vec<RegistryValue> => "values",
-        unreadable_subkeys: Vec<RegistryCellError>,
-        unreadable_values: Vec<RegistryCellError>,
-        /// Subkey indexes and value lists that do not read, and counts that
-        /// do not match.
-        problems: Vec<String>,
-    }
+/// A key with its subkeys and values (`!reg querykey`).
+#[record]
+pub struct RegistryKey {
+    /// Its full path, with the names as the hives store them.
+    pub path: String,
+    pub hive: VirtAddr,
+    /// Its cell; `None` for a key read by the address of its node.
+    #[record(hex)]
+    pub cell: Option<u32>,
+    pub node: VirtAddr,
+    pub name: String,
+    #[record(hex)]
+    pub flags: u16,
+    /// The `KEY_*` names of `flags`.
+    pub flag_names: Vec<&'static str>,
+    /// A FILETIME, and as UTC.
+    pub last_write: u64,
+    pub last_write_utc: Option<String>,
+    /// The symbolic links the path went through.
+    pub links: Vec<RegistryLink>,
+    /// The subkeys and values the key node counts.
+    pub subkey_count: u32,
+    pub value_count: u32,
+    pub subkeys: Vec<RegistrySubkey>,
+    #[record(rename = "values")]
+    pub key_values: Vec<RegistryValue>,
+    pub unreadable_subkeys: Vec<RegistryCellError>,
+    pub unreadable_values: Vec<RegistryCellError>,
+    /// Subkey indexes and value lists that do not read, and counts that
+    /// do not match.
+    pub problems: Vec<String>,
+}
 
-    /// Where a cell of a hive is (`!reg cellindex`).
-    RegistryCell {
-        hive: VirtAddr,
-        cell: Hex<u32>,
-        volatile: bool,
-        /// The cell map directory and table indexes and the offset in the
-        /// block, from the cell index; `None` in a flat hive.
-        directory: Option<u32>,
-        table: Option<u32>,
-        offset: Option<Hex<u32>>,
-        /// The block's `_HMAP_ENTRY`, and where it maps the block: its
-        /// place in the bin that holds it.
-        map_entry: Option<VirtAddr>,
-        block: Option<VirtAddr>,
-        /// The cell: its size field, which its data follows.
-        address: VirtAddr,
-        /// The size field: negative for a cell in use.
-        size: Diag<i32>,
-    }
+/// Where a cell of a hive is (`!reg cellindex`).
+#[record]
+pub struct RegistryCell {
+    pub hive: VirtAddr,
+    #[record(hex)]
+    pub cell: u32,
+    pub volatile: bool,
+    /// The cell map directory and table indexes and the offset in the
+    /// block, from the cell index; `None` in a flat hive.
+    pub directory: Option<u32>,
+    pub table: Option<u32>,
+    #[record(hex)]
+    pub offset: Option<u32>,
+    /// The block's `_HMAP_ENTRY`, and where it maps the block: its
+    /// place in the bin that holds it.
+    pub map_entry: Option<VirtAddr>,
+    pub block: Option<VirtAddr>,
+    /// The cell: its size field, which its data follows.
+    pub address: VirtAddr,
+    /// The size field: negative for a cell in use.
+    pub size: DiagnosticValue<i32>,
 }
 
 fn data(data: RegData) -> RegistryData {
