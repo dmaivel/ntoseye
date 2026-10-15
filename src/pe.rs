@@ -3,10 +3,9 @@
 //! mapping an on-disk image file to its in-memory layout.
 
 use crate::{
-    backend::MemoryOps,
     bytes::{get_u16, get_u32, read_u16, read_u32},
     error::{Error, Result},
-    memory::{self, PAGE_SIZE},
+    memory::{self, MemoryOps, PAGE_SIZE},
     types::*,
 };
 use pelite::{
@@ -878,9 +877,8 @@ mod tests {
         IMAGE_BLOCK, ModuleExportInfo, PE_HEADER_PROBE, PeImage, read_code_layout,
         read_image_c_string, read_pe_exports, read_pe_header_page, read_pe_image,
     };
-    use crate::backend::MemoryOps;
     use crate::error::{Error, Result};
-    use crate::memory::{AddressSpace, DTB_IDENTITY};
+    use crate::memory::{AddressSpace, DTB_IDENTITY, MemoryOps};
     use crate::types::CodeMachine;
     use crate::types::{PhysAddr, VirtAddr};
     use std::sync::Arc;

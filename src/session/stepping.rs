@@ -11,7 +11,6 @@ use iced_x86::{
     Mnemonic, OpAccess, OpKind, Register,
 };
 
-use crate::backend::MemoryOps;
 use crate::breakpoints::{
     BreakpointManager, StepFrame, ThreadScope, lift_target_site, plant_target_site,
 };
@@ -22,6 +21,7 @@ use crate::dbg_backend::{
 };
 use crate::disasm::{ControlFlow, classify};
 use crate::error::{Error, Result};
+use crate::memory::MemoryOps;
 use crate::notice::Notice;
 use crate::session::breakpoints::event_word;
 use crate::session::context::windows_thread_on_backend_thread;

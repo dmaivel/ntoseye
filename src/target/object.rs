@@ -3,13 +3,12 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::backend::MemoryOps;
 use crate::bugchecks::looks_like_kernel_pointer;
 use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix};
 use crate::guest::{Guest, ProcessInfo};
 use crate::layout::{StructRef, TypeInfo, Types};
-use crate::memory::PAGE_SIZE;
+use crate::memory::{MemoryOps, PAGE_SIZE};
 use crate::types::VirtAddr;
 
 use super::{

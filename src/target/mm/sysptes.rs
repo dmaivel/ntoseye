@@ -4,10 +4,9 @@
 //! `_MI_SYSTEM_PTE_TYPE`.
 
 use super::{SystemPteRun, SystemPteTypeDetail, SystemPtesDetail};
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::layout::ParsedType;
-use crate::memory::PAGE_SIZE;
+use crate::memory::{MemoryOps, PAGE_SIZE};
 use crate::target::Target;
 use crate::types::VirtAddr;
 

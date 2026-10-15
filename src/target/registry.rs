@@ -27,10 +27,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::{DiagnosticValue, Target, bounded_list_walk};
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::layout::{TypeInfo, Types, utf16le_lossy, utf16le_nul_terminated};
-use crate::memory::AddressSpace;
+use crate::memory::{AddressSpace, MemoryOps};
 use crate::phys::PhysMem;
 use crate::types::VirtAddr;
 

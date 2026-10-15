@@ -7,14 +7,13 @@ use super::{
     ProcessMemoryUsage, SystemMemorySummary, VmCounter, VmDetail, VmPageFileDetail, VmPoolDetail,
     VmPteDetail, find_mi_state_fields,
 };
-use crate::backend::MemoryOps;
 use crate::debugger_data::{
     DebuggerDataBlock, MetadataSource, MetadataValue, read_counter_from_getter,
 };
 use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
 use crate::layout::{ParsedType, TypeInfo};
-use crate::memory::PAGE_SIZE;
+use crate::memory::{MemoryOps, PAGE_SIZE};
 use crate::target::pool::read_kernel_global_u64;
 use crate::target::{DiagnosticMetric, DiagnosticValue, Target};
 use crate::types::VirtAddr;

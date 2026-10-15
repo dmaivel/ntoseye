@@ -3,10 +3,10 @@
 //! module-list scope (`.process`) and then the kernel's.
 
 use super::{DiagnosticValue, Target};
-use crate::backend::MemoryOps;
 use crate::bugchecks::looks_like_kernel_pointer;
 use crate::error::{Error, Result};
 use crate::guest::ModuleInfo;
+use crate::memory::MemoryOps;
 use crate::pe::headers::{
     DebugRecord, ImageHeaders, ImportDescriptor, debug_directory, decode_headers, imports,
 };

@@ -7,10 +7,9 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::layout::{ParsedType, TypeInfo, le_uint};
-use crate::memory::AddressSpace;
+use crate::memory::{AddressSpace, MemoryOps};
 use crate::phys::PhysMem;
 use crate::target::{DiagnosticValue, ListCursor, Target};
 use crate::types::{Dtb, VirtAddr};

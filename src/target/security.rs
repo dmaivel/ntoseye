@@ -2,10 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
 use crate::layout::{StructRef, TypeInfo};
+use crate::memory::MemoryOps;
 use crate::symbols::glob_matches;
 use crate::target::{DiagnosticValue, Target, fast_ref_address};
 use crate::types::VirtAddr;
@@ -834,8 +834,8 @@ impl Target {
 #[cfg(test)]
 mod tests {
     use super::{DiagnosticValue, decode_acl, read_sid_bounded};
-    use crate::backend::MemoryOps;
     use crate::error::{Error, Result};
+    use crate::memory::MemoryOps;
     use crate::session::session_over_memory;
     use crate::types::VirtAddr;
 

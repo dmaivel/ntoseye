@@ -3,9 +3,9 @@
 
 use super::{Guest, ProcessInfo};
 use crate::{
-    backend::MemoryOps,
     bytes::read_u64,
     error::{Error, Result},
+    memory::MemoryOps,
     target::{ListCursor, links_back_to},
     types::*,
 };

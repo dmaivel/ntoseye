@@ -4,9 +4,9 @@
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 
-use crate::backend::MemoryOps;
 use crate::dbg_backend::PciConfigAddress;
 use crate::error::{Error, Result};
+use crate::memory::MemoryOps;
 use crate::session::Session;
 use crate::target::Target;
 use crate::types::VirtAddr;

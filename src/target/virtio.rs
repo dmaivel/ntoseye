@@ -6,8 +6,8 @@
 //! its PDB, and from the rings themselves in guest memory, whose layout
 //! the virtio specification fixes.
 
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
+use crate::memory::MemoryOps;
 use crate::target::Target;
 use crate::target::pci::{PciTreeBus, PciTreeDevice};
 use crate::types::VirtAddr;

@@ -6,7 +6,7 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use crate::backend::MemoryOps;
+use crate::memory::MemoryOps;
 use crate::target::Target;
 use crate::target::virtio::{VRING_DESC_F_INDIRECT, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
 

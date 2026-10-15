@@ -13,8 +13,7 @@ use pelite::pe64::image::{
 use super::{
     AMD64_REGISTER_NAMES, RegisterContext, StackTracer, Unwound, image_u32, runtime_functions,
 };
-use crate::backend::MemoryOps;
-use crate::memory::AddressSpace;
+use crate::memory::{AddressSpace, MemoryOps};
 use crate::pe::{CodeLayout, PeImage};
 use crate::phys::PhysMem;
 use crate::types::{CodeMachine, VirtAddr};

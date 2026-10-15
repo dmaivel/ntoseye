@@ -6,11 +6,10 @@ use super::{
     ThreadInfo, lookup_register, process_matches,
 };
 use crate::{
-    backend::MemoryOps,
     bugchecks::looks_like_kernel_pointer,
     error::{Error, Result},
     guest::{ModuleInfo, ModuleSymbolLoadReport, ProcessInfo},
-    memory::DTB_IDENTITY,
+    memory::{DTB_IDENTITY, MemoryOps},
     pe::read_code_layout,
     types::{Arch, CodeMachine, Dtb, VirtAddr},
 };

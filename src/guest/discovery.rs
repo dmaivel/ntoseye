@@ -4,9 +4,8 @@
 
 use super::Image;
 use crate::{
-    backend::MemoryOps,
     error::Result,
-    memory::{AddressSpace, PAGE_SIZE},
+    memory::{AddressSpace, MemoryOps, PAGE_SIZE},
     phys::PhysMem,
     symbols::SymbolStore,
     types::*,
@@ -504,8 +503,8 @@ pub(super) fn find_ntoskrnl(
 #[cfg(test)]
 mod tests {
     use super::find_ntoskrnl_va;
-    use crate::backend::MemoryOps;
     use crate::error::{Error, Result};
+    use crate::memory::MemoryOps;
     use crate::types::{PhysAddr, VirtAddr};
     use std::collections::HashMap;
 

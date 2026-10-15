@@ -7,9 +7,8 @@ use super::{
     BigPoolDetail, PoolBlockDetail, PoolFindDetail, PoolFindMatch, PoolFindRange, PoolPageDetail,
     PoolProblem, PoolRegionDetail, PoolType, PoolUsageDetail, PoolUsageSort, PoolValidationDetail,
 };
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
-use crate::memory::PAGE_SIZE;
+use crate::memory::{MemoryOps, PAGE_SIZE};
 use crate::symbols::glob_matches;
 use crate::target::Target;
 use crate::target::pool::{

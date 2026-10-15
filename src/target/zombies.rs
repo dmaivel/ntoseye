@@ -9,9 +9,9 @@
 
 use std::ops::ControlFlow;
 
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::layout::StructRef;
+use crate::memory::MemoryOps;
 use crate::target::Target;
 use crate::target::pool::{
     NONPAGED_POOL, pool_header_tags, pool_layout, pool_range, scan_present_pool_pages,

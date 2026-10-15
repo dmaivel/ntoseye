@@ -1,9 +1,8 @@
-use crate::backend::MemoryOps;
 use crate::{
     dmp::DmpInfo,
     error::{Error, Result},
     layout::ParsedType,
-    memory::{DTB_IDENTITY, SectionLayout, SectionViews},
+    memory::{DTB_IDENTITY, MemoryOps, SectionLayout, SectionViews},
     pe::headers::CodeView,
     phys::PhysMem,
     symbols::SymbolStore,

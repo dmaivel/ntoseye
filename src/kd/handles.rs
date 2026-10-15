@@ -4,14 +4,13 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use crate::backend::MemoryOps;
 use crate::dbg_backend::{
     BackendCapability, ContinueDisposition, DebugBackend, DebugOutputPage, HwBreakpointAccess,
     PciConfigAddress, ProcessorRead, RegisterMap, StopEvent, TebPath, TrapState,
 };
 use crate::debugger_data::DebuggerDataCandidate;
 use crate::error::Result;
-use crate::memory::TranslationCache;
+use crate::memory::{MemoryOps, TranslationCache};
 use crate::phys::PhysMem;
 use crate::types::{Dtb, KernelLocation, PhysAddr, VirtAddr};
 

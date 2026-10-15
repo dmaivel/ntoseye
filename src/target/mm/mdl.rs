@@ -1,9 +1,8 @@
 //! `_MDL` decoding (`!mdl`): the header and the PFN array after it.
 
 use super::MdlDetail;
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
-use crate::memory::PAGE_SIZE;
+use crate::memory::{MemoryOps, PAGE_SIZE};
 use crate::target::Target;
 use crate::types::VirtAddr;
 

@@ -5,9 +5,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::{Target, bounded_list_walk};
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::layout::{StructRef, TypeInfo, Types};
+use crate::memory::MemoryOps;
 use crate::types::VirtAddr;
 
 const MAX_FRAMES: usize = 16;

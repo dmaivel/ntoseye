@@ -3,8 +3,8 @@
 //! (`nt!WmipSMBiosTablePhysicalAddress`, `nt!WmipSMBiosTableLength`) and
 //! reads from physical memory, decoded per the DMTF SMBIOS specification.
 
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
+use crate::memory::MemoryOps;
 use crate::target::Target;
 
 /// The longest table read; SMBIOS 2.x tables are at most 64 KiB.

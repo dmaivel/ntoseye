@@ -11,8 +11,8 @@ use gdbstub::target::ext::base::single_register_access::{
 use gdbstub::target::{TargetError, TargetResult};
 use libc::EFAULT;
 
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
+use crate::memory::MemoryOps;
 use crate::session::Session;
 use crate::types::VirtAddr;
 

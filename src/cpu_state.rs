@@ -1,10 +1,10 @@
 //! Per-processor kernel state: `_KPCR` / `_KPRCB` location and processor
 //! count, shared by the CPU and scheduler commands.
 
-use crate::backend::MemoryOps;
 use crate::dbg_backend::TebPath;
 use crate::error::{Error, Result};
 use crate::guest::Image;
+use crate::memory::MemoryOps;
 use crate::target::Target;
 use crate::types::VirtAddr;
 

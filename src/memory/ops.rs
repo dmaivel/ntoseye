@@ -6,6 +6,9 @@ use crate::error::Result;
 use crate::memory::{SectionViews, TranslationCache};
 use crate::types::{Dtb, VirtAddr};
 
+/// Reads and writes of guest memory at addresses of type `A`: physical
+/// memory ([`crate::phys::PhysMem`]), or a virtual address space walked
+/// through its page tables ([`crate::memory::AddressSpace`]).
 pub trait MemoryOps<A> {
     fn read_bytes(&self, addr: A, buf: &mut [u8]) -> Result<()>;
 

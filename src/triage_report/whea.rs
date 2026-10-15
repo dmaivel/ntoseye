@@ -2,9 +2,9 @@
 //! carries and the bounded decoding of that `WHEA_ERROR_RECORD`.
 
 use super::{WheaFinding, WheaRecord, WheaRecordState, WheaSection, WheaSectionKind};
-use crate::backend::MemoryOps;
 use crate::bugchecks::BugcheckAnalysis;
 use crate::bytes::{read_u16, read_u32};
+use crate::memory::MemoryOps;
 use crate::types::VirtAddr;
 
 pub(super) fn whea_without_memory(bugcheck: &BugcheckAnalysis) -> Option<WheaFinding> {

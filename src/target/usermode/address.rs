@@ -7,8 +7,8 @@
 //! `ProcessHeaps` array names when that array was captured. A region none
 //! of these explain is `<unknown>`, not guessed at.
 
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
+use crate::memory::MemoryOps;
 use crate::target::Target;
 use crate::target::mm::{
     MEM_COMMIT, MEM_FREE, MEM_IMAGE, memory_state_name, memory_type_name, page_protection_name,

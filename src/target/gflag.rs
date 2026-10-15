@@ -1,9 +1,9 @@
 //! Global flags (`!gflag`): `nt!NtGlobalFlag` and the current process's
 //! `_PEB.NtGlobalFlag`, decoded by the GFlags table's names.
 
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
+use crate::memory::MemoryOps;
 use crate::target::{DiagnosticValue, Target};
 use crate::types::VirtAddr;
 

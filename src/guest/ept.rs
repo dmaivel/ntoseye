@@ -2,8 +2,8 @@
 //! tables (EPT), the second-level address translation whose root the VTL's
 //! eVMCS names. The entry format is Intel's (SDM Vol. 3C, 29.3.2).
 
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
+use crate::memory::MemoryOps;
 use crate::types::PhysAddr;
 
 /// Physical-address bits of an EPT pointer or entry.

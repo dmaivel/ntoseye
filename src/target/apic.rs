@@ -6,10 +6,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::backend::MemoryOps;
 use crate::dbg_backend::ProcessorRead;
 use crate::error::{Error, Result};
 use crate::layout::{TypeInfo, Types};
+use crate::memory::MemoryOps;
 use crate::session::Session;
 use crate::target::{Target, bounded_list_walk};
 use crate::types::{Arch, VirtAddr};

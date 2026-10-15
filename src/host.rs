@@ -24,8 +24,8 @@ mod platform {
     use std::io::{IoSlice, IoSliceMut};
 
     use super::MemoryRegion;
-    use crate::backend::MemoryOps;
     use crate::error::{Error, Result};
+    use crate::memory::MemoryOps;
     use crate::types::PhysAddr;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -408,8 +408,8 @@ mod platform {
 #[cfg(target_os = "macos")]
 mod platform {
     use super::MemoryRegion;
-    use crate::backend::MemoryOps;
     use crate::error::{Error, Result};
+    use crate::memory::MemoryOps;
     use crate::types::PhysAddr;
 
     pub struct VmHandle {

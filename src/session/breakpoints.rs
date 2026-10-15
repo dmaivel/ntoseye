@@ -4,7 +4,6 @@
 use std::mem::take;
 use std::sync::Arc;
 
-use crate::backend::MemoryOps;
 use crate::breakpoints::{
     Breakpoint, BreakpointConfig, BreakpointScope, HypercallFilter, ThreadScope, lift_target_site,
     plant_target_site,
@@ -17,6 +16,7 @@ use crate::exception_policy::ExceptionPolicyMode;
 use crate::expr::Expr;
 use crate::guest::vm_exits::ExitFilter;
 use crate::guest::{ModuleSymbolLoadReport, hypercalls};
+use crate::memory::MemoryOps;
 use crate::notice::Notice;
 use crate::partition_backend::PartitionBackend;
 use crate::session::{ModuleTrap, Session, TrapSite};

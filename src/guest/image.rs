@@ -2,10 +2,9 @@
 //! that read it and resolve its symbols and types, and [`SymbolRef`].
 
 use crate::{
-    backend::MemoryOps,
     error::{Error, Result},
     layout::Types,
-    memory::AddressSpace,
+    memory::{AddressSpace, MemoryOps},
     pe::{HeaderPage, PeImage, read_pe_header_page, read_pe_image, size_of_image},
     phys::PhysMem,
     symbols::SymbolStore,

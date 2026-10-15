@@ -6,11 +6,10 @@ use super::{CODE_BITNESS_AMD64, CODE_BITNESS_X86, MemorySearchMatch, StringDescr
 use std::sync::atomic::Ordering;
 
 use crate::{
-    backend::MemoryOps,
     error::{Error, Result},
     guest::EvmcsState,
     layout::{StructRef, TypeInfo, Types},
-    memory::{AddressSpace, PAGE_SIZE, pattern_offsets, read_page_chunks},
+    memory::{AddressSpace, MemoryOps, PAGE_SIZE, pattern_offsets, read_page_chunks},
     phys::PhysMem,
     types::{Dtb, PhysAddr, VirtAddr},
 };

@@ -3,11 +3,10 @@ use std::io::{Read, Write};
 
 use owo_colors::OwoColorize;
 
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result, best_effort};
 use crate::expr::Expr;
 use crate::layout::utf16le_lossy;
-use crate::memory::{PAGE_SIZE, for_each_page_chunk, read_page_chunks};
+use crate::memory::{MemoryOps, PAGE_SIZE, for_each_page_chunk, read_page_chunks};
 use crate::symbols::glob_matches;
 use crate::target::{CODE_BITNESS_X86, MAX_SEARCH_MATCHES, SearchStop, StringDescriptor};
 use crate::types::{CodeMachine, VirtAddr};

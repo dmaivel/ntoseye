@@ -18,7 +18,6 @@
 
 use std::sync::Arc;
 
-use crate::backend::MemoryOps;
 use crate::bugchecks::looks_like_kernel_pointer;
 use crate::bytes::{
     get_u16, get_u32, get_u64, read_u16, read_u32, read_u64, write_u16, write_u32, write_u64,
@@ -27,6 +26,7 @@ use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix};
 use crate::kuser_shared::KuserSharedData;
 use crate::layout::TypeInfo;
+use crate::memory::MemoryOps;
 use crate::target::{ListCursor, Target};
 use crate::triage_report::time::filetime_to_iso;
 use crate::types::VirtAddr;

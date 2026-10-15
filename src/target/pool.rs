@@ -2,11 +2,10 @@ use std::collections::{BTreeMap, HashSet};
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
-use crate::backend::MemoryOps;
 use crate::cpu_state::MAX_PROCESSORS;
 use crate::error::{Error, Result};
 use crate::layout::{FieldInfo, ParsedType, TypeInfo, le_uint};
-use crate::memory::PAGE_SIZE;
+use crate::memory::{MemoryOps, PAGE_SIZE};
 use crate::symbols::format_symbol_with_offset;
 use crate::target::Target;
 use crate::target::mm::find_mi_state_fields;

@@ -1,12 +1,12 @@
 use std::fs;
 
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::guest::{
     ModuleInfo, ProcessInfo, ProcessModulesDetail, UNKNOWN_MODULE_NAME, merge_wow64_modules,
     walk_loader_list, walk_loader_list32,
 };
 use crate::layout::{StructRef, Types};
+use crate::memory::MemoryOps;
 use crate::ntstatus::{ntstatus_name, win32_error_name};
 use crate::pe::{image_base, read_pe_header_page, size_of_image};
 use crate::target::{DiagnosticValue, ListTermination, Target, TargetKind};

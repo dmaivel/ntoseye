@@ -3,10 +3,9 @@
 use std::collections::HashSet;
 
 use super::{PfnDetail, PfnSelector, nested_type_name};
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::layout::{TypeInfo, le_uint};
-use crate::memory::PAGE_SIZE;
+use crate::memory::{MemoryOps, PAGE_SIZE};
 use crate::target::pool::{pool_field_from_buf, read_kernel_global_u64};
 use crate::target::{DiagnosticValue, Target};
 use crate::types::VirtAddr;

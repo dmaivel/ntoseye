@@ -9,11 +9,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::{Target, bounded_list_walk};
-use crate::backend::MemoryOps;
 use crate::cpu_state::processor_count;
 use crate::error::{Error, Result};
 use crate::kuser_shared::KuserSharedData;
 use crate::layout::{StructRef, TypeInfo, Types, le_uint};
+use crate::memory::MemoryOps;
 use crate::target::srb::Srb;
 use crate::target::virtio_request::sense_text;
 use crate::types::VirtAddr;

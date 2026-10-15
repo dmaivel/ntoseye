@@ -6,7 +6,6 @@ use std::time::Duration;
 use memmap2::Mmap;
 use zerocopy::FromBytes;
 
-use crate::backend::MemoryOps;
 use crate::bytes::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64};
 use crate::cpu_context::{amd64, arm64};
 use crate::cpu_state;
@@ -17,7 +16,7 @@ use crate::dbg_backend::{
 use crate::debugger_data::{DebuggerDataCandidate, KdDebuggerData64, MetadataSource};
 use crate::error::{Error, Result};
 use crate::layout::ParsedType;
-use crate::memory::PAGE_SIZE;
+use crate::memory::{MemoryOps, PAGE_SIZE};
 use crate::notice::Notice;
 use crate::target::Target;
 use crate::types::{Arch, PhysAddr, VirtAddr};

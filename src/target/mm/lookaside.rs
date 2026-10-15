@@ -4,9 +4,9 @@
 use std::collections::HashSet;
 
 use super::{LookasideDetail, LookasideListsDetail};
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::layout::TypeInfo;
+use crate::memory::MemoryOps;
 use crate::target::pool::{kernel_symbol_address, read_pool_field};
 use crate::target::{DiagnosticValue, Target};
 use crate::types::VirtAddr;

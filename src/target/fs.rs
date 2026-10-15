@@ -7,9 +7,9 @@ use std::collections::{BTreeMap, HashSet};
 use std::ops::ControlFlow;
 
 use super::{DiagnosticValue, Target, fast_ref_address};
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::layout::utf16le_lossy;
+use crate::memory::MemoryOps;
 use crate::types::VirtAddr;
 
 /// Subsections one `!ca` walks.

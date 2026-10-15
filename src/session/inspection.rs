@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use crate::backend::MemoryOps;
 use crate::bugchecks::{
     BugcheckAnalysis, analyze_bugcheck, bugcheck_from_dump_info, current_bugcheck,
 };
@@ -17,7 +16,7 @@ use crate::disasm::{
 };
 use crate::error::{Error, Result};
 use crate::guest::hypervisor::{HvPartition, HvVirtualProcessor, processor_guest_vp};
-use crate::memory::{PAGE_SIZE, read_page_chunks};
+use crate::memory::{MemoryOps, PAGE_SIZE, read_page_chunks};
 use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::{
     ContinueOutcome, ExceptionRecord, InstructionBoundary, PageInReport, Session, TerminatedRead,

@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::dmp::structs::{ExceptionRecord64, Header64};
 
-use crate::backend::MemoryOps;
 use crate::bugchecks::current_bugcheck;
 use crate::bytes::{write_u32, write_u64};
 use crate::cpu_context::{amd64, arm64};
@@ -20,7 +19,7 @@ use crate::dbg_backend::RegisterMap;
 use crate::dmp::{IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64};
 use crate::error::{Error, Result};
 use crate::layout::{FieldInfo, ParsedType};
-use crate::memory::PAGE_SIZE;
+use crate::memory::{MemoryOps, PAGE_SIZE};
 use crate::session::Session;
 use crate::target::Target;
 use crate::types::{Arch, PhysAddr, VirtAddr};

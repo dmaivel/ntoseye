@@ -10,9 +10,9 @@ use super::spec::CodeSite;
 use super::{Breakpoint, BreakpointConfig, BreakpointManager, PartitionFilter, StepFrame};
 #[cfg(test)]
 use super::{HardwareBreakpoint, install::BreakpointPatch};
-use crate::backend::MemoryOps;
 use crate::dbg_backend::{DebugBackend, HwBreakpointAccess};
 use crate::error::{Error, Result};
+use crate::memory::MemoryOps;
 use crate::target::Target;
 use crate::types::{Dtb, VirtAddr};
 

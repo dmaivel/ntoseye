@@ -3,11 +3,11 @@
 
 use super::{Guest, ModuleInfo, ProcessInfo, ProcessModulesDetail};
 use crate::{
-    backend::MemoryOps,
     bytes::{read_u16, read_u32},
     error::{Error, Result},
     layout::{StructRef, Types, utf16le_lossy},
     memory,
+    memory::MemoryOps,
     pe::read_pe_version_info,
     target::{ListCursor, ListTermination, links_back_to},
     types::*,

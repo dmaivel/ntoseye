@@ -2,13 +2,13 @@
 
 use std::collections::HashSet;
 
-use crate::backend::MemoryOps;
 use crate::cpu_state::processor_count;
 use crate::dmp::tagged::known_tag;
 use crate::error::{Error, Result};
 use crate::guest::{Guest, ModuleInfo};
 use crate::kuser_shared::KuserSharedData;
 use crate::layout::{StructRef, Types};
+use crate::memory::MemoryOps;
 use crate::ntstatus::{ntstatus_name, win32_error_name};
 use crate::session::Session;
 use crate::symbols::ModuleSymbolStatus;

@@ -1,13 +1,12 @@
 use crate::repl::*;
 
-use crate::backend::MemoryOps;
 use crate::error::Result;
 use crate::target::{MAX_SEARCH_MATCHES, SearchStop};
 use crate::types::{PhysAddr, VirtAddr};
 use crate::ui;
 
 use super::memory::{MAX_DISPLAY_BYTES, parse_write_values};
-use crate::memory::{PAGE_SIZE, read_page_chunks};
+use crate::memory::{MemoryOps, PAGE_SIZE, read_page_chunks};
 use owo_colors::OwoColorize;
 
 repl_command! {

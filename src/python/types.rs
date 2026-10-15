@@ -16,12 +16,12 @@ use super::handle::Owner;
 use super::record::PlainDict;
 use super::symbols::load_scope_symbols;
 use super::{err, raise, view_dict};
-use crate::backend::MemoryOps;
 use crate::error::Result as CoreResult;
 use crate::layout::{
     EnumDef, FieldInfo, FieldValue, ParsedType, TypeInfo, bitfield_mask, le_uint, named_type,
     unqualified_type_name,
 };
+use crate::memory::MemoryOps;
 use crate::symbols::SymbolStore;
 use crate::target::{CODE_BITNESS_AMD64, CODE_BITNESS_X86};
 use crate::types::{Dtb, VirtAddr};

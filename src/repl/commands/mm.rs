@@ -2,10 +2,9 @@ use tabled::builder::Builder;
 use tabled::settings::object::Rows;
 use tabled::settings::{Alignment, Modify, Panel};
 
-use crate::backend::MemoryOps;
 use crate::error::Result;
 use crate::expr::Expr;
-use crate::memory::{DTB_IDENTITY, PAGE_SIZE};
+use crate::memory::{DTB_IDENTITY, MemoryOps, PAGE_SIZE};
 use crate::repl::*;
 use crate::target::DiagnosticValue;
 use crate::target::mm::{

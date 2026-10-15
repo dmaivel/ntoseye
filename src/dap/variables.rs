@@ -5,8 +5,8 @@ use std::result;
 
 use serde_json::{Value, json};
 
-use crate::backend::MemoryOps;
 use crate::layout::{FieldInfo, ParsedType, find_field};
+use crate::memory::MemoryOps;
 use crate::symbols::{LocalVariableLocation, ProcedureLocal};
 use crate::types::{Dtb, VirtAddr};
 use crate::typeview::{Expand, FieldView, TypeView};

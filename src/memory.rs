@@ -1,4 +1,3 @@
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::types::*;
 use std::collections::HashMap;
@@ -6,8 +5,10 @@ use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+mod ops;
 mod sections;
 
+pub use ops::MemoryOps;
 pub use sections::{SectionLayout, SectionViews};
 
 pub const PAGE_SIZE: usize = 0x1000; // 4KiB
@@ -750,7 +751,6 @@ impl<'a, B: MemoryOps<PhysAddr>> MemoryOps<VirtAddr> for AddressSpace<'a, B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::MemoryOps;
     use std::sync::Arc;
 
     struct FakePhysMem {

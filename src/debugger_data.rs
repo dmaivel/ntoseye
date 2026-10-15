@@ -4,9 +4,9 @@ use std::fmt;
 use std::mem::{offset_of, size_of};
 use zerocopy::{FromBytes, Immutable, KnownLayout};
 
-use crate::backend::MemoryOps;
 use crate::bytes::{get_u64, read_u32};
 use crate::error::{Error, Result};
+use crate::memory::MemoryOps;
 use crate::types::{Arch, VirtAddr};
 
 const KDBG_OWNER_TAG: u32 = 0x4742_444b;

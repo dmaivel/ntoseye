@@ -8,10 +8,11 @@ use super::{
     ModuleSymbolStatus, PdbIdentity, SymbolStore,
 };
 use crate::{
-    backend::MemoryOps,
     error::{Error, Result},
     guest::{Image, ModuleInfo},
-    memory, output,
+    memory,
+    memory::MemoryOps,
+    output,
     pe::{
         headers::{self, DebugDirectoryEntry, read_debug_directory},
         read_pe_header_page, size_of_image,

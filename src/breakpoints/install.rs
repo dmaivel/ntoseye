@@ -6,13 +6,12 @@ use pelite::{PeView, image::IMAGE_SCN_MEM_EXECUTE};
 
 use super::journal::site_window;
 use super::{Breakpoint, BreakpointManager, BreakpointScope};
-use crate::backend::MemoryOps;
 use crate::bugchecks::looks_like_kernel_pointer;
 use crate::dbg_backend::{DebugBackend, DebugCapability};
 use crate::error::{Error, Result};
 use crate::guest::ModuleInfo;
 use crate::kd::api::DBGKD_WRITE_PHYSICAL_MEMORY;
-use crate::memory::{AddressSpace, PAGE_SIZE};
+use crate::memory::{AddressSpace, MemoryOps, PAGE_SIZE};
 use crate::pe::read_pe_header_page;
 use crate::phys::PhysMem;
 use crate::target::Target;

@@ -5,10 +5,10 @@
 use std::collections::HashSet;
 
 use super::{AddressDescription, AddressModule, MemoryRegionInfo, VadProtection, VadType};
-use crate::backend::MemoryOps;
 use crate::error::Result;
 use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::layout::{ParsedType, TypeInfo, bitfield_value};
+use crate::memory::MemoryOps;
 use crate::pe::section_name_at;
 use crate::target::Target;
 use crate::types::{Dtb, VirtAddr};

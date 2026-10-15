@@ -7,10 +7,9 @@ use std::sync::Arc;
 
 use super::{SymbolSearchMatch, Target, lookup_register};
 use crate::{
-    backend::MemoryOps,
     error::{Error, Result},
     guest::{Guest, ModuleInfo, ModuleSymbolLoadReport, PdbRecovery, SessionSpace},
-    memory::AddressSpace,
+    memory::{AddressSpace, MemoryOps},
     pe::{ModuleExportInfo, PeImage, read_pe_exports, read_pe_image, read_pe_version_info},
     symbols::{
         CodeFrame, InlineFrame, LocalVariableLocation, ProcedureLocal, SourceLineExtent,

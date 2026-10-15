@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::result;
 
 use super::Target;
-use crate::{backend::MemoryOps, error::Result, types::VirtAddr};
+use crate::{error::Result, memory::MemoryOps, types::VirtAddr};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListTermination {

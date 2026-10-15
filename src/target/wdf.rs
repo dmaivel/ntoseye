@@ -6,9 +6,9 @@
 use std::sync::Arc;
 
 use super::{ListCursor, ListTermination, Target, bounded_list_walk};
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::layout::{StructRef, TypeInfo, Types, le_uint};
+use crate::memory::MemoryOps;
 use crate::symbols::format_symbol_with_offset;
 use crate::types::VirtAddr;
 use crate::wpp::{TmfMessage, format_message};

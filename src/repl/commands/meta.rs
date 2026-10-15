@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::IsTerminal;
 
-use crate::backend::MemoryOps;
 use crate::error::Result;
 use crate::expr::{Expr, NumberRadix};
 use crate::layout::utf16le_nul_terminated;
+use crate::memory::MemoryOps;
 use crate::output;
 #[cfg(feature = "python")]
 use crate::python::embed;

@@ -11,9 +11,9 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use super::{Target, bounded_list_walk};
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::layout::{ParsedType, StructRef, TypeInfo, Types, le_uint, utf16le_nul_terminated};
+use crate::memory::MemoryOps;
 use crate::types::VirtAddr;
 
 const MAX_DRIVERS: usize = 256;

@@ -13,9 +13,8 @@ use super::{
     trustlet_layout::{MAX_FUNCTION_BYTES, TrustletLayout},
 };
 use crate::{
-    backend::MemoryOps,
     error::{Error, Result},
-    memory::{AddressSpace, PAGE_SIZE},
+    memory::{AddressSpace, MemoryOps, PAGE_SIZE},
     phys::PhysMem,
     symbols::SymbolStore,
     target::bounded_list_walk,

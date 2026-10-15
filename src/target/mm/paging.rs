@@ -4,9 +4,8 @@
 use std::collections::HashSet;
 
 use super::{PteLevel, PteWalk, PtovDetail, PtovMapping, VtopDetail, VtopLevel};
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
-use crate::memory::{AddressSpace, DTB_IDENTITY, PAGE_SIZE, Residency};
+use crate::memory::{AddressSpace, DTB_IDENTITY, MemoryOps, PAGE_SIZE, Residency};
 use crate::target::Target;
 use crate::types::{Arch, Dtb, PFN_MASK, PageTableEntry, PageTableLevel, VirtAddr};
 

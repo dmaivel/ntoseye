@@ -5,13 +5,12 @@ use std::collections::{HashMap, HashSet};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
-use crate::backend::MemoryOps;
 use crate::bytes;
 use crate::dbg_backend::DebugLog;
 use crate::debugger_data::{DebuggerDataCandidate, MetadataSource};
 use crate::error::{Error, Result};
 use crate::kd::framing::KdFraming;
-use crate::memory::{AddressSpace, TranslationCache};
+use crate::memory::{AddressSpace, MemoryOps, TranslationCache};
 use crate::types::{Arch, Dtb, PhysAddr, VirtAddr};
 
 use super::breakpoints::{

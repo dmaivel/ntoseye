@@ -3,12 +3,11 @@
 
 use super::paging::PteSelfMap;
 use super::{MemoryRegionInfo, VadType, VprotDetail};
-use crate::backend::MemoryOps;
 use crate::bugchecks::looks_like_kernel_pointer;
 use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
 use crate::layout::{FieldInfo, ParsedType, TypeInfo};
-use crate::memory::{AddressSpace, PAGE_SIZE};
+use crate::memory::{AddressSpace, MemoryOps, PAGE_SIZE};
 use crate::phys::PhysMem;
 use crate::target::Target;
 use crate::types::{Arch, PageTableEntry, PageTableLevel, VirtAddr};

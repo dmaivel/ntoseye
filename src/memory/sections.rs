@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use crate::backend::MemoryOps;
+use super::MemoryOps;
 use crate::types::{Dtb, VirtAddr};
 
 /// Processes walked from `PsActiveProcessHead` before giving up on a cycle.

@@ -6,9 +6,9 @@
 //! `_KPRIQUEUE`: 32 priority lists of `_WORK_QUEUE_ITEM`s, the threads
 //! serving it linked through `_KTHREAD.QueueListEntry`.
 
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::layout::Types;
+use crate::memory::MemoryOps;
 use crate::target::sched::walk_list_nodes;
 use crate::target::{DiagnosticValue, ListTermination, Target, ThreadInfo};
 use crate::types::VirtAddr;

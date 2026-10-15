@@ -9,7 +9,6 @@ use pelite::PeView;
 
 use super::{SelectedFrame, Target};
 use crate::{
-    backend::MemoryOps,
     cpu_state::kpcr_for_processor,
     dbg_backend::processor_index_from_backend_thread_id,
     disasm::{self, DisasmRow},
@@ -25,7 +24,7 @@ use crate::{
         hypervisor::{self, HvVirtualProcessor},
         vp_registers,
     },
-    memory::{AddressSpace, PAGE_SIZE},
+    memory::{AddressSpace, MemoryOps, PAGE_SIZE},
     pe::{PeImage, image_file_name, read_pe_header_page, size_of_image},
     phys::PhysMem,
     symbols::{ImageFetch, SymbolStore},

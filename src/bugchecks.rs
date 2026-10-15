@@ -2,9 +2,9 @@
 // Source: https://learn.microsoft.com/windows-hardware/drivers/debugger/bug-check-code-reference2
 // Audited against all 379 linked code pages on 2026-07-16.
 
-use crate::backend::MemoryOps;
 use crate::dbg_backend::BugcheckInfo;
 use crate::error::Result;
+use crate::memory::MemoryOps;
 use crate::target::Target;
 use crate::trapframe::{KtrapFrame, ktrap_frame_at_machine_frame, read_ktrap_frame};
 use crate::types::VirtAddr;

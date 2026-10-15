@@ -3,8 +3,7 @@
 
 use super::{BuiltinVar, Target, ThreadInfo};
 use crate::{
-    backend::MemoryOps,
-    memory::PAGE_SIZE,
+    memory::{MemoryOps, PAGE_SIZE},
     types::{Arch, VirtAddr},
     unwind::return_address_for_register_values,
 };

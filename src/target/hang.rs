@@ -4,10 +4,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::backend::MemoryOps;
 use crate::cpu_state::kprcb_for_processor;
 use crate::error::{Error, Result};
 use crate::layout::{ParsedType, TypeInfo, le_uint};
+use crate::memory::MemoryOps;
 use crate::target::sched::{layout_for, processor_indices};
 use crate::target::{DiagnosticValue, Target};
 use crate::types::VirtAddr;

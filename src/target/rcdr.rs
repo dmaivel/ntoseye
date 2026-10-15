@@ -14,9 +14,9 @@
 use std::sync::Arc;
 
 use super::{Target, bounded_list_walk};
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::layout::{TypeInfo, Types, le_uint};
+use crate::memory::MemoryOps;
 use crate::target::wdf::{IfrEnd, IfrRecordLayout, WdfLogEntry, walk_ifr};
 use crate::types::VirtAddr;
 

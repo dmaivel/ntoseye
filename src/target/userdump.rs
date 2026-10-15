@@ -8,10 +8,10 @@ use std::collections::HashMap;
 
 use super::Target;
 use crate::{
-    backend::MemoryOps,
     dbg_backend::RegisterMap,
     error::{Error, Result},
     guest::ModuleInfo,
+    memory::MemoryOps,
     ntstatus::ntstatus_name,
     types::{Arch, VirtAddr},
     unwind::{format_symbol, resolve_thread_trace_context},

@@ -6,7 +6,6 @@ use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::thread::{JoinHandle, spawn};
 
-use crate::backend::MemoryOps;
 use crate::guest::{Guest, Image};
 use crate::kd::framing::{
     INITIAL_PACKET_ID, PACKET_TYPE_KD_ACKNOWLEDGE, PACKET_TYPE_KD_STATE_MANIPULATE, control_packet,
@@ -15,7 +14,7 @@ use crate::kd::framing::{
 use crate::kd::memory::KD_VIRTUAL_LINE;
 use crate::kd::registers::{KSPECIAL_REGISTERS_CR3_OFFSET, KSPECIAL_REGISTERS_MIN_SIZE};
 use crate::layout::{FieldInfo, ParsedType, TypeInfo};
-use crate::memory::{AddressSpace, PAGE_SIZE};
+use crate::memory::{AddressSpace, MemoryOps, PAGE_SIZE};
 use crate::phys::PhysMem;
 use crate::symbols::SymbolStore;
 

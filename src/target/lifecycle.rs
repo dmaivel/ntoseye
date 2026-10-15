@@ -7,14 +7,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::{ExpressionScope, ReloadReport, StartupMessage, Target, UserProcess};
 use crate::{
-    backend::MemoryOps,
     debugger_data::{
         DebuggerDataBlock, DebuggerDataCandidate, MetadataSource, locate_debugger_data_block,
     },
     dmp::DmpInfo,
     error::{Error, Result},
     guest::{Guest, ModuleInfo, PdbRecovery, SessionSpace},
-    memory::DTB_IDENTITY,
+    memory::{DTB_IDENTITY, MemoryOps},
     notice::Notice,
     phys::PhysMem,
     symbols::SymbolStore,

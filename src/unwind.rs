@@ -6,13 +6,12 @@ use std::sync::{Arc, OnceLock};
 use pelite::pe64::{Pe, PeView, image::IMAGE_DIRECTORY_ENTRY_EXCEPTION};
 
 use crate::{
-    backend::MemoryOps,
     breakpoints::BreakpointManager,
     bugchecks::looks_like_kernel_pointer,
     dbg_backend::RegisterMap,
     error::{Error, Result},
     guest::{Image, ModuleInfo, ProcessInfo, SecureKernel, hypercalls::HypervisorSymbols},
-    memory::{AddressSpace, DTB_IDENTITY},
+    memory::{AddressSpace, DTB_IDENTITY, MemoryOps},
     pe::{CodeLayout, PeImage},
     phys::PhysMem,
     symbols::{

@@ -6,9 +6,9 @@
 
 use std::sync::Arc;
 
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::layout::{StructRef, TypeInfo, Types};
+use crate::memory::MemoryOps;
 use crate::target::Target;
 use crate::target::virtio_request::sense_text;
 use crate::types::VirtAddr;
