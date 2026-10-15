@@ -1377,6 +1377,44 @@ class Breakpoint:
         """
 
 @final
+class BreakpointHit(BaseRecord):
+    """
+    A breakpoint hit that stopped the target.
+    """
+    @property
+    def access(self, /) -> str |None:
+        """
+        A debug-register breakpoint's access and length.
+        """
+    @property
+    def action(self, /) -> str |None: ...
+    @property
+    def address(self, /) -> int:
+        """
+        The planted or watched address, not necessarily where it stopped.
+        """
+    @property
+    def condition_error(self, /) -> str |None:
+        """
+        Why its condition failed to evaluate; the hit is surfaced instead.
+        """
+    @property
+    def exit_reason(self, /) -> str |None:
+        """
+        A VM-exit breakpoint's exit reason.
+        """
+    @property
+    def id(self, /) -> int: ...
+    @property
+    def kind(self, /) -> str: ...
+    @property
+    def length(self, /) -> int |None: ...
+    @property
+    def symbol(self, /) -> str |None: ...
+    @property
+    def temporary(self, /) -> bool: ...
+
+@final
 class BreakpointIterator:
     """
     Iterator over `dbg.breakpoints`.
@@ -1669,6 +1707,19 @@ class BugcheckFault(BaseRecord):
         """
         The symbol at `ip`.
         """
+
+@final
+class BugcheckInfo(BaseRecord):
+    """
+    A bugcheck's code and its four parameters, and the driver the transport
+    names for it.
+    """
+    @property
+    def code(self, /) -> int: ...
+    @property
+    def driver(self, /) -> str |None: ...
+    @property
+    def parameters(self, /) -> list[int]: ...
 
 @final
 class BugcheckTrapFrame(BaseRecord):
@@ -2454,9 +2505,9 @@ class Debugger:
     
     You can use it from any Python thread, and the session thread runs the calls
     one at a time. A call that waits (`run()`, `wait()`) releases the GIL.
-    Ctrl+C (`KeyboardInterrupt`) during a call stops a wait, step, or trace
-    early and raises the exception, and during a `command()` that resumes the
-    target it breaks in, as in the REPL. Between calls the session continues to
+    Ctrl+C (`KeyboardInterrupt`) during a call that runs or waits on the
+    target breaks in, as in the REPL, and raises the exception; the target is
+    left halted where it was. Between calls the session continues to
     service the guest, resuming breakpoint hits in the wrong process and hits
     with a false condition so the guest does not stay frozen. A debugger that
     ntoseye gives to a REPL custom command is valid only on the REPL thread, and
@@ -2611,7 +2662,7 @@ class Debugger:
         """
     def reboot(self, /) -> None:
         """
-        Reboot the target (`.reboot`). The next stop is a `Stop.Reboot`.
+        Reboot the target (`.reboot`). The next stop is of kind `"reload"`.
         """
     def reload(self, /) -> None:
         """
@@ -2633,8 +2684,8 @@ class Debugger:
         or a symbolic `module!name[+off]`. With `step="over"`/`"into"`,
         single-step to it (`pa`/`ta`). Other stops on the way are returned as
         they are. With `timeout`, if execution does not reach `target` in time,
-        the target is interrupted where it is, and the stop is a
-        `Stop.Interrupt`.
+        the target is interrupted where it is, and the stop's
+        kind is `"interrupt"`.
         """
     @property
     def secure_kernel(self, /) -> SecureKernel:
@@ -2673,8 +2724,8 @@ class Debugger:
         Single-step one instruction. With `until` ("call", "ret", "branch"),
         step into instructions until the next instruction of that kind
         (`tc`/`tt`/`th`). With `timeout` (seconds), an `until` walk that does
-        not end in time is interrupted where it is, and the stop is a
-        `Stop.Interrupt`: a `Stop.Step` always ends a walk where it was going.
+        not end in time is interrupted where it is, and the stop's
+        kind is `"interrupt"`: a `"step"` stop always ends a walk where it was going.
         Under VBS on the gdb backend, the other vCPUs can run while the step's
         vCPU waits on them; a watchpoint hit one of them makes meanwhile ends
         the step, and is returned instead.
@@ -2683,7 +2734,7 @@ class Debugger:
         """
         Run until the stepping thread returns from the current function (`gu`).
         With `timeout` (seconds), the thread is interrupted where it is if it
-        does not return in time, and the stop is a `Stop.Interrupt`.
+        does not return in time, and the stop's kind is `"interrupt"`.
         """
     def step_over(self, /, until: Literal["call", "ret", "branch"] |None = None, timeout: float |None = None) -> Stop:
         """
@@ -2691,7 +2742,7 @@ class Debugger:
         until the next call, ret, or branch (`pc`/`pt`/`ph`). Stepping over a
         call runs the target until the stepping thread returns from it. With
         `timeout` (seconds), a run or walk that does not end in time is
-        interrupted where it is, and the stop is a `Stop.Interrupt`.
+        interrupted where it is, and the stop's kind is `"interrupt"`.
         """
     @property
     def stop(self, /) -> Stop |None:
@@ -4303,6 +4354,28 @@ class ExceptionRecord(BaseRecord):
         """
 
 @final
+class ExceptionStop(BaseRecord):
+    """
+    A Windows exception that stopped the target.
+    """
+    @property
+    def address(self, /) -> int |None:
+        """
+        The exception record's address, when the transport gives one.
+        """
+    @property
+    def code(self, /) -> int:
+        """
+        The NTSTATUS code.
+        """
+    @property
+    def first_chance(self, /) -> bool |None:
+        """
+        Whether this is the first chance; `None` when the transport does not
+        say.
+        """
+
+@final
 class Exceptions:
     """
     The stop policy for each exception (`dbg.exceptions`, `sx*`).
@@ -4335,8 +4408,8 @@ class Exceptions:
         module filter: `"ld"` or `"ld:<module>"` for loads, `"ud"` or
         `"ud:<module>"` for unloads. The module name is not case-sensitive, the
         extension is optional, and `*`/`?` globs work. A `"break"` load filter
-        stops as `Stop.ModuleLoad` before the module entry point runs, and a
-        `"break"` unload filter stops as `Stop.ModuleUnload` after the driver's
+        stops (kind `"module_load"`) before the module entry point runs, and a
+        `"break"` unload filter stops (kind `"module_unload"`) after the driver's
         unload routine, while the module is still listed. A `"notify"` filter
         adds a `ModLoad:` or `Unload module` line to the queue in
         `dbg.notices()`. `disposition` does not apply to `ld` or `ud`.
@@ -9173,6 +9246,37 @@ class ModuleImageInfo(BaseRecord):
     def time_date_stamp(self, /) -> int: ...
 
 @final
+class ModuleInfo(BaseRecord):
+    """
+    A loaded module (kernel or process image), as its loader list records it.
+    """
+    @property
+    def base_address(self, /) -> int: ...
+    @property
+    def checksum(self, /) -> int |None: ...
+    @property
+    def entry_point(self, /) -> int |None: ...
+    @property
+    def file_version(self, /) -> str |None: ...
+    @property
+    def is_32bit(self, /) -> bool:
+        """
+        From a WOW64 process's 32-bit loader list: x86 code, 4-byte pointers.
+        """
+    @property
+    def name(self, /) -> str: ...
+    @property
+    def path(self, /) -> str |None: ...
+    @property
+    def product_version(self, /) -> str |None: ...
+    @property
+    def short_name(self, /) -> str: ...
+    @property
+    def size(self, /) -> int: ...
+    @property
+    def time_date_stamp(self, /) -> int |None: ...
+
+@final
 class ModuleIterator:
     """
     Iterator over `dbg.modules` / `proc.modules`.
@@ -12976,6 +13080,22 @@ class RegistryValue(BaseRecord):
         """
 
 @final
+class ReloadStop(BaseRecord):
+    """
+    A reboot the debugger rebuilt its state for.
+    """
+    @property
+    def coherent(self, /) -> bool:
+        """
+        Whether the kernel's module list exists yet.
+        """
+    @property
+    def kernel_base(self, /) -> int |None:
+        """
+        The new kernel's base.
+        """
+
+@final
 class ResourceList(BaseRecord):
     """
     The executive-resource list of the kernel (`!locks`).
@@ -14013,181 +14133,75 @@ class StackFrame(BaseRecord):
         The symbol at `ip`. Empty if no symbol resolves.
         """
 
-class Stop:
+@final
+class Stop(BaseRecord):
     """
-    The reason why the target stopped. Each stop is one of the nested kinds,
-    which you can test with `isinstance(stop, Stop.Breakpoint)` or `match`. A
-    stop is bound to the target generation in which it occurred.
+    Why the target stopped, with the context it stopped in, snapshotted at
+    the stop. `kind` says which of the optional parts it has.
     """
-    def __repr__(self, /) -> str: ...
     @property
-    def breakpoints(self, /) -> list[Breakpoint]:
-        """
-        The breakpoint or watchpoint handles for this stop. The list is empty
-        for other kinds of stop, so `bp in stop.breakpoints` works on all stops.
-        """
+    def breakpoint(self, /) -> BreakpointHit |None: ...
     @property
-    def cpu(self, /) -> Cpu:
+    def bugcheck(self, /) -> BugcheckInfo |None:
         """
-        The processor that stopped. A user-mode minidump has no processors,
-        so this raises `NtoseyeError` there; `Debugger.user_dump.threads`
-        holds its threads.
+        The bugcheck code and parameters, when the transport decoded them.
         """
     @property
-    def process(self, /) -> Process |None:
+    def cpu(self, /) -> str:
         """
-        The process whose page tables were active at this stop, if known.
+        The backend thread that stopped: a vCPU (`p1.2`), or a user dump's
+        thread.
         """
-    def record(self, /) -> ExceptionRecord:
+    @property
+    def exception(self, /) -> ExceptionStop |None: ...
+    @property
+    def inspection_process(self, /) -> ProcessInfo |None:
         """
-        Decode the current exception record (`.exr -1`).
+        The `.process` inspection scope at the stop, which can differ from
+        `process`.
         """
+    @property
+    def kind(self, /) -> str: ...
+    @property
+    def module(self, /) -> ModuleInfo |None:
+        """
+        The module a `sxe ld`/`sxe ud` filter stopped for.
+        """
+    @property
+    def partition(self, /) -> int |None:
+        """
+        The hypervisor partition whose view (`.partition`) shows the stop.
+        """
+    @property
+    def process(self, /) -> ProcessInfo |None:
+        """
+        The process whose page tables the stopped vCPU has loaded (its CR3).
+        """
+    @property
+    def reload(self, /) -> ReloadStop |None: ...
     @property
     def rip(self, /) -> int |None:
         """
-        The instruction pointer that ntoseye recorded at this stop.
+        Where it stopped. A bugcheck's fault site is in `bugcheck`, a
+        breakpoint's address in `breakpoint`, an exception's in `exception`.
         """
     @property
     def symbol(self, /) -> str |None:
         """
-        The nearest symbol that ntoseye recorded at this stop, if one resolved.
+        The nearest symbol to `rip`, named in the stopped vCPU's own address
+        space.
         """
     @property
-    def thread(self, /) -> Thread |None:
+    def thread(self, /) -> ThreadInfo |None:
         """
-        The Windows thread that runs on the stopped vCPU, if known.
+        The Windows thread the stopped vCPU runs.
         """
-    def to_dict(self, /) -> dict[str, Any]: ...
-    @final
-    class Breakpoint(Stop):
+    @property
+    def vtl(self, /) -> int |None:
         """
-        A code breakpoint or data-watchpoint hit. If the breakpoint condition
-        fails to evaluate, ntoseye sets `condition_error` and stops on the hit
-        instead of skipping it.
+        The VTL the stopped vCPU runs in (1: the secure kernel); `None` for a
+        user dump.
         """
-        __match_args__: Final = ("condition_error", "_context")
-        def __new__(cls, /, condition_error: str |None, _context: _StopContext) -> Stop.Breakpoint: ...
-        @property
-        def _context(self, /) -> _StopContext: ...
-        @property
-        def condition_error(self, /) -> str |None:
-            """
-            The reason why the breakpoint condition failed to evaluate, if it failed.
-            """
-    @final
-    class Bugcheck(Stop):
-        """
-        The guest is in a bugcheck (BSOD). `info` is the bugcheck analysis.
-        """
-        __match_args__: Final = ("info", "_context")
-        def __new__(cls, /, info: Bugcheck |None, _context: _StopContext) -> Stop.Bugcheck: ...
-        @property
-        def _context(self, /) -> _StopContext: ...
-        @property
-        def info(self, /) -> Bugcheck |None:
-            """
-            The bugcheck analysis: the code, the parameters, and the culprit from
-            `!analyze`.
-            """
-    @final
-    class Exception(Stop):
-        """
-        A Windows exception, with its `code` (NTSTATUS), the first-chance flag,
-        and the faulting address.
-        """
-        __match_args__: Final = ("code", "first_chance", "address", "_context")
-        def __new__(cls, /, code: int, first_chance: bool |None, address: int |None, _context: _StopContext) -> Stop.Exception: ...
-        @property
-        def _context(self, /) -> _StopContext: ...
-        @property
-        def address(self, /) -> int |None:
-            """
-            The faulting address, if the exception has one.
-            """
-        @property
-        def code(self, /) -> int:
-            """
-            The NTSTATUS code of the exception.
-            """
-        @property
-        def first_chance(self, /) -> bool |None:
-            """
-            True if this is the first chance, or `None` if the backend does not
-            give this data.
-            """
-    @final
-    class Interrupt(Stop):
-        """
-        A break-in (`interrupt()`), or a different stop that has no exception code.
-        """
-        __match_args__: Final = ("_context",)
-        def __new__(cls, /, _context: _StopContext) -> Stop.Interrupt: ...
-        @property
-        def _context(self, /) -> _StopContext: ...
-    @final
-    class ModuleLoad(Stop):
-        """
-        A kernel image loaded, and an `"ld"` filter set to `"break"` matched it
-        (`dbg.exceptions.set("ld:<module>", "break")`, `sxe ld`). The module is
-        in the module list with its symbols loaded and its breakpoints set, and
-        its entry point has not run.
-        """
-        __match_args__: Final = ("module", "_context")
-        def __new__(cls, /, module: Module, _context: _StopContext) -> Stop.ModuleLoad: ...
-        @property
-        def _context(self, /) -> _StopContext: ...
-        @property
-        def module(self, /) -> Module:
-            """
-            The loaded kernel module.
-            """
-    @final
-    class ModuleUnload(Stop):
-        """
-        A kernel image is unloading, and a `"ud"` filter set to `"break"`
-        matched it (`dbg.exceptions.set("ud:<module>", "break")`, `sxe ud`).
-        The driver's unload routine has run, and the module is still in the
-        module list with its symbols.
-        """
-        __match_args__: Final = ("module", "_context")
-        def __new__(cls, /, module: Module, _context: _StopContext) -> Stop.ModuleUnload: ...
-        @property
-        def _context(self, /) -> _StopContext: ...
-        @property
-        def module(self, /) -> Module:
-            """
-            The unloading kernel module.
-            """
-    @final
-    class Reboot(Stop):
-        """
-        The guest rebooted, so all earlier handles are now stale. While
-        `coherent` is false, the kernel module list does not exist yet, but
-        kernel symbols and breakpoints work and `run()` lets the boot continue.
-        """
-        __match_args__: Final = ("kernel_base", "coherent", "_context")
-        def __new__(cls, /, kernel_base: int |None, coherent: bool, _context: _StopContext) -> Stop.Reboot: ...
-        @property
-        def _context(self, /) -> _StopContext: ...
-        @property
-        def coherent(self, /) -> bool:
-            """
-            True if the kernel module list exists.
-            """
-        @property
-        def kernel_base(self, /) -> int |None:
-            """
-            The base address of the new kernel (KASLR moves it).
-            """
-    @final
-    class Step(Stop):
-        """
-        A completed step.
-        """
-        __match_args__: Final = ("_context",)
-        def __new__(cls, /, _context: _StopContext) -> Stop.Step: ...
-        @property
-        def _context(self, /) -> _StopContext: ...
 
 @final
 class StorAdapter(BaseRecord):
@@ -19320,12 +19334,6 @@ class Zombies(BaseRecord):
         """
         True if a result list reached its limit.
         """
-
-@final
-class _StopContext:
-    """
-    Rust-only snapshot backing the shared properties of a typed stop.
-    """
 
 def _cli_main() -> int:
     """
