@@ -8,7 +8,7 @@ use crate::error::Result;
 use crate::target::etw::dump::{EtwDumpData, EtwDumpLogger};
 use crate::target::etw::{
     EtwBuffer, EtwBufferIssue, EtwClock, EtwEvent, EtwEvents, EtwHeaderKind, EtwLogger,
-    EtwMessageFormat, LogDumpArguments, event_trace_group_name, extended_type_name,
+    EtwMessageFormat, GuidStyle, LogDumpArguments, event_trace_group_name, extended_type_name,
     format_filetime_precise, format_guid, logger_mode_names,
 };
 use crate::types::VirtAddr;
@@ -253,7 +253,10 @@ impl ReplState<'_> {
         );
         row("LoggerThread", ui::addr(logger.logger_thread.0));
         row("LoggerStatus", format!("{:#x}", logger.logger_status));
-        row("InstanceGuid", format_guid(&logger.instance_guid));
+        row(
+            "InstanceGuid",
+            format_guid(&logger.instance_guid, GuidStyle::Braced),
+        );
         row(
             "LogFileName",
             match logger.log_file_name.as_deref() {
@@ -606,7 +609,10 @@ fn print_event(event: &EtwEvent) {
         (None, Some(raw)) => format!("{raw:#x}"),
         (None, None) => "(no timestamp)".to_string(),
     };
-    let guid = record.guid.as_ref().map(format_guid);
+    let guid = record
+        .guid
+        .as_ref()
+        .map(|guid| format_guid(guid, GuidStyle::Braced));
     let what = match record.kind {
         EtwHeaderKind::EventHeader => {
             let d = record

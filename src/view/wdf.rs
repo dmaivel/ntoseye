@@ -3,7 +3,7 @@
 //! logs.
 
 use super::shape::{Hex, shapes};
-use crate::target::etw::{format_filetime_precise, format_guid};
+use crate::target::etw::{GuidStyle, format_filetime_precise, format_guid};
 use crate::target::irp_major_function_name;
 use crate::target::wdf as target;
 use crate::types::VirtAddr;
@@ -881,7 +881,7 @@ pub fn log_record(entry: &target::WdfLogEntry) -> WdfLogRecord {
         sequence: record.sequence,
         timestamp: record.timestamp,
         timestamp_utc: record.timestamp.and_then(format_filetime_precise),
-        message_guid: format_guid(&record.message_guid),
+        message_guid: format_guid(&record.message_guid, GuidStyle::Braced),
         message_number: record.message_number,
         provider: message.map(|message| message.provider.clone()),
         function: message.and_then(|message| message.function.clone()),

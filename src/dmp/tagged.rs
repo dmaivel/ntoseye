@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use crate::bytes::read_u32;
-use crate::target::etw::format_guid;
+use crate::target::etw::{GuidStyle, format_guid};
 
 const FILE_SIGNATURE: &[u8; 8] = b"DumpBlob";
 const FILE_HEADER_SIZE: usize = 0x10;
@@ -29,7 +29,7 @@ pub struct TaggedBlock {
 impl TaggedBlock {
     /// The tag as `{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}`.
     pub fn tag_text(&self) -> String {
-        format_guid(&self.tag)
+        format_guid(&self.tag, GuidStyle::Braced)
     }
 }
 
@@ -212,7 +212,7 @@ const KNOWN_TAGS: &[(&str, &str, &str)] = &[
 
 /// What Windows writes under `tag`, when it is one of its own.
 pub fn known_tag(tag: &[u8; 16]) -> Option<KnownTag> {
-    let text = format_guid(tag);
+    let text = format_guid(tag, GuidStyle::Braced);
     KNOWN_TAGS
         .iter()
         .find(|(guid, _, _)| *guid == text)

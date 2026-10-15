@@ -16,6 +16,7 @@
 //! same in 32- and 64-bit Windows and unchanged since Windows 8, and are
 //! written out below.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use crate::bugchecks::looks_like_kernel_pointer;
@@ -154,15 +155,55 @@ pub fn event_trace_group_name(hook_id: u16) -> Option<&'static str> {
     EVENT_TRACE_GROUPS.get(usize::from(hook_id >> 8)).copied()
 }
 
-/// `{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}` for a GUID's in-memory bytes.
-pub fn format_guid(guid: &[u8; 16]) -> String {
-    let d1 = u32::from_le_bytes([guid[0], guid[1], guid[2], guid[3]]);
-    let d2 = u16::from_le_bytes([guid[4], guid[5]]);
-    let d3 = u16::from_le_bytes([guid[6], guid[7]]);
-    format!(
-        "{{{d1:08x}-{d2:04x}-{d3:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}}}",
-        guid[8], guid[9], guid[10], guid[11], guid[12], guid[13], guid[14], guid[15]
-    )
+/// How [`format_guid`] writes a GUID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuidStyle {
+    /// `{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}`, as ETW and WPP name GUIDs.
+    Braced,
+    /// `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`, as WinDbg's `.enumtag` does.
+    BracedUpper,
+    /// `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`, as WHEA names section types.
+    Bare,
+    /// `XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX`, as SMBIOS tools show UUIDs.
+    BareUpper,
+}
+
+/// A GUID's in-memory bytes as text in `style`: the first three fields are
+/// little-endian, the last eight bytes are in order.
+pub fn format_guid(guid: &[u8; 16], style: GuidStyle) -> String {
+    let (braces, upper) = match style {
+        GuidStyle::Braced => (true, false),
+        GuidStyle::BracedUpper => (true, true),
+        GuidStyle::Bare => (false, false),
+        GuidStyle::BareUpper => (false, true),
+    };
+    let d1 = read_u32(guid, 0);
+    let d2 = read_u16(guid, 4);
+    let d3 = read_u16(guid, 6);
+    let mut text = String::with_capacity(38);
+    if braces {
+        text.push('{');
+    }
+    let _ = if upper {
+        write!(text, "{d1:08X}-{d2:04X}-{d3:04X}")
+    } else {
+        write!(text, "{d1:08x}-{d2:04x}-{d3:04x}")
+    };
+    for (index, byte) in guid[8..].iter().enumerate() {
+        // `-xxxx-xxxxxxxxxxxx`: the clock sequence, then the node.
+        if matches!(index, 0 | 2) {
+            text.push('-');
+        }
+        let _ = if upper {
+            write!(text, "{byte:02X}")
+        } else {
+            write!(text, "{byte:02x}")
+        };
+    }
+    if braces {
+        text.push('}');
+    }
+    text
 }
 
 /// A GUID's in-memory bytes from its text: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`,
@@ -1898,6 +1939,30 @@ mod tests {
             .collect()
     }
 
+    /// The first three fields are little-endian and the last eight bytes in
+    /// order, in every style; only the case and the braces differ.
+    #[test]
+    fn formats_guids_in_each_style() {
+        let guid = hex("d6 2c fb 22 7b 0e 2b 42 a0 c7 2f ad 1f d0 e7 16");
+        let guid: &[u8; 16] = guid.as_slice().try_into().unwrap();
+        assert_eq!(
+            format_guid(guid, GuidStyle::Braced),
+            "{22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716}"
+        );
+        assert_eq!(
+            format_guid(guid, GuidStyle::BracedUpper),
+            "{22FB2CD6-0E7B-422B-A0C7-2FAD1FD0E716}"
+        );
+        assert_eq!(
+            format_guid(guid, GuidStyle::Bare),
+            "22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716"
+        );
+        assert_eq!(
+            format_guid(guid, GuidStyle::BareUpper),
+            "22FB2CD6-0E7B-422B-A0C7-2FAD1FD0E716"
+        );
+    }
+
     #[test]
     fn decodes_wpp_messages_with_guid_timestamp_and_system_info() {
         // Two NtfsLog records read live (build 26200), after the buffer header.
@@ -1917,7 +1982,7 @@ mod tests {
         let message = first.message.unwrap();
         assert_eq!((message.number, message.option_flags), (0x0a, 0xaa));
         assert_eq!(
-            format_guid(&message.guid.unwrap()),
+            format_guid(&message.guid.unwrap(), GuidStyle::Braced),
             "{26465a38-b775-37bf-c9af-1810e91887cd}"
         );
         assert_eq!(first.timestamp, Some(0x01dd_4e5b_2835_48f3));
@@ -2014,7 +2079,7 @@ mod tests {
         assert_eq!(event.kind, EtwHeaderKind::EventHeader);
         assert_eq!(event.size, 0xaf);
         assert_eq!(
-            format_guid(&event.guid.unwrap()),
+            format_guid(&event.guid.unwrap(), GuidStyle::Braced),
             "{22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716}"
         );
         assert_eq!(

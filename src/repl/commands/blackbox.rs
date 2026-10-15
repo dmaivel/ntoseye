@@ -12,7 +12,7 @@ use crate::blackbox::{
 };
 use crate::dmp::tagged::{TaggedBlock, known_tag};
 use crate::error::Result;
-use crate::target::etw::{format_guid, parse_guid};
+use crate::target::etw::{GuidStyle, format_guid, parse_guid};
 use crate::triage_report::time::filetime_to_iso;
 use crate::types::VirtAddr;
 use crate::ui;
@@ -126,7 +126,7 @@ impl ReplState<'_> {
             .filter(|block| only.is_none_or(|tag| block.tag == tag))
         {
             shown += 1;
-            let tag = format_guid(&block.tag).to_uppercase();
+            let tag = format_guid(&block.tag, GuidStyle::BracedUpper);
             let owner = match known_tag(&block.tag) {
                 Some(known) => format!("{}: {}", known.owner, known.holds),
                 None => self
@@ -276,7 +276,7 @@ impl ReplState<'_> {
             Ok(pnp) => {
                 outln!(
                     "    PnpActivityId      : {}",
-                    format_guid(&pnp.activity_id).to_uppercase()
+                    format_guid(&pnp.activity_id, GuidStyle::BracedUpper)
                 );
                 outln!("    PnpActivityTime    : {}", pnp.activity_time);
                 outln!("    PnpEventInformation: {}", pnp.event_information);

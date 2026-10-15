@@ -5,7 +5,7 @@ use crate::types::VirtAddr;
 use crate::target::etw::{
     self, EtwEventDump as EtwEventDumpDetail, EtwLoggerBuffers as EtwLoggerBuffersDetail,
     EtwLoggerTable as EtwLoggerTableDetail, event_trace_group_name, extended_type_name,
-    format_filetime_precise, format_guid, logger_mode_names,
+    GuidStyle, format_filetime_precise, format_guid, logger_mode_names,
 };
 use crate::target::etw::dump::{EtwDumpData, EtwDumpLogger};
 
@@ -288,7 +288,7 @@ shapes! {
 }
 
 fn guid(value: Option<&[u8; 16]>) -> Option<String> {
-    value.map(format_guid)
+    value.map(|guid| format_guid(guid, GuidStyle::Braced))
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {
@@ -334,7 +334,7 @@ pub fn logger(l: &etw::EtwLogger) -> EtwLogger {
         maximum_file_size: l.maximum_file_size,
         logger_thread: l.logger_thread,
         logger_status: l.logger_status,
-        instance_guid: format_guid(&l.instance_guid),
+        instance_guid: format_guid(&l.instance_guid, GuidStyle::Braced),
     }
 }
 

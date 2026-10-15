@@ -6,6 +6,7 @@
 use crate::error::{Error, Result};
 use crate::memory::MemoryOps;
 use crate::target::Target;
+use crate::target::etw::{GuidStyle, format_guid};
 
 /// The longest table read; SMBIOS 2.x tables are at most 64 KiB.
 const MAX_TABLE: u64 = 0x10000;
@@ -193,23 +194,6 @@ pub fn structure_name(kind: u8) -> &'static str {
     }
 }
 
-/// A system UUID as SMBIOS 2.6 and later store it: the first three fields
-/// little-endian.
-pub fn uuid_text(bytes: &[u8; 16]) -> String {
-    format!(
-        "{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{}",
-        u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
-        u16::from_le_bytes([bytes[4], bytes[5]]),
-        u16::from_le_bytes([bytes[6], bytes[7]]),
-        bytes[8],
-        bytes[9],
-        bytes[10..]
-            .iter()
-            .map(|byte| format!("{byte:02X}"))
-            .collect::<String>()
-    )
-}
-
 /// The fields of a structure the specification defines, by name, for the
 /// types `!sysinfo` decodes; other types have none.
 pub fn structure_fields(structure: &SmbiosStructure) -> Vec<(&'static str, String)> {
@@ -253,7 +237,10 @@ pub fn structure_fields(structure: &SmbiosStructure) -> Vec<(&'static str, Strin
             text("Version", string(6));
             text("Serial Number", string(7));
             if let Some(bytes) = s.formatted.get(8..0x18) {
-                text("UUID", Some(uuid_text(bytes.try_into().unwrap())));
+                // SMBIOS 2.6 and later store the first three fields
+                // little-endian, as a GUID does.
+                let uuid = format_guid(bytes.try_into().unwrap(), GuidStyle::BareUpper);
+                text("UUID", Some(uuid));
             }
             text("SKU Number", string(0x19));
             text("Family", string(0x1a));
@@ -462,6 +449,9 @@ pc-q35-10.1\0\0\x03\x16\x00\x03\x01\x01\x02\x00\x00\x03\x03\x03\x02\x00\x00\x00\
     #[test]
     fn uuids_swap_their_first_three_fields() {
         let bytes: [u8; 16] = QEMU[8..0x18].try_into().unwrap();
-        assert_eq!(uuid_text(&bytes), "3D0FC3AA-FFC0-4FE1-9F82-5E83C91FEEDB");
+        assert_eq!(
+            format_guid(&bytes, GuidStyle::BareUpper),
+            "3D0FC3AA-FFC0-4FE1-9F82-5E83C91FEEDB"
+        );
     }
 }

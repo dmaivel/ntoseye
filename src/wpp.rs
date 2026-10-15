@@ -24,7 +24,7 @@ use std::sync::{Arc, OnceLock};
 
 use crate::layout::{EnumDef, le_uint, utf16le_lossy};
 use crate::ntstatus::{ntstatus_name, win32_error_name};
-use crate::target::etw::{format_guid, parse_guid};
+use crate::target::etw::{GuidStyle, format_guid, parse_guid};
 
 /// A message's identity: its message GUID's in-memory bytes and its number.
 pub type MessageKey = ([u8; 16], u16);
@@ -376,7 +376,7 @@ fn decode(argument: &TmfArgument, args: &mut &[u8], pointer_size: u8) -> Result<
         }
         Item::Guid => {
             let bytes: [u8; 16] = take(args, 16, index, item)?.try_into().unwrap();
-            text(format_guid(&bytes))
+            text(format_guid(&bytes, GuidStyle::Braced))
         }
         Item::NtStatus | Item::HResult | Item::WinError => {
             let value = le_uint(take(args, 4, index, item)?) as u32;

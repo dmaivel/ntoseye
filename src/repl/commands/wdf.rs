@@ -7,7 +7,7 @@ use tabled::builder::Builder;
 
 use crate::error::Result;
 use crate::repl::*;
-use crate::target::etw::{format_filetime_precise, format_guid};
+use crate::target::etw::{GuidStyle, format_filetime_precise, format_guid};
 use crate::target::wdf::{
     IfrEnd, WdfCallback, WdfClient, WdfDeviceDetail, WdfDriverInfo, WdfDumpDriver, WdfEnumValue,
     WdfIoParameters, WdfIoTargetDetail, WdfIrpLocation, WdfIrpQueueRole, WdfLoader, WdfLogDump,
@@ -826,7 +826,7 @@ pub fn ifr_entry_line(entry: &WdfLogEntry) -> String {
             format!(
                 "{}: {time}{} #{} {}  {}",
                 record.sequence,
-                format_guid(&record.message_guid),
+                format_guid(&record.message_guid, GuidStyle::Braced),
                 record.message_number,
                 ui::muted(&format!("({why})")),
                 args
