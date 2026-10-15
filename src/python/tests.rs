@@ -9,7 +9,7 @@ use std::process::id;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::embed::exec_script;
-use crate::triage::{TriageBlock, make_triage_dump};
+use crate::dmp::triage::{TriageBlock, make_triage_dump};
 
 /// Where the dump's one captured page lives (it holds `nop`s).
 const PAGE: u64 = 0xffff_f800_1234_5000;

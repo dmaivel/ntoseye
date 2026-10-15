@@ -7,8 +7,8 @@ use super::module::module;
 use super::pnp::device_stack;
 use super::power::{power_driver, power_irp, power_irp_holder, power_irp_list, power_worker_list};
 use super::shape::{Diag, Hex, shapes};
-use crate::dmp::{self, DmpException, DmpSystemInfo, TriageCrashInfo};
-use crate::triage::TriagePrcbInfo;
+use crate::dmp::triage::TriagePrcbInfo;
+use crate::dmp::{self, DmpException, DmpSystemInfo};
 use crate::triage_report::{
     BlackboxFinding, BlackboxKind, BlackboxState, CodeOwner as CodeOwnerDetail,
     CulpritAttribution, CulpritConfidence, CulpritEvidenceKind, CulpritSubject, FailureCodeKind,
@@ -18,7 +18,7 @@ use crate::triage_report::{
     time::{filetime_to_iso, unix_time_to_iso},
 };
 use crate::triage_report::{
-    FailureSignature as SignatureDetail, TriageReport as ReportDetail,
+    FailureSignature as SignatureDetail, TriageCrashInfo, TriageReport as ReportDetail,
     VerifierFinding as VerifierFindingDetail, WheaFinding as WheaFindingDetail,
 };
 use crate::target::DiagnosticValue;

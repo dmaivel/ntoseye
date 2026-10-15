@@ -20,6 +20,8 @@ use crate::dbg_backend::{
     LastEvent, ModuleEvent, RegisterMap, StopEvent,
 };
 use crate::disasm::ControlFlow;
+#[cfg(test)]
+use crate::dmp::triage::{TriageBlock, make_triage_dump};
 use crate::error::{Error, Result};
 use crate::exception_policy::ExceptionPolicyTable;
 use crate::expr::NumberRadix;
@@ -29,8 +31,6 @@ use crate::session::lifecycle::InstanceGuard;
 use crate::session::partition::{KeptPartition, PartitionView};
 use crate::target::dbgprint::{PrintCursor, prints_between};
 use crate::target::{ReloadReport, ServedVp, Target, TargetSelection, ThreadInfo};
-#[cfg(test)]
-use crate::triage::{TriageBlock, make_triage_dump};
 use crate::types::VirtAddr;
 use crate::unwind::SavedVtl;
 

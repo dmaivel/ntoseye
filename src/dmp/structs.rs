@@ -10,7 +10,7 @@ use crate::error::{Error, Result};
 
 /// Types of kernel crash dump.
 ///
-/// Triage dumps (`0x4`) have no physical-memory map; [`crate::triage`] handles them.
+/// Triage dumps (`0x4`) have no physical-memory map; [`crate::dmp::triage`] handles them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum DumpType {

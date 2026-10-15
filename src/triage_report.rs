@@ -1,6 +1,7 @@
 //! Presentation-free crash triage aggregation shared by debugger frontends.
 
 mod blackbox;
+mod crash_context;
 mod culprit;
 mod power;
 mod signature;
@@ -10,14 +11,15 @@ mod verifier;
 mod whea;
 
 use crate::bugchecks::{BugcheckAnalysis, bugcheck_trap_frame_on_stack, module_filename};
-use crate::dmp::{DmpException, DmpInfo, DmpSystemInfo, TriageCrashInfo, UnloadedDriver};
+use crate::dmp::triage::TriagePrcbInfo;
+use crate::dmp::{DmpException, DmpInfo, DmpSystemInfo, UnloadedDriver};
 use crate::guest::ModuleInfo;
 use crate::ntstatus::ntstatus_name;
 use crate::session::{RunStatus, Session};
-use crate::triage::TriagePrcbInfo;
 use crate::types::VirtAddr;
 use crate::unwind::StackTrace;
 use blackbox::blackbox_findings;
+pub use crash_context::TriageCrashInfo;
 use culprit::culprit_attribution;
 pub use power::{
     POWER_THREAD_STACK_LIMIT, PowerFailureFinding, PowerFailureThread, PowerThreadRole,
@@ -488,11 +490,11 @@ mod tests {
     use crate::bugchecks::{BugcheckArg, BugcheckFault};
     use crate::cpu_context::amd64::REGISTER_BUFFER_SIZE;
     use crate::dmp::DmpContext;
+    use crate::dmp::triage::TriageDriver;
     use crate::guest::ProcessInfo;
     use crate::session::RunStatus;
     use crate::symbols::CodeFrame;
     use crate::target::power::{DeviceDriver, PowerCulprit, PowerFailure};
-    use crate::triage::TriageDriver;
     use crate::types::{Arch, VirtAddr};
     use crate::unwind::{FrameSource, StackFrame};
 
