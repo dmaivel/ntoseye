@@ -1651,6 +1651,7 @@ dependencies = [
  "libc",
  "linkme",
  "md-5",
+ "memchr",
  "memmap2",
  "nix 0.31.3",
  "nu-ansi-term",

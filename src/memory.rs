@@ -87,15 +87,22 @@ pub fn read_page_chunks(
 }
 
 /// Offsets of every occurrence of `pattern` in `haystack`, overlapping ones
-/// included. `pattern` must not be empty.
+/// included. `pattern` must not be empty. A search reads up to 1 GiB, so this
+/// uses `memmem`'s vectorized search rather than comparing a window at every
+/// byte, which was most of the time `s` took.
 pub fn pattern_offsets<'a>(
     haystack: &'a [u8],
     pattern: &'a [u8],
 ) -> impl Iterator<Item = usize> + 'a {
-    haystack
-        .windows(pattern.len())
-        .enumerate()
-        .filter_map(move |(offset, window)| (window == pattern).then_some(offset))
+    let finder = memchr::memmem::Finder::new(pattern);
+    let mut from = 0;
+    std::iter::from_fn(move || {
+        let at = from + finder.find(haystack.get(from..)?)?;
+        // On from the next byte, not past the match, so that overlapping
+        // occurrences are found too.
+        from = at + 1;
+        Some(at)
+    })
 }
 
 /// Sentinel DTB: `AddressSpace` skips page-table translation and treats
@@ -1271,5 +1278,16 @@ mod tests {
 
         let (mem, va) = viewed_space(0x5000, 0);
         assert!(AddressSpace::new(&mem, 0x1000).read::<u64>(va).is_err());
+    }
+
+    #[test]
+    fn pattern_offsets_include_overlapping_matches() {
+        let offsets = |haystack: &[u8], pattern: &[u8]| {
+            pattern_offsets(haystack, pattern).collect::<Vec<_>>()
+        };
+        assert_eq!(offsets(b"aaaa", b"aa"), [0, 1, 2]);
+        assert_eq!(offsets(b"abcab", b"ab"), [0, 3]);
+        assert_eq!(offsets(b"ab", b"ab"), [0]);
+        assert_eq!(offsets(b"a", b"ab"), [] as [usize; 0]);
     }
 }
