@@ -12,7 +12,7 @@ use crate::target::alpc::{
 use crate::target::etw::format_filetime_precise;
 use crate::target::gflag::{GLOBAL_FLAGS, GlobalFlagChange, GlobalFlagsDetail, global_flags_set};
 use crate::target::htrace::{HandleTraceDetail, handle_trace_kind_name};
-use crate::target::job::{JobDetail, job_limit_flag_names};
+use crate::target::job::{Job, job_limit_flag_names};
 use crate::target::zombies::{MAX_ZOMBIES, ZombieKinds, ZombiesDetail};
 use crate::types::VirtAddr;
 use crate::ui;
@@ -204,7 +204,7 @@ impl ReplState<'_> {
     }
 }
 
-fn print_job(job: &JobDetail, flags: u64) {
+fn print_job(job: &Job, flags: u64) {
     outln!("Job at {}", ui::addr(job.address.0));
     let optional = |value: Option<u64>| value.map_or("-".to_string(), |value| value.to_string());
     outln!(
@@ -214,25 +214,24 @@ fn print_job(job: &JobDetail, flags: u64) {
     );
     if flags & 1 != 0 {
         outln!("  Basic Accounting Information");
-        for field in &job.accounting {
-            outln!("    {:<28} {:#x}", format!("{}:", field.field), field.value);
+        for (field, value) in job.accounting.fields() {
+            if let Some(value) = value {
+                outln!("    {:<28} {value:#x}", format!("{field}:"));
+            }
         }
         outln!("  Job Flags ({})", optional_hex(job.job_flags));
         for name in &job.job_flag_names {
             outln!("    [{name}]");
         }
         outln!("  Limit Information");
-        for field in &job.limits {
-            let names = if field.field.ends_with("LimitFlags") {
-                format!(" {}", job_limit_flag_names(field.value).join(" "))
+        for (field, value) in job.limits.fields() {
+            let Some(value) = value else { continue };
+            let names = if field.ends_with("LimitFlags") {
+                format!(" {}", job_limit_flag_names(value).join(" "))
             } else {
                 String::new()
             };
-            outln!(
-                "    {:<28} {:#x}{names}",
-                format!("{}:", field.field),
-                field.value
-            );
+            outln!("    {:<28} {value:#x}{names}", format!("{field}:"));
         }
         outln!(
             "  Nesting: depth {}  parent {}  root {}",
@@ -243,7 +242,7 @@ fn print_job(job: &JobDetail, flags: u64) {
         for child in &job.child_jobs {
             outln!("    child job {}", ui::addr(child.0));
         }
-        if let Some(why) = job.child_job_termination.diagnostic() {
+        if let Some(why) = job.child_job_list_termination.diagnostic() {
             outln!("    child job list ended early: {why}");
         }
         if job.silo {
@@ -258,7 +257,7 @@ fn print_job(job: &JobDetail, flags: u64) {
         for process in &job.processes {
             outln!(
                 "    PROCESS {}  Cid: {:04x}  Image: {}",
-                ui::addr(process.eprocess_va.0),
+                ui::addr(process.eprocess.0),
                 process.pid,
                 process.name
             );
@@ -266,7 +265,7 @@ fn print_job(job: &JobDetail, flags: u64) {
         for eprocess in &job.unreadable_processes {
             outln!("    PROCESS {}  (unreadable)", ui::addr(eprocess.0));
         }
-        if let Some(why) = job.process_termination.diagnostic() {
+        if let Some(why) = job.process_list_termination.diagnostic() {
             outln!("    process list ended early: {why}");
         }
     }
@@ -314,7 +313,7 @@ fn print_handle_traces(detail: &HandleTraceDetail) {
     let process = &detail.process;
     outln!(
         "Process {} ({}, PID {})",
-        ui::addr(process.eprocess_va.0),
+        ui::addr(process.eprocess.0),
         process.name,
         process.pid
     );
@@ -548,7 +547,7 @@ fn print_alpc_process_ports(ports: &AlpcProcessPorts) {
     let process = &ports.process;
     let label = format!(
         "{} ({}, PID {})",
-        ui::addr(process.eprocess_va.0),
+        ui::addr(process.eprocess.0),
         process.name,
         process.pid
     );

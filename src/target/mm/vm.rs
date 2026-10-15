@@ -224,7 +224,7 @@ impl Target {
         vm_layout: &TypeInfo,
         process: ProcessInfo,
     ) -> ProcessMemoryUsage {
-        let eprocess = process.eprocess_va;
+        let eprocess = process.eprocess;
         ProcessMemoryUsage::from_counters(process, |field| {
             self.process_memory_counter(eprocess_layout, vm_layout, eprocess, field)
         })

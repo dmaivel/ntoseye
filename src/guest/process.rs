@@ -162,14 +162,14 @@ impl Guest {
         Ok(processes)
     }
 
-    /// The process whose `_EPROCESS` at `eprocess_va` `span` has just read.
-    fn process_from_span(&self, eprocess_va: VirtAddr, span: &EprocessSpan) -> ProcessInfo {
+    /// The process whose `_EPROCESS` at `eprocess` `span` has just read.
+    fn process_from_span(&self, eprocess: VirtAddr, span: &EprocessSpan) -> ProcessInfo {
         let dtb = span.dtb();
         ProcessInfo {
             pid: span.pid(),
-            name: self.process_name_from_image_file_name(eprocess_va, dtb, span.image_file_name()),
+            name: self.process_name_from_image_file_name(eprocess, dtb, span.image_file_name()),
             dtb,
-            eprocess_va,
+            eprocess,
             wow64_peb: self.wow64_peb(dtb, span.wow64_process()),
         }
     }
@@ -194,7 +194,7 @@ impl Guest {
             .into_iter()
             .find(|process| {
                 memory
-                    .read::<u64>(process.eprocess_va + user_root_offset)
+                    .read::<u64>(process.eprocess + user_root_offset)
                     .is_ok_and(|root| root & mask == user_root)
             })
     }
@@ -206,7 +206,7 @@ impl Guest {
         let root = self
             .ntoskrnl
             .memory()
-            .read::<u64>(process.eprocess_va + self.user_root_offset()?)
+            .read::<u64>(process.eprocess + self.user_root_offset()?)
             .ok()?
             & mask;
         (root != 0).then_some(root)

@@ -111,7 +111,7 @@ impl Module {
     /// The owning process's `_EPROCESS`, `None` for a kernel module.
     fn process_key(&self) -> Option<VirtAddr> {
         match &self.space {
-            Space::Process(info) => Some(info.eprocess_va),
+            Space::Process(info) => Some(info.eprocess),
             Space::Kernel | Space::Physical | Space::Secure(_) | Space::Root(_) => None,
         }
     }

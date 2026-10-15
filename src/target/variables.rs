@@ -198,11 +198,9 @@ impl Target {
             "ntbase" | "kernelbase" => self.guest.as_ref().map(|g| g.ntoskrnl.base_address.0),
             "processbase" | "imagebase" => self.current_process_image_base(),
             "processdtb" => self.process.as_ref().map(|p| p.dtb),
-            "attachedeprocess" | "attachedprocess" => {
-                self.process.as_ref().map(|p| p.eprocess_va.0)
-            }
+            "attachedeprocess" | "attachedprocess" => self.process.as_ref().map(|p| p.eprocess.0),
             "attachedpid" => self.process.as_ref().map(|p| p.pid),
-            "eprocess" | "process" => self.process.as_ref().map(|p| p.eprocess_va.0),
+            "eprocess" | "process" => self.process.as_ref().map(|p| p.eprocess.0),
             "peb" => self.current_process_peb(),
             "pid" => self.process.as_ref().map(|p| p.pid),
             // `$t0`-`$t19` are WinDbg's twenty writable slots, kept as the
@@ -246,7 +244,7 @@ impl Target {
     /// `_EPROCESS`. A System-context stop has none, which stays `None` so the
     /// expression reports an error rather than handing back zero.
     fn current_process_peb(&self) -> Option<u64> {
-        let eprocess_va = self.process.as_ref()?.eprocess_va;
+        let eprocess_va = self.process.as_ref()?.eprocess;
         let peb: VirtAddr = self
             .guest()
             .ok()?
@@ -362,7 +360,7 @@ impl Target {
                 },
                 BuiltinVar {
                     name: "attachedeprocess",
-                    value: process.eprocess_va.0,
+                    value: process.eprocess.0,
                     source: "attached process EPROCESS",
                 },
                 BuiltinVar {
@@ -377,7 +375,7 @@ impl Target {
                 vars.extend([
                     BuiltinVar {
                         name: "eprocess",
-                        value: process.eprocess_va.0,
+                        value: process.eprocess.0,
                         source: "attached process EPROCESS",
                     },
                     BuiltinVar {

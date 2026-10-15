@@ -129,7 +129,7 @@ fn print_user_modules(report: &AttachReport) {
 
 fn process_brief_row(process: &ProcessInfo, detail: &ProcessDetail) -> Vec<String> {
     vec![
-        display_pointer(Some(process.eprocess_va)),
+        display_pointer(Some(process.eprocess)),
         display_decimal(detail.session_id.map(u64::from)),
         format!("{} ({:#x})", process.pid, process.pid),
         display_pointer(detail.peb),
@@ -177,7 +177,7 @@ fn print_ps(processes: &[ProcessInfo]) {
         builder.push_record(vec![
             process.name.to_string(),
             format!("{}", ui::Value(process.pid)),
-            ui::addr(process.eprocess_va.0).to_string(),
+            ui::addr(process.eprocess.0).to_string(),
             ui::addr(process.dtb),
             if process.is_wow64() { "x86" } else { "-" }.to_string(),
         ]);
@@ -233,9 +233,7 @@ impl ReplState<'_> {
         }
         let address = Expr::eval_with_radix(selector, &self.ctx.target, self.radix).ok();
         if let Some(address) = address
-            && let Some(process) = processes
-                .iter()
-                .find(|process| process.eprocess_va == address)
+            && let Some(process) = processes.iter().find(|process| process.eprocess == address)
         {
             return Some(process.clone());
         }
@@ -407,7 +405,7 @@ impl ReplState<'_> {
                 outln!(
                     "{} {} ({})",
                     ui::label("process:"),
-                    ui::addr(process.eprocess_va.0),
+                    ui::addr(process.eprocess.0),
                     process.name
                 );
                 if flags & 1 != 0 {
@@ -522,7 +520,7 @@ impl ReplState<'_> {
             if let Some(process) = self.ctx.target.current_process() {
                 outln!(
                     "process context: {} {} (PID {}, DTB {}{})\n",
-                    ui::addr(process.eprocess_va.0),
+                    ui::addr(process.eprocess.0),
                     process.name,
                     process.pid,
                     ui::addr(process.dtb),
@@ -549,7 +547,7 @@ impl ReplState<'_> {
                     "process context: {} (PID {}, EPROCESS {}{})",
                     report.name,
                     process.pid,
-                    ui::addr(process.eprocess_va.0),
+                    ui::addr(process.eprocess.0),
                     if process.is_wow64() { ", WOW64" } else { "" },
                 );
                 print_user_modules(&report);

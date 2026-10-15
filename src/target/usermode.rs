@@ -587,7 +587,7 @@ impl Target {
                 .guest()?
                 .ntoskrnl
                 .types_in(dtb)
-                .struct_at("_EPROCESS", process.eprocess_va)?;
+                .struct_at("_EPROCESS", process.eprocess)?;
             let peb = eprocess.follow("Peb")?;
             if peb.addr().is_zero() {
                 return Err(Error::MissingPEB);

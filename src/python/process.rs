@@ -79,13 +79,13 @@ impl Process {
                 .map_err(err)?
                 .ntoskrnl
                 .types_in(info.dtb)
-                .struct_at("_EPROCESS", info.eprocess_va)
+                .struct_at("_EPROCESS", info.eprocess)
                 .map_err(err)?;
             let ppid = session.target.process_parent_pid(&info).map_err(err)?;
             let peb = eprocess.read_field::<VirtAddr>("Peb").map_err(err)?;
             Ok(ProcessDetails {
                 ppid,
-                session: session.target.process_session_id(info.eprocess_va),
+                session: session.target.process_session_id(info.eprocess),
                 peb: (!peb.is_zero()).then_some(peb.0),
             })
         })
@@ -167,7 +167,7 @@ impl Process {
     #[getter]
     fn eprocess(&self, py: Python<'_>) -> PyResult<u64> {
         self.owner.check(py)?;
-        Ok(self.info.eprocess_va.0)
+        Ok(self.info.eprocess.0)
     }
 
     /// The process page-table root.
@@ -208,7 +208,7 @@ impl Process {
             &self.owner,
             self.space(),
             "_EPROCESS",
-            self.info.eprocess_va.0,
+            self.info.eprocess.0,
         )
     }
 
@@ -360,27 +360,26 @@ impl Process {
     }
 
     /// Get the process identity as a plain `dict` (`pid`, `name`, `dtb`,
-    /// `eprocess`, `wow64`).
+    /// `eprocess`, `wow64_peb`, `wow64`).
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
-        view_dict(py, &view::process::process(&self.info))
+        view_dict(py, &self.info)
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
         other.extract::<PyRef<'_, Process>>().is_ok_and(|other| {
-            self.owner.same_debugger(&other.owner)
-                && self.info.eprocess_va == other.info.eprocess_va
+            self.owner.same_debugger(&other.owner) && self.info.eprocess == other.info.eprocess
         })
     }
 
     fn __hash__(&self) -> isize {
-        self.owner.identity_hash(self.info.eprocess_va)
+        self.owner.identity_hash(self.info.eprocess)
     }
 
     fn __repr__(&self) -> String {
         format!(
             "Process(pid={}, name={:?}, eprocess={:#x})",
-            self.info.pid, self.info.name, self.info.eprocess_va.0
+            self.info.pid, self.info.name, self.info.eprocess.0
         )
     }
 }
@@ -585,14 +584,13 @@ impl Heap {
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
         other.extract::<PyRef<'_, Heap>>().is_ok_and(|other| {
             self.owner.same_debugger(&other.owner)
-                && self.info.eprocess_va == other.info.eprocess_va
+                && self.info.eprocess == other.info.eprocess
                 && self.address == other.address
         })
     }
 
     fn __hash__(&self) -> isize {
-        self.owner
-            .identity_hash((self.info.eprocess_va, self.address))
+        self.owner.identity_hash((self.info.eprocess, self.address))
     }
 
     fn __repr__(&self) -> String {

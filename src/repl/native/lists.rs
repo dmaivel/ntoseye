@@ -226,10 +226,10 @@ pub fn processes(processes: &[ProcessInfo], details: &[ProcessDetail]) -> View {
     }
     for (process, detail) in processes.iter().zip(details) {
         table = table.row(
-            TableRow::new(format!("{:x}", process.eprocess_va.0))
+            TableRow::new(format!("{:x}", process.eprocess.0))
                 .cell("pid", span(process.pid.to_string(), NUMBER))
                 .cell("image", span(&process.name, STRONG))
-                .cell("eprocess", pointer(Some(process.eprocess_va), MUTED))
+                .cell("eprocess", pointer(Some(process.eprocess), MUTED))
                 .cell("session", decimal(detail.session_id.map(u64::from)))
                 .cell("parent", decimal(detail.parent_pid))
                 .cell("handles", decimal(detail.handle_count))
@@ -264,12 +264,12 @@ pub fn ps(processes: &[ProcessInfo]) -> View {
         .col(Column::new("wow64", "Wow64").priority(4.0));
     for process in processes {
         table = table.row(
-            TableRow::new(format!("{:x}", process.eprocess_va.0))
+            TableRow::new(format!("{:x}", process.eprocess.0))
                 .cell("name", span(&process.name, STRONG))
                 .cell("pid", span(process.pid.to_string(), NUMBER))
                 .cell(
                     "eprocess",
-                    span(format!("{:016x}", process.eprocess_va.0), MUTED),
+                    span(format!("{:016x}", process.eprocess.0), MUTED),
                 )
                 .cell("dtb", span(format!("{:016x}", process.dtb), MUTED))
                 .cell(

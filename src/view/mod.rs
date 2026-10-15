@@ -11,7 +11,6 @@ pub mod fs;
 pub mod hardware;
 pub mod heap;
 pub mod hypervisor;
-pub mod list;
 pub mod machine;
 pub mod meta;
 pub mod mm;

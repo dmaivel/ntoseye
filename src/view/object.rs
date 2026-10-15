@@ -3,11 +3,11 @@
 //! resources, notification callbacks, service tables, and ALPC ports.
 
 use super::record::Keyed;
+use crate::guest::ProcessInfo;
 use crate::target::DiagnosticValue;
 use ntoseye_macros::record;
 
-use super::list::{ListEnd, list_termination};
-use super::process::process;
+use crate::target::ListTermination;
 use crate::target::alpc::{
     AlpcConnection as AlpcConnectionDetail, AlpcField, AlpcMessageDetail, AlpcPortDetail,
     AlpcPortKind, AlpcProcessPorts as AlpcProcessPortsDetail, lpc_message_type_name,
@@ -306,7 +306,7 @@ pub struct HandleEntry {
 #[record]
 pub struct HandleTable {
     /// The process that owns the table.
-    pub process: super::process::ProcessIdentity,
+    pub process: ProcessInfo,
     /// The `_HANDLE_TABLE`.
     pub table: VirtAddr,
     /// The level of the table (0-2), which is the number of pointer levels
@@ -388,7 +388,7 @@ pub struct ResourceList {
     /// `nt!ExpSystemResourcesList`.
     pub head: VirtAddr,
     pub resources: Vec<ExecutiveResource>,
-    pub termination: ListEnd,
+    pub termination: ListTermination,
 }
 
 /// An IRP that `!irpfind` found in pool.
@@ -474,7 +474,7 @@ pub struct HandleTrace {
 #[record]
 pub struct HandleTraces {
     /// The traced process.
-    pub process: super::process::ProcessIdentity,
+    pub process: ProcessInfo,
     pub object_table: VirtAddr,
     /// The `_HANDLE_TRACE_DEBUG_INFO`. None if handle tracing is off.
     pub debug_info: Option<VirtAddr>,
@@ -522,7 +522,7 @@ pub struct AlpcQueue {
     /// The queued `_KALPC_MESSAGE`s. For the wait queue, the waiting
     /// `_ETHREAD`s.
     pub entries: Vec<VirtAddr>,
-    pub termination: ListEnd,
+    pub termination: ListTermination,
 }
 
 /// An `_ALPC_PORT` (`!alpc /p`). A field is None if this Windows build does
@@ -563,7 +563,7 @@ pub struct AlpcPort {
     /// The connections of a connection port.
     pub connections: Vec<AlpcConnection>,
     /// How the walk of the connection list ended. None if there was no walk.
-    pub connection_termination: Option<ListEnd>,
+    pub connection_termination: Option<ListTermination>,
 }
 
 /// A `_KALPC_MESSAGE` (`!alpc /m`). A field is None if this Windows build
@@ -619,7 +619,7 @@ pub struct AlpcOwnedPort {
     pub port: VirtAddr,
     pub name: Option<String>,
     pub connections: Vec<AlpcConnection>,
-    pub termination: ListEnd,
+    pub termination: ListTermination,
 }
 
 /// A client communication port that a process holds, and the ports that it
@@ -645,7 +645,7 @@ pub struct AlpcClientPort {
 /// The ALPC ports that a process holds handles to (`!alpc /lpp`).
 #[record]
 pub struct AlpcProcessPorts {
-    pub process: super::process::ProcessIdentity,
+    pub process: ProcessInfo,
     /// The connection ports that the process owns.
     pub created: Vec<AlpcOwnedPort>,
     /// The client ports that the process holds.
@@ -868,7 +868,7 @@ pub fn handle_entry(entry: &HandleEntryDetail) -> HandleEntry {
 
 pub fn handle_table(summary: &HandleTableSummary) -> HandleTable {
     HandleTable {
-        process: process(&summary.process),
+        process: summary.process.clone(),
         table: summary.table,
         table_level: summary.table_level,
         advertised_handles: summary.advertised_handles,
@@ -932,7 +932,7 @@ pub fn resource_list(summary: &ResourceListSummary) -> ResourceList {
     ResourceList {
         head: summary.head,
         resources: summary.resources.iter().map(resource).collect(),
-        termination: list_termination(&summary.termination),
+        termination: summary.termination.clone(),
     }
 }
 
@@ -974,7 +974,7 @@ pub fn irp_find(detail: &IrpFindDetail) -> IrpFindResult {
 /// `!htrace`: a process's handle traces, newest first.
 pub fn handle_traces(detail: &HandleTraceDetail) -> HandleTraces {
     HandleTraces {
-        process: process(&detail.process),
+        process: detail.process.clone(),
         object_table: detail.object_table,
         debug_info: detail.debug_info,
         table_size: detail.table_size,
@@ -1058,12 +1058,12 @@ pub fn alpc_port(port: &AlpcPortDetail) -> AlpcPort {
                 key: queue.key,
                 length: queue.length,
                 entries: queue.entries.clone(),
-                termination: list_termination(&queue.termination),
+                termination: queue.termination.clone(),
             })
             .collect(),
         direct_queue_length: port.direct_queue_length,
         connections: port.connections.iter().map(alpc_connection).collect(),
-        connection_termination: port.connection_termination.as_ref().map(list_termination),
+        connection_termination: port.connection_termination.clone(),
     }
 }
 
@@ -1101,7 +1101,7 @@ pub fn alpc_message(message: &AlpcMessageDetail) -> AlpcMessage {
 /// holds.
 pub fn alpc_process_ports(ports: &AlpcProcessPortsDetail) -> AlpcProcessPorts {
     AlpcProcessPorts {
-        process: process(&ports.process),
+        process: ports.process.clone(),
         created: ports
             .created
             .iter()
@@ -1110,7 +1110,7 @@ pub fn alpc_process_ports(ports: &AlpcProcessPortsDetail) -> AlpcProcessPorts {
                 port: port.port,
                 name: port.name.clone(),
                 connections: port.connections.iter().map(alpc_connection).collect(),
-                termination: list_termination(&port.termination),
+                termination: port.termination.clone(),
             })
             .collect(),
         connected: ports

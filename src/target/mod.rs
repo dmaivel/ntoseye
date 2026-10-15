@@ -22,7 +22,7 @@ pub mod image;
 pub mod irpfind;
 pub mod job;
 mod lifecycle;
-mod list;
+pub mod list;
 mod memory;
 pub mod meta;
 pub mod mm;
@@ -77,6 +77,7 @@ use crate::{
     types::{Arch, CodeMachine, Dtb, VirtAddr},
     unwind::RecoveredStackTrace,
 };
+use ntoseye_macros::record;
 
 /// A host's handle on [`Target::interrupt`], usable from any thread.
 #[derive(Clone)]
@@ -438,16 +439,23 @@ impl SavedThreadRegisters {
     }
 }
 
-#[derive(Debug, Clone)]
+/// A Windows thread, as `threads`, `!thread`, and all scheduler listings
+/// show it. A field that the walk could not read is `None`.
+#[record(impl)]
 pub struct ThreadInfo {
     pub ethread: VirtAddr,
     pub kthread: VirtAddr,
     pub tid: Option<u64>,
     pub pid: Option<u64>,
+    /// The image name of the owning process.
     pub process_name: Option<String>,
+    /// The owning `_EPROCESS`.
     pub eprocess: Option<VirtAddr>,
+    /// `_KTHREAD.State`.
     pub state: Option<u8>,
+    /// `_KTHREAD.WaitReason`.
     pub wait_reason: Option<u8>,
+    /// The current scheduling priority.
     pub priority: Option<u8>,
     pub base_priority: Option<u8>,
     pub wait_irql: Option<u8>,
@@ -455,11 +463,29 @@ pub struct ThreadInfo {
     pub start_address: Option<VirtAddr>,
     pub win32_start_address: Option<VirtAddr>,
     pub teb: Option<VirtAddr>,
+    /// `_KTHREAD.KernelStack`, the saved stack pointer of a thread that is
+    /// not running.
     pub kernel_stack: Option<VirtAddr>,
     pub stack_base: Option<VirtAddr>,
     pub stack_limit: Option<VirtAddr>,
     pub trap_frame: Option<VirtAddr>,
+    /// The IRPs on the thread's `IrpList`.
     pub pending_irps: Option<Vec<VirtAddr>>,
+}
+
+#[record]
+impl ThreadInfo {
+    /// The name of the state (`Running`, `Waiting`, ...).
+    #[record(getter)]
+    pub fn state_name(&self) -> Option<&'static str> {
+        self.state.map(kthread_state_name)
+    }
+
+    /// The name of the wait reason (`Executive`, `UserRequest`, ...).
+    #[record(getter)]
+    pub fn wait_reason_name(&self) -> Option<&'static str> {
+        self.wait_reason.map(wait_reason_name)
+    }
 }
 
 #[cfg(test)]

@@ -563,7 +563,7 @@ fn watches_evaluate_in_the_address_space_the_frame_was_recovered_in() {
         pid: 8,
         name: "other.exe".to_string(),
         dtb: attached_dtb,
-        eprocess_va: VirtAddr(0),
+        eprocess: VirtAddr(0),
         wow64_peb: None,
     });
     let (_tx, rx) = mpsc::channel();

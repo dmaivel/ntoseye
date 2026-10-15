@@ -355,7 +355,7 @@ class AlpcOwnedPort(BaseRecord):
     @property
     def port(self, /) -> int: ...
     @property
-    def termination(self, /) -> ListEnd: ...
+    def termination(self, /) -> ListTermination: ...
 
 @final
 class AlpcPort(BaseRecord):
@@ -381,7 +381,7 @@ class AlpcPort(BaseRecord):
     @property
     def connection_port(self, /) -> int |None: ...
     @property
-    def connection_termination(self, /) -> ListEnd |None:
+    def connection_termination(self, /) -> ListTermination |None:
         """
         How the walk of the connection list ended. None if there was no walk.
         """
@@ -460,7 +460,7 @@ class AlpcProcessPorts(BaseRecord):
         The connection ports that the process owns.
         """
     @property
-    def process(self, /) -> ProcessIdentity: ...
+    def process(self, /) -> ProcessInfo: ...
     @property
     def scanned_handles(self, /) -> int: ...
     @property
@@ -503,7 +503,7 @@ class AlpcQueue(BaseRecord):
         count.
         """
     @property
-    def termination(self, /) -> ListEnd: ...
+    def termination(self, /) -> ListTermination: ...
 
 @final
 class Amd64TrapFrame(BaseRecord):
@@ -737,7 +737,7 @@ class ApcThread(BaseRecord):
     @property
     def kernel(self, /) -> list[Apc]: ...
     @property
-    def kernel_termination(self, /) -> ListEnd:
+    def kernel_termination(self, /) -> ListTermination:
         """
         How the kernel-mode list walk ended.
         """
@@ -747,11 +747,11 @@ class ApcThread(BaseRecord):
         The error, if ntoseye could not read the APC state of the thread.
         """
     @property
-    def thread(self, /) -> ThreadSummary: ...
+    def thread(self, /) -> ThreadInfo: ...
     @property
     def user(self, /) -> list[Apc]: ...
     @property
-    def user_termination(self, /) -> ListEnd:
+    def user_termination(self, /) -> ListTermination:
         """
         How the user-mode list walk ended.
         """
@@ -3286,7 +3286,7 @@ class DpcQueue(BaseRecord):
         0 for the normal queue, 1 for the threaded queue.
         """
     @property
-    def termination(self, /) -> ListEnd:
+    def termination(self, /) -> ListTermination:
         """
         How the list walk ended.
         """
@@ -4708,6 +4708,12 @@ class FindStackThread(BaseRecord):
     A thread with a stack frame that matches the `!findstack` pattern.
     """
     @property
+    def active(self, /) -> str |None:
+        """
+        The vCPU that runs the thread, if the listing resolves it. `None` if
+        no vCPU runs it, and while the target runs.
+        """
+    @property
     def frames(self, /) -> list[StackFrame] |None:
         """
         The whole walked stack, innermost first. `None` below level 2.
@@ -4723,7 +4729,7 @@ class FindStackThread(BaseRecord):
         The frames that matched. `None` at level 0.
         """
     @property
-    def thread(self, /) -> ThreadSummary: ...
+    def thread(self, /) -> ThreadInfo: ...
     @property
     def truncated(self, /) -> int |None:
         """
@@ -5134,7 +5140,7 @@ class GlobalFlags(BaseRecord):
     @property
     def kernel_flags(self, /) -> list[GlobalFlag]: ...
     @property
-    def process(self, /) -> ProcessIdentity |None:
+    def process(self, /) -> ProcessInfo |None:
         """
         The current process. `None` if no process is selected.
         """
@@ -5296,7 +5302,7 @@ class HandleTable(BaseRecord):
     @property
     def entries(self, /) -> list[HandleEntry]: ...
     @property
-    def process(self, /) -> ProcessIdentity:
+    def process(self, /) -> ProcessInfo:
         """
         The process that owns the table.
         """
@@ -5383,7 +5389,7 @@ class HandleTraces(BaseRecord):
         The number of ring slots that ntoseye read.
         """
     @property
-    def process(self, /) -> ProcessIdentity:
+    def process(self, /) -> ProcessInfo:
         """
         The traced process.
         """
@@ -7987,7 +7993,7 @@ class Job(BaseRecord):
         The `_EJOB`.
         """
     @property
-    def child_job_list_termination(self, /) -> ListEnd: ...
+    def child_job_list_termination(self, /) -> ListTermination: ...
     @property
     def child_jobs(self, /) -> list[int]: ...
     @property
@@ -8018,9 +8024,9 @@ class Job(BaseRecord):
         `None` for a top-level job.
         """
     @property
-    def process_list_termination(self, /) -> ListEnd: ...
+    def process_list_termination(self, /) -> ListTermination: ...
     @property
-    def processes(self, /) -> list[ProcessIdentity]: ...
+    def processes(self, /) -> list[ProcessInfo]: ...
     @property
     def root_job(self, /) -> int |None:
         """
@@ -8036,7 +8042,7 @@ class Job(BaseRecord):
     @property
     def silo(self, /) -> bool:
         """
-        True if the job is a silo.
+        True if the job is a silo (`JobFlags.Silo`).
         """
     @property
     def unreadable_processes(self, /) -> list[int]:
@@ -8301,7 +8307,7 @@ class LfhSubsegment(BaseRecord):
     def free_count(self, /) -> int: ...
 
 @final
-class ListEnd(BaseRecord):
+class ListTermination(BaseRecord):
     """
     The end condition of a guest linked-list walk.
     """
@@ -8311,17 +8317,19 @@ class ListEnd(BaseRecord):
         The address where a cycle closed.
         """
     @property
+    def diagnostic(self, /) -> str |None:
+        """
+        Why the walk ended before the list head, if it did.
+        """
+    @property
     def error(self, /) -> str |None:
         """
-        The problem with a corrupt link. Some walks also set this for a null
-        link.
+        The problem with a corrupt link.
         """
     @property
     def kind(self, /) -> str:
         """
-        `head` (the walk came back to the list head), `null`, `cycle` (a
-        loop that does not go through the head), `bound` (the walk reached
-        its limit), or `corrupt`.
+        The variant: `head`, `null`, `cycle`, `bound`, `corrupt`.
         """
 
 @final
@@ -8479,9 +8487,9 @@ class LoaderTerminations(BaseRecord):
     How a process's native and WOW64 loader-list walks ended.
     """
     @property
-    def termination(self, /) -> ListEnd: ...
+    def termination(self, /) -> ListTermination: ...
     @property
-    def wow64_termination(self, /) -> ListEnd |None:
+    def wow64_termination(self, /) -> ListTermination |None:
         """
         `None` for a native process.
         """
@@ -8853,7 +8861,7 @@ class MemoryBasicInformation(BaseRecord):
     @property
     def base_address(self, /) -> int: ...
     @property
-    def process(self, /) -> ProcessIdentity: ...
+    def process(self, /) -> ProcessInfo: ...
     @property
     def protect(self, /) -> int: ...
     @property
@@ -12134,7 +12142,7 @@ class Process:
     def to_dict(self, /) -> dict[str, Any]:
         """
         Get the process identity as a plain `dict` (`pid`, `name`, `dtb`,
-        `eprocess`, `wow64`).
+        `eprocess`, `wow64_peb`, `wow64`).
         """
     def token(self, /) -> Token:
         """
@@ -12162,9 +12170,10 @@ class ProcessGlobalFlags(BaseRecord):
     def value(self, /) -> int: ...
 
 @final
-class ProcessIdentity(BaseRecord):
+class ProcessInfo(BaseRecord):
     """
-    The identity of a process (`ps`, `!process 0 0`).
+    The identity of a process (`ps`, `!process 0 0`) and the root (`dtb`) of
+    its address space.
     """
     @property
     def dtb(self, /) -> int:
@@ -12184,6 +12193,12 @@ class ProcessIdentity(BaseRecord):
     def wow64(self, /) -> bool:
         """
         True if it is a 32-bit process that runs under WOW64.
+        """
+    @property
+    def wow64_peb(self, /) -> int |None:
+        """
+        The 32-bit PEB of a WOW64 process (`_EPROCESS.WoW64Process`), `None`
+        for a native process.
         """
 
 @final
@@ -12210,7 +12225,7 @@ class ProcessMemoryUsage(BaseRecord):
     @property
     def private_usage(self, /) -> Diagnostic[int]: ...
     @property
-    def process(self, /) -> ProcessIdentity: ...
+    def process(self, /) -> ProcessInfo: ...
     @property
     def virtual_size(self, /) -> Diagnostic[int]: ...
     @property
@@ -12565,7 +12580,7 @@ class ReadyQueue(BaseRecord):
     @property
     def processor(self, /) -> int: ...
     @property
-    def termination(self, /) -> ListEnd:
+    def termination(self, /) -> ListTermination:
         """
         How the list walk ended.
         """
@@ -12604,7 +12619,7 @@ class ReadyThread(BaseRecord):
         The `_KTHREAD` linked on the queue.
         """
     @property
-    def thread(self, /) -> Diagnostic[ThreadSummary]:
+    def thread(self, /) -> Diagnostic[ThreadInfo]:
         """
         The decoded thread.
         """
@@ -12973,7 +12988,7 @@ class ResourceList(BaseRecord):
     @property
     def resources(self, /) -> list[ExecutiveResource]: ...
     @property
-    def termination(self, /) -> ListEnd: ...
+    def termination(self, /) -> ListTermination: ...
 
 @final
 class ResourceOwner(BaseRecord):
@@ -13021,7 +13036,7 @@ class RunStatus(BaseRecord):
     Whether the target runs, and where it stopped.
     """
     @property
-    def attached_process(self, /) -> ProcessIdentity |None:
+    def attached_process(self, /) -> ProcessInfo |None:
         """
         The process that you selected with `.process`. `dt`, `dq`, and
         similar commands read its memory, and the selection stays after the
@@ -13077,12 +13092,12 @@ class RunStatus(BaseRecord):
         virtual processor it serves, as `VcpuStatus.serving`.
         """
     @property
-    def stopped_process(self, /) -> ProcessIdentity |None:
+    def stopped_process(self, /) -> ProcessInfo |None:
         """
         The process whose page tables the stopped vCPU has loaded.
         """
     @property
-    def stopped_thread(self, /) -> ThreadSummary |None:
+    def stopped_thread(self, /) -> ThreadInfo |None:
         """
         The Windows thread that the stopped vCPU runs. Its owner can be
         different from `stopped_process` (`KeStackAttachProcess`).
@@ -13100,13 +13115,13 @@ class RunningProcessor(BaseRecord):
     A processor's running, next, and idle threads (`!running`).
     """
     @property
-    def current_thread(self, /) -> Diagnostic[ThreadSummary |None]:
+    def current_thread(self, /) -> Diagnostic[ThreadInfo |None]:
         """
         The thread that runs on the processor. The value inside is `None` if
         no thread runs.
         """
     @property
-    def idle_thread(self, /) -> Diagnostic[ThreadSummary |None]:
+    def idle_thread(self, /) -> Diagnostic[ThreadInfo |None]:
         """
         The processor's idle thread.
         """
@@ -13118,7 +13133,7 @@ class RunningProcessor(BaseRecord):
     @property
     def kpcr(self, /) -> Diagnostic[int]: ...
     @property
-    def next_thread(self, /) -> Diagnostic[ThreadSummary |None]:
+    def next_thread(self, /) -> Diagnostic[ThreadInfo |None]:
         """
         The thread selected to run next. The value inside is `None` if there
         is no next thread.
@@ -13629,7 +13644,7 @@ class Session(BaseRecord):
         `None` for processes whose session is unknown.
         """
     @property
-    def processes(self, /) -> list[ProcessIdentity]:
+    def processes(self, /) -> list[ProcessInfo]:
         """
         The processes in the session.
         """
@@ -15351,9 +15366,10 @@ class Thread:
         """
         The `_ETHREAD` address, which identifies the thread.
         """
-    def inspect(self, /) -> ThreadSummary:
+    def inspect(self, /) -> ThreadInfo:
         """
-        Get the thread summary and the saved scheduling details (`!thread`).
+        Get the thread as the walk read it: its identity, state, scheduling
+        details and stack bounds (`!thread`).
         """
     @property
     def kthread(self, /) -> int:
@@ -15410,6 +15426,85 @@ class Thread:
         """
 
 @final
+class ThreadInfo(BaseRecord):
+    """
+    A Windows thread, as `threads`, `!thread`, and all scheduler listings
+    show it. A field that the walk could not read is `None`.
+    """
+    @property
+    def base_priority(self, /) -> int |None: ...
+    @property
+    def eprocess(self, /) -> int |None:
+        """
+        The owning `_EPROCESS`.
+        """
+    @property
+    def ethread(self, /) -> int: ...
+    @property
+    def kernel_stack(self, /) -> int |None:
+        """
+        `_KTHREAD.KernelStack`, the saved stack pointer of a thread that is
+        not running.
+        """
+    @property
+    def kernel_stack_resident(self, /) -> bool |None: ...
+    @property
+    def kthread(self, /) -> int: ...
+    @property
+    def pending_irps(self, /) -> list[int] |None:
+        """
+        The IRPs on the thread's `IrpList`.
+        """
+    @property
+    def pid(self, /) -> int |None: ...
+    @property
+    def priority(self, /) -> int |None:
+        """
+        The current scheduling priority.
+        """
+    @property
+    def process_name(self, /) -> str |None:
+        """
+        The image name of the owning process.
+        """
+    @property
+    def stack_base(self, /) -> int |None: ...
+    @property
+    def stack_limit(self, /) -> int |None: ...
+    @property
+    def start_address(self, /) -> int |None: ...
+    @property
+    def state(self, /) -> int |None:
+        """
+        `_KTHREAD.State`.
+        """
+    @property
+    def state_name(self, /) -> str |None:
+        """
+        The name of the state (`Running`, `Waiting`, ...).
+        """
+    @property
+    def teb(self, /) -> int |None: ...
+    @property
+    def tid(self, /) -> int |None: ...
+    @property
+    def trap_frame(self, /) -> int |None: ...
+    @property
+    def wait_irql(self, /) -> int |None: ...
+    @property
+    def wait_reason(self, /) -> int |None:
+        """
+        `_KTHREAD.WaitReason`.
+        """
+    @property
+    def wait_reason_name(self, /) -> str |None:
+        """
+        The name of the wait reason (`Executive`, `UserRequest`, ...).
+        """
+    @property
+    def win32_start_address(self, /) -> int |None: ...
+
+@final
 class ThreadIterator:
     """
     Iterator over `dbg.threads` / `proc.threads`.
@@ -15423,6 +15518,12 @@ class ThreadStack(BaseRecord):
     The state and walked stack of a thread (`!stacks`).
     """
     @property
+    def active(self, /) -> str |None:
+        """
+        The vCPU that runs the thread, if the listing resolves it. `None` if
+        no vCPU runs it, and while the target runs.
+        """
+    @property
     def error(self, /) -> str |None:
         """
         The error, if the stack walk failed.
@@ -15434,7 +15535,7 @@ class ThreadStack(BaseRecord):
         up to 32 frames, and level 2 has up to 64 frames.
         """
     @property
-    def thread(self, /) -> ThreadSummary: ...
+    def thread(self, /) -> ThreadInfo: ...
     @property
     def top_symbol(self, /) -> Diagnostic[str |None]:
         """
@@ -15475,62 +15576,6 @@ class ThreadStacks(BaseRecord):
     def threads(self, /) -> list[ThreadStack]: ...
 
 @final
-class ThreadSummary(BaseRecord):
-    """
-    A Windows thread, as `threads`, `!thread`, and all scheduler listings
-    show it. A field that the walk could not read is `None`.
-    """
-    @property
-    def active(self, /) -> str |None:
-        """
-        The vCPU that runs the thread, if the listing resolves it. `None` if
-        no vCPU runs it, and while the target runs.
-        """
-    @property
-    def eprocess(self, /) -> int |None:
-        """
-        The owning `_EPROCESS`.
-        """
-    @property
-    def ethread(self, /) -> int: ...
-    @property
-    def kthread(self, /) -> int: ...
-    @property
-    def pid(self, /) -> int |None: ...
-    @property
-    def priority(self, /) -> int |None:
-        """
-        The current scheduling priority.
-        """
-    @property
-    def process_name(self, /) -> str |None:
-        """
-        The image name of the owning process.
-        """
-    @property
-    def state(self, /) -> int |None:
-        """
-        `_KTHREAD.State`.
-        """
-    @property
-    def state_name(self, /) -> str |None:
-        """
-        The name of the state (`Running`, `Waiting`, ...).
-        """
-    @property
-    def tid(self, /) -> int |None: ...
-    @property
-    def wait_reason(self, /) -> int |None:
-        """
-        `_KTHREAD.WaitReason`.
-        """
-    @property
-    def wait_reason_name(self, /) -> str |None:
-        """
-        The name of the wait reason (`Executive`, `UserRequest`, ...).
-        """
-
-@final
 class Threads:
     """
     A collection of threads: `dbg.threads` (all threads) or `proc.threads`.
@@ -15563,7 +15608,7 @@ class TimerBucketEnd(BaseRecord):
     @property
     def processor(self, /) -> int: ...
     @property
-    def termination(self, /) -> ListEnd: ...
+    def termination(self, /) -> ListTermination: ...
 
 @final
 class TimerTable(BaseRecord):
@@ -15636,7 +15681,7 @@ class Token(BaseRecord):
     @property
     def privileges(self, /) -> Diagnostic[list[TokenPrivilege]]: ...
     @property
-    def process(self, /) -> ProcessIdentity:
+    def process(self, /) -> ProcessInfo:
         """
         The process record.
         """
@@ -15962,7 +16007,7 @@ class UniqStackGroup(BaseRecord):
     @property
     def thread_count(self, /) -> int: ...
     @property
-    def threads(self, /) -> list[ThreadSummary]: ...
+    def threads(self, /) -> list[ThreadInfo]: ...
     @property
     def truncated(self, /) -> int:
         """
@@ -16043,7 +16088,7 @@ class UnwalkedThread(BaseRecord):
         The reason the walk failed.
         """
     @property
-    def thread(self, /) -> ThreadSummary: ...
+    def thread(self, /) -> ThreadInfo: ...
 
 @final
 class UnwindHandler(BaseRecord):
@@ -16885,7 +16930,7 @@ class Verifier(BaseRecord):
     @property
     def statistics(self, /) -> VerifierStatistics: ...
     @property
-    def suspect_list_termination(self, /) -> ListEnd:
+    def suspect_list_termination(self, /) -> ListTermination:
         """
         How the suspect-list walk ended.
         """
@@ -19081,7 +19126,7 @@ class WorkQueue(BaseRecord):
     @property
     def threads(self, /) -> list[WorkerThread]: ...
     @property
-    def threads_termination(self, /) -> ListEnd:
+    def threads_termination(self, /) -> ListTermination:
         """
         How the worker-thread list walk ended.
         """
@@ -19105,7 +19150,7 @@ class WorkQueuePriority(BaseRecord):
         The `WORK_QUEUE_TYPE`s that `ExQueueWorkItem` maps to this priority.
         """
     @property
-    def termination(self, /) -> ListEnd:
+    def termination(self, /) -> ListTermination:
         """
         How the list walk ended.
         """
@@ -19153,7 +19198,7 @@ class WorkerThread(BaseRecord):
         thread did not decode.
         """
     @property
-    def thread(self, /) -> Diagnostic[ThreadSummary]: ...
+    def thread(self, /) -> Diagnostic[ThreadInfo]: ...
 
 @final
 class ZombieProcess(BaseRecord):

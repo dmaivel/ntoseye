@@ -64,7 +64,7 @@ impl Target {
     ) -> Result<HandleTraceDetail> {
         let types = self.guest()?.ntoskrnl.types_in(process.dtb);
         let object_table = types
-            .struct_at("_EPROCESS", process.eprocess_va)?
+            .struct_at("_EPROCESS", process.eprocess)?
             .read_pointer("ObjectTable")?;
         if object_table.is_zero() {
             return Err(Error::DebugInfo(format!(

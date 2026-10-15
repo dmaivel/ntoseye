@@ -1,10 +1,10 @@
 //! Neutral value-tree views for memory-manager inspectors.
 
+use crate::guest::ProcessInfo;
 use crate::target::DiagnosticMetric;
 use crate::target::DiagnosticValue;
 use ntoseye_macros::record;
 
-use super::process::process;
 use crate::target::mm::{
     self as target_mm, BigPoolDetail, LookasideDetail, LookasideListsDetail, MdlDetail,
     MemoryRegionInfo, PfnDetail, PoolBlockDetail, PoolFindDetail, PoolFindMatch, PoolFindRange,
@@ -588,7 +588,7 @@ pub struct MemoryRegion {
 /// `MEM_*`/`PAGE_*` value has its name next to it.
 #[record]
 pub struct MemoryBasicInformation {
-    pub process: super::process::ProcessIdentity,
+    pub process: ProcessInfo,
     pub address: VirtAddr,
     pub base_address: VirtAddr,
     /// The VAD's start; zero for free memory.
@@ -665,7 +665,7 @@ pub struct MemorySearchMatch {
 /// One process's memory counters, in bytes.
 #[record]
 pub struct ProcessMemoryUsage {
-    pub process: super::process::ProcessIdentity,
+    pub process: ProcessInfo,
     pub virtual_size: DiagnosticValue<u64>,
     pub peak_virtual_size: DiagnosticValue<u64>,
     pub working_set_size: DiagnosticValue<u64>,
@@ -1103,7 +1103,7 @@ pub fn memory_region(r: &MemoryRegionInfo) -> MemoryRegion {
 /// `!vprot`'s `VirtualQuery` fields.
 pub fn vprot(detail: &VprotDetail) -> MemoryBasicInformation {
     MemoryBasicInformation {
-        process: process(&detail.process),
+        process: detail.process.clone(),
         address: detail.address,
         base_address: detail.base_address,
         allocation_base: detail.allocation_base,
@@ -1171,7 +1171,7 @@ pub fn undescribed_search_match(
 
 fn process_memory_usage(usage: &target_mm::ProcessMemoryUsage) -> ProcessMemoryUsage {
     ProcessMemoryUsage {
-        process: process(&usage.process),
+        process: usage.process.clone(),
         virtual_size: usage.virtual_size.clone(),
         peak_virtual_size: usage.peak_virtual_size.clone(),
         working_set_size: usage.working_set_size.clone(),

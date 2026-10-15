@@ -184,6 +184,15 @@ impl<M, T: ToView<M>> ToView<M> for Box<T> {
     const HINT: PyStaticExpr = T::HINT;
 }
 
+/// A fixed-size array: a `list`, as a `Vec`.
+impl<M, T: ToView<M>, const N: usize> ToView<M> for [T; N] {
+    fn to_view(&self) -> View {
+        View::List(self.iter().map(T::to_view).collect())
+    }
+    #[cfg(feature = "python-stubs")]
+    const HINT: PyStaticExpr = <Vec<T> as ToView<M>>::HINT;
+}
+
 fn diagnostic<M, T: ToView<M>>(value: &DiagnosticValue<T>, source: Option<Option<String>>) -> View {
     let (value, error) = match value {
         DiagnosticValue::Available(value) => (Some(value.to_view()), None),
@@ -391,6 +400,7 @@ mod hints {
         absent: Option<u8> [Plain] = None,
         present: Option<u8> [Plain] = Some(1),
         list: Vec<Inner> [Plain] = vec![Inner { id: 1 }],
+        #[record(hex)] array: [u64; 2] [Hex] = [1, 2],
         boxed: Box<Inner> [Plain] = Box::new(Inner { id: 2 }),
         nested: Inner [Plain] = Inner { id: 3 },
         read: DiagnosticValue<VirtAddr> [Plain] = DiagnosticValue::Available(VirtAddr(0x20)),

@@ -1354,14 +1354,14 @@ impl Target {
             .guest()?
             .ntoskrnl
             .types_in(process.dtb)
-            .struct_at("_EPROCESS", process.eprocess_va)?;
+            .struct_at("_EPROCESS", process.eprocess)?;
         parent_pid(&eprocess)
     }
 
     /// Read the layout-sensitive `_EPROCESS` fields `!process` reports,
     /// trying each build's field names in turn.
     pub fn process_detail(&self, process: &ProcessInfo) -> ProcessDetail {
-        let session_id = self.process_session_id(process.eprocess_va);
+        let session_id = self.process_session_id(process.eprocess);
         let unavailable = || ProcessDetail {
             session_id,
             ..ProcessDetail::default()
@@ -1370,7 +1370,7 @@ impl Target {
             return unavailable();
         };
         let types = guest.ntoskrnl.types_in(process.dtb);
-        let Ok(eprocess) = types.struct_at("_EPROCESS", process.eprocess_va) else {
+        let Ok(eprocess) = types.struct_at("_EPROCESS", process.eprocess) else {
             return unavailable();
         };
         let eprocess = eprocess.prefetch();
@@ -1458,7 +1458,7 @@ impl Target {
         let eprocess = guest
             .ntoskrnl
             .types_in(process.dtb)
-            .struct_at("_EPROCESS", process.eprocess_va)?;
+            .struct_at("_EPROCESS", process.eprocess)?;
         let eprocess_layout = guest.ntoskrnl.types().layout("_EPROCESS")?;
         let thread_list_head_offset = eprocess_layout.field_offset("ThreadListHead")?;
         let ethread_layout = guest.ntoskrnl.types().layout("_ETHREAD")?;
@@ -1604,7 +1604,7 @@ impl Target {
             tid,
             pid: pid.or_else(|| owner.map(|process| process.pid)),
             process_name,
-            eprocess: eprocess.or_else(|| owner.map(|process| process.eprocess_va)),
+            eprocess: eprocess.or_else(|| owner.map(|process| process.eprocess)),
             state: read_kthread_u8("State"),
             wait_reason: read_kthread_u8("WaitReason"),
             priority: read_kthread_u8("Priority"),

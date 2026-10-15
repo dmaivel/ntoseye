@@ -17,6 +17,7 @@ use crate::expr::NumberRadix;
 use crate::session::Session;
 use crate::target::etw::parse_guid;
 use crate::target::irpfind::{IrpCriteria, IrpPool};
+use crate::target::job::Job;
 use crate::target::mm::{PfnSelector, PoolType, PoolUsageSort};
 use crate::target::pci::{PCI_EXTENDED_CONFIG_SIZE, PciQuery, PciRawRange};
 use crate::target::registry::names_equal;
@@ -223,16 +224,11 @@ impl Inspect {
     /// `address` is the job or a process or thread whose job to decode, and
     /// `None` selects the job of the current process.
     #[pyo3(signature = (address=None))]
-    fn job<'py>(
-        &self,
-        py: Python<'py>,
-        address: Option<u64>,
-    ) -> PyResult<Typed<'py, view::process::Job>> {
+    fn job<'py>(&self, py: Python<'py>, address: Option<u64>) -> PyResult<Typed<'py, Job>> {
         self.typed(py, |session| {
             let target = &session.target;
             let job = target.job_address(address.map(VirtAddr)).map_err(err)?;
-            let detail = target.inspect_job(job).map_err(err)?;
-            Ok(view::process::job(&detail))
+            target.inspect_job(job).map_err(err)
         })
     }
 

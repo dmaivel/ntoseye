@@ -240,7 +240,7 @@ fn print_session(detail: &SessionDetail) {
             "    {:>6} {}  EPROCESS {}",
             process.pid,
             process.name,
-            ui::addr(process.eprocess_va.0)
+            ui::addr(process.eprocess.0)
         );
     }
     if detail.processes.len() > MAX_SESSION_DISPLAY {
@@ -278,7 +278,7 @@ fn print_session_processes(detail: &SessionProcessesDetail) {
             builder.push_record([
                 row.process.pid.to_string(),
                 row.process.name.clone(),
-                ui::addr(row.process.eprocess_va.0),
+                ui::addr(row.process.eprocess.0),
                 ui::addr(row.process.dtb),
                 row.session
                     .map(|id| id.to_string())

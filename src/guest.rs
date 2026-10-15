@@ -10,6 +10,7 @@ use crate::{
     target::object::DriverObjectInfo,
     types::*,
 };
+use ntoseye_macros::record;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, atomic::AtomicBool};
 use vad::{MissingOffset, VadTreeOffsets};
@@ -46,19 +47,26 @@ pub use image::{Image, SymbolRef};
 pub use modules::{UNKNOWN_MODULE_NAME, merge_wow64_modules, walk_loader_list, walk_loader_list32};
 pub use secure_kernel::{SecureKernel, TrustletInfo};
 
-/// A process's identity and the root (`dtb`) of its address space.
-#[derive(Debug, Clone)]
+/// The identity of a process (`ps`, `!process 0 0`) and the root (`dtb`) of
+/// its address space.
+#[record(impl)]
 pub struct ProcessInfo {
     pub pid: u64,
+    /// The image name.
     pub name: String,
+    /// The directory table base (page-table root).
+    #[record(hex)]
     pub dtb: Dtb,
-    pub eprocess_va: VirtAddr,
+    pub eprocess: VirtAddr,
     /// The 32-bit PEB of a WOW64 process (`_EPROCESS.WoW64Process`), `None`
     /// for a native process.
     pub wow64_peb: Option<VirtAddr>,
 }
 
+#[record]
 impl ProcessInfo {
+    /// True if it is a 32-bit process that runs under WOW64.
+    #[record(getter, rename = "wow64")]
     pub fn is_wow64(&self) -> bool {
         self.wow64_peb.is_some()
     }

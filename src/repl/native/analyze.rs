@@ -602,7 +602,7 @@ fn faulting_context(report: &TriageReport) -> Section<()> {
             [
                 span(&process.name, STRONG),
                 span(format!(" (pid {}, eprocess ", process.pid), MUTED),
-                addr(process.eprocess_va.0),
+                addr(process.eprocess.0),
                 span(")", MUTED),
             ],
         );

@@ -59,7 +59,7 @@ fn decide_bitness(
 
 fn thread_owner_matches(thread: &ThreadInfo, process: &ProcessInfo) -> bool {
     match thread.eprocess {
-        Some(eprocess) => eprocess == process.eprocess_va,
+        Some(eprocess) => eprocess == process.eprocess,
         None => thread.pid.is_some_and(|pid| pid == process.pid),
     }
 }
@@ -473,7 +473,7 @@ impl Target {
             // captured); reads go through the identity mapping, so report
             // the DTB that actually resolves.
             dtb: self.kernel_dtb(),
-            eprocess_va: VirtAddr(0),
+            eprocess: VirtAddr(0),
             wow64_peb: None,
         }])
     }
@@ -670,7 +670,7 @@ mod tests {
             pid: 42,
             name: "nt-process.exe".into(),
             dtb: 0x3000,
-            eprocess_va: VirtAddr(0xffff800000004000),
+            eprocess: VirtAddr(0xffff800000004000),
             wow64_peb: None,
         });
         target.symbols.set_secure_roots(0x5000, [0x6000]);
@@ -695,14 +695,14 @@ mod tests {
             pid: thread.pid.unwrap(),
             name: "reused.exe".into(),
             dtb: 0x1111_0000,
-            eprocess_va: VirtAddr(0xffff_8000_0000_9999),
+            eprocess: VirtAddr(0xffff_8000_0000_9999),
             wow64_peb: None,
         };
         let owner = ProcessInfo {
             pid: 0x99,
             name: "sample.exe".into(),
             dtb: 0x2222_0000,
-            eprocess_va: thread.eprocess.unwrap(),
+            eprocess: thread.eprocess.unwrap(),
             wow64_peb: None,
         };
         assert!(!thread_owner_matches(&thread, &same_pid_wrong_process));
@@ -744,7 +744,7 @@ mod tests {
             pid,
             name: name.into(),
             dtb: 0,
-            eprocess_va: VirtAddr(0),
+            eprocess: VirtAddr(0),
             wow64_peb: None,
         };
         let processes = [
