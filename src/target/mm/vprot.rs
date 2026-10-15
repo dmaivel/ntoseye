@@ -6,6 +6,7 @@ use super::{MemoryRegionInfo, VadType, VprotDetail};
 use crate::bugchecks::looks_like_kernel_pointer;
 use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
+use crate::guest::vad::vad_node_offset;
 use crate::layout::{FieldInfo, ParsedType, TypeInfo};
 use crate::memory::{AddressSpace, MemoryOps, PAGE_SIZE};
 use crate::phys::PhysMem;
@@ -481,7 +482,7 @@ impl Target {
         let types = guest.ntoskrnl.types();
         let kernel = self.kernel_address_space();
         let vad_short = types.layout("_MMVAD_SHORT")?;
-        let vad = region.node_address - vad_short.field_offset("VadNode").unwrap_or(0);
+        let vad = region.node_address - vad_node_offset(&vad_short);
         let flags_offset = vad_short.field_offset("u")?;
         let flags: u32 = kernel.read(vad + flags_offset)?;
         let private = region.private_memory.unwrap_or(false);

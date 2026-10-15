@@ -6,6 +6,7 @@ use std::collections::HashSet;
 
 use super::{AddressDescription, AddressModule, MemoryRegionInfo, VadProtection, VadType};
 use crate::error::Result;
+use crate::guest::vad::{MissingOffset, VadTreeOffsets, vad_tree_link};
 use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::layout::{ParsedType, TypeInfo, bitfield_value};
 use crate::memory::MemoryOps;
@@ -163,10 +164,7 @@ impl Target {
         let vad_layout = types
             .layout("_MMVAD_SHORT")
             .or_else(|_| types.layout("_MMVAD"))?;
-        let vad_node_offset = vad_layout.field_offset("VadNode").unwrap_or(0);
-        let node_layout = types.layout("_RTL_BALANCED_NODE")?;
-        let left_offset = node_layout.field_offset("Left").unwrap_or(0);
-        let right_offset = node_layout.field_offset("Right").unwrap_or(8);
+        let offsets = VadTreeOffsets::resolve(types, &vad_layout, MissingOffset::Default)?;
         let flags_layout = types.layout("_MMVAD_FLAGS").ok();
         let modules = guest.process_modules(process).unwrap_or_default();
 
@@ -179,8 +177,8 @@ impl Target {
                 continue;
             }
 
-            let left = Self::canonical_vad_link(memory.read::<VirtAddr>(node + left_offset)?);
-            let right = Self::canonical_vad_link(memory.read::<VirtAddr>(node + right_offset)?);
+            let left = vad_tree_link(memory.read(node + offsets.left)?);
+            let right = vad_tree_link(memory.read(node + offsets.right)?);
             if !right.is_zero() {
                 stack.push((right, level.saturating_add(1)));
             }
@@ -188,7 +186,7 @@ impl Target {
                 stack.push((left, level.saturating_add(1)));
             }
 
-            let vad = node - vad_node_offset;
+            let vad = node - offsets.vad_node;
             if let Some(region) = Self::read_vad_region(
                 &memory,
                 &vad_layout,
@@ -213,16 +211,9 @@ impl Target {
         if let Ok(tree_layout) = types.layout("_RTL_AVL_TREE")
             && let Ok(root_offset) = tree_layout.field_offset("Root")
         {
-            let root: VirtAddr = memory.read(vad_root_base + root_offset)?;
-            return Ok(Self::canonical_vad_link(root));
+            return Ok(vad_tree_link(memory.read(vad_root_base + root_offset)?));
         }
-
-        let root: VirtAddr = memory.read(vad_root_base)?;
-        Ok(Self::canonical_vad_link(root))
-    }
-
-    fn canonical_vad_link(link: VirtAddr) -> VirtAddr {
-        VirtAddr(link.0 & !0xf)
+        Ok(vad_tree_link(memory.read(vad_root_base)?))
     }
 
     fn read_integer_field(

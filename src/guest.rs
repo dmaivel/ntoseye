@@ -12,6 +12,7 @@ use crate::{
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, atomic::AtomicBool};
+use vad::{MissingOffset, VadTreeOffsets};
 
 mod discovery;
 pub mod ept;
@@ -29,6 +30,7 @@ mod process;
 mod secure_kernel;
 mod symbol_load;
 mod trustlet_layout;
+pub mod vad;
 pub mod vm_exits;
 pub mod vp_registers;
 
@@ -608,8 +610,8 @@ fn section_layout(kernel: &Image) -> Option<SectionLayout> {
     let eprocess = types.layout("_EPROCESS").ok()?;
     let kprocess = types.layout("_KPROCESS").ok()?;
     let tree = types.layout("_RTL_AVL_TREE").ok()?;
-    let node = types.layout("_RTL_BALANCED_NODE").ok()?;
     let short = types.layout("_MMVAD_SHORT").ok()?;
+    let links = VadTreeOffsets::resolve(types, &short, MissingOffset::Fail).ok()?;
     let vad = types.layout("_MMVAD").ok()?;
     let flags = types.layout("_MMVAD_FLAGS").ok()?;
     let ParsedType::Bitfield { pos, .. } = flags.fields.get("PrivateMemory")?.type_data else {
@@ -622,9 +624,9 @@ fn section_layout(kernel: &Image) -> Option<SectionLayout> {
             + kprocess.field_offset("DirectoryTableBase").ok()?,
         root_mask: kernel.arch().dtb_page_mask(),
         vad_root: eprocess.field_offset("VadRoot").ok()? + tree.field_offset("Root").ok()?,
-        left: node.field_offset("Left").ok()?,
-        right: node.field_offset("Right").ok()?,
-        vad_node: short.field_offset("VadNode").ok()?,
+        left: links.left,
+        right: links.right,
+        vad_node: links.vad_node,
         starting_vpn: short.field_offset("StartingVpn").ok()?,
         ending_vpn: short.field_offset("EndingVpn").ok()?,
         starting_vpn_high: short.field_offset("StartingVpnHigh").ok(),

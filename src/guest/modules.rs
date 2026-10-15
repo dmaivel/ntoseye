@@ -1,6 +1,7 @@
 //! Loader-list walks: a process's native and WOW64 module lists, the
 //! kernel's `PsLoadedModuleList`, and module version population.
 
+use super::vad::{MissingOffset, VadTreeOffsets, vad_tree_link};
 use super::{Guest, ModuleInfo, ProcessInfo, ProcessModulesDetail};
 use crate::{
     bytes::{read_u16, read_u32},
@@ -306,13 +307,7 @@ impl Guest {
     fn mapped_image_name(&self, info: &ProcessInfo, base: VirtAddr) -> Option<String> {
         let types = self.ntoskrnl.types_in(info.dtb);
         let memory = self.ntoskrnl.memory_in(info.dtb);
-        // Tree links keep balance bits in their low bits.
-        let link = |address: VirtAddr| {
-            memory
-                .read::<u64>(address)
-                .ok()
-                .map(|link| VirtAddr(link & !0xf))
-        };
+        let link = |address: VirtAddr| memory.read::<u64>(address).ok().map(vad_tree_link);
         let vad_root = types
             .struct_at("_EPROCESS", info.eprocess_va)
             .ok()?
@@ -321,10 +316,11 @@ impl Guest {
         // `_RTL_AVL_TREE.Root`; before it, the root pointer itself.
         let root = link(vad_root.addr() + vad_root.layout().field_offset("Root").unwrap_or(0))?;
         let short = types.layout("_MMVAD_SHORT").ok()?;
-        let vad_node = short.field_offset("VadNode").unwrap_or(0);
-        let balanced = types.layout("_RTL_BALANCED_NODE").ok()?;
-        let left = balanced.field_offset("Left").unwrap_or(0);
-        let right = balanced.field_offset("Right").unwrap_or(8);
+        let VadTreeOffsets {
+            vad_node,
+            left,
+            right,
+        } = VadTreeOffsets::resolve(types, &short, MissingOffset::Default).ok()?;
         let read_node = |node: VirtAddr| {
             let vad = types.struct_with_layout(Arc::clone(&short), node - vad_node);
             let vpn = |low: &str, high: &str| -> Option<u64> {
