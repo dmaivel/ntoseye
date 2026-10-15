@@ -328,7 +328,7 @@ fn arm64() -> Vec<WireRegister> {
 #[cfg(test)]
 mod tests {
     use super::Layout;
-    use crate::kd::context::{REGISTER_BUFFER_SIZE, build_register_map};
+    use crate::cpu_context::amd64::{REGISTER_BUFFER_SIZE, build_register_map};
     use crate::types::Arch;
 
     /// Byte offset of a register on the wire: its position in the AMD64

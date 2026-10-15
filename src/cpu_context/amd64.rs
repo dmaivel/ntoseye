@@ -77,7 +77,8 @@ pub const OFFSET_TR: usize = OFFSET_IDTR_LIMIT + 8;
 pub const OFFSET_LDTR: usize = OFFSET_TR + 8;
 pub const OFFSET_EFER: usize = OFFSET_LDTR + 8;
 
-/// Build the KD register map
+/// The register map over a [`REGISTER_BUFFER_SIZE`] buffer: the CONTEXT's
+/// registers, then the synthetic control and descriptor-table slots behind it.
 pub fn build_register_map() -> RegisterMap {
     let mut regnum = 0usize;
     let mut next_reg = |name: &str, offset: usize, size: usize| -> RegisterInfo {

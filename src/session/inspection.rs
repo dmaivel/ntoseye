@@ -10,13 +10,13 @@ use crate::bugchecks::{
     BugcheckAnalysis, analyze_bugcheck, bugcheck_from_dump_info, current_bugcheck,
 };
 use crate::bytes;
+use crate::cpu_context::{amd64, arm64};
 use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::disasm::{
     DisasmRow, decode_code, decode_preceding, function_extent, instruction_containing,
 };
 use crate::error::{Error, Result};
 use crate::guest::hypervisor::{HvPartition, HvVirtualProcessor, processor_guest_vp};
-use crate::kd::{context, context_arm64};
 use crate::memory::{PAGE_SIZE, read_page_chunks};
 use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::{
@@ -87,11 +87,8 @@ impl Session {
     /// changing the selected backend context (`.cxr`).
     pub fn read_context_record(&self, address: VirtAddr) -> Result<HashMap<String, u64>> {
         let (size, map) = match self.target.arch() {
-            Arch::Amd64 => (context::CONTEXT_SIZE, context::build_register_map()),
-            Arch::Arm64 => (
-                context_arm64::CONTEXT_SIZE,
-                context_arm64::build_register_map(),
-            ),
+            Arch::Amd64 => (amd64::CONTEXT_SIZE, amd64::build_register_map()),
+            Arch::Arm64 => (arm64::CONTEXT_SIZE, arm64::build_register_map()),
         };
         let mut bytes = vec![0u8; size];
         self.read_record_bytes(address, &mut bytes)?;

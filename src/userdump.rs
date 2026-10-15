@@ -15,10 +15,10 @@ use std::path::Path;
 use memmap2::Mmap;
 
 use crate::bytes::get_u32;
+use crate::cpu_context::{amd64, arm64};
 use crate::dbg_backend::RegisterMap;
 use crate::error::{Error, Result};
 use crate::guest::ModuleInfo;
-use crate::kd::{context, context_arm64};
 use crate::pe::headers::CodeView;
 use crate::types::{Arch, VirtAddr};
 
@@ -321,11 +321,8 @@ impl UserDumpInfo {
 /// stay zero: a user dump records none.
 pub fn register_buffer(arch: Arch, raw_context: &[u8]) -> Vec<u8> {
     let (context_size, buffer_size) = match arch {
-        Arch::Amd64 => (context::CONTEXT_SIZE, context::REGISTER_BUFFER_SIZE),
-        Arch::Arm64 => (
-            context_arm64::CONTEXT_SIZE,
-            context_arm64::REGISTER_BUFFER_SIZE,
-        ),
+        Arch::Amd64 => (amd64::CONTEXT_SIZE, amd64::REGISTER_BUFFER_SIZE),
+        Arch::Arm64 => (arm64::CONTEXT_SIZE, arm64::REGISTER_BUFFER_SIZE),
     };
     let mut buffer = vec![0u8; buffer_size];
     let length = raw_context.len().min(context_size);
@@ -344,11 +341,8 @@ pub fn context_registers(
     raw_context: &[u8],
 ) -> HashMap<String, u64> {
     let (size, flags_offset) = match arch {
-        Arch::Amd64 => (context::CONTEXT_SIZE, context::OFFSET_CONTEXT_FLAGS),
-        Arch::Arm64 => (
-            context_arm64::CONTEXT_SIZE,
-            context_arm64::OFFSET_CONTEXT_FLAGS,
-        ),
+        Arch::Amd64 => (amd64::CONTEXT_SIZE, amd64::OFFSET_CONTEXT_FLAGS),
+        Arch::Arm64 => (arm64::CONTEXT_SIZE, arm64::OFFSET_CONTEXT_FLAGS),
     };
     let raw_context = &raw_context[..raw_context.len().min(size)];
     let flags = get_u32(raw_context, flags_offset).unwrap_or(0);
@@ -362,16 +356,14 @@ pub fn context_registers(
         };
         match arch {
             Arch::Amd64 => {
-                (has(context::CONTEXT_SEGMENTS)
-                    || !["ds", "es", "fs", "gs"].contains(&name.as_str()))
-                    && (has(context::CONTEXT_DEBUG_REGISTERS) || !numbered("dr"))
-                    && (has(context::CONTEXT_FLOATING_POINT)
-                        || !(numbered("xmm") || name == "mxcsr"))
+                (has(amd64::CONTEXT_SEGMENTS) || !["ds", "es", "fs", "gs"].contains(&name.as_str()))
+                    && (has(amd64::CONTEXT_DEBUG_REGISTERS) || !numbered("dr"))
+                    && (has(amd64::CONTEXT_FLOATING_POINT) || !(numbered("xmm") || name == "mxcsr"))
             }
             Arch::Arm64 => {
-                (has(context_arm64::CONTEXT_FLOATING_POINT)
+                (has(arm64::CONTEXT_FLOATING_POINT)
                     || !(numbered("v") || name == "fpcr" || name == "fpsr"))
-                    && (has(context_arm64::CONTEXT_DEBUG_REGISTERS)
+                    && (has(arm64::CONTEXT_DEBUG_REGISTERS)
                         || !["bcr", "bvr", "wcr", "wvr"]
                             .iter()
                             .any(|prefix| numbered(prefix)))

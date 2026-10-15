@@ -137,6 +137,7 @@ pub mod bytes;
 pub mod cli;
 #[cfg(feature = "cli")]
 pub mod configure;
+pub mod cpu_context;
 pub mod cpu_state;
 #[cfg(feature = "dap")]
 pub mod dap;

@@ -10,6 +10,7 @@ use crate::backend::MemoryOps;
 use crate::bytes::{
     get_u32, get_u64, read_u16, read_u32, read_u64, write_u16, write_u32, write_u64,
 };
+use crate::cpu_context::{amd64, arm64};
 use crate::cpu_state;
 use crate::dbg_backend::{
     BackendCapability, DebugBackend, DebugCapability, RegisterMap, StopEvent,
@@ -17,8 +18,6 @@ use crate::dbg_backend::{
 };
 use crate::debugger_data::{DebuggerDataCandidate, MetadataSource};
 use crate::error::{Error, Result};
-use crate::kd::context;
-use crate::kd::context_arm64;
 use crate::layout::{ParsedType, TypeInfo};
 use crate::memory::PAGE_SIZE;
 use crate::notice::Notice;
@@ -143,72 +142,72 @@ pub struct UnloadedDriver {
 impl DmpContext {
     pub fn from_bytes(buf: &[u8]) -> Self {
         let mut xmm = [0u128; 16];
-        if buf.len() >= context::OFFSET_XMM0 + 16 * 16 {
+        if buf.len() >= amd64::OFFSET_XMM0 + 16 * 16 {
             for (i, slot) in xmm.iter_mut().enumerate() {
-                let off = context::OFFSET_XMM0 + i * 16;
+                let off = amd64::OFFSET_XMM0 + i * 16;
                 let mut bytes = [0u8; 16];
                 bytes.copy_from_slice(&buf[off..off + 16]);
                 *slot = u128::from_le_bytes(bytes);
             }
         }
 
-        let has_lbr = buf.len() >= context::OFFSET_LAST_EXCEPTION_FROM_RIP + 8;
+        let has_lbr = buf.len() >= amd64::OFFSET_LAST_EXCEPTION_FROM_RIP + 8;
 
         Self {
-            rax: read_u64(buf, context::OFFSET_RAX),
-            rbx: read_u64(buf, context::OFFSET_RBX),
-            rcx: read_u64(buf, context::OFFSET_RCX),
-            rdx: read_u64(buf, context::OFFSET_RDX),
-            rsi: read_u64(buf, context::OFFSET_RSI),
-            rdi: read_u64(buf, context::OFFSET_RDI),
-            rbp: read_u64(buf, context::OFFSET_RBP),
-            rsp: read_u64(buf, context::OFFSET_RSP),
-            r8: read_u64(buf, context::OFFSET_R8),
-            r9: read_u64(buf, context::OFFSET_R9),
-            r10: read_u64(buf, context::OFFSET_R10),
-            r11: read_u64(buf, context::OFFSET_R11),
-            r12: read_u64(buf, context::OFFSET_R12),
-            r13: read_u64(buf, context::OFFSET_R13),
-            r14: read_u64(buf, context::OFFSET_R14),
-            r15: read_u64(buf, context::OFFSET_R15),
-            rip: read_u64(buf, context::OFFSET_RIP),
-            eflags: read_u32(buf, context::OFFSET_EFLAGS),
-            cs: read_u16(buf, context::OFFSET_SEG_CS),
-            ds: read_u16(buf, context::OFFSET_SEG_DS),
-            es: read_u16(buf, context::OFFSET_SEG_ES),
-            fs: read_u16(buf, context::OFFSET_SEG_FS),
-            gs: read_u16(buf, context::OFFSET_SEG_GS),
-            ss: read_u16(buf, context::OFFSET_SEG_SS),
-            dr0: read_u64(buf, context::OFFSET_DR0),
-            dr1: read_u64(buf, context::OFFSET_DR1),
-            dr2: read_u64(buf, context::OFFSET_DR2),
-            dr3: read_u64(buf, context::OFFSET_DR3),
-            dr6: read_u64(buf, context::OFFSET_DR6),
-            dr7: read_u64(buf, context::OFFSET_DR7),
-            mxcsr: read_u32(buf, context::OFFSET_MX_CSR),
+            rax: read_u64(buf, amd64::OFFSET_RAX),
+            rbx: read_u64(buf, amd64::OFFSET_RBX),
+            rcx: read_u64(buf, amd64::OFFSET_RCX),
+            rdx: read_u64(buf, amd64::OFFSET_RDX),
+            rsi: read_u64(buf, amd64::OFFSET_RSI),
+            rdi: read_u64(buf, amd64::OFFSET_RDI),
+            rbp: read_u64(buf, amd64::OFFSET_RBP),
+            rsp: read_u64(buf, amd64::OFFSET_RSP),
+            r8: read_u64(buf, amd64::OFFSET_R8),
+            r9: read_u64(buf, amd64::OFFSET_R9),
+            r10: read_u64(buf, amd64::OFFSET_R10),
+            r11: read_u64(buf, amd64::OFFSET_R11),
+            r12: read_u64(buf, amd64::OFFSET_R12),
+            r13: read_u64(buf, amd64::OFFSET_R13),
+            r14: read_u64(buf, amd64::OFFSET_R14),
+            r15: read_u64(buf, amd64::OFFSET_R15),
+            rip: read_u64(buf, amd64::OFFSET_RIP),
+            eflags: read_u32(buf, amd64::OFFSET_EFLAGS),
+            cs: read_u16(buf, amd64::OFFSET_SEG_CS),
+            ds: read_u16(buf, amd64::OFFSET_SEG_DS),
+            es: read_u16(buf, amd64::OFFSET_SEG_ES),
+            fs: read_u16(buf, amd64::OFFSET_SEG_FS),
+            gs: read_u16(buf, amd64::OFFSET_SEG_GS),
+            ss: read_u16(buf, amd64::OFFSET_SEG_SS),
+            dr0: read_u64(buf, amd64::OFFSET_DR0),
+            dr1: read_u64(buf, amd64::OFFSET_DR1),
+            dr2: read_u64(buf, amd64::OFFSET_DR2),
+            dr3: read_u64(buf, amd64::OFFSET_DR3),
+            dr6: read_u64(buf, amd64::OFFSET_DR6),
+            dr7: read_u64(buf, amd64::OFFSET_DR7),
+            mxcsr: read_u32(buf, amd64::OFFSET_MX_CSR),
             xmm,
             debug_control: if has_lbr {
-                read_u64(buf, context::OFFSET_DEBUG_CONTROL)
+                read_u64(buf, amd64::OFFSET_DEBUG_CONTROL)
             } else {
                 0
             },
             last_branch_to_rip: if has_lbr {
-                read_u64(buf, context::OFFSET_LAST_BRANCH_TO_RIP)
+                read_u64(buf, amd64::OFFSET_LAST_BRANCH_TO_RIP)
             } else {
                 0
             },
             last_branch_from_rip: if has_lbr {
-                read_u64(buf, context::OFFSET_LAST_BRANCH_FROM_RIP)
+                read_u64(buf, amd64::OFFSET_LAST_BRANCH_FROM_RIP)
             } else {
                 0
             },
             last_exception_to_rip: if has_lbr {
-                read_u64(buf, context::OFFSET_LAST_EXCEPTION_TO_RIP)
+                read_u64(buf, amd64::OFFSET_LAST_EXCEPTION_TO_RIP)
             } else {
                 0
             },
             last_exception_from_rip: if has_lbr {
-                read_u64(buf, context::OFFSET_LAST_EXCEPTION_FROM_RIP)
+                read_u64(buf, amd64::OFFSET_LAST_EXCEPTION_FROM_RIP)
             } else {
                 0
             },
@@ -220,7 +219,7 @@ impl DmpContext {
     /// deliberately bounds-checked so a truncated dump yields zero for the
     /// unavailable field instead of panicking while parsing an untrusted file.
     pub fn from_arm64_bytes(buf: &[u8]) -> Self {
-        if buf.len() < context_arm64::CONTEXT_SIZE {
+        if buf.len() < arm64::CONTEXT_SIZE {
             return Self {
                 arm64: Some(DmpArm64Context::default()),
                 ..Self::default()
@@ -228,37 +227,37 @@ impl DmpContext {
         }
         let mut x = [0u64; 31];
         for (i, slot) in x.iter_mut().enumerate() {
-            *slot = read_u64(buf, context_arm64::OFFSET_X0 + i * 8);
+            *slot = read_u64(buf, arm64::OFFSET_X0 + i * 8);
         }
         let mut v = [0u128; 32];
         for (i, slot) in v.iter_mut().enumerate() {
-            let off = context_arm64::OFFSET_V0 + i * 16;
+            let off = arm64::OFFSET_V0 + i * 16;
             let mut bytes = [0u8; 16];
             bytes.copy_from_slice(&buf[off..off + 16]);
             *slot = u128::from_le_bytes(bytes);
         }
         let mut bcr = [0u32; 8];
         for (i, slot) in bcr.iter_mut().enumerate() {
-            *slot = read_u32(buf, context_arm64::OFFSET_BCR0 + i * 4);
+            *slot = read_u32(buf, arm64::OFFSET_BCR0 + i * 4);
         }
         let mut bvr = [0u64; 8];
         for (i, slot) in bvr.iter_mut().enumerate() {
-            *slot = read_u64(buf, context_arm64::OFFSET_BVR0 + i * 8);
+            *slot = read_u64(buf, arm64::OFFSET_BVR0 + i * 8);
         }
         let mut wcr = [0u32; 2];
         for (i, slot) in wcr.iter_mut().enumerate() {
-            *slot = read_u32(buf, context_arm64::OFFSET_WCR0 + i * 4);
+            *slot = read_u32(buf, arm64::OFFSET_WCR0 + i * 4);
         }
         let mut wvr = [0u64; 2];
         for (i, slot) in wvr.iter_mut().enumerate() {
-            *slot = read_u64(buf, context_arm64::OFFSET_WVR0 + i * 8);
+            *slot = read_u64(buf, arm64::OFFSET_WVR0 + i * 8);
         }
 
-        let cpsr = read_u32(buf, context_arm64::OFFSET_CPSR);
-        let sp = read_u64(buf, context_arm64::OFFSET_SP);
-        let pc = read_u64(buf, context_arm64::OFFSET_PC);
-        let fpcr = read_u32(buf, context_arm64::OFFSET_FPCR);
-        let fpsr = read_u32(buf, context_arm64::OFFSET_FPSR);
+        let cpsr = read_u32(buf, arm64::OFFSET_CPSR);
+        let sp = read_u64(buf, arm64::OFFSET_SP);
+        let pc = read_u64(buf, arm64::OFFSET_PC);
+        let fpcr = read_u32(buf, arm64::OFFSET_FPCR);
+        let fpsr = read_u32(buf, arm64::OFFSET_FPSR);
         Self {
             arm64: Some(DmpArm64Context {
                 x,
@@ -291,106 +290,104 @@ impl DmpContext {
 
     pub fn to_register_buffer(&self, directory_table_base: u64) -> Vec<u8> {
         if let Some(ctx) = &self.arm64 {
-            let mut data = vec![0u8; context_arm64::REGISTER_BUFFER_SIZE];
-            data[context_arm64::OFFSET_CONTEXT_FLAGS..context_arm64::OFFSET_CONTEXT_FLAGS + 4]
-                .copy_from_slice(&context_arm64::CONTEXT_ALL.to_le_bytes());
-            data[context_arm64::OFFSET_CPSR..context_arm64::OFFSET_CPSR + 4]
+            let mut data = vec![0u8; arm64::REGISTER_BUFFER_SIZE];
+            data[arm64::OFFSET_CONTEXT_FLAGS..arm64::OFFSET_CONTEXT_FLAGS + 4]
+                .copy_from_slice(&arm64::CONTEXT_ALL.to_le_bytes());
+            data[arm64::OFFSET_CPSR..arm64::OFFSET_CPSR + 4]
                 .copy_from_slice(&ctx.cpsr.to_le_bytes());
             for (i, &value) in ctx.x.iter().enumerate() {
-                let off = context_arm64::OFFSET_X0 + i * 8;
+                let off = arm64::OFFSET_X0 + i * 8;
                 data[off..off + 8].copy_from_slice(&value.to_le_bytes());
             }
-            data[context_arm64::OFFSET_SP..context_arm64::OFFSET_SP + 8]
-                .copy_from_slice(&ctx.sp.to_le_bytes());
-            data[context_arm64::OFFSET_PC..context_arm64::OFFSET_PC + 8]
-                .copy_from_slice(&ctx.pc.to_le_bytes());
+            data[arm64::OFFSET_SP..arm64::OFFSET_SP + 8].copy_from_slice(&ctx.sp.to_le_bytes());
+            data[arm64::OFFSET_PC..arm64::OFFSET_PC + 8].copy_from_slice(&ctx.pc.to_le_bytes());
             for (i, &value) in ctx.v.iter().enumerate() {
-                let off = context_arm64::OFFSET_V0 + i * 16;
+                let off = arm64::OFFSET_V0 + i * 16;
                 data[off..off + 16].copy_from_slice(&value.to_le_bytes());
             }
-            data[context_arm64::OFFSET_FPCR..context_arm64::OFFSET_FPCR + 4]
+            data[arm64::OFFSET_FPCR..arm64::OFFSET_FPCR + 4]
                 .copy_from_slice(&ctx.fpcr.to_le_bytes());
-            data[context_arm64::OFFSET_FPSR..context_arm64::OFFSET_FPSR + 4]
+            data[arm64::OFFSET_FPSR..arm64::OFFSET_FPSR + 4]
                 .copy_from_slice(&ctx.fpsr.to_le_bytes());
             for (i, &value) in ctx.bcr.iter().enumerate() {
-                let off = context_arm64::OFFSET_BCR0 + i * 4;
+                let off = arm64::OFFSET_BCR0 + i * 4;
                 data[off..off + 4].copy_from_slice(&value.to_le_bytes());
             }
             for (i, &value) in ctx.bvr.iter().enumerate() {
-                let off = context_arm64::OFFSET_BVR0 + i * 8;
+                let off = arm64::OFFSET_BVR0 + i * 8;
                 data[off..off + 8].copy_from_slice(&value.to_le_bytes());
             }
             for (i, &value) in ctx.wcr.iter().enumerate() {
-                let off = context_arm64::OFFSET_WCR0 + i * 4;
+                let off = arm64::OFFSET_WCR0 + i * 4;
                 data[off..off + 4].copy_from_slice(&value.to_le_bytes());
             }
             for (i, &value) in ctx.wvr.iter().enumerate() {
-                let off = context_arm64::OFFSET_WVR0 + i * 8;
+                let off = arm64::OFFSET_WVR0 + i * 8;
                 data[off..off + 8].copy_from_slice(&value.to_le_bytes());
             }
-            data[context_arm64::OFFSET_CR3..context_arm64::OFFSET_CR3 + 8]
+            data[arm64::OFFSET_CR3..arm64::OFFSET_CR3 + 8]
                 .copy_from_slice(&directory_table_base.to_le_bytes());
             return data;
         }
-        let mut data = vec![0u8; context::REGISTER_BUFFER_SIZE];
+        let mut data = vec![0u8; amd64::REGISTER_BUFFER_SIZE];
 
-        write_u64(&mut data, context::OFFSET_RAX, self.rax);
-        write_u64(&mut data, context::OFFSET_RBX, self.rbx);
-        write_u64(&mut data, context::OFFSET_RCX, self.rcx);
-        write_u64(&mut data, context::OFFSET_RDX, self.rdx);
-        write_u64(&mut data, context::OFFSET_RSI, self.rsi);
-        write_u64(&mut data, context::OFFSET_RDI, self.rdi);
-        write_u64(&mut data, context::OFFSET_RBP, self.rbp);
-        write_u64(&mut data, context::OFFSET_RSP, self.rsp);
-        write_u64(&mut data, context::OFFSET_R8, self.r8);
-        write_u64(&mut data, context::OFFSET_R9, self.r9);
-        write_u64(&mut data, context::OFFSET_R10, self.r10);
-        write_u64(&mut data, context::OFFSET_R11, self.r11);
-        write_u64(&mut data, context::OFFSET_R12, self.r12);
-        write_u64(&mut data, context::OFFSET_R13, self.r13);
-        write_u64(&mut data, context::OFFSET_R14, self.r14);
-        write_u64(&mut data, context::OFFSET_R15, self.r15);
-        write_u64(&mut data, context::OFFSET_RIP, self.rip);
-        write_u32(&mut data, context::OFFSET_EFLAGS, self.eflags);
-        write_u16(&mut data, context::OFFSET_SEG_CS, self.cs);
-        write_u16(&mut data, context::OFFSET_SEG_DS, self.ds);
-        write_u16(&mut data, context::OFFSET_SEG_ES, self.es);
-        write_u16(&mut data, context::OFFSET_SEG_FS, self.fs);
-        write_u16(&mut data, context::OFFSET_SEG_GS, self.gs);
-        write_u16(&mut data, context::OFFSET_SEG_SS, self.ss);
-        write_u64(&mut data, context::OFFSET_DR0, self.dr0);
-        write_u64(&mut data, context::OFFSET_DR1, self.dr1);
-        write_u64(&mut data, context::OFFSET_DR2, self.dr2);
-        write_u64(&mut data, context::OFFSET_DR3, self.dr3);
-        write_u64(&mut data, context::OFFSET_DR6, self.dr6);
-        write_u64(&mut data, context::OFFSET_DR7, self.dr7);
-        write_u64(&mut data, context::OFFSET_CR3, directory_table_base);
-        write_u32(&mut data, context::OFFSET_MX_CSR, self.mxcsr);
+        write_u64(&mut data, amd64::OFFSET_RAX, self.rax);
+        write_u64(&mut data, amd64::OFFSET_RBX, self.rbx);
+        write_u64(&mut data, amd64::OFFSET_RCX, self.rcx);
+        write_u64(&mut data, amd64::OFFSET_RDX, self.rdx);
+        write_u64(&mut data, amd64::OFFSET_RSI, self.rsi);
+        write_u64(&mut data, amd64::OFFSET_RDI, self.rdi);
+        write_u64(&mut data, amd64::OFFSET_RBP, self.rbp);
+        write_u64(&mut data, amd64::OFFSET_RSP, self.rsp);
+        write_u64(&mut data, amd64::OFFSET_R8, self.r8);
+        write_u64(&mut data, amd64::OFFSET_R9, self.r9);
+        write_u64(&mut data, amd64::OFFSET_R10, self.r10);
+        write_u64(&mut data, amd64::OFFSET_R11, self.r11);
+        write_u64(&mut data, amd64::OFFSET_R12, self.r12);
+        write_u64(&mut data, amd64::OFFSET_R13, self.r13);
+        write_u64(&mut data, amd64::OFFSET_R14, self.r14);
+        write_u64(&mut data, amd64::OFFSET_R15, self.r15);
+        write_u64(&mut data, amd64::OFFSET_RIP, self.rip);
+        write_u32(&mut data, amd64::OFFSET_EFLAGS, self.eflags);
+        write_u16(&mut data, amd64::OFFSET_SEG_CS, self.cs);
+        write_u16(&mut data, amd64::OFFSET_SEG_DS, self.ds);
+        write_u16(&mut data, amd64::OFFSET_SEG_ES, self.es);
+        write_u16(&mut data, amd64::OFFSET_SEG_FS, self.fs);
+        write_u16(&mut data, amd64::OFFSET_SEG_GS, self.gs);
+        write_u16(&mut data, amd64::OFFSET_SEG_SS, self.ss);
+        write_u64(&mut data, amd64::OFFSET_DR0, self.dr0);
+        write_u64(&mut data, amd64::OFFSET_DR1, self.dr1);
+        write_u64(&mut data, amd64::OFFSET_DR2, self.dr2);
+        write_u64(&mut data, amd64::OFFSET_DR3, self.dr3);
+        write_u64(&mut data, amd64::OFFSET_DR6, self.dr6);
+        write_u64(&mut data, amd64::OFFSET_DR7, self.dr7);
+        write_u64(&mut data, amd64::OFFSET_CR3, directory_table_base);
+        write_u32(&mut data, amd64::OFFSET_MX_CSR, self.mxcsr);
         for (i, &val) in self.xmm.iter().enumerate() {
-            let off = context::OFFSET_XMM0 + i * 16;
+            let off = amd64::OFFSET_XMM0 + i * 16;
             data[off..off + 16].copy_from_slice(&val.to_le_bytes());
         }
         // Keep the buffer symmetric with from_bytes: PRCB-sourced raw CONTEXT
         // copies carry these, so the header-context buffer must too.
-        write_u64(&mut data, context::OFFSET_DEBUG_CONTROL, self.debug_control);
+        write_u64(&mut data, amd64::OFFSET_DEBUG_CONTROL, self.debug_control);
         write_u64(
             &mut data,
-            context::OFFSET_LAST_BRANCH_TO_RIP,
+            amd64::OFFSET_LAST_BRANCH_TO_RIP,
             self.last_branch_to_rip,
         );
         write_u64(
             &mut data,
-            context::OFFSET_LAST_BRANCH_FROM_RIP,
+            amd64::OFFSET_LAST_BRANCH_FROM_RIP,
             self.last_branch_from_rip,
         );
         write_u64(
             &mut data,
-            context::OFFSET_LAST_EXCEPTION_TO_RIP,
+            amd64::OFFSET_LAST_EXCEPTION_TO_RIP,
             self.last_exception_to_rip,
         );
         write_u64(
             &mut data,
-            context::OFFSET_LAST_EXCEPTION_FROM_RIP,
+            amd64::OFFSET_LAST_EXCEPTION_FROM_RIP,
             self.last_exception_from_rip,
         );
 
@@ -729,9 +726,9 @@ impl DmpBackend {
     pub fn new(info: &DmpInfo) -> Self {
         let is_arm64 = info.context.is_arm64();
         let register_map = if is_arm64 {
-            context_arm64::build_register_map()
+            arm64::build_register_map()
         } else {
-            context::build_register_map()
+            amd64::build_register_map()
         };
         let n = info.number_processors.max(1) as usize;
 
@@ -741,14 +738,14 @@ impl DmpBackend {
         per_cpu.push(cpu0_data);
         for _ in 1..n {
             let mut data = if is_arm64 {
-                vec![0u8; context_arm64::REGISTER_BUFFER_SIZE]
+                vec![0u8; arm64::REGISTER_BUFFER_SIZE]
             } else {
-                vec![0u8; context::REGISTER_BUFFER_SIZE]
+                vec![0u8; amd64::REGISTER_BUFFER_SIZE]
             };
             let dtb_offset = if is_arm64 {
-                context_arm64::OFFSET_CR3
+                arm64::OFFSET_CR3
             } else {
-                context::OFFSET_CR3
+                amd64::OFFSET_CR3
             };
             data[dtb_offset..dtb_offset + 8]
                 .copy_from_slice(&info.directory_table_base.to_le_bytes());
@@ -788,7 +785,7 @@ impl DmpBackend {
 
     fn read_prcb_contexts(&mut self, target: &Target, prcb_ctx_offset: u16) -> Result<()> {
         let memory = target.guest()?.ntoskrnl.memory();
-        self.read_prcb_contexts_with(target, context::CONTEXT_SIZE, "PRCB", |prcb| {
+        self.read_prcb_contexts_with(target, amd64::CONTEXT_SIZE, "PRCB", |prcb| {
             memory.read(prcb + u64::from(prcb_ctx_offset))
         })
     }
@@ -866,7 +863,7 @@ impl DmpBackend {
         let context_frame = state.field("ContextFrame")?;
         let offset = processor_state.offset as u64 + context_frame.offset as u64;
         let context_end = offset
-            .checked_add(context_arm64::CONTEXT_SIZE as u64)
+            .checked_add(arm64::CONTEXT_SIZE as u64)
             .ok_or_else(|| Error::DebugInfo("ARM64 PRCB ContextFrame offset overflow".into()))?;
         if context_end > prcb.size as u64 {
             return Err(Error::DebugInfo(format!(
@@ -879,7 +876,7 @@ impl DmpBackend {
 
     fn read_arm64_prcb_contexts(&mut self, target: &Target) -> Result<()> {
         let context_offset = Self::arm64_prcb_context_offset(target)?;
-        self.read_prcb_contexts_with(target, context_arm64::CONTEXT_SIZE, "ARM64 PRCB", |prcb| {
+        self.read_prcb_contexts_with(target, arm64::CONTEXT_SIZE, "ARM64 PRCB", |prcb| {
             Ok(prcb + context_offset)
         })
     }
@@ -894,13 +891,11 @@ impl DmpBackend {
 
         let matches_header = |regs: &Vec<u8>| {
             if self.header_context.is_arm64() {
-                read_u64(regs, context_arm64::OFFSET_PC)
-                    == self.header_context.instruction_pointer()
-                    && read_u64(regs, context_arm64::OFFSET_SP)
-                        == self.header_context.stack_pointer()
+                read_u64(regs, arm64::OFFSET_PC) == self.header_context.instruction_pointer()
+                    && read_u64(regs, arm64::OFFSET_SP) == self.header_context.stack_pointer()
             } else {
-                read_u64(regs, context::OFFSET_RIP) == self.header_context.instruction_pointer()
-                    && read_u64(regs, context::OFFSET_RSP) == self.header_context.stack_pointer()
+                read_u64(regs, amd64::OFFSET_RIP) == self.header_context.instruction_pointer()
+                    && read_u64(regs, amd64::OFFSET_RSP) == self.header_context.stack_pointer()
             }
         };
         match self.per_cpu_registers.iter().position(matches_header) {
@@ -1156,19 +1151,18 @@ mod tests {
 
     #[test]
     fn arm64_context_header_round_trips_registers_and_debug_state() {
-        let mut raw = vec![0u8; context_arm64::CONTEXT_SIZE];
-        raw[context_arm64::OFFSET_CPSR..context_arm64::OFFSET_CPSR + 4]
+        let mut raw = vec![0u8; arm64::CONTEXT_SIZE];
+        raw[arm64::OFFSET_CPSR..arm64::OFFSET_CPSR + 4]
             .copy_from_slice(&0x6000_03c5u32.to_le_bytes());
-        raw[context_arm64::OFFSET_X0..context_arm64::OFFSET_X0 + 8]
+        raw[arm64::OFFSET_X0..arm64::OFFSET_X0 + 8]
             .copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
-        raw[context_arm64::OFFSET_SP..context_arm64::OFFSET_SP + 8]
+        raw[arm64::OFFSET_SP..arm64::OFFSET_SP + 8]
             .copy_from_slice(&0xffff_0000_1234_5000u64.to_le_bytes());
-        raw[context_arm64::OFFSET_PC..context_arm64::OFFSET_PC + 8]
+        raw[arm64::OFFSET_PC..arm64::OFFSET_PC + 8]
             .copy_from_slice(&0xffff_0000_0000_1000u64.to_le_bytes());
-        raw[context_arm64::OFFSET_BCR0..context_arm64::OFFSET_BCR0 + 4]
+        raw[arm64::OFFSET_BCR0..arm64::OFFSET_BCR0 + 4]
             .copy_from_slice(&0x0000_e9e1u32.to_le_bytes());
-        raw[context_arm64::OFFSET_WVR0..context_arm64::OFFSET_WVR0 + 8]
-            .copy_from_slice(&0x4000u64.to_le_bytes());
+        raw[arm64::OFFSET_WVR0..arm64::OFFSET_WVR0 + 8].copy_from_slice(&0x4000u64.to_le_bytes());
         let context = DmpContext::from_arm64_bytes(&raw);
         let arm = context.arm64.as_ref().unwrap();
         assert_eq!(arm.x[0], 0x1122_3344_5566_7788);
@@ -1177,7 +1171,7 @@ mod tests {
         assert_eq!(arm.bcr[0], 0x0000_e9e1);
         assert_eq!(arm.wvr[0], 0x4000);
 
-        let map = context_arm64::build_register_map();
+        let map = arm64::build_register_map();
         let data = context.to_register_buffer(0x1234_5000);
         assert_eq!(map.read_u64("x0", &data).unwrap(), arm.x[0]);
         assert_eq!(map.read_u64("pc", &data).unwrap(), arm.pc);
@@ -1359,8 +1353,8 @@ mod tests {
             } else {
                 (0xfffff800aaaa0000 + i as u64, 0xfffff800bbbb0000 + i as u64)
             };
-            regs[context::OFFSET_RIP..context::OFFSET_RIP + 8].copy_from_slice(&rip.to_le_bytes());
-            regs[context::OFFSET_RSP..context::OFFSET_RSP + 8].copy_from_slice(&rsp.to_le_bytes());
+            regs[amd64::OFFSET_RIP..amd64::OFFSET_RIP + 8].copy_from_slice(&rip.to_le_bytes());
+            regs[amd64::OFFSET_RSP..amd64::OFFSET_RSP + 8].copy_from_slice(&rsp.to_le_bytes());
         }
 
         backend.select_crash_processor();
@@ -1375,7 +1369,7 @@ mod tests {
         let mut backend = DmpBackend::new(&info);
 
         for regs in backend.per_cpu_registers.iter_mut() {
-            regs[context::OFFSET_RIP..context::OFFSET_RIP + 8]
+            regs[amd64::OFFSET_RIP..amd64::OFFSET_RIP + 8]
                 .copy_from_slice(&0xfffff800cccc0000u64.to_le_bytes());
         }
 

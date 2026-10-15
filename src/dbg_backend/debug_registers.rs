@@ -4,11 +4,12 @@
 //! and selects its trigger condition (R/W) and width (LEN); DR6 reports which
 //! slots fired (status bits B0-B3). These helpers are pure so the wire-level
 //! per-processor read-modify-write in [`crate::kd`] stays trivial and the bit
-//! math is unit-testable.
+//! math is unit-testable. They encode the architecture, not a transport: the
+//! session reads the same slot ranges to decide which breakpoint a stop hit.
 
 use std::ops::Range;
 
-use crate::dbg_backend::HwBreakpointAccess;
+use super::HwBreakpointAccess;
 
 /// Number of architectural ARM64 hardware breakpoint and watchpoint slots.
 /// These values are part of the Windows ARM64 ABI (`ARM64_NT_CONTEXT`).

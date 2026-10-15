@@ -56,7 +56,9 @@ pub const OFFSET_TTBR0: usize = OFFSET_CR3 + 8;
 pub const OFFSET_ESR: usize = OFFSET_TTBR0 + 8;
 pub const OFFSET_FAR: usize = OFFSET_ESR + 8;
 
-/// Build the KD register map for an ARM64 target.
+/// The register map over a [`REGISTER_BUFFER_SIZE`] buffer: the CONTEXT's
+/// registers with their ABI aliases, then the synthetic page-table-root,
+/// ESR, and FAR slots behind it.
 pub fn build_register_map() -> RegisterMap {
     let mut regnum = 0usize;
     let mut next_reg = |name: &str, offset: usize, size: usize| -> RegisterInfo {

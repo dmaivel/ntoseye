@@ -486,9 +486,9 @@ fn names_match(left: &str, right: &str) -> bool {
 mod tests {
     use super::*;
     use crate::bugchecks::{BugcheckArg, BugcheckFault};
+    use crate::cpu_context::amd64::REGISTER_BUFFER_SIZE;
     use crate::dmp::DmpContext;
     use crate::guest::ProcessInfo;
-    use crate::kd::context::REGISTER_BUFFER_SIZE;
     use crate::session::RunStatus;
     use crate::symbols::CodeFrame;
     use crate::target::power::{DeviceDriver, PowerCulprit, PowerFailure};

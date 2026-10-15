@@ -10,7 +10,7 @@ use super::amd64::{
 };
 use super::{RegisterContext, StackTracer, Unwound, image_u32, runtime_functions};
 use crate::{
-    kd::context_arm64::{OFFSET_PC, OFFSET_SP, OFFSET_X0},
+    cpu_context::arm64::{OFFSET_PC, OFFSET_SP, OFFSET_X0},
     pe::{CodeLayout, PeImage},
     target::Arm64SavedRegisters,
     trapframe::decode_ktrap_frame_for_thread,

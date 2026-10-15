@@ -36,7 +36,7 @@ fn arm64_target_hints_read_ttbr1_through_kd() {
     let (mut kernel, host) = UnixStream::pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.arch = Arch::Arm64;
-    backend.register_map = context_arm64::build_register_map();
+    backend.register_map = arm64::build_register_map();
     backend.link.halt();
     backend.exit_prepared = true;
     let kernel_base = 0xffff_f802_4e80_0000u64;

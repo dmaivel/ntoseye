@@ -103,11 +103,11 @@ fn u64s(values: &[u64]) -> Vec<u8> {
 
 /// An AMD64 CONTEXT with `flags`, `rip`, and `rsp`.
 fn amd64_context(flags: u32, rip: u64, rsp: u64) -> Vec<u8> {
-    let mut context = vec![0u8; context::CONTEXT_SIZE];
-    context[context::OFFSET_CONTEXT_FLAGS..context::OFFSET_CONTEXT_FLAGS + 4]
+    let mut context = vec![0u8; amd64::CONTEXT_SIZE];
+    context[amd64::OFFSET_CONTEXT_FLAGS..amd64::OFFSET_CONTEXT_FLAGS + 4]
         .copy_from_slice(&flags.to_le_bytes());
-    context[context::OFFSET_RIP..context::OFFSET_RIP + 8].copy_from_slice(&rip.to_le_bytes());
-    context[context::OFFSET_RSP..context::OFFSET_RSP + 8].copy_from_slice(&rsp.to_le_bytes());
+    context[amd64::OFFSET_RIP..amd64::OFFSET_RIP + 8].copy_from_slice(&rip.to_le_bytes());
+    context[amd64::OFFSET_RSP..amd64::OFFSET_RSP + 8].copy_from_slice(&rsp.to_le_bytes());
     context
 }
 
@@ -148,7 +148,7 @@ fn both_memory_lists_and_thread_stacks_serve_reads_with_holes_reported() {
     builder.stream(5, &list);
     // A thread whose stack is in no list.
     let stack = builder.blob(&[0x5a; 0x30]);
-    let context = amd64_context(context::CONTEXT_CONTROL | context::CONTEXT_INTEGER, 1, 2);
+    let context = amd64_context(amd64::CONTEXT_CONTROL | amd64::CONTEXT_INTEGER, 1, 2);
     let context_rva = builder.blob(&context);
     let mut threads = u32s(&[1]);
     threads.extend(thread_record(
@@ -328,15 +328,15 @@ fn amd64_contexts_are_checked_and_thread_streams_merge_by_thread_id() {
     let mut builder = Builder::new(5);
     builder.system_info(AMD64, WIN32_NT);
     let good = amd64_context(
-        context::CONTEXT_CONTROL | context::CONTEXT_INTEGER,
+        amd64::CONTEXT_CONTROL | amd64::CONTEXT_INTEGER,
         0x7ff9_4651_1344,
         0xf3_5cfa_f788,
     );
     let good_rva = builder.blob(&good);
     // Control registers but no integer ones: not enough to place a thread.
-    let partial = amd64_context(context::CONTEXT_CONTROL, 1, 2);
+    let partial = amd64_context(amd64::CONTEXT_CONTROL, 1, 2);
     let partial_rva = builder.blob(&partial);
-    let size = context::CONTEXT_SIZE as u32;
+    let size = amd64::CONTEXT_SIZE as u32;
     let mut threads = u32s(&[3]);
     threads.extend(thread_record(0x10, 0, 0, (0, 0), (size, good_rva)));
     threads.extend(thread_record(0x20, 0, 0, (0, 0), (size, partial_rva)));
@@ -356,7 +356,7 @@ fn amd64_contexts_are_checked_and_thread_streams_merge_by_thread_id() {
     let dump = open(&builder.finish()).unwrap();
     let threads = &dump.info().threads;
 
-    let map = context::build_register_map();
+    let map = amd64::build_register_map();
     let registers = register_buffer(Arch::Amd64, threads[0].context.as_ref().unwrap());
     assert_eq!(map.read_u64("rip", &registers).unwrap(), 0x7ff9_4651_1344);
     assert_eq!(map.read_u64("rsp", &registers).unwrap(), 0xf3_5cfa_f788);
@@ -382,18 +382,17 @@ fn amd64_contexts_are_checked_and_thread_streams_merge_by_thread_id() {
 fn arm64_threads_and_the_exception_stream_carry_their_contexts() {
     let mut builder = Builder::new(3);
     builder.system_info(ARM64, WIN32_NT);
-    let mut thread_context = vec![0u8; context_arm64::CONTEXT_SIZE];
-    thread_context[..4].copy_from_slice(
-        &(context_arm64::CONTEXT_CONTROL | context_arm64::CONTEXT_INTEGER).to_le_bytes(),
-    );
-    thread_context[context_arm64::OFFSET_PC..context_arm64::OFFSET_PC + 8]
+    let mut thread_context = vec![0u8; arm64::CONTEXT_SIZE];
+    thread_context[..4]
+        .copy_from_slice(&(arm64::CONTEXT_CONTROL | arm64::CONTEXT_INTEGER).to_le_bytes());
+    thread_context[arm64::OFFSET_PC..arm64::OFFSET_PC + 8]
         .copy_from_slice(&0x7ffa_0000_1000u64.to_le_bytes());
     let thread_rva = builder.blob(&thread_context);
     let mut exception_context = thread_context.clone();
-    exception_context[context_arm64::OFFSET_PC..context_arm64::OFFSET_PC + 8]
+    exception_context[arm64::OFFSET_PC..arm64::OFFSET_PC + 8]
         .copy_from_slice(&0x7ffa_0000_2000u64.to_le_bytes());
     let exception_rva = builder.blob(&exception_context);
-    let size = context_arm64::CONTEXT_SIZE as u32;
+    let size = arm64::CONTEXT_SIZE as u32;
     let mut threads = u32s(&[2]);
     threads.extend(thread_record(0x100, 0, 0, (0, 0), (size, thread_rva)));
     threads.extend(thread_record(0x200, 0, 0, (0, 0), (size, thread_rva)));
@@ -411,7 +410,7 @@ fn arm64_threads_and_the_exception_stream_carry_their_contexts() {
     let info = dump.info();
 
     assert_eq!(info.arch, Arch::Arm64);
-    let map = context_arm64::build_register_map();
+    let map = arm64::build_register_map();
     let thread = register_buffer(Arch::Arm64, info.threads[0].context.as_ref().unwrap());
     assert_eq!(map.read_u64("pc", &thread).unwrap(), 0x7ffa_0000_1000);
 
@@ -678,7 +677,6 @@ fn arm64_function_tables_take_their_lengths_from_the_unwind_data() {
 /// the thread's stack.
 #[test]
 fn an_arm64_stack_unwinds_through_jit_code_and_recursion() {
-    use crate::kd::context_arm64;
     use crate::phys::PhysMem;
     use crate::target::Target;
     use crate::unwind::{FrameSource, build_stacktrace_with_register_values};
@@ -713,12 +711,8 @@ fn an_arm64_stack_unwinds_through_jit_code_and_recursion() {
         ("fp".to_string(), STACK),
         ("lr".to_string(), RETURN),
     ]);
-    let trace = build_stacktrace_with_register_values(
-        &target,
-        &context_arm64::build_register_map(),
-        &values,
-        8,
-    );
+    let trace =
+        build_stacktrace_with_register_values(&target, &arm64::build_register_map(), &values, 8);
     let frames: Vec<_> = trace
         .frames
         .iter()

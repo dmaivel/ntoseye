@@ -27,9 +27,9 @@ use super::{
     DBG_KD_EXCEPTION_STATE_CHANGE, DBG_KD_LOAD_SYMBOLS_STATE_CHANGE, KD_INITIAL_PROBE_TIMEOUT,
     KD_INITIAL_PROGRESS_INTERVAL, KD_INITIAL_TIMEOUT_DEFAULT, KD_INITIAL_TIMEOUT_ENV,
     KD_RECONNECT_BREAKIN_INTERVAL, KD_RECONNECT_BREAKIN_TRACE_EVERY, KD_REQUEST_TIMEOUT, PUMP_POLL,
-    STATUS_BREAKPOINT, StateChange, context, context_arm64, handle_debug_io_with_output,
-    handle_file_io,
+    STATUS_BREAKPOINT, StateChange, handle_debug_io_with_output, handle_file_io,
 };
+use crate::cpu_context::{amd64, arm64};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitialHandshakeStimulus {
@@ -620,8 +620,8 @@ pub fn read_program_counter(
 
 fn context_flags_for(arch: Arch) -> u32 {
     match arch {
-        Arch::Amd64 => context::CONTEXT_ALL,
-        Arch::Arm64 => context_arm64::CONTEXT_ALL,
+        Arch::Amd64 => amd64::CONTEXT_ALL,
+        Arch::Arm64 => arm64::CONTEXT_ALL,
     }
 }
 
@@ -916,13 +916,12 @@ mod tests {
 
     use super::*;
     use crate::kd::api::test_wire::{ack_then_reply, build_reply, first_outbound_id};
-    use crate::kd::context;
     use crate::kd::framing::INITIAL_PACKET_ID;
 
     #[test]
     fn advance_pc_refuses_a_program_counter_that_moved_since_the_decision() {
-        let register_map = context::build_register_map();
-        let mut guest_context = vec![0u8; context::CONTEXT_SIZE];
+        let register_map = amd64::build_register_map();
+        let mut guest_context = vec![0u8; amd64::CONTEXT_SIZE];
         register_map
             .write_u64("rip", &mut guest_context, 0xffff_f800_0011_2233)
             .unwrap();

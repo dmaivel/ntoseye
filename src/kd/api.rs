@@ -757,7 +757,7 @@ mod tests {
     use super::*;
     use std::io::{Cursor, Read, Write};
 
-    use crate::kd::context;
+    use crate::cpu_context::amd64;
     use crate::kd::framing::{KdFraming, PACKET_TYPE_KD_ACKNOWLEDGE};
 
     #[test]
@@ -940,12 +940,12 @@ mod tests {
         );
 
         let mut framing = KdFraming::new(Loopback::new(stream));
-        let ctx = get_context(&mut framing, 0, context::CONTEXT_ALL).unwrap();
+        let ctx = get_context(&mut framing, 0, amd64::CONTEXT_ALL).unwrap();
         assert_eq!(ctx, ctx_bytes);
 
         let out = &framing.transport_ref().outbound;
         let req_header = &out[16..16 + MANIPULATE_HEADER_SIZE];
-        assert_eq!(read_u32(req_header, UNION_OFFSET), context::CONTEXT_ALL);
+        assert_eq!(read_u32(req_header, UNION_OFFSET), amd64::CONTEXT_ALL);
     }
 
     #[test]
@@ -964,8 +964,8 @@ mod tests {
         set_context_ex_chunk(
             &mut framing,
             1,
-            context::OFFSET_RIP as u32,
-            context::CONTEXT_SIZE as u32,
+            amd64::OFFSET_RIP as u32,
+            amd64::CONTEXT_SIZE as u32,
             &rip,
         )
         .unwrap();
@@ -978,11 +978,11 @@ mod tests {
         let request = &outbound[16..16 + MANIPULATE_HEADER_SIZE];
         assert_eq!(read_u32(request, 0), DBGKD_SET_CONTEXT_EX);
         assert_eq!(read_u16(request, 6), 1);
-        assert_eq!(read_u32(request, UNION_OFFSET), context::OFFSET_RIP as u32);
+        assert_eq!(read_u32(request, UNION_OFFSET), amd64::OFFSET_RIP as u32);
         assert_eq!(read_u32(request, UNION_OFFSET + 4), rip.len() as u32);
         assert_eq!(
             read_u32(request, UNION_OFFSET + 8),
-            context::CONTEXT_SIZE as u32
+            amd64::CONTEXT_SIZE as u32
         );
         assert_eq!(
             &outbound[16 + MANIPULATE_HEADER_SIZE..16 + MANIPULATE_HEADER_SIZE + rip.len()],
@@ -992,7 +992,7 @@ mod tests {
 
     #[test]
     fn set_context_chunked_sends_ordered_chunks_and_commits_at_total_size() {
-        let context: Vec<u8> = (0..context::CONTEXT_SIZE)
+        let context: Vec<u8> = (0..amd64::CONTEXT_SIZE)
             .map(|index| (index & 0xff) as u8)
             .collect();
         let chunk_lengths: Vec<usize> = context
@@ -1236,7 +1236,7 @@ mod tests {
         );
 
         let mut framing = KdFraming::new(Loopback::new(stream));
-        let err = get_context(&mut framing, 0, context::CONTEXT_ALL).unwrap_err();
+        let err = get_context(&mut framing, 0, amd64::CONTEXT_ALL).unwrap_err();
         match err {
             Error::Kd(msg) => assert!(msg.contains("processor mismatch")),
             other => panic!("unexpected error: {other:?}"),

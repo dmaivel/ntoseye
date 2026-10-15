@@ -24,10 +24,11 @@ use super::registers::{ARM64_WINDBG_TTBR1_EL1, KSPECIAL_REGISTERS_CR3_OFFSET};
 use super::transport::KdTransport;
 use super::{
     DBG_KD_EXCEPTION_STATE_CHANGE, DEBUG_LOG_CAPACITY, KD_REQUEST_TIMEOUT, KdBackend,
-    KdTargetHints, Link, STATUS_BREAKPOINT, api, context, context_arm64, is_initial_resync_error,
-    kd_initial_timeout, kd_socket_connect_error, poll_for_initial_break, probe_initial_request,
+    KdTargetHints, Link, STATUS_BREAKPOINT, api, is_initial_resync_error, kd_initial_timeout,
+    kd_socket_connect_error, poll_for_initial_break, probe_initial_request,
     with_framing_read_timeout,
 };
+use crate::cpu_context::{amd64, arm64};
 
 /// [`KdBackend::running_reason`] when the operator picked `--memory-source kd`.
 pub(super) const MEMORY_OVER_KD_CHOSEN: &str = "Guest memory is read over KD on this session, and KD only \
@@ -121,8 +122,8 @@ impl KdBackend {
         };
         let arch = detect_arch(version.machine_type)?;
         let register_map = match arch {
-            Arch::Amd64 => context::build_register_map(),
-            Arch::Arm64 => context_arm64::build_register_map(),
+            Arch::Amd64 => amd64::build_register_map(),
+            Arch::Arm64 => arm64::build_register_map(),
         };
         // The first state-change often arrives with KD's SYNC bit set. That is
         // the baseline connection, not a target reload for the REPL to surface.

@@ -11,14 +11,14 @@ use crate::breakpoints::{
     Breakpoint, BreakpointConfig, HardwareBreakpoint, HypercallFilter, PartitionFilter, StepFrame,
     ThreadScope,
 };
+use crate::cpu_context::amd64::{REGISTER_BUFFER_SIZE, build_register_map};
+use crate::cpu_context::arm64;
 use crate::dbg_backend::{
     ContinueDisposition, HwBreakpointAccess, RegisterInfo, TrapState, clear_trap_flag,
 };
 use crate::dmp::{IMAGE_FILE_MACHINE_ARM64, structs::Header64};
 use crate::exception_policy::ExceptionPolicyMode;
 use crate::guest::ModuleInfo;
-use crate::kd::context::{REGISTER_BUFFER_SIZE, build_register_map};
-use crate::kd::context_arm64;
 use crate::memory::PAGE_SIZE;
 use crate::partition_backend::PartitionVp;
 use crate::target::SelectedFrame;
@@ -741,8 +741,8 @@ fn page_in_result_reads_arm64_pc_alias_and_first_argument() {
     assert_eq!(session.target.arch(), Arch::Arm64);
 
     let mut backend = MockBackend {
-        register_map: context_arm64::build_register_map(),
-        regs: vec![0; context_arm64::REGISTER_BUFFER_SIZE],
+        register_map: arm64::build_register_map(),
+        regs: vec![0; arm64::REGISTER_BUFFER_SIZE],
         ..MockBackend::default()
     };
     backend.set("rip", 0x2000);

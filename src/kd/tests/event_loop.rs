@@ -243,7 +243,7 @@ fn continue_drains_in_place_rebreak_stale_breakin_and_retired_breakpoint_trap() 
             managed.iter().copied().collect(),
             HashSet::from([breakin]),
             HashSet::from([retired]),
-            context::build_register_map(),
+            amd64::build_register_map(),
             None,
         )
     };
@@ -348,7 +348,7 @@ fn pump_absorbs_rebreak_after_continue_and_reports_real_stop() {
         HashSet::new(),
         HashSet::new(),
         HashSet::new(),
-        context::build_register_map(),
+        amd64::build_register_map(),
         None,
     );
     let (tx, rx) = mpsc::channel();
@@ -392,8 +392,8 @@ fn pump_absorbs_rebreak_after_continue_and_reports_real_stop() {
         let api_number = u32::from_le_bytes(request[0..4].try_into().unwrap());
         let reply = match api_number {
             api::DBGKD_GET_CONTEXT => {
-                let mut context = vec![0u8; context::CONTEXT_SIZE];
-                context[context::OFFSET_RIP..context::OFFSET_RIP + 8]
+                let mut context = vec![0u8; amd64::CONTEXT_SIZE];
+                context[amd64::OFFSET_RIP..amd64::OFFSET_RIP + 8]
                     .copy_from_slice(&resumed_from.to_le_bytes());
                 let mut reply = manipulate_reply_payload(api_number, 0, &[]);
                 reply.extend_from_slice(&context);
@@ -423,7 +423,7 @@ fn pump_absorbs_rebreak_after_continue_and_reports_real_stop() {
     }
     assert_eq!(
         context_written,
-        context::CONTEXT_SIZE,
+        amd64::CONTEXT_SIZE,
         "the pump must write back the whole advanced context"
     );
     assert!(

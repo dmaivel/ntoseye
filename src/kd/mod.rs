@@ -8,7 +8,7 @@ use crate::bytes;
 use crate::dbg_backend::{
     BackendCapability, BugcheckInfo, ContinueDisposition, DebugBackend, DebugCapability, DebugLog,
     DebugOutputPage, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, PciConfigAddress, ProcessorRead,
-    RegisterMap, StopEvent, TebPath, TrapState,
+    RegisterMap, StopEvent, TebPath, TrapState, debug_registers,
 };
 use crate::debugger_data::DebuggerDataCandidate;
 use crate::error::{Error, Result};
@@ -53,14 +53,11 @@ pub fn trace_bytes_enabled() -> bool {
 pub mod api;
 mod breakpoints;
 mod connect;
-pub mod context;
-pub mod context_arm64;
 mod exit;
 pub mod framing;
 mod halt;
 mod handles;
 mod hw_breakpoints;
-pub mod hwbp;
 mod kdnet;
 mod memory;
 mod pump;
@@ -503,14 +500,16 @@ impl DebugBackend for KdBackend {
     fn hardware_breakpoint_slots(&self) -> u8 {
         match self.arch {
             Arch::Amd64 => HW_BREAKPOINT_SLOTS,
-            Arch::Arm64 => hwbp::ARM64_MAX_BREAKPOINTS + hwbp::ARM64_MAX_WATCHPOINTS,
+            Arch::Arm64 => {
+                debug_registers::ARM64_MAX_BREAKPOINTS + debug_registers::ARM64_MAX_WATCHPOINTS
+            }
         }
     }
 
     fn hardware_slot_range(&self, access: HwBreakpointAccess) -> std::ops::Range<u8> {
         match self.arch {
             Arch::Amd64 => 0..HW_BREAKPOINT_SLOTS,
-            Arch::Arm64 => hwbp::arm64_slot_range(access),
+            Arch::Arm64 => debug_registers::arm64_slot_range(access),
         }
     }
 

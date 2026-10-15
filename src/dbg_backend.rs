@@ -10,6 +10,7 @@ use crate::phys::PhysMem;
 use crate::target::Target;
 use crate::types::{KernelLocation, VirtAddr};
 
+pub mod debug_registers;
 mod registers;
 
 pub use registers::{RegisterInfo, RegisterMap, push_arm64_aliases, repeats_another_register};

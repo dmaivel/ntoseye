@@ -1469,9 +1469,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::{FrameSource, RegisterContext, build_stacktrace_with_register_values};
+    use crate::cpu_context::amd64::build_register_map;
     use crate::guest::ModuleInfo;
     use crate::guest::hypercalls::HypervisorSymbols;
-    use crate::kd::context::build_register_map;
     use crate::session::{Session, session_over_memory};
     use crate::target::{SavedThreadRegisters, SelectedFrame};
     use crate::types::VirtAddr;

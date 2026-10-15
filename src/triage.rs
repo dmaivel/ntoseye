@@ -1,4 +1,5 @@
 use crate::bytes::{read_u16, read_u32, read_u64};
+use crate::cpu_context::{amd64, arm64};
 #[cfg(test)]
 use crate::dmp::IMAGE_FILE_MACHINE_AMD64;
 use crate::dmp::structs::{ExceptionRecord64, Header64, KdDebuggerData64};
@@ -9,8 +10,6 @@ use crate::dmp::{
 };
 use crate::error::{Error, Result};
 use crate::guest::ModuleInfo;
-use crate::kd::context;
-use crate::kd::context_arm64;
 use crate::layout::utf16le_nul_terminated;
 use crate::types::VirtAddr;
 use std::mem::{offset_of, size_of};
@@ -170,9 +169,9 @@ pub fn parse_triage(mmap: &[u8]) -> Result<(DmpInfo, Vec<TriageBlock>)> {
     // offset is authoritative for minidumps.
     let ctx_offset = read_u32(triage_hdr, TRIAGE_CONTEXT_OFFSET) as usize;
     let pc_offset = if machine_image_type == IMAGE_FILE_MACHINE_ARM64 {
-        context_arm64::OFFSET_PC
+        arm64::OFFSET_PC
     } else {
-        context::OFFSET_RIP
+        amd64::OFFSET_RIP
     };
     let ctx_offset = if ctx_offset > 0
         && ctx_offset
@@ -708,7 +707,7 @@ pub(crate) fn make_triage_dump(blocks: &[TriageBlock], mem_regions: &[(u64, &[u8
         .copy_from_slice(&0x1ad000u64.to_le_bytes());
     // Context: set RIP
     let ctx_base = OFF_CONTEXT_RECORD;
-    buf[ctx_base + context::OFFSET_RIP..ctx_base + context::OFFSET_RIP + 8]
+    buf[ctx_base + amd64::OFFSET_RIP..ctx_base + amd64::OFFSET_RIP + 8]
         .copy_from_slice(&0xfffff80012345678u64.to_le_bytes());
 
     // TRIAGE_DUMP64 at 0x2000
@@ -794,11 +793,11 @@ mod tests {
         dump[OFF_MACHINE_IMAGE_TYPE..OFF_MACHINE_IMAGE_TYPE + 4]
             .copy_from_slice(&IMAGE_FILE_MACHINE_ARM64.to_le_bytes());
         let ctx_base = OFF_CONTEXT_RECORD;
-        dump[ctx_base + context_arm64::OFFSET_PC..ctx_base + context_arm64::OFFSET_PC + 8]
+        dump[ctx_base + arm64::OFFSET_PC..ctx_base + arm64::OFFSET_PC + 8]
             .copy_from_slice(&0xffff_0000_0000_1000u64.to_le_bytes());
-        dump[ctx_base + context_arm64::OFFSET_SP..ctx_base + context_arm64::OFFSET_SP + 8]
+        dump[ctx_base + arm64::OFFSET_SP..ctx_base + arm64::OFFSET_SP + 8]
             .copy_from_slice(&0xffff_0000_1234_5000u64.to_le_bytes());
-        dump[ctx_base + context_arm64::OFFSET_BCR0..ctx_base + context_arm64::OFFSET_BCR0 + 4]
+        dump[ctx_base + arm64::OFFSET_BCR0..ctx_base + arm64::OFFSET_BCR0 + 4]
             .copy_from_slice(&0x0000_e9e1u32.to_le_bytes());
 
         let (info, _) = parse_triage(&dump).unwrap();

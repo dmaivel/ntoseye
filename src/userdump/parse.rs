@@ -14,8 +14,8 @@ use super::{
     UserException, UserHandle, UserModule, UserSystemInfo, UserThread, UserThreadInfo,
     UserTimeZone,
 };
+use crate::cpu_context::{amd64, arm64};
 use crate::error::{Error, Result};
-use crate::kd::{context, context_arm64};
 use crate::pe::headers::{MAX_CODEVIEW_BYTES, decode_codeview};
 use crate::types::Arch;
 
@@ -776,16 +776,16 @@ fn read_context(
 ) -> std::result::Result<Vec<u8>, String> {
     let (size, flags_offset, arch_flag, required) = match arch {
         Arch::Amd64 => (
-            context::CONTEXT_SIZE,
-            context::OFFSET_CONTEXT_FLAGS,
-            context::CONTEXT_AMD64,
-            context::CONTEXT_CONTROL | context::CONTEXT_INTEGER,
+            amd64::CONTEXT_SIZE,
+            amd64::OFFSET_CONTEXT_FLAGS,
+            amd64::CONTEXT_AMD64,
+            amd64::CONTEXT_CONTROL | amd64::CONTEXT_INTEGER,
         ),
         Arch::Arm64 => (
-            context_arm64::CONTEXT_SIZE,
-            context_arm64::OFFSET_CONTEXT_FLAGS,
-            context_arm64::CONTEXT_ARM64,
-            context_arm64::CONTEXT_CONTROL | context_arm64::CONTEXT_INTEGER,
+            arm64::CONTEXT_SIZE,
+            arm64::OFFSET_CONTEXT_FLAGS,
+            arm64::CONTEXT_ARM64,
+            arm64::CONTEXT_CONTROL | arm64::CONTEXT_INTEGER,
         ),
     };
     let (rva, data_size) = (location.rva, location.data_size);

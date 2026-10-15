@@ -7,11 +7,10 @@ use crate::breakpoints::{
 };
 use crate::dbg_backend::{
     ContinueDisposition, DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, RegisterMap,
-    StopEvent, processor_index_from_backend_thread_id,
+    StopEvent, debug_registers, processor_index_from_backend_thread_id,
 };
 use crate::error::{Error, Result};
 use crate::guest::hypercalls::HypercallCaller;
-use crate::kd::hwbp;
 use crate::notice::Notice;
 use crate::session::context::{
     refresh_windows_thread_context_for_backend_thread, update_target_context_from_registers,
@@ -493,7 +492,7 @@ fn arm64_hardware_breakpoint_hit(
     // that caused the data watchpoint. Require FAR as evidence: without it a
     // plain single-step must not be mistaken for a data breakpoint.
     if far != 0 {
-        for slot in hwbp::ARM64_WATCHPOINT_SLOTS {
+        for slot in debug_registers::ARM64_WATCHPOINT_SLOTS {
             let Some(bp) = breakpoints.hardware_breakpoint_for_slot(slot) else {
                 continue;
             };
@@ -525,7 +524,7 @@ fn arm64_hardware_breakpoint_hit(
     }
 
     if hit.is_none() {
-        for slot in hwbp::ARM64_BREAKPOINT_SLOTS {
+        for slot in debug_registers::ARM64_BREAKPOINT_SLOTS {
             let Some(bp) = breakpoints.hardware_breakpoint_for_slot(slot) else {
                 continue;
             };
@@ -533,7 +532,7 @@ fn arm64_hardware_breakpoint_hit(
             if hw.access != HwBreakpointAccess::Execute {
                 continue;
             }
-            let index = slot - hwbp::ARM64_BREAKPOINT_SLOTS.start;
+            let index = slot - debug_registers::ARM64_BREAKPOINT_SLOTS.start;
             let control = register_map
                 .read_u64(format!("bcr{index}"), regs)
                 .unwrap_or(0);

@@ -14,12 +14,11 @@ use crate::dmp::structs::{ExceptionRecord64, Header64};
 use crate::backend::MemoryOps;
 use crate::bugchecks::current_bugcheck;
 use crate::bytes::{write_u32, write_u64};
+use crate::cpu_context::{amd64, arm64};
 use crate::cpu_state::MAX_PROCESSORS;
 use crate::dbg_backend::RegisterMap;
 use crate::dmp::{IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64};
 use crate::error::{Error, Result};
-use crate::kd::context;
-use crate::kd::context_arm64;
 use crate::layout::{FieldInfo, ParsedType};
 use crate::memory::PAGE_SIZE;
 use crate::session::Session;
@@ -47,14 +46,14 @@ fn machine_image_type(arch: Arch) -> u32 {
 fn context_from_registers(arch: Arch, source: &RegisterMap, registers: &[u8]) -> Vec<u8> {
     let (layout, flags_offset, flags) = match arch {
         Arch::Amd64 => (
-            context::build_register_map(),
-            context::OFFSET_CONTEXT_FLAGS,
-            context::CONTEXT_CONTROL | context::CONTEXT_INTEGER | context::CONTEXT_SEGMENTS,
+            amd64::build_register_map(),
+            amd64::OFFSET_CONTEXT_FLAGS,
+            amd64::CONTEXT_CONTROL | amd64::CONTEXT_INTEGER | amd64::CONTEXT_SEGMENTS,
         ),
         Arch::Arm64 => (
-            context_arm64::build_register_map(),
-            context_arm64::OFFSET_CONTEXT_FLAGS,
-            context_arm64::CONTEXT_CONTROL | context_arm64::CONTEXT_INTEGER,
+            arm64::build_register_map(),
+            arm64::OFFSET_CONTEXT_FLAGS,
+            arm64::CONTEXT_CONTROL | arm64::CONTEXT_INTEGER,
         ),
     };
     let mut context = vec![0u8; context_size(arch)];
@@ -75,8 +74,8 @@ fn context_from_registers(arch: Arch, source: &RegisterMap, registers: &[u8]) ->
 
 fn context_size(arch: Arch) -> usize {
     match arch {
-        Arch::Amd64 => context::CONTEXT_SIZE,
-        Arch::Arm64 => context_arm64::CONTEXT_SIZE,
+        Arch::Amd64 => amd64::CONTEXT_SIZE,
+        Arch::Arm64 => arm64::CONTEXT_SIZE,
     }
 }
 
@@ -786,8 +785,8 @@ mod tests {
 
         let converted = context_from_registers(Arch::Amd64, &stub, &registers);
 
-        assert_eq!(converted.len(), context::CONTEXT_SIZE);
-        let layout = context::build_register_map();
+        assert_eq!(converted.len(), amd64::CONTEXT_SIZE);
+        let layout = amd64::build_register_map();
         assert_eq!(
             layout.read_u64("rip", &converted).unwrap(),
             0xffff_f805_aed1_950f
@@ -804,13 +803,13 @@ mod tests {
         );
         assert_eq!(layout.read_u64("dr7", &converted).unwrap(), 0);
         let flags = u32::from_le_bytes(
-            converted[context::OFFSET_CONTEXT_FLAGS..context::OFFSET_CONTEXT_FLAGS + 4]
+            converted[amd64::OFFSET_CONTEXT_FLAGS..amd64::OFFSET_CONTEXT_FLAGS + 4]
                 .try_into()
                 .unwrap(),
         );
         assert_eq!(
             flags,
-            context::CONTEXT_CONTROL | context::CONTEXT_INTEGER | context::CONTEXT_SEGMENTS
+            amd64::CONTEXT_CONTROL | amd64::CONTEXT_INTEGER | amd64::CONTEXT_SEGMENTS
         );
     }
 
@@ -850,7 +849,7 @@ mod tests {
             bug_check_code: 0,
             bug_check_parameters: [0; 4],
             kd_debugger_data_block: 0,
-            context: vec![0u8; context::CONTEXT_SIZE],
+            context: vec![0u8; amd64::CONTEXT_SIZE],
             exception: None,
             runs,
         }
@@ -886,8 +885,8 @@ mod tests {
             *byte = (index as u8).wrapping_mul(37).wrapping_add(11);
         }
         let memory = SyntheticMemory { bytes };
-        let mut context = vec![0u8; context::CONTEXT_SIZE];
-        write_u64(&mut context, context::OFFSET_RIP, 0xffff_f800_1234_5678);
+        let mut context = vec![0u8; amd64::CONTEXT_SIZE];
+        write_u64(&mut context, amd64::OFFSET_RIP, 0xffff_f800_1234_5678);
         let metadata = DumpMetadata {
             arch: Arch::Amd64,
             major_version: 0xf,
@@ -963,29 +962,17 @@ mod tests {
         }
         let memory = SyntheticMemory { bytes };
 
-        let mut context = vec![0u8; context_arm64::REGISTER_BUFFER_SIZE];
+        let mut context = vec![0u8; arm64::REGISTER_BUFFER_SIZE];
         write_u32(
             &mut context,
-            context_arm64::OFFSET_CONTEXT_FLAGS,
-            context_arm64::CONTEXT_ALL,
+            arm64::OFFSET_CONTEXT_FLAGS,
+            arm64::CONTEXT_ALL,
         );
-        write_u64(
-            &mut context,
-            context_arm64::OFFSET_PC,
-            0xffff_8000_dead_0000,
-        );
-        write_u64(
-            &mut context,
-            context_arm64::OFFSET_SP,
-            0xffff_8000_beef_1000,
-        );
-        write_u64(&mut context, context_arm64::OFFSET_X0, 0x5a5a_5a5a);
+        write_u64(&mut context, arm64::OFFSET_PC, 0xffff_8000_dead_0000);
+        write_u64(&mut context, arm64::OFFSET_SP, 0xffff_8000_beef_1000);
+        write_u64(&mut context, arm64::OFFSET_X0, 0x5a5a_5a5a);
         // Past the CONTEXT record: must not leak into the dump header.
-        write_u64(
-            &mut context,
-            context_arm64::OFFSET_CR3,
-            0xdead_dead_dead_dead,
-        );
+        write_u64(&mut context, arm64::OFFSET_CR3, 0xdead_dead_dead_dead);
 
         let metadata = DumpMetadata {
             arch: Arch::Arm64,
@@ -1009,13 +996,13 @@ mod tests {
             "the header must declare ARM64, not AMD64"
         );
         let ctx = offset_of!(Header64, context_record_buffer);
-        let flags_at = ctx + context_arm64::OFFSET_CONTEXT_FLAGS;
+        let flags_at = ctx + arm64::OFFSET_CONTEXT_FLAGS;
         assert_eq!(
             u32::from_le_bytes(raw[flags_at..flags_at + 4].try_into().unwrap()),
-            context_arm64::CONTEXT_ALL,
+            arm64::CONTEXT_ALL,
         );
         assert!(
-            raw[ctx + context_arm64::CONTEXT_SIZE..ctx + context::CONTEXT_SIZE]
+            raw[ctx + arm64::CONTEXT_SIZE..ctx + amd64::CONTEXT_SIZE]
                 .iter()
                 .all(|&b| b == 0),
             "only the ARM64 CONTEXT prefix belongs in the header"
