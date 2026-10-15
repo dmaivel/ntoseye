@@ -1,5 +1,6 @@
 //! Reading the halted guest: breakpoint-masked memory, disassembly,
-//! backtraces, exception/context records, and debugger-worker page-in.
+//! backtraces, exception/context records, version metadata, and
+//! debugger-worker page-in.
 
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
@@ -22,6 +23,7 @@ use crate::session::{
     ContinueOutcome, ExceptionRecord, InstructionBoundary, PageInReport, Session, TerminatedRead,
     VpRegisters,
 };
+use crate::target::meta::TargetVersionDetail;
 use crate::target::usermode::ImageCheckDetail;
 use crate::target::{CompareResult, SearchResult, SelectedFrame, ThreadInfo, exit_registers};
 use crate::types::{Arch, CodeMachine, Dtb, VirtAddr};
@@ -441,6 +443,22 @@ impl Session {
             .map(|info| analyze_bugcheck(&self.target, info))
             .or_else(|| current_bugcheck(&self.target))
             .or_else(|| bugcheck_from_dump_info(&self.target))
+    }
+
+    /// Add backend identity and a backend vCPU count fallback to the target
+    /// metadata. The target-only method remains useful for passive memory and
+    /// dump consumers that have no execution backend.
+    pub fn target_version(&mut self) -> Result<TargetVersionDetail> {
+        let mut detail = self.target.target_version()?;
+        if detail.processors.is_none() {
+            detail.processors = self
+                .backend
+                .thread_list()
+                .ok()
+                .map(|threads| threads.len() as u16);
+        }
+        detail.backend = Some(self.backend.name().to_string());
+        Ok(detail)
     }
 
     /// The function-table entry and unwind data for the function containing

@@ -3,18 +3,14 @@
 use std::sync::Arc;
 
 use crate::cpu_state;
-use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::error::{Error, Result};
 use crate::guest::Image;
 use crate::layout::{FieldInfo, ParsedType, TypeInfo, le_uint};
 use crate::memory::MemoryOps;
-use crate::session::Session;
 use crate::target::{DiagnosticValue, Target};
 use crate::types::{Arch, VirtAddr};
 
 const MAX_FIELD_BYTES: usize = 0x1000;
-/// [`Error::TargetRunning`] payload for MSR access.
-const MSRS_NEED_HALT: &str = "MSRs are read on a halted processor.";
 const IDT_VECTOR_COUNT: u16 = 256;
 const MAX_GDT_ENTRIES: usize = 256;
 
@@ -23,6 +19,39 @@ const MAX_GDT_ENTRIES: usize = 256;
 pub struct DescriptorDetail {
     pub base: VirtAddr,
     pub limit: u64,
+}
+
+/// An x86 descriptor table whose register a processor's `_KPRCB` saves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DescriptorTable {
+    Idt,
+    Gdt,
+}
+
+impl DescriptorTable {
+    /// The table register's name in a backend's register map.
+    pub fn register(self) -> &'static str {
+        match self {
+            Self::Idt => "idtr",
+            Self::Gdt => "gdtr",
+        }
+    }
+
+    /// The `_KSPECIAL_REGISTERS` field holding the register.
+    fn special_register_names(self) -> &'static [&'static str] {
+        match self {
+            Self::Idt => &["Idtr", "IDTR"],
+            Self::Gdt => &["Gdtr", "GDTR"],
+        }
+    }
+
+    /// The `_KPCR` fields holding the table's base and limit.
+    fn kpcr_names(self) -> (&'static [&'static str], &'static [&'static str]) {
+        match self {
+            Self::Idt => (&["IdtBase", "IDTBase"], &["IdtLimit", "IDTLimit"]),
+            Self::Gdt => (&["GdtBase", "GDTBase"], &["GdtLimit", "GDTLimit"]),
+        }
+    }
 }
 
 /// All KPCR/KPRCB fields displayed by `!pcr`.
@@ -300,14 +329,16 @@ fn nested_field(
     ))
 }
 
+/// A processor's `_KPCR` and `_KPRCB`.
 #[derive(Clone, Debug)]
-struct CpuLocation {
+pub struct CpuLocation {
     processor: u16,
     kpcr: DiagnosticValue<VirtAddr>,
     kprcb: VirtAddr,
 }
 
-fn cpu_location(target: &Target, processor: u16) -> Result<CpuLocation> {
+/// Find `processor`'s control blocks; it fails only without its `_KPRCB`.
+pub fn cpu_location(target: &Target, processor: u16) -> Result<CpuLocation> {
     let kprcb = cpu_state::kprcb_for_processor(target, processor)?;
     Ok(CpuLocation {
         processor,
@@ -404,41 +435,27 @@ fn descriptor_from_prcb(
     }
 }
 
-fn descriptor_from_target(
+/// `table`'s register as Windows saved it for the processor at `location`:
+/// its `_KPRCB`'s `ProcessorState`, else the `_KPCR`'s base and limit.
+pub fn descriptor_from_target(
     target: &Target,
     location: &CpuLocation,
-    names: &[&str],
-    direct_base_names: &[&str],
-    direct_limit_names: &[&str],
+    table: DescriptorTable,
 ) -> Result<DescriptorDetail> {
-    descriptor_from_prcb(target, location.kprcb, names).or_else(|_| {
+    descriptor_from_prcb(target, location.kprcb, table.special_register_names()).or_else(|_| {
         let kpcr = match &location.kpcr {
             DiagnosticValue::Available(kpcr) => *kpcr,
             DiagnosticValue::Unavailable(error) => {
                 return Err(Error::DebugInfo(error.clone()));
             }
         };
-        descriptor_from_layout(target, "_KPCR", kpcr, direct_base_names, direct_limit_names)
+        let (base_names, limit_names) = table.kpcr_names();
+        descriptor_from_layout(target, "_KPCR", kpcr, base_names, limit_names)
     })
 }
 
-fn target_descriptor_value(
-    target: &Target,
-    location: &CpuLocation,
-    names: &[&str],
-    direct_base_names: &[&str],
-    direct_limit_names: &[&str],
-) -> DiagnosticValue<DescriptorDetail> {
-    DiagnosticValue::from_result(descriptor_from_target(
-        target,
-        location,
-        names,
-        direct_base_names,
-        direct_limit_names,
-    ))
-}
-
-fn validate_idt_vector(vector: Option<u16>) -> Result<()> {
+/// Refuse an IDT vector past the table's 256 entries.
+pub fn validate_idt_vector(vector: Option<u16>) -> Result<()> {
     if let Some(vector) = vector
         && vector >= IDT_VECTOR_COUNT
     {
@@ -540,20 +557,16 @@ impl Target {
             current_thread,
             next_thread,
             idle_thread,
-            idtr: target_descriptor_value(
+            idtr: DiagnosticValue::from_result(descriptor_from_target(
                 self,
                 &location,
-                &["Idtr", "IDTR"],
-                &["IdtBase", "IDTBase"],
-                &["IdtLimit", "IDTLimit"],
-            ),
-            gdtr: target_descriptor_value(
+                DescriptorTable::Idt,
+            )),
+            gdtr: DiagnosticValue::from_result(descriptor_from_target(
                 self,
                 &location,
-                &["Gdtr", "GDTR"],
-                &["GdtBase", "GDTBase"],
-                &["GdtLimit", "GDTLimit"],
-            ),
+                DescriptorTable::Gdt,
+            )),
             tss_base: tss_base(self, &location),
         })
     }
@@ -691,13 +704,7 @@ impl Target {
         }
         validate_idt_vector(vector)?;
         let location = cpu_location(self, processor)?;
-        let descriptor = descriptor_from_target(
-            self,
-            &location,
-            &["Idtr", "IDTR"],
-            &["IdtBase", "IDTBase"],
-            &["IdtLimit", "IDTLimit"],
-        )?;
+        let descriptor = descriptor_from_target(self, &location, DescriptorTable::Idt)?;
         Ok(decode_idt(self, location.processor, descriptor, vector))
     }
 
@@ -712,13 +719,7 @@ impl Target {
             ));
         }
         let location = cpu_location(self, processor)?;
-        let descriptor = descriptor_from_target(
-            self,
-            &location,
-            &["Gdtr", "GDTR"],
-            &["GdtBase", "GDTBase"],
-            &["GdtLimit", "GDTLimit"],
-        )?;
+        let descriptor = descriptor_from_target(self, &location, DescriptorTable::Gdt)?;
         Ok(decode_gdt(self, location.processor, descriptor))
     }
 
@@ -986,7 +987,8 @@ fn decode_idt_entry(target: &Target, base: u64, vector: u16) -> IdtEntryDetail {
     unavailable_idt_entry(vector, address, error.to_string())
 }
 
-fn decode_idt(
+/// Decode `vector`, or all 256 vectors, of the IDT `descriptor` names.
+pub fn decode_idt(
     target: &Target,
     processor: u16,
     descriptor: DescriptorDetail,
@@ -1089,7 +1091,8 @@ fn decode_gdt_entry(index: usize, raw: u64, high_raw: Result<Option<u64>>) -> Gd
     }
 }
 
-fn decode_gdt(target: &Target, processor: u16, descriptor: DescriptorDetail) -> GdtDetail {
+/// Decode the GDT `descriptor` names, bounded to 256 entries.
+pub fn decode_gdt(target: &Target, processor: u16, descriptor: DescriptorDetail) -> GdtDetail {
     let raw_count = descriptor.limit.saturating_add(8) / 8;
     let count = usize::try_from(raw_count).unwrap_or(MAX_GDT_ENTRIES + 1);
     let truncated = count > MAX_GDT_ENTRIES;
@@ -1149,246 +1152,9 @@ fn decode_gdt(target: &Target, processor: u16, descriptor: DescriptorDetail) -> 
     }
 }
 
-impl Session {
-    fn current_processor_for_cpu(&self) -> u16 {
-        processor_index_from_backend_thread_id(&self.current_thread).unwrap_or(0)
-    }
-
-    fn backend_descriptor(&mut self, name: &str) -> Result<DescriptorDetail> {
-        let names = self.register_map.names();
-        if !names
-            .iter()
-            .any(|candidate| candidate.eq_ignore_ascii_case(name))
-        {
-            return Err(Error::FieldNotFound(name.to_string()));
-        }
-        let registers = self.read_registers()?;
-        let base = self.register_map.read_u64(name, &registers)?;
-        let limit_name = format!("{name}_limit");
-        let limit = self
-            .register_map
-            .read_u64(&limit_name, &registers)
-            .unwrap_or(0);
-        Ok(DescriptorDetail {
-            base: VirtAddr(base),
-            limit,
-        })
-    }
-
-    fn descriptor_for_cpu(
-        &mut self,
-        processor: u16,
-        names: &[&str],
-        direct_base_names: &[&str],
-        direct_limit_names: &[&str],
-        backend_name: &str,
-    ) -> Result<DescriptorDetail> {
-        if processor != self.current_processor_for_cpu() {
-            return Err(Error::DebugInfo(
-                "IDTR/GDTR ProcessorState is valid only for the halting processor".into(),
-            ));
-        }
-        let location = cpu_location(&self.target, processor)?;
-        let target_result = descriptor_from_target(
-            &self.target,
-            &location,
-            names,
-            direct_base_names,
-            direct_limit_names,
-        );
-        match target_result {
-            Ok(descriptor) => Ok(descriptor),
-            Err(error) => self.backend_descriptor(backend_name).or(Err(error)),
-        }
-    }
-
-    /// Decode KPCR/KPRCB essentials, using halted backend descriptor registers
-    /// only when target-memory descriptor fields are unavailable; all other
-    /// diagnostic values retain their target-memory layout/read errors.
-    pub fn inspect_pcr(&mut self, processor: u16) -> Result<PcrDetail> {
-        let mut detail = self.target.inspect_pcr(processor)?;
-        let idtr = self.descriptor_for_cpu(
-            processor,
-            &["Idtr", "IDTR"],
-            &["IdtBase", "IDTBase"],
-            &["IdtLimit", "IDTLimit"],
-            "idtr",
-        );
-        detail.idtr = DiagnosticValue::from_result(idtr);
-        let gdtr = self.descriptor_for_cpu(
-            processor,
-            &["Gdtr", "GDTR"],
-            &["GdtBase", "GDTBase"],
-            &["GdtLimit", "GDTLimit"],
-            "gdtr",
-        );
-        detail.gdtr = DiagnosticValue::from_result(gdtr);
-        Ok(detail)
-    }
-
-    /// Decode one IDT vector or all 256 vectors from the halted processor's
-    /// IDTR, falling back to backend register reads when PDB state is absent;
-    /// each entry field preserves its own memory/symbol diagnostic.
-    pub fn inspect_idt(&mut self, processor: u16, vector: Option<u16>) -> Result<IdtDetail> {
-        if self.target.arch() == Arch::Arm64 {
-            return Err(Error::DebugInfo(
-                "!idt is not defined on ARM64 targets".into(),
-            ));
-        }
-        validate_idt_vector(vector)?;
-        let descriptor = self.descriptor_for_cpu(
-            processor,
-            &["Idtr", "IDTR"],
-            &["IdtBase", "IDTBase"],
-            &["IdtLimit", "IDTLimit"],
-            "idtr",
-        )?;
-        Ok(decode_idt(&self.target, processor, descriptor, vector))
-    }
-
-    /// Decode the halted processor's bounded GDT, falling back to backend GDTR
-    /// registers when PDB state is absent; each entry field preserves its own
-    /// raw/descriptor diagnostic.
-    pub fn inspect_gdt(&mut self, processor: u16) -> Result<GdtDetail> {
-        if self.target.arch() == Arch::Arm64 {
-            return Err(Error::DebugInfo(
-                "!gdt is not defined on ARM64 targets".into(),
-            ));
-        }
-        let descriptor = self.descriptor_for_cpu(
-            processor,
-            &["Gdtr", "GDTR"],
-            &["GdtBase", "GDTBase"],
-            &["GdtLimit", "GDTLimit"],
-            "gdtr",
-        )?;
-        Ok(decode_gdt(&self.target, processor, descriptor))
-    }
-
-    /// Read one MSR on a halted processor after enforcing the backend MSR
-    /// capability. The backend error is returned unchanged to the caller.
-    pub fn read_msr(&mut self, processor: u16, msr: u32) -> Result<u64> {
-        if self.backend.is_running() {
-            return Err(Error::TargetRunning(MSRS_NEED_HALT));
-        }
-        if !self.backend.supports_msr() {
-            return Err(Error::NotSupported);
-        }
-        self.backend.read_msr(processor, msr)
-    }
-
-    /// Write one MSR on a halted processor after enforcing the backend MSR
-    /// capability. The backend error is returned unchanged to the caller.
-    pub fn write_msr(&mut self, processor: u16, msr: u32, value: u64) -> Result<()> {
-        if self.backend.is_running() {
-            return Err(Error::TargetRunning(MSRS_NEED_HALT));
-        }
-        // Hosts write the selected vCPU's MSRs; a vCPU stopped in VTL1 is
-        // inspection-only, like its register file.
-        if processor_index_from_backend_thread_id(&self.current_thread) == Some(processor)
-            && self
-                .read_registers()
-                .ok()
-                .and_then(|regs| {
-                    self.register_map
-                        .read_u64(self.target.arch().dtb_register(), &regs)
-                        .ok()
-                })
-                .is_some_and(|dtb| self.target.recognize_secure_root(dtb))
-        {
-            return Err(Error::DebugInfo("VTL1 MSRs are read-only".into()));
-        }
-        if !self.backend.supports_msr() {
-            return Err(Error::NotSupported);
-        }
-        self.backend.write_msr(processor, msr, value)
-    }
-
-    /// Refuse an I/O-port access the backend cannot make, saying why, or one
-    /// the target cannot take while running.
-    fn check_io_ports(&self) -> Result<()> {
-        if self.target.arch() == Arch::Arm64 {
-            return Err(Error::DebugInfo(
-                "ARM64 has no I/O-port space; devices are memory-mapped".into(),
-            ));
-        }
-        if !self.backend.supports_io_ports() {
-            return Err(Error::DebugInfo(format!(
-                "the {} backend has no I/O-port access; ports are read and written through \
-                 the Windows KD protocol (the kd and kdnet backends)",
-                self.backend.name()
-            )));
-        }
-        if self.backend.is_running() {
-            return Err(Error::TargetRunning(PORTS_NEED_HALT));
-        }
-        Ok(())
-    }
-
-    /// Read `size` (1, 2, or 4) bytes from I/O port `port` on the current
-    /// processor (`ib`/`iw`/`id`).
-    pub fn read_io_port(&mut self, port: u64, size: u8) -> Result<u32> {
-        validate_io_port(port, size)?;
-        self.check_io_ports()?;
-        self.backend.read_io_port(port, size)
-    }
-
-    /// Write `value` as `size` (1, 2, or 4) bytes to I/O port `port` on the
-    /// current processor (`ob`/`ow`/`od`).
-    pub fn write_io_port(&mut self, port: u64, size: u8, value: u64) -> Result<()> {
-        validate_io_port(port, size)?;
-        if value >> (u32::from(size) * 8) != 0 {
-            return Err(Error::InvalidArgument(format!(
-                "{value:#x} does not fit in {size} byte(s)"
-            )));
-        }
-        self.check_io_ports()?;
-        self.backend.write_io_port(port, size, value as u32)
-    }
-}
-
-/// [`Error::TargetRunning`] payload for I/O-port access.
-const PORTS_NEED_HALT: &str = "I/O ports are accessed on a halted target.";
-
-/// An x86 I/O-port access: 1, 2, or 4 bytes inside the 64 KiB port space,
-/// aligned to its size as the kernel's `KdpReadIoSpace` requires.
-fn validate_io_port(port: u64, size: u8) -> Result<()> {
-    if !matches!(size, 1 | 2 | 4) {
-        return Err(Error::InvalidArgument(format!(
-            "I/O access size must be 1, 2, or 4 bytes, not {size}"
-        )));
-    }
-    if port
-        .checked_add(u64::from(size))
-        .is_none_or(|end| end > 0x1_0000)
-    {
-        return Err(Error::InvalidArgument(format!(
-            "port {port:#x} is outside the 64 KiB I/O space"
-        )));
-    }
-    if !port.is_multiple_of(u64::from(size)) {
-        return Err(Error::InvalidArgument(format!(
-            "port {port:#x} is not aligned to a {size}-byte access"
-        )));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{msr_name, parse_msr_name, validate_io_port};
-
-    #[test]
-    fn io_port_accesses_stay_aligned_inside_the_port_space() {
-        assert!(validate_io_port(0xfffc, 4).is_ok());
-        assert!(validate_io_port(0xffff, 1).is_ok());
-        assert!(validate_io_port(0xfffe, 4).is_err());
-        assert!(validate_io_port(0x1_0000, 1).is_err());
-        assert!(validate_io_port(0xcf9, 2).is_err());
-        assert!(validate_io_port(0xcfa, 2).is_ok());
-        assert!(validate_io_port(0x80, 3).is_err());
-        assert!(validate_io_port(u64::MAX, 1).is_err());
-    }
+    use super::{msr_name, parse_msr_name};
 
     #[test]
     fn msr_name_aliases_round_trip() {

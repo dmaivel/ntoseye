@@ -10,12 +10,11 @@ use crate::dbg_backend::ProcessorRead;
 use crate::error::{Error, Result};
 use crate::layout::{TypeInfo, Types};
 use crate::memory::MemoryOps;
-use crate::session::Session;
 use crate::target::{Target, bounded_list_walk};
-use crate::types::{Arch, VirtAddr};
+use crate::types::VirtAddr;
 
 /// `IA32_APIC_BASE`.
-const IA32_APIC_BASE: u32 = 0x1b;
+pub const IA32_APIC_BASE: u32 = 0x1b;
 /// `IA32_APIC_BASE` bits: the bootstrap processor, x2APIC mode, and the
 /// APIC enabled.
 const APIC_BASE_BSP: u64 = 1 << 8;
@@ -27,10 +26,17 @@ const X2APIC_MSR_BASE: u32 = 0x800;
 /// The physical base of the xAPIC page in `IA32_APIC_BASE`.
 const APIC_BASE_ADDRESS: u64 = 0x000f_ffff_ffff_f000;
 
-/// Why the first register read of an xAPIC failed: a backend without
-/// device reads, or the read itself.
-fn apic_read_error(base: Option<u64>, error: Error) -> Error {
-    match (base, error) {
+/// The physical base of the registers of a local APIC whose
+/// `IA32_APIC_BASE` is `apic_base`; `None` in x2APIC mode.
+fn xapic_base(apic_base: u64) -> Option<u64> {
+    (apic_base & APIC_BASE_X2APIC == 0).then_some(apic_base & APIC_BASE_ADDRESS)
+}
+
+/// Why a register read of the local APIC whose `IA32_APIC_BASE` is
+/// `apic_base` failed: for an xAPIC, a backend without device reads, or
+/// the read itself.
+pub fn apic_read_error(apic_base: u64, error: Error) -> Error {
+    match (xapic_base(apic_base), error) {
         (Some(base), Error::NotSupported) => Error::DebugInfo(format!(
             "the local APIC is in xAPIC mode, with its registers at physical {base:#x}, which \
              this backend cannot read; attach over KD (kd or kdnet)"
@@ -260,57 +266,34 @@ impl LocalApic {
     pub fn enabled(&self) -> bool {
         self.apic_base & APIC_BASE_ENABLE != 0
     }
-}
 
-impl Session {
-    /// The local APIC of `processor`, which needs a backend that reads MSRs
-    /// and device registers on a given processor (KD): in x2APIC mode
-    /// through its MSRs, in xAPIC mode through its registers at the
-    /// physical base `IA32_APIC_BASE` names, read uncached.
-    pub fn local_apic(&mut self, processor: u16) -> Result<LocalApic> {
-        if self.target.arch() != Arch::Amd64 {
-            return Err(Error::DebugInfo(
-                "!apic reads an x86 local APIC; an ARM64 target has a GIC".into(),
-            ));
-        }
-        if self.backend.is_running() {
-            return Err(Error::TargetRunning(
-                "the local APIC is read on a halted processor.",
-            ));
-        }
-        let apic_base = self
-            .read_msr(processor, IA32_APIC_BASE)
-            .map_err(|error| match error {
-                Error::NotSupported => Error::DebugInfo(
-                    "!apic reads the local APIC through MSRs, which this backend cannot read; \
-                 attach over KD (kd or kdnet)"
-                        .into(),
-                ),
-                other => other,
-            })?;
-        let x2apic = apic_base & APIC_BASE_X2APIC != 0;
-        let base = (!x2apic).then_some(apic_base & APIC_BASE_ADDRESS);
-        let words = apic_words(x2apic);
-        let reads: Vec<ProcessorRead> = words
-            .iter()
-            .map(|&(register, index)| match base {
+    /// The reads of the registers of a local APIC whose `IA32_APIC_BASE` is
+    /// `apic_base`: in x2APIC mode its MSRs, in xAPIC mode its registers at
+    /// the physical base `apic_base` names, read uncached.
+    pub fn reads(apic_base: u64) -> Vec<ProcessorRead> {
+        let base = xapic_base(apic_base);
+        apic_words(base.is_none())
+            .into_iter()
+            .map(|(register, index)| match base {
                 None => ProcessorRead::Msr(register.msr(index)),
                 Some(base) => {
                     ProcessorRead::Device(base + register as u64 + u64::from(index) * 0x10)
                 }
             })
-            .collect();
-        let results = self
-            .backend
-            .read_on_processor(processor, &reads)
-            .map_err(|error| apic_read_error(base, error))?;
+            .collect()
+    }
+
+    /// Decode `processor`'s local APIC from the `results` of
+    /// [`LocalApic::reads`] for the same `apic_base`.
+    pub fn decode(processor: u16, apic_base: u64, results: Vec<Result<u64>>) -> Result<Self> {
+        let x2apic = apic_base & APIC_BASE_X2APIC != 0;
         let mut values: HashMap<(ApicRegister, u32), Result<u64>> =
-            words.into_iter().zip(results).collect();
+            apic_words(x2apic).into_iter().zip(results).collect();
         let mut word = |register: ApicRegister, index: u32| -> Result<u64> {
             values
                 .remove(&(register, index))
                 .unwrap_or(Err(Error::NotSupported))
-                .map_err(|error| apic_read_error(base, error))
+                .map_err(|error| apic_read_error(apic_base, error))
         };
         let mut bitmap = |register: ApicRegister| -> Result<[u32; 8]> {
             let mut bits = [0u32; 8];
@@ -366,7 +349,7 @@ impl Session {
             };
             lvt.push((name, entry));
         }
-        Ok(LocalApic {
+        Ok(Self {
             processor,
             apic_base,
             x2apic,

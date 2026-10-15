@@ -10,7 +10,6 @@ use crate::kuser_shared::KuserSharedData;
 use crate::layout::{StructRef, Types};
 use crate::memory::MemoryOps;
 use crate::ntstatus::{ntstatus_name, win32_error_name};
-use crate::session::Session;
 use crate::symbols::ModuleSymbolStatus;
 use crate::target::{DiagnosticValue, ListCursor, ListTermination, Target};
 use crate::triage_report::time::{filetime_to_iso, unix_time_to_iso};
@@ -1126,24 +1125,6 @@ impl Target {
     /// data and missing dump metadata are represented by `None` fields.
     pub fn target_time(&self) -> Result<TargetTimeDetail> {
         Ok(target_time(self, &KuserSharedData::new(self)))
-    }
-}
-
-impl Session {
-    /// Add backend identity and a backend vCPU count fallback to the target
-    /// metadata. The target-only method remains useful for passive memory and
-    /// dump consumers that have no execution backend.
-    pub fn target_version(&mut self) -> Result<TargetVersionDetail> {
-        let mut detail = self.target.target_version()?;
-        if detail.processors.is_none() {
-            detail.processors = self
-                .backend
-                .thread_list()
-                .ok()
-                .map(|threads| threads.len() as u16);
-        }
-        detail.backend = Some(self.backend.name().to_string());
-        Ok(detail)
     }
 }
 

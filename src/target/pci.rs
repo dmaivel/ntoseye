@@ -2,12 +2,9 @@
 //! space read through the backend and decoded (`!pci`).
 
 use std::collections::HashSet;
-use std::sync::atomic::Ordering;
 
-use crate::dbg_backend::PciConfigAddress;
 use crate::error::{Error, Result};
 use crate::memory::MemoryOps;
-use crate::session::Session;
 use crate::target::Target;
 use crate::types::VirtAddr;
 
@@ -376,6 +373,11 @@ pub struct PciCapability {
 
 fn u16_at(config: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([config[offset], config[offset + 1]])
+}
+
+/// No function answered the configuration read: its vendor ID is all ones.
+pub fn function_absent(config: &[u8]) -> bool {
+    u16_at(config, 0) == u16::MAX
 }
 
 fn u32_at(config: &[u8], offset: usize) -> u32 {
@@ -1077,157 +1079,6 @@ impl TreeWalk<'_> {
             .ok()?
             .unicode_string("InstancePath")
             .ok()
-    }
-}
-
-/// [`Error::TargetRunning`] payload for configuration-space reads.
-const PCI_CONFIG_NEEDS_HALT: &str = "PCI configuration space is read on a halted target.";
-
-impl Session {
-    /// Refuse a configuration-space read the backend cannot make, saying why,
-    /// or one the target cannot take while running.
-    fn check_pci_config(&self) -> Result<()> {
-        if !self.backend.supports_pci_config() {
-            return Err(Error::DebugInfo(format!(
-                "the {} backend cannot read PCI configuration space: it is device registers \
-                 (the ECAM window or ports 0xcf8/0xcfc), not the RAM this backend reads; use \
-                 the gdb backend (QEMU) or kd/kdnet",
-                self.backend.name()
-            )));
-        }
-        if self.backend.is_running() {
-            return Err(Error::TargetRunning(PCI_CONFIG_NEEDS_HALT));
-        }
-        Ok(())
-    }
-
-    /// Read `len` bytes of a function's configuration space from `offset`.
-    fn read_function_config(
-        &mut self,
-        windows: &[EcamWindow],
-        segment: u16,
-        bus: u8,
-        device: u8,
-        function: u8,
-        offset: u16,
-        len: usize,
-    ) -> Result<Vec<u8>> {
-        let ecam = windows
-            .iter()
-            .find_map(|window| window.function_page(segment, bus, device, function));
-        let mut config = vec![0; len];
-        self.backend.read_pci_config(
-            PciConfigAddress {
-                segment,
-                bus,
-                device,
-                function,
-                ecam,
-            },
-            offset,
-            &mut config,
-        )?;
-        Ok(config)
-    }
-
-    /// Scan configuration space as `!pci` does: each device's function 0,
-    /// and functions 1-7 of a multi-function device, reading `query.size`
-    /// bytes of every function whose vendor ID is not all-ones. A named
-    /// function is read whatever function 0 says.
-    pub fn scan_pci(&mut self, query: &PciQuery) -> Result<PciScan> {
-        if let Some(device) = query.device.filter(|device| *device >= PCI_MAX_DEVICES) {
-            return Err(Error::InvalidArgument(format!(
-                "PCI device {device:#x} is out of range (0-0x1f)"
-            )));
-        }
-        if let Some(function) = query
-            .function
-            .filter(|function| *function >= PCI_MAX_FUNCTIONS)
-        {
-            return Err(Error::InvalidArgument(format!(
-                "PCI function {function:#x} is out of range (0-7)"
-            )));
-        }
-        if query.first_bus > query.last_bus {
-            return Err(Error::InvalidArgument(format!(
-                "bus range {:#x}-{:#x} is empty",
-                query.first_bus, query.last_bus
-            )));
-        }
-        self.check_pci_config()?;
-        let size = query.size.clamp(0x40, PCI_EXTENDED_CONFIG_SIZE);
-        // Only the gdb backend needs them; a missing table is its error then.
-        let windows = self.target.pci_ecam_windows().unwrap_or_default();
-        let interrupt = std::sync::Arc::clone(&self.target.interrupt);
-        let mut scan = PciScan {
-            functions: Vec::new(),
-            interrupted: false,
-        };
-        for bus in query.first_bus..=query.last_bus {
-            let devices = match query.device {
-                Some(device) => device..=device,
-                None => 0..=PCI_MAX_DEVICES - 1,
-            };
-            for device in devices {
-                if interrupt.load(Ordering::Relaxed) {
-                    scan.interrupted = true;
-                    return Ok(scan);
-                }
-                let functions = match query.function {
-                    Some(function) => function..=function,
-                    None => {
-                        let head = self.read_function_config(
-                            &windows,
-                            query.segment,
-                            bus,
-                            device,
-                            0,
-                            0,
-                            0x10,
-                        )?;
-                        if u16_at(&head, 0) == u16::MAX {
-                            continue;
-                        }
-                        let last = if head[0x0e] & 0x80 != 0 {
-                            PCI_MAX_FUNCTIONS - 1
-                        } else {
-                            0
-                        };
-                        0..=last
-                    }
-                };
-                for function in functions {
-                    let config = self.read_function_config(
-                        &windows,
-                        query.segment,
-                        bus,
-                        device,
-                        function,
-                        0,
-                        size,
-                    )?;
-                    if u16_at(&config, 0) == u16::MAX {
-                        continue;
-                    }
-                    let Some(header) = parse_header(&config) else {
-                        return Err(Error::DebugInfo(format!(
-                            "PCI {bus:02x}:{device:02x}.{function} returned {} bytes of \
-                             configuration space, short of its 64-byte header",
-                            config.len()
-                        )));
-                    };
-                    scan.functions.push(PciFunctionConfig {
-                        segment: query.segment,
-                        bus,
-                        device,
-                        function,
-                        header,
-                        config,
-                    });
-                }
-            }
-        }
-        Ok(scan)
     }
 }
 
