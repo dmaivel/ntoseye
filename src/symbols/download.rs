@@ -15,7 +15,7 @@ use std::{
     fs::File,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, LazyLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -130,8 +130,24 @@ pub(super) fn download_job(job: &DownloadJob, pb: ProgressBar) -> Result<()> {
         .unwrap_or_else(|| Error::DebugInfo("no symbol server URL to download from".into())))
 }
 
+/// The one HTTP client every download shares. Building a client reads every
+/// root certificate in the system's store (hundreds of files) and starts
+/// the thread that drives its requests, and a shared client also keeps its
+/// connection to a symbol server open for the next request.
+fn http_client() -> Result<&'static reqwest::blocking::Client> {
+    static CLIENT: LazyLock<std::result::Result<reqwest::blocking::Client, String>> =
+        LazyLock::new(|| {
+            reqwest::blocking::Client::builder()
+                .build()
+                .map_err(|error| error.to_string())
+        });
+    CLIENT
+        .as_ref()
+        .map_err(|error| Error::DebugInfo(error.clone()))
+}
+
 fn download_url_to_path(url: &str, path: &Path, filename: &str, pb: &ProgressBar) -> Result<()> {
-    let response = reqwest::blocking::get(url)?;
+    let response = http_client()?.get(url).send()?;
     let response = response.error_for_status()?;
     let total_size = response.content_length().unwrap_or(0);
 
