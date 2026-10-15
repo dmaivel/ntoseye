@@ -10,10 +10,10 @@
 use std::ffi::OsString;
 use std::time::Duration;
 
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDict, PyType};
+use pyo3::types::{PyBool, PyDict, PyType};
 
 #[cfg(all(feature = "cli", feature = "python-extension"))]
 use crate::cli;
@@ -179,6 +179,15 @@ pub fn timeout_arg(timeout: Option<f64>) -> PyResult<Option<Duration>> {
     }
 }
 
+fn handshake_timeout_arg(value: &Bound<'_, PyAny>) -> PyResult<Option<u64>> {
+    if value.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(
+            "kd_handshake_timeout must be a positive integer number of seconds",
+        ));
+    }
+    value.extract()
+}
+
 /// A value as a plain `dict`: an entity's `to_dict()`, with its records and
 /// diagnostics converted.
 pub fn view_dict<'py, T: ViewValue<Source = T>>(
@@ -200,6 +209,9 @@ pub fn view_dict<'py, T: ViewValue<Source = T>>(
 /// holds. Without `connect`, the function uses the default of the backend,
 /// but dmp has no default and needs a path. kdnet needs `key`.
 /// `memory_source` is `auto`, `host`, or `kd` for KD/KDNET.
+/// `kd_handshake_timeout` is keyword-only: positive integer seconds for the
+/// initial KD/KDNET handshake. It overrides `NTOSEYE_KD_TIMEOUT`; `None` uses
+/// the environment variable or the 8-second default. Other backends reject it.
 ///
 /// For kd/kdnet/gdb, the function takes an instance lock for the target before
 /// it makes the backend, so a second live attach to the same target fails
@@ -211,6 +223,8 @@ pub fn view_dict<'py, T: ViewValue<Source = T>>(
     connect=None,
     key=None,
     memory_source=MemorySource(KdMemorySource::Auto),
+    *,
+    kd_handshake_timeout: "int | None" = None,
 ))]
 fn attach(
     py: Python<'_>,
@@ -218,6 +232,7 @@ fn attach(
     connect: Option<&str>,
     key: Option<&str>,
     memory_source: MemorySource,
+    #[pyo3(from_py_with = handshake_timeout_arg)] kd_handshake_timeout: Option<u64>,
 ) -> PyResult<Debugger> {
     let spec = match backend.0 {
         Some(backend) => TargetSpec::Live {
@@ -225,8 +240,14 @@ fn attach(
             connect: connect.map(str::to_string),
             kdnet_key: key.map(str::to_string),
             memory_source: memory_source.0,
+            kd_handshake_timeout,
         },
         None => {
+            if kd_handshake_timeout.is_some() {
+                return Err(PyValueError::new_err(
+                    "kd_handshake_timeout is only valid for kd and kdnet backends",
+                ));
+            }
             let path = connect.ok_or_else(|| {
                 PyValueError::new_err("the dmp backend needs a dump file path: connect=<path>")
             })?;

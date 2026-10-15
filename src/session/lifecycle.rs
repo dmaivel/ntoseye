@@ -78,6 +78,7 @@ impl Session {
             TargetSpec::Live {
                 backend: backend @ (Backend::Kd | Backend::KdNet),
                 kdnet_key,
+                kd_handshake_timeout,
                 memory_source,
                 ..
             } => {
@@ -87,10 +88,19 @@ impl Session {
                     *memory_source,
                     progress,
                     |progress| match backend {
-                        Backend::Kd => KdBackend::connect(endpoint, progress),
+                        Backend::Kd => KdBackend::connect_with_handshake_timeout(
+                            endpoint,
+                            *kd_handshake_timeout,
+                            progress,
+                        ),
                         Backend::KdNet => {
                             let key = kdnet_key.as_deref().expect("validated above");
-                            KdBackend::connect_net(endpoint, key, progress)
+                            KdBackend::connect_net_with_handshake_timeout(
+                                endpoint,
+                                key,
+                                *kd_handshake_timeout,
+                                progress,
+                            )
                         }
                         Backend::Gdb | Backend::Memory => unreachable!("matched KD above"),
                     },

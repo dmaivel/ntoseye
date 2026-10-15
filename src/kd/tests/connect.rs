@@ -14,6 +14,35 @@ use crate::kd::framing::{
 use crate::kd::registers::ARM64_WINDBG_TTBR1_EL1;
 
 #[test]
+fn explicit_kdnet_handshake_timeout_is_used_for_the_initial_wait() {
+    let mut progress = Vec::new();
+    let error = KdBackend::connect_net_with_handshake_timeout(
+        "127.0.0.1:0",
+        "1.2.3.4",
+        Some(1),
+        &mut |line| progress.push(line.to_string()),
+    )
+    .err()
+    .unwrap();
+    assert!(progress.iter().any(|line| line.ends_with("(timeout 1s)")));
+    assert!(error.to_string().contains("no UDP datagrams within 1s"));
+}
+
+#[test]
+fn kd_connections_reject_invalid_handshake_timeouts_before_opening_a_transport() {
+    for seconds in [0, u64::MAX] {
+        assert!(matches!(
+            KdBackend::connect_with_handshake_timeout("", Some(seconds), &mut |_| {}),
+            Err(Error::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            KdBackend::connect_net_with_handshake_timeout("", "", Some(seconds), &mut |_| {}),
+            Err(Error::InvalidArgument(_))
+        ));
+    }
+}
+
+#[test]
 fn kd_detects_amd64_and_arm64_machine_types() {
     assert_eq!(detect_arch(0x8664).unwrap(), Arch::Amd64);
     assert_eq!(detect_arch(0xaa64).unwrap(), Arch::Arm64);

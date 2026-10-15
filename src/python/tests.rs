@@ -40,6 +40,36 @@ fn run_over_dump(script: &str) {
 }
 
 #[test]
+fn kd_handshake_timeout_is_validated_before_attaching() {
+    run_over_dump(
+        r#"
+for seconds, kind in ((0, ValueError), (2**64 - 1, ValueError),
+                      (-1, OverflowError), (2**64, OverflowError),
+                      (1.5, TypeError), (True, TypeError), (False, TypeError)):
+    try:
+        ntoseye.attach("kd", kd_handshake_timeout=seconds)
+    except kind:
+        pass
+    else:
+        raise AssertionError(f"accepted timeout {seconds!r}")
+for backend in ("gdb", "memory", "dmp"):
+    try:
+        ntoseye.attach(backend, DUMP, kd_handshake_timeout=1)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"accepted KD timeout for {backend}")
+try:
+    ntoseye.attach("kd", DUMP + ".sock", None, "auto", kd_handshake_timeout=1)
+except ntoseye.NtoseyeError as error:
+    assert "does not exist" in str(error), str(error)
+else:
+    raise AssertionError("connected to a missing socket")
+"#,
+    );
+}
+
+#[test]
 fn a_crash_dump_stops_at_its_bugcheck() {
     run_over_dump(
         r#"

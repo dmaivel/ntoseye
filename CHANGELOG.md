@@ -13,6 +13,12 @@ Keeping this file:
 - To release, rename "## Unreleased" to "## vX.Y.Z (YYYY-MM-DD)", the version in Cargo.toml. The release workflow refuses a tag whose version has no section here, or an empty one; dist publishes the section as the release notes, under the tag as the release title.
 -->
 
+## Unreleased
+
+### Added
+
+- Set the initial KD/KDNET handshake wait with `--kd-handshake-timeout <seconds>` or `ntoseye.attach(kd_handshake_timeout=...)`, without setting an environment variable. Explicit values override `NTOSEYE_KD_TIMEOUT`; the default remains 8 seconds.
+
 ## v0.49.1 (2026-10-14)
 
 ### Fixed

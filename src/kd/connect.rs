@@ -24,9 +24,9 @@ use super::registers::{ARM64_WINDBG_TTBR1_EL1, KSPECIAL_REGISTERS_CR3_OFFSET};
 use super::transport::KdTransport;
 use super::{
     DBG_KD_EXCEPTION_STATE_CHANGE, DEBUG_LOG_CAPACITY, KD_REQUEST_TIMEOUT, KdBackend,
-    KdTargetHints, Link, STATUS_BREAKPOINT, api, context, context_arm64, is_initial_resync_error,
-    kd_initial_timeout, kd_socket_connect_error, poll_for_initial_break, probe_initial_request,
-    with_framing_read_timeout,
+    KdTargetHints, Link, STATUS_BREAKPOINT, api, context, context_arm64, handshake_timeout,
+    is_initial_resync_error, kd_initial_timeout, kd_socket_connect_error, poll_for_initial_break,
+    probe_initial_request, with_framing_read_timeout,
 };
 
 /// [`KdBackend::running_reason`] when the operator picked `--memory-source kd`.
@@ -60,6 +60,17 @@ impl KdBackend {
     /// Connection progress (the wait for a target can run for a minute) is
     /// reported one line at a time through `progress`.
     pub fn connect(socket_path: &str, progress: &mut dyn FnMut(&str)) -> Result<Self> {
+        Self::connect_with_handshake_timeout(socket_path, None, progress)
+    }
+
+    /// Connect over serial with an initial handshake timeout in positive integer
+    /// seconds. `None` uses `NTOSEYE_KD_TIMEOUT`, or 8 seconds when it is unset.
+    pub fn connect_with_handshake_timeout(
+        socket_path: &str,
+        timeout: Option<u64>,
+        progress: &mut dyn FnMut(&str),
+    ) -> Result<Self> {
+        let timeout = timeout.map(handshake_timeout).transpose()?;
         progress(&format!("kd: using KDCOM backend on {socket_path}"));
         let stream = UnixStream::connect(socket_path)
             .map_err(|err| kd_socket_connect_error(socket_path, err))?;
@@ -67,6 +78,7 @@ impl KdBackend {
             KdTransport::Serial(stream),
             "kd: serial connected; waiting for Windows KD target",
             "kd",
+            timeout,
             progress,
         )
     }
@@ -77,12 +89,25 @@ impl KdBackend {
         key: &str,
         progress: &mut dyn FnMut(&str),
     ) -> Result<Self> {
+        Self::connect_net_with_handshake_timeout(listen_addr, key, None, progress)
+    }
+
+    /// Listen for a KDNET target with an initial handshake timeout in positive
+    /// integer seconds. `None` uses `NTOSEYE_KD_TIMEOUT`, or 8 seconds when unset.
+    pub fn connect_net_with_handshake_timeout(
+        listen_addr: &str,
+        key: &str,
+        timeout: Option<u64>,
+        progress: &mut dyn FnMut(&str),
+    ) -> Result<Self> {
+        let timeout = timeout.map(handshake_timeout).transpose()?;
         progress(&format!("kdnet: listening on {listen_addr}"));
         let stream = KdNetStream::bind(listen_addr, key)?;
         Self::connect_transport(
             KdTransport::Network(stream),
             "kdnet: listener ready; waiting for Windows KDNET target",
             "kdnet",
+            timeout,
             progress,
         )
     }
@@ -91,6 +116,7 @@ impl KdBackend {
         transport: KdTransport,
         waiting_message: &str,
         backend_name: &'static str,
+        timeout: Option<std::time::Duration>,
         progress: &mut dyn FnMut(&str),
     ) -> Result<Self> {
         let network_generation = transport.network_session_generation();
@@ -98,7 +124,10 @@ impl KdBackend {
         if let Some(generation) = network_generation {
             framing.use_kdnet_packet_ids(generation);
         }
-        let initial_timeout = kd_initial_timeout()?;
+        let initial_timeout = match timeout {
+            Some(timeout) => timeout,
+            None => kd_initial_timeout()?,
+        };
 
         progress(&format!(
             "{waiting_message} (timeout {}s)",

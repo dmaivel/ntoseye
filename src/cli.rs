@@ -74,6 +74,11 @@ struct TargetOptions {
     #[arg(long, global = true)]
     kdnet_key: Option<String>,
 
+    /// Seconds to wait for the initial KD/KDNET handshake. Overrides
+    /// NTOSEYE_KD_TIMEOUT; defaults to 8 seconds when neither is set
+    #[arg(long, global = true, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
+    kd_handshake_timeout: Option<u64>,
+
     /// The memory source for KD and KDNET: auto (validated host memory first,
     /// then KD), host, or kd
     #[arg(long, global = true)]
@@ -270,7 +275,7 @@ ntoseye --connect /tmp/ntoseye-kd.sock
 By default, ntoseye waits 8 seconds for the first KD handshake.
 For a very slow guest, set a different time:
 
-NTOSEYE_KD_TIMEOUT=20 ntoseye
+ntoseye --kd-handshake-timeout 20
 
 macOS (UTM): UTM runs QEMU in a sandbox, even in the unsigned build,
 so the socket must be in the QEMUHelper container of UTM instead of
@@ -410,6 +415,14 @@ fn run(cli: Cli) -> Result<()> {
             "--memory-source is only valid with --backend kd or --backend kdnet".to_string(),
         ));
     }
+    if let Some(seconds) = args.kd_handshake_timeout {
+        if args.dump.is_some() || !matches!(backend, Backend::Kd | Backend::KdNet) {
+            return Err(Error::DebugInfo(
+                "--kd-handshake-timeout is only valid with --backend kd or --backend kdnet".into(),
+            ));
+        }
+        crate::kd::handshake_timeout(seconds)?;
+    }
     // A protocol server may start without a target and be pointed at one by
     // its client, which is where the KDNET key arrives instead.
     let may_defer_kdnet_key = match &command {
@@ -479,7 +492,7 @@ fn run(cli: Cli) -> Result<()> {
                     "use the 'open' tool after launch",
                     &args,
                     backend,
-                );
+                )?;
                 mcp::run(spec, mcp_args.http, mcp_args.unsafe_http)
                     .map_err(|e| Error::DebugInfo(e.to_string()))
             }
@@ -490,7 +503,7 @@ fn run(cli: Cli) -> Result<()> {
                     "name the target in the client's launch/attach arguments",
                     &args,
                     backend,
-                );
+                )?;
                 dap::run(spec, dap_args.port)
             }
             // The protocol has no attach request, so the command line names
@@ -530,6 +543,7 @@ fn live_spec(args: &TargetOptions, backend: Backend) -> TargetSpec {
         backend,
         connect: args.connect.clone(),
         kdnet_key: args.kdnet_key.clone(),
+        kd_handshake_timeout: args.kd_handshake_timeout,
         memory_source: args.memory_source.unwrap_or(KdMemorySource::Auto),
     }
 }
@@ -543,9 +557,9 @@ fn server_startup_spec(
     client_attach_hint: &str,
     args: &TargetOptions,
     backend: Backend,
-) -> Option<TargetSpec> {
+) -> Result<Option<TargetSpec>> {
     if let Some(dump) = args.dump.clone() {
-        return Some(TargetSpec::Dump(dump));
+        return Ok(Some(TargetSpec::Dump(dump)));
     }
     // Naming a backend is the operator saying what to attach to, so it
     // attaches, at the same default endpoint the REPL would use. KDNET is the
@@ -555,7 +569,12 @@ fn server_startup_spec(
         || (args.backend.is_some() && backend != Backend::KdNet)
         || (backend == Backend::KdNet && args.kdnet_key.is_some())
     {
-        return Some(live_spec(args, backend));
+        return Ok(Some(live_spec(args, backend)));
+    }
+    if args.kd_handshake_timeout.is_some() {
+        return Err(Error::DebugInfo(
+            "--kd-handshake-timeout requires a startup target; set the timeout in the client's attach request instead".into(),
+        ));
     }
     if backend == Backend::KdNet {
         eprintln!(
@@ -568,14 +587,17 @@ fn server_startup_spec(
             DEFAULT_KD_SOCKET = crate::DEFAULT_KD_SOCKET
         );
     }
-    None
+    Ok(None)
 }
 
 #[cfg(test)]
 mod tests {
     use clap::CommandFactory;
 
-    use super::{Cli, parse_cli};
+    #[cfg(any(feature = "mcp", feature = "dap"))]
+    use super::server_startup_spec;
+    use super::{Cli, live_spec, parse_cli};
+    use crate::{Backend, TargetSpec};
 
     #[test]
     fn repeated_target_options_accumulate_across_subcommands() {
@@ -652,6 +674,56 @@ mod tests {
     }
 
     #[test]
+    fn kd_handshake_timeout_rejects_invalid_seconds() {
+        for value in ["0", "-1", "1.5", "meow", "18446744073709551616"] {
+            assert!(
+                parse_cli(["ntoseye", "--kd-handshake-timeout", value].map(Into::into)).is_err()
+            );
+        }
+    }
+
+    #[cfg(any(feature = "mcp", feature = "dap"))]
+    #[test]
+    fn deferred_servers_reject_a_cli_handshake_timeout() {
+        for command in [
+            #[cfg(feature = "mcp")]
+            "mcp",
+            #[cfg(feature = "dap")]
+            "dap",
+        ] {
+            for options in [vec![], vec!["--backend", "kdnet"]] {
+                let cli = parse_cli(
+                    ["ntoseye", command, "--kd-handshake-timeout", "20"]
+                        .into_iter()
+                        .chain(options)
+                        .map(Into::into),
+                )
+                .unwrap();
+                let error = server_startup_spec(
+                    command,
+                    "",
+                    &cli.target,
+                    cli.target.backend.unwrap_or(Backend::Kd),
+                )
+                .unwrap_err();
+                assert!(error.to_string().contains("requires a startup target"));
+            }
+        }
+    }
+
+    #[test]
+    fn kd_handshake_timeout_is_optional() {
+        let cli = parse_cli(["ntoseye"].map(Into::into)).unwrap();
+        assert!(matches!(
+            live_spec(&cli.target, Backend::Kd),
+            TargetSpec::Live {
+                kd_handshake_timeout: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn command_definition_is_valid() {
         Cli::command().debug_assert();
     }
@@ -670,6 +742,8 @@ mod tests {
             "1.2.3.4",
             "--memory-source",
             "kd",
+            "--kd-handshake-timeout",
+            "20",
             "--pdb-server",
             "https://symbols.example",
             "--force-download-symbols",
@@ -695,6 +769,14 @@ mod tests {
             assert_eq!(target.backend, Some(crate::Backend::KdNet));
             assert_eq!(target.connect.as_deref(), Some("0.0.0.0:50000"));
             assert_eq!(target.kdnet_key.as_deref(), Some("1.2.3.4"));
+            assert_eq!(target.kd_handshake_timeout, Some(20));
+            assert!(matches!(
+                live_spec(&target, crate::Backend::KdNet),
+                TargetSpec::Live {
+                    kd_handshake_timeout: Some(20),
+                    ..
+                }
+            ));
             assert_eq!(target.memory_source, Some(crate::kd::KdMemorySource::Kd));
             assert_eq!(target.pdb_server, ["https://symbols.example"]);
             assert!(target.redownload_symbols);

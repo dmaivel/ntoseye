@@ -10,7 +10,7 @@ If the agent's harness keeps a Python kernel alive between calls, such as oh-my-
 | --- | --- |
 | `command` | Runs one REPL line and returns its text with a `[target ...]` trailer. A `;` separates commands, and {command}`help` lists them. The arguments are `line` and `timeout_ms` (default 10 s, maximum 5 min). |
 | `output` | Reads more of a long `command` result: the lines from `offset`, or only the lines that contain `filter`. The arguments are `id`, `offset`, `limit`, and `filter`. |
-| `open` / `close` | `open` attaches to a target using `backend`, `connect`, and, for `kdnet`, `key`. For a crash dump or a [user-mode minidump](#user-mode-minidumps), use `backend: dump` with the dump path as `connect`. `close` releases the target. The server holds one session at a time. |
+| `open` / `close` | `open` attaches to a target using `backend`, `connect`, and, for `kdnet`, `key`. For `kd` and `kdnet`, it also accepts `kd_handshake_timeout` in seconds. For a crash dump or a [user-mode minidump](#user-mode-minidumps), use `backend: dump` with the dump path as `connect`. `close` releases the target. The server holds one session at a time. |
 
 ## Run control
 
@@ -139,7 +139,9 @@ Put the target options after the subcommand, for example to set the backend and 
 
 For KDNET, use `["mcp", "--backend", "kdnet", "--kdnet-key", "1.2.3.4"]`. To force target-mediated memory, add `["--memory-source", "kd"]`, and add `--connect` only to change the default `0.0.0.0:50000` listener.
 
-The `open` tool accepts the same backend, connect, and key values. If the server starts without a target, it tells the agent to ask the user how the VM is exposed instead of guessing.
+The `open` tool accepts the same backend, connect, and key values. Its optional `kd_handshake_timeout` is a positive integer number of seconds for the initial KD/KDNET handshake, for example `{"backend": "kd", "kd_handshake_timeout": 30}`. It is only valid for `kd` and `kdnet`; `gdb`, `memory`, and `dump` reject it. An explicit value overrides `NTOSEYE_KD_TIMEOUT`; when omitted, the environment variable still applies, with a default of 8 seconds. This is separate from the `command` tool's `timeout_ms`.
+
+For a startup attach, use `--kd-handshake-timeout 30` with the CLI target options. If the server starts without a target, set `kd_handshake_timeout` in `open` instead. The server tells the agent to ask the user how the VM is exposed instead of guessing.
 
 If `ntoseye` is not in `PATH`, use an absolute path for `command` (for example, `../target/release/ntoseye`).
 

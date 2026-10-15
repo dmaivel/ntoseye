@@ -28,6 +28,7 @@ By default, `attach()` uses the `kd` backend. To use a different one, set `backe
 - The `kdnet` backend needs `key`.
 - The `memory` backend is passive and cannot stop or resume the guest. For run control, use `kd` or `gdb`.
 - The `dmp` backend reads an offline dump.
+- `kd_handshake_timeout` sets the initial KD/KDNET handshake wait in positive integer seconds, for example `ntoseye.attach("kd", kd_handshake_timeout=30)`. It is keyword-only and applies only to `kd` and `kdnet`. An explicit value overrides `NTOSEYE_KD_TIMEOUT`; `None` uses the environment variable or the 8-second default.
 
 ```python
 import ntoseye

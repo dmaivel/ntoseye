@@ -19434,7 +19434,7 @@ def _cli_main() -> int:
     the full session, and custom commands get the GIL again while they run.
     """
 
-def attach(backend: Literal["kd", "kdnet", "gdb", "memory", "dmp"] = ..., connect: str |None = None, key: str |None = None, memory_source: Literal["auto", "host", "kd"] = ...) -> Debugger:
+def attach(backend: Literal["kd", "kdnet", "gdb", "memory", "dmp"] = ..., connect: str |None = None, key: str |None = None, memory_source: Literal["auto", "host", "kd"] = ..., *, kd_handshake_timeout: int |None = None) -> Debugger:
     """
     Attach to a guest and return a `Debugger`.
     
@@ -19445,6 +19445,9 @@ def attach(backend: Literal["kd", "kdnet", "gdb", "memory", "dmp"] = ..., connec
     holds. Without `connect`, the function uses the default of the backend,
     but dmp has no default and needs a path. kdnet needs `key`.
     `memory_source` is `auto`, `host`, or `kd` for KD/KDNET.
+    `kd_handshake_timeout` is keyword-only: positive integer seconds for the
+    initial KD/KDNET handshake. It overrides `NTOSEYE_KD_TIMEOUT`; `None` uses
+    the environment variable or the 8-second default. Other backends reject it.
     
     For kd/kdnet/gdb, the function takes an instance lock for the target before
     it makes the backend, so a second live attach to the same target fails

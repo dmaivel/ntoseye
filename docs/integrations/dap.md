@@ -135,10 +135,13 @@ Kernel debugging does not start a process, so `launch` and `attach` do the same 
 | `backend` | `kd` (default), `kdnet`, `gdb`, or `memory`. |
 | `connect` | KD socket path, KDNET listen address, or GDB address. |
 | `kdnetKey` | KDNET encryption key (four base-36 components). |
+| `kdHandshakeTimeout` | Optional positive integer seconds for the initial KD/KDNET handshake, for `kd` and `kdnet` only. Overrides `NTOSEYE_KD_TIMEOUT`; when omitted, uses the environment variable or the default of 8 seconds. |
 | `memorySource` | `auto` (default), `host`, or `kd`, for KD and KDNET only. |
-| `dump` | Opens a crash dump or a [user-mode minidump](#user-mode-minidumps) instead of attaching to a live VM, and has priority over the live options. |
+| `dump` | Opens a crash dump or a [user-mode minidump](#user-mode-minidumps) instead of attaching to a live VM, and has priority over the other live options. Combining it with `kdHandshakeTimeout` is rejected. |
 | `symbolPath` | Directories or symbol servers to add to the end of the symbol path, in {command}`.sympath` syntax. |
 | `sourcePath` | Source-path mappings to add to the end of the source path, in {command}`.srcpath` syntax. |
+
+For example, `"backend": "kd", "kdHandshakeTimeout": 30` allows 30 seconds for the handshake. For a startup attach, use `--kd-handshake-timeout 30` with the CLI target options. If the client names the target after launch, set `kdHandshakeTimeout` in its attach arguments instead.
 
 `symbolPath` accepts a local directory, a symbol server (`https://...`, `srv*a*b`), a `;`-separated list, or a JSON array. ntoseye adds the entries after the managed cache and the Microsoft server, and loads the symbols again when it attaches.
 

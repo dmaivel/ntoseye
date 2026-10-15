@@ -186,6 +186,21 @@ pub fn parse_kd_initial_timeout(value: Option<&str>) -> Result<Duration> {
     Ok(Duration::from_secs(seconds))
 }
 
+pub(crate) fn handshake_timeout(seconds: u64) -> Result<Duration> {
+    if seconds == 0 {
+        return Err(Error::InvalidArgument(
+            "kd_handshake_timeout must be positive integer seconds".into(),
+        ));
+    }
+    let timeout = Duration::from_secs(seconds);
+    if Instant::now().checked_add(timeout).is_none() {
+        return Err(Error::InvalidArgument(
+            "kd_handshake_timeout is too large".into(),
+        ));
+    }
+    Ok(timeout)
+}
+
 pub fn kd_initial_timeout() -> Result<Duration> {
     match std::env::var(KD_INITIAL_TIMEOUT_ENV) {
         Ok(value) => parse_kd_initial_timeout(Some(&value)),
@@ -206,7 +221,9 @@ pub fn poll_for_initial_break(
     budget: Duration,
     progress: &mut dyn FnMut(&str),
 ) -> Result<StateChange> {
-    let deadline = Instant::now() + budget;
+    let deadline = Instant::now()
+        .checked_add(budget)
+        .ok_or_else(|| Error::InvalidArgument("KD handshake timeout is too large".into()))?;
 
     let is_network = framing
         .transport_mut()
@@ -284,7 +301,7 @@ pub fn poll_for_initial_break(
                                - the guest was rebooted after changing BCD settings\n\
                                - the VM is not paused or suspended\n\
                                - virt-manager/libvirt may reserve COM1 for its console serial; use debugport:2 if KD is wired as COM2\n\
-                               - set NTOSEYE_KD_TIMEOUT=<seconds> if the guest is unusually slow to reach KD\n\
+                               - set --kd-handshake-timeout <seconds> if the guest is unusually slow to reach KD\n\
                                - use `--backend gdb` for gdbstub guests, or `--backend memory` for passive memory introspection",
                             budget.as_secs()
                         ),

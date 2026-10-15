@@ -40,7 +40,7 @@ We did not test these integrations with other hypervisors. Crash-dump analysis s
 
 On UTM, the `gdb` backend needs "Use Hypervisor" turned off, because QEMU versions before 10.1 abort the VM when a debugger enables guest debugging on HVF. If "Use Hypervisor" is on, `ntoseye` does not connect. If your QEMU version has the fix, set `NTOSEYE_GDB_ON_HVF=1` to override this check. The [UTM guide](utm.md) has the details. The other backends do not have this problem, because they do not ask the hypervisor for debug traps.
 
-The initial KD handshake times out after 8 seconds by default. For very slow guests, set `NTOSEYE_KD_TIMEOUT=<seconds>` to change it.
+The initial KD/KDNET handshake times out after 8 seconds by default. For very slow guests, pass `--kd-handshake-timeout <seconds>` with a positive integer. It overrides `NTOSEYE_KD_TIMEOUT`, which still supplies the timeout when the option is omitted. This changes the initial handshake wait, not resume or other request timeouts.
 
 ## KDNET
 

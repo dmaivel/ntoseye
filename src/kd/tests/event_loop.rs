@@ -219,6 +219,29 @@ fn initial_handshake_breaks_in_immediately_then_resets() {
 }
 
 #[test]
+fn kd_handshake_timeout_accepts_positive_seconds() {
+    assert_eq!(handshake_timeout(12).unwrap(), Duration::from_secs(12));
+}
+
+#[test]
+fn kd_handshake_timeout_rejects_zero_and_deadline_overflow() {
+    for seconds in [0, u64::MAX] {
+        assert!(matches!(
+            handshake_timeout(seconds),
+            Err(Error::InvalidArgument(_))
+        ));
+    }
+}
+
+#[test]
+fn kd_initial_timeout_defaults_to_eight_seconds() {
+    assert_eq!(
+        parse_kd_initial_timeout(None).unwrap(),
+        Duration::from_secs(8)
+    );
+}
+
+#[test]
 fn kd_initial_timeout_accepts_positive_seconds() {
     assert_eq!(
         parse_kd_initial_timeout(Some("12")).unwrap(),
