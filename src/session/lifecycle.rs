@@ -29,6 +29,15 @@ use crate::{Backend, TargetSpec};
 /// before breaking in.
 const EXIT_STOP_POLL: Duration = Duration::from_millis(200);
 
+/// Point a kernel `target` at its kernel's `KDDEBUGGER_DATA64`, trying the
+/// transport's candidate first. A user dump has no kernel to look in.
+fn locate_debugger_data(target: &mut Target, backend: &mut dyn DebugBackend) {
+    if target.kind() == TargetKind::Kernel {
+        let hint = backend.target_debugger_data_hint().ok().flatten();
+        target.refresh_debugger_data(hint);
+    }
+}
+
 pub(super) fn prepare_backend_after_cleanup(
     backend: &mut dyn DebugBackend,
     cleanup: Result<()>,
@@ -68,12 +77,7 @@ impl Session {
                 if userdump::file_is_minidump(path)? {
                     return Self::open_user_dump(path);
                 }
-                let phys = Arc::new(PhysMem::dmp(path)?);
-                let info = phys
-                    .dmp_info()
-                    .expect("dmp_info must be Some for DMP backend")
-                    .clone();
-                Self::connect(phys, None, || Ok(Box::new(DmpBackend::new(&info))))
+                Self::open_kernel_dump(path)
             }
             TargetSpec::Live {
                 backend: backend @ (Backend::Kd | Backend::KdNet),
@@ -150,6 +154,23 @@ impl Session {
         let backend = UserDumpBackend::new(dump.info());
         let target = Target::with_user_dump(Arc::new(PhysMem::minidump(dump)))?;
         Self::new_with_target(target, Box::new(backend), None)
+    }
+
+    /// Open a kernel crash or triage dump. Its backend reads each
+    /// processor's context out of that processor's PRCB, which takes the
+    /// kernel's symbols, so it gets the target once that has located the
+    /// kernel and before the session takes the backend over. Read-only, so
+    /// no instance lock is taken.
+    fn open_kernel_dump(path: &std::path::Path) -> Result<Self> {
+        let phys = Arc::new(PhysMem::dmp(path)?);
+        let mut backend = DmpBackend::new(
+            phys.dmp_info()
+                .expect("a kernel dump's memory carries its dump header"),
+        );
+        let mut target = Target::with_phys(phys)?;
+        locate_debugger_data(&mut target, &mut backend);
+        backend.read_processor_contexts(&target);
+        Self::with_located_target(target, Box::new(backend), None)
     }
 
     /// Connect KD/KDNET, select a validated memory source, and build the
@@ -309,14 +330,20 @@ impl Session {
         mut backend: Box<dyn DebugBackend>,
         journal: Option<&str>,
     ) -> Result<Self> {
+        locate_debugger_data(&mut target, backend.as_mut());
+        Self::with_located_target(target, backend, journal)
+    }
+
+    /// [`Self::new_with_target`] for a target that has already looked for
+    /// its kernel's debugger data.
+    fn with_located_target(
+        mut target: Target,
+        mut backend: Box<dyn DebugBackend>,
+        journal: Option<&str>,
+    ) -> Result<Self> {
         // A user dump has no kernel: no debugger data, DbgPrint buffer, or
         // kernel functions to trap.
         let kernel = target.kind() == TargetKind::Kernel;
-        if kernel {
-            let debugger_data_hint = backend.target_debugger_data_hint().ok().flatten();
-            target.refresh_debugger_data(debugger_data_hint);
-        }
-        backend.initialize_from_target(&target);
         // ARM64 register snapshots expose TTBR1 via the synthetic `cr3` slot;
         // hand the resolved kernel root to the backend so it can fill it.
         backend.set_kernel_dtb(target.kernel_dtb());

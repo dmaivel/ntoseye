@@ -316,7 +316,7 @@ impl TriageReport {
                 Vec::new()
             }
         };
-        let crash_context = session.backend.triage_crash_info().cloned();
+        let crash_context = TriageCrashInfo::from_dump(&session.target);
 
         let mut report = Self::assemble(
             status,

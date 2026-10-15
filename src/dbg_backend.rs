@@ -4,10 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::debugger_data::DebuggerDataCandidate;
-use crate::dmp::TriageCrashInfo;
 use crate::error::{Error, Result};
 use crate::phys::PhysMem;
-use crate::target::Target;
 use crate::types::{KernelLocation, VirtAddr};
 
 pub mod debug_registers;
@@ -779,16 +777,6 @@ pub trait DebugBackend {
     /// next resume. Empty for backends whose sites survive a stop.
     fn sites_dropped_by_stop(&self) -> Vec<u64> {
         Vec::new()
-    }
-
-    /// Called once after the [`Target`] is constructed, giving the backend a
-    /// chance to read guest state that requires symbol resolution. DmpBackend
-    /// uses this to extract per-CPU registers from the PRCB ContextFrame.
-    fn initialize_from_target(&mut self, _target: &Target) {}
-
-    /// Crash context extracted from triage dump EPROCESS/ETHREAD snapshots.
-    fn triage_crash_info(&self) -> Option<&TriageCrashInfo> {
-        None
     }
 
     /// Notify the backend about guest rediscovery progress after a transport

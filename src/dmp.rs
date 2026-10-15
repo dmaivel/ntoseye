@@ -449,6 +449,74 @@ pub struct TriageCrashInfo {
     pub thread_exit_status: Option<i32>,
 }
 
+impl TriageCrashInfo {
+    /// The crashing process and thread a triage dump snapshots as raw
+    /// `EPROCESS`/`ETHREAD` bytes, decoded with the kernel's type layouts.
+    /// `None` when `target` is not a triage dump with a process snapshot or
+    /// the kernel's symbols lack `_EPROCESS`.
+    pub fn from_dump(target: &Target) -> Option<Self> {
+        let info = target.phys.dmp_info()?;
+        let proc_snap = info.triage_process_snapshot.as_deref()?;
+        let dtb = target.kernel_dtb();
+
+        let eprocess_layout = target.symbols.find_type_across_modules(dtb, "_EPROCESS")?;
+
+        let process_name = eprocess_layout
+            .field_offset("ImageFileName")
+            .ok()
+            .and_then(|off| {
+                let off = off as usize;
+                if off + 15 <= proc_snap.len() {
+                    let name_buf = &proc_snap[off..off + 15];
+                    let end = name_buf.iter().position(|&c| c == 0).unwrap_or(15);
+                    let s = String::from_utf8_lossy(&name_buf[..end]).to_string();
+                    if s.is_empty() { None } else { Some(s) }
+                } else {
+                    None
+                }
+            });
+
+        let process_id = read_u64_field(proc_snap, &eprocess_layout, "UniqueProcessId");
+        let parent_process_id =
+            read_u64_field(proc_snap, &eprocess_layout, "InheritedFromUniqueProcessId");
+        let exit_status = read_i32_field(proc_snap, &eprocess_layout, "ExitStatus");
+        let create_time = read_u64_field(proc_snap, &eprocess_layout, "CreateTime");
+
+        let (thread_id, thread_exit_status) = info
+            .triage_thread_snapshot
+            .as_deref()
+            .and_then(|thread_snap| {
+                let ethread_layout = target.symbols.find_type_across_modules(dtb, "_ETHREAD")?;
+                let cid_off = ethread_layout.field_offset("Cid").ok()? as usize;
+                let client_id_layout =
+                    target.symbols.find_type_across_modules(dtb, "_CLIENT_ID")?;
+                let ut_off = client_id_layout.field_offset("UniqueThread").ok()? as usize;
+                let tid = get_u64(thread_snap, cid_off + ut_off);
+                let exit_st = read_i32_field(thread_snap, &ethread_layout, "ExitStatus");
+                Some((tid, exit_st))
+            })
+            .unwrap_or((None, None));
+
+        Some(Self {
+            process_name,
+            process_id,
+            parent_process_id,
+            exit_status,
+            create_time,
+            thread_id,
+            thread_exit_status,
+        })
+    }
+}
+
+fn read_u64_field(snap: &[u8], layout: &TypeInfo, field: &str) -> Option<u64> {
+    get_u64(snap, layout.field_offset(field).ok()? as usize)
+}
+
+fn read_i32_field(snap: &[u8], layout: &TypeInfo, field: &str) -> Option<i32> {
+    get_u32(snap, layout.field_offset(field).ok()? as usize).map(u32::cast_signed)
+}
+
 pub struct DmpMem {
     mmap: Mmap,
     storage: DmpStorage,
@@ -715,7 +783,6 @@ pub struct DmpBackend {
     // `select_crash_processor`)
     header_context: DmpContext,
     directory_table_base: u64,
-    triage_crash_info: Option<TriageCrashInfo>,
     debugger_data_hint: Option<DebuggerDataCandidate>,
     /// Dump-integrity and per-CPU context warnings raised while opening,
     /// drained by the session through [`DebugBackend::take_notices`].
@@ -766,7 +833,6 @@ impl DmpBackend {
                     address: VirtAddr(address),
                     source: MetadataSource::DumpHeader,
                 }),
-            triage_crash_info: None,
             notices: (!info.triage_signature_valid)
                 .then(|| {
                     Notice::warning(
@@ -908,71 +974,6 @@ impl DmpBackend {
         }
     }
 
-    fn read_u64_field(snap: &[u8], layout: &TypeInfo, field: &str) -> Option<u64> {
-        get_u64(snap, layout.field_offset(field).ok()? as usize)
-    }
-
-    fn read_i32_field(snap: &[u8], layout: &TypeInfo, field: &str) -> Option<i32> {
-        get_u32(snap, layout.field_offset(field).ok()? as usize).map(u32::cast_signed)
-    }
-
-    fn extract_triage_crash_info(target: &Target, info: &DmpInfo) -> Option<TriageCrashInfo> {
-        let proc_snap = info.triage_process_snapshot.as_deref()?;
-        let dtb = target.kernel_dtb();
-
-        let eprocess_layout = target.symbols.find_type_across_modules(dtb, "_EPROCESS")?;
-
-        let process_name = eprocess_layout
-            .field_offset("ImageFileName")
-            .ok()
-            .and_then(|off| {
-                let off = off as usize;
-                if off + 15 <= proc_snap.len() {
-                    let name_buf = &proc_snap[off..off + 15];
-                    let end = name_buf.iter().position(|&c| c == 0).unwrap_or(15);
-                    let s = String::from_utf8_lossy(&name_buf[..end]).to_string();
-                    if s.is_empty() { None } else { Some(s) }
-                } else {
-                    None
-                }
-            });
-
-        let process_id = Self::read_u64_field(proc_snap, &eprocess_layout, "UniqueProcessId");
-        let parent_process_id =
-            Self::read_u64_field(proc_snap, &eprocess_layout, "InheritedFromUniqueProcessId");
-        let exit_status = Self::read_i32_field(proc_snap, &eprocess_layout, "ExitStatus");
-        let create_time = Self::read_u64_field(proc_snap, &eprocess_layout, "CreateTime");
-
-        let (thread_id, thread_exit_status) = info
-            .triage_thread_snapshot
-            .as_deref()
-            .and_then(|thread_snap| {
-                let ethread_layout = target.symbols.find_type_across_modules(dtb, "_ETHREAD")?;
-                let cid_off = ethread_layout.field_offset("Cid").ok()? as usize;
-                let client_id_layout =
-                    target.symbols.find_type_across_modules(dtb, "_CLIENT_ID")?;
-                let ut_off = client_id_layout.field_offset("UniqueThread").ok()? as usize;
-                let tid = get_u64(thread_snap, cid_off + ut_off);
-                let exit_st = Self::read_i32_field(thread_snap, &ethread_layout, "ExitStatus");
-                Some((tid, exit_st))
-            })
-            .unwrap_or((None, None));
-
-        Some(TriageCrashInfo {
-            process_name,
-            process_id,
-            parent_process_id,
-            exit_status,
-            create_time,
-            thread_id,
-            thread_exit_status,
-        })
-    }
-
-    pub fn triage_crash_info(&self) -> Option<&TriageCrashInfo> {
-        self.triage_crash_info.as_ref()
-    }
-
     /// Full dumps need guest translation to read KDBG; triage dumps resolve
     /// this from their embedded copy at parse time.
     fn resolve_prcb_context_offset(&self, target: &Target) -> Option<u16> {
@@ -983,24 +984,13 @@ impl DmpBackend {
         (offset > 0).then_some(offset)
     }
 
-    fn unsupported(operation: &str) -> Error {
-        Error::DebugInfo(format!(
-            "crash dump is a static snapshot; {operation} is not available"
-        ))
-    }
-}
-
-impl DebugBackend for DmpBackend {
-    fn name(&self) -> &'static str {
-        "dmp"
-    }
-    fn registers_are_context(&self) -> bool {
-        true
-    }
-    fn take_notices(&mut self) -> Vec<Notice> {
-        std::mem::take(&mut self.notices)
-    }
-    fn initialize_from_target(&mut self, target: &Target) {
+    /// Read every processor's register context from its PRCB and select the
+    /// processor that bugchecked. The dump header holds only the crashing
+    /// processor's context, and finding the others takes the kernel's
+    /// symbols, so the session calls this once `target` has located the
+    /// kernel and before it takes the backend over. Failures become notices:
+    /// the header's context still stands.
+    pub fn read_processor_contexts(&mut self, target: &Target) {
         if self.header_context.is_arm64() {
             if let Err(e) = self.read_arm64_prcb_contexts(target) {
                 self.notices.push(Notice::warning(format!(
@@ -1022,16 +1012,25 @@ impl DebugBackend for DmpBackend {
                 self.select_crash_processor();
             }
         }
-
-        if let Some(info) = target.phys.dmp_info() {
-            self.triage_crash_info = Self::extract_triage_crash_info(target, info);
-        }
     }
 
-    fn triage_crash_info(&self) -> Option<&TriageCrashInfo> {
-        self.triage_crash_info.as_ref()
+    fn unsupported(operation: &str) -> Error {
+        Error::DebugInfo(format!(
+            "crash dump is a static snapshot; {operation} is not available"
+        ))
     }
+}
 
+impl DebugBackend for DmpBackend {
+    fn name(&self) -> &'static str {
+        "dmp"
+    }
+    fn registers_are_context(&self) -> bool {
+        true
+    }
+    fn take_notices(&mut self) -> Vec<Notice> {
+        std::mem::take(&mut self.notices)
+    }
     fn target_debugger_data_hint(&mut self) -> Result<Option<DebuggerDataCandidate>> {
         Ok(self.debugger_data_hint)
     }
