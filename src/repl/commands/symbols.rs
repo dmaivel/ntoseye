@@ -197,7 +197,10 @@ impl ReplState<'_> {
                 .into_iter()
                 .map(|name| format!("{module}!{name}"))
                 .collect(),
-            None => self.caches.symbols.read().unwrap().search(query, X_LIMIT),
+            None => {
+                self.caches.refresh_loaded_symbols(&self.ctx.target);
+                self.caches.symbols.read().unwrap().search(query, X_LIMIT)
+            }
         };
         let truncated = names.len() >= X_LIMIT;
         let mut matches: Vec<(u64, String)> = Vec::new();

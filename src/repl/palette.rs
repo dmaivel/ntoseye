@@ -27,6 +27,7 @@ impl ReplState<'_> {
 
     /// What the palette offers, with `recent` as the recent lines.
     pub fn palette_catalog(&self, recent: Vec<String>) -> Catalog {
+        self.caches.refresh_loaded_symbols(&self.ctx.target);
         Catalog {
             recent,
             commands: self.palette_commands(),

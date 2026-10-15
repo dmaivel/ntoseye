@@ -13,6 +13,10 @@ use crate::types::{Dtb, VirtAddr};
 
 const PROCESS_COMPLETION_LIMIT: usize = 4096;
 
+/// [`ReplCaches::indexed_at`] of symbol and type indexes not built yet. The
+/// store's load generation counts up from zero and never reaches it.
+pub const NOT_INDEXED: u64 = u64::MAX;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompletionStrategy {
     None,
@@ -97,7 +101,10 @@ pub struct ReplCaches {
     /// hypervisor reserves as invalid (see [`Self::refresh_partition`]).
     pub partition: Arc<AtomicU64>,
     /// The symbol store's load generation when `symbols` and `types` were
-    /// built (see [`Self::refresh_loaded_symbols`]).
+    /// built (see [`Self::refresh_loaded_symbols`]), or [`NOT_INDEXED`].
+    /// Merging every module's names takes a noticeable part of a second
+    /// with many PDBs loaded, so a host without a tab completer leaves them
+    /// unbuilt until a search reads them.
     pub indexed_at: Arc<AtomicU64>,
 }
 
@@ -180,15 +187,27 @@ impl ReplCaches {
     }
 
     /// Rebuild the symbol and type indexes when PDBs loaded since they were
-    /// built: a module whose symbols load when first needed, or a download
-    /// that finished, so completion offers its names.
+    /// built, or build them if they never were: a module whose symbols load
+    /// when first needed, or a download that finished, so completion offers
+    /// its names. Anything that reads `symbols` or `types` calls this first.
     pub fn refresh_loaded_symbols(&self, debugger: &Target) {
         if debugger.symbols.load_generation() != self.indexed_at.load(Ordering::Acquire) {
-            self.rebuild_symbol_context(debugger);
+            self.build_symbol_indexes(debugger);
         }
     }
 
+    /// Rebuild the symbol and type indexes for the current context, if they
+    /// were built: indexes nothing has read yet are left for
+    /// [`Self::refresh_loaded_symbols`] to build.
     pub fn rebuild_symbol_context(&self, debugger: &Target) {
+        if self.indexed_at.load(Ordering::Acquire) == NOT_INDEXED {
+            *self.dtb.write().unwrap() = debugger.current_dtb();
+            return;
+        }
+        self.build_symbol_indexes(debugger);
+    }
+
+    fn build_symbol_indexes(&self, debugger: &Target) {
         // Read first: a load during the rebuild then shows as a newer
         // generation, and the next refresh picks it up.
         let generation = debugger.symbols.load_generation();

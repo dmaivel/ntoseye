@@ -418,11 +418,11 @@ pub struct ReplStore {
 impl ReplStore {
     /// Fresh REPL state for `ctx`: caches seeded from the current symbol
     /// context, persisted aliases loaded, default exception policies and radix.
+    /// The symbol and type indexes are built when a search first reads them.
     pub fn new(ctx: &Session, context: DispatchContext) -> Self {
-        let indexed_at = ctx.target.symbols.load_generation();
         let caches = ReplCaches {
-            symbols: Arc::new(RwLock::new(ctx.target.current_symbol_index())),
-            types: Arc::new(RwLock::new(ctx.target.current_types_index())),
+            symbols: Arc::default(),
+            types: Arc::default(),
             symbol_store: Arc::clone(&ctx.target.symbols),
             dtb: Arc::new(RwLock::new(ctx.target.current_dtb())),
             processes: Arc::new(RwLock::new(Vec::new())),
@@ -435,7 +435,7 @@ impl ReplStore {
             user_commands: Arc::new(RwLock::new(initial_user_commands())),
             aliases: Arc::new(RwLock::new(Vec::new())),
             partition: Arc::new(AtomicU64::new(ctx.partition().unwrap_or(0))),
-            indexed_at: Arc::new(AtomicU64::new(indexed_at)),
+            indexed_at: Arc::new(AtomicU64::new(NOT_INDEXED)),
         };
         caches.refresh_expression_context(&ctx.target);
         let aliases = UserAliases::load();
@@ -980,10 +980,9 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     // Process and driver lists are never walked ahead of use: completions
     // enumerate them on demand through the target loan below, and listing
     // commands refresh the fallback snapshots as a side effect.
-    let indexed_at = debugger.symbols.load_generation();
     let caches = ReplCaches {
-        symbols: Arc::new(RwLock::new(debugger.current_symbol_index())),
-        types: Arc::new(RwLock::new(debugger.current_types_index())),
+        symbols: Arc::default(),
+        types: Arc::default(),
         symbol_store: Arc::clone(&debugger.symbols),
         dtb: Arc::new(RwLock::new(debugger.current_dtb())),
         processes: Arc::new(RwLock::new(Vec::new())),
@@ -998,8 +997,14 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         aliases: Arc::new(RwLock::new(aliases.entries())),
         // A session starts on the target; only `.partition` shows a view.
         partition: Arc::new(AtomicU64::new(0)),
-        indexed_at: Arc::new(AtomicU64::new(indexed_at)),
+        indexed_at: Arc::new(AtomicU64::new(NOT_INDEXED)),
     };
+    // The tab completer reads the symbol and type indexes as the first line
+    // is typed, so they are built before the prompt. The plain REPL has no
+    // completer and builds them when a search first needs them.
+    if !plain {
+        caches.refresh_loaded_symbols(debugger);
+    }
     caches.refresh_expression_context(debugger);
 
     let target_loan = TargetLoan::default();
