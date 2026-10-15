@@ -1,4 +1,4 @@
-use crate::bytes::{read_u16, read_u32, read_u64};
+use crate::bytes::{c_string_lossy, read_u16, read_u32, read_u64};
 use crate::cpu_context::{amd64, arm64};
 use crate::debugger_data::KdDebuggerData64;
 #[cfg(test)]
@@ -636,9 +636,7 @@ fn parse_prcb_info(
         && (dd.offset_prcb_vendor_string as usize) + 13 <= prcb_size
     {
         let off = dd.offset_prcb_vendor_string as usize;
-        let bytes = &prcb[off..off + 13];
-        let end = bytes.iter().position(|&b| b == 0).unwrap_or(13);
-        String::from_utf8_lossy(&bytes[..end]).to_string()
+        c_string_lossy(&prcb[off..off + 13])
     } else {
         String::new()
     };

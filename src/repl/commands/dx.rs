@@ -5,11 +5,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::bytes::c_string_lossy;
 use crate::error::{Error, Result};
 use crate::expr::{Expr, ExprValue, NumberRadix};
 use crate::layout::{
     ParsedType, TypeInfo, abi_layout, bitfield_value, is_signed_primitive, named_type,
-    nested_layout_name, utf16le_lossy, windbg_type_name,
+    nested_layout_name, utf16le_lossy, utf16le_nul_terminated, windbg_type_name,
 };
 use crate::target::ThreadInfo;
 use crate::types::VirtAddr;
@@ -967,19 +968,9 @@ impl ReplState<'_> {
 /// NUL, as written, without escapes, as `dx` shows it.
 fn decode_string(bytes: &[u8], unit: usize) -> String {
     if unit == 2 {
-        let end = bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .position(|ch| *ch == [0, 0])
-            .map_or(bytes.len(), |index| index * 2);
-        utf16le_lossy(&bytes[..end])
+        utf16le_nul_terminated(bytes)
     } else {
-        let end = bytes
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(bytes.len());
-        String::from_utf8_lossy(&bytes[..end]).into_owned()
+        c_string_lossy(bytes)
     }
 }
 

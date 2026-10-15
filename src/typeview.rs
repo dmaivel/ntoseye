@@ -5,6 +5,7 @@ use std::iter::repeat_n;
 use std::result;
 use std::sync::Arc;
 
+use crate::bytes::before_nul;
 use crate::layout::{
     FieldInfo, ParsedType, TypeInfo, abi_layout, bitfield_value, find_field, le_uint, named_type,
     nested_layout_name, primitive_size, utf16le_lossy,
@@ -440,11 +441,7 @@ impl<'a> TypeView<'a> {
             Ok(bytes) => bytes,
             Err(error) => return format!("<unavailable: {error}>"),
         };
-        let end = bytes
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(bytes.len());
-        quote_bounded(&String::from_utf8_lossy(&bytes[..end]))
+        quote_bounded(&String::from_utf8_lossy(before_nul(&bytes)))
     }
 
     /// `type_data` is the field's own type: its (possibly `module!`-qualified)

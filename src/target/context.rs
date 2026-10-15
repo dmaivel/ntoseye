@@ -7,6 +7,7 @@ use super::{
 };
 use crate::{
     bugchecks::looks_like_kernel_pointer,
+    bytes::c_string_lossy,
     error::{Error, Result},
     guest::{ModuleInfo, ModuleSymbolLoadReport, ProcessInfo},
     memory::{DTB_IDENTITY, MemoryOps},
@@ -457,9 +458,7 @@ impl Target {
             .and_then(|off| {
                 let off = off as usize;
                 if off + 15 <= proc_snap.len() {
-                    let buf = &proc_snap[off..off + 15];
-                    let end = buf.iter().position(|&c| c == 0).unwrap_or(15);
-                    let s = String::from_utf8_lossy(&buf[..end]).to_string();
+                    let s = c_string_lossy(&proc_snap[off..off + 15]);
                     if s.is_empty() { None } else { Some(s) }
                 } else {
                     None

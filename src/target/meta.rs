@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use crate::bytes::before_nul;
 use crate::cpu_state::processor_count;
 use crate::dmp::tagged::known_tag;
 use crate::error::{Error, Result};
@@ -918,11 +919,9 @@ fn shared_build_lab(target: &Target) -> Option<String> {
         .memory()
         .read_bytes(address, &mut bytes)
         .ok()?;
-    let end = bytes
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(bytes.len());
-    let text = String::from_utf8_lossy(&bytes[..end]).trim().to_string();
+    let text = String::from_utf8_lossy(before_nul(&bytes))
+        .trim()
+        .to_string();
     (!text.is_empty()).then_some(text)
 }
 

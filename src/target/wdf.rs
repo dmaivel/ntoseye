@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use super::{ListCursor, ListTermination, Target, bounded_list_walk};
+use crate::bytes::before_nul;
 use crate::error::{Error, Result};
 use crate::layout::{StructRef, TypeInfo, Types, le_uint};
 use crate::memory::MemoryOps;
@@ -1045,7 +1046,7 @@ fn flag_names(variants: &[(String, i64)], value: u64) -> Vec<String> {
 /// (globals the framework keeps without a name), Err when it holds anything
 /// but printable ASCII.
 pub fn driver_name(bytes: &[u8]) -> std::result::Result<Option<String>, String> {
-    let text = &bytes[..bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len())];
+    let text = before_nul(bytes);
     if text.is_empty() {
         return Ok(None);
     }

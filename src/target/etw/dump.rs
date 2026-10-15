@@ -28,6 +28,7 @@ use crate::bytes::{read_u32, read_u64};
 use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix};
 use crate::kuser_shared::KuserSharedData;
+use crate::layout::utf16le_lossy;
 use crate::target::Target;
 use crate::types::VirtAddr;
 
@@ -178,12 +179,6 @@ fn parse_dump_data(
                 ));
                 break;
             };
-            let name: Vec<u16> = name
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|unit| u16::from_le_bytes(*unit))
-                .collect();
             let buffer_size = read_u32(rest, 0x10);
             if buffer_size as usize <= offsets.size || buffer_size > MAX_BUFFER_SIZE {
                 stop = Some(format!(
@@ -200,7 +195,7 @@ fn parse_dump_data(
                 start_time: read_u64(rest, 0x18),
                 reference_system_time: read_u64(rest, 0x20),
                 reference_clock: read_u64(rest, 0x28),
-                name: String::from_utf16_lossy(&name),
+                name: utf16le_lossy(name),
                 buffers: Vec::new(),
             });
             at += LOGGER_HEADER_SIZE + name_size;

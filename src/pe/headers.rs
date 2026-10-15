@@ -6,9 +6,8 @@
 //! reported on its own instead of failing the dump.
 
 use super::{PeImage, read_image_bytes, read_image_c_string};
-use crate::bytes::{get_u32, get_u64, read_u16, read_u32};
+use crate::bytes::{c_string_lossy, get_u32, get_u64, read_u16, read_u32};
 use crate::error::{Error, Result};
-use crate::symbols::SymbolStore;
 use pelite::image::{
     GUID, IMAGE_DEBUG_TYPE_CODEVIEW, IMAGE_DIRECTORY_ENTRY_DEBUG, IMAGE_DIRECTORY_ENTRY_IMPORT,
     IMAGE_NT_OPTIONAL_HDR64_MAGIC,
@@ -398,8 +397,7 @@ pub fn debug_directory(image: &PeImage, headers: &ImageHeaders) -> Result<Vec<De
 
 /// Decode an RSDS (PDB 7.0) or NB10 (PDB 2.0) CodeView record.
 pub fn decode_codeview(bytes: &[u8]) -> Result<CodeView> {
-    let path =
-        |start: usize| SymbolStore::read_c_string_lossy(bytes.get(start..).unwrap_or_default());
+    let path = |start: usize| c_string_lossy(bytes.get(start..).unwrap_or_default());
     match bytes.get(..4) {
         Some(b"RSDS") if bytes.len() >= 24 => Ok(CodeView::Rsds {
             guid: GUID {

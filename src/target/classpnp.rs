@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::{Target, bounded_list_walk};
+use crate::bytes::before_nul;
 use crate::cpu_state::processor_count;
 use crate::error::{Error, Result};
 use crate::kuser_shared::KuserSharedData;
@@ -136,9 +137,9 @@ fn class_layout(types: Types<'_>, name: &str) -> Result<Arc<TypeInfo>> {
 /// `None` for offset 0 (no string) or one past the bytes read.
 fn descriptor_string(bytes: &[u8], offset: u64) -> Option<String> {
     let start = usize::try_from(offset).ok().filter(|&start| start != 0)?;
-    let rest = bytes.get(start..)?;
-    let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
-    let text = String::from_utf8_lossy(&rest[..end]).trim().to_string();
+    let text = String::from_utf8_lossy(before_nul(bytes.get(start..)?))
+        .trim()
+        .to_string();
     (!text.is_empty()).then_some(text)
 }
 

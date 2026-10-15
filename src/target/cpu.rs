@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::bytes::before_nul;
 use crate::cpu_state;
 use crate::error::{Error, Result};
 use crate::guest::Image;
@@ -287,11 +288,9 @@ fn field_string(
     names: &[&str],
 ) -> Result<String> {
     let bytes = field_bytes(target, layout, base, names)?;
-    let end = bytes
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(bytes.len());
-    Ok(String::from_utf8_lossy(&bytes[..end]).trim().to_string())
+    Ok(String::from_utf8_lossy(before_nul(&bytes))
+        .trim()
+        .to_string())
 }
 
 fn nested_field(

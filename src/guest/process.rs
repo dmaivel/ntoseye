@@ -3,7 +3,7 @@
 
 use super::{Guest, ProcessInfo};
 use crate::{
-    bytes::read_u64,
+    bytes::{before_nul, read_u64},
     error::{Error, Result},
     memory::MemoryOps,
     target::{ListCursor, links_back_to},
@@ -250,20 +250,17 @@ impl Guest {
         dtb: Dtb,
         image_file_name: &[u8],
     ) -> String {
-        let len = image_file_name
-            .iter()
-            .position(|&c| c == 0)
-            .unwrap_or(image_file_name.len());
-        if len == IMAGE_FILE_NAME_LEN
+        let name = before_nul(image_file_name);
+        if name.len() == IMAGE_FILE_NAME_LEN
             && dtb != 0
             && let Ok(full) = self.full_process_name(eprocess_va, dtb)
         {
             return full;
         }
-        if len == 0 {
+        if name.is_empty() {
             return "<unknown>".to_string();
         }
-        String::from_utf8_lossy(&image_file_name[..len]).to_string()
+        String::from_utf8_lossy(name).into_owned()
     }
 
     /// Display name for the process at `eprocess_va` without walking the

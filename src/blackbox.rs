@@ -4,7 +4,7 @@
 //! PnP event in progress, winlogon's state, and the PCI configuration
 //! snapshot. The layouts and checks follow WinDbg's `ext.dll`.
 
-use crate::bytes::{read_u16, read_u32, read_u64};
+use crate::bytes::{c_string_lossy, read_u16, read_u32, read_u64};
 use crate::dmp::tagged::TaggedBlock;
 use crate::layout::utf16le_nul_terminated;
 use crate::target::etw::parse_guid;
@@ -286,11 +286,11 @@ pub fn decode_ntfs(data: &[u8]) -> Result<Vec<NtfsRecord>, String> {
     let record = |kind: u32, length: u32, bytes: &[u8]| {
         let qword = |at: usize| bytes.get(at..at + 8).map_or(0, |_| read_u64(bytes, at));
         let name = |at: usize| {
-            let raw = bytes
-                .get(at..(at + 15).min(bytes.len()))
-                .unwrap_or_default();
-            let end = raw.iter().position(|&byte| byte == 0).unwrap_or(raw.len());
-            String::from_utf8_lossy(&raw[..end]).into_owned()
+            c_string_lossy(
+                bytes
+                    .get(at..(at + 15).min(bytes.len()))
+                    .unwrap_or_default(),
+            )
         };
         match kind {
             NTFS_SLOW_IO_TIMEOUT => NtfsRecord {

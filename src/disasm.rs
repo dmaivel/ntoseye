@@ -6,6 +6,7 @@ use iced_x86::{
 
 use std::fmt::Write as _;
 
+use crate::bytes::before_nul;
 use crate::types::{Arch, CodeMachine};
 
 /// Control-flow class for the instruction at the start of a byte buffer.
@@ -998,8 +999,7 @@ fn arm64_operand_tokens(op: &bad64::Operand) -> Vec<AsmToken> {
         bad64::Operand::Name(_) => t.push(&op.to_string(), AsmKind::Text),
         bad64::Operand::StrImm { str, imm } => {
             // A NUL-padded ASCII name from the C decoder.
-            let end = str.iter().position(|&b| b == 0).unwrap_or(str.len());
-            let name = std::str::from_utf8(&str[..end]).unwrap_or("?");
+            let name = std::str::from_utf8(before_nul(str)).unwrap_or("?");
             t.push(name, AsmKind::Text);
             t.space();
             t.push(&format!("#{imm:#x}"), AsmKind::Number);

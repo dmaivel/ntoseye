@@ -14,6 +14,7 @@
 use std::sync::Arc;
 
 use super::{Target, bounded_list_walk};
+use crate::bytes::c_string_lossy;
 use crate::error::{Error, Result};
 use crate::layout::{TypeInfo, Types, le_uint};
 use crate::memory::MemoryOps;
@@ -115,12 +116,6 @@ fn rcdr_layout(types: Types<'_>, name: &str) -> Result<Arc<TypeInfo>> {
     })
 }
 
-/// A NUL-terminated ANSI `CHAR` array.
-fn ansi(bytes: &[u8]) -> String {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    String::from_utf8_lossy(&bytes[..end]).into_owned()
-}
-
 /// Where `_WPP_AUTOLOG_RECORD`'s fields sit: KMDF's IFR record.
 fn record_layout(types: Types<'_>) -> Result<IfrRecordLayout> {
     let record = rcdr_layout(types, "_WPP_AUTOLOG_RECORD")?;
@@ -184,7 +179,7 @@ impl Target {
             bounded_list_walk(head, MAX_LOGS, |at| memory.read::<VirtAddr>(at));
         Ok(RcdrDriver {
             context: address,
-            name: ansi(&context.read_field_bytes("FileBaseName", 64)?),
+            name: c_string_lossy(&context.read_field_bytes("FileBaseName", 64)?),
             image: context.read_pointer("ImageAddress")?,
             image_size: context.read_uint("ImageSize")? as u32,
             logs: links.into_iter().map(|at| at - link).collect(),
@@ -245,7 +240,7 @@ impl Target {
         let log = types
             .struct_with_layout(rcdr_layout(types, "_WPP_AUTOLOG_HEADER")?, header)
             .prefetch();
-        let mut identifier = ansi(&log.read_field_bytes("LogIdentifier", 16)?);
+        let mut identifier = c_string_lossy(&log.read_field_bytes("LogIdentifier", 16)?);
         if log.read_uint("LogIdentifierAppendValueSet")? != 0 {
             identifier.push_str(&format!(" {}", log.read_uint("LogIdentifierAppendValue")?));
         }

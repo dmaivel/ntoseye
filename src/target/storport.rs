@@ -11,6 +11,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use super::{Target, bounded_list_walk};
+use crate::bytes::before_nul;
 use crate::error::{Error, Result};
 use crate::layout::{ParsedType, StructRef, TypeInfo, Types, le_uint, utf16le_nul_terminated};
 use crate::memory::MemoryOps;
@@ -384,8 +385,9 @@ pub fn flag_names(layout: &TypeInfo, value: u64) -> Vec<String> {
 /// The text of a fixed `UCHAR` array, such as an inquiry's vendor field:
 /// up to the first NUL, with the padding spaces trimmed.
 pub fn inquiry_text(bytes: &[u8]) -> String {
-    let text = &bytes[..bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len())];
-    String::from_utf8_lossy(text).trim().to_string()
+    String::from_utf8_lossy(before_nul(bytes))
+        .trim()
+        .to_string()
 }
 
 /// The name `variants` gives `value`.

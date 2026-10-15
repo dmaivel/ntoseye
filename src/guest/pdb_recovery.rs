@@ -13,7 +13,7 @@
 //! pointer say it is a data file's, and a rebuilt file only when its MSF
 //! header bounds it and its PDB identity is the one the image records.
 
-use crate::layout::{ParsedType, TypeInfo};
+use crate::layout::{ParsedType, TypeInfo, utf16le_lossy};
 use crate::memory::{AddressSpace, MemoryOps};
 use crate::phys::PhysMem;
 use crate::symbols::{PdbIdentity, SymbolStore, download::pdb_bytes_identity};
@@ -412,13 +412,7 @@ impl<'a> Walker<'a> {
         let buffer = self.memory.read::<u64>(name + 8u64).ok()?;
         let mut bytes = vec![0u8; length];
         self.memory.read_bytes(VirtAddr(buffer), &mut bytes).ok()?;
-        let units: Vec<u16> = bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| u16::from_le_bytes(*pair))
-            .collect();
-        Some(String::from_utf16_lossy(&units))
+        Some(utf16le_lossy(&bytes))
     }
 
     /// The file whose data section `control_area` is, as its pages are in

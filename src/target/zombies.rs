@@ -9,6 +9,7 @@
 
 use std::ops::ControlFlow;
 
+use crate::bytes::c_string_lossy;
 use crate::error::{Error, Result};
 use crate::layout::StructRef;
 use crate::memory::MemoryOps;
@@ -301,9 +302,5 @@ impl Target {
 /// `_EPROCESS.ImageFileName`, up to its NUL.
 fn image_file_name(process: &StructRef<'_>) -> Option<String> {
     let bytes = process.read_field_bytes("ImageFileName", 16).ok()?;
-    let end = bytes
-        .iter()
-        .position(|&byte| byte == 0)
-        .unwrap_or(bytes.len());
-    Some(String::from_utf8_lossy(&bytes[..end]).into_owned())
+    Some(c_string_lossy(&bytes))
 }

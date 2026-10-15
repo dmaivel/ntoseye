@@ -16,6 +16,7 @@ use super::{
 };
 use crate::cpu_context::{amd64, arm64};
 use crate::error::{Error, Result};
+use crate::layout::{utf16le_lossy, utf16le_nul_terminated};
 use crate::pe::headers::{MAX_CODEVIEW_BYTES, decode_codeview};
 use crate::types::Arch;
 
@@ -331,25 +332,7 @@ fn read_string(data: &[u8], rva: u64) -> std::result::Result<String, String> {
     }
     let bytes = located(data, rva + 4, u64::from(length))
         .ok_or_else(|| format!("string at {rva:#x} ({length} bytes) leaves the file"))?;
-    let units: Vec<u16> = bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|unit| u16::from_le_bytes(*unit))
-        .collect();
-    Ok(String::from_utf16_lossy(&units))
-}
-
-/// The UTF-16 string in a fixed buffer, up to its first NUL.
-fn fixed_utf16(bytes: &[u8]) -> String {
-    let units: Vec<u16> = bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|unit| u16::from_le_bytes(*unit))
-        .take_while(|unit| *unit != 0)
-        .collect();
-    String::from_utf16_lossy(&units)
+    Ok(utf16le_lossy(bytes))
 }
 
 /// What a `MINIDUMP_SYSTEM_INFO.PlatformId` that is not Windows NT names,
@@ -1118,7 +1101,7 @@ fn parse_misc_info(stream: &[u8], info: &mut UserDumpInfo, notes: &mut Vec<Strin
     }
     let build_end = MISC_INFO_BUILD_STRING + MISC_INFO_BUILD_STRING_UNITS * 2;
     if flags & MISC4_BUILDSTRING != 0 && size >= build_end {
-        let build = fixed_utf16(&stream[MISC_INFO_BUILD_STRING..build_end]);
+        let build = utf16le_nul_terminated(&stream[MISC_INFO_BUILD_STRING..build_end]);
         info.build_string = (!build.is_empty()).then_some(build);
     }
 }
@@ -1131,10 +1114,14 @@ fn parse_time_zone(id: u32, zone: &[u8]) -> Option<UserTimeZone> {
     // DaylightDate, DaylightBias.
     let bias: i32 = read_at(zone, 0)?;
     let (name, extra) = match id {
-        TIME_ZONE_ID_UNKNOWN | TIME_ZONE_ID_STANDARD => {
-            (fixed_utf16(zone.get(4..68)?), read_at::<i32>(zone, 84)?)
-        }
-        TIME_ZONE_ID_DAYLIGHT => (fixed_utf16(zone.get(88..152)?), read_at::<i32>(zone, 168)?),
+        TIME_ZONE_ID_UNKNOWN | TIME_ZONE_ID_STANDARD => (
+            utf16le_nul_terminated(zone.get(4..68)?),
+            read_at::<i32>(zone, 84)?,
+        ),
+        TIME_ZONE_ID_DAYLIGHT => (
+            utf16le_nul_terminated(zone.get(88..152)?),
+            read_at::<i32>(zone, 168)?,
+        ),
         _ => return None,
     };
     Some(UserTimeZone {

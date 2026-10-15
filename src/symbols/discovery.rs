@@ -119,14 +119,6 @@ impl SymbolStore {
             }))
     }
 
-    pub fn read_c_string_lossy(bytes: &[u8]) -> String {
-        let nul = bytes
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(bytes.len());
-        String::from_utf8_lossy(&bytes[..nul]).into_owned()
-    }
-
     pub fn load_from_binary(&self, object: &mut Image, name: &str) -> Result<Option<u128>> {
         let view = object.view().ok_or(Error::ViewFailed)?;
         if name.eq_ignore_ascii_case("ntoskrnl.exe")

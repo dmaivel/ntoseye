@@ -16,13 +16,13 @@ use super::handle::Owner;
 use super::record::PlainDict;
 use super::symbols::load_scope_symbols;
 use super::{err, raise, view_dict};
+use crate::bytes::c_string_lossy;
 use crate::error::Result as CoreResult;
 use crate::layout::{
     EnumDef, FieldInfo, FieldValue, ParsedType, TypeInfo, bitfield_mask, le_uint, named_type,
     unqualified_type_name,
 };
 use crate::memory::MemoryOps;
-use crate::symbols::SymbolStore;
 use crate::target::{CODE_BITNESS_AMD64, CODE_BITNESS_X86};
 use crate::types::{Dtb, VirtAddr};
 use crate::view::shape::Typed;
@@ -370,7 +370,7 @@ impl Struct {
                 return enum_value(py, &self.owner, &self.space, enum_name, le_uint(&bytes));
             }
             ParsedType::Array(_, _) if field.type_data.c_string_len().is_some() => {
-                SymbolStore::read_c_string_lossy(&bytes).into_bound_py_any(py)?
+                c_string_lossy(&bytes).into_bound_py_any(py)?
             }
             _ => match size {
                 1 | 2 | 4 | 8 => le_uint(&bytes).into_bound_py_any(py)?,
