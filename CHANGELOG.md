@@ -21,6 +21,7 @@ Keeping this file:
 - `k` and `~*k` on a minidump that lacks a module's code ask the symbol server for the module's image once per session, as for PDBs, instead of at every stack walk when the server does not have it or cannot be reached; `.reload` asks again. Offline, ten `~*k` on an ARM64 minidump took 1.7 s and now take 0.3 s.
 - `s` searches about ten times faster: 256 MiB of a user-mode minidump's address space in 45 ms instead of 420 ms.
 - `--plain-repl`, the MCP server, the DAP adapter and the Python SDK start sooner: they build the symbol and type name indexes behind completion and symbol search when a search first needs them, not when the session starts. Opening a PowerShell minidump with `--plain-repl` takes 0.29 s instead of 0.39 s.
+- Indexing a module's symbols is faster, so a dump with many modules opens about a third sooner: a PowerShell minidump opens with `--plain-repl` in 0.22 s instead of 0.29 s, and a charmap minidump in 0.10 s instead of 0.15 s.
 
 ## v0.49.1 (2026-10-14)
 
