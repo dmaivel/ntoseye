@@ -9,8 +9,9 @@ use single_instance::SingleInstance;
 
 use crate::breakpoints::{BreakpointManager, SiteJournal, breakpoint_opcode};
 use crate::bugchecks::plausible_bugcheck_code;
+use crate::cpu_state;
 use crate::dbg_backend::{BugcheckInfo, DebugBackend, DebugCapability};
-use crate::dmp::DmpBackend;
+use crate::dmp::{DmpBackend, DmpInfo};
 use crate::error::{Error, Result};
 use crate::exception_policy::ExceptionPolicyTable;
 use crate::gdb::GdbClient;
@@ -22,6 +23,7 @@ use crate::phys::{HaltClock, PhysMem};
 use crate::session::{ContinueOutcome, Session, StopResolution};
 use crate::symbols::ntoseye_home;
 use crate::target::{Target, TargetKind};
+use crate::types::VirtAddr;
 use crate::userdump::{self, UserDump, UserDumpBackend};
 use crate::{Backend, TargetSpec};
 
@@ -36,6 +38,29 @@ fn locate_debugger_data(target: &mut Target, backend: &mut dyn DebugBackend) {
         let hint = backend.target_debugger_data_hint().ok().flatten();
         target.refresh_debugger_data(hint);
     }
+}
+
+/// Give a kernel dump's `backend` each processor's register context from
+/// its PRCB; the dump header holds only the crashing processor's. Failures
+/// become the backend's notices, and the header's context still stands. An
+/// AMD64 dump whose PRCB context offset is unknown keeps the header's
+/// context alone.
+fn read_processor_contexts(target: &Target, info: &DmpInfo, backend: &mut DmpBackend) {
+    let processors = backend.processor_count();
+    let saved = if info.context.is_arm64() {
+        cpu_state::read_arm64_prcb_contexts(target, processors)
+    } else {
+        // Triage dumps carry the offset from their embedded KDBG copy; full
+        // dumps read it from the KDBG the header names.
+        let offset = info.offset_prcb_context.or_else(|| {
+            cpu_state::prcb_context_offset(target, VirtAddr(info.debugger_data_block?))
+        });
+        let Some(offset) = offset else {
+            return;
+        };
+        cpu_state::read_amd64_prcb_contexts(target, processors, offset)
+    };
+    backend.set_processor_contexts(saved.contexts, saved.warnings);
 }
 
 pub(super) fn prepare_backend_after_cleanup(
@@ -156,20 +181,20 @@ impl Session {
         Self::new_with_target(target, Box::new(backend), None)
     }
 
-    /// Open a kernel crash or triage dump. Its backend reads each
-    /// processor's context out of that processor's PRCB, which takes the
-    /// kernel's symbols, so it gets the target once that has located the
-    /// kernel and before the session takes the backend over. Read-only, so
-    /// no instance lock is taken.
+    /// Open a kernel crash or triage dump. Each processor's context is read
+    /// out of that processor's PRCB, which takes the kernel's symbols, so
+    /// the backend gets them once the target has located the kernel and
+    /// before the session takes the backend over. Read-only, so no instance
+    /// lock is taken.
     fn open_kernel_dump(path: &std::path::Path) -> Result<Self> {
         let phys = Arc::new(PhysMem::dmp(path)?);
-        let mut backend = DmpBackend::new(
-            phys.dmp_info()
-                .expect("a kernel dump's memory carries its dump header"),
-        );
-        let mut target = Target::with_phys(phys)?;
+        let info = phys
+            .dmp_info()
+            .expect("a kernel dump's memory carries its dump header");
+        let mut backend = DmpBackend::new(info);
+        let mut target = Target::with_phys(Arc::clone(&phys))?;
         locate_debugger_data(&mut target, &mut backend);
-        backend.read_processor_contexts(&target);
+        read_processor_contexts(&target, info, &mut backend);
         Self::with_located_target(target, Box::new(backend), None)
     }
 

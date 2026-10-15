@@ -17,7 +17,7 @@ use crate::target::cpu::{
     SpecialRegistersDetail, msr_name, parse_msr_name,
 };
 use crate::target::{DiagnosticValue, ServedVp, Target};
-use crate::types::{Arch, VirtAddr};
+use crate::types::{Arch, MAX_PROCESSORS, VirtAddr};
 use crate::ui;
 
 use super::diagnostics::{diagnostic_addr, diagnostic_cell, diagnostic_hex};
@@ -158,11 +158,7 @@ fn processor_count(state: &mut ReplState<'_>) -> u16 {
         .backend
         .thread_list()
         .ok()
-        .map(|threads| {
-            threads
-                .len()
-                .clamp(1, usize::from(cpu_state::MAX_PROCESSORS)) as u16
-        })
+        .map(|threads| threads.len().clamp(1, usize::from(MAX_PROCESSORS)) as u16)
         .unwrap_or(1)
 }
 

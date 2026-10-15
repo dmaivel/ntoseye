@@ -1,5 +1,4 @@
 use std::fs::File;
-use std::mem::offset_of;
 use std::path::Path;
 use std::time::Duration;
 
@@ -8,18 +7,15 @@ use zerocopy::FromBytes;
 
 use crate::bytes::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64};
 use crate::cpu_context::{amd64, arm64};
-use crate::cpu_state;
 use crate::dbg_backend::{
     BackendCapability, DebugBackend, DebugCapability, RegisterMap, StopEvent,
     processor_index_from_backend_thread_id,
 };
-use crate::debugger_data::{DebuggerDataCandidate, KdDebuggerData64, MetadataSource};
+use crate::debugger_data::{DebuggerDataCandidate, MetadataSource};
 use crate::error::{Error, Result};
-use crate::layout::ParsedType;
 use crate::memory::{MemoryOps, PAGE_SIZE};
 use crate::notice::Notice;
-use crate::target::Target;
-use crate::types::{Arch, PhysAddr, VirtAddr};
+use crate::types::{Arch, MAX_PROCESSORS, PhysAddr, VirtAddr};
 
 pub mod parse;
 pub mod structs;
@@ -396,7 +392,7 @@ impl DmpContext {
 /// Clamp the untrusted header's processor count so a malformed dump can't
 /// drive an unbounded per-CPU register-buffer allocation.
 pub fn clamp_processors(n: u32) -> u32 {
-    n.clamp(1, u32::from(cpu_state::MAX_PROCESSORS))
+    n.clamp(1, u32::from(MAX_PROCESSORS))
 }
 
 #[derive(Debug, Clone)]
@@ -553,7 +549,8 @@ impl DmpMem {
             directory_table_base: hdr.directory_table_base,
             bug_check_code: hdr.bug_check_code,
             bug_check_parameters: hdr.bug_check_code_parameters,
-            // Resolved by DmpBackend once guest virtual-memory translation is available.
+            // Read from KDBG by the session once guest virtual-memory
+            // translation is available.
             offset_prcb_context: None,
             number_processors: clamp_processors(hdr.number_processors),
             is_triage: false,
@@ -696,7 +693,6 @@ pub struct DmpBackend {
     per_cpu_registers: Vec<Vec<u8>>,
     current_processor: usize,
     number_processors: u32,
-    prcb_context_offset: Option<u16>,
     // The dump header's CONTEXT record (the crashing CPU's) and DTB, kept so
     // the crash context can be re-seated after the PRCB pass (see
     // `select_crash_processor`)
@@ -743,7 +739,6 @@ impl DmpBackend {
             per_cpu_registers: per_cpu,
             current_processor: 0,
             number_processors: info.number_processors,
-            prcb_context_offset: info.offset_prcb_context,
             header_context: info.context.clone(),
             directory_table_base: info.directory_table_base,
             debugger_data_hint: info
@@ -766,104 +761,6 @@ impl DmpBackend {
 
     fn build_register_buffer(ctx: &DmpContext, directory_table_base: u64) -> Vec<u8> {
         ctx.to_register_buffer(directory_table_base)
-    }
-
-    fn read_prcb_contexts(&mut self, target: &Target, prcb_ctx_offset: u16) -> Result<()> {
-        let memory = target.guest()?.ntoskrnl.memory();
-        self.read_prcb_contexts_with(target, amd64::CONTEXT_SIZE, "PRCB", |prcb| {
-            memory.read(prcb + u64::from(prcb_ctx_offset))
-        })
-    }
-
-    fn read_prcb_contexts_with<F>(
-        &mut self,
-        target: &Target,
-        context_size: usize,
-        context_label: &str,
-        context_pointer: F,
-    ) -> Result<()>
-    where
-        F: Fn(VirtAddr) -> Result<VirtAddr>,
-    {
-        let memory = target.guest()?.ntoskrnl.memory();
-        for i in 0..self.per_cpu_registers.len() {
-            let index = u16::try_from(i).map_err(|_| {
-                Error::DebugInfo(format!("processor index {i} exceeds the supported bound"))
-            })?;
-            let prcb = match cpu_state::kprcb_for_processor(target, index) {
-                Ok(prcb) => prcb,
-                Err(error) => {
-                    self.notices.push(Notice::warning(format!(
-                        "KiProcessorBlock[{i}] unavailable: {error}"
-                    )));
-                    continue;
-                }
-            };
-            let context_ptr = match context_pointer(prcb) {
-                Ok(context_ptr) if !context_ptr.is_zero() => context_ptr,
-                Ok(_) => {
-                    self.notices.push(Notice::warning(format!(
-                        "PRCB[{i}] Context pointer is null, skipping"
-                    )));
-                    continue;
-                }
-                Err(error) => {
-                    self.notices.push(Notice::warning(format!(
-                        "failed to read {context_label}[{i}] context pointer: {error}"
-                    )));
-                    continue;
-                }
-            };
-
-            let mut ctx_buf = vec![0u8; context_size];
-            if let Err(error) = memory.read_bytes(context_ptr, &mut ctx_buf) {
-                self.notices.push(Notice::warning(format!(
-                    "failed to read {context_label}[{i}] context: {error}"
-                )));
-                continue;
-            }
-            self.per_cpu_registers[i][..context_size].copy_from_slice(&ctx_buf);
-        }
-        Ok(())
-    }
-
-    fn arm64_prcb_context_offset(target: &Target) -> Result<u64> {
-        let symbols = &target.symbols;
-        let prcb = symbols
-            .find_type_across_modules(target.kernel_dtb(), "_KPRCB")
-            .ok_or_else(|| Error::StructNotFound("_KPRCB".into()))?;
-        let processor_state = prcb.field("ProcessorState")?;
-        let state_name = match &processor_state.type_data {
-            ParsedType::Struct(name) | ParsedType::Union(name) => name,
-            other => {
-                return Err(Error::FieldTypeMismatch(
-                    format!("ProcessorState ({other})"),
-                    "struct".into(),
-                ));
-            }
-        };
-        let state = symbols
-            .find_type_across_modules(target.kernel_dtb(), state_name)
-            .ok_or_else(|| Error::StructNotFound(state_name.clone()))?;
-        let context_frame = state.field("ContextFrame")?;
-        let offset = processor_state.offset as u64 + context_frame.offset as u64;
-        let context_end = offset
-            .checked_add(arm64::CONTEXT_SIZE as u64)
-            .ok_or_else(|| Error::DebugInfo("ARM64 PRCB ContextFrame offset overflow".into()))?;
-        if context_end > prcb.size as u64 {
-            return Err(Error::DebugInfo(format!(
-                "ARM64 PRCB ContextFrame at {offset:#x} exceeds _KPRCB size {:#x}",
-                prcb.size
-            )));
-        }
-        Ok(offset)
-    }
-
-    fn read_arm64_prcb_contexts(&mut self, target: &Target) -> Result<()> {
-        let context_offset = Self::arm64_prcb_context_offset(target)?;
-        self.read_prcb_contexts_with(target, arm64::CONTEXT_SIZE, "ARM64 PRCB", |prcb| {
-            Ok(prcb + context_offset)
-        })
     }
 
     /// Select the bugchecking CPU by matching the header CONTEXT against the
@@ -893,44 +790,30 @@ impl DmpBackend {
         }
     }
 
-    /// Full dumps need guest translation to read KDBG; triage dumps resolve
-    /// this from their embedded copy at parse time.
-    fn resolve_prcb_context_offset(&self, target: &Target) -> Option<u16> {
-        let kdbg = self.debugger_data_hint?.address;
-        let memory = target.guest().ok()?.ntoskrnl.memory();
-        let field = offset_of!(KdDebuggerData64, offset_prcb_context) as u64;
-        let offset: u16 = memory.read(kdbg + field).ok()?;
-        (offset > 0).then_some(offset)
+    /// The number of processors this dump holds a register context for.
+    pub fn processor_count(&self) -> usize {
+        self.per_cpu_registers.len()
     }
 
-    /// Read every processor's register context from its PRCB and select the
-    /// processor that bugchecked. The dump header holds only the crashing
-    /// processor's context, and finding the others takes the kernel's
-    /// symbols, so the session calls this once `target` has located the
-    /// kernel and before it takes the backend over. Failures become notices:
-    /// the header's context still stands.
-    pub fn read_processor_contexts(&mut self, target: &Target) {
-        if self.header_context.is_arm64() {
-            if let Err(e) = self.read_arm64_prcb_contexts(target) {
-                self.notices.push(Notice::warning(format!(
-                    "could not read ARM64 PRCB ContextFrame contexts from dump: {e}"
-                )));
-            }
-            self.select_crash_processor();
-        } else {
-            let offset = self
-                .prcb_context_offset
-                .or_else(|| self.resolve_prcb_context_offset(target));
-            if let Some(offset) = offset {
-                self.prcb_context_offset = Some(offset);
-                if let Err(e) = self.read_prcb_contexts(target, offset) {
-                    self.notices.push(Notice::warning(format!(
-                        "could not read PRCB contexts from dump: {e}"
-                    )));
-                }
-                self.select_crash_processor();
+    /// Take each processor's register context, by index, as the kernel saved
+    /// it in the processor's PRCB, with warnings for those that could not be
+    /// read, and select the processor that bugchecked. The dump header holds
+    /// only the crashing processor's context, and finding the others takes
+    /// the kernel's symbols, so the session reads them once it has located
+    /// the kernel. A `None` context keeps what the processor had.
+    pub fn set_processor_contexts(
+        &mut self,
+        contexts: Vec<Option<Vec<u8>>>,
+        warnings: Vec<String>,
+    ) {
+        for (registers, context) in self.per_cpu_registers.iter_mut().zip(contexts) {
+            if let Some(context) = context {
+                registers[..context.len()].copy_from_slice(&context);
             }
         }
+        self.notices
+            .extend(warnings.into_iter().map(Notice::warning));
+        self.select_crash_processor();
     }
 
     fn unsupported(operation: &str) -> Error {

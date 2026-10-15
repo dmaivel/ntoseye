@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::cpu_state::{MAX_PROCESSORS, kpcr_for_processor, kprcb_for_processor, processor_count};
+use crate::cpu_state::{kpcr_for_processor, kprcb_for_processor, processor_count};
 use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
 use crate::kuser_shared::KuserSharedData;
@@ -13,7 +13,7 @@ use crate::symbols::glob_matches;
 use crate::target::{
     DiagnosticValue, ListTermination, Target, ThreadInfo, bounded_list_walk, fast_ref_address,
 };
-use crate::types::VirtAddr;
+use crate::types::{MAX_PROCESSORS, VirtAddr};
 
 #[cfg(test)]
 use crate::target::sample_thread;

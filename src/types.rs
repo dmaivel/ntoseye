@@ -11,6 +11,10 @@ pub const PDPTE_SHIFT: u8 = 30;
 pub const PML4E_SHIFT: u8 = 39;
 pub const PT_INDEX_MASK: u64 = 0x1FF;
 
+/// Upper bound on processor indexes; `KiProcessorBlock` is sized by
+/// `MAXIMUM_PROCESSORS`.
+pub const MAX_PROCESSORS: u16 = 2048;
+
 #[derive(
     Default,
     Clone,
