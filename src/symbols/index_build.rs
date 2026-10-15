@@ -17,19 +17,25 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-/// Everything one PDB contributes to the symbol store, parsed while the PDB is
-/// locked so that building the searchable indexes from it (which is parallel)
-/// runs with no lock held.
-struct ParsedIndexData {
+/// What one PDB's symbol, line and module streams contribute to the symbol
+/// store, parsed while the PDB is locked so that building the searchable
+/// indexes from it (which is parallel) runs with no lock held.
+struct ParsedSymbols {
     strings: Vec<String>,
     rvas: FxHashMap<String, Vec<IndexedSymbol>>,
     source_lines: Vec<SourceLineEntry>,
     procedures: Vec<ProcedureSpan>,
     source_checksums: FxHashMap<String, SourceChecksum>,
+    wpp_messages: HashMap<MessageKey, Arc<TmfMessage>>,
+    diagnostics: Vec<SymbolIndexDiagnostic>,
+}
+
+/// What one PDB's type stream contributes, parsed through a handle of its
+/// own (see [`SymbolStore::build_index`]).
+struct ParsedTypes {
     type_strings: Vec<String>,
     enum_strings: Vec<String>,
     struct_defs: HashMap<String, (u64, TypeIndex)>,
-    wpp_messages: HashMap<MessageKey, Arc<TmfMessage>>,
     diagnostics: Vec<SymbolIndexDiagnostic>,
 }
 
@@ -95,13 +101,15 @@ fn address_index(rvas: &FxHashMap<String, Vec<IndexedSymbol>>) -> Vec<AddressEnt
         .collect()
 }
 
+/// The most diagnostics one PDB's indexing keeps.
+const DIAGNOSTIC_LIMIT: usize = 64;
+
 fn record_index_diagnostic(
     diagnostics: &mut Vec<SymbolIndexDiagnostic>,
     phase: &'static str,
     compiland: Option<&str>,
     message: impl Into<String>,
 ) {
-    const DIAGNOSTIC_LIMIT: usize = 64;
     if diagnostics.len() < DIAGNOSTIC_LIMIT {
         diagnostics.push(SymbolIndexDiagnostic {
             phase,
@@ -151,11 +159,11 @@ impl SymbolStore {
         }
     }
 
-    /// Parse every index input out of the PDB for `guid`.
+    /// Parse the symbol, line and module streams of the PDB for `guid`.
     ///
     /// The `pdbs` shard guard and the PDB mutex are held for exactly this
     /// call. See [`Self::build_index`] for why they must not outlive it.
-    fn parse_index_data(&self, guid: u128) -> Result<ParsedIndexData> {
+    fn parse_symbols(&self, guid: u128) -> Result<ParsedSymbols> {
         let pdb = self.pdbs.get_mut(&guid).ok_or(Error::ExpectedSymbols)?;
         let mut pdb_lock = pdb.lock();
         let address_map = pdb_lock.address_map()?;
@@ -210,26 +218,12 @@ impl SymbolStore {
             &mut diagnostics,
         )?;
 
-        let mut type_strings: Vec<String> = Vec::new();
-        let mut enum_strings: Vec<String> = Vec::new();
-        let mut struct_defs: HashMap<String, (u64, TypeIndex)> = HashMap::new();
-        parse_type_stream(
-            &mut pdb_lock,
-            &mut type_strings,
-            &mut enum_strings,
-            &mut struct_defs,
-            &mut diagnostics,
-        )?;
-
-        Ok(ParsedIndexData {
+        Ok(ParsedSymbols {
             strings,
             rvas,
             source_lines,
             procedures,
             source_checksums,
-            type_strings,
-            enum_strings,
-            struct_defs,
             wpp_messages,
             diagnostics,
         })
@@ -247,15 +241,35 @@ impl SymbolStore {
     /// finishes and releases both locks before any parallel work starts.
     /// That includes sorting what it parsed, which for a large PDB's
     /// hundred thousand names took as long as parsing its public symbols.
+    ///
+    /// The type stream is parsed at the same time as the symbol streams,
+    /// through a second `pdb2` handle on the same mapping, as reading one
+    /// stream needs nothing from the other and a handle is cheap to open.
+    /// The parse holding the locks runs on this thread and does no parallel
+    /// work, and the other takes no lock.
     fn build_index(&self, guid: u128) -> Result<()> {
-        let mut parsed = self.parse_index_data(guid)?;
+        let mmap = self
+            .mmaps
+            .get(&guid)
+            .map(|mmap| Arc::clone(&mmap))
+            .ok_or(Error::ExpectedSymbols)?;
+        let (symbols, types) = rayon::join(|| self.parse_symbols(guid), || parse_types(&mmap));
+        // A symbol stream's error is the one reported when both fail, as
+        // the symbol streams were parsed first.
+        let mut parsed = symbols?;
+        let mut types = types?;
+        let room = DIAGNOSTIC_LIMIT.saturating_sub(parsed.diagnostics.len());
+        parsed
+            .diagnostics
+            .extend(types.diagnostics.into_iter().take(room));
+
         // Equal names are the same name, so an unstable sort orders them as
         // a stable one would. Lines and procedures sharing an RVA keep the
         // order the PDB lists them in.
         for names in [
             &mut parsed.strings,
-            &mut parsed.type_strings,
-            &mut parsed.enum_strings,
+            &mut types.type_strings,
+            &mut types.enum_strings,
         ] {
             names.par_sort_unstable();
             names.dedup();
@@ -273,10 +287,10 @@ impl SymbolStore {
         self.procedures.insert(guid, parsed.procedures);
         self.source_checksums.insert(guid, parsed.source_checksums);
         self.index_types
-            .insert(guid, SymbolIndex::from_names(parsed.type_strings));
+            .insert(guid, SymbolIndex::from_names(types.type_strings));
         self.index_enums
-            .insert(guid, SymbolIndex::from_names(parsed.enum_strings));
-        self.struct_defs.insert(guid, parsed.struct_defs);
+            .insert(guid, SymbolIndex::from_names(types.enum_strings));
+        self.struct_defs.insert(guid, types.struct_defs);
         if !parsed.wpp_messages.is_empty() {
             self.wpp_messages.insert(guid, parsed.wpp_messages);
         }
@@ -657,12 +671,32 @@ pub(super) fn section_offset_limit(pdb: &mut pdb2::PDB<'static, Cursor<&'static 
         .unwrap_or(u32::MAX)
 }
 
+/// The type stream's index inputs, read through a `pdb2` handle of its own
+/// on `bytes`, the PDB's mapping.
+fn parse_types(bytes: &[u8]) -> Result<ParsedTypes> {
+    let mut pdb = pdb2::PDB::open(Cursor::new(bytes))?;
+    let mut types = ParsedTypes {
+        type_strings: Vec::new(),
+        enum_strings: Vec::new(),
+        struct_defs: HashMap::new(),
+        diagnostics: Vec::new(),
+    };
+    parse_type_stream(
+        &mut pdb,
+        &mut types.type_strings,
+        &mut types.enum_strings,
+        &mut types.struct_defs,
+        &mut types.diagnostics,
+    )?;
+    Ok(types)
+}
+
 /// Named structs, unions, and enums from the type stream, keeping each
 /// struct's largest complete definition in `struct_defs`. Unnamed structs
 /// and unions are defined there under their [`aggregate_key`] but not
 /// listed: nobody types `<unnamed-tag>#1124`.
-fn parse_type_stream(
-    pdb: &mut pdb2::PDB<'static, Cursor<&'static [u8]>>,
+fn parse_type_stream<'s>(
+    pdb: &mut pdb2::PDB<'s, Cursor<&'s [u8]>>,
     type_strings: &mut Vec<String>,
     enum_strings: &mut Vec<String>,
     struct_defs: &mut HashMap<String, (u64, TypeIndex)>,
