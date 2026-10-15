@@ -65,6 +65,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
         run: cargo clippy --locked -p ntoseye ${{ matrix.features }} --all-targets
+      # The debugger core alone, with no host: a core module that reaches into
+      # the REPL, MCP, DAP, gdbserver or Python fails to compile here, which
+      # keeps the hosts layered on the core rather than tangled into it.
+      - name: Clippy, core only
+        if: matrix.os == 'ubuntu-latest' && matrix.label == 'dist'
+        run: cargo clippy --locked -p ntoseye --no-default-features --lib
       - name: Test
         run: cargo test --locked -p ntoseye ${{ matrix.features }}
       # The SDK's type hints compile only with `python-stubs`; this checks each

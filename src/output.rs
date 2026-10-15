@@ -276,6 +276,7 @@ macro_rules! out {
 }
 
 /// `println!` that honors an active [`capture`].
+#[cfg_attr(not(feature = "repl"), allow(unused_macros))]
 macro_rules! outln {
     () => {
         $crate::output::write_fmt(format_args!("\n"))
