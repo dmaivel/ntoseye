@@ -323,22 +323,17 @@ impl Thread {
         Typed::new(py, view)
     }
 
-    /// Get the thread summary and the saved scheduling details (`!thread`).
-    fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::process::ThreadSummary>> {
-        let active = self.cpu_id(py)?;
-        Typed::new(
-            py,
-            view::process::thread_summary(&self.info, active.as_deref()),
-        )
+    /// Get the thread as the walk read it: its identity, state, scheduling
+    /// details and stack bounds (`!thread`).
+    fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, ThreadInfo>> {
+        self.owner.check(py)?;
+        Typed::of(py, &self.info)
     }
 
     /// The thread as a plain `dict`.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        let active = self.cpu_id(py)?;
-        view_dict(
-            py,
-            &view::process::thread_summary(&self.info, active.as_deref()),
-        )
+        self.owner.check(py)?;
+        view_dict(py, &self.info)
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {

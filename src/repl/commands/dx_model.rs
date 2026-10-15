@@ -171,7 +171,7 @@ pub fn process_name(target: &Target, process: &ProcessInfo) -> String {
     let full = || -> Option<String> {
         let types = target.types_in(target.kernel_dtb());
         let audit = types
-            .struct_at("_EPROCESS", process.eprocess_va)
+            .struct_at("_EPROCESS", process.eprocess)
             .ok()?
             .embedded("SeAuditProcessCreationInfo")
             .ok()?
@@ -204,7 +204,7 @@ fn current_process(target: &Target) -> Result<ProcessInfo> {
 fn process_modules(target: &Target, process: &ProcessInfo) -> Result<Vec<ModuleInfo>> {
     let no_peb = target
         .types_in(target.kernel_dtb())
-        .struct_at("_EPROCESS", process.eprocess_va)
+        .struct_at("_EPROCESS", process.eprocess)
         .and_then(|eprocess| eprocess.read_pointer("Peb"))
         .is_ok_and(|peb| peb.is_zero());
     if process.pid <= 4 || no_peb {
@@ -232,7 +232,7 @@ pub fn elements(target: &Target, value: &ModelValue) -> Result<Vec<(u64, ModelVa
             let idle = idle.filter(|idle| {
                 !listed
                     .iter()
-                    .any(|process| process.eprocess_va == idle.eprocess_va)
+                    .any(|process| process.eprocess == idle.eprocess)
             });
             idle.into_iter()
                 .chain(listed)
@@ -298,7 +298,7 @@ pub fn property(target: &Target, value: &ModelValue, name: &str) -> Result<Model
         (ModelValue::Session, "Processes") => ModelValue::Processes,
         (ModelValue::Session, "Id") => ModelValue::Int(Integer::new(0, false, false)),
         (ModelValue::Process(process), "KernelObject") => {
-            kernel_object("_EPROCESS", process.eprocess_va.0)
+            kernel_object("_EPROCESS", process.eprocess.0)
         }
         (ModelValue::Process(process), "Name") => ModelValue::Text(process_name(target, process)),
         (ModelValue::Process(process), "Id") => ModelValue::unsigned(process.pid),

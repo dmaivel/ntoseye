@@ -3,7 +3,7 @@
 use crate::target::DiagnosticValue;
 use ntoseye_macros::record;
 
-use super::list::{ListEnd, list_termination};
+use crate::target::ListTermination;
 use crate::target::usermode::{
     self as target, ImageCheckDetail, ImageSectionResult, LastError32Detail, LastErrorDetail,
     LoaderListHeads, LoaderModuleDetail, LoaderModulesDetail, Peb32Detail, PebDetail,
@@ -193,9 +193,9 @@ pub struct LoaderModule {
 /// How a process's native and WOW64 loader-list walks ended.
 #[record]
 pub struct LoaderTerminations {
-    pub termination: ListEnd,
+    pub termination: ListTermination,
     /// `None` for a native process.
-    pub wow64_termination: Option<ListEnd>,
+    pub wow64_termination: Option<ListTermination>,
 }
 
 /// A thread's Win32 last error and last NTSTATUS (`!gle`).
@@ -464,8 +464,8 @@ pub fn loader_module(detail: &LoaderModuleDetail) -> LoaderModule {
 /// How a process's native and WOW64 loader lists ended.
 pub fn loader_terminations(detail: &LoaderModulesDetail) -> LoaderTerminations {
     LoaderTerminations {
-        termination: list_termination(&detail.termination),
-        wow64_termination: detail.wow64_termination.as_ref().map(list_termination),
+        termination: detail.termination.clone(),
+        wow64_termination: detail.wow64_termination.clone(),
     }
 }
 

@@ -1002,7 +1002,7 @@ impl Target {
         // kernel's DTB maps even where a dump lacks the process's own page
         // directory.
         let types = self.guest()?.ntoskrnl.types_in(self.kernel_dtb());
-        let eprocess = types.struct_at("_EPROCESS", process.eprocess_va)?;
+        let eprocess = types.struct_at("_EPROCESS", process.eprocess)?;
         let table: VirtAddr = eprocess.read_field("ObjectTable")?;
         if table.is_zero() {
             return Err(Error::DebugInfo(
@@ -1625,7 +1625,7 @@ impl Target {
             };
 
             // Walk the process thread list (ETHREAD.ThreadListEntry).
-            let head = p.eprocess_va + head_off;
+            let head = p.eprocess + head_off;
             let (ethreads, _) =
                 bounded_record_list_walk(head, link_off, 4096, |link| mem.read(link));
             for ethread in ethreads {

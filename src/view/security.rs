@@ -1,9 +1,9 @@
 //! security: [`View`] builders for the structured inspectors.
 
+use crate::guest::ProcessInfo;
 use crate::target::DiagnosticValue;
 use ntoseye_macros::record;
 
-use super::process::process;
 use crate::target::security::{
     self, AceDetail, AclDetail, ObjectSecurityDetail, PrivilegeInfo, SecurityDescriptorDetail,
     SessionDetail, SessionsDetail, SidDetail, TokenDetail,
@@ -104,7 +104,7 @@ pub struct Session {
     /// `None` for processes whose session is unknown.
     pub id: Option<u64>,
     /// The processes in the session.
-    pub processes: Vec<super::process::ProcessIdentity>,
+    pub processes: Vec<ProcessInfo>,
 }
 
 /// Sessions and their processes (`!session`).
@@ -140,7 +140,7 @@ pub struct TokenPrivilege {
 #[record]
 pub struct Token {
     /// The process record.
-    pub process: super::process::ProcessIdentity,
+    pub process: ProcessInfo,
     /// The `_TOKEN`.
     pub token: VirtAddr,
     #[record(hex)]
@@ -228,7 +228,7 @@ pub fn object_security(detail: &ObjectSecurityDetail) -> ObjectSecurity {
 fn session(detail: &SessionDetail) -> Session {
     Session {
         id: detail.id,
-        processes: detail.processes.iter().map(process).collect(),
+        processes: detail.processes.clone(),
     }
 }
 
@@ -259,7 +259,7 @@ fn privilege(privilege: &PrivilegeInfo) -> TokenPrivilege {
 /// Render `!token`: the current process's primary token.
 pub fn token(token: &TokenDetail) -> Token {
     Token {
-        process: process(&token.process),
+        process: token.process.clone(),
         token: token.token,
         token_id: token.token_id.clone(),
         authentication_id: token.authentication_id.clone(),

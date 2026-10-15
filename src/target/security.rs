@@ -715,7 +715,7 @@ impl Target {
             .into_iter()
             .take(MAX_SESSION_PROCESSES)
             .map(|process| {
-                let session = self.process_session_id(process.eprocess_va).map(u64::from);
+                let session = self.process_session_id(process.eprocess).map(u64::from);
                 (process, session)
             })
             .collect();
@@ -727,7 +727,7 @@ impl Target {
             .and_then(|current| {
                 processes
                     .iter()
-                    .find(|(process, _)| process.eprocess_va == current.eprocess_va)
+                    .find(|(process, _)| process.eprocess == current.eprocess)
                     .and_then(|(_, session)| *session)
             })
             .or_else(|| {
@@ -737,7 +737,7 @@ impl Target {
                     .and_then(|eprocess| {
                         processes
                             .iter()
-                            .find(|(process, _)| process.eprocess_va == eprocess)
+                            .find(|(process, _)| process.eprocess == eprocess)
                             .and_then(|(_, session)| *session)
                     })
             })
@@ -994,8 +994,7 @@ impl Target {
         let process = self.selected_process_info()?;
         let types = self.guest()?.ntoskrnl.types_in(process.dtb);
         let eprocess_layout = types.layout("_EPROCESS")?;
-        let raw_token: u64 =
-            self.read_layout_field(&eprocess_layout, process.eprocess_va, "Token")?;
+        let raw_token: u64 = self.read_layout_field(&eprocess_layout, process.eprocess, "Token")?;
         let token = fast_ref_address(raw_token);
         if token.is_zero() {
             return Err(Error::DebugInfo("_EPROCESS.Token is null".to_string()));

@@ -630,7 +630,7 @@ impl ReplState<'_> {
                     error!("no process matches '{selector}'");
                     return Ok(());
                 };
-                Some(process.eprocess_va.0)
+                Some(process.eprocess.0)
             }
             None => None,
         };

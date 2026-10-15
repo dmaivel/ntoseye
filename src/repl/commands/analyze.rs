@@ -398,7 +398,7 @@ fn print_triage_report(report: &TriageReport, verbose: bool) {
                 ui::muted("scope  "),
                 process.name,
                 process.pid,
-                ui::addr(process.eprocess_va.0)
+                ui::addr(process.eprocess.0)
             );
         }
         if !report.status.coherent {

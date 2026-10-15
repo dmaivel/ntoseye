@@ -3,8 +3,7 @@
 use ntoseye_macros::record;
 
 use super::execution::{self, stack_frame, stack_frames};
-use super::list::{ListEnd, list_termination};
-use super::process::{ThreadSummary, thread_summary};
+use crate::target::ListTermination;
 use crate::target::sched::{self as detail, ApcSelector};
 use crate::target::workqueue::{self, ExQueueDetail};
 use crate::target::{DiagnosticValue, ThreadInfo};
@@ -19,12 +18,12 @@ pub struct RunningProcessor {
     pub prcb: DiagnosticValue<VirtAddr>,
     /// The thread that runs on the processor. The value inside is `None` if
     /// no thread runs.
-    pub current_thread: DiagnosticValue<Option<ThreadSummary>>,
+    pub current_thread: DiagnosticValue<Option<ThreadInfo>>,
     /// The thread selected to run next. The value inside is `None` if there
     /// is no next thread.
-    pub next_thread: DiagnosticValue<Option<ThreadSummary>>,
+    pub next_thread: DiagnosticValue<Option<ThreadInfo>>,
     /// The processor's idle thread.
-    pub idle_thread: DiagnosticValue<Option<ThreadSummary>>,
+    pub idle_thread: DiagnosticValue<Option<ThreadInfo>>,
     /// The first frames of the running thread. `None` if stacks were not
     /// requested.
     pub short_stack: Option<DiagnosticValue<Vec<execution::StackFrame>>>,
@@ -42,7 +41,7 @@ pub struct ReadyThread {
     /// The `_KTHREAD` linked on the queue.
     pub kthread: VirtAddr,
     /// The decoded thread.
-    pub thread: DiagnosticValue<ThreadSummary>,
+    pub thread: DiagnosticValue<ThreadInfo>,
 }
 
 /// The ready list of one processor for one priority.
@@ -52,7 +51,7 @@ pub struct ReadyQueue {
     pub priority: u8,
     pub entries: Vec<ReadyThread>,
     /// How the list walk ended.
-    pub termination: ListEnd,
+    pub termination: ListTermination,
 }
 
 /// A processor or queue read that failed during a scheduler walk.
@@ -99,7 +98,7 @@ pub struct DpcQueue {
     pub queue: u8,
     pub entries: Vec<Dpc>,
     /// How the list walk ended.
-    pub termination: ListEnd,
+    pub termination: ListTermination,
 }
 
 /// The queued DPCs of all processors (`!dpcs`).
@@ -149,7 +148,7 @@ pub struct TimerTableEntry {
 pub struct TimerBucketEnd {
     pub processor: u16,
     pub bucket: u16,
-    pub termination: ListEnd,
+    pub termination: ListTermination,
 }
 
 /// The timer tables of all processors (`!timer`).
@@ -197,13 +196,13 @@ pub struct Apc {
 /// The kernel-mode and user-mode APC queues of a thread.
 #[record]
 pub struct ApcThread {
-    pub thread: ThreadSummary,
+    pub thread: ThreadInfo,
     pub kernel: Vec<Apc>,
     pub user: Vec<Apc>,
     /// How the kernel-mode list walk ended.
-    pub kernel_termination: ListEnd,
+    pub kernel_termination: ListTermination,
     /// How the user-mode list walk ended.
-    pub user_termination: ListEnd,
+    pub user_termination: ListTermination,
     /// The error, if ntoseye could not read the APC state of the thread.
     pub state_error: Option<String>,
 }
@@ -226,7 +225,10 @@ pub struct ApcQueues {
 /// The state and walked stack of a thread (`!stacks`).
 #[record]
 pub struct ThreadStack {
-    pub thread: ThreadSummary,
+    pub thread: ThreadInfo,
+    /// The vCPU that runs the thread, if the listing resolves it. `None` if
+    /// no vCPU runs it, and while the target runs.
+    pub active: Option<String>,
     /// The symbol of the top frame.
     pub top_symbol: DiagnosticValue<Option<String>>,
     /// The frames, innermost first. Level 0 has the top frame, level 1 has
@@ -257,7 +259,7 @@ pub struct ThreadStacks {
 /// it.
 #[record]
 pub struct UnwalkedThread {
-    pub thread: ThreadSummary,
+    pub thread: ThreadInfo,
     /// The reason the walk failed.
     pub error: String,
 }
@@ -265,7 +267,10 @@ pub struct UnwalkedThread {
 /// A thread with a stack frame that matches the `!findstack` pattern.
 #[record]
 pub struct FindStackThread {
-    pub thread: ThreadSummary,
+    pub thread: ThreadInfo,
+    /// The vCPU that runs the thread, if the listing resolves it. `None` if
+    /// no vCPU runs it, and while the target runs.
+    pub active: Option<String>,
     /// The number of frames that matched.
     pub match_count: usize,
     /// The frames that matched. `None` at level 0.
@@ -333,14 +338,14 @@ pub struct WorkQueuePriority {
     #[record(rename = "items")]
     pub work_items: Vec<WorkItem>,
     /// How the list walk ended.
-    pub termination: ListEnd,
+    pub termination: ListTermination,
 }
 
 /// A thread that serves a work queue.
 #[record]
 pub struct WorkerThread {
     pub kthread: VirtAddr,
-    pub thread: DiagnosticValue<ThreadSummary>,
+    pub thread: DiagnosticValue<ThreadInfo>,
     /// The stack of the thread. `None` if stacks were not requested or the
     /// thread did not decode.
     pub stack: Option<DiagnosticValue<Vec<execution::StackFrame>>>,
@@ -373,7 +378,7 @@ pub struct WorkQueue {
     pub priorities: Vec<WorkQueuePriority>,
     pub threads: Vec<WorkerThread>,
     /// How the worker-thread list walk ended.
-    pub threads_termination: ListEnd,
+    pub threads_termination: ListTermination,
 }
 
 /// All executive worker queues (`!exqueue`).
@@ -394,7 +399,7 @@ pub struct WorkQueues {
 #[record]
 pub struct UniqStackGroup {
     pub thread_count: usize,
-    pub threads: Vec<ThreadSummary>,
+    pub threads: Vec<ThreadInfo>,
     /// The frames of the first thread, innermost first. The other threads
     /// have the same instruction pointers, but their stack pointers can
     /// differ.
@@ -437,12 +442,6 @@ pub enum ApcSelectorValue {
     Selection(ApcSelection),
 }
 
-fn optional_thread(
-    value: &DiagnosticValue<Option<ThreadInfo>>,
-) -> DiagnosticValue<Option<ThreadSummary>> {
-    value.map(|thread| thread.as_ref().map(|thread| thread_summary(thread, None)))
-}
-
 fn scheduler_error(error: &detail::SchedulerError) -> SchedulerError {
     SchedulerError {
         processor: error.processor,
@@ -464,9 +463,9 @@ pub fn running(detail: &detail::RunningDetail) -> RunningProcessors {
                 index: processor.index,
                 kpcr: processor.kpcr.clone(),
                 prcb: processor.prcb.clone(),
-                current_thread: optional_thread(&processor.current_thread),
-                next_thread: optional_thread(&processor.next_thread),
-                idle_thread: optional_thread(&processor.idle_thread),
+                current_thread: processor.current_thread.clone(),
+                next_thread: processor.next_thread.clone(),
+                idle_thread: processor.idle_thread.clone(),
                 short_stack: processor
                     .short_stack
                     .as_ref()
@@ -489,10 +488,10 @@ pub fn ready_queues(detail: &detail::ReadyQueuesDetail) -> ReadyQueues {
                     .iter()
                     .map(|entry| ReadyThread {
                         kthread: entry.kthread,
-                        thread: entry.thread.map(|thread| thread_summary(thread, None)),
+                        thread: entry.thread.clone(),
                     })
                     .collect(),
-                termination: list_termination(&queue.termination),
+                termination: queue.termination.clone(),
             })
             .collect(),
         total: detail.total,
@@ -520,7 +519,7 @@ pub fn dpc_queues(detail: &detail::DpcQueuesDetail) -> DpcQueues {
                 processor: queue.processor,
                 queue: queue.queue,
                 entries: queue.entries.iter().map(dpc).collect(),
-                termination: list_termination(&queue.termination),
+                termination: queue.termination.clone(),
             })
             .collect(),
         total: detail.total,
@@ -559,7 +558,7 @@ pub fn timer_list(detail: &detail::TimerListDetail) -> TimerTable {
             .map(|entry| TimerBucketEnd {
                 processor: entry.processor,
                 bucket: entry.bucket,
-                termination: list_termination(&entry.termination),
+                termination: entry.termination.clone(),
             })
             .collect(),
         total: detail.total,
@@ -596,11 +595,11 @@ pub fn apcs(detail: &detail::ApcListDetail) -> ApcQueues {
             .threads
             .iter()
             .map(|thread| ApcThread {
-                thread: thread_summary(&thread.thread, None),
+                thread: thread.thread.clone(),
                 kernel: thread.kernel.iter().map(apc).collect(),
                 user: thread.user.iter().map(apc).collect(),
-                kernel_termination: list_termination(&thread.kernel_termination),
-                user_termination: list_termination(&thread.user_termination),
+                kernel_termination: thread.kernel_termination.clone(),
+                user_termination: thread.user_termination.clone(),
                 state_error: thread.state_error.clone(),
             })
             .collect(),
@@ -621,7 +620,8 @@ pub fn stacks(detail: &detail::StacksDetail) -> ThreadStacks {
             .threads
             .iter()
             .map(|thread| ThreadStack {
-                thread: thread_summary(&thread.thread, thread.active_vcpu.as_deref()),
+                thread: thread.thread.clone(),
+                active: thread.active_vcpu.clone(),
                 top_symbol: thread.top_symbol.clone(),
                 frames: stack_frames(&thread.frames),
                 truncated: thread.truncated,
@@ -635,7 +635,7 @@ fn unwalked_threads(threads: &[detail::UnwalkedThread]) -> Vec<UnwalkedThread> {
     threads
         .iter()
         .map(|thread| UnwalkedThread {
-            thread: thread_summary(&thread.thread, None),
+            thread: thread.thread.clone(),
             error: thread.error.clone(),
         })
         .collect()
@@ -644,7 +644,8 @@ fn unwalked_threads(threads: &[detail::UnwalkedThread]) -> Vec<UnwalkedThread> {
 fn findstack_thread(thread: &detail::FindStackThread, level: u8) -> FindStackThread {
     let whole = level >= 2;
     FindStackThread {
-        thread: thread_summary(&thread.thread, thread.active_vcpu.as_deref()),
+        thread: thread.thread.clone(),
+        active: thread.active_vcpu.clone(),
         match_count: thread.matches.len(),
         matching_frames: (level >= 1).then(|| {
             thread
@@ -695,7 +696,7 @@ fn work_queue_priority(priority: &workqueue::WorkQueuePriority) -> WorkQueuePrio
         queue_types: priority.queue_types.clone(),
         current_count: priority.current_count,
         work_items: priority.items.iter().map(work_item).collect(),
-        termination: list_termination(&priority.termination),
+        termination: priority.termination.clone(),
     }
 }
 
@@ -719,14 +720,14 @@ fn work_queue(queue: &workqueue::WorkQueueDetail) -> WorkQueue {
             .iter()
             .map(|worker| WorkerThread {
                 kthread: worker.kthread,
-                thread: worker.thread.map(|info| thread_summary(info, None)),
+                thread: worker.thread.clone(),
                 stack: worker
                     .stack
                     .as_ref()
                     .map(|stack| stack.map(|stack| stack_frames(stack))),
             })
             .collect(),
-        threads_termination: list_termination(&queue.threads_termination),
+        threads_termination: queue.threads_termination.clone(),
     }
 }
 
@@ -762,11 +763,7 @@ pub fn uniqstack(detail: &detail::UniqStackDetail) -> UniqStacks {
             .iter()
             .map(|group| UniqStackGroup {
                 thread_count: group.threads.len(),
-                threads: group
-                    .threads
-                    .iter()
-                    .map(|thread| thread_summary(thread, None))
-                    .collect(),
+                threads: group.threads.clone(),
                 frames: stack_frames(&group.stack.frames),
                 truncated: group.stack.truncated,
             })

@@ -289,7 +289,7 @@ impl ReplState<'_> {
                 && let Ok(processes) = self.ctx.target.guest()?.enumerate_processes()
                 && thread
                     .eprocess
-                    .is_some_and(|owner| processes.iter().any(|p| p.eprocess_va == owner))
+                    .is_some_and(|owner| processes.iter().any(|p| p.eprocess == owner))
             {
                 return Ok(ThreadResolution::Found(thread));
             }

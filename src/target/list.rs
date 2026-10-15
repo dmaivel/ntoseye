@@ -4,18 +4,36 @@
 use std::collections::HashSet;
 use std::result;
 
+use ntoseye_macros::record;
+
 use crate::{error::Result, types::VirtAddr};
 
+/// The end condition of a guest linked-list walk.
+#[record(tagged, impl)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListTermination {
+    /// The walk came back to the list head.
     Head,
     Null,
-    Cycle(VirtAddr),
+    /// A loop that does not go through the head.
+    Cycle(
+        /// The address where a cycle closed.
+        #[record(rename = "address")]
+        VirtAddr,
+    ),
+    /// The walk reached its limit.
     Bound,
-    Corrupt(String),
+    Corrupt(
+        /// The problem with a corrupt link.
+        #[record(rename = "error")]
+        String,
+    ),
 }
 
+#[record]
 impl ListTermination {
+    /// Why the walk ended before the list head, if it did.
+    #[record(getter)]
     pub fn diagnostic(&self) -> Option<String> {
         match self {
             Self::Head => None,

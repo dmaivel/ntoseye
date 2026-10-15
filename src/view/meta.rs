@@ -3,7 +3,6 @@
 use crate::target::DiagnosticValue;
 use ntoseye_macros::record;
 
-use super::list::{ListEnd, list_termination};
 use crate::target::ListTermination;
 use crate::target::meta::{
     ErrorCodeDetail, TargetDumpMetadata, TargetKernelDetail, TargetTimeDetail,
@@ -92,7 +91,7 @@ pub struct Verifier {
     /// not loaded.
     pub configured_but_unloaded: DiagnosticValue<Vec<VerifierSuspectDriver>>,
     /// How the suspect-list walk ended.
-    pub suspect_list_termination: ListEnd,
+    pub suspect_list_termination: ListTermination,
 }
 
 /// The image, signing level, and counters of one verified driver
@@ -378,22 +377,6 @@ fn verifier_statistics(stats: &StatisticsDetail) -> VerifierStatistics {
     }
 }
 
-/// How the verifier's suspect-list walk ended: as the shared
-/// [`list_termination`], but every end except the list head carries an error.
-fn suspect_list_end(termination: &ListTermination) -> ListEnd {
-    let error = match termination {
-        ListTermination::Null => Some("null link".to_string()),
-        ListTermination::Cycle(address) => Some(format!("non-head cycle at {:#x}", address.0)),
-        ListTermination::Bound => Some("entry bound reached".to_string()),
-        ListTermination::Head | ListTermination::Corrupt(_) => None,
-    };
-    let end = list_termination(termination);
-    ListEnd {
-        error: end.error.or(error),
-        ..end
-    }
-}
-
 /// Driver Verifier global level/options, aggregate statistics, loaded drivers,
 /// and configured-but-unloaded suspect drivers.
 pub fn verifier(detail: &VerifierDetail) -> Verifier {
@@ -410,7 +393,7 @@ pub fn verifier(detail: &VerifierDetail) -> Verifier {
         configured_but_unloaded: detail
             .configured_but_unloaded
             .map(|drivers| drivers.iter().map(suspect_driver).collect()),
-        suspect_list_termination: suspect_list_end(&detail.suspect_list_termination),
+        suspect_list_termination: detail.suspect_list_termination.clone(),
     }
 }
 

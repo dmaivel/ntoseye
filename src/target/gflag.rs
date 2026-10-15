@@ -158,7 +158,7 @@ impl Target {
             Some(process) => DiagnosticValue::from_result((|| {
                 let types = guest.ntoskrnl.types_in(process.dtb);
                 let peb = types
-                    .struct_at("_EPROCESS", process.eprocess_va)?
+                    .struct_at("_EPROCESS", process.eprocess)?
                     .read_pointer("Peb")?;
                 if peb.is_zero() {
                     return Err(Error::DebugInfo(format!("{} has no PEB", process.name)));

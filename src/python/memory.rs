@@ -384,7 +384,7 @@ impl Memory {
         let context = self.space.context();
         self.space.require_nt("page_in")?;
         let process = match &self.space {
-            Space::Process(info) => Some(info.eprocess_va.0),
+            Space::Process(info) => Some(info.eprocess.0),
             Space::Kernel => None,
             Space::Physical | Space::Secure(_) | Space::Root(_) => unreachable!(),
         };

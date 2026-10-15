@@ -620,13 +620,13 @@ impl ReplState<'_> {
                     return Ok(None);
                 }
                 // A triage dump's one-process snapshot has no EPROCESS address.
-                if process.eprocess_va.is_zero() {
+                if process.eprocess.is_zero() {
                     return Err(MissingValue(format!(
                         "{} (PID {}) has no known EPROCESS address",
                         process.name, process.pid
                     )));
                 }
-                Ok(Some(hex(process.eprocess_va.0)))
+                Ok(Some(hex(process.eprocess.0)))
             }
         })
     }

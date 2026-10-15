@@ -252,14 +252,14 @@ impl Guest {
     /// that need to diagnose a corrupt or truncated list.
     pub fn process_modules_detail(&self, info: &ProcessInfo) -> Result<ProcessModulesDetail> {
         self.memoized(
-            |memo| memo.process_modules.entry(info.eprocess_va).or_default(),
+            |memo| memo.process_modules.entry(info.eprocess).or_default(),
             || self.walk_process_modules(info),
         )
     }
 
     fn walk_process_modules(&self, info: &ProcessInfo) -> Result<ProcessModulesDetail> {
         let types = self.ntoskrnl.types_in(info.dtb);
-        let eprocess = types.struct_at("_EPROCESS", info.eprocess_va)?;
+        let eprocess = types.struct_at("_EPROCESS", info.eprocess)?;
         let peb = eprocess.follow("Peb")?;
         if peb.addr().is_zero() {
             return Err(Error::MissingPEB);
@@ -309,7 +309,7 @@ impl Guest {
         let memory = self.ntoskrnl.memory_in(info.dtb);
         let link = |address: VirtAddr| memory.read::<u64>(address).ok().map(vad_tree_link);
         let vad_root = types
-            .struct_at("_EPROCESS", info.eprocess_va)
+            .struct_at("_EPROCESS", info.eprocess)
             .ok()?
             .embedded("VadRoot")
             .ok()?;

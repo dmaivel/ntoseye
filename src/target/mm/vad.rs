@@ -155,7 +155,7 @@ impl Target {
         let memory = self.address_space(process.dtb);
         let types = guest.ntoskrnl.types_in(process.dtb);
         let eprocess_layout = guest.ntoskrnl.types().layout("_EPROCESS")?;
-        let vad_root_base = process.eprocess_va + eprocess_layout.field_offset("VadRoot")?;
+        let vad_root_base = process.eprocess + eprocess_layout.field_offset("VadRoot")?;
         let root = self.read_vad_root(process.dtb, vad_root_base)?;
         if root.is_zero() {
             return Ok(Vec::new());

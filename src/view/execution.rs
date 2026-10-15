@@ -6,15 +6,16 @@ use super::record::Keyed;
 use ntoseye_macros::record;
 
 use super::hypervisor::{DecodedHypercall, ServedVp, decoded_hypercall, exit_registers, served_vp};
-use super::process::{ProcessIdentity, ThreadSummary, process, thread_summary};
 use super::symbols::source_location;
 use crate::breakpoints::{self, Breakpoint};
 use crate::disasm::{DisasmOperand, DisasmRow, disasm_formatter};
 use crate::exception_policy::{self, ExceptionPolicyFinalAction, exception_alias};
+use crate::guest::ProcessInfo;
 use crate::guest::exit_reason_name;
 use crate::guest::hypercalls::tlfs_hypercall;
 use crate::guest::vm_exits;
 use crate::session::{self, CallTraceEnd, VcpuInfo};
+use crate::target::ThreadInfo;
 use crate::types::VirtAddr;
 use crate::unwind::{
     self, Arm64CodeDetail, Arm64UnwindDetail, FunctionEntryDetail, HandlerDetail, UnwindDetail,
@@ -257,12 +258,12 @@ pub struct RunStatus {
     /// The process that you selected with `.process`. `dt`, `dq`, and
     /// similar commands read its memory, and the selection stays after the
     /// target resumes.
-    pub attached_process: Option<ProcessIdentity>,
+    pub attached_process: Option<ProcessInfo>,
     /// The process whose page tables the stopped vCPU has loaded.
-    pub stopped_process: Option<ProcessIdentity>,
+    pub stopped_process: Option<ProcessInfo>,
     /// The Windows thread that the stopped vCPU runs. Its owner can be
     /// different from `stopped_process` (`KeStackAttachProcess`).
-    pub stopped_thread: Option<ThreadSummary>,
+    pub stopped_thread: Option<ThreadInfo>,
     /// False after a reboot until the kernel's loaded-module list exists,
     /// and process and module enumeration is not valid until then.
     pub coherent: bool,
@@ -712,12 +713,9 @@ pub fn run_status(status: &session::RunStatus) -> RunStatus {
         saved_vtl: status.saved_vtl.iter().map(saved_vtl_state).collect(),
         serving: status.serving.as_ref().map(served_vp),
         running_vp: status.running_vp.clone(),
-        attached_process: status.attached_process.as_ref().map(process),
-        stopped_process: status.stopped_process.as_ref().map(process),
-        stopped_thread: status
-            .stopped_thread
-            .as_ref()
-            .map(|thread| thread_summary(thread, None)),
+        attached_process: status.attached_process.clone(),
+        stopped_process: status.stopped_process.clone(),
+        stopped_thread: status.stopped_thread.clone(),
         coherent: status.coherent,
         kernel_base: status.kernel_base,
         partition: status.partition,

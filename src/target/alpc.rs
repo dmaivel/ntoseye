@@ -666,7 +666,7 @@ impl Target {
             };
             match (core.kind, core.ends) {
                 (Some(AlpcPortKind::Connection), _) => {
-                    if core.owner != handles.process.eprocess_va {
+                    if core.owner != handles.process.eprocess {
                         continue;
                     }
                     let (connections, termination) =
