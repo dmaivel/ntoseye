@@ -11,7 +11,9 @@ use crate::breakpoints::{
     Breakpoint, BreakpointConfig, HardwareBreakpoint, HypercallFilter, PartitionFilter, StepFrame,
     ThreadScope,
 };
-use crate::dbg_backend::{ContinueDisposition, HwBreakpointAccess, TrapState, clear_trap_flag};
+use crate::dbg_backend::{
+    ContinueDisposition, HwBreakpointAccess, RegisterInfo, TrapState, clear_trap_flag,
+};
 use crate::dmp::{IMAGE_FILE_MACHINE_ARM64, structs::Header64};
 use crate::exception_policy::ExceptionPolicyMode;
 use crate::guest::ModuleInfo;
@@ -224,14 +226,17 @@ impl MockBackend {
     /// Model a stub that owns the processor's debug registers and exposes
     /// none of them, as a GDB target description does.
     fn without_debug_registers(mut self) -> Self {
-        self.register_map = RegisterMap::parse_target_xml(
-            r#"<target><feature name="org.gnu.gdb.i386.core">
-                 <reg name="rsp" bitsize="64"/>
-                 <reg name="rip" bitsize="64"/>
-                 <reg name="eflags" bitsize="32"/>
-               </feature></target>"#,
-        )
-        .unwrap();
+        let register = |name: &str, offset, size, regnum| RegisterInfo {
+            name: name.to_string(),
+            offset,
+            size,
+            regnum,
+        };
+        self.register_map = RegisterMap::from_registers(vec![
+            register("rsp", 0, 8, 0),
+            register("rip", 8, 8, 1),
+            register("eflags", 16, 4, 2),
+        ]);
         self.regs = vec![0u8; 20];
         self
     }

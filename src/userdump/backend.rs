@@ -5,9 +5,10 @@
 use std::time::Duration;
 
 use super::{UserDumpInfo, register_buffer};
-use crate::dbg_backend::{BackendCapability, DebugBackend, DebugCapability, StopEvent};
+use crate::dbg_backend::{
+    BackendCapability, DebugBackend, DebugCapability, RegisterMap, StopEvent,
+};
 use crate::error::{Error, Result};
-use crate::gdb::RegisterMap;
 use crate::kd::{context, context_arm64};
 use crate::notice::Notice;
 use crate::types::Arch;

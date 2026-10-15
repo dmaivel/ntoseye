@@ -5,16 +5,14 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use crate::dbg_backend::{
-    DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, PciConfigAddress,
-    STEP_UNDER_WINDOWS_HYPERVISOR, StopEvent,
+    DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, PciConfigAddress, RegisterInfo,
+    RegisterMap, STEP_UNDER_WINDOWS_HYPERVISOR, StopEvent, push_arm64_aliases,
 };
 use crate::error::{Error, Result};
 use crate::phys::HaltClock;
 use crate::types::Arch;
 
-pub mod registers;
-
-pub use registers::{RegisterInfo, RegisterMap, push_arm64_aliases};
+mod target_xml;
 
 /// Bytes of a packet shown per trace line.
 const TRACE_BYTES: usize = 200;
@@ -198,7 +196,7 @@ impl StopReply {
 
 /// The architecture a target description declares the stub is debugging.
 fn description_arch(xml: &str) -> Result<Arch> {
-    let Some(architecture) = RegisterMap::target_architecture(xml) else {
+    let Some(architecture) = target_xml::target_architecture(xml) else {
         return Err(Error::UnsupportedArchitecture(
             "the stub's target description declares no architecture".into(),
         ));
@@ -406,7 +404,7 @@ impl GdbClient {
         let description = client.fetch_target_description()?;
         client.arch = description_arch(&description)?;
         client.register_map =
-            client.build_register_map(&RegisterMap::parse_target_xml(&description)?)?;
+            client.build_register_map(&target_xml::parse_target_xml(&description)?)?;
 
         Ok(client)
     }
@@ -1328,7 +1326,7 @@ impl GdbClient {
             };
 
             let element = &result[start..end];
-            let href = RegisterMap::extract_attr(element, "href");
+            let href = target_xml::extract_attr(element, "href");
 
             if let Some(filename) = href {
                 let included_xml = self.fetch_feature_file(filename)?;
@@ -1586,8 +1584,7 @@ mod tests {
         GdbClient, HW_BREAKPOINT_SLOTS, HaltCache, PacketReadState, RegisterMap, StopReply,
         StubFeatures, append_packet, description_arch, holds_stop_reply,
     };
-    use crate::dbg_backend::DebugBackend;
-    use crate::gdb::registers::RegisterInfo;
+    use crate::dbg_backend::{DebugBackend, RegisterInfo};
     use crate::phys::HaltClock;
     use crate::types::Arch;
 

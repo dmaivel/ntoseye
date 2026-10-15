@@ -15,8 +15,8 @@ use std::path::Path;
 use memmap2::Mmap;
 
 use crate::bytes::get_u32;
+use crate::dbg_backend::RegisterMap;
 use crate::error::{Error, Result};
-use crate::gdb::RegisterMap;
 use crate::guest::ModuleInfo;
 use crate::kd::{context, context_arm64};
 use crate::pe::headers::CodeView;

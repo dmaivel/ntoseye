@@ -6,10 +6,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::debugger_data::DebuggerDataCandidate;
 use crate::dmp::TriageCrashInfo;
 use crate::error::{Error, Result};
-use crate::gdb::RegisterMap;
 use crate::phys::PhysMem;
 use crate::target::Target;
 use crate::types::{KernelLocation, VirtAddr};
+
+mod registers;
+
+pub use registers::{RegisterInfo, RegisterMap, push_arm64_aliases, repeats_another_register};
 
 /// One captured line of guest debug output (DbgPrint / kernel printf), with the
 /// host wall-clock time it completed and a monotonic sequence number used as the

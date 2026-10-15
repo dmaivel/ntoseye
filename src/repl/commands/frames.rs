@@ -3,10 +3,9 @@ use std::collections::HashMap;
 use owo_colors::OwoColorize;
 
 use crate::bugchecks::{bugcheck_trap_frame_address, looks_like_kernel_pointer};
-use crate::dbg_backend::processor_index_from_backend_thread_id;
+use crate::dbg_backend::{RegisterMap, processor_index_from_backend_thread_id};
 use crate::diagnostics;
 use crate::error::{Error, Result};
-use crate::gdb::RegisterMap;
 use crate::session::ExceptionRecord;
 use crate::target::{SavedThreadRegisters, SelectedFrame, lookup_register};
 use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current, trap_frame_rip_symbol};

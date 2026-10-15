@@ -12,12 +12,11 @@ use crate::bytes::{
 };
 use crate::cpu_state;
 use crate::dbg_backend::{
-    BackendCapability, DebugBackend, DebugCapability, StopEvent,
+    BackendCapability, DebugBackend, DebugCapability, RegisterMap, StopEvent,
     processor_index_from_backend_thread_id,
 };
 use crate::debugger_data::{DebuggerDataCandidate, MetadataSource};
 use crate::error::{Error, Result};
-use crate::gdb::RegisterMap;
 use crate::kd::context;
 use crate::kd::context_arm64;
 use crate::layout::{ParsedType, TypeInfo};

@@ -7,11 +7,10 @@ use std::time::Duration;
 use crate::backend::MemoryOps;
 use crate::dbg_backend::{
     BackendCapability, ContinueDisposition, DebugBackend, DebugOutputPage, HwBreakpointAccess,
-    PciConfigAddress, ProcessorRead, StopEvent, TebPath, TrapState,
+    PciConfigAddress, ProcessorRead, RegisterMap, StopEvent, TebPath, TrapState,
 };
 use crate::debugger_data::DebuggerDataCandidate;
 use crate::error::Result;
-use crate::gdb::RegisterMap;
 use crate::memory::TranslationCache;
 use crate::phys::PhysMem;
 use crate::types::{Dtb, KernelLocation, PhysAddr, VirtAddr};

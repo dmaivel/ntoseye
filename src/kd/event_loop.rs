@@ -9,9 +9,8 @@ use std::time::{Duration, Instant};
 
 use super::transport::KdTransport;
 use crate::bytes::{read_u16, read_u32, read_u64};
-use crate::dbg_backend::DebugLog;
+use crate::dbg_backend::{DebugLog, RegisterMap};
 use crate::error::{Error, Result};
-use crate::gdb::RegisterMap;
 use crate::kd::api;
 use crate::kd::framing::{
     KdFraming, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO, PACKET_TYPE_KD_STATE_CHANGE64,

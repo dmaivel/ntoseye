@@ -1,6 +1,6 @@
 //! AMD64 `CONTEXT` offsets. Layout reference: ReactOS `sdk/include/xdk/amd64/ke.h`
 
-use crate::gdb::{RegisterInfo, RegisterMap};
+use crate::dbg_backend::{RegisterInfo, RegisterMap};
 
 pub const CONTEXT_SIZE: usize = 1232;
 

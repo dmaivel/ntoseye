@@ -17,13 +17,12 @@ use crate::TargetSpec;
 use crate::breakpoints::{Breakpoint, BreakpointManager, StepFrame};
 use crate::dbg_backend::{
     BackendCapability, BugcheckInfo, DebugBackend, DebugCapability, DebugLog, DebugOutputPage,
-    LastEvent, ModuleEvent, StopEvent,
+    LastEvent, ModuleEvent, RegisterMap, StopEvent,
 };
 use crate::disasm::ControlFlow;
 use crate::error::{Error, Result};
 use crate::exception_policy::ExceptionPolicyTable;
 use crate::expr::NumberRadix;
-use crate::gdb::RegisterMap;
 use crate::guest::{ModuleInfo, ModuleSymbolLoadReport, ProcessInfo};
 use crate::notice::Notice;
 use crate::session::lifecycle::InstanceGuard;

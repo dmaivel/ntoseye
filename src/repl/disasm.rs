@@ -3,9 +3,8 @@ use std::collections::HashMap;
 use owo_colors::OwoColorize;
 
 use crate::backend::MemoryOps;
+use crate::dbg_backend::{RegisterMap, repeats_another_register};
 use crate::error::Error;
-use crate::gdb::RegisterMap;
-use crate::gdb::registers::repeats_another_register;
 #[cfg(feature = "cli")]
 use crate::repl::native;
 use crate::session::Session;

@@ -6,11 +6,10 @@ use crate::breakpoints::{
     Breakpoint, BreakpointHitDisposition, BreakpointHitResult, BreakpointManager, ThreadScope,
 };
 use crate::dbg_backend::{
-    ContinueDisposition, DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, StopEvent,
-    processor_index_from_backend_thread_id,
+    ContinueDisposition, DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, RegisterMap,
+    StopEvent, processor_index_from_backend_thread_id,
 };
 use crate::error::{Error, Result};
-use crate::gdb::RegisterMap;
 use crate::guest::hypercalls::HypercallCaller;
 use crate::kd::hwbp;
 use crate::notice::Notice;

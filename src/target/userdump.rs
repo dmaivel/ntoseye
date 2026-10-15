@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use super::Target;
 use crate::{
     backend::MemoryOps,
+    dbg_backend::RegisterMap,
     error::{Error, Result},
-    gdb::RegisterMap,
     guest::ModuleInfo,
     ntstatus::ntstatus_name,
     types::{Arch, VirtAddr},

@@ -17,7 +17,7 @@
 //! state and the stopped processor's system registers when available,
 //! mirroring how the AMD64 map appends CR0-CR8 from KSPECIAL_REGISTERS.
 
-use crate::gdb::{RegisterInfo, RegisterMap, push_arm64_aliases};
+use crate::dbg_backend::{RegisterInfo, RegisterMap, push_arm64_aliases};
 
 pub const CONTEXT_SIZE: usize = 0x390; // 912
 

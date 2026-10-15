@@ -16,12 +16,12 @@ use crate::breakpoints::{
     BreakpointManager, StepFrame, ThreadScope, lift_target_site, plant_target_site,
 };
 use crate::dbg_backend::{
-    ContinueDisposition, DebugBackend, HwBreakpointAccess, STEP_UNDER_WINDOWS_HYPERVISOR,
-    StopEvent, clear_trap_flag, processor_index_from_backend_thread_id,
+    ContinueDisposition, DebugBackend, HwBreakpointAccess, RegisterMap,
+    STEP_UNDER_WINDOWS_HYPERVISOR, StopEvent, clear_trap_flag,
+    processor_index_from_backend_thread_id,
 };
 use crate::disasm::{ControlFlow, classify};
 use crate::error::{Error, Result};
-use crate::gdb::RegisterMap;
 use crate::notice::Notice;
 use crate::session::breakpoints::event_word;
 use crate::session::context::windows_thread_on_backend_thread;

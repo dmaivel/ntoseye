@@ -8,11 +8,10 @@ use crate::bytes;
 use crate::dbg_backend::{
     BackendCapability, BugcheckInfo, ContinueDisposition, DebugBackend, DebugCapability, DebugLog,
     DebugOutputPage, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, PciConfigAddress, ProcessorRead,
-    StopEvent, TebPath, TrapState,
+    RegisterMap, StopEvent, TebPath, TrapState,
 };
 use crate::debugger_data::DebuggerDataCandidate;
 use crate::error::{Error, Result};
-use crate::gdb::RegisterMap;
 use crate::kd::framing::KdFraming;
 use crate::memory::TranslationCache;
 use crate::notice::Notice;

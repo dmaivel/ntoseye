@@ -1,8 +1,9 @@
 use std::time::Duration;
 
-use crate::dbg_backend::{BackendCapability, DebugBackend, DebugCapability, StopEvent};
+use crate::dbg_backend::{
+    BackendCapability, DebugBackend, DebugCapability, RegisterMap, StopEvent,
+};
 use crate::error::{Error, Result};
-use crate::gdb::RegisterMap;
 
 #[derive(Default)]
 pub struct MemoryBackend {

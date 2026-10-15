@@ -2,9 +2,8 @@
 
 use std::time::Duration;
 
-use crate::dbg_backend::{DebugBackend, StopEvent};
+use crate::dbg_backend::{DebugBackend, RegisterMap, StopEvent};
 use crate::error::{Error, Result};
-use crate::gdb::RegisterMap;
 
 /// Backend stub that records which DR slots `clear_hardware_breakpoint`
 /// releases; every other operation is out of scope for these tests.

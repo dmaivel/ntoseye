@@ -9,8 +9,8 @@
 
 use std::fmt::Write as _;
 
+use crate::dbg_backend::RegisterMap;
 use crate::error::{Error, Result};
-use crate::gdb::registers::RegisterMap;
 use crate::types::Arch;
 
 struct WireRegister {
