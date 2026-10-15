@@ -1,8 +1,8 @@
 //! Loaded-module [`View`] builders: module identity and symbol
 //! load status.
 
-use super::shape::{Diag, Hex, shapes, unions};
-use crate::types::VirtAddr;
+use ntoseye_macros::record;
+
 use crate::guest::{ModuleInfo, ModuleSymbolLoadReport};
 use crate::pe::headers::{
     CodeView, DebugRecord, FileHeader, ImportDescriptor, ImportName, OptionalHeader, SectionHeader,
@@ -14,305 +14,384 @@ use crate::symbols::ModuleSymbolStatus;
 use crate::target::image::{self, ImageHeadersDetail};
 use crate::target::{DiagnosticValue, Target};
 use crate::types::Dtb;
+use crate::types::VirtAddr;
 
-shapes! {
-    /// A loaded image (`lm`).
-    LoadedModule {
-        /// The image file name (`ntoskrnl.exe`).
-        name: String,
-        /// The short name that `module!symbol` uses (`nt`).
-        short_name: String,
-        /// The full image path, if the loader recorded one.
-        path: Option<String>,
-        base: VirtAddr,
-        /// The address after the last byte of the image.
-        end: Hex,
-        /// The mapped image size in bytes.
-        size: u32,
-        /// The PE timestamp. `None` if the loader record does not contain one.
-        time_date_stamp: Option<Hex<u32>>,
-        /// The PE checksum. `None` if the loader record does not contain one.
-        checksum: Option<Hex<u32>>,
-        /// The file version from the version resource. `None` if ntoseye did not read it.
-        file_version: Option<String>,
-        /// The product version from the version resource. `None` if ntoseye did not read it.
-        product_version: Option<String>,
-        /// The symbol status. `None` except in `inspect()` of a kernel module.
-        symbols: Option<ModuleSymbols>,
-    }
+/// A loaded image (`lm`).
+#[record]
+pub struct LoadedModule {
+    /// The image file name (`ntoskrnl.exe`).
+    pub name: String,
+    /// The short name that `module!symbol` uses (`nt`).
+    pub short_name: String,
+    /// The full image path, if the loader recorded one.
+    pub path: Option<String>,
+    pub base: VirtAddr,
+    /// The address after the last byte of the image.
+    #[record(hex)]
+    pub end: u64,
+    /// The mapped image size in bytes.
+    pub size: u32,
+    /// The PE timestamp. `None` if the loader record does not contain one.
+    #[record(hex)]
+    pub time_date_stamp: Option<u32>,
+    /// The PE checksum. `None` if the loader record does not contain one.
+    #[record(hex)]
+    pub checksum: Option<u32>,
+    /// The file version from the version resource. `None` if ntoseye did not read it.
+    pub file_version: Option<String>,
+    /// The product version from the version resource. `None` if ntoseye did not read it.
+    pub product_version: Option<String>,
+    /// The symbol status. `None` except in `inspect()` of a kernel module.
+    pub symbols: Option<ModuleSymbols>,
+}
 
-    /// The symbol status and PDB identity of a module (`lmv`).
-    ModuleSymbols {
-        /// `loaded`, `deferred`, `failed`, `unknown`, ...
-        status: String,
-        /// The source of the PDB, if known.
-        source: Option<String>,
-        /// The GUID of the loaded PDB as 32 hex digits. `None` if there is no PDB.
-        pdb_guid: Option<String>,
-        /// The age of the loaded PDB. `None` if there is no PDB.
-        pdb_age: Option<u32>,
-        /// The reason for the load failure, for status `failed`.
-        error: Option<String>,
-    }
+/// The symbol status and PDB identity of a module (`lmv`).
+#[record]
+pub struct ModuleSymbols {
+    /// `loaded`, `deferred`, `failed`, `unknown`, ...
+    pub status: String,
+    /// The source of the PDB, if known.
+    pub source: Option<String>,
+    /// The GUID of the loaded PDB as 32 hex digits. `None` if there is no PDB.
+    pub pdb_guid: Option<String>,
+    /// The age of the loaded PDB. `None` if there is no PDB.
+    pub pdb_age: Option<u32>,
+    /// The reason for the load failure, for status `failed`.
+    pub error: Option<String>,
+}
 
-    /// The result of a symbol reload. It counts the modules that loaded, had
-    /// no PDB, were skipped, or failed, and keeps the first diagnostics up to
-    /// a limit.
-    SymbolReloadReport {
-        total: usize,
-        loaded: usize,
-        /// The number of modules with symbols that unloaded after the previous refresh.
-        unloaded: usize,
-        no_pdb: usize,
-        skipped: usize,
-        failed: usize,
-        /// The number of all diagnostics, including those after the limit of `diagnostics`.
-        diagnostic_count: usize,
-        diagnostics: Vec<SymbolLoadDiagnostic>,
-    }
+/// The result of a symbol reload. It counts the modules that loaded, had
+/// no PDB, were skipped, or failed, and keeps the first diagnostics up to
+/// a limit.
+#[record]
+pub struct SymbolReloadReport {
+    pub total: usize,
+    pub loaded: usize,
+    /// The number of modules with symbols that unloaded after the previous refresh.
+    pub unloaded: usize,
+    pub no_pdb: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    /// The number of all diagnostics, including those after the limit of `diagnostics`.
+    pub diagnostic_count: usize,
+    pub diagnostics: Vec<SymbolLoadDiagnostic>,
+}
 
-    /// One problem that ntoseye found when it loaded the symbols of a module.
-    SymbolLoadDiagnostic {
-        module: String,
-        /// The load step that reported it.
-        phase: String,
-        /// The compiland of the problem, if the problem is specific to one compiland.
-        compiland: Option<String>,
-        message: String,
-    }
+/// One problem that ntoseye found when it loaded the symbols of a module.
+#[record]
+pub struct SymbolLoadDiagnostic {
+    pub module: String,
+    /// The load step that reported it.
+    pub phase: String,
+    /// The compiland of the problem, if the problem is specific to one compiland.
+    pub compiland: Option<String>,
+    pub message: String,
+}
 
-    /// `IMAGE_FILE_HEADER`.
-    ImageFileHeader {
-        machine: Hex<u16>,
-        /// `AMD64`, `I386`, ...
-        machine_name: &'static str,
-        number_of_sections: u16,
-        time_date_stamp: Hex<u32>,
-        pointer_to_symbol_table: Hex<u32>,
-        number_of_symbols: u32,
-        size_of_optional_header: Hex<u16>,
-        characteristics: Hex<u16>,
-        /// The `IMAGE_FILE_*` flags that are set in `characteristics`.
-        characteristics_names: Vec<String>,
-    }
+/// `IMAGE_FILE_HEADER`.
+#[record]
+pub struct ImageFileHeader {
+    #[record(hex)]
+    pub machine: u16,
+    /// `AMD64`, `I386`, ...
+    pub machine_name: &'static str,
+    pub number_of_sections: u16,
+    #[record(hex)]
+    pub time_date_stamp: u32,
+    #[record(hex)]
+    pub pointer_to_symbol_table: u32,
+    pub number_of_symbols: u32,
+    #[record(hex)]
+    pub size_of_optional_header: u16,
+    #[record(hex)]
+    pub characteristics: u16,
+    /// The `IMAGE_FILE_*` flags that are set in `characteristics`.
+    pub characteristics_names: Vec<String>,
+}
 
-    /// `IMAGE_OPTIONAL_HEADER` (PE32 or PE32+).
-    ImageOptionalHeader {
-        magic: Hex<u16>,
-        /// `major.minor`.
-        linker_version: String,
-        size_of_code: Hex<u32>,
-        size_of_initialized_data: Hex<u32>,
-        size_of_uninitialized_data: Hex<u32>,
-        entry_point_rva: Hex<u32>,
-        /// The mapped entry point. `None` if the image has no entry point.
-        entry_point: Option<Hex>,
-        base_of_code: Hex<u32>,
-        /// Only for PE32. `None` for PE32+.
-        base_of_data: Option<Hex<u32>>,
-        /// The preferred base address for which the image was linked.
-        image_base: Hex,
-        section_alignment: Hex<u32>,
-        file_alignment: Hex<u32>,
-        /// `major.minor`.
-        operating_system_version: String,
-        /// `major.minor`.
-        image_version: String,
-        /// `major.minor`.
-        subsystem_version: String,
-        win32_version_value: Hex<u32>,
-        size_of_image: Hex<u32>,
-        size_of_headers: Hex<u32>,
-        checksum: Hex<u32>,
-        subsystem: u16,
-        /// `Native`, `Windows GUI`, ...
-        subsystem_name: &'static str,
-        dll_characteristics: Hex<u16>,
-        /// The `IMAGE_DLLCHARACTERISTICS_*` flags that are set.
-        dll_characteristics_names: Vec<String>,
-        size_of_stack_reserve: Hex,
-        size_of_stack_commit: Hex,
-        size_of_heap_reserve: Hex,
-        size_of_heap_commit: Hex,
-        loader_flags: Hex<u32>,
-        number_of_rva_and_sizes: u32,
-    }
+/// `IMAGE_OPTIONAL_HEADER` (PE32 or PE32+).
+#[record]
+pub struct ImageOptionalHeader {
+    #[record(hex)]
+    pub magic: u16,
+    /// `major.minor`.
+    pub linker_version: String,
+    #[record(hex)]
+    pub size_of_code: u32,
+    #[record(hex)]
+    pub size_of_initialized_data: u32,
+    #[record(hex)]
+    pub size_of_uninitialized_data: u32,
+    #[record(hex)]
+    pub entry_point_rva: u32,
+    /// The mapped entry point. `None` if the image has no entry point.
+    #[record(hex)]
+    pub entry_point: Option<u64>,
+    #[record(hex)]
+    pub base_of_code: u32,
+    /// Only for PE32. `None` for PE32+.
+    #[record(hex)]
+    pub base_of_data: Option<u32>,
+    /// The preferred base address for which the image was linked.
+    #[record(hex)]
+    pub image_base: u64,
+    #[record(hex)]
+    pub section_alignment: u32,
+    #[record(hex)]
+    pub file_alignment: u32,
+    /// `major.minor`.
+    pub operating_system_version: String,
+    /// `major.minor`.
+    pub image_version: String,
+    /// `major.minor`.
+    pub subsystem_version: String,
+    #[record(hex)]
+    pub win32_version_value: u32,
+    #[record(hex)]
+    pub size_of_image: u32,
+    #[record(hex)]
+    pub size_of_headers: u32,
+    #[record(hex)]
+    pub checksum: u32,
+    pub subsystem: u16,
+    /// `Native`, `Windows GUI`, ...
+    pub subsystem_name: &'static str,
+    #[record(hex)]
+    pub dll_characteristics: u16,
+    /// The `IMAGE_DLLCHARACTERISTICS_*` flags that are set.
+    pub dll_characteristics_names: Vec<String>,
+    #[record(hex)]
+    pub size_of_stack_reserve: u64,
+    #[record(hex)]
+    pub size_of_stack_commit: u64,
+    #[record(hex)]
+    pub size_of_heap_reserve: u64,
+    #[record(hex)]
+    pub size_of_heap_commit: u64,
+    #[record(hex)]
+    pub loader_flags: u32,
+    pub number_of_rva_and_sizes: u32,
+}
 
-    /// One `IMAGE_DATA_DIRECTORY` entry.
-    ImageDataDirectory {
-        /// The slot of the entry in the directory table.
-        index: usize,
-        /// `Export`, `Import`, `Debug`, ...
-        name: &'static str,
-        rva: Hex<u32>,
-        size: Hex<u32>,
-    }
+/// One `IMAGE_DATA_DIRECTORY` entry.
+#[record]
+pub struct ImageDataDirectory {
+    /// The slot of the entry in the directory table.
+    pub index: usize,
+    /// `Export`, `Import`, `Debug`, ...
+    pub name: &'static str,
+    #[record(hex)]
+    pub rva: u32,
+    #[record(hex)]
+    pub size: u32,
+}
 
-    /// One `IMAGE_SECTION_HEADER`.
-    ImageSectionHeader {
-        name: String,
-        virtual_size: Hex<u32>,
-        /// The RVA of the section.
-        virtual_address: Hex<u32>,
-        size_of_raw_data: Hex<u32>,
-        pointer_to_raw_data: Hex<u32>,
-        pointer_to_relocations: Hex<u32>,
-        pointer_to_linenumbers: Hex<u32>,
-        number_of_relocations: u16,
-        number_of_linenumbers: u16,
-        characteristics: Hex<u32>,
-        /// The `IMAGE_SCN_*` flags that are set.
-        characteristics_names: Vec<String>,
-    }
+/// One `IMAGE_SECTION_HEADER`.
+#[record]
+pub struct ImageSectionHeader {
+    pub name: String,
+    #[record(hex)]
+    pub virtual_size: u32,
+    /// The RVA of the section.
+    #[record(hex)]
+    pub virtual_address: u32,
+    #[record(hex)]
+    pub size_of_raw_data: u32,
+    #[record(hex)]
+    pub pointer_to_raw_data: u32,
+    #[record(hex)]
+    pub pointer_to_relocations: u32,
+    #[record(hex)]
+    pub pointer_to_linenumbers: u32,
+    pub number_of_relocations: u16,
+    pub number_of_linenumbers: u16,
+    #[record(hex)]
+    pub characteristics: u32,
+    /// The `IMAGE_SCN_*` flags that are set.
+    pub characteristics_names: Vec<String>,
+}
 
-    /// A CodeView debug record, which identifies the PDB that the image was built with.
-    CodeViewRecord {
-        /// `RSDS` (PDB 7.0) or `NB10` (PDB 2.0).
-        format: &'static str,
-        /// The PDB GUID, for `RSDS`.
-        guid: Option<String>,
-        /// The PDB timestamp signature, for `NB10`.
-        signature: Option<Hex<u32>>,
-        age: u32,
-        /// The PDB path that the linker recorded.
-        pdb: String,
-    }
+/// A CodeView debug record, which identifies the PDB that the image was built with.
+#[record]
+pub struct CodeViewRecord {
+    /// `RSDS` (PDB 7.0) or `NB10` (PDB 2.0).
+    pub format: &'static str,
+    /// The PDB GUID, for `RSDS`.
+    pub guid: Option<String>,
+    /// The PDB timestamp signature, for `NB10`.
+    #[record(hex)]
+    pub signature: Option<u32>,
+    pub age: u32,
+    /// The PDB path that the linker recorded.
+    pub pdb: String,
+}
 
-    /// One `IMAGE_DEBUG_DIRECTORY` entry.
-    ImageDebugEntry {
-        /// The `IMAGE_DEBUG_TYPE_*` value.
-        r#type: u32,
-        /// `CODEVIEW`, `POGO`, ...
-        type_name: &'static str,
-        characteristics: Hex<u32>,
-        time_date_stamp: Hex<u32>,
-        /// `major.minor`.
-        version: String,
-        size_of_data: Hex<u32>,
-        address_of_raw_data: Hex<u32>,
-        pointer_to_raw_data: Hex<u32>,
-        /// The decoded CodeView record. `None` for other entry types.
-        codeview: Option<Diag<CodeViewRecord>>,
-    }
+/// One `IMAGE_DEBUG_DIRECTORY` entry.
+#[record]
+pub struct ImageDebugEntry {
+    /// The `IMAGE_DEBUG_TYPE_*` value.
+    pub r#type: u32,
+    /// `CODEVIEW`, `POGO`, ...
+    pub type_name: &'static str,
+    #[record(hex)]
+    pub characteristics: u32,
+    #[record(hex)]
+    pub time_date_stamp: u32,
+    /// `major.minor`.
+    pub version: String,
+    #[record(hex)]
+    pub size_of_data: u32,
+    #[record(hex)]
+    pub address_of_raw_data: u32,
+    #[record(hex)]
+    pub pointer_to_raw_data: u32,
+    /// The decoded CodeView record. `None` for other entry types.
+    pub codeview: Option<DiagnosticValue<CodeViewRecord>>,
+}
 
-    /// `IMAGE_EXPORT_DIRECTORY`.
-    ImageExportDirectory {
-        /// The DLL name that the directory records.
-        name: String,
-        characteristics: Hex<u32>,
-        time_date_stamp: Hex<u32>,
-        /// `major.minor`.
-        version: String,
-        ordinal_base: u32,
-        number_of_functions: u32,
-        number_of_names: u32,
-        address_of_functions: Hex<u32>,
-        address_of_names: Hex<u32>,
-        address_of_name_ordinals: Hex<u32>,
-    }
+/// `IMAGE_EXPORT_DIRECTORY`.
+#[record]
+pub struct ImageExportDirectory {
+    /// The DLL name that the directory records.
+    pub name: String,
+    #[record(hex)]
+    pub characteristics: u32,
+    #[record(hex)]
+    pub time_date_stamp: u32,
+    /// `major.minor`.
+    pub version: String,
+    pub ordinal_base: u32,
+    pub number_of_functions: u32,
+    pub number_of_names: u32,
+    #[record(hex)]
+    pub address_of_functions: u32,
+    #[record(hex)]
+    pub address_of_names: u32,
+    #[record(hex)]
+    pub address_of_name_ordinals: u32,
+}
 
-    /// The export directory and the exports of an image (`!dh -e`).
-    ImageExports {
-        /// `None` if the image has no exports.
-        directory: Option<ImageExportDirectory>,
-        exports: Vec<Export>,
-    }
+/// The export directory and the exports of an image (`!dh -e`).
+#[record]
+pub struct ImageExports {
+    /// `None` if the image has no exports.
+    pub directory: Option<ImageExportDirectory>,
+    pub exports: Vec<Export>,
+}
 
-    /// One PE export (`Module.exports`, `!dh -e`). An export has a name or
-    /// only an ordinal, and a forwarder has no address.
-    Export {
-        ordinal: u32,
-        /// `None` for an ordinal-only export.
-        name: Option<String>,
-        /// `None` for a forwarder.
-        rva: Option<Hex>,
-        /// The mapped address. `None` for a forwarder.
-        address: Option<VirtAddr>,
-        /// The target of a forwarder (`OTHER.Function`).
-        forwarder: Option<String>,
-    }
+/// One PE export (`Module.exports`, `!dh -e`). An export has a name or
+/// only an ordinal, and a forwarder has no address.
+#[record]
+pub struct Export {
+    pub ordinal: u32,
+    /// `None` for an ordinal-only export.
+    pub name: Option<String>,
+    /// `None` for a forwarder.
+    #[record(hex)]
+    pub rva: Option<u64>,
+    /// The mapped address. `None` for a forwarder.
+    pub address: Option<VirtAddr>,
+    /// The target of a forwarder (`OTHER.Function`).
+    pub forwarder: Option<String>,
+}
 
-    /// One `IMAGE_IMPORT_DESCRIPTOR`, which identifies a DLL that the image imports from.
-    ImageImportDescriptor {
-        /// The DLL name. `None` if ntoseye could not read it.
-        name: Option<String>,
-        /// The reason that ntoseye could not read the DLL name.
-        name_error: Option<String>,
-        import_address_table: Hex<u32>,
-        import_name_table: Hex<u32>,
-        time_date_stamp: Hex<u32>,
-        forwarder_chain: Hex<u32>,
-        imports: Vec<ImageImport>,
-        /// The reason that the thunk walk stopped early, if it did.
-        incomplete: Option<String>,
-    }
+/// One `IMAGE_IMPORT_DESCRIPTOR`, which identifies a DLL that the image imports from.
+#[record]
+pub struct ImageImportDescriptor {
+    /// The DLL name. `None` if ntoseye could not read it.
+    pub name: Option<String>,
+    /// The reason that ntoseye could not read the DLL name.
+    pub name_error: Option<String>,
+    #[record(hex)]
+    pub import_address_table: u32,
+    #[record(hex)]
+    pub import_name_table: u32,
+    #[record(hex)]
+    pub time_date_stamp: u32,
+    #[record(hex)]
+    pub forwarder_chain: u32,
+    pub imports: Vec<ImageImport>,
+    /// The reason that the thunk walk stopped early, if it did.
+    pub incomplete: Option<String>,
+}
 
-    /// One imported function.
-    ImageImport {
-        /// The imported name. `None` for an import by ordinal, or for an import
-        /// that ntoseye could not read.
-        name: Option<String>,
-        /// The export-name-table hint, for a named import.
-        hint: Option<u16>,
-        /// The ordinal, for an import by ordinal.
-        ordinal: Option<u16>,
-        /// The bound address in the import address table.
-        bound: Option<Hex>,
-        /// The reason that ntoseye could not read the import name.
-        error: Option<String>,
-    }
+/// One imported function.
+#[record]
+pub struct ImageImport {
+    /// The imported name. `None` for an import by ordinal, or for an import
+    /// that ntoseye could not read.
+    pub name: Option<String>,
+    /// The export-name-table hint, for a named import.
+    pub hint: Option<u16>,
+    /// The ordinal, for an import by ordinal.
+    pub ordinal: Option<u16>,
+    /// The bound address in the import address table.
+    #[record(hex)]
+    pub bound: Option<u64>,
+    /// The reason that ntoseye could not read the import name.
+    pub error: Option<String>,
+}
 
-    /// The headers of a mapped image (`!dh`).
-    ImageHeaders {
-        base: Hex,
-        /// The loaded module at `base`, if there is one.
-        module: Option<String>,
-        /// `PE32` or `PE32+`.
-        format: &'static str,
-        file_header: ImageFileHeader,
-        optional_header: ImageOptionalHeader,
-        data_directories: Vec<ImageDataDirectory>,
-        sections: Vec<ImageSectionHeader>,
-        /// The debug directory. `None` if you did not ask for it.
-        debug_directory: Option<Diag<Vec<ImageDebugEntry>>>,
-        /// The export directory. `None` if you did not ask for it.
-        exports: Option<Diag<ImageExports>>,
-        /// The import descriptors. `None` if you did not ask for them.
-        imports: Option<Diag<Vec<ImageImportDescriptor>>>,
-    }
+/// The headers of a mapped image (`!dh`).
+#[record]
+pub struct ImageHeaders {
+    #[record(hex)]
+    pub base: u64,
+    /// The loaded module at `base`, if there is one.
+    pub module: Option<String>,
+    /// `PE32` or `PE32+`.
+    pub format: &'static str,
+    pub file_header: ImageFileHeader,
+    pub optional_header: ImageOptionalHeader,
+    pub data_directories: Vec<ImageDataDirectory>,
+    pub sections: Vec<ImageSectionHeader>,
+    /// The debug directory. `None` if you did not ask for it.
+    pub debug_directory: Option<DiagnosticValue<Vec<ImageDebugEntry>>>,
+    /// The export directory. `None` if you did not ask for it.
+    pub exports: Option<DiagnosticValue<ImageExports>>,
+    /// The import descriptors. `None` if you did not ask for them.
+    pub imports: Option<DiagnosticValue<Vec<ImageImportDescriptor>>>,
+}
 
-    /// The image identity of a module (`!lmi`), with the file-header identity,
-    /// the symbol state, and the debug directory, which includes the CodeView
-    /// PDB name, GUID, and age.
-    ModuleImageInfo {
-        module: LoadedModule,
-        machine: Hex<u16>,
-        /// `AMD64`, `I386`, ...
-        machine_name: &'static str,
-        time_date_stamp: Hex<u32>,
-        size_of_image: Hex<u32>,
-        checksum: Hex<u32>,
-        characteristics: Hex<u16>,
-        /// The `IMAGE_FILE_*` flags that are set in `characteristics`.
-        characteristics_names: Vec<String>,
-        debug_directory: Diag<Vec<ImageDebugEntry>>,
-        symbols: ModuleSymbols,
-        /// The local PDB file, if a PDB is loaded.
-        symbol_file: Option<String>,
-    }
+/// The image identity of a module (`!lmi`), with the file-header identity,
+/// the symbol state, and the debug directory, which includes the CodeView
+/// PDB name, GUID, and age.
+#[record]
+pub struct ModuleImageInfo {
+    pub module: LoadedModule,
+    #[record(hex)]
+    pub machine: u16,
+    /// `AMD64`, `I386`, ...
+    pub machine_name: &'static str,
+    #[record(hex)]
+    pub time_date_stamp: u32,
+    #[record(hex)]
+    pub size_of_image: u32,
+    #[record(hex)]
+    pub checksum: u32,
+    #[record(hex)]
+    pub characteristics: u16,
+    /// The `IMAGE_FILE_*` flags that are set in `characteristics`.
+    pub characteristics_names: Vec<String>,
+    pub debug_directory: DiagnosticValue<Vec<ImageDebugEntry>>,
+    pub symbols: ModuleSymbols,
+    /// The local PDB file, if a PDB is loaded.
+    pub symbol_file: Option<String>,
+}
 
-    /// One PE section with its name, RVA, mapped size, and `rwx` permissions.
-    Section {
-        /// The section name (`.text`).
-        name: String,
-        /// The offset of the section from the image base.
-        rva: Hex<u32>,
-        /// The mapped size of the section.
-        size: Hex<u32>,
-        /// The mapped permissions as `rwx`, with `-` for a missing permission.
-        permissions: String,
-    }
-
+/// One PE section with its name, RVA, mapped size, and `rwx` permissions.
+#[record]
+pub struct Section {
+    /// The section name (`.text`).
+    pub name: String,
+    /// The offset of the section from the image base.
+    #[record(hex)]
+    pub rva: u32,
+    /// The mapped size of the section.
+    #[record(hex)]
+    pub size: u32,
+    /// The mapped permissions as `rwx`, with `-` for a missing permission.
+    pub permissions: String,
 }
 
 /// A loaded image's identity, without its symbol status.
@@ -380,13 +459,12 @@ pub fn module_symbols(target: &Target, info: &ModuleInfo, dtb: Dtb) -> ModuleSym
     }
 }
 
-unions! {
-    /// A module as `Module.inspect()` decodes it: a kernel module from the
-    /// loaded-module list, or a process module from its loader list.
-    ModuleDetail {
-        Kernel(LoadedModule),
-        Process(super::usermode::LoaderModule),
-    }
+/// A module as `Module.inspect()` decodes it: a kernel module from the
+/// loaded-module list, or a process module from its loader list.
+#[record]
+pub enum ModuleDetail {
+    Kernel(LoadedModule),
+    Process(super::usermode::LoaderModule),
 }
 
 /// A module's identity with its symbol status (a kernel module's
@@ -505,10 +583,13 @@ fn debug_entry(record: &DebugRecord) -> ImageDebugEntry {
         address_of_raw_data: entry.address_of_raw_data,
         pointer_to_raw_data: entry.pointer_to_raw_data,
         codeview: record.codeview.as_ref().map(|record| {
-            record.as_ref().map_or_else(
+            record
+                .as_ref()
+                .map_or_else(
                     |error| DiagnosticValue::unavailable(error.clone()),
                     DiagnosticValue::Available,
-                ).map(|record| codeview(record))
+                )
+                .map(|record| codeview(record))
         }),
     }
 }
@@ -539,9 +620,7 @@ pub fn export(export: &pe::ModuleExportInfo, base: u64) -> Export {
     Export {
         ordinal: export.ordinal,
         name: export.name.clone(),
-        rva: export
-            .address
-            .map(|address| address.0.wrapping_sub(base)),
+        rva: export.address.map(|address| address.0.wrapping_sub(base)),
         address: export.address,
         forwarder: export.forwarder.clone(),
     }
@@ -619,13 +698,11 @@ pub fn image_headers(detail: &ImageHeadersDetail) -> ImageHeaders {
         sections: headers.sections.iter().map(section_header).collect(),
         debug_directory: detail.debug.as_ref().map(debug_directory),
         exports: detail
-                .exports
-                .as_ref()
-                .map(|exports| exports.map(|exports| image_exports(exports, base))),
+            .exports
+            .as_ref()
+            .map(|exports| exports.map(|exports| image_exports(exports, base))),
         imports: detail.imports.as_ref().map(|imports| {
-            imports.map(|descriptors| {
-                descriptors.iter().map(import_descriptor).collect()
-            })
+            imports.map(|descriptors| descriptors.iter().map(import_descriptor).collect())
         }),
     }
 }

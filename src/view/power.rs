@@ -1,7 +1,8 @@
 //! Power management [`View`] builders: the power action and power IRPs
 //! (`!poaction`) and a device's power state (`!podev`).
 
-use super::shape::{Diag, Hex, shapes};
+use ntoseye_macros::record;
+
 use crate::target::DiagnosticValue;
 use crate::target::power::{
     self, DO_POWER_INRUSH, DO_POWER_PAGABLE, DevicePower as DevicePowerDetail, PowerActionDetail,
@@ -9,213 +10,233 @@ use crate::target::power::{
 };
 use crate::types::VirtAddr;
 
-shapes! {
-    /// A driver, found from one of its device objects or its driver object.
-    PowerDriver {
-        driver_object: VirtAddr,
-        /// The driver object's name, as `!drvobj` shows it; empty when it
-        /// has none.
-        name: String,
-        driver_start: VirtAddr,
-        /// The loaded module that holds `driver_start`, such as
-        /// `viostor.sys`.
-        module: Option<String>,
-    }
+/// A driver, found from one of its device objects or its driver object.
+#[record]
+pub struct PowerDriver {
+    pub driver_object: VirtAddr,
+    /// The driver object's name, as `!drvobj` shows it; empty when it
+    /// has none.
+    pub name: String,
+    pub driver_start: VirtAddr,
+    /// The loaded module that holds `driver_start`, such as
+    /// `viostor.sys`.
+    pub module: Option<String>,
+}
 
-    /// A power state.
-    PowerStateValue {
-        /// `system` or `device`.
-        kind: &'static str,
-        value: u64,
-        /// The state's name, such as `Working`, `Hibernate`, or `D3`, or the
-        /// value in hex when the PDB has no name for it.
-        name: String,
-    }
+/// A power state.
+#[record]
+pub struct PowerStateValue {
+    /// `system` or `device`.
+    pub kind: &'static str,
+    pub value: u64,
+    /// The state's name, such as `Working`, `Hibernate`, or `D3`, or the
+    /// value in hex when the PDB has no name for it.
+    pub name: String,
+}
 
-    /// Where an IRP is pending: the driver of its current stack location.
-    PowerIrpHolder {
-        /// `CurrentLocation`, counted from 1 as `!irp` does.
-        location: u8,
-        stack_count: u8,
-        stack_location: VirtAddr,
-        major_function: Hex<u8>,
-        minor_function: Hex<u8>,
-        /// The state that the location's power request asks for.
-        state: Option<PowerStateValue>,
-        /// Whether the location's driver returned `STATUS_PENDING`.
-        pending_returned: bool,
-        device: VirtAddr,
-        driver: Diag<PowerDriver>,
-    }
+/// Where an IRP is pending: the driver of its current stack location.
+#[record]
+pub struct PowerIrpHolder {
+    /// `CurrentLocation`, counted from 1 as `!irp` does.
+    pub location: u8,
+    pub stack_count: u8,
+    pub stack_location: VirtAddr,
+    #[record(hex)]
+    pub major_function: u8,
+    #[record(hex)]
+    pub minor_function: u8,
+    /// The state that the location's power request asks for.
+    pub state: Option<PowerStateValue>,
+    /// Whether the location's driver returned `STATUS_PENDING`.
+    pub pending_returned: bool,
+    pub device: VirtAddr,
+    pub driver: DiagnosticValue<PowerDriver>,
+}
 
-    /// A power IRP the power manager allocated (`_POP_IRP_DATA`).
-    PowerIrp {
-        /// The `_POP_IRP_DATA`.
-        data: VirtAddr,
-        irp: VirtAddr,
-        pdo: VirtAddr,
-        /// The device that the IRP was sent to, the top of the PDO's stack.
-        target_device: VirtAddr,
-        /// The device the power manager passed it to last, or 0.
-        current_device: VirtAddr,
-        minor_function: Hex<u8>,
-        /// `IRP_MN_SET_POWER`, `IRP_MN_QUERY_POWER`, `IRP_MN_WAIT_WAKE`, or
-        /// `IRP_MN_POWER_SEQUENCE`.
-        minor_name: Option<&'static str>,
-        /// The requested state; for a wait/wake IRP, the deepest system
-        /// state it can wake the system from.
-        state: PowerStateValue,
-        /// Whether the IRP is part of a system power transition.
-        system_transition: bool,
-        /// The watchdog state: `Disabled`, `Enabled`, or `Completed`.
-        watchdog: String,
-        /// How long ago the watchdog was armed, in milliseconds. `None` when
-        /// the watchdog never ran or the current time is unreadable.
-        pending_ms: Option<u64>,
-        /// Where the IRP is pending now.
-        holder: Diag<PowerIrpHolder>,
-    }
+/// A power IRP the power manager allocated (`_POP_IRP_DATA`).
+#[record]
+pub struct PowerIrp {
+    /// The `_POP_IRP_DATA`.
+    pub data: VirtAddr,
+    pub irp: VirtAddr,
+    pub pdo: VirtAddr,
+    /// The device that the IRP was sent to, the top of the PDO's stack.
+    pub target_device: VirtAddr,
+    /// The device the power manager passed it to last, or 0.
+    pub current_device: VirtAddr,
+    #[record(hex)]
+    pub minor_function: u8,
+    /// `IRP_MN_SET_POWER`, `IRP_MN_QUERY_POWER`, `IRP_MN_WAIT_WAKE`, or
+    /// `IRP_MN_POWER_SEQUENCE`.
+    pub minor_name: Option<&'static str>,
+    /// The requested state; for a wait/wake IRP, the deepest system
+    /// state it can wake the system from.
+    pub state: PowerStateValue,
+    /// Whether the IRP is part of a system power transition.
+    pub system_transition: bool,
+    /// The watchdog state: `Disabled`, `Enabled`, or `Completed`.
+    pub watchdog: String,
+    /// How long ago the watchdog was armed, in milliseconds. `None` when
+    /// the watchdog never ran or the current time is unreadable.
+    pub pending_ms: Option<u64>,
+    /// Where the IRP is pending now.
+    pub holder: DiagnosticValue<PowerIrpHolder>,
+}
 
-    /// The power IRPs on a list of `_POP_IRP_DATA`.
-    PowerIrpList {
-        head: VirtAddr,
-        /// The symbol of the head, such as `nt!PopIrpList`.
-        head_name: Option<&'static str>,
-        /// Each entry, or why it does not decode.
-        irps: Vec<Diag<PowerIrp>>,
-        /// Why the walk stopped before the head.
-        stopped: Option<String>,
-    }
+/// The power IRPs on a list of `_POP_IRP_DATA`.
+#[record]
+pub struct PowerIrpList {
+    pub head: VirtAddr,
+    /// The symbol of the head, such as `nt!PopIrpList`.
+    pub head_name: Option<&'static str>,
+    /// Each entry, or why it does not decode.
+    pub irps: Vec<DiagnosticValue<PowerIrp>>,
+    /// Why the walk stopped before the head.
+    pub stopped: Option<String>,
+}
 
-    /// A thread that passes power IRPs to drivers.
-    PowerWorker {
-        thread: VirtAddr,
-        /// The IRP that it is passing to a driver, or 0 while it waits.
-        irp: VirtAddr,
-        device: VirtAddr,
-        /// The driver of `device`.
-        driver: Option<String>,
-        /// Whether the power manager keeps the thread when there is no work.
-        is_static: bool,
-    }
+/// A thread that passes power IRPs to drivers.
+#[record]
+pub struct PowerWorker {
+    pub thread: VirtAddr,
+    /// The IRP that it is passing to a driver, or 0 while it waits.
+    pub irp: VirtAddr,
+    pub device: VirtAddr,
+    /// The driver of `device`.
+    pub driver: Option<String>,
+    /// Whether the power manager keeps the thread when there is no work.
+    pub is_static: bool,
+}
 
-    /// The power IRP worker threads on a list of `_POP_IRP_WORKER_ENTRY`.
-    PowerWorkerList {
-        head: VirtAddr,
-        /// The symbol of the head, such as `nt!PopIrpThreadList`.
-        head_name: Option<&'static str>,
-        workers: Vec<Diag<PowerWorker>>,
-        stopped: Option<String>,
-    }
+/// The power IRP worker threads on a list of `_POP_IRP_WORKER_ENTRY`.
+#[record]
+pub struct PowerWorkerList {
+    pub head: VirtAddr,
+    /// The symbol of the head, such as `nt!PopIrpThreadList`.
+    pub head_name: Option<&'static str>,
+    pub workers: Vec<DiagnosticValue<PowerWorker>>,
+    pub stopped: Option<String>,
+}
 
-    /// The device notification pass of a system power action
-    /// (`PopAction.DevState`).
-    DeviceNotifyState {
-        address: VirtAddr,
-        irp_minor: Hex<u8>,
-        system_state: String,
-        thread: VirtAddr,
-        status: Hex<u32>,
-        failed_device: VirtAddr,
-        waking: bool,
-        cancelled: bool,
-    }
+/// The device notification pass of a system power action
+/// (`PopAction.DevState`).
+#[record]
+pub struct DeviceNotifyState {
+    pub address: VirtAddr,
+    #[record(hex)]
+    pub irp_minor: u8,
+    pub system_state: String,
+    pub thread: VirtAddr,
+    #[record(hex)]
+    pub status: u32,
+    pub failed_device: VirtAddr,
+    pub waking: bool,
+    pub cancelled: bool,
+}
 
-    /// The system power action, the power IRPs, and the IRP worker threads
-    /// (`!poaction`).
-    PowerAction {
-        /// `nt!PopAction`.
-        address: VirtAddr,
-        state: u8,
-        /// `Idle`, `NewRequest`, `Callout`, or `SetSystemState`.
-        state_name: Option<&'static str>,
-        updates: u8,
-        shutdown: bool,
-        /// The action, such as `None`, `Sleep`, or `Hibernate`.
-        action: String,
-        lightest_state: String,
-        flags: Hex<u32>,
-        /// The `POWER_ACTION_*` flags, such as `QUERY_ALLOWED`.
-        flag_names: Vec<&'static str>,
-        status: Hex<u32>,
-        irp_minor: Hex<u8>,
-        waking: bool,
-        /// The system state being entered.
-        system_state: String,
-        next_system_state: String,
-        effective_system_state: String,
-        current_system_state: String,
-        hiber_context: VirtAddr,
-        action_worker_thread: VirtAddr,
-        /// The device notification pass in progress. `None` when there is
-        /// none.
-        devices: Option<Diag<DeviceNotifyState>>,
-        /// The power IRPs on `nt!PopIrpList`.
-        irps: Diag<PowerIrpList>,
-        /// The IRP worker threads on `nt!PopIrpThreadList`.
-        workers: Diag<PowerWorkerList>,
-    }
+/// The system power action, the power IRPs, and the IRP worker threads
+/// (`!poaction`).
+#[record]
+pub struct PowerAction {
+    /// `nt!PopAction`.
+    pub address: VirtAddr,
+    pub state: u8,
+    /// `Idle`, `NewRequest`, `Callout`, or `SetSystemState`.
+    pub state_name: Option<&'static str>,
+    pub updates: u8,
+    pub shutdown: bool,
+    /// The action, such as `None`, `Sleep`, or `Hibernate`.
+    pub action: String,
+    pub lightest_state: String,
+    #[record(hex)]
+    pub flags: u32,
+    /// The `POWER_ACTION_*` flags, such as `QUERY_ALLOWED`.
+    pub flag_names: Vec<&'static str>,
+    #[record(hex)]
+    pub status: u32,
+    #[record(hex)]
+    pub irp_minor: u8,
+    pub waking: bool,
+    /// The system state being entered.
+    pub system_state: String,
+    pub next_system_state: String,
+    pub effective_system_state: String,
+    pub current_system_state: String,
+    pub hiber_context: VirtAddr,
+    pub action_worker_thread: VirtAddr,
+    /// The device notification pass in progress. `None` when there is
+    /// none.
+    pub devices: Option<DiagnosticValue<DeviceNotifyState>>,
+    /// The power IRPs on `nt!PopIrpList`.
+    pub irps: DiagnosticValue<PowerIrpList>,
+    /// The IRP worker threads on `nt!PopIrpThreadList`.
+    pub workers: DiagnosticValue<PowerWorkerList>,
+}
 
-    /// The idle detection a driver registered with
-    /// `PoRegisterDeviceForIdleDetection`.
-    PowerIdleDetection {
-        /// The `_DEVICE_OBJECT_POWER_EXTENSION`.
-        address: VirtAddr,
-        idle_count: u32,
-        busy_count: u32,
-        busy_reference: u32,
-        total_busy_count: u32,
-        /// Seconds idle before the power manager powers the device down,
-        /// on battery.
-        conservation_idle_time: u32,
-        /// Seconds idle before the power manager powers the device down,
-        /// on AC power.
-        performance_idle_time: u32,
-        idle_type: String,
-        /// The device state requested when the device idles.
-        idle_state: String,
-        current_state: String,
-    }
+/// The idle detection a driver registered with
+/// `PoRegisterDeviceForIdleDetection`.
+#[record]
+pub struct PowerIdleDetection {
+    /// The `_DEVICE_OBJECT_POWER_EXTENSION`.
+    pub address: VirtAddr,
+    pub idle_count: u32,
+    pub busy_count: u32,
+    pub busy_reference: u32,
+    pub total_busy_count: u32,
+    /// Seconds idle before the power manager powers the device down,
+    /// on battery.
+    pub conservation_idle_time: u32,
+    /// Seconds idle before the power manager powers the device down,
+    /// on AC power.
+    pub performance_idle_time: u32,
+    pub idle_type: String,
+    /// The device state requested when the device idles.
+    pub idle_state: String,
+    pub current_state: String,
+}
 
-    /// The power fields of the device node of a device's stack.
-    DevNodePower {
-        address: VirtAddr,
-        instance_path: String,
-        /// The device state of the PDO, as PnP records it.
-        current_state: String,
-        /// The device's `_POP_FX_DEVICE`, or 0 when its driver did not
-        /// register with the power framework.
-        fx_device: VirtAddr,
-        /// The device power IRP the power framework has outstanding.
-        fx_pending_irp: Option<VirtAddr>,
-    }
+/// The power fields of the device node of a device's stack.
+#[record]
+pub struct DevNodePower {
+    pub address: VirtAddr,
+    pub instance_path: String,
+    /// The device state of the PDO, as PnP records it.
+    pub current_state: String,
+    /// The device's `_POP_FX_DEVICE`, or 0 when its driver did not
+    /// register with the power framework.
+    pub fx_device: VirtAddr,
+    /// The device power IRP the power framework has outstanding.
+    pub fx_pending_irp: Option<VirtAddr>,
+}
 
-    /// A device object's power state (`!podev`).
-    DevicePower {
-        device: VirtAddr,
-        driver: Diag<PowerDriver>,
-        /// `DEVICE_OBJECT.Flags`.
-        flags: Hex<u32>,
-        /// `DO_POWER_PAGABLE`: the driver handles power IRPs at
-        /// PASSIVE_LEVEL.
-        power_pagable: bool,
-        /// `DO_POWER_INRUSH`: the device draws inrush current at power-up.
-        power_inrush: bool,
-        /// The `_DEVOBJ_EXTENSION`.
-        extension: VirtAddr,
-        power_flags: Hex<u32>,
-        /// The last system state the driver set with `PoSetPowerState`.
-        system_state: String,
-        /// The last device state the driver set with `PoSetPowerState`.
-        device_state: String,
-        /// The idle detection the driver registered. `None` when it did
-        /// not.
-        idle: Option<Diag<PowerIdleDetection>>,
-        /// The device node of the stack. `None` when there is none.
-        devnode: Option<Diag<DevNodePower>>,
-        /// The power IRPs on `nt!PopIrpList` sent to the device's stack.
-        irps: Diag<Vec<PowerIrp>>,
-    }
+/// A device object's power state (`!podev`).
+#[record]
+pub struct DevicePower {
+    pub device: VirtAddr,
+    pub driver: DiagnosticValue<PowerDriver>,
+    /// `DEVICE_OBJECT.Flags`.
+    #[record(hex)]
+    pub flags: u32,
+    /// `DO_POWER_PAGABLE`: the driver handles power IRPs at
+    /// PASSIVE_LEVEL.
+    pub power_pagable: bool,
+    /// `DO_POWER_INRUSH`: the device draws inrush current at power-up.
+    pub power_inrush: bool,
+    /// The `_DEVOBJ_EXTENSION`.
+    pub extension: VirtAddr,
+    #[record(hex)]
+    pub power_flags: u32,
+    /// The last system state the driver set with `PoSetPowerState`.
+    pub system_state: String,
+    /// The last device state the driver set with `PoSetPowerState`.
+    pub device_state: String,
+    /// The idle detection the driver registered. `None` when it did
+    /// not.
+    pub idle: Option<DiagnosticValue<PowerIdleDetection>>,
+    /// The device node of the stack. `None` when there is none.
+    pub devnode: Option<DiagnosticValue<DevNodePower>>,
+    /// The power IRPs on `nt!PopIrpList` sent to the device's stack.
+    pub irps: DiagnosticValue<Vec<PowerIrp>>,
 }
 
 fn diag<T, U>(

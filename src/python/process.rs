@@ -21,8 +21,8 @@ use crate::target::mm::MemoryRegionInfo;
 use crate::target::sched::ApcSelector;
 use crate::types::VirtAddr;
 use crate::view;
-use crate::view::mm::py::MemoryRegion;
-use crate::view::shape::Typed;
+use crate::view::mm::MemoryRegionPy;
+use crate::view::record::Typed;
 
 /// The running processes, with their PIDs as keys (`dbg.processes`). Each
 /// iteration reads the process list again, and `find(name)` matches image
@@ -363,7 +363,7 @@ impl Process {
     /// `eprocess`, `wow64`).
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
-        view_dict(py, view::process::process(&self.info))
+        view_dict(py, &view::process::process(&self.info))
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -408,7 +408,7 @@ impl Regions {
 #[pymethods]
 impl Regions {
     /// Find the VAD region that contains `addr`, or return `None`.
-    fn at<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Option<Bound<'py, MemoryRegion>>> {
+    fn at<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Option<Bound<'py, MemoryRegionPy>>> {
         self.snapshot(py)?
             .iter()
             .find(|region| addr >= region.start.0 && addr < region.end.0)
@@ -416,7 +416,7 @@ impl Regions {
             .transpose()
     }
 
-    fn __getitem__<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, MemoryRegion>> {
+    fn __getitem__<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, MemoryRegionPy>> {
         self.at(py, addr)?
             .ok_or_else(|| PyKeyError::new_err(format!("no VAD region contains {addr:#x}")))
     }

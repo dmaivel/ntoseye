@@ -1,62 +1,38 @@
-pub mod shape;
+//! The SDK's result records that are not (yet) the target model's own
+//! types, and the value tree ([`View`]) every record renders to (see
+//! [`record`]).
 
-/// Declares the view modules, and `with_shape_classes!`, which adds every
-/// class their shapes declare to the SDK's `#[pymodule]` as exports, so a
-/// class is named only where its shape is (see [`shape`]). `$d` is a `$` for
-/// the macros it defines.
-macro_rules! view_modules {
-    ([$d:tt] $($module:ident),* $(,)?) => {
-        $(pub mod $module;)*
-
-        /// `with_shape_classes! { #[pymodule] pub mod m { ... } }`: the module,
-        /// exporting every shape class besides its own items.
-        #[cfg(feature = "python")]
-        macro_rules! with_shape_classes {
-            ($d($d item:tt)*) => {
-                $crate::view::collect_shape_classes!([$($module)*] [] { $d($d item)* });
-            };
-        }
-        #[cfg(feature = "python")]
-        pub(crate) use with_shape_classes;
-    };
-}
-
-view_modules!([$] backend, bugcheck, cpu, etw, execution, fs, hardware, heap, hypervisor, list, machine, meta, mm, module, ndis, object, pnp, power, process, rcdr, registry, sched, security, storage, symbols, triage, userdump, usermode, virtio, wdf);
-
-/// One step of [`with_shape_classes!`]: asks the next module for its classes
-/// (its `shape_classes!`), then emits the module once none are left.
-#[cfg(feature = "python")]
-macro_rules! collect_shape_classes {
-    ([$next:ident $($rest:ident)*] [$($done:tt)*] $module:tt) => {
-        $crate::view::$next::shape_classes!(
-            $crate::view::collected_shape_classes; $next [$($rest)*] [$($done)*] $module
-        );
-    };
-    ([] [$(($from:ident $($class:ident)*))*] {
-        $(#[$attr:meta])* $vis:vis mod $name:ident { $($body:tt)* }
-    }) => {
-        $(#[$attr])*
-        $vis mod $name {
-            $($body)*
-            $(
-                #[pymodule_export]
-                use $crate::view::$from::py::{$($class),*};
-            )*
-        }
-    };
-}
-#[cfg(feature = "python")]
-pub(crate) use collect_shape_classes;
-
-/// A module's classes, back from its `shape_classes!`.
-#[cfg(feature = "python")]
-macro_rules! collected_shape_classes {
-    ($from:ident [$($rest:ident)*] [$($done:tt)*] $module:tt [$($class:ident)*]) => {
-        $crate::view::collect_shape_classes!([$($rest)*] [$($done)* ($from $($class)*)] $module);
-    };
-}
-#[cfg(feature = "python")]
-pub(crate) use collected_shape_classes;
+pub mod backend;
+pub mod bugcheck;
+pub mod cpu;
+pub mod etw;
+pub mod execution;
+pub mod fs;
+pub mod hardware;
+pub mod heap;
+pub mod hypervisor;
+pub mod list;
+pub mod machine;
+pub mod meta;
+pub mod mm;
+pub mod module;
+pub mod ndis;
+pub mod object;
+pub mod pnp;
+pub mod power;
+pub mod process;
+pub mod rcdr;
+pub mod record;
+pub mod registry;
+pub mod sched;
+pub mod security;
+pub mod storage;
+pub mod symbols;
+pub mod triage;
+pub mod userdump;
+pub mod usermode;
+pub mod virtio;
+pub mod wdf;
 
 /// A node in the value tree the SDK builds its results from.
 pub enum View {
@@ -74,9 +50,9 @@ pub enum View {
     List(Vec<View>),
     /// An ordered key/value object (insertion order is preserved on render).
     Object(Vec<(&'static str, View)>),
-    /// An object declared with [`shape::shapes!`]: rendered as an
-    /// [`Object`](Self::Object), and as its own class in the SDK.
-    Shaped(shape::Shaped),
+    /// A `#[record]`: rendered as an [`Object`](Self::Object), and as its
+    /// own class in the SDK.
+    Shaped(record::Shaped),
     /// A value that can fail to read on its own: an `ntoseye.Diagnostic`, or
     /// `{available, value, error}` in plain form.
     Diagnostic(Box<DiagnosticView>),
@@ -91,7 +67,6 @@ pub struct DiagnosticView {
 }
 
 /// How [`to_py`] renders objects and diagnostics.
-#[cfg(feature = "python")]
 #[derive(Clone, Copy)]
 pub enum PyShape {
     /// [`Record`](crate::python::record::Record)s and `ntoseye.Diagnostic`s
@@ -103,7 +78,6 @@ pub enum PyShape {
 }
 
 /// Render a [`View`] to a Python object (the SDK): addresses become plain ints.
-#[cfg(feature = "python")]
 pub fn to_py<'py>(
     py: pyo3::Python<'py>,
     v: &View,
@@ -127,7 +101,7 @@ pub fn to_py<'py>(
             }
             list.into_any()
         }
-        View::Object(fields) | View::Shaped(shape::Shaped { fields, .. }) => {
+        View::Object(fields) | View::Shaped(record::Shaped { fields, .. }) => {
             let dict = PyDict::new(py);
             let mut hex = Vec::new();
             for (key, val) in fields {

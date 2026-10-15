@@ -2,7 +2,8 @@
 //! its memory and threads: the exception, handles, memory regions, and
 //! unloaded modules.
 
-use super::shape::{Hex, shapes};
+use ntoseye_macros::record;
+
 use crate::ntstatus::ntstatus_name;
 use crate::target::Target;
 use crate::target::mm::{memory_state_name, memory_type_name, page_protection_name};
@@ -12,81 +13,98 @@ use crate::types::VirtAddr;
 use crate::unwind::{resolve_thread_trace_context, try_format_symbol};
 use crate::userdump::{UnloadedModule, UserException, UserHandle};
 
-shapes! {
-    /// The exception a user-mode minidump was written for (`ExceptionStream`).
-    UserDumpException {
-        /// The thread that raised it.
-        thread_id: u32,
-        /// The exception code (an NTSTATUS, or an application's own code).
-        code: Hex<u32>,
-        /// The NTSTATUS name of `code`, when it is one ntoseye knows.
-        code_name: Option<String>,
-        flags: Hex<u32>,
-        /// The address of a chained `EXCEPTION_RECORD`, 0 for none.
-        record: VirtAddr,
-        /// Where the exception was raised.
-        address: VirtAddr,
-        /// `address` as `module!function+offset`, when it resolves.
-        symbol: Option<String>,
-        parameters: Vec<Hex>,
-        /// Why the exception's CONTEXT is unusable, `None` when it is.
-        context_error: Option<String>,
-    }
+/// The exception a user-mode minidump was written for (`ExceptionStream`).
+#[record]
+pub struct UserDumpException {
+    /// The thread that raised it.
+    pub thread_id: u32,
+    /// The exception code (an NTSTATUS, or an application's own code).
+    #[record(hex)]
+    pub code: u32,
+    /// The NTSTATUS name of `code`, when it is one ntoseye knows.
+    pub code_name: Option<String>,
+    #[record(hex)]
+    pub flags: u32,
+    /// The address of a chained `EXCEPTION_RECORD`, 0 for none.
+    pub record: VirtAddr,
+    /// Where the exception was raised.
+    pub address: VirtAddr,
+    /// `address` as `module!function+offset`, when it resolves.
+    pub symbol: Option<String>,
+    #[record(hex)]
+    pub parameters: Vec<u64>,
+    /// Why the exception's CONTEXT is unusable, `None` when it is.
+    pub context_error: Option<String>,
+}
 
-    /// A handle the process held, as `HandleDataStream` records it. The dump
-    /// names no object address.
-    UserDumpHandle {
-        handle: Hex,
-        type_name: Option<String>,
-        object_name: Option<String>,
-        /// `OBJ_*` attribute flags.
-        attributes: Hex<u32>,
-        /// `attributes` as `OBJ_*` names.
-        attribute_names: Vec<String>,
-        granted_access: Hex<u32>,
-        handle_count: u32,
-        pointer_count: u32,
-    }
+/// A handle the process held, as `HandleDataStream` records it. The dump
+/// names no object address.
+#[record]
+pub struct UserDumpHandle {
+    #[record(hex)]
+    pub handle: u64,
+    pub type_name: Option<String>,
+    pub object_name: Option<String>,
+    /// `OBJ_*` attribute flags.
+    #[record(hex)]
+    pub attributes: u32,
+    /// `attributes` as `OBJ_*` names.
+    pub attribute_names: Vec<String>,
+    #[record(hex)]
+    pub granted_access: u32,
+    pub handle_count: u32,
+    pub pointer_count: u32,
+}
 
-    /// A region of the process's address space, as `VirtualQueryEx`
-    /// reported it (`MemoryInfoListStream`), with what the dump shows uses it
-    /// (`!address`).
-    UserDumpRegion {
-        base: VirtAddr,
-        allocation_base: VirtAddr,
-        allocation_protect: Hex<u32>,
-        /// `allocation_protect` as `PAGE_*` names.
-        allocation_protect_name: String,
-        size: Hex,
-        state: Hex<u32>,
-        /// `MEM_COMMIT`, `MEM_RESERVE`, or `MEM_FREE`.
-        state_name: &'static str,
-        protect: Hex<u32>,
-        /// `protect` as `PAGE_*` names; empty for a free or reserved region.
-        protect_name: String,
-        /// The region's type: `MEM_IMAGE`, `MEM_MAPPED`, or `MEM_PRIVATE`; 0 for
-        /// a free region.
-        kind: Hex<u32>,
-        /// `kind`'s name, empty for a free region.
-        kind_name: &'static str,
-        /// What uses the region: `Image`, `Stack`, `TEB`, `PEB`, `Heap`,
-        /// `Free`, or `<unknown>`.
-        usage: &'static str,
-        /// The module, thread, or heap `usage` names.
-        detail: Option<String>,
-        /// How many of the region's bytes the dump captured; the rest do not
-        /// read.
-        captured: Hex,
-    }
+/// A region of the process's address space, as `VirtualQueryEx`
+/// reported it (`MemoryInfoListStream`), with what the dump shows uses it
+/// (`!address`).
+#[record]
+pub struct UserDumpRegion {
+    pub base: VirtAddr,
+    pub allocation_base: VirtAddr,
+    #[record(hex)]
+    pub allocation_protect: u32,
+    /// `allocation_protect` as `PAGE_*` names.
+    pub allocation_protect_name: String,
+    #[record(hex)]
+    pub size: u64,
+    #[record(hex)]
+    pub state: u32,
+    /// `MEM_COMMIT`, `MEM_RESERVE`, or `MEM_FREE`.
+    pub state_name: &'static str,
+    #[record(hex)]
+    pub protect: u32,
+    /// `protect` as `PAGE_*` names; empty for a free or reserved region.
+    pub protect_name: String,
+    /// The region's type: `MEM_IMAGE`, `MEM_MAPPED`, or `MEM_PRIVATE`; 0 for
+    /// a free region.
+    #[record(hex)]
+    pub kind: u32,
+    /// `kind`'s name, empty for a free region.
+    pub kind_name: &'static str,
+    /// What uses the region: `Image`, `Stack`, `TEB`, `PEB`, `Heap`,
+    /// `Free`, or `<unknown>`.
+    pub usage: &'static str,
+    /// The module, thread, or heap `usage` names.
+    pub detail: Option<String>,
+    /// How many of the region's bytes the dump captured; the rest do not
+    /// read.
+    #[record(hex)]
+    pub captured: u64,
+}
 
-    /// A module the process had unloaded (`UnloadedModuleListStream`).
-    UserDumpUnloadedModule {
-        name: String,
-        base: VirtAddr,
-        size: Hex<u32>,
-        checksum: Hex<u32>,
-        time_date_stamp: Hex<u32>,
-    }
+/// A module the process had unloaded (`UnloadedModuleListStream`).
+#[record]
+pub struct UserDumpUnloadedModule {
+    pub name: String,
+    pub base: VirtAddr,
+    #[record(hex)]
+    pub size: u32,
+    #[record(hex)]
+    pub checksum: u32,
+    #[record(hex)]
+    pub time_date_stamp: u32,
 }
 
 /// The dump's exception, its address named in the dump's modules.

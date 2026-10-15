@@ -16,7 +16,7 @@ use crate::session::{ContinueOutcome, ExceptionRecord};
 use crate::target::ThreadInfo;
 use crate::unwind::try_format_symbol_at;
 use crate::view;
-use crate::view::shape::Typed;
+use crate::view::record::Typed;
 
 /// Rust-only snapshot backing the shared properties of a typed stop.
 #[pyclass(name = "_StopContext", module = "ntoseye")]
@@ -82,7 +82,7 @@ pub enum Stop {
     Bugcheck {
         /// The bugcheck analysis: the code, the parameters, and the culprit from
         /// `!analyze`.
-        info: Option<Py<view::bugcheck::py::Bugcheck>>,
+        info: Option<Py<view::bugcheck::BugcheckPy>>,
         _context: Py<StopContext>,
     },
     /// The guest rebooted, so all earlier handles are now stale. While

@@ -28,7 +28,7 @@ use super::{err, raise, runcontrol, runner};
 use crate::dbg_backend::ContinueDisposition;
 use crate::dump_writer::{collect_dump_metadata, write_kernel_dump};
 use crate::view;
-use crate::view::shape::Typed;
+use crate::view::record::Typed;
 
 fn namespace_owner(slf: &Bound<'_, Debugger>) -> Owner {
     Owner::unstamped(slf.py(), slf.as_unbound())

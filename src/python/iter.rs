@@ -11,8 +11,8 @@ use super::module::{Driver, Module};
 use super::process::{Heap, Process};
 use super::thread::{Cpu, Thread};
 use super::userdump::UserThread;
-use crate::view::execution::py::ExceptionPolicy;
-use crate::view::mm::py::MemoryRegion;
+use crate::view::execution::ExceptionPolicyPy;
+use crate::view::mm::MemoryRegionPy;
 
 macro_rules! typed_iterator {
     ($(#[$doc:meta])* $name:ident($item:ty)) => {
@@ -71,7 +71,7 @@ typed_iterator! {
 }
 typed_iterator! {
     /// Iterator over `proc.regions`.
-    MemoryRegionIterator(Py<MemoryRegion>)
+    MemoryRegionIterator(Py<MemoryRegionPy>)
 }
 typed_iterator! {
     /// Iterator over `proc.heaps`.
@@ -79,7 +79,7 @@ typed_iterator! {
 }
 typed_iterator! {
     /// Iterator over `dbg.exceptions`.
-    ExceptionPolicyIterator(Py<ExceptionPolicy>)
+    ExceptionPolicyIterator(Py<ExceptionPolicyPy>)
 }
 typed_iterator! {
     /// Iterator over names, for example the fields of a record or the registers

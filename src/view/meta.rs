@@ -1,8 +1,9 @@
 //! `View` builders for the metadata inspectors.
 
-use super::shape::{Diag, Hex, shapes};
+use crate::target::DiagnosticValue;
+use ntoseye_macros::record;
+
 use super::list::{ListEnd, list_termination};
-use crate::types::VirtAddr;
 use crate::target::ListTermination;
 use crate::target::meta::{
     ErrorCodeDetail, TargetDumpMetadata, TargetKernelDetail, TargetTimeDetail,
@@ -10,301 +11,327 @@ use crate::target::meta::{
     VerifierDriverDetail, VerifierDriverSummary as DriverSummaryDetail,
     VerifierStatistics as StatisticsDetail, VerifierSuspectDriver as SuspectDriverDetail,
 };
+use crate::types::VirtAddr;
 
-shapes! {
-    /// A driver that Driver Verifier verifies, from the `!verifier` list.
-    VerifierDriverSummary {
-        /// The verifier entry of the driver.
-        entry: VirtAddr,
-        /// The state of the entry (`Loaded`).
-        state: String,
-        /// The nonpaged pool that the driver holds, in bytes.
-        nonpaged_bytes: u64,
-        /// The paged pool that the driver holds, in bytes.
-        paged_bytes: u64,
-        /// The module name of the driver.
-        module: String,
-    }
+/// A driver that Driver Verifier verifies, from the `!verifier` list.
+#[record]
+pub struct VerifierDriverSummary {
+    /// The verifier entry of the driver.
+    pub entry: VirtAddr,
+    /// The state of the entry (`Loaded`).
+    pub state: String,
+    /// The nonpaged pool that the driver holds, in bytes.
+    pub nonpaged_bytes: u64,
+    /// The paged pool that the driver holds, in bytes.
+    pub paged_bytes: u64,
+    /// The module name of the driver.
+    pub module: String,
+}
 
-    /// A driver that is configured for verification, from the verifier
-    /// suspect list.
-    VerifierSuspectDriver {
-        /// The suspect-list entry.
-        address: VirtAddr,
-        full_name: String,
-        base_name: String,
-        /// The number of times that the driver loaded.
-        loads: u64,
-        /// The number of times that the driver unloaded.
-        unloads: u64,
-    }
+/// A driver that is configured for verification, from the verifier
+/// suspect list.
+#[record]
+pub struct VerifierSuspectDriver {
+    /// The suspect-list entry.
+    pub address: VirtAddr,
+    pub full_name: String,
+    pub base_name: String,
+    /// The number of times that the driver loaded.
+    pub loads: u64,
+    /// The number of times that the driver unloaded.
+    pub unloads: u64,
+}
 
-    /// The aggregate counters of Driver Verifier. ntoseye reads each counter
-    /// separately, and each read can fail.
-    VerifierStatistics {
-        raise_irqls: Diag<u64>,
-        acquire_spin_locks: Diag<u64>,
-        synchronize_executions: Diag<u64>,
-        trims: Diag<u64>,
-        allocations_attempted: Diag<u64>,
-        allocations_succeeded: Diag<u64>,
-        allocations_succeeded_special_pool: Diag<u64>,
-        allocations_with_no_tag: Diag<u64>,
-        allocations_failed: Diag<u64>,
-        current_paged_pool_allocations: Diag<u64>,
-        paged_bytes: Diag<u64>,
-        peak_paged_pool_allocations: Diag<u64>,
-        peak_paged_bytes: Diag<u64>,
-        current_nonpaged_pool_allocations: Diag<u64>,
-        nonpaged_bytes: Diag<u64>,
-        peak_nonpaged_pool_allocations: Diag<u64>,
-        peak_nonpaged_bytes: Diag<u64>,
-        loads: Diag<u64>,
-        unloads: Diag<u64>,
-    }
+/// The aggregate counters of Driver Verifier. ntoseye reads each counter
+/// separately, and each read can fail.
+#[record]
+pub struct VerifierStatistics {
+    pub raise_irqls: DiagnosticValue<u64>,
+    pub acquire_spin_locks: DiagnosticValue<u64>,
+    pub synchronize_executions: DiagnosticValue<u64>,
+    pub trims: DiagnosticValue<u64>,
+    pub allocations_attempted: DiagnosticValue<u64>,
+    pub allocations_succeeded: DiagnosticValue<u64>,
+    pub allocations_succeeded_special_pool: DiagnosticValue<u64>,
+    pub allocations_with_no_tag: DiagnosticValue<u64>,
+    pub allocations_failed: DiagnosticValue<u64>,
+    pub current_paged_pool_allocations: DiagnosticValue<u64>,
+    pub paged_bytes: DiagnosticValue<u64>,
+    pub peak_paged_pool_allocations: DiagnosticValue<u64>,
+    pub peak_paged_bytes: DiagnosticValue<u64>,
+    pub current_nonpaged_pool_allocations: DiagnosticValue<u64>,
+    pub nonpaged_bytes: DiagnosticValue<u64>,
+    pub peak_nonpaged_pool_allocations: DiagnosticValue<u64>,
+    pub peak_nonpaged_bytes: DiagnosticValue<u64>,
+    pub loads: DiagnosticValue<u64>,
+    pub unloads: DiagnosticValue<u64>,
+}
 
-    /// The Driver Verifier configuration, statistics, and drivers
-    /// (`!verifier`). The drivers are the verified drivers and the configured
-    /// suspect drivers that are not loaded.
-    Verifier {
-        /// The verification level (`MmVerifierData.Level`).
-        level: Diag<Hex>,
-        /// The option flags (`VerifierOptionFlags`).
-        option_flags: Diag<Hex>,
-        verify_mode: Diag<u64>,
-        /// The names of the checks that `level` enables.
-        level_options: Diag<Vec<String>>,
-        statistics: VerifierStatistics,
-        /// The verified drivers.
-        drivers: Diag<Vec<VerifierDriverSummary>>,
-        /// Whether the driver table gives a smaller entry count than the
-        /// number of linked entries, which means that the walk stopped before
-        /// it reached all drivers.
-        drivers_truncated: bool,
-        /// The suspect drivers that are configured for verification but are
-        /// not loaded.
-        configured_but_unloaded: Diag<Vec<VerifierSuspectDriver>>,
-        /// How the suspect-list walk ended.
-        suspect_list_termination: ListEnd,
-    }
+/// The Driver Verifier configuration, statistics, and drivers
+/// (`!verifier`). The drivers are the verified drivers and the configured
+/// suspect drivers that are not loaded.
+#[record]
+pub struct Verifier {
+    /// The verification level (`MmVerifierData.Level`).
+    #[record(hex)]
+    pub level: DiagnosticValue<u64>,
+    /// The option flags (`VerifierOptionFlags`).
+    #[record(hex)]
+    pub option_flags: DiagnosticValue<u64>,
+    pub verify_mode: DiagnosticValue<u64>,
+    /// The names of the checks that `level` enables.
+    pub level_options: DiagnosticValue<Vec<String>>,
+    pub statistics: VerifierStatistics,
+    /// The verified drivers.
+    pub drivers: DiagnosticValue<Vec<VerifierDriverSummary>>,
+    /// Whether the driver table gives a smaller entry count than the
+    /// number of linked entries, which means that the walk stopped before
+    /// it reached all drivers.
+    pub drivers_truncated: bool,
+    /// The suspect drivers that are configured for verification but are
+    /// not loaded.
+    pub configured_but_unloaded: DiagnosticValue<Vec<VerifierSuspectDriver>>,
+    /// How the suspect-list walk ended.
+    pub suspect_list_termination: ListEnd,
+}
 
-    /// The image, signing level, and counters of one verified driver
-    /// (`!verifier <module>`).
-    VerifierDriver {
-        module: String,
-        image_base: VirtAddr,
-        /// The image size in bytes.
-        image_size: u64,
-        /// The `_DRIVER_OBJECT` of the driver.
-        driver_object: VirtAddr,
-        /// The signing level of the image (`SE_SIGNING_LEVEL`).
-        se_signing_level: Hex,
-        raise_irqls: u64,
-        acquire_spin_locks: u64,
-        synchronize_executions: u64,
-        allocations_with_no_tag: u64,
-        allocations_failed: u64,
-        /// The number of allocations that the verifier failed on purpose
-        /// (fault injection).
-        allocations_failed_deliberately: u64,
-        current_paged_pool_allocations: u64,
-        paged_bytes: u64,
-        peak_paged_pool_allocations: u64,
-        peak_paged_bytes: u64,
-        current_nonpaged_pool_allocations: u64,
-        nonpaged_bytes: u64,
-        peak_nonpaged_pool_allocations: u64,
-        peak_nonpaged_bytes: u64,
-        locked_bytes: u64,
-        peak_locked_bytes: u64,
-        mapped_locked_bytes: u64,
-        peak_mapped_locked_bytes: u64,
-        mapped_io_space_bytes: u64,
-        peak_mapped_io_space_bytes: u64,
-        pages_for_mdl_bytes: u64,
-        peak_pages_for_mdl_bytes: u64,
-        contiguous_memory_bytes: u64,
-        peak_contiguous_memory_bytes: u64,
-        /// The suspect-list entry of the driver, with its load history.
-        /// `None` if the driver has no entry.
-        suspect: Option<VerifierSuspectDriver>,
-    }
+/// The image, signing level, and counters of one verified driver
+/// (`!verifier <module>`).
+#[record]
+pub struct VerifierDriver {
+    pub module: String,
+    pub image_base: VirtAddr,
+    /// The image size in bytes.
+    pub image_size: u64,
+    /// The `_DRIVER_OBJECT` of the driver.
+    pub driver_object: VirtAddr,
+    /// The signing level of the image (`SE_SIGNING_LEVEL`).
+    #[record(hex)]
+    pub se_signing_level: u64,
+    pub raise_irqls: u64,
+    pub acquire_spin_locks: u64,
+    pub synchronize_executions: u64,
+    pub allocations_with_no_tag: u64,
+    pub allocations_failed: u64,
+    /// The number of allocations that the verifier failed on purpose
+    /// (fault injection).
+    pub allocations_failed_deliberately: u64,
+    pub current_paged_pool_allocations: u64,
+    pub paged_bytes: u64,
+    pub peak_paged_pool_allocations: u64,
+    pub peak_paged_bytes: u64,
+    pub current_nonpaged_pool_allocations: u64,
+    pub nonpaged_bytes: u64,
+    pub peak_nonpaged_pool_allocations: u64,
+    pub peak_nonpaged_bytes: u64,
+    pub locked_bytes: u64,
+    pub peak_locked_bytes: u64,
+    pub mapped_locked_bytes: u64,
+    pub peak_mapped_locked_bytes: u64,
+    pub mapped_io_space_bytes: u64,
+    pub peak_mapped_io_space_bytes: u64,
+    pub pages_for_mdl_bytes: u64,
+    pub peak_pages_for_mdl_bytes: u64,
+    pub contiguous_memory_bytes: u64,
+    pub peak_contiguous_memory_bytes: u64,
+    /// The suspect-list entry of the driver, with its load history.
+    /// `None` if the driver has no entry.
+    pub suspect: Option<VerifierSuspectDriver>,
+}
 
-    /// The identity of the kernel image.
-    TargetKernel {
-        /// The file name of the image.
-        name: String,
-        /// The module name (`nt`).
-        short_name: String,
-        base: VirtAddr,
-        /// The image size in bytes.
-        size: Option<u64>,
-        file_version: Option<String>,
-        product_version: Option<String>,
-        /// The GUID of the PDB, which identifies the symbols.
-        pdb_guid: Option<String>,
-        /// The age of the PDB.
-        pdb_age: Option<u32>,
-    }
+/// The identity of the kernel image.
+#[record]
+pub struct TargetKernel {
+    /// The file name of the image.
+    pub name: String,
+    /// The module name (`nt`).
+    pub short_name: String,
+    pub base: VirtAddr,
+    /// The image size in bytes.
+    pub size: Option<u64>,
+    pub file_version: Option<String>,
+    pub product_version: Option<String>,
+    /// The GUID of the PDB, which identifies the symbols.
+    pub pdb_guid: Option<String>,
+    /// The age of the PDB.
+    pub pdb_age: Option<u32>,
+}
 
-    /// The data that a crash dump header records.
-    TargetDump {
-        /// Whether the dump is a triage (minidump-style) dump.
-        is_triage: bool,
-        /// The kernel page-table root that the dump records.
-        directory_table_base: VirtAddr,
-        bugcheck_code: Hex<u32>,
-        bugcheck_parameters: Vec<Hex>,
-        number_processors: u32,
-        major_version: u32,
-        minor_version: u32,
-        product_type: u32,
-        /// The machine type (`IMAGE_FILE_MACHINE_*`).
-        machine_image_type: u32,
-        service_pack_build: u32,
-        /// The time when the dump was taken (FILETIME).
-        system_time: Option<Hex>,
-        /// The system uptime in seconds.
-        uptime_seconds: Option<u64>,
-        /// The exception code that the dump records.
-        exception_code: Option<Hex<u32>>,
-        /// Whether the triage data of the dump overflowed.
-        triage_overflowed: bool,
-        kernel_base: Option<VirtAddr>,
-        /// The blocks that bugcheck callbacks added to the dump (`.enumtag`);
-        /// `Inspect.read_tagged` reads one.
-        tagged_blocks: Vec<TaggedBlock>,
-    }
+/// The data that a crash dump header records.
+#[record]
+pub struct TargetDump {
+    /// Whether the dump is a triage (minidump-style) dump.
+    pub is_triage: bool,
+    /// The kernel page-table root that the dump records.
+    pub directory_table_base: VirtAddr,
+    #[record(hex)]
+    pub bugcheck_code: u32,
+    #[record(hex)]
+    pub bugcheck_parameters: Vec<u64>,
+    pub number_processors: u32,
+    pub major_version: u32,
+    pub minor_version: u32,
+    pub product_type: u32,
+    /// The machine type (`IMAGE_FILE_MACHINE_*`).
+    pub machine_image_type: u32,
+    pub service_pack_build: u32,
+    /// The time when the dump was taken (FILETIME).
+    #[record(hex)]
+    pub system_time: Option<u64>,
+    /// The system uptime in seconds.
+    pub uptime_seconds: Option<u64>,
+    /// The exception code that the dump records.
+    #[record(hex)]
+    pub exception_code: Option<u32>,
+    /// Whether the triage data of the dump overflowed.
+    pub triage_overflowed: bool,
+    pub kernel_base: Option<VirtAddr>,
+    /// The blocks that bugcheck callbacks added to the dump (`.enumtag`);
+    /// `Inspect.read_tagged` reads one.
+    pub tagged_blocks: Vec<TaggedBlock>,
+}
 
-    /// A tagged data block of a crash dump.
-    TaggedBlock {
-        /// The GUID tag, `{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}`.
-        tag: String,
-        /// The data's size in bytes.
-        size: u64,
-        /// For a tag Windows writes, the global that holds it, such as
-        /// `nt!PopBlackBoxPnpGuid`.
-        owner: Option<&'static str>,
-        /// For a tag Windows writes, what the block holds.
-        holds: Option<&'static str>,
-    }
+/// A tagged data block of a crash dump.
+#[record]
+pub struct TaggedBlock {
+    /// The GUID tag, `{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}`.
+    pub tag: String,
+    /// The data's size in bytes.
+    pub size: u64,
+    /// For a tag Windows writes, the global that holds it, such as
+    /// `nt!PopBlackBoxPnpGuid`.
+    pub owner: Option<&'static str>,
+    /// For a tag Windows writes, what the block holds.
+    pub holds: Option<&'static str>,
+}
 
-    /// The version data of the target (`vertarget`), with the build,
-    /// architecture, kernel, symbols, debugger version, time, and dump
-    /// metadata.
-    TargetVersion {
-        major_version: Option<u64>,
-        minor_version: Option<u64>,
-        build_number: Option<u64>,
-        /// The build lab string.
-        build_lab: Option<String>,
-        architecture: String,
-        /// The number of processors in the target.
-        processors: Option<u16>,
-        /// The product name.
-        product: String,
-        /// The kernel image. `None` if ntoseye did not find it.
-        kernel: Option<TargetKernel>,
-        /// The symbol status label of the kernel. `None` if ntoseye did not
-        /// find the kernel.
-        symbol_status: Option<String>,
-        debugger_version: String,
-        symbol_path: String,
-        time: TargetTime,
-        /// The backend attached to the target.
-        backend: Option<String>,
-        /// The crash dump header. `None` for a live target.
-        dump: Option<TargetDump>,
-        /// What a user-mode minidump records of its process and how it was
-        /// written. `None` for a kernel target.
-        user_dump: Option<TargetUserDump>,
-    }
+/// The version data of the target (`vertarget`), with the build,
+/// architecture, kernel, symbols, debugger version, time, and dump
+/// metadata.
+#[record]
+pub struct TargetVersion {
+    pub major_version: Option<u64>,
+    pub minor_version: Option<u64>,
+    pub build_number: Option<u64>,
+    /// The build lab string.
+    pub build_lab: Option<String>,
+    pub architecture: String,
+    /// The number of processors in the target.
+    pub processors: Option<u16>,
+    /// The product name.
+    pub product: String,
+    /// The kernel image. `None` if ntoseye did not find it.
+    pub kernel: Option<TargetKernel>,
+    /// The symbol status label of the kernel. `None` if ntoseye did not
+    /// find the kernel.
+    pub symbol_status: Option<String>,
+    pub debugger_version: String,
+    pub symbol_path: String,
+    pub time: TargetTime,
+    /// The backend attached to the target.
+    pub backend: Option<String>,
+    /// The crash dump header. `None` for a live target.
+    pub dump: Option<TargetDump>,
+    /// What a user-mode minidump records of its process and how it was
+    /// written. `None` for a kernel target.
+    pub user_dump: Option<TargetUserDump>,
+}
 
-    /// A user-mode minidump's process and header.
-    TargetUserDump {
-        process_name: Option<String>,
-        process_id: Option<u32>,
-        /// `ProcessorLevel`: on AMD64, the processor family.
-        processor_level: u16,
-        /// `ProcessorRevision`: on AMD64, the model (high byte) and stepping
-        /// (low byte).
-        processor_revision: Hex<u16>,
-        service_pack: Option<String>,
-        /// The `MINIDUMP_TYPE` flags the dump was written with.
-        flags: Hex,
-        /// `flags` as `MINIDUMP_TYPE` names (`MiniDumpWithFullMemory`, ...).
-        flag_names: Vec<String>,
-        threads: usize,
-        modules: usize,
-        /// The code of the exception the dump was written for.
-        exception_code: Option<Hex<u32>>,
-    }
+/// A user-mode minidump's process and header.
+#[record]
+pub struct TargetUserDump {
+    pub process_name: Option<String>,
+    pub process_id: Option<u32>,
+    /// `ProcessorLevel`: on AMD64, the processor family.
+    pub processor_level: u16,
+    /// `ProcessorRevision`: on AMD64, the model (high byte) and stepping
+    /// (low byte).
+    #[record(hex)]
+    pub processor_revision: u16,
+    pub service_pack: Option<String>,
+    /// The `MINIDUMP_TYPE` flags the dump was written with.
+    #[record(hex)]
+    pub flags: u64,
+    /// `flags` as `MINIDUMP_TYPE` names (`MiniDumpWithFullMemory`, ...).
+    pub flag_names: Vec<String>,
+    pub threads: usize,
+    pub modules: usize,
+    /// The code of the exception the dump was written for.
+    #[record(hex)]
+    pub exception_code: Option<u32>,
+}
 
-    /// The UTC time and uptime of the target (`.time`). A user-mode minidump
-    /// records neither: its `user_dump` says when it was written instead.
-    TargetTime {
-        /// The UTC time of the target (FILETIME).
-        system_time: Option<Hex>,
-        /// `system_time` as ISO 8601.
-        system_time_iso: Option<String>,
-        /// `KUSER_SHARED_DATA.InterruptTime`: the time since boot, in 100 ns
-        /// units. The `due_time` of clock timers uses this clock.
-        interrupt_time: Option<Hex>,
-        /// Seconds since boot.
-        uptime_seconds: Option<u64>,
-        /// The uptime as formatted text.
-        uptime: Option<String>,
-        /// When a user-mode minidump was written, and its process's times.
-        /// `None` for a kernel target.
-        user_dump: Option<UserDumpTime>,
-    }
+/// The UTC time and uptime of the target (`.time`). A user-mode minidump
+/// records neither: its `user_dump` says when it was written instead.
+#[record]
+pub struct TargetTime {
+    /// The UTC time of the target (FILETIME).
+    #[record(hex)]
+    pub system_time: Option<u64>,
+    /// `system_time` as ISO 8601.
+    pub system_time_iso: Option<String>,
+    /// `KUSER_SHARED_DATA.InterruptTime`: the time since boot, in 100 ns
+    /// units. The `due_time` of clock timers uses this clock.
+    #[record(hex)]
+    pub interrupt_time: Option<u64>,
+    /// Seconds since boot.
+    pub uptime_seconds: Option<u64>,
+    /// The uptime as formatted text.
+    pub uptime: Option<String>,
+    /// When a user-mode minidump was written, and its process's times.
+    /// `None` for a kernel target.
+    pub user_dump: Option<UserDumpTime>,
+}
 
-    /// When a user-mode minidump was written (its header), and how long its
-    /// process had run (`MiscInfoStream`), where it records them.
-    UserDumpTime {
-        /// When the dump was written, in seconds since 1970 (UTC).
-        written: u32,
-        /// `written` as ISO 8601 UTC.
-        written_iso: Option<String>,
-        /// `written` in the system's time zone.
-        written_local: Option<String>,
-        /// The name of that zone's period in effect.
-        time_zone: Option<String>,
-        /// When the process started, in seconds since 1970 (UTC).
-        process_created: Option<u32>,
-        /// `process_created` as ISO 8601 UTC.
-        process_created_iso: Option<String>,
-        /// From the process's start to the dump, in seconds.
-        process_uptime_seconds: Option<u64>,
-        /// `process_uptime_seconds` as formatted text.
-        process_uptime: Option<String>,
-        /// User-mode time the process had run, in seconds.
-        user_time_seconds: Option<u32>,
-        /// Kernel-mode time the process had run, in seconds.
-        kernel_time_seconds: Option<u32>,
-    }
+/// When a user-mode minidump was written (its header), and how long its
+/// process had run (`MiscInfoStream`), where it records them.
+#[record]
+pub struct UserDumpTime {
+    /// When the dump was written, in seconds since 1970 (UTC).
+    pub written: u32,
+    /// `written` as ISO 8601 UTC.
+    pub written_iso: Option<String>,
+    /// `written` in the system's time zone.
+    pub written_local: Option<String>,
+    /// The name of that zone's period in effect.
+    pub time_zone: Option<String>,
+    /// When the process started, in seconds since 1970 (UTC).
+    pub process_created: Option<u32>,
+    /// `process_created` as ISO 8601 UTC.
+    pub process_created_iso: Option<String>,
+    /// From the process's start to the dump, in seconds.
+    pub process_uptime_seconds: Option<u64>,
+    /// `process_uptime_seconds` as formatted text.
+    pub process_uptime: Option<String>,
+    /// User-mode time the process had run, in seconds.
+    pub user_time_seconds: Option<u32>,
+    /// Kernel-mode time the process had run, in seconds.
+    pub kernel_time_seconds: Option<u32>,
+}
 
-    /// A decoded NTSTATUS, Win32, or HRESULT code (`!error`).
-    ErrorCode {
-        code: Hex,
-        /// `NTSTATUS`, `HRESULT`, `Win32`, or `unknown`.
-        kind: String,
-        /// The symbolic name of the code.
-        name: String,
-        description: String,
-        /// `success`, `informational`, `warning`, or `error`. `None` for a
-        /// Win32 code.
-        severity: Option<String>,
-        /// The facility that the code encodes.
-        facility: Option<u32>,
-        /// Whether the code is customer-defined (its C bit).
-        customer: Option<bool>,
-        /// The Win32 error: the code itself, or the Win32 error that a
-        /// `HRESULT_FROM_WIN32` code wraps.
-        win32_code: Option<Hex<u32>>,
-        /// The name of that Win32 error.
-        win32_name: Option<String>,
-    }
+/// A decoded NTSTATUS, Win32, or HRESULT code (`!error`).
+#[record]
+pub struct ErrorCode {
+    #[record(hex)]
+    pub code: u64,
+    /// `NTSTATUS`, `HRESULT`, `Win32`, or `unknown`.
+    pub kind: String,
+    /// The symbolic name of the code.
+    pub name: String,
+    pub description: String,
+    /// `success`, `informational`, `warning`, or `error`. `None` for a
+    /// Win32 code.
+    pub severity: Option<String>,
+    /// The facility that the code encodes.
+    pub facility: Option<u32>,
+    /// Whether the code is customer-defined (its C bit).
+    pub customer: Option<bool>,
+    /// The Win32 error: the code itself, or the Win32 error that a
+    /// `HRESULT_FROM_WIN32` code wraps.
+    #[record(hex)]
+    pub win32_code: Option<u32>,
+    /// The name of that Win32 error.
+    pub win32_name: Option<String>,
 }
 
 fn verifier_summary(driver: &DriverSummaryDetail) -> VerifierDriverSummary {
@@ -376,13 +403,13 @@ pub fn verifier(detail: &VerifierDetail) -> Verifier {
         verify_mode: detail.verify_mode.clone(),
         level_options: detail.level_options.clone(),
         statistics: verifier_statistics(&detail.statistics),
-        drivers: detail.drivers.map(|drivers| {
-            drivers.iter().map(verifier_summary).collect()
-        }),
+        drivers: detail
+            .drivers
+            .map(|drivers| drivers.iter().map(verifier_summary).collect()),
         drivers_truncated: detail.drivers_truncated,
-        configured_but_unloaded: detail.configured_but_unloaded.map(|drivers| {
-            drivers.iter().map(suspect_driver).collect()
-        }),
+        configured_but_unloaded: detail
+            .configured_but_unloaded
+            .map(|drivers| drivers.iter().map(suspect_driver).collect()),
         suspect_list_termination: suspect_list_end(&detail.suspect_list_termination),
     }
 }

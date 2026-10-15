@@ -1,48 +1,51 @@
 //! Debug-backend [`View`] builders: the capability matrix, captured guest
 //! debug output, and the debugger's notices.
 
-use super::shape::shapes;
+use ntoseye_macros::record;
+
 use crate::dbg_backend::{self, DebugLine, DebugOutputPage};
 use crate::notice;
 
-shapes! {
-    /// A captured line of guest debug output (DbgPrint, kernel printf).
-    DebugLogLine {
-        /// A monotonic sequence number that serves as the read cursor.
-        seq: u64,
-        /// The host wall-clock time when the line was complete, in milliseconds
-        /// since the Unix epoch.
-        timestamp_ms: u64,
-        text: String,
-    }
+/// A captured line of guest debug output (DbgPrint, kernel printf).
+#[record]
+pub struct DebugLogLine {
+    /// A monotonic sequence number that serves as the read cursor.
+    pub seq: u64,
+    /// The host wall-clock time when the line was complete, in milliseconds
+    /// since the Unix epoch.
+    pub timestamp_ms: u64,
+    pub text: String,
+}
 
-    /// A page of captured guest debug output.
-    DebugLog {
-        lines: Vec<DebugLogLine>,
-        /// The cursor to give on the next call to continue after the last line.
-        next_seq: u64,
-        /// Whether the bounded ring removed lines that the caller did not read.
-        dropped: bool,
-    }
+/// A page of captured guest debug output.
+#[record]
+pub struct DebugLog {
+    pub lines: Vec<DebugLogLine>,
+    /// The cursor to give on the next call to continue after the last line.
+    pub next_seq: u64,
+    /// Whether the bounded ring removed lines that the caller did not read.
+    pub dropped: bool,
+}
 
-    /// A row of the capability matrix of the backend.
-    BackendCapability {
-        /// Stable identifier (`memory_introspection`, ...).
-        capability: &'static str,
-        /// Human-readable name.
-        label: &'static str,
-        supported: bool,
-    }
+/// A row of the capability matrix of the backend.
+#[record]
+pub struct BackendCapability {
+    /// Stable identifier (`memory_introspection`, ...).
+    pub capability: &'static str,
+    /// Human-readable name.
+    pub label: &'static str,
+    pub supported: bool,
+}
 
-    /// Something the debugger reported beside a command's result.
-    Notice {
-        /// `"info"` for status, such as a background symbol fetch
-        /// finishing or a `ModLoad:` line of an `sxn ld` filter, or
-        /// `"warning"` for something that did not work as it should, such as
-        /// a breakpoint that failed to re-arm.
-        level: &'static str,
-        text: String,
-    }
+/// Something the debugger reported beside a command's result.
+#[record]
+pub struct Notice {
+    /// `"info"` for status, such as a background symbol fetch
+    /// finishing or a `ModLoad:` line of an `sxn ld` filter, or
+    /// `"warning"` for something that did not work as it should, such as
+    /// a breakpoint that failed to re-arm.
+    pub level: &'static str,
+    pub text: String,
 }
 
 /// A page of captured guest debug output plus the cursor for the next poll.

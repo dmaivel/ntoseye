@@ -1,222 +1,241 @@
 //! Process, thread, job, global-flag, and zombie [`View`] builders.
 
-use super::shape::{Diag, Hex, shapes};
+use crate::target::DiagnosticValue;
+use ntoseye_macros::record;
+
 use super::list::{ListEnd, list_termination};
-use crate::types::VirtAddr;
 use crate::guest::ProcessInfo;
 use crate::target::gflag::{GlobalFlagsDetail, global_flags_set};
 use crate::target::job::{JobDetail, JobField, job_limit_flag_names};
 use crate::target::zombies::ZombiesDetail;
 use crate::target::{ThreadInfo, kthread_state_name, wait_reason_name};
+use crate::types::VirtAddr;
 
-shapes! {
-    /// A Windows thread, as `threads`, `!thread`, and all scheduler listings
-    /// show it. A field that the walk could not read is `None`.
-    ThreadSummary {
-        tid: Option<u64>,
-        pid: Option<u64>,
-        /// The image name of the owning process.
-        process_name: Option<String>,
-        ethread: VirtAddr,
-        kthread: VirtAddr,
-        /// The owning `_EPROCESS`.
-        eprocess: Option<VirtAddr>,
-        /// `_KTHREAD.State`.
-        state: Option<u8>,
-        /// The name of the state (`Running`, `Waiting`, ...).
-        state_name: Option<&'static str>,
-        /// `_KTHREAD.WaitReason`.
-        wait_reason: Option<u8>,
-        /// The name of the wait reason (`Executive`, `UserRequest`, ...).
-        wait_reason_name: Option<&'static str>,
-        /// The current scheduling priority.
-        priority: Option<u8>,
-        /// The vCPU that runs the thread, if the listing resolves it. `None` if
-        /// no vCPU runs it, and while the target runs.
-        active: Option<String>,
-    }
+/// A Windows thread, as `threads`, `!thread`, and all scheduler listings
+/// show it. A field that the walk could not read is `None`.
+#[record]
+pub struct ThreadSummary {
+    pub tid: Option<u64>,
+    pub pid: Option<u64>,
+    /// The image name of the owning process.
+    pub process_name: Option<String>,
+    pub ethread: VirtAddr,
+    pub kthread: VirtAddr,
+    /// The owning `_EPROCESS`.
+    pub eprocess: Option<VirtAddr>,
+    /// `_KTHREAD.State`.
+    pub state: Option<u8>,
+    /// The name of the state (`Running`, `Waiting`, ...).
+    pub state_name: Option<&'static str>,
+    /// `_KTHREAD.WaitReason`.
+    pub wait_reason: Option<u8>,
+    /// The name of the wait reason (`Executive`, `UserRequest`, ...).
+    pub wait_reason_name: Option<&'static str>,
+    /// The current scheduling priority.
+    pub priority: Option<u8>,
+    /// The vCPU that runs the thread, if the listing resolves it. `None` if
+    /// no vCPU runs it, and while the target runs.
+    pub active: Option<String>,
+}
 
-    /// The identity of a process (`ps`, `!process 0 0`).
-    ProcessIdentity {
-        pid: u64,
-        /// The image name.
-        name: String,
-        /// The directory table base (page-table root).
-        dtb: Hex,
-        eprocess: VirtAddr,
-        /// True if it is a 32-bit process that runs under WOW64.
-        wow64: bool,
-    }
+/// The identity of a process (`ps`, `!process 0 0`).
+#[record]
+pub struct ProcessIdentity {
+    pub pid: u64,
+    /// The image name.
+    pub name: String,
+    /// The directory table base (page-table root).
+    #[record(hex)]
+    pub dtb: u64,
+    pub eprocess: VirtAddr,
+    /// True if it is a 32-bit process that runs under WOW64.
+    pub wow64: bool,
+}
 
-    /// The `_EJOB` accounting of a job. A field that this build does not have is
-    /// `None`.
-    JobAccounting {
-        /// In 100 ns units.
-        total_user_time: Option<u64>,
-        /// In 100 ns units.
-        total_kernel_time: Option<u64>,
-        /// In CPU cycles.
-        total_cycle_time: Option<u64>,
-        /// In 100 ns units.
-        this_period_total_user_time: Option<u64>,
-        /// In 100 ns units.
-        this_period_total_kernel_time: Option<u64>,
-        total_page_fault_count: Option<u64>,
-        /// The number of processes that were ever assigned to the job.
-        total_processes: Option<u64>,
-        active_processes: Option<u64>,
-        /// The number of processes that a job limit violation terminated.
-        total_terminated_processes: Option<u64>,
-        /// In pages.
-        peak_process_memory_used: Option<u64>,
-        /// In pages.
-        peak_job_memory_used: Option<u64>,
-        /// In pages.
-        current_job_memory_used: Option<u64>,
-    }
+/// The `_EJOB` accounting of a job. A field that this build does not have is
+/// `None`.
+#[record]
+pub struct JobAccounting {
+    /// In 100 ns units.
+    pub total_user_time: Option<u64>,
+    /// In 100 ns units.
+    pub total_kernel_time: Option<u64>,
+    /// In CPU cycles.
+    pub total_cycle_time: Option<u64>,
+    /// In 100 ns units.
+    pub this_period_total_user_time: Option<u64>,
+    /// In 100 ns units.
+    pub this_period_total_kernel_time: Option<u64>,
+    pub total_page_fault_count: Option<u64>,
+    /// The number of processes that were ever assigned to the job.
+    pub total_processes: Option<u64>,
+    pub active_processes: Option<u64>,
+    /// The number of processes that a job limit violation terminated.
+    pub total_terminated_processes: Option<u64>,
+    /// In pages.
+    pub peak_process_memory_used: Option<u64>,
+    /// In pages.
+    pub peak_job_memory_used: Option<u64>,
+    /// In pages.
+    pub current_job_memory_used: Option<u64>,
+}
 
-    /// The `_EJOB` limit settings of a job. A field that this build does not
-    /// have is `None`.
-    JobLimits {
-        /// The `JOB_OBJECT_LIMIT_*` bits that are set.
-        limit_flags: Option<u64>,
-        /// The limit bits in effect, with the bits from nesting.
-        effective_limit_flags: Option<u64>,
-        active_process_limit: Option<u64>,
-        /// In 100 ns units.
-        per_process_user_time_limit: Option<u64>,
-        /// In 100 ns units.
-        per_job_user_time_limit: Option<u64>,
-        /// In pages.
-        minimum_working_set_size: Option<u64>,
-        /// In pages.
-        maximum_working_set_size: Option<u64>,
-        /// In pages.
-        process_memory_limit: Option<u64>,
-        /// In pages.
-        job_memory_limit: Option<u64>,
-        priority_class: Option<u64>,
-        scheduling_class: Option<u64>,
-        /// The `JOB_OBJECT_UILIMIT_*` bits that are set.
-        ui_restrictions_class: Option<u64>,
-    }
+/// The `_EJOB` limit settings of a job. A field that this build does not
+/// have is `None`.
+#[record]
+pub struct JobLimits {
+    /// The `JOB_OBJECT_LIMIT_*` bits that are set.
+    pub limit_flags: Option<u64>,
+    /// The limit bits in effect, with the bits from nesting.
+    pub effective_limit_flags: Option<u64>,
+    pub active_process_limit: Option<u64>,
+    /// In 100 ns units.
+    pub per_process_user_time_limit: Option<u64>,
+    /// In 100 ns units.
+    pub per_job_user_time_limit: Option<u64>,
+    /// In pages.
+    pub minimum_working_set_size: Option<u64>,
+    /// In pages.
+    pub maximum_working_set_size: Option<u64>,
+    /// In pages.
+    pub process_memory_limit: Option<u64>,
+    /// In pages.
+    pub job_memory_limit: Option<u64>,
+    pub priority_class: Option<u64>,
+    pub scheduling_class: Option<u64>,
+    /// The `JOB_OBJECT_UILIMIT_*` bits that are set.
+    pub ui_restrictions_class: Option<u64>,
+}
 
-    /// A job object (`!job`), with its accounting, limits, flags, nesting, and
-    /// assigned processes. A field that this build does not have is `None`.
-    Job {
-        /// The `_EJOB`.
-        address: VirtAddr,
-        job_id: Option<u64>,
-        session_id: Option<u64>,
-        accounting: JobAccounting,
-        limits: JobLimits,
-        /// The `JOB_OBJECT_LIMIT_*` names of the limit flags that are set. A
-        /// bit that has no name shows as its hex value.
-        limit_flag_names: Vec<String>,
-        /// `_EJOB.JobFlags`.
-        job_flags: Option<Hex>,
-        /// The `JobFlags` bits that are set, by their PDB names.
-        job_flag_names: Vec<String>,
-        nesting_depth: Option<u64>,
-        /// `None` for a top-level job.
-        parent_job: Option<VirtAddr>,
-        /// `None` for a top-level job.
-        root_job: Option<VirtAddr>,
-        child_jobs: Vec<VirtAddr>,
-        child_job_list_termination: ListEnd,
-        /// True if the job is a silo.
-        silo: bool,
-        /// `None` for a job that is not a server silo.
-        server_silo_globals: Option<VirtAddr>,
-        processes: Vec<ProcessIdentity>,
-        /// The `_EPROCESS` addresses on the job list that ntoseye could not decode.
-        unreadable_processes: Vec<VirtAddr>,
-        process_list_termination: ListEnd,
-    }
+/// A job object (`!job`), with its accounting, limits, flags, nesting, and
+/// assigned processes. A field that this build does not have is `None`.
+#[record]
+pub struct Job {
+    /// The `_EJOB`.
+    pub address: VirtAddr,
+    pub job_id: Option<u64>,
+    pub session_id: Option<u64>,
+    pub accounting: JobAccounting,
+    pub limits: JobLimits,
+    /// The `JOB_OBJECT_LIMIT_*` names of the limit flags that are set. A
+    /// bit that has no name shows as its hex value.
+    pub limit_flag_names: Vec<String>,
+    /// `_EJOB.JobFlags`.
+    #[record(hex)]
+    pub job_flags: Option<u64>,
+    /// The `JobFlags` bits that are set, by their PDB names.
+    pub job_flag_names: Vec<String>,
+    pub nesting_depth: Option<u64>,
+    /// `None` for a top-level job.
+    pub parent_job: Option<VirtAddr>,
+    /// `None` for a top-level job.
+    pub root_job: Option<VirtAddr>,
+    pub child_jobs: Vec<VirtAddr>,
+    pub child_job_list_termination: ListEnd,
+    /// True if the job is a silo.
+    pub silo: bool,
+    /// `None` for a job that is not a server silo.
+    pub server_silo_globals: Option<VirtAddr>,
+    pub processes: Vec<ProcessIdentity>,
+    /// The `_EPROCESS` addresses on the job list that ntoseye could not decode.
+    pub unreadable_processes: Vec<VirtAddr>,
+    pub process_list_termination: ListEnd,
+}
 
-    /// One GFlags flag that is set.
-    GlobalFlag {
-        /// The bit mask of the flag.
-        bit: Hex<u32>,
-        /// The GFlags abbreviation (`hpa`, `ust`, ...).
-        abbreviation: &'static str,
-        description: &'static str,
-    }
+/// One GFlags flag that is set.
+#[record]
+pub struct GlobalFlag {
+    /// The bit mask of the flag.
+    #[record(hex)]
+    pub bit: u32,
+    /// The GFlags abbreviation (`hpa`, `ust`, ...).
+    pub abbreviation: &'static str,
+    pub description: &'static str,
+}
 
-    /// The `_PEB.NtGlobalFlag` of a process.
-    ProcessGlobalFlags {
-        value: Hex<u32>,
-        flags: Vec<GlobalFlag>,
-    }
+/// The `_PEB.NtGlobalFlag` of a process.
+#[record]
+pub struct ProcessGlobalFlags {
+    #[record(hex)]
+    pub value: u32,
+    pub flags: Vec<GlobalFlag>,
+}
 
-    /// `nt!NtGlobalFlag` and the `_PEB.NtGlobalFlag` of the current process
-    /// (`!gflag`).
-    GlobalFlags {
-        /// The address of `nt!NtGlobalFlag`.
-        kernel_address: VirtAddr,
-        /// `nt!NtGlobalFlag`.
-        kernel: Hex<u32>,
-        kernel_flags: Vec<GlobalFlag>,
-        /// The current process. `None` if no process is selected.
-        process: Option<ProcessIdentity>,
-        /// The flags of the current process, read from its PEB.
-        process_flags: Diag<ProcessGlobalFlags>,
-    }
+/// `nt!NtGlobalFlag` and the `_PEB.NtGlobalFlag` of the current process
+/// (`!gflag`).
+#[record]
+pub struct GlobalFlags {
+    /// The address of `nt!NtGlobalFlag`.
+    pub kernel_address: VirtAddr,
+    /// `nt!NtGlobalFlag`.
+    #[record(hex)]
+    pub kernel: u32,
+    pub kernel_flags: Vec<GlobalFlag>,
+    /// The current process. `None` if no process is selected.
+    pub process: Option<ProcessIdentity>,
+    /// The flags of the current process, read from its PEB.
+    pub process_flags: DiagnosticValue<ProcessGlobalFlags>,
+}
 
-    /// An exited process whose object still has references.
-    ZombieProcess {
-        eprocess: VirtAddr,
-        pid: u64,
-        /// The image name.
-        image: String,
-        /// `_EPROCESS.ExitTime`, a FILETIME.
-        exit_time: Hex,
-        /// The exit NTSTATUS.
-        exit_status: Hex<u32>,
-        /// Open handles to the object.
-        handle_count: u64,
-        /// References to the object.
-        pointer_count: u64,
-    }
+/// An exited process whose object still has references.
+#[record]
+pub struct ZombieProcess {
+    pub eprocess: VirtAddr,
+    pub pid: u64,
+    /// The image name.
+    pub image: String,
+    /// `_EPROCESS.ExitTime`, a FILETIME.
+    #[record(hex)]
+    pub exit_time: u64,
+    /// The exit NTSTATUS.
+    #[record(hex)]
+    pub exit_status: u32,
+    /// Open handles to the object.
+    pub handle_count: u64,
+    /// References to the object.
+    pub pointer_count: u64,
+}
 
-    /// A terminated thread whose object still has references.
-    ZombieThread {
-        ethread: VirtAddr,
-        pid: u64,
-        tid: u64,
-        /// The owning `_EPROCESS`.
-        process: VirtAddr,
-        /// The image name of the owning process. `None` if ntoseye cannot read it.
-        image: Option<String>,
-        /// The exit NTSTATUS.
-        exit_status: Hex<u32>,
-        /// Open handles to the object.
-        handle_count: u64,
-        /// References to the object.
-        pointer_count: u64,
-    }
+/// A terminated thread whose object still has references.
+#[record]
+pub struct ZombieThread {
+    pub ethread: VirtAddr,
+    pub pid: u64,
+    pub tid: u64,
+    /// The owning `_EPROCESS`.
+    pub process: VirtAddr,
+    /// The image name of the owning process. `None` if ntoseye cannot read it.
+    pub image: Option<String>,
+    /// The exit NTSTATUS.
+    #[record(hex)]
+    pub exit_status: u32,
+    /// Open handles to the object.
+    pub handle_count: u64,
+    /// References to the object.
+    pub pointer_count: u64,
+}
 
-    /// The exited processes and terminated threads that still have references
-    /// (`!zombies`), which ntoseye finds with a scan of nonpaged pool.
-    Zombies {
-        /// `None` if the flags did not ask for processes.
-        processes: Option<Vec<ZombieProcess>>,
-        /// `None` if the flags did not ask for threads.
-        threads: Option<Vec<ZombieThread>>,
-        /// The number of live processes that the scan found.
-        live_processes: u64,
-        /// The number of live threads that the scan found.
-        live_threads: u64,
-        /// The start of the scanned pool region.
-        region_start: VirtAddr,
-        /// The end of the scanned pool region.
-        region_end: VirtAddr,
-        scanned_pages: u64,
-        /// True if the scan was interrupted before it finished.
-        interrupted: bool,
-        /// True if a result list reached its limit.
-        truncated: bool,
-    }
+/// The exited processes and terminated threads that still have references
+/// (`!zombies`), which ntoseye finds with a scan of nonpaged pool.
+#[record]
+pub struct Zombies {
+    /// `None` if the flags did not ask for processes.
+    pub processes: Option<Vec<ZombieProcess>>,
+    /// `None` if the flags did not ask for threads.
+    pub threads: Option<Vec<ZombieThread>>,
+    /// The number of live processes that the scan found.
+    pub live_processes: u64,
+    /// The number of live threads that the scan found.
+    pub live_threads: u64,
+    /// The start of the scanned pool region.
+    pub region_start: VirtAddr,
+    /// The end of the scanned pool region.
+    pub region_end: VirtAddr,
+    pub scanned_pages: u64,
+    /// True if the scan was interrupted before it finished.
+    pub interrupted: bool,
+    /// True if a result list reached its limit.
+    pub truncated: bool,
 }
 
 /// One Windows thread from the kernel thread walk; `active` is the vCPU id

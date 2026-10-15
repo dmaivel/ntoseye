@@ -1,8 +1,9 @@
 //! Neutral value-tree views for the file-system inspectors: control areas,
 //! VPBs, the file cache, and the filter manager.
 
-use super::shape::{Diag, Hex, shapes};
-use crate::types::VirtAddr;
+use crate::target::DiagnosticValue;
+use ntoseye_macros::record;
+
 use crate::target::fltmgr::{
     FltFilterDetail, FltFrame, FltFrames, FltInstanceDetail, FltVolumeDetail,
 };
@@ -10,204 +11,225 @@ use crate::target::fs::{
     CachedFile as CachedFileDetail, ControlAreaDetail, FileCacheDetail, SegmentDetail,
     SubsectionDetail, VpbDetail,
 };
+use crate::types::VirtAddr;
 
-shapes! {
-    /// A control area's `_SEGMENT`.
-    ControlAreaSegment {
-        total_ptes: u64,
-        /// Bytes.
-        size: Hex,
-        committed_pages: u64,
-        /// `None` for the segment of a data file, whose prototype PTEs are in
-        /// its subsections.
-        prototype_ptes: Option<VirtAddr>,
-    }
+/// A control area's `_SEGMENT`.
+#[record]
+pub struct ControlAreaSegment {
+    pub total_ptes: u64,
+    /// Bytes.
+    #[record(hex)]
+    pub size: u64,
+    pub committed_pages: u64,
+    /// `None` for the segment of a data file, whose prototype PTEs are in
+    /// its subsections.
+    pub prototype_ptes: Option<VirtAddr>,
+}
 
-    /// A `_SUBSECTION` after a control area.
-    Subsection {
-        address: VirtAddr,
-        /// Its first prototype PTE.
-        base_pte: VirtAddr,
-        ptes: u64,
-        unused_ptes: u64,
-        starting_sector: Hex,
-        sectors: Hex,
-        /// The MM protection in `SubsectionFlags`.
-        protection: Hex,
-    }
+/// A `_SUBSECTION` after a control area.
+#[record]
+pub struct Subsection {
+    pub address: VirtAddr,
+    /// Its first prototype PTE.
+    pub base_pte: VirtAddr,
+    pub ptes: u64,
+    pub unused_ptes: u64,
+    #[record(hex)]
+    pub starting_sector: u64,
+    #[record(hex)]
+    pub sectors: u64,
+    /// The MM protection in `SubsectionFlags`.
+    #[record(hex)]
+    pub protection: u64,
+}
 
-    /// The `_CONTROL_AREA` of a section, with its segment and subsections
-    /// (`!ca`).
-    ControlArea {
-        address: VirtAddr,
-        segment: VirtAddr,
-        section_references: u64,
-        pfn_references: u64,
-        mapped_views: u64,
-        user_references: u64,
-        /// `u.LongFlags`.
-        flags: Hex,
-        /// The `_MMSECTION_FLAGS` bits set in `flags`.
-        flag_names: Vec<String>,
-        file_object: VirtAddr,
-        file_name: Diag<String>,
-        segment_detail: Diag<ControlAreaSegment>,
-        subsections: Vec<Subsection>,
-        /// Why the subsection walk stopped before a null `NextSubsection`.
-        /// `None` if the walk got to a null `NextSubsection`.
-        subsections_stopped: Option<String>,
-    }
+/// The `_CONTROL_AREA` of a section, with its segment and subsections
+/// (`!ca`).
+#[record]
+pub struct ControlArea {
+    pub address: VirtAddr,
+    pub segment: VirtAddr,
+    pub section_references: u64,
+    pub pfn_references: u64,
+    pub mapped_views: u64,
+    pub user_references: u64,
+    /// `u.LongFlags`.
+    #[record(hex)]
+    pub flags: u64,
+    /// The `_MMSECTION_FLAGS` bits set in `flags`.
+    pub flag_names: Vec<String>,
+    pub file_object: VirtAddr,
+    pub file_name: DiagnosticValue<String>,
+    pub segment_detail: DiagnosticValue<ControlAreaSegment>,
+    pub subsections: Vec<Subsection>,
+    /// Why the subsection walk stopped before a null `NextSubsection`.
+    /// `None` if the walk got to a null `NextSubsection`.
+    pub subsections_stopped: Option<String>,
+}
 
-    /// A volume parameter block (`!vpb`).
-    Vpb {
-        address: VirtAddr,
-        flags: Hex,
-        /// The `VPB_*` bits set in `flags`.
-        flag_names: Vec<&'static str>,
-        /// The mounted file system's volume device object.
-        device_object: VirtAddr,
-        device_name: Option<String>,
-        /// The storage device that holds the volume.
-        real_device: VirtAddr,
-        real_device_name: Option<String>,
-        serial_number: Hex<u32>,
-        reference_count: u32,
-        volume_label: String,
-    }
+/// A volume parameter block (`!vpb`).
+#[record]
+pub struct Vpb {
+    pub address: VirtAddr,
+    #[record(hex)]
+    pub flags: u64,
+    /// The `VPB_*` bits set in `flags`.
+    pub flag_names: Vec<&'static str>,
+    /// The mounted file system's volume device object.
+    pub device_object: VirtAddr,
+    pub device_name: Option<String>,
+    /// The storage device that holds the volume.
+    pub real_device: VirtAddr,
+    pub real_device_name: Option<String>,
+    #[record(hex)]
+    pub serial_number: u32,
+    pub reference_count: u32,
+    pub volume_label: String,
+}
 
-    /// A file that the cache manager maps a view of.
-    CachedFile {
-        shared_cache_map: VirtAddr,
-        file_object: VirtAddr,
-        file_name: Diag<String>,
-        /// Bytes.
-        file_size: Diag<u64>,
-        /// Bytes.
-        valid_data_length: Diag<u64>,
-        open_count: Diag<u64>,
-        dirty_pages: Diag<u64>,
-        mapped_vacbs: u64,
-        /// The bytes in the mapped views that are present in memory.
-        valid_bytes: u64,
-    }
+/// A file that the cache manager maps a view of.
+#[record]
+pub struct CachedFile {
+    pub shared_cache_map: VirtAddr,
+    pub file_object: VirtAddr,
+    pub file_name: DiagnosticValue<String>,
+    /// Bytes.
+    pub file_size: DiagnosticValue<u64>,
+    /// Bytes.
+    pub valid_data_length: DiagnosticValue<u64>,
+    pub open_count: DiagnosticValue<u64>,
+    pub dirty_pages: DiagnosticValue<u64>,
+    pub mapped_vacbs: u64,
+    /// The bytes in the mapped views that are present in memory.
+    pub valid_bytes: u64,
+}
 
-    /// The mapped views of the cache manager, from its VACB arrays
-    /// (`!filecache`).
-    FileCache {
-        vacb_arrays: u64,
-        /// `CcNumberOfFreeVacbs`.
-        free_vacbs: Diag<u64>,
-        /// The VACBs that map a view.
-        active_vacbs: u64,
-        mapped_bytes: u64,
-        /// The bytes in the mapped views that are present in memory.
-        valid_bytes: u64,
-        /// One entry for each shared cache map that has a mapped view, most
-        /// valid bytes first, up to 1,024 entries.
-        files: Vec<CachedFile>,
-        /// The number of shared cache maps that have a mapped view, including
-        /// the maps that `files` does not list.
-        file_count: u64,
-        /// Whether an interrupt request stopped the walk early.
-        interrupted: bool,
-    }
+/// The mapped views of the cache manager, from its VACB arrays
+/// (`!filecache`).
+#[record]
+pub struct FileCache {
+    pub vacb_arrays: u64,
+    /// `CcNumberOfFreeVacbs`.
+    pub free_vacbs: DiagnosticValue<u64>,
+    /// The VACBs that map a view.
+    pub active_vacbs: u64,
+    pub mapped_bytes: u64,
+    /// The bytes in the mapped views that are present in memory.
+    pub valid_bytes: u64,
+    /// One entry for each shared cache map that has a mapped view, most
+    /// valid bytes first, up to 1,024 entries.
+    pub files: Vec<CachedFile>,
+    /// The number of shared cache maps that have a mapped view, including
+    /// the maps that `files` does not list.
+    pub file_count: u64,
+    /// Whether an interrupt request stopped the walk early.
+    pub interrupted: bool,
+}
 
-    /// A minifilter attached to a volume (`_FLT_INSTANCE`).
-    FltInstance {
-        address: VirtAddr,
-        name: String,
-        altitude: String,
-        /// Its `_FLT_FILTER`.
-        filter: VirtAddr,
-        filter_name: Option<String>,
-        /// Its `_FLT_VOLUME`.
-        volume: VirtAddr,
-        volume_name: Option<String>,
-    }
+/// A minifilter attached to a volume (`_FLT_INSTANCE`).
+#[record]
+pub struct FltInstance {
+    pub address: VirtAddr,
+    pub name: String,
+    pub altitude: String,
+    /// Its `_FLT_FILTER`.
+    pub filter: VirtAddr,
+    pub filter_name: Option<String>,
+    /// Its `_FLT_VOLUME`.
+    pub volume: VirtAddr,
+    pub volume_name: Option<String>,
+}
 
-    /// A registered minifilter (`_FLT_FILTER`) and its instances.
-    FltFilter {
-        address: VirtAddr,
-        name: String,
-        altitude: String,
-        driver_object: VirtAddr,
-        instances: Vec<FltInstance>,
-        /// Why the instance walk stopped before the list head. `None` if the
-        /// walk completed.
-        instances_stopped: Option<String>,
-    }
+/// A registered minifilter (`_FLT_FILTER`) and its instances.
+#[record]
+pub struct FltFilter {
+    pub address: VirtAddr,
+    pub name: String,
+    pub altitude: String,
+    pub driver_object: VirtAddr,
+    pub instances: Vec<FltInstance>,
+    /// Why the instance walk stopped before the list head. `None` if the
+    /// walk completed.
+    pub instances_stopped: Option<String>,
+}
 
-    /// A volume that the filter manager attached to (`_FLT_VOLUME`), and the
-    /// instances on it.
-    FltVolume {
-        address: VirtAddr,
-        device_name: String,
-        /// The `_FLT_FILESYSTEM_TYPE` name without its `FLT_FSTYPE_` prefix.
-        file_system: Option<String>,
-        instances: Vec<FltInstance>,
-        /// Why the instance walk stopped before the list head. `None` if the
-        /// walk completed.
-        instances_stopped: Option<String>,
-    }
+/// A volume that the filter manager attached to (`_FLT_VOLUME`), and the
+/// instances on it.
+#[record]
+pub struct FltVolume {
+    pub address: VirtAddr,
+    pub device_name: String,
+    /// The `_FLT_FILESYSTEM_TYPE` name without its `FLT_FSTYPE_` prefix.
+    pub file_system: Option<String>,
+    pub instances: Vec<FltInstance>,
+    /// Why the instance walk stopped before the list head. `None` if the
+    /// walk completed.
+    pub instances_stopped: Option<String>,
+}
 
-    /// A filter manager frame and its registered minifilters.
-    FltFilterFrame {
-        /// The `_FLTP_FRAME`.
-        address: VirtAddr,
-        frame_id: u64,
-        filters: Vec<FltFilter>,
-        /// Why the walk of the frame list stopped before the list head. `None`
-        /// if the walk completed.
-        stopped: Option<String>,
-    }
+/// A filter manager frame and its registered minifilters.
+#[record]
+pub struct FltFilterFrame {
+    /// The `_FLTP_FRAME`.
+    pub address: VirtAddr,
+    pub frame_id: u64,
+    pub filters: Vec<FltFilter>,
+    /// Why the walk of the frame list stopped before the list head. `None`
+    /// if the walk completed.
+    pub stopped: Option<String>,
+}
 
-    /// A filter manager frame and its minifilter instances.
-    FltInstanceFrame {
-        /// The `_FLTP_FRAME`.
-        address: VirtAddr,
-        frame_id: u64,
-        instances: Vec<FltInstance>,
-        /// Why the walk of the frame list stopped before the list head. `None`
-        /// if the walk completed.
-        stopped: Option<String>,
-    }
+/// A filter manager frame and its minifilter instances.
+#[record]
+pub struct FltInstanceFrame {
+    /// The `_FLTP_FRAME`.
+    pub address: VirtAddr,
+    pub frame_id: u64,
+    pub instances: Vec<FltInstance>,
+    /// Why the walk of the frame list stopped before the list head. `None`
+    /// if the walk completed.
+    pub stopped: Option<String>,
+}
 
-    /// A filter manager frame and its volumes.
-    FltVolumeFrame {
-        /// The `_FLTP_FRAME`.
-        address: VirtAddr,
-        frame_id: u64,
-        volumes: Vec<FltVolume>,
-        /// Why the walk of the frame list stopped before the list head. `None`
-        /// if the walk completed.
-        stopped: Option<String>,
-    }
+/// A filter manager frame and its volumes.
+#[record]
+pub struct FltVolumeFrame {
+    /// The `_FLTP_FRAME`.
+    pub address: VirtAddr,
+    pub frame_id: u64,
+    pub volumes: Vec<FltVolume>,
+    /// Why the walk of the frame list stopped before the list head. `None`
+    /// if the walk completed.
+    pub stopped: Option<String>,
+}
 
-    /// The registered minifilters of each filter manager frame
-    /// (`!fltkd.filters`).
-    FltFilters {
-        frames: Vec<FltFilterFrame>,
-        /// Why the frame walk stopped before the list head. `None` if the walk
-        /// completed.
-        stopped: Option<String>,
-    }
+/// The registered minifilters of each filter manager frame
+/// (`!fltkd.filters`).
+#[record]
+pub struct FltFilters {
+    pub frames: Vec<FltFilterFrame>,
+    /// Why the frame walk stopped before the list head. `None` if the walk
+    /// completed.
+    pub stopped: Option<String>,
+}
 
-    /// The minifilter instances of each filter manager frame
-    /// (`!fltkd.instances`).
-    FltInstances {
-        frames: Vec<FltInstanceFrame>,
-        /// Why the frame walk stopped before the list head. `None` if the walk
-        /// completed.
-        stopped: Option<String>,
-    }
+/// The minifilter instances of each filter manager frame
+/// (`!fltkd.instances`).
+#[record]
+pub struct FltInstances {
+    pub frames: Vec<FltInstanceFrame>,
+    /// Why the frame walk stopped before the list head. `None` if the walk
+    /// completed.
+    pub stopped: Option<String>,
+}
 
-    /// The volumes of each filter manager frame (`!fltkd.volumes`).
-    FltVolumes {
-        frames: Vec<FltVolumeFrame>,
-        /// Why the frame walk stopped before the list head. `None` if the walk
-        /// completed.
-        stopped: Option<String>,
-    }
+/// The volumes of each filter manager frame (`!fltkd.volumes`).
+#[record]
+pub struct FltVolumes {
+    pub frames: Vec<FltVolumeFrame>,
+    /// Why the frame walk stopped before the list head. `None` if the walk
+    /// completed.
+    pub stopped: Option<String>,
 }
 
 fn segment(segment: &SegmentDetail) -> ControlAreaSegment {

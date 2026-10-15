@@ -1,409 +1,445 @@
 //! sched: [`View`] builders for the structured inspectors.
 
+use ntoseye_macros::record;
+
 use super::execution::{self, stack_frame, stack_frames};
-use super::shape::{Diag, Hex, shapes, unions};
 use super::list::{ListEnd, list_termination};
+use super::process::{ThreadSummary, thread_summary};
 use crate::target::sched::{self as detail, ApcSelector};
 use crate::target::workqueue::{self, ExQueueDetail};
-use super::process::{ThreadSummary, thread_summary};
 use crate::target::{DiagnosticValue, ThreadInfo};
 use crate::types::VirtAddr;
 
-shapes! {
-    /// A processor's running, next, and idle threads (`!running`).
-    RunningProcessor {
-        /// The processor number.
-        index: u16,
-        kpcr: Diag<VirtAddr>,
-        prcb: Diag<VirtAddr>,
-        /// The thread that runs on the processor. The value inside is `None` if
-        /// no thread runs.
-        current_thread: Diag<Option<ThreadSummary>>,
-        /// The thread selected to run next. The value inside is `None` if there
-        /// is no next thread.
-        next_thread: Diag<Option<ThreadSummary>>,
-        /// The processor's idle thread.
-        idle_thread: Diag<Option<ThreadSummary>>,
-        /// The first frames of the running thread. `None` if stacks were not
-        /// requested.
-        short_stack: Option<Diag<Vec<execution::StackFrame>>>,
-    }
+/// A processor's running, next, and idle threads (`!running`).
+#[record]
+pub struct RunningProcessor {
+    /// The processor number.
+    pub index: u16,
+    pub kpcr: DiagnosticValue<VirtAddr>,
+    pub prcb: DiagnosticValue<VirtAddr>,
+    /// The thread that runs on the processor. The value inside is `None` if
+    /// no thread runs.
+    pub current_thread: DiagnosticValue<Option<ThreadSummary>>,
+    /// The thread selected to run next. The value inside is `None` if there
+    /// is no next thread.
+    pub next_thread: DiagnosticValue<Option<ThreadSummary>>,
+    /// The processor's idle thread.
+    pub idle_thread: DiagnosticValue<Option<ThreadSummary>>,
+    /// The first frames of the running thread. `None` if stacks were not
+    /// requested.
+    pub short_stack: Option<DiagnosticValue<Vec<execution::StackFrame>>>,
+}
 
-    /// The running threads of all processors (`!running`).
-    RunningProcessors {
-        processors: Vec<RunningProcessor>,
-    }
+/// The running threads of all processors (`!running`).
+#[record]
+pub struct RunningProcessors {
+    pub processors: Vec<RunningProcessor>,
+}
 
-    /// A thread on a dispatcher ready queue.
-    ReadyThread {
-        /// The `_KTHREAD` linked on the queue.
-        kthread: VirtAddr,
-        /// The decoded thread.
-        thread: Diag<ThreadSummary>,
-    }
+/// A thread on a dispatcher ready queue.
+#[record]
+pub struct ReadyThread {
+    /// The `_KTHREAD` linked on the queue.
+    pub kthread: VirtAddr,
+    /// The decoded thread.
+    pub thread: DiagnosticValue<ThreadSummary>,
+}
 
-    /// The ready list of one processor for one priority.
-    ReadyQueue {
-        processor: u16,
-        priority: u8,
-        entries: Vec<ReadyThread>,
-        /// How the list walk ended.
-        termination: ListEnd,
-    }
+/// The ready list of one processor for one priority.
+#[record]
+pub struct ReadyQueue {
+    pub processor: u16,
+    pub priority: u8,
+    pub entries: Vec<ReadyThread>,
+    /// How the list walk ended.
+    pub termination: ListEnd,
+}
 
-    /// A processor or queue read that failed during a scheduler walk.
-    SchedulerError {
-        /// The processor of the error, if there is one.
-        processor: Option<u16>,
-        /// The queue of the error, if there is one.
-        queue: Option<u16>,
-        message: String,
-    }
+/// A processor or queue read that failed during a scheduler walk.
+#[record]
+pub struct SchedulerError {
+    /// The processor of the error, if there is one.
+    pub processor: Option<u16>,
+    /// The queue of the error, if there is one.
+    pub queue: Option<u16>,
+    pub message: String,
+}
 
-    /// The dispatcher ready queues (`!ready`).
-    ReadyQueues {
-        /// The queues that are not empty.
-        queues: Vec<ReadyQueue>,
-        /// The total number of threads in `queues`.
-        total: usize,
-        /// Whether the walk stopped at its entry limit.
-        truncated: bool,
-        errors: Vec<SchedulerError>,
-    }
+/// The dispatcher ready queues (`!ready`).
+#[record]
+pub struct ReadyQueues {
+    /// The queues that are not empty.
+    pub queues: Vec<ReadyQueue>,
+    /// The total number of threads in `queues`.
+    pub total: usize,
+    /// Whether the walk stopped at its entry limit.
+    pub truncated: bool,
+    pub errors: Vec<SchedulerError>,
+}
 
-    /// A queued `_KDPC`.
-    Dpc {
-        address: VirtAddr,
-        /// `DeferredRoutine`.
-        deferred_routine: Diag<Option<VirtAddr>>,
-        /// `deferred_routine` as a symbol, if it resolves to one.
-        deferred_routine_symbol: Diag<Option<String>>,
-        /// `DeferredContext`.
-        context: Diag<Option<VirtAddr>>,
-        /// `Importance`.
-        importance: Diag<u8>,
-    }
+/// A queued `_KDPC`.
+#[record]
+pub struct Dpc {
+    pub address: VirtAddr,
+    /// `DeferredRoutine`.
+    pub deferred_routine: DiagnosticValue<Option<VirtAddr>>,
+    /// `deferred_routine` as a symbol, if it resolves to one.
+    pub deferred_routine_symbol: DiagnosticValue<Option<String>>,
+    /// `DeferredContext`.
+    pub context: DiagnosticValue<Option<VirtAddr>>,
+    /// `Importance`.
+    pub importance: DiagnosticValue<u8>,
+}
 
-    /// One of a processor's DPC queues.
-    DpcQueue {
-        processor: u16,
-        /// 0 for the normal queue, 1 for the threaded queue.
-        queue: u8,
-        entries: Vec<Dpc>,
-        /// How the list walk ended.
-        termination: ListEnd,
-    }
+/// One of a processor's DPC queues.
+#[record]
+pub struct DpcQueue {
+    pub processor: u16,
+    /// 0 for the normal queue, 1 for the threaded queue.
+    pub queue: u8,
+    pub entries: Vec<Dpc>,
+    /// How the list walk ended.
+    pub termination: ListEnd,
+}
 
-    /// The queued DPCs of all processors (`!dpcs`).
-    DpcQueues {
-        /// The queues that are not empty.
-        queues: Vec<DpcQueue>,
-        /// The total number of DPCs in `queues`.
-        total: usize,
-        /// Whether the walk stopped at its entry limit.
-        truncated: bool,
-        errors: Vec<SchedulerError>,
-    }
+/// The queued DPCs of all processors (`!dpcs`).
+#[record]
+pub struct DpcQueues {
+    /// The queues that are not empty.
+    pub queues: Vec<DpcQueue>,
+    /// The total number of DPCs in `queues`.
+    pub total: usize,
+    /// Whether the walk stopped at its entry limit.
+    pub truncated: bool,
+    pub errors: Vec<SchedulerError>,
+}
 
-    /// A `_KTIMER` and its decoded DPC.
-    KernelTimer {
-        address: VirtAddr,
-        /// `DueTime`, the interrupt time when the timer expires (see
-        /// `TargetTime.interrupt_time`).
-        due_time: Diag<Hex>,
-        /// `Period` in milliseconds. 0 for a one-shot timer.
-        period: Diag<u32>,
-        /// `Dpc` in the encoded form that the kernel stores.
-        dpc_encoded: Diag<Option<VirtAddr>>,
-        /// The decoded `_KDPC` address. The value inside is `None` if the timer
-        /// has no DPC.
-        dpc: Diag<Option<VirtAddr>>,
-        /// The DPC's `DeferredRoutine`.
-        dpc_routine: Diag<Option<VirtAddr>>,
-        /// `dpc_routine` as a symbol, if it resolves to one.
-        dpc_routine_symbol: Diag<Option<String>>,
-    }
+/// A `_KTIMER` and its decoded DPC.
+#[record]
+pub struct KernelTimer {
+    pub address: VirtAddr,
+    /// `DueTime`, the interrupt time when the timer expires (see
+    /// `TargetTime.interrupt_time`).
+    #[record(hex)]
+    pub due_time: DiagnosticValue<u64>,
+    /// `Period` in milliseconds. 0 for a one-shot timer.
+    pub period: DiagnosticValue<u32>,
+    /// `Dpc` in the encoded form that the kernel stores.
+    pub dpc_encoded: DiagnosticValue<Option<VirtAddr>>,
+    /// The decoded `_KDPC` address. The value inside is `None` if the timer
+    /// has no DPC.
+    pub dpc: DiagnosticValue<Option<VirtAddr>>,
+    /// The DPC's `DeferredRoutine`.
+    pub dpc_routine: DiagnosticValue<Option<VirtAddr>>,
+    /// `dpc_routine` as a symbol, if it resolves to one.
+    pub dpc_routine_symbol: DiagnosticValue<Option<String>>,
+}
 
-    /// A timer in the timer table of a processor.
-    TimerTableEntry {
-        processor: u16,
-        /// The index of the timer-table bucket.
-        bucket: u16,
-        timer: KernelTimer,
-    }
+/// A timer in the timer table of a processor.
+#[record]
+pub struct TimerTableEntry {
+    pub processor: u16,
+    /// The index of the timer-table bucket.
+    pub bucket: u16,
+    pub timer: KernelTimer,
+}
 
-    /// A timer-table bucket whose list walk did not end at its head.
-    TimerBucketEnd {
-        processor: u16,
-        bucket: u16,
-        termination: ListEnd,
-    }
+/// A timer-table bucket whose list walk did not end at its head.
+#[record]
+pub struct TimerBucketEnd {
+    pub processor: u16,
+    pub bucket: u16,
+    pub termination: ListEnd,
+}
 
-    /// The timer tables of all processors (`!timer`).
-    TimerTable {
-        /// The interrupt time (`KUSER_SHARED_DATA.InterruptTime`) when ntoseye
-        /// read the tables. The `due_time` of each entry uses this time scale.
-        interrupt_time: Diag<Hex>,
-        entries: Vec<TimerTableEntry>,
-        /// The buckets whose walk did not end normally.
-        terminations: Vec<TimerBucketEnd>,
-        /// The number of timers in `entries`.
-        total: usize,
-        /// Whether the walk stopped at its entry limit.
-        truncated: bool,
-        errors: Vec<SchedulerError>,
-    }
+/// The timer tables of all processors (`!timer`).
+#[record]
+pub struct TimerTable {
+    /// The interrupt time (`KUSER_SHARED_DATA.InterruptTime`) when ntoseye
+    /// read the tables. The `due_time` of each entry uses this time scale.
+    #[record(hex)]
+    pub interrupt_time: DiagnosticValue<u64>,
+    pub entries: Vec<TimerTableEntry>,
+    /// The buckets whose walk did not end normally.
+    pub terminations: Vec<TimerBucketEnd>,
+    /// The number of timers in `entries`.
+    pub total: usize,
+    /// Whether the walk stopped at its entry limit.
+    pub truncated: bool,
+    pub errors: Vec<SchedulerError>,
+}
 
-    /// The thread or process that `!apc` inspects.
-    ApcSelection {
-        /// `thread`, `process`, or `number`. A `number` is not yet resolved to
-        /// a thread or a process.
-        kind: &'static str,
-        /// The given value: an ETHREAD, KTHREAD, or TID, or a PID or EPROCESS.
-        value: Hex,
-    }
+/// The thread or process that `!apc` inspects.
+#[record]
+pub struct ApcSelection {
+    /// `thread`, `process`, or `number`. A `number` is not yet resolved to
+    /// a thread or a process.
+    pub kind: &'static str,
+    /// The given value: an ETHREAD, KTHREAD, or TID, or a PID or EPROCESS.
+    #[record(hex)]
+    pub value: u64,
+}
 
-    /// A queued `_KAPC`.
-    Apc {
-        address: VirtAddr,
-        /// `KernelRoutine`.
-        kernel_routine: Diag<Option<VirtAddr>>,
-        /// `kernel_routine` as a symbol, if it resolves to one.
-        kernel_routine_symbol: Diag<Option<String>>,
-        /// `NormalRoutine`. The value inside is `None` for a special kernel APC.
-        normal_routine: Diag<Option<VirtAddr>>,
-        /// `normal_routine` as a symbol, if it resolves to one.
-        normal_routine_symbol: Diag<Option<String>>,
-    }
+/// A queued `_KAPC`.
+#[record]
+pub struct Apc {
+    pub address: VirtAddr,
+    /// `KernelRoutine`.
+    pub kernel_routine: DiagnosticValue<Option<VirtAddr>>,
+    /// `kernel_routine` as a symbol, if it resolves to one.
+    pub kernel_routine_symbol: DiagnosticValue<Option<String>>,
+    /// `NormalRoutine`. The value inside is `None` for a special kernel APC.
+    pub normal_routine: DiagnosticValue<Option<VirtAddr>>,
+    /// `normal_routine` as a symbol, if it resolves to one.
+    pub normal_routine_symbol: DiagnosticValue<Option<String>>,
+}
 
-    /// The kernel-mode and user-mode APC queues of a thread.
-    ApcThread {
-        thread: ThreadSummary,
-        kernel: Vec<Apc>,
-        user: Vec<Apc>,
-        /// How the kernel-mode list walk ended.
-        kernel_termination: ListEnd,
-        /// How the user-mode list walk ended.
-        user_termination: ListEnd,
-        /// The error, if ntoseye could not read the APC state of the thread.
-        state_error: Option<String>,
-    }
+/// The kernel-mode and user-mode APC queues of a thread.
+#[record]
+pub struct ApcThread {
+    pub thread: ThreadSummary,
+    pub kernel: Vec<Apc>,
+    pub user: Vec<Apc>,
+    /// How the kernel-mode list walk ended.
+    pub kernel_termination: ListEnd,
+    /// How the user-mode list walk ended.
+    pub user_termination: ListEnd,
+    /// The error, if ntoseye could not read the APC state of the thread.
+    pub state_error: Option<String>,
+}
 
-    /// The APC queues of all threads, of one process, or of one thread
-    /// (`!apc`).
-    ApcQueues {
-        /// `all`, `current_thread`, or the selected thread or process.
-        selector: ApcSelectorValue,
-        threads: Vec<ApcThread>,
-        /// The total number of APCs in `threads`.
-        total: usize,
-        /// Whether the walk stopped at its entry limit.
-        truncated: bool,
-        /// The error, if ntoseye could not resolve the APC layout.
-        layout_error: Option<String>,
-    }
+/// The APC queues of all threads, of one process, or of one thread
+/// (`!apc`).
+#[record]
+pub struct ApcQueues {
+    /// `all`, `current_thread`, or the selected thread or process.
+    pub selector: ApcSelectorValue,
+    pub threads: Vec<ApcThread>,
+    /// The total number of APCs in `threads`.
+    pub total: usize,
+    /// Whether the walk stopped at its entry limit.
+    pub truncated: bool,
+    /// The error, if ntoseye could not resolve the APC layout.
+    pub layout_error: Option<String>,
+}
 
-    /// The state and walked stack of a thread (`!stacks`).
-    ThreadStack {
-        thread: ThreadSummary,
-        /// The symbol of the top frame.
-        top_symbol: Diag<Option<String>>,
-        /// The frames, innermost first. Level 0 has the top frame, level 1 has
-        /// up to 32 frames, and level 2 has up to 64 frames.
-        frames: Vec<execution::StackFrame>,
-        /// The number of frames past the walk limit, which are not listed.
-        truncated: usize,
-        /// The error, if the stack walk failed.
-        error: Option<String>,
-    }
+/// The state and walked stack of a thread (`!stacks`).
+#[record]
+pub struct ThreadStack {
+    pub thread: ThreadSummary,
+    /// The symbol of the top frame.
+    pub top_symbol: DiagnosticValue<Option<String>>,
+    /// The frames, innermost first. Level 0 has the top frame, level 1 has
+    /// up to 32 frames, and level 2 has up to 64 frames.
+    pub frames: Vec<execution::StackFrame>,
+    /// The number of frames past the walk limit, which are not listed.
+    pub truncated: usize,
+    /// The error, if the stack walk failed.
+    pub error: Option<String>,
+}
 
-    /// Threads with their states and stacks (`!stacks`).
-    ThreadStacks {
-        /// The detail level (0, 1, or 2), which sets the frame limit of the
-        /// walk.
-        level: u8,
-        /// The symbol or module filter, if you gave one.
-        filter: Option<String>,
-        scanned_threads: usize,
-        displayed_threads: usize,
-        /// Whether an interrupt stopped the walk before it finished.
-        interrupted: bool,
-        threads: Vec<ThreadStack>,
-    }
+/// Threads with their states and stacks (`!stacks`).
+#[record]
+pub struct ThreadStacks {
+    /// The detail level (0, 1, or 2), which sets the frame limit of the
+    /// walk.
+    pub level: u8,
+    /// The symbol or module filter, if you gave one.
+    pub filter: Option<String>,
+    pub scanned_threads: usize,
+    pub displayed_threads: usize,
+    /// Whether an interrupt stopped the walk before it finished.
+    pub interrupted: bool,
+    pub threads: Vec<ThreadStack>,
+}
 
-    /// A thread whose stack walk failed, so ntoseye could not search or group
+/// A thread whose stack walk failed, so ntoseye could not search or group
+/// it.
+#[record]
+pub struct UnwalkedThread {
+    pub thread: ThreadSummary,
+    /// The reason the walk failed.
+    pub error: String,
+}
+
+/// A thread with a stack frame that matches the `!findstack` pattern.
+#[record]
+pub struct FindStackThread {
+    pub thread: ThreadSummary,
+    /// The number of frames that matched.
+    pub match_count: usize,
+    /// The frames that matched. `None` at level 0.
+    pub matching_frames: Option<Vec<execution::StackFrame>>,
+    /// The whole walked stack, innermost first. `None` below level 2.
+    pub frames: Option<Vec<execution::StackFrame>>,
+    /// The number of frames past the walk limit, which ntoseye did not
+    /// search. `None` below level 2.
+    pub truncated: Option<usize>,
+}
+
+/// Threads with a stack frame that matches a symbol or module
+/// (`!findstack`).
+#[record]
+pub struct FindStack {
+    pub pattern: String,
+    /// The detail level. 0 counts the matches, 1 lists them, and 2 adds the
+    /// whole stacks.
+    pub level: u8,
+    pub scanned_threads: usize,
+    /// Whether an interrupt stopped the walk before it finished.
+    pub interrupted: bool,
+    pub threads: Vec<FindStackThread>,
+    pub unwalked: Vec<UnwalkedThread>,
+}
+
+/// An `_IO_WORKITEM` that `IoQueueWorkItem` queued. Its work item runs
+/// `nt!IopProcessWorkItem`, which calls `routine`.
+#[record]
+pub struct IoWorkItem {
+    /// The `_IO_WORKITEM` that holds the queued `_WORK_QUEUE_ITEM`.
+    pub address: VirtAddr,
+    pub routine: VirtAddr,
+    /// `routine` as a symbol, when one resolves.
+    pub routine_symbol: Option<String>,
+    /// The device or driver object that the item was allocated for.
+    pub io_object: VirtAddr,
+    pub context: VirtAddr,
+}
+
+/// A pending `_WORK_QUEUE_ITEM`.
+#[record]
+pub struct WorkItem {
+    pub address: VirtAddr,
+    /// `WorkerRoutine`.
+    pub routine: VirtAddr,
+    /// `routine` as a symbol, when one resolves.
+    pub routine_symbol: Option<String>,
+    pub parameter: VirtAddr,
+    /// The I/O work item that owns this item, if `IoQueueWorkItem` queued
     /// it.
-    UnwalkedThread {
-        thread: ThreadSummary,
-        /// The reason the walk failed.
-        error: String,
-    }
-
-    /// A thread with a stack frame that matches the `!findstack` pattern.
-    FindStackThread {
-        thread: ThreadSummary,
-        /// The number of frames that matched.
-        match_count: usize,
-        /// The frames that matched. `None` at level 0.
-        matching_frames: Option<Vec<execution::StackFrame>>,
-        /// The whole walked stack, innermost first. `None` below level 2.
-        frames: Option<Vec<execution::StackFrame>>,
-        /// The number of frames past the walk limit, which ntoseye did not
-        /// search. `None` below level 2.
-        truncated: Option<usize>,
-    }
-
-    /// Threads with a stack frame that matches a symbol or module
-    /// (`!findstack`).
-    FindStack {
-        pattern: String,
-        /// The detail level. 0 counts the matches, 1 lists them, and 2 adds the
-        /// whole stacks.
-        level: u8,
-        scanned_threads: usize,
-        /// Whether an interrupt stopped the walk before it finished.
-        interrupted: bool,
-        threads: Vec<FindStackThread>,
-        unwalked: Vec<UnwalkedThread>,
-    }
-
-    /// An `_IO_WORKITEM` that `IoQueueWorkItem` queued. Its work item runs
-    /// `nt!IopProcessWorkItem`, which calls `routine`.
-    IoWorkItem {
-        /// The `_IO_WORKITEM` that holds the queued `_WORK_QUEUE_ITEM`.
-        address: VirtAddr,
-        routine: VirtAddr,
-        /// `routine` as a symbol, when one resolves.
-        routine_symbol: Option<String>,
-        /// The device or driver object that the item was allocated for.
-        io_object: VirtAddr,
-        context: VirtAddr,
-    }
-
-    /// A pending `_WORK_QUEUE_ITEM`.
-    WorkItem {
-        address: VirtAddr,
-        /// `WorkerRoutine`.
-        routine: VirtAddr,
-        /// `routine` as a symbol, when one resolves.
-        routine_symbol: Option<String>,
-        parameter: VirtAddr,
-        /// The I/O work item that owns this item, if `IoQueueWorkItem` queued
-        /// it.
-        io_work_item: Option<IoWorkItem>,
-    }
-
-    /// One of the 32 priority lists of a work queue.
-    WorkQueuePriority {
-        priority: u8,
-        /// The `WORK_QUEUE_TYPE`s that `ExQueueWorkItem` maps to this priority.
-        queue_types: Vec<&'static str>,
-        /// `CurrentCount[priority]`, the number of threads that run an item of
-        /// this priority.
-        current_count: i32,
-        /// The pending work items (key `items`).
-        work_items: Vec<WorkItem> => "items",
-        /// How the list walk ended.
-        termination: ListEnd,
-    }
-
-    /// A thread that serves a work queue.
-    WorkerThread {
-        kthread: VirtAddr,
-        thread: Diag<ThreadSummary>,
-        /// The stack of the thread. `None` if stacks were not requested or the
-        /// thread did not decode.
-        stack: Option<Diag<Vec<execution::StackFrame>>>,
-    }
-
-    /// An `_EX_WORK_QUEUE`.
-    WorkQueue {
-        address: VirtAddr,
-        /// The `_EPARTITION` it belongs to.
-        partition: VirtAddr,
-        /// The NUMA node.
-        node: u16,
-        queue_index: u32,
-        /// The name of `queue_index`, if it is a known index.
-        queue_index_name: Option<String>,
-        items_processed: u32,
-        items_processed_last_pass: u32,
-        thread_count: i32,
-        min_threads: u64,
-        max_threads: i32,
-        /// `_KPRIQUEUE.MaximumCount`, the maximum number of threads that can run
-        /// items at the same time.
-        concurrency: u32,
-        /// The number of items on all 32 priority lists, including items that
-        /// are not listed.
-        pending: u64,
-        /// The priority lists that hold items or have running threads, limited
-        /// to the requested priorities.
-        priorities: Vec<WorkQueuePriority>,
-        threads: Vec<WorkerThread>,
-        /// How the worker-thread list walk ended.
-        threads_termination: ListEnd,
-    }
-
-    /// All executive worker queues (`!exqueue`).
-    WorkQueues {
-        /// The `!exqueue` flags.
-        flags: Hex,
-        /// The priorities that flags 0x10, 0x20, and 0x40 selected. `None` means
-        /// all priorities.
-        priority_filter: Option<Vec<u8>>,
-        queues: Vec<WorkQueue>,
-        /// The partitions or queues that ntoseye could not decode.
-        errors: Vec<String>,
-    }
-
-    /// Threads whose walked stacks have the same frames and truncation.
-    UniqStackGroup {
-        thread_count: usize,
-        threads: Vec<ThreadSummary>,
-        /// The frames of the first thread, innermost first. The other threads
-        /// have the same instruction pointers, but their stack pointers can
-        /// differ.
-        frames: Vec<execution::StackFrame>,
-        /// The number of frames past the walk limit, which ntoseye did not
-        /// compare.
-        truncated: usize,
-    }
-
-    /// The threads that `!uniqstack` grouped.
-    UniqStackScope {
-        /// `all` or `process`.
-        kind: &'static str,
-        /// The process ID. `None` for `all`.
-        pid: Option<u64>,
-        /// The image name of the process. `None` for `all`.
-        name: Option<String>,
-    }
-
-    /// Threads grouped by identical call stacks (`!uniqstack`).
-    UniqStacks {
-        scope: UniqStackScope,
-        scanned_threads: usize,
-        /// The number of threads whose stacks ntoseye walked and grouped.
-        walked_threads: usize,
-        /// Whether an interrupt stopped the walk before it finished.
-        interrupted: bool,
-        /// The groups, in the order that ntoseye walked their first threads.
-        groups: Vec<UniqStackGroup>,
-        unwalked: Vec<UnwalkedThread>,
-    }
+    pub io_work_item: Option<IoWorkItem>,
 }
 
-unions! {
-    /// `!apc`'s selector: a name for the whole-walk selections, an
-    /// [`ApcSelection`] for a thread or process.
-    ApcSelectorValue {
-        Name(&'static str),
-        Selection(ApcSelection),
-    }
+/// One of the 32 priority lists of a work queue.
+#[record]
+pub struct WorkQueuePriority {
+    pub priority: u8,
+    /// The `WORK_QUEUE_TYPE`s that `ExQueueWorkItem` maps to this priority.
+    pub queue_types: Vec<&'static str>,
+    /// `CurrentCount[priority]`, the number of threads that run an item of
+    /// this priority.
+    pub current_count: i32,
+    /// The pending work items (key `items`).
+    #[record(rename = "items")]
+    pub work_items: Vec<WorkItem>,
+    /// How the list walk ended.
+    pub termination: ListEnd,
 }
 
-fn optional_thread(value: &DiagnosticValue<Option<ThreadInfo>>) -> DiagnosticValue<Option<ThreadSummary>> {
+/// A thread that serves a work queue.
+#[record]
+pub struct WorkerThread {
+    pub kthread: VirtAddr,
+    pub thread: DiagnosticValue<ThreadSummary>,
+    /// The stack of the thread. `None` if stacks were not requested or the
+    /// thread did not decode.
+    pub stack: Option<DiagnosticValue<Vec<execution::StackFrame>>>,
+}
+
+/// An `_EX_WORK_QUEUE`.
+#[record]
+pub struct WorkQueue {
+    pub address: VirtAddr,
+    /// The `_EPARTITION` it belongs to.
+    pub partition: VirtAddr,
+    /// The NUMA node.
+    pub node: u16,
+    pub queue_index: u32,
+    /// The name of `queue_index`, if it is a known index.
+    pub queue_index_name: Option<String>,
+    pub items_processed: u32,
+    pub items_processed_last_pass: u32,
+    pub thread_count: i32,
+    pub min_threads: u64,
+    pub max_threads: i32,
+    /// `_KPRIQUEUE.MaximumCount`, the maximum number of threads that can run
+    /// items at the same time.
+    pub concurrency: u32,
+    /// The number of items on all 32 priority lists, including items that
+    /// are not listed.
+    pub pending: u64,
+    /// The priority lists that hold items or have running threads, limited
+    /// to the requested priorities.
+    pub priorities: Vec<WorkQueuePriority>,
+    pub threads: Vec<WorkerThread>,
+    /// How the worker-thread list walk ended.
+    pub threads_termination: ListEnd,
+}
+
+/// All executive worker queues (`!exqueue`).
+#[record]
+pub struct WorkQueues {
+    /// The `!exqueue` flags.
+    #[record(hex)]
+    pub flags: u64,
+    /// The priorities that flags 0x10, 0x20, and 0x40 selected. `None` means
+    /// all priorities.
+    pub priority_filter: Option<Vec<u8>>,
+    pub queues: Vec<WorkQueue>,
+    /// The partitions or queues that ntoseye could not decode.
+    pub errors: Vec<String>,
+}
+
+/// Threads whose walked stacks have the same frames and truncation.
+#[record]
+pub struct UniqStackGroup {
+    pub thread_count: usize,
+    pub threads: Vec<ThreadSummary>,
+    /// The frames of the first thread, innermost first. The other threads
+    /// have the same instruction pointers, but their stack pointers can
+    /// differ.
+    pub frames: Vec<execution::StackFrame>,
+    /// The number of frames past the walk limit, which ntoseye did not
+    /// compare.
+    pub truncated: usize,
+}
+
+/// The threads that `!uniqstack` grouped.
+#[record]
+pub struct UniqStackScope {
+    /// `all` or `process`.
+    pub kind: &'static str,
+    /// The process ID. `None` for `all`.
+    pub pid: Option<u64>,
+    /// The image name of the process. `None` for `all`.
+    pub name: Option<String>,
+}
+
+/// Threads grouped by identical call stacks (`!uniqstack`).
+#[record]
+pub struct UniqStacks {
+    pub scope: UniqStackScope,
+    pub scanned_threads: usize,
+    /// The number of threads whose stacks ntoseye walked and grouped.
+    pub walked_threads: usize,
+    /// Whether an interrupt stopped the walk before it finished.
+    pub interrupted: bool,
+    /// The groups, in the order that ntoseye walked their first threads.
+    pub groups: Vec<UniqStackGroup>,
+    pub unwalked: Vec<UnwalkedThread>,
+}
+
+/// `!apc`'s selector: a name for the whole-walk selections, an
+/// [`ApcSelection`] for a thread or process.
+#[record]
+pub enum ApcSelectorValue {
+    Name(&'static str),
+    Selection(ApcSelection),
+}
+
+fn optional_thread(
+    value: &DiagnosticValue<Option<ThreadInfo>>,
+) -> DiagnosticValue<Option<ThreadSummary>> {
     value.map(|thread| thread.as_ref().map(|thread| thread_summary(thread, None)))
 }
 
@@ -432,9 +468,9 @@ pub fn running(detail: &detail::RunningDetail) -> RunningProcessors {
                 next_thread: optional_thread(&processor.next_thread),
                 idle_thread: optional_thread(&processor.idle_thread),
                 short_stack: processor
-                        .short_stack
-                        .as_ref()
-                        .map(|stack| stack.map(|stack| stack_frames(stack))),
+                    .short_stack
+                    .as_ref()
+                    .map(|stack| stack.map(|stack| stack_frames(stack))),
             })
             .collect(),
     }
@@ -540,10 +576,7 @@ fn apc_selector(selector: ApcSelector) -> ApcSelectorValue {
         ApcSelector::Process(value) => ("process", value),
         ApcSelector::Number(value) => ("number", value),
     };
-    ApcSelectorValue::Selection(ApcSelection {
-        kind,
-        value,
-    })
+    ApcSelectorValue::Selection(ApcSelection { kind, value })
 }
 
 fn apc(apc: &detail::ApcDetail) -> Apc {

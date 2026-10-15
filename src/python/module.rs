@@ -19,7 +19,7 @@ use crate::target::image::DhParts;
 use crate::target::object::DriverObjectInfo;
 use crate::types::{Dtb, VirtAddr};
 use crate::view::module::Section;
-use crate::view::shape::Typed;
+use crate::view::record::Typed;
 use crate::view::{self};
 use pelite::PeView;
 
@@ -418,7 +418,7 @@ impl Module {
     /// The module as a plain `dict`.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
-        view_dict(py, view::module::module(&self.info))
+        view_dict(py, &view::module::module(&self.info))
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -656,7 +656,7 @@ impl Driver {
     /// The driver object as a plain `dict`.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
-        view_dict(py, view::object::driver_object_info(&self.info))
+        view_dict(py, &view::object::driver_object_info(&self.info))
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {

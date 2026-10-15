@@ -23,7 +23,7 @@ use crate::session::{
 };
 use crate::types::VirtAddr;
 use crate::view;
-use crate::view::shape::Typed;
+use crate::view::record::Typed;
 
 thread_local! {
     static IN_CONDITION: Cell<bool> = const { Cell::new(false) };

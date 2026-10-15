@@ -15,7 +15,7 @@ use crate::target::MAX_SEARCH_BYTES;
 use crate::target::{CODE_BITNESS_X86, StringDescriptor};
 use crate::types::VirtAddr;
 use crate::view;
-use crate::view::shape::Typed;
+use crate::view::record::Typed;
 
 /// A guest address space: `dbg.memory` (kernel), `proc.memory`, `cpu.memory`,
 /// or `dbg.physical`.
