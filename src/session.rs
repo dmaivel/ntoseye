@@ -146,14 +146,6 @@ pub enum ContinueOutcome {
     Halted { rip: u64 },
 }
 
-/// The readable contents of a NUL-terminated string, without the terminator.
-pub struct TerminatedRead {
-    /// Readable bytes before the terminator or the first unreadable page.
-    pub bytes: Vec<u8>,
-    /// The string ran into an unreadable page before its terminator.
-    pub unreadable: bool,
-}
-
 /// Whether an instruction starts at an address. See
 /// [`Session::instruction_boundary`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

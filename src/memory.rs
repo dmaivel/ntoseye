@@ -87,6 +87,70 @@ pub fn read_page_chunks(
     running.map(|()| (data, valid))
 }
 
+/// The readable contents of a NUL-terminated string, without the terminator.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TerminatedRead {
+    /// Readable bytes before the terminator or the first unreadable page.
+    pub bytes: Vec<u8>,
+    /// The string ran into an unreadable page before its terminator.
+    pub unreadable: bool,
+}
+
+/// How a [`read_terminated`] read failed.
+#[derive(Debug)]
+pub enum ScanFault {
+    /// The page is unreadable: the scan ends with the bytes before it, or
+    /// with this error when there are none.
+    Unreadable(Error),
+    /// The scan ends with this error, whatever it has read.
+    Fatal(Error),
+}
+
+/// Scan the string of `unit`-byte characters at `addr`, at most `max_bytes`
+/// long, for its first all-zero unit, reading a page at a time with `read`.
+/// A unit split by a page boundary is joined before the check, and the
+/// result holds whole units only. Addresses wrap at the top of the address
+/// space; `read` decides whether that is an error. `unit` must not be zero.
+pub fn read_terminated(
+    addr: VirtAddr,
+    max_bytes: usize,
+    unit: usize,
+    mut read: impl FnMut(VirtAddr, &mut [u8]) -> std::result::Result<(), ScanFault>,
+) -> Result<TerminatedRead> {
+    let mut bytes = Vec::with_capacity(max_bytes.min(PAGE_SIZE));
+    let mut unreadable = false;
+    while bytes.len() < max_bytes {
+        let start = bytes.len();
+        let current = addr + start as u64;
+        let page_remaining = PAGE_SIZE - current.page_offset() as usize;
+        bytes.resize(start + page_remaining.min(max_bytes - start), 0);
+        match read(current, &mut bytes[start..]) {
+            Ok(()) => {}
+            Err(ScanFault::Unreadable(error)) if start == 0 => return Err(error),
+            Err(ScanFault::Unreadable(_)) => {
+                bytes.truncate(start);
+                unreadable = true;
+                break;
+            }
+            Err(ScanFault::Fatal(error)) => return Err(error),
+        }
+        let complete_units = bytes.len() / unit;
+        if let Some(index) = (start / unit..complete_units).find(|&index| {
+            bytes[index * unit..(index + 1) * unit]
+                .iter()
+                .all(|&b| b == 0)
+        }) {
+            bytes.truncate(index * unit);
+            return Ok(TerminatedRead {
+                bytes,
+                unreadable: false,
+            });
+        }
+    }
+    bytes.truncate(bytes.len() - bytes.len() % unit);
+    Ok(TerminatedRead { bytes, unreadable })
+}
+
 /// Offsets of every occurrence of `pattern` in `haystack`, overlapping ones
 /// included. `pattern` must not be empty. A search reads up to 1 GiB, so this
 /// uses `memmem`'s vectorized search rather than comparing a window at every
@@ -1289,5 +1353,48 @@ mod tests {
         assert_eq!(offsets(b"abcab", b"ab"), [0, 3]);
         assert_eq!(offsets(b"ab", b"ab"), [0]);
         assert_eq!(offsets(b"a", b"ab"), [] as [usize; 0]);
+    }
+
+    /// A fault on the first page is the scan's error; an unreadable later
+    /// page keeps the prefix and says so, unless the reader calls it fatal;
+    /// the prefix holds whole units only.
+    #[test]
+    fn terminated_scan_keeps_the_prefix_before_an_unreadable_page() {
+        const READABLE: u64 = 0x1000;
+        let end = READABLE + PAGE_SIZE as u64;
+        let read = |fatal: bool| {
+            move |at: VirtAddr, buf: &mut [u8]| {
+                if at.0 >= READABLE && at.0 < end {
+                    buf.fill(b'A');
+                    if at.0 + buf.len() as u64 == end {
+                        buf[buf.len() - 1] = 0;
+                    }
+                    return Ok(());
+                }
+                let error = Error::BadVirtualAddress(at);
+                Err(if fatal {
+                    ScanFault::Fatal(error)
+                } else {
+                    ScanFault::Unreadable(error)
+                })
+            }
+        };
+
+        assert!(read_terminated(VirtAddr(end), 8, 1, read(false)).is_err());
+
+        let tail = VirtAddr(end - 2);
+        let prefix = read_terminated(tail, 8, 1, read(false)).unwrap();
+        assert_eq!(prefix.bytes, b"A");
+        assert!(!prefix.unreadable);
+
+        let wide = read_terminated(VirtAddr(end - 3), 8, 2, read(false)).unwrap();
+        assert_eq!(
+            wide,
+            TerminatedRead {
+                bytes: b"AA".to_vec(),
+                unreadable: true
+            }
+        );
+        assert!(read_terminated(VirtAddr(end - 3), 8, 2, read(true)).is_err());
     }
 }

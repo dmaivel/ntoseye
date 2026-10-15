@@ -9,7 +9,9 @@ use crate::{
     error::{Error, Result},
     guest::EvmcsState,
     layout::{StructRef, TypeInfo, Types},
-    memory::{AddressSpace, MemoryOps, PAGE_SIZE, pattern_offsets, read_page_chunks},
+    memory::{
+        self, AddressSpace, MemoryOps, PAGE_SIZE, ScanFault, pattern_offsets, read_page_chunks,
+    },
     phys::PhysMem,
     types::{Dtb, PhysAddr, VirtAddr},
 };
@@ -495,26 +497,12 @@ impl Target {
     /// [`read_unicode_string`](Self::read_unicode_string).
     pub fn read_c_string(&self, addr: VirtAddr, max_len: usize) -> Result<String> {
         let mem = self.context_memory();
-        let mut bytes = Vec::new();
-        while bytes.len() < max_len {
-            let cur = addr + bytes.len() as u64;
-            let to_page_end = PAGE_SIZE - cur.page_offset() as usize;
-            let chunk = to_page_end.min(max_len - bytes.len());
-            let mut buf = vec![0u8; chunk];
-            match mem.read_bytes(cur, &mut buf) {
-                Ok(()) => {}
-                // Nothing readable at the very start is a real error; once we
-                // have some bytes, a fault just terminates the string.
-                Err(_) if !bytes.is_empty() => break,
-                Err(e) => return Err(e),
-            }
-            if let Some(nul) = buf.iter().position(|&b| b == 0) {
-                bytes.extend_from_slice(&buf[..nul]);
-                return Ok(String::from_utf8_lossy(&bytes).into_owned());
-            }
-            bytes.extend_from_slice(&buf);
-        }
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+        // Nothing readable at the very start is a real error; once there are
+        // some bytes, any fault just terminates the string.
+        let read = memory::read_terminated(addr, max_len, 1, |at, buf| {
+            mem.read_bytes(at, buf).map_err(ScanFault::Unreadable)
+        })?;
+        Ok(String::from_utf8_lossy(&read.bytes).into_owned())
     }
 
     pub fn read_layout_field<T>(&self, layout: &TypeInfo, base: VirtAddr, name: &str) -> Result<T>

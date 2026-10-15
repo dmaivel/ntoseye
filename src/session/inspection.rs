@@ -17,11 +17,10 @@ use crate::disasm::{
 };
 use crate::error::{Error, Result};
 use crate::guest::hypervisor::{HvPartition, HvVirtualProcessor, processor_guest_vp};
-use crate::memory::{MemoryOps, PAGE_SIZE, read_page_chunks};
+use crate::memory::{self, MemoryOps, PAGE_SIZE, ScanFault, TerminatedRead, read_page_chunks};
 use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::{
-    ContinueOutcome, ExceptionRecord, InstructionBoundary, PageInReport, Session, TerminatedRead,
-    VpRegisters,
+    ContinueOutcome, ExceptionRecord, InstructionBoundary, PageInReport, Session, VpRegisters,
 };
 use crate::target::meta::TargetVersionDetail;
 use crate::target::usermode::ImageCheckDetail;
@@ -210,7 +209,8 @@ impl Session {
 
     /// Read up to `max_units` NUL-terminated 1- or 2-byte units. The returned
     /// bytes exclude the terminator; a later unreadable page is reported with
-    /// the readable prefix, while a failure at the start remains an error.
+    /// the readable prefix, while a failure at the start, a running target
+    /// and a string past the top of the address space remain errors.
     pub fn read_terminated(
         &self,
         addr: VirtAddr,
@@ -225,45 +225,18 @@ impl Session {
         let max_bytes = max_units
             .checked_mul(unit)
             .ok_or_else(|| Error::InvalidArgument("string length overflows".to_string()))?;
-        let mut bytes = Vec::with_capacity(max_bytes.min(PAGE_SIZE));
-        let mut unreadable = false;
-        while bytes.len() < max_bytes {
-            let offset = u64::try_from(bytes.len())
-                .map_err(|_| Error::InvalidArgument("string address overflows".to_string()))?;
-            let current = addr
-                .0
-                .checked_add(offset)
-                .ok_or_else(|| Error::InvalidArgument("string address overflows".to_string()))?;
-            let page_remaining = PAGE_SIZE - VirtAddr(current).page_offset() as usize;
-            let chunk_len = page_remaining.min(max_bytes - bytes.len());
-            let mut page = [0u8; PAGE_SIZE];
-            if let Err(error) = self.read_masked(VirtAddr(current), &mut page[..chunk_len]) {
-                if matches!(&error, Error::TargetRunning(_)) {
-                    return Err(error);
-                }
-                if bytes.is_empty() {
-                    return Err(error);
-                }
-                unreadable = true;
-                break;
+        memory::read_terminated(addr, max_bytes, unit, |at, buf| {
+            // A wrapped address is a string past the top of the address space.
+            if at < addr {
+                return Err(ScanFault::Fatal(Error::InvalidArgument(
+                    "string address overflows".to_string(),
+                )));
             }
-
-            let first_new_unit = bytes.len() / unit;
-            bytes.extend_from_slice(&page[..chunk_len]);
-            let complete_units = bytes.len() / unit;
-            if let Some(index) = (first_new_unit..complete_units).find(|&index| {
-                let start = index * unit;
-                bytes[start..start + unit].iter().all(|byte| *byte == 0)
-            }) {
-                bytes.truncate(index * unit);
-                return Ok(TerminatedRead {
-                    bytes,
-                    unreadable: false,
-                });
-            }
-        }
-        bytes.truncate(bytes.len() - bytes.len() % unit);
-        Ok(TerminatedRead { bytes, unreadable })
+            self.read_masked(at, buf).map_err(|error| match error {
+                Error::TargetRunning(_) => ScanFault::Fatal(error),
+                error => ScanFault::Unreadable(error),
+            })
+        })
     }
 
     /// Read as much of `buf` as the guest will give with [`Self::read_masked`],
