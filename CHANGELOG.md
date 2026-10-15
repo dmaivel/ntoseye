@@ -18,6 +18,7 @@ Keeping this file:
 ### Changed
 
 - `q` exits sooner, by 0.2 s on a minidump of a process with many modules loaded.
+- `k` and `~*k` on a minidump that lacks a module's code ask the symbol server for the module's image once per session, as for PDBs, instead of at every stack walk when the server does not have it or cannot be reached; `.reload` asks again. Offline, ten `~*k` on an ARM64 minidump took 1.7 s and now take 0.3 s.
 
 ## v0.49.1 (2026-10-14)
 
