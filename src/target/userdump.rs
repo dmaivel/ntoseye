@@ -15,7 +15,7 @@ use crate::{
     ntstatus::ntstatus_name,
     types::{Arch, VirtAddr},
     unwind::{format_symbol, resolve_thread_trace_context, try_format_symbol},
-    userdump::{UserDump, UserDumpInfo, UserException, UserThread, context_registers},
+    userdump::{UserDump, UserDumpInfo, UserException, UserThreadInfo, context_registers},
 };
 
 /// The exception a user-mode minidump was written for, with its address
@@ -90,7 +90,7 @@ impl Target {
     }
 
     /// The captured thread selected for inspection.
-    pub fn user_thread(&self) -> Option<&UserThread> {
+    pub fn user_thread(&self) -> Option<&UserThreadInfo> {
         let tid = self.user_process.as_ref()?.thread?;
         self.user_dump_info()?.thread(tid)
     }

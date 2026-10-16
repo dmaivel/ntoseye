@@ -3,6 +3,8 @@
 //! page for each hypercall, and HvCallGetPartitionId (0x0046), which the
 //! current pages name without a code, from TLFS 6.0b.
 
+use ntoseye_macros::record;
+
 use super::evmcs::EvmcsState;
 use super::hv_layout::Hypercall;
 use super::hypercall_input::{DecodedHypercall, HypercallControl};
@@ -120,30 +122,51 @@ fn code_name(code: usize) -> String {
     }
 }
 
-/// The virtual processor whose exit a processor in the Windows hypervisor
-/// handles, as a hypercall's caller: its partition, its index, the VTL it
-/// runs in, and what its exit says of the call.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HypercallCaller {
+/// The virtual processor whose hypercall a processor halted in the Windows
+/// hypervisor handles (`cpu.hypercall_caller()`), found as `!hvcall` and a
+/// hypercall breakpoint's filter find it: the call as the caller made it,
+/// and the caller's memory, which a hypercall breakpoint's condition reads.
+#[record(impl)]
+#[derive(PartialEq, Eq)]
+pub struct HypercallCallerInfo {
+    /// The caller's partition ID (the root partition's is 1).
+    #[record(hex, rename = "partition_id")]
     pub partition: u64,
-    /// The partition is the root partition.
+    /// Whether the caller is a VP of the root partition (Windows itself)
+    /// rather than of a guest partition.
     pub root: bool,
+    /// The caller's VP index in its partition.
+    #[record(rename = "vp_index")]
     pub vp: u32,
+    /// The VTL that made the call.
     pub vtl: u8,
+    #[record(skip)]
     pub input: HypercallInput,
     /// Its registers at its VMCALL, as `.vtlcxr` selects a saved state's:
     /// RIP, RSP, flags, control and segment registers from its eVMCS, and
     /// the general-purpose registers when they are known. A hypercall
     /// breakpoint's condition sees these.
+    #[record(skip)]
     pub registers: std::collections::HashMap<String, u64>,
     /// The calling VTL's state at its VMCALL, whose EPT and CR3 a hypercall
     /// breakpoint's condition reads the caller's memory through. `None`
     /// when the state ntoseye found is an older exit's, as its registers
     /// then are.
+    #[record(skip)]
     pub state: Option<EvmcsState>,
 }
 
-impl HypercallCaller {
+#[record]
+impl HypercallCallerInfo {
+    /// The call with its input decoded, as `!hvcall` shows it, or `None`
+    /// when the caller's registers are not known.
+    #[record(getter)]
+    pub fn hypercall(&self) -> Option<DecodedHypercall> {
+        self.input.call().cloned()
+    }
+}
+
+impl HypercallCallerInfo {
     /// `root partition VP 2 VTL0`, or `partition 0x4 VP 1 VTL0`.
     pub fn label(&self) -> String {
         if self.root {

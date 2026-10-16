@@ -863,7 +863,6 @@ impl Render for Selectors {
     kind = Query,
     target = Kernel,
     python = Cpu,
-    python_name = "info",
     usage = "!cpuinfo",
     completion = []
 )]

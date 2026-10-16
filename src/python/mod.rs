@@ -25,6 +25,7 @@ use crate::{Backend, TargetSpec};
 
 pub mod args;
 pub mod breakpoints;
+pub mod collection;
 pub mod command;
 pub mod context;
 pub mod debugger;
@@ -32,7 +33,6 @@ pub mod embed;
 pub mod handle;
 pub mod hypervisor;
 pub mod inspect;
-pub mod iter;
 pub mod memory;
 pub mod module;
 pub mod process;
@@ -47,7 +47,7 @@ pub mod thread;
 pub mod types;
 pub mod userdump;
 
-use args::{AttachBackend, MemorySource};
+use args::AttachBackend;
 use handle::Actor;
 pub use handle::Debugger;
 use record::{PlainDict, PyStyle, ToValue, Typed};
@@ -205,21 +205,21 @@ pub fn plain_dict<'py, T: ToValue>(py: Python<'py>, value: &T) -> PyResult<Plain
     backend=AttachBackend(Some(Backend::Kd)),
     connect=None,
     key=None,
-    memory_source=MemorySource(KdMemorySource::Auto),
+    memory_source=KdMemorySource::Auto,
 ))]
 fn attach(
     py: Python<'_>,
     backend: AttachBackend,
     connect: Option<&str>,
     key: Option<&str>,
-    memory_source: MemorySource,
+    memory_source: KdMemorySource,
 ) -> PyResult<Debugger> {
     let spec = match backend.0 {
         Some(backend) => TargetSpec::Live {
             backend,
             connect: connect.map(str::to_string),
             kdnet_key: key.map(str::to_string),
-            memory_source: memory_source.0,
+            memory_source,
         },
         None => {
             let path = connect.ok_or_else(|| {
@@ -259,50 +259,18 @@ fn cli_main(py: Python<'_>) -> PyResult<i32> {
 
 // The one list of what the SDK exports: the wheel's `PyInit__ntoseye`, the
 // REPL's embedded interpreter, and PyO3's introspection (the generated
-// `_ntoseye.pyi`) all read it. `with_record_classes!` (written by build.rs)
-// adds every `#[record]` class. Exceptions and the package re-exports live
-// in `ntoseye/__init__.py`.
-include!(concat!(env!("OUT_DIR"), "/record_classes.rs"));
-with_record_classes! {
+// `_ntoseye.pyi`) all read it. `with_sdk_classes!` (written by build.rs)
+// adds every class: `#[record]`s, `#[handle]`s and `#[pyclass]`es.
+// Exceptions and the package re-exports live in `ntoseye/__init__.py`.
+include!(concat!(env!("OUT_DIR"), "/sdk_classes.rs"));
+with_sdk_classes! {
 /// The native module of the ntoseye SDK. Import from `ntoseye`, which
 /// re-exports all of it.
 #[pymodule]
 pub mod _ntoseye {
-    #[pymodule_export]
-    use super::breakpoints::{Breakpoint, Breakpoints, Exceptions, Watchpoint};
     #[cfg(all(feature = "cli", feature = "python-extension"))]
     #[pymodule_export]
     use super::cli_main;
-    #[pymodule_export]
-    use super::handle::Debugger;
-    #[pymodule_export]
-    use super::inspect::Inspect;
-    #[pymodule_export]
-    use super::iter::{
-        BreakpointIterator, CpuIterator, DriverIterator, ExceptionPolicyIterator, HeapIterator,
-        MemoryRegionIterator, ModuleIterator, NameIterator, ProcessIterator, ThreadIterator,
-        UserThreadIterator,
-    };
-    #[pymodule_export]
-    use super::memory::Memory;
-    #[pymodule_export]
-    use super::module::{Device, Driver, Drivers, Module, Modules};
-    #[pymodule_export]
-    use super::process::{Heap, Heaps, Process, Processes, Regions};
-    #[pymodule_export]
-    use super::record::{BaseRecord, Record};
-    #[pymodule_export]
-    use super::hypervisor::{HypercallCaller, HypervisorPartition, HypervisorVtl, VirtualProcessor};
-    #[pymodule_export]
-    use super::secure::{SecureKernel, Trustlet};
-    #[pymodule_export]
-    use super::symbols::Symbols;
-    #[pymodule_export]
-    use super::thread::{Cpu, Cpus, Frame, Msrs, Registers, Thread, Threads};
-    #[pymodule_export]
-    use super::types::{Struct, Type, Types};
-    #[pymodule_export]
-    use super::userdump::{UserDump, UserProcess, UserThread, UserThreads};
     #[pymodule_export]
     use super::{attach, decode_error};
 

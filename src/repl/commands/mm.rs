@@ -215,8 +215,7 @@ fn pool_usage(
     session: &Session,
     #[arg(parse = poolused_tag)] tag: Option<String>,
     #[arg(render, parse = poolused_counts)] include_counts: bool,
-    #[arg(parse = poolused_sort, default = crate::python::args::PoolSort(PoolUsageSort::Tag))]
-    sort: PoolUsageSort,
+    #[arg(parse = poolused_sort, default = PoolUsageSort::Tag)] sort: PoolUsageSort,
 ) -> Result<PoolUsageDetail> {
     session.target.pool_usage(sort, tag.as_deref())
 }

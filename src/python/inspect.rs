@@ -3,7 +3,7 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use super::command::admit;
+use super::command::{CommandHost, HostSession, admit};
 use super::context::Context;
 use super::handle::Owner;
 use super::module::Device;
@@ -24,6 +24,12 @@ use crate::types::VirtAddr;
 #[pyclass(module = "ntoseye")]
 pub struct Inspect {
     pub owner: Owner,
+}
+
+impl CommandHost for Inspect {
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Owner(&self.owner)
+    }
 }
 
 impl Inspect {
@@ -70,8 +76,16 @@ impl Inspect {
 
     /// Return a handle for the `_DEVICE_OBJECT` at `address` (`!devobj`).
     fn device(&self, py: Python<'_>, address: u64) -> PyResult<Device> {
-        let owner = self.owner.derive(py);
-        Ok(Device::new(owner, address))
+        let info = self.owner.with(py, |session| {
+            session
+                .target
+                .read_device_link(VirtAddr(address))
+                .map_err(err)
+        })?;
+        Ok(Device {
+            owner: self.owner.derive(py),
+            info,
+        })
     }
 
     /// Decode a CONTEXT record and return its register set as a `Frame` (`.cxr`).

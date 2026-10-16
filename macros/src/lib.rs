@@ -2,7 +2,9 @@
 //! crate (`crate::python::record`, `crate::repl`, `crate::python::command`),
 //! so only that crate can use them.
 
+mod collection;
 mod command;
+mod handle;
 mod record;
 
 use proc_macro::TokenStream;
@@ -40,7 +42,8 @@ use proc_macro::TokenStream;
 /// - fieldless: each variant has a text, its `rename` or else its snake_case
 ///   name. The macro generates `as_str()` and `Display` from the texts, and
 ///   the value is the variant's text, typed as the `typing.Literal` of every
-///   variant's text;
+///   variant's text. An SDK argument of the enum's type takes the same
+///   texts (`FromPyObject` and `PyArg`);
 /// - every variant one unnamed field: the union of the variants' types
 ///   (the value is the variant's own);
 /// - `#[record(tagged)]`: a class with `kind` (the snake_case variant name,
@@ -162,6 +165,109 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn command(attr: TokenStream, item: TokenStream) -> TokenStream {
     command::expand(attr.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// An SDK handle class: a live object of a debugger, with a `#[record]`
+/// that describes it.
+///
+/// ```ignore
+/// #[handle(record = ThreadInfo, key = ethread, context = self.thread_context(py)?, impl)]
+/// pub struct Thread {
+///     pub owner: Owner,
+///     pub info: ThreadInfo,
+/// }
+///
+/// #[handle]
+/// impl Thread {
+///     /// The process that owns the thread.
+///     #[getter]
+///     fn process(&self, py: Python<'_>) -> PyResult<Option<Process>> { ... }
+/// }
+/// ```
+///
+/// The struct becomes a frozen `ntoseye.<Name>` class. It has an `owner`
+/// (`python::handle::Owner`) and, by default, its record in `info`. The
+/// class gets:
+///
+/// - a property for each of the record's properties (its fields and its
+///   `#[record(getter)]`s), typed and documented as the record's, which
+///   checks the handle is still valid and reads the record;
+/// - `info` (the record), `to_dict()`, and `==`/`hash` by its identity;
+/// - `python::handle::Handle`, through which a `#[collection(records)]`
+///   finds the item a record describes (by its `key`);
+/// - `CommandHost`, so `#[command(python = Name)]` methods run in its
+///   `context`, and `Bind<Record>`, so a `receiver` argument of the
+///   record's type is this object.
+///
+/// Options:
+///
+/// - `record = Path` (required): the `#[record]` struct;
+/// - `key = field` (required): the record property that names the object;
+///   also the identity, unless `identity` is given;
+/// - `info = field`: where the record is held (default `info`); or
+///   `fetch = path`, a `fn(&Self, Python) -> PyResult<Record>` that reads
+///   it now (a breakpoint's state), for which `identity` is required;
+/// - `identity = path`: a `fn(&Self) -> impl Hash + Eq`;
+/// - `context = expr`: the `Context` its commands run in, an expression of
+///   `self` and `py` (`?` may be used), else the kernel's; `refuse = expr`
+///   (of `self`, `operation`, `effects`) and `prepare = expr` (of `self`,
+///   `session`), `PyResult<()>`s: `CommandHost`'s other methods;
+/// - `impl`: a `#[handle] impl Name { ... }` block follows in the same
+///   module. Its items are the class's `#[pymethods]`, and a method or
+///   getter there replaces the generated property of its Python name
+///   (`Thread.process` is a `Process` handle, not the record's value).
+#[proc_macro_attribute]
+pub fn handle(attr: TokenStream, item: TokenStream) -> TokenStream {
+    handle::expand(attr.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// The `#[pymethods]` of a `#[handle]` class, with its record's
+/// properties: the record's own macro (`#[record]` defines one, under the
+/// record's name) calls this with them. Not for direct use.
+#[doc(hidden)]
+#[proc_macro]
+pub fn handle_methods(input: TokenStream) -> TokenStream {
+    handle::methods(input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// An SDK collection class's container protocol, from one function that
+/// lists its items and one that finds an item by key.
+///
+/// ```ignore
+/// #[collection(records)]
+/// impl Threads {
+///     fn enumerate(&self, py: Python<'_>) -> PyResult<Vec<Thread>> { ... }
+///     /// The thread with TID `key`, or the one a `ThreadInfo` describes.
+///     fn lookup(&self, py: Python<'_>, key: &u64) -> PyResult<Option<Thread>> { ... }
+///     /// The thread at an ETHREAD or KTHREAD address, or `None`.
+///     #[collection(at)]
+///     fn holds(thread: &Thread, address: u64) -> bool { ... }
+/// }
+/// ```
+///
+/// `enumerate` and `lookup` stay Rust methods; the class's `#[pymethods]`
+/// get `__len__`, `__iter__` (a typed `Iterator[Item]` over a snapshot),
+/// and, from `lookup` (whose docs they take), `__getitem__` (`KeyError`),
+/// `get` (`None`) and `__contains__`. Flags:
+///
+/// - `records`: the items are `#[handle]`s, and a record of their kind is
+///   a key too, naming the listed item it describes (`dbg.threads[stop.thread]`);
+/// - `sequence`: no `lookup`; `__getitem__` and `get` take a position,
+///   negative from the end (`IndexError`), and `in` compares items.
+///
+/// A method marked `#[collection(find)]`, `fn(&Item, &str) -> bool`, makes
+/// `find(name)`, the items it holds for; `#[collection(at)]`, `fn(&Item,
+/// u64) -> bool`, makes `at(address)`, the first. Other items of the block
+/// are the class's own `#[pymethods]`.
+#[proc_macro_attribute]
+pub fn collection(attr: TokenStream, item: TokenStream) -> TokenStream {
+    collection::expand(attr.into(), item.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

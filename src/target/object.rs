@@ -22,10 +22,15 @@ use super::{
 /// object manager (`drivers`).
 #[record]
 pub struct DriverObjectInfo {
+    /// The name of the driver object.
     pub name: String,
+    /// The `_DRIVER_OBJECT` address.
     pub object: VirtAddr,
+    /// The base address of the driver image.
+    #[record(rename = "start")]
     pub driver_start: VirtAddr,
     /// The size of the driver image in bytes.
+    #[record(rename = "size")]
     pub driver_size: u64,
     /// The first device on the chain of the driver. 0 if there is none.
     pub device_object: VirtAddr,
@@ -203,6 +208,8 @@ impl IrpDispatchRoutine {
 /// A device on the `DeviceObject`/`NextDevice` chain of a driver.
 #[record]
 pub struct DriverDeviceLink {
+    /// The `_DEVICE_OBJECT` address.
+    #[record(rename = "address")]
     pub device: VirtAddr,
     pub device_type: u32,
     pub flags: u32,
@@ -885,7 +892,8 @@ impl Target {
             .filter(|name| !name.is_empty())
     }
 
-    fn read_device_link(&self, device: VirtAddr) -> Result<DriverDeviceLink> {
+    /// The `_DEVICE_OBJECT` at `device`, as its driver's chain lists it.
+    pub fn read_device_link(&self, device: VirtAddr) -> Result<DriverDeviceLink> {
         let d = self.kernel_struct("_DEVICE_OBJECT", device)?;
         Ok(DriverDeviceLink {
             device,

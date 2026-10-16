@@ -111,7 +111,7 @@ impl ExceptionPolicy {
     #[record(getter)]
     pub fn disposition(&self) -> Option<&'static str> {
         self.final_action.map(|action| match action {
-            ExceptionPolicyFinalAction::Continue(disposition) => disposition.name(),
+            ExceptionPolicyFinalAction::Continue(disposition) => disposition.as_str(),
             ExceptionPolicyFinalAction::Break => "break",
         })
     }
@@ -142,7 +142,7 @@ impl ModuleEventPolicy {
     /// `ld` for a load filter, `ud` for an unload filter.
     #[record(getter, rename = "event")]
     pub fn event_kind(&self) -> &'static str {
-        self.event.filter_name()
+        self.event.as_str()
     }
 }
 
@@ -170,7 +170,7 @@ impl ModuleEventPolicy {
     /// The filter as `sx` spells it: `ld`, `ld:<module>`, `ud`, or
     /// `ud:<module>`.
     pub fn event_name(&self) -> String {
-        let event = self.event.filter_name();
+        let event = self.event.as_str();
         match &self.module {
             Some(module) => format!("{event}:{module}"),
             None => event.to_string(),
@@ -349,11 +349,11 @@ pub fn parse_event_filter(value: &str) -> Result<EventFilter, String> {
     };
     let module_event = [ModuleEvent::Load, ModuleEvent::Unload]
         .into_iter()
-        .find(|kind| event.eq_ignore_ascii_case(kind.filter_name()));
+        .find(|kind| event.eq_ignore_ascii_case(kind.as_str()));
     if let Some(module_event) = module_event {
         return match argument {
             Some("") => {
-                let name = module_event.filter_name();
+                let name = module_event.as_str();
                 Err(format!(
                     "'{value}' names no module (use {name} or {name}:<module>)"
                 ))

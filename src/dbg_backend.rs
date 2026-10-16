@@ -163,7 +163,8 @@ pub struct BugcheckInfo {
 /// Windows KD maps these choices to `DBG_CONTINUE` and
 /// `DBG_EXCEPTION_NOT_HANDLED`. Backends without a native exception
 /// disposition continue normally for either value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub enum ContinueDisposition {
     Handled,
     NotHandled,
@@ -174,14 +175,6 @@ impl ContinueDisposition {
         match self {
             Self::Handled => "handled",
             Self::NotHandled => "not handled",
-        }
-    }
-
-    /// Stable API spelling used by structured frontends.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Handled => "handled",
-            Self::NotHandled => "not_handled",
         }
     }
 }
@@ -262,10 +255,13 @@ pub struct StopEvent {
 }
 
 /// A kernel image entering or leaving the module list: the events `sx* ld`
-/// and `sx* ud` filter.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// and `sx* ud` filter, spelled as `sx` spells them.
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub enum ModuleEvent {
+    #[record(rename = "ld")]
     Load,
+    #[record(rename = "ud")]
     Unload,
 }
 
@@ -277,16 +273,6 @@ pub enum ProcessorRead {
     Msr(u32),
     /// The 32-bit device register at a physical address, read uncached.
     Device(u64),
-}
-
-impl ModuleEvent {
-    /// The event as `sx` spells it: `ld` or `ud`.
-    pub fn filter_name(self) -> &'static str {
-        match self {
-            Self::Load => "ld",
-            Self::Unload => "ud",
-        }
-    }
 }
 
 /// What memory access a hardware (debug-register) breakpoint traps on. The x86
@@ -325,20 +311,12 @@ impl HwBreakpointAccess {
 /// Semantic data-watch access exposed by host APIs. The transport may
 /// implement this with x86 debug registers, but callers request a watchpoint,
 /// not a software-vs-hardware breakpoint implementation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub enum WatchpointAccess {
     Write,
     /// x86 has no read-only data watch, so reads also trap writes.
     ReadWrite,
-}
-
-impl WatchpointAccess {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Write => "write",
-            Self::ReadWrite => "read_write",
-        }
-    }
 }
 
 impl std::str::FromStr for WatchpointAccess {

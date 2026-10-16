@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, HashMap};
 use zerocopy::{FromBytes, Immutable, KnownLayout};
 
 use super::{
-    DynamicFunction, FunctionTable, MemoryRange, MemoryRegion, UnloadedModule, UserDumpInfo,
-    UserException, UserHandle, UserModule, UserSystemInfo, UserThread, UserThreadInfo,
-    UserTimeZone,
+    CapturedStack, DynamicFunction, FunctionTable, MemoryRange, MemoryRegion, UnloadedModule,
+    UserDumpInfo, UserException, UserHandle, UserModule, UserSystemInfo, UserThreadInfo,
+    UserThreadTimes, UserTimeZone,
 };
 use crate::cpu_context::{amd64, arm64};
 use crate::error::{Error, Result};
@@ -804,7 +804,7 @@ fn parse_thread_list(
     arch: Arch,
     memory: &mut MemoryMap,
     notes: &mut Vec<String>,
-) -> Vec<UserThread> {
+) -> Vec<UserThreadInfo> {
     let Some(count) = read_at::<u32>(stream, 0) else {
         notes.push("ThreadListStream header is truncated; no threads are listed".into());
         return Vec::new();
@@ -836,8 +836,11 @@ fn parse_thread_list(
             &format!("thread {tid:#x} stack"),
             notes,
         )
-        .then_some((stack.start, stack_size));
-        threads.push(UserThread {
+        .then_some(CapturedStack {
+            start: stack.start,
+            size: stack_size,
+        });
+        threads.push(UserThreadInfo {
             tid,
             suspend_count: raw.suspend_count,
             priority_class: raw.priority_class,
@@ -846,13 +849,13 @@ fn parse_thread_list(
             stack: stack_range,
             context: read_context(data, raw.context, arch),
             name: None,
-            info: None,
+            times: None,
         });
     }
     threads
 }
 
-fn merge_thread_info(stream: &[u8], threads: &mut [UserThread], notes: &mut Vec<String>) {
+fn merge_thread_info(stream: &[u8], threads: &mut [UserThreadInfo], notes: &mut Vec<String>) {
     let Some(header) = read_at::<RawSizedListHeader>(stream, 0) else {
         notes.push("ThreadInfoListStream header is truncated; ignored".into());
         return;
@@ -878,7 +881,7 @@ fn merge_thread_info(stream: &[u8], threads: &mut [UserThread], notes: &mut Vec<
         };
         let tid = raw.thread_id;
         if let Some(thread) = threads.iter_mut().find(|thread| thread.tid == tid) {
-            thread.info = Some(UserThreadInfo {
+            thread.times = Some(UserThreadTimes {
                 exit_status: raw.exit_status,
                 create_time: raw.create_time,
                 exit_time: raw.exit_time,
@@ -894,7 +897,7 @@ fn merge_thread_info(stream: &[u8], threads: &mut [UserThread], notes: &mut Vec<
 fn merge_thread_names(
     data: &[u8],
     stream: &[u8],
-    threads: &mut [UserThread],
+    threads: &mut [UserThreadInfo],
     notes: &mut Vec<String>,
 ) {
     let Some(count) = read_at::<u32>(stream, 0) else {

@@ -1435,29 +1435,46 @@ impl HeapReader<'_> {
 #[derive(Debug, Clone)]
 pub struct HeapSummaryDetail {
     pub peb: VirtAddr,
-    pub heaps: Vec<HeapSummaryItem>,
+    pub heaps: Vec<HeapInfo>,
     /// True when the PEB advertised more than `MAX_HEAPS` entries.
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone)]
-pub struct HeapSummaryItem {
+/// One heap of a process, from its PEB heap list (`!heap -s`).
+#[record(impl)]
+pub struct HeapInfo {
+    /// The index of the heap in the PEB list.
     pub index: usize,
+    /// The heap address.
     pub address: VirtAddr,
+    #[record(skip)]
     pub kind: HeapKind,
     /// Heap-wide sizes and allocator counts.  An unavailable value contains
     /// the layout, memory, or symbol error for this heap only.
-    pub stats: DiagnosticValue<HeapSummaryStats>,
+    pub stats: DiagnosticValue<HeapStats>,
 }
 
-#[derive(Debug, Clone)]
-pub struct HeapSummaryStats {
+#[record]
+impl HeapInfo {
+    /// `nt`, `segment`, or `unknown (<signature>)`.
+    #[record(getter, rename = "kind")]
+    pub fn kind_name(&self) -> String {
+        self.kind.to_string()
+    }
+}
+
+/// A heap's sizes, in bytes, and allocator counts (`!heap -s`).
+#[record]
+pub struct HeapStats {
+    /// The heap's flags.
+    #[record(hex)]
     pub flags: u32,
     pub reserved: u64,
     pub committed: u64,
     pub free: u64,
     pub segments: u64,
     pub virtual_blocks: u64,
+    /// The front-end allocator (the LFH), if the heap has one.
     pub front_end: Option<VirtAddr>,
     pub vs_subsegments: u64,
     pub lfh_subsegments: u64,
@@ -1654,10 +1671,7 @@ pub enum HeapSelector {
     Address(VirtAddr),
 }
 
-fn heap_summary_stats(
-    reader: &HeapReader<'_>,
-    heap: &ProcessHeap,
-) -> DiagnosticValue<HeapSummaryStats> {
+fn heap_summary_stats(reader: &HeapReader<'_>, heap: &ProcessHeap) -> DiagnosticValue<HeapStats> {
     if let Some(error) = heap.classification_error.as_ref() {
         return DiagnosticValue::unavailable(error.clone());
     }
@@ -1673,7 +1687,7 @@ fn heap_summary_stats(
                 .iter()
                 .map(|segment| u64::from(segment.uncommitted_pages) * PAGE)
                 .sum();
-            HeapSummaryStats {
+            HeapStats {
                 flags: nt.flags,
                 reserved,
                 committed: reserved.saturating_sub(uncommitted),
@@ -1698,7 +1712,7 @@ fn heap_summary_stats(
                         .filter(|range| range.kind == kind)
                         .count() as u64
                 };
-                HeapSummaryStats {
+                HeapStats {
                     flags: segment.global_flags,
                     reserved: segment.reserved_pages.saturating_mul(PAGE),
                     committed: segment.committed_pages.saturating_mul(PAGE),
@@ -1964,7 +1978,7 @@ impl Target {
             truncated,
             heaps: heaps
                 .iter()
-                .map(|heap| HeapSummaryItem {
+                .map(|heap| HeapInfo {
                     index: heap.index,
                     address: heap.address,
                     kind: heap.kind,

@@ -4,6 +4,8 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use ntoseye_macros::record;
+
 use crate::bytes;
 use crate::dbg_backend::{
     BackendCapability, BugcheckInfo, ContinueDisposition, DebugBackend, DebugCapability, DebugLog,
@@ -376,7 +378,9 @@ pub struct KdBackend {
     running_reason: &'static str,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Where KD reads guest memory.
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub enum KdMemorySource {
     Auto,
     Host,

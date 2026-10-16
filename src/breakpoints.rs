@@ -176,7 +176,7 @@ impl BreakpointInfo {
     /// breakpoint.
     #[record(getter)]
     pub fn watch_access(&self) -> Option<&'static str> {
-        self.watchpoint().map(|(access, _)| access.name())
+        self.watchpoint().map(|(access, _)| access.as_str())
     }
 
     /// The watched width in bytes. None for a code breakpoint.

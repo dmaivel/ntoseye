@@ -1,29 +1,27 @@
 //! Loaded modules (`dbg.modules`, `proc.modules`) and driver objects
 //! (`dbg.drivers`): sections, exports, mapped images, and symbol status.
 
-use pyo3::exceptions::PyKeyError;
+use ntoseye_macros::{collection, handle, record};
+use pelite::PeView;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyDict};
+use pyo3::types::PyBytes;
 
-use super::command::{Bind, CommandHost, HostSession};
+use super::command::Bind;
 use super::context::{Context, Space};
 use super::handle::Owner;
-use super::iter::{DriverIterator, ModuleIterator};
-use super::record::PlainDict;
 use super::record::Typed;
-use super::{MAX_READ_LEN, err, plain_dict, raise, symbol_not_found};
+use super::{MAX_READ_LEN, err, raise, symbol_not_found};
 use crate::error::Error;
-use crate::guest::{ModuleInfo, ModuleInfoPy, ProcessInfo};
+use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::memory::PAGE_SIZE;
 use crate::pe;
 use crate::pe::ModuleExportInfo;
 use crate::pe::headers::Section;
+use crate::session::effects::{Effects, TargetScope};
 use crate::symbols::{ImageSource, ModuleListing, ModuleSymbols};
-use crate::target::object::DriverObjectInfo;
+use crate::target::image::ImageRef;
+use crate::target::object::{DriverDeviceLink, DriverObjectInfo};
 use crate::types::{Dtb, VirtAddr};
-
-use ntoseye_macros::record;
-use pelite::PeView;
 
 /// A collection of modules: `dbg.modules` (kernel), `proc.modules` (loader
 /// lists), or `dbg.secure_kernel.modules` (secure kernel), keyed by short
@@ -32,47 +30,6 @@ use pelite::PeView;
 pub struct Modules {
     pub owner: Owner,
     space: Space,
-}
-
-/// A key of a `Modules` collection: a module name, or a `ModuleInfo`
-/// record, which names the module loaded at its base.
-#[derive(FromPyObject)]
-pub enum ModuleKey<'py> {
-    Name(String),
-    Info(Bound<'py, ModuleInfoPy>),
-}
-
-/// What a listed module must match.
-enum ModuleMatch {
-    Name(String),
-    Base(u64),
-}
-
-impl ModuleKey<'_> {
-    fn resolve(self) -> PyResult<ModuleMatch> {
-        match self {
-            ModuleKey::Name(name) => Ok(ModuleMatch::Name(name)),
-            ModuleKey::Info(info) => {
-                Ok(ModuleMatch::Base(info.getattr("base_address")?.extract()?))
-            }
-        }
-    }
-}
-
-impl ModuleMatch {
-    fn matches(&self, module: &ModuleInfo) -> bool {
-        match self {
-            ModuleMatch::Name(name) => module_matches(module, name),
-            ModuleMatch::Base(base) => module.base_address.0 == *base,
-        }
-    }
-
-    fn key_error(&self) -> PyErr {
-        match self {
-            ModuleMatch::Name(name) => PyKeyError::new_err(name.clone()),
-            ModuleMatch::Base(base) => PyKeyError::new_err(format!("{base:#x}")),
-        }
-    }
 }
 
 impl Modules {
@@ -99,14 +56,13 @@ impl Modules {
             space: Space::Secure(root),
         }
     }
+}
 
-    fn space(&self) -> Space {
-        self.space.clone()
-    }
-
-    fn infos(&self, py: Python<'_>) -> PyResult<Vec<ModuleInfo>> {
+#[collection(records)]
+impl Modules {
+    fn enumerate(&self, py: Python<'_>) -> PyResult<Vec<Module>> {
         let kernel = matches!(self.space, Space::Kernel);
-        self.owner.with_in(py, &self.space.context(), |session| {
+        let modules = self.owner.with_in(py, &self.space.context(), |session| {
             // A user-mode minidump's one address space lists the dump's
             // modules, as `lm` does.
             if kernel && session.target.user_dump().is_none() {
@@ -117,33 +73,41 @@ impl Modules {
                 session.target.modules_with_versions()
             }
             .map_err(err)
-        })
-    }
-
-    fn handles(&self, py: Python<'_>) -> PyResult<Vec<Module>> {
-        let modules = self.infos(py)?;
-        let (owner, space) = (self.owner.derive(py), self.space());
+        })?;
+        let owner = self.owner.derive(py);
         Ok(modules
             .into_iter()
-            .map(|info| Module::new(owner.clone_ref(py), space.clone(), info))
+            .map(|info| Module::new(owner.clone_ref(py), self.space.clone(), info))
             .collect())
     }
 
-    fn handle(&self, py: Python<'_>, found: Option<ModuleInfo>) -> PyResult<Option<Module>> {
-        Ok(found.map(|info| Module::new(self.owner.derive(py), self.space(), info)))
+    /// The module with a short name, ignoring case (`"nt"` is ntoskrnl),
+    /// or the module loaded at the base of a `ModuleInfo` record
+    /// (`stop.module`).
+    fn lookup(&self, py: Python<'_>, name: &String) -> PyResult<Option<Module>> {
+        Ok(self.enumerate(py)?.into_iter().find(|module| {
+            module.info.short_name.eq_ignore_ascii_case(name)
+                || module.info.name.eq_ignore_ascii_case(name)
+        }))
     }
 
-    fn find(&self, py: Python<'_>, wanted: &ModuleMatch) -> PyResult<Option<Module>> {
-        let found = self
-            .infos(py)?
-            .into_iter()
-            .find(|module| wanted.matches(module));
-        self.handle(py, found)
+    /// The module that contains `address`, or `None` if no module contains
+    /// it.
+    #[collection(at)]
+    fn holds(module: &Module, address: u64) -> bool {
+        module.info.contains_address(VirtAddr(address))
     }
 }
 
 /// One loaded image in the kernel address space or in a process address space.
-#[pyclass(module = "ntoseye")]
+#[handle(
+    record = ModuleInfo,
+    key = base_address,
+    identity = Module::identity,
+    context = self.space.context(),
+    refuse = self.refuse_kernel(operation, effects),
+    impl
+)]
 pub struct Module {
     pub owner: Owner,
     pub space: Space,
@@ -160,12 +124,23 @@ impl Module {
         self.space.context()
     }
 
-    /// The owning process's `_EPROCESS`, `None` for a kernel module.
-    fn process_key(&self) -> Option<VirtAddr> {
-        match &self.space {
+    /// The module's identity: its base, in its process's address space
+    /// (`None` for the kernel's).
+    fn identity(&self) -> (Option<VirtAddr>, VirtAddr) {
+        let process = match &self.space {
             Space::Process(info) => Some(info.eprocess),
             Space::Kernel | Space::Physical | Space::Secure(_) | Space::Root(_) => None,
+        };
+        (process, self.info.base_address)
+    }
+
+    /// A kernel command reads NT's state about the module, which a
+    /// secure-kernel module does not have (Driver Verifier never tracks one).
+    fn refuse_kernel(&self, operation: &str, effects: &Effects) -> PyResult<()> {
+        if effects.target == TargetScope::Kernel {
+            self.space.require_nt(operation)?;
         }
+        Ok(())
     }
 
     /// The mapped image in memory layout, breakpoint bytes masked back to
@@ -235,57 +210,8 @@ impl Module {
     }
 }
 
-#[pymethods]
+#[handle]
 impl Module {
-    /// The base address of the loaded image.
-    #[getter]
-    fn base(&self, py: Python<'_>) -> PyResult<u64> {
-        self.owner.check(py)?;
-        Ok(self.info.base_address.0)
-    }
-
-    /// The size of the mapped image.
-    #[getter]
-    fn size(&self, py: Python<'_>) -> PyResult<u32> {
-        self.owner.check(py)?;
-        Ok(self.info.size)
-    }
-
-    /// The image name.
-    #[getter]
-    fn name(&self, py: Python<'_>) -> PyResult<String> {
-        self.owner.check(py)?;
-        Ok(self.info.name.clone())
-    }
-
-    /// The full image path, if the loader recorded one.
-    #[getter]
-    fn path(&self, py: Python<'_>) -> PyResult<Option<String>> {
-        self.owner.check(py)?;
-        Ok(self.info.path.clone())
-    }
-
-    /// The PE timestamp, if the loader record contains one.
-    #[getter]
-    fn timestamp(&self, py: Python<'_>) -> PyResult<Option<u32>> {
-        self.owner.check(py)?;
-        Ok(self.info.time_date_stamp)
-    }
-
-    /// The file version from the version resource of the image.
-    #[getter]
-    fn file_version(&self, py: Python<'_>) -> PyResult<Option<String>> {
-        self.owner.check(py)?;
-        Ok(self.info.file_version.clone())
-    }
-
-    /// The product version from the version resource of the image.
-    #[getter]
-    fn product_version(&self, py: Python<'_>) -> PyResult<Option<String>> {
-        self.owner.check(py)?;
-        Ok(self.info.product_version.clone())
-    }
-
     /// The PE sections and their mapped permissions.
     #[getter]
     fn sections<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<Section>>> {
@@ -370,73 +296,12 @@ impl Module {
         Typed::new(py, view)
     }
 
-    /// The module as a plain `dict`.
-    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        self.owner.check(py)?;
-        plain_dict(py, &self.info)
-    }
-
-    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
-        other.extract::<PyRef<'_, Module>>().is_ok_and(|other| {
-            self.owner.same_debugger(&other.owner)
-                && self.process_key() == other.process_key()
-                && self.info.base_address == other.info.base_address
-        })
-    }
-
-    fn __hash__(&self) -> isize {
-        self.owner
-            .identity_hash((self.process_key(), self.info.base_address))
-    }
-
     fn __repr__(&self) -> String {
         format!(
             "Module(name={:?}, base={:#x}, size={:#x})",
             self.info.name, self.info.base_address.0, self.info.size
         )
     }
-}
-
-#[pymethods]
-impl Modules {
-    /// Find a module by its short name, ignoring case (`"nt"` is ntoskrnl),
-    /// or the module loaded at the base of a `ModuleInfo` record
-    /// (`stop.module`).
-    fn get(&self, py: Python<'_>, key: ModuleKey<'_>) -> PyResult<Option<Module>> {
-        self.find(py, &key.resolve()?)
-    }
-
-    /// The module that contains `addr`, or `None` if no module contains it.
-    fn at(&self, py: Python<'_>, addr: u64) -> PyResult<Option<Module>> {
-        let found = self
-            .infos(py)?
-            .into_iter()
-            .find(|module| module.contains_address(VirtAddr(addr)));
-        self.handle(py, found)
-    }
-
-    /// Get a module by short name or `ModuleInfo` record, or raise
-    /// `KeyError` if no module matches.
-    fn __getitem__(&self, py: Python<'_>, key: ModuleKey<'_>) -> PyResult<Module> {
-        let wanted = key.resolve()?;
-        self.find(py, &wanted)?.ok_or_else(|| wanted.key_error())
-    }
-
-    fn __contains__(&self, py: Python<'_>, key: ModuleKey<'_>) -> PyResult<bool> {
-        Ok(self.find(py, &key.resolve()?)?.is_some())
-    }
-
-    fn __iter__(&self, py: Python<'_>) -> PyResult<ModuleIterator> {
-        Ok(ModuleIterator::new(self.handles(py)?))
-    }
-
-    fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
-        Ok(self.infos(py)?.len())
-    }
-}
-
-fn module_matches(module: &ModuleInfo, query: &str) -> bool {
-    module.short_name.eq_ignore_ascii_case(query) || module.name.eq_ignore_ascii_case(query)
 }
 
 /// The driver objects in the `Driver` directory of the object manager, keyed
@@ -450,8 +315,11 @@ impl Drivers {
     pub fn new(owner: Owner) -> Drivers {
         Drivers { owner }
     }
+}
 
-    fn snapshot(&self, py: Python<'_>) -> PyResult<Vec<Driver>> {
+#[collection(records)]
+impl Drivers {
+    fn enumerate(&self, py: Python<'_>) -> PyResult<Vec<Driver>> {
         let infos = self.owner.with(py, |session| {
             session.target.enumerate_driver_objects().map_err(err)
         })?;
@@ -464,132 +332,57 @@ impl Drivers {
             })
             .collect())
     }
-}
 
-#[pymethods]
-impl Drivers {
-    /// Find a driver object by name, with or without its directory prefix.
-    fn get(&self, py: Python<'_>, name: &str) -> PyResult<Option<Driver>> {
-        Ok(self
-            .snapshot(py)?
-            .into_iter()
-            .find(|driver| driver_name_matches(&driver.info.name, name)))
-    }
-
-    /// Find the driver object or image that contains `addr`.
-    fn at(&self, py: Python<'_>, addr: u64) -> PyResult<Option<Driver>> {
-        Ok(self.snapshot(py)?.into_iter().find(|driver| {
-            driver.info.object.0 == addr
-                || (addr >= driver.info.driver_start.0
-                    && addr
-                        < driver
-                            .info
-                            .driver_start
-                            .0
-                            .saturating_add(driver.info.driver_size))
+    /// The driver object with a name, with or without its directory prefix,
+    /// or the one a `DriverObjectInfo` record describes.
+    fn lookup(&self, py: Python<'_>, name: &String) -> PyResult<Option<Driver>> {
+        let query = name.strip_prefix("\\Driver\\").unwrap_or(name);
+        Ok(self.enumerate(py)?.into_iter().find(|driver| {
+            let name = &driver.info.name;
+            name.eq_ignore_ascii_case(query)
+                || name
+                    .strip_prefix("\\Driver\\")
+                    .is_some_and(|driver| driver.eq_ignore_ascii_case(query))
         }))
     }
 
-    fn __getitem__(&self, py: Python<'_>, name: &str) -> PyResult<Driver> {
-        self.get(py, name)?
-            .ok_or_else(|| PyKeyError::new_err(name.to_string()))
+    /// The driver object at `address`, or the one whose image contains it.
+    #[collection(at)]
+    fn holds(driver: &Driver, address: u64) -> bool {
+        let info = &driver.info;
+        info.object.0 == address
+            || (address >= info.driver_start.0
+                && address < info.driver_start.0.saturating_add(info.driver_size))
     }
-
-    fn __contains__(&self, py: Python<'_>, name: &str) -> PyResult<bool> {
-        Ok(self.get(py, name)?.is_some())
-    }
-
-    fn __iter__(&self, py: Python<'_>) -> PyResult<DriverIterator> {
-        Ok(DriverIterator::new(self.snapshot(py)?))
-    }
-
-    fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
-        Ok(self.snapshot(py)?.len())
-    }
-}
-
-fn driver_name_matches(name: &str, query: &str) -> bool {
-    let query = query.strip_prefix("\\Driver\\").unwrap_or(query);
-    name.eq_ignore_ascii_case(query)
-        || name
-            .strip_prefix("\\Driver\\")
-            .is_some_and(|driver| driver.eq_ignore_ascii_case(query))
 }
 
 /// One `_DRIVER_OBJECT` and the device objects that it created.
-#[pyclass(module = "ntoseye")]
+#[handle(record = DriverObjectInfo, key = object, impl)]
 pub struct Driver {
     pub owner: Owner,
     pub info: DriverObjectInfo,
 }
 
-#[pymethods]
+#[handle]
 impl Driver {
-    /// The name of the driver object.
-    #[getter]
-    fn name(&self, py: Python<'_>) -> PyResult<String> {
-        self.owner.check(py)?;
-        Ok(self.info.name.clone())
-    }
-
-    /// The `_DRIVER_OBJECT` address.
-    #[getter]
-    fn object(&self, py: Python<'_>) -> PyResult<u64> {
-        self.owner.check(py)?;
-        Ok(self.info.object.0)
-    }
-
-    /// The base address of the driver image.
-    #[getter]
-    fn start(&self, py: Python<'_>) -> PyResult<u64> {
-        self.owner.check(py)?;
-        Ok(self.info.driver_start.0)
-    }
-
-    /// The size of the driver image.
-    #[getter]
-    fn size(&self, py: Python<'_>) -> PyResult<u64> {
-        self.owner.check(py)?;
-        Ok(self.info.driver_size)
-    }
-
     /// The device objects that this driver created.
     #[getter]
     fn devices(&self, py: Python<'_>) -> PyResult<Vec<Device>> {
-        let owner = self.owner.derive(py);
-        let addresses: Vec<u64> = self.owner.with(py, |session| {
+        let devices = self.owner.with(py, |session| {
             session
                 .target
                 .inspect_driver_object(self.info.object)
-                .map(|detail| {
-                    detail
-                        .devices
-                        .into_iter()
-                        .map(|device| device.device.0)
-                        .collect()
-                })
+                .map(|detail| detail.devices)
                 .map_err(err)
         })?;
-        Ok(addresses
+        let owner = self.owner.derive(py);
+        Ok(devices
             .into_iter()
-            .map(|address| Device::new(owner.clone_ref(py), address))
+            .map(|info| Device {
+                owner: owner.clone_ref(py),
+                info,
+            })
             .collect())
-    }
-
-    /// The driver object as a plain `dict`.
-    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        self.owner.check(py)?;
-        plain_dict(py, &self.info)
-    }
-
-    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
-        other.extract::<PyRef<'_, Driver>>().is_ok_and(|other| {
-            self.owner.same_debugger(&other.owner) && self.info.object == other.info.object
-        })
-    }
-
-    fn __hash__(&self) -> isize {
-        self.owner.identity_hash(self.info.object)
     }
 
     fn __repr__(&self) -> String {
@@ -600,48 +393,17 @@ impl Driver {
     }
 }
 
-/// One `_DEVICE_OBJECT`.
-#[pyclass(module = "ntoseye")]
+/// One `_DEVICE_OBJECT`, on its driver's device chain.
+#[handle(record = DriverDeviceLink, key = device, impl)]
 pub struct Device {
     pub owner: Owner,
-    pub address: u64,
+    pub info: DriverDeviceLink,
 }
 
+#[handle]
 impl Device {
-    /// Store a device address under an already stamped owner.
-    pub fn new(owner: Owner, address: u64) -> Device {
-        Device { owner, address }
-    }
-}
-
-#[pymethods]
-impl Device {
-    /// The `_DEVICE_OBJECT` address.
-    #[getter]
-    fn address(&self, py: Python<'_>) -> PyResult<u64> {
-        self.owner.check(py)?;
-        Ok(self.address)
-    }
-
-    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        self.owner.check(py)?;
-        let out = PyDict::new(py);
-        out.set_item("address", self.address)?;
-        Ok(PlainDict(out))
-    }
-
-    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
-        other.extract::<PyRef<'_, Device>>().is_ok_and(|other| {
-            self.owner.same_debugger(&other.owner) && self.address == other.address
-        })
-    }
-
-    fn __hash__(&self) -> isize {
-        self.owner.identity_hash(self.address)
-    }
-
     fn __repr__(&self) -> String {
-        format!("Device(address={:#x})", self.address)
+        format!("Device(address={:#x})", self.info.device.0)
     }
 }
 
@@ -653,20 +415,34 @@ pub enum ModuleDetail {
     Process(crate::target::usermode::LoaderModule),
 }
 
+/// A module binds its short name (`!chkimg nt`).
+impl Bind<String> for Module {
+    fn bind(&self) -> String {
+        self.info.short_name.clone()
+    }
+}
+
+/// A module binds its image (`!dh`, `!lmi`): its base and loader entry, in
+/// the address space it was listed in. The kernel's is left to the command,
+/// which names it for the session.
+impl Bind<ImageRef> for Module {
+    fn bind(&self) -> ImageRef {
+        ImageRef {
+            base: self.info.base_address,
+            module: Some(self.info.clone()),
+            dtb: match &self.space {
+                Space::Process(process) => Some(process.dtb),
+                Space::Secure(root) | Space::Root(root) => Some(*root),
+                Space::Kernel | Space::Physical => None,
+            },
+        }
+    }
+}
+
 /// A module binds its image for `.fetchimage`.
 impl Bind<ImageSource> for Module {
     fn bind(&self) -> ImageSource {
         ImageSource::Module(self.info.name.clone())
-    }
-}
-
-impl CommandHost for Driver {
-    fn session(&self) -> HostSession<'_> {
-        HostSession::Owner(&self.owner)
-    }
-
-    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
-        Ok(Context::default())
     }
 }
 
@@ -677,19 +453,9 @@ impl Bind<VirtAddr> for Driver {
     }
 }
 
-impl CommandHost for Device {
-    fn session(&self) -> HostSession<'_> {
-        HostSession::Owner(&self.owner)
-    }
-
-    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
-        Ok(Context::default())
-    }
-}
-
 /// `!devobj` inspects the device object.
 impl Bind<VirtAddr> for Device {
     fn bind(&self) -> VirtAddr {
-        VirtAddr(self.address)
+        self.info.device
     }
 }

@@ -3,17 +3,20 @@
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use super::command::admit;
+use super::command::{Bind, CommandHost, HostSession, admit};
+use super::context::Context;
 use super::context::Space;
 use super::handle::Owner;
 use super::record::Typed;
 use super::symbols::load_scope_symbols;
 use super::{MAX_READ_LEN, err, raise};
 use crate::error::Error;
+use crate::guest::ProcessInfo;
 use crate::layout::utf16le_lossy;
 use crate::session::Session;
 use crate::session::effects::{Effects, TargetScope, Writes};
 use crate::target::MemoryKind;
+use crate::target::memory::SearchSpace;
 use crate::target::mm::VtopDetail;
 use crate::target::{CODE_BITNESS_X86, StringDescriptor};
 use crate::types::VirtAddr;
@@ -24,6 +27,65 @@ use crate::types::VirtAddr;
 pub struct Memory {
     pub owner: Owner,
     pub space: Space,
+}
+
+/// A `Memory` runs a command in its space's context: `proc.memory` in the
+/// process's, `dbg.memory` and `dbg.physical` in the kernel's.
+impl CommandHost for Memory {
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Owner(&self.owner)
+    }
+
+    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
+        Ok(self.space.context())
+    }
+
+    /// A kernel (or NT) command reads NT's state about an address, which
+    /// VTL1 and roots outside NT do not have; a write needs a writable space.
+    fn refuse(&self, operation: &str, effects: &Effects) -> PyResult<()> {
+        if effects.target != TargetScope::Any {
+            self.space.require_nt(operation)?;
+        }
+        if !effects.writes.is_empty() {
+            self.space.require_writable()?;
+        }
+        Ok(())
+    }
+}
+
+/// Which memory a `Memory` addresses: `dbg.physical` the physical, every
+/// other space its virtual addresses.
+impl Bind<MemoryKind> for Memory {
+    fn bind(&self) -> MemoryKind {
+        match self.space {
+            Space::Physical => MemoryKind::Physical,
+            _ => MemoryKind::Virtual,
+        }
+    }
+}
+
+/// The process a `Memory` addresses: `proc.memory`'s, none for the
+/// kernel's and the other spaces.
+impl Bind<Option<ProcessInfo>> for Memory {
+    fn bind(&self) -> Option<ProcessInfo> {
+        match &self.space {
+            Space::Process(info) => Some(info.clone()),
+            _ => None,
+        }
+    }
+}
+
+/// How a search in a `Memory` describes its matches: NT's region
+/// descriptions cover neither VTL1 nor roots outside NT.
+impl Bind<SearchSpace> for Memory {
+    fn bind(&self) -> SearchSpace {
+        match self.space {
+            Space::Physical => SearchSpace::Physical,
+            Space::Secure(_) => SearchSpace::Virtual(Some("vtl1")),
+            Space::Root(_) => SearchSpace::Virtual(Some("foreign")),
+            Space::Kernel | Space::Process(_) => SearchSpace::Virtual(None),
+        }
+    }
 }
 
 impl Memory {

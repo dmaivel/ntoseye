@@ -531,10 +531,18 @@ impl BreakpointManager {
         self.breakpoints.get(&id)
     }
 
-    /// The breakpoint numbered `id`, only if it is still the one created
-    /// with `serial` and not a later breakpoint that reused the id.
-    pub fn get_exact(&self, id: u32, serial: u64) -> Option<&BreakpointInfo> {
-        self.get(id).filter(|bp| bp.serial == serial)
+    /// The breakpoint numbered `id` as [`Self::list`] lists it: not a
+    /// one-shot hit retained until the next resume, which is gone for the
+    /// user.
+    pub fn listed(&self, id: u32) -> Option<&BreakpointInfo> {
+        self.get(id)
+            .filter(|bp| !self.one_shot_hits.contains(&bp.id))
+    }
+
+    /// The listed breakpoint numbered `id`, only if it is still the one
+    /// created with `serial` and not a later breakpoint that reused the id.
+    pub fn live(&self, id: u32, serial: u64) -> Option<&BreakpointInfo> {
+        self.listed(id).filter(|bp| bp.serial == serial)
     }
 
     pub fn has_enabled_breakpoints(&self) -> bool {
@@ -686,8 +694,24 @@ mod tests {
         let new = manager.get(0).unwrap().serial;
 
         assert_ne!(old, new);
-        assert!(manager.get_exact(0, old).is_none());
-        assert_eq!(manager.get_exact(0, new).unwrap().address, VirtAddr(0x2000));
+        assert!(manager.live(0, old).is_none());
+        assert_eq!(manager.live(0, new).unwrap().address, VirtAddr(0x2000));
+    }
+
+    #[test]
+    fn fired_one_shot_is_no_longer_listed() {
+        let mut manager = BreakpointManager::new();
+        manager.insert_for_test(3, VirtAddr(0x3000), true, None);
+        manager.breakpoints.get_mut(&3).unwrap().one_shot = true;
+        let serial = manager.get(3).unwrap().serial;
+        assert_eq!(manager.live(3, serial).unwrap().address, VirtAddr(0x3000));
+
+        manager.mark_one_shot_hit(3).unwrap();
+
+        // Held until the next resume removes it, but gone for hosts.
+        assert_eq!(manager.get(3).unwrap().serial, serial);
+        assert!(manager.listed(3).is_none());
+        assert!(manager.live(3, serial).is_none());
     }
 
     #[test]

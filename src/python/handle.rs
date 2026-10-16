@@ -2,6 +2,7 @@
 //! `Session`, and every handle reaches it through [`Owner`], which also refuses
 //! handles minted before the guest was rebuilt (a reboot).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -16,8 +17,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
-use super::command::admit;
+use super::command::{CommandHost, HostSession, admit};
 use super::context::{Context, in_context};
+use super::record::{RecordClass, ToValue};
 use super::{ErrorKind, error, raise};
 use crate::error::{Error, Result as CoreResult};
 use crate::repl::ReplStore;
@@ -271,6 +273,12 @@ impl Drop for Actor {
     }
 }
 
+impl CommandHost for Debugger {
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Debugger(self)
+    }
+}
+
 impl Debugger {
     fn with_handle(inner: SessionHandle, generation: Arc<AtomicU64>) -> Self {
         Debugger {
@@ -492,6 +500,22 @@ fn stale_check(minted: Option<u64>, current: u64) -> PyResult<()> {
         )),
         _ => Ok(()),
     }
+}
+
+/// An SDK handle on one guest or debugger object, with a record of it:
+/// what `#[handle]` (the `ntoseye-macros` crate) generates for a class
+/// and its `#[handle] impl` block. The class gets a property per record
+/// field, `info`, `to_dict()`, and an identity (`==`, `hash`) by its key.
+pub trait Handle: Sized {
+    type Record: ToValue + RecordClass + Clone;
+
+    /// The record, once the handle is checked valid: the one it holds, if
+    /// it is from the current target generation, or the object's state now.
+    fn record(&self, py: Python<'_>) -> PyResult<Cow<'_, Self::Record>>;
+
+    /// Whether `record`, a record of this handle's kind, describes this
+    /// object: its key field matches.
+    fn describes(&self, py: Python<'_>, record: &Bound<'_, PyAny>) -> PyResult<bool>;
 }
 
 #[cfg(test)]

@@ -170,7 +170,8 @@ fn both_memory_lists_and_thread_stacks_serve_reads_with_holes_reported() {
     dump.read_virtual(VirtAddr(0x20010), &mut stack_bytes)
         .unwrap();
     assert_eq!(stack_bytes, [0x5a; 0x30]);
-    assert_eq!(dump.info().threads[0].stack, Some((0x20010, 0x30)));
+    let stack = dump.info().threads[0].stack.unwrap();
+    assert_eq!((stack.start, stack.size), (0x20010, 0x30));
 
     // A read running off the first block stops at the hole and names where
     // the capture resumes.
@@ -365,9 +366,9 @@ fn amd64_contexts_are_checked_and_thread_streams_merge_by_thread_id() {
     assert!(threads[1].context.is_err());
     assert!(threads[2].context.is_err());
 
-    assert_eq!(threads[0].info.as_ref().unwrap().start_address, 0x1010);
-    assert_eq!(threads[2].info.as_ref().unwrap().start_address, 0x1030);
-    assert!(threads[1].info.is_none());
+    assert_eq!(threads[0].times.as_ref().unwrap().start_address, 0x1010);
+    assert_eq!(threads[2].times.as_ref().unwrap().start_address, 0x1030);
+    assert!(threads[1].times.is_none());
     assert_eq!(threads[1].name.as_deref(), Some("worker"));
 
     // Only the groups the flags mark are registers of the context.

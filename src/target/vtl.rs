@@ -20,7 +20,7 @@ use crate::{
         hv_layout,
         hv_layout::Hypercall,
         hypercall_input::{self, DecodedHypercall},
-        hypercalls::{self, HypercallCaller, HypercallInput},
+        hypercalls::{self, HypercallCallerInfo, HypercallInput},
         hypervisor::{self, HvVirtualProcessor},
         ordered_exit_gprs, vp_registers,
     },
@@ -1483,7 +1483,7 @@ impl Target {
     /// or more. `None` when the partitions cannot be walked, or the
     /// processor serves no guest's VP and no state of its root VP is
     /// current, which leaves the caller unknown.
-    pub fn hypercall_caller(&self, cr3: u64, rip: u64, number: u16) -> Option<HypercallCaller> {
+    pub fn hypercall_caller(&self, cr3: u64, rip: u64, number: u16) -> Option<HypercallCallerInfo> {
         if let Some(caller) = self.loaded_hypercall_caller(cr3, rip, number) {
             return Some(caller);
         }
@@ -1505,7 +1505,7 @@ impl Target {
                 ),
                 _ => served.hypercall,
             };
-            return Some(HypercallCaller {
+            return Some(HypercallCallerInfo {
                 partition: served.partition,
                 root: false,
                 vp: served.vp,
@@ -1533,7 +1533,7 @@ impl Target {
                     .any(|processor| processor.number == Some(number))
             })
             .or_else(|| root.virtual_processors.iter().find(|vp| vp.index == number))?;
-        Some(HypercallCaller {
+        Some(HypercallCallerInfo {
             partition: root.id,
             root: true,
             vp: vp.index,
@@ -1753,7 +1753,12 @@ impl Target {
     /// `None` when no eVMCS is known loaded there, no walk names one, or
     /// several guest VPs' are loaded with its root, which leaves the caller
     /// to the walk.
-    fn loaded_hypercall_caller(&self, cr3: u64, rip: u64, number: u16) -> Option<HypercallCaller> {
+    fn loaded_hypercall_caller(
+        &self,
+        cr3: u64,
+        rip: u64,
+        number: u16,
+    ) -> Option<HypercallCallerInfo> {
         let guest = self.guest().ok()?;
         let mask = self.arch().dtb_page_mask();
         let walk = || Some(hypervisor::vp_slots(&self.hypervisor_partitions().ok()?));
@@ -1775,7 +1780,7 @@ impl Target {
             .filter(|stop| stop.processor == number && stop.rip == rip);
         let registers = self.saved_general_registers(cr3 & mask, rip, &loaded, true, entered);
         let xmm = self.saved_xmm_registers(cr3 & mask, rip, &loaded, &registers);
-        Some(HypercallCaller {
+        Some(HypercallCallerInfo {
             partition: slot.partition,
             root: slot.root,
             vp: slot.vp,

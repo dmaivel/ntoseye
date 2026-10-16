@@ -435,9 +435,14 @@ impl SavedThreadRegisters {
 /// show it. A field that the walk could not read is `None`.
 #[record(impl)]
 pub struct ThreadInfo {
+    /// The `_ETHREAD` address, which identifies the thread.
     pub ethread: VirtAddr,
+    /// The `_KTHREAD` address.
     pub kthread: VirtAddr,
+    /// The thread ID, or `None` if the thread has no ID (for example, an
+    /// idle thread).
     pub tid: Option<u64>,
+    /// The ID of the process that owns the thread.
     pub pid: Option<u64>,
     /// The image name of the owning process.
     pub process_name: Option<String>,

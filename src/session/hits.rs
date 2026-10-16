@@ -10,7 +10,7 @@ use crate::dbg_backend::{
     StopEvent, debug_registers, processor_index_from_backend_thread_id,
 };
 use crate::error::{Error, Result};
-use crate::guest::hypercalls::HypercallCaller;
+use crate::guest::hypercalls::HypercallCallerInfo;
 use crate::notice::Notice;
 use crate::session::context::{
     refresh_windows_thread_context_for_backend_thread, update_target_context_from_registers,
@@ -218,7 +218,7 @@ pub fn stopped_caller_matches(
     stopped: &str,
     cr3: u64,
     rip: u64,
-) -> (bool, Option<HypercallCaller>) {
+) -> (bool, Option<HypercallCallerInfo>) {
     if breakpoint.hypercall.is_none() && breakpoint.vm_exit.is_none() {
         return (true, None);
     }
@@ -253,7 +253,7 @@ pub fn stopped_caller_matches(
 pub fn evaluate_hit_condition(
     target: &mut Target,
     breakpoint: &BreakpointInfo,
-    caller: Option<&HypercallCaller>,
+    caller: Option<&HypercallCallerInfo>,
 ) -> Result<bool> {
     if (breakpoint.hypercall.is_none() && breakpoint.vm_exit.is_none())
         || breakpoint.condition_expr.is_none()

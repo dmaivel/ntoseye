@@ -28,7 +28,7 @@ mod image;
 mod modules;
 pub mod pdb_recovery;
 mod process;
-mod secure_kernel;
+pub mod secure_kernel;
 mod symbol_load;
 mod trustlet_layout;
 pub mod vad;
@@ -51,12 +51,14 @@ pub use secure_kernel::{SecureKernel, TrustletInfo};
 /// its address space.
 #[record(impl)]
 pub struct ProcessInfo {
+    /// The process identifier.
     pub pid: u64,
     /// The image name.
     pub name: String,
     /// The directory table base (page-table root).
     #[record(hex)]
     pub dtb: Dtb,
+    /// The `_EPROCESS` address.
     pub eprocess: VirtAddr,
     /// The 32-bit PEB of a WOW64 process (`_EPROCESS.WoW64Process`), `None`
     /// for a native process.
@@ -75,19 +77,29 @@ impl ProcessInfo {
 /// A loaded module (kernel or process image), as its loader list records it.
 #[record(impl)]
 pub struct ModuleInfo {
+    /// The image name.
     pub name: String,
+    /// The name without its extension, as `nt!` and `lm` name the module
+    /// (`nt` for the kernel).
     pub short_name: String,
+    /// The full image path, if the loader recorded one.
     pub path: Option<String>,
+    /// The base address of the loaded image.
+    #[record(rename = "base")]
     pub base_address: VirtAddr,
+    /// The size of the mapped image.
     pub size: u32,
     /// From a WOW64 process's 32-bit loader list: x86 code, 4-byte pointers.
     pub is_32bit: bool,
     pub entry_point: Option<VirtAddr>,
-    #[record(hex)]
+    /// The PE timestamp, if the loader record contains one.
+    #[record(hex, rename = "timestamp")]
     pub time_date_stamp: Option<u32>,
     #[record(hex)]
     pub checksum: Option<u32>,
+    /// The file version from the version resource of the image.
     pub file_version: Option<String>,
+    /// The product version from the version resource of the image.
     pub product_version: Option<String>,
     /// The image's CodeView record when the module list itself records it
     /// (a user-mode minidump's module stream), so its PDB is known without

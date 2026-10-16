@@ -5,6 +5,8 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ntoseye_macros::record;
+
 use super::{SymbolSearchMatch, Target, lookup_register};
 use crate::{
     error::{Error, Result},
@@ -21,7 +23,8 @@ use crate::{
 };
 
 /// Which modules [`Target::reload_module_symbols`] reloads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub enum ReloadScope {
     /// The inspection scope's, as `lm` lists them: the selected process's
     /// user-mode modules, else the kernel's.

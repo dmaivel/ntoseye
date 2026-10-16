@@ -11,7 +11,7 @@ use crate::guest::{
     ept::{self, Access, EptTranslation},
     evmcs_fields::{self, IoIntercepts, MsrIntercepts, MsrRange, PortRange},
     hypercall_input::{DecodedHypercall, HypercallField},
-    hypercalls::{HypercallCaller, HypercallInput},
+    hypercalls::{HypercallCallerInfo, HypercallInput},
     privilege_names,
 };
 use crate::repl::args::{ArgCursor, ArgCx, ArgError};
@@ -261,7 +261,7 @@ fn memory_type_name(memory_type: u8) -> &'static str {
 
 /// What `!hvcall` shows for `caller`, the VP whose exit a processor
 /// handles: the lines of its decoded hypercall, or why it has none.
-fn hypercall_report(caller: &HypercallCaller) -> std::result::Result<Vec<String>, String> {
+fn hypercall_report(caller: &HypercallCallerInfo) -> std::result::Result<Vec<String>, String> {
     let label = caller.label();
     match &caller.input {
         HypercallInput::Known(call) => Ok(hypercall_lines(&label, call)),
@@ -2097,7 +2097,7 @@ mod tests {
     }
 
     /// `caller`'s hypercall as `!hvcall` prints it, line by line.
-    fn hvcall_output(caller: HypercallCaller) -> Vec<String> {
+    fn hvcall_output(caller: HypercallCallerInfo) -> Vec<String> {
         let (result, text) = capture(|| {
             for line in hypercall_report(&caller)? {
                 outln!("{line}");
@@ -2110,7 +2110,7 @@ mod tests {
 
     /// Root partition VP 2's hypercall `value`, whose input page holds
     /// `parts`, each `(offset, qword)`.
-    fn root_caller(value: u64, parts: &[(usize, u64)]) -> HypercallCaller {
+    fn root_caller(value: u64, parts: &[(usize, u64)]) -> HypercallCallerInfo {
         let mut page = vec![0u8; 0x1000];
         for &(offset, qword) in parts {
             page[offset..offset + 8].copy_from_slice(&qword.to_le_bytes());
@@ -2119,7 +2119,7 @@ mod tests {
             buf.copy_from_slice(&page[..buf.len()]);
             Ok(())
         });
-        HypercallCaller {
+        HypercallCallerInfo {
             partition: 1,
             root: true,
             vp: 2,
@@ -2186,7 +2186,7 @@ mod tests {
     /// Without a decoded call `!hvcall` says why rather than print a tree.
     #[test]
     fn hvcall_explains_an_exit_with_no_known_call() {
-        let caller = |input| HypercallCaller {
+        let caller = |input| HypercallCallerInfo {
             partition: 4,
             root: false,
             vp: 1,

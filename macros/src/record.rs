@@ -171,7 +171,7 @@ fn unraw(ident: &Ident) -> String {
     name.strip_prefix("r#").map_or(name.clone(), str::to_string)
 }
 
-fn snake_case(ident: &Ident) -> String {
+pub fn snake_case(ident: &Ident) -> String {
     let mut out = String::new();
     for (index, c) in unraw(ident).chars().enumerate() {
         if c.is_uppercase() {
@@ -236,6 +236,14 @@ struct Getter {
     ty: TokenStream,
     mode: Mode,
     docs: Vec<Attribute>,
+    /// How a struct's value is read: its field, or its getter method. A
+    /// tagged enum's properties have none.
+    access: Option<Access>,
+}
+
+enum Access {
+    Field(Ident),
+    Method(Ident),
 }
 
 impl Getter {
@@ -246,6 +254,7 @@ impl Getter {
             ty,
             mode,
             docs,
+            access: _,
         } = self;
         let mode = mode.tokens();
         let ident = format_ident!("record_property_{index}");
@@ -261,6 +270,66 @@ impl Getter {
                 ))
             }
         }
+    }
+
+    /// What a `#[handle]` on the record learns of this property (see
+    /// [`handle_callback`]), and the `Field<index>` impl naming its type.
+    fn handle_entry(&self, name: &Ident, index: usize) -> (TokenStream, TokenStream) {
+        let Some(access) = &self.access else {
+            return (TokenStream::new(), TokenStream::new());
+        };
+        let (kind, ident) = match access {
+            Access::Field(ident) => (quote!(field), ident),
+            Access::Method(ident) => (quote!(getter), ident),
+        };
+        let property = &self.property;
+        let docs = &self.docs;
+        let index = syn::Index::from(index);
+        let ty = &self.ty;
+        let mode = self.mode.tokens();
+        (
+            quote!(#kind #ident #property #index { #(#docs)* };),
+            quote! {
+                #[cfg(feature = "python")]
+                impl crate::python::record::Field<#index> for #name {
+                    type Type = #ty;
+                    type Mode = #mode;
+                }
+            },
+        )
+    }
+}
+
+/// The macro a record struct defines under its own name, in the macro
+/// namespace, so a module that imports the record imports it too: `Name!
+/// { ... }` hands its input to `ntoseye_macros::handle_methods!` after the
+/// record's properties (`entries`, then `extra`). `#[handle]` invokes it to
+/// learn the record's properties. `d` is the `$` the definition is
+/// written with (`$d` inside another `macro_rules!`).
+fn handle_callback(
+    name: &Ident,
+    entries: &[TokenStream],
+    extra: TokenStream,
+    d: TokenStream,
+) -> TokenStream {
+    let hidden = format_ident!("__record_handle_{}", unraw(name));
+    quote! {
+        #[cfg(feature = "python")]
+        #[doc(hidden)]
+        #[allow(non_snake_case)]
+        mod #hidden {
+            #[allow(unused_macros)]
+            macro_rules! #name {
+                (#d (#d input:tt)*) => {
+                    ::ntoseye_macros::handle_methods! { [#(#entries)* #extra] #d (#d input)* }
+                };
+            }
+            #[allow(unused_imports)]
+            pub(crate) use #name;
+        }
+        #[cfg(feature = "python")]
+        #[allow(unused_imports)]
+        pub(crate) use #hidden::#name;
     }
 }
 
@@ -294,36 +363,51 @@ fn unique(getters: &[Getter], span: Span) -> Result<()> {
 }
 
 /// The class of a record: `<Name>Py`, its `wrap`, `Name::into_class`, and its
-/// properties (through `methods_macro` when an impl block adds to them).
+/// properties (through `methods_macro` when an impl block adds to them). A
+/// struct's class also has the `handle_callback` macro, with the impl
+/// block's computed properties when it has one, and its `Field` impls.
 fn class(name: &Ident, docs: &[Attribute], getters: &[Getter], has_impl: bool) -> TokenStream {
     let class = class_ident(name);
     let python_name = unraw(name);
+    let structure = getters.iter().any(|getter| getter.access.is_some());
+    let (entries, fields): (Vec<_>, Vec<_>) = getters
+        .iter()
+        .enumerate()
+        .map(|(index, getter)| getter.handle_entry(name, index))
+        .unzip();
     let getters = getters
         .iter()
         .enumerate()
         .map(|(index, getter)| getter.tokens(index));
     let methods = if has_impl {
         let methods = methods_macro(name);
+        // The impl block hands over `$` and its computed properties' entries.
+        let callback =
+            structure.then(|| handle_callback(name, &entries, quote!($($computed)*), quote!($d)));
         quote! {
             #[cfg(feature = "python")]
             #[allow(unused_macros)]
             macro_rules! #methods {
-                ($($items:tt)*) => {
+                ($d:tt [$($computed:tt)*] $($items:tt)*) => {
                     #[pyo3::pymethods]
                     impl #class {
                         #(#getters)*
                         $($items)*
                     }
+                    #callback
                 };
             }
         }
     } else {
+        let callback =
+            structure.then(|| handle_callback(name, &entries, TokenStream::new(), quote!($)));
         quote! {
             #[cfg(feature = "python")]
             #[pyo3::pymethods]
             impl #class {
                 #(#getters)*
             }
+            #callback
         }
     };
     quote! {
@@ -336,6 +420,13 @@ fn class(name: &Ident, docs: &[Attribute], getters: &[Getter], has_impl: bool) -
             extends = crate::python::record::BaseRecord
         )]
         pub struct #class;
+
+        #[cfg(feature = "python")]
+        impl crate::python::record::RecordClass for #name {
+            type Class = #class;
+        }
+
+        #(#fields)*
 
         #[cfg(feature = "python")]
         impl #class {
@@ -500,6 +591,7 @@ fn structure(flags: Flags, mut item: ItemStruct) -> Result<TokenStream> {
             ty: quote!(#ty),
             mode: opts.mode,
             docs: docs(&field.attrs),
+            access: Some(Access::Field(ident.clone())),
         });
     }
     unique(&getters, item.ident.span())?;
@@ -550,6 +642,7 @@ fn enumeration(flags: Flags, mut item: ItemEnum) -> Result<TokenStream> {
 fn fieldless_enum(item: &mut ItemEnum) -> Result<TokenStream> {
     let mut texts = Vec::new();
     let mut arms = Vec::new();
+    let mut parse = Vec::new();
     for variant in &mut item.variants {
         let opts = Opts::take(&mut variant.attrs)?;
         opts.field_only()?;
@@ -564,17 +657,20 @@ fn fieldless_enum(item: &mut ItemEnum) -> Result<TokenStream> {
             .map_or_else(|| snake_case(&variant.ident), |rename| rename.value());
         let ident = &variant.ident;
         arms.push(quote!(Self::#ident => #text,));
+        parse.push(quote!(#text => ::std::result::Result::Ok(Self::#ident),));
         texts.push((text, variant.ident.span()));
     }
     distinct(&texts, "text")?;
     let texts: Vec<String> = texts.into_iter().map(|(text, _)| text).collect();
+    let expected = format!("expected one of '{}', got ", texts.join("', '"));
+    let hint = literal_hint(&texts);
     let name = &item.ident;
     let to_value = to_value(
         name,
         quote!(crate::python::record::Value::Str(
             ::std::string::String::from(self.as_str())
         )),
-        literal_hint(&texts),
+        hint.clone(),
     );
     Ok(quote! {
         impl #name {
@@ -593,6 +689,35 @@ fn fieldless_enum(item: &mut ItemEnum) -> Result<TokenStream> {
         }
 
         #to_value
+
+        /// An SDK argument takes the variant's text.
+        #[cfg(feature = "python")]
+        impl<'a, 'py> pyo3::FromPyObject<'a, 'py> for #name {
+            type Error = pyo3::PyErr;
+
+            #[cfg(feature = "python-stubs")]
+            const INPUT_TYPE: pyo3::inspect::PyStaticExpr = #hint;
+
+            fn extract(obj: pyo3::Borrowed<'a, 'py, pyo3::PyAny>) -> pyo3::PyResult<Self> {
+                let text: ::std::borrow::Cow<'_, str> = obj.extract()?;
+                match &*text {
+                    #(#parse)*
+                    other => ::std::result::Result::Err(
+                        pyo3::exceptions::PyValueError::new_err(
+                            ::std::format!("{}{other:?}", #expected),
+                        ),
+                    ),
+                }
+            }
+        }
+
+        #[cfg(feature = "python")]
+        impl crate::python::command::PyArg for #name {
+            type Py = Self;
+            fn from_py(value: Self) -> Self {
+                value
+            }
+        }
     })
 }
 
@@ -721,6 +846,7 @@ fn tagged(flags: &Flags, item: &mut ItemEnum) -> Result<TokenStream> {
                         ty: quote!(::std::option::Option<#ty>),
                         mode: opts.mode,
                         docs: docs(&field.attrs),
+                        access: None,
                     });
                     getters.len() - 1
                 }
@@ -763,6 +889,7 @@ fn tagged(flags: &Flags, item: &mut ItemEnum) -> Result<TokenStream> {
         ty: quote!(#kind_type),
         mode: Mode::Plain,
         docs: kind_docs,
+        access: None,
     }];
     all.extend(getters);
     unique(&all, name.span())?;
@@ -891,6 +1018,7 @@ fn implementation(mut item: ItemImpl) -> Result<TokenStream> {
             ty: quote!(#ty),
             mode: opts.mode,
             docs: docs(&method.attrs),
+            access: Some(Access::Method(ident.clone())),
         });
         kept.push(impl_item);
     }
@@ -898,6 +1026,11 @@ fn implementation(mut item: ItemImpl) -> Result<TokenStream> {
     item.items = kept;
     let methods = methods_macro(&name);
     let offset = 1000;
+    let (entries, fields): (Vec<_>, Vec<_>) = getters
+        .iter()
+        .enumerate()
+        .map(|(index, getter)| getter.handle_entry(&name, offset + index))
+        .unzip();
     let getters = getters
         .iter()
         .enumerate()
@@ -915,8 +1048,11 @@ fn implementation(mut item: ItemImpl) -> Result<TokenStream> {
             }
         }
 
+        #(#fields)*
+
         #[cfg(feature = "python")]
         #methods! {
+            $ [#(#entries)*]
             #(#getters)*
             #(#python)*
         }

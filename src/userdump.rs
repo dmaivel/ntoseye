@@ -48,34 +48,82 @@ pub struct UserSystemInfo {
     pub service_pack: Option<String>,
 }
 
-/// `ThreadInfoListStream` entry: what the kernel knew of the thread.
-#[derive(Debug, Clone)]
-pub struct UserThreadInfo {
+/// The process a user-mode minidump captured (`dbg.user_dump.process`).
+#[record]
+pub struct UserProcessInfo {
+    /// The process id, when the dump records it.
+    pub pid: Option<u32>,
+    /// The executable's file name, from the first module the dump lists.
+    pub name: Option<String>,
+}
+
+/// What the dump's thread-info stream (`ThreadInfoListStream`) records of
+/// a thread: what the kernel knew of it.
+#[record]
+pub struct UserThreadTimes {
+    /// The thread's exit status.
+    #[record(hex)]
     pub exit_status: u32,
+    /// When the thread started, as a FILETIME.
     pub create_time: u64,
+    /// When the thread exited, as a FILETIME (0 while it runs).
     pub exit_time: u64,
+    /// Kernel-mode time the thread had run, in 100 ns units.
     pub kernel_time: u64,
+    /// User-mode time the thread had run, in 100 ns units.
     pub user_time: u64,
+    /// The thread's start address.
+    #[record(hex)]
     pub start_address: u64,
+    /// The thread's processor affinity mask.
+    #[record(hex)]
     pub affinity: u64,
+}
+
+/// The part of a thread's stack that a dump captured.
+#[record]
+#[derive(Copy)]
+pub struct CapturedStack {
+    #[record(hex)]
+    pub start: u64,
+    /// Its size in bytes.
+    #[record(hex)]
+    pub size: u64,
 }
 
 /// A thread of the captured process (`MINIDUMP_THREAD`), with what the
 /// thread-info and thread-name streams add, matched by thread id.
-#[derive(Debug, Clone)]
-pub struct UserThread {
+#[record(impl)]
+pub struct UserThreadInfo {
+    /// The thread id.
     pub tid: u32,
     pub suspend_count: u32,
     pub priority_class: u32,
     pub priority: u32,
+    /// The `_TEB` address, 0 when the dump records none.
+    #[record(hex)]
     pub teb: u64,
-    /// The captured stack as `(start, size)`, `None` when the dump holds
-    /// none of it.
-    pub stack: Option<(u64, u64)>,
+    /// The captured stack, `None` when the dump holds none of it.
+    pub stack: Option<CapturedStack>,
     /// The thread's raw CONTEXT at the dump, or why it is unusable.
+    #[record(skip)]
     pub context: std::result::Result<Vec<u8>, String>,
+    /// The thread's description (`SetThreadDescription`), when the dump
+    /// records one.
     pub name: Option<String>,
-    pub info: Option<UserThreadInfo>,
+    /// What the dump's thread-info stream records of the thread, when it
+    /// has one.
+    pub times: Option<UserThreadTimes>,
+}
+
+#[record]
+impl UserThreadInfo {
+    /// Why the thread's recorded context is unusable, or `None` when it is
+    /// usable.
+    #[record(getter)]
+    pub fn context_error(&self) -> Option<String> {
+        self.context.as_ref().err().cloned()
+    }
 }
 
 /// A loaded module (`MINIDUMP_MODULE`).
@@ -169,7 +217,7 @@ pub struct UserDumpInfo {
     pub time_zone: Option<UserTimeZone>,
     /// `MINIDUMP_MISC_INFO_4.BuildString`.
     pub build_string: Option<String>,
-    pub threads: Vec<UserThread>,
+    pub threads: Vec<UserThreadInfo>,
     pub modules: Vec<UserModule>,
     pub unloaded_modules: Vec<UnloadedModule>,
     pub exception: Option<UserException>,
@@ -332,6 +380,14 @@ impl UserDumpInfo {
         self.modules.first().map(UserModule::file_name)
     }
 
+    /// The captured process, as far as the dump records it.
+    pub fn process(&self) -> UserProcessInfo {
+        UserProcessInfo {
+            pid: self.process_id,
+            name: self.process_name().map(str::to_string),
+        }
+    }
+
     /// `charmap.exe (pid 1234)`, as far as the dump records it.
     pub fn process_label(&self) -> String {
         let name = self.process_name().unwrap_or("process");
@@ -341,7 +397,7 @@ impl UserDumpInfo {
         }
     }
 
-    pub fn thread(&self, tid: u32) -> Option<&UserThread> {
+    pub fn thread(&self, tid: u32) -> Option<&UserThreadInfo> {
         self.threads.iter().find(|thread| thread.tid == tid)
     }
 
@@ -389,7 +445,7 @@ impl UserDumpInfo {
     }
 
     /// The thread a backend id names (see [`Self::backend_thread_id`]).
-    pub fn thread_for_backend_id(&self, id: &str) -> Option<&UserThread> {
+    pub fn thread_for_backend_id(&self, id: &str) -> Option<&UserThreadInfo> {
         self.threads
             .iter()
             .find(|thread| self.backend_thread_id(thread.tid).eq_ignore_ascii_case(id))

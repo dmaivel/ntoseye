@@ -16,17 +16,13 @@ use super::handle::Owner;
 use super::process::Process;
 use super::thread::{Cpu, Thread};
 use crate::Backend;
-use crate::dbg_backend::{ContinueDisposition, ModuleEvent, WatchpointAccess};
-use crate::exception_policy::{EventName, ExceptionPolicyFinalAction, ExceptionPolicyMode};
+use crate::dbg_backend::ContinueDisposition;
+use crate::exception_policy::{EventName, ExceptionPolicyFinalAction};
 use crate::guest::ProcessInfo;
-use crate::kd::KdMemorySource;
 use crate::session::WalkUntil;
 #[cfg(feature = "python-stubs")]
 use crate::session::driver::StopPy;
-use crate::target::ReloadScope;
 use crate::target::ThreadInfo;
-use crate::target::irpfind::IrpPool;
-use crate::target::mm::{PoolType, PoolUsageSort};
 use crate::target::object::ObjectName;
 use crate::target::sched::{ApcSelector, UniqStackScope};
 use crate::target::workqueue::WorkQueueTypes;
@@ -77,30 +73,6 @@ literal_arg! {
 }
 
 literal_arg! {
-    /// `attach(memory_source=...)`: where KD/KDNET reads guest memory.
-    MemorySource(KdMemorySource) {
-        "auto" => KdMemorySource::Auto,
-        "host" => KdMemorySource::Host,
-        "kd" => KdMemorySource::Kd,
-    }
-}
-
-literal_arg! {
-    /// How a resume acknowledges the current exception (KD).
-    Disposition(ContinueDisposition) {
-        "handled" => ContinueDisposition::Handled,
-        "not_handled" => ContinueDisposition::NotHandled,
-    }
-}
-
-impl PyArg for ContinueDisposition {
-    type Py = Disposition;
-    fn from_py(value: Disposition) -> Self {
-        value.0
-    }
-}
-
-literal_arg! {
     /// An instruction class a step walk stops before.
     Until(WalkUntil) {
         "call" => WalkUntil::Call,
@@ -146,46 +118,6 @@ pub enum AddressArg {
 }
 
 literal_arg! {
-    /// A data watchpoint's access kind.
-    WatchAccess(WatchpointAccess) {
-        "write" => WatchpointAccess::Write,
-        "read_write" => WatchpointAccess::ReadWrite,
-    }
-}
-
-literal_arg! {
-    /// An exception stop policy (`sxe`/`sxd`/`sxn`/`sxi`).
-    PolicyMode(ExceptionPolicyMode) {
-        "break" => ExceptionPolicyMode::Break,
-        "second_chance" => ExceptionPolicyMode::SecondChance,
-        "notify" => ExceptionPolicyMode::Notify,
-        "ignore" => ExceptionPolicyMode::Ignore,
-    }
-}
-
-impl PyArg for ExceptionPolicyMode {
-    type Py = PolicyMode;
-    fn from_py(value: PolicyMode) -> Self {
-        value.0
-    }
-}
-
-literal_arg! {
-    /// A module event a filter is for: a load (`ld`) or an unload (`ud`).
-    ModuleEventArg(ModuleEvent) {
-        "ld" => ModuleEvent::Load,
-        "ud" => ModuleEvent::Unload,
-    }
-}
-
-impl PyArg for ModuleEvent {
-    type Py = ModuleEventArg;
-    fn from_py(value: ModuleEventArg) -> Self {
-        value.0
-    }
-}
-
-literal_arg! {
     /// An exception policy's explicit final action (`-f`): break, or
     /// continue as handled or not handled.
     FinalAction(ExceptionPolicyFinalAction) {
@@ -198,37 +130,6 @@ literal_arg! {
 impl PyArg for ExceptionPolicyFinalAction {
     type Py = FinalAction;
     fn from_py(value: FinalAction) -> Self {
-        value.0
-    }
-}
-
-literal_arg! {
-    /// `Inspect.pool_usage(sort=...)`: `!poolused`'s order.
-    PoolSort(PoolUsageSort) {
-        "tag" => PoolUsageSort::Tag,
-        "nonpaged" => PoolUsageSort::NonPagedBytes,
-        "paged" => PoolUsageSort::PagedBytes,
-    }
-}
-
-impl PyArg for PoolUsageSort {
-    type Py = PoolSort;
-    fn from_py(value: PoolSort) -> Self {
-        value.0
-    }
-}
-
-literal_arg! {
-    /// `Inspect.pool_find(pool_type=...)`: the pool `!poolfind` searches.
-    PoolKind(PoolType) {
-        "nonpaged" => PoolType::NonPaged,
-        "paged" => PoolType::Paged,
-    }
-}
-
-impl PyArg for PoolType {
-    type Py = PoolKind;
-    fn from_py(value: PoolKind) -> Self {
         value.0
     }
 }
@@ -419,36 +320,5 @@ impl PyArg for ObjectName {
             ObjectArg::Address(address) => ObjectName::Address(VirtAddr(address)),
             ObjectArg::Path(path) => ObjectName::Path(path),
         }
-    }
-}
-
-literal_arg! {
-    /// `irp_find(pool_type=...)`: the pool `!irpfind` scans.
-    IrpPoolArg(IrpPool) {
-        "nonpaged" => IrpPool::NonPaged,
-        "paged" => IrpPool::Paged,
-    }
-}
-
-impl PyArg for IrpPool {
-    type Py = IrpPoolArg;
-    fn from_py(value: IrpPoolArg) -> Self {
-        value.0
-    }
-}
-
-literal_arg! {
-    /// `Symbols.reload(scope=...)`: whose modules `.reload` reloads.
-    ReloadScopeArg(ReloadScope) {
-        "current" => ReloadScope::Current,
-        "kernel" => ReloadScope::Kernel,
-        "user" => ReloadScope::User,
-    }
-}
-
-impl PyArg for ReloadScope {
-    type Py = ReloadScopeArg;
-    fn from_py(value: ReloadScopeArg) -> Self {
-        value.0
     }
 }

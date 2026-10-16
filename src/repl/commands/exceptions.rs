@@ -176,7 +176,7 @@ fn set_event_policy(
             if disposition.is_some() {
                 return Err(Error::DebugInfo(format!(
                     "-f does not apply to {}: a module event either stops (sxe) or continues",
-                    event.filter_name()
+                    event.as_str()
                 )));
             }
             set_module_filter(session, event, module, mode, command).map(EventPolicy::Module)
@@ -220,7 +220,7 @@ fn set_module_filter(
     if command.is_some() && mode != ExceptionPolicyMode::Break {
         return Err(Error::DebugInfo(format!(
             "-c applies to {} only with sxe, where it runs at the stop",
-            event.filter_name()
+            event.as_str()
         )));
     }
     if let Some(event_command) = command.as_deref() {
@@ -255,8 +255,8 @@ fn set_exception_policy(
         EventFilter::Exception(code) => set_exception(session, code, mode, command, disposition),
         EventFilter::Module(event, _) => Err(Error::InvalidArgument(format!(
             "{} is a module event, not an exception: use set_module_event(\"{}\", ...)",
-            event.filter_name(),
-            event.filter_name()
+            event.as_str(),
+            event.as_str()
         ))),
     }
 }
@@ -284,7 +284,7 @@ fn set_module_event(
         Some("") => {
             return Err(Error::InvalidArgument(format!(
                 "an empty module name names no module (omit it to filter every {})",
-                event.filter_name()
+                event.as_str()
             )));
         }
         trimmed => trimmed.map(str::to_string),

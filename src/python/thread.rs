@@ -4,31 +4,33 @@ use std::collections::HashMap;
 
 use indexmap::IndexMap;
 
-use pyo3::exceptions::{PyAttributeError, PyIndexError, PyKeyError, PyTypeError, PyValueError};
+use ntoseye_macros::{collection, handle};
+use pyo3::exceptions::{PyAttributeError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyInt};
 
-use super::command::admit;
+use super::collection::Iter;
+use super::command::{Bind, admit};
 use super::context::{Context, Space};
+use super::err;
 use super::handle::{Owner, require_halted};
 use super::hypervisor::HypercallCaller;
-use super::iter::{CpuIterator, NameIterator, ThreadIterator};
 use super::memory::Memory;
 use super::process::Process;
 use super::record::PlainDict;
 use super::record::Typed;
 use super::types::{Struct, enum_value};
-use super::{err, plain_dict};
 use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::guest::ProcessInfo;
 use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::effects::Effects;
 use crate::session::{Session, VcpuInfo};
 use crate::symbols::CodeFrame;
-use crate::target::{SelectedFrame, ServedVp, ThreadInfo, ThreadInfoPy, cpu};
+use crate::target::cpu::Processor;
+use crate::target::{SelectedFrame, ThreadInfo, cpu};
 use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current};
 use crate::types::VirtAddr;
-use crate::unwind::{RecoveredFrame, SavedVtl, StackFrame, halted_in_windows_hypervisor};
+use crate::unwind::{RecoveredFrame, StackFrame, halted_in_windows_hypervisor};
 
 /// A collection of threads: `dbg.threads` (all threads) or `proc.threads`,
 /// keyed by TID or by a `ThreadInfo` record (`stop.thread`).
@@ -36,45 +38,6 @@ use crate::unwind::{RecoveredFrame, SavedVtl, StackFrame, halted_in_windows_hype
 pub struct Threads {
     pub owner: Owner,
     pub process: Option<ProcessInfo>,
-}
-
-/// A key of a `Threads` collection: a TID, or a `ThreadInfo` record, which
-/// names its thread by `_ETHREAD` (an idle thread has no TID).
-#[derive(FromPyObject)]
-pub enum ThreadKey<'py> {
-    Tid(u64),
-    Info(Bound<'py, ThreadInfoPy>),
-}
-
-/// What a listed thread must match.
-enum ThreadMatch {
-    Tid(u64),
-    Ethread(u64),
-}
-
-impl ThreadKey<'_> {
-    fn resolve(&self) -> PyResult<ThreadMatch> {
-        match self {
-            ThreadKey::Tid(tid) => Ok(ThreadMatch::Tid(*tid)),
-            ThreadKey::Info(info) => Ok(ThreadMatch::Ethread(info.getattr("ethread")?.extract()?)),
-        }
-    }
-}
-
-impl ThreadMatch {
-    fn matches(&self, thread: &ThreadInfo) -> bool {
-        match *self {
-            ThreadMatch::Tid(tid) => thread.tid == Some(tid),
-            ThreadMatch::Ethread(ethread) => thread.ethread.0 == ethread,
-        }
-    }
-
-    fn key_error(&self) -> PyErr {
-        match *self {
-            ThreadMatch::Tid(tid) => PyKeyError::new_err(tid),
-            ThreadMatch::Ethread(ethread) => PyKeyError::new_err(format!("{ethread:#x}")),
-        }
-    }
 }
 
 impl Threads {
@@ -92,13 +55,17 @@ impl Threads {
             process: Some(info),
         }
     }
+}
 
-    fn snapshot(&self, py: Python<'_>) -> PyResult<Vec<ThreadInfo>> {
+#[collection(records)]
+impl Threads {
+    fn enumerate(&self, py: Python<'_>) -> PyResult<Vec<Thread>> {
         let context = self
             .process
             .clone()
             .map_or_else(Context::default, Context::process);
-        self.owner
+        let infos = self
+            .owner
             .with_in(py, &context, |session| match &self.process {
                 Some(process) => session
                     .target
@@ -108,70 +75,32 @@ impl Threads {
                     .windows_threads()
                     .map(|(threads, _)| threads)
                     .map_err(err),
-            })
-    }
-
-    fn find(&self, py: Python<'_>, wanted: &ThreadMatch) -> PyResult<Option<Thread>> {
-        let Some(info) = self
-            .snapshot(py)?
-            .into_iter()
-            .find(|thread| wanted.matches(thread))
-        else {
-            return Ok(None);
-        };
-        Ok(Some(Thread::from_owner(self.owner.derive(py), info)))
-    }
-
-    fn handles(&self, py: Python<'_>) -> PyResult<Vec<Py<Thread>>> {
-        let infos = self.snapshot(py)?;
+            })?;
         let owner = self.owner.derive(py);
-        infos
+        Ok(infos
             .into_iter()
-            .map(|info| Py::new(py, Thread::from_owner(owner.clone_ref(py), info)))
-            .collect()
-    }
-}
-
-#[pymethods]
-impl Threads {
-    /// Get the thread with a TID, or the thread a `ThreadInfo` record
-    /// describes (`dbg.threads[stop.thread]`); raise `KeyError` if no thread
-    /// matches.
-    fn __getitem__(&self, py: Python<'_>, key: ThreadKey<'_>) -> PyResult<Thread> {
-        let wanted = key.resolve()?;
-        self.find(py, &wanted)?.ok_or_else(|| wanted.key_error())
+            .map(|info| Thread::from_owner(owner.clone_ref(py), info))
+            .collect())
     }
 
-    /// Get the thread with a TID, or the thread a `ThreadInfo` record
-    /// describes; `None` if no thread matches.
-    fn get(&self, py: Python<'_>, key: ThreadKey<'_>) -> PyResult<Option<Thread>> {
-        self.find(py, &key.resolve()?)
-    }
-
-    /// Get the thread at an ETHREAD or KTHREAD address.
-    fn at(&self, py: Python<'_>, address: u64) -> PyResult<Thread> {
-        let info = self
-            .snapshot(py)?
+    /// The thread with a TID, or the thread a `ThreadInfo` record describes
+    /// (`dbg.threads[stop.thread]`, which also finds an idle thread, which
+    /// has no TID).
+    fn lookup(&self, py: Python<'_>, tid: &u64) -> PyResult<Option<Thread>> {
+        Ok(self
+            .enumerate(py)?
             .into_iter()
-            .find(|thread| thread.ethread.0 == address || thread.kthread.0 == address)
-            .ok_or_else(|| PyKeyError::new_err(format!("{address:#x}")))?;
-        Ok(Thread::from_owner(self.owner.derive(py), info))
+            .find(|thread| thread.info.tid == Some(*tid)))
     }
 
-    fn __contains__(&self, py: Python<'_>, key: ThreadKey<'_>) -> PyResult<bool> {
-        Ok(self.find(py, &key.resolve()?)?.is_some())
-    }
-
-    fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
-        Ok(self.snapshot(py)?.len())
-    }
-
-    fn __iter__(&self, py: Python<'_>) -> PyResult<ThreadIterator> {
-        Ok(ThreadIterator::new(self.handles(py)?))
+    /// The thread at an ETHREAD or KTHREAD address, or `None`.
+    #[collection(at)]
+    fn holds(thread: &Thread, address: u64) -> bool {
+        thread.info.ethread.0 == address || thread.info.kthread.0 == address
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        let count = self.snapshot(py)?.len();
+        let count = self.enumerate(py)?.len();
         Ok(match &self.process {
             Some(process) => format!("Threads(pid={}, len={count})", process.pid),
             None => format!("Threads(len={count})"),
@@ -180,7 +109,7 @@ impl Threads {
 }
 
 /// One Windows thread, identified in a debugger by its ETHREAD address.
-#[pyclass(module = "ntoseye")]
+#[handle(record = ThreadInfo, key = ethread, context = self.thread_context(py)?, impl)]
 pub struct Thread {
     pub owner: Owner,
     pub info: ThreadInfo,
@@ -192,7 +121,7 @@ impl Thread {
         Thread { owner, info }
     }
 
-    fn cpu_id(&self, py: Python<'_>) -> PyResult<Option<String>> {
+    fn vcpu_id(&self, py: Python<'_>) -> PyResult<Option<String>> {
         self.owner.with(py, |session| {
             Ok(session
                 .active_thread_map()
@@ -216,42 +145,13 @@ impl Thread {
 
     /// The context a call on this thread runs in: the thread, in its
     /// process's address space.
-    pub(super) fn thread_context(&self, py: Python<'_>) -> PyResult<Context> {
+    fn thread_context(&self, py: Python<'_>) -> PyResult<Context> {
         Ok(self.context(self.process_info(py)?))
     }
 }
 
-#[pymethods]
+#[handle]
 impl Thread {
-    /// The thread ID, or `None` if the thread has no ID (for example, an idle
-    /// thread).
-    #[getter]
-    fn tid(&self, py: Python<'_>) -> PyResult<Option<u64>> {
-        self.owner.check(py)?;
-        Ok(self.info.tid)
-    }
-
-    /// The ID of the process that owns the thread.
-    #[getter]
-    fn pid(&self, py: Python<'_>) -> PyResult<Option<u64>> {
-        self.owner.check(py)?;
-        Ok(self.info.pid)
-    }
-
-    /// The `_ETHREAD` address, which identifies the thread.
-    #[getter]
-    fn ethread(&self, py: Python<'_>) -> PyResult<u64> {
-        self.owner.check(py)?;
-        Ok(self.info.ethread.0)
-    }
-
-    /// The `_KTHREAD` address.
-    #[getter]
-    fn kthread(&self, py: Python<'_>) -> PyResult<u64> {
-        self.owner.check(py)?;
-        Ok(self.info.kthread.0)
-    }
-
     /// The process that owns the thread.
     #[getter]
     fn process(&self, py: Python<'_>) -> PyResult<Option<Process>> {
@@ -278,7 +178,7 @@ impl Thread {
     /// The processor that runs the thread, or `None` if the thread is not running.
     #[getter]
     fn cpu(&self, py: Python<'_>) -> PyResult<Option<Cpu>> {
-        let Some(id) = self.cpu_id(py)? else {
+        let Some(id) = self.vcpu_id(py)? else {
             return Ok(None);
         };
         Ok(Some(Cpu::from_owner(self.owner.derive(py), id)))
@@ -348,22 +248,6 @@ impl Thread {
             read_ktrap_frame_at_or_current(&session.target, self.info.trap_frame).map_err(err)
         })?;
         Typed::new(py, frame)
-    }
-
-    /// The thread as a plain `dict`.
-    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        self.owner.check(py)?;
-        plain_dict(py, &self.info)
-    }
-
-    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
-        other.extract::<PyRef<'_, Thread>>().is_ok_and(|other| {
-            self.owner.same_debugger(&other.owner) && self.info.ethread == other.info.ethread
-        })
-    }
-
-    fn __hash__(&self) -> isize {
-        self.owner.identity_hash(self.info.ethread)
     }
 
     fn __repr__(&self) -> String {
@@ -728,12 +612,11 @@ impl Registers {
             .any(|key| key.eq_ignore_ascii_case(name)))
     }
 
-    fn __iter__(&self, py: Python<'_>) -> PyResult<NameIterator> {
+    fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Iter<'py, String>> {
         let names = sorted_registers(&self.values(py)?)
             .into_iter()
-            .map(|(name, _)| name)
-            .collect();
-        Ok(NameIterator::new(names))
+            .map(|(name, _)| name);
+        Iter::new(py, names)
     }
 
     /// The register names, sorted.
@@ -781,9 +664,12 @@ impl Cpus {
     pub fn new(owner: Owner) -> Cpus {
         Cpus { owner }
     }
+}
 
-    fn ids(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        self.owner.with(py, |session| {
+#[collection(sequence)]
+impl Cpus {
+    fn enumerate(&self, py: Python<'_>) -> PyResult<Vec<Cpu>> {
+        let ids = self.owner.with(py, |session| {
             // A user dump's backend contexts are its threads, not processors.
             admit(session, &Effects::KERNEL_HALTED, "vcpus")?;
             Ok(session
@@ -791,54 +677,29 @@ impl Cpus {
                 .map_err(err)?
                 .into_iter()
                 .map(|cpu| cpu.id)
-                .collect())
-        })
-    }
-
-    fn handles(&self, py: Python<'_>) -> PyResult<Vec<Py<Cpu>>> {
-        let ids = self.ids(py)?;
+                .collect::<Vec<_>>())
+        })?;
         let owner = self.owner.derive(py);
-        ids.into_iter()
-            .map(|id| Py::new(py, Cpu::from_owner(owner.clone_ref(py), id)))
-            .collect()
-    }
-}
-
-#[pymethods]
-impl Cpus {
-    /// The processor numbered `index` (negative from the end); raise
-    /// `IndexError` when there is none.
-    fn __getitem__(&self, py: Python<'_>, index: isize) -> PyResult<Cpu> {
-        self.get(py, index)?
-            .ok_or_else(|| PyIndexError::new_err(index))
-    }
-
-    /// The processor numbered `index` (`stop.cpu`, negative from the end);
-    /// `None` if there is none.
-    fn get(&self, py: Python<'_>, index: isize) -> PyResult<Option<Cpu>> {
-        let mut ids = self.ids(py)?;
-        let Some(index) = sequence_index(index, ids.len()) else {
-            return Ok(None);
-        };
-        let id = ids.swap_remove(index);
-        Ok(Some(Cpu::from_owner(self.owner.derive(py), id)))
-    }
-
-    fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
-        Ok(self.ids(py)?.len())
-    }
-
-    fn __iter__(&self, py: Python<'_>) -> PyResult<CpuIterator> {
-        Ok(CpuIterator::new(self.handles(py)?))
+        Ok(ids
+            .into_iter()
+            .map(|id| Cpu::from_owner(owner.clone_ref(py), id))
+            .collect())
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        Ok(format!("Cpus(len={})", self.ids(py)?.len()))
+        Ok(format!("Cpus(len={})", self.enumerate(py)?.len()))
     }
 }
 
 /// One processor, identified by its number.
-#[pyclass(module = "ntoseye")]
+#[handle(
+    record = VcpuInfo,
+    key = number,
+    fetch = Cpu::read,
+    identity = Cpu::id,
+    context = self.context(),
+    impl
+)]
 pub struct Cpu {
     pub owner: Owner,
     /// The backend thread that is the vCPU (`p1.1`), which selects it.
@@ -856,11 +717,16 @@ impl Cpu {
             .ok_or_else(|| PyValueError::new_err(format!("invalid vCPU id: {}", self.id)))
     }
 
+    fn id(&self) -> &str {
+        &self.id
+    }
+
     fn context(&self) -> Context {
         Context::vcpu(self.id.clone())
     }
 
-    fn current_info(&self, py: Python<'_>) -> PyResult<VcpuInfo> {
+    /// The processor's state now, which needs a halted target.
+    fn read(&self, py: Python<'_>) -> PyResult<VcpuInfo> {
         self.owner.with(py, |session| {
             admit(session, &Effects::KERNEL_HALTED, "vcpus")?;
             session
@@ -873,7 +739,16 @@ impl Cpu {
     }
 }
 
-#[pymethods]
+/// A `Cpu` is its processor; an id that names none (not `p<pid>.<tid>`)
+/// leaves it to the session, which reads the current vCPU's, the `Cpu`'s
+/// own in its context.
+impl Bind<Option<Processor>> for Cpu {
+    fn bind(&self) -> Option<Processor> {
+        processor_index_from_backend_thread_id(&self.id).map(Processor)
+    }
+}
+
+#[handle]
 impl Cpu {
     /// The zero-based processor number: this processor is
     /// `dbg.cpus[number]`.
@@ -881,40 +756,6 @@ impl Cpu {
     fn number(&self, py: Python<'_>) -> PyResult<u16> {
         self.owner.check(py)?;
         self.processor()
-    }
-
-    /// The instruction pointer, which needs a halted target.
-    #[getter]
-    fn rip(&self, py: Python<'_>) -> PyResult<Option<u64>> {
-        Ok(self.current_info(py)?.rip)
-    }
-
-    /// The symbol at `rip`, if it resolves to one.
-    #[getter]
-    fn symbol(&self, py: Python<'_>) -> PyResult<Option<String>> {
-        Ok(self.current_info(py)?.symbol)
-    }
-
-    /// The VTL states that the hypervisor saved for this virtual processor
-    /// (`.vtlcxr`), for a vCPU halted in the Windows hypervisor (VBS). VTL0
-    /// comes first, and each state has the point where the VTL stopped, its
-    /// control and segment registers, and the last exit that it took. This
-    /// needs `hv-evmcs` on the VM, and the list is empty without it or if the
-    /// saved state does not pass validation.
-    #[getter]
-    fn saved_vtl<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<SavedVtl>>> {
-        Typed::new(py, self.current_info(py)?.saved_vtl)
-    }
-
-    /// The guest partition's virtual processor that this processor serves,
-    /// for a vCPU halted in the Windows hypervisor: the VP whose exit it
-    /// handles or that it is about to enter, with its partition ID, VP index,
-    /// VTL, where it left off, its last exit, and the hypercall it made.
-    /// None when the processor runs one of the root partition's VPs, or the
-    /// hypervisor's partitions cannot be walked (no `hv-evmcs`).
-    #[getter]
-    fn serving<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Option<ServedVp>>> {
-        Typed::new(py, self.current_info(py)?.serving)
     }
 
     /// The virtual processor whose hypercall this processor handles, for a
@@ -1067,21 +908,6 @@ impl Cpu {
         })
     }
 
-    /// The processor as a plain `dict`.
-    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        plain_dict(py, &self.current_info(py)?)
-    }
-
-    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
-        other
-            .extract::<PyRef<'_, Cpu>>()
-            .is_ok_and(|other| self.owner.same_debugger(&other.owner) && self.id == other.id)
-    }
-
-    fn __hash__(&self) -> isize {
-        self.owner.identity_hash(&self.id)
-    }
-
     fn __repr__(&self) -> PyResult<String> {
         Ok(format!("Cpu(number={})", self.processor()?))
     }
@@ -1196,31 +1022,5 @@ impl MsrKey {
                 cpu::parse_msr_name(&name).ok_or_else(|| PyKeyError::new_err(name))
             }
         }
-    }
-}
-
-/// A Python sequence index (negative counts from the end) into `len` items.
-fn sequence_index(index: isize, len: usize) -> Option<usize> {
-    let index = if index < 0 {
-        len.checked_sub(index.unsigned_abs())?
-    } else {
-        index.unsigned_abs()
-    };
-    (index < len).then_some(index)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::sequence_index;
-
-    #[test]
-    fn sequence_index_counts_negative_indexes_from_the_end() {
-        assert_eq!(sequence_index(0, 4), Some(0));
-        assert_eq!(sequence_index(3, 4), Some(3));
-        assert_eq!(sequence_index(-1, 4), Some(3));
-        assert_eq!(sequence_index(-4, 4), Some(0));
-        assert_eq!(sequence_index(4, 4), None);
-        assert_eq!(sequence_index(-5, 4), None);
-        assert_eq!(sequence_index(0, 0), None);
     }
 }

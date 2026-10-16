@@ -37,11 +37,12 @@
 //! methods return `Typed<'py, T>`, whose `T` types the method in the stub.
 //!
 //! **How classes reach the SDK.** `build.rs` walks the crate's module tree
-//! from `src/lib.rs` and lists every record class (a struct, or a `tagged`
-//! enum) in `with_record_classes!`, which wraps the `#[pymodule]` in
+//! from `src/lib.rs` and lists every class (a record struct or `tagged`
+//! enum, a `#[handle]`, a `#[pyclass]`) in `with_sdk_classes!`, which
+//! wraps the `#[pymodule]` in
 //! `python/mod.rs` and adds one `#[pymodule_export] use` per class, under
 //! the `cfg`s of the modules on its path. PyO3 exports only named `use`
-//! items, and the stub lists only exported classes; so a new record needs
+//! items, and the stub lists only exported classes; so a new class needs
 //! nothing else.
 
 use std::convert::Infallible;
@@ -59,7 +60,7 @@ use pyo3::types::{PyBytes, PyDict, PyList};
 #[cfg(feature = "python-stubs")]
 use pyo3::{PyTypeInfo, type_hint_identifier, type_hint_subscript};
 
-use super::iter::NameIterator;
+use super::collection::Iter;
 use super::package_attr;
 use crate::target::{DiagnosticMetric, DiagnosticValue};
 use crate::types::{Keyed, VirtAddr};
@@ -144,8 +145,8 @@ impl BaseRecord {
         self.fields.bind(py).len()
     }
 
-    fn __iter__(&self, py: Python<'_>) -> PyResult<NameIterator> {
-        Ok(NameIterator::new(self.keys(py)?))
+    fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Iter<'py, String>> {
+        Iter::new(py, self.keys(py)?)
     }
 
     fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
@@ -389,6 +390,19 @@ pub enum Bytes {}
 /// The computed properties a `#[record] impl` block adds to its record.
 pub trait RecordImpl {
     fn computed(&self, fields: &mut Vec<(&'static str, Value)>);
+}
+
+/// A record struct's SDK class (`<Name>Py`), which `#[record]` names.
+pub trait RecordClass {
+    type Class: pyo3::PyTypeInfo;
+}
+
+/// Property `N` of a record struct: the Rust type of its value and its
+/// mode. A `#[handle]` on the record names its properties' types through
+/// this, since the types are written in the record's module.
+pub trait Field<const N: usize> {
+    type Type: ToValue<Self::Mode>;
+    type Mode;
 }
 
 macro_rules! scalars {

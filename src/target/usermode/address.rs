@@ -488,7 +488,7 @@ impl Target {
             let bounds = tib.or_else(|| {
                 thread
                     .stack
-                    .map(|(start, size)| (start, start.saturating_add(size)))
+                    .map(|stack| (stack.start, stack.start.saturating_add(stack.size)))
             });
             if let Some((low, high)) = bounds {
                 sources.stacks.push(StackSource {

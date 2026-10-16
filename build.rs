@@ -4,8 +4,8 @@
 //! `unknown` outside a git checkout (a crates.io or sdist build). With
 //! `python-embed`, also point the binary at a macOS framework Python.
 //!
-//! With `python`, also list the SDK's `#[record]` classes (see
-//! `src/python/record.rs`) in `$OUT_DIR/record_classes.rs`.
+//! With `python`, also list the SDK's classes (`#[record]`s, `#[handle]`s
+//! and `#[pyclass]`es) in `$OUT_DIR/sdk_classes.rs`.
 
 use std::path::Path;
 use std::process::Command;
@@ -60,17 +60,18 @@ fn main() {
     pyo3_build_config::add_python_framework_link_args();
 
     #[cfg(feature = "python")]
-    records::write();
+    classes::write();
 }
 
-/// Finds every `#[record]` class by walking the crate's module tree from
-/// `src/lib.rs`, as rustc does, and writes `with_record_classes!`, which
-/// adds a `#[pymodule_export] use` of each to the SDK's module. A class is
-/// exported under the `cfg`s of the modules on its path and its own; a
-/// module whose `cfg` names `test` is skipped. Also checks that no two
-/// classes (records or hand-written `#[pyclass]`es) share a Python name.
+/// Finds every SDK class (a `#[record]` struct or `tagged` enum, a
+/// `#[handle]`, or a `#[pyclass]`) by walking the crate's module tree from
+/// `src/lib.rs`, as rustc does, and writes `with_sdk_classes!`, which adds a
+/// `#[pymodule_export] use` of each to the SDK's module. A class is exported
+/// under the `cfg`s of the modules on its path and its own; a module whose
+/// `cfg` names `test` is skipped. Also checks that no two classes share a
+/// Python name.
 #[cfg(feature = "python")]
-mod records {
+mod classes {
     use std::collections::BTreeMap;
     use std::fmt::Write;
     use std::path::{Path, PathBuf};
@@ -80,7 +81,8 @@ mod records {
 
     struct Class {
         cfgs: Vec<String>,
-        /// The class's Rust path, `crate::target::zombies::ZombiesPy`.
+        /// The class's Rust path, `crate::target::zombies::ZombiesPy`
+        /// (a record's) or `crate::python::process::Process`.
         path: String,
     }
 
@@ -104,13 +106,13 @@ mod records {
             writeln!(uses, "#[pymodule_export] use {};", class.path).unwrap();
         }
         let source = format!(
-            "/// `with_record_classes! {{ #[pymodule] mod m {{ ... }} }}`: the module, \
-             exporting every `#[record]` class besides its own items. Written by build.rs.\n\
-             macro_rules! with_record_classes {{\n\
+            "/// `with_sdk_classes! {{ #[pymodule] mod m {{ ... }} }}`: the module, \
+             exporting every SDK class besides its own items. Written by build.rs.\n\
+             macro_rules! with_sdk_classes {{\n\
              ($(#[$attr:meta])* $vis:vis mod $name:ident {{ $($body:tt)* }}) => {{\n\
              $(#[$attr])* $vis mod $name {{\n$($body)*\n{uses}}}\n}};\n}}\n"
         );
-        let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("record_classes.rs");
+        let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("sdk_classes.rs");
         std::fs::write(out, source).unwrap();
     }
 
@@ -145,15 +147,17 @@ mod records {
             })
     }
 
-    /// A hand-written `#[pyclass]`'s Python name.
+    /// A hand-written class's Python name: a `#[pyclass]`'s, or a
+    /// `#[handle]`'s, which is a pyclass named by its ident.
     fn pyclass(attrs: &[Attribute], ident: &syn::Ident) -> Option<String> {
-        let attr = attrs.iter().find(|attr| {
-            attr.path()
-                .segments
-                .last()
-                .is_some_and(|last| last.ident == "pyclass")
-        })?;
         let mut name = ident.to_string();
+        let attr = attrs.iter().find_map(|attr| {
+            let last = &attr.path().segments.last()?.ident;
+            (last == "pyclass" || last == "handle").then_some((last == "pyclass", attr))
+        });
+        let (true, attr) = attr? else {
+            return Some(name);
+        };
         if let syn::Meta::List(list) = &attr.meta {
             let _ = list.parse_nested_meta(|meta| {
                 if meta.path.is_ident("name") {
@@ -235,6 +239,10 @@ mod records {
                     });
                     name
                 } else if let Some(name) = pyclass(attrs, ident) {
+                    self.classes.push(Class {
+                        cfgs: item_cfgs,
+                        path: format!("{module}::{ident}"),
+                    });
                     name
                 } else {
                     continue;

@@ -13,36 +13,33 @@ use super::context::{Context, in_context};
 use super::handle::Owner;
 use super::record::{ToValue, Typed};
 use super::{ErrorKind, err, error, raise};
-use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::error::Result;
 use crate::expr::Expr;
-use crate::guest::ProcessInfo;
 use crate::session::Session;
-use crate::session::effects::{Effects, Refusal, RunState, TargetScope};
-use crate::target::cpu::Processor;
-use crate::target::image::ImageRef;
-use crate::target::{MemoryKind, ThreadInfo};
+use crate::session::effects::{Effects, Refusal, RunState};
 use crate::types::VirtAddr;
 
+// The classes `#[command(python = ...)]` names, as the macro spells them.
 pub use super::breakpoints::{Breakpoints, Exceptions};
-use super::context::Space;
 pub use super::handle::Debugger;
 pub use super::inspect::Inspect;
 pub use super::memory::Memory;
 pub use super::module::{Device, Driver, Module};
 pub use super::process::{Heap, Heaps, Process};
 pub use super::symbols::Symbols;
-use super::symbols::load_scope_symbols;
 pub use super::thread::{Cpu, Thread};
 pub use super::userdump::{UserProcess, UserThread};
-use crate::target::heap::HeapSelector;
-use crate::target::memory::SearchSpace;
 
 /// An SDK object a `#[command]` method can be placed on: the debugger it
 /// runs in and the context (process, thread) its calls run in.
 pub trait CommandHost {
     fn session(&self) -> HostSession<'_>;
-    fn context(&self, py: Python<'_>) -> PyResult<Context>;
+
+    /// The context its calls run in: the kernel's, unless the object has
+    /// its own (a process, a thread).
+    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
+        Ok(Context::default())
+    }
 
     /// Refuse an operation this object cannot run, before it reaches the
     /// session: a `Memory` in VTL1 has no NT state to describe and cannot
@@ -168,68 +165,19 @@ impl<T> Pending<T> {
     }
 }
 
-impl PyArg for u64 {
-    type Py = u64;
-    fn from_py(value: u64) -> Self {
-        value
-    }
+/// Arguments that arrive as they are.
+macro_rules! as_given {
+    ($($ty:ty),* $(,)?) => {$(
+        impl PyArg for $ty {
+            type Py = $ty;
+            fn from_py(value: $ty) -> Self {
+                value
+            }
+        }
+    )*};
 }
 
-impl PyArg for u8 {
-    type Py = u8;
-    fn from_py(value: u8) -> Self {
-        value
-    }
-}
-
-impl PyArg for u16 {
-    type Py = u16;
-    fn from_py(value: u16) -> Self {
-        value
-    }
-}
-
-impl PyArg for u32 {
-    type Py = u32;
-    fn from_py(value: u32) -> Self {
-        value
-    }
-}
-
-impl PyArg for usize {
-    type Py = usize;
-    fn from_py(value: usize) -> Self {
-        value
-    }
-}
-
-impl PyArg for Vec<u64> {
-    type Py = Vec<u64>;
-    fn from_py(value: Vec<u64>) -> Self {
-        value
-    }
-}
-
-impl PyArg for i64 {
-    type Py = i64;
-    fn from_py(value: i64) -> Self {
-        value
-    }
-}
-
-impl PyArg for bool {
-    type Py = bool;
-    fn from_py(value: bool) -> Self {
-        value
-    }
-}
-
-impl PyArg for String {
-    type Py = String;
-    fn from_py(value: String) -> Self {
-        value
-    }
-}
+as_given!(u8, u16, u32, u64, usize, i64, bool, String, Vec<u64>);
 
 /// `bytes`.
 impl PyArg for Vec<u8> {
@@ -270,34 +218,6 @@ impl<T: PyArg> PyArg for Option<T> {
         value
             .map(|value| T::from_py_in(py, owner, value))
             .transpose()
-    }
-}
-
-/// A process handle argument: the process it is.
-impl PyArg for ProcessInfo {
-    type Py = Py<Process>;
-    fn from_py(value: Py<Process>) -> Self {
-        Python::attach(|py| value.borrow(py).info.clone())
-    }
-
-    fn from_py_in(py: Python<'_>, owner: &Owner, value: Py<Process>) -> PyResult<Self> {
-        let process = value.borrow(py);
-        process.owner.require_argument_of(py, owner, "process")?;
-        Ok(process.info.clone())
-    }
-}
-
-/// A thread handle argument: the thread it is.
-impl PyArg for ThreadInfo {
-    type Py = Py<Thread>;
-    fn from_py(value: Py<Thread>) -> Self {
-        Python::attach(|py| value.borrow(py).info.clone())
-    }
-
-    fn from_py_in(py: Python<'_>, owner: &Owner, value: Py<Thread>) -> PyResult<Self> {
-        let thread = value.borrow(py);
-        thread.owner.require_argument_of(py, owner, "thread")?;
-        Ok(thread.info.clone())
     }
 }
 
@@ -363,258 +283,4 @@ pub fn admit(session: &mut Session, effects: &Effects, operation: &str) -> PyRes
         )),
         Refusal::ReadOnlyVtl1 => raise("VTL1 memory is read-only"),
     })
-}
-
-impl CommandHost for Inspect {
-    fn session(&self) -> HostSession<'_> {
-        HostSession::Owner(&self.owner)
-    }
-
-    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
-        Ok(Context::default())
-    }
-}
-
-impl CommandHost for Debugger {
-    fn session(&self) -> HostSession<'_> {
-        HostSession::Debugger(self)
-    }
-
-    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
-        Ok(Context::default())
-    }
-}
-
-impl CommandHost for Breakpoints {
-    fn session(&self) -> HostSession<'_> {
-        HostSession::Owner(&self.owner)
-    }
-
-    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
-        Ok(Context::default())
-    }
-}
-
-impl CommandHost for Exceptions {
-    fn session(&self) -> HostSession<'_> {
-        HostSession::Owner(&self.owner)
-    }
-
-    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
-        Ok(Context::default())
-    }
-}
-
-impl CommandHost for Process {
-    fn session(&self) -> HostSession<'_> {
-        HostSession::Owner(&self.owner)
-    }
-
-    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
-        Ok(Context::process(self.info.clone()))
-    }
-}
-
-impl Bind<ProcessInfo> for Process {
-    fn bind(&self) -> ProcessInfo {
-        self.info.clone()
-    }
-}
-
-impl CommandHost for Thread {
-    fn session(&self) -> HostSession<'_> {
-        HostSession::Owner(&self.owner)
-    }
-
-    fn context(&self, py: Python<'_>) -> PyResult<Context> {
-        self.thread_context(py)
-    }
-}
-
-impl Bind<ThreadInfo> for Thread {
-    fn bind(&self) -> ThreadInfo {
-        self.info.clone()
-    }
-}
-
-impl CommandHost for Cpu {
-    fn session(&self) -> HostSession<'_> {
-        HostSession::Owner(&self.owner)
-    }
-
-    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
-        Ok(Context::vcpu(self.id.clone()))
-    }
-}
-
-/// A `Cpu` is its processor; an id that names none (not `p<pid>.<tid>`)
-/// leaves it to the session, which reads the current vCPU's, the `Cpu`'s
-/// own in its context.
-impl Bind<Option<Processor>> for Cpu {
-    fn bind(&self) -> Option<Processor> {
-        processor_index_from_backend_thread_id(&self.id).map(Processor)
-    }
-}
-
-/// A `Memory` runs a command in its space's context: `proc.memory` in the
-/// process's, `dbg.memory` and `dbg.physical` in the kernel's.
-impl CommandHost for Memory {
-    fn session(&self) -> HostSession<'_> {
-        HostSession::Owner(&self.owner)
-    }
-
-    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
-        Ok(self.space.context())
-    }
-
-    /// A kernel (or NT) command reads NT's state about an address, which
-    /// VTL1 and roots outside NT do not have; a write needs a writable space.
-    fn refuse(&self, operation: &str, effects: &Effects) -> PyResult<()> {
-        if effects.target != TargetScope::Any {
-            self.space.require_nt(operation)?;
-        }
-        if !effects.writes.is_empty() {
-            self.space.require_writable()?;
-        }
-        Ok(())
-    }
-}
-
-/// Which memory a `Memory` addresses: `dbg.physical` the physical, every
-/// other space its virtual addresses.
-impl Bind<MemoryKind> for Memory {
-    fn bind(&self) -> MemoryKind {
-        match self.space {
-            Space::Physical => MemoryKind::Physical,
-            _ => MemoryKind::Virtual,
-        }
-    }
-}
-
-/// A process's heap list: its calls run in the process, with its module
-/// symbols loaded (the heap decoders read ntdll's).
-impl CommandHost for Heaps {
-    fn session(&self) -> HostSession<'_> {
-        HostSession::Owner(&self.owner)
-    }
-
-    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
-        Ok(Context::process(self.info.clone()))
-    }
-
-    fn prepare(&self, session: &mut Session) -> PyResult<()> {
-        load_scope_symbols(session, &Space::Process(self.info.clone()))
-    }
-}
-
-/// One heap: its calls run in its process, as the heap list's do.
-impl CommandHost for Heap {
-    fn session(&self) -> HostSession<'_> {
-        HostSession::Owner(&self.owner)
-    }
-
-    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
-        Ok(Context::process(self.info.clone()))
-    }
-
-    fn prepare(&self, session: &mut Session) -> PyResult<()> {
-        load_scope_symbols(session, &Space::Process(self.info.clone()))
-    }
-}
-
-/// A heap is the heap at its address.
-impl Bind<HeapSelector> for Heap {
-    fn bind(&self) -> HeapSelector {
-        HeapSelector::Address(self.address)
-    }
-}
-
-/// The process a `Memory` addresses: `proc.memory`'s, none for the
-/// kernel's and the other spaces.
-impl Bind<Option<ProcessInfo>> for Memory {
-    fn bind(&self) -> Option<ProcessInfo> {
-        match &self.space {
-            Space::Process(info) => Some(info.clone()),
-            _ => None,
-        }
-    }
-}
-
-/// How a search in a `Memory` describes its matches: NT's region
-/// descriptions cover neither VTL1 nor roots outside NT.
-impl Bind<SearchSpace> for Memory {
-    fn bind(&self) -> SearchSpace {
-        match self.space {
-            Space::Physical => SearchSpace::Physical,
-            Space::Secure(_) => SearchSpace::Virtual(Some("vtl1")),
-            Space::Root(_) => SearchSpace::Virtual(Some("foreign")),
-            Space::Kernel | Space::Process(_) => SearchSpace::Virtual(None),
-        }
-    }
-}
-
-/// A user-mode minidump's process: the dump's one address space.
-impl CommandHost for UserProcess {
-    fn session(&self) -> HostSession<'_> {
-        HostSession::Owner(&self.owner)
-    }
-
-    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
-        Ok(Context::default())
-    }
-}
-
-/// A user-mode minidump's thread: its calls run with it selected.
-impl CommandHost for UserThread {
-    fn session(&self) -> HostSession<'_> {
-        HostSession::Owner(UserThread::owner(self))
-    }
-
-    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
-        Ok(UserThread::context(self))
-    }
-}
-
-/// A module: its calls run in the address space it is loaded in.
-impl CommandHost for Module {
-    fn session(&self) -> HostSession<'_> {
-        HostSession::Owner(&self.owner)
-    }
-
-    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
-        Ok(Module::context(self))
-    }
-
-    /// A kernel command reads NT's state about the module, which a
-    /// secure-kernel module does not have (Driver Verifier never tracks one).
-    fn refuse(&self, operation: &str, effects: &Effects) -> PyResult<()> {
-        if effects.target == TargetScope::Kernel {
-            self.space.require_nt(operation)?;
-        }
-        Ok(())
-    }
-}
-
-/// A module binds its short name (`!chkimg nt`).
-impl Bind<String> for Module {
-    fn bind(&self) -> String {
-        self.info.short_name.clone()
-    }
-}
-
-/// A module binds its image (`!dh`, `!lmi`): its base and loader entry, in
-/// the address space it was listed in. The kernel's is left to the command,
-/// which names it for the session.
-impl Bind<ImageRef> for Module {
-    fn bind(&self) -> ImageRef {
-        ImageRef {
-            base: self.info.base_address,
-            module: Some(self.info.clone()),
-            dtb: match &self.space {
-                Space::Process(process) => Some(process.dtb),
-                Space::Secure(root) | Space::Root(root) => Some(*root),
-                Space::Kernel | Space::Physical => None,
-            },
-        }
-    }
 }
