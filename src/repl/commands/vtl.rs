@@ -1,4 +1,4 @@
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 use tabled::builder::Builder;
 
 use super::memory::MAX_DISASSEMBLY_INSTRUCTIONS;
@@ -921,6 +921,7 @@ impl ReplState<'_> {
 
 /// Every word of the line, for a hypervisor command whose grammar its
 /// body reads (optional leading flags, then a variable number of values).
+#[grammar(operation)]
 fn all_words(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -957,9 +958,11 @@ fn all_words(
     kind = Action,
     target = Kernel,
     python = none,
-    usage = ".vtl [0|1 [pid]]"
 )]
-fn vtl(repl: &mut ReplState<'_>, #[arg(parse = all_words)] argv: Vec<String>) -> Result<()> {
+fn vtl(
+    repl: &mut ReplState<'_>,
+    #[arg(parse = all_words, usage = "[0|1 [pid]]", complete = None)] argv: Vec<String>,
+) -> Result<()> {
     if let Err(error) = repl.select_vtl(&argv) {
         error!("{error}");
     }
@@ -980,7 +983,6 @@ fn vtl(repl: &mut ReplState<'_>, #[arg(parse = all_words)] argv: Vec<String>) ->
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "!trustlets"
 )]
 fn trustlets(repl: &mut ReplState<'_>) -> Result<()> {
     let processes = match repl.ctx.target.trustlets() {
@@ -1027,7 +1029,6 @@ fn trustlets(repl: &mut ReplState<'_>) -> Result<()> {
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "!hvpartitions"
 )]
 fn hvpartitions(repl: &mut ReplState<'_>) -> Result<()> {
     let partitions = match repl.ctx.target.hypervisor_partitions() {
@@ -1086,12 +1087,11 @@ fn hvpartitions(repl: &mut ReplState<'_>) -> Result<()> {
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "!hvvps [partition-id]"
 )]
 fn hvvps(
     repl: &mut ReplState<'_>,
     #[arg(invoked)] name: &str,
-    #[arg(parse = all_words)] argv: Vec<String>,
+    #[arg(parse = all_words, usage = "[partition-id]", complete = None)] argv: Vec<String>,
 ) -> Result<()> {
     if argv.len() > 1 {
         outln!("{}\n", command_help(name));
@@ -1206,12 +1206,12 @@ fn hvvps(
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "!hvept [-v] <address> [partition-id [vp-index]]"
 )]
 fn hvept(
     repl: &mut ReplState<'_>,
     #[arg(invoked)] name: &str,
-    #[arg(parse = all_words)] argv: Vec<String>,
+    #[arg(parse = all_words, usage = "[-v] <address> [partition-id [vp-index]]", complete = None)]
+    argv: Vec<String>,
 ) -> Result<()> {
     let virtual_address = matches!(argv.first().map(String::as_str), Some("-v" | "/v"));
     let arguments = &argv[usize::from(virtual_address)..];
@@ -1341,12 +1341,13 @@ fn hvept(
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "!hveptdiff [partition-id [vp-index]]"
 )]
 fn hveptdiff(
     repl: &mut ReplState<'_>,
     #[arg(invoked)] name: &str,
-    #[arg(parse = all_words)] argv: Vec<String>,
+    #[arg(parse = all_words, usage = "[partition-id [vp-index]]", complete = None)] argv: Vec<
+        String,
+    >,
 ) -> Result<()> {
     if argv.len() > 2 {
         outln!("{}\n", command_help(name));
@@ -1460,12 +1461,11 @@ fn hveptdiff(
     kind = Query,
     target = Kernel,
     forms = [hypercalls],
-    usage = "!hvcalls [-a]"
 )]
 fn hvcalls(
     repl: &mut ReplState<'_>,
     #[arg(invoked)] name: &str,
-    #[arg(parse = all_words)] argv: Vec<String>,
+    #[arg(parse = all_words, usage = "[-a]", complete = None)] argv: Vec<String>,
 ) -> Result<()> {
     let all = match argv.as_slice() {
         [] => false,
@@ -1525,7 +1525,7 @@ fn hvcalls(
 /// The Windows hypervisor's hypercall table, one entry per call code, as
 /// `!hvcalls -a` lists it. Needs the VM's `hv-evmcs` enlightenment or a
 /// vCPU stopped in the hypervisor. This feature is experimental.
-#[command(form_of = hvcalls, python = Debugger, sdk)]
+#[command(form_of = hvcalls, python = Debugger)]
 fn hypercalls(session: &Session) -> Result<Vec<Hypercall>> {
     Ok(session.target.hypercalls()?.1)
 }
@@ -1557,7 +1557,6 @@ fn hypercalls(session: &Session) -> Result<Vec<Hypercall>> {
     target = Kernel,
     state = Halted,
     python = none,
-    usage = "!hvcall"
 )]
 fn hvcall(repl: &mut ReplState<'_>) -> Result<()> {
     if let Err(error) = repl
@@ -1637,12 +1636,12 @@ fn hvcall(repl: &mut ReplState<'_>) -> Result<()> {
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "!hvvmcs [-msr|-io] [partition-id [vp-index [vtl]]]"
 )]
 fn hvvmcs(
     repl: &mut ReplState<'_>,
     #[arg(invoked)] name: &str,
-    #[arg(parse = all_words)] argv: Vec<String>,
+    #[arg(parse = all_words, usage = "[-msr|-io] [partition-id [vp-index [vtl]]]", complete = None)]
+    argv: Vec<String>,
 ) -> Result<()> {
     let view = match argv.first().map(String::as_str) {
         Some("-msr" | "/msr") => "msr",
@@ -1725,12 +1724,12 @@ fn hvvmcs(
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "!hvd [-p] [-b|-d|-q] [<partition-id> <vp-index>] <address> [range]"
 )]
 fn hvd(
     repl: &mut ReplState<'_>,
     #[arg(invoked)] name: &str,
-    #[arg(parse = all_words)] argv: Vec<String>,
+    #[arg(parse = all_words, usage = "[-p] [-b|-d|-q] [partition-id vp-index] <address> [range]", complete = None)]
+    argv: Vec<String>,
 ) -> Result<()> {
     let mut physical = false;
     let (mut mode, mut item) = (MemoryDisplayMode::bytes(), 1);
@@ -1827,12 +1826,12 @@ fn hvd(
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "!hvu [-p] [<partition-id> <vp-index>] <address> [range]"
 )]
 fn hvu(
     repl: &mut ReplState<'_>,
     #[arg(invoked)] name: &str,
-    #[arg(parse = all_words)] argv: Vec<String>,
+    #[arg(parse = all_words, usage = "[-p] [partition-id vp-index] <address> [range]", complete = None)]
+    argv: Vec<String>,
 ) -> Result<()> {
     const DEFAULT_INSTRUCTIONS: usize = 8;
     let mut arguments = argv.as_slice();
@@ -1928,12 +1927,13 @@ fn hvu(
     target = Kernel,
     state = Halted,
     python = none,
-    usage = "!hvr [partition-id vp-index [vtl]]"
 )]
 fn hvr(
     repl: &mut ReplState<'_>,
     #[arg(invoked)] name: &str,
-    #[arg(parse = all_words)] argv: Vec<String>,
+    #[arg(parse = all_words, usage = "[partition-id vp-index [vtl]]", complete = None)] argv: Vec<
+        String,
+    >,
 ) -> Result<()> {
     if !matches!(argv.len(), 0 | 2 | 3) {
         outln!("{}\n", command_help(name));
@@ -2036,12 +2036,11 @@ fn select_partition(session: &mut Session, partition_id: u64) -> Result<()> {
     target = Kernel,
     state = Halted,
     forms = [select_partition],
-    usage = ".partition [partition-id]"
 )]
 fn partition(
     repl: &mut ReplState<'_>,
     #[arg(invoked)] name: &str,
-    #[arg(parse = all_words)] argv: Vec<String>,
+    #[arg(parse = all_words, usage = "[partition-id]", complete = None)] argv: Vec<String>,
 ) -> Result<()> {
     if argv.len() > 1 {
         outln!("{}\n", command_help(name));

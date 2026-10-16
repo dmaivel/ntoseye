@@ -64,13 +64,16 @@ const DEBUG_SYMTYPE_DEFERRED: u64 = 5;
     category = "session",
     kind = Host,
     python = none,
-    usage = ".foreach [/pS n] [/ps n] ( Variable { InCommands } ) { OutCommands } | .foreach [options] /s ( Variable \"InString\" ) { OutCommands } | .foreach [options] /f ( Variable \"InFile\" ) { OutCommands }",
-    completion = Expression,
     style = ExpressionTail
 )]
 fn foreach(
     state: &mut ReplState<'_>,
-    #[arg(raw)] tail: String,
+    #[arg(
+        raw,
+        usage = "[/pS <count>] [/ps <count>] (<variable> { <in-commands> }) { <out-commands> } | [/pS <count>] [/ps <count>] /s (<variable> \"<in-string>\") { <out-commands> } | [/pS <count>] [/ps <count>] /f (<variable> \"<in-file>\") { <out-commands> }",
+        complete = Expression
+    )]
+    tail: String,
     #[arg(invoked)] name: &str,
 ) -> Result<Flow> {
     if tail.is_empty() {
@@ -148,12 +151,11 @@ fn foreach(
     kind = Host,
     target = Kernel,
     python = none,
-    usage = "!for_each_process [\"CommandString\"]",
     style = ExpressionTail
 )]
 fn for_each_process(
     state: &mut ReplState<'_>,
-    #[arg(raw)] tail: String,
+    #[arg(raw, usage = "[\"<command-string>\"]", complete = None)] tail: String,
     #[arg(invoked)] name: &str,
 ) -> Result<Flow> {
     let Some(command) = state.for_each_command(name, &tail, DEFAULT_PROCESS_COMMAND) else {
@@ -202,12 +204,11 @@ fn for_each_process(
     kind = Host,
     target = Kernel,
     python = none,
-    usage = "!for_each_thread [\"CommandString\"]",
     style = ExpressionTail
 )]
 fn for_each_thread(
     state: &mut ReplState<'_>,
-    #[arg(raw)] tail: String,
+    #[arg(raw, usage = "[\"<command-string>\"]", complete = None)] tail: String,
     #[arg(invoked)] name: &str,
 ) -> Result<Flow> {
     let Some(command) = state.for_each_command(name, &tail, DEFAULT_THREAD_COMMAND) else {
@@ -268,12 +269,11 @@ fn for_each_thread(
     category = "processes and modules",
     kind = Host,
     python = none,
-    usage = "!for_each_module [\"CommandString\"]",
     style = ExpressionTail
 )]
 fn for_each_module(
     state: &mut ReplState<'_>,
-    #[arg(raw)] tail: String,
+    #[arg(raw, usage = "[\"<command-string>\"]", complete = None)] tail: String,
     #[arg(invoked)] name: &str,
 ) -> Result<Flow> {
     let Some(command) = state.for_each_command(name, &tail, DEFAULT_MODULE_COMMAND) else {
@@ -331,12 +331,11 @@ fn for_each_module(
     kind = Host,
     state = HaltedOrParkedThread,
     python = none,
-    usage = "!for_each_frame [\"CommandString\"]",
     style = ExpressionTail
 )]
 fn for_each_frame(
     state: &mut ReplState<'_>,
-    #[arg(raw)] tail: String,
+    #[arg(raw, usage = "[\"<command-string>\"]", complete = None)] tail: String,
     #[arg(invoked)] name: &str,
 ) -> Result<Flow> {
     let Some(command) = state.for_each_command(name, &tail, "") else {

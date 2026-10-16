@@ -5,7 +5,7 @@ use std::fmt::Display;
 
 use tabled::builder::Builder;
 
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 use crate::error::{Error, Result};
 use crate::repl::args::{ArgCursor, ArgCx, ArgError};
@@ -385,6 +385,10 @@ pub enum RegRequest {
 }
 
 /// `!reg`'s subcommand and its arguments.
+#[grammar(
+    usage = "hivelist | querykey <path> [-v <value>] | keyinfo <hive> <knode> | cellindex <hive> <cell>",
+    complete = [None, RegistryKey]
+)]
 fn reg_request(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -499,8 +503,6 @@ pub enum RegOutput {
     kind = Query,
     target = Kernel,
     forms = [registry_hives, registry_key, registry_value, registry_key_at, registry_cell],
-    usage = "!reg hivelist | !reg querykey <path> [-v <value>] | !reg keyinfo <hive> <knode> | !reg cellindex <hive> <cell>",
-    completion = [None, RegistryKey]
 )]
 fn reg(session: &Session, #[arg(parse = reg_request)] request: RegRequest) -> Result<RegOutput> {
     let failed = |command: &str, error: Error| Error::DebugInfo(format!("{command}: {error}"));
@@ -557,7 +559,7 @@ fn reg(session: &Session, #[arg(parse = reg_request)] request: RegRequest) -> Re
 
 /// List the registry hives loaded in kernel memory, with where each is
 /// mounted and the file it was loaded from (`!reg hivelist`).
-#[command(form_of = reg, python = Inspect, word = "hivelist")]
+#[command(form_of = reg, python = Inspect)]
 fn registry_hives(session: &Session) -> Result<HiveList> {
     session.target.registry_hives()
 }
@@ -566,15 +568,15 @@ fn registry_hives(session: &Session) -> Result<HiveList> {
 /// `HKLM\SYSTEM\CurrentControlSet\Services\Tcpip` or
 /// `\REGISTRY\MACHINE\...`, with its subkeys and its values, each
 /// value's data typed by its type (`!reg querykey`).
-#[command(form_of = reg, python = Inspect, word = "querykey")]
-fn registry_key(session: &Session, #[arg(complete = RegistryKey)] path: String) -> Result<RegKey> {
+#[command(form_of = reg, python = Inspect)]
+fn registry_key(session: &Session, path: String) -> Result<RegKey> {
     session.target.registry_key(&path)
 }
 
 /// Read the value `name` of the registry key at `path`; `""` names the
 /// key's default value. Its `data` is a `str`, a `list[str]`, an `int`,
 /// or `bytes`, by the value's type (`!reg querykey <path> -v <name>`).
-#[command(form_of = reg, python = Inspect, sdk)]
+#[command(form_of = reg, python = Inspect)]
 fn registry_value(session: &Session, path: String, name: String) -> Result<RegValue> {
     let key = session.target.registry_key(&path)?;
     key.values
@@ -589,18 +591,14 @@ fn registry_value(session: &Session, path: String, name: String) -> Result<RegVa
 
 /// Read the registry key whose key node (`_CM_KEY_NODE`) is at `node`
 /// in the hive at `hive` (`!reg keyinfo`).
-#[command(form_of = reg, python = Inspect, word = "keyinfo")]
-fn registry_key_at(
-    session: &Session,
-    hive: VirtAddr,
-    #[arg(name = "knode")] node: VirtAddr,
-) -> Result<RegKey> {
+#[command(form_of = reg, python = Inspect)]
+fn registry_key_at(session: &Session, hive: VirtAddr, node: VirtAddr) -> Result<RegKey> {
     session.target.registry_key_at(hive, node)
 }
 
 /// Find where cell index `cell` of the hive at `hive` is, through the
 /// hive's cell map (`!reg cellindex`).
-#[command(form_of = reg, python = Inspect, word = "cellindex")]
+#[command(form_of = reg, python = Inspect)]
 fn registry_cell(session: &Session, hive: VirtAddr, cell: u32) -> Result<CellLocation> {
     session.target.registry_cell(hive, cell)
 }

@@ -25,7 +25,7 @@ use crate::session::Session;
 use crate::triage_report::hang::{
     ANALYZE_HANG_STACK_LIMIT, BugcheckDecoding, HangReport, HangThread, gather_hang_report,
 };
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 pub const ANALYZE_STACK_LIMIT: usize = 16;
 pub const ANALYZE_MODULE_LIMIT: usize = 16;
@@ -74,6 +74,10 @@ pub struct AnalyzeOptions {
 
 /// `!analyze`'s options: `-v`, `-hang` and `-show <code> [p1 p2 p3 p4]`, in
 /// any order; a bad one shows the help, then the error.
+#[grammar(
+    usage = "[-v] [-show <bugcheck-code> [p1 p2 p3 p4]] [-hang]",
+    complete = Expression
+)]
 fn analyze_options(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -1256,7 +1260,6 @@ pub fn codeview_path(codeview: &CodeView) -> &str {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = ".bugcheck"
 )]
 fn bugcheck(session: &Session) -> Result<Option<BugcheckAnalysis>> {
     Ok(session.bugcheck())
@@ -1310,8 +1313,6 @@ impl Render for Option<BugcheckAnalysis> {
     category = "analysis",
     kind = Query,
     forms = [triage, hang, decode_bugcheck],
-    usage = "!analyze [-v] [-show <bugcheck-code> [p1 p2 p3 p4]] [-hang]",
-    completion = Expression
 )]
 fn analyze(
     session: &mut Session,
@@ -1356,7 +1357,7 @@ fn triage(session: &mut Session) -> Result<TriageReport> {
 /// Find what a hung system is doing (`!analyze -hang`): the thread on each
 /// processor with its stack, and the waiting threads with the most pending
 /// IRPs. The target must be a kernel.
-#[command(form_of = analyze, python = Inspect, word = "-hang")]
+#[command(form_of = analyze, python = Inspect)]
 fn hang(session: &mut Session) -> Result<HangReport> {
     session.target.require_kernel()?;
     Ok(gather_hang_report(session))
@@ -1365,10 +1366,10 @@ fn hang(session: &mut Session) -> Result<HangReport> {
 /// Decode a bugcheck code and its parameters as if the target had stopped
 /// with it (`!analyze -show`), and for a DRIVER_POWER_STATE_FAILURE (0x9F),
 /// read what its parameters point to. The target must be a kernel.
-#[command(form_of = analyze, python = Inspect, word = "-show")]
+#[command(form_of = analyze, python = Inspect)]
 fn decode_bugcheck(
     session: &mut Session,
-    #[arg(name = "bugcheck-code")] code: u32,
+    code: u32,
     #[arg(sdk, default = Vec::new(), positional)] parameters: Vec<u64>,
 ) -> Result<BugcheckDecoding> {
     session.target.require_kernel()?;

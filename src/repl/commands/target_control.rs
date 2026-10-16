@@ -8,7 +8,7 @@ use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
 use crate::session::{Motion, Session};
 use indicatif::ProgressStyle;
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -25,7 +25,6 @@ use std::sync::atomic::Ordering;
     run = Run,
     capability = TargetControl,
     python = Debugger,
-    usage = ".reboot"
 )]
 fn reboot(session: &mut Session) -> Result<Motion> {
     session
@@ -48,7 +47,6 @@ fn reboot(session: &mut Session) -> Result<Motion> {
     run = Run,
     capability = TargetControl,
     python = Debugger,
-    usage = ".crash"
 )]
 fn crash(session: &mut Session) -> Result<Motion> {
     session
@@ -75,8 +73,6 @@ fn crash(session: &mut Session) -> Result<Motion> {
     capability = MemoryIntrospection,
     writes = [Files],
     python = Debugger,
-    usage = ".dump [/f] [/ma] <file>",
-    completion = None
 )]
 fn write_dump(session: &mut Session, #[arg(parse = dump_path)] path: String) -> Result<DumpWrite> {
     let (metadata, total_pages) = collect_dump_metadata(session)
@@ -115,6 +111,7 @@ impl Render for DumpWrite {
 }
 
 /// `.dump`'s file, among the full-dump switches.
+#[grammar(usage = "[/f] [/ma] <file>", complete = None)]
 fn dump_path(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -170,8 +167,6 @@ pub enum KdFilesChanged {
     kind = Action,
     target = Kernel,
     python = none,
-    usage = ".kdfiles [<map-file>] [-m <target> <host>] [-d <target>] [-c]",
-    completion = None
 )]
 fn kdfiles(
     _session: &Session,
@@ -206,6 +201,7 @@ fn kdfiles(
 
 /// `.kdfiles`' words: none, `-c`, `-d <target>`, `-m <target> <host>`, or a
 /// map file; any other shape shows the help.
+#[grammar(usage = "[map-file] | -m <target> <host> | -d <target> | -c", complete = None)]
 fn kdfiles_change(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -334,7 +330,6 @@ fn capabilities(state: &mut ReplState<'_>) -> Result<()> {
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "!dbgprint [count]"
 )]
 fn dbgprint(state: &mut ReplState<'_>, #[arg(parse = dbgprint_count)] count: usize) -> Result<()> {
     if !state.ctx.backend_streams_debug_output() {
@@ -367,6 +362,7 @@ fn dbgprint(state: &mut ReplState<'_>, #[arg(parse = dbgprint_count)] count: usi
 }
 
 /// `!dbgprint`'s count of lines, a decimal number; 50 when omitted.
+#[grammar(usage = "[count]", complete = [None])]
 fn dbgprint_count(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,

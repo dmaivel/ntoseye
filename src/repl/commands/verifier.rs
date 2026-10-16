@@ -316,7 +316,6 @@ fn print_driver_details(driver: &VerifierDriver) {
     kind = Query,
     target = Kernel,
     forms = [verifier_status, verifier_driver],
-    usage = "!verifier [module]"
 )]
 fn verifier(session: &Session, module: Option<String>) -> Result<VerifierReport> {
     match module {
@@ -335,10 +334,7 @@ fn verifier_status(session: &Session) -> Result<Verifier> {
 
 /// Get the verifier data for this driver module (`!verifier <module>`).
 #[command(form_of = verifier, python = Module, python_name = "verifier")]
-fn verifier_driver(
-    session: &Session,
-    #[arg(receiver, name = "module")] module: String,
-) -> Result<VerifierDriver> {
+fn verifier_driver(session: &Session, #[arg(receiver)] module: String) -> Result<VerifierDriver> {
     session.target.verifier_driver(&module)
 }
 

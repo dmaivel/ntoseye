@@ -5,7 +5,7 @@ use tabled::builder::Builder;
 
 use owo_colors::OwoColorize;
 
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 use crate::breakpoints::BreakpointManager;
 use crate::error::{Error, Result};
@@ -26,6 +26,7 @@ use crate::ui;
 use crate::repl::*;
 
 /// The first word; `x` ignores the words after it, as it always did.
+#[grammar(usage = "[module!]<query>", complete = Symbol)]
 fn first_word(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -45,8 +46,6 @@ fn first_word(
     category = "symbols, types, and expressions",
     kind = Query,
     python = none,
-    usage = "x <query>  or  x <module>!<query>",
-    completion = Symbol
 )]
 fn x(state: &mut ReplState<'_>, #[arg(parse = first_word)] query: String) -> Result<()> {
     // bounded purely for terminal-output sanity (resolution
@@ -130,6 +129,7 @@ fn x(state: &mut ReplState<'_>, #[arg(parse = first_word)] query: String) -> Res
 
 /// The next word as an address, left for the argument after, which takes it
 /// too: `ln` names the address it was given when no symbol covers it.
+#[grammar(usage = "")]
 fn peek_address(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -145,8 +145,6 @@ fn peek_address(
     kind = Query,
     python = Symbols,
     python_name = "nearest",
-    usage = "ln <address>",
-    completion = Expression
 )]
 fn ln(
     session: &Session,
@@ -197,10 +195,11 @@ impl Render<VirtAddr> for Option<Symbol> {
     kind = Query,
     python = none,
     style = ExpressionTail,
-    usage = "? <expression>",
-    completion = Expression
 )]
-fn ev(state: &mut ReplState<'_>, #[arg(raw)] expression: String) -> Result<()> {
+fn ev(
+    state: &mut ReplState<'_>,
+    #[arg(raw, usage = "<expression>", complete = Expression)] expression: String,
+) -> Result<()> {
     if expression.is_empty() {
         outln!("{}\n", command_help("ev"));
         return Ok(());
@@ -223,6 +222,7 @@ fn ev(state: &mut ReplState<'_>, #[arg(raw)] expression: String) -> Result<()> {
 }
 
 /// Every word left, at least one.
+#[grammar(operation)]
 fn some_words(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -241,9 +241,13 @@ fn some_words(
     kind = Action,
     writes = [Symbols],
     python = none,
-    usage = ".sympath [<directory|http-server> ...]"
 )]
-fn sympath(session: &Session, #[arg(parse = words)] sources: Vec<String>) -> Result<SymbolPath> {
+fn sympath(
+    session: &Session,
+    #[arg(parse = words, usage = "[directory|http-server]...", complete = None)] sources: Vec<
+        String,
+    >,
+) -> Result<SymbolPath> {
     let symbols = &session.target.symbols;
     if !sources.is_empty() {
         symbols.set_symbol_sources(parse_symbol_sources(&sources));
@@ -258,11 +262,12 @@ fn sympath(session: &Session, #[arg(parse = words)] sources: Vec<String>) -> Res
     kind = Action,
     writes = [Symbols],
     python = none,
-    usage = ".sympath+ <directory|http-server> ..."
 )]
 fn sympath_append(
     session: &Session,
-    #[arg(parse = some_words)] sources: Vec<String>,
+    #[arg(parse = some_words, usage = "<directory|http-server>...", complete = None)] sources: Vec<
+        String,
+    >,
 ) -> Result<SymbolPath> {
     let symbols = &session.target.symbols;
     for source in parse_symbol_sources(&sources) {
@@ -279,7 +284,6 @@ fn sympath_append(
     writes = [Symbols],
     python = Symbols,
     python_name = "reset_path",
-    usage = ".symfix"
 )]
 fn symfix(session: &Session) -> Result<SymbolPath> {
     let symbols = &session.target.symbols;
@@ -314,9 +318,12 @@ impl Render for SymbolPath {
     kind = Action,
     writes = [Symbols],
     python = none,
-    usage = ".srcpath [<local-root|recorded-prefix=local-root> ...]"
 )]
-fn srcpath(session: &Session, #[arg(parse = words)] paths: Vec<String>) -> Result<SourcePath> {
+fn srcpath(
+    session: &Session,
+    #[arg(parse = words, usage = "[local-root|recorded-prefix=local-root]...", complete = None)]
+    paths: Vec<String>,
+) -> Result<SourcePath> {
     let symbols = &session.target.symbols;
     if !paths.is_empty() {
         symbols.set_source_paths(parse_source_paths(&paths));
@@ -333,11 +340,11 @@ fn srcpath(session: &Session, #[arg(parse = words)] paths: Vec<String>) -> Resul
     kind = Action,
     writes = [Symbols],
     python = none,
-    usage = ".srcpath+ <local-root|recorded-prefix=local-root> ..."
 )]
 fn srcpath_append(
     session: &Session,
-    #[arg(parse = some_words)] paths: Vec<String>,
+    #[arg(parse = some_words, usage = "<local-root|recorded-prefix=local-root>...", complete = None)]
+    paths: Vec<String>,
 ) -> Result<SourcePath> {
     let symbols = &session.target.symbols;
     for mapping in parse_source_paths(&paths) {
@@ -361,6 +368,7 @@ impl Render for SourcePath {
 }
 
 /// `ls [.] [first][,count]`.
+#[grammar(usage = "[.] [first][,count]", complete = None)]
 fn ls_arguments(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -369,6 +377,7 @@ fn ls_arguments(
 }
 
 /// `lsa [address][,first][,count]`.
+#[grammar(usage = "[address][,first][,count]", complete = Expression)]
 fn lsa_arguments(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -388,7 +397,6 @@ fn lsa_arguments(
     category = "symbols, types, and expressions",
     kind = Query,
     python = none,
-    usage = "ls [.] [first][,count]"
 )]
 fn ls(state: &mut ReplState<'_>, #[arg(parse = ls_arguments)] spec: LsArgs) -> Result<()> {
     const DEFAULT_COUNT: u32 = 10;
@@ -431,8 +439,6 @@ fn ls(state: &mut ReplState<'_>, #[arg(parse = ls_arguments)] spec: LsArgs) -> R
     category = "symbols, types, and expressions",
     kind = Query,
     python = none,
-    usage = "lsa [address][,first][,count]",
-    completion = Expression
 )]
 fn lsa(state: &mut ReplState<'_>, #[arg(parse = lsa_arguments)] spec: LsaArgs) -> Result<()> {
     const DEFAULT_FIRST: i64 = -5;
@@ -481,8 +487,6 @@ fn lsa(state: &mut ReplState<'_>, #[arg(parse = lsa_arguments)] spec: LsaArgs) -
     category = "symbols, types, and expressions",
     kind = Query,
     python = none,
-    usage = "dv [address]",
-    completion = Expression
 )]
 fn dv(state: &mut ReplState<'_>, address: Option<VirtAddr>) -> Result<()> {
     let target = &state.ctx.target;
@@ -534,6 +538,7 @@ fn dv(state: &mut ReplState<'_>, address: Option<VirtAddr>) -> Result<()> {
 /// `.reload`'s options, anywhere on the line: `/n` (the kernel's modules)
 /// or `/user` (the process's), and `/f` and `/v`, which change nothing.
 /// Every word is checked in order, so the first bad one is reported.
+#[grammar(usage = "[/f] [/v] [/n|/user]")]
 fn reload_scope(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -590,7 +595,6 @@ fn reload_scope(
     kind = Action,
     writes = [Symbols],
     python = Symbols,
-    usage = ".reload [/f] [/v] [/n | /user] [module]"
 )]
 fn reload(
     session: &mut Session,
@@ -612,7 +616,6 @@ fn reload(
     writes = [Symbols],
     python = Module,
     python_name = "reload_symbols",
-    usage = "ld <module>"
 )]
 fn ld(session: &mut Session, #[arg(receiver)] module: String) -> Result<ModuleSymbolLoadReport> {
     reload_symbols(session, ReloadScope::Current, Some(&module))
@@ -652,6 +655,7 @@ impl Render for ModuleSymbolLoadReport {
 }
 
 /// `.fetchimage <module>` or `.fetchimage /f <file>`.
+#[grammar(usage = "<module> | /f <file>", complete = Symbol)]
 fn image_source(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -684,8 +688,6 @@ fn image_source(
     kind = Action,
     writes = [Symbols],
     forms = [fetch_image, import_image],
-    usage = ".fetchimage <module>  or  .fetchimage /f <file>",
-    completion = Symbol
 )]
 fn fetchimage(
     session: &Session,
@@ -712,7 +714,7 @@ fn fetch_image(session: &Session, #[arg(receiver)] image: ImageSource) -> Result
 /// Copy a PE file into the symbol cache under the key in its own header, and
 /// return its path in the cache (`.fetchimage /f`). Use it for an image that
 /// no symbol server has, such as the Windows hypervisor's `hvix64.exe`.
-#[command(form_of = fetchimage, python = Symbols, word = "/f")]
+#[command(form_of = fetchimage, python = Symbols)]
 fn import_image(session: &Session, path: String) -> Result<String> {
     fetch_image(session, ImageSource::File(PathBuf::from(path)))
 }
@@ -786,6 +788,7 @@ fn module_words<'w>(line: &[&'w str]) -> ModuleWords<'w> {
 }
 
 /// `lm`'s display words, left for [`module_filter`].
+#[grammar(usage = "")]
 fn module_display(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -795,6 +798,7 @@ fn module_display(
 }
 
 /// `lmv`'s display words: always the details.
+#[grammar(usage = "")]
 fn module_details_display(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -806,6 +810,7 @@ fn module_details_display(
 }
 
 /// `lm`'s filter: every word.
+#[grammar(usage = "[m <pattern>|a <address>|<name>] [v] [u|k] [t]", complete = [None, Symbol, None, None])]
 fn module_filter(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -838,8 +843,6 @@ fn module_filter(
     category = "processes and modules",
     kind = Query,
     python = none,
-    usage = "lm [m <pattern>|a <address>] [v] [u|k] [t]",
-    completion = [None, Symbol, None, None]
 )]
 fn lm(
     session: &Session,
@@ -858,7 +861,6 @@ fn lm(
     category = "processes and modules",
     kind = Query,
     python = none,
-    usage = "lmv [m <pattern>|a <address>|<name>] [u|k] [t]"
 )]
 fn lmv(
     session: &Session,
@@ -998,10 +1000,11 @@ fn source_file_at(
     category = "symbols, types, and expressions",
     kind = Host,
     python = none,
-    usage = "set $<name> <expression>",
-    completion = [None, Expression]
 )]
-fn set(state: &mut ReplState<'_>, #[arg(rest)] rest: String) -> Result<()> {
+fn set(
+    state: &mut ReplState<'_>,
+    #[arg(rest, usage = "<$name> <expression>", complete = [None, Expression])] rest: String,
+) -> Result<()> {
     let Some((lhs, rhs)) = rest.split_once(char::is_whitespace) else {
         outln!("{}\n", command_help("set"));
         return Ok(());
@@ -1120,9 +1123,8 @@ fn vars(state: &mut ReplState<'_>) -> Result<()> {
     category = "symbols, types, and expressions",
     kind = Host,
     python = none,
-    usage = "unset $<name>"
 )]
-fn unset(state: &mut ReplState<'_>, variable: String) -> Result<()> {
+fn unset(state: &mut ReplState<'_>, #[arg(name = "$name")] variable: String) -> Result<()> {
     let name = variable.strip_prefix('$').unwrap_or(&variable);
     if state.ctx.target.user_vars.remove(name).is_some() {
         outln!("unset ${}\n", name);

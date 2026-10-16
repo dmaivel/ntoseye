@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 use tabled::builder::Builder;
 
 use crate::error::{Error, Result};
@@ -38,12 +38,10 @@ use crate::repl::*;
     kind = Query,
     target = Kernel,
     forms = [virtio, virtio_driver],
-    usage = "!virtio [<virtio_device> [module]]",
-    completion = [Expression, Expression]
 )]
 fn virtio_command(
     session: &Session,
-    address: Option<VirtAddr>,
+    #[arg(name = "virtio-device")] address: Option<VirtAddr>,
     module: Option<String>,
 ) -> Result<Virtio> {
     match address {
@@ -71,7 +69,7 @@ fn virtio(session: &Session) -> Result<Vec<VirtioFunction>> {
 #[command(form_of = virtio_command, python = Inspect)]
 fn virtio_driver(
     session: &Session,
-    #[arg(name = "virtio_device")] address: VirtAddr,
+    address: VirtAddr,
     module: Option<String>,
 ) -> Result<VirtioDriver> {
     let target = &session.target;
@@ -126,8 +124,6 @@ impl Render for Virtio {
     kind = Query,
     target = Kernel,
     forms = [vring, vring_raw],
-    usage = "!vring <virtqueue> [module] | !vring /r <size> <desc> <avail> <used> [/t <kind>]",
-    completion = [Expression, Expression, Expression, Expression, Expression, Expression, Expression]
 )]
 fn vring_command(
     session: &Session,
@@ -156,7 +152,7 @@ fn vring_command(
 #[command(form_of = vring_command, python = Inspect)]
 fn vring(
     session: &Session,
-    #[arg(name = "virtqueue")] address: VirtAddr,
+    address: VirtAddr,
     module: Option<String>,
     #[arg(sdk, default = None)] kind: Option<RequestKind>,
 ) -> Result<VirtioRing> {
@@ -184,14 +180,14 @@ fn vring(
 /// descriptor table, avail ring and used ring (`!vring /r`), for a driver
 /// without a PDB. `kind` says what its buffers hold, for decoding their
 /// requests (`/t`).
-#[command(form_of = vring_command, python = Inspect, word = "/r")]
+#[command(form_of = vring_command, python = Inspect)]
 fn vring_raw(
     session: &Session,
     size: u32,
     desc: VirtAddr,
     avail: VirtAddr,
     used: VirtAddr,
-    #[arg(name = "/t <kind>")] kind: Option<RequestKind>,
+    kind: Option<RequestKind>,
 ) -> Result<VirtioRing> {
     let target = &session.target;
     let ring = target.split_ring(size, desc, avail, used)?;
@@ -228,6 +224,10 @@ fn unknown_kind(name: &str) -> String {
 
 /// `!vring <virtqueue> [module]`'s address; `/r` and four more words
 /// start a raw ring instead.
+#[grammar(
+    usage = "<virtqueue> [module] | /r <size> <desc> <avail> <used> [/t <kind>]",
+    complete = Expression
+)]
 fn vring_address(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -244,6 +244,7 @@ fn vring_address(
 }
 
 /// The module after a virtqueue's address.
+#[grammar(usage = "")]
 fn vring_module(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -256,6 +257,7 @@ fn vring_module(
 
 /// A raw ring's `/t <kind>`, after its four words, checked before they are
 /// evaluated.
+#[grammar(usage = "")]
 fn vring_kind(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -277,6 +279,7 @@ fn vring_kind(
 }
 
 /// A raw ring's size and addresses.
+#[grammar(usage = "")]
 fn raw_ring_words(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,

@@ -36,12 +36,16 @@ const SLEEP_POLL: Duration = Duration::from_millis(50);
     category = "session",
     kind = Host,
     python = none,
-    usage = ".if (Condition) { Commands } [.elsif (Condition) { Commands }]... [.else { Commands }]",
     style = RawTail
 )]
 fn if_statement(
     state: &mut ReplState<'_>,
-    #[arg(raw)] tail: String,
+    #[arg(
+        raw,
+        usage = "(<condition>) { <commands> } [.elsif (<condition>) { <commands> }]... [.else { <commands> }]",
+        complete = None
+    )]
+    tail: String,
     #[arg(invoked)] name: &str,
 ) -> Result<Flow> {
     if tail.is_empty() {
@@ -78,12 +82,11 @@ fn if_statement(
     category = "session",
     kind = Host,
     python = none,
-    usage = ".if (Condition) { Commands } .elsif (Condition) { Commands }",
     style = RawTail
 )]
 fn elsif(
     _state: &mut ReplState<'_>,
-    #[arg(raw)] _tail: String,
+    #[arg(raw, usage = "(<condition>) { <commands> }", complete = None)] _tail: String,
     #[arg(invoked)] name: &str,
 ) -> Result<Flow> {
     orphan_else(name)
@@ -97,12 +100,11 @@ fn elsif(
     category = "session",
     kind = Host,
     python = none,
-    usage = ".if (Condition) { Commands } .else { Commands }",
     style = RawTail
 )]
 fn else_block(
     _state: &mut ReplState<'_>,
-    #[arg(raw)] _tail: String,
+    #[arg(raw, usage = "{ <commands> }", complete = None)] _tail: String,
     #[arg(invoked)] name: &str,
 ) -> Result<Flow> {
     orphan_else(name)
@@ -127,12 +129,11 @@ fn orphan_else(name: &str) -> Result<Flow> {
     category = "session",
     kind = Host,
     python = none,
-    usage = ".while (Condition) { Commands }",
     style = RawTail
 )]
 fn while_loop(
     state: &mut ReplState<'_>,
-    #[arg(raw)] tail: String,
+    #[arg(raw, usage = "(<condition>) { <commands> }", complete = None)] tail: String,
     #[arg(invoked)] name: &str,
 ) -> Result<Flow> {
     state.loop_command(name, &tail, parse_while)
@@ -151,12 +152,12 @@ fn while_loop(
     category = "session",
     kind = Host,
     python = none,
-    usage = ".for (InitialCommand ; Condition ; IncrementCommand) { Commands }",
     style = RawTail
 )]
 fn for_loop(
     state: &mut ReplState<'_>,
-    #[arg(raw)] tail: String,
+    #[arg(raw, usage = "(<initial-command> ; <condition> ; <increment-command>) { <commands> }", complete = None)]
+    tail: String,
     #[arg(invoked)] name: &str,
 ) -> Result<Flow> {
     state.loop_command(name, &tail, parse_for)
@@ -173,12 +174,11 @@ fn for_loop(
     category = "session",
     kind = Host,
     python = none,
-    usage = ".do { Commands } (Condition)",
     style = RawTail
 )]
 fn do_loop(
     state: &mut ReplState<'_>,
-    #[arg(raw)] tail: String,
+    #[arg(raw, usage = "{ <commands> } (<condition>)", complete = None)] tail: String,
     #[arg(invoked)] name: &str,
 ) -> Result<Flow> {
     state.loop_command(name, &tail, parse_do)
@@ -194,11 +194,10 @@ fn do_loop(
     category = "session",
     kind = Host,
     python = none,
-    usage = ".break"
 )]
 fn break_loop(
     state: &mut ReplState<'_>,
-    #[arg(raw)] tail: String,
+    #[arg(raw, usage = "")] tail: String,
     #[arg(invoked)] name: &str,
 ) -> Result<Flow> {
     state.loop_jump(name, &tail, Jump::Break)
@@ -210,11 +209,10 @@ fn break_loop(
     category = "session",
     kind = Host,
     python = none,
-    usage = ".continue"
 )]
 fn continue_loop(
     state: &mut ReplState<'_>,
-    #[arg(raw)] tail: String,
+    #[arg(raw, usage = "")] tail: String,
     #[arg(invoked)] name: &str,
 ) -> Result<Flow> {
     state.loop_jump(name, &tail, Jump::Continue)
@@ -230,12 +228,11 @@ fn continue_loop(
     category = "session",
     kind = Host,
     python = none,
-    usage = ".block { Commands }",
     style = RawTail
 )]
 fn block(
     state: &mut ReplState<'_>,
-    #[arg(raw)] tail: String,
+    #[arg(raw, usage = "{ <commands> }", complete = None)] tail: String,
     #[arg(invoked)] name: &str,
 ) -> Result<Flow> {
     if tail.is_empty() {
@@ -263,12 +260,16 @@ fn block(
     category = "session",
     kind = Host,
     python = none,
-    usage = "j Expression Command1 ; Command2 | j Expression 'Commands1' ; 'Commands2'",
     style = RawTail
 )]
 fn j(
     state: &mut ReplState<'_>,
-    #[arg(raw)] tail: String,
+    #[arg(
+        raw,
+        usage = "<expression> <command1> [; <command2>] | <expression> '<commands1>' [; '<commands2>']",
+        complete = None
+    )]
+    tail: String,
     #[arg(invoked)] name: &str,
 ) -> Result<Flow> {
     if tail.is_empty() {
@@ -325,11 +326,10 @@ fn j(
     category = "session",
     kind = Host,
     python = none,
-    usage = "$<Filename | $><Filename | $$<Filename | $$><Filename | $$>a<Filename [arg1 arg2 ...]"
 )]
 fn script_file(
     state: &mut ReplState<'_>,
-    #[arg(raw)] operand: String,
+    #[arg(raw, usage = "<filename> [argument]...", complete = None)] operand: String,
     #[arg(invoked)] token: &str,
 ) -> Result<Flow> {
     // The dispatcher calls `run_script_file` itself for the usual glued form
@@ -344,9 +344,8 @@ fn script_file(
     category = "session",
     kind = Host,
     python = none,
-    usage = "$$ Text | * Text"
 )]
-fn comment(_state: &mut ReplState<'_>, #[arg(raw)] _text: String) -> Result<()> {
+fn comment(_state: &mut ReplState<'_>, #[arg(raw, usage = "[text]")] _text: String) -> Result<()> {
     // A comment does nothing. The dispatcher drops it before parsing
     // (`is_comment`), so this runs only if a host calls the spec directly.
     Ok(())
@@ -362,8 +361,6 @@ fn comment(_state: &mut ReplState<'_>, #[arg(raw)] _text: String) -> Result<()> 
     category = "session",
     kind = Host,
     python = none,
-    usage = ".sleep Milliseconds",
-    completion = Expression
 )]
 fn sleep(state: &mut ReplState<'_>, milliseconds: u64) -> Result<()> {
     let requests = state.ctx.target.interrupt_requests();

@@ -1,4 +1,4 @@
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 use super::hardware::ready_processor;
 use crate::error::{Error, Result};
@@ -127,8 +127,6 @@ fn termination_message(termination: &ListTermination) -> Option<String> {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!running [-i] [-t]",
-    completion = [None]
 )]
 fn running(
     session: &mut Session,
@@ -199,8 +197,6 @@ impl Render for RunningProcessors {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!ready [processor]",
-    completion = [Expression]
 )]
 fn ready(
     session: &mut Session,
@@ -228,8 +224,6 @@ impl Render for ReadyQueues {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!dpcs",
-    completion = [None]
 )]
 fn dpcs(session: &mut Session) -> Result<DpcQueues> {
     session
@@ -319,7 +313,6 @@ impl Render for DpcQueues {
     kind = Query,
     target = Kernel,
     forms = [work_queues],
-    usage = "!exqueue [flags]"
 )]
 fn exqueue(session: &mut Session, #[arg(default = 0)] flags: u64) -> Result<WorkQueues> {
     session.inspect_work_queues(flags)
@@ -329,7 +322,7 @@ fn exqueue(session: &mut Session, #[arg(default = 0)] flags: u64) -> Result<Work
 /// worker threads (`!exqueue`). `include_stacks` adds the stack of each
 /// worker, and `queue_types` (`"critical"`, `"delayed"`, `"hypercritical"`)
 /// limits the listed items to the priorities of those types.
-#[command(form_of = exqueue, python = Inspect, sdk)]
+#[command(form_of = exqueue, python = Inspect)]
 fn work_queues(
     session: &mut Session,
     #[arg(default = false)] include_stacks: bool,
@@ -346,6 +339,7 @@ impl Render for WorkQueues {
 }
 
 /// `!timer`'s address: an expression over the rest of the line.
+#[grammar(usage = "[{}]", complete = [Expression])]
 fn timer_address(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -378,8 +372,6 @@ pub enum Timers {
     kind = Query,
     target = Kernel,
     forms = [timers, timer],
-    usage = "!timer [address-expression]",
-    completion = [Expression]
 )]
 fn timer_command(
     session: &mut Session,
@@ -410,10 +402,7 @@ fn timers(session: &Session) -> Result<TimerTable> {
 
 /// Decode a `_KTIMER` and its DPC (`!timer address`).
 #[command(form_of = timer_command, python = Inspect)]
-fn timer(
-    session: &Session,
-    #[arg(name = "address-expression", complete = Expression)] address: VirtAddr,
-) -> Result<KernelTimer> {
+fn timer(session: &Session, address: VirtAddr) -> Result<KernelTimer> {
     session.target.inspect_timer(address)
 }
 
@@ -428,6 +417,7 @@ impl Render for Timers {
 
 /// `!apc`'s selection: `.` or nothing for the current thread, `*` for every
 /// thread, a number for a thread or process, or part of a process name.
+#[grammar(usage = "[.|*|thread|process]", complete = [Expression])]
 fn apc_selector(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -471,8 +461,6 @@ fn apc_selector(
     kind = Query,
     target = Kernel,
     forms = [apcs, process_apcs, thread_apcs],
-    usage = "!apc [process|thread]",
-    completion = [Expression]
 )]
 fn apc(
     session: &mut Session,
@@ -488,20 +476,19 @@ fn apc(
 #[command(form_of = apc, python = Inspect)]
 fn apcs(
     session: &mut Session,
-    #[arg(default = None, name = "process|thread", complete = Expression, positional)]
-    target: ApcSelector,
+    #[arg(default = None, positional)] target: ApcSelector,
 ) -> Result<ApcQueues> {
     session.inspect_apcs(target)
 }
 
 /// Decode the kernel and user APC queues of this process (`!apc`).
-#[command(form_of = apc, python = Process, python_name = "apcs", sdk)]
+#[command(form_of = apc, python = Process, python_name = "apcs")]
 fn process_apcs(session: &mut Session, #[arg(receiver)] process: ProcessInfo) -> Result<ApcQueues> {
     session.inspect_apcs(ApcSelector::Process(process.pid))
 }
 
 /// Decode the APC lists of this thread (`!apc`).
-#[command(form_of = apc, python = Thread, python_name = "apcs", sdk)]
+#[command(form_of = apc, python = Thread, python_name = "apcs")]
 fn thread_apcs(session: &mut Session, #[arg(receiver)] thread: ThreadInfo) -> Result<ApcQueues> {
     session.inspect_apcs(ApcSelector::Thread(thread.ethread))
 }
@@ -513,6 +500,7 @@ impl Render for ApcQueues {
 }
 
 /// `!stacks`' level: a leading 0, 1, or 2; anything else is the filter.
+#[grammar(usage = "[0|1|2]", complete = [None])]
 fn stacks_level(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -528,6 +516,7 @@ fn stacks_level(
 }
 
 /// The words left, joined, or `None` when there are none.
+#[grammar(usage = "[{}]", complete = Process)]
 fn rest_of_line(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -545,8 +534,6 @@ fn rest_of_line(
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!stacks [0|1|2] [filter]",
-    completion = [None, Process]
 )]
 fn stacks(
     session: &mut Session,
@@ -565,6 +552,7 @@ impl Render for ThreadStacks {
 }
 
 /// `!findstack`'s pattern; `-?` asks for the help.
+#[grammar(usage = "<symbol|module>", complete = [Symbol])]
 fn findstack_pattern(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -577,6 +565,7 @@ fn findstack_pattern(
 }
 
 /// `!findstack`'s display level: 0, 1 (the default), or 2.
+#[grammar(usage = "[0|1|2]", complete = [None])]
 fn findstack_display_level(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -611,8 +600,6 @@ fn findstack_display_level(
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!findstack <symbol|module> [0|1|2]",
-    completion = [Symbol, None]
 )]
 fn findstack(
     session: &mut Session,
@@ -631,6 +618,7 @@ impl Render for FindStack {
 }
 
 /// `!uniqstack`'s `-v`/`-n` words, wherever they are.
+#[grammar(usage = "[-v] [-n]")]
 fn uniqstack_options(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -646,6 +634,7 @@ fn uniqstack_options(
 /// named as `.process` names it or by name (see
 /// [`ReplState::process_for_selector_or_name`]), and by default the
 /// `.process` selection, or every thread when none is selected.
+#[grammar(usage = "[*|process]", complete = [Process])]
 fn uniqstack_scope(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -707,8 +696,6 @@ fn uniqstack_scope(
     kind = Query,
     target = Kernel,
     forms = [uniqstack],
-    usage = "!uniqstack [-v] [-n] [*|process]",
-    completion = [Process]
 )]
 fn uniqstack_command(
     session: &mut Session,
@@ -723,8 +710,7 @@ fn uniqstack_command(
 #[command(form_of = uniqstack_command, python = Inspect)]
 fn uniqstack(
     session: &mut Session,
-    #[arg(default = None, name = "*|process", complete = Process, positional)]
-    process: UniqStackScope,
+    #[arg(default = None, positional)] process: UniqStackScope,
 ) -> Result<UniqStacks> {
     session.inspect_uniqstack(process)
 }

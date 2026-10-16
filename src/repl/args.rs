@@ -6,6 +6,8 @@
 
 use std::borrow::Cow;
 
+use ntoseye_macros::grammar;
+
 use crate::expr::Expr;
 use crate::repl::{CommandInvocation, CompletionStrategy, ReplState, command_help, error};
 use crate::target::MemoryKind;
@@ -94,6 +96,7 @@ impl FromArg for String {
 /// `#[arg(receiver, parse = virtual_memory)]`: a virtual-memory command
 /// (`db`) addresses the context's address space. It takes no word; the
 /// SDK's `Memory` binds the kind from its space.
+#[grammar(usage = "")]
 pub fn virtual_memory(
     _: &mut ArgCx<'_, '_>,
     _: &mut ArgCursor<'_>,
@@ -102,7 +105,8 @@ pub fn virtual_memory(
 }
 
 /// `#[arg(parse = words)]`: every word left, as written (quotes removed),
-/// for a command that takes a list (`undisplay 1 3`).
+/// for a command that takes a list (`undisplay 1 3`), which reads them.
+#[grammar(operation)]
 pub fn words(_: &mut ArgCx<'_, '_>, cursor: &mut ArgCursor<'_>) -> Result<Vec<String>, ArgError> {
     Ok(cursor
         .take_all(|_| true)

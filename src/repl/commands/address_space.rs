@@ -6,7 +6,7 @@ use tabled::builder::Builder;
 
 use owo_colors::OwoColorize;
 
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 use crate::error::{Error, Result};
 use crate::expr::Expr;
@@ -42,6 +42,7 @@ enum MapScope {
 
 /// `!vad`'s process: a PID or EPROCESS, or the current one. `vmmap` takes
 /// a filter instead.
+#[grammar(usage = "[pid|eprocess]", complete = [Process])]
 fn map_scope(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -71,6 +72,7 @@ fn map_scope(
 
 /// `vmmap`'s filter: an address the regions hold, or text in their bounds,
 /// file, type, or protection.
+#[grammar(usage = "")]
 fn map_filter(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -108,8 +110,6 @@ pub enum AddressMap {
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "!vad [pid|eprocess]",
-    completion = [Process, None]
 )]
 fn vad(
     session: &Session,
@@ -246,6 +246,7 @@ fn print_kernel_regions(
 
 /// `!address -summary` on a user-mode minidump: only the summary. The
 /// minidump's address list takes at most one word.
+#[grammar(usage = "[-summary]")]
 fn summary_switch(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -261,6 +262,7 @@ fn summary_switch(
 
 /// `!address`'s address: required on a kernel target; a user-mode
 /// minidump without one lists its regions.
+#[grammar(usage = "[address]", complete = [Expression])]
 fn address_arg(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -290,8 +292,6 @@ fn address_arg(
     kind = Query,
     target = Nt,
     forms = [describe, address_report],
-    usage = "!address [-summary | address-expression]",
-    completion = Expression
 )]
 fn address(
     session: &Session,
@@ -316,7 +316,7 @@ fn address(
 fn describe(
     session: &Session,
     #[arg(receiver)] memory: MemoryKind,
-    #[arg(name = "address-expression")] address: VirtAddr,
+    address: VirtAddr,
 ) -> Result<AddressDescription> {
     memory.require_virtual()?;
     if session.target.kind() == TargetKind::UserDump {
@@ -333,7 +333,7 @@ fn describe(
 /// `address`, the region that holds it and whether the dump captured it;
 /// without, every region with the dump's summary. A dump without a
 /// memory-info list reports the memory ranges it captured instead.
-#[command(form_of = address, python = UserDump, sdk)]
+#[command(form_of = address, python = UserDump)]
 fn address_report(
     session: &Session,
     #[arg(positional)] address: Option<VirtAddr>,
@@ -379,7 +379,6 @@ impl Render<bool> for AddressReport {
     kind = Query,
     python = Process,
     python_name = "protection",
-    completion = Expression
 )]
 fn vprot(session: &Session, address: VirtAddr) -> Result<MemoryBasicInformation> {
     let target = &session.target;

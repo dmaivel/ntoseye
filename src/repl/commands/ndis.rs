@@ -3,7 +3,7 @@
 
 use std::fmt::Display;
 
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 use tabled::builder::Builder;
 
 use crate::error::{Error, Result};
@@ -77,9 +77,11 @@ enum Miniports {
     kind = Query,
     target = Kernel,
     forms = [ndis_miniport],
-    usage = "!ndiskd.miniport [<miniport>]"
 )]
-fn ndis_miniport_command(session: &Session, address: Option<VirtAddr>) -> Result<Miniports> {
+fn ndis_miniport_command(
+    session: &Session,
+    #[arg(name = "miniport")] address: Option<VirtAddr>,
+) -> Result<Miniports> {
     let Some(address) = address else {
         return ndis_miniports(session).map(Miniports::List);
     };
@@ -91,10 +93,7 @@ fn ndis_miniport_command(session: &Session, address: Option<VirtAddr>) -> Result
 /// Read the NDIS miniport at `address` with its driver, filter stack,
 /// bindings, and pending OID request (`!ndiskd.miniport`).
 #[command(form_of = ndis_miniport_command, python = Inspect)]
-fn ndis_miniport(
-    session: &Session,
-    #[arg(name = "miniport")] address: VirtAddr,
-) -> Result<NdisMiniportDetail> {
+fn ndis_miniport(session: &Session, address: VirtAddr) -> Result<NdisMiniportDetail> {
     session.target.ndis_miniport(address)
 }
 
@@ -127,9 +126,11 @@ enum Minidrivers {
     kind = Query,
     target = Kernel,
     forms = [ndis_minidrivers, ndis_minidriver],
-    usage = "!ndiskd.minidriver [<minidriver>]"
 )]
-fn ndis_minidriver_command(session: &Session, address: Option<VirtAddr>) -> Result<Minidrivers> {
+fn ndis_minidriver_command(
+    session: &Session,
+    #[arg(name = "minidriver")] address: Option<VirtAddr>,
+) -> Result<Minidrivers> {
     let Some(address) = address else {
         return ndis_minidrivers(session).map(Minidrivers::List);
     };
@@ -147,10 +148,7 @@ fn ndis_minidrivers(session: &Session) -> Result<NdisDriverList> {
 /// Read the NDIS miniport driver block at `address` and its miniports
 /// (`!ndiskd.minidriver <address>`).
 #[command(form_of = ndis_minidriver_command, python = Inspect)]
-fn ndis_minidriver(
-    session: &Session,
-    #[arg(name = "minidriver")] address: VirtAddr,
-) -> Result<NdisMinidriver> {
+fn ndis_minidriver(session: &Session, address: VirtAddr) -> Result<NdisMinidriver> {
     session.target.ndis_minidriver(address)
 }
 
@@ -185,9 +183,11 @@ enum Protocols {
     kind = Query,
     target = Kernel,
     forms = [ndis_protocols, ndis_protocol],
-    usage = "!ndiskd.protocol [<protocol>]"
 )]
-fn ndis_protocol_command(session: &Session, address: Option<VirtAddr>) -> Result<Protocols> {
+fn ndis_protocol_command(
+    session: &Session,
+    #[arg(name = "protocol")] address: Option<VirtAddr>,
+) -> Result<Protocols> {
     let Some(address) = address else {
         return ndis_protocols(session).map(Protocols::List);
     };
@@ -205,10 +205,7 @@ fn ndis_protocols(session: &Session) -> Result<NdisProtocolList> {
 /// Read the NDIS protocol block at `address` and its bindings
 /// (`!ndiskd.protocol <address>`).
 #[command(form_of = ndis_protocol_command, python = Inspect)]
-fn ndis_protocol(
-    session: &Session,
-    #[arg(name = "protocol")] address: VirtAddr,
-) -> Result<NdisProtocolDetail> {
+fn ndis_protocol(session: &Session, address: VirtAddr) -> Result<NdisProtocolDetail> {
     session.target.ndis_protocol_detail(address)
 }
 
@@ -243,11 +240,10 @@ enum FilterDrivers {
     kind = Query,
     target = Kernel,
     forms = [ndis_filter_drivers, ndis_filter_driver],
-    usage = "!ndiskd.filterdriver [<filterdriver>]"
 )]
 fn ndis_filter_driver_command(
     session: &Session,
-    address: Option<VirtAddr>,
+    #[arg(name = "filterdriver")] address: Option<VirtAddr>,
 ) -> Result<FilterDrivers> {
     let Some(address) = address else {
         return ndis_filter_drivers(session).map(FilterDrivers::List);
@@ -266,10 +262,7 @@ fn ndis_filter_drivers(session: &Session) -> Result<NdisFilterDriverList> {
 /// Read the NDIS filter driver block at `address` and its filter
 /// modules (`!ndiskd.filterdriver <address>`).
 #[command(form_of = ndis_filter_driver_command, python = Inspect)]
-fn ndis_filter_driver(
-    session: &Session,
-    #[arg(name = "filterdriver")] address: VirtAddr,
-) -> Result<NdisFilterDriverDetail> {
+fn ndis_filter_driver(session: &Session, address: VirtAddr) -> Result<NdisFilterDriverDetail> {
     session.target.ndis_filter_driver_detail(address)
 }
 
@@ -305,9 +298,11 @@ enum Filters {
     kind = Query,
     target = Kernel,
     forms = [ndis_filters, ndis_filter],
-    usage = "!ndiskd.filter [<filter>]"
 )]
-fn ndis_filter_command(session: &Session, address: Option<VirtAddr>) -> Result<Filters> {
+fn ndis_filter_command(
+    session: &Session,
+    #[arg(name = "filter")] address: Option<VirtAddr>,
+) -> Result<Filters> {
     let Some(address) = address else {
         return ndis_filters(session).map(Filters::List);
     };
@@ -324,10 +319,7 @@ fn ndis_filters(session: &Session) -> Result<NdisFilterList> {
 
 /// Read the NDIS filter module at `address` (`!ndiskd.filter <address>`).
 #[command(form_of = ndis_filter_command, python = Inspect)]
-fn ndis_filter(
-    session: &Session,
-    #[arg(name = "filter")] address: VirtAddr,
-) -> Result<NdisFilterDetail> {
+fn ndis_filter(session: &Session, address: VirtAddr) -> Result<NdisFilterDetail> {
     session.target.ndis_filter_detail(address)
 }
 
@@ -379,6 +371,7 @@ const NBL_USAGE: &str = "usage: !ndiskd.nbl <nbl> [-chain] [-data]";
 
 /// `!ndiskd.nbl`'s address, once its switches are taken: the one word that
 /// is not an option.
+#[grammar(usage = "<nbl>", complete = [Expression])]
 fn nbl_address(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -423,11 +416,10 @@ fn nbl_address(
     kind = Query,
     target = Kernel,
     forms = [ndis_nbl, ndis_nbl_chain],
-    usage = "!ndiskd.nbl <nbl> [-chain] [-data]"
 )]
 fn ndis_nbl_command(
     session: &Session,
-    #[arg(parse = nbl_address, complete = Expression)] address: VirtAddr,
+    #[arg(parse = nbl_address)] address: VirtAddr,
     #[arg(switch = "-chain")] chain: bool,
     #[arg(switch = "-data")] data: bool,
 ) -> Result<Nbls> {
@@ -449,8 +441,8 @@ fn ndis_nbl_command(
 #[command(form_of = ndis_nbl_command, python = Inspect)]
 fn ndis_nbl(
     session: &Session,
-    #[arg(name = "nbl")] address: VirtAddr,
-    #[arg(default = false, name = "-data")] data: bool,
+    address: VirtAddr,
+    #[arg(default = false)] data: bool,
 ) -> Result<NdisNbl> {
     let target = &session.target;
     let mut nbl = target.ndis_nbl(address)?;
@@ -464,11 +456,11 @@ fn ndis_nbl(
 /// (`!ndiskd.nbl -chain`). With `data`, each NET_BUFFER's `data` holds up
 /// to 64 KiB of its frame, or `data_error` why it does not read
 /// (`!ndiskd.nbl -chain -data`).
-#[command(form_of = ndis_nbl_command, python = Inspect, word = "-chain")]
+#[command(form_of = ndis_nbl_command, python = Inspect)]
 fn ndis_nbl_chain(
     session: &Session,
-    #[arg(name = "nbl")] address: VirtAddr,
-    #[arg(default = false, name = "-data")] data: bool,
+    address: VirtAddr,
+    #[arg(default = false)] data: bool,
 ) -> Result<NdisNblChain> {
     let target = &session.target;
     let mut chain = target.ndis_nbl_chain(address)?;

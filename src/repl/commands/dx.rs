@@ -21,7 +21,7 @@ use super::dx_query;
 use super::types::MAX_RECURSION_DEPTH;
 use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 /// Show a typed expression's value and its fields.
 ///
@@ -56,8 +56,6 @@ use ntoseye_macros::command;
     category = "symbols, types, and expressions",
     kind = Query,
     python = none,
-    usage = "dx [-r<depth>] [-g] <expression>[, d | , <count>]",
-    completion = Expression
 )]
 fn dx(state: &mut ReplState<'_>, #[arg(parse = dx_request)] request: DxRequest) -> Result<()> {
     state.dx(&request.0)
@@ -67,6 +65,7 @@ fn dx(state: &mut ReplState<'_>, #[arg(parse = dx_request)] request: DxRequest) 
 /// its own grammar, [`parse_dx_args`], which the command reads it with.
 struct DxRequest(String);
 
+#[grammar(usage = "[-r<depth>] [-g] <expression>[,d|,<count>]", complete = Expression)]
 fn dx_request(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,

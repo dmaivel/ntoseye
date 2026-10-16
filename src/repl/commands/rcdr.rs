@@ -1,7 +1,7 @@
 //! The WPP recorder (`!rcdrkd.rcdrloglist`, `!rcdrkd.rcdrlogdump`): the
 //! in-flight logs WppRecorder.sys keeps for drivers.
 
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 use tabled::builder::Builder;
 
 use super::wdf::ifr_entry_line;
@@ -37,7 +37,6 @@ const LOG_DUMP_USAGE: &str = "!rcdrkd.rcdrlogdump <driver> [-a <log>]";
     kind = Query,
     target = Kernel,
     forms = [rcdr_drivers, rcdr_logs],
-    usage = "!rcdrkd.rcdrloglist [<driver>]"
 )]
 fn rcdr_log_list(
     session: &Session,
@@ -60,7 +59,7 @@ fn rcdr_drivers(session: &Session) -> Result<RcdrDriverList> {
 /// List the WPP recorder logs of `driver`, by its name with or without
 /// `.sys` or its recorder context (`!rcdrkd.rcdrloglist <driver>`).
 #[command(form_of = rcdr_log_list, python = Inspect)]
-fn rcdr_logs(session: &Session, #[arg(complete = Driver)] driver: String) -> Result<RcdrLogs> {
+fn rcdr_logs(session: &Session, driver: String) -> Result<RcdrLogs> {
     session.target.rcdr_logs(&driver)
 }
 
@@ -100,11 +99,10 @@ impl Render for RcdrLogList {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!rcdrkd.rcdrlogdump <driver> [-a <log>]"
 )]
 fn rcdr_log(
     session: &Session,
-    #[arg(parse = log_dump_driver, complete = Driver)] driver: String,
+    #[arg(parse = log_dump_driver)] driver: String,
     #[arg(parse = log_dump_only)] log: Option<VirtAddr>,
 ) -> Result<RcdrLogDump> {
     session
@@ -117,6 +115,7 @@ fn rcdr_log(
 /// line is checked here, in its order, as it always was: an `-a` without a
 /// log, a log that does not evaluate, a second driver. The `-a` words are
 /// left for [`log_dump_only`].
+#[grammar(usage = "<driver>", complete = [Driver])]
 fn log_dump_driver(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -146,6 +145,7 @@ fn log_dump_driver(
 
 /// `!rcdrkd.rcdrlogdump`'s `-a <log>`, the last one given; the line is
 /// [`log_dump_driver`]'s check, so only `-a` and logs are left.
+#[grammar(usage = "[-a <log>]", complete = [None, Expression])]
 fn log_dump_only(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,

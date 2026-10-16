@@ -12,11 +12,12 @@ use crate::session::{
     CallTrace, CallTraceEnd, CallTraceFrame, Cancel, Motion, Session, StepMode, WalkUntil,
 };
 use crate::types::VirtAddr;
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 /// `g`'s optional address: the rest of the line, one expression. The
 /// `.vtl 1` view names addresses in VTL1 but holds no vCPU context to run
 /// from, so it refuses one before anything leaves the view.
+#[grammar(usage = "[{}]", complete = Expression)]
 fn run_address(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -41,6 +42,7 @@ fn run_address(
 }
 
 /// `pa`'s and `ta`'s address: the rest of the line, one expression.
+#[grammar(usage = "<{}>", complete = Expression)]
 fn walk_address(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -68,8 +70,6 @@ fn walk_address(
     run = Run,
     python = Debugger,
     python_name = "run",
-    usage = "g [address]",
-    completion = Expression
 )]
 fn go(
     session: &mut Session,
@@ -105,8 +105,6 @@ fn go(
     kind = Run,
     run = Run,
     python = none,
-    usage = "gh [address]",
-    completion = Expression
 )]
 fn go_handled(
     session: &mut Session,
@@ -122,8 +120,6 @@ fn go_handled(
     kind = Run,
     run = Run,
     python = none,
-    usage = "gn [address]",
-    completion = Expression
 )]
 fn go_not_handled(
     session: &mut Session,
@@ -139,7 +135,6 @@ fn go_not_handled(
     kind = Run,
     state = Running,
     python = none,
-    usage = "break"
 )]
 fn break_in(_session: &mut Session) -> Result<Motion> {
     Ok(Motion::Break)
@@ -154,7 +149,6 @@ fn break_in(_session: &mut Session) -> Result<Motion> {
     run = Step,
     python = Debugger,
     python_name = "step",
-    usage = "t"
 )]
 fn step(
     _session: &mut Session,
@@ -177,7 +171,6 @@ fn step(
     run = Run,
     python = Debugger,
     python_name = "step_over",
-    usage = "p or ni"
 )]
 fn step_over(
     _session: &mut Session,
@@ -201,7 +194,6 @@ fn step_over(
     run = Run,
     python = Debugger,
     python_name = "step_out",
-    usage = "gu or finish"
 )]
 fn step_out(_session: &mut Session) -> Result<Motion> {
     Ok(Motion::StepOut)
@@ -214,8 +206,6 @@ fn step_out(_session: &mut Session) -> Result<Motion> {
     kind = Run,
     run = Run,
     python = none,
-    usage = "pa <address>",
-    completion = Expression
 )]
 fn step_over_to(
     session: &mut Session,
@@ -232,8 +222,6 @@ fn step_over_to(
     state = Halted,
     run = Run,
     python = none,
-    usage = "ta <address>",
-    completion = Expression
 )]
 fn step_to(
     session: &mut Session,
@@ -250,7 +238,6 @@ fn step_to(
     state = Halted,
     run = Run,
     python = none,
-    usage = "pc"
 )]
 fn step_over_to_call(session: &mut Session) -> Result<Motion> {
     step_over(session, Some(WalkUntil::Call))
@@ -264,7 +251,6 @@ fn step_over_to_call(session: &mut Session) -> Result<Motion> {
     state = Halted,
     run = Run,
     python = none,
-    usage = "tc"
 )]
 fn step_to_call(session: &mut Session) -> Result<Motion> {
     step(session, Some(WalkUntil::Call))
@@ -278,7 +264,6 @@ fn step_to_call(session: &mut Session) -> Result<Motion> {
     state = Halted,
     run = Run,
     python = none,
-    usage = "pt"
 )]
 fn step_over_to_return(session: &mut Session) -> Result<Motion> {
     step_over(session, Some(WalkUntil::Return))
@@ -292,7 +277,6 @@ fn step_over_to_return(session: &mut Session) -> Result<Motion> {
     state = Halted,
     run = Run,
     python = none,
-    usage = "tt"
 )]
 fn step_to_return(session: &mut Session) -> Result<Motion> {
     step(session, Some(WalkUntil::Return))
@@ -306,7 +290,6 @@ fn step_to_return(session: &mut Session) -> Result<Motion> {
     state = Halted,
     run = Run,
     python = none,
-    usage = "ph"
 )]
 fn step_over_to_branch(session: &mut Session) -> Result<Motion> {
     step_over(session, Some(WalkUntil::Branch))
@@ -320,7 +303,6 @@ fn step_over_to_branch(session: &mut Session) -> Result<Motion> {
     state = Halted,
     run = Run,
     python = none,
-    usage = "th"
 )]
 fn step_to_branch(session: &mut Session) -> Result<Motion> {
     step(session, Some(WalkUntil::Branch))
@@ -334,8 +316,6 @@ fn step_to_branch(session: &mut Session) -> Result<Motion> {
     state = Halted,
     run = Run,
     python = Debugger,
-    usage = "wt [count]",
-    completion = Expression
 )]
 fn trace_calls(
     session: &mut Session,

@@ -6,7 +6,7 @@ use std::fmt::Display;
 
 use tabled::builder::Builder;
 
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 use super::cpu::print_cpuinfo;
 use crate::error::{Error, Result};
@@ -316,6 +316,7 @@ fn print_smbios(table: &SmbiosTable) {
 }
 
 /// The processor of `!apic`, whose errors name the command.
+#[grammar(usage = "[processor]", complete = [Expression])]
 fn apic_processor(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -353,8 +354,6 @@ fn apic_processor(
     target = Kernel,
     state = Halted,
     python = Cpu,
-    usage = "!apic [processor]",
-    completion = [Expression]
 )]
 fn apic(
     session: &mut Session,
@@ -389,7 +388,6 @@ impl Render for LocalApic {
     target = Kernel,
     python = Inspect,
     python_name = "interrupt_controllers",
-    usage = "!ioapic"
 )]
 fn ioapic(session: &mut Session) -> Result<HalControllers> {
     session
@@ -406,6 +404,7 @@ impl Render for HalControllers {
 
 /// The `!sysinfo` section: `machineid`, `smbios`, or `cpuinfo`, in any case;
 /// anything else shows the help.
+#[grammar(usage = "<machineid|smbios|cpuinfo>", complete = [None])]
 fn sysinfo_section(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -433,8 +432,6 @@ fn sysinfo_section(
     kind = Query,
     target = Kernel,
     forms = [smbios],
-    usage = "!sysinfo machineid | smbios | cpuinfo",
-    completion = []
 )]
 fn sysinfo(
     session: &mut Session,
@@ -465,7 +462,7 @@ fn sysinfo(
 /// (`nt!WmipSMBiosTablePhysicalAddress`) from physical memory, with every
 /// structure it holds (`!sysinfo smbios`; `!sysinfo machineid` shows the
 /// identity strings of the same table).
-#[command(form_of = sysinfo, python = Inspect, word = "smbios")]
+#[command(form_of = sysinfo, python = Inspect)]
 fn smbios(session: &Session) -> Result<SmbiosTable> {
     session.target.smbios_table()
 }

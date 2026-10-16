@@ -25,11 +25,12 @@ use crate::unwind::try_format_symbol_at;
     category = "symbols, types, and expressions",
     kind = Host,
     python = none,
-    usage = "display [<expression>]",
-    completion = Expression,
     style = ExpressionTail
 )]
-fn display(state: &mut ReplState<'_>, #[arg(raw)] tail: String) -> Result<()> {
+fn display(
+    state: &mut ReplState<'_>,
+    #[arg(raw, usage = "[expression]", complete = Expression)] tail: String,
+) -> Result<()> {
     let expr = tail.as_str().trim();
     if expr.is_empty() {
         if state.ctx.displays.is_empty() {
@@ -69,10 +70,11 @@ fn display(state: &mut ReplState<'_>, #[arg(raw)] tail: String) -> Result<()> {
     category = "symbols, types, and expressions",
     kind = Host,
     python = none,
-    usage = "undisplay <number>... | *",
-    completion = None
 )]
-fn undisplay(state: &mut ReplState<'_>, #[arg(parse = words)] numbers: Vec<String>) -> Result<()> {
+fn undisplay(
+    state: &mut ReplState<'_>,
+    #[arg(parse = words, usage = "<number>... | *", complete = None)] numbers: Vec<String>,
+) -> Result<()> {
     let args: Vec<&str> = numbers.iter().map(String::as_str).collect();
     if args.is_empty() {
         outln!("{}\n", command_help("undisplay"));

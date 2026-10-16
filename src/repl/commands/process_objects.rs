@@ -17,7 +17,7 @@ use crate::target::job::{Job, job_limit_flag_names};
 use crate::target::zombies::{MAX_ZOMBIES, ZombieKinds, Zombies};
 use crate::types::VirtAddr;
 use crate::ui;
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 /// Show an ALPC port, an ALPC message, or the ports that a process holds.
 ///
@@ -41,8 +41,6 @@ use ntoseye_macros::command;
     kind = Query,
     target = Kernel,
     forms = [alpc_port, alpc_message, alpc_process_ports],
-    usage = "!alpc /p <port> | /m <message> | /lpp [process]",
-    completion = [Expression, Expression]
 )]
 fn alpc(session: &Session, #[arg(parse = alpc_query)] query: AlpcQuery) -> Result<AlpcObject> {
     Ok(match query {
@@ -57,20 +55,14 @@ fn alpc(session: &Session, #[arg(parse = alpc_query)] query: AlpcQuery) -> Resul
 /// Decode an ALPC port (`!alpc /p`). The result has the port kind, owner,
 /// connection, state, and queues, and for a connection port also its
 /// connections. `address` is the body or the header of the port object.
-#[command(form_of = alpc, python = Inspect, word = "/p")]
-fn alpc_port(
-    session: &Session,
-    #[arg(name = "port", complete = Expression)] address: VirtAddr,
-) -> Result<AlpcPort> {
+#[command(form_of = alpc, python = Inspect)]
+fn alpc_port(session: &Session, address: VirtAddr) -> Result<AlpcPort> {
     session.target.alpc_port(address)
 }
 
 /// Decode an ALPC message, a `_KALPC_MESSAGE` (`!alpc /m`).
-#[command(form_of = alpc, python = Inspect, word = "/m")]
-fn alpc_message(
-    session: &Session,
-    #[arg(name = "message", complete = Expression)] address: VirtAddr,
-) -> Result<AlpcMessage> {
+#[command(form_of = alpc, python = Inspect)]
+fn alpc_message(session: &Session, address: VirtAddr) -> Result<AlpcMessage> {
     session.target.alpc_message(address)
 }
 
@@ -78,10 +70,10 @@ fn alpc_message(
 /// result has the connection ports that the process owns, with their
 /// connections, and the client ports through which the process is
 /// connected. `process` defaults to the current process.
-#[command(form_of = alpc, python = Inspect, word = "/lpp")]
+#[command(form_of = alpc, python = Inspect)]
 fn alpc_process_ports(
     session: &Session,
-    #[arg(complete = Process, positional)] process: Option<ProcessInfo>,
+    #[arg(positional)] process: Option<ProcessInfo>,
 ) -> Result<AlpcProcessPorts> {
     let target = &session.target;
     let process = match process {
@@ -105,6 +97,10 @@ enum AlpcObject {
     ProcessPorts(AlpcProcessPorts),
 }
 
+#[grammar(
+    usage = "/p <port> | /m <message> | /lpp [process]",
+    complete = [Expression, Expression]
+)]
 fn alpc_query(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -156,13 +152,11 @@ impl Render for AlpcObject {
     kind = Action,
     target = Kernel,
     forms = [global_flags, set_global_flags],
-    usage = "!gflag [[+|-]value | {+|-}abbreviation | -?]",
-    completion = [Expression]
 )]
 fn gflag(
     session: &Session,
     #[arg(render, switch = "-?")] list: bool,
-    change: Option<GlobalFlagChange>,
+    #[arg(name = "[+|-]value|+abbreviation|-abbreviation")] change: Option<GlobalFlagChange>,
 ) -> Result<GlobalFlags> {
     match change {
         Some(change) => set_global_flags(session, change),
@@ -214,8 +208,6 @@ fn set_global_flags(session: &Session, change: GlobalFlagChange) -> Result<Globa
     target = Kernel,
     python = Process,
     python_name = "handle_traces",
-    usage = "!htrace [handle [process [max-traces]]]",
-    completion = [Expression, Expression, Expression]
 )]
 fn htrace(
     session: &Session,
@@ -234,6 +226,7 @@ fn htrace(
 
 /// A process argument: an EPROCESS, a PID, or an image name; omitted or 0,
 /// the current process.
+#[grammar(usage = "[{}]", complete = [Expression])]
 fn process_or_current(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -312,7 +305,6 @@ impl Render<bool> for GlobalFlags {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!job [address [flags]]"
 )]
 fn job(
     session: &mut Session,

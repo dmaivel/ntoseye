@@ -1,4 +1,4 @@
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 use crate::error::Result;
 use crate::repl::args::{ArgCursor, ArgCx, ArgError};
@@ -228,6 +228,7 @@ fn print_pnp_triage(triage: &PnpTriageDetail) {
 
 /// `!devnode`'s node: the line is checked whole first (`[node|0] [-r|1]`,
 /// in any order), then the node's word, if any, is taken.
+#[grammar(usage = "[node|0]", complete = [Expression])]
 fn devnode_node(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -247,6 +248,7 @@ fn devnode_node(
 }
 
 /// `!devnode`'s `-r` (or WinDbg's trailing `1`), left by `devnode_node`.
+#[grammar(usage = "[-r|1]")]
 fn devnode_recurse(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -267,8 +269,6 @@ fn devnode_recurse(
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!devnode [node|0] [-r]",
-    completion = [Expression]
 )]
 fn devnode(
     session: &Session,
@@ -305,9 +305,11 @@ impl Render for DevNodeDetail {
     target = Kernel,
     python = Inspect,
     python_name = "device_stack",
-    usage = "!devstack <device-object|devnode>"
 )]
-fn devstack(session: &Session, device_or_node: VirtAddr) -> Result<DeviceStackDetail> {
+fn devstack(
+    session: &Session,
+    #[arg(name = "device-object|devnode")] device_or_node: VirtAddr,
+) -> Result<DeviceStackDetail> {
     session.target.inspect_device_stack(device_or_node)
 }
 

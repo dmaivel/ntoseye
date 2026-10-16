@@ -215,9 +215,11 @@ fn print_frame_title(title: &str, address: VirtAddr, frame_id: u64) {
     target = Kernel,
     python = Inspect,
     python_name = "control_area",
-    usage = "!ca <control-area>"
 )]
-fn ca(session: &Session, address: VirtAddr) -> Result<ControlAreaDetail> {
+fn ca(
+    session: &Session,
+    #[arg(name = "control-area")] address: VirtAddr,
+) -> Result<ControlAreaDetail> {
     session.target.inspect_control_area(address)
 }
 
@@ -240,9 +242,8 @@ impl Render for ControlAreaDetail {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!vpb <vpb>"
 )]
-fn vpb(session: &Session, address: VirtAddr) -> Result<VpbDetail> {
+fn vpb(session: &Session, #[arg(name = "vpb")] address: VirtAddr) -> Result<VpbDetail> {
     session.target.inspect_vpb(address)
 }
 
@@ -343,7 +344,6 @@ impl FromArg for FltFilterSelector {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!fltkd.instances [filter]"
 )]
 fn flt_instances(
     session: &Session,

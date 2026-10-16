@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressStyle};
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 use owo_colors::OwoColorize;
 use tabled::builder::Builder;
 
@@ -50,6 +50,7 @@ impl FromArg for Processor {
 
 /// The processor of a command that reads the current vCPU's and takes no
 /// processor word (`!idt`, `!gdt`, `!cpuinfo`): `None`, the current one.
+#[grammar(usage = "")]
 pub fn current_processor(
     _: &mut ArgCx<'_, '_>,
     _: &mut ArgCursor<'_>,
@@ -509,6 +510,7 @@ fn render_msr_value(target: &Target, value: u64) -> String {
 }
 
 /// The processor of `rdmsr /p <processor>`; omitted, the current vCPU's.
+#[grammar(usage = "[/p <processor>]", complete = [None, Expression])]
 fn msr_processor(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -546,8 +548,6 @@ pub struct MsrValue {
     state = Halted,
     capability = Msr,
     python = none,
-    usage = "rdmsr [/p <processor>] <msr>",
-    completion = [None, Expression, Expression]
 )]
 fn rdmsr(
     session: &mut Session,
@@ -701,6 +701,7 @@ impl Render for Irql {
 }
 
 /// An IDT vector, `!idt`'s argument: 0 to 255.
+#[grammar(usage = "[vector]", complete = [Expression])]
 fn idt_vector(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -729,8 +730,6 @@ fn idt_vector(
     kind = Query,
     target = Kernel,
     python = Cpu,
-    usage = "!idt [vector]",
-    completion = [Expression]
 )]
 fn idt(
     session: &mut Session,
@@ -778,8 +777,6 @@ fn read_gdt(session: &mut Session, processor: Option<Processor>, name: &str) -> 
     kind = Query,
     target = Kernel,
     python = Cpu,
-    usage = "!gdt",
-    completion = []
 )]
 fn gdt(
     session: &mut Session,
@@ -832,9 +829,12 @@ pub struct Selectors {
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "dg <first-selector> [last-selector]"
 )]
-fn dg(session: &mut Session, first: Selector, last: Option<Selector>) -> Result<Selectors> {
+fn dg(
+    session: &mut Session,
+    #[arg(name = "first-selector")] first: Selector,
+    #[arg(name = "last-selector")] last: Option<Selector>,
+) -> Result<Selectors> {
     let Selector(first) = first;
     let last = last.map_or(first, |last| last.0);
     if last < first {
@@ -863,8 +863,6 @@ impl Render for Selectors {
     kind = Query,
     target = Kernel,
     python = Cpu,
-    usage = "!cpuinfo",
-    completion = []
 )]
 fn cpuinfo(
     session: &mut Session,
@@ -888,10 +886,11 @@ impl Render for CpuInfo {
     target = Kernel,
     state = Halted,
     python = none,
-    usage = "vcpu <id>",
-    completion = [Vcpu]
 )]
-fn vcpu(state: &mut ReplState<'_>, requested: String) -> Result<()> {
+fn vcpu(
+    state: &mut ReplState<'_>,
+    #[arg(name = "id", complete = Vcpu)] requested: String,
+) -> Result<()> {
     let threads = state
         .ctx
         .backend
@@ -1202,7 +1201,6 @@ impl ReplState<'_> {
     kind = Query,
     state = Halted,
     python = none,
-    usage = "~"
 )]
 fn vcpus(session: &mut Session) -> Result<Contexts> {
     // A user dump's contexts are its captured threads.

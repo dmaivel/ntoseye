@@ -7,7 +7,7 @@ use tabled::builder::Builder;
 
 use owo_colors::OwoColorize;
 
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 use crate::error::{Error, Result};
 use crate::session::Session;
@@ -40,7 +40,6 @@ fn kernel_symbol(target: &Target, address: VirtAddr) -> String {
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "drivers [filter]"
 )]
 fn drivers(
     session: &Session,
@@ -105,6 +104,7 @@ impl Render<Option<String>> for Vec<DriverObjectInfo> {
 
 /// The driver object that `!drvobj` names: an expression, or else a driver
 /// name (`ACPI` or `\Driver\ACPI`).
+#[grammar(usage = "<driver-object|driver-name>", complete = [Driver])]
 fn driver_argument(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -146,8 +146,6 @@ fn driver_argument(
     target = Kernel,
     python = Driver,
     python_name = "inspect",
-    usage = "!drvobj <driver-object-expression-or-name>",
-    completion = [Driver]
 )]
 fn drvobj(
     session: &Session,
@@ -217,9 +215,11 @@ impl Render for DriverObjectDetail {
     target = Kernel,
     python = Device,
     python_name = "inspect",
-    usage = "!devobj <device-object-expression>"
 )]
-fn devobj(session: &Session, #[arg(receiver)] device: VirtAddr) -> Result<DeviceObjectDetail> {
+fn devobj(
+    session: &Session,
+    #[arg(receiver, name = "device-object")] device: VirtAddr,
+) -> Result<DeviceObjectDetail> {
     session.target.inspect_device_object(device)
 }
 
@@ -273,8 +273,6 @@ impl Render for DeviceObjectDetail {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!irp <address-expression> [detail]",
-    completion = [Expression]
 )]
 fn irp(
     session: &Session,
@@ -439,6 +437,7 @@ fn print_irp_detail(irp: &IrpInfo) {
 }
 
 /// The next word, which a later argument also takes.
+#[grammar(usage = "")]
 fn peek_word(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -453,13 +452,11 @@ fn peek_word(
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "irps [process-filter|driver-filter]",
-    completion = [Process]
 )]
 fn irps(
     session: &Session,
     #[arg(render, parse = peek_word)] shown: Option<String>,
-    filter: Option<String>,
+    #[arg(name = "process-filter|driver-filter", complete = Process)] filter: Option<String>,
 ) -> Result<Vec<IrpHit>> {
     session.target.discover_irps(filter.as_deref())
 }
@@ -531,6 +528,7 @@ impl FromArg for IrpCriteriaKind {
 
 /// `!irpfind`'s pool type, once the line has a WinDbg shape: after `-v`,
 /// up to a pool type and restart address, or both and a criteria pair.
+#[grammar(usage = "[{}]", complete = [Expression])]
 fn irpfind_pool(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -585,16 +583,14 @@ fn irpfind_pool(
     target = Kernel,
     python = Inspect,
     python_name = "irp_find",
-    usage = "!irpfind [-v] [pool-type [restart-address [criteria data]]]",
-    completion = [Expression, Expression, Expression, None, Expression]
 )]
 fn irpfind(
     session: &Session,
     #[arg(render, switch = "-v")] verbose: bool,
     #[arg(parse = irpfind_pool)] pool_type: Option<IrpPool>,
-    restart: Option<VirtAddr>,
+    #[arg(name = "restart-address")] restart: Option<VirtAddr>,
     criteria: Option<IrpCriteriaKind>,
-    #[arg(default = 0)] value: u64,
+    #[arg(default = 0, name = "data")] value: u64,
 ) -> Result<IrpFindDetail> {
     let criteria = criteria.map(|kind| IrpCriteria::new(kind, value));
     session.target.irp_find(
@@ -754,9 +750,11 @@ impl FromArg for ObjectName {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!object <path|object-expression>"
 )]
-fn object(session: &Session, object: ObjectName) -> Result<ObjectDetail> {
+fn object(
+    session: &Session,
+    #[arg(name = "path|object-expression")] object: ObjectName,
+) -> Result<ObjectDetail> {
     let target = &session.target;
     target.inspect_object(target.object_address(&object)?)
 }
@@ -813,12 +811,10 @@ impl Render for ObjectDetail {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "callbacks [symbol-filter]",
-    completion = [Symbol]
 )]
 fn callbacks(
     session: &Session,
-    #[arg(render)] filter: Option<String>,
+    #[arg(render, name = "symbol-filter", complete = Symbol)] filter: Option<String>,
 ) -> Result<Vec<NotifyCallback>> {
     session.target.enumerate_notify_callbacks()
 }

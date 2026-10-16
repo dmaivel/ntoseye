@@ -12,7 +12,7 @@ use crate::target::heap::{
 };
 use crate::types::VirtAddr;
 use crate::ui;
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 /// Summarize, walk, or search the user-mode heaps of the attached process,
 /// or of a user-mode minidump's process.
@@ -33,8 +33,6 @@ use ntoseye_macros::command;
     category = "user mode",
     kind = Query,
     forms = [inspect_heap, find_block],
-    usage = "!heap [-s] [-h|-a <heap>] [-x <address>] [-p -a <address>]",
-    completion = [None, Expression]
 )]
 fn heap(session: &Session, #[arg(parse = heap_query)] query: HeapQuery) -> Result<HeapReport> {
     let target = &session.target;
@@ -60,7 +58,7 @@ fn heap(session: &Session, #[arg(parse = heap_query)] query: HeapQuery) -> Resul
 
 /// Decode this heap (`!heap -h`), with its entries if `list_entries` is
 /// true.
-#[command(form_of = heap, python = Heap, python_name = "inspect", sdk)]
+#[command(form_of = heap, python = Heap, python_name = "inspect")]
 fn inspect_heap(
     session: &Session,
     #[arg(receiver)] heap: HeapSelector,
@@ -70,11 +68,8 @@ fn inspect_heap(
 }
 
 /// Find the heap block that contains `address` (`!heap -x`).
-#[command(form_of = heap, python = Heaps, word = "-x")]
-fn find_block(
-    session: &Session,
-    #[arg(complete = Expression)] address: VirtAddr,
-) -> Result<HeapBlockSearch> {
+#[command(form_of = heap, python = Heaps)]
+fn find_block(session: &Session, address: VirtAddr) -> Result<HeapBlockSearch> {
     session.target.find_heap_block(address)
 }
 
@@ -102,6 +97,10 @@ impl Render for HeapReport {
     }
 }
 
+#[grammar(
+    usage = "[-s] | [-h|-a] <heap> | -x <address> | -p -a <address>",
+    complete = [None, Expression]
+)]
 fn heap_query(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,

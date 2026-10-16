@@ -19,7 +19,7 @@ use crate::ui;
 
 use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 /// How many 16-byte lines `.enumtag` shows of each block without a tag.
 const ENUMTAG_PREVIEW_LINES: usize = 4;
@@ -73,8 +73,6 @@ fn decoded<T>(command: &str, result: std::result::Result<T, String>) -> Result<T
     kind = Query,
     target = Kernel,
     python = none,
-    usage = ".enumtag [tag]",
-    completion = None
 )]
 fn enumtag(
     state: &mut ReplState<'_>,
@@ -127,6 +125,7 @@ fn enumtag(
 }
 
 /// `.enumtag`'s tag, a GUID.
+#[grammar(usage = "[tag]")]
 fn enumtag_tag(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -170,8 +169,6 @@ fn tag_owner(session: &Session, tag: &[u8; 16]) -> Option<String> {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!blackboxbsd",
-    completion = None
 )]
 fn blackbox_bsd(session: &Session) -> Result<BootStatus> {
     let data = blackbox_block(session, "!blackboxbsd", BSD_TAG, "boot status data")?;
@@ -196,8 +193,6 @@ impl Render for BootStatus {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!blackboxntfs",
-    completion = None
 )]
 fn blackbox_ntfs(session: &Session) -> Result<Vec<NtfsRecord>> {
     let data = blackbox_block(session, "!blackboxntfs", NTFS_TAG, "NTFS blackbox")?;
@@ -275,8 +270,6 @@ impl Render for Vec<NtfsRecord> {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!blackboxpnp",
-    completion = None
 )]
 fn blackbox_pnp(session: &Session) -> Result<PnpBlackbox> {
     let data = blackbox_block(session, "!blackboxpnp", PNP_TAG, "PnP blackbox")?;
@@ -307,8 +300,6 @@ impl Render for PnpBlackbox {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!blackboxwinlogon",
-    completion = None
 )]
 fn blackbox_winlogon(session: &Session) -> Result<WinlogonBlackbox> {
     let data = blackbox_block(
@@ -345,8 +336,6 @@ impl Render for WinlogonBlackbox {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!blackboxpci",
-    completion = None
 )]
 fn blackbox_pci(session: &Session) -> Result<Vec<PciRecord>> {
     let data = blackbox_block(session, "!blackboxpci", PCI_TAG, "PCI blackbox")?;

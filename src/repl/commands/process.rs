@@ -4,7 +4,7 @@ use tabled::builder::Builder;
 
 use owo_colors::OwoColorize;
 
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 use crate::error::{Error, Result};
 use crate::expr::Expr;
@@ -39,8 +39,6 @@ const MAX_PROCESS_THREADS: usize = 512;
     target = Kernel,
     python = Process,
     python_name = "inspect",
-    usage = "!process [eprocess|pid|image-name|0] [flags] [image-name]",
-    completion = [Process, None, Process]
 )]
 fn process(
     session: &Session,
@@ -53,6 +51,7 @@ fn process(
 /// The processes `!process <process> [flags] [image]` names: `0` is every
 /// process, an EPROCESS or PID one, anything else an image name; the image
 /// name filters them, and none is the current process.
+#[grammar(usage = "[eprocess|pid|image-name|0]", complete = [Process])]
 fn process_selection(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -99,6 +98,7 @@ fn process_selection(
 }
 
 /// `!process`'s flags: 1 details, 2 threads, 4 their stacks.
+#[grammar(usage = "[flags] [image-name]", complete = [None, Process])]
 fn process_flags(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -150,10 +150,11 @@ impl Render<u32> for Vec<ProcessDetail> {
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "ps [filter]",
-    completion = [Process]
 )]
-fn ps(session: &Session, #[arg(render)] filter: Option<String>) -> Result<Vec<ProcessInfo>> {
+fn ps(
+    session: &Session,
+    #[arg(render, complete = Process)] filter: Option<String>,
+) -> Result<Vec<ProcessInfo>> {
     session
         .target
         .matching_processes(None)
@@ -191,6 +192,7 @@ enum ProcessContext {
     Process(ProcessInfo),
 }
 
+#[grammar(usage = "[eprocess|pid|0]", complete = [Process])]
 fn process_context_selector(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -230,8 +232,6 @@ fn process_context_selector(
     kind = Action,
     target = Kernel,
     python = none,
-    usage = ".process [/i] [/p] [/r] [eprocess|pid]",
-    completion = [Process]
 )]
 fn process_context(
     state: &mut ReplState<'_>,
@@ -274,10 +274,8 @@ fn process_context(
     kind = Action,
     target = Kernel,
     python = none,
-    usage = "attach <pid>",
-    completion = Process
 )]
-fn attach(state: &mut ReplState<'_>, pid: String) -> Result<()> {
+fn attach(state: &mut ReplState<'_>, #[arg(complete = Process)] pid: String) -> Result<()> {
     // Same selector grammar as `.process`, so a PID copied from `ps` (or
     // inserted by completion) means the same thing in both.
     let processes = match state.ctx.target.matching_processes(None) {
@@ -335,10 +333,8 @@ fn detach(state: &mut ReplState<'_>) -> Result<()> {
     kind = Action,
     target = Kernel,
     python = none,
-    usage = ".context <dtb>",
-    completion = Expression
 )]
-fn context(state: &mut ReplState<'_>, dtb: String) -> Result<()> {
+fn context(state: &mut ReplState<'_>, #[arg(complete = Expression)] dtb: String) -> Result<()> {
     let text = dtb.as_str();
     let dtb = match Expr::eval_with_radix(text, &state.ctx.target, state.radix) {
         Ok(value) => value,

@@ -16,7 +16,7 @@ use crate::target::{Target, TargetKind};
 use crate::triage_report::time::filetime_to_iso;
 use crate::types::{Arch, CodeMachine, VirtAddr};
 
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
@@ -82,9 +82,8 @@ fn reload_scripts(state: &mut ReplState<'_>) -> Result<()> {
     category = "symbols, types, and expressions",
     kind = Host,
     python = none,
-    usage = "n [8|10|16]"
 )]
-fn radix(state: &mut ReplState<'_>, radix: Option<String>) -> Result<()> {
+fn radix(state: &mut ReplState<'_>, #[arg(name = "8|10|16")] radix: Option<String>) -> Result<()> {
     if let Some(value) = radix {
         state.radix = match value.as_str() {
             "8" => NumberRadix::Octal,
@@ -120,9 +119,11 @@ fn radix(state: &mut ReplState<'_>, radix: Option<String>) -> Result<()> {
     category = "processes and modules",
     kind = Action,
     python = none,
-    usage = ".effmach [x86|amd64|arm64|auto|.]"
 )]
-fn effmach(session: &mut Session, machine: Option<String>) -> Result<()> {
+fn effmach(
+    session: &mut Session,
+    #[arg(name = "x86|amd64|arm64|auto|.")] machine: Option<String>,
+) -> Result<()> {
     if let Some(machine) = machine {
         let machine = machine.to_ascii_lowercase();
         session.target.effmach = match machine.as_str() {
@@ -154,10 +155,9 @@ fn effmach(session: &mut Session, machine: Option<String>) -> Result<()> {
     category = "session",
     kind = Host,
     python = none,
-    usage = ".echo <text>",
     style = ExpressionTail
 )]
-fn echo(_state: &mut ReplState<'_>, #[arg(raw)] text: String) -> Result<()> {
+fn echo(_state: &mut ReplState<'_>, #[arg(raw, usage = "[text]")] text: String) -> Result<()> {
     let mut text = text.as_str();
     if text.len() >= 2 && text.starts_with('"') && text.ends_with('"') {
         text = &text[1..text.len() - 1];
@@ -192,13 +192,11 @@ fn echotime(_state: &mut ReplState<'_>) -> Result<()> {
     category = "session",
     kind = Host,
     python = none,
-    usage = ".printf \"format\" [, argument]...",
-    completion = Expression,
     style = ExpressionTail
 )]
 fn printf(
     state: &mut ReplState<'_>,
-    #[arg(raw)] tail: String,
+    #[arg(raw, usage = "\"<format>\" [, <argument>]...", complete = Expression)] tail: String,
     #[arg(invoked)] name: &str,
 ) -> Result<()> {
     let Some((format, args)) = parse_printf_tail(&tail) else {
@@ -230,7 +228,6 @@ fn cls(_state: &mut ReplState<'_>) -> Result<()> {
     category = "session",
     kind = Host,
     python = none,
-    usage = ".logopen <file>"
 )]
 fn logopen(_state: &mut ReplState<'_>, file: String) -> Result<()> {
     open_log_file(&file, false)
@@ -242,7 +239,6 @@ fn logopen(_state: &mut ReplState<'_>, file: String) -> Result<()> {
     category = "session",
     kind = Host,
     python = none,
-    usage = ".logappend <file>"
 )]
 fn logappend(_state: &mut ReplState<'_>, file: String) -> Result<()> {
     open_log_file(&file, true)
@@ -273,7 +269,6 @@ fn logclose(_state: &mut ReplState<'_>) -> Result<()> {
     category = "session",
     kind = Host,
     python = none,
-    usage = ".hh [command]"
 )]
 fn help(state: &mut ReplState<'_>, command: Option<String>) -> Result<()> {
     if let Some(name) = command.as_deref() {
@@ -453,8 +448,6 @@ impl Render for TargetTime {
     category = "analysis",
     kind = Query,
     python = none,
-    usage = "!error <code>",
-    completion = Expression
 )]
 fn error_code(
     _session: &Session,
@@ -469,6 +462,7 @@ fn error_code(
 }
 
 /// `!error`'s code: an expression in the current radix, of 32 bits.
+#[grammar(usage = "<{}>", complete = Expression)]
 fn error_code_arg(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,

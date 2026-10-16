@@ -4,6 +4,7 @@
 
 mod collection;
 mod command;
+mod grammar;
 mod handle;
 mod record;
 
@@ -97,13 +98,18 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   `run = None | Step | Run`, `writes = [Memory, Registers, Hardware,
 ///   Breakpoints, Symbols, Files]`, `live_only`, `capability =
 ///   <DebugCapability>`;
-/// - overrides: `usage = "..."` (else generated from the arguments),
-///   `completion = [Strategy, ...]` (one per word; else from the argument
-///   types) or `completion = Strategy` (every word),
-///   `python_name = "..."` (else the function's name), `style = RawTail |
+/// - `python_name = "..."` (else the function's name), `style = RawTail |
 ///   ExpressionTail` (the line is not split into words, for a `raw`
 ///   argument), and `flow = Quit` (the flow the command ends with once it
 ///   ran; a line that does not parse ends with `Continue`).
+///
+/// There is no `usage` or `completion` key: both are generated from the
+/// arguments (`crate::repl::usage` has the notation), so they cannot drift
+/// from what the line accepts. A typed argument is `<name>`, or `[name]`
+/// when it may be omitted, completed as its `FromArg::COMPLETION`; a switch
+/// is `[/x]`; `rest` is `[name]...`; a custom parser gives the fragment and
+/// completion it declares with `#[grammar]`. A form of the line (` | ` in a
+/// fragment) is a usage line of its own.
 ///
 /// The first parameter is `&Session`, `&mut Session`, or (REPL only)
 /// `&mut ReplState`. Every other parameter is an argument, parsed in order
@@ -118,8 +124,8 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// - `parse = path`: a custom parser `fn(&mut ArgCx, &mut ArgCursor) ->
 ///   Result<T, ArgError>`, which may take a `default` too: the SDK keyword's
 ///   default, as the parser gives the REPL's; `each = path`: one returning
-///   `Vec<T>`, which the
-///   REPL runs the operation on in turn, rendering the `Vec` of results;
+///   `Vec<T>`, which the REPL runs the operation on in turn, rendering the
+///   `Vec` of results. The parser carries `#[grammar(...)]`;
 /// - `render`: a display option (WinDbg's flags that only choose what the
 ///   text shows), not passed to the function: the REPL passes the render
 ///   options to `Render::render` (one value, or a tuple in order);
@@ -135,7 +141,13 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   sort=...)`). The positional ones come first;
 /// - `cancel`: a `kind = Run` command's `&Cancel`, which the host supplies
 ///   (the REPL's stop budget, the SDK's `timeout`);
-/// - `name = "..."`, `complete = Strategy`: its usage name and completion.
+/// - `name = "..."`: its usage name (else the parameter's, kebab-case);
+///   `complete = Strategy`: the completion of a typed argument whose type
+///   does not say (a `String` that names a driver);
+/// - `usage = "..."` (with `complete = [Strategy, ...]` per word, or
+///   `complete = Strategy` for every word): the fragment of a `raw`
+///   argument, or of one whose `#[grammar(operation)]` parser hands its
+///   words to the operation, which reads them itself.
 ///
 /// The function returns `Result<R>`. The REPL renders `R` with
 /// `Render`, except a `Result<Flow>`, which a command that runs other
@@ -160,16 +172,9 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// `Option<T>`, `default`, `positional` and `receiver` apply (a REPL-only
 /// option is refused), so a form can take what the REPL grammar has no word
 /// for, such as an object handle (`PyArg for ProcessInfo` takes a `Process`).
-///
-/// Each form also describes its REPL form, for usage and completion generated
-/// from forms (`CommandSpec::forms`, in the command's `forms` order): `word =
-/// "/p"` is the subcommand or switch that selects it, then each argument the
-/// line gives, `<name>` or `[name]` (`#[arg(name = ...)]`, completed by
-/// `#[arg(complete = ...)]`); an `#[arg(sdk, default = e)]` argument and a
-/// `receiver` have no word. A bare `sdk` key marks an SDK-only form, which
-/// the line has no form of. A form and its command name each other (the
-/// command hands the form its effects as `__FORM_<command>_<form>` and takes
-/// its usage as `__FORM_USAGE_<command>_<form>`), and both live in one
+/// The command's own arguments describe the line (its usage and completion),
+/// not the forms'. A form and its command name each other (the command hands
+/// the form its effects as `__FORM_<command>_<form>`), and both live in one
 /// module.
 ///
 /// A `kind = Run` command takes `&mut Session` and either returns the
@@ -183,6 +188,35 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn command(attr: TokenStream, item: TokenStream) -> TokenStream {
     command::expand(attr.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// The usage fragment and completion of a custom argument parser
+/// (`#[arg(parse = f)]` or `each = f`), declared beside it:
+///
+/// ```ignore
+/// #[grammar(usage = "<address> [L<count>|length|end]", complete = [Expression, Expression])]
+/// fn display_range(cx: &mut ArgCx, cursor: &mut ArgCursor) -> Result<AddressRange, ArgError> { ... }
+/// ```
+///
+/// - `usage = "..."`: the words the parser reads, in the usage notation
+///   (`crate::repl::usage`); `{}` stands for the argument's name, so a
+///   shared parser can name each use (`<{}>`). Empty for a parser that
+///   reads no word of its own;
+/// - `complete = [Strategy, ...]`: the completion of each word, in order;
+///   `complete = Strategy`: of every word (the parser takes the rest of the
+///   line); omitted: none;
+/// - `operation` (alone): the parser hands the words to the operation,
+///   which reads them itself, so each argument it parses gives its own
+///   `#[arg(usage = ..., complete = ...)]`.
+///
+/// The function stays as written; the grammar is `f::GRAMMAR`, in a hidden
+/// module of the function's name and visibility (so a `use` of the parser
+/// brings it along), which `#[command]` reads.
+#[proc_macro_attribute]
+pub fn grammar(attr: TokenStream, item: TokenStream) -> TokenStream {
+    grammar::expand(attr.into(), item.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

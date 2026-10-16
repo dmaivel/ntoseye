@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 use linkme::distributed_slice;
 
 use crate::error::Result;
+use crate::repl::usage::ArgGrammar;
 use crate::repl::{CompletionStrategy, Flow, ReplState, error};
 use crate::session::effects::{Effects, Refusal};
 use crate::ui;
@@ -22,27 +23,19 @@ pub struct CommandSpec {
     /// The `help` listing's and the command reference's group.
     pub category: &'static str,
     pub kind: CommandKind,
+    /// Generated from `args`: a line per form of the command, each
+    /// starting with its canonical name (see [`crate::repl::usage`]).
     pub usage: &'static str,
     pub summary: &'static str,
     pub details: Option<&'static str>,
+    /// Generated from `args`: how each word of the line completes.
     pub completion: CompletionSpec,
-    /// The REPL forms of a command that is several SDK operations
-    /// (`#[command(form_of = ...)]`), in its `forms` order: each one's
-    /// usage fragment and completion, generated from its arguments; `None`
-    /// for an SDK-only form. Empty for any other command.
-    pub forms: &'static [Option<FormUsage>],
+    /// The arguments the line gives, in order, with their grammar.
+    pub args: &'static [ArgGrammar],
     pub effects: Effects,
     pub style: CommandStyle,
     pub flow: Flow,
     pub handler: CommandHandler,
-}
-
-/// One REPL form of a multi-form command: its words after the command name
-/// (`/p <address>`) and the completion of each.
-#[derive(Clone, Copy, Debug)]
-pub struct FormUsage {
-    pub usage: &'static str,
-    pub completion: &'static [CompletionStrategy],
 }
 
 /// What a `#[command]` does.
@@ -89,23 +82,17 @@ pub enum CommandStyle {
     ExpressionTail,
 }
 
-#[derive(Clone, Copy)]
-pub enum CompletionSpec {
-    None,
-    All(CompletionStrategy),
-    PerArg(&'static [CompletionStrategy]),
+/// How a command's words complete: the `n`th word by `words[n]`, and every
+/// word after them by `rest`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompletionSpec {
+    pub words: &'static [CompletionStrategy],
+    pub rest: CompletionStrategy,
 }
 
 impl CompletionSpec {
     pub fn strategy_for_arg(self, index: usize) -> CompletionStrategy {
-        match self {
-            Self::None => CompletionStrategy::None,
-            Self::All(strategy) => strategy,
-            Self::PerArg(strategies) => strategies
-                .get(index)
-                .copied()
-                .unwrap_or(CompletionStrategy::None),
-        }
+        self.words.get(index).copied().unwrap_or(self.rest)
     }
 }
 
@@ -185,7 +172,9 @@ pub fn command_help(name: &str) -> String {
 
 /// A command's summary, usage and details as text.
 pub fn spec_help(spec: &CommandSpec) -> String {
-    let mut help = format!("{}\n(usage: {})", spec.summary, spec.usage);
+    // A form per line, under the first.
+    let usage = spec.usage.replace('\n', "\n        ");
+    let mut help = format!("{}\n(usage: {usage})", spec.summary);
     if let Some(detail) = spec.details {
         help.push('\n');
         help.push_str(detail);
@@ -592,40 +581,50 @@ mod tests {
         assert_eq!(invocation.raw_tail, "rax + rbx");
     }
 
-    /// A multi-form command's REPL forms carry the usage and completion
-    /// generated from each form, in its `forms` order, and SDK-only forms
-    /// none.
+    /// Every argument that names a value (a `<placeholder>`, or a typed
+    /// argument's `{}`) has a completion at its words' position, or takes
+    /// the rest of the line; and no argument that takes words follows one
+    /// that takes the rest of the line, where it would have no position.
     #[test]
-    fn forms_describe_their_repl_usage() {
-        let registry = command_registry();
-        let usage = |name: &str| -> Vec<Option<&str>> {
-            let spec = registry.get(name).unwrap();
-            spec.forms
-                .iter()
-                .map(|form| form.map(|form| form.usage))
-                .collect()
-        };
-        assert_eq!(
-            usage("!alpc"),
-            [
-                Some("/p <port>"),
-                Some("/m <message>"),
-                Some("/lpp [process]")
-            ]
-        );
-        assert_eq!(usage("!apc"), [Some("[process|thread]"), None, None]);
-        assert_eq!(
-            usage("!vring"),
-            [
-                Some("<virtqueue> [module]"),
-                Some("/r <size> <desc> <avail> <used> [/t <kind>]")
-            ]
-        );
-        let alpc = registry.get("!alpc").unwrap().forms[2].unwrap();
-        assert_eq!(
-            alpc.completion,
-            [CompletionStrategy::None, CompletionStrategy::Process]
-        );
-        assert!(registry.get("!job").unwrap().forms.is_empty());
+    fn completion_covers_every_argument() {
+        let mut uncovered = Vec::new();
+        for spec in COMMANDS {
+            let name = spec.names[0];
+            let mut at = 0;
+            let mut rest = None;
+            for arg in spec.args {
+                let grammar = arg.grammar;
+                let names_value = grammar.usage.contains('<') || grammar.usage.contains("{}");
+                if names_value && rest.is_some() {
+                    uncovered.push(format!(
+                        "{name}: `{}` follows an argument that takes the rest of the line",
+                        arg.name
+                    ));
+                }
+                if names_value && grammar.words.is_empty() && grammar.rest.is_none() {
+                    uncovered.push(format!(
+                        "{name}: `{}` ({}) has no completion",
+                        arg.name, grammar.usage
+                    ));
+                }
+                if rest.is_none() {
+                    assert_eq!(
+                        spec.completion.words.get(at..at + grammar.words.len()),
+                        Some(grammar.words),
+                        "{name}: `{}`'s words complete at their position",
+                        arg.name
+                    );
+                    at += grammar.words.len();
+                    rest = grammar.rest;
+                }
+            }
+            assert_eq!(spec.completion.words.len(), at, "{name}");
+            assert_eq!(
+                spec.completion.rest,
+                rest.unwrap_or(CompletionStrategy::None),
+                "{name}"
+            );
+        }
+        assert!(uncovered.is_empty(), "{}", uncovered.join("\n"));
     }
 }

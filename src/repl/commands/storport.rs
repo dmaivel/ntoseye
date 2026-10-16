@@ -6,7 +6,7 @@
 
 use std::fmt::Display;
 
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 use tabled::builder::Builder;
 
 use crate::error::{Error, Result};
@@ -47,11 +47,10 @@ use crate::ui;
     kind = Query,
     target = Kernel,
     forms = [storport_adapters, storport_adapter],
-    usage = "!storagekd.storadapter [<adapter>]"
 )]
 fn storport_adapter_command(
     session: &Session,
-    address: Option<VirtAddr>,
+    #[arg(name = "adapter")] address: Option<VirtAddr>,
 ) -> Result<StorAdapterOrList> {
     match address {
         None => storport_adapters(session).map(StorAdapterOrList::Drivers),
@@ -70,10 +69,7 @@ fn storport_adapters(session: &Session) -> Result<StorDrivers> {
 /// Read the StorPort adapter whose extension or FDO is at `address`
 /// (`!storagekd.storadapter <address>`).
 #[command(form_of = storport_adapter_command, python = Inspect)]
-fn storport_adapter(
-    session: &Session,
-    #[arg(name = "adapter")] address: VirtAddr,
-) -> Result<StorAdapter> {
+fn storport_adapter(session: &Session, address: VirtAddr) -> Result<StorAdapter> {
     session.target.storport_adapter(address)
 }
 
@@ -112,9 +108,8 @@ impl Render for StorAdapterOrList {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!storagekd.storunit <unit>"
 )]
-fn storport_unit(session: &Session, address: VirtAddr) -> Result<StorUnit> {
+fn storport_unit(session: &Session, #[arg(name = "unit")] address: VirtAddr) -> Result<StorUnit> {
     session
         .target
         .storport_unit(address)
@@ -145,12 +140,11 @@ impl Render for StorUnit {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!storagekd.storloglist <adapter> [<start> [<end>]] [L <count>]"
 )]
 fn storport_log(
     session: &Session,
-    address: VirtAddr,
-    #[arg(render, parse = log_range, complete = Expression)] range: LogRange,
+    #[arg(name = "adapter")] address: VirtAddr,
+    #[arg(render, parse = log_range)] range: LogRange,
 ) -> Result<StorLog> {
     session
         .target
@@ -167,6 +161,7 @@ struct LogRange {
 }
 
 /// `[<start> [<end>]] [L <count>]`, `L<count>` glued too.
+#[grammar(usage = "[start [end]] [L<count>]", complete = Expression)]
 fn log_range(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -239,7 +234,6 @@ impl Render<LogRange> for StorLog {
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "!storagekd.storlogirp <adapter> <irp>"
 )]
 fn storlogirp(session: &Session, adapter: VirtAddr, irp: VirtAddr) -> Result<LogNaming> {
     log_naming(
@@ -263,7 +257,6 @@ fn storlogirp(session: &Session, adapter: VirtAddr, irp: VirtAddr) -> Result<Log
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "!storagekd.storlogsrb <adapter> <srb>"
 )]
 fn storlogsrb(session: &Session, adapter: VirtAddr, srb: VirtAddr) -> Result<LogNaming> {
     log_naming(
@@ -340,9 +333,8 @@ impl Render for LogNaming {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!storagekd.storsrb <srb>"
 )]
-fn srb(session: &Session, address: VirtAddr) -> Result<Srb> {
+fn srb(session: &Session, #[arg(name = "srb")] address: VirtAddr) -> Result<Srb> {
     session
         .target
         .decode_srb(address)
@@ -375,9 +367,11 @@ impl Render for Srb {
     kind = Query,
     target = Kernel,
     forms = [class_devices, class_device],
-    usage = "!storagekd.storclass [<device>]"
 )]
-fn class_device_command(session: &Session, address: Option<VirtAddr>) -> Result<ClassDeviceOrList> {
+fn class_device_command(
+    session: &Session,
+    #[arg(name = "device")] address: Option<VirtAddr>,
+) -> Result<ClassDeviceOrList> {
     match address {
         None => class_devices(session).map(ClassDeviceOrList::Devices),
         Some(address) => class_device(session, address).map(ClassDeviceOrList::Device),
@@ -396,10 +390,7 @@ fn class_devices(session: &Session) -> Result<ClassDevices> {
 /// is at `address`, with its requests in flight and its error log
 /// (`!storagekd.storclass <address>`).
 #[command(form_of = class_device_command, python = Inspect)]
-fn class_device(
-    session: &Session,
-    #[arg(name = "device")] address: VirtAddr,
-) -> Result<ClassDeviceDetail> {
+fn class_device(session: &Session, address: VirtAddr) -> Result<ClassDeviceDetail> {
     session.target.classpnp_device(address)
 }
 

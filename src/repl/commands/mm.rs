@@ -4,7 +4,7 @@
 
 use std::borrow::Cow;
 
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 use tabled::builder::Builder;
 use tabled::settings::object::Rows;
 use tabled::settings::{Alignment, Modify, Panel};
@@ -38,8 +38,6 @@ use super::diagnostics::{diagnostic_cell, diagnostic_metric_cell, print_memory_u
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!vm [flags]",
-    completion = Expression
 )]
 fn vm(
     session: &Session,
@@ -49,6 +47,7 @@ fn vm(
 }
 
 /// `!vm`'s flags: bit 0 omits the per-process rows.
+#[grammar(usage = "[flags]", complete = [Expression])]
 fn vm_flags(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -75,8 +74,6 @@ impl Render for VmDetail {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!pfn <pfn> | !pfn -a <physical-address>",
-    completion = Expression
 )]
 fn pfn(
     session: &Session,
@@ -97,6 +94,7 @@ fn pfn_switch(word: Option<&str>) -> bool {
 
 /// `!pfn`'s value: the first word, or the one after a leading `-a`, which is
 /// left for [`pfn_physical`].
+#[grammar(usage = "<pfn> | -a <physical-address>", complete = [Expression, Expression])]
 fn pfn_value(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -109,6 +107,7 @@ fn pfn_value(
     Ok(cx.eval(&word.ok_or(ArgError::Missing)?)?.0)
 }
 
+#[grammar(usage = "")]
 fn pfn_physical(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -137,18 +136,17 @@ impl Render for PfnDetail {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!vtop <directory-base> <virtual-address>",
-    completion = Expression
 )]
 fn vtop(
     session: &Session,
     #[arg(parse = directory_base)] directory_base: u64,
-    address: VirtAddr,
+    #[arg(name = "virtual-address")] address: VirtAddr,
 ) -> Result<VtopDetail> {
     session.target.vtop(directory_base, address)
 }
 
 /// `!vtop`'s directory base. Both words are required before either is read.
+#[grammar(usage = "<directory-base>", complete = [Expression])]
 fn directory_base(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -177,13 +175,11 @@ impl Render for VtopDetail {
     kind = Query,
     target = Kernel,
     python = Memory,
-    usage = "!ptov <physical-address>",
-    completion = Expression
 )]
 fn ptov(
     session: &Session,
     #[arg(receiver, parse = virtual_memory)] memory: MemoryKind,
-    physical: u64,
+    #[arg(name = "physical-address")] physical: u64,
 ) -> Result<PtovDetail> {
     memory.require_virtual()?;
     session.target.ptov(physical)
@@ -208,8 +204,6 @@ impl Render for PtovDetail {
     target = Kernel,
     python = Inspect,
     python_name = "pool_usage",
-    usage = "!poolused [flags] [tag]",
-    completion = Expression
 )]
 fn pool_usage(
     session: &Session,
@@ -232,6 +226,7 @@ fn poolused_flags(cx: &ArgCx<'_, '_>, cursor: &ArgCursor<'_>) -> Option<u64> {
 
 /// `!poolused`'s tag: the word after the flags, or the first word when it is
 /// not an expression, in which case nothing may follow it.
+#[grammar(usage = "[flags] [tag]", complete = [Expression, Expression])]
 fn poolused_tag(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -244,6 +239,7 @@ fn poolused_tag(
     Ok(tag)
 }
 
+#[grammar(usage = "")]
 fn poolused_counts(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -251,6 +247,7 @@ fn poolused_counts(
     Ok(poolused_flags(cx, cursor).is_some_and(|flags| flags & 1 != 0))
 }
 
+#[grammar(usage = "")]
 fn poolused_sort(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -286,8 +283,6 @@ impl Render<bool> for PoolUsageDetail {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!poolfind <tag> [0|1]",
-    completion = Expression
 )]
 fn pool_find(
     session: &Session,
@@ -298,6 +293,7 @@ fn pool_find(
 }
 
 /// `!poolfind`'s pool: 0 (nonpaged) or 1 (paged).
+#[grammar(usage = "[0|1]", complete = [Expression])]
 fn poolfind_type(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -331,8 +327,6 @@ impl Render for PoolFindDetail {
     kind = Query,
     target = Kernel,
     forms = [lookasides, lookaside],
-    usage = "!lookaside [address]",
-    completion = Expression
 )]
 fn lookaside_command(session: &Session, address: Option<VirtAddr>) -> Result<Lookaside> {
     match address {
@@ -350,10 +344,7 @@ fn lookasides(session: &Session) -> Result<LookasideListsDetail> {
 
 /// Decode one `GENERAL_LOOKASIDE` (`!lookaside address`).
 #[command(form_of = lookaside_command, python = Inspect)]
-fn lookaside(
-    session: &Session,
-    #[arg(complete = Expression)] address: VirtAddr,
-) -> Result<LookasideDetail> {
+fn lookaside(session: &Session, address: VirtAddr) -> Result<LookasideDetail> {
     session.target.inspect_lookaside(address)
 }
 
@@ -379,8 +370,6 @@ impl Render for Lookaside {
     kind = Query,
     target = Kernel,
     python = Memory,
-    usage = "!pte <address>",
-    completion = Expression
 )]
 fn pte(
     session: &Session,
@@ -411,8 +400,6 @@ impl Render for PteWalk {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!pool <address-expression>",
-    completion = Expression
 )]
 fn pool(session: &Session, address: VirtAddr) -> Result<PoolPageDetail> {
     session.target.inspect_pool(address)
@@ -448,8 +435,6 @@ impl Render for PoolPageDetail {
     target = Kernel,
     python = Inspect,
     python_name = "pool_validate",
-    usage = "!poolval <address> [level]",
-    completion = Expression
 )]
 fn pool_validate(
     session: &Session,
@@ -482,8 +467,6 @@ impl Render<u64> for PoolValidationDetail {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!mdl <address> [pfn-count]",
-    completion = Expression
 )]
 fn mdl(session: &Session, address: VirtAddr, pfn_count: Option<u64>) -> Result<MdlDetail> {
     session.target.inspect_mdl(address, pfn_count)
@@ -521,8 +504,6 @@ impl Render for MdlDetail {
     target = Kernel,
     python = Inspect,
     python_name = "system_ptes",
-    usage = "!sysptes [flags]",
-    completion = Expression
 )]
 fn system_ptes(
     session: &Session,
@@ -534,6 +515,7 @@ fn system_ptes(
 
 /// `!sysptes`'s flag 0x1, which lists the free blocks. The flags word is
 /// left for the render options.
+#[grammar(usage = "")]
 fn sysptes_free_runs(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,

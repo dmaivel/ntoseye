@@ -1,6 +1,6 @@
 use tabled::builder::Builder;
 
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 use crate::error::Result;
 use crate::repl::args::{ArgCursor, ArgCx, ArgError};
@@ -19,6 +19,7 @@ const MAX_SESSION_DISPLAY: usize = 64;
 
 /// The address of a command that takes exactly one expression: any other
 /// word count prints the help.
+#[grammar(usage = "<{}>", complete = [Expression])]
 fn single_address(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -32,6 +33,7 @@ fn single_address(
 
 /// `!sd`'s optional `1` (the second word), checked before the address is
 /// evaluated: one or two words, and the second one must be `1`.
+#[grammar(usage = "")]
 fn sd_annotate(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -56,6 +58,7 @@ fn session_id(text: &str) -> std::result::Result<i64, ArgError> {
 }
 
 /// `!session`'s `-s <id>`; anything else prints the help.
+#[grammar(usage = "[-s <id>]", complete = [None, Expression])]
 fn session_switch(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -75,6 +78,7 @@ fn session_switch(
 }
 
 /// `!sprocess`'s session: at most three words, the first a session id.
+#[grammar(usage = "[{}]", complete = [Expression])]
 fn sprocess_session(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -97,8 +101,6 @@ fn sprocess_session(
     target = Kernel,
     python = Inspect,
     python_name = "security_descriptor",
-    usage = "!sd <address> [1]",
-    completion = [Expression, None]
 )]
 fn sd(
     session: &Session,
@@ -109,6 +111,7 @@ fn sd(
 }
 
 /// The next word as an address (after [`sd_annotate`] checked the line).
+#[grammar(usage = "<address> [1]", complete = [Expression, None])]
 fn single_address_word(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -129,8 +132,6 @@ impl Render<bool> for SecurityDescriptor {
     category = "security",
     kind = Query,
     python = Inspect,
-    usage = "!acl <address>",
-    completion = [Expression]
 )]
 fn acl(session: &Session, #[arg(parse = single_address)] address: VirtAddr) -> Result<Acl> {
     session.target.inspect_acl(address)
@@ -148,8 +149,6 @@ impl Render for Acl {
     category = "security",
     kind = Query,
     python = Inspect,
-    usage = "!sid <address>",
-    completion = [Expression]
 )]
 fn sid(session: &Session, #[arg(parse = single_address)] address: VirtAddr) -> Result<Sid> {
     session.target.inspect_sid(address)
@@ -179,8 +178,6 @@ impl Render for Sid {
     target = Kernel,
     python = Inspect,
     python_name = "object_security",
-    usage = "!objsd <object>",
-    completion = [Expression]
 )]
 fn objsd(
     session: &Session,
@@ -207,8 +204,6 @@ impl Render for ObjectSecurity {
     target = Kernel,
     python = Inspect,
     python_name = "sessions",
-    usage = "!session [-s <id>]",
-    completion = [None, Expression]
 )]
 fn session(
     state: &Session,
@@ -243,8 +238,6 @@ impl Render for Sessions {
     target = Kernel,
     python = Inspect,
     python_name = "session_processes",
-    usage = "!sprocess [session] [flags] [image]",
-    completion = [Expression, Expression, None]
 )]
 fn sprocess(
     state: &Session,

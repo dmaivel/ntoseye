@@ -2,7 +2,7 @@
 
 use owo_colors::OwoColorize;
 
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 use crate::disasm::FunctionDisassembly;
 use crate::error::{Error, Result};
@@ -67,14 +67,12 @@ fn instruction_count(count: u64) -> Result<usize> {
     category = "memory and disassembly",
     kind = Query,
     python = Memory,
-    usage = "u [address [L<count>|length|end]]",
-    completion = [Expression, Expression]
 )]
 fn disassemble(
     session: &Session,
     #[arg(receiver, parse = virtual_memory)] memory: MemoryKind,
     #[arg(parse = listing_start)] address: VirtAddr,
-    #[arg(parse = listing_extent)] count: DisasmExtent,
+    #[arg(parse = listing_extent, name = "L<count>|length|end")] count: DisasmExtent,
     #[arg(render, parse = continues_listing)] continues: ContinuesListing,
 ) -> Result<Vec<DisasmRow>> {
     memory.require_virtual()?;
@@ -125,6 +123,7 @@ fn disassemble(
 
 /// Where `u` starts: the address given, else where the previous `u` left
 /// off while its scope holds, else the instruction pointer.
+#[grammar(usage = "[{}]", complete = [Expression])]
 fn listing_start(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -137,6 +136,7 @@ fn listing_start(
 }
 
 /// `u`'s `L<count>`, length, or end; 8 instructions without one.
+#[grammar(usage = "[{}]", complete = [Expression])]
 fn listing_extent(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -153,6 +153,7 @@ fn listing_extent(
 /// `u`'s listing moves the cursor a bare `u` continues from; `ub`'s does not.
 pub struct ContinuesListing;
 
+#[grammar(usage = "")]
 fn continues_listing(
     _: &mut ArgCx<'_, '_>,
     _: &mut ArgCursor<'_>,
@@ -202,8 +203,6 @@ impl Render for Vec<DisasmRow> {
     category = "memory and disassembly",
     kind = Query,
     python = Memory,
-    usage = "uf [address]",
-    completion = [Expression]
 )]
 fn disassemble_function(
     session: &Session,
@@ -215,6 +214,7 @@ fn disassemble_function(
 }
 
 /// `uf`'s address, `@rip` without one.
+#[grammar(usage = "[{}]", complete = [Expression])]
 fn address_or_ip(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -255,8 +255,6 @@ impl Render for FunctionDisassembly {
     category = "memory and disassembly",
     kind = Query,
     python = Memory,
-    usage = "ub <address> [L<count>]",
-    completion = [Expression, Expression]
 )]
 fn disassemble_back(
     session: &Session,
@@ -269,6 +267,7 @@ fn disassemble_back(
 }
 
 /// `ub`'s count: `L<count>`, `L?<count>`, or a bare count; 8 without one.
+#[grammar(usage = "[L<count>|count]", complete = [Expression])]
 fn back_count(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -307,12 +306,15 @@ fn back_count(
     category = "memory and disassembly",
     kind = Query,
     python = none,
-    usage = "# [pattern] [address [L<count>]]",
-    completion = [None, Expression]
 )]
 fn disasm_search(
     state: &mut ReplState<'_>,
-    #[arg(parse = every_word)] args: Vec<String>,
+    #[arg(
+        parse = every_word,
+        usage = "[pattern] [address [L<count>]]",
+        complete = [None, Expression]
+    )]
+    args: Vec<String>,
 ) -> Result<()> {
     /// Instructions searched when no count bounds the search.
     const MAX_SEARCH_INSTRUCTIONS: u64 = 1 << 20;
@@ -444,6 +446,7 @@ fn disasm_search(
 }
 
 /// `#`'s words, which it reads by their count.
+#[grammar(operation)]
 fn every_word(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,

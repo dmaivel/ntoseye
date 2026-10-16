@@ -9,7 +9,7 @@ use crate::symbols::ModuleSymbolStatus;
 use crate::target::DiagnosticValue;
 use crate::target::image::{DhParts, ImageHeaders, ImageRef, ModuleImageInfo};
 use crate::ui;
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 /// The image `text` names (see [`crate::target::Target::resolve_image`]),
 /// its address evaluated in the current radix.
@@ -38,6 +38,7 @@ fn dh_options(cursor: &ArgCursor<'_>) -> std::result::Result<DhParts, ArgError> 
 }
 
 /// `-e` (or `-a`), possibly among other options in one word (`-fe`).
+#[grammar(usage = "")]
 fn dh_exports(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -46,6 +47,7 @@ fn dh_exports(
 }
 
 /// `-i` (or `-a`), possibly among other options in one word (`-fi`).
+#[grammar(usage = "")]
 fn dh_imports(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -54,6 +56,7 @@ fn dh_imports(
 }
 
 /// `[-f] [-s] [-e] [-i] [-a]`: the parts to show, taking the option words.
+#[grammar(usage = "[-f] [-s] [-e] [-i] [-a]")]
 fn dh_parts(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -64,6 +67,7 @@ fn dh_parts(
 }
 
 /// `<module|address>`: the one word the options leave.
+#[grammar(usage = "<module|address>", complete = [Symbol])]
 fn dh_image(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -115,8 +119,6 @@ fn dh_image(
     kind = Query,
     python = Module,
     python_name = "headers",
-    usage = "!dh [-f] [-s] [-e] [-i] [-a] <module|address>",
-    completion = [Symbol]
 )]
 fn dh(
     session: &Session,
@@ -138,6 +140,7 @@ impl Render<DhParts> for ImageHeaders {
 }
 
 /// `<module|address>`: a loaded module's name or an address inside it.
+#[grammar(usage = "<module|address>", complete = [Symbol])]
 fn lmi_image(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -161,8 +164,6 @@ fn lmi_image(
     kind = Query,
     python = Module,
     python_name = "image_info",
-    usage = "!lmi <module|address>",
-    completion = [Symbol]
 )]
 fn lmi(
     session: &Session,

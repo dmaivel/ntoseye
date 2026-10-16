@@ -55,12 +55,12 @@ impl ReplState<'_> {
     category = "session",
     kind = Host,
     python = none,
-    usage = ".shell [-ci \"<debugger commands>\"] <host command>",
     style = RawTail
 )]
 fn shell(
     state: &mut ReplState<'_>,
-    #[arg(raw)] tail: String,
+    #[arg(raw, usage = "[-ci \"<debugger-commands>\"] <host-command>", complete = None)]
+    tail: String,
     #[arg(invoked)] name: &str,
 ) -> Result<Flow> {
     let tail = tail.trim();

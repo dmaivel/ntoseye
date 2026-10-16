@@ -3,7 +3,7 @@
 
 use std::fmt::Display;
 
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 use tabled::builder::Builder;
 
 use crate::error::Result;
@@ -68,11 +68,10 @@ impl Render for WdfLoader {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!wdfkd.wdfdriverinfo <driver-name>"
 )]
 fn wdf_driver_info(
     session: &Session,
-    #[arg(complete = Driver)] driver: String,
+    #[arg(complete = Driver, name = "driver-name")] driver: String,
 ) -> Result<WdfDriverInfo> {
     session.target.wdf_driver_info(&driver)
 }
@@ -134,9 +133,11 @@ impl Render for WdfObject {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!wdfkd.wdfobject <handle | FxObject>"
 )]
-fn wdf_object(session: &Session, object: u64) -> Result<WdfObjectDetail> {
+fn wdf_object(
+    session: &Session,
+    #[arg(name = "handle|FxObject")] object: u64,
+) -> Result<WdfObjectDetail> {
     session.target.wdf_object(object)
 }
 
@@ -168,9 +169,11 @@ impl Render for WdfObjectDetail {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!wdfkd.wdfdevice <WDFDEVICE>"
 )]
-fn wdf_device(session: &Session, handle: u64) -> Result<WdfDeviceDetail> {
+fn wdf_device(
+    session: &Session,
+    #[arg(name = "WDFDEVICE")] handle: u64,
+) -> Result<WdfDeviceDetail> {
     session.target.wdf_device(handle)
 }
 
@@ -197,9 +200,8 @@ impl Render for WdfDeviceDetail {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!wdfkd.wdfqueue <WDFQUEUE>"
 )]
-fn wdf_queue(session: &Session, handle: u64) -> Result<WdfQueueDetail> {
+fn wdf_queue(session: &Session, #[arg(name = "WDFQUEUE")] handle: u64) -> Result<WdfQueueDetail> {
     session.target.wdf_queue(handle)
 }
 
@@ -236,9 +238,11 @@ impl Render for WdfQueueDetail {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!wdfkd.wdfrequest <WDFREQUEST>"
 )]
-fn wdf_request(session: &Session, handle: u64) -> Result<WdfRequestDetail> {
+fn wdf_request(
+    session: &Session,
+    #[arg(name = "WDFREQUEST")] handle: u64,
+) -> Result<WdfRequestDetail> {
     session.target.wdf_request(handle)
 }
 
@@ -272,9 +276,11 @@ impl Render for WdfRequestDetail {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!wdfkd.wdfiotarget <WDFIOTARGET>"
 )]
-fn wdf_io_target(session: &Session, handle: u64) -> Result<WdfIoTargetDetail> {
+fn wdf_io_target(
+    session: &Session,
+    #[arg(name = "WDFIOTARGET")] handle: u64,
+) -> Result<WdfIoTargetDetail> {
     session.target.wdf_io_target(handle)
 }
 
@@ -304,9 +310,11 @@ impl Render for WdfIoTargetDetail {
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!wdfkd.wdflogdump <driver-name>"
 )]
-fn wdf_log(session: &Session, #[arg(complete = Driver)] driver: String) -> Result<WdfLogDump> {
+fn wdf_log(
+    session: &Session,
+    #[arg(complete = Driver, name = "driver-name")] driver: String,
+) -> Result<WdfLogDump> {
     session.target.wdf_log_dump(&driver)
 }
 
@@ -337,7 +345,6 @@ impl Render for WdfLogDump {
     kind = Query,
     target = Kernel,
     forms = [wdf_crash_log, wdf_crash_drivers],
-    usage = "!wdfkd.wdfcrashdump [log | loader]"
 )]
 fn wdf_crash_dump(
     session: &Session,
@@ -355,20 +362,21 @@ fn wdf_crash_dump(
 /// that the bugcheck parameters point to, or one set to keep its log in
 /// minidumps, or else the last one that ran on the processor that
 /// crashed. A minidump has no other copy of it.
-#[command(form_of = wdf_crash_dump, python = Inspect, word = "log")]
+#[command(form_of = wdf_crash_dump, python = Inspect)]
 fn wdf_crash_log(session: &Session) -> Result<WdfLogDump> {
     session.target.wdf_crash_log()
 }
 
 /// List the KMDF client drivers that KMDF recorded in a crash dump, with
 /// their version and globals (`!wdfkd.wdfcrashdump loader`).
-#[command(form_of = wdf_crash_dump, python = Inspect, word = "loader")]
+#[command(form_of = wdf_crash_dump, python = Inspect)]
 fn wdf_crash_drivers(session: &Session) -> Result<Vec<WdfDumpDriver>> {
     session.target.wdf_crash_drivers()
 }
 
 /// `!wdfkd.wdfcrashdump`'s word: `log` (or none) is `Some(false)` (or
 /// `None`), `loader` is `Some(true)`, in any case.
+#[grammar(usage = "[log|loader]")]
 fn crash_dump_part(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,

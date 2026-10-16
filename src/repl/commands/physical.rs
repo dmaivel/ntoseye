@@ -1,6 +1,6 @@
 use owo_colors::OwoColorize;
 
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 use crate::error::{Error, Result};
 use crate::memory::PAGE_SIZE;
@@ -16,6 +16,7 @@ use super::memory::{
 };
 
 /// A physical display command's `<address> [L<count>|length|end]`.
+#[grammar(usage = "<address> [L<count>|length|end]", complete = [Expression, Expression])]
 fn physical_range<const COUNT: u64, const SIZE: u64>(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -30,8 +31,6 @@ fn physical_range<const COUNT: u64, const SIZE: u64>(
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "!db <address> [L<count>|length|end]",
-    completion = Expression
 )]
 fn physical_db(
     session: &Session,
@@ -52,8 +51,6 @@ fn physical_db(
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "!dw <address> [L<count>|length|end]",
-    completion = Expression
 )]
 fn physical_dw(
     session: &Session,
@@ -74,8 +71,6 @@ fn physical_dw(
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "!dd <address> [L<count>|length|end]",
-    completion = Expression
 )]
 fn physical_dd(
     session: &Session,
@@ -96,8 +91,6 @@ fn physical_dd(
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "!dq <address> [L<count>|length|end]",
-    completion = Expression
 )]
 fn physical_dq(
     session: &Session,
@@ -151,8 +144,6 @@ fn write_physical(
     target = Kernel,
     writes = [Memory],
     python = none,
-    usage = "!eb <address> <value...>",
-    completion = Expression
 )]
 fn physical_eb(
     session: &Session,
@@ -170,8 +161,6 @@ fn physical_eb(
     target = Kernel,
     writes = [Memory],
     python = none,
-    usage = "!ed <address> <value...>",
-    completion = Expression
 )]
 fn physical_ed(
     session: &Session,
@@ -189,8 +178,6 @@ fn physical_ed(
     target = Kernel,
     writes = [Memory],
     python = none,
-    usage = "!eq <address> <value...>",
-    completion = Expression
 )]
 fn physical_eq(
     session: &Session,
@@ -201,6 +188,7 @@ fn physical_eq(
 }
 
 /// `!search`'s value: one to four words in all, else the help.
+#[grammar(usage = "<{}>", complete = [Expression])]
 fn pointer_value(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -230,15 +218,13 @@ fn pointer_value(
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "!search <value> [delta [start-pfn [end-pfn]]]",
-    completion = Expression
 )]
 fn physical_search(
     session: &Session,
     #[arg(parse = pointer_value)] value: u64,
     #[arg(default = 0)] delta: u64,
-    first_pfn: Option<u64>,
-    last_pfn: Option<u64>,
+    #[arg(name = "start-pfn")] first_pfn: Option<u64>,
+    #[arg(name = "end-pfn")] last_pfn: Option<u64>,
 ) -> Result<PhysicalSearchResult> {
     session
         .target

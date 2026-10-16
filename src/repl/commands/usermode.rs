@@ -10,12 +10,13 @@ use crate::target::usermode::{
 use crate::target::{DiagnosticValue, ListTermination};
 use crate::types::VirtAddr;
 use crate::ui;
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 use tabled::builder::Builder;
 
 use super::diagnostics::{diagnostic_addr, diagnostic_cell};
 
 /// `[address]`: one optional expression; more words print the help.
+#[grammar(usage = "[{}]", complete = [Expression])]
 fn optional_address(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -41,8 +42,6 @@ fn optional_address(
     kind = Query,
     python = [Process, UserProcess],
     python_name = "decode_peb",
-    usage = "!peb [address]",
-    completion = [Expression]
 )]
 fn peb(
     session: &Session,
@@ -68,8 +67,6 @@ impl Render for Peb {
     kind = Query,
     python = [Thread, UserThread],
     python_name = "decode_teb",
-    usage = "!teb [address]",
-    completion = [Expression]
 )]
 fn teb(
     session: &Session,
@@ -85,6 +82,7 @@ impl Render for Teb {
 }
 
 /// `[-c <address>]`.
+#[grammar(usage = "[-c <address>]", complete = [None, Expression])]
 fn dlls_filter(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -119,8 +117,6 @@ fn dlls_filter(
     kind = Query,
     python = [Process, UserProcess],
     python_name = "loader_modules",
-    usage = "!dlls [-c <address>]",
-    completion = [None, Expression]
 )]
 fn dlls(
     session: &Session,
@@ -142,7 +138,6 @@ impl Render for LoaderModules {
     category = "user mode",
     kind = Query,
     python = [Thread, UserThread],
-    usage = "!gle"
 )]
 fn last_error(session: &Session) -> Result<LastError> {
     session.target.last_error()
@@ -156,6 +151,7 @@ impl Render for LastError {
 
 /// `<module>`: the one word the switches leave; none, or more, print the
 /// help.
+#[grammar(usage = "<{}>", complete = [Symbol])]
 fn chkimg_module(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -186,8 +182,6 @@ fn chkimg_module(
     kind = Query,
     python = Module,
     python_name = "check_image",
-    usage = "!chkimg [-d] [-v] [-nospec] <module>",
-    completion = [None, None, None, Symbol]
 )]
 fn chkimg(
     session: &Session,

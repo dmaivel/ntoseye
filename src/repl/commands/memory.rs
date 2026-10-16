@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 
 use owo_colors::OwoColorize;
 
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 use crate::error::{Error, Result, best_effort};
 use crate::expr::Expr;
@@ -164,6 +164,7 @@ impl Render for MemoryDump {
 
 /// A display command's `<address> [L<count>|length|end]`, `COUNT` items of
 /// `SIZE` bytes without an end.
+#[grammar(usage = "<address> [L<count>|length|end]", complete = [Expression, Expression])]
 fn display_range<const COUNT: u64, const SIZE: u64>(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -177,8 +178,6 @@ fn display_range<const COUNT: u64, const SIZE: u64>(
     category = "memory and disassembly",
     kind = Query,
     python = none,
-    usage = "db <address> [L<count>|length|end]",
-    completion = Expression
 )]
 fn db(
     session: &Session,
@@ -198,8 +197,6 @@ fn db(
     category = "memory and disassembly",
     kind = Query,
     python = none,
-    usage = "dw <address> [L<count>|length|end]",
-    completion = Expression
 )]
 fn dw(
     session: &Session,
@@ -219,8 +216,6 @@ fn dw(
     category = "memory and disassembly",
     kind = Query,
     python = none,
-    usage = "dW <address> [L<count>|length|end]",
-    completion = Expression
 )]
 fn dw_ascii(
     session: &Session,
@@ -240,8 +235,6 @@ fn dw_ascii(
     category = "memory and disassembly",
     kind = Query,
     python = none,
-    usage = "dc <address> [L<count>|length|end]",
-    completion = Expression
 )]
 fn dc(
     session: &Session,
@@ -261,8 +254,6 @@ fn dc(
     category = "memory and disassembly",
     kind = Query,
     python = none,
-    usage = "dd <address> [L<count>|length|end]",
-    completion = Expression
 )]
 fn dd(
     session: &Session,
@@ -282,8 +273,6 @@ fn dd(
     category = "memory and disassembly",
     kind = Query,
     python = none,
-    usage = "dq <address> [L<count>|length|end]",
-    completion = Expression
 )]
 fn dq(
     session: &Session,
@@ -303,8 +292,6 @@ fn dq(
     category = "memory and disassembly",
     kind = Query,
     python = none,
-    usage = "dp <address> [L<count>|length|end]",
-    completion = Expression
 )]
 fn dp(
     session: &Session,
@@ -326,8 +313,6 @@ fn dp(
     category = "memory and disassembly",
     kind = Query,
     python = none,
-    usage = "dyb <address> [L<count>|length|end]",
-    completion = Expression
 )]
 fn dyb(
     session: &Session,
@@ -342,6 +327,7 @@ fn dyb(
 }
 
 /// `df`'s range of four-byte floats, or `dD`'s of eight-byte doubles.
+#[grammar(usage = "<address> [L<count>|length|end]", complete = [Expression, Expression])]
 fn float_range(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -359,8 +345,6 @@ fn float_range(
     category = "memory and disassembly",
     kind = Query,
     python = none,
-    usage = "df|dD <address> [L<count>|length|end]",
-    completion = Expression
 )]
 fn df(
     session: &Session,
@@ -484,8 +468,6 @@ impl ReplState<'_> {
     category = "memory and disassembly",
     kind = Query,
     python = none,
-    usage = "dds <address> [L<count>|length|end]",
-    completion = Expression
 )]
 fn dds(
     session: &Session,
@@ -503,8 +485,6 @@ fn dds(
     category = "memory and disassembly",
     kind = Query,
     python = none,
-    usage = "dqs <address> [L<count>|length|end]",
-    completion = Expression
 )]
 fn dqs(
     session: &Session,
@@ -657,6 +637,7 @@ impl Render for Pointers {
 
 /// The range of the `d*p` family member typed: its pointer size decides the
 /// default count and the size of an `L<count>` item.
+#[grammar(usage = "<address> [L<count>|length|end]", complete = [Expression, Expression])]
 fn pointer_range(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -675,8 +656,6 @@ fn pointer_range(
     category = "memory and disassembly",
     kind = Query,
     python = none,
-    usage = "dpp|ddp|dqa|dda|dqu|ddu <address> [L<count>|length|end]",
-    completion = Expression
 )]
 fn dpp(
     session: &Session,
@@ -751,6 +730,7 @@ impl Render for TerminatedString {
 
 /// `da`/`du`'s `[max-chars]`: a positive count of `CHAR_SIZE`-byte units
 /// within [`MAX_DISPLAY_BYTES`].
+#[grammar(usage = "[{}]", complete = [Expression])]
 fn max_chars<const CHAR_SIZE: usize>(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -771,8 +751,6 @@ fn max_chars<const CHAR_SIZE: usize>(
     category = "memory and disassembly",
     kind = Query,
     python = none,
-    usage = "da <address> [max-chars]",
-    completion = Expression
 )]
 fn da(
     session: &Session,
@@ -788,8 +766,6 @@ fn da(
     category = "memory and disassembly",
     kind = Query,
     python = none,
-    usage = "du <address> [max-chars]",
-    completion = Expression
 )]
 fn du(
     session: &Session,
@@ -959,8 +935,6 @@ impl Render for CountedString {
     category = "memory and disassembly",
     kind = Query,
     python = none,
-    usage = "ds <address>",
-    completion = [Expression, None]
 )]
 fn ds(session: &Session, address: VirtAddr) -> Result<CountedString> {
     counted_string(session, address, StringDescriptor::Ansi, "ds")
@@ -972,8 +946,6 @@ fn ds(session: &Session, address: VirtAddr) -> Result<CountedString> {
     category = "memory and disassembly",
     kind = Query,
     python = none,
-    usage = "dS <address>",
-    completion = [Expression, None]
 )]
 fn ds_unicode(session: &Session, address: VirtAddr) -> Result<CountedString> {
     counted_string(session, address, StringDescriptor::Unicode, "dS")
@@ -986,6 +958,7 @@ struct PageInRequest {
 }
 
 /// `.pagein [/p <pid|eprocess>] <address>`.
+#[grammar(usage = "[/p <pid|eprocess>] <address>", complete = [None, Process, Expression])]
 fn pagein_request(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -1043,8 +1016,6 @@ fn pagein_request(
     target = Kernel,
     state = Halted,
     forms = [page_in],
-    usage = ".pagein [/p <pid|eprocess>] <address>",
-    completion = [None, Expression]
 )]
 fn pagein(
     state: &mut ReplState<'_>,
@@ -1078,7 +1049,7 @@ fn pagein(
 /// Make `address` resident with the guest debugger worker (`.pagein`), which
 /// resumes the guest. When the worker completes, the guest stops and the
 /// method returns, and `dbg.stop` shows that stop.
-#[command(form_of = pagein, python = Memory, sdk)]
+#[command(form_of = pagein, python = Memory)]
 fn page_in(
     session: &mut Session,
     #[arg(receiver)] memory: MemoryKind,
@@ -1199,6 +1170,7 @@ fn write_integers(
 }
 
 /// A write's `<address>`, which needs a value after it.
+#[grammar(usage = "<{}>", complete = [Expression])]
 pub fn write_address(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -1215,8 +1187,9 @@ fn words<'i>(cursor: &mut ArgCursor<'i>) -> Vec<Cow<'i, str>> {
     std::iter::from_fn(|| cursor.word()).collect()
 }
 
-/// A write's `<value...>`: each word an expression, or, when one of them is
+/// A write's `<value>...`: each word an expression, or, when one of them is
 /// not, all of them one expression (`eb @rsp 1 + 1`).
+#[grammar(usage = "<value>...", complete = Expression)]
 pub fn write_values(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -1242,8 +1215,6 @@ pub fn write_values(
     kind = Action,
     writes = [Memory],
     python = none,
-    usage = "eb <address> <value...>",
-    completion = Expression
 )]
 fn eb(
     session: &Session,
@@ -1260,8 +1231,6 @@ fn eb(
     kind = Action,
     writes = [Memory],
     python = none,
-    usage = "ew <address> <value...>",
-    completion = Expression
 )]
 fn ew(
     session: &Session,
@@ -1278,8 +1247,6 @@ fn ew(
     kind = Action,
     writes = [Memory],
     python = none,
-    usage = "ed <address> <value...>",
-    completion = Expression
 )]
 fn ed(
     session: &Session,
@@ -1296,8 +1263,6 @@ fn ed(
     kind = Action,
     writes = [Memory],
     python = none,
-    usage = "eq <address> <value...>",
-    completion = Expression
 )]
 fn eq(
     session: &Session,
@@ -1307,7 +1272,8 @@ fn eq(
     write_integers(session, address, values, WriteUnit::Qword)
 }
 
-/// `ef`/`eD`'s `<number...>`: decimal floating-point literals.
+/// `ef`/`eD`'s `<number>...`: decimal floating-point literals.
+#[grammar(usage = "<number>...", complete = Expression)]
 fn float_values(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -1335,8 +1301,6 @@ fn float_values(
     kind = Action,
     writes = [Memory],
     python = none,
-    usage = "ef|eD <address> <number...>",
-    completion = Expression
 )]
 fn ef(
     session: &Session,
@@ -1414,13 +1378,11 @@ fn write_string(
     kind = Action,
     writes = [Memory],
     python = none,
-    usage = "ea <address> \"text\"",
-    completion = Expression
 )]
 fn ea(
     session: &Session,
     #[arg(parse = write_address)] address: VirtAddr,
-    #[arg(rest)] text: String,
+    #[arg(rest, usage = "<text>", complete = None)] text: String,
 ) -> Result<StringWritten> {
     write_string(session, address, &text, false, false, "ea")
 }
@@ -1432,13 +1394,11 @@ fn ea(
     kind = Action,
     writes = [Memory],
     python = none,
-    usage = "eu <address> \"text\"",
-    completion = Expression
 )]
 fn eu(
     session: &Session,
     #[arg(parse = write_address)] address: VirtAddr,
-    #[arg(rest)] text: String,
+    #[arg(rest, usage = "<text>", complete = None)] text: String,
 ) -> Result<StringWritten> {
     write_string(session, address, &text, true, false, "eu")
 }
@@ -1450,13 +1410,11 @@ fn eu(
     kind = Action,
     writes = [Memory],
     python = none,
-    usage = "eza <address> \"text\"",
-    completion = Expression
 )]
 fn eza(
     session: &Session,
     #[arg(parse = write_address)] address: VirtAddr,
-    #[arg(rest)] text: String,
+    #[arg(rest, usage = "<text>", complete = None)] text: String,
 ) -> Result<StringWritten> {
     write_string(session, address, &text, false, true, "eza")
 }
@@ -1468,18 +1426,17 @@ fn eza(
     kind = Action,
     writes = [Memory],
     python = none,
-    usage = "ezu <address> \"text\"",
-    completion = Expression
 )]
 fn ezu(
     session: &Session,
     #[arg(parse = write_address)] address: VirtAddr,
-    #[arg(rest)] text: String,
+    #[arg(rest, usage = "<text>", complete = None)] text: String,
 ) -> Result<StringWritten> {
     write_string(session, address, &text, true, true, "ezu")
 }
 
 /// `.writemem`/`.readmem`'s `<address> <L<len>|end>`.
+#[grammar(usage = "<address> <L<count>|length|end>", complete = [Expression, Expression])]
 fn file_range(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -1502,12 +1459,10 @@ pub struct MemoryToFile {
     kind = Action,
     writes = [Files],
     python = none,
-    usage = ".writemem <file> <address> <L<len>|end>",
-    completion = [None, Expression, Expression]
 )]
 fn writemem(
     session: &Session,
-    path: String,
+    #[arg(name = "file")] path: String,
     #[arg(parse = file_range)] range: AddressRange,
 ) -> Result<MemoryToFile> {
     let mut file = File::create(&path)
@@ -1574,12 +1529,10 @@ pub struct FileToMemory {
     kind = Action,
     writes = [Memory],
     python = none,
-    usage = ".readmem <file> <address> <L<len>|end>",
-    completion = [None, Expression, Expression]
 )]
 fn readmem(
     session: &Session,
-    path: String,
+    #[arg(name = "file")] path: String,
     #[arg(parse = file_range)] range: AddressRange,
 ) -> Result<FileToMemory> {
     let mut file = File::open(&path)
@@ -1647,6 +1600,7 @@ impl Render for FileToMemory {
 }
 
 /// `.formats`' expression: the rest of the line, unsplit.
+#[grammar(usage = "<expression>", complete = Expression)]
 fn formats_value(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -1669,8 +1623,6 @@ pub struct NumberFormats(pub u64);
     kind = Query,
     python = none,
     style = ExpressionTail,
-    usage = ".formats <expression>",
-    completion = Expression
 )]
 fn formats(_session: &Session, #[arg(parse = formats_value)] value: u64) -> Result<NumberFormats> {
     Ok(NumberFormats(value))
@@ -1733,6 +1685,7 @@ fn range_before(
 }
 
 /// `f`'s range: its pattern follows.
+#[grammar(usage = "<address> <L<count>|length|end>", complete = [Expression, Expression])]
 fn fill_range(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -1757,6 +1710,7 @@ fn search_pattern(
 }
 
 /// `f`'s byte pattern, in the format `s` takes.
+#[grammar(usage = "<pattern>...", complete = None)]
 fn fill_pattern(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -1795,8 +1749,6 @@ impl Render for MemoryFilled {
     kind = Action,
     writes = [Memory],
     python = none,
-    usage = "f <address> <L<count>|end> <pattern>",
-    completion = [Expression, Expression, None]
 )]
 fn fill(
     session: &Session,
@@ -1816,6 +1768,7 @@ fn fill(
 }
 
 /// `c`'s and `m`'s range: exactly one address follows.
+#[grammar(usage = "<address> <L<count>|length|end>", complete = [Expression, Expression])]
 fn paired_range(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -1838,13 +1791,11 @@ fn paired_range(
     category = "memory and disassembly",
     kind = Query,
     python = none,
-    usage = "c <address> <L<count>|end> <address2>",
-    completion = [Expression, Expression, Expression]
 )]
 fn compare(
     session: &Session,
     #[arg(parse = paired_range)] range: AddressRange,
-    other: VirtAddr,
+    #[arg(name = "address2")] other: VirtAddr,
 ) -> Result<CompareResult> {
     session
         .compare(range.start, other, range.len())
@@ -1932,8 +1883,6 @@ impl Render for MemoryCopied {
     kind = Action,
     writes = [Memory],
     python = none,
-    usage = "m <address> <L<count>|end> <destination>",
-    completion = [Expression, Expression, Expression]
 )]
 fn move_memory(
     session: &Session,
@@ -1985,6 +1934,10 @@ pub struct SearchRequest {
 
 /// `s [-b|-w|-d|-q|-a|-u] <address> <L<count>|end> <pattern>`: the flag
 /// sets both the element an `L<count>` counts and how the pattern reads.
+#[grammar(
+    usage = "[-b|-w|-d|-q|-a|-u] <address> <L<count>|length|end> <pattern>...",
+    complete = [None, Expression, Expression]
+)]
 fn search_request(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -2025,8 +1978,6 @@ fn search_request(
     category = "memory and disassembly",
     kind = Query,
     forms = [memory_search],
-    usage = "s [-b|-w|-d|-q|-a|-u] <address> <L<count>|end> <pattern>",
-    completion = [None, Expression, Expression]
 )]
 fn search(
     session: &Session,
@@ -2042,7 +1993,7 @@ fn search(
 /// context. In a virtual space, the search skips pages that it cannot read,
 /// the breakpoints of this session read as the code that they replaced, and
 /// the search returns a maximum of 4096 matches.
-#[command(form_of = search, python = Memory, python_name = "search", sdk)]
+#[command(form_of = search, python = Memory, python_name = "search")]
 fn memory_search(
     session: &Session,
     #[arg(receiver)] space: SearchSpace,

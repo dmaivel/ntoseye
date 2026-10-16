@@ -18,7 +18,7 @@ use crate::target::{DiagnosticMetric, DiagnosticValue, ListTermination, TargetKi
 use crate::types::VirtAddr;
 use crate::ui;
 use crate::userdump::UserHandle;
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 /// Show the system memory-use counters and the counters of a limited number
 /// of processes.
@@ -32,8 +32,6 @@ use ntoseye_macros::command;
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!memusage [process-limit]",
-    completion = Expression
 )]
 fn memusage(
     session: &Session,
@@ -239,8 +237,6 @@ fn print_resource(detail: &ExecutiveResource) {
     category = "objects and I/O",
     kind = Query,
     forms = [process_handle, process_handles],
-    usage = "!handle [handle-expression [flags [type]]]",
-    completion = [Expression, Expression, Expression]
 )]
 fn handle(session: &Session, #[arg(parse = handle_query)] query: HandleQuery) -> Result<Handles> {
     let target = &session.target;
@@ -279,10 +275,7 @@ enum HandleQuery {
 
 /// Decode a handle in the handle table of this process.
 #[command(form_of = handle, python = Process, python_name = "handle")]
-fn process_handle(
-    session: &Session,
-    #[arg(name = "handle-expression", complete = Expression)] value: u64,
-) -> Result<HandleEntry> {
+fn process_handle(session: &Session, value: u64) -> Result<HandleEntry> {
     session.target.inspect_handle(value)
 }
 
@@ -313,6 +306,10 @@ struct UserHandles {
     process: String,
 }
 
+#[grammar(
+    usage = "[handle-expression [flags [type]]]",
+    complete = [Expression, Expression, None]
+)]
 fn handle_query(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -501,7 +498,6 @@ fn print_user_handles(listing: &UserHandles) {
     target = Kernel,
     python = Inspect,
     python_name = "file_object",
-    usage = "!fileobj <address-expression>"
 )]
 fn fileobj(session: &Session, address: VirtAddr) -> Result<FileObject> {
     session.target.inspect_file_object(address)
@@ -595,9 +591,8 @@ impl Render for FileObject {
     kind = Query,
     target = Kernel,
     forms = [resource, resources],
-    usage = "!locks [resource-address-expression]"
 )]
-fn locks(session: &Session, address: Option<VirtAddr>) -> Result<Locks> {
+fn locks(session: &Session, #[arg(name = "resource")] address: Option<VirtAddr>) -> Result<Locks> {
     match address {
         Some(address) => resource(session, address).map(Locks::One),
         None => resources(session, 256).map(Locks::List).map_err(|error| {
@@ -608,10 +603,7 @@ fn locks(session: &Session, address: Option<VirtAddr>) -> Result<Locks> {
 
 /// Decode an executive resource (`!locks address`).
 #[command(form_of = locks, python = Inspect)]
-fn resource(
-    session: &Session,
-    #[arg(name = "resource-address-expression", complete = Expression)] address: VirtAddr,
-) -> Result<ExecutiveResource> {
+fn resource(session: &Session, address: VirtAddr) -> Result<ExecutiveResource> {
     session.target.inspect_resource(address)
 }
 
@@ -664,13 +656,13 @@ impl Render for Locks {
     kind = Query,
     target = Kernel,
     python = Process,
-    usage = "!token"
 )]
 fn token(session: &Session, #[arg(render, parse = no_words)] none: ()) -> Result<Token> {
     session.target.inspect_process_token()
 }
 
 /// No argument: any word prints the help, as `!token` always did.
+#[grammar(usage = "")]
 fn no_words(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,

@@ -4,7 +4,7 @@ use tabled::builder::Builder;
 
 use owo_colors::OwoColorize;
 
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 use crate::error::{Error, Result};
 use crate::session::Session;
@@ -57,7 +57,6 @@ const UNREADABLE_NAME: &str = "<unreadable>";
     kind = Query,
     target = Kernel,
     forms = [etw_loggers, etw_buffers, etw_crash_sessions],
-    usage = "!wmitrace.strdump [logger-id|logger-name|context-address]"
 )]
 fn wmitrace_strdump(
     session: &Session,
@@ -80,10 +79,7 @@ fn etw_loggers(session: &Session) -> Result<EtwLoggerTable> {
 /// List the trace buffers on the GlobalList of an ETW trace session
 /// (`!wmitrace.strdump logger`).
 #[command(form_of = wmitrace_strdump, python = Inspect)]
-fn etw_buffers(
-    session: &Session,
-    #[arg(name = "logger-id|logger-name|context-address")] logger: EtwLoggerRef,
-) -> Result<EtwLoggerBuffers> {
+fn etw_buffers(session: &Session, logger: EtwLoggerRef) -> Result<EtwLoggerBuffers> {
     session.target.etw_logger_buffers(&logger)
 }
 
@@ -92,7 +88,7 @@ fn etw_buffers(
 /// sessions started with `EVENT_TRACE_ADDTO_TRIAGE_DUMP`, such as
 /// EventLog-System. A minidump has no other copy of them; in a kernel or
 /// full dump, `etw_loggers()` reads every session from memory.
-#[command(form_of = wmitrace_strdump, python = Inspect, sdk)]
+#[command(form_of = wmitrace_strdump, python = Inspect)]
 fn etw_crash_sessions(session: &Session) -> Result<EtwDumpData> {
     session.target.etw_crash_data()
 }
@@ -136,7 +132,6 @@ impl Render for EtwLoggerList {
     kind = Query,
     target = Kernel,
     forms = [etw_logger, etw_crash_session],
-    usage = "!wmitrace.logger <logger-id|logger-name|context-address>"
 )]
 fn wmitrace_logger(
     session: &Session,
@@ -153,17 +148,14 @@ fn wmitrace_logger(
 /// (`!wmitrace.logger`). `logger` is the logger ID, the context address, or
 /// the session name.
 #[command(form_of = wmitrace_logger, python = Inspect)]
-fn etw_logger(
-    session: &Session,
-    #[arg(name = "logger-id|logger-name|context-address")] logger: EtwLoggerRef,
-) -> Result<EtwLogger> {
+fn etw_logger(session: &Session, logger: EtwLoggerRef) -> Result<EtwLogger> {
     session.target.etw_logger(&logger)
 }
 
 /// Show one ETW trace session that Windows saved in a crash dump, with its
 /// buffers (`!wmitrace.logger` and `!wmitrace.strdump logger` in a
 /// minidump). `logger` is the logger ID or the session name.
-#[command(form_of = wmitrace_logger, python = Inspect, sdk)]
+#[command(form_of = wmitrace_logger, python = Inspect)]
 fn etw_crash_session(session: &Session, logger: EtwLoggerRef) -> Result<EtwDumpLogger> {
     let target = &session.target;
     let data = target.etw_crash_data()?;
@@ -210,7 +202,6 @@ impl Render for EtwSession {
     kind = Query,
     target = Kernel,
     forms = [etw_events, etw_crash_events],
-    usage = "!wmitrace.logdump [-t count] <logger-id|logger-name|context-address>"
 )]
 fn wmitrace_logdump(
     session: &Session,
@@ -233,7 +224,7 @@ fn wmitrace_logdump(
 #[command(form_of = wmitrace_logdump, python = Inspect)]
 fn etw_events(
     session: &Session,
-    #[arg(name = "logger-id|logger-name|context-address")] logger: EtwLoggerRef,
+    logger: EtwLoggerRef,
     count: Option<usize>,
 ) -> Result<EtwEventDump> {
     session.target.etw_log_dump(&logger, count)
@@ -243,7 +234,7 @@ fn etw_events(
 /// crash dump, oldest first (`!wmitrace.logdump` in a minidump).
 /// `logger` is the logger ID or the session name, and `count` keeps
 /// only the most recent events.
-#[command(form_of = wmitrace_logdump, python = Inspect, sdk)]
+#[command(form_of = wmitrace_logdump, python = Inspect)]
 fn etw_crash_events(
     session: &Session,
     logger: EtwLoggerRef,
@@ -295,12 +286,11 @@ impl Render for EtwEventDump {
     target = Kernel,
     writes = [Files],
     forms = [etw_save, etw_crash_save],
-    usage = "!wmitrace.logsave <logger-id|logger-name|context-address> <file>"
 )]
 fn wmitrace_logsave(
     session: &Session,
     #[arg(parse = logsave_logger)] logger: EtwLoggerRef,
-    path: String,
+    #[arg(name = "file")] path: String,
 ) -> Result<EtwLogSave> {
     if session.target.etw_reads_dump_data() {
         etw_crash_save(session, logger, path)
@@ -314,11 +304,7 @@ fn wmitrace_logsave(
 /// tracerpt open. `logger` is the logger ID, the context address, or the
 /// session name.
 #[command(form_of = wmitrace_logsave, python = Inspect)]
-fn etw_save(
-    session: &Session,
-    #[arg(name = "logger-id|logger-name|context-address")] logger: EtwLoggerRef,
-    #[arg(name = "file")] path: String,
-) -> Result<EtwLogSave> {
+fn etw_save(session: &Session, logger: EtwLoggerRef, path: String) -> Result<EtwLogSave> {
     let file = session.target.etw_log_file(&logger)?;
     write_log_file(path, file)
 }
@@ -326,7 +312,7 @@ fn etw_save(
 /// Save the buffers of an ETW trace session that Windows saved in a crash
 /// dump as an .etl file at `path` on the host (`!wmitrace.logsave` in a
 /// minidump). `logger` is the logger ID or the session name.
-#[command(form_of = wmitrace_logsave, python = Inspect, sdk)]
+#[command(form_of = wmitrace_logsave, python = Inspect)]
 fn etw_crash_save(session: &Session, logger: EtwLoggerRef, path: String) -> Result<EtwLogSave> {
     let target = &session.target;
     let data = target.etw_crash_data()?;
@@ -364,6 +350,7 @@ impl Render for EtwLogSave {
 
 /// The logger of a command that takes only it; any other number of words
 /// shows the help.
+#[grammar(usage = "<logger-id|logger-name|context-address>", complete = [None])]
 fn sole_logger(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -375,6 +362,7 @@ fn sole_logger(
 }
 
 /// `!wmitrace.strdump`'s logger, if one is named; more words show the help.
+#[grammar(usage = "[logger-id|logger-name|context-address]")]
 fn optional_logger(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -388,6 +376,7 @@ fn optional_logger(
 
 /// `!wmitrace.logsave`'s logger, before its file; any other number of words
 /// shows the help.
+#[grammar(usage = "<logger-id|logger-name|context-address>", complete = [None])]
 fn logsave_logger(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -447,6 +436,7 @@ fn logdump_error(message: String) -> ArgError {
 }
 
 /// `!wmitrace.logdump`'s logger, once the whole line checks out.
+#[grammar(usage = "<logger-id|logger-name|context-address>", complete = [None])]
 fn logdump_logger(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -462,6 +452,7 @@ fn logdump_logger(
 
 /// `!wmitrace.logdump`'s `-t count`: the words left once
 /// [`logdump_logger`] took the logger.
+#[grammar(usage = "[-t <count>]", complete = [None])]
 fn logdump_count(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,

@@ -9,6 +9,8 @@ use syn::{
     Path, PathArguments, Result, ReturnType, Token, Type,
 };
 
+use crate::grammar;
+
 pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let mut function: ItemFn = syn::parse2(item)?;
     let options = match Attr::parse(attr)? {
@@ -46,7 +48,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         .filter(|(index, _)| *index == 0 || !command.args[index - 1].render)
         .map(|(_, input)| input.clone())
         .collect();
-    let spec = command.spec();
+    let spec = command.spec()?;
     let repl = command.repl();
     let python = command.python()?;
     let forms = command.forms();
@@ -56,11 +58,20 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
 
         const _: () = {
             #repl
-            #[linkme::distributed_slice(crate::repl::COMMANDS)]
-            static SPEC: crate::repl::CommandSpec = #spec;
+            #spec
             #python
         };
     })
+}
+
+/// `f::GRAMMAR`, the grammar `#[grammar]` declares beside parser `f` (in a
+/// module of the parser's name), for `parse = f` or `parse = f::<N>`.
+fn grammar_path(parser: &Path) -> TokenStream {
+    let mut path = parser.clone();
+    if let Some(last) = path.segments.last_mut() {
+        last.arguments = PathArguments::None;
+    }
+    quote!(#path::GRAMMAR)
 }
 
 /// A form: one more SDK method of the command it names, from a function the
@@ -96,14 +107,16 @@ fn expand_form(form: FormOptions, mut function: ItemFn) -> Result<TokenStream> {
             || arg.invoked
             || arg.parse.is_some()
             || arg.each.is_some()
-            || arg.current;
+            || arg.current
+            || arg.name.is_some()
+            || arg.complete.is_some()
+            || arg.usage.is_some();
         if repl_only {
             return Err(Error::new(
                 arg.span,
                 "a form's arguments are its SDK method's (`receiver`, `default`, `positional`, \
-                 `Option<T>`, `sdk` for one the REPL line has no word for, and `name` and \
-                 `complete` for its REPL usage); its command's REPL operation parses the line \
-                 and calls it",
+                 `Option<T>`, `sdk`); its command's REPL arguments parse the line, and give \
+                 the usage and completion",
             ));
         }
     }
@@ -115,38 +128,6 @@ fn expand_form(form: FormOptions, mut function: ItemFn) -> Result<TokenStream> {
         .map(docstring_line)
         .collect();
     let effects = format_ident!("__FORM_{}_{}", form.command, function.sig.ident);
-    let usage = format_ident!("__FORM_USAGE_{}_{}", form.command, function.sig.ident);
-    let fragment = if form.sdk {
-        quote!(None)
-    } else {
-        // The words after the command name: the selecting word, then each
-        // argument the line gives (not a receiver, not an `sdk` one).
-        let mut words = Vec::new();
-        let mut completion = Vec::new();
-        let strategy = quote!(crate::repl::CompletionStrategy);
-        if let Some(word) = &form.word {
-            words.push(word.value());
-            completion.push(quote!(#strategy::None));
-        }
-        for arg in args.iter().filter(|arg| !arg.receiver && !arg.sdk) {
-            words.push(if arg.omittable() {
-                format!("[{}]", arg.usage_name())
-            } else {
-                format!("<{}>", arg.usage_name())
-            });
-            completion.push(match &arg.complete {
-                Some(ident) => quote!(#strategy::#ident),
-                None => quote!(#strategy::None),
-            });
-        }
-        let words = words.join(" ");
-        quote! {
-            Some(crate::repl::FormUsage {
-                usage: #words,
-                completion: &[#(#completion),*],
-            })
-        }
-    };
     let method = Method {
         function: &function.sig.ident,
         python_name: form.python_name.as_ref(),
@@ -163,14 +144,10 @@ fn expand_form(form: FormOptions, mut function: ItemFn) -> Result<TokenStream> {
         .map(|object| method.python(object))
         .collect::<Result<TokenStream>>()?;
     Ok(quote! {
-        // A form is an SDK method first: the REPL may reach its operation
-        // another way (`sdk` forms), so without Python it may go unused.
+        // A form is an SDK method: the REPL may reach its operation another
+        // way, so without Python it may go unused.
         #[cfg_attr(not(feature = "python"), allow(dead_code))]
         #function
-
-        #[doc(hidden)]
-        #[allow(non_upper_case_globals)]
-        const #usage: ::std::option::Option<crate::repl::FormUsage> = #fragment;
 
         const _: () = {
             #python
@@ -207,8 +184,6 @@ struct Options {
     writes: Vec<Ident>,
     live_only: bool,
     capability: Option<Ident>,
-    usage: Option<LitStr>,
-    completion: Option<Completion>,
     /// The SDK classes the method goes on (`python = Process` or
     /// `python = [Process, UserProcess]`); empty is `python = none`: REPL
     /// only.
@@ -230,11 +205,6 @@ struct FormOptions {
     command: Ident,
     python: Vec<Ident>,
     python_name: Option<LitStr>,
-    /// The word that selects the form on the REPL line (a subcommand or a
-    /// switch), before its arguments.
-    word: Option<LitStr>,
-    /// SDK-only: the REPL line has no form of it.
-    sdk: bool,
 }
 
 /// What `#[command(...)]` declares: a command, or a form of one.
@@ -255,28 +225,21 @@ impl Attr {
         let mut writes = Vec::new();
         let mut live_only = false;
         let mut capability = None;
-        let mut usage = None;
-        let mut completion = None;
         let mut python = None;
         let mut python_name = None;
         let mut style = None;
         let mut flow = None;
         let mut forms = Vec::new();
         let mut form_of: Option<Ident> = None;
-        let mut word: Option<LitStr> = None;
-        let mut sdk = false;
         let mut command_keys = Vec::new();
-        let mut form_keys = Vec::new();
         let parser = syn::meta::parser(|meta| {
             let key = meta
                 .path
                 .get_ident()
                 .map(Ident::to_string)
                 .unwrap_or_default();
-            match key.as_str() {
-                "form_of" | "python" | "python_name" => {}
-                "word" | "sdk" => form_keys.push(meta.path.span()),
-                _ => command_keys.push(meta.path.span()),
+            if !matches!(key.as_str(), "form_of" | "python" | "python_name") {
+                command_keys.push(meta.path.span());
             }
             match key.as_str() {
                 "names" => names = Some(lit_list(meta.value()?)?),
@@ -288,22 +251,24 @@ impl Attr {
                 "writes" => writes = ident_list(meta.value()?)?,
                 "live_only" => live_only = true,
                 "capability" => capability = Some(meta.value()?.parse()?),
-                "usage" => usage = Some(meta.value()?.parse()?),
-                "completion" => completion = Some(Completion::parse(meta.value()?)?),
                 "python" => python = Some(ident_list(meta.value()?)?),
                 "python_name" => python_name = Some(meta.value()?.parse()?),
                 "style" => style = Some(meta.value()?.parse()?),
                 "flow" => flow = Some(meta.value()?.parse()?),
                 "forms" => forms = ident_list(meta.value()?)?,
                 "form_of" => form_of = Some(meta.value()?.parse()?),
-                "word" => word = Some(meta.value()?.parse()?),
-                "sdk" => sdk = true,
+                "usage" | "completion" => {
+                    return Err(meta.error(
+                        "the usage and completion are generated from the arguments: a typed \
+                         argument gives its own, a custom parser declares its words with \
+                         `#[grammar(...)]`",
+                    ));
+                }
                 _ => {
                     return Err(meta.error(
                         "expected `names`, `category`, `kind`, `target`, `state`, `run`, \
-                         `writes`, `live_only`, `capability`, `usage`, `completion`, `python`, \
-                         `python_name`, `style`, `flow`, `forms`, or a form's `form_of`, `word` \
-                         and `sdk`",
+                         `writes`, `live_only`, `capability`, `python`, `python_name`, `style`, \
+                         `flow`, `forms`, or a form's `form_of`",
                     ));
                 }
             }
@@ -321,8 +286,8 @@ impl Attr {
             if let Some(key) = command_keys.first() {
                 return Err(Error::new(
                     *key,
-                    "a form takes only `form_of`, `python`, `python_name`, `word` and `sdk`: \
-                     its command declares the rest",
+                    "a form takes only `form_of`, `python` and `python_name`: its command \
+                     declares the rest",
                 ));
             }
             let python = python.ok_or_else(|| missing("python"))?;
@@ -332,22 +297,11 @@ impl Attr {
                     "a form is an SDK method: `python = Object`",
                 ));
             }
-            if sdk && word.is_some() {
-                return Err(Error::new(span, "an `sdk` form has no REPL `word`"));
-            }
             return Ok(Self::Form(FormOptions {
                 command,
                 python,
                 python_name,
-                word,
-                sdk,
             }));
-        }
-        if let Some(key) = form_keys.first() {
-            return Err(Error::new(
-                *key,
-                "`word` and `sdk` describe a form (`form_of = ...`)",
-            ));
         }
         let names: Vec<LitStr> = names.ok_or_else(|| missing("names"))?;
         if names.is_empty() {
@@ -375,8 +329,6 @@ impl Attr {
             writes,
             live_only,
             capability,
-            usage,
-            completion,
             python,
             python_name,
             style,
@@ -395,15 +347,16 @@ fn lit_list(input: syn::parse::ParseStream<'_>) -> Result<Vec<LitStr>> {
         .collect())
 }
 
-/// `completion = ...`: a bare strategy completes every word with it, a list
-/// one per word.
-enum Completion {
+/// `complete = ...`: a list completes each word in turn; a bare strategy
+/// completes a typed argument's word, or every word of an argument that
+/// takes the rest of the line.
+pub enum Completion {
     All(Ident),
     PerArg(Vec<Ident>),
 }
 
 impl Completion {
-    fn parse(input: syn::parse::ParseStream<'_>) -> Result<Self> {
+    pub fn parse(input: syn::parse::ParseStream<'_>) -> Result<Self> {
         if input.peek(syn::token::Bracket) {
             ident_list(input).map(Self::PerArg)
         } else {
@@ -556,7 +509,12 @@ struct Arg {
     /// address, name or object the method is about), not a mode.
     subject: bool,
     name: Option<LitStr>,
-    complete: Option<Ident>,
+    /// How its words complete, when its type does not say (a `String` that
+    /// names a driver), or with `usage`.
+    complete: Option<Completion>,
+    /// The usage fragment of a `raw` argument, or of one whose
+    /// `#[grammar(operation)]` parser hands its words to the operation.
+    usage: Option<LitStr>,
     span: Span,
 }
 
@@ -574,10 +532,6 @@ impl Arg {
 
     fn omittable(&self) -> bool {
         self.optional.is_some() || self.default.is_some() || self.current
-    }
-
-    fn positional(&self) -> bool {
-        self.switch.is_none() && !self.raw && !self.invoked && !self.sdk && !self.cancel
     }
 
     /// Keyword-only in Python (after the `*`): an argument that may be
@@ -630,6 +584,7 @@ fn take_args(function: &mut ItemFn) -> Result<Vec<Arg>> {
             subject: false,
             name: None,
             complete: None,
+            usage: None,
             span: typed.span(),
         };
         let mut kept = Vec::new();
@@ -659,13 +614,14 @@ fn take_args(function: &mut ItemFn) -> Result<Vec<Arg>> {
                     "sdk" => arg.sdk = true,
                     "positional" => arg.subject = true,
                     "name" => arg.name = Some(meta.value()?.parse()?),
-                    "complete" => arg.complete = Some(meta.value()?.parse()?),
+                    "complete" => arg.complete = Some(Completion::parse(meta.value()?)?),
+                    "usage" => arg.usage = Some(meta.value()?.parse()?),
                     _ => {
                         return Err(meta.error(
                             "expected `render`, `default = ...`, `current`, `switch = \"/x\"`, \
                              `rest`, `raw`, `invoked`, `parse = path`, `each = path`, `receiver`, \
-                             `sdk`, `positional`, `cancel`, `name = \"...\"` or `complete = \
-                             Strategy`",
+                             `sdk`, `positional`, `cancel`, `name = \"...\"`, `complete = \
+                             Strategy` or `usage = \"...\"`",
                         ));
                     }
                 }
@@ -673,11 +629,34 @@ fn take_args(function: &mut ItemFn) -> Result<Vec<Arg>> {
             })?;
         }
         typed.attrs = kept;
+        let custom = arg.parse.is_some() || arg.each.is_some();
+        if arg.usage.is_some() && !(arg.raw || arg.rest || custom) {
+            return Err(Error::new(
+                arg.span,
+                "`usage` describes a `raw` or `rest` argument, or the words a \
+                 `#[grammar(operation)]` parser hands to the operation, which the operation \
+                 reads; any other argument's usage is generated",
+            ));
+        }
+        match &arg.complete {
+            Some(_) if custom && arg.usage.is_none() => {
+                return Err(Error::new(
+                    arg.span,
+                    "a custom parser declares its completion with `#[grammar(complete = ...)]`",
+                ));
+            }
+            Some(Completion::PerArg(_)) if arg.usage.is_none() => {
+                return Err(Error::new(
+                    arg.span,
+                    "a typed argument is one word: `complete = Strategy`",
+                ));
+            }
+            _ => {}
+        }
         // A custom parser may return an `Option` of its own, and may name
         // the `default` the SDK's keyword takes (its parser supplies the
         // REPL's); an `sdk` argument's `default` is the REPL's value, and it
         // may be an `Option` too.
-        let custom = arg.parse.is_some() || arg.each.is_some();
         let sources = [
             arg.default.is_some() && arg.parse.is_none() && !arg.sdk,
             arg.current,
@@ -887,76 +866,87 @@ impl Command {
         Ok(())
     }
 
-    fn usage(&self) -> String {
-        if let Some(usage) = &self.options.usage {
-            return usage.value();
-        }
-        let mut usage = self.options.names[0].value();
-        for arg in &self.args {
-            let part = if arg.hosted() || arg.sdk {
-                continue;
-            } else if let Some(switch) = &arg.switch {
-                format!("[{}]", switch.value())
-            } else if arg.rest || arg.raw {
-                format!("[{}...]", arg.usage_name())
-            } else if arg.omittable() {
-                format!("[{}]", arg.usage_name())
-            } else {
-                format!("<{}>", arg.usage_name())
+    /// Each argument the line gives, as a `usage::ArgGrammar`: a typed one
+    /// by its name and type, a switch as typed, a custom parser by the
+    /// grammar it declares (`#[grammar]`), and a `raw` argument, or one
+    /// whose parser hands its words to the operation, by its own `usage`.
+    fn grammar(&self) -> Result<Vec<TokenStream>> {
+        let usage = quote!(crate::repl::usage);
+        let mut grammars = Vec::new();
+        for arg in self.args.iter().filter(|arg| !arg.hosted() && !arg.sdk) {
+            let name = arg.usage_name();
+            let words = |words: Vec<TokenStream>, rest: Option<TokenStream>| {
+                let rest = match rest {
+                    Some(rest) => quote!(::std::option::Option::Some(#rest)),
+                    None => quote!(::std::option::Option::None),
+                };
+                (quote!(&[#(#words),*]), rest)
             };
-            usage.push(' ');
-            usage.push_str(&part);
-        }
-        usage
-    }
-
-    fn completion(&self) -> TokenStream {
-        let strategy = |ident: &Ident| quote!(crate::repl::CompletionStrategy::#ident);
-        match &self.options.completion {
-            Some(Completion::All(ident)) => {
-                let strategy = strategy(ident);
-                return quote!(crate::repl::CompletionSpec::All(#strategy));
-            }
-            Some(Completion::PerArg(list)) => {
-                let list = list.iter().map(strategy);
-                return quote!(crate::repl::CompletionSpec::PerArg(&[#(#list),*]));
-            }
-            None => {}
-        }
-        let list: Vec<TokenStream> = self
-            .args
-            .iter()
-            .filter(|arg| arg.positional())
-            .map(|arg| match (&arg.complete, &arg.parse, &arg.each) {
-                (Some(ident), _, _) => strategy(ident),
-                (None, None, None) => {
+            let value_completion = || match &arg.complete {
+                Some(Completion::All(ident)) => quote!(crate::repl::CompletionStrategy::#ident),
+                _ => {
                     let ty = arg.value_type();
                     quote!(<#ty as crate::repl::args::FromArg>::COMPLETION)
                 }
-                _ => quote!(crate::repl::CompletionStrategy::None),
-            })
-            .collect();
-        if list.is_empty() {
-            quote!(crate::repl::CompletionSpec::None)
-        } else {
-            quote!(crate::repl::CompletionSpec::PerArg(&[#(#list),*]))
+            };
+            let (text, (words, rest)) = if let Some(switch) = &arg.switch {
+                (format!("[{}]", switch.value()), words(Vec::new(), None))
+            } else if let Some(path) = arg.parse.as_ref().or(arg.each.as_ref()) {
+                let parser = grammar_path(path);
+                let grammar = match &arg.usage {
+                    Some(text) => {
+                        let described = grammar::literal(text, arg.complete.as_ref())?;
+                        quote!(#usage::described(#parser, #described))
+                    }
+                    None => quote!(#usage::declared(#parser)),
+                };
+                grammars.push(quote!(#usage::ArgGrammar { name: #name, grammar: #grammar }));
+                continue;
+            } else if arg.raw || (arg.rest && arg.usage.is_some()) {
+                let text = arg
+                    .usage
+                    .clone()
+                    .unwrap_or_else(|| LitStr::new("[{}]...", arg.span));
+                let grammar = grammar::literal(&text, arg.complete.as_ref())?;
+                grammars.push(quote!(#usage::ArgGrammar { name: #name, grammar: #grammar }));
+                continue;
+            } else if arg.rest {
+                (
+                    "[{}]...".to_owned(),
+                    words(Vec::new(), Some(value_completion())),
+                )
+            } else if arg.omittable() {
+                ("[{}]".to_owned(), words(vec![value_completion()], None))
+            } else {
+                ("<{}>".to_owned(), words(vec![value_completion()], None))
+            };
+            grammars.push(quote! {
+                #usage::ArgGrammar {
+                    name: #name,
+                    grammar: #usage::Grammar { usage: #text, words: #words, rest: #rest },
+                }
+            });
         }
+        Ok(grammars)
     }
 
-    fn spec(&self) -> TokenStream {
+    /// The `CommandSpec`, after the constants that generate its usage and
+    /// completion.
+    fn spec(&self) -> Result<TokenStream> {
         let Options {
             names,
             category,
             kind,
             ..
         } = &self.options;
-        let usage = self.usage();
+        let name = &names[0];
+        let grammar = self.grammar()?;
+        let usage = quote!(crate::repl::usage);
         let summary = &self.help.summary;
         let details = match &self.help.details {
             Some(details) => quote!(Some(#details)),
             None => quote!(None),
         };
-        let completion = self.completion();
         let style = self
             .options
             .style
@@ -973,27 +963,32 @@ impl Command {
             quote!(Args)
         };
         let effects = self.effects();
-        let forms = self
-            .options
-            .forms
-            .iter()
-            .map(|form| format_ident!("__FORM_USAGE_{}_{}", self.function, form));
-        quote! {
-            crate::repl::CommandSpec {
+        Ok(quote! {
+            const ARGS: &[#usage::ArgGrammar] = &[#(#grammar),*];
+            const USAGE_LEN: usize = #usage::usage_len(#name, ARGS);
+            const USAGE: [u8; USAGE_LEN] = #usage::usage_bytes(#name, ARGS);
+            const WORDS_LEN: usize = #usage::completion_len(ARGS);
+            const WORDS: [crate::repl::CompletionStrategy; WORDS_LEN] =
+                #usage::completion_words(ARGS);
+            #[linkme::distributed_slice(crate::repl::COMMANDS)]
+            static SPEC: crate::repl::CommandSpec = crate::repl::CommandSpec {
                 names: &[#(#names),*],
                 category: #category,
                 kind: crate::repl::CommandKind::#kind,
-                usage: #usage,
+                usage: #usage::usage_text(&USAGE),
                 summary: #summary,
                 details: #details,
-                completion: #completion,
-                forms: &[#(#forms),*],
+                completion: crate::repl::CompletionSpec {
+                    words: &WORDS,
+                    rest: #usage::completion_rest(ARGS),
+                },
+                args: ARGS,
                 effects: #effects,
                 style: crate::repl::CommandStyle::#style,
                 flow: crate::repl::Flow::#flow,
                 handler: crate::repl::CommandHandler::#handler(repl),
-            }
-        }
+            };
+        })
     }
 
     /// The declared effects, as an `Effects` expression.

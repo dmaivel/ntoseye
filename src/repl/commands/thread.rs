@@ -7,7 +7,7 @@ use tabled::builder::Builder;
 
 use owo_colors::OwoColorize;
 
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 use crate::bugchecks::looks_like_kernel_pointer;
 use crate::dbg_backend::processor_index_from_backend_thread_id;
@@ -423,10 +423,11 @@ impl Current for ThreadInfo {
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "threads [filter]",
-    completion = [Process]
 )]
-fn threads(session: &mut Session, #[arg(render)] filter: Option<String>) -> Result<WindowsThreads> {
+fn threads(
+    session: &mut Session,
+    #[arg(render, complete = Process)] filter: Option<String>,
+) -> Result<WindowsThreads> {
     let (threads, active) = session
         .windows_threads()
         .map_err(|error| Error::DebugInfo(format!("failed to enumerate threads: {error}")))?;
@@ -522,14 +523,12 @@ impl Render<Option<String>> for WindowsThreads {
     target = Kernel,
     python = Thread,
     python_name = "inspect",
-    usage = "!thread [ethread|tid] [flags] [count]",
-    completion = [Thread, None, None]
 )]
 fn thread(
     session: &mut Session,
-    #[arg(receiver, current)] thread: ThreadInfo,
+    #[arg(receiver, current, name = "ethread|tid")] thread: ThreadInfo,
     #[arg(render, parse = thread_action)] action: ThreadAction,
-    #[arg(render)] count: Option<u64>,
+    #[arg(render, complete = None)] count: Option<u64>,
 ) -> Result<ThreadDetail> {
     let cpu = session
         .active_thread_map()
@@ -548,6 +547,7 @@ struct ThreadAction {
     default_stack: bool,
 }
 
+#[grammar(usage = "[flags|k|r]", complete = [None])]
 fn thread_action(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -593,10 +593,11 @@ impl Render<(ThreadAction, Option<u64>)> for ThreadDetail {
     kind = Action,
     target = Kernel,
     python = none,
-    usage = ".thread [ethread|tid]",
-    completion = [Thread]
 )]
-fn dot_thread(state: &mut ReplState<'_>, thread: Option<ThreadInfo>) -> Result<()> {
+fn dot_thread(
+    state: &mut ReplState<'_>,
+    #[arg(name = "ethread|tid")] thread: Option<ThreadInfo>,
+) -> Result<()> {
     let Some(thread) = thread else {
         let current = state.ctx.current_thread.clone();
         state.ctx.reset_windows_thread().map_err(|error| {

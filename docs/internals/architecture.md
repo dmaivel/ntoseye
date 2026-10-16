@@ -66,9 +66,37 @@ impl Render for Job {
 - `Render` prints the REPL text through `outln!`. The hosts capture that output. The renderer also gets the `ReplState`, for things that only the REPL keeps, such as completion caches and the selected thread.
 - The macro registers a `CommandSpec` in the `COMMANDS` slice (`src/repl/command.rs`). `help`, completion, `--dump-command-reference` (and the generated command reference in these docs), MCP and the REPL dispatcher all read that one registry.
 
+### Usage lines and completion
+
+Nobody writes a command's usage line or its completion by hand. The macro generates both from the arguments (`src/repl/usage.rs`), so they cannot drift from what the parser accepts, and it refuses a `usage =` or `completion =` key on `#[command]`.
+
+The notation follows WinDbg's documentation and POSIX:
+
+| Notation | Meaning |
+| --- | --- |
+| `<name>` | a required word |
+| `[name]` | an optional word |
+| `<name>...`, `[name]...` | one or more, any number |
+| `[/p]`, `[-v]` | a switch or option, as typed |
+| `[/p <processor>]` | an option with a value |
+| `a\|b` (no spaces) | alternatives within one argument: `<id\|id-id\|*>`, `[+\|-]value` |
+| `[bus [device]]` | nested optional groups; optional words that the line gives in turn nest (`!job [address [flags]]`) |
+| `a \| b` (spaced) | alternative forms of the whole line |
+
+Names are kebab-case: the parameter's name, or `#[arg(name = "...")]`. Each form of the line is a usage line of its own, which starts with the command name: `help !alpc` shows `!alpc /p <port>`, `!alpc /m <message>` and `!alpc /lpp [process]` on three lines, and the command reference's `usage` holds them separated by newlines.
+
+Each argument contributes a fragment and the completion of its words:
+
+- A typed argument is `<name>`, or `[name]` when it may be omitted (`Option<T>`, `default`, `current`), and completes as its type's `FromArg::COMPLETION`: an expression (`VirtAddr`, the integers) as `Expression`, a `ThreadInfo` as `Thread`, a `BreakpointId` as `Breakpoint`, and so on. `#[arg(complete = Driver)]` covers a word that its type does not describe, such as a `String` that names a driver.
+- `#[arg(switch = "/x")]` is `[/x]`, and `rest` is `[name]...`.
+- A custom parser (`parse = f`, `each = f`) declares its words next to its code with `#[grammar(usage = "<address> [L<count>|length|end]", complete = [Expression, Expression])]`. In the fragment, `{}` stands for the argument's name, so a parser that several commands share can name each use. `usage = ""` declares a parser that reads no word of its own, and a bare `complete = Strategy` completes every word, for a parser that takes the rest of the line.
+- A parser that only hands the words to the operation, which reads them itself, is `#[grammar(operation)]`. Each argument that uses it describes the words with `#[arg(usage = "...", complete = ...)]`, as may a `raw` or `rest` argument, whose operation reads its text.
+
+The usage line is the command name and the fragments in parameter order. The completion of the `n`th word is the `n`th of the arguments' words in order; after an argument that takes the rest of the line, every word completes as it does. A test in `src/repl/command.rs` checks that every argument which names a value has a completion position.
+
 ### Forms: several SDK methods behind one REPL name
 
-When one REPL command is several operations (`!alpc` decodes a port, a message, or a process's ports), each operation is a *form*: a function with its own return type and docstring, marked `#[command(form_of = alpc, python = Inspect)]`. The command lists its forms (`forms = [alpc_port, alpc_message, ...]`) instead of `python`, parses its line as before, and calls the form that the line selects. A form has no help entry of its own, and its SDK method admits the command's effects. A form can take arguments that the REPL grammar has no word for, such as a `Process` handle or a keyword-only option. With the bare `sdk` key, a form exists only in the SDK (`Debugger.hypercalls()`, a form of `!hvcalls`).
+When one REPL command is several operations (`!alpc` decodes a port, a message, or a process's ports), each operation is a *form*: a function with its own return type and docstring, marked `#[command(form_of = alpc, python = Inspect)]`. The command lists its forms (`forms = [alpc_port, alpc_message, ...]`) instead of `python`, parses its line as before, and calls the form that the line selects. A form has no help entry of its own, and its SDK method admits the command's effects. A form can take arguments that the REPL grammar has no word for, such as a `Process` handle or a keyword-only option, and a form may exist only in the SDK, when the REPL reaches its operation another way (`Debugger.hypercalls()`, a form of `!hvcalls`). The command's own arguments describe the line, so its usage and completion come from them, not from its forms.
 
 ## Effects and `Session::admit`
 
@@ -119,7 +147,7 @@ Some SDK methods are written by hand. These are properties and setters (`Symbols
 1. Make the result a model record: add `#[record]` to the model type (or write a new one next to the model), and use `#[record(skip)]` for fields that only the REPL needs.
 2. Write the function with `#[command]` next to the other commands of its area in `src/repl/commands/`. Put the help text in the doc comment, and declare `kind`, `category`, the effects, and `python = Object` or `python = none`.
 3. Implement `Render` for the result, reading the record.
-4. For a new kind of argument, implement `FromArg` (and `Current` if it has a current value, and `PyArg` if Python takes it) next to the model, or write a `parse = f` parser for a grammar of the command's own.
+4. For a new kind of argument, implement `FromArg` (and `Current` if it has a current value, and `PyArg` if Python takes it) next to the model, or write a `parse = f` parser, with its `#[grammar]`, for a grammar of the command's own.
 5. Check `help <name>`, the REPL text, and `ntoseye --dump-command-reference`. A change in the reference is a change in the docs.
 
 ## Adding an SDK method

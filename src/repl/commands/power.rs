@@ -512,9 +512,11 @@ impl Render for PowerActionDetail {
     target = Kernel,
     python = Inspect,
     python_name = "device_power",
-    usage = "!podev <device-object>"
 )]
-fn podev(session: &Session, device: VirtAddr) -> Result<DevicePower> {
+fn podev(
+    session: &Session,
+    #[arg(name = "device-object")] device: VirtAddr,
+) -> Result<DevicePower> {
     session
         .target
         .device_power(device)
@@ -541,7 +543,6 @@ impl Render for DevicePower {
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "!popolicy [address]"
 )]
 fn popolicy(session: &Session, address: Option<VirtAddr>) -> Result<PowerPolicy> {
     session

@@ -25,7 +25,7 @@ use crate::guest::vm_exits::{self, ExitFilter};
 use crate::session::Session;
 use crate::target::decimal_pid_literal;
 use crate::ui;
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::commands::thread::ThreadResolution;
@@ -93,6 +93,10 @@ fn invalid(error: Error) -> ArgError {
 
 /// `bp`, `bu` and `bm`'s line: a software breakpoint's options, target,
 /// pass count, condition and commands.
+#[grammar(
+    usage = "[/1] [/a] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <{}> [passes] [if <expr>] [do <commands>]",
+    complete = Expression
+)]
 fn code_breakpoint(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -105,8 +109,25 @@ fn code_breakpoint(
     parse_breakpoint_arguments(&words, cx.state.radix, cx.name, false).map_err(invalid)
 }
 
+/// `bm`'s line: [`code_breakpoint`]'s, whose target is a symbol pattern
+/// and which takes no /a.
+#[grammar(
+    usage = "[/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <symbol-pattern> [passes] [if <expr>] [do <commands>]",
+    complete = Expression
+)]
+fn pattern_breakpoint(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<ParsedBreakpointArgs, ArgError> {
+    code_breakpoint(cx, cursor)
+}
+
 /// `ba`'s line: the options, access and size, target, pass count,
 /// condition and commands.
+#[grammar(
+    usage = "[/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <access><size> <address> [passes] [if <expr>] [do <commands>]",
+    complete = [None, Expression]
+)]
 fn hardware_breakpoint(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -116,6 +137,10 @@ fn hardware_breakpoint(
 }
 
 /// `!hvbp`'s and `!hvexit`'s line.
+#[grammar(
+    usage = "[/1] [/c <processor>] [/w \"<expr>\"] <{}> [partition-id [vp-index]] [if <expr>] [do <commands>]",
+    complete = None
+)]
 fn hypervisor_breakpoint(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -125,6 +150,7 @@ fn hypervisor_breakpoint(
 }
 
 /// `bc`/`bd`/`be`'s IDs: `id`, `first-last`, or `*`.
+#[grammar(usage = "<id|id-id|*>...", complete = Breakpoint)]
 fn breakpoint_ids(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -138,6 +164,7 @@ fn breakpoint_ids(
 }
 
 /// The rest of the line, which a command needs.
+#[grammar(usage = "<{}|clear>", complete = Expression)]
 fn required_rest(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -151,6 +178,7 @@ fn required_rest(
 }
 
 /// `bpp`'s pass count: a number in the current radix.
+#[grammar(usage = "<{}>", complete = [None])]
 fn pass_count(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -161,6 +189,7 @@ fn pass_count(
 
 /// `bsc`'s condition and commands: a quoted last word is the commands, and
 /// everything before it the condition, which may contain spaces.
+#[grammar(usage = "<condition> [\"commands\"]", complete = Expression)]
 fn condition_and_commands(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -196,12 +225,10 @@ fn condition_and_commands(
     state = Halted,
     writes = [Breakpoints],
     python = none,
-    usage = "bp [/1] [/a] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <address|file:line> [<passes>] [if <expr>] [do <commands>]",
-    completion = Expression
 )]
 fn set_breakpoint(
     state: &mut ReplState<'_>,
-    #[arg(parse = code_breakpoint)] args: ParsedBreakpointArgs,
+    #[arg(parse = code_breakpoint, name = "address|file:line")] args: ParsedBreakpointArgs,
 ) -> Result<BreakpointsSet> {
     let spec = args.target.clone();
     let config = state.breakpoint_config(args)?;
@@ -260,12 +287,10 @@ fn set_breakpoint(
     state = Halted,
     writes = [Breakpoints],
     python = none,
-    usage = "bu [/1] [/a] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <symbol|file:line> [<passes>] [if <expr>] [do <commands>]",
-    completion = Expression
 )]
 fn set_symbolic_breakpoint(
     state: &mut ReplState<'_>,
-    #[arg(parse = code_breakpoint)] args: ParsedBreakpointArgs,
+    #[arg(parse = code_breakpoint, name = "symbol|file:line")] args: ParsedBreakpointArgs,
 ) -> Result<BreakpointsSet> {
     let spec = args.target.clone();
     let config = state.breakpoint_config(args)?;
@@ -302,12 +327,10 @@ fn set_symbolic_breakpoint(
     state = Halted,
     writes = [Breakpoints],
     python = none,
-    usage = "bm [/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <symbol-pattern> [<passes>] [if <expr>] [do <commands>]",
-    completion = Expression
 )]
 fn set_pattern_breakpoints(
     state: &mut ReplState<'_>,
-    #[arg(parse = code_breakpoint)] args: ParsedBreakpointArgs,
+    #[arg(parse = pattern_breakpoint)] args: ParsedBreakpointArgs,
 ) -> Result<BreakpointsSet> {
     const BM_LIMIT: usize = 256;
     let spec = args.target.clone();
@@ -337,8 +360,6 @@ fn set_pattern_breakpoints(
     state = Halted,
     writes = [Breakpoints],
     python = none,
-    usage = "ba [/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <access><size> <address> [<passes>] [if <expr>] [do <commands>]",
-    completion = [None, Expression]
 )]
 fn set_hardware_breakpoint(
     state: &mut ReplState<'_>,
@@ -416,12 +437,10 @@ fn set_hardware_breakpoint(
     state = Halted,
     writes = [Breakpoints],
     python = none,
-    usage = "!hvbp [/1] [/c <processor>] [/w \"<expr>\"] <code|name> [partition-id [vp-index]] [if <expr>] [do <commands>]",
-    completion = None
 )]
 fn set_hypercall_breakpoint(
     state: &mut ReplState<'_>,
-    #[arg(parse = hypervisor_breakpoint)] args: ParsedHypercallArgs,
+    #[arg(parse = hypervisor_breakpoint, name = "code|name")] args: ParsedHypercallArgs,
 ) -> Result<BreakpointsSet> {
     let code = hypercall_code_text(&args.call, state.radix)?;
     let (vp, config) = state.hypervisor_breakpoint_config(&args)?;
@@ -465,12 +484,10 @@ fn set_hypercall_breakpoint(
     state = Halted,
     writes = [Breakpoints],
     python = none,
-    usage = "!hvexit [/1] [/c <processor>] [/w \"<expr>\"] <reason> [partition-id [vp-index]] [if <expr>] [do <commands>]",
-    completion = None
 )]
 fn set_exit_breakpoint(
     state: &mut ReplState<'_>,
-    #[arg(parse = hypervisor_breakpoint)] args: ParsedHypercallArgs,
+    #[arg(parse = hypervisor_breakpoint, name = "reason")] args: ParsedHypercallArgs,
 ) -> Result<BreakpointsSet> {
     let reason = vm_exits::parse_reason(&args.call)?;
     let (vp, config) = state.hypervisor_breakpoint_config(&args)?;
@@ -690,7 +707,6 @@ impl Render for BreakpointsSet {
     kind = Query,
     python = Breakpoints,
     python_name = "list",
-    usage = "bl"
 )]
 fn list_breakpoints(session: &Session) -> Result<Vec<BreakpointInfo>> {
     Ok(session.breakpoints.list().into_iter().cloned().collect())
@@ -731,7 +747,6 @@ impl Render for Vec<BreakpointInfo> {
     kind = Query,
     python = Breakpoints,
     python_name = "commands",
-    usage = ".bpcmds"
 )]
 fn breakpoint_commands(session: &Session) -> Result<BreakpointCommands> {
     Ok(BreakpointCommands {
@@ -766,7 +781,6 @@ impl Render for BreakpointCommands {
     category = "breakpoints and events",
     kind = Host,
     python = none,
-    usage = "gc"
 )]
 fn resume_from_action(state: &mut ReplState<'_>) -> Result<Flow> {
     if state.context != DispatchContext::BreakpointAction {
@@ -829,8 +843,6 @@ impl Render for BreakpointUpdates {
     state = Halted,
     writes = [Breakpoints],
     python = none,
-    usage = "bc <id|id-id|*>",
-    completion = Breakpoint
 )]
 fn clear_breakpoints(
     session: &mut Session,
@@ -852,8 +864,6 @@ fn clear_breakpoints(
     state = Halted,
     writes = [Breakpoints],
     python = none,
-    usage = "bd <id|id-id|*>",
-    completion = Breakpoint
 )]
 fn disable_breakpoints(
     session: &mut Session,
@@ -875,8 +885,6 @@ fn disable_breakpoints(
     state = Halted,
     writes = [Breakpoints],
     python = none,
-    usage = "be <id|id-id|*>",
-    completion = Breakpoint
 )]
 fn enable_breakpoints(
     session: &mut Session,
@@ -897,8 +905,6 @@ fn enable_breakpoints(
     kind = Action,
     writes = [Breakpoints],
     python = none,
-    usage = "bpc <id> <condition|clear>",
-    completion = [Breakpoint, Expression]
 )]
 fn set_condition(
     state: &mut ReplState<'_>,
@@ -929,8 +935,6 @@ fn set_condition(
     kind = Action,
     writes = [Breakpoints],
     python = none,
-    usage = "bsc <id> <condition> [\"commands\"]",
-    completion = [Breakpoint, Expression]
 )]
 fn set_condition_and_commands(
     state: &mut ReplState<'_>,
@@ -957,8 +961,6 @@ fn set_condition_and_commands(
     kind = Action,
     writes = [Breakpoints],
     python = none,
-    usage = "bs <id> <commands|clear>",
-    completion = Breakpoint
 )]
 fn set_commands(
     session: &mut Session,
@@ -979,8 +981,6 @@ fn set_commands(
     kind = Action,
     writes = [Breakpoints],
     python = none,
-    usage = "br <id> <newid>",
-    completion = Breakpoint
 )]
 fn renumber_breakpoint(
     state: &mut ReplState<'_>,
@@ -1005,8 +1005,6 @@ fn renumber_breakpoint(
     kind = Action,
     writes = [Breakpoints],
     python = none,
-    usage = "bpp <id> <passes>",
-    completion = Breakpoint
 )]
 fn reset_pass_count(
     session: &mut Session,

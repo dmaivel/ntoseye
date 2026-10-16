@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 use crate::error::{Error, Result};
 use crate::expr::Expr;
@@ -39,7 +39,6 @@ use crate::ui;
     target = Kernel,
     python = Inspect,
     python_name = "queued_locks",
-    usage = "!qlocks"
 )]
 fn qlocks(session: &mut Session) -> Result<QueuedLocks> {
     session
@@ -72,6 +71,7 @@ fn processor_filter(
 }
 
 /// `!ipi`'s processor: one word.
+#[grammar(usage = "[processor]", complete = [Expression])]
 fn ipi_processor(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -81,6 +81,7 @@ fn ipi_processor(
 }
 
 /// `!ready`'s processor: the rest of the line.
+#[grammar(usage = "[{}]", complete = [Expression])]
 pub fn ready_processor(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -111,8 +112,6 @@ pub fn ready_processor(
     kind = Query,
     target = Kernel,
     python = Inspect,
-    usage = "!ipi [processor]",
-    completion = [Expression]
 )]
 fn ipi(
     session: &mut Session,
@@ -159,7 +158,6 @@ impl Render for IpiState {
     target = Kernel,
     python = Inspect,
     python_name = "pci_tree",
-    usage = "!pcitree"
 )]
 fn pcitree(session: &mut Session) -> Result<PciTree> {
     session
@@ -175,6 +173,7 @@ impl Render for PciTree {
 }
 
 /// `!pci`'s words, each an expression, as WinDbg reads them.
+#[grammar(usage = "[flags] [bus [device [function [min max]]]]", complete = Expression)]
 fn pci_request(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -224,8 +223,6 @@ pub struct PciReport {
     kind = Query,
     target = Kernel,
     forms = [pci],
-    usage = "!pci [flags] [bus [device [function [min max]]]]",
-    completion = [Expression]
 )]
 fn pci_command(
     session: &mut Session,
@@ -242,7 +239,7 @@ fn pci_command(
 /// all 4 KiB of each function, with the extended capabilities, as `config`.
 /// This needs a halted target and a backend that can get to configuration
 /// space (kd/kdnet, or gdb on QEMU).
-#[command(form_of = pci_command, python = Inspect, sdk)]
+#[command(form_of = pci_command, python = Inspect)]
 fn pci(
     session: &mut Session,
     #[arg(default = 0, positional)] bus: u8,
@@ -317,7 +314,6 @@ fn write_port(session: &mut Session, name: &str, port: u64, size: u8, value: u64
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "ib <port>"
 )]
 fn ib(session: &mut Session, #[arg(invoked)] name: &str, port: u64) -> Result<PortValue> {
     read_port(session, name, port, 1)
@@ -338,8 +334,6 @@ fn ib(session: &mut Session, #[arg(invoked)] name: &str, port: u64) -> Result<Po
     writes = [Hardware],
     live_only,
     python = none,
-    usage = "ob <port> <value>",
-    completion = [Expression]
 )]
 fn ob(session: &mut Session, #[arg(invoked)] name: &str, port: u64, value: u64) -> Result<()> {
     write_port(session, name, port, 1, value)
@@ -359,7 +353,6 @@ fn ob(session: &mut Session, #[arg(invoked)] name: &str, port: u64, value: u64) 
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "iw <port>"
 )]
 fn iw(session: &mut Session, #[arg(invoked)] name: &str, port: u64) -> Result<PortValue> {
     read_port(session, name, port, 2)
@@ -380,8 +373,6 @@ fn iw(session: &mut Session, #[arg(invoked)] name: &str, port: u64) -> Result<Po
     writes = [Hardware],
     live_only,
     python = none,
-    usage = "ow <port> <value>",
-    completion = [Expression]
 )]
 fn ow(session: &mut Session, #[arg(invoked)] name: &str, port: u64, value: u64) -> Result<()> {
     write_port(session, name, port, 2, value)
@@ -401,7 +392,6 @@ fn ow(session: &mut Session, #[arg(invoked)] name: &str, port: u64, value: u64) 
     kind = Query,
     target = Kernel,
     python = none,
-    usage = "id <port>"
 )]
 fn id(session: &mut Session, #[arg(invoked)] name: &str, port: u64) -> Result<PortValue> {
     read_port(session, name, port, 4)
@@ -422,8 +412,6 @@ fn id(session: &mut Session, #[arg(invoked)] name: &str, port: u64) -> Result<Po
     writes = [Hardware],
     live_only,
     python = none,
-    usage = "od <port> <value>",
-    completion = [Expression]
 )]
 fn od(session: &mut Session, #[arg(invoked)] name: &str, port: u64, value: u64) -> Result<()> {
     write_port(session, name, port, 4, value)

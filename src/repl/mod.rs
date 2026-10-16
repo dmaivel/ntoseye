@@ -94,6 +94,7 @@ mod remote;
 mod stop;
 #[cfg(feature = "cli")]
 mod tern_prompt;
+pub mod usage;
 
 pub use crate::exception_policy::*;
 pub use crate::session::effects::{RunEffect, RunState, TargetScope};

@@ -1,7 +1,7 @@
 //! Exception stop policies and module load and unload filters (`sx*`), and
 //! the last target event (`.lastevent`).
 
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 use crate::dbg_backend::{ContinueDisposition, LastEvent, ModuleEvent};
 use crate::error::{Error, Result};
@@ -14,6 +14,10 @@ use crate::ui;
 /// <commands>`, `-f <break|gh|gn>`, and one event, in any order. Returns
 /// the event; `-c` and `-f` are left for [`event_command`] and
 /// [`final_action`], which the check made sure are well formed.
+#[grammar(
+    usage = "[-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]|ud[:<module>]>",
+    complete = None
+)]
 fn event_name(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -60,6 +64,7 @@ fn option_value(cursor: &mut ArgCursor<'_>, option: &str) -> Option<String> {
 }
 
 /// `-c <commands>`.
+#[grammar(usage = "")]
 fn event_command(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -68,6 +73,7 @@ fn event_command(
 }
 
 /// `-f <break|gh|gn>`.
+#[grammar(usage = "")]
 fn final_action(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -134,8 +140,6 @@ fn module_event_label(mode: ExceptionPolicyMode) -> &'static str {
     category = "breakpoints and events",
     kind = Action,
     forms = [set_exception_policy, set_module_event],
-    usage = "sxe [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]|ud[:<module>]>",
-    completion = None
 )]
 fn sxe(
     session: &mut Session,
@@ -242,7 +246,7 @@ fn set_module_filter(
 /// `command` runs at the stop, which needs an explicit `disposition`: break,
 /// or continue the exception as handled or not handled. For a module load
 /// or unload filter, use `set_module_event`.
-#[command(form_of = sxe, python = Exceptions, python_name = "set", sdk)]
+#[command(form_of = sxe, python = Exceptions, python_name = "set")]
 fn set_exception_policy(
     session: &mut Session,
     code: EventName,
@@ -272,7 +276,7 @@ fn set_exception_policy(
 /// then the target continues), or `second_chance` or `ignore` (it
 /// continues). `command` runs at the stop, so only with `break`. A named
 /// filter has precedence over a bare one.
-#[command(form_of = sxe, python = Exceptions, sdk)]
+#[command(form_of = sxe, python = Exceptions)]
 fn set_module_event(
     session: &mut Session,
     event: ModuleEvent,
@@ -332,8 +336,6 @@ impl Render for EventPolicy {
     category = "breakpoints and events",
     kind = Action,
     python = none,
-    usage = "sxd [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]|ud[:<module>]>",
-    completion = None
 )]
 fn set_second_chance(
     session: &mut Session,
@@ -361,8 +363,6 @@ fn set_second_chance(
     category = "breakpoints and events",
     kind = Action,
     python = none,
-    usage = "sxn [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]|ud[:<module>]>",
-    completion = None
 )]
 fn set_notify(
     session: &mut Session,
@@ -389,8 +389,6 @@ fn set_notify(
     category = "breakpoints and events",
     kind = Action,
     python = none,
-    usage = "sxi [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]|ud[:<module>]>",
-    completion = None
 )]
 fn set_ignore(
     session: &mut Session,
@@ -413,7 +411,6 @@ fn set_ignore(
     category = "breakpoints and events",
     kind = Query,
     python = none,
-    usage = "sx or sxl"
 )]
 fn event_policies(session: &Session) -> Result<EventPolicies> {
     let policies = &session.exception_policies;
@@ -484,7 +481,6 @@ pub struct PoliciesReset;
     category = "breakpoints and events",
     kind = Action,
     python = none,
-    usage = "sxr"
 )]
 fn reset_event_policies(session: &mut Session) -> Result<PoliciesReset> {
     session.exception_policies.reset();
@@ -519,7 +515,6 @@ pub enum LastEventReport {
     category = "target control",
     kind = Query,
     python = none,
-    usage = ".lastevent"
 )]
 fn last_event(session: &Session) -> Result<LastEventReport> {
     if let Some(last) = &session.last_event {

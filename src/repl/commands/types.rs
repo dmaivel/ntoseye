@@ -13,7 +13,7 @@ use crate::types::VirtAddr;
 use crate::typeview::{MAX_ARRAY_ELEMENTS, TypeView};
 use crate::ui;
 
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
@@ -45,14 +45,16 @@ const MAX_DL_WORDS: usize = 64;
     category = "symbols, types, and expressions",
     kind = Query,
     python = none,
-    usage = "dt [-r[N]] [-a[N]] [-v] [-y] [-l <field>] [module!]<type> [address] [field-pattern...]",
-    completion = Type
 )]
 fn dt(state: &mut ReplState<'_>, #[arg(parse = dt_arguments)] parsed: ParsedDtArgs) -> Result<()> {
     state.dt(parsed)
 }
 
 /// `dt`'s words.
+#[grammar(
+    usage = "[-r[N]] [-a[N]] [-v] [-y] [-l <field>] [module!]<type> [address] [field-pattern]...",
+    complete = Type
+)]
 fn dt_arguments(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -84,8 +86,6 @@ fn dt_arguments(
     category = "memory and disassembly",
     kind = Query,
     python = none,
-    usage = "dl [-b] <address> <maxcount> [size]",
-    completion = Expression
 )]
 fn dl(state: &mut ReplState<'_>, #[arg(parse = dl_arguments)] words: DlArgs) -> Result<()> {
     state.dl(words)
@@ -97,6 +97,7 @@ struct DlArgs {
     positional: Vec<String>,
 }
 
+#[grammar(usage = "[-b] <address> <maxcount> [size]", complete = Expression)]
 fn dl_arguments(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -124,6 +125,10 @@ struct ListArguments {
     address: String,
 }
 
+#[grammar(
+    usage = "-t [module!]<type>.<field> -x \"<commands>\" <address>",
+    complete = Expression
+)]
 fn list_arguments(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -187,8 +192,6 @@ fn list_arguments(
     category = "objects and I/O",
     kind = Host,
     python = none,
-    usage = "!list -t [module!]<type>.<field> -x \"<commands>\" <address>",
-    completion = Expression
 )]
 fn list(
     state: &mut ReplState<'_>,

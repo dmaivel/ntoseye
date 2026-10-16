@@ -5,7 +5,7 @@ use owo_colors::OwoColorize;
 use crate::bugchecks::{bugcheck_trap_frame_address, looks_like_kernel_pointer};
 use crate::dbg_backend::{RegisterMap, processor_index_from_backend_thread_id};
 use crate::diagnostics;
-use ntoseye_macros::command;
+use ntoseye_macros::{command, grammar};
 
 use crate::error::{Error, Result};
 use crate::session::effects::{Effects, Writes};
@@ -93,8 +93,6 @@ fn print_frame_line(line: &FrameLine, frame: &SelectedFrame, show_registers: boo
     kind = Action,
     state = HaltedOrParkedThread,
     python = none,
-    usage = ".frame [/r] [N]",
-    completion = Expression
 )]
 fn frame(
     state: &mut ReplState<'_>,
@@ -145,6 +143,7 @@ pub struct FrameRequest {
     index: Option<usize>,
 }
 
+#[grammar(usage = "[/r] [frame-number]", complete = Expression)]
 fn frame_request(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -185,8 +184,6 @@ fn frame_request(
     kind = Query,
     python = Memory,
     python_name = "function_entry",
-    usage = ".fnent <address>",
-    completion = Expression
 )]
 fn fnent(
     session: &Session,
@@ -214,8 +211,6 @@ impl Render for FunctionEntry {
     kind = Action,
     state = Halted,
     python = none,
-    usage = ".cxr [address]",
-    completion = Expression
 )]
 fn cxr(
     state: &mut ReplState<'_>,
@@ -244,6 +239,7 @@ fn cxr(
 }
 
 /// One optional expression; a second word prints the help.
+#[grammar(usage = "[{}]", complete = Expression)]
 fn lone_address(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -261,8 +257,6 @@ fn lone_address(
     kind = Action,
     state = Halted,
     python = none,
-    usage = ".ecxr",
-    completion = []
 )]
 fn ecxr(state: &mut ReplState<'_>) -> Result<()> {
     // A user dump stores the exception's CONTEXT in its ExceptionStream.
@@ -375,8 +369,6 @@ fn ecxr(state: &mut ReplState<'_>) -> Result<()> {
     target = Kernel,
     state = Halted,
     python = none,
-    usage = ".vtlcxr [0|1]",
-    completion = []
 )]
 fn vtlcxr(state: &mut ReplState<'_>, #[arg(parse = vtl_choice)] vtl: u8) -> Result<()> {
     if let Err(error) = state
@@ -512,6 +504,7 @@ fn vtlcxr(state: &mut ReplState<'_>, #[arg(parse = vtl_choice)] vtl: u8) -> Resu
 }
 
 /// `.vtlcxr`'s VTL: none (0), `0` or `1`; anything else prints the help.
+#[grammar(usage = "[0|1]")]
 fn vtl_choice(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -532,8 +525,6 @@ fn vtl_choice(
     kind = Query,
     python = Inspect,
     python_name = "exception_record",
-    usage = ".exr <address|-1>",
-    completion = Expression
 )]
 fn exr(
     session: &Session,
@@ -554,6 +545,7 @@ fn exr(
 
 /// `.exr`'s record: an address, or `-1` (`None`) for the current
 /// exception's. A missing or second word prints the help.
+#[grammar(usage = "<{}|-1>", complete = Expression)]
 fn exception_record_address(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -587,13 +579,11 @@ impl Render for ExceptionRecord {
     kind = Query,
     state = HaltedOrParkedThread,
     python = none,
-    usage = "r [register[, register...] | register=expression]",
-    completion = []
 )]
 fn registers(
     state: &mut ReplState<'_>,
     #[arg(invoked)] invoked: &str,
-    #[arg(raw)] tail: String,
+    #[arg(raw, usage = "[register[,register]...] | <register>=<expression>", complete = None)] tail: String,
 ) -> Result<()> {
     // A live frame 0 (`.frame 0`, or the frame an editor client keeps
     // selected) is the vCPU's own register file. Only a recovered context
@@ -764,8 +754,6 @@ fn registers(
     kind = Query,
     state = HaltedOrParkedThread,
     python = none,
-    usage = "kn|k|kb|kp|kv|kf [count]",
-    completion = []
 )]
 fn stack(
     state: &mut ReplState<'_>,
@@ -919,10 +907,8 @@ fn stack(
     kind = Query,
     state = HaltedOrParkedThread,
     python = none,
-    usage = "kd [count]",
-    completion = Expression
 )]
-fn kd(state: &mut ReplState<'_>, #[arg(default = 20)] words: u64) -> Result<()> {
+fn kd(state: &mut ReplState<'_>, #[arg(default = 20, name = "count")] words: u64) -> Result<()> {
     if words == 0 {
         error!("word count must be positive");
         return Ok(());
@@ -974,8 +960,6 @@ fn kd(state: &mut ReplState<'_>, #[arg(default = 20)] words: u64) -> Result<()> 
     kind = Action,
     target = Kernel,
     python = none,
-    usage = ".trap [address-expression]",
-    completion = Expression
 )]
 fn trap(
     state: &mut ReplState<'_>,
@@ -1024,6 +1008,7 @@ fn trap(
 }
 
 /// `.trap`'s optional address, its first word; it ignores any after.
+#[grammar(usage = "[{}]", complete = Expression)]
 fn first_address(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,

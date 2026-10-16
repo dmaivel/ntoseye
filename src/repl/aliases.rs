@@ -306,10 +306,12 @@ fn aliases(state: &mut ReplState<'_>) -> Result<()> {
     category = "session",
     kind = Host,
     python = none,
-    usage = "as <name> <expansion>",
     style = RawTail
 )]
-fn alias(state: &mut ReplState<'_>, #[arg(raw)] tail: String) -> Result<()> {
+fn alias(
+    state: &mut ReplState<'_>,
+    #[arg(raw, usage = "<name> <expansion>", complete = None)] tail: String,
+) -> Result<()> {
     let (name, expansion) = match parse_alias_body(tail.as_str()) {
         Ok(parts) => parts,
         Err(err) => {
@@ -335,10 +337,8 @@ fn alias(state: &mut ReplState<'_>, #[arg(raw)] tail: String) -> Result<()> {
     category = "session",
     kind = Host,
     python = none,
-    usage = "ad <name>",
-    completion = Alias
 )]
-fn unalias(state: &mut ReplState<'_>, name: String) -> Result<()> {
+fn unalias(state: &mut ReplState<'_>, #[arg(complete = Alias)] name: String) -> Result<()> {
     match state.aliases.remove(&name) {
         Ok(true) => {
             state.refresh_alias_cache();
