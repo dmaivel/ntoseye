@@ -518,10 +518,12 @@ class AlpcQueue(BaseRecord):
 @final
 class Amd64TrapFrame(BaseRecord):
     """
-    The x64 registers that a `_KTRAP_FRAME` saved. A register is `None` if
-    the entry that built the frame does not write it. The nonvolatile
-    registers r12-r15 are in the `_KEXCEPTION_FRAME`, so this type does
-    not include them.
+    The x64 registers that a `_KTRAP_FRAME` saved. The nonvolatile r12-r15
+    live in the accompanying `_KEXCEPTION_FRAME`, not the trap frame.
+    
+    What a frame holds depends on the entry that built it, `kind` (see
+    [`TrapKind`]). A register the entry does not write is `None` rather than
+    whatever its slot held.
     """
     @property
     def cs(self, /) -> int: ...
@@ -530,15 +532,17 @@ class Amd64TrapFrame(BaseRecord):
     @property
     def error_code(self, /) -> int |None:
         """
-        The exception error code, which is stale for a vector that has no
-        error code.
+        The exception error code, which is stale for an exception whose
+        vector carries none (#DE, #BP, #UD, ...): the frame cannot tell them
+        apart.
         """
     @property
     def kind(self, /) -> str |None:
         """
         The entry that built the frame: `interrupt`, `exception`,
-        `system call`, or `Zw call`. `None` if the entry is unknown, and
-        then only the machine frame and rbp are reliable.
+        `system call`, or `Zw call`. `None` if the entry is unknown (no or
+        an unknown `ExceptionActive`), and then only the machine frame and
+        rbp, which every entry writes, are reliable.
         """
     @property
     def previous_irql(self, /) -> int |None:
@@ -548,7 +552,9 @@ class Amd64TrapFrame(BaseRecord):
     @property
     def previous_mode(self, /) -> int:
         """
-        The mode that the trap came from: 0 for kernel, 1 for user.
+        The mode that the trap came from: 0 for kernel, 1 for user. It is
+        read from the saved `cs`, as Windows reads it: the `PreviousMode`
+        field is set only by system calls.
         """
     @property
     def r10(self, /) -> int |None: ...
@@ -895,8 +901,10 @@ class Arm64PackedUnwind(BaseRecord):
 @final
 class Arm64TrapFrame(BaseRecord):
     """
-    The ARM64 registers that a `_KTRAP_FRAME` saved. The frame holds
-    x0-x18, fp (x29), and lr (x30), so x19-x28 are `None`.
+    The ARM64 registers that a `_KTRAP_FRAME` saved, as the target's PDB
+    lays the frame out. The frame holds x0-x18, fp (x29) and lr (x30), and
+    keeps the control and debug state beside the return context. A field
+    that the build's frame lacks is `None`.
     """
     @property
     def bcr(self, /) -> list[int |None]:
@@ -946,67 +954,10 @@ class Arm64TrapFrame(BaseRecord):
         Watchpoint value registers.
         """
     @property
-    def x0(self, /) -> int |None: ...
-    @property
-    def x1(self, /) -> int |None: ...
-    @property
-    def x10(self, /) -> int |None: ...
-    @property
-    def x11(self, /) -> int |None: ...
-    @property
-    def x12(self, /) -> int |None: ...
-    @property
-    def x13(self, /) -> int |None: ...
-    @property
-    def x14(self, /) -> int |None: ...
-    @property
-    def x15(self, /) -> int |None: ...
-    @property
-    def x16(self, /) -> int |None: ...
-    @property
-    def x17(self, /) -> int |None: ...
-    @property
-    def x18(self, /) -> int |None: ...
-    @property
-    def x19(self, /) -> int |None: ...
-    @property
-    def x2(self, /) -> int |None: ...
-    @property
-    def x20(self, /) -> int |None: ...
-    @property
-    def x21(self, /) -> int |None: ...
-    @property
-    def x22(self, /) -> int |None: ...
-    @property
-    def x23(self, /) -> int |None: ...
-    @property
-    def x24(self, /) -> int |None: ...
-    @property
-    def x25(self, /) -> int |None: ...
-    @property
-    def x26(self, /) -> int |None: ...
-    @property
-    def x27(self, /) -> int |None: ...
-    @property
-    def x28(self, /) -> int |None: ...
-    @property
-    def x29(self, /) -> int |None: ...
-    @property
-    def x3(self, /) -> int |None: ...
-    @property
-    def x30(self, /) -> int |None: ...
-    @property
-    def x4(self, /) -> int |None: ...
-    @property
-    def x5(self, /) -> int |None: ...
-    @property
-    def x6(self, /) -> int |None: ...
-    @property
-    def x7(self, /) -> int |None: ...
-    @property
-    def x8(self, /) -> int |None: ...
-    @property
-    def x9(self, /) -> int |None: ...
+    def x(self, /) -> list[int]:
+        """
+        x0 to x18.
+        """
 
 @final
 class Arm64UnwindCode(BaseRecord):
@@ -2388,7 +2339,7 @@ class Cpu:
         The instruction pointer, which needs a halted target.
         """
     @property
-    def saved_vtl(self, /) -> list[SavedVtlState]:
+    def saved_vtl(self, /) -> list[SavedVtl]:
         """
         The VTL states that the hypervisor saved for this virtual processor
         (`.vtlcxr`), for a vCPU halted in the Windows hypervisor (VBS). VTL0
@@ -3041,21 +2992,26 @@ class Debugger:
 class DecodedHypercall(BaseRecord):
     """
     The hypercall of a VMCALL exit, with its input decoded as the Hyper-V
-    TLFS lays it out (`!hvcall`).
+    TLFS lays it out (`!hvcall`): the one data model that the REPL, the MCP
+    trailer, and the SDK show.
     """
     @property
-    def code(self, /) -> int: ...
+    def code(self, /) -> int:
+        """
+        The call code (bits 15:0 of the input value).
+        """
     @property
     def decoded(self, /) -> bool:
         """
         Whether ntoseye knows the layout of the call's input. When it does
-        not, `fields` holds the input as raw qwords: RDX and R8 for a fast
-        call, else the first 8 qwords of the input.
+        not, `fields` holds the input as raw qwords, `Input[0]` on: RDX and
+        R8 for a fast call, else the first [`RAW_QWORDS`] of the input page.
         """
     @property
     def elements(self, /) -> list[HypercallElement]:
         """
-        A rep call's input list, each element up to the rep count.
+        A rep call's input list, every element up to the rep count, those
+        before the rep start (done already) included.
         """
     @property
     def fast(self, /) -> bool:
@@ -3102,13 +3058,14 @@ class DecodedHypercall(BaseRecord):
     @property
     def summary(self, /) -> str:
         """
-        The call on one line, as the stop header shows it.
+        The call on one line, as the stop header shows it:
+        `hypercall 0x0003 HvCallFlushVirtualAddressList rep 0/12`.
         """
     @property
     def unavailable(self, /) -> str |None:
         """
-        Why some of the input is missing: an unreadable input page, input
-        in XMM registers, or input past the end of its page.
+        Why some of the input is not shown: the input page is unreadable, the
+        input is in XMM registers, or it runs past the end of its page.
         """
     @property
     def variable_header_size(self, /) -> int:
@@ -4746,8 +4703,8 @@ class ExceptionRecord(BaseRecord):
     def record_address(self, /) -> int |None:
         """
         The address that ntoseye read the record from. `None` for the
-        record of the current event, which ntoseye builds from the stop
-        without reading it from memory.
+        record of the current event, which ntoseye builds from the stop or
+        the dump without reading it from memory.
         """
 
 @final
@@ -5166,9 +5123,15 @@ class FindStackThread(BaseRecord):
         The number of frames that matched.
         """
     @property
+    def matches(self, /) -> list[int]:
+        """
+        The indexes in the walked stack (`frames`) of the frames that
+        matched, innermost first.
+        """
+    @property
     def matching_frames(self, /) -> list[StackFrame]:
         """
-        The frames that matched.
+        The frames that matched, in the order of `matches`.
         """
     @property
     def thread(self, /) -> ThreadInfo: ...
@@ -6359,8 +6322,8 @@ class HypercallField(BaseRecord):
     @property
     def meaning(self, /) -> str |None:
         """
-        What the value means, where it has a name or stands for a set
-        (`HV_PARTITION_ID_SELF`, `VPs 0-3`, a register's TLFS name).
+        What the value means, where it has a name or stands for a set:
+        `HV_PARTITION_ID_SELF`, `VPs 0-3`, a register's TLFS name.
         """
     @property
     def name(self, /) -> str:
@@ -6373,7 +6336,7 @@ class HypercallField(BaseRecord):
     @property
     def offset(self, /) -> int:
         """
-        The offset in the input, from its first byte.
+        The offset in the input, from its first byte, rep list included.
         """
     @property
     def size(self, /) -> int:
@@ -7269,9 +7232,9 @@ class Inspect:
         tracerpt open. `logger` is the logger ID, the context address, or the
         session name.
         """
-    def exception_record(self, /, address: int) -> ExceptionRecord:
+    def exception_record(self, /, address: int |None = None) -> ExceptionRecord:
         """
-        Decode an `EXCEPTION_RECORD64` (`.exr`).
+        Show an EXCEPTION_RECORD64.
         """
     def file_cache(self, /) -> FileCacheDetail:
         """
@@ -7892,7 +7855,7 @@ class Inspect:
         Read the kernel timer-table entries, up to a limit, and their DPCs
         (`!timer`).
         """
-    def trap_frame(self, /, address: int) -> TrapFrame:
+    def trap_frame(self, /, address: int) -> KtrapFrame:
         """
         Decode a `_KTRAP_FRAME` at `address` (`.trap`).
         """
@@ -8165,7 +8128,10 @@ class Inspect:
 @final
 class IoIntercepts(BaseRecord):
     """
-    Which I/O instructions of a VTL exit (`!hvvmcs -io`).
+    Which I/O instructions of a VTL exit (`!hvvmcs -io`), by its eVMCS's
+    controls and I/O bitmaps. `kind` is `none` (no I/O bitmaps and no
+    unconditional I/O exiting), `every` (unconditional I/O exiting), or
+    `bitmaps`.
     """
     @property
     def every(self, /) -> bool:
@@ -8174,11 +8140,12 @@ class IoIntercepts(BaseRecord):
         bitmaps but unconditional I/O exiting.
         """
     @property
-    def ports(self, /) -> list[PortRange]:
+    def kind(self, /) -> str:
         """
-        The port ranges whose accesses exit, through I/O bitmaps A and B.
-        Empty with `every`, and when no I/O instruction exits.
+        The variant: `none`, `every`, `bitmaps`.
         """
+    @property
+    def ports(self, /) -> list[PortRange] |None: ...
 
 @final
 class IoStackLocationInfo(BaseRecord):
@@ -8909,6 +8876,22 @@ class KernelTimer(BaseRecord):
         """
 
 @final
+class KtrapFrame(BaseRecord):
+    """
+    A decoded `_KTRAP_FRAME` (`.trap`).
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The address that ntoseye read the frame from.
+        """
+    @property
+    def frame(self, /) -> Amd64TrapFrame |Arm64TrapFrame:
+        """
+        The saved registers, by architecture.
+        """
+
+@final
 class LargeAllocation(BaseRecord):
     """
     A segment-heap large allocation (`_HEAP_LARGE_ALLOC_DATA`).
@@ -9427,8 +9410,19 @@ class Memory:
         """
     def function_entry(self, /, addr: int) -> FunctionEntry:
         """
-        Get the function-table entry and unwind info (AMD64 or ARM64) of the
-        function that contains `addr`, with the chained parents (`.fnent`).
+        Show the function table entry and unwind info of the function that
+        contains an address.
+        
+        Shows the RUNTIME_FUNCTION that covers the address (the begin, end, and
+        unwind info RVAs), then its unwind data. On AMD64, the unwind data is the
+        UNWIND_INFO version, flags, prolog size, frame register, and frame offset,
+        each unwind code with its operands, and the exception or termination
+        handler. After a chained entry, .fnent shows the entry of each parent. On
+        ARM64, it shows the fields of packed unwind data (flag, RegF, RegI, H, CR,
+        frame size) and the prolog codes that they represent. For an .xdata
+        record, it shows the header, the epilog scopes, each unwind code with the
+        instruction that it undoes, and the exception handler. If a function table
+        is paged out, .fnent reads it from the image file on disk.
         """
     def page_in(self, /, addr: int) -> bool:
         """
@@ -10185,35 +10179,33 @@ class Modules:
 @final
 class MsrIntercepts(BaseRecord):
     """
-    Which RDMSRs and WRMSRs of a VTL exit (`!hvvmcs -msr`). MSRs outside
-    the bitmap's 0x0-0x1fff and 0xc0000000-0xc0001fff always exit.
+    Which RDMSRs and WRMSRs of a VTL exit (`!hvvmcs -msr`), by its eVMCS's
+    controls and MSR bitmap. `kind` is `every` (the controls use no MSR
+    bitmap: every RDMSR and WRMSR exits) or `bitmap`. MSRs outside the
+    bitmap's 0x0-0x1fff and 0xc0000000-0xc0001fff always exit.
     """
     @property
-    def bitmap(self, /) -> int |None:
-        """
-        The MSR bitmap's physical address, or None without one.
-        """
+    def bitmap(self, /) -> int |None: ...
     @property
     def every(self, /) -> bool:
         """
         Whether every RDMSR and WRMSR exits: the controls use no MSR
-        bitmap, and the lists are empty.
+        bitmap.
         """
     @property
-    def read(self, /) -> list[MsrRange]:
+    def kind(self, /) -> str:
         """
-        The MSR ranges whose reads exit.
+        The variant: `every`, `bitmap`.
         """
+    @property
+    def read(self, /) -> list[MsrRange] |None: ...
     @property
     def read_without_exit(self, /) -> list[str]:
         """
         The MSRs ntoseye names that the VTL reads without an exit.
         """
     @property
-    def write(self, /) -> list[MsrRange]:
-        """
-        The MSR ranges whose writes exit.
-        """
+    def write(self, /) -> list[MsrRange] |None: ...
     @property
     def write_without_exit(self, /) -> list[str]:
         """
@@ -10223,15 +10215,18 @@ class MsrIntercepts(BaseRecord):
 @final
 class MsrRange(BaseRecord):
     """
-    A range of MSRs whose accesses exit, with the architectural MSRs (or
-    blocks, such as `x2APIC`) that ntoseye names in it.
+    An inclusive range of MSRs whose accesses exit, with the architectural
+    MSRs (or blocks, such as `x2APIC`) that ntoseye names in it.
     """
     @property
     def first(self, /) -> int: ...
     @property
     def last(self, /) -> int: ...
     @property
-    def names(self, /) -> list[str]: ...
+    def names(self, /) -> list[str]:
+        """
+        The MSRs and blocks that ntoseye names in the range.
+        """
 
 @final
 class Msrs:
@@ -12713,7 +12708,7 @@ class PoolValidationDetail(BaseRecord):
 @final
 class PortRange(BaseRecord):
     """
-    A range of I/O ports whose accesses exit.
+    An inclusive range of I/O ports whose accesses exit.
     """
     @property
     def first(self, /) -> int: ...
@@ -14362,7 +14357,7 @@ class RunStatus(BaseRecord):
         shows, or None.
         """
     @property
-    def saved_vtl(self, /) -> list[SavedVtlState]:
+    def saved_vtl(self, /) -> list[SavedVtl]:
         """
         For a vCPU halted in the Windows hypervisor, the VTL states that the
         hypervisor saved for the vCPU's virtual processor, VTL0 first.
@@ -14371,7 +14366,7 @@ class RunStatus(BaseRecord):
     def serving(self, /) -> ServedVp |None:
         """
         For a vCPU halted in the Windows hypervisor, the guest partition's
-        virtual processor it serves, as `VcpuStatus.serving`.
+        virtual processor it serves, as `VcpuInfo.serving`.
         """
     @property
     def stopped_process(self, /) -> ProcessInfo |None:
@@ -14465,7 +14460,8 @@ class RuntimeFunction(BaseRecord):
     def unwind_data(self, /) -> int:
         """
         The raw unwind word of the entry: the RVA of the unwind info, or
-        the packed unwind data on ARM64.
+        the packed unwind data on ARM64 when its low two bits (the flag) are
+        not zero.
         """
     @property
     def unwind_info(self, /) -> int |None:
@@ -14474,11 +14470,12 @@ class RuntimeFunction(BaseRecord):
         """
 
 @final
-class SavedVtlState(BaseRecord):
+class SavedVtl(BaseRecord):
     """
     One VTL of a virtual processor, as the Windows hypervisor last saved it
-    in the VTL's Enlightened VMCS. A VMCS holds no general-purpose register
-    other than `rsp`; `general_registers` has the others when they are known.
+    in the VTL's Enlightened VMCS, with the symbol where it left off. A VMCS
+    holds no general-purpose register other than `rsp`; `general_registers`
+    has the others when they are known.
     """
     @property
     def cr0(self, /) -> int: ...
@@ -14968,7 +14965,7 @@ class ServedVp(BaseRecord):
     """
     The guest partition's virtual processor that a processor in the
     Windows hypervisor runs or last ran: the VP whose exit it handles, or
-    which it is about to enter.
+    which it is about to enter, rather than one of the root's.
     """
     @property
     def current(self, /) -> bool:
@@ -14991,7 +14988,7 @@ class ServedVp(BaseRecord):
     def general_registers(self, /) -> Record |None:
         """
         The guest's general-purpose registers other than `rsp` at the last
-        exit, as `SavedVtlState.general_registers`. None when they are not
+        exit, as `SavedVtl.general_registers`. None when they are not
         known.
         """
     @property
@@ -15474,11 +15471,6 @@ class StackFrame(BaseRecord):
     One frame of a stack walk.
     """
     @property
-    def index(self, /) -> int:
-        """
-        The position of the frame in the stack walk. The innermost frame is 0.
-        """
-    @property
     def inline(self, /) -> bool:
         """
         True for a call that the compiler inlined into the physical frame
@@ -15493,16 +15485,15 @@ class StackFrame(BaseRecord):
     @property
     def source(self, /) -> str:
         """
-        How ntoseye recovered the frame: `current`, `seed`, `unwind`,
-        `prolog` (read off its function's prolog, for the Windows
-        hypervisor's code without its file), or `scan`.
+        How ntoseye recovered the frame.
         """
     @property
     def source_location(self, /) -> SourceLocation |None:
         """
         The source line of the frame, if line information resolves it. For
         an inline frame this is the line in the inlined function, and for a
-        caller it is the line of the call.
+        caller it is the line of the call (see
+        [`SymbolStore::frame_source_location`]).
         """
     @property
     def sp(self, /) -> int:
@@ -15512,7 +15503,9 @@ class StackFrame(BaseRecord):
     @property
     def symbol(self, /) -> str:
         """
-        The symbol at `ip`. Empty if no symbol resolves.
+        The symbol at `ip` (`module!procedure+offset`). For an inline frame,
+        `module!function`, the function inlined. Empty if no symbol
+        resolves.
         """
 
 @final
@@ -16923,7 +16916,7 @@ class Thread:
         """
         The thread as a plain `dict`.
         """
-    def trap_frame(self, /) -> TrapFrame:
+    def trap_frame(self, /) -> KtrapFrame:
         """
         Decode the saved `_KTRAP_FRAME` (`!trap`).
         """
@@ -17248,27 +17241,6 @@ class TokenPrivilege(BaseRecord):
     def attributes(self, /) -> int: ...
     @property
     def luid(self, /) -> int: ...
-
-@final
-class TrapFrame(BaseRecord):
-    """
-    A decoded `_KTRAP_FRAME` (`.trap`).
-    """
-    @property
-    def address(self, /) -> int:
-        """
-        The address that ntoseye read the frame from.
-        """
-    @property
-    def frame(self, /) -> Amd64TrapFrame |Arm64TrapFrame:
-        """
-        The saved registers, by architecture.
-        """
-    @property
-    def rip_symbol(self, /) -> str |None:
-        """
-        The symbol at the interrupted instruction.
-        """
 
 @final
 class TriagePrcb(BaseRecord):
@@ -18463,7 +18435,7 @@ class UserTriageStackThread(BaseRecord):
     def tid(self, /) -> int: ...
 
 @final
-class VcpuStatus(BaseRecord):
+class VcpuInfo(BaseRecord):
     """
     A vCPU (backend execution context) and the guest code that it runs.
     """
@@ -18492,7 +18464,7 @@ class VcpuStatus(BaseRecord):
         None if ntoseye cannot read the register context.
         """
     @property
-    def saved_vtl(self, /) -> list[SavedVtlState]:
+    def saved_vtl(self, /) -> list[SavedVtl]:
         """
         For a vCPU halted in the Windows hypervisor, the VTL states that the
         hypervisor saved for the vCPU's virtual processor, VTL0 first.
@@ -19209,7 +19181,8 @@ class VmPteDetail(BaseRecord):
 @final
 class VpRegisters(BaseRecord):
     """
-    The registers of one VTL of a Windows hypervisor VP (`!hvr`).
+    The registers of one VTL of a Windows hypervisor VP (`!hvr`, see
+    [`Session::vp_registers`]).
     """
     @property
     def missing(self, /) -> str |None:
@@ -19220,7 +19193,8 @@ class VpRegisters(BaseRecord):
     def registers(self, /) -> Record:
         """
         RIP, RSP, flags, control and segment registers, and the
-        general-purpose ones when they are known.
+        general-purpose ones when they are known, in
+        [`crate::target::VP_STATE_REGISTERS`] order.
         """
     @property
     def source(self, /) -> str:
