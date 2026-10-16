@@ -470,12 +470,43 @@ impl<M, T: ToValue<M>> ToValue<M> for Option<T> {
     fn to_value(&self) -> Value {
         self.as_ref().map_or(Value::Null, T::to_value)
     }
+    /// `T | None`, or `T`'s own hint when that already ends in `| None`
+    /// (`Option<Option<T>>`, a tagged enum's optional field).
     #[cfg(feature = "python-stubs")]
-    const HINT: PyStaticExpr = PyStaticExpr::BinOp {
-        left: &T::HINT,
-        op: PyStaticOperator::BitOr,
-        right: &type_hint_identifier!("builtins", "None"),
+    const HINT: PyStaticExpr = if is_optional(&T::HINT) {
+        T::HINT
+    } else {
+        PyStaticExpr::BinOp {
+            left: &T::HINT,
+            op: PyStaticOperator::BitOr,
+            right: &type_hint_identifier!("builtins", "None"),
+        }
     };
+}
+
+/// Whether `hint` is a union whose last member is `None`, as an `Option`'s.
+#[cfg(feature = "python-stubs")]
+const fn is_optional(hint: &PyStaticExpr) -> bool {
+    let PyStaticExpr::BinOp {
+        op: PyStaticOperator::BitOr,
+        right: PyStaticExpr::Name { id },
+        ..
+    } = hint
+    else {
+        return false;
+    };
+    let (id, none) = (id.as_bytes(), b"None");
+    if id.len() != none.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < id.len() {
+        if id[index] != none[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
 impl<M, T: ToValue<M>> ToValue<M> for Vec<T> {
@@ -708,6 +739,7 @@ mod hints {
         name: &'static str [Plain] = "name",
         absent: Option<u8> [Plain] = None,
         present: Option<u8> [Plain] = Some(1),
+        nested_option: Option<Option<u8>> [Plain] = Some(None),
         unit: () [Plain] = (),
         list: Vec<Inner> [Plain] = vec![Inner { id: 1 }],
         #[record(hex)] array: [u64; 2] [Hex] = [1, 2],
@@ -769,6 +801,7 @@ assert len(value) == len([name for name, _ in HINTS if "." not in name]), value.
 assert "hidden" not in value and "work_items" not in value and "items" in value, value.keys()
 assert value.color == "red" and value.renamed_color == "dark blue", value
 assert value.computed == 2, value.computed
+assert dict(HINTS)["nested_option"] == "int | None", dict(HINTS)["nested_option"]
 assert value.end_head.kind == "head" and value.end_head.address is None, value.end_head
 assert value.end_cycle.kind == "cycle" and value.end_cycle.address == 0x30, value.end_cycle
 assert value.end_corrupt.error == "bad link", value.end_corrupt
