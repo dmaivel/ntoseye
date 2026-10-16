@@ -255,6 +255,48 @@ impl MockBackend {
         self
     }
 
+    /// Take software breakpoints, as KD does.
+    pub fn with_breakpoints(mut self) -> Self {
+        self.allow_breakpoints = true;
+        self
+    }
+
+    /// Put processor 0 at `rip`, its stack at `rsp`, running `ethread`.
+    pub fn standing_at(mut self, rip: u64, rsp: u64, ethread: u64) -> Self {
+        self.land(Landing { rip, rsp, ethread });
+        self
+    }
+
+    /// Runs of every vCPU stop on a breakpoint at each `(rip, rsp,
+    /// ethread)` in turn, then run freely.
+    pub fn runs_stopping_at(mut self, stops: &[(u64, u64, u64)]) -> Self {
+        self.schedule
+            .extend(
+                stops
+                    .iter()
+                    .map(|&(rip, rsp, ethread)| Landing { rip, rsp, ethread }),
+            );
+        self
+    }
+
+    /// Make every register fetch take `delay`.
+    pub fn with_register_read_delay(mut self, delay: Duration) -> Self {
+        self.register_read_delay = delay;
+        self
+    }
+
+    /// The `set_breakpoint` / `remove_breakpoint` log, readable after the
+    /// backend moves into a session.
+    pub fn site_log(&self) -> Arc<Mutex<Vec<(u64, bool)>>> {
+        Arc::clone(&self.site_writes)
+    }
+
+    /// The count of runs of every vCPU, readable after the backend moves
+    /// into a session.
+    pub fn continue_count(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.continues)
+    }
+
     /// Give `processor` MSR `msr`, read as `value`.
     pub fn with_msr(mut self, processor: u16, msr: u32, value: u64) -> Self {
         self.msrs.insert((processor, msr), value);
@@ -628,6 +670,16 @@ pub fn session_with_mock(backend: MockBackend) -> Session {
     let mut session = session_over_memory(0x1000, &[0; 0x100]);
     session.backend = Box::new(backend);
     session.register_map = build_register_map();
+    session
+}
+
+/// A session over `code` at 0x1000 whose one vCPU (`p01.01`, a
+/// [`MockBackend::one_vcpu`]) runs the threads the backend lands it on.
+pub fn session_running_code(code: &[u8], backend: MockBackend) -> Session {
+    let threads = Arc::clone(&backend.threads);
+    let mut session = stepping_session(code, backend);
+    session.target.test_current_threads = Some(threads);
+    session.current_thread = "p01.01".into();
     session
 }
 
@@ -1968,11 +2020,7 @@ fn walk_session(steps: &[Landing], runs: &[Landing]) -> (Session, Arc<AtomicUsiz
         ethread: WALKED,
     });
     let continues = Arc::clone(&backend.continues);
-    let threads = Arc::clone(&backend.threads);
-    let mut session = stepping_session(&[0x90u8; 0x40], backend);
-    session.target.test_current_threads = Some(threads);
-    session.current_thread = "p01.01".into();
-    (session, continues)
+    (session_running_code(&[0x90u8; 0x40], backend), continues)
 }
 
 /// A step that an interrupt switched to another thread goes on in the

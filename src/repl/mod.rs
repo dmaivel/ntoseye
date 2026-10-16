@@ -1189,13 +1189,17 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::dbg_backend::BugcheckInfo;
+    use crate::dbg_backend::{BugcheckInfo, StopEvent};
     use crate::layout::{FieldInfo, ParsedType, TypeInfo};
     use crate::output::capture;
     use crate::repl::{Flow, ReplState};
-    use crate::session::tests::{MockBackend, breakpoint_event, session_with_mock};
+    use crate::session::tests::{
+        MockBackend, breakpoint_event, session_running_code, session_with_mock,
+    };
     use crate::session::{Session, session_over_memory};
     use crate::types::VirtAddr;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
 
     use super::{
         bugcheck_fault_ip, looks_like_kernel_pointer, parse_byte_pattern, plausible_bugcheck_code,
@@ -1611,5 +1615,182 @@ mod tests {
             "{text:?}"
         );
         assert_eq!(text.lines().count(), 1, "{text:?}");
+    }
+
+    /// The `_ETHREAD` the mock's vCPU runs in the run-command tests below.
+    const THREAD: u64 = 0xffff_8000_0000_a000;
+    /// Its stack pointer.
+    const STACK: u64 = 0x2000;
+
+    /// A vCPU at `rip` in nops at 0x1000.., which takes breakpoints.
+    fn vcpu_at(rip: u64) -> MockBackend {
+        MockBackend::default()
+            .with_breakpoints()
+            .one_vcpu()
+            .standing_at(rip, STACK, THREAD)
+    }
+
+    fn rip(state: &mut ReplState<'_>) -> u64 {
+        let registers = state.ctx.backend.read_registers().unwrap();
+        state.ctx.register_map.read_u64("rip", &registers).unwrap()
+    }
+
+    /// `g` runs until the breakpoint `bp` set, and renders that hit.
+    #[test]
+    fn g_stops_at_the_breakpoint_bp_set() {
+        let backend = vcpu_at(0x1010).runs_stopping_at(&[(0x1000, STACK, THREAD)]);
+        let sites = backend.site_log();
+        let mut session = session_running_code(&[0x90; 0x40], backend);
+        let mut state = remote_state(&mut session, 5_000);
+
+        let (result, text) = capture(|| state.dispatch_line("bp 1000; g"));
+        assert_eq!(result.unwrap(), Flow::Continue);
+        assert!(text.contains("breakpoint #0"), "{text:?}");
+        assert!(!state.ctx.backend.is_running());
+        assert_eq!(rip(&mut state), 0x1000);
+        assert!(sites.lock().contains(&(0x1000, true)), "{:?}", sites.lock());
+    }
+
+    /// `t` executes one instruction and stops after it.
+    #[test]
+    fn t_steps_one_instruction() {
+        let mut session = session_running_code(&[0x90; 0x40], vcpu_at(0x1000));
+        let mut state = remote_state(&mut session, 5_000);
+
+        let (result, text) = capture(|| state.dispatch_line("t"));
+        assert_eq!(result.unwrap(), Flow::Continue, "{text:?}");
+        assert!(!state.ctx.backend.is_running());
+        assert_eq!(rip(&mut state), 0x1001, "{text:?}");
+    }
+
+    /// `p` on a call runs to the return site rather than stepping into the
+    /// callee, and lifts the temporary breakpoint it planted there.
+    #[test]
+    fn p_runs_over_a_call_to_its_return_site() {
+        let mut code = [0x90u8; 0x40];
+        code[..5].copy_from_slice(&[0xe8, 0x1b, 0x00, 0x00, 0x00]); // call 0x1020
+        let backend = vcpu_at(0x1000).runs_stopping_at(&[(0x1005, STACK, THREAD)]);
+        let sites = backend.site_log();
+        let continues = backend.continue_count();
+        let mut session = session_running_code(&code, backend);
+        let mut state = remote_state(&mut session, 5_000);
+
+        let (result, text) = capture(|| state.dispatch_line("p"));
+        assert_eq!(result.unwrap(), Flow::Continue, "{text:?}");
+        assert_eq!(rip(&mut state), 0x1005, "{text:?}");
+        assert_eq!(continues.load(Ordering::Relaxed), 1);
+        let sites = sites.lock();
+        assert!(sites.iter().all(|&(site, _)| site == 0x1005), "{sites:?}");
+        assert_eq!(sites.last(), Some(&(0x1005, false)));
+        assert!(state.ctx.breakpoints.list().is_empty());
+    }
+
+    /// A hit whose `do` action ends in `gc` runs the action and resumes: the
+    /// run goes on to the next breakpoint, which has no action and stops.
+    #[test]
+    fn a_do_action_ending_in_gc_resumes_past_its_hit() {
+        let backend =
+            vcpu_at(0x1020).runs_stopping_at(&[(0x1000, STACK, THREAD), (0x1010, STACK, THREAD)]);
+        let continues = backend.continue_count();
+        let mut session = session_running_code(&[0x90; 0x40], backend);
+        let mut state = remote_state(&mut session, 5_000);
+
+        let (result, text) =
+            capture(|| state.dispatch_line(r#"bp 1000 do ".echo action ran; gc"; bp 1010; g"#));
+        assert_eq!(result.unwrap(), Flow::Continue, "{text:?}");
+        assert_eq!(text.matches("action ran").count(), 1, "{text:?}");
+        assert_eq!(text.matches(" BREAK ").count(), 1, "{text:?}");
+        assert!(text.contains("├─ breakpoint #1"), "{text:?}");
+        assert_eq!(rip(&mut state), 0x1010);
+        assert_eq!(continues.load(Ordering::Relaxed), 2);
+    }
+
+    /// `bl` lists each breakpoint with its state, site, condition and
+    /// action; `bc` clears the ones it names, and `bc *` the rest.
+    #[test]
+    fn bl_lists_what_bp_set_and_bc_clears_it() {
+        let mut session = session_running_code(&[0x90; 0x40], vcpu_at(0x1020));
+        let mut state = remote_state(&mut session, 5_000);
+        let (result, text) = capture(|| {
+            state.dispatch_line(r#"bp 1000 if @rax == 5; bp 1010 do "r rax"; bp 1018; bd 2"#)
+        });
+        assert_eq!(result.unwrap(), Flow::Continue, "{text:?}");
+
+        let (result, text) = capture(|| state.dispatch_line("bl"));
+        result.unwrap();
+        let row = |id: &str| {
+            text.lines()
+                .find(|line| line.split_whitespace().any(|word| word == id))
+                .unwrap_or_else(|| panic!("no row for {id}: {text:?}"))
+                .to_string()
+        };
+        let (first, second, third) = (row("#0"), row("#1"), row("#2"));
+        assert!(first.contains("0000000000001000"), "{first:?}");
+        assert!(first.contains("@rax == 5"), "{first:?}");
+        assert!(second.contains("0000000000001010"), "{second:?}");
+        assert!(second.contains("r rax"), "{second:?}");
+        assert!(third.contains(" d "), "{third:?}");
+        assert!(first.contains(" e "), "{first:?}");
+
+        let (result, text) = capture(|| state.dispatch_line("bc 1"));
+        result.unwrap();
+        assert!(text.contains("breakpoint #1 cleared"), "{text:?}");
+        let ids = |state: &ReplState<'_>| -> Vec<u32> {
+            state
+                .ctx
+                .breakpoints
+                .list()
+                .iter()
+                .map(|bp| bp.id)
+                .collect()
+        };
+        assert_eq!(ids(&state), [0, 2]);
+
+        let (result, _) = capture(|| state.dispatch_line("bc *"));
+        result.unwrap();
+        assert!(ids(&state).is_empty());
+        let (result, text) = capture(|| state.dispatch_line("bl"));
+        result.unwrap();
+        assert!(text.contains("no breakpoints set"), "{text:?}");
+    }
+
+    /// `sxe` makes a first-chance exception the default policy passes on
+    /// stop the target, and its `-c` command runs at that stop.
+    #[test]
+    fn sxe_stops_on_the_exception_and_runs_its_command() {
+        const ACCESS_VIOLATION: u32 = 0xC000_0005;
+        let mut backend = vcpu_at(0x1020).running();
+        backend.queue_interrupt(StopEvent {
+            exception_code: Some(ACCESS_VIOLATION),
+            ..breakpoint_event(0x1020)
+        });
+        let mut session = session_running_code(&[0x90; 0x40], backend);
+        let mut state = remote_state(&mut session, 5_000);
+
+        let (result, text) = capture(|| state.dispatch_line(r#"sxe -c ".echo seen" -f break av"#));
+        assert_eq!(result.unwrap(), Flow::Continue, "{text:?}");
+        assert!(text.contains("sxe 0xc0000005 (av)"), "{text:?}");
+
+        let (flow, text) = capture(|| state.begin_remote_line(""));
+        assert_eq!(flow, Some(Flow::Continue));
+        assert!(!state.ctx.backend.is_running(), "{text:?}");
+        assert!(text.contains("seen"), "{text:?}");
+        assert!(text.contains("exception 0xc0000005"), "{text:?}");
+    }
+
+    /// A remote client's budget ends `wt` where it got to, halted, and the
+    /// trace says it was interrupted rather than running to its limit.
+    #[test]
+    fn wt_ends_within_the_remote_budget() {
+        let backend = vcpu_at(0x1000).with_register_read_delay(Duration::from_millis(5));
+        let mut session = session_running_code(&[0x90; 0x1000], backend);
+        let mut state = remote_state(&mut session, 150);
+
+        let started = Instant::now();
+        let (result, text) = capture(|| state.dispatch_line("wt"));
+        assert_eq!(result.unwrap(), Flow::Continue, "{text:?}");
+        assert!(started.elapsed() < Duration::from_secs(2), "{text:?}");
+        assert!(text.contains("wt interrupted after"), "{text:?}");
+        assert!(!state.ctx.backend.is_running());
     }
 }
