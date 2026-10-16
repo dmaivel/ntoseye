@@ -1340,7 +1340,16 @@ impl Method<'_> {
         let mut params = Vec::new();
         let mut signature = Vec::new();
         let mut bindings = Vec::new();
+        // The arguments converted on the session thread ([`Pending`]).
+        let mut pending = Vec::new();
         let mut keywords = false;
+        // A run command's method is the `Debugger`'s own, which has no
+        // `Owner` to check a handle argument against.
+        let owner = if self.run.is_some() {
+            quote!(::std::option::Option::None)
+        } else {
+            quote!(::std::option::Option::Some(#command::CommandHost::owner(self)))
+        };
         for arg in self.args {
             if arg.render || arg.cancel {
                 continue;
@@ -1365,20 +1374,11 @@ impl Method<'_> {
                     "a Python argument after a `keyword` one is `keyword` too",
                 ));
             }
-            params.push(quote!(#ident: <#ty as #command::PyArg>::Py));
-            // A run command's method is the `Debugger`'s own, which has no
-            // `Owner` to check a handle argument against.
-            bindings.push(if self.run.is_some() {
-                quote!(let #ident = <#ty as #command::PyArg>::from_py(#ident);)
-            } else {
-                quote! {
-                    let #ident = <#ty as #command::PyArg>::from_py_in(
-                        py,
-                        #command::CommandHost::owner(self),
-                        #ident,
-                    )?;
-                }
+            params.push(quote!(#ident: <#ty as #command::SdkArg>::Py));
+            bindings.push(quote! {
+                let #ident = <#ty as #command::SdkArg>::from_sdk(py, #owner, #ident)?;
             });
+            pending.push(ident);
             signature.push(if arg.sdk {
                 let default = arg.default.as_ref().unwrap();
                 quote!(#ident = #default)
@@ -1418,25 +1418,32 @@ impl Method<'_> {
             .collect();
         let output = self.output;
         let effects = &self.effects;
+        // On the session thread, in the object's context and once the
+        // effects are admitted: an address given as an expression evaluates
+        // there, then the command runs.
+        let body = quote! {
+            #(let #pending = #pending.resolve(&*__session)?;)*
+            self::#function(#receiver, #(#call),*)
+        };
         if let Some(run) = self.run {
             let runcontrol = quote!(crate::python::runcontrol);
             let (driver, output, closure) = match run {
                 RunMode::Cancellable => (
                     quote!(run_cancellable),
                     quote!(#output),
-                    quote!(move |__session, __cancel| self::#function(#receiver, #(#call),*)),
+                    quote!(move |__session, __cancel| { #body }),
                 ),
                 // A run admitted on a running target (`g`) can still be
                 // running when the timeout ends; any other ends on a stop.
                 RunMode::Motion { may_run_on: true } => (
                     quote!(run_motion),
                     quote!(::std::option::Option<crate::session::Stop>),
-                    quote!(move |__session| self::#function(#receiver, #(#call),*)),
+                    quote!(move |__session| { #body }),
                 ),
                 RunMode::Motion { may_run_on: false } => (
                     quote!(run_motion_to_stop),
                     quote!(crate::session::Stop),
-                    quote!(move |__session| self::#function(#receiver, #(#call),*)),
+                    quote!(move |__session| { #body }),
                 ),
             };
             return Ok(quote! {
@@ -1469,7 +1476,7 @@ impl Method<'_> {
                 ) -> pyo3::PyResult<crate::view::record::Typed<'py, #output>> {
                     #(#bindings)*
                     #command::run(py, self, #operation, #effects, move |__session| {
-                        self::#function(#receiver, #(#call),*)
+                        #body
                     })
                 }
             }

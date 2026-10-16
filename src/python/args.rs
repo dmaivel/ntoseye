@@ -11,7 +11,7 @@ use pyo3::types::{PyByteArray, PyBytes};
 #[cfg(feature = "python-stubs")]
 use pyo3::{PyTypeInfo, type_hint_identifier, type_hint_subscript};
 
-use super::command::PyArg;
+use super::command::{Pending, PyArg, SdkArg};
 use super::handle::Owner;
 use super::process::Process;
 use super::thread::{Cpu, Thread};
@@ -115,17 +115,34 @@ literal_arg! {
 #[derive(FromPyObject)]
 pub enum UntilArg {
     Flow(Until),
-    Address(u64),
+    Address(AddressArg),
 }
 
-impl PyArg for WalkUntil {
-    type Py = UntilArg;
-    fn from_py(value: UntilArg) -> Self {
-        match value {
-            UntilArg::Flow(Until(until)) => until,
-            UntilArg::Address(address) => WalkUntil::Address(VirtAddr(address)),
-        }
+impl SdkArg for Option<WalkUntil> {
+    type Py = Option<UntilArg>;
+
+    fn from_sdk(
+        _: Python<'_>,
+        _: Option<&Owner>,
+        value: Option<UntilArg>,
+    ) -> PyResult<Pending<Self>> {
+        Ok(match value {
+            None => Pending::Ready(None),
+            Some(UntilArg::Flow(Until(until))) => Pending::Ready(Some(until)),
+            Some(UntilArg::Address(address)) => {
+                Pending::address(address, |address| Some(WalkUntil::Address(address)))
+            }
+        })
     }
+}
+
+/// An address: an `int`, or a debugger expression that the session
+/// evaluates as the REPL does (`"nt!KiSystemCall64+0x10"`, `"@rip"`,
+/// `"poi(@rsp)"`), in the method's context.
+#[derive(FromPyObject)]
+pub enum AddressArg {
+    Value(u64),
+    Expression(String),
 }
 
 literal_arg! {

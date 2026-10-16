@@ -117,8 +117,10 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// `Render`, except a `Result<Flow>`, which a command that runs other
 /// commands (`.foreach`, `.if`) returns to the dispatcher as it is; `python = Object` adds a method to that SDK class (through
 /// PyO3's `multiple-pymethods`) whose keyword arguments are the arguments
-/// that are neither bound nor rendered (`PyArg`), whose docstring is the doc
-/// comment, and which returns `R`'s record class.
+/// that are neither bound nor rendered (`SdkArg`: every `PyArg`, and
+/// addresses, which Python may give as a debugger expression that the
+/// session evaluates in the method's context before the call), whose
+/// docstring is the doc comment, and which returns `R`'s record class.
 ///
 /// **Several SDK methods behind one REPL name.** When one REPL command is
 /// several SDK operations (`!locks` decodes one resource or lists them all),

@@ -1,19 +1,20 @@
 //! The SDK half of `#[command]`: the objects a command's method can be
 //! placed on (`python = Inspect`), how such an object binds a `receiver`
-//! argument, how a keyword argument converts ([`PyArg`]), and [`run`], which
-//! every generated method calls to admit the command's effects and run it
-//! on the session thread. [`admit`] is also what the hand-written methods'
-//! `require_halted` and kernel checks go through, so the SDK refuses with
-//! the same decision as the REPL.
+//! argument, how a keyword argument converts ([`SdkArg`], [`PyArg`]), and
+//! [`run`], which every generated method calls to admit the command's
+//! effects and run it on the session thread. [`admit`] is also what the
+//! hand-written methods' `require_halted` and kernel checks go through, so
+//! the SDK refuses with the same decision as the REPL.
 
 use pyo3::prelude::*;
 
-use super::args::BytesArg;
+use super::args::{AddressArg, BytesArg};
 use super::context::Context;
 use super::handle::Owner;
 use super::{ErrorKind, err, error, raise};
 use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::error::Result;
+use crate::expr::Expr;
 use crate::guest::ProcessInfo;
 use crate::session::Session;
 use crate::session::effects::{Effects, Refusal, RunState, TargetScope};
@@ -74,6 +75,61 @@ pub trait PyArg: Sized {
     /// handle argument (a `Process`) must belong to it.
     fn from_py_in(_py: Python<'_>, _owner: &Owner, value: Self::Py) -> PyResult<Self> {
         Ok(Self::from_py(value))
+    }
+}
+
+/// How a generated method's argument arrives from Python: as `Py`, which
+/// the stub types, then converted before the call, or, for an address
+/// given as a debugger expression, on the session thread ([`Pending`]).
+/// Every [`PyArg`] is one; an address is one of its own, because only the
+/// session can evaluate an expression.
+pub trait SdkArg: Sized {
+    type Py;
+
+    /// Convert `value` for a method of an object of `owner`'s debugger:
+    /// [`PyArg::from_py_in`], or [`PyArg::from_py`] for a `Debugger` run
+    /// method, which has no `owner` (and takes no handle).
+    fn from_sdk(py: Python<'_>, owner: Option<&Owner>, value: Self::Py) -> PyResult<Pending<Self>>;
+}
+
+impl<T: PyArg> SdkArg for T {
+    type Py = T::Py;
+
+    fn from_sdk(py: Python<'_>, owner: Option<&Owner>, value: Self::Py) -> PyResult<Pending<T>> {
+        let value = match owner {
+            Some(owner) => T::from_py_in(py, owner, value)?,
+            None => T::from_py(value),
+        };
+        Ok(Pending::Ready(value))
+    }
+}
+
+/// An argument as a generated method has it before the call: converted, or
+/// a debugger expression for an address, which [`Self::resolve`] evaluates
+/// on the session thread, in the method's context once the command is
+/// admitted, and `finish`es into the argument.
+pub enum Pending<T> {
+    Ready(T),
+    Expression(String, fn(VirtAddr) -> T),
+}
+
+impl<T> Pending<T> {
+    /// The argument an address gives, through `finish`.
+    pub fn address(value: AddressArg, finish: fn(VirtAddr) -> T) -> Self {
+        match value {
+            AddressArg::Value(address) => Pending::Ready(finish(VirtAddr(address))),
+            AddressArg::Expression(text) => Pending::Expression(text, finish),
+        }
+    }
+
+    /// The argument, an expression evaluated as the REPL evaluates one
+    /// (symbols, `module!symbol+0x10`, registers, `poi(...)`), in the
+    /// session's current context.
+    pub fn resolve(self, session: &Session) -> Result<T> {
+        match self {
+            Pending::Ready(value) => Ok(value),
+            Pending::Expression(text, finish) => Expr::eval(&text, &session.target).map(finish),
+        }
     }
 }
 
@@ -148,10 +204,24 @@ impl PyArg for Vec<u8> {
     }
 }
 
-impl PyArg for VirtAddr {
-    type Py = u64;
-    fn from_py(value: u64) -> Self {
-        VirtAddr(value)
+/// An address: an `int`, or a debugger expression (`"nt!KiSystemCall64"`).
+impl SdkArg for VirtAddr {
+    type Py = AddressArg;
+
+    fn from_sdk(_: Python<'_>, _: Option<&Owner>, value: AddressArg) -> PyResult<Pending<Self>> {
+        Ok(Pending::address(value, |address| address))
+    }
+}
+
+impl SdkArg for Option<VirtAddr> {
+    type Py = Option<AddressArg>;
+
+    fn from_sdk(
+        _: Python<'_>,
+        _: Option<&Owner>,
+        value: Option<AddressArg>,
+    ) -> PyResult<Pending<Self>> {
+        Ok(value.map_or(Pending::Ready(None), |value| Pending::address(value, Some)))
     }
 }
 
