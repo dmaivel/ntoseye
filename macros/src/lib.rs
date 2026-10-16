@@ -105,6 +105,10 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   text shows), not passed to the function: the REPL passes the render
 ///   options to `Render::render` (one value, or a tuple in order);
 /// - `receiver`: the Python method's object binds it (`Bind<T>`);
+/// - `sdk` (with `default = expr`): an SDK-only keyword; the REPL reads no
+///   word for it and passes `expr`, Python's keyword defaults to `expr`;
+/// - `keyword`: keyword-only in Python (after a `*`); every Python argument
+///   after it must be `keyword` too;
 /// - `name = "..."`, `complete = Strategy`: its usage name and completion.
 ///
 /// The function returns `Result<R>`. The REPL renders `R` with

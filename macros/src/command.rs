@@ -341,6 +341,11 @@ struct Arg {
     each: Option<Path>,
     /// Bound from the SDK object the method is placed on.
     receiver: bool,
+    /// SDK-only: the REPL never reads a word for it and passes `default`;
+    /// Python takes it as a keyword with that default.
+    sdk: bool,
+    /// Keyword-only in Python (after a `*` in the signature).
+    keyword: bool,
     name: Option<LitStr>,
     complete: Option<Ident>,
     span: Span,
@@ -363,7 +368,7 @@ impl Arg {
     }
 
     fn positional(&self) -> bool {
-        self.switch.is_none() && !self.raw && !self.invoked
+        self.switch.is_none() && !self.raw && !self.invoked && !self.sdk
     }
 
     /// The type whose `FromArg`/`PyArg` reads it: `T` of an `Option<T>`.
@@ -398,6 +403,8 @@ fn take_args(function: &mut ItemFn) -> Result<Vec<Arg>> {
             parse: None,
             each: None,
             receiver: false,
+            sdk: false,
+            keyword: false,
             name: None,
             complete: None,
             span: typed.span(),
@@ -425,13 +432,15 @@ fn take_args(function: &mut ItemFn) -> Result<Vec<Arg>> {
                     "parse" => arg.parse = Some(meta.value()?.parse()?),
                     "each" => arg.each = Some(meta.value()?.parse()?),
                     "receiver" => arg.receiver = true,
+                    "sdk" => arg.sdk = true,
+                    "keyword" => arg.keyword = true,
                     "name" => arg.name = Some(meta.value()?.parse()?),
                     "complete" => arg.complete = Some(meta.value()?.parse()?),
                     _ => {
                         return Err(meta.error(
                             "expected `render`, `default = ...`, `current`, `switch = \"/x\"`, \
                              `rest`, `raw`, `invoked`, `parse = path`, `each = path`, `receiver`, \
-                             `name = \"...\"` or `complete = Strategy`",
+                             `sdk`, `keyword`, `name = \"...\"` or `complete = Strategy`",
                         ));
                     }
                 }
@@ -441,10 +450,11 @@ fn take_args(function: &mut ItemFn) -> Result<Vec<Arg>> {
         typed.attrs = kept;
         // A custom parser may return an `Option` of its own, and may name
         // the `default` the SDK's keyword takes (its parser supplies the
-        // REPL's).
+        // REPL's); an `sdk` argument's `default` is the REPL's value, and it
+        // may be an `Option` too.
         let custom = arg.parse.is_some() || arg.each.is_some();
         let sources = [
-            arg.default.is_some() && arg.parse.is_none(),
+            arg.default.is_some() && arg.parse.is_none() && !arg.sdk,
             arg.current,
             arg.switch.is_some(),
             arg.rest,
@@ -452,13 +462,27 @@ fn take_args(function: &mut ItemFn) -> Result<Vec<Arg>> {
             arg.invoked,
             arg.parse.is_some(),
             arg.each.is_some(),
-            arg.optional.is_some() && !custom,
+            arg.optional.is_some() && !custom && !arg.sdk,
+            arg.sdk,
         ];
         if sources.iter().filter(|set| **set).count() > 1 {
             return Err(Error::new(
                 arg.span,
                 "an argument takes one of `Option<T>`, `default`, `current`, `switch`, `rest`, \
-                 `raw`, `invoked`, `parse` and `each`",
+                 `raw`, `invoked`, `parse`, `each` and `sdk`",
+            ));
+        }
+        if arg.sdk && (arg.default.is_none() || arg.receiver) {
+            return Err(Error::new(
+                arg.span,
+                "an `sdk` argument needs `default = ...` (the value the REPL passes), and is \
+                 not a `receiver`",
+            ));
+        }
+        if arg.sdk && arg.render {
+            return Err(Error::new(
+                arg.span,
+                "an `sdk` argument is not a render option",
             ));
         }
         args.push(arg);
@@ -589,6 +613,11 @@ impl Command {
                 arg.span,
                 "`receiver` binds an argument from the `python = Object` the method is on",
             ));
+        } else if let Some(arg) = self.args.iter().find(|arg| arg.sdk || arg.keyword) {
+            return Err(Error::new(
+                arg.span,
+                "`sdk` and `keyword` shape the method of a `python = Object` command",
+            ));
         }
         Ok(())
     }
@@ -599,7 +628,7 @@ impl Command {
         }
         let mut usage = self.options.names[0].value();
         for arg in &self.args {
-            let part = if arg.invoked {
+            let part = if arg.invoked || arg.sdk {
                 continue;
             } else if let Some(switch) = &arg.switch {
                 format!("[{}]", switch.value())
@@ -750,7 +779,10 @@ impl Command {
             let ty = &arg.ty;
             let value_ty = arg.value_type();
             let from = quote!(<#value_ty as #args::FromArg>::from_arg(cx, &text)?);
-            let step = if let Some(path) = arg.parse.as_ref().or(arg.each.as_ref()) {
+            let step = if arg.sdk {
+                let default = arg.default.as_ref().unwrap();
+                quote!(let #ident: #ty = #default;)
+            } else if let Some(path) = arg.parse.as_ref().or(arg.each.as_ref()) {
                 quote!(let #ident = #path(cx, cursor)?;)
             } else if arg.rest {
                 quote!(let #ident: #ty = cursor.rest();)
@@ -947,6 +979,7 @@ impl Command {
         let mut params = Vec::new();
         let mut signature = Vec::new();
         let mut bindings = Vec::new();
+        let mut keywords = false;
         for arg in &self.args {
             if arg.render {
                 continue;
@@ -957,9 +990,21 @@ impl Command {
                 bindings.push(quote!(let #ident: #ty = <Self as #command::Bind<#ty>>::bind(self);));
                 continue;
             }
+            if arg.keyword && !keywords {
+                keywords = true;
+                signature.push(quote!(*));
+            } else if keywords && !arg.keyword {
+                return Err(Error::new(
+                    arg.span,
+                    "a Python argument after a `keyword` one is `keyword` too",
+                ));
+            }
             params.push(quote!(#ident: <#ty as #command::PyArg>::Py));
             bindings.push(quote!(let #ident = <#ty as #command::PyArg>::from_py(#ident);));
-            signature.push(if arg.optional.is_some() {
+            signature.push(if arg.sdk {
+                let default = arg.default.as_ref().unwrap();
+                quote!(#ident = #default)
+            } else if arg.optional.is_some() {
                 quote!(#ident = None)
             } else if arg.switch.is_some() {
                 quote!(#ident = false)
