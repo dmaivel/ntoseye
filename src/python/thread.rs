@@ -24,11 +24,10 @@ use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::effects::Effects;
 use crate::session::{Session, VcpuInfo};
 use crate::symbols::CodeFrame;
-use crate::target::{SelectedFrame, ThreadInfo, cpu};
+use crate::target::{SelectedFrame, ServedVp, ThreadInfo, cpu};
 use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current};
 use crate::types::VirtAddr;
-use crate::unwind::{RecoveredFrame, StackFrame, halted_in_windows_hypervisor};
-use crate::view;
+use crate::unwind::{RecoveredFrame, SavedVtl, StackFrame, halted_in_windows_hypervisor};
 use crate::view::record::Typed;
 
 /// A collection of threads: `dbg.threads` (all threads) or `proc.threads`.
@@ -858,15 +857,8 @@ impl Cpu {
     fn saved_vtl<'py>(
         &self,
         py: Python<'py>,
-    ) -> PyResult<Typed<'py, Vec<view::execution::SavedVtlState>>> {
-        let info = self.current_info(py)?;
-        Typed::new(
-            py,
-            info.saved_vtl
-                .iter()
-                .map(view::execution::saved_vtl_state)
-                .collect(),
-        )
+    ) -> PyResult<Typed<'py, Vec<SavedVtl>>> {
+        Typed::new(py, self.current_info(py)?.saved_vtl)
     }
 
     /// The guest partition's virtual processor that this processor serves,
@@ -879,9 +871,8 @@ impl Cpu {
     fn serving<'py>(
         &self,
         py: Python<'py>,
-    ) -> PyResult<Typed<'py, Option<view::hypervisor::ServedVp>>> {
-        let info = self.current_info(py)?;
-        Typed::new(py, info.serving.as_ref().map(view::hypervisor::served_vp))
+    ) -> PyResult<Typed<'py, Option<ServedVp>>> {
+        Typed::new(py, self.current_info(py)?.serving)
     }
 
     /// The virtual processor whose hypercall this processor handles, for a
@@ -1035,7 +1026,7 @@ impl Cpu {
 
     /// The processor as a plain `dict`.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        view_dict(py, &view::execution::vcpu(&self.current_info(py)?))
+        view_dict(py, &self.current_info(py)?)
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {

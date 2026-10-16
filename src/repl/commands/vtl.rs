@@ -8,7 +8,7 @@ use crate::error::{Error, Result};
 use crate::guest::{
     EvmcsState, HvPartition, HvProcessor, HvVirtualProcessor,
     ept::{self, Access, EptTranslation},
-    evmcs_fields::{self, IoIntercepts, MsrIntercepts},
+    evmcs_fields::{self, IoIntercepts, MsrIntercepts, MsrRange, PortRange},
     hypercall_input::{DecodedHypercall, HypercallField},
     hypercalls::{HypercallCaller, HypercallInput, tlfs_hypercall},
     privilege_names,
@@ -735,7 +735,7 @@ impl ReplState<'_> {
         let mut table = Builder::default();
         table.push_record(["Access", "First MSR", "Last MSR", "Names"]);
         for (access, ranges) in [("read", &read), ("write", &write)] {
-            for &(first, last) in ranges {
+            for &MsrRange { first, last } in ranges {
                 let names = evmcs_fields::msr_names(first, last);
                 let shown = names.iter().take(4).copied().collect::<Vec<_>>().join(" ");
                 table.push_record([
@@ -805,7 +805,7 @@ impl ReplState<'_> {
         };
         let mut table = Builder::default();
         table.push_record(["First port", "Last port"]);
-        for (first, last) in ports {
+        for PortRange { first, last } in ports {
             table.push_record([format!("{first:#x}"), format!("{last:#x}")]);
         }
         print_padded_table(table);

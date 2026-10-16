@@ -45,7 +45,7 @@ pub mod usermode;
 mod variables;
 pub mod virtio;
 pub mod virtio_request;
-mod vtl;
+pub mod vtl;
 pub mod wdf;
 pub mod workqueue;
 pub mod zombies;

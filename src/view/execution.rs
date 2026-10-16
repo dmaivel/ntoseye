@@ -2,138 +2,20 @@
 //! vCPUs, breakpoints, exception policies, stacks, call traces, and
 //! disassembly.
 
-use crate::types::Keyed;
 use ntoseye_macros::record;
 
-use super::hypervisor::{DecodedHypercall, ServedVp, decoded_hypercall, exit_registers, served_vp};
 use crate::breakpoints::{self, Breakpoint};
 use crate::exception_policy::{self, ExceptionPolicyFinalAction, exception_alias};
 use crate::guest::ProcessInfo;
 use crate::guest::exit_reason_name;
 use crate::guest::hypercalls::tlfs_hypercall;
 use crate::guest::vm_exits;
-use crate::session::{self, CallTraceEnd, VcpuInfo};
-use crate::target::ThreadInfo;
+use crate::session::{self, CallTraceEnd};
+use crate::target::{ServedVp, ThreadInfo};
 use crate::types::VirtAddr;
 use crate::unwind::{
-    self, Arm64CodeDetail, Arm64UnwindDetail, FunctionEntryDetail, HandlerDetail, UnwindDetail,
+    Arm64CodeDetail, Arm64UnwindDetail, FunctionEntryDetail, HandlerDetail, SavedVtl, UnwindDetail,
 };
-
-/// A vCPU (backend execution context) and the guest code that it runs.
-#[record]
-pub struct VcpuStatus {
-    /// The backend thread/vCPU ID (`p1.1`).
-    pub id: String,
-    /// None if ntoseye cannot read the register context.
-    #[record(hex)]
-    pub rip: Option<u64>,
-    /// What the vCPU runs: `kernel`, a process name, `hypervisor`, `VTL1`,
-    /// a guest partition's VP (`partition 0x3 VP 1`), or `unknown`; `no
-    /// context` for a dump CPU whose context the dump lacks. Empty if
-    /// ntoseye cannot read the register context.
-    pub context: String,
-    /// The nearest symbol to `rip`, if one resolves.
-    pub symbol: Option<String>,
-    /// For a vCPU halted in the Windows hypervisor, the VTL states that the
-    /// hypervisor saved for the vCPU's virtual processor, VTL0 first.
-    pub saved_vtl: Vec<SavedVtlState>,
-    /// For a vCPU halted in the Windows hypervisor, the guest partition's
-    /// virtual processor whose exit it handles or that it is about to
-    /// enter, when it is not one of the root partition's.
-    pub serving: Option<ServedVp>,
-    /// The reason that the register context is not available. None if it is
-    /// available.
-    pub error: Option<String>,
-}
-
-/// One VTL of a virtual processor, as the Windows hypervisor last saved it
-/// in the VTL's Enlightened VMCS. A VMCS holds no general-purpose register
-/// other than `rsp`; `general_registers` has the others when they are known.
-#[record]
-pub struct SavedVtlState {
-    /// 0 or 1.
-    pub vtl: u8,
-    /// Whether the VP assist page names this state's eVMCS as current. The
-    /// current VTL is the one that entered the hypervisor or that the
-    /// hypervisor is about to enter.
-    pub current: bool,
-    pub rip: VirtAddr,
-    /// The symbol at `rip` in the VTL's address space, if one resolves.
-    pub symbol: Option<String>,
-    pub rsp: VirtAddr,
-    #[record(hex)]
-    pub rflags: u64,
-    #[record(hex)]
-    pub cr0: u64,
-    /// The page-table root of the VTL.
-    #[record(hex)]
-    pub cr3: u64,
-    #[record(hex)]
-    pub cr4: u64,
-    #[record(hex)]
-    pub dr7: u64,
-    #[record(hex)]
-    pub cs: u16,
-    #[record(hex)]
-    pub ss: u16,
-    #[record(hex)]
-    pub ds: u16,
-    #[record(hex)]
-    pub es: u16,
-    #[record(hex)]
-    pub fs: u16,
-    #[record(hex)]
-    pub gs: u16,
-    pub fs_base: VirtAddr,
-    pub gs_base: VirtAddr,
-    /// The VM-exit reason of the last exit from the VTL. Bits 15:0 hold the
-    /// basic reason, and bit 31 is set for a failed VM entry.
-    #[record(hex)]
-    pub exit_reason: u32,
-    /// The name of the exit reason (`HLT`, `VMCALL`, ...), if it is a
-    /// common reason.
-    pub exit_reason_name: Option<&'static str>,
-    /// Reason-specific detail of the last exit, such as the access that
-    /// caused an EPT violation (Intel SDM, exit qualification).
-    #[record(hex)]
-    pub exit_qualification: u64,
-    /// The vector and type of the event behind an exception or interrupt
-    /// exit (Intel SDM, VM-exit interruption information).
-    #[record(hex)]
-    pub exit_interruption_info: u32,
-    /// The length of the instruction that caused the exit, for exits that
-    /// an instruction caused.
-    pub exit_instruction_length: u32,
-    /// The hypervisor's VM-exit entry point.
-    pub host_rip: VirtAddr,
-    /// The stack the hypervisor's VM-exit entry point runs on.
-    pub host_rsp: VirtAddr,
-    /// The vCPU is stopped on `host_rip`, and not by a breakpoint there.
-    /// KVM writes the eVMCS when it enters the hypervisor, and a stop from
-    /// outside can fall between a VM exit and that entry, so this state
-    /// may still describe the exit before the one in progress. The
-    /// guest's general-purpose registers are then still in the vCPU's own
-    /// registers. A breakpoint on `host_rip` fires after the write.
-    /// Only the current state, the exiting VTL's, can be behind; when no
-    /// state of the VP is current, every state is marked.
-    pub may_be_stale: bool,
-    /// The guest's general-purpose registers other than `rsp` at the last
-    /// exit (`rax` to `r15`), read where the hypervisor's VM-exit entry
-    /// code saved them. Experimental: where that is, is read off the
-    /// entry code. None when they are not known: for a VTL that is not
-    /// the current one, while the vCPU is on `host_rip` (unless it stopped
-    /// there on a breakpoint, when they are the vCPU's own) or still saving
-    /// them, or when the entry code does not save them in one block.
-    #[record(hex)]
-    pub general_registers: Option<Keyed<u64>>,
-    /// The physical address of the eVMCS page that ntoseye read the state
-    /// from.
-    #[record(hex)]
-    pub evmcs: u64,
-    /// The hypercall of a VMCALL exit whose general-purpose registers are
-    /// known, with its input decoded.
-    pub hypercall: Option<DecodedHypercall>,
-}
 
 /// A code breakpoint or data watchpoint (`bl`).
 #[record]
@@ -245,9 +127,9 @@ pub struct RunStatus {
     pub symbol: Option<String>,
     /// For a vCPU halted in the Windows hypervisor, the VTL states that the
     /// hypervisor saved for the vCPU's virtual processor, VTL0 first.
-    pub saved_vtl: Vec<SavedVtlState>,
+    pub saved_vtl: Vec<SavedVtl>,
     /// For a vCPU halted in the Windows hypervisor, the guest partition's
-    /// virtual processor it serves, as `VcpuStatus.serving`.
+    /// virtual processor it serves, as `VcpuInfo.serving`.
     pub serving: Option<ServedVp>,
     /// The guest partition's virtual processor that the halted vCPU runs
     /// (`partition 0x5 VP 2`), whose registers and code the vCPU then
@@ -512,59 +394,6 @@ pub enum Unwind {
     Xdata(Arm64XdataUnwind),
 }
 
-pub fn vcpu(v: &VcpuInfo) -> VcpuStatus {
-    VcpuStatus {
-        id: v.id.clone(),
-        rip: v.rip,
-        context: v.context.clone(),
-        symbol: v.symbol.clone(),
-        saved_vtl: v.saved_vtl.iter().map(saved_vtl_state).collect(),
-        serving: v.serving.as_ref().map(served_vp),
-        error: v.error.clone(),
-    }
-}
-
-/// A VTL state the Windows hypervisor saved.
-pub fn saved_vtl_state(saved: &unwind::SavedVtl) -> SavedVtlState {
-    let state = &saved.context.state;
-    SavedVtlState {
-        vtl: saved.context.vtl,
-        current: state.current,
-        rip: VirtAddr(state.rip),
-        symbol: saved.symbol.clone(),
-        rsp: VirtAddr(state.rsp),
-        rflags: state.rflags,
-        cr0: state.cr0,
-        cr3: state.cr3,
-        cr4: state.cr4,
-        dr7: state.dr7,
-        cs: state.cs,
-        ss: state.ss,
-        ds: state.ds,
-        es: state.es,
-        fs: state.fs,
-        gs: state.gs,
-        fs_base: VirtAddr(state.fs_base),
-        gs_base: VirtAddr(state.gs_base),
-        exit_reason: state.exit_reason,
-        exit_reason_name: state.exit_reason_name(),
-        exit_qualification: state.exit_qualification,
-        exit_interruption_info: state.exit_interruption_info,
-        exit_instruction_length: state.exit_instruction_length,
-        host_rip: VirtAddr(state.host_rip),
-        host_rsp: VirtAddr(state.host_rsp),
-        may_be_stale: saved.context.may_be_stale,
-        general_registers: saved
-            .context
-            .general_registers
-            .as_ref()
-            .ok()
-            .map(exit_registers),
-        evmcs: state.address,
-        hypercall: saved.context.hypercall.call().map(decoded_hypercall),
-    }
-}
-
 /// What a hypercall breakpoint stops on.
 pub fn hypercall_filter(filter: &breakpoints::HypercallFilter) -> HypercallFilter {
     HypercallFilter {
@@ -627,8 +456,8 @@ pub fn run_status(status: &session::RunStatus) -> RunStatus {
         current_thread: status.current_thread.clone(),
         rip: status.rip,
         symbol: status.symbol.clone(),
-        saved_vtl: status.saved_vtl.iter().map(saved_vtl_state).collect(),
-        serving: status.serving.as_ref().map(served_vp),
+        saved_vtl: status.saved_vtl.clone(),
+        serving: status.serving.clone(),
         running_vp: status.running_vp.clone(),
         attached_process: status.attached_process.clone(),
         stopped_process: status.stopped_process.clone(),

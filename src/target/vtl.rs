@@ -19,8 +19,9 @@ use crate::{
         ept::{self, EptTranslation},
         hv_layout,
         hv_layout::HypercallEntry,
-        hypercall_input,
+        hypercall_input::{self, DecodedHypercall},
         hypercalls::{self, HypercallCaller, HypercallInput},
+        ordered_exit_gprs,
         hypervisor::{self, HvVirtualProcessor},
         vp_registers,
     },
@@ -28,9 +29,10 @@ use crate::{
     pe::{PeImage, image_file_name, read_pe_header_page, size_of_image},
     phys::PhysMem,
     symbols::{ImageFetch, SymbolStore},
-    types::{Arch, CodeMachine, Dtb, PhysAddr, VirtAddr},
+    types::{Arch, CodeMachine, Dtb, Keyed, PhysAddr, VirtAddr},
     unwind::{halted_in_windows_hypervisor, prolog},
 };
+use ntoseye_macros::record;
 
 /// How far below an instruction pointer to look for the header of the image
 /// it lies in. The Windows hypervisor and secure kernel are a few MiB.
@@ -119,22 +121,72 @@ pub struct BreakpointStop {
     general_registers: HashMap<&'static str, u64>,
 }
 
-/// A guest partition's virtual processor that a processor runs, or last
-/// ran: at a stop in the hypervisor, the VP whose exit it handles, or which
-/// it is about to enter, rather than one of the root's.
+/// The guest partition's virtual processor that a processor in the
+/// Windows hypervisor runs or last ran: the VP whose exit it handles, or
+/// which it is about to enter, rather than one of the root's.
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct ServedVp {
+    #[record(hex, rename = "partition_id")]
     pub partition: u64,
+    #[record(rename = "vp_index")]
     pub vp: u32,
-    /// The VTL the VP runs in, and its saved state, when the walk read it.
+    /// The VTL the VP runs in.
     pub vtl: u8,
+    /// The VTL's saved state, when the partition walk read it.
+    #[record(skip)]
     pub state: Option<EvmcsState>,
     /// The general-purpose registers of the VP's last exit, as
     /// [`SavedVtlContext::general_registers`], or why they are not known.
+    #[record(skip)]
     pub general_registers: std::result::Result<HashMap<&'static str, u64>, String>,
     /// The hypercall of the VP's last exit, as
     /// [`SavedVtlContext::hypercall`].
+    #[record(skip)]
     pub hypercall: HypercallInput,
+}
+
+#[record]
+impl ServedVp {
+    /// Where the VTL left off, when the partition walk read its state.
+    #[record(getter, rename = "rip")]
+    pub fn saved_rip(&self) -> Option<VirtAddr> {
+        self.state.as_ref().map(|state| VirtAddr(state.rip))
+    }
+
+    /// Whether the processor's VP assist page names this VTL's eVMCS: the
+    /// processor handles this VP's exit, or is about to enter it.
+    #[record(getter)]
+    pub fn current(&self) -> bool {
+        self.state.is_some_and(|state| state.current)
+    }
+
+    /// The VM-exit reason of the VTL's last exit.
+    #[record(getter, hex)]
+    pub fn exit_reason(&self) -> Option<u32> {
+        self.state.as_ref().map(|state| state.exit_reason)
+    }
+
+    /// The name of the exit reason (`HLT`, `VMCALL`, ...), if it is a
+    /// common reason.
+    #[record(getter)]
+    pub fn exit_reason_name(&self) -> Option<&'static str> {
+        self.state.as_ref().and_then(|state| state.exit_reason_name())
+    }
+
+    /// The guest's general-purpose registers other than `rsp` at the last
+    /// exit, as `SavedVtl.general_registers`. None when they are not
+    /// known.
+    #[record(getter, hex, rename = "general_registers")]
+    pub fn known_general_registers(&self) -> Option<Keyed<u64>> {
+        self.general_registers.as_ref().ok().map(ordered_exit_gprs)
+    }
+
+    /// The hypercall of a VMCALL exit whose registers are known.
+    #[record(getter, rename = "hypercall")]
+    pub fn exit_hypercall(&self) -> Option<DecodedHypercall> {
+        self.hypercall.call().cloned()
+    }
 }
 
 impl ServedVp {

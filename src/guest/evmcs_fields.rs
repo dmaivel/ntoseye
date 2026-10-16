@@ -2,6 +2,7 @@
 //! TLFS layout (Linux `struct hv_enlightened_vmcs`), padding left out.
 
 use crate::error::{Error, Result};
+use ntoseye_macros::record;
 
 /// `(name, offset, size in bytes)`, in offset order.
 pub const EVMCS_FIELDS: &[(&str, u16, u8)] = &[
@@ -233,15 +234,15 @@ pub fn msr_names(first: u32, last: u32) -> Vec<&'static str> {
         .collect()
 }
 
-/// The names [`MSR_NAMES`] has whose every MSR is in none of the inclusive
+/// The names [`MSR_NAMES`] has whose every MSR is in none of the
 /// `intercepted` ranges: those the guest accesses without an exit.
-pub fn msr_names_outside(intercepted: &[(u32, u32)]) -> Vec<&'static str> {
+pub fn msr_names_outside(intercepted: &[MsrRange]) -> Vec<&'static str> {
     MSR_NAMES
         .iter()
         .filter(|&&(low, high, _)| {
             intercepted
                 .iter()
-                .all(|&(first, last)| high < first || last < low)
+                .all(|range| high < range.first || range.last < low)
         })
         .map(|&(.., name)| name)
         .collect()
@@ -274,31 +275,104 @@ const USE_MSR_BITMAPS: u64 = 1 << 28;
 /// The first MSR of the high half the MSR bitmap covers (0xc0000000-0xc0001fff).
 const HIGH_MSRS: u32 = 0xc000_0000;
 
-/// Which RDMSRs and WRMSRs exit, by an eVMCS's controls and MSR bitmap.
+/// An inclusive range of MSRs whose accesses exit, with the architectural
+/// MSRs (or blocks, such as `x2APIC`) that ntoseye names in it.
+#[record(impl)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsrRange {
+    #[record(hex)]
+    pub first: u32,
+    #[record(hex)]
+    pub last: u32,
+}
+
+#[record]
+impl MsrRange {
+    /// The MSRs and blocks that ntoseye names in the range.
+    #[record(getter)]
+    pub fn names(&self) -> Vec<&'static str> {
+        msr_names(self.first, self.last)
+    }
+}
+
+/// An inclusive range of I/O ports whose accesses exit.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortRange {
+    #[record(hex)]
+    pub first: u32,
+    #[record(hex)]
+    pub last: u32,
+}
+
+/// Which RDMSRs and WRMSRs of a VTL exit (`!hvvmcs -msr`), by its eVMCS's
+/// controls and MSR bitmap. `kind` is `every` (the controls use no MSR
+/// bitmap: every RDMSR and WRMSR exits) or `bitmap`. MSRs outside the
+/// bitmap's 0x0-0x1fff and 0xc0000000-0xc0001fff always exit.
+#[record(tagged, impl)]
 #[derive(Debug, PartialEq, Eq)]
 pub enum MsrIntercepts {
-    /// The controls use no MSR bitmap: every RDMSR and WRMSR exits.
     Every,
-    /// The MSR bitmap at physical address `bitmap`: the inclusive ranges of
-    /// MSRs whose reads, and whose writes, exit. MSRs outside the two halves
-    /// it covers (0x0-0x1fff and 0xc0000000-0xc0001fff) always exit.
+    /// The MSR bitmap at physical address `bitmap`, and the ranges of MSRs
+    /// whose reads, and whose writes, exit.
     Bitmap {
+        #[record(hex)]
         bitmap: u64,
-        read: Vec<(u32, u32)>,
-        write: Vec<(u32, u32)>,
+        read: Vec<MsrRange>,
+        write: Vec<MsrRange>,
     },
 }
 
-/// Which I/O instructions exit, by an eVMCS's controls and I/O bitmaps.
+#[record]
+impl MsrIntercepts {
+    /// Whether every RDMSR and WRMSR exits: the controls use no MSR
+    /// bitmap.
+    #[record(getter)]
+    pub fn every(&self) -> bool {
+        matches!(self, Self::Every)
+    }
+
+    /// The MSRs ntoseye names that the VTL reads without an exit.
+    #[record(getter)]
+    pub fn read_without_exit(&self) -> Vec<&'static str> {
+        match self {
+            Self::Every => Vec::new(),
+            Self::Bitmap { read, .. } => msr_names_outside(read),
+        }
+    }
+
+    /// The MSRs ntoseye names that the VTL writes without an exit.
+    #[record(getter)]
+    pub fn write_without_exit(&self) -> Vec<&'static str> {
+        match self {
+            Self::Every => Vec::new(),
+            Self::Bitmap { write, .. } => msr_names_outside(write),
+        }
+    }
+}
+
+/// Which I/O instructions of a VTL exit (`!hvvmcs -io`), by its eVMCS's
+/// controls and I/O bitmaps. `kind` is `none` (no I/O bitmaps and no
+/// unconditional I/O exiting), `every` (unconditional I/O exiting), or
+/// `bitmaps`.
+#[record(tagged, impl)]
 #[derive(Debug, PartialEq, Eq)]
 pub enum IoIntercepts {
-    /// No I/O bitmaps and no unconditional I/O exiting: none exits.
     None,
-    /// No I/O bitmaps, but unconditional I/O exiting: every one exits.
     Every,
-    /// I/O bitmaps A (ports 0-0x7fff) and B: the inclusive port ranges whose
+    /// I/O bitmaps A (ports 0-0x7fff) and B: the port ranges whose
     /// accesses exit.
-    Bitmaps { ports: Vec<(u32, u32)> },
+    Bitmaps { ports: Vec<PortRange> },
+}
+
+#[record]
+impl IoIntercepts {
+    /// Whether every I/O instruction exits: the controls use no I/O
+    /// bitmaps but unconditional I/O exiting.
+    #[record(getter)]
+    pub fn every(&self) -> bool {
+        matches!(self, Self::Every)
+    }
 }
 
 /// The RDMSR and WRMSR intercepts of the eVMCS `vmcs`, whose MSR bitmap
@@ -316,11 +390,13 @@ pub fn msr_intercepts(
     read_physical(bitmap, &mut page)
         .map_err(|error| Error::DebugInfo(format!("the MSR bitmap at {bitmap:#x}: {error}")))?;
     // Read low, read high, write low, write high (Intel SDM 25.6.9).
-    let quarter = |index: usize, base| set_ranges(&page[index * 0x400..][..0x400], base);
-    let mut read = quarter(0, 0);
-    read.extend(quarter(1, HIGH_MSRS));
-    let mut write = quarter(2, 0);
-    write.extend(quarter(3, HIGH_MSRS));
+    let quarter = |index: usize, base| {
+        set_ranges(&page[index * 0x400..][..0x400], base)
+            .into_iter()
+            .map(|(first, last)| MsrRange { first, last })
+    };
+    let read = quarter(0, 0).chain(quarter(1, HIGH_MSRS)).collect();
+    let write = quarter(2, 0).chain(quarter(3, HIGH_MSRS)).collect();
     Ok(MsrIntercepts::Bitmap {
         bitmap,
         read,
@@ -348,7 +424,11 @@ pub fn io_intercepts(
         let mut page = vec![0u8; 0x1000];
         read_physical(address, &mut page)
             .map_err(|error| Error::DebugInfo(format!("{name} at {address:#x}: {error}")))?;
-        ports.extend(set_ranges(&page, base));
+        ports.extend(
+            set_ranges(&page, base)
+                .into_iter()
+                .map(|(first, last)| PortRange { first, last }),
+        );
     }
     Ok(IoIntercepts::Bitmaps { ports })
 }
@@ -356,6 +436,13 @@ pub fn io_intercepts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ranges(ranges: &[(u32, u32)]) -> Vec<MsrRange> {
+        ranges
+            .iter()
+            .map(|&(first, last)| MsrRange { first, last })
+            .collect()
+    }
 
     /// An eVMCS page with `fields` set.
     fn vmcs_with(fields: &[(&str, u64)]) -> Vec<u8> {
@@ -394,8 +481,8 @@ mod tests {
             intercepts,
             MsrIntercepts::Bitmap {
                 bitmap: 0x5000,
-                read: vec![(0x10, 0x10), (0xc000_0080, 0xc000_0080)],
-                write: vec![(0xdb, 0xdb), (0xc000_0100, 0xc000_0100)],
+                read: ranges(&[(0x10, 0x10), (0xc000_0080, 0xc000_0080)]),
+                write: ranges(&[(0xdb, 0xdb), (0xc000_0100, 0xc000_0100)]),
             }
         );
         let no_bitmap = vmcs_with(&[("msr_bitmap", 0x5000)]);
@@ -426,7 +513,20 @@ mod tests {
         assert_eq!(
             intercepts,
             IoIntercepts::Bitmaps {
-                ports: vec![(0x60, 0x60), (0x64, 0x64), (0x8000, 0x8000)],
+                ports: vec![
+                    PortRange {
+                        first: 0x60,
+                        last: 0x60
+                    },
+                    PortRange {
+                        first: 0x64,
+                        last: 0x64
+                    },
+                    PortRange {
+                        first: 0x8000,
+                        last: 0x8000
+                    },
+                ],
             }
         );
         let read = |_: u64, _: &mut [u8]| -> Result<()> { panic!("no bitmap to read") };
@@ -454,7 +554,7 @@ mod tests {
             msr_names(0xc000_0080, 0xc000_0081),
             ["IA32_EFER", "IA32_STAR"]
         );
-        let intercepted = [(0x0, 0x47), (0x4a, 0x8ff), (0xc000_0000, 0xc000_00ff)];
+        let intercepted = ranges(&[(0x0, 0x47), (0x4a, 0x8ff), (0xc000_0000, 0xc000_00ff)]);
         assert_eq!(
             msr_names_outside(&intercepted)[..3],
             ["IA32_SPEC_CTRL", "IA32_PRED_CMD", "IA32_XSS"]

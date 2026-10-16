@@ -39,7 +39,7 @@ use discovery::{
     find_kernel, find_ntoskrnl, find_ntoskrnl_va, find_ntoskrnl_va_arm64, find_ntoskrnl_va_triage,
 };
 pub use evmcs::{EvmcsCache, EvmcsPages, EvmcsState, exit_reason_name};
-pub use exit_registers::{ENTRY_CODE_BYTES, EXIT_GPRS, ExitRegisterLayout};
+pub use exit_registers::{ENTRY_CODE_BYTES, EXIT_GPRS, ExitRegisterLayout, ordered_exit_gprs};
 pub use hypervisor::{
     HvMemory, HvPartition, HvProcessor, HvVirtualProcessor, HvVtl, privilege_names,
 };

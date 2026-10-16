@@ -23,7 +23,7 @@ use crate::{
         SavedThreadRegisters, SavedVtlContext, Target, ThreadInfo, lookup_register,
     },
     trapframe::{decode_kswitch_frame_seed, decode_ktrap_frame_for_thread},
-    types::{Arch, CodeMachine, Dtb, VirtAddr},
+    types::{Arch, CodeMachine, Dtb, Keyed, VirtAddr},
 };
 
 /// Per-frame unwinder diagnostics, gated on `NTOSEYE_UNWIND_TRACE`. Prints which
@@ -670,15 +670,206 @@ pub fn format_symbol(debugger: &Target, trace: &ThreadTraceContext, addr: u64) -
     try_format_symbol(debugger, trace, addr).unwrap_or_else(|| format!("{addr:#x}"))
 }
 
-/// A VTL state the Windows hypervisor saved, with the symbol where it left
-/// off.
+/// One VTL of a virtual processor, as the Windows hypervisor last saved it
+/// in the VTL's Enlightened VMCS, with the symbol where it left off. A VMCS
+/// holds no general-purpose register other than `rsp`; `general_registers`
+/// has the others when they are known.
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct SavedVtl {
+    #[record(skip)]
     pub context: SavedVtlContext,
     /// The symbol at the saved `rip`, resolved in the state's own address
     /// space.
+    #[record(skip)]
     pub symbol: Option<String>,
 }
+
+#[record]
+impl SavedVtl {
+    /// 0 or 1.
+    #[record(getter)]
+    pub fn vtl(&self) -> u8 {
+        self.context.vtl
+    }
+
+    /// Whether the VP assist page names this state's eVMCS as current. The
+    /// current VTL is the one that entered the hypervisor or that the
+    /// hypervisor is about to enter.
+    #[record(getter)]
+    pub fn current(&self) -> bool {
+        self.context.state.current
+    }
+
+    #[record(getter)]
+    pub fn rip(&self) -> VirtAddr {
+        VirtAddr(self.context.state.rip)
+    }
+
+    /// The symbol at `rip` in the VTL's address space, if one resolves.
+    #[record(getter, rename = "symbol")]
+    pub fn saved_symbol(&self) -> Option<String> {
+        self.symbol.clone()
+    }
+
+    #[record(getter)]
+    pub fn rsp(&self) -> VirtAddr {
+        VirtAddr(self.context.state.rsp)
+    }
+
+    #[record(getter, hex)]
+    pub fn rflags(&self) -> u64 {
+        self.context.state.rflags
+    }
+
+    #[record(getter, hex)]
+    pub fn cr0(&self) -> u64 {
+        self.context.state.cr0
+    }
+
+    /// The page-table root of the VTL.
+    #[record(getter, hex)]
+    pub fn cr3(&self) -> u64 {
+        self.context.state.cr3
+    }
+
+    #[record(getter, hex)]
+    pub fn cr4(&self) -> u64 {
+        self.context.state.cr4
+    }
+
+    #[record(getter, hex)]
+    pub fn dr7(&self) -> u64 {
+        self.context.state.dr7
+    }
+
+    #[record(getter, hex)]
+    pub fn cs(&self) -> u16 {
+        self.context.state.cs
+    }
+
+    #[record(getter, hex)]
+    pub fn ss(&self) -> u16 {
+        self.context.state.ss
+    }
+
+    #[record(getter, hex)]
+    pub fn ds(&self) -> u16 {
+        self.context.state.ds
+    }
+
+    #[record(getter, hex)]
+    pub fn es(&self) -> u16 {
+        self.context.state.es
+    }
+
+    #[record(getter, hex)]
+    pub fn fs(&self) -> u16 {
+        self.context.state.fs
+    }
+
+    #[record(getter, hex)]
+    pub fn gs(&self) -> u16 {
+        self.context.state.gs
+    }
+
+    #[record(getter)]
+    pub fn fs_base(&self) -> VirtAddr {
+        VirtAddr(self.context.state.fs_base)
+    }
+
+    #[record(getter)]
+    pub fn gs_base(&self) -> VirtAddr {
+        VirtAddr(self.context.state.gs_base)
+    }
+
+    /// The VM-exit reason of the last exit from the VTL. Bits 15:0 hold the
+    /// basic reason, and bit 31 is set for a failed VM entry.
+    #[record(getter, hex)]
+    pub fn exit_reason(&self) -> u32 {
+        self.context.state.exit_reason
+    }
+
+    /// The name of the exit reason (`HLT`, `VMCALL`, ...), if it is a
+    /// common reason.
+    #[record(getter)]
+    pub fn exit_reason_name(&self) -> Option<&'static str> {
+        self.context.state.exit_reason_name()
+    }
+
+    /// Reason-specific detail of the last exit, such as the access that
+    /// caused an EPT violation (Intel SDM, exit qualification).
+    #[record(getter, hex)]
+    pub fn exit_qualification(&self) -> u64 {
+        self.context.state.exit_qualification
+    }
+
+    /// The vector and type of the event behind an exception or interrupt
+    /// exit (Intel SDM, VM-exit interruption information).
+    #[record(getter, hex)]
+    pub fn exit_interruption_info(&self) -> u32 {
+        self.context.state.exit_interruption_info
+    }
+
+    /// The length of the instruction that caused the exit, for exits that
+    /// an instruction caused.
+    #[record(getter)]
+    pub fn exit_instruction_length(&self) -> u32 {
+        self.context.state.exit_instruction_length
+    }
+
+    /// The hypervisor's VM-exit entry point.
+    #[record(getter)]
+    pub fn host_rip(&self) -> VirtAddr {
+        VirtAddr(self.context.state.host_rip)
+    }
+
+    /// The stack the hypervisor's VM-exit entry point runs on.
+    #[record(getter)]
+    pub fn host_rsp(&self) -> VirtAddr {
+        VirtAddr(self.context.state.host_rsp)
+    }
+
+    /// The vCPU is stopped on `host_rip`, and not by a breakpoint there.
+    /// KVM writes the eVMCS when it enters the hypervisor, and a stop from
+    /// outside can fall between a VM exit and that entry, so this state
+    /// may still describe the exit before the one in progress. The
+    /// guest's general-purpose registers are then still in the vCPU's own
+    /// registers. A breakpoint on `host_rip` fires after the write.
+    /// Only the current state, the exiting VTL's, can be behind; when no
+    /// state of the VP is current, every state is marked.
+    #[record(getter)]
+    pub fn may_be_stale(&self) -> bool {
+        self.context.may_be_stale
+    }
+
+    /// The guest's general-purpose registers other than `rsp` at the last
+    /// exit (`rax` to `r15`), read where the hypervisor's VM-exit entry
+    /// code saved them. Experimental: where that is, is read off the
+    /// entry code. None when they are not known: for a VTL that is not
+    /// the current one, while the vCPU is on `host_rip` (unless it stopped
+    /// there on a breakpoint, when they are the vCPU's own) or still saving
+    /// them, or when the entry code does not save them in one block.
+    #[record(getter, hex)]
+    pub fn general_registers(&self) -> Option<Keyed<u64>> {
+        self.context.general_registers.as_ref().ok().map(crate::guest::ordered_exit_gprs)
+    }
+
+    /// The physical address of the eVMCS page that ntoseye read the state
+    /// from.
+    #[record(getter, hex)]
+    pub fn evmcs(&self) -> u64 {
+        self.context.state.address
+    }
+
+    /// The hypercall of a VMCALL exit whose general-purpose registers are
+    /// known, with its input decoded.
+    #[record(getter)]
+    pub fn hypercall(&self) -> Option<crate::guest::hypercall_input::DecodedHypercall> {
+        self.context.hypercall.call().cloned()
+    }
+}
+
 
 impl SavedVtl {
     /// Where the state left off, as `VTL0 nt!HalProcessorIdle+0xf`, marked

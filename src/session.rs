@@ -452,22 +452,39 @@ pub enum StopResolution {
     Stopped { event: StopEvent, rip: u64 },
 }
 
-/// The registers of one VTL of a Windows hypervisor VP (see
+/// The registers of one VTL of a Windows hypervisor VP (`!hvr`, see
 /// [`Session::vp_registers`]).
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct VpRegisters {
     /// RIP, RSP, flags, control and segment registers from the VTL's eVMCS,
     /// and the general-purpose registers when they are known; a vCPU's
     /// whole register file when it runs the VP.
+    #[record(skip)]
     pub registers: HashMap<String, u64>,
-    /// Where they are from: the vCPU that runs the VP now, the exit that a
-    /// vCPU in the hypervisor handles for it, or its last exit.
+    /// Where they are from: a vCPU that runs the VP now, the exit a vCPU
+    /// in the hypervisor handles for it, or its last exit.
     pub source: String,
     /// Why the general-purpose registers are missing, when they are.
     pub missing: Option<String>,
     /// The vCPU that runs the VP now, whose register file `registers` is;
     /// `None` when they are an exit's or the hypervisor's record of them.
+    #[record(skip)]
     pub vcpu: Option<String>,
+}
+
+#[record]
+impl VpRegisters {
+    /// RIP, RSP, flags, control and segment registers, and the
+    /// general-purpose ones when they are known, in
+    /// [`crate::target::VP_STATE_REGISTERS`] order.
+    #[record(getter, hex, rename = "registers")]
+    pub fn ordered_registers(&self) -> crate::types::Keyed<u64> {
+        crate::target::VP_STATE_REGISTERS
+            .iter()
+            .filter_map(|name| Some((*name, *self.registers.get(*name)?)))
+            .collect()
+    }
 }
 
 /// A thread a user-mode minidump captured, as `~` lists it.
@@ -493,27 +510,31 @@ pub struct UserThreadSummary {
     pub exception: bool,
 }
 
-/// A backend execution context (vCPU) and the guest code it is currently
-/// running. `symbol` is `None` when nothing resolves (render the raw `rip`);
-/// `error` is set when the vCPU's register context couldn't be read at all.
+/// A vCPU (backend execution context) and the guest code that it runs.
+#[record]
 #[derive(Debug, Clone)]
 pub struct VcpuInfo {
-    /// Backend thread/vCPU id (e.g. `p1.1`).
+    /// The backend thread/vCPU ID (`p1.1`).
     pub id: String,
-    /// Instruction pointer, or `None` if the register context was unreadable.
+    /// None if ntoseye cannot read the register context.
+    #[record(hex)]
     pub rip: Option<u64>,
-    /// The address space the vCPU is executing in: `"kernel"`, a process name,
-    /// or `"unknown"`. Empty when the context could not be determined.
+    /// What the vCPU runs: `kernel`, a process name, `hypervisor`, `VTL1`,
+    /// a guest partition's VP (`partition 0x3 VP 1`), or `unknown`; `no
+    /// context` for a dump CPU whose context the dump lacks. Empty if
+    /// ntoseye cannot read the register context.
     pub context: String,
-    /// Nearest symbol to `rip` (`module!name+0x..`), if one resolved.
+    /// The nearest symbol to `rip`, if one resolves.
     pub symbol: Option<String>,
-    /// For a vCPU halted in the Windows hypervisor, the VTL states it saved
-    /// for the vCPU's virtual processor.
+    /// For a vCPU halted in the Windows hypervisor, the VTL states that the
+    /// hypervisor saved for the vCPU's virtual processor, VTL0 first.
     pub saved_vtl: Vec<SavedVtl>,
     /// For a vCPU halted in the Windows hypervisor, the guest partition's
-    /// virtual processor whose exit it handles, when it is not the root's.
+    /// virtual processor whose exit it handles or that it is about to
+    /// enter, when it is not one of the root partition's.
     pub serving: Option<ServedVp>,
-    /// Why the vCPU context was unavailable, if it was.
+    /// The reason that the register context is not available. None if it is
+    /// available.
     pub error: Option<String>,
 }
 

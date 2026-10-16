@@ -16,10 +16,9 @@ use crate::guest::ept::{EptTranslation, differences};
 use crate::guest::hypercalls::HypercallCaller as Caller;
 use crate::guest::{HvPartition, HvVirtualProcessor, HvVtl, evmcs_fields, privilege_names};
 use crate::target::CodeExtent;
-use crate::view::hypervisor::{
-    DecodedHypercall, IoIntercepts, MsrIntercepts, VpRegisters, decoded_hypercall, io_intercepts,
-    msr_intercepts, vp_registers,
-};
+use crate::guest::evmcs_fields::{IoIntercepts, MsrIntercepts};
+use crate::guest::hypercall_input::DecodedHypercall;
+use crate::session::VpRegisters;
 use crate::types::Keyed;
 use crate::view::record::{Hex, Typed};
 
@@ -270,7 +269,7 @@ impl VirtualProcessor {
                 .vp_registers(self.partition, self.info.index, vtl)
                 .map_err(err)
         })?;
-        Typed::new(py, vp_registers(&found))
+        Typed::new(py, found)
     }
 
     fn __repr__(&self) -> String {
@@ -469,7 +468,7 @@ impl HypervisorVtl {
             })
             .map_err(err)
         })?;
-        Typed::new(py, msr_intercepts(&intercepts))
+        Typed::new(py, intercepts)
     }
 
     /// Which I/O instructions of this VTL exit, as `!hvvmcs -io` shows them:
@@ -484,7 +483,7 @@ impl HypervisorVtl {
             })
             .map_err(err)
         })?;
-        Typed::new(py, io_intercepts(&intercepts))
+        Typed::new(py, intercepts)
     }
 
     /// Translate a guest physical address through this VTL's EPT, as
@@ -585,7 +584,7 @@ impl HypercallCaller {
     #[getter]
     fn hypercall<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Option<DecodedHypercall>>> {
         self.owner.check(py)?;
-        Typed::new(py, self.info.input.call().map(decoded_hypercall))
+        Typed::new(py, self.info.input.call().cloned())
     }
 
     /// Read `size` bytes of the caller's memory, as a hypercall
@@ -635,7 +634,7 @@ impl HypercallCaller {
         dict.set_item("vtl", self.info.vtl)?;
         dict.set_item("registers", self.info.registers.clone())?;
         let hypercall = match self.info.input.call() {
-            Some(call) => Some(view_dict(py, &decoded_hypercall(call))?),
+            Some(call) => Some(view_dict(py, call)?),
             None => None,
         };
         dict.set_item("hypercall", hypercall)?;
