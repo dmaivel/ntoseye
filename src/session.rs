@@ -32,6 +32,7 @@ use crate::session::partition::{KeptPartition, PartitionView};
 use crate::target::dbgprint::{PrintCursor, prints_between};
 use crate::target::{ReloadReport, ServedVp, Target, TargetSelection, ThreadInfo};
 use crate::types::VirtAddr;
+use ntoseye_macros::record;
 use crate::unwind::SavedVtl;
 
 /// Trace reload classification (lines prefixed `reload:`), gated on
@@ -233,14 +234,33 @@ pub struct RunStatus {
     pub partition: Option<u64>,
 }
 
-/// The fields decoded from a 64-bit Windows `EXCEPTION_RECORD` by `.exr`.
+/// A decoded `EXCEPTION_RECORD64` (`.exr`).
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct ExceptionRecord {
+    /// The exception code (NTSTATUS).
+    #[record(hex)]
     pub code: u32,
+    #[record(hex)]
     pub flags: u32,
+    /// The address of a nested `EXCEPTION_RECORD`, or 0.
+    #[record(hex)]
     pub nested: u64,
+    /// Where the exception occurred.
+    #[record(hex, rename = "exception_address")]
     pub address: u64,
+    /// The exception's `ExceptionInformation` parameters.
+    #[record(hex)]
     pub parameters: Vec<u64>,
+}
+
+#[record]
+impl ExceptionRecord {
+    /// The code's symbolic name.
+    #[record(getter)]
+    pub fn code_name(&self) -> &'static str {
+        crate::triage_report::exception_code_name(self.code)
+    }
 }
 
 /// One call-tree node of a [`CallTrace`].

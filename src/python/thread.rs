@@ -24,8 +24,8 @@ use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::effects::Effects;
 use crate::session::{Session, VcpuInfo};
 use crate::symbols::CodeFrame;
-use crate::target::{SelectedFrame, Target, ThreadInfo, cpu};
-use crate::trapframe::{read_ktrap_frame_at_or_current, trap_frame_rip_symbol};
+use crate::target::{SelectedFrame, ThreadInfo, cpu};
+use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current};
 use crate::types::VirtAddr;
 use crate::unwind::{RecoveredFrame, StackFrame, halted_in_windows_hypervisor};
 use crate::view;
@@ -301,12 +301,12 @@ impl Thread {
     }
 
     /// Decode the saved `_KTRAP_FRAME` (`!trap`).
-    fn trap_frame<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::bugcheck::TrapFrame>> {
+    fn trap_frame<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, KtrapFrame>> {
         let context = self.context(self.process_info(py)?);
-        let view = self.owner.with_in(py, &context, |session| {
-            trap_frame_view(&session.target, self.info.trap_frame)
+        let frame = self.owner.with_in(py, &context, |session| {
+            read_ktrap_frame_at_or_current(&session.target, self.info.trap_frame).map_err(err)
         })?;
-        Typed::new(py, view)
+        Typed::new(py, frame)
     }
 
     /// The thread as a plain `dict`.
@@ -1111,17 +1111,6 @@ pub fn process_for_thread(session: &Session, thread: &ThreadInfo) -> PyResult<Op
         .map_err(err)?
         .into_iter()
         .find(|process| process.pid == pid))
-}
-
-pub fn trap_frame_view(
-    target: &Target,
-    address: Option<VirtAddr>,
-) -> PyResult<view::bugcheck::TrapFrame> {
-    let frame = read_ktrap_frame_at_or_current(target, address).map_err(err)?;
-    Ok(view::bugcheck::trap_frame(
-        &frame,
-        trap_frame_rip_symbol(target, &frame),
-    ))
 }
 
 /// A `u8` enum field as its PDB `IntEnum` member (an `int`), or `None`.

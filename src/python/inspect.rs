@@ -7,10 +7,11 @@ use super::command::admit;
 use super::context::Context;
 use super::handle::Owner;
 use super::module::Device;
-use super::thread::{Frame, trap_frame_view};
+use super::thread::Frame;
 use super::{err, raise};
 use crate::bugchecks::{bugcheck_from_dump_info, current_bugcheck};
-use crate::session::Session;
+use crate::session::{ExceptionRecord, Session};
+use crate::trapframe::{KtrapFrame, read_ktrap_frame};
 use crate::session::effects::Effects;
 use crate::target::etw::parse_guid;
 use crate::triage_report::TriageReport;
@@ -68,9 +69,9 @@ impl Inspect {
         &self,
         py: Python<'py>,
         address: u64,
-    ) -> PyResult<Typed<'py, view::bugcheck::TrapFrame>> {
+    ) -> PyResult<Typed<'py, KtrapFrame>> {
         self.typed(py, |session| {
-            trap_frame_view(&session.target, Some(VirtAddr(address)))
+            read_ktrap_frame(&session.target, VirtAddr(address)).map_err(err)
         })
     }
 
@@ -113,12 +114,11 @@ impl Inspect {
         &self,
         py: Python<'py>,
         address: u64,
-    ) -> PyResult<Typed<'py, view::bugcheck::ExceptionRecord>> {
+    ) -> PyResult<Typed<'py, ExceptionRecord>> {
         self.typed_any(py, |session| {
-            let record = session
+            session
                 .read_exception_record(VirtAddr(address))
-                .map_err(err)?;
-            Ok(view::bugcheck::exception_record(Some(address), &record))
+                .map_err(err)
         })
     }
 
