@@ -450,6 +450,9 @@ impl DebugBackend for KdBackend {
     fn registers_are_context(&self) -> bool {
         true
     }
+    fn debug_traps_reach_target(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         self.backend_name
     }

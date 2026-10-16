@@ -393,6 +393,32 @@ impl Target {
             .is_some_and(|guest| guest.in_hypervisor_image(address))
     }
 
+    /// Why a debug exception at `address` must not reach Windows, for
+    /// `what` takes one there ("a single step", "a breakpoint"): the
+    /// address is in the kernel's user/kernel transition code (see
+    /// [`Guest::kernel_transition_code`]). `None` anywhere else.
+    ///
+    /// [`Guest::kernel_transition_code`]: crate::nt::guest::Guest::kernel_transition_code
+    pub fn kernel_transition_refusal(&self, address: VirtAddr, what: &str) -> Option<String> {
+        let guest = self.guest.as_ref()?;
+        if !guest.kernel_transition_code()?.contains(&address) {
+            return None;
+        }
+        let at = self
+            .symbols
+            .format_closest_symbol_for_address(self.kernel_dtb(), address)
+            .map_or_else(
+                || format!("{:#x}", address.0),
+                |symbol| format!("{symbol} ({:#x})", address.0),
+            );
+        Some(format!(
+            "{at} is in ntoskrnl's KVASCODE section, the code that switches between user and kernel \
+             mode; Windows cannot take a debug exception there (it bugchecks with \
+             UNEXPECTED_KERNEL_MODE_TRAP), so {what} cannot be taken over KD. Resume with g, or \
+             stop before the transition or in user mode"
+        ))
+    }
+
     /// Whether inspection is in the hypervisor's address space: a stop in it,
     /// whose context `.cxr` selected.
     pub fn in_hypervisor_address_space(&self) -> bool {

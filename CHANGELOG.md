@@ -62,6 +62,7 @@ The Python SDK is now generated from the same definitions as the REPL: each comm
 
 ### Fixed
 
+- Over KD, a single step or breakpoint in the code where Windows switches between kernel and user mode (ntoskrnl's `KVASCODE` section, such as `nt!KiKernelSysretExit`) is refused with the reason, instead of crashing Windows with bugcheck `0x7F` (`UNEXPECTED_KERNEL_MODE_TRAP`). A step that reaches that code, such as `pt` or `wt` past a system call's return, stops before it with the same error.
 - `!pfn <value> -a` reads the physical address, as `-a` asks; a `-a` after the value was ignored.
 - The SDK's `Memory.disassemble()` returns the instructions that are readable when the rest of the window is not, and names their targets as `u` does, instead of raising; a count outside 1-4096 raises for `disassemble()` and `disassemble_back()` alike.
 - On a user-mode minidump, `Process.protection()` reads the dump's memory information instead of failing.

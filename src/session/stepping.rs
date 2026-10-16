@@ -69,6 +69,14 @@ impl Session {
             return Ok((outcome, RunPast::Kept));
         }
         self.require_steppable_vcpu()?;
+        // A walk that reaches the kernel's return to user mode ends here
+        // too, on the instruction it could not step, with this error.
+        if self.run_backend().debug_traps_reach_target() {
+            let rip = VirtAddr(self.current_rip());
+            if let Some(refusal) = self.target.kernel_transition_refusal(rip, "a single step") {
+                return Err(Error::DebugInfo(refusal));
+            }
+        }
         self.target.selected_frame = None;
         // Advancing the VM spends any stop `service_idle` parked, so drop it (the
         // other advance paths clear it via `resume`; a bare single-step doesn't).

@@ -51,6 +51,10 @@ If nothing near the address says where its instructions start, or that code cann
 
 The Python SDK's `dbg.breakpoints.add()` makes the same check, with the same refusal: it raises `NtoseyeError` for an address inside an instruction, puts the warning in `dbg.notices()` when it cannot check, and skips the check with `unchecked=True`. A `ba e1` breakpoint, and `add(..., hardware=True)`, does not write to memory, so it needs no check. ntoseye does not check the breakpoints that DAP and GDB clients set.
 
+### The kernel's switch to user mode
+
+On the `kd` and `kdnet` backends, ntoseye refuses a code breakpoint, `ba e1` included, and a single step in ntoskrnl's `KVASCODE` section. That section holds the code that switches between kernel and user mode: the system-call entry `nt!KiSystemCall64Shadow` and the exits back to user mode, such as `nt!KiKernelSysretExit`. An exit uses the stack pointer as a scratch register and switches to the user page tables before it returns to user mode. Windows takes a debug exception that comes in between without a usable kernel stack, and bugchecks with `UNEXPECTED_KERNEL_MODE_TRAP` (`0x7F`, a double fault). A step that reaches the section, such as a {command}`pt` or {command}`wt` past the return of a system call, stops at its first instruction and says why. Resume with {command}`g`, or stop in user mode with a breakpoint there. The `gdb` backend breaks and steps below Windows, which then sees no exception, so it allows both.
+
 ## Breakpoints on non-resident pages
 
 You can set a kernel code breakpoint on a page that is not resident. KD records the site and writes the breakpoint when the page comes into memory, and until then {command}`bl` shows `o` (owed). At an offset into a function whose code is not resident, ntoseye cannot read the code to confirm an instruction start, so it warns that it could not check.

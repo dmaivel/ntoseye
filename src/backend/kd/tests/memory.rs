@@ -663,3 +663,53 @@ fn truncated_fills_keep_whole_lines_and_finish_the_read() {
     // 0x800 asked and 0x300 answered, then one line per request.
     assert_eq!(worker.join().unwrap(), 1 + 3);
 }
+
+/// The kernel's header page, with `.text` and `KVASCODE` sections.
+fn kernel_headers_with_transition_code() -> Vec<u8> {
+    let mut page = vec![0u8; PAGE_SIZE];
+    let mut put = |at: usize, bytes: &[u8]| page[at..at + bytes.len()].copy_from_slice(bytes);
+    let pe = 0x80;
+    put(0, b"MZ");
+    put(0x3c, &(pe as u32).to_le_bytes());
+    put(pe, b"PE\0\0");
+    put(pe + 4, &0x8664u16.to_le_bytes());
+    put(pe + 6, &2u16.to_le_bytes());
+    put(pe + 20, &240u16.to_le_bytes());
+    let optional = pe + 24;
+    put(optional, &0x20bu16.to_le_bytes());
+    put(optional + 32, &0x1000u32.to_le_bytes());
+    put(optional + 36, &0x200u32.to_le_bytes());
+    put(optional + 56, &0x3000u32.to_le_bytes());
+    put(optional + 60, &0x1000u32.to_le_bytes());
+    put(optional + 108, &16u32.to_le_bytes());
+    let sections = optional + 240;
+    for (index, (name, rva, size)) in [
+        (&b".text\0\0\0"[..], 0x1000u32, 0x1000u32),
+        (b"KVASCODE", 0x2000, 0x498),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let header = sections + index * 40;
+        put(header, name);
+        put(header + 8, &size.to_le_bytes());
+        put(header + 12, &rva.to_le_bytes());
+    }
+    page
+}
+
+#[test]
+fn the_kernel_transition_code_is_its_kvascode_section() {
+    let regions = vec![(FAKE_KERNEL_BASE, kernel_headers_with_transition_code())];
+    let (guest, backend, worker) = synthetic_guest(regions, Vec::new(), &[]);
+    let range = guest.kernel_transition_code().unwrap().clone();
+    assert_eq!(
+        range,
+        VirtAddr(FAKE_KERNEL_BASE + 0x2000)..VirtAddr(FAKE_KERNEL_BASE + 0x2498)
+    );
+    // The section's mapped size ends it, not the section alignment.
+    assert!(!range.contains(&VirtAddr(FAKE_KERNEL_BASE + 0x2498)));
+    drop(guest);
+    drop(backend);
+    worker.join().unwrap();
+}
