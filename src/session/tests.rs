@@ -11,7 +11,9 @@ use crate::breakpoints::{
     Breakpoint, BreakpointConfig, HardwareBreakpoint, HypercallFilter, PartitionFilter, StepFrame,
     ThreadScope,
 };
-use crate::dbg_backend::{ContinueDisposition, HwBreakpointAccess, TrapState, clear_trap_flag};
+use crate::dbg_backend::{
+    ContinueDisposition, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, TrapState, clear_trap_flag,
+};
 use crate::dmp::{IMAGE_FILE_MACHINE_ARM64, structs::Header64};
 use crate::exception_policy::ExceptionPolicyMode;
 use crate::guest::ModuleInfo;
@@ -40,7 +42,7 @@ const TF: u64 = 1 << 8;
 const EFLAGS_BASE: u64 = 0x202;
 
 /// Hardware slot writes in order: `(slot, Some(address))` sets, `None` clears.
-type HardwareWrites = Arc<Mutex<Vec<(u8, Option<u64>)>>>;
+type HardwareWrites = Arc<Mutex<Vec<(usize, Option<u64>)>>>;
 /// Software site writes in order: `(address, true)` plants, `false` lifts.
 type SiteWrites = Arc<Mutex<Vec<(u64, bool)>>>;
 
@@ -75,6 +77,8 @@ pub struct MockBackend {
     site_writes: SiteWrites,
     /// `set_hardware_breakpoint` / `clear_hardware_breakpoint` calls.
     hardware_writes: HardwareWrites,
+    /// Physical capacity behind a larger logical slot range, as on a GDB stub.
+    hardware_limit: Option<usize>,
     /// Debug registers are the host's, as a GDB stub programs them: they
     /// trap whatever a processor runs, a guest partition's code included.
     host_debug_registers: bool,
@@ -167,6 +171,7 @@ impl Default for MockBackend {
             dropped_sites: Vec::new(),
             site_writes: Arc::new(Mutex::new(Vec::new())),
             hardware_writes: Arc::new(Mutex::new(Vec::new())),
+            hardware_limit: None,
             host_debug_registers: false,
             reads: 0,
             register_read_delay: Duration::ZERO,
@@ -330,17 +335,27 @@ impl DebugBackend for MockBackend {
     fn supports_user_mode_breakpoints(&self) -> bool {
         self.allow_breakpoints
     }
+    fn hardware_breakpoint_slots(&self) -> usize {
+        self.hardware_limit
+            .map_or(usize::from(HW_BREAKPOINT_SLOTS), |limit| limit + 4)
+    }
     fn set_hardware_breakpoint(
         &mut self,
-        slot: u8,
+        slot: usize,
         addr: u64,
         _access: HwBreakpointAccess,
         _len: u8,
     ) -> Result<()> {
+        if self.hardware_limit.is_some_and(|limit| slot >= limit) {
+            return Err(Error::HardwareBreakpointRefused {
+                address: addr,
+                response: "E22".into(),
+            });
+        }
         self.hardware_writes.lock().push((slot, Some(addr)));
         Ok(())
     }
-    fn clear_hardware_breakpoint(&mut self, slot: u8) -> Result<()> {
+    fn clear_hardware_breakpoint(&mut self, slot: usize) -> Result<()> {
         self.hardware_writes.lock().push((slot, None));
         Ok(())
     }
@@ -2405,6 +2420,109 @@ fn a_user_space_step_uses_debug_register_sites_where_int3_is_unsafe() {
     }
 }
 
+/// Refusing the optional instruction marker leaves the last physical slot
+/// on the successor while the other vCPUs run to free this one.
+#[test]
+fn a_user_space_step_completes_when_the_release_marker_is_refused() {
+    let mut backend = MockBackend {
+        single_step_unsafe: true,
+        hardware_limit: Some(4),
+        halts_only_on_interrupt: true,
+        landings: VecDeque::from([0x1000]),
+        released_to: Some(0x1001),
+        one_vcpu: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1000);
+    let (sites, hardware) = (backend.site_writes.clone(), backend.hardware_writes.clone());
+    let continues = Arc::clone(&backend.continues);
+    let mut session = stepping_session(&[0x90u8; 0x40], backend);
+    session.current_thread = "p01.01".into();
+    for slot in 0..3 {
+        session.breakpoints.insert_for_test(
+            slot as u32,
+            VirtAddr(0x1020 + slot as u64),
+            true,
+            Some(HardwareBreakpoint {
+                access: HwBreakpointAccess::Execute,
+                len: 1,
+                slot,
+            }),
+        );
+    }
+
+    assert_eq!(step_rip(&mut session), 0x1001);
+    assert_eq!(continues.load(Ordering::Relaxed), 1);
+    assert!(session.take_notices().is_empty());
+    assert!(sites.lock().is_empty(), "an int3 was planted in user space");
+    assert_eq!(*hardware.lock(), [(3, Some(0x1001)), (3, None)]);
+    assert_eq!(session.list_breakpoints().len(), 3);
+}
+
+/// Every successor is required: refusing the second must lift the first
+/// without falling back to patching user code.
+#[test]
+fn a_user_space_step_cleans_up_when_a_successor_is_refused() {
+    let mut code = [0x90u8; 0x40];
+    code[..2].copy_from_slice(&[0x74, 0x10]); // je +0x10
+    let mut backend = MockBackend {
+        single_step_unsafe: true,
+        hardware_limit: Some(1),
+        one_vcpu: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1000);
+    let (sites, hardware) = (backend.site_writes.clone(), backend.hardware_writes.clone());
+    let mut session = stepping_session(&code, backend);
+
+    let error = session.step().unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::HardwareBreakpointRefused {
+                address: 0x1012,
+                ref response,
+            } if response == "E22"
+        ),
+        "{error:?}"
+    );
+    assert!(sites.lock().is_empty(), "an int3 was planted in user space");
+    assert_eq!(*hardware.lock(), [(0, Some(0x1002)), (0, None)]);
+}
+
+/// Temporary debug-register sites retain the full logical slot ID, even
+/// after hundreds of user hardware breakpoints have occupied earlier slots.
+#[test]
+fn a_user_space_step_uses_and_clears_a_hardware_slot_above_255() {
+    let mut backend = MockBackend {
+        single_step_unsafe: true,
+        hardware_limit: Some(512),
+        lands_at: Some(0x1001),
+        one_vcpu: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1000);
+    let (sites, hardware) = (backend.site_writes.clone(), backend.hardware_writes.clone());
+    let mut session = stepping_session(&[0x90u8; 0x40], backend);
+    for slot in 0..300 {
+        session.breakpoints.insert_for_test(
+            slot as u32,
+            VirtAddr(0x2000 + slot as u64),
+            true,
+            Some(HardwareBreakpoint {
+                access: HwBreakpointAccess::Execute,
+                len: 1,
+                slot,
+            }),
+        );
+    }
+
+    assert_eq!(step_rip(&mut session), 0x1001);
+    assert!(sites.lock().is_empty(), "an int3 was planted in user space");
+    assert_eq!(*hardware.lock(), [(300, Some(0x1001)), (300, None)]);
+    assert_eq!(session.list_breakpoints().len(), 300);
+}
+
 #[test]
 fn refresh_rewrites_only_the_sites_the_stop_dropped() {
     let session = session_over_memory(0x1000, &[0u8; 0x80]);
@@ -2426,7 +2544,7 @@ fn refresh_rewrites_only_the_sites_the_stop_dropped() {
     );
 }
 
-fn manager_with_hw(slot: u8, access: HwBreakpointAccess, enabled: bool) -> BreakpointManager {
+fn manager_with_hw(slot: usize, access: HwBreakpointAccess, enabled: bool) -> BreakpointManager {
     let mut manager = BreakpointManager::new();
     let len = match access {
         HwBreakpointAccess::Execute => 1,

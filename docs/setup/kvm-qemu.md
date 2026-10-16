@@ -89,6 +89,8 @@ Keep debug mode off.
 
 For plain QEMU, add `-s -S` to the qemu command.
 
+With TCG (`-accel tcg`), QEMU implements hardware breakpoints and watchpoints in the emulator, without a fixed slot limit. The `gdb` backend accepts as many as the stub allows; use `ba e1 <address>` for an execution breakpoint without patching code, including in user space. KVM still has four shared debug-register slots on AMD64. No additional ntoseye option is needed.
+
 For virt-manager, add these lines to the XML configuration:
 
 ```xml

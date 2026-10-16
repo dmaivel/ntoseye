@@ -501,31 +501,38 @@ impl DebugBackend for KdBackend {
         matches!(self.arch, Arch::Amd64 | Arch::Arm64)
     }
 
-    fn hardware_breakpoint_slots(&self) -> u8 {
+    fn hardware_breakpoint_slots(&self) -> usize {
         match self.arch {
-            Arch::Amd64 => HW_BREAKPOINT_SLOTS,
-            Arch::Arm64 => hwbp::ARM64_MAX_BREAKPOINTS + hwbp::ARM64_MAX_WATCHPOINTS,
+            Arch::Amd64 => usize::from(HW_BREAKPOINT_SLOTS),
+            Arch::Arm64 => usize::from(hwbp::ARM64_MAX_BREAKPOINTS + hwbp::ARM64_MAX_WATCHPOINTS),
         }
     }
 
-    fn hardware_slot_range(&self, access: HwBreakpointAccess) -> std::ops::Range<u8> {
+    fn hardware_slot_range(&self, access: HwBreakpointAccess) -> std::ops::Range<usize> {
         match self.arch {
-            Arch::Amd64 => 0..HW_BREAKPOINT_SLOTS,
-            Arch::Arm64 => hwbp::arm64_slot_range(access),
+            Arch::Amd64 => 0..usize::from(HW_BREAKPOINT_SLOTS),
+            Arch::Arm64 => {
+                let slots = hwbp::arm64_slot_range(access);
+                usize::from(slots.start)..usize::from(slots.end)
+            }
         }
     }
 
     fn set_hardware_breakpoint(
         &mut self,
-        slot: u8,
+        slot: usize,
         addr: u64,
         access: HwBreakpointAccess,
         len: u8,
     ) -> Result<()> {
+        let slot = u8::try_from(slot)
+            .map_err(|_| Error::Kd(format!("invalid hardware breakpoint slot {slot}")))?;
         self.set_hardware_slot(slot, addr, access, len)
     }
 
-    fn clear_hardware_breakpoint(&mut self, slot: u8) -> Result<()> {
+    fn clear_hardware_breakpoint(&mut self, slot: usize) -> Result<()> {
+        let slot = u8::try_from(slot)
+            .map_err(|_| Error::Kd(format!("invalid hardware breakpoint slot {slot}")))?;
         self.clear_hardware_slot(slot)
     }
 

@@ -6,11 +6,11 @@ use crate::dbg_backend::{DebugBackend, StopEvent};
 use crate::error::{Error, Result};
 use crate::gdb::RegisterMap;
 
-/// Backend stub that records which DR slots `clear_hardware_breakpoint`
+/// Backend stub that records which backend slots `clear_hardware_breakpoint`
 /// releases; every other operation is out of scope for these tests.
 pub(super) struct SlotRecorder {
     register_map: RegisterMap,
-    pub(super) cleared: Vec<u8>,
+    pub(super) cleared: Vec<usize>,
     /// Address the target refuses a breakpoint at, like a driver's
     /// discarded `INIT` section.
     refused: Option<u64>,
@@ -99,7 +99,7 @@ impl DebugBackend for SlotRecorder {
     fn reclaims_abandoned_breakpoints(&self) -> bool {
         self.reclaims
     }
-    fn clear_hardware_breakpoint(&mut self, slot: u8) -> Result<()> {
+    fn clear_hardware_breakpoint(&mut self, slot: usize) -> Result<()> {
         self.cleared.push(slot);
         Ok(())
     }

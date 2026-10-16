@@ -280,7 +280,7 @@ pub struct GdbClient {
     /// Whether the target runs, shared with the host memory this client's
     /// session reads, which memoizes guest lists per halt.
     halts: Arc<HaltClock>,
-    hardware_sites: [Option<HardwareSite>; HW_BREAKPOINT_SLOTS as usize],
+    hardware_sites: Vec<Option<HardwareSite>>,
     extra_registers: Vec<ExtraRegister>,
     /// The stop reply that left the target halted: the one to the initial
     /// `?`, then each stop read since, for the stopped thread. Asking again
@@ -375,7 +375,7 @@ impl GdbClient {
             register_map: RegisterMap::default(),
             // Resuming the VM from outside (a hypervisor GUI) goes unseen here.
             halts,
-            hardware_sites: [None; HW_BREAKPOINT_SLOTS as usize],
+            hardware_sites: Vec::new(),
             extra_registers: Vec::new(),
             last_stop: String::new(),
             kept_stop: false,
@@ -796,38 +796,46 @@ impl GdbClient {
 
     /// The slot's record, or an error naming the slot a caller invented.
     /// Indexing would panic, and a debugger has no business dying over one.
-    fn hardware_slot(&mut self, slot: u8) -> Result<&mut Option<HardwareSite>> {
-        let count = self.hardware_sites.len();
-        self.hardware_sites
-            .get_mut(usize::from(slot))
-            .ok_or_else(|| {
-                Error::InvalidArgument(format!(
-                    "hardware breakpoint slot {slot} does not exist; the stub has {count}"
-                ))
-            })
+    fn hardware_slot(&self, slot: usize) -> Result<Option<HardwareSite>> {
+        let count = self.hardware_breakpoint_slots();
+        if slot >= count {
+            return Err(Error::InvalidArgument(format!(
+                "hardware breakpoint slot {slot} does not exist; {count} slots are available"
+            )));
+        }
+        Ok(self.hardware_sites.get(slot).copied().flatten())
     }
 
-    fn set_hardware_site(&mut self, slot: u8, site: HardwareSite) -> Result<()> {
+    fn set_hardware_site(&mut self, slot: usize, site: HardwareSite) -> Result<()> {
         self.clear_hardware_site(slot)?;
 
         let response = self.send_packet(&format!("Z{},{:x},{}", site.kind, site.addr, site.len))?;
         if response == "OK" {
-            *self.hardware_slot(slot)? = Some(site);
+            self.hardware_sites
+                .resize(self.hardware_sites.len().max(slot + 1), None);
+            self.hardware_sites[slot] = Some(site);
             return Ok(());
         }
         // An empty reply is RSP for "I do not implement this packet".
         if response.is_empty() {
             return Err(Error::NotSupported);
         }
+        if response.strip_prefix('E').is_some_and(|code| {
+            code.len() == 2 && code.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }) {
+            return Err(Error::HardwareBreakpointRefused {
+                address: site.addr,
+                response,
+            });
+        }
         Err(Error::Rsp(format!(
-            "stub refused a hardware breakpoint at {:#x}: {}.\n\
-             The hypervisor programs these with the processor's debug registers and may have none left.",
-            site.addr, response
+            "unexpected reply to hardware breakpoint at {:#x}: {response}",
+            site.addr
         )))
     }
 
-    fn clear_hardware_site(&mut self, slot: u8) -> Result<()> {
-        let Some(site) = *self.hardware_slot(slot)? else {
+    fn clear_hardware_site(&mut self, slot: usize) -> Result<()> {
+        let Some(site) = self.hardware_slot(slot)? else {
             return Ok(());
         };
 
@@ -840,7 +848,7 @@ impl GdbClient {
                 site.addr, response
             )));
         }
-        *self.hardware_slot(slot)? = None;
+        self.hardware_sites[slot] = None;
         Ok(())
     }
 
@@ -1458,15 +1466,20 @@ impl DebugBackend for GdbClient {
         true
     }
 
-    /// A stub programs these with the processor's debug registers, so they
-    /// trap on every processor and leave guest memory untouched.
+    /// The stub traps these on every processor without patching guest memory.
     fn supports_watchpoints(&self) -> bool {
         true
     }
 
+    /// RSP sites have no physical slot number. Keep spare records for steps
+    /// and new breakpoints; the stub enforces its own limit (none on QEMU TCG).
+    fn hardware_breakpoint_slots(&self) -> usize {
+        self.hardware_sites.len() + usize::from(HW_BREAKPOINT_SLOTS)
+    }
+
     fn set_hardware_breakpoint(
         &mut self,
-        slot: u8,
+        slot: usize,
         addr: u64,
         access: HwBreakpointAccess,
         len: u8,
@@ -1479,7 +1492,7 @@ impl DebugBackend for GdbClient {
         GdbClient::set_hardware_site(self, slot, site)
     }
 
-    fn clear_hardware_breakpoint(&mut self, slot: u8) -> Result<()> {
+    fn clear_hardware_breakpoint(&mut self, slot: usize) -> Result<()> {
         GdbClient::clear_hardware_site(self, slot)
     }
 
@@ -1583,13 +1596,15 @@ mod tests {
     use parking_lot::Mutex;
 
     use super::{
-        GdbClient, HW_BREAKPOINT_SLOTS, HaltCache, PacketReadState, RegisterMap, StopReply,
-        StubFeatures, append_packet, description_arch, holds_stop_reply,
+        GdbClient, HaltCache, PacketReadState, RegisterMap, StopReply, StubFeatures, append_packet,
+        description_arch, holds_stop_reply,
     };
-    use crate::dbg_backend::DebugBackend;
+    use crate::breakpoints::BreakpointManager;
+    use crate::dbg_backend::{DebugBackend, HwBreakpointAccess};
     use crate::gdb::registers::RegisterInfo;
     use crate::phys::HaltClock;
-    use crate::types::Arch;
+    use crate::session::{hits::hardware_breakpoint_hit, session_over_memory};
+    use crate::types::{Arch, VirtAddr};
 
     /// A running target behind a stub that answers the break byte with a stop
     /// on `p01.02`, each packet with `answer(packet, times seen before)`, and
@@ -1638,7 +1653,7 @@ mod tests {
             arch: Arch::Amd64,
             register_map: RegisterMap::default(),
             halts,
-            hardware_sites: [None; HW_BREAKPOINT_SLOTS as usize],
+            hardware_sites: Vec::new(),
             extra_registers: Vec::new(),
             last_stop: String::new(),
             kept_stop: false,
@@ -1678,6 +1693,224 @@ mod tests {
             regnum: 0x43,
         }]);
         (client, received)
+    }
+
+    #[test]
+    fn hardware_breakpoints_are_not_limited_to_debug_register_slots() {
+        let (mut client, received) = halted_client_over_stub(|packet, _| {
+            match packet {
+                "g" => "",
+                _ => "OK",
+            }
+            .to_string()
+        });
+        let session = session_over_memory(0x1000, &[0u8; 0x200]);
+        let mut manager = BreakpointManager::new();
+        for index in 0..300 {
+            let id = manager
+                .add_hardware(
+                    &mut client,
+                    &session.target,
+                    VirtAddr(0x1000 + index),
+                    HwBreakpointAccess::Execute,
+                    1,
+                    None,
+                    None,
+                )
+                .unwrap();
+            assert_eq!(
+                manager
+                    .hardware_breakpoint_for_slot(index as usize)
+                    .unwrap()
+                    .id,
+                id
+            );
+        }
+        let mut event = StopReply::parse("S05").into_event();
+        event.program_counter = Some(0x112b);
+        let map = RegisterMap::default();
+        let hit = hardware_breakpoint_hit(&mut client, &map, &manager, &event)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.hardware.unwrap().slot, 299);
+        manager.remove_all(&mut client, &session.target).unwrap();
+        assert!(client.hardware_sites.iter().all(Option::is_none));
+        let packets = received.lock();
+        assert_eq!(
+            packets
+                .iter()
+                .filter(|packet| packet.starts_with("Z1,"))
+                .count(),
+            300
+        );
+        assert_eq!(
+            packets
+                .iter()
+                .filter(|packet| packet.starts_with("z1,"))
+                .count(),
+            300
+        );
+        assert!(!packets.iter().any(|packet| packet.starts_with("Z0,")));
+    }
+
+    #[test]
+    fn a_refused_hardware_breakpoint_does_not_claim_a_slot() {
+        let (mut client, received) = halted_client_over_stub(|packet, _| {
+            match packet {
+                "Z1,1004,1" => "E22",
+                _ => "OK",
+            }
+            .to_string()
+        });
+        let session = session_over_memory(0x1000, &[0u8; 0x10]);
+        let mut manager = BreakpointManager::new();
+        for index in 0..4 {
+            manager
+                .add_hardware(
+                    &mut client,
+                    &session.target,
+                    VirtAddr(0x1000 + index),
+                    HwBreakpointAccess::Execute,
+                    1,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+        let error = manager
+            .add_hardware(
+                &mut client,
+                &session.target,
+                VirtAddr(0x1004),
+                HwBreakpointAccess::Execute,
+                1,
+                None,
+                None,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("E22"));
+        assert!(manager.hardware_breakpoint_for_slot(4).is_none());
+        assert_eq!(client.hardware_sites.len(), 4);
+        manager.remove(&mut client, &session.target, 1).unwrap();
+        let id = manager
+            .add_hardware(
+                &mut client,
+                &session.target,
+                VirtAddr(0x1005),
+                HwBreakpointAccess::Execute,
+                1,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(manager.hardware_breakpoint_for_slot(1).unwrap().id, id);
+        assert!(received.lock().iter().any(|packet| packet == "Z1,1004,1"));
+    }
+
+    #[test]
+    fn disabled_hardware_breakpoints_keep_their_logical_slot() {
+        let (mut client, _) = halted_client_over_stub(|_, _| "OK".to_string());
+        let session = session_over_memory(0x1000, &[0u8; 0x200]);
+        let mut manager = BreakpointManager::new();
+        for index in 0..300 {
+            manager
+                .add_hardware(
+                    &mut client,
+                    &session.target,
+                    VirtAddr(0x1000 + index),
+                    HwBreakpointAccess::Execute,
+                    1,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+        manager.disable(&mut client, &session.target, 299).unwrap();
+        let id = manager
+            .add_hardware(
+                &mut client,
+                &session.target,
+                VirtAddr(0x2000),
+                HwBreakpointAccess::Write,
+                4,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(manager.hardware_breakpoint_for_slot(300).unwrap().id, id);
+        manager.enable(&mut client, &session.target, 299).unwrap();
+        assert_eq!(client.hardware_sites[299].unwrap().addr, 0x112b);
+        let event = StopReply::parse("T05watch:2002;").into_event();
+        let hit = hardware_breakpoint_hit(&mut client, &RegisterMap::default(), &manager, &event)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.id, id);
+        manager.remove_all(&mut client, &session.target).unwrap();
+        assert!(client.hardware_sites.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn hardware_refusals_are_distinct_from_protocol_errors() {
+        let (mut client, _) = halted_client_over_stub(|packet, _| {
+            match packet {
+                "Z1,1000,1" => "",
+                "Z1,1001,1" => "E22",
+                "Z1,1003,1" => "E",
+                "Z1,1004,1" => "E2",
+                "Z1,1005,1" => "Ezz",
+                "Z1,1006,1" => "E220",
+                _ => "invalid",
+            }
+            .to_string()
+        });
+        assert!(matches!(
+            client.set_hardware_breakpoint(0, 0x1000, HwBreakpointAccess::Execute, 1),
+            Err(crate::error::Error::NotSupported)
+        ));
+        assert!(matches!(
+            client.set_hardware_breakpoint(0, 0x1001, HwBreakpointAccess::Execute, 1),
+            Err(crate::error::Error::HardwareBreakpointRefused { .. })
+        ));
+        for address in 0x1002..=0x1006 {
+            assert!(matches!(
+                client.set_hardware_breakpoint(0, address, HwBreakpointAccess::Execute, 1),
+                Err(crate::error::Error::Rsp(_))
+            ));
+        }
+        assert!(client.hardware_sites.is_empty());
+    }
+
+    #[test]
+    fn a_failed_hardware_removal_keeps_the_record_for_retry() {
+        let (mut client, received) = halted_client_over_stub(|packet, seen| {
+            match (packet, seen) {
+                ("z1,112b,1", 0) => "E22",
+                _ => "OK",
+            }
+            .to_string()
+        });
+        for slot in 0..300 {
+            client
+                .set_hardware_breakpoint(slot, 0x1000 + slot as u64, HwBreakpointAccess::Execute, 1)
+                .unwrap();
+        }
+        assert!(client.clear_hardware_breakpoint(299).is_err());
+        assert_eq!(client.hardware_sites[299].unwrap().addr, 0x112b);
+        client.clear_hardware_breakpoint(299).unwrap();
+        assert!(client.hardware_sites[299].is_none());
+        client
+            .set_hardware_breakpoint(299, 0x2000, HwBreakpointAccess::ReadWrite, 8)
+            .unwrap();
+        client.clear_hardware_breakpoint(299).unwrap();
+        let packets = received.lock();
+        assert_eq!(
+            packets
+                .iter()
+                .filter(|packet| *packet == "z1,112b,1")
+                .count(),
+            2
+        );
+        assert_eq!(&packets[packets.len() - 2..], ["Z4,2000,8", "z4,2000,8"]);
     }
 
     /// A stop the stub sent while the target ran is pending before anything

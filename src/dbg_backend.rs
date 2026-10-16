@@ -666,26 +666,27 @@ pub trait DebugBackend {
         false
     }
 
-    /// Number of physical hardware-breakpoint slots exposed by this backend.
-    /// AMD64 backends use the four DR0-DR3 slots; ARM64 KD exposes eight
-    /// execute slots and two data-watch slots through one global ID space.
-    fn hardware_breakpoint_slots(&self) -> u8 {
-        HW_BREAKPOINT_SLOTS
+    /// Hardware-breakpoint slots the manager can allocate. GDB grows its
+    /// logical records as sites are accepted; the stub enforces its own limit.
+    /// AMD64 KD uses four DR0-DR3 slots; ARM64 KD exposes eight execute slots
+    /// and two data-watch slots through one global ID space.
+    fn hardware_breakpoint_slots(&self) -> usize {
+        usize::from(HW_BREAKPOINT_SLOTS)
     }
 
-    /// Physical slots available for a hardware breakpoint access mode.
+    /// Backend slots available for a hardware breakpoint access mode.
     /// Backends with separate execute/watchpoint banks override this range;
     /// the default covers all slots used by AMD64 debug registers.
-    fn hardware_slot_range(&self, access: HwBreakpointAccess) -> Range<u8> {
+    fn hardware_slot_range(&self, access: HwBreakpointAccess) -> Range<usize> {
         let _ = access;
         0..self.hardware_breakpoint_slots()
     }
 
-    /// Program debug-register slot `slot` to trap on `access` at `addr` over
+    /// Program backend slot `slot` to trap on `access` at `addr` over
     /// `len` bytes (1/2/4/8; execute forces 1), on every processor.
     fn set_hardware_breakpoint(
         &mut self,
-        _slot: u8,
+        _slot: usize,
         _addr: u64,
         _access: HwBreakpointAccess,
         _len: u8,
@@ -693,8 +694,8 @@ pub trait DebugBackend {
         Err(Error::NotSupported)
     }
 
-    /// Disable debug-register slot `slot` on every processor.
-    fn clear_hardware_breakpoint(&mut self, _slot: u8) -> Result<()> {
+    /// Disable backend slot `slot` on every processor.
+    fn clear_hardware_breakpoint(&mut self, _slot: usize) -> Result<()> {
         Err(Error::NotSupported)
     }
 

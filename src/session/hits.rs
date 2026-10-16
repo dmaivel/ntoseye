@@ -352,7 +352,7 @@ pub fn hardware_breakpoint_hit(
 
     let hit = (0..HW_BREAKPOINT_SLOTS)
         .filter(|slot| dr6 & (1u64 << slot) != 0)
-        .find_map(|slot| breakpoints.hardware_breakpoint_for_slot(slot));
+        .find_map(|slot| breakpoints.hardware_breakpoint_for_slot(usize::from(slot)));
 
     let mut dirty = false;
     // Clear the B0-B3 status bits so the next single-step is unambiguous; the
@@ -388,7 +388,7 @@ pub fn hardware_breakpoint_hit(
 /// [`hardware_breakpoint_hit`]).
 pub fn reported_watch_hit(
     breakpoints: &BreakpointManager,
-    slots: u8,
+    slots: usize,
     watch: Option<u64>,
     pc: Option<u64>,
 ) -> Option<Breakpoint> {
@@ -400,7 +400,7 @@ pub fn reported_watch_hit(
 /// trap address names: the byte touched, not the watchpoint's base.
 fn watchpoint_covering(
     breakpoints: &BreakpointManager,
-    slots: u8,
+    slots: usize,
     address: u64,
 ) -> Option<Breakpoint> {
     (0..slots)
@@ -419,7 +419,7 @@ fn watchpoint_covering(
 
 /// Whether an armed breakpoint executes at `pc`: a planted software site, or
 /// a hardware execute breakpoint.
-fn execute_site_at(breakpoints: &BreakpointManager, slots: u8, pc: u64) -> bool {
+fn execute_site_at(breakpoints: &BreakpointManager, slots: usize, pc: u64) -> bool {
     breakpoints.breakpoint_id_at_address(pc).is_some()
         || (0..slots)
             .filter_map(|slot| breakpoints.hardware_breakpoint_for_slot(slot))
@@ -443,7 +443,7 @@ fn execute_breakpoint_at_pc(
     backend: &mut dyn DebugBackend,
     register_map: &RegisterMap,
     breakpoints: &BreakpointManager,
-    slots: u8,
+    slots: usize,
     event: &StopEvent,
     regs: &mut [u8],
 ) -> Result<Option<Breakpoint>> {
@@ -495,7 +495,7 @@ fn arm64_hardware_breakpoint_hit(
     // plain single-step must not be mistaken for a data breakpoint.
     if far != 0 {
         for slot in hwbp::ARM64_WATCHPOINT_SLOTS {
-            let Some(bp) = breakpoints.hardware_breakpoint_for_slot(slot) else {
+            let Some(bp) = breakpoints.hardware_breakpoint_for_slot(usize::from(slot)) else {
                 continue;
             };
             let Some(hw) = bp.hardware else { continue };
@@ -527,7 +527,7 @@ fn arm64_hardware_breakpoint_hit(
 
     if hit.is_none() {
         for slot in hwbp::ARM64_BREAKPOINT_SLOTS {
-            let Some(bp) = breakpoints.hardware_breakpoint_for_slot(slot) else {
+            let Some(bp) = breakpoints.hardware_breakpoint_for_slot(usize::from(slot)) else {
                 continue;
             };
             let Some(hw) = bp.hardware else { continue };

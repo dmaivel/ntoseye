@@ -55,6 +55,14 @@ pub enum Error {
     #[error("breakpoint: {0}")]
     Breakpoint(String),
 
+    /// The stub refused a site; optional step markers can be skipped, unlike
+    /// a transport failure that leaves the state of the site unknown.
+    #[error(
+        "GDB protocol failure: stub refused a hardware breakpoint at {address:#x}: {response}.\n\
+         The stub may have no hardware breakpoint slots left."
+    )]
+    HardwareBreakpointRefused { address: u64, response: String },
+
     /// A code breakpoint refused because its address is not code: a
     /// non-executable page or section.
     #[error("breakpoint: refusing breakpoint at {address:#x}: {reason}")]

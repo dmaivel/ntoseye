@@ -214,6 +214,6 @@ Use KDNET for work with many breakpoints. Each absorb takes a few KD request/rep
 You can also reduce the cost in these ways:
 
 - Scope the breakpoint to a symbol that the rest of the system does not call. A breakpoint in the image of the target traps only the processes of that image.
-- Use `ba e1`, which needs no byte in the page and so writes nothing to a shared frame. `ntoseye` sets the debug registers on every processor and not for one thread, so `ba e1` still traps in each process that runs the code, and there are only four slots.
+- Use `ba e1`, which needs no byte in the page and so writes nothing to a shared frame. The breakpoint applies to every processor and not to one thread, so `ba e1` still traps in each process that runs the code. AMD64 KD and QEMU/KVM have four shared hardware slots; [QEMU/TCG](../setup/kvm-qemu.md#gdb-stub) has no fixed slot limit over `gdb`.
 
 A pass count or a condition does not reduce the number of absorbs, because `ntoseye` absorbs each hit that a pass count or a false condition skips. It evaluates the condition at each hit before it resumes the target, so a condition that reads guest memory through KD adds KD requests to every hit.

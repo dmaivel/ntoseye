@@ -28,12 +28,12 @@ pub use install::{breakpoint_opcode, lift_target_site, plant_target_site};
 pub use journal::{Repair, SiteJournal};
 
 /// A hardware (debug-register) breakpoint's parameters: the access it traps on,
-/// the watch width in bytes, and which physical debug slot it occupies.
+/// the watch width in bytes, and its backend slot (a logical record for GDB).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HardwareBreakpoint {
     pub access: HwBreakpointAccess,
     pub len: u8,
-    pub slot: u8,
+    pub slot: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
