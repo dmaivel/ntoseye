@@ -7,6 +7,8 @@ mod command;
 mod grammar;
 mod handle;
 mod record;
+#[cfg(test)]
+mod tests;
 
 use proc_macro::TokenStream;
 
@@ -31,12 +33,20 @@ use proc_macro::TokenStream;
 /// - `bytes`: a `Vec<u8>` (possibly wrapped) is Python `bytes`;
 /// - `skip`: Rust only; Python does not see the field;
 /// - `rename = "key"`: the record key. The property takes the key too,
-///   unless the key would hide `BaseRecord.to_dict` or is a Python keyword
-///   (`class`), in which case the property keeps the Rust name;
+/// unless the key would hide `BaseRecord.to_dict` or is a Python keyword
+///   (`class`), in which case the property keeps the Rust name. The key
+///   must be a Python identifier;
 /// - `flatten`: the field (keyed `kind`) is a `tagged` enum declared with
-///   `base = Name` for this struct: the struct's class is a base, and each
-///   value is the subclass of its variant, with `kind` and the variant's
-///   fields after the fields before it (`Stop.Breakpoint`).
+/// `base = Name` for this struct: the struct's class is a base, and each
+/// value is the subclass of its variant, with `kind` and the variant's
+/// fields after the fields before it (`Stop.Breakpoint`).
+///
+/// A record cannot have generics or lifetimes: its class is one concrete
+/// Python type. A field the record shows, a variant and a variant's field
+/// cannot carry `#[cfg]` or `#[cfg_attr]`, since the class, its
+/// `__match_args__` and `build.rs` list every one; a `skip`ped field may.
+/// `build.rs` must see the `#[record]` in the source, so a record made by a
+/// `macro_rules!` or a `cfg_attr` fails to compile at its name.
 ///
 /// Item flags: `#[record(impl)]` says a `#[record] impl Name { ... }` block
 /// follows in the same module, adding computed properties
@@ -46,10 +56,14 @@ use proc_macro::TokenStream;
 /// On an enum:
 ///
 /// - fieldless: each variant has a text, its `rename` or else its snake_case
-///   name. The macro generates `as_str()` and `Display` from the texts, and
-///   the value is the variant's text, typed as the `typing.Literal` of every
-///   variant's text. An SDK argument of the enum's type takes the same
-///   texts (`FromPyObject` and `PyArg`);
+///   name. The macro generates `as_str()` from the texts, and the value is
+///   the variant's text, typed as the `typing.Literal` of every variant's
+///   text. An SDK argument of the enum's type takes the same texts
+///   (`FromPyObject` and `PyArg`). `Display`, the REPL's text, is the
+///   variant's `label = "..."` if it has one, else its text: a label
+///   changes only what the REPL prints, while `rename` changes the SDK's
+///   value (`#[record(rename = "nonpaged", label = "NonPagedPool")]`).
+///   Only a fieldless enum's variant takes `label`;
 /// - every variant one unnamed field: the union of the variants' types
 ///   (the value is the variant's own);
 /// - `#[record(tagged)]`: a base class with `kind` (the snake_case variant
@@ -90,9 +104,10 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// attribute takes:
 ///
 /// - `names = [...]` (the first is canonical), `category = "..."`,
-///   `kind = Query | Action | Run | Host`, and `python = Object | [Object,
+/// `kind = Query | Action | Run | Host`, and `python = Object | [Object,
 ///   ...] | none` (one method on each class: a kernel and a user-dump
-///   class can share a command);
+///   class can share a command; a list names at least one class, and
+///   `none` stands alone);
 /// - effects, which `Session::admit` enforces for every host: `target =
 ///   Any | Kernel | Machine | Nt` (`Kernel` and `Machine` need a kernel
 ///   target; `Kernel` and `Nt` read NT's structures, which a VTL1 address
@@ -101,9 +116,10 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   Breakpoints, Symbols, Files]`, `live_only`, `capability =
 ///   <DebugCapability>`;
 /// - `python_name = "..."` (else the function's name), `style = RawTail |
-///   ExpressionTail` (the line is not split into words, for a `raw`
-///   argument), and `flow = Quit` (the flow the command ends with once it
-///   ran; a line that does not parse ends with `Continue`).
+/// ExpressionTail` (the line is not split into words, for a `raw`
+/// argument), and `flow = Quit` (the flow the command ends with once it
+///   ran; a line that does not parse ends with `Continue`; refused on a
+///   function that returns its own `Flow`).
 ///
 /// There is no `usage` or `completion` key: both are generated from the
 /// arguments (`crate::repl::usage` has the notation), so they cannot drift
@@ -127,7 +143,8 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   Result<T, ArgError>`, which may take a `default` too: the SDK keyword's
 ///   default, as the parser gives the REPL's; `each = path`: one returning
 ///   `Vec<T>`, which the REPL runs the operation on in turn, rendering the
-///   `Vec` of results. The parser carries `#[grammar(...)]`;
+///   `Vec` of results (not on a `kind = Run` command, which runs once).
+///   The parser carries `#[grammar(...)]`;
 /// - `render`: a display option (WinDbg's flags that only choose what the
 ///   text shows), not passed to the function: the REPL passes the render
 ///   options to `Render::render` (one value, or a tuple in order);

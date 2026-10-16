@@ -162,8 +162,8 @@ impl Opts {
                     Ok(())
                 } else {
                     Err(meta.error(
-                        "expected `hex`, `bytes`, `skip`, `flatten`, `rename = \"...\"`, `getter` or \
-                         `python`",
+                        "expected `hex`, `bytes`, `skip`, `flatten`, `rename = \"...\"`, \
+                         `label = \"...\"`, `getter` or `python`",
                     ))
                 }
             })?;
@@ -172,8 +172,8 @@ impl Opts {
         Ok(opts)
     }
 
-    /// Reject the options a struct's field does not take.
-    fn struct_field(&self) -> Result<()> {
+    /// Reject the options of a `#[record] impl` block's methods.
+    fn not_method(&self) -> Result<()> {
         match self.span {
             Some(span) if self.getter || self.python => Err(Error::new(
                 span,
@@ -183,9 +183,28 @@ impl Opts {
         }
     }
 
-    /// Reject the options an enum's variant or variant field does not take.
+    /// Reject `label`, which only a fieldless enum's variant takes: the
+    /// REPL text of a variant whose SDK text is its `rename`.
+    fn no_label(&self) -> Result<()> {
+        match &self.label {
+            Some(label) => Err(Error::new(
+                label.span(),
+                "`label` applies to a fieldless record enum's variant",
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// Reject the options a struct's field does not take.
+    fn struct_field(&self) -> Result<()> {
+        self.not_method()?;
+        self.no_label()
+    }
+
+    /// Reject the options an enum's variant or variant field does not take;
+    /// all but a fieldless enum's variant also reject `label`.
     fn field_only(&self) -> Result<()> {
-        self.struct_field()?;
+        self.not_method()?;
         match self.span {
             Some(span) if self.flatten => Err(Error::new(
                 span,
@@ -235,7 +254,21 @@ fn naming(
     span: Span,
 ) -> Result<(String, String)> {
     let key = match (rename, default) {
-        (Some(rename), _) => rename.value(),
+        (Some(rename), _) => {
+            let key = rename.value();
+            let mut chars = key.chars();
+            let identifier = chars
+                .next()
+                .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+                && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric());
+            if !identifier {
+                return Err(Error::new(
+                    rename.span(),
+                    format!("`{key}` is not a Python identifier, which a property's name is"),
+                ));
+            }
+            key
+        }
         (None, Some(default)) => default,
         (None, None) => {
             return Err(Error::new(
@@ -513,7 +546,13 @@ fn class(
     };
     let match_args = match_names.map(|names| match_args(&class, names));
     let subclass = subclass.then(|| quote!(subclass,));
+    // At the record's name: a record build.rs did not see (made by a
+    // macro) is refused there.
+    let checked = Ident::new(&class.to_string(), name.span());
     quote! {
+        #[cfg(all(feature = "python", not(test)))]
+        const _: () = crate::python::record::exported::<#checked>();
+
         #[cfg(feature = "python")]
         #(#docs)*
         #[pyo3::pyclass(
@@ -660,7 +699,31 @@ fn no_generics(generics: &syn::Generics) -> Result<()> {
     if generics.params.is_empty() {
         Ok(())
     } else {
-        Err(Error::new_spanned(generics, "a record cannot be generic"))
+        Err(Error::new_spanned(
+            generics,
+            "a record cannot have generics or lifetimes: its Python class is one concrete type",
+        ))
+    }
+}
+
+/// Reject a `#[cfg]` or `#[cfg_attr]` on what a record shows (a field
+/// that is not skipped, a variant, a variant's field): the record's class,
+/// its `__match_args__` and its values are generated for every field and
+/// variant, and `build.rs` lists its properties without the `cfg`. A
+/// skipped field may have one, as nothing reads it.
+fn no_cfg(attrs: &[Attribute], what: &str) -> Result<()> {
+    match attrs
+        .iter()
+        .find(|attr| attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr"))
+    {
+        Some(attr) => Err(Error::new_spanned(
+            attr,
+            format!(
+                "a record's {what} cannot be conditional: put the `cfg` on the whole record, \
+                 or `#[record(skip)]` the field"
+            ),
+        )),
+        None => Ok(()),
     }
 }
 
@@ -688,6 +751,7 @@ fn structure(flags: Flags, mut item: ItemStruct) -> Result<TokenStream> {
             }
             continue;
         }
+        no_cfg(&field.attrs, "field")?;
         let ident = field.ident.as_ref().expect("named field");
         let (key, property) = naming(
             Some(ident),
@@ -807,10 +871,12 @@ fn fieldless_enum(item: &mut ItemEnum) -> Result<TokenStream> {
     for variant in &mut item.variants {
         let opts = Opts::take(&mut variant.attrs)?;
         opts.field_only()?;
+        no_cfg(&variant.attrs, "variant")?;
         if opts.skip || opts.mode != Mode::Plain {
             return Err(Error::new(
                 opts.span.unwrap_or_else(|| variant.span()),
-                "a fieldless record enum's variant takes only `rename`, for its text",
+                "a fieldless record enum's variant takes only `rename`, for its text, and \
+                 `label`, for its REPL text",
             ));
         }
         let text = opts
@@ -901,6 +967,7 @@ fn union(item: &mut ItemEnum) -> Result<TokenStream> {
         if let Some(span) = opts.span {
             return Err(Error::new(span, "a union's variants take no options"));
         }
+        no_cfg(&variant.attrs, "variant")?;
         let field = match &mut variant.fields {
             Fields::Unnamed(fields) if fields.unnamed.len() == 1 => &mut fields.unnamed[0],
             _ => {
@@ -913,6 +980,7 @@ fn union(item: &mut ItemEnum) -> Result<TokenStream> {
         };
         let opts = Opts::take(&mut field.attrs)?;
         opts.field_only()?;
+        opts.no_label()?;
         if opts.skip || opts.rename.is_some() {
             return Err(Error::new_spanned(
                 &*field,
@@ -969,6 +1037,8 @@ fn tagged(flags: &Flags, item: &mut ItemEnum) -> Result<TokenStream> {
     for variant in &mut item.variants {
         let opts = Opts::take(&mut variant.attrs)?;
         opts.field_only()?;
+        opts.no_label()?;
+        no_cfg(&variant.attrs, "variant")?;
         if opts.skip || opts.mode != Mode::Plain {
             return Err(Error::new_spanned(
                 &*variant,
@@ -987,6 +1057,8 @@ fn tagged(flags: &Flags, item: &mut ItemEnum) -> Result<TokenStream> {
         for (index, field) in variant.fields.iter_mut().enumerate() {
             let opts = Opts::take(&mut field.attrs)?;
             opts.field_only()?;
+            opts.no_label()?;
+            no_cfg(&field.attrs, "variant's field")?;
             let binding = format_ident!("field_{index}");
             bindings.push(binding.clone());
             if opts.skip {
@@ -1413,6 +1485,7 @@ fn implementation(mut item: ItemImpl) -> Result<TokenStream> {
             continue;
         };
         let opts = Opts::take(&mut method.attrs)?;
+        opts.no_label()?;
         if opts.flatten {
             return Err(Error::new_spanned(
                 &method.sig,

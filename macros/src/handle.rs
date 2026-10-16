@@ -217,6 +217,9 @@ fn structure(config: Config, attr: TokenStream, item: ItemStruct) -> Result<Toke
         #[pyo3::pyclass(module = "ntoseye", frozen)]
         #item
 
+        #[cfg(not(test))]
+        const _: () = crate::python::record::exported::<#name>();
+
         impl #command::CommandHost for #name {
             fn session(&self) -> #command::HostSession<'_> {
                 #command::HostSession::Owner(&self.owner)
@@ -383,10 +386,25 @@ pub fn methods(input: TokenStream) -> Result<TokenStream> {
         items,
     } = syn::parse2(input)?;
     let mut written = Vec::new();
+    let mut eq_hash = [None, None];
     for item in &items {
         if let Some(name) = python_name(item)? {
+            match name.as_str() {
+                "__eq__" => eq_hash[0] = Some(item),
+                "__hash__" => eq_hash[1] = Some(item),
+                _ => {}
+            }
             written.push(name);
         }
+    }
+    // Equal objects must hash equal: one written without the other would
+    // pair it with the generated one, which compares something else.
+    if let [Some(item), None] | [None, Some(item)] = eq_hash {
+        return Err(Error::new_spanned(
+            item,
+            "a handle's `__eq__` and `__hash__` are written together: one beside the \
+             generated other would let equal handles hash differently",
+        ));
     }
     let own = |python: &str| written.iter().any(|name| name == python);
     let record = &config.record;
@@ -412,7 +430,7 @@ pub fn methods(input: TokenStream) -> Result<TokenStream> {
         .map(|entry| {
             let docs = &entry.docs;
             let property = &entry.property;
-            let ident = format_ident!("__handle_{}", entry.property.value());
+            let ident = format_ident!("__handle_{}", entry.index.base10_digits());
             let (ty, mode) = field(entry);
             let value = read(entry);
             quote! {

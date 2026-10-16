@@ -1,6 +1,6 @@
 //! `#[collection]`: see the crate docs.
 
-use proc_macro2::TokenStream;
+use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::spanned::Spanned;
 use syn::{
@@ -213,7 +213,6 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
 
 /// `#[collection(sequence)]`: indexed by position, with no `lookup`;
 /// `#[collection(records)]`: a record of the items' kind is a key too.
-#[derive(Default)]
 struct Flags {
     sequence: bool,
     records: bool,
@@ -221,14 +220,20 @@ struct Flags {
 
 impl Flags {
     fn parse(attr: TokenStream) -> Result<Self> {
-        let mut flags = Self::default();
+        let (mut sequence, mut records) = (None::<Span>, None::<Span>);
         let parser = |input: syn::parse::ParseStream<'_>| -> Result<()> {
             while !input.is_empty() {
                 let ident: Ident = input.parse()?;
                 match ident.to_string().as_str() {
-                    "sequence" => flags.sequence = true,
-                    "records" => flags.records = true,
+                    "sequence" => sequence = Some(ident.span()),
+                    "records" => records = Some(ident.span()),
                     _ => return Err(Error::new(ident.span(), "expected `sequence` or `records`")),
+                }
+                if let (Some(_), Some(_)) = (sequence, records) {
+                    return Err(Error::new(
+                        ident.span(),
+                        "a `sequence` is indexed by position, not by record",
+                    ));
                 }
                 if !input.is_empty() {
                     input.parse::<Token![,]>()?;
@@ -237,13 +242,10 @@ impl Flags {
             Ok(())
         };
         syn::parse::Parser::parse2(parser, attr)?;
-        if flags.sequence && flags.records {
-            return Err(Error::new(
-                proc_macro2::Span::call_site(),
-                "a `sequence` is indexed by position, not by record",
-            ));
-        }
-        Ok(flags)
+        Ok(Self {
+            sequence: sequence.is_some(),
+            records: records.is_some(),
+        })
     }
 }
 

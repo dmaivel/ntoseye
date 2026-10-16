@@ -65,11 +65,19 @@ fn main() {
 
 /// Finds every SDK class (a `#[record]` struct or `tagged` enum, a
 /// `#[handle]`, or a `#[pyclass]`) by walking the crate's module tree from
-/// `src/lib.rs`, as rustc does, and writes `with_sdk_classes!`, which adds a
-/// `#[pymodule_export] use` of each to the SDK's module. A class is exported
-/// under the `cfg`s of the modules on its path and its own; a module whose
-/// `cfg` names `test` is skipped. A `tagged` enum with a `base` has no class
-/// of its own (its variants subclass the base's, which nests them).
+/// `src/lib.rs`, as rustc does (`#[path]` included), and writes
+/// `with_sdk_classes!`, which adds a `#[pymodule_export] use` of each to the
+/// SDK's module. A class is exported under the `cfg`s of the modules on its
+/// path and its own; one that only exists under `cfg(test)` is not (but one
+/// under `not(test)` is). A `tagged` enum with a `base` has no class of its
+/// own (its variants subclass the base's, which nests them).
+///
+/// The walk reads the source, so it cannot see a class that a macro makes
+/// (a `macro_rules!`, a `cfg_attr(..., record)`). It writes an
+/// `ExportedClass` impl for each `#[record]` and `#[handle]` class it
+/// exports, and those macros require one outside tests, so a class the
+/// walk missed fails to compile at its name instead of being left out of
+/// the module.
 ///
 /// Also fails the build on a name clash, which PyO3 would resolve silently:
 /// two classes with one Python name, or two members of one class with one
@@ -91,15 +99,25 @@ mod classes {
         /// The class's Rust path, `crate::target::zombies::ZombiesPy`
         /// (a record's) or `crate::python::process::Process`.
         path: String,
+        /// A `#[record]`'s or `#[handle]`'s class, which requires its
+        /// `ExportedClass` impl.
+        checked: bool,
     }
 
     /// A Python member of a class, and where it is defined (for the clash
-    /// message), under the `cfg`s of its item: two members under
-    /// different `cfg`s are taken to be alternatives.
+    /// message), under the `cfg`s of its item: two members are alternatives
+    /// only when one's `cfg` is `not` of one of the other's.
     struct Member {
         name: String,
         at: String,
-        cfgs: Vec<String>,
+        cfgs: Vec<Cfg>,
+    }
+
+    /// One `#[cfg(predicate)]`: the predicate's text, and for `not(p)`,
+    /// `p`'s.
+    struct Cfg {
+        text: String,
+        negates: Option<String>,
     }
 
     /// The Python members the walk found, by the Rust name of their class
@@ -137,19 +155,26 @@ mod classes {
         walk.members.check();
         walk.classes.sort_by(|a, b| a.path.cmp(&b.path));
         let mut uses = String::new();
+        let mut checked = String::new();
         for class in &walk.classes {
-            for cfg in &class.cfgs {
-                uses.push_str(cfg);
-                uses.push(' ');
+            let cfgs: String = class.cfgs.iter().map(|cfg| format!("{cfg} ")).collect();
+            writeln!(uses, "{cfgs}#[pymodule_export] use {};", class.path).unwrap();
+            if class.checked {
+                writeln!(
+                    checked,
+                    "{cfgs}impl crate::python::record::ExportedClass for {} {{}}",
+                    class.path
+                )
+                .unwrap();
             }
-            writeln!(uses, "#[pymodule_export] use {};", class.path).unwrap();
         }
         let source = format!(
             "/// `with_sdk_classes! {{ #[pymodule] mod m {{ ... }} }}`: the module, \
              exporting every SDK class besides its own items. Written by build.rs.\n\
              macro_rules! with_sdk_classes {{\n\
              ($(#[$attr:meta])* $vis:vis mod $name:ident {{ $($body:tt)* }}) => {{\n\
-             $(#[$attr])* $vis mod $name {{\n$($body)*\n{uses}}}\n}};\n}}\n"
+             $(#[$attr])* $vis mod $name {{\n$($body)*\n{uses}}}\n}};\n}}\n\
+             {checked}"
         );
         let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("sdk_classes.rs");
         std::fs::write(out, source).unwrap();
@@ -163,11 +188,83 @@ mod classes {
             .collect()
     }
 
-    fn names_test(cfgs: &[String]) -> bool {
-        cfgs.iter().any(|cfg| {
-            cfg.split(|c: char| !c.is_alphanumeric() && c != '_')
-                .any(|word| word == "test")
-        })
+    /// The predicates of the `#[cfg]`s in `attrs`.
+    fn predicates(attrs: &[Attribute]) -> Vec<syn::Meta> {
+        attrs
+            .iter()
+            .filter(|attr| attr.path().is_ident("cfg"))
+            .map(|attr| {
+                attr.parse_args::<syn::Meta>()
+                    .unwrap_or_else(|error| panic!("#[cfg(...)]: {error}"))
+            })
+            .collect()
+    }
+
+    /// `attrs`' `#[cfg]`s, for comparing two members' conditions.
+    fn conditions(attrs: &[Attribute]) -> Vec<Cfg> {
+        predicates(attrs)
+            .into_iter()
+            .map(|predicate| {
+                let negates = match &predicate {
+                    syn::Meta::List(list) if list.path.is_ident("not") => list
+                        .parse_args::<syn::Meta>()
+                        .ok()
+                        .map(|inner| inner.to_token_stream().to_string()),
+                    _ => None,
+                };
+                Cfg {
+                    text: predicate.to_token_stream().to_string(),
+                    negates,
+                }
+            })
+            .collect()
+    }
+
+    /// Whether `predicate` holds only in a test build: `test`, an `all`
+    /// with such a part, or an `any` of only such parts. `not(test)` and
+    /// `any(test, x)` hold outside tests too.
+    fn requires_test(predicate: &syn::Meta) -> bool {
+        let parts = |list: &syn::MetaList| {
+            list.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            )
+            .unwrap_or_else(|error| panic!("#[cfg(...)]: {error}"))
+        };
+        match predicate {
+            syn::Meta::Path(path) => path.is_ident("test"),
+            syn::Meta::List(list) if list.path.is_ident("all") => {
+                parts(list).iter().any(requires_test)
+            }
+            syn::Meta::List(list) if list.path.is_ident("any") => {
+                let parts = parts(list);
+                !parts.is_empty() && parts.iter().all(requires_test)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether an item with `attrs` exists only in a test build.
+    fn test_only(attrs: &[Attribute]) -> bool {
+        predicates(attrs).iter().any(requires_test)
+    }
+
+    /// A module's `#[path = "..."]`.
+    fn child_path(attrs: &[Attribute], file: &Path) -> Option<String> {
+        let attr = attrs.iter().find(|attr| attr.path().is_ident("path"))?;
+        match &attr.meta {
+            syn::Meta::NameValue(syn::MetaNameValue {
+                value:
+                    syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(path),
+                        ..
+                    }),
+                ..
+            }) => Some(path.value()),
+            _ => panic!(
+                "{}: #[path] takes a string, #[path = \"...\"]",
+                file.display()
+            ),
+        }
     }
 
     /// The attribute named `name` (by its last path segment).
@@ -360,7 +457,7 @@ mod classes {
                 ImplItem::Fn(method) => Some(Member {
                     name: method_name(&method.attrs, &method.sig.ident)?,
                     at: at.to_string(),
-                    cfgs: cfgs(&method.attrs),
+                    cfgs: conditions(&method.attrs),
                 }),
                 _ => None,
             })
@@ -454,12 +551,21 @@ mod classes {
     }
 
     fn unique(class: &str, members: &[&Member]) {
+        // Two `cfg`s exclude each other when one is `not` of the other.
+        // Anything else (`feature = "a"` and `feature = "b"`) can hold at
+        // once, so the two members can both exist.
+        let excludes = |a: &Member, b: &Member| {
+            a.cfgs.iter().any(|cfg| {
+                b.cfgs
+                    .iter()
+                    .any(|other| cfg.negates.as_ref() == Some(&other.text))
+            })
+        };
         for (index, member) in members.iter().enumerate() {
             if let Some(earlier) = members[..index].iter().find(|earlier| {
                 earlier.name == member.name
-                    && (earlier.cfgs.is_empty()
-                        || member.cfgs.is_empty()
-                        || earlier.cfgs == member.cfgs)
+                    && !excludes(earlier, member)
+                    && !excludes(member, earlier)
             }) {
                 panic!(
                     "class {class} has two Python members named `{}`, which PyO3 would \
@@ -477,7 +583,10 @@ mod classes {
                 .unwrap_or_else(|error| panic!("{}: {error}", file.display()));
             let ast = syn::parse_file(&source)
                 .unwrap_or_else(|error| panic!("{}: {error}", file.display()));
-            self.items(&ast.items, file, module, dir, cfgs);
+            // A `#[path]` at a file's top level is relative to the file's
+            // directory; in an inline module, to that module's directory.
+            let path_base = file.parent().unwrap_or(Path::new(""));
+            self.items(&ast.items, file, module, dir, cfgs, path_base);
         }
 
         /// The members an item outside a class's own definition adds to a
@@ -500,7 +609,7 @@ mod classes {
                                 continue;
                             };
                             let ident = &method.sig.ident;
-                            let cfgs = cfgs(&method.attrs);
+                            let cfgs = conditions(&method.attrs);
                             if args.flags.iter().any(|flag| flag == "getter") {
                                 let name = property(ident, args.rename);
                                 let member = Member {
@@ -553,7 +662,7 @@ mod classes {
                                         Member {
                                             name,
                                             at: at.clone(),
-                                            cfgs: cfgs(&method.attrs),
+                                            cfgs: conditions(&method.attrs),
                                         }
                                     }),
                                 ),
@@ -573,7 +682,7 @@ mod classes {
                         let member = Member {
                             name: name.clone(),
                             at: format!("#[command] {} in {module}", function.sig.ident),
-                            cfgs: cfgs(&function.attrs),
+                            cfgs: conditions(&function.attrs),
                         };
                         Members::add(&mut self.members.methods, &class, vec![member]);
                     }
@@ -601,7 +710,7 @@ mod classes {
                     Some(Member {
                         name: property(ident, args.rename),
                         at: at.clone(),
-                        cfgs: cfgs(&field.attrs),
+                        cfgs: conditions(&field.attrs),
                     })
                 })
                 .collect();
@@ -616,31 +725,45 @@ mod classes {
             module: &str,
             dir: &Path,
             cfgs: &[String],
+            path_base: &Path,
         ) {
             for item in items {
                 let (attrs, ident, class) = match item {
                     Item::Mod(child) => {
-                        let mut child_cfgs = cfgs.to_vec();
-                        child_cfgs.extend(self::cfgs(&child.attrs));
-                        if names_test(&child_cfgs) {
+                        if test_only(&child.attrs) {
                             continue;
                         }
-                        assert!(
-                            !child.attrs.iter().any(|attr| attr.path().is_ident("path")),
-                            "{}: build.rs does not follow #[path] modules",
-                            file.display()
-                        );
+                        let mut child_cfgs = cfgs.to_vec();
+                        child_cfgs.extend(self::cfgs(&child.attrs));
                         let name = child.ident.to_string();
                         let path = format!("{module}::{name}");
-                        let child_dir = dir.join(&name);
+                        let explicit =
+                            child_path(&child.attrs, file).map(|explicit| path_base.join(explicit));
                         match &child.content {
                             Some((_, items)) => {
-                                self.items(items, file, &path, &child_dir, &child_cfgs)
+                                // An inline module's `#[path]` names its
+                                // directory.
+                                let child_dir = explicit.unwrap_or_else(|| dir.join(&name));
+                                self.items(items, file, &path, &child_dir, &child_cfgs, &child_dir)
                             }
                             None => {
-                                let flat = dir.join(format!("{name}.rs"));
-                                let nested = child_dir.join("mod.rs");
-                                let child_file = if flat.exists() { flat } else { nested };
+                                let (child_file, child_dir) = match explicit {
+                                    // A `#[path]` file's own modules are
+                                    // beside it, as a `mod.rs`'s are.
+                                    Some(child_file) => {
+                                        let child_dir = child_file
+                                            .parent()
+                                            .unwrap_or(Path::new(""))
+                                            .to_path_buf();
+                                        (child_file, child_dir)
+                                    }
+                                    None => {
+                                        let child_dir = dir.join(&name);
+                                        let flat = dir.join(format!("{name}.rs"));
+                                        let nested = child_dir.join("mod.rs");
+                                        (if flat.exists() { flat } else { nested }, child_dir)
+                                    }
+                                };
                                 self.file(&child_file, &path, &child_dir, &child_cfgs);
                             }
                         }
@@ -649,20 +772,18 @@ mod classes {
                     Item::Struct(item) => (&item.attrs, &item.ident, true),
                     Item::Enum(item) => (&item.attrs, &item.ident, false),
                     Item::Impl(ItemImpl { attrs, .. }) | Item::Fn(syn::ItemFn { attrs, .. }) => {
-                        let mut item_cfgs = cfgs.to_vec();
-                        item_cfgs.extend(self::cfgs(attrs));
-                        if !names_test(&item_cfgs) {
+                        if !test_only(attrs) {
                             self.members(item, module);
                         }
                         continue;
                     }
                     _ => continue,
                 };
-                let mut item_cfgs = cfgs.to_vec();
-                item_cfgs.extend(self::cfgs(attrs));
-                if names_test(&item_cfgs) {
+                if test_only(attrs) {
                     continue;
                 }
+                let mut item_cfgs = cfgs.to_vec();
+                item_cfgs.extend(self::cfgs(attrs));
                 let python = if let Some(args) = record_args(attrs) {
                     // A struct, or a `tagged` enum without a `base`, has a
                     // class.
@@ -674,6 +795,7 @@ mod classes {
                     self.classes.push(Class {
                         cfgs: item_cfgs,
                         path: format!("{module}::{name}Py"),
+                        checked: true,
                     });
                     match item {
                         Item::Struct(item) => self.record_members(item, module),
@@ -694,6 +816,7 @@ mod classes {
                     self.classes.push(Class {
                         cfgs: item_cfgs,
                         path: format!("{module}::{ident}"),
+                        checked: attribute(attrs, "handle").is_some(),
                     });
                     if let Some(record) = handle_record(attrs) {
                         self.members

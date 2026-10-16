@@ -351,6 +351,20 @@ pub trait RecordClass {
     type Class: pyo3::PyTypeInfo;
 }
 
+/// A class `build.rs` found and exported from the SDK module. `#[record]`
+/// and `#[handle]` require it of their class (outside tests), so a class
+/// the walk cannot see fails to compile rather than go missing from the
+/// module.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not exported from the SDK module: build.rs did not find it",
+    note = "build.rs reads the source from src/lib.rs: write `#[record]` or `#[handle]` on the \
+            item itself, not through `cfg_attr` or a `macro_rules!`, in a module it can reach"
+)]
+pub trait ExportedClass {}
+
+/// `T`'s class is exported (see [`ExportedClass`]).
+pub const fn exported<T: ExportedClass>() {}
+
 /// Property `N` of a record struct: the Rust type of its value and its
 /// mode. A `#[handle]` on the record names its properties' types through
 /// this, since the types are written in the record's module.

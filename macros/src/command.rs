@@ -11,6 +11,13 @@ use syn::{
 
 use crate::grammar;
 
+/// A local the generated code binds, with `mixed_site` hygiene, so an
+/// argument of the same name (`state`, `values`, `py`) neither shadows it
+/// nor is shadowed by it.
+fn local(name: &str) -> Ident {
+    Ident::new(name, Span::mixed_site())
+}
+
 pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let mut function: ItemFn = syn::parse2(item)?;
     let options = match Attr::parse(attr)? {
@@ -156,19 +163,24 @@ fn expand_form(form: FormOptions, mut function: ItemFn) -> Result<TokenStream> {
     })
 }
 
-/// A doc line as the Python docstring takes it: backslashes doubled, because
-/// the stub writes the docstring verbatim into a `"""` literal, where `\R`
-/// would be an invalid escape. (The help text keeps the doc comment as
-/// written; a record field's doc comment escapes by hand instead.)
+/// A doc line as the Python docstring takes it: backslashes doubled and
+/// `"""` escaped, because the stub writes the docstring verbatim into a
+/// `"""` literal, where `\R` would be an invalid escape and `"""` would end
+/// it. (The help text keeps the doc comment as written; a record field's
+/// doc comment escapes by hand instead.)
 fn docstring_line(attr: &Attribute) -> Attribute {
     if let Meta::NameValue(value) = &attr.meta
         && let Expr::Lit(ExprLit {
             lit: Lit::Str(text),
             ..
         }) = &value.value
-        && text.value().contains('\\')
+        && (text.value().contains('\\') || text.value().contains("\"\"\""))
     {
-        let escaped = LitStr::new(&text.value().replace('\\', "\\\\"), text.span());
+        let escaped = text
+            .value()
+            .replace('\\', "\\\\")
+            .replace("\"\"\"", "\\\"\\\"\\\"");
+        let escaped = LitStr::new(&escaped, text.span());
         return syn::parse_quote!(#[doc = #escaped]);
     }
     attr.clone()
@@ -307,7 +319,7 @@ impl Attr {
                 "writes" => writes = ident_list(meta.value()?)?,
                 "live_only" => live_only = true,
                 "capability" => capability = Some(meta.value()?.parse()?),
-                "python" => python = Some(ident_list(meta.value()?)?),
+                "python" => python = Some(python_list(meta.value()?)?),
                 "python_name" => python_name = Some(meta.value()?.parse()?),
                 "style" => style = Some(meta.value()?.parse()?),
                 "flow" => flow = Some(meta.value()?.parse()?),
@@ -439,6 +451,28 @@ fn ident_list(input: syn::parse::ParseStream<'_>) -> Result<Vec<Ident>> {
     Ok(Punctuated::<Ident, Token![,]>::parse_terminated(&content)?
         .into_iter()
         .collect())
+}
+
+/// `python = Object`, `[Object, ...]` or `none`: a list names at least one
+/// class and no `none`, which stands alone.
+fn python_list(input: syn::parse::ParseStream<'_>) -> Result<Vec<Ident>> {
+    let span = input.span();
+    let bracketed = input.peek(syn::token::Bracket);
+    let python = ident_list(input)?;
+    if python.is_empty() {
+        return Err(Error::new(
+            span,
+            "`python = []` names no class: write `python = none` for a REPL-only command",
+        ));
+    }
+    if bracketed && let Some(none) = python.iter().find(|object| *object == "none") {
+        return Err(Error::new(
+            none.span(),
+            "`none` stands alone: `python = none` is a REPL-only command, a list names SDK \
+             classes",
+        ));
+    }
+    Ok(python)
 }
 
 /// The doc comment: its first paragraph is the summary, the rest the
@@ -884,6 +918,32 @@ impl Command {
                 "a #[command] maps over one `each` argument",
             ));
         }
+        if self.is_run()
+            && let Some(arg) = self.args.iter().find(|arg| arg.each.is_some())
+        {
+            return Err(Error::new(
+                arg.span,
+                "a `kind = Run` command runs once: it cannot map over an `each` argument",
+            ));
+        }
+        if let Some(flow) = &self.options.flow
+            && self.returns_flow()
+        {
+            return Err(Error::new(
+                flow.span(),
+                "a command that returns `Flow` ends with the flow it returns: drop `flow`",
+            ));
+        }
+        if self.is_run()
+            && !self.options.python.is_empty()
+            && let Some(arg) = self.args.iter().find(|arg| arg.ident == "timeout")
+        {
+            return Err(Error::new(
+                arg.ident.span(),
+                "a `kind = Run` command's SDK method has a `timeout` of its own: name the \
+                 argument otherwise",
+            ));
+        }
         if let Some(object) = self.options.python.first() {
             if self.receiver == Receiver::Repl {
                 return Err(Error::new(
@@ -1117,6 +1177,33 @@ impl Command {
     /// argument), and render the result with the render options.
     fn repl(&self) -> TokenStream {
         let args = quote!(crate::repl::args);
+        let [
+            cx,
+            cursor,
+            text,
+            state,
+            invocation,
+            name,
+            outcome,
+            error,
+            value,
+            values,
+            item,
+        ] = [
+            "cx",
+            "cursor",
+            "text",
+            "state",
+            "invocation",
+            "name",
+            "outcome",
+            "error",
+            "value",
+            "values",
+            "item",
+        ]
+        .map(local);
+        let cancel = local("cancel");
         let switches: Vec<&LitStr> = self
             .args
             .iter()
@@ -1126,10 +1213,10 @@ impl Command {
         for arg in self.args.iter().filter(|arg| arg.switch.is_some()) {
             let ident = &arg.ident;
             let switch = arg.switch.as_ref().unwrap();
-            steps.push(quote!(let #ident = cursor.switch(#switch);));
+            steps.push(quote!(let #ident = #cursor.switch(#switch);));
         }
         if !switches.is_empty() {
-            steps.push(quote!(cursor.reject_switches(cx.name, &[#(#switches),*])?;));
+            steps.push(quote!(#cursor.reject_switches(#cx.name, &[#(#switches),*])?;));
         }
         for arg in self
             .args
@@ -1139,41 +1226,41 @@ impl Command {
             let ident = &arg.ident;
             let ty = &arg.ty;
             let value_ty = arg.value_type();
-            let from = quote!(<#value_ty as #args::FromArg>::from_arg(cx, &text)?);
+            let from = quote!(<#value_ty as #args::FromArg>::from_arg(#cx, &#text)?);
             let step = if arg.sdk {
                 let default = arg.default.as_ref().unwrap();
                 quote!(let #ident: #ty = #default;)
             } else if let Some(path) = arg.parse.as_ref().or(arg.each.as_ref()) {
-                quote!(let #ident = #path(cx, cursor)?;)
+                quote!(let #ident = #path(#cx, #cursor)?;)
             } else if arg.rest {
-                quote!(let #ident: #ty = cursor.rest();)
+                quote!(let #ident: #ty = #cursor.rest();)
             } else if arg.raw {
-                quote!(let #ident: #ty = cursor.raw();)
+                quote!(let #ident: #ty = #cursor.raw();)
             } else if arg.optional.is_some() {
                 quote! {
-                    let #ident: #ty = match cursor.word() {
-                        Some(text) => Some(#from),
+                    let #ident: #ty = match #cursor.word() {
+                        Some(#text) => Some(#from),
                         None => None,
                     };
                 }
             } else if let Some(default) = &arg.default {
                 quote! {
-                    let #ident: #ty = match cursor.word() {
-                        Some(text) => #from,
+                    let #ident: #ty = match #cursor.word() {
+                        Some(#text) => #from,
                         None => #default,
                     };
                 }
             } else if arg.current {
                 quote! {
-                    let #ident: #ty = match cursor.word() {
-                        Some(text) => #from,
-                        None => <#ty as #args::Current>::current(cx)?,
+                    let #ident: #ty = match #cursor.word() {
+                        Some(#text) => #from,
+                        None => <#ty as #args::Current>::current(#cx)?,
                     };
                 }
             } else {
                 quote! {
-                    let #ident: #ty = match cursor.word() {
-                        Some(text) => #from,
+                    let #ident: #ty = match #cursor.word() {
+                        Some(#text) => #from,
                         None => return Err(#args::ArgError::Missing),
                     };
                 }
@@ -1207,9 +1294,9 @@ impl Command {
             .collect();
 
         let receiver = match self.receiver {
-            Receiver::SessionMut => quote!(&mut *state.ctx),
-            Receiver::Session => quote!(&*state.ctx),
-            Receiver::Repl => quote!(&mut *state),
+            Receiver::SessionMut => quote!(&mut *#state.ctx),
+            Receiver::Session => quote!(&*#state.ctx),
+            Receiver::Repl => quote!(&mut *#state),
         };
         let function = &self.function;
         let call_args: Vec<TokenStream> = self
@@ -1219,9 +1306,9 @@ impl Command {
             .map(|arg| {
                 let ident = &arg.ident;
                 if arg.cancel {
-                    quote!(&__cancel)
+                    quote!(&#cancel)
                 } else if arg.each.is_some() {
-                    quote!(item)
+                    quote!(#item)
                 } else if self.args.iter().any(|arg| arg.each.is_some()) {
                     quote!(::std::clone::Clone::clone(&#ident))
                 } else {
@@ -1246,42 +1333,41 @@ impl Command {
             // The REPL drives the motion and renders the stop.
             _ if self.is_run() && self.returns_motion() => quote! {
                 match self::#function(#receiver, #(#call_args),*) {
-                    Ok(motion) => state.run_motion(motion),
-                    Err(error) => crate::repl::error(&error.to_string()),
+                    Ok(#value) => #state.run_motion(#value),
+                    Err(#error) => crate::repl::error(&#error.to_string()),
                 }
                 Ok(())
             },
             // The operation drives the run within the REPL's stop budget.
             _ if self.is_run() => quote! {
-                let __cancel = crate::repl::run_cancel(state.stop_wait.as_ref());
-                let value = self::#function(#receiver, #(#call_args),*);
-                match value {
-                    Ok(value) => crate::repl::Render::render(&value, state, #options),
-                    Err(error) => crate::repl::error(&error.to_string()),
+                let #cancel = crate::repl::run_cancel(#state.stop_wait.as_ref());
+                match self::#function(#receiver, #(#call_args),*) {
+                    Ok(#value) => crate::repl::Render::render(&#value, #state, #options),
+                    Err(#error) => crate::repl::error(&#error.to_string()),
                 }
                 Ok(())
             },
             Some(each) => {
                 let ident = &each.ident;
                 quote! {
-                    let mut values = ::std::vec::Vec::with_capacity(#ident.len());
-                    for item in #ident {
+                    let mut #values = ::std::vec::Vec::with_capacity(#ident.len());
+                    for #item in #ident {
                         match self::#function(#receiver, #(#call_args),*) {
-                            Ok(value) => values.push(value),
-                            Err(error) => {
-                                crate::repl::error(&error.to_string());
+                            Ok(#value) => #values.push(#value),
+                            Err(#error) => {
+                                crate::repl::error(&#error.to_string());
                                 return Ok(());
                             }
                         }
                     }
-                    crate::repl::Render::render(&values, state, #options);
+                    crate::repl::Render::render(&#values, #state, #options);
                     Ok(())
                 }
             }
             None => quote! {
                 match self::#function(#receiver, #(#call_args),*) {
-                    Ok(value) => crate::repl::Render::render(&value, state, #options),
-                    Err(error) => crate::repl::error(&error.to_string()),
+                    Ok(#value) => crate::repl::Render::render(&#value, #state, #options),
+                    Err(#error) => crate::repl::error(&#error.to_string()),
                 }
                 Ok(())
             },
@@ -1307,29 +1393,32 @@ impl Command {
         quote! {
             #[allow(unused_variables, clippy::unnecessary_wraps)]
             fn parse(
-                cx: &mut #args::ArgCx<'_, '_>,
-                cursor: &mut #args::ArgCursor<'_>,
+                #cx: &mut #args::ArgCx<'_, '_>,
+                #cursor: &mut #args::ArgCursor<'_>,
             ) -> ::std::result::Result<(#(#parsed_types,)*), #args::ArgError> {
                 #(#steps)*
-                cursor.finish(cx.name)?;
+                #cursor.finish(#cx.name)?;
                 Ok((#(#parsed,)*))
             }
 
             fn repl(
-                state: &mut crate::repl::ReplState<'_>,
-                invocation: crate::repl::CommandInvocation<'_>,
+                #state: &mut crate::repl::ReplState<'_>,
+                #invocation: crate::repl::CommandInvocation<'_>,
             ) -> crate::error::Result<#returns> {
-                let name = invocation.name;
-                let mut cursor = #args::ArgCursor::new(invocation);
-                let parsed = parse(&mut #args::ArgCx { state: &mut *state, name }, &mut cursor);
-                let (#(#parsed,)*) = match parsed {
-                    Ok(parsed) => parsed,
-                    Err(error) => {
-                        error.report(name);
+                let #name = #invocation.name;
+                let mut #cursor = #args::ArgCursor::new(#invocation);
+                let #outcome = parse(
+                    &mut #args::ArgCx { state: &mut *#state, name: #name },
+                    &mut #cursor,
+                );
+                let (#(#parsed,)*) = match #outcome {
+                    Ok(#outcome) => #outcome,
+                    Err(#error) => {
+                        #error.report(#name);
                         return Ok(#parse_failed);
                     }
                 };
-                #(let #invoked: &str = name;)*
+                #(let #invoked: &str = #name;)*
                 #run
             }
         }
@@ -1407,6 +1496,10 @@ impl Method<'_> {
         let operation = format!("{object}.{python_name}");
         let docs = self.docs;
         let command = quote!(crate::python::command);
+        let [slf, py, borrowed, host, owner, session, cancel] = [
+            "slf", "py", "borrowed", "host", "owner", "session", "cancel",
+        ]
+        .map(local);
         let mut params = Vec::new();
         let mut signature = Vec::new();
         let mut bindings = Vec::new();
@@ -1416,9 +1509,9 @@ impl Method<'_> {
         // The object, and the owner a handle argument must belong to (for
         // the `Debugger`, the debugger itself).
         let prologue = quote! {
-            let __borrowed = slf.borrow();
-            let __host = &*__borrowed;
-            let __owner = <Self as #command::CommandHost>::argument_owner(slf)?;
+            let #borrowed = #slf.borrow();
+            let #host = &*#borrowed;
+            let #owner = <Self as #command::CommandHost>::argument_owner(#slf)?;
         };
         for arg in self.args {
             if arg.render || arg.cancel {
@@ -1428,7 +1521,7 @@ impl Method<'_> {
             let ty = &arg.ty;
             if arg.receiver {
                 bindings
-                    .push(quote!(let #ident: #ty = <Self as #command::Bind<#ty>>::bind(__host);));
+                    .push(quote!(let #ident: #ty = <Self as #command::Bind<#ty>>::bind(#host);));
                 continue;
             }
             if arg.keyword() && !keywords {
@@ -1448,7 +1541,7 @@ impl Method<'_> {
             }
             params.push(quote!(#ident: <#ty as #command::SdkArg>::Py));
             bindings.push(quote! {
-                let #ident = <#ty as #command::SdkArg>::from_sdk(py, &__owner, #ident)?;
+                let #ident = <#ty as #command::SdkArg>::from_sdk(#py, &#owner, #ident)?;
             });
             pending.push(ident);
             signature.push(if arg.sdk {
@@ -1469,9 +1562,8 @@ impl Method<'_> {
             signature.push(quote!(timeout = None));
         }
         let receiver = match self.receiver {
-            // Not `session`: a keyword argument may be named that (`!session`).
-            Receiver::SessionMut => quote!(__session),
-            Receiver::Session => quote!(&*__session),
+            Receiver::SessionMut => quote!(#session),
+            Receiver::Session => quote!(&*#session),
             Receiver::Repl => unreachable!("validated"),
         };
         let function = self.function;
@@ -1481,7 +1573,7 @@ impl Method<'_> {
             .filter(|arg| !arg.render)
             .map(|arg| {
                 if arg.cancel {
-                    quote!(__cancel)
+                    quote!(#cancel)
                 } else {
                     let ident = &arg.ident;
                     quote!(#ident)
@@ -1494,7 +1586,7 @@ impl Method<'_> {
         // effects are admitted: an address given as an expression evaluates
         // there, then the command runs.
         let body = quote! {
-            #(let #pending = #pending.resolve(&*__session)?;)*
+            #(let #pending = #pending.resolve(&*#session)?;)*
             self::#function(#receiver, #(#call),*)
         };
         if let Some(run) = self.run {
@@ -1503,19 +1595,19 @@ impl Method<'_> {
                 RunMode::Cancellable => (
                     quote!(run_cancellable),
                     quote!(#output),
-                    quote!(move |__session, __cancel| { #body }),
+                    quote!(move |#session, #cancel| { #body }),
                 ),
                 // A run admitted on a running target (`g`) can still be
                 // running when the timeout ends; any other ends on a stop.
                 RunMode::Motion { may_run_on: true } => (
                     quote!(run_motion),
                     quote!(::std::option::Option<crate::session::Stop>),
-                    quote!(move |__session| { #body }),
+                    quote!(move |#session| { #body }),
                 ),
                 RunMode::Motion { may_run_on: false } => (
                     quote!(run_motion_to_stop),
                     quote!(crate::session::Stop),
-                    quote!(move |__session| { #body }),
+                    quote!(move |#session| { #body }),
                 ),
             };
             return Ok(quote! {
@@ -1525,13 +1617,13 @@ impl Method<'_> {
                     #(#docs)*
                     #[pyo3(name = #python_name, signature = (#(#signature),*))]
                     fn #method<'py>(
-                        slf: &pyo3::Bound<'py, Self>,
-                        py: pyo3::Python<'py>,
+                        #slf: &pyo3::Bound<'py, Self>,
+                        #py: pyo3::Python<'py>,
                         #(#params),*
                     ) -> pyo3::PyResult<crate::python::record::Typed<'py, #output>> {
                         #prologue
                         #(#bindings)*
-                        #runcontrol::#driver(py, __host, #operation, #effects, timeout, #closure)
+                        #runcontrol::#driver(#py, #host, #operation, #effects, timeout, #closure)
                     }
                 }
             });
@@ -1543,13 +1635,13 @@ impl Method<'_> {
                 #(#docs)*
                 #[pyo3(name = #python_name, signature = (#(#signature),*))]
                 fn #method<'py>(
-                    slf: &pyo3::Bound<'py, Self>,
-                    py: pyo3::Python<'py>,
+                    #slf: &pyo3::Bound<'py, Self>,
+                    #py: pyo3::Python<'py>,
                     #(#params),*
                 ) -> pyo3::PyResult<crate::python::record::Typed<'py, #output>> {
                     #prologue
                     #(#bindings)*
-                    #command::run(py, __host, #operation, #effects, move |__session| {
+                    #command::run(#py, #host, #operation, #effects, move |#session| {
                         #body
                     })
                 }
