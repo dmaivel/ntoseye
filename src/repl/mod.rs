@@ -96,7 +96,7 @@ mod stop;
 mod tern_prompt;
 
 pub use crate::exception_policy::*;
-pub use crate::session::effects::{Effects, RunEffect, RunState, TargetScope};
+pub use crate::session::effects::{RunEffect, RunState, TargetScope};
 pub use aliases::*;
 pub use bugcheck::*;
 pub use command::*;

@@ -55,7 +55,7 @@ pub use list::{
 };
 pub use memory::{
     CompareResult, ExpressionMemory, ExpressionScope, MAX_SEARCH_BYTES, MAX_SEARCH_MATCHES,
-    MemoryKind, MemorySearchMatch, PhysicalSearchResult, SearchResult, SearchStop,
+    MemoryKind, PhysicalSearchResult, SearchResult, SearchStop,
 };
 pub use symbols::ReloadScope;
 pub use userdump::{TargetKind, UserProcess};

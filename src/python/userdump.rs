@@ -425,11 +425,6 @@ impl UserThread {
         Context::vcpu(self.id.clone())
     }
 
-    /// The backend's id for the thread, which selects it.
-    pub fn backend_id(&self) -> &str {
-        &self.id
-    }
-
     pub fn owner(&self) -> &Owner {
         &self.owner
     }

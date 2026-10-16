@@ -101,15 +101,6 @@ pub fn virtual_memory(
     Ok(MemoryKind::Virtual)
 }
 
-/// `#[arg(receiver, parse = physical_memory)]`: a physical-memory command
-/// (`!db`) addresses guest-physical memory. It takes no word.
-pub fn physical_memory(
-    _: &mut ArgCx<'_, '_>,
-    _: &mut ArgCursor<'_>,
-) -> Result<MemoryKind, ArgError> {
-    Ok(MemoryKind::Physical)
-}
-
 /// `#[arg(parse = words)]`: every word left, as written (quotes removed),
 /// for a command that takes a list (`undisplay 1 3`).
 pub fn words(_: &mut ArgCx<'_, '_>, cursor: &mut ArgCursor<'_>) -> Result<Vec<String>, ArgError> {

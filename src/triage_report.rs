@@ -30,8 +30,8 @@ pub use power::{
 };
 use signature::failure_signature;
 pub use user::{
-    CodeOwner, ExceptionParameter, UserDumpTriage, UserExceptionFinding, UserExceptionKind,
-    UserFrame, UserProcessSummary, UserStackSource, UserStackThread,
+    CodeOwner, ExceptionParameter, UserDumpTriage, UserExceptionFinding, UserFrame,
+    UserProcessSummary, UserStackSource, UserStackThread,
 };
 use verifier::verifier_finding;
 use whea::{decode_whea_record, whea_without_memory};
@@ -676,6 +676,7 @@ fn names_match(left: &str, right: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::user::UserExceptionKind;
     use super::*;
     use crate::bugchecks::{BugcheckArg, BugcheckFault};
     use crate::cpu_context::amd64::REGISTER_BUFFER_SIZE;

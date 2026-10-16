@@ -128,16 +128,6 @@ impl<'a> CommandInvocation<'a> {
     pub fn arg(&self, index: usize) -> Option<&str> {
         self.argv.get(index).map(|arg| arg.as_ref())
     }
-
-    pub fn join_args(&self, start: usize) -> String {
-        self.argv
-            .get(start..)
-            .unwrap_or(&[])
-            .iter()
-            .map(|arg| arg.as_ref())
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
 }
 
 pub struct CommandRegistry {

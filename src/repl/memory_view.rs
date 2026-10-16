@@ -5,7 +5,6 @@ use owo_colors::OwoColorize;
 use crate::disasm::DisasmRow;
 use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix};
-use crate::repl::CommandInvocation;
 use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::target::Target;
 use crate::types::VirtAddr;
@@ -100,21 +99,6 @@ pub fn eval_range(
 }
 
 impl AddressRange {
-    pub fn parse(
-        invocation: &CommandInvocation<'_>,
-        debugger: &Target,
-        radix: NumberRadix,
-        default_count: u64,
-        item_size: u64,
-    ) -> Result<Self> {
-        let start_arg = invocation.arg(0).ok_or(Error::InvalidRange)?;
-        let start = Expr::eval_with_radix(start_arg, debugger, radix)?;
-        match invocation.arg(1) {
-            Some(range_arg) => eval_range(range_arg, debugger, radix, start, item_size),
-            None => resolve_range(start, RangeEnd::Count(default_count), item_size),
-        }
-    }
-
     /// A display command's `<address> [L<count>|length|end]`: without an
     /// end, `default_count` elements of `item_size` bytes. A missing address
     /// is an invalid range.

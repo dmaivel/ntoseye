@@ -126,15 +126,6 @@ impl Sub<u32> for VirtAddr {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Keyed<T>(pub Vec<(&'static str, T)>);
 
-impl<T> Keyed<T> {
-    /// The value under `key`.
-    pub fn get(&self, key: &str) -> Option<&T> {
-        self.0
-            .iter()
-            .find_map(|(name, value)| (*name == key).then_some(value))
-    }
-}
-
 impl<T> FromIterator<(&'static str, T)> for Keyed<T> {
     fn from_iter<I: IntoIterator<Item = (&'static str, T)>>(fields: I) -> Self {
         Self(fields.into_iter().collect())

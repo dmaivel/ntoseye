@@ -76,12 +76,6 @@ impl Session {
         self.set_current_stop(Some(outcome));
     }
 
-    /// The stop the target is halted at, if it has stopped since it last
-    /// moved; see [`Self::note_stop`].
-    pub fn current_stop(&self) -> Option<&ContinueOutcome> {
-        self.current_stop.as_ref()
-    }
-
     /// Record `stop` as the stop the target is halted at (`None`: it moved),
     /// dropping the snapshot of the one before.
     pub fn set_current_stop(&mut self, stop: Option<ContinueOutcome>) {

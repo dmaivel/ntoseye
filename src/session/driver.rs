@@ -803,11 +803,6 @@ impl Session {
         resume
     }
 
-    /// Install the runner for breakpoint actions and filter commands.
-    pub fn set_action_runner(&mut self, runner: Box<dyn ActionRunner>) {
-        self.action_runner = Some(runner);
-    }
-
     /// The stop the target is halted at, snapshotted when it surfaced; a
     /// [`StopKind::Entry`] when nothing stopped it since the debugger
     /// attached. `None` while it runs. A stop the backend caught but no host

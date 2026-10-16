@@ -2982,7 +2982,7 @@ fn a_load_trap_hit_a_break_filter_names_surfaces_the_module_load() {
     assert_eq!(module.base_address, VirtAddr(0x2000));
     assert_eq!(rip, LOAD_TRAP);
     assert!(matches!(
-        session.current_stop(),
+        session.current_stop.as_ref(),
         Some(ContinueOutcome::ModuleLoad { .. })
     ));
     assert_eq!(continues.load(Ordering::Relaxed), 0);
@@ -3030,7 +3030,7 @@ fn an_unload_trap_hit_a_break_filter_names_surfaces_the_module_unload() {
     assert_eq!(module.base_address, VirtAddr(0x2000));
     assert_eq!(rip, UNLOAD_TRAP);
     assert!(matches!(
-        session.current_stop(),
+        session.current_stop.as_ref(),
         Some(ContinueOutcome::ModuleUnload { .. })
     ));
     assert_eq!(continues.load(Ordering::Relaxed), 0);
@@ -3522,7 +3522,7 @@ impl ActionRunner for RecordingRunner {
 /// A session whose runner records into the returned log.
 fn recording(session: &mut Session, resume: bool) -> Arc<Mutex<Vec<String>>> {
     let log = Arc::new(Mutex::new(Vec::new()));
-    session.set_action_runner(Box::new(RecordingRunner {
+    session.action_runner = Some(Box::new(RecordingRunner {
         log: Arc::clone(&log),
         resume,
     }));

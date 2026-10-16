@@ -92,11 +92,7 @@ pub enum ContinueOutcome {
     /// A scoped breakpoint hit (its condition, if any, held).
     Breakpoint {
         id: u32,
-        address: u64,
-        symbol: Option<String>,
         temporary: bool,
-        /// Optional frontend command action attached to the breakpoint.
-        action: Option<String>,
         rip: u64,
         /// Runtime condition failure. The stop is surfaced rather than skipped.
         condition_error: Option<String>,
@@ -183,10 +179,7 @@ impl ContinueOutcome {
     ) -> Self {
         ContinueOutcome::Breakpoint {
             id: breakpoint.id,
-            address: breakpoint.address.0,
-            symbol: breakpoint.symbol.clone(),
             temporary: breakpoint.temporary,
-            action: breakpoint.action.clone(),
             rip,
             condition_error,
         }
