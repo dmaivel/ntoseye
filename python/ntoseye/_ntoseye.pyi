@@ -81,7 +81,8 @@ class Acl(BaseRecord):
 class AddressDescription(BaseRecord):
     """
     What an address belongs to: a loaded module (and section), a process VAD
-    region, a kernel region, or nothing that ntoseye recognizes.
+    region, a kernel region, or nothing that ntoseye recognizes. Complements
+    `pte_traverse` (how it's mapped) with where it lives.
     """
     @property
     def address(self, /) -> int: ...
@@ -102,9 +103,9 @@ class AddressDescription(BaseRecord):
         The module containing the address, if any.
         """
     @property
-    def region(self, /) -> MemoryRegion |None:
+    def region(self, /) -> MemoryRegionInfo |None:
         """
-        The region containing the address, if any.
+        The VAD region containing the address, if any.
         """
     @property
     def section(self, /) -> str |None:
@@ -114,7 +115,8 @@ class AddressDescription(BaseRecord):
     @property
     def va_type(self, /) -> str |None:
         """
-        The `_MI_SYSTEM_VA_TYPE` name, for a kernel region.
+        The `_MI_SYSTEM_VA_TYPE` name, for a kernel region (e.g.
+        `KernelStacks`, `PagedPool`, `SystemPtes`).
         """
 
 @final
@@ -144,42 +146,34 @@ class AddressModule(BaseRecord):
         """
 
 @final
-class AddressTranslation(BaseRecord):
+class AddressSummary(BaseRecord):
     """
-    A virtual address translated through the page tables of a DTB (`!vtop`).
+    WinDbg's `!address` summary: regions by usage, by type and protection of
+    those in use, and by state.
     """
     @property
-    def address(self, /) -> int: ...
-    @property
-    def dtb(self, /) -> int: ...
-    @property
-    def large(self, /) -> bool:
+    def busy(self, /) -> int:
         """
-        Whether a large page maps it.
+        The size of the regions not free.
         """
     @property
-    def levels(self, /) -> list[PageTableEntry]:
+    def by_protect(self, /) -> list[SummaryRow]:
         """
-        The levels read, top down.
-        """
-    @property
-    def physical(self, /) -> int |None:
-        """
-        The physical address; `None` when the address is not mapped.
+        Committed regions, by protection.
         """
     @property
-    def section(self, /) -> bool:
+    def by_state(self, /) -> list[SummaryRow]: ...
+    @property
+    def by_type(self, /) -> list[SummaryRow]:
         """
-        Whether nothing maps the page here. If true, `physical` is the frame
-        that the page's section PTE holds, for a page of a shared image or
-        file view that is not touched yet.
+        Regions in use (not free), by `MEM_*` type.
         """
     @property
-    def transition(self, /) -> bool:
+    def by_usage(self, /) -> list[SummaryRow]: ...
+    @property
+    def total(self, /) -> int:
         """
-        Whether the leaf is a transition PTE. If true, `physical` is a frame
-        that the guest still holds, but nothing maps it here and it cannot be
-        written.
+        The size of every region listed.
         """
 
 @final
@@ -1125,7 +1119,7 @@ class BaseRecord:
         """
 
 @final
-class BigPoolAllocation(BaseRecord):
+class BigPoolDetail(BaseRecord):
     """
     A large allocation from `PoolBigPageTable`.
     """
@@ -1842,6 +1836,24 @@ class CallTraceFrame(BaseRecord):
         """
         The called function.
         """
+
+@final
+class CapturedRange(BaseRecord):
+    """
+    One captured range of a dump without a memory-info list, with the usage
+    the dump shows for its start.
+    """
+    @property
+    def detail(self, /) -> str |None:
+        """
+        The module, thread, or heap the usage names.
+        """
+    @property
+    def length(self, /) -> int: ...
+    @property
+    def start(self, /) -> int: ...
+    @property
+    def usage(self, /) -> str: ...
 
 @final
 class ClassDevice(BaseRecord):
@@ -3329,9 +3341,79 @@ class DeviceStackLayer(BaseRecord):
     def object_name(self, /) -> str: ...
 
 @final
-class DisassembledInstruction(BaseRecord):
+class DisasmOperand(BaseRecord):
     """
-    One decoded instruction.
+    One explicit operand of a decoded instruction. Fields that do not apply
+    to its `kind` are None.
+    """
+    @property
+    def base(self, /) -> str |None:
+        """
+        A memory operand's base register, full and lowercase (`rip` when
+        RIP-relative).
+        """
+    @property
+    def displacement(self, /) -> int |None:
+        """
+        A memory operand's signed displacement: relative to the next
+        instruction when RIP-relative, and the writeback offset of an ARM64
+        post-indexed operand.
+        """
+    @property
+    def full_register(self, /) -> str |None:
+        """
+        The architectural register that `register` is part of (`r8` for
+        `r8d`, `x3` for `w3`; vector registers stay as written).
+        """
+    @property
+    def immediate(self, /) -> int |None:
+        """
+        An immediate operand's value (negative when the instruction
+        sign-extends it), or a branch operand's target address.
+        """
+    @property
+    def index(self, /) -> str |None:
+        """
+        A memory operand's index register, full and lowercase.
+        """
+    @property
+    def kind(self, /) -> str:
+        """
+        `register`, `memory`, `immediate`, `branch` (a branch or PC-relative
+        label target), or `other`.
+        """
+    @property
+    def register(self, /) -> str |None:
+        """
+        A register operand's register as written, lowercase (`r8d`, `w3`).
+        """
+    @property
+    def scale(self, /) -> int |None:
+        """
+        The scale of `index`.
+        """
+    @property
+    def segment(self, /) -> str |None:
+        """
+        A memory operand's x86 segment override (`gs`).
+        """
+    @property
+    def size(self, /) -> int |None:
+        """
+        A memory operand's access size in bytes, when known (x86 only).
+        """
+    @property
+    def text(self, /) -> str:
+        """
+        The operand as `asm` shows it.
+        """
+
+@final
+class DisasmRow(BaseRecord):
+    """
+    One decoded instruction. `asm` is its text; `mnemonic` and `operands`
+    describe the same instruction structurally, for code that follows code
+    instead of reading it.
     """
     @property
     def asm(self, /) -> str:
@@ -3349,7 +3431,10 @@ class DisassembledInstruction(BaseRecord):
         The bytes of the instruction, in hex.
         """
     @property
-    def ip(self, /) -> int: ...
+    def ip(self, /) -> int:
+        """
+        The address of the instruction.
+        """
     @property
     def length(self, /) -> int:
         """
@@ -3362,7 +3447,7 @@ class DisassembledInstruction(BaseRecord):
         for an ARM64 word that encodes no instruction.
         """
     @property
-    def operands(self, /) -> list[Operand]:
+    def operands(self, /) -> list[DisasmOperand]:
         """
         The explicit operands, in instruction order.
         """
@@ -5211,6 +5296,27 @@ class Frame:
     def to_dict(self, /) -> dict[str, Any]: ...
 
 @final
+class FunctionDisassembly(BaseRecord):
+    """
+    A disassembled function (`uf`).
+    """
+    @property
+    def length(self, /) -> int:
+        """
+        The length of the function in bytes.
+        """
+    @property
+    def rows(self, /) -> list[DisasmRow]:
+        """
+        Its instructions, from its start.
+        """
+    @property
+    def symbol(self, /) -> str:
+        """
+        The symbol at the start of the function.
+        """
+
+@final
 class FunctionEntry(BaseRecord):
     """
     The function-table entry that covers an address, and the entry of each
@@ -6435,7 +6541,7 @@ class HypervisorVtl:
         """
         The address of the hypervisor's context object for this VTL.
         """
-    def disassemble(self, /, address: int, count: int, physical: bool = False) -> list[DisassembledInstruction]:
+    def disassemble(self, /, address: int, count: int, physical: bool = False) -> list[DisasmRow]:
         """
         Disassemble `count` instructions of this VTL's guest at `address`, as
         `!hvu` does: read as `read` reads it (guest virtual, or with
@@ -7608,24 +7714,36 @@ class Inspect:
         jobs, the parent and root job, and the silo state. Flag 2 lists the
         processes assigned to the job (from ProcessListHead).
         """
-    def lookaside(self, /, address: int) -> LookasideList:
+    def lookaside(self, /, address: int |None = None) -> LookasideDetail |LookasideListsDetail:
         """
-        Decode one `GENERAL_LOOKASIDE` (`!lookaside address`).
+        List or decode GENERAL_LOOKASIDE caches.
+        
+        With no argument, the command walks the exported nonpaged and paged
+        lookaside lists and detects cycles. With an address, it decodes only that
+        entry.
         """
-    def lookasides(self, /) -> LookasideLists:
+    def mdl(self, /, address: int, pfn_count: int |None = None) -> MdlDetail:
         """
-        List exported nonpaged and paged `GENERAL_LOOKASIDE` lists (`!lookaside`).
+        Decode a memory descriptor list and the page frames it describes.
+        
+        The command shows the _MDL header and the PFN array that follows it. The
+        header fields are Next, Size, MdlFlags by MDL_* name, Process,
+        MappedSystemVa, StartVa, ByteCount, and ByteOffset. By default, the PFN
+        count is the number of pages that ByteCount spans from ByteOffset, and a
+        pfn-count overrides this value. In both cases, the count cannot be more than
+        the slots that Size leaves after the header. If the Size, ByteOffset, or
+        span of the header cannot describe an MDL, the command gives an error. The
+        command does not follow Next, so for a chained MDL, run !mdl on the Next
+        address.
         """
-    def mdl(self, /, address: int, pfn_count: int |None = None) -> Mdl:
+    def memusage(self, /, process_limit: int = 64) -> SystemMemorySummary:
         """
-        Decode an `_MDL` and the page frames after its header (`!mdl`).
-        `pfn_count` replaces the page count that `ByteCount` spans from
-        `ByteOffset`.
-        """
-    def memusage(self, /, process_limit: int = 64) -> SystemMemoryUsage:
-        """
-        Get the memory-use counters of the system and of each process, up to a
-        limit (`!memusage`).
+        Show the system memory-use counters and the counters of a limited number
+        of processes.
+        
+        The command uses validated memory-manager globals, KDBG fields, or
+        recognized public getter code, and EPROCESS.Vm counters. It does not scan
+        physical memory, and it does not walk all VADs.
         """
     def ndis_filter(self, /, address: int |None = None) -> NdisFilterList |NdisFilterDetail:
         """
@@ -7773,32 +7891,54 @@ class Inspect:
         (`!peb`): a kernel target's `Process`, or a user-mode minidump's
         `UserProcess`.
         """
-    def pfn(self, /, value: int, physical_address: bool = False) -> Pfn:
+    def pfn(self, /, value: int, physical_address: bool = False) -> PfnDetail:
         """
-        Decode an `_MMPFN` by page-frame number or physical address (`!pfn`).
+        Decode an _MMPFN entry.
+        
+        A plain value is a page-frame number. Use -a to read the value as a physical
+        address.
         """
     def pnp_triage(self, /) -> PnpTriage:
         """
         Get the device nodes that have PnP problems (`!pnptriage`).
         """
-    def pool(self, /, address: int) -> PoolPage:
+    def pool(self, /, address: int) -> PoolPageDetail:
         """
-        Decode the pool page or big-pool allocation that contains `address`
-        (`!pool`).
+        Show the pool page that contains an address.
         """
-    def pool_find(self, /, tag: str, pool_type: str |None = None) -> PoolSearch:
+    def pool_find(self, /, tag: str, pool_type: Literal["nonpaged", "paged"] |None = None) -> PoolFindDetail:
         """
-        Find pool allocations by tag (`!poolfind`), optionally in one pool type
-        only.
+        Find pool blocks with a matching tag.
+        
+        The command reads the mapped pages of the pool ranges and the big-page
+        table. On Windows 10 1803 and later, the pool ranges are the fixed regions
+        in MiState.Vs.SystemVaRegions. On earlier builds, they come from
+        MmNonPagedPoolStart and related symbols. The optional type selects nonpaged
+        (0) or paged (1) pool. The scan stops after 1,024 matches, and you can
+        interrupt it.
         """
-    def pool_usage(self, /, tag: str |None = None, *, sort: str = "tag", include_counts: bool = False) -> PoolUsage:
+    def pool_usage(self, /, tag: str |None = None, sort: Literal["tag", "nonpaged", "paged"] = ...) -> PoolUsageDetail:
         """
-        Add up pool tracker usage by tag (`!poolused`).
+        Show pool tracker usage by tag.
+        
+        The command adds up the usage from the tag table of each processor. The
+        flags follow WinDbg: bit 1 (2) sorts by nonpaged bytes, bit 2 (4) sorts by
+        paged bytes, and bit 0 (1) shows the alloc/free columns. The tag match is
+        case-sensitive and supports * and ?.
         """
-    def pool_validate(self, /, address: int) -> PoolValidation:
+    def pool_validate(self, /, address: int) -> PoolValidationDetail:
         """
-        Check the block headers of the pool page that contains `address`, and
-        return the first inconsistency (`!poolval`).
+        Check the block headers of the pool page that contains an address.
+        
+        The command reports the page as VALID or INVALID, with the first
+        inconsistency. The blocks of a classic pool page must make a chain from the
+        start of the page to its end, in which the PreviousSize of each block
+        matches the BlockSize of the block before it. Segment-heap pages (Windows 10
+        1903 and later) have no PreviousSize chain, so on these pages the
+        inconsistency is a block whose BlockSize runs over the header of another
+        block. The PoolType of a classic block must also identify the pool (paged or
+        nonpaged) that holds the page. A level of 1 or more also lists all block
+        headers. The command does not do the single-bit-error scan of WinDbg.
         """
     def power_action(self, /) -> PowerAction:
         """
@@ -8014,11 +8154,27 @@ class Inspect:
         memory device, and mapped address structures. cpuinfo shows the current
         processor as !cpuinfo does.
         """
-    def system_ptes(self, /, free_runs: bool = False) -> SystemPtes:
+    def system_ptes(self, /, free_runs: bool = False) -> SystemPtesDetail:
         """
-        Get the system PTE usage from each `_MI_SYSTEM_PTE_TYPE` bitmap
-        allocator (`!sysptes`). `free_runs` lists the free blocks of each
-        allocator.
+        Show system PTE usage from the memory manager's bitmap allocators.
+        
+        Windows 10 and later allocate system PTEs from _MI_SYSTEM_PTE_TYPE bitmap
+        allocators in MiState. These allocators are Vs.SystemPteInfo (the SystemPtes
+        region) and the system-view, non-cached-mapping, and kernel-stack allocators
+        of SystemPtes. For each allocator, the command shows the VA range that it
+        serves, TotalSystemPtes, TotalFreeSystemPtes, the PTEs in use, and
+        PteFailures, and from the bitmap, the number of free blocks and the largest
+        free block. The command reads all of the bitmap, up to 2^27 bits, a limit
+        that only a corrupt SizeOfBitMap exceeds. If the free count from the bitmap
+        differs from the counter, the target made an allocation between the reads.
+        All counts are in PTEs, and each bit of the system-view bitmap covers 16
+        PTEs. The flags follow WinDbg. 0x1 lists each free block with its first PTE,
+        the address that it maps, and its length, up to 256 free blocks for each
+        allocator. 0x4 (PTEs that map locked pages) needs the TrackPtes tracking of
+        the kernel, and shows which allocators track but does not list the tracked
+        mappings. The command ignores 0x2, 0x8, and 0x10, which select Windows
+        2000/XP/Vista lists that these allocators replaced. On a build without these
+        allocators, the command gives an error.
         """
     def teb(self, /, thread: Thread |UserThread, address: int |None = None) -> Teb:
         """
@@ -8073,9 +8229,14 @@ class Inspect:
         shows the virtio_device there, typed by the module you give or by the
         driver that owns it. See the virtio devices guide.
         """
-    def vm(self, /, include_processes: bool = True) -> VmStatistics:
+    def vm(self, /, include_processes: bool = True) -> VmDetail:
         """
-        Get the system memory, pool, PTE, and page-file counters (`!vm`).
+        Show virtual-memory statistics.
+        
+        The command shows system memory, pool, PTE, page-file, and process usage.
+        The flags follow WinDbg: bit 0 omits the per-process rows, and the command
+        accepts bits 1, 2, and 3 but ignores them. If the command cannot read a
+        counter, it still shows the other counters.
         """
     def vpb(self, /, address: int) -> Vpb:
         """
@@ -8096,6 +8257,14 @@ class Inspect:
         addresses for a driver without a PDB, and /t names what its buffers hold:
         blk, scsi, scsi-control, scsi-event, net, net-control, gpu, or vsock. See
         the virtio devices guide.
+        """
+    def vtop(self, /, directory_base: int, address: int) -> VtopDetail:
+        """
+        Translate a virtual address with an explicit directory base.
+        
+        The command shows each AMD64 page-table level and the final physical
+        address. A directory base of zero uses the current context, and for a large
+        page, the walk stops at its leaf level.
         """
     def wdf_crash_dump(self, /, loader: bool |None = None) -> WdfLogDump |list[WdfDumpDriver]:
         """
@@ -9290,9 +9459,10 @@ class LocalVariableLocation(BaseRecord):
         """
 
 @final
-class LookasideList(BaseRecord):
+class LookasideDetail(BaseRecord):
     """
-    A decoded `_GENERAL_LOOKASIDE` list (`!lookaside`).
+    A decoded `_GENERAL_LOOKASIDE` list (`!lookaside`). Each counter is
+    read on its own, because stripped PDBs often omit some members.
     """
     @property
     def address(self, /) -> int: ...
@@ -9318,7 +9488,7 @@ class LookasideList(BaseRecord):
     def total_frees(self, /) -> Diagnostic[int]: ...
 
 @final
-class LookasideLists(BaseRecord):
+class LookasideListsDetail(BaseRecord):
     """
     The system lookaside lists (`!lookaside`).
     """
@@ -9342,7 +9512,7 @@ class LookasideLists(BaseRecord):
         How the paged list walk ended.
         """
     @property
-    def records(self, /) -> list[LookasideList]: ...
+    def records(self, /) -> list[LookasideDetail]: ...
     @property
     def truncated(self, /) -> bool:
         """
@@ -9350,7 +9520,7 @@ class LookasideLists(BaseRecord):
         """
 
 @final
-class Mdl(BaseRecord):
+class MdlDetail(BaseRecord):
     """
     A decoded `_MDL` header and the page-frame array that follows it
     (`!mdl`).
@@ -9394,7 +9564,8 @@ class Mdl(BaseRecord):
     @property
     def spanned_pages(self, /) -> int:
         """
-        The number of pages that the described buffer spans.
+        The number of pages that the described buffer spans
+        (`ADDRESS_AND_SIZE_TO_SPAN_PAGES`).
         """
     @property
     def start_va(self, /) -> int: ...
@@ -9411,23 +9582,44 @@ class Memory:
     A guest address space: `dbg.memory` (kernel), `proc.memory`, `cpu.memory`,
     or `dbg.physical`.
     """
-    def describe(self, /, addr: int) -> AddressDescription:
+    def describe(self, /, addr: int |None = None) -> AddressDescription |UserAddressReport:
         """
-        Describe the loaded module, kernel region, or process VAD that contains
-        `addr`. A user-mode minidump has no VADs and raises `NtoseyeError`;
-        `Debugger.user_dump.region(addr)` describes its region.
+        Show the module and section, or the VAD region, that an address belongs
+        to.
+        
+        On a user-mode minidump the command uses the regions that the dump's
+        memory-info list records. Without an argument, it lists them with their
+        state, protection, type, allocation base, usage, and how much of each the
+        dump captured, followed by a summary by usage, type, state, and
+        protection; -summary shows only the summary. With an address, it shows
+        the region that holds it. Usage comes from the dump's modules, its
+        threads' stacks and TEBs, the PEB, and the heaps in the PEB's
+        ProcessHeaps array; it is <unknown> for any other region. A dump without
+        a memory-info list shows the memory ranges it captured instead.
         """
-    def disassemble(self, /, addr: int, count: int) -> list[DisassembledInstruction]:
+    def disassemble(self, /, addr: int, count: int) -> list[DisasmRow]:
         """
-        Disassemble `count` instructions at `addr` (`u`).
+        Disassemble memory at a symbol or address.
+        
+        `L<count>` sets the number of instructions, 8 by default. If you give an
+        end address, the command shows all instructions that start at or before
+        that address. If you do not give an address, the command continues after
+        the last instruction that the previous u showed. After the target runs or
+        steps, or when you select another frame, thread, or process, it starts at
+        the instruction pointer instead.
         """
-    def disassemble_back(self, /, addr: int, count: int) -> list[DisassembledInstruction]:
+    def disassemble_back(self, /, addr: int, count: int) -> list[DisasmRow]:
         """
-        Disassemble the `count` instructions that end at `addr` (`ub`).
+        Disassemble the instructions that end at an address.
         """
-    def disassemble_function(self, /, addr: int) -> list[DisassembledInstruction]:
+    def disassemble_function(self, /, addr: int) -> FunctionDisassembly:
         """
-        Disassemble the runtime function that contains `addr` (`uf`).
+        Disassemble the function that contains an address.
+        
+        The function's runtime function entry gives its extent. A leaf function
+        has none, so uf reads it from its symbol for as far as its control flow
+        reaches before the next symbol: it follows the branches inside the
+        function, and treats a branch past the next symbol as a tail call.
         """
     @property
     def dtb(self, /) -> int:
@@ -9451,10 +9643,17 @@ class Memory:
         """
         The guest pointer width, in bytes (`$ptrsize`).
         """
-    def ptov(self, /, physical: int) -> ReverseTranslation:
+    def pte(self, /, address: int) -> PteWalk:
         """
-        Map a physical address back to virtual addresses with the page tables of
-        this space (`!ptov`).
+        Show the page table entries for an address.
+        """
+    def ptov(self, /, physical: int) -> PtovDetail:
+        """
+        Find the virtual addresses in the current directory base that map a physical
+        address.
+        
+        The command walks the page tables in reverse and detects cycles in them. The
+        walk stops after 32 mappings or 65,536 table pages.
         """
     def read(self, /, addr: int, n: int) -> bytes:
         """
@@ -9512,9 +9711,11 @@ class Memory:
         """
         Translate a virtual address with the page tables of this space (`!vtop`).
         """
-    def translation(self, /, addr: int) -> AddressTranslation:
+    def translation(self, /, addr: int) -> VtopDetail:
         """
-        Get the full page-table walk and the final translation (`!pte` + `!vtop`).
+        Get the page-table walk and the final translation of `addr` in this
+        space's page tables (`!vtop` with this space's DTB). It works in every
+        virtual space, VTL1 and roots outside NT included.
         """
     def write(self, /, addr: int, data: bytes) -> None:
         """
@@ -9557,7 +9758,11 @@ class MemoryBasicInformation(BaseRecord):
     @property
     def base_address(self, /) -> int: ...
     @property
-    def process(self, /) -> ProcessInfo: ...
+    def process(self, /) -> ProcessInfo |None:
+        """
+        The process whose address space holds the address; `None` on a
+        user-mode minidump, whose memory-info list gives the region.
+        """
     @property
     def protect(self, /) -> int: ...
     @property
@@ -9580,7 +9785,10 @@ class MemoryBasicInformation(BaseRecord):
         lower bound.
         """
     @property
-    def type(self, /) -> int: ...
+    def type(self, /) -> int:
+        """
+        The `MEM_*` type (`MEMORY_BASIC_INFORMATION.Type`).
+        """
     @property
     def type_name(self, /) -> str: ...
     @property
@@ -9592,7 +9800,55 @@ class MemoryBasicInformation(BaseRecord):
 @final
 class MemoryRegion(BaseRecord):
     """
-    One VAD or kernel region (`proc.regions` items, address context).
+    `MINIDUMP_MEMORY_INFO`: one region of the address space, as
+    `VirtualQueryEx` reported it.
+    """
+    @property
+    def allocation_base(self, /) -> int: ...
+    @property
+    def allocation_protect(self, /) -> int: ...
+    @property
+    def allocation_protect_name(self, /) -> str:
+        """
+        `allocation_protect` as `PAGE_*` names.
+        """
+    @property
+    def base(self, /) -> int: ...
+    @property
+    def kind(self, /) -> int:
+        """
+        `MEM_IMAGE`, `MEM_MAPPED`, `MEM_PRIVATE`, or 0 for a free region.
+        """
+    @property
+    def kind_name(self, /) -> str:
+        """
+        `MEM_IMAGE`, `MEM_MAPPED`, or `MEM_PRIVATE`; empty for a free region.
+        """
+    @property
+    def protect(self, /) -> int: ...
+    @property
+    def protect_name(self, /) -> str:
+        """
+        `protect` as `PAGE_*` names; empty for a free or reserved region.
+        """
+    @property
+    def size(self, /) -> int: ...
+    @property
+    def state(self, /) -> int:
+        """
+        `MEM_COMMIT`, `MEM_RESERVE`, or `MEM_FREE`.
+        """
+    @property
+    def state_name(self, /) -> str:
+        """
+        `MEM_COMMIT`, `MEM_RESERVE`, or `MEM_FREE`.
+        """
+
+@final
+class MemoryRegionInfo(BaseRecord):
+    """
+    One VAD region of a process (`!vad`, `proc.regions` items, address
+    context).
     """
     @property
     def commit_charge(self, /) -> int |None:
@@ -9602,12 +9858,22 @@ class MemoryRegion(BaseRecord):
     @property
     def details(self, /) -> str |None:
         """
-        A description: the mapped file, or the kernel region kind.
+        A description: the mapped file.
         """
     @property
     def end(self, /) -> int:
         """
         The end of the region (exclusive).
+        """
+    @property
+    def level(self, /) -> int:
+        """
+        The node's depth in the VAD tree.
+        """
+    @property
+    def node_address(self, /) -> int:
+        """
+        The VAD's node in the process's VAD tree.
         """
     @property
     def private_memory(self, /) -> bool |None:
@@ -9642,7 +9908,7 @@ class MemoryRegionIterator:
     Iterator over `proc.regions`.
     """
     def __iter__(self, /) -> MemoryRegionIterator: ...
-    def __next__(self, /) -> MemoryRegion: ...
+    def __next__(self, /) -> MemoryRegionInfo: ...
 
 @final
 class MemorySearchMatch(BaseRecord):
@@ -9672,7 +9938,7 @@ class MemorySearchMatch(BaseRecord):
         The offset of the match from the start of the search.
         """
     @property
-    def region(self, /) -> MemoryRegion |None:
+    def region(self, /) -> MemoryRegionInfo |None:
         """
         The region containing the match, if any.
         """
@@ -11189,74 +11455,6 @@ class ObjectSecurity(BaseRecord):
     def object(self, /) -> int: ...
 
 @final
-class Operand(BaseRecord):
-    """
-    One explicit operand of a decoded instruction. Fields that do not apply
-    to its `kind` are None.
-    """
-    @property
-    def base(self, /) -> str |None:
-        """
-        A memory operand's base register, full and lowercase (`rip` when
-        RIP-relative).
-        """
-    @property
-    def displacement(self, /) -> int |None:
-        """
-        A memory operand's signed displacement: relative to the next
-        instruction when RIP-relative, and the writeback offset of an ARM64
-        post-indexed operand.
-        """
-    @property
-    def full_register(self, /) -> str |None:
-        """
-        The architectural register that `register` is part of (`r8` for
-        `r8d`, `x3` for `w3`; vector registers stay as written).
-        """
-    @property
-    def immediate(self, /) -> int |None:
-        """
-        An immediate operand's value (negative when the instruction
-        sign-extends it), or a branch operand's target address.
-        """
-    @property
-    def index(self, /) -> str |None:
-        """
-        A memory operand's index register, full and lowercase.
-        """
-    @property
-    def kind(self, /) -> str:
-        """
-        `register`, `memory`, `immediate`, `branch` (a branch or PC-relative
-        label target), or `other`.
-        """
-    @property
-    def register(self, /) -> str |None:
-        """
-        A register operand's register as written, lowercase (`r8d`, `w3`).
-        """
-    @property
-    def scale(self, /) -> int |None:
-        """
-        The scale of `index`.
-        """
-    @property
-    def segment(self, /) -> str |None:
-        """
-        A memory operand's x86 segment override (`gs`).
-        """
-    @property
-    def size(self, /) -> int |None:
-        """
-        A memory operand's access size in bytes, when known (x86 only).
-        """
-    @property
-    def text(self, /) -> str:
-        """
-        The operand as `asm` shows it.
-        """
-
-@final
 class PackedQueueState(BaseRecord):
     """
     What the driver keeps of a packed queue.
@@ -11343,54 +11541,6 @@ class PageLocation(BaseRecord):
         """
     @property
     def value(self, /) -> int: ...
-
-@final
-class PageTableEntry(BaseRecord):
-    """
-    One page-table level of a walk, with the entry decoded into WinDbg-style
-    flags. For an entry that points to a lower table, `writable`, `user`,
-    and `nx` are the restrictions that the entry puts on everything below
-    it.
-    """
-    @property
-    def address(self, /) -> int:
-        """
-        The entry's virtual address.
-        """
-    @property
-    def flags(self, /) -> str:
-        """
-        WinDbg's flag string for the entry.
-        """
-    @property
-    def large_page(self, /) -> bool:
-        """
-        Whether the entry maps a large page instead of pointing to a lower
-        table.
-        """
-    @property
-    def level(self, /) -> str:
-        """
-        `PXE`, `PPE`, `PDE`, or `PTE`.
-        """
-    @property
-    def nx(self, /) -> bool: ...
-    @property
-    def pfn(self, /) -> int:
-        """
-        The frame the entry points at.
-        """
-    @property
-    def present(self, /) -> bool: ...
-    @property
-    def user(self, /) -> bool: ...
-    @property
-    def value(self, /) -> int:
-        """
-        The entry as read.
-        """
-    @property
-    def writable(self, /) -> bool: ...
 
 @final
 class PartitionFilter(BaseRecord):
@@ -11901,12 +12051,14 @@ class Peb32(BaseRecord):
     def session_id(self, /) -> Diagnostic[int]: ...
 
 @final
-class Pfn(BaseRecord):
+class PfnDetail(BaseRecord):
     """
-    A decoded `_MMPFN` record (`!pfn`). Union members that the page state
-    does not use are `None`: the list links when the page is not on a list,
-    `share_count` and `ws_index` when the page is not active, and `event`
-    when the page is not in transition.
+    A decoded `_MMPFN` record (`!pfn`). A member the layout lacks is decoded
+    from the record's raw bits at its known offset, so only `page_color`,
+    which has no such fallback, can be unavailable. Union members that the
+    page state does not use are `None`: the list links when the page is not
+    on a list, `share_count` and `ws_index` when the page is not active, and
+    `event` when the page is not in transition.
     """
     @property
     def blink(self, /) -> int |None: ...
@@ -11972,28 +12124,19 @@ class Pfn(BaseRecord):
 @final
 class PfnSelector(BaseRecord):
     """
-    The input to `!pfn`.
+    What `!pfn` decodes: a page-frame number, or the frame of a physical
+    address (shifted by the page size before indexing the PFN database).
     """
     @property
     def kind(self, /) -> str:
         """
-        `pfn` or `physical_address`.
+        The variant: `pfn`, `physical_address`.
         """
     @property
-    def value(self, /) -> int: ...
-
-@final
-class PhysicalMapping(BaseRecord):
-    """
-    A virtual address that maps a physical page.
-    """
-    @property
-    def large(self, /) -> bool:
+    def value(self, /) -> int |None:
         """
-        Whether a large page maps it.
+        The page-frame number or physical address given.
         """
-    @property
-    def virtual_address(self, /) -> int: ...
 
 @final
 class PnpTriage(BaseRecord):
@@ -12030,7 +12173,7 @@ class PnpTriage(BaseRecord):
         """
 
 @final
-class PoolBlock(BaseRecord):
+class PoolBlockDetail(BaseRecord):
     """
     A `_POOL_HEADER` block in a pool page.
     """
@@ -12085,6 +12228,122 @@ class PoolBlock(BaseRecord):
         """
 
 @final
+class PoolFindDetail(BaseRecord):
+    """
+    A pool-tag search (`!poolfind`).
+    """
+    @property
+    def big_status(self, /) -> str |None:
+        """
+        The read status of the big-pool table, if the search included it.
+        """
+    @property
+    def found(self, /) -> int:
+        """
+        The number of matches found, including those past the listing limit.
+        """
+    @property
+    def interrupted(self, /) -> bool:
+        """
+        Whether an interrupt request stopped the search.
+        """
+    @property
+    def matches(self, /) -> list[PoolFindMatch]: ...
+    @property
+    def pool_type(self, /) -> str |None:
+        """
+        The pool that the search was limited to, if any.
+        """
+    @property
+    def ranges(self, /) -> list[PoolFindRange]: ...
+    @property
+    def tag(self, /) -> str:
+        """
+        The searched tag.
+        """
+    @property
+    def truncated(self, /) -> bool:
+        """
+        Whether more matches were found than are listed.
+        """
+
+@final
+class PoolFindMatch(BaseRecord):
+    """
+    A pool allocation with the search tag (`!poolfind`).
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def allocated(self, /) -> bool: ...
+    @property
+    def index(self, /) -> int |None:
+        """
+        The `PoolBigPageTable` index, for a big-pool match.
+        """
+    @property
+    def pool_type(self, /) -> str |None:
+        """
+        The pool, when known.
+        """
+    @property
+    def size(self, /) -> int:
+        """
+        Size in bytes.
+        """
+    @property
+    def source(self, /) -> str:
+        """
+        Where the search found the allocation: a pool range scan or the big-pool
+        table.
+        """
+    @property
+    def state(self, /) -> str: ...
+    @property
+    def table_entry(self, /) -> int |None:
+        """
+        The `PoolBigPageTable` entry, for a big-pool match.
+        """
+    @property
+    def tag(self, /) -> int: ...
+    @property
+    def tag_name(self, /) -> str:
+        """
+        The tag as its four characters.
+        """
+
+@final
+class PoolFindRange(BaseRecord):
+    """
+    How far `!poolfind` scanned one virtual pool range.
+    """
+    @property
+    def end(self, /) -> int:
+        """
+        The end of the range (exclusive).
+        """
+    @property
+    def name(self, /) -> str: ...
+    @property
+    def pages(self, /) -> int:
+        """
+        The number of pages in the range, mapped or not.
+        """
+    @property
+    def scanned_pages(self, /) -> int:
+        """
+        The number of mapped pages that the scan read.
+        """
+    @property
+    def start(self, /) -> int: ...
+    @property
+    def stopped_at(self, /) -> int |None:
+        """
+        The mapped page where the scan stopped, if the match limit or an
+        interrupt stopped it early. The scan did not read this page.
+        """
+
+@final
 class PoolIrp(BaseRecord):
     """
     An IRP that `!irpfind` found in pool.
@@ -12125,62 +12384,17 @@ class PoolIrp(BaseRecord):
         """
 
 @final
-class PoolMatch(BaseRecord):
-    """
-    A pool allocation with the search tag (`!poolfind`).
-    """
-    @property
-    def address(self, /) -> int: ...
-    @property
-    def allocated(self, /) -> bool: ...
-    @property
-    def index(self, /) -> int |None:
-        """
-        The `PoolBigPageTable` index, for a big-pool match.
-        """
-    @property
-    def pool_type(self, /) -> str |None:
-        """
-        `NonPagedPool` or `PagedPool`, when known.
-        """
-    @property
-    def size(self, /) -> int:
-        """
-        Size in bytes.
-        """
-    @property
-    def source(self, /) -> str:
-        """
-        Where the search found the allocation: a pool range scan or the big-pool
-        table.
-        """
-    @property
-    def state(self, /) -> str: ...
-    @property
-    def table_entry(self, /) -> int |None:
-        """
-        The `PoolBigPageTable` entry, for a big-pool match.
-        """
-    @property
-    def tag(self, /) -> int: ...
-    @property
-    def tag_name(self, /) -> str:
-        """
-        The tag as its four characters.
-        """
-
-@final
-class PoolPage(BaseRecord):
+class PoolPageDetail(BaseRecord):
     """
     The pool page holding an address (`!pool`).
     """
     @property
-    def big(self, /) -> BigPoolAllocation |None:
+    def big(self, /) -> BigPoolDetail |None:
         """
         The large allocation that holds the address, if the address is in one.
         """
     @property
-    def blocks(self, /) -> list[PoolBlock]: ...
+    def blocks(self, /) -> list[PoolBlockDetail]: ...
     @property
     def message(self, /) -> str |None:
         """
@@ -12203,7 +12417,7 @@ class PoolPage(BaseRecord):
         could not be decoded.
         """
     @property
-    def region(self, /) -> PoolRegion |None:
+    def region(self, /) -> PoolRegionDetail |None:
         """
         The pool range holding the page, when known.
         """
@@ -12241,38 +12455,7 @@ class PoolProblem(BaseRecord):
         """
 
 @final
-class PoolRangeScan(BaseRecord):
-    """
-    How far `!poolfind` scanned one virtual pool range.
-    """
-    @property
-    def end(self, /) -> int:
-        """
-        The end of the range (exclusive).
-        """
-    @property
-    def name(self, /) -> str: ...
-    @property
-    def pages(self, /) -> int:
-        """
-        The number of pages in the range, mapped or not.
-        """
-    @property
-    def scanned_pages(self, /) -> int:
-        """
-        The number of mapped pages that the scan read.
-        """
-    @property
-    def start(self, /) -> int: ...
-    @property
-    def stopped_at(self, /) -> int |None:
-        """
-        The mapped page where the scan stopped, if the match limit or an
-        interrupt stopped it early. The scan did not read this page.
-        """
-
-@final
-class PoolRegion(BaseRecord):
+class PoolRegionDetail(BaseRecord):
     """
     A virtual pool range.
     """
@@ -12285,46 +12468,6 @@ class PoolRegion(BaseRecord):
     def name(self, /) -> str: ...
     @property
     def start(self, /) -> int: ...
-
-@final
-class PoolSearch(BaseRecord):
-    """
-    A pool-tag search (`!poolfind`).
-    """
-    @property
-    def big_status(self, /) -> str |None:
-        """
-        The read status of the big-pool table, if the search included it.
-        """
-    @property
-    def found(self, /) -> int:
-        """
-        The number of matches found, including those past the listing limit.
-        """
-    @property
-    def interrupted(self, /) -> bool:
-        """
-        Whether an interrupt request stopped the search.
-        """
-    @property
-    def matches(self, /) -> list[PoolMatch]: ...
-    @property
-    def pool_type(self, /) -> str |None:
-        """
-        The pool that the search was limited to, if any.
-        """
-    @property
-    def ranges(self, /) -> list[PoolRangeScan]: ...
-    @property
-    def tag(self, /) -> str:
-        """
-        The searched tag.
-        """
-    @property
-    def truncated(self, /) -> bool:
-        """
-        Whether more matches were found than are listed.
-        """
 
 @final
 class PoolTag(BaseRecord):
@@ -12340,45 +12483,7 @@ class PoolTag(BaseRecord):
     def value(self, /) -> int: ...
 
 @final
-class PoolTagUsage(BaseRecord):
-    """
-    The pool usage of one tag, in bytes (`!poolused`). A value is `None` if
-    the tracker has no entry for that pool.
-    """
-    @property
-    def nonpaged_allocs(self, /) -> int |None:
-        """
-        `None` unless allocation counts were requested.
-        """
-    @property
-    def nonpaged_bytes(self, /) -> int |None: ...
-    @property
-    def nonpaged_frees(self, /) -> int |None:
-        """
-        `None` unless allocation counts were requested.
-        """
-    @property
-    def paged_allocs(self, /) -> int |None:
-        """
-        `None` unless allocation counts were requested.
-        """
-    @property
-    def paged_bytes(self, /) -> int |None: ...
-    @property
-    def paged_frees(self, /) -> int |None:
-        """
-        `None` unless allocation counts were requested.
-        """
-    @property
-    def tag(self, /) -> int: ...
-    @property
-    def tag_name(self, /) -> str:
-        """
-        The tag as its four characters.
-        """
-
-@final
-class PoolUsage(BaseRecord):
+class PoolUsageDetail(BaseRecord):
     """
     Pool usage by tag, from the pool tracker (`!poolused`).
     """
@@ -12388,22 +12493,14 @@ class PoolUsage(BaseRecord):
         The read status of the big-pool table.
         """
     @property
-    def include_counts(self, /) -> bool:
-        """
-        Whether allocation and free counts were requested.
-        """
-    @property
-    def rows(self, /) -> list[PoolTagUsage]: ...
+    def rows(self, /) -> list[PoolUsageRow]: ...
     @property
     def rows_truncated(self, /) -> bool:
         """
         Whether more tags matched than are listed.
         """
     @property
-    def sort(self, /) -> str:
-        """
-        The sort order: `tag`, `nonpaged_bytes`, or `paged_bytes`.
-        """
+    def sort(self, /) -> str: ...
     @property
     def tag_filter(self, /) -> str |None:
         """
@@ -12416,7 +12513,40 @@ class PoolUsage(BaseRecord):
         """
 
 @final
-class PoolValidation(BaseRecord):
+class PoolUsageRow(BaseRecord):
+    """
+    The pool usage of one tag (`!poolused`), summed over the processors'
+    tracker tables and the big-pool table. A value is `None` if no source
+    has an entry for that pool.
+    """
+    @property
+    def nonpaged_allocs(self, /) -> int |None: ...
+    @property
+    def nonpaged_bytes(self, /) -> int |None:
+        """
+        In bytes.
+        """
+    @property
+    def nonpaged_frees(self, /) -> int |None: ...
+    @property
+    def paged_allocs(self, /) -> int |None: ...
+    @property
+    def paged_bytes(self, /) -> int |None:
+        """
+        In bytes.
+        """
+    @property
+    def paged_frees(self, /) -> int |None: ...
+    @property
+    def tag(self, /) -> int: ...
+    @property
+    def tag_name(self, /) -> str:
+        """
+        The tag as its four characters.
+        """
+
+@final
+class PoolValidationDetail(BaseRecord):
     """
     The blocks of the pool page that holds an address, with a check of
     header consistency (`!poolval`).
@@ -12424,7 +12554,7 @@ class PoolValidation(BaseRecord):
     @property
     def address(self, /) -> int: ...
     @property
-    def blocks(self, /) -> list[PoolBlock]: ...
+    def blocks(self, /) -> list[PoolBlockDetail]: ...
     @property
     def layout(self, /) -> str:
         """
@@ -12441,7 +12571,7 @@ class PoolValidation(BaseRecord):
         The first inconsistency found.
         """
     @property
-    def region(self, /) -> PoolRegion |None:
+    def region(self, /) -> PoolRegionDetail |None:
         """
         The pool range holding the page, when known.
         """
@@ -13041,9 +13171,21 @@ class Process:
         """
     def protection(self, /, address: int) -> MemoryBasicInformation:
         """
-        Get the region that contains `address`, as `VirtualQuery` reports it
-        (`!vprot`). The result has the base, the allocation base and
-        protection, the region size, the state, the protection, and the type.
+        Show the VirtualQuery data for a user address.
+        
+        The command shows the region, state, protection, and type of a user
+        address, as VirtualQuery reports them. It looks up the address in the
+        current process context, which you can select with `.process /p <pid>`.
+        The VAD that holds the address gives AllocationBase, AllocationProtect,
+        and Type, and the state and protection of each page come from its PTE.
+        For a page without a PTE, they come from the VAD (private memory) or
+        from its prototype PTE (a section view). RegionSize runs from the page of
+        the address to the first page that differs. An address that is not in a
+        VAD is MEM_FREE up to the next VAD. The scan stops after 262,144
+        page-table steps. On a user-mode minidump the command reads the region
+        from the dump's memory-info list, which records what VirtualQuery
+        returned when the dump was written; RegionSize runs from the page of the
+        address to the end of that region.
         """
     @property
     def regions(self, /) -> Regions:
@@ -13306,6 +13448,128 @@ class ProcessorStateArea(BaseRecord):
         """
     @property
     def special_registers(self, /) -> Diagnostic[SpecialRegistersArea]: ...
+
+@final
+class PteAttributes(BaseRecord):
+    """
+    A page-table entry decoded at its level; see
+    [`PageTableEntry::attributes`]. For an entry pointing at a lower table,
+    `writable`, `user`, and `nx` are the restrictions it places on what lies
+    below.
+    """
+    @property
+    def flags(self, /) -> str:
+        """
+        WinDbg's flag string for the entry.
+        """
+    @property
+    def large_page(self, /) -> bool:
+        """
+        Whether the entry maps a large page instead of pointing to a lower
+        table.
+        """
+    @property
+    def nx(self, /) -> bool: ...
+    @property
+    def pfn(self, /) -> int:
+        """
+        The frame the entry points at.
+        """
+    @property
+    def present(self, /) -> bool: ...
+    @property
+    def user(self, /) -> bool: ...
+    @property
+    def writable(self, /) -> bool: ...
+
+@final
+class PteLevel(BaseRecord):
+    """
+    One page-table level of a walk (`!pte`, `!vtop`): where its entry is,
+    the entry as read, and the entry decoded at its level.
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The entry's address: virtual through NT's self-map, physical in an
+        explicit walk.
+        """
+    @property
+    def attributes(self, /) -> PteAttributes: ...
+    @property
+    def level(self, /) -> str: ...
+    @property
+    def value(self, /) -> int:
+        """
+        The entry as read.
+        """
+
+@final
+class PteWalk(BaseRecord):
+    """
+    The page-table entries that map an address, read through NT's self-map
+    (`!pte`).
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def dtb(self, /) -> int:
+        """
+        The address space the walk was performed in (the attached process DTB
+        when attached, else the kernel), so callers know what was walked.
+        """
+    @property
+    def pde(self, /) -> PteLevel |None: ...
+    @property
+    def ppe(self, /) -> PteLevel |None:
+        """
+        The levels below the PXE, each present only when the one above it
+        points at a table.
+        """
+    @property
+    def pte(self, /) -> PteLevel |None: ...
+    @property
+    def pxe(self, /) -> PteLevel: ...
+
+@final
+class PtovDetail(BaseRecord):
+    """
+    The virtual addresses that map a physical address (`!ptov`).
+    """
+    @property
+    def bounded(self, /) -> bool:
+        """
+        Whether the walk stopped at its limit before the end.
+        """
+    @property
+    def dtb(self, /) -> int: ...
+    @property
+    def interrupted(self, /) -> bool:
+        """
+        Whether an interrupt request stopped the walk.
+        """
+    @property
+    def mappings(self, /) -> list[PtovMapping]: ...
+    @property
+    def physical(self, /) -> int: ...
+    @property
+    def table_pages(self, /) -> int:
+        """
+        The number of page-table pages that the walk read.
+        """
+
+@final
+class PtovMapping(BaseRecord):
+    """
+    A virtual address that maps a physical page (`!ptov`).
+    """
+    @property
+    def large(self, /) -> bool:
+        """
+        Whether a large page maps it.
+        """
+    @property
+    def virtual_address(self, /) -> int: ...
 
 @final
 class QueueProgress(BaseRecord):
@@ -13668,10 +13932,10 @@ class Regions:
     The VAD regions of a process (`!vad`).
     """
     def __contains__(self, addr: int, /) -> bool: ...
-    def __getitem__(self, addr: int, /) -> MemoryRegion: ...
+    def __getitem__(self, addr: int, /) -> MemoryRegionInfo: ...
     def __iter__(self, /) -> MemoryRegionIterator: ...
     def __len__(self, /) -> int: ...
-    def at(self, /, addr: int) -> MemoryRegion |None:
+    def at(self, /, addr: int) -> MemoryRegionInfo |None:
         """
         Find the VAD region that contains `addr`, or return `None`.
         """
@@ -14049,33 +14313,6 @@ class ResourceOwner(BaseRecord):
         """
     @property
     def thread(self, /) -> int: ...
-
-@final
-class ReverseTranslation(BaseRecord):
-    """
-    The virtual addresses that map a physical address (`!ptov`).
-    """
-    @property
-    def bounded(self, /) -> bool:
-        """
-        Whether the walk stopped at its limit before the end.
-        """
-    @property
-    def dtb(self, /) -> int: ...
-    @property
-    def interrupted(self, /) -> bool:
-        """
-        Whether an interrupt request stopped the walk.
-        """
-    @property
-    def mappings(self, /) -> list[PhysicalMapping]: ...
-    @property
-    def physical(self, /) -> int: ...
-    @property
-    def table_pages(self, /) -> int:
-        """
-        The number of page-table pages that the walk read.
-        """
 
 @final
 class RunStatus(BaseRecord):
@@ -15743,6 +15980,18 @@ class Subsection(BaseRecord):
     def unused_ptes(self, /) -> int: ...
 
 @final
+class SummaryRow(BaseRecord):
+    """
+    Count and total size of the regions in one summary row.
+    """
+    @property
+    def label(self, /) -> str: ...
+    @property
+    def regions(self, /) -> int: ...
+    @property
+    def size(self, /) -> int: ...
+
+@final
 class Symbol(BaseRecord):
     """
     The symbol nearest below an address (`ln`, `Symbols.nearest()`).
@@ -15931,7 +16180,7 @@ class Symbols:
     def source_path(self, /, paths: Sequence[str]) -> None: ...
 
 @final
-class SystemMemoryUsage(BaseRecord):
+class SystemMemorySummary(BaseRecord):
     """
     System memory counters and per-process usage (`!memusage`).
     """
@@ -15983,10 +16232,10 @@ class SystemPteRun(BaseRecord):
         """
 
 @final
-class SystemPteType(BaseRecord):
+class SystemPteTypeDetail(BaseRecord):
     """
-    One `_MI_SYSTEM_PTE_TYPE` bitmap allocator (`!sysptes`). Counts are
-    in PTEs.
+    One `_MI_SYSTEM_PTE_TYPE` bitmap allocator (`!sysptes`). Counts are in
+    PTEs; the bitmap may cover several PTEs per bit (`ptes_per_bit`).
     """
     @property
     def address(self, /) -> int: ...
@@ -16004,7 +16253,8 @@ class SystemPteType(BaseRecord):
     @property
     def bitmap_free(self, /) -> int:
         """
-        The free PTEs, counted from the clear bits of the bitmap.
+        The free PTEs, counted from the clear bits of the bitmap. It differs
+        from `free` only when the target allocated between the two reads.
         """
     @property
     def failures(self, /) -> int: ...
@@ -16020,7 +16270,7 @@ class SystemPteType(BaseRecord):
     @property
     def free_runs(self, /) -> list[SystemPteRun]:
         """
-        The free runs in address order, if the list was requested.
+        The free runs in address order, if the list was requested; bounded.
         """
     @property
     def free_runs_truncated(self, /) -> bool: ...
@@ -16039,7 +16289,8 @@ class SystemPteType(BaseRecord):
     @property
     def total(self, /) -> int:
         """
-        `TotalSystemPtes`, the number of PTEs made available so far.
+        `TotalSystemPtes`, the number of PTEs made available so far; the rest
+        of the bitmap is reserved (its bits set) until the allocator expands.
         """
     @property
     def tracking(self, /) -> bool:
@@ -16054,8 +16305,8 @@ class SystemPteType(BaseRecord):
     @property
     def unscanned_bitmap_bits(self, /) -> int:
         """
-        The bits past the read limit for one bitmap, which no count
-        includes.
+        The bits past the read limit for one bitmap (a corrupt
+        `SizeOfBitMap`), which no count includes.
         """
     @property
     def used(self, /) -> int:
@@ -16069,24 +16320,22 @@ class SystemPteType(BaseRecord):
         """
 
 @final
-class SystemPtes(BaseRecord):
+class SystemPtesDetail(BaseRecord):
     """
     Every system-PTE bitmap allocator in `MiState` (`!sysptes`). Counts
     are in PTEs.
     """
     @property
-    def flags(self, /) -> int:
-        """
-        The requested flags.
-        """
-    @property
     def free(self, /) -> int: ...
     @property
     def total(self, /) -> int: ...
     @property
-    def types(self, /) -> list[SystemPteType]: ...
+    def types(self, /) -> list[SystemPteTypeDetail]: ...
     @property
-    def used(self, /) -> int: ...
+    def used(self, /) -> int:
+        """
+        `total` minus `free`.
+        """
 
 @final
 class TaggedBlock(BaseRecord):
@@ -17263,6 +17512,32 @@ class UnwindHandler(BaseRecord):
     def symbol(self, /) -> str: ...
 
 @final
+class UserAddressReport(BaseRecord):
+    """
+    `!address` on a user-mode minidump: what its memory-info list records,
+    or, for a dump without one, the memory ranges it captured.
+    """
+    @property
+    def address(self, /) -> int |None: ...
+    @property
+    def address_captured(self, /) -> bool |None: ...
+    @property
+    def kind(self, /) -> str:
+        """
+        The variant: `region`, `map`, `captured_range`, `captured_ranges`.
+        """
+    @property
+    def range(self, /) -> CapturedRange |None |None: ...
+    @property
+    def ranges(self, /) -> list[CapturedRange] |None: ...
+    @property
+    def region(self, /) -> UserRegion |None |None: ...
+    @property
+    def regions(self, /) -> list[UserRegion] |None: ...
+    @property
+    def summary(self, /) -> AddressSummary |None: ...
+
+@final
 class UserDump:
     """
     A user-mode minidump (`dbg.user_dump`): the captured process, its
@@ -17587,6 +17862,35 @@ class UserProcess:
         The captured threads.
         """
     def to_dict(self, /) -> dict[str, Any]: ...
+
+@final
+class UserRegion(BaseRecord):
+    """
+    One region of a user-mode minidump's memory-info list (`!address`),
+    with what the dump shows uses it and how much of it the dump holds.
+    """
+    @property
+    def captured(self, /) -> int:
+        """
+        Bytes of the region the dump captured.
+        """
+    @property
+    def detail(self, /) -> str |None:
+        """
+        The module, thread, or heap the usage names.
+        """
+    @property
+    def end(self, /) -> int:
+        """
+        The end of the region (exclusive).
+        """
+    @property
+    def region(self, /) -> MemoryRegion:
+        """
+        The region, as `VirtualQueryEx` reported it.
+        """
+    @property
+    def usage(self, /) -> str: ...
 
 @final
 class UserThread:
@@ -18690,7 +18994,33 @@ class VmCounter(BaseRecord):
     def value(self, /) -> Diagnostic[int]: ...
 
 @final
-class VmPool(BaseRecord):
+class VmDetail(BaseRecord):
+    """
+    Virtual-memory statistics (`!vm`). Each counter carries its own source
+    and read failure, so one that cannot be read leaves the others.
+    """
+    @property
+    def include_processes(self, /) -> bool:
+        """
+        Whether per-process usage was requested.
+        """
+    @property
+    def page_files(self, /) -> list[VmCounter]:
+        """
+        Paging-file counters.
+        """
+    @property
+    def pool(self, /) -> VmPoolDetail: ...
+    @property
+    def pte(self, /) -> VmPteDetail: ...
+    @property
+    def system(self, /) -> SystemMemorySummary:
+        """
+        The system memory counters and, when requested, per-process usage.
+        """
+
+@final
+class VmPoolDetail(BaseRecord):
     """
     Pool counters and the pool fields of `MiState` (`!vm`).
     """
@@ -18707,34 +19037,12 @@ class VmPool(BaseRecord):
     def paged_pool_pages(self, /) -> Diagnostic[int]: ...
 
 @final
-class VmPte(BaseRecord):
+class VmPteDetail(BaseRecord):
     """
     System PTE counters (`!vm`).
     """
     @property
     def counters(self, /) -> list[VmCounter]: ...
-
-@final
-class VmStatistics(BaseRecord):
-    """
-    Virtual-memory statistics (`!vm`).
-    """
-    @property
-    def include_processes(self, /) -> bool:
-        """
-        Whether per-process usage was requested.
-        """
-    @property
-    def page_files(self, /) -> list[VmCounter]:
-        """
-        Paging-file counters.
-        """
-    @property
-    def pool(self, /) -> VmPool: ...
-    @property
-    def pte(self, /) -> VmPte: ...
-    @property
-    def system(self, /) -> SystemMemoryUsage: ...
 
 @final
 class VpRegisters(BaseRecord):
@@ -18869,6 +19177,46 @@ class VsSubsegment(BaseRecord):
     def signature_ok(self, /) -> bool:
         """
         Whether the signature of the subsegment matches the expected value.
+        """
+
+@final
+class VtopDetail(BaseRecord):
+    """
+    A virtual address translated through the page tables of a DTB
+    (`!vtop`), with every level read.
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def dtb(self, /) -> int: ...
+    @property
+    def large(self, /) -> bool:
+        """
+        Whether a large page maps it.
+        """
+    @property
+    def levels(self, /) -> list[PteLevel]:
+        """
+        The levels read, top down.
+        """
+    @property
+    def physical(self, /) -> int |None:
+        """
+        The physical address; `None` when the address is not mapped.
+        """
+    @property
+    def section(self, /) -> bool:
+        """
+        Whether nothing maps the page here. If true, `physical` is the frame
+        that the page's section PTE holds, for a page of a shared image or
+        file view that is not touched yet. It cannot be written either.
+        """
+    @property
+    def transition(self, /) -> bool:
+        """
+        Whether the leaf is a transition PTE. If true, `physical` is a frame
+        that the guest still holds, but nothing maps it here and it cannot be
+        written.
         """
 
 @final
