@@ -2,181 +2,246 @@
 //! ports, and exited processes and threads still referenced.
 
 use crate::error::Result;
-use crate::expr::Expr;
+use crate::guest::ProcessInfo;
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
 use crate::session::Session;
 use crate::target::DiagnosticValue;
 use crate::target::alpc::{
-    AlpcConnection, AlpcMessageDetail, AlpcPortDetail, AlpcPortKind, AlpcProcessPorts,
-    lpc_message_type_name,
+    AlpcConnection, AlpcMessage, AlpcPort, AlpcPortKind, AlpcProcessPorts, lpc_message_type_name,
 };
 use crate::target::etw::format_filetime_precise;
-use crate::target::gflag::{GLOBAL_FLAGS, GlobalFlagChange, GlobalFlagsDetail, global_flags_set};
-use crate::target::htrace::{HandleTraceDetail, handle_trace_kind_name};
+use crate::target::gflag::{GLOBAL_FLAGS, GlobalFlagChange, GlobalFlags, global_flags_set};
+use crate::target::htrace::HandleTraces;
 use crate::target::job::{Job, job_limit_flag_names};
-use crate::target::zombies::{MAX_ZOMBIES, ZombieKinds, ZombiesDetail};
+use crate::target::zombies::{MAX_ZOMBIES, ZombieKinds, Zombies};
 use crate::types::VirtAddr;
 use crate::ui;
 use ntoseye_macros::command;
 
-repl_command! {
-    cmd_gflag;
-    names: ["!gflag", "gflag"],
-    category: "analysis",
-    usage: "!gflag [[+|-]value | {+|-}abbreviation | -?]",
-    summary: "Show or change nt!NtGlobalFlag, and show the PEB flags of the current process.",
-    details: "Without an argument, the command decodes nt!NtGlobalFlag and the _PEB.NtGlobalFlag of the current process and shows the bits by their GFlags names. `+` sets bits and `-` clears bits, from a value or from one flag that you name by its three-letter abbreviation (`!gflag +ust`). A value without `+` or `-` replaces nt!NtGlobalFlag. Each change is one 4-byte write to nt!NtGlobalFlag, the same write that `ed` makes, and the command does not change the PEB copy. `-?` lists the flags and their abbreviations.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_zombies;
-    names: ["!zombies", "zombies"],
-    category: "processes and modules",
-    usage: "!zombies [flags]",
-    summary: "List exited processes and threads that still have references.",
-    details: "Scans nonpaged pool for process (`Proc`) and thread (`Thre`) objects, and finds the header of each object by its decoded type. The command lists the processes that have ExitTime set and the threads in the Terminated state. For each object, it shows the handle count and the pointer count: whatever still holds these references keeps the object in memory. Flag 1 (the default) lists processes, 2 lists threads, and 3 lists both. The scan stops after 4096 processes or 4096 threads, or when you press Ctrl+C.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_htrace;
-    names: ["!htrace", "htrace"],
-    category: "objects and I/O",
-    usage: "!htrace [handle [process [max-traces]]]",
-    summary: "Show the stacks that handle tracing recorded for the handles of a process.",
-    details: "Reads the ring of traces (open, close, bad reference) in the DebugInfo of the process handle table and shows the newest trace first. If handle is 0 or not given, the command shows the traces of all handles, and if max-traces is 0 or not given, it shows all traces. The process can be an EPROCESS address, a PID, or a name, and the default is the current process. Handle tracing must be on for the process before you use the command. The Handles check of Application Verifier or NtSetInformationProcess(ProcessHandleTracing) turns tracing on, and if it is off, !htrace shows a message. User-mode frames resolve after the modules of the process are loaded (.process /p). The command does not have the user-mode forms that change tracing (-enable, -disable, -snapshot, -diff).",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_alpc;
-    names: ["!alpc", "alpc"],
-    category: "objects and I/O",
-    usage: "!alpc /p <port> | /m <message> | /lpp [process]",
-    summary: "Show an ALPC port, an ALPC message, or the ports that a process holds.",
-    details: "/p decodes an _ALPC_PORT from its object body or header. It shows the kind, owner, and state flags of the port, and the connection, server, and client ports of its communication info. It also shows the queues of the port with the messages on them, and the threads on the wait queue. For a connection port, /p also lists the connections. /m decodes a _KALPC_MESSAGE and shows the IDs, type, sizes, and state of the message, its owner and queue ports, and the waiting and server threads. /lpp walks the handle table of a process to find ALPC ports. The process can be an EPROCESS address, a PID, or a name, and the default is the current process. /lpp first shows the connection ports that the process owns and, for each connection, the server and client ports and the client process. Then it shows the ports that the process is connected to. The number after a port is the count of its queued messages in the main, large-message, and pending queues.",
-    completion: Expression,
-    target: Kernel,
-}
-
-impl ReplState<'_> {
-    fn cmd_alpc(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let usage = || error!("usage: !alpc /p <port> | /m <message> | /lpp [process]");
-        let Some(switch) = invocation.arg(0) else {
-            usage();
-            return Ok(());
-        };
-        let target = &self.ctx.target;
-        match switch.to_ascii_lowercase().as_str() {
-            form @ ("/p" | "/m") => {
-                let Some(text) = invocation.arg(1) else {
-                    usage();
-                    return Ok(());
-                };
-                let Some(address) = self.eval_or_report(text) else {
-                    return Ok(());
-                };
-                let target = &self.ctx.target;
-                let shown = if form == "/p" {
-                    target.alpc_port(address).map(|port| print_alpc_port(&port))
-                } else {
-                    target
-                        .alpc_message(address)
-                        .map(|message| print_alpc_message(&message))
-                };
-                if let Err(error) = shown {
-                    error!("{error}");
-                }
-            }
-            "/lpp" => {
-                match self
-                    .process_or_current(invocation.arg(1))
-                    .and_then(|process| target.alpc_process_ports(process))
-                {
-                    Ok(ports) => print_alpc_process_ports(&ports),
-                    Err(error) => error!("{error}"),
-                }
-            }
-            _ => usage(),
+/// Show an ALPC port, an ALPC message, or the ports that a process holds.
+///
+/// /p decodes an _ALPC_PORT from its object body or header. It shows the
+/// kind, owner, and state flags of the port, and the connection, server, and
+/// client ports of its communication info. It also shows the queues of the
+/// port with the messages on them, and the threads on the wait queue. For a
+/// connection port, /p also lists the connections. /m decodes a
+/// _KALPC_MESSAGE and shows the IDs, type, sizes, and state of the message,
+/// its owner and queue ports, and the waiting and server threads. /lpp walks
+/// the handle table of a process to find ALPC ports. The process can be an
+/// EPROCESS address, a PID, or a name, and the default is the current
+/// process. /lpp first shows the connection ports that the process owns and,
+/// for each connection, the server and client ports and the client process.
+/// Then it shows the ports that the process is connected to. The number
+/// after a port is the count of its queued messages in the main,
+/// large-message, and pending queues.
+#[command(
+    names = ["!alpc", "alpc"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = none,
+    usage = "!alpc /p <port> | /m <message> | /lpp [process]",
+    completion = [Expression, Expression]
+)]
+fn alpc(session: &Session, #[arg(parse = alpc_query)] query: AlpcQuery) -> Result<AlpcObject> {
+    let target = &session.target;
+    Ok(match query {
+        AlpcQuery::Port(address) => AlpcObject::Port(target.alpc_port(address)?),
+        AlpcQuery::Message(address) => AlpcObject::Message(target.alpc_message(address)?),
+        AlpcQuery::ProcessPorts(process) => {
+            AlpcObject::ProcessPorts(target.alpc_process_ports(process)?)
         }
-        Ok(())
+    })
+}
+
+/// What `!alpc` decodes: its switch and the argument after it.
+enum AlpcQuery {
+    Port(VirtAddr),
+    Message(VirtAddr),
+    ProcessPorts(ProcessInfo),
+}
+
+/// What `!alpc` decoded. The SDK has a method for each
+/// (`Inspect.alpc_port`, `alpc_message`, `alpc_process_ports`).
+enum AlpcObject {
+    Port(AlpcPort),
+    Message(AlpcMessage),
+    ProcessPorts(AlpcProcessPorts),
+}
+
+fn alpc_query(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<AlpcQuery, ArgError> {
+    let usage =
+        || ArgError::Message("usage: !alpc /p <port> | /m <message> | /lpp [process]".into());
+    let switch = cursor.word().ok_or_else(usage)?.to_ascii_lowercase();
+    match switch.as_str() {
+        form @ ("/p" | "/m") => {
+            let address = cx.eval(&cursor.word().ok_or_else(usage)?)?;
+            Ok(if form == "/p" {
+                AlpcQuery::Port(address)
+            } else {
+                AlpcQuery::Message(address)
+            })
+        }
+        "/lpp" => cx
+            .state
+            .process_or_current(cursor.word().as_deref())
+            .map(AlpcQuery::ProcessPorts)
+            .map_err(|error| ArgError::Message(error.to_string())),
+        _ => Err(usage()),
     }
+}
 
-    fn cmd_htrace(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        // A handle or max-traces of 0, like an omitted one, means all.
-        let mut values = [None; 2];
-        for (slot, index) in values.iter_mut().zip([0, 2]) {
-            if let Some(text) = invocation.arg(index) {
-                let Some(VirtAddr(value)) = self.eval_or_report(text) else {
-                    return Ok(());
-                };
-                *slot = (value != 0).then_some(value);
-            }
+impl Render for AlpcObject {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        match self {
+            Self::Port(port) => print_alpc_port(port),
+            Self::Message(message) => print_alpc_message(message),
+            Self::ProcessPorts(ports) => print_alpc_process_ports(ports),
         }
-        let [handle, max_traces] = values;
-        let target = &self.ctx.target;
-        match self
-            .process_or_current(invocation.arg(1).filter(|text| *text != "0"))
-            .and_then(|process| {
-                target.handle_traces(&process, handle, max_traces.map(|max| max as usize))
-            }) {
-            Ok(detail) => print_handle_traces(&detail),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
     }
+}
 
-    fn cmd_zombies(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let flags = match invocation.arg(0).map(|text| self.eval_or_report(text)) {
-            Some(Some(VirtAddr(flags))) => flags,
-            Some(None) => return Ok(()),
-            None => 1,
-        };
-        match ZombieKinds::from_flags(flags).and_then(|kinds| self.ctx.target.zombies(kinds)) {
-            Ok(detail) => print_zombies(&detail),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
+/// Show or change nt!NtGlobalFlag, and show the PEB flags of the current process.
+///
+/// Without an argument, the command decodes nt!NtGlobalFlag and the
+/// _PEB.NtGlobalFlag of the current process and shows the bits by their
+/// GFlags names. `+` sets bits and `-` clears bits, from a value or from one
+/// flag that you name by its three-letter abbreviation (`!gflag +ust`). A
+/// value without `+` or `-` replaces nt!NtGlobalFlag. Each change is one
+/// 4-byte write to nt!NtGlobalFlag, the same write that `ed` makes, and the
+/// command does not change the PEB copy. `-?` lists the flags and their
+/// abbreviations.
+#[command(
+    names = ["!gflag", "gflag"],
+    category = "analysis",
+    kind = Action,
+    target = Kernel,
+    python = Inspect,
+    python_name = "global_flags",
+    usage = "!gflag [[+|-]value | {+|-}abbreviation | -?]",
+    completion = [Expression]
+)]
+fn gflag(
+    session: &Session,
+    #[arg(render, switch = "-?")] list: bool,
+    change: Option<GlobalFlagChange>,
+) -> Result<GlobalFlags> {
+    let target = &session.target;
+    let change = change
+        .map(|change| target.change_global_flag(change))
+        .transpose()?;
+    Ok(GlobalFlags {
+        change,
+        ..target.global_flags()?
+    })
+}
+
+/// Show the stacks that handle tracing recorded for the handles of a process.
+///
+/// Reads the ring of traces (open, close, bad reference) in the DebugInfo of
+/// the process handle table and shows the newest trace first. If handle is 0
+/// or not given, the command shows the traces of all handles, and if
+/// max-traces is 0 or not given, it shows all traces. The process can be an
+/// EPROCESS address, a PID, or a name, and the default is the current
+/// process. Handle tracing must be on for the process before you use the
+/// command. The Handles check of Application Verifier or
+/// NtSetInformationProcess(ProcessHandleTracing) turns tracing on, and if it
+/// is off, !htrace shows a message. User-mode frames resolve after the
+/// modules of the process are loaded (.process /p). The command does not
+/// have the user-mode forms that change tracing (-enable, -disable,
+/// -snapshot, -diff).
+#[command(
+    names = ["!htrace", "htrace"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Process,
+    python_name = "handle_traces",
+    usage = "!htrace [handle [process [max-traces]]]",
+    completion = [Expression, Expression, Expression]
+)]
+fn htrace(
+    session: &Session,
+    handle: Option<u64>,
+    #[arg(receiver, parse = process_or_current)] process: ProcessInfo,
+    max_traces: Option<u64>,
+) -> Result<HandleTraces> {
+    // A handle or max-traces of 0, like an omitted one, means all.
+    let nonzero = |value: Option<u64>| value.filter(|&value| value != 0);
+    session.target.handle_traces(
+        &process,
+        nonzero(handle),
+        nonzero(max_traces).map(|max| max as usize),
+    )
+}
+
+/// A process argument: an EPROCESS, a PID, or an image name; omitted or 0,
+/// the current process.
+fn process_or_current(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<ProcessInfo, ArgError> {
+    let selector = cursor.word().filter(|text| text != "0");
+    cx.state
+        .process_or_current(selector.as_deref())
+        .map_err(|error| ArgError::Message(error.to_string()))
+}
+
+impl Render for HandleTraces {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_handle_traces(self);
     }
+}
 
-    fn cmd_gflag(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let target = &self.ctx.target;
-        match invocation.arg(0) {
-            Some("-?") => {
-                for flag in &GLOBAL_FLAGS {
-                    outln!(
-                        "  {:#010x} {:<3} {}",
-                        flag.bit,
-                        flag.abbreviation,
-                        flag.description
-                    );
-                }
-                outln!();
-                return Ok(());
+/// List exited processes and threads that still have references.
+///
+/// Scans nonpaged pool for process (`Proc`) and thread (`Thre`) objects, and
+/// finds the header of each object by its decoded type. The command lists
+/// the processes that have ExitTime set and the threads in the Terminated
+/// state. For each object, it shows the handle count and the pointer count:
+/// whatever still holds these references keeps the object in memory. Flag 1
+/// (the default) lists processes, 2 lists threads, and 3 lists both. The
+/// scan stops after 4096 processes or 4096 threads, or when you press
+/// Ctrl+C.
+#[command(
+    names = ["!zombies", "zombies"],
+    category = "processes and modules",
+    kind = Query,
+    target = Kernel,
+    python = Inspect
+)]
+fn zombies(session: &Session, #[arg(default = 1)] flags: u64) -> Result<Zombies> {
+    session.target.zombies(ZombieKinds::from_flags(flags)?)
+}
+
+impl Render for Zombies {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_zombies(self);
+    }
+}
+
+impl Render<bool> for GlobalFlags {
+    fn render(&self, _: &mut ReplState<'_>, list: bool) {
+        if list {
+            for flag in &GLOBAL_FLAGS {
+                outln!(
+                    "  {:#010x} {:<3} {}",
+                    flag.bit,
+                    flag.abbreviation,
+                    flag.description
+                );
             }
-            Some(text) => {
-                let change = GlobalFlagChange::parse(text, |text| {
-                    Expr::eval_with_radix(text, target, self.radix).map(|value| value.0)
-                });
-                match change.and_then(|change| target.change_global_flag(change)) {
-                    Ok((old, new)) => outln!("NtGlobalFlag {old:#010x} -> {new:#010x}"),
-                    Err(error) => {
-                        error!("{error}");
-                        return Ok(());
-                    }
-                }
-            }
-            None => {}
+            outln!();
+            return;
         }
-        match target.global_flags() {
-            Ok(detail) => print_global_flags(&detail),
-            Err(error) => error!("{error}"),
+        if let Some(change) = &self.change {
+            outln!("NtGlobalFlag {:#010x} -> {:#010x}", change.old, change.new);
         }
-        Ok(())
+        print_global_flags(self);
     }
 }
 
@@ -279,7 +344,7 @@ fn print_job(job: &Job, flags: u64) {
     outln!();
 }
 
-fn print_global_flags(detail: &GlobalFlagsDetail) {
+fn print_global_flags(detail: &GlobalFlags) {
     let print_flags = |value: u32| {
         for flag in global_flags_set(value) {
             let abbreviation = if flag.abbreviation.is_empty() {
@@ -316,7 +381,7 @@ fn print_global_flags(detail: &GlobalFlagsDetail) {
     outln!();
 }
 
-fn print_handle_traces(detail: &HandleTraceDetail) {
+fn print_handle_traces(detail: &HandleTraces) {
     let process = &detail.process;
     outln!(
         "Process {} ({}, PID {})",
@@ -338,20 +403,16 @@ fn print_handle_traces(detail: &HandleTraceDetail) {
     let separator = "-".repeat(38);
     outln!("{separator}");
     for trace in &detail.traces {
-        outln!(
-            "Handle {:#x} - {}:",
-            trace.handle,
-            handle_trace_kind_name(trace.kind)
-        );
+        outln!("Handle {:#x} - {}:", trace.handle, trace.kind_name());
         outln!(
             "Thread ID = {:#x}, Process ID = {:#x}",
             trace.thread_id,
             trace.process_id
         );
-        for (address, symbol) in &trace.stack {
-            match symbol {
-                Some(symbol) => outln!("{}: {}", ui::addr(address.0), ui::symbol(symbol)),
-                None => outln!("{}", ui::addr(address.0)),
+        for frame in &trace.stack {
+            match &frame.symbol {
+                Some(symbol) => outln!("{}: {}", ui::addr(frame.address.0), ui::symbol(symbol)),
+                None => outln!("{}", ui::addr(frame.address.0)),
             }
         }
         outln!("{separator}");
@@ -404,7 +465,7 @@ fn print_alpc_connection(connection: &AlpcConnection) {
     );
 }
 
-fn print_alpc_port(port: &AlpcPortDetail) {
+fn print_alpc_port(port: &AlpcPort) {
     match &port.name {
         Some(name) => outln!("Port {} ('{name}')", ui::addr(port.address.0)),
         None => outln!("Port {}", ui::addr(port.address.0)),
@@ -479,7 +540,7 @@ fn print_alpc_port(port: &AlpcPortDetail) {
     outln!();
 }
 
-fn print_alpc_message(message: &AlpcMessageDetail) {
+fn print_alpc_message(message: &AlpcMessage) {
     outln!("Message {}", ui::addr(message.address.0));
     let row = |label: &str, value: String| outln!("  {label:<22}: {value}");
     let number =
@@ -607,7 +668,7 @@ fn print_alpc_process_ports(ports: &AlpcProcessPorts) {
     outln!();
 }
 
-fn print_zombies(detail: &ZombiesDetail) {
+fn print_zombies(detail: &Zombies) {
     let exited = |filetime: u64| {
         format_filetime_precise(filetime).unwrap_or_else(|| format!("{filetime:#x}"))
     };
@@ -637,8 +698,8 @@ fn print_zombies(detail: &ZombiesDetail) {
                 process.image,
                 exited(process.exit_time),
                 process.exit_status,
-                process.counts.handle_count,
-                process.counts.pointer_count
+                process.handle_count,
+                process.pointer_count
             );
         }
     }
@@ -668,8 +729,8 @@ fn print_zombies(detail: &ZombiesDetail) {
                 ui::addr(thread.process.0),
                 thread.image.as_deref().unwrap_or("?"),
                 thread.exit_status,
-                thread.counts.handle_count,
-                thread.counts.pointer_count
+                thread.handle_count,
+                thread.pointer_count
             );
         }
     }

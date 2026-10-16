@@ -13,7 +13,6 @@ pub mod module;
 pub mod object;
 pub mod pnp;
 pub mod power;
-pub mod process;
 pub mod record;
 pub mod registry;
 pub mod security;

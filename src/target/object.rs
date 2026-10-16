@@ -10,6 +10,7 @@ use crate::layout::{StructRef, TypeInfo, Types};
 use crate::memory::{MemoryOps, PAGE_SIZE};
 use crate::symbols::format_symbol_with_offset;
 use crate::types::VirtAddr;
+use ntoseye_macros::record;
 
 use super::{
     DiagnosticValue, ListCursor, ListTermination, Target, bounded_record_list_walk,
@@ -247,46 +248,71 @@ pub struct IrpHit {
     pub device: Option<VirtAddr>,
 }
 
-#[derive(Debug, Clone)]
-pub struct HandleEntryDetail {
+/// A handle-table entry (`!handle <handle>`).
+#[record]
+pub struct HandleEntry {
+    #[record(hex)]
     pub handle: u64,
+    /// The `_HANDLE_TABLE_ENTRY`.
     pub entry: VirtAddr,
+    /// The body of the object.
     pub object: DiagnosticValue<VirtAddr>,
     pub type_name: DiagnosticValue<Option<String>>,
+    /// The name of the object, or None for an unnamed object.
     pub name: DiagnosticValue<Option<String>>,
+    #[record(hex)]
     pub granted_access: DiagnosticValue<u32>,
+    /// The attribute bits of the entry (inherit, protect-from-close, audit).
+    #[record(hex)]
     pub attributes: DiagnosticValue<u32>,
 }
 
-#[derive(Debug, Clone)]
-pub struct HandleTableSummary {
+/// The handle table of a process (`!handle`).
+#[record]
+pub struct HandleTable {
+    /// The process that owns the table.
     pub process: ProcessInfo,
+    /// The `_HANDLE_TABLE`.
     pub table: VirtAddr,
+    /// The level of the table (0-2), which is the number of pointer levels
+    /// before the entries.
     pub table_level: u8,
+    /// The handle count that the table reports.
     pub advertised_handles: usize,
     pub scanned_handles: usize,
+    /// The number of entries that ntoseye could not read.
     pub skipped_entries: usize,
+    /// Whether the enumeration stopped at its limit.
     pub truncated: bool,
-    pub entries: Vec<HandleEntryDetail>,
+    pub entries: Vec<HandleEntry>,
 }
 
-#[derive(Debug, Clone)]
-pub struct FileObjectDetail {
+/// A `_FILE_OBJECT` (`!fileobj`).
+#[record]
+pub struct FileObject {
     pub address: VirtAddr,
+    /// `Type`, which is `IO_TYPE_FILE` (5) for a valid file object.
     pub file_type: DiagnosticValue<i16>,
     pub size: DiagnosticValue<i16>,
     pub device_object: DiagnosticValue<VirtAddr>,
+    #[record(hex)]
     pub device_type: DiagnosticValue<u32>,
+    /// The object name of the device, or None for an unnamed device.
     pub device_name: DiagnosticValue<Option<String>>,
     pub file_name: DiagnosticValue<String>,
     pub related_file_object: DiagnosticValue<VirtAddr>,
+    #[record(hex)]
     pub flags: DiagnosticValue<u32>,
     pub current_byte_offset: DiagnosticValue<i64>,
+    /// The `FsContext` of the file system (its FCB).
     pub fs_context: DiagnosticValue<VirtAddr>,
+    /// The `FsContext2` of the file system (its CCB).
     pub fs_context2: DiagnosticValue<VirtAddr>,
     pub section_object_pointer: DiagnosticValue<VirtAddr>,
     pub private_cache_map: DiagnosticValue<VirtAddr>,
-    pub final_status: DiagnosticValue<i32>,
+    /// The NTSTATUS that the file object completed with.
+    #[record(hex)]
+    pub final_status: DiagnosticValue<u32>,
     pub lock_operation: DiagnosticValue<bool>,
     pub delete_pending: DiagnosticValue<bool>,
     pub read_access: DiagnosticValue<bool>,
@@ -297,27 +323,37 @@ pub struct FileObjectDetail {
     pub shared_delete: DiagnosticValue<bool>,
 }
 
+/// A thread that owns an executive resource.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceOwner {
     pub thread: VirtAddr,
+    /// The number of times that the thread acquired the resource.
     pub count: i32,
 }
 
-#[derive(Debug, Clone)]
-pub struct ResourceDetail {
+/// An `_ERESOURCE` (`!locks <address>`).
+#[record]
+pub struct ExecutiveResource {
     pub address: VirtAddr,
     pub active_count: DiagnosticValue<i16>,
+    #[record(hex)]
     pub flags: DiagnosticValue<u16>,
     pub contention_count: DiagnosticValue<u32>,
+    /// The number of threads that wait for shared access.
     pub shared_waiters: DiagnosticValue<u32>,
+    /// The number of threads that wait for exclusive access.
     pub exclusive_waiters: DiagnosticValue<u32>,
+    /// The threads that own the resource.
     pub owners: DiagnosticValue<Vec<ResourceOwner>>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ResourceListSummary {
+/// The executive-resource list of the kernel (`!locks`).
+#[record]
+pub struct ResourceList {
+    /// `nt!ExpSystemResourcesList`.
     pub head: VirtAddr,
-    pub resources: Vec<ResourceDetail>,
+    pub resources: Vec<ExecutiveResource>,
     pub termination: ListTermination,
 }
 
@@ -924,7 +960,7 @@ impl Target {
         entry_layout: &TypeInfo,
         entry: VirtAddr,
         handle: u64,
-    ) -> HandleEntryDetail {
+    ) -> HandleEntry {
         let object = (|| -> Result<VirtAddr> {
             if entry_layout.fields.contains_key("ObjectPointerBits") {
                 let bits =
@@ -983,7 +1019,7 @@ impl Target {
             Err(error) => DiagnosticValue::unavailable(error.to_string()),
         };
 
-        HandleEntryDetail {
+        HandleEntry {
             handle,
             entry,
             object: DiagnosticValue::from_result(object),
@@ -1032,7 +1068,7 @@ impl Target {
 
     /// List non-free handles in the selected/current process.  Both page-table
     /// traversal and slot count are bounded by `limit`.
-    pub fn enumerate_handles(&self, limit: usize) -> Result<HandleTableSummary> {
+    pub fn enumerate_handles(&self, limit: usize) -> Result<HandleTable> {
         self.enumerate_process_handles(self.selected_process_info()?, limit.clamp(1, 4096))
     }
 
@@ -1042,7 +1078,7 @@ impl Target {
         &self,
         process: ProcessInfo,
         limit: usize,
-    ) -> Result<HandleTableSummary> {
+    ) -> Result<HandleTable> {
         let (process, table, table_base, level, advertised, entry_layout) =
             self.handle_table_context(process)?;
         let scanned = advertised.min(limit);
@@ -1065,7 +1101,7 @@ impl Target {
                 entries.push(decoded);
             }
         }
-        Ok(HandleTableSummary {
+        Ok(HandleTable {
             process,
             table,
             table_level: level,
@@ -1078,7 +1114,7 @@ impl Target {
     }
 
     /// Decode one handle from the same selected/current process handle table.
-    pub fn inspect_handle(&self, handle: u64) -> Result<HandleEntryDetail> {
+    pub fn inspect_handle(&self, handle: u64) -> Result<HandleEntry> {
         if handle & 3 != 0 {
             return Err(Error::DebugInfo(format!(
                 "handle {handle:#x} is not 4-byte aligned"
@@ -1098,7 +1134,7 @@ impl Target {
     }
 
     /// Decode a `_FILE_OBJECT` strictly from the loaded kernel PDB layout.
-    pub fn inspect_file_object(&self, address: VirtAddr) -> Result<FileObjectDetail> {
+    pub fn inspect_file_object(&self, address: VirtAddr) -> Result<FileObject> {
         let types = self.guest()?.ntoskrnl.types_in(self.kernel_dtb());
         let layout = types.layout("_FILE_OBJECT")?;
         let read_ptr = |name| {
@@ -1129,7 +1165,7 @@ impl Target {
             Err(error) => DiagnosticValue::unavailable(error.to_string()),
         };
 
-        Ok(FileObjectDetail {
+        Ok(FileObject {
             address,
             file_type: DiagnosticValue::from_result(
                 self.read_kernel_layout_field(&layout, address, "Type"),
@@ -1175,7 +1211,7 @@ impl Target {
     }
 
     /// Decode one executive resource at an explicit address.
-    pub fn inspect_resource(&self, address: VirtAddr) -> Result<ResourceDetail> {
+    pub fn inspect_resource(&self, address: VirtAddr) -> Result<ExecutiveResource> {
         const MAX_RESOURCE_OWNERS: usize = 64;
         let types = self.guest()?.ntoskrnl.types_in(self.kernel_dtb());
         let layout = types.layout("_ERESOURCE")?;
@@ -1221,7 +1257,7 @@ impl Target {
             Ok(owners)
         })());
 
-        Ok(ResourceDetail {
+        Ok(ExecutiveResource {
             address,
             active_count: DiagnosticValue::from_result(self.read_kernel_layout_field(
                 &layout,
@@ -1253,7 +1289,7 @@ impl Target {
     /// Enumerate the kernel-maintained executive-resource list when the private
     /// list-head symbol and `_ERESOURCE.SystemResourcesList` metadata exist.
     /// There is deliberately no memory-scan fallback.
-    pub fn enumerate_resources(&self, limit: usize) -> Result<ResourceListSummary> {
+    pub fn enumerate_resources(&self, limit: usize) -> Result<ResourceList> {
         let limit = limit.clamp(1, 1024);
         let guest = self.guest()?;
         let head = guest.ntoskrnl.symbol("ExpSystemResourcesList")?.address();
@@ -1267,7 +1303,7 @@ impl Target {
             .into_iter()
             .map(|resource| self.inspect_resource(resource))
             .collect::<Result<Vec<_>>>()?;
-        Ok(ResourceListSummary {
+        Ok(ResourceList {
             head,
             resources,
             termination,

@@ -5,6 +5,7 @@
 //! of its communication info points back at it.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 
 use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
@@ -12,6 +13,7 @@ use crate::layout::{StructRef, Types};
 use crate::target::sched::walk_list_records;
 use crate::target::{DiagnosticValue, ListTermination, Target};
 use crate::types::VirtAddr;
+use ntoseye_macros::record;
 
 /// The object type name of an ALPC port.
 const ALPC_PORT_TYPE: &str = "ALPC Port";
@@ -20,7 +22,9 @@ const MAX_LIST_ENTRIES: usize = 4096;
 /// How many handle-table slots `/lpp` scans.
 const MAX_PROCESS_HANDLES: usize = 1 << 16;
 
-/// What an `_ALPC_PORT` is within its connection.
+/// What an `_ALPC_PORT` is within its connection, by WinDbg's port type
+/// name (`ALPC_CONNECTION_PORT`, ...).
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlpcPortKind {
     /// The named port a server listens on.
@@ -39,6 +43,12 @@ impl AlpcPortKind {
             Self::ServerCommunication => "ALPC_SERVER_COMMUNICATION_PORT",
             Self::ClientCommunication => "ALPC_CLIENT_COMMUNICATION_PORT",
         }
+    }
+}
+
+impl fmt::Display for AlpcPortKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
     }
 }
 
@@ -107,47 +117,57 @@ const MESSAGE_QUEUE_LENGTHS: [&str; 3] = [
     "PendingQueueLength",
 ];
 
-/// One `_ALPC_PORT` queue.
-#[derive(Debug, Clone)]
+/// One message queue of an ALPC port, or its wait queue.
+#[record]
 pub struct AlpcQueue {
-    /// The PDB list head, e.g. `PendingQueue`.
+    /// The `_ALPC_PORT` list head, for example `PendingQueue`.
     pub field: &'static str,
+    /// The snake_case name of the queue.
     pub key: &'static str,
-    /// The port's count for the queue (`<field>Length`).
+    /// The count that the port keeps for the queue (`<field>Length`). None if
+    /// the port keeps no count.
     pub length: Option<u64>,
-    /// The queued `_KALPC_MESSAGE`s, or for the wait queue the waiting
+    /// The queued `_KALPC_MESSAGE`s. For the wait queue, the waiting
     /// `_ETHREAD`s.
     pub entries: Vec<VirtAddr>,
     pub termination: ListTermination,
 }
 
-/// One connection to a connection port: its communication info and the two
-/// ports it joins.
-#[derive(Debug, Clone)]
+/// A connection to an ALPC connection port, with its communication info
+/// and the two ports that it connects.
+#[record]
 pub struct AlpcConnection {
     pub communication_info: VirtAddr,
     pub server_port: VirtAddr,
-    /// Messages queued on the server port (main, large, and pending).
+    /// The number of messages queued on the server port (main, large, and
+    /// pending). None if ntoseye cannot read it.
     pub server_queued: Option<u64>,
     pub client_port: VirtAddr,
+    /// The number of messages queued on the client port. None if ntoseye cannot
+    /// read it.
     pub client_queued: Option<u64>,
+    /// The `_EPROCESS` of the client.
     pub client_owner: VirtAddr,
     pub client_owner_name: Option<String>,
 }
 
-/// A decoded `_ALPC_PORT`.
-#[derive(Debug, Clone)]
-pub struct AlpcPortDetail {
+/// An `_ALPC_PORT` (`!alpc /p`). A field is None if this Windows build does
+/// not have it, or if ntoseye cannot read it.
+#[record]
+pub struct AlpcPort {
     pub address: VirtAddr,
     pub name: Option<String>,
     pub pointer_count: i64,
     pub handle_count: i64,
     pub kind: Option<AlpcPortKind>,
-    /// `u1.State`; `port_type` is its `Type` bits.
+    /// `u1.State`.
+    #[record(hex)]
     pub state: Option<u64>,
+    /// The `Type` bits of `u1.State`.
     pub port_type: Option<u64>,
-    /// The one-bit `u1.s1` state flags set, by their PDB names.
+    /// The PDB names of the one-bit `u1.s1` state flags that are set.
     pub state_flags: Vec<String>,
+    /// The `_EPROCESS` that owns the port.
     pub owner: VirtAddr,
     pub owner_name: Option<String>,
     pub communication_info: VirtAddr,
@@ -158,17 +178,23 @@ pub struct AlpcPortDetail {
     pub completion_port: Option<VirtAddr>,
     pub completion_list: Option<VirtAddr>,
     pub port_context: Option<VirtAddr>,
-    /// `PortAttributes.Flags` and `.MaxMessageLength`.
+    /// `PortAttributes.Flags`.
+    #[record(hex)]
     pub attribute_flags: Option<u64>,
+    /// `PortAttributes.MaxMessageLength`.
     pub max_message_length: Option<u64>,
     pub queues: Vec<AlpcQueue>,
     pub direct_queue_length: Option<u64>,
-    /// A connection port's connections (`CommunicationInfo.CommunicationList`).
+    /// The connections of a connection port
+    /// (`CommunicationInfo.CommunicationList`).
     pub connections: Vec<AlpcConnection>,
+    /// How the walk of the connection list ended. None if there was no walk.
     pub connection_termination: Option<ListTermination>,
 }
 
-/// One `_KALPC_MESSAGE` pointer field, as (PDB path, key, value).
+/// One `_KALPC_MESSAGE` pointer field: its PDB name, its snake_case name, and
+/// its value.
+#[record]
 #[derive(Debug, Clone, Copy)]
 pub struct AlpcField {
     pub field: &'static str,
@@ -199,44 +225,61 @@ const MESSAGE_ATTRIBUTES: &[(&str, &str)] = &[
     ("HandleData", "handle_data"),
 ];
 
-/// A decoded `_KALPC_MESSAGE`.
-#[derive(Debug, Clone)]
-pub struct AlpcMessageDetail {
+/// A `_KALPC_MESSAGE` (`!alpc /m`). A field is None if this Windows build
+/// does not have it, or if ntoseye cannot read it.
+#[record(impl)]
+pub struct AlpcMessage {
     pub address: VirtAddr,
     pub message_id: Option<u64>,
     pub callback_id: Option<u64>,
     pub sequence_no: Option<u64>,
     /// `PortMessage.u2.s2.Type`.
+    #[record(hex)]
     pub message_type: Option<u64>,
     pub data_length: Option<u64>,
     pub total_length: Option<u64>,
-    /// `PortMessage.ClientId`: the sender.
+    /// `PortMessage.ClientId`, the sender.
     pub client_process_id: Option<u64>,
     pub client_thread_id: Option<u64>,
-    /// `u1.State` and its `QueueType`/`QueuePortType` bits.
+    /// `u1.State`.
+    #[record(hex)]
     pub state: Option<u64>,
+    /// The `QueueType` bits of `u1.State`.
     pub queue_type: Option<u64>,
+    /// The `QueuePortType` bits of `u1.State`.
     pub queue_port_type: Option<u64>,
-    /// The one-bit `u1.s1` state flags set, by their PDB names.
+    /// The PDB names of the one-bit `u1.s1` state flags that are set.
     pub state_flags: Vec<String>,
     pub owner_port: VirtAddr,
+    /// The port type of the owner port.
     pub owner_port_kind: Option<AlpcPortKind>,
-    /// The port whose queue holds the message, and its owner.
+    /// The port whose queue holds the message.
     pub port_queue: VirtAddr,
     pub port_queue_kind: Option<AlpcPortKind>,
+    /// The `_EPROCESS` that owns the queue port.
     pub port_queue_owner: Option<VirtAddr>,
     pub port_queue_owner_name: Option<String>,
     pub cancel_sequence_no: Option<u64>,
     pub extension_buffer_size: Option<u64>,
-    /// [`MESSAGE_POINTERS`] fields this build has.
+    /// The pointer fields of the message that this build has.
     pub pointers: Vec<AlpcField>,
-    /// [`MESSAGE_ATTRIBUTES`] fields this build has.
+    /// The `_KALPC_MESSAGE_ATTRIBUTES` fields that this build has.
     pub attributes: Vec<AlpcField>,
 }
 
-/// A connection port a process owns, and its connections.
-#[derive(Debug, Clone)]
+#[record]
+impl AlpcMessage {
+    /// The `LPC_*` name of the low byte of the message type.
+    #[record(getter)]
+    pub fn message_type_name(&self) -> Option<&'static str> {
+        self.message_type.and_then(lpc_message_type_name)
+    }
+}
+
+/// A connection port that a process owns, and its connections.
+#[record]
 pub struct AlpcOwnedPort {
+    #[record(hex)]
     pub handle: u64,
     pub port: VirtAddr,
     pub name: Option<String>,
@@ -244,33 +287,41 @@ pub struct AlpcOwnedPort {
     pub termination: ListTermination,
 }
 
-/// A client communication port a process holds: what it is connected to.
-#[derive(Debug, Clone)]
+/// A client communication port that a process holds, and the ports that it
+/// is connected to.
+#[record]
 pub struct AlpcClientPort {
+    #[record(hex)]
     pub handle: u64,
     pub port: VirtAddr,
+    /// The number of messages queued on the port. None if ntoseye cannot read it.
     pub queued: Option<u64>,
     pub connection_port: VirtAddr,
     pub connection_name: Option<String>,
     pub server_port: VirtAddr,
+    /// The number of messages queued on the server port. None if ntoseye cannot
+    /// read it.
     pub server_queued: Option<u64>,
+    /// The `_EPROCESS` of the server. None if ntoseye cannot read it.
     pub server_owner: Option<VirtAddr>,
     pub server_owner_name: Option<String>,
 }
 
-/// The ALPC ports a process holds handles to (`!alpc /lpp`).
-#[derive(Debug, Clone)]
+/// The ALPC ports that a process holds handles to (`!alpc /lpp`).
+#[record]
 pub struct AlpcProcessPorts {
     pub process: ProcessInfo,
-    /// Connection ports the process owns.
+    /// The connection ports that the process owns.
     pub created: Vec<AlpcOwnedPort>,
-    /// Client ports the process holds.
+    /// The client ports that the process holds.
     pub connected: Vec<AlpcClientPort>,
-    /// Server communication ports it holds (its ends of connections to its
-    /// own ports).
+    /// The number of server communication ports that the process holds,
+    /// which are its ends of connections to its own ports.
     pub server_ports: usize,
     pub scanned_handles: usize,
+    /// The handle count that the table reports.
     pub advertised_handles: usize,
+    /// The number of handle-table entries that ntoseye could not read.
     pub skipped_entries: usize,
 }
 
@@ -472,7 +523,7 @@ impl Target {
     }
 
     /// Decode the ALPC port at `address` (its object body or header).
-    pub fn alpc_port(&self, address: VirtAddr) -> Result<AlpcPortDetail> {
+    pub fn alpc_port(&self, address: VirtAddr) -> Result<AlpcPort> {
         let (body, name, pointer_count, handle_count) = self.alpc_port_object(address)?;
         let types = self.guest()?.ntoskrnl.types();
         let core = self.alpc_port_core(types, body)?;
@@ -516,7 +567,7 @@ impl Target {
         };
         let [connection_port, server_port, client_port] =
             core.ends.map_or([None; 3], |ends| ends.map(Some));
-        Ok(AlpcPortDetail {
+        Ok(AlpcPort {
             address: body,
             name,
             pointer_count,
@@ -546,7 +597,7 @@ impl Target {
 
     /// Decode the `_KALPC_MESSAGE` at `address`. Its owner port, when set,
     /// must be an ALPC port.
-    pub fn alpc_message(&self, address: VirtAddr) -> Result<AlpcMessageDetail> {
+    pub fn alpc_message(&self, address: VirtAddr) -> Result<AlpcMessage> {
         let types = self.guest()?.ntoskrnl.types();
         let message = types.struct_at("_KALPC_MESSAGE", address)?.prefetch();
         let owner_port = message.read_pointer("OwnerPort").map_err(|error| {
@@ -604,7 +655,7 @@ impl Target {
         };
         let attributes = message.embedded("MessageAttributes").ok();
         let port_queue_owner = queue.map(|(_, owner)| owner);
-        Ok(AlpcMessageDetail {
+        Ok(AlpcMessage {
             address,
             message_id: direct("MessageId"),
             callback_id: direct("CallbackId"),

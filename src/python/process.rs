@@ -18,6 +18,7 @@ use super::{err, view_dict};
 use crate::guest::ProcessInfo;
 use crate::target::heap::HeapSelector;
 use crate::target::mm::{MemoryRegionInfo, MemoryRegionInfoPy};
+use crate::target::object::{HandleEntry, HandleTable};
 use crate::target::sched::ApcSelector;
 use crate::types::VirtAddr;
 use crate::view;
@@ -281,48 +282,20 @@ impl Process {
     }
 
     /// Decode a handle in the handle table of this process.
-    fn handle<'py>(
-        &self,
-        py: Python<'py>,
-        value: u64,
-    ) -> PyResult<Typed<'py, view::object::HandleEntry>> {
-        let detail = self.owner.with_in(py, &self.context(), |session| {
+    fn handle<'py>(&self, py: Python<'py>, value: u64) -> PyResult<Typed<'py, HandleEntry>> {
+        let entry = self.owner.with_in(py, &self.context(), |session| {
             session.target.inspect_handle(value).map_err(err)
         })?;
-        Typed::new(py, view::object::handle_entry(&detail))
+        Typed::new(py, entry)
     }
 
     /// List a maximum of `limit` handles in the handle table of this process.
     #[pyo3(signature = (limit=256))]
-    fn handles<'py>(
-        &self,
-        py: Python<'py>,
-        limit: usize,
-    ) -> PyResult<Typed<'py, view::object::HandleTable>> {
-        let summary = self.owner.with_in(py, &self.context(), |session| {
+    fn handles<'py>(&self, py: Python<'py>, limit: usize) -> PyResult<Typed<'py, HandleTable>> {
+        let table = self.owner.with_in(py, &self.context(), |session| {
             session.target.enumerate_handles(limit).map_err(err)
         })?;
-        Typed::new(py, view::object::handle_table(&summary))
-    }
-
-    /// Get the stacks that handle tracing recorded for the handles of this
-    /// process, newest first and at most `max_traces` of them (`!htrace`). If
-    /// you give `handle`, you get only the stacks of that handle. `debug_info`
-    /// is `None` if tracing is off for the process.
-    #[pyo3(signature = (handle=None, max_traces=None))]
-    fn handle_traces<'py>(
-        &self,
-        py: Python<'py>,
-        handle: Option<u64>,
-        max_traces: Option<usize>,
-    ) -> PyResult<Typed<'py, view::object::HandleTraces>> {
-        let detail = self.owner.with_in(py, &self.context(), |session| {
-            session
-                .target
-                .handle_traces(&self.info, handle, max_traces)
-                .map_err(err)
-        })?;
-        Typed::new(py, view::object::handle_traces(&detail))
+        Typed::new(py, table)
     }
 
     /// Decode the kernel and user APC queues of this process (`!apc`).

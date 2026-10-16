@@ -9,7 +9,7 @@
 
 use crate::error::{Error, Result};
 use crate::guest::{ModuleInfo, ProcessInfo};
-use crate::target::object::HandleEntryDetail;
+use crate::target::object::HandleEntry;
 use crate::target::{DiagnosticValue, Target, ThreadInfo};
 use crate::types::VirtAddr;
 
@@ -28,7 +28,7 @@ pub enum ModelValue {
     /// A process's `Io`, which holds its `Handles`.
     Io(ProcessInfo),
     Handles(ProcessInfo),
-    Handle(Box<HandleEntryDetail>),
+    Handle(Box<HandleEntry>),
     /// A handle's `Object`: its `_OBJECT_HEADER`, with the object type's
     /// name.
     ObjectHeader {

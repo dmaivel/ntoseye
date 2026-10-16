@@ -8,6 +8,7 @@ use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
 use crate::target::Target;
 use crate::types::VirtAddr;
+use ntoseye_macros::record;
 
 /// Traces a ring is read for at most, whatever its `TableSize` says.
 const MAX_TRACE_SLOTS: u64 = 0x10000;
@@ -22,35 +23,56 @@ pub fn handle_trace_kind_name(kind: u32) -> &'static str {
     }
 }
 
+/// A return address on the stack of a handle trace.
+#[record]
+pub struct HandleTraceFrame {
+    pub address: VirtAddr,
+    /// The symbol of the address in the traced process. None if no symbol
+    /// resolves.
+    pub symbol: Option<String>,
+}
+
 /// One `_HANDLE_TRACE_DB_ENTRY`.
-#[derive(Debug, Clone)]
+#[record(impl)]
 pub struct HandleTrace {
+    #[record(hex)]
     pub handle: u64,
+    /// 1 open, 2 close, 3 bad reference.
     pub kind: u32,
     pub process_id: u64,
     pub thread_id: u64,
-    /// Return addresses, newest frame first, each with the symbol it
-    /// resolves to in the traced process.
-    pub stack: Vec<(VirtAddr, Option<String>)>,
+    /// Newest frame first.
+    pub stack: Vec<HandleTraceFrame>,
 }
 
-/// A process's handle traces (`!htrace`).
-#[derive(Debug, Clone)]
-pub struct HandleTraceDetail {
+#[record]
+impl HandleTrace {
+    /// `OPEN`, `CLOSE`, `BAD REFERENCE`, or `UNKNOWN`.
+    #[record(getter)]
+    pub fn kind_name(&self) -> &'static str {
+        handle_trace_kind_name(self.kind)
+    }
+}
+
+/// The handle traces of a process (`!htrace`).
+#[record]
+pub struct HandleTraces {
+    /// The traced process.
     pub process: ProcessInfo,
     pub object_table: VirtAddr,
-    /// `None` when handle tracing is off for the process.
+    /// The `_HANDLE_TRACE_DEBUG_INFO`. None if handle tracing is off.
     pub debug_info: Option<VirtAddr>,
+    /// The capacity of the ring.
     pub table_size: u64,
-    /// Traces ever recorded (`CurrentStackIndex`); the ring keeps the last
-    /// `table_size` of them.
+    /// The total number of recorded traces (`CurrentStackIndex`), of which
+    /// the ring keeps the last `table_size`.
     pub recorded: u64,
-    /// Ring slots read.
+    /// The number of ring slots that ntoseye read.
     pub parsed: u64,
+    /// The number of ring slots that ntoseye could not read.
+    pub unreadable: u64,
     /// The matching traces, newest first.
     pub traces: Vec<HandleTrace>,
-    /// Slots that could not be read.
-    pub unreadable: u64,
 }
 
 impl Target {
@@ -61,7 +83,7 @@ impl Target {
         process: &ProcessInfo,
         handle: Option<u64>,
         max_traces: Option<usize>,
-    ) -> Result<HandleTraceDetail> {
+    ) -> Result<HandleTraces> {
         let types = self.guest()?.ntoskrnl.types_in(process.dtb);
         let object_table = types
             .struct_at("_EPROCESS", process.eprocess)?
@@ -75,7 +97,7 @@ impl Target {
         let debug_info = types
             .struct_at("_HANDLE_TABLE", object_table)?
             .read_pointer("DebugInfo")?;
-        let mut detail = HandleTraceDetail {
+        let mut detail = HandleTraces {
             process: process.clone(),
             object_table,
             debug_info: (!debug_info.is_zero()).then_some(debug_info),
@@ -130,7 +152,7 @@ impl Target {
                         .map(|address| {
                             let symbol =
                                 symbols.format_closest_symbol_for_address(process.dtb, address);
-                            (address, symbol)
+                            HandleTraceFrame { address, symbol }
                         })
                         .collect(),
                 }))

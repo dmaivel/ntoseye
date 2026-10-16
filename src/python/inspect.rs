@@ -16,15 +16,16 @@ use crate::bugchecks::{bugcheck_from_dump_info, current_bugcheck};
 use crate::error::Error;
 use crate::session::Session;
 use crate::session::effects::Effects;
+use crate::target::alpc::{AlpcMessage, AlpcPort, AlpcProcessPorts};
 use crate::target::etw::parse_guid;
 use crate::target::irpfind::{IrpCriteria, IrpPool};
+use crate::target::object::{ExecutiveResource, ResourceList};
 use crate::target::pci::{PCI_EXTENDED_CONFIG_SIZE, PciQuery, PciScan};
 use crate::target::registry::names_equal;
 use crate::target::sched::{
     ApcQueues, ApcSelector, KernelTimer, TimerTable, UniqStackScope, UniqStacks,
 };
 use crate::target::workqueue::WorkQueues;
-use crate::target::zombies::ZombieKinds;
 use crate::triage_report::TriageReport;
 use crate::types::VirtAddr;
 use crate::view::record::{ToView, Typed};
@@ -150,14 +151,9 @@ impl Inspect {
     /// Decode an ALPC port (`!alpc /p`). The result has the port kind, owner,
     /// connection, state, and queues, and for a connection port also its
     /// connections. `address` is the body or the header of the port object.
-    fn alpc_port<'py>(
-        &self,
-        py: Python<'py>,
-        address: u64,
-    ) -> PyResult<Typed<'py, view::object::AlpcPort>> {
+    fn alpc_port<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Typed<'py, AlpcPort>> {
         self.typed(py, |session| {
-            let port = session.target.alpc_port(VirtAddr(address)).map_err(err)?;
-            Ok(view::object::alpc_port(&port))
+            session.target.alpc_port(VirtAddr(address)).map_err(err)
         })
     }
 
@@ -166,13 +162,9 @@ impl Inspect {
         &self,
         py: Python<'py>,
         address: u64,
-    ) -> PyResult<Typed<'py, view::object::AlpcMessage>> {
+    ) -> PyResult<Typed<'py, AlpcMessage>> {
         self.typed(py, |session| {
-            let message = session
-                .target
-                .alpc_message(VirtAddr(address))
-                .map_err(err)?;
-            Ok(view::object::alpc_message(&message))
+            session.target.alpc_message(VirtAddr(address)).map_err(err)
         })
     }
 
@@ -185,7 +177,7 @@ impl Inspect {
         &self,
         py: Python<'py>,
         process: Option<PyRef<'py, Process>>,
-    ) -> PyResult<Typed<'py, view::object::AlpcProcessPorts>> {
+    ) -> PyResult<Typed<'py, AlpcProcessPorts>> {
         let process = match process {
             Some(process) => {
                 process
@@ -201,36 +193,7 @@ impl Inspect {
                 Some(process) => process,
                 None => target.selected_process_info().map_err(err)?,
             };
-            let ports = target.alpc_process_ports(process).map_err(err)?;
-            Ok(view::object::alpc_process_ports(&ports))
-        })
-    }
-
-    /// Decode `nt!NtGlobalFlag` and the `_PEB.NtGlobalFlag` of the current
-    /// process into GFlags names (`!gflag`).
-    fn global_flags<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Typed<'py, view::process::GlobalFlags>> {
-        self.typed(py, |session| {
-            let detail = session.target.global_flags().map_err(err)?;
-            Ok(view::process::global_flags(&detail))
-        })
-    }
-
-    /// Scan nonpaged pool for exited processes and terminated threads whose
-    /// objects still have references (`!zombies`). `flags` is 1 for
-    /// processes, 2 for threads, or 3 for both.
-    #[pyo3(signature = (flags=1))]
-    fn zombies<'py>(
-        &self,
-        py: Python<'py>,
-        flags: u64,
-    ) -> PyResult<Typed<'py, view::process::Zombies>> {
-        let kinds = ZombieKinds::from_flags(flags).map_err(err)?;
-        self.typed(py, |session| {
-            let detail = session.target.zombies(kinds).map_err(err)?;
-            Ok(view::process::zombies(&detail))
+            target.alpc_process_ports(process).map_err(err)
         })
     }
 
@@ -253,47 +216,26 @@ impl Inspect {
         })
     }
 
-    /// Decode a `_FILE_OBJECT` (`!fileobj`).
-    fn file_object<'py>(
-        &self,
-        py: Python<'py>,
-        address: u64,
-    ) -> PyResult<Typed<'py, view::object::FileObject>> {
-        self.typed(py, |session| {
-            let detail = session
-                .target
-                .inspect_file_object(VirtAddr(address))
-                .map_err(err)?;
-            Ok(view::object::file_object(&detail))
-        })
-    }
-
     /// Decode an executive resource (`!locks address`).
     fn resource<'py>(
         &self,
         py: Python<'py>,
         address: u64,
-    ) -> PyResult<Typed<'py, view::object::ExecutiveResource>> {
+    ) -> PyResult<Typed<'py, ExecutiveResource>> {
         self.typed(py, |session| {
-            let detail = session
+            session
                 .target
                 .inspect_resource(VirtAddr(address))
-                .map_err(err)?;
-            Ok(view::object::resource(&detail))
+                .map_err(err)
         })
     }
 
     /// List the entries of the symbol-backed executive-resource list
     /// (`!locks`).
     #[pyo3(signature = (limit=256))]
-    fn resources<'py>(
-        &self,
-        py: Python<'py>,
-        limit: usize,
-    ) -> PyResult<Typed<'py, view::object::ResourceList>> {
+    fn resources<'py>(&self, py: Python<'py>, limit: usize) -> PyResult<Typed<'py, ResourceList>> {
         self.typed(py, |session| {
-            let detail = session.target.enumerate_resources(limit).map_err(err)?;
-            Ok(view::object::resource_list(&detail))
+            session.target.enumerate_resources(limit).map_err(err)
         })
     }
 

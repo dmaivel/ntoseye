@@ -2,13 +2,14 @@ use std::fmt::Display;
 
 use tabled::builder::Builder;
 
-use ntoseye_macros::command;
-
-use crate::error::Result;
+use crate::error::{Error, Result};
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
 use crate::session::Session;
 use crate::target::mm::SystemMemorySummary;
-use crate::target::object::ResourceDetail;
+use crate::target::object::{
+    ExecutiveResource, FileObject, HandleEntry, HandleTable, ResourceList,
+};
 use crate::target::usermode::handles::{
     handle_attribute_names, handle_type_counts, handle_type_label,
 };
@@ -16,16 +17,7 @@ use crate::target::{DiagnosticMetric, DiagnosticValue, ListTermination, TargetKi
 use crate::types::VirtAddr;
 use crate::ui;
 use crate::userdump::UserHandle;
-
-repl_command! {
-    cmd_handle;
-    names: ["!handle"],
-    category: "objects and I/O",
-    usage: "!handle [handle-expression [flags [type]]]",
-    summary: "List a limited number of handles of the selected process, or show one handle.",
-    details: "Without an argument, the command scans up to 256 handle-table slots. With a handle, it shows the object, type, name, access mask, and attributes, if it can decode them. On a user-mode minidump it lists the handles the dump's handle data records, as Windows reported them when the dump was written, with a count of each type; it has no objects to show. There, a handle of 0 selects every handle, flags choose what to show (1 type, 2 access, attributes, and counts, 4 name; the default shows all), and a type, such as File, keeps only handles of that type.",
-    completion: Expression,
-}
+use ntoseye_macros::command;
 
 repl_command! {
     cmd_token();
@@ -34,27 +26,6 @@ repl_command! {
     usage: "!token",
     summary: "Show the primary token of the selected or current process.",
     details: "The command shows the token IDs, user and groups, privileges, type, impersonation level, and flags. It gets each field independently, and if the metadata or memory for a field is missing, it shows this in that field.",
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_fileobj;
-    names: ["!fileobj"],
-    category: "objects and I/O",
-    usage: "!fileobj <address-expression>",
-    summary: "Decode a FILE_OBJECT and its relations to its device and name.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_locks;
-    names: ["!locks"],
-    category: "objects and I/O",
-    usage: "!locks [resource-address-expression]",
-    summary: "Show one ERESOURCE, or list the resources in the system resource list.",
-    details: "Without an argument, the command uses ExpSystemResourcesList and shows up to 256 entries without scanning memory. If the symbol or the list metadata is not available, it cannot list the resources.",
-    completion: Expression,
     target: Kernel,
 }
 
@@ -167,9 +138,9 @@ where
     }
 }
 
-fn diagnostic_status(value: &DiagnosticValue<i32>) -> String {
+fn diagnostic_status(value: &DiagnosticValue<u32>) -> String {
     match value {
-        DiagnosticValue::Available(value) => format!("{:#010x}", *value as u32),
+        DiagnosticValue::Available(value) => format!("{value:#010x}"),
         DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
     }
 }
@@ -227,7 +198,7 @@ fn print_user_handle(entry: &UserHandle, show: u64) {
     }
 }
 
-fn print_resource(detail: &ResourceDetail) {
+fn print_resource(detail: &ExecutiveResource) {
     outln!("ERESOURCE {}", ui::addr(detail.address.0));
     outln!(
         "  active count       : {}",
@@ -263,195 +234,6 @@ fn print_resource(detail: &ResourceDetail) {
 }
 
 impl ReplState<'_> {
-    fn cmd_handle(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if self.ctx.target.kind() == TargetKind::UserDump {
-            return self.cmd_handle_user_dump(&invocation);
-        }
-        if invocation.argv.len() > 1 {
-            error!("!handle: flags and a type apply to a user-mode minidump's handle data");
-            return Ok(());
-        }
-        if let Some(expression) = invocation.arg(0) {
-            let Some(VirtAddr(handle)) = self.eval_or_report(expression) else {
-                return Ok(());
-            };
-            match self.ctx.target.inspect_handle(handle) {
-                Ok(detail) => {
-                    outln!(
-                        "handle {:#x}  entry {}",
-                        detail.handle,
-                        ui::addr(detail.entry.0)
-                    );
-                    outln!("  object      : {}", diagnostic_addr(&detail.object));
-                    outln!(
-                        "  type        : {}",
-                        diagnostic_opt_string(&detail.type_name)
-                    );
-                    outln!("  name        : {}", diagnostic_opt_string(&detail.name));
-                    outln!("  access      : {}", diagnostic_hex(&detail.granted_access));
-                    outln!("  attributes  : {}", diagnostic_hex(&detail.attributes));
-                }
-                Err(error) => error!("{error}"),
-            }
-            return Ok(());
-        }
-
-        match self.ctx.target.enumerate_handles(256) {
-            Ok(summary) => {
-                outln!(
-                    "handles: {} ({})  table {} level {}  scanned {}/{} slots, {} skipped{}",
-                    summary.process.name,
-                    summary.process.pid,
-                    ui::addr(summary.table.0),
-                    summary.table_level,
-                    summary.scanned_handles,
-                    summary.advertised_handles,
-                    summary.skipped_entries,
-                    if summary.truncated { " (bounded)" } else { "" }
-                );
-                let mut builder = Builder::default();
-                builder.push_record(["Handle", "Object", "Type", "Access", "Name"]);
-                for entry in summary.entries {
-                    builder.push_record([
-                        format!("{:#x}", entry.handle),
-                        diagnostic_addr(&entry.object),
-                        diagnostic_opt_string(&entry.type_name),
-                        diagnostic_hex(&entry.granted_access),
-                        diagnostic_opt_string(&entry.name),
-                    ]);
-                }
-                print_padded_table(builder);
-            }
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    /// `!handle` on a user-mode minidump, over the handles its handle data
-    /// records: `!handle [handle [flags [type]]]`, as WinDbg takes it in
-    /// user mode.
-    fn cmd_handle_user_dump(&mut self, invocation: &CommandInvocation<'_>) -> Result<()> {
-        if invocation.argv.len() > 3 {
-            outln!("{}\n", command_help("!handle"));
-            return Ok(());
-        }
-        let handle = match invocation.arg(0) {
-            Some(expression) => match self.eval_or_report(expression) {
-                Some(VirtAddr(handle)) => handle,
-                None => return Ok(()),
-            },
-            None => 0,
-        };
-        let show = match invocation.arg(1) {
-            Some(expression) => match self.eval_or_report(expression) {
-                Some(VirtAddr(flags)) => flags,
-                None => return Ok(()),
-            },
-            None => SHOW_TYPE | SHOW_BASIC | SHOW_NAME,
-        };
-        if show & !(SHOW_TYPE | SHOW_BASIC | SHOW_NAME | SHOW_OBJECT) != 0 {
-            error!(
-                "!handle: flags {show:#x}: only 1 (type), 2 (access, attributes, counts), 4 (name), and 8 (object) are defined"
-            );
-            return Ok(());
-        }
-        let type_filter = invocation.arg(2);
-        let handles = match self.ctx.target.user_handles() {
-            Ok(handles) => handles,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        let shown: Vec<&UserHandle> = handles
-            .iter()
-            .filter(|entry| handle == 0 || entry.handle == handle)
-            .filter(|entry| {
-                type_filter
-                    .is_none_or(|filter| handle_type_label(entry).eq_ignore_ascii_case(filter))
-            })
-            .collect();
-        if show & SHOW_OBJECT != 0 {
-            outln!(
-                "{}",
-                ui::muted("object-specific information is not recorded in a user-mode minidump")
-            );
-        }
-        if handle != 0 {
-            let Some(entry) = shown.first() else {
-                match type_filter {
-                    Some(filter) => error!(
-                        "handle {handle:#x} of type {filter} is not in the minidump's handle data"
-                    ),
-                    None => error!("handle {handle:#x} is not in the minidump's handle data"),
-                }
-                return Ok(());
-            };
-            print_user_handle(entry, show);
-            outln!();
-            return Ok(());
-        }
-
-        let process = self
-            .ctx
-            .target
-            .user_dump_info()
-            .map(|info| info.process_label())
-            .unwrap_or_default();
-        outln!(
-            "handles: {process}, {} of {} the minidump records{}",
-            shown.len(),
-            handles.len(),
-            type_filter
-                .map(|filter| format!(" (type {filter})"))
-                .unwrap_or_default()
-        );
-        if shown.is_empty() {
-            outln!();
-            return Ok(());
-        }
-        let mut header = vec!["Handle"];
-        if show & SHOW_TYPE != 0 {
-            header.push("Type");
-        }
-        if show & SHOW_BASIC != 0 {
-            header.extend(["Access", "Attributes", "Handles", "Pointers"]);
-        }
-        if show & SHOW_NAME != 0 {
-            header.push("Name");
-        }
-        let mut builder = Builder::default();
-        builder.push_record(header);
-        for entry in &shown {
-            let mut row = vec![format!("{:#x}", entry.handle)];
-            if show & SHOW_TYPE != 0 {
-                row.push(handle_type_label(entry).to_string());
-            }
-            if show & SHOW_BASIC != 0 {
-                row.extend([
-                    format!("{:#x}", entry.granted_access),
-                    format!("{:#x}", entry.attributes),
-                    entry.handle_count.to_string(),
-                    entry.pointer_count.to_string(),
-                ]);
-            }
-            if show & SHOW_NAME != 0 {
-                row.push(entry.object_name.clone().unwrap_or_else(|| "-".to_string()));
-            }
-            builder.push_record(row);
-        }
-        print_padded_table(builder);
-
-        let mut summary = Builder::default();
-        summary.push_record(["Type", "Handles"]);
-        for (type_name, count) in handle_type_counts(shown.iter().copied()) {
-            summary.push_record([type_name, count.to_string()]);
-        }
-        outln!("{}", ui::label("by type"));
-        print_padded_table(summary);
-        Ok(())
-    }
-
     fn cmd_token(&mut self) -> Result<()> {
         match self.ctx.target.inspect_process_token() {
             Ok(token) => {
@@ -517,110 +299,394 @@ impl ReplState<'_> {
         }
         Ok(())
     }
+}
 
-    fn cmd_fileobj(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let expression = require_arg!(invocation, 0, "!fileobj");
-        let Some(address) = self.eval_or_report(expression) else {
-            return Ok(());
-        };
-        match self.ctx.target.inspect_file_object(address) {
-            Ok(file) => {
-                outln!("FILE_OBJECT {}", ui::addr(file.address.0));
-                outln!(
-                    "  type / size        : {} / {}",
-                    diagnostic_cell(&file.file_type),
-                    diagnostic_cell(&file.size)
-                );
-                outln!(
-                    "  device             : {}",
-                    diagnostic_addr(&file.device_object)
-                );
-                outln!(
-                    "  device type        : {}",
-                    diagnostic_hex(&file.device_type)
-                );
-                outln!(
-                    "  device name        : {}",
-                    diagnostic_opt_string(&file.device_name)
-                );
-                outln!(
-                    "  file name          : {}",
-                    diagnostic_cell(&file.file_name)
-                );
-                outln!(
-                    "  related file       : {}",
-                    diagnostic_addr(&file.related_file_object)
-                );
-                outln!("  flags              : {}", diagnostic_hex(&file.flags));
-                outln!(
-                    "  current offset     : {}",
-                    diagnostic_cell(&file.current_byte_offset)
-                );
-                outln!(
-                    "  fs context         : {}",
-                    diagnostic_addr(&file.fs_context)
-                );
-                outln!(
-                    "  fs context 2       : {}",
-                    diagnostic_addr(&file.fs_context2)
-                );
-                outln!(
-                    "  section object ptr : {}",
-                    diagnostic_addr(&file.section_object_pointer)
-                );
-                outln!(
-                    "  private cache map  : {}",
-                    diagnostic_addr(&file.private_cache_map)
-                );
-                outln!(
-                    "  final status       : {}",
-                    diagnostic_status(&file.final_status)
-                );
-                outln!(
-                    "  lock operation     : {}",
-                    diagnostic_cell(&file.lock_operation)
-                );
-                outln!(
-                    "  delete pending     : {}",
-                    diagnostic_cell(&file.delete_pending)
-                );
-                outln!(
-                    "  access R/W/D       : {}/{}/{}",
-                    diagnostic_cell(&file.read_access),
-                    diagnostic_cell(&file.write_access),
-                    diagnostic_cell(&file.delete_access)
-                );
-                outln!(
-                    "  shared R/W/D       : {}/{}/{}",
-                    diagnostic_cell(&file.shared_read),
-                    diagnostic_cell(&file.shared_write),
-                    diagnostic_cell(&file.shared_delete)
-                );
-            }
-            Err(error) => error!("{error}"),
+/// List a limited number of handles of the selected process, or show one handle.
+///
+/// Without an argument, the command scans up to 256 handle-table slots. With
+/// a handle, it shows the object, type, name, access mask, and attributes, if
+/// it can decode them. On a user-mode minidump it lists the handles the
+/// dump's handle data records, as Windows reported them when the dump was
+/// written, with a count of each type; it has no objects to show. There, a
+/// handle of 0 selects every handle, flags choose what to show (1 type, 2
+/// access, attributes, and counts, 4 name; the default shows all), and a
+/// type, such as File, keeps only handles of that type.
+#[command(
+    names = ["!handle"],
+    category = "objects and I/O",
+    kind = Query,
+    python = none,
+    usage = "!handle [handle-expression [flags [type]]]",
+    completion = [Expression, Expression, Expression]
+)]
+fn handle(session: &Session, #[arg(parse = handle_query)] query: HandleQuery) -> Result<Handles> {
+    let target = &session.target;
+    Ok(match query {
+        HandleQuery::Kernel(Some(handle)) => Handles::Entry(target.inspect_handle(handle)?),
+        HandleQuery::Kernel(None) => Handles::Table(target.enumerate_handles(256)?),
+        HandleQuery::User {
+            handle,
+            show,
+            type_filter,
+        } => Handles::User(UserHandles {
+            handle,
+            show,
+            type_filter,
+            handles: target.user_handles()?.to_vec(),
+            process: target
+                .user_dump_info()
+                .map(|info| info.process_label())
+                .unwrap_or_default(),
+        }),
+    })
+}
+
+/// What `!handle` shows: on a kernel target one handle or the table's
+/// first slots; on a user-mode minidump, its handle data, as WinDbg takes
+/// `!handle [handle [flags [type]]]` in user mode.
+enum HandleQuery {
+    Kernel(Option<u64>),
+    User {
+        /// 0 is every handle.
+        handle: u64,
+        show: u64,
+        type_filter: Option<String>,
+    },
+}
+
+/// What `!handle` read. The SDK has `Process.handle` and `Process.handles`
+/// for a kernel target.
+enum Handles {
+    Entry(HandleEntry),
+    Table(HandleTable),
+    User(UserHandles),
+}
+
+/// A user-mode minidump's handle data, and what `!handle` was asked to show
+/// of it.
+struct UserHandles {
+    handle: u64,
+    show: u64,
+    type_filter: Option<String>,
+    handles: Vec<UserHandle>,
+    /// The dumped process, as its label.
+    process: String,
+}
+
+fn handle_query(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<HandleQuery, ArgError> {
+    if cx.state.ctx.target.kind() != TargetKind::UserDump {
+        if cursor.remaining() > 1 {
+            return Err(ArgError::Message(
+                "!handle: flags and a type apply to a user-mode minidump's handle data".into(),
+            ));
         }
-        Ok(())
+        return match cursor.word() {
+            Some(text) => Ok(HandleQuery::Kernel(Some(cx.eval(&text)?.0))),
+            None => Ok(HandleQuery::Kernel(None)),
+        };
+    }
+    if cursor.remaining() > 3 {
+        return Err(ArgError::Missing);
+    }
+    let handle = match cursor.word() {
+        Some(text) => cx.eval(&text)?.0,
+        None => 0,
+    };
+    let show = match cursor.word() {
+        Some(text) => cx.eval(&text)?.0,
+        None => SHOW_TYPE | SHOW_BASIC | SHOW_NAME,
+    };
+    if show & !(SHOW_TYPE | SHOW_BASIC | SHOW_NAME | SHOW_OBJECT) != 0 {
+        return Err(ArgError::Message(format!(
+            "!handle: flags {show:#x}: only 1 (type), 2 (access, attributes, counts), 4 (name), and 8 (object) are defined"
+        )));
+    }
+    Ok(HandleQuery::User {
+        handle,
+        show,
+        type_filter: cursor.word().map(String::from),
+    })
+}
+
+impl Render for Handles {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        match self {
+            Self::Entry(entry) => print_handle_entry(entry),
+            Self::Table(table) => print_handle_table(table),
+            Self::User(handles) => print_user_handles(handles),
+        }
+    }
+}
+
+fn print_handle_entry(entry: &HandleEntry) {
+    outln!(
+        "handle {:#x}  entry {}",
+        entry.handle,
+        ui::addr(entry.entry.0)
+    );
+    outln!("  object      : {}", diagnostic_addr(&entry.object));
+    outln!(
+        "  type        : {}",
+        diagnostic_opt_string(&entry.type_name)
+    );
+    outln!("  name        : {}", diagnostic_opt_string(&entry.name));
+    outln!("  access      : {}", diagnostic_hex(&entry.granted_access));
+    outln!("  attributes  : {}", diagnostic_hex(&entry.attributes));
+}
+
+fn print_handle_table(table: &HandleTable) {
+    outln!(
+        "handles: {} ({})  table {} level {}  scanned {}/{} slots, {} skipped{}",
+        table.process.name,
+        table.process.pid,
+        ui::addr(table.table.0),
+        table.table_level,
+        table.scanned_handles,
+        table.advertised_handles,
+        table.skipped_entries,
+        if table.truncated { " (bounded)" } else { "" }
+    );
+    let mut builder = Builder::default();
+    builder.push_record(["Handle", "Object", "Type", "Access", "Name"]);
+    for entry in &table.entries {
+        builder.push_record([
+            format!("{:#x}", entry.handle),
+            diagnostic_addr(&entry.object),
+            diagnostic_opt_string(&entry.type_name),
+            diagnostic_hex(&entry.granted_access),
+            diagnostic_opt_string(&entry.name),
+        ]);
+    }
+    print_padded_table(builder);
+}
+
+fn print_user_handles(listing: &UserHandles) {
+    let UserHandles {
+        handle,
+        show,
+        type_filter,
+        handles,
+        process,
+    } = listing;
+    let (handle, show, type_filter) = (*handle, *show, type_filter.as_deref());
+    let shown: Vec<&UserHandle> = handles
+        .iter()
+        .filter(|entry| handle == 0 || entry.handle == handle)
+        .filter(|entry| {
+            type_filter.is_none_or(|filter| handle_type_label(entry).eq_ignore_ascii_case(filter))
+        })
+        .collect();
+    if show & SHOW_OBJECT != 0 {
+        outln!(
+            "{}",
+            ui::muted("object-specific information is not recorded in a user-mode minidump")
+        );
+    }
+    if handle != 0 {
+        let Some(entry) = shown.first() else {
+            match type_filter {
+                Some(filter) => error!(
+                    "handle {handle:#x} of type {filter} is not in the minidump's handle data"
+                ),
+                None => error!("handle {handle:#x} is not in the minidump's handle data"),
+            }
+            return;
+        };
+        print_user_handle(entry, show);
+        outln!();
+        return;
     }
 
-    fn cmd_locks(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if let Some(expression) = invocation.arg(0) {
-            let Some(address) = self.eval_or_report(expression) else {
-                return Ok(());
-            };
-            match self.ctx.target.inspect_resource(address) {
-                Ok(detail) => print_resource(&detail),
-                Err(error) => error!("{error}"),
-            }
-            return Ok(());
+    outln!(
+        "handles: {process}, {} of {} the minidump records{}",
+        shown.len(),
+        handles.len(),
+        type_filter
+            .map(|filter| format!(" (type {filter})"))
+            .unwrap_or_default()
+    );
+    if shown.is_empty() {
+        outln!();
+        return;
+    }
+    let mut header = vec!["Handle"];
+    if show & SHOW_TYPE != 0 {
+        header.push("Type");
+    }
+    if show & SHOW_BASIC != 0 {
+        header.extend(["Access", "Attributes", "Handles", "Pointers"]);
+    }
+    if show & SHOW_NAME != 0 {
+        header.push("Name");
+    }
+    let mut builder = Builder::default();
+    builder.push_record(header);
+    for entry in &shown {
+        let mut row = vec![format!("{:#x}", entry.handle)];
+        if show & SHOW_TYPE != 0 {
+            row.push(handle_type_label(entry).to_string());
         }
+        if show & SHOW_BASIC != 0 {
+            row.extend([
+                format!("{:#x}", entry.granted_access),
+                format!("{:#x}", entry.attributes),
+                entry.handle_count.to_string(),
+                entry.pointer_count.to_string(),
+            ]);
+        }
+        if show & SHOW_NAME != 0 {
+            row.push(entry.object_name.clone().unwrap_or_else(|| "-".to_string()));
+        }
+        builder.push_record(row);
+    }
+    print_padded_table(builder);
 
-        match self.ctx.target.enumerate_resources(256) {
-            Ok(summary) => {
+    let mut summary = Builder::default();
+    summary.push_record(["Type", "Handles"]);
+    for (type_name, count) in handle_type_counts(shown.iter().copied()) {
+        summary.push_record([type_name, count.to_string()]);
+    }
+    outln!("{}", ui::label("by type"));
+    print_padded_table(summary);
+}
+
+/// Decode a FILE_OBJECT and its relations to its device and name.
+#[command(
+    names = ["!fileobj"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    python_name = "file_object",
+    usage = "!fileobj <address-expression>"
+)]
+fn fileobj(session: &Session, address: VirtAddr) -> Result<FileObject> {
+    session.target.inspect_file_object(address)
+}
+
+impl Render for FileObject {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        let file = self;
+        outln!("FILE_OBJECT {}", ui::addr(file.address.0));
+        outln!(
+            "  type / size        : {} / {}",
+            diagnostic_cell(&file.file_type),
+            diagnostic_cell(&file.size)
+        );
+        outln!(
+            "  device             : {}",
+            diagnostic_addr(&file.device_object)
+        );
+        outln!(
+            "  device type        : {}",
+            diagnostic_hex(&file.device_type)
+        );
+        outln!(
+            "  device name        : {}",
+            diagnostic_opt_string(&file.device_name)
+        );
+        outln!(
+            "  file name          : {}",
+            diagnostic_cell(&file.file_name)
+        );
+        outln!(
+            "  related file       : {}",
+            diagnostic_addr(&file.related_file_object)
+        );
+        outln!("  flags              : {}", diagnostic_hex(&file.flags));
+        outln!(
+            "  current offset     : {}",
+            diagnostic_cell(&file.current_byte_offset)
+        );
+        outln!(
+            "  fs context         : {}",
+            diagnostic_addr(&file.fs_context)
+        );
+        outln!(
+            "  fs context 2       : {}",
+            diagnostic_addr(&file.fs_context2)
+        );
+        outln!(
+            "  section object ptr : {}",
+            diagnostic_addr(&file.section_object_pointer)
+        );
+        outln!(
+            "  private cache map  : {}",
+            diagnostic_addr(&file.private_cache_map)
+        );
+        outln!(
+            "  final status       : {}",
+            diagnostic_status(&file.final_status)
+        );
+        outln!(
+            "  lock operation     : {}",
+            diagnostic_cell(&file.lock_operation)
+        );
+        outln!(
+            "  delete pending     : {}",
+            diagnostic_cell(&file.delete_pending)
+        );
+        outln!(
+            "  access R/W/D       : {}/{}/{}",
+            diagnostic_cell(&file.read_access),
+            diagnostic_cell(&file.write_access),
+            diagnostic_cell(&file.delete_access)
+        );
+        outln!(
+            "  shared R/W/D       : {}/{}/{}",
+            diagnostic_cell(&file.shared_read),
+            diagnostic_cell(&file.shared_write),
+            diagnostic_cell(&file.shared_delete)
+        );
+    }
+}
+
+/// Show one ERESOURCE, or list the resources in the system resource list.
+///
+/// Without an argument, the command uses ExpSystemResourcesList and shows up
+/// to 256 entries without scanning memory. If the symbol or the list metadata
+/// is not available, it cannot list the resources.
+#[command(
+    names = ["!locks"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = none,
+    usage = "!locks [resource-address-expression]"
+)]
+fn locks(session: &Session, address: Option<VirtAddr>) -> Result<Locks> {
+    let target = &session.target;
+    match address {
+        Some(address) => target.inspect_resource(address).map(Locks::One),
+        None => target
+            .enumerate_resources(256)
+            .map(Locks::List)
+            .map_err(|error| {
+                Error::DebugInfo(format!("global resource enumeration unavailable: {error}"))
+            }),
+    }
+}
+
+/// What `!locks` read. The SDK has `Inspect.resource` and
+/// `Inspect.resources`.
+enum Locks {
+    One(ExecutiveResource),
+    List(ResourceList),
+}
+
+impl Render for Locks {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        match self {
+            Self::One(resource) => print_resource(resource),
+            Self::List(list) => {
                 outln!(
                     "executive resources: head {} entries {} termination {}",
-                    ui::addr(summary.head.0),
-                    summary.resources.len(),
-                    match summary.termination {
+                    ui::addr(list.head.0),
+                    list.resources.len(),
+                    match &list.termination {
                         ListTermination::Head => "head".to_string(),
                         ListTermination::Null => "null (corrupt)".to_string(),
                         ListTermination::Cycle(address) => {
@@ -630,12 +696,8 @@ impl ReplState<'_> {
                         ListTermination::Corrupt(error) => format!("read error: {error}"),
                     }
                 );
-                for detail in &summary.resources {
-                    print_resource(detail);
-                }
+                list.resources.iter().for_each(print_resource);
             }
-            Err(error) => error!("global resource enumeration unavailable: {error}"),
         }
-        Ok(())
     }
 }
