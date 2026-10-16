@@ -15,21 +15,69 @@ use super::symbols::{self, Symbols};
 use super::thread::Threads;
 use super::types::{Struct, Types};
 use super::{err, plain_dict};
-use crate::guest::ProcessInfo;
+use crate::guest::{ProcessInfo, ProcessInfoPy};
 use crate::target::mm::{MemoryRegionInfo, MemoryRegionInfoPy};
 use crate::types::VirtAddr;
 
 /// The running processes, with their PIDs as keys (`dbg.processes`). Each
 /// iteration reads the process list again, and `find(name)` matches image
-/// names.
+/// names. A `ProcessInfo` record (`stop.process`) is a key too: it gives the
+/// handle of the process it describes, listed or not (the idle process is
+/// not).
 #[pyclass(module = "ntoseye")]
 pub struct Processes {
     pub owner: Owner,
 }
 
+/// A key of `dbg.processes`: a PID, or a `ProcessInfo` record, which holds
+/// all a handle needs.
+#[derive(FromPyObject)]
+pub enum ProcessKey<'py> {
+    Pid(u64),
+    Info(Bound<'py, ProcessInfoPy>),
+}
+
+/// A [`ProcessKey`] read out of Python.
+enum ProcessMatch {
+    Pid(u64),
+    Info(ProcessInfo),
+}
+
+impl ProcessKey<'_> {
+    fn resolve(&self) -> PyResult<ProcessMatch> {
+        let record = match self {
+            ProcessKey::Pid(pid) => return Ok(ProcessMatch::Pid(*pid)),
+            ProcessKey::Info(record) => record,
+        };
+        let field = |name: &str| record.getattr(name);
+        Ok(ProcessMatch::Info(ProcessInfo {
+            pid: field("pid")?.extract()?,
+            name: field("name")?.extract()?,
+            dtb: field("dtb")?.extract()?,
+            eprocess: VirtAddr(field("eprocess")?.extract()?),
+            wow64_peb: field("wow64_peb")?.extract::<Option<u64>>()?.map(VirtAddr),
+        }))
+    }
+}
+
 impl Processes {
     pub fn new(owner: Owner) -> Processes {
         Processes { owner }
+    }
+
+    /// The process `wanted` names: a listed one by PID, or the one a record
+    /// describes.
+    fn lookup(&self, py: Python<'_>, wanted: ProcessMatch) -> PyResult<Option<Process>> {
+        match wanted {
+            ProcessMatch::Pid(pid) => Ok(self
+                .snapshot(py)?
+                .into_iter()
+                .find(|process| process.info.pid == pid)),
+            ProcessMatch::Info(info) => {
+                self.owner.check(py)?;
+                Ok(Some(Process::from_owner(self.owner.derive(py), info)))
+            }
+        }
     }
 
     fn snapshot(&self, py: Python<'_>) -> PyResult<Vec<Process>> {
@@ -95,12 +143,10 @@ struct ProcessDetails {
 
 #[pymethods]
 impl Processes {
-    /// Find a process by PID. Return `None` if the PID does not exist.
-    fn get(&self, py: Python<'_>, pid: u64) -> PyResult<Option<Process>> {
-        Ok(self
-            .snapshot(py)?
-            .into_iter()
-            .find(|process| process.info.pid == pid))
+    /// Find a process by PID, or `None` if no listed process has it. A
+    /// `ProcessInfo` record (`stop.process`) gives the process it describes.
+    fn get(&self, py: Python<'_>, key: ProcessKey<'_>) -> PyResult<Option<Process>> {
+        self.lookup(py, key.resolve()?)
     }
 
     /// Find all processes whose image name is an exact match, ignoring case.
@@ -112,19 +158,32 @@ impl Processes {
             .collect())
     }
 
-    fn __getitem__(&self, py: Python<'_>, pid: u64) -> PyResult<Process> {
-        self.get(py, pid)?
-            .ok_or_else(|| PyKeyError::new_err(pid.to_string()))
+    /// Get a process by PID, or raise `KeyError` if no listed process has
+    /// it. A `ProcessInfo` record (`dbg.processes[stop.process]`) gives the
+    /// process it describes.
+    fn __getitem__(&self, py: Python<'_>, key: ProcessKey<'_>) -> PyResult<Process> {
+        let wanted = key.resolve()?;
+        let missing = match &wanted {
+            ProcessMatch::Pid(pid) => pid.to_string(),
+            ProcessMatch::Info(info) => info.pid.to_string(),
+        };
+        self.lookup(py, wanted)?
+            .ok_or_else(|| PyKeyError::new_err(missing))
     }
 
+    /// Whether a process with the PID is listed; for a `ProcessInfo` record,
+    /// whether its process (PID and `_EPROCESS`) is.
     fn __contains__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<bool> {
-        let Ok(pid) = key.extract::<u64>() else {
+        let Ok(key) = key.extract::<ProcessKey<'_>>() else {
             return Ok(false);
         };
-        Ok(self
-            .snapshot(py)?
-            .iter()
-            .any(|process| process.info.pid == pid))
+        let listed = self.snapshot(py)?;
+        Ok(match key.resolve()? {
+            ProcessMatch::Pid(pid) => listed.iter().any(|process| process.info.pid == pid),
+            ProcessMatch::Info(info) => listed.iter().any(|process| {
+                process.info.pid == info.pid && process.info.eprocess == info.eprocess
+            }),
+        })
     }
 
     fn __iter__(&self, py: Python<'_>) -> PyResult<ProcessIterator> {

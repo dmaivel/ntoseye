@@ -2619,13 +2619,23 @@ class CpuTriageFallback(BaseRecord):
 class Cpus:
     """
     The processors of the target, in backend vCPU order (`dbg.cpus`). The target
-    must be halted to list them.
+    must be halted to list them. A processor is indexed by position, or by its
+    backend vCPU ID (`dbg.cpus["p1.2"]`, `dbg.cpus[stop.cpu]`).
     """
-    def __getitem__(self, index: int, /) -> Cpu: ...
+    def __getitem__(self, key: int |str, /) -> Cpu:
+        """
+        The processor at a position, or with a backend vCPU ID; raise
+        `IndexError` for a position out of range and `KeyError` for an
+        unknown ID.
+        """
     def __iter__(self, /) -> CpuIterator: ...
     def __len__(self, /) -> int: ...
     def __repr__(self, /) -> str: ...
-    def get(self, /, index: int) -> Cpu |None: ...
+    def get(self, /, key: int |str) -> Cpu |None:
+        """
+        The processor at a position, or with a backend vCPU ID (`stop.cpu`);
+        `None` if there is none.
+        """
 
 @final
 class CulpritAttribution(BaseRecord):
@@ -10431,19 +10441,26 @@ class ModuleSymbols(BaseRecord):
 class Modules:
     """
     A collection of modules: `dbg.modules` (kernel), `proc.modules` (loader
-    lists), or `dbg.secure_kernel.modules` (secure kernel).
+    lists), or `dbg.secure_kernel.modules` (secure kernel), keyed by short
+    name or by a `ModuleInfo` record (`stop.module`).
     """
-    def __contains__(self, name: str, /) -> bool: ...
-    def __getitem__(self, name: str, /) -> Module: ...
+    def __contains__(self, key: str |ModuleInfo, /) -> bool: ...
+    def __getitem__(self, key: str |ModuleInfo, /) -> Module:
+        """
+        Get a module by short name or `ModuleInfo` record, or raise
+        `KeyError` if no module matches.
+        """
     def __iter__(self, /) -> ModuleIterator: ...
     def __len__(self, /) -> int: ...
     def at(self, /, addr: int) -> Module |None:
         """
         The module that contains `addr`, or `None` if no module contains it.
         """
-    def get(self, /, name: str) -> Module |None:
+    def get(self, /, key: str |ModuleInfo) -> Module |None:
         """
-        Find a module by its short name, ignoring case (`"nt"` is ntoskrnl).
+        Find a module by its short name, ignoring case (`"nt"` is ntoskrnl),
+        or the module loaded at the base of a `ModuleInfo` record
+        (`stop.module`).
         """
 
 @final
@@ -13929,19 +13946,31 @@ class Processes:
     """
     The running processes, with their PIDs as keys (`dbg.processes`). Each
     iteration reads the process list again, and `find(name)` matches image
-    names.
+    names. A `ProcessInfo` record (`stop.process`) is a key too: it gives the
+    handle of the process it describes, listed or not (the idle process is
+    not).
     """
-    def __contains__(self, key: Any, /) -> bool: ...
-    def __getitem__(self, pid: int, /) -> Process: ...
+    def __contains__(self, key: Any, /) -> bool:
+        """
+        Whether a process with the PID is listed; for a `ProcessInfo` record,
+        whether its process (PID and `_EPROCESS`) is.
+        """
+    def __getitem__(self, key: int |ProcessInfo, /) -> Process:
+        """
+        Get a process by PID, or raise `KeyError` if no listed process has
+        it. A `ProcessInfo` record (`dbg.processes[stop.process]`) gives the
+        process it describes.
+        """
     def __iter__(self, /) -> ProcessIterator: ...
     def __len__(self, /) -> int: ...
     def find(self, /, name: str) -> list[Process]:
         """
         Find all processes whose image name is an exact match, ignoring case.
         """
-    def get(self, /, pid: int) -> Process |None:
+    def get(self, /, key: int |ProcessInfo) -> Process |None:
         """
-        Find a process by PID. Return `None` if the PID does not exist.
+        Find a process by PID, or `None` if no listed process has it. A
+        `ProcessInfo` record (`stop.process`) gives the process it describes.
         """
 
 @final
@@ -15985,6 +16014,10 @@ class Stop(BaseRecord):
     """
     Why the target stopped, with the context it stopped in, snapshotted at
     the stop. `kind` says which of the optional parts it has.
+    
+    The parts are records, not live handles; the collections take them as
+    keys: `dbg.threads[stop.thread]`, `dbg.processes[stop.process]`,
+    `dbg.cpus[stop.cpu]`, `dbg.modules[stop.module]`.
     """
     @property
     def breakpoint(self, /) -> BreakpointHit |None: ...
@@ -16001,6 +16034,11 @@ class Stop(BaseRecord):
         """
     @property
     def exception(self, /) -> ExceptionStop |None: ...
+    def hit(self, /, bp: Breakpoint) -> bool:
+        """
+        Whether breakpoint `bp` is the one that stopped the target. `bp`
+        may be deleted since (a one-shot breakpoint that fired).
+        """
     @property
     def inspection_process(self, /) -> ProcessInfo |None:
         """
@@ -17564,13 +17602,15 @@ class ThreadStacks(BaseRecord):
 @final
 class Threads:
     """
-    A collection of threads: `dbg.threads` (all threads) or `proc.threads`.
+    A collection of threads: `dbg.threads` (all threads) or `proc.threads`,
+    keyed by TID or by a `ThreadInfo` record (`stop.thread`).
     """
-    def __contains__(self, tid: int, /) -> bool: ...
-    def __getitem__(self, tid: int, /) -> Thread:
+    def __contains__(self, key: int |ThreadInfo, /) -> bool: ...
+    def __getitem__(self, key: int |ThreadInfo, /) -> Thread:
         """
-        Get the thread with a TID, or raise `KeyError` if no thread has that
-        TID.
+        Get the thread with a TID, or the thread a `ThreadInfo` record
+        describes (`dbg.threads[stop.thread]`); raise `KeyError` if no thread
+        matches.
         """
     def __iter__(self, /) -> ThreadIterator: ...
     def __len__(self, /) -> int: ...
@@ -17579,9 +17619,10 @@ class Threads:
         """
         Get the thread at an ETHREAD or KTHREAD address.
         """
-    def get(self, /, tid: int) -> Thread |None:
+    def get(self, /, key: int |ThreadInfo) -> Thread |None:
         """
-        Get the thread with a TID, or `None` if no thread has that TID.
+        Get the thread with a TID, or the thread a `ThreadInfo` record
+        describes; `None` if no thread matches.
         """
 
 @final

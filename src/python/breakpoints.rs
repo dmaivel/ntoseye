@@ -71,6 +71,11 @@ pub struct Breakpoint {
 }
 
 impl Breakpoint {
+    /// The breakpoint's ID, whether or not it still exists.
+    pub fn raw_id(&self) -> u32 {
+        self.id
+    }
+
     fn snapshot(&self, py: Python<'_>) -> PyResult<Option<BreakpointInfo>> {
         self.owner.with(py, |session| {
             Ok(session.breakpoints.get_exact(self.id, self.serial).cloned())

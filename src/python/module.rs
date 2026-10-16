@@ -13,7 +13,7 @@ use super::record::PlainDict;
 use super::record::Typed;
 use super::{MAX_READ_LEN, err, plain_dict, raise, symbol_not_found};
 use crate::error::Error;
-use crate::guest::{ModuleInfo, ProcessInfo};
+use crate::guest::{ModuleInfo, ModuleInfoPy, ProcessInfo};
 use crate::memory::PAGE_SIZE;
 use crate::pe;
 use crate::pe::ModuleExportInfo;
@@ -26,11 +26,53 @@ use ntoseye_macros::record;
 use pelite::PeView;
 
 /// A collection of modules: `dbg.modules` (kernel), `proc.modules` (loader
-/// lists), or `dbg.secure_kernel.modules` (secure kernel).
+/// lists), or `dbg.secure_kernel.modules` (secure kernel), keyed by short
+/// name or by a `ModuleInfo` record (`stop.module`).
 #[pyclass(module = "ntoseye")]
 pub struct Modules {
     pub owner: Owner,
     space: Space,
+}
+
+/// A key of a `Modules` collection: a module name, or a `ModuleInfo`
+/// record, which names the module loaded at its base.
+#[derive(FromPyObject)]
+pub enum ModuleKey<'py> {
+    Name(String),
+    Info(Bound<'py, ModuleInfoPy>),
+}
+
+/// What a listed module must match.
+enum ModuleMatch {
+    Name(String),
+    Base(u64),
+}
+
+impl ModuleKey<'_> {
+    fn resolve(self) -> PyResult<ModuleMatch> {
+        match self {
+            ModuleKey::Name(name) => Ok(ModuleMatch::Name(name)),
+            ModuleKey::Info(info) => {
+                Ok(ModuleMatch::Base(info.getattr("base_address")?.extract()?))
+            }
+        }
+    }
+}
+
+impl ModuleMatch {
+    fn matches(&self, module: &ModuleInfo) -> bool {
+        match self {
+            ModuleMatch::Name(name) => module_matches(module, name),
+            ModuleMatch::Base(base) => module.base_address.0 == *base,
+        }
+    }
+
+    fn key_error(&self) -> PyErr {
+        match self {
+            ModuleMatch::Name(name) => PyKeyError::new_err(name.clone()),
+            ModuleMatch::Base(base) => PyKeyError::new_err(format!("{base:#x}")),
+        }
+    }
 }
 
 impl Modules {
@@ -89,6 +131,14 @@ impl Modules {
 
     fn handle(&self, py: Python<'_>, found: Option<ModuleInfo>) -> PyResult<Option<Module>> {
         Ok(found.map(|info| Module::new(self.owner.derive(py), self.space(), info)))
+    }
+
+    fn find(&self, py: Python<'_>, wanted: &ModuleMatch) -> PyResult<Option<Module>> {
+        let found = self
+            .infos(py)?
+            .into_iter()
+            .find(|module| wanted.matches(module));
+        self.handle(py, found)
     }
 }
 
@@ -349,13 +399,11 @@ impl Module {
 
 #[pymethods]
 impl Modules {
-    /// Find a module by its short name, ignoring case (`"nt"` is ntoskrnl).
-    fn get(&self, py: Python<'_>, name: &str) -> PyResult<Option<Module>> {
-        let found = self
-            .infos(py)?
-            .into_iter()
-            .find(|module| module_matches(module, name));
-        self.handle(py, found)
+    /// Find a module by its short name, ignoring case (`"nt"` is ntoskrnl),
+    /// or the module loaded at the base of a `ModuleInfo` record
+    /// (`stop.module`).
+    fn get(&self, py: Python<'_>, key: ModuleKey<'_>) -> PyResult<Option<Module>> {
+        self.find(py, &key.resolve()?)
     }
 
     /// The module that contains `addr`, or `None` if no module contains it.
@@ -367,13 +415,15 @@ impl Modules {
         self.handle(py, found)
     }
 
-    fn __getitem__(&self, py: Python<'_>, name: &str) -> PyResult<Module> {
-        self.get(py, name)?
-            .ok_or_else(|| PyKeyError::new_err(name.to_string()))
+    /// Get a module by short name or `ModuleInfo` record, or raise
+    /// `KeyError` if no module matches.
+    fn __getitem__(&self, py: Python<'_>, key: ModuleKey<'_>) -> PyResult<Module> {
+        let wanted = key.resolve()?;
+        self.find(py, &wanted)?.ok_or_else(|| wanted.key_error())
     }
 
-    fn __contains__(&self, py: Python<'_>, name: &str) -> PyResult<bool> {
-        Ok(self.get(py, name)?.is_some())
+    fn __contains__(&self, py: Python<'_>, key: ModuleKey<'_>) -> PyResult<bool> {
+        Ok(self.find(py, &key.resolve()?)?.is_some())
     }
 
     fn __iter__(&self, py: Python<'_>) -> PyResult<ModuleIterator> {

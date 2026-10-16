@@ -21,6 +21,8 @@ use crate::exception_policy::ExceptionPolicyAction;
 use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::kd::trace_enabled;
 use crate::notice::Notice;
+#[cfg(feature = "python")]
+use crate::python::breakpoints::Breakpoint;
 use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::{
     ContinueOutcome, STEP_UNTIL_LIMIT, Session, StepKind, StepMode, StepStack, StopResolution,
@@ -236,7 +238,11 @@ pub trait ActionRunner {
 
 /// Why the target stopped, with the context it stopped in, snapshotted at
 /// the stop. `kind` says which of the optional parts it has.
-#[record]
+///
+/// The parts are records, not live handles; the collections take them as
+/// keys: `dbg.threads[stop.thread]`, `dbg.processes[stop.process]`,
+/// `dbg.cpus[stop.cpu]`, `dbg.modules[stop.module]`.
+#[record(impl)]
 pub struct Stop {
     pub kind: StopKind,
     /// The backend thread that stopped: a vCPU (`p1.2`), or a user dump's
@@ -268,6 +274,21 @@ pub struct Stop {
     /// The bugcheck code and parameters, when the transport decoded them.
     pub bugcheck: Option<BugcheckInfo>,
     pub reload: Option<ReloadStop>,
+}
+
+#[record]
+impl Stop {
+    /// Whether breakpoint `bp` is the one that stopped the target. `bp`
+    /// may be deleted since (a one-shot breakpoint that fired).
+    #[record(python)]
+    fn hit(slf: &pyo3::Bound<'_, Self>, bp: pyo3::PyRef<'_, Breakpoint>) -> pyo3::PyResult<bool> {
+        use pyo3::types::PyAnyMethods;
+        let hit = slf.as_super().get().field(slf.py(), "breakpoint")?;
+        if hit.is_none() {
+            return Ok(false);
+        }
+        Ok(hit.getattr("id")?.extract::<u32>()? == bp.raw_id())
+    }
 }
 
 /// The kind of a [`Stop`], named in snake case.

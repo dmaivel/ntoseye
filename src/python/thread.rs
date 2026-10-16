@@ -25,16 +25,56 @@ use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::effects::Effects;
 use crate::session::{Session, VcpuInfo};
 use crate::symbols::CodeFrame;
-use crate::target::{SelectedFrame, ServedVp, ThreadInfo, cpu};
+use crate::target::{SelectedFrame, ServedVp, ThreadInfo, ThreadInfoPy, cpu};
 use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current};
 use crate::types::VirtAddr;
 use crate::unwind::{RecoveredFrame, SavedVtl, StackFrame, halted_in_windows_hypervisor};
 
-/// A collection of threads: `dbg.threads` (all threads) or `proc.threads`.
+/// A collection of threads: `dbg.threads` (all threads) or `proc.threads`,
+/// keyed by TID or by a `ThreadInfo` record (`stop.thread`).
 #[pyclass(module = "ntoseye")]
 pub struct Threads {
     pub owner: Owner,
     pub process: Option<ProcessInfo>,
+}
+
+/// A key of a `Threads` collection: a TID, or a `ThreadInfo` record, which
+/// names its thread by `_ETHREAD` (an idle thread has no TID).
+#[derive(FromPyObject)]
+pub enum ThreadKey<'py> {
+    Tid(u64),
+    Info(Bound<'py, ThreadInfoPy>),
+}
+
+/// What a listed thread must match.
+enum ThreadMatch {
+    Tid(u64),
+    Ethread(u64),
+}
+
+impl ThreadKey<'_> {
+    fn resolve(&self) -> PyResult<ThreadMatch> {
+        match self {
+            ThreadKey::Tid(tid) => Ok(ThreadMatch::Tid(*tid)),
+            ThreadKey::Info(info) => Ok(ThreadMatch::Ethread(info.getattr("ethread")?.extract()?)),
+        }
+    }
+}
+
+impl ThreadMatch {
+    fn matches(&self, thread: &ThreadInfo) -> bool {
+        match *self {
+            ThreadMatch::Tid(tid) => thread.tid == Some(tid),
+            ThreadMatch::Ethread(ethread) => thread.ethread.0 == ethread,
+        }
+    }
+
+    fn key_error(&self) -> PyErr {
+        match *self {
+            ThreadMatch::Tid(tid) => PyKeyError::new_err(tid),
+            ThreadMatch::Ethread(ethread) => PyKeyError::new_err(format!("{ethread:#x}")),
+        }
+    }
 }
 
 impl Threads {
@@ -71,11 +111,11 @@ impl Threads {
             })
     }
 
-    fn by_tid(&self, py: Python<'_>, tid: u64) -> PyResult<Option<Thread>> {
+    fn find(&self, py: Python<'_>, wanted: &ThreadMatch) -> PyResult<Option<Thread>> {
         let Some(info) = self
             .snapshot(py)?
             .into_iter()
-            .find(|thread| thread.tid == Some(tid))
+            .find(|thread| wanted.matches(thread))
         else {
             return Ok(None);
         };
@@ -94,16 +134,18 @@ impl Threads {
 
 #[pymethods]
 impl Threads {
-    /// Get the thread with a TID, or raise `KeyError` if no thread has that
-    /// TID.
-    fn __getitem__(&self, py: Python<'_>, tid: u64) -> PyResult<Thread> {
-        self.by_tid(py, tid)?
-            .ok_or_else(|| PyKeyError::new_err(tid))
+    /// Get the thread with a TID, or the thread a `ThreadInfo` record
+    /// describes (`dbg.threads[stop.thread]`); raise `KeyError` if no thread
+    /// matches.
+    fn __getitem__(&self, py: Python<'_>, key: ThreadKey<'_>) -> PyResult<Thread> {
+        let wanted = key.resolve()?;
+        self.find(py, &wanted)?.ok_or_else(|| wanted.key_error())
     }
 
-    /// Get the thread with a TID, or `None` if no thread has that TID.
-    fn get(&self, py: Python<'_>, tid: u64) -> PyResult<Option<Thread>> {
-        self.by_tid(py, tid)
+    /// Get the thread with a TID, or the thread a `ThreadInfo` record
+    /// describes; `None` if no thread matches.
+    fn get(&self, py: Python<'_>, key: ThreadKey<'_>) -> PyResult<Option<Thread>> {
+        self.find(py, &key.resolve()?)
     }
 
     /// Get the thread at an ETHREAD or KTHREAD address.
@@ -116,8 +158,8 @@ impl Threads {
         Ok(Thread::from_owner(self.owner.derive(py), info))
     }
 
-    fn __contains__(&self, py: Python<'_>, tid: u64) -> PyResult<bool> {
-        Ok(self.by_tid(py, tid)?.is_some())
+    fn __contains__(&self, py: Python<'_>, key: ThreadKey<'_>) -> PyResult<bool> {
+        Ok(self.find(py, &key.resolve()?)?.is_some())
     }
 
     fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
@@ -729,10 +771,19 @@ impl Registers {
 }
 
 /// The processors of the target, in backend vCPU order (`dbg.cpus`). The target
-/// must be halted to list them.
+/// must be halted to list them. A processor is indexed by position, or by its
+/// backend vCPU ID (`dbg.cpus["p1.2"]`, `dbg.cpus[stop.cpu]`).
 #[pyclass(module = "ntoseye")]
 pub struct Cpus {
     pub owner: Owner,
+}
+
+/// A key of `dbg.cpus`: a position (negative from the end), or a backend
+/// vCPU ID.
+#[derive(FromPyObject)]
+pub enum CpuKey {
+    Index(isize),
+    Id(String),
 }
 
 impl Cpus {
@@ -764,14 +815,26 @@ impl Cpus {
 
 #[pymethods]
 impl Cpus {
-    fn __getitem__(&self, py: Python<'_>, index: isize) -> PyResult<Cpu> {
-        self.get(py, index)?
-            .ok_or_else(|| PyIndexError::new_err(index))
+    /// The processor at a position, or with a backend vCPU ID; raise
+    /// `IndexError` for a position out of range and `KeyError` for an
+    /// unknown ID.
+    fn __getitem__(&self, py: Python<'_>, key: CpuKey) -> PyResult<Cpu> {
+        let error = match &key {
+            CpuKey::Index(index) => PyIndexError::new_err(*index),
+            CpuKey::Id(id) => PyKeyError::new_err(id.clone()),
+        };
+        self.get(py, key)?.ok_or(error)
     }
 
-    fn get(&self, py: Python<'_>, index: isize) -> PyResult<Option<Cpu>> {
+    /// The processor at a position, or with a backend vCPU ID (`stop.cpu`);
+    /// `None` if there is none.
+    fn get(&self, py: Python<'_>, key: CpuKey) -> PyResult<Option<Cpu>> {
         let mut ids = self.ids(py)?;
-        let Some(index) = sequence_index(index, ids.len()) else {
+        let found = match key {
+            CpuKey::Index(index) => sequence_index(index, ids.len()),
+            CpuKey::Id(id) => ids.iter().position(|known| *known == id),
+        };
+        let Some(index) = found else {
             return Ok(None);
         };
         let id = ids.swap_remove(index);
