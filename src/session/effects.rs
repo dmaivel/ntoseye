@@ -55,6 +55,14 @@ impl Effects {
         ..Effects::NONE
     };
 
+    /// Reads a halted kernel target's machine state (its vCPUs), which a
+    /// VTL1 address space has too.
+    pub const MACHINE_HALTED: Effects = Effects {
+        target: TargetScope::Machine,
+        state: RunState::Halted,
+        ..Effects::NONE
+    };
+
     /// Whether the operation writes the guest's memory, registers or
     /// devices, which a dump does not have and VTL0 cannot write in VTL1.
     pub fn writes_guest(&self) -> bool {

@@ -670,8 +670,9 @@ impl Cpus {
 impl Cpus {
     fn enumerate(&self, py: Python<'_>) -> PyResult<Vec<Cpu>> {
         let ids = self.owner.with(py, |session| {
-            // A user dump's backend contexts are its threads, not processors.
-            admit(session, &Effects::KERNEL_HALTED, "vcpus")?;
+            // A user dump's backend contexts are its threads, not processors;
+            // a stop in VTL1 is on one.
+            admit(session, &Effects::MACHINE_HALTED, "vcpus")?;
             Ok(session
                 .vcpus()
                 .map_err(err)?
@@ -728,7 +729,7 @@ impl Cpu {
     /// The processor's state now, which needs a halted target.
     fn read(&self, py: Python<'_>) -> PyResult<VcpuInfo> {
         self.owner.with(py, |session| {
-            admit(session, &Effects::KERNEL_HALTED, "vcpus")?;
+            admit(session, &Effects::MACHINE_HALTED, "vcpus")?;
             session
                 .vcpus()
                 .map_err(err)?
