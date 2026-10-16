@@ -121,8 +121,8 @@ pub struct WdfClient {
     #[record(hex)]
     pub wdf_driver: Option<u64>,
     pub driver_object: VirtAddr,
-    /// The `DRIVER_OBJECT`'s `DriverName` (`\Driver\kdnic`): what names a
-    /// client whose `Public.DriverName` is empty.
+    /// The `DRIVER_OBJECT`'s `DriverName` (`kdnic` in the `Driver`
+    /// directory): what names a client whose `Public.DriverName` is empty.
     pub driver_object_name: Option<String>,
     /// The `FxDriver`'s `m_RegistryPath`.
     pub registry_path: Option<String>,

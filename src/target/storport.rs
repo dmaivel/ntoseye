@@ -111,9 +111,9 @@ pub struct StorAdapter {
     pub pdo: VirtAddr,
     pub lower: VirtAddr,
     /// The FDO's full name, its `Device` directory included
-    /// (`\Device\RaidPort0`).
+    /// (`RaidPort0` in the `Device` directory).
     pub device_name: String,
-    /// The SCSI port number (`\\.\Scsi0:`).
+    /// The SCSI port number (the `0` of the `Scsi0:` DOS device).
     pub port_number: u32,
     pub miniport_name: Option<String>,
     pub adapter_id: Option<String>,

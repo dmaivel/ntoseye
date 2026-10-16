@@ -1846,12 +1846,15 @@ class CallTraceFrame(BaseRecord):
 @final
 class ClassDevice(BaseRecord):
     """
-    A storage class device (`!storagekd.storclass`).
+    A storage class device as `!storagekd.storclass` lists it.
     """
     @property
     def boot_device(self, /) -> bool: ...
     @property
-    def bus_type(self, /) -> str |None: ...
+    def bus_type(self, /) -> str |None:
+        """
+        `STORAGE_BUS_TYPE` without its `BusType` prefix.
+        """
     @property
     def device_number(self, /) -> int |None: ...
     @property
@@ -1864,24 +1867,15 @@ class ClassDevice(BaseRecord):
     @property
     def fdo(self, /) -> int |None:
         """
-        `None` when no transfer packet names the FDO.
+        The FDO and its `_FUNCTIONAL_DEVICE_EXTENSION`; `None` when no
+        transfer packet names the FDO.
         """
     @property
-    def in_flight(self, /) -> list[ClassTransferPacket]: ...
-    @property
-    def packets_free(self, /) -> int: ...
-    @property
-    def packets_stopped(self, /) -> list[str]: ...
-    @property
-    def packets_total(self, /) -> int:
-        """
-        The transfer packets on `AllTransferPacketsList`, and those on a
-        free list.
-        """
+    def packets(self, /) -> ClassPackets: ...
     @property
     def private_data(self, /) -> int:
         """
-        `_CLASS_PRIVATE_FDO_DATA`, its entry on `classpnp!AllFdosList`.
+        `_CLASS_PRIVATE_FDO_DATA`, the entry on `classpnp!AllFdosList`.
         """
     @property
     def product(self, /) -> str |None: ...
@@ -1897,7 +1891,7 @@ class ClassDevice(BaseRecord):
 @final
 class ClassDeviceDetail(BaseRecord):
     """
-    One class device in detail.
+    One storage class device in detail.
     """
     @property
     def bytes_per_sector(self, /) -> int: ...
@@ -1913,10 +1907,13 @@ class ClassDeviceDetail(BaseRecord):
     @property
     def length(self, /) -> int:
         """
-        Bytes.
+        `PartitionLength` of partition zero: the device's capacity in bytes.
         """
     @property
-    def lower_device(self, /) -> int: ...
+    def lower_device(self, /) -> int:
+        """
+        The lower device object, and the PDO under the stack.
+        """
     @property
     def lower_pdo(self, /) -> int: ...
     @property
@@ -1924,25 +1921,32 @@ class ClassDeviceDetail(BaseRecord):
     @property
     def timeout(self, /) -> int:
         """
-        Seconds.
+        `TimeOutValue` in seconds.
         """
 
 @final
 class ClassDevices(BaseRecord):
     """
-    The class devices on `classpnp!AllFdosList`.
+    The storage class devices on `classpnp!AllFdosList`.
     """
     @property
     def devices(self, /) -> list[ClassDevice]: ...
     @property
-    def stopped(self, /) -> str |None: ...
+    def stopped(self, /) -> str |None:
+        """
+        Why the walk of the list stopped short of its head.
+        """
     @property
-    def unreadable(self, /) -> list[ClassUnreadable]: ...
+    def unreadable(self, /) -> list[ClassUnreadable]:
+        """
+        The entries whose private data does not read, in list order.
+        """
 
 @final
 class ClassError(BaseRecord):
     """
-    An error classpnp logged (`_CLASS_ERROR_LOG_DATA`).
+    One error classpnp logged (`_CLASS_ERROR_LOG_DATA`): the SRB that failed
+    and its sense data.
     """
     @property
     def age_ms(self, /) -> int |None:
@@ -1952,7 +1956,10 @@ class ClassError(BaseRecord):
     @property
     def cdb(self, /) -> list[int]: ...
     @property
-    def command(self, /) -> str |None: ...
+    def command(self, /) -> str |None:
+        """
+        The CDB's command, with its LBA and block count when it has them.
+        """
     @property
     def lun(self, /) -> int: ...
     @property
@@ -1962,7 +1969,7 @@ class ClassError(BaseRecord):
     @property
     def port(self, /) -> int |None:
         """
-        `None` where classpnp did not know the port.
+        `None` where classpnp did not know the port (it logs -1).
         """
     @property
     def retried(self, /) -> bool: ...
@@ -1973,7 +1980,10 @@ class ClassError(BaseRecord):
     @property
     def srb_status(self, /) -> int: ...
     @property
-    def srb_status_text(self, /) -> str: ...
+    def srb_status_text(self, /) -> str:
+        """
+        The SRB status by name, with `QUEUE_FROZEN` and `AUTOSENSE_VALID`.
+        """
     @property
     def target(self, /) -> int: ...
     @property
@@ -1982,9 +1992,35 @@ class ClassError(BaseRecord):
     def unhandled(self, /) -> bool: ...
 
 @final
+class ClassPackets(BaseRecord):
+    """
+    A device's transfer packets: how many classpnp allocated, how many are
+    free, and the ones it has sent down the stack.
+    """
+    @property
+    def free(self, /) -> int:
+        """
+        Those on a free list: a NUMA node's, a processor's, or the one
+        packet classpnp keeps for forward progress.
+        """
+    @property
+    def in_flight(self, /) -> list[ClassTransferPacket]: ...
+    @property
+    def stopped(self, /) -> list[str]:
+        """
+        Why a walk of the packets stopped short.
+        """
+    @property
+    def total(self, /) -> int:
+        """
+        The packets on `AllTransferPacketsList`.
+        """
+
+@final
 class ClassTransferPacket(BaseRecord):
     """
-    A transfer packet classpnp has in flight.
+    A transfer packet (`_TRANSFER_PACKET`) classpnp has sent down the stack
+    and not seen completed.
     """
     @property
     def address(self, /) -> int: ...
@@ -3501,6 +3537,33 @@ class DriverObjectSummary(BaseRecord):
     def object(self, /) -> int: ...
 
 @final
+class DriverQueueState(BaseRecord):
+    """
+    What the driver keeps of a split queue.
+    """
+    @property
+    def avail_idx(self, /) -> int:
+        """
+        `master_vring_avail.idx`: the avail index the driver wrote, which
+        the ring's own shows once published.
+        """
+    @property
+    def free(self, /) -> int:
+        """
+        `num_unused`: free descriptors.
+        """
+    @property
+    def last_used(self, /) -> int:
+        """
+        `last_used`: the used index up to which the driver took buffers back.
+        """
+    @property
+    def unkicked(self, /) -> int:
+        """
+        `num_added_since_kick`: buffers added since the device was notified.
+        """
+
+@final
 class Drivers:
     """
     The driver objects in the `Driver` directory of the object manager, keyed
@@ -3717,7 +3780,11 @@ class EtwBuffer(BaseRecord):
     A trace buffer of a logger (`_WMI_BUFFER_HEADER`).
     """
     @property
-    def address(self, /) -> int: ...
+    def address(self, /) -> int:
+        """
+        The buffer's kernel address or, for a buffer out of a minidump's ETW
+        data, the offset of its header in that block.
+        """
     @property
     def current_offset(self, /) -> int: ...
     @property
@@ -3745,11 +3812,30 @@ class EtwBuffer(BaseRecord):
         """
 
 @final
-class EtwCrashData(BaseRecord):
+class EtwBufferIssue(BaseRecord):
     """
-    The ETW trace sessions that Windows saved as it wrote a crash dump
-    (tagged data `nt!EtwSecondaryDumpDataGuid`): the sessions started
-    with `EVENT_TRACE_ADDTO_TRIAGE_DUMP`, such as EventLog-System.
+    A buffer in which ntoseye could not decode all events.
+    """
+    @property
+    def buffer(self, /) -> int:
+        """
+        The `EtwBuffer.address` of the buffer.
+        """
+    @property
+    def offset(self, /) -> int:
+        """
+        The position in the buffer where the walk stopped.
+        """
+    @property
+    def reason(self, /) -> str: ...
+
+@final
+class EtwDumpData(BaseRecord):
+    """
+    The ETW trace sessions that Windows saved as it wrote a minidump
+    (tagged data `nt!EtwSecondaryDumpDataGuid`): the sessions started with
+    `EVENT_TRACE_ADDTO_TRIAGE_DUMP`, such as EventLog-System, and the system
+    fields that the logfile header of an .etl records.
     """
     @property
     def boot_time(self, /) -> int:
@@ -3764,7 +3850,7 @@ class EtwCrashData(BaseRecord):
     @property
     def build_number(self, /) -> int:
         """
-        `NtBuildNumber`.
+        `NtBuildNumber`, its top nibble the free or checked build.
         """
     @property
     def cpu_mhz(self, /) -> int:
@@ -3772,12 +3858,12 @@ class EtwCrashData(BaseRecord):
         `EtwCPUSpeedInMHz`.
         """
     @property
+    def loggers(self, /) -> list[EtwDumpLogger]: ...
+    @property
     def perf_frequency(self, /) -> int:
         """
         `EtwPerfFreq`, the QPC frequency of PerfCounter timestamps.
         """
-    @property
-    def sessions(self, /) -> list[EtwCrashSession]: ...
     @property
     def size(self, /) -> int:
         """
@@ -3796,40 +3882,11 @@ class EtwCrashData(BaseRecord):
         """
 
 @final
-class EtwCrashEvents(BaseRecord):
+class EtwDumpLogger(BaseRecord):
     """
-    The events of a session that Windows saved in a crash dump, oldest
-    first.
-    """
-    @property
-    def buffers_walked(self, /) -> int: ...
-    @property
-    def events(self, /) -> list[EtwEvent]: ...
-    @property
-    def issues(self, /) -> list[EtwEventIssue]:
-        """
-        The buffers that ntoseye skipped fully (compressed), and the walks
-        that stopped early.
-        """
-    @property
-    def message_format_note(self, /) -> str |None:
-        """
-        Why some WPP messages have no `text`. `None` if all messages have
-        `text`.
-        """
-    @property
-    def session(self, /) -> EtwCrashSession: ...
-    @property
-    def total_events(self, /) -> int:
-        """
-        The number of events found before a count kept the most recent.
-        """
-
-@final
-class EtwCrashSession(BaseRecord):
-    """
-    An ETW trace session that Windows saved in a crash dump, as the
-    session's header in the dump records it.
+    An ETW trace session that Windows saved in a minidump: what the
+    session's header in the dump records of its `_WMI_LOGGER_CONTEXT`, and
+    its buffers.
     """
     @property
     def buffer_size(self, /) -> int:
@@ -3839,8 +3896,9 @@ class EtwCrashSession(BaseRecord):
     @property
     def buffers(self, /) -> list[EtwBuffer]:
         """
-        The buffers saved of the session. A buffer's `address` is the
-        offset of its header in the dump's ETW data.
+        The buffers saved of the session, which are all the buffers on its
+        `GlobalList`. A buffer's `address` is the offset of its header in the
+        dump's ETW data, and its `data_end` its bytes there.
         """
     @property
     def clock(self, /) -> str:
@@ -3878,74 +3936,24 @@ class EtwCrashSession(BaseRecord):
 @final
 class EtwEvent(BaseRecord):
     """
-    An event record that ntoseye decoded from a trace buffer. A field is
-    `None` if the header kind of the event does not have it.
+    An event that ntoseye decoded from a trace buffer, with the buffer it
+    came from and its time.
     """
-    @property
-    def activity_id(self, /) -> str |None: ...
     @property
     def buffer(self, /) -> int:
         """
-        The buffer that the event came from.
+        The buffer that the event came from (its `EtwBuffer.address`).
         """
     @property
-    def descriptor(self, /) -> EtwEventDescriptor |None: ...
-    @property
-    def event_class(self, /) -> EtwEventClass |None:
+    def message_format(self, /) -> EtwMessageFormat |None:
         """
-        The class of a classic event. The JSON key is `class`.
+        The message rendered from its TMF, for a WPP message whose trace
+        message format a loaded PDB declares; else `None`.
         """
-    @property
-    def event_flags(self, /) -> int |None:
-        """
-        `EVENT_HEADER.Flags`.
-        """
-    @property
-    def extended(self, /) -> list[EtwExtendedData]: ...
-    @property
-    def group(self, /) -> str |None:
-        """
-        The `EVENT_TRACE_GROUP_*` name of the hook id, if it is known.
-        """
-    @property
-    def guid(self, /) -> str |None:
-        """
-        The provider GUID (`EVENT_HEADER`), event class GUID
-        (`EVENT_TRACE_HEADER`), or message GUID (`MESSAGE_TRACE_HEADER`).
-        """
-    @property
-    def header(self, /) -> str:
-        """
-        The trace header at the start of the record (`EVENT_HEADER`, ...).
-        """
-    @property
-    def header_type(self, /) -> int: ...
-    @property
-    def hook_id(self, /) -> int |None:
-        """
-        The kernel hook id (group << 8 | type) of system and perfinfo events.
-        """
-    @property
-    def message(self, /) -> EtwEventMessage |None: ...
-    @property
-    def offset(self, /) -> int:
-        """
-        The offset of the record in its buffer.
-        """
-    @property
-    def payload(self, /) -> str:
-        """
-        The user data of the event, as hex.
-        """
-    @property
-    def process_id(self, /) -> int |None: ...
     @property
     def processor(self, /) -> int: ...
     @property
-    def size(self, /) -> int:
-        """
-        The record size, with the header included (unaligned).
-        """
+    def record(self, /) -> EtwRecord: ...
     @property
     def system_time(self, /) -> int |None:
         """
@@ -3955,14 +3963,6 @@ class EtwEvent(BaseRecord):
     def system_time_utc(self, /) -> str |None:
         """
         `system_time` as UTC (`YYYY-MM-DD HH:MM:SS.fffffff`).
-        """
-    @property
-    def thread_id(self, /) -> int |None: ...
-    @property
-    def timestamp(self, /) -> int |None:
-        """
-        The raw timestamp in the clock of the logger. A WPP message without
-        `TRACE_MESSAGE_TIMESTAMP` has no timestamp.
         """
 
 @final
@@ -4000,7 +4000,8 @@ class EtwEventDescriptor(BaseRecord):
 @final
 class EtwEventDump(BaseRecord):
     """
-    The in-memory events of a logger, oldest first (`!wmitrace.logdump`).
+    The events still in the buffers of a session, oldest first
+    (`!wmitrace.logdump`).
     """
     @property
     def buffers_walked(self, /) -> int: ...
@@ -4012,24 +4013,24 @@ class EtwEventDump(BaseRecord):
     @property
     def events(self, /) -> list[EtwEvent]: ...
     @property
-    def issues(self, /) -> list[EtwEventIssue]:
+    def issues(self, /) -> list[EtwBufferIssue]:
         """
-        The buffers that ntoseye skipped fully (compressed), and the walks that
-        stopped early.
+        The buffers that ntoseye skipped fully (compressed or unreadable), and
+        the walks that stopped early.
         """
     @property
     def list_stop(self, /) -> str |None:
         """
-        Why the walk of the `GlobalList` stopped before it came back to the
-        list head. `None` if the walk completed.
+        Why the walk of the `GlobalList`, or of a minidump's ETW data,
+        stopped before its end. `None` if the walk completed.
         """
     @property
-    def logger(self, /) -> EtwLogger: ...
+    def logger(self, /) -> EtwLogger |EtwDumpLogger: ...
     @property
     def message_format_note(self, /) -> str |None:
         """
-        Why some WPP messages have no `text`. `None` if all messages have
-        `text`.
+        Why some WPP messages have no `message_format`. `None` if all
+        messages have one.
         """
     @property
     def qpc_frequency(self, /) -> int |None:
@@ -4043,81 +4044,14 @@ class EtwEventDump(BaseRecord):
         """
 
 @final
-class EtwEventIssue(BaseRecord):
-    """
-    A buffer in which ntoseye could not decode all events.
-    """
-    @property
-    def buffer(self, /) -> int: ...
-    @property
-    def offset(self, /) -> int:
-        """
-        The position in the buffer where the walk stopped.
-        """
-    @property
-    def reason(self, /) -> str: ...
-
-@final
-class EtwEventMessage(BaseRecord):
-    """
-    The fields that follow a `MESSAGE_TRACE_HEADER`, as the
-    `TRACE_MESSAGE_*` option flags of the header select them. A field is
-    `None` if the flags do not select it, and the TMF fields are `None` if
-    no loaded PDB declares the trace message format (TMF) of the message.
-    """
-    @property
-    def component_id(self, /) -> int |None: ...
-    @property
-    def flags(self, /) -> str |None:
-        """
-        The trace flag name from the TMF.
-        """
-    @property
-    def format_error(self, /) -> str |None:
-        """
-        Why the payload does not fit the argument types of the TMF.
-        """
-    @property
-    def function(self, /) -> str |None:
-        """
-        The function that traced the message.
-        """
-    @property
-    def guid(self, /) -> str |None: ...
-    @property
-    def level(self, /) -> str |None:
-        """
-        The trace level from the TMF (`TRACE_LEVEL_ERROR`, or a number).
-        """
-    @property
-    def number(self, /) -> int:
-        """
-        The message number.
-        """
-    @property
-    def option_flags(self, /) -> int: ...
-    @property
-    def provider(self, /) -> str |None:
-        """
-        The provider (component) name from the TMF.
-        """
-    @property
-    def sequence(self, /) -> int |None: ...
-    @property
-    def text(self, /) -> str |None:
-        """
-        The message text, rendered from its TMF and the payload.
-        """
-
-@final
-class EtwExtendedData(BaseRecord):
+class EtwExtendedItem(BaseRecord):
     """
     An `EVENT_HEADER` extended data item.
     """
     @property
-    def data(self, /) -> str:
+    def data(self, /) -> bytes:
         """
-        The bytes of the item, as hex.
+        The bytes of the item.
         """
     @property
     def type(self, /) -> int:
@@ -4128,6 +4062,50 @@ class EtwExtendedData(BaseRecord):
     def type_name(self, /) -> str |None:
         """
         The name of the type, if it is known.
+        """
+
+@final
+class EtwLogFile(BaseRecord):
+    """
+    The buffers of a session as an .etl file: a header buffer, then each
+    buffer that holds events.
+    """
+    @property
+    def buffers(self, /) -> int:
+        """
+        The buffers with events written after the header buffer.
+        """
+    @property
+    def issues(self, /) -> list[EtwBufferIssue]:
+        """
+        The buffers left out (unreadable) and the buffers cut short before a
+        record that does not decode.
+        """
+    @property
+    def list_stop(self, /) -> str |None:
+        """
+        Why the walk of the `GlobalList`, or of a minidump's ETW data, ended
+        early. `None` if the walk completed.
+        """
+    @property
+    def logger(self, /) -> EtwLogger |EtwDumpLogger: ...
+    @property
+    def size(self, /) -> int:
+        """
+        Bytes in the file.
+        """
+
+@final
+class EtwLogSave(BaseRecord):
+    """
+    An .etl file that `!wmitrace.logsave` wrote on the host.
+    """
+    @property
+    def file(self, /) -> EtwLogFile: ...
+    @property
+    def path(self, /) -> str:
+        """
+        Where the file was written.
         """
 
 @final
@@ -4184,7 +4162,10 @@ class EtwLogger(BaseRecord):
     @property
     def flush_timer(self, /) -> int: ...
     @property
-    def instance_guid(self, /) -> str: ...
+    def instance_guid(self, /) -> str:
+        """
+        `InstanceGuid`, braced.
+        """
     @property
     def log_buffers_lost(self, /) -> int: ...
     @property
@@ -4272,6 +4253,145 @@ class EtwLoggerTable(BaseRecord):
     def max_loggers(self, /) -> int: ...
     @property
     def silo_state(self, /) -> int: ...
+
+@final
+class EtwMessage(BaseRecord):
+    """
+    The fields that follow a `MESSAGE_TRACE_HEADER`, as the
+    `TRACE_MESSAGE_*` option flags of the header select them. A field is
+    `None` if the flags do not select it.
+    """
+    @property
+    def component_id(self, /) -> int |None: ...
+    @property
+    def guid(self, /) -> str |None:
+        """
+        The message GUID, braced.
+        """
+    @property
+    def number(self, /) -> int:
+        """
+        The message number.
+        """
+    @property
+    def option_flags(self, /) -> int: ...
+    @property
+    def sequence(self, /) -> int |None: ...
+
+@final
+class EtwMessageFormat(BaseRecord):
+    """
+    A WPP message rendered from the trace message format (TMF) that a loaded
+    PDB declares for it.
+    """
+    @property
+    def flags(self, /) -> str |None:
+        """
+        The trace flag name from the TMF.
+        """
+    @property
+    def format_error(self, /) -> str |None:
+        """
+        Why the payload does not fit the argument types of the TMF.
+        """
+    @property
+    def function(self, /) -> str |None:
+        """
+        The function that traced the message.
+        """
+    @property
+    def level(self, /) -> str |None:
+        """
+        The trace level from the TMF (`TRACE_LEVEL_ERROR`, or a number).
+        """
+    @property
+    def provider(self, /) -> str:
+        """
+        The provider (component) name from the TMF.
+        """
+    @property
+    def text(self, /) -> str |None:
+        """
+        The message text, rendered from its TMF and the payload.
+        """
+
+@final
+class EtwRecord(BaseRecord):
+    """
+    An event record decoded from a trace buffer. A field is `None` if the
+    header kind of the event does not have it.
+    """
+    @property
+    def activity_id(self, /) -> str |None:
+        """
+        `EVENT_HEADER.ActivityId`, braced.
+        """
+    @property
+    def descriptor(self, /) -> EtwEventDescriptor |None: ...
+    @property
+    def event_class(self, /) -> EtwEventClass |None:
+        """
+        The class of a classic event.
+        """
+    @property
+    def event_flags(self, /) -> int |None:
+        """
+        `EVENT_HEADER.Flags`.
+        """
+    @property
+    def extended(self, /) -> list[EtwExtendedItem]: ...
+    @property
+    def group(self, /) -> str |None:
+        """
+        The `EVENT_TRACE_GROUP_*` name of the hook id, if it is known.
+        """
+    @property
+    def guid(self, /) -> str |None:
+        """
+        The provider GUID (`EVENT_HEADER`), event class GUID
+        (`EVENT_TRACE_HEADER`), or message GUID (`MESSAGE_TRACE_HEADER`),
+        braced.
+        """
+    @property
+    def header(self, /) -> str:
+        """
+        The trace header at the start of the record (`event` for
+        `EVENT_HEADER`, ...).
+        """
+    @property
+    def header_type(self, /) -> int: ...
+    @property
+    def hook_id(self, /) -> int |None:
+        """
+        The kernel hook id (group << 8 | type) of system and perfinfo events.
+        """
+    @property
+    def message(self, /) -> EtwMessage |None: ...
+    @property
+    def offset(self, /) -> int:
+        """
+        The offset of the record in its buffer.
+        """
+    @property
+    def payload(self, /) -> bytes:
+        """
+        The user data of the event.
+        """
+    @property
+    def process_id(self, /) -> int |None: ...
+    @property
+    def size(self, /) -> int:
+        """
+        The record size, with the header included (unaligned).
+        """
+    @property
+    def thread_id(self, /) -> int |None: ...
+    @property
+    def timestamp(self, /) -> int |None:
+        """
+        The raw timestamp in the clock of the logger. A WPP message without
+        `TRACE_MESSAGE_TIMESTAMP` has no timestamp.
+        """
 
 @final
 class ExceptionPolicy(BaseRecord):
@@ -6462,6 +6582,72 @@ class IdtGate(BaseRecord):
     def vector(self, /) -> int: ...
 
 @final
+class IfrEnd(BaseRecord):
+    """
+    Why an IFR walk ended: `empty` (no record was ever written),
+    `first_record` (the oldest record reached is the first the log held),
+    `overwritten` (the records before the oldest one reached were
+    overwritten), or `corrupt` (a record failed validation, and the walk
+    stopped there).
+    """
+    @property
+    def corruption(self, /) -> str |None:
+        """
+        The item that failed validation.
+        """
+    @property
+    def kind(self, /) -> str:
+        """
+        The variant: `empty`, `first_record`, `overwritten`, `corrupt`.
+        """
+
+@final
+class IfrRecord(BaseRecord):
+    """
+    An In-Flight Recorder record (`_WDF_IFR_RECORD`).
+    """
+    @property
+    def args(self, /) -> bytes:
+        """
+        The WPP argument bytes after the header, padded to 4 bytes.
+        """
+    @property
+    def length(self, /) -> int:
+        """
+        `Length`: header and arguments.
+        """
+    @property
+    def message_guid(self, /) -> str:
+        """
+        `MessageGuid`, braced.
+        """
+    @property
+    def message_number(self, /) -> int: ...
+    @property
+    def offset(self, /) -> int:
+        """
+        Its offset in the log area.
+        """
+    @property
+    def prev_offset(self, /) -> int:
+        """
+        `PrevOffset`: the record before it.
+        """
+    @property
+    def sequence(self, /) -> int: ...
+    @property
+    def timestamp(self, /) -> int |None:
+        """
+        The FILETIME (UTC). `None` for an 'LR' record, which has no
+        timestamp.
+        """
+    @property
+    def timestamp_utc(self, /) -> str |None:
+        """
+        `timestamp` as UTC (`YYYY-MM-DD HH:MM:SS.fffffff`).
+        """
+
+@final
 class ImageByteDiff(BaseRecord):
     """
     One byte that differs from the cached image.
@@ -7063,6 +7249,19 @@ class InFlightIrp(BaseRecord):
         """
 
 @final
+class IndirectTable(BaseRecord):
+    """
+    What an indirect descriptor's table holds: its descriptors, and the
+    bytes the driver gives the device and the device may write back.
+    """
+    @property
+    def descriptors(self, /) -> int: ...
+    @property
+    def in_bytes(self, /) -> int: ...
+    @property
+    def out_bytes(self, /) -> int: ...
+
+@final
 class Inspect:
     """
     System-wide reports and helpers that decode an object at an address
@@ -7107,16 +7306,22 @@ class Inspect:
         """
         List the process, thread, and image notification callbacks.
         """
-    def class_device(self, /, address: int) -> ClassDeviceDetail:
+    def class_device(self, /, address: int |None = None) -> ClassDevices |ClassDeviceDetail:
         """
-        Read the class device whose FDO, device extension, or private data
-        is at `address`, with its requests in flight and its error log
-        (`!storagekd.storclass <address>`).
-        """
-    def class_devices(self, /) -> ClassDevices:
-        """
-        List the storage class devices on `classpnp!AllFdosList`
-        (`!storagekd.storclass`).
+        List the storage class devices (disks, CD-ROMs), or show one with its
+        requests and errors.
+        
+        Without an argument, walks classpnp!AllFdosList and shows each class device
+        that classpnp drives for disk.sys, cdrom.sys, and the other class drivers:
+        its FDO, class driver, device number, bus, vendor and product, and how many
+        of its transfer packets are in flight. With the address of an FDO, its
+        device extension, or its private data, shows the device: its identity and
+        serial number, bus, lower device and PDO, capacity and sector size, timeout
+        and retry limit, ErrorCount, each request in flight (a transfer packet that
+        is not on classpnp's free lists) with its IRP, the client's IRP, the SRB,
+        the command, and the retries, and the last 16 errors classpnp logged, each
+        with its age, address, command, SRB and SCSI status, and sense key and code.
+        The command needs the PDB for classpnp.sys.
         """
     def context_record(self, /, address: int) -> Frame:
         """
@@ -7150,43 +7355,98 @@ class Inspect:
         """
         Get the DPCs that are queued on each processor (`!dpcs`).
         """
-    def etw_buffers(self, /, logger: int |str) -> EtwLoggerBuffers:
-        """
-        List the trace buffers on the GlobalList of an ETW trace session
-        (`!wmitrace.strdump logger`).
-        """
-    def etw_crash_events(self, /, logger: int |str, count: int |None = None) -> EtwCrashEvents:
-        """
-        Decode the events of an ETW trace session that Windows saved in a
-        crash dump, oldest first (`!wmitrace.logdump` in a minidump).
-        `logger` is the logger ID or the session name, and `count` keeps
-        only the most recent events.
-        """
-    def etw_crash_sessions(self, /) -> EtwCrashData:
-        """
-        List the ETW trace sessions that Windows saved as it wrote a crash
-        dump, and their buffers (`!wmitrace.strdump` in a minidump): the
-        sessions started with `EVENT_TRACE_ADDTO_TRIAGE_DUMP`, such as
-        EventLog-System. A minidump has no other copy of them; in a kernel or
-        full dump, `etw_loggers()` reads every session from memory.
-        """
     def etw_events(self, /, logger: int |str, count: int |None = None) -> EtwEventDump:
         """
-        Decode the events that are still in the buffers of an ETW trace session,
-        oldest first (`!wmitrace.logdump`). `count` keeps only the most recent
-        events. For a WPP message, `message.text` is the message rendered from
-        the TMF that a loaded PDB declares, and the raw `payload` is always
-        kept.
+        Show the events that are still in the buffers of an ETW trace session,
+        oldest first.
+        
+        Reads each buffer on the GlobalList of the session: the current buffer of
+        each processor, the buffers that wait for a flush, and the free buffers,
+        whose events ETW delivered but did not overwrite yet. The command decodes
+        each event record by its trace header. EVENT_HEADER is for manifest and
+        TraceLogging providers and gives the provider GUID, event id, version,
+        opcode, task, level, and keyword. EVENT_TRACE_HEADER is for classic
+        providers. SYSTEM_TRACE_HEADER and PERFINFO_TRACE_HEADER are for kernel
+        events and give the group and hook id. MESSAGE_TRACE_HEADER is for WPP and
+        gives the message GUID and number. The command prints each event as
+        [cpu]pid.tid::time, with its payload in hex (the first 256 bytes). The ids
+        are hex, and the time is UTC, converted from the clock of the session. When
+        a loaded PDB declares the trace message format (TMF) of a WPP message, the
+        command prints the message formatted: the provider, the function, and the
+        rendered text. If the payload does not fit its TMF, it prints the message
+        raw, with the reason. The public Microsoft Wdf01000.pdb contains the TMF of
+        KMDF, but for other providers the TMF is only in the private PDB of the
+        provider, so add the PDB directory of the driver with .sympath+ and then use
+        .reload for the driver. -t count keeps the most recent count events. If the
+        records in a buffer stop being valid, the command reports the buffer with
+        the offset and does not resynchronize. In a minidump, the command decodes
+        the buffers that Windows saved in the tagged data of the dump (see
+        !wmitrace.strdump), which hold the same events as the buffers in memory.
         """
-    def etw_logger(self, /, logger: int |str) -> EtwLogger:
+    def etw_logger(self, /, logger: int |str) -> EtwLogger |EtwDumpLogger:
         """
-        Decode the `_WMI_LOGGER_CONTEXT` of one ETW trace session
-        (`!wmitrace.logger`). `logger` is the logger ID, the context address, or
-        the session name.
+        Show the configuration and counters of one ETW trace session.
+        
+        Decodes the _WMI_LOGGER_CONTEXT of the session. The command shows the logger
+        mode with its EVENT_TRACE_*_MODE names, and the context flags that are set
+        (from the PDB bitfields). It shows the buffer size, the buffer counts
+        (minimum, maximum, allocated, free, peak), and the buffers written, then the
+        events and buffers lost, the real-time delivery, the clock type, the start
+        time, and the flush timer. Last come the logger thread, the consumers, and
+        the log file. The command does not show events. To see them, use
+        !wmitrace.logdump. In a minidump, the command shows the few fields that the
+        tagged data of the dump records for the session: the logger mode, the buffer
+        size, the number of buffers, the clock type, and the start time.
         """
-    def etw_loggers(self, /) -> EtwLoggerTable:
+    def etw_loggers(self, /, logger: int |str |None = None) -> EtwLoggerTable |EtwLoggerBuffers |EtwDumpData |EtwDumpLogger:
         """
-        List the active ETW trace sessions (`!wmitrace.strdump`).
+        List the active ETW trace sessions, or the trace buffers of one session.
+        
+        Without an argument, lists all active loggers of the host silo from the
+        EtwpLoggerContext array of nt!EtwpHostSiloState. For each logger, it shows
+        the id, the _WMI_LOGGER_CONTEXT, the name, the logger mode, and the buffer
+        size, and also the buffers allocated/in use/free, the buffers written, the
+        events lost, and the log file. With a logger argument, it lists each
+        _WMI_BUFFER_HEADER on the GlobalList of the logger. The argument is the
+        logger id, the session name, or the _WMI_LOGGER_CONTEXT address, and the
+        session name match ignores case. For each buffer, the command shows the
+        state (free, logging, flush, ...), the processor of the buffer, the sequence
+        number, and the number of bytes that hold events. The command also lists the
+        sessions that `logman query -ets` does not show (secure and private
+        sessions). A minidump holds no kernel pool, so in a minidump the command
+        lists instead the sessions that Windows saved in the tagged data of the dump
+        (nt!EtwSecondaryDumpDataGuid, see .enumtag): those started with
+        EVENT_TRACE_ADDTO_TRIAGE_DUMP. For each session, it shows the id, the name,
+        the logger mode, the buffer size, the clock, the start time, and the buffers
+        saved, which are all the buffers on the GlobalList of the session. With a
+        logger argument, it lists these buffers, each at its offset in the tagged
+        data.
+        """
+    def etw_save(self, /, logger: int |str, path: str) -> EtwLogSave:
+        """
+        Save the in-memory buffers of an ETW trace session as an .etl file on the
+        host.
+        
+        Writes an .etl file that ETW consumers such as tracerpt can open. The file
+        starts with a header buffer that holds the logfile header event
+        (TRACE_LOGFILE_HEADER). This event records the buffer size, the OS version
+        and build, the processor count, the timer resolution, and the CPU speed, and
+        also the boot time, the QPC frequency, the start reference and clock type of
+        the session, and the session names. After the header buffer comes each
+        buffer on the GlobalList of the session that holds events. The command seals
+        each buffer as the logger does when it flushes a buffer, by setting the
+        valid length and filling the rest of the buffer with 0xff. Each buffer ends
+        after its last record that decodes, so the file holds the events that
+        !wmitrace.logdump shows. The current buffer of a processor can end in a
+        record that is not fully written yet. The file also includes buffers that
+        the logger already flushed to the log file of the session, if their events
+        are still in memory. The command leaves out an unreadable buffer, and after
+        it writes the file, it lists each unreadable buffer and each buffer that it
+        cut short. The time zone data records only the current bias. If a buffer is
+        compressed, the command gives an error. In a minidump, the command saves the
+        buffers of the tagged data of the dump (see !wmitrace.strdump), with the
+        boot time, the QPC frequency, the timer resolution, and the CPU speed that
+        the tagged data records.
         """
     def exception_record(self, /, address: int) -> ExceptionRecord:
         """
@@ -7286,71 +7546,109 @@ class Inspect:
         Get the memory-use counters of the system and of each process, up to a
         limit (`!memusage`).
         """
-    def ndis_filter(self, /, address: int) -> NdisFilterDetail:
+    def ndis_filter(self, /, address: int |None = None) -> NdisFilterList |NdisFilterDetail:
         """
-        Read the NDIS filter module at `address` (`!ndiskd.filter <address>`).
+        List the NDIS filter modules, or show one.
+        
+        Without an address, walks ndis!ndisGlobalFilterList and shows each filter
+        module of every miniport: its _NDIS_FILTER_BLOCK, state, driver image,
+        miniport, and name. With the address of a filter block, as this list or
+        !ndiskd.miniport shows it, the command shows the filter driver, the
+        miniport, the filter modules above and below it on the miniport's stack, the
+        module context (FilterModuleContext, which you can dt with the driver's
+        PDB), the link the filter last saw indicated, the reference count, the NBLs
+        and status indications NDIS dropped because the filter was not running, and
+        the pending OID request. The command needs the PDB for ndis.sys.
         """
-    def ndis_filter_driver(self, /, address: int) -> NdisFilterDriverDetail:
+    def ndis_filter_driver(self, /, address: int |None = None) -> NdisFilterDriverList |NdisFilterDriverDetail:
         """
-        Read the NDIS filter driver block at `address` and its filter
-        modules (`!ndiskd.filterdriver <address>`).
+        List the NDIS filter drivers, or show one and its filter modules.
+        
+        Without an address, walks ndis!ndisFilterDriverList and shows each filter
+        driver's _NDIS_FILTER_DRIVER_BLOCK, friendly name, service, image, NDIS
+        version, driver version, and number of filter modules. With the address of a
+        filter driver block, the command shows the driver's unique name (its GUID),
+        DRIVER_OBJECT, the module its code is in, its driver context and flags, and
+        its filter modules, one for each miniport it is attached to. The command
+        needs the PDB for ndis.sys.
         """
-    def ndis_filter_drivers(self, /) -> NdisFilterDrivers:
+    def ndis_minidriver(self, /, address: int |None = None) -> NdisDriverList |NdisMinidriver:
         """
-        List the NDIS filter drivers (`!ndiskd.filterdriver`).
+        List the NDIS miniport drivers, or show one and its miniports.
+        
+        Without an address, walks ndis!ndisMiniDriverList and shows each miniport
+        driver's _NDIS_M_DRIVER_BLOCK, service name, image, NDIS version, driver
+        version, and number of miniports. With the address of a driver block, as
+        this list or !ndiskd.miniport shows it, the command shows the driver's
+        DRIVER_OBJECT, the module its code is in, its versions, and its miniports.
         """
-    def ndis_filters(self, /) -> NdisFilters:
+    def ndis_miniport(self, /, address: int |None = None) -> NdisMiniportList |NdisMiniportDetail:
         """
-        List the NDIS filter modules of every miniport (`!ndiskd.filter`).
+        Show an NDIS miniport: its driver, state, filter stack, bindings, and
+        pending OID.
+        
+        Give the address that !ndiskd.miniports lists. The command shows the device
+        name and instance ID, the miniport driver with its image and versions, the
+        adapter context (MiniportAdapterContext, the driver's own context, which you
+        can dt with the driver's PDB), the FDO and PDO (none for a virtual
+        miniport), the miniport, PnP, and power states, the medium and link, the
+        interface index and NetLuid, the reference count, the reset counts and the
+        status of the last reset, the pending OID request with its OID, type, and
+        buffer, and PendingReturnNBLCount. Then it shows the filter stack from the
+        top down along each filter's LowerFilter link, with each filter's state,
+        driver image, module context, and pending OID request, and the protocols
+        bound to the miniport. A filter whose HigherFilter does not lead back ends
+        the stack walk with the reason. Without an address, the command lists the
+        miniports as !ndiskd.miniports does.
         """
-    def ndis_minidriver(self, /, address: int) -> NdisMinidriver:
+    def ndis_miniports(self, /) -> NdisMiniportList:
         """
-        Read the NDIS miniport driver block at `address` and its miniports
-        (`!ndiskd.minidriver <address>`).
+        List the NDIS miniports (network adapters).
+        
+        Walks ndis!ndisMiniportList and shows one line per miniport: the address of
+        its _NDIS_MINIPORT_BLOCK, which !ndiskd.miniport takes, the service of its
+        miniport driver, the miniport state (Running, Pausing, Paused, Restarting,
+        Initializing, Halted), the media connect state with the transmit link speed
+        (and the receive speed when it differs), the device power state, the
+        interface index, and the friendly name. Virtual miniports, such as Hyper-V's
+        adapters, are on the list too. The command needs the PDB for ndis.sys.
         """
-    def ndis_minidrivers(self, /) -> NdisDrivers:
+    def ndis_nbl(self, /, address: int, chain: bool = False, data: bool = False) -> NdisNbl |NdisNblChain:
         """
-        List the NDIS miniport drivers (`!ndiskd.minidriver`).
-        """
-    def ndis_miniport(self, /, address: int) -> NdisMiniportDetail:
-        """
-        Read the NDIS miniport at `address` with its driver, filter stack,
-        bindings, and pending OID request (`!ndiskd.miniport`).
-        """
-    def ndis_miniports(self, /) -> NdisMiniports:
-        """
-        List the NDIS miniports on `ndis!ndisMiniportList`
-        (`!ndiskd.miniports`).
-        """
-    def ndis_nbl(self, /, address: int) -> NdisNbl:
-        """
-        Decode the NET_BUFFER_LIST at `address` and its NET_BUFFERs
-        (`!ndiskd.nbl`).
-        """
-    def ndis_nbl_chain(self, /, address: int) -> NdisNblChain:
-        """
-        Decode the NET_BUFFER_LISTs on the `Next` chain from `address`
-        (`!ndiskd.nbl -chain`).
-        """
-    def ndis_nbl_data(self, /, address: int, max_bytes: int = 65536) -> list[bytes]:
-        """
-        The data of each NET_BUFFER of the NET_BUFFER_LIST at `address`, up
-        to `max_bytes` of each, read through its MDLs' PFNs
-        (`!ndiskd.nbl -data`).
+        Show a NET_BUFFER_LIST and its NET_BUFFERs.
+        
+        Shows the _NET_BUFFER_LIST at the address: its next and parent NBLs, its
+        source handle with the miniport, filter module, or binding it names, its
+        pool, context, Flags and NblFlags (by NDIS_NBL_FLAGS_ name), status, and
+        child reference count, and each NET_BUFFER with its data length, data
+        offset, current MDL and offset into it, and MDL chain. -chain lists every
+        NBL on the Next chain from the address, with its NET_BUFFERs, bytes, source,
+        and status. -data dumps each NET_BUFFER's data, up to 64 KiB of it, read
+        through the MDLs' PFNs, so a buffer that is not mapped into system space
+        reads too. The command needs the PDB for ndis.sys.
         """
     def ndis_oids(self, /) -> NdisPendingOids:
         """
-        The OID requests that miniports and filter modules have not
-        completed (`!ndiskd.oid`).
+        Show the OID requests that miniports and filters have not completed.
+        
+        Reads the PendingOidRequest of every miniport on ndis!ndisMiniportList and
+        every filter module on ndis!ndisGlobalFilterList, and shows each request
+        with its owner, type, OID by its ntddndis.h name, and buffer. NDIS passes a
+        miniport or filter one OID request at a time, apart from direct OID
+        requests, so a request that stays here holds up the ones behind it. The
+        command needs the PDB for ndis.sys.
         """
-    def ndis_protocol(self, /, address: int) -> NdisProtocolDetail:
+    def ndis_protocol(self, /, address: int |None = None) -> NdisProtocolList |NdisProtocolDetail:
         """
-        Read the NDIS protocol block at `address` and its bindings
-        (`!ndiskd.protocol <address>`).
-        """
-    def ndis_protocols(self, /) -> NdisProtocols:
-        """
-        List the NDIS protocol drivers (`!ndiskd.protocol`).
+        List the NDIS protocol drivers, or show one and its bindings.
+        
+        Without an address, walks ndis!ndisProtocolList and shows each protocol's
+        _NDIS_PROTOCOL_BLOCK, name, image, NDIS version, driver version, and number
+        of bindings. With the address of a protocol block, as this list or
+        !ndiskd.miniport shows it, the command shows the protocol's driver context,
+        flags, and BindAdapterHandlerEx, and each binding (_NDIS_OPEN_BLOCK) with
+        the miniport it opened and the protocol's binding context. The command needs
+        the PDB for ndis.sys.
         """
     def object(self, /, object: int |str) -> ExecutiveObject:
         """
@@ -7419,21 +7717,36 @@ class Inspect:
         Get the processors that own or wait for each numbered queued spinlock
         (`!qlocks`).
         """
-    def rcdr_drivers(self, /) -> RcdrDrivers:
+    def rcdr_log(self, /, driver: str, log: int |None = None) -> RcdrLogDump:
         """
-        List the drivers the WPP recorder keeps logs for
-        (`!rcdrkd.rcdrloglist`).
+        Show a driver's WPP recorder log records, oldest first.
+        
+        Walks each of the driver's recorder logs, both the normal and the error
+        partition, back from the newest record, and shows the records of all of them
+        merged in the order the driver logged them (their sequence numbers come from
+        one counter per driver). -a shows only the log whose _WPP_AUTOLOG_HEADER you
+        give, as !rcdrkd.rcdrloglist lists it. Each record shows its sequence
+        number, its time when the log keeps timestamps, the log it is in, and its
+        message formatted from the trace message format (TMF) annotations in a
+        loaded PDB, or else the message GUID and number and the argument bytes.
+        Microsoft's public PDBs carry no TMF annotations; add your driver's private
+        PDB to the symbol path for its messages. The walk is !wdfkd.wdflogdump's:
+        the records share KMDF's IFR format.
         """
-    def rcdr_log(self, /, driver: str, log: int |None = None) -> RcdrDump:
+    def rcdr_log_list(self, /, driver: str |None = None) -> RcdrDriverList |RcdrLogs:
         """
-        Read the records of `driver`'s WPP recorder logs, merged oldest
-        first, or of the one log whose `_WPP_AUTOLOG_HEADER` is at `log`
-        (`!rcdrkd.rcdrlogdump`).
-        """
-    def rcdr_logs(self, /, driver: str) -> RcdrLogs:
-        """
-        List the WPP recorder logs of `driver`, by its name with or without
-        `.sys` (`!rcdrkd.rcdrloglist <driver>`).
+        List the drivers the WPP recorder keeps logs for, or one driver's logs.
+        
+        WppRecorder.sys keeps in-flight logs for each driver built with WPP's
+        recorder, such as the inbox USB, storage, and network drivers, and KMDF
+        drivers' own WPP messages. Without an argument, lists those drivers: each
+        one's recorder context (_WPP_AUTOLOG_CONTEXT), name, image base, and number
+        of logs. With a driver, given by its name (with or without .sys) or its
+        context, lists its logs: each _WPP_AUTOLOG_HEADER, its identifier, size, and
+        the offsets of its normal and error partitions, and marks the default log
+        and a deleted one. The recorder keeps no list of its drivers; the command
+        finds each through the bugcheck callback the recorder registers for it, so
+        it needs the PDB for WppRecorder.sys.
         """
     def read_tagged(self, /, tag: str) -> bytes:
         """
@@ -7509,8 +7822,18 @@ class Inspect:
         """
     def srb(self, /, address: int) -> Srb:
         """
-        Decode the SRB at `address`, extended or legacy
-        (`!storagekd.storsrb`).
+        Decode an SRB: its function, status, command, address, data, and sense.
+        
+        Decodes a STORAGE_REQUEST_BLOCK (an extended SRB, which StorPort, classpnp,
+        and miniports use on Windows 8 and later) or a legacy SCSI_REQUEST_BLOCK
+        with storport's public PDB: the SRB function, the SRB status with
+        QUEUE_FROZEN and AUTOSENSE_VALID, the SCSI status, the command its CDB holds
+        with its LBA and block count, the port, path, target, and LUN, the data
+        buffer and length, the IRP (OriginalRequest), the flags by SRB_FLAGS_ name,
+        the timeout, tag, and priority, the sense data when AUTOSENSE_VALID says it
+        is valid, the class, port, and miniport contexts, and an extended SRB's
+        extended data blocks. An address whose Function and Signature, or Length,
+        are not an SRB's is refused.
         """
     def ssdt(self, /) -> list[SsdtTable]:
         """
@@ -7522,26 +7845,55 @@ class Inspect:
         Get the thread states, wait reasons, and stacks, up to a limit
         (`!stacks`).
         """
-    def storport_adapter(self, /, address: int) -> StorAdapter:
+    def storport_adapter(self, /, address: int |None = None) -> StorDrivers |StorAdapter:
         """
-        Read the StorPort adapter whose extension or FDO is at `address`
-        (`!storagekd.storadapter <address>`).
-        """
-    def storport_adapters(self, /) -> StorDrivers:
-        """
-        List StorPort's drivers, their adapters, and their units
-        (`!storagekd.storadapter`).
+        List the StorPort adapters, or show one adapter and its units.
+        
+        Without an argument, walks storport's driver list (storport!RaidpPortData)
+        and each driver's adapters, and shows one line per adapter: the miniport
+        driver, the adapter extension (_RAID_ADAPTER_EXTENSION), the FDO, the PnP
+        state, the port device name, the PCI location, the number of units, and the
+        I/O state. With the address of an adapter extension or of its FDO, shows the
+        adapter: its driver, device objects, PnP and power state, the miniport's own
+        device extension (the HwDeviceExtension that StorPort passes to every Hw
+        routine, which you read with dt and the miniport's private PDB) and its
+        size, the flags (_FLAGS, _FLAGS2), the paging and crash-dump path counts,
+        each I/O gateway's outstanding and waiting requests, and each unit with its
+        bus/target/LUN, PDO, state, inquiry product, and I/O state. The command
+        needs storport's PDB. It stops each list at the head, a null or repeated
+        link, or 256 drivers or adapters, and says why it stopped early. Adapters of
+        storport's native NVMe path are listed but not decoded.
         """
     def storport_log(self, /, address: int) -> StorLog:
         """
-        Read the internal log of the StorPort adapter whose extension or FDO
-        is at `address`, oldest entry first (`!storagekd.storloglist`).
+        Show a StorPort adapter's internal log of requests, pauses, and resumes.
+        
+        Give the address of an adapter extension or of its FDO, as
+        !storagekd.storadapter lists them. StorPort keeps a ring of its last 256
+        events for each adapter (RaidLogList): requests it builds, starts, and sees
+        completed, pauses and resumes of the adapter and its units, busy and ready
+        notifications, timeouts, resets, and PnP and power IRPs. Each entry shows
+        its number, its time (UTC), the event, and for a request its IRP, SRB,
+        command, and SRB status, or else the four parameters StorPort logged, a code
+        address by symbol. Without a range, the command shows the last 50 entries;
+        <start> shows entries from that number, <start> <end> that range, and L
+        <count> how many.
         """
     def storport_unit(self, /, address: int) -> StorUnit:
         """
-        Read the StorPort unit whose extension or PDO is at `address`, with
-        its queue and the requests the miniport holds
-        (`!storagekd.storunit`).
+        Show a StorPort logical unit, its queue, and the requests the miniport
+        holds.
+        
+        Give the address of a unit extension (_RAID_UNIT_EXTENSION), as
+        !storagekd.storadapter lists them, or of the unit's PDO. Shows the unit's
+        bus/target/LUN, the inquiry vendor, product and revision, the adapter, the
+        PnP and power state, the flags, the miniport's per-unit extension
+        (StorPortGetLogicalUnit), and its device queue: the depth, whether it is
+        frozen or locked, the pause and busy counts, and the requests waiting in
+        storport. Then it lists each request that storport handed to the miniport
+        and has not seen completed, from the unit's per-processor pending queues,
+        with its _EXTENDED_REQUEST_BLOCK, IRP and SRB; use !irp on the IRP. It lists
+        at most 256 requests and says why a list stopped early.
         """
     def system_ptes(self, /, free_runs: bool = False) -> SystemPtes:
         """
@@ -7589,11 +7941,18 @@ class Inspect:
         Get the target, kernel, symbol, processor, and debugger version
         information (`vertarget`).
         """
-    def virtio(self, /) -> list[VirtioDevice]:
+    def virtio(self, /, address: int |None = None, module: str |None = None) -> list[VirtioFunction] |VirtioDriver:
         """
-        List the virtio PCI functions (`!virtio`), with the state of each
-        queue where the driver's private PDB types it. A queue's `progress`
-        counters only grow, so two calls show what moved in between.
+        List the virtio devices and the state of their virtqueues.
+        
+        Lists the virtio PCI functions with their device type and driver. With a
+        virtio-win driver's private PDB loaded, it also shows each queue's
+        indexes and state: what the device holds, what it returned that the
+        driver has not taken back, and what the driver has not published or
+        kicked. Moved compares with the previous look in guest time, and from the
+        second look the state names a queue that did not move. With an address,
+        shows the virtio_device there, typed by the module you give or by the
+        driver that owns it. See the virtio devices guide.
         """
     def vm(self, /, include_processes: bool = True) -> VmStatistics:
         """
@@ -7603,75 +7962,198 @@ class Inspect:
         """
         Decode a volume parameter block (`!vpb`).
         """
-    def vring(self, /, address: int, module: str |None = None) -> VirtioRing:
+    def vring(self, /, address: int |None = None, module: str |None = None, kind: str |None = None, raw: tuple[int, int, int, int] |None = None) -> VirtioRing:
         """
-        Read the virtio-win virtqueue at `address` (`!vring`): its ring, the
-        buffers the device holds or returned, and the request each carries.
-        `module` names the driver whose PDB types it, by default the one its
-        `add_buf` routine is in.
+        Show a virtqueue's ring, its signalling, and its outstanding buffers.
+        
+        Give a virtqueue address that !virtio lists. Shows the ring's indexes and
+        state, when the driver wants interrupts and the device wants
+        notifications (and for a split ring whether an interrupt was due), and up
+        to 64 buffers the device holds or returned, with their descriptors (W
+        device-writable, N continues, I indirect table). Under each buffer, a line
+        decodes the request and the device's answer from the virtio
+        specification's layouts, such as a block sector and status or a SCSI
+        command and its sense. /r reads a split ring from its size and kernel
+        addresses for a driver without a PDB, and /t names what its buffers hold:
+        blk, scsi, scsi-control, scsi-event, net, net-control, gpu, or vsock. See
+        the virtio devices guide.
         """
-    def wdf_crash_drivers(self, /) -> list[WdfDumpDriver]:
+    def wdf_crash_dump(self, /, loader: bool |None = None) -> WdfLogDump |list[WdfDumpDriver]:
         """
-        List the KMDF client drivers that KMDF recorded in a crash dump, with
-        their version and globals (`!wdfkd.wdfcrashdump loader`).
+        Show the KMDF data in a crash dump: one driver's In-Flight Recorder log, or
+        the client drivers.
+        
+        When Windows writes a crash dump, Wdf01000 copies one client driver's
+        In-Flight Recorder log into the dump's tagged data (WdfDumpGuid): the log of
+        the driver whose code the bugcheck parameters point to, or of a driver set
+        to keep its log in minidumps, or else of the last KMDF driver that ran on
+        the processor that crashed. A minidump has no other copy of the log. Without
+        an argument or with log, the command shows that log, oldest record first, as
+        !wdfkd.wdflogdump shows a log in memory. Unlike WinDbg, it shows a log's
+        only record once, and it keeps the oldest record that survives in a log that
+        has wrapped. With loader, it lists the client drivers that Wdf01000 recorded
+        (WdfDumpGuid2), with the KMDF version each bound to and its
+        _FX_DRIVER_GLOBALS; the first entry is the framework itself. The command
+        needs the PDB for Wdf01000.
         """
-    def wdf_crash_log(self, /) -> WdfLog:
+    def wdf_device(self, /, handle: int) -> WdfDeviceDetail:
         """
-        Get the In-Flight Recorder log of the one KMDF client driver that
-        KMDF copied into a crash dump (`!wdfkd.wdfcrashdump`): the driver
-        that the bugcheck parameters point to, or else the last one that ran
-        on the processor that crashed. A minidump has no other copy of it.
-        """
-    def wdf_device(self, /, handle: int) -> WdfDevice:
-        """
-        Get the device objects, state machines, and queues of a WDFDEVICE
-        (`!wdfkd.wdfdevice`).
+        Show a WDFDEVICE and its device objects, state machines, queues, and I/O
+        targets.
+        
+        Shows the kind of the device (FDO, filter, PDO, or control), its WDM device
+        object, the device object that it is attached to, and the PDO of the stack.
+        It also shows the current states of the PnP, power, and power policy state
+        machines (_WDF_DEVICE_PNP_STATE, _WDF_DEVICE_POWER_STATE,
+        _WDF_DEVICE_POWER_POLICY_STATE), and the device and system power states. For
+        a PDO, it shows the parent device, and for an FDO, the child lists and the
+        default and self I/O targets. For each queue of the I/O package, it shows
+        the dispatch type, the power management, and the counts of pending and
+        driver-owned requests, and it marks the default queue. For each I/O target
+        of the device (m_IoTargetsList), it shows the WDFIOTARGET handle, the kind
+        of target, its state, and the device object that it sends to, and it marks
+        the default target. Pass a WDFQUEUE to !wdfkd.wdfqueue and a WDFIOTARGET to
+        !wdfkd.wdfiotarget.
         """
     def wdf_driver_info(self, /, driver: str) -> WdfDriverInfo:
         """
-        Get a KMDF client driver and its device objects, with the WDFDEVICEs
-        behind them (`!wdfkd.wdfdriverinfo`). Use the driver name that
-        `wdf_loader` shows, in any case and with or without `.sys`.
+        Show a KMDF client driver and its WDF devices.
+        
+        Give the driver name as !wdfkd.wdfldr lists it. The name is not
+        case-sensitive, and `.sys` is optional. The command shows the DRIVER_OBJECT,
+        the FxDriver, the WDFDRIVER handle, the _FX_DRIVER_GLOBALS, the KMDF
+        version, the registry path, and the image. Then it shows each device object
+        on the DeviceObject/NextDevice chain of the driver object, with the related
+        WDFDEVICE and its kind and PnP state. A device object links to its WDFDEVICE
+        through its DeviceExtension, which KMDF sets to point to the first context
+        of the device. The command checks the context header, the type and owner of
+        the object, and the device object of the FxDevice, and if a check fails, it
+        lists the device object with the reason.
         """
-    def wdf_handle(self, /, handle: int) -> WdfHandle:
+    def wdf_handle(self, /, handle: int) -> WdfObject:
         """
-        Decode a WDF handle and the object that it identifies
-        (`!wdfkd.wdfhandle`), or raise an exception if the value is not the
-        handle of a live KMDF object.
+        Decode a WDF handle and show its object.
+        
+        A handle is the address of its object, XORed with ~7. An offset handle has
+        bit 0 set and points to a WDFOBJECT_OFFSET value inside the object, which
+        the command subtracts from the address that the handle points to. The
+        command shows the FxObject, its type (FX_OBJECT_TYPES), size, reference
+        count, state (FxObjectState), flags, owning driver, and parent, and each
+        context with its type name, size, and address. Then it names the command
+        that shows the object in full: !wdfkd.wdfdevice, !wdfkd.wdfqueue,
+        !wdfkd.wdfrequest, or !wdfkd.wdfiotarget for those types,
+        !wdfkd.wdfdriverinfo for a WDFDRIVER, and !wdfkd.wdfobject, which adds the
+        children of the object, for any other type. It shows an error if the value
+        does not decode to a kernel address, or if the type, state, size, context
+        header, or owning driver of the object is not valid.
         """
-    def wdf_io_target(self, /, handle: int) -> WdfIoTarget:
+    def wdf_io_target(self, /, handle: int) -> WdfIoTargetDetail:
         """
-        Get a WDFIOTARGET: its state, the device object it sends to, and
-        the requests sent to it (`!wdfkd.wdfiotarget`).
+        Show a WDFIOTARGET, the device object it sends to, and the requests sent to
+        it.
+        
+        Shows the kind of the target: local (in the device's own stack, as the
+        default target is), remote (a target that the driver opened with
+        WdfIoTargetOpen), self, or a USB device or USB pipe, and whether it is the
+        default I/O target of its device. It shows the state (_WDF_IO_TARGET_STATE),
+        the open state of a remote target, the WDFDEVICE that the target belongs to,
+        the device object that the target sends requests to and the driver of that
+        device object, the PDO of that stack, the file object, the I/O count, and
+        the stack size. Then it lists the requests on three lists: the requests sent
+        to the target and not completed (m_SentIoListHead), the requests sent with
+        WDF_REQUEST_SEND_OPTION_IGNORE_TARGET_STATE while the target was not started
+        (m_IgnoredIoListHead), and the requests that the target holds until it
+        starts (m_PendedQueue). For each request, it shows the WDFREQUEST handle,
+        the FxRequest, and the IRP. A request without a handle is the framework's
+        own, such as the request that a synchronous send builds. A list stops at a
+        request whose m_Target is not this target, with the reason.
         """
     def wdf_loader(self, /) -> WdfLoader:
         """
-        Get the KMDF client drivers on the driver list of
-        `Wdf01000!FxLibraryGlobals` (`!wdfkd.wdfldr`).
+        List the KMDF client drivers.
+        
+        Walks the list at Wdf01000!FxLibraryGlobals.FxDriverGlobalsList. For each
+        client driver, it shows the name, the KMDF version that the driver bound to
+        (WdfBindInfo), the _FX_DRIVER_GLOBALS, the WDFDRIVER handle, the
+        DRIVER_OBJECT, and whether the driver has an In-Flight Recorder log. The
+        command needs the PDB for Wdf01000. The walk continues only while the Blink
+        of each entry points back to the entry before it. A client has an empty
+        DriverName if it bound to KMDF but did not create an FxDriver, and the
+        command then lists the client by the name of its DRIVER_OBJECT, which you
+        also use with !wdfkd.wdfdriverinfo and !wdfkd.wdflogdump. When a client name
+        is not printable, or the FxDriver of a client fails the checks of its type,
+        owner, or handle, the command lists the client with the problem.
         """
-    def wdf_log(self, /, driver: str) -> WdfLog:
+    def wdf_log(self, /, driver: str) -> WdfLogDump:
         """
-        Get the In-Flight Recorder log of a KMDF client driver, oldest record
-        first (`!wdfkd.wdflogdump`). A record whose TMF message a loaded PDB
-        declares is formatted from that message.
+        Show the In-Flight Recorder log of a KMDF driver, oldest record first.
+        
+        Reads the IFR log of the driver (_FX_DRIVER_GLOBALS.WdfLogHeader). The
+        command walks the records back from the newest record along PrevOffset, and
+        stops at the first record written or at records that newer records
+        overwrote. For each record, it shows the sequence number, the UTC time (only
+        when the log keeps timestamps), the function, and the message. The command
+        formats the message from the trace message format (TMF) annotations in the
+        PDB for Wdf01000. For a record with a message that no loaded PDB declares,
+        or with arguments that do not fit the message, it shows the message GUID,
+        the message number, and the argument bytes. The command checks the header
+        (its GUID, base, and size) and each record (signature, length, position, and
+        sequence), and the walk stops at the first item that fails a check, with the
+        reason.
         """
-    def wdf_object(self, /, object: int) -> WdfObject:
+    def wdf_object(self, /, object: int) -> WdfObjectDetail:
         """
-        Get a KMDF object's header, contexts, and children
-        (`!wdfkd.wdfobject`). Pass its handle or the address of its
-        `FxObject`; raise an exception if the value names no live KMDF
-        object.
+        Show a KMDF object's header, contexts, and children.
+        
+        Give a handle, as for !wdfkd.wdfhandle, or the address of an FxObject. The
+        command shows what !wdfkd.wdfhandle shows: the handle, the type
+        (FX_OBJECT_TYPES), size, reference count, state (FxObjectState), flags
+        (FXOBJECT_FLAGS), owning driver, and parent, and each context with its type
+        name, size, and address. Then it lists the children of the object
+        (m_ChildListHead), each with its handle and type. The framework's own
+        children, such as the packages of a device, have no handle. Use the command
+        for an object whose type has no command of its own, such as a WDFMEMORY,
+        WDFTIMER, or WDFWORKITEM. The object must pass the same checks as for
+        !wdfkd.wdfhandle, and the list of children stops at a child whose
+        m_ParentObject is not this object.
         """
-    def wdf_queue(self, /, handle: int) -> WdfQueue:
+    def wdf_queue(self, /, handle: int) -> WdfQueueDetail:
         """
-        Get the configuration, state, callbacks, and requests of a WDFQUEUE
-        (`!wdfkd.wdfqueue`).
+        Show a WDFQUEUE and its configuration, state, callbacks, and requests.
+        
+        Shows the dispatch type of the queue, the state bits (_FX_IO_QUEUE_STATE),
+        the power state, and the power management. It also shows the execution
+        level, the synchronization scope, the request counts, and the Evt callbacks
+        that the driver set. Then it shows the requests on three lists: the requests
+        that wait in the queue, the requests that the driver marked cancelable, and
+        the requests presented to the driver. For each request, it shows the
+        WDFREQUEST handle, which you pass to !wdfkd.wdfrequest, the FxRequest, and
+        the IRP. If a request is not valid, the command stops that list at the
+        request and shows the reason.
         """
     def wdf_request(self, /, handle: int) -> WdfRequestDetail:
         """
-        Get a WDFREQUEST: its IRP and current stack location, the queue it
-        came from, the I/O target it was sent to, and its cancel and
-        completion routines (`!wdfkd.wdfrequest`).
+        Show a WDFREQUEST, its IRP, its queue, and the I/O target it was sent to.
+        
+        Shows the FxRequest, its owning driver, parent, reference count, and object
+        state. For the IRP of the request, it shows the current stack location: the
+        major and minor function, the device object and its driver, and the buffer
+        lengths of a read, a write, or a device control with its control code. It
+        also shows the system buffer, the user buffer, and the MDL of the IRP; pass
+        the IRP to !irp for all of its stack locations. If the IRP was freed or
+        reused, the command shows why it is not a live IRP. The command shows
+        whether the IRP came from the I/O manager or the framework or the driver
+        allocated it (FxRequestAllocationSource), whether the request is completed
+        or canceled, and whether its queue presented it to the driver. It shows the
+        queue that the request came from or waits in (m_IoQueue) and the cancel-safe
+        queue that holds the IRP: the requests that wait in the queue, the requests
+        that the driver marked cancelable with its EvtRequestCancel routine, which
+        the command shows, or the requests that an I/O target holds until it starts.
+        A request that none of these holds cannot be canceled. For a request that
+        the driver sent, it shows the I/O target (m_Target), the completion routine
+        and its context, and the target flags (FxRequestTargetFlags). KMDF sets the
+        verifier flags (FxRequestVerifierFlags) only when its verifier is on for the
+        driver.
         """
     def work_queues(self, /, include_stacks: bool = False, queue_types: Sequence[str] |None = None) -> WorkQueues:
         """
@@ -9416,26 +9898,6 @@ class NameIterator:
     def __next__(self, /) -> str: ...
 
 @final
-class NdisBinding(BaseRecord):
-    """
-    A protocol's binding, with the miniport it opened.
-    """
-    @property
-    def context(self, /) -> int:
-        """
-        `ProtocolBindingContext`.
-        """
-    @property
-    def miniport(self, /) -> int: ...
-    @property
-    def miniport_name(self, /) -> str |None: ...
-    @property
-    def open(self, /) -> int:
-        """
-        The `_NDIS_OPEN_BLOCK`.
-        """
-
-@final
 class NdisDriver(BaseRecord):
     """
     A miniport driver (`_NDIS_M_DRIVER_BLOCK`).
@@ -9447,22 +9909,22 @@ class NdisDriver(BaseRecord):
     @property
     def driver_version(self, /) -> str |None:
         """
-        Its own version, from its NDIS 6 characteristics.
+        The driver's own version, from its NDIS 6 characteristics.
         """
     @property
     def image_name(self, /) -> str: ...
     @property
     def miniports(self, /) -> list[int]:
         """
-        Its miniports, on its `MiniportQueue`.
+        The miniports on the driver's `MiniportQueue`.
         """
     @property
     def miniports_stopped(self, /) -> str |None: ...
     @property
     def module(self, /) -> str |None:
         """
-        The loaded module the driver's code is in, the name its PDB's
-        types go by.
+        The loaded module the driver's code is in, the name its PDB's types
+        go by.
         """
     @property
     def ndis_version(self, /) -> str:
@@ -9473,16 +9935,25 @@ class NdisDriver(BaseRecord):
     def service_name(self, /) -> str: ...
 
 @final
-class NdisDrivers(BaseRecord):
+class NdisDriverList(BaseRecord):
     """
-    The miniport drivers on `ndis!ndisMiniDriverList`.
+    The miniport drivers on `ndis!ndisMiniDriverList` (`!ndiskd.minidriver`).
     """
     @property
-    def drivers(self, /) -> list[NdisDriver]: ...
+    def drivers(self, /) -> list[NdisDriver]:
+        """
+        The drivers whose block reads.
+        """
     @property
-    def stopped(self, /) -> str |None: ...
+    def stopped(self, /) -> str |None:
+        """
+        Why the walk stopped before the end of the list.
+        """
     @property
-    def unreadable(self, /) -> list[NdisUnreadable]: ...
+    def unreadable(self, /) -> list[NdisUnreadable]:
+        """
+        The driver blocks that do not read.
+        """
 
 @final
 class NdisFilter(BaseRecord):
@@ -9502,11 +9973,20 @@ class NdisFilter(BaseRecord):
         The `_NDIS_FILTER_DRIVER_BLOCK`.
         """
     @property
-    def driver_image(self, /) -> str |None: ...
+    def driver_image(self, /) -> str |None:
+        """
+        The filter driver's `ImageName`.
+        """
     @property
-    def miniport(self, /) -> int: ...
+    def miniport(self, /) -> int:
+        """
+        The miniport the filter module is attached to.
+        """
     @property
-    def miniport_name(self, /) -> str |None: ...
+    def miniport_name(self, /) -> str |None:
+        """
+        That miniport's friendly name.
+        """
     @property
     def name(self, /) -> str |None:
         """
@@ -9528,7 +10008,7 @@ class NdisFilter(BaseRecord):
 @final
 class NdisFilterDetail(BaseRecord):
     """
-    One filter module in detail (`!ndiskd.filter`).
+    One filter module in detail (`!ndiskd.filter <address>`).
     """
     @property
     def driver_name(self, /) -> str |None:
@@ -9538,7 +10018,8 @@ class NdisFilterDetail(BaseRecord):
     @property
     def dropped_receive_nbls(self, /) -> int:
         """
-        What NDIS dropped because the filter was not running.
+        NBLs and status indications NDIS dropped because the filter was not
+        running.
         """
     @property
     def dropped_send_nbls(self, /) -> int: ...
@@ -9551,15 +10032,15 @@ class NdisFilterDetail(BaseRecord):
     @property
     def higher(self, /) -> int:
         """
-        The filter modules above and below it; null at the top and at the
-        bottom.
+        The filter modules above and below it on the miniport's stack; null
+        at the top and at the bottom.
         """
     @property
     def if_index(self, /) -> int: ...
     @property
     def listed(self, /) -> bool:
         """
-        Whether it is on `ndis!ndisGlobalFilterList`.
+        Whether the filter is on `ndis!ndisGlobalFilterList`.
         """
     @property
     def lower(self, /) -> int: ...
@@ -9585,7 +10066,8 @@ class NdisFilterDriver(BaseRecord):
     @property
     def context(self, /) -> int:
         """
-        `FilterDriverContext`.
+        `FilterDriverContext`, the context the driver gave
+        NdisFRegisterFilterDriver.
         """
     @property
     def driver_object(self, /) -> int: ...
@@ -9594,14 +10076,18 @@ class NdisFilterDriver(BaseRecord):
     @property
     def filters(self, /) -> list[int]:
         """
-        Its filter modules, one for each miniport it is attached to.
+        The filter modules on the driver's `FilterQueue`, one for each
+        miniport it is attached to.
         """
     @property
     def filters_stopped(self, /) -> str |None: ...
     @property
     def flags(self, /) -> int: ...
     @property
-    def friendly_name(self, /) -> str: ...
+    def friendly_name(self, /) -> str:
+        """
+        `FriendlyName`, from the characteristics the driver registered.
+        """
     @property
     def image_name(self, /) -> str: ...
     @property
@@ -9613,56 +10099,88 @@ class NdisFilterDriver(BaseRecord):
     @property
     def unique_name(self, /) -> str:
         """
-        The filter's GUID.
+        `UniqueName`, the filter's GUID.
         """
 
 @final
 class NdisFilterDriverDetail(BaseRecord):
     """
-    A filter driver and its filter modules (`!ndiskd.filterdriver`).
+    A filter driver and its filter modules (`!ndiskd.filterdriver
+    <address>`).
     """
     @property
     def driver(self, /) -> NdisFilterDriver: ...
     @property
-    def filters(self, /) -> list[NdisFilter]: ...
+    def filters(self, /) -> list[NdisFilter]:
+        """
+        Its filter modules whose block reads.
+        """
     @property
-    def unreadable(self, /) -> list[NdisUnreadable]: ...
+    def unreadable(self, /) -> list[NdisUnreadable]:
+        """
+        Its filter blocks that do not read.
+        """
 
 @final
-class NdisFilterDrivers(BaseRecord):
+class NdisFilterDriverList(BaseRecord):
     """
-    The filter drivers on `ndis!ndisFilterDriverList`.
+    The filter drivers on `ndis!ndisFilterDriverList`
+    (`!ndiskd.filterdriver`).
     """
     @property
-    def drivers(self, /) -> list[NdisFilterDriver]: ...
+    def drivers(self, /) -> list[NdisFilterDriver]:
+        """
+        The filter drivers whose block reads.
+        """
     @property
-    def stopped(self, /) -> str |None: ...
+    def stopped(self, /) -> str |None:
+        """
+        Why the walk stopped before the end of the list.
+        """
     @property
-    def unreadable(self, /) -> list[NdisUnreadable]: ...
+    def unreadable(self, /) -> list[NdisUnreadable]:
+        """
+        The driver blocks that do not read.
+        """
 
 @final
-class NdisFilters(BaseRecord):
+class NdisFilterList(BaseRecord):
     """
-    The filter modules on `ndis!ndisGlobalFilterList`.
+    The filter modules on `ndis!ndisGlobalFilterList` (`!ndiskd.filter`).
     """
     @property
-    def filters(self, /) -> list[NdisFilter]: ...
+    def filters(self, /) -> list[NdisFilter]:
+        """
+        The filter modules whose block reads.
+        """
     @property
-    def stopped(self, /) -> str |None: ...
+    def stopped(self, /) -> str |None:
+        """
+        Why the walk stopped before the end of the list.
+        """
     @property
-    def unreadable(self, /) -> list[NdisUnreadable]: ...
+    def unreadable(self, /) -> list[NdisUnreadable]:
+        """
+        The filter blocks that do not read.
+        """
 
 @final
 class NdisMinidriver(BaseRecord):
     """
-    A miniport driver and its miniports (`!ndiskd.minidriver`).
+    A miniport driver and its miniports (`!ndiskd.minidriver <address>`).
     """
     @property
     def driver(self, /) -> NdisDriver: ...
     @property
-    def miniports(self, /) -> list[NdisMiniport]: ...
+    def miniports(self, /) -> list[NdisMiniport]:
+        """
+        Its miniports whose block reads.
+        """
     @property
-    def unreadable(self, /) -> list[NdisUnreadable]: ...
+    def unreadable(self, /) -> list[NdisUnreadable]:
+        """
+        Its miniports whose block does not read.
+        """
 
 @final
 class NdisMiniport(BaseRecord):
@@ -9681,12 +10199,12 @@ class NdisMiniport(BaseRecord):
     @property
     def driver_name(self, /) -> str |None:
         """
-        The miniport driver's service name.
+        The miniport driver's service name, from its `_NDIS_M_DRIVER_BLOCK`.
         """
     @property
     def friendly_name(self, /) -> str |None:
         """
-        The adapter's friendly name.
+        `pAdapterInstanceName`, the adapter's friendly name.
         """
     @property
     def if_index(self, /) -> int: ...
@@ -9695,7 +10213,8 @@ class NdisMiniport(BaseRecord):
     @property
     def name(self, /) -> str:
         """
-        `MiniportName`, the adapter's device name.
+        `MiniportName`, the adapter's device name (its `{GUID}` in the
+        `DEVICE` directory).
         """
     @property
     def pnp_state(self, /) -> str: ...
@@ -9722,17 +10241,19 @@ class NdisMiniport(BaseRecord):
 @final
 class NdisMiniportDetail(BaseRecord):
     """
-    One miniport in detail (`!ndiskd.miniport`).
+    One miniport in detail (`!ndiskd.miniport <address>`).
     """
     @property
     def adapter_context(self, /) -> int:
         """
-        `MiniportAdapterContext`, the miniport driver's own context.
+        `MiniportAdapterContext`, the context the miniport driver gave
+        NdisMSetMiniportAttributes.
         """
     @property
     def device_object(self, /) -> int:
         """
-        The FDO NDIS created; null for a virtual miniport.
+        The functional device object NDIS created; null for a virtual
+        miniport.
         """
     @property
     def driver(self, /) -> NdisDriver |None: ...
@@ -9755,18 +10276,24 @@ class NdisMiniportDetail(BaseRecord):
     @property
     def instance_id(self, /) -> str |None: ...
     @property
-    def internal_resets(self, /) -> int: ...
+    def internal_resets(self, /) -> int:
+        """
+        `InternalResetCount`.
+        """
     @property
     def listed(self, /) -> bool:
         """
-        Whether it is on `ndis!ndisMiniportList`.
+        Whether the miniport is on `ndis!ndisMiniportList`.
         """
     @property
     def medium(self, /) -> str: ...
     @property
     def miniport(self, /) -> NdisMiniport: ...
     @property
-    def miniport_resets(self, /) -> int: ...
+    def miniport_resets(self, /) -> int:
+        """
+        `MiniportResetCount`.
+        """
     @property
     def ndis_version(self, /) -> str: ...
     @property
@@ -9782,9 +10309,15 @@ class NdisMiniportDetail(BaseRecord):
     @property
     def pdo(self, /) -> int: ...
     @property
-    def pending_oid(self, /) -> NdisOidRequest |None: ...
+    def pending_oid(self, /) -> NdisOidRequest |None:
+        """
+        The OID request the miniport has not completed.
+        """
     @property
-    def pending_oid_error(self, /) -> str |None: ...
+    def pending_oid_error(self, /) -> str |None:
+        """
+        Why `pending_oid` does not decode.
+        """
     @property
     def pending_return_nbls(self, /) -> int:
         """
@@ -9803,24 +10336,30 @@ class NdisMiniportDetail(BaseRecord):
         """
 
 @final
-class NdisMiniports(BaseRecord):
+class NdisMiniportList(BaseRecord):
     """
-    The miniports on `ndis!ndisMiniportList`.
+    The miniports on `ndis!ndisMiniportList` (`!ndiskd.miniports`).
     """
     @property
-    def miniports(self, /) -> list[NdisMiniport]: ...
+    def miniports(self, /) -> list[NdisMiniport]:
+        """
+        The miniports whose block reads.
+        """
     @property
     def stopped(self, /) -> str |None:
         """
         Why the walk stopped before the end of the list.
         """
     @property
-    def unreadable(self, /) -> list[NdisUnreadable]: ...
+    def unreadable(self, /) -> list[NdisUnreadable]:
+        """
+        The miniports whose block does not read.
+        """
 
 @final
 class NdisNbl(BaseRecord):
     """
-    A `_NET_BUFFER_LIST` (`!ndiskd.nbl`).
+    A `_NET_BUFFER_LIST` and its NET_BUFFERs (`!ndiskd.nbl`).
     """
     @property
     def address(self, /) -> int: ...
@@ -9850,33 +10389,43 @@ class NdisNbl(BaseRecord):
     @property
     def source(self, /) -> str |None:
         """
-        What `source_handle` is, when NDIS knows it.
+        What `source_handle` is, when it is a miniport, filter module, or
+        binding NDIS knows.
         """
     @property
     def source_handle(self, /) -> int:
         """
-        The NDIS handle of the miniport, filter module, or binding that
-        owns it on its way.
+        `SourceHandle`, the NDIS handle of the miniport, filter module, or
+        binding that owns the NBL on its way.
         """
     @property
-    def status(self, /) -> int: ...
+    def status(self, /) -> int:
+        """
+        `Status`, the NDIS_STATUS the NBL completes with.
+        """
     @property
-    def status_name(self, /) -> str |None: ...
+    def status_name(self, /) -> str |None:
+        """
+        The NTSTATUS name of `status`.
+        """
 
 @final
 class NdisNblChain(BaseRecord):
     """
-    The NBLs on a `Next` chain.
+    The NBLs on a `Next` chain (`!ndiskd.nbl -chain`).
     """
     @property
     def nbls(self, /) -> list[NdisNbl]: ...
     @property
-    def stopped(self, /) -> str |None: ...
+    def stopped(self, /) -> str |None:
+        """
+        Why the walk stopped short.
+        """
 
 @final
 class NdisNetBuffer(BaseRecord):
     """
-    A `_NET_BUFFER`.
+    A `_NET_BUFFER`: one frame of a NET_BUFFER_LIST.
     """
     @property
     def address(self, /) -> int: ...
@@ -9888,11 +10437,23 @@ class NdisNetBuffer(BaseRecord):
     @property
     def current_mdl_offset(self, /) -> int: ...
     @property
+    def data(self, /) -> bytes |None:
+        """
+        Its data, up to 64 KiB of it, read through the MDLs' PFNs, when
+        asked for (`!ndiskd.nbl -data`).
+        """
+    @property
+    def data_error(self, /) -> str |None:
+        """
+        Why the data asked for does not read.
+        """
+    @property
     def data_length(self, /) -> int: ...
     @property
     def data_offset(self, /) -> int:
         """
-        Where the data starts from the start of `mdl_chain`.
+        Where the data starts from the start of `mdl_chain`; the bytes
+        before it are the backfill.
         """
     @property
     def mdl_chain(self, /) -> int: ...
@@ -9911,7 +10472,7 @@ class NdisOidRequest(BaseRecord):
     @property
     def buffer_length(self, /) -> int:
         """
-        `InformationBufferLength`, or a method request's input length.
+        `InformationBufferLength`, or a method request's `InputBufferLength`.
         """
     @property
     def method_id(self, /) -> int |None:
@@ -9935,12 +10496,13 @@ class NdisOidRequest(BaseRecord):
     @property
     def request_type(self, /) -> str:
         """
-        `QueryInformation`, `SetInformation`, `Method`, ...
+        `RequestType` without its `NdisRequest` prefix (`QueryInformation`,
+        `SetInformation`, `Method`, ...).
         """
     @property
     def timeout(self, /) -> int:
         """
-        Seconds; 0 lets NDIS pick one.
+        `Timeout` in seconds; 0 lets NDIS pick one.
         """
 
 @final
@@ -9953,7 +10515,7 @@ class NdisOpen(BaseRecord):
     @property
     def context(self, /) -> int:
         """
-        `ProtocolBindingContext`.
+        `ProtocolBindingContext`, the protocol driver's own context.
         """
     @property
     def protocol(self, /) -> int:
@@ -9979,12 +10541,12 @@ class NdisPendingOid(BaseRecord):
         Why `request` does not decode.
         """
     @property
-    def name(self, /) -> str |None: ...
+    def name(self, /) -> str |None:
+        """
+        The miniport's friendly name, or the filter module's.
+        """
     @property
-    def owner(self, /) -> str:
-        """
-        `miniport` or `filter`.
-        """
+    def owner(self, /) -> str: ...
     @property
     def request(self, /) -> NdisOidRequest |None: ...
 
@@ -10019,12 +10581,13 @@ class NdisProtocol(BaseRecord):
     @property
     def bind_handler(self, /) -> int:
         """
-        `BindAdapterHandlerEx`.
+        `BindAdapterHandlerEx`, which places the protocol's code.
         """
     @property
     def context(self, /) -> int:
         """
-        `ProtocolDriverContext`.
+        `ProtocolDriverContext`, the context the driver gave
+        NdisRegisterProtocolDriver.
         """
     @property
     def driver_version(self, /) -> str: ...
@@ -10039,15 +10602,36 @@ class NdisProtocol(BaseRecord):
     @property
     def opens(self, /) -> list[int]:
         """
-        Its bindings (`_NDIS_OPEN_BLOCK`), on its `OpenQueue`.
+        Its bindings (`_NDIS_OPEN_BLOCK`) on its `OpenQueue`, along
+        `ProtocolNextOpen`.
         """
     @property
     def opens_stopped(self, /) -> str |None: ...
 
 @final
+class NdisProtocolBinding(BaseRecord):
+    """
+    A protocol's binding as the protocol sees it: the miniport it opened.
+    """
+    @property
+    def context(self, /) -> int:
+        """
+        `ProtocolBindingContext`, the protocol's own context for the binding.
+        """
+    @property
+    def miniport(self, /) -> int: ...
+    @property
+    def miniport_name(self, /) -> str |None: ...
+    @property
+    def open(self, /) -> int:
+        """
+        The `_NDIS_OPEN_BLOCK`.
+        """
+
+@final
 class NdisProtocolDetail(BaseRecord):
     """
-    One protocol driver in detail (`!ndiskd.protocol`).
+    One protocol driver in detail (`!ndiskd.protocol <address>`).
     """
     @property
     def bind_handler_name(self, /) -> str |None:
@@ -10055,28 +10639,40 @@ class NdisProtocolDetail(BaseRecord):
         `BindAdapterHandlerEx` as a symbol.
         """
     @property
-    def bindings(self, /) -> list[NdisBinding]: ...
+    def bindings(self, /) -> list[NdisProtocolBinding]: ...
     @property
-    def bindings_stopped(self, /) -> str |None: ...
+    def bindings_stopped(self, /) -> str |None:
+        """
+        Why the binding walk stopped short.
+        """
     @property
     def listed(self, /) -> bool:
         """
-        Whether it is on `ndis!ndisProtocolList`.
+        Whether the protocol is on `ndis!ndisProtocolList`.
         """
     @property
     def protocol(self, /) -> NdisProtocol: ...
 
 @final
-class NdisProtocols(BaseRecord):
+class NdisProtocolList(BaseRecord):
     """
-    The protocol drivers on `ndis!ndisProtocolList`.
+    The protocol drivers on `ndis!ndisProtocolList` (`!ndiskd.protocol`).
     """
     @property
-    def protocols(self, /) -> list[NdisProtocol]: ...
+    def protocols(self, /) -> list[NdisProtocol]:
+        """
+        The protocols whose block reads.
+        """
     @property
-    def stopped(self, /) -> str |None: ...
+    def stopped(self, /) -> str |None:
+        """
+        Why the walk stopped before the end of the list.
+        """
     @property
-    def unreadable(self, /) -> list[NdisUnreadable]: ...
+    def unreadable(self, /) -> list[NdisUnreadable]:
+        """
+        The protocol blocks that do not read.
+        """
 
 @final
 class NdisUnreadable(BaseRecord):
@@ -10521,6 +11117,81 @@ class Operand(BaseRecord):
     def text(self, /) -> str:
         """
         The operand as `asm` shows it.
+        """
+
+@final
+class PackedQueueState(BaseRecord):
+    """
+    What the driver keeps of a packed queue.
+    """
+    @property
+    def avail_wrap(self, /) -> bool: ...
+    @property
+    def desc(self, /) -> int:
+        """
+        The descriptor ring.
+        """
+    @property
+    def desc_state(self, /) -> int:
+        """
+        The driver's per-buffer state (`desc_state`), by buffer ID.
+        """
+    @property
+    def device_event(self, /) -> int: ...
+    @property
+    def driver_event(self, /) -> int:
+        """
+        The driver's and the device's event suppression structures.
+        """
+    @property
+    def free(self, /) -> int:
+        """
+        `num_free`: free descriptors.
+        """
+    @property
+    def interrupts(self, /) -> Signal:
+        """
+        When the driver wants interrupts, from its event suppression
+        structure, and when the device wants notifications, from its own.
+        """
+    @property
+    def last_used(self, /) -> int:
+        """
+        `last_used_idx`: the position where the driver takes used buffers
+        back next, in the lap `used_wrap` names.
+        """
+    @property
+    def next_avail(self, /) -> int:
+        """
+        `next_avail_idx`: the position the driver fills next, in the lap
+        `avail_wrap` names.
+        """
+    @property
+    def notifications(self, /) -> Signal: ...
+    @property
+    def used_wrap(self, /) -> bool: ...
+
+@final
+class PackedRing(BaseRecord):
+    """
+    A packed ring as guest memory holds it, read from the driver's last
+    used position.
+    """
+    @property
+    def broken(self, /) -> str |None:
+        """
+        Why the walk stopped before the driver's count of descriptors in
+        flight.
+        """
+    @property
+    def returned(self, /) -> int:
+        """
+        Buffers the device used that the driver has not taken back.
+        """
+    @property
+    def with_device(self, /) -> int:
+        """
+        How many buffers the device holds.
         """
 
 @final
@@ -12501,6 +13172,43 @@ class ProcessorStateArea(BaseRecord):
     def special_registers(self, /) -> Diagnostic[SpecialRegistersArea]: ...
 
 @final
+class QueueProgress(BaseRecord):
+    """
+    Where a queue's traffic stood at one look, as counters that only grow,
+    modulo `modulus`: the buffers the driver handed the device, the ones the
+    device returned (split rings, whose used index says so), and the ones
+    the driver took back; with how many were with the device and returned
+    but not taken back.
+    """
+    @property
+    def completed(self, /) -> int |None:
+        """
+        Buffers the device returned (split rings).
+        """
+    @property
+    def modulus(self, /) -> int: ...
+    @property
+    def published(self, /) -> int:
+        """
+        Buffers the driver handed the device.
+        """
+    @property
+    def returned(self, /) -> int:
+        """
+        Buffers the device returned that the driver has not taken back.
+        """
+    @property
+    def taken_back(self, /) -> int:
+        """
+        Buffers the driver took back.
+        """
+    @property
+    def with_device(self, /) -> int:
+        """
+        Buffers the device holds.
+        """
+
+@final
 class QueuedLock(BaseRecord):
     """
     A numbered queued spinlock and the processors that own it or wait for it.
@@ -12575,7 +13283,7 @@ class RcdrDriver(BaseRecord):
     @property
     def default_log(self, /) -> int:
         """
-        The log `WppRecorderLogGetDefault` returns.
+        `DefaultAutoLogHeader`, the log `WppRecorderLogGetDefault` returns.
         """
     @property
     def image(self, /) -> int: ...
@@ -12584,23 +13292,24 @@ class RcdrDriver(BaseRecord):
     @property
     def logs(self, /) -> list[int]:
         """
-        The `_WPP_AUTOLOG_HEADER` of each of its logs.
+        The `_WPP_AUTOLOG_HEADER` of each of its logs (its `LogListHead`).
         """
     @property
     def logs_stopped(self, /) -> str |None: ...
     @property
     def name(self, /) -> str:
         """
-        `FileBaseName`: the image name without its extension.
+        `FileBaseName`: the driver's image name without its extension.
         """
     @property
     def sequence(self, /) -> int:
         """
-        The last sequence number a record of its logs took.
+        The context's `Sequence`: the last sequence number a record of any of
+        its logs took.
         """
 
 @final
-class RcdrDrivers(BaseRecord):
+class RcdrDriverList(BaseRecord):
     """
     The drivers the recorder serves (`!rcdrkd.rcdrloglist`).
     """
@@ -12612,22 +13321,28 @@ class RcdrDrivers(BaseRecord):
         Why the walk of the bugcheck callback list stopped short.
         """
     @property
-    def unreadable(self, /) -> list[RcdrUnreadable]: ...
+    def unreadable(self, /) -> list[RcdrUnreadable]:
+        """
+        The contexts that do not read.
+        """
 
 @final
-class RcdrDump(BaseRecord):
+class RcdrEntry(BaseRecord):
     """
-    A driver's records from its logs, oldest first
-    (`!rcdrkd.rcdrlogdump`).
+    A record of a log's partition, formatted.
     """
     @property
-    def driver(self, /) -> RcdrDriver: ...
+    def entry(self, /) -> WdfLogEntry: ...
     @property
-    def ends(self, /) -> list[RcdrWalkEnd]: ...
+    def log(self, /) -> int:
+        """
+        The index of its log in `RcdrLogDump.logs`.
+        """
     @property
-    def logs(self, /) -> list[RcdrLog]: ...
-    @property
-    def records(self, /) -> list[RcdrRecord]: ...
+    def partition(self, /) -> str:
+        """
+        `normal` or `error`.
+        """
 
 @final
 class RcdrLog(BaseRecord):
@@ -12648,7 +13363,8 @@ class RcdrLog(BaseRecord):
     @property
     def identifier(self, /) -> str:
         """
-        `LogIdentifier`, with its append value when the driver set one.
+        `LogIdentifier`, with `LogIdentifierAppendValue` after it when the
+        driver set one.
         """
     @property
     def partitions(self, /) -> list[RcdrPartition]: ...
@@ -12661,6 +13377,24 @@ class RcdrLog(BaseRecord):
         """
 
 @final
+class RcdrLogDump(BaseRecord):
+    """
+    A driver's records from its logs, merged in the order the driver logged
+    them, oldest first (`!rcdrkd.rcdrlogdump`).
+    """
+    @property
+    def driver(self, /) -> RcdrDriver: ...
+    @property
+    def ends(self, /) -> list[RcdrWalkEnd]:
+        """
+        How each walk of a partition ended.
+        """
+    @property
+    def entries(self, /) -> list[RcdrEntry]: ...
+    @property
+    def logs(self, /) -> list[RcdrLog]: ...
+
+@final
 class RcdrLogs(BaseRecord):
     """
     A driver's logs (`!rcdrkd.rcdrloglist <driver>`).
@@ -12670,19 +13404,22 @@ class RcdrLogs(BaseRecord):
     @property
     def logs(self, /) -> list[RcdrLog]: ...
     @property
-    def unreadable(self, /) -> list[RcdrUnreadable]: ...
+    def unreadable(self, /) -> list[RcdrUnreadable]:
+        """
+        The log headers that do not read.
+        """
 
 @final
 class RcdrPartition(BaseRecord):
     """
-    A partition of a log: the ring its records go to.
+    A partition of a recorder log: the ring its records go to.
     """
     @property
     def base(self, /) -> int: ...
     @property
     def current(self, /) -> int:
         """
-        Where the next record goes, and the newest record.
+        `Offset.Current`, where the next record goes.
         """
     @property
     def name(self, /) -> str:
@@ -12690,34 +13427,17 @@ class RcdrPartition(BaseRecord):
         `normal` or `error`.
         """
     @property
-    def previous(self, /) -> int: ...
+    def previous(self, /) -> int:
+        """
+        `Offset.Previous`, the newest record.
+        """
     @property
     def size(self, /) -> int: ...
 
 @final
-class RcdrRecord(BaseRecord):
-    """
-    A record of a recorder log.
-    """
-    @property
-    def log(self, /) -> int:
-        """
-        The log's `_WPP_AUTOLOG_HEADER` and identifier.
-        """
-    @property
-    def log_identifier(self, /) -> str: ...
-    @property
-    def partition(self, /) -> str:
-        """
-        `normal` or `error`.
-        """
-    @property
-    def record(self, /) -> WdfLogRecord: ...
-
-@final
 class RcdrUnreadable(BaseRecord):
     """
-    A recorder context that does not read.
+    A recorder context or log header that does not read.
     """
     @property
     def address(self, /) -> int: ...
@@ -12730,16 +13450,17 @@ class RcdrWalkEnd(BaseRecord):
     How the walk of one partition ended.
     """
     @property
-    def corruption(self, /) -> str |None: ...
+    def end(self, /) -> IfrEnd: ...
     @property
-    def end(self, /) -> str:
+    def log(self, /) -> int:
         """
-        `empty`, `first_record`, `overwritten`, or `corrupt`.
+        The index of its log in `RcdrLogDump.logs`.
         """
     @property
-    def log(self, /) -> int: ...
-    @property
-    def partition(self, /) -> str: ...
+    def partition(self, /) -> str:
+        """
+        `normal` or `error`.
+        """
 
 @final
 class ReadyQueue(BaseRecord):
@@ -13897,6 +14618,23 @@ class SidAndAttributes(BaseRecord):
     def sid(self, /) -> str: ...
 
 @final
+class Signal(BaseRecord):
+    """
+    When one side of a queue asks the other to signal it: the driver asks
+    the device for interrupts, the device asks the driver for
+    notifications (kicks).
+    """
+    @property
+    def kind(self, /) -> str:
+        """
+        The variant: `on`, `off`, `after`, `at`.
+        """
+    @property
+    def lap(self, /) -> bool |None: ...
+    @property
+    def value(self, /) -> int |None: ...
+
+@final
 class SmbiosField(BaseRecord):
     """
     A field of an SMBIOS structure, by the specification's name.
@@ -14010,16 +14748,61 @@ class SpecialRegistersArea(BaseRecord):
         """
 
 @final
+class SplitRing(BaseRecord):
+    """
+    A split ring as guest memory holds it.
+    """
+    @property
+    def avail(self, /) -> int:
+        """
+        The avail ring.
+        """
+    @property
+    def avail_event(self, /) -> int |None: ...
+    @property
+    def avail_flags(self, /) -> int: ...
+    @property
+    def avail_idx(self, /) -> int: ...
+    @property
+    def desc(self, /) -> int:
+        """
+        The descriptor table.
+        """
+    @property
+    def size(self, /) -> int: ...
+    @property
+    def used(self, /) -> int:
+        """
+        The used ring.
+        """
+    @property
+    def used_event(self, /) -> int |None:
+        """
+        With the event index feature: the used index after which the
+        driver wants an interrupt (the slot after the avail ring's entries),
+        and the avail index after which the device wants a notification
+        (the slot after the used ring's). `None` where unreadable.
+        """
+    @property
+    def used_flags(self, /) -> int: ...
+    @property
+    def used_idx(self, /) -> int: ...
+
+@final
 class Srb(BaseRecord):
     """
-    An SRB (`!storagekd.storsrb`).
+    A decoded SRB (`!storagekd.storsrb`).
     """
     @property
     def address(self, /) -> int: ...
     @property
     def cdb(self, /) -> list[int]: ...
     @property
-    def class_context(self, /) -> int |None: ...
+    def class_context(self, /) -> int |None:
+        """
+        The contexts an extended SRB keeps for the class driver, the port
+        driver, and the miniport; a legacy one has none.
+        """
     @property
     def command(self, /) -> str |None:
         """
@@ -14037,13 +14820,22 @@ class Srb(BaseRecord):
         A `STORAGE_REQUEST_BLOCK`, rather than a `SCSI_REQUEST_BLOCK`.
         """
     @property
-    def flag_names(self, /) -> list[str]: ...
+    def flag_names(self, /) -> list[str]:
+        """
+        The `SRB_FLAGS_*` names of the flags.
+        """
     @property
     def flags(self, /) -> int: ...
     @property
-    def function(self, /) -> int: ...
+    def function(self, /) -> int:
+        """
+        `SrbFunction` of an extended SRB, else `Function`.
+        """
     @property
-    def function_name(self, /) -> str |None: ...
+    def function_name(self, /) -> str |None:
+        """
+        The function by `SRB_FUNCTION_*` name, without the prefix.
+        """
     @property
     def lun(self, /) -> int |None: ...
     @property
@@ -14053,10 +14845,13 @@ class Srb(BaseRecord):
     @property
     def original_request(self, /) -> int:
         """
-        `OriginalRequest`: the IRP.
+        `OriginalRequest`: the IRP the SRB carries.
         """
     @property
-    def path(self, /) -> int |None: ...
+    def path(self, /) -> int |None:
+        """
+        The path, target, and LUN, when the SRB has a BTL8 address.
+        """
     @property
     def port(self, /) -> int |None:
         """
@@ -14073,7 +14868,8 @@ class Srb(BaseRecord):
     @property
     def sense(self, /) -> str |None:
         """
-        The sense data, decoded, when `AUTOSENSE_VALID` says it is valid.
+        The sense data, decoded, when `SRB_STATUS_AUTOSENSE_VALID` says it
+        holds some.
         """
     @property
     def sense_buffer(self, /) -> int: ...
@@ -14097,14 +14893,14 @@ class Srb(BaseRecord):
 @final
 class SrbExData(BaseRecord):
     """
-    One block of an extended SRB's extended data.
+    One block of an extended SRB's extended data (`SRBEX_DATA`).
     """
     @property
     def address(self, /) -> int: ...
     @property
     def kind(self, /) -> str:
         """
-        `_SRBEXDATATYPE` without its prefix (`ScsiCdb16`).
+        `_SRBEXDATATYPE` without its `SrbExDataType` prefix (`ScsiCdb16`).
         """
     @property
     def length(self, /) -> int: ...
@@ -14275,17 +15071,21 @@ class Stop(BaseRecord):
 @final
 class StorAdapter(BaseRecord):
     """
-    A StorPort adapter (`_RAID_ADAPTER_EXTENSION`).
+    A StorPort adapter (`_RAID_ADAPTER_EXTENSION`), the FDO storport creates
+    for each device the miniport drives.
     """
     @property
     def adapter_id(self, /) -> str |None: ...
     @property
-    def busy_count(self, /) -> int: ...
+    def busy_count(self, /) -> int:
+        """
+        `StorPortBusy` calls not yet readied.
+        """
     @property
     def device_name(self, /) -> str:
         """
         The FDO's full name, its `Device` directory included
-        (`RaidPort0`).
+        (`RaidPort0` in the `Device` directory).
         """
     @property
     def device_power(self, /) -> StorEnumValue: ...
@@ -14309,13 +15109,17 @@ class StorAdapter(BaseRecord):
     @property
     def gateways(self, /) -> list[StorGateway]: ...
     @property
-    def gateways_error(self, /) -> str |None: ...
+    def gateways_error(self, /) -> str |None:
+        """
+        Why the gateways are not all shown.
+        """
     @property
     def hiber_paths(self, /) -> int: ...
     @property
     def hw_device_extension(self, /) -> int:
         """
-        The miniport's own device extension (`HwDeviceExtension`).
+        The miniport's own device extension, the one StorPort passes to every
+        Hw routine: the structure its private PDB describes.
         """
     @property
     def hw_device_extension_size(self, /) -> int |None: ...
@@ -14324,19 +15128,25 @@ class StorAdapter(BaseRecord):
     @property
     def io(self, /) -> str:
         """
-        What holds the adapter's requests: `idle`, `2 with the miniport`,
-        `paused`, ...
+        What holds the adapter's requests, as `!storagekd.storadapter` says
+        it: `idle`, `2 with the miniport`, `paused`, ...
         """
     @property
     def lower(self, /) -> int: ...
     @property
-    def lu_extension_size(self, /) -> int |None: ...
+    def lu_extension_size(self, /) -> int |None:
+        """
+        The size of the per-unit extension the miniport asked for.
+        """
     @property
     def miniport_name(self, /) -> str |None: ...
     @property
     def paging_paths(self, /) -> int: ...
     @property
-    def pause_count(self, /) -> int: ...
+    def pause_count(self, /) -> int:
+        """
+        `StorPortPause` calls not yet resumed.
+        """
     @property
     def pci_location(self, /) -> str |None:
         """
@@ -14345,7 +15155,10 @@ class StorAdapter(BaseRecord):
     @property
     def pdo(self, /) -> int: ...
     @property
-    def port_number(self, /) -> int: ...
+    def port_number(self, /) -> int:
+        """
+        The SCSI port number (the `0` of the `Scsi0:` DOS device).
+        """
     @property
     def state(self, /) -> StorEnumValue: ...
     @property
@@ -14353,26 +15166,39 @@ class StorAdapter(BaseRecord):
     @property
     def units(self, /) -> list[StorUnitEntry]: ...
     @property
-    def units_stopped(self, /) -> str |None: ...
+    def units_stopped(self, /) -> str |None:
+        """
+        Why the walk of the unit list stopped short of its head.
+        """
     @property
-    def virtual_miniport(self, /) -> bool: ...
+    def virtual_miniport(self, /) -> bool:
+        """
+        The miniport registered as a virtual miniport.
+        """
 
 @final
 class StorAdapterEntry(BaseRecord):
     """
-    An adapter on a driver's list, or why it is not shown.
+    One entry of a driver's adapter list: a StorPort adapter, or why it is
+    not shown.
     """
     @property
-    def adapter(self, /) -> StorAdapter |None: ...
+    def adapter(self, /) -> StorAdapter |None:
+        """
+        The adapter, when it reads.
+        """
     @property
-    def error(self, /) -> str |None: ...
+    def error(self, /) -> str |None:
+        """
+        Why the adapter is not shown.
+        """
     @property
     def extension(self, /) -> int: ...
 
 @final
 class StorDriver(BaseRecord):
     """
-    A driver that called `StorPortInitialize`.
+    A driver that called `StorPortInitialize` (`_RAID_DRIVER_EXTENSION`).
     """
     @property
     def adapters(self, /) -> list[StorAdapterEntry]: ...
@@ -14383,15 +15209,19 @@ class StorDriver(BaseRecord):
     @property
     def name(self, /) -> str:
         """
-        The service name (`storahci`).
+        The service name (`storahci`), from the driver object's name.
         """
     @property
-    def stopped(self, /) -> str |None: ...
+    def stopped(self, /) -> str |None:
+        """
+        Why the walk of the adapter list stopped short of its head.
+        """
 
 @final
 class StorDrivers(BaseRecord):
     """
-    storport's drivers and their adapters (`!storagekd.storadapter`).
+    storport's drivers and their adapters, from `RaidpPortData`
+    (`!storagekd.storadapter`).
     """
     @property
     def drivers(self, /) -> list[StorDriver]: ...
@@ -14401,13 +15231,15 @@ class StorDrivers(BaseRecord):
         `storport!RaidpPortData`.
         """
     @property
-    def stopped(self, /) -> str |None: ...
+    def stopped(self, /) -> str |None:
+        """
+        Why the walk of the driver list stopped short of its head.
+        """
 
 @final
 class StorEnumValue(BaseRecord):
     """
-    A value of one of storport's enums, with its name when the PDB has
-    one.
+    A value of one of storport's enums, with its name when the PDB has one.
     """
     @property
     def name(self, /) -> str |None: ...
@@ -14417,7 +15249,8 @@ class StorEnumValue(BaseRecord):
 @final
 class StorGateway(BaseRecord):
     """
-    An adapter's I/O gateway (`_STOR_IO_GATEWAY`).
+    An adapter's I/O gateway (`_STOR_IO_GATEWAY`): what limits the requests
+    the adapter sends to the miniport.
     """
     @property
     def address(self, /) -> int: ...
@@ -14426,22 +15259,27 @@ class StorGateway(BaseRecord):
     @property
     def outstanding(self, /) -> int:
         """
-        Requests the miniport holds, and the most the gateway lets it.
+        Requests the miniport holds.
         """
     @property
-    def outstanding_max(self, /) -> int: ...
+    def outstanding_max(self, /) -> int:
+        """
+        The most the gateway lets the miniport hold.
+        """
     @property
     def paused(self, /) -> int: ...
     @property
     def pending(self, /) -> int:
         """
-        Requests waiting for the gateway.
+        Requests waiting for the gateway to let them through.
         """
 
 @final
 class StorLog(BaseRecord):
     """
-    An adapter's internal log (`!storagekd.storloglist`).
+    A StorPort adapter's internal log (`!storagekd.storloglist`): a ring of
+    `RaidLogListSize` entries that storport writes as it starts, completes,
+    pauses, and resumes requests.
     """
     @property
     def adapter(self, /) -> int: ...
@@ -14455,7 +15293,7 @@ class StorLog(BaseRecord):
     @property
     def newest(self, /) -> int:
         """
-        The number of the newest entry.
+        The number of the newest entry, which is how many storport wrote.
         """
     @property
     def ring(self, /) -> int:
@@ -14468,10 +15306,14 @@ class StorLog(BaseRecord):
 @final
 class StorLogEntry(BaseRecord):
     """
-    An entry of an adapter's log (`_RAID_LOG_ENTRY`).
+    An entry of an adapter's internal log (`_RAID_LOG_ENTRY`).
     """
     @property
-    def command(self, /) -> str |None: ...
+    def command(self, /) -> str |None:
+        """
+        For an entry of the request path: the command its operation code
+        names.
+        """
     @property
     def event(self, /) -> str |None:
         """
@@ -14482,29 +15324,40 @@ class StorLogEntry(BaseRecord):
     @property
     def irp(self, /) -> int |None:
         """
-        For an entry of the request path: its IRP, SRB, CDB operation
-        code, command, and SRB status.
+        For an entry of the request path: its IRP.
         """
     @property
     def number(self, /) -> int:
         """
-        storport numbers entries from 1 as it writes them.
+        The entry's number: storport numbers them from 1 as it writes them.
         """
     @property
-    def opcode(self, /) -> int |None: ...
+    def opcode(self, /) -> int |None:
+        """
+        For an entry of the request path: its CDB's operation code.
+        """
     @property
     def parameters(self, /) -> list[int]: ...
     @property
-    def srb(self, /) -> int |None: ...
+    def srb(self, /) -> int |None:
+        """
+        For an entry of the request path: its SRB.
+        """
     @property
-    def srb_status(self, /) -> str |None: ...
+    def srb_status(self, /) -> str |None:
+        """
+        For an entry of the request path: its SRB status, by name.
+        """
     @property
     def time(self, /) -> int:
         """
-        When storport wrote it, a FILETIME (UTC).
+        When storport wrote it, as a FILETIME (UTC).
         """
     @property
-    def time_utc(self, /) -> str |None: ...
+    def time_utc(self, /) -> str |None:
+        """
+        `time` as text (UTC).
+        """
 
 @final
 class StorQueue(BaseRecord):
@@ -14512,19 +15365,40 @@ class StorQueue(BaseRecord):
     A unit's device queue (`_EXTENDED_DEVICE_QUEUE`).
     """
     @property
-    def busy_count(self, /) -> int: ...
+    def busy_count(self, /) -> int:
+        """
+        `StorPortDeviceBusy` calls not yet readied.
+        """
     @property
-    def bypass_count(self, /) -> int: ...
+    def bypass_count(self, /) -> int:
+        """
+        Requests that bypass the queue.
+        """
     @property
-    def bypass_waiting(self, /) -> int: ...
+    def bypass_waiting(self, /) -> int:
+        """
+        Requests waiting to bypass the queue.
+        """
     @property
-    def depth(self, /) -> int: ...
+    def depth(self, /) -> int:
+        """
+        How many requests the queue lets the miniport hold.
+        """
     @property
-    def frozen(self, /) -> bool: ...
+    def frozen(self, /) -> bool:
+        """
+        Frozen after an error until the class driver releases it.
+        """
     @property
-    def locked(self, /) -> bool: ...
+    def locked(self, /) -> bool:
+        """
+        Locked by the class driver (`SRB_FUNCTION_LOCK_QUEUE`).
+        """
     @property
-    def pause_count(self, /) -> int: ...
+    def pause_count(self, /) -> int:
+        """
+        `StorPortPauseDevice` calls not yet resumed.
+        """
     @property
     def power_locked(self, /) -> bool: ...
     @property
@@ -14535,12 +15409,16 @@ class StorQueue(BaseRecord):
         Requests waiting because the queue is full or held.
         """
     @property
-    def waiting_stopped(self, /) -> list[str]: ...
+    def waiting_stopped(self, /) -> list[str]:
+        """
+        Why a count of waiting requests is short.
+        """
 
 @final
 class StorRequest(BaseRecord):
     """
-    A request the miniport holds (`_EXTENDED_REQUEST_BLOCK`).
+    A request the miniport holds: storport's `_EXTENDED_REQUEST_BLOCK` and
+    the IRP and SRB it carries.
     """
     @property
     def irp(self, /) -> int: ...
@@ -14557,7 +15435,8 @@ class StorRequest(BaseRecord):
 @final
 class StorUnit(BaseRecord):
     """
-    A logical unit (`_RAID_UNIT_EXTENSION`).
+    A logical unit (`_RAID_UNIT_EXTENSION`), the PDO storport creates for
+    each LUN the miniport reports.
     """
     @property
     def adapter(self, /) -> int: ...
@@ -14578,22 +15457,33 @@ class StorUnit(BaseRecord):
     @property
     def lu_extension(self, /) -> int:
         """
-        The miniport's per-unit extension; null when it asked for none.
+        The miniport's per-unit extension (`StorPortGetLogicalUnit`); null
+        when the miniport asked for none.
         """
     @property
     def lun(self, /) -> int: ...
     @property
     def max_queue_depth(self, /) -> int: ...
     @property
-    def path(self, /) -> int: ...
+    def path(self, /) -> int:
+        """
+        The unit's SCSI address.
+        """
     @property
     def product(self, /) -> str: ...
     @property
     def queue(self, /) -> StorQueue: ...
     @property
-    def requests(self, /) -> list[StorRequest]: ...
+    def requests(self, /) -> list[StorRequest]:
+        """
+        The requests the miniport holds for the unit, from storport's pending
+        queue.
+        """
     @property
-    def requests_stopped(self, /) -> list[str]: ...
+    def requests_stopped(self, /) -> list[str]:
+        """
+        Why the requests are not all listed.
+        """
     @property
     def revision(self, /) -> str: ...
     @property
@@ -14606,14 +15496,20 @@ class StorUnit(BaseRecord):
 @final
 class StorUnitEntry(BaseRecord):
     """
-    A unit on an adapter's list, or why it is not shown.
+    One entry of an adapter's unit list.
     """
     @property
-    def error(self, /) -> str |None: ...
+    def error(self, /) -> str |None:
+        """
+        Why the unit is not shown.
+        """
     @property
     def extension(self, /) -> int: ...
     @property
-    def unit(self, /) -> StorUnit |None: ...
+    def unit(self, /) -> StorUnit |None:
+        """
+        The unit, when it reads.
+        """
 
 @final
 class Struct:
@@ -17304,6 +18200,92 @@ class VerifierSuspectDriver(BaseRecord):
         """
 
 @final
+class VirtQueue(BaseRecord):
+    """
+    One queue: the driver's bookkeeping and, for a split ring, the ring.
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The `virtqueue_split` or `virtqueue_packed`.
+        """
+    @property
+    def driver(self, /) -> DriverQueueState |None:
+        """
+        What the driver keeps of a split queue.
+        """
+    @property
+    def error(self, /) -> str |None:
+        """
+        Why the queue or its ring could not be read.
+        """
+    @property
+    def event_idx(self, /) -> bool:
+        """
+        The device and driver use event indexes (see [`VirtioDriver`]).
+        """
+    @property
+    def index(self, /) -> int:
+        """
+        Its index in the device's queue table.
+        """
+    @property
+    def interrupt_due(self, /) -> bool:
+        """
+        Whether an interrupt was due for the returned buffers (split).
+        """
+    @property
+    def interrupts(self, /) -> Signal |None:
+        """
+        When the driver wants interrupts.
+        """
+    @property
+    def name(self, /) -> str |None:
+        """
+        Its name where the virtio specification fixes it, such as `rx 0`
+        or `request 2`, when the device's type is known ([`name_queues`]).
+        """
+    @property
+    def notifications(self, /) -> Signal |None:
+        """
+        When the device wants notifications.
+        """
+    @property
+    def packed(self, /) -> PackedQueueState |None:
+        """
+        The driver's bookkeeping of a packed queue.
+        """
+    @property
+    def packed_ring(self, /) -> PackedRing |None:
+        """
+        A packed queue's ring, read against the driver's bookkeeping.
+        """
+    @property
+    def progress(self, /) -> QueueProgress |None:
+        """
+        Counters that only grow, to compare two looks with.
+        """
+    @property
+    def ring(self, /) -> SplitRing |None:
+        """
+        A split queue's ring.
+        """
+    @property
+    def role(self, /) -> str |None:
+        """
+        `device_fills` for a queue whose buffers wait until the device has
+        something (receive, events), `requests` for one whose buffers
+        carry requests.
+        """
+    @property
+    def size(self, /) -> int: ...
+    @property
+    def state(self, /) -> str:
+        """
+        What the queue's counts mean together, as `!virtio` says it.
+        """
+
+@final
 class VirtioBuffer(BaseRecord):
     """
     One buffer: its descriptors and the request it carries.
@@ -17349,42 +18331,89 @@ class VirtioDescriptor(BaseRecord):
         The buffer's guest-physical address.
         """
     @property
-    def device_writes(self, /) -> bool: ...
+    def device_writes(self, /) -> bool:
+        """
+        Whether the device writes the buffer.
+        """
     @property
     def flags(self, /) -> int: ...
     @property
-    def in_bytes(self, /) -> int |None: ...
+    def id(self, /) -> int |None:
+        """
+        The buffer ID it carries (packed).
+        """
     @property
     def index(self, /) -> int:
         """
         Its index in the table (split) or its ring position (packed).
         """
     @property
-    def indirect_descriptors(self, /) -> int |None:
+    def indirect(self, /) -> IndirectTable |None:
         """
-        For an indirect table: how many descriptors it holds and the
-        bytes the driver gives the device and the device may write.
+        For an indirect descriptor: what its table holds, or why it could
+        not be read (`indirect_error`).
         """
+    @property
+    def indirect_error(self, /) -> str |None: ...
     @property
     def length(self, /) -> int: ...
-    @property
-    def out_bytes(self, /) -> int |None: ...
 
 @final
-class VirtioDevice(BaseRecord):
+class VirtioDriver(BaseRecord):
     """
-    A virtio PCI function (`!virtio`).
+    A device as its virtio-win driver sees it: its `virtio_device` and the
+    queues it set up.
     """
+    @property
+    def device(self, /) -> int:
+        """
+        The `virtio_device`.
+        """
+    @property
+    def event_idx(self, /) -> bool:
+        """
+        The device and driver use event indexes to suppress signals
+        (`VIRTIO_RING_F_EVENT_IDX`, virtio-win's `event_suppression_enabled`).
+        """
+    @property
+    def module(self, /) -> str:
+        """
+        The driver module whose PDB types its structures.
+        """
+    @property
+    def msix(self, /) -> bool:
+        """
+        Interrupts come by MSI-X, one vector per queue or shared.
+        """
+    @property
+    def packed(self, /) -> bool: ...
+    @property
+    def queues(self, /) -> list[VirtQueue]: ...
+
+@final
+class VirtioFunction(BaseRecord):
+    """
+    A virtio PCI function and what its driver shows of it.
+    """
+    @property
+    def bus(self, /) -> int: ...
+    @property
+    def device(self, /) -> int: ...
     @property
     def device_id(self, /) -> int: ...
     @property
-    def driver(self, /) -> VirtioDriverState |None:
+    def driver(self, /) -> VirtioDriver |None:
         """
         What its virtio-win driver shows of it, with the driver's private
         PDB. None when `driver_missing` says why not.
         """
     @property
-    def driver_missing(self, /) -> str |None: ...
+    def driver_missing(self, /) -> str |None:
+        """
+        Why there is no driver state.
+        """
+    @property
+    def function(self, /) -> int: ...
     @property
     def kind(self, /) -> str:
         """
@@ -17400,7 +18429,7 @@ class VirtioDevice(BaseRecord):
     @property
     def service(self, /) -> str |None:
         """
-        The service that drives it.
+        The service that drives it, from its device node.
         """
     @property
     def transitional(self, /) -> bool:
@@ -17414,68 +18443,22 @@ class VirtioDevice(BaseRecord):
         """
 
 @final
-class VirtioDriverState(BaseRecord):
-    """
-    A device as its virtio-win driver sees it.
-    """
-    @property
-    def device(self, /) -> int:
-        """
-        The `virtio_device`.
-        """
-    @property
-    def event_idx(self, /) -> bool:
-        """
-        Whether the device and driver negotiated the event index feature.
-        """
-    @property
-    def module(self, /) -> str:
-        """
-        The driver module whose PDB types its structures.
-        """
-    @property
-    def msix(self, /) -> bool: ...
-    @property
-    def packed(self, /) -> bool: ...
-    @property
-    def queues(self, /) -> list[Virtqueue]: ...
-
-@final
-class VirtioProgress(BaseRecord):
-    """
-    A queue's counters at one look, which only grow modulo `modulus`;
-    the difference between two looks is what moved.
-    """
-    @property
-    def completed(self, /) -> int |None:
-        """
-        Buffers the device returned (split rings).
-        """
-    @property
-    def modulus(self, /) -> int: ...
-    @property
-    def published(self, /) -> int:
-        """
-        Buffers the driver handed the device.
-        """
-    @property
-    def taken_back(self, /) -> int:
-        """
-        Buffers the driver took back.
-        """
-
-@final
 class VirtioRing(BaseRecord):
     """
     A virtqueue's ring and the buffers outstanding in it (`!vring`).
     """
     @property
-    def broken(self, /) -> str |None:
+    def queue(self, /) -> VirtQueue |None:
         """
-        Why reading a packed ring stopped early.
+        The driver's queue, or None for a ring read from its addresses
+        (`raw_ring`).
         """
     @property
-    def queue(self, /) -> Virtqueue: ...
+    def raw_ring(self, /) -> SplitRing |None:
+        """
+        A split ring read from its size and addresses, which has no driver
+        queue (`!vring /r`).
+        """
     @property
     def request_kind(self, /) -> str |None:
         """
@@ -17491,146 +18474,6 @@ class VirtioRing(BaseRecord):
     def with_device(self, /) -> list[VirtioBuffer]:
         """
         Buffers the device holds, at most 64.
-        """
-
-@final
-class VirtioSignal(BaseRecord):
-    """
-    When one side of a queue wants to be signalled.
-    """
-    @property
-    def kind(self, /) -> str:
-        """
-        `on` (after every buffer), `off`, `after` (the event index), or
-        `at` (a packed ring position).
-        """
-    @property
-    def lap(self, /) -> bool |None:
-        """
-        The lap for `at`.
-        """
-    @property
-    def value(self, /) -> int |None:
-        """
-        The index for `after`, the position for `at`.
-        """
-
-@final
-class Virtqueue(BaseRecord):
-    """
-    One virtqueue and where its traffic stands.
-    """
-    @property
-    def address(self, /) -> int:
-        """
-        The `virtqueue_split` or `virtqueue_packed`.
-        """
-    @property
-    def avail(self, /) -> int |None:
-        """
-        The avail index the driver published (split), or the position it
-        fills next (packed).
-        """
-    @property
-    def desc(self, /) -> int |None:
-        """
-        The descriptor table.
-        """
-    @property
-    def device_area(self, /) -> int |None:
-        """
-        The used ring (split) or the device's event suppression structure
-        (packed).
-        """
-    @property
-    def driver_area(self, /) -> int |None:
-        """
-        The avail ring (split) or the driver's event suppression structure
-        (packed).
-        """
-    @property
-    def error(self, /) -> str |None:
-        """
-        Why the queue could not be read.
-        """
-    @property
-    def free(self, /) -> int |None:
-        """
-        The descriptors the driver has not given out.
-        """
-    @property
-    def index(self, /) -> int: ...
-    @property
-    def interrupt_due(self, /) -> bool:
-        """
-        Whether an interrupt was due for the returned buffers (split).
-        """
-    @property
-    def interrupts(self, /) -> VirtioSignal |None:
-        """
-        When the driver wants interrupts.
-        """
-    @property
-    def name(self, /) -> str |None:
-        """
-        Its name where the virtio specification fixes it, such as `rx 0`
-        or `request 2`.
-        """
-    @property
-    def notifications(self, /) -> VirtioSignal |None:
-        """
-        When the device wants notifications.
-        """
-    @property
-    def packed(self, /) -> bool: ...
-    @property
-    def progress(self, /) -> VirtioProgress |None:
-        """
-        Counters that only grow, to compare two looks with.
-        """
-    @property
-    def returned(self, /) -> int |None:
-        """
-        Buffers the device returned that the driver has not taken back.
-        """
-    @property
-    def role(self, /) -> str |None:
-        """
-        `device_fills` for a queue whose buffers wait until the device has
-        something (receive, events), `requests` for one whose buffers
-        carry requests.
-        """
-    @property
-    def size(self, /) -> int: ...
-    @property
-    def state(self, /) -> str:
-        """
-        What these mean together, as `!virtio` says it.
-        """
-    @property
-    def taken_back(self, /) -> int |None:
-        """
-        Where the driver takes buffers back next.
-        """
-    @property
-    def unkicked(self, /) -> int |None:
-        """
-        Buffers added since the driver last notified the device (split).
-        """
-    @property
-    def unpublished(self, /) -> int |None:
-        """
-        Buffers the driver added but has not published (split).
-        """
-    @property
-    def used(self, /) -> int |None:
-        """
-        The used index up to which the device returned buffers (split).
-        """
-    @property
-    def with_device(self, /) -> int |None:
-        """
-        Buffers the device holds.
         """
 
 @final
@@ -17906,7 +18749,7 @@ class Watchpoint(Breakpoint):
 @final
 class WdfCallback(BaseRecord):
     """
-    A queue event callback.
+    An event callback the driver set.
     """
     @property
     def address(self, /) -> int: ...
@@ -17926,14 +18769,16 @@ class WdfClient(BaseRecord):
     @property
     def driver(self, /) -> int |None:
         """
-        The `FxDriver`. `None` before the driver calls `WdfDriverCreate`.
+        `Driver`, the `FxDriver`. `None` before the driver calls
+        `WdfDriverCreate`.
         """
     @property
     def driver_object(self, /) -> int: ...
     @property
     def driver_object_name(self, /) -> str |None:
         """
-        The `DRIVER_OBJECT`'s name (`\\Driver\\kdnic`).
+        The `DRIVER_OBJECT`'s `DriverName` (`kdnic` in the `Driver`
+        directory): what names a client whose `Public.DriverName` is empty.
         """
     @property
     def globals(self, /) -> int:
@@ -17950,7 +18795,7 @@ class WdfClient(BaseRecord):
     @property
     def log_header(self, /) -> int |None:
         """
-        The `_WDF_IFR_HEADER` of the IFR log (`WdfLogHeader`). `None` if the
+        `WdfLogHeader`, the `_WDF_IFR_HEADER` of the IFR log. `None` if the
         driver has no IFR log.
         """
     @property
@@ -17961,13 +18806,14 @@ class WdfClient(BaseRecord):
     @property
     def problems(self, /) -> list[str]:
         """
-        The parts of the globals that failed validation, whose related
-        fields are `None`.
+        What in the globals failed validation (a name that is not printable,
+        a `Driver` that is not this driver's `FxDriver`, ...); the fields it
+        concerns are `None`.
         """
     @property
     def registry_path(self, /) -> str |None:
         """
-        The `FxDriver`'s registry path.
+        The `FxDriver`'s `m_RegistryPath`.
         """
     @property
     def verifier_on(self, /) -> bool:
@@ -17978,22 +18824,23 @@ class WdfClient(BaseRecord):
     def version(self, /) -> WdfVersion |None:
         """
         The KMDF version that the driver bound to (`WdfBindInfo->Version`).
+        `None` when `WdfBindInfo` is null.
         """
     @property
     def wdf_driver(self, /) -> int |None:
         """
-        The WDFDRIVER handle (`Public.Driver`).
+        `Public.Driver`, the WDFDRIVER handle.
         """
 
 @final
 class WdfContext(BaseRecord):
     """
-    An object's context (`FxContextHeader`).
+    One `FxContextHeader` of an object.
     """
     @property
     def context(self, /) -> int:
         """
-        The context itself.
+        The context itself (`FxContextHeader.Context`).
         """
     @property
     def header(self, /) -> int:
@@ -18008,20 +18855,20 @@ class WdfContext(BaseRecord):
     @property
     def size(self, /) -> int |None:
         """
-        Bytes.
+        `ContextSize`, bytes.
         """
     @property
     def type_info(self, /) -> int |None:
         """
-        The `_WDF_OBJECT_CONTEXT_TYPE_INFO`. `None` for a header that has no
-        context type.
+        `ContextTypeInfo`, the `_WDF_OBJECT_CONTEXT_TYPE_INFO`. `None` for a
+        header without a context type.
         """
 
 @final
-class WdfDevice(BaseRecord):
+class WdfDeviceDetail(BaseRecord):
     """
-    A WDFDEVICE with its device objects, state machines, and queues
-    (`!wdfkd.wdfdevice`).
+    A WDFDEVICE with its device objects, state machines, queues, and I/O
+    targets (`!wdfkd.wdfdevice`).
     """
     @property
     def address(self, /) -> int:
@@ -18031,18 +18878,18 @@ class WdfDevice(BaseRecord):
     @property
     def attached_device(self, /) -> int:
         """
-        The device object this one is attached to.
+        The device object this one is attached to (`m_AttachedDevice`).
         """
     @property
     def default_child_list(self, /) -> int |None:
         """
-        An FDO's default child list (WDFCHILDLIST).
+        An FDO's default child list (`m_DefaultDeviceList`, a WDFCHILDLIST).
         """
     @property
     def default_io_target(self, /) -> int |None:
         """
-        An FDO's default I/O target (WDFIOTARGET), the next device object
-        down its stack.
+        An FDO's default I/O target (`FxPkgFdo.m_DefaultTarget`, a
+        WDFIOTARGET), the next device object down its stack.
         """
     @property
     def default_queue(self, /) -> int |None:
@@ -18054,7 +18901,7 @@ class WdfDevice(BaseRecord):
     @property
     def device_object(self, /) -> int: ...
     @property
-    def device_power_state(self, /) -> WdfState |None:
+    def device_power_state(self, /) -> WdfEnumValue |None:
         """
         `_DEVICE_POWER_STATE`.
         """
@@ -18089,12 +18936,12 @@ class WdfDevice(BaseRecord):
     @property
     def parent(self, /) -> WdfObjectRef |None:
         """
-        A PDO's parent WDFDEVICE.
+        A PDO's parent WDFDEVICE (`m_ParentDevice`).
         """
     @property
     def physical_device(self, /) -> int:
         """
-        The device stack's PDO.
+        The device stack's PDO (`m_PhysicalDevice`).
         """
     @property
     def pkg_io(self, /) -> int:
@@ -18104,20 +18951,20 @@ class WdfDevice(BaseRecord):
     @property
     def pkg_pnp(self, /) -> int:
         """
-        The `FxPkgPnp`. Null for a control device.
+        `m_PkgPnp`, the `FxPkgPnp`. Null for a control device.
         """
     @property
-    def pnp_state(self, /) -> WdfState:
+    def pnp_state(self, /) -> WdfEnumValue:
         """
         `_WDF_DEVICE_PNP_STATE`.
         """
     @property
-    def power_policy_state(self, /) -> WdfState:
+    def power_policy_state(self, /) -> WdfEnumValue:
         """
         `_WDF_DEVICE_POWER_POLICY_STATE`.
         """
     @property
-    def power_state(self, /) -> WdfState:
+    def power_state(self, /) -> WdfEnumValue:
         """
         `_WDF_DEVICE_POWER_STATE`.
         """
@@ -18132,15 +18979,16 @@ class WdfDevice(BaseRecord):
     @property
     def self_io_target(self, /) -> int |None:
         """
-        An FDO's self I/O target (WDFIOTARGET), the top of its own stack.
+        An FDO's self I/O target (`FxPkgFdo.m_SelfTarget`, a WDFIOTARGET),
+        the top of its own stack.
         """
     @property
     def static_child_list(self, /) -> int |None:
         """
-        An FDO's static child list (WDFCHILDLIST).
+        An FDO's static child list (`m_StaticDeviceList`, a WDFCHILDLIST).
         """
     @property
-    def system_power_state(self, /) -> WdfState |None:
+    def system_power_state(self, /) -> WdfEnumValue |None:
         """
         `_SYSTEM_POWER_STATE`.
         """
@@ -18148,7 +18996,7 @@ class WdfDevice(BaseRecord):
 @final
 class WdfDriverDevice(BaseRecord):
     """
-    A device object of a driver, and its related WDFDEVICE.
+    One of a driver's `DEVICE_OBJECT`s and the WDFDEVICE behind it.
     """
     @property
     def device(self, /) -> int |None:
@@ -18169,7 +19017,7 @@ class WdfDriverDevice(BaseRecord):
         `FDO`, `filter`, `PDO`, or `control`.
         """
     @property
-    def pnp_state(self, /) -> WdfState |None:
+    def pnp_state(self, /) -> WdfEnumValue |None:
         """
         `m_CurrentPnpState` (`_WDF_DEVICE_PNP_STATE`).
         """
@@ -18227,85 +19075,29 @@ class WdfDumpDriver(BaseRecord):
     @property
     def name(self, /) -> str |None:
         """
-        None for an entry without a printable name.
+        `None` for an entry without a printable name.
         """
 
 @final
-class WdfHandle(BaseRecord):
+class WdfEnumValue(BaseRecord):
     """
-    A WDF handle and the object it names (`!wdfkd.wdfhandle`).
+    A PDB enum value and its name.
     """
     @property
-    def address(self, /) -> int:
+    def name(self, /) -> str |None:
         """
-        The `FxObject`.
-        """
-    @property
-    def contexts(self, /) -> list[WdfContext]: ...
-    @property
-    def contexts_stopped(self, /) -> str |None:
-        """
-        Why the walk of the context header chain stopped before a null
-        `NextHeader`. `None` if the walk got to a null `NextHeader`.
+        `None` when the enum has no name for `value`.
         """
     @property
-    def driver(self, /) -> str |None:
-        """
-        The owning driver's name, when it has one.
-        """
-    @property
-    def flag_names(self, /) -> list[str]:
-        """
-        The `FXOBJECT_FLAGS` set in `flags`.
-        """
-    @property
-    def flags(self, /) -> int:
-        """
-        `m_ObjectFlags`.
-        """
-    @property
-    def globals(self, /) -> int:
-        """
-        The owning driver's `_FX_DRIVER_GLOBALS`.
-        """
-    @property
-    def handle(self, /) -> int: ...
-    @property
-    def object_size(self, /) -> int:
-        """
-        `m_ObjectSize`: the size of the object and its extra bytes.
-        """
-    @property
-    def offset(self, /) -> int |None:
-        """
-        For an offset handle, the `WDFOBJECT_OFFSET` value to subtract from
-        the address that the handle points to.
-        """
-    @property
-    def parent(self, /) -> WdfObjectRef |None: ...
-    @property
-    def refcount(self, /) -> int: ...
-    @property
-    def state(self, /) -> WdfState:
-        """
-        `m_ObjectState` (`FxObjectState`).
-        """
-    @property
-    def type_name(self, /) -> str:
-        """
-        Its `FX_OBJECT_TYPES` name.
-        """
-    @property
-    def type_value(self, /) -> int:
-        """
-        `m_Type`.
-        """
+    def value(self, /) -> int: ...
 
 @final
 class WdfIoParameters(BaseRecord):
     """
-    The buffer lengths in a stack location's parameters. Each is `None`
-    when the major function has no such field.
+    The buffer lengths in a stack location's `Parameters` for its major
+    function: a read's or write's `Length`, a device control's buffer
+    lengths and control code. Each is `None` when the major function has no
+    such field.
     """
     @property
     def input_length(self, /) -> int |None:
@@ -18329,10 +19121,10 @@ class WdfIoParameters(BaseRecord):
         """
 
 @final
-class WdfIoTarget(BaseRecord):
+class WdfIoTargetDetail(BaseRecord):
     """
-    A WDFIOTARGET with the device object that it sends to and the
-    requests sent to it (`!wdfkd.wdfiotarget`).
+    A WDFIOTARGET with the device object that it sends to and the requests
+    sent to it (`!wdfkd.wdfiotarget`).
     """
     @property
     def address(self, /) -> int:
@@ -18342,7 +19134,7 @@ class WdfIoTarget(BaseRecord):
     @property
     def device(self, /) -> WdfObjectRef |None:
         """
-        The WDFDEVICE that it belongs to.
+        The WDFDEVICE that it belongs to (`m_DeviceBase`).
         """
     @property
     def driver(self, /) -> str |None:
@@ -18350,7 +19142,10 @@ class WdfIoTarget(BaseRecord):
         The owning driver's name, when it has one.
         """
     @property
-    def file_object(self, /) -> int: ...
+    def file_object(self, /) -> int:
+        """
+        `m_TargetFileObject`.
+        """
     @property
     def globals(self, /) -> int:
         """
@@ -18359,31 +19154,25 @@ class WdfIoTarget(BaseRecord):
     @property
     def handle(self, /) -> int: ...
     @property
-    def ignored(self, /) -> list[WdfTargetRequest]:
+    def ignored(self, /) -> WdfTargetRequestList:
         """
         Requests sent while the target was not started, with
-        `WDF_REQUEST_SEND_OPTION_IGNORE_TARGET_STATE`.
-        """
-    @property
-    def ignored_stopped(self, /) -> str |None:
-        """
-        Why the walk stopped early. `None` if the walk completed.
+        `WDF_REQUEST_SEND_OPTION_IGNORE_TARGET_STATE` (`m_IgnoredIoListHead`).
         """
     @property
     def in_stack(self, /) -> bool:
         """
-        Whether the target is in the device's own stack.
+        `m_InStack`: whether the target is in the device's own stack.
         """
     @property
     def in_stack_device(self, /) -> int:
         """
-        The device's own device object.
+        `m_InStackDevice`: the device's own device object.
         """
     @property
     def io_count(self, /) -> int:
         """
-        `m_IoCount`: one for the target and one for each request in
-        flight.
+        `m_IoCount`: one for the target and one for each request in flight.
         """
     @property
     def is_default(self, /) -> bool:
@@ -18393,33 +19182,23 @@ class WdfIoTarget(BaseRecord):
     @property
     def kind(self, /) -> str:
         """
-        `local` (in the device's own stack), `remote` (opened by the
-        driver), `self`, `USB device`, or `USB pipe`.
+        `local` (a target in the device's own stack), `remote` (one the
+        driver opened), `self`, `USB device`, or `USB pipe`.
         """
     @property
-    def open_state(self, /) -> WdfState |None:
+    def open_state(self, /) -> WdfEnumValue |None:
         """
-        A remote target's `FxIoTargetRemoteOpenState`.
-        """
-    @property
-    def pended(self, /) -> list[WdfTargetRequest]:
-        """
-        Requests that the target holds until it starts.
+        A remote target's `m_OpenState` (`FxIoTargetRemoteOpenState`).
         """
     @property
-    def pended_stopped(self, /) -> str |None:
+    def pended(self, /) -> WdfTargetRequestList:
         """
-        Why the walk stopped early. `None` if the walk completed.
-        """
-    @property
-    def sent(self, /) -> list[WdfTargetRequest]:
-        """
-        Requests sent and not completed.
+        Requests that the target holds until it starts (`m_PendedQueue`).
         """
     @property
-    def sent_stopped(self, /) -> str |None:
+    def sent(self, /) -> WdfTargetRequestList:
         """
-        Why the walk stopped early. `None` if the walk completed.
+        Requests sent and not completed (`m_SentIoListHead`).
         """
     @property
     def stack_size(self, /) -> int:
@@ -18427,14 +19206,14 @@ class WdfIoTarget(BaseRecord):
         `m_TargetStackSize`.
         """
     @property
-    def state(self, /) -> WdfState:
+    def state(self, /) -> WdfEnumValue:
         """
-        `_WDF_IO_TARGET_STATE`.
+        `m_State` (`_WDF_IO_TARGET_STATE`).
         """
     @property
     def target_device(self, /) -> int:
         """
-        The device object that it sends requests to.
+        `m_TargetDevice`, the device object that it sends requests to.
         """
     @property
     def target_driver(self, /) -> str |None:
@@ -18442,7 +19221,10 @@ class WdfIoTarget(BaseRecord):
         The name of `target_device`'s driver.
         """
     @property
-    def target_pdo(self, /) -> int: ...
+    def target_pdo(self, /) -> int:
+        """
+        `m_TargetPdo`.
+        """
     @property
     def type_name(self, /) -> str:
         """
@@ -18472,17 +19254,18 @@ class WdfIoTargetSummary(BaseRecord):
     @property
     def kind(self, /) -> str:
         """
-        `local`, `remote`, `self`, `USB device`, or `USB pipe`.
+        See [`WdfIoTargetDetail::kind`]: `local`, `remote`, `self`,
+        `USB device`, or `USB pipe`.
         """
     @property
-    def state(self, /) -> WdfState:
+    def state(self, /) -> WdfEnumValue:
         """
-        `_WDF_IO_TARGET_STATE`.
+        `m_State` (`_WDF_IO_TARGET_STATE`).
         """
     @property
     def target_device(self, /) -> int:
         """
-        The device object that it sends requests to.
+        `m_TargetDevice`, the device object that it sends requests to.
         """
     @property
     def type_name(self, /) -> str:
@@ -18550,7 +19333,7 @@ class WdfLoader(BaseRecord):
         """
 
 @final
-class WdfLog(BaseRecord):
+class WdfLogDump(BaseRecord):
     """
     The In-Flight Recorder log of a client driver, oldest record first
     (`!wdfkd.wdflogdump`, `!wdfkd.wdfcrashdump`).
@@ -18558,31 +19341,30 @@ class WdfLog(BaseRecord):
     @property
     def base(self, /) -> int:
         """
-        The record area.
-        """
-    @property
-    def corruption(self, /) -> str |None:
-        """
-        The item that failed validation, when `end` is `corrupt`.
+        The record area (`Base`).
         """
     @property
     def current(self, /) -> int:
         """
-        The offset where KMDF writes the next record.
+        `Offset.Current`: where KMDF writes the next record.
         """
     @property
     def driver(self, /) -> str: ...
     @property
-    def end(self, /) -> str:
+    def end(self, /) -> IfrEnd:
         """
-        Why the walk ended: `empty`, `first_record`, `overwritten`, or
-        `corrupt`.
+        Why the walk ended.
+        """
+    @property
+    def entries(self, /) -> list[WdfLogEntry]:
+        """
+        Oldest first.
         """
     @property
     def globals(self, /) -> int:
         """
-        The `_FX_DRIVER_GLOBALS`; 0 in a crash dump that does not list
-        the driver.
+        The `_FX_DRIVER_GLOBALS`; 0 in a crash dump that does not list the
+        driver.
         """
     @property
     def header(self, /) -> int:
@@ -18592,14 +19374,12 @@ class WdfLog(BaseRecord):
     @property
     def previous(self, /) -> int:
         """
-        The newest record's offset.
+        `Offset.Previous`: the newest record's offset.
         """
-    @property
-    def records(self, /) -> list[WdfLogRecord]: ...
     @property
     def sequence(self, /) -> int:
         """
-        The header's sequence number.
+        The header's `Sequence`, the newest record's sequence number.
         """
     @property
     def size(self, /) -> int:
@@ -18609,47 +19389,28 @@ class WdfLog(BaseRecord):
     @property
     def use_timestamps(self, /) -> bool:
         """
-        Whether the records have timestamps ('L2').
+        `UseTimeStamp`: whether the records are 'L2', with a timestamp.
         """
 
 @final
-class WdfLogRecord(BaseRecord):
+class WdfLogEntry(BaseRecord):
     """
-    An In-Flight Recorder record.
+    An In-Flight Recorder record and its message.
     """
-    @property
-    def args(self, /) -> str:
-        """
-        The argument bytes, as hex.
-        """
-    @property
-    def error(self, /) -> str |None:
-        """
-        Why the message is not formatted.
-        """
     @property
     def flags(self, /) -> str |None:
         """
-        Its `FLAGS=`.
+        The TMF message's `FLAGS=`.
         """
     @property
     def function(self, /) -> str |None:
         """
-        Its `FUNC=`.
+        The TMF message's `FUNC=`.
         """
     @property
     def level(self, /) -> str |None:
         """
-        Its `LEVEL=`.
-        """
-    @property
-    def message_guid(self, /) -> str: ...
-    @property
-    def message_number(self, /) -> int: ...
-    @property
-    def offset(self, /) -> int:
-        """
-        Its offset in the log.
+        The TMF message's `LEVEL=`.
         """
     @property
     def provider(self, /) -> str |None:
@@ -18657,42 +19418,103 @@ class WdfLogRecord(BaseRecord):
         The TMF message's provider, when a loaded PDB declares it.
         """
     @property
-    def sequence(self, /) -> int: ...
+    def record(self, /) -> IfrRecord: ...
     @property
-    def text(self, /) -> str |None:
+    def text(self, /) -> Diagnostic[str]:
         """
-        The formatted message.
-        """
-    @property
-    def timestamp(self, /) -> int |None:
-        """
-        The FILETIME. `None` for an 'LR' record, because it has no
-        timestamp.
-        """
-    @property
-    def timestamp_utc(self, /) -> str |None:
-        """
-        `timestamp` as UTC (`YYYY-MM-DD HH:MM:SS.fffffff`).
+        The message formatted with its arguments, or why it is not.
         """
 
 @final
 class WdfObject(BaseRecord):
+    """
+    A WDF handle and the object it names (`!wdfkd.wdfhandle`).
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The `FxObject`.
+        """
+    @property
+    def contexts(self, /) -> list[WdfContext]: ...
+    @property
+    def contexts_stopped(self, /) -> str |None:
+        """
+        Why the walk of the context header chain stopped before a null
+        `NextHeader`. `None` if the walk got to a null `NextHeader`.
+        """
+    @property
+    def driver(self, /) -> str |None:
+        """
+        The owning driver's `DriverName`, when it has one.
+        """
+    @property
+    def flag_names(self, /) -> list[str]:
+        """
+        The `FXOBJECT_FLAGS` set in `flags`.
+        """
+    @property
+    def flags(self, /) -> int:
+        """
+        `m_ObjectFlags`.
+        """
+    @property
+    def globals(self, /) -> int:
+        """
+        The owning driver's `_FX_DRIVER_GLOBALS`.
+        """
+    @property
+    def handle(self, /) -> int: ...
+    @property
+    def object_size(self, /) -> int:
+        """
+        `m_ObjectSize`: the size of the object and its extra bytes.
+        """
+    @property
+    def offset(self, /) -> int |None:
+        """
+        For an offset handle, the `WDFOBJECT_OFFSET` value to subtract from
+        the address that the handle points to.
+        """
+    @property
+    def parent(self, /) -> WdfObjectRef |None: ...
+    @property
+    def refcount(self, /) -> int: ...
+    @property
+    def state(self, /) -> WdfEnumValue:
+        """
+        `m_ObjectState` (`FxObjectState`).
+        """
+    @property
+    def type_name(self, /) -> str:
+        """
+        Its `FX_OBJECT_TYPES` name.
+        """
+    @property
+    def type_value(self, /) -> int:
+        """
+        `m_Type`.
+        """
+
+@final
+class WdfObjectDetail(BaseRecord):
     """
     A KMDF object with its children (`!wdfkd.wdfobject`).
     """
     @property
     def children(self, /) -> list[WdfObjectRef]:
         """
-        The objects on `m_ChildListHead`.
+        The objects on `m_ChildListHead`, each of which names this object as
+        its `m_ParentObject`.
         """
     @property
     def children_stopped(self, /) -> str |None:
         """
-        Why the walk of the child list stopped before the list head.
-        `None` if the walk completed.
+        Why the walk of the child list stopped before the list head. `None`
+        if the walk completed.
         """
     @property
-    def object(self, /) -> WdfHandle:
+    def object(self, /) -> WdfObject:
         """
         The object, as `!wdfkd.wdfhandle` shows it.
         """
@@ -18700,15 +19522,15 @@ class WdfObject(BaseRecord):
 @final
 class WdfObjectRef(BaseRecord):
     """
-    The address, handle, and type of a KMDF object, as far as ntoseye can
-    read them.
+    The address, handle, and type of a KMDF object, as far as they read.
     """
     @property
     def address(self, /) -> int: ...
     @property
     def handle(self, /) -> int |None:
         """
-        `None` for an object that has no handle or that ntoseye cannot read.
+        `None` for an object without a handle (`m_ObjectSize` 0) or that does
+        not read.
         """
     @property
     def type_name(self, /) -> str |None:
@@ -18717,7 +19539,7 @@ class WdfObjectRef(BaseRecord):
         """
 
 @final
-class WdfQueue(BaseRecord):
+class WdfQueueDetail(BaseRecord):
     """
     A WDFQUEUE with its configuration, state, and requests
     (`!wdfkd.wdfqueue`).
@@ -18739,7 +19561,7 @@ class WdfQueue(BaseRecord):
     @property
     def device(self, /) -> WdfObjectRef |None: ...
     @property
-    def dispatch_type(self, /) -> WdfState:
+    def dispatch_type(self, /) -> WdfEnumValue:
         """
         `_WDF_IO_QUEUE_DISPATCH_TYPE`.
         """
@@ -18749,9 +19571,9 @@ class WdfQueue(BaseRecord):
         The owning driver's name, when it has one.
         """
     @property
-    def driver_cancelable(self, /) -> list[WdfRequest]:
+    def driver_cancelable(self, /) -> WdfRequestList:
         """
-        Requests the driver marked cancelable.
+        Requests the driver marked cancelable (`m_DriverCancelable`).
         """
     @property
     def driver_cancelable_count(self, /) -> int:
@@ -18759,14 +19581,9 @@ class WdfQueue(BaseRecord):
         Requests the driver marked cancelable.
         """
     @property
-    def driver_cancelable_stopped(self, /) -> str |None:
+    def driver_owned(self, /) -> WdfRequestList:
         """
-        Why the walk stopped early. `None` if the walk completed.
-        """
-    @property
-    def driver_owned(self, /) -> list[WdfRequest]:
-        """
-        Requests presented to the driver.
+        Requests presented to the driver (`m_DriverOwned`).
         """
     @property
     def driver_owned_count(self, /) -> int:
@@ -18774,12 +19591,7 @@ class WdfQueue(BaseRecord):
         Requests the driver owns.
         """
     @property
-    def driver_owned_stopped(self, /) -> str |None:
-        """
-        Why the walk stopped early. `None` if the walk completed.
-        """
-    @property
-    def execution_level(self, /) -> WdfState:
+    def execution_level(self, /) -> WdfEnumValue:
         """
         `_WDF_EXECUTION_LEVEL`.
         """
@@ -18791,9 +19603,9 @@ class WdfQueue(BaseRecord):
         `m_MaxParallelQueuePresentedRequests`.
         """
     @property
-    def pending(self, /) -> list[WdfRequest]:
+    def pending(self, /) -> WdfRequestList:
         """
-        Requests waiting in the queue.
+        Requests waiting in the queue (`m_Queue`).
         """
     @property
     def pending_count(self, /) -> int:
@@ -18801,14 +19613,9 @@ class WdfQueue(BaseRecord):
         Requests waiting in the queue.
         """
     @property
-    def pending_stopped(self, /) -> str |None:
-        """
-        Why the walk stopped early. `None` if the walk completed.
-        """
-    @property
     def power_managed(self, /) -> bool: ...
     @property
-    def power_state(self, /) -> WdfState:
+    def power_state(self, /) -> WdfEnumValue:
         """
         `FxIoQueuePowerState`.
         """
@@ -18823,7 +19630,7 @@ class WdfQueue(BaseRecord):
         The `_FX_IO_QUEUE_STATE` bits set in `state`.
         """
     @property
-    def synchronization_scope(self, /) -> WdfState:
+    def synchronization_scope(self, /) -> WdfEnumValue:
         """
         `_WDF_SYNCHRONIZATION_SCOPE`.
         """
@@ -18833,7 +19640,7 @@ class WdfQueue(BaseRecord):
 @final
 class WdfQueueSummary(BaseRecord):
     """
-    A device's queue.
+    A queue of a device.
     """
     @property
     def address(self, /) -> int:
@@ -18841,14 +19648,14 @@ class WdfQueueSummary(BaseRecord):
         The `FxIoQueue`.
         """
     @property
-    def dispatch_type(self, /) -> WdfState:
+    def dispatch_type(self, /) -> WdfEnumValue:
         """
         `_WDF_IO_QUEUE_DISPATCH_TYPE`.
         """
     @property
     def driver_owned(self, /) -> int:
         """
-        Requests the driver owns.
+        Requests the driver owns (`m_DriverIoCount`).
         """
     @property
     def handle(self, /) -> int:
@@ -18863,28 +19670,10 @@ class WdfQueueSummary(BaseRecord):
     @property
     def pending(self, /) -> int:
         """
-        Requests waiting in the queue.
+        Requests waiting in the queue (`m_Queue.m_RequestCount`).
         """
     @property
     def power_managed(self, /) -> bool: ...
-
-@final
-class WdfRequest(BaseRecord):
-    """
-    A request on a queue's list.
-    """
-    @property
-    def address(self, /) -> int:
-        """
-        The `FxRequest`.
-        """
-    @property
-    def handle(self, /) -> int:
-        """
-        The WDFREQUEST handle.
-        """
-    @property
-    def irp(self, /) -> int: ...
 
 @final
 class WdfRequestDetail(BaseRecord):
@@ -18900,7 +19689,7 @@ class WdfRequestDetail(BaseRecord):
     @property
     def cancel_routine(self, /) -> WdfCallback |None:
         """
-        The driver's `EvtRequestCancel`.
+        The driver's `EvtRequestCancel` (`m_CancelRoutine`).
         """
     @property
     def canceled(self, /) -> bool: ...
@@ -18909,15 +19698,15 @@ class WdfRequestDetail(BaseRecord):
     @property
     def completion_context(self, /) -> int:
         """
-        The completion routine's context.
+        The completion routine's context (`m_TargetCompletionContext`).
         """
     @property
     def completion_routine(self, /) -> WdfCallback |None:
         """
-        The completion routine set for its send.
+        The completion routine set for its send (`m_CompletionRoutine`).
         """
     @property
-    def completion_state(self, /) -> WdfState:
+    def completion_state(self, /) -> WdfEnumValue:
         """
         `m_CompletionState` (`FxRequestCompletionState`).
         """
@@ -18936,10 +19725,10 @@ class WdfRequestDetail(BaseRecord):
     @property
     def irp(self, /) -> int:
         """
-        The IRP (`m_Irp`). Null for a request without an IRP.
+        The IRP (`m_Irp.m_Irp`). Null for a request without an IRP.
         """
     @property
-    def irp_allocation(self, /) -> WdfState:
+    def irp_allocation(self, /) -> WdfEnumValue:
         """
         `m_IrpAllocation` (`FxRequestAllocationSource`): whether the IRP
         came from the I/O manager (`REQUEST_ALLOCATED_FROM_IO`) or the
@@ -18958,17 +19747,16 @@ class WdfRequestDetail(BaseRecord):
     @property
     def irp_queue(self, /) -> int:
         """
-        The cancel-safe queue (`FxIrpQueue`) that holds its IRP. Null if
-        none does, and the request cannot be canceled.
+        `m_IrpQueue`: the cancel-safe queue (`FxIrpQueue`) that holds its
+        IRP. Null if none does, and the request cannot be canceled.
         """
     @property
     def irp_queue_role(self, /) -> str |None:
         """
         Which queue `irp_queue` is: `pending` (its queue's waiting
-        requests), `driver_cancelable` (the driver marked it
-        cancelable), or `target_pended` (its I/O target holds it until
-        the target starts). `None` if `irp_queue` is null or none of
-        these.
+        requests), `driver_cancelable` (the driver marked it cancelable), or
+        `target_pended` (its I/O target holds it until the target starts).
+        `None` if `irp_queue` is null or none of these.
         """
     @property
     def irp_reference_count(self, /) -> int:
@@ -18976,7 +19764,7 @@ class WdfRequestDetail(BaseRecord):
         `m_IrpReferenceCount`.
         """
     @property
-    def object_state(self, /) -> WdfState:
+    def object_state(self, /) -> WdfEnumValue:
         """
         `m_ObjectState` (`FxObjectState`).
         """
@@ -18985,7 +19773,7 @@ class WdfRequestDetail(BaseRecord):
     @property
     def presented(self, /) -> bool:
         """
-        Whether its queue has presented it to the driver.
+        `m_Presented`: whether its queue has presented it to the driver.
         """
     @property
     def queue(self, /) -> WdfObjectRef |None:
@@ -19030,8 +19818,8 @@ class WdfRequestIrp(BaseRecord):
     @property
     def current(self, /) -> WdfIrpLocation |None:
         """
-        `None` when `CurrentLocation` names no stack location, because
-        the IRP has left every driver of the stack.
+        `None` when `CurrentLocation` names no stack location, because the
+        IRP has left every driver of the stack.
         """
     @property
     def current_location(self, /) -> int: ...
@@ -19048,17 +19836,35 @@ class WdfRequestIrp(BaseRecord):
     def user_buffer(self, /) -> int: ...
 
 @final
-class WdfState(BaseRecord):
+class WdfRequestList(BaseRecord):
     """
-    A PDB enum value and its name.
+    A request list of a queue.
     """
     @property
-    def name(self, /) -> str |None:
+    def requests(self, /) -> list[WdfRequestRef]: ...
+    @property
+    def stopped(self, /) -> str |None:
         """
-        `None` when the enum has no name for `value`.
+        Why the walk stopped early. `None` if the walk completed.
+        """
+
+@final
+class WdfRequestRef(BaseRecord):
+    """
+    A request on one of a queue's lists.
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The `FxRequest`.
         """
     @property
-    def value(self, /) -> int: ...
+    def handle(self, /) -> int:
+        """
+        The WDFREQUEST handle.
+        """
+    @property
+    def irp(self, /) -> int: ...
 
 @final
 class WdfTargetRequest(BaseRecord):
@@ -19073,16 +19879,30 @@ class WdfTargetRequest(BaseRecord):
     @property
     def handle(self, /) -> int |None:
         """
-        The WDFREQUEST handle. `None` for the framework's own request
-        that has no handle, such as a synchronous send's.
+        The WDFREQUEST handle. `None` for the framework's own request that
+        has no handle, such as the one a synchronous send builds on the
+        sender's stack.
         """
     @property
     def irp(self, /) -> int: ...
 
 @final
+class WdfTargetRequestList(BaseRecord):
+    """
+    A request list of an I/O target.
+    """
+    @property
+    def requests(self, /) -> list[WdfTargetRequest]: ...
+    @property
+    def stopped(self, /) -> str |None:
+        """
+        Why the walk stopped early. `None` if the walk completed.
+        """
+
+@final
 class WdfVersion(BaseRecord):
     """
-    A KMDF version.
+    The KMDF version a client bound to (`_WDF_BIND_INFO.Version`).
     """
     @property
     def build(self, /) -> int: ...

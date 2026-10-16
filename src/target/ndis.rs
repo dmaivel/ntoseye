@@ -361,7 +361,8 @@ fn split_result<T>(value: Option<std::result::Result<T, String>>) -> (Option<T>,
 #[record]
 pub struct NdisMiniport {
     pub address: VirtAddr,
-    /// `MiniportName`, the adapter's device name (`\DEVICE\{GUID}`).
+    /// `MiniportName`, the adapter's device name (its `{GUID}` in the
+    /// `DEVICE` directory).
     pub name: String,
     /// `pAdapterInstanceName`, the adapter's friendly name.
     pub friendly_name: Option<String>,
