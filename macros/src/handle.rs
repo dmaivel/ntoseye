@@ -502,7 +502,7 @@ pub fn methods(input: TokenStream) -> Result<TokenStream> {
                 use pyo3::types::PyAnyMethods;
                 other.cast::<Self>().is_ok_and(|other| {
                     let other = other.get();
-                    self.owner.same_debugger(&other.owner) && #this == #other
+                    self.owner.same_target(&other.owner) && #this == #other
                 })
             }
         }

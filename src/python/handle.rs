@@ -444,6 +444,14 @@ impl Owner {
         self.dbg.as_ptr() == other.dbg.as_ptr()
     }
 
+    /// Whether `other` belongs to the same debugger and was minted for the
+    /// same target generation: a handle from before a reload names an
+    /// object of the old kernel, which a fresh one at the same address is
+    /// not. Handle equality is this and the handle's key.
+    pub fn same_target(&self, other: &Owner) -> bool {
+        self.same_debugger(other) && self.generation == other.generation
+    }
+
     /// Accept this handle as an argument to a call on `dbg`: it must be that
     /// debugger's and current. `what` names it in the `ValueError`.
     pub fn require_argument_of(&self, py: Python<'_>, dbg: &Owner, what: &str) -> PyResult<()> {
@@ -461,6 +469,7 @@ impl Owner {
     pub fn identity_hash(&self, key: impl Hash) -> isize {
         let mut hasher = DefaultHasher::new();
         (self.dbg.as_ptr() as usize).hash(&mut hasher);
+        self.generation.hash(&mut hasher);
         key.hash(&mut hasher);
         hasher.finish() as isize
     }

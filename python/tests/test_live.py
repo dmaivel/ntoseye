@@ -191,6 +191,15 @@ def test_reload_makes_old_handles_stale(halted: Debugger) -> None:
     assert halted.processes[4].name == "System"
 
 
+def test_a_handle_from_before_a_reload_is_not_the_fresh_one(halted: Debugger) -> None:
+    old = halted.processes[4]
+    assert old == halted.processes[4]
+    halted.reload()
+    fresh = halted.processes[4]
+    assert old != fresh
+    assert len({old, fresh}) == 2
+
+
 def test_debugger_methods_refuse_a_stale_handle_argument(halted: Debugger) -> None:
     system = halted.processes[4]
     halted.reload()

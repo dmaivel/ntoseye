@@ -500,7 +500,7 @@ impl Frame {
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
         other.extract::<PyRef<'_, Frame>>().is_ok_and(|other| {
-            self.owner.same_debugger(&other.owner)
+            self.owner.same_target(&other.owner)
                 && self.ethread() == other.ethread()
                 && self.vcpu == other.vcpu
                 && self.index == other.index
