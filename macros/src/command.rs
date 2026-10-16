@@ -92,15 +92,14 @@ fn expand_form(form: FormOptions, mut function: ItemFn) -> Result<TokenStream> {
             || arg.invoked
             || arg.parse.is_some()
             || arg.each.is_some()
-            || arg.current
-            || arg.sdk
-            || arg.name.is_some()
-            || arg.complete.is_some();
+            || arg.current;
         if repl_only {
             return Err(Error::new(
                 arg.span,
                 "a form's arguments are its SDK method's (`receiver`, `default`, `keyword`, \
-                 `Option<T>`); its command's REPL operation parses the line and calls it",
+                 `Option<T>`, `sdk` for one the REPL line has no word for, and `name` and \
+                 `complete` for its REPL usage); its command's REPL operation parses the line \
+                 and calls it",
             ));
         }
     }
@@ -112,6 +111,38 @@ fn expand_form(form: FormOptions, mut function: ItemFn) -> Result<TokenStream> {
         .map(docstring_line)
         .collect();
     let effects = format_ident!("__FORM_{}_{}", form.command, function.sig.ident);
+    let usage = format_ident!("__FORM_USAGE_{}_{}", form.command, function.sig.ident);
+    let fragment = if form.sdk {
+        quote!(None)
+    } else {
+        // The words after the command name: the selecting word, then each
+        // argument the line gives (not a receiver, not an `sdk` one).
+        let mut words = Vec::new();
+        let mut completion = Vec::new();
+        let strategy = quote!(crate::repl::CompletionStrategy);
+        if let Some(word) = &form.word {
+            words.push(word.value());
+            completion.push(quote!(#strategy::None));
+        }
+        for arg in args.iter().filter(|arg| !arg.receiver && !arg.sdk) {
+            words.push(if arg.omittable() {
+                format!("[{}]", arg.usage_name())
+            } else {
+                format!("<{}>", arg.usage_name())
+            });
+            completion.push(match &arg.complete {
+                Some(ident) => quote!(#strategy::#ident),
+                None => quote!(#strategy::None),
+            });
+        }
+        let words = words.join(" ");
+        quote! {
+            Some(crate::repl::FormUsage {
+                usage: #words,
+                completion: &[#(#completion),*],
+            })
+        }
+    };
     let method = Method {
         function: &function.sig.ident,
         python_name: form.python_name.as_ref(),
@@ -128,6 +159,10 @@ fn expand_form(form: FormOptions, mut function: ItemFn) -> Result<TokenStream> {
         .collect::<Result<TokenStream>>()?;
     Ok(quote! {
         #function
+
+        #[doc(hidden)]
+        #[allow(non_upper_case_globals)]
+        const #usage: ::std::option::Option<crate::repl::FormUsage> = #fragment;
 
         const _: () = {
             #python
@@ -187,6 +222,11 @@ struct FormOptions {
     command: Ident,
     python: Vec<Ident>,
     python_name: Option<LitStr>,
+    /// The word that selects the form on the REPL line (a subcommand or a
+    /// switch), before its arguments.
+    word: Option<LitStr>,
+    /// SDK-only: the REPL line has no form of it.
+    sdk: bool,
 }
 
 /// What `#[command(...)]` declares: a command, or a form of one.
@@ -215,15 +255,20 @@ impl Attr {
         let mut flow = None;
         let mut forms = Vec::new();
         let mut form_of: Option<Ident> = None;
+        let mut word: Option<LitStr> = None;
+        let mut sdk = false;
         let mut command_keys = Vec::new();
+        let mut form_keys = Vec::new();
         let parser = syn::meta::parser(|meta| {
             let key = meta
                 .path
                 .get_ident()
                 .map(Ident::to_string)
                 .unwrap_or_default();
-            if !matches!(key.as_str(), "form_of" | "python" | "python_name") {
-                command_keys.push(meta.path.span());
+            match key.as_str() {
+                "form_of" | "python" | "python_name" => {}
+                "word" | "sdk" => form_keys.push(meta.path.span()),
+                _ => command_keys.push(meta.path.span()),
             }
             match key.as_str() {
                 "names" => names = Some(lit_list(meta.value()?)?),
@@ -243,11 +288,14 @@ impl Attr {
                 "flow" => flow = Some(meta.value()?.parse()?),
                 "forms" => forms = ident_list(meta.value()?)?,
                 "form_of" => form_of = Some(meta.value()?.parse()?),
+                "word" => word = Some(meta.value()?.parse()?),
+                "sdk" => sdk = true,
                 _ => {
                     return Err(meta.error(
                         "expected `names`, `category`, `kind`, `target`, `state`, `run`, \
                          `writes`, `live_only`, `capability`, `usage`, `completion`, `python`, \
-                         `python_name`, `style`, `flow`, `forms` or `form_of`",
+                         `python_name`, `style`, `flow`, `forms`, or a form's `form_of`, `word` \
+                         and `sdk`",
                     ));
                 }
             }
@@ -265,19 +313,30 @@ impl Attr {
             if let Some(key) = command_keys.first() {
                 return Err(Error::new(
                     *key,
-                    "a form takes only `form_of`, `python` and `python_name`: its command \
-                     declares the rest",
+                    "a form takes only `form_of`, `python`, `python_name`, `word` and `sdk`: \
+                     its command declares the rest",
                 ));
             }
             let python = python.ok_or_else(|| missing("python"))?;
             if python.is_empty() {
                 return Err(Error::new(span, "a form is an SDK method: `python = Object`"));
             }
+            if sdk && word.is_some() {
+                return Err(Error::new(span, "an `sdk` form has no REPL `word`"));
+            }
             return Ok(Self::Form(FormOptions {
                 command,
                 python,
                 python_name,
+                word,
+                sdk,
             }));
+        }
+        if let Some(key) = form_keys.first() {
+            return Err(Error::new(
+                *key,
+                "`word` and `sdk` describe a form (`form_of = ...`)",
+            ));
         }
         let names: Vec<LitStr> = names.ok_or_else(|| missing("names"))?;
         if names.is_empty() {
@@ -843,6 +902,11 @@ impl Command {
             quote!(Args)
         };
         let effects = self.effects();
+        let forms = self
+            .options
+            .forms
+            .iter()
+            .map(|form| format_ident!("__FORM_USAGE_{}_{}", self.function, form));
         quote! {
             crate::repl::CommandSpec {
                 names: &[#(#names),*],
@@ -852,6 +916,7 @@ impl Command {
                 summary: #summary,
                 details: #details,
                 completion: #completion,
+                forms: &[#(#forms),*],
                 effects: #effects,
                 style: crate::repl::CommandStyle::#style,
                 flow: crate::repl::Flow::#flow,

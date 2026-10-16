@@ -122,17 +122,27 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// several SDK operations (`!locks` decodes one resource or lists them all),
 /// each operation is a *form*: a function of its own, with its own return
 /// type and docstring, marked
-/// `#[command(form_of = locks, python = Inspect, python_name = "...")]`
-/// (only those three keys). The command lists them, `forms = [resource,
+/// `#[command(form_of = locks, python = Inspect, python_name = "...")]`.
+/// The command lists them, `forms = [resource,
 /// resources]` instead of `python`, and its REPL operation parses the line as
-/// before and calls the form it names, returning a REPL-only enum of their
-/// results. A form has no usage, help or reference entry of its own; its SDK
+/// before and calls the form it names (usually; a form may also be an SDK
+/// operation the REPL reaches its own way), returning a REPL-only enum of
+/// their results. A form has no help or reference entry of its own; its SDK
 /// method admits the command's effects. Its arguments are all the method's:
 /// `Option<T>`, `default`, `keyword` and `receiver` apply (a REPL-only
 /// option is refused), so a form can take what the REPL grammar has no word
 /// for, such as an object handle (`PyArg for ProcessInfo` takes a `Process`).
-/// A form and its command name each other (the command hands the form its
-/// effects as `__FORM_<command>_<form>`), and both live in one module.
+///
+/// Each form also describes its REPL form, for usage and completion generated
+/// from forms (`CommandSpec::forms`, in the command's `forms` order): `word =
+/// "/p"` is the subcommand or switch that selects it, then each argument the
+/// line gives, `<name>` or `[name]` (`#[arg(name = ...)]`, completed by
+/// `#[arg(complete = ...)]`); an `#[arg(sdk, default = e)]` argument and a
+/// `receiver` have no word. A bare `sdk` key marks an SDK-only form, which
+/// the line has no form of. A form and its command name each other (the
+/// command hands the form its effects as `__FORM_<command>_<form>` and takes
+/// its usage as `__FORM_USAGE_<command>_<form>`), and both live in one
+/// module.
 #[proc_macro_attribute]
 pub fn command(attr: TokenStream, item: TokenStream) -> TokenStream {
     command::expand(attr.into(), item.into())

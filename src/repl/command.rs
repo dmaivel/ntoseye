@@ -28,10 +28,23 @@ pub struct CommandSpec {
     pub summary: &'static str,
     pub details: Option<&'static str>,
     pub completion: CompletionSpec,
+    /// The REPL forms of a command that is several SDK operations
+    /// (`#[command(form_of = ...)]`), in its `forms` order: each one's
+    /// usage fragment and completion, generated from its arguments; `None`
+    /// for an SDK-only form. Empty for any other command.
+    pub forms: &'static [Option<FormUsage>],
     pub effects: Effects,
     pub style: CommandStyle,
     pub flow: Flow,
     pub handler: CommandHandler,
+}
+
+/// One REPL form of a multi-form command: its words after the command name
+/// (`/p <address>`) and the completion of each.
+#[derive(Clone, Copy, Debug)]
+pub struct FormUsage {
+    pub usage: &'static str,
+    pub completion: &'static [CompletionStrategy],
 }
 
 /// What a `#[command]` does.
@@ -638,6 +651,7 @@ macro_rules! repl_command {
                 summary: $summary,
                 details: $crate::repl_command!(@details $($details)?),
                 completion: $crate::repl_command!(@completion $($completion)?),
+                forms: &[],
                 effects: $crate::session::effects::Effects {
                     target: $crate::repl_command!(@target $($target)?),
                     state: $crate::repl_command!(@run_state $($run_state)?),
@@ -738,5 +752,35 @@ mod tests {
         assert_eq!(invocation.name, "?");
         assert!(invocation.argv.is_empty());
         assert_eq!(invocation.raw_tail, "rax + rbx");
+    }
+
+    /// A multi-form command's REPL forms carry the usage and completion
+    /// generated from each form, in its `forms` order, and SDK-only forms
+    /// none.
+    #[test]
+    fn forms_describe_their_repl_usage() {
+        let registry = command_registry();
+        let usage = |name: &str| -> Vec<Option<&str>> {
+            let spec = registry.get(name).unwrap();
+            spec.forms.iter().map(|form| form.map(|form| form.usage)).collect()
+        };
+        assert_eq!(
+            usage("!alpc"),
+            [Some("/p <port>"), Some("/m <message>"), Some("/lpp [process]")]
+        );
+        assert_eq!(usage("!apc"), [Some("[process|thread]"), None, None]);
+        assert_eq!(
+            usage("!vring"),
+            [
+                Some("<virtqueue> [module]"),
+                Some("/r <size> <desc> <avail> <used> [/t <kind>]")
+            ]
+        );
+        let alpc = registry.get("!alpc").unwrap().forms[2].unwrap();
+        assert_eq!(
+            alpc.completion,
+            [CompletionStrategy::None, CompletionStrategy::Process]
+        );
+        assert!(registry.get("!job").unwrap().forms.is_empty());
     }
 }
