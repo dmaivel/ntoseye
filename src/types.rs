@@ -120,6 +120,27 @@ impl Sub<u32> for VirtAddr {
     }
 }
 
+/// An object whose keys are data, not a schema (registers a state may or may
+/// not hold, fields a Windows build may or may not have), in order. In the
+/// SDK a `Record`, whose attributes are its keys.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Keyed<T>(pub Vec<(&'static str, T)>);
+
+impl<T> Keyed<T> {
+    /// The value under `key`.
+    pub fn get(&self, key: &str) -> Option<&T> {
+        self.0
+            .iter()
+            .find_map(|(name, value)| (*name == key).then_some(value))
+    }
+}
+
+impl<T> FromIterator<(&'static str, T)> for Keyed<T> {
+    fn from_iter<I: IntoIterator<Item = (&'static str, T)>>(fields: I) -> Self {
+        Self(fields.into_iter().collect())
+    }
+}
+
 pub type PhysAddr = u64;
 
 pub type Dtb = PhysAddr;

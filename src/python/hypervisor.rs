@@ -20,7 +20,8 @@ use crate::view::hypervisor::{
     DecodedHypercall, IoIntercepts, MsrIntercepts, VpRegisters, decoded_hypercall, io_intercepts,
     msr_intercepts, vp_registers,
 };
-use crate::view::record::{Hex, Keyed, Typed};
+use crate::types::Keyed;
+use crate::view::record::{Hex, Typed};
 
 /// A partition of the Windows hypervisor, as it was when listed.
 #[pyclass(module = "ntoseye", frozen)]

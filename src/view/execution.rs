@@ -2,7 +2,7 @@
 //! vCPUs, breakpoints, exception policies, stacks, call traces, and
 //! disassembly.
 
-use super::record::Keyed;
+use crate::types::Keyed;
 use ntoseye_macros::record;
 
 use super::hypervisor::{DecodedHypercall, ServedVp, decoded_hypercall, exit_registers, served_vp};

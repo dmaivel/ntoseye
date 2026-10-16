@@ -2,7 +2,7 @@
 //! processors, EPTs, and hypercall table, the guest VP a processor serves,
 //! and the hypercall a VP made.
 
-use super::record::Keyed;
+use crate::types::Keyed;
 use ntoseye_macros::record;
 
 use std::collections::HashMap;

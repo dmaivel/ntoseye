@@ -51,7 +51,7 @@ use pyo3::{type_hint_identifier, type_hint_subscript};
 use super::{DiagnosticView, PyShape, View, to_py};
 use crate::python::record::BaseRecord;
 use crate::target::{DiagnosticMetric, DiagnosticValue};
-use crate::types::VirtAddr;
+use crate::types::{Keyed, VirtAddr};
 
 /// How a value of this type renders in mode `M`, and its SDK type there.
 pub trait ToView<M = Plain> {
@@ -72,17 +72,6 @@ pub enum Hex {}
 
 /// `#[record(bytes)]`: a `Vec<u8>` is Python `bytes`.
 pub enum Bytes {}
-
-/// An object whose keys are data, not a schema (fields a Windows build may
-/// or may not have): in the SDK a `Record`, whose attributes are its keys.
-#[derive(Debug, Clone)]
-pub struct Keyed<T>(pub Vec<(&'static str, T)>);
-
-impl<T> FromIterator<(&'static str, T)> for Keyed<T> {
-    fn from_iter<I: IntoIterator<Item = (&'static str, T)>>(fields: I) -> Self {
-        Self(fields.into_iter().collect())
-    }
-}
 
 /// The computed properties a `#[record] impl` block adds to its record.
 pub trait RecordImpl {
