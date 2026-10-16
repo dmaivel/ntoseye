@@ -21,9 +21,8 @@ use crate::{
         hv_layout::HypercallEntry,
         hypercall_input::{self, DecodedHypercall},
         hypercalls::{self, HypercallCaller, HypercallInput},
-        ordered_exit_gprs,
         hypervisor::{self, HvVirtualProcessor},
-        vp_registers,
+        ordered_exit_gprs, vp_registers,
     },
     memory::{AddressSpace, MemoryOps, PAGE_SIZE},
     pe::{PeImage, image_file_name, read_pe_header_page, size_of_image},
@@ -171,7 +170,9 @@ impl ServedVp {
     /// common reason.
     #[record(getter)]
     pub fn exit_reason_name(&self) -> Option<&'static str> {
-        self.state.as_ref().and_then(|state| state.exit_reason_name())
+        self.state
+            .as_ref()
+            .and_then(|state| state.exit_reason_name())
     }
 
     /// The guest's general-purpose registers other than `rsp` at the last

@@ -5,7 +5,6 @@ use ntoseye_macros::record;
 
 use super::bugcheck::{Bugcheck, bugcheck};
 use super::execution::run_status;
-use crate::unwind::StackFrame;
 use crate::dmp::triage::TriagePrcbInfo;
 use crate::dmp::{self, DmpException, DmpSystemInfo};
 use crate::target::DiagnosticValue;
@@ -22,6 +21,7 @@ use crate::triage_report::{
     FailureSignature as SignatureDetail, TriageCrashInfo, TriageReport as ReportDetail,
     VerifierFinding as VerifierFindingDetail, WheaFinding as WheaFindingDetail,
 };
+use crate::unwind::StackFrame;
 
 /// The exception a crash dump recorded.
 #[record]
@@ -846,10 +846,7 @@ pub fn triage_report(report: &ReportDetail, module_limit: usize) -> TriageReport
         bugcheck: report.bugcheck.as_ref().map(bugcheck),
         exception: report.exception.as_ref().map(dump_exception),
         system_info: report.system_info.as_ref().map(system_info),
-        backtrace: report
-            .backtrace
-            .as_ref()
-            .map(|trace| trace.frames.clone()),
+        backtrace: report.backtrace.as_ref().map(|trace| trace.frames.clone()),
         modules: report.modules.iter().take(module_limit).cloned().collect(),
         modules_total: report.modules.len(),
         unloaded_drivers: report

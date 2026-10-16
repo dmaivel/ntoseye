@@ -11,9 +11,9 @@ use super::thread::Frame;
 use super::{err, raise};
 use crate::bugchecks::{bugcheck_from_dump_info, current_bugcheck};
 use crate::session::Session;
-use crate::trapframe::{KtrapFrame, read_ktrap_frame};
 use crate::session::effects::Effects;
 use crate::target::etw::parse_guid;
+use crate::trapframe::{KtrapFrame, read_ktrap_frame};
 use crate::triage_report::TriageReport;
 use crate::types::VirtAddr;
 use crate::view::record::{ToView, Typed};
@@ -65,11 +65,7 @@ impl Inspect {
     }
 
     /// Decode a `_KTRAP_FRAME` at `address` (`.trap`).
-    fn trap_frame<'py>(
-        &self,
-        py: Python<'py>,
-        address: u64,
-    ) -> PyResult<Typed<'py, KtrapFrame>> {
+    fn trap_frame<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Typed<'py, KtrapFrame>> {
         self.typed(py, |session| {
             read_ktrap_frame(&session.target, VirtAddr(address)).map_err(err)
         })

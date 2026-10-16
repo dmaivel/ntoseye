@@ -460,7 +460,6 @@ impl UniqStacks {
     }
 }
 
-
 #[record]
 impl FindStackThread {
     /// The number of frames that matched.

@@ -224,7 +224,6 @@ pub struct ExpressionValue {
     pub value: VirtAddr,
 }
 
-
 /// What a hypercall breakpoint stops on.
 pub fn hypercall_filter(filter: &breakpoints::HypercallFilter) -> HypercallFilter {
     HypercallFilter {

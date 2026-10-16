@@ -32,8 +32,8 @@ use crate::session::partition::{KeptPartition, PartitionView};
 use crate::target::dbgprint::{PrintCursor, prints_between};
 use crate::target::{ReloadReport, ServedVp, Target, TargetSelection, ThreadInfo};
 use crate::types::VirtAddr;
-use ntoseye_macros::record;
 use crate::unwind::SavedVtl;
+use ntoseye_macros::record;
 
 /// Trace reload classification (lines prefixed `reload:`), gated on
 /// `NTOSEYE_KD_TRACE` like the KD packet trace so one capture correlates both.

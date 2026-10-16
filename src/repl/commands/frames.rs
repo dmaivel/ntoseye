@@ -16,9 +16,8 @@ use crate::triage_report::exception_code_name;
 use crate::types::{Arch, VirtAddr};
 use crate::unwind::{
     Arm64UnwindCode, FrameSource, FunctionEntry, RecoveredStackTrace, StackTrace, UNKNOWN_CONTEXT,
-    Unwind, UnwindHandler,
-    build_stacktrace_with_register_values, build_thread_stacktrace, halted_in_windows_hypervisor,
-    resolve_thread_trace_context, saved_vtls, try_format_symbol,
+    Unwind, UnwindHandler, build_stacktrace_with_register_values, build_thread_stacktrace,
+    halted_in_windows_hypervisor, resolve_thread_trace_context, saved_vtls, try_format_symbol,
 };
 
 use crate::repl::args::{ArgCursor, ArgCx, ArgError, virtual_memory};
@@ -114,8 +113,7 @@ fn frame(
         let Some((recovered, seed, live)) = state.recovered_trace(1)? else {
             return Ok(());
         };
-        let Some(selected) = SelectedFrame::from_recovered(&recovered, 0, Some(&seed), live)
-        else {
+        let Some(selected) = SelectedFrame::from_recovered(&recovered, 0, Some(&seed), live) else {
             error!("current frame is unavailable");
             return Ok(());
         };
@@ -131,8 +129,7 @@ fn frame(
     let Some((recovered, seed, live)) = state.recovered_trace(limit)? else {
         return Ok(());
     };
-    let Some(selected) = SelectedFrame::from_recovered(&recovered, index, Some(&seed), live)
-    else {
+    let Some(selected) = SelectedFrame::from_recovered(&recovered, index, Some(&seed), live) else {
         error!("frame {} is unavailable", index);
         return Ok(());
     };
@@ -663,7 +660,8 @@ fn registers(
         }
     };
     state.ctx.target.registers = Some(
-        state.ctx
+        state
+            .ctx
             .target
             .register_values(&state.ctx.register_map, &regs),
     );
@@ -933,7 +931,8 @@ fn kd(state: &mut ReplState<'_>, #[arg(default = 20)] words: u64) -> Result<()> 
     // walk does.
     let sp = state.ctx.target.builtin_variable_value("csp").or_else(|| {
         state.ctx.parked_windows_thread()?;
-        state.ctx
+        state
+            .ctx
             .backtrace(1)
             .ok()?
             .frames

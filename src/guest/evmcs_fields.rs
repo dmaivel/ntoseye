@@ -362,7 +362,9 @@ pub enum IoIntercepts {
     Every,
     /// I/O bitmaps A (ports 0-0x7fff) and B: the port ranges whose
     /// accesses exit.
-    Bitmaps { ports: Vec<PortRange> },
+    Bitmaps {
+        ports: Vec<PortRange>,
+    },
 }
 
 #[record]

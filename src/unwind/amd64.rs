@@ -14,11 +14,11 @@ use super::{
     AMD64_REGISTER_NAMES, RegisterContext, StackTracer, Unwound, image_u32, runtime_functions,
 };
 use crate::memory::{AddressSpace, MemoryOps};
-use ntoseye_macros::record;
 use crate::pe::{CodeLayout, PeImage};
 use crate::phys::PhysMem;
 use crate::types::{CodeMachine, VirtAddr};
 use crate::userdump::DynamicFunction;
+use ntoseye_macros::record;
 
 // cap on chained unwind entries followed per frame, guarding against cyclic or
 // corrupt unwind data

@@ -854,10 +854,7 @@ impl Cpu {
     /// needs `hv-evmcs` on the VM, and the list is empty without it or if the
     /// saved state does not pass validation.
     #[getter]
-    fn saved_vtl<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Typed<'py, Vec<SavedVtl>>> {
+    fn saved_vtl<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<SavedVtl>>> {
         Typed::new(py, self.current_info(py)?.saved_vtl)
     }
 
@@ -868,10 +865,7 @@ impl Cpu {
     /// None when the processor runs one of the root partition's VPs, or the
     /// hypervisor's partitions cannot be walked (no `hv-evmcs`).
     #[getter]
-    fn serving<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Typed<'py, Option<ServedVp>>> {
+    fn serving<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Option<ServedVp>>> {
         Typed::new(py, self.current_info(py)?.serving)
     }
 

@@ -851,7 +851,11 @@ impl SavedVtl {
     /// them, or when the entry code does not save them in one block.
     #[record(getter, hex)]
     pub fn general_registers(&self) -> Option<Keyed<u64>> {
-        self.context.general_registers.as_ref().ok().map(crate::guest::ordered_exit_gprs)
+        self.context
+            .general_registers
+            .as_ref()
+            .ok()
+            .map(crate::guest::ordered_exit_gprs)
     }
 
     /// The physical address of the eVMCS page that ntoseye read the state
@@ -868,7 +872,6 @@ impl SavedVtl {
         self.context.hypercall.call().cloned()
     }
 }
-
 
 impl SavedVtl {
     /// Where the state left off, as `VTL0 nt!HalProcessorIdle+0xf`, marked
