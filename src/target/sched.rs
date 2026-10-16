@@ -6,6 +6,7 @@ use std::sync::Arc;
 use ntoseye_macros::record;
 
 use crate::cpu_state::{kpcr_for_processor, kprcb_for_processor, processor_count};
+use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
 use crate::kuser_shared::KuserSharedData;
@@ -280,12 +281,12 @@ pub struct ApcQueues {
 }
 
 /// The state and walked stack of a thread (`!stacks`).
-#[record]
+#[record(impl)]
 pub struct ThreadStack {
     pub thread: ThreadInfo,
-    /// The vCPU that runs the thread, if the listing resolves it. `None` if
-    /// no vCPU runs it, and while the target runs.
-    #[record(rename = "active")]
+    /// The backend thread (vCPU) that runs the thread, if the listing
+    /// resolves it.
+    #[record(skip)]
     pub active_vcpu: Option<String>,
     /// The symbol of the top frame.
     pub top_symbol: DiagnosticValue<Option<String>>,
@@ -296,6 +297,22 @@ pub struct ThreadStack {
     pub truncated: usize,
     /// The error, if the stack walk failed.
     pub error: Option<String>,
+}
+
+#[record]
+impl ThreadStack {
+    /// The processor that runs the thread, if the listing resolves it.
+    /// `None` if no processor runs it, and while the target runs.
+    #[record(getter)]
+    pub fn active(&self) -> Option<u16> {
+        processor_number(self.active_vcpu.as_deref())
+    }
+}
+
+/// The zero-based processor a vCPU's backend thread id names, as `dbg.cpus`
+/// numbers it.
+fn processor_number(vcpu: Option<&str>) -> Option<u16> {
+    vcpu.and_then(processor_index_from_backend_thread_id)
 }
 
 /// Threads with their states and stacks (`!stacks`).
@@ -326,9 +343,9 @@ pub struct UnwalkedThread {
 #[record(impl)]
 pub struct FindStackThread {
     pub thread: ThreadInfo,
-    /// The vCPU that runs the thread, if the listing resolves it. `None` if
-    /// no vCPU runs it, and while the target runs.
-    #[record(rename = "active")]
+    /// The backend thread (vCPU) that runs the thread, if the listing
+    /// resolves it.
+    #[record(skip)]
     pub active_vcpu: Option<String>,
     /// The whole walked stack.
     #[record(skip)]
@@ -462,6 +479,13 @@ impl UniqStacks {
 
 #[record]
 impl FindStackThread {
+    /// The processor that runs the thread, if the listing resolves it.
+    /// `None` if no processor runs it, and while the target runs.
+    #[record(getter)]
+    pub fn active(&self) -> Option<u16> {
+        processor_number(self.active_vcpu.as_deref())
+    }
+
     /// The number of frames that matched.
     #[record(getter)]
     pub fn match_count(&self) -> usize {
@@ -640,18 +664,28 @@ pub struct ProcessDetail {
 /// A thread as `!thread` shows it: the thread, the vCPU running it, and the
 /// `_ETHREAD`/`_KTHREAD` fields the listing adds. Each field is `None` when
 /// this build's layout lacks it or its read failed.
-#[record]
+#[record(impl)]
 pub struct ThreadDetail {
     pub thread: ThreadInfo,
-    /// The vCPU running the thread (`p1.2`), or `None` when it is not
-    /// running.
-    pub cpu: Option<String>,
+    /// The backend thread (vCPU) running the thread (`p1.2`), or `None`
+    /// when it is not running.
+    #[record(skip)]
+    pub vcpu: Option<String>,
     pub win32_thread: Option<VirtAddr>,
     pub user_time: Option<u64>,
     pub kernel_time: Option<u64>,
     pub wait_time: Option<u64>,
     pub ready_time: Option<u64>,
     pub quantum_target: Option<u64>,
+}
+
+#[record]
+impl ThreadDetail {
+    /// The processor running the thread, or `None` when it is not running.
+    #[record(getter)]
+    pub fn cpu(&self) -> Option<u16> {
+        processor_number(self.vcpu.as_deref())
+    }
 }
 
 /// The integer at the first readable path below `root`. Every segment but
@@ -1610,9 +1644,9 @@ impl Target {
     }
 
     /// Read the extended `_KTHREAD`/`_ETHREAD` fields shown by thread
-    /// listings, through the owning process's address space. `cpu` is the
+    /// listings, through the owning process's address space. `vcpu` is the
     /// vCPU running it, which the caller knows from the session.
-    pub fn thread_detail(&self, thread: ThreadInfo, cpu: Option<String>) -> ThreadDetail {
+    pub fn thread_detail(&self, thread: ThreadInfo, vcpu: Option<String>) -> ThreadDetail {
         let guest = self.guest().ok();
         let dtb = self
             .thread_process_dtb(&thread)
@@ -1630,7 +1664,7 @@ impl Target {
         };
         ThreadDetail {
             thread,
-            cpu,
+            vcpu,
             win32_thread: read(&ethread, "Win32Thread").map(VirtAddr),
             user_time: read(&kthread, "UserTime").or_else(|| read(&ethread, "UserTime")),
             kernel_time: read(&kthread, "KernelTime").or_else(|| read(&ethread, "KernelTime")),

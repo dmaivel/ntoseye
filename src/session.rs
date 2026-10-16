@@ -17,7 +17,7 @@ use crate::TargetSpec;
 use crate::breakpoints::{BreakpointInfo, BreakpointManager, StepFrame};
 use crate::dbg_backend::{
     BackendCapability, BugcheckInfo, DebugBackend, DebugCapability, DebugLog, DebugOutputPage,
-    LastEvent, ModuleEvent, RegisterMap, StopEvent,
+    LastEvent, ModuleEvent, RegisterMap, StopEvent, processor_index_from_backend_thread_id,
 };
 use crate::disasm::ControlFlow;
 #[cfg(test)]
@@ -553,10 +553,11 @@ pub struct UserThreadSummary {
 }
 
 /// A vCPU (backend execution context) and the guest code that it runs.
-#[record]
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct VcpuInfo {
-    /// The backend thread/vCPU ID (`p1.1`).
+    /// The backend thread/vCPU ID (`p1.1`), which `~` shows.
+    #[record(skip)]
     pub id: String,
     /// None if ntoseye cannot read the register context.
     #[record(hex)]
@@ -578,6 +579,16 @@ pub struct VcpuInfo {
     /// The reason that the register context is not available. None if it is
     /// available.
     pub error: Option<String>,
+}
+
+#[record]
+impl VcpuInfo {
+    /// The zero-based processor number, as `dbg.cpus` numbers it; `None`
+    /// for a backend thread that is no processor.
+    #[record(getter)]
+    pub fn number(&self) -> Option<u16> {
+        processor_index_from_backend_thread_id(&self.id)
+    }
 }
 
 impl VcpuInfo {

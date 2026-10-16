@@ -770,20 +770,11 @@ impl Registers {
     }
 }
 
-/// The processors of the target, in backend vCPU order (`dbg.cpus`). The target
-/// must be halted to list them. A processor is indexed by position, or by its
-/// backend vCPU ID (`dbg.cpus["p1.2"]`, `dbg.cpus[stop.cpu]`).
+/// The processors of the target, by number (`dbg.cpus[0]`,
+/// `dbg.cpus[stop.cpu]`). The target must be halted to list them.
 #[pyclass(module = "ntoseye")]
 pub struct Cpus {
     pub owner: Owner,
-}
-
-/// A key of `dbg.cpus`: a position (negative from the end), or a backend
-/// vCPU ID.
-#[derive(FromPyObject)]
-pub enum CpuKey {
-    Index(isize),
-    Id(String),
 }
 
 impl Cpus {
@@ -815,26 +806,18 @@ impl Cpus {
 
 #[pymethods]
 impl Cpus {
-    /// The processor at a position, or with a backend vCPU ID; raise
-    /// `IndexError` for a position out of range and `KeyError` for an
-    /// unknown ID.
-    fn __getitem__(&self, py: Python<'_>, key: CpuKey) -> PyResult<Cpu> {
-        let error = match &key {
-            CpuKey::Index(index) => PyIndexError::new_err(*index),
-            CpuKey::Id(id) => PyKeyError::new_err(id.clone()),
-        };
-        self.get(py, key)?.ok_or(error)
+    /// The processor numbered `index` (negative from the end); raise
+    /// `IndexError` when there is none.
+    fn __getitem__(&self, py: Python<'_>, index: isize) -> PyResult<Cpu> {
+        self.get(py, index)?
+            .ok_or_else(|| PyIndexError::new_err(index))
     }
 
-    /// The processor at a position, or with a backend vCPU ID (`stop.cpu`);
+    /// The processor numbered `index` (`stop.cpu`, negative from the end);
     /// `None` if there is none.
-    fn get(&self, py: Python<'_>, key: CpuKey) -> PyResult<Option<Cpu>> {
+    fn get(&self, py: Python<'_>, index: isize) -> PyResult<Option<Cpu>> {
         let mut ids = self.ids(py)?;
-        let found = match key {
-            CpuKey::Index(index) => sequence_index(index, ids.len()),
-            CpuKey::Id(id) => ids.iter().position(|known| *known == id),
-        };
-        let Some(index) = found else {
+        let Some(index) = sequence_index(index, ids.len()) else {
             return Ok(None);
         };
         let id = ids.swap_remove(index);
@@ -854,10 +837,11 @@ impl Cpus {
     }
 }
 
-/// One processor, identified by its backend vCPU ID (for example, `"p1.1"`).
+/// One processor, identified by its number.
 #[pyclass(module = "ntoseye")]
 pub struct Cpu {
     pub owner: Owner,
+    /// The backend thread that is the vCPU (`p1.1`), which selects it.
     pub id: String,
 }
 
@@ -891,11 +875,12 @@ impl Cpu {
 
 #[pymethods]
 impl Cpu {
-    /// The backend vCPU ID.
+    /// The zero-based processor number: this processor is
+    /// `dbg.cpus[number]`.
     #[getter]
-    fn id(&self, py: Python<'_>) -> PyResult<String> {
+    fn number(&self, py: Python<'_>) -> PyResult<u16> {
         self.owner.check(py)?;
-        Ok(self.id.clone())
+        self.processor()
     }
 
     /// The instruction pointer, which needs a halted target.
@@ -1097,8 +1082,8 @@ impl Cpu {
         self.owner.identity_hash(&self.id)
     }
 
-    fn __repr__(&self) -> String {
-        format!("Cpu(id={:?})", self.id)
+    fn __repr__(&self) -> PyResult<String> {
+        Ok(format!("Cpu(number={})", self.processor()?))
     }
 }
 

@@ -66,7 +66,7 @@ A process has views that use its own address space:
 
 Use these views directly, without selecting or attaching to a global process.
 
-`dbg.cpus` is keyed by processor number. A `Cpu` decodes its processor's state: `pcr()`, `prcb()`, `irql()`, `idt()`, `gdt()`, and `info()`. With `kd` or `kdnet`, `cpu.msr["IA32_LSTAR"]` reads a model-specific register and `cpu.apic()` the local APIC, as {command}`rdmsr` `/p` and {command}`!apic` do: KD runs these reads on the processor that reported the stop, so ntoseye switches the target to the processor you asked for and back. `dbg.inspect.interrupt_controllers()` returns the interrupt controllers and lines that {command}`!ioapic` shows, and `dbg.inspect.smbios()` the SMBIOS structures of {command}`!sysinfo` `smbios`, each with its fields by the specification's names.
+`dbg.cpus` is the sequence of processors: `dbg.cpus[n]` is processor `n`, and `cpu.number` is its number. A `Cpu` decodes its processor's state: `pcr()`, `prcb()`, `irql()`, `idt()`, `gdt()`, and `info()`. With `kd` or `kdnet`, `cpu.msr["IA32_LSTAR"]` reads a model-specific register and `cpu.apic()` the local APIC, as {command}`rdmsr` `/p` and {command}`!apic` do: KD runs these reads on the processor that reported the stop, so ntoseye switches the target to the processor you asked for and back. `dbg.inspect.interrupt_controllers()` returns the interrupt controllers and lines that {command}`!ioapic` shows, and `dbg.inspect.smbios()` the SMBIOS structures of {command}`!sysinfo` `smbios`, each with its fields by the specification's names.
 
 Handles such as `Process`, `Module`, `Thread`, `Frame`, and struct cursors are stamped with the target generation. After a reboot (a stop whose `kind` is `"reload"`), discard the old handles and query them again, because an old handle raises `ntoseye.StaleHandleError` when you use it. Old handles stay hashable and printable, so a set or dict that holds them continues to work.
 
@@ -220,7 +220,7 @@ Because ntoseye unwinds the NT thread on that vCPU from the saved VTL0 state, `b
 
 ```python
 for cpu in dbg.cpus:
-    print(cpu.id, cpu.symbol)                  # p01.01 hv+0x3a6bde
+    print(cpu.number, cpu.symbol)              # 0 hv+0x3a6bde
     for saved in cpu.saved_vtl:
         print("   ", saved.vtl, saved.symbol, saved.exit_reason_name)  # 0 nt!HalProcessorIdle+0xf HLT
     if cpu.thread:
@@ -363,7 +363,7 @@ A `Stop` is a record of why the target stopped, taken at the stop. Its `kind` is
 
 `stop.hit(bp)` tells whether breakpoint `bp` stopped the target, so `if stop.hit(bp):` works without checking the kind first, and also for a one-shot breakpoint that the hit deleted. A crash dump that you open with `backend="dmp"` is stopped at its bugcheck, so its `dbg.stop` has the kind `"bugcheck"`. For the analysis that {command}`!analyze` makes of it, call `dbg.inspect.bugcheck()`.
 
-The parts are records, not live handles. The collections take them as keys: `dbg.threads[stop.thread]`, `dbg.processes[stop.process]`, `dbg.cpus[stop.cpu]` (a vCPU ID such as `"p1.2"`), and `dbg.modules[stop.module]`.
+The parts are records, not live handles. The collections take them as keys: `dbg.threads[stop.thread]`, `dbg.processes[stop.process]`, and `dbg.modules[stop.module]`. `stop.cpu` is the number of the processor that stopped, so `dbg.cpus[stop.cpu]` is its `Cpu`; it is `None` on a user-mode minidump, which has no processors.
 
 ```python
 bp = dbg.breakpoints.add("nt!NtCreateFile")

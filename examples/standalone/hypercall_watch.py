@@ -39,6 +39,7 @@ def main() -> None:
         deadline: float = time.monotonic() + args.seconds
 
         def count_caller(stop: ntoseye.Stop) -> bool:
+            assert stop.cpu is not None  # a kernel stop is on a processor
             caller = dbg.cpus[stop.cpu].hypercall_caller()
             if caller is None:
                 return True
@@ -61,13 +62,14 @@ def main() -> None:
         if stop is None or not stop.hit(bp):
             raise SystemExit("no call stopped; use the guest while the script runs")
 
+        assert stop.cpu is not None
         cpu = dbg.cpus[stop.cpu]
         caller = cpu.hypercall_caller()
         if caller is None:
-            raise SystemExit(f"stopped on {cpu.id}, but its caller is unknown")
+            raise SystemExit(f"stopped on CPU {cpu.number}, but its caller is unknown")
         summary = caller.hypercall.summary if caller.hypercall else "(input not decoded)"
-        print(f"\nstopped on {cpu.id}: partition {caller.partition_id:#x} VP {caller.vp_index} VTL{caller.vtl}: {summary}")
-        print(f"the hypervisor on {cpu.id}:")
+        print(f"\nstopped on CPU {cpu.number}: partition {caller.partition_id:#x} VP {caller.vp_index} VTL{caller.vtl}: {summary}")
+        print(f"the hypervisor on CPU {cpu.number}:")
         for frame in cpu.backtrace(limit=args.frames):
             print(f"  {frame.ip:#018x}  {frame.symbol or '?'}")
 
@@ -79,7 +81,7 @@ def main() -> None:
             raise SystemExit(f"no Windows guest to read: {error}")
         try:
             guest_cpu = dbg.cpus[vp]
-            print(f"the guest's VP {vp} ({guest_cpu.id}):")
+            print(f"the guest's VP {vp}:")
             for frame in guest_cpu.backtrace(limit=args.frames):
                 print(f"  {frame.ip:#018x}  {frame.symbol or '?'}")
         finally:

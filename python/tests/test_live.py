@@ -483,9 +483,7 @@ def test_a_guest_partition_reads_as_its_own_windows(halted: Debugger) -> None:
     try:
         assert halted.partition == guest.id
         cpus = list(halted.cpus)
-        assert [cpu.id for cpu in cpus] == [
-            f"p{guest.id:x}.{vp.index + 1:x}" for vp in guest.virtual_processors
-        ]
+        assert [cpu.number for cpu in cpus] == [vp.index for vp in guest.virtual_processors]
         guest_nt = halted.symbols["nt!KeBugCheckEx"]
         nt = halted.modules["nt"]
         assert guest_nt != root_nt and nt.base <= guest_nt < nt.base + nt.size
@@ -528,8 +526,7 @@ def test_a_guest_partitions_breakpoint_stops_in_its_view(halted: Debugger) -> No
             stop = halted.run(timeout=30.0)
             assert stop is not None and stop.hit(bp), stop
             assert halted.partition == guest.id
-            vps = [f"p{guest.id:x}.{vp.index + 1:x}" for vp in guest.virtual_processors]
-            assert stop.cpu in vps
+            assert stop.cpu in [vp.index for vp in guest.virtual_processors]
             assert stop.rip == swap
             assert halted.cpus[stop.cpu].backtrace(limit=1)[0].symbol == "nt!KiSwapContext"
             # Every context switch runs it: left set, it stops the step on
@@ -614,7 +611,7 @@ def test_saved_general_registers_are_the_exits(halted: Debugger) -> None:
         finally:
             halted.interrupt()
             stored.delete()
-        assert stop is not None and stop.kind == "breakpoint" and stop.cpu == exiting.id
+        assert stop is not None and stop.kind == "breakpoint" and stop.cpu == exiting.number
         saved = next(saved for saved in halted.cpus[stop.cpu].saved_vtl if saved.current)
         assert (saved.vtl, saved.rip, saved.exit_reason) == (at_entry.vtl, at_entry.rip, at_entry.exit_reason)
         assert saved.general_registers is not None

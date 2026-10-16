@@ -57,7 +57,7 @@ def main() -> None:
             for cpu in dbg.cpus:
                 idt = cpu.idt()
                 outside = sum(1 for gate in idt.entries if gate.non_nt_hook.value)
-                print(f"  cpu {cpu.id}: {len(idt.entries)} gates, {outside} outside NT")
+                print(f"  cpu {cpu.number}: {len(idt.entries)} gates, {outside} outside NT")
                 for gate in idt.entries:
                     if not gate.non_nt_hook:  # the check itself could not be read
                         print(f"    vector {gate.vector:#04x}: unreadable ({gate.non_nt_hook.error})")

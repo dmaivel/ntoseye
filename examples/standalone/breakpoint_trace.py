@@ -51,6 +51,7 @@ def main() -> None:
                     continue
 
                 hits += 1
+                assert stop.cpu is not None  # a kernel stop is on a processor
                 registers = dbg.cpus[stop.cpu].registers
                 rcx = registers.rcx if "rcx" in registers else 0
                 print(f"hit #{hits}: rip={rip:#x} ({symbol})  bp={bp.id}  rcx={rcx:#x}")

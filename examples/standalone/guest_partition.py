@@ -32,7 +32,7 @@ def show_guest(dbg: ntoseye.Debugger, target_nt: tuple[int | None, int], args: a
     same = (nt.timestamp, nt.size) == target_nt
     print(f"  nt at {nt.base:#x}{' (the target kernel image)' if same else ''}, {len(dbg.processes)} processes")
     for cpu in dbg.cpus:
-        print(f"  {cpu.id}: {frame_names(cpu.backtrace(limit=args.frames))}")
+        print(f"  CPU {cpu.number}: {frame_names(cpu.backtrace(limit=args.frames))}")
 
     if args.process is None:
         return

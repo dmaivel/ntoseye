@@ -2356,7 +2356,7 @@ class ControlAreaDetail(BaseRecord):
 @final
 class Cpu:
     """
-    One processor, identified by its backend vCPU ID (for example, `"p1.1"`).
+    One processor, identified by its number.
     """
     def __eq__(self, other: object, /) -> bool: ...
     def __hash__(self, /) -> int: ...
@@ -2412,11 +2412,6 @@ class Cpu:
         unknown: the partitions cannot be walked, or no saved state of a VP
         that the processor runs is current.
         """
-    @property
-    def id(self, /) -> str:
-        """
-        The backend vCPU ID.
-        """
     def idt(self, /, vector: int |None = None) -> Idt:
         """
         Decode one IDT entry or the bounded 256-entry IDT.
@@ -2453,6 +2448,12 @@ class Cpu:
     def msr(self, /) -> Msrs:
         """
         Model-specific registers: `cpu.msr[0xC0000082]`, `cpu.msr["IA32_LSTAR"]`.
+        """
+    @property
+    def number(self, /) -> int:
+        """
+        The zero-based processor number: this processor is
+        `dbg.cpus[number]`.
         """
     def pcr(self, /) -> Pcr:
         """
@@ -2614,22 +2615,20 @@ class CpuTriageFallback(BaseRecord):
 @final
 class Cpus:
     """
-    The processors of the target, in backend vCPU order (`dbg.cpus`). The target
-    must be halted to list them. A processor is indexed by position, or by its
-    backend vCPU ID (`dbg.cpus["p1.2"]`, `dbg.cpus[stop.cpu]`).
+    The processors of the target, by number (`dbg.cpus[0]`,
+    `dbg.cpus[stop.cpu]`). The target must be halted to list them.
     """
-    def __getitem__(self, key: int |str, /) -> Cpu:
+    def __getitem__(self, index: int, /) -> Cpu:
         """
-        The processor at a position, or with a backend vCPU ID; raise
-        `IndexError` for a position out of range and `KeyError` for an
-        unknown ID.
+        The processor numbered `index` (negative from the end); raise
+        `IndexError` when there is none.
         """
     def __iter__(self, /) -> CpuIterator: ...
     def __len__(self, /) -> int: ...
     def __repr__(self, /) -> str: ...
-    def get(self, /, key: int |str) -> Cpu |None:
+    def get(self, /, index: int) -> Cpu |None:
         """
-        The processor at a position, or with a backend vCPU ID (`stop.cpu`);
+        The processor numbered `index` (`stop.cpu`, negative from the end);
         `None` if there is none.
         """
 
@@ -5271,10 +5270,10 @@ class FindStackThread(BaseRecord):
     A thread with a stack frame that matches the `!findstack` pattern.
     """
     @property
-    def active(self, /) -> str |None:
+    def active(self, /) -> int |None:
         """
-        The vCPU that runs the thread, if the listing resolves it. `None` if
-        no vCPU runs it, and while the target runs.
+        The processor that runs the thread, if the listing resolves it.
+        `None` if no processor runs it, and while the target runs.
         """
     @property
     def frames(self, /) -> list[StackFrame]:
@@ -16019,7 +16018,7 @@ class Stop(BaseRecord):
     
     The parts are records, not live handles; the collections take them as
     keys: `dbg.threads[stop.thread]`, `dbg.processes[stop.process]`,
-    `dbg.cpus[stop.cpu]`, `dbg.modules[stop.module]`.
+    `dbg.modules[stop.module]`; `dbg.cpus[stop.cpu]` is the processor.
     """
     @property
     def breakpoint(self, /) -> BreakpointHit |None: ...
@@ -16029,10 +16028,11 @@ class Stop(BaseRecord):
         The bugcheck code and parameters, when the transport decoded them.
         """
     @property
-    def cpu(self, /) -> str:
+    def cpu(self, /) -> int |None:
         """
-        The backend thread that stopped: a vCPU (`p1.2`), or a user dump's
-        thread.
+        The zero-based number of the processor that stopped, as `dbg.cpus`
+        numbers them in the current view; `None` on a user-mode minidump,
+        whose threads are no processors.
         """
     @property
     def exception(self, /) -> ExceptionStop |None: ...
@@ -17431,10 +17431,9 @@ class ThreadDetail(BaseRecord):
     this build's layout lacks it or its read failed.
     """
     @property
-    def cpu(self, /) -> str |None:
+    def cpu(self, /) -> int |None:
         """
-        The vCPU running the thread (`p1.2`), or `None` when it is not
-        running.
+        The processor running the thread, or `None` when it is not running.
         """
     @property
     def kernel_time(self, /) -> int |None: ...
@@ -17544,10 +17543,10 @@ class ThreadStack(BaseRecord):
     The state and walked stack of a thread (`!stacks`).
     """
     @property
-    def active(self, /) -> str |None:
+    def active(self, /) -> int |None:
         """
-        The vCPU that runs the thread, if the listing resolves it. `None` if
-        no vCPU runs it, and while the target runs.
+        The processor that runs the thread, if the listing resolves it.
+        `None` if no processor runs it, and while the target runs.
         """
     @property
     def error(self, /) -> str |None:
@@ -18898,9 +18897,10 @@ class VcpuInfo(BaseRecord):
         available.
         """
     @property
-    def id(self, /) -> str:
+    def number(self, /) -> int |None:
         """
-        The backend thread/vCPU ID (`p1.1`).
+        The zero-based processor number, as `dbg.cpus` numbers it; `None`
+        for a backend thread that is no processor.
         """
     @property
     def rip(self, /) -> int |None:

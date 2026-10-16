@@ -59,6 +59,7 @@ def main() -> None:
                     continue
                 thread = stop.thread
                 tid = thread.tid if thread is not None and thread.tid is not None else "?"
+                assert stop.cpu is not None  # a kernel stop is on a processor
                 registers = dbg.cpus[stop.cpu].registers
                 first_argument = registers.rcx if "rcx" in registers else 0
                 hits += 1

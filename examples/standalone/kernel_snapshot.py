@@ -38,7 +38,7 @@ def main() -> None:
             for cpu in dbg.cpus:
                 thread = cpu.thread
                 where = f"tid {thread.tid}" if thread and thread.tid is not None else "no current thread"
-                print(f"  cpu {cpu.id}: {where}, rip={cpu.rip!r}, irql={cpu.irql()}")
+                print(f"  cpu {cpu.number}: {where}, rip={cpu.rip!r}, irql={cpu.irql()}")
 
         if args.backend == "kd" and len(dbg.cpus):
             print("\nmsrs (cpu 0):")

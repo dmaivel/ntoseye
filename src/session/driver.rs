@@ -13,7 +13,10 @@ use std::time::{Duration, Instant};
 use ntoseye_macros::record;
 
 use crate::breakpoints::{BreakpointInfo, StepFrame};
-use crate::dbg_backend::{BugcheckInfo, ContinueDisposition, HwBreakpointAccess, ModuleEvent};
+use crate::dbg_backend::{
+    BugcheckInfo, ContinueDisposition, HwBreakpointAccess, ModuleEvent,
+    processor_index_from_backend_thread_id,
+};
 use crate::disasm::ControlFlow;
 use crate::error::Result;
 use crate::exception_policy::ExceptionPolicyAction;
@@ -240,13 +243,14 @@ pub trait ActionRunner {
 ///
 /// The parts are records, not live handles; the collections take them as
 /// keys: `dbg.threads[stop.thread]`, `dbg.processes[stop.process]`,
-/// `dbg.cpus[stop.cpu]`, `dbg.modules[stop.module]`.
+/// `dbg.modules[stop.module]`; `dbg.cpus[stop.cpu]` is the processor.
 #[record(impl)]
 pub struct Stop {
     pub kind: StopKind,
-    /// The backend thread that stopped: a vCPU (`p1.2`), or a user dump's
-    /// thread.
-    pub cpu: String,
+    /// The zero-based number of the processor that stopped, as `dbg.cpus`
+    /// numbers them in the current view; `None` on a user-mode minidump,
+    /// whose threads are no processors.
+    pub cpu: Option<u16>,
     /// Where it stopped. A bugcheck's fault site is in `bugcheck`, a
     /// breakpoint's address in `breakpoint`, an exception's in `exception`.
     #[record(hex)]
@@ -866,7 +870,9 @@ impl Session {
         let thread = windows_thread_on_backend_thread(&self.target, &self.current_thread);
         let mut stop = Stop {
             kind: StopKind::Entry,
-            cpu: self.current_thread.clone(),
+            cpu: (!user_dump)
+                .then(|| processor_index_from_backend_thread_id(&self.current_thread))
+                .flatten(),
             rip: register_rip,
             symbol: None,
             process,

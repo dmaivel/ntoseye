@@ -23,6 +23,7 @@ Keeping this file:
 - `--plain-repl`, the MCP server, the DAP adapter and the Python SDK start sooner: they build the symbol and type name indexes behind completion and symbol search when a search first needs them, not when the session starts. Opening a PowerShell minidump with `--plain-repl` takes 0.29 s instead of 0.39 s.
 - Indexing a module's symbols is faster, so a dump with many modules opens about a third sooner: a PowerShell minidump opens with `--plain-repl` in 0.22 s instead of 0.29 s, and a charmap minidump in 0.10 s instead of 0.15 s.
 - The `ntoseye` command and the Python package allocate memory with mimalloc, which makes opening a dump, `k`, and symbol searches about 15% faster. Indexing symbols takes more memory at its peak: about 1.3 GiB instead of 1.0 GiB for an ARM64 PowerShell minidump with 95 modules.
+- The Python SDK names a processor by its number everywhere: `Stop.cpu`, `ThreadDetail.cpu`, `ThreadStack.active` and `FindStackThread.active` are the processor number (an `int`, or `None`), `VcpuInfo` has `number` instead of `id`, and `Cpu.number` replaces `Cpu.id`. `dbg.cpus` is a plain sequence: `dbg.cpus[n]` takes an `int` only, so `dbg.cpus[stop.cpu]` is still the processor that stopped.
 
 ### Removed
 

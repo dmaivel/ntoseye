@@ -279,13 +279,13 @@ impl ReplState<'_> {
                 _ => {}
             }
             if action.default_stack {
-                self.print_thread_kstack(thread, detail.cpu.as_deref(), stack_limit);
+                self.print_thread_kstack(thread, detail.vcpu.as_deref(), stack_limit);
             }
             outln!();
             return;
         }
 
-        let Some(vcpu) = &detail.cpu else {
+        let Some(vcpu) = &detail.vcpu else {
             print_thread_detail(detail);
             outln!(
                 "{}",
