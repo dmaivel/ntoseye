@@ -2178,12 +2178,13 @@ class ClassUnreadable(BaseRecord):
     def private_data(self, /) -> int: ...
 
 @final
-class CodeViewRecord(BaseRecord):
+class CodeView(BaseRecord):
     """
-    A CodeView debug record, which identifies the PDB that the image was built with.
+    A CodeView debug record (`IMAGE_DEBUG_TYPE_CODEVIEW`), which identifies
+    the PDB that the image was built with.
     """
     @property
-    def age(self, /) -> int: ...
+    def age(self, /) -> int |None: ...
     @property
     def format(self, /) -> str:
         """
@@ -2195,7 +2196,12 @@ class CodeViewRecord(BaseRecord):
         The PDB GUID, for `RSDS`.
         """
     @property
-    def pdb(self, /) -> str:
+    def kind(self, /) -> str:
+        """
+        The variant: `rsds`, `nb10`.
+        """
+    @property
+    def pdb(self, /) -> str |None:
         """
         The PDB path that the linker recorded.
         """
@@ -2631,6 +2637,30 @@ class CulpritEvidence(BaseRecord):
         """
 
 @final
+class DataDirectory(BaseRecord):
+    """
+    One `IMAGE_DATA_DIRECTORY` entry.
+    """
+    @property
+    def index(self, /) -> int:
+        """
+        The slot of the entry in the directory table.
+        """
+    @property
+    def name(self, /) -> str:
+        """
+        `Export`, `Import`, `Debug`, ...
+        """
+    @property
+    def rva(self, /) -> int:
+        """
+        An RVA, except for the security directory, whose value is a file
+        offset (the certificate table is not mapped).
+        """
+    @property
+    def size(self, /) -> int: ...
+
+@final
 class DebugLog(BaseRecord):
     """
     A page of captured guest debug output.
@@ -2665,6 +2695,44 @@ class DebugLogLine(BaseRecord):
         """
         The host wall-clock time when the line was complete, in milliseconds
         since the Unix epoch.
+        """
+
+@final
+class DebugRecord(BaseRecord):
+    """
+    One `IMAGE_DEBUG_DIRECTORY` entry as `!dh` shows it, with its CodeView
+    record decoded when it is one.
+    """
+    @property
+    def address_of_raw_data(self, /) -> int: ...
+    @property
+    def characteristics(self, /) -> int: ...
+    @property
+    def codeview(self, /) -> Diagnostic[CodeView] |None:
+        """
+        The decoded CodeView record, or why it does not read. `None` for
+        other entry types.
+        """
+    @property
+    def pointer_to_raw_data(self, /) -> int: ...
+    @property
+    def size_of_data(self, /) -> int: ...
+    @property
+    def time_date_stamp(self, /) -> int: ...
+    @property
+    def type(self, /) -> int:
+        """
+        The `IMAGE_DEBUG_TYPE_*` value.
+        """
+    @property
+    def type_name(self, /) -> str:
+        """
+        `cv`, `pogo`, `repro`, ...
+        """
+    @property
+    def version(self, /) -> str:
+        """
+        `major.minor`.
         """
 
 @final
@@ -4802,32 +4870,35 @@ class ExitFilter(BaseRecord):
         """
 
 @final
-class Export(BaseRecord):
+class ExportDirectory(BaseRecord):
     """
-    One PE export (`Module.exports`, `!dh -e`). An export has a name or
-    only an ordinal, and a forwarder has no address.
+    `IMAGE_EXPORT_DIRECTORY` and the DLL name it points at.
     """
     @property
-    def address(self, /) -> int |None:
+    def address_of_functions(self, /) -> int: ...
+    @property
+    def address_of_name_ordinals(self, /) -> int: ...
+    @property
+    def address_of_names(self, /) -> int: ...
+    @property
+    def characteristics(self, /) -> int: ...
+    @property
+    def name(self, /) -> str:
         """
-        The mapped address. `None` for a forwarder.
+        The DLL name that the directory records.
         """
     @property
-    def forwarder(self, /) -> str |None:
-        """
-        The target of a forwarder (`OTHER.Function`).
-        """
+    def number_of_functions(self, /) -> int: ...
     @property
-    def name(self, /) -> str |None:
-        """
-        `None` for an ordinal-only export.
-        """
+    def number_of_names(self, /) -> int: ...
     @property
-    def ordinal(self, /) -> int: ...
+    def ordinal_base(self, /) -> int: ...
     @property
-    def rva(self, /) -> int |None:
+    def time_date_stamp(self, /) -> int: ...
+    @property
+    def version(self, /) -> str:
         """
-        `None` for a forwarder.
+        `major.minor`.
         """
 
 @final
@@ -4887,12 +4958,10 @@ class FailureSignature(BaseRecord):
         """
 
 @final
-class Field(BaseRecord):
+class FieldInfo(BaseRecord):
     """
-    The PDB layout of a field, with its name, byte offset, byte size, and type spelling.
+    The PDB layout of a field: its byte offset, byte size, and type.
     """
-    @property
-    def name(self, /) -> str: ...
     @property
     def offset(self, /) -> int:
         """
@@ -4951,6 +5020,36 @@ class FileCacheDetail(BaseRecord):
         """
         The bytes in the mapped views that are present in memory.
         """
+
+@final
+class FileHeader(BaseRecord):
+    """
+    `IMAGE_FILE_HEADER`.
+    """
+    @property
+    def characteristics(self, /) -> int: ...
+    @property
+    def characteristics_names(self, /) -> list[str]:
+        """
+        The `IMAGE_FILE_*` flags that are set in `characteristics`.
+        """
+    @property
+    def machine(self, /) -> int: ...
+    @property
+    def machine_name(self, /) -> str:
+        """
+        `X64`, `X86`, `ARM64`, ...
+        """
+    @property
+    def number_of_sections(self, /) -> int: ...
+    @property
+    def number_of_symbols(self, /) -> int: ...
+    @property
+    def pointer_to_symbol_table(self, /) -> int: ...
+    @property
+    def size_of_optional_header(self, /) -> int: ...
+    @property
+    def time_date_stamp(self, /) -> int: ...
 
 @final
 class FileObject(BaseRecord):
@@ -6739,149 +6838,38 @@ class ImageCheck(BaseRecord):
         """
 
 @final
-class ImageDataDirectory(BaseRecord):
-    """
-    One `IMAGE_DATA_DIRECTORY` entry.
-    """
-    @property
-    def index(self, /) -> int:
-        """
-        The slot of the entry in the directory table.
-        """
-    @property
-    def name(self, /) -> str:
-        """
-        `Export`, `Import`, `Debug`, ...
-        """
-    @property
-    def rva(self, /) -> int: ...
-    @property
-    def size(self, /) -> int: ...
-
-@final
-class ImageDebugEntry(BaseRecord):
-    """
-    One `IMAGE_DEBUG_DIRECTORY` entry.
-    """
-    @property
-    def address_of_raw_data(self, /) -> int: ...
-    @property
-    def characteristics(self, /) -> int: ...
-    @property
-    def codeview(self, /) -> Diagnostic[CodeViewRecord] |None:
-        """
-        The decoded CodeView record. `None` for other entry types.
-        """
-    @property
-    def pointer_to_raw_data(self, /) -> int: ...
-    @property
-    def size_of_data(self, /) -> int: ...
-    @property
-    def time_date_stamp(self, /) -> int: ...
-    @property
-    def type(self, /) -> int:
-        """
-        The `IMAGE_DEBUG_TYPE_*` value.
-        """
-    @property
-    def type_name(self, /) -> str:
-        """
-        `CODEVIEW`, `POGO`, ...
-        """
-    @property
-    def version(self, /) -> str:
-        """
-        `major.minor`.
-        """
-
-@final
-class ImageExportDirectory(BaseRecord):
-    """
-    `IMAGE_EXPORT_DIRECTORY`.
-    """
-    @property
-    def address_of_functions(self, /) -> int: ...
-    @property
-    def address_of_name_ordinals(self, /) -> int: ...
-    @property
-    def address_of_names(self, /) -> int: ...
-    @property
-    def characteristics(self, /) -> int: ...
-    @property
-    def name(self, /) -> str:
-        """
-        The DLL name that the directory records.
-        """
-    @property
-    def number_of_functions(self, /) -> int: ...
-    @property
-    def number_of_names(self, /) -> int: ...
-    @property
-    def ordinal_base(self, /) -> int: ...
-    @property
-    def time_date_stamp(self, /) -> int: ...
-    @property
-    def version(self, /) -> str:
-        """
-        `major.minor`.
-        """
-
-@final
 class ImageExports(BaseRecord):
     """
-    The export directory and the exports of an image (`!dh -e`).
+    A mapped image's export directory and the exports it lists (`!dh -e`).
     """
     @property
-    def directory(self, /) -> ImageExportDirectory |None:
+    def directory(self, /) -> ExportDirectory |None:
         """
         `None` if the image has no exports.
         """
     @property
-    def exports(self, /) -> list[Export]: ...
-
-@final
-class ImageFileHeader(BaseRecord):
-    """
-    `IMAGE_FILE_HEADER`.
-    """
-    @property
-    def characteristics(self, /) -> int: ...
-    @property
-    def characteristics_names(self, /) -> list[str]:
-        """
-        The `IMAGE_FILE_*` flags that are set in `characteristics`.
-        """
-    @property
-    def machine(self, /) -> int: ...
-    @property
-    def machine_name(self, /) -> str:
-        """
-        `AMD64`, `I386`, ...
-        """
-    @property
-    def number_of_sections(self, /) -> int: ...
-    @property
-    def number_of_symbols(self, /) -> int: ...
-    @property
-    def pointer_to_symbol_table(self, /) -> int: ...
-    @property
-    def size_of_optional_header(self, /) -> int: ...
-    @property
-    def time_date_stamp(self, /) -> int: ...
+    def exports(self, /) -> list[ModuleExportInfo]: ...
 
 @final
 class ImageHeaders(BaseRecord):
     """
-    The headers of a mapped image (`!dh`).
+    The headers of a mapped image (`!dh`). Each directory is read on its own:
+    a discarded or paged-out one (a driver's `INIT`-resident import table) is
+    unavailable beside the headers that did read.
     """
     @property
     def base(self, /) -> int: ...
     @property
-    def data_directories(self, /) -> list[ImageDataDirectory]: ...
+    def data_directories(self, /) -> list[DataDirectory]: ...
     @property
-    def debug_directory(self, /) -> Diagnostic[list[ImageDebugEntry]] |None:
+    def debug_directory(self, /) -> Diagnostic[list[DebugRecord]]:
         """
-        The debug directory. `None` if you did not ask for it.
+        The debug directory, with each CodeView record decoded.
+        """
+    @property
+    def entry_point(self, /) -> int |None:
+        """
+        The mapped entry point. `None` if the image has no entry point.
         """
     @property
     def exports(self, /) -> Diagnostic[ImageExports] |None:
@@ -6889,14 +6877,14 @@ class ImageHeaders(BaseRecord):
         The export directory. `None` if you did not ask for it.
         """
     @property
-    def file_header(self, /) -> ImageFileHeader: ...
+    def file_header(self, /) -> FileHeader: ...
     @property
     def format(self, /) -> str:
         """
         `PE32` or `PE32+`.
         """
     @property
-    def imports(self, /) -> Diagnostic[list[ImageImportDescriptor]] |None:
+    def imports(self, /) -> Diagnostic[list[ImportDescriptor]] |None:
         """
         The import descriptors. `None` if you did not ask for them.
         """
@@ -6906,72 +6894,9 @@ class ImageHeaders(BaseRecord):
         The loaded module at `base`, if there is one.
         """
     @property
-    def optional_header(self, /) -> ImageOptionalHeader: ...
+    def optional_header(self, /) -> OptionalHeader: ...
     @property
-    def sections(self, /) -> list[ImageSectionHeader]: ...
-
-@final
-class ImageImport(BaseRecord):
-    """
-    One imported function.
-    """
-    @property
-    def bound(self, /) -> int |None:
-        """
-        The bound address in the import address table.
-        """
-    @property
-    def error(self, /) -> str |None:
-        """
-        The reason that ntoseye could not read the import name.
-        """
-    @property
-    def hint(self, /) -> int |None:
-        """
-        The export-name-table hint, for a named import.
-        """
-    @property
-    def name(self, /) -> str |None:
-        """
-        The imported name. `None` for an import by ordinal, or for an import
-        that ntoseye could not read.
-        """
-    @property
-    def ordinal(self, /) -> int |None:
-        """
-        The ordinal, for an import by ordinal.
-        """
-
-@final
-class ImageImportDescriptor(BaseRecord):
-    """
-    One `IMAGE_IMPORT_DESCRIPTOR`, which identifies a DLL that the image imports from.
-    """
-    @property
-    def forwarder_chain(self, /) -> int: ...
-    @property
-    def import_address_table(self, /) -> int: ...
-    @property
-    def import_name_table(self, /) -> int: ...
-    @property
-    def imports(self, /) -> list[ImageImport]: ...
-    @property
-    def incomplete(self, /) -> str |None:
-        """
-        The reason that the thunk walk stopped early, if it did.
-        """
-    @property
-    def name(self, /) -> str |None:
-        """
-        The DLL name. `None` if ntoseye could not read it.
-        """
-    @property
-    def name_error(self, /) -> str |None:
-        """
-        The reason that ntoseye could not read the DLL name.
-        """
-    @property
-    def time_date_stamp(self, /) -> int: ...
+    def sections(self, /) -> list[SectionHeader]: ...
 
 @final
 class ImageMismatchRange(BaseRecord):
@@ -6990,97 +6915,6 @@ class ImageMismatchRange(BaseRecord):
         """
     @property
     def start(self, /) -> int: ...
-
-@final
-class ImageOptionalHeader(BaseRecord):
-    """
-    `IMAGE_OPTIONAL_HEADER` (PE32 or PE32+).
-    """
-    @property
-    def base_of_code(self, /) -> int: ...
-    @property
-    def base_of_data(self, /) -> int |None:
-        """
-        Only for PE32. `None` for PE32+.
-        """
-    @property
-    def checksum(self, /) -> int: ...
-    @property
-    def dll_characteristics(self, /) -> int: ...
-    @property
-    def dll_characteristics_names(self, /) -> list[str]:
-        """
-        The `IMAGE_DLLCHARACTERISTICS_*` flags that are set.
-        """
-    @property
-    def entry_point(self, /) -> int |None:
-        """
-        The mapped entry point. `None` if the image has no entry point.
-        """
-    @property
-    def entry_point_rva(self, /) -> int: ...
-    @property
-    def file_alignment(self, /) -> int: ...
-    @property
-    def image_base(self, /) -> int:
-        """
-        The preferred base address for which the image was linked.
-        """
-    @property
-    def image_version(self, /) -> str:
-        """
-        `major.minor`.
-        """
-    @property
-    def linker_version(self, /) -> str:
-        """
-        `major.minor`.
-        """
-    @property
-    def loader_flags(self, /) -> int: ...
-    @property
-    def magic(self, /) -> int: ...
-    @property
-    def number_of_rva_and_sizes(self, /) -> int: ...
-    @property
-    def operating_system_version(self, /) -> str:
-        """
-        `major.minor`.
-        """
-    @property
-    def section_alignment(self, /) -> int: ...
-    @property
-    def size_of_code(self, /) -> int: ...
-    @property
-    def size_of_headers(self, /) -> int: ...
-    @property
-    def size_of_heap_commit(self, /) -> int: ...
-    @property
-    def size_of_heap_reserve(self, /) -> int: ...
-    @property
-    def size_of_image(self, /) -> int: ...
-    @property
-    def size_of_initialized_data(self, /) -> int: ...
-    @property
-    def size_of_stack_commit(self, /) -> int: ...
-    @property
-    def size_of_stack_reserve(self, /) -> int: ...
-    @property
-    def size_of_uninitialized_data(self, /) -> int: ...
-    @property
-    def subsystem(self, /) -> int: ...
-    @property
-    def subsystem_name(self, /) -> str:
-        """
-        `Native`, `Windows GUI`, ...
-        """
-    @property
-    def subsystem_version(self, /) -> str:
-        """
-        `major.minor`.
-        """
-    @property
-    def win32_version_value(self, /) -> int: ...
 
 @final
 class ImageSectionCheck(BaseRecord):
@@ -7119,40 +6953,6 @@ class ImageSectionCheck(BaseRecord):
         The reason that ntoseye could not read the section memory. `None` if
         the read succeeded.
         """
-
-@final
-class ImageSectionHeader(BaseRecord):
-    """
-    One `IMAGE_SECTION_HEADER`.
-    """
-    @property
-    def characteristics(self, /) -> int: ...
-    @property
-    def characteristics_names(self, /) -> list[str]:
-        """
-        The `IMAGE_SCN_*` flags that are set.
-        """
-    @property
-    def name(self, /) -> str: ...
-    @property
-    def number_of_linenumbers(self, /) -> int: ...
-    @property
-    def number_of_relocations(self, /) -> int: ...
-    @property
-    def pointer_to_linenumbers(self, /) -> int: ...
-    @property
-    def pointer_to_raw_data(self, /) -> int: ...
-    @property
-    def pointer_to_relocations(self, /) -> int: ...
-    @property
-    def size_of_raw_data(self, /) -> int: ...
-    @property
-    def virtual_address(self, /) -> int:
-        """
-        The RVA of the section.
-        """
-    @property
-    def virtual_size(self, /) -> int: ...
 
 @final
 class ImageSelfPatchCounts(BaseRecord):
@@ -7206,6 +7006,80 @@ class ImageSelfPatchRange(BaseRecord):
         """
     @property
     def start(self, /) -> int: ...
+
+@final
+class ImportDescriptor(BaseRecord):
+    """
+    One `IMAGE_IMPORT_DESCRIPTOR`, which identifies a DLL that the image
+    imports from, and its entries.
+    """
+    @property
+    def forwarder_chain(self, /) -> int: ...
+    @property
+    def import_address_table(self, /) -> int:
+        """
+        `FirstThunk`.
+        """
+    @property
+    def import_name_table(self, /) -> int:
+        """
+        `OriginalFirstThunk`.
+        """
+    @property
+    def imports(self, /) -> list[ImportEntry]: ...
+    @property
+    def incomplete(self, /) -> str |None:
+        """
+        Why `entries` stops short of the table's end: a thunk that does not
+        read, or no terminator within the bound. `None` when the table was
+        read to its terminator.
+        """
+    @property
+    def name(self, /) -> str |None:
+        """
+        The DLL name. `None` if ntoseye could not read it.
+        """
+    @property
+    def name_error(self, /) -> str |None:
+        """
+        The reason that ntoseye could not read the DLL name.
+        """
+    @property
+    def time_date_stamp(self, /) -> int: ...
+
+@final
+class ImportEntry(BaseRecord):
+    """
+    One imported function: its import-name-table entry and the import
+    address table slot beside it.
+    """
+    @property
+    def bound(self, /) -> int |None:
+        """
+        The bound address in the import address table. `None` if that slot
+        does not read.
+        """
+    @property
+    def error(self, /) -> str |None:
+        """
+        The reason that ntoseye could not read the import name.
+        """
+    @property
+    def hint(self, /) -> int |None:
+        """
+        The export-name-table hint, for a named import.
+        """
+    @property
+    def name(self, /) -> str |None:
+        """
+        The imported name. `None` for an import by ordinal, or for an import
+        that ntoseye could not read.
+        """
+    @property
+    def ordinal(self, /) -> int |None:
+        """
+        The ordinal, for an import by ordinal.
+        """
 
 @final
 class IndirectTable(BaseRecord):
@@ -9178,64 +9052,6 @@ class ListTermination(BaseRecord):
         """
 
 @final
-class LoadedModule(BaseRecord):
-    """
-    A loaded image (`lm`).
-    """
-    @property
-    def base(self, /) -> int: ...
-    @property
-    def checksum(self, /) -> int |None:
-        """
-        The PE checksum. `None` if the loader record does not contain one.
-        """
-    @property
-    def end(self, /) -> int:
-        """
-        The address after the last byte of the image.
-        """
-    @property
-    def file_version(self, /) -> str |None:
-        """
-        The file version from the version resource. `None` if ntoseye did not read it.
-        """
-    @property
-    def name(self, /) -> str:
-        """
-        The image file name (`ntoskrnl.exe`).
-        """
-    @property
-    def path(self, /) -> str |None:
-        """
-        The full image path, if the loader recorded one.
-        """
-    @property
-    def product_version(self, /) -> str |None:
-        """
-        The product version from the version resource. `None` if ntoseye did not read it.
-        """
-    @property
-    def short_name(self, /) -> str:
-        """
-        The short name that `module!symbol` uses (`nt`).
-        """
-    @property
-    def size(self, /) -> int:
-        """
-        The mapped image size in bytes.
-        """
-    @property
-    def symbols(self, /) -> ModuleSymbols |None:
-        """
-        The symbol status. `None` except in `inspect()` of a kernel module.
-        """
-    @property
-    def time_date_stamp(self, /) -> int |None:
-        """
-        The PE timestamp. `None` if the loader record does not contain one.
-        """
-
-@final
 class LoaderListHead(BaseRecord):
     """
     A `_PEB_LDR_DATA` list head.
@@ -9425,30 +9241,20 @@ class LocalApic(BaseRecord):
 @final
 class LocalVariableLocation(BaseRecord):
     """
-    The location of a local variable.
+    The location of a local variable: `kind` is `register`,
+    `register_relative`, `frame_relative`, or `unavailable`.
     """
     @property
     def kind(self, /) -> str:
         """
-        `register`, `register_relative`, `frame_relative`, or
-        `unavailable`.
+        The variant: `register`, `register_relative`, `frame_relative`, `unavailable`.
         """
     @property
-    def offset(self, /) -> int |None:
-        """
-        The signed displacement, for `register_relative` and
-        `frame_relative`.
-        """
+    def offset(self, /) -> int |None: ...
     @property
-    def reason(self, /) -> str |None:
-        """
-        The reason that the location is unknown, for `unavailable`.
-        """
+    def reason(self, /) -> str |None: ...
     @property
-    def register(self, /) -> str |None:
-        """
-        The register, for `register` and `register_relative`.
-        """
+    def register(self, /) -> str |None: ...
 
 @final
 class LookasideDetail(BaseRecord):
@@ -9982,13 +9788,26 @@ class Module:
         the results for each section.
         """
     @property
-    def exports(self, /) -> list[Export]:
+    def exports(self, /) -> list[ModuleExportInfo]:
         """
         The exports from the mapped PE export directory.
         """
     def fetch_image(self, /) -> str:
         """
-        Fetch the matching image from the symbol server cache (`.fetchimage`).
+        Download the PE file of a loaded module into the symbol cache, or copy a file into it, and print its path.
+        
+        The command finds the file by the TimeDateStamp and SizeOfImage values
+        in the mapped PE header of the module. These values are the
+        symbol-server key, so the file is the same build that is running, and a
+        disassembler database that you make from this file rebases onto the live
+        module. A copy in a local directory on the symbol path, at its root or in
+        symbol-store layout, is used before a symbol server. `/f` copies a PE
+        file that you have into the cache under the key in its own header, with
+        the name of its PDB, so ntoseye finds it for the module that runs that
+        build. Use it for the Windows hypervisor, which Microsoft's symbol server
+        does not have: copy C:\\Windows\\System32\\hvix64.exe from the guest and run
+        `.fetchimage /f hvix64.exe`, after which the stacks of a vCPU in the
+        hypervisor unwind through the file's unwind data.
         """
     @property
     def file_version(self, /) -> str |None:
@@ -9997,9 +9816,31 @@ class Module:
         """
     def headers(self, /, exports: bool = False, imports: bool = False) -> ImageHeaders:
         """
-        The PE headers of the mapped image (`!dh`), including the file and
-        optional headers, data directories, sections, and the debug directory
-        with its PDB identity. `exports` and `imports` add those directories.
+        Show the headers of a mapped PE image.
+        
+        The argument is a module name, an address, or an image base. A module name
+        is `nt`, `hal`, `ntdll`, or the image name of the module, and ntoseye
+        looks for it in the `.process` module list first, and then in the kernel
+        module list. An address can be any address inside a loaded module. An
+        image base can be the base of an image that no loader list contains, if
+        that image starts with MZ. With no options, the command shows the file and
+        section headers, as WinDbg does. -f: the file header, the optional header
+        (entry point, image base, subsystem, DLL characteristics, stack and heap
+        sizes), and the data directories (RVA and size). For the security
+        directory, the value is a file offset. -s: the section table with decoded
+        flags, and the debug directory with its CodeView PDB name, GUID, and age.
+        -e: the export directory and all exports (ordinal, RVA, name or
+        forwarder). -i: each import descriptor and its imports (hint and name or
+        ordinal), with the address that the loader bound in the IAT. If a
+        descriptor has no import name table, the command shows only the bound
+        addresses, because its IAT no longer contains names. -a: all of these. You
+        can combine options (`-fs`, `-f -i`). If ntoseye cannot read a directory,
+        it shows the directory as unavailable and shows the other data. For
+        example, the import table of a driver is in its INIT section, and Windows
+        discards that section after load. The same applies to an import name or a
+        module name that ntoseye cannot read. The command reads the headers from
+        memory as they are mapped, so the values are the ones that the loader left
+        there.
         """
     def image(self, /, zero_fill: bool = False) -> bytes:
         """
@@ -10010,12 +9851,17 @@ class Module:
         """
     def image_info(self, /) -> ModuleImageInfo:
         """
-        The image identity of the module (`!lmi`): the machine, time stamp,
-        size, checksum, and characteristics from the headers, and the debug
-        directory with the CodeView PDB name, GUID, and age. The symbol state
-        and the local PDB file follow.
+        Show the image identity, debug directory, and symbol state of a loaded
+        module.
+        
+        The argument is a module name as for !dh (`nt`, `ntdll`, an image name),
+        or any address inside the module. From the mapped headers, the command
+        shows the base, image name and path, machine, time stamp, size, checksum,
+        and characteristics. It also shows the debug directory with the CodeView
+        PDB name, GUID, and age. Last, it shows whether symbols are loaded, where
+        they come from, and the local PDB file.
         """
-    def inspect(self, /) -> LoadedModule |LoaderModule:
+    def inspect(self, /) -> ModuleListing |LoaderModule:
         """
         The symbol status, load diagnostics, and PDB identity (`lmv`).
         """
@@ -10034,9 +9880,9 @@ class Module:
         """
         The product version from the version resource of the image.
         """
-    def reload_symbols(self, /) -> SymbolReloadReport:
+    def reload_symbols(self, /) -> ModuleSymbolLoadReport:
         """
-        Select, fetch, and index symbols for this module (`ld`, `.reload`).
+        Force ntoseye to select the symbol source and index the symbols for one module.
         """
     @property
     def sections(self, /) -> list[Section]:
@@ -10098,11 +9944,41 @@ class ModuleEventPolicy(BaseRecord):
         """
 
 @final
+class ModuleExportInfo(BaseRecord):
+    """
+    One PE export (`Module.exports`, `!dh -e`), recovered from a module's
+    mapped export directory. An export has a name or only an ordinal, and a
+    forwarder has no address.
+    """
+    @property
+    def address(self, /) -> int |None:
+        """
+        The mapped address. `None` for a forwarder.
+        """
+    @property
+    def forwarder(self, /) -> str |None:
+        """
+        The target of a forwarder (`OTHER.Function`).
+        """
+    @property
+    def name(self, /) -> str |None:
+        """
+        `None` for an ordinal-only export.
+        """
+    @property
+    def ordinal(self, /) -> int: ...
+    @property
+    def rva(self, /) -> int |None:
+        """
+        The RVA of the export. `None` for a forwarder.
+        """
+
+@final
 class ModuleImageInfo(BaseRecord):
     """
-    The image identity of a module (`!lmi`), with the file-header identity,
-    the symbol state, and the debug directory, which includes the CodeView
-    PDB name, GUID, and age.
+    The image identity of a loaded module (`!lmi`): the file-header identity
+    from its mapped headers, the debug directory, which includes the CodeView
+    PDB name, GUID, and age, and the symbol state.
     """
     @property
     def characteristics(self, /) -> int: ...
@@ -10114,16 +9990,16 @@ class ModuleImageInfo(BaseRecord):
     @property
     def checksum(self, /) -> int: ...
     @property
-    def debug_directory(self, /) -> Diagnostic[list[ImageDebugEntry]]: ...
+    def debug_directory(self, /) -> Diagnostic[list[DebugRecord]]: ...
     @property
     def machine(self, /) -> int: ...
     @property
     def machine_name(self, /) -> str:
         """
-        `AMD64`, `I386`, ...
+        `X64`, `X86`, `ARM64`, ...
         """
     @property
-    def module(self, /) -> LoadedModule: ...
+    def module(self, /) -> ModuleInfo: ...
     @property
     def size_of_image(self, /) -> int: ...
     @property
@@ -10132,7 +10008,11 @@ class ModuleImageInfo(BaseRecord):
         The local PDB file, if a PDB is loaded.
         """
     @property
-    def symbols(self, /) -> ModuleSymbols: ...
+    def symbols(self, /) -> ModuleSymbols:
+        """
+        The symbol state, from the symbol store under the address space the
+        module's symbols load in.
+        """
     @property
     def time_date_stamp(self, /) -> int: ...
 
@@ -10145,6 +10025,11 @@ class ModuleInfo(BaseRecord):
     def base_address(self, /) -> int: ...
     @property
     def checksum(self, /) -> int |None: ...
+    @property
+    def end(self, /) -> int:
+        """
+        The address after the last byte of the image.
+        """
     @property
     def entry_point(self, /) -> int |None: ...
     @property
@@ -10176,9 +10061,81 @@ class ModuleIterator:
     def __next__(self, /) -> Module: ...
 
 @final
+class ModuleListing(BaseRecord):
+    """
+    A loaded module with its symbols' state (`lm`, a kernel module's
+    `Module.inspect()`).
+    """
+    @property
+    def module(self, /) -> ModuleInfo: ...
+    @property
+    def symbols(self, /) -> ModuleSymbols: ...
+
+@final
+class ModuleSymbolDiagnostic(BaseRecord):
+    """
+    One problem that ntoseye found when it loaded the symbols of a module.
+    """
+    @property
+    def compiland(self, /) -> str |None:
+        """
+        The compiland of the problem, if the problem is specific to one compiland.
+        """
+    @property
+    def message(self, /) -> str: ...
+    @property
+    def module(self, /) -> str: ...
+    @property
+    def phase(self, /) -> str:
+        """
+        The load step that reported it.
+        """
+
+@final
+class ModuleSymbolLoadReport(BaseRecord):
+    """
+    The result of a symbol reload. It counts the modules that loaded, had
+    no PDB, were skipped, failed, or are still being fetched, and keeps the
+    first diagnostics up to a limit.
+    """
+    @property
+    def breakpoint_error(self, /) -> str |None:
+        """
+        Why resolving the symbolic breakpoints again after the reload
+        failed (`.reload`, `ld`); `None` if it did not fail or did not run.
+        """
+    @property
+    def diagnostic_count(self, /) -> int:
+        """
+        The number of all diagnostics, including those after the limit of `diagnostics`.
+        """
+    @property
+    def diagnostics(self, /) -> list[ModuleSymbolDiagnostic]: ...
+    @property
+    def failed(self, /) -> int: ...
+    @property
+    def fetching(self, /) -> int:
+        """
+        Handed to the background fetcher; not yet loaded or failed.
+        """
+    @property
+    def loaded(self, /) -> int: ...
+    @property
+    def no_pdb(self, /) -> int: ...
+    @property
+    def skipped(self, /) -> int: ...
+    @property
+    def total(self, /) -> int: ...
+    @property
+    def unloaded(self, /) -> int:
+        """
+        The number of modules with symbols that unloaded after the previous refresh.
+        """
+
+@final
 class ModuleSymbols(BaseRecord):
     """
-    The symbol status and PDB identity of a module (`lmv`).
+    The symbol status and PDB identity of a module (`lm v`, `Module.symbols`).
     """
     @property
     def error(self, /) -> str |None:
@@ -10203,7 +10160,7 @@ class ModuleSymbols(BaseRecord):
     @property
     def status(self, /) -> str:
         """
-        `loaded`, `deferred`, `failed`, `unknown`, ...
+        `loaded`, `no-pdb`, `skipped`, `failed`, `fetching` or `unknown`.
         """
 
 @final
@@ -11528,6 +11485,96 @@ class ObjectSecurity(BaseRecord):
         """
     @property
     def object(self, /) -> int: ...
+
+@final
+class OptionalHeader(BaseRecord):
+    """
+    `IMAGE_OPTIONAL_HEADER32`/`64` (PE32 or PE32+), widened to one shape.
+    `base_of_data` exists only in the 32-bit header.
+    """
+    @property
+    def base_of_code(self, /) -> int: ...
+    @property
+    def base_of_data(self, /) -> int |None:
+        """
+        Only for PE32. `None` for PE32+.
+        """
+    @property
+    def checksum(self, /) -> int: ...
+    @property
+    def dll_characteristics(self, /) -> int: ...
+    @property
+    def dll_characteristics_names(self, /) -> list[str]:
+        """
+        The `IMAGE_DLLCHARACTERISTICS_*` flags that are set.
+        """
+    @property
+    def entry_point_rva(self, /) -> int:
+        """
+        The RVA of the entry point; 0 if the image has none.
+        """
+    @property
+    def file_alignment(self, /) -> int: ...
+    @property
+    def image_base(self, /) -> int:
+        """
+        The preferred base address for which the image was linked.
+        """
+    @property
+    def image_version(self, /) -> str:
+        """
+        `major.minor`.
+        """
+    @property
+    def linker_version(self, /) -> str:
+        """
+        `major.minor`.
+        """
+    @property
+    def loader_flags(self, /) -> int: ...
+    @property
+    def magic(self, /) -> int: ...
+    @property
+    def number_of_rva_and_sizes(self, /) -> int: ...
+    @property
+    def operating_system_version(self, /) -> str:
+        """
+        `major.minor`.
+        """
+    @property
+    def section_alignment(self, /) -> int: ...
+    @property
+    def size_of_code(self, /) -> int: ...
+    @property
+    def size_of_headers(self, /) -> int: ...
+    @property
+    def size_of_heap_commit(self, /) -> int: ...
+    @property
+    def size_of_heap_reserve(self, /) -> int: ...
+    @property
+    def size_of_image(self, /) -> int: ...
+    @property
+    def size_of_initialized_data(self, /) -> int: ...
+    @property
+    def size_of_stack_commit(self, /) -> int: ...
+    @property
+    def size_of_stack_reserve(self, /) -> int: ...
+    @property
+    def size_of_uninitialized_data(self, /) -> int: ...
+    @property
+    def subsystem(self, /) -> int: ...
+    @property
+    def subsystem_name(self, /) -> str:
+        """
+        `Native`, `Windows GUI`, ...
+        """
+    @property
+    def subsystem_version(self, /) -> str:
+        """
+        `major.minor`.
+        """
+    @property
+    def win32_version_value(self, /) -> int: ...
 
 @final
 class PackedQueueState(BaseRecord):
@@ -14580,7 +14627,8 @@ class SchedulerError(BaseRecord):
 @final
 class Section(BaseRecord):
     """
-    One PE section with its name, RVA, mapped size, and `rwx` permissions.
+    One PE section with its name, RVA, mapped size, and `rwx` permissions
+    (`Module.sections`).
     """
     @property
     def name(self, /) -> str:
@@ -14602,6 +14650,41 @@ class Section(BaseRecord):
         """
         The mapped size of the section.
         """
+
+@final
+class SectionHeader(BaseRecord):
+    """
+    One `IMAGE_SECTION_HEADER`.
+    """
+    @property
+    def characteristics(self, /) -> int: ...
+    @property
+    def characteristics_names(self, /) -> list[str]:
+        """
+        The `IMAGE_SCN_*` flags that are set, then the alignment and the
+        access, as WinDbg lists them.
+        """
+    @property
+    def name(self, /) -> str: ...
+    @property
+    def number_of_linenumbers(self, /) -> int: ...
+    @property
+    def number_of_relocations(self, /) -> int: ...
+    @property
+    def pointer_to_linenumbers(self, /) -> int: ...
+    @property
+    def pointer_to_raw_data(self, /) -> int: ...
+    @property
+    def pointer_to_relocations(self, /) -> int: ...
+    @property
+    def size_of_raw_data(self, /) -> int: ...
+    @property
+    def virtual_address(self, /) -> int:
+        """
+        The RVA of the section.
+        """
+    @property
+    def virtual_size(self, /) -> int: ...
 
 @final
 class SecureKernel:
@@ -15154,6 +15237,14 @@ class SourceLocation(BaseRecord):
         file. `differs` means that the file is there but its checksum does
         not match the compiled file. `None` if `local_path` is `None`.
         """
+
+@final
+class SourcePath(BaseRecord):
+    """
+    The ordered local source path mappings (`.srcpath`).
+    """
+    @property
+    def mappings(self, /) -> list[str]: ...
 
 @final
 class SpecialRegistersArea(BaseRecord):
@@ -16105,54 +16196,13 @@ class SymbolCandidate(BaseRecord):
         """
 
 @final
-class SymbolLoadDiagnostic(BaseRecord):
+class SymbolPath(BaseRecord):
     """
-    One problem that ntoseye found when it loaded the symbols of a module.
-    """
-    @property
-    def compiland(self, /) -> str |None:
-        """
-        The compiland of the problem, if the problem is specific to one compiland.
-        """
-    @property
-    def message(self, /) -> str: ...
-    @property
-    def module(self, /) -> str: ...
-    @property
-    def phase(self, /) -> str:
-        """
-        The load step that reported it.
-        """
-
-@final
-class SymbolReloadReport(BaseRecord):
-    """
-    The result of a symbol reload. It counts the modules that loaded, had
-    no PDB, were skipped, or failed, and keeps the first diagnostics up to
-    a limit.
+    The ordered symbol source path (`.sympath`): local directories and
+    symbol servers, tried in order.
     """
     @property
-    def diagnostic_count(self, /) -> int:
-        """
-        The number of all diagnostics, including those after the limit of `diagnostics`.
-        """
-    @property
-    def diagnostics(self, /) -> list[SymbolLoadDiagnostic]: ...
-    @property
-    def failed(self, /) -> int: ...
-    @property
-    def loaded(self, /) -> int: ...
-    @property
-    def no_pdb(self, /) -> int: ...
-    @property
-    def skipped(self, /) -> int: ...
-    @property
-    def total(self, /) -> int: ...
-    @property
-    def unloaded(self, /) -> int:
-        """
-        The number of modules with symbols that unloaded after the previous refresh.
-        """
+    def sources(self, /) -> list[str]: ...
 
 @final
 class SymbolSearchMatch(BaseRecord):
@@ -16203,9 +16253,9 @@ class Symbols:
         at `addr`, which are those of the inlined call if the compiler inlined a
         call there. This method does not evaluate the values.
         """
-    def nearest(self, /, addr: int) -> Symbol |None:
+    def nearest(self, /, address: int) -> Symbol |None:
         """
-        Get the nearest symbol, or `None` if no symbol covers `addr`.
+        List the symbol nearest to an address.
         """
     @property
     def path(self, /) -> list[str]:
@@ -16214,13 +16264,21 @@ class Symbols:
         """
     @path.setter
     def path(self, /, sources: Sequence[str]) -> None: ...
-    def reload(self, /) -> SymbolReloadReport:
+    def reload(self, /, scope: Literal["current", "kernel", "user"] |None = None, module: str |None = None) -> ModuleSymbolLoadReport:
         """
-        Reload symbols in this space, and resolve symbolic breakpoints again.
+        Reload symbols for the modules in the current scope, or for the modules a name or pattern names.
+        
+        Asks the symbol path again for each module's PDB, whatever failed before,
+        and loads it at once. The current scope's modules are the selected
+        process's user-mode modules, else the kernel's; /n reloads the kernel's
+        and /user the selected process's. A module is a name such as nt or
+        viostor.sys, or a pattern with * and ? such as vio*. /f and /v are
+        accepted as in WinDbg: ntoseye always loads at once, and lm shows each
+        module's symbol status.
         """
-    def reset_path(self, /) -> None:
+    def reset_path(self, /) -> SymbolPath:
         """
-        Restore the default symbol sources (`.symfix`).
+        Set the symbol source path back to the defaults, the ntoseye cache and the Microsoft symbol server.
         """
     def search(self, /, query: str, limit: int = 50) -> list[SymbolSearchMatch]:
         """
@@ -17284,7 +17342,7 @@ class TriageReport(BaseRecord):
     @property
     def failure_signature(self, /) -> FailureSignature |None: ...
     @property
-    def modules(self, /) -> list[LoadedModule]:
+    def modules(self, /) -> list[ModuleInfo]:
         """
         The loaded modules, up to a maximum that the caller sets (see
         `modules_total`).
@@ -17425,7 +17483,7 @@ class Type:
         Bind this layout to an address as a reflective struct cursor.
         """
     @property
-    def fields(self, /) -> dict[str, Field]:
+    def fields(self, /) -> dict[str, FieldInfo]:
         """
         Field layouts by name, in offset order. An enum has no fields.
         """
