@@ -6,8 +6,8 @@ use crate::target::ListTermination;
 use crate::target::meta::{
     Verifier, VerifierDriver, VerifierDriverSummary, VerifierStatistics, VerifierSuspectDriver,
 };
-use ntoseye_macros::command;
 use crate::ui;
+use ntoseye_macros::command;
 
 fn diagnostic_error<T>(value: &DiagnosticValue<T>) -> Option<&str> {
     match value {

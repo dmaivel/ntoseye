@@ -2,13 +2,13 @@ use crate::dbg_backend::DebugCapability;
 use crate::diagnostics::print_warning;
 use crate::dump_writer::{collect_dump_metadata, write_kernel_dump};
 use crate::error::{Error, Result};
-use crate::session::Session;
 use crate::kd::{KdFileMapping, kd_files, load_map_file};
 use crate::output;
-use crate::repl::*;
 use crate::repl::args::{ArgCursor, ArgCx, ArgError};
-use ntoseye_macros::command;
+use crate::repl::*;
+use crate::session::Session;
 use indicatif::ProgressStyle;
+use ntoseye_macros::command;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -74,7 +74,6 @@ impl ReplState<'_> {
         );
         self.wait_for_stop_after_resume()
     }
-
 }
 
 /// Write a full PAGEDU64 kernel dump from the halted target.

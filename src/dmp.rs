@@ -1,5 +1,5 @@
-use std::fs::File;
 use ntoseye_macros::record;
+use std::fs::File;
 use std::path::Path;
 use std::time::Duration;
 

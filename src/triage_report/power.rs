@@ -6,9 +6,9 @@
 use std::collections::HashMap;
 
 use crate::session::Session;
+use crate::target::DiagnosticValue;
 use crate::target::power::{PowerFailure, power_failure_description};
 use crate::types::VirtAddr;
-use crate::target::DiagnosticValue;
 use crate::unwind::{StackFrame, StackTrace};
 use ntoseye_macros::record;
 

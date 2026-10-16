@@ -112,7 +112,9 @@ pub fn gather_hang_report(session: &mut Session) -> HangReport {
     let vcpus = session.processor_vcpus();
     let mut processors = Vec::with_capacity(usize::from(processor_count));
     for processor in 0..processor_count {
-        let current = match session.target.current_windows_thread_for_processor(processor)
+        let current = match session
+            .target
+            .current_windows_thread_for_processor(processor)
         {
             Ok(thread) => {
                 let vcpu = vcpus.get(&processor).map(String::as_str);
@@ -148,4 +150,3 @@ pub fn gather_hang_report(session: &mut Session) -> HangReport {
         waiting,
     }
 }
-

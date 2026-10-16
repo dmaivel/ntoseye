@@ -3,13 +3,15 @@
 // Audited against all 379 linked code pages on 2026-07-16.
 
 use crate::dbg_backend::BugcheckInfo;
-use ntoseye_macros::record;
 use crate::error::Result;
 use crate::memory::MemoryOps;
 use crate::target::Target;
-use crate::trapframe::{KtrapFrame, KtrapFrameData, ktrap_frame_at_machine_frame, read_ktrap_frame};
+use crate::trapframe::{
+    KtrapFrame, KtrapFrameData, ktrap_frame_at_machine_frame, read_ktrap_frame,
+};
 use crate::types::VirtAddr;
 use crate::unwind::{StackTrace, ThreadTraceContext, format_symbol, resolve_thread_trace_context};
+use ntoseye_macros::record;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BugcheckDescriptor {

@@ -17,8 +17,8 @@ use crate::triage_report::time::filetime_to_iso;
 use crate::types::VirtAddr;
 use crate::ui;
 
-use crate::repl::*;
 use crate::repl::args::{ArgCursor, ArgCx, ArgError};
+use crate::repl::*;
 use ntoseye_macros::command;
 
 /// How many 16-byte lines `.enumtag` shows of each block without a tag.
@@ -76,7 +76,10 @@ fn decoded<T>(command: &str, result: std::result::Result<T, String>) -> Result<T
     usage = ".enumtag [tag]",
     completion = None
 )]
-fn enumtag(state: &mut ReplState<'_>, #[arg(parse = enumtag_tag)] only: Option<[u8; 16]>) -> Result<()> {
+fn enumtag(
+    state: &mut ReplState<'_>,
+    #[arg(parse = enumtag_tag)] only: Option<[u8; 16]>,
+) -> Result<()> {
     let blocks = tagged_blocks(state.ctx, ".enumtag")?;
     let mut shown = 0;
     for block in blocks
@@ -147,10 +150,7 @@ fn tag_owner(session: &Session, tag: &[u8; 16]) -> Option<String> {
             .ok()?;
         let hit = *found.matches.first()?;
         Some(
-            match session
-                .target
-                .nearest_symbol_current_context(VirtAddr(hit))
-            {
+            match session.target.nearest_symbol_current_context(VirtAddr(hit)) {
                 Some((owner, name, 0)) => format!("{owner}!{name}"),
                 _ => format!("{}+{:#x}", module.short_name, hit - module.base_address.0),
             },
@@ -311,7 +311,12 @@ impl Render for PnpBlackbox {
     completion = None
 )]
 fn blackbox_winlogon(session: &Session) -> Result<WinlogonBlackbox> {
-    let data = blackbox_block(session, "!blackboxwinlogon", WINLOGON_TAG, "winlogon blackbox")?;
+    let data = blackbox_block(
+        session,
+        "!blackboxwinlogon",
+        WINLOGON_TAG,
+        "winlogon blackbox",
+    )?;
     decoded("!blackboxwinlogon", decode_winlogon(data))
 }
 

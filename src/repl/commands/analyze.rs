@@ -18,9 +18,9 @@ use crate::unwind::FrameSource;
 use super::power::{
     duration_text, holder_text, print_power_irp_list, print_power_worker_list, request_text,
 };
-use crate::repl::*;
 use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::bugcheck::show_bugcheck_analysis;
+use crate::repl::*;
 use crate::session::Session;
 use crate::triage_report::hang::{
     ANALYZE_HANG_STACK_LIMIT, BugcheckDecoding, HangReport, HangThread, gather_hang_report,

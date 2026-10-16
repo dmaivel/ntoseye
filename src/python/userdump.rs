@@ -125,10 +125,7 @@ impl UserDump {
     /// The exception the dump was written for, or `None` when it records
     /// none.
     #[getter]
-    fn exception<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Typed<'py, Option<UserExceptionDetail>>> {
+    fn exception<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Option<UserExceptionDetail>>> {
         let exception = self.read(py, |session, _| Ok(session.target.user_exception_detail()))?;
         Typed::new(py, exception)
     }
@@ -171,10 +168,7 @@ impl UserDump {
     /// The handles the process held, as the dump records them, or `None`
     /// when the dump has no handle data.
     #[getter]
-    fn handles<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Typed<'py, Option<Vec<UserHandle>>>> {
+    fn handles<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Option<Vec<UserHandle>>>> {
         let handles = self.read(py, |_, info| Ok(info.handles.clone()))?;
         Typed::new(py, handles)
     }
@@ -183,10 +177,7 @@ impl UserDump {
     /// uses it (`!address`), or `None` when the dump has no memory-info list.
     /// A region's bytes read only where the dump captured them.
     #[getter]
-    fn regions<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Typed<'py, Option<Vec<UserRegion>>>> {
+    fn regions<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Option<Vec<UserRegion>>>> {
         let regions = self.read(py, |session, info| {
             if info.regions.is_none() {
                 return Ok(None);
@@ -216,10 +207,7 @@ impl UserDump {
 
     /// The modules the process had unloaded.
     #[getter]
-    fn unloaded_modules<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Typed<'py, Vec<UnloadedModule>>> {
+    fn unloaded_modules<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<UnloadedModule>>> {
         let modules = self.read(py, |_, info| Ok(info.unloaded_modules.clone()))?;
         Typed::new(py, modules)
     }
