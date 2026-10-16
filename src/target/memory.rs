@@ -24,6 +24,28 @@ pub const MAX_SEARCH_MATCHES: usize = 4096;
 /// Bytes read per step of a search.
 const SEARCH_CHUNK: usize = 1 << 20;
 
+/// Which memory an operation addresses: the virtual address space of the
+/// session's context, or guest-physical memory. The REPL names it by the
+/// command (`db` or `!db`); an SDK `Memory` binds it from its space
+/// (`dbg.memory` or `dbg.physical`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryKind {
+    Virtual,
+    Physical,
+}
+
+impl MemoryKind {
+    /// Refuse physical memory, for an operation on virtual addresses only.
+    pub fn require_virtual(self) -> Result<()> {
+        match self {
+            MemoryKind::Virtual => Ok(()),
+            MemoryKind::Physical => Err(Error::DebugInfo(
+                "not available on physical memory".to_string(),
+            )),
+        }
+    }
+}
+
 /// Whose memory expressions read ([`Target::expression_memory`],
 /// [`Target::read_expression_physical`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

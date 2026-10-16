@@ -15,13 +15,15 @@ use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::error::Result;
 use crate::guest::ProcessInfo;
 use crate::session::Session;
-use crate::session::effects::{Effects, Refusal, RunState};
-use crate::target::ThreadInfo;
+use crate::session::effects::{Effects, Refusal, RunState, TargetScope};
 use crate::target::cpu::Processor;
+use crate::target::{MemoryKind, ThreadInfo};
 use crate::types::VirtAddr;
 use crate::view::record::{ToView, Typed};
 
+use super::context::Space;
 pub use super::inspect::Inspect;
+pub use super::memory::Memory;
 pub use super::process::Process;
 pub use super::thread::{Cpu, Thread};
 
@@ -30,6 +32,13 @@ pub use super::thread::{Cpu, Thread};
 pub trait CommandHost {
     fn owner(&self) -> &Owner;
     fn context(&self, py: Python<'_>) -> PyResult<Context>;
+
+    /// Refuse an operation this object cannot run, before it reaches the
+    /// session: a `Memory` in VTL1 has no NT state to describe and cannot
+    /// be written. `effects` are the command's.
+    fn refuse(&self, _operation: &str, _effects: &Effects) -> PyResult<()> {
+        Ok(())
+    }
 }
 
 /// A `#[arg(receiver)]` argument the object supplies: a `Thread` handle is
@@ -108,6 +117,7 @@ where
     H: CommandHost,
     T: ToView + Send,
 {
+    host.refuse(operation, effects)?;
     let context = host.context(py)?;
     let value = host.owner().with_in(py, &context, |session| {
         admit(session, effects, operation)?;
@@ -214,5 +224,40 @@ impl CommandHost for Cpu {
 impl Bind<Option<Processor>> for Cpu {
     fn bind(&self) -> Option<Processor> {
         processor_index_from_backend_thread_id(&self.id).map(Processor)
+    }
+}
+
+/// A `Memory` runs a command in its space's context: `proc.memory` in the
+/// process's, `dbg.memory` and `dbg.physical` in the kernel's.
+impl CommandHost for Memory {
+    fn owner(&self) -> &Owner {
+        &self.owner
+    }
+
+    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
+        Ok(self.space.context())
+    }
+
+    /// A kernel command reads NT's state about an address, which VTL1 and
+    /// roots outside NT do not have; a write needs a writable space.
+    fn refuse(&self, operation: &str, effects: &Effects) -> PyResult<()> {
+        if effects.target == TargetScope::Kernel {
+            self.space.require_nt(operation)?;
+        }
+        if !effects.writes.is_empty() {
+            self.space.require_writable()?;
+        }
+        Ok(())
+    }
+}
+
+/// Which memory a `Memory` addresses: `dbg.physical` the physical, every
+/// other space its virtual addresses.
+impl Bind<MemoryKind> for Memory {
+    fn bind(&self) -> MemoryKind {
+        match self.space {
+            Space::Physical => MemoryKind::Physical,
+            _ => MemoryKind::Virtual,
+        }
     }
 }

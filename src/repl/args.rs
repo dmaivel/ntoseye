@@ -8,6 +8,7 @@ use std::borrow::Cow;
 
 use crate::expr::Expr;
 use crate::repl::{CommandInvocation, CompletionStrategy, ReplState, command_help, error};
+use crate::target::MemoryKind;
 use crate::types::VirtAddr;
 
 /// What a parser may use: the REPL (radix, target, caches) and the name the
@@ -77,6 +78,25 @@ impl FromArg for String {
     fn from_arg(_: &mut ArgCx<'_, '_>, text: &str) -> Result<Self, ArgError> {
         Ok(text.to_string())
     }
+}
+
+/// `#[arg(receiver, parse = virtual_memory)]`: a virtual-memory command
+/// (`db`) addresses the context's address space. It takes no word; the
+/// SDK's `Memory` binds the kind from its space.
+pub fn virtual_memory(
+    _: &mut ArgCx<'_, '_>,
+    _: &mut ArgCursor<'_>,
+) -> Result<MemoryKind, ArgError> {
+    Ok(MemoryKind::Virtual)
+}
+
+/// `#[arg(receiver, parse = physical_memory)]`: a physical-memory command
+/// (`!db`) addresses guest-physical memory. It takes no word.
+pub fn physical_memory(
+    _: &mut ArgCx<'_, '_>,
+    _: &mut ArgCursor<'_>,
+) -> Result<MemoryKind, ArgError> {
+    Ok(MemoryKind::Physical)
 }
 
 /// The words of a command line not yet parsed. Positional arguments take
