@@ -7,22 +7,28 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 #[cfg(feature = "python-stubs")]
 use pyo3::inspect::{PyStaticConstant, PyStaticExpr};
 use pyo3::prelude::*;
+use pyo3::types::{PyByteArray, PyBytes};
 #[cfg(feature = "python-stubs")]
 use pyo3::{PyTypeInfo, type_hint_identifier, type_hint_subscript};
 
 use super::command::PyArg;
+use super::handle::Owner;
 use super::process::Process;
 use super::thread::{Cpu, Thread};
 use crate::Backend;
 use crate::dbg_backend::{ContinueDisposition, WatchpointAccess};
 use crate::exception_policy::ExceptionPolicyMode;
+use crate::guest::ProcessInfo;
 use crate::kd::KdMemorySource;
 #[cfg(feature = "python-stubs")]
 use crate::session::driver::StopPy;
 use crate::session::{StepMode, WalkUntil};
+use crate::target::ThreadInfo;
 use crate::target::irpfind::IrpPool;
 use crate::target::mm::{PoolType, PoolUsageSort};
 use crate::target::object::ObjectName;
+use crate::target::sched::{ApcSelector, UniqStackScope};
+use crate::target::workqueue::WorkQueueTypes;
 use crate::types::VirtAddr;
 
 /// A string argument restricted to fixed spellings, typed as
@@ -152,6 +158,23 @@ impl PyArg for PoolType {
     }
 }
 
+/// A `bytes` (or `bytearray`) argument, typed `bytes`.
+pub struct BytesArg(pub Vec<u8>);
+
+impl<'a, 'py> FromPyObject<'a, 'py> for BytesArg {
+    type Error = PyErr;
+
+    #[cfg(feature = "python-stubs")]
+    const INPUT_TYPE: PyStaticExpr = type_hint_identifier!("builtins", "bytes");
+
+    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        if let Ok(bytes) = obj.cast::<PyBytes>() {
+            return Ok(BytesArg(bytes.as_bytes().to_vec()));
+        }
+        Ok(BytesArg(obj.cast::<PyByteArray>()?.to_vec()))
+    }
+}
+
 /// A `when=` breakpoint predicate: called with the `Stop`, truthy to stop.
 pub struct WhenCallback(pub Py<PyAny>);
 
@@ -199,10 +222,79 @@ pub enum CpuArg<'py> {
 
 /// Whose APC queues to decode: a process, a thread, or an `_ETHREAD`.
 #[derive(FromPyObject)]
-pub enum ApcTarget<'py> {
-    Process(PyRef<'py, Process>),
-    Thread(PyRef<'py, Thread>),
+pub enum ApcTarget {
+    Process(Py<Process>),
+    Thread(Py<Thread>),
     Ethread(u64),
+}
+
+/// `Inspect.apcs(target=None)`: every thread by default.
+impl PyArg for ApcSelector {
+    type Py = Option<ApcTarget>;
+    fn from_py(value: Self::Py) -> Self {
+        Python::attach(|py| match value {
+            None => ApcSelector::All,
+            Some(ApcTarget::Process(process)) => ApcSelector::Process(process.borrow(py).info.pid),
+            Some(ApcTarget::Thread(thread)) => ApcSelector::Thread(thread.borrow(py).info.ethread),
+            Some(ApcTarget::Ethread(address)) => ApcSelector::Thread(VirtAddr(address)),
+        })
+    }
+
+    fn from_py_in(py: Python<'_>, owner: &Owner, value: Self::Py) -> PyResult<Self> {
+        Ok(match value {
+            None => ApcSelector::All,
+            Some(ApcTarget::Process(process)) => {
+                ApcSelector::Process(ProcessInfo::from_py_in(py, owner, process)?.pid)
+            }
+            Some(ApcTarget::Thread(thread)) => {
+                ApcSelector::Thread(ThreadInfo::from_py_in(py, owner, thread)?.ethread)
+            }
+            Some(ApcTarget::Ethread(address)) => ApcSelector::Thread(VirtAddr(address)),
+        })
+    }
+}
+
+/// `Inspect.uniqstack(process=None)`: every thread by default.
+impl PyArg for UniqStackScope {
+    type Py = Option<Py<Process>>;
+    fn from_py(value: Self::Py) -> Self {
+        Self::scope(value.map(ProcessInfo::from_py))
+    }
+
+    fn from_py_in(py: Python<'_>, owner: &Owner, value: Self::Py) -> PyResult<Self> {
+        Ok(Self::scope(Option::<ProcessInfo>::from_py_in(
+            py, owner, value,
+        )?))
+    }
+}
+
+impl UniqStackScope {
+    fn scope(process: Option<ProcessInfo>) -> Self {
+        match process {
+            None => UniqStackScope::AllThreads,
+            Some(process) => UniqStackScope::Process {
+                pid: process.pid,
+                name: process.name,
+            },
+        }
+    }
+}
+
+literal_arg! {
+    /// `Inspect.work_queues(queue_types=[...])`: a `WORK_QUEUE_TYPE` whose
+    /// priority `!exqueue` lists (flags 0x10, 0x20, 0x40).
+    WorkQueueTypeArg(u64) {
+        "critical" => 0x10,
+        "delayed" => 0x20,
+        "hypercritical" => 0x40,
+    }
+}
+
+impl PyArg for WorkQueueTypes {
+    type Py = Vec<WorkQueueTypeArg>;
+    fn from_py(value: Self::Py) -> Self {
+        WorkQueueTypes(value.iter().fold(0, |flags, kind| flags | kind.0))
+    }
 }
 
 /// An exception by NTSTATUS code or WinDbg alias (`av`, `bpe`, ...).

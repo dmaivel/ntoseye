@@ -10,12 +10,11 @@ use super::symbols::load_scope_symbols;
 use super::{MAX_READ_LEN, err, raise};
 use crate::error::Error;
 use crate::layout::utf16le_lossy;
-use crate::memory::pattern_offsets;
 use crate::session::Session;
 use crate::session::effects::{Effects, TargetScope, Writes};
+use crate::target::MemoryKind;
 use crate::target::mm::VtopDetail;
 use crate::target::{CODE_BITNESS_X86, StringDescriptor};
-use crate::target::{MAX_SEARCH_BYTES, MemoryKind, MemorySearchMatch};
 use crate::types::VirtAddr;
 use crate::view;
 use crate::view::record::Typed;
@@ -128,15 +127,6 @@ fn check_read_len(n: usize) -> PyResult<()> {
 fn require_page_tables(session: &Session) -> PyResult<()> {
     if session.target.user_dump().is_some() {
         return Err(err(Error::NoPhysicalMemory));
-    }
-    Ok(())
-}
-
-fn check_search_len(length: usize) -> PyResult<()> {
-    if length > MAX_SEARCH_BYTES {
-        return Err(raise(format!(
-            "search length {length} exceeds cap {MAX_SEARCH_BYTES} (0x{MAX_SEARCH_BYTES:x})"
-        )));
     }
     Ok(())
 }
@@ -259,75 +249,6 @@ impl Memory {
         self.read_descriptor(py, addr, StringDescriptor::Ansi, bits)
     }
 
-    /// Find matches, including overlapping ones, with symbol/module/VAD
-    /// context. In a virtual space, the search skips pages that it cannot read,
-    /// the breakpoints of this session read as the code that they replaced, and
-    /// the search returns a maximum of 4096 matches.
-    fn search<'py>(
-        &self,
-        py: Python<'py>,
-        pattern: &[u8],
-        start: u64,
-        length: usize,
-    ) -> PyResult<Typed<'py, Vec<MemorySearchMatch>>> {
-        check_search_len(length)?;
-        if pattern.is_empty() || pattern.len() > length {
-            return Typed::new(py, Vec::new());
-        }
-        let context = self.space.context();
-        let physical = matches!(self.space, Space::Physical);
-        // NT's region descriptions cover neither VTL1 nor roots outside NT.
-        let undescribed = match self.space {
-            Space::Secure(_) => Some("vtl1"),
-            Space::Root(_) => Some("foreign"),
-            _ => None,
-        };
-        let matches = self.owner.with_in(py, &context, move |session| {
-            if physical {
-                let mut bytes = vec![0; length];
-                session
-                    .target
-                    .read_physical(start, &mut bytes)
-                    .map_err(err)?;
-                Ok(pattern_offsets(&bytes, pattern)
-                    .map(|offset| {
-                        MemorySearchMatch::undescribed(
-                            start.wrapping_add(offset as u64),
-                            offset as u64,
-                            None,
-                            "physical",
-                        )
-                    })
-                    .collect::<Vec<_>>())
-            } else {
-                let hits = session
-                    .search(VirtAddr(start), pattern, length)
-                    .map_err(err)?
-                    .matches;
-                if let Some(kind) = undescribed {
-                    return Ok(hits
-                        .into_iter()
-                        .map(|address| {
-                            MemorySearchMatch::undescribed(
-                                address,
-                                address.wrapping_sub(start),
-                                session
-                                    .target
-                                    .closest_symbol_current_context(VirtAddr(address)),
-                                kind,
-                            )
-                        })
-                        .collect::<Vec<_>>());
-                }
-                session
-                    .target
-                    .describe_search_matches(VirtAddr(start), &hits)
-                    .map_err(err)
-            }
-        })?;
-        Typed::new(py, matches)
-    }
-
     /// Translate a virtual address with the page tables of this space (`!vtop`).
     fn translate(&self, py: Python<'_>, addr: u64) -> PyResult<Option<u64>> {
         self.space.require_virtual()?;
@@ -361,30 +282,6 @@ impl Memory {
         self.owner.with_in(py, &self.space.context(), |session| {
             require_page_tables(session)?;
             self.space.dtb(&session.target)
-        })
-    }
-
-    /// Make `addr` resident with the guest debugger worker (`.pagein`), which
-    /// resumes the guest. When the worker completes, the guest stops and the
-    /// method returns, and `dbg.stop` shows that stop.
-    fn page_in(&self, py: Python<'_>, addr: u64) -> PyResult<bool> {
-        self.space.require_virtual()?;
-        let context = self.space.context();
-        self.space.require_nt("page_in")?;
-        let process = match &self.space {
-            Space::Process(info) => Some(info.eprocess.0),
-            Space::Kernel => None,
-            Space::Physical | Space::Secure(_) | Space::Root(_) => unreachable!(),
-        };
-        self.owner.with_in(py, &context, |session| {
-            admit(session, &Effects::KERNEL_HALTED, "page_in")?;
-            let report = session.page_in(VirtAddr(addr), process).map_err(err)?;
-            if !report.from_worker {
-                return Err(raise(
-                    "the target stopped for another reason before the worker reported",
-                ));
-            }
-            Ok(report.resident)
         })
     }
 

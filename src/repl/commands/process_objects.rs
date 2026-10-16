@@ -40,19 +40,55 @@ use ntoseye_macros::command;
     category = "objects and I/O",
     kind = Query,
     target = Kernel,
-    python = none,
+    forms = [alpc_port, alpc_message, alpc_process_ports],
     usage = "!alpc /p <port> | /m <message> | /lpp [process]",
     completion = [Expression, Expression]
 )]
 fn alpc(session: &Session, #[arg(parse = alpc_query)] query: AlpcQuery) -> Result<AlpcObject> {
-    let target = &session.target;
     Ok(match query {
-        AlpcQuery::Port(address) => AlpcObject::Port(target.alpc_port(address)?),
-        AlpcQuery::Message(address) => AlpcObject::Message(target.alpc_message(address)?),
+        AlpcQuery::Port(address) => AlpcObject::Port(alpc_port(session, address)?),
+        AlpcQuery::Message(address) => AlpcObject::Message(alpc_message(session, address)?),
         AlpcQuery::ProcessPorts(process) => {
-            AlpcObject::ProcessPorts(target.alpc_process_ports(process)?)
+            AlpcObject::ProcessPorts(alpc_process_ports(session, Some(process))?)
         }
     })
+}
+
+/// Decode an ALPC port (`!alpc /p`). The result has the port kind, owner,
+/// connection, state, and queues, and for a connection port also its
+/// connections. `address` is the body or the header of the port object.
+#[command(form_of = alpc, python = Inspect, word = "/p")]
+fn alpc_port(
+    session: &Session,
+    #[arg(name = "port", complete = Expression)] address: VirtAddr,
+) -> Result<AlpcPort> {
+    session.target.alpc_port(address)
+}
+
+/// Decode an ALPC message, a `_KALPC_MESSAGE` (`!alpc /m`).
+#[command(form_of = alpc, python = Inspect, word = "/m")]
+fn alpc_message(
+    session: &Session,
+    #[arg(name = "message", complete = Expression)] address: VirtAddr,
+) -> Result<AlpcMessage> {
+    session.target.alpc_message(address)
+}
+
+/// Get the ALPC ports to which a process has handles (`!alpc /lpp`). The
+/// result has the connection ports that the process owns, with their
+/// connections, and the client ports through which the process is
+/// connected. `process` defaults to the current process.
+#[command(form_of = alpc, python = Inspect, word = "/lpp")]
+fn alpc_process_ports(
+    session: &Session,
+    #[arg(complete = Process)] process: Option<ProcessInfo>,
+) -> Result<AlpcProcessPorts> {
+    let target = &session.target;
+    let process = match process {
+        Some(process) => process,
+        None => target.selected_process_info()?,
+    };
+    target.alpc_process_ports(process)
 }
 
 /// What `!alpc` decodes: its switch and the argument after it.
@@ -62,8 +98,7 @@ enum AlpcQuery {
     ProcessPorts(ProcessInfo),
 }
 
-/// What `!alpc` decoded. The SDK has a method for each
-/// (`Inspect.alpc_port`, `alpc_message`, `alpc_process_ports`).
+/// What `!alpc` decoded.
 enum AlpcObject {
     Port(AlpcPort),
     Message(AlpcMessage),

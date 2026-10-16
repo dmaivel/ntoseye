@@ -15,9 +15,10 @@ use crate::target::hang::{
     IpiProcessor, IpiState, QueuedLockState, QueuedLocks, ipi_frozen_name, ipi_request_type_name,
 };
 use crate::target::pci::{
-    CAPABILITY_PCI_EXPRESS, PCI_CONFIG_SIZE, PciFunction, PciRawRange, PciRequest, PciScan,
-    PciTree, PciTreeBus, PciTreeDevice, capabilities, capability_name, class_name, command_flags,
-    extended_capabilities, extended_capability_name, parse_pci_request, status_flags,
+    CAPABILITY_PCI_EXPRESS, PCI_CONFIG_SIZE, PCI_EXTENDED_CONFIG_SIZE, PciFunction, PciQuery,
+    PciRawRange, PciRequest, PciScan, PciTree, PciTreeBus, PciTreeDevice, capabilities,
+    capability_name, class_name, command_flags, extended_capabilities, extended_capability_name,
+    parse_pci_request, status_flags,
 };
 use crate::ui;
 
@@ -222,11 +223,11 @@ pub struct PciReport {
     category = "objects and I/O",
     kind = Query,
     target = Kernel,
-    python = none,
+    forms = [pci],
     usage = "!pci [flags] [bus [device [function [min max]]]]",
     completion = [Expression]
 )]
-fn pci(
+fn pci_command(
     session: &mut Session,
     #[arg(parse = pci_request)] request: PciRequest,
 ) -> Result<PciReport> {
@@ -234,6 +235,29 @@ fn pci(
         .scan_pci(&request.query)
         .map_err(|error| Error::DebugInfo(format!("!pci: {error}")))?;
     Ok(PciReport { request, scan })
+}
+
+/// Read and decode PCI configuration space (`!pci`) for the functions on
+/// `bus` (through `last_bus`), or for one `device` and `function`. It reads
+/// all 4 KiB of each function, with the extended capabilities, as `config`.
+/// This needs a halted target and a backend that can get to configuration
+/// space (kd/kdnet, or gdb on QEMU).
+#[command(form_of = pci_command, python = Inspect, sdk)]
+fn pci(
+    session: &mut Session,
+    #[arg(default = 0)] bus: u8,
+    device: Option<u8>,
+    function: Option<u8>,
+    #[arg(keyword)] last_bus: Option<u8>,
+) -> Result<PciScan> {
+    session.scan_pci(&PciQuery {
+        segment: 0,
+        first_bus: bus,
+        last_bus: last_bus.unwrap_or(bus),
+        device,
+        function,
+        size: PCI_EXTENDED_CONFIG_SIZE,
+    })
 }
 
 impl Render for PciReport {

@@ -6,7 +6,6 @@
 use crate::error::{Error, Result};
 use crate::memory::MemoryOps;
 use crate::target::Target;
-use crate::target::cpu::CpuInfo;
 use crate::target::etw::{GuidStyle, format_guid};
 use ntoseye_macros::record;
 
@@ -120,17 +119,6 @@ impl SmbiosTable {
             .iter()
             .find(|structure| structure.kind == kind)
     }
-}
-
-/// What `!sysinfo` shows.
-#[record]
-pub enum SysInfo {
-    /// `machineid`: the identity lines from the SMBIOS table.
-    MachineId(SmbiosTable),
-    /// `smbios`: every structure of the table.
-    Smbios(SmbiosTable),
-    /// `cpuinfo`: the current processor, as `!cpuinfo` shows it.
-    CpuInfo(CpuInfo),
 }
 
 /// Parse the structures of an SMBIOS table: each a header (type, length,

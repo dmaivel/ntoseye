@@ -19,6 +19,16 @@ use crate::{
 
 /// The most bytes one search scans.
 pub const MAX_SEARCH_BYTES: usize = 1 << 30;
+
+/// The space an SDK memory search runs in, which says how its matches are
+/// described: physical memory by offset only, an NT space by symbol, module
+/// and region, and a space NT does not describe (VTL1, a root outside NT) by
+/// symbol and that kind.
+#[derive(Debug, Clone, Copy)]
+pub enum SearchSpace {
+    Physical,
+    Virtual(Option<&'static str>),
+}
 /// The most matches one search records. A pattern common in the range (a
 /// zero byte) would otherwise fill memory with them.
 pub const MAX_SEARCH_MATCHES: usize = 4096;

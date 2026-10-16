@@ -32,7 +32,7 @@ use ntoseye_macros::command;
     names = ["!heap", "heap"],
     category = "user mode",
     kind = Query,
-    python = none,
+    forms = [inspect_heap, find_block],
     usage = "!heap [-s] [-h|-a <heap>] [-x <address>] [-p -a <address>]",
     completion = [None, Expression]
 )]
@@ -52,10 +52,30 @@ fn heap(session: &Session, #[arg(parse = heap_query)] query: HeapQuery) -> Resul
             } else {
                 HeapSelector::Address(heap)
             };
-            HeapReport::Detail(target.inspect_heap(selector, entries)?)
+            HeapReport::Detail(inspect_heap(session, selector, entries)?)
         }
-        HeapQuery::Find(address) => HeapReport::Find(target.find_heap_block(address)?),
+        HeapQuery::Find(address) => HeapReport::Find(find_block(session, address)?),
     })
+}
+
+/// Decode this heap (`!heap -h`), with its entries if `list_entries` is
+/// true.
+#[command(form_of = heap, python = Heap, python_name = "inspect", sdk)]
+fn inspect_heap(
+    session: &Session,
+    #[arg(receiver)] heap: HeapSelector,
+    #[arg(default = false)] list_entries: bool,
+) -> Result<HeapDetail> {
+    session.target.inspect_heap(heap, list_entries)
+}
+
+/// Find the heap block that contains `addr` (`!heap -x`).
+#[command(form_of = heap, python = Heaps, word = "-x")]
+fn find_block(
+    session: &Session,
+    #[arg(name = "address", complete = Expression)] addr: VirtAddr,
+) -> Result<HeapBlockSearch> {
+    session.target.find_heap_block(addr)
 }
 
 /// What `!heap` was asked for, its expressions evaluated.

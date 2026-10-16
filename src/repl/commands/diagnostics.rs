@@ -238,15 +238,15 @@ fn print_resource(detail: &ExecutiveResource) {
     names = ["!handle"],
     category = "objects and I/O",
     kind = Query,
-    python = none,
+    forms = [process_handle, process_handles],
     usage = "!handle [handle-expression [flags [type]]]",
     completion = [Expression, Expression, Expression]
 )]
 fn handle(session: &Session, #[arg(parse = handle_query)] query: HandleQuery) -> Result<Handles> {
     let target = &session.target;
     Ok(match query {
-        HandleQuery::Kernel(Some(handle)) => Handles::Entry(target.inspect_handle(handle)?),
-        HandleQuery::Kernel(None) => Handles::Table(target.enumerate_handles(256)?),
+        HandleQuery::Kernel(Some(handle)) => Handles::Entry(process_handle(session, handle)?),
+        HandleQuery::Kernel(None) => Handles::Table(process_handles(session, 256)?),
         HandleQuery::User {
             handle,
             show,
@@ -277,8 +277,25 @@ enum HandleQuery {
     },
 }
 
-/// What `!handle` read. The SDK has `Process.handle` and `Process.handles`
-/// for a kernel target.
+/// Decode a handle in the handle table of this process.
+#[command(form_of = handle, python = Process, python_name = "handle")]
+fn process_handle(
+    session: &Session,
+    #[arg(name = "handle-expression", complete = Expression)] value: u64,
+) -> Result<HandleEntry> {
+    session.target.inspect_handle(value)
+}
+
+/// List a maximum of `limit` handles in the handle table of this process.
+#[command(form_of = handle, python = Process, python_name = "handles")]
+fn process_handles(
+    session: &Session,
+    #[arg(sdk, default = 256)] limit: usize,
+) -> Result<HandleTable> {
+    session.target.enumerate_handles(limit)
+}
+
+/// What `!handle` read.
 enum Handles {
     Entry(HandleEntry),
     Table(HandleTable),
@@ -577,24 +594,35 @@ impl Render for FileObject {
     category = "objects and I/O",
     kind = Query,
     target = Kernel,
-    python = none,
+    forms = [resource, resources],
     usage = "!locks [resource-address-expression]"
 )]
 fn locks(session: &Session, address: Option<VirtAddr>) -> Result<Locks> {
-    let target = &session.target;
     match address {
-        Some(address) => target.inspect_resource(address).map(Locks::One),
-        None => target
-            .enumerate_resources(256)
-            .map(Locks::List)
-            .map_err(|error| {
-                Error::DebugInfo(format!("global resource enumeration unavailable: {error}"))
-            }),
+        Some(address) => resource(session, address).map(Locks::One),
+        None => resources(session, 256).map(Locks::List).map_err(|error| {
+            Error::DebugInfo(format!("global resource enumeration unavailable: {error}"))
+        }),
     }
 }
 
-/// What `!locks` read. The SDK has `Inspect.resource` and
-/// `Inspect.resources`.
+/// Decode an executive resource (`!locks address`).
+#[command(form_of = locks, python = Inspect)]
+fn resource(
+    session: &Session,
+    #[arg(name = "resource-address-expression", complete = Expression)] address: VirtAddr,
+) -> Result<ExecutiveResource> {
+    session.target.inspect_resource(address)
+}
+
+/// List the entries of the symbol-backed executive-resource list
+/// (`!locks`), at most `limit` of them.
+#[command(form_of = locks, python = Inspect)]
+fn resources(session: &Session, #[arg(sdk, default = 256)] limit: usize) -> Result<ResourceList> {
+    session.target.enumerate_resources(limit)
+}
+
+/// What `!locks` read.
 enum Locks {
     One(ExecutiveResource),
     List(ResourceList),

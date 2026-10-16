@@ -16,12 +16,8 @@ use super::thread::Threads;
 use super::types::{Struct, Types};
 use super::{err, view_dict};
 use crate::guest::ProcessInfo;
-use crate::target::heap::{HeapBlockSearch, HeapDetail, HeapSelector};
 use crate::target::mm::{MemoryRegionInfo, MemoryRegionInfoPy};
-use crate::target::object::{HandleEntry, HandleTable};
-use crate::target::sched::ApcSelector;
 use crate::types::VirtAddr;
-use crate::view::record::Typed;
 
 /// The running processes, with their PIDs as keys (`dbg.processes`). Each
 /// iteration reads the process list again, and `find(name)` matches image
@@ -272,33 +268,6 @@ impl Process {
         })
     }
 
-    /// Decode a handle in the handle table of this process.
-    fn handle<'py>(&self, py: Python<'py>, value: u64) -> PyResult<Typed<'py, HandleEntry>> {
-        let entry = self.owner.with_in(py, &self.context(), |session| {
-            session.target.inspect_handle(value).map_err(err)
-        })?;
-        Typed::new(py, entry)
-    }
-
-    /// List a maximum of `limit` handles in the handle table of this process.
-    #[pyo3(signature = (limit=256))]
-    fn handles<'py>(&self, py: Python<'py>, limit: usize) -> PyResult<Typed<'py, HandleTable>> {
-        let table = self.owner.with_in(py, &self.context(), |session| {
-            session.target.enumerate_handles(limit).map_err(err)
-        })?;
-        Typed::new(py, table)
-    }
-
-    /// Decode the kernel and user APC queues of this process (`!apc`).
-    fn apcs<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, crate::target::sched::ApcQueues>> {
-        let detail = self.owner.with_in(py, &self.context(), |session| {
-            session
-                .inspect_apcs(ApcSelector::Process(self.info.pid))
-                .map_err(err)
-        })?;
-        Typed::new(py, detail)
-    }
-
     /// Evaluate a debugger expression in the symbol scope of this process.
     fn eval(&self, py: Python<'_>, expr: &str) -> PyResult<u64> {
         symbols::eval(py, &self.owner, &self.space(), expr)
@@ -423,16 +392,6 @@ struct HeapHandleInfo {
 
 #[pymethods]
 impl Heaps {
-    /// Find the heap block that contains `addr` (`!heap -x`).
-    fn find_block<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Typed<'py, HeapBlockSearch>> {
-        let ctx = Context::process(self.info.clone());
-        let detail = self.owner.with_in(py, &ctx, |session| {
-            symbols::load_scope_symbols(session, &Space::Process(self.info.clone()))?;
-            session.target.find_heap_block(VirtAddr(addr)).map_err(err)
-        })?;
-        Typed::new(py, detail)
-    }
-
     fn get(&self, py: Python<'_>, index: usize) -> PyResult<Option<Heap>> {
         let Some(heap) = self
             .snapshot(py)?
@@ -497,25 +456,6 @@ impl Heap {
     fn address(&self, py: Python<'_>) -> PyResult<u64> {
         self.owner.check(py)?;
         Ok(self.address.0)
-    }
-
-    /// Decode this heap (`!heap -h`), with its entries if `list_entries` is
-    /// true.
-    #[pyo3(signature = (list_entries=false))]
-    fn inspect<'py>(
-        &self,
-        py: Python<'py>,
-        list_entries: bool,
-    ) -> PyResult<Typed<'py, HeapDetail>> {
-        let ctx = Context::process(self.info.clone());
-        let detail = self.owner.with_in(py, &ctx, |session| {
-            symbols::load_scope_symbols(session, &Space::Process(self.info.clone()))?;
-            session
-                .target
-                .inspect_heap(HeapSelector::Address(self.address), list_entries)
-                .map_err(err)
-        })?;
-        Typed::new(py, detail)
     }
 
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {

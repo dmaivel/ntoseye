@@ -16,8 +16,9 @@ use crate::session::Session;
 use crate::target::apic::{
     ApicLvt, HalController, HalControllerEntry, HalControllers, LVT_NAMES, LocalApic,
 };
+use crate::target::cpu::CpuInfo;
 use crate::target::cpu::Processor;
-use crate::target::smbios::{SmbiosTable, SysInfo, structure_fields, structure_name};
+use crate::target::smbios::{SmbiosTable, structure_fields, structure_name};
 use crate::ui;
 
 /// A labeled line of a detail view.
@@ -431,7 +432,7 @@ fn sysinfo_section(
     category = "cpu",
     kind = Query,
     target = Kernel,
-    python = Inspect,
+    forms = [smbios],
     usage = "!sysinfo machineid | smbios | cpuinfo",
     completion = []
 )]
@@ -446,10 +447,8 @@ fn sysinfo(
             .map(SysInfo::CpuInfo)
             .map_err(|error| Error::DebugInfo(format!("!sysinfo cpuinfo: {error}"))),
         section @ ("machineid" | "smbios") => {
-            let table = session
-                .target
-                .smbios_table()
-                .map_err(|error| Error::DebugInfo(format!("!sysinfo: {error}")))?;
+            let table =
+                smbios(session).map_err(|error| Error::DebugInfo(format!("!sysinfo: {error}")))?;
             Ok(if section == "machineid" {
                 SysInfo::MachineId(table)
             } else {
@@ -460,6 +459,25 @@ fn sysinfo(
             "unknown !sysinfo section '{other}': expected machineid, smbios, or cpuinfo"
         ))),
     }
+}
+
+/// Read the SMBIOS table the kernel found at boot
+/// (`nt!WmipSMBiosTablePhysicalAddress`) from physical memory, with every
+/// structure it holds (`!sysinfo smbios`; `!sysinfo machineid` shows the
+/// identity strings of the same table).
+#[command(form_of = sysinfo, python = Inspect, word = "smbios")]
+fn smbios(session: &Session) -> Result<SmbiosTable> {
+    session.target.smbios_table()
+}
+
+/// What `!sysinfo` shows.
+enum SysInfo {
+    /// `machineid`: the identity lines from the SMBIOS table.
+    MachineId(SmbiosTable),
+    /// `smbios`: every structure of the table.
+    Smbios(SmbiosTable),
+    /// `cpuinfo`: the current processor, as `!cpuinfo` shows it.
+    CpuInfo(CpuInfo),
 }
 
 impl Render for SysInfo {

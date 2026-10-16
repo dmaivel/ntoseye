@@ -15,9 +15,9 @@ use crate::repl::args::{ArgCursor, ArgCx, ArgError, virtual_memory};
 use crate::repl::*;
 use crate::session::Session;
 use crate::target::mm::{
-    Lookaside, LookasideDetail, LookasideListsDetail, MdlDetail, PfnDetail, PfnSelector,
-    PoolBlockDetail, PoolFindDetail, PoolPageDetail, PoolType, PoolUsageDetail, PoolUsageSort,
-    PoolValidationDetail, PteLevel, PteWalk, PtovDetail, SystemPtesDetail, VmDetail, VtopDetail,
+    LookasideDetail, LookasideListsDetail, MdlDetail, PfnDetail, PfnSelector, PoolBlockDetail,
+    PoolFindDetail, PoolPageDetail, PoolType, PoolUsageDetail, PoolUsageSort, PoolValidationDetail,
+    PteLevel, PteWalk, PtovDetail, SystemPtesDetail, VmDetail, VtopDetail,
 };
 use crate::target::pool::tag_string;
 use crate::target::{DiagnosticValue, MemoryKind};
@@ -331,16 +331,37 @@ impl Render for PoolFindDetail {
     category = "memory manager",
     kind = Query,
     target = Kernel,
-    python = Inspect,
+    forms = [lookasides, lookaside],
     usage = "!lookaside [address]",
     completion = Expression
 )]
-fn lookaside(session: &Session, address: Option<VirtAddr>) -> Result<Lookaside> {
-    let target = &session.target;
+fn lookaside_command(session: &Session, address: Option<VirtAddr>) -> Result<Lookaside> {
     match address {
-        Some(address) => target.inspect_lookaside(address).map(Lookaside::List),
-        None => target.lookaside_lists().map(Lookaside::Lists),
+        Some(address) => lookaside(session, address).map(Lookaside::List),
+        None => lookasides(session).map(Lookaside::Lists),
     }
+}
+
+/// List the exported nonpaged and paged `GENERAL_LOOKASIDE` lists
+/// (`!lookaside`), detecting cycles.
+#[command(form_of = lookaside_command, python = Inspect)]
+fn lookasides(session: &Session) -> Result<LookasideListsDetail> {
+    session.target.lookaside_lists()
+}
+
+/// Decode one `GENERAL_LOOKASIDE` (`!lookaside address`).
+#[command(form_of = lookaside_command, python = Inspect)]
+fn lookaside(
+    session: &Session,
+    #[arg(complete = Expression)] address: VirtAddr,
+) -> Result<LookasideDetail> {
+    session.target.inspect_lookaside(address)
+}
+
+/// What `!lookaside` shows: one list it was given, or every system list.
+enum Lookaside {
+    List(LookasideDetail),
+    Lists(LookasideListsDetail),
 }
 
 impl Render for Lookaside {

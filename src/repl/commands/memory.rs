@@ -10,12 +10,15 @@ use crate::error::{Error, Result, best_effort};
 use crate::expr::Expr;
 use crate::guest::ProcessInfo;
 use crate::layout::utf16le_lossy;
-use crate::memory::{MemoryOps, TerminatedRead, for_each_page_chunk, read_page_chunks};
+use crate::memory::{
+    MemoryOps, TerminatedRead, for_each_page_chunk, pattern_offsets, read_page_chunks,
+};
 use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::session::Session;
+use crate::target::memory::{MemorySearchMatch, SearchSpace};
 use crate::target::{
-    CODE_BITNESS_X86, CompareResult, MAX_SEARCH_MATCHES, MemoryKind, SearchResult, SearchStop,
-    StringDescriptor,
+    CODE_BITNESS_X86, CompareResult, MAX_SEARCH_BYTES, MAX_SEARCH_MATCHES, MemoryKind,
+    SearchResult, SearchStop, StringDescriptor,
 };
 use crate::triage_report::time::days_to_ymd;
 use crate::types::VirtAddr;
@@ -1038,7 +1041,7 @@ fn pagein_request(
     kind = Action,
     target = Kernel,
     state = Halted,
-    python = none,
+    forms = [page_in],
     usage = ".pagein [/p <pid|eprocess>] <address>",
     completion = [None, Expression]
 )]
@@ -1069,6 +1072,26 @@ fn pagein(
     }
     outln!("{} is resident", ui::addr(address.0));
     Ok(())
+}
+
+/// Make `addr` resident with the guest debugger worker (`.pagein`), which
+/// resumes the guest. When the worker completes, the guest stops and the
+/// method returns, and `dbg.stop` shows that stop.
+#[command(form_of = pagein, python = Memory, sdk)]
+fn page_in(
+    session: &mut Session,
+    #[arg(receiver)] memory: MemoryKind,
+    #[arg(receiver)] process: Option<ProcessInfo>,
+    addr: VirtAddr,
+) -> Result<bool> {
+    memory.require_virtual()?;
+    let report = session.page_in(addr, process.map(|process| process.eprocess.0))?;
+    if !report.from_worker {
+        return Err(Error::DebugInfo(
+            "the target stopped for another reason before the worker reported".to_string(),
+        ));
+    }
+    Ok(report.resident)
 }
 
 /// The width of the integers `eb`/`ew`/`ed`/`eq` (and `!eb`/`!ed`/`!eq`)
@@ -2000,7 +2023,7 @@ fn search_request(
     names = ["s"],
     category = "memory and disassembly",
     kind = Query,
-    python = none,
+    forms = [memory_search],
     usage = "s [-b|-w|-d|-q|-a|-u] <address> <L<count>|end> <pattern>",
     completion = [None, Expression, Expression]
 )]
@@ -2012,6 +2035,59 @@ fn search(
     session
         .search(range.start, &pattern, range.len())
         .map_err(|error| Error::DebugInfo(format!("failed to search memory: {error}")))
+}
+
+/// Find matches, including overlapping ones, with symbol/module/VAD
+/// context. In a virtual space, the search skips pages that it cannot read,
+/// the breakpoints of this session read as the code that they replaced, and
+/// the search returns a maximum of 4096 matches.
+#[command(form_of = search, python = Memory, python_name = "search", sdk)]
+fn memory_search(
+    session: &Session,
+    #[arg(receiver)] space: SearchSpace,
+    pattern: Vec<u8>,
+    start: u64,
+    length: usize,
+) -> Result<Vec<MemorySearchMatch>> {
+    if length > MAX_SEARCH_BYTES {
+        return Err(Error::DebugInfo(format!(
+            "search length {length} exceeds cap {MAX_SEARCH_BYTES} (0x{MAX_SEARCH_BYTES:x})"
+        )));
+    }
+    if pattern.is_empty() || pattern.len() > length {
+        return Ok(Vec::new());
+    }
+    let target = &session.target;
+    let SearchSpace::Virtual(undescribed) = space else {
+        // The range in one read, as `!search` does not chunk it.
+        let mut bytes = vec![0; length];
+        target.read_physical(start, &mut bytes)?;
+        return Ok(pattern_offsets(&bytes, &pattern)
+            .map(|offset| {
+                MemorySearchMatch::undescribed(
+                    start.wrapping_add(offset as u64),
+                    offset as u64,
+                    None,
+                    "physical",
+                )
+            })
+            .collect());
+    };
+    let hits = session.search(VirtAddr(start), &pattern, length)?.matches;
+    match undescribed {
+        Some(kind) => Ok(hits
+            .into_iter()
+            .map(|address| {
+                MemorySearchMatch::undescribed(
+                    address,
+                    address.wrapping_sub(start),
+                    target.closest_symbol_current_context(VirtAddr(address)),
+                    kind,
+                )
+            })
+            .collect()),
+        None => target.describe_search_matches(VirtAddr(start), &hits),
+    }
 }
 
 /// The matches with their symbols, which become `$0`.. (`.results`).

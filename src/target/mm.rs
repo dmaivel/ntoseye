@@ -568,14 +568,6 @@ pub struct LookasideListsDetail {
     pub truncated: bool,
 }
 
-/// What `!lookaside` shows: one list it was given, or every system list.
-#[record]
-#[derive(Debug, Clone)]
-pub enum Lookaside {
-    List(LookasideDetail),
-    Lists(LookasideListsDetail),
-}
-
 /// A decoded `_MDL` header and the page-frame array that follows it
 /// (`!mdl`).
 #[record]

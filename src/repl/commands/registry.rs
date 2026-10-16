@@ -498,24 +498,20 @@ pub enum RegOutput {
     category = "objects and I/O",
     kind = Query,
     target = Kernel,
-    python = none,
+    forms = [registry_hives, registry_key, registry_value, registry_key_at, registry_cell],
     usage = "!reg hivelist | !reg querykey <path> [-v <value>] | !reg keyinfo <hive> <knode> | !reg cellindex <hive> <cell>",
     completion = [None, RegistryKey]
 )]
 fn reg(session: &Session, #[arg(parse = reg_request)] request: RegRequest) -> Result<RegOutput> {
-    let target = &session.target;
     let failed = |command: &str, error: Error| Error::DebugInfo(format!("{command}: {error}"));
     match request {
-        RegRequest::Hives => target
-            .registry_hives()
+        RegRequest::Hives => registry_hives(session)
             .map(RegOutput::Hives)
             .map_err(|error| failed("!reg hivelist", error)),
-        RegRequest::KeyAt { hive, node } => target
-            .registry_key_at(hive, node)
+        RegRequest::KeyAt { hive, node } => registry_key_at(session, hive, node)
             .map(|key| RegOutput::Key(key, "!reg querykey".to_string()))
             .map_err(|error| failed("!reg keyinfo", error)),
-        RegRequest::Cell { hive, cell } => target
-            .registry_cell(hive, cell)
+        RegRequest::Cell { hive, cell } => registry_cell(session, hive, cell)
             .map(RegOutput::Cell)
             .map_err(|error| failed("!reg cellindex", error)),
         RegRequest::Query {
@@ -523,9 +519,7 @@ fn reg(session: &Session, #[arg(parse = reg_request)] request: RegRequest) -> Re
             path,
             value,
         } => {
-            let key = target
-                .registry_key(&path)
-                .map_err(|error| failed(&command, error))?;
+            let key = registry_key(session, path).map_err(|error| failed(&command, error))?;
             let Some(wanted) = value else {
                 return Ok(RegOutput::Key(key, command));
             };
@@ -559,6 +553,56 @@ fn reg(session: &Session, #[arg(parse = reg_request)] request: RegRequest) -> Re
             }
         }
     }
+}
+
+/// List the registry hives loaded in kernel memory, with where each is
+/// mounted and the file it was loaded from (`!reg hivelist`).
+#[command(form_of = reg, python = Inspect, word = "hivelist")]
+fn registry_hives(session: &Session) -> Result<HiveList> {
+    session.target.registry_hives()
+}
+
+/// Read the registry key at `path`, a full path such as
+/// `HKLM\SYSTEM\CurrentControlSet\Services\Tcpip` or
+/// `\REGISTRY\MACHINE\...`, with its subkeys and its values, each
+/// value's data typed by its type (`!reg querykey`).
+#[command(form_of = reg, python = Inspect, word = "querykey")]
+fn registry_key(session: &Session, #[arg(complete = RegistryKey)] path: String) -> Result<RegKey> {
+    session.target.registry_key(&path)
+}
+
+/// Read the value `name` of the registry key at `path`; `""` names the
+/// key's default value. Its `data` is a `str`, a `list[str]`, an `int`,
+/// or `bytes`, by the value's type (`!reg querykey <path> -v <name>`).
+#[command(form_of = reg, python = Inspect, sdk)]
+fn registry_value(session: &Session, path: String, name: String) -> Result<RegValue> {
+    let key = session.target.registry_key(&path)?;
+    key.values
+        .iter()
+        .flatten()
+        .find(|value| names_equal(&value.name, &name))
+        .cloned()
+        .ok_or_else(|| {
+            Error::DebugInfo(format!("{} has no readable value named {name:?}", key.path))
+        })
+}
+
+/// Read the registry key whose key node (`_CM_KEY_NODE`) is at `node`
+/// in the hive at `hive` (`!reg keyinfo`).
+#[command(form_of = reg, python = Inspect, word = "keyinfo")]
+fn registry_key_at(
+    session: &Session,
+    hive: VirtAddr,
+    #[arg(name = "knode")] node: VirtAddr,
+) -> Result<RegKey> {
+    session.target.registry_key_at(hive, node)
+}
+
+/// Find where cell index `cell` of the hive at `hive` is, through the
+/// hive's cell map (`!reg cellindex`).
+#[command(form_of = reg, python = Inspect, word = "cellindex")]
+fn registry_cell(session: &Session, hive: VirtAddr, cell: u32) -> Result<CellLocation> {
+    session.target.registry_cell(hive, cell)
 }
 
 impl Render for RegOutput {

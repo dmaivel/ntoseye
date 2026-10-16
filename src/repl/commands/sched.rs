@@ -3,6 +3,7 @@ use ntoseye_macros::command;
 use super::hardware::ready_processor;
 use crate::error::{Error, Result};
 use crate::expr::Expr;
+use crate::guest::ProcessInfo;
 use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::disasm::{format_stack_frame, more_frames};
 use crate::repl::*;
@@ -12,7 +13,7 @@ use crate::target::sched::{
     ThreadStacks, TimerTable, UniqStackOptions, UniqStackScope, UniqStacks, UnwalkedThread,
     findstack_level,
 };
-use crate::target::workqueue::{WorkItem, WorkQueues};
+use crate::target::workqueue::{WorkItem, WorkQueueTypes, WorkQueues};
 use crate::target::{
     DiagnosticValue, ListTermination, ThreadInfo, kthread_state_name, wait_reason_name,
 };
@@ -317,11 +318,25 @@ impl Render for DpcQueues {
     category = "cpu",
     kind = Query,
     target = Kernel,
-    python = none,
+    forms = [work_queues],
     usage = "!exqueue [flags]"
 )]
 fn exqueue(session: &mut Session, #[arg(default = 0)] flags: u64) -> Result<WorkQueues> {
     session.inspect_work_queues(flags)
+}
+
+/// Get the executive worker queues, their pending work items, and their
+/// worker threads (`!exqueue`). `include_stacks` adds the stack of each
+/// worker, and `queue_types` (`"critical"`, `"delayed"`, `"hypercritical"`)
+/// limits the listed items to the priorities of those types.
+#[command(form_of = exqueue, python = Inspect, sdk)]
+fn work_queues(
+    session: &mut Session,
+    #[arg(default = false)] include_stacks: bool,
+    queue_types: Option<WorkQueueTypes>,
+) -> Result<WorkQueues> {
+    let stacks = if include_stacks { 0x4 } else { 0 };
+    session.inspect_work_queues(stacks | queue_types.map_or(0, |types| types.0))
 }
 
 impl Render for WorkQueues {
@@ -362,30 +377,44 @@ pub enum Timers {
     category = "cpu",
     kind = Query,
     target = Kernel,
-    python = none,
+    forms = [timers, timer],
     usage = "!timer [address-expression]",
     completion = [Expression]
 )]
-fn timer(
+fn timer_command(
     session: &mut Session,
     #[arg(parse = timer_address)] address: Option<VirtAddr>,
 ) -> Result<Timers> {
-    let target = &session.target;
     match address {
         Some(address) => {
-            let timer = target.inspect_timer(address).map_err(|error| {
+            let timer = timer(session, address).map_err(|error| {
                 Error::DebugInfo(format!(
                     "failed to inspect timer {}: {error}",
                     ui::addr(address.0)
                 ))
             })?;
-            Ok(Timers::Timer(timer, target.interrupt_time()))
+            Ok(Timers::Timer(timer, session.target.interrupt_time()))
         }
-        None => target
-            .timer_list()
+        None => timers(session)
             .map(Timers::Table)
             .map_err(|error| Error::DebugInfo(format!("failed to enumerate timers: {error}"))),
     }
+}
+
+/// Read the kernel timer-table entries, up to a limit, and their DPCs
+/// (`!timer`).
+#[command(form_of = timer_command, python = Inspect)]
+fn timers(session: &Session) -> Result<TimerTable> {
+    session.target.timer_list()
+}
+
+/// Decode a `_KTIMER` and its DPC (`!timer address`).
+#[command(form_of = timer_command, python = Inspect)]
+fn timer(
+    session: &Session,
+    #[arg(name = "address-expression", complete = Expression)] address: VirtAddr,
+) -> Result<KernelTimer> {
+    session.target.inspect_timer(address)
 }
 
 impl Render for Timers {
@@ -441,7 +470,7 @@ fn apc_selector(
     category = "execution and stack",
     kind = Query,
     target = Kernel,
-    python = none,
+    forms = [apcs, process_apcs, thread_apcs],
     usage = "!apc [process|thread]",
     completion = [Expression]
 )]
@@ -449,9 +478,31 @@ fn apc(
     session: &mut Session,
     #[arg(parse = apc_selector)] selector: ApcSelector,
 ) -> Result<ApcQueues> {
-    session
-        .inspect_apcs(selector)
+    apcs(session, selector)
         .map_err(|error| Error::DebugInfo(format!("failed to inspect APCs: {error}")))
+}
+
+/// Decode the kernel and user APC queues of all threads, of a process, or
+/// of a thread (`!apc`): `target` is a `Process`, a `Thread`, or an
+/// `_ETHREAD` address, and all threads by default.
+#[command(form_of = apc, python = Inspect)]
+fn apcs(
+    session: &mut Session,
+    #[arg(default = None, name = "process|thread", complete = Expression)] target: ApcSelector,
+) -> Result<ApcQueues> {
+    session.inspect_apcs(target)
+}
+
+/// Decode the kernel and user APC queues of this process (`!apc`).
+#[command(form_of = apc, python = Process, python_name = "apcs", sdk)]
+fn process_apcs(session: &mut Session, #[arg(receiver)] process: ProcessInfo) -> Result<ApcQueues> {
+    session.inspect_apcs(ApcSelector::Process(process.pid))
+}
+
+/// Decode the APC lists of this thread (`!apc`).
+#[command(form_of = apc, python = Thread, python_name = "apcs", sdk)]
+fn thread_apcs(session: &mut Session, #[arg(receiver)] thread: ThreadInfo) -> Result<ApcQueues> {
+    session.inspect_apcs(ApcSelector::Thread(thread.ethread))
 }
 
 impl Render for ApcQueues {
@@ -654,18 +705,26 @@ fn uniqstack_scope(
     category = "execution and stack",
     kind = Query,
     target = Kernel,
-    python = none,
+    forms = [uniqstack],
     usage = "!uniqstack [-v] [-n] [*|process]",
     completion = [Process]
 )]
-fn uniqstack(
+fn uniqstack_command(
     session: &mut Session,
     #[arg(render, parse = uniqstack_options)] options: UniqStackOptions,
     #[arg(parse = uniqstack_scope)] scope: UniqStackScope,
 ) -> Result<UniqStacks> {
-    session
-        .inspect_uniqstack(scope)
-        .map_err(|error| Error::DebugInfo(format!("!uniqstack: {error}")))
+    uniqstack(session, scope).map_err(|error| Error::DebugInfo(format!("!uniqstack: {error}")))
+}
+
+/// Group threads by identical call stacks (`!uniqstack`), using all threads
+/// unless `process` limits it to the threads of one process.
+#[command(form_of = uniqstack_command, python = Inspect)]
+fn uniqstack(
+    session: &mut Session,
+    #[arg(default = None, name = "*|process", complete = Process)] process: UniqStackScope,
+) -> Result<UniqStacks> {
+    session.inspect_uniqstack(process)
 }
 
 impl Render<UniqStackOptions> for UniqStacks {

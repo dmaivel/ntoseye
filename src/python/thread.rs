@@ -24,7 +24,6 @@ use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::effects::Effects;
 use crate::session::{Session, VcpuInfo};
 use crate::symbols::CodeFrame;
-use crate::target::sched::ApcSelector;
 use crate::target::{SelectedFrame, Target, ThreadInfo, cpu};
 use crate::trapframe::{read_ktrap_frame_at_or_current, trap_frame_rip_symbol};
 use crate::types::VirtAddr;
@@ -299,17 +298,6 @@ impl Thread {
                 )
             })
             .collect())
-    }
-
-    /// Decode the APC lists of this thread (`!apc`).
-    fn apcs<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, crate::target::sched::ApcQueues>> {
-        let context = self.context(self.process_info(py)?);
-        let detail = self.owner.with_in(py, &context, |session| {
-            session
-                .inspect_apcs(ApcSelector::Thread(self.info.ethread))
-                .map_err(err)
-        })?;
-        Typed::new(py, detail)
     }
 
     /// Decode the saved `_KTRAP_FRAME` (`!trap`).

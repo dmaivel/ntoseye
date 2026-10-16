@@ -146,6 +146,11 @@ pub struct WorkQueues {
     pub errors: Vec<String>,
 }
 
+/// The `WORK_QUEUE_TYPE`s whose priorities `!exqueue` lists, as its flags
+/// (0x10 critical, 0x20 delayed, 0x40 hypercritical).
+#[derive(Debug, Clone, Copy)]
+pub struct WorkQueueTypes(pub u64);
+
 impl Target {
     /// The priority each `WORK_QUEUE_TYPE` maps to, read from
     /// `nt!ExpBuiltinPriorities`; empty when the symbol is absent.

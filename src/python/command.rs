@@ -8,6 +8,7 @@
 
 use pyo3::prelude::*;
 
+use super::args::BytesArg;
 use super::context::Context;
 use super::handle::Owner;
 use super::{ErrorKind, err, error, raise};
@@ -25,9 +26,12 @@ use super::context::Space;
 pub use super::inspect::Inspect;
 pub use super::memory::Memory;
 pub use super::module::{Device, Driver, Module};
-pub use super::process::Process;
+pub use super::process::{Heap, Heaps, Process};
+use super::symbols::load_scope_symbols;
 pub use super::thread::{Cpu, Thread};
 pub use super::userdump::{UserProcess, UserThread};
+use crate::target::heap::HeapSelector;
+use crate::target::memory::SearchSpace;
 
 /// An SDK object a `#[command]` method can be placed on: the debugger it
 /// runs in and the context (process, thread) its calls run in.
@@ -90,6 +94,13 @@ impl PyArg for u16 {
     }
 }
 
+impl PyArg for u32 {
+    type Py = u32;
+    fn from_py(value: u32) -> Self {
+        value
+    }
+}
+
 impl PyArg for usize {
     type Py = usize;
     fn from_py(value: usize) -> Self {
@@ -115,6 +126,14 @@ impl PyArg for String {
     type Py = String;
     fn from_py(value: String) -> Self {
         value
+    }
+}
+
+/// `bytes`.
+impl PyArg for Vec<u8> {
+    type Py = BytesArg;
+    fn from_py(value: BytesArg) -> Self {
+        value.0
     }
 }
 
@@ -322,6 +341,68 @@ impl Bind<MemoryKind> for Memory {
         match self.space {
             Space::Physical => MemoryKind::Physical,
             _ => MemoryKind::Virtual,
+        }
+    }
+}
+
+/// A process's heap list: its calls run in the process, with its module
+/// symbols loaded (the heap decoders read ntdll's).
+impl CommandHost for Heaps {
+    fn owner(&self) -> &Owner {
+        &self.owner
+    }
+
+    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
+        Ok(Context::process(self.info.clone()))
+    }
+
+    fn prepare(&self, session: &mut Session) -> PyResult<()> {
+        load_scope_symbols(session, &Space::Process(self.info.clone()))
+    }
+}
+
+/// One heap: its calls run in its process, as the heap list's do.
+impl CommandHost for Heap {
+    fn owner(&self) -> &Owner {
+        &self.owner
+    }
+
+    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
+        Ok(Context::process(self.info.clone()))
+    }
+
+    fn prepare(&self, session: &mut Session) -> PyResult<()> {
+        load_scope_symbols(session, &Space::Process(self.info.clone()))
+    }
+}
+
+/// A heap is the heap at its address.
+impl Bind<HeapSelector> for Heap {
+    fn bind(&self) -> HeapSelector {
+        HeapSelector::Address(self.address)
+    }
+}
+
+/// The process a `Memory` addresses: `proc.memory`'s, none for the
+/// kernel's and the other spaces.
+impl Bind<Option<ProcessInfo>> for Memory {
+    fn bind(&self) -> Option<ProcessInfo> {
+        match &self.space {
+            Space::Process(info) => Some(info.clone()),
+            _ => None,
+        }
+    }
+}
+
+/// How a search in a `Memory` describes its matches: NT's region
+/// descriptions cover neither VTL1 nor roots outside NT.
+impl Bind<SearchSpace> for Memory {
+    fn bind(&self) -> SearchSpace {
+        match self.space {
+            Space::Physical => SearchSpace::Physical,
+            Space::Secure(_) => SearchSpace::Virtual(Some("vtl1")),
+            Space::Root(_) => SearchSpace::Virtual(Some("foreign")),
+            Space::Kernel | Space::Process(_) => SearchSpace::Virtual(None),
         }
     }
 }
