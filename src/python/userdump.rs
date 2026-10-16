@@ -6,6 +6,7 @@
 use ntoseye_macros::{collection, handle};
 use pyo3::prelude::*;
 
+use super::command::{CommandHost, HostSession};
 use super::context::{Context, Space};
 use super::handle::Owner;
 use super::memory::Memory;
@@ -36,6 +37,12 @@ fn info(session: &Session) -> PyResult<&UserDumpInfo> {
 #[pyclass(module = "ntoseye")]
 pub struct UserDump {
     pub owner: Owner,
+}
+
+impl CommandHost for UserDump {
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Owner(&self.owner)
+    }
 }
 
 impl UserDump {

@@ -158,7 +158,7 @@ fn vring(
     session: &Session,
     #[arg(name = "virtqueue")] address: VirtAddr,
     module: Option<String>,
-    #[arg(sdk, keyword, default = None)] kind: Option<RequestKind>,
+    #[arg(sdk, default = None)] kind: Option<RequestKind>,
 ) -> Result<VirtioRing> {
     let target = &session.target;
     let mut queue = target.virtqueue_at(module.as_deref(), address)?;
@@ -191,7 +191,7 @@ fn vring_raw(
     desc: VirtAddr,
     avail: VirtAddr,
     used: VirtAddr,
-    #[arg(keyword, name = "/t <kind>")] kind: Option<RequestKind>,
+    #[arg(name = "/t <kind>")] kind: Option<RequestKind>,
 ) -> Result<VirtioRing> {
     let target = &session.target;
     let ring = target.split_ring(size, desc, avail, used)?;

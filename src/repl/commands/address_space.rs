@@ -17,14 +17,14 @@ use crate::target::mm::{
     memory_state_name, memory_type_name, page_protection_name,
 };
 use crate::target::usermode::address::{
-    AddressReport, AddressSummary, CapturedRange, SummaryRow, UserAddressReport, UserRegion,
-    human_size, state_label, type_label,
+    AddressSummary, CapturedRange, SummaryRow, UserAddressReport, UserRegion, human_size,
+    state_label, type_label,
 };
 use crate::target::{MemoryKind, TargetKind};
 use crate::types::VirtAddr;
 use crate::ui;
 
-use crate::repl::args::{ArgCursor, ArgCx, ArgError, virtual_memory};
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
 use crate::session::Session;
 
@@ -289,28 +289,63 @@ fn address_arg(
     category = "memory and disassembly",
     kind = Query,
     target = Nt,
-    python = Memory,
-    python_name = "describe",
+    forms = [describe, address_report],
     usage = "!address [-summary | address-expression]",
     completion = Expression
 )]
 fn address(
     session: &Session,
-    #[arg(receiver, parse = virtual_memory)] memory: MemoryKind,
     #[arg(render, parse = summary_switch)] summary: bool,
     #[arg(parse = address_arg)] addr: Option<VirtAddr>,
 ) -> Result<AddressReport> {
-    memory.require_virtual()?;
-    let target = &session.target;
-    if target.kind() == TargetKind::UserDump {
-        return target
-            .user_address_report(addr)
-            .map(AddressReport::UserDump);
+    if session.target.kind() == TargetKind::UserDump {
+        return address_report(session, addr).map(AddressReport::UserDump);
     }
     let addr = addr.ok_or_else(|| {
         Error::InvalidArgument("an address is required on a kernel target".to_string())
     })?;
-    target.describe_address(addr).map(AddressReport::Nt)
+    describe(session, MemoryKind::Virtual, addr).map(AddressReport::Nt)
+}
+
+/// Describe what `address` belongs to (`!address <address>`): its kind (a
+/// kernel module, a user image, a kernel region, private or mapped user
+/// memory), the module or VAD that holds it, and its protection. On a
+/// user-mode minidump, `Debugger.user_dump.address_report(address)` reads
+/// the dump's memory-info list instead.
+#[command(form_of = address, python = Memory)]
+fn describe(
+    session: &Session,
+    #[arg(receiver)] memory: MemoryKind,
+    #[arg(name = "address-expression")] address: VirtAddr,
+) -> Result<AddressDescription> {
+    memory.require_virtual()?;
+    if session.target.kind() == TargetKind::UserDump {
+        return Err(Error::InvalidArgument(
+            "a user-mode minidump describes an address with \
+             Debugger.user_dump.address_report(address)"
+                .to_string(),
+        ));
+    }
+    session.target.describe_address(address)
+}
+
+/// What a user-mode minidump's memory-info list records (`!address`): with
+/// `address`, the region that holds it and whether the dump captured it;
+/// without, every region with the dump's summary. A dump without a
+/// memory-info list reports the memory ranges it captured instead.
+#[command(form_of = address, python = UserDump, sdk)]
+fn address_report(
+    session: &Session,
+    #[arg(positional)] address: Option<VirtAddr>,
+) -> Result<UserAddressReport> {
+    session.target.user_address_report(address)
+}
+
+/// What `!address` shows: NT's description of an address on a kernel
+/// target, the minidump's memory-info list on a user-mode minidump.
+enum AddressReport {
+    Nt(AddressDescription),
+    UserDump(UserAddressReport),
 }
 
 /// `summary`: `-summary`, the minidump's summary without its region list.

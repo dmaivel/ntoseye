@@ -88,6 +88,21 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
                         .map(|index| items.swap_remove(index)),
                 )
             }
+
+            /// Whether `item` is one of the items (`==`).
+            fn __contains__<'py>(
+                &self,
+                py: pyo3::Python<'py>,
+                item: &pyo3::Bound<'py, pyo3::PyAny>,
+            ) -> pyo3::PyResult<bool> {
+                use pyo3::types::PyAnyMethods;
+                for element in Self::enumerate(self, py)? {
+                    if pyo3::IntoPyObjectExt::into_bound_py_any(element, py)?.eq(item)? {
+                        return ::std::result::Result::Ok(true);
+                    }
+                }
+                ::std::result::Result::Ok(false)
+            }
         }),
         (Some(lookup), false) => {
             let key = lookup_key(lookup)?;

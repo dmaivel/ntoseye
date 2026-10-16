@@ -450,7 +450,7 @@ fn ndis_nbl_command(
 fn ndis_nbl(
     session: &Session,
     #[arg(name = "nbl")] address: VirtAddr,
-    #[arg(keyword, default = false, name = "-data")] data: bool,
+    #[arg(default = false, name = "-data")] data: bool,
 ) -> Result<NdisNbl> {
     let target = &session.target;
     let mut nbl = target.ndis_nbl(address)?;
@@ -468,7 +468,7 @@ fn ndis_nbl(
 fn ndis_nbl_chain(
     session: &Session,
     #[arg(name = "nbl")] address: VirtAddr,
-    #[arg(keyword, default = false, name = "-data")] data: bool,
+    #[arg(default = false, name = "-data")] data: bool,
 ) -> Result<NdisNblChain> {
     let target = &session.target;
     let mut chain = target.ndis_nbl_chain(address)?;

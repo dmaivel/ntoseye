@@ -100,7 +100,7 @@ fn expand_form(form: FormOptions, mut function: ItemFn) -> Result<TokenStream> {
         if repl_only {
             return Err(Error::new(
                 arg.span,
-                "a form's arguments are its SDK method's (`receiver`, `default`, `keyword`, \
+                "a form's arguments are its SDK method's (`receiver`, `default`, `positional`, \
                  `Option<T>`, `sdk` for one the REPL line has no word for, and `name` and \
                  `complete` for its REPL usage); its command's REPL operation parses the line \
                  and calls it",
@@ -552,8 +552,9 @@ struct Arg {
     /// SDK-only: the REPL never reads a word for it and passes `default`;
     /// Python takes it as a keyword with that default.
     sdk: bool,
-    /// Keyword-only in Python (after a `*` in the signature).
-    keyword: bool,
+    /// Positional in Python although it may be omitted: a subject (the
+    /// address, name or object the method is about), not a mode.
+    subject: bool,
     name: Option<LitStr>,
     complete: Option<Ident>,
     span: Span,
@@ -577,6 +578,14 @@ impl Arg {
 
     fn positional(&self) -> bool {
         self.switch.is_none() && !self.raw && !self.invoked && !self.sdk && !self.cancel
+    }
+
+    /// Keyword-only in Python (after the `*`): an argument that may be
+    /// omitted (a mode, flag or option), unless it is a `subject`.
+    fn keyword(&self) -> bool {
+        let omittable =
+            self.optional.is_some() || self.default.is_some() || self.switch.is_some() || self.sdk;
+        omittable && !self.subject
     }
 
     /// Supplied by the host, not parsed from the line.
@@ -618,7 +627,7 @@ fn take_args(function: &mut ItemFn) -> Result<Vec<Arg>> {
             each: None,
             receiver: false,
             sdk: false,
-            keyword: false,
+            subject: false,
             name: None,
             complete: None,
             span: typed.span(),
@@ -648,14 +657,15 @@ fn take_args(function: &mut ItemFn) -> Result<Vec<Arg>> {
                     "each" => arg.each = Some(meta.value()?.parse()?),
                     "receiver" => arg.receiver = true,
                     "sdk" => arg.sdk = true,
-                    "keyword" => arg.keyword = true,
+                    "positional" => arg.subject = true,
                     "name" => arg.name = Some(meta.value()?.parse()?),
                     "complete" => arg.complete = Some(meta.value()?.parse()?),
                     _ => {
                         return Err(meta.error(
                             "expected `render`, `default = ...`, `current`, `switch = \"/x\"`, \
                              `rest`, `raw`, `invoked`, `parse = path`, `each = path`, `receiver`, \
-                             `sdk`, `keyword`, `cancel`, `name = \"...\"` or `complete = Strategy`",
+                             `sdk`, `positional`, `cancel`, `name = \"...\"` or `complete = \
+                             Strategy`",
                         ));
                     }
                 }
@@ -688,7 +698,7 @@ fn take_args(function: &mut ItemFn) -> Result<Vec<Arg>> {
                  `raw`, `invoked`, `cancel`, `parse`, `each` and `sdk`",
             ));
         }
-        if arg.cancel && (arg.render || arg.receiver || arg.keyword) {
+        if arg.cancel && (arg.render || arg.receiver || arg.subject) {
             return Err(Error::new(
                 arg.span,
                 "a `cancel` argument is the host's, nothing else",
@@ -868,10 +878,10 @@ impl Command {
                 arg.span,
                 "`receiver` binds an argument from the `python = Object` the method is on",
             ));
-        } else if let Some(arg) = self.args.iter().find(|arg| arg.sdk || arg.keyword) {
+        } else if let Some(arg) = self.args.iter().find(|arg| arg.sdk || arg.subject) {
             return Err(Error::new(
                 arg.span,
-                "`sdk` and `keyword` shape the method of a `python = Object` command",
+                "`sdk` and `positional` shape the method of a `python = Object` command",
             ));
         }
         Ok(())
@@ -1326,8 +1336,9 @@ enum RunMode {
 
 impl Method<'_> {
     /// The method on `object`, in a `#[pymethods]` block: the arguments the
-    /// receiver does not bind and the REPL does not render become keyword
-    /// arguments, and the call runs on the session thread through
+    /// receiver does not bind and the REPL does not render become Python
+    /// arguments, those that may be omitted keyword-only (`Arg::keyword`),
+    /// and the call runs on the session thread through
     /// `crate::python::command::run`, which admits the effects.
     fn python(&self, object: &Ident) -> Result<TokenStream> {
         let python_name = self
@@ -1355,7 +1366,7 @@ impl Method<'_> {
                 bindings.push(quote!(let #ident: #ty = <Self as #command::Bind<#ty>>::bind(self);));
                 continue;
             }
-            if arg.keyword && !keywords {
+            if arg.keyword() && !keywords {
                 keywords = true;
                 // A run's `timeout` goes before the keyword-only arguments.
                 if self.run.is_some() {
@@ -1363,10 +1374,11 @@ impl Method<'_> {
                     signature.push(quote!(timeout = None));
                 }
                 signature.push(quote!(*));
-            } else if keywords && !arg.keyword {
+            } else if keywords && !arg.keyword() {
                 return Err(Error::new(
                     arg.span,
-                    "a Python argument after a `keyword` one is `keyword` too",
+                    "a positional Python argument (a required one, or a `positional` one) \
+                     comes before the keyword-only ones (those that may be omitted)",
                 ));
             }
             params.push(quote!(#ident: <#ty as #command::SdkArg>::Py));

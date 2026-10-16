@@ -19,7 +19,8 @@ use proc_macro::TokenStream;
 ///   fields in order as a `Value::Record`;
 /// - `<Name>Py`, a frozen `ntoseye.<Name>` class extending `BaseRecord`, with
 ///   a typed property per field (the struct's and fields' doc comments become
-///   its docstrings), which `build.rs` exports from the SDK module;
+///   its docstrings) and `__match_args__` (the properties, in order), which
+///   `build.rs` exports from the SDK module;
 /// - `Name::into_class`, the record as its class.
 ///
 /// Field attributes, `#[record(...)]`:
@@ -29,8 +30,12 @@ use proc_macro::TokenStream;
 /// - `bytes`: a `Vec<u8>` (possibly wrapped) is Python `bytes`;
 /// - `skip`: Rust only; Python does not see the field;
 /// - `rename = "key"`: the record key. The property takes the key too,
-///   unless the key would hide a `BaseRecord` method or is a Python keyword
-///   (`keys`, `class`), in which case the property keeps the Rust name.
+///   unless the key would hide `BaseRecord.to_dict` or is a Python keyword
+///   (`class`), in which case the property keeps the Rust name;
+/// - `flatten`: the field (keyed `kind`) is a `tagged` enum declared with
+///   `base = Name` for this struct: the struct's class is a base, and each
+///   value is the subclass of its variant, with `kind` and the variant's
+///   fields after the fields before it (`Stop.Breakpoint`).
 ///
 /// Item flags: `#[record(impl)]` says a `#[record] impl Name { ... }` block
 /// follows in the same module, adding computed properties
@@ -46,11 +51,19 @@ use proc_macro::TokenStream;
 ///   texts (`FromPyObject` and `PyArg`);
 /// - every variant one unnamed field: the union of the variants' types
 ///   (the value is the variant's own);
-/// - `#[record(tagged)]`: a class with `kind` (the snake_case variant name,
-///   or the variant's `rename`; typed as the `Literal` of the kinds) and
-///   each variant field as an optional property, named by the field, its
-///   `rename`, or for a variant's single unnamed field the variant's
-///   snake_case name.
+/// - `#[record(tagged)]`: a base class with `kind` (the snake_case variant
+///   name, or the variant's `rename`; typed as the `Literal` of the kinds),
+///   and a final subclass per variant, nested in it as `Name.Variant`, whose
+///   `kind` is the variant's own `Literal` and whose properties are the
+///   variant's fields (named by the field, its `rename`, or for a variant's
+///   single unnamed field the variant's snake_case name), never `None`
+///   outside it. `isinstance(x, Name.Variant)` and `case
+///   Name.Variant(field=...)` narrow to the variant; its `__match_args__`
+///   are its fields. `#[record(tagged, base = Struct)]` nests the variants
+///   in a record struct's class instead, which holds the enum in a
+///   `#[record(flatten)]` field. Each variant class is a class attribute of
+///   its base, as PyO3 nests a complex enum's variants, and the stub nests it
+///   through an introspection fragment naming the base as its parent.
 #[proc_macro_attribute]
 pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
     record::expand(attr.into(), item.into())
@@ -113,8 +126,13 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// - `receiver`: the Python method's object binds it (`Bind<T>`);
 /// - `sdk` (with `default = expr`): an SDK-only keyword; the REPL reads no
 ///   word for it and passes `expr`, Python's keyword defaults to `expr`;
-/// - `keyword`: keyword-only in Python (after a `*`); every Python argument
-///   after it must be `keyword` too;
+/// - `positional`: positional in Python although it may be omitted. In the
+///   SDK method, an argument that may be omitted (`Option<T>`, `default`,
+///   `switch`, `sdk`) is a mode, flag or option, so it is keyword-only
+///   (after the `*`); the arguments the method is about (an address, a
+///   name, an object) stay positional: the required ones, and those marked
+///   `positional` (`job(address=None)`, `pool_usage(tag=None, *,
+///   sort=...)`). The positional ones come first;
 /// - `cancel`: a `kind = Run` command's `&Cancel`, which the host supplies
 ///   (the REPL's stop budget, the SDK's `timeout`);
 /// - `name = "..."`, `complete = Strategy`: its usage name and completion.
@@ -259,7 +277,8 @@ pub fn handle_methods(input: TokenStream) -> TokenStream {
 /// - `records`: the items are `#[handle]`s, and a record of their kind is
 ///   a key too, naming the listed item it describes (`dbg.threads[stop.thread]`);
 /// - `sequence`: no `lookup`; `__getitem__` and `get` take a position,
-///   negative from the end (`IndexError`), and `in` compares items.
+///   negative from the end (`IndexError`), and `__contains__` tests an
+///   item (`heap in heaps`), as a Python sequence's does.
 ///
 /// A method marked `#[collection(find)]`, `fn(&Item, &str) -> bool`, makes
 /// `find(name)`, the items it holds for; `#[collection(at)]`, `fn(&Item,

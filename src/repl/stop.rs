@@ -119,43 +119,38 @@ fn print_stop(session: &mut Session, caches: &ReplCaches, stop: &Stop) {
     refresh_windows_thread_context_for_backend_thread(&mut session.target, &session.current_thread);
 
     if let Some(error) = stop
-        .breakpoint
-        .as_ref()
+        .breakpoint()
         .and_then(|hit| hit.condition_error.as_deref())
     {
         error!("breakpoint condition failed: {error}");
     }
     print_stop_separator();
-    match stop.kind {
-        StopKind::Breakpoint => {
-            let cause = stop.breakpoint.as_ref().map(breakpoint_cause);
-            print_break_context_at(session, None, cause);
+    match &stop.kind {
+        StopKind::Breakpoint { breakpoint } => {
+            print_break_context_at(session, None, Some(breakpoint_cause(breakpoint)));
         }
-        StopKind::ModuleLoad | StopKind::ModuleUnload => {
-            let event = if stop.kind == StopKind::ModuleLoad {
-                ModuleEvent::Load
-            } else {
-                ModuleEvent::Unload
-            };
-            match &stop.module {
-                Some(module) => print_module_event_stop(session, event, module),
-                None => print_break_context(session),
-            }
+        StopKind::ModuleLoad { module } => {
+            print_module_event_stop(session, ModuleEvent::Load, module);
         }
-        StopKind::Bugcheck => {
-            print_bugcheck_summary(&session.target, stop.bugcheck.as_ref());
+        StopKind::ModuleUnload { module } => {
+            print_module_event_stop(session, ModuleEvent::Unload, module);
+        }
+        StopKind::Bugcheck { bugcheck } => {
+            print_bugcheck_summary(&session.target, bugcheck.as_ref());
             outln!();
-            print_break_context_for_bugcheck(session, stop.bugcheck.as_ref());
+            print_break_context_for_bugcheck(session, bugcheck.as_ref());
         }
-        StopKind::Reload => {
+        StopKind::Reload { reload } => {
             caches.clear_threads();
-            let coherent = stop.reload.is_none_or(|reload| reload.coherent);
-            print_target_reload(&session.target, &session.current_thread, stop.rip, coherent);
+            print_target_reload(
+                &session.target,
+                &session.current_thread,
+                stop.rip,
+                reload.coherent,
+            );
         }
-        StopKind::Exception => {
-            let cause = stop
-                .exception
-                .and_then(|exception| stop_exception_cause(Some(exception.code), stop.rip));
+        StopKind::Exception { exception } => {
+            let cause = stop_exception_cause(Some(exception.code), stop.rip);
             print_break_context_at(session, None, cause);
         }
         StopKind::Interrupt | StopKind::Step | StopKind::Entry => print_break_context(session),
@@ -862,7 +857,7 @@ impl ReplState<'_> {
             native::finish_running();
             // Past the `^C` the terminal echoed.
             if let Ok(RunOutcome::Stopped(stop)) = &outcome
-                && stop.kind == StopKind::Interrupt
+                && matches!(stop.kind, StopKind::Interrupt)
             {
                 outln!();
             }

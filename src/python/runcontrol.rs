@@ -17,7 +17,7 @@ use super::{err, raise, timeout_arg};
 use crate::error::Result;
 use crate::output;
 use crate::session::effects::Effects;
-use crate::session::{Cancel, CancelBehavior, Motion, RunOutcome, Session, Stop, StopKind};
+use crate::session::{Cancel, CancelBehavior, Motion, RunOutcome, Session, Stop};
 
 thread_local! {
     static IN_CONDITION: Cell<bool> = const { Cell::new(false) };
@@ -122,16 +122,12 @@ fn settle<'py>(
 /// `None` means the callback declined the hit; a callback that raises
 /// surfaces the hit with `condition_error`, as a failed `condition=` does.
 fn surface<'py>(py: Python<'py>, dbg: &Debugger, stop: Stop) -> PyResult<Option<Typed<'py, Stop>>> {
-    let condition = stop
-        .breakpoint
-        .as_ref()
-        .filter(|_| stop.kind == StopKind::Breakpoint)
-        .and_then(|hit| {
-            dbg.conditions
-                .lock()
-                .get(&hit.id)
-                .map(|callable| callable.clone_ref(py))
-        });
+    let condition = stop.breakpoint().and_then(|hit| {
+        dbg.conditions
+            .lock()
+            .get(&hit.id)
+            .map(|callable| callable.clone_ref(py))
+    });
     let object = Typed::<Stop>::of(py, &stop)?.into_bound();
     let Some(condition) = condition else {
         return Ok(Some(Typed::converted(object)));

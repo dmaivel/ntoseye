@@ -212,7 +212,7 @@ impl Render for ObjectSecurity {
 )]
 fn session(
     state: &Session,
-    #[arg(parse = session_switch)] session: Option<i64>,
+    #[arg(parse = session_switch, positional)] session: Option<i64>,
 ) -> Result<Sessions> {
     state.target.sessions(session)
 }
@@ -248,7 +248,7 @@ impl Render for Sessions {
 )]
 fn sprocess(
     state: &Session,
-    #[arg(parse = sprocess_session)] session: Option<i64>,
+    #[arg(parse = sprocess_session, positional)] session: Option<i64>,
     #[arg(render, default = 0)] flags: u64,
     image: Option<String>,
 ) -> Result<SessionProcesses> {

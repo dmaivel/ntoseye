@@ -345,7 +345,10 @@ impl FromArg for FltFilterSelector {
     python = Inspect,
     usage = "!fltkd.instances [filter]"
 )]
-fn flt_instances(session: &Session, filter: Option<FltFilterSelector>) -> Result<FltInstances> {
+fn flt_instances(
+    session: &Session,
+    #[arg(positional)] filter: Option<FltFilterSelector>,
+) -> Result<FltInstances> {
     session.target.flt_instances(filter.as_ref())
 }
 

@@ -204,7 +204,7 @@ impl Render for RunningProcessors {
 )]
 fn ready(
     session: &mut Session,
-    #[arg(parse = ready_processor)] processor: Option<u16>,
+    #[arg(parse = ready_processor, positional)] processor: Option<u16>,
 ) -> Result<ReadyQueues> {
     session
         .target
@@ -488,7 +488,8 @@ fn apc(
 #[command(form_of = apc, python = Inspect)]
 fn apcs(
     session: &mut Session,
-    #[arg(default = None, name = "process|thread", complete = Expression)] target: ApcSelector,
+    #[arg(default = None, name = "process|thread", complete = Expression, positional)]
+    target: ApcSelector,
 ) -> Result<ApcQueues> {
     session.inspect_apcs(target)
 }
@@ -722,7 +723,8 @@ fn uniqstack_command(
 #[command(form_of = uniqstack_command, python = Inspect)]
 fn uniqstack(
     session: &mut Session,
-    #[arg(default = None, name = "*|process", complete = Process)] process: UniqStackScope,
+    #[arg(default = None, name = "*|process", complete = Process, positional)]
+    process: UniqStackScope,
 ) -> Result<UniqStacks> {
     session.inspect_uniqstack(process)
 }

@@ -13,15 +13,19 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let flags = Flags::parse(attr)?;
     match syn::parse2::<Item>(item)? {
         Item::Struct(item) => {
-            if let Some(span) = flags.tagged {
-                return Err(Error::new(span, "`tagged` applies to an enum"));
+            if let Some(span) = flags.tagged.or(flags.base.as_ref().map(Ident::span)) {
+                return Err(Error::new(span, "`tagged` and `base` apply to an enum"));
             }
             structure(flags, item)
         }
         Item::Enum(item) => enumeration(flags, item),
         Item::Impl(item) => {
-            if let Some(span) = flags.has_impl.or(flags.tagged) {
-                return Err(Error::new(span, "a `#[record]` impl block takes no flags"));
+            if let Some(span) = flags
+                .has_impl
+                .or(flags.tagged)
+                .or(flags.base.as_ref().map(Ident::span))
+            {
+                return Err(Error::new(span, "a `#[record] impl` block takes no flags"));
             }
             implementation(item)
         }
@@ -32,13 +36,18 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     }
 }
 
-/// The item-level flags: `#[record(impl, tagged)]`.
+/// The item-level flags: `#[record(impl, tagged, base = Name)]`.
 #[derive(Default)]
 struct Flags {
     /// A `#[record] impl` block adds computed properties and methods.
     has_impl: Option<Span>,
-    /// An enum becomes a class with a `kind` and its variants' fields.
+    /// An enum becomes a base class with a `kind`, and a subclass per
+    /// variant with its fields.
     tagged: Option<Span>,
+    /// A tagged enum's variants subclass this record struct's class, which
+    /// holds the enum in a `#[record(flatten)]` field, instead of a class
+    /// of the enum's own.
+    base: Option<Ident>,
 }
 
 impl Flags {
@@ -53,8 +62,15 @@ impl Flags {
                     let ident: Ident = input.parse()?;
                     match ident.to_string().as_str() {
                         "tagged" => flags.tagged = Some(ident.span()),
+                        "base" => {
+                            input.parse::<Token![=]>()?;
+                            flags.base = Some(input.parse()?);
+                        }
                         _ => {
-                            return Err(Error::new(ident.span(), "expected `impl` or `tagged`"));
+                            return Err(Error::new(
+                                ident.span(),
+                                "expected `impl`, `tagged` or `base = Name`",
+                            ));
                         }
                     }
                 }
@@ -93,7 +109,11 @@ impl Mode {
 struct Opts {
     mode: Mode,
     skip: bool,
+    flatten: bool,
     rename: Option<LitStr>,
+    /// A fieldless enum variant's REPL text (its `Display`), when it is not
+    /// its SDK text.
+    label: Option<LitStr>,
     getter: bool,
     python: bool,
     span: Option<Span>,
@@ -125,8 +145,14 @@ impl Opts {
                 } else if meta.path.is_ident("skip") {
                     opts.skip = true;
                     Ok(())
+                } else if meta.path.is_ident("flatten") {
+                    opts.flatten = true;
+                    Ok(())
                 } else if meta.path.is_ident("rename") {
                     opts.rename = Some(meta.value()?.parse()?);
+                    Ok(())
+                } else if meta.path.is_ident("label") {
+                    opts.label = Some(meta.value()?.parse()?);
                     Ok(())
                 } else if meta.path.is_ident("getter") {
                     opts.getter = true;
@@ -136,7 +162,8 @@ impl Opts {
                     Ok(())
                 } else {
                     Err(meta.error(
-                        "expected `hex`, `bytes`, `skip`, `rename = \"...\"`, `getter` or `python`",
+                        "expected `hex`, `bytes`, `skip`, `flatten`, `rename = \"...\"`, `getter` or \
+                         `python`",
                     ))
                 }
             })?;
@@ -145,8 +172,8 @@ impl Opts {
         Ok(opts)
     }
 
-    /// Reject the options a field or variant does not take.
-    fn field_only(&self) -> Result<()> {
+    /// Reject the options a struct's field does not take.
+    fn struct_field(&self) -> Result<()> {
         match self.span {
             Some(span) if self.getter || self.python => Err(Error::new(
                 span,
@@ -155,15 +182,27 @@ impl Opts {
             _ => Ok(()),
         }
     }
+
+    /// Reject the options an enum's variant or variant field does not take.
+    fn field_only(&self) -> Result<()> {
+        self.struct_field()?;
+        match self.span {
+            Some(span) if self.flatten => Err(Error::new(
+                span,
+                "`flatten` applies to a record struct's field",
+            )),
+            _ => Ok(()),
+        }
+    }
 }
 
-/// Names that a property cannot take: `BaseRecord`'s methods, which it would
+/// Names that a property cannot take: `BaseRecord`'s method, which it would
 /// hide, and Python keywords, which no attribute access can spell.
-const RESERVED: [&str; 40] = [
-    "keys", "values", "items", "get", "to_dict", "False", "None", "True", "and", "as", "assert",
-    "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except",
-    "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", "not",
-    "or", "pass", "raise", "return", "try", "while", "with", "yield",
+const RESERVED: [&str; 36] = [
+    "to_dict", "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class",
+    "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if",
+    "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try",
+    "while", "with", "yield",
 ];
 
 fn unraw(ident: &Ident) -> String {
@@ -266,7 +305,7 @@ impl Getter {
                 slf: &pyo3::Bound<'py, Self>,
             ) -> pyo3::PyResult<crate::python::record::Typed<'py, #ty, #mode>> {
                 ::std::result::Result::Ok(crate::python::record::Typed::converted(
-                    slf.as_super().get().field(slf.py(), #key)?,
+                    crate::python::record::field(slf.as_any(), #key)?,
                 ))
             }
         }
@@ -362,11 +401,73 @@ fn unique(getters: &[Getter], span: Span) -> Result<()> {
     Ok(())
 }
 
-/// The class of a record: `<Name>Py`, its `wrap`, `Name::into_class`, and its
-/// properties (through `methods_macro` when an impl block adds to them). A
-/// struct's class also has the `handle_callback` macro, with the impl
-/// block's computed properties when it has one, and its `Field` impls.
-fn class(name: &Ident, docs: &[Attribute], getters: &[Getter], has_impl: bool) -> TokenStream {
+/// `__match_args__` of `class`: `names`, typed as the tuple of their
+/// `Literal`s so a type checker can match positional patterns.
+fn match_args(class: &Ident, names: &[String]) -> TokenStream {
+    let ty = format_ident!("__{}MatchArgs", class);
+    let count = names.len();
+    let hint = if names.is_empty() {
+        // `tuple[()]`: the stub prints an empty `Tuple` as nothing.
+        quote!(pyo3::inspect::PyStaticExpr::Name { id: "()" })
+    } else {
+        let literals = names
+            .iter()
+            .map(|name| literal_hint(std::slice::from_ref(name)));
+        quote!(pyo3::inspect::PyStaticExpr::Tuple { elts: &[#(#literals),*] })
+    };
+    quote! {
+        #[cfg(feature = "python")]
+        #[doc(hidden)]
+        #[allow(non_camel_case_types)]
+        pub struct #ty;
+
+        #[cfg(feature = "python")]
+        impl<'py> pyo3::IntoPyObject<'py> for #ty {
+            type Target = pyo3::types::PyTuple;
+            type Output = pyo3::Bound<'py, pyo3::types::PyTuple>;
+            type Error = pyo3::PyErr;
+
+            #[cfg(feature = "python-stubs")]
+            const OUTPUT_TYPE: pyo3::inspect::PyStaticExpr = pyo3::inspect::PyStaticExpr::Subscript {
+                value: &pyo3::type_hint_identifier!("builtins", "tuple"),
+                slice: &#hint,
+            };
+
+            fn into_pyobject(
+                self,
+                py: pyo3::Python<'py>,
+            ) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::types::PyTuple>> {
+                let names: [&'static str; #count] = [#(#names),*];
+                pyo3::types::PyTuple::new(py, names)
+            }
+        }
+
+        #[cfg(feature = "python")]
+        #[pyo3::pymethods]
+        impl #class {
+            #[classattr]
+            #[pyo3(name = "__match_args__")]
+            fn record_match_args() -> #ty {
+                #ty
+            }
+        }
+    }
+}
+
+/// The class of a record: `<Name>Py`, its `wrap`, `Name::into_class`, its
+/// properties (through `methods_macro` when an impl block adds to them) and
+/// `__match_args__` (`match_args`, when given). A struct's class also has the
+/// `handle_callback` macro, with the impl block's computed properties when
+/// it has one, and its `Field` impls. A `subclass` class is a base, which
+/// a tagged enum's variant classes extend.
+fn class(
+    name: &Ident,
+    docs: &[Attribute],
+    getters: &[Getter],
+    has_impl: bool,
+    subclass: bool,
+    match_names: Option<&[String]>,
+) -> TokenStream {
     let class = class_ident(name);
     let python_name = unraw(name);
     let structure = getters.iter().any(|getter| getter.access.is_some());
@@ -410,6 +511,8 @@ fn class(name: &Ident, docs: &[Attribute], getters: &[Getter], has_impl: bool) -
             #callback
         }
     };
+    let match_args = match_names.map(|names| match_args(&class, names));
+    let subclass = subclass.then(|| quote!(subclass,));
     quote! {
         #[cfg(feature = "python")]
         #(#docs)*
@@ -417,6 +520,7 @@ fn class(name: &Ident, docs: &[Attribute], getters: &[Getter], has_impl: bool) -
             module = "ntoseye",
             name = #python_name,
             frozen,
+            #subclass
             extends = crate::python::record::BaseRecord
         )]
         pub struct #class;
@@ -431,6 +535,7 @@ fn class(name: &Ident, docs: &[Attribute], getters: &[Getter], has_impl: bool) -
         #[cfg(feature = "python")]
         impl #class {
             /// The class around a record's fields.
+            #[allow(dead_code)]
             pub fn wrap<'py>(
                 py: pyo3::Python<'py>,
                 record: crate::python::record::BaseRecord,
@@ -454,13 +559,13 @@ fn class(name: &Ident, docs: &[Attribute], getters: &[Getter], has_impl: bool) -
         }
 
         #methods
+        #match_args
     }
 }
 
-/// `Value::Record` of `fields`, plus the computed properties for a record
-/// with an impl block.
-fn shaped(name: &Ident, fields: TokenStream, has_impl: bool) -> TokenStream {
-    let class = class_ident(name);
+/// `Value::Record` of the fields `push` pushes onto `fields`, plus the
+/// computed properties for a record with an impl block, as `class`.
+fn shaped(push: TokenStream, class: TokenStream, has_impl: bool) -> TokenStream {
     let computed = has_impl.then(|| {
         quote! {
             <Self as crate::python::record::RecordImpl>::computed(self, &mut fields);
@@ -468,11 +573,13 @@ fn shaped(name: &Ident, fields: TokenStream, has_impl: bool) -> TokenStream {
     });
     quote! {
         #[allow(unused_mut)]
-        let mut fields: ::std::vec::Vec<(&'static str, crate::python::record::Value)> = #fields;
+        let mut fields: ::std::vec::Vec<(&'static str, crate::python::record::Value)> =
+            ::std::vec::Vec::new();
+        #push
         #computed
         crate::python::record::Value::Record(crate::python::record::RecordFields {
             fields,
-            class: #class::wrap,
+            class: #class,
         })
     }
 }
@@ -567,10 +674,18 @@ fn structure(flags: Flags, mut item: ItemStruct) -> Result<TokenStream> {
     };
     let mut getters = Vec::new();
     let mut values = Vec::new();
+    let mut match_names = Vec::new();
+    let mut flattened = None;
     for field in &mut named.named {
         let opts = Opts::take(&mut field.attrs)?;
-        opts.field_only()?;
+        opts.struct_field()?;
         if opts.skip {
+            if opts.flatten {
+                return Err(Error::new_spanned(
+                    &*field,
+                    "a skipped field is not flattened",
+                ));
+            }
             continue;
         }
         let ident = field.ident.as_ref().expect("named field");
@@ -581,9 +696,40 @@ fn structure(flags: Flags, mut item: ItemStruct) -> Result<TokenStream> {
             ident.span(),
         )?;
         let ty = &field.ty;
+        match_names.push(property.clone());
+        if opts.flatten {
+            // The tagged enum's `kind`, then its variant's fields; the
+            // variant's class is the record's.
+            if key != "kind" || opts.mode != Mode::Plain || flattened.is_some() {
+                return Err(Error::new_spanned(
+                    &*field,
+                    "one field is flattened, keyed `kind`, with no `hex` or `bytes`",
+                ));
+            }
+            let variants = quote!(<#ty as crate::python::record::Variants>);
+            values.push(quote! {
+                fields.push((#key, crate::python::record::Value::Str(
+                    ::std::string::String::from(#variants::kind(&self.#ident)),
+                )));
+                #variants::payload(&self.#ident, &mut fields);
+            });
+            getters.push(Getter {
+                key,
+                property,
+                ty: quote!(#variants::Kind),
+                mode: Mode::Plain,
+                docs: docs(&field.attrs),
+                access: None,
+            });
+            flattened = Some(quote!(#variants::class(&self.#ident)));
+            continue;
+        }
         let mode = opts.mode.tokens();
         values.push(quote! {
-            (#key, <#ty as crate::python::record::ToValue<#mode>>::to_value(&self.#ident))
+            fields.push((
+                #key,
+                <#ty as crate::python::record::ToValue<#mode>>::to_value(&self.#ident),
+            ));
         });
         getters.push(Getter {
             key,
@@ -598,9 +744,21 @@ fn structure(flags: Flags, mut item: ItemStruct) -> Result<TokenStream> {
     derives(&mut item.attrs)?;
     let name = &item.ident;
     let has_impl = flags.has_impl.is_some();
-    let body = shaped(name, quote!(::std::vec![#(#values),*]), has_impl);
+    let subclass = flattened.is_some();
+    let wrap = flattened.unwrap_or_else(|| {
+        let class = class_ident(name);
+        quote!(#class::wrap)
+    });
+    let body = shaped(quote!(#(#values)*), wrap, has_impl);
     let to_value = to_value(name, body, class_hint(name));
-    let class = class(name, &docs(&item.attrs), &getters, has_impl);
+    let class = class(
+        name,
+        &docs(&item.attrs),
+        &getters,
+        has_impl,
+        subclass,
+        Some(&match_names),
+    );
     Ok(quote! {
         #item
         #to_value
@@ -619,6 +777,8 @@ fn enumeration(flags: Flags, mut item: ItemEnum) -> Result<TokenStream> {
         .all(|variant| matches!(variant.fields, Fields::Unit));
     let expanded = if flags.tagged.is_some() {
         tagged(&flags, &mut item)?
+    } else if let Some(base) = &flags.base {
+        return Err(Error::new(base.span(), "`base` applies to a `tagged` enum"));
     } else if let Some(span) = flags.has_impl {
         return Err(Error::new(
             span,
@@ -642,6 +802,7 @@ fn enumeration(flags: Flags, mut item: ItemEnum) -> Result<TokenStream> {
 fn fieldless_enum(item: &mut ItemEnum) -> Result<TokenStream> {
     let mut texts = Vec::new();
     let mut arms = Vec::new();
+    let mut labels = Vec::new();
     let mut parse = Vec::new();
     for variant in &mut item.variants {
         let opts = Opts::take(&mut variant.attrs)?;
@@ -656,7 +817,11 @@ fn fieldless_enum(item: &mut ItemEnum) -> Result<TokenStream> {
             .rename
             .map_or_else(|| snake_case(&variant.ident), |rename| rename.value());
         let ident = &variant.ident;
+        let label = opts
+            .label
+            .map_or_else(|| text.clone(), |label| label.value());
         arms.push(quote!(Self::#ident => #text,));
+        labels.push(quote!(Self::#ident => #label,));
         parse.push(quote!(#text => ::std::result::Result::Ok(Self::#ident),));
         texts.push((text, variant.ident.span()));
     }
@@ -674,7 +839,7 @@ fn fieldless_enum(item: &mut ItemEnum) -> Result<TokenStream> {
     );
     Ok(quote! {
         impl #name {
-            /// The variant's text: its `Display`, and its value in the SDK.
+            /// The variant's text: its value in the SDK.
             pub const fn as_str(&self) -> &'static str {
                 match self {
                     #(#arms)*
@@ -682,9 +847,13 @@ fn fieldless_enum(item: &mut ItemEnum) -> Result<TokenStream> {
             }
         }
 
+        /// The variant's label, as the REPL shows it: its `label`, else its
+        /// text.
         impl ::std::fmt::Display for #name {
             fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-                f.write_str(self.as_str())
+                f.write_str(match self {
+                    #(#labels)*
+                })
             }
         }
 
@@ -777,14 +946,25 @@ fn union(item: &mut ItemEnum) -> Result<TokenStream> {
     ))
 }
 
-/// A tagged enum: a class with `kind` and every variant's fields, each
-/// `None` outside its variant.
+/// A tagged enum: a base class with `kind`, and a subclass per variant,
+/// nested in it (`Base.Variant`), with that variant's fields. The base is
+/// the enum's own class, or with `base = Name` the class of the record
+/// struct `Name`, which holds the enum in its `#[record(flatten)]` field.
 fn tagged(flags: &Flags, item: &mut ItemEnum) -> Result<TokenStream> {
     let name = item.ident.clone();
+    if let (Some(base), Some(_)) = (&flags.base, flags.has_impl) {
+        return Err(Error::new(
+            base.span(),
+            "the `base` record's impl block holds the computed properties",
+        ));
+    }
+    let base = flags.base.clone().unwrap_or_else(|| name.clone());
+    let base_class = class_ident(&base);
     let mut kinds = Vec::new();
-    let mut getters: Vec<Getter> = Vec::new();
-    // Per variant: its pattern, and the (getter index, value) it fills.
-    let mut variants = Vec::new();
+    let mut kind_arms = Vec::new();
+    let mut payload_arms = Vec::new();
+    let mut class_arms = Vec::new();
+    let mut classes = Vec::new();
     for variant in &mut item.variants {
         let opts = Opts::take(&mut variant.attrs)?;
         opts.field_only()?;
@@ -801,7 +981,8 @@ fn tagged(flags: &Flags, item: &mut ItemEnum) -> Result<TokenStream> {
         let single =
             matches!(&variant.fields, Fields::Unnamed(fields) if fields.unnamed.len() == 1);
         let mut bindings = Vec::new();
-        let mut filled = Vec::new();
+        let mut getters = Vec::new();
+        let mut pushes = Vec::new();
         for (index, field) in variant.fields.iter_mut().enumerate() {
             let opts = Opts::take(&mut field.attrs)?;
             opts.field_only()?;
@@ -821,102 +1002,94 @@ fn tagged(flags: &Flags, item: &mut ItemEnum) -> Result<TokenStream> {
                 default,
                 field.span(),
             )?;
+            if key == "kind" {
+                return Err(Error::new_spanned(
+                    &*field,
+                    "`kind` names the variant; rename the field",
+                ));
+            }
             let ty = &field.ty;
-            let ty_tokens = quote!(#ty).to_string();
-            let position = match getters.iter().position(|getter| getter.key == key) {
-                Some(position) => {
-                    let getter = &getters[position];
-                    let existing = getter.ty.to_string();
-                    let expected = quote!(::std::option::Option<#ty>).to_string();
-                    if existing != expected || getter.mode != opts.mode {
-                        return Err(Error::new_spanned(
-                            &*field,
-                            format!(
-                                "`{key}` is `{ty_tokens}` here but has another type or \
-                                 attribute in an earlier variant"
-                            ),
-                        ));
-                    }
-                    position
-                }
-                None => {
-                    getters.push(Getter {
-                        key,
-                        property,
-                        ty: quote!(::std::option::Option<#ty>),
-                        mode: opts.mode,
-                        docs: docs(&field.attrs),
-                        access: None,
-                    });
-                    getters.len() - 1
-                }
-            };
             let mode = opts.mode.tokens();
-            filled.push((
-                position,
-                quote!(<#ty as crate::python::record::ToValue<#mode>>::to_value(#binding)),
-            ));
+            pushes.push(quote! {
+                fields.push((
+                    #key,
+                    <#ty as crate::python::record::ToValue<#mode>>::to_value(#binding),
+                ));
+            });
+            getters.push(Getter {
+                key,
+                property,
+                ty: quote!(#ty),
+                mode: opts.mode,
+                docs: docs(&field.attrs),
+                access: None,
+            });
         }
+        unique(&getters, variant.ident.span())?;
         let ident = &variant.ident;
-        let pattern = match &variant.fields {
-            Fields::Unit => quote!(Self::#ident),
-            Fields::Unnamed(_) => quote!(Self::#ident(#(#bindings),*)),
+        let (pattern, any) = match &variant.fields {
+            Fields::Unit => (quote!(Self::#ident), quote!(Self::#ident)),
+            Fields::Unnamed(_) => (
+                quote!(Self::#ident(#(#bindings),*)),
+                quote!(Self::#ident(..)),
+            ),
             Fields::Named(fields) => {
                 let names = fields.named.iter().map(|field| &field.ident);
-                quote!(Self::#ident { #(#names: #bindings),* })
+                (
+                    quote!(Self::#ident { #(#names: #bindings),* }),
+                    quote!(Self::#ident { .. }),
+                )
             }
         };
-        variants.push((pattern, kind, filled));
+        let variant_class = format_ident!("{}{}Py", unraw(&name), unraw(ident));
+        kind_arms.push(quote!(#any => #kind,));
+        payload_arms.push(quote! {
+            #[allow(unused_variables)]
+            #pattern => { #(#pushes)* }
+        });
+        class_arms.push(quote!(#any => #variant_class::wrap,));
+        classes.push(variant_subclass(
+            &base_class,
+            &unraw(&base),
+            &variant_class,
+            ident,
+            &kind,
+            &docs(&variant.attrs),
+            &getters,
+        ));
     }
     distinct(&kinds, "kind")?;
     let kinds: Vec<String> = kinds.into_iter().map(|(kind, _)| kind).collect();
-    let kind_docs = {
-        let listed = kinds
-            .iter()
-            .map(|kind| format!("`{kind}`"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let text = format!(" The variant: {listed}.");
-        vec![syn::parse_quote!(#[doc = #text])]
-    };
     // `kind` is typed as the `Literal` of the kinds, through a type that
     // exists only for its hint.
     let kind_type = format_ident!("__{}RecordKind", unraw(&name));
     let kind_hint = literal_hint(&kinds);
-    let mut all = vec![Getter {
-        key: "kind".to_string(),
-        property: "kind".to_string(),
-        ty: quote!(#kind_type),
-        mode: Mode::Plain,
-        docs: kind_docs,
-        access: None,
-    }];
-    all.extend(getters);
-    unique(&all, name.span())?;
-    let count = all.len() - 1;
-    let arms = variants.into_iter().map(|(pattern, kind, filled)| {
-        let values = (0..count).map(|position| {
-            let key = &all[position + 1].key;
-            match filled.iter().find(|(at, _)| *at == position) {
-                Some((_, value)) => quote!((#key, #value)),
-                None => quote!((#key, crate::python::record::Value::Null)),
+    let variants = quote! {
+        #[cfg(feature = "python")]
+        impl crate::python::record::Variants for #name {
+            type Kind = #kind_type;
+
+            fn kind(&self) -> &'static str {
+                match self {
+                    #(#kind_arms)*
+                }
             }
-        });
-        quote! {
-            #[allow(unused_variables)]
-            #pattern => ::std::vec![
-                ("kind", crate::python::record::Value::Str(::std::string::String::from(#kind))),
-                #(#values),*
-            ],
+
+            fn payload(
+                &self,
+                fields: &mut ::std::vec::Vec<(&'static str, crate::python::record::Value)>,
+            ) {
+                match self {
+                    #(#payload_arms)*
+                }
+            }
+
+            fn class(&self) -> crate::python::record::Wrap {
+                match self {
+                    #(#class_arms)*
+                }
+            }
         }
-    });
-    let has_impl = flags.has_impl.is_some();
-    let body = shaped(&name, quote!(match self { #(#arms)* }), has_impl);
-    let to_value = to_value(&name, body, class_hint(&name));
-    let class = class(&name, &docs(&item.attrs), &all, has_impl);
-    Ok(quote! {
-        #to_value
-        #class
 
         #[cfg(feature = "python")]
         #[doc(hidden)]
@@ -931,7 +1104,283 @@ fn tagged(flags: &Flags, item: &mut ItemEnum) -> Result<TokenStream> {
             #[cfg(feature = "python-stubs")]
             const HINT: pyo3::inspect::PyStaticExpr = #kind_hint;
         }
+
+        #(#classes)*
+    };
+    if flags.base.is_some() {
+        return Ok(variants);
+    }
+    // The enum's own base class: `kind`, and the impl block's computed
+    // properties.
+    let kind_docs = {
+        let listed = kinds
+            .iter()
+            .map(|kind| format!("`{kind}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let text = format!(" The variant: {listed}.");
+        vec![syn::parse_quote!(#[doc = #text])]
+    };
+    let kind = Getter {
+        key: "kind".to_string(),
+        property: "kind".to_string(),
+        ty: quote!(#kind_type),
+        mode: Mode::Plain,
+        docs: kind_docs,
+        access: None,
+    };
+    let has_impl = flags.has_impl.is_some();
+    let push = quote! {
+        fields.push(("kind", crate::python::record::Value::Str(
+            ::std::string::String::from(crate::python::record::Variants::kind(self)),
+        )));
+        crate::python::record::Variants::payload(self, &mut fields);
+    };
+    let body = shaped(
+        push,
+        quote!(crate::python::record::Variants::class(self)),
+        has_impl,
+    );
+    let to_value = to_value(&name, body, class_hint(&name));
+    let class = class(&name, &docs(&item.attrs), &[kind], has_impl, true, None);
+    Ok(quote! {
+        #to_value
+        #class
+        #variants
     })
+}
+
+/// A tagged enum's variant: `variant_class`, a final subclass of
+/// `base_class` named after the variant, with `kind` (typed as the variant's
+/// own `Literal`) and the variant's fields (`getters`), and `__match_args__`
+/// of those fields. It is a class attribute of the base (`Stop.Breakpoint`)
+/// with that `__qualname__`, as PyO3 nests a complex enum's variants: both
+/// attributes go straight into the classes' items, so they add nothing to
+/// the stub; there, an introspection fragment names the base as the
+/// variant's parent, so maturin writes it as a nested class.
+fn variant_subclass(
+    base_class: &Ident,
+    base_name: &str,
+    variant_class: &Ident,
+    variant: &Ident,
+    kind: &str,
+    docs: &[Attribute],
+    getters: &[Getter],
+) -> TokenStream {
+    let python_name = unraw(variant);
+    let kind_type = format_ident!("__{}Kind", variant_class);
+    let kind_hint = literal_hint(&[kind.to_string()]);
+    let kind_text = format!(" `{kind}`.");
+    let kind_getter = Getter {
+        key: "kind".to_string(),
+        property: "kind".to_string(),
+        ty: quote!(#kind_type),
+        mode: Mode::Plain,
+        docs: vec![syn::parse_quote!(#[doc = #kind_text])],
+        access: None,
+    };
+    let properties = std::iter::once(&kind_getter)
+        .chain(getters)
+        .enumerate()
+        .map(|(index, getter)| getter.tokens(index));
+    let names: Vec<String> = getters
+        .iter()
+        .map(|getter| getter.property.clone())
+        .collect();
+    let match_args = match_args(variant_class, &names);
+    let fragment = nested_fragment(base_class, variant_class, &python_name, docs);
+    let attribute = syn::LitCStr::new(
+        &std::ffi::CString::new(python_name.clone()).expect("an identifier"),
+        Span::call_site(),
+    );
+    let qualname = format!("{base_name}.{python_name}");
+    quote! {
+        #[cfg(feature = "python")]
+        #(#docs)*
+        #[pyo3::pyclass(module = "ntoseye", name = #python_name, frozen, extends = #base_class)]
+        pub struct #variant_class;
+
+        #[cfg(feature = "python")]
+        #[pyo3::pymethods]
+        impl #variant_class {
+            #(#properties)*
+        }
+
+        #[cfg(feature = "python")]
+        impl #variant_class {
+            /// The class around a record's fields.
+            pub fn wrap<'py>(
+                py: pyo3::Python<'py>,
+                record: crate::python::record::BaseRecord,
+            ) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::PyAny>> {
+                let init = pyo3::PyClassInitializer::from(record)
+                    .add_subclass(#base_class)
+                    .add_subclass(#variant_class);
+                ::std::result::Result::Ok(pyo3::Bound::new(py, init)?.into_any())
+            }
+
+            /// The class, as its base's attribute.
+            fn nested(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+                ::std::result::Result::Ok(py.get_type::<#variant_class>().into_any().unbind())
+            }
+
+            /// Its `__qualname__`: `Base.Variant`.
+            fn qualname(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+                pyo3::IntoPyObjectExt::into_py_any(#qualname, py)
+            }
+        }
+
+        #[cfg(feature = "python")]
+        pyo3::inventory::submit! {
+            type Inventory = <#base_class as pyo3::impl_::pyclass::PyClassImpl>::Inventory;
+            Inventory::new(pyo3::impl_::pyclass::PyClassItems {
+                methods: &[pyo3::impl_::pymethods::PyMethodDefType::ClassAttribute(
+                    pyo3::impl_::pymethods::PyClassAttributeDef::new(
+                        #attribute,
+                        #variant_class::nested,
+                    ),
+                )],
+                slots: &[],
+            })
+        }
+
+        #[cfg(feature = "python")]
+        pyo3::inventory::submit! {
+            type Inventory = <#variant_class as pyo3::impl_::pyclass::PyClassImpl>::Inventory;
+            Inventory::new(pyo3::impl_::pyclass::PyClassItems {
+                methods: &[pyo3::impl_::pymethods::PyMethodDefType::ClassAttribute(
+                    pyo3::impl_::pymethods::PyClassAttributeDef::new(
+                        c"__qualname__",
+                        #variant_class::qualname,
+                    ),
+                )],
+                slots: &[],
+            })
+        }
+
+        #[cfg(feature = "python")]
+        #[doc(hidden)]
+        #[allow(non_camel_case_types)]
+        pub enum #kind_type {}
+
+        #[cfg(feature = "python")]
+        impl<M> crate::python::record::ToValue<M> for #kind_type {
+            fn to_value(&self) -> crate::python::record::Value {
+                match *self {}
+            }
+            #[cfg(feature = "python-stubs")]
+            const HINT: pyo3::inspect::PyStaticExpr = #kind_hint;
+        }
+
+        #match_args
+        #fragment
+    }
+}
+
+/// `text` as a JSON string's contents.
+fn json_escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The docstring PyO3 makes of `docs`: each line less one leading space.
+fn docstring(docs: &[Attribute]) -> Option<String> {
+    let lines: Vec<String> = docs
+        .iter()
+        .filter_map(|attr| match &attr.meta {
+            syn::Meta::NameValue(syn::MetaNameValue {
+                value:
+                    syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(text),
+                        ..
+                    }),
+                ..
+            }) => {
+                let text = text.value();
+                Some(text.strip_prefix(' ').unwrap_or(&text).to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// The introspection fragment of a nested class (`python-stubs`): PyO3's
+/// own for `class` names no parent, and PyO3 sets one only for a complex
+/// enum's variants. This one names `parent`, so maturin writes `class` inside
+/// it, and types it as `Parent.Name`. It is the same class (the same id), so
+/// its properties, which name it as their parent, land in it.
+fn nested_fragment(
+    parent: &Ident,
+    class: &Ident,
+    python_name: &str,
+    docs: &[Attribute],
+) -> TokenStream {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    format!("{parent}::{class}").hash(&mut hasher);
+    format!("{:?}", Span::call_site()).hash(&mut hasher);
+    let symbol = format_ident!("PYO3_INTROSPECTION_1_ntoseye_nested_{}", hasher.finish());
+    let head = format!(
+        "{{\"type\":\"class\",\"name\":\"{}\",\"id\":\"",
+        json_escaped(python_name)
+    );
+    let doc = docstring(docs)
+        .map(|doc| format!(",\"doc\":\"{}\"", json_escaped(&doc)))
+        .unwrap_or_default();
+    let tail = format!("]{doc}}}");
+    quote! {
+        #[cfg(feature = "python-stubs")]
+        const _: () = {
+            use pyo3::inspect::{
+                PyStaticExpr, serialize_for_introspection, serialized_len_for_introspection,
+            };
+            const BASE: PyStaticExpr = <#parent as pyo3::PyTypeInfo>::TYPE_HINT;
+            const BASE_LEN: usize = serialized_len_for_introspection(&BASE);
+            const BASE_SER: [u8; BASE_LEN] = {
+                let mut out = [0; BASE_LEN];
+                serialize_for_introspection(&BASE, &mut out);
+                out
+            };
+            const FINAL: PyStaticExpr = pyo3::type_hint_identifier!("typing", "final");
+            const FINAL_LEN: usize = serialized_len_for_introspection(&FINAL);
+            const FINAL_SER: [u8; FINAL_LEN] = {
+                let mut out = [0; FINAL_LEN];
+                serialize_for_introspection(&FINAL, &mut out);
+                out
+            };
+            const PIECES: &[&[u8]] = &[
+                #head.as_bytes(),
+                #class::_PYO3_INTROSPECTION_ID.as_bytes(),
+                b"\",\"parent\":\"",
+                #parent::_PYO3_INTROSPECTION_ID.as_bytes(),
+                b"\",\"bases\":[",
+                &BASE_SER,
+                b"],\"decorators\":[",
+                &FINAL_SER,
+                #tail.as_bytes(),
+            ];
+            const LEN: usize = pyo3::impl_::concat::combined_len(PIECES);
+            #[used]
+            #[unsafe(no_mangle)]
+            static #symbol: pyo3::impl_::introspection::SerializedIntrospectionFragment<LEN> =
+                pyo3::impl_::introspection::SerializedIntrospectionFragment {
+                    length: LEN as u32,
+                    fragment: pyo3::impl_::concat::combine_to_array::<LEN>(PIECES),
+                };
+        };
+    }
 }
 
 /// `#[record] impl Name { ... }`: the methods stay Rust methods, except that
@@ -963,6 +1412,12 @@ fn implementation(mut item: ItemImpl) -> Result<TokenStream> {
             continue;
         };
         let opts = Opts::take(&mut method.attrs)?;
+        if opts.flatten {
+            return Err(Error::new_spanned(
+                &method.sig,
+                "`flatten` applies to a record struct's field",
+            ));
+        }
         if opts.python {
             if opts.getter || opts.skip || opts.rename.is_some() || opts.mode != Mode::Plain {
                 return Err(Error::new_spanned(

@@ -213,7 +213,7 @@ impl Render for PtovDetail {
 )]
 fn pool_usage(
     session: &Session,
-    #[arg(parse = poolused_tag)] tag: Option<String>,
+    #[arg(parse = poolused_tag, positional)] tag: Option<String>,
     #[arg(render, parse = poolused_counts)] include_counts: bool,
     #[arg(parse = poolused_sort, default = PoolUsageSort::Tag)] sort: PoolUsageSort,
 ) -> Result<PoolUsageDetail> {

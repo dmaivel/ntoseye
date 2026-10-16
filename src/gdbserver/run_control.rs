@@ -140,10 +140,7 @@ impl GdbTarget<'_> {
     fn stop_reason(&mut self, stop: Stop, interrupted: bool) -> MultiThreadStopReason<u64> {
         let rip = stop.rip.unwrap_or(0);
         let signal = match stop.kind {
-            StopKind::Breakpoint => {
-                let Some(hit) = stop.breakpoint else {
-                    return self.signal(Signal::SIGTRAP);
-                };
+            StopKind::Breakpoint { breakpoint: hit } => {
                 if let Some(error) = &hit.condition_error {
                     self.note(format!("breakpoint {} condition failed: {error}", hit.id));
                 }
@@ -166,38 +163,34 @@ impl GdbTarget<'_> {
                 Signal::SIGTRAP
             }
             StopKind::Step => Signal::SIGTRAP,
-            StopKind::ModuleLoad | StopKind::ModuleUnload => {
-                let event = if stop.kind == StopKind::ModuleLoad {
-                    ModuleEvent::Load
-                } else {
-                    ModuleEvent::Unload
-                };
-                if let Some(module) = &stop.module {
-                    self.note(module_event_line(event, module));
-                }
+            StopKind::ModuleLoad { module } => {
+                self.note(module_event_line(ModuleEvent::Load, &module));
+                Signal::SIGTRAP
+            }
+            StopKind::ModuleUnload { module } => {
+                self.note(module_event_line(ModuleEvent::Unload, &module));
                 Signal::SIGTRAP
             }
             StopKind::Entry | StopKind::Interrupt if interrupted => Signal::SIGINT,
             StopKind::Entry | StopKind::Interrupt => Signal::SIGTRAP,
-            StopKind::Exception => match stop.exception {
-                Some(exception) if interrupted && exception.code == STATUS_BREAKPOINT => {
-                    Signal::SIGINT
-                }
-                Some(exception) => {
-                    let code = exception.code;
-                    let chance = match exception.first_chance {
-                        Some(true) => " (first chance)",
-                        Some(false) => " (second chance)",
-                        None => "",
-                    };
-                    let name = exception_code_name(code);
-                    self.note(format!("{name} ({code:#010x}){chance} at {rip:#x}"));
-                    exception_signal(code)
-                }
-                None => Signal::SIGTRAP,
-            },
-            StopKind::Bugcheck => {
-                let detail = match stop.bugcheck {
+            StopKind::Exception { exception }
+                if interrupted && exception.code == STATUS_BREAKPOINT =>
+            {
+                Signal::SIGINT
+            }
+            StopKind::Exception { exception } => {
+                let code = exception.code;
+                let chance = match exception.first_chance {
+                    Some(true) => " (first chance)",
+                    Some(false) => " (second chance)",
+                    None => "",
+                };
+                let name = exception_code_name(code);
+                self.note(format!("{name} ({code:#010x}){chance} at {rip:#x}"));
+                exception_signal(code)
+            }
+            StopKind::Bugcheck { bugcheck } => {
+                let detail = match bugcheck {
                     Some(info) => format!(
                         "bugcheck {:#x} ({:#x}, {:#x}, {:#x}, {:#x})",
                         info.code,
@@ -215,13 +208,12 @@ impl GdbTarget<'_> {
                 self.note("run `monitor !analyze -v` for the full triage");
                 Signal::SIGABRT
             }
-            StopKind::Reload => {
-                let reload = stop.reload;
+            StopKind::Reload { reload } => {
                 let base = reload
-                    .and_then(|reload| reload.kernel_base)
+                    .kernel_base
                     .map(|base| format!("{base:#x}"))
                     .unwrap_or_else(|| "unknown".to_string());
-                let early = if reload.is_none_or(|reload| reload.coherent) {
+                let early = if reload.coherent {
                     ""
                 } else {
                     " (early boot: modules and processes are not available yet)"

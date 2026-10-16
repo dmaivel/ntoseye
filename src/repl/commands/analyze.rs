@@ -1369,7 +1369,7 @@ fn hang(session: &mut Session) -> Result<HangReport> {
 fn decode_bugcheck(
     session: &mut Session,
     #[arg(name = "bugcheck-code")] code: u32,
-    #[arg(sdk, default = Vec::new())] parameters: Vec<u64>,
+    #[arg(sdk, default = Vec::new(), positional)] parameters: Vec<u64>,
 ) -> Result<BugcheckDecoding> {
     session.target.require_kernel()?;
     let mut slots = [0u64; 4];

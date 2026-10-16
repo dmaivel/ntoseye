@@ -537,7 +537,7 @@ fn vtl_choice(
 )]
 fn exr(
     session: &Session,
-    #[arg(parse = exception_record_address)] address: Option<VirtAddr>,
+    #[arg(parse = exception_record_address, positional)] address: Option<VirtAddr>,
 ) -> Result<ExceptionRecord> {
     match address {
         Some(address) => session.read_exception_record(address).map_err(|error| {

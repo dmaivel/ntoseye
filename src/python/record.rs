@@ -2,10 +2,10 @@
 //! renders for Python, the type each field has in the stub, and the classes
 //! results are built as. Every record is its own [`BaseRecord`] subclass with
 //! a property per field (`frame.ip`, `thread.state_name`), every keyed map a
-//! [`Record`], and every field that can fail to read on its own the
-//! package's generic `Diagnostic` (`peb.ldr.value`, `if peb.ldr:`). Records
-//! keep dict access (`record["ip"]`, `to_dict()`) for code that walks fields
-//! by name.
+//! `dict`, and every field that can fail to read on its own the package's
+//! generic `Diagnostic` (`peb.ldr.value`, `if peb.ldr:`). Records are values,
+//! like frozen dataclasses, not containers: `to_dict()` walks the fields by
+//! name.
 //!
 //! ```text
 //! /// A capability-list entry.            <- the class's docs
@@ -33,8 +33,10 @@
 //! **What `#[record]` generates.** For each record: its `ToValue` impl,
 //! which renders every field, in order, as a [`Value::Record`]; the SDK
 //! class `<Name>Py` (Python name `Name`), a [`BaseRecord`] subclass with one
-//! typed property per field, which [`to_py`] wraps the fields in. SDK
-//! methods return `Typed<'py, T>`, whose `T` types the method in the stub.
+//! typed property per field and `__match_args__`, which [`to_py`] wraps the
+//! fields in. A `tagged` enum's class is a base, with a final subclass per
+//! variant nested in it ([`Variants`]). SDK methods return `Typed<'py, T>`,
+//! whose `T` types the method in the stub.
 //!
 //! **How classes reach the SDK.** `build.rs` walks the crate's module tree
 //! from `src/lib.rs` and lists every class (a record struct or `tagged`
@@ -43,24 +45,23 @@
 //! `python/mod.rs` and adds one `#[pymodule_export] use` per class, under
 //! the `cfg`s of the modules on its path. PyO3 exports only named `use`
 //! items, and the stub lists only exported classes; so a new class needs
-//! nothing else.
+//! nothing else. A variant class is not exported: it is its base's.
 
 use std::convert::Infallible;
 use std::marker::PhantomData;
 
 use pyo3::IntoPyObjectExt;
-use pyo3::exceptions::{PyAttributeError, PyKeyError};
+use pyo3::exceptions::PyKeyError;
 #[cfg(feature = "python-stubs")]
 use pyo3::inspect::{PyStaticExpr, PyStaticOperator};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 #[cfg(feature = "python-stubs")]
 use pyo3::types::PyString;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 #[cfg(feature = "python-stubs")]
 use pyo3::{PyTypeInfo, type_hint_identifier, type_hint_subscript};
 
-use super::collection::Iter;
 use super::package_attr;
 use crate::target::{DiagnosticMetric, DiagnosticValue};
 use crate::types::{Keyed, VirtAddr};
@@ -86,35 +87,16 @@ impl<'py> IntoPyObject<'py> for PlainDict<'py> {
     }
 }
 
-/// An immutable, ordered set of named fields with dict access. It is the base
-/// of `Record` and of all typed result classes (`PciFunction`, ...), whose
-/// properties give the type of each field.
+/// An immutable result, the base of every typed result class
+/// (`PciFunction`, ...), whose properties are its fields. Like a frozen
+/// dataclass, it compares and hashes by class and fields, matches by
+/// `__match_args__` (its fields, in order) and is not a container; use
+/// `to_dict()` to walk the fields by name.
 #[pyclass(module = "ntoseye", frozen, subclass)]
 pub struct BaseRecord {
     fields: Py<PyDict>,
     /// Fields that are addresses, rendered as hex by `__repr__`.
     hex: Vec<&'static str>,
-}
-
-/// An immutable, ordered set of named fields with attribute access.
-#[pyclass(module = "ntoseye", frozen, extends = BaseRecord)]
-pub struct Record;
-
-impl Record {
-    pub fn new(fields: Py<PyDict>, hex: Vec<&'static str>) -> PyClassInitializer<Self> {
-        PyClassInitializer::from(BaseRecord::new(fields, hex)).add_subclass(Record)
-    }
-}
-
-#[pymethods]
-impl Record {
-    fn __getattr__<'py>(slf: &Bound<'py, Self>, name: &str) -> PyResult<Bound<'py, PyAny>> {
-        let fields = slf.as_super().get().fields.bind(slf.py());
-        fields.get_item(name)?.ok_or_else(|| {
-            let known: Vec<String> = fields.keys().iter().map(|k| k.to_string()).collect();
-            PyAttributeError::new_err(format!("no field '{name}'; fields: {}", known.join(", ")))
-        })
-    }
 }
 
 impl BaseRecord {
@@ -131,40 +113,31 @@ impl BaseRecord {
     }
 }
 
+/// Field `name` of `record`, an instance of a record class: what a
+/// generated property returns.
+pub fn field<'py>(record: &Bound<'py, PyAny>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+    record.cast::<BaseRecord>()?.get().field(record.py(), name)
+}
+
 #[pymethods]
 impl BaseRecord {
-    fn __getitem__<'py>(&self, py: Python<'py>, key: &str) -> PyResult<Bound<'py, PyAny>> {
-        self.field(py, key)
+    /// Equal to a record of the same class with equal fields.
+    fn __eq__(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if !slf.get_type().is(other.get_type()) {
+            return Ok(false);
+        }
+        let other = other.cast::<BaseRecord>()?;
+        slf.get()
+            .fields
+            .bind(slf.py())
+            .eq(other.get().fields.bind(slf.py()))
     }
 
-    fn __contains__(&self, py: Python<'_>, key: &str) -> PyResult<bool> {
-        self.fields.bind(py).contains(key)
-    }
-
-    fn __len__(&self, py: Python<'_>) -> usize {
-        self.fields.bind(py).len()
-    }
-
-    fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Iter<'py, String>> {
-        Iter::new(py, self.keys(py)?)
-    }
-
-    fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
-        let other = match other.cast::<BaseRecord>() {
-            Ok(record) => record.get().fields.bind(py).clone().into_any(),
-            Err(_) => other.clone(),
-        };
-        self.fields.bind(py).eq(other)
-    }
-
-    fn __dir__(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        let mut names = self.keys(py)?;
-        names.extend(
-            ["keys", "values", "items", "get", "to_dict"]
-                .into_iter()
-                .map(str::to_string),
-        );
-        Ok(names)
+    /// The hash of the class and the fields; a `TypeError` when a field is
+    /// unhashable (a `list`), as for a frozen dataclass.
+    fn __hash__(slf: &Bound<'_, Self>) -> PyResult<isize> {
+        let values = PyTuple::new(slf.py(), slf.get().fields.bind(slf.py()).values())?;
+        (slf.get_type(), values).into_pyobject(slf.py())?.hash()
     }
 
     fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
@@ -179,42 +152,11 @@ impl BaseRecord {
             };
             parts.push(format!("{key}={shown}"));
         }
-        Ok(format!("{}({})", slf.get_type().name()?, parts.join(", ")))
-    }
-
-    /// The field names, in order.
-    fn keys(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        self.fields.bind(py).keys().extract()
-    }
-
-    /// The field values, in order.
-    fn values<'py>(&self, py: Python<'py>) -> Vec<Bound<'py, PyAny>> {
-        self.fields.bind(py).values().iter().collect()
-    }
-
-    /// `(name, value)` pairs, in order.
-    fn items<'py>(&self, py: Python<'py>) -> PyResult<Vec<(String, Bound<'py, PyAny>)>> {
-        self.fields
-            .bind(py)
-            .iter()
-            .map(|(key, value)| Ok((key.extract()?, value)))
-            .collect()
-    }
-
-    /// The field, or `default` if the record has no field with that name.
-    #[pyo3(signature = (key, default=None))]
-    fn get<'py>(
-        &self,
-        py: Python<'py>,
-        key: &str,
-        default: Option<Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        Ok(self
-            .fields
-            .bind(py)
-            .get_item(key)?
-            .or(default)
-            .unwrap_or_else(|| py.None().into_bound(py)))
+        Ok(format!(
+            "{}({})",
+            slf.get_type().qualname()?,
+            parts.join(", ")
+        ))
     }
 
     /// A plain nested `dict`, with all records and diagnostics converted, for
@@ -331,12 +273,11 @@ pub fn to_py<'py>(py: Python<'py>, v: &Value, style: PyStyle) -> PyResult<Bound<
                 }
                 dict.set_item(key, to_py(py, val, style)?)?;
             }
-            if let PyStyle::Plain = style {
-                return Ok(dict.into_any());
-            }
             match v {
-                Value::Record(record) => (record.class)(py, BaseRecord::new(dict.unbind(), hex))?,
-                _ => Bound::new(py, Record::new(dict.unbind(), hex))?.into_any(),
+                Value::Record(record) if matches!(style, PyStyle::Records) => {
+                    (record.class)(py, BaseRecord::new(dict.unbind(), hex))?
+                }
+                _ => dict.into_any(),
             }
         }
         Value::Diagnostic(diagnostic) => {
@@ -390,6 +331,20 @@ pub enum Bytes {}
 /// The computed properties a `#[record] impl` block adds to its record.
 pub trait RecordImpl {
     fn computed(&self, fields: &mut Vec<(&'static str, Value)>);
+}
+
+/// Wraps a record's fields' [`BaseRecord`] in the record's class.
+pub type Wrap = for<'py> fn(Python<'py>, BaseRecord) -> PyResult<Bound<'py, PyAny>>;
+
+/// A `tagged` record enum: which variant a value is, and that variant's
+/// fields and class, a subclass of the enum's class or of the record
+/// struct that holds it in a `#[record(flatten)]` field (its `base`).
+pub trait Variants {
+    /// A type whose hint is the `Literal` of the variants' kinds.
+    type Kind: ToValue;
+    fn kind(&self) -> &'static str;
+    fn payload(&self, fields: &mut Vec<(&'static str, Value)>);
+    fn class(&self) -> Wrap;
 }
 
 /// A record struct's SDK class (`<Name>Py`), which `#[record]` names.
@@ -476,8 +431,13 @@ impl<M, T: ToValue<M>> ToValue<M> for Keyed<T> {
                 .collect(),
         )
     }
+    /// `dict[str, T]`, in the order of the pairs.
     #[cfg(feature = "python-stubs")]
-    const HINT: PyStaticExpr = <Record as PyTypeInfo>::TYPE_HINT;
+    const HINT: PyStaticExpr = type_hint_subscript!(
+        PyDict::TYPE_HINT,
+        type_hint_identifier!("builtins", "str"),
+        T::HINT
+    );
 }
 
 impl<M, T: ToValue<M>> ToValue<M> for Option<T> {
@@ -590,7 +550,7 @@ impl<M, T: ToValue<M>> ToValue<M> for DiagnosticMetric<T> {
 pub struct RecordFields {
     pub fields: Vec<(&'static str, Value)>,
     /// Wraps the fields' [`BaseRecord`] in the record's class.
-    pub class: for<'py> fn(Python<'py>, BaseRecord) -> PyResult<Bound<'py, PyAny>>,
+    pub class: Wrap,
 }
 
 /// A value as the SDK returns it (records for its objects), typed for the
@@ -799,27 +759,44 @@ mod hints {
         Python::attach(|py| -> PyResult<()> {
             let globals = PyDict::new(py);
             globals.set_item("value", Typed::<Every>::new(py, every())?.into_bound())?;
+            globals.set_item("again", Typed::<Every>::new(py, every())?.into_bound())?;
             globals.set_item("HINTS", hints())?;
             let source = format!(
                 "{}\n{}",
                 include_str!("../../python/tests/stubcheck.py"),
                 r#"
+RENAMED = {"work_items": "items"}
 checker = Checker({})
 for name, hint in HINTS:
     field = value
     for part in name.split("."):
-        field = getattr(field, part)
+        field = getattr(field, RENAMED.get(part, part))
     checker.value(field, ast.parse(hint, mode="eval").body, name)
 assert checker.errors == [], checker.errors
-assert len(value) == len([name for name, _ in HINTS if "." not in name]), value.keys()
-assert "hidden" not in value and "work_items" not in value and "items" in value, value.keys()
+fields = value.to_dict()
+assert len(fields) == len([name for name, _ in HINTS if "." not in name]), fields.keys()
+assert "hidden" not in fields and "work_items" not in fields and "items" in fields, fields.keys()
+assert value.items == 2 and not hasattr(value, "__getitem__") and not hasattr(value, "__len__"), value
 assert value.color == "red" and value.renamed_color == "dark blue", value
 assert value.computed == 2, value.computed
 assert dict(HINTS)["nested_option"] == "int | None", dict(HINTS)["nested_option"]
-assert value.end_head.kind == "head" and value.end_head.address is None, value.end_head
+assert dict(HINTS)["keyed"] == "builtins.dict[str, ntoseye.Diagnostic[int]]", dict(HINTS)["keyed"]
+assert list(value.keyed) == ["a"] and value.keyed["a"].value == 7, value.keyed
+End = type(value.end_head).__mro__[1]
+assert End.__qualname__ == "End" and type(value.end_cycle).__qualname__ == "End.Cycle", type(value.end_cycle)
+assert isinstance(value.end_head, End.Head) and value.end_head.kind == "head", value.end_head
+assert not hasattr(value.end_head, "address"), value.end_head
 assert value.end_cycle.kind == "cycle" and value.end_cycle.address == 0x30, value.end_cycle
+assert End.Cycle.__match_args__ == ("address",), End.Cycle.__match_args__
+match value.end_cycle:
+    case End.Cycle(address):
+        assert address == 0x30, address
+    case _:
+        raise AssertionError(value.end_cycle)
 assert value.end_corrupt.error == "bad link", value.end_corrupt
-assert checker.forms >= {"class", "Record", "available", "unavailable", "source", "Literal"}, checker.forms
+assert value.list[0] != value.nested and value.nested.id == 3, (value.list, value.nested)
+assert again.nested == value.nested and hash(again.nested) == hash(value.nested), value.nested
+assert checker.forms >= {"class", "variant", "dict", "available", "unavailable", "source", "Literal"}, checker.forms
 color = ast.parse(dict(HINTS)["color"], mode="eval").body
 assert not checker.value("blue", color, "blue") and checker.errors, "a Literal admits only its texts"
 "#

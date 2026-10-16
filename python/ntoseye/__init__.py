@@ -126,7 +126,7 @@ class Diagnostic(Generic[_T]):
 def _summary(value: object) -> str:
     """A one-line rendering: scalars in full, records and lists by size."""
     if isinstance(value, BaseRecord):
-        return f"{type(value).__name__}(<{len(value)} fields>)"
+        return f"{type(value).__qualname__}(<{len(value.to_dict())} fields>)"
     if isinstance(value, list):
         return f"[<{len(value)} items>]"
     return repr(value)

@@ -11,9 +11,7 @@ use crate::disasm::{fallthrough_run_end, instruction_length};
 use crate::guest::ModuleInfo;
 use crate::output;
 use crate::session::stops::module_event_line;
-use crate::session::{
-    Cancel, ExceptionStop, Motion, ReloadStop, RunOutcome, StepMode, StepStack, Stop, StopKind,
-};
+use crate::session::{Cancel, Motion, RunOutcome, StepMode, StepStack, Stop, StopKind};
 use crate::triage_report::exception_code_name;
 use crate::types::VirtAddr;
 
@@ -182,7 +180,7 @@ impl Server {
         let mut last = None;
         for _ in 0..STEP_LINE_BUDGET {
             let stop = self.advance_within_line(mode, rip)?;
-            if stop.kind != StopKind::Step || self.cancel.load(Ordering::Relaxed) {
+            if !matches!(stop.kind, StopKind::Step) || self.cancel.load(Ordering::Relaxed) {
                 return Ok(stop);
             }
             rip = stop.rip.unwrap_or(0);
@@ -360,25 +358,22 @@ impl Server {
         self.reconcile_breakpoints();
 
         let rip = stop.rip.unwrap_or(0);
-        let info = match stop.kind {
-            StopKind::Breakpoint => {
-                let hit = stop.breakpoint.as_ref();
-                let id = hit.map_or(0, |hit| hit.id);
-                if let Some(error) = hit.and_then(|hit| hit.condition_error.as_deref()) {
+        let info = match &stop.kind {
+            StopKind::Breakpoint { breakpoint: hit } => {
+                let id = hit.id;
+                if let Some(error) = hit.condition_error.as_deref() {
                     self.emit_output(
                         "important",
                         format!("breakpoint {id} condition failed: {error}\n"),
                     );
                 }
-                let where_ = hit
-                    .and_then(|hit| hit.symbol.clone())
-                    .unwrap_or_else(|| format!("{rip:#x}"));
+                let where_ = hit.symbol.clone().unwrap_or_else(|| format!("{rip:#x}"));
                 StopInfo {
                     reason: "breakpoint",
                     description: format!("breakpoint {id} at {where_}"),
                     exception_id: None,
-                    detail: hit.map(|hit| format!("address {:#x}", hit.address)),
-                    breakpoint_id: hit.map(|hit| hit.id),
+                    detail: Some(format!("address {:#x}", hit.address)),
+                    breakpoint_id: Some(id),
                 }
             }
             StopKind::Step => StopInfo {
@@ -388,25 +383,14 @@ impl Server {
                 detail: None,
                 breakpoint_id: None,
             },
-            StopKind::ModuleLoad | StopKind::ModuleUnload => {
-                let event = if stop.kind == StopKind::ModuleLoad {
-                    ModuleEvent::Load
-                } else {
-                    ModuleEvent::Unload
-                };
-                match &stop.module {
-                    Some(module) => self.module_event_stop(event, module, rip),
-                    None => StopInfo {
-                        reason: "pause",
-                        description: format!("halted at {rip:#x}"),
-                        exception_id: None,
-                        detail: None,
-                        breakpoint_id: None,
-                    },
-                }
+            StopKind::ModuleLoad { module } => {
+                self.module_event_stop(ModuleEvent::Load, module, rip)
+            }
+            StopKind::ModuleUnload { module } => {
+                self.module_event_stop(ModuleEvent::Unload, module, rip)
             }
             StopKind::Entry | StopKind::Interrupt => StopInfo {
-                reason: if stop.kind == StopKind::Entry {
+                reason: if matches!(stop.kind, StopKind::Entry) {
                     "entry"
                 } else {
                     "pause"
@@ -416,12 +400,7 @@ impl Server {
                 detail: None,
                 breakpoint_id: None,
             },
-            StopKind::Exception => {
-                let exception = stop.exception.unwrap_or(ExceptionStop {
-                    code: 0,
-                    first_chance: None,
-                    address: None,
-                });
+            StopKind::Exception { exception } => {
                 let code = exception.code;
                 let name = exception_code_name(code);
                 let chance = match exception.first_chance {
@@ -439,8 +418,8 @@ impl Server {
                     breakpoint_id: None,
                 }
             }
-            StopKind::Bugcheck => {
-                let detail = match &stop.bugcheck {
+            StopKind::Bugcheck { bugcheck } => {
+                let detail = match bugcheck {
                     Some(info) => format!(
                         "bugcheck {:#x} ({:#x}, {:#x}, {:#x}, {:#x})",
                         info.code,
@@ -467,11 +446,7 @@ impl Server {
                     breakpoint_id: None,
                 }
             }
-            StopKind::Reload => {
-                let reload = stop.reload.unwrap_or(ReloadStop {
-                    kernel_base: None,
-                    coherent: true,
-                });
+            StopKind::Reload { reload } => {
                 let base = reload
                     .kernel_base
                     .map(|base| format!("{base:#x}"))

@@ -46,7 +46,7 @@ fn optional_address(
 )]
 fn peb(
     session: &Session,
-    #[arg(parse = optional_address)] address: Option<VirtAddr>,
+    #[arg(parse = optional_address, positional)] address: Option<VirtAddr>,
 ) -> Result<Peb> {
     session.target.inspect_peb(address)
 }
@@ -73,7 +73,7 @@ impl Render for Peb {
 )]
 fn teb(
     session: &Session,
-    #[arg(parse = optional_address)] address: Option<VirtAddr>,
+    #[arg(parse = optional_address, positional)] address: Option<VirtAddr>,
 ) -> Result<Teb> {
     session.target.inspect_teb(address)
 }

@@ -272,7 +272,7 @@ fn devnode_recurse(
 )]
 fn devnode(
     session: &Session,
-    #[arg(parse = devnode_node)] node: Option<VirtAddr>,
+    #[arg(parse = devnode_node, positional)] node: Option<VirtAddr>,
     #[arg(parse = devnode_recurse)] recurse: Option<bool>,
 ) -> Result<DevNodeDetail> {
     session

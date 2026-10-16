@@ -735,7 +735,7 @@ fn idt_vector(
 fn idt(
     session: &mut Session,
     #[arg(receiver, parse = current_processor)] processor: Option<Processor>,
-    #[arg(parse = idt_vector)] vector: Option<u16>,
+    #[arg(parse = idt_vector, positional)] vector: Option<u16>,
 ) -> Result<Idt> {
     if session.target.arch() == Arch::Arm64 {
         return Err(Error::DebugInfo(

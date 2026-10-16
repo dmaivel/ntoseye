@@ -81,7 +81,7 @@ fn alpc_message(
 #[command(form_of = alpc, python = Inspect, word = "/lpp")]
 fn alpc_process_ports(
     session: &Session,
-    #[arg(complete = Process)] process: Option<ProcessInfo>,
+    #[arg(complete = Process, positional)] process: Option<ProcessInfo>,
 ) -> Result<AlpcProcessPorts> {
     let target = &session.target;
     let process = match process {
@@ -155,8 +155,7 @@ impl Render for AlpcObject {
     category = "analysis",
     kind = Action,
     target = Kernel,
-    python = Inspect,
-    python_name = "global_flags",
+    forms = [global_flags, set_global_flags],
     usage = "!gflag [[+|-]value | {+|-}abbreviation | -?]",
     completion = [Expression]
 )]
@@ -165,12 +164,31 @@ fn gflag(
     #[arg(render, switch = "-?")] list: bool,
     change: Option<GlobalFlagChange>,
 ) -> Result<GlobalFlags> {
+    match change {
+        Some(change) => set_global_flags(session, change),
+        None => global_flags(session),
+    }
+}
+
+/// Decode nt!NtGlobalFlag and the _PEB.NtGlobalFlag of the current process
+/// (`!gflag`): the value of each and the bits by their GFlags names.
+#[command(form_of = gflag, python = Inspect)]
+fn global_flags(session: &Session) -> Result<GlobalFlags> {
+    session.target.global_flags()
+}
+
+/// Change nt!NtGlobalFlag and decode the flags as they now are (`!gflag
+/// +ust`). `change` is `+` or `-` and a value or a flag's three-letter
+/// abbreviation, which sets or clears those bits, or a value without a sign,
+/// which replaces nt!NtGlobalFlag. It is one 4-byte write to
+/// nt!NtGlobalFlag; the PEB copy does not change. The result's `change`
+/// has the value before and after.
+#[command(form_of = gflag, python = Inspect)]
+fn set_global_flags(session: &Session, change: GlobalFlagChange) -> Result<GlobalFlags> {
     let target = &session.target;
-    let change = change
-        .map(|change| target.change_global_flag(change))
-        .transpose()?;
+    let change = target.change_global_flag(change)?;
     Ok(GlobalFlags {
-        change,
+        change: Some(change),
         ..target.global_flags()?
     })
 }
@@ -201,7 +219,7 @@ fn gflag(
 )]
 fn htrace(
     session: &Session,
-    handle: Option<u64>,
+    #[arg(positional)] handle: Option<u64>,
     #[arg(receiver, parse = process_or_current)] process: ProcessInfo,
     max_traces: Option<u64>,
 ) -> Result<HandleTraces> {
@@ -298,7 +316,7 @@ impl Render<bool> for GlobalFlags {
 )]
 fn job(
     session: &mut Session,
-    address: Option<VirtAddr>,
+    #[arg(positional)] address: Option<VirtAddr>,
     #[arg(render, default = 1)] flags: u64,
 ) -> Result<Job> {
     let target = &session.target;

@@ -28,7 +28,7 @@ pub use super::module::{Device, Driver, Module};
 pub use super::process::{Heap, Heaps, Process};
 pub use super::symbols::Symbols;
 pub use super::thread::{Cpu, Thread};
-pub use super::userdump::{UserProcess, UserThread};
+pub use super::userdump::{UserDump, UserProcess, UserThread};
 
 /// An SDK object a `#[command]` method can be placed on: the debugger it
 /// runs in and the context (process, thread) its calls run in.

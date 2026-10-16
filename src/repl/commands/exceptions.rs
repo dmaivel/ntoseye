@@ -247,8 +247,8 @@ fn set_exception_policy(
     session: &mut Session,
     code: EventName,
     mode: Option<ExceptionPolicyMode>,
-    #[arg(keyword)] command: Option<String>,
-    #[arg(keyword)] disposition: Option<ExceptionPolicyFinalAction>,
+    command: Option<String>,
+    disposition: Option<ExceptionPolicyFinalAction>,
 ) -> Result<ExceptionPolicy> {
     let mode = mode.unwrap_or(ExceptionPolicyMode::Break);
     match code.resolve().map_err(Error::DebugInfo)? {
@@ -276,9 +276,9 @@ fn set_exception_policy(
 fn set_module_event(
     session: &mut Session,
     event: ModuleEvent,
-    module: Option<String>,
+    #[arg(positional)] module: Option<String>,
     mode: Option<ExceptionPolicyMode>,
-    #[arg(keyword)] command: Option<String>,
+    command: Option<String>,
 ) -> Result<ModuleEventPolicy> {
     let module = match module.as_deref().map(str::trim) {
         Some("") => {

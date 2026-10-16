@@ -73,8 +73,8 @@ fn walk_address(
 )]
 fn go(
     session: &mut Session,
-    #[arg(parse = run_address, keyword)] address: Option<VirtAddr>,
-    #[arg(sdk, keyword, default = None)] disposition: Option<ContinueDisposition>,
+    #[arg(parse = run_address)] address: Option<VirtAddr>,
+    #[arg(sdk, default = None)] disposition: Option<ContinueDisposition>,
 ) -> Result<Motion> {
     let disposition = disposition.unwrap_or(ContinueDisposition::Handled);
     let Some(address) = address else {

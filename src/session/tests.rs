@@ -3625,8 +3625,7 @@ fn a_parked_breakpoint_runs_its_action_when_it_surfaces() {
     let RunOutcome::Stopped(stop) = outcome else {
         panic!("no stop surfaced");
     };
-    assert_eq!(stop.kind, StopKind::Breakpoint);
-    assert_eq!(stop.breakpoint.map(|hit| hit.id), Some(1));
+    assert_eq!(stop.breakpoint().map(|hit| hit.id), Some(1));
     assert_eq!(*log.lock(), ["action log"]);
 }
 
@@ -3701,7 +3700,7 @@ fn a_notify_policy_continues_with_a_notice() {
         panic!("no stop surfaced");
     };
     assert_eq!(
-        stop.exception.map(|exception| exception.code),
+        stop.exception().map(|exception| exception.code),
         Some(ILLEGAL_INSTRUCTION)
     );
     assert_eq!(continues.load(Ordering::Relaxed), 1);
@@ -3744,7 +3743,7 @@ fn a_cancelled_run_to_is_an_interrupt_stop() {
     let RunOutcome::Stopped(stop) = outcome else {
         panic!("a halted run reported Running");
     };
-    assert_eq!(stop.kind, StopKind::Interrupt);
+    assert!(matches!(stop.kind, StopKind::Interrupt), "{:?}", stop.kind);
     assert!(!session.backend.is_running());
     assert_eq!(sites.lock().last(), Some(&(0x1040, false)));
     assert!(session.breakpoints.list().is_empty());

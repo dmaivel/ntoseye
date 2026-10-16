@@ -25,6 +25,8 @@ use crate::kd::trace_enabled;
 use crate::notice::Notice;
 #[cfg(feature = "python")]
 use crate::python::breakpoints::Breakpoint;
+#[cfg(feature = "python")]
+use crate::python::record;
 use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::{
     ContinueOutcome, STEP_UNTIL_LIMIT, Session, StepKind, StepMode, StepStack, StopResolution,
@@ -239,13 +241,20 @@ pub trait ActionRunner {
 }
 
 /// Why the target stopped, with the context it stopped in, snapshotted at
-/// the stop. `kind` says which of the optional parts it has.
+/// the stop. Each kind is a subclass with that kind's own parts:
+/// `Stop.Breakpoint` (`breakpoint`), `Stop.Exception` (`exception`),
+/// `Stop.ModuleLoad` and `Stop.ModuleUnload` (`module`), `Stop.Bugcheck`
+/// (`bugcheck`), `Stop.Reload` (`reload`), `Stop.Step`, `Stop.Interrupt`
+/// and `Stop.Entry`; `isinstance` and `match` tell them apart, as `kind`
+/// does.
 ///
 /// The parts are records, not live handles; the collections take them as
 /// keys: `dbg.threads[stop.thread]`, `dbg.processes[stop.process]`,
 /// `dbg.modules[stop.module]`; `dbg.cpus[stop.cpu]` is the processor.
 #[record(impl)]
 pub struct Stop {
+    /// The kind of stop, in snake case.
+    #[record(flatten)]
     pub kind: StopKind,
     /// The zero-based number of the processor that stopped, as `dbg.cpus`
     /// numbers them in the current view; `None` on a user-mode minidump,
@@ -270,13 +279,6 @@ pub struct Stop {
     pub vtl: Option<u8>,
     /// The hypervisor partition whose view (`.partition`) shows the stop.
     pub partition: Option<u64>,
-    pub breakpoint: Option<BreakpointHit>,
-    pub exception: Option<ExceptionStop>,
-    /// The module a `sxe ld`/`sxe ud` filter stopped for.
-    pub module: Option<ModuleInfo>,
-    /// The bugcheck code and parameters, when the transport decoded them.
-    pub bugcheck: Option<BugcheckInfo>,
-    pub reload: Option<ReloadStop>,
 }
 
 #[record]
@@ -286,34 +288,85 @@ impl Stop {
     #[record(python)]
     fn hit(slf: &pyo3::Bound<'_, Self>, bp: pyo3::PyRef<'_, Breakpoint>) -> pyo3::PyResult<bool> {
         use pyo3::types::PyAnyMethods;
-        let hit = slf.as_super().get().field(slf.py(), "breakpoint")?;
-        if hit.is_none() {
+        if !slf.is_instance_of::<StopKindBreakpointPy>() {
             return Ok(false);
         }
+        let hit = record::field(slf.as_any(), "breakpoint")?;
         Ok(hit.getattr("id")?.extract::<u32>()? == bp.raw_id())
     }
 }
 
-/// The kind of a [`Stop`], named in snake case.
-#[record]
-#[derive(Copy, PartialEq, Eq)]
+impl Stop {
+    /// The breakpoint hit, for a breakpoint stop.
+    pub fn breakpoint(&self) -> Option<&BreakpointHit> {
+        match &self.kind {
+            StopKind::Breakpoint { breakpoint } => Some(breakpoint),
+            _ => None,
+        }
+    }
+
+    /// The exception, for an exception stop.
+    pub fn exception(&self) -> Option<&ExceptionStop> {
+        match &self.kind {
+            StopKind::Exception { exception } => Some(exception),
+            _ => None,
+        }
+    }
+
+    /// The module, for a module load or unload stop.
+    pub fn module(&self) -> Option<&ModuleInfo> {
+        match &self.kind {
+            StopKind::ModuleLoad { module } | StopKind::ModuleUnload { module } => Some(module),
+            _ => None,
+        }
+    }
+
+    /// The bugcheck code and parameters, for a bugcheck stop whose transport
+    /// decoded them.
+    pub fn bugcheck(&self) -> Option<&BugcheckInfo> {
+        match &self.kind {
+            StopKind::Bugcheck { bugcheck } => bugcheck.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// The reload, for a reboot the debugger rebuilt its state for.
+    pub fn reload(&self) -> Option<&ReloadStop> {
+        match &self.kind {
+            StopKind::Reload { reload } => Some(reload),
+            _ => None,
+        }
+    }
+}
+
+/// Why a [`Stop`] stopped: its kind (in Python, its subclass of `Stop`) and
+/// that kind's parts.
+#[record(tagged, base = Stop)]
 pub enum StopKind {
     /// A breakpoint or watchpoint hit.
-    Breakpoint,
+    Breakpoint { breakpoint: BreakpointHit },
     /// A Windows exception.
-    Exception,
+    Exception { exception: ExceptionStop },
     /// A requested break-in, or a stop with no exception code.
     Interrupt,
     /// A completed step, or a run to an address that reached it.
     Step,
-    /// A kernel image a `sxe ld` filter names loaded.
-    ModuleLoad,
-    /// A kernel image a `sxe ud` filter names is unloading.
-    ModuleUnload,
-    /// The guest is in a bugcheck.
-    Bugcheck,
-    /// The guest rebooted and the debugger rebuilt its state.
-    Reload,
+    /// A kernel image loaded, and a `ld` filter set to `break` names it
+    /// (`dbg.exceptions.set_module_event("ld", ...)`, `sxe ld`). The module
+    /// is listed with its symbols and breakpoints, and its entry point has
+    /// not run.
+    ModuleLoad { module: ModuleInfo },
+    /// A kernel image is unloading, and a `ud` filter set to `break` names
+    /// it (`sxe ud`). Its unload routine has run, and it is still listed.
+    ModuleUnload { module: ModuleInfo },
+    /// The guest is in a bugcheck. `bugcheck` is the code and parameters
+    /// when the transport decoded them (`None` otherwise);
+    /// `dbg.inspect.bugcheck()` reads and analyzes the bugcheck from guest
+    /// memory (`!analyze`).
+    Bugcheck { bugcheck: Option<BugcheckInfo> },
+    /// The guest rebooted and the debugger rebuilt its state; earlier
+    /// handles are stale.
+    Reload { reload: ReloadStop },
     /// Nothing stopped the target since the debugger attached: it was found
     /// halted (a dump, a target attached halted).
     Entry,
@@ -444,8 +497,7 @@ impl Session {
             self.note_stop(&outcome);
             let stop = self.current_snapshot(outcome);
             let action = stop
-                .breakpoint
-                .as_ref()
+                .breakpoint()
                 .and_then(|hit| hit.action.clone())
                 .filter(|_| !self.halt_requested);
             if let Some(action) = action
@@ -825,8 +877,8 @@ impl Session {
             *condition_error = Some(error.clone());
         }
         let stop = self.stop_snapshot.as_mut()?;
-        if let Some(hit) = &mut stop.breakpoint {
-            hit.condition_error = Some(error);
+        if let StopKind::Breakpoint { breakpoint } = &mut stop.kind {
+            breakpoint.condition_error = Some(error);
         }
         Some(stop.clone())
     }
@@ -880,11 +932,6 @@ impl Session {
             inspection_process: self.target.attached_process().cloned(),
             vtl: (!user_dump).then_some(if secure { 1 } else { 0 }),
             partition: self.partition(),
-            breakpoint: None,
-            exception: None,
-            module: None,
-            bugcheck: None,
-            reload: None,
         };
         let rip = match outcome {
             ContinueOutcome::Breakpoint {
@@ -895,21 +942,19 @@ impl Session {
                 ..
             } => {
                 // A run to an address reaching its own site is a step's end,
-                // whichever wait saw it.
-                if temporary {
-                    stop.kind = StopKind::Step;
-                } else {
-                    stop.kind = StopKind::Breakpoint;
-                    stop.breakpoint = self
-                        .breakpoints
-                        .get(id)
-                        .map(|breakpoint| BreakpointHit::new(breakpoint, condition_error));
-                }
+                // whichever wait saw it. A hit breakpoint is kept until the
+                // next resume, so it is still there to describe.
+                stop.kind = match self.breakpoints.get(id) {
+                    _ if temporary => StopKind::Step,
+                    Some(breakpoint) => StopKind::Breakpoint {
+                        breakpoint: BreakpointHit::new(breakpoint, condition_error),
+                    },
+                    None => StopKind::Interrupt,
+                };
                 Some(rip)
             }
             ContinueOutcome::Bugcheck { rip, info } => {
-                stop.kind = StopKind::Bugcheck;
-                stop.bugcheck = info;
+                stop.kind = StopKind::Bugcheck { bugcheck: info };
                 rip
             }
             ContinueOutcome::Stopped {
@@ -920,12 +965,13 @@ impl Session {
             } => {
                 match exception_code {
                     Some(code) => {
-                        stop.kind = StopKind::Exception;
-                        stop.exception = Some(ExceptionStop {
-                            code,
-                            first_chance,
-                            address: exception_address,
-                        });
+                        stop.kind = StopKind::Exception {
+                            exception: ExceptionStop {
+                                code,
+                                first_chance,
+                                address: exception_address,
+                            },
+                        };
                     }
                     None => stop.kind = StopKind::Interrupt,
                 }
@@ -936,13 +982,11 @@ impl Session {
                 Some(rip)
             }
             ContinueOutcome::ModuleLoad { module, rip } => {
-                stop.kind = StopKind::ModuleLoad;
-                stop.module = Some(*module);
+                stop.kind = StopKind::ModuleLoad { module: *module };
                 Some(rip)
             }
             ContinueOutcome::ModuleUnload { module, rip } => {
-                stop.kind = StopKind::ModuleUnload;
-                stop.module = Some(*module);
+                stop.kind = StopKind::ModuleUnload { module: *module };
                 Some(rip)
             }
             ContinueOutcome::TargetReloaded {
@@ -950,11 +994,12 @@ impl Session {
                 kernel_base,
                 coherent,
             } => {
-                stop.kind = StopKind::Reload;
-                stop.reload = Some(ReloadStop {
-                    kernel_base,
-                    coherent,
-                });
+                stop.kind = StopKind::Reload {
+                    reload: ReloadStop {
+                        kernel_base,
+                        coherent,
+                    },
+                };
                 rip
             }
             ContinueOutcome::Halted { rip } => Some(rip),

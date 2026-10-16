@@ -12,18 +12,18 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from stubcheck import Checker, returns
+from stubcheck import Checker, returns, stub_classes
 
 import ntoseye
 from ntoseye import Debugger
 
 STUB = ast.parse(Path(ntoseye.__file__).with_name("_ntoseye.pyi").read_text())
-CLASSES = {node.name: node for node in STUB.body if isinstance(node, ast.ClassDef)}
+CLASSES = stub_classes(STUB)
 
 
 def results(dbg: Debugger) -> list[tuple[object, str, Callable[[], object]]]:
     """(owner, method, call) for results that hold every kind of field: nested
-    classes, unions, lists, `Record`s, diagnostics that did and did not read,
+    classes, unions, lists, `dict`s, diagnostics that did and did not read,
     and metrics with a source."""
     inspect = dbg.inspect
     cpu = next(iter(dbg.cpus))
@@ -196,7 +196,7 @@ def test_results_match_their_stub_types(halted: Debugger) -> None:
         checker.value(call(), returns(CLASSES[cls], method), f"{cls}.{method}()")
     assert checker.errors == []
     # The sample must keep exercising every kind of field.
-    assert checker.forms >= {"class", "Record", "available", "unavailable", "source"}
+    assert checker.forms >= {"class", "dict", "available", "unavailable", "source"}
 
 
 def user_dump_results(dbg: Debugger) -> list[tuple[object, str, Callable[[], object]]]:

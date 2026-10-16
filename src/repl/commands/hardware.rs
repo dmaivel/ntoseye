@@ -116,7 +116,7 @@ pub fn ready_processor(
 )]
 fn ipi(
     session: &mut Session,
-    #[arg(parse = ipi_processor)] processor: Option<u16>,
+    #[arg(parse = ipi_processor, positional)] processor: Option<u16>,
 ) -> Result<IpiState> {
     session
         .target
@@ -245,10 +245,10 @@ fn pci_command(
 #[command(form_of = pci_command, python = Inspect, sdk)]
 fn pci(
     session: &mut Session,
-    #[arg(default = 0)] bus: u8,
-    device: Option<u8>,
-    function: Option<u8>,
-    #[arg(keyword)] last_bus: Option<u8>,
+    #[arg(default = 0, positional)] bus: u8,
+    #[arg(positional)] device: Option<u8>,
+    #[arg(positional)] function: Option<u8>,
+    last_bus: Option<u8>,
 ) -> Result<PciScan> {
     session.scan_pci(&PciQuery {
         segment: 0,

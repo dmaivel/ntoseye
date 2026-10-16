@@ -13,8 +13,7 @@ use crate::error::{Error, Result};
 use crate::memory::MemoryOps;
 use crate::target::Target;
 use crate::target::mm::{
-    AddressDescription, MEM_COMMIT, MEM_FREE, MEM_IMAGE, memory_state_name, memory_type_name,
-    page_protection_name,
+    MEM_COMMIT, MEM_FREE, MEM_IMAGE, memory_state_name, memory_type_name, page_protection_name,
 };
 use crate::types::VirtAddr;
 use crate::userdump::{MemoryRange, MemoryRegion};
@@ -186,14 +185,6 @@ pub enum UserAddressReport {
     },
     /// A dump without a memory-info list: every range it captured.
     CapturedRanges { ranges: Vec<CapturedRange> },
-}
-
-/// What an address belongs to (`!address`): NT's description of it on a
-/// kernel target, the minidump's memory-info list on a user-mode minidump.
-#[record]
-pub enum AddressReport {
-    Nt(AddressDescription),
-    UserDump(UserAddressReport),
 }
 
 impl UsageSources {

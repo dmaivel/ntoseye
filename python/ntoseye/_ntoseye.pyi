@@ -25,6 +25,7 @@ class Ace(BaseRecord):
     An ACE in an ACL. ntoseye reads the mask and the SID separately, so a
     damaged body does not hide the type and flags of the header.
     """
+    __match_args__: Final[tuple[Literal["index"], Literal["type"], Literal["type_name"], Literal["flags"], Literal["flag_names"], Literal["access_mask"], Literal["sid"]]]
     @property
     def access_mask(self, /) -> Diagnostic[int]:
         """
@@ -57,6 +58,7 @@ class Acl(BaseRecord):
     """
     A decoded ACL header and its ACEs (`!acl`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["revision"], Literal["size"], Literal["ace_count"], Literal["bounded"], Literal["unknown_revision"], Literal["aces"]]]
     @property
     def ace_count(self, /) -> int: ...
     @property
@@ -90,6 +92,7 @@ class AddressDescription(BaseRecord):
     region, a kernel region, or nothing that ntoseye recognizes. Complements
     `pte_traverse` (how it's mapped) with where it lives.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["dtb"], Literal["kind"], Literal["module"], Literal["section"], Literal["va_type"], Literal["region"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -130,6 +133,7 @@ class AddressModule(BaseRecord):
     """
     The loaded module that contains an address.
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["base"], Literal["size"], Literal["offset"]]]
     @property
     def base(self, /) -> int:
         """
@@ -157,6 +161,7 @@ class AddressSummary(BaseRecord):
     WinDbg's `!address` summary: regions by usage, by type and protection of
     those in use, and by state.
     """
+    __match_args__: Final[tuple[Literal["by_usage"], Literal["by_type"], Literal["by_state"], Literal["by_protect"], Literal["total"], Literal["busy"]]]
     @property
     def busy(self, /) -> int:
         """
@@ -188,6 +193,7 @@ class AlpcClientPort(BaseRecord):
     A client communication port that a process holds, and the ports that it
     is connected to.
     """
+    __match_args__: Final[tuple[Literal["handle"], Literal["port"], Literal["queued"], Literal["connection_port"], Literal["connection_name"], Literal["server_port"], Literal["server_queued"], Literal["server_owner"], Literal["server_owner_name"]]]
     @property
     def connection_name(self, /) -> str |None: ...
     @property
@@ -223,6 +229,7 @@ class AlpcConnection(BaseRecord):
     A connection to an ALPC connection port, with its communication info
     and the two ports that it connects.
     """
+    __match_args__: Final[tuple[Literal["communication_info"], Literal["server_port"], Literal["server_queued"], Literal["client_port"], Literal["client_queued"], Literal["client_owner"], Literal["client_owner_name"]]]
     @property
     def client_owner(self, /) -> int:
         """
@@ -255,6 +262,7 @@ class AlpcField(BaseRecord):
     One `_KALPC_MESSAGE` pointer field: its PDB name, its snake_case name, and
     its value.
     """
+    __match_args__: Final[tuple[Literal["field"], Literal["key"], Literal["value"]]]
     @property
     def field(self, /) -> str: ...
     @property
@@ -268,6 +276,7 @@ class AlpcMessage(BaseRecord):
     A `_KALPC_MESSAGE` (`!alpc /m`). A field is None if this Windows build
     does not have it, or if ntoseye cannot read it.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["message_id"], Literal["callback_id"], Literal["sequence_no"], Literal["message_type"], Literal["data_length"], Literal["total_length"], Literal["client_process_id"], Literal["client_thread_id"], Literal["state"], Literal["queue_type"], Literal["queue_port_type"], Literal["state_flags"], Literal["owner_port"], Literal["owner_port_kind"], Literal["port_queue"], Literal["port_queue_kind"], Literal["port_queue_owner"], Literal["port_queue_owner_name"], Literal["cancel_sequence_no"], Literal["extension_buffer_size"], Literal["pointers"], Literal["attributes"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -358,6 +367,7 @@ class AlpcOwnedPort(BaseRecord):
     """
     A connection port that a process owns, and its connections.
     """
+    __match_args__: Final[tuple[Literal["handle"], Literal["port"], Literal["name"], Literal["connections"], Literal["termination"]]]
     @property
     def connections(self, /) -> list[AlpcConnection]: ...
     @property
@@ -375,6 +385,7 @@ class AlpcPort(BaseRecord):
     An `_ALPC_PORT` (`!alpc /p`). A field is None if this Windows build does
     not have it, or if ntoseye cannot read it.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["name"], Literal["pointer_count"], Literal["handle_count"], Literal["kind"], Literal["state"], Literal["port_type"], Literal["state_flags"], Literal["owner"], Literal["owner_name"], Literal["communication_info"], Literal["connection_port"], Literal["server_port"], Literal["client_port"], Literal["sequence_no"], Literal["completion_port"], Literal["completion_list"], Literal["port_context"], Literal["attribute_flags"], Literal["max_message_length"], Literal["queues"], Literal["direct_queue_length"], Literal["connections"], Literal["connection_termination"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -454,6 +465,7 @@ class AlpcProcessPorts(BaseRecord):
     """
     The ALPC ports that a process holds handles to (`!alpc /lpp`).
     """
+    __match_args__: Final[tuple[Literal["process"], Literal["created"], Literal["connected"], Literal["server_ports"], Literal["scanned_handles"], Literal["advertised_handles"], Literal["skipped_entries"]]]
     @property
     def advertised_handles(self, /) -> int:
         """
@@ -490,6 +502,7 @@ class AlpcQueue(BaseRecord):
     """
     One message queue of an ALPC port, or its wait queue.
     """
+    __match_args__: Final[tuple[Literal["field"], Literal["key"], Literal["length"], Literal["entries"], Literal["termination"]]]
     @property
     def entries(self, /) -> list[int]:
         """
@@ -525,6 +538,7 @@ class Amd64TrapFrame(BaseRecord):
     [`TrapKind`]). A register the entry does not write is `None` rather than
     whatever its slot held.
     """
+    __match_args__: Final[tuple[Literal["kind"], Literal["rax"], Literal["rbx"], Literal["rcx"], Literal["rdx"], Literal["rsi"], Literal["rdi"], Literal["rbp"], Literal["rsp"], Literal["r8"], Literal["r9"], Literal["r10"], Literal["r11"], Literal["rip"], Literal["cs"], Literal["ss"], Literal["eflags"], Literal["error_code"], Literal["previous_mode"], Literal["previous_irql"]]]
     @property
     def cs(self, /) -> int: ...
     @property
@@ -590,6 +604,7 @@ class Amd64UnwindCode(BaseRecord):
     """
     One AMD64 unwind code.
     """
+    __match_args__: Final[tuple[Literal["slot"], Literal["code_offset"], Literal["op"], Literal["op_info"], Literal["description"]]]
     @property
     def code_offset(self, /) -> int:
         """
@@ -623,6 +638,7 @@ class Amd64UnwindInfo(BaseRecord):
     """
     AMD64 `UNWIND_INFO`.
     """
+    __match_args__: Final[tuple[Literal["version"], Literal["flags"], Literal["prolog_size"], Literal["code_count"], Literal["frame_register"], Literal["frame_offset"], Literal["size"], Literal["codes"], Literal["handler"]]]
     @property
     def code_count(self, /) -> int:
         """
@@ -676,6 +692,7 @@ class Apc(BaseRecord):
     """
     A queued `_KAPC`.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["kernel_routine"], Literal["kernel_routine_symbol"], Literal["normal_routine"], Literal["normal_routine_symbol"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -705,6 +722,7 @@ class ApcQueues(BaseRecord):
     The APC queues of all threads, of one process, or of one thread
     (`!apc`).
     """
+    __match_args__: Final[tuple[Literal["selector"], Literal["threads"], Literal["total"], Literal["truncated"], Literal["layout_error"]]]
     @property
     def layout_error(self, /) -> str |None:
         """
@@ -728,7 +746,6 @@ class ApcQueues(BaseRecord):
         Whether the walk stopped at its entry limit.
         """
 
-@final
 class ApcSelector(BaseRecord):
     """
     The threads `!apc` inspects; `kind` says which.
@@ -738,18 +755,74 @@ class ApcSelector(BaseRecord):
         """
         The variant: `current_thread`, `thread`, `process`, `number`, `all`.
         """
-    @property
-    def number(self, /) -> int |None: ...
-    @property
-    def process(self, /) -> int |None: ...
-    @property
-    def thread(self, /) -> int |None: ...
+    @final
+    class All(ApcSelector):
+        """
+        Enumerate every thread in the bounded process/thread walk.
+        """
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["all"]:
+            """
+            `all`.
+            """
+    @final
+    class CurrentThread(ApcSelector):
+        """
+        Select the Windows thread currently selected by the session.
+        """
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["current_thread"]:
+            """
+            `current_thread`.
+            """
+    @final
+    class Number(ApcSelector):
+        """
+        Resolve a numeric target as a thread first, then a PID/EPROCESS.
+        """
+        __match_args__: Final[tuple[Literal["number"]]]
+        @property
+        def kind(self, /) -> Literal["number"]:
+            """
+            `number`.
+            """
+        @property
+        def number(self, /) -> int: ...
+    @final
+    class Process(ApcSelector):
+        """
+        Select all threads owned by a PID or EPROCESS value.
+        """
+        __match_args__: Final[tuple[Literal["process"]]]
+        @property
+        def kind(self, /) -> Literal["process"]:
+            """
+            `process`.
+            """
+        @property
+        def process(self, /) -> int: ...
+    @final
+    class Thread(ApcSelector):
+        """
+        Select a thread by ETHREAD, KTHREAD, or TID value.
+        """
+        __match_args__: Final[tuple[Literal["thread"]]]
+        @property
+        def kind(self, /) -> Literal["thread"]:
+            """
+            `thread`.
+            """
+        @property
+        def thread(self, /) -> int: ...
 
 @final
 class ApcThread(BaseRecord):
     """
     The kernel-mode and user-mode APC queues of a thread.
     """
+    __match_args__: Final[tuple[Literal["thread"], Literal["kernel"], Literal["user"], Literal["kernel_termination"], Literal["user_termination"], Literal["state_error"]]]
     @property
     def kernel(self, /) -> list[Apc]: ...
     @property
@@ -777,6 +850,7 @@ class ApicIcr(BaseRecord):
     """
     The interrupt command register, decoded.
     """
+    __match_args__: Final[tuple[Literal["raw"], Literal["vector"], Literal["delivery"], Literal["logical"], Literal["pending"], Literal["level_assert"], Literal["level_triggered"], Literal["shorthand"], Literal["destination"]]]
     @property
     def delivery(self, /) -> str: ...
     @property
@@ -804,6 +878,7 @@ class ApicLvt(BaseRecord):
     """
     A local vector table entry, decoded (Intel SDM vol. 3, 11.5.1).
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["raw"], Literal["vector"], Literal["delivery"], Literal["pending"], Literal["active_low"], Literal["remote_irr"], Literal["level"], Literal["masked"], Literal["timer_mode"]]]
     @property
     def active_low(self, /) -> bool: ...
     @property
@@ -840,6 +915,7 @@ class Arm64EpilogScope(BaseRecord):
     """
     One ARM64 epilog scope.
     """
+    __match_args__: Final[tuple[Literal["start_offset"], Literal["first_code"]]]
     @property
     def first_code(self, /) -> int:
         """
@@ -858,6 +934,7 @@ class Arm64PackedUnwind(BaseRecord):
     It describes a canonical prolog, and ntoseye lists it as the codes that
     it represents.
     """
+    __match_args__: Final[tuple[Literal["flag"], Literal["reg_f"], Literal["reg_i"], Literal["homes_arguments"], Literal["cr"], Literal["frame_size"], Literal["codes"]]]
     @property
     def codes(self, /) -> list[Arm64UnwindCode]: ...
     @property
@@ -906,6 +983,7 @@ class Arm64TrapFrame(BaseRecord):
     keeps the control and debug state beside the return context. A field
     that the build's frame lacks is `None`.
     """
+    __match_args__: Final[tuple[Literal["x"], Literal["lr"], Literal["fp"], Literal["pc"], Literal["sp"], Literal["cpsr"], Literal["esr"], Literal["fault_address"], Literal["bcr"], Literal["bvr"], Literal["wcr"], Literal["wvr"], Literal["previous_mode"], Literal["previous_irql"]]]
     @property
     def bcr(self, /) -> list[int |None]:
         """
@@ -964,6 +1042,7 @@ class Arm64UnwindCode(BaseRecord):
     """
     One ARM64 unwind code.
     """
+    __match_args__: Final[tuple[Literal["index"], Literal["bytes"], Literal["description"]]]
     @property
     def bytes(self, /) -> list[int]: ...
     @property
@@ -982,6 +1061,7 @@ class Arm64XdataUnwind(BaseRecord):
     """
     An ARM64 `.xdata` unwind record.
     """
+    __match_args__: Final[tuple[Literal["version"], Literal["exception_data"], Literal["epilog_in_header"], Literal["epilog_count"], Literal["code_words"], Literal["epilog_scopes"], Literal["size"], Literal["codes"], Literal["handler"]]]
     @property
     def code_words(self, /) -> int:
         """
@@ -1023,6 +1103,7 @@ class AttachedDevice(BaseRecord):
     """
     A device on the `AttachedDevice` stack of a device.
     """
+    __match_args__: Final[tuple[Literal["device"], Literal["driver_object"], Literal["device_type"], Literal["flags"]]]
     @property
     def device(self, /) -> int: ...
     @property
@@ -1037,6 +1118,7 @@ class BackendCapability(BaseRecord):
     """
     A row of the capability matrix of the backend.
     """
+    __match_args__: Final[tuple[Literal["capability"], Literal["supported"]]]
     @property
     def capability(self, /) -> Literal["memory_introspection", "execution_control", "interrupt_target", "single_step", "read_registers", "write_registers", "thread_list", "thread_selection", "kernel_breakpoints", "user_mode_breakpoints", "watchpoints", "target_reload_detection", "kernel_base_hint", "bugcheck_detection", "bugcheck_details", "module_load_events", "debug_output", "msr", "io_ports", "pci_config", "target_control", "target_file_io"]:
         """
@@ -1052,37 +1134,26 @@ class BackendCapability(BaseRecord):
 
 class BaseRecord:
     """
-    An immutable, ordered set of named fields with dict access. It is the base
-    of `Record` and of all typed result classes (`PciFunction`, ...), whose
-    properties give the type of each field.
+    An immutable result, the base of every typed result class
+    (`PciFunction`, ...), whose properties are its fields. Like a frozen
+    dataclass, it compares and hashes by class and fields, matches by
+    `__match_args__` (its fields, in order) and is not a container; use
+    `to_dict()` to walk the fields by name.
     """
-    def __contains__(self, key: str, /) -> bool: ...
-    def __dir__(self, /) -> list[str]: ...
-    def __eq__(self, other: object, /) -> bool: ...
-    def __getitem__(self, key: str, /) -> Any: ...
-    def __iter__(self, /) -> Iterator[str]: ...
-    def __len__(self, /) -> int: ...
+    def __eq__(self, other: object, /) -> bool:
+        """
+        Equal to a record of the same class with equal fields.
+        """
+    def __hash__(self, /) -> int:
+        """
+        The hash of the class and the fields; a `TypeError` when a field is
+        unhashable (a `list`), as for a frozen dataclass.
+        """
     def __repr__(self, /) -> str: ...
-    def get(self, /, key: str, default: Any |None = None) -> Any:
-        """
-        The field, or `default` if the record has no field with that name.
-        """
-    def items(self, /) -> list[tuple[str, Any]]:
-        """
-        `(name, value)` pairs, in order.
-        """
-    def keys(self, /) -> list[str]:
-        """
-        The field names, in order.
-        """
     def to_dict(self, /) -> dict[str, Any]:
         """
         A plain nested `dict`, with all records and diagnostics converted, for
         serializing or comparing a result.
-        """
-    def values(self, /) -> list[Any]:
-        """
-        The field values, in order.
         """
 
 @final
@@ -1090,6 +1161,7 @@ class BigPoolDetail(BaseRecord):
     """
     A large allocation from `PoolBigPageTable`.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["target"], Literal["size"], Literal["offset"], Literal["tag"], Literal["tag_name"], Literal["entry"], Literal["index"], Literal["nonpaged"], Literal["pattern"], Literal["pool_flags"], Literal["slush_size"]]]
     @property
     def address(self, /) -> int:
         """
@@ -1142,6 +1214,7 @@ class BlackboxFinding(BaseRecord):
     A blackbox record (pnp, ntfs, bsd, winlogon) of a crash dump: a block of
     its tagged data that ntoseye decodes as WinDbg's `!blackbox*` commands do.
     """
+    __match_args__: Final[tuple[Literal["kind"], Literal["name"], Literal["command"], Literal["size"], Literal["state"]]]
     @property
     def command(self, /) -> str:
         """
@@ -1162,7 +1235,6 @@ class BlackboxFinding(BaseRecord):
     @property
     def state(self, /) -> BlackboxState: ...
 
-@final
 class BlackboxState(BaseRecord):
     """
     What a dump holds of a blackbox: `decoded` (with `summary`, what it holds
@@ -1173,59 +1245,209 @@ class BlackboxState(BaseRecord):
         """
         The variant: `decoded`, `malformed`, `absent`.
         """
-    @property
-    def reason(self, /) -> str |None: ...
-    @property
-    def summary(self, /) -> str |None: ...
+    @final
+    class Absent(BlackboxState):
+        """
+        The dump has no block for the blackbox.
+        """
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["absent"]:
+            """
+            `absent`.
+            """
+    @final
+    class Decoded(BlackboxState):
+        """
+        The dump has the block, and it decodes; `summary` says what it holds.
+        """
+        __match_args__: Final[tuple[Literal["summary"]]]
+        @property
+        def kind(self, /) -> Literal["decoded"]:
+            """
+            `decoded`.
+            """
+        @property
+        def summary(self, /) -> str: ...
+    @final
+    class Malformed(BlackboxState):
+        """
+        The dump has the block, but it does not decode.
+        """
+        __match_args__: Final[tuple[Literal["reason"]]]
+        @property
+        def kind(self, /) -> Literal["malformed"]:
+            """
+            `malformed`.
+            """
+        @property
+        def reason(self, /) -> str: ...
 
-@final
 class BlockMatch(BaseRecord):
     """
     Where a searched address lands inside a heap, told apart by `kind`.
     """
     @property
-    def allocation(self, /) -> LargeAllocation |None: ...
-    @property
-    def block(self, /) -> NtVirtualBlock |None: ...
-    @property
-    def chunk(self, /) -> VsChunk |None: ...
-    @property
-    def entry(self, /) -> NtEntry |None: ...
-    @property
-    def index(self, /) -> int |None: ...
-    @property
     def kind(self, /) -> Literal["nt-entry", "nt-lfh-block", "nt-virtual", "nt-segment", "page", "vs-chunk", "lfh-block", "range", "large"]:
         """
         The variant: `nt-entry`, `nt-lfh-block`, `nt-virtual`, `nt-segment`, `page`, `vs-chunk`, `lfh-block`, `range`, `large`.
         """
-    @property
-    def range(self, /) -> PageRange |None: ...
-    @property
-    def region(self, /) -> NtUserBlocks |None: ...
-    @property
-    def segment(self, /) -> int |None:
+    @final
+    class Direct(BlockMatch):
         """
-        The `_HEAP_SEGMENT` that contains the entry.
+        A segment-heap range that the heap allocated directly from its
+        segment.
         """
-    @property
-    def stopped(self, /) -> HeapWalkStop |None:
+        __match_args__: Final[tuple[Literal["range"]]]
+        @property
+        def kind(self, /) -> Literal["page"]:
+            """
+            `page`.
+            """
+        @property
+        def range(self, /) -> PageRange: ...
+    @final
+    class Large(BlockMatch):
         """
-        Where the entry walk stopped, and why. None if the walk did not
-        stop early.
+        Inside a segment-heap large allocation.
         """
-    @property
-    def subsegment(self, /) -> LfhSubsegment |None: ...
-    @property
-    def vs_subsegment(self, /) -> int |None:
+        __match_args__: Final[tuple[Literal["allocation"]]]
+        @property
+        def allocation(self, /) -> LargeAllocation: ...
+        @property
+        def kind(self, /) -> Literal["large"]:
+            """
+            `large`.
+            """
+    @final
+    class LfhBlock(BlockMatch):
         """
-        The `_HEAP_VS_SUBSEGMENT` that contains the chunk.
+        Inside block `index` of a segment-heap LFH subsegment.
         """
+        __match_args__: Final[tuple[Literal["range"], Literal["subsegment"], Literal["index"]]]
+        @property
+        def index(self, /) -> int: ...
+        @property
+        def kind(self, /) -> Literal["lfh-block"]:
+            """
+            `lfh-block`.
+            """
+        @property
+        def range(self, /) -> PageRange: ...
+        @property
+        def subsegment(self, /) -> LfhSubsegment: ...
+    @final
+    class NtEntry(BlockMatch):
+        """
+        Inside an NT-heap entry.
+        """
+        __match_args__: Final[tuple[Literal["segment"], Literal["entry"]]]
+        @property
+        def entry(self, /) -> NtEntry: ...
+        @property
+        def kind(self, /) -> Literal["nt-entry"]:
+            """
+            `nt-entry`.
+            """
+        @property
+        def segment(self, /) -> int:
+            """
+            The `_HEAP_SEGMENT` that contains the entry.
+            """
+    @final
+    class NtLfhBlock(BlockMatch):
+        """
+        Inside a legacy-LFH block of an NT heap: block `index` of the user
+        block `region` in the busy `entry`.
+        """
+        __match_args__: Final[tuple[Literal["segment"], Literal["entry"], Literal["region"], Literal["index"]]]
+        @property
+        def entry(self, /) -> NtEntry: ...
+        @property
+        def index(self, /) -> int: ...
+        @property
+        def kind(self, /) -> Literal["nt-lfh-block"]:
+            """
+            `nt-lfh-block`.
+            """
+        @property
+        def region(self, /) -> NtUserBlocks: ...
+        @property
+        def segment(self, /) -> int: ...
+    @final
+    class NtSegmentOnly(BlockMatch):
+        """
+        Inside a segment but not on the chain: the heap header, an
+        uncommitted range, or past where the walk had to stop.
+        """
+        __match_args__: Final[tuple[Literal["segment"], Literal["stopped"]]]
+        @property
+        def kind(self, /) -> Literal["nt-segment"]:
+            """
+            `nt-segment`.
+            """
+        @property
+        def segment(self, /) -> int: ...
+        @property
+        def stopped(self, /) -> HeapWalkStop |None:
+            """
+            Where the entry walk stopped, and why. None if the walk did not
+            stop early.
+            """
+    @final
+    class NtVirtual(BlockMatch):
+        """
+        Inside an NT-heap virtually allocated block.
+        """
+        __match_args__: Final[tuple[Literal["block"]]]
+        @property
+        def block(self, /) -> NtVirtualBlock: ...
+        @property
+        def kind(self, /) -> Literal["nt-virtual"]:
+            """
+            `nt-virtual`.
+            """
+    @final
+    class RangeOnly(BlockMatch):
+        """
+        Inside a page range but outside its subsegment's blocks (header,
+        bitmap, or trailing slack).
+        """
+        __match_args__: Final[tuple[Literal["range"]]]
+        @property
+        def kind(self, /) -> Literal["range"]:
+            """
+            `range`.
+            """
+        @property
+        def range(self, /) -> PageRange: ...
+    @final
+    class VsChunk(BlockMatch):
+        """
+        Inside a segment-heap VS chunk.
+        """
+        __match_args__: Final[tuple[Literal["range"], Literal["vs_subsegment"], Literal["chunk"]]]
+        @property
+        def chunk(self, /) -> VsChunk: ...
+        @property
+        def kind(self, /) -> Literal["vs-chunk"]:
+            """
+            `vs-chunk`.
+            """
+        @property
+        def range(self, /) -> PageRange: ...
+        @property
+        def vs_subsegment(self, /) -> int:
+            """
+            The `_HEAP_VS_SUBSEGMENT` that contains the chunk.
+            """
 
 @final
 class BlockedIrp(BaseRecord):
     """
     The IRP of a 0x9F/0x3: where it is pending, and its `_POP_IRP_DATA`.
     """
+    __match_args__: Final[tuple[Literal["irp"], Literal["holder"], Literal["data"]]]
     @property
     def data(self, /) -> PowerIrp |None:
         """
@@ -1245,6 +1467,7 @@ class BootStatus(BaseRecord):
     The boot status data (`RTL_BSD_DATA`) the boot manager and the kernel
     keep in `bootstat.dat`. Sections past `version` (its size) are absent.
     """
+    __match_args__: Final[tuple[Literal["version"], Literal["truncated_to"], Literal["product_type"], Literal["auto_advanced_boot"], Literal["advanced_boot_menu_timeout"], Literal["last_boot_succeeded"], Literal["last_boot_shutdown"], Literal["sleep_in_progress"], Literal["power_transition"], Literal["boot_attempt_count"], Literal["last_boot_checkpoint"], Literal["checksum"], Literal["last_boot_id"], Literal["last_successful_shutdown_boot_id"], Literal["last_reported_abnormal_shutdown_boot_id"], Literal["error_info"], Literal["power_button"], Literal["transition_extension"], Literal["feature_configuration_state"]]]
     @property
     def advanced_boot_menu_timeout(self, /) -> int: ...
     @property
@@ -1470,6 +1693,7 @@ class BreakpointCommands(BaseRecord):
     """
     The commands that set the current breakpoints again (`.bpcmds`).
     """
+    __match_args__: Final[tuple[Literal["commands"]]]
     @property
     def commands(self, /) -> list[str]:
         """
@@ -1481,6 +1705,7 @@ class BreakpointHit(BaseRecord):
     """
     A breakpoint hit that stopped the target.
     """
+    __match_args__: Final[tuple[Literal["id"], Literal["kind"], Literal["address"], Literal["access"], Literal["length"], Literal["exit_reason"], Literal["symbol"], Literal["temporary"], Literal["action"], Literal["condition_error"]]]
     @property
     def access(self, /) -> Literal["execute", "write", "read_write"] |None:
         """
@@ -1519,6 +1744,7 @@ class BreakpointInfo(BaseRecord):
     """
     A code breakpoint or data watchpoint (`bl`), as the debugger keeps it.
     """
+    __match_args__: Final[tuple[Literal["id"], Literal["enabled"], Literal["symbol"], Literal["resolved"], Literal["processor"], Literal["hypercall"], Literal["vm_exit"], Literal["partition"], Literal["condition"], Literal["pass_count"], Literal["hit_count"], Literal["remaining_pass_count"], Literal["one_shot"], Literal["action"], Literal["temporary"], Literal["unchecked"]]]
     @property
     def action(self, /) -> str |None:
         """
@@ -1739,6 +1965,7 @@ class BsdErrorInfo(BaseRecord):
     """
     The error info section of the boot status data.
     """
+    __match_args__: Final[tuple[Literal["boot_id"], Literal["repeat_count"], Literal["other_error_count"], Literal["code"], Literal["status"]]]
     @property
     def boot_id(self, /) -> int: ...
     @property
@@ -1758,6 +1985,7 @@ class BugcheckAnalysis(BaseRecord):
     or the fault site), and the faulting instruction if ntoseye identified it.
     One source of truth for bugcheck analysis.
     """
+    __match_args__: Final[tuple[Literal["code"], Literal["name"], Literal["description"], Literal["driver"], Literal["args"], Literal["fault"], Literal["trap_frames"], Literal["source"]]]
     @property
     def args(self, /) -> list[BugcheckArg]:
         """
@@ -1812,6 +2040,7 @@ class BugcheckArg(BaseRecord):
     """
     One bugcheck parameter and what it means for the code.
     """
+    __match_args__: Final[tuple[Literal["value"], Literal["description"]]]
     @property
     def description(self, /) -> str:
         """
@@ -1826,6 +2055,7 @@ class BugcheckDecoding(BaseRecord):
     """
     A bugcheck code and parameters decoded (`!analyze -show`).
     """
+    __match_args__: Final[tuple[Literal["analysis"], Literal["power"]]]
     @property
     def analysis(self, /) -> BugcheckAnalysis: ...
     @property
@@ -1839,6 +2069,7 @@ class BugcheckFault(BaseRecord):
     """
     The instruction a bugcheck faulted at.
     """
+    __match_args__: Final[tuple[Literal["ip"], Literal["symbol"], Literal["driver"]]]
     @property
     def driver(self, /) -> str |None:
         """
@@ -1862,6 +2093,7 @@ class BugcheckInfo(BaseRecord):
     A bugcheck's code and its four parameters, and the driver the transport
     names for it.
     """
+    __match_args__: Final[tuple[Literal["code"], Literal["parameters"], Literal["driver"]]]
     @property
     def code(self, /) -> int: ...
     @property
@@ -1875,6 +2107,7 @@ class BugcheckTrapFrame(BaseRecord):
     A trap frame that a bugcheck parameter points to, with its decoded
     registers or the reason that decoding failed.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["rip_symbol"], Literal["error"]]]
     @property
     def address(self, /) -> int:
         """
@@ -1902,6 +2135,7 @@ class CacheAttribute(BaseRecord):
     """
     The `CacheAttribute` of a PFN.
     """
+    __match_args__: Final[tuple[Literal["value"]]]
     @property
     def name(self, /) -> str:
         """
@@ -1915,6 +2149,7 @@ class CachedFile(BaseRecord):
     """
     A file that the cache manager maps a view of.
     """
+    __match_args__: Final[tuple[Literal["shared_cache_map"], Literal["file_object"], Literal["file_name"], Literal["file_size"], Literal["valid_data_length"], Literal["open_count"], Literal["dirty_pages"], Literal["mapped_vacbs"], Literal["valid_bytes"]]]
     @property
     def dirty_pages(self, /) -> Diagnostic[int]: ...
     @property
@@ -1949,6 +2184,7 @@ class CallTrace(BaseRecord):
     A `wt` call trace: the call tree, the instructions that it stepped, and
     why it stopped ([`Session::trace_calls`]).
     """
+    __match_args__: Final[tuple[Literal["root"], Literal["instructions"]]]
     @property
     def end(self, /) -> str:
         """
@@ -1976,6 +2212,7 @@ class CallTraceFrame(BaseRecord):
     """
     One call-tree node of a `wt` trace.
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["instructions"], Literal["children"]]]
     @property
     def children(self, /) -> list[CallTraceFrame]:
         """
@@ -1998,6 +2235,7 @@ class CapturedRange(BaseRecord):
     One captured range of a dump without a memory-info list, with the usage
     the dump shows for its start.
     """
+    __match_args__: Final[tuple[Literal["start"], Literal["length"], Literal["usage"], Literal["detail"]]]
     @property
     def detail(self, /) -> str |None:
         """
@@ -2015,6 +2253,7 @@ class CapturedStack(BaseRecord):
     """
     The part of a thread's stack that a dump captured.
     """
+    __match_args__: Final[tuple[Literal["start"], Literal["size"]]]
     @property
     def size(self, /) -> int:
         """
@@ -2028,6 +2267,7 @@ class CellLocation(BaseRecord):
     """
     Where a cell of a hive is (`!reg cellindex`).
     """
+    __match_args__: Final[tuple[Literal["hive"], Literal["cell"], Literal["volatile"], Literal["address"], Literal["size"]]]
     @property
     def address(self, /) -> int:
         """
@@ -2076,6 +2316,7 @@ class ClassDevice(BaseRecord):
     """
     A storage class device as `!storagekd.storclass` lists it.
     """
+    __match_args__: Final[tuple[Literal["private_data"], Literal["fdo"], Literal["extension"], Literal["driver"], Literal["device_number"], Literal["vendor"], Literal["product"], Literal["revision"], Literal["serial"], Literal["bus_type"], Literal["removable"], Literal["boot_device"], Literal["packets_total"], Literal["packets_free"], Literal["in_flight"], Literal["packets_stopped"]]]
     @property
     def boot_device(self, /) -> bool: ...
     @property
@@ -2141,6 +2382,7 @@ class ClassDeviceDetail(BaseRecord):
     """
     One storage class device in detail.
     """
+    __match_args__: Final[tuple[Literal["device"], Literal["lower_device"], Literal["lower_pdo"], Literal["bytes_per_sector"], Literal["length"], Literal["timeout"], Literal["max_retries"], Literal["error_count"], Literal["errors"]]]
     @property
     def bytes_per_sector(self, /) -> int: ...
     @property
@@ -2177,6 +2419,7 @@ class ClassDevices(BaseRecord):
     """
     The storage class devices on `classpnp!AllFdosList`.
     """
+    __match_args__: Final[tuple[Literal["devices"], Literal["unreadable"], Literal["stopped"]]]
     @property
     def devices(self, /) -> list[ClassDevice]: ...
     @property
@@ -2196,6 +2439,7 @@ class ClassError(BaseRecord):
     One error classpnp logged (`_CLASS_ERROR_LOG_DATA`): the SRB that failed
     and its sense data.
     """
+    __match_args__: Final[tuple[Literal["tick"], Literal["port"], Literal["path"], Literal["target"], Literal["lun"], Literal["paging"], Literal["retried"], Literal["unhandled"], Literal["srb_status"], Literal["scsi_status"], Literal["cdb"], Literal["sense"]]]
     @property
     def age_ms(self, /) -> int |None:
         """
@@ -2245,6 +2489,7 @@ class ClassTransferPacket(BaseRecord):
     A transfer packet (`_TRANSFER_PACKET`) classpnp has sent down the stack
     and not seen completed.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["irp"], Literal["original_irp"], Literal["srb"], Literal["retries_left"], Literal["timed_out"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -2276,12 +2521,12 @@ class ClassUnreadable(BaseRecord):
     """
     A class device whose private data does not read.
     """
+    __match_args__: Final[tuple[Literal["private_data"], Literal["error"]]]
     @property
     def error(self, /) -> str: ...
     @property
     def private_data(self, /) -> int: ...
 
-@final
 class CodeOwner(BaseRecord):
     """
     What holds a code address: `kind` `module` (`name`, and `system` when
@@ -2295,25 +2540,59 @@ class CodeOwner(BaseRecord):
         """
         The variant: `module`, `dynamic_code`, `unowned`.
         """
-    @property
-    def name(self, /) -> str |None: ...
-    @property
-    def region(self, /) -> str |None: ...
-    @property
-    def system(self, /) -> bool |None: ...
-    @property
-    def table_end(self, /) -> int |None: ...
-    @property
-    def table_start(self, /) -> int |None: ...
+    @final
+    class DynamicCode(CodeOwner):
+        """
+        No module; a dynamic function table the process registered covers
+        it, as for JIT-compiled code. The table covers
+        `table_start..table_end`.
+        """
+        __match_args__: Final[tuple[Literal["table_start"], Literal["table_end"]]]
+        @property
+        def kind(self, /) -> Literal["dynamic_code"]:
+            """
+            `dynamic_code`.
+            """
+        @property
+        def table_end(self, /) -> int: ...
+        @property
+        def table_start(self, /) -> int: ...
+    @final
+    class Module(CodeOwner):
+        """
+        A loaded module. `system` when it is part of Windows or a language
+        runtime, which raise and dispatch exceptions on a caller's behalf.
+        """
+        __match_args__: Final[tuple[Literal["name"], Literal["system"]]]
+        @property
+        def kind(self, /) -> Literal["module"]:
+            """
+            `module`.
+            """
+        @property
+        def name(self, /) -> str: ...
+        @property
+        def system(self, /) -> bool: ...
+    @final
+    class Unowned(CodeOwner):
+        """
+        No module and no dynamic function table. `region` describes the
+        memory when the dump's memory-info list records it.
+        """
+        __match_args__: Final[tuple[Literal["region"]]]
+        @property
+        def kind(self, /) -> Literal["unowned"]:
+            """
+            `unowned`.
+            """
+        @property
+        def region(self, /) -> str |None: ...
 
-@final
 class CodeView(BaseRecord):
     """
     A CodeView debug record (`IMAGE_DEBUG_TYPE_CODEVIEW`), which identifies
     the PDB that the image was built with.
     """
-    @property
-    def age(self, /) -> int |None: ...
     @property
     def format(self, /) -> str:
         """
@@ -2329,16 +2608,47 @@ class CodeView(BaseRecord):
         """
         The variant: `rsds`, `nb10`.
         """
-    @property
-    def pdb(self, /) -> str |None:
+    @final
+    class Nb10(CodeView):
         """
-        The PDB path that the linker recorded.
+        PDB 2.0: a timestamp signature, an age, and the PDB path.
         """
-    @property
-    def signature(self, /) -> int |None:
+        __match_args__: Final[tuple[Literal["signature"], Literal["age"], Literal["pdb"]]]
+        @property
+        def age(self, /) -> int: ...
+        @property
+        def kind(self, /) -> Literal["nb10"]:
+            """
+            `nb10`.
+            """
+        @property
+        def pdb(self, /) -> str:
+            """
+            The PDB path that the linker recorded.
+            """
+        @property
+        def signature(self, /) -> int:
+            """
+            The PDB timestamp signature, for `NB10`.
+            """
+    @final
+    class Rsds(CodeView):
         """
-        The PDB timestamp signature, for `NB10`.
+        PDB 7.0: a GUID, an age, and the PDB path.
         """
+        __match_args__: Final[tuple[Literal["age"], Literal["pdb"]]]
+        @property
+        def age(self, /) -> int: ...
+        @property
+        def kind(self, /) -> Literal["rsds"]:
+            """
+            `rsds`.
+            """
+        @property
+        def pdb(self, /) -> str:
+            """
+            The PDB path that the linker recorded.
+            """
 
 @final
 class ControlAreaDetail(BaseRecord):
@@ -2346,6 +2656,7 @@ class ControlAreaDetail(BaseRecord):
     The `_CONTROL_AREA` of a section, with its segment and subsections
     (`!ca`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["segment"], Literal["section_references"], Literal["pfn_references"], Literal["mapped_views"], Literal["user_references"], Literal["flags"], Literal["flag_names"], Literal["file_object"], Literal["file_name"], Literal["segment_detail"], Literal["subsections"], Literal["subsections_stopped"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -2570,6 +2881,7 @@ class CpuFeatureBits(BaseRecord):
     """
     One `_KPRCB` feature-bit field.
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["value"]]]
     @property
     def name(self, /) -> str:
         """
@@ -2584,6 +2896,7 @@ class CpuInfo(BaseRecord):
     The vendor, family, model, speed, and feature bits of a processor
     (`!cpuinfo`).
     """
+    __match_args__: Final[tuple[Literal["processor"], Literal["kprcb"], Literal["source"], Literal["vendor"], Literal["vendor_id"], Literal["family"], Literal["model"], Literal["stepping"], Literal["mhz"], Literal["feature_bits"], Literal["triage_fallback"]]]
     @property
     def family(self, /) -> Diagnostic[int]: ...
     @property
@@ -2634,6 +2947,7 @@ class CpuTriageFallback(BaseRecord):
     The triage PRCB metadata of the dump, which ntoseye uses when it
     cannot read the KPRCB.
     """
+    __match_args__: Final[tuple[Literal["processor_number"], Literal["vendor"], Literal["family"], Literal["mhz"]]]
     @property
     def family(self, /) -> int: ...
     @property
@@ -2652,6 +2966,10 @@ class Cpus:
     The processors of the target, by number (`dbg.cpus[0]`,
     `dbg.cpus[stop.cpu]`). The target must be halted to list them.
     """
+    def __contains__(self, item: Any, /) -> bool:
+        """
+        Whether `item` is one of the items (`==`).
+        """
     def __getitem__(self, index: int, /) -> Cpu: ...
     def __iter__(self, /) -> Iterator[Cpu]: ...
     def __len__(self, /) -> int: ...
@@ -2670,6 +2988,7 @@ class CulpritAttribution(BaseRecord):
     Absence means the evidence was not sufficient to name a non-kernel
     culprit.
     """
+    __match_args__: Final[tuple[Literal["subject"], Literal["confidence"], Literal["evidence"]]]
     @property
     def confidence(self, /) -> Literal["low", "medium", "high"]: ...
     @property
@@ -2685,6 +3004,7 @@ class CulpritEvidence(BaseRecord):
     """
     One item of evidence for a culprit attribution.
     """
+    __match_args__: Final[tuple[Literal["kind"], Literal["detail"], Literal["address"]]]
     @property
     def address(self, /) -> int |None:
         """
@@ -2695,7 +3015,6 @@ class CulpritEvidence(BaseRecord):
     @property
     def kind(self, /) -> Literal["recorded_broken_driver", "recorded_bugcheck_driver", "bugcheck_fault_address", "exception_address", "current_instruction", "top_frame", "power_failure_driver", "pnp_lock_owner_stack", "first_non_system_frame"]: ...
 
-@final
 class CulpritSubject(BaseRecord):
     """
     What a culprit attribution names: `kind` `module` (`module`, its name),
@@ -2703,20 +3022,41 @@ class CulpritSubject(BaseRecord):
     dynamic function table covers, on a user-mode minidump).
     """
     @property
-    def dynamic_code(self, /) -> DynamicCodeCulprit |None: ...
-    @property
     def kind(self, /) -> Literal["module", "dynamic_code"]:
         """
         The variant: `module`, `dynamic_code`.
         """
-    @property
-    def module(self, /) -> str |None: ...
+    @final
+    class DynamicCode(CulpritSubject):
+        """
+        On a user-mode minidump, code no module holds that a dynamic
+        function table covers: JIT-compiled or otherwise generated code.
+        """
+        __match_args__: Final[tuple[Literal["dynamic_code"]]]
+        @property
+        def dynamic_code(self, /) -> DynamicCodeCulprit: ...
+        @property
+        def kind(self, /) -> Literal["dynamic_code"]:
+            """
+            `dynamic_code`.
+            """
+    @final
+    class Module(CulpritSubject):
+        __match_args__: Final[tuple[Literal["module"]]]
+        @property
+        def kind(self, /) -> Literal["module"]:
+            """
+            `module`.
+            """
+        @property
+        def module(self, /) -> str: ...
 
 @final
 class DataDirectory(BaseRecord):
     """
     One `IMAGE_DATA_DIRECTORY` entry.
     """
+    __match_args__: Final[tuple[Literal["index"], Literal["name"], Literal["rva"], Literal["size"]]]
     @property
     def index(self, /) -> int:
         """
@@ -2741,6 +3081,7 @@ class DebugLine(BaseRecord):
     """
     A captured line of guest debug output (DbgPrint, kernel printf).
     """
+    __match_args__: Final[tuple[Literal["seq"], Literal["timestamp_ms"], Literal["text"]]]
     @property
     def seq(self, /) -> int:
         """
@@ -2760,6 +3101,7 @@ class DebugOutputPage(BaseRecord):
     """
     A page of captured guest debug output, plus the cursor for the next poll.
     """
+    __match_args__: Final[tuple[Literal["lines"], Literal["next_seq"], Literal["dropped"]]]
     @property
     def dropped(self, /) -> bool:
         """
@@ -2780,6 +3122,7 @@ class DebugRecord(BaseRecord):
     One `IMAGE_DEBUG_DIRECTORY` entry as `!dh` shows it, with its CodeView
     record decoded when it is one.
     """
+    __match_args__: Final[tuple[Literal["codeview"]]]
     @property
     def address_of_raw_data(self, /) -> int: ...
     @property
@@ -3033,7 +3376,7 @@ class Debugger:
         of a switch go stale (`generation` advances). The target must be halted.
         This feature is experimental.
         """
-    def step(self, /, until: Literal["call", "ret", "branch"] |int |str |None = None, timeout: float |None = None) -> Stop:
+    def step(self, /, timeout: float |None = None, *, until: Literal["call", "ret", "branch"] |int |str |None = None) -> Stop:
         """
         Step one instruction (step into).
         """
@@ -3045,7 +3388,7 @@ class Debugger:
         from this call. Other threads that get to the address, and deeper calls of
         the same function, continue to run.
         """
-    def step_over(self, /, until: Literal["call", "ret", "branch"] |int |str |None = None, timeout: float |None = None) -> Stop:
+    def step_over(self, /, timeout: float |None = None, *, until: Literal["call", "ret", "branch"] |int |str |None = None) -> Stop:
         """
         Step over the current instruction.
         
@@ -3071,7 +3414,7 @@ class Debugger:
         """
         All Windows threads, keyed by TID: `threads[tid]`, `.at(ethread)`.
         """
-    def trace_calls(self, /, limit: int = 10000, timeout: float |None = None) -> CallTrace:
+    def trace_calls(self, /, timeout: float |None = None, *, limit: int = 10000) -> CallTrace:
         """
         Watch and trace calls until the current function returns.
         """
@@ -3111,6 +3454,7 @@ class DecodedHypercall(BaseRecord):
     TLFS lays it out (`!hvcall`): the one data model that the REPL, the MCP
     trailer, and the SDK show.
     """
+    __match_args__: Final[tuple[Literal["input_value"], Literal["name"], Literal["input_gpa"], Literal["output_gpa"], Literal["decoded"], Literal["fields"], Literal["elements"], Literal["unavailable"]]]
     @property
     def code(self, /) -> int:
         """
@@ -3194,6 +3538,7 @@ class DescriptorRegister(BaseRecord):
     """
     A descriptor-table register (IDTR/GDTR).
     """
+    __match_args__: Final[tuple[Literal["base"], Literal["limit"]]]
     @property
     def base(self, /) -> int: ...
     @property
@@ -3208,6 +3553,7 @@ class DevNodeDetail(BaseRecord):
     A decoded `_DEVICE_NODE` and, if requested, its flat subtree
     (`!devnode`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["pdo"], Literal["parent"], Literal["sibling"], Literal["child"], Literal["instance_path"], Literal["service_name"], Literal["state"], Literal["state_name"], Literal["previous_state"], Literal["previous_state_name"], Literal["state_history"], Literal["state_history_entry"], Literal["flags"], Literal["user_flags"], Literal["completion_status"], Literal["problem"], Literal["problem_name"], Literal["problem_status"], Literal["pending_irp"], Literal["subtree"], Literal["subtree_truncated"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -3283,6 +3629,7 @@ class DevNodePower(BaseRecord):
     """
     The power fields of the device node of a device's stack.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["instance_path"], Literal["current_state"], Literal["fx_device"], Literal["fx_pending_irp"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -3311,6 +3658,7 @@ class DevNodeSummary(BaseRecord):
     The identity and state of a device node, as the subtree and triage
     lists show them.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["pdo"], Literal["instance_path"], Literal["service_name"], Literal["state"], Literal["state_name"], Literal["problem"], Literal["problem_name"], Literal["problem_status"], Literal["pending_irp"], Literal["depth"]]]
     @property
     def address(self, /) -> int:
         """
@@ -3403,6 +3751,7 @@ class DeviceDriver(BaseRecord):
     """
     A driver, found from one of its device objects or its driver object.
     """
+    __match_args__: Final[tuple[Literal["driver_object"], Literal["name"], Literal["driver_start"], Literal["module"]]]
     @property
     def driver_object(self, /) -> int: ...
     @property
@@ -3424,6 +3773,7 @@ class DeviceNotifyState(BaseRecord):
     The device notification pass of a system power action
     (`_POP_DEVICE_SYS_STATE`, `PopAction.DevState`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["irp_minor"], Literal["system_state"], Literal["thread"], Literal["status"], Literal["failed_device"], Literal["waking"], Literal["cancelled"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -3446,6 +3796,7 @@ class DeviceObjectDetail(BaseRecord):
     """
     A `_DEVICE_OBJECT` and the devices attached above it (`!devobj`).
     """
+    __match_args__: Final[tuple[Literal["object"], Literal["via_pointer"], Literal["device_type"], Literal["flags"], Literal["characteristics"], Literal["driver_object"], Literal["attached_device"], Literal["next_device"], Literal["current_irp"], Literal["device_extension"], Literal["attached_stack"]]]
     @property
     def attached_device(self, /) -> int:
         """
@@ -3486,6 +3837,7 @@ class DevicePower(BaseRecord):
     """
     `!podev`: a device object's power state.
     """
+    __match_args__: Final[tuple[Literal["device"], Literal["driver"], Literal["flags"], Literal["extension"], Literal["power_flags"], Literal["system_state"], Literal["device_state"], Literal["idle"], Literal["devnode"], Literal["irps"]]]
     @property
     def device(self, /) -> int: ...
     @property
@@ -3535,6 +3887,7 @@ class DeviceStackDetail(BaseRecord):
     A device stack from the top filter to the PDO, and the device node of
     the PDO (`!devstack`).
     """
+    __match_args__: Final[tuple[Literal["argument"], Literal["requested_device"], Literal["entries"], Literal["pdo_devnode"], Literal["pdo_devnode_error"], Literal["truncated"]]]
     @property
     def argument(self, /) -> int:
         """
@@ -3570,6 +3923,7 @@ class DeviceStackEntry(BaseRecord):
     """
     A device object in a device stack.
     """
+    __match_args__: Final[tuple[Literal["device_object"], Literal["driver_object"], Literal["driver_name"], Literal["device_extension"], Literal["object_name"], Literal["is_argument"]]]
     @property
     def device_extension(self, /) -> int: ...
     @property
@@ -3592,6 +3946,7 @@ class DisasmOperand(BaseRecord):
     One explicit operand of a decoded instruction. Fields that do not apply
     to its `kind` are None.
     """
+    __match_args__: Final[tuple[Literal["kind"], Literal["text"], Literal["register"], Literal["full_register"], Literal["base"], Literal["index"], Literal["scale"], Literal["displacement"], Literal["size"], Literal["segment"], Literal["immediate"]]]
     @property
     def base(self, /) -> str |None:
         """
@@ -3661,6 +4016,7 @@ class DisasmRow(BaseRecord):
     describe the same instruction structurally, for code that follows code
     instead of reading it.
     """
+    __match_args__: Final[tuple[Literal["ip"], Literal["hex"], Literal["length"], Literal["comment"]]]
     @property
     def asm(self, /) -> str:
         """
@@ -3703,6 +4059,7 @@ class DmpException(BaseRecord):
     """
     The exception a crash dump recorded.
     """
+    __match_args__: Final[tuple[Literal["code"], Literal["flags"], Literal["address"], Literal["parameters"]]]
     @property
     def address(self, /) -> int:
         """
@@ -3732,6 +4089,7 @@ class DmpSystemInfo(BaseRecord):
     The system that a crash dump comes from, as the system-info stream of
     the dump records it.
     """
+    __match_args__: Final[tuple[Literal["major_version"], Literal["minor_version"], Literal["system_time"], Literal["system_up_time"], Literal["product_type"], Literal["suite_mask"], Literal["machine_image_type"], Literal["service_pack_build"]]]
     @property
     def machine(self, /) -> str:
         """
@@ -3793,6 +4151,7 @@ class Dpc(BaseRecord):
     """
     A queued `_KDPC`.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["deferred_routine"], Literal["deferred_routine_symbol"], Literal["context"], Literal["importance"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -3821,6 +4180,7 @@ class DpcQueue(BaseRecord):
     """
     One of a processor's DPC queues.
     """
+    __match_args__: Final[tuple[Literal["processor"], Literal["queue"], Literal["entries"], Literal["termination"]]]
     @property
     def entries(self, /) -> list[Dpc]: ...
     @property
@@ -3841,6 +4201,7 @@ class DpcQueues(BaseRecord):
     """
     The queued DPCs of all processors (`!dpcs`).
     """
+    __match_args__: Final[tuple[Literal["queues"], Literal["total"], Literal["truncated"], Literal["errors"]]]
     @property
     def errors(self, /) -> list[SchedulerError]: ...
     @property
@@ -3918,6 +4279,7 @@ class DriverDeviceLink(BaseRecord):
     """
     A device on the `DeviceObject`/`NextDevice` chain of a driver.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["device_type"], Literal["flags"], Literal["characteristics"], Literal["attached"], Literal["next"]]]
     @property
     def address(self, /) -> int:
         """
@@ -3945,6 +4307,7 @@ class DriverObjectDetail(BaseRecord):
     """
     A `_DRIVER_OBJECT` with its device chain and dispatch table (`!drvobj`).
     """
+    __match_args__: Final[tuple[Literal["object"], Literal["via_pointer"], Literal["name"], Literal["driver_start"], Literal["driver_size"], Literal["driver_section"], Literal["driver_unload"], Literal["devices"], Literal["dispatch"]]]
     @property
     def devices(self, /) -> list[DriverDeviceLink]:
         """
@@ -3986,6 +4349,7 @@ class DriverObjectInfo(BaseRecord):
     A `_DRIVER_OBJECT` from the Driver and FileSystem directories of the
     object manager (`drivers`).
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["object"], Literal["start"], Literal["size"], Literal["device_object"], Literal["driver_unload"]]]
     @property
     def device_object(self, /) -> int:
         """
@@ -4019,6 +4383,7 @@ class DriverQueueState(BaseRecord):
     """
     What the driver keeps of a split queue.
     """
+    __match_args__: Final[tuple[Literal["avail_idx"], Literal["last_used"], Literal["free"], Literal["unkicked"]]]
     @property
     def avail_idx(self, /) -> int:
         """
@@ -4070,6 +4435,7 @@ class DumpWrite(BaseRecord):
     """
     A kernel dump that `.dump` wrote.
     """
+    __match_args__: Final[tuple[Literal["path"], Literal["unreadable_pages"]]]
     @property
     def path(self, /) -> str: ...
     @property
@@ -4084,6 +4450,7 @@ class DynamicCodeCulprit(BaseRecord):
     Generated code a culprit attribution names: no module holds it, and a
     dynamic function table the process registered covers it.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["table_start"], Literal["table_end"], Literal["caller"]]]
     @property
     def address(self, /) -> int:
         """
@@ -4109,6 +4476,7 @@ class EptDifference(BaseRecord):
     A range of guest physical memory, `start..end`, that two EPTs map
     differently: with different access, or in one of them only (`None`).
     """
+    __match_args__: Final[tuple[Literal["start"], Literal["end"]]]
     @property
     def end(self, /) -> int:
         """
@@ -4134,6 +4502,7 @@ class EptMapping(BaseRecord):
     Where a guest physical address goes through one VTL's EPT, and the
     access that every level of the walk allows.
     """
+    __match_args__: Final[tuple[Literal["host_physical"], Literal["page_size"], Literal["read"], Literal["write"], Literal["execute"], Literal["user_execute"], Literal["memory_type"], Literal["entries"]]]
     @property
     def entries(self, /) -> list[int]:
         """
@@ -4174,6 +4543,7 @@ class ErrorCode(BaseRecord):
     """
     A decoded NTSTATUS, Win32, or HRESULT code (`!error`).
     """
+    __match_args__: Final[tuple[Literal["code"], Literal["kind"], Literal["name"], Literal["description"], Literal["severity"], Literal["facility"], Literal["customer"], Literal["win32_code"], Literal["win32_name"]]]
     @property
     def code(self, /) -> int: ...
     @property
@@ -4221,6 +4591,7 @@ class EtwBuffer(BaseRecord):
     """
     A trace buffer of a logger (`_WMI_BUFFER_HEADER`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["state"], Literal["state_name"], Literal["processor"], Literal["sequence_number"], Literal["timestamp"], Literal["saved_offset"], Literal["current_offset"], Literal["data_end"], Literal["reference_count"]]]
     @property
     def address(self, /) -> int:
         """
@@ -4258,6 +4629,7 @@ class EtwBufferIssue(BaseRecord):
     """
     A buffer in which ntoseye could not decode all events.
     """
+    __match_args__: Final[tuple[Literal["buffer"], Literal["offset"], Literal["reason"]]]
     @property
     def buffer(self, /) -> int:
         """
@@ -4279,6 +4651,7 @@ class EtwDumpData(BaseRecord):
     `EVENT_TRACE_ADDTO_TRIAGE_DUMP`, such as EventLog-System, and the system
     fields that the logfile header of an .etl records.
     """
+    __match_args__: Final[tuple[Literal["timer_resolution"], Literal["build_number"], Literal["cpu_mhz"], Literal["boot_time"], Literal["perf_frequency"], Literal["loggers"], Literal["stop"]]]
     @property
     def boot_time(self, /) -> int:
         """
@@ -4330,6 +4703,7 @@ class EtwDumpLogger(BaseRecord):
     session's header in the dump records of its `_WMI_LOGGER_CONTEXT`, and
     its buffers.
     """
+    __match_args__: Final[tuple[Literal["logger_id"], Literal["name"], Literal["logger_mode"], Literal["buffer_size"], Literal["start_time"], Literal["buffers"]]]
     @property
     def buffer_size(self, /) -> int:
         """
@@ -4381,6 +4755,7 @@ class EtwEvent(BaseRecord):
     An event that ntoseye decoded from a trace buffer, with the buffer it
     came from and its time.
     """
+    __match_args__: Final[tuple[Literal["buffer"], Literal["processor"], Literal["system_time"], Literal["record"], Literal["message_format"]]]
     @property
     def buffer(self, /) -> int:
         """
@@ -4412,6 +4787,7 @@ class EtwEventClass(BaseRecord):
     """
     `Class.Type`/`Level`/`Version` of a classic event.
     """
+    __match_args__: Final[tuple[Literal["type"], Literal["level"], Literal["version"]]]
     @property
     def level(self, /) -> int: ...
     @property
@@ -4424,6 +4800,7 @@ class EtwEventDescriptor(BaseRecord):
     """
     The `EVENT_DESCRIPTOR` of an `EVENT_HEADER` event.
     """
+    __match_args__: Final[tuple[Literal["id"], Literal["version"], Literal["channel"], Literal["level"], Literal["opcode"], Literal["task"], Literal["keyword"]]]
     @property
     def channel(self, /) -> int: ...
     @property
@@ -4445,6 +4822,7 @@ class EtwEventDump(BaseRecord):
     The events still in the buffers of a session, oldest first
     (`!wmitrace.logdump`).
     """
+    __match_args__: Final[tuple[Literal["logger"], Literal["buffers_walked"], Literal["list_stop"], Literal["total_events"], Literal["qpc_frequency"], Literal["cpu_mhz"], Literal["issues"], Literal["message_format_note"], Literal["events"]]]
     @property
     def buffers_walked(self, /) -> int: ...
     @property
@@ -4490,6 +4868,7 @@ class EtwExtendedItem(BaseRecord):
     """
     An `EVENT_HEADER` extended data item.
     """
+    __match_args__: Final[tuple[Literal["type"], Literal["data"]]]
     @property
     def data(self, /) -> bytes:
         """
@@ -4512,6 +4891,7 @@ class EtwLogFile(BaseRecord):
     The buffers of a session as an .etl file: a header buffer, then each
     buffer that holds events.
     """
+    __match_args__: Final[tuple[Literal["logger"], Literal["buffers"], Literal["list_stop"], Literal["issues"]]]
     @property
     def buffers(self, /) -> int:
         """
@@ -4542,6 +4922,7 @@ class EtwLogSave(BaseRecord):
     """
     An .etl file that `!wmitrace.logsave` wrote on the host.
     """
+    __match_args__: Final[tuple[Literal["path"], Literal["file"]]]
     @property
     def file(self, /) -> EtwLogFile: ...
     @property
@@ -4555,6 +4936,7 @@ class EtwLogger(BaseRecord):
     """
     An active ETW trace session, decoded from its `_WMI_LOGGER_CONTEXT`.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["logger_id"], Literal["name"], Literal["log_file_name"], Literal["logger_mode"], Literal["flags"], Literal["flag_names"], Literal["collection_on"], Literal["buffer_size"], Literal["maximum_event_size"], Literal["minimum_buffers"], Literal["maximum_buffers"], Literal["number_of_buffers"], Literal["buffers_available"], Literal["peak_buffers"], Literal["buffers_written"], Literal["events_lost"], Literal["log_buffers_lost"], Literal["real_time_buffers_delivered"], Literal["real_time_buffers_lost"], Literal["consumers"], Literal["start_time"], Literal["flush_timer"], Literal["flush_threshold"], Literal["maximum_file_size"], Literal["logger_thread"], Literal["logger_status"]]]
     @property
     def address(self, /) -> int:
         """
@@ -4668,6 +5050,7 @@ class EtwLoggerBuffers(BaseRecord):
     A logger and the buffers on its `GlobalList`
     (`!wmitrace.strdump <logger>`).
     """
+    __match_args__: Final[tuple[Literal["logger"], Literal["buffers"], Literal["list_stop"]]]
     @property
     def buffers(self, /) -> list[EtwBuffer]: ...
     @property
@@ -4684,6 +5067,7 @@ class EtwLoggerTable(BaseRecord):
     """
     All active ETW loggers of the host silo (`!wmitrace.strdump`).
     """
+    __match_args__: Final[tuple[Literal["silo_state"], Literal["context_array"], Literal["max_loggers"], Literal["loggers"]]]
     @property
     def context_array(self, /) -> int:
         """
@@ -4703,6 +5087,7 @@ class EtwMessage(BaseRecord):
     `TRACE_MESSAGE_*` option flags of the header select them. A field is
     `None` if the flags do not select it.
     """
+    __match_args__: Final[tuple[Literal["number"], Literal["option_flags"], Literal["sequence"], Literal["component_id"]]]
     @property
     def component_id(self, /) -> int |None: ...
     @property
@@ -4726,6 +5111,7 @@ class EtwMessageFormat(BaseRecord):
     A WPP message rendered from the trace message format (TMF) that a loaded
     PDB declares for it.
     """
+    __match_args__: Final[tuple[Literal["provider"], Literal["function"], Literal["level"], Literal["flags"]]]
     @property
     def flags(self, /) -> str |None:
         """
@@ -4763,6 +5149,7 @@ class EtwRecord(BaseRecord):
     An event record decoded from a trace buffer. A field is `None` if the
     header kind of the event does not have it.
     """
+    __match_args__: Final[tuple[Literal["offset"], Literal["header"], Literal["header_type"], Literal["size"], Literal["timestamp"], Literal["process_id"], Literal["thread_id"], Literal["descriptor"], Literal["event_flags"], Literal["hook_id"], Literal["event_class"], Literal["message"], Literal["extended"], Literal["payload"]]]
     @property
     def activity_id(self, /) -> str |None:
         """
@@ -4841,6 +5228,7 @@ class EventPolicies(BaseRecord):
     The configured exception policies and module load and unload filters
     (`sx`).
     """
+    __match_args__: Final[tuple[Literal["exceptions"], Literal["module_events"]]]
     @property
     def exceptions(self, /) -> list[ExceptionPolicy]:
         """
@@ -4858,6 +5246,7 @@ class ExceptionParameter(BaseRecord):
     One `ExceptionInformation` entry, with what it means for the code when
     that is known.
     """
+    __match_args__: Final[tuple[Literal["value"], Literal["label"], Literal["meaning"]]]
     @property
     def label(self, /) -> str |None:
         """
@@ -4877,6 +5266,7 @@ class ExceptionPolicy(BaseRecord):
     """
     One exception stop policy (`sx`).
     """
+    __match_args__: Final[tuple[Literal["code"], Literal["mode"], Literal["command"]]]
     @property
     def alias(self, /) -> str |None:
         """
@@ -4909,6 +5299,7 @@ class ExceptionRecord(BaseRecord):
     """
     A decoded `EXCEPTION_RECORD64` (`.exr`).
     """
+    __match_args__: Final[tuple[Literal["record_address"], Literal["code"], Literal["flags"], Literal["nested"], Literal["exception_address"], Literal["parameters"]]]
     @property
     def code(self, /) -> int:
         """
@@ -4949,6 +5340,7 @@ class ExceptionStop(BaseRecord):
     """
     A Windows exception that stopped the target.
     """
+    __match_args__: Final[tuple[Literal["code"], Literal["first_chance"], Literal["address"]]]
     @property
     def address(self, /) -> int |None:
         """
@@ -4987,7 +5379,7 @@ class Exceptions:
         ordinary exceptions break by default and module loads and unloads do
         not stop.
         """
-    def set(self, /, code: int |str, mode: Literal["break", "second_chance", "notify", "ignore"] |None = None, *, command: str |None = None, disposition: Literal["break", "handled", "not_handled"] |None = None) -> ExceptionPolicy:
+    def set(self, /, code: int |str, *, mode: Literal["break", "second_chance", "notify", "ignore"] |None = None, command: str |None = None, disposition: Literal["break", "handled", "not_handled"] |None = None) -> ExceptionPolicy:
         """
         Set how the debugger handles an exception, by NTSTATUS code or WinDbg
         alias (`av`, `bpe`, ...), and return its policy.
@@ -4997,7 +5389,7 @@ class Exceptions:
         or continue the exception as handled or not handled. For a module load
         or unload filter, use `set_module_event`.
         """
-    def set_module_event(self, /, event: Literal["ld", "ud"], module: str |None = None, mode: Literal["break", "second_chance", "notify", "ignore"] |None = None, *, command: str |None = None) -> ModuleEventPolicy:
+    def set_module_event(self, /, event: Literal["ld", "ud"], module: str |None = None, *, mode: Literal["break", "second_chance", "notify", "ignore"] |None = None, command: str |None = None) -> ModuleEventPolicy:
         """
         Set a filter for a kernel module load (`ld`) or unload (`ud`), and return
         it.
@@ -5017,6 +5409,7 @@ class ExecutiveResource(BaseRecord):
     """
     An `_ERESOURCE` (`!locks <address>`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["active_count"], Literal["flags"], Literal["contention_count"], Literal["shared_waiters"], Literal["exclusive_waiters"], Literal["owners"]]]
     @property
     def active_count(self, /) -> Diagnostic[int]: ...
     @property
@@ -5048,6 +5441,7 @@ class ExitFilter(BaseRecord):
     Vol. 3D, Appendix C), optionally only from one partition or one of its
     VPs.
     """
+    __match_args__: Final[tuple[Literal["reason"], Literal["partition"], Literal["vp"]]]
     @property
     def name(self, /) -> str |None:
         """
@@ -5075,6 +5469,7 @@ class ExportDirectory(BaseRecord):
     """
     `IMAGE_EXPORT_DIRECTORY` and the DLL name it points at.
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["characteristics"], Literal["time_date_stamp"], Literal["ordinal_base"], Literal["number_of_functions"], Literal["number_of_names"], Literal["address_of_functions"], Literal["address_of_names"], Literal["address_of_name_ordinals"]]]
     @property
     def address_of_functions(self, /) -> int: ...
     @property
@@ -5108,6 +5503,7 @@ class FailureSignature(BaseRecord):
     A deterministic identity for a failure that does not depend on
     addresses, so you can use it to compare failures.
     """
+    __match_args__: Final[tuple[Literal["code_kind"], Literal["code"], Literal["module"], Literal["symbol"], Literal["source"], Literal["components"], Literal["bucket"]]]
     @property
     def bucket(self, /) -> str:
         """
@@ -5143,6 +5539,7 @@ class FieldInfo(BaseRecord):
     """
     The PDB layout of a field: its byte offset, byte size, and type.
     """
+    __match_args__: Final[tuple[Literal["offset"], Literal["size"]]]
     @property
     def offset(self, /) -> int:
         """
@@ -5165,6 +5562,7 @@ class FileCacheDetail(BaseRecord):
     The mapped views of the cache manager, from its VACB arrays
     (`!filecache`).
     """
+    __match_args__: Final[tuple[Literal["vacb_arrays"], Literal["free_vacbs"], Literal["active_vacbs"], Literal["mapped_bytes"], Literal["valid_bytes"], Literal["files"], Literal["file_count"], Literal["interrupted"]]]
     @property
     def active_vacbs(self, /) -> int:
         """
@@ -5207,6 +5605,7 @@ class FileHeader(BaseRecord):
     """
     `IMAGE_FILE_HEADER`.
     """
+    __match_args__: Final[tuple[Literal["machine"], Literal["number_of_sections"], Literal["time_date_stamp"], Literal["pointer_to_symbol_table"], Literal["number_of_symbols"], Literal["size_of_optional_header"], Literal["characteristics"]]]
     @property
     def characteristics(self, /) -> int: ...
     @property
@@ -5237,6 +5636,7 @@ class FileObject(BaseRecord):
     """
     A `_FILE_OBJECT` (`!fileobj`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["file_type"], Literal["size"], Literal["device_object"], Literal["device_type"], Literal["device_name"], Literal["file_name"], Literal["related_file_object"], Literal["flags"], Literal["current_byte_offset"], Literal["fs_context"], Literal["fs_context2"], Literal["section_object_pointer"], Literal["private_cache_map"], Literal["final_status"], Literal["lock_operation"], Literal["delete_pending"], Literal["read_access"], Literal["write_access"], Literal["delete_access"], Literal["shared_read"], Literal["shared_write"], Literal["shared_delete"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -5305,6 +5705,7 @@ class FindStack(BaseRecord):
     Threads with a stack frame that matches a symbol or module
     (`!findstack`).
     """
+    __match_args__: Final[tuple[Literal["pattern"], Literal["level"], Literal["scanned_threads"], Literal["interrupted"], Literal["threads"], Literal["unwalked"]]]
     @property
     def interrupted(self, /) -> bool:
         """
@@ -5330,6 +5731,7 @@ class FindStackThread(BaseRecord):
     """
     A thread with a stack frame that matches the `!findstack` pattern.
     """
+    __match_args__: Final[tuple[Literal["thread"], Literal["matches"]]]
     @property
     def active(self, /) -> int |None:
         """
@@ -5370,6 +5772,7 @@ class FltFilterDetail(BaseRecord):
     """
     A registered minifilter (`_FLT_FILTER`) and its instances.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["name"], Literal["altitude"], Literal["driver_object"], Literal["instances"], Literal["instances_stopped"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -5392,6 +5795,7 @@ class FltFilterFrame(BaseRecord):
     """
     A filter manager frame (`_FLTP_FRAME`) and its registered minifilters.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["frame_id"], Literal["filters"], Literal["stopped"]]]
     @property
     def address(self, /) -> int:
         """
@@ -5414,6 +5818,7 @@ class FltFilters(BaseRecord):
     The registered minifilters of each filter manager frame
     (`!fltkd.filters`).
     """
+    __match_args__: Final[tuple[Literal["frames"], Literal["stopped"]]]
     @property
     def frames(self, /) -> list[FltFilterFrame]: ...
     @property
@@ -5428,6 +5833,7 @@ class FltInstanceDetail(BaseRecord):
     """
     A minifilter attached to a volume (`_FLT_INSTANCE`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["name"], Literal["altitude"], Literal["filter"], Literal["filter_name"], Literal["volume"], Literal["volume_name"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -5454,6 +5860,7 @@ class FltInstanceFrame(BaseRecord):
     """
     A filter manager frame and its minifilter instances.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["frame_id"], Literal["instances"], Literal["stopped"]]]
     @property
     def address(self, /) -> int:
         """
@@ -5476,6 +5883,7 @@ class FltInstances(BaseRecord):
     The minifilter instances of each filter manager frame
     (`!fltkd.instances`).
     """
+    __match_args__: Final[tuple[Literal["frames"], Literal["stopped"]]]
     @property
     def frames(self, /) -> list[FltInstanceFrame]: ...
     @property
@@ -5491,6 +5899,7 @@ class FltVolumeDetail(BaseRecord):
     A volume that the filter manager attached to (`_FLT_VOLUME`), and the
     instances on it.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["device_name"], Literal["file_system"], Literal["instances"], Literal["instances_stopped"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -5514,6 +5923,7 @@ class FltVolumeFrame(BaseRecord):
     """
     A filter manager frame and its volumes.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["frame_id"], Literal["volumes"], Literal["stopped"]]]
     @property
     def address(self, /) -> int:
         """
@@ -5535,6 +5945,7 @@ class FltVolumes(BaseRecord):
     """
     The volumes of each filter manager frame (`!fltkd.volumes`).
     """
+    __match_args__: Final[tuple[Literal["frames"], Literal["stopped"]]]
     @property
     def frames(self, /) -> list[FltVolumeFrame]: ...
     @property
@@ -5612,6 +6023,7 @@ class FunctionDisassembly(BaseRecord):
     """
     A disassembled function (`uf`).
     """
+    __match_args__: Final[tuple[Literal["symbol"], Literal["length"], Literal["rows"]]]
     @property
     def length(self, /) -> int:
         """
@@ -5634,6 +6046,7 @@ class FunctionEntry(BaseRecord):
     The function-table entry that covers an address, and the entry of each
     chained parent (`.fnent`).
     """
+    __match_args__: Final[tuple[Literal["module"], Literal["image_base"], Literal["entries"], Literal["incomplete"]]]
     @property
     def entries(self, /) -> list[RuntimeFunction]:
         """
@@ -5659,6 +6072,7 @@ class Gdt(BaseRecord):
     """
     The GDT of a processor and its bounded descriptors (`!gdt`).
     """
+    __match_args__: Final[tuple[Literal["processor"], Literal["base"], Literal["limit"], Literal["entry_count"], Literal["truncated"], Literal["entries"]]]
     @property
     def base(self, /) -> int:
         """
@@ -5693,6 +6107,7 @@ class GdtDescriptor(BaseRecord):
     """
     One decoded GDT descriptor. A system descriptor uses two slots.
     """
+    __match_args__: Final[tuple[Literal["index"], Literal["raw"], Literal["high_raw"], Literal["base"], Literal["limit"], Literal["type_code"], Literal["descriptor_kind"], Literal["dpl"], Literal["present"], Literal["long_mode"], Literal["default_size"], Literal["granularity"]]]
     @property
     def base(self, /) -> Diagnostic[int]:
         """
@@ -5758,6 +6173,7 @@ class GlobalFlag(BaseRecord):
     One GFlags flag: its bit, GFlags abbreviation (`hpa`, `ust`, ...), and
     description.
     """
+    __match_args__: Final[tuple[Literal["bit"], Literal["abbreviation"], Literal["description"]]]
     @property
     def abbreviation(self, /) -> str:
         """
@@ -5776,6 +6192,7 @@ class GlobalFlagUpdate(BaseRecord):
     """
     A change `!gflag` made to `nt!NtGlobalFlag`: its value before and after.
     """
+    __match_args__: Final[tuple[Literal["old"], Literal["new"]]]
     @property
     def new(self, /) -> int: ...
     @property
@@ -5787,6 +6204,7 @@ class GlobalFlags(BaseRecord):
     `nt!NtGlobalFlag` and the `_PEB.NtGlobalFlag` of the current process
     (`!gflag`), and the change the command made to `nt!NtGlobalFlag`.
     """
+    __match_args__: Final[tuple[Literal["kernel_address"], Literal["kernel"], Literal["process"], Literal["process_flags"], Literal["change"]]]
     @property
     def change(self, /) -> GlobalFlagUpdate |None:
         """
@@ -5831,6 +6249,7 @@ class HalController(BaseRecord):
     An interrupt controller the HAL registered
     (`_REGISTERED_INTERRUPT_CONTROLLER`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["kind"], Literal["unit_id"], Literal["resource_id"], Literal["min_line"], Literal["max_line"], Literal["problem"], Literal["ranges"], Literal["ranges_stopped"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -5865,6 +6284,7 @@ class HalControllers(BaseRecord):
     The interrupt controllers on `nt!HalpRegisteredInterruptControllers`
     (`!ioapic`), in list order.
     """
+    __match_args__: Final[tuple[Literal["controllers"], Literal["stopped"]]]
     @property
     def controllers(self, /) -> list[HalController |HalUnreadable]: ...
     @property
@@ -5879,6 +6299,7 @@ class HalLine(BaseRecord):
     A line of an interrupt controller as the HAL set it
     (`_INTERRUPT_LINE_STATE`).
     """
+    __match_args__: Final[tuple[Literal["line"], Literal["gsi"], Literal["vector"], Literal["irql"], Literal["level"], Literal["polarity"], Literal["target"], Literal["flags"]]]
     @property
     def flags(self, /) -> int: ...
     @property
@@ -5911,6 +6332,7 @@ class HalLineRange(BaseRecord):
     """
     A range of a controller's lines (`_INTERRUPT_LINES`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["kind"], Literal["min_line"], Literal["max_line"], Literal["gsi_base"], Literal["lines"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -5935,6 +6357,7 @@ class HalUnreadable(BaseRecord):
     """
     A controller that does not read.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["error"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -5945,6 +6368,7 @@ class HandleEntry(BaseRecord):
     """
     A handle-table entry (`!handle <handle>`).
     """
+    __match_args__: Final[tuple[Literal["handle"], Literal["entry"], Literal["object"], Literal["type_name"], Literal["name"], Literal["granted_access"], Literal["attributes"]]]
     @property
     def attributes(self, /) -> Diagnostic[int]:
         """
@@ -5977,6 +6401,7 @@ class HandleTable(BaseRecord):
     """
     The handle table of a process (`!handle`).
     """
+    __match_args__: Final[tuple[Literal["process"], Literal["table"], Literal["table_level"], Literal["advertised_handles"], Literal["scanned_handles"], Literal["skipped_entries"], Literal["truncated"], Literal["entries"]]]
     @property
     def advertised_handles(self, /) -> int:
         """
@@ -6018,6 +6443,7 @@ class HandleTrace(BaseRecord):
     """
     One `_HANDLE_TRACE_DB_ENTRY`.
     """
+    __match_args__: Final[tuple[Literal["handle"], Literal["kind"], Literal["process_id"], Literal["thread_id"], Literal["stack"]]]
     @property
     def handle(self, /) -> int: ...
     @property
@@ -6045,6 +6471,7 @@ class HandleTraceFrame(BaseRecord):
     """
     A return address on the stack of a handle trace.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["symbol"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -6059,6 +6486,7 @@ class HandleTraces(BaseRecord):
     """
     The handle traces of a process (`!htrace`).
     """
+    __match_args__: Final[tuple[Literal["process"], Literal["object_table"], Literal["debug_info"], Literal["table_size"], Literal["recorded"], Literal["parsed"], Literal["unreadable"], Literal["traces"]]]
     @property
     def debug_info(self, /) -> int |None:
         """
@@ -6103,6 +6531,7 @@ class HangProcessor(BaseRecord):
     """
     A processor in `!analyze -hang`, and the thread running on it.
     """
+    __match_args__: Final[tuple[Literal["processor"]]]
     @property
     def current(self, /) -> Diagnostic[HangThread]:
         """
@@ -6117,6 +6546,7 @@ class HangReport(BaseRecord):
     What `!analyze -hang` found: the thread on each processor with its
     stack, and the waiting threads.
     """
+    __match_args__: Final[tuple[Literal["processors"]]]
     @property
     def processors(self, /) -> list[HangProcessor]:
         """
@@ -6134,6 +6564,7 @@ class HangThread(BaseRecord):
     """
     A thread running on a processor, with its stack.
     """
+    __match_args__: Final[tuple[Literal["thread"]]]
     @property
     def stack(self, /) -> Diagnostic[list[StackFrame]]:
         """
@@ -6165,7 +6596,7 @@ class Heap:
         """
         The `HeapInfo` record of this handle: its properties as one value.
         """
-    def inspect(self, /, list_entries: bool = False) -> HeapDetail:
+    def inspect(self, /, *, list_entries: bool = False) -> HeapDetail:
         """
         Decode this heap (`!heap -h`), with its entries if `list_entries` is
         true.
@@ -6192,6 +6623,7 @@ class HeapBlock(BaseRecord):
     One block of a heap walk: an NT legacy-LFH block, a segment-heap VS
     chunk, or a segment-heap LFH block.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["size"], Literal["previous_size"], Literal["flags"], Literal["state"], Literal["kind"], Literal["unused_bytes"], Literal["checksum_ok"], Literal["user"], Literal["user_size"], Literal["index"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -6254,6 +6686,7 @@ class HeapBlockSearch(BaseRecord):
     The heap block that contains an address (`!heap -x <addr>`,
     `Heaps.find_block()`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["found"], Literal["truncated"], Literal["heap"], Literal["block"], Literal["errors"]]]
     @property
     def address(self, /) -> int:
         """
@@ -6292,6 +6725,7 @@ class HeapDetail(BaseRecord):
     """
     One decoded heap (`!heap -h|-a <heap>`, `Heap.inspect()`).
     """
+    __match_args__: Final[tuple[Literal["index"], Literal["address"], Literal["list_entries"], Literal["nt"], Literal["segment"], Literal["error"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -6332,6 +6766,7 @@ class HeapIdentity(BaseRecord):
     """
     A heap, identified by its PEB-list position, address, and kind.
     """
+    __match_args__: Final[tuple[Literal["index"], Literal["address"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -6350,6 +6785,7 @@ class HeapInfo(BaseRecord):
     """
     One heap of a process, from its PEB heap list (`!heap -s`).
     """
+    __match_args__: Final[tuple[Literal["index"], Literal["address"], Literal["stats"]]]
     @property
     def address(self, /) -> int:
         """
@@ -6377,6 +6813,7 @@ class HeapStats(BaseRecord):
     """
     A heap's sizes, in bytes, and allocator counts (`!heap -s`).
     """
+    __match_args__: Final[tuple[Literal["flags"], Literal["reserved"], Literal["committed"], Literal["free"], Literal["segments"], Literal["virtual_blocks"], Literal["front_end"], Literal["vs_subsegments"], Literal["lfh_subsegments"], Literal["page_allocations"], Literal["large_allocations"]]]
     @property
     def committed(self, /) -> int: ...
     @property
@@ -6411,6 +6848,7 @@ class HeapWalkStop(BaseRecord):
     """
     The address where a heap walk stopped, and the reason.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["reason"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -6421,6 +6859,10 @@ class Heaps:
     """
     The PEB heap list of a process.
     """
+    def __contains__(self, item: Any, /) -> bool:
+        """
+        Whether `item` is one of the items (`==`).
+        """
     def __getitem__(self, index: int, /) -> Heap: ...
     def __iter__(self, /) -> Iterator[Heap]: ...
     def __len__(self, /) -> int: ...
@@ -6439,6 +6881,7 @@ class Hive(BaseRecord):
     """
     A loaded hive (`_CMHIVE`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["master"], Literal["mount"], Literal["file"], Literal["base_block"], Literal["base_block_name"], Literal["root_cell"], Literal["version"], Literal["flags"], Literal["flat"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -6511,6 +6954,7 @@ class HiveList(BaseRecord):
     """
     The loaded hives (`!reg hivelist`).
     """
+    __match_args__: Final[tuple[Literal["stopped"]]]
     @property
     def hives(self, /) -> list[Hive]:
         """
@@ -6532,6 +6976,7 @@ class HvPartition(BaseRecord):
     """
     A partition of the Windows hypervisor, as it was when listed.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["id"], Literal["parent_id"], Literal["privileges"], Literal["virtual_processors"]]]
     @property
     def address(self, /) -> int:
         """
@@ -6571,6 +7016,7 @@ class HvProcessor(BaseRecord):
     A logical processor whose current VP a VP is: the one that runs it, or
     ran it last.
     """
+    __match_args__: Final[tuple[Literal["block"], Literal["number"]]]
     @property
     def block(self, /) -> int:
         """
@@ -6587,6 +7033,7 @@ class HvVirtualProcessor(BaseRecord):
     """
     A virtual processor of a Windows hypervisor partition.
     """
+    __match_args__: Final[tuple[Literal["index"], Literal["address"], Literal["vtl"], Literal["vtls"], Literal["processors"]]]
     @property
     def address(self, /) -> int:
         """
@@ -6620,6 +7067,7 @@ class HvVtl(BaseRecord):
     One VTL of a virtual processor: the hypervisor's context for it and, when
     found, its eVMCS and the guest state saved there.
     """
+    __match_args__: Final[tuple[Literal["level"], Literal["context"], Literal["vmcs"]]]
     @property
     def context(self, /) -> int:
         """
@@ -6662,6 +7110,7 @@ class Hypercall(BaseRecord):
     dispatches it: its handler, its kind, and the sizes of its fixed input
     and output and of each rep element.
     """
+    __match_args__: Final[tuple[Literal["code"], Literal["implemented"], Literal["handler"], Literal["input_size"], Literal["input_element_size"], Literal["output_size"], Literal["output_element_size"]]]
     @property
     def code(self, /) -> int: ...
     @property
@@ -6774,6 +7223,7 @@ class HypercallCallerInfo(BaseRecord):
     hypercall breakpoint's filter find it: the call as the caller made it,
     and the caller's memory, which a hypercall breakpoint's condition reads.
     """
+    __match_args__: Final[tuple[Literal["partition_id"], Literal["root"], Literal["vp_index"], Literal["vtl"]]]
     @property
     def hypercall(self, /) -> DecodedHypercall |None:
         """
@@ -6807,6 +7257,7 @@ class HypercallElement(BaseRecord):
     """
     One element of a rep hypercall's input list.
     """
+    __match_args__: Final[tuple[Literal["index"], Literal["fields"]]]
     @property
     def fields(self, /) -> list[HypercallField]: ...
     @property
@@ -6817,6 +7268,7 @@ class HypercallField(BaseRecord):
     """
     One field of a hypercall's input, as the Hyper-V TLFS lays it out.
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["offset"], Literal["size"], Literal["value"], Literal["meaning"]]]
     @property
     def meaning(self, /) -> str |None:
         """
@@ -6855,6 +7307,7 @@ class HypercallFilter(BaseRecord):
     Like the thread filter, the caller is known only once the hit arrives:
     the VP whose exit the processor handles, and the code in its RCX.
     """
+    __match_args__: Final[tuple[Literal["code"], Literal["partition"], Literal["vp"]]]
     @property
     def code(self, /) -> int:
         """
@@ -7032,7 +7485,7 @@ class HypervisorVtl:
         `None` when ntoseye did not find where the context keeps it (no
         `hv-evmcs`).
         """
-    def vmcs_fields(self, /) -> Record:
+    def vmcs_fields(self, /) -> dict[str, int]:
         """
         Every field of this VTL's eVMCS, read now, named as the TLFS names it
         (`guest_rip`, `msr_bitmap`, ...), as `!hvvmcs` shows them:
@@ -7046,6 +7499,7 @@ class IdleDetection(BaseRecord):
     The idle detection a driver registered with
     `PoRegisterDeviceForIdleDetection` (`_DEVICE_OBJECT_POWER_EXTENSION`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["idle_count"], Literal["busy_count"], Literal["busy_reference"], Literal["total_busy_count"], Literal["conservation_idle_time"], Literal["performance_idle_time"], Literal["idle_type"], Literal["idle_state"], Literal["current_state"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -7080,6 +7534,7 @@ class Idt(BaseRecord):
     The IDT of a processor (`!idt`), with one vector or the bounded full
     table.
     """
+    __match_args__: Final[tuple[Literal["processor"], Literal["base"], Literal["limit"], Literal["vector"], Literal["truncated"], Literal["entries"]]]
     @property
     def base(self, /) -> int:
         """
@@ -7113,6 +7568,7 @@ class IdtGate(BaseRecord):
     """
     One decoded AMD64 IDT gate.
     """
+    __match_args__: Final[tuple[Literal["vector"], Literal["address"], Literal["handler"], Literal["symbol"], Literal["selector"], Literal["ist"], Literal["gate_type"], Literal["gate_name"], Literal["dpl"], Literal["present"], Literal["non_nt_hook"], Literal["ki_isr_thunk"]]]
     @property
     def address(self, /) -> int:
         """
@@ -7172,7 +7628,6 @@ class IdtGate(BaseRecord):
     @property
     def vector(self, /) -> int: ...
 
-@final
 class IfrEnd(BaseRecord):
     """
     Why an IFR walk ended: `empty` (no record was ever written),
@@ -7182,21 +7637,54 @@ class IfrEnd(BaseRecord):
     stopped there).
     """
     @property
-    def corruption(self, /) -> str |None:
-        """
-        The item that failed validation.
-        """
-    @property
     def kind(self, /) -> Literal["empty", "first_record", "overwritten", "corrupt"]:
         """
         The variant: `empty`, `first_record`, `overwritten`, `corrupt`.
         """
+    @final
+    class Corrupt(IfrEnd):
+        __match_args__: Final[tuple[Literal["corruption"]]]
+        @property
+        def corruption(self, /) -> str:
+            """
+            The item that failed validation.
+            """
+        @property
+        def kind(self, /) -> Literal["corrupt"]:
+            """
+            `corrupt`.
+            """
+    @final
+    class Empty(IfrEnd):
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["empty"]:
+            """
+            `empty`.
+            """
+    @final
+    class FirstRecord(IfrEnd):
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["first_record"]:
+            """
+            `first_record`.
+            """
+    @final
+    class Overwritten(IfrEnd):
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["overwritten"]:
+            """
+            `overwritten`.
+            """
 
 @final
 class IfrRecord(BaseRecord):
     """
     An In-Flight Recorder record (`_WDF_IFR_RECORD`).
     """
+    __match_args__: Final[tuple[Literal["offset"], Literal["length"], Literal["sequence"], Literal["prev_offset"], Literal["message_number"], Literal["timestamp"], Literal["args"]]]
     @property
     def args(self, /) -> bytes:
         """
@@ -7243,6 +7731,7 @@ class ImageByteDiff(BaseRecord):
     """
     One byte that differs from the cached image.
     """
+    __match_args__: Final[tuple[Literal["rva"], Literal["expected"], Literal["actual"], Literal["kind"]]]
     @property
     def actual(self, /) -> int:
         """
@@ -7268,6 +7757,7 @@ class ImageCheck(BaseRecord):
     Each range list has a limit, and its `*_overflow` flag is true if more
     ranges exist.
     """
+    __match_args__: Final[tuple[Literal["module"], Literal["short_name"], Literal["base_address"], Literal["sections"], Literal["genuine_mismatched_bytes"], Literal["total_mismatched_bytes"], Literal["self_patches"], Literal["mismatch_ranges"], Literal["mismatch_range_overflow"], Literal["all_mismatch_ranges"], Literal["all_mismatch_range_overflow"], Literal["self_patch_ranges"], Literal["self_patch_range_overflow"], Literal["byte_diffs"], Literal["byte_diffs_truncated"]]]
     @property
     def all_mismatch_range_overflow(self, /) -> bool: ...
     @property
@@ -7322,6 +7812,7 @@ class ImageExports(BaseRecord):
     """
     A mapped image's export directory and the exports it lists (`!dh -e`).
     """
+    __match_args__: Final[tuple[Literal["directory"], Literal["exports"]]]
     @property
     def directory(self, /) -> ExportDirectory |None:
         """
@@ -7337,6 +7828,7 @@ class ImageHeaders(BaseRecord):
     a discarded or paged-out one (a driver's `INIT`-resident import table) is
     unavailable beside the headers that did read.
     """
+    __match_args__: Final[tuple[Literal["base"], Literal["module"], Literal["file_header"], Literal["optional_header"], Literal["data_directories"], Literal["sections"], Literal["debug_directory"], Literal["exports"], Literal["imports"]]]
     @property
     def base(self, /) -> int: ...
     @property
@@ -7383,6 +7875,7 @@ class ImageMismatchRange(BaseRecord):
     """
     A contiguous RVA range of mismatched bytes.
     """
+    __match_args__: Final[tuple[Literal["start"], Literal["end"]]]
     @property
     def end(self, /) -> int:
         """
@@ -7401,6 +7894,7 @@ class ImageSectionCheck(BaseRecord):
     """
     The comparison of one executable section with the cached image.
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["rva"], Literal["genuine_mismatches"], Literal["total_mismatches"], Literal["self_patches"], Literal["skipped"], Literal["skip_reason"], Literal["unavailable"]]]
     @property
     def genuine_mismatches(self, /) -> int:
         """
@@ -7440,6 +7934,7 @@ class ImageSelfPatchCounts(BaseRecord):
     The number of bytes that ntoseye identifies as known kernel self-patches,
     by kind.
     """
+    __match_args__: Final[tuple[Literal["import_optimization"], Literal["retpoline"], Literal["ki_patch_self"], Literal["region_rebase"]]]
     @property
     def import_optimization(self, /) -> int: ...
     @property
@@ -7467,6 +7962,7 @@ class ImageSelfPatchRange(BaseRecord):
     A contiguous RVA range that ntoseye identifies as one kind of kernel
     self-patch.
     """
+    __match_args__: Final[tuple[Literal["start"], Literal["end"], Literal["kind"], Literal["function"]]]
     @property
     def end(self, /) -> int:
         """
@@ -7493,6 +7989,7 @@ class ImportDescriptor(BaseRecord):
     One `IMAGE_IMPORT_DESCRIPTOR`, which identifies a DLL that the image
     imports from, and its entries.
     """
+    __match_args__: Final[tuple[Literal["import_name_table"], Literal["time_date_stamp"], Literal["forwarder_chain"], Literal["import_address_table"], Literal["imports"], Literal["incomplete"]]]
     @property
     def forwarder_chain(self, /) -> int: ...
     @property
@@ -7533,6 +8030,7 @@ class ImportEntry(BaseRecord):
     One imported function: its import-name-table entry and the import
     address table slot beside it.
     """
+    __match_args__: Final[tuple[Literal["bound"]]]
     @property
     def bound(self, /) -> int |None:
         """
@@ -7567,6 +8065,7 @@ class IndirectTable(BaseRecord):
     What an indirect descriptor's table holds: its descriptors, and the
     bytes the driver gives the device and the device may write back.
     """
+    __match_args__: Final[tuple[Literal["descriptors"], Literal["out_bytes"], Literal["in_bytes"]]]
     @property
     def descriptors(self, /) -> int: ...
     @property
@@ -7729,7 +8228,7 @@ class Inspect:
         `>` marks the argument. After the stack, the command shows the device node
         of the PDO.
         """
-    def devnode(self, /, node: int |str |None = None, recurse: bool |None = None) -> DevNodeDetail:
+    def devnode(self, /, node: int |str |None = None, *, recurse: bool |None = None) -> DevNodeDetail:
         """
         Show a PnP device node and, optionally, its subtree.
         
@@ -7751,7 +8250,7 @@ class Inspect:
         List the trace buffers on the GlobalList of an ETW trace session
         (`!wmitrace.strdump logger`).
         """
-    def etw_crash_events(self, /, logger: int |str, count: int |None = None) -> EtwEventDump:
+    def etw_crash_events(self, /, logger: int |str, *, count: int |None = None) -> EtwEventDump:
         """
         Decode the events of an ETW trace session that Windows saved in a
         crash dump, oldest first (`!wmitrace.logdump` in a minidump).
@@ -7778,7 +8277,7 @@ class Inspect:
         EventLog-System. A minidump has no other copy of them; in a kernel or
         full dump, `etw_loggers()` reads every session from memory.
         """
-    def etw_events(self, /, logger: int |str, count: int |None = None) -> EtwEventDump:
+    def etw_events(self, /, logger: int |str, *, count: int |None = None) -> EtwEventDump:
         """
         Decode the events that are still in the buffers of an ETW trace session,
         oldest first (`!wmitrace.logdump`). `count` keeps only the most recent
@@ -7823,7 +8322,7 @@ class Inspect:
         """
         Decode a FILE_OBJECT and its relations to its device and name.
         """
-    def findstack(self, /, symbol: str, level: int = 1) -> FindStack:
+    def findstack(self, /, symbol: str, *, level: int = 1) -> FindStack:
         """
         List the threads with a stack frame that matches a symbol or module.
         
@@ -7866,18 +8365,10 @@ class Inspect:
         the command shows the device name, the file-system type, and the attached
         instances with their names and altitudes.
         """
-    def global_flags(self, /, change: str |None = None) -> GlobalFlags:
+    def global_flags(self, /) -> GlobalFlags:
         """
-        Show or change nt!NtGlobalFlag, and show the PEB flags of the current process.
-        
-        Without an argument, the command decodes nt!NtGlobalFlag and the
-        _PEB.NtGlobalFlag of the current process and shows the bits by their
-        GFlags names. `+` sets bits and `-` clears bits, from a value or from one
-        flag that you name by its three-letter abbreviation (`!gflag +ust`). A
-        value without `+` or `-` replaces nt!NtGlobalFlag. Each change is one
-        4-byte write to nt!NtGlobalFlag, the same write that `ed` makes, and the
-        command does not change the PEB copy. `-?` lists the flags and their
-        abbreviations.
+        Decode nt!NtGlobalFlag and the _PEB.NtGlobalFlag of the current process
+        (`!gflag`): the value of each and the bits by their GFlags names.
         """
     def hang(self, /) -> HangReport:
         """
@@ -7933,7 +8424,7 @@ class Inspect:
         such as 1, it first shows the IRP's status, requestor mode, user event and
         user buffer.
         """
-    def irp_find(self, /, pool_type: Literal["nonpaged", "paged"] |None = None, restart: int |str |None = None, criteria: str |None = None, value: int = 0) -> IrpFindDetail:
+    def irp_find(self, /, *, pool_type: Literal["nonpaged", "paged"] |None = None, restart: int |str |None = None, criteria: str |None = None, value: int = 0) -> IrpFindDetail:
         """
         Scan pool for the IRPs that IoAllocateIrp allocates.
         
@@ -7967,7 +8458,7 @@ class Inspect:
         (IoInitializeIrp). These IRPs have the tag of that driver, so the scan does
         not find them. Use irps to list the IRPs in thread IrpLists.
         """
-    def irps(self, /, filter: str |None = None) -> list[IrpHit]:
+    def irps(self, /, *, filter: str |None = None) -> list[IrpHit]:
         """
         Find the in-flight IRPs in thread IrpLists and device CurrentIrp fields.
         """
@@ -7991,7 +8482,7 @@ class Inspect:
         List the exported nonpaged and paged `GENERAL_LOOKASIDE` lists
         (`!lookaside`), detecting cycles.
         """
-    def mdl(self, /, address: int |str, pfn_count: int |None = None) -> MdlDetail:
+    def mdl(self, /, address: int |str, *, pfn_count: int |None = None) -> MdlDetail:
         """
         Decode a memory descriptor list and the page frames it describes.
         
@@ -8005,7 +8496,7 @@ class Inspect:
         command does not follow Next, so for a chained MDL, run !mdl on the Next
         address.
         """
-    def memusage(self, /, process_limit: int = 64) -> SystemMemorySummary:
+    def memusage(self, /, *, process_limit: int = 64) -> SystemMemorySummary:
         """
         Show the system memory-use counters and the counters of a limited number
         of processes.
@@ -8131,7 +8622,7 @@ class Inspect:
         follows the bridge and is indented. The JSON output also has the PnP
         instance path of each function.
         """
-    def pfn(self, /, value: int, physical_address: bool = False) -> PfnDetail:
+    def pfn(self, /, value: int, *, physical_address: bool = False) -> PfnDetail:
         """
         Decode an _MMPFN entry.
         
@@ -8147,7 +8638,7 @@ class Inspect:
         """
         Show the pool page that contains an address.
         """
-    def pool_find(self, /, tag: str, pool_type: Literal["NonPagedPool", "PagedPool"] |None = None) -> PoolFindDetail:
+    def pool_find(self, /, tag: str, *, pool_type: Literal["NonPagedPool", "PagedPool"] |None = None) -> PoolFindDetail:
         """
         Find pool blocks with a matching tag.
         
@@ -8158,7 +8649,7 @@ class Inspect:
         (0) or paged (1) pool. The scan stops after 1,024 matches, and you can
         interrupt it.
         """
-    def pool_usage(self, /, tag: str |None = None, sort: Literal["tag", "nonpaged_bytes", "paged_bytes"] = ...) -> PoolUsageDetail:
+    def pool_usage(self, /, tag: str |None = None, *, sort: Literal["tag", "nonpaged_bytes", "paged_bytes"] = ...) -> PoolUsageDetail:
         """
         Show pool tracker usage by tag.
         
@@ -8212,7 +8703,7 @@ class Inspect:
         List the drivers the WPP recorder keeps logs for
         (`!rcdrkd.rcdrloglist`).
         """
-    def rcdr_log(self, /, driver: str, log: int |str |None = None) -> RcdrLogDump:
+    def rcdr_log(self, /, driver: str, *, log: int |str |None = None) -> RcdrLogDump:
         """
         Show a driver's WPP recorder log records, oldest first.
         
@@ -8281,12 +8772,12 @@ class Inspect:
         """
         Decode an executive resource (`!locks address`).
         """
-    def resources(self, /, limit: int = 256) -> ResourceList:
+    def resources(self, /, *, limit: int = 256) -> ResourceList:
         """
         List the entries of the symbol-backed executive-resource list
         (`!locks`), at most `limit` of them.
         """
-    def running(self, /, include_idle: bool = False, include_stacks: bool = False) -> RunningProcessors:
+    def running(self, /, *, include_idle: bool = False, include_stacks: bool = False) -> RunningProcessors:
         """
         Show the thread that runs on each processor.
         
@@ -8301,7 +8792,7 @@ class Inspect:
         SID and each ACE separately. The optional 1 adds the names of well-known
         SIDs.
         """
-    def session_processes(self, /, session: int |None = None, image: str |None = None) -> SessionProcesses:
+    def session_processes(self, /, session: int |None = None, *, image: str |None = None) -> SessionProcesses:
         """
         List the processes in a session.
         
@@ -8318,6 +8809,15 @@ class Inspect:
         The command reads session IDs from _EPROCESS.Session and
         _MM_SESSION_SPACE, or from the primary token if session space is opaque.
         Use -s -1 for the current session. The process walk stops at 4096 entries.
+        """
+    def set_global_flags(self, /, change: str) -> GlobalFlags:
+        """
+        Change nt!NtGlobalFlag and decode the flags as they now are (`!gflag
+        +ust`). `change` is `+` or `-` and a value or a flag's three-letter
+        abbreviation, which sets or clears those bits, or a value without a sign,
+        which replaces nt!NtGlobalFlag. It is one 4-byte write to
+        nt!NtGlobalFlag; the PEB copy does not change. The result's `change`
+        has the value before and after.
         """
     def sid(self, /, address: int |str) -> Sid:
         """
@@ -8349,7 +8849,7 @@ class Inspect:
         """
         Show the SSDT and the shadow SSDT.
         """
-    def stacks(self, /, level: int = 0, filter: str |None = None) -> ThreadStacks:
+    def stacks(self, /, *, level: int = 0, filter: str |None = None) -> ThreadStacks:
         """
         Show the state, wait reason, and top stack symbol of each thread.
         
@@ -8397,7 +8897,7 @@ class Inspect:
         with its _EXTENDED_REQUEST_BLOCK, IRP and SRB; use !irp on the IRP. It lists
         at most 256 requests and says why a list stopped early.
         """
-    def system_ptes(self, /, free_runs: bool = False) -> SystemPtesDetail:
+    def system_ptes(self, /, *, free_runs: bool = False) -> SystemPtesDetail:
         """
         Show system PTE usage from the memory manager's bitmap allocators.
         
@@ -8460,14 +8960,14 @@ class Inspect:
         queue where the driver's private PDB types it. A queue's `progress`
         counters only grow, so two calls show what moved in between.
         """
-    def virtio_driver(self, /, address: int |str, module: str |None = None) -> VirtioDriver:
+    def virtio_driver(self, /, address: int |str, *, module: str |None = None) -> VirtioDriver:
         """
         Read the `virtio_device` at `address` as its virtio-win driver sees it,
         with its queues, named when its PCI function is found
         (`!virtio <address> [module]`). `module` names the driver whose PDB
         types it, by default the one that owns it.
         """
-    def vm(self, /, include_processes: bool = True) -> VmDetail:
+    def vm(self, /, *, include_processes: bool = True) -> VmDetail:
         """
         Show virtual-memory statistics.
         
@@ -8486,7 +8986,7 @@ class Inspect:
         device object points to the VPB. If the Type at the address is not
         IO_TYPE_VPB, the command shows an error.
         """
-    def vring(self, /, address: int |str, module: str |None = None, *, kind: Literal["blk", "scsi", "scsi-control", "scsi-event", "net", "net-control", "gpu", "vsock"] |None = None) -> VirtioRing:
+    def vring(self, /, address: int |str, *, module: str |None = None, kind: Literal["blk", "scsi", "scsi-control", "scsi-event", "net", "net-control", "gpu", "vsock"] |None = None) -> VirtioRing:
         """
         Read the virtio-win virtqueue at `address` (`!vring`): its ring, the
         buffers the device holds or returned, and the request each carries.
@@ -8681,14 +9181,14 @@ class Inspect:
         verifier flags (FxRequestVerifierFlags) only when its verifier is on for the
         driver.
         """
-    def work_queues(self, /, include_stacks: bool = False, queue_types: Sequence[Literal["critical", "delayed", "hypercritical"]] |None = None) -> WorkQueues:
+    def work_queues(self, /, *, include_stacks: bool = False, queue_types: Sequence[Literal["critical", "delayed", "hypercritical"]] |None = None) -> WorkQueues:
         """
         Get the executive worker queues, their pending work items, and their
         worker threads (`!exqueue`). `include_stacks` adds the stack of each
         worker, and `queue_types` (`"critical"`, `"delayed"`, `"hypercritical"`)
         limits the listed items to the priorities of those types.
         """
-    def zombies(self, /, flags: int = 1) -> Zombies:
+    def zombies(self, /, *, flags: int = 1) -> Zombies:
         """
         List exited processes and threads that still have references.
         
@@ -8702,7 +9202,6 @@ class Inspect:
         Ctrl+C.
         """
 
-@final
 class IoIntercepts(BaseRecord):
     """
     Which I/O instructions of a VTL exit (`!hvvmcs -io`), by its eVMCS's
@@ -8721,14 +9220,43 @@ class IoIntercepts(BaseRecord):
         """
         The variant: `none`, `every`, `bitmaps`.
         """
-    @property
-    def ports(self, /) -> list[PortRange] |None: ...
+    @final
+    class Bitmaps(IoIntercepts):
+        """
+        I/O bitmaps A (ports 0-0x7fff) and B: the port ranges whose
+        accesses exit.
+        """
+        __match_args__: Final[tuple[Literal["ports"]]]
+        @property
+        def kind(self, /) -> Literal["bitmaps"]:
+            """
+            `bitmaps`.
+            """
+        @property
+        def ports(self, /) -> list[PortRange]: ...
+    @final
+    class Every(IoIntercepts):
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["every"]:
+            """
+            `every`.
+            """
+    @final
+    class None(IoIntercepts):
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["none"]:
+            """
+            `none`.
+            """
 
 @final
 class IoStackLocationInfo(BaseRecord):
     """
     An `_IO_STACK_LOCATION`, which is the part of an IRP for one driver.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["major_function"], Literal["minor_function"], Literal["flags"], Literal["control"], Literal["arguments"], Literal["device_object"], Literal["file_object"], Literal["completion_routine"], Literal["context"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -8791,6 +9319,7 @@ class IoWorkItem(BaseRecord):
     An `_IO_WORKITEM` that `IoQueueWorkItem` queued. Its work item runs
     `nt!IopProcessWorkItem`, which calls `routine`.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["routine"], Literal["routine_symbol"], Literal["io_object"], Literal["context"]]]
     @property
     def address(self, /) -> int:
         """
@@ -8816,6 +9345,7 @@ class IpiField(BaseRecord):
     """
     A `_KPRCB` IPI field and its value.
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["value"]]]
     @property
     def name(self, /) -> str: ...
     @property
@@ -8826,6 +9356,7 @@ class IpiProcessor(BaseRecord):
     """
     The IPI state of one processor.
     """
+    __match_args__: Final[tuple[Literal["processor"], Literal["kprcb"], Literal["fields"], Literal["pending"], Literal["pending_truncated"], Literal["awaiting"]]]
     @property
     def awaiting(self, /) -> list[int]:
         """
@@ -8864,6 +9395,7 @@ class IpiRequest(BaseRecord):
     """
     A request that a sender put in the IPI mailbox list of a processor.
     """
+    __match_args__: Final[tuple[Literal["mailbox"], Literal["sender"], Literal["request_summary"], Literal["worker_routine"], Literal["worker_symbol"], Literal["parameters"]]]
     @property
     def mailbox(self, /) -> int:
         """
@@ -8901,6 +9433,7 @@ class IpiState(BaseRecord):
     """
     The interprocessor interrupt state of each processor (`!ipi`).
     """
+    __match_args__: Final[tuple[Literal["processors"], Literal["errors"]]]
     @property
     def errors(self, /) -> list[ProcessorError]: ...
     @property
@@ -8911,6 +9444,7 @@ class IrpDispatchRoutine(BaseRecord):
     """
     One slot in the `MajorFunction` dispatch table.
     """
+    __match_args__: Final[tuple[Literal["index"], Literal["routine"], Literal["symbol"]]]
     @property
     def index(self, /) -> int:
         """
@@ -8934,6 +9468,7 @@ class IrpFindCriteria(BaseRecord):
     """
     The criteria that an `!irpfind` search used to match IRPs.
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["value"]]]
     @property
     def name(self, /) -> str:
         """
@@ -8948,6 +9483,7 @@ class IrpFindDetail(BaseRecord):
     """
     One `!irpfind` pool scan.
     """
+    __match_args__: Final[tuple[Literal["pool"], Literal["region_start"], Literal["region_end"], Literal["scan_start"], Literal["scanned_pages"], Literal["big_pool_status"], Literal["irps"], Literal["truncated"], Literal["interrupted"], Literal["restart"]]]
     @property
     def big_pool_status(self, /) -> str:
         """
@@ -8995,6 +9531,7 @@ class IrpFindEntry(BaseRecord):
     """
     An IRP that `!irpfind` found in pool.
     """
+    __match_args__: Final[tuple[Literal["irp"], Literal["pool_header"], Literal["tag"], Literal["original_file_object"], Literal["mdl_process"], Literal["driver"]]]
     @property
     def completed(self, /) -> bool:
         """
@@ -9036,6 +9573,7 @@ class IrpHit(BaseRecord):
     An in-flight IRP that ntoseye found on the `IrpList` of a thread or in the
     `CurrentIrp` of a device (`irps`).
     """
+    __match_args__: Final[tuple[Literal["irp"], Literal["source"], Literal["stack_count"], Literal["current_location"], Literal["pid"], Literal["tid"], Literal["ethread"], Literal["state"], Literal["wait_reason"], Literal["driver"], Literal["device"]]]
     @property
     def current_location(self, /) -> int: ...
     @property
@@ -9099,6 +9637,7 @@ class IrpHolder(BaseRecord):
     """
     Where an IRP is pending: the driver of its current stack location.
     """
+    __match_args__: Final[tuple[Literal["location"], Literal["stack_count"], Literal["stack_location"], Literal["major_function"], Literal["minor_function"], Literal["state"], Literal["pending_returned"], Literal["device"], Literal["driver"]]]
     @property
     def device(self, /) -> int: ...
     @property
@@ -9132,6 +9671,7 @@ class IrpInfo(BaseRecord):
     """
     An `_IRP` and its I/O stack locations (`!irp`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["type"], Literal["size"], Literal["stack_count"], Literal["current_location"], Literal["pending_returned"], Literal["requestor_mode"], Literal["io_status"], Literal["user_event"], Literal["user_buffer"], Literal["mdl_address"], Literal["system_buffer"], Literal["thread"], Literal["stack"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -9199,6 +9739,7 @@ class Irql(BaseRecord):
     """
     The current IRQL of a processor (`!irql`).
     """
+    __match_args__: Final[tuple[Literal["processor"], Literal["value"], Literal["level_name"], Literal["note"]]]
     @property
     def level_name(self, /) -> Diagnostic[str]:
         """
@@ -9228,6 +9769,7 @@ class Job(BaseRecord):
     A job object (`!job`), with its accounting, limits, flags, nesting, and
     assigned processes. A field that this build does not have is `None`.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["job_id"], Literal["session_id"], Literal["accounting"], Literal["limits"], Literal["job_flags"], Literal["job_flag_names"], Literal["nesting_depth"], Literal["parent_job"], Literal["root_job"], Literal["child_jobs"], Literal["child_job_list_termination"], Literal["silo"], Literal["server_silo_globals"], Literal["processes"], Literal["unreadable_processes"], Literal["process_list_termination"]]]
     @property
     def accounting(self, /) -> JobAccounting: ...
     @property
@@ -9299,6 +9841,7 @@ class JobAccounting(BaseRecord):
     The `_EJOB` accounting of a job. A field that this build does not have is
     `None`.
     """
+    __match_args__: Final[tuple[Literal["total_user_time"], Literal["total_kernel_time"], Literal["total_cycle_time"], Literal["this_period_total_user_time"], Literal["this_period_total_kernel_time"], Literal["total_page_fault_count"], Literal["total_processes"], Literal["active_processes"], Literal["total_terminated_processes"], Literal["peak_process_memory_used"], Literal["peak_job_memory_used"], Literal["current_job_memory_used"]]]
     @property
     def active_processes(self, /) -> int |None: ...
     @property
@@ -9360,6 +9903,7 @@ class JobLimits(BaseRecord):
     The `_EJOB` limit settings of a job. A field that this build does not
     have is `None`.
     """
+    __match_args__: Final[tuple[Literal["limit_flags"], Literal["effective_limit_flags"], Literal["active_process_limit"], Literal["per_process_user_time_limit"], Literal["per_job_user_time_limit"], Literal["minimum_working_set_size"], Literal["maximum_working_set_size"], Literal["process_memory_limit"], Literal["job_memory_limit"], Literal["priority_class"], Literal["scheduling_class"], Literal["ui_restrictions_class"]]]
     @property
     def active_process_limit(self, /) -> int |None: ...
     @property
@@ -9417,6 +9961,7 @@ class KernelTimer(BaseRecord):
     """
     A `_KTIMER` and its decoded DPC.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["due_time"], Literal["period"], Literal["dpc_encoded"], Literal["dpc"], Literal["dpc_routine"], Literal["dpc_routine_symbol"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -9459,6 +10004,7 @@ class KmdfLogFinding(BaseRecord):
     crash dump, and how many records it holds (`!wdfkd.wdfcrashdump` shows
     them).
     """
+    __match_args__: Final[tuple[Literal["driver"], Literal["records"]]]
     @property
     def driver(self, /) -> str: ...
     @property
@@ -9469,6 +10015,7 @@ class KtrapFrame(BaseRecord):
     """
     A decoded `_KTRAP_FRAME` (`.trap`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["frame"]]]
     @property
     def address(self, /) -> int:
         """
@@ -9485,6 +10032,7 @@ class LargeAllocation(BaseRecord):
     """
     A segment-heap large allocation (`_HEAP_LARGE_ALLOC_DATA`).
     """
+    __match_args__: Final[tuple[Literal["metadata"], Literal["address"], Literal["pages"], Literal["unused_bytes"], Literal["extra_present"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -9512,6 +10060,7 @@ class LastError(BaseRecord):
     """
     A thread's Win32 last error and last NTSTATUS (`!gle`).
     """
+    __match_args__: Final[tuple[Literal["teb"], Literal["last_error_value"], Literal["last_error_name"], Literal["last_status_value"], Literal["last_status_name"], Literal["teb32"]]]
     @property
     def last_error_name(self, /) -> Diagnostic[str |None]:
         """
@@ -9542,6 +10091,7 @@ class LastError32(BaseRecord):
     """
     A WOW64 thread's 32-bit last error and last NTSTATUS.
     """
+    __match_args__: Final[tuple[Literal["teb"], Literal["last_error_value"], Literal["last_error_name"], Literal["last_status_value"], Literal["last_status_name"]]]
     @property
     def last_error_name(self, /) -> Diagnostic[str |None]:
         """
@@ -9567,6 +10117,7 @@ class LfhSubsegment(BaseRecord):
     """
     A segment-heap LFH subsegment (`_HEAP_LFH_SUBSEGMENT`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["block_size"], Literal["block_count"], Literal["free_count"], Literal["bucket"], Literal["first_block"], Literal["bitmap"], Literal["blocks_per_word"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -9597,37 +10148,86 @@ class LfhSubsegment(BaseRecord):
     @property
     def free_count(self, /) -> int: ...
 
-@final
 class ListTermination(BaseRecord):
     """
     The end condition of a guest linked-list walk.
     """
-    @property
-    def address(self, /) -> int |None:
-        """
-        The address where a cycle closed.
-        """
     @property
     def diagnostic(self, /) -> str |None:
         """
         Why the walk ended before the list head, if it did.
         """
     @property
-    def error(self, /) -> str |None:
-        """
-        The problem with a corrupt link.
-        """
-    @property
     def kind(self, /) -> Literal["head", "null", "cycle", "bound", "corrupt"]:
         """
         The variant: `head`, `null`, `cycle`, `bound`, `corrupt`.
         """
+    @final
+    class Bound(ListTermination):
+        """
+        The walk reached its limit.
+        """
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["bound"]:
+            """
+            `bound`.
+            """
+    @final
+    class Corrupt(ListTermination):
+        __match_args__: Final[tuple[Literal["error"]]]
+        @property
+        def error(self, /) -> str:
+            """
+            The problem with a corrupt link.
+            """
+        @property
+        def kind(self, /) -> Literal["corrupt"]:
+            """
+            `corrupt`.
+            """
+    @final
+    class Cycle(ListTermination):
+        """
+        A loop that does not go through the head.
+        """
+        __match_args__: Final[tuple[Literal["address"]]]
+        @property
+        def address(self, /) -> int:
+            """
+            The address where a cycle closed.
+            """
+        @property
+        def kind(self, /) -> Literal["cycle"]:
+            """
+            `cycle`.
+            """
+    @final
+    class Head(ListTermination):
+        """
+        The walk came back to the list head.
+        """
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["head"]:
+            """
+            `head`.
+            """
+    @final
+    class Null(ListTermination):
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["null"]:
+            """
+            `null`.
+            """
 
 @final
 class LoaderListHead(BaseRecord):
     """
     A `_PEB_LDR_DATA` list head.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["flink"], Literal["blink"]]]
     @property
     def address(self, /) -> int:
         """
@@ -9649,6 +10249,7 @@ class LoaderLists(BaseRecord):
     """
     The heads of the three `_PEB_LDR_DATA` module lists.
     """
+    __match_args__: Final[tuple[Literal["in_load_order"], Literal["in_memory_order"], Literal["in_initialization_order"]]]
     @property
     def in_initialization_order(self, /) -> Diagnostic[LoaderListHead]: ...
     @property
@@ -9661,6 +10262,7 @@ class LoaderModule(BaseRecord):
     """
     One module on a process's loader list (`!dlls`).
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["short_name"], Literal["base_address"], Literal["size"], Literal["is_32bit"], Literal["entry_point"], Literal["time_date_stamp"], Literal["checksum"], Literal["file_version"], Literal["product_version"]]]
     @property
     def base_address(self, /) -> int: ...
     @property
@@ -9720,6 +10322,7 @@ class LoaderModules(BaseRecord):
     The modules on a process's loader lists (`!dlls`), and how the native
     and WOW64 list walks ended.
     """
+    __match_args__: Final[tuple[Literal["modules"], Literal["termination"], Literal["wow64_termination"]]]
     @property
     def modules(self, /) -> list[LoaderModule]: ...
     @property
@@ -9736,6 +10339,7 @@ class LocalApic(BaseRecord):
     A processor's local APIC (`!apic`), read through its x2APIC MSRs or
     its xAPIC registers.
     """
+    __match_args__: Final[tuple[Literal["processor"], Literal["apic_base"], Literal["x2apic"], Literal["id"], Literal["version"], Literal["tpr"], Literal["ppr"], Literal["ldr"], Literal["svr"], Literal["esr"], Literal["icr"], Literal["lvt"], Literal["lvt_missing"], Literal["timer_initial"], Literal["timer_current"], Literal["timer_divide"], Literal["isr"], Literal["irr"], Literal["tmr"]]]
     @property
     def apic_base(self, /) -> int:
         """
@@ -9810,7 +10414,6 @@ class LocalApic(BaseRecord):
         In x2APIC mode, read through MSRs; else through its registers.
         """
 
-@final
 class LocalVariableLocation(BaseRecord):
     """
     The location of a local variable: `kind` is `register`,
@@ -9821,12 +10424,60 @@ class LocalVariableLocation(BaseRecord):
         """
         The variant: `register`, `register_relative`, `frame_relative`, `unavailable`.
         """
-    @property
-    def offset(self, /) -> int |None: ...
-    @property
-    def reason(self, /) -> str |None: ...
-    @property
-    def register(self, /) -> str |None: ...
+    @final
+    class FrameRelative(LocalVariableLocation):
+        """
+        PDB frame-pointer-relative location without a safely decoded base register.
+        """
+        __match_args__: Final[tuple[Literal["offset"]]]
+        @property
+        def kind(self, /) -> Literal["frame_relative"]:
+            """
+            `frame_relative`.
+            """
+        @property
+        def offset(self, /) -> int: ...
+    @final
+    class Register(LocalVariableLocation):
+        """
+        The variable's value is held directly in a register.
+        """
+        __match_args__: Final[tuple[Literal["register"]]]
+        @property
+        def kind(self, /) -> Literal["register"]:
+            """
+            `register`.
+            """
+        @property
+        def register(self, /) -> str: ...
+    @final
+    class RegisterRelative(LocalVariableLocation):
+        """
+        The variable is stored in memory at register + signed offset.
+        """
+        __match_args__: Final[tuple[Literal["register"], Literal["offset"]]]
+        @property
+        def kind(self, /) -> Literal["register_relative"]:
+            """
+            `register_relative`.
+            """
+        @property
+        def offset(self, /) -> int: ...
+        @property
+        def register(self, /) -> str: ...
+    @final
+    class Unavailable(LocalVariableLocation):
+        """
+        The PDB explicitly says the value is absent or uses an unsupported recipe.
+        """
+        __match_args__: Final[tuple[Literal["reason"]]]
+        @property
+        def kind(self, /) -> Literal["unavailable"]:
+            """
+            `unavailable`.
+            """
+        @property
+        def reason(self, /) -> str: ...
 
 @final
 class LookasideDetail(BaseRecord):
@@ -9834,6 +10485,7 @@ class LookasideDetail(BaseRecord):
     A decoded `_GENERAL_LOOKASIDE` list (`!lookaside`). Each counter is
     read on its own, because stripped PDBs often omit some members.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["index"], Literal["tag"], Literal["size"], Literal["depth"], Literal["total_allocates"], Literal["total_frees"], Literal["allocate_misses"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -9862,6 +10514,7 @@ class LookasideListsDetail(BaseRecord):
     """
     The system lookaside lists (`!lookaside`).
     """
+    __match_args__: Final[tuple[Literal["records"], Literal["nonpaged_count"], Literal["paged_count"], Literal["nonpaged_termination"], Literal["paged_termination"], Literal["interrupted"], Literal["truncated"]]]
     @property
     def interrupted(self, /) -> bool:
         """
@@ -9895,6 +10548,7 @@ class MdlDetail(BaseRecord):
     A decoded `_MDL` header and the page-frame array that follows it
     (`!mdl`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["next"], Literal["size"], Literal["flags"], Literal["flag_names"], Literal["process"], Literal["mapped_system_va"], Literal["start_va"], Literal["byte_count"], Literal["byte_offset"], Literal["spanned_pages"], Literal["capacity"], Literal["pfn_array"], Literal["pfns"], Literal["truncated"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -9952,20 +10606,13 @@ class Memory:
     A guest address space: `dbg.memory` (kernel), `proc.memory`, `cpu.memory`,
     or `dbg.physical`.
     """
-    def describe(self, /, addr: int |str |None = None) -> AddressDescription |UserAddressReport:
+    def describe(self, /, address: int |str) -> AddressDescription:
         """
-        Show the module and section, or the VAD region, that an address belongs
-        to.
-        
-        On a user-mode minidump the command uses the regions that the dump's
-        memory-info list records. Without an argument, it lists them with their
-        state, protection, type, allocation base, usage, and how much of each the
-        dump captured, followed by a summary by usage, type, state, and
-        protection; -summary shows only the summary. With an address, it shows
-        the region that holds it. Usage comes from the dump's modules, its
-        threads' stacks and TEBs, the PEB, and the heaps in the PEB's
-        ProcessHeaps array; it is <unknown> for any other region. A dump without
-        a memory-info list shows the memory ranges it captured instead.
+        Describe what `address` belongs to (`!address <address>`): its kind (a
+        kernel module, a user image, a kernel region, private or mapped user
+        memory), the module or VAD that holds it, and its protection. On a
+        user-mode minidump, `Debugger.user_dump.address_report(address)` reads
+        the dump's memory-info list instead.
         """
     def disassemble(self, /, addr: int |str, count: int) -> list[DisasmRow]:
         """
@@ -10125,6 +10772,7 @@ class MemoryBasicInformation(BaseRecord):
     The data that `VirtualQuery` reports for an address (`!vprot`). Each
     `MEM_*`/`PAGE_*` value has its name next to it.
     """
+    __match_args__: Final[tuple[Literal["process"], Literal["address"], Literal["base_address"], Literal["allocation_base"], Literal["allocation_protect"], Literal["region_size"], Literal["state"], Literal["protect"], Literal["type"], Literal["vad"], Literal["truncated"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -10184,6 +10832,7 @@ class MemoryRegion(BaseRecord):
     `MINIDUMP_MEMORY_INFO`: one region of the address space, as
     `VirtualQueryEx` reported it.
     """
+    __match_args__: Final[tuple[Literal["base"], Literal["allocation_base"], Literal["allocation_protect"], Literal["size"], Literal["state"], Literal["protect"], Literal["kind"]]]
     @property
     def allocation_base(self, /) -> int: ...
     @property
@@ -10231,6 +10880,7 @@ class MemoryRegionInfo(BaseRecord):
     One VAD region of a process (`!vad`, `proc.regions` items, address
     context).
     """
+    __match_args__: Final[tuple[Literal["node_address"], Literal["level"], Literal["start"], Literal["end"], Literal["private_memory"], Literal["commit_charge"], Literal["details"]]]
     @property
     def commit_charge(self, /) -> int |None:
         """
@@ -10288,6 +10938,7 @@ class MemorySearchMatch(BaseRecord):
     """
     A memory-search hit, with its symbol and location data.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["offset"], Literal["symbol"], Literal["kind"], Literal["module"], Literal["section"], Literal["va_type"], Literal["region"]]]
     @property
     def address(self, /) -> int:
         """
@@ -10348,7 +10999,7 @@ class Module:
         """
         The base address of the loaded image.
         """
-    def check_image(self, /, include_diffs: bool = False) -> ImageCheck:
+    def check_image(self, /, *, include_diffs: bool = False) -> ImageCheck:
         """
         Compare the executable sections of a module with the cached on-disk
         image.
@@ -10389,7 +11040,7 @@ class Module:
         """
         The file version from the version resource of the image.
         """
-    def headers(self, /, exports: bool = False, imports: bool = False) -> ImageHeaders:
+    def headers(self, /, *, exports: bool = False, imports: bool = False) -> ImageHeaders:
         """
         Show the headers of a mapped PE image.
         
@@ -10511,6 +11162,7 @@ class ModuleEventPolicy(BaseRecord):
     `sx* ud[:<module>]`). Only `break` stops and only `notify` reports;
     `command` runs at a `break` stop.
     """
+    __match_args__: Final[tuple[Literal["module"], Literal["mode"], Literal["command"]]]
     @property
     def command(self, /) -> str |None:
         """
@@ -10543,6 +11195,7 @@ class ModuleExportInfo(BaseRecord):
     mapped export directory. An export has a name or only an ordinal, and a
     forwarder has no address.
     """
+    __match_args__: Final[tuple[Literal["ordinal"], Literal["name"], Literal["rva"], Literal["address"], Literal["forwarder"]]]
     @property
     def address(self, /) -> int |None:
         """
@@ -10573,6 +11226,7 @@ class ModuleImageInfo(BaseRecord):
     from its mapped headers, the debug directory, which includes the CodeView
     PDB name, GUID, and age, and the symbol state.
     """
+    __match_args__: Final[tuple[Literal["module"], Literal["debug_directory"], Literal["symbols"], Literal["symbol_file"]]]
     @property
     def characteristics(self, /) -> int: ...
     @property
@@ -10614,6 +11268,7 @@ class ModuleInfo(BaseRecord):
     """
     A loaded module (kernel or process image), as its loader list records it.
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["short_name"], Literal["path"], Literal["base"], Literal["size"], Literal["is_32bit"], Literal["entry_point"], Literal["timestamp"], Literal["checksum"], Literal["file_version"], Literal["product_version"]]]
     @property
     def base(self, /) -> int:
         """
@@ -10676,6 +11331,7 @@ class ModuleListing(BaseRecord):
     A loaded module with its symbols' state (`lm`, a kernel module's
     `Module.inspect()`).
     """
+    __match_args__: Final[tuple[Literal["module"], Literal["symbols"]]]
     @property
     def module(self, /) -> ModuleInfo: ...
     @property
@@ -10686,6 +11342,7 @@ class ModuleSymbolDiagnostic(BaseRecord):
     """
     One problem that ntoseye found when it loaded the symbols of a module.
     """
+    __match_args__: Final[tuple[Literal["module"], Literal["phase"], Literal["compiland"], Literal["message"]]]
     @property
     def compiland(self, /) -> str |None:
         """
@@ -10708,6 +11365,7 @@ class ModuleSymbolLoadReport(BaseRecord):
     no PDB, were skipped, failed, or are still being fetched, and keeps the
     first diagnostics up to a limit.
     """
+    __match_args__: Final[tuple[Literal["total"], Literal["loaded"], Literal["unloaded"], Literal["no_pdb"], Literal["skipped"], Literal["failed"], Literal["fetching"], Literal["diagnostic_count"], Literal["diagnostics"], Literal["breakpoint_error"]]]
     @property
     def breakpoint_error(self, /) -> str |None:
         """
@@ -10747,6 +11405,7 @@ class ModuleSymbols(BaseRecord):
     """
     The symbol status and PDB identity of a module (`lm v`, `Module.symbols`).
     """
+    __match_args__: Final[tuple[()]]
     @property
     def error(self, /) -> str |None:
         """
@@ -10801,7 +11460,6 @@ class Modules:
         (`stop.module`).
         """
 
-@final
 class MsrIntercepts(BaseRecord):
     """
     Which RDMSRs and WRMSRs of a VTL exit (`!hvvmcs -msr`), by its eVMCS's
@@ -10809,8 +11467,6 @@ class MsrIntercepts(BaseRecord):
     bitmap: every RDMSR and WRMSR exits) or `bitmap`. MSRs outside the
     bitmap's 0x0-0x1fff and 0xc0000000-0xc0001fff always exit.
     """
-    @property
-    def bitmap(self, /) -> int |None: ...
     @property
     def every(self, /) -> bool:
         """
@@ -10823,19 +11479,41 @@ class MsrIntercepts(BaseRecord):
         The variant: `every`, `bitmap`.
         """
     @property
-    def read(self, /) -> list[MsrRange] |None: ...
-    @property
     def read_without_exit(self, /) -> list[str]:
         """
         The MSRs ntoseye names that the VTL reads without an exit.
         """
     @property
-    def write(self, /) -> list[MsrRange] |None: ...
-    @property
     def write_without_exit(self, /) -> list[str]:
         """
         The MSRs ntoseye names that the VTL writes without an exit.
         """
+    @final
+    class Bitmap(MsrIntercepts):
+        """
+        The MSR bitmap at physical address `bitmap`, and the ranges of MSRs
+        whose reads, and whose writes, exit.
+        """
+        __match_args__: Final[tuple[Literal["bitmap"], Literal["read"], Literal["write"]]]
+        @property
+        def bitmap(self, /) -> int: ...
+        @property
+        def kind(self, /) -> Literal["bitmap"]:
+            """
+            `bitmap`.
+            """
+        @property
+        def read(self, /) -> list[MsrRange]: ...
+        @property
+        def write(self, /) -> list[MsrRange]: ...
+    @final
+    class Every(MsrIntercepts):
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["every"]:
+            """
+            `every`.
+            """
 
 @final
 class MsrRange(BaseRecord):
@@ -10843,6 +11521,7 @@ class MsrRange(BaseRecord):
     An inclusive range of MSRs whose accesses exit, with the architectural
     MSRs (or blocks, such as `x2APIC`) that ntoseye names in it.
     """
+    __match_args__: Final[tuple[Literal["first"], Literal["last"]]]
     @property
     def first(self, /) -> int: ...
     @property
@@ -10867,6 +11546,7 @@ class NdisDriver(BaseRecord):
     """
     A miniport driver (`_NDIS_M_DRIVER_BLOCK`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["service_name"], Literal["image_name"], Literal["module"], Literal["driver_object"], Literal["ndis_version"], Literal["driver_version"], Literal["miniports"], Literal["miniports_stopped"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -10904,6 +11584,7 @@ class NdisDriverList(BaseRecord):
     """
     The miniport drivers on `ndis!ndisMiniDriverList` (`!ndiskd.minidriver`).
     """
+    __match_args__: Final[tuple[Literal["stopped"]]]
     @property
     def drivers(self, /) -> list[NdisDriver]:
         """
@@ -10925,6 +11606,7 @@ class NdisFilter(BaseRecord):
     """
     A filter module on a miniport's stack (`_NDIS_FILTER_BLOCK`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["name"], Literal["driver"], Literal["driver_image"], Literal["miniport"], Literal["miniport_name"], Literal["state"], Literal["context"], Literal["pending_oid"], Literal["pending_oid_error"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -10975,6 +11657,7 @@ class NdisFilterDetail(BaseRecord):
     """
     One filter module in detail (`!ndiskd.filter <address>`).
     """
+    __match_args__: Final[tuple[Literal["filter"], Literal["listed"], Literal["driver_name"], Literal["higher"], Literal["lower"], Literal["media_connect"], Literal["xmit_link_speed"], Literal["rcv_link_speed"], Literal["if_index"], Literal["flags"], Literal["references"], Literal["dropped_receive_nbls"], Literal["dropped_send_nbls"], Literal["dropped_status_indications"]]]
     @property
     def driver_name(self, /) -> str |None:
         """
@@ -11026,6 +11709,7 @@ class NdisFilterDriver(BaseRecord):
     """
     A filter driver (`_NDIS_FILTER_DRIVER_BLOCK`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["friendly_name"], Literal["unique_name"], Literal["service_name"], Literal["image_name"], Literal["module"], Literal["driver_object"], Literal["context"], Literal["flags"], Literal["ndis_version"], Literal["driver_version"], Literal["filters"], Literal["filters_stopped"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -11073,6 +11757,7 @@ class NdisFilterDriverDetail(BaseRecord):
     A filter driver and its filter modules (`!ndiskd.filterdriver
     <address>`).
     """
+    __match_args__: Final[tuple[Literal["driver"]]]
     @property
     def driver(self, /) -> NdisFilterDriver: ...
     @property
@@ -11092,6 +11777,7 @@ class NdisFilterDriverList(BaseRecord):
     The filter drivers on `ndis!ndisFilterDriverList`
     (`!ndiskd.filterdriver`).
     """
+    __match_args__: Final[tuple[Literal["stopped"]]]
     @property
     def drivers(self, /) -> list[NdisFilterDriver]:
         """
@@ -11113,6 +11799,7 @@ class NdisFilterList(BaseRecord):
     """
     The filter modules on `ndis!ndisGlobalFilterList` (`!ndiskd.filter`).
     """
+    __match_args__: Final[tuple[Literal["stopped"]]]
     @property
     def filters(self, /) -> list[NdisFilter]:
         """
@@ -11134,6 +11821,7 @@ class NdisMinidriver(BaseRecord):
     """
     A miniport driver and its miniports (`!ndiskd.minidriver <address>`).
     """
+    __match_args__: Final[tuple[Literal["driver"]]]
     @property
     def driver(self, /) -> NdisDriver: ...
     @property
@@ -11152,6 +11840,7 @@ class NdisMiniport(BaseRecord):
     """
     A miniport as `!ndiskd.miniports` lists it (`_NDIS_MINIPORT_BLOCK`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["name"], Literal["friendly_name"], Literal["driver"], Literal["driver_name"], Literal["state"], Literal["pnp_state"], Literal["media_connect"], Literal["connected"], Literal["xmit_link_speed"], Literal["rcv_link_speed"], Literal["power"], Literal["if_index"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -11208,6 +11897,7 @@ class NdisMiniportDetail(BaseRecord):
     """
     One miniport in detail (`!ndiskd.miniport <address>`).
     """
+    __match_args__: Final[tuple[Literal["miniport"], Literal["listed"], Literal["ndis_version"], Literal["adapter_context"], Literal["driver"], Literal["driver_error"], Literal["device_object"], Literal["pdo"], Literal["instance_id"], Literal["medium"], Literal["physical_medium"], Literal["duplex"], Literal["oper_status"], Literal["net_luid"], Literal["flags"], Literal["pnp_flags"], Literal["references"], Literal["reset_status"], Literal["internal_resets"], Literal["miniport_resets"], Literal["pending_oid"], Literal["pending_oid_error"], Literal["pending_return_nbls"], Literal["filters"], Literal["filters_stopped"], Literal["num_opens"], Literal["opens"], Literal["opens_stopped"]]]
     @property
     def adapter_context(self, /) -> int:
         """
@@ -11305,6 +11995,7 @@ class NdisMiniportList(BaseRecord):
     """
     The miniports on `ndis!ndisMiniportList` (`!ndiskd.miniports`).
     """
+    __match_args__: Final[tuple[Literal["stopped"]]]
     @property
     def miniports(self, /) -> list[NdisMiniport]:
         """
@@ -11326,6 +12017,7 @@ class NdisNbl(BaseRecord):
     """
     A `_NET_BUFFER_LIST` and its NET_BUFFERs (`!ndiskd.nbl`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["next"], Literal["parent"], Literal["context"], Literal["pool"], Literal["source_handle"], Literal["source"], Literal["flags"], Literal["nbl_flags"], Literal["child_ref_count"], Literal["status"], Literal["net_buffers"], Literal["net_buffers_stopped"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -11379,6 +12071,7 @@ class NdisNblChain(BaseRecord):
     """
     The NBLs on a `Next` chain (`!ndiskd.nbl -chain`).
     """
+    __match_args__: Final[tuple[Literal["nbls"], Literal["stopped"]]]
     @property
     def nbls(self, /) -> list[NdisNbl]: ...
     @property
@@ -11392,6 +12085,7 @@ class NdisNetBuffer(BaseRecord):
     """
     A `_NET_BUFFER`: one frame of a NET_BUFFER_LIST.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["next"], Literal["current_mdl"], Literal["current_mdl_offset"], Literal["data_length"], Literal["data_offset"], Literal["mdl_chain"], Literal["data"], Literal["data_error"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -11430,6 +12124,7 @@ class NdisOidRequest(BaseRecord):
     """
     An `_NDIS_OID_REQUEST`.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["request_type"], Literal["oid"], Literal["port"], Literal["timeout"], Literal["buffer"], Literal["buffer_length"], Literal["output_length"], Literal["method_id"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -11475,6 +12170,7 @@ class NdisOpen(BaseRecord):
     """
     A protocol's binding to a miniport (`_NDIS_OPEN_BLOCK`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["protocol"], Literal["protocol_name"], Literal["context"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -11495,6 +12191,7 @@ class NdisPendingOid(BaseRecord):
     """
     An OID request a miniport or filter module has not completed.
     """
+    __match_args__: Final[tuple[Literal["owner"], Literal["address"], Literal["name"], Literal["request"], Literal["error"]]]
     @property
     def address(self, /) -> int:
         """
@@ -11521,6 +12218,7 @@ class NdisPendingOids(BaseRecord):
     The pending OID requests of every miniport and filter module
     (`!ndiskd.oid`).
     """
+    __match_args__: Final[tuple[Literal["pending"], Literal["miniports"], Literal["filters"], Literal["problems"]]]
     @property
     def filters(self, /) -> int: ...
     @property
@@ -11541,6 +12239,7 @@ class NdisProtocol(BaseRecord):
     """
     A protocol driver (`_NDIS_PROTOCOL_BLOCK`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["name"], Literal["image_name"], Literal["ndis_version"], Literal["driver_version"], Literal["context"], Literal["flags"], Literal["bind_handler"], Literal["opens"], Literal["opens_stopped"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -11578,6 +12277,7 @@ class NdisProtocolBinding(BaseRecord):
     """
     A protocol's binding as the protocol sees it: the miniport it opened.
     """
+    __match_args__: Final[tuple[Literal["open"], Literal["miniport"], Literal["miniport_name"], Literal["context"]]]
     @property
     def context(self, /) -> int:
         """
@@ -11598,6 +12298,7 @@ class NdisProtocolDetail(BaseRecord):
     """
     One protocol driver in detail (`!ndiskd.protocol <address>`).
     """
+    __match_args__: Final[tuple[Literal["protocol"], Literal["listed"], Literal["bind_handler_name"], Literal["bindings"], Literal["bindings_stopped"]]]
     @property
     def bind_handler_name(self, /) -> str |None:
         """
@@ -11623,6 +12324,7 @@ class NdisProtocolList(BaseRecord):
     """
     The protocol drivers on `ndis!ndisProtocolList` (`!ndiskd.protocol`).
     """
+    __match_args__: Final[tuple[Literal["stopped"]]]
     @property
     def protocols(self, /) -> list[NdisProtocol]:
         """
@@ -11644,6 +12346,7 @@ class NdisUnreadable(BaseRecord):
     """
     A block a list names but that does not read.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["error"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -11654,6 +12357,7 @@ class Notice(BaseRecord):
     """
     Something the debugger reported beside a command's result.
     """
+    __match_args__: Final[tuple[Literal["level"], Literal["text"]]]
     @property
     def level(self, /) -> Literal["info", "warning"]:
         """
@@ -11670,6 +12374,7 @@ class NotifyCallback(BaseRecord):
     """
     A process, thread, or image notification callback (`callbacks`).
     """
+    __match_args__: Final[tuple[Literal["kind"], Literal["index"], Literal["function"], Literal["symbol"], Literal["block"], Literal["raw"], Literal["context"]]]
     @property
     def block(self, /) -> int:
         """
@@ -11705,6 +12410,7 @@ class NtEntry(BaseRecord):
     """
     An NT-heap entry (`_HEAP_ENTRY`), decoded from its header.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["size"], Literal["previous_size"], Literal["flags"], Literal["unused_bytes"], Literal["granule"], Literal["checksum_ok"]]]
     @property
     def address(self, /) -> int:
         """
@@ -11763,6 +12469,7 @@ class NtEntryDetail(BaseRecord):
     """
     An NT-heap entry with the legacy-LFH region it holds.
     """
+    __match_args__: Final[tuple[Literal["entry"], Literal["lfh"], Literal["lfh_blocks"], Literal["lfh_truncated"], Literal["lfh_error"]]]
     @property
     def entry(self, /) -> NtEntry: ...
     @property
@@ -11792,6 +12499,7 @@ class NtHeap(BaseRecord):
     """
     An NT (`_HEAP`) heap.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["flags"], Literal["force_flags"], Literal["granule"], Literal["encoding"], Literal["total_free_units"], Literal["virtual_threshold"], Literal["front_end"], Literal["front_end_type"], Literal["virtual_blocks"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -11849,6 +12557,7 @@ class NtHeapDetail(BaseRecord):
     """
     An NT heap with its segments.
     """
+    __match_args__: Final[tuple[Literal["heap"], Literal["segments"]]]
     @property
     def heap(self, /) -> NtHeap: ...
     @property
@@ -11859,6 +12568,7 @@ class NtSegment(BaseRecord):
     """
     One `_HEAP_SEGMENT` of an NT heap.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["base"], Literal["pages"], Literal["uncommitted_pages"], Literal["first_entry"], Literal["last_valid_entry"], Literal["uncommitted"]]]
     @property
     def address(self, /) -> int:
         """
@@ -11893,6 +12603,7 @@ class NtSegmentDetail(BaseRecord):
     """
     An NT-heap segment with its entry chain.
     """
+    __match_args__: Final[tuple[Literal["segment"], Literal["entries"], Literal["stopped"]]]
     @property
     def entries(self, /) -> list[NtEntryDetail]:
         """
@@ -11912,6 +12623,7 @@ class NtUncommittedRange(BaseRecord):
     """
     An uncommitted range of an NT-heap segment.
     """
+    __match_args__: Final[tuple[Literal["start"], Literal["end"]]]
     @property
     def end(self, /) -> int:
         """
@@ -11925,6 +12637,7 @@ class NtUserBlocks(BaseRecord):
     """
     A legacy-LFH user block region in one busy NT-heap entry.
     """
+    __match_args__: Final[tuple[Literal["header"], Literal["subsegment"], Literal["block_size"], Literal["block_count"], Literal["first_block"], Literal["stride"], Literal["busy"]]]
     @property
     def block_count(self, /) -> int: ...
     @property
@@ -11963,6 +12676,7 @@ class NtVirtualBlock(BaseRecord):
     """
     An NT-heap block with a separate allocation (`_HEAP_VIRTUAL_ALLOC_ENTRY`).
     """
+    __match_args__: Final[tuple[Literal["entry"], Literal["commit_size"], Literal["reserve_size"], Literal["user"]]]
     @property
     def commit_size(self, /) -> int:
         """
@@ -11990,6 +12704,7 @@ class NtfsRecord(BaseRecord):
     """
     One NTFS blackbox record.
     """
+    __match_args__: Final[tuple[Literal["kind"], Literal["length"], Literal["irp"], Literal["scb"], Literal["thread"], Literal["break_reason"], Literal["owner_process_name"], Literal["breaking_process_name"]]]
     @property
     def break_reason(self, /) -> int |None:
         """
@@ -12023,6 +12738,7 @@ class ObjectDetail(BaseRecord):
     An executive object with its header, type, and name, and the entries of
     a directory (`!object`).
     """
+    __match_args__: Final[tuple[Literal["header"], Literal["entries"]]]
     @property
     def entries(self, /) -> list[ObjectDirectoryEntry] |None:
         """
@@ -12036,6 +12752,7 @@ class ObjectDirectoryEntry(BaseRecord):
     """
     A named object in an object directory.
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["object"], Literal["type"]]]
     @property
     def name(self, /) -> str: ...
     @property
@@ -12052,6 +12769,7 @@ class ObjectHeaderDetail(BaseRecord):
     """
     An executive object's `_OBJECT_HEADER`, type, and name.
     """
+    __match_args__: Final[tuple[Literal["input"], Literal["mode"], Literal["header"], Literal["body"], Literal["pointer_count"], Literal["handle_count"], Literal["type_index"], Literal["type_object"], Literal["type_name"], Literal["info_mask"], Literal["name_info"], Literal["name"]]]
     @property
     def body(self, /) -> int: ...
     @property
@@ -12105,6 +12823,7 @@ class ObjectSecurity(BaseRecord):
     """
     The security descriptor of an object, from its header (`!objsd`).
     """
+    __match_args__: Final[tuple[Literal["object"], Literal["header"], Literal["fast_reference"], Literal["descriptor_address"], Literal["descriptor"]]]
     @property
     def descriptor(self, /) -> SecurityDescriptor |None:
         """
@@ -12135,6 +12854,7 @@ class OptionalHeader(BaseRecord):
     `IMAGE_OPTIONAL_HEADER32`/`64` (PE32 or PE32+), widened to one shape.
     `base_of_data` exists only in the 32-bit header.
     """
+    __match_args__: Final[tuple[Literal["magic"], Literal["size_of_code"], Literal["size_of_initialized_data"], Literal["size_of_uninitialized_data"], Literal["entry_point_rva"], Literal["base_of_code"], Literal["base_of_data"], Literal["image_base"], Literal["section_alignment"], Literal["file_alignment"], Literal["win32_version_value"], Literal["size_of_image"], Literal["size_of_headers"], Literal["checksum"], Literal["subsystem"], Literal["dll_characteristics"], Literal["size_of_stack_reserve"], Literal["size_of_stack_commit"], Literal["size_of_heap_reserve"], Literal["size_of_heap_commit"], Literal["loader_flags"], Literal["number_of_rva_and_sizes"]]]
     @property
     def base_of_code(self, /) -> int: ...
     @property
@@ -12224,6 +12944,7 @@ class PackedQueueState(BaseRecord):
     """
     What the driver keeps of a packed queue.
     """
+    __match_args__: Final[tuple[Literal["free"], Literal["last_used"], Literal["used_wrap"], Literal["next_avail"], Literal["avail_wrap"], Literal["desc"], Literal["desc_state"], Literal["driver_event"], Literal["device_event"], Literal["interrupts"], Literal["notifications"]]]
     @property
     def avail_wrap(self, /) -> bool: ...
     @property
@@ -12277,6 +12998,7 @@ class PackedRing(BaseRecord):
     A packed ring as guest memory holds it, read from the driver's last
     used position.
     """
+    __match_args__: Final[tuple[Literal["returned"], Literal["with_device"], Literal["broken"]]]
     @property
     def broken(self, /) -> str |None:
         """
@@ -12299,6 +13021,7 @@ class PageLocation(BaseRecord):
     """
     The `PageLocation` of a PFN, which is the list that holds the page.
     """
+    __match_args__: Final[tuple[Literal["value"]]]
     @property
     def name(self, /) -> str:
         """
@@ -12312,6 +13035,7 @@ class PageRange(BaseRecord):
     """
     A page range (`_HEAP_PAGE_RANGE_DESCRIPTOR`) of a page segment.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["units"], Literal["unit_size"], Literal["flags"], Literal["committed_pages"], Literal["unused_bytes"], Literal["kind"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -12351,6 +13075,7 @@ class PageSegment(BaseRecord):
     """
     A page segment (`_HEAP_PAGE_SEGMENT`) of a segment context.
     """
+    __match_args__: Final[tuple[Literal["address"]]]
     @property
     def address(self, /) -> int: ...
 
@@ -12366,6 +13091,7 @@ class PartitionFilter(BaseRecord):
     another partition's or the target's own mapped there. Which VP ran it is
     known only once the hit arrives, from the processor's current VP.
     """
+    __match_args__: Final[tuple[Literal["partition"], Literal["vp"]]]
     @property
     def partition(self, /) -> int:
         """
@@ -12384,6 +13110,7 @@ class PciBar(BaseRecord):
     A base address register: its index, the raw register (both halves of a
     64-bit BAR), and the address it decodes to.
     """
+    __match_args__: Final[tuple[Literal["index"], Literal["raw"], Literal["kind"], Literal["address"], Literal["prefetchable"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -12403,6 +13130,7 @@ class PciBuses(BaseRecord):
     """
     The bus numbers of a type 1 or type 2 header.
     """
+    __match_args__: Final[tuple[Literal["primary"], Literal["secondary"], Literal["subordinate"]]]
     @property
     def primary(self, /) -> int: ...
     @property
@@ -12416,6 +13144,7 @@ class PciCapability(BaseRecord):
     A capability-list entry: its offset, ID, and (extended capabilities) the
     version.
     """
+    __match_args__: Final[tuple[Literal["offset"], Literal["id"], Literal["version"]]]
     @property
     def id(self, /) -> int: ...
     @property
@@ -12440,6 +13169,7 @@ class PciFunction(BaseRecord):
     A function's configuration space as read (256 bytes, or 4 KiB with
     extended space), with where it is and its decoded header.
     """
+    __match_args__: Final[tuple[Literal["segment"], Literal["bus"], Literal["device"], Literal["function"], Literal["header"], Literal["config"]]]
     @property
     def bus(self, /) -> int: ...
     @property
@@ -12477,6 +13207,7 @@ class PciHeader(BaseRecord):
     """
     The decoded type 0/1/2 configuration header.
     """
+    __match_args__: Final[tuple[Literal["vendor_id"], Literal["device_id"], Literal["command"], Literal["status"], Literal["revision"], Literal["prog_if"], Literal["sub_class"], Literal["base_class"], Literal["cache_line_size"], Literal["latency_timer"], Literal["header_type"], Literal["bist"], Literal["bars"], Literal["expansion_rom"], Literal["capabilities_pointer"], Literal["interrupt_line"], Literal["interrupt_pin"]]]
     @property
     def bars(self, /) -> list[PciBar]: ...
     @property
@@ -12553,6 +13284,7 @@ class PciRecord(BaseRecord):
     """
     One function's configuration header as pci.sys recorded it.
     """
+    __match_args__: Final[tuple[Literal["bus"], Literal["device"], Literal["function"], Literal["vendor_id"], Literal["device_id"], Literal["command"], Literal["status"], Literal["revision"]]]
     @property
     def bus(self, /) -> int: ...
     @property
@@ -12575,6 +13307,7 @@ class PciScan(BaseRecord):
     """
     The functions that a `!pci` scan found.
     """
+    __match_args__: Final[tuple[Literal["functions"], Literal["interrupted"]]]
     @property
     def functions(self, /) -> list[PciFunction]: ...
     @property
@@ -12589,6 +13322,7 @@ class PciTree(BaseRecord):
     pci.sys's view of the hierarchy: segments, their root buses, and each
     bus's functions and child buses (`!pcitree`).
     """
+    __match_args__: Final[tuple[Literal["segments"], Literal["truncated"], Literal["errors"]]]
     @property
     def errors(self, /) -> list[str]:
         """
@@ -12609,6 +13343,7 @@ class PciTreeBus(BaseRecord):
     A bus that pci.sys enumerated, with the devices on it and the buses
     behind its bridges.
     """
+    __match_args__: Final[tuple[Literal["extension"], Literal["number"], Literal["subordinate"], Literal["bridge_pdo"], Literal["devices"], Literal["child_buses"]]]
     @property
     def bridge_pdo(self, /) -> int:
         """
@@ -12634,6 +13369,7 @@ class PciTreeDevice(BaseRecord):
     """
     A device that pci.sys enumerated.
     """
+    __match_args__: Final[tuple[Literal["extension"], Literal["device_object"], Literal["bus"], Literal["device"], Literal["function"], Literal["vendor_id"], Literal["device_id"], Literal["revision"], Literal["base_class"], Literal["sub_class"], Literal["prog_if"], Literal["subsystem_vendor_id"], Literal["subsystem_id"], Literal["header_type"], Literal["instance_path"]]]
     @property
     def base_class(self, /) -> int: ...
     @property
@@ -12684,6 +13420,7 @@ class PciTreeSegment(BaseRecord):
     """
     A PCI segment and its root buses.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["number"], Literal["root_buses"]]]
     @property
     def address(self, /) -> int:
         """
@@ -12700,6 +13437,7 @@ class Pcr(BaseRecord):
     The main KPCR and KPRCB data of a processor (`!pcr`). A field is a
     diagnostic if its read can fail separately from the other reads.
     """
+    __match_args__: Final[tuple[Literal["processor"], Literal["kpcr"], Literal["kprcb"], Literal["kd_version_block"], Literal["current_prcb"], Literal["irql"], Literal["self_pcr"], Literal["current_thread"], Literal["next_thread"], Literal["idle_thread"], Literal["idtr"], Literal["gdtr"], Literal["tss_base"]]]
     @property
     def current_prcb(self, /) -> Diagnostic[int]:
         """
@@ -12771,6 +13509,7 @@ class Peb(BaseRecord):
     """
     A process's `_PEB` (`!peb`). ntoseye reads each field separately.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["image_base_address"], Literal["ldr"], Literal["process_parameters"], Literal["process_parameters_detail"], Literal["process_heap"], Literal["number_of_heaps"], Literal["process_heaps"], Literal["being_debugged"], Literal["os_major_version"], Literal["os_minor_version"], Literal["os_build_number"], Literal["session_id"], Literal["number_of_processors"], Literal["api_set_map"], Literal["loader_lists"], Literal["peb32"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -12838,6 +13577,7 @@ class Peb32(BaseRecord):
     """
     A WOW64 process's 32-bit `_PEB32`. ntoseye reads each field separately.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["image_base_address"], Literal["ldr"], Literal["process_parameters"], Literal["process_parameters_detail"], Literal["process_heap"], Literal["number_of_heaps"], Literal["process_heaps"], Literal["being_debugged"], Literal["os_major_version"], Literal["os_minor_version"], Literal["os_build_number"], Literal["session_id"], Literal["number_of_processors"], Literal["loader_lists"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -12900,6 +13640,7 @@ class PfnDetail(BaseRecord):
     on a list, `share_count` and `ws_index` when the page is not active, and
     `event` when the page is not in transition.
     """
+    __match_args__: Final[tuple[Literal["selector"], Literal["pfn"], Literal["record"], Literal["physical_address"], Literal["pte_address"], Literal["original_pte"], Literal["reference_count"], Literal["flink"], Literal["blink"], Literal["node_flink_low"], Literal["node_blink_low"], Literal["share_count"], Literal["ws_index"], Literal["event"], Literal["used_entry_count"], Literal["page_color"], Literal["pte_frame"], Literal["page_location"], Literal["modified"], Literal["cache_attribute"], Literal["priority"]]]
     @property
     def blink(self, /) -> int |None: ...
     @property
@@ -12961,7 +13702,6 @@ class PfnDetail(BaseRecord):
         The working-set index.
         """
 
-@final
 class PfnSelector(BaseRecord):
     """
     What `!pfn` decodes: a page-frame number, or the frame of a physical
@@ -12972,17 +13712,39 @@ class PfnSelector(BaseRecord):
         """
         The variant: `pfn`, `physical_address`.
         """
-    @property
-    def value(self, /) -> int |None:
-        """
-        The page-frame number or physical address given.
-        """
+    @final
+    class Pfn(PfnSelector):
+        __match_args__: Final[tuple[Literal["value"]]]
+        @property
+        def kind(self, /) -> Literal["pfn"]:
+            """
+            `pfn`.
+            """
+        @property
+        def value(self, /) -> int:
+            """
+            The page-frame number or physical address given.
+            """
+    @final
+    class PhysicalAddress(PfnSelector):
+        __match_args__: Final[tuple[Literal["value"]]]
+        @property
+        def kind(self, /) -> Literal["physical_address"]:
+            """
+            `physical_address`.
+            """
+        @property
+        def value(self, /) -> int:
+            """
+            The page-frame number or physical address given.
+            """
 
 @final
 class PnpBlackbox(BaseRecord):
     """
     The PnP event in progress, or the last one.
     """
+    __match_args__: Final[tuple[Literal["activity_id"], Literal["activity_time"], Literal["event_information"], Literal["event_in_progress"], Literal["problem_code"], Literal["veto_type"], Literal["device_id"], Literal["veto_string"]]]
     @property
     def activity_id(self, /) -> str:
         """
@@ -13009,6 +13771,7 @@ class PnpTriageDetail(BaseRecord):
     PnP triage groups from one limited walk of the device tree
     (`!pnptriage`).
     """
+    __match_args__: Final[tuple[Literal["problems"], Literal["not_started"], Literal["pending_irps"], Literal["total"], Literal["started"], Literal["truncated"]]]
     @property
     def not_started(self, /) -> list[DevNodeSummary]:
         """
@@ -13042,6 +13805,7 @@ class PoolBlockDetail(BaseRecord):
     """
     A `_POOL_HEADER` block in a pool page.
     """
+    __match_args__: Final[tuple[Literal["header"], Literal["body"], Literal["size"], Literal["previous_size"], Literal["pool_type"], Literal["tag"], Literal["tag_name"], Literal["allocated"], Literal["marked"], Literal["state"], Literal["target_offset"]]]
     @property
     def allocated(self, /) -> bool: ...
     @property
@@ -13097,6 +13861,7 @@ class PoolFindDetail(BaseRecord):
     """
     A pool-tag search (`!poolfind`).
     """
+    __match_args__: Final[tuple[Literal["tag"], Literal["pool_type"], Literal["matches"], Literal["found"], Literal["ranges"], Literal["big_status"], Literal["truncated"], Literal["interrupted"]]]
     @property
     def big_status(self, /) -> str |None:
         """
@@ -13137,6 +13902,7 @@ class PoolFindMatch(BaseRecord):
     """
     A pool allocation with the search tag (`!poolfind`).
     """
+    __match_args__: Final[tuple[Literal["source"], Literal["address"], Literal["size"], Literal["tag"], Literal["tag_name"], Literal["allocated"], Literal["state"], Literal["pool_type"], Literal["table_entry"], Literal["index"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -13182,6 +13948,7 @@ class PoolFindRange(BaseRecord):
     """
     How far `!poolfind` scanned one virtual pool range.
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["start"], Literal["end"], Literal["pages"], Literal["scanned_pages"], Literal["stopped_at"]]]
     @property
     def end(self, /) -> int:
         """
@@ -13213,6 +13980,7 @@ class PoolPageDetail(BaseRecord):
     """
     The pool page holding an address (`!pool`).
     """
+    __match_args__: Final[tuple[Literal["target"], Literal["page"], Literal["page_kind"], Literal["region"], Literal["blocks"], Literal["target_index"], Literal["big"], Literal["segment_heap_hint"], Literal["near_symbol"], Literal["message"]]]
     @property
     def big(self, /) -> BigPoolDetail |None:
         """
@@ -13268,6 +14036,7 @@ class PoolProblem(BaseRecord):
     """
     A pool header inconsistency.
     """
+    __match_args__: Final[tuple[Literal["header"], Literal["message"]]]
     @property
     def header(self, /) -> int:
         """
@@ -13284,6 +14053,7 @@ class PoolRegionDetail(BaseRecord):
     """
     A virtual pool range.
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["start"], Literal["end"]]]
     @property
     def end(self, /) -> int:
         """
@@ -13299,6 +14069,7 @@ class PoolTag(BaseRecord):
     """
     A pool tag.
     """
+    __match_args__: Final[tuple[Literal["value"]]]
     @property
     def name(self, /) -> str:
         """
@@ -13312,6 +14083,7 @@ class PoolUsageDetail(BaseRecord):
     """
     Pool usage by tag, from the pool tracker (`!poolused`).
     """
+    __match_args__: Final[tuple[Literal["rows"], Literal["rows_truncated"], Literal["tracker_status"], Literal["big_status"], Literal["sort"], Literal["tag_filter"]]]
     @property
     def big_status(self, /) -> str:
         """
@@ -13344,6 +14116,7 @@ class PoolUsageRow(BaseRecord):
     tracker tables and the big-pool table. A value is `None` if no source
     has an entry for that pool.
     """
+    __match_args__: Final[tuple[Literal["tag"], Literal["nonpaged_allocs"], Literal["nonpaged_frees"], Literal["nonpaged_bytes"], Literal["paged_allocs"], Literal["paged_frees"], Literal["paged_bytes"]]]
     @property
     def nonpaged_allocs(self, /) -> int |None: ...
     @property
@@ -13376,6 +14149,7 @@ class PoolValidationDetail(BaseRecord):
     The blocks of the pool page that holds an address, with a check of
     header consistency (`!poolval`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["page"], Literal["region"], Literal["layout"], Literal["blocks"], Literal["problem"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -13411,6 +14185,7 @@ class PortRange(BaseRecord):
     """
     An inclusive range of I/O ports whose accesses exit.
     """
+    __match_args__: Final[tuple[Literal["first"], Literal["last"]]]
     @property
     def first(self, /) -> int: ...
     @property
@@ -13421,6 +14196,7 @@ class PowerAction(BaseRecord):
     """
     The system power action (`nt!PopAction`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["updates"], Literal["state"], Literal["shutdown"], Literal["action"], Literal["lightest_state"], Literal["flags"], Literal["status"], Literal["irp_minor"], Literal["waking"], Literal["system_state"], Literal["next_system_state"], Literal["effective_system_state"], Literal["current_system_state"], Literal["hiber_context"], Literal["action_worker_thread"], Literal["devices"]]]
     @property
     def action(self, /) -> PowerEnum: ...
     @property
@@ -13478,6 +14254,7 @@ class PowerActionDetail(BaseRecord):
     `!poaction`: the power action, the power IRPs, and the IRP worker
     threads.
     """
+    __match_args__: Final[tuple[Literal["action"], Literal["irps"], Literal["workers"]]]
     @property
     def action(self, /) -> PowerAction: ...
     @property
@@ -13496,6 +14273,7 @@ class PowerButton(BaseRecord):
     """
     The power button section of the boot status data.
     """
+    __match_args__: Final[tuple[Literal["last_press_time"], Literal["cumulative_press_count"], Literal["last_press_boot_id"], Literal["last_power_watchdog_stage"], Literal["watchdog_armed"], Literal["shutdown_in_progress"], Literal["last_release_time"], Literal["cumulative_release_count"], Literal["last_release_boot_id"], Literal["error_count"], Literal["current_connected_standby_phase"], Literal["transition_latest_checkpoint_id"], Literal["transition_latest_checkpoint_type"], Literal["transition_latest_checkpoint_sequence_number"]]]
     @property
     def cumulative_press_count(self, /) -> int: ...
     @property
@@ -13530,6 +14308,7 @@ class PowerCulprit(BaseRecord):
     """
     The driver a DRIVER_POWER_STATE_FAILURE names, and why.
     """
+    __match_args__: Final[tuple[Literal["driver"], Literal["device"], Literal["reason"]]]
     @property
     def device(self, /) -> int:
         """
@@ -13547,6 +14326,7 @@ class PowerEnum(BaseRecord):
     has one, less the enum's common prefix (`Working` for
     `PowerSystemWorking`, `D3` for `PowerDeviceD3`).
     """
+    __match_args__: Final[tuple[Literal["value"], Literal["name"]]]
     @property
     def label(self, /) -> str:
         """
@@ -13566,6 +14346,7 @@ class PowerFailure(BaseRecord):
     What a DRIVER_POWER_STATE_FAILURE (0x9F) names as stuck, by subtype
     (parameter 1).
     """
+    __match_args__: Final[tuple[Literal["subtype"], Literal["description"], Literal["device"], Literal["blocked_irp"], Literal["irps"], Literal["workers"], Literal["pnp_lock_owner"], Literal["timeout_seconds"], Literal["culprit"], Literal["notes"]]]
     @property
     def blocked_irp(self, /) -> BlockedIrp |None:
         """
@@ -13623,6 +14404,7 @@ class PowerFailureFinding(BaseRecord):
     What a DRIVER_POWER_STATE_FAILURE (0x9F) names, read from the target,
     and the stacks of the threads involved.
     """
+    __match_args__: Final[tuple[Literal["failure"], Literal["threads"]]]
     @property
     def failure(self, /) -> PowerFailure: ...
     @property
@@ -13633,6 +14415,7 @@ class PowerFailureThread(BaseRecord):
     """
     A thread that a DRIVER_POWER_STATE_FAILURE names, with its stack.
     """
+    __match_args__: Final[tuple[Literal["role"], Literal["thread"]]]
     @property
     def role(self, /) -> PowerThreadRole: ...
     @property
@@ -13651,6 +14434,7 @@ class PowerIrp(BaseRecord):
     """
     A power IRP the power manager allocated (`_POP_IRP_DATA`).
     """
+    __match_args__: Final[tuple[Literal["data"], Literal["irp"], Literal["pdo"], Literal["target_device"], Literal["current_device"], Literal["minor_function"], Literal["state"], Literal["system_transition"], Literal["watchdog"], Literal["pending"], Literal["holder"]]]
     @property
     def current_device(self, /) -> int:
         """
@@ -13712,6 +14496,7 @@ class PowerIrpEntry(BaseRecord):
     An entry on a list of `_POP_IRP_DATA`: the power IRP, or why it does
     not decode.
     """
+    __match_args__: Final[tuple[Literal["data"], Literal["irp"]]]
     @property
     def data(self, /) -> int:
         """
@@ -13725,6 +14510,7 @@ class PowerIrpList(BaseRecord):
     """
     The power IRPs on a list of `_POP_IRP_DATA`, normally `nt!PopIrpList`.
     """
+    __match_args__: Final[tuple[Literal["head"], Literal["head_name"], Literal["entries"], Literal["stopped"]]]
     @property
     def entries(self, /) -> list[PowerIrpEntry]: ...
     @property
@@ -13740,23 +14526,37 @@ class PowerIrpList(BaseRecord):
         Why the walk stopped short of the head.
         """
 
-@final
 class PowerState(BaseRecord):
     """
     The power state a power IRP or a stack location asks for: a `system`
     or a `device` state.
     """
     @property
-    def device(self, /) -> PowerEnum |None: ...
-    @property
     def kind(self, /) -> Literal["system", "device"]:
         """
         The variant: `system`, `device`.
         """
-    @property
-    def system(self, /) -> PowerEnum |None: ...
+    @final
+    class Device(PowerState):
+        __match_args__: Final[tuple[Literal["device"]]]
+        @property
+        def device(self, /) -> PowerEnum: ...
+        @property
+        def kind(self, /) -> Literal["device"]:
+            """
+            `device`.
+            """
+    @final
+    class System(PowerState):
+        __match_args__: Final[tuple[Literal["system"]]]
+        @property
+        def kind(self, /) -> Literal["system"]:
+            """
+            `system`.
+            """
+        @property
+        def system(self, /) -> PowerEnum: ...
 
-@final
 class PowerThreadRole(BaseRecord):
     """
     Why a DRIVER_POWER_STATE_FAILURE names a thread: `kind` `irp_worker`
@@ -13765,20 +14565,44 @@ class PowerThreadRole(BaseRecord):
     lock, 0x4).
     """
     @property
-    def device(self, /) -> int |None: ...
-    @property
-    def irp(self, /) -> int |None: ...
-    @property
     def kind(self, /) -> Literal["irp_worker", "pnp_lock_owner"]:
         """
         The variant: `irp_worker`, `pnp_lock_owner`.
         """
+    @final
+    class IrpWorker(PowerThreadRole):
+        """
+        A power IRP worker thread, passing `irp` to `device`, or waiting for
+        work when both are 0.
+        """
+        __match_args__: Final[tuple[Literal["irp"], Literal["device"]]]
+        @property
+        def device(self, /) -> int: ...
+        @property
+        def irp(self, /) -> int: ...
+        @property
+        def kind(self, /) -> Literal["irp_worker"]:
+            """
+            `irp_worker`.
+            """
+    @final
+    class PnpLockOwner(PowerThreadRole):
+        """
+        The thread that holds the PnP lock (0x4).
+        """
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["pnp_lock_owner"]:
+            """
+            `pnp_lock_owner`.
+            """
 
 @final
 class PowerTransition(BaseRecord):
     """
     The power transition section of the boot status data.
     """
+    __match_args__: Final[tuple[Literal["power_button_timestamp"], Literal["system_running"], Literal["connected_standby_in_progress"], Literal["user_shutdown_in_progress"], Literal["system_shutdown_in_progress"], Literal["sleep_in_progress"], Literal["connected_standby_scenario_instance_id"], Literal["connected_standby_entry_reason"], Literal["connected_standby_exit_reason"], Literal["system_sleep_transitions_to_on"], Literal["last_reference_time"], Literal["last_reference_time_checksum"], Literal["last_update_boot_id"]]]
     @property
     def connected_standby_entry_reason(self, /) -> int: ...
     @property
@@ -13811,6 +14635,7 @@ class PowerWorker(BaseRecord):
     """
     A thread that passes power IRPs to drivers (`_POP_IRP_WORKER_ENTRY`).
     """
+    __match_args__: Final[tuple[Literal["thread"], Literal["irp"], Literal["device"], Literal["driver"], Literal["is_static"]]]
     @property
     def device(self, /) -> int: ...
     @property
@@ -13834,6 +14659,7 @@ class PowerWorkerEntry(BaseRecord):
     An entry on a list of `_POP_IRP_WORKER_ENTRY`: the worker, or why it
     does not decode.
     """
+    __match_args__: Final[tuple[Literal["entry"], Literal["worker"]]]
     @property
     def entry(self, /) -> int: ...
     @property
@@ -13844,6 +14670,7 @@ class PowerWorkerList(BaseRecord):
     """
     The IRP worker threads on a list, normally `nt!PopIrpThreadList`.
     """
+    __match_args__: Final[tuple[Literal["head"], Literal["head_name"], Literal["entries"], Literal["stopped"]]]
     @property
     def entries(self, /) -> list[PowerWorkerEntry]: ...
     @property
@@ -13858,6 +14685,7 @@ class Prcb(BaseRecord):
     """
     Selected `_KPRCB` fields of a processor (`!prcb`).
     """
+    __match_args__: Final[tuple[Literal["processor"], Literal["kprcb"], Literal["number"], Literal["current_thread"], Literal["next_thread"], Literal["idle_thread"], Literal["dpc_routine_active"], Literal["interrupt_count"], Literal["processor_state"]]]
     @property
     def current_thread(self, /) -> Diagnostic[int]:
         """
@@ -13906,6 +14734,7 @@ class ProcedureLocal(BaseRecord):
     """
     A PDB local or parameter.
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["type_name"], Literal["byte_size"], Literal["parameter"], Literal["location"]]]
     @property
     def byte_size(self, /) -> int |None:
         """
@@ -13968,7 +14797,7 @@ class Process:
         """
         Decode a handle in the handle table of this process.
         """
-    def handle_traces(self, /, handle: int |None = None, max_traces: int |None = None) -> HandleTraces:
+    def handle_traces(self, /, handle: int |None = None, *, max_traces: int |None = None) -> HandleTraces:
         """
         Show the stacks that handle tracing recorded for the handles of a process.
         
@@ -13985,7 +14814,7 @@ class Process:
         have the user-mode forms that change tracing (-enable, -disable,
         -snapshot, -diff).
         """
-    def handles(self, /, limit: int = 256) -> HandleTable:
+    def handles(self, /, *, limit: int = 256) -> HandleTable:
         """
         List a maximum of `limit` handles in the handle table of this process.
         """
@@ -14010,7 +14839,7 @@ class Process:
         explorer.exe` shows explorer.exe, and `!process svchost 0` lists each
         svchost.exe. `ps` keeps its short legacy list format.
         """
-    def loader_modules(self, /, containing: int |str |None = None) -> LoaderModules:
+    def loader_modules(self, /, *, containing: int |str |None = None) -> LoaderModules:
         """
         List the modules in the loader lists of the current process.
         
@@ -14130,6 +14959,7 @@ class ProcessDetail(BaseRecord):
     `_EPROCESS` fields. Each field is `None` when this build's layout lacks
     it or its read failed.
     """
+    __match_args__: Final[tuple[Literal["process"], Literal["session_id"], Literal["peb"], Literal["parent_pid"], Literal["directory_table_base"], Literal["object_table"], Literal["handle_count"], Literal["vad_root"], Literal["token"], Literal["create_time"], Literal["user_time"], Literal["kernel_time"], Literal["quota_paged_pool"], Literal["quota_nonpaged_pool"], Literal["working_set_size"], Literal["commit_charge"], Literal["peak_virtual_size"], Literal["private_page_count"], Literal["debug_port"], Literal["job"]]]
     @property
     def commit_charge(self, /) -> int |None: ...
     @property
@@ -14183,6 +15013,7 @@ class ProcessInfo(BaseRecord):
     The identity of a process (`ps`, `!process 0 0`) and the root (`dtb`) of
     its address space.
     """
+    __match_args__: Final[tuple[Literal["pid"], Literal["name"], Literal["dtb"], Literal["eprocess"], Literal["wow64_peb"]]]
     @property
     def dtb(self, /) -> int:
         """
@@ -14220,6 +15051,7 @@ class ProcessMemoryUsage(BaseRecord):
     """
     One process's memory counters, in bytes.
     """
+    __match_args__: Final[tuple[Literal["process"], Literal["virtual_size"], Literal["peak_virtual_size"], Literal["working_set_size"], Literal["peak_working_set_size"], Literal["pagefile_usage"], Literal["peak_pagefile_usage"], Literal["private_usage"]]]
     @property
     def pagefile_usage(self, /) -> Diagnostic[int]: ...
     @property
@@ -14243,6 +15075,7 @@ class ProcessParameters(BaseRecord):
     A process's `_RTL_USER_PROCESS_PARAMETERS`. ntoseye reads each string
     separately, and a string that is paged out is unavailable.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["command_line"], Literal["image_path_name"], Literal["current_directory"], Literal["dll_path"], Literal["window_title"], Literal["desktop_info"], Literal["shell_info"], Literal["runtime_data"], Literal["environment"], Literal["environment_size"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -14309,6 +15142,7 @@ class ProcessorError(BaseRecord):
     """
     A processor whose state ntoseye could not read.
     """
+    __match_args__: Final[tuple[Literal["processor"], Literal["message"]]]
     @property
     def message(self, /) -> str: ...
     @property
@@ -14319,6 +15153,7 @@ class ProcessorStateArea(BaseRecord):
     """
     The `_KPROCESSOR_STATE` embedded in a `_KPRCB`.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["size"], Literal["name"], Literal["context_frame"], Literal["special_registers"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -14347,6 +15182,7 @@ class PteAttributes(BaseRecord):
     `writable`, `user`, and `nx` are the restrictions it places on what lies
     below.
     """
+    __match_args__: Final[tuple[Literal["present"], Literal["large_page"], Literal["writable"], Literal["user"], Literal["nx"], Literal["pfn"], Literal["flags"]]]
     @property
     def flags(self, /) -> str:
         """
@@ -14378,6 +15214,7 @@ class PteLevel(BaseRecord):
     One page-table level of a walk (`!pte`, `!vtop`): where its entry is,
     the entry as read, and the entry decoded at its level.
     """
+    __match_args__: Final[tuple[Literal["level"], Literal["address"], Literal["value"], Literal["attributes"]]]
     @property
     def address(self, /) -> int:
         """
@@ -14400,6 +15237,7 @@ class PteWalk(BaseRecord):
     The page-table entries that map an address, read through NT's self-map
     (`!pte`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["dtb"], Literal["pxe"], Literal["ppe"], Literal["pde"], Literal["pte"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -14426,6 +15264,7 @@ class PtovDetail(BaseRecord):
     """
     The virtual addresses that map a physical address (`!ptov`).
     """
+    __match_args__: Final[tuple[Literal["physical"], Literal["dtb"], Literal["mappings"], Literal["table_pages"], Literal["bounded"], Literal["interrupted"]]]
     @property
     def bounded(self, /) -> bool:
         """
@@ -14453,6 +15292,7 @@ class PtovMapping(BaseRecord):
     """
     A virtual address that maps a physical page (`!ptov`).
     """
+    __match_args__: Final[tuple[Literal["virtual_address"], Literal["large"]]]
     @property
     def large(self, /) -> bool:
         """
@@ -14470,6 +15310,7 @@ class QueueProgress(BaseRecord):
     the driver took back; with how many were with the device and returned
     but not taken back.
     """
+    __match_args__: Final[tuple[Literal["published"], Literal["completed"], Literal["taken_back"], Literal["modulus"], Literal["with_device"], Literal["returned"]]]
     @property
     def completed(self, /) -> int |None:
         """
@@ -14503,6 +15344,7 @@ class QueuedLock(BaseRecord):
     """
     A numbered queued spinlock and the processors that own it or wait for it.
     """
+    __match_args__: Final[tuple[Literal["number"], Literal["name"], Literal["lock"], Literal["holders"]]]
     @property
     def holders(self, /) -> list[QueuedLockHolder]: ...
     @property
@@ -14528,6 +15370,7 @@ class QueuedLockHolder(BaseRecord):
     """
     The entry of a processor in a queued spinlock that it owns or waits for.
     """
+    __match_args__: Final[tuple[Literal["processor"]]]
     @property
     def processor(self, /) -> int: ...
     @property
@@ -14554,6 +15397,7 @@ class QueuedLocks(BaseRecord):
     """
     All numbered queued spinlocks on all processors (`!qlocks`).
     """
+    __match_args__: Final[tuple[Literal["processors"], Literal["locks"], Literal["errors"]]]
     @property
     def errors(self, /) -> list[ProcessorError]: ...
     @property
@@ -14569,6 +15413,7 @@ class RcdrDriver(BaseRecord):
     """
     A driver the WPP recorder serves (`_WPP_AUTOLOG_CONTEXT`).
     """
+    __match_args__: Final[tuple[Literal["context"], Literal["name"], Literal["image"], Literal["image_size"], Literal["logs"], Literal["logs_stopped"], Literal["default_log"], Literal["sequence"]]]
     @property
     def context(self, /) -> int: ...
     @property
@@ -14604,6 +15449,7 @@ class RcdrDriverList(BaseRecord):
     """
     The drivers the recorder serves (`!rcdrkd.rcdrloglist`).
     """
+    __match_args__: Final[tuple[Literal["drivers"], Literal["unreadable"], Literal["stopped"]]]
     @property
     def drivers(self, /) -> list[RcdrDriver]: ...
     @property
@@ -14622,6 +15468,7 @@ class RcdrEntry(BaseRecord):
     """
     A record of a log's partition, formatted.
     """
+    __match_args__: Final[tuple[Literal["log"], Literal["partition"], Literal["entry"]]]
     @property
     def entry(self, /) -> WdfLogEntry: ...
     @property
@@ -14640,6 +15487,7 @@ class RcdrLog(BaseRecord):
     """
     A recorder log (`_WPP_AUTOLOG_HEADER`).
     """
+    __match_args__: Final[tuple[Literal["header"], Literal["identifier"], Literal["id_number"], Literal["size"], Literal["deleted"], Literal["timestamps"], Literal["default"], Literal["partitions"]]]
     @property
     def default(self, /) -> bool:
         """
@@ -14673,6 +15521,7 @@ class RcdrLogDump(BaseRecord):
     A driver's records from its logs, merged in the order the driver logged
     them, oldest first (`!rcdrkd.rcdrlogdump`).
     """
+    __match_args__: Final[tuple[Literal["driver"], Literal["logs"], Literal["entries"], Literal["ends"]]]
     @property
     def driver(self, /) -> RcdrDriver: ...
     @property
@@ -14690,6 +15539,7 @@ class RcdrLogs(BaseRecord):
     """
     A driver's logs (`!rcdrkd.rcdrloglist <driver>`).
     """
+    __match_args__: Final[tuple[Literal["driver"], Literal["logs"], Literal["unreadable"]]]
     @property
     def driver(self, /) -> RcdrDriver: ...
     @property
@@ -14705,6 +15555,7 @@ class RcdrPartition(BaseRecord):
     """
     A partition of a recorder log: the ring its records go to.
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["base"], Literal["size"], Literal["current"], Literal["previous"]]]
     @property
     def base(self, /) -> int: ...
     @property
@@ -14730,6 +15581,7 @@ class RcdrUnreadable(BaseRecord):
     """
     A recorder context or log header that does not read.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["error"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -14740,6 +15592,7 @@ class RcdrWalkEnd(BaseRecord):
     """
     How the walk of one partition ended.
     """
+    __match_args__: Final[tuple[Literal["log"], Literal["partition"], Literal["end"]]]
     @property
     def end(self, /) -> IfrEnd: ...
     @property
@@ -14758,6 +15611,7 @@ class ReadyQueue(BaseRecord):
     """
     The ready list of one processor for one priority.
     """
+    __match_args__: Final[tuple[Literal["processor"], Literal["priority"], Literal["entries"], Literal["termination"]]]
     @property
     def entries(self, /) -> list[ReadyThread]: ...
     @property
@@ -14775,6 +15629,7 @@ class ReadyQueues(BaseRecord):
     """
     The dispatcher ready queues (`!ready`).
     """
+    __match_args__: Final[tuple[Literal["queues"], Literal["total"], Literal["truncated"], Literal["errors"]]]
     @property
     def errors(self, /) -> list[SchedulerError]: ...
     @property
@@ -14798,6 +15653,7 @@ class ReadyThread(BaseRecord):
     """
     A thread on a dispatcher ready queue.
     """
+    __match_args__: Final[tuple[Literal["kthread"], Literal["thread"]]]
     @property
     def kthread(self, /) -> int:
         """
@@ -14810,17 +15666,11 @@ class ReadyThread(BaseRecord):
         """
 
 @final
-class Record(BaseRecord):
-    """
-    An immutable, ordered set of named fields with attribute access.
-    """
-    def __getattr__(self, name: str, /) -> Any: ...
-
-@final
 class RegKey(BaseRecord):
     """
     A key with its subkeys and values (`!reg querykey`, `!reg keyinfo`).
     """
+    __match_args__: Final[tuple[Literal["path"], Literal["hive"], Literal["cell"], Literal["node"], Literal["name"], Literal["flags"], Literal["last_write"], Literal["links"], Literal["subkey_count"], Literal["value_count"], Literal["problems"]]]
     @property
     def cell(self, /) -> int |None:
         """
@@ -14835,11 +15685,6 @@ class RegKey(BaseRecord):
     def flags(self, /) -> int: ...
     @property
     def hive(self, /) -> int: ...
-    @property
-    def key_values(self, /) -> list[RegValue]:
-        """
-        The values that read.
-        """
     @property
     def last_write(self, /) -> int:
         """
@@ -14892,6 +15737,11 @@ class RegKey(BaseRecord):
         """
     @property
     def value_count(self, /) -> int: ...
+    @property
+    def values(self, /) -> list[RegValue]:
+        """
+        The values that read.
+        """
 
 @final
 class RegLink(BaseRecord):
@@ -14899,6 +15749,7 @@ class RegLink(BaseRecord):
     A symbolic link a path went through: the link's path and the path
     its `SymbolicLinkValue` holds.
     """
+    __match_args__: Final[tuple[Literal["path"], Literal["target"]]]
     @property
     def path(self, /) -> str: ...
     @property
@@ -14909,6 +15760,7 @@ class RegSubkey(BaseRecord):
     """
     A subkey as its parent lists it.
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["cell"], Literal["node"], Literal["flags"], Literal["last_write"], Literal["subkey_count"], Literal["value_count"]]]
     @property
     def cell(self, /) -> int: ...
     @property
@@ -14958,6 +15810,7 @@ class RegValue(BaseRecord):
     """
     A value (`_CM_KEY_VALUE`).
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["cell"], Literal["node"], Literal["type"], Literal["length"], Literal["raw"]]]
     @property
     def cell(self, /) -> int: ...
     @property
@@ -15021,6 +15874,7 @@ class RegisterValue(BaseRecord):
     """
     A register of the exception's context.
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["value"]]]
     @property
     def name(self, /) -> str: ...
     @property
@@ -15062,6 +15916,7 @@ class RegistryCellError(BaseRecord):
     """
     A subkey or value cell that does not read.
     """
+    __match_args__: Final[tuple[Literal["cell"], Literal["error"]]]
     @property
     def cell(self, /) -> int: ...
     @property
@@ -15072,6 +15927,7 @@ class RegistryUnreadable(BaseRecord):
     """
     A hive that does not read.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["error"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -15082,6 +15938,7 @@ class ReloadStop(BaseRecord):
     """
     A reboot the debugger rebuilt its state for.
     """
+    __match_args__: Final[tuple[Literal["kernel_base"], Literal["coherent"]]]
     @property
     def coherent(self, /) -> bool:
         """
@@ -15098,6 +15955,7 @@ class ResourceList(BaseRecord):
     """
     The executive-resource list of the kernel (`!locks`).
     """
+    __match_args__: Final[tuple[Literal["head"], Literal["resources"], Literal["termination"]]]
     @property
     def head(self, /) -> int:
         """
@@ -15113,6 +15971,7 @@ class ResourceOwner(BaseRecord):
     """
     A thread that owns an executive resource.
     """
+    __match_args__: Final[tuple[Literal["thread"], Literal["count"]]]
     @property
     def count(self, /) -> int:
         """
@@ -15129,6 +15988,7 @@ class RunStatus(BaseRecord):
     loaded-module list exists, so a host knows process/module enumeration is
     not yet meaningful.
     """
+    __match_args__: Final[tuple[Literal["running"], Literal["current_thread"], Literal["rip"], Literal["symbol"], Literal["saved_vtl"], Literal["serving"], Literal["running_vp"], Literal["attached_process"], Literal["stopped_process"], Literal["stopped_thread"], Literal["coherent"], Literal["kernel_base"], Literal["partition"]]]
     @property
     def attached_process(self, /) -> ProcessInfo |None:
         """
@@ -15211,6 +16071,7 @@ class RunningProcessor(BaseRecord):
     """
     A processor's running, next, and idle threads (`!running`).
     """
+    __match_args__: Final[tuple[Literal["index"], Literal["kpcr"], Literal["prcb"], Literal["current_thread"], Literal["next_thread"], Literal["idle_thread"], Literal["short_stack"]]]
     @property
     def current_thread(self, /) -> Diagnostic[ThreadInfo |None]:
         """
@@ -15249,6 +16110,7 @@ class RunningProcessors(BaseRecord):
     """
     The running threads of all processors (`!running`).
     """
+    __match_args__: Final[tuple[Literal["processors"]]]
     @property
     def processors(self, /) -> list[RunningProcessor]: ...
 
@@ -15258,6 +16120,7 @@ class RuntimeFunction(BaseRecord):
     One function-table entry and its unwind data. Addresses are absolute,
     and the `*_rva` fields hold the raw image-relative values.
     """
+    __match_args__: Final[tuple[Literal["begin"], Literal["end"], Literal["begin_rva"], Literal["end_rva"], Literal["unwind_info"], Literal["unwind_data"], Literal["symbol"], Literal["unwind"]]]
     @property
     def begin(self, /) -> int: ...
     @property
@@ -15297,6 +16160,7 @@ class SavedVtl(BaseRecord):
     holds no general-purpose register other than `rsp`; `general_registers`
     has the others when they are known.
     """
+    __match_args__: Final[tuple[()]]
     @property
     def cr0(self, /) -> int: ...
     @property
@@ -15362,7 +16226,7 @@ class SavedVtl(BaseRecord):
     @property
     def fs_base(self, /) -> int: ...
     @property
-    def general_registers(self, /) -> Record |None:
+    def general_registers(self, /) -> dict[str, int] |None:
         """
         The guest's general-purpose registers other than `rsp` at the last
         exit (`rax` to `r15`), read where the hypervisor's VM-exit entry
@@ -15428,6 +16292,7 @@ class SchedulerError(BaseRecord):
     """
     A processor or queue read that failed during a scheduler walk.
     """
+    __match_args__: Final[tuple[Literal["processor"], Literal["queue"], Literal["message"]]]
     @property
     def message(self, /) -> str: ...
     @property
@@ -15447,6 +16312,7 @@ class Section(BaseRecord):
     One PE section with its name, RVA, mapped size, and `rwx` permissions
     (`Module.sections`).
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["rva"], Literal["size"], Literal["permissions"]]]
     @property
     def name(self, /) -> str:
         """
@@ -15473,6 +16339,7 @@ class SectionHeader(BaseRecord):
     """
     One `IMAGE_SECTION_HEADER`.
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["virtual_size"], Literal["virtual_address"], Literal["size_of_raw_data"], Literal["pointer_to_raw_data"], Literal["pointer_to_relocations"], Literal["pointer_to_linenumbers"], Literal["number_of_relocations"], Literal["number_of_linenumbers"], Literal["characteristics"]]]
     @property
     def characteristics(self, /) -> int: ...
     @property
@@ -15565,6 +16432,7 @@ class SecurityDescriptor(BaseRecord):
     """
     A decoded absolute or self-relative security descriptor (`!sd`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["revision"], Literal["control"], Literal["control_names"], Literal["self_relative"], Literal["owner"], Literal["group"], Literal["dacl"], Literal["sacl"], Literal["unsupported_revision"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -15615,6 +16483,7 @@ class SegContext(BaseRecord):
     """
     A segment context (`_HEAP_SEG_CONTEXT`) of a segment heap.
     """
+    __match_args__: Final[tuple[Literal["index"], Literal["unit_shift"], Literal["segment_mask"], Literal["max_allocation_size"]]]
     @property
     def index(self, /) -> int:
         """
@@ -15648,6 +16517,7 @@ class SegmentContextDetail(BaseRecord):
     """
     A segment context with its page segments.
     """
+    __match_args__: Final[tuple[Literal["context"], Literal["segments"]]]
     @property
     def context(self, /) -> SegContext: ...
     @property
@@ -15658,6 +16528,7 @@ class SegmentDetail(BaseRecord):
     """
     A control area's `_SEGMENT`.
     """
+    __match_args__: Final[tuple[Literal["total_ptes"], Literal["size"], Literal["committed_pages"], Literal["prototype_ptes"]]]
     @property
     def committed_pages(self, /) -> int: ...
     @property
@@ -15679,15 +16550,11 @@ class SegmentHeap(BaseRecord):
     """
     A segment heap (`_SEGMENT_HEAP`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["global_flags"], Literal["reserved_pages"], Literal["committed_pages"], Literal["free_committed_pages"], Literal["lfh_free_committed_pages"], Literal["vs_free_committed_pages"], Literal["large_reserved_pages"], Literal["large_committed_pages"], Literal["large_allocations"], Literal["keys"], Literal["granule"]]]
     @property
     def address(self, /) -> int: ...
     @property
     def committed_pages(self, /) -> int: ...
-    @property
-    def encoding_keys(self, /) -> SegmentKeys:
-        """
-        `ntdll!RtlpHpHeapGlobals`: the VS header key and the LFH offsets key.
-        """
     @property
     def free_committed_pages(self, /) -> int: ...
     @property
@@ -15700,6 +16567,11 @@ class SegmentHeap(BaseRecord):
         """
         The size in bytes of the `_HEAP_VS_CHUNK_HEADER` that starts each VS
         chunk: 16 on x64, 8 on x86. Chunk sizes are in this unit.
+        """
+    @property
+    def keys(self, /) -> SegmentKeys:
+        """
+        `ntdll!RtlpHpHeapGlobals`: the VS header key and the LFH offsets key.
         """
     @property
     def large_allocations(self, /) -> list[LargeAllocation]: ...
@@ -15719,6 +16591,7 @@ class SegmentHeapDetail(BaseRecord):
     """
     A segment heap with its segment contexts.
     """
+    __match_args__: Final[tuple[Literal["heap"], Literal["contexts"]]]
     @property
     def contexts(self, /) -> list[SegmentContextDetail]: ...
     @property
@@ -15729,6 +16602,7 @@ class SegmentKeys(BaseRecord):
     """
     `ntdll!RtlpHpHeapGlobals`: the encoding keys of a segment heap.
     """
+    __match_args__: Final[tuple[Literal["heap_key"], Literal["lfh_key"]]]
     @property
     def heap_key(self, /) -> int:
         """
@@ -15745,6 +16619,7 @@ class SegmentPageDetail(BaseRecord):
     """
     A page segment with its page ranges.
     """
+    __match_args__: Final[tuple[Literal["segment"], Literal["ranges"]]]
     @property
     def ranges(self, /) -> list[SegmentRangeDetail]: ...
     @property
@@ -15755,6 +16630,7 @@ class SegmentRangeDetail(BaseRecord):
     """
     A page range with its decoded subsegment.
     """
+    __match_args__: Final[tuple[Literal["range"], Literal["subsegment"], Literal["blocks"], Literal["error"], Literal["truncated"]]]
     @property
     def blocks(self, /) -> list[HeapBlock]:
         """
@@ -15787,6 +16663,7 @@ class ServedVp(BaseRecord):
     Windows hypervisor runs or last ran: the VP whose exit it handles, or
     which it is about to enter, rather than one of the root's.
     """
+    __match_args__: Final[tuple[Literal["partition_id"], Literal["vp_index"], Literal["vtl"]]]
     @property
     def current(self, /) -> bool:
         """
@@ -15805,7 +16682,7 @@ class ServedVp(BaseRecord):
         common reason.
         """
     @property
-    def general_registers(self, /) -> Record |None:
+    def general_registers(self, /) -> dict[str, int] |None:
         """
         The guest's general-purpose registers other than `rsp` at the last
         exit, as `SavedVtl.general_registers`. None when they are not
@@ -15836,6 +16713,7 @@ class Session(BaseRecord):
     """
     A session and its processes.
     """
+    __match_args__: Final[tuple[Literal["id"], Literal["processes"]]]
     @property
     def id(self, /) -> int |None:
         """
@@ -15852,6 +16730,7 @@ class SessionProcess(BaseRecord):
     """
     A process and its session (`!sprocess`).
     """
+    __match_args__: Final[tuple[Literal["process"], Literal["session"]]]
     @property
     def process(self, /) -> ProcessInfo: ...
     @property
@@ -15865,6 +16744,7 @@ class SessionProcesses(BaseRecord):
     """
     The processes of a session, filtered by an image glob (`!sprocess`).
     """
+    __match_args__: Final[tuple[Literal["selected_session"], Literal["processes"], Literal["process_count"], Literal["truncated"]]]
     @property
     def process_count(self, /) -> int: ...
     @property
@@ -15886,6 +16766,7 @@ class Sessions(BaseRecord):
     """
     Sessions and their processes (`!session`).
     """
+    __match_args__: Final[tuple[Literal["selected_session"], Literal["sessions"], Literal["process_count"], Literal["truncated"]]]
     @property
     def process_count(self, /) -> int: ...
     @property
@@ -15907,6 +16788,7 @@ class Sid(BaseRecord):
     """
     A decoded SID (`!sid`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["sid"], Literal["revision"], Literal["authority"], Literal["sub_authorities"], Literal["well_known"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -15934,12 +16816,12 @@ class SidAndAttributes(BaseRecord):
     """
     A token SID and its `SE_GROUP_*` attributes.
     """
+    __match_args__: Final[tuple[Literal["sid"], Literal["attributes"]]]
     @property
     def attributes(self, /) -> int: ...
     @property
     def sid(self, /) -> str: ...
 
-@final
 class Signal(BaseRecord):
     """
     When one side of a queue asks the other to signal it: the driver asks
@@ -15951,16 +16833,64 @@ class Signal(BaseRecord):
         """
         The variant: `on`, `off`, `after`, `at`.
         """
-    @property
-    def lap(self, /) -> bool |None: ...
-    @property
-    def value(self, /) -> int |None: ...
+    @final
+    class After(Signal):
+        """
+        Once a split ring's index passes this one (`used_event` or
+        `avail_event`, with the event index feature).
+        """
+        __match_args__: Final[tuple[Literal["value"]]]
+        @property
+        def kind(self, /) -> Literal["after"]:
+            """
+            `after`.
+            """
+        @property
+        def value(self, /) -> int: ...
+    @final
+    class At(Signal):
+        """
+        Once a packed ring reaches this position in this lap.
+        """
+        __match_args__: Final[tuple[Literal["value"], Literal["lap"]]]
+        @property
+        def kind(self, /) -> Literal["at"]:
+            """
+            `at`.
+            """
+        @property
+        def lap(self, /) -> bool: ...
+        @property
+        def value(self, /) -> int: ...
+    @final
+    class Off(Signal):
+        """
+        Never: the side set the flag that turns signals off.
+        """
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["off"]:
+            """
+            `off`.
+            """
+    @final
+    class On(Signal):
+        """
+        After every buffer.
+        """
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["on"]:
+            """
+            `on`.
+            """
 
 @final
 class SmbiosField(BaseRecord):
     """
     A field of an SMBIOS structure, by the specification's name.
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["value"]]]
     @property
     def name(self, /) -> str: ...
     @property
@@ -15971,6 +16901,7 @@ class SmbiosStructure(BaseRecord):
     """
     One SMBIOS structure: its header, its formatted area, and its strings.
     """
+    __match_args__: Final[tuple[Literal["kind"], Literal["handle"], Literal["formatted"], Literal["strings"]]]
     @property
     def fields(self, /) -> list[SmbiosField]:
         """
@@ -16006,6 +16937,7 @@ class SmbiosTable(BaseRecord):
     """
     The SMBIOS table the kernel found at boot (`!sysinfo smbios`).
     """
+    __match_args__: Final[tuple[Literal["physical_address"], Literal["length"], Literal["structures"], Literal["stopped"]]]
     @property
     def length(self, /) -> int: ...
     @property
@@ -16028,6 +16960,7 @@ class SourceLocation(BaseRecord):
     """
     PDB source metadata for an address.
     """
+    __match_args__: Final[tuple[Literal["file"], Literal["line"], Literal["column"]]]
     @property
     def column(self, /) -> int |None:
         """
@@ -16060,6 +16993,7 @@ class SourcePath(BaseRecord):
     """
     The ordered local source path mappings (`.srcpath`).
     """
+    __match_args__: Final[tuple[Literal["mappings"]]]
     @property
     def mappings(self, /) -> list[str]: ...
 
@@ -16068,6 +17002,7 @@ class SpecialRegistersArea(BaseRecord):
     """
     The location of `_KSPECIAL_REGISTERS` in a processor state.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["size"], Literal["name"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -16086,6 +17021,7 @@ class SplitRing(BaseRecord):
     """
     A split ring as guest memory holds it.
     """
+    __match_args__: Final[tuple[Literal["size"], Literal["desc"], Literal["avail"], Literal["used"], Literal["avail_flags"], Literal["avail_idx"], Literal["used_flags"], Literal["used_idx"], Literal["used_event"], Literal["avail_event"]]]
     @property
     def avail(self, /) -> int:
         """
@@ -16127,6 +17063,7 @@ class Srb(BaseRecord):
     """
     A decoded SRB (`!storagekd.storsrb`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["extended"], Literal["function"], Literal["srb_status"], Literal["scsi_status"], Literal["flags"], Literal["port"], Literal["path"], Literal["target"], Literal["lun"], Literal["data_transfer_length"], Literal["data_buffer"], Literal["timeout"], Literal["original_request"], Literal["next_srb"], Literal["request_tag"], Literal["priority"], Literal["cdb"], Literal["sense_buffer"], Literal["sense_length"], Literal["sense"], Literal["class_context"], Literal["port_context"], Literal["miniport_context"], Literal["ex_data"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -16229,6 +17166,7 @@ class SrbExData(BaseRecord):
     """
     One block of an extended SRB's extended data (`SRBEX_DATA`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["kind"], Literal["length"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -16244,6 +17182,7 @@ class SsdtEntry(BaseRecord):
     """
     A slot in a system-service table.
     """
+    __match_args__: Final[tuple[Literal["index"], Literal["target"], Literal["symbol"], Literal["module"]]]
     @property
     def index(self, /) -> int:
         """
@@ -16270,6 +17209,7 @@ class SsdtTable(BaseRecord):
     """
     A system-service table, either the kernel SSDT or the win32k shadow (`ssdt`).
     """
+    __match_args__: Final[tuple[Literal["label"], Literal["base"], Literal["limit"], Literal["entries"]]]
     @property
     def base(self, /) -> int: ...
     @property
@@ -16290,6 +17230,7 @@ class StackFrame(BaseRecord):
     """
     One frame of a stack walk.
     """
+    __match_args__: Final[tuple[Literal["ip"], Literal["sp"], Literal["symbol"], Literal["inline"], Literal["source"], Literal["source_location"]]]
     @property
     def inline(self, /) -> bool:
         """
@@ -16333,6 +17274,7 @@ class StateHistoryEntry(BaseRecord):
     """
     A nonzero entry in the `StateHistory` ring of a device node.
     """
+    __match_args__: Final[tuple[Literal["index"], Literal["state"], Literal["state_name"]]]
     @property
     def index(self, /) -> int:
         """
@@ -16343,23 +17285,21 @@ class StateHistoryEntry(BaseRecord):
     @property
     def state_name(self, /) -> str: ...
 
-@final
 class Stop(BaseRecord):
     """
     Why the target stopped, with the context it stopped in, snapshotted at
-    the stop. `kind` says which of the optional parts it has.
+    the stop. Each kind is a subclass with that kind's own parts:
+    `Stop.Breakpoint` (`breakpoint`), `Stop.Exception` (`exception`),
+    `Stop.ModuleLoad` and `Stop.ModuleUnload` (`module`), `Stop.Bugcheck`
+    (`bugcheck`), `Stop.Reload` (`reload`), `Stop.Step`, `Stop.Interrupt`
+    and `Stop.Entry`; `isinstance` and `match` tell them apart, as `kind`
+    does.
     
     The parts are records, not live handles; the collections take them as
     keys: `dbg.threads[stop.thread]`, `dbg.processes[stop.process]`,
     `dbg.modules[stop.module]`; `dbg.cpus[stop.cpu]` is the processor.
     """
-    @property
-    def breakpoint(self, /) -> BreakpointHit |None: ...
-    @property
-    def bugcheck(self, /) -> BugcheckInfo |None:
-        """
-        The bugcheck code and parameters, when the transport decoded them.
-        """
+    __match_args__: Final[tuple[Literal["kind"], Literal["cpu"], Literal["rip"], Literal["symbol"], Literal["process"], Literal["thread"], Literal["inspection_process"], Literal["vtl"], Literal["partition"]]]
     @property
     def cpu(self, /) -> int |None:
         """
@@ -16367,8 +17307,6 @@ class Stop(BaseRecord):
         numbers them in the current view; `None` on a user-mode minidump,
         whose threads are no processors.
         """
-    @property
-    def exception(self, /) -> ExceptionStop |None: ...
     def hit(self, /, bp: Breakpoint) -> bool:
         """
         Whether breakpoint `bp` is the one that stopped the target. `bp`
@@ -16381,11 +17319,9 @@ class Stop(BaseRecord):
         `process`.
         """
     @property
-    def kind(self, /) -> Literal["breakpoint", "exception", "interrupt", "step", "module_load", "module_unload", "bugcheck", "reload", "entry"]: ...
-    @property
-    def module(self, /) -> ModuleInfo |None:
+    def kind(self, /) -> Literal["breakpoint", "exception", "interrupt", "step", "module_load", "module_unload", "bugcheck", "reload", "entry"]:
         """
-        The module a `sxe ld`/`sxe ud` filter stopped for.
+        The kind of stop, in snake case.
         """
     @property
     def partition(self, /) -> int |None:
@@ -16397,8 +17333,6 @@ class Stop(BaseRecord):
         """
         The process whose page tables the stopped vCPU has loaded (its CR3).
         """
-    @property
-    def reload(self, /) -> ReloadStop |None: ...
     @property
     def rip(self, /) -> int |None:
         """
@@ -16422,6 +17356,126 @@ class Stop(BaseRecord):
         The VTL the stopped vCPU runs in (1: the secure kernel); `None` for a
         user dump.
         """
+    @final
+    class Breakpoint(Stop):
+        """
+        A breakpoint or watchpoint hit.
+        """
+        __match_args__: Final[tuple[Literal["breakpoint"]]]
+        @property
+        def breakpoint(self, /) -> BreakpointHit: ...
+        @property
+        def kind(self, /) -> Literal["breakpoint"]:
+            """
+            `breakpoint`.
+            """
+    @final
+    class Bugcheck(Stop):
+        """
+        The guest is in a bugcheck. `bugcheck` is the code and parameters
+        when the transport decoded them (`None` otherwise);
+        `dbg.inspect.bugcheck()` reads and analyzes the bugcheck from guest
+        memory (`!analyze`).
+        """
+        __match_args__: Final[tuple[Literal["bugcheck"]]]
+        @property
+        def bugcheck(self, /) -> BugcheckInfo |None: ...
+        @property
+        def kind(self, /) -> Literal["bugcheck"]:
+            """
+            `bugcheck`.
+            """
+    @final
+    class Entry(Stop):
+        """
+        Nothing stopped the target since the debugger attached: it was found
+        halted (a dump, a target attached halted).
+        """
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["entry"]:
+            """
+            `entry`.
+            """
+    @final
+    class Exception(Stop):
+        """
+        A Windows exception.
+        """
+        __match_args__: Final[tuple[Literal["exception"]]]
+        @property
+        def exception(self, /) -> ExceptionStop: ...
+        @property
+        def kind(self, /) -> Literal["exception"]:
+            """
+            `exception`.
+            """
+    @final
+    class Interrupt(Stop):
+        """
+        A requested break-in, or a stop with no exception code.
+        """
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["interrupt"]:
+            """
+            `interrupt`.
+            """
+    @final
+    class ModuleLoad(Stop):
+        """
+        A kernel image loaded, and a `ld` filter set to `break` names it
+        (`dbg.exceptions.set_module_event("ld", ...)`, `sxe ld`). The module
+        is listed with its symbols and breakpoints, and its entry point has
+        not run.
+        """
+        __match_args__: Final[tuple[Literal["module"]]]
+        @property
+        def kind(self, /) -> Literal["module_load"]:
+            """
+            `module_load`.
+            """
+        @property
+        def module(self, /) -> ModuleInfo: ...
+    @final
+    class ModuleUnload(Stop):
+        """
+        A kernel image is unloading, and a `ud` filter set to `break` names
+        it (`sxe ud`). Its unload routine has run, and it is still listed.
+        """
+        __match_args__: Final[tuple[Literal["module"]]]
+        @property
+        def kind(self, /) -> Literal["module_unload"]:
+            """
+            `module_unload`.
+            """
+        @property
+        def module(self, /) -> ModuleInfo: ...
+    @final
+    class Reload(Stop):
+        """
+        The guest rebooted and the debugger rebuilt its state; earlier
+        handles are stale.
+        """
+        __match_args__: Final[tuple[Literal["reload"]]]
+        @property
+        def kind(self, /) -> Literal["reload"]:
+            """
+            `reload`.
+            """
+        @property
+        def reload(self, /) -> ReloadStop: ...
+    @final
+    class Step(Stop):
+        """
+        A completed step, or a run to an address that reached it.
+        """
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["step"]:
+            """
+            `step`.
+            """
 
 @final
 class StorAdapter(BaseRecord):
@@ -16429,6 +17483,7 @@ class StorAdapter(BaseRecord):
     A StorPort adapter (`_RAID_ADAPTER_EXTENSION`), the FDO storport creates
     for each device the miniport drives.
     """
+    __match_args__: Final[tuple[Literal["extension"], Literal["driver"], Literal["driver_object"], Literal["driver_name"], Literal["fdo"], Literal["pdo"], Literal["lower"], Literal["device_name"], Literal["port_number"], Literal["miniport_name"], Literal["adapter_id"], Literal["state"], Literal["flags"], Literal["interface"], Literal["virtual_miniport"], Literal["hw_device_extension"], Literal["hw_device_extension_size"], Literal["lu_extension_size"], Literal["system_power"], Literal["device_power"], Literal["paging_paths"], Literal["dump_paths"], Literal["hiber_paths"], Literal["pause_count"], Literal["busy_count"], Literal["gateways"], Literal["gateways_error"], Literal["units"], Literal["units_stopped"]]]
     @property
     def adapter_id(self, /) -> str |None: ...
     @property
@@ -16537,6 +17592,7 @@ class StorAdapterEntry(BaseRecord):
     One entry of a driver's adapter list: a StorPort adapter, or why it is
     not shown.
     """
+    __match_args__: Final[tuple[Literal["extension"]]]
     @property
     def adapter(self, /) -> StorAdapter |None:
         """
@@ -16555,6 +17611,7 @@ class StorDriver(BaseRecord):
     """
     A driver that called `StorPortInitialize` (`_RAID_DRIVER_EXTENSION`).
     """
+    __match_args__: Final[tuple[Literal["extension"], Literal["driver_object"], Literal["name"], Literal["adapters"], Literal["stopped"]]]
     @property
     def adapters(self, /) -> list[StorAdapterEntry]: ...
     @property
@@ -16578,6 +17635,7 @@ class StorDrivers(BaseRecord):
     storport's drivers and their adapters, from `RaidpPortData`
     (`!storagekd.storadapter`).
     """
+    __match_args__: Final[tuple[Literal["port_data"], Literal["drivers"], Literal["stopped"]]]
     @property
     def drivers(self, /) -> list[StorDriver]: ...
     @property
@@ -16596,6 +17654,7 @@ class StorEnumValue(BaseRecord):
     """
     A value of one of storport's enums, with its name when the PDB has one.
     """
+    __match_args__: Final[tuple[Literal["value"], Literal["name"]]]
     @property
     def name(self, /) -> str |None: ...
     @property
@@ -16607,6 +17666,7 @@ class StorGateway(BaseRecord):
     An adapter's I/O gateway (`_STOR_IO_GATEWAY`): what limits the requests
     the adapter sends to the miniport.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["outstanding"], Literal["outstanding_max"], Literal["pending"], Literal["busy"], Literal["paused"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -16636,6 +17696,7 @@ class StorLog(BaseRecord):
     `RaidLogListSize` entries that storport writes as it starts, completes,
     pauses, and resumes requests.
     """
+    __match_args__: Final[tuple[Literal["adapter"], Literal["driver_name"], Literal["ring"], Literal["size"], Literal["newest"], Literal["entries"]]]
     @property
     def adapter(self, /) -> int: ...
     @property
@@ -16663,6 +17724,7 @@ class StorLogEntry(BaseRecord):
     """
     An entry of an adapter's internal log (`_RAID_LOG_ENTRY`).
     """
+    __match_args__: Final[tuple[Literal["number"], Literal["time"], Literal["parameters"]]]
     @property
     def command(self, /) -> str |None:
         """
@@ -16719,6 +17781,7 @@ class StorQueue(BaseRecord):
     """
     A unit's device queue (`_EXTENDED_DEVICE_QUEUE`).
     """
+    __match_args__: Final[tuple[Literal["depth"], Literal["pause_count"], Literal["busy_count"], Literal["frozen"], Literal["locked"], Literal["untagged"], Literal["power_locked"], Literal["bypass_count"], Literal["waiting"], Literal["bypass_waiting"], Literal["waiting_stopped"]]]
     @property
     def busy_count(self, /) -> int:
         """
@@ -16775,6 +17838,7 @@ class StorRequest(BaseRecord):
     A request the miniport holds: storport's `_EXTENDED_REQUEST_BLOCK` and
     the IRP and SRB it carries.
     """
+    __match_args__: Final[tuple[Literal["xrb"], Literal["irp"], Literal["srb"], Literal["processor"]]]
     @property
     def irp(self, /) -> int: ...
     @property
@@ -16793,6 +17857,7 @@ class StorUnit(BaseRecord):
     A logical unit (`_RAID_UNIT_EXTENSION`), the PDO storport creates for
     each LUN the miniport reports.
     """
+    __match_args__: Final[tuple[Literal["extension"], Literal["device_object"], Literal["adapter"], Literal["path"], Literal["target"], Literal["lun"], Literal["vendor"], Literal["product"], Literal["revision"], Literal["state"], Literal["device_power"], Literal["flags"], Literal["lu_extension"], Literal["max_queue_depth"], Literal["queue"], Literal["requests"], Literal["requests_stopped"]]]
     @property
     def adapter(self, /) -> int: ...
     @property
@@ -16853,6 +17918,7 @@ class StorUnitEntry(BaseRecord):
     """
     One entry of an adapter's unit list.
     """
+    __match_args__: Final[tuple[Literal["extension"]]]
     @property
     def error(self, /) -> str |None:
         """
@@ -16935,6 +18001,7 @@ class SubsectionDetail(BaseRecord):
     """
     A `_SUBSECTION` after a control area.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["base_pte"], Literal["ptes"], Literal["unused_ptes"], Literal["starting_sector"], Literal["sectors"], Literal["protection"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -16961,6 +18028,7 @@ class SummaryRow(BaseRecord):
     """
     Count and total size of the regions in one summary row.
     """
+    __match_args__: Final[tuple[Literal["label"], Literal["regions"], Literal["size"]]]
     @property
     def label(self, /) -> str: ...
     @property
@@ -16973,6 +18041,7 @@ class Symbol(BaseRecord):
     """
     The symbol nearest below an address (`ln`, `Symbols.nearest()`).
     """
+    __match_args__: Final[tuple[Literal["module"], Literal["name"], Literal["address"], Literal["offset"]]]
     def __str__(self, /) -> str:
         """
         `module!name+0xoffset`.
@@ -17003,6 +18072,7 @@ class SymbolCandidate(BaseRecord):
     """
     One definition that a symbol name resolves to.
     """
+    __match_args__: Final[tuple[Literal["module"], Literal["address"], Literal["visibility"], Literal["compiland"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -17024,6 +18094,7 @@ class SymbolPath(BaseRecord):
     The ordered symbol source path (`.sympath`): local directories and
     symbol servers, tried in order.
     """
+    __match_args__: Final[tuple[Literal["sources"]]]
     @property
     def sources(self, /) -> list[str]: ...
 
@@ -17032,6 +18103,7 @@ class SymbolSearchMatch(BaseRecord):
     """
     A symbol that a name search matched.
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["address"], Literal["module"]]]
     @property
     def address(self, /) -> int |None:
         """
@@ -17087,7 +18159,7 @@ class Symbols:
         """
     @path.setter
     def path(self, /, sources: Sequence[str]) -> None: ...
-    def reload(self, /, scope: Literal["current", "kernel", "user"] |None = None, module: str |None = None) -> ModuleSymbolLoadReport:
+    def reload(self, /, *, scope: Literal["current", "kernel", "user"] |None = None, module: str |None = None) -> ModuleSymbolLoadReport:
         """
         Reload symbols for the modules in the current scope, or for the modules a name or pattern names.
         
@@ -17128,6 +18200,7 @@ class SystemMemorySummary(BaseRecord):
     """
     System memory counters and per-process usage (`!memusage`).
     """
+    __match_args__: Final[tuple[Literal["physical_pages"], Literal["available_pages"], Literal["committed_pages"], Literal["commit_limit_pages"], Literal["paged_pool_pages"], Literal["nonpaged_pool_bytes"], Literal["processes"], Literal["process_count"], Literal["truncated"]]]
     @property
     def available_pages(self, /) -> Diagnostic[int]: ...
     @property
@@ -17159,6 +18232,7 @@ class SystemPteRun(BaseRecord):
     A run of free system PTEs, which is a sequence of clear bits in an
     allocation bitmap.
     """
+    __match_args__: Final[tuple[Literal["pte"], Literal["va"], Literal["ptes"]]]
     @property
     def pte(self, /) -> int:
         """
@@ -17181,6 +18255,7 @@ class SystemPteTypeDetail(BaseRecord):
     One `_MI_SYSTEM_PTE_TYPE` bitmap allocator (`!sysptes`). Counts are in
     PTEs; the bitmap may cover several PTEs per bit (`ptes_per_bit`).
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["address"], Literal["va_type"], Literal["flags"], Literal["ptes_per_bit"], Literal["base_pte"], Literal["base_va"], Literal["bitmap"], Literal["bitmap_bits"], Literal["total"], Literal["free"], Literal["failures"], Literal["bitmap_free"], Literal["unreadable_bitmap_bytes"], Literal["unscanned_bitmap_bits"], Literal["free_run_count"], Literal["largest_free_run"], Literal["free_runs"], Literal["free_runs_truncated"], Literal["tracking"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -17269,6 +18344,7 @@ class SystemPtesDetail(BaseRecord):
     Every system-PTE bitmap allocator in `MiState` (`!sysptes`). Counts
     are in PTEs.
     """
+    __match_args__: Final[tuple[Literal["types"], Literal["total"], Literal["free"]]]
     @property
     def free(self, /) -> int: ...
     @property
@@ -17286,6 +18362,7 @@ class TaggedBlock(BaseRecord):
     """
     A tagged data block of a crash dump.
     """
+    __match_args__: Final[tuple[Literal["tag"], Literal["size"], Literal["owner"], Literal["holds"]]]
     @property
     def holds(self, /) -> str |None:
         """
@@ -17313,6 +18390,7 @@ class TargetDump(BaseRecord):
     """
     The data that a crash dump header records.
     """
+    __match_args__: Final[tuple[Literal["is_triage"], Literal["directory_table_base"], Literal["bugcheck_code"], Literal["bugcheck_parameters"], Literal["number_processors"], Literal["major_version"], Literal["minor_version"], Literal["product_type"], Literal["machine_image_type"], Literal["service_pack_build"], Literal["system_time"], Literal["uptime_seconds"], Literal["exception_code"], Literal["triage_overflowed"], Literal["kernel_base"], Literal["tagged_blocks"]]]
     @property
     def bugcheck_code(self, /) -> int: ...
     @property
@@ -17376,6 +18454,7 @@ class TargetKernel(BaseRecord):
     """
     The identity of the kernel image.
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["short_name"], Literal["base"], Literal["size"], Literal["file_version"], Literal["product_version"], Literal["pdb_guid"], Literal["pdb_age"]]]
     @property
     def base(self, /) -> int: ...
     @property
@@ -17414,6 +18493,7 @@ class TargetTime(BaseRecord):
     The UTC time and uptime of the target (`.time`). A user-mode minidump
     records neither: its `user_dump` says when it was written instead.
     """
+    __match_args__: Final[tuple[Literal["system_time"], Literal["system_time_iso"], Literal["interrupt_time"], Literal["uptime_seconds"], Literal["uptime"], Literal["user_dump"]]]
     @property
     def interrupt_time(self, /) -> int |None:
         """
@@ -17452,6 +18532,7 @@ class TargetUserDump(BaseRecord):
     """
     A user-mode minidump's process and header.
     """
+    __match_args__: Final[tuple[Literal["process_name"], Literal["process_id"], Literal["processor_level"], Literal["processor_revision"], Literal["service_pack"], Literal["flags"], Literal["flag_names"], Literal["threads"], Literal["modules"], Literal["exception_code"]]]
     @property
     def exception_code(self, /) -> int |None:
         """
@@ -17496,6 +18577,7 @@ class TargetVersion(BaseRecord):
     architecture, kernel, symbols, debugger version, time, and dump
     metadata.
     """
+    __match_args__: Final[tuple[Literal["major_version"], Literal["minor_version"], Literal["build_number"], Literal["build_lab"], Literal["architecture"], Literal["processors"], Literal["product"], Literal["kernel"], Literal["symbol_status"], Literal["debugger_version"], Literal["symbol_path"], Literal["time"], Literal["backend"], Literal["dump"], Literal["user_dump"]]]
     @property
     def architecture(self, /) -> str: ...
     @property
@@ -17558,6 +18640,7 @@ class Teb(BaseRecord):
     """
     A thread's `_TEB` (`!teb`). ntoseye reads each field separately.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["stack_base"], Literal["stack_limit"], Literal["tls_pointer"], Literal["last_error_value"], Literal["last_status_value"], Literal["count_of_owned_critical_sections"], Literal["peb"], Literal["wow_teb_offset"], Literal["wow64_reserved"], Literal["activation_context"], Literal["client_id_unique_process"], Literal["client_id_unique_thread"], Literal["teb32"]]]
     @property
     def activation_context(self, /) -> Diagnostic[int |None]:
         """
@@ -17618,6 +18701,7 @@ class Teb32(BaseRecord):
     """
     A WOW64 thread's 32-bit `_TEB32`. ntoseye reads each field separately.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["stack_base"], Literal["stack_limit"], Literal["tls_pointer"], Literal["last_error_value"], Literal["last_status_value"], Literal["count_of_owned_critical_sections"], Literal["peb"], Literal["client_id_unique_process"], Literal["client_id_unique_thread"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -17818,6 +18902,7 @@ class ThreadDetail(BaseRecord):
     `_ETHREAD`/`_KTHREAD` fields the listing adds. Each field is `None` when
     this build's layout lacks it or its read failed.
     """
+    __match_args__: Final[tuple[Literal["thread"], Literal["win32_thread"], Literal["user_time"], Literal["kernel_time"], Literal["wait_time"], Literal["ready_time"], Literal["quantum_target"]]]
     @property
     def cpu(self, /) -> int |None:
         """
@@ -17844,6 +18929,7 @@ class ThreadInfo(BaseRecord):
     A Windows thread, as `threads`, `!thread`, and all scheduler listings
     show it. A field that the walk could not read is `None`.
     """
+    __match_args__: Final[tuple[Literal["ethread"], Literal["kthread"], Literal["tid"], Literal["pid"], Literal["process_name"], Literal["eprocess"], Literal["state"], Literal["wait_reason"], Literal["priority"], Literal["base_priority"], Literal["wait_irql"], Literal["kernel_stack_resident"], Literal["start_address"], Literal["win32_start_address"], Literal["teb"], Literal["kernel_stack"], Literal["stack_base"], Literal["stack_limit"], Literal["trap_frame"], Literal["pending_irps"]]]
     @property
     def base_priority(self, /) -> int |None: ...
     @property
@@ -17935,6 +19021,7 @@ class ThreadStack(BaseRecord):
     """
     The state and walked stack of a thread (`!stacks`).
     """
+    __match_args__: Final[tuple[Literal["thread"], Literal["top_symbol"], Literal["frames"], Literal["truncated"], Literal["error"]]]
     @property
     def active(self, /) -> int |None:
         """
@@ -17970,6 +19057,7 @@ class ThreadStacks(BaseRecord):
     """
     Threads with their states and stacks (`!stacks`).
     """
+    __match_args__: Final[tuple[Literal["level"], Literal["filter"], Literal["scanned_threads"], Literal["displayed_threads"], Literal["interrupted"], Literal["threads"]]]
     @property
     def displayed_threads(self, /) -> int: ...
     @property
@@ -18025,6 +19113,7 @@ class TimerBucketEnd(BaseRecord):
     """
     A timer-table bucket whose list walk did not end at its head.
     """
+    __match_args__: Final[tuple[Literal["processor"], Literal["bucket"], Literal["termination"]]]
     @property
     def bucket(self, /) -> int: ...
     @property
@@ -18037,6 +19126,7 @@ class TimerTable(BaseRecord):
     """
     The timer tables of all processors (`!timer`).
     """
+    __match_args__: Final[tuple[Literal["interrupt_time"], Literal["entries"], Literal["terminations"], Literal["total"], Literal["truncated"], Literal["errors"]]]
     @property
     def entries(self, /) -> list[TimerTableEntry]: ...
     @property
@@ -18068,6 +19158,7 @@ class TimerTableEntry(BaseRecord):
     """
     A timer in the timer table of a processor.
     """
+    __match_args__: Final[tuple[Literal["processor"], Literal["bucket"], Literal["timer"]]]
     @property
     def bucket(self, /) -> int:
         """
@@ -18083,6 +19174,7 @@ class Token(BaseRecord):
     """
     The primary token of a process (`!token`).
     """
+    __match_args__: Final[tuple[Literal["process"], Literal["token"], Literal["token_id"], Literal["authentication_id"], Literal["token_type"], Literal["impersonation_level"], Literal["flags"], Literal["user"], Literal["groups"], Literal["privileges"]]]
     @property
     def authentication_id(self, /) -> Diagnostic[int]:
         """
@@ -18130,6 +19222,7 @@ class TokenPrivilege(BaseRecord):
     """
     A token privilege and its `SE_PRIVILEGE_*` attributes.
     """
+    __match_args__: Final[tuple[Literal["luid"], Literal["attributes"]]]
     @property
     def attributes(self, /) -> int: ...
     @property
@@ -18140,6 +19233,7 @@ class TransitionExtension(BaseRecord):
     """
     The power transition extension of the boot status data.
     """
+    __match_args__: Final[tuple[Literal["shutdown_device_type"], Literal["setup_in_progress"], Literal["oobe_in_progress"], Literal["sleep_checkpoint_source"], Literal["sleep_checkpoint"], Literal["connected_standby_entry_reason_category"], Literal["connected_standby_exit_reason_category"], Literal["connected_standby_entry_scenario_instance_id"]]]
     @property
     def connected_standby_entry_reason_category(self, /) -> int: ...
     @property
@@ -18164,6 +19258,7 @@ class TriageCrashInfo(BaseRecord):
     snapshots their `EPROCESS` and `ETHREAD` as raw bytes rather than as
     mapped memory. A field is `None` if the dump does not record it.
     """
+    __match_args__: Final[tuple[Literal["process_name"], Literal["process_id"], Literal["parent_process_id"], Literal["exit_status"], Literal["create_time"], Literal["thread_id"], Literal["thread_exit_status"]]]
     @property
     def create_time(self, /) -> int |None:
         """
@@ -18200,6 +19295,7 @@ class TriagePrcbInfo(BaseRecord):
     The main `_KPRCB` data of the crashed processor, as a triage dump
     recorded it.
     """
+    __match_args__: Final[tuple[Literal["current_thread"], Literal["processor_number"], Literal["mhz"], Literal["cpu_type"], Literal["vendor_string"]]]
     @property
     def cpu_type(self, /) -> int: ...
     @property
@@ -18227,6 +19323,7 @@ class TriageReport(BaseRecord):
     bugcheck or exception, the backtrace, the modules, the dump records, and
     the findings.
     """
+    __match_args__: Final[tuple[Literal["status"], Literal["bugcheck"], Literal["exception"], Literal["system_info"], Literal["modules"], Literal["unloaded_drivers"], Literal["crash_context"], Literal["prcb"], Literal["broken_driver"], Literal["triage_overflowed"], Literal["failure_signature"], Literal["culprit"], Literal["verifier"], Literal["whea"], Literal["blackboxes"], Literal["kmdf_log"], Literal["power"], Literal["user"], Literal["warnings"]]]
     @property
     def backtrace(self, /) -> list[StackFrame] |None:
         """
@@ -18407,6 +19504,7 @@ class TrustletInfo(BaseRecord):
     An isolated user-mode process (trustlet) in VTL1, such as `LsaIso.exe`,
     as `!trustlets` lists it.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["pid"], Literal["name"], Literal["dtb"], Literal["trustlet_id"]]]
     @property
     def address(self, /) -> int:
         """
@@ -18494,6 +19592,7 @@ class UniqStackGroup(BaseRecord):
     """
     Threads whose walked stacks have the same frames and truncation.
     """
+    __match_args__: Final[tuple[Literal["threads"]]]
     @property
     def frames(self, /) -> list[StackFrame]:
         """
@@ -18511,7 +19610,6 @@ class UniqStackGroup(BaseRecord):
         The number of frames past the walk limit, which were not compared.
         """
 
-@final
 class UniqStackScope(BaseRecord):
     """
     Which threads `!uniqstack` groups: `all`, or one `process`.
@@ -18521,22 +19619,39 @@ class UniqStackScope(BaseRecord):
         """
         The variant: `all`, `process`.
         """
-    @property
-    def name(self, /) -> str |None:
-        """
-        The image name of the process.
-        """
-    @property
-    def pid(self, /) -> int |None:
-        """
-        The process ID.
-        """
+    @final
+    class AllThreads(UniqStackScope):
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["all"]:
+            """
+            `all`.
+            """
+    @final
+    class Process(UniqStackScope):
+        __match_args__: Final[tuple[Literal["pid"], Literal["name"]]]
+        @property
+        def kind(self, /) -> Literal["process"]:
+            """
+            `process`.
+            """
+        @property
+        def name(self, /) -> str:
+            """
+            The image name of the process.
+            """
+        @property
+        def pid(self, /) -> int:
+            """
+            The process ID.
+            """
 
 @final
 class UniqStacks(BaseRecord):
     """
     Threads grouped by identical call stacks (`!uniqstack`).
     """
+    __match_args__: Final[tuple[Literal["scope"], Literal["scanned_threads"], Literal["interrupted"], Literal["groups"], Literal["unwalked"]]]
     @property
     def groups(self, /) -> list[UniqStackGroup]:
         """
@@ -18565,6 +19680,7 @@ class UnloadedDriver(BaseRecord):
     """
     A driver that the system unloaded recently, as the crash dump records it.
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["start_address"], Literal["end_address"]]]
     @property
     def end_address(self, /) -> int: ...
     @property
@@ -18577,6 +19693,7 @@ class UnloadedModule(BaseRecord):
     """
     A module the process had unloaded (`UnloadedModuleListStream`).
     """
+    __match_args__: Final[tuple[Literal["base"], Literal["size"], Literal["checksum"], Literal["time_date_stamp"], Literal["name"]]]
     @property
     def base(self, /) -> int: ...
     @property
@@ -18594,6 +19711,7 @@ class UnwalkedThread(BaseRecord):
     A thread whose stack walk failed, so ntoseye could not search or group
     it.
     """
+    __match_args__: Final[tuple[Literal["thread"], Literal["error"]]]
     @property
     def error(self, /) -> str:
         """
@@ -18607,6 +19725,7 @@ class UnwindHandler(BaseRecord):
     """
     The exception or termination handler of an unwind info.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["symbol"], Literal["data"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -18617,31 +19736,78 @@ class UnwindHandler(BaseRecord):
     @property
     def symbol(self, /) -> str: ...
 
-@final
 class UserAddressReport(BaseRecord):
     """
     `!address` on a user-mode minidump: what its memory-info list records,
     or, for a dump without one, the memory ranges it captured.
     """
     @property
-    def address(self, /) -> int |None: ...
-    @property
-    def address_captured(self, /) -> bool |None: ...
-    @property
     def kind(self, /) -> Literal["region", "map", "captured_range", "captured_ranges"]:
         """
         The variant: `region`, `map`, `captured_range`, `captured_ranges`.
         """
-    @property
-    def range(self, /) -> CapturedRange |None: ...
-    @property
-    def ranges(self, /) -> list[CapturedRange] |None: ...
-    @property
-    def region(self, /) -> UserRegion |None: ...
-    @property
-    def regions(self, /) -> list[UserRegion] |None: ...
-    @property
-    def summary(self, /) -> AddressSummary |None: ...
+    @final
+    class CapturedRange(UserAddressReport):
+        """
+        A dump without a memory-info list: the captured range that holds
+        `address`, if one does.
+        """
+        __match_args__: Final[tuple[Literal["address"], Literal["range"]]]
+        @property
+        def address(self, /) -> int: ...
+        @property
+        def kind(self, /) -> Literal["captured_range"]:
+            """
+            `captured_range`.
+            """
+        @property
+        def range(self, /) -> CapturedRange |None: ...
+    @final
+    class CapturedRanges(UserAddressReport):
+        """
+        A dump without a memory-info list: every range it captured.
+        """
+        __match_args__: Final[tuple[Literal["ranges"]]]
+        @property
+        def kind(self, /) -> Literal["captured_ranges"]:
+            """
+            `captured_ranges`.
+            """
+        @property
+        def ranges(self, /) -> list[CapturedRange]: ...
+    @final
+    class Map(UserAddressReport):
+        """
+        Every region of the memory-info list, with their summary.
+        """
+        __match_args__: Final[tuple[Literal["regions"], Literal["summary"]]]
+        @property
+        def kind(self, /) -> Literal["map"]:
+            """
+            `map`.
+            """
+        @property
+        def regions(self, /) -> list[UserRegion]: ...
+        @property
+        def summary(self, /) -> AddressSummary: ...
+    @final
+    class Region(UserAddressReport):
+        """
+        The memory-info list's region that holds `address` (`None` when no
+        region does), and whether the dump captured the byte at `address`.
+        """
+        __match_args__: Final[tuple[Literal["address"], Literal["region"], Literal["address_captured"]]]
+        @property
+        def address(self, /) -> int: ...
+        @property
+        def address_captured(self, /) -> bool: ...
+        @property
+        def kind(self, /) -> Literal["region"]:
+            """
+            `region`.
+            """
+        @property
+        def region(self, /) -> UserRegion |None: ...
 
 @final
 class UserDump:
@@ -18653,6 +19819,13 @@ class UserDump:
     `dbg.inspect.time()`.
     """
     def __repr__(self, /) -> str: ...
+    def address_report(self, /, address: int |str |None = None) -> UserAddressReport:
+        """
+        What a user-mode minidump's memory-info list records (`!address`): with
+        `address`, the region that holds it and whether the dump captured it;
+        without, every region with the dump's summary. A dump without a
+        memory-info list reports the memory ranges it captured instead.
+        """
     @property
     def current_thread(self, /) -> UserThread |None:
         """
@@ -18724,6 +19897,7 @@ class UserDumpTime(BaseRecord):
     When a user-mode minidump was written (its header), and how long its
     process had run (`MiscInfoStream`), where it records them.
     """
+    __match_args__: Final[tuple[Literal["written"], Literal["written_iso"], Literal["written_local"], Literal["time_zone"], Literal["process_created"], Literal["process_created_iso"], Literal["process_uptime_seconds"], Literal["process_uptime"], Literal["user_time_seconds"], Literal["kernel_time_seconds"]]]
     @property
     def kernel_time_seconds(self, /) -> int |None:
         """
@@ -18783,6 +19957,7 @@ class UserDumpTriage(BaseRecord):
     the culprit): the process, the exception decoded, and the frame the
     failure is blamed on.
     """
+    __match_args__: Final[tuple[Literal["process"], Literal["exception"], Literal["stack_thread"], Literal["exception_registers"]]]
     @property
     def exception(self, /) -> UserExceptionFinding |None:
         """
@@ -18808,6 +19983,7 @@ class UserException(BaseRecord):
     """
     The exception a user-mode minidump was written for (`ExceptionStream`).
     """
+    __match_args__: Final[tuple[Literal["thread_id"], Literal["code"], Literal["flags"], Literal["record"], Literal["address"], Literal["parameters"]]]
     @property
     def address(self, /) -> int:
         """
@@ -18849,6 +20025,7 @@ class UserExceptionDetail(BaseRecord):
     The exception a user-mode minidump was written for, with its address
     named in the dump's modules.
     """
+    __match_args__: Final[tuple[Literal["exception"], Literal["symbol"]]]
     @property
     def exception(self, /) -> UserException: ...
     @property
@@ -18862,6 +20039,7 @@ class UserExceptionFinding(BaseRecord):
     """
     The exception a user-mode minidump was written for, decoded.
     """
+    __match_args__: Final[tuple[Literal["code"], Literal["kind"], Literal["name"], Literal["flags"], Literal["flag_names"], Literal["record"], Literal["address"], Literal["symbol"], Literal["address_owner"], Literal["parameters"], Literal["summary"], Literal["thread_id"], Literal["thread"], Literal["thread_name"], Literal["faulting_frame"], Literal["blamed_frame"], Literal["module_caller"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -18933,6 +20111,7 @@ class UserFrame(BaseRecord):
     """
     A frame of the report's stack, as the analysis uses it.
     """
+    __match_args__: Final[tuple[Literal["index"], Literal["ip"], Literal["symbol"], Literal["source"], Literal["owner"]]]
     @property
     def index(self, /) -> int:
         """
@@ -18954,6 +20133,7 @@ class UserHandle(BaseRecord):
     `MINIDUMP_HANDLE_DESCRIPTOR_2`), as the dump records it. The dump names
     no object address.
     """
+    __match_args__: Final[tuple[Literal["handle"], Literal["type_name"], Literal["object_name"], Literal["attributes"], Literal["granted_access"], Literal["handle_count"], Literal["pointer_count"]]]
     @property
     def attribute_names(self, /) -> list[str]:
         """
@@ -19004,7 +20184,7 @@ class UserProcess:
         """
         The `UserProcessInfo` record of this handle: its properties as one value.
         """
-    def loader_modules(self, /, containing: int |str |None = None) -> LoaderModules:
+    def loader_modules(self, /, *, containing: int |str |None = None) -> LoaderModules:
         """
         List the modules in the loader lists of the current process.
         
@@ -19056,6 +20236,7 @@ class UserProcessInfo(BaseRecord):
     """
     The process a user-mode minidump captured (`dbg.user_dump.process`).
     """
+    __match_args__: Final[tuple[Literal["pid"], Literal["name"]]]
     @property
     def name(self, /) -> str |None:
         """
@@ -19072,6 +20253,7 @@ class UserProcessSummary(BaseRecord):
     """
     The captured process, as the dump's streams record it.
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["pid"], Literal["major_version"], Literal["minor_version"], Literal["build_number"], Literal["build_string"], Literal["dump_time"], Literal["create_time"], Literal["threads"], Literal["modules"], Literal["unloaded_modules"], Literal["handles"]]]
     @property
     def arch(self, /) -> str:
         """
@@ -19143,6 +20325,7 @@ class UserRegion(BaseRecord):
     One region of a user-mode minidump's memory-info list (`!address`),
     with what the dump shows uses it and how much of it the dump holds.
     """
+    __match_args__: Final[tuple[Literal["region"], Literal["usage"], Literal["detail"], Literal["captured"]]]
     @property
     def captured(self, /) -> int:
         """
@@ -19171,6 +20354,7 @@ class UserStackThread(BaseRecord):
     """
     The thread a user dump report's stack belongs to.
     """
+    __match_args__: Final[tuple[Literal["tid"], Literal["id"], Literal["name"], Literal["source"]]]
     @property
     def id(self, /) -> str:
         """
@@ -19287,6 +20471,7 @@ class UserThreadInfo(BaseRecord):
     A thread of the captured process (`MINIDUMP_THREAD`), with what the
     thread-info and thread-name streams add, matched by thread id.
     """
+    __match_args__: Final[tuple[Literal["tid"], Literal["suspend_count"], Literal["priority_class"], Literal["priority"], Literal["teb"], Literal["stack"], Literal["name"], Literal["times"]]]
     @property
     def context_error(self, /) -> str |None:
         """
@@ -19333,6 +20518,7 @@ class UserThreadTimes(BaseRecord):
     What the dump's thread-info stream (`ThreadInfoListStream`) records of
     a thread: what the kernel knew of it.
     """
+    __match_args__: Final[tuple[Literal["exit_status"], Literal["create_time"], Literal["exit_time"], Literal["kernel_time"], Literal["user_time"], Literal["start_address"], Literal["affinity"]]]
     @property
     def affinity(self, /) -> int:
         """
@@ -19393,6 +20579,7 @@ class VcpuInfo(BaseRecord):
     """
     A vCPU (backend execution context) and the guest code that it runs.
     """
+    __match_args__: Final[tuple[Literal["rip"], Literal["context"], Literal["symbol"], Literal["saved_vtl"], Literal["serving"], Literal["error"]]]
     @property
     def context(self, /) -> str:
         """
@@ -19444,6 +20631,7 @@ class Verifier(BaseRecord):
     (`!verifier`). The drivers are the verified drivers and the configured
     suspect drivers that are not loaded.
     """
+    __match_args__: Final[tuple[Literal["level"], Literal["option_flags"], Literal["verify_mode"], Literal["level_options"], Literal["statistics"], Literal["drivers"], Literal["drivers_truncated"], Literal["configured_but_unloaded"], Literal["suspect_list_termination"]]]
     @property
     def configured_but_unloaded(self, /) -> Diagnostic[list[VerifierSuspectDriver]]:
         """
@@ -19492,6 +20680,7 @@ class VerifierAddress(BaseRecord):
     """
     An address in a verifier bugcheck, and its role.
     """
+    __match_args__: Final[tuple[Literal["role"], Literal["address"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -19502,6 +20691,7 @@ class VerifierArgument(BaseRecord):
     """
     A verifier bugcheck parameter and what it means for the subcode.
     """
+    __match_args__: Final[tuple[Literal["value"], Literal["description"]]]
     @property
     def description(self, /) -> str: ...
     @property
@@ -19513,6 +20703,7 @@ class VerifierDriver(BaseRecord):
     The image, signing level, and counters of one verified driver
     (`!verifier <module>`).
     """
+    __match_args__: Final[tuple[Literal["module"], Literal["image_base"], Literal["image_size"], Literal["driver_object"], Literal["se_signing_level"], Literal["raise_irqls"], Literal["acquire_spin_locks"], Literal["synchronize_executions"], Literal["allocations_with_no_tag"], Literal["allocations_failed"], Literal["allocations_failed_deliberately"], Literal["current_paged_pool_allocations"], Literal["paged_bytes"], Literal["peak_paged_pool_allocations"], Literal["peak_paged_bytes"], Literal["current_nonpaged_pool_allocations"], Literal["nonpaged_bytes"], Literal["peak_nonpaged_pool_allocations"], Literal["peak_nonpaged_bytes"], Literal["locked_bytes"], Literal["peak_locked_bytes"], Literal["mapped_locked_bytes"], Literal["peak_mapped_locked_bytes"], Literal["mapped_io_space_bytes"], Literal["peak_mapped_io_space_bytes"], Literal["pages_for_mdl_bytes"], Literal["peak_pages_for_mdl_bytes"], Literal["contiguous_memory_bytes"], Literal["peak_contiguous_memory_bytes"], Literal["suspect"]]]
     @property
     def acquire_spin_locks(self, /) -> int: ...
     @property
@@ -19596,6 +20787,7 @@ class VerifierDriverSummary(BaseRecord):
     """
     A driver that Driver Verifier verifies, from the `!verifier` list.
     """
+    __match_args__: Final[tuple[Literal["entry"], Literal["state"], Literal["nonpaged_bytes"], Literal["paged_bytes"], Literal["module"]]]
     @property
     def entry(self, /) -> int:
         """
@@ -19627,6 +20819,7 @@ class VerifierFinding(BaseRecord):
     """
     A Driver Verifier bugcheck, decoded from its subcode.
     """
+    __match_args__: Final[tuple[Literal["bugcheck_code"], Literal["bugcheck_name"], Literal["subcode"], Literal["known_subcode"], Literal["subcode_description"], Literal["arguments"], Literal["associated_driver"], Literal["addresses"]]]
     @property
     def addresses(self, /) -> list[VerifierAddress]:
         """
@@ -19668,6 +20861,7 @@ class VerifierStatistics(BaseRecord):
     The aggregate counters of Driver Verifier. ntoseye reads each counter
     separately, and each read can fail.
     """
+    __match_args__: Final[tuple[Literal["raise_irqls"], Literal["acquire_spin_locks"], Literal["synchronize_executions"], Literal["trims"], Literal["allocations_attempted"], Literal["allocations_succeeded"], Literal["allocations_succeeded_special_pool"], Literal["allocations_with_no_tag"], Literal["allocations_failed"], Literal["current_paged_pool_allocations"], Literal["paged_bytes"], Literal["peak_paged_pool_allocations"], Literal["peak_paged_bytes"], Literal["current_nonpaged_pool_allocations"], Literal["nonpaged_bytes"], Literal["peak_nonpaged_pool_allocations"], Literal["peak_nonpaged_bytes"], Literal["loads"], Literal["unloads"]]]
     @property
     def acquire_spin_locks(self, /) -> Diagnostic[int]: ...
     @property
@@ -19713,6 +20907,7 @@ class VerifierSuspectDriver(BaseRecord):
     A driver that is configured for verification, from the verifier
     suspect list.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["full_name"], Literal["base_name"], Literal["loads"], Literal["unloads"]]]
     @property
     def address(self, /) -> int:
         """
@@ -19738,6 +20933,7 @@ class VirtQueue(BaseRecord):
     """
     One queue: the driver's bookkeeping and, for a split ring, the ring.
     """
+    __match_args__: Final[tuple[Literal["index"], Literal["name"], Literal["role"], Literal["address"], Literal["size"], Literal["driver"], Literal["ring"], Literal["packed"], Literal["packed_ring"], Literal["event_idx"], Literal["error"]]]
     @property
     def address(self, /) -> int:
         """
@@ -19824,6 +21020,7 @@ class VirtioBuffer(BaseRecord):
     """
     One buffer: its descriptors and the request it carries.
     """
+    __match_args__: Final[tuple[Literal["position"], Literal["head"], Literal["written"], Literal["descriptors"], Literal["request"], Literal["broken"]]]
     @property
     def broken(self, /) -> str |None:
         """
@@ -19859,6 +21056,7 @@ class VirtioDescriptor(BaseRecord):
     """
     One descriptor of a buffer.
     """
+    __match_args__: Final[tuple[Literal["index"], Literal["id"], Literal["address"], Literal["length"], Literal["flags"], Literal["indirect"], Literal["indirect_error"]]]
     @property
     def address(self, /) -> int:
         """
@@ -19898,6 +21096,7 @@ class VirtioDriver(BaseRecord):
     A device as its virtio-win driver sees it: its `virtio_device` and the
     queues it set up.
     """
+    __match_args__: Final[tuple[Literal["module"], Literal["device"], Literal["packed"], Literal["event_idx"], Literal["msix"], Literal["queues"]]]
     @property
     def device(self, /) -> int:
         """
@@ -19929,6 +21128,7 @@ class VirtioFunction(BaseRecord):
     """
     A virtio PCI function and what its driver shows of it.
     """
+    __match_args__: Final[tuple[Literal["bus"], Literal["device"], Literal["function"], Literal["device_id"], Literal["virtio_id"], Literal["transitional"], Literal["pdo"], Literal["service"], Literal["driver"], Literal["driver_missing"]]]
     @property
     def bus(self, /) -> int: ...
     @property
@@ -19981,6 +21181,7 @@ class VirtioRing(BaseRecord):
     """
     A virtqueue's ring and the buffers outstanding in it (`!vring`).
     """
+    __match_args__: Final[tuple[Literal["queue"], Literal["raw_ring"], Literal["request_kind"], Literal["with_device"], Literal["returned"]]]
     @property
     def queue(self, /) -> VirtQueue |None:
         """
@@ -20078,6 +21279,7 @@ class VmCounter(BaseRecord):
     """
     A named memory-manager counter (`!vm`).
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["value"], Literal["unit"]]]
     @property
     def name(self, /) -> str: ...
     @property
@@ -20094,6 +21296,7 @@ class VmDetail(BaseRecord):
     Virtual-memory statistics (`!vm`). Each counter carries its own source
     and read failure, so one that cannot be read leaves the others.
     """
+    __match_args__: Final[tuple[Literal["system"], Literal["pool"], Literal["pte"], Literal["page_files"], Literal["include_processes"]]]
     @property
     def include_processes(self, /) -> bool:
         """
@@ -20119,6 +21322,7 @@ class VmPoolDetail(BaseRecord):
     """
     Pool counters and the pool fields of `MiState` (`!vm`).
     """
+    __match_args__: Final[tuple[Literal["nonpaged_pool_bytes"], Literal["nonpaged_pool_maximum"], Literal["paged_pool_pages"], Literal["fields"]]]
     @property
     def fields(self, /) -> list[VmCounter]:
         """
@@ -20136,6 +21340,7 @@ class VmPteDetail(BaseRecord):
     """
     System PTE counters (`!vm`).
     """
+    __match_args__: Final[tuple[Literal["counters"]]]
     @property
     def counters(self, /) -> list[VmCounter]: ...
 
@@ -20145,13 +21350,14 @@ class VpRegisters(BaseRecord):
     The registers of one VTL of a Windows hypervisor VP (`!hvr`, see
     [`Session::vp_registers`]).
     """
+    __match_args__: Final[tuple[Literal["source"], Literal["missing"]]]
     @property
     def missing(self, /) -> str |None:
         """
         Why the general-purpose registers are missing, when they are.
         """
     @property
-    def registers(self, /) -> Record:
+    def registers(self, /) -> dict[str, int]:
         """
         RIP, RSP, flags, control and segment registers, and the
         general-purpose ones when they are known, in
@@ -20169,6 +21375,7 @@ class VpbDetail(BaseRecord):
     """
     A volume parameter block (`!vpb`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["flags"], Literal["flag_names"], Literal["device_object"], Literal["device_name"], Literal["real_device"], Literal["real_device_name"], Literal["serial_number"], Literal["reference_count"], Literal["volume_label"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -20204,6 +21411,7 @@ class VsChunk(BaseRecord):
     """
     A segment-heap VS chunk, decoded from its header.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["size"], Literal["previous_size"], Literal["busy"], Literal["granule"], Literal["unused_bytes"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -20245,6 +21453,7 @@ class VsSubsegment(BaseRecord):
     """
     A segment-heap variable-size subsegment (`_HEAP_VS_SUBSEGMENT`).
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["signature_ok"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -20264,6 +21473,7 @@ class VtopDetail(BaseRecord):
     A virtual address translated through the page tables of a DTB
     (`!vtop`), with every level read.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["dtb"], Literal["levels"], Literal["physical"], Literal["large"], Literal["transition"], Literal["section"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -20303,6 +21513,7 @@ class WdfCallback(BaseRecord):
     """
     An event callback the driver set.
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["address"], Literal["symbol"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -20318,6 +21529,7 @@ class WdfClient(BaseRecord):
     """
     A KMDF client driver (`_FX_DRIVER_GLOBALS`).
     """
+    __match_args__: Final[tuple[Literal["globals"], Literal["name"], Literal["driver"], Literal["wdf_driver"], Literal["driver_object"], Literal["driver_object_name"], Literal["registry_path"], Literal["version"], Literal["image_base"], Literal["image_size"], Literal["log_header"], Literal["verifier_on"], Literal["problems"]]]
     @property
     def driver(self, /) -> int |None:
         """
@@ -20389,6 +21601,7 @@ class WdfContext(BaseRecord):
     """
     One `FxContextHeader` of an object.
     """
+    __match_args__: Final[tuple[Literal["header"], Literal["context"], Literal["type_info"], Literal["name"], Literal["size"]]]
     @property
     def context(self, /) -> int:
         """
@@ -20422,6 +21635,7 @@ class WdfDeviceDetail(BaseRecord):
     A WDFDEVICE with its device objects, state machines, queues, and I/O
     targets (`!wdfkd.wdfdevice`).
     """
+    __match_args__: Final[tuple[Literal["handle"], Literal["address"], Literal["driver"], Literal["globals"], Literal["kind"], Literal["device_object"], Literal["attached_device"], Literal["physical_device"], Literal["device_name"], Literal["parent"], Literal["pnp_state"], Literal["power_state"], Literal["power_policy_state"], Literal["pkg_pnp"], Literal["device_power_state"], Literal["system_power_state"], Literal["pkg_io"], Literal["default_queue"], Literal["queues"], Literal["queues_stopped"], Literal["default_child_list"], Literal["static_child_list"], Literal["default_io_target"], Literal["self_io_target"], Literal["io_targets"], Literal["io_targets_stopped"]]]
     @property
     def address(self, /) -> int:
         """
@@ -20550,6 +21764,7 @@ class WdfDriverDevice(BaseRecord):
     """
     One of a driver's `DEVICE_OBJECT`s and the WDFDEVICE behind it.
     """
+    __match_args__: Final[tuple[Literal["device_object"], Literal["device"], Literal["handle"], Literal["kind"], Literal["pnp_state"], Literal["unlinked"]]]
     @property
     def device(self, /) -> int |None:
         """
@@ -20584,6 +21799,7 @@ class WdfDriverInfo(BaseRecord):
     """
     A KMDF client driver and its device objects (`!wdfkd.wdfdriverinfo`).
     """
+    __match_args__: Final[tuple[Literal["client"], Literal["devices"], Literal["devices_stopped"]]]
     @property
     def client(self, /) -> WdfClient: ...
     @property
@@ -20604,6 +21820,7 @@ class WdfDumpDriver(BaseRecord):
     A KMDF client driver as Wdf01000 recorded it in a crash dump
     (`!wdfkd.wdfcrashdump loader`).
     """
+    __match_args__: Final[tuple[Literal["name"], Literal["globals"], Literal["major"], Literal["minor"], Literal["build"]]]
     @property
     def build(self, /) -> int:
         """
@@ -20635,6 +21852,7 @@ class WdfEnumValue(BaseRecord):
     """
     A PDB enum value and its name.
     """
+    __match_args__: Final[tuple[Literal["value"], Literal["name"]]]
     @property
     def name(self, /) -> str |None:
         """
@@ -20651,6 +21869,7 @@ class WdfIoParameters(BaseRecord):
     lengths and control code. Each is `None` when the major function has no
     such field.
     """
+    __match_args__: Final[tuple[Literal["length"], Literal["input_length"], Literal["output_length"], Literal["io_control_code"]]]
     @property
     def input_length(self, /) -> int |None:
         """
@@ -20678,6 +21897,7 @@ class WdfIoTargetDetail(BaseRecord):
     A WDFIOTARGET with the device object that it sends to and the requests
     sent to it (`!wdfkd.wdfiotarget`).
     """
+    __match_args__: Final[tuple[Literal["handle"], Literal["address"], Literal["driver"], Literal["globals"], Literal["type_name"], Literal["kind"], Literal["is_default"], Literal["state"], Literal["open_state"], Literal["device"], Literal["in_stack"], Literal["in_stack_device"], Literal["target_device"], Literal["target_driver"], Literal["target_pdo"], Literal["file_object"], Literal["io_count"], Literal["stack_size"], Literal["sent"], Literal["sent_stopped"], Literal["ignored"], Literal["ignored_stopped"], Literal["pended"], Literal["pended_stopped"]]]
     @property
     def address(self, /) -> int:
         """
@@ -20803,6 +22023,7 @@ class WdfIoTargetSummary(BaseRecord):
     """
     One of a device's I/O targets.
     """
+    __match_args__: Final[tuple[Literal["handle"], Literal["address"], Literal["type_name"], Literal["kind"], Literal["state"], Literal["target_device"], Literal["is_default"]]]
     @property
     def address(self, /) -> int:
         """
@@ -20845,6 +22066,7 @@ class WdfIrpLocation(BaseRecord):
     """
     The stack location that an IRP's `CurrentLocation` names.
     """
+    __match_args__: Final[tuple[Literal["number"], Literal["address"], Literal["major_function"], Literal["minor_function"], Literal["device_object"], Literal["driver"], Literal["file_object"], Literal["parameters"]]]
     @property
     def address(self, /) -> int:
         """
@@ -20885,6 +22107,7 @@ class WdfLoader(BaseRecord):
     The KMDF client drivers on `FxLibraryGlobals.FxDriverGlobalsList`
     (`!wdfkd.wdfldr`).
     """
+    __match_args__: Final[tuple[Literal["library_globals"], Literal["clients"], Literal["stopped"]]]
     @property
     def clients(self, /) -> list[WdfClient]: ...
     @property
@@ -20905,6 +22128,7 @@ class WdfLogDump(BaseRecord):
     The In-Flight Recorder log of a client driver, oldest record first
     (`!wdfkd.wdflogdump`, `!wdfkd.wdfcrashdump`).
     """
+    __match_args__: Final[tuple[Literal["driver"], Literal["globals"], Literal["header"], Literal["base"], Literal["size"], Literal["current"], Literal["previous"], Literal["sequence"], Literal["use_timestamps"], Literal["entries"], Literal["end"]]]
     @property
     def base(self, /) -> int:
         """
@@ -20964,6 +22188,7 @@ class WdfLogEntry(BaseRecord):
     """
     An In-Flight Recorder record and its message.
     """
+    __match_args__: Final[tuple[Literal["record"], Literal["text"]]]
     @property
     def flags(self, /) -> str |None:
         """
@@ -20997,6 +22222,7 @@ class WdfObject(BaseRecord):
     """
     A WDF handle and the object it names (`!wdfkd.wdfhandle`).
     """
+    __match_args__: Final[tuple[Literal["handle"], Literal["address"], Literal["offset"], Literal["type_value"], Literal["type_name"], Literal["object_size"], Literal["refcount"], Literal["state"], Literal["flags"], Literal["flag_names"], Literal["globals"], Literal["driver"], Literal["parent"], Literal["contexts"], Literal["contexts_stopped"]]]
     @property
     def address(self, /) -> int:
         """
@@ -21068,6 +22294,7 @@ class WdfObjectDetail(BaseRecord):
     """
     A KMDF object with its children (`!wdfkd.wdfobject`).
     """
+    __match_args__: Final[tuple[Literal["object"], Literal["children"], Literal["children_stopped"]]]
     @property
     def children(self, /) -> list[WdfObjectRef]:
         """
@@ -21091,6 +22318,7 @@ class WdfObjectRef(BaseRecord):
     """
     The address, handle, and type of a KMDF object, as far as they read.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["handle"], Literal["type_name"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -21111,6 +22339,7 @@ class WdfQueueDetail(BaseRecord):
     A WDFQUEUE with its configuration, state, and requests
     (`!wdfkd.wdfqueue`).
     """
+    __match_args__: Final[tuple[Literal["handle"], Literal["address"], Literal["driver"], Literal["device"], Literal["dispatch_type"], Literal["state"], Literal["state_names"], Literal["power_state"], Literal["power_managed"], Literal["allow_zero_length_requests"], Literal["deleted"], Literal["execution_level"], Literal["synchronization_scope"], Literal["max_parallel_requests"], Literal["pending_count"], Literal["driver_cancelable_count"], Literal["driver_owned_count"], Literal["two_phase_completions"], Literal["callbacks"], Literal["pending"], Literal["pending_stopped"], Literal["driver_cancelable"], Literal["driver_cancelable_stopped"], Literal["driver_owned"], Literal["driver_owned_stopped"]]]
     @property
     def address(self, /) -> int:
         """
@@ -21225,6 +22454,7 @@ class WdfQueueSummary(BaseRecord):
     """
     A queue of a device.
     """
+    __match_args__: Final[tuple[Literal["handle"], Literal["address"], Literal["dispatch_type"], Literal["power_managed"], Literal["pending"], Literal["driver_owned"], Literal["is_default"]]]
     @property
     def address(self, /) -> int:
         """
@@ -21264,6 +22494,7 @@ class WdfRequestDetail(BaseRecord):
     A WDFREQUEST with its IRP, its queue, and the I/O target it was sent
     to (`!wdfkd.wdfrequest`).
     """
+    __match_args__: Final[tuple[Literal["handle"], Literal["address"], Literal["driver"], Literal["globals"], Literal["refcount"], Literal["object_state"], Literal["parent"], Literal["irp"], Literal["irp_detail"], Literal["irp_problem"], Literal["irp_allocation"], Literal["irp_reference_count"], Literal["completed"], Literal["canceled"], Literal["presented"], Literal["target_flags"], Literal["target_flag_names"], Literal["verifier_flags"], Literal["verifier_flag_names"], Literal["completion_state"], Literal["queue"], Literal["irp_queue"], Literal["irp_queue_role"], Literal["cancel_routine"], Literal["target"], Literal["completion_routine"], Literal["completion_context"]]]
     @property
     def address(self, /) -> int:
         """
@@ -21396,6 +22627,7 @@ class WdfRequestIrp(BaseRecord):
     """
     The IRP that a request carries.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["stack_count"], Literal["current_location"], Literal["system_buffer"], Literal["user_buffer"], Literal["mdl_address"], Literal["current"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -21423,6 +22655,7 @@ class WdfRequestRef(BaseRecord):
     """
     A request on one of a queue's lists.
     """
+    __match_args__: Final[tuple[Literal["handle"], Literal["address"], Literal["irp"]]]
     @property
     def address(self, /) -> int:
         """
@@ -21441,6 +22674,7 @@ class WdfTargetRequest(BaseRecord):
     """
     A request on one of an I/O target's lists.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["handle"], Literal["irp"]]]
     @property
     def address(self, /) -> int:
         """
@@ -21461,6 +22695,7 @@ class WdfVersion(BaseRecord):
     """
     The KMDF version a client bound to (`_WDF_BIND_INFO.Version`).
     """
+    __match_args__: Final[tuple[Literal["major"], Literal["minor"], Literal["build"]]]
     @property
     def build(self, /) -> int: ...
     @property
@@ -21473,6 +22708,7 @@ class WheaFinding(BaseRecord):
     """
     The WHEA error record of a hardware-error bugcheck.
     """
+    __match_args__: Final[tuple[Literal["record_address"], Literal["state"]]]
     @property
     def record_address(self, /) -> int |None:
         """
@@ -21486,6 +22722,7 @@ class WheaRecord(BaseRecord):
     """
     A decoded WHEA error record.
     """
+    __match_args__: Final[tuple[Literal["revision"], Literal["severity"], Literal["length"], Literal["sections"]]]
     @property
     def length(self, /) -> int:
         """
@@ -21501,26 +22738,42 @@ class WheaRecord(BaseRecord):
         The record's error severity (`WHEA_ERROR_SEVERITY`).
         """
 
-@final
 class WheaRecordState(BaseRecord):
     """
     A WHEA error record, `decoded`, or `unavailable` with the `reason`.
     """
     @property
-    def decoded(self, /) -> WheaRecord |None: ...
-    @property
     def kind(self, /) -> Literal["decoded", "unavailable"]:
         """
         The variant: `decoded`, `unavailable`.
         """
-    @property
-    def reason(self, /) -> str |None: ...
+    @final
+    class Decoded(WheaRecordState):
+        __match_args__: Final[tuple[Literal["decoded"]]]
+        @property
+        def decoded(self, /) -> WheaRecord: ...
+        @property
+        def kind(self, /) -> Literal["decoded"]:
+            """
+            `decoded`.
+            """
+    @final
+    class Unavailable(WheaRecordState):
+        __match_args__: Final[tuple[Literal["reason"]]]
+        @property
+        def kind(self, /) -> Literal["unavailable"]:
+            """
+            `unavailable`.
+            """
+        @property
+        def reason(self, /) -> str: ...
 
 @final
 class WheaSection(BaseRecord):
     """
     One section of a WHEA error record.
     """
+    __match_args__: Final[tuple[Literal["offset"], Literal["length"], Literal["severity"], Literal["section_type"], Literal["kind"]]]
     @property
     def kind(self, /) -> Literal["processor_generic", "memory", "pci_express", "x64_processor", "unknown"]: ...
     @property
@@ -21549,6 +22802,7 @@ class WinlogonBlackbox(BaseRecord):
     """
     What winlogon was doing.
     """
+    __match_args__: Final[tuple[Literal["thread_name"], Literal["is_operation_pending"]]]
     @property
     def is_operation_pending(self, /) -> int: ...
     @property
@@ -21559,6 +22813,7 @@ class WorkItem(BaseRecord):
     """
     A pending `_WORK_QUEUE_ITEM`.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["routine"], Literal["routine_symbol"], Literal["parameter"], Literal["io_work_item"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -21585,6 +22840,7 @@ class WorkQueue(BaseRecord):
     """
     An `_EX_WORK_QUEUE`.
     """
+    __match_args__: Final[tuple[Literal["address"], Literal["partition"], Literal["node"], Literal["queue_index"], Literal["queue_index_name"], Literal["items_processed"], Literal["items_processed_last_pass"], Literal["thread_count"], Literal["min_threads"], Literal["max_threads"], Literal["concurrency"], Literal["pending"], Literal["priorities"], Literal["threads"], Literal["threads_termination"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -21645,11 +22901,17 @@ class WorkQueuePriority(BaseRecord):
     """
     One of the 32 priority lists of a work queue.
     """
+    __match_args__: Final[tuple[Literal["priority"], Literal["queue_types"], Literal["current_count"], Literal["items"], Literal["termination"]]]
     @property
     def current_count(self, /) -> int:
         """
         `CurrentCount[priority]`, the number of threads that run an item of
         this priority.
+        """
+    @property
+    def items(self, /) -> list[WorkItem]:
+        """
+        The pending work items (key `items`).
         """
     @property
     def priority(self, /) -> int: ...
@@ -21663,17 +22925,13 @@ class WorkQueuePriority(BaseRecord):
         """
         How the list walk ended.
         """
-    @property
-    def work_items(self, /) -> list[WorkItem]:
-        """
-        The pending work items (key `items`).
-        """
 
 @final
 class WorkQueues(BaseRecord):
     """
     All executive worker queues (`!exqueue`).
     """
+    __match_args__: Final[tuple[Literal["flags"], Literal["priority_filter"], Literal["queues"], Literal["errors"]]]
     @property
     def errors(self, /) -> list[str]:
         """
@@ -21698,6 +22956,7 @@ class WorkerThread(BaseRecord):
     """
     A thread that serves a work queue.
     """
+    __match_args__: Final[tuple[Literal["kthread"], Literal["thread"], Literal["stack"]]]
     @property
     def kthread(self, /) -> int: ...
     @property
@@ -21714,6 +22973,7 @@ class ZombieKinds(BaseRecord):
     """
     Which kinds `!zombies` looks for (WinDbg's flags: 1 processes, 2 threads).
     """
+    __match_args__: Final[tuple[Literal["processes"], Literal["threads"]]]
     @property
     def processes(self, /) -> bool: ...
     @property
@@ -21724,6 +22984,7 @@ class ZombieProcess(BaseRecord):
     """
     An exited process whose object still has references.
     """
+    __match_args__: Final[tuple[Literal["eprocess"], Literal["pid"], Literal["image"], Literal["exit_time"], Literal["exit_status"], Literal["handle_count"], Literal["pointer_count"]]]
     @property
     def eprocess(self, /) -> int: ...
     @property
@@ -21759,6 +23020,7 @@ class ZombieThread(BaseRecord):
     """
     A terminated thread whose object still has references.
     """
+    __match_args__: Final[tuple[Literal["ethread"], Literal["pid"], Literal["tid"], Literal["process"], Literal["image"], Literal["exit_status"], Literal["handle_count"], Literal["pointer_count"]]]
     @property
     def ethread(self, /) -> int: ...
     @property
@@ -21797,6 +23059,7 @@ class Zombies(BaseRecord):
     The exited processes and terminated threads that still have references
     (`!zombies`), which ntoseye finds with a scan of nonpaged pool.
     """
+    __match_args__: Final[tuple[Literal["kinds"], Literal["region_start"], Literal["region_end"], Literal["scanned_pages"], Literal["processes"], Literal["threads"], Literal["live_processes"], Literal["live_threads"], Literal["interrupted"], Literal["truncated"]]]
     @property
     def interrupted(self, /) -> bool:
         """
