@@ -99,6 +99,16 @@ pub fn physical_memory(
     Ok(MemoryKind::Physical)
 }
 
+/// `#[arg(parse = words)]`: every word left, as written (quotes removed),
+/// for a command that takes a list (`undisplay 1 3`).
+pub fn words(_: &mut ArgCx<'_, '_>, cursor: &mut ArgCursor<'_>) -> Result<Vec<String>, ArgError> {
+    Ok(cursor
+        .take_all(|_| true)
+        .into_iter()
+        .map(Cow::into_owned)
+        .collect())
+}
+
 /// The words of a command line not yet parsed. Positional arguments take
 /// them front to back; a switch is found anywhere.
 pub struct ArgCursor<'i> {
