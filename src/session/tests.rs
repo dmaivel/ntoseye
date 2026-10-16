@@ -1107,6 +1107,41 @@ fn absorbed_software_breakpoint_invalidates_stopped_inspection() {
     assert_eq!(session.target.current_dtb(), expected_dtb);
 }
 
+/// A breakpoint set where a one-shot breakpoint just fired, with the target
+/// still halted at the hit, takes the site over: it is not refused as the
+/// fired one's, which only the next resume would otherwise remove, and it
+/// is the one listed.
+#[test]
+fn a_breakpoint_takes_over_the_site_of_a_fired_one_shot() {
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1001);
+    let mut session = session_with_mock(backend);
+    let once = BreakpointConfig {
+        one_shot: true,
+        ..BreakpointConfig::default()
+    };
+    let fired = session
+        .add_breakpoint(VirtAddr(0x1000), None, once)
+        .unwrap();
+    let hit = session
+        .classify_stop_event(breakpoint_event(0x1000))
+        .unwrap();
+    assert!(
+        matches!(&hit, StopResolution::Breakpoint { breakpoint, .. } if breakpoint.id == fired),
+        "precondition: the one-shot breakpoint stops"
+    );
+
+    let taken = session.add_breakpoint(VirtAddr(0x1000), None, BreakpointConfig::default());
+
+    let taken = taken.unwrap();
+    let listed: Vec<_> = session.breakpoints.list().iter().map(|bp| bp.id).collect();
+    assert_eq!(listed, [taken]);
+    assert!(!session.breakpoints.list()[0].one_shot);
+}
+
 #[test]
 fn absorbed_watchpoint_invalidates_stopped_inspection() {
     let mut backend = MockBackend::default();

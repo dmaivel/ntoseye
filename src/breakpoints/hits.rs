@@ -4,6 +4,7 @@
 #[cfg(test)]
 use super::BreakpointScope;
 use super::{BreakpointHitDisposition, BreakpointHitResult, BreakpointManager};
+use crate::dbg_backend::DebugBackend;
 use crate::error::{Error, Result};
 use crate::target::Target;
 use crate::types::{Arch, VirtAddr};
@@ -32,6 +33,30 @@ impl BreakpointManager {
 
     pub fn one_shot_hit_ids(&self) -> Vec<u32> {
         self.one_shot_hits.iter().copied().collect()
+    }
+
+    /// Remove now, not at the next resume, the one-shot breakpoints that
+    /// fired at `address` (software, or `hardware`): a breakpoint set there
+    /// while the target is still halted at the hit takes the site over.
+    pub fn retire_one_shot_hits_at(
+        &mut self,
+        client: &mut dyn DebugBackend,
+        debugger: &Target,
+        address: VirtAddr,
+        hardware: bool,
+    ) -> Result<()> {
+        let fired: Vec<u32> = self
+            .breakpoints
+            .values()
+            .filter(|bp| {
+                self.one_shot_hits.contains(&bp.id)
+                    && bp.resolved
+                    && bp.address == address
+                    && bp.hardware.is_some() == hardware
+            })
+            .map(|bp| bp.id)
+            .collect();
+        self.remove_ids(client, debugger, fired)
     }
 
     pub fn check_breakpoint_hit(&self, rip: u64, dtb: u64, arch: Arch) -> BreakpointHitResult {

@@ -84,6 +84,7 @@ impl BreakpointManager {
         }
         let condition_expr = Self::configured_condition(&config)?;
         validate_hw_breakpoint(access, len, address.0)?;
+        self.retire_one_shot_hits_at(client, debugger, address, true)?;
         self.ensure_site_available(address, true, None)?;
         let slot = self.free_hardware_slot(client, access)?;
         let automatic_scope = config.scope.is_none();

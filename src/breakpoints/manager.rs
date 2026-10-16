@@ -212,6 +212,7 @@ impl BreakpointManager {
 
         let (address, resolved, backend) = match address {
             Some(address) => {
+                self.retire_one_shot_hits_at(client, debugger, address, false)?;
                 self.ensure_site_available(address, false, None)?;
                 Self::validate_breakpoint_target(debugger, address, &scope)?;
                 let backend = Self::install_breakpoint(client, debugger, address, &scope)?;
