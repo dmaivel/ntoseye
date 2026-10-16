@@ -402,29 +402,6 @@ impl Memory {
         })
     }
 
-    /// Describe the loaded module, kernel region, or process VAD that contains
-    /// `addr`. A user-mode minidump has no VADs and raises `NtoseyeError`;
-    /// `Debugger.user_dump.region(addr)` describes its region.
-    fn describe<'py>(
-        &self,
-        py: Python<'py>,
-        addr: u64,
-    ) -> PyResult<Typed<'py, crate::target::mm::AddressDescription>> {
-        self.space.require_virtual()?;
-        self.space.require_nt("describe")?;
-        let context = self.space.context();
-        let detail = self.owner.with_in(py, &context, |session| {
-            if session.target.user_dump().is_some() {
-                return Err(raise(
-                    "a user-mode minidump has no VADs or kernel regions; \
-                     Debugger.user_dump.region(address) describes its memory",
-                ));
-            }
-            session.target.describe_address(VirtAddr(addr)).map_err(err)
-        })?;
-        Typed::new(py, detail)
-    }
-
     /// Get the function-table entry and unwind info (AMD64 or ARM64) of the
     /// function that contains `addr`, with the chained parents (`.fnent`).
     fn function_entry<'py>(

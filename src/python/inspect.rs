@@ -300,22 +300,6 @@ impl Inspect {
         })
     }
 
-    /// Get the memory-use counters of the system and of each process, up to a
-    /// limit (`!memusage`).
-    #[pyo3(signature = (process_limit=64))]
-    fn memusage<'py>(
-        &self,
-        py: Python<'py>,
-        process_limit: usize,
-    ) -> PyResult<Typed<'py, crate::target::mm::SystemMemorySummary>> {
-        self.typed(py, |session| {
-            session
-                .target
-                .memory_use_summary(process_limit)
-                .map_err(err)
-        })
-    }
-
     /// List the process, thread, and image notification callbacks.
     fn callbacks<'py>(
         &self,

@@ -617,7 +617,8 @@ mod tests {
             protect: 0x20,
             kind: 0x100_0000,
         };
-        let query = |address| MemoryBasicInformation::in_user_dump_region(&region, VirtAddr(address));
+        let query =
+            |address| MemoryBasicInformation::in_user_dump_region(&region, VirtAddr(address));
         let middle = query(0x7ff6_0000_2345);
         assert_eq!(middle.base_address, VirtAddr(0x7ff6_0000_2000));
         assert_eq!(middle.region_size, 0x3000);

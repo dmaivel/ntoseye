@@ -272,24 +272,6 @@ impl Process {
         })
     }
 
-    /// Get the region that contains `address`, as `VirtualQuery` reports it
-    /// (`!vprot`). The result has the base, the allocation base and
-    /// protection, the region size, the state, the protection, and the type.
-    fn protection<'py>(
-        &self,
-        py: Python<'py>,
-        address: u64,
-    ) -> PyResult<Typed<'py, crate::target::mm::MemoryBasicInformation>> {
-        let info = self.info.clone();
-        let detail = self.owner.with_in(py, &self.context(), |session| {
-            session
-                .target
-                .virtual_query(&info, VirtAddr(address))
-                .map_err(err)
-        })?;
-        Typed::new(py, detail)
-    }
-
     /// Get the process token and its security information.
     fn token<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::security::Token>> {
         let detail = self.owner.with_in(py, &self.context(), |session| {
@@ -406,7 +388,11 @@ impl Regions {
 #[pymethods]
 impl Regions {
     /// Find the VAD region that contains `addr`, or return `None`.
-    fn at<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Option<Bound<'py, MemoryRegionInfoPy>>> {
+    fn at<'py>(
+        &self,
+        py: Python<'py>,
+        addr: u64,
+    ) -> PyResult<Option<Bound<'py, MemoryRegionInfoPy>>> {
         self.snapshot(py)?
             .iter()
             .find(|region| addr >= region.start.0 && addr < region.end.0)
@@ -414,7 +400,11 @@ impl Regions {
             .transpose()
     }
 
-    fn __getitem__<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, MemoryRegionInfoPy>> {
+    fn __getitem__<'py>(
+        &self,
+        py: Python<'py>,
+        addr: u64,
+    ) -> PyResult<Bound<'py, MemoryRegionInfoPy>> {
         self.at(py, addr)?
             .ok_or_else(|| PyKeyError::new_err(format!("no VAD region contains {addr:#x}")))
     }

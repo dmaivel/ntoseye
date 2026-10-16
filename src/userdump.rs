@@ -13,6 +13,7 @@ use std::io::{ErrorKind, Read};
 use std::path::Path;
 
 use memmap2::Mmap;
+use ntoseye_macros::record;
 
 use crate::bytes::get_u32;
 use crate::cpu_context::{amd64, arm64};
@@ -20,6 +21,7 @@ use crate::dbg_backend::RegisterMap;
 use crate::error::{Error, Result};
 use crate::guest::ModuleInfo;
 use crate::pe::headers::CodeView;
+use crate::target::mm::{memory_state_name, memory_type_name, page_protection_name};
 use crate::types::{Arch, VirtAddr};
 
 pub mod backend;
@@ -179,17 +181,52 @@ pub struct UserHandle {
 
 /// `MINIDUMP_MEMORY_INFO`: one region of the address space, as
 /// `VirtualQueryEx` reported it.
+#[record(impl)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryRegion {
+    #[record(hex)]
     pub base: u64,
+    #[record(hex)]
     pub allocation_base: u64,
+    #[record(hex)]
     pub allocation_protect: u32,
+    #[record(hex)]
     pub size: u64,
     /// `MEM_COMMIT`, `MEM_RESERVE`, or `MEM_FREE`.
+    #[record(hex)]
     pub state: u32,
+    #[record(hex)]
     pub protect: u32,
     /// `MEM_IMAGE`, `MEM_MAPPED`, `MEM_PRIVATE`, or 0 for a free region.
+    #[record(hex)]
     pub kind: u32,
+}
+
+#[record]
+impl MemoryRegion {
+    /// `allocation_protect` as `PAGE_*` names.
+    #[record(getter)]
+    pub fn allocation_protect_name(&self) -> String {
+        page_protection_name(self.allocation_protect)
+    }
+
+    /// `MEM_COMMIT`, `MEM_RESERVE`, or `MEM_FREE`.
+    #[record(getter)]
+    pub fn state_name(&self) -> &'static str {
+        memory_state_name(self.state)
+    }
+
+    /// `protect` as `PAGE_*` names; empty for a free or reserved region.
+    #[record(getter)]
+    pub fn protect_name(&self) -> String {
+        page_protection_name(self.protect)
+    }
+
+    /// `MEM_IMAGE`, `MEM_MAPPED`, or `MEM_PRIVATE`; empty for a free region.
+    #[record(getter)]
+    pub fn kind_name(&self) -> &'static str {
+        memory_type_name(self.kind)
+    }
 }
 
 /// A dynamic function table (`MINIDUMP_FUNCTION_TABLE_DESCRIPTOR`): the

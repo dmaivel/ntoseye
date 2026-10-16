@@ -11,8 +11,8 @@ use super::module::{Driver, Module};
 use super::process::{Heap, Process};
 use super::thread::{Cpu, Thread};
 use super::userdump::UserThread;
-use crate::view::execution::ExceptionPolicyPy;
 use crate::target::mm::MemoryRegionInfoPy;
+use crate::view::execution::ExceptionPolicyPy;
 
 macro_rules! typed_iterator {
     ($(#[$doc:meta])* $name:ident($item:ty)) => {

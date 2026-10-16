@@ -7,11 +7,16 @@
 //! `ProcessHeaps` array names when that array was captured. A region none
 //! of these explain is `<unknown>`, not guessed at.
 
+use std::fmt;
+
+use ntoseye_macros::record;
+
 use crate::error::{Error, Result};
 use crate::memory::MemoryOps;
 use crate::target::Target;
 use crate::target::mm::{
-    MEM_COMMIT, MEM_FREE, MEM_IMAGE, memory_state_name, memory_type_name, page_protection_name,
+    AddressDescription, MEM_COMMIT, MEM_FREE, MEM_IMAGE, memory_state_name, memory_type_name,
+    page_protection_name,
 };
 use crate::types::VirtAddr;
 use crate::userdump::{MemoryRange, MemoryRegion};
@@ -29,7 +34,10 @@ const TIB64_STACK_LIMIT: u64 = 0x10;
 /// lower.
 const MAX_PROCESS_HEAPS: u32 = 1024;
 
-/// What a region of the address space is used for.
+/// What a region of the address space is used for: `Free`, `Image`,
+/// `Stack`, `TEB`, `PEB`, `Heap`, or `<unknown>` (in use, for nothing the
+/// dump identifies).
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RegionUsage {
     Free,
@@ -56,6 +64,12 @@ impl RegionUsage {
     }
 }
 
+impl fmt::Display for RegionUsage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 /// A thread's stack, as its TEB's `NT_TIB` bounds it, else as far as the
 /// dump captured it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,18 +93,25 @@ pub struct UsageSources {
     pub heaps: Vec<u64>,
 }
 
-/// One memory-info region with its usage and how much of it the dump holds.
+/// One region of a user-mode minidump's memory-info list (`!address`),
+/// with what the dump shows uses it and how much of it the dump holds.
+#[record(impl)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRegion {
+    /// The region, as `VirtualQueryEx` reported it.
     pub region: MemoryRegion,
     pub usage: RegionUsage,
     /// The module, thread, or heap the usage names.
     pub detail: Option<String>,
     /// Bytes of the region the dump captured.
+    #[record(hex)]
     pub captured: u64,
 }
 
+#[record]
 impl UserRegion {
+    /// The end of the region (exclusive).
+    #[record(getter, hex)]
     pub fn end(&self) -> u64 {
         self.region.base.saturating_add(self.region.size)
     }
@@ -98,11 +119,15 @@ impl UserRegion {
 
 /// One captured range of a dump without a memory-info list, with the usage
 /// the dump shows for its start.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedRange {
+    #[record(hex)]
     pub start: u64,
+    #[record(hex)]
     pub length: u64,
     pub usage: RegionUsage,
+    /// The module, thread, or heap the usage names.
     pub detail: Option<String>,
 }
 
@@ -124,15 +149,18 @@ impl UserAddressMap {
 }
 
 /// Count and total size of the regions in one summary row.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SummaryRow {
     pub label: String,
     pub regions: usize,
+    #[record(hex)]
     pub size: u64,
 }
 
 /// WinDbg's `!address` summary: regions by usage, by type and protection of
 /// those in use, and by state.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddressSummary {
     pub by_usage: Vec<SummaryRow>,
@@ -142,9 +170,45 @@ pub struct AddressSummary {
     /// Committed regions, by protection.
     pub by_protect: Vec<SummaryRow>,
     /// The size of every region listed.
+    #[record(hex)]
     pub total: u64,
     /// The size of the regions not free.
+    #[record(hex)]
     pub busy: u64,
+}
+
+/// `!address` on a user-mode minidump: what its memory-info list records,
+/// or, for a dump without one, the memory ranges it captured.
+#[record(tagged)]
+pub enum UserAddressReport {
+    /// The memory-info list's region that holds `address` (`None` when no
+    /// region does), and whether the dump captured the byte at `address`.
+    Region {
+        address: VirtAddr,
+        region: Option<UserRegion>,
+        address_captured: bool,
+    },
+    /// Every region of the memory-info list, with their summary.
+    Map {
+        regions: Vec<UserRegion>,
+        summary: AddressSummary,
+    },
+    /// A dump without a memory-info list: the captured range that holds
+    /// `address`, if one does.
+    CapturedRange {
+        address: VirtAddr,
+        range: Option<CapturedRange>,
+    },
+    /// A dump without a memory-info list: every range it captured.
+    CapturedRanges { ranges: Vec<CapturedRange> },
+}
+
+/// What an address belongs to (`!address`): NT's description of it on a
+/// kernel target, the minidump's memory-info list on a user-mode minidump.
+#[record]
+pub enum AddressReport {
+    Nt(AddressDescription),
+    UserDump(UserAddressReport),
 }
 
 impl UsageSources {
@@ -506,6 +570,37 @@ impl Target {
         let sources = self.user_usage_sources()?;
         Ok(UserAddressMap {
             regions: attribute_regions(regions, &sources, dump.memory_ranges()),
+        })
+    }
+
+    /// `!address` on a user-mode minidump: the region holding `address`, or
+    /// every region and their summary; for a dump without a memory-info
+    /// list, the captured range holding `address`, or every one.
+    pub fn user_address_report(&self, address: Option<VirtAddr>) -> Result<UserAddressReport> {
+        let dump = self.user_dump().ok_or_else(not_a_user_dump)?;
+        if dump.info().regions.is_none() {
+            let ranges = self.user_captured_ranges()?;
+            return Ok(match address {
+                Some(address) => UserAddressReport::CapturedRange {
+                    address,
+                    range: ranges
+                        .into_iter()
+                        .find(|range| address.0.wrapping_sub(range.start) < range.length),
+                },
+                None => UserAddressReport::CapturedRanges { ranges },
+            });
+        }
+        let map = self.user_address_map()?;
+        Ok(match address {
+            Some(address) => UserAddressReport::Region {
+                address,
+                region: map.region_at(address.0).cloned(),
+                address_captured: dump.read_virtual(address, &mut [0u8; 1]).is_ok(),
+            },
+            None => UserAddressReport::Map {
+                summary: summarize(&map.regions),
+                regions: map.regions,
+            },
         })
     }
 

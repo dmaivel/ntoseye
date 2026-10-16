@@ -2,8 +2,11 @@ use std::fmt::Display;
 
 use tabled::builder::Builder;
 
+use ntoseye_macros::command;
+
 use crate::error::Result;
 use crate::repl::*;
+use crate::session::Session;
 use crate::target::mm::SystemMemorySummary;
 use crate::target::object::ResourceDetail;
 use crate::target::usermode::handles::{
@@ -55,18 +58,33 @@ repl_command! {
     target: Kernel,
 }
 
-repl_command! {
-    cmd_memusage;
-    names: ["!memusage"],
-    category: "memory manager",
-    usage: "!memusage [process-limit]",
-    summary: "Show the system memory-use counters and the counters of a limited number of processes.",
-    details: "The command uses validated memory-manager globals, KDBG fields, or recognized public getter code, and EPROCESS.Vm counters. It does not scan physical memory, and it does not walk all VADs.",
-    completion: Expression,
-    target: Kernel,
+/// Show the system memory-use counters and the counters of a limited number
+/// of processes.
+///
+/// The command uses validated memory-manager globals, KDBG fields, or
+/// recognized public getter code, and EPROCESS.Vm counters. It does not scan
+/// physical memory, and it does not walk all VADs.
+#[command(
+    names = ["!memusage"],
+    category = "memory manager",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    usage = "!memusage [process-limit]",
+    completion = Expression
+)]
+fn memusage(
+    session: &Session,
+    #[arg(default = 64)] process_limit: u64,
+) -> Result<SystemMemorySummary> {
+    session.target.memory_use_summary(process_limit as usize)
 }
 
-pub const DEFAULT_MEMORY_PROCESS_LIMIT: usize = 64;
+impl Render for SystemMemorySummary {
+    fn render(&self, _: &mut ReplState<'_>, _: ()) {
+        print_memory_use_summary(self, true);
+    }
+}
 
 pub fn diagnostic_cell<T: Display>(value: &DiagnosticValue<T>) -> String {
     match value {
@@ -617,21 +635,6 @@ impl ReplState<'_> {
                 }
             }
             Err(error) => error!("global resource enumeration unavailable: {error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_memusage(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let limit = match invocation.arg(0) {
-            Some(expression) => match self.eval_or_report(expression) {
-                Some(value) => value.0 as usize,
-                None => return Ok(()),
-            },
-            None => DEFAULT_MEMORY_PROCESS_LIMIT,
-        };
-        match self.ctx.target.memory_use_summary(limit) {
-            Ok(summary) => print_memory_use_summary(&summary, true),
-            Err(error) => error!("{error}"),
         }
         Ok(())
     }
