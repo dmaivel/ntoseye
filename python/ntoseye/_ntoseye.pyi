@@ -3283,7 +3283,7 @@ class Debugger:
     @property
     def modules(self, /) -> Modules:
         """
-        Loaded kernel modules: `modules["nt"]`, iteration, `.at(addr)`. On a
+        Loaded kernel modules: `modules["nt"]`, iteration, `.at(address)`. On a
         user-mode minidump, the modules the dump lists.
         """
     def notices(self, /) -> list[Notice]:
@@ -7488,8 +7488,7 @@ class HypervisorVtl:
         """
         Every field of this VTL's eVMCS, read now, named as the TLFS names it
         (`guest_rip`, `msr_bitmap`, ...), as `!hvvmcs` shows them:
-        `fields.guest_rip` or `fields["guest_rip"]`. Raises `NtoseyeError`
-        without the VTL's eVMCS.
+        `fields["guest_rip"]`. Raises `NtoseyeError` without the VTL's eVMCS.
         """
 
 @final
@@ -8076,7 +8075,7 @@ class IndirectTable(BaseRecord):
 class Inspect:
     """
     System-wide reports and helpers that decode an object at an address
-    (`dbg.inspect`). The results are typed `Record`s. On a user-mode
+    (`dbg.inspect`). The results are typed records. On a user-mode
     minidump, which has no kernel, only `version`, `time`, `triage`,
     `bugcheck`, `exception_record`, and `context_record` apply; the others
     raise `NtoseyeError`.

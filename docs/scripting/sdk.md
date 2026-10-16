@@ -68,7 +68,7 @@ Use these views directly, without selecting or attaching to a global process.
 
 `dbg.cpus` is the sequence of processors: `dbg.cpus[n]` is processor `n`, and `cpu.number` is its number. A `Cpu` decodes its processor's state: `pcr()`, `prcb()`, `irql()`, `idt()`, `gdt()`, and `cpuinfo()`. With `kd` or `kdnet`, `cpu.msr["IA32_LSTAR"]` reads a model-specific register and `cpu.apic()` the local APIC, as {command}`rdmsr` `/p` and {command}`!apic` do: KD runs these reads on the processor that reported the stop, so ntoseye switches the target to the processor you asked for and back. `dbg.inspect.interrupt_controllers()` returns the interrupt controllers and lines that {command}`!ioapic` shows, and `dbg.inspect.smbios()` the SMBIOS structures of {command}`!sysinfo` `smbios`, each with its fields by the specification's names.
 
-Handles such as `Process`, `Module`, `Thread`, `Frame`, and struct cursors are stamped with the target generation. After a reboot (a stop whose `kind` is `"reload"`), discard the old handles and query them again, because an old handle raises `ntoseye.StaleHandleError` when you use it. Old handles stay hashable and printable, so a set or dict that holds them continues to work.
+Handles such as `Process`, `Module`, `Thread`, `Frame`, and struct cursors are stamped with the target generation. After a reboot (a `Stop.Reload` stop), discard the old handles and query them again, because an old handle raises `ntoseye.StaleHandleError` when you use it. Old handles stay hashable and printable, so a set or dict that holds them continues to work.
 
 If your code caches raw addresses, use `dbg.generation` to detect a rebuild. `Breakpoint` handles are not stamped: breakpoints stay after a reboot, and ntoseye resolves symbolic breakpoints again in the new kernel.
 
@@ -85,7 +85,7 @@ with ntoseye.attach("dmp", "powershell-exception.dmp") as dbg:
         print(hex(thread.tid), thread.name, thread.backtrace(3)[0])
     exception = dump.exception                          # UserExceptionDetail or None
     if exception is not None:
-        print(hex(exception.exception.code), exception.symbol)  # 0xe0d7e5e1 kernelbase!RaiseException+0x8a
+        print(hex(exception.info.code), exception.symbol)  # 0xe0d7e5e1 kernelbase!RaiseException+0x8a
     frame = dump.exception_context()                    # the .ecxr registers, as a Frame
     report = dbg.inspect.triage()                       # what !analyze reports
     if report.failure_signature and report.culprit:
@@ -173,7 +173,7 @@ address = sk.symbols["securekernel!SkeSelectProcessAddressSpace"]
 bp = dbg.breakpoints.add(address, hardware=True)
 try:
     stop = dbg.run(timeout=10.0)
-    if stop is not None and stop.hit(bp):
+    if stop is not None and stop.hit(bp) and stop.cpu is not None:
         cpu = dbg.cpus[stop.cpu]
         print(stop.symbol, cpu.registers["rip"], cpu.registers["cr3"])
         print(dbg.command("k"))
@@ -244,7 +244,7 @@ A `DecodedHypercall` has the hypercall input value (`input_value`, RCX), `code`,
 bp = dbg.breakpoints.add_hypercall("HvCallFlushVirtualAddressList")
 stop = dbg.run(timeout=10.0)
 bp.delete()
-assert stop is not None, "no flush in 10 s"
+assert stop is not None and stop.cpu is not None, "no flush in 10 s"
 cpu = dbg.cpus[stop.cpu]
 served = cpu.serving
 calls = [served.hypercall] if served and served.current else [s.hypercall for s in cpu.saved_vtl if s.current]
@@ -296,6 +296,8 @@ A `when=` callback reads the caller through `dbg.cpus[stop.cpu].hypercall_caller
 
 ```python
 def in_space(stop: ntoseye.Stop) -> bool:
+    if stop.cpu is None:
+        return True
     caller = dbg.cpus[stop.cpu].hypercall_caller()
     if caller is None or caller.hypercall is None or caller.hypercall.fast:
         return True
@@ -310,7 +312,7 @@ dbg.breakpoints.add_hypercall("HvCallFlushVirtualAddressList", guest.id, when=in
 ```python
 bp = dbg.breakpoints.add_exit("rdmsr", partition=1)
 stop = dbg.run(timeout=10.0)
-caller = dbg.cpus[stop.cpu].hypercall_caller() if stop is not None else None
+caller = dbg.cpus[stop.cpu].hypercall_caller() if stop is not None and stop.cpu is not None else None
 if caller is not None:
     print(caller.vp_index, hex(caller.registers["rcx"]))
 bp.delete()
@@ -351,7 +353,7 @@ if cpu.rip is not None:
 
 A step-until walk (`until=`) also follows the thread that it started in, and so does `trace_calls()`. If an interrupt switches that thread out during a step, the walk waits until the thread executes that instruction at the same call depth, on any vCPU. If the thread exits first, the walk fails with an error that says so, and `trace_calls()` ends as `failed`.
 
-These functions have a `timeout=` argument in seconds. When the timeout expires, the function interrupts the target at its current location and returns that stop, whose `kind` is `"interrupt"`. A `"step"` stop from a walk means it got where it was going. Under VBS, an interrupted vCPU can be in the Windows hypervisor, where steps are refused until the target resumes.
+These functions have a `timeout=` argument in seconds. When the timeout expires, the function interrupts the target at its current location and returns that stop, a `Stop.Interrupt`. A `Stop.Step` from a walk means it got where it was going. Under VBS, an interrupted vCPU can be in the Windows hypervisor, where steps are refused until the target resumes.
 
 `trace_calls()` records the call tree until the current function returns, the same as {command}`wt`. Because it follows its thread too, a trace can wait a long time on a busy guest when other threads keep reaching an instruction before the traced one. `trace_calls(timeout=...)` ends it as `interrupted` when the time runs out, with the target halted where the trace got to and the tree it recorded so far.
 
@@ -359,33 +361,52 @@ These functions have a `timeout=` argument in seconds. When the timeout expires,
 
 While the target is stopped, its stop stays current until the target moves again. `dbg.stop`, `wait()`, and `interrupt()` all return this stop, and reading it does not consume it.
 
-A `Stop` is a record of why the target stopped, taken at the stop. Its `kind` is one of `"breakpoint"`, `"exception"`, `"interrupt"`, `"step"`, `"module_load"`, `"module_unload"`, `"bugcheck"`, `"reload"` (the target rebooted or ntoseye found its kernel again), and `"entry"` (nothing stopped the target since the debugger attached). Every stop has `rip`, `symbol`, `cpu`, `thread`, `process`, `inspection_process`, `vtl`, and `partition`, and the part that its kind describes: `breakpoint`, `exception`, `module`, `bugcheck`, or `reload`, each `None` for the other kinds.
+A `Stop` is a record of why the target stopped, taken at the stop. Every stop has `rip`, `symbol`, `cpu`, `thread`, `process`, `inspection_process`, `vtl`, and `partition`. Each kind of stop is a subclass of `Stop` that adds its own part, which is never `None` there:
 
-`stop.hit(bp)` tells whether breakpoint `bp` stopped the target, so `if stop.hit(bp):` works without checking the kind first, and also for a one-shot breakpoint that the hit deleted. A crash dump that you open with `backend="dmp"` is stopped at its bugcheck, so its `dbg.stop` has the kind `"bugcheck"`. For the analysis that {command}`!analyze` makes of it, call `dbg.inspect.bugcheck()`.
+| Class | Part | Stops on |
+| --- | --- | --- |
+| `Stop.Breakpoint` | `breakpoint`, a `BreakpointHit` | a breakpoint or a watchpoint |
+| `Stop.Exception` | `exception`, an `ExceptionStop` | a Windows exception |
+| `Stop.ModuleLoad`, `Stop.ModuleUnload` | `module`, a `ModuleInfo` | a module filter set to `break` |
+| `Stop.Bugcheck` | `bugcheck`, a `BugcheckInfo`, or `None` when the transport did not decode it | a bugcheck |
+| `Stop.Reload` | `reload`, a `ReloadStop` | the target rebooted, or ntoseye found its kernel again |
+| `Stop.Step` | | a completed step, or `run(address=...)` reaching its address |
+| `Stop.Interrupt` | | a break-in, or a timed-out step |
+| `Stop.Entry` | | nothing since the debugger attached |
+
+`isinstance()` and `match` tell them apart, and narrow the type, so a type checker knows that `stop.breakpoint` exists after `case Stop.Breakpoint()`. `stop.kind` names the class in snake case (`"breakpoint"`, `"module_load"`, ...).
+
+`stop.hit(bp)` tells whether breakpoint `bp` stopped the target, also for a one-shot breakpoint that the hit deleted. A crash dump that you open with `backend="dmp"` is stopped at its bugcheck, so its `dbg.stop` is a `Stop.Bugcheck`. For the analysis that {command}`!analyze` makes of it, call `dbg.inspect.bugcheck()`.
 
 The parts are records, not live handles. The collections take them as keys: `dbg.threads[stop.thread]`, `dbg.processes[stop.process]`, and `dbg.modules[stop.module]`. `stop.cpu` is the number of the processor that stopped, so `dbg.cpus[stop.cpu]` is its `Cpu`; it is `None` on a user-mode minidump, which has no processors.
 
 ```python
+from ntoseye import Stop
+
 bp = dbg.breakpoints.add("nt!NtCreateFile")
-stop = dbg.run(timeout=10.0)
-if stop is None:
-    print("still running")
-elif stop.hit(bp):
-    print("hit", stop.symbol, stop.thread)
-    if stop.thread is not None:
-        print(dbg.threads[stop.thread].backtrace(4))
+match dbg.run(timeout=10.0):
+    case None:
+        print("still running")
+    case Stop.Breakpoint(breakpoint=hit) as stop if stop.hit(bp):
+        print("hit", hit.symbol, stop.thread)
+        if stop.thread is not None:
+            print(dbg.threads[stop.thread].backtrace(4))
+    case Stop.Exception(exception=raised):
+        print("exception", hex(raised.code))
+    case stop:
+        print("stopped:", stop.kind)
 ```
 
 ### Exceptions and module loads
 
-`dbg.exceptions.set(code, mode)` sets an exception policy, for example for `"av"` or `0xC0000005`, as the REPL's {command}`sx` commands do, and returns it. `dbg.exceptions.set_module_event(event, module, mode)` sets a module filter: `event` is `"ld"` for loads or `"ud"` for unloads, and `module` a module name, or `None` for every module. `dbg.exceptions.module_events` lists the module filters, each with its `event`.
+`dbg.exceptions.set(code, mode=...)` sets an exception policy, for example for `"av"` or `0xC0000005`, as the REPL's {command}`sx` commands do, and returns it. `dbg.exceptions.set_module_event(event, module, mode=...)` sets a module filter: `event` is `"ld"` for loads or `"ud"` for unloads, and `module` a module name, or `None` for every module. `dbg.exceptions.module_events` lists the module filters, each with its `event`.
 
-With a `"break"` load filter, the load of a matching kernel module stops the target with the kind `"module_load"`, whose `module` is the loaded module's `ModuleInfo`; `dbg.modules[stop.module]` gives its `Module`. The stop occurs before the module's `DriverEntry` runs, and the deferred breakpoints in the module are already armed. A `"break"` unload filter stops with the kind `"module_unload"` after the driver's unload routine has run, while the module is still listed.
+With a `"break"` load filter, the load of a matching kernel module stops the target with a `Stop.ModuleLoad`, whose `module` is the loaded module's `ModuleInfo`; `dbg.modules[stop.module]` gives its `Module`. The stop occurs before the module's `DriverEntry` runs, and the deferred breakpoints in the module are already armed. A `"break"` unload filter stops with a `Stop.ModuleUnload` after the driver's unload routine has run, while the module is still listed.
 
 ```python
-dbg.exceptions.set_module_event("ld", "mydriver", "break")
+dbg.exceptions.set_module_event("ld", "mydriver", mode="break")
 stop = dbg.run()
-if stop is not None and stop.kind == "module_load" and stop.module is not None:
+if isinstance(stop, Stop.ModuleLoad):
     print(stop.module.name, hex(stop.module.base))
     dbg.breakpoints.add("mydriver!MyDispatchCreate")
 ```
@@ -439,9 +460,15 @@ The SDK raises `ValueError` before it touches the target when an argument is not
 
 Decoded results, for example `dbg.inspect.pci()`, `thread.inspect()`, a `FieldInfo`, a `Symbol`, or a `MemoryRegionInfo`, are records with one typed property for each field, so an editor can complete the property names and a type checker finds a misspelled name. [Results](../reference/sdk/index.md#results) lists each property.
 
-A result always has every field of its class. If a field does not apply, its value is `None`, or empty or false where the documentation of the field says so. You can also read a record as a mapping, with `keys()` and `record["field"]`. `to_dict()` returns the same fields as plain nested `dict`s.
+A result always has every field of its class. If a field does not apply, its value is `None`, or empty or false where the documentation of the field says so. A field with a fixed set of values is typed as a `Literal` of its snake-case names (`"nonpaged"`, `"kernel_module"`), so a type checker catches a misspelled value.
+
+Records are values, like frozen dataclasses: two records are equal when they are of the same class and their fields are equal, an unchanging record is hashable, and `match` takes their fields positionally in declaration order or by keyword (`case ModuleInfo(name="nt")`). They are not mappings, so read a field as an attribute; `to_dict()` returns the fields as plain nested `dict`s, for JSON or to iterate over them. A record whose kinds carry different fields, such as `Stop`, has a nested subclass for each kind, as `Stop.Breakpoint` above.
 
 A handle (a process, a thread, a module, a CPU, a driver, a breakpoint, and the others) has its record's fields as properties too, and the record itself as `info`; `to_dict()` is `info`'s. Two handles are equal when they name the same object, and a collection takes the handle's record as a key: `dbg.threads[stop.thread]`. Iterating over a collection walks a fresh list.
+
+Where an argument is a kernel address, a handle of the object at that address works too: `dbg.memory.read(proc, 16)` reads the `EPROCESS`, and `dbg.types["nt!_ETHREAD"].at(thread)` is a cursor on a thread's `ETHREAD`. A process or thread stands for its `EPROCESS` or `ETHREAD`, a module for its base, a driver or device for its object, and a heap for its address. The handle must come from the same debugger.
+
+Options are keyword-only: the subject of a method (an address, a name, a record) is positional, and its modes and flags are named, as in `dbg.inspect.pool_usage(sort="paged")` or `dbg.step(until="call")`.
 
 `ntoseye.build` is the commit stamp in the compiled extension: `<commit>`, `<commit>-dirty`, or `unknown`. After you rebuild, compare this value if a long-lived Python interpreter might still have an older native module loaded.
 

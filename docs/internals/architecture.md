@@ -29,8 +29,12 @@ impl Job {
 - With the `python` feature, the macro also emits a frozen class `JobPy` (Python name `Job`) that extends `BaseRecord`, with one typed property for each field. The doc comments become docstrings.
 - Field options: `hex` (`repr` shows the integer in hex), `bytes` (a `Vec<u8>` is Python `bytes`), `skip` (Rust and REPL only), and `rename = "key"`. A field's Rust type gives its stub type, through `Option`, `Vec`, `Box`, `DiagnosticValue` (`Diagnostic[T]`), `DiagnosticMetric` and `Keyed`.
 - Values that are computed from the fields are `#[record(getter)]` methods in a `#[record] impl` block, and the struct then says `#[record(impl)]`. `#[record(python)]` methods in that block become ordinary Python methods.
-- A fieldless enum is a string: each variant's text is its `rename`, or else its snake_case name. The macro generates `as_str()` and `Display` from the texts, and the stub types the value as the `Literal` of every text. An enum whose variants each hold one value is the union of those values' types. `#[record(tagged)]` makes a class with `kind`, typed as the `Literal` of the variant kinds, and one optional property for each variant field.
+- A fieldless enum is a string: each variant's text is its `rename`, or else its snake_case name, and the stub types the value as the `Literal` of every text. An SDK argument of the enum's type takes the same texts. `#[record(label = "...")]` on a variant gives the REPL a different text (`Display`) from the SDK's, so the SDK says `pde` where the REPL prints `PDE`.
+- An enum whose variants each hold one value is the union of those values' types.
+- `#[record(tagged)]` on an enum with struct variants makes a base class with `kind`, typed as the `Literal` of the variant kinds, and a final subclass per variant, nested in it (`ListTermination.Cycle`). A variant's class has its own `kind` and the variant's fields as properties that are never `None` for being in another variant, so `isinstance()` and `match` narrow. With `base = S`, the subclasses extend struct `S`'s class instead, and `S` holds the enum in a `#[record(flatten)]` field: that is how `Stop` has its shared context and `Stop.Breakpoint` its `breakpoint`.
 - Context that depends on the session, not on the guest structure, stays outside the record. For example, the vCPU that runs a thread is a field of `ThreadDetail`, not of `ThreadInfo`.
+
+In Python, a record is a value, like a frozen dataclass. `BaseRecord` gives it `==` (same class, equal fields), `hash` (a `TypeError` when a field is unhashable), `repr`, and `to_dict()`, and each class has `__match_args__`, its properties in order. It is not a container: it has no `len`, iteration or `record["field"]`, so a script reads fields as attributes. A `Keyed` field is a plain `dict[str, T]`.
 
 The runtime that turns a record into Python objects is `src/python/record.rs` (`ToValue`, `Typed`, `to_py`). `build.rs` walks the module tree from `src/lib.rs` and exports every record class from the `_ntoseye` module, so a new record needs no list entry. For this reason, a record must be an item in a module that `crate::python` can see, not the output of a `macro_rules!`. Everything Python-specific is behind `cfg(feature = "python")`, so the core builds with `--no-default-features`.
 
@@ -83,7 +87,7 @@ A command declares what it needs and what it changes, instead of checking for it
 
 `Session::run(Motion, &Cancel) -> Result<RunOutcome>` (`src/session/driver.rs`) is the only way to resume, step or wait, for every host. A `Motion` is `Continue`, `Wait`, `Break`, `Step`, `StepOver`, `StepOut`, `RunTo` or `Walk`. A `Cancel` carries the cross-thread flag, a deadline, a behavior for when it fires, and a `tick` hook that the host calls between polls. The driver polls the backend, skips stops that do not count, applies the exception policy, surfaces parked stops, and runs breakpoint actions and filter commands through the session's `ActionRunner` (the REPL dispatcher, in every session built with the REPL).
 
-The result is a `Stop` record: its `kind`, the context at the stop (vCPU, RIP, symbol, process, thread, inspection process, VTL, partition), and the optional `breakpoint`, `exception`, `module`, `bugcheck` and `reload` parts. Each host only maps it. The REPL prints the stop card (`ReplState::run_motion`), the SDK returns the `Stop` itself (`python::runcontrol`), DAP sends a stopped event, gdbserver a stop reply, and MCP goes through the REPL.
+The result is a `Stop` record: the context at the stop (vCPU, RIP, symbol, process, thread, inspection process, VTL, partition) and a `StopKind`, a `tagged` enum flattened into it, whose variants carry their own parts (`Breakpoint { breakpoint }`, `Exception { exception }`, `ModuleLoad { module }`, ...). In Python, each variant is a subclass, `Stop.Breakpoint` with a `breakpoint` that is never `None`. Each host only maps it. The REPL prints the stop card (`ReplState::run_motion`), the SDK returns the `Stop` itself (`python::runcontrol`), DAP sends a stopped event, gdbserver a stop reply, and MCP goes through the REPL.
 
 ## The Python SDK
 
@@ -94,7 +98,9 @@ A generated method runs through `python::command::run`. That function takes the 
 - `refuse()` and `prepare()` are optional. They refuse an operation that the object cannot run, and set up the session after admission (for example, a `Heap` loads its process's symbols).
 - A `#[arg(receiver)]` argument comes from the object through `Bind<T>`. For example, a `Thread` binds the `ThreadInfo` that `!thread` takes.
 
-A Python argument type implements `PyArg`, whose `Py` type is what the stub shows. A fieldless `#[record]` enum is one already, taking its variants' texts (`Literal[...]` in the stub), and a handle's record is one taking the handle (`ProcessInfo` takes a `Process`). Addresses also accept a debugger expression, which is evaluated on the session thread. Run commands get a `timeout` and the `when=` handling of `python::runcontrol`.
+A Python argument type implements `PyArg`, whose `Py` type is what the stub shows. A fieldless `#[record]` enum is one already, taking its variants' texts (`Literal[...]` in the stub), and a handle's record is one taking the handle (`ProcessInfo` takes a `Process`). A `VirtAddr` argument is an `AddressArg` (`src/python/args.rs`): an `int`, a debugger expression, which is evaluated on the session thread in the method's context, or a handle, which gives its object's address (a `Process` its `_EPROCESS`, a `Module` its base, ...; also `Thread`, `Driver`, `Device` and `Heap`) and must belong to the same debugger. Hand-written methods take `AddressArg` too, through `AddressArg::resolve` or `AddressArg::pending`. Run commands get a `timeout` and the `when=` handling of `python::runcontrol`.
+
+The arguments a method is about (an address, a name, an object) are positional. An argument that may be omitted (`Option<T>`, `default`, `switch`, `sdk`) is a mode, flag or option, so the generated method makes it keyword-only, after the `*`; `#[arg(positional)]` keeps an omittable subject positional (`job(address=None)`, `pool_usage(tag=None, *, sort=...)`).
 
 ### Handles and collections
 
@@ -102,7 +108,9 @@ A live handle (`Process`, `Thread`, `Module`, `Breakpoint`) is a struct with `#[
 
 A collection (`dbg.processes`) is an impl block with `#[collection]` (`macros/src/collection.rs`). It writes `fn enumerate`, which lists the items, and `fn lookup` for a key; the macro makes `__len__`, a typed `__iter__`, `__getitem__`, `get` and `__contains__`, and `find`/`at` from matcher functions marked `#[collection(find)]` or `#[collection(at)]`. `#[collection(records)]` also takes an item's record as a key (`dbg.threads[stop.thread]`), and `#[collection(sequence)]` indexes by position.
 
-Every SDK class reaches the module without a list: `build.rs` finds each `#[record]`, `#[handle]` and `#[pyclass]` and writes their `#[pymodule_export]`s.
+Every SDK class reaches the module without a list: `build.rs` finds each `#[record]`, `#[handle]` and `#[pyclass]` and writes their `#[pymodule_export]`s. A `tagged` variant class reaches it through its base, which nests it.
+
+`build.rs` also fails the build on a name clash, which PyO3 would resolve silently by keeping one of the two: two SDK classes with one Python name, or two members of one class with one Python name. It collects a class's members from every source: a record's properties and `#[record(getter)]`s, a handle's generated members (`info`, `to_dict`, its record's properties), a `#[collection]`'s protocol, `#[command(python = ...)]` methods and forms, and hand-written `#[pymethods]`. A `#[handle] impl` item with the name of a generated property replaces it on purpose, and is not a clash.
 
 Some SDK methods are written by hand. These are properties and setters (`Symbols.path`), mapping objects (`Cpu.msr`), cursor reads (`Debugger.debug_log`), and operations that no command performs. They return model records through `Typed` as well.
 
@@ -117,6 +125,6 @@ Some SDK methods are written by hand. These are properties and setters (`Symbols
 ## Adding an SDK method
 
 1. If a REPL command performs the operation, generate the method: use `python = Object` on the command, or add a form (`form_of`) when the command is several operations or the method needs arguments that the line has no word for. Use `python_name` to choose the Python name.
-2. On a class that has no commands yet, implement `CommandHost`, and `Bind<T>` for each argument that the object supplies. A `#[handle]` has both. A generated method's Python name must not be one of the class's record properties, which the handle macro cannot see.
+2. On a class that has no commands yet, implement `CommandHost`, and `Bind<T>` for each argument that the object supplies. A `#[handle]` has both. A generated method's Python name must not be one of the class's members; `build.rs` stops the build if it is.
 3. Write a method by hand only for the cases listed above. Return records, and route halt and kernel checks through `python::command::admit`.
 4. Regenerate the stub and check it, as `python/README.md` describes: `maturin develop --generate-stubs`, then `mypy --strict -p ntoseye` and the target-free tests in `python/tests`. A script-visible change is an SDK change, and belongs in the changelog.

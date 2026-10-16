@@ -40,7 +40,7 @@ def main() -> None:
                     print(f"timeout waiting for {args.symbol} after {args.timeout:g}s")
                     dbg.interrupt()
                     return
-                if stop.kind in ("bugcheck", "reload"):
+                if isinstance(stop, (ntoseye.Stop.Bugcheck, ntoseye.Stop.Reload)):
                     print(f"stop: {stop.kind} before reaching the breakpoint")
                     return
                 if stop.hit(bp):

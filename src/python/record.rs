@@ -240,8 +240,7 @@ pub struct Diagnosed {
 /// How [`to_py`] renders objects and diagnostics.
 #[derive(Clone, Copy)]
 pub enum PyStyle {
-    /// [`Record`](Record)s and `ntoseye.Diagnostic`s
-    /// with attribute access.
+    /// Record classes and `ntoseye.Diagnostic`s, with attribute access.
     Records,
     /// Plain `dict`s throughout, the shape `to_dict()` returns: a diagnostic
     /// becomes `{available, value, error[, source]}`.

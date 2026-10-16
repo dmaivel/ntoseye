@@ -52,7 +52,7 @@ def main() -> None:
                     raise SystemExit(f"no hit within {args.timeout:g}s (is {args.process} doing anything?)")
                 if stop.hit(bp):
                     break
-                if stop.kind in ("bugcheck", "reload"):
+                if isinstance(stop, (ntoseye.Stop.Bugcheck, ntoseye.Stop.Reload)):
                     raise SystemExit(f"target stopped with a {stop.kind} before the breakpoint")
                 print(f"other stop: {stop.kind} at {stop.symbol or stop.rip}; waiting again")
 
@@ -85,7 +85,7 @@ def main() -> None:
                 once.delete()
                 print("\none-shot breakpoint did not fire in time; removed it")
             else:
-                listed = any(handle.id == once.id for handle in dbg.breakpoints)
+                listed = once in dbg.breakpoints
                 print(f"\none-shot breakpoint {once.id} stopped: {stop.hit(once)}; still listed: {listed}")
         finally:
             for handle in list(dbg.breakpoints):

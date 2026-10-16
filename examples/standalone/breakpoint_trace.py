@@ -44,10 +44,11 @@ def main() -> None:
 
                 rip = stop.rip or 0
                 symbol = stop.symbol or nearest(dbg, rip)
-                if not stop.hit(bp):
+                if isinstance(stop, (ntoseye.Stop.Bugcheck, ntoseye.Stop.Reload)):
                     print(f"stop: {stop.kind}  rip={rip:#x} ({symbol})")
-                    if stop.kind in ("bugcheck", "reload"):
-                        break
+                    break
+                if not stop.hit(bp):
+                    print(f"other stop: {stop.kind}  rip={rip:#x} ({symbol})")
                     continue
 
                 hits += 1

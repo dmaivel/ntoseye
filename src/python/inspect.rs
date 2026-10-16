@@ -17,7 +17,7 @@ use crate::target::etw::parse_guid;
 use crate::trapframe::{KtrapFrame, read_ktrap_frame};
 
 /// System-wide reports and helpers that decode an object at an address
-/// (`dbg.inspect`). The results are typed `Record`s. On a user-mode
+/// (`dbg.inspect`). The results are typed records. On a user-mode
 /// minidump, which has no kernel, only `version`, `time`, `triage`,
 /// `bugcheck`, `exception_record`, and `context_record` apply; the others
 /// raise `NtoseyeError`.

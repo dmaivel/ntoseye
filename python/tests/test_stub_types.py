@@ -124,7 +124,7 @@ def driver_results(dbg: Debugger) -> list[tuple[object, str, Callable[[], object
     power_irps = inspect.power_action().irps.value
     pdo: int | None = None
     if power_irps is not None:
-        pdo = next((entry.irp.value.pdo for entry in power_irps.entries if entry.irp.value is not None), None)
+        pdo = next((entry.power_irp.value.pdo for entry in power_irps.entries if entry.power_irp.value is not None), None)
     # A KMDF FDO, which has a default I/O target, and a request that a KMDF
     # driver holds, such as the one the balloon driver keeps for statistics.
     wdf_devices = [

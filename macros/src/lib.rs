@@ -157,7 +157,7 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// operation the REPL reaches its own way), returning a REPL-only enum of
 /// their results. A form has no help or reference entry of its own; its SDK
 /// method admits the command's effects. Its arguments are all the method's:
-/// `Option<T>`, `default`, `keyword` and `receiver` apply (a REPL-only
+/// `Option<T>`, `default`, `positional` and `receiver` apply (a REPL-only
 /// option is refused), so a form can take what the REPL grammar has no word
 /// for, such as an object handle (`PyArg for ProcessInfo` takes a `Process`).
 ///

@@ -66,7 +66,7 @@ def stall(
 
 
 def show_ring(dbg: ntoseye.Debugger, module: str, queue: ntoseye.VirtQueue) -> None:
-    ring = dbg.inspect.vring(queue.address, module)
+    ring = dbg.inspect.vring(queue.address, module=module)
     for label, buffers in (("with the device", ring.with_device), ("returned", ring.returned)):
         for buffer in buffers:
             count = len(buffer.descriptors)

@@ -258,8 +258,7 @@ impl HypervisorVtl {
 
     /// Every field of this VTL's eVMCS, read now, named as the TLFS names it
     /// (`guest_rip`, `msr_bitmap`, ...), as `!hvvmcs` shows them:
-    /// `fields.guest_rip` or `fields["guest_rip"]`. Raises `NtoseyeError`
-    /// without the VTL's eVMCS.
+    /// `fields["guest_rip"]`. Raises `NtoseyeError` without the VTL's eVMCS.
     fn vmcs_fields<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Keyed<u64>, Hex>> {
         let vmcs = self.read_vmcs(py)?;
         Typed::new(

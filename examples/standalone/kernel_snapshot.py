@@ -46,7 +46,7 @@ def main() -> None:
             for name in ("IA32_EFER", "IA32_LSTAR", "IA32_GS_BASE", "IA32_KERNEL_GS_BASE"):
                 print(f"  {name:<20} {cpu.msr[name]:#018x}")
 
-        print(f"\nnonpaged pool usage:\n  {dbg.inspect.pool_usage(sort='nonpaged_bytes')}")
+        print(f"\nnonpaged pool usage:\n  {dbg.inspect.pool_usage(sort='nonpaged')}")
         print(f"\nsessions:\n  {dbg.inspect.sessions()}")
 
         if args.dump:

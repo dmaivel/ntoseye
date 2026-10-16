@@ -63,7 +63,7 @@ impl Debugger {
         Types::new(namespace_owner(slf), Space::Kernel)
     }
 
-    /// Loaded kernel modules: `modules["nt"]`, iteration, `.at(addr)`. On a
+    /// Loaded kernel modules: `modules["nt"]`, iteration, `.at(address)`. On a
     /// user-mode minidump, the modules the dump lists.
     #[getter]
     fn modules(slf: &Bound<'_, Self>) -> Modules {

@@ -342,7 +342,7 @@ with ntoseye.attach("gdb", "127.0.0.1:1234") as dbg:
     bp = dbg.breakpoints.add_hypercall("HvCallSendSyntheticClusterIpi", 4)
     stop = dbg.run(timeout=60.0)
     bp.delete()
-    assert stop is not None
+    assert stop is not None and stop.cpu is not None
     caller = dbg.cpus[stop.cpu].hypercall_caller()
     assert caller is not None and caller.hypercall is not None
     vp_index = caller.vp_index                   # read before the switch

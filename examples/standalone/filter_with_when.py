@@ -43,15 +43,17 @@ def main() -> None:
                     timed_out = True
                     print(f"timeout waiting for a stop after {args.timeout:g}s")
                     break
-                if not stop.hit(bp):
-                    print(f"stop: {stop.kind} ({stop.symbol or '?'})")
-                    if stop.kind in ("bugcheck", "reload"):
+                match stop:
+                    case ntoseye.Stop.Breakpoint(breakpoint=hit) if stop.hit(bp):
+                        if hit.condition_error is not None:
+                            print(f"when predicate failed: {hit.condition_error}")
+                            break
+                    case ntoseye.Stop.Bugcheck() | ntoseye.Stop.Reload():
+                        print(f"stop: {stop.kind} ({stop.symbol or '?'})")
                         break
-                    continue
-                hit = stop.breakpoint
-                if hit is not None and hit.condition_error is not None:
-                    print(f"when predicate failed: {hit.condition_error}")
-                    break
+                    case _:
+                        print(f"other stop: {stop.kind} ({stop.symbol or '?'})")
+                        continue
 
                 process = stop.process
                 if process is None:
