@@ -69,7 +69,9 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// attribute takes:
 ///
 /// - `names = [...]` (the first is canonical), `category = "..."`,
-///   `kind = Query | Action | Run | Host`, and `python = Object | none`;
+///   `kind = Query | Action | Run | Host`, and `python = Object | [Object,
+///   ...] | none` (one method on each class: a kernel and a user-dump
+///   class can share a command);
 /// - effects, which `Session::admit` enforces for every host: `target =
 ///   Any | Kernel`, `state = Any | Halted | HaltedOrParkedThread | Running`,
 ///   `run = None | Step | Run`, `writes = [Memory, Registers, Hardware,

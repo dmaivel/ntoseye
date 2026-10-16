@@ -24,9 +24,10 @@ use crate::view::record::{ToView, Typed};
 use super::context::Space;
 pub use super::inspect::Inspect;
 pub use super::memory::Memory;
-pub use super::module::{Device, Driver};
+pub use super::module::{Device, Driver, Module};
 pub use super::process::Process;
 pub use super::thread::{Cpu, Thread};
+pub use super::userdump::{UserProcess, UserThread};
 
 /// An SDK object a `#[command]` method can be placed on: the debugger it
 /// runs in and the context (process, thread) its calls run in.
@@ -267,5 +268,45 @@ impl Bind<MemoryKind> for Memory {
             Space::Physical => MemoryKind::Physical,
             _ => MemoryKind::Virtual,
         }
+    }
+}
+
+/// A user-mode minidump's process: the dump's one address space.
+impl CommandHost for UserProcess {
+    fn owner(&self) -> &Owner {
+        &self.owner
+    }
+
+    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
+        Ok(Context::default())
+    }
+}
+
+/// A user-mode minidump's thread: its calls run with it selected.
+impl CommandHost for UserThread {
+    fn owner(&self) -> &Owner {
+        UserThread::owner(self)
+    }
+
+    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
+        Ok(UserThread::context(self))
+    }
+}
+
+/// A module: its calls run in the address space it is loaded in.
+impl CommandHost for Module {
+    fn owner(&self) -> &Owner {
+        &self.owner
+    }
+
+    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
+        Ok(Module::context(self))
+    }
+}
+
+/// A module binds its short name (`!chkimg nt`).
+impl Bind<String> for Module {
+    fn bind(&self) -> String {
+        self.info.short_name.clone()
     }
 }

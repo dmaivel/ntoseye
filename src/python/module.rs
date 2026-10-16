@@ -105,7 +105,7 @@ impl Module {
         Module { owner, space, info }
     }
 
-    fn context(&self) -> Context {
+    pub fn context(&self) -> Context {
         self.space.context()
     }
 

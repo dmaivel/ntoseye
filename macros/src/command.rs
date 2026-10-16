@@ -71,8 +71,10 @@ struct Options {
     capability: Option<Ident>,
     usage: Option<LitStr>,
     completion: Option<Completion>,
-    /// `None` is `python = none`: REPL only.
-    python: Option<Ident>,
+    /// The SDK classes the method goes on (`python = Process` or
+    /// `python = [Process, UserProcess]`); empty is `python = none`: REPL
+    /// only.
+    python: Vec<Ident>,
     python_name: Option<LitStr>,
     /// How the line splits: `StructuredArgs` (words), or `RawTail` /
     /// `ExpressionTail` (unsplit, for a `raw` argument).
@@ -117,7 +119,7 @@ impl Options {
                 "capability" => capability = Some(meta.value()?.parse()?),
                 "usage" => usage = Some(meta.value()?.parse()?),
                 "completion" => completion = Some(Completion::parse(meta.value()?)?),
-                "python" => python = Some(meta.value()?.parse::<Ident>()?),
+                "python" => python = Some(ident_list(meta.value()?)?),
                 "python_name" => python_name = Some(meta.value()?.parse()?),
                 "style" => style = Some(meta.value()?.parse()?),
                 "flow" => flow = Some(meta.value()?.parse()?),
@@ -150,7 +152,10 @@ impl Options {
             capability,
             usage,
             completion,
-            python: (python != "none").then_some(python),
+            python: python
+                .into_iter()
+                .filter(|object| object != "none")
+                .collect(),
             python_name,
             style,
             flow,
@@ -503,7 +508,7 @@ impl Command {
     }
 
     fn validate(&self) -> Result<()> {
-        if let Some(object) = &self.options.python
+        if let Some(object) = self.options.python.first()
             && (self.options.kind == "Host" || self.returns_flow())
         {
             return Err(Error::new(
@@ -523,7 +528,7 @@ impl Command {
                 "a #[command] maps over one `each` argument",
             ));
         }
-        if let Some(object) = &self.options.python {
+        if let Some(object) = self.options.python.first() {
             if self.receiver == Receiver::Repl {
                 return Err(Error::new(
                     object.span(),
@@ -883,14 +888,19 @@ impl Command {
         }
     }
 
-    /// The SDK method, `#[pymethods]` on the `python = Object` class: the
+    /// The SDK method, `#[pymethods]` on each `python = Object` class: the
     /// arguments the receiver does not bind and the REPL does not render
     /// become keyword arguments, and the call runs on the session thread
     /// through `crate::python::command::run`, which admits the effects.
     fn python(&self) -> Result<TokenStream> {
-        let Some(object) = &self.options.python else {
-            return Ok(TokenStream::new());
-        };
+        self.options
+            .python
+            .iter()
+            .map(|object| self.python_method(object))
+            .collect()
+    }
+
+    fn python_method(&self, object: &Ident) -> Result<TokenStream> {
         let python_name = self
             .options
             .python_name

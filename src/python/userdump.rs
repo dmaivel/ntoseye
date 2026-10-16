@@ -448,7 +448,7 @@ impl UserThread {
         }
     }
 
-    fn context(&self) -> Context {
+    pub fn context(&self) -> Context {
         Context::vcpu(self.id.clone())
     }
 
