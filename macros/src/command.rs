@@ -10,8 +10,11 @@ use syn::{
 };
 
 pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
-    let options = Options::parse(attr)?;
     let mut function: ItemFn = syn::parse2(item)?;
+    let options = match Attr::parse(attr)? {
+        Attr::Command(options) => *options,
+        Attr::Form(form) => return expand_form(form, function),
+    };
     let help = Help::from_docs(&function.attrs, function.sig.ident.span())?;
     let receiver = Receiver::parse(&function)?;
     let args = take_args(&mut function)?;
@@ -46,13 +49,87 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let spec = command.spec();
     let repl = command.repl();
     let python = command.python()?;
+    let forms = command.forms();
     Ok(quote! {
         #function
+        #forms
 
         const _: () = {
             #repl
             #[linkme::distributed_slice(crate::repl::COMMANDS)]
             static SPEC: crate::repl::CommandSpec = #spec;
+            #python
+        };
+    })
+}
+
+/// A form: one more SDK method of the command it names, from a function the
+/// command's REPL operation calls. It has no REPL presence of its own (the
+/// command's spec, usage and help cover it) and admits the command's
+/// effects, which the command hands it as `__FORM_<command>_<form>`; that
+/// constant exists only when the command lists the form in `forms`, so the
+/// two must agree.
+fn expand_form(form: FormOptions, mut function: ItemFn) -> Result<TokenStream> {
+    let receiver = Receiver::parse(&function)?;
+    if receiver == Receiver::Repl {
+        return Err(Error::new(
+            function.sig.span(),
+            "a form is an SDK method: its first parameter is `&Session` or `&mut Session`",
+        ));
+    }
+    if !function.attrs.iter().any(|attr| attr.path().is_ident("doc")) {
+        return Err(Error::new(
+            function.sig.ident.span(),
+            "a form needs a doc comment: its SDK method's docstring",
+        ));
+    }
+    let args = take_args(&mut function)?;
+    for arg in &args {
+        let repl_only = arg.render
+            || arg.switch.is_some()
+            || arg.rest
+            || arg.raw
+            || arg.invoked
+            || arg.parse.is_some()
+            || arg.each.is_some()
+            || arg.current
+            || arg.sdk
+            || arg.name.is_some()
+            || arg.complete.is_some();
+        if repl_only {
+            return Err(Error::new(
+                arg.span,
+                "a form's arguments are its SDK method's (`receiver`, `default`, `keyword`, \
+                 `Option<T>`); its command's REPL operation parses the line and calls it",
+            ));
+        }
+    }
+    let output = result_type(&function.sig.output)?;
+    let docs: Vec<Attribute> = function
+        .attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("doc"))
+        .map(docstring_line)
+        .collect();
+    let effects = format_ident!("__FORM_{}_{}", form.command, function.sig.ident);
+    let method = Method {
+        function: &function.sig.ident,
+        python_name: form.python_name.as_ref(),
+        docs: &docs,
+        receiver,
+        args: &args,
+        output: &output,
+        effects: quote!(&#effects),
+    };
+    let python = form
+        .python
+        .iter()
+        .map(|object| method.python(object))
+        .collect::<Result<TokenStream>>()?;
+    Ok(quote! {
+        #function
+
+        const _: () = {
             #python
         };
     })
@@ -99,9 +176,26 @@ struct Options {
     style: Option<Ident>,
     /// The flow a command that returns a value (not a `Flow`) ends with.
     flow: Option<Ident>,
+    /// The SDK methods of a command that is several SDK operations: the
+    /// form functions (`#[command(form_of = ...)]`) its operation calls.
+    forms: Vec<Ident>,
 }
 
-impl Options {
+/// `#[command(form_of = command, python = Object, ...)]`.
+struct FormOptions {
+    /// The command (its function) whose REPL operation calls the form.
+    command: Ident,
+    python: Vec<Ident>,
+    python_name: Option<LitStr>,
+}
+
+/// What `#[command(...)]` declares: a command, or a form of one.
+enum Attr {
+    Command(Box<Options>),
+    Form(FormOptions),
+}
+
+impl Attr {
     fn parse(attr: TokenStream) -> Result<Self> {
         let span = attr.span();
         let mut names = None;
@@ -119,12 +213,18 @@ impl Options {
         let mut python_name = None;
         let mut style = None;
         let mut flow = None;
+        let mut forms = Vec::new();
+        let mut form_of: Option<Ident> = None;
+        let mut command_keys = Vec::new();
         let parser = syn::meta::parser(|meta| {
             let key = meta
                 .path
                 .get_ident()
                 .map(Ident::to_string)
                 .unwrap_or_default();
+            if !matches!(key.as_str(), "form_of" | "python" | "python_name") {
+                command_keys.push(meta.path.span());
+            }
             match key.as_str() {
                 "names" => names = Some(lit_list(meta.value()?)?),
                 "category" => category = Some(meta.value()?.parse()?),
@@ -141,11 +241,13 @@ impl Options {
                 "python_name" => python_name = Some(meta.value()?.parse()?),
                 "style" => style = Some(meta.value()?.parse()?),
                 "flow" => flow = Some(meta.value()?.parse()?),
+                "forms" => forms = ident_list(meta.value()?)?,
+                "form_of" => form_of = Some(meta.value()?.parse()?),
                 _ => {
                     return Err(meta.error(
                         "expected `names`, `category`, `kind`, `target`, `state`, `run`, \
                          `writes`, `live_only`, `capability`, `usage`, `completion`, `python`, \
-                         `python_name`, `style` or `flow`",
+                         `python_name`, `style`, `flow`, `forms` or `form_of`",
                     ));
                 }
             }
@@ -153,12 +255,47 @@ impl Options {
         });
         syn::parse::Parser::parse2(parser, attr)?;
         let missing = |what: &str| Error::new(span, format!("#[command] needs `{what} = ...`"));
+        let python: Option<Vec<Ident>> = python.map(|python| {
+            python
+                .into_iter()
+                .filter(|object| object != "none")
+                .collect()
+        });
+        if let Some(command) = form_of {
+            if let Some(key) = command_keys.first() {
+                return Err(Error::new(
+                    *key,
+                    "a form takes only `form_of`, `python` and `python_name`: its command \
+                     declares the rest",
+                ));
+            }
+            let python = python.ok_or_else(|| missing("python"))?;
+            if python.is_empty() {
+                return Err(Error::new(span, "a form is an SDK method: `python = Object`"));
+            }
+            return Ok(Self::Form(FormOptions {
+                command,
+                python,
+                python_name,
+            }));
+        }
         let names: Vec<LitStr> = names.ok_or_else(|| missing("names"))?;
         if names.is_empty() {
             return Err(Error::new(span, "`names` needs at least one name"));
         }
-        let python = python.ok_or_else(|| missing("python"))?;
-        Ok(Self {
+        // A command with forms has its SDK methods there.
+        let python = match python {
+            Some(python) if !forms.is_empty() && !python.is_empty() => {
+                return Err(Error::new(
+                    python[0].span(),
+                    "a command with `forms` has its SDK methods there: drop `python`",
+                ));
+            }
+            Some(python) => python,
+            None if !forms.is_empty() => Vec::new(),
+            None => return Err(missing("python")),
+        };
+        Ok(Self::Command(Box::new(Options {
             names,
             category: category.ok_or_else(|| missing("category"))?,
             kind: kind.ok_or_else(|| missing("kind"))?,
@@ -170,14 +307,12 @@ impl Options {
             capability,
             usage,
             completion,
-            python: python
-                .into_iter()
-                .filter(|object| object != "none")
-                .collect(),
+            python,
             python_name,
             style,
             flow,
-        })
+            forms,
+        })))
     }
 }
 
@@ -683,12 +818,6 @@ impl Command {
             names,
             category,
             kind,
-            target,
-            state,
-            run,
-            writes,
-            live_only,
-            capability,
             ..
         } = &self.options;
         let usage = self.usage();
@@ -713,6 +842,35 @@ impl Command {
         } else {
             quote!(Args)
         };
+        let effects = self.effects();
+        quote! {
+            crate::repl::CommandSpec {
+                names: &[#(#names),*],
+                category: #category,
+                kind: Some(crate::repl::CommandKind::#kind),
+                usage: #usage,
+                summary: #summary,
+                details: #details,
+                completion: #completion,
+                effects: #effects,
+                style: crate::repl::CommandStyle::#style,
+                flow: crate::repl::Flow::#flow,
+                handler: crate::repl::CommandHandler::#handler(repl),
+            }
+        }
+    }
+
+    /// The declared effects, as an `Effects` expression.
+    fn effects(&self) -> TokenStream {
+        let Options {
+            target,
+            state,
+            run,
+            writes,
+            live_only,
+            capability,
+            ..
+        } = &self.options;
         let effects = quote!(crate::session::effects);
         let target = target
             .as_ref()
@@ -728,27 +886,35 @@ impl Command {
             None => quote!(None),
         };
         quote! {
-            crate::repl::CommandSpec {
-                names: &[#(#names),*],
-                category: #category,
-                kind: Some(crate::repl::CommandKind::#kind),
-                usage: #usage,
-                summary: #summary,
-                details: #details,
-                completion: #completion,
-                effects: #effects::Effects {
-                    target: #effects::TargetScope::#target,
-                    state: #effects::RunState::#state,
-                    run: #effects::RunEffect::#run,
-                    writes: &[#(#effects::Writes::#writes),*],
-                    live_only: #live_only,
-                    capability: #capability,
-                },
-                style: crate::repl::CommandStyle::#style,
-                flow: crate::repl::Flow::#flow,
-                handler: crate::repl::CommandHandler::#handler(repl),
+            #effects::Effects {
+                target: #effects::TargetScope::#target,
+                state: #effects::RunState::#state,
+                run: #effects::RunEffect::#run,
+                writes: &[#(#effects::Writes::#writes),*],
+                live_only: #live_only,
+                capability: #capability,
             }
         }
+    }
+
+    /// What a command hands each of its forms: its effects, as the
+    /// `__FORM_<command>_<form>` constant the form's SDK method admits (and
+    /// names, so a form and its command must list each other).
+    fn forms(&self) -> TokenStream {
+        let effects = self.effects();
+        self.options
+            .forms
+            .iter()
+            .map(|form| {
+                let name = format_ident!("__FORM_{}_{}", self.function, form);
+                quote! {
+                    #[cfg(feature = "python")]
+                    #[doc(hidden)]
+                    #[allow(non_upper_case_globals)]
+                    const #name: crate::session::effects::Effects = #effects;
+                }
+            })
+            .collect()
     }
 
     /// The REPL handler: parse the arguments in the order the function
@@ -954,33 +1120,56 @@ impl Command {
         }
     }
 
-    /// The SDK method, `#[pymethods]` on each `python = Object` class: the
-    /// arguments the receiver does not bind and the REPL does not render
-    /// become keyword arguments, and the call runs on the session thread
-    /// through `crate::python::command::run`, which admits the effects.
+    /// The SDK method, `#[pymethods]` on each `python = Object` class.
     fn python(&self) -> Result<TokenStream> {
+        let method = Method {
+            function: &self.function,
+            python_name: self.options.python_name.as_ref(),
+            docs: &self.docs,
+            receiver: self.receiver,
+            args: &self.args,
+            output: &self.output,
+            effects: quote!(&SPEC.effects),
+        };
         self.options
             .python
             .iter()
-            .map(|object| self.python_method(object))
+            .map(|object| method.python(object))
             .collect()
     }
+}
 
-    fn python_method(&self, object: &Ident) -> Result<TokenStream> {
+/// An SDK method: a command's, or a form's.
+struct Method<'a> {
+    function: &'a Ident,
+    python_name: Option<&'a LitStr>,
+    /// The docstring.
+    docs: &'a [Attribute],
+    receiver: Receiver,
+    args: &'a [Arg],
+    output: &'a Type,
+    /// The `&Effects` it admits.
+    effects: TokenStream,
+}
+
+impl Method<'_> {
+    /// The method on `object`, in a `#[pymethods]` block: the arguments the
+    /// receiver does not bind and the REPL does not render become keyword
+    /// arguments, and the call runs on the session thread through
+    /// `crate::python::command::run`, which admits the effects.
+    fn python(&self, object: &Ident) -> Result<TokenStream> {
         let python_name = self
-            .options
             .python_name
-            .as_ref()
             .map_or_else(|| self.function.to_string(), LitStr::value);
         let method = format_ident!("command_{}", self.function);
         let operation = format!("{object}.{python_name}");
-        let docs = &self.docs;
+        let docs = self.docs;
         let command = quote!(crate::python::command);
         let mut params = Vec::new();
         let mut signature = Vec::new();
         let mut bindings = Vec::new();
         let mut keywords = false;
-        for arg in &self.args {
+        for arg in self.args {
             if arg.render {
                 continue;
             }
@@ -1000,7 +1189,13 @@ impl Command {
                 ));
             }
             params.push(quote!(#ident: <#ty as #command::PyArg>::Py));
-            bindings.push(quote!(let #ident = <#ty as #command::PyArg>::from_py(#ident);));
+            bindings.push(quote! {
+                let #ident = <#ty as #command::PyArg>::from_py_in(
+                    py,
+                    #command::CommandHost::owner(self),
+                    #ident,
+                )?;
+            });
             signature.push(if arg.sdk {
                 let default = arg.default.as_ref().unwrap();
                 quote!(#ident = #default)
@@ -1020,14 +1215,15 @@ impl Command {
             Receiver::Session => quote!(&*__session),
             Receiver::Repl => unreachable!("validated"),
         };
-        let function = &self.function;
+        let function = self.function;
         let call: Vec<&Ident> = self
             .args
             .iter()
             .filter(|arg| !arg.render)
             .map(|arg| &arg.ident)
             .collect();
-        let output = &self.output;
+        let output = self.output;
+        let effects = &self.effects;
         Ok(quote! {
             #[cfg(feature = "python")]
             #[pyo3::pymethods]
@@ -1040,7 +1236,7 @@ impl Command {
                     #(#params),*
                 ) -> pyo3::PyResult<crate::view::record::Typed<'py, #output>> {
                     #(#bindings)*
-                    #command::run(py, self, #operation, &SPEC.effects, move |__session| {
+                    #command::run(py, self, #operation, #effects, move |__session| {
                         self::#function(#receiver, #(#call),*)
                     })
                 }
@@ -1048,3 +1244,4 @@ impl Command {
         })
     }
 }
+

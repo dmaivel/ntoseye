@@ -117,6 +117,22 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// PyO3's `multiple-pymethods`) whose keyword arguments are the arguments
 /// that are neither bound nor rendered (`PyArg`), whose docstring is the doc
 /// comment, and which returns `R`'s record class.
+///
+/// **Several SDK methods behind one REPL name.** When one REPL command is
+/// several SDK operations (`!locks` decodes one resource or lists them all),
+/// each operation is a *form*: a function of its own, with its own return
+/// type and docstring, marked
+/// `#[command(form_of = locks, python = Inspect, python_name = "...")]`
+/// (only those three keys). The command lists them, `forms = [resource,
+/// resources]` instead of `python`, and its REPL operation parses the line as
+/// before and calls the form it names, returning a REPL-only enum of their
+/// results. A form has no usage, help or reference entry of its own; its SDK
+/// method admits the command's effects. Its arguments are all the method's:
+/// `Option<T>`, `default`, `keyword` and `receiver` apply (a REPL-only
+/// option is refused), so a form can take what the REPL grammar has no word
+/// for, such as an object handle (`PyArg for ProcessInfo` takes a `Process`).
+/// A form and its command name each other (the command hands the form its
+/// effects as `__FORM_<command>_<form>`), and both live in one module.
 #[proc_macro_attribute]
 pub fn command(attr: TokenStream, item: TokenStream) -> TokenStream {
     command::expand(attr.into(), item.into())

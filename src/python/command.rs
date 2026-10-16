@@ -41,6 +41,13 @@ pub trait CommandHost {
     fn refuse(&self, _operation: &str, _effects: &Effects) -> PyResult<()> {
         Ok(())
     }
+
+    /// Get the session ready for a call admitted on this object, on the
+    /// session thread: a `Heap` loads its process's module symbols, as its
+    /// decoders need ntdll's.
+    fn prepare(&self, _session: &mut Session) -> PyResult<()> {
+        Ok(())
+    }
 }
 
 /// A `#[arg(receiver)]` argument the object supplies: a `Thread` handle is
@@ -54,6 +61,12 @@ pub trait Bind<T> {
 pub trait PyArg: Sized {
     type Py;
     fn from_py(value: Self::Py) -> Self;
+
+    /// [`Self::from_py`] for a method of an object of `owner`'s debugger: a
+    /// handle argument (a `Process`) must belong to it.
+    fn from_py_in(_py: Python<'_>, _owner: &Owner, value: Self::Py) -> PyResult<Self> {
+        Ok(Self::from_py(value))
+    }
 }
 
 impl PyArg for u64 {
@@ -73,6 +86,13 @@ impl PyArg for u8 {
 impl PyArg for u16 {
     type Py = u16;
     fn from_py(value: u16) -> Self {
+        value
+    }
+}
+
+impl PyArg for usize {
+    type Py = usize;
+    fn from_py(value: usize) -> Self {
         value
     }
 }
@@ -110,6 +130,40 @@ impl<T: PyArg> PyArg for Option<T> {
     fn from_py(value: Self::Py) -> Self {
         value.map(T::from_py)
     }
+
+    fn from_py_in(py: Python<'_>, owner: &Owner, value: Self::Py) -> PyResult<Self> {
+        value
+            .map(|value| T::from_py_in(py, owner, value))
+            .transpose()
+    }
+}
+
+/// A process handle argument: the process it is.
+impl PyArg for ProcessInfo {
+    type Py = Py<Process>;
+    fn from_py(value: Py<Process>) -> Self {
+        Python::attach(|py| value.borrow(py).info.clone())
+    }
+
+    fn from_py_in(py: Python<'_>, owner: &Owner, value: Py<Process>) -> PyResult<Self> {
+        let process = value.borrow(py);
+        process.owner.require_argument_of(py, owner, "process")?;
+        Ok(process.info.clone())
+    }
+}
+
+/// A thread handle argument: the thread it is.
+impl PyArg for ThreadInfo {
+    type Py = Py<Thread>;
+    fn from_py(value: Py<Thread>) -> Self {
+        Python::attach(|py| value.borrow(py).info.clone())
+    }
+
+    fn from_py_in(py: Python<'_>, owner: &Owner, value: Py<Thread>) -> PyResult<Self> {
+        let thread = value.borrow(py);
+        thread.owner.require_argument_of(py, owner, "thread")?;
+        Ok(thread.info.clone())
+    }
 }
 
 /// Run a command for the SDK: on the session thread, in `host`'s context,
@@ -123,13 +177,14 @@ pub fn run<'py, H, T>(
     f: impl FnOnce(&mut Session) -> Result<T> + Send,
 ) -> PyResult<Typed<'py, T>>
 where
-    H: CommandHost,
+    H: CommandHost + Sync,
     T: ToView + Send,
 {
     host.refuse(operation, effects)?;
     let context = host.context(py)?;
     let value = host.owner().with_in(py, &context, |session| {
         admit(session, effects, operation)?;
+        host.prepare(session)?;
         f(session).map_err(err)
     })?;
     Typed::new(py, value)
