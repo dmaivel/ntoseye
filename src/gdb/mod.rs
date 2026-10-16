@@ -336,6 +336,9 @@ const PHYSICAL_READ_CHUNK: usize = 0x400;
 /// The first canonical upper-half (kernel) address on AMD64.
 const KERNEL_HALF: u64 = 0xffff_8000_0000_0000;
 
+/// The read timeout of a wait asked not to wait: a socket refuses zero.
+const MIN_READ_TIMEOUT: Duration = Duration::from_millis(1);
+
 fn gdb_connect_error(addr: &str, err: io::Error) -> Error {
     let message = match err.kind() {
         io::ErrorKind::ConnectionRefused => format!(
@@ -1500,6 +1503,10 @@ impl DebugBackend for GdbClient {
     }
 
     fn try_wait_for_stop(&mut self, timeout: Duration) -> Result<Option<StopEvent>> {
+        // The session polls once without waiting when its deadline is
+        // reached, and a socket refuses a zero read timeout: the shortest
+        // one it takes is that poll.
+        let timeout = timeout.max(MIN_READ_TIMEOUT);
         self.stream.get_ref().set_read_timeout(Some(timeout))?;
         let result = GdbClient::try_wait_for_stop(self);
         let _ = self.stream.get_ref().set_read_timeout(None);
@@ -1987,6 +1994,19 @@ mod tests {
         DebugBackend::wait_for_stop(&mut client).unwrap();
 
         assert!(!received.lock().iter().any(|packet| packet == "?"));
+    }
+
+    /// A wait whose deadline is reached polls once without waiting, as the
+    /// run driver asks with a zero timeout, which a socket refuses as its
+    /// read timeout: a running target with no stop is `None`, not an error.
+    #[test]
+    fn a_zero_timeout_wait_polls_a_running_target() {
+        let (mut client, _) = running_client_over_recording_stub();
+
+        let polled = DebugBackend::try_wait_for_stop(&mut client, Duration::ZERO);
+
+        assert!(matches!(polled, Ok(None)), "{polled:?}");
+        assert!(DebugBackend::is_running(&client));
     }
 
     #[test]
