@@ -170,6 +170,41 @@ pub struct WdfObjectRef {
     pub type_name: Option<String>,
 }
 
+/// A WDFDEVICE's kind, by its `m_PkgPnp`: `fdo`, `filter`, `pdo`, or
+/// `control` (a legacy device without one).
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WdfDeviceKind {
+    #[record(label = "FDO")]
+    Fdo,
+    Filter,
+    #[record(label = "PDO")]
+    Pdo,
+    Control,
+}
+
+impl WdfDeviceKind {
+    /// Whether it has an `FxPkgFdo` (an FDO or a filter).
+    fn is_fdo(self) -> bool {
+        matches!(self, Self::Fdo | Self::Filter)
+    }
+}
+
+/// A KMDF I/O target's kind: `local`, `remote`, `self`, `usb_device`, or
+/// `usb_pipe`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WdfIoTargetKind {
+    Local,
+    Remote,
+    #[record(rename = "self")]
+    SelfTarget,
+    #[record(label = "USB device")]
+    UsbDevice,
+    #[record(label = "USB pipe")]
+    UsbPipe,
+}
+
 /// One of a driver's `DEVICE_OBJECT`s and the WDFDEVICE behind it.
 #[record]
 #[derive(Debug, Clone)]
@@ -182,7 +217,7 @@ pub struct WdfDriverDevice {
     #[record(hex)]
     pub handle: Option<u64>,
     /// `FDO`, `filter`, `PDO`, or `control`.
-    pub kind: Option<&'static str>,
+    pub kind: Option<WdfDeviceKind>,
     /// `m_CurrentPnpState` (`_WDF_DEVICE_PNP_STATE`).
     pub pnp_state: Option<WdfEnumValue>,
     /// Why the device object does not link to a WDFDEVICE of this driver.
@@ -306,7 +341,7 @@ pub struct WdfDeviceDetail {
     /// The owning driver's `_FX_DRIVER_GLOBALS`.
     pub globals: VirtAddr,
     /// `FDO`, `filter`, `PDO`, or `control`.
-    pub kind: &'static str,
+    pub kind: WdfDeviceKind,
     pub device_object: VirtAddr,
     /// The device object this one is attached to (`m_AttachedDevice`).
     pub attached_device: VirtAddr,
@@ -370,7 +405,7 @@ pub struct WdfIoTargetSummary {
     pub type_name: String,
     /// See [`WdfIoTargetDetail::kind`]: `local`, `remote`, `self`,
     /// `USB device`, or `USB pipe`.
-    pub kind: &'static str,
+    pub kind: WdfIoTargetKind,
     /// `m_State` (`_WDF_IO_TARGET_STATE`).
     pub state: WdfEnumValue,
     /// `m_TargetDevice`, the device object that it sends requests to.
@@ -629,7 +664,7 @@ pub struct WdfIoTargetDetail {
     pub type_name: String,
     /// `local` (a target in the device's own stack), `remote` (one the
     /// driver opened), `self`, `USB device`, or `USB pipe`.
-    pub kind: &'static str,
+    pub kind: WdfIoTargetKind,
     /// Whether it is its device's default I/O target.
     pub is_default: bool,
     /// `m_State` (`_WDF_IO_TARGET_STATE`).
@@ -1067,13 +1102,13 @@ fn sent_request_problem(
 /// device's local one, so only `m_InStack` tells the two apart: the
 /// default target is in the device's own stack, and a target that the
 /// driver opens is not.
-fn io_target_kind(type_name: &str, in_stack: bool) -> &'static str {
+fn io_target_kind(type_name: &str, in_stack: bool) -> WdfIoTargetKind {
     match type_name {
-        "FX_TYPE_IO_TARGET_SELF" => "self",
-        "FX_TYPE_IO_TARGET_USB_DEVICE" => "USB device",
-        "FX_TYPE_IO_TARGET_USB_PIPE" => "USB pipe",
-        _ if in_stack => "local",
-        _ => "remote",
+        "FX_TYPE_IO_TARGET_SELF" => WdfIoTargetKind::SelfTarget,
+        "FX_TYPE_IO_TARGET_USB_DEVICE" => WdfIoTargetKind::UsbDevice,
+        "FX_TYPE_IO_TARGET_USB_PIPE" => WdfIoTargetKind::UsbPipe,
+        _ if in_stack => WdfIoTargetKind::Local,
+        _ => WdfIoTargetKind::Remote,
     }
 }
 
@@ -1783,16 +1818,18 @@ impl Target {
 
     /// `m_PkgPnp`'s kind of device: `control` without one (a legacy device),
     /// else by the package's type.
-    fn wdf_device_kind(&self, wdf: &WdfTypes<'_>, device: &StructRef<'_>) -> Result<&'static str> {
+    fn wdf_device_kind(&self, wdf: &WdfTypes<'_>, device: &StructRef<'_>) -> Result<WdfDeviceKind> {
         if device.read_uint("m_Legacy")? != 0 {
-            return Ok("control");
+            return Ok(WdfDeviceKind::Control);
         }
         let pkg = device.read_pointer("m_PkgPnp")?;
         let header = self.wdf_object_header(wdf, pkg)?;
         Ok(match wdf.type_name(header.type_value) {
-            Some("FX_TYPE_PACKAGE_PDO") => "PDO",
-            Some("FX_TYPE_PACKAGE_FDO") if device.read_uint("m_Filter")? != 0 => "filter",
-            Some("FX_TYPE_PACKAGE_FDO") => "FDO",
+            Some("FX_TYPE_PACKAGE_PDO") => WdfDeviceKind::Pdo,
+            Some("FX_TYPE_PACKAGE_FDO") if device.read_uint("m_Filter")? != 0 => {
+                WdfDeviceKind::Filter
+            }
+            Some("FX_TYPE_PACKAGE_FDO") => WdfDeviceKind::Fdo,
             _ => {
                 return Err(Error::DebugInfo(format!(
                     "m_PkgPnp {:#x} is neither an FDO nor a PDO package (m_Type {:#x})",
@@ -2217,7 +2254,7 @@ impl Target {
                 )),
             )
         };
-        let (default_child_list, static_child_list) = if matches!(kind, "FDO" | "filter") {
+        let (default_child_list, static_child_list) = if kind.is_fdo() {
             let fdo = wdf.at(&wdf.layout("FxPkgFdo")?, pkg_pnp);
             let list = |field: &str| -> Result<Option<u64>> {
                 let list = fdo.read_pointer(field)?;
@@ -2289,10 +2326,10 @@ impl Target {
     fn wdf_fdo_targets(
         &self,
         wdf: &WdfTypes<'_>,
-        kind: &str,
+        kind: WdfDeviceKind,
         pkg_pnp: VirtAddr,
     ) -> Result<(VirtAddr, VirtAddr)> {
-        if !matches!(kind, "FDO" | "filter") {
+        if !kind.is_fdo() {
             return Ok((VirtAddr(0), VirtAddr(0)));
         }
         let fdo = wdf.at(&wdf.layout("FxPkgFdo")?, pkg_pnp);
@@ -2812,16 +2849,17 @@ impl Target {
         let kind = io_target_kind(&object.type_name, in_stack);
         let remote_layout = wdf.layout("FxIoTargetRemote")?;
         // Only an object as large as an FxIoTargetRemote has its fields.
-        let open_state =
-            if kind == "remote" && usize::from(object.header.object_size) >= remote_layout.size {
-                let remote = wdf.at(&remote_layout, address);
-                Some(enum_value(
-                    &self.wdf_enum("FxIoTargetRemoteOpenState"),
-                    remote.read_uint("m_OpenState")?,
-                ))
-            } else {
-                None
-            };
+        let open_state = if kind == WdfIoTargetKind::Remote
+            && usize::from(object.header.object_size) >= remote_layout.size
+        {
+            let remote = wdf.at(&remote_layout, address);
+            Some(enum_value(
+                &self.wdf_enum("FxIoTargetRemoteOpenState"),
+                remote.read_uint("m_OpenState")?,
+            ))
+        } else {
+            None
+        };
         let device = object.header.device;
         let default_target = self.wdf_default_target(&wdf, device);
         let target_device = target.read_pointer("m_TargetDevice")?;
@@ -3491,14 +3529,23 @@ mod tests {
 
     #[test]
     fn remote_targets_share_the_local_type_and_differ_in_m_in_stack() {
-        assert_eq!(io_target_kind("FX_TYPE_IO_TARGET", true), "local");
-        assert_eq!(io_target_kind("FX_TYPE_IO_TARGET", false), "remote");
+        assert_eq!(
+            io_target_kind("FX_TYPE_IO_TARGET", true),
+            WdfIoTargetKind::Local
+        );
+        assert_eq!(
+            io_target_kind("FX_TYPE_IO_TARGET", false),
+            WdfIoTargetKind::Remote
+        );
         // The derived classes' types win over m_InStack.
         assert_eq!(
             io_target_kind("FX_TYPE_IO_TARGET_USB_PIPE", true),
-            "USB pipe"
+            WdfIoTargetKind::UsbPipe
         );
-        assert_eq!(io_target_kind("FX_TYPE_IO_TARGET_SELF", false), "self");
+        assert_eq!(
+            io_target_kind("FX_TYPE_IO_TARGET_SELF", false),
+            WdfIoTargetKind::SelfTarget
+        );
     }
 
     #[test]

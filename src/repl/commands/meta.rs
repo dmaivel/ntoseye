@@ -9,8 +9,8 @@ use crate::output;
 #[cfg(feature = "python")]
 use crate::python::embed;
 use crate::target::meta::{
-    ErrorCode, TargetTime, TargetUserDump, TargetVersion, UserDumpTime, decode_error_code,
-    decode_error_code_as_ntstatus,
+    ErrorCode, ErrorCodeKind, TargetTime, TargetUserDump, TargetVersion, UserDumpTime,
+    decode_error_code, decode_error_code_as_ntstatus,
 };
 use crate::target::{Target, TargetKind};
 use crate::triage_report::time::filetime_to_iso;
@@ -982,25 +982,25 @@ fn format_printf(
 }
 
 fn print_error_code(detail: &ErrorCode) {
-    match detail.kind.as_str() {
-        "NTSTATUS" => {
+    match detail.kind {
+        ErrorCodeKind::Ntstatus => {
             outln!("NTSTATUS {:#010x}: {}", detail.code, detail.name);
             outln!("  {}", detail.description);
         }
-        "HRESULT" => {
+        ErrorCodeKind::Hresult => {
             outln!("HRESULT {:#010x}: {}", detail.code, detail.name);
             outln!("  {}", detail.description);
             if let Some(win32) = detail.win32_code {
                 outln!("  Win32 code: {win32} ({win32:#x})");
             }
         }
-        "Win32" => outln!(
+        ErrorCodeKind::Win32 => outln!(
             "Win32 error {} ({:#x}): {}",
             detail.code,
             detail.code,
             detail.name
         ),
-        _ => outln!(
+        ErrorCodeKind::Unknown => outln!(
             "Unknown error code {} ({:#x}): {}",
             detail.code,
             detail.code,

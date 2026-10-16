@@ -605,7 +605,7 @@ fn print_pool_block_row(block: &PoolBlockDetail, problem: Option<VirtAddr>) {
         ui::addr(block.header.0),
         block.size,
         block.previous_size,
-        block.state,
+        block.state.to_string(),
         block.pool_type,
         block.tag_name
     );
@@ -795,7 +795,7 @@ fn print_vm(detail: &VmDetail) {
                 "    {:<32}: {} {}",
                 field.name,
                 diagnostic_metric_cell(&field.value),
-                field.unit
+                field.unit.map_or_else(String::new, |unit| unit.to_string())
             );
         }
     }
@@ -831,11 +831,9 @@ fn print_vm(detail: &VmDetail) {
                 "  {:<24}: {}{}",
                 counter.name,
                 diagnostic_metric_cell(&counter.value),
-                if counter.unit.is_empty() {
-                    "".to_string()
-                } else {
-                    format!(" {}", counter.unit)
-                }
+                counter
+                    .unit
+                    .map_or_else(String::new, |unit| format!(" {unit}"))
             );
         }
     }
@@ -907,7 +905,7 @@ fn print_pfn(detail: &PfnDetail) {
 }
 
 fn print_pte_entry(level: &PteLevel) {
-    let name = level.level.as_str();
+    let name = level.level;
     let (address, raw, attributes) = (level.address.0, level.value, &level.attributes);
     if attributes.present {
         outln!(
@@ -1059,7 +1057,8 @@ fn print_pool_find(detail: &PoolFindDetail) {
                 m.size,
                 m.state,
                 if m.allocated { "allocated" } else { "free" },
-                m.pool_type.map_or("unknown", |kind| kind.as_str())
+                m.pool_type
+                    .map_or_else(|| "unknown".to_string(), |kind| kind.to_string())
             );
         }
         if let Some(stopped_at) = range.stopped_at {
@@ -1078,7 +1077,8 @@ fn print_pool_find(detail: &PoolFindDetail) {
             m.tag_name,
             m.size,
             m.state,
-            m.pool_type.map_or("unknown", |kind| kind.as_str()),
+            m.pool_type
+                .map_or_else(|| "unknown".to_string(), |kind| kind.to_string()),
             m.table_entry.map_or_else(
                 || "".to_string(),
                 |entry| format!(
@@ -1160,7 +1160,7 @@ fn pte_level_cell(level: &PteLevel, invalid_pte_mask: u64) -> String {
     };
     format!(
         "{} at {:X}\ncontains {:016X}\n{decoded}",
-        level.level.as_str(),
+        level.level,
         level.address,
         ui::Value(value.0),
     )

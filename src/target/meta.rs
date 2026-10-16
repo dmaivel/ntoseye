@@ -1219,19 +1219,43 @@ impl Target {
     }
 }
 
+/// The family of a decoded error code: `ntstatus`, `hresult`, `win32`, or
+/// `unknown` (a code wider than 32 bits).
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCodeKind {
+    #[record(label = "NTSTATUS")]
+    Ntstatus,
+    #[record(label = "HRESULT")]
+    Hresult,
+    #[record(label = "Win32")]
+    Win32,
+    Unknown,
+}
+
+/// The severity of an NTSTATUS or HRESULT code: `success`,
+/// `informational`, `warning`, or `error`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorSeverity {
+    Success,
+    Informational,
+    Warning,
+    Error,
+}
+
 /// A decoded NTSTATUS, Win32, or HRESULT code (`!error`).
 #[record]
 pub struct ErrorCode {
     #[record(hex)]
     pub code: u64,
-    /// `NTSTATUS`, `HRESULT`, `Win32`, or `unknown`.
-    pub kind: String,
+    pub kind: ErrorCodeKind,
     /// The symbolic name of the code.
     pub name: String,
     pub description: String,
     /// `success`, `informational`, `warning`, or `error`. `None` for a
     /// Win32 code.
-    pub severity: Option<String>,
+    pub severity: Option<ErrorSeverity>,
     /// The facility that the code encodes.
     pub facility: Option<u32>,
     /// Whether the code is customer-defined (its C bit).
@@ -1248,7 +1272,7 @@ fn decode_error_code_inner(code: u64, force_ntstatus: bool) -> ErrorCode {
     let Some(raw) = u32::try_from(code).ok() else {
         return ErrorCode {
             code,
-            kind: "unknown".to_string(),
+            kind: ErrorCodeKind::Unknown,
             name: "UNKNOWN".to_string(),
             description: "error code exceeds 32 bits".to_string(),
             severity: None,
@@ -1262,22 +1286,22 @@ fn decode_error_code_inner(code: u64, force_ntstatus: bool) -> ErrorCode {
     let is_ntstatus = force_ntstatus || raw >= 0xc000_0000;
     if is_ntstatus {
         let severity = match raw >> 30 {
-            0 => "success",
-            1 => "informational",
-            2 => "warning",
-            _ => "error",
+            0 => ErrorSeverity::Success,
+            1 => ErrorSeverity::Informational,
+            2 => ErrorSeverity::Warning,
+            _ => ErrorSeverity::Error,
         };
         let facility = (raw >> 16) & 0x0fff;
         let customer = raw & 0x2000_0000 != 0;
         return ErrorCode {
             code,
-            kind: "NTSTATUS".to_string(),
+            kind: ErrorCodeKind::Ntstatus,
             name: ntstatus_name(raw).unwrap_or("STATUS_UNKNOWN").to_string(),
             description: format!(
                 "severity: {severity}; facility: {facility:#x}; customer: {}",
                 if customer { "yes" } else { "no" }
             ),
-            severity: Some(severity.to_string()),
+            severity: Some(severity),
             facility: Some(facility),
             customer: Some(customer),
             win32_code: None,
@@ -1292,7 +1316,7 @@ fn decode_error_code_inner(code: u64, force_ntstatus: bool) -> ErrorCode {
         let customer = raw & 0x2000_0000 != 0;
         return ErrorCode {
             code,
-            kind: "HRESULT".to_string(),
+            kind: ErrorCodeKind::Hresult,
             name: win32_name
                 .as_deref()
                 .unwrap_or("HRESULT_UNKNOWN")
@@ -1301,7 +1325,7 @@ fn decode_error_code_inner(code: u64, force_ntstatus: bool) -> ErrorCode {
                 "severity: error; facility: {facility:#x}; customer: {}",
                 if customer { "yes" } else { "no" }
             ),
-            severity: Some("error".to_string()),
+            severity: Some(ErrorSeverity::Error),
             facility: Some(facility),
             customer: Some(customer),
             win32_code,
@@ -1311,7 +1335,7 @@ fn decode_error_code_inner(code: u64, force_ntstatus: bool) -> ErrorCode {
 
     ErrorCode {
         code,
-        kind: "Win32".to_string(),
+        kind: ErrorCodeKind::Win32,
         name: win32_error_name(raw).unwrap_or("ERROR_UNKNOWN").to_string(),
         description: format!("Win32 error {raw} ({raw:#x})"),
         severity: None,
@@ -1365,20 +1389,20 @@ mod tests {
     #[test]
     fn error_code_decoding_keeps_win32_hresult_and_ntstatus_metadata() {
         let win32 = decode_error_code(5);
-        assert_eq!(win32.kind, "Win32");
+        assert_eq!(win32.kind, ErrorCodeKind::Win32);
         assert_eq!(win32.name, "ERROR_ACCESS_DENIED");
         assert_eq!(win32.win32_code, Some(5));
 
         let hresult = decode_error_code(0x8007_0005);
-        assert_eq!(hresult.kind, "HRESULT");
+        assert_eq!(hresult.kind, ErrorCodeKind::Hresult);
         assert_eq!(hresult.name, "ERROR_ACCESS_DENIED");
         assert_eq!(hresult.facility, Some(7));
         assert_eq!(hresult.win32_code, Some(5));
 
         let ntstatus = decode_error_code(0xc000_0005);
-        assert_eq!(ntstatus.kind, "NTSTATUS");
+        assert_eq!(ntstatus.kind, ErrorCodeKind::Ntstatus);
         assert_eq!(ntstatus.name, "STATUS_ACCESS_VIOLATION");
-        assert_eq!(ntstatus.severity.as_deref(), Some("error"));
+        assert_eq!(ntstatus.severity, Some(ErrorSeverity::Error));
     }
 
     #[test]

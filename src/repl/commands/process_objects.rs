@@ -503,8 +503,8 @@ fn owner_label(owner: VirtAddr, name: &Option<String>) -> String {
     format!("{} ({})", ui::addr(owner.0), name.as_deref().unwrap_or("?"))
 }
 
-fn kind_name(kind: Option<AlpcPortKind>) -> &'static str {
-    kind.map_or("unknown", |kind| kind.as_str())
+fn kind_name(kind: Option<AlpcPortKind>) -> String {
+    kind.map_or_else(|| "unknown".to_string(), |kind| kind.to_string())
 }
 
 fn print_alpc_connection(connection: &AlpcConnection) {

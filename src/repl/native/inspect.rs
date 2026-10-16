@@ -302,7 +302,7 @@ fn pool_row(block: &PoolBlockDetail) -> TableRow {
         .cell(
             "state",
             strong(
-                block.state.clone(),
+                block.state.to_string(),
                 if block.allocated { "success" } else { MUTED },
             ),
         )

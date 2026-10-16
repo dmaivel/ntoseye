@@ -36,8 +36,8 @@ const MAX_MI_FIELDS: usize = 64;
 pub struct VmCounter {
     pub name: String,
     pub value: DiagnosticMetric<u64>,
-    /// The unit of `value`: `pages`, `bytes`, or empty for a plain count.
-    pub unit: &'static str,
+    /// The unit of `value`, or `None` for a plain count.
+    pub unit: Option<VmUnit>,
 }
 
 /// Pool counters and the pool fields of `MiState` (`!vm`).
@@ -266,14 +266,70 @@ pub struct PtovDetail {
     pub interrupted: bool,
 }
 
-/// A pool: `NonPagedPool` or `PagedPool`.
+/// A pool: `nonpaged` (`NonPagedPool`) or `paged` (`PagedPool`).
 #[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolType {
-    #[record(rename = "NonPagedPool")]
+    #[record(rename = "nonpaged", label = "NonPagedPool")]
     NonPaged,
-    #[record(rename = "PagedPool")]
+    #[record(label = "PagedPool")]
     Paged,
+}
+
+/// The state of a pool block: `allocated`, `free`, or `allocated_unverified`
+/// (allocated, but its tag is not printable).
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolBlockState {
+    #[record(label = "Allocated")]
+    Allocated,
+    #[record(label = "Free")]
+    Free,
+    #[record(label = "Allocated?")]
+    AllocatedUnverified,
+}
+
+/// How a pool page lays its blocks out, which decides what a consistent page
+/// looks like: `chained` or `segment_heap`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolPageLayout {
+    /// The classic pool: headers chain from the page start to its end, each
+    /// `PreviousSize` the `BlockSize` before it, `PoolType` the POOL_TYPE + 1.
+    Chained,
+    /// Segment heap (Windows 10 1903 and later): `PreviousSize` is unused,
+    /// variable-size blocks sit behind a 16-byte chunk header, and free
+    /// chunks have no `_POOL_HEADER`.
+    #[record(label = "segment heap")]
+    SegmentHeap,
+}
+
+/// The unit of a [`VmCounter`] value: `pages` or `bytes`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmUnit {
+    Pages,
+    Bytes,
+}
+
+/// What an address belongs to (`address`): `kernel_module`, `user_image`,
+/// `kernel_region`, `private`, `mapped`, or `unknown`; a memory-search match
+/// may also be `physical`, `vtl1`, or `foreign` (a root outside NT and VTL1).
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressKind {
+    #[record(label = "kernel-module")]
+    KernelModule,
+    #[record(label = "user-image")]
+    UserImage,
+    #[record(label = "kernel-region")]
+    KernelRegion,
+    Private,
+    Mapped,
+    Unknown,
+    Physical,
+    Vtl1,
+    Foreign,
 }
 
 /// A `_POOL_HEADER` block in a pool page.
@@ -297,8 +353,7 @@ pub struct PoolBlockDetail {
     pub allocated: bool,
     /// Whether the block holds the requested address.
     pub marked: bool,
-    /// `allocated`, `free`, or a description of what is wrong.
-    pub state: String,
+    pub state: PoolBlockState,
     /// The offset of the requested address in the block, if the block holds it.
     #[record(hex)]
     pub target_offset: Option<u64>,
@@ -370,8 +425,7 @@ pub struct PoolValidationDetail {
     pub page: VirtAddr,
     /// The pool range holding the page, when known.
     pub region: Option<PoolRegionDetail>,
-    /// `chained` (the classic pool) or `segment heap`.
-    pub layout: String,
+    pub layout: PoolPageLayout,
     pub blocks: Vec<PoolBlockDetail>,
     /// The first inconsistency found.
     pub problem: Option<PoolProblem>,
@@ -422,14 +476,15 @@ pub struct PoolUsageDetail {
     pub tag_filter: Option<String>,
 }
 
-/// The order of `!poolused`'s rows: `tag`, `nonpaged_bytes`, or
-/// `paged_bytes` (largest first).
+/// The order of `!poolused`'s rows: `tag`, or `nonpaged`/`paged` bytes
+/// (largest first).
 #[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolUsageSort {
     Tag,
-    #[record(rename = "nonpaged_bytes")]
+    #[record(rename = "nonpaged")]
     NonPagedBytes,
+    #[record(rename = "paged")]
     PagedBytes,
 }
 
@@ -448,7 +503,7 @@ pub struct PoolFindMatch {
     /// The tag as its four characters.
     pub tag_name: String,
     pub allocated: bool,
-    pub state: String,
+    pub state: PoolBlockState,
     /// The pool, when known.
     pub pool_type: Option<PoolType>,
     /// The `PoolBigPageTable` entry, for a big-pool match.
@@ -964,9 +1019,7 @@ pub struct AddressDescription {
     /// The address space of the lookup.
     #[record(hex)]
     pub dtb: Dtb,
-    /// `kernel-module`, `user-image`, `kernel-region`, `private`,
-    /// `mapped`, or `unknown`.
-    pub kind: &'static str,
+    pub kind: AddressKind,
     /// The module containing the address, if any.
     pub module: Option<AddressModule>,
     /// The module section containing the address, if any.

@@ -4,8 +4,9 @@
 use std::ops::ControlFlow;
 
 use super::{
-    BigPoolDetail, PoolBlockDetail, PoolFindDetail, PoolFindMatch, PoolFindRange, PoolPageDetail,
-    PoolProblem, PoolRegionDetail, PoolType, PoolUsageDetail, PoolUsageSort, PoolValidationDetail,
+    BigPoolDetail, PoolBlockDetail, PoolBlockState, PoolFindDetail, PoolFindMatch, PoolFindRange,
+    PoolPageDetail, PoolPageLayout, PoolProblem, PoolRegionDetail, PoolType, PoolUsageDetail,
+    PoolUsageSort, PoolValidationDetail,
 };
 use crate::error::{Error, Result};
 use crate::memory::{MemoryOps, PAGE_SIZE};
@@ -137,7 +138,7 @@ impl Target {
             address,
             page,
             region,
-            layout: page_layout.name().to_string(),
+            layout: page_layout,
             blocks: blocks
                 .iter()
                 .map(|block| {
@@ -237,8 +238,8 @@ impl Target {
                             size: block.size,
                             tag: block.tag,
                             tag_name: tag_string(block.tag),
-                            allocated: pool_block_state(&block) != "Free",
-                            state: pool_block_state(&block).to_string(),
+                            allocated: pool_block_state(&block) != PoolBlockState::Free,
+                            state: pool_block_state(&block),
                             pool_type: Some(kind),
                             table_entry: None,
                             index: None,
@@ -283,7 +284,7 @@ impl Target {
                                 tag: entry.tag,
                                 tag_name: tag_string(entry.tag),
                                 allocated: true,
-                                state: "Allocated".to_string(),
+                                state: PoolBlockState::Allocated,
                                 pool_type: Some(if entry.nonpaged {
                                     PoolType::NonPaged
                                 } else {
@@ -321,7 +322,7 @@ impl Target {
                                     tag: entry.tag,
                                     tag_name: tag_string(entry.tag),
                                     allocated: true,
-                                    state: "Allocated".to_string(),
+                                    state: PoolBlockState::Allocated,
                                     pool_type: Some(if entry.nonpaged {
                                         PoolType::NonPaged
                                     } else {
@@ -351,28 +352,6 @@ impl Target {
             truncated,
             interrupted,
         })
-    }
-}
-
-/// How a pool page lays its blocks out, which decides what a consistent page
-/// looks like.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PoolPageLayout {
-    /// The classic pool: headers chain from the page start to its end, each
-    /// `PreviousSize` the `BlockSize` before it, `PoolType` the POOL_TYPE + 1.
-    Chained,
-    /// Segment heap (Windows 10 1903 and later): `PreviousSize` is unused,
-    /// variable-size blocks sit behind a 16-byte chunk header, and free
-    /// chunks have no `_POOL_HEADER`.
-    SegmentHeap,
-}
-
-impl PoolPageLayout {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Chained => "chained",
-            Self::SegmentHeap => "segment heap",
-        }
     }
 }
 
@@ -506,7 +485,7 @@ fn segment_heap_header(header: &PoolHeader) -> bool {
 }
 
 fn pool_block_detail(block: &PoolHeader, marked: bool, target: VirtAddr) -> PoolBlockDetail {
-    let state = pool_block_state(block).to_string();
+    let state = pool_block_state(block);
     PoolBlockDetail {
         header: block.header,
         body: block.body,
@@ -515,7 +494,7 @@ fn pool_block_detail(block: &PoolHeader, marked: bool, target: VirtAddr) -> Pool
         pool_type: block.pool_type,
         tag: block.tag,
         tag_name: tag_string(block.tag),
-        allocated: state != "Free",
+        allocated: state != PoolBlockState::Free,
         marked,
         state,
         target_offset: marked.then(|| target.0.saturating_sub(block.body.0)),

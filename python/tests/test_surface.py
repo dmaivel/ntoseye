@@ -34,7 +34,7 @@ def test_attach_rejects_bad_arguments_before_connecting(kwargs: dict[str, str]) 
 def test_decode_error_needs_no_target() -> None:
     record = ntoseye.decode_error(0xC0000005)
     assert record.name == "STATUS_ACCESS_VIOLATION"
-    assert record.kind == "NTSTATUS"
+    assert record.kind == "ntstatus"
 
 
 def test_repl_commands_raise_outside_the_repl() -> None:

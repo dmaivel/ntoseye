@@ -622,7 +622,7 @@ fn print_self_patch_counts(counts: &ImageSelfPatchCounts) {
     for kind in SelfPatchKind::ALL {
         let count = counts.get(kind);
         if count != 0 {
-            outln!("    {count} bytes: {}", kind.as_str());
+            outln!("    {count} bytes: {kind}");
         }
     }
 }
@@ -693,7 +693,7 @@ fn print_self_patch_ranges(ranges: &[ImageSelfPatchRange], overflow: bool) {
             range.start,
             range.end,
             range.end.saturating_sub(range.start),
-            range.kind.as_str(),
+            range.kind,
             function
         );
     }
@@ -712,7 +712,7 @@ fn print_byte_diffs(diffs: &[ImageByteDiff], truncated: bool, no_spec: bool) {
                 diff.rva,
                 diff.expected,
                 diff.actual,
-                kind.as_str()
+                kind
             );
         } else {
             outln!(

@@ -265,6 +265,7 @@ impl PowerIrp {
 pub struct PowerIrpEntry {
     /// The `_POP_IRP_DATA`.
     pub data: VirtAddr,
+    #[record(rename = "power_irp")]
     pub irp: DiagnosticValue<PowerIrp>,
 }
 
@@ -367,6 +368,7 @@ impl PowerAction {
 /// threads.
 #[record]
 pub struct PowerActionDetail {
+    #[record(rename = "record")]
     pub action: PowerAction,
     /// The power IRPs on `nt!PopIrpList`.
     pub irps: DiagnosticValue<PowerIrpList>,
@@ -505,6 +507,7 @@ pub struct BlockedIrp {
     /// The driver of the IRP's current stack location.
     pub holder: DiagnosticValue<IrpHolder>,
     /// The IRP's entry on the power IRP list, when it is there.
+    #[record(rename = "power_irp")]
     pub data: Option<PowerIrp>,
 }
 

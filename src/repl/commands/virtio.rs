@@ -209,85 +209,13 @@ pub struct RawRing {
     used: VirtAddr,
 }
 
-/// The SDK's `kind`: what a ring's buffers hold, by the name `!vring /t`
-/// takes.
+/// The SDK's `kind`: what a ring's buffers hold, as a
+/// [`VirtioRequestKind`] (`!vring /t` spells it with hyphens).
 #[cfg(feature = "python")]
-mod request_kind_arg {
-    use pyo3::exceptions::PyValueError;
-    #[cfg(feature = "python-stubs")]
-    use pyo3::inspect::{PyStaticConstant, PyStaticExpr};
-    use pyo3::prelude::*;
-    #[cfg(feature = "python-stubs")]
-    use pyo3::{type_hint_identifier, type_hint_subscript};
-
-    use crate::python::command::PyArg;
-    use crate::target::virtio_request::{RequestKind, request_kind_named};
-
-    /// The names `kind` takes, as `typing.Literal[...]` in the stubs.
-    const NAMES: [&str; 8] = [
-        "blk",
-        "scsi",
-        "scsi-control",
-        "scsi-event",
-        "net",
-        "net-control",
-        "gpu",
-        "vsock",
-    ];
-
-    pub struct RequestKindArg(RequestKind);
-
-    impl<'a, 'py> FromPyObject<'a, 'py> for RequestKindArg {
-        type Error = PyErr;
-
-        #[cfg(feature = "python-stubs")]
-        const INPUT_TYPE: PyStaticExpr = type_hint_subscript!(
-            type_hint_identifier!("typing", "Literal"),
-            PyStaticExpr::Constant {
-                value: PyStaticConstant::Str(NAMES[0])
-            },
-            PyStaticExpr::Constant {
-                value: PyStaticConstant::Str(NAMES[1])
-            },
-            PyStaticExpr::Constant {
-                value: PyStaticConstant::Str(NAMES[2])
-            },
-            PyStaticExpr::Constant {
-                value: PyStaticConstant::Str(NAMES[3])
-            },
-            PyStaticExpr::Constant {
-                value: PyStaticConstant::Str(NAMES[4])
-            },
-            PyStaticExpr::Constant {
-                value: PyStaticConstant::Str(NAMES[5])
-            },
-            PyStaticExpr::Constant {
-                value: PyStaticConstant::Str(NAMES[6])
-            },
-            PyStaticExpr::Constant {
-                value: PyStaticConstant::Str(NAMES[7])
-            }
-        );
-
-        fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
-            let text: std::borrow::Cow<'_, str> = obj.extract()?;
-            request_kind_named(&text)
-                .filter(|_| NAMES.contains(&&*text))
-                .map(Self)
-                .ok_or_else(|| {
-                    PyValueError::new_err(format!(
-                        "expected one of '{}', got {text:?}",
-                        NAMES.join("', '")
-                    ))
-                })
-        }
-    }
-
-    impl PyArg for RequestKind {
-        type Py = RequestKindArg;
-        fn from_py(value: RequestKindArg) -> Self {
-            value.0
-        }
+impl crate::python::command::PyArg for RequestKind {
+    type Py = crate::target::virtio_request::VirtioRequestKind;
+    fn from_py(value: Self::Py) -> Self {
+        value.into()
     }
 }
 

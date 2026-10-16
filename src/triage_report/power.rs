@@ -61,6 +61,7 @@ impl PowerFailureThread {
 #[record]
 #[derive(Debug, Clone)]
 pub struct PowerFailureFinding {
+    #[record(rename = "record")]
     pub failure: PowerFailure,
     pub threads: Vec<PowerFailureThread>,
 }

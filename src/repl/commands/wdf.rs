@@ -565,7 +565,9 @@ fn print_driver_info(info: &WdfDriverInfo) {
             None => builder.push_record([
                 ui::addr(device.device_object.0),
                 handle_text(device.handle),
-                device.kind.unwrap_or("?").to_string(),
+                device
+                    .kind
+                    .map_or_else(|| "?".to_string(), |kind| kind.to_string()),
                 device.pnp_state.as_ref().map(enum_text).unwrap_or_default(),
             ]),
             Some(why) => builder.push_record([

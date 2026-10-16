@@ -724,6 +724,17 @@ pub enum ModuleSymbolStatus {
 }
 
 impl ModuleSymbolStatus {
+    /// The status without the failure reason.
+    pub fn kind(&self) -> SymbolStatus {
+        match self {
+            Self::Loaded => SymbolStatus::Loaded,
+            Self::MissingDebugInfo => SymbolStatus::NoPdb,
+            Self::Skipped => SymbolStatus::Skipped,
+            Self::Failed(_) => SymbolStatus::Failed,
+            Self::Fetching => SymbolStatus::Fetching,
+        }
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             Self::Loaded => "loaded",
@@ -733,6 +744,20 @@ impl ModuleSymbolStatus {
             Self::Fetching => "fetching",
         }
     }
+}
+
+/// The symbol state of a module: `loaded`, `no_pdb`, `skipped`, `failed`,
+/// `fetching` or `unknown`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolStatus {
+    Loaded,
+    #[record(label = "no-pdb")]
+    NoPdb,
+    Skipped,
+    Failed,
+    Fetching,
+    Unknown,
 }
 
 #[derive(Debug, Clone)]
@@ -769,15 +794,14 @@ pub struct ModuleSymbols {
 
 #[record]
 impl ModuleSymbols {
-    /// `loaded`, `no-pdb`, `skipped`, `failed`, `fetching` or `unknown`.
+    /// The symbol state of the module.
     #[record(getter, rename = "status")]
-    pub fn status_name(&self) -> String {
+    pub fn status_kind(&self) -> SymbolStatus {
         match (&self.status, &self.pdb) {
-            (Some(status), _) => status.label(),
-            (None, Some(_)) => "loaded",
-            (None, None) => "unknown",
+            (Some(status), _) => status.kind(),
+            (None, Some(_)) => SymbolStatus::Loaded,
+            (None, None) => SymbolStatus::Unknown,
         }
-        .to_string()
     }
 
     /// The source of the PDB, if known.
@@ -814,6 +838,7 @@ impl ModuleSymbols {
 /// `Module.inspect()`).
 #[record]
 pub struct ModuleListing {
+    #[record(rename = "info")]
     pub module: ModuleInfo,
     pub symbols: ModuleSymbols,
 }

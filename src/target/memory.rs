@@ -1,7 +1,7 @@
 //! Reading guest memory in the target's scopes: address spaces and typed
 //! views over them, byte-pattern search, fields, and counted and C strings.
 
-use super::mm::{AddressModule, MemoryRegionInfo, PfnSelector};
+use super::mm::{AddressKind, AddressModule, MemoryRegionInfo, PfnSelector};
 use super::{CODE_BITNESS_AMD64, CODE_BITNESS_X86, StringDescriptor, Target};
 use ntoseye_macros::record;
 use std::sync::atomic::Ordering;
@@ -27,7 +27,7 @@ pub const MAX_SEARCH_BYTES: usize = 1 << 30;
 #[derive(Debug, Clone, Copy)]
 pub enum SearchSpace {
     Physical,
-    Virtual(Option<&'static str>),
+    Virtual(Option<AddressKind>),
 }
 /// The most matches one search records. A pattern common in the range (a
 /// zero byte) would otherwise fill memory with them.
@@ -182,10 +182,8 @@ pub struct MemorySearchMatch {
     pub offset: u64,
     /// The nearest symbol, if one resolves.
     pub symbol: Option<String>,
-    /// The kind of address: `kernel-module`, `user-image`,
-    /// `kernel-region`, `private`, `mapped`, `unknown`, `physical`,
-    /// `vtl1`, or `foreign` (a root outside NT and VTL1).
-    pub kind: &'static str,
+    /// The kind of address.
+    pub kind: AddressKind,
     /// The module containing the match, if any.
     pub module: Option<AddressModule>,
     /// The module section containing the match, if any.
@@ -203,7 +201,7 @@ impl MemorySearchMatch {
         address: u64,
         offset: u64,
         symbol: Option<String>,
-        kind: &'static str,
+        kind: AddressKind,
     ) -> Self {
         Self {
             address: VirtAddr(address),

@@ -109,12 +109,27 @@ impl ExceptionPolicy {
     /// An explicit final action: `break`, or continue as `handled` or
     /// `not_handled`. None for the default action of the mode.
     #[record(getter)]
-    pub fn disposition(&self) -> Option<&'static str> {
+    pub fn disposition(&self) -> Option<FinalDisposition> {
         self.final_action.map(|action| match action {
-            ExceptionPolicyFinalAction::Continue(disposition) => disposition.as_str(),
-            ExceptionPolicyFinalAction::Break => "break",
+            ExceptionPolicyFinalAction::Continue(ContinueDisposition::Handled) => {
+                FinalDisposition::Handled
+            }
+            ExceptionPolicyFinalAction::Continue(ContinueDisposition::NotHandled) => {
+                FinalDisposition::NotHandled
+            }
+            ExceptionPolicyFinalAction::Break => FinalDisposition::Break,
         })
     }
+}
+
+/// An exception policy's explicit final action: `break`, `handled` or
+/// `not_handled`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalDisposition {
+    Break,
+    Handled,
+    NotHandled,
 }
 
 /// One module load or unload filter (`sx* ld[:<module>]` or

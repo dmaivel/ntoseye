@@ -4,7 +4,9 @@
 
 use std::collections::HashSet;
 
-use super::{AddressDescription, AddressModule, MemoryRegionInfo, VadProtection, VadType};
+use super::{
+    AddressDescription, AddressKind, AddressModule, MemoryRegionInfo, VadProtection, VadType,
+};
 use crate::error::Result;
 use crate::guest::vad::{MissingOffset, VadTreeOffsets, vad_tree_link};
 use crate::guest::{ModuleInfo, ProcessInfo};
@@ -44,9 +46,9 @@ impl Target {
                 address,
                 dtb,
                 kind: if is_kernel {
-                    "kernel-module"
+                    AddressKind::KernelModule
                 } else {
-                    "user-image"
+                    AddressKind::UserImage
                 },
                 module: Some(AddressModule {
                     name: m.name,
@@ -66,7 +68,7 @@ impl Target {
             return Ok(AddressDescription {
                 address,
                 dtb,
-                kind: "kernel-region",
+                kind: AddressKind::KernelRegion,
                 module: None,
                 section: None,
                 va_type: Some(va_type),
@@ -82,8 +84,8 @@ impl Target {
                 .find(|r| address.0 >= r.start.0 && address.0 < r.end.0)
         {
             let kind = match r.private_memory {
-                Some(true) => "private",
-                _ => "mapped",
+                Some(true) => AddressKind::Private,
+                _ => AddressKind::Mapped,
             };
             return Ok(AddressDescription {
                 address,
@@ -99,7 +101,7 @@ impl Target {
         Ok(AddressDescription {
             address,
             dtb,
-            kind: "unknown",
+            kind: AddressKind::Unknown,
             module: None,
             section: None,
             va_type: None,

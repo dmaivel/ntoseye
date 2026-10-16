@@ -243,7 +243,9 @@ impl Flags {
 enum Matcher {
     /// `fn(&Item, &str) -> bool`: `find(name)`, every item it holds for.
     Find,
-    /// `fn(&Item, u64) -> bool`: `at(address)`, the first item it holds for.
+    /// `fn(&Item, u64) -> bool`: `at(address)`, the first item it holds for;
+    /// the address is an `AddressArg` (an `int`, an expression or a handle),
+    /// resolved through the collection's `owner`.
     At,
 }
 
@@ -308,8 +310,11 @@ impl Matcher {
                 fn at(
                     &self,
                     py: pyo3::Python<'_>,
-                    #param: #ty,
+                    #param: crate::python::args::AddressArg,
                 ) -> pyo3::PyResult<::std::option::Option<#element>> {
+                    let #param: #ty = #param
+                        .resolve(py, &self.owner, &crate::python::context::Context::default())?
+                        .0;
                     ::std::result::Result::Ok(
                         Self::enumerate(self, py)?
                             .into_iter()

@@ -301,14 +301,14 @@ impl CallTrace {
     /// thread is not known. Any value other than `returned` means that
     /// the tree is partial.
     #[record(getter, rename = "end")]
-    pub fn end_name(&self) -> &'static str {
+    pub fn end_kind(&self) -> CallTraceEndKind {
         match self.end {
-            CallTraceEnd::Returned => "returned",
-            CallTraceEnd::Limit => "limit",
-            CallTraceEnd::Interrupted => "interrupted",
-            CallTraceEnd::Breakpoint => "breakpoint",
-            CallTraceEnd::Diverted => "diverted",
-            CallTraceEnd::Failed(_) => "failed",
+            CallTraceEnd::Returned => CallTraceEndKind::Returned,
+            CallTraceEnd::Limit => CallTraceEndKind::Limit,
+            CallTraceEnd::Interrupted => CallTraceEndKind::Interrupted,
+            CallTraceEnd::Breakpoint => CallTraceEndKind::Breakpoint,
+            CallTraceEnd::Diverted => CallTraceEndKind::Diverted,
+            CallTraceEnd::Failed(_) => CallTraceEndKind::Failed,
         }
     }
 
@@ -320,6 +320,19 @@ impl CallTrace {
             _ => None,
         }
     }
+}
+
+/// Why a call trace stopped, without the failure's description: a
+/// [`CallTraceEnd`]'s kind.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallTraceEndKind {
+    Returned,
+    Limit,
+    Interrupted,
+    Breakpoint,
+    Diverted,
+    Failed,
 }
 
 /// Why [`Session::trace_calls`] stopped tracing. Anything but `Returned`

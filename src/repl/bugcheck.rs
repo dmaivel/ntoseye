@@ -164,7 +164,7 @@ pub fn print_ktrap_frame(frame: &KtrapFrame, rip_symbol: Option<&str>) {
     let kind = frame
         .amd64()
         .and_then(|frame| frame.kind)
-        .map(|kind| format!(" {}", ui::muted(&format!("({})", kind.as_str()))))
+        .map(|kind| format!(" {}", ui::muted(&format!("({})", kind))))
         .unwrap_or_default();
     outln!(
         "{} @ {}{kind}",

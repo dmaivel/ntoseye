@@ -3,6 +3,7 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
+use super::args::AddressArg;
 use super::command::{CommandHost, HostSession, admit};
 use super::context::Context;
 use super::handle::Owner;
@@ -14,7 +15,6 @@ use crate::session::Session;
 use crate::session::effects::Effects;
 use crate::target::etw::parse_guid;
 use crate::trapframe::{KtrapFrame, read_ktrap_frame};
-use crate::types::VirtAddr;
 
 /// System-wide reports and helpers that decode an object at an address
 /// (`dbg.inspect`). The results are typed `Record`s. On a user-mode
@@ -68,19 +68,22 @@ impl Inspect {
     }
 
     /// Decode a `_KTRAP_FRAME` at `address` (`.trap`).
-    fn trap_frame<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Typed<'py, KtrapFrame>> {
+    fn trap_frame<'py>(
+        &self,
+        py: Python<'py>,
+        address: AddressArg,
+    ) -> PyResult<Typed<'py, KtrapFrame>> {
+        let address = address.resolve(py, &self.owner, &Context::default())?;
         self.typed(py, |session| {
-            read_ktrap_frame(&session.target, VirtAddr(address)).map_err(err)
+            read_ktrap_frame(&session.target, address).map_err(err)
         })
     }
 
     /// Return a handle for the `_DEVICE_OBJECT` at `address` (`!devobj`).
-    fn device(&self, py: Python<'_>, address: u64) -> PyResult<Device> {
+    fn device(&self, py: Python<'_>, address: AddressArg) -> PyResult<Device> {
+        let address = address.resolve(py, &self.owner, &Context::default())?;
         let info = self.owner.with(py, |session| {
-            session
-                .target
-                .read_device_link(VirtAddr(address))
-                .map_err(err)
+            session.target.read_device_link(address).map_err(err)
         })?;
         Ok(Device {
             owner: self.owner.derive(py),
@@ -89,9 +92,10 @@ impl Inspect {
     }
 
     /// Decode a CONTEXT record and return its register set as a `Frame` (`.cxr`).
-    fn context_record(&self, py: Python<'_>, address: u64) -> PyResult<Frame> {
+    fn context_record(&self, py: Python<'_>, address: AddressArg) -> PyResult<Frame> {
+        let address = address.resolve(py, &self.owner, &Context::default())?;
         let registers = self.owner.with_in(py, &Context::default(), |session| {
-            session.read_context_record(VirtAddr(address)).map_err(err)
+            session.read_context_record(address).map_err(err)
         })?;
         let ip = registers
             .get("rip")

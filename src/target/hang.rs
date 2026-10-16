@@ -51,6 +51,16 @@ pub enum QueuedLockState {
     Corrupt(String),
 }
 
+/// A processor's role in a queued lock, without the details:
+/// `owner`, `waiting`, or `corrupt`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueuedLockRole {
+    Owner,
+    Waiting,
+    Corrupt,
+}
+
 /// The entry of a processor in a queued spinlock that it owns or waits for.
 #[record(impl)]
 pub struct QueuedLockHolder {
@@ -64,11 +74,11 @@ impl QueuedLockHolder {
     /// `owner`, `waiting`, or `corrupt`. `corrupt` means that the bits of the
     /// entry do not agree with the queue links.
     #[record(getter, rename = "state")]
-    pub fn state_name(&self) -> &'static str {
+    pub fn role(&self) -> QueuedLockRole {
         match self.state {
-            QueuedLockState::Owner => "owner",
-            QueuedLockState::Waiting(_) => "waiting",
-            QueuedLockState::Corrupt(_) => "corrupt",
+            QueuedLockState::Owner => QueuedLockRole::Owner,
+            QueuedLockState::Waiting(_) => QueuedLockRole::Waiting,
+            QueuedLockState::Corrupt(_) => QueuedLockRole::Corrupt,
         }
     }
 

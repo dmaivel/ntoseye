@@ -11,11 +11,11 @@ use ntoseye_macros::command;
 
 use crate::error::{Error, Result};
 use crate::session::Session;
-use crate::target::irpfind::{IrpCriteria, IrpFindDetail, IrpPool};
+use crate::target::irpfind::{IrpCriteria, IrpCriteriaKind, IrpFindDetail, IrpPool};
 use crate::target::object::{
-    DeviceObjectDetail, DriverObjectDetail, DriverObjectInfo, IrpHit, IrpInfo, NotifyCallback,
-    ObjectDetail, ObjectName, SL_INVOKE_ON_CANCEL, SL_INVOKE_ON_ERROR, SL_INVOKE_ON_SUCCESS,
-    SL_PENDING_RETURNED, SsdtTable,
+    DeviceObjectDetail, DriverObjectDetail, DriverObjectInfo, IrpHit, IrpInfo, IrpSource,
+    NotifyCallback, ObjectDetail, ObjectName, SL_INVOKE_ON_CANCEL, SL_INVOKE_ON_ERROR,
+    SL_INVOKE_ON_SUCCESS, SL_PENDING_RETURNED, SsdtTable,
 };
 use crate::target::{Target, irp_major_function_name, irp_minor_function_name};
 use crate::types::VirtAddr;
@@ -478,7 +478,7 @@ impl Render<Option<String>> for Vec<IrpHit> {
 
         outln!("  {:<16} {:<7} Details", "IRP", "Source");
         for h in self {
-            let details = if h.source == "thread" {
+            let details = if h.source == IrpSource::Thread {
                 format!(
                     "pid={} tid={} ethread={} state={} wait={}",
                     h.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into()),
@@ -501,7 +501,7 @@ impl Render<Option<String>> for Vec<IrpHit> {
             outln!(
                 "  {} {:<7} stack={:<2} current={:<2} {}",
                 ui::addr(h.irp.0),
-                h.source,
+                h.source.to_string(),
                 h.stack_count,
                 h.current_location,
                 details
@@ -519,6 +519,13 @@ impl FromArg for IrpPool {
 
     fn from_arg(cx: &mut ArgCx<'_, '_>, text: &str) -> std::result::Result<Self, ArgError> {
         IrpPool::from_windbg(cx.eval(text)?.0).map_err(|error| ArgError::Message(error.to_string()))
+    }
+}
+
+/// A WinDbg `!irpfind` criteria name, in any case.
+impl FromArg for IrpCriteriaKind {
+    fn from_arg(_: &mut ArgCx<'_, '_>, text: &str) -> std::result::Result<Self, ArgError> {
+        IrpCriteriaKind::parse(text).map_err(|error| ArgError::Message(error.to_string()))
     }
 }
 
@@ -586,12 +593,10 @@ fn irpfind(
     #[arg(render, switch = "-v")] verbose: bool,
     #[arg(parse = irpfind_pool)] pool_type: Option<IrpPool>,
     restart: Option<VirtAddr>,
-    criteria: Option<String>,
+    criteria: Option<IrpCriteriaKind>,
     #[arg(default = 0)] value: u64,
 ) -> Result<IrpFindDetail> {
-    let criteria = criteria
-        .map(|name| IrpCriteria::parse(&name, value))
-        .transpose()?;
+    let criteria = criteria.map(|kind| IrpCriteria::new(kind, value));
     session.target.irp_find(
         pool_type.unwrap_or(IrpPool::NonPaged),
         restart.filter(|address| !address.is_zero()),
@@ -823,7 +828,7 @@ impl Render<Option<String>> for Vec<NotifyCallback> {
     fn render(&self, _: &mut ReplState<'_>, filter: Option<String>) {
         let lowered = filter.as_ref().map(|filter| filter.to_lowercase());
         let mut printed = 0;
-        let mut last_kind = "";
+        let mut last_kind = None;
         for c in self {
             let target = c
                 .symbol
@@ -834,9 +839,9 @@ impl Render<Option<String>> for Vec<NotifyCallback> {
             {
                 continue;
             }
-            if c.kind != last_kind {
+            if last_kind != Some(c.kind) {
                 outln!("{} callbacks:", c.kind);
-                last_kind = c.kind;
+                last_kind = Some(c.kind);
             }
             outln!(
                 "  [{:02}] fn={}  block={}  raw={}  ctx={}",

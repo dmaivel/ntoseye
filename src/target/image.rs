@@ -147,6 +147,7 @@ impl ImageHeaders {
 /// PDB name, GUID, and age, and the symbol state.
 #[record(impl)]
 pub struct ModuleImageInfo {
+    #[record(rename = "info")]
     pub module: ModuleInfo,
     #[record(skip)]
     pub headers: PeHeaders,

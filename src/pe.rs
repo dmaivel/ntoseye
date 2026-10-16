@@ -110,6 +110,7 @@ impl ExportDirectory {
 pub struct ImageExports {
     /// `None` if the image has no exports.
     pub directory: Option<ExportDirectory>,
+    #[record(rename = "entries")]
     pub exports: Vec<ModuleExportInfo>,
 }
 

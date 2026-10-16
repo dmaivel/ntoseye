@@ -27,13 +27,13 @@ const MAX_PROCESS_HANDLES: usize = 1 << 16;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlpcPortKind {
     /// The named port a server listens on.
-    #[record(rename = "ALPC_CONNECTION_PORT")]
+    #[record(label = "ALPC_CONNECTION_PORT")]
     Connection,
     /// The server's end of one connection.
-    #[record(rename = "ALPC_SERVER_COMMUNICATION_PORT")]
+    #[record(label = "ALPC_SERVER_COMMUNICATION_PORT")]
     ServerCommunication,
     /// The client's end of one connection.
-    #[record(rename = "ALPC_CLIENT_COMMUNICATION_PORT")]
+    #[record(label = "ALPC_CLIENT_COMMUNICATION_PORT")]
     ClientCommunication,
 }
 

@@ -352,29 +352,19 @@ impl MsrIntercepts {
 }
 
 /// Which I/O instructions of a VTL exit (`!hvvmcs -io`), by its eVMCS's
-/// controls and I/O bitmaps. `kind` is `none` (no I/O bitmaps and no
+/// controls and I/O bitmaps: `never` (no I/O bitmaps and no
 /// unconditional I/O exiting), `every` (unconditional I/O exiting), or
 /// `bitmaps`.
-#[record(tagged, impl)]
+#[record(tagged)]
 #[derive(Debug, PartialEq, Eq)]
 pub enum IoIntercepts {
-    None,
+    Never,
     Every,
     /// I/O bitmaps A (ports 0-0x7fff) and B: the port ranges whose
     /// accesses exit.
     Bitmaps {
         ports: Vec<PortRange>,
     },
-}
-
-#[record]
-impl IoIntercepts {
-    /// Whether every I/O instruction exits: the controls use no I/O
-    /// bitmaps but unconditional I/O exiting.
-    #[record(getter)]
-    pub fn every(&self) -> bool {
-        matches!(self, Self::Every)
-    }
 }
 
 /// The RDMSR and WRMSR intercepts of the eVMCS `vmcs`, whose MSR bitmap
@@ -415,7 +405,7 @@ pub fn io_intercepts(
     let controls = field(vmcs, "cpu_based_vm_exec_control").unwrap_or(0);
     if controls & USE_IO_BITMAPS == 0 {
         return Ok(if controls & UNCONDITIONAL_IO_EXITING == 0 {
-            IoIntercepts::None
+            IoIntercepts::Never
         } else {
             IoIntercepts::Every
         });
@@ -539,7 +529,7 @@ mod tests {
         );
         assert_eq!(
             io_intercepts(&vmcs_with(&[]), read).unwrap(),
-            IoIntercepts::None
+            IoIntercepts::Never
         );
     }
 

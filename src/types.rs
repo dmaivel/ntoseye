@@ -256,13 +256,13 @@ pub struct PteAttributes {
 #[record]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PageTableLevel {
-    #[record(rename = "PXE")]
+    #[record(label = "PXE")]
     Pxe,
-    #[record(rename = "PPE")]
+    #[record(label = "PPE")]
     Ppe,
-    #[record(rename = "PDE")]
+    #[record(label = "PDE")]
     Pde,
-    #[record(rename = "PTE")]
+    #[record(label = "PTE")]
     Pte,
 }
 

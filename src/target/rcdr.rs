@@ -69,12 +69,20 @@ pub struct RcdrDriverList {
     pub stopped: Option<String>,
 }
 
+/// Which partition of a recorder log: `normal` or `error`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RcdrPartitionName {
+    Normal,
+    Error,
+}
+
 /// A partition of a recorder log: the ring its records go to.
 #[record]
 #[derive(Debug, Clone)]
 pub struct RcdrPartition {
     /// `normal` or `error`.
-    pub name: &'static str,
+    pub name: RcdrPartitionName,
     pub base: VirtAddr,
     #[record(hex)]
     pub size: u32,
@@ -122,7 +130,7 @@ pub struct RcdrEntry {
     /// The index of its log in `RcdrLogDump.logs`.
     pub log: usize,
     /// `normal` or `error`.
-    pub partition: &'static str,
+    pub partition: RcdrPartitionName,
     pub entry: WdfLogEntry,
 }
 
@@ -133,7 +141,7 @@ pub struct RcdrWalkEnd {
     /// The index of its log in `RcdrLogDump.logs`.
     pub log: usize,
     /// `normal` or `error`.
-    pub partition: &'static str,
+    pub partition: RcdrPartitionName,
     pub end: IfrEnd,
 }
 
@@ -302,7 +310,10 @@ impl Target {
             identifier.push_str(&format!(" {}", log.read_uint("LogIdentifierAppendValue")?));
         }
         let mut partitions = Vec::new();
-        for (name, field) in [("normal", "NormalPartition"), ("error", "ErrorPartition")] {
+        for (name, field) in [
+            (RcdrPartitionName::Normal, "NormalPartition"),
+            (RcdrPartitionName::Error, "ErrorPartition"),
+        ] {
             let partition = log.embedded(field)?;
             // `Offset` is `{USHORT Current; USHORT Previous}` read as one
             // LONG, as KMDF's IFR header keeps it.

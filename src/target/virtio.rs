@@ -12,7 +12,7 @@ use crate::error::{Error, Result};
 use crate::memory::MemoryOps;
 use crate::target::Target;
 use crate::target::pci::{PciTreeBus, PciTreeDevice};
-use crate::target::virtio_request::RequestKind;
+use crate::target::virtio_request::{RequestKind, VirtioRequestKind};
 use crate::types::VirtAddr;
 
 /// The PCI vendor ID of virtio devices (Red Hat / Qumranet).
@@ -70,26 +70,53 @@ pub fn virtio_device_id(device_id: u16) -> Option<(u16, bool)> {
 }
 
 /// The specification's name of virtio device ID `id`.
-pub fn virtio_type_name(id: u16) -> &'static str {
+pub fn virtio_type_name(id: u16) -> VirtioDeviceType {
     match id {
-        1 => "net",
-        2 => "block",
-        3 => "console",
-        4 => "entropy",
-        5 => "balloon",
-        8 => "scsi",
-        9 => "9p",
-        16 => "gpu",
-        18 => "input",
-        19 => "vsock",
-        20 => "crypto",
-        23 => "iommu",
-        24 => "mem",
-        25 => "sound",
-        26 => "fs",
-        27 => "pmem",
-        _ => "unknown",
+        1 => VirtioDeviceType::Net,
+        2 => VirtioDeviceType::Block,
+        3 => VirtioDeviceType::Console,
+        4 => VirtioDeviceType::Entropy,
+        5 => VirtioDeviceType::Balloon,
+        8 => VirtioDeviceType::Scsi,
+        9 => VirtioDeviceType::NineP,
+        16 => VirtioDeviceType::Gpu,
+        18 => VirtioDeviceType::Input,
+        19 => VirtioDeviceType::Vsock,
+        20 => VirtioDeviceType::Crypto,
+        23 => VirtioDeviceType::Iommu,
+        24 => VirtioDeviceType::Mem,
+        25 => VirtioDeviceType::Sound,
+        26 => VirtioDeviceType::Fs,
+        27 => VirtioDeviceType::Pmem,
+        _ => VirtioDeviceType::Unknown,
     }
+}
+
+/// A virtio device type, by the specification's name: `net`, `block`,
+/// `console`, `entropy`, `balloon`, `scsi`, `nine_p` (9P transport, `9p` in
+/// the REPL), `gpu`, `input`, `vsock`, `crypto`, `iommu`, `mem`, `sound`,
+/// `fs`, `pmem`, or `unknown`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VirtioDeviceType {
+    Net,
+    Block,
+    Console,
+    Entropy,
+    Balloon,
+    Scsi,
+    #[record(label = "9p")]
+    NineP,
+    Gpu,
+    Input,
+    Vsock,
+    Crypto,
+    Iommu,
+    Mem,
+    Sound,
+    Fs,
+    Pmem,
+    Unknown,
 }
 
 /// What the driver uses a queue for, which says whether buffers waiting
@@ -381,7 +408,7 @@ impl VirtioFunction {
 
     /// The specification's name of the type, such as `net` or `block`.
     #[record(getter)]
-    pub fn kind(&self) -> &'static str {
+    pub fn kind(&self) -> VirtioDeviceType {
         virtio_type_name(self.virtio_id)
     }
 }
@@ -808,7 +835,7 @@ pub struct VirtioRing {
     /// queue (`!vring /r`).
     pub raw_ring: Option<SplitRing>,
     /// What its buffers hold, for decoding: `blk`, `scsi`, `net`, ...
-    pub request_kind: Option<&'static str>,
+    pub request_kind: Option<VirtioRequestKind>,
     /// Buffers the device holds, at most 64.
     pub with_device: Vec<VirtioBuffer>,
     /// Buffers the device returned that the driver has not taken back
@@ -1668,7 +1695,7 @@ impl Target {
         VirtioRing {
             queue,
             raw_ring,
-            request_kind: kind.map(RequestKind::name),
+            request_kind: kind.map(RequestKind::sdk_kind),
             with_device,
             returned,
         }

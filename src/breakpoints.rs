@@ -7,7 +7,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::dbg_backend::HwBreakpointAccess;
+use crate::dbg_backend::{HwBreakpointAccess, WatchpointAccess};
 use crate::expr::Expr;
 use crate::guest::hypercalls::tlfs_hypercall;
 use crate::guest::vm_exits::ExitFilter;
@@ -175,8 +175,8 @@ impl BreakpointInfo {
     /// `write` or `read_write` for a data watchpoint. None for a code
     /// breakpoint.
     #[record(getter)]
-    pub fn watch_access(&self) -> Option<&'static str> {
-        self.watchpoint().map(|(access, _)| access.as_str())
+    pub fn watch_access(&self) -> Option<WatchpointAccess> {
+        self.watchpoint().map(|(access, _)| access)
     }
 
     /// The watched width in bytes. None for a code breakpoint.
@@ -255,6 +255,7 @@ impl HypercallFilter {
 #[derive(Copy, PartialEq, Eq)]
 pub struct PartitionFilter {
     /// The partition ID.
+    #[record(rename = "id")]
     pub partition: u64,
     /// The VP index a hit must be on (`/c` in the view). None for any of
     /// the partition's VPs.

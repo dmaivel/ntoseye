@@ -6,6 +6,7 @@
 use ntoseye_macros::{collection, handle};
 use pyo3::prelude::*;
 
+use super::args::AddressArg;
 use super::command::{CommandHost, HostSession};
 use super::context::{Context, Space};
 use super::handle::Owner;
@@ -171,8 +172,9 @@ impl UserDump {
     fn region<'py>(
         &self,
         py: Python<'py>,
-        address: u64,
+        address: AddressArg,
     ) -> PyResult<Typed<'py, Option<UserRegion>>> {
+        let address = address.resolve(py, &self.owner, &Context::default())?.0;
         let region = self.read(py, |session, info| {
             if info.regions.is_none() {
                 return Ok(None);
@@ -343,14 +345,6 @@ impl UserThread {
 
 #[handle]
 impl UserThread {
-    /// The backend's id for the thread, `<pid>.<tid>` in hex as WinDbg
-    /// writes it (just `<tid>` when the dump records no process id).
-    #[getter]
-    fn id(&self, py: Python<'_>) -> PyResult<String> {
-        self.owner.check(py)?;
-        Ok(self.id.clone())
-    }
-
     /// The thread's position in the dump's thread list, which `~N` names.
     #[getter]
     fn index(&self, py: Python<'_>) -> PyResult<usize> {

@@ -37,20 +37,20 @@ const MAX_PROCESS_HEAPS: u32 = 1024;
 #[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RegionUsage {
-    #[record(rename = "Free")]
+    #[record(label = "Free")]
     Free,
-    #[record(rename = "Image")]
+    #[record(label = "Image")]
     Image,
-    #[record(rename = "Stack")]
+    #[record(label = "Stack")]
     Stack,
-    #[record(rename = "TEB")]
+    #[record(label = "TEB")]
     Teb,
-    #[record(rename = "PEB")]
+    #[record(label = "PEB")]
     Peb,
-    #[record(rename = "Heap")]
+    #[record(label = "Heap")]
     Heap,
     /// In use, for nothing the dump identifies.
-    #[record(rename = "<unknown>")]
+    #[record(label = "<unknown>")]
     Unknown,
 }
 
@@ -83,6 +83,7 @@ pub struct UsageSources {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRegion {
     /// The region, as `VirtualQueryEx` reported it.
+    #[record(rename = "info")]
     pub region: MemoryRegion,
     pub usage: RegionUsage,
     /// The module, thread, or heap the usage names.
@@ -375,7 +376,7 @@ pub fn summarize(regions: &[UserRegion]) -> AddressSummary {
     for entry in regions {
         let region = &entry.region;
         summary.total = summary.total.saturating_add(region.size);
-        add(&mut summary.by_usage, entry.usage.as_str(), region.size);
+        add(&mut summary.by_usage, &entry.usage.to_string(), region.size);
         add(
             &mut summary.by_state,
             &state_label(region.state),

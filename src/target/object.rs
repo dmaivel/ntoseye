@@ -256,7 +256,7 @@ pub struct ObjectHeaderDetail {
     pub input: VirtAddr,
     /// `body` if the input pointed to the object body, or `header` if it
     /// pointed to the object header.
-    pub mode: &'static str,
+    pub mode: ObjectHeaderInput,
     pub header: VirtAddr,
     pub body: VirtAddr,
     pub pointer_count: i64,
@@ -279,6 +279,7 @@ pub struct ObjectHeaderDetail {
 /// a directory (`!object`).
 #[record]
 pub struct ObjectDetail {
+    #[record(rename = "info")]
     pub header: ObjectHeaderDetail,
     /// The entries of a directory, by name. None for all other objects.
     pub entries: Option<Vec<ObjectDirectoryEntry>>,
@@ -306,11 +307,38 @@ pub enum ObjectName {
 /// The object type name of an object directory.
 const DIRECTORY_TYPE: &str = "Directory";
 
+/// What the address given to `inspect_object_header` pointed to: `body` or
+/// `header`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectHeaderInput {
+    Body,
+    Header,
+}
+
+/// The kind of a notification callback: `process`, `thread`, or `image`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotifyCallbackKind {
+    Process,
+    Thread,
+    Image,
+}
+
+/// Where ntoseye found an IRP: `thread` (an `IrpList`) or `device` (a
+/// `CurrentIrp`).
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrpSource {
+    Thread,
+    Device,
+}
+
 /// A process, thread, or image notification callback (`callbacks`).
 #[record]
 pub struct NotifyCallback {
     /// `process`, `thread`, or `image`.
-    pub kind: &'static str,
+    pub kind: NotifyCallbackKind,
     /// The slot of the callback in the kernel callback array.
     pub index: usize,
     pub function: VirtAddr,
@@ -353,7 +381,7 @@ pub struct SsdtTable {
 pub struct IrpHit {
     pub irp: VirtAddr,
     /// Where ntoseye found the IRP: `thread` or `device`.
-    pub source: &'static str,
+    pub source: IrpSource,
     pub stack_count: u8,
     pub current_location: u8,
     /// The process that issued the IRP. None if ntoseye found the IRP on a device.
@@ -564,17 +592,17 @@ fn select_object_header_candidate(
     direct_candidate: Option<VirtAddr>,
     body_has_type: bool,
     direct_has_type: bool,
-) -> Option<(VirtAddr, VirtAddr, &'static str)> {
+) -> Option<(VirtAddr, VirtAddr, ObjectHeaderInput)> {
     match (body_candidate, direct_candidate) {
-        (Some(header), Some(_)) if body_has_type => Some((header, input, "body")),
+        (Some(header), Some(_)) if body_has_type => Some((header, input, ObjectHeaderInput::Body)),
         (Some(_), Some(header)) if direct_has_type => {
-            Some((header, header + body_offset, "header"))
+            Some((header, header + body_offset, ObjectHeaderInput::Header))
         }
         // Both locations are readable but neither decodes through the type
         // table. Guessing here would make an arbitrary pool address look valid.
         (Some(_), Some(_)) => None,
-        (Some(header), None) => Some((header, input, "body")),
-        (None, Some(header)) => Some((header, header + body_offset, "header")),
+        (Some(header), None) => Some((header, input, ObjectHeaderInput::Body)),
+        (None, Some(header)) => Some((header, header + body_offset, ObjectHeaderInput::Header)),
         (None, None) => None,
     }
 }
@@ -1584,10 +1612,10 @@ impl Target {
     /// the `Psp*NotifyRoutine` fast-ref arrays.
     pub fn enumerate_notify_callbacks(&self) -> Result<Vec<NotifyCallback>> {
         const MAX_NOTIFY: u64 = 64;
-        let sets: [(&str, &str); 3] = [
-            ("process", "PspCreateProcessNotifyRoutine"),
-            ("thread", "PspCreateThreadNotifyRoutine"),
-            ("image", "PspLoadImageNotifyRoutine"),
+        let sets: [(NotifyCallbackKind, &str); 3] = [
+            (NotifyCallbackKind::Process, "PspCreateProcessNotifyRoutine"),
+            (NotifyCallbackKind::Thread, "PspCreateThreadNotifyRoutine"),
+            (NotifyCallbackKind::Image, "PspLoadImageNotifyRoutine"),
         ];
 
         let guest = self.guest()?;
@@ -1828,7 +1856,7 @@ impl Target {
                     if let Some((sc, cl)) = self.plausible_irp(irp) {
                         out.push(IrpHit {
                             irp,
-                            source: "thread",
+                            source: IrpSource::Thread,
                             stack_count: sc,
                             current_location: cl,
                             pid: Some(p.pid),
@@ -1862,7 +1890,7 @@ impl Target {
                         {
                             out.push(IrpHit {
                                 irp: current_irp,
-                                source: "device",
+                                source: IrpSource::Device,
                                 stack_count: sc,
                                 current_location: cl,
                                 pid: None,
@@ -1965,7 +1993,7 @@ mod tests {
                 false,
                 true,
             ),
-            Some((input, VirtAddr(0x1030), "header"))
+            Some((input, VirtAddr(0x1030), ObjectHeaderInput::Header))
         );
     }
 

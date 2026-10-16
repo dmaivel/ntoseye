@@ -16,6 +16,7 @@ use crate::memory::{
 use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::session::Session;
 use crate::target::memory::{MemorySearchMatch, SearchSpace};
+use crate::target::mm::AddressKind;
 use crate::target::{
     CODE_BITNESS_X86, CompareResult, MAX_SEARCH_BYTES, MAX_SEARCH_MATCHES, MemoryKind,
     SearchResult, SearchStop, StringDescriptor,
@@ -2046,9 +2047,10 @@ fn memory_search(
     session: &Session,
     #[arg(receiver)] space: SearchSpace,
     pattern: Vec<u8>,
-    start: u64,
+    start: VirtAddr,
     length: usize,
 ) -> Result<Vec<MemorySearchMatch>> {
+    let VirtAddr(start) = start;
     if length > MAX_SEARCH_BYTES {
         return Err(Error::DebugInfo(format!(
             "search length {length} exceeds cap {MAX_SEARCH_BYTES} (0x{MAX_SEARCH_BYTES:x})"
@@ -2068,7 +2070,7 @@ fn memory_search(
                     start.wrapping_add(offset as u64),
                     offset as u64,
                     None,
-                    "physical",
+                    AddressKind::Physical,
                 )
             })
             .collect());

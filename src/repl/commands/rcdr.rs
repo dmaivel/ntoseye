@@ -10,7 +10,9 @@ use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
 use crate::session::Session;
 use crate::target::Target;
-use crate::target::rcdr::{RcdrDriver, RcdrDriverList, RcdrLog, RcdrLogDump, RcdrLogs};
+use crate::target::rcdr::{
+    RcdrDriver, RcdrDriverList, RcdrLog, RcdrLogDump, RcdrLogs, RcdrPartitionName,
+};
 use crate::target::wdf::IfrEnd;
 use crate::types::VirtAddr;
 use crate::ui;
@@ -277,9 +279,9 @@ fn print_dump(dump: &RcdrLogDump) {
         let line = ifr_entry_line(&entry.entry);
         let log = &dump.logs[entry.log];
         let place = match (several, entry.partition) {
-            (true, "normal") => format!("[{}] ", log.identifier),
+            (true, RcdrPartitionName::Normal) => format!("[{}] ", log.identifier),
             (true, partition) => format!("[{} {partition}] ", log.identifier),
-            (false, "normal") => String::new(),
+            (false, RcdrPartitionName::Normal) => String::new(),
             (false, partition) => format!("[{partition}] "),
         };
         // The sequence number leads the line; the log goes after it.

@@ -9,7 +9,7 @@ use crate::layout::{FieldInfo, ParsedType, TypeInfo, le_uint};
 use crate::memory::{MemoryOps, PAGE_SIZE};
 use crate::symbols::format_symbol_with_offset;
 use crate::target::Target;
-use crate::target::mm::find_mi_state_fields;
+use crate::target::mm::{PoolBlockState, find_mi_state_fields};
 use crate::types::{MAX_PROCESSORS, VirtAddr};
 
 pub const POOL_ALIGN: u64 = 0x10;
@@ -744,13 +744,13 @@ pub fn plausible_pool_tag(tag: u32) -> bool {
     tag == POOL_FREE_TAG || tag_looks_printable(tag)
 }
 
-pub fn pool_block_state(h: &PoolHeader) -> &'static str {
+pub fn pool_block_state(h: &PoolHeader) -> PoolBlockState {
     if h.synthetic_free || h.tag == POOL_FREE_TAG {
-        "Free"
+        PoolBlockState::Free
     } else if tag_looks_printable(h.tag) {
-        "Allocated"
+        PoolBlockState::Allocated
     } else {
-        "Allocated?"
+        PoolBlockState::AllocatedUnverified
     }
 }
 

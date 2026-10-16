@@ -90,12 +90,12 @@ pub enum TrapKind {
     /// A processor exception (`ExceptionActive` 1).
     Exception,
     /// A `syscall` from user mode (`ExceptionActive` 2).
-    #[record(rename = "system call")]
+    #[record(label = "system call")]
     SystemCall,
     /// A kernel-mode `Zw*` call into the system service dispatcher. Every
     /// `Zw*` stub builds the machine frame with rip `nt!KiServiceLinkage` and
     /// enters `KiServiceInternal`, which leaves `ExceptionActive` unwritten.
-    #[record(rename = "Zw call")]
+    #[record(label = "Zw call")]
     ZwCall,
 }
 

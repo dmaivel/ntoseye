@@ -12,18 +12,22 @@ use pyo3::types::{PyByteArray, PyBytes};
 use pyo3::{PyTypeInfo, type_hint_identifier, type_hint_subscript};
 
 use super::command::{Pending, PyArg, SdkArg};
+use super::context::Context;
+use super::err;
 use super::handle::Owner;
-use super::process::Process;
+use super::module::{Device, Driver, Module};
+use super::process::{Heap, Process};
 use super::thread::{Cpu, Thread};
 use crate::Backend;
 use crate::dbg_backend::ContinueDisposition;
 use crate::exception_policy::{EventName, ExceptionPolicyFinalAction};
-use crate::guest::ProcessInfo;
+use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::session::WalkUntil;
 #[cfg(feature = "python-stubs")]
 use crate::session::driver::StopPy;
 use crate::target::ThreadInfo;
-use crate::target::object::ObjectName;
+use crate::target::heap::HeapInfo;
+use crate::target::object::{DriverDeviceLink, DriverObjectInfo, ObjectName};
 use crate::target::sched::{ApcSelector, UniqStackScope};
 use crate::target::workqueue::WorkQueueTypes;
 use crate::types::VirtAddr;
@@ -94,27 +98,87 @@ impl SdkArg for Option<WalkUntil> {
     type Py = Option<UntilArg>;
 
     fn from_sdk(
-        _: Python<'_>,
-        _: Option<&Owner>,
+        py: Python<'_>,
+        owner: Option<&Owner>,
         value: Option<UntilArg>,
     ) -> PyResult<Pending<Self>> {
-        Ok(match value {
-            None => Pending::Ready(None),
-            Some(UntilArg::Flow(Until(until))) => Pending::Ready(Some(until)),
+        match value {
+            None => Ok(Pending::Ready(None)),
+            Some(UntilArg::Flow(Until(until))) => Ok(Pending::Ready(Some(until))),
             Some(UntilArg::Address(address)) => {
-                Pending::address(address, |address| Some(WalkUntil::Address(address)))
+                address.pending(py, owner, |address| Some(WalkUntil::Address(address)))
             }
-        })
+        }
     }
 }
 
-/// An address: an `int`, or a debugger expression that the session
-/// evaluates as the REPL does (`"nt!KiSystemCall64+0x10"`, `"@rip"`,
-/// `"poi(@rsp)"`), in the method's context.
+/// An address: an `int`, a debugger expression that the session evaluates
+/// as the REPL does (`"nt!KiSystemCall64+0x10"`, `"@rip"`, `"poi(@rsp)"`) in
+/// the method's context, or the handle of the object at the address.
 #[derive(FromPyObject)]
 pub enum AddressArg {
     Value(u64),
     Expression(String),
+    Object(AddressObject),
+}
+
+/// A handle given for its object's address: a `Process` its `_EPROCESS`, a
+/// `Thread` its `_ETHREAD`, a `Module` its base, a `Driver` its
+/// `_DRIVER_OBJECT`, a `Device` its `_DEVICE_OBJECT`, a `Heap` its heap.
+#[derive(FromPyObject)]
+pub enum AddressObject {
+    Process(Py<Process>),
+    Thread(Py<Thread>),
+    Module(Py<Module>),
+    Driver(Py<Driver>),
+    Device(Py<Device>),
+    Heap(Py<Heap>),
+}
+
+impl AddressObject {
+    /// The object's address; the handle must belong to `owner`'s debugger.
+    fn address(self, py: Python<'_>, owner: Option<&Owner>) -> PyResult<VirtAddr> {
+        fn record<R: PyArg>(py: Python<'_>, owner: Option<&Owner>, value: R::Py) -> PyResult<R> {
+            match owner {
+                Some(owner) => R::from_py_in(py, owner, value),
+                None => Ok(R::from_py(value)),
+            }
+        }
+        Ok(match self {
+            Self::Process(handle) => record::<ProcessInfo>(py, owner, handle)?.eprocess,
+            Self::Thread(handle) => record::<ThreadInfo>(py, owner, handle)?.ethread,
+            Self::Module(handle) => record::<ModuleInfo>(py, owner, handle)?.base_address,
+            Self::Driver(handle) => record::<DriverObjectInfo>(py, owner, handle)?.object,
+            Self::Device(handle) => record::<DriverDeviceLink>(py, owner, handle)?.device,
+            Self::Heap(handle) => record::<HeapInfo>(py, owner, handle)?.address,
+        })
+    }
+}
+
+impl AddressArg {
+    /// The argument the address gives, through `finish`: an expression is
+    /// evaluated later, on the session thread ([`Pending::resolve`]).
+    pub fn pending<T>(
+        self,
+        py: Python<'_>,
+        owner: Option<&Owner>,
+        finish: fn(VirtAddr) -> T,
+    ) -> PyResult<Pending<T>> {
+        Ok(match self {
+            Self::Value(address) => Pending::Ready(finish(VirtAddr(address))),
+            Self::Expression(text) => Pending::Expression(text, finish),
+            Self::Object(object) => Pending::Ready(finish(object.address(py, owner)?)),
+        })
+    }
+
+    /// The address, for a hand-written method of an object of `owner`'s
+    /// debugger: an expression is evaluated in `context`.
+    pub fn resolve(self, py: Python<'_>, owner: &Owner, context: &Context) -> PyResult<VirtAddr> {
+        match self.pending(py, Some(owner), |address| address)? {
+            Pending::Ready(address) => Ok(address),
+            pending => owner.with_in(py, context, |session| pending.resolve(session).map_err(err)),
+        }
+    }
 }
 
 literal_arg! {
@@ -305,20 +369,34 @@ pub enum FltFilterArg {
     Name(String),
 }
 
-/// An executive object by body or header address, or by object namespace
-/// path (`\\Driver\\ACPI`).
+/// An executive object by body or header address, by object namespace
+/// path (`\\Driver\\ACPI`), or by the handle of the object (`Process`,
+/// `Driver`, ...).
 #[derive(FromPyObject)]
 pub enum ObjectArg {
     Address(u64),
     Path(String),
+    Object(AddressObject),
 }
 
-impl PyArg for ObjectName {
-    type Py = ObjectArg;
-    fn from_py(value: ObjectArg) -> Self {
-        match value {
+impl ObjectArg {
+    fn name(self, py: Python<'_>, owner: Option<&Owner>) -> PyResult<ObjectName> {
+        Ok(match self {
             ObjectArg::Address(address) => ObjectName::Address(VirtAddr(address)),
             ObjectArg::Path(path) => ObjectName::Path(path),
-        }
+            ObjectArg::Object(object) => ObjectName::Address(object.address(py, owner)?),
+        })
+    }
+}
+
+impl SdkArg for ObjectName {
+    type Py = ObjectArg;
+
+    fn from_sdk(
+        py: Python<'_>,
+        owner: Option<&Owner>,
+        value: ObjectArg,
+    ) -> PyResult<Pending<Self>> {
+        value.name(py, owner).map(Pending::Ready)
     }
 }

@@ -22,8 +22,9 @@ use crate::{
 /// named in the dump's modules.
 #[ntoseye_macros::record]
 pub struct UserExceptionDetail {
+    #[record(rename = "info")]
     pub exception: UserException,
-    /// `exception.address` as `module!function+offset`, when it resolves.
+    /// `info.address` as `module!function+offset`, when it resolves.
     pub symbol: Option<String>,
 }
 

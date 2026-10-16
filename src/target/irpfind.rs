@@ -49,32 +49,26 @@ pub enum IrpCriteria {
 }
 
 impl IrpCriteria {
-    /// The criterion WinDbg names `name`, matching `value`.
-    pub fn parse(name: &str, value: u64) -> Result<Self> {
-        Ok(match name.to_ascii_lowercase().as_str() {
-            "arg" => Self::Arg(value),
-            "device" => Self::Device(VirtAddr(value)),
-            "fileobject" => Self::FileObject(VirtAddr(value)),
-            "mdlprocess" => Self::MdlProcess(VirtAddr(value)),
-            "thread" => Self::Thread(VirtAddr(value)),
-            "userevent" => Self::UserEvent(VirtAddr(value)),
-            other => {
-                return Err(Error::InvalidArgument(format!(
-                    "unknown !irpfind criteria '{other}' (arg, device, fileobject, mdlprocess, \
-                     thread, userevent)"
-                )));
-            }
-        })
+    /// The criterion `kind` names, matching `value`.
+    pub fn new(kind: IrpCriteriaKind, value: u64) -> Self {
+        match kind {
+            IrpCriteriaKind::Arg => Self::Arg(value),
+            IrpCriteriaKind::Device => Self::Device(VirtAddr(value)),
+            IrpCriteriaKind::FileObject => Self::FileObject(VirtAddr(value)),
+            IrpCriteriaKind::MdlProcess => Self::MdlProcess(VirtAddr(value)),
+            IrpCriteriaKind::Thread => Self::Thread(VirtAddr(value)),
+            IrpCriteriaKind::UserEvent => Self::UserEvent(VirtAddr(value)),
+        }
     }
 
-    pub fn name(self) -> &'static str {
+    pub fn name(self) -> IrpCriteriaKind {
         match self {
-            Self::Arg(_) => "arg",
-            Self::Device(_) => "device",
-            Self::FileObject(_) => "fileobject",
-            Self::MdlProcess(_) => "mdlprocess",
-            Self::Thread(_) => "thread",
-            Self::UserEvent(_) => "userevent",
+            Self::Arg(_) => IrpCriteriaKind::Arg,
+            Self::Device(_) => IrpCriteriaKind::Device,
+            Self::FileObject(_) => IrpCriteriaKind::FileObject,
+            Self::MdlProcess(_) => IrpCriteriaKind::MdlProcess,
+            Self::Thread(_) => IrpCriteriaKind::Thread,
+            Self::UserEvent(_) => IrpCriteriaKind::UserEvent,
         }
     }
 
@@ -87,6 +81,42 @@ impl IrpCriteria {
             | Self::Thread(address)
             | Self::UserEvent(address) => address.0,
         }
+    }
+}
+
+/// The name WinDbg gives an `!irpfind` criterion: `arg`, `device`,
+/// `fileobject`, `mdlprocess`, `thread`, or `userevent`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrpCriteriaKind {
+    Arg,
+    Device,
+    #[record(rename = "fileobject")]
+    FileObject,
+    #[record(rename = "mdlprocess")]
+    MdlProcess,
+    Thread,
+    #[record(rename = "userevent")]
+    UserEvent,
+}
+
+impl IrpCriteriaKind {
+    /// The criterion WinDbg names `name`, in any case.
+    pub fn parse(name: &str) -> Result<Self> {
+        Ok(match name.to_ascii_lowercase().as_str() {
+            "arg" => Self::Arg,
+            "device" => Self::Device,
+            "fileobject" => Self::FileObject,
+            "mdlprocess" => Self::MdlProcess,
+            "thread" => Self::Thread,
+            "userevent" => Self::UserEvent,
+            other => {
+                return Err(Error::InvalidArgument(format!(
+                    "unknown !irpfind criteria '{other}' (arg, device, fileobject, mdlprocess, \
+                     thread, userevent)"
+                )));
+            }
+        })
     }
 }
 
@@ -176,7 +206,7 @@ impl IrpFindEntry {
 pub struct IrpFindCriteria {
     /// `arg`, `device`, `fileobject`, `mdlprocess`, `thread`, or
     /// `userevent`.
-    pub name: &'static str,
+    pub name: IrpCriteriaKind,
     #[record(hex)]
     pub value: u64,
 }

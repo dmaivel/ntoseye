@@ -122,6 +122,19 @@ fn apic_words(x2apic: bool) -> Vec<(ApicRegister, u32)> {
     words
 }
 
+/// An LVT timer's mode (bits 17-18): `one_shot`, `periodic`,
+/// `tsc_deadline`, or `reserved`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApicTimerMode {
+    #[record(label = "one-shot")]
+    OneShot,
+    Periodic,
+    #[record(label = "TSC-deadline")]
+    TscDeadline,
+    Reserved,
+}
+
 /// A local vector table entry, decoded (Intel SDM vol. 3, 11.5.1).
 #[record]
 #[derive(PartialEq, Eq)]
@@ -140,8 +153,8 @@ pub struct ApicLvt {
     pub remote_irr: bool,
     pub level: bool,
     pub masked: bool,
-    /// The timer's mode: `one-shot`, `periodic`, or `TSC-deadline`.
-    pub timer_mode: Option<&'static str>,
+    /// The timer's mode; `None` for an entry other than the timer.
+    pub timer_mode: Option<ApicTimerMode>,
 }
 
 /// The local vector table entries in register order.
@@ -169,12 +182,25 @@ pub fn decode_lvt(name: &'static str, raw: u32, timer: bool) -> ApicLvt {
         level: raw & (1 << 15) != 0,
         masked: raw & (1 << 16) != 0,
         timer_mode: timer.then_some(match (raw >> 17) & 3 {
-            0 => "one-shot",
-            1 => "periodic",
-            2 => "TSC-deadline",
-            _ => "reserved",
+            0 => ApicTimerMode::OneShot,
+            1 => ApicTimerMode::Periodic,
+            2 => ApicTimerMode::TscDeadline,
+            _ => ApicTimerMode::Reserved,
         }),
     }
+}
+
+/// An ICR destination shorthand (bits 18-19): `none`, `self`, `all`, or
+/// `all_but_self`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApicShorthand {
+    None,
+    #[record(rename = "self")]
+    SelfOnly,
+    All,
+    #[record(label = "all-but-self")]
+    AllButSelf,
 }
 
 /// The interrupt command register, decoded.
@@ -190,8 +216,7 @@ pub struct ApicIcr {
     pub pending: bool,
     pub level_assert: bool,
     pub level_triggered: bool,
-    /// `none`, `self`, `all`, or `all-but-self`.
-    pub shorthand: &'static str,
+    pub shorthand: ApicShorthand,
     #[record(hex)]
     pub destination: u32,
 }
@@ -217,10 +242,10 @@ pub fn decode_icr(raw: u64, x2apic: bool) -> ApicIcr {
         level_assert: low & (1 << 14) != 0,
         level_triggered: low & (1 << 15) != 0,
         shorthand: match (low >> 18) & 3 {
-            0 => "none",
-            1 => "self",
-            2 => "all",
-            _ => "all-but-self",
+            0 => ApicShorthand::None,
+            1 => ApicShorthand::SelfOnly,
+            2 => ApicShorthand::All,
+            _ => ApicShorthand::AllButSelf,
         },
         destination: if x2apic {
             (raw >> 32) as u32
@@ -693,10 +718,13 @@ mod tests {
         assert!(lint1.level && !lint1.masked);
         // A periodic timer on vector 0xd1, and a TSC-deadline one.
         let timer = decode_lvt("Timer", 0x0002_00d1, true);
-        assert_eq!((timer.vector, timer.timer_mode), (0xd1, Some("periodic")));
+        assert_eq!(
+            (timer.vector, timer.timer_mode),
+            (0xd1, Some(ApicTimerMode::Periodic))
+        );
         assert_eq!(
             decode_lvt("Timer", 0x0004_00d1, true).timer_mode,
-            Some("TSC-deadline")
+            Some(ApicTimerMode::TscDeadline)
         );
     }
 
@@ -704,7 +732,10 @@ mod tests {
     fn icr_destination_depends_on_the_mode() {
         // A fixed IPI to x2APIC ID 3 on vector 0x2f.
         let x2 = decode_icr(0x0000_0003_0000_402f, true);
-        assert_eq!((x2.vector, x2.destination, x2.shorthand), (0x2f, 3, "none"));
+        assert_eq!(
+            (x2.vector, x2.destination, x2.shorthand),
+            (0x2f, 3, ApicShorthand::None)
+        );
         assert!(x2.level_assert && !x2.logical);
         // The same in xAPIC form keeps the destination in bits 56-63.
         assert_eq!(decode_icr(0x0300_0000_0000_402f, false).destination, 3);
@@ -712,7 +743,7 @@ mod tests {
         let nmi = decode_icr(0x000c_0400, true);
         assert_eq!(
             (nmi.delivery.as_str(), nmi.shorthand),
-            ("NMI", "all-but-self")
+            ("NMI", ApicShorthand::AllButSelf)
         );
     }
 

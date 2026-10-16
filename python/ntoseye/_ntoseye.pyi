@@ -101,11 +101,7 @@ class AddressDescription(BaseRecord):
         The address space of the lookup.
         """
     @property
-    def kind(self, /) -> str:
-        """
-        `kernel-module`, `user-image`, `kernel-region`, `private`,
-        `mapped`, or `unknown`.
-        """
+    def kind(self, /) -> Literal["kernel_module", "user_image", "kernel_region", "private", "mapped", "unknown", "physical", "vtl1", "foreign"]: ...
     @property
     def module(self, /) -> AddressModule |None:
         """
@@ -314,7 +310,7 @@ class AlpcMessage(BaseRecord):
     @property
     def owner_port(self, /) -> int: ...
     @property
-    def owner_port_kind(self, /) -> Literal["ALPC_CONNECTION_PORT", "ALPC_SERVER_COMMUNICATION_PORT", "ALPC_CLIENT_COMMUNICATION_PORT"] |None:
+    def owner_port_kind(self, /) -> Literal["connection", "server_communication", "client_communication"] |None:
         """
         The port type of the owner port.
         """
@@ -329,7 +325,7 @@ class AlpcMessage(BaseRecord):
         The port whose queue holds the message.
         """
     @property
-    def port_queue_kind(self, /) -> Literal["ALPC_CONNECTION_PORT", "ALPC_SERVER_COMMUNICATION_PORT", "ALPC_CLIENT_COMMUNICATION_PORT"] |None: ...
+    def port_queue_kind(self, /) -> Literal["connection", "server_communication", "client_communication"] |None: ...
     @property
     def port_queue_owner(self, /) -> int |None:
         """
@@ -419,7 +415,7 @@ class AlpcPort(BaseRecord):
     @property
     def handle_count(self, /) -> int: ...
     @property
-    def kind(self, /) -> Literal["ALPC_CONNECTION_PORT", "ALPC_SERVER_COMMUNICATION_PORT", "ALPC_CLIENT_COMMUNICATION_PORT"] |None: ...
+    def kind(self, /) -> Literal["connection", "server_communication", "client_communication"] |None: ...
     @property
     def max_message_length(self, /) -> int |None:
         """
@@ -551,7 +547,7 @@ class Amd64TrapFrame(BaseRecord):
         apart.
         """
     @property
-    def kind(self, /) -> Literal["interrupt", "exception", "system call", "Zw call"] |None:
+    def kind(self, /) -> Literal["interrupt", "exception", "system_call", "zw_call"] |None:
         """
         The entry that built the frame: `interrupt`, `exception`,
         `system call`, or `Zw call`. `None` if the entry is unknown (no or
@@ -866,10 +862,7 @@ class ApicIcr(BaseRecord):
     @property
     def raw(self, /) -> int: ...
     @property
-    def shorthand(self, /) -> str:
-        """
-        `none`, `self`, `all`, or `all-but-self`.
-        """
+    def shorthand(self, /) -> Literal["none", "self", "all", "all_but_self"]: ...
     @property
     def vector(self, /) -> int: ...
 
@@ -903,9 +896,9 @@ class ApicLvt(BaseRecord):
     @property
     def remote_irr(self, /) -> bool: ...
     @property
-    def timer_mode(self, /) -> str |None:
+    def timer_mode(self, /) -> Literal["one_shot", "periodic", "tsc_deadline", "reserved"] |None:
         """
-        The timer's mode: `one-shot`, `periodic`, or `TSC-deadline`.
+        The timer's mode; `None` for an entry other than the timer.
         """
     @property
     def vector(self, /) -> int: ...
@@ -1288,9 +1281,9 @@ class BlockMatch(BaseRecord):
     Where a searched address lands inside a heap, told apart by `kind`.
     """
     @property
-    def kind(self, /) -> Literal["nt-entry", "nt-lfh-block", "nt-virtual", "nt-segment", "page", "vs-chunk", "lfh-block", "range", "large"]:
+    def kind(self, /) -> Literal["nt_entry", "nt_lfh_block", "nt_virtual", "nt_segment", "page", "vs_chunk", "lfh_block", "range", "large"]:
         """
-        The variant: `nt-entry`, `nt-lfh-block`, `nt-virtual`, `nt-segment`, `page`, `vs-chunk`, `lfh-block`, `range`, `large`.
+        The variant: `nt_entry`, `nt_lfh_block`, `nt_virtual`, `nt_segment`, `page`, `vs_chunk`, `lfh_block`, `range`, `large`.
         """
     @final
     class Direct(BlockMatch):
@@ -1328,9 +1321,9 @@ class BlockMatch(BaseRecord):
         @property
         def index(self, /) -> int: ...
         @property
-        def kind(self, /) -> Literal["lfh-block"]:
+        def kind(self, /) -> Literal["lfh_block"]:
             """
-            `lfh-block`.
+            `lfh_block`.
             """
         @property
         def range(self, /) -> PageRange: ...
@@ -1345,9 +1338,9 @@ class BlockMatch(BaseRecord):
         @property
         def entry(self, /) -> NtEntry: ...
         @property
-        def kind(self, /) -> Literal["nt-entry"]:
+        def kind(self, /) -> Literal["nt_entry"]:
             """
-            `nt-entry`.
+            `nt_entry`.
             """
         @property
         def segment(self, /) -> int:
@@ -1366,9 +1359,9 @@ class BlockMatch(BaseRecord):
         @property
         def index(self, /) -> int: ...
         @property
-        def kind(self, /) -> Literal["nt-lfh-block"]:
+        def kind(self, /) -> Literal["nt_lfh_block"]:
             """
-            `nt-lfh-block`.
+            `nt_lfh_block`.
             """
         @property
         def region(self, /) -> NtUserBlocks: ...
@@ -1382,9 +1375,9 @@ class BlockMatch(BaseRecord):
         """
         __match_args__: Final[tuple[Literal["segment"], Literal["stopped"]]]
         @property
-        def kind(self, /) -> Literal["nt-segment"]:
+        def kind(self, /) -> Literal["nt_segment"]:
             """
-            `nt-segment`.
+            `nt_segment`.
             """
         @property
         def segment(self, /) -> int: ...
@@ -1403,9 +1396,9 @@ class BlockMatch(BaseRecord):
         @property
         def block(self, /) -> NtVirtualBlock: ...
         @property
-        def kind(self, /) -> Literal["nt-virtual"]:
+        def kind(self, /) -> Literal["nt_virtual"]:
             """
-            `nt-virtual`.
+            `nt_virtual`.
             """
     @final
     class RangeOnly(BlockMatch):
@@ -1430,9 +1423,9 @@ class BlockMatch(BaseRecord):
         @property
         def chunk(self, /) -> VsChunk: ...
         @property
-        def kind(self, /) -> Literal["vs-chunk"]:
+        def kind(self, /) -> Literal["vs_chunk"]:
             """
-            `vs-chunk`.
+            `vs_chunk`.
             """
         @property
         def range(self, /) -> PageRange: ...
@@ -1447,12 +1440,7 @@ class BlockedIrp(BaseRecord):
     """
     The IRP of a 0x9F/0x3: where it is pending, and its `_POP_IRP_DATA`.
     """
-    __match_args__: Final[tuple[Literal["irp"], Literal["holder"], Literal["data"]]]
-    @property
-    def data(self, /) -> PowerIrp |None:
-        """
-        The IRP's entry on the power IRP list, when it is there.
-        """
+    __match_args__: Final[tuple[Literal["irp"], Literal["holder"], Literal["power_irp"]]]
     @property
     def holder(self, /) -> Diagnostic[IrpHolder]:
         """
@@ -1460,6 +1448,11 @@ class BlockedIrp(BaseRecord):
         """
     @property
     def irp(self, /) -> int: ...
+    @property
+    def power_irp(self, /) -> PowerIrp |None:
+        """
+        The IRP's entry on the power IRP list, when it is there.
+        """
 
 @final
 class BootStatus(BaseRecord):
@@ -1677,7 +1670,7 @@ class Breakpoint:
         VM-exit breakpoint (`!hvexit`). None for any other breakpoint.
         """
     @property
-    def watch_access(self, /) -> str |None:
+    def watch_access(self, /) -> Literal["write", "read_write"] |None:
         """
         `write` or `read_write` for a data watchpoint. None for a code
         breakpoint.
@@ -1853,7 +1846,7 @@ class BreakpointInfo(BaseRecord):
         VM-exit breakpoint (`!hvexit`). None for any other breakpoint.
         """
     @property
-    def watch_access(self, /) -> str |None:
+    def watch_access(self, /) -> Literal["write", "read_write"] |None:
         """
         `write` or `read_write` for a data watchpoint. None for a code
         breakpoint.
@@ -2186,7 +2179,7 @@ class CallTrace(BaseRecord):
     """
     __match_args__: Final[tuple[Literal["root"], Literal["instructions"]]]
     @property
-    def end(self, /) -> str:
+    def end(self, /) -> Literal["returned", "limit", "interrupted", "breakpoint", "diverted", "failed"]:
         """
         `returned`, `limit`, `interrupted`, `breakpoint`, `diverted`, or
         `failed`. `interrupted` means Ctrl+C or the `timeout` ended it.
@@ -2246,7 +2239,7 @@ class CapturedRange(BaseRecord):
     @property
     def start(self, /) -> int: ...
     @property
-    def usage(self, /) -> Literal["Free", "Image", "Stack", "TEB", "PEB", "Heap", "<unknown>"]: ...
+    def usage(self, /) -> Literal["free", "image", "stack", "teb", "peb", "heap", "unknown"]: ...
 
 @final
 class CapturedStack(BaseRecord):
@@ -3333,7 +3326,7 @@ class Debugger:
         rebuild. A user-mode minidump has no kernel to find, and raises
         `NtoseyeError`.
         """
-    def run(self, /, timeout: float |None = None, *, address: int |str |None = None, disposition: Literal["handled", "not_handled"] |None = None) -> Stop |None:
+    def run(self, /, timeout: float |None = None, *, address: int |str |Process |Thread |Module |Driver |Device |Heap |None = None, disposition: Literal["handled", "not_handled"] |None = None) -> Stop |None:
         """
         Resume VM execution.
         
@@ -3376,7 +3369,7 @@ class Debugger:
         of a switch go stale (`generation` advances). The target must be halted.
         This feature is experimental.
         """
-    def step(self, /, timeout: float |None = None, *, until: Literal["call", "ret", "branch"] |int |str |None = None) -> Stop:
+    def step(self, /, timeout: float |None = None, *, until: Literal["call", "ret", "branch"] |int |str |Process |Thread |Module |Driver |Device |Heap |None = None) -> Stop:
         """
         Step one instruction (step into).
         """
@@ -3388,7 +3381,7 @@ class Debugger:
         from this call. Other threads that get to the address, and deeper calls of
         the same function, continue to run.
         """
-    def step_over(self, /, timeout: float |None = None, *, until: Literal["call", "ret", "branch"] |int |str |None = None) -> Stop:
+    def step_over(self, /, timeout: float |None = None, *, until: Literal["call", "ret", "branch"] |int |str |Process |Thread |Module |Driver |Device |Heap |None = None) -> Stop:
         """
         Step over the current instruction.
         
@@ -4420,7 +4413,7 @@ class Drivers:
         """
     def __iter__(self, /) -> Iterator[Driver]: ...
     def __len__(self, /) -> int: ...
-    def at(self, /, address: int) -> Driver |None:
+    def at(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> Driver |None:
         """
         The driver object at `address`, or the one whose image contains it.
         """
@@ -4559,17 +4552,14 @@ class ErrorCode(BaseRecord):
         The facility that the code encodes.
         """
     @property
-    def kind(self, /) -> str:
-        """
-        `NTSTATUS`, `HRESULT`, `Win32`, or `unknown`.
-        """
+    def kind(self, /) -> Literal["ntstatus", "hresult", "win32", "unknown"]: ...
     @property
     def name(self, /) -> str:
         """
         The symbolic name of the code.
         """
     @property
-    def severity(self, /) -> str |None:
+    def severity(self, /) -> Literal["success", "informational", "warning", "error"] |None:
         """
         `success`, `informational`, `warning`, or `error`. `None` for a
         Win32 code.
@@ -5283,7 +5273,7 @@ class ExceptionPolicy(BaseRecord):
         The commands that run when the exception occurs.
         """
     @property
-    def disposition(self, /) -> str |None:
+    def disposition(self, /) -> Literal["break", "handled", "not_handled"] |None:
         """
         An explicit final action: `break`, or continue as `handled` or
         `not_handled`. None for the default action of the mode.
@@ -6602,9 +6592,12 @@ class Heap:
         true.
         """
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["nt", "segment", "unknown"]: ...
+    @property
+    def signature(self, /) -> int |None:
         """
-        `nt`, `segment`, or `unknown (<signature>)`.
+        The `_HEAP.Signature` of an unknown heap (0 if ntoseye could not
+        classify it). None for NT and segment heaps.
         """
     @property
     def stats(self, /) -> Diagnostic[HeapStats]:
@@ -6643,10 +6636,7 @@ class HeapBlock(BaseRecord):
         The position in the region or subsegment. None for VS chunks.
         """
     @property
-    def kind(self, /) -> str:
-        """
-        `nt-lfh-block`, `vs-chunk`, or `lfh-block`.
-        """
+    def kind(self, /) -> Literal["nt_lfh_block", "vs_chunk", "lfh_block"]: ...
     @property
     def previous_size(self, /) -> int |None:
         """
@@ -6659,7 +6649,7 @@ class HeapBlock(BaseRecord):
         The size in bytes, with the header.
         """
     @property
-    def state(self, /) -> str:
+    def state(self, /) -> Literal["busy", "free"]:
         """
         `busy` or `free`.
         """
@@ -6739,10 +6729,7 @@ class HeapDetail(BaseRecord):
         Position in the PEB heap list.
         """
     @property
-    def kind(self, /) -> str:
-        """
-        `nt`, `segment`, or `unknown (<signature>)`.
-        """
+    def kind(self, /) -> Literal["nt", "segment", "unknown"]: ...
     @property
     def list_entries(self, /) -> bool:
         """
@@ -6760,6 +6747,12 @@ class HeapDetail(BaseRecord):
         The segment-heap decoding. None for other heap kinds or if the
         decoding failed.
         """
+    @property
+    def signature(self, /) -> int |None:
+        """
+        The `_HEAP.Signature` of an unknown heap (0 if ntoseye could not
+        classify it). None for NT and segment heaps.
+        """
 
 @final
 class HeapIdentity(BaseRecord):
@@ -6775,9 +6768,12 @@ class HeapIdentity(BaseRecord):
         Position in the PEB heap list.
         """
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["nt", "segment", "unknown"]: ...
+    @property
+    def signature(self, /) -> int |None:
         """
-        `nt`, `segment`, or `unknown (<signature>)`.
+        The `_HEAP.Signature` of an unknown heap (0 if ntoseye could not
+        classify it). None for NT and segment heaps.
         """
 
 @final
@@ -6797,9 +6793,12 @@ class HeapInfo(BaseRecord):
         The index of the heap in the PEB list.
         """
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["nt", "segment", "unknown"]: ...
+    @property
+    def signature(self, /) -> int |None:
         """
-        `nt`, `segment`, or `unknown (<signature>)`.
+        The `_HEAP.Signature` of an unknown heap (0 if ntoseye could not
+        classify it). None for NT and segment heaps.
         """
     @property
     def stats(self, /) -> Diagnostic[HeapStats]:
@@ -6866,7 +6865,7 @@ class Heaps:
     def __getitem__(self, index: int, /) -> Heap: ...
     def __iter__(self, /) -> Iterator[Heap]: ...
     def __len__(self, /) -> int: ...
-    def find_block(self, /, addr: int |str) -> HeapBlockSearch:
+    def find_block(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> HeapBlockSearch:
         """
         Find the heap block that contains `addr` (`!heap -x`).
         """
@@ -7743,7 +7742,7 @@ class ImageByteDiff(BaseRecord):
         The byte in the cached image.
         """
     @property
-    def kind(self, /) -> Literal["import optimization", "retpoline", "KiPatchSelf/JMP thunk", "kernel VA region rebase"] |None:
+    def kind(self, /) -> Literal["import_optimization", "retpoline", "ki_patch_self", "region_rebase"] |None:
         """
         The self-patch kind of the byte. `None` for a genuine mismatch.
         """
@@ -7812,14 +7811,14 @@ class ImageExports(BaseRecord):
     """
     A mapped image's export directory and the exports it lists (`!dh -e`).
     """
-    __match_args__: Final[tuple[Literal["directory"], Literal["exports"]]]
+    __match_args__: Final[tuple[Literal["directory"], Literal["entries"]]]
     @property
     def directory(self, /) -> ExportDirectory |None:
         """
         `None` if the image has no exports.
         """
     @property
-    def exports(self, /) -> list[ModuleExportInfo]: ...
+    def entries(self, /) -> list[ModuleExportInfo]: ...
 
 @final
 class ImageHeaders(BaseRecord):
@@ -7974,7 +7973,7 @@ class ImageSelfPatchRange(BaseRecord):
         The function that contains the patch, if a symbol covers it.
         """
     @property
-    def kind(self, /) -> Literal["import optimization", "retpoline", "KiPatchSelf/JMP thunk", "kernel VA region rebase"]: ...
+    def kind(self, /) -> Literal["import_optimization", "retpoline", "ki_patch_self", "region_rebase"]: ...
     @property
     def size(self, /) -> int:
         """
@@ -7989,7 +7988,9 @@ class ImportDescriptor(BaseRecord):
     One `IMAGE_IMPORT_DESCRIPTOR`, which identifies a DLL that the image
     imports from, and its entries.
     """
-    __match_args__: Final[tuple[Literal["import_name_table"], Literal["time_date_stamp"], Literal["forwarder_chain"], Literal["import_address_table"], Literal["imports"], Literal["incomplete"]]]
+    __match_args__: Final[tuple[Literal["import_name_table"], Literal["time_date_stamp"], Literal["forwarder_chain"], Literal["import_address_table"], Literal["entries"], Literal["incomplete"]]]
+    @property
+    def entries(self, /) -> list[ImportEntry]: ...
     @property
     def forwarder_chain(self, /) -> int: ...
     @property
@@ -8002,8 +8003,6 @@ class ImportDescriptor(BaseRecord):
         """
         `OriginalFirstThunk`.
         """
-    @property
-    def imports(self, /) -> list[ImportEntry]: ...
     @property
     def incomplete(self, /) -> str |None:
         """
@@ -8083,15 +8082,15 @@ class Inspect:
     raise `NtoseyeError`.
     """
     def __repr__(self, /) -> str: ...
-    def acl(self, /, address: int |str) -> Acl:
+    def acl(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> Acl:
         """
         Decode an ACL and its ACEs.
         """
-    def alpc_message(self, /, address: int |str) -> AlpcMessage:
+    def alpc_message(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> AlpcMessage:
         """
         Decode an ALPC message, a `_KALPC_MESSAGE` (`!alpc /m`).
         """
-    def alpc_port(self, /, address: int |str) -> AlpcPort:
+    def alpc_port(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> AlpcPort:
         """
         Decode an ALPC port (`!alpc /p`). The result has the port kind, owner,
         connection, state, and queues, and for a connection port also its
@@ -8167,7 +8166,7 @@ class Inspect:
         """
         List the process, thread, and image notification callbacks.
         """
-    def class_device(self, /, address: int |str) -> ClassDeviceDetail:
+    def class_device(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> ClassDeviceDetail:
         """
         Read the class device whose FDO, device extension, or private data
         is at `address`, with its requests in flight and its error log
@@ -8178,11 +8177,11 @@ class Inspect:
         List the storage class devices on `classpnp!AllFdosList`
         (`!storagekd.storclass`).
         """
-    def context_record(self, /, address: int) -> Frame:
+    def context_record(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> Frame:
         """
         Decode a CONTEXT record and return its register set as a `Frame` (`.cxr`).
         """
-    def control_area(self, /, address: int |str) -> ControlAreaDetail:
+    def control_area(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> ControlAreaDetail:
         """
         Decode the control area of a section, with its segment and subsections.
         
@@ -8202,11 +8201,11 @@ class Inspect:
         with it (`!analyze -show`), and for a DRIVER_POWER_STATE_FAILURE (0x9F),
         read what its parameters point to. The target must be a kernel.
         """
-    def device(self, /, address: int) -> Device:
+    def device(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> Device:
         """
         Return a handle for the `_DEVICE_OBJECT` at `address` (`!devobj`).
         """
-    def device_power(self, /, device: int |str) -> DevicePower:
+    def device_power(self, /, device: int |str |Process |Thread |Module |Driver |Device |Heap) -> DevicePower:
         """
         Show the power state of a device object.
         
@@ -8218,7 +8217,7 @@ class Inspect:
         outstanding, and the power IRPs on nt!PopIrpList sent to any device of the
         stack.
         """
-    def device_stack(self, /, device_or_node: int |str) -> DeviceStackDetail:
+    def device_stack(self, /, device_or_node: int |str |Process |Thread |Module |Driver |Device |Heap) -> DeviceStackDetail:
         """
         Show the device stack for a DEVICE_OBJECT or device node.
         
@@ -8228,7 +8227,7 @@ class Inspect:
         `>` marks the argument. After the stack, the command shows the device node
         of the PDO.
         """
-    def devnode(self, /, node: int |str |None = None, *, recurse: bool |None = None) -> DevNodeDetail:
+    def devnode(self, /, node: int |str |Process |Thread |Module |Driver |Device |Heap |None = None, *, recurse: bool |None = None) -> DevNodeDetail:
         """
         Show a PnP device node and, optionally, its subtree.
         
@@ -8302,7 +8301,7 @@ class Inspect:
         tracerpt open. `logger` is the logger ID, the context address, or the
         session name.
         """
-    def exception_record(self, /, address: int |str |None = None) -> ExceptionRecord:
+    def exception_record(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap |None = None) -> ExceptionRecord:
         """
         Show an EXCEPTION_RECORD64.
         """
@@ -8318,7 +8317,7 @@ class Inspect:
         free, and the bytes mapped and present. The command lists up to 1,024 files,
         and you can interrupt the walk.
         """
-    def file_object(self, /, address: int |str) -> FileObject:
+    def file_object(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> FileObject:
         """
         Decode a FILE_OBJECT and its relations to its device and name.
         """
@@ -8409,7 +8408,7 @@ class Inspect:
         processor as a sender, the command also shows the processors whose queues
         still hold its request.
         """
-    def irp(self, /, address: int |str) -> IrpInfo:
+    def irp(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> IrpInfo:
         """
         Show an IRP and its I/O stack locations.
         
@@ -8424,7 +8423,7 @@ class Inspect:
         such as 1, it first shows the IRP's status, requestor mode, user event and
         user buffer.
         """
-    def irp_find(self, /, *, pool_type: Literal["nonpaged", "paged"] |None = None, restart: int |str |None = None, criteria: str |None = None, value: int = 0) -> IrpFindDetail:
+    def irp_find(self, /, *, pool_type: Literal["nonpaged", "paged"] |None = None, restart: int |str |Process |Thread |Module |Driver |Device |Heap |None = None, criteria: Literal["arg", "device", "fileobject", "mdlprocess", "thread", "userevent"] |None = None, value: int = 0) -> IrpFindDetail:
         """
         Scan pool for the IRPs that IoAllocateIrp allocates.
         
@@ -8462,7 +8461,7 @@ class Inspect:
         """
         Find the in-flight IRPs in thread IrpLists and device CurrentIrp fields.
         """
-    def job(self, /, address: int |str |None = None) -> Job:
+    def job(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap |None = None) -> Job:
         """
         Show a job object and the processes in it.
         
@@ -8473,7 +8472,7 @@ class Inspect:
         jobs, the parent and root job, and the silo state. Flag 2 lists the
         processes assigned to the job (from ProcessListHead).
         """
-    def lookaside(self, /, address: int |str) -> LookasideDetail:
+    def lookaside(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> LookasideDetail:
         """
         Decode one `GENERAL_LOOKASIDE` (`!lookaside address`).
         """
@@ -8482,7 +8481,7 @@ class Inspect:
         List the exported nonpaged and paged `GENERAL_LOOKASIDE` lists
         (`!lookaside`), detecting cycles.
         """
-    def mdl(self, /, address: int |str, *, pfn_count: int |None = None) -> MdlDetail:
+    def mdl(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap, *, pfn_count: int |None = None) -> MdlDetail:
         """
         Decode a memory descriptor list and the page frames it describes.
         
@@ -8505,11 +8504,11 @@ class Inspect:
         recognized public getter code, and EPROCESS.Vm counters. It does not scan
         physical memory, and it does not walk all VADs.
         """
-    def ndis_filter(self, /, address: int |str) -> NdisFilterDetail:
+    def ndis_filter(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> NdisFilterDetail:
         """
         Read the NDIS filter module at `address` (`!ndiskd.filter <address>`).
         """
-    def ndis_filter_driver(self, /, address: int |str) -> NdisFilterDriverDetail:
+    def ndis_filter_driver(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> NdisFilterDriverDetail:
         """
         Read the NDIS filter driver block at `address` and its filter
         modules (`!ndiskd.filterdriver <address>`).
@@ -8522,7 +8521,7 @@ class Inspect:
         """
         List the NDIS filter modules of every miniport (`!ndiskd.filter`).
         """
-    def ndis_minidriver(self, /, address: int |str) -> NdisMinidriver:
+    def ndis_minidriver(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> NdisMinidriver:
         """
         Read the NDIS miniport driver block at `address` and its miniports
         (`!ndiskd.minidriver <address>`).
@@ -8531,7 +8530,7 @@ class Inspect:
         """
         List the NDIS miniport drivers (`!ndiskd.minidriver`).
         """
-    def ndis_miniport(self, /, address: int |str) -> NdisMiniportDetail:
+    def ndis_miniport(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> NdisMiniportDetail:
         """
         Read the NDIS miniport at `address` with its driver, filter stack,
         bindings, and pending OID request (`!ndiskd.miniport`).
@@ -8548,14 +8547,14 @@ class Inspect:
         interface index, and the friendly name. Virtual miniports, such as Hyper-V's
         adapters, are on the list too. The command needs the PDB for ndis.sys.
         """
-    def ndis_nbl(self, /, address: int |str, *, data: bool = False) -> NdisNbl:
+    def ndis_nbl(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap, *, data: bool = False) -> NdisNbl:
         """
         Decode the NET_BUFFER_LIST at `address` and its NET_BUFFERs
         (`!ndiskd.nbl`). With `data`, each NET_BUFFER's `data` holds up to
         64 KiB of its frame, read through its MDLs' PFNs, or `data_error` why it
         does not read (`!ndiskd.nbl -data`).
         """
-    def ndis_nbl_chain(self, /, address: int |str, *, data: bool = False) -> NdisNblChain:
+    def ndis_nbl_chain(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap, *, data: bool = False) -> NdisNblChain:
         """
         Decode the NET_BUFFER_LISTs on the `Next` chain from `address`
         (`!ndiskd.nbl -chain`). With `data`, each NET_BUFFER's `data` holds up
@@ -8573,7 +8572,7 @@ class Inspect:
         requests, so a request that stays here holds up the ones behind it. The
         command needs the PDB for ndis.sys.
         """
-    def ndis_protocol(self, /, address: int |str) -> NdisProtocolDetail:
+    def ndis_protocol(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> NdisProtocolDetail:
         """
         Read the NDIS protocol block at `address` and its bindings
         (`!ndiskd.protocol <address>`).
@@ -8582,7 +8581,7 @@ class Inspect:
         """
         List the NDIS protocol drivers (`!ndiskd.protocol`).
         """
-    def object(self, /, object: int |str) -> ObjectDetail:
+    def object(self, /, object: int |str |Process |Thread |Module |Driver |Device |Heap) -> ObjectDetail:
         """
         Show an executive object header and body, and list the entries of a directory.
         
@@ -8591,7 +8590,7 @@ class Inspect:
         the root directory and ignores case. It does not follow symbolic links in
         the path. For a directory, the command lists the entries and their types.
         """
-    def object_security(self, /, object: int |str) -> ObjectSecurity:
+    def object_security(self, /, object: int |str |Process |Thread |Module |Driver |Device |Heap) -> ObjectSecurity:
         """
         Decode the security descriptor that an object header references.
         
@@ -8634,11 +8633,11 @@ class Inspect:
         Show the PnP device nodes that have problems, pending IRPs, or incomplete
         starts.
         """
-    def pool(self, /, address: int |str) -> PoolPageDetail:
+    def pool(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> PoolPageDetail:
         """
         Show the pool page that contains an address.
         """
-    def pool_find(self, /, tag: str, *, pool_type: Literal["NonPagedPool", "PagedPool"] |None = None) -> PoolFindDetail:
+    def pool_find(self, /, tag: str, *, pool_type: Literal["nonpaged", "paged"] |None = None) -> PoolFindDetail:
         """
         Find pool blocks with a matching tag.
         
@@ -8649,7 +8648,7 @@ class Inspect:
         (0) or paged (1) pool. The scan stops after 1,024 matches, and you can
         interrupt it.
         """
-    def pool_usage(self, /, tag: str |None = None, *, sort: Literal["tag", "nonpaged_bytes", "paged_bytes"] = ...) -> PoolUsageDetail:
+    def pool_usage(self, /, tag: str |None = None, *, sort: Literal["tag", "nonpaged", "paged"] = ...) -> PoolUsageDetail:
         """
         Show pool tracker usage by tag.
         
@@ -8658,7 +8657,7 @@ class Inspect:
         paged bytes, and bit 0 (1) shows the alloc/free columns. The tag match is
         case-sensitive and supports * and ?.
         """
-    def pool_validate(self, /, address: int |str) -> PoolValidationDetail:
+    def pool_validate(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> PoolValidationDetail:
         """
         Check the block headers of the pool page that contains an address.
         
@@ -8703,7 +8702,7 @@ class Inspect:
         List the drivers the WPP recorder keeps logs for
         (`!rcdrkd.rcdrloglist`).
         """
-    def rcdr_log(self, /, driver: str, *, log: int |str |None = None) -> RcdrLogDump:
+    def rcdr_log(self, /, driver: str, *, log: int |str |Process |Thread |Module |Driver |Device |Heap |None = None) -> RcdrLogDump:
         """
         Show a driver's WPP recorder log records, oldest first.
         
@@ -8740,7 +8739,7 @@ class Inspect:
         reports null links, cycles, unreadable links, and when it reaches its entry
         limit.
         """
-    def registry_cell(self, /, hive: int |str, cell: int) -> CellLocation:
+    def registry_cell(self, /, hive: int |str |Process |Thread |Module |Driver |Device |Heap, cell: int) -> CellLocation:
         """
         Find where cell index `cell` of the hive at `hive` is, through the
         hive's cell map (`!reg cellindex`).
@@ -8757,7 +8756,7 @@ class Inspect:
         `\\REGISTRY\\MACHINE\\...`, with its subkeys and its values, each
         value's data typed by its type (`!reg querykey`).
         """
-    def registry_key_at(self, /, hive: int |str, node: int |str) -> RegKey:
+    def registry_key_at(self, /, hive: int |str |Process |Thread |Module |Driver |Device |Heap, node: int |str |Process |Thread |Module |Driver |Device |Heap) -> RegKey:
         """
         Read the registry key whose key node (`_CM_KEY_NODE`) is at `node`
         in the hive at `hive` (`!reg keyinfo`).
@@ -8768,7 +8767,7 @@ class Inspect:
         key's default value. Its `data` is a `str`, a `list[str]`, an `int`,
         or `bytes`, by the value's type (`!reg querykey <path> -v <name>`).
         """
-    def resource(self, /, address: int |str) -> ExecutiveResource:
+    def resource(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> ExecutiveResource:
         """
         Decode an executive resource (`!locks address`).
         """
@@ -8784,7 +8783,7 @@ class Inspect:
         -i includes idle threads, and -t adds a short kernel stack, with a frame
         limit, for each processor.
         """
-    def security_descriptor(self, /, address: int |str) -> SecurityDescriptor:
+    def security_descriptor(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> SecurityDescriptor:
         """
         Decode a SECURITY_DESCRIPTOR and its ACLs.
         
@@ -8819,7 +8818,7 @@ class Inspect:
         nt!NtGlobalFlag; the PEB copy does not change. The result's `change`
         has the value before and after.
         """
-    def sid(self, /, address: int |str) -> Sid:
+    def sid(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> Sid:
         """
         Decode a SID in guest memory.
         """
@@ -8830,7 +8829,7 @@ class Inspect:
         structure it holds (`!sysinfo smbios`; `!sysinfo machineid` shows the
         identity strings of the same table).
         """
-    def srb(self, /, address: int |str) -> Srb:
+    def srb(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> Srb:
         """
         Decode an SRB: its function, status, command, address, data, and sense.
         
@@ -8856,7 +8855,7 @@ class Inspect:
         Level 0 shows one frame. Levels 1 and 2 add the full stacks, with a frame
         limit. The optional filter matches process or stack symbols.
         """
-    def storport_adapter(self, /, address: int |str) -> StorAdapter:
+    def storport_adapter(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> StorAdapter:
         """
         Read the StorPort adapter whose extension or FDO is at `address`
         (`!storagekd.storadapter <address>`).
@@ -8866,7 +8865,7 @@ class Inspect:
         List StorPort's drivers, their adapters, and their units
         (`!storagekd.storadapter`).
         """
-    def storport_log(self, /, address: int |str) -> StorLog:
+    def storport_log(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> StorLog:
         """
         Show a StorPort adapter's internal log of requests, pauses, and resumes.
         
@@ -8881,7 +8880,7 @@ class Inspect:
         <start> shows entries from that number, <start> <end> that range, and L
         <count> how many.
         """
-    def storport_unit(self, /, address: int |str) -> StorUnit:
+    def storport_unit(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> StorUnit:
         """
         Show a StorPort logical unit, its queue, and the requests the miniport
         holds.
@@ -8923,7 +8922,7 @@ class Inspect:
         """
         Show the target UTC time and the system uptime.
         """
-    def timer(self, /, address: int |str) -> KernelTimer:
+    def timer(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> KernelTimer:
         """
         Decode a `_KTIMER` and its DPC (`!timer address`).
         """
@@ -8932,7 +8931,7 @@ class Inspect:
         Read the kernel timer-table entries, up to a limit, and their DPCs
         (`!timer`).
         """
-    def trap_frame(self, /, address: int) -> KtrapFrame:
+    def trap_frame(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> KtrapFrame:
         """
         Decode a `_KTRAP_FRAME` at `address` (`.trap`).
         """
@@ -8960,7 +8959,7 @@ class Inspect:
         queue where the driver's private PDB types it. A queue's `progress`
         counters only grow, so two calls show what moved in between.
         """
-    def virtio_driver(self, /, address: int |str, *, module: str |None = None) -> VirtioDriver:
+    def virtio_driver(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap, *, module: str |None = None) -> VirtioDriver:
         """
         Read the `virtio_device` at `address` as its virtio-win driver sees it,
         with its queues, named when its PCI function is found
@@ -8976,7 +8975,7 @@ class Inspect:
         accepts bits 1, 2, and 3 but ignores them. If the command cannot read a
         counter, it still shows the other counters.
         """
-    def vpb(self, /, address: int |str) -> VpbDetail:
+    def vpb(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> VpbDetail:
         """
         Decode a volume parameter block.
         
@@ -8986,7 +8985,7 @@ class Inspect:
         device object points to the VPB. If the Type at the address is not
         IO_TYPE_VPB, the command shows an error.
         """
-    def vring(self, /, address: int |str, *, module: str |None = None, kind: Literal["blk", "scsi", "scsi-control", "scsi-event", "net", "net-control", "gpu", "vsock"] |None = None) -> VirtioRing:
+    def vring(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap, *, module: str |None = None, kind: Literal["blk", "scsi", "scsi_control", "scsi_event", "net", "net_control", "gpu", "vsock"] |None = None) -> VirtioRing:
         """
         Read the virtio-win virtqueue at `address` (`!vring`): its ring, the
         buffers the device holds or returned, and the request each carries.
@@ -8994,14 +8993,14 @@ class Inspect:
         `add_buf` routine is in. `kind` says what its buffers hold, by default
         what its device's type and the queue's index say.
         """
-    def vring_raw(self, /, size: int, desc: int |str, avail: int |str, used: int |str, *, kind: Literal["blk", "scsi", "scsi-control", "scsi-event", "net", "net-control", "gpu", "vsock"] |None = None) -> VirtioRing:
+    def vring_raw(self, /, size: int, desc: int |str |Process |Thread |Module |Driver |Device |Heap, avail: int |str |Process |Thread |Module |Driver |Device |Heap, used: int |str |Process |Thread |Module |Driver |Device |Heap, *, kind: Literal["blk", "scsi", "scsi_control", "scsi_event", "net", "net_control", "gpu", "vsock"] |None = None) -> VirtioRing:
         """
         Read a split ring from its size and the kernel addresses of its
         descriptor table, avail ring and used ring (`!vring /r`), for a driver
         without a PDB. `kind` says what its buffers hold, for decoding their
         requests (`/t`).
         """
-    def vtop(self, /, directory_base: int, address: int |str) -> VtopDetail:
+    def vtop(self, /, directory_base: int, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> VtopDetail:
         """
         Translate a virtual address with an explicit directory base.
         
@@ -9205,20 +9204,14 @@ class Inspect:
 class IoIntercepts(BaseRecord):
     """
     Which I/O instructions of a VTL exit (`!hvvmcs -io`), by its eVMCS's
-    controls and I/O bitmaps. `kind` is `none` (no I/O bitmaps and no
+    controls and I/O bitmaps: `never` (no I/O bitmaps and no
     unconditional I/O exiting), `every` (unconditional I/O exiting), or
     `bitmaps`.
     """
     @property
-    def every(self, /) -> bool:
+    def kind(self, /) -> Literal["never", "every", "bitmaps"]:
         """
-        Whether every I/O instruction exits: the controls use no I/O
-        bitmaps but unconditional I/O exiting.
-        """
-    @property
-    def kind(self, /) -> Literal["none", "every", "bitmaps"]:
-        """
-        The variant: `none`, `every`, `bitmaps`.
+        The variant: `never`, `every`, `bitmaps`.
         """
     @final
     class Bitmaps(IoIntercepts):
@@ -9243,12 +9236,12 @@ class IoIntercepts(BaseRecord):
             `every`.
             """
     @final
-    class None(IoIntercepts):
+    class Never(IoIntercepts):
         __match_args__: Final[tuple[()]]
         @property
-        def kind(self, /) -> Literal["none"]:
+        def kind(self, /) -> Literal["never"]:
             """
-            `none`.
+            `never`.
             """
 
 @final
@@ -9470,7 +9463,7 @@ class IrpFindCriteria(BaseRecord):
     """
     __match_args__: Final[tuple[Literal["name"], Literal["value"]]]
     @property
-    def name(self, /) -> str:
+    def name(self, /) -> Literal["arg", "device", "fileobject", "mdlprocess", "thread", "userevent"]:
         """
         `arg`, `device`, `fileobject`, `mdlprocess`, `thread`, or
         `userevent`.
@@ -9597,7 +9590,7 @@ class IrpHit(BaseRecord):
         The process that issued the IRP. None if ntoseye found the IRP on a device.
         """
     @property
-    def source(self, /) -> str:
+    def source(self, /) -> Literal["thread", "device"]:
         """
         Where ntoseye found the IRP: `thread` or `device`.
         """
@@ -10606,7 +10599,7 @@ class Memory:
     A guest address space: `dbg.memory` (kernel), `proc.memory`, `cpu.memory`,
     or `dbg.physical`.
     """
-    def describe(self, /, address: int |str) -> AddressDescription:
+    def describe(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> AddressDescription:
         """
         Describe what `address` belongs to (`!address <address>`): its kind (a
         kernel module, a user image, a kernel region, private or mapped user
@@ -10614,7 +10607,7 @@ class Memory:
         user-mode minidump, `Debugger.user_dump.address_report(address)` reads
         the dump's memory-info list instead.
         """
-    def disassemble(self, /, addr: int |str, count: int) -> list[DisasmRow]:
+    def disassemble(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, count: int) -> list[DisasmRow]:
         """
         Disassemble memory at a symbol or address.
         
@@ -10625,11 +10618,11 @@ class Memory:
         steps, or when you select another frame, thread, or process, it starts at
         the instruction pointer instead.
         """
-    def disassemble_back(self, /, addr: int |str, count: int) -> list[DisasmRow]:
+    def disassemble_back(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, count: int) -> list[DisasmRow]:
         """
         Disassemble the instructions that end at an address.
         """
-    def disassemble_function(self, /, addr: int |str) -> FunctionDisassembly:
+    def disassemble_function(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> FunctionDisassembly:
         """
         Disassemble the function that contains an address.
         
@@ -10644,7 +10637,7 @@ class Memory:
         The directory-table base that this space uses. A user-mode minidump
         has none, and raises `NtoseyeError`.
         """
-    def function_entry(self, /, addr: int |str) -> FunctionEntry:
+    def function_entry(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> FunctionEntry:
         """
         Show the function table entry and unwind info of the function that
         contains an address.
@@ -10660,7 +10653,7 @@ class Memory:
         instruction that it undoes, and the exception handler. If a function table
         is paged out, .fnent reads it from the image file on disk.
         """
-    def page_in(self, /, addr: int |str) -> bool:
+    def page_in(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> bool:
         """
         Make `addr` resident with the guest debugger worker (`.pagein`), which
         resumes the guest. When the worker completes, the guest stops and the
@@ -10671,7 +10664,7 @@ class Memory:
         """
         The guest pointer width, in bytes (`$ptrsize`).
         """
-    def pte(self, /, address: int |str) -> PteWalk:
+    def pte(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> PteWalk:
         """
         Show the page table entries for an address.
         """
@@ -10683,85 +10676,85 @@ class Memory:
         The command walks the page tables in reverse and detects cycles in them. The
         walk stops after 32 mappings or 65,536 table pages.
         """
-    def read(self, /, addr: int, n: int) -> bytes:
+    def read(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, n: int) -> bytes:
         """
         Read `n` bytes. A virtual read hides the breakpoint opcodes of this
         debugger.
         """
-    def read_ansi_string(self, /, addr: int, bits: int |None = None) -> str:
+    def read_ansi_string(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, bits: int |None = None) -> str:
         """
         Decode the `_STRING`/`ANSI_STRING` descriptor at `addr` (`ds`). `bits`
         sets the layout, as in `read_unicode_string`.
         """
-    def read_pointer(self, /, addr: int) -> int:
+    def read_pointer(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> int:
         """
         Read a pointer-sized value at `addr` (`poi`).
         """
-    def read_string(self, /, addr: int, max_len: int = 256) -> str:
+    def read_string(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, max_len: int = 256) -> str:
         """
         Read a NUL-terminated ANSI string at `addr` (`da`).
         """
-    def read_u16(self, /, addr: int) -> int:
+    def read_u16(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> int:
         """
         Read a little-endian 16-bit integer.
         """
-    def read_u32(self, /, addr: int) -> int:
+    def read_u32(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> int:
         """
         Read a little-endian 32-bit integer.
         """
-    def read_u64(self, /, addr: int) -> int:
+    def read_u64(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> int:
         """
         Read a little-endian 64-bit integer.
         """
-    def read_u8(self, /, addr: int) -> int:
+    def read_u8(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> int:
         """
         Read a little-endian byte.
         """
-    def read_unicode_string(self, /, addr: int, bits: int |None = None) -> str:
+    def read_unicode_string(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, bits: int |None = None) -> str:
         """
         Decode the `_UNICODE_STRING` descriptor at `addr` (`dS`). `bits` sets
         the layout: 32 for the x86 descriptors of a WOW64 process and 64 for
         native descriptors. By default, the `.effmach` setting selects the
         layout.
         """
-    def read_wstring(self, /, addr: int, max_len: int = 256) -> str:
+    def read_wstring(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, max_len: int = 256) -> str:
         """
         Read a NUL-terminated UTF-16 string at `addr` (`du`).
         """
-    def search(self, /, pattern: bytes, start: int, length: int) -> list[MemorySearchMatch]:
+    def search(self, /, pattern: bytes, start: int |str |Process |Thread |Module |Driver |Device |Heap, length: int) -> list[MemorySearchMatch]:
         """
         Find matches, including overlapping ones, with symbol/module/VAD
         context. In a virtual space, the search skips pages that it cannot read,
         the breakpoints of this session read as the code that they replaced, and
         the search returns a maximum of 4096 matches.
         """
-    def translate(self, /, addr: int) -> int |None:
+    def translate(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> int |None:
         """
         Translate a virtual address with the page tables of this space (`!vtop`).
         """
-    def translation(self, /, addr: int) -> VtopDetail:
+    def translation(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> VtopDetail:
         """
         Get the page-table walk and the final translation of `addr` in this
         space's page tables (`!vtop` with this space's DTB). It works in every
         virtual space, VTL1 and roots outside NT included.
         """
-    def write(self, /, addr: int, data: bytes) -> None:
+    def write(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, data: bytes) -> None:
         """
         Write bytes to this address space.
         """
-    def write_u16(self, /, addr: int, value: int) -> None:
+    def write_u16(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, value: int) -> None:
         """
         Write a little-endian 16-bit integer.
         """
-    def write_u32(self, /, addr: int, value: int) -> None:
+    def write_u32(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, value: int) -> None:
         """
         Write a little-endian 32-bit integer.
         """
-    def write_u64(self, /, addr: int, value: int) -> None:
+    def write_u64(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, value: int) -> None:
         """
         Write a little-endian 64-bit integer.
         """
-    def write_u8(self, /, addr: int, value: int) -> None:
+    def write_u8(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, value: int) -> None:
         """
         Write a little-endian byte.
         """
@@ -10945,11 +10938,9 @@ class MemorySearchMatch(BaseRecord):
         The address of the match.
         """
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["kernel_module", "user_image", "kernel_region", "private", "mapped", "unknown", "physical", "vtl1", "foreign"]:
         """
-        The kind of address: `kernel-module`, `user-image`,
-        `kernel-region`, `private`, `mapped`, `unknown`, `physical`,
-        `vtl1`, or `foreign` (a root outside NT and VTL1).
+        The kind of address.
         """
     @property
     def module(self, /) -> AddressModule |None:
@@ -11226,7 +11217,7 @@ class ModuleImageInfo(BaseRecord):
     from its mapped headers, the debug directory, which includes the CodeView
     PDB name, GUID, and age, and the symbol state.
     """
-    __match_args__: Final[tuple[Literal["module"], Literal["debug_directory"], Literal["symbols"], Literal["symbol_file"]]]
+    __match_args__: Final[tuple[Literal["info"], Literal["debug_directory"], Literal["symbols"], Literal["symbol_file"]]]
     @property
     def characteristics(self, /) -> int: ...
     @property
@@ -11239,14 +11230,14 @@ class ModuleImageInfo(BaseRecord):
     @property
     def debug_directory(self, /) -> Diagnostic[list[DebugRecord]]: ...
     @property
+    def info(self, /) -> ModuleInfo: ...
+    @property
     def machine(self, /) -> int: ...
     @property
     def machine_name(self, /) -> str:
         """
         `X64`, `X86`, `ARM64`, ...
         """
-    @property
-    def module(self, /) -> ModuleInfo: ...
     @property
     def size_of_image(self, /) -> int: ...
     @property
@@ -11331,9 +11322,9 @@ class ModuleListing(BaseRecord):
     A loaded module with its symbols' state (`lm`, a kernel module's
     `Module.inspect()`).
     """
-    __match_args__: Final[tuple[Literal["module"], Literal["symbols"]]]
+    __match_args__: Final[tuple[Literal["info"], Literal["symbols"]]]
     @property
-    def module(self, /) -> ModuleInfo: ...
+    def info(self, /) -> ModuleInfo: ...
     @property
     def symbols(self, /) -> ModuleSymbols: ...
 
@@ -11427,9 +11418,9 @@ class ModuleSymbols(BaseRecord):
         The source of the PDB, if known.
         """
     @property
-    def status(self, /) -> str:
+    def status(self, /) -> Literal["loaded", "no_pdb", "skipped", "failed", "fetching", "unknown"]:
         """
-        `loaded`, `no-pdb`, `skipped`, `failed`, `fetching` or `unknown`.
+        The symbol state of the module.
         """
 
 @final
@@ -11448,7 +11439,7 @@ class Modules:
         """
     def __iter__(self, /) -> Iterator[Module]: ...
     def __len__(self, /) -> int: ...
-    def at(self, /, address: int) -> Module |None:
+    def at(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> Module |None:
         """
         The module that contains `address`, or `None` if no module contains
         it.
@@ -12390,7 +12381,7 @@ class NotifyCallback(BaseRecord):
         The slot of the callback in the kernel callback array.
         """
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["process", "thread", "image"]:
         """
         `process`, `thread`, or `image`.
         """
@@ -12443,7 +12434,7 @@ class NtEntry(BaseRecord):
         The size in bytes, with the header.
         """
     @property
-    def state(self, /) -> str:
+    def state(self, /) -> Literal["busy", "free"]:
         """
         `busy` or `free`.
         """
@@ -12469,9 +12460,9 @@ class NtEntryDetail(BaseRecord):
     """
     An NT-heap entry with the legacy-LFH region it holds.
     """
-    __match_args__: Final[tuple[Literal["entry"], Literal["lfh"], Literal["lfh_blocks"], Literal["lfh_truncated"], Literal["lfh_error"]]]
+    __match_args__: Final[tuple[Literal["header"], Literal["lfh"], Literal["lfh_blocks"], Literal["lfh_truncated"], Literal["lfh_error"]]]
     @property
-    def entry(self, /) -> NtEntry: ...
+    def header(self, /) -> NtEntry: ...
     @property
     def lfh(self, /) -> NtUserBlocks |None:
         """
@@ -12557,9 +12548,9 @@ class NtHeapDetail(BaseRecord):
     """
     An NT heap with its segments.
     """
-    __match_args__: Final[tuple[Literal["heap"], Literal["segments"]]]
+    __match_args__: Final[tuple[Literal["header"], Literal["segments"]]]
     @property
-    def heap(self, /) -> NtHeap: ...
+    def header(self, /) -> NtHeap: ...
     @property
     def segments(self, /) -> list[NtSegmentDetail]: ...
 
@@ -12603,14 +12594,14 @@ class NtSegmentDetail(BaseRecord):
     """
     An NT-heap segment with its entry chain.
     """
-    __match_args__: Final[tuple[Literal["segment"], Literal["entries"], Literal["stopped"]]]
+    __match_args__: Final[tuple[Literal["header"], Literal["entries"], Literal["stopped"]]]
     @property
     def entries(self, /) -> list[NtEntryDetail]:
         """
         The entry chain of the segment. Empty unless the entries were listed.
         """
     @property
-    def segment(self, /) -> NtSegment: ...
+    def header(self, /) -> NtSegment: ...
     @property
     def stopped(self, /) -> HeapWalkStop |None:
         """
@@ -12738,14 +12729,14 @@ class ObjectDetail(BaseRecord):
     An executive object with its header, type, and name, and the entries of
     a directory (`!object`).
     """
-    __match_args__: Final[tuple[Literal["header"], Literal["entries"]]]
+    __match_args__: Final[tuple[Literal["info"], Literal["entries"]]]
     @property
     def entries(self, /) -> list[ObjectDirectoryEntry] |None:
         """
         The entries of a directory, by name. None for all other objects.
         """
     @property
-    def header(self, /) -> ObjectHeaderDetail: ...
+    def info(self, /) -> ObjectHeaderDetail: ...
 
 @final
 class ObjectDirectoryEntry(BaseRecord):
@@ -12788,7 +12779,7 @@ class ObjectHeaderDetail(BaseRecord):
         The address that you gave.
         """
     @property
-    def mode(self, /) -> str:
+    def mode(self, /) -> Literal["body", "header"]:
         """
         `body` if the input pointed to the object body, or `header` if it
         pointed to the object header.
@@ -13091,9 +13082,9 @@ class PartitionFilter(BaseRecord):
     another partition's or the target's own mapped there. Which VP ran it is
     known only once the hit arrives, from the processor's current VP.
     """
-    __match_args__: Final[tuple[Literal["partition"], Literal["vp"]]]
+    __match_args__: Final[tuple[Literal["id"], Literal["vp"]]]
     @property
-    def partition(self, /) -> int:
+    def id(self, /) -> int:
         """
         The partition ID.
         """
@@ -13839,10 +13830,7 @@ class PoolBlockDetail(BaseRecord):
         The block size in bytes, with the header.
         """
     @property
-    def state(self, /) -> str:
-        """
-        `allocated`, `free`, or a description of what is wrong.
-        """
+    def state(self, /) -> Literal["allocated", "free", "allocated_unverified"]: ...
     @property
     def tag(self, /) -> int: ...
     @property
@@ -13880,7 +13868,7 @@ class PoolFindDetail(BaseRecord):
     @property
     def matches(self, /) -> list[PoolFindMatch]: ...
     @property
-    def pool_type(self, /) -> Literal["NonPagedPool", "PagedPool"] |None:
+    def pool_type(self, /) -> Literal["nonpaged", "paged"] |None:
         """
         The pool that the search was limited to, if any.
         """
@@ -13913,7 +13901,7 @@ class PoolFindMatch(BaseRecord):
         The `PoolBigPageTable` index, for a big-pool match.
         """
     @property
-    def pool_type(self, /) -> Literal["NonPagedPool", "PagedPool"] |None:
+    def pool_type(self, /) -> Literal["nonpaged", "paged"] |None:
         """
         The pool, when known.
         """
@@ -13929,7 +13917,7 @@ class PoolFindMatch(BaseRecord):
         table.
         """
     @property
-    def state(self, /) -> str: ...
+    def state(self, /) -> Literal["allocated", "free", "allocated_unverified"]: ...
     @property
     def table_entry(self, /) -> int |None:
         """
@@ -14097,7 +14085,7 @@ class PoolUsageDetail(BaseRecord):
         Whether more tags matched than are listed.
         """
     @property
-    def sort(self, /) -> Literal["tag", "nonpaged_bytes", "paged_bytes"]: ...
+    def sort(self, /) -> Literal["tag", "nonpaged", "paged"]: ...
     @property
     def tag_filter(self, /) -> str |None:
         """
@@ -14155,10 +14143,7 @@ class PoolValidationDetail(BaseRecord):
     @property
     def blocks(self, /) -> list[PoolBlockDetail]: ...
     @property
-    def layout(self, /) -> str:
-        """
-        `chained` (the classic pool) or `segment heap`.
-        """
+    def layout(self, /) -> Literal["chained", "segment_heap"]: ...
     @property
     def page(self, /) -> int:
         """
@@ -14254,14 +14239,14 @@ class PowerActionDetail(BaseRecord):
     `!poaction`: the power action, the power IRPs, and the IRP worker
     threads.
     """
-    __match_args__: Final[tuple[Literal["action"], Literal["irps"], Literal["workers"]]]
-    @property
-    def action(self, /) -> PowerAction: ...
+    __match_args__: Final[tuple[Literal["record"], Literal["irps"], Literal["workers"]]]
     @property
     def irps(self, /) -> Diagnostic[PowerIrpList]:
         """
         The power IRPs on `nt!PopIrpList`.
         """
+    @property
+    def record(self, /) -> PowerAction: ...
     @property
     def workers(self, /) -> Diagnostic[PowerWorkerList]:
         """
@@ -14404,9 +14389,9 @@ class PowerFailureFinding(BaseRecord):
     What a DRIVER_POWER_STATE_FAILURE (0x9F) names, read from the target,
     and the stacks of the threads involved.
     """
-    __match_args__: Final[tuple[Literal["failure"], Literal["threads"]]]
+    __match_args__: Final[tuple[Literal["record"], Literal["threads"]]]
     @property
-    def failure(self, /) -> PowerFailure: ...
+    def record(self, /) -> PowerFailure: ...
     @property
     def threads(self, /) -> list[PowerFailureThread]: ...
 
@@ -14496,14 +14481,14 @@ class PowerIrpEntry(BaseRecord):
     An entry on a list of `_POP_IRP_DATA`: the power IRP, or why it does
     not decode.
     """
-    __match_args__: Final[tuple[Literal["data"], Literal["irp"]]]
+    __match_args__: Final[tuple[Literal["data"], Literal["power_irp"]]]
     @property
     def data(self, /) -> int:
         """
         The `_POP_IRP_DATA`.
         """
     @property
-    def irp(self, /) -> Diagnostic[PowerIrp]: ...
+    def power_irp(self, /) -> Diagnostic[PowerIrp]: ...
 
 @final
 class PowerIrpList(BaseRecord):
@@ -14767,7 +14752,7 @@ class Process:
         """
         Decode the kernel and user APC queues of this process (`!apc`).
         """
-    def decode_peb(self, /, address: int |str |None = None) -> Peb:
+    def decode_peb(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap |None = None) -> Peb:
         """
         Decode the process environment block and process parameters of the
         current process.
@@ -14839,7 +14824,7 @@ class Process:
         explorer.exe` shows explorer.exe, and `!process svchost 0` lists each
         svchost.exe. `ps` keeps its short legacy list format.
         """
-    def loader_modules(self, /, *, containing: int |str |None = None) -> LoaderModules:
+    def loader_modules(self, /, *, containing: int |str |Process |Thread |Module |Driver |Device |Heap |None = None) -> LoaderModules:
         """
         List the modules in the loader lists of the current process.
         
@@ -14885,7 +14870,7 @@ class Process:
         """
         The parent process identifier.
         """
-    def protection(self, /, address: int |str) -> MemoryBasicInformation:
+    def protection(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> MemoryBasicInformation:
         """
         Show the VirtualQuery data for a user address.
         
@@ -14959,7 +14944,7 @@ class ProcessDetail(BaseRecord):
     `_EPROCESS` fields. Each field is `None` when this build's layout lacks
     it or its read failed.
     """
-    __match_args__: Final[tuple[Literal["process"], Literal["session_id"], Literal["peb"], Literal["parent_pid"], Literal["directory_table_base"], Literal["object_table"], Literal["handle_count"], Literal["vad_root"], Literal["token"], Literal["create_time"], Literal["user_time"], Literal["kernel_time"], Literal["quota_paged_pool"], Literal["quota_nonpaged_pool"], Literal["working_set_size"], Literal["commit_charge"], Literal["peak_virtual_size"], Literal["private_page_count"], Literal["debug_port"], Literal["job"]]]
+    __match_args__: Final[tuple[Literal["info"], Literal["session_id"], Literal["peb"], Literal["parent_pid"], Literal["directory_table_base"], Literal["object_table"], Literal["handle_count"], Literal["vad_root"], Literal["token"], Literal["create_time"], Literal["user_time"], Literal["kernel_time"], Literal["quota_paged_pool"], Literal["quota_nonpaged_pool"], Literal["working_set_size"], Literal["commit_charge"], Literal["peak_virtual_size"], Literal["private_page_count"], Literal["debug_port"], Literal["job"]]]
     @property
     def commit_charge(self, /) -> int |None: ...
     @property
@@ -14973,6 +14958,8 @@ class ProcessDetail(BaseRecord):
     def directory_table_base(self, /) -> int |None: ...
     @property
     def handle_count(self, /) -> int |None: ...
+    @property
+    def info(self, /) -> ProcessInfo: ...
     @property
     def job(self, /) -> int |None: ...
     @property
@@ -14990,8 +14977,6 @@ class ProcessDetail(BaseRecord):
         """
     @property
     def private_page_count(self, /) -> int |None: ...
-    @property
-    def process(self, /) -> ProcessInfo: ...
     @property
     def quota_nonpaged_pool(self, /) -> int |None: ...
     @property
@@ -15224,7 +15209,7 @@ class PteLevel(BaseRecord):
     @property
     def attributes(self, /) -> PteAttributes: ...
     @property
-    def level(self, /) -> Literal["PXE", "PPE", "PDE", "PTE"]: ...
+    def level(self, /) -> Literal["pxe", "ppe", "pde", "pte"]: ...
     @property
     def value(self, /) -> int:
         """
@@ -15380,7 +15365,7 @@ class QueuedLockHolder(BaseRecord):
         other entries.
         """
     @property
-    def state(self, /) -> str:
+    def state(self, /) -> Literal["owner", "waiting", "corrupt"]:
         """
         `owner`, `waiting`, or `corrupt`. `corrupt` means that the bits of the
         entry do not agree with the queue links.
@@ -15477,7 +15462,7 @@ class RcdrEntry(BaseRecord):
         The index of its log in `RcdrLogDump.logs`.
         """
     @property
-    def partition(self, /) -> str:
+    def partition(self, /) -> Literal["normal", "error"]:
         """
         `normal` or `error`.
         """
@@ -15564,7 +15549,7 @@ class RcdrPartition(BaseRecord):
         `Offset.Current`, where the next record goes.
         """
     @property
-    def name(self, /) -> str:
+    def name(self, /) -> Literal["normal", "error"]:
         """
         `normal` or `error`.
         """
@@ -15601,7 +15586,7 @@ class RcdrWalkEnd(BaseRecord):
         The index of its log in `RcdrLogDump.logs`.
         """
     @property
-    def partition(self, /) -> str:
+    def partition(self, /) -> Literal["normal", "error"]:
         """
         `normal` or `error`.
         """
@@ -15810,7 +15795,7 @@ class RegValue(BaseRecord):
     """
     A value (`_CM_KEY_VALUE`).
     """
-    __match_args__: Final[tuple[Literal["name"], Literal["cell"], Literal["node"], Literal["type"], Literal["length"], Literal["raw"]]]
+    __match_args__: Final[tuple[Literal["name"], Literal["cell"], Literal["node"], Literal["type"], Literal["length"], Literal["storage"], Literal["raw"]]]
     @property
     def cell(self, /) -> int: ...
     @property
@@ -15836,11 +15821,7 @@ class RegValue(BaseRecord):
         The data's bytes.
         """
     @property
-    def storage(self, /) -> str:
-        """
-        Where the data is: `inline` in the value record, in a `cell`, or in
-        `big` data segments.
-        """
+    def storage(self, /) -> Literal["inline", "cell", "big"]: ...
     @property
     def type(self, /) -> int:
         """
@@ -16517,9 +16498,9 @@ class SegmentContextDetail(BaseRecord):
     """
     A segment context with its page segments.
     """
-    __match_args__: Final[tuple[Literal["context"], Literal["segments"]]]
+    __match_args__: Final[tuple[Literal["header"], Literal["segments"]]]
     @property
-    def context(self, /) -> SegContext: ...
+    def header(self, /) -> SegContext: ...
     @property
     def segments(self, /) -> list[SegmentPageDetail]: ...
 
@@ -16591,11 +16572,11 @@ class SegmentHeapDetail(BaseRecord):
     """
     A segment heap with its segment contexts.
     """
-    __match_args__: Final[tuple[Literal["heap"], Literal["contexts"]]]
+    __match_args__: Final[tuple[Literal["header"], Literal["contexts"]]]
     @property
     def contexts(self, /) -> list[SegmentContextDetail]: ...
     @property
-    def heap(self, /) -> SegmentHeap: ...
+    def header(self, /) -> SegmentHeap: ...
 
 @final
 class SegmentKeys(BaseRecord):
@@ -16619,18 +16600,18 @@ class SegmentPageDetail(BaseRecord):
     """
     A page segment with its page ranges.
     """
-    __match_args__: Final[tuple[Literal["segment"], Literal["ranges"]]]
+    __match_args__: Final[tuple[Literal["header"], Literal["ranges"]]]
+    @property
+    def header(self, /) -> PageSegment: ...
     @property
     def ranges(self, /) -> list[SegmentRangeDetail]: ...
-    @property
-    def segment(self, /) -> PageSegment: ...
 
 @final
 class SegmentRangeDetail(BaseRecord):
     """
     A page range with its decoded subsegment.
     """
-    __match_args__: Final[tuple[Literal["range"], Literal["subsegment"], Literal["blocks"], Literal["error"], Literal["truncated"]]]
+    __match_args__: Final[tuple[Literal["header"], Literal["subsegment"], Literal["blocks"], Literal["error"], Literal["truncated"]]]
     @property
     def blocks(self, /) -> list[HeapBlock]:
         """
@@ -16643,7 +16624,7 @@ class SegmentRangeDetail(BaseRecord):
         The reason that ntoseye could not read the subsegment.
         """
     @property
-    def range(self, /) -> PageRange: ...
+    def header(self, /) -> PageRange: ...
     @property
     def subsegment(self, /) -> VsSubsegment |LfhSubsegment |None:
         """
@@ -16788,7 +16769,7 @@ class Sid(BaseRecord):
     """
     A decoded SID (`!sid`).
     """
-    __match_args__: Final[tuple[Literal["address"], Literal["sid"], Literal["revision"], Literal["authority"], Literal["sub_authorities"], Literal["well_known"]]]
+    __match_args__: Final[tuple[Literal["address"], Literal["text"], Literal["revision"], Literal["authority"], Literal["sub_authorities"], Literal["well_known"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -16799,12 +16780,12 @@ class Sid(BaseRecord):
     @property
     def revision(self, /) -> int: ...
     @property
-    def sid(self, /) -> str:
+    def sub_authorities(self, /) -> list[int]: ...
+    @property
+    def text(self, /) -> str:
         """
         The canonical string form (`S-1-5-18`).
         """
-    @property
-    def sub_authorities(self, /) -> list[int]: ...
     @property
     def well_known(self, /) -> str |None:
         """
@@ -18142,13 +18123,13 @@ class Symbols:
         return its path in the cache (`.fetchimage /f`). Use it for an image that
         no symbol server has, such as the Windows hypervisor's `hvix64.exe`.
         """
-    def locals_at(self, /, addr: int) -> list[ProcedureLocal]:
+    def locals_at(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> list[ProcedureLocal]:
         """
         List the PDB layouts of the locals and parameters of the innermost frame
         at `addr`, which are those of the inlined call if the compiler inlined a
         call there. This method does not evaluate the values.
         """
-    def nearest(self, /, address: int |str) -> Symbol |None:
+    def nearest(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> Symbol |None:
         """
         List the symbol nearest to an address.
         """
@@ -18183,7 +18164,7 @@ class Symbols:
         """
         Get all loaded addresses that match a source file and line.
         """
-    def source_location(self, /, addr: int) -> SourceLocation |None:
+    def source_location(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> SourceLocation |None:
         """
         Get the PDB source metadata and the mapped local path for an address.
         """
@@ -18760,7 +18741,7 @@ class Thread:
         """
         The processor that runs the thread, or `None` if the thread is not running.
         """
-    def decode_teb(self, /, address: int |str |None = None) -> Teb:
+    def decode_teb(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap |None = None) -> Teb:
         """
         Decode a thread environment block.
         
@@ -18902,20 +18883,20 @@ class ThreadDetail(BaseRecord):
     `_ETHREAD`/`_KTHREAD` fields the listing adds. Each field is `None` when
     this build's layout lacks it or its read failed.
     """
-    __match_args__: Final[tuple[Literal["thread"], Literal["win32_thread"], Literal["user_time"], Literal["kernel_time"], Literal["wait_time"], Literal["ready_time"], Literal["quantum_target"]]]
+    __match_args__: Final[tuple[Literal["info"], Literal["win32_thread"], Literal["user_time"], Literal["kernel_time"], Literal["wait_time"], Literal["ready_time"], Literal["quantum_target"]]]
     @property
     def cpu(self, /) -> int |None:
         """
         The processor running the thread, or `None` when it is not running.
         """
     @property
+    def info(self, /) -> ThreadInfo: ...
+    @property
     def kernel_time(self, /) -> int |None: ...
     @property
     def quantum_target(self, /) -> int |None: ...
     @property
     def ready_time(self, /) -> int |None: ...
-    @property
-    def thread(self, /) -> ThreadInfo: ...
     @property
     def user_time(self, /) -> int |None: ...
     @property
@@ -19097,7 +19078,7 @@ class Threads:
     def __iter__(self, /) -> Iterator[Thread]: ...
     def __len__(self, /) -> int: ...
     def __repr__(self, /) -> str: ...
-    def at(self, /, address: int) -> Thread |None:
+    def at(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> Thread |None:
         """
         The thread at an ETHREAD or KTHREAD address, or `None`.
         """
@@ -19537,7 +19518,7 @@ class Type:
     A named PDB struct or union layout, or an enum definition.
     """
     def __repr__(self, /) -> str: ...
-    def at(self, /, addr: int) -> Struct:
+    def at(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> Struct:
         """
         Bind this layout to an address as a reflective struct cursor.
         """
@@ -19564,7 +19545,7 @@ class Type:
         Enum members by name, in declaration order. For a struct or union, this
         raises an exception.
         """
-    def walk(self, /, head: int, link_field: str) -> list[Struct]:
+    def walk(self, /, head: int |str |Process |Thread |Module |Driver |Device |Heap, link_field: str) -> list[Struct]:
         """
         Walk an intrusive list whose head is at `head`, where `link_field` is
         the field that holds the links.
@@ -19819,7 +19800,7 @@ class UserDump:
     `dbg.inspect.time()`.
     """
     def __repr__(self, /) -> str: ...
-    def address_report(self, /, address: int |str |None = None) -> UserAddressReport:
+    def address_report(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap |None = None) -> UserAddressReport:
         """
         What a user-mode minidump's memory-info list records (`!address`): with
         `address`, the region that holds it and whether the dump captured it;
@@ -19867,7 +19848,7 @@ class UserDump:
         """
         The captured process.
         """
-    def region(self, /, address: int) -> UserRegion |None:
+    def region(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> UserRegion |None:
         """
         The region holding `address`, or `None` when no region holds it or
         the dump has no memory-info list.
@@ -20025,13 +20006,13 @@ class UserExceptionDetail(BaseRecord):
     The exception a user-mode minidump was written for, with its address
     named in the dump's modules.
     """
-    __match_args__: Final[tuple[Literal["exception"], Literal["symbol"]]]
+    __match_args__: Final[tuple[Literal["info"], Literal["symbol"]]]
     @property
-    def exception(self, /) -> UserException: ...
+    def info(self, /) -> UserException: ...
     @property
     def symbol(self, /) -> str |None:
         """
-        `exception.address` as `module!function+offset`, when it resolves.
+        `info.address` as `module!function+offset`, when it resolves.
         """
 
 @final
@@ -20167,7 +20148,7 @@ class UserProcess:
     def __eq__(self, other: object, /) -> bool: ...
     def __hash__(self, /) -> int: ...
     def __repr__(self, /) -> str: ...
-    def decode_peb(self, /, address: int |str |None = None) -> Peb:
+    def decode_peb(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap |None = None) -> Peb:
         """
         Decode the process environment block and process parameters of the
         current process.
@@ -20184,7 +20165,7 @@ class UserProcess:
         """
         The `UserProcessInfo` record of this handle: its properties as one value.
         """
-    def loader_modules(self, /, *, containing: int |str |None = None) -> LoaderModules:
+    def loader_modules(self, /, *, containing: int |str |Process |Thread |Module |Driver |Device |Heap |None = None) -> LoaderModules:
         """
         List the modules in the loader lists of the current process.
         
@@ -20325,7 +20306,7 @@ class UserRegion(BaseRecord):
     One region of a user-mode minidump's memory-info list (`!address`),
     with what the dump shows uses it and how much of it the dump holds.
     """
-    __match_args__: Final[tuple[Literal["region"], Literal["usage"], Literal["detail"], Literal["captured"]]]
+    __match_args__: Final[tuple[Literal["info"], Literal["usage"], Literal["detail"], Literal["captured"]]]
     @property
     def captured(self, /) -> int:
         """
@@ -20342,24 +20323,19 @@ class UserRegion(BaseRecord):
         The end of the region (exclusive).
         """
     @property
-    def region(self, /) -> MemoryRegion:
+    def info(self, /) -> MemoryRegion:
         """
         The region, as `VirtualQueryEx` reported it.
         """
     @property
-    def usage(self, /) -> Literal["Free", "Image", "Stack", "TEB", "PEB", "Heap", "<unknown>"]: ...
+    def usage(self, /) -> Literal["free", "image", "stack", "teb", "peb", "heap", "unknown"]: ...
 
 @final
 class UserStackThread(BaseRecord):
     """
     The thread a user dump report's stack belongs to.
     """
-    __match_args__: Final[tuple[Literal["tid"], Literal["id"], Literal["name"], Literal["source"]]]
-    @property
-    def id(self, /) -> str:
-        """
-        The thread's id as `~` lists it (`<pid>.<tid>` in hex).
-        """
+    __match_args__: Final[tuple[Literal["tid"], Literal["name"], Literal["source"]]]
     @property
     def name(self, /) -> str |None: ...
     @property
@@ -20387,7 +20363,7 @@ class UserThread:
         Why the thread's recorded context is unusable, or `None` when it is
         usable.
         """
-    def decode_teb(self, /, address: int |str |None = None) -> Teb:
+    def decode_teb(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap |None = None) -> Teb:
         """
         Decode a thread environment block.
         
@@ -20399,12 +20375,6 @@ class UserThread:
     def exception(self, /) -> bool:
         """
         Whether this thread raised the exception the dump was written for.
-        """
-    @property
-    def id(self, /) -> str:
-        """
-        The backend's id for the thread, `<pid>.<tid>` in hex as WinDbg
-        writes it (just `<tid>` when the dump records no process id).
         """
     @property
     def index(self, /) -> int:
@@ -21149,7 +21119,7 @@ class VirtioFunction(BaseRecord):
     @property
     def function(self, /) -> int: ...
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["net", "block", "console", "entropy", "balloon", "scsi", "nine_p", "gpu", "input", "vsock", "crypto", "iommu", "mem", "sound", "fs", "pmem", "unknown"]:
         """
         The specification's name of the type, such as `net` or `block`.
         """
@@ -21195,7 +21165,7 @@ class VirtioRing(BaseRecord):
         queue (`!vring /r`).
         """
     @property
-    def request_kind(self, /) -> str |None:
+    def request_kind(self, /) -> Literal["blk", "scsi", "scsi_control", "scsi_event", "net", "net_control", "gpu", "vsock"] |None:
         """
         What its buffers hold, for decoding: `blk`, `scsi`, `net`, ...
         """
@@ -21283,9 +21253,9 @@ class VmCounter(BaseRecord):
     @property
     def name(self, /) -> str: ...
     @property
-    def unit(self, /) -> str:
+    def unit(self, /) -> Literal["pages", "bytes"] |None:
         """
-        The unit of `value`: `pages`, `bytes`, or empty for a plain count.
+        The unit of `value`, or `None` for a plain count.
         """
     @property
     def value(self, /) -> Diagnostic[int]: ...
@@ -21695,7 +21665,7 @@ class WdfDeviceDetail(BaseRecord):
         `None` if the walk completed.
         """
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["fdo", "filter", "pdo", "control"]:
         """
         `FDO`, `filter`, `PDO`, or `control`.
         """
@@ -21779,7 +21749,7 @@ class WdfDriverDevice(BaseRecord):
         The WDFDEVICE handle.
         """
     @property
-    def kind(self, /) -> str |None:
+    def kind(self, /) -> Literal["fdo", "filter", "pdo", "control"] |None:
         """
         `FDO`, `filter`, `PDO`, or `control`.
         """
@@ -21957,7 +21927,7 @@ class WdfIoTargetDetail(BaseRecord):
         Whether it is its device's default I/O target.
         """
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["local", "remote", "self", "usb_device", "usb_pipe"]:
         """
         `local` (a target in the device's own stack), `remote` (one the
         driver opened), `self`, `USB device`, or `USB pipe`.
@@ -22040,7 +22010,7 @@ class WdfIoTargetSummary(BaseRecord):
         Whether it is the device's default I/O target.
         """
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["local", "remote", "self", "usb_device", "usb_pipe"]:
         """
         See [`WdfIoTargetDetail::kind`]: `local`, `remote`, `self`,
         `USB device`, or `USB pipe`.

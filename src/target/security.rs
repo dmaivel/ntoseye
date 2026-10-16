@@ -27,6 +27,7 @@ const SE_SELF_RELATIVE: u16 = 0x8000;
 pub struct Sid {
     pub address: VirtAddr,
     /// The canonical string form (`S-1-5-18`).
+    #[record(rename = "text")]
     pub sid: String,
     pub revision: u8,
     /// The identifier authority.

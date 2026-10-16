@@ -636,6 +636,7 @@ pub fn group_stacks(
 /// it or its read failed.
 #[record]
 pub struct ProcessDetail {
+    #[record(rename = "info")]
     pub process: ProcessInfo,
     pub session_id: Option<u32>,
     /// The `_PEB`.
@@ -666,6 +667,7 @@ pub struct ProcessDetail {
 /// this build's layout lacks it or its read failed.
 #[record(impl)]
 pub struct ThreadDetail {
+    #[record(rename = "info")]
     pub thread: ThreadInfo,
     /// The backend thread (vCPU) running the thread (`p1.2`), or `None`
     /// when it is not running.

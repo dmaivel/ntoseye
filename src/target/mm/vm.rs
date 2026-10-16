@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use super::{
     ProcessMemoryUsage, SystemMemorySummary, VmCounter, VmDetail, VmPoolDetail, VmPteDetail,
-    find_mi_state_fields,
+    VmUnit, find_mi_state_fields,
 };
 use crate::debugger_data::{
     DebuggerDataBlock, MetadataSource, MetadataValue, read_counter_from_getter,
@@ -42,7 +42,7 @@ fn global_metric(target: &Target, symbol: &str) -> DiagnosticMetric<u64> {
     }
 }
 
-fn named_counter(target: &Target, name: &str, unit: &'static str) -> VmCounter {
+fn named_counter(target: &Target, name: &str, unit: Option<VmUnit>) -> VmCounter {
     VmCounter {
         name: name.to_string(),
         value: global_metric(target, name),
@@ -50,7 +50,7 @@ fn named_counter(target: &Target, name: &str, unit: &'static str) -> VmCounter {
     }
 }
 
-fn mi_state_pool_field_unit(name: &str) -> &'static str {
+fn mi_state_pool_field_unit(name: &str) -> VmUnit {
     let leaf = name
         .to_ascii_lowercase()
         .rsplit('.')
@@ -61,9 +61,9 @@ fn mi_state_pool_field_unit(name: &str) -> &'static str {
         || (leaf.contains("allocated")
             && (leaf.contains("nonpagedpool") || leaf.contains("pagedpool")))
     {
-        "pages"
+        VmUnit::Pages
     } else {
-        "bytes"
+        VmUnit::Bytes
     }
 }
 
@@ -149,7 +149,7 @@ impl Target {
             .filter(|(name, _)| curated_mi_state_pool_field(name))
             .take(MAX_MI_STATE_FIELDS)
             .map(|(name, value)| VmCounter {
-                unit: mi_state_pool_field_unit(&name),
+                unit: Some(mi_state_pool_field_unit(&name)),
                 name,
                 value: available_metric(value),
             })
@@ -169,20 +169,20 @@ impl Target {
             ]
             .into_iter()
             .map(|(symbol, name)| {
-                let mut counter = named_counter(self, symbol, "");
+                let mut counter = named_counter(self, symbol, None);
                 counter.name = name.to_string();
                 counter
             })
             .collect(),
         };
         let page_files = [
-            ("MmNumberOfPagingFiles", "number of paging files", ""),
+            ("MmNumberOfPagingFiles", "number of paging files", None),
             (
                 "MmTotalPagesForPagingFile",
                 "pages for paging file",
-                "pages",
+                Some(VmUnit::Pages),
             ),
-            ("MmFreePages", "free paging pages", "pages"),
+            ("MmFreePages", "free paging pages", Some(VmUnit::Pages)),
         ]
         .into_iter()
         .map(|(symbol, name, unit)| {

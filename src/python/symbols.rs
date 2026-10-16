@@ -2,6 +2,7 @@
 
 use pyo3::prelude::*;
 
+use super::args::AddressArg;
 use super::command::{CommandHost, HostSession};
 use super::context::{Context, Space};
 use super::handle::Owner;
@@ -116,8 +117,9 @@ impl Symbols {
     fn source_location<'py>(
         &self,
         py: Python<'py>,
-        addr: u64,
+        addr: AddressArg,
     ) -> PyResult<Typed<'py, Option<SourceLocation>>> {
+        let addr = addr.resolve(py, &self.owner, &self.space.context())?.0;
         let location = scoped(py, &self.owner, &self.space, |session| {
             Ok(session.target.source_location(VirtAddr(addr)))
         })?;
@@ -142,8 +144,9 @@ impl Symbols {
     fn locals_at<'py>(
         &self,
         py: Python<'py>,
-        addr: u64,
+        addr: AddressArg,
     ) -> PyResult<Typed<'py, Vec<ProcedureLocal>>> {
+        let addr = addr.resolve(py, &self.owner, &self.space.context())?.0;
         let rows = scoped(py, &self.owner, &self.space, |session| {
             let locals = session
                 .target

@@ -146,14 +146,6 @@ pub enum Pending<T> {
 }
 
 impl<T> Pending<T> {
-    /// The argument an address gives, through `finish`.
-    pub fn address(value: AddressArg, finish: fn(VirtAddr) -> T) -> Self {
-        match value {
-            AddressArg::Value(address) => Pending::Ready(finish(VirtAddr(address))),
-            AddressArg::Expression(text) => Pending::Expression(text, finish),
-        }
-    }
-
     /// The argument, an expression evaluated as the REPL evaluates one
     /// (symbols, `module!symbol+0x10`, registers, `poi(...)`), in the
     /// session's current context.
@@ -187,12 +179,17 @@ impl PyArg for Vec<u8> {
     }
 }
 
-/// An address: an `int`, or a debugger expression (`"nt!KiSystemCall64"`).
+/// An address: an `int`, a debugger expression (`"nt!KiSystemCall64"`), or
+/// the handle of the object at it (`Process`, `Driver`, ...).
 impl SdkArg for VirtAddr {
     type Py = AddressArg;
 
-    fn from_sdk(_: Python<'_>, _: Option<&Owner>, value: AddressArg) -> PyResult<Pending<Self>> {
-        Ok(Pending::address(value, |address| address))
+    fn from_sdk(
+        py: Python<'_>,
+        owner: Option<&Owner>,
+        value: AddressArg,
+    ) -> PyResult<Pending<Self>> {
+        value.pending(py, owner, |address| address)
     }
 }
 
@@ -200,11 +197,13 @@ impl SdkArg for Option<VirtAddr> {
     type Py = Option<AddressArg>;
 
     fn from_sdk(
-        _: Python<'_>,
-        _: Option<&Owner>,
+        py: Python<'_>,
+        owner: Option<&Owner>,
         value: Option<AddressArg>,
     ) -> PyResult<Pending<Self>> {
-        Ok(value.map_or(Pending::Ready(None), |value| Pending::address(value, Some)))
+        value.map_or(Ok(Pending::Ready(None)), |value| {
+            value.pending(py, owner, Some)
+        })
     }
 }
 

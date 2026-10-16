@@ -447,7 +447,6 @@ pub struct ImportDescriptor {
     /// `FirstThunk`.
     #[record(hex, rename = "import_address_table")]
     pub first_thunk: u32,
-    #[record(rename = "imports")]
     pub entries: Vec<ImportEntry>,
     /// Why `entries` stops short of the table's end: a thunk that does not
     /// read, or no terminator within the bound. `None` when the table was

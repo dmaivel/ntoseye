@@ -132,7 +132,9 @@ pub enum UserStackSource {
 #[derive(Debug, Clone)]
 pub struct UserStackThread {
     pub tid: u32,
-    /// The thread's id as `~` lists it (`<pid>.<tid>` in hex).
+    /// The thread's id as `~` lists it (`<pid>.<tid>` in hex), which the
+    /// REPL prints; `tid` identifies the thread.
+    #[record(skip)]
     pub id: String,
     pub name: Option<String>,
     pub source: UserStackSource,

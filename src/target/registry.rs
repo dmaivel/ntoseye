@@ -452,7 +452,9 @@ impl RegSubkey {
     }
 }
 
-/// Where a value's data is stored.
+/// Where a value's data is stored: `inline` in the value record, in a
+/// `cell`, or in `big` data segments.
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataStorage {
     /// In the value record itself (up to 4 bytes).
@@ -477,7 +479,6 @@ pub struct RegValue {
     pub value_type: u32,
     /// The data's length in bytes.
     pub length: u32,
-    #[record(skip)]
     pub storage: DataStorage,
     /// The data's bytes.
     #[record(bytes, rename = "raw")]
@@ -490,17 +491,6 @@ impl RegValue {
     #[record(getter)]
     pub fn type_name(&self) -> Option<&'static str> {
         value_type_name(self.value_type)
-    }
-
-    /// Where the data is: `inline` in the value record, in a `cell`, or in
-    /// `big` data segments.
-    #[record(getter, rename = "storage")]
-    pub fn storage_name(&self) -> &'static str {
-        match self.storage {
-            DataStorage::Inline => "inline",
-            DataStorage::Cell => "cell",
-            DataStorage::Big => "big",
-        }
     }
 
     /// The data decoded by the value's type.

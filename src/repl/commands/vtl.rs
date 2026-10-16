@@ -791,7 +791,7 @@ impl ReplState<'_> {
         let ports = match evmcs_fields::io_intercepts(vmcs, |address, page| {
             target.read_physical(address, page)
         }) {
-            Ok(IoIntercepts::None) => {
+            Ok(IoIntercepts::Never) => {
                 outln!("no I/O instruction exits: the controls use no I/O bitmaps\n");
                 return;
             }

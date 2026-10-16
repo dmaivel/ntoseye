@@ -1,8 +1,10 @@
 //! Address-space-bound memory operations for the Python SDK.
 
+use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
+use super::args::AddressArg;
 use super::command::{Bind, CommandHost, HostSession, admit};
 use super::context::Context;
 use super::context::Space;
@@ -17,7 +19,7 @@ use crate::session::Session;
 use crate::session::effects::{Effects, TargetScope, Writes};
 use crate::target::MemoryKind;
 use crate::target::memory::SearchSpace;
-use crate::target::mm::VtopDetail;
+use crate::target::mm::{AddressKind, VtopDetail};
 use crate::target::{CODE_BITNESS_X86, StringDescriptor};
 use crate::types::VirtAddr;
 
@@ -81,8 +83,8 @@ impl Bind<SearchSpace> for Memory {
     fn bind(&self) -> SearchSpace {
         match self.space {
             Space::Physical => SearchSpace::Physical,
-            Space::Secure(_) => SearchSpace::Virtual(Some("vtl1")),
-            Space::Root(_) => SearchSpace::Virtual(Some("foreign")),
+            Space::Secure(_) => SearchSpace::Virtual(Some(AddressKind::Vtl1)),
+            Space::Root(_) => SearchSpace::Virtual(Some(AddressKind::Foreign)),
             Space::Kernel | Space::Process(_) => SearchSpace::Virtual(None),
         }
     }
@@ -91,6 +93,17 @@ impl Bind<SearchSpace> for Memory {
 impl Memory {
     pub fn new(owner: Owner, space: Space) -> Memory {
         Memory { owner, space }
+    }
+
+    /// `addr` as this space's address. A handle names a virtual address,
+    /// which `dbg.physical` does not take.
+    fn address(&self, py: Python<'_>, addr: AddressArg) -> PyResult<u64> {
+        if matches!(self.space, Space::Physical) && matches!(addr, AddressArg::Object(_)) {
+            return Err(PyTypeError::new_err(
+                "a handle gives a virtual address; dbg.physical takes a physical one",
+            ));
+        }
+        Ok(addr.resolve(py, &self.owner, &self.space.context())?.0)
     }
 
     fn read_bytes(&self, py: Python<'_>, addr: u64, n: usize) -> PyResult<Vec<u8>> {
@@ -196,53 +209,68 @@ fn require_page_tables(session: &Session) -> PyResult<()> {
 impl Memory {
     /// Read `n` bytes. A virtual read hides the breakpoint opcodes of this
     /// debugger.
-    fn read<'py>(&self, py: Python<'py>, addr: u64, n: usize) -> PyResult<Bound<'py, PyBytes>> {
+    fn read<'py>(
+        &self,
+        py: Python<'py>,
+        addr: AddressArg,
+        n: usize,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let addr = self.address(py, addr)?;
         let bytes = self.read_bytes(py, addr, n)?;
         Ok(PyBytes::new(py, &bytes))
     }
 
     /// Write bytes to this address space.
-    fn write(&self, py: Python<'_>, addr: u64, data: &[u8]) -> PyResult<()> {
+    fn write(&self, py: Python<'_>, addr: AddressArg, data: &[u8]) -> PyResult<()> {
+        let addr = self.address(py, addr)?;
         self.write_bytes(py, addr, data)
     }
 
     /// Read a little-endian byte.
-    fn read_u8(&self, py: Python<'_>, addr: u64) -> PyResult<u8> {
+    fn read_u8(&self, py: Python<'_>, addr: AddressArg) -> PyResult<u8> {
+        let addr = self.address(py, addr)?;
         Ok(self.read_fixed::<1>(py, addr)?[0])
     }
 
     /// Read a little-endian 16-bit integer.
-    fn read_u16(&self, py: Python<'_>, addr: u64) -> PyResult<u16> {
+    fn read_u16(&self, py: Python<'_>, addr: AddressArg) -> PyResult<u16> {
+        let addr = self.address(py, addr)?;
         Ok(u16::from_le_bytes(self.read_fixed::<2>(py, addr)?))
     }
 
     /// Read a little-endian 32-bit integer.
-    fn read_u32(&self, py: Python<'_>, addr: u64) -> PyResult<u32> {
+    fn read_u32(&self, py: Python<'_>, addr: AddressArg) -> PyResult<u32> {
+        let addr = self.address(py, addr)?;
         Ok(u32::from_le_bytes(self.read_fixed::<4>(py, addr)?))
     }
 
     /// Read a little-endian 64-bit integer.
-    fn read_u64(&self, py: Python<'_>, addr: u64) -> PyResult<u64> {
+    fn read_u64(&self, py: Python<'_>, addr: AddressArg) -> PyResult<u64> {
+        let addr = self.address(py, addr)?;
         Ok(u64::from_le_bytes(self.read_fixed::<8>(py, addr)?))
     }
 
     /// Write a little-endian byte.
-    fn write_u8(&self, py: Python<'_>, addr: u64, value: u8) -> PyResult<()> {
+    fn write_u8(&self, py: Python<'_>, addr: AddressArg, value: u8) -> PyResult<()> {
+        let addr = self.address(py, addr)?;
         self.write_bytes(py, addr, &value.to_le_bytes())
     }
 
     /// Write a little-endian 16-bit integer.
-    fn write_u16(&self, py: Python<'_>, addr: u64, value: u16) -> PyResult<()> {
+    fn write_u16(&self, py: Python<'_>, addr: AddressArg, value: u16) -> PyResult<()> {
+        let addr = self.address(py, addr)?;
         self.write_bytes(py, addr, &value.to_le_bytes())
     }
 
     /// Write a little-endian 32-bit integer.
-    fn write_u32(&self, py: Python<'_>, addr: u64, value: u32) -> PyResult<()> {
+    fn write_u32(&self, py: Python<'_>, addr: AddressArg, value: u32) -> PyResult<()> {
+        let addr = self.address(py, addr)?;
         self.write_bytes(py, addr, &value.to_le_bytes())
     }
 
     /// Write a little-endian 64-bit integer.
-    fn write_u64(&self, py: Python<'_>, addr: u64, value: u64) -> PyResult<()> {
+    fn write_u64(&self, py: Python<'_>, addr: AddressArg, value: u64) -> PyResult<()> {
+        let addr = self.address(py, addr)?;
         self.write_bytes(py, addr, &value.to_le_bytes())
     }
 
@@ -254,13 +282,15 @@ impl Memory {
     }
 
     /// Read a pointer-sized value at `addr` (`poi`).
-    fn read_pointer(&self, py: Python<'_>, addr: u64) -> PyResult<u64> {
-        self.read_u64(py, addr)
+    fn read_pointer(&self, py: Python<'_>, addr: AddressArg) -> PyResult<u64> {
+        let addr = self.address(py, addr)?;
+        Ok(u64::from_le_bytes(self.read_fixed::<8>(py, addr)?))
     }
 
     /// Read a NUL-terminated ANSI string at `addr` (`da`).
     #[pyo3(signature = (addr, max_len=256))]
-    fn read_string(&self, py: Python<'_>, addr: u64, max_len: usize) -> PyResult<String> {
+    fn read_string(&self, py: Python<'_>, addr: AddressArg, max_len: usize) -> PyResult<String> {
+        let addr = self.address(py, addr)?;
         self.space.require_virtual()?;
         check_read_len(max_len)?;
         let bytes = self.owner.with_in(py, &self.space.context(), |session| {
@@ -274,7 +304,8 @@ impl Memory {
 
     /// Read a NUL-terminated UTF-16 string at `addr` (`du`).
     #[pyo3(signature = (addr, max_len=256))]
-    fn read_wstring(&self, py: Python<'_>, addr: u64, max_len: usize) -> PyResult<String> {
+    fn read_wstring(&self, py: Python<'_>, addr: AddressArg, max_len: usize) -> PyResult<String> {
+        let addr = self.address(py, addr)?;
         self.space.require_virtual()?;
         let byte_len = max_len
             .checked_mul(2)
@@ -297,21 +328,29 @@ impl Memory {
     fn read_unicode_string(
         &self,
         py: Python<'_>,
-        addr: u64,
+        addr: AddressArg,
         bits: Option<u32>,
     ) -> PyResult<String> {
+        let addr = self.address(py, addr)?;
         self.read_descriptor(py, addr, StringDescriptor::Unicode, bits)
     }
 
     /// Decode the `_STRING`/`ANSI_STRING` descriptor at `addr` (`ds`). `bits`
     /// sets the layout, as in `read_unicode_string`.
     #[pyo3(signature = (addr, bits = None))]
-    fn read_ansi_string(&self, py: Python<'_>, addr: u64, bits: Option<u32>) -> PyResult<String> {
+    fn read_ansi_string(
+        &self,
+        py: Python<'_>,
+        addr: AddressArg,
+        bits: Option<u32>,
+    ) -> PyResult<String> {
+        let addr = self.address(py, addr)?;
         self.read_descriptor(py, addr, StringDescriptor::Ansi, bits)
     }
 
     /// Translate a virtual address with the page tables of this space (`!vtop`).
-    fn translate(&self, py: Python<'_>, addr: u64) -> PyResult<Option<u64>> {
+    fn translate(&self, py: Python<'_>, addr: AddressArg) -> PyResult<Option<u64>> {
+        let addr = self.address(py, addr)?;
         self.space.require_virtual()?;
         let context = self.space.context();
         self.owner.with_in(py, &context, |session| {
@@ -326,7 +365,12 @@ impl Memory {
     /// Get the page-table walk and the final translation of `addr` in this
     /// space's page tables (`!vtop` with this space's DTB). It works in every
     /// virtual space, VTL1 and roots outside NT included.
-    fn translation<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Typed<'py, VtopDetail>> {
+    fn translation<'py>(
+        &self,
+        py: Python<'py>,
+        addr: AddressArg,
+    ) -> PyResult<Typed<'py, VtopDetail>> {
+        let addr = self.address(py, addr)?;
         self.space.require_virtual()?;
         let detail = self.owner.with_in(py, &self.space.context(), |session| {
             require_page_tables(session)?;

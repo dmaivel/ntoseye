@@ -11,6 +11,7 @@ use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList};
 
+use super::args::AddressArg;
 use super::context::Space;
 use super::handle::Owner;
 use super::record::PlainDict;
@@ -203,15 +204,17 @@ impl Type {
     }
 
     /// Bind this layout to an address as a reflective struct cursor.
-    fn at(&self, py: Python<'_>, addr: u64) -> PyResult<Struct> {
+    fn at(&self, py: Python<'_>, addr: AddressArg) -> PyResult<Struct> {
         self.struct_info()?;
+        let addr = addr.resolve(py, &self.owner, &self.space.context())?.0;
         Struct::new(py, &self.owner, self.space.clone(), &self.name, addr)
     }
 
     /// Walk an intrusive list whose head is at `head`, where `link_field` is
     /// the field that holds the links.
-    fn walk(&self, py: Python<'_>, head: u64, link_field: &str) -> PyResult<Vec<Struct>> {
+    fn walk(&self, py: Python<'_>, head: AddressArg, link_field: &str) -> PyResult<Vec<Struct>> {
         self.struct_info()?;
+        let head = head.resolve(py, &self.owner, &self.space.context())?.0;
         let addresses =
             list_record_addresses(py, &self.owner, &self.space, head, &self.name, link_field)?;
         addresses

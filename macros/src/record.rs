@@ -851,7 +851,8 @@ fn fieldless_enum(item: &mut ItemEnum) -> Result<TokenStream> {
         /// text.
         impl ::std::fmt::Display for #name {
             fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-                f.write_str(match self {
+                // `pad`, so a width or an alignment applies as to a `str`.
+                f.pad(match self {
                     #(#labels)*
                 })
             }

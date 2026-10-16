@@ -252,15 +252,15 @@ pub struct LastError32 {
 #[record]
 #[derive(Copy, PartialEq, Eq)]
 pub enum SelfPatchKind {
-    #[record(rename = "import optimization")]
+    #[record(label = "import optimization")]
     ImportOptimization,
     Retpoline,
-    #[record(rename = "KiPatchSelf/JMP thunk")]
+    #[record(label = "KiPatchSelf/JMP thunk")]
     KiPatchSelf,
     /// A relocated address of a kernel VA region (the PFN database, the
     /// page tables, ...) the kernel moved to a randomized top-level slot at
     /// boot: the image holds the region's old fixed base.
-    #[record(rename = "kernel VA region rebase")]
+    #[record(label = "kernel VA region rebase")]
     RegionRebase,
 }
 
