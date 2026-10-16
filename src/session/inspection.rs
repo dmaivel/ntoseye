@@ -12,7 +12,8 @@ use crate::bytes;
 use crate::cpu_context::{amd64, arm64};
 use crate::dbg_backend::{ContinueDisposition, processor_index_from_backend_thread_id};
 use crate::disasm::{
-    DisasmRow, decode_code, decode_preceding, function_extent, instruction_containing,
+    DisasmRow, FunctionDisassembly, decode_code, decode_preceding, function_extent,
+    instruction_containing,
 };
 use crate::error::{Error, Result};
 use crate::guest::hypervisor::{HvPartition, HvVirtualProcessor, processor_guest_vp};
@@ -343,9 +344,8 @@ impl Session {
 
     /// Disassemble the function containing `addr`: the one its runtime
     /// function entry describes, or else a leaf, which has none (see
-    /// [`Self::leaf_function_range`]). Returns its start symbol, byte
-    /// length, and decoded rows.
-    pub fn disassemble_function(&self, addr: VirtAddr) -> Result<(String, usize, Vec<DisasmRow>)> {
+    /// [`Self::leaf_function_range`]).
+    pub fn disassemble_function(&self, addr: VirtAddr) -> Result<FunctionDisassembly> {
         let dtb = self.target.current_dtb();
         let trace = resolve_thread_trace_context(&self.target, dtb);
         let (start, end) = match function_range(&self.target, &trace, addr.0) {
@@ -370,7 +370,11 @@ impl Session {
         let resolve = |target| format_symbol(&self.target, &trace, target);
         let machine = self.target.code_machine(VirtAddr(start));
         let rows = decode_code(&bytes, start, None, machine, resolve);
-        Ok((format_symbol(&self.target, &trace, start), len, rows))
+        Ok(FunctionDisassembly {
+            symbol: format_symbol(&self.target, &trace, start),
+            length: len,
+            rows,
+        })
     }
 
     /// The function containing `addr` that no runtime function entry

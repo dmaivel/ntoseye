@@ -8,7 +8,6 @@ use ntoseye_macros::record;
 use super::hypervisor::{DecodedHypercall, ServedVp, decoded_hypercall, exit_registers, served_vp};
 use super::symbols::source_location;
 use crate::breakpoints::{self, Breakpoint};
-use crate::disasm::{DisasmOperand, DisasmRow, disasm_formatter};
 use crate::exception_policy::{self, ExceptionPolicyFinalAction, exception_alias};
 use crate::guest::ProcessInfo;
 use crate::guest::exit_reason_name;
@@ -302,60 +301,6 @@ pub struct StackFrame {
     /// an inline frame this is the line in the inlined function, and for a
     /// caller it is the line of the call.
     pub source_location: Option<super::symbols::SourceLocation>,
-}
-
-/// One decoded instruction.
-#[record]
-pub struct DisassembledInstruction {
-    #[record(hex)]
-    pub ip: u64,
-    /// The bytes of the instruction, in hex.
-    pub hex: String,
-    /// The instruction text.
-    pub asm: String,
-    /// The resolved branch or rip-relative target, if there is one.
-    pub comment: Option<String>,
-    /// The instruction length in bytes.
-    pub length: usize,
-    /// The lowercase mnemonic, without prefixes (`mov`, `ldr`). `.inst`
-    /// for an ARM64 word that encodes no instruction.
-    pub mnemonic: String,
-    /// The explicit operands, in instruction order.
-    pub operands: Vec<Operand>,
-}
-
-/// One explicit operand of a decoded instruction. Fields that do not apply
-/// to its `kind` are None.
-#[record]
-pub struct Operand {
-    /// `register`, `memory`, `immediate`, `branch` (a branch or PC-relative
-    /// label target), or `other`.
-    pub kind: &'static str,
-    /// The operand as `asm` shows it.
-    pub text: String,
-    /// A register operand's register as written, lowercase (`r8d`, `w3`).
-    pub register: Option<String>,
-    /// The architectural register that `register` is part of (`r8` for
-    /// `r8d`, `x3` for `w3`; vector registers stay as written).
-    pub full_register: Option<String>,
-    /// A memory operand's base register, full and lowercase (`rip` when
-    /// RIP-relative).
-    pub base: Option<String>,
-    /// A memory operand's index register, full and lowercase.
-    pub index: Option<String>,
-    /// The scale of `index`.
-    pub scale: Option<u32>,
-    /// A memory operand's signed displacement: relative to the next
-    /// instruction when RIP-relative, and the writeback offset of an ARM64
-    /// post-indexed operand.
-    pub displacement: Option<i64>,
-    /// A memory operand's access size in bytes, when known (x86 only).
-    pub size: Option<u32>,
-    /// A memory operand's x86 segment override (`gs`).
-    pub segment: Option<String>,
-    /// An immediate operand's value (negative when the instruction
-    /// sign-extends it), or a branch operand's target address.
-    pub immediate: Option<i128>,
 }
 
 /// The function-table entry that covers an address, and the entry of each
@@ -742,43 +687,6 @@ pub fn stack_frames(frames: &[unwind::StackFrame]) -> Vec<StackFrame> {
         .enumerate()
         .map(|(index, frame)| stack_frame(index, frame))
         .collect()
-}
-
-/// Decoded instructions.
-pub fn disasm_rows(rows: &[DisasmRow]) -> Vec<DisassembledInstruction> {
-    let mut formatter = disasm_formatter();
-    rows.iter()
-        .map(|row| DisassembledInstruction {
-            ip: row.ip,
-            hex: row.hex.clone(),
-            asm: row.asm(),
-            comment: row.comment.clone(),
-            length: row.length,
-            mnemonic: row.mnemonic(&mut formatter),
-            operands: row
-                .operands(&mut formatter)
-                .into_iter()
-                .map(operand)
-                .collect(),
-        })
-        .collect()
-}
-
-/// One operand of a decoded instruction.
-fn operand(operand: DisasmOperand) -> Operand {
-    Operand {
-        kind: operand.kind.as_str(),
-        text: operand.text,
-        register: operand.register,
-        full_register: operand.full_register,
-        base: operand.base,
-        index: operand.index,
-        scale: operand.scale,
-        displacement: operand.displacement,
-        size: operand.size,
-        segment: operand.segment,
-        immediate: operand.immediate,
-    }
 }
 
 fn arm64_codes(codes: &[Arm64CodeDetail]) -> Vec<Arm64UnwindCode> {

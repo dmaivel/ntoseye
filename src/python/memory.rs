@@ -425,36 +425,6 @@ impl Memory {
         Typed::new(py, view::mm::address_description(&detail))
     }
 
-    /// Disassemble `count` instructions at `addr` (`u`).
-    fn disassemble<'py>(
-        &self,
-        py: Python<'py>,
-        addr: u64,
-        count: usize,
-    ) -> PyResult<Typed<'py, Vec<view::execution::DisassembledInstruction>>> {
-        self.space.require_virtual()?;
-        check_disassembly_count(count)?;
-        let context = self.space.context();
-        let rows = self.owner.with_in(py, &context, |session| {
-            session.disassemble(VirtAddr(addr), count).map_err(err)
-        })?;
-        Typed::new(py, view::execution::disasm_rows(&rows))
-    }
-
-    /// Disassemble the runtime function that contains `addr` (`uf`).
-    fn disassemble_function<'py>(
-        &self,
-        py: Python<'py>,
-        addr: u64,
-    ) -> PyResult<Typed<'py, Vec<view::execution::DisassembledInstruction>>> {
-        self.space.require_virtual()?;
-        let context = self.space.context();
-        let (_, _, rows) = self.owner.with_in(py, &context, |session| {
-            session.disassemble_function(VirtAddr(addr)).map_err(err)
-        })?;
-        Typed::new(py, view::execution::disasm_rows(&rows))
-    }
-
     /// Get the function-table entry and unwind info (AMD64 or ARM64) of the
     /// function that contains `addr`, with the chained parents (`.fnent`).
     fn function_entry<'py>(
@@ -468,22 +438,6 @@ impl Memory {
             session.function_entry(VirtAddr(addr)).map_err(err)
         })?;
         Typed::new(py, view::execution::function_entry(&detail))
-    }
-
-    /// Disassemble the `count` instructions that end at `addr` (`ub`).
-    fn disassemble_back<'py>(
-        &self,
-        py: Python<'py>,
-        addr: u64,
-        count: usize,
-    ) -> PyResult<Typed<'py, Vec<view::execution::DisassembledInstruction>>> {
-        self.space.require_virtual()?;
-        check_disassembly_count(count)?;
-        let context = self.space.context();
-        let rows = self.owner.with_in(py, &context, |session| {
-            session.disassemble_back(VirtAddr(addr), count).map_err(err)
-        })?;
-        Typed::new(py, view::execution::disasm_rows(&rows))
     }
 }
 

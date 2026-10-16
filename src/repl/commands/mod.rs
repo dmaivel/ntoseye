@@ -52,6 +52,7 @@ mod blackbox;
 pub mod breakpoints;
 mod cpu;
 mod diagnostics;
+mod disasm;
 pub mod display;
 mod dx;
 mod dx_model;

@@ -9,13 +9,13 @@ use super::handle::{Owner, require_halted};
 use super::memory::check_disassembly_count;
 use super::record::PlainDict;
 use super::{MAX_READ_LEN, err, raise, view_dict};
+use crate::disasm::DisasmRow;
 use crate::guest::HvProcessor;
 use crate::guest::ept::{EptDifference, EptMapping};
 use crate::guest::ept::{EptTranslation, differences};
 use crate::guest::hypercalls::HypercallCaller as Caller;
 use crate::guest::{HvPartition, HvVirtualProcessor, HvVtl, evmcs_fields, privilege_names};
 use crate::target::CodeExtent;
-use crate::view::execution::{DisassembledInstruction, disasm_rows};
 use crate::view::hypervisor::{
     DecodedHypercall, IoIntercepts, MsrIntercepts, VpRegisters, decoded_hypercall, io_intercepts,
     msr_intercepts, vp_registers,
@@ -419,7 +419,7 @@ impl HypervisorVtl {
         address: u64,
         count: usize,
         physical: bool,
-    ) -> PyResult<Typed<'py, Vec<DisassembledInstruction>>> {
+    ) -> PyResult<Typed<'py, Vec<DisasmRow>>> {
         let Some(state) = self.info.state else {
             return Err(raise("this VTL has no eVMCS state"));
         };
@@ -433,7 +433,7 @@ impl HypervisorVtl {
         if let (true, Some(at)) = (code.rows.is_empty(), code.unreadable) {
             return Err(raise(format!("guest memory at {at:#x} is unreadable")));
         }
-        Typed::new(py, disasm_rows(&code.rows))
+        Typed::new(py, code.rows)
     }
 
     /// Every field of this VTL's eVMCS, read now, named as the TLFS names it
