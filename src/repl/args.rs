@@ -118,13 +118,6 @@ impl<'i> ArgCursor<'i> {
             .take()
     }
 
-    /// The `index`th word left, not taken: for a grammar that checks the
-    /// line in its order before its parameters take their words
-    /// (`!rcdrkd.rcdrlogdump <driver> [-a <log>]`).
-    pub fn peek_at(&self, index: usize) -> Option<&str> {
-        self.words.iter().flatten().nth(index).map(|word| &**word)
-    }
-
     /// How many words are left.
     pub fn remaining(&self) -> usize {
         self.words.iter().flatten().count()

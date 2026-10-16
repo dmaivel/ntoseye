@@ -108,25 +108,24 @@ fn log_dump_driver(
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<String, ArgError> {
     let mut name = None;
-    let mut index = 0;
-    while let Some(word) = cursor.peek_at(index) {
+    let mut words = cursor.words().enumerate();
+    while let Some((index, word)) = words.next() {
         if word == "-a" {
-            let Some(log) = cursor.peek_at(index + 1) else {
+            let Some((_, log)) = words.next() else {
                 return Err(ArgError::Message(format!(
                     "!rcdrkd.rcdrlogdump: -a needs a log address; usage: {LOG_DUMP_USAGE}"
                 )));
             };
             cx.eval(log)?;
-            index += 2;
         } else if name.is_none() {
             name = Some(index);
-            index += 1;
         } else {
             return Err(ArgError::Message(format!(
                 "!rcdrkd.rcdrlogdump: unexpected argument {word}; usage: {LOG_DUMP_USAGE}"
             )));
         }
     }
+    drop(words);
     let name = name.ok_or(ArgError::Missing)?;
     Ok(cursor.word_at(name).ok_or(ArgError::Missing)?.into_owned())
 }
