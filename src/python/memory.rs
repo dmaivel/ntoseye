@@ -10,11 +10,11 @@ use super::symbols::load_scope_symbols;
 use super::{MAX_READ_LEN, err, raise};
 use crate::error::Error;
 use crate::layout::utf16le_lossy;
-use crate::memory::{MemoryOps, pattern_offsets};
+use crate::memory::pattern_offsets;
 use crate::session::Session;
-use crate::session::effects::Effects;
-use crate::target::MAX_SEARCH_BYTES;
+use crate::session::effects::{Effects, TargetScope, Writes};
 use crate::target::{CODE_BITNESS_X86, StringDescriptor};
+use crate::target::{MAX_SEARCH_BYTES, MemoryKind, MemorySearchMatch};
 use crate::types::VirtAddr;
 use crate::view;
 use crate::view::record::Typed;
@@ -57,21 +57,18 @@ impl Memory {
         Ok(bytes)
     }
 
+    /// Write `data` at `addr`, admitted as the REPL admits `eb` or `!eb`.
     fn write_bytes(&self, py: Python<'_>, addr: u64, data: &[u8]) -> PyResult<()> {
         self.space.require_writable()?;
         check_read_len(data.len())?;
         let context = self.space.context();
-        let physical = matches!(self.space, Space::Physical);
+        let (memory, effects) = match self.space {
+            Space::Physical => (MemoryKind::Physical, &PHYSICAL_WRITE),
+            _ => (MemoryKind::Virtual, &VIRTUAL_WRITE),
+        };
         self.owner.with_in(py, &context, |session| {
-            if physical {
-                session.target.write_physical(addr, data).map_err(err)
-            } else {
-                session
-                    .target
-                    .context_memory()
-                    .write_bytes(VirtAddr(addr), data)
-                    .map_err(err)
-            }
+            admit(session, effects, "Memory.write")?;
+            session.target.write_memory(memory, addr, data).map_err(err)
         })
     }
 
@@ -101,6 +98,19 @@ impl Memory {
         })
     }
 }
+
+/// The effects of a virtual memory write, `eb`'s.
+const VIRTUAL_WRITE: Effects = Effects {
+    writes: &[Writes::Memory],
+    ..Effects::NONE
+};
+
+/// The effects of a physical memory write, `!eb`'s.
+const PHYSICAL_WRITE: Effects = Effects {
+    target: TargetScope::Kernel,
+    writes: &[Writes::Memory],
+    ..Effects::NONE
+};
 
 fn check_read_len(n: usize) -> PyResult<()> {
     if n > MAX_READ_LEN {
@@ -258,7 +268,7 @@ impl Memory {
         pattern: &[u8],
         start: u64,
         length: usize,
-    ) -> PyResult<Typed<'py, Vec<view::mm::MemorySearchMatch>>> {
+    ) -> PyResult<Typed<'py, Vec<MemorySearchMatch>>> {
         check_search_len(length)?;
         if pattern.is_empty() || pattern.len() > length {
             return Typed::new(py, Vec::new());
@@ -280,7 +290,7 @@ impl Memory {
                     .map_err(err)?;
                 Ok(pattern_offsets(&bytes, pattern)
                     .map(|offset| {
-                        view::mm::undescribed_search_match(
+                        MemorySearchMatch::undescribed(
                             start.wrapping_add(offset as u64),
                             offset as u64,
                             None,
@@ -297,7 +307,7 @@ impl Memory {
                     return Ok(hits
                         .into_iter()
                         .map(|address| {
-                            view::mm::undescribed_search_match(
+                            MemorySearchMatch::undescribed(
                                 address,
                                 address.wrapping_sub(start),
                                 session
@@ -311,12 +321,6 @@ impl Memory {
                 session
                     .target
                     .describe_search_matches(VirtAddr(start), &hits)
-                    .map(|matches| {
-                        matches
-                            .into_iter()
-                            .map(|hit| view::mm::memory_search_match(&hit))
-                            .collect::<Vec<_>>()
-                    })
                     .map_err(err)
             }
         })?;

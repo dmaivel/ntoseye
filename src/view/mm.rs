@@ -5,14 +5,12 @@ use crate::target::DiagnosticValue;
 use ntoseye_macros::record;
 
 use crate::target::mm::{
-    self as target_mm, AddressModule, BigPoolDetail, LookasideDetail, LookasideListsDetail,
-    MdlDetail, MemoryRegionInfo, PfnDetail, PoolBlockDetail, PoolFindDetail, PoolFindMatch,
-    PoolFindRange, PoolPageDetail, PoolRegionDetail, PoolType, PoolUsageDetail,
-    PoolValidationDetail, PtovDetail, PtovMapping, SystemMemorySummary, SystemPteTypeDetail,
-    SystemPtesDetail, VmDetail, VtopDetail, VtopLevel,
+    self as target_mm, BigPoolDetail, LookasideDetail, LookasideListsDetail, MdlDetail, PfnDetail,
+    PoolBlockDetail, PoolFindDetail, PoolFindMatch, PoolFindRange, PoolPageDetail,
+    PoolRegionDetail, PoolType, PoolUsageDetail, PoolValidationDetail, PtovDetail, PtovMapping,
+    SystemMemorySummary, SystemPteTypeDetail, SystemPtesDetail, VmDetail, VtopDetail, VtopLevel,
 };
 use crate::target::pool::{PoolUsageRow, tag_string};
-use crate::target::{self};
 use crate::types::{PageTableLevel, PteAttributes, VirtAddr};
 
 /// A named memory-manager counter (`!vm`).
@@ -546,30 +544,6 @@ pub struct SystemPtes {
     pub used: u64,
 }
 
-/// A memory-search hit, with its symbol and location data.
-#[record]
-pub struct MemorySearchMatch {
-    /// The address of the match.
-    pub address: VirtAddr,
-    /// The offset of the match from the start of the search.
-    #[record(hex)]
-    pub offset: u64,
-    /// The nearest symbol, if one resolves.
-    pub symbol: Option<String>,
-    /// The kind of address: `kernel-module`, `user-image`,
-    /// `kernel-region`, `private`, `mapped`, `unknown`, `physical`,
-    /// `vtl1`, or `foreign` (a root outside NT and VTL1).
-    pub kind: &'static str,
-    /// The module containing the match, if any.
-    pub module: Option<AddressModule>,
-    /// The module section containing the match, if any.
-    pub section: Option<String>,
-    /// The `_MI_SYSTEM_VA_TYPE` name, for a kernel-region match.
-    pub va_type: Option<String>,
-    /// The region containing the match, if any.
-    pub region: Option<MemoryRegionInfo>,
-}
-
 fn vm_counter(counter: &target_mm::VmCounter) -> VmCounter {
     VmCounter {
         name: counter.name.clone(),
@@ -953,40 +927,5 @@ pub fn system_ptes(detail: &SystemPtesDetail) -> SystemPtes {
         total: detail.total,
         free: detail.free,
         used: detail.total.saturating_sub(detail.free),
-    }
-}
-
-/// A memory-search hit, with what its address belongs to.
-pub fn memory_search_match(m: &target::MemorySearchMatch) -> MemorySearchMatch {
-    let d = &m.description;
-    MemorySearchMatch {
-        address: m.address,
-        offset: m.offset,
-        symbol: m.symbol.clone(),
-        kind: d.kind,
-        module: d.module.clone(),
-        section: d.section.clone(),
-        va_type: d.va_type.clone(),
-        region: d.region.clone(),
-    }
-}
-
-/// A memory-search hit outside NT's address descriptions: `kind` is
-/// `physical`, `vtl1`, or `foreign`.
-pub fn undescribed_search_match(
-    address: u64,
-    offset: u64,
-    symbol: Option<String>,
-    kind: &'static str,
-) -> MemorySearchMatch {
-    MemorySearchMatch {
-        address: VirtAddr(address),
-        offset,
-        symbol,
-        kind,
-        module: None,
-        section: None,
-        va_type: None,
-        region: None,
     }
 }

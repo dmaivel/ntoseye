@@ -23,7 +23,7 @@ pub mod irpfind;
 pub mod job;
 mod lifecycle;
 pub mod list;
-mod memory;
+pub mod memory;
 pub mod meta;
 pub mod mm;
 pub mod ndis;
@@ -55,7 +55,7 @@ pub use list::{
 };
 pub use memory::{
     CompareResult, ExpressionMemory, ExpressionScope, MAX_SEARCH_BYTES, MAX_SEARCH_MATCHES,
-    MemoryKind, SearchResult, SearchStop,
+    MemoryKind, MemorySearchMatch, PhysicalSearchResult, SearchResult, SearchStop,
 };
 pub use symbols::ReloadScope;
 pub use userdump::{TargetKind, UserProcess};
@@ -64,7 +64,6 @@ pub use vtl::{
     SavedVtlContext, ServedVp, VP_STATE_REGISTERS, exit_registers,
 };
 
-use self::mm::AddressDescription;
 use crate::{
     breakpoints::SiteJournal,
     debugger_data::{DebuggerDataBlock, MetadataSource, MetadataValue},
@@ -348,16 +347,6 @@ impl StringDescriptor {
             Self::Ansi => ("_STRING", &["_ANSI_STRING"]),
         }
     }
-}
-
-/// One memory-search hit, enriched with the same location/symbol context used
-/// by the SDK and MCP.
-#[derive(Debug, Clone)]
-pub struct MemorySearchMatch {
-    pub address: VirtAddr,
-    pub offset: u64,
-    pub symbol: Option<String>,
-    pub description: AddressDescription,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
