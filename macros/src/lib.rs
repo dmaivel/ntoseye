@@ -72,8 +72,9 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   `kind = Query | Action | Run | Host`, and `python = Object | none`;
 /// - effects, which `Session::admit` enforces for every host: `target =
 ///   Any | Kernel`, `state = Any | Halted | HaltedOrParkedThread | Running`,
-///   `run = None | Step | Run`, `writes = [Memory, Registers, Breakpoints,
-///   Symbols, Files]`, `live_only`, `capability = <DebugCapability>`;
+///   `run = None | Step | Run`, `writes = [Memory, Registers, Hardware,
+///   Breakpoints, Symbols, Files]`, `live_only`, `capability =
+///   <DebugCapability>`;
 /// - overrides: `usage = "..."` (else generated from the arguments),
 ///   `completion = [Strategy, ...]` (else from the argument types),
 ///   `python_name = "..."` (else the function's name), `style = RawTail |

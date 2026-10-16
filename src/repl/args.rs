@@ -107,6 +107,12 @@ impl<'i> ArgCursor<'i> {
         self.words.iter_mut().find_map(Option::take)
     }
 
+    /// The next word, left in place, for a grammar whose next argument
+    /// depends on it (`rdmsr /p <processor> <msr>`).
+    pub fn peek(&self) -> Option<&str> {
+        self.words.iter().flatten().next().map(AsRef::as_ref)
+    }
+
     /// The `index`th word left (`word_at(0)` is [`Self::word`]), for a grammar
     /// whose words are not in parameter order (`!process <process> [flags]
     /// [image]` reads the image with the process).

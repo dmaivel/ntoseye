@@ -107,6 +107,8 @@ pub enum RunEffect {
 pub enum Writes {
     Memory,
     Registers,
+    /// Device state: I/O ports, configuration space.
+    Hardware,
     Breakpoints,
     Symbols,
     Files,
