@@ -13,6 +13,9 @@ use crate::types::VirtAddr;
 use crate::typeview::{MAX_ARRAY_ELEMENTS, TypeView};
 use crate::ui;
 
+use ntoseye_macros::command;
+
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
 
 const MAX_LIST_ENTRIES: usize = 4096;
@@ -39,14 +42,148 @@ repl_command! {
     completion: Expression,
 }
 
-repl_command! {
-    cmd_list_command -> Flow;
-    names: ["!list"],
-    category: "objects and I/O",
-    usage: "!list -t [module!]<type>.<field> -x \"<commands>\" <address>",
-    summary: "Run commands for each element of a typed LIST_ENTRY chain.",
-    details: "Each command can get the element address as $extret, @extret, or @$extret. The walk stops at the head, at a repeated link, or after 4096 elements. The given address is the first element, as in WinDbg, so the walk includes all nodes until it returns to that address. In memory, a list head and a record link look the same, so if you start at a list head instead of at `poi(ListHead)`, the command uses the head as one pseudo-record and does not drop a real record. If the list is empty, its link points to itself, and the command runs nothing. The walk keeps the entries that it collected, and reports null links, cycles, unreadable links, and when it reaches the entry limit. Ctrl+C stops the commands between elements. A command that the session does not accept, for example a resume inside a breakpoint action, stops the element commands and the rest of the command line, but a command that only reports an error does not stop them.",
-    completion: Expression,
+/// `!list`'s words: `-t [module!]<type>.<field>`, `-x "<commands>"`, and the
+/// list head address, in any order.
+struct ListArguments {
+    type_field: String,
+    commands: String,
+    address: String,
+}
+
+fn list_arguments(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<ListArguments, ArgError> {
+    let message = |text: &str| ArgError::Message(text.to_string());
+    let mut type_field = None;
+    let mut commands = None;
+    let mut positional = Vec::new();
+    while let Some(word) = cursor.word() {
+        match word.as_ref() {
+            "-t" => {
+                let value = cursor
+                    .word()
+                    .ok_or_else(|| message("!list: missing type after -t"))?;
+                type_field = Some(value.into_owned());
+            }
+            "-x" => {
+                let value = cursor
+                    .word()
+                    .ok_or_else(|| message("!list: missing commands after -x"))?;
+                commands = Some(value.into_owned());
+            }
+            arg if arg.starts_with('-') => {
+                return Err(ArgError::Message(format!("!list: unknown option `{arg}`")));
+            }
+            _ => positional.push(word.into_owned()),
+        }
+    }
+    let (Some(type_field), Some(commands), Some(address)) =
+        (type_field, commands, positional.first().cloned())
+    else {
+        return Err(ArgError::Missing);
+    };
+    if positional.len() > 1 {
+        return Err(message("!list accepts one list head address"));
+    }
+    Ok(ListArguments {
+        type_field,
+        commands,
+        address,
+    })
+}
+
+/// Run commands for each element of a typed LIST_ENTRY chain.
+///
+/// Each command can get the element address as $extret, @extret, or @$extret.
+/// The walk stops at the head, at a repeated link, or after 4096 elements. The
+/// given address is the first element, as in WinDbg, so the walk includes all
+/// nodes until it returns to that address. In memory, a list head and a record
+/// link look the same, so if you start at a list head instead of at
+/// `poi(ListHead)`, the command uses the head as one pseudo-record and does not
+/// drop a real record. If the list is empty, its link points to itself, and the
+/// command runs nothing. The walk keeps the entries that it collected, and
+/// reports null links, cycles, unreadable links, and when it reaches the entry
+/// limit. Ctrl+C stops the commands between elements. A command that the
+/// session does not accept, for example a resume inside a breakpoint action,
+/// stops the element commands and the rest of the command line, but a command
+/// that only reports an error does not stop them.
+#[command(
+    names = ["!list"],
+    category = "objects and I/O",
+    kind = Host,
+    python = none,
+    usage = "!list -t [module!]<type>.<field> -x \"<commands>\" <address>",
+    completion = Expression
+)]
+fn list(
+    state: &mut ReplState<'_>,
+    #[arg(parse = list_arguments)] arguments: ListArguments,
+) -> Result<Flow> {
+    let ListArguments {
+        type_field,
+        commands,
+        address: address_text,
+    } = arguments;
+    let Some((type_name, field_name)) = type_field.rsplit_once('.') else {
+        error!("!list -t expects [module!]<type>.<field>");
+        return Ok(Flow::Continue);
+    };
+    let path = match parse_field_path(field_name) {
+        Ok(path) => path,
+        Err(error) => {
+            error!("!list: {}", error);
+            return Ok(Flow::Continue);
+        }
+    };
+    let type_info = match state.lookup_type(type_name) {
+        Some(type_info) => type_info,
+        None => {
+            error!("!list: type `{}` not found", type_name);
+            return Ok(Flow::Continue);
+        }
+    };
+    let head = match state.eval_or_report(&address_text) {
+        Some(address) if !address.is_zero() => address,
+        Some(_) => {
+            error!("!list requires a nonzero list head address");
+            return Ok(Flow::Continue);
+        }
+        None => return Ok(Flow::Continue),
+    };
+    let resolved = match state.resolve_field_path(type_info.as_ref(), &path) {
+        Ok(path) => path,
+        Err(error) => {
+            error!("!list -t {}: {}", type_field, error);
+            return Ok(Flow::Continue);
+        }
+    };
+    let (link_offset, next_offset, pointer_size) = match state.list_offsets(&resolved) {
+        Ok(offsets) => offsets,
+        Err(error) => {
+            error!("!list -t {}: {}", type_field, error);
+            return Ok(Flow::Continue);
+        }
+    };
+    let (records, termination) =
+        state.collect_typed_list(head, link_offset, next_offset, pointer_size);
+    let command = commands.replace("@$extret", "@extret");
+    let flow = state.in_command_loop("!list", |state| {
+        state.run_iterations("!list", records.len(), |state, index| {
+            state.ctx.target.user_vars.insert(
+                "extret".to_string(),
+                UserVar {
+                    value: records[index].0,
+                    source: "!list element".to_string(),
+                },
+            );
+            Some(Cow::Borrowed(command.as_str()))
+        })
+    })?;
+    if let Some(stop) = termination.diagnostic() {
+        outln!("!list: list walk stopped: {stop}");
+    }
+    Ok(flow)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -859,116 +996,6 @@ impl ReplState<'_> {
             }
         }
         Ok(())
-    }
-
-    fn cmd_list_command(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
-        let mut type_field = None;
-        let mut commands = None;
-        let mut positional = Vec::new();
-        let mut index = 0;
-        while index < invocation.argv.len() {
-            match invocation.arg(index).unwrap_or_default() {
-                "-t" => {
-                    let Some(value) = invocation.arg(index + 1) else {
-                        error!("!list: missing type after -t");
-                        return Ok(Flow::Continue);
-                    };
-                    type_field = Some(value.to_string());
-                    index += 2;
-                }
-                "-x" => {
-                    let Some(value) = invocation.arg(index + 1) else {
-                        error!("!list: missing commands after -x");
-                        return Ok(Flow::Continue);
-                    };
-                    commands = Some(value.to_string());
-                    index += 2;
-                }
-                arg if arg.starts_with('-') => {
-                    error!("!list: unknown option `{arg}`");
-                    return Ok(Flow::Continue);
-                }
-                arg => {
-                    positional.push(arg.to_string());
-                    index += 1;
-                }
-            }
-        }
-        let Some(type_field) = type_field else {
-            outln!("{}\n", command_help("!list"));
-            return Ok(Flow::Continue);
-        };
-        let Some(commands) = commands else {
-            outln!("{}\n", command_help("!list"));
-            return Ok(Flow::Continue);
-        };
-        let Some(address_text) = positional.first() else {
-            outln!("{}\n", command_help("!list"));
-            return Ok(Flow::Continue);
-        };
-        if positional.len() > 1 {
-            error!("!list accepts one list head address");
-            return Ok(Flow::Continue);
-        }
-        let Some((type_name, field_name)) = type_field.rsplit_once('.') else {
-            error!("!list -t expects [module!]<type>.<field>");
-            return Ok(Flow::Continue);
-        };
-        let path = match parse_field_path(field_name) {
-            Ok(path) => path,
-            Err(error) => {
-                error!("!list: {}", error);
-                return Ok(Flow::Continue);
-            }
-        };
-        let type_info = match self.lookup_type(type_name) {
-            Some(type_info) => type_info,
-            None => {
-                error!("!list: type `{}` not found", type_name);
-                return Ok(Flow::Continue);
-            }
-        };
-        let head = match self.eval_or_report(address_text) {
-            Some(address) if !address.is_zero() => address,
-            Some(_) => {
-                error!("!list requires a nonzero list head address");
-                return Ok(Flow::Continue);
-            }
-            None => return Ok(Flow::Continue),
-        };
-        let resolved = match self.resolve_field_path(type_info.as_ref(), &path) {
-            Ok(path) => path,
-            Err(error) => {
-                error!("!list -t {}: {}", type_field, error);
-                return Ok(Flow::Continue);
-            }
-        };
-        let (link_offset, next_offset, pointer_size) = match self.list_offsets(&resolved) {
-            Ok(offsets) => offsets,
-            Err(error) => {
-                error!("!list -t {}: {}", type_field, error);
-                return Ok(Flow::Continue);
-            }
-        };
-        let (records, termination) =
-            self.collect_typed_list(head, link_offset, next_offset, pointer_size);
-        let command = commands.replace("@$extret", "@extret");
-        let flow = self.in_command_loop("!list", |state| {
-            state.run_iterations("!list", records.len(), |state, index| {
-                state.ctx.target.user_vars.insert(
-                    "extret".to_string(),
-                    UserVar {
-                        value: records[index].0,
-                        source: "!list element".to_string(),
-                    },
-                );
-                Some(Cow::Borrowed(command.as_str()))
-            })
-        })?;
-        if let Some(stop) = termination.diagnostic() {
-            outln!("!list: list walk stopped: {stop}");
-        }
-        Ok(flow)
     }
 }
 

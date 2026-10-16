@@ -9,6 +9,8 @@ use std::borrow::Cow;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use ntoseye_macros::command;
+
 use crate::diagnostics::print_warning;
 use crate::error::Result;
 use crate::expr::{Expr, NumberRadix};
@@ -21,128 +23,379 @@ use crate::repl::*;
 /// How often `.sleep` looks for Ctrl+C.
 const SLEEP_POLL: Duration = Duration::from_millis(50);
 
-repl_command! {
-    cmd_if -> Flow;
-    names: [".if"],
-    category: "session",
-    usage: ".if (Condition) { Commands } [.elsif (Condition) { Commands }]... [.else { Commands }]",
-    summary: "Run a block of commands if a condition is true, like the C if statement.",
-    details: "Each Condition is an expression, and a nonzero value is true. The block of the first true condition runs, and if no condition is true, the .else block runs, if there is one. Spaces and line breaks can separate the parts, and so can the `;` that `$$><` puts at each line break of a script. Commands after the statement run after the statement ends, for example: `.if (@rcx == 0) { .echo null } .else { dq @rcx L1 }; k`.",
-    style: RawTail,
+/// Run a block of commands if a condition is true, like the C if statement.
+///
+/// Each Condition is an expression, and a nonzero value is true. The block of
+/// the first true condition runs, and if no condition is true, the .else block
+/// runs, if there is one. Spaces and line breaks can separate the parts, and so
+/// can the `;` that `$$><` puts at each line break of a script. Commands after
+/// the statement run after the statement ends, for example: `.if (@rcx == 0) {
+/// .echo null } .else { dq @rcx L1 }; k`.
+#[command(
+    names = [".if"],
+    category = "session",
+    kind = Host,
+    python = none,
+    usage = ".if (Condition) { Commands } [.elsif (Condition) { Commands }]... [.else { Commands }]",
+    style = RawTail
+)]
+fn if_statement(
+    state: &mut ReplState<'_>,
+    #[arg(raw)] tail: String,
+    #[arg(invoked)] name: &str,
+) -> Result<Flow> {
+    if tail.is_empty() {
+        outln!("{}\n", command_help(name));
+        return Ok(Flow::Continue);
+    }
+    let statement = match parse_if(&tail) {
+        Ok(statement) => statement,
+        Err(error) => return malformed(".if", error),
+    };
+    let mut chosen = statement.otherwise;
+    for &(condition, body) in &statement.arms {
+        match state.condition_holds(".if", condition) {
+            Some(true) => {
+                chosen = Some(body);
+                break;
+            }
+            Some(false) => {}
+            None => return Ok(Flow::Denied),
+        }
+    }
+    let flow = match chosen {
+        Some(body) => state.run_block(".if", body)?,
+        None => Flow::Continue,
+    };
+    state.then_rest(flow, statement.rest)
 }
 
-repl_command! {
-    cmd_orphan_else -> Flow;
-    names: [".elsif"],
-    category: "session",
-    usage: ".if (Condition) { Commands } .elsif (Condition) { Commands }",
-    summary: "Add a condition to an .if statement.",
-    details: "Use this only immediately after an .if or .elsif block. See .if.",
-    style: RawTail,
+/// Add a condition to an .if statement.
+///
+/// Use this only immediately after an .if or .elsif block. See .if.
+#[command(
+    names = [".elsif"],
+    category = "session",
+    kind = Host,
+    python = none,
+    usage = ".if (Condition) { Commands } .elsif (Condition) { Commands }",
+    style = RawTail
+)]
+fn elsif(
+    _state: &mut ReplState<'_>,
+    #[arg(raw)] _tail: String,
+    #[arg(invoked)] name: &str,
+) -> Result<Flow> {
+    orphan_else(name)
 }
 
-repl_command! {
-    cmd_orphan_else -> Flow;
-    names: [".else"],
-    category: "session",
-    usage: ".if (Condition) { Commands } .else { Commands }",
-    summary: "Run a block when no condition of an .if statement is true.",
-    details: "Use this only immediately after an .if or .elsif block. See .if.",
-    style: RawTail,
+/// Run a block when no condition of an .if statement is true.
+///
+/// Use this only immediately after an .if or .elsif block. See .if.
+#[command(
+    names = [".else"],
+    category = "session",
+    kind = Host,
+    python = none,
+    usage = ".if (Condition) { Commands } .else { Commands }",
+    style = RawTail
+)]
+fn else_block(
+    _state: &mut ReplState<'_>,
+    #[arg(raw)] _tail: String,
+    #[arg(invoked)] name: &str,
+) -> Result<Flow> {
+    orphan_else(name)
 }
 
-repl_command! {
-    cmd_while -> Flow;
-    names: [".while"],
-    category: "session",
-    usage: ".while (Condition) { Commands }",
-    summary: "Run a block of commands while a condition is true.",
-    details: "Condition is an expression that the loop evaluates before each pass, and a nonzero value is true. .break stops the loop, and .continue starts the next pass. Ctrl+C, or a timeout or cancellation of a remote call, stops the loop between passes. If the session does not permit a command, the loop stops and the rest of the command line does not run.",
-    style: RawTail,
+/// An `.elsif` or `.else` that no `.if` block precedes (a statement's parser
+/// takes the ones that follow its blocks).
+fn orphan_else(name: &str) -> Result<Flow> {
+    error!("{name} must follow the block of an .if or .elsif");
+    Ok(Flow::Denied)
 }
 
-repl_command! {
-    cmd_for -> Flow;
-    names: [".for"],
-    category: "session",
-    usage: ".for (InitialCommand ; Condition ; IncrementCommand) { Commands }",
-    summary: "Run a block of commands in a loop, like the C for statement.",
-    details: "InitialCommand runs once. Then, while the expression Condition is nonzero, the block runs, followed by IncrementCommand. Usually, the two commands are pseudo-register assignments, for example: `.for (r $t0 = 0; @$t0 < 4; r $t0 = @$t0 + 1) { ? @$t0 }`. .break stops the loop, and .continue goes to IncrementCommand. Ctrl+C, or a timeout or cancellation of a remote call, stops the loop between passes.",
-    style: RawTail,
+/// Run a block of commands while a condition is true.
+///
+/// Condition is an expression that the loop evaluates before each pass, and a
+/// nonzero value is true. .break stops the loop, and .continue starts the next
+/// pass. Ctrl+C, or a timeout or cancellation of a remote call, stops the loop
+/// between passes. If the session does not permit a command, the loop stops and
+/// the rest of the command line does not run.
+#[command(
+    names = [".while"],
+    category = "session",
+    kind = Host,
+    python = none,
+    usage = ".while (Condition) { Commands }",
+    style = RawTail
+)]
+fn while_loop(
+    state: &mut ReplState<'_>,
+    #[arg(raw)] tail: String,
+    #[arg(invoked)] name: &str,
+) -> Result<Flow> {
+    state.loop_command(name, &tail, parse_while)
 }
 
-repl_command! {
-    cmd_do -> Flow;
-    names: [".do"],
-    category: "session",
-    usage: ".do { Commands } (Condition)",
-    summary: "Run a block of commands, then run it again while a condition is true.",
-    details: "Condition is an expression that the loop evaluates after each pass, and a nonzero value is true. .break stops the loop, and .continue goes to the condition. Ctrl+C, or a timeout or cancellation of a remote call, stops the loop between passes.",
-    style: RawTail,
+/// Run a block of commands in a loop, like the C for statement.
+///
+/// InitialCommand runs once. Then, while the expression Condition is nonzero,
+/// the block runs, followed by IncrementCommand. Usually, the two commands are
+/// pseudo-register assignments, for example: `.for (r $t0 = 0; @$t0 < 4; r $t0
+/// = @$t0 + 1) { ? @$t0 }`. .break stops the loop, and .continue goes to
+/// IncrementCommand. Ctrl+C, or a timeout or cancellation of a remote call,
+/// stops the loop between passes.
+#[command(
+    names = [".for"],
+    category = "session",
+    kind = Host,
+    python = none,
+    usage = ".for (InitialCommand ; Condition ; IncrementCommand) { Commands }",
+    style = RawTail
+)]
+fn for_loop(
+    state: &mut ReplState<'_>,
+    #[arg(raw)] tail: String,
+    #[arg(invoked)] name: &str,
+) -> Result<Flow> {
+    state.loop_command(name, &tail, parse_for)
 }
 
-repl_command! {
-    cmd_break -> Flow;
-    names: [".break"],
-    category: "session",
-    usage: ".break",
-    summary: "Stop the innermost .for, .while, or .do loop.",
-    details: "As in WinDbg, .break does not stop .foreach and !for_each_* loops. Usually, you put .break in an .if block. For example: `.while (1) { r $t0 = @$t0 + 1; .if (@$t0 > 5) { .break } }`.",
+/// Run a block of commands, then run it again while a condition is true.
+///
+/// Condition is an expression that the loop evaluates after each pass, and a
+/// nonzero value is true. .break stops the loop, and .continue goes to the
+/// condition. Ctrl+C, or a timeout or cancellation of a remote call, stops the
+/// loop between passes.
+#[command(
+    names = [".do"],
+    category = "session",
+    kind = Host,
+    python = none,
+    usage = ".do { Commands } (Condition)",
+    style = RawTail
+)]
+fn do_loop(
+    state: &mut ReplState<'_>,
+    #[arg(raw)] tail: String,
+    #[arg(invoked)] name: &str,
+) -> Result<Flow> {
+    state.loop_command(name, &tail, parse_do)
 }
 
-repl_command! {
-    cmd_continue -> Flow;
-    names: [".continue"],
-    category: "session",
-    usage: ".continue",
-    summary: "Start the next pass of the innermost .for, .while, or .do loop.",
+/// Stop the innermost .for, .while, or .do loop.
+///
+/// As in WinDbg, .break does not stop .foreach and !for_each_* loops. Usually,
+/// you put .break in an .if block. For example: `.while (1) { r $t0 = @$t0 + 1;
+/// .if (@$t0 > 5) { .break } }`.
+#[command(
+    names = [".break"],
+    category = "session",
+    kind = Host,
+    python = none,
+    usage = ".break"
+)]
+fn break_loop(
+    state: &mut ReplState<'_>,
+    #[arg(raw)] tail: String,
+    #[arg(invoked)] name: &str,
+) -> Result<Flow> {
+    state.loop_jump(name, &tail, Jump::Break)
 }
 
-repl_command! {
-    cmd_block -> Flow;
-    names: [".block"],
-    category: "session",
-    usage: ".block { Commands }",
-    summary: "Run a block of commands.",
-    details: "WinDbg uses a block to evaluate its `${alias}` aliases again. Because ntoseye expands aliases when each command runs, a block in ntoseye only groups commands.",
-    style: RawTail,
+/// Start the next pass of the innermost .for, .while, or .do loop.
+#[command(
+    names = [".continue"],
+    category = "session",
+    kind = Host,
+    python = none,
+    usage = ".continue"
+)]
+fn continue_loop(
+    state: &mut ReplState<'_>,
+    #[arg(raw)] tail: String,
+    #[arg(invoked)] name: &str,
+) -> Result<Flow> {
+    state.loop_jump(name, &tail, Jump::Continue)
 }
 
-repl_command! {
-    cmd_j -> Flow;
-    names: ["j"],
-    category: "session",
-    usage: "j Expression Command1 ; Command2 | j Expression 'Commands1' ; 'Commands2'",
-    summary: "Run one of two commands, based on the value of an expression.",
-    details: "If Expression is nonzero, Command1 runs, and otherwise Command2 runs. To put several commands in a branch, separate them with `;` and put them in single quotes. Each branch can be empty (`''`, or nothing before the `;`). j uses the rest of the line, so it ignores text after Command2. In a breakpoint action, a `gc` in either branch resumes the target. For example: `bp nt!NtClose \"j (@rcx == 0) '.echo null handle' ; 'gc'\"`.",
-    style: RawTail,
+/// Run a block of commands.
+///
+/// WinDbg uses a block to evaluate its `${alias}` aliases again. Because
+/// ntoseye expands aliases when each command runs, a block in ntoseye only
+/// groups commands.
+#[command(
+    names = [".block"],
+    category = "session",
+    kind = Host,
+    python = none,
+    usage = ".block { Commands }",
+    style = RawTail
+)]
+fn block(
+    state: &mut ReplState<'_>,
+    #[arg(raw)] tail: String,
+    #[arg(invoked)] name: &str,
+) -> Result<Flow> {
+    if tail.is_empty() {
+        outln!("{}\n", command_help(name));
+        return Ok(Flow::Continue);
+    }
+    let (body, rest) = match take_delimited(&tail, '{', '}') {
+        Ok(block) => block,
+        Err(error) => return malformed(".block", error),
+    };
+    let flow = state.run_block(".block", body)?;
+    state.then_rest(flow, rest)
 }
 
-repl_command! {
-    names: ["$<", "$><", "$$<", "$$><", "$$>a<"],
-    category: "session",
-    usage: "$<Filename | $><Filename | $$<Filename | $$><Filename | $$>a<Filename [arg1 arg2 ...]",
-    summary: "Run the commands in a script file on the machine that ntoseye runs on.",
-    details: "`$<` and `$$<` run the file one line at a time, while `$><`, `$$><`, and `$$>a<` join its lines with `;` into one command block. Use these forms if the .if or .while blocks of a script span lines. `$<` and `$><` use the rest of the line as the file name, `;` included. For the `$$` forms, the file name ends at `;`, so other commands can follow. `$$>a<` accepts a quoted file name if the name has spaces, and replaces `${$arg1}`...`${$argN}` in the file with its arguments as written. If argument N is not given, `${$argN}` stays as written. `$$>a<` replaces `${/d:$argN}` with 1 if argument N is given, else with 0. `$$>a<` shows only the output of the commands, and the other forms show each command before it runs. Scripts can run scripts, up to a depth of 16. Ctrl+C stops a script between commands.",
-    flow: Continue,
+/// Run one of two commands, based on the value of an expression.
+///
+/// If Expression is nonzero, Command1 runs, and otherwise Command2 runs. To put
+/// several commands in a branch, separate them with `;` and put them in single
+/// quotes. Each branch can be empty (`''`, or nothing before the `;`). j uses
+/// the rest of the line, so it ignores text after Command2. In a breakpoint
+/// action, a `gc` in either branch resumes the target. For example: `bp
+/// nt!NtClose "j (@rcx == 0) '.echo null handle' ; 'gc'"`.
+#[command(
+    names = ["j"],
+    category = "session",
+    kind = Host,
+    python = none,
+    usage = "j Expression Command1 ; Command2 | j Expression 'Commands1' ; 'Commands2'",
+    style = RawTail
+)]
+fn j(
+    state: &mut ReplState<'_>,
+    #[arg(raw)] tail: String,
+    #[arg(invoked)] name: &str,
+) -> Result<Flow> {
+    if tail.is_empty() {
+        outln!("{}\n", command_help(name));
+        return Ok(Flow::Continue);
+    }
+    // `*` in an expression multiplies; a comment is never Command1.
+    let is_command = |word: &str| {
+        (command_registry().get(word).is_some() && !is_comment(word))
+            || state
+                .aliases
+                .entries()
+                .iter()
+                .any(|(alias, _)| alias == word)
+            || word.starts_with('~')
+            || script_file_token(word).is_some()
+    };
+    let command = match parse_j(&tail, state.radix, is_command) {
+        Ok(command) => command,
+        Err(error) => return malformed("j", error),
+    };
+    if !command.ignored.is_empty() {
+        print_warning(format!("j: ignoring '{}' after Command2", command.ignored));
+    }
+    let Some(holds) = state.condition_holds("j", command.condition) else {
+        return Ok(Flow::Denied);
+    };
+    let commands = if holds {
+        command.then
+    } else {
+        command.otherwise
+    };
+    if commands.trim().is_empty() {
+        return Ok(Flow::Continue);
+    }
+    state.run_block("j", &commands)
 }
 
-repl_command! {
-    names: ["$$", "*"],
-    category: "session",
-    usage: "$$ Text | * Text",
-    summary: "Add a comment that ends at the next `;` (`$$`) or at the end of the line (`*`).",
-    flow: Continue,
+/// Run the commands in a script file on the machine that ntoseye runs on.
+///
+/// `$<` and `$$<` run the file one line at a time, while `$><`, `$$><`, and
+/// `$$>a<` join its lines with `;` into one command block. Use these forms if
+/// the .if or .while blocks of a script span lines. `$<` and `$><` use the rest
+/// of the line as the file name, `;` included. For the `$$` forms, the file
+/// name ends at `;`, so other commands can follow. `$$>a<` accepts a quoted
+/// file name if the name has spaces, and replaces `${$arg1}`...`${$argN}` in
+/// the file with its arguments as written. If argument N is not given,
+/// `${$argN}` stays as written. `$$>a<` replaces `${/d:$argN}` with 1 if
+/// argument N is given, else with 0. `$$>a<` shows only the output of the
+/// commands, and the other forms show each command before it runs. Scripts can
+/// run scripts, up to a depth of 16. Ctrl+C stops a script between commands.
+#[command(
+    names = ["$<", "$><", "$$<", "$$><", "$$>a<"],
+    category = "session",
+    kind = Host,
+    python = none,
+    usage = "$<Filename | $><Filename | $$<Filename | $$><Filename | $$>a<Filename [arg1 arg2 ...]"
+)]
+fn script_file(
+    state: &mut ReplState<'_>,
+    #[arg(raw)] operand: String,
+    #[arg(invoked)] token: &str,
+) -> Result<Flow> {
+    // The dispatcher calls `run_script_file` itself for the usual glued form
+    // (`$<file`), which never parses as this name.
+    state.run_script_file(token, &operand)
 }
 
-repl_command! {
-    cmd_sleep;
-    names: [".sleep"],
-    category: "session",
-    usage: ".sleep Milliseconds",
-    summary: "Pause the debugger for a number of milliseconds.",
-    details: "Milliseconds is an expression in the current radix (`.sleep 0n500`). Ctrl+C, or a timeout or cancellation of a remote call, ends the pause early. The command does not change the target, so a running target continues to run.",
-    completion: Expression,
+/// Add a comment that ends at the next `;` (`$$`) or at the end of the line
+/// (`*`).
+#[command(
+    names = ["$$", "*"],
+    category = "session",
+    kind = Host,
+    python = none,
+    usage = "$$ Text | * Text"
+)]
+fn comment(_state: &mut ReplState<'_>, #[arg(raw)] _text: String) -> Result<()> {
+    // A comment does nothing. The dispatcher drops it before parsing
+    // (`is_comment`), so this runs only if a host calls the spec directly.
+    Ok(())
+}
+
+/// Pause the debugger for a number of milliseconds.
+///
+/// Milliseconds is an expression in the current radix (`.sleep 0n500`). Ctrl+C,
+/// or a timeout or cancellation of a remote call, ends the pause early. The
+/// command does not change the target, so a running target continues to run.
+#[command(
+    names = [".sleep"],
+    category = "session",
+    kind = Host,
+    python = none,
+    usage = ".sleep Milliseconds",
+    completion = Expression
+)]
+fn sleep(state: &mut ReplState<'_>, milliseconds: u64) -> Result<()> {
+    let requests = state.ctx.target.interrupt_requests();
+    // Past what an Instant can hold, the pause lasts until Ctrl+C.
+    let deadline = Instant::now().checked_add(Duration::from_millis(milliseconds));
+    loop {
+        if state.cancelled_since(requests) {
+            // The Ctrl+C was for this pause; an enclosing loop still sees it
+            // in the request count.
+            state.ctx.target.interrupt.store(false, Ordering::SeqCst);
+            outln!(".sleep: interrupted");
+            return Ok(());
+        }
+        let slice = match deadline {
+            Some(deadline) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Ok(());
+                }
+                (deadline - now).min(SLEEP_POLL)
+            }
+            None => SLEEP_POLL,
+        };
+        std::thread::sleep(slice);
+    }
+}
+
+/// Report a statement that does not parse. The rest of its line cannot be
+/// told apart from it, so the line is abandoned.
+fn malformed(name: &str, error: String) -> Result<Flow> {
+    error!("{name}: {error}");
+    Ok(Flow::Denied)
 }
 
 /// `text` past what may separate the parts of a statement: whitespace, and
@@ -446,73 +699,19 @@ impl ReplState<'_> {
         }
     }
 
-    /// Report a statement that does not parse. The rest of its line cannot
-    /// be told apart from it, so the line is abandoned.
-    fn malformed(name: &str, error: String) -> Result<Flow> {
-        error!("{name}: {error}");
-        Ok(Flow::Denied)
-    }
-
-    fn cmd_if(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
-        if invocation.raw_tail.is_empty() {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(Flow::Continue);
-        }
-        let statement = match parse_if(invocation.raw_tail) {
-            Ok(statement) => statement,
-            Err(error) => return Self::malformed(".if", error),
-        };
-        let mut chosen = statement.otherwise;
-        for &(condition, body) in &statement.arms {
-            match self.condition_holds(".if", condition) {
-                Some(true) => {
-                    chosen = Some(body);
-                    break;
-                }
-                Some(false) => {}
-                None => return Ok(Flow::Denied),
-            }
-        }
-        let flow = match chosen {
-            Some(body) => self.run_block(".if", body)?,
-            None => Flow::Continue,
-        };
-        self.then_rest(flow, statement.rest)
-    }
-
-    fn cmd_orphan_else(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
-        error!(
-            "{} must follow the block of an .if or .elsif",
-            invocation.name
-        );
-        Ok(Flow::Denied)
-    }
-
-    fn cmd_while(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
-        self.loop_command(invocation, parse_while)
-    }
-
-    fn cmd_for(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
-        self.loop_command(invocation, parse_for)
-    }
-
-    fn cmd_do(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
-        self.loop_command(invocation, parse_do)
-    }
-
     fn loop_command(
         &mut self,
-        invocation: CommandInvocation<'_>,
+        name: &str,
+        tail: &str,
         parse: fn(&str) -> std::result::Result<LoopStatement<'_>, String>,
     ) -> Result<Flow> {
-        let name = invocation.name;
-        if invocation.raw_tail.is_empty() {
+        if tail.is_empty() {
             outln!("{}\n", command_help(name));
             return Ok(Flow::Continue);
         }
-        let statement = match parse(invocation.raw_tail) {
+        let statement = match parse(tail) {
             Ok(statement) => statement,
-            Err(error) => return Self::malformed(name, error),
+            Err(error) => return malformed(name, error),
         };
         let flow = self.in_command_loop(name, |state| {
             let outer = std::mem::replace(&mut state.breakable_loop, true);
@@ -567,77 +766,16 @@ impl ReplState<'_> {
         }
     }
 
-    fn cmd_break(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
-        self.loop_jump(invocation, Jump::Break)
-    }
-
-    fn cmd_continue(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
-        self.loop_jump(invocation, Jump::Continue)
-    }
-
-    fn loop_jump(&mut self, invocation: CommandInvocation<'_>, jump: Jump) -> Result<Flow> {
-        if !invocation.raw_tail.is_empty() {
-            outln!("{}\n", command_help(invocation.name));
+    fn loop_jump(&mut self, name: &str, tail: &str, jump: Jump) -> Result<Flow> {
+        if !tail.is_empty() {
+            outln!("{}\n", command_help(name));
             return Ok(Flow::Continue);
         }
         if !self.breakable_loop {
-            error!(
-                "{} is only valid inside a .for, .while, or .do loop",
-                invocation.name
-            );
+            error!("{name} is only valid inside a .for, .while, or .do loop");
             return Ok(Flow::Denied);
         }
         Ok(Flow::Jump(jump))
-    }
-
-    fn cmd_block(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
-        if invocation.raw_tail.is_empty() {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(Flow::Continue);
-        }
-        let (body, rest) = match take_delimited(invocation.raw_tail, '{', '}') {
-            Ok(block) => block,
-            Err(error) => return Self::malformed(".block", error),
-        };
-        let flow = self.run_block(".block", body)?;
-        self.then_rest(flow, rest)
-    }
-
-    fn cmd_j(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
-        if invocation.raw_tail.is_empty() {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(Flow::Continue);
-        }
-        // `*` in an expression multiplies; a comment is never Command1.
-        let is_command = |word: &str| {
-            (command_registry().get(word).is_some() && !is_comment(word))
-                || self
-                    .aliases
-                    .entries()
-                    .iter()
-                    .any(|(alias, _)| alias == word)
-                || word.starts_with('~')
-                || script_file_token(word).is_some()
-        };
-        let command = match parse_j(invocation.raw_tail, self.radix, is_command) {
-            Ok(command) => command,
-            Err(error) => return Self::malformed("j", error),
-        };
-        if !command.ignored.is_empty() {
-            print_warning(format!("j: ignoring '{}' after Command2", command.ignored));
-        }
-        let Some(holds) = self.condition_holds("j", command.condition) else {
-            return Ok(Flow::Denied);
-        };
-        let commands = if holds {
-            command.then
-        } else {
-            command.otherwise
-        };
-        if commands.trim().is_empty() {
-            return Ok(Flow::Continue);
-        }
-        self.run_block("j", &commands)
     }
 
     /// Run a script file: `token` is the `$<`-family token, `operand` the
@@ -647,7 +785,7 @@ impl ReplState<'_> {
         let (path, args) = if token == "$$>a<" {
             let mut words = match parse_args(operand, 0) {
                 Ok(words) => words,
-                Err(_) => return Self::malformed(token, "unterminated quoted argument".into()),
+                Err(_) => return malformed(token, "unterminated quoted argument".into()),
             };
             if words.is_empty() {
                 (Cow::Borrowed(""), words)
@@ -735,39 +873,6 @@ impl ReplState<'_> {
                 source: expression.to_string(),
             },
         );
-    }
-
-    fn cmd_sleep(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let (Some(text), 1) = (invocation.arg(0), invocation.argv.len()) else {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        };
-        let Some(milliseconds) = self.eval_or_report(text) else {
-            return Ok(());
-        };
-        let requests = self.ctx.target.interrupt_requests();
-        // Past what an Instant can hold, the pause lasts until Ctrl+C.
-        let deadline = Instant::now().checked_add(Duration::from_millis(milliseconds.0));
-        loop {
-            if self.cancelled_since(requests) {
-                // The Ctrl+C was for this pause; an enclosing loop still
-                // sees it in the request count.
-                self.ctx.target.interrupt.store(false, Ordering::SeqCst);
-                outln!(".sleep: interrupted");
-                return Ok(());
-            }
-            let slice = match deadline {
-                Some(deadline) => {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        return Ok(());
-                    }
-                    (deadline - now).min(SLEEP_POLL)
-                }
-                None => SLEEP_POLL,
-            };
-            std::thread::sleep(slice);
-        }
     }
 }
 

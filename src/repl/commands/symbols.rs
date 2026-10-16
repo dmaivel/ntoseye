@@ -5,6 +5,8 @@ use tabled::builder::Builder;
 
 use owo_colors::OwoColorize;
 
+use ntoseye_macros::command;
+
 use crate::breakpoints::BreakpointManager;
 use crate::error::Result;
 use crate::expr::{Expr, ExprValue};
@@ -50,31 +52,6 @@ repl_command! {
     details: "Memory read functions and their sizes in bytes: by() 1, wo() 2, dwo() 4, qwo()/poi() 8. `&expr` gives the address of `expr`. `->` and `.` give field values.",
     completion: Expression,
     style: ExpressionTail,
-}
-
-repl_command! {
-    cmd_set;
-    names: ["set"],
-    category: "symbols, types, and expressions",
-    usage: "set $<name> <expression>",
-    summary: "Define a convenience variable that you can use in expressions as $<name>.",
-    completion: [None, Expression],
-}
-
-repl_command! {
-    cmd_vars();
-    names: ["vars"],
-    category: "symbols, types, and expressions",
-    usage: "vars",
-    summary: "List the defined convenience variables and result slots.",
-}
-
-repl_command! {
-    cmd_unset;
-    names: ["unset"],
-    category: "symbols, types, and expressions",
-    usage: "unset $<name>",
-    summary: "Remove a convenience variable.",
 }
 
 repl_command! {
@@ -192,6 +169,147 @@ repl_command! {
     usage: "lmv [m <pattern>|a <address>|<name>] [u|k] [t]",
     summary: "Show the detailed symbol status and PDB identity of each module.",
     details: "This command is the same as `lm v` and uses the same filters, for example `lmv m nt`.",
+}
+
+/// Define a convenience variable that you can use in expressions as $<name>.
+#[command(
+    names = ["set"],
+    category = "symbols, types, and expressions",
+    kind = Host,
+    python = none,
+    usage = "set $<name> <expression>",
+    completion = [None, Expression]
+)]
+fn set(state: &mut ReplState<'_>, #[arg(rest)] rest: String) -> Result<()> {
+    let Some((lhs, rhs)) = rest.split_once(char::is_whitespace) else {
+        outln!("{}\n", command_help("set"));
+        return Ok(());
+    };
+    let name = lhs.trim().strip_prefix('$').unwrap_or(lhs.trim()).trim();
+    // names must start with a letter or '_'; this reserves
+    // $<digits> (and digit-leading names) for the $0..$N
+    // result slots, avoiding any collision
+    let valid = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !valid {
+        error!(
+            "invalid variable name '${}' (must start with a letter or '_'; $<digits> are reserved for result slots)",
+            name
+        );
+        return Ok(());
+    }
+    let source = rhs.trim().to_string();
+    match Expr::eval_with_radix(&source, &state.ctx.target, state.radix) {
+        Ok(v) => {
+            state
+                .ctx
+                .target
+                .user_vars
+                .insert(name.to_string(), UserVar { value: v.0, source });
+            outln!("${} = {}\n", name, ui::addr(v.0));
+        }
+        Err(e) => error!("{}", e),
+    }
+
+    Ok(())
+}
+
+/// List the defined convenience variables and result slots.
+#[command(
+    names = ["vars"],
+    category = "symbols, types, and expressions",
+    kind = Host,
+    python = none
+)]
+fn vars(state: &mut ReplState<'_>) -> Result<()> {
+    let builtins = state.ctx.target.builtin_variables();
+    if state.ctx.target.user_vars.is_empty()
+        && state.ctx.target.results.is_empty()
+        && builtins.is_empty()
+    {
+        outln!("no variables defined\n");
+        return Ok(());
+    }
+    let mut names: Vec<&String> = state.ctx.target.user_vars.keys().collect();
+    names.sort();
+    let user: Vec<(&str, &UserVar)> = names
+        .into_iter()
+        .map(|name| (name.as_str(), &state.ctx.target.user_vars[name]))
+        .collect();
+    let results = state.ctx.target.results.len();
+    let origin = state.ctx.target.results_origin.as_deref();
+    let print_text = || {
+        if !user.is_empty() {
+            outln!("{}", ui::label("user"));
+            for (name, var) in &user {
+                outln!(
+                    "  ${:<16} {}   {}",
+                    name,
+                    ui::addr(var.value),
+                    ui::muted(&var.source)
+                );
+            }
+        }
+        if results != 0 {
+            if !user.is_empty() {
+                outln!();
+            }
+            let origin = origin
+                .map(|cmd| format!("from: {}", cmd))
+                .unwrap_or_default();
+            outln!(
+                "  {}   {}",
+                ui::muted(&format!("$0..${}", results - 1)),
+                ui::muted(&origin)
+            );
+        }
+        if !builtins.is_empty() {
+            if !user.is_empty() || results != 0 {
+                outln!();
+            }
+            outln!("{}", ui::label("builtins"));
+            for var in &builtins {
+                outln!(
+                    "  ${:<16} {}   {}",
+                    var.name,
+                    ui::addr(var.value),
+                    ui::muted(var.source)
+                );
+            }
+        }
+        outln!();
+    };
+    #[cfg(feature = "cli")]
+    native::render(
+        || native::inspect::vars(&user, results, origin, &builtins),
+        print_text,
+    );
+    #[cfg(not(feature = "cli"))]
+    print_text();
+
+    Ok(())
+}
+
+/// Remove a convenience variable.
+#[command(
+    names = ["unset"],
+    category = "symbols, types, and expressions",
+    kind = Host,
+    python = none,
+    usage = "unset $<name>"
+)]
+fn unset(state: &mut ReplState<'_>, variable: String) -> Result<()> {
+    let name = variable.strip_prefix('$').unwrap_or(&variable);
+    if state.ctx.target.user_vars.remove(name).is_some() {
+        outln!("unset ${}\n", name);
+    } else {
+        error!("no such variable: ${}", name);
+    }
+
+    Ok(())
 }
 
 impl ReplState<'_> {
@@ -396,127 +514,6 @@ impl ReplState<'_> {
         self.ctx
             .target
             .set_results(vec![address.0], self.line.clone());
-        Ok(())
-    }
-
-    fn cmd_set(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let rest = invocation.join_args(0);
-        let Some((lhs, rhs)) = rest.split_once(char::is_whitespace) else {
-            outln!("{}\n", command_help("set"));
-            return Ok(());
-        };
-        let name = lhs.trim().strip_prefix('$').unwrap_or(lhs.trim()).trim();
-        // names must start with a letter or '_'; this reserves
-        // $<digits> (and digit-leading names) for the $0..$N
-        // result slots, avoiding any collision
-        let valid = name
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-        if !valid {
-            error!(
-                "invalid variable name '${}' (must start with a letter or '_'; $<digits> are reserved for result slots)",
-                name
-            );
-            return Ok(());
-        }
-        let source = rhs.trim().to_string();
-        match Expr::eval_with_radix(&source, &self.ctx.target, self.radix) {
-            Ok(v) => {
-                self.ctx
-                    .target
-                    .user_vars
-                    .insert(name.to_string(), UserVar { value: v.0, source });
-                outln!("${} = {}\n", name, ui::addr(v.0));
-            }
-            Err(e) => error!("{}", e),
-        }
-
-        Ok(())
-    }
-
-    fn cmd_vars(&mut self) -> Result<()> {
-        let builtins = self.ctx.target.builtin_variables();
-        if self.ctx.target.user_vars.is_empty()
-            && self.ctx.target.results.is_empty()
-            && builtins.is_empty()
-        {
-            outln!("no variables defined\n");
-            return Ok(());
-        }
-        let mut names: Vec<&String> = self.ctx.target.user_vars.keys().collect();
-        names.sort();
-        let user: Vec<(&str, &UserVar)> = names
-            .into_iter()
-            .map(|name| (name.as_str(), &self.ctx.target.user_vars[name]))
-            .collect();
-        let results = self.ctx.target.results.len();
-        let origin = self.ctx.target.results_origin.as_deref();
-        let print_text = || {
-            if !user.is_empty() {
-                outln!("{}", ui::label("user"));
-                for (name, var) in &user {
-                    outln!(
-                        "  ${:<16} {}   {}",
-                        name,
-                        ui::addr(var.value),
-                        ui::muted(&var.source)
-                    );
-                }
-            }
-            if results != 0 {
-                if !user.is_empty() {
-                    outln!();
-                }
-                let origin = origin
-                    .map(|cmd| format!("from: {}", cmd))
-                    .unwrap_or_default();
-                outln!(
-                    "  {}   {}",
-                    ui::muted(&format!("$0..${}", results - 1)),
-                    ui::muted(&origin)
-                );
-            }
-            if !builtins.is_empty() {
-                if !user.is_empty() || results != 0 {
-                    outln!();
-                }
-                outln!("{}", ui::label("builtins"));
-                for var in &builtins {
-                    outln!(
-                        "  ${:<16} {}   {}",
-                        var.name,
-                        ui::addr(var.value),
-                        ui::muted(var.source)
-                    );
-                }
-            }
-            outln!();
-        };
-        #[cfg(feature = "cli")]
-        native::render(
-            || native::inspect::vars(&user, results, origin, &builtins),
-            print_text,
-        );
-        #[cfg(not(feature = "cli"))]
-        print_text();
-
-        Ok(())
-    }
-
-    fn cmd_unset(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(arg) = invocation.arg(0) else {
-            outln!("{}\n", command_help("unset"));
-            return Ok(());
-        };
-        let name = arg.strip_prefix('$').unwrap_or(arg);
-        if self.ctx.target.user_vars.remove(name).is_some() {
-            outln!("unset ${}\n", name);
-        } else {
-            error!("no such variable: ${}", name);
-        }
-
         Ok(())
     }
 

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::IsTerminal;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix};
 use crate::layout::utf16le_nul_terminated;
 use crate::memory::MemoryOps;
@@ -16,7 +16,10 @@ use crate::target::{Target, TargetKind};
 use crate::triage_report::time::filetime_to_iso;
 use crate::types::{Arch, CodeMachine, VirtAddr};
 
+use ntoseye_macros::command;
+
 use crate::repl::*;
+use crate::session::Session;
 
 const PRINTF_C_STRING_LIMIT: usize = 4096;
 const PRINTF_WIDE_STRING_LIMIT: usize = 2048;
@@ -57,31 +60,6 @@ fn print_help_listing(groups: &[HelpGroup]) {
 }
 
 repl_command! {
-    cmd_reload_scripts();
-    names: ["reload-scripts"],
-    category: "session",
-    usage: "reload-scripts",
-    summary: "Reload custom commands and aliases.",
-}
-
-repl_command! {
-    cmd_radix;
-    names: ["n"],
-    category: "symbols, types, and expressions",
-    usage: "n [8|10|16]",
-    summary: "Show or set the default numeric radix for REPL expressions.",
-}
-
-repl_command! {
-    cmd_effmach;
-    names: [".effmach"],
-    category: "processes and modules",
-    usage: ".effmach [x86|amd64|arm64|auto|.]",
-    summary: "Show or set the effective code machine.",
-    details: "With no argument, shows the selected machine. x86, amd64, and arm64 (on an ARM64 target only) make u, ub, uf, and editor disassembly decode all code as that instruction set, and auto or . goes back to selection by context and image. This selection covers the x86 images of a WOW64 program and, on ARM64, also an emulated x64 image and the x64 ranges of an ARM64X/ARM64EC hybrid. x86 also makes ds/dS read 32-bit (WOW64) string descriptors.",
-}
-
-repl_command! {
     cmd_version();
     names: ["vertarget", "version"],
     category: "target control",
@@ -98,74 +76,6 @@ repl_command! {
 }
 
 repl_command! {
-    cmd_echo;
-    names: [".echo", "echo"],
-    category: "session",
-    usage: ".echo <text>",
-    summary: "Print text without evaluating expressions in it.",
-    style: ExpressionTail,
-}
-
-repl_command! {
-    cmd_echotime();
-    names: [".echotime"],
-    category: "session",
-    usage: ".echotime",
-    summary: "Print the current date and time of the host in UTC.",
-}
-
-repl_command! {
-    cmd_printf;
-    names: [".printf"],
-    category: "session",
-    usage: ".printf \"format\" [, argument]...",
-    summary: "Format debugger values with WinDbg-style printf specifiers.",
-    details: "Put the arguments after the format and separate them with commas, as in WinDbg (`.printf \"%p %d\\n\", poi(@rcx + 8), @$t0`). If each argument is one word, you can separate them with spaces.",
-    completion: Expression,
-    style: ExpressionTail,
-}
-
-repl_command! {
-    cmd_cls();
-    names: [".cls"],
-    category: "session",
-    usage: ".cls",
-    summary: "Clear the terminal screen if stdout is a terminal.",
-}
-
-repl_command! {
-    cmd_logopen;
-    names: [".logopen"],
-    category: "session",
-    usage: ".logopen <file>",
-    summary: "Start a debugger transcript and replace any existing file.",
-}
-
-repl_command! {
-    cmd_logappend;
-    names: [".logappend"],
-    category: "session",
-    usage: ".logappend <file>",
-    summary: "Start a debugger transcript and append it to the file.",
-}
-
-repl_command! {
-    cmd_logclose();
-    names: [".logclose"],
-    category: "session",
-    usage: ".logclose",
-    summary: "Close the debugger transcript.",
-}
-
-repl_command! {
-    cmd_help;
-    names: [".hh", "help", ".help"],
-    category: "session",
-    usage: ".hh [command]",
-    summary: "List commands or show detailed help for one command.",
-}
-
-repl_command! {
     cmd_error;
     names: ["!error", "!ntstatus"],
     category: "analysis",
@@ -174,83 +84,355 @@ repl_command! {
     completion: Expression,
 }
 
-repl_command! {
-    names: ["q", "quit", "qd"],
-    category: "session",
-    usage: "q",
-    summary: "Exit, remove the breakpoints of this session, and leave the guest running.",
-    details: "This is the WinDbg qd command (quit and detach), and ntoseye also accepts qd. If this session halted the guest, q resumes it. If q cannot remove a breakpoint from the guest, it leaves the guest halted, because if q resumed that guest, the breakpoint could trap when there is no debugger.",
-    flow: Quit,
+/// Reload custom commands and aliases.
+#[command(names = ["reload-scripts"], category = "session", kind = Host, python = none)]
+fn reload_scripts(state: &mut ReplState<'_>) -> Result<()> {
+    #[cfg(feature = "python")]
+    {
+        let py_report = embed::load_commands_dir();
+        embed::print_script_load_report(&py_report);
+        *state.caches.user_commands.write().unwrap() = initial_user_commands();
+    }
+    #[cfg(not(feature = "python"))]
+    print_python_commands_notice();
+    let alias_report = state.reload_aliases();
+    print_alias_load_report(&alias_report);
+    Ok(())
+}
+
+/// Show or set the default numeric radix for REPL expressions.
+#[command(
+    names = ["n"],
+    category = "symbols, types, and expressions",
+    kind = Host,
+    python = none,
+    usage = "n [8|10|16]"
+)]
+fn radix(state: &mut ReplState<'_>, radix: Option<String>) -> Result<()> {
+    if let Some(value) = radix {
+        state.radix = match value.as_str() {
+            "8" => NumberRadix::Octal,
+            "10" => NumberRadix::Decimal,
+            "16" => NumberRadix::Hexadecimal,
+            _ => {
+                return Err(Error::DebugInfo(format!(
+                    "invalid radix '{value}' (use 8, 10, or 16)"
+                )));
+            }
+        };
+    }
+
+    let name = match state.radix {
+        NumberRadix::Octal => "octal",
+        NumberRadix::Decimal => "decimal",
+        NumberRadix::Hexadecimal => "hexadecimal",
+    };
+    outln!("radix {} ({name})\n", state.radix.value());
+    Ok(())
+}
+
+/// Show or set the effective code machine.
+///
+/// With no argument, shows the selected machine. x86, amd64, and arm64 (on an
+/// ARM64 target only) make u, ub, uf, and editor disassembly decode all code as
+/// that instruction set, and auto or . goes back to selection by context and
+/// image. This selection covers the x86 images of a WOW64 program and, on
+/// ARM64, also an emulated x64 image and the x64 ranges of an ARM64X/ARM64EC
+/// hybrid. x86 also makes ds/dS read 32-bit (WOW64) string descriptors.
+#[command(
+    names = [".effmach"],
+    category = "processes and modules",
+    kind = Action,
+    python = none,
+    usage = ".effmach [x86|amd64|arm64|auto|.]"
+)]
+fn effmach(session: &mut Session, machine: Option<String>) -> Result<()> {
+    if let Some(machine) = machine {
+        let machine = machine.to_ascii_lowercase();
+        session.target.effmach = match machine.as_str() {
+            "x86" => Some(CodeMachine::X86),
+            "amd64" => Some(CodeMachine::Amd64),
+            "arm64" if session.target.arch() == Arch::Arm64 => Some(CodeMachine::Arm64),
+            "arm64" => {
+                return Err(Error::DebugInfo(
+                    "an AMD64 target runs no ARM64 code; use x86, amd64, or auto".to_string(),
+                ));
+            }
+            "." | "auto" => None,
+            _ => {
+                return Err(Error::DebugInfo(format!(
+                    "invalid effective machine '{machine}' (use x86, amd64, arm64, or auto)"
+                )));
+            }
+        };
+    }
+
+    let machine = session.target.effmach.map_or("auto", CodeMachine::label);
+    outln!("effective machine: {machine}\n");
+    Ok(())
+}
+
+/// Print text without evaluating expressions in it.
+#[command(
+    names = [".echo", "echo"],
+    category = "session",
+    kind = Host,
+    python = none,
+    usage = ".echo <text>",
+    style = ExpressionTail
+)]
+fn echo(_state: &mut ReplState<'_>, #[arg(raw)] text: String) -> Result<()> {
+    let mut text = text.as_str();
+    if text.len() >= 2 && text.starts_with('"') && text.ends_with('"') {
+        text = &text[1..text.len() - 1];
+    }
+    outln!("{text}");
+    Ok(())
+}
+
+/// Print the current date and time of the host in UTC.
+#[command(names = [".echotime"], category = "session", kind = Host, python = none)]
+fn echotime(_state: &mut ReplState<'_>) -> Result<()> {
+    const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|since| u64::try_from(since.as_nanos() / 100).ok())
+        .and_then(|ticks| filetime_to_iso(ticks.checked_add(FILETIME_UNIX_EPOCH)?))
+        .ok_or_else(|| {
+            Error::DebugInfo("the host clock is outside the representable range".to_string())
+        })?;
+    outln!("Debugger (not debuggee) time: {now}\n");
+    Ok(())
+}
+
+/// Format debugger values with WinDbg-style printf specifiers.
+///
+/// Put the arguments after the format and separate them with commas, as in
+/// WinDbg (`.printf "%p %d\n", poi(@rcx + 8), @$t0`). If each argument is one
+/// word, you can separate them with spaces.
+#[command(
+    names = [".printf"],
+    category = "session",
+    kind = Host,
+    python = none,
+    usage = ".printf \"format\" [, argument]...",
+    completion = Expression,
+    style = ExpressionTail
+)]
+fn printf(
+    state: &mut ReplState<'_>,
+    #[arg(raw)] tail: String,
+    #[arg(invoked)] name: &str,
+) -> Result<()> {
+    let Some((format, args)) = parse_printf_tail(&tail) else {
+        outln!("{}\n", command_help(name));
+        return Ok(());
+    };
+    // An unreadable argument is reported (the REPL prints the error), not
+    // propagated: `.printf` is the body of a log point, and a single bad read
+    // must not tear down the session that is running it.
+    let text = format_printf(&format, &args, &state.ctx.target, state.radix)?;
+    // WinDbg's `.printf` emits exactly the format's characters, which is
+    // why its examples end in `\n`; appending one here would double it.
+    out!("{text}");
+    Ok(())
+}
+
+/// Clear the terminal screen if stdout is a terminal.
+#[command(names = [".cls"], category = "session", kind = Host, python = none)]
+fn cls(_state: &mut ReplState<'_>) -> Result<()> {
+    if std::io::stdout().is_terminal() {
+        out!("\x1b[2J\x1b[H");
+    }
+    Ok(())
+}
+
+/// Start a debugger transcript and replace any existing file.
+#[command(
+    names = [".logopen"],
+    category = "session",
+    kind = Host,
+    python = none,
+    usage = ".logopen <file>"
+)]
+fn logopen(_state: &mut ReplState<'_>, file: String) -> Result<()> {
+    open_log_file(&file, false)
+}
+
+/// Start a debugger transcript and append it to the file.
+#[command(
+    names = [".logappend"],
+    category = "session",
+    kind = Host,
+    python = none,
+    usage = ".logappend <file>"
+)]
+fn logappend(_state: &mut ReplState<'_>, file: String) -> Result<()> {
+    open_log_file(&file, true)
+}
+
+fn open_log_file(path: &str, append: bool) -> Result<()> {
+    output::open_log(path, append)
+        .map_err(|error| Error::DebugInfo(format!("failed to open log '{path}': {error}")))?;
+    outln!(
+        "log {} {}\n",
+        if append { "appending to" } else { "opened" },
+        path
+    );
+    Ok(())
+}
+
+/// Close the debugger transcript.
+#[command(names = [".logclose"], category = "session", kind = Host, python = none)]
+fn logclose(_state: &mut ReplState<'_>) -> Result<()> {
+    output::close_log();
+    outln!("log closed\n");
+    Ok(())
+}
+
+/// List commands or show detailed help for one command.
+#[command(
+    names = [".hh", "help", ".help"],
+    category = "session",
+    kind = Host,
+    python = none,
+    usage = ".hh [command]"
+)]
+fn help(state: &mut ReplState<'_>, command: Option<String>) -> Result<()> {
+    if let Some(name) = command.as_deref() {
+        if let Some((_, help, _)) = state
+            .caches
+            .user_commands
+            .read()
+            .unwrap()
+            .iter()
+            .find(|(command, _, _)| command == name)
+        {
+            outln!("{name}\n{help}\n");
+            return Ok(());
+        }
+        if let Some((_, expansion)) = state
+            .aliases
+            .entries()
+            .into_iter()
+            .find(|(alias, _)| alias == name)
+        {
+            outln!("alias {name} {expansion}\n");
+            return Ok(());
+        }
+        match command_registry().get(name) {
+            None => error!("unknown command '{name}'"),
+            Some(spec) => {
+                let print_text = || outln!("{}\n", spec_help(spec));
+                #[cfg(feature = "cli")]
+                native::render(|| native::help::command(spec), print_text);
+                #[cfg(not(feature = "cli"))]
+                print_text();
+            }
+        }
+        return Ok(());
+    }
+
+    let mut groups: BTreeMap<&'static str, BTreeMap<&'static str, &'static CommandSpec>> =
+        BTreeMap::new();
+    // A user-mode minidump refuses every kernel command, so the listing
+    // leaves them out; `help <command>` still describes each.
+    let user_dump = state.ctx.target.kind() == TargetKind::UserDump;
+    let mut hidden = BTreeSet::new();
+    for (_, spec) in command_registry().command_names() {
+        let canonical = spec.names[0];
+        if user_dump && spec.effects.target == TargetScope::Kernel {
+            hidden.insert(canonical);
+            continue;
+        }
+        groups
+            .entry(spec.category)
+            .or_default()
+            .insert(canonical, spec);
+    }
+    let mut listing: Vec<HelpGroup> = groups
+        .into_iter()
+        .map(|(category, specs)| HelpGroup {
+            title: category.to_string(),
+            entries: specs
+                .into_values()
+                .map(|spec| HelpEntry {
+                    name: spec.names[0].to_string(),
+                    summary: spec.summary.to_string(),
+                    aliases: spec.names[1..].join(", "),
+                })
+                .collect(),
+        })
+        .collect();
+
+    let user_commands = state.caches.user_commands.read().unwrap().clone();
+    if !user_commands.is_empty() {
+        listing.push(HelpGroup {
+            title: "python commands".to_string(),
+            entries: user_commands
+                .into_iter()
+                .map(|(name, help, _)| HelpEntry {
+                    summary: help.lines().next().unwrap_or("").to_string(),
+                    name,
+                    aliases: String::new(),
+                })
+                .collect(),
+        });
+    }
+    let aliases = state.aliases.entries();
+    if !aliases.is_empty() {
+        listing.push(HelpGroup {
+            title: "user aliases".to_string(),
+            entries: aliases
+                .into_iter()
+                .map(|(name, expansion)| HelpEntry {
+                    name,
+                    summary: expansion,
+                    aliases: String::new(),
+                })
+                .collect(),
+        });
+    }
+    #[cfg(feature = "cli")]
+    native::render(
+        || native::help::view(&listing),
+        || print_help_listing(&listing),
+    );
+    #[cfg(not(feature = "cli"))]
+    print_help_listing(&listing);
+    if !hidden.is_empty() {
+        outln!(
+            "{}\n",
+            ui::muted(&format!(
+                "{} commands that need a kernel target are not listed: this is a user-mode minidump",
+                hidden.len()
+            ))
+        );
+    }
+    Ok(())
+}
+
+/// Exit, remove the breakpoints of this session, and leave the guest running.
+///
+/// This is the WinDbg qd command (quit and detach), and ntoseye also accepts
+/// qd. If this session halted the guest, q resumes it. If q cannot remove a
+/// breakpoint from the guest, it leaves the guest halted, because if q resumed
+/// that guest, the breakpoint could trap when there is no debugger.
+#[command(
+    names = ["q", "quit", "qd"],
+    category = "session",
+    kind = Host,
+    python = none,
+    flow = Quit
+)]
+fn quit(_state: &mut ReplState<'_>) -> Result<()> {
+    // The host quits on the command's flow: it removes the breakpoints and
+    // resumes the guest it halted.
+    Ok(())
 }
 
 impl ReplState<'_> {
-    fn cmd_reload_scripts(&mut self) -> Result<()> {
-        #[cfg(feature = "python")]
-        {
-            let py_report = embed::load_commands_dir();
-            embed::print_script_load_report(&py_report);
-            *self.caches.user_commands.write().unwrap() = initial_user_commands();
-        }
-        #[cfg(not(feature = "python"))]
-        print_python_commands_notice();
-        let alias_report = self.reload_aliases();
-        print_alias_load_report(&alias_report);
-        Ok(())
-    }
-
-    fn cmd_radix(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if let Some(value) = invocation.arg(0) {
-            self.radix = match value {
-                "8" => NumberRadix::Octal,
-                "10" => NumberRadix::Decimal,
-                "16" => NumberRadix::Hexadecimal,
-                _ => {
-                    error!("invalid radix '{value}' (use 8, 10, or 16)");
-                    return Ok(());
-                }
-            };
-        }
-
-        let name = match self.radix {
-            NumberRadix::Octal => "octal",
-            NumberRadix::Decimal => "decimal",
-            NumberRadix::Hexadecimal => "hexadecimal",
-        };
-        outln!("radix {} ({name})\n", self.radix.value());
-        Ok(())
-    }
-
-    fn cmd_effmach(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if invocation.argv.len() > 1 {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-
-        if let Some(machine) = invocation.arg(0) {
-            let machine = machine.to_ascii_lowercase();
-            self.ctx.target.effmach = match machine.as_str() {
-                "x86" => Some(CodeMachine::X86),
-                "amd64" => Some(CodeMachine::Amd64),
-                "arm64" if self.ctx.target.arch() == Arch::Arm64 => Some(CodeMachine::Arm64),
-                "arm64" => {
-                    error!("an AMD64 target runs no ARM64 code; use x86, amd64, or auto");
-                    return Ok(());
-                }
-                "." | "auto" => None,
-                _ => {
-                    error!(
-                        "invalid effective machine '{machine}' (use x86, amd64, arm64, or auto)"
-                    );
-                    return Ok(());
-                }
-            };
-        }
-
-        let machine = self.ctx.target.effmach.map_or("auto", CodeMachine::label);
-        outln!("effective machine: {machine}\n");
-        Ok(())
-    }
-
     fn cmd_version(&mut self) -> Result<()> {
         let detail = self.ctx.target_version()?;
         print_target_version(&detail);
@@ -262,205 +444,6 @@ impl ReplState<'_> {
         let detail = self.ctx.target.target_time()?;
         print_target_time(&detail);
         outln!();
-        Ok(())
-    }
-
-    fn cmd_echotime(&mut self) -> Result<()> {
-        const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|since| u64::try_from(since.as_nanos() / 100).ok())
-            .and_then(|ticks| filetime_to_iso(ticks.checked_add(FILETIME_UNIX_EPOCH)?));
-        match now {
-            Some(now) => outln!("Debugger (not debuggee) time: {now}\n"),
-            None => error!("the host clock is outside the representable range"),
-        }
-        Ok(())
-    }
-
-    fn cmd_echo(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let mut text = invocation.raw_tail;
-        if text.len() >= 2 && text.starts_with('"') && text.ends_with('"') {
-            text = &text[1..text.len() - 1];
-        }
-        outln!("{text}");
-        Ok(())
-    }
-
-    fn cmd_printf(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some((format, args)) = parse_printf_tail(invocation.raw_tail) else {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        };
-        // An unreadable argument is reported, not propagated: `.printf` is
-        // the body of a log point, and a single bad read must not tear down
-        // the session that is running it.
-        let text = match format_printf(&format, &args, &self.ctx.target, self.radix) {
-            Ok(text) => text,
-            Err(error) => {
-                error!("{}", error);
-                return Ok(());
-            }
-        };
-        // WinDbg's `.printf` emits exactly the format's characters, which is
-        // why its examples end in `\n`; appending one here would double it.
-        out!("{text}");
-        Ok(())
-    }
-
-    fn cmd_cls(&mut self) -> Result<()> {
-        if std::io::stdout().is_terminal() {
-            out!("\x1b[2J\x1b[H");
-        }
-        Ok(())
-    }
-
-    fn cmd_logopen(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.open_log_file(&invocation, false)
-    }
-
-    fn cmd_logappend(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.open_log_file(&invocation, true)
-    }
-
-    fn open_log_file(&mut self, invocation: &CommandInvocation<'_>, append: bool) -> Result<()> {
-        let Some(path) = invocation.arg(0) else {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        };
-        if invocation.argv.len() != 1 {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        match output::open_log(path, append) {
-            Ok(()) => outln!(
-                "log {} {}\n",
-                if append { "appending to" } else { "opened" },
-                path
-            ),
-            Err(error) => error!("failed to open log '{}': {error}", path),
-        }
-        Ok(())
-    }
-
-    fn cmd_logclose(&mut self) -> Result<()> {
-        output::close_log();
-        outln!("log closed\n");
-        Ok(())
-    }
-
-    fn cmd_help(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if let Some(name) = invocation.arg(0) {
-            if let Some((_, help, _)) = self
-                .caches
-                .user_commands
-                .read()
-                .unwrap()
-                .iter()
-                .find(|(command, _, _)| command == name)
-            {
-                outln!("{name}\n{help}\n");
-                return Ok(());
-            }
-            if let Some((_, expansion)) = self
-                .aliases
-                .entries()
-                .into_iter()
-                .find(|(alias, _)| alias == name)
-            {
-                outln!("alias {name} {expansion}\n");
-                return Ok(());
-            }
-            match command_registry().get(name) {
-                None => error!("unknown command '{name}'"),
-                Some(spec) => {
-                    let print_text = || outln!("{}\n", spec_help(spec));
-                    #[cfg(feature = "cli")]
-                    native::render(|| native::help::command(spec), print_text);
-                    #[cfg(not(feature = "cli"))]
-                    print_text();
-                }
-            }
-            return Ok(());
-        }
-
-        let mut groups: BTreeMap<&'static str, BTreeMap<&'static str, &'static CommandSpec>> =
-            BTreeMap::new();
-        // A user-mode minidump refuses every kernel command, so the listing
-        // leaves them out; `help <command>` still describes each.
-        let user_dump = self.ctx.target.kind() == TargetKind::UserDump;
-        let mut hidden = BTreeSet::new();
-        for (_, spec) in command_registry().command_names() {
-            let canonical = spec.names[0];
-            if user_dump && spec.effects.target == TargetScope::Kernel {
-                hidden.insert(canonical);
-                continue;
-            }
-            groups
-                .entry(spec.category)
-                .or_default()
-                .insert(canonical, spec);
-        }
-        let mut listing: Vec<HelpGroup> = groups
-            .into_iter()
-            .map(|(category, specs)| HelpGroup {
-                title: category.to_string(),
-                entries: specs
-                    .into_values()
-                    .map(|spec| HelpEntry {
-                        name: spec.names[0].to_string(),
-                        summary: spec.summary.to_string(),
-                        aliases: spec.names[1..].join(", "),
-                    })
-                    .collect(),
-            })
-            .collect();
-
-        let user_commands = self.caches.user_commands.read().unwrap().clone();
-        if !user_commands.is_empty() {
-            listing.push(HelpGroup {
-                title: "python commands".to_string(),
-                entries: user_commands
-                    .into_iter()
-                    .map(|(name, help, _)| HelpEntry {
-                        summary: help.lines().next().unwrap_or("").to_string(),
-                        name,
-                        aliases: String::new(),
-                    })
-                    .collect(),
-            });
-        }
-        let aliases = self.aliases.entries();
-        if !aliases.is_empty() {
-            listing.push(HelpGroup {
-                title: "user aliases".to_string(),
-                entries: aliases
-                    .into_iter()
-                    .map(|(name, expansion)| HelpEntry {
-                        name,
-                        summary: expansion,
-                        aliases: String::new(),
-                    })
-                    .collect(),
-            });
-        }
-        #[cfg(feature = "cli")]
-        native::render(
-            || native::help::view(&listing),
-            || print_help_listing(&listing),
-        );
-        #[cfg(not(feature = "cli"))]
-        print_help_listing(&listing);
-        if !hidden.is_empty() {
-            outln!(
-                "{}\n",
-                ui::muted(&format!(
-                    "{} commands that need a kernel target are not listed: this is a user-mode minidump",
-                    hidden.len()
-                ))
-            );
-        }
         Ok(())
     }
 

@@ -6,19 +6,11 @@ use std::thread;
 
 use crate::error::Result;
 use crate::output;
+use ntoseye_macros::command;
+
 use crate::repl::*;
 
 const SHELL: &str = ".shell";
-
-repl_command! {
-    cmd_shell -> Flow;
-    names: [".shell"],
-    category: "session",
-    usage: ".shell [-ci \"<debugger commands>\"] <host command>",
-    summary: "Run a host command, and optionally send debugger output to it.",
-    details: "The command runs <host command> with the shell of the host (sh -c) and waits until it exits. It shows what the host command writes to standard output and standard error, and then the exit status if the status is not zero. With -ci, the quoted debugger commands (separated by `;`) run first, and their output becomes the standard input of the host command. For example, `.shell -ci \"lm\" grep nt` filters the module list, and `.shell -ci \"!process 0 0\" sort` sorts the process list. ntoseye shows errors from the debugger commands and does not send them to the host command. Without -ci, the host command reads an empty standard input. The rest of the line, `;` included, is the host command. Only the interactive prompt can run .shell. ntoseye does not permit it in a line from MCP, DAP, the Python SDK, a GDB client monitor command, a breakpoint action, or an exception command, because none of these may start host programs.",
-    style: RawTail,
-}
 
 impl ReplState<'_> {
     /// Why `spec` is refused here when it starts host programs: anywhere
@@ -41,36 +33,63 @@ impl ReplState<'_> {
              interactive prompt"
         ))
     }
+}
 
-    fn cmd_shell(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
-        let tail = invocation.raw_tail.trim();
-        let (commands, host_command) = match tail.strip_prefix("-ci") {
-            Some(rest) if rest.is_empty() || rest.starts_with(char::is_whitespace) => {
-                let Some((commands, rest)) = take_quoted(rest.trim_start()) else {
-                    error!("{SHELL}: -ci takes the debugger commands in quotes");
-                    return Ok(Flow::Continue);
-                };
-                (Some(commands), rest.trim())
-            }
-            _ => (None, tail),
-        };
-        if host_command.is_empty() {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(Flow::Continue);
+/// Run a host command, and optionally send debugger output to it.
+///
+/// The command runs <host command> with the shell of the host (sh -c) and waits
+/// until it exits. It shows what the host command writes to standard output and
+/// standard error, and then the exit status if the status is not zero. With
+/// -ci, the quoted debugger commands (separated by `;`) run first, and their
+/// output becomes the standard input of the host command. For example, `.shell
+/// -ci "lm" grep nt` filters the module list, and `.shell -ci "!process 0 0"
+/// sort` sorts the process list. ntoseye shows errors from the debugger
+/// commands and does not send them to the host command. Without -ci, the host
+/// command reads an empty standard input. The rest of the line, `;` included,
+/// is the host command. Only the interactive prompt can run .shell. ntoseye
+/// does not permit it in a line from MCP, DAP, the Python SDK, a GDB client
+/// monitor command, a breakpoint action, or an exception command, because none
+/// of these may start host programs.
+#[command(
+    names = [".shell"],
+    category = "session",
+    kind = Host,
+    python = none,
+    usage = ".shell [-ci \"<debugger commands>\"] <host command>",
+    style = RawTail
+)]
+fn shell(
+    state: &mut ReplState<'_>,
+    #[arg(raw)] tail: String,
+    #[arg(invoked)] name: &str,
+) -> Result<Flow> {
+    let tail = tail.trim();
+    let (commands, host_command) = match tail.strip_prefix("-ci") {
+        Some(rest) if rest.is_empty() || rest.starts_with(char::is_whitespace) => {
+            let Some((commands, rest)) = take_quoted(rest.trim_start()) else {
+                error!("{SHELL}: -ci takes the debugger commands in quotes");
+                return Ok(Flow::Continue);
+            };
+            (Some(commands), rest.trim())
         }
-        let input = match commands {
-            Some(commands) => {
-                let (flow, text) = output::capture_output(|| self.dispatch_line(&commands));
-                match flow? {
-                    Flow::Continue => Some(text),
-                    flow => return Ok(flow),
-                }
-            }
-            None => None,
-        };
-        run_host_command(host_command, input);
-        Ok(Flow::Continue)
+        _ => (None, tail),
+    };
+    if host_command.is_empty() {
+        outln!("{}\n", command_help(name));
+        return Ok(Flow::Continue);
     }
+    let input = match commands {
+        Some(commands) => {
+            let (flow, text) = output::capture_output(|| state.dispatch_line(&commands));
+            match flow? {
+                Flow::Continue => Some(text),
+                flow => return Ok(flow),
+            }
+        }
+        None => None,
+    };
+    run_host_command(host_command, input);
+    Ok(Flow::Continue)
 }
 
 /// Run `command` with `sh -c`, `input` on its standard input, and print what

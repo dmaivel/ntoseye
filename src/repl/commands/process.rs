@@ -24,35 +24,6 @@ use super::thread::{THREAD_STACK_LIMIT, print_thread_detail};
 
 const MAX_PROCESS_THREADS: usize = 512;
 
-repl_command! {
-    cmd_attach;
-    names: ["attach"],
-    category: "processes and modules",
-    usage: "attach <pid>",
-    summary: "Attach to a process by PID.",
-    completion: Process,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_detach();
-    names: ["detach"],
-    category: "processes and modules",
-    usage: "detach",
-    summary: "Detach from the current process.",
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_context;
-    names: [".context"],
-    category: "processes and modules",
-    usage: ".context <dtb>",
-    summary: "Set the translation base that inspection uses.",
-    completion: Expression,
-    target: Kernel,
-}
-
 /// List or inspect Windows processes.
 ///
 /// `!process 0 0` lists all processes. Bit 1 adds process details, bit 2
@@ -270,7 +241,7 @@ fn process_context(
     #[arg(parse = process_context_selector)] selection: Option<ProcessContext>,
 ) -> Result<()> {
     let process = match selection {
-        Some(ProcessContext::Kernel) => return state.cmd_detach(),
+        Some(ProcessContext::Kernel) => return detach(state),
         Some(ProcessContext::Process(process)) => process,
         None => {
             state.print_process_context();
@@ -293,6 +264,107 @@ fn process_context(
         if process.is_wow64() { ", WOW64" } else { "" },
     );
     print_user_modules(&report);
+    Ok(())
+}
+
+/// Attach to a process by PID.
+#[command(
+    names = ["attach"],
+    category = "processes and modules",
+    kind = Action,
+    target = Kernel,
+    python = none,
+    usage = "attach <pid>",
+    completion = Process
+)]
+fn attach(state: &mut ReplState<'_>, pid: String) -> Result<()> {
+    // Same selector grammar as `.process`, so a PID copied from `ps` (or
+    // inserted by completion) means the same thing in both.
+    let processes = match state.ctx.target.matching_processes(None) {
+        Ok(processes) => processes,
+        Err(error) => {
+            error!("failed to enumerate processes: {}", error);
+            return Ok(());
+        }
+    };
+    let Some(process) = state.process_for_selector(&pid, &processes) else {
+        error!("no process matches '{}'", pid);
+        return Ok(());
+    };
+    state.leave_vtl1();
+    match state.ctx.target.attach(process.pid) {
+        Ok(report) => {
+            state.caches.refresh_symbol_context(&state.ctx.target);
+            state.clear_selected_frame();
+            outln!("attached to {} (PID {})", report.name, process.pid);
+            print_user_modules(&report);
+            outln!();
+        }
+        Err(e) => error!("failed to attach: {}", e),
+    }
+
+    Ok(())
+}
+
+/// Detach from the current process.
+#[command(
+    names = ["detach"],
+    category = "processes and modules",
+    kind = Action,
+    target = Kernel,
+    python = none
+)]
+fn detach(state: &mut ReplState<'_>) -> Result<()> {
+    if state.ctx.target.attached_process().is_none() && !state.ctx.target.in_secure_scope() {
+        error!("not attached to any process");
+    } else {
+        state.leave_vtl1();
+        state.ctx.target.detach();
+        state.caches.refresh_symbol_context(&state.ctx.target);
+        state.clear_selected_frame();
+        outln!("detached, now in kernel context\n");
+    }
+
+    Ok(())
+}
+
+/// Set the translation base that inspection uses.
+#[command(
+    names = [".context"],
+    category = "processes and modules",
+    kind = Action,
+    target = Kernel,
+    python = none,
+    usage = ".context <dtb>",
+    completion = Expression
+)]
+fn context(state: &mut ReplState<'_>, dtb: String) -> Result<()> {
+    let text = dtb.as_str();
+    let dtb = match Expr::eval_with_radix(text, &state.ctx.target, state.radix) {
+        Ok(value) => value,
+        Err(error) => {
+            error!("invalid translation base '{}': {}", text, error);
+            return Ok(());
+        }
+    };
+    // A VTL1 root outside `.vtl 1` would pair it with a VTL0 register
+    // file; only a live VTL1 stop may do that, with its own registers.
+    let target = &state.ctx.target;
+    if target.symbols.is_secure_root(target.normalize_dtb(dtb.0)) {
+        error!(
+            "{} is a VTL1 root; use .vtl 1 [pid] to inspect it",
+            ui::addr(dtb.0)
+        );
+        return Ok(());
+    }
+    state.leave_vtl1();
+    if state.ctx.target.attached_process().is_some() {
+        state.ctx.target.detach();
+    }
+    state.clear_selected_frame();
+    state.ctx.target.set_context_dtb_override(dtb.0);
+    state.caches.refresh_symbol_context(&state.ctx.target);
+    outln!("inspection context DTB set to {}\n", ui::addr(dtb.0));
     Ok(())
 }
 
@@ -526,36 +598,6 @@ impl ReplState<'_> {
         true
     }
 
-    fn cmd_attach(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let pid_str = require_arg!(invocation, 0, "attach");
-        // Same selector grammar as `.process`, so a PID copied from `ps` (or
-        // inserted by completion) means the same thing in both.
-        let processes = match self.ctx.target.matching_processes(None) {
-            Ok(processes) => processes,
-            Err(error) => {
-                error!("failed to enumerate processes: {}", error);
-                return Ok(());
-            }
-        };
-        let Some(process) = self.process_for_selector(pid_str, &processes) else {
-            error!("no process matches '{}'", pid_str);
-            return Ok(());
-        };
-        self.leave_vtl1();
-        match self.ctx.target.attach(process.pid) {
-            Ok(report) => {
-                self.caches.refresh_symbol_context(&self.ctx.target);
-                self.clear_selected_frame();
-                outln!("attached to {} (PID {})", report.name, process.pid);
-                print_user_modules(&report);
-                outln!();
-            }
-            Err(e) => error!("failed to attach: {}", e),
-        }
-
-        Ok(())
-    }
-
     /// `.process` with no argument: the address space inspection uses.
     fn print_process_context(&self) {
         let target = &self.ctx.target;
@@ -584,49 +626,5 @@ impl ReplState<'_> {
                 ui::addr(target.kernel_dtb())
             );
         }
-    }
-
-    fn cmd_context(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let text = require_arg!(invocation, 0, ".context");
-        let dtb = match Expr::eval_with_radix(text, &self.ctx.target, self.radix) {
-            Ok(value) => value,
-            Err(error) => {
-                error!("invalid translation base '{}': {}", text, error);
-                return Ok(());
-            }
-        };
-        // A VTL1 root outside `.vtl 1` would pair it with a VTL0 register
-        // file; only a live VTL1 stop may do that, with its own registers.
-        let target = &self.ctx.target;
-        if target.symbols.is_secure_root(target.normalize_dtb(dtb.0)) {
-            error!(
-                "{} is a VTL1 root; use .vtl 1 [pid] to inspect it",
-                ui::addr(dtb.0)
-            );
-            return Ok(());
-        }
-        self.leave_vtl1();
-        if self.ctx.target.attached_process().is_some() {
-            self.ctx.target.detach();
-        }
-        self.clear_selected_frame();
-        self.ctx.target.set_context_dtb_override(dtb.0);
-        self.caches.refresh_symbol_context(&self.ctx.target);
-        outln!("inspection context DTB set to {}\n", ui::addr(dtb.0));
-        Ok(())
-    }
-
-    fn cmd_detach(&mut self) -> Result<()> {
-        if self.ctx.target.attached_process().is_none() && !self.ctx.target.in_secure_scope() {
-            error!("not attached to any process");
-        } else {
-            self.leave_vtl1();
-            self.ctx.target.detach();
-            self.caches.refresh_symbol_context(&self.ctx.target);
-            self.clear_selected_frame();
-            outln!("detached, now in kernel context\n");
-        }
-
-        Ok(())
     }
 }
