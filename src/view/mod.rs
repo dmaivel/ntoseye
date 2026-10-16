@@ -30,7 +30,6 @@ pub mod symbols;
 pub mod triage;
 pub mod userdump;
 pub mod usermode;
-pub mod virtio;
 pub mod wdf;
 
 /// A node in the value tree the SDK builds its results from.
