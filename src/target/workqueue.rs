@@ -79,27 +79,13 @@ pub struct WorkQueuePriority {
 }
 
 /// A thread that serves a work queue.
-#[record(impl)]
+#[record]
 pub struct WorkerThread {
     pub kthread: VirtAddr,
     pub thread: DiagnosticValue<ThreadInfo>,
     /// The stack of the thread; `None` if stacks were not requested or the
     /// thread did not decode.
-    #[record(skip)]
     pub stack: Option<DiagnosticValue<Vec<StackFrame>>>,
-}
-
-#[record]
-impl WorkerThread {
-    /// The stack of the thread; `None` if stacks were not requested or the
-    /// thread did not decode.
-    #[cfg(feature = "python")]
-    #[record(getter, rename = "stack")]
-    pub fn stack_frames(&self) -> Option<DiagnosticValue<Vec<crate::view::execution::StackFrame>>> {
-        self.stack
-            .as_ref()
-            .map(|stack| stack.map(|frames| crate::view::execution::stack_frames(frames)))
-    }
 }
 
 /// An `_EX_WORK_QUEUE`.

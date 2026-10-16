@@ -4,7 +4,8 @@
 use ntoseye_macros::record;
 
 use super::bugcheck::{Bugcheck, bugcheck};
-use super::execution::{run_status, stack_frames};
+use super::execution::run_status;
+use crate::unwind::StackFrame;
 use crate::dmp::triage::TriagePrcbInfo;
 use crate::dmp::{self, DmpException, DmpSystemInfo};
 use crate::target::DiagnosticValue;
@@ -321,7 +322,7 @@ pub struct PowerFailureThread {
     pub irp: Option<u64>,
     #[record(hex)]
     pub device: Option<u64>,
-    pub stack: DiagnosticValue<Vec<super::execution::StackFrame>>,
+    pub stack: DiagnosticValue<Vec<StackFrame>>,
 }
 
 /// What a DRIVER_POWER_STATE_FAILURE (0x9F) names as stuck.
@@ -370,7 +371,7 @@ pub struct TriageReport {
     pub system_info: Option<DumpSystemInfo>,
     /// The stack of the current thread. `None` while the target runs or
     /// if the unwind failed (see `warnings`).
-    pub backtrace: Option<Vec<super::execution::StackFrame>>,
+    pub backtrace: Option<Vec<StackFrame>>,
     /// The loaded modules, up to a maximum that the caller sets (see
     /// `modules_total`).
     pub modules: Vec<crate::guest::ModuleInfo>,
@@ -826,7 +827,7 @@ fn power_failure(finding: &PowerDetail) -> PowerFailure {
                     irp,
                     device,
                     stack: match &thread.stack {
-                        Ok(trace) => DiagnosticValue::Available(stack_frames(&trace.frames)),
+                        Ok(trace) => DiagnosticValue::Available(trace.frames.clone()),
                         Err(error) => DiagnosticValue::unavailable(error.clone()),
                     },
                 }
@@ -848,7 +849,7 @@ pub fn triage_report(report: &ReportDetail, module_limit: usize) -> TriageReport
         backtrace: report
             .backtrace
             .as_ref()
-            .map(|trace| stack_frames(&trace.frames)),
+            .map(|trace| trace.frames.clone()),
         modules: report.modules.iter().take(module_limit).cloned().collect(),
         modules_total: report.modules.len(),
         unloaded_drivers: report

@@ -30,7 +30,7 @@ const DPC_QUEUE_COUNT: usize = 2;
 const TIMER_BUCKET_COUNT: usize = 256;
 
 /// A processor's running, next, and idle threads (`!running`).
-#[record(impl)]
+#[record]
 pub struct RunningProcessor {
     /// The processor number.
     pub index: u16,
@@ -46,7 +46,6 @@ pub struct RunningProcessor {
     pub idle_thread: DiagnosticValue<Option<ThreadInfo>>,
     /// The first frames of the running thread; `None` if stacks were not
     /// requested.
-    #[record(skip)]
     pub short_stack: Option<DiagnosticValue<Vec<StackFrame>>>,
 }
 
@@ -281,7 +280,7 @@ pub struct ApcQueues {
 }
 
 /// The state and walked stack of a thread (`!stacks`).
-#[record(impl)]
+#[record]
 pub struct ThreadStack {
     pub thread: ThreadInfo,
     /// The vCPU that runs the thread, if the listing resolves it. `None` if
@@ -292,7 +291,6 @@ pub struct ThreadStack {
     pub top_symbol: DiagnosticValue<Option<String>>,
     /// The frames, innermost first. Level 0 has the top frame, level 1 has
     /// up to 32 frames, and level 2 has up to 64 frames.
-    #[record(skip)]
     pub frames: Vec<StackFrame>,
     /// The number of frames past the walk limit, which are not listed.
     pub truncated: usize,
@@ -335,8 +333,8 @@ pub struct FindStackThread {
     /// The whole walked stack.
     #[record(skip)]
     pub stack: StackTrace,
-    /// The indexes in `stack` of the frames that matched.
-    #[record(skip)]
+    /// The indexes in the walked stack (`frames`) of the frames that
+    /// matched, innermost first.
     pub matches: Vec<usize>,
 }
 
@@ -462,31 +460,6 @@ impl UniqStacks {
     }
 }
 
-#[record]
-impl RunningProcessor {
-    /// The first frames of the running thread; `None` if stacks were not
-    /// requested.
-    #[cfg(feature = "python")]
-    #[record(getter, rename = "short_stack")]
-    pub fn short_stack_frames(
-        &self,
-    ) -> Option<DiagnosticValue<Vec<crate::view::execution::StackFrame>>> {
-        self.short_stack
-            .as_ref()
-            .map(|stack| stack.map(|frames| crate::view::execution::stack_frames(frames)))
-    }
-}
-
-#[record]
-impl ThreadStack {
-    /// The frames, innermost first. Level 0 has the top frame, level 1 has
-    /// up to 32 frames, and level 2 has up to 64 frames.
-    #[cfg(feature = "python")]
-    #[record(getter, rename = "frames")]
-    pub fn frame_records(&self) -> Vec<crate::view::execution::StackFrame> {
-        crate::view::execution::stack_frames(&self.frames)
-    }
-}
 
 #[record]
 impl FindStackThread {
@@ -496,21 +469,19 @@ impl FindStackThread {
         self.matches.len()
     }
 
-    /// The frames that matched.
-    #[cfg(feature = "python")]
+    /// The frames that matched, in the order of `matches`.
     #[record(getter)]
-    pub fn matching_frames(&self) -> Vec<crate::view::execution::StackFrame> {
+    pub fn matching_frames(&self) -> Vec<StackFrame> {
         self.matches
             .iter()
-            .map(|&index| crate::view::execution::stack_frame(index, &self.stack.frames[index]))
+            .map(|&index| self.stack.frames[index].clone())
             .collect()
     }
 
     /// The whole walked stack, innermost first.
-    #[cfg(feature = "python")]
     #[record(getter)]
-    pub fn frames(&self) -> Vec<crate::view::execution::StackFrame> {
-        crate::view::execution::stack_frames(&self.stack.frames)
+    pub fn frames(&self) -> Vec<StackFrame> {
+        self.stack.frames.clone()
     }
 
     /// The number of frames past the walk limit, which were not searched.
@@ -530,10 +501,9 @@ impl UniqStackGroup {
     /// The frames of the first thread, innermost first. The other threads
     /// have the same instruction pointers, but their stack pointers can
     /// differ.
-    #[cfg(feature = "python")]
     #[record(getter)]
-    pub fn frames(&self) -> Vec<crate::view::execution::StackFrame> {
-        crate::view::execution::stack_frames(&self.stack.frames)
+    pub fn frames(&self) -> Vec<StackFrame> {
+        self.stack.frames.clone()
     }
 
     /// The number of frames past the walk limit, which were not compared.

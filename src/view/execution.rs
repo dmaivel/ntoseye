@@ -275,33 +275,6 @@ pub struct RunStatus {
     pub partition: Option<u64>,
 }
 
-/// One frame of a stack walk.
-#[record]
-pub struct StackFrame {
-    /// The position of the frame in the stack walk. The innermost frame is 0.
-    pub index: usize,
-    /// The instruction pointer.
-    #[record(hex)]
-    pub ip: u64,
-    /// The stack pointer.
-    #[record(hex)]
-    pub sp: u64,
-    /// The symbol at `ip`. Empty if no symbol resolves.
-    pub symbol: String,
-    /// True for a call that the compiler inlined into the physical frame
-    /// after it, so the call has no stack frame of its own. `symbol` is the
-    /// inlined function, and `ip` and `sp` are those of the physical frame.
-    pub inline: bool,
-    /// How ntoseye recovered the frame: `current`, `seed`, `unwind`,
-    /// `prolog` (read off its function's prolog, for the Windows
-    /// hypervisor's code without its file), or `scan`.
-    pub source: &'static str,
-    /// The source line of the frame, if line information resolves it. For
-    /// an inline frame this is the line in the inlined function, and for a
-    /// caller it is the line of the call.
-    pub source_location: Option<crate::symbols::SourceLocation>,
-}
-
 /// The function-table entry that covers an address, and the entry of each
 /// chained parent (`.fnent`).
 #[record]
@@ -664,28 +637,6 @@ pub fn run_status(status: &session::RunStatus) -> RunStatus {
         kernel_base: status.kernel_base,
         partition: status.partition,
     }
-}
-
-/// Frame `index` of a walked stack.
-pub fn stack_frame(index: usize, frame: &unwind::StackFrame) -> StackFrame {
-    StackFrame {
-        index,
-        ip: frame.ip,
-        sp: frame.sp,
-        symbol: frame.symbol.clone(),
-        inline: frame.inline,
-        source: frame.source.as_str(),
-        source_location: frame.source_location.clone(),
-    }
-}
-
-/// A walked stack's frames, innermost first.
-pub fn stack_frames(frames: &[unwind::StackFrame]) -> Vec<StackFrame> {
-    frames
-        .iter()
-        .enumerate()
-        .map(|(index, frame)| stack_frame(index, frame))
-        .collect()
 }
 
 fn arm64_codes(codes: &[Arm64CodeDetail]) -> Vec<Arm64UnwindCode> {

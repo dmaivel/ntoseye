@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
+use ntoseye_macros::record;
 use pelite::pe64::{Pe, PeView, image::IMAGE_DIRECTORY_ENTRY_EXCEPTION};
 
 use crate::{
@@ -97,6 +98,10 @@ pub struct ThreadTraceContext {
     pub hypervisor: Option<Arc<HypervisorSymbols>>,
 }
 
+/// How ntoseye recovered a frame. In the SDK, its tag: `current`, `seed`,
+/// `unwind`, `prolog` (read off its function's prolog, for the Windows
+/// hypervisor's code without its file), or `scan`.
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameSource {
     Current,
@@ -123,27 +128,46 @@ impl FrameSource {
     }
 }
 
+impl std::fmt::Display for FrameSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One frame of a stack walk.
+#[record]
 #[derive(Debug, Clone)]
 pub struct StackFrame {
-    pub sp: u64,
+    /// The instruction pointer.
+    #[record(hex)]
     pub ip: u64,
-    /// `module!procedure+offset` at `ip`; for an inline frame,
-    /// `module!function`, the function inlined.
+    /// The stack pointer.
+    #[record(hex)]
+    pub sp: u64,
+    /// The symbol at `ip` (`module!procedure+offset`). For an inline frame,
+    /// `module!function`, the function inlined. Empty if no symbol
+    /// resolves.
     pub symbol: String,
+    /// True for a call that the compiler inlined into the physical frame
+    /// after it, so the call has no stack frame of its own. `symbol` is the
+    /// inlined function, and `ip` and `sp` are those of the physical frame.
+    pub inline: bool,
+    /// How ntoseye recovered the frame.
     pub source: FrameSource,
-    /// The frame's source line (see [`SymbolStore::frame_source_location`]).
+    /// The source line of the frame, if line information resolves it. For
+    /// an inline frame this is the line in the inlined function, and for a
+    /// caller it is the line of the call (see
+    /// [`SymbolStore::frame_source_location`]).
     pub source_location: Option<SourceLocation>,
     /// The hardware-pushed machine frame the walk crossed to reach this
     /// frame: the trap or interrupt that stopped it here. On Windows it is the
     /// tail of the handler's `_KTRAP_FRAME` (see
     /// [`crate::trapframe::ktrap_frame_at_machine_frame`]).
+    #[record(skip)]
     pub machine_frame: Option<u64>,
     /// Where the frame is in code, and which of the frames there it is.
+    #[record(skip)]
     pub code: CodeFrame,
-    /// The frame is a call the compiler inlined into the code of the
-    /// physical frame after it: it has no stack frame of its own, and shares
-    /// that frame's `ip`, `sp`, registers and `machine_frame`.
-    pub inline: bool,
 }
 
 #[derive(Debug, Clone, Default)]
