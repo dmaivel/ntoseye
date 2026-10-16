@@ -24,6 +24,7 @@ use crate::view::record::{ToView, Typed};
 use super::context::Space;
 pub use super::inspect::Inspect;
 pub use super::memory::Memory;
+pub use super::module::{Device, Driver};
 pub use super::process::Process;
 pub use super::thread::{Cpu, Thread};
 
