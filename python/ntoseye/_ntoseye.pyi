@@ -1137,11 +1137,10 @@ class BigPoolDetail(BaseRecord):
         """
 
 @final
-class BlackboxStream(BaseRecord):
+class BlackboxFinding(BaseRecord):
     """
-    A blackbox record (pnp, ntfs, bsd, winlogon) of a crash dump: a block
-    of its tagged data that ntoseye decodes as WinDbg's `!blackbox*`
-    commands do.
+    A blackbox record (pnp, ntfs, bsd, winlogon) of a crash dump: a block of
+    its tagged data that ntoseye decodes as WinDbg's `!blackbox*` commands do.
     """
     @property
     def command(self, /) -> str:
@@ -1149,36 +1148,35 @@ class BlackboxStream(BaseRecord):
         The command that shows the whole record, such as `!blackboxpnp`.
         """
     @property
-    def kind(self, /) -> str:
-        """
-        `pnp`, `ntfs`, `bsd`, or `winlogon`.
-        """
+    def kind(self, /) -> str: ...
     @property
     def name(self, /) -> str:
         """
         `PnP`, `NTFS`, `BSD`, or `Winlogon`.
         """
     @property
-    def present(self, /) -> bool:
-        """
-        `True` if the dump has the block.
-        """
-    @property
-    def reason(self, /) -> str |None:
-        """
-        Why the record does not decode, or that the dump has none. None
-        if it decodes.
-        """
-    @property
     def size(self, /) -> int |None:
         """
-        The block's size in bytes. None if the dump has no block.
+        The block's size in bytes. `None` if the dump has no block.
         """
     @property
-    def summary(self, /) -> str |None:
+    def state(self, /) -> BlackboxState: ...
+
+@final
+class BlackboxState(BaseRecord):
+    """
+    What a dump holds of a blackbox: `decoded` (with `summary`, what it holds
+    in one line), `malformed` (with the `reason`), or `absent`.
+    """
+    @property
+    def kind(self, /) -> str:
         """
-        What the record holds, in one line. None if it does not decode.
+        The variant: `decoded`, `malformed`, `absent`.
         """
+    @property
+    def reason(self, /) -> str |None: ...
+    @property
+    def summary(self, /) -> str |None: ...
 
 @final
 class BlockMatch(BaseRecord):
@@ -1224,15 +1222,14 @@ class BlockMatch(BaseRecord):
         """
 
 @final
-class BlockedPowerIrp(BaseRecord):
+class BlockedIrp(BaseRecord):
     """
-    The IRP that a 0x9F/0x3 names, and where it is pending.
+    The IRP of a 0x9F/0x3: where it is pending, and its `_POP_IRP_DATA`.
     """
     @property
     def data(self, /) -> PowerIrp |None:
         """
-        The IRP's entry on the power IRP list. `None` when it is not on
-        the list.
+        The IRP's entry on the power IRP list, when it is there.
         """
     @property
     def holder(self, /) -> Diagnostic[IrpHolder]:
@@ -1241,6 +1238,58 @@ class BlockedPowerIrp(BaseRecord):
         """
     @property
     def irp(self, /) -> int: ...
+
+@final
+class BootStatus(BaseRecord):
+    """
+    The boot status data (`RTL_BSD_DATA`) the boot manager and the kernel
+    keep in `bootstat.dat`. Sections past `version` (its size) are absent.
+    """
+    @property
+    def advanced_boot_menu_timeout(self, /) -> int: ...
+    @property
+    def auto_advanced_boot(self, /) -> bool: ...
+    @property
+    def boot_attempt_count(self, /) -> int: ...
+    @property
+    def checksum(self, /) -> int: ...
+    @property
+    def error_info(self, /) -> BsdErrorInfo |None: ...
+    @property
+    def feature_configuration_state(self, /) -> int |None:
+        """
+        `0` uninitialized, `1` boot pending, `2` LKG pending, `3` rollback
+        pending, `4` committed.
+        """
+    @property
+    def last_boot_checkpoint(self, /) -> bool: ...
+    @property
+    def last_boot_id(self, /) -> int: ...
+    @property
+    def last_boot_shutdown(self, /) -> bool: ...
+    @property
+    def last_boot_succeeded(self, /) -> bool: ...
+    @property
+    def last_reported_abnormal_shutdown_boot_id(self, /) -> int: ...
+    @property
+    def last_successful_shutdown_boot_id(self, /) -> int: ...
+    @property
+    def power_button(self, /) -> PowerButton |None: ...
+    @property
+    def power_transition(self, /) -> PowerTransition: ...
+    @property
+    def product_type(self, /) -> int: ...
+    @property
+    def sleep_in_progress(self, /) -> bool: ...
+    @property
+    def transition_extension(self, /) -> TransitionExtension |None: ...
+    @property
+    def truncated_to(self, /) -> int |None:
+        """
+        The block's size when it is smaller than `version` says.
+        """
+    @property
+    def version(self, /) -> int: ...
 
 class Breakpoint:
     """
@@ -1619,13 +1668,31 @@ class Breakpoints:
         """
 
 @final
-class Bugcheck(BaseRecord):
+class BsdErrorInfo(BaseRecord):
     """
-    A decoded bugcheck (BSOD) with the code, the four parameters, and the
-    faulting instruction if ntoseye identified it.
+    The error info section of the boot status data.
     """
     @property
-    def args(self, /) -> list[BugcheckArgument]:
+    def boot_id(self, /) -> int: ...
+    @property
+    def code(self, /) -> int: ...
+    @property
+    def other_error_count(self, /) -> int: ...
+    @property
+    def repeat_count(self, /) -> int: ...
+    @property
+    def status(self, /) -> int: ...
+
+@final
+class BugcheckAnalysis(BaseRecord):
+    """
+    A decoded bugcheck (BSOD): the code resolved to a name and per-parameter
+    descriptions, the responsible driver (from the dump record, the KD stream
+    or the fault site), and the faulting instruction if ntoseye identified it.
+    One source of truth for bugcheck analysis.
+    """
+    @property
+    def args(self, /) -> list[BugcheckArg]:
         """
         The four bugcheck parameters, each with its meaning for this code.
         """
@@ -1662,8 +1729,10 @@ class Bugcheck(BaseRecord):
     @property
     def source(self, /) -> str |None:
         """
-        Where ntoseye found the data if it was not in its usual place (a
-        pointer in `nt!KiBugCheckData` to the real slots). Usually `None`.
+        Set only when the data was not where it should have been, naming
+        where it was instead: `nt!KiBugCheckData` holding a pointer to the
+        real slots rather than the slots themselves. `None` is the normal
+        case, including every bugcheck the target reported itself.
         """
     @property
     def trap_frames(self, /) -> list[BugcheckTrapFrame]:
@@ -1672,7 +1741,7 @@ class Bugcheck(BaseRecord):
         """
 
 @final
-class BugcheckArgument(BaseRecord):
+class BugcheckArg(BaseRecord):
     """
     One bugcheck parameter and what it means for the code.
     """
@@ -1683,12 +1752,20 @@ class BugcheckArgument(BaseRecord):
         has no documented meaning for this parameter.
         """
     @property
-    def index(self, /) -> int:
-        """
-        The parameter's position, 1 to 4.
-        """
-    @property
     def value(self, /) -> int: ...
+
+@final
+class BugcheckDecoding(BaseRecord):
+    """
+    A bugcheck code and parameters decoded (`!analyze -show`).
+    """
+    @property
+    def analysis(self, /) -> BugcheckAnalysis: ...
+    @property
+    def power(self, /) -> PowerFailureFinding |None:
+        """
+        What a DRIVER_POWER_STATE_FAILURE (0x9F) names as stuck.
+        """
 
 @final
 class BugcheckFault(BaseRecord):
@@ -1739,7 +1816,8 @@ class BugcheckTrapFrame(BaseRecord):
     @property
     def error(self, /) -> str |None:
         """
-        The reason that decoding failed. `None` if decoding succeeded.
+        The reason that decoding failed. `None` exactly when `frame` is
+        present.
         """
     @property
     def frame(self, /) -> Amd64TrapFrame |Arm64TrapFrame |None:
@@ -1749,7 +1827,7 @@ class BugcheckTrapFrame(BaseRecord):
     @property
     def rip_symbol(self, /) -> str |None:
         """
-        The symbol at the interrupted instruction.
+        The symbol at the interrupted instruction, when the frame decoded.
         """
 
 @final
@@ -2129,6 +2207,31 @@ class ClassUnreadable(BaseRecord):
     def private_data(self, /) -> int: ...
 
 @final
+class CodeOwner(BaseRecord):
+    """
+    What holds a code address: `kind` `module` (`name`, and `system` when
+    it is part of Windows or a language runtime), `dynamic_code` (no module;
+    a dynamic function table covers it, `table_start..table_end`), or
+    `unowned` (`region`: the memory, as the dump's memory-info list records
+    it).
+    """
+    @property
+    def kind(self, /) -> str:
+        """
+        The variant: `module`, `dynamic_code`, `unowned`.
+        """
+    @property
+    def name(self, /) -> str |None: ...
+    @property
+    def region(self, /) -> str |None |None: ...
+    @property
+    def system(self, /) -> bool |None: ...
+    @property
+    def table_end(self, /) -> int |None: ...
+    @property
+    def table_start(self, /) -> int |None: ...
+
+@final
 class CodeView(BaseRecord):
     """
     A CodeView debug record (`IMAGE_DEBUG_TYPE_CODEVIEW`), which identifies
@@ -2475,96 +2578,22 @@ class Cpus:
     def get(self, /, index: int) -> Cpu |None: ...
 
 @final
-class CrashContext(BaseRecord):
-    """
-    The process and thread that crashed, as a triage dump recorded them.
-    A field is `None` if the dump does not record it.
-    """
-    @property
-    def create_time(self, /) -> str |None:
-        """
-        The time when the process was created (ISO 8601 UTC). Also `None` if
-        ntoseye cannot convert the recorded time.
-        """
-    @property
-    def exit_status(self, /) -> int |None:
-        """
-        The process's exit status (NTSTATUS).
-        """
-    @property
-    def parent_process_id(self, /) -> int |None: ...
-    @property
-    def process_id(self, /) -> int |None: ...
-    @property
-    def process_name(self, /) -> str |None: ...
-    @property
-    def thread_exit_status(self, /) -> int |None:
-        """
-        The thread's exit status (NTSTATUS).
-        """
-    @property
-    def thread_id(self, /) -> int |None: ...
-
-@final
-class Culprit(BaseRecord):
+class CulpritAttribution(BaseRecord):
     """
     What the available evidence identifies as the cause of the crash: a
     module, or on a user-mode minidump, generated code no module holds.
+    Absence means the evidence was not sufficient to name a non-kernel
+    culprit.
     """
     @property
-    def confidence(self, /) -> str:
-        """
-        `low`, `medium`, or `high`.
-        """
-    @property
-    def dynamic_code(self, /) -> CulpritDynamicCode |None:
-        """
-        The generated code, for `dynamic_code`.
-        """
+    def confidence(self, /) -> str: ...
     @property
     def evidence(self, /) -> list[CulpritEvidence]:
         """
         The evidence that points to the culprit.
         """
     @property
-    def kind(self, /) -> str:
-        """
-        `module`, or `dynamic_code` (JIT-compiled or generated code that
-        a dynamic function table covers; see `dynamic_code`).
-        """
-    @property
-    def module(self, /) -> str |None:
-        """
-        The module. `None` for `dynamic_code`.
-        """
-
-@final
-class CulpritDynamicCode(BaseRecord):
-    """
-    Generated code a culprit attribution names: no module holds it, and
-    a dynamic function table the process registered covers it.
-    """
-    @property
-    def address(self, /) -> int:
-        """
-        The blamed frame's address.
-        """
-    @property
-    def caller(self, /) -> UserTriageFrame |None:
-        """
-        The first frame further out that a module holds: the module
-        code that called into the generated code.
-        """
-    @property
-    def table_end(self, /) -> int:
-        """
-        The end (exclusive) of the table's range.
-        """
-    @property
-    def table_start(self, /) -> int:
-        """
-        The start of the dynamic function table's range.
-        """
+    def subject(self, /) -> CulpritSubject: ...
 
 @final
 class CulpritEvidence(BaseRecord):
@@ -2579,13 +2608,24 @@ class CulpritEvidence(BaseRecord):
     @property
     def detail(self, /) -> str: ...
     @property
+    def kind(self, /) -> str: ...
+
+@final
+class CulpritSubject(BaseRecord):
+    """
+    What a culprit attribution names: `kind` `module` (`module`, its name),
+    or `dynamic_code` (`dynamic_code`: JIT-compiled or generated code that a
+    dynamic function table covers, on a user-mode minidump).
+    """
+    @property
+    def dynamic_code(self, /) -> DynamicCodeCulprit |None: ...
+    @property
     def kind(self, /) -> str:
         """
-        `recorded_broken_driver`, `recorded_bugcheck_driver`,
-        `bugcheck_fault_address`, `exception_address`,
-        `current_instruction`, `top_frame`, `power_failure_driver`,
-        `pnp_lock_owner_stack`, or `first_non_system_frame`.
+        The variant: `module`, `dynamic_code`.
         """
+    @property
+    def module(self, /) -> str |None: ...
 
 @final
 class DataDirectory(BaseRecord):
@@ -3559,6 +3599,96 @@ class DisasmRow(BaseRecord):
         """
 
 @final
+class DmpException(BaseRecord):
+    """
+    The exception a crash dump recorded.
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        Where the exception occurred.
+        """
+    @property
+    def code(self, /) -> int:
+        """
+        The exception code (NTSTATUS).
+        """
+    @property
+    def code_name(self, /) -> str:
+        """
+        The code's symbolic name.
+        """
+    @property
+    def flags(self, /) -> int: ...
+    @property
+    def parameters(self, /) -> list[int]:
+        """
+        The exception's `ExceptionInformation` parameters.
+        """
+
+@final
+class DmpSystemInfo(BaseRecord):
+    """
+    The system that a crash dump comes from, as the system-info stream of
+    the dump records it.
+    """
+    @property
+    def machine(self, /) -> str:
+        """
+        `I386`, `AMD64`, `ARM64`, or `Unknown`.
+        """
+    @property
+    def machine_image_type(self, /) -> int:
+        """
+        The machine type (`IMAGE_FILE_MACHINE_*`).
+        """
+    @property
+    def major_version(self, /) -> int: ...
+    @property
+    def minor_version(self, /) -> int:
+        """
+        The build number.
+        """
+    @property
+    def product(self, /) -> str:
+        """
+        `Workstation`, `DomainController`, `Server`, or `Unknown`.
+        """
+    @property
+    def product_type(self, /) -> int:
+        """
+        `VER_NT_*`: 1 workstation, 2 domain controller, 3 server.
+        """
+    @property
+    def service_pack_build(self, /) -> int: ...
+    @property
+    def suite_mask(self, /) -> int:
+        """
+        The product suite (`VER_SUITE_*`) bits.
+        """
+    @property
+    def system_time(self, /) -> int:
+        """
+        When the dump was taken (FILETIME), 0 if the dump does not record it.
+        """
+    @property
+    def system_time_utc(self, /) -> str |None:
+        """
+        When the dump was taken (ISO 8601 UTC). `None` if the dump does not
+        record it.
+        """
+    @property
+    def system_up_time(self, /) -> int:
+        """
+        The system uptime, in 100 ns units.
+        """
+    @property
+    def system_up_time_secs(self, /) -> int |None:
+        """
+        The system uptime in seconds. `None` if the dump does not record it.
+        """
+
+@final
 class Dpc(BaseRecord):
     """
     A queued `_KDPC`.
@@ -3815,84 +3945,28 @@ class Drivers:
         """
 
 @final
-class DumpException(BaseRecord):
+class DynamicCodeCulprit(BaseRecord):
     """
-    The exception a crash dump recorded.
+    Generated code a culprit attribution names: no module holds it, and a
+    dynamic function table the process registered covers it.
     """
     @property
     def address(self, /) -> int:
         """
-        Where the exception occurred.
+        The blamed frame's address.
         """
     @property
-    def code(self, /) -> int:
+    def caller(self, /) -> UserFrame |None:
         """
-        The exception code (NTSTATUS).
-        """
-    @property
-    def code_hex(self, /) -> int:
-        """
-        The same code in hex.
+        The first frame further out that a module holds: the module code
+        that called into the generated code.
         """
     @property
-    def code_name(self, /) -> str:
-        """
-        The code's symbolic name.
-        """
+    def table_end(self, /) -> int: ...
     @property
-    def flags(self, /) -> int: ...
-    @property
-    def parameters(self, /) -> list[int]:
+    def table_start(self, /) -> int:
         """
-        The exception's `ExceptionInformation` parameters.
-        """
-
-@final
-class DumpSystemInfo(BaseRecord):
-    """
-    The system that a crash dump comes from, as the system-info stream of
-    the dump records it.
-    """
-    @property
-    def build(self, /) -> int:
-        """
-        The build number (the stream's minor version).
-        """
-    @property
-    def machine(self, /) -> str:
-        """
-        `I386`, `AMD64`, `ARM64`, or `Unknown`.
-        """
-    @property
-    def machine_image_type(self, /) -> int:
-        """
-        The machine type (`IMAGE_FILE_MACHINE_*`).
-        """
-    @property
-    def major_version(self, /) -> int: ...
-    @property
-    def product_type(self, /) -> str:
-        """
-        `Workstation`, `DomainController`, `Server`, or `Unknown`.
-        """
-    @property
-    def service_pack_build(self, /) -> int: ...
-    @property
-    def suite_mask(self, /) -> int:
-        """
-        The product suite (`VER_SUITE_*`) bits.
-        """
-    @property
-    def system_time(self, /) -> str |None:
-        """
-        The time when the dump was taken (ISO 8601 UTC). `None` if the dump
-        does not record it.
-        """
-    @property
-    def system_up_time_secs(self, /) -> int |None:
-        """
-        The system uptime in seconds. `None` if the dump does not record
-        it.
+        The dynamic function table covering it, `table_start..table_end`.
         """
 
 @final
@@ -4628,6 +4702,26 @@ class EtwRecord(BaseRecord):
         """
 
 @final
+class ExceptionParameter(BaseRecord):
+    """
+    One `ExceptionInformation` entry, with what it means for the code when
+    that is known.
+    """
+    @property
+    def label(self, /) -> str |None:
+        """
+        What the entry is for the code (`access`, `address`, `ThrowInfo`,
+        ...). `None` if the code defines no meaning.
+        """
+    @property
+    def meaning(self, /) -> str |None:
+        """
+        The value decoded: an access type, a status name, a module.
+        """
+    @property
+    def value(self, /) -> int: ...
+
+@final
 class ExceptionPolicy(BaseRecord):
     """
     One exception stop policy (`sx`).
@@ -4885,10 +4979,7 @@ class FailureSignature(BaseRecord):
         The bugcheck or exception code.
         """
     @property
-    def code_kind(self, /) -> str:
-        """
-        `bugcheck` or `exception`.
-        """
+    def code_kind(self, /) -> str: ...
     @property
     def components(self, /) -> list[str]:
         """
@@ -4900,14 +4991,7 @@ class FailureSignature(BaseRecord):
         The module at the failing location.
         """
     @property
-    def source(self, /) -> str:
-        """
-        The source of the failing location: `bugcheck_fault`,
-        `exception_address`, `current_instruction`, `top_frame`,
-        `power_failure_driver` (the driver a 0x9F names),
-        `first_non_system_frame` (on a user-mode minidump, the first frame
-        outside the system modules), or `code_only`.
-        """
+    def source(self, /) -> str: ...
     @property
     def symbol(self, /) -> str |None:
         """
@@ -5873,6 +5957,50 @@ class HandleTraces(BaseRecord):
         """
         The number of ring slots that ntoseye could not read.
         """
+
+@final
+class HangProcessor(BaseRecord):
+    """
+    A processor in `!analyze -hang`, and the thread running on it.
+    """
+    @property
+    def current(self, /) -> Diagnostic[HangThread]:
+        """
+        The thread running on the processor, or why it is unknown.
+        """
+    @property
+    def processor(self, /) -> int: ...
+
+@final
+class HangReport(BaseRecord):
+    """
+    What `!analyze -hang` found: the thread on each processor with its
+    stack, and the waiting threads.
+    """
+    @property
+    def processors(self, /) -> list[HangProcessor]:
+        """
+        One entry per processor, in order; empty when the count is unknown.
+        """
+    @property
+    def waiting(self, /) -> Diagnostic[list[ThreadInfo]]:
+        """
+        The waiting threads, most pending IRPs first (at most 32), or why
+        there are none.
+        """
+
+@final
+class HangThread(BaseRecord):
+    """
+    A thread running on a processor, with its stack.
+    """
+    @property
+    def stack(self, /) -> Diagnostic[list[StackFrame]]:
+        """
+        The thread's innermost frames (at most 8), or why it did not unwind.
+        """
+    @property
+    def thread(self, /) -> ThreadInfo: ...
 
 @final
 class Heap:
@@ -7094,10 +7222,58 @@ class Inspect:
         of a thread (`!apc`): `target` is a `Process`, a `Thread`, or an
         `_ETHREAD` address, and all threads by default.
         """
-    def bugcheck(self, /) -> Bugcheck |None:
+    def blackbox_bsd(self, /) -> BootStatus:
         """
-        Analyze the current bugcheck, or return `None` if no bugcheck is in
-        progress on the target.
+        Show the boot status data (bootstat.dat) the crash dump recorded.
+        
+        Whether the last boot succeeded and shut down, the boot IDs of the last
+        successful and abnormal shutdowns, the power transition and power button
+        state, and the feature configuration state, as WinDbg's !blackboxbsd shows
+        them.
+        """
+    def blackbox_ntfs(self, /) -> list[NtfsRecord]:
+        """
+        Show the NTFS slow I/O and oplock break timeouts the crash dump recorded.
+        
+        Each record shows its type and length; a slow I/O timeout its IRP, SCB,
+        and waiting thread, and an oplock break timeout its reason (the NTFS
+        routine), IRP, SCB, and the owning and breaking processes, as WinDbg's
+        !blackboxntfs shows them.
+        """
+    def blackbox_pci(self, /) -> list[PciRecord]:
+        """
+        List the PCI functions pci.sys recorded in the crash dump, with their
+        command and status.
+        
+        Each function shows its bus, device, and function, its vendor and device
+        IDs and revision, and its command and status registers with their flags as
+        WinDbg's !blackboxpci shows them: i (I/O), m (memory), b (bus master), v
+        (VGA palette snoop), p (parity), s (SERR) for the command, and c
+        (capability list), 6 (66 MHz), P (master data parity error), A (signaled
+        target abort), S (signaled system error) for the status. WinDbg prints the
+        command register's value as the status value; ntoseye prints the status
+        register's.
+        """
+    def blackbox_pnp(self, /) -> PnpBlackbox:
+        """
+        Show the PnP event the crash dump recorded.
+        
+        The PnP activity, its time, the event, whether it was in progress, the
+        device's problem code, the veto, and the device instance ID, as WinDbg's
+        !blackboxpnp shows them.
+        """
+    def blackbox_winlogon(self, /) -> WinlogonBlackbox:
+        """
+        Show what winlogon was doing when the crash dump was written.
+        """
+    def bugcheck(self, /) -> BugcheckAnalysis |None:
+        """
+        Show the bugcheck code and its four parameters.
+        
+        Uses the bugcheck that the stop reported. If there is none, it uses the
+        bugcheck in nt!KiBugCheckData, as $bug_code and $bug_param1-4 do, and if
+        there is none there, the bugcheck in the crash dump header. !analyze uses
+        the same order.
         """
     def callbacks(self, /) -> list[NotifyCallback]:
         """
@@ -7131,6 +7307,12 @@ class Inspect:
         control area, and stops at a subsection that points to a different control
         area. To find a control area, use the SectionObjectPointer of a file object
         or the Subsection of a VAD.
+        """
+    def decode_bugcheck(self, /, code: int, parameters: Sequence[int] = ...) -> BugcheckDecoding:
+        """
+        Decode a bugcheck code and its parameters as if the target had stopped
+        with it (`!analyze -show`), and for a DRIVER_POWER_STATE_FAILURE (0x9F),
+        read what its parameters point to. The target must be a kernel.
         """
     def device(self, /, address: int) -> Device:
         """
@@ -7307,6 +7489,12 @@ class Inspect:
         4-byte write to nt!NtGlobalFlag, the same write that `ed` makes, and the
         command does not change the PEB copy. `-?` lists the flags and their
         abbreviations.
+        """
+    def hang(self, /) -> HangReport:
+        """
+        Find what a hung system is doing (`!analyze -hang`): the thread on each
+        processor with its stack, and the waiting threads with the most pending
+        IRPs. The target must be a kernel.
         """
     def interrupt_controllers(self, /) -> HalControllers:
         """
@@ -8876,6 +9064,18 @@ class KernelTimer(BaseRecord):
         """
 
 @final
+class KmdfLogFinding(BaseRecord):
+    """
+    The client driver whose In-Flight Recorder log Wdf01000 copied into a
+    crash dump, and how many records it holds (`!wdfkd.wdfcrashdump` shows
+    them).
+    """
+    @property
+    def driver(self, /) -> str: ...
+    @property
+    def records(self, /) -> int: ...
+
+@final
 class KtrapFrame(BaseRecord):
     """
     A decoded `_KTRAP_FRAME` (`.trap`).
@@ -9904,7 +10104,7 @@ class Module:
         """
     def verifier(self, /) -> VerifierDriver:
         """
-        Get the verifier data for this driver module.
+        Get the verifier data for this driver module (`!verifier <module>`).
         """
 
 @final
@@ -11370,6 +11570,38 @@ class NtVirtualBlock(BaseRecord):
         """
 
 @final
+class NtfsRecord(BaseRecord):
+    """
+    One NTFS blackbox record.
+    """
+    @property
+    def break_reason(self, /) -> int |None:
+        """
+        An oplock break's reason: `1` `NtfsFsdSetInformation` to `5`
+        `NtfsFsdWrite`.
+        """
+    @property
+    def breaking_process_name(self, /) -> str |None: ...
+    @property
+    def irp(self, /) -> int: ...
+    @property
+    def kind(self, /) -> int:
+        """
+        `1` slow I/O timeout, `2` oplock break timeout.
+        """
+    @property
+    def length(self, /) -> int: ...
+    @property
+    def owner_process_name(self, /) -> str |None: ...
+    @property
+    def scb(self, /) -> int: ...
+    @property
+    def thread(self, /) -> int |None:
+        """
+        A slow I/O timeout's waiting thread.
+        """
+
+@final
 class ObjectDetail(BaseRecord):
     """
     An executive object with its header, type, and name, and the entries of
@@ -11895,6 +12127,28 @@ class PciHeader(BaseRecord):
     def vendor_id(self, /) -> int: ...
 
 @final
+class PciRecord(BaseRecord):
+    """
+    One function's configuration header as pci.sys recorded it.
+    """
+    @property
+    def bus(self, /) -> int: ...
+    @property
+    def command(self, /) -> int: ...
+    @property
+    def device(self, /) -> int: ...
+    @property
+    def device_id(self, /) -> int: ...
+    @property
+    def function(self, /) -> int: ...
+    @property
+    def revision(self, /) -> int: ...
+    @property
+    def status(self, /) -> int: ...
+    @property
+    def vendor_id(self, /) -> int: ...
+
+@final
 class PciScan(BaseRecord):
     """
     The functions that a `!pci` scan found.
@@ -12301,6 +12555,31 @@ class PfnSelector(BaseRecord):
         """
         The page-frame number or physical address given.
         """
+
+@final
+class PnpBlackbox(BaseRecord):
+    """
+    The PnP event in progress, or the last one.
+    """
+    @property
+    def activity_id(self, /) -> str:
+        """
+        The activity GUID, braced and in upper case.
+        """
+    @property
+    def activity_time(self, /) -> int: ...
+    @property
+    def device_id(self, /) -> str: ...
+    @property
+    def event_in_progress(self, /) -> int: ...
+    @property
+    def event_information(self, /) -> int: ...
+    @property
+    def problem_code(self, /) -> int: ...
+    @property
+    def veto_string(self, /) -> str |None: ...
+    @property
+    def veto_type(self, /) -> int: ...
 
 @final
 class PnpTriageDetail(BaseRecord):
@@ -12791,6 +13070,55 @@ class PowerActionDetail(BaseRecord):
         """
 
 @final
+class PowerButton(BaseRecord):
+    """
+    The power button section of the boot status data.
+    """
+    @property
+    def cumulative_press_count(self, /) -> int: ...
+    @property
+    def cumulative_release_count(self, /) -> int: ...
+    @property
+    def current_connected_standby_phase(self, /) -> int: ...
+    @property
+    def error_count(self, /) -> int: ...
+    @property
+    def last_power_watchdog_stage(self, /) -> int: ...
+    @property
+    def last_press_boot_id(self, /) -> int: ...
+    @property
+    def last_press_time(self, /) -> int: ...
+    @property
+    def last_release_boot_id(self, /) -> int: ...
+    @property
+    def last_release_time(self, /) -> int: ...
+    @property
+    def shutdown_in_progress(self, /) -> bool: ...
+    @property
+    def transition_latest_checkpoint_id(self, /) -> int: ...
+    @property
+    def transition_latest_checkpoint_sequence_number(self, /) -> int: ...
+    @property
+    def transition_latest_checkpoint_type(self, /) -> int: ...
+    @property
+    def watchdog_armed(self, /) -> bool: ...
+
+@final
+class PowerCulprit(BaseRecord):
+    """
+    The driver a DRIVER_POWER_STATE_FAILURE names, and why.
+    """
+    @property
+    def device(self, /) -> int:
+        """
+        The device object that ties the driver to the failure.
+        """
+    @property
+    def driver(self, /) -> DeviceDriver: ...
+    @property
+    def reason(self, /) -> str: ...
+
+@final
 class PowerEnum(BaseRecord):
     """
     A value of one of the kernel's power enums, with its name when the PDB
@@ -12813,31 +13141,33 @@ class PowerEnum(BaseRecord):
 @final
 class PowerFailure(BaseRecord):
     """
-    What a DRIVER_POWER_STATE_FAILURE (0x9F) names as stuck.
+    What a DRIVER_POWER_STATE_FAILURE (0x9F) names as stuck, by subtype
+    (parameter 1).
     """
     @property
-    def blocked_irp(self, /) -> BlockedPowerIrp |None:
+    def blocked_irp(self, /) -> BlockedIrp |None:
         """
         0x3: the blocked IRP.
         """
     @property
-    def culprit(self, /) -> PowerFailureCulprit |None: ...
+    def culprit(self, /) -> PowerCulprit |None: ...
     @property
     def description(self, /) -> str: ...
     @property
     def device(self, /) -> int |None:
         """
-        The device object that the parameters name.
+        The device object the parameters name: the PDO for 0x3 and 0x5, the
+        device for 0x1, 0x2, and 0x500.
         """
     @property
     def device_stack(self, /) -> Diagnostic[DeviceStackDetail] |None:
         """
-        The stack of `device`.
+        The stack of `device`, or why it is unknown.
         """
     @property
     def irps(self, /) -> PowerIrpList |None:
         """
-        0x3: the power IRPs on the list that `TRIAGE_9F_POWER` names.
+        0x3: the power IRPs, from the list `TRIAGE_9F_POWER` names.
         """
     @property
     def notes(self, /) -> list[str]:
@@ -12855,36 +13185,26 @@ class PowerFailure(BaseRecord):
         Parameter 1.
         """
     @property
-    def threads(self, /) -> list[PowerFailureThread]:
-        """
-        The IRP worker threads and the PnP lock owner, with their stacks.
-        """
-    @property
     def timeout_seconds(self, /) -> int |None:
         """
-        0x4: the timeout in seconds.
+        0x4: the timeout, in seconds.
         """
     @property
     def workers(self, /) -> PowerWorkerList |None:
         """
-        0x3: the IRP worker threads on the list that `TRIAGE_9F_POWER`
-        names.
+        0x3: the IRP worker threads, from the list `TRIAGE_9F_POWER` names.
         """
 
 @final
-class PowerFailureCulprit(BaseRecord):
+class PowerFailureFinding(BaseRecord):
     """
-    The driver that a DRIVER_POWER_STATE_FAILURE names, and why.
+    What a DRIVER_POWER_STATE_FAILURE (0x9F) names, read from the target,
+    and the stacks of the threads involved.
     """
     @property
-    def device(self, /) -> int:
-        """
-        The device object that ties the driver to the failure.
-        """
+    def failure(self, /) -> PowerFailure: ...
     @property
-    def driver(self, /) -> DeviceDriver: ...
-    @property
-    def reason(self, /) -> str: ...
+    def threads(self, /) -> list[PowerFailureThread]: ...
 
 @final
 class PowerFailureThread(BaseRecord):
@@ -12892,22 +13212,17 @@ class PowerFailureThread(BaseRecord):
     A thread that a DRIVER_POWER_STATE_FAILURE names, with its stack.
     """
     @property
-    def device(self, /) -> int |None: ...
+    def role(self, /) -> PowerThreadRole: ...
     @property
-    def irp(self, /) -> int |None:
+    def stack(self, /) -> Diagnostic[list[StackFrame]]:
         """
-        For an IRP worker, the IRP it is passing to a driver; 0 while it
-        waits.
-        """
-    @property
-    def role(self, /) -> str:
-        """
-        `irp_worker` or `pnp_lock_owner`.
+        The thread's stack, or why it did not unwind.
         """
     @property
-    def stack(self, /) -> Diagnostic[list[StackFrame]]: ...
-    @property
-    def thread(self, /) -> int: ...
+    def thread(self, /) -> int:
+        """
+        The `_ETHREAD`.
+        """
 
 @final
 class PowerIrp(BaseRecord):
@@ -13018,6 +13333,56 @@ class PowerState(BaseRecord):
         """
     @property
     def system(self, /) -> PowerEnum |None: ...
+
+@final
+class PowerThreadRole(BaseRecord):
+    """
+    Why a DRIVER_POWER_STATE_FAILURE names a thread: `kind` `irp_worker`
+    (a power IRP worker thread, passing `irp` to `device`, or waiting for
+    work when both are 0) or `pnp_lock_owner` (the thread that holds the PnP
+    lock, 0x4).
+    """
+    @property
+    def device(self, /) -> int |None: ...
+    @property
+    def irp(self, /) -> int |None: ...
+    @property
+    def kind(self, /) -> str:
+        """
+        The variant: `irp_worker`, `pnp_lock_owner`.
+        """
+
+@final
+class PowerTransition(BaseRecord):
+    """
+    The power transition section of the boot status data.
+    """
+    @property
+    def connected_standby_entry_reason(self, /) -> int: ...
+    @property
+    def connected_standby_exit_reason(self, /) -> int: ...
+    @property
+    def connected_standby_in_progress(self, /) -> bool: ...
+    @property
+    def connected_standby_scenario_instance_id(self, /) -> int: ...
+    @property
+    def last_reference_time(self, /) -> int: ...
+    @property
+    def last_reference_time_checksum(self, /) -> int: ...
+    @property
+    def last_update_boot_id(self, /) -> int: ...
+    @property
+    def power_button_timestamp(self, /) -> int: ...
+    @property
+    def sleep_in_progress(self, /) -> int: ...
+    @property
+    def system_running(self, /) -> bool: ...
+    @property
+    def system_shutdown_in_progress(self, /) -> bool: ...
+    @property
+    def system_sleep_transitions_to_on(self, /) -> int: ...
+    @property
+    def user_shutdown_in_progress(self, /) -> bool: ...
 
 @final
 class PowerWorker(BaseRecord):
@@ -14213,6 +14578,16 @@ class Regions:
         """
 
 @final
+class RegisterValue(BaseRecord):
+    """
+    A register of the exception's context.
+    """
+    @property
+    def name(self, /) -> str: ...
+    @property
+    def value(self, /) -> int: ...
+
+@final
 class Registers:
     """
     A register file that is bound to a vCPU or to a recovered frame context.
@@ -14310,7 +14685,10 @@ class ResourceOwner(BaseRecord):
 @final
 class RunStatus(BaseRecord):
     """
-    Whether the target runs, and where it stopped.
+    Whether the target runs, and where it stopped: the read-only status
+    surface. `coherent` is false after a reboot until the kernel's
+    loaded-module list exists, so a host knows process/module enumeration is
+    not yet meaningful.
     """
     @property
     def attached_process(self, /) -> ProcessInfo |None:
@@ -14333,7 +14711,8 @@ class RunStatus(BaseRecord):
     @property
     def kernel_base(self, /) -> int:
         """
-        The `nt` base that ntoseye found again. It changes across a reboot.
+        The `nt` base that ntoseye found again. It changes across a reboot,
+        so a host can cache it to notice one.
         """
     @property
     def partition(self, /) -> int |None:
@@ -14366,18 +14745,20 @@ class RunStatus(BaseRecord):
     def serving(self, /) -> ServedVp |None:
         """
         For a vCPU halted in the Windows hypervisor, the guest partition's
-        virtual processor it serves, as `VcpuInfo.serving`.
+        virtual processor whose exit it handles, when it is not the root's.
         """
     @property
     def stopped_process(self, /) -> ProcessInfo |None:
         """
-        The process whose page tables the stopped vCPU has loaded.
+        The process whose page tables the stopped vCPU has loaded (from
+        CR3), refreshed at every stop.
         """
     @property
     def stopped_thread(self, /) -> ThreadInfo |None:
         """
-        The Windows thread that the stopped vCPU runs. Its owner can be
-        different from `stopped_process` (`KeStackAttachProcess`).
+        The Windows thread that the stopped vCPU runs, walked from its KPRCB
+        at this stop. Its owner can be different from `stopped_process`
+        (`KeStackAttachProcess`).
         """
     @property
     def symbol(self, /) -> str |None:
@@ -17243,7 +17624,66 @@ class TokenPrivilege(BaseRecord):
     def luid(self, /) -> int: ...
 
 @final
-class TriagePrcb(BaseRecord):
+class TransitionExtension(BaseRecord):
+    """
+    The power transition extension of the boot status data.
+    """
+    @property
+    def connected_standby_entry_reason_category(self, /) -> int: ...
+    @property
+    def connected_standby_entry_scenario_instance_id(self, /) -> int: ...
+    @property
+    def connected_standby_exit_reason_category(self, /) -> int: ...
+    @property
+    def oobe_in_progress(self, /) -> bool: ...
+    @property
+    def setup_in_progress(self, /) -> bool: ...
+    @property
+    def shutdown_device_type(self, /) -> int: ...
+    @property
+    def sleep_checkpoint(self, /) -> int: ...
+    @property
+    def sleep_checkpoint_source(self, /) -> int: ...
+
+@final
+class TriageCrashInfo(BaseRecord):
+    """
+    The process and thread that crashed, as a triage dump recorded them: it
+    snapshots their `EPROCESS` and `ETHREAD` as raw bytes rather than as
+    mapped memory. A field is `None` if the dump does not record it.
+    """
+    @property
+    def create_time(self, /) -> int |None:
+        """
+        When the process was created (FILETIME).
+        """
+    @property
+    def create_time_utc(self, /) -> str |None:
+        """
+        When the process was created (ISO 8601 UTC). `None` if ntoseye cannot
+        convert the recorded time.
+        """
+    @property
+    def exit_status(self, /) -> int |None:
+        """
+        The process's exit status (NTSTATUS).
+        """
+    @property
+    def parent_process_id(self, /) -> int |None: ...
+    @property
+    def process_id(self, /) -> int |None: ...
+    @property
+    def process_name(self, /) -> str |None: ...
+    @property
+    def thread_exit_status(self, /) -> int |None:
+        """
+        The thread's exit status (NTSTATUS).
+        """
+    @property
+    def thread_id(self, /) -> int |None: ...
+
+@final
+class TriagePrcbInfo(BaseRecord):
     """
     The main `_KPRCB` data of the crashed processor, as a triage dump
     recorded it.
@@ -17272,34 +17712,34 @@ class TriagePrcb(BaseRecord):
 class TriageReport(BaseRecord):
     """
     The one-shot crash triage report (`!analyze`), with the run status, the
-    bugcheck or exception, the backtrace, the modules, the dump records,
-    and the findings.
+    bugcheck or exception, the backtrace, the modules, the dump records, and
+    the findings.
     """
     @property
     def backtrace(self, /) -> list[StackFrame] |None:
         """
-        The stack of the current thread. `None` while the target runs or
-        if the unwind failed (see `warnings`).
+        The stack of the current thread. `None` while the target runs or if
+        the unwind failed (see `warnings`).
         """
     @property
-    def blackboxes(self, /) -> list[BlackboxStream]: ...
+    def blackboxes(self, /) -> list[BlackboxFinding]: ...
     @property
     def broken_driver(self, /) -> str |None:
         """
         The driver that the dump records as broken.
         """
     @property
-    def bugcheck(self, /) -> Bugcheck |None:
+    def bugcheck(self, /) -> BugcheckAnalysis |None:
         """
         The bugcheck, if the target is in a bugcheck.
         """
     @property
-    def crash_context(self, /) -> CrashContext |None:
+    def crash_context(self, /) -> TriageCrashInfo |None:
         """
         The process and thread that crashed, as a triage dump recorded them.
         """
     @property
-    def culprit(self, /) -> Culprit |None:
+    def culprit(self, /) -> CulpritAttribution |None:
         """
         What the evidence identifies as the cause: a module, or on a
         user-mode minidump, JIT-compiled code. `None` if the evidence
@@ -17307,30 +17747,29 @@ class TriageReport(BaseRecord):
         module nor generated code.
         """
     @property
-    def exception(self, /) -> DumpException |None:
+    def exception(self, /) -> DmpException |None:
         """
         The exception that a dump recorded.
         """
     @property
     def failure_signature(self, /) -> FailureSignature |None: ...
     @property
+    def kmdf_log(self, /) -> KmdfLogFinding |None:
+        """
+        The KMDF driver whose In-Flight Recorder log the dump holds.
+        """
+    @property
     def modules(self, /) -> list[ModuleInfo]:
         """
-        The loaded modules, up to a maximum that the caller sets (see
-        `modules_total`).
+        The loaded modules.
         """
     @property
-    def modules_total(self, /) -> int:
-        """
-        The number of loaded modules.
-        """
-    @property
-    def power(self, /) -> PowerFailure |None:
+    def power(self, /) -> PowerFailureFinding |None:
         """
         What a DRIVER_POWER_STATE_FAILURE names as stuck.
         """
     @property
-    def prcb(self, /) -> TriagePrcb |None:
+    def prcb(self, /) -> TriagePrcbInfo |None:
         """
         The processor that crashed, as a triage dump recorded it.
         """
@@ -17340,7 +17779,7 @@ class TriageReport(BaseRecord):
         The target's run status.
         """
     @property
-    def system_info(self, /) -> DumpSystemInfo |None:
+    def system_info(self, /) -> DmpSystemInfo |None:
         """
         The system information of the dump.
         """
@@ -17351,14 +17790,16 @@ class TriageReport(BaseRecord):
         target is not a dump.
         """
     @property
-    def unloaded_drivers(self, /) -> list[UnloadedDriver]: ...
-    @property
-    def user(self, /) -> UserTriage |None:
+    def unloaded_drivers(self, /) -> list[UnloadedDriver]:
         """
-        What a user-mode minidump adds: the process, the exception
-        decoded, and the frame the failure is blamed on. `None` for a
-        kernel target, whose bugcheck and kernel findings do not apply to
-        a user dump.
+        The drivers the system unloaded recently, as the crash dump records
+        them.
+        """
+    @property
+    def user(self, /) -> UserDumpTriage |None:
+        """
+        What a user-mode minidump adds: the process, the exception decoded,
+        and the frame the failure is blamed on. `None` for a kernel target.
         """
     @property
     def verifier(self, /) -> VerifierFinding |None:
@@ -17574,8 +18015,7 @@ class UniqStacks(BaseRecord):
 @final
 class UnloadedDriver(BaseRecord):
     """
-    A driver that the system unloaded recently, as the crash dump records
-    it.
+    A driver that the system unloaded recently, as the crash dump records it.
     """
     @property
     def end_address(self, /) -> int: ...
@@ -17583,6 +18023,22 @@ class UnloadedDriver(BaseRecord):
     def name(self, /) -> str: ...
     @property
     def start_address(self, /) -> int: ...
+
+@final
+class UnloadedModule(BaseRecord):
+    """
+    A module the process had unloaded (`UnloadedModuleListStream`).
+    """
+    @property
+    def base(self, /) -> int: ...
+    @property
+    def checksum(self, /) -> int: ...
+    @property
+    def name(self, /) -> str: ...
+    @property
+    def size(self, /) -> int: ...
+    @property
+    def time_date_stamp(self, /) -> int: ...
 
 @final
 class UnwalkedThread(BaseRecord):
@@ -17656,7 +18112,7 @@ class UserDump:
         exception's thread when the dump records an exception.
         """
     @property
-    def exception(self, /) -> UserDumpException |None:
+    def exception(self, /) -> UserExceptionDetail |None:
         """
         The exception the dump was written for, or `None` when it records
         none.
@@ -17675,7 +18131,7 @@ class UserDump:
         records no exception (or its thread is not in the thread list).
         """
     @property
-    def handles(self, /) -> list[UserDumpHandle] |None:
+    def handles(self, /) -> list[UserHandle] |None:
         """
         The handles the process held, as the dump records them, or `None`
         when the dump has no handle data.
@@ -17690,13 +18146,13 @@ class UserDump:
         """
         The captured process.
         """
-    def region(self, /, address: int) -> UserDumpRegion |None:
+    def region(self, /, address: int) -> UserRegion |None:
         """
         The region holding `address`, or `None` when no region holds it or
         the dump has no memory-info list.
         """
     @property
-    def regions(self, /) -> list[UserDumpRegion] |None:
+    def regions(self, /) -> list[UserRegion] |None:
         """
         The regions of the process's address space, by base, each with what
         uses it (`!address`), or `None` when the dump has no memory-info list.
@@ -17709,146 +18165,9 @@ class UserDump:
         dump's order.
         """
     @property
-    def unloaded_modules(self, /) -> list[UserDumpUnloadedModule]:
+    def unloaded_modules(self, /) -> list[UnloadedModule]:
         """
         The modules the process had unloaded.
-        """
-
-@final
-class UserDumpException(BaseRecord):
-    """
-    The exception a user-mode minidump was written for (`ExceptionStream`).
-    """
-    @property
-    def address(self, /) -> int:
-        """
-        Where the exception was raised.
-        """
-    @property
-    def code(self, /) -> int:
-        """
-        The exception code (an NTSTATUS, or an application's own code).
-        """
-    @property
-    def code_name(self, /) -> str |None:
-        """
-        The NTSTATUS name of `code`, when it is one ntoseye knows.
-        """
-    @property
-    def context_error(self, /) -> str |None:
-        """
-        Why the exception's CONTEXT is unusable, `None` when it is.
-        """
-    @property
-    def flags(self, /) -> int: ...
-    @property
-    def parameters(self, /) -> list[int]: ...
-    @property
-    def record(self, /) -> int:
-        """
-        The address of a chained `EXCEPTION_RECORD`, 0 for none.
-        """
-    @property
-    def symbol(self, /) -> str |None:
-        """
-        `address` as `module!function+offset`, when it resolves.
-        """
-    @property
-    def thread_id(self, /) -> int:
-        """
-        The thread that raised it.
-        """
-
-@final
-class UserDumpHandle(BaseRecord):
-    """
-    A handle the process held, as `HandleDataStream` records it. The dump
-    names no object address.
-    """
-    @property
-    def attribute_names(self, /) -> list[str]:
-        """
-        `attributes` as `OBJ_*` names.
-        """
-    @property
-    def attributes(self, /) -> int:
-        """
-        `OBJ_*` attribute flags.
-        """
-    @property
-    def granted_access(self, /) -> int: ...
-    @property
-    def handle(self, /) -> int: ...
-    @property
-    def handle_count(self, /) -> int: ...
-    @property
-    def object_name(self, /) -> str |None: ...
-    @property
-    def pointer_count(self, /) -> int: ...
-    @property
-    def type_name(self, /) -> str |None: ...
-
-@final
-class UserDumpRegion(BaseRecord):
-    """
-    A region of the process's address space, as `VirtualQueryEx`
-    reported it (`MemoryInfoListStream`), with what the dump shows uses it
-    (`!address`).
-    """
-    @property
-    def allocation_base(self, /) -> int: ...
-    @property
-    def allocation_protect(self, /) -> int: ...
-    @property
-    def allocation_protect_name(self, /) -> str:
-        """
-        `allocation_protect` as `PAGE_*` names.
-        """
-    @property
-    def base(self, /) -> int: ...
-    @property
-    def captured(self, /) -> int:
-        """
-        How many of the region's bytes the dump captured; the rest do not
-        read.
-        """
-    @property
-    def detail(self, /) -> str |None:
-        """
-        The module, thread, or heap `usage` names.
-        """
-    @property
-    def kind(self, /) -> int:
-        """
-        The region's type: `MEM_IMAGE`, `MEM_MAPPED`, or `MEM_PRIVATE`; 0 for
-        a free region.
-        """
-    @property
-    def kind_name(self, /) -> str:
-        """
-        `kind`'s name, empty for a free region.
-        """
-    @property
-    def protect(self, /) -> int: ...
-    @property
-    def protect_name(self, /) -> str:
-        """
-        `protect` as `PAGE_*` names; empty for a free or reserved region.
-        """
-    @property
-    def size(self, /) -> int: ...
-    @property
-    def state(self, /) -> int: ...
-    @property
-    def state_name(self, /) -> str:
-        """
-        `MEM_COMMIT`, `MEM_RESERVE`, or `MEM_FREE`.
-        """
-    @property
-    def usage(self, /) -> str:
-        """
-        What uses the region: `Image`, `Stack`, `TEB`, `PEB`, `Heap`,
-        `Free`, or `<unknown>`.
         """
 
 @final
@@ -17909,20 +18228,206 @@ class UserDumpTime(BaseRecord):
         """
 
 @final
-class UserDumpUnloadedModule(BaseRecord):
+class UserDumpTriage(BaseRecord):
     """
-    A module the process had unloaded (`UnloadedModuleListStream`).
+    What `!analyze` reports for a user-mode minidump beyond the fields it
+    shares with a kernel report (the stack, the modules, the signature and
+    the culprit): the process, the exception decoded, and the frame the
+    failure is blamed on.
     """
     @property
-    def base(self, /) -> int: ...
+    def exception(self, /) -> UserExceptionFinding |None:
+        """
+        The exception the dump was written for; `None` when it records none.
+        """
     @property
-    def checksum(self, /) -> int: ...
+    def exception_registers(self, /) -> list[RegisterValue]:
+        """
+        The general-purpose registers of the exception's context, in display
+        order. Empty without an exception, or when its context is unusable.
+        """
     @property
-    def name(self, /) -> str: ...
+    def process(self, /) -> UserProcessSummary: ...
     @property
-    def size(self, /) -> int: ...
+    def stack_thread(self, /) -> UserStackThread |None:
+        """
+        The thread whose stack the report's `backtrace` is, and the context
+        the walk started from. `None` if no thread is selected.
+        """
+
+@final
+class UserException(BaseRecord):
+    """
+    The exception a user-mode minidump was written for (`ExceptionStream`).
+    """
     @property
-    def time_date_stamp(self, /) -> int: ...
+    def address(self, /) -> int:
+        """
+        Where the exception was raised.
+        """
+    @property
+    def code(self, /) -> int:
+        """
+        The exception code (an NTSTATUS, or an application's own code).
+        """
+    @property
+    def code_name(self, /) -> str |None:
+        """
+        The NTSTATUS name of `code`, when it is one ntoseye knows.
+        """
+    @property
+    def context_error(self, /) -> str |None:
+        """
+        Why the exception's CONTEXT is unusable, `None` when it is.
+        """
+    @property
+    def flags(self, /) -> int: ...
+    @property
+    def parameters(self, /) -> list[int]: ...
+    @property
+    def record(self, /) -> int:
+        """
+        The address of a chained `EXCEPTION_RECORD`, 0 for none.
+        """
+    @property
+    def thread_id(self, /) -> int:
+        """
+        The thread that raised it.
+        """
+
+@final
+class UserExceptionDetail(BaseRecord):
+    """
+    The exception a user-mode minidump was written for, with its address
+    named in the dump's modules.
+    """
+    @property
+    def exception(self, /) -> UserException: ...
+    @property
+    def symbol(self, /) -> str |None:
+        """
+        `exception.address` as `module!function+offset`, when it resolves.
+        """
+
+@final
+class UserExceptionFinding(BaseRecord):
+    """
+    The exception a user-mode minidump was written for, decoded.
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def address_owner(self, /) -> CodeOwner:
+        """
+        What holds the exception address: the faulting module.
+        """
+    @property
+    def blamed_frame(self, /) -> UserFrame |None:
+        """
+        The first frame, from the faulting one outward, outside the system
+        modules: the code the failure is blamed on. `None` when every frame
+        is in a system module or there is no stack.
+        """
+    @property
+    def code(self, /) -> int: ...
+    @property
+    def faulting_frame(self, /) -> int |None:
+        """
+        The index in the report's `backtrace` of the frame at the exception
+        address; `None` when no frame is there.
+        """
+    @property
+    def flag_names(self, /) -> list[str]:
+        """
+        The `EXCEPTION_*` flags set, with any unknown bits in hex.
+        """
+    @property
+    def flags(self, /) -> int: ...
+    @property
+    def kind(self, /) -> str: ...
+    @property
+    def module_caller(self, /) -> UserFrame |None:
+        """
+        When the blamed frame is in no module, the first frame further out
+        that a module holds: the module code that called into it.
+        """
+    @property
+    def name(self, /) -> str:
+        """
+        The code's name, or what kind of code it is when it has none.
+        """
+    @property
+    def parameters(self, /) -> list[ExceptionParameter]: ...
+    @property
+    def record(self, /) -> int:
+        """
+        The address of a chained exception record, 0 for none.
+        """
+    @property
+    def summary(self, /) -> str |None:
+        """
+        What the parameters say, in one line (`write to 0x10`).
+        """
+    @property
+    def symbol(self, /) -> str: ...
+    @property
+    def thread(self, /) -> str:
+        """
+        The thread's id as `~` lists it.
+        """
+    @property
+    def thread_id(self, /) -> int: ...
+    @property
+    def thread_name(self, /) -> str |None: ...
+
+@final
+class UserFrame(BaseRecord):
+    """
+    A frame of the report's stack, as the analysis uses it.
+    """
+    @property
+    def index(self, /) -> int:
+        """
+        The frame's index in the report's `backtrace`.
+        """
+    @property
+    def ip(self, /) -> int: ...
+    @property
+    def owner(self, /) -> CodeOwner: ...
+    @property
+    def source(self, /) -> str: ...
+    @property
+    def symbol(self, /) -> str: ...
+
+@final
+class UserHandle(BaseRecord):
+    """
+    A handle the process held (`MINIDUMP_HANDLE_DESCRIPTOR` or
+    `MINIDUMP_HANDLE_DESCRIPTOR_2`), as the dump records it. The dump names
+    no object address.
+    """
+    @property
+    def attribute_names(self, /) -> list[str]:
+        """
+        `attributes` as `OBJ_*` names.
+        """
+    @property
+    def attributes(self, /) -> int:
+        """
+        `OBJ_*` attribute flags.
+        """
+    @property
+    def granted_access(self, /) -> int: ...
+    @property
+    def handle(self, /) -> int: ...
+    @property
+    def handle_count(self, /) -> int: ...
+    @property
+    def object_name(self, /) -> str |None: ...
+    @property
+    def pointer_count(self, /) -> int: ...
+    @property
+    def type_name(self, /) -> str |None: ...
 
 @final
 class UserProcess:
@@ -17989,6 +18494,76 @@ class UserProcess:
     def to_dict(self, /) -> dict[str, Any]: ...
 
 @final
+class UserProcessSummary(BaseRecord):
+    """
+    The captured process, as the dump's streams record it.
+    """
+    @property
+    def arch(self, /) -> str:
+        """
+        `AMD64` or `ARM64`.
+        """
+    @property
+    def build_number(self, /) -> int: ...
+    @property
+    def build_string(self, /) -> str |None:
+        """
+        `MINIDUMP_MISC_INFO_4.BuildString`.
+        """
+    @property
+    def create_time(self, /) -> int |None:
+        """
+        When the process was created, in seconds since 1970 (UTC).
+        """
+    @property
+    def create_time_utc(self, /) -> str |None:
+        """
+        When the process was created (ISO 8601 UTC).
+        """
+    @property
+    def dump_time(self, /) -> int:
+        """
+        When the dump was written, in seconds since 1970 (UTC).
+        """
+    @property
+    def dump_time_utc(self, /) -> str |None:
+        """
+        When the dump was written (ISO 8601 UTC).
+        """
+    @property
+    def handles(self, /) -> int |None:
+        """
+        `None` when the dump has no handle stream.
+        """
+    @property
+    def kernel_time_secs(self, /) -> int |None:
+        """
+        Kernel-mode time the process had run, in seconds.
+        """
+    @property
+    def major_version(self, /) -> int: ...
+    @property
+    def minor_version(self, /) -> int: ...
+    @property
+    def modules(self, /) -> int: ...
+    @property
+    def name(self, /) -> str |None:
+        """
+        The executable's file name, from the first module the dump lists.
+        """
+    @property
+    def pid(self, /) -> int |None: ...
+    @property
+    def threads(self, /) -> int: ...
+    @property
+    def unloaded_modules(self, /) -> int: ...
+    @property
+    def user_time_secs(self, /) -> int |None:
+        """
+        User-mode time the process had run, in seconds.
+        """
+
+@final
 class UserRegion(BaseRecord):
     """
     One region of a user-mode minidump's memory-info list (`!address`),
@@ -18016,6 +18591,23 @@ class UserRegion(BaseRecord):
         """
     @property
     def usage(self, /) -> str: ...
+
+@final
+class UserStackThread(BaseRecord):
+    """
+    The thread a user dump report's stack belongs to.
+    """
+    @property
+    def id(self, /) -> str:
+        """
+        The thread's id as `~` lists it (`<pid>.<tid>` in hex).
+        """
+    @property
+    def name(self, /) -> str |None: ...
+    @property
+    def source(self, /) -> str: ...
+    @property
+    def tid(self, /) -> int: ...
 
 @final
 class UserThread:
@@ -18168,273 +18760,6 @@ class UserThreads:
         """
 
 @final
-class UserTriage(BaseRecord):
-    """
-    The triage of a user-mode minidump.
-    """
-    @property
-    def exception(self, /) -> UserTriageException |None:
-        """
-        The exception the dump was written for. `None` if it records
-        none.
-        """
-    @property
-    def exception_registers(self, /) -> list[UserTriageRegister]:
-        """
-        The general-purpose registers of the exception's context, in
-        display order. Empty without an exception or when its context is
-        unusable.
-        """
-    @property
-    def process(self, /) -> UserTriageProcess: ...
-    @property
-    def stack_thread(self, /) -> UserTriageStackThread |None:
-        """
-        The thread whose stack `backtrace` is. `None` if no thread is
-        selected.
-        """
-
-@final
-class UserTriageCodeOwner(BaseRecord):
-    """
-    What holds a code address of a user dump.
-    """
-    @property
-    def kind(self, /) -> str:
-        """
-        `module`, `dynamic_code` (no module; a dynamic function table
-        covers it, as for JIT-compiled code), or `unowned`.
-        """
-    @property
-    def module(self, /) -> str |None: ...
-    @property
-    def region(self, /) -> str |None:
-        """
-        For `unowned`, the memory region as the dump's memory-info list
-        records it.
-        """
-    @property
-    def system(self, /) -> bool:
-        """
-        Whether the module is part of Windows or a language runtime.
-        """
-    @property
-    def table_end(self, /) -> int |None: ...
-    @property
-    def table_start(self, /) -> int |None:
-        """
-        For `dynamic_code`, the range of the dynamic function table that
-        covers the address.
-        """
-
-@final
-class UserTriageException(BaseRecord):
-    """
-    The exception a user-mode minidump was written for, decoded.
-    """
-    @property
-    def address(self, /) -> int: ...
-    @property
-    def blamed_frame(self, /) -> UserTriageFrame |None:
-        """
-        The first frame from the faulting one outward outside the system
-        modules (ntdll, kernelbase, the C++ and .NET runtimes): the code
-        the failure is blamed on. `None` if every frame is in a system
-        module.
-        """
-    @property
-    def code(self, /) -> int: ...
-    @property
-    def faulting_frame(self, /) -> int |None:
-        """
-        The index in `backtrace` of the frame at the exception address.
-        """
-    @property
-    def flag_names(self, /) -> list[str]:
-        """
-        The `EXCEPTION_*` flags set, with unknown bits in hex.
-        """
-    @property
-    def flags(self, /) -> int: ...
-    @property
-    def kind(self, /) -> str:
-        """
-        `ntstatus`, `cpp_exception`, `clr_exception`, `well_known`,
-        `application_defined` (customer bit set, no name), or `unknown`.
-        """
-    @property
-    def module(self, /) -> UserTriageCodeOwner:
-        """
-        What holds the exception address: the faulting module.
-        """
-    @property
-    def module_caller(self, /) -> UserTriageFrame |None:
-        """
-        When `blamed_frame` is in no module, the first frame further out
-        that a module holds: the module code that called into it.
-        """
-    @property
-    def name(self, /) -> str:
-        """
-        The code's name, or what kind of code it is when it has none.
-        """
-    @property
-    def parameters(self, /) -> list[UserTriageExceptionParameter]: ...
-    @property
-    def record(self, /) -> int:
-        """
-        The address of a chained exception record; 0 for none.
-        """
-    @property
-    def summary(self, /) -> str |None:
-        """
-        What the parameters say in one line, such as `write to 0x10`.
-        """
-    @property
-    def symbol(self, /) -> str: ...
-    @property
-    def thread(self, /) -> str:
-        """
-        The faulting thread's id as `~` lists it.
-        """
-    @property
-    def thread_id(self, /) -> int: ...
-    @property
-    def thread_name(self, /) -> str |None: ...
-
-@final
-class UserTriageExceptionParameter(BaseRecord):
-    """
-    One `ExceptionInformation` entry of a user dump's exception.
-    """
-    @property
-    def label(self, /) -> str |None:
-        """
-        What the entry is for the code (`access`, `address`,
-        `ThrowInfo`, ...). `None` if the code defines no meaning.
-        """
-    @property
-    def meaning(self, /) -> str |None:
-        """
-        The value decoded (`write`, a status name, a module).
-        """
-    @property
-    def value(self, /) -> int: ...
-
-@final
-class UserTriageFrame(BaseRecord):
-    """
-    A frame of a user dump report's stack.
-    """
-    @property
-    def index(self, /) -> int:
-        """
-        The frame's index in `backtrace`.
-        """
-    @property
-    def ip(self, /) -> int: ...
-    @property
-    def owner(self, /) -> UserTriageCodeOwner: ...
-    @property
-    def source(self, /) -> str:
-        """
-        How the frame was recovered (`unwind`, `scan`, ...).
-        """
-    @property
-    def symbol(self, /) -> str: ...
-
-@final
-class UserTriageProcess(BaseRecord):
-    """
-    The captured process, as the dump's streams record it.
-    """
-    @property
-    def arch(self, /) -> str:
-        """
-        `AMD64` or `ARM64`.
-        """
-    @property
-    def build_number(self, /) -> int: ...
-    @property
-    def build_string(self, /) -> str |None:
-        """
-        The full build string (`MINIDUMP_MISC_INFO_4.BuildString`).
-        """
-    @property
-    def create_time(self, /) -> str |None:
-        """
-        When the process was created (ISO 8601 UTC).
-        """
-    @property
-    def dump_time(self, /) -> str |None:
-        """
-        When the dump was written (ISO 8601 UTC).
-        """
-    @property
-    def handles(self, /) -> int |None:
-        """
-        `None` if the dump has no handle stream.
-        """
-    @property
-    def kernel_time_secs(self, /) -> int |None:
-        """
-        Kernel-mode time the process had run, in seconds.
-        """
-    @property
-    def major_version(self, /) -> int: ...
-    @property
-    def minor_version(self, /) -> int: ...
-    @property
-    def modules(self, /) -> int: ...
-    @property
-    def name(self, /) -> str |None:
-        """
-        The executable's file name.
-        """
-    @property
-    def pid(self, /) -> int |None: ...
-    @property
-    def threads(self, /) -> int: ...
-    @property
-    def unloaded_modules(self, /) -> int: ...
-    @property
-    def user_time_secs(self, /) -> int |None:
-        """
-        User-mode time the process had run, in seconds.
-        """
-
-@final
-class UserTriageRegister(BaseRecord):
-    """
-    A register of the exception's context.
-    """
-    @property
-    def name(self, /) -> str: ...
-    @property
-    def value(self, /) -> int: ...
-
-@final
-class UserTriageStackThread(BaseRecord):
-    """
-    The thread a user dump report's stack belongs to.
-    """
-    @property
-    def id(self, /) -> str:
-        """
-        The id as `~` lists it (`<pid>.<tid>` in hex).
-        """
-    @property
-    def name(self, /) -> str |None: ...
-    @property
-    def source(self, /) -> str:
-        """
-        `exception_context` (walked from the exception's CONTEXT) or
-        `thread_context` (the selected thread's).
-        """
-    @property
-    def tid(self, /) -> int: ...
-
-@final
 class VcpuInfo(BaseRecord):
     """
     A vCPU (backend execution context) and the guest code that it runs.
@@ -18531,6 +18856,26 @@ class Verifier(BaseRecord):
         """
     @property
     def verify_mode(self, /) -> Diagnostic[int]: ...
+
+@final
+class VerifierAddress(BaseRecord):
+    """
+    An address in a verifier bugcheck, and its role.
+    """
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def role(self, /) -> str: ...
+
+@final
+class VerifierArgument(BaseRecord):
+    """
+    A verifier bugcheck parameter and what it means for the subcode.
+    """
+    @property
+    def description(self, /) -> str: ...
+    @property
+    def value(self, /) -> int: ...
 
 @final
 class VerifierDriver(BaseRecord):
@@ -18653,12 +18998,12 @@ class VerifierFinding(BaseRecord):
     A Driver Verifier bugcheck, decoded from its subcode.
     """
     @property
-    def addresses(self, /) -> list[VerifierFindingAddress]:
+    def addresses(self, /) -> list[VerifierAddress]:
         """
         The addresses in the parameters, with their roles.
         """
     @property
-    def arguments(self, /) -> list[VerifierFindingArgument]:
+    def arguments(self, /) -> list[VerifierArgument]:
         """
         The bugcheck parameters, with descriptions for the subcode.
         """
@@ -18686,26 +19031,6 @@ class VerifierFinding(BaseRecord):
         """
         What the subcode means, or `unknown verifier subcode`.
         """
-
-@final
-class VerifierFindingAddress(BaseRecord):
-    """
-    An address in a verifier bugcheck, and its role.
-    """
-    @property
-    def address(self, /) -> int: ...
-    @property
-    def role(self, /) -> str: ...
-
-@final
-class VerifierFindingArgument(BaseRecord):
-    """
-    A verifier bugcheck parameter and what it means for the subcode.
-    """
-    @property
-    def description(self, /) -> str: ...
-    @property
-    def value(self, /) -> int: ...
 
 @final
 class VerifierStatistics(BaseRecord):
@@ -20524,16 +20849,12 @@ class WheaFinding(BaseRecord):
     The WHEA error record of a hardware-error bugcheck.
     """
     @property
-    def record(self, /) -> Diagnostic[WheaRecord]:
-        """
-        The decoded record, or the reason that decoding failed.
-        """
-    @property
     def record_address(self, /) -> int |None:
         """
-        The address of the record. `None` if the bugcheck does not give
-        one.
+        The address of the record. `None` if the bugcheck does not give one.
         """
+    @property
+    def state(self, /) -> WheaRecordState: ...
 
 @final
 class WheaRecord(BaseRecord):
@@ -20550,15 +20871,25 @@ class WheaRecord(BaseRecord):
     @property
     def sections(self, /) -> list[WheaSection]: ...
     @property
-    def sections_total(self, /) -> int:
-        """
-        The number of sections in the record. `sections` holds at most 64.
-        """
-    @property
     def severity(self, /) -> int:
         """
         The record's error severity (`WHEA_ERROR_SEVERITY`).
         """
+
+@final
+class WheaRecordState(BaseRecord):
+    """
+    A WHEA error record, `decoded`, or `unavailable` with the `reason`.
+    """
+    @property
+    def decoded(self, /) -> WheaRecord |None: ...
+    @property
+    def kind(self, /) -> str:
+        """
+        The variant: `decoded`, `unavailable`.
+        """
+    @property
+    def reason(self, /) -> str |None: ...
 
 @final
 class WheaSection(BaseRecord):
@@ -20566,11 +20897,7 @@ class WheaSection(BaseRecord):
     One section of a WHEA error record.
     """
     @property
-    def kind(self, /) -> str:
-        """
-        `processor_generic`, `memory`, `pci_express`, `x64_processor`, or
-        `unknown`.
-        """
+    def kind(self, /) -> str: ...
     @property
     def length(self, /) -> int:
         """
@@ -20591,6 +20918,16 @@ class WheaSection(BaseRecord):
         """
         The section's error severity.
         """
+
+@final
+class WinlogonBlackbox(BaseRecord):
+    """
+    What winlogon was doing.
+    """
+    @property
+    def is_operation_pending(self, /) -> int: ...
+    @property
+    def thread_name(self, /) -> str: ...
 
 @final
 class WorkItem(BaseRecord):
