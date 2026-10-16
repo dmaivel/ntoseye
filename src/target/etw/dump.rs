@@ -331,24 +331,39 @@ impl<'a> From<&'a EtwDumpLogger> for LogFileLogger<'a> {
 }
 
 impl Target {
-    /// The ETW data of a minidump, where the `!wmitrace` commands read the
-    /// sessions from; `None` for a live target and a full or kernel dump,
-    /// whose memory holds the sessions themselves.
-    pub fn etw_dump_data(&self) -> Result<Option<EtwDumpData>> {
-        let Some(dump) = self.phys.dmp_info().filter(|dump| dump.is_triage) else {
-            return Ok(None);
-        };
+    /// Whether the `!wmitrace` commands read the sessions from the ETW data
+    /// of a minidump ([`Self::etw_crash_data`]): a live target and a full
+    /// or kernel dump hold the sessions themselves in memory.
+    pub fn etw_reads_dump_data(&self) -> bool {
+        self.phys.dmp_info().is_some_and(|dump| dump.is_triage)
+    }
+
+    /// The ETW sessions Windows saved as it wrote a crash dump, of any kind,
+    /// as tagged data: what the `!wmitrace` commands read in a minidump, and
+    /// the SDK's `etw_crash_sessions()`.
+    pub fn etw_crash_data(&self) -> Result<EtwDumpData> {
+        let dump = self.phys.dmp_info().ok_or_else(|| {
+            Error::DebugInfo(
+                "Windows saves ETW sessions as it writes a crash dump; a live target's \
+                 sessions are in its memory, which etw_loggers() and !wmitrace read"
+                    .into(),
+            )
+        })?;
         let block = dump
             .tagged_blocks
             .iter()
             .find(|block| block.tag == ETW_DUMP_DATA_TAG)
             .ok_or_else(|| {
-                Error::DebugInfo(
+                Error::DebugInfo(if dump.is_triage {
                     "a minidump does not hold the kernel's ETW sessions, only the tagged data \
                      nt!EtwSecondaryDumpDataGuid of those that log to triage dumps, and this \
                      one has none"
-                        .into(),
-                )
+                        .into()
+                } else {
+                    "this dump has no tagged data nt!EtwSecondaryDumpDataGuid, the ETW \
+                     sessions that log to triage dumps"
+                        .into()
+                })
             })?;
         let types = self.etw_types()?;
         parse_dump_data(
@@ -356,7 +371,6 @@ impl Target {
             &types.offsets,
             &types.buffer_states,
         )
-        .map(Some)
     }
 
     /// `!wmitrace.logdump` in a minidump: the events in `logger`'s buffers,

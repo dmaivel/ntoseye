@@ -10,8 +10,8 @@ use crate::error::{Error, Result};
 use crate::session::Session;
 use crate::target::etw::dump::{EtwDumpData, EtwDumpLogger};
 use crate::target::etw::{
-    EtwBuffer, EtwBufferIssue, EtwClock, EtwEvent, EtwEventDump, EtwHeaderKind, EtwLogSave,
-    EtwLogger, EtwLoggerBuffers, EtwLoggerList, EtwLoggerRef, EtwLoggerTable, EtwMessageFormat,
+    EtwBuffer, EtwBufferIssue, EtwClock, EtwEvent, EtwEventDump, EtwHeaderKind, EtwLogFile,
+    EtwLogSave, EtwLogger, EtwLoggerBuffers, EtwLoggerRef, EtwLoggerTable, EtwMessageFormat,
     EtwSession, GuidStyle, event_trace_group_name, extended_type_name, format_filetime_precise,
     format_guid, logger_mode_names,
 };
@@ -56,22 +56,55 @@ const UNREADABLE_NAME: &str = "<unreadable>";
     category = "analysis",
     kind = Query,
     target = Kernel,
-    python = Inspect,
+    forms = [etw_loggers, etw_buffers, etw_crash_sessions],
     usage = "!wmitrace.strdump [logger-id|logger-name|context-address]"
 )]
-fn etw_loggers(
+fn wmitrace_strdump(
     session: &Session,
     #[arg(parse = optional_logger)] logger: Option<EtwLoggerRef>,
 ) -> Result<EtwLoggerList> {
-    let target = &session.target;
-    Ok(match (target.etw_dump_data()?, logger) {
-        (Some(data), None) => EtwLoggerList::Saved(data),
-        (Some(data), Some(logger)) => {
-            EtwLoggerList::SavedBuffers(target.etw_dump_logger(&data, &logger)?.clone())
-        }
-        (None, None) => EtwLoggerList::Active(target.etw_loggers()?),
-        (None, Some(logger)) => EtwLoggerList::Buffers(target.etw_logger_buffers(&logger)?),
-    })
+    match (session.target.etw_reads_dump_data(), logger) {
+        (true, None) => etw_crash_sessions(session).map(EtwLoggerList::Saved),
+        (true, Some(logger)) => etw_crash_session(session, logger).map(EtwLoggerList::SavedBuffers),
+        (false, None) => etw_loggers(session).map(EtwLoggerList::Active),
+        (false, Some(logger)) => etw_buffers(session, logger).map(EtwLoggerList::Buffers),
+    }
+}
+
+/// List the active ETW trace sessions (`!wmitrace.strdump`).
+#[command(form_of = wmitrace_strdump, python = Inspect)]
+fn etw_loggers(session: &Session) -> Result<EtwLoggerTable> {
+    session.target.etw_loggers()
+}
+
+/// List the trace buffers on the GlobalList of an ETW trace session
+/// (`!wmitrace.strdump logger`).
+#[command(form_of = wmitrace_strdump, python = Inspect)]
+fn etw_buffers(
+    session: &Session,
+    #[arg(name = "logger-id|logger-name|context-address")] logger: EtwLoggerRef,
+) -> Result<EtwLoggerBuffers> {
+    session.target.etw_logger_buffers(&logger)
+}
+
+/// List the ETW trace sessions that Windows saved as it wrote a crash
+/// dump, and their buffers (`!wmitrace.strdump` in a minidump): the
+/// sessions started with `EVENT_TRACE_ADDTO_TRIAGE_DUMP`, such as
+/// EventLog-System. A minidump has no other copy of them; in a kernel or
+/// full dump, `etw_loggers()` reads every session from memory.
+#[command(form_of = wmitrace_strdump, python = Inspect, sdk)]
+fn etw_crash_sessions(session: &Session) -> Result<EtwDumpData> {
+    session.target.etw_crash_data()
+}
+
+/// What `!wmitrace.strdump` lists: the active sessions, or the buffers of
+/// one; in a minidump, the sessions of its ETW data, or one of them with
+/// its buffers.
+enum EtwLoggerList {
+    Active(EtwLoggerTable),
+    Buffers(EtwLoggerBuffers),
+    Saved(EtwDumpData),
+    SavedBuffers(EtwDumpLogger),
 }
 
 impl Render for EtwLoggerList {
@@ -102,20 +135,39 @@ impl Render for EtwLoggerList {
     category = "analysis",
     kind = Query,
     target = Kernel,
-    python = Inspect,
+    forms = [etw_logger, etw_crash_session],
     usage = "!wmitrace.logger <logger-id|logger-name|context-address>"
 )]
-fn etw_logger(
+fn wmitrace_logger(
     session: &Session,
     #[arg(parse = sole_logger)] logger: EtwLoggerRef,
 ) -> Result<EtwSession> {
-    let target = &session.target;
-    match target.etw_dump_data()? {
-        Some(data) => Ok(EtwSession::Saved(
-            target.etw_dump_logger(&data, &logger)?.clone(),
-        )),
-        None => target.etw_logger(&logger).map(EtwSession::Active),
+    if session.target.etw_reads_dump_data() {
+        etw_crash_session(session, logger).map(EtwSession::Saved)
+    } else {
+        etw_logger(session, logger).map(EtwSession::Active)
     }
+}
+
+/// Decode the `_WMI_LOGGER_CONTEXT` of one ETW trace session
+/// (`!wmitrace.logger`). `logger` is the logger ID, the context address, or
+/// the session name.
+#[command(form_of = wmitrace_logger, python = Inspect)]
+fn etw_logger(
+    session: &Session,
+    #[arg(name = "logger-id|logger-name|context-address")] logger: EtwLoggerRef,
+) -> Result<EtwLogger> {
+    session.target.etw_logger(&logger)
+}
+
+/// Show one ETW trace session that Windows saved in a crash dump, with its
+/// buffers (`!wmitrace.logger` and `!wmitrace.strdump logger` in a
+/// minidump). `logger` is the logger ID or the session name.
+#[command(form_of = wmitrace_logger, python = Inspect, sdk)]
+fn etw_crash_session(session: &Session, logger: EtwLoggerRef) -> Result<EtwDumpLogger> {
+    let target = &session.target;
+    let data = target.etw_crash_data()?;
+    target.etw_dump_logger(&data, &logger).cloned()
 }
 
 impl Render for EtwSession {
@@ -157,23 +209,50 @@ impl Render for EtwSession {
     category = "analysis",
     kind = Query,
     target = Kernel,
-    python = Inspect,
+    forms = [etw_events, etw_crash_events],
     usage = "!wmitrace.logdump [-t count] <logger-id|logger-name|context-address>"
 )]
-fn etw_events(
+fn wmitrace_logdump(
     session: &Session,
     #[arg(parse = logdump_logger)] logger: EtwLoggerRef,
     #[arg(parse = logdump_count)] count: Option<u64>,
 ) -> Result<EtwEventDump> {
-    let target = &session.target;
-    let most_recent = count.map(|count| usize::try_from(count).unwrap_or(usize::MAX));
-    match target.etw_dump_data()? {
-        Some(data) => {
-            let logger = target.etw_dump_logger(&data, &logger)?;
-            target.etw_dump_events(&data, logger, most_recent)
-        }
-        None => target.etw_log_dump(&logger, most_recent),
+    let count = count.map(|count| usize::try_from(count).unwrap_or(usize::MAX));
+    if session.target.etw_reads_dump_data() {
+        etw_crash_events(session, logger, count)
+    } else {
+        etw_events(session, logger, count)
     }
+}
+
+/// Decode the events that are still in the buffers of an ETW trace session,
+/// oldest first (`!wmitrace.logdump`). `count` keeps only the most recent
+/// events. For a WPP message, `message_format.text` is the message rendered
+/// from the TMF that a loaded PDB declares, and the raw `record.payload` is
+/// always kept.
+#[command(form_of = wmitrace_logdump, python = Inspect)]
+fn etw_events(
+    session: &Session,
+    #[arg(name = "logger-id|logger-name|context-address")] logger: EtwLoggerRef,
+    count: Option<usize>,
+) -> Result<EtwEventDump> {
+    session.target.etw_log_dump(&logger, count)
+}
+
+/// Decode the events of an ETW trace session that Windows saved in a
+/// crash dump, oldest first (`!wmitrace.logdump` in a minidump).
+/// `logger` is the logger ID or the session name, and `count` keeps
+/// only the most recent events.
+#[command(form_of = wmitrace_logdump, python = Inspect, sdk)]
+fn etw_crash_events(
+    session: &Session,
+    logger: EtwLoggerRef,
+    count: Option<usize>,
+) -> Result<EtwEventDump> {
+    let target = &session.target;
+    let data = target.etw_crash_data()?;
+    let logger = target.etw_dump_logger(&data, &logger)?;
+    target.etw_dump_events(&data, logger, count)
 }
 
 impl Render for EtwEventDump {
@@ -215,22 +294,49 @@ impl Render for EtwEventDump {
     kind = Action,
     target = Kernel,
     writes = [Files],
-    python = Inspect,
+    forms = [etw_save, etw_crash_save],
     usage = "!wmitrace.logsave <logger-id|logger-name|context-address> <file>"
 )]
-fn etw_save(
+fn wmitrace_logsave(
     session: &Session,
     #[arg(parse = logsave_logger)] logger: EtwLoggerRef,
     path: String,
 ) -> Result<EtwLogSave> {
+    if session.target.etw_reads_dump_data() {
+        etw_crash_save(session, logger, path)
+    } else {
+        etw_save(session, logger, path)
+    }
+}
+
+/// Save the in-memory buffers of an ETW trace session as an .etl file at
+/// `path` on the host (`!wmitrace.logsave`), which ETW consumers such as
+/// tracerpt open. `logger` is the logger ID, the context address, or the
+/// session name.
+#[command(form_of = wmitrace_logsave, python = Inspect)]
+fn etw_save(
+    session: &Session,
+    #[arg(name = "logger-id|logger-name|context-address")] logger: EtwLoggerRef,
+    #[arg(name = "file")] path: String,
+) -> Result<EtwLogSave> {
+    let file = session.target.etw_log_file(&logger)?;
+    write_log_file(path, file)
+}
+
+/// Save the buffers of an ETW trace session that Windows saved in a crash
+/// dump as an .etl file at `path` on the host (`!wmitrace.logsave` in a
+/// minidump). `logger` is the logger ID or the session name.
+#[command(form_of = wmitrace_logsave, python = Inspect, sdk)]
+fn etw_crash_save(session: &Session, logger: EtwLoggerRef, path: String) -> Result<EtwLogSave> {
     let target = &session.target;
-    let file = match target.etw_dump_data()? {
-        Some(data) => {
-            let logger = target.etw_dump_logger(&data, &logger)?;
-            target.etw_dump_log_file(&data, logger)?
-        }
-        None => target.etw_log_file(&logger)?,
-    };
+    let data = target.etw_crash_data()?;
+    let logger = target.etw_dump_logger(&data, &logger)?;
+    let file = target.etw_dump_log_file(&data, logger)?;
+    write_log_file(path, file)
+}
+
+/// Writes `file` at `path` on the host.
+fn write_log_file(path: String, file: EtwLogFile) -> Result<EtwLogSave> {
     std::fs::write(&path, &file.bytes)
         .map_err(|e| Error::DebugInfo(format!("failed to write '{path}': {e}")))?;
     Ok(EtwLogSave { path, file })

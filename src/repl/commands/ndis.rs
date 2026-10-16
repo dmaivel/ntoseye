@@ -3,7 +3,7 @@
 
 use std::fmt::Display;
 
-use ntoseye_macros::{command, record};
+use ntoseye_macros::command;
 use tabled::builder::Builder;
 
 use crate::error::{Error, Result};
@@ -50,7 +50,6 @@ impl Render for NdisMiniportList {
 }
 
 /// What `!ndiskd.miniport` shows: the miniports, or one in detail.
-#[record]
 enum Miniports {
     List(NdisMiniportList),
     Miniport(NdisMiniportDetail),
@@ -77,18 +76,26 @@ enum Miniports {
     category = "objects and I/O",
     kind = Query,
     target = Kernel,
-    python = Inspect,
+    forms = [ndis_miniport],
     usage = "!ndiskd.miniport [<miniport>]"
 )]
-fn ndis_miniport(session: &Session, address: Option<VirtAddr>) -> Result<Miniports> {
-    let target = &session.target;
+fn ndis_miniport_command(session: &Session, address: Option<VirtAddr>) -> Result<Miniports> {
     let Some(address) = address else {
-        return target.ndis_miniports().map(Miniports::List);
+        return ndis_miniports(session).map(Miniports::List);
     };
-    target
-        .ndis_miniport(address)
+    ndis_miniport(session, address)
         .map(Miniports::Miniport)
         .map_err(|error| detail_error("!ndiskd.miniport", address, &error))
+}
+
+/// Read the NDIS miniport at `address` with its driver, filter stack,
+/// bindings, and pending OID request (`!ndiskd.miniport`).
+#[command(form_of = ndis_miniport_command, python = Inspect)]
+fn ndis_miniport(
+    session: &Session,
+    #[arg(name = "miniport")] address: VirtAddr,
+) -> Result<NdisMiniportDetail> {
+    session.target.ndis_miniport(address)
 }
 
 impl Render for Miniports {
@@ -102,7 +109,6 @@ impl Render for Miniports {
 
 /// What `!ndiskd.minidriver` shows: the miniport drivers, or one and its
 /// miniports.
-#[record]
 enum Minidrivers {
     List(NdisDriverList),
     Driver(NdisMinidriver),
@@ -120,18 +126,32 @@ enum Minidrivers {
     category = "objects and I/O",
     kind = Query,
     target = Kernel,
-    python = Inspect,
+    forms = [ndis_minidrivers, ndis_minidriver],
     usage = "!ndiskd.minidriver [<minidriver>]"
 )]
-fn ndis_minidriver(session: &Session, address: Option<VirtAddr>) -> Result<Minidrivers> {
-    let target = &session.target;
+fn ndis_minidriver_command(session: &Session, address: Option<VirtAddr>) -> Result<Minidrivers> {
     let Some(address) = address else {
-        return target.ndis_minidrivers().map(Minidrivers::List);
+        return ndis_minidrivers(session).map(Minidrivers::List);
     };
-    target
-        .ndis_minidriver(address)
+    ndis_minidriver(session, address)
         .map(Minidrivers::Driver)
         .map_err(|error| detail_error("!ndiskd.minidriver", address, &error))
+}
+
+/// List the NDIS miniport drivers (`!ndiskd.minidriver`).
+#[command(form_of = ndis_minidriver_command, python = Inspect)]
+fn ndis_minidrivers(session: &Session) -> Result<NdisDriverList> {
+    session.target.ndis_minidrivers()
+}
+
+/// Read the NDIS miniport driver block at `address` and its miniports
+/// (`!ndiskd.minidriver <address>`).
+#[command(form_of = ndis_minidriver_command, python = Inspect)]
+fn ndis_minidriver(
+    session: &Session,
+    #[arg(name = "minidriver")] address: VirtAddr,
+) -> Result<NdisMinidriver> {
+    session.target.ndis_minidriver(address)
 }
 
 impl Render for Minidrivers {
@@ -145,7 +165,6 @@ impl Render for Minidrivers {
 
 /// What `!ndiskd.protocol` shows: the protocol drivers, or one and its
 /// bindings.
-#[record]
 enum Protocols {
     List(NdisProtocolList),
     Protocol(NdisProtocolDetail),
@@ -165,18 +184,32 @@ enum Protocols {
     category = "objects and I/O",
     kind = Query,
     target = Kernel,
-    python = Inspect,
+    forms = [ndis_protocols, ndis_protocol],
     usage = "!ndiskd.protocol [<protocol>]"
 )]
-fn ndis_protocol(session: &Session, address: Option<VirtAddr>) -> Result<Protocols> {
-    let target = &session.target;
+fn ndis_protocol_command(session: &Session, address: Option<VirtAddr>) -> Result<Protocols> {
     let Some(address) = address else {
-        return target.ndis_protocols().map(Protocols::List);
+        return ndis_protocols(session).map(Protocols::List);
     };
-    target
-        .ndis_protocol_detail(address)
+    ndis_protocol(session, address)
         .map(Protocols::Protocol)
         .map_err(|error| detail_error("!ndiskd.protocol", address, &error))
+}
+
+/// List the NDIS protocol drivers (`!ndiskd.protocol`).
+#[command(form_of = ndis_protocol_command, python = Inspect)]
+fn ndis_protocols(session: &Session) -> Result<NdisProtocolList> {
+    session.target.ndis_protocols()
+}
+
+/// Read the NDIS protocol block at `address` and its bindings
+/// (`!ndiskd.protocol <address>`).
+#[command(form_of = ndis_protocol_command, python = Inspect)]
+fn ndis_protocol(
+    session: &Session,
+    #[arg(name = "protocol")] address: VirtAddr,
+) -> Result<NdisProtocolDetail> {
+    session.target.ndis_protocol_detail(address)
 }
 
 impl Render for Protocols {
@@ -190,7 +223,6 @@ impl Render for Protocols {
 
 /// What `!ndiskd.filterdriver` shows: the filter drivers, or one and its
 /// filter modules.
-#[record]
 enum FilterDrivers {
     List(NdisFilterDriverList),
     Driver(NdisFilterDriverDetail),
@@ -210,18 +242,35 @@ enum FilterDrivers {
     category = "objects and I/O",
     kind = Query,
     target = Kernel,
-    python = Inspect,
+    forms = [ndis_filter_drivers, ndis_filter_driver],
     usage = "!ndiskd.filterdriver [<filterdriver>]"
 )]
-fn ndis_filter_driver(session: &Session, address: Option<VirtAddr>) -> Result<FilterDrivers> {
-    let target = &session.target;
+fn ndis_filter_driver_command(
+    session: &Session,
+    address: Option<VirtAddr>,
+) -> Result<FilterDrivers> {
     let Some(address) = address else {
-        return target.ndis_filter_drivers().map(FilterDrivers::List);
+        return ndis_filter_drivers(session).map(FilterDrivers::List);
     };
-    target
-        .ndis_filter_driver_detail(address)
+    ndis_filter_driver(session, address)
         .map(FilterDrivers::Driver)
         .map_err(|error| detail_error("!ndiskd.filterdriver", address, &error))
+}
+
+/// List the NDIS filter drivers (`!ndiskd.filterdriver`).
+#[command(form_of = ndis_filter_driver_command, python = Inspect)]
+fn ndis_filter_drivers(session: &Session) -> Result<NdisFilterDriverList> {
+    session.target.ndis_filter_drivers()
+}
+
+/// Read the NDIS filter driver block at `address` and its filter
+/// modules (`!ndiskd.filterdriver <address>`).
+#[command(form_of = ndis_filter_driver_command, python = Inspect)]
+fn ndis_filter_driver(
+    session: &Session,
+    #[arg(name = "filterdriver")] address: VirtAddr,
+) -> Result<NdisFilterDriverDetail> {
+    session.target.ndis_filter_driver_detail(address)
 }
 
 impl Render for FilterDrivers {
@@ -234,7 +283,6 @@ impl Render for FilterDrivers {
 }
 
 /// What `!ndiskd.filter` shows: the filter modules, or one in detail.
-#[record]
 enum Filters {
     List(NdisFilterList),
     Filter(NdisFilterDetail),
@@ -256,18 +304,31 @@ enum Filters {
     category = "objects and I/O",
     kind = Query,
     target = Kernel,
-    python = Inspect,
+    forms = [ndis_filters, ndis_filter],
     usage = "!ndiskd.filter [<filter>]"
 )]
-fn ndis_filter(session: &Session, address: Option<VirtAddr>) -> Result<Filters> {
-    let target = &session.target;
+fn ndis_filter_command(session: &Session, address: Option<VirtAddr>) -> Result<Filters> {
     let Some(address) = address else {
-        return target.ndis_filters_all().map(Filters::List);
+        return ndis_filters(session).map(Filters::List);
     };
-    target
-        .ndis_filter_detail(address)
+    ndis_filter(session, address)
         .map(Filters::Filter)
         .map_err(|error| detail_error("!ndiskd.filter", address, &error))
+}
+
+/// List the NDIS filter modules of every miniport (`!ndiskd.filter`).
+#[command(form_of = ndis_filter_command, python = Inspect)]
+fn ndis_filters(session: &Session) -> Result<NdisFilterList> {
+    session.target.ndis_filters_all()
+}
+
+/// Read the NDIS filter module at `address` (`!ndiskd.filter <address>`).
+#[command(form_of = ndis_filter_command, python = Inspect)]
+fn ndis_filter(
+    session: &Session,
+    #[arg(name = "filter")] address: VirtAddr,
+) -> Result<NdisFilterDetail> {
+    session.target.ndis_filter_detail(address)
 }
 
 impl Render for Filters {
@@ -309,7 +370,6 @@ impl Render for NdisPendingOids {
 
 /// What `!ndiskd.nbl` shows: one NBL, or the NBLs on its `Next` chain
 /// (`-chain`).
-#[record]
 enum Nbls {
     Nbl(NdisNbl),
     Chain(NdisNblChain),
@@ -362,31 +422,62 @@ fn nbl_address(
     category = "objects and I/O",
     kind = Query,
     target = Kernel,
-    python = Inspect,
+    forms = [ndis_nbl, ndis_nbl_chain],
     usage = "!ndiskd.nbl <nbl> [-chain] [-data]"
 )]
-fn ndis_nbl(
+fn ndis_nbl_command(
     session: &Session,
     #[arg(parse = nbl_address, complete = Expression)] address: VirtAddr,
     #[arg(switch = "-chain")] chain: bool,
     #[arg(switch = "-data")] data: bool,
 ) -> Result<Nbls> {
-    let target = &session.target;
     let error = |error: Error| detail_error("!ndiskd.nbl", address, &error);
     if chain {
-        let mut chain = target.ndis_nbl_chain(address).map_err(error)?;
-        if data {
-            for nbl in &mut chain.nbls {
-                target.ndis_read_nbl_data(nbl);
-            }
-        }
-        return Ok(Nbls::Chain(chain));
+        return ndis_nbl_chain(session, address, data)
+            .map(Nbls::Chain)
+            .map_err(error);
     }
-    let mut nbl = target.ndis_nbl(address).map_err(error)?;
+    ndis_nbl(session, address, data)
+        .map(Nbls::Nbl)
+        .map_err(error)
+}
+
+/// Decode the NET_BUFFER_LIST at `address` and its NET_BUFFERs
+/// (`!ndiskd.nbl`). With `data`, each NET_BUFFER's `data` holds up to
+/// 64 KiB of its frame, read through its MDLs' PFNs, or `data_error` why it
+/// does not read (`!ndiskd.nbl -data`).
+#[command(form_of = ndis_nbl_command, python = Inspect)]
+fn ndis_nbl(
+    session: &Session,
+    #[arg(name = "nbl")] address: VirtAddr,
+    #[arg(keyword, default = false, name = "-data")] data: bool,
+) -> Result<NdisNbl> {
+    let target = &session.target;
+    let mut nbl = target.ndis_nbl(address)?;
     if data {
         target.ndis_read_nbl_data(&mut nbl);
     }
-    Ok(Nbls::Nbl(nbl))
+    Ok(nbl)
+}
+
+/// Decode the NET_BUFFER_LISTs on the `Next` chain from `address`
+/// (`!ndiskd.nbl -chain`). With `data`, each NET_BUFFER's `data` holds up
+/// to 64 KiB of its frame, or `data_error` why it does not read
+/// (`!ndiskd.nbl -chain -data`).
+#[command(form_of = ndis_nbl_command, python = Inspect, word = "-chain")]
+fn ndis_nbl_chain(
+    session: &Session,
+    #[arg(name = "nbl")] address: VirtAddr,
+    #[arg(keyword, default = false, name = "-data")] data: bool,
+) -> Result<NdisNblChain> {
+    let target = &session.target;
+    let mut chain = target.ndis_nbl_chain(address)?;
+    if data {
+        for nbl in &mut chain.nbls {
+            target.ndis_read_nbl_data(nbl);
+        }
+    }
+    Ok(chain)
 }
 
 impl Render for Nbls {

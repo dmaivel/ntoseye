@@ -6,7 +6,7 @@
 
 use std::fmt::Display;
 
-use ntoseye_macros::{command, record};
+use ntoseye_macros::command;
 use tabled::builder::Builder;
 
 use crate::error::{Error, Result};
@@ -24,22 +24,6 @@ use crate::target::storport::{
 use crate::target::virtio_request::{scsi_command, scsi_status};
 use crate::types::VirtAddr;
 use crate::ui;
-
-/// What `!storagekd.storadapter` shows: every driver and its adapters, or
-/// one adapter.
-#[record]
-pub enum StorAdapterOrList {
-    Drivers(StorDrivers),
-    Adapter(StorAdapter),
-}
-
-/// What `!storagekd.storclass` shows: every class device, or one in
-/// detail.
-#[record]
-pub enum ClassDeviceOrList {
-    Devices(ClassDevices),
-    Device(ClassDeviceDetail),
-}
 
 /// List the StorPort adapters, or show one adapter and its units.
 ///
@@ -62,18 +46,42 @@ pub enum ClassDeviceOrList {
     category = "objects and I/O",
     kind = Query,
     target = Kernel,
-    python = Inspect,
+    forms = [storport_adapters, storport_adapter],
     usage = "!storagekd.storadapter [<adapter>]"
 )]
-fn storport_adapter(session: &Session, address: Option<VirtAddr>) -> Result<StorAdapterOrList> {
-    let target = &session.target;
+fn storport_adapter_command(
+    session: &Session,
+    address: Option<VirtAddr>,
+) -> Result<StorAdapterOrList> {
     match address {
-        None => target.storport_drivers().map(StorAdapterOrList::Drivers),
-        Some(address) => target
-            .storport_adapter(address)
-            .map(StorAdapterOrList::Adapter),
+        None => storport_adapters(session).map(StorAdapterOrList::Drivers),
+        Some(address) => storport_adapter(session, address).map(StorAdapterOrList::Adapter),
     }
     .map_err(|error| Error::DebugInfo(format!("!storagekd.storadapter: {error}")))
+}
+
+/// List StorPort's drivers, their adapters, and their units
+/// (`!storagekd.storadapter`).
+#[command(form_of = storport_adapter_command, python = Inspect)]
+fn storport_adapters(session: &Session) -> Result<StorDrivers> {
+    session.target.storport_drivers()
+}
+
+/// Read the StorPort adapter whose extension or FDO is at `address`
+/// (`!storagekd.storadapter <address>`).
+#[command(form_of = storport_adapter_command, python = Inspect)]
+fn storport_adapter(
+    session: &Session,
+    #[arg(name = "adapter")] address: VirtAddr,
+) -> Result<StorAdapter> {
+    session.target.storport_adapter(address)
+}
+
+/// What `!storagekd.storadapter` shows: every driver and its adapters, or
+/// one adapter.
+enum StorAdapterOrList {
+    Drivers(StorDrivers),
+    Adapter(StorAdapter),
 }
 
 impl Render for StorAdapterOrList {
@@ -366,18 +374,40 @@ impl Render for Srb {
     category = "objects and I/O",
     kind = Query,
     target = Kernel,
-    python = Inspect,
+    forms = [class_devices, class_device],
     usage = "!storagekd.storclass [<device>]"
 )]
-fn class_device(session: &Session, address: Option<VirtAddr>) -> Result<ClassDeviceOrList> {
-    let target = &session.target;
+fn class_device_command(session: &Session, address: Option<VirtAddr>) -> Result<ClassDeviceOrList> {
     match address {
-        None => target.classpnp_devices().map(ClassDeviceOrList::Devices),
-        Some(address) => target
-            .classpnp_device(address)
-            .map(ClassDeviceOrList::Device),
+        None => class_devices(session).map(ClassDeviceOrList::Devices),
+        Some(address) => class_device(session, address).map(ClassDeviceOrList::Device),
     }
     .map_err(|error| Error::DebugInfo(format!("!storagekd.storclass: {error}")))
+}
+
+/// List the storage class devices on `classpnp!AllFdosList`
+/// (`!storagekd.storclass`).
+#[command(form_of = class_device_command, python = Inspect)]
+fn class_devices(session: &Session) -> Result<ClassDevices> {
+    session.target.classpnp_devices()
+}
+
+/// Read the class device whose FDO, device extension, or private data
+/// is at `address`, with its requests in flight and its error log
+/// (`!storagekd.storclass <address>`).
+#[command(form_of = class_device_command, python = Inspect)]
+fn class_device(
+    session: &Session,
+    #[arg(name = "device")] address: VirtAddr,
+) -> Result<ClassDeviceDetail> {
+    session.target.classpnp_device(address)
+}
+
+/// What `!storagekd.storclass` shows: every class device, or one in
+/// detail.
+enum ClassDeviceOrList {
+    Devices(ClassDevices),
+    Device(ClassDeviceDetail),
 }
 
 impl Render for ClassDeviceOrList {

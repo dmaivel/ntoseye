@@ -732,17 +732,6 @@ impl EtwSession {
     }
 }
 
-/// What `!wmitrace.strdump` lists: the active sessions, or the buffers of
-/// one; in a minidump, the sessions of its ETW data, or one of them with
-/// its buffers.
-#[record]
-pub enum EtwLoggerList {
-    Active(EtwLoggerTable),
-    Buffers(EtwLoggerBuffers),
-    Saved(dump::EtwDumpData),
-    SavedBuffers(dump::EtwDumpLogger),
-}
-
 /// The events still in the buffers of a session, oldest first
 /// (`!wmitrace.logdump`).
 #[record]
@@ -1383,10 +1372,11 @@ impl Target {
 
     /// Every active logger of the host silo, in logger-id order.
     pub fn etw_loggers(&self) -> Result<EtwLoggerTable> {
-        if self.phys.dmp_info().is_some_and(|dump| dump.is_triage) {
+        if self.etw_reads_dump_data() {
             return Err(Error::DebugInfo(
                 "a minidump does not hold the kernel's ETW sessions, only those Windows saved \
-                 in it at the crash, which the !wmitrace commands read"
+                 in it at the crash, which the !wmitrace commands and the SDK's \
+                 etw_crash_sessions() and etw_crash_events() read"
                     .into(),
             ));
         }

@@ -1,7 +1,7 @@
 //! The WPP recorder (`!rcdrkd.rcdrloglist`, `!rcdrkd.rcdrlogdump`): the
 //! in-flight logs WppRecorder.sys keeps for drivers.
 
-use ntoseye_macros::{command, record};
+use ntoseye_macros::command;
 use tabled::builder::Builder;
 
 use super::wdf::ifr_entry_line;
@@ -34,25 +34,37 @@ const LOG_DUMP_USAGE: &str = "!rcdrkd.rcdrlogdump <driver> [-a <log>]";
     category = "objects and I/O",
     kind = Query,
     target = Kernel,
-    python = Inspect,
+    forms = [rcdr_drivers, rcdr_logs],
     usage = "!rcdrkd.rcdrloglist [<driver>]"
 )]
 fn rcdr_log_list(
     session: &Session,
     #[arg(complete = Driver)] driver: Option<String>,
 ) -> Result<RcdrLogList> {
-    let target = &session.target;
     match driver {
-        None => target.rcdr_drivers().map(RcdrLogList::Drivers),
-        Some(name) => target.rcdr_logs(&name).map(RcdrLogList::Logs),
+        None => rcdr_drivers(session).map(RcdrLogList::Drivers),
+        Some(name) => rcdr_logs(session, name).map(RcdrLogList::Logs),
     }
     .map_err(|error| Error::DebugInfo(format!("!rcdrkd.rcdrloglist: {error}")))
 }
 
+/// List the drivers the WPP recorder keeps logs for
+/// (`!rcdrkd.rcdrloglist`).
+#[command(form_of = rcdr_log_list, python = Inspect)]
+fn rcdr_drivers(session: &Session) -> Result<RcdrDriverList> {
+    session.target.rcdr_drivers()
+}
+
+/// List the WPP recorder logs of `driver`, by its name with or without
+/// `.sys` or its recorder context (`!rcdrkd.rcdrloglist <driver>`).
+#[command(form_of = rcdr_log_list, python = Inspect)]
+fn rcdr_logs(session: &Session, #[arg(complete = Driver)] driver: String) -> Result<RcdrLogs> {
+    session.target.rcdr_logs(&driver)
+}
+
 /// What `!rcdrkd.rcdrloglist` shows: the drivers the recorder serves, or
 /// one driver's logs.
-#[record]
-pub enum RcdrLogList {
+enum RcdrLogList {
     Drivers(RcdrDriverList),
     Logs(RcdrLogs),
 }

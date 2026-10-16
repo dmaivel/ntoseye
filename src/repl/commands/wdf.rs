@@ -3,7 +3,7 @@
 
 use std::fmt::Display;
 
-use ntoseye_macros::{command, record};
+use ntoseye_macros::command;
 use tabled::builder::Builder;
 
 use crate::error::Result;
@@ -336,19 +336,35 @@ impl Render for WdfLogDump {
     category = "objects and I/O",
     kind = Query,
     target = Kernel,
-    python = Inspect,
+    forms = [wdf_crash_log, wdf_crash_drivers],
     usage = "!wdfkd.wdfcrashdump [log | loader]"
 )]
 fn wdf_crash_dump(
     session: &Session,
     #[arg(parse = crash_dump_part)] loader: Option<bool>,
 ) -> Result<WdfCrashDump> {
-    let target = &session.target;
     if loader.unwrap_or(false) {
-        target.wdf_crash_drivers().map(WdfCrashDump::Loader)
+        wdf_crash_drivers(session).map(WdfCrashDump::Loader)
     } else {
-        target.wdf_crash_log().map(WdfCrashDump::Log)
+        wdf_crash_log(session).map(WdfCrashDump::Log)
     }
+}
+
+/// Get the In-Flight Recorder log of the one KMDF client driver that
+/// KMDF copied into a crash dump (`!wdfkd.wdfcrashdump`): the driver
+/// that the bugcheck parameters point to, or one set to keep its log in
+/// minidumps, or else the last one that ran on the processor that
+/// crashed. A minidump has no other copy of it.
+#[command(form_of = wdf_crash_dump, python = Inspect, word = "log")]
+fn wdf_crash_log(session: &Session) -> Result<WdfLogDump> {
+    session.target.wdf_crash_log()
+}
+
+/// List the KMDF client drivers that KMDF recorded in a crash dump, with
+/// their version and globals (`!wdfkd.wdfcrashdump loader`).
+#[command(form_of = wdf_crash_dump, python = Inspect, word = "loader")]
+fn wdf_crash_drivers(session: &Session) -> Result<Vec<WdfDumpDriver>> {
+    session.target.wdf_crash_drivers()
 }
 
 /// `!wdfkd.wdfcrashdump`'s word: `log` (or none) is `Some(false)` (or
@@ -371,8 +387,7 @@ fn crash_dump_part(
 
 /// What `!wdfkd.wdfcrashdump` shows: the IFR log Wdf01000 copied into the
 /// dump, or with `loader`, the client drivers it recorded.
-#[record]
-pub enum WdfCrashDump {
+enum WdfCrashDump {
     Log(WdfLogDump),
     Loader(Vec<WdfDumpDriver>),
 }

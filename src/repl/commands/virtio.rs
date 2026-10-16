@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use ntoseye_macros::{command, record};
+use ntoseye_macros::command;
 use tabled::builder::Builder;
 
 use crate::error::{Error, Result};
@@ -16,7 +16,7 @@ use crate::target::virtio::{
     VirtioDescriptor, VirtioDriver, VirtioFunction, VirtioRing, name_queues, packed_verdict,
     queue_movement, queue_verdict, split_signals, virtio_type_name,
 };
-use crate::target::virtio_request::{request_kind, request_kind_named};
+use crate::target::virtio_request::{RequestKind, request_kind, request_kind_named};
 use crate::types::VirtAddr;
 use crate::ui;
 
@@ -37,33 +37,55 @@ use crate::repl::*;
     category = "objects and I/O",
     kind = Query,
     target = Kernel,
-    python = Inspect,
+    forms = [virtio, virtio_driver],
     usage = "!virtio [<virtio_device> [module]]",
     completion = [Expression, Expression]
 )]
-fn virtio(session: &Session, address: Option<VirtAddr>, module: Option<String>) -> Result<Virtio> {
-    let target = &session.target;
-    let Some(address) = address else {
-        return target
-            .virtio_functions()
+fn virtio_command(
+    session: &Session,
+    address: Option<VirtAddr>,
+    module: Option<String>,
+) -> Result<Virtio> {
+    match address {
+        None => virtio(session)
             .map(Virtio::Functions)
-            .map_err(|error| Error::DebugInfo(format!("!virtio: pci.sys's device tree: {error}")));
-    };
-    let fail = |error: Error| Error::DebugInfo(format!("!virtio: {error}"));
-    let module = target
-        .virtio_module_for(module.as_deref(), address, "virtio_device", "device")
-        .map_err(fail)?;
-    let mut driver = target.virtio_device(&module, address).map_err(fail)?;
+            .map_err(|error| Error::DebugInfo(format!("!virtio: pci.sys's device tree: {error}"))),
+        Some(address) => virtio_driver(session, address, module)
+            .map(Virtio::Device)
+            .map_err(|error| Error::DebugInfo(format!("!virtio: {error}"))),
+    }
+}
+
+/// List the virtio PCI functions (`!virtio`), with the state of each
+/// queue where the driver's private PDB types it. A queue's `progress`
+/// counters only grow, so two calls show what moved in between.
+#[command(form_of = virtio_command, python = Inspect)]
+fn virtio(session: &Session) -> Result<Vec<VirtioFunction>> {
+    session.target.virtio_functions()
+}
+
+/// Read the `virtio_device` at `address` as its virtio-win driver sees it,
+/// with its queues, named when its PCI function is found
+/// (`!virtio <address> [module]`). `module` names the driver whose PDB
+/// types it, by default the one that owns it.
+#[command(form_of = virtio_command, python = Inspect)]
+fn virtio_driver(
+    session: &Session,
+    #[arg(name = "virtio_device")] address: VirtAddr,
+    module: Option<String>,
+) -> Result<VirtioDriver> {
+    let target = &session.target;
+    let module = target.virtio_module_for(module.as_deref(), address, "virtio_device", "device")?;
+    let mut driver = target.virtio_device(&module, address)?;
     if let Some(virtio_id) = device_type_of(target, |driver| driver.device == address) {
         name_queues(&mut driver.queues, virtio_id);
     }
-    Ok(Virtio::Device(driver))
+    Ok(driver)
 }
 
 /// What `!virtio` shows: every virtio PCI function, or the `virtio_device`
 /// at an address, its queues named when its function is found.
-#[record]
-pub enum Virtio {
+enum Virtio {
     Functions(Vec<VirtioFunction>),
     Device(VirtioDriver),
 }
@@ -103,51 +125,22 @@ impl Render for Virtio {
     category = "objects and I/O",
     kind = Query,
     target = Kernel,
-    python = Inspect,
+    forms = [vring, vring_raw],
     usage = "!vring <virtqueue> [module] | !vring /r <size> <desc> <avail> <used> [/t <kind>]",
     completion = [Expression, Expression, Expression, Expression, Expression, Expression, Expression]
 )]
-fn vring(
+fn vring_command(
     session: &Session,
     #[arg(parse = vring_address)] address: Option<VirtAddr>,
     #[arg(parse = vring_module)] module: Option<String>,
-    #[arg(parse = vring_kind)] kind: Option<String>,
-    #[arg(parse = vring_raw)] raw: Option<RawRing>,
+    #[arg(parse = vring_kind)] kind: Option<RequestKind>,
+    #[arg(parse = raw_ring_words)] raw: Option<RawRing>,
 ) -> Result<VirtioRing> {
-    let target = &session.target;
-    let named = kind
-        .as_deref()
-        .map(|name| request_kind_named(name).ok_or_else(|| unknown_kind(name)))
-        .transpose()
-        .map_err(Error::DebugInfo)?;
     let fail = |error: Error| Error::DebugInfo(format!("!vring: {error}"));
     match (address, raw) {
-        (Some(address), _) => {
-            let mut queue = target
-                .virtqueue_at(module.as_deref(), address)
-                .map_err(fail)?;
-            let device = target.virtqueue_device(queue.address);
-            if let Some((virtio_id, _, queues)) = device {
-                queue.name_as(virtio_id, queues);
-            }
-            let kind = named.or_else(|| {
-                device.and_then(|(virtio_id, transitional, queues)| {
-                    request_kind(virtio_id, queue.index, queues, transitional)
-                })
-            });
-            if queue.ring.is_none() && (queue.packed.is_none() || queue.packed_ring.is_none()) {
-                return Err(Error::DebugInfo(format!(
-                    "!vring: {:#x} has neither a split nor a packed ring",
-                    queue.address.0
-                )));
-            }
-            Ok(target.virtio_ring(Some(queue), None, kind))
-        }
+        (Some(address), _) => vring(session, address, module, kind).map_err(fail),
         (None, Some(raw)) => {
-            let ring = target
-                .split_ring(raw.size, raw.desc, raw.avail, raw.used)
-                .map_err(fail)?;
-            Ok(target.virtio_ring(None, Some(ring), named))
+            vring_raw(session, raw.size, raw.desc, raw.avail, raw.used, kind).map_err(fail)
         }
         (None, None) => Err(Error::DebugInfo(
             "!vring: give a virtqueue address, or a raw ring's size and addresses".into(),
@@ -155,9 +148,59 @@ fn vring(
     }
 }
 
+/// Read the virtio-win virtqueue at `address` (`!vring`): its ring, the
+/// buffers the device holds or returned, and the request each carries.
+/// `module` names the driver whose PDB types it, by default the one its
+/// `add_buf` routine is in. `kind` says what its buffers hold, by default
+/// what its device's type and the queue's index say.
+#[command(form_of = vring_command, python = Inspect)]
+fn vring(
+    session: &Session,
+    #[arg(name = "virtqueue")] address: VirtAddr,
+    module: Option<String>,
+    #[arg(sdk, keyword, default = None)] kind: Option<RequestKind>,
+) -> Result<VirtioRing> {
+    let target = &session.target;
+    let mut queue = target.virtqueue_at(module.as_deref(), address)?;
+    let device = target.virtqueue_device(queue.address);
+    if let Some((virtio_id, _, queues)) = device {
+        queue.name_as(virtio_id, queues);
+    }
+    let kind = kind.or_else(|| {
+        device.and_then(|(virtio_id, transitional, queues)| {
+            request_kind(virtio_id, queue.index, queues, transitional)
+        })
+    });
+    if queue.ring.is_none() && (queue.packed.is_none() || queue.packed_ring.is_none()) {
+        return Err(Error::DebugInfo(format!(
+            "{:#x} has neither a split nor a packed ring",
+            queue.address.0
+        )));
+    }
+    Ok(target.virtio_ring(Some(queue), None, kind))
+}
+
+/// Read a split ring from its size and the kernel addresses of its
+/// descriptor table, avail ring and used ring (`!vring /r`), for a driver
+/// without a PDB. `kind` says what its buffers hold, for decoding their
+/// requests (`/t`).
+#[command(form_of = vring_command, python = Inspect, word = "/r")]
+fn vring_raw(
+    session: &Session,
+    size: u32,
+    desc: VirtAddr,
+    avail: VirtAddr,
+    used: VirtAddr,
+    #[arg(keyword, name = "/t <kind>")] kind: Option<RequestKind>,
+) -> Result<VirtioRing> {
+    let target = &session.target;
+    let ring = target.split_ring(size, desc, avail, used)?;
+    Ok(target.virtio_ring(None, Some(ring), kind))
+}
+
 /// A split ring named by its size and the kernel addresses of its
 /// descriptor table, avail ring and used ring (`!vring /r`), for a driver
-/// without a PDB. The SDK takes it as `(size, desc, avail, used)`.
+/// without a PDB.
 #[derive(Debug, Clone, Copy)]
 pub struct RawRing {
     size: u32,
@@ -166,15 +209,84 @@ pub struct RawRing {
     used: VirtAddr,
 }
 
+/// The SDK's `kind`: what a ring's buffers hold, by the name `!vring /t`
+/// takes.
 #[cfg(feature = "python")]
-impl crate::python::command::PyArg for RawRing {
-    type Py = (u32, u64, u64, u64);
-    fn from_py((size, desc, avail, used): Self::Py) -> Self {
-        Self {
-            size,
-            desc: VirtAddr(desc),
-            avail: VirtAddr(avail),
-            used: VirtAddr(used),
+mod request_kind_arg {
+    use pyo3::exceptions::PyValueError;
+    #[cfg(feature = "python-stubs")]
+    use pyo3::inspect::{PyStaticConstant, PyStaticExpr};
+    use pyo3::prelude::*;
+    #[cfg(feature = "python-stubs")]
+    use pyo3::{type_hint_identifier, type_hint_subscript};
+
+    use crate::python::command::PyArg;
+    use crate::target::virtio_request::{RequestKind, request_kind_named};
+
+    /// The names `kind` takes, as `typing.Literal[...]` in the stubs.
+    const NAMES: [&str; 8] = [
+        "blk",
+        "scsi",
+        "scsi-control",
+        "scsi-event",
+        "net",
+        "net-control",
+        "gpu",
+        "vsock",
+    ];
+
+    pub struct RequestKindArg(RequestKind);
+
+    impl<'a, 'py> FromPyObject<'a, 'py> for RequestKindArg {
+        type Error = PyErr;
+
+        #[cfg(feature = "python-stubs")]
+        const INPUT_TYPE: PyStaticExpr = type_hint_subscript!(
+            type_hint_identifier!("typing", "Literal"),
+            PyStaticExpr::Constant {
+                value: PyStaticConstant::Str(NAMES[0])
+            },
+            PyStaticExpr::Constant {
+                value: PyStaticConstant::Str(NAMES[1])
+            },
+            PyStaticExpr::Constant {
+                value: PyStaticConstant::Str(NAMES[2])
+            },
+            PyStaticExpr::Constant {
+                value: PyStaticConstant::Str(NAMES[3])
+            },
+            PyStaticExpr::Constant {
+                value: PyStaticConstant::Str(NAMES[4])
+            },
+            PyStaticExpr::Constant {
+                value: PyStaticConstant::Str(NAMES[5])
+            },
+            PyStaticExpr::Constant {
+                value: PyStaticConstant::Str(NAMES[6])
+            },
+            PyStaticExpr::Constant {
+                value: PyStaticConstant::Str(NAMES[7])
+            }
+        );
+
+        fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+            let text: std::borrow::Cow<'_, str> = obj.extract()?;
+            request_kind_named(&text)
+                .filter(|_| NAMES.contains(&&*text))
+                .map(Self)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "expected one of '{}', got {text:?}",
+                        NAMES.join("', '")
+                    ))
+                })
+        }
+    }
+
+    impl PyArg for RequestKind {
+        type Py = RequestKindArg;
+        fn from_py(value: RequestKindArg) -> Self {
+            value.0
         }
     }
 }
@@ -219,7 +331,7 @@ fn vring_module(
 fn vring_kind(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
-) -> std::result::Result<Option<String>, ArgError> {
+) -> std::result::Result<Option<RequestKind>, ArgError> {
     match cursor.remaining() {
         0..=4 => Ok(None),
         6 => {
@@ -228,7 +340,7 @@ fn vring_kind(
             }
             let name = cursor.word_at(4).ok_or(ArgError::Missing)?;
             match request_kind_named(&name) {
-                Some(_) => Ok(Some(name.into_owned())),
+                Some(kind) => Ok(Some(kind)),
                 None => Err(ArgError::Message(unknown_kind(&name))),
             }
         }
@@ -237,7 +349,7 @@ fn vring_kind(
 }
 
 /// A raw ring's size and addresses.
-fn vring_raw(
+fn raw_ring_words(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<Option<RawRing>, ArgError> {
