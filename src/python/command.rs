@@ -238,10 +238,10 @@ impl CommandHost for Memory {
         Ok(self.space.context())
     }
 
-    /// A kernel command reads NT's state about an address, which VTL1 and
-    /// roots outside NT do not have; a write needs a writable space.
+    /// A kernel (or NT) command reads NT's state about an address, which
+    /// VTL1 and roots outside NT do not have; a write needs a writable space.
     fn refuse(&self, operation: &str, effects: &Effects) -> PyResult<()> {
-        if effects.target == TargetScope::Kernel {
+        if effects.target != TargetScope::Any {
             self.space.require_nt(operation)?;
         }
         if !effects.writes.is_empty() {

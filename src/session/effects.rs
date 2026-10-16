@@ -74,6 +74,11 @@ pub enum TargetScope {
     Any,
     /// A Windows kernel: a live target or a kernel dump.
     Kernel,
+    /// NT's own state about an address space: a kernel target or a
+    /// user-mode minidump (both are NT's), but not VTL1 or a root outside
+    /// NT. The REPL and admission treat it as `Any`; an SDK `Memory` over
+    /// such a space refuses it (`!address`).
+    Nt,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
