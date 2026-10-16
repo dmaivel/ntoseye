@@ -170,6 +170,16 @@ pub fn command_help(name: &str) -> String {
     spec_help(spec)
 }
 
+/// `reason`, then command `name`'s generated usage, its forms on one line
+/// joined by ` | `: what a command reports for a line it cannot read, so no
+/// message spells out a usage by hand.
+pub fn usage_error(name: &str, reason: impl std::fmt::Display) -> String {
+    match command_registry().get(name) {
+        Some(spec) => format!("{reason}; usage: {}", spec.usage.replace('\n', " | ")),
+        None => reason.to_string(),
+    }
+}
+
 /// A command's summary, usage and details as text.
 pub fn spec_help(spec: &CommandSpec) -> String {
     // A form per line, under the first.
@@ -543,6 +553,16 @@ pub fn report_refusal(typed: &str, refusal: Refusal) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_errors_quote_the_generated_usage_on_one_line() {
+        assert_eq!(
+            usage_error("!reg", "!reg: unknown subcommand x"),
+            "!reg: unknown subcommand x; usage: !reg hivelist | \
+             !reg querykey|q <path> [-v <value>] | !reg keyinfo <hive> <knode> | \
+             !reg cellindex <hive> <cell>"
+        );
+    }
 
     #[test]
     fn parses_quoted_arguments() {

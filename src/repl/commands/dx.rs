@@ -65,14 +65,17 @@ fn dx(state: &mut ReplState<'_>, #[arg(parse = dx_request)] request: DxRequest) 
 /// its own grammar, [`parse_dx_args`], which the command reads it with.
 struct DxRequest(String);
 
-#[grammar(usage = "[-r<depth>] [-g] <expression>[,d|,<count>]", complete = Expression)]
+#[grammar(
+    usage = "[-r<depth>] [-g] [-v|-nv] <expression>[,d|,x|,<count>]",
+    complete = Expression
+)]
 fn dx_request(
-    _: &mut ArgCx<'_, '_>,
+    cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<DxRequest, ArgError> {
     let raw = cursor.raw();
-    let args =
-        parse_dx_args(&raw).map_err(|message| ArgError::Message(format!("dx: {message}")))?;
+    let args = parse_dx_args(&raw)
+        .map_err(|message| ArgError::usage(cx.name, format!("{}: {message}", cx.name)))?;
     if args.text.is_empty() {
         return Err(ArgError::Missing);
     }
@@ -152,9 +155,7 @@ fn parse_dx_args(raw: &str) -> std::result::Result<DxArgs<'_>, String> {
                 };
             }
             _ => {
-                return Err(format!(
-                    "option '-{flag}' is not supported; dx takes -r<depth>, -g, and -nv"
-                ));
+                return Err(format!("option '-{flag}' is not supported"));
             }
         }
         rest = after.trim_start();
@@ -198,12 +199,8 @@ fn split_format(text: &str) -> std::result::Result<(&str, DxFormat), String> {
                 Some(hex) => usize::from_str_radix(hex, 16).ok(),
                 None => spec.parse().ok(),
             };
-            format.limit = Some(count.ok_or_else(|| {
-                format!(
-                    "format specifier ', {spec}' is not supported; dx takes , d, , x, and an \
-                     element count"
-                )
-            })?);
+            format.limit =
+                Some(count.ok_or_else(|| format!("format specifier ', {spec}' is not supported"))?);
         }
     }
     Ok((text[..comma].trim_end(), format))

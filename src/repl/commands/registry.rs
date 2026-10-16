@@ -20,8 +20,6 @@ use crate::triage_report::time::filetime_to_iso;
 use crate::types::VirtAddr;
 use crate::ui;
 
-const USAGE: &str = "!reg hivelist | !reg querykey <path> [-v <value>] | !reg keyinfo <hive> <knode> | !reg cellindex <hive> <cell>";
-
 /// The most characters of a string, and bytes of binary data, a value
 /// list shows.
 const PREVIEW_CHARS: usize = 96;
@@ -386,7 +384,7 @@ pub enum RegRequest {
 
 /// `!reg`'s subcommand and its arguments.
 #[grammar(
-    usage = "hivelist | querykey <path> [-v <value>] | keyinfo <hive> <knode> | cellindex <hive> <cell>",
+    usage = "hivelist | querykey|q <path> [-v <value>] | keyinfo <hive> <knode> | cellindex <hive> <cell>",
     complete = [None, RegistryKey]
 )]
 fn reg_request(
@@ -404,9 +402,10 @@ fn reg_request(
             while let Some(word) = cursor.word() {
                 if word == "-v" {
                     let Some(name) = cursor.word() else {
-                        return Err(message(format!(
-                            "{command}: -v needs a value name; usage: {USAGE}"
-                        )));
+                        return Err(ArgError::usage(
+                            cx.name,
+                            format!("{command}: -v needs a value name"),
+                        ));
                     };
                     value = Some(name.into_owned());
                 } else {
@@ -414,9 +413,10 @@ fn reg_request(
                 }
             }
             if path.is_empty() {
-                return Err(message(format!(
-                    "{command}: give a key's full path; usage: {USAGE}"
-                )));
+                return Err(ArgError::usage(
+                    cx.name,
+                    format!("{command}: give a key's full path"),
+                ));
             }
             Ok(RegRequest::Query {
                 command,
@@ -429,9 +429,10 @@ fn reg_request(
                 .map(|word| word.into_owned())
                 .collect();
             let [hive, node] = words.as_slice() else {
-                return Err(message(format!(
-                    "!reg keyinfo: give the hive and the key node; usage: {USAGE}"
-                )));
+                return Err(ArgError::usage(
+                    cx.name,
+                    format!("{} keyinfo: give the hive and the key node", cx.name),
+                ));
             };
             Ok(RegRequest::KeyAt {
                 hive: cx.eval(hive)?,
@@ -443,9 +444,10 @@ fn reg_request(
                 .map(|word| word.into_owned())
                 .collect();
             let [hive, cell] = words.as_slice() else {
-                return Err(message(format!(
-                    "!reg cellindex: give the hive and the cell index; usage: {USAGE}"
-                )));
+                return Err(ArgError::usage(
+                    cx.name,
+                    format!("{} cellindex: give the hive and the cell index", cx.name),
+                ));
             };
             let hive = cx.eval(hive)?;
             let VirtAddr(cell) = cx.eval(cell)?;
@@ -456,9 +458,10 @@ fn reg_request(
             })?;
             Ok(RegRequest::Cell { hive, cell })
         }
-        other => Err(message(format!(
-            "!reg: unknown subcommand {other}; usage: {USAGE}"
-        ))),
+        other => Err(ArgError::usage(
+            cx.name,
+            format!("{}: unknown subcommand {other}", cx.name),
+        )),
     }
 }
 

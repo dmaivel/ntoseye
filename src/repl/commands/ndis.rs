@@ -367,8 +367,6 @@ enum Nbls {
     Chain(NdisNblChain),
 }
 
-const NBL_USAGE: &str = "usage: !ndiskd.nbl <nbl> [-chain] [-data]";
-
 /// `!ndiskd.nbl`'s address, once its switches are taken: the one word that
 /// is not an option.
 #[grammar(usage = "<nbl>", complete = [Expression])]
@@ -382,19 +380,24 @@ fn nbl_address(
             && word.starts_with('-')
             && word[1..].chars().all(|ch| ch.is_ascii_alphabetic())
         {
-            return Err(ArgError::Message(format!(
-                "!ndiskd.nbl: unknown option {word}; {NBL_USAGE}"
-            )));
+            return Err(ArgError::usage(
+                cx.name,
+                format!("{}: unknown option {word}", cx.name),
+            ));
         }
         if address.is_some() {
-            return Err(ArgError::Message(format!(
-                "!ndiskd.nbl: unexpected argument {word}; {NBL_USAGE}"
-            )));
+            return Err(ArgError::usage(
+                cx.name,
+                format!("{}: unexpected argument {word}", cx.name),
+            ));
         }
         address = Some(word);
     }
     let Some(address) = address else {
-        return Err(ArgError::Message(NBL_USAGE.to_string()));
+        return Err(ArgError::usage(
+            cx.name,
+            format!("{} needs a NET_BUFFER_LIST", cx.name),
+        ));
     };
     cx.eval(&address)
 }

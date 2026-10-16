@@ -17,8 +17,6 @@ use crate::target::wdf::IfrEnd;
 use crate::types::VirtAddr;
 use crate::ui;
 
-const LOG_DUMP_USAGE: &str = "!rcdrkd.rcdrlogdump <driver> [-a <log>]";
-
 /// List the drivers the WPP recorder keeps logs for, or one driver's logs.
 ///
 /// WppRecorder.sys keeps in-flight logs for each driver built with WPP's
@@ -125,17 +123,19 @@ fn log_dump_driver(
     while let Some((index, word)) = words.next() {
         if word == "-a" {
             let Some((_, log)) = words.next() else {
-                return Err(ArgError::Message(format!(
-                    "!rcdrkd.rcdrlogdump: -a needs a log address; usage: {LOG_DUMP_USAGE}"
-                )));
+                return Err(ArgError::usage(
+                    cx.name,
+                    format!("{}: -a needs a log address", cx.name),
+                ));
             };
             cx.eval(log)?;
         } else if name.is_none() {
             name = Some(index);
         } else {
-            return Err(ArgError::Message(format!(
-                "!rcdrkd.rcdrlogdump: unexpected argument {word}; usage: {LOG_DUMP_USAGE}"
-            )));
+            return Err(ArgError::usage(
+                cx.name,
+                format!("{}: unexpected argument {word}", cx.name),
+            ));
         }
     }
     drop(words);

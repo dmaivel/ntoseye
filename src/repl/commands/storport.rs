@@ -166,16 +166,16 @@ fn log_range(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<LogRange, ArgError> {
-    const USAGE: &str = "!storagekd.storloglist <adapter> [<start> [<end>]] [L <count>]";
     let mut range = LogRange::default();
     while let Some(arg) = cursor.word() {
         let count_text = match arg.as_ref() {
             "L" | "l" => match cursor.word() {
                 Some(text) => Some(text),
                 None => {
-                    return Err(ArgError::Message(format!(
-                        "!storagekd.storloglist: L needs a count; usage: {USAGE}"
-                    )));
+                    return Err(ArgError::usage(
+                        cx.name,
+                        format!("{}: L needs a count", cx.name),
+                    ));
                 }
             },
             _ => arg
@@ -189,9 +189,10 @@ fn log_range(
         } else if range.bounds.len() < 2 {
             range.bounds.push(value.0);
         } else {
-            return Err(ArgError::Message(format!(
-                "!storagekd.storloglist: unexpected argument {arg}; usage: {USAGE}"
-            )));
+            return Err(ArgError::usage(
+                cx.name,
+                format!("{}: unexpected argument {arg}", cx.name),
+            ));
         }
     }
     Ok(range)

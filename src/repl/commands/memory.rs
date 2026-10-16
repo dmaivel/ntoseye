@@ -973,16 +973,21 @@ fn pagein_request(
             };
             process_text = Some(selector);
         } else if arg.starts_with('/') {
-            return Err(message(format!(
-                "unknown .pagein switch '{arg}'; expected /p"
-            )));
+            return Err(ArgError::usage(
+                cx.name,
+                format!("unknown {} switch '{arg}'", cx.name),
+            ));
         } else if address_text.replace(arg).is_some() {
-            return Err(message(".pagein accepts one address".to_string()));
+            return Err(ArgError::usage(
+                cx.name,
+                format!("{} accepts one address", cx.name),
+            ));
         }
     }
     let Some(address_text) = address_text else {
-        return Err(message(
-            "usage: .pagein [/p <pid|eprocess>] <address>".to_string(),
+        return Err(ArgError::usage(
+            cx.name,
+            format!("{} needs an address", cx.name),
         ));
     };
     let address = cx.eval(&address_text)?;

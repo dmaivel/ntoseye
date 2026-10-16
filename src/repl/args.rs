@@ -9,7 +9,9 @@ use std::borrow::Cow;
 use ntoseye_macros::grammar;
 
 use crate::expr::Expr;
-use crate::repl::{CommandInvocation, CompletionStrategy, ReplState, command_help, error};
+use crate::repl::{
+    CommandInvocation, CompletionStrategy, ReplState, command_help, error, usage_error,
+};
 use crate::target::MemoryKind;
 use crate::types::VirtAddr;
 
@@ -38,6 +40,12 @@ pub enum ArgError {
 }
 
 impl ArgError {
+    /// `reason`, then command `name`'s generated usage (see
+    /// [`usage_error`]).
+    pub fn usage(name: &str, reason: impl std::fmt::Display) -> Self {
+        Self::Message(usage_error(name, reason))
+    }
+
     pub fn report(&self, name: &str) {
         match self {
             Self::Missing => outln!("{}\n", command_help(name)),

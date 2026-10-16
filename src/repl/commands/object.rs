@@ -508,8 +508,6 @@ impl Render<Option<String>> for Vec<IrpHit> {
     }
 }
 
-const IRPFIND_USAGE: &str = "!irpfind [-v] [pool-type [restart-address [criteria data]]]";
-
 /// A WinDbg pool type: 0 nonpaged, 1 paged.
 impl FromArg for IrpPool {
     const COMPLETION: CompletionStrategy = CompletionStrategy::Expression;
@@ -534,9 +532,16 @@ fn irpfind_pool(
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<Option<IrpPool>, ArgError> {
     let words = cursor.remaining();
-    if words == 3 || words > 4 {
-        return Err(ArgError::Message(
-            Error::InvalidArgument(format!("usage: {IRPFIND_USAGE}")).to_string(),
+    if words == 3 {
+        return Err(ArgError::usage(
+            cx.name,
+            format!("{}: a criteria needs its data", cx.name),
+        ));
+    }
+    if words > 4 {
+        return Err(ArgError::usage(
+            cx.name,
+            format!("{}: too many arguments", cx.name),
         ));
     }
     cursor

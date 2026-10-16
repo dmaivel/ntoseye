@@ -452,8 +452,9 @@ fn sysinfo(
                 SysInfo::Smbios(table)
             })
         }
-        other => Err(Error::InvalidArgument(format!(
-            "unknown !sysinfo section '{other}': expected machineid, smbios, or cpuinfo"
+        other => Err(Error::InvalidArgument(usage_error(
+            "!sysinfo",
+            format!("unknown !sysinfo section '{other}'"),
         ))),
     }
 }

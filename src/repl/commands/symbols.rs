@@ -555,7 +555,7 @@ fn dv(state: &mut ReplState<'_>, address: Option<VirtAddr>) -> Result<()> {
 /// Every word is checked in order, so the first bad one is reported.
 #[grammar(usage = "[/f] [/v] [/n|/user]")]
 fn reload_scope(
-    _: &mut ArgCx<'_, '_>,
+    cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<Option<ReloadScope>, ArgError> {
     let line: Vec<String> = cursor.words().map(str::to_string).collect();
@@ -585,9 +585,10 @@ fn reload_scope(
             }
             Some("?") | None => return Err(ArgError::Missing),
             Some(_) => {
-                return Err(ArgError::Message(format!(
-                    ".reload: unknown option '{arg}'; it takes /f, /v, /n and /user"
-                )));
+                return Err(ArgError::usage(
+                    cx.name,
+                    format!("{}: unknown option '{arg}'", cx.name),
+                ));
             }
         }
     }

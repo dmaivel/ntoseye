@@ -105,12 +105,16 @@ fn alpc_query(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<AlpcQuery, ArgError> {
-    let usage =
-        || ArgError::Message("usage: !alpc /p <port> | /m <message> | /lpp [process]".into());
-    let switch = cursor.word().ok_or_else(usage)?.to_ascii_lowercase();
+    let name = cx.name;
+    let switch = cursor
+        .word()
+        .ok_or_else(|| ArgError::usage(name, format!("{name} needs /p, /m or /lpp")))?
+        .to_ascii_lowercase();
     match switch.as_str() {
         form @ ("/p" | "/m") => {
-            let address = cx.eval(&cursor.word().ok_or_else(usage)?)?;
+            let address = cx.eval(&cursor.word().ok_or_else(|| {
+                ArgError::usage(name, format!("{name} {form} needs an address"))
+            })?)?;
             Ok(if form == "/p" {
                 AlpcQuery::Port(address)
             } else {
@@ -122,7 +126,10 @@ fn alpc_query(
             .process_or_current(cursor.word().as_deref())
             .map(AlpcQuery::ProcessPorts)
             .map_err(|error| ArgError::Message(error.to_string())),
-        _ => Err(usage()),
+        other => Err(ArgError::usage(
+            name,
+            format!("{name}: unknown switch '{other}'"),
+        )),
     }
 }
 

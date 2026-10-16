@@ -203,7 +203,13 @@ fn list(
         address: address_text,
     } = arguments;
     let Some((type_name, field_name)) = type_field.rsplit_once('.') else {
-        error!("!list -t expects [module!]<type>.<field>");
+        error!(
+            "{}",
+            usage_error(
+                "!list",
+                format!("!list -t names no field in '{type_field}'")
+            )
+        );
         return Ok(Flow::Continue);
     };
     let path = match parse_field_path(field_name) {

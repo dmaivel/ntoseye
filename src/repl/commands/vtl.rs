@@ -441,9 +441,10 @@ impl ReplState<'_> {
                 self.caches.refresh_symbol_context(&self.ctx.target);
             }
             _ => {
-                return Err(Error::InvalidArgument(
-                    "usage: .vtl [0|1 [pid]]".to_string(),
-                ));
+                return Err(Error::InvalidArgument(usage_error(
+                    ".vtl",
+                    ".vtl takes 0, or 1 and an optional PID",
+                )));
             }
         }
         let target = &self.ctx.target;
@@ -646,7 +647,13 @@ impl ReplState<'_> {
         } = self.hypervisor_vp(selector.first().copied(), selector.get(1).copied(), false)?;
         if root && selector.is_empty() {
             error!(
-                "{command} reads a guest partition's memory, and the current vCPU's processor runs none; name one: {command} <partition-id> <vp-index> <address>"
+                "{}",
+                usage_error(
+                    command,
+                    format!(
+                        "{command} reads a guest partition's memory, and the current vCPU's processor runs none; name one"
+                    ),
+                )
             );
             return None;
         }

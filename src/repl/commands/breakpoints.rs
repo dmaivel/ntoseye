@@ -1492,8 +1492,9 @@ fn parse_hw_breakpoint_spec(spec: &str) -> Result<(HwBreakpointAccess, u8)> {
         // Execute watches are always a single byte; allow the bare `e`.
         "" if matches!(access, HwBreakpointAccess::Execute) => 1,
         "" => {
-            return Err(Error::InvalidArgument(format!(
-                "missing size in '{spec}' (e.g. ba w4 <address>)"
+            return Err(Error::InvalidArgument(usage_error(
+                "ba",
+                format!("missing size in '{spec}'"),
             )));
         }
         other => other.parse().map_err(|_| {
