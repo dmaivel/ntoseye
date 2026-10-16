@@ -304,7 +304,12 @@ impl Memory {
 
     /// Read a NUL-terminated UTF-16 string at `address` (`du`).
     #[pyo3(signature = (address, *, max_len=256))]
-    fn read_wstring(&self, py: Python<'_>, address: AddressArg, max_len: usize) -> PyResult<String> {
+    fn read_wstring(
+        &self,
+        py: Python<'_>,
+        address: AddressArg,
+        max_len: usize,
+    ) -> PyResult<String> {
         let addr = self.address(py, address)?;
         self.space.require_virtual()?;
         let byte_len = max_len

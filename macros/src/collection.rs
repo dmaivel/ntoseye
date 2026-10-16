@@ -165,7 +165,16 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
                         ::std::result::Result::Ok(key) => {
                             ::std::result::Result::Ok(Self::#find(self, py, &key)?.is_some())
                         }
-                        ::std::result::Result::Err(_) => ::std::result::Result::Ok(false),
+                        // Not a key: whether it is one of the items (`==`),
+                        // as for a handle the iteration yields.
+                        ::std::result::Result::Err(_) => {
+                            for element in Self::enumerate(self, py)? {
+                                if pyo3::IntoPyObjectExt::into_bound_py_any(element, py)?.eq(key)? {
+                                    return ::std::result::Result::Ok(true);
+                                }
+                            }
+                            ::std::result::Result::Ok(false)
+                        }
                     }
                 }
             });

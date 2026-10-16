@@ -272,7 +272,8 @@ pub fn handle_methods(input: TokenStream) -> TokenStream {
 /// `enumerate` and `lookup` stay Rust methods; the class's `#[pymethods]`
 /// get `__len__`, `__iter__` (a typed `Iterator[Item]` over a snapshot),
 /// and, from `lookup` (whose docs they take), `__getitem__` (`KeyError`),
-/// `get` (`None`) and `__contains__`. Flags:
+/// `get` (`None`) and `__contains__`, which takes a key, or else tests
+/// whether the value is one of the items (`bp in dbg.breakpoints`). Flags:
 ///
 /// - `records`: the items are `#[handle]`s, and a record of their kind is
 ///   a key too, naming the listed item it describes (`dbg.threads[stop.thread]`);
