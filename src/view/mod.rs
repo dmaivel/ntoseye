@@ -19,7 +19,6 @@ pub mod object;
 pub mod pnp;
 pub mod power;
 pub mod process;
-pub mod rcdr;
 pub mod record;
 pub mod registry;
 pub mod sched;
@@ -28,7 +27,6 @@ pub mod symbols;
 pub mod triage;
 pub mod userdump;
 pub mod usermode;
-pub mod wdf;
 
 /// A node in the value tree the SDK builds its results from.
 pub enum View {

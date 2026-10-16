@@ -13,6 +13,8 @@
 
 use std::sync::Arc;
 
+use ntoseye_macros::record;
+
 use super::{Target, bounded_list_walk, bounded_record_list_walk};
 use crate::bytes::c_string_lossy;
 use crate::error::{Error, Result};
@@ -29,14 +31,16 @@ const DRIVER_CALLBACK: &str = "wpprecorder!WppAutoLogpBugCheckCallbackForDriver"
 const CALLBACK_LIST: &str = "nt!KeBugCheckReasonCallbackListHead";
 
 /// A driver the WPP recorder serves (`_WPP_AUTOLOG_CONTEXT`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct RcdrDriver {
     pub context: VirtAddr,
     /// `FileBaseName`: the driver's image name without its extension.
     pub name: String,
     pub image: VirtAddr,
+    #[record(hex)]
     pub image_size: u32,
-    /// The logs on its `LogListHead`.
+    /// The `_WPP_AUTOLOG_HEADER` of each of its logs (its `LogListHead`).
     pub logs: Vec<VirtAddr>,
     pub logs_stopped: Option<String>,
     /// `DefaultAutoLogHeader`, the log `WppRecorderLogGetDefault` returns.
@@ -46,20 +50,44 @@ pub struct RcdrDriver {
     pub sequence: i32,
 }
 
+/// A recorder context or log header that does not read.
+#[record]
+#[derive(Debug, Clone)]
+pub struct RcdrUnreadable {
+    pub address: VirtAddr,
+    pub error: String,
+}
+
+/// The drivers the recorder serves (`!rcdrkd.rcdrloglist`).
+#[record]
+#[derive(Debug, Clone)]
+pub struct RcdrDriverList {
+    pub drivers: Vec<RcdrDriver>,
+    /// The contexts that do not read.
+    pub unreadable: Vec<RcdrUnreadable>,
+    /// Why the walk of the bugcheck callback list stopped short.
+    pub stopped: Option<String>,
+}
+
 /// A partition of a recorder log: the ring its records go to.
+#[record]
 #[derive(Debug, Clone)]
 pub struct RcdrPartition {
     /// `normal` or `error`.
     pub name: &'static str,
     pub base: VirtAddr,
+    #[record(hex)]
     pub size: u32,
-    /// `Offset.Current`, where the next record goes, and `Offset.Previous`,
-    /// the newest record.
+    /// `Offset.Current`, where the next record goes.
+    #[record(hex)]
     pub current: u16,
+    /// `Offset.Previous`, the newest record.
+    #[record(hex)]
     pub previous: u16,
 }
 
 /// A recorder log (`_WPP_AUTOLOG_HEADER`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct RcdrLog {
     pub header: VirtAddr,
@@ -67,44 +95,58 @@ pub struct RcdrLog {
     /// driver set one.
     pub identifier: String,
     pub id_number: u16,
+    #[record(hex)]
     pub size: u32,
     pub deleted: bool,
     /// Records are 'L2', with a timestamp.
     pub timestamps: bool,
+    /// Whether it is the driver's default log.
+    pub default: bool,
     pub partitions: Vec<RcdrPartition>,
 }
 
-/// A log as a list shows it, or its header's address and why it does not
-/// read.
-pub type RcdrLogEntry = std::result::Result<RcdrLog, (VirtAddr, String)>;
+/// A driver's logs (`!rcdrkd.rcdrloglist <driver>`).
+#[record]
+#[derive(Debug, Clone)]
+pub struct RcdrLogs {
+    pub driver: RcdrDriver,
+    pub logs: Vec<RcdrLog>,
+    /// The log headers that do not read.
+    pub unreadable: Vec<RcdrUnreadable>,
+}
 
 /// A record of a log's partition, formatted.
+#[record]
 #[derive(Debug, Clone)]
 pub struct RcdrEntry {
-    /// The index of its log in [`RcdrLogDump::logs`], and its partition.
+    /// The index of its log in `RcdrLogDump.logs`.
     pub log: usize,
+    /// `normal` or `error`.
     pub partition: &'static str,
     pub entry: WdfLogEntry,
 }
 
-/// A driver's recorder logs, their records merged in sequence order
-/// (`!rcdrkd.rcdrlogdump`).
+/// How the walk of one partition ended.
+#[record]
+#[derive(Debug, Clone)]
+pub struct RcdrWalkEnd {
+    /// The index of its log in `RcdrLogDump.logs`.
+    pub log: usize,
+    /// `normal` or `error`.
+    pub partition: &'static str,
+    pub end: IfrEnd,
+}
+
+/// A driver's records from its logs, merged in the order the driver logged
+/// them, oldest first (`!rcdrkd.rcdrlogdump`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct RcdrLogDump {
     pub driver: RcdrDriver,
     pub logs: Vec<RcdrLog>,
     pub entries: Vec<RcdrEntry>,
-    /// How each walk of a partition ended: its log index, partition, and
-    /// end.
-    pub ends: Vec<(usize, &'static str, IfrEnd)>,
-}
-
-/// The drivers the recorder serves, and why the callback walk stopped
-/// short.
-#[derive(Debug, Clone)]
-pub struct RcdrDriverList {
-    pub drivers: Vec<std::result::Result<RcdrDriver, (VirtAddr, String)>>,
-    pub stopped: Option<String>,
+    /// How each walk of a partition ended.
+    pub ends: Vec<RcdrWalkEnd>,
 }
 
 fn rcdr_layout(types: Types<'_>, name: &str) -> Result<Arc<TypeInfo>> {
@@ -193,14 +235,22 @@ impl Target {
     pub fn rcdr_drivers(&self) -> Result<RcdrDriverList> {
         let types = self.types_in(self.kernel_dtb());
         let (contexts, stopped) = self.rcdr_contexts(types)?;
-        let drivers = contexts
-            .into_iter()
-            .map(|context| {
-                self.rcdr_driver(types, context)
-                    .map_err(|error| (context, error.to_string()))
-            })
-            .collect();
-        Ok(RcdrDriverList { drivers, stopped })
+        let mut drivers = Vec::new();
+        let mut unreadable = Vec::new();
+        for context in contexts {
+            match self.rcdr_driver(types, context) {
+                Ok(driver) => drivers.push(driver),
+                Err(error) => unreadable.push(RcdrUnreadable {
+                    address: context,
+                    error: error.to_string(),
+                }),
+            }
+        }
+        Ok(RcdrDriverList {
+            drivers,
+            unreadable,
+            stopped,
+        })
     }
 
     /// The driver the recorder serves that `name` names: its
@@ -211,7 +261,7 @@ impl Target {
         let wanted = name.trim_end_matches(".sys").trim_end_matches(".SYS");
         let parsed = u64::from_str_radix(name.trim_start_matches("0x"), 16).ok();
         let mut known = Vec::new();
-        for driver in list.drivers.into_iter().flatten() {
+        for driver in list.drivers {
             let module = self
                 .module_containing(driver.image)
                 .map(|module| module.short_name);
@@ -236,7 +286,14 @@ impl Target {
         )))
     }
 
-    fn rcdr_log(&self, types: Types<'_>, header: VirtAddr) -> Result<RcdrLog> {
+    /// The log whose header is at `header`, of the driver whose default log
+    /// is `default_log`.
+    fn rcdr_log(
+        &self,
+        types: Types<'_>,
+        header: VirtAddr,
+        default_log: VirtAddr,
+    ) -> Result<RcdrLog> {
         let log = types
             .struct_with_layout(rcdr_layout(types, "_WPP_AUTOLOG_HEADER")?, header)
             .prefetch();
@@ -265,23 +322,31 @@ impl Target {
             size: log.read_uint("Size")? as u32,
             deleted: log.read_uint("Deleted")? != 0,
             timestamps: log.read_uint("UseTimeStamp")? != 0,
+            default: header == default_log,
             partitions,
         })
     }
 
     /// The logs of the driver `name` names, each with its partitions.
-    pub fn rcdr_logs(&self, name: &str) -> Result<(RcdrDriver, Vec<RcdrLogEntry>)> {
+    pub fn rcdr_logs(&self, name: &str) -> Result<RcdrLogs> {
         let types = self.types_in(self.kernel_dtb());
         let driver = self.rcdr_driver_named(name)?;
-        let logs = driver
-            .logs
-            .iter()
-            .map(|&header| {
-                self.rcdr_log(types, header)
-                    .map_err(|error| (header, error.to_string()))
-            })
-            .collect();
-        Ok((driver, logs))
+        let mut logs = Vec::new();
+        let mut unreadable = Vec::new();
+        for &header in &driver.logs {
+            match self.rcdr_log(types, header, driver.default_log) {
+                Ok(log) => logs.push(log),
+                Err(error) => unreadable.push(RcdrUnreadable {
+                    address: header,
+                    error: error.to_string(),
+                }),
+            }
+        }
+        Ok(RcdrLogs {
+            driver,
+            logs,
+            unreadable,
+        })
     }
 
     /// The records of the driver `name` names, from every log, or only the
@@ -306,21 +371,21 @@ impl Target {
         let mut entries = Vec::new();
         let mut ends = Vec::new();
         for header in headers {
-            let log = self.rcdr_log(types, header)?;
+            let log = self.rcdr_log(types, header, driver.default_log)?;
             let index = logs.len();
             for partition in &log.partitions {
                 if partition.base.is_zero() || partition.size == 0 {
                     continue;
                 }
                 if u64::from(partition.size) > MAX_PARTITION {
-                    ends.push((
-                        index,
-                        partition.name,
-                        IfrEnd::Corrupt(format!(
+                    ends.push(RcdrWalkEnd {
+                        log: index,
+                        partition: partition.name,
+                        end: IfrEnd::Corrupt(format!(
                             "its Size {:#x} is more than its offsets reach",
                             partition.size
                         )),
-                    ));
+                    });
                     continue;
                 }
                 let mut bytes = vec![0u8; partition.size as usize];
@@ -328,11 +393,11 @@ impl Target {
                     .kernel_address_space()
                     .read_bytes(partition.base, &mut bytes)
                 {
-                    ends.push((
-                        index,
-                        partition.name,
-                        IfrEnd::Corrupt(format!("{:#x}: {error}", partition.base.0)),
-                    ));
+                    ends.push(RcdrWalkEnd {
+                        log: index,
+                        partition: partition.name,
+                        end: IfrEnd::Corrupt(format!("{:#x}: {error}", partition.base.0)),
+                    });
                     continue;
                 }
                 let walk = walk_ifr(
@@ -341,7 +406,11 @@ impl Target {
                     usize::from(partition.previous),
                     &layout,
                 );
-                ends.push((index, partition.name, walk.end));
+                ends.push(RcdrWalkEnd {
+                    log: index,
+                    partition: partition.name,
+                    end: walk.end,
+                });
                 entries.extend(
                     self.wdf_log_entries(walk.records, pointer_size)
                         .into_iter()

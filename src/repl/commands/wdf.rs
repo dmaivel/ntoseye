@@ -3,128 +3,387 @@
 
 use std::fmt::Display;
 
+use ntoseye_macros::{command, record};
 use tabled::builder::Builder;
 
 use crate::error::Result;
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
-use crate::target::etw::{GuidStyle, format_filetime_precise, format_guid};
+use crate::session::Session;
+use crate::target::DiagnosticValue;
+use crate::target::irp_minor_function_name;
 use crate::target::wdf::{
     IfrEnd, WdfCallback, WdfClient, WdfDeviceDetail, WdfDriverInfo, WdfDumpDriver, WdfEnumValue,
     WdfIoParameters, WdfIoTargetDetail, WdfIrpLocation, WdfIrpQueueRole, WdfLoader, WdfLogDump,
     WdfLogEntry, WdfObject, WdfObjectDetail, WdfObjectRef, WdfQueueDetail, WdfRequestDetail,
     WdfRequestList, WdfTargetRequestList,
 };
-use crate::target::{irp_major_function_name, irp_minor_function_name};
-use crate::types::VirtAddr;
 use crate::ui;
 
-repl_command! {
-    cmd_wdfkd_wdfldr();
-    names: ["!wdfkd.wdfldr"],
-    category: "objects and I/O",
-    usage: "!wdfkd.wdfldr",
-    summary: "List the KMDF client drivers.",
-    details: "Walks the list at Wdf01000!FxLibraryGlobals.FxDriverGlobalsList. For each client driver, it shows the name, the KMDF version that the driver bound to (WdfBindInfo), the _FX_DRIVER_GLOBALS, the WDFDRIVER handle, the DRIVER_OBJECT, and whether the driver has an In-Flight Recorder log. The command needs the PDB for Wdf01000. The walk continues only while the Blink of each entry points back to the entry before it. A client has an empty DriverName if it bound to KMDF but did not create an FxDriver, and the command then lists the client by the name of its DRIVER_OBJECT, which you also use with !wdfkd.wdfdriverinfo and !wdfkd.wdflogdump. When a client name is not printable, or the FxDriver of a client fails the checks of its type, owner, or handle, the command lists the client with the problem.",
-    target: Kernel,
+/// List the KMDF client drivers.
+///
+/// Walks the list at Wdf01000!FxLibraryGlobals.FxDriverGlobalsList. For each
+/// client driver, it shows the name, the KMDF version that the driver bound to
+/// (WdfBindInfo), the _FX_DRIVER_GLOBALS, the WDFDRIVER handle, the
+/// DRIVER_OBJECT, and whether the driver has an In-Flight Recorder log. The
+/// command needs the PDB for Wdf01000. The walk continues only while the Blink
+/// of each entry points back to the entry before it. A client has an empty
+/// DriverName if it bound to KMDF but did not create an FxDriver, and the
+/// command then lists the client by the name of its DRIVER_OBJECT, which you
+/// also use with !wdfkd.wdfdriverinfo and !wdfkd.wdflogdump. When a client name
+/// is not printable, or the FxDriver of a client fails the checks of its type,
+/// owner, or handle, the command lists the client with the problem.
+#[command(
+    names = ["!wdfkd.wdfldr"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect
+)]
+fn wdf_loader(session: &Session) -> Result<WdfLoader> {
+    session.target.wdf_loader()
 }
 
-repl_command! {
-    cmd_wdfkd_wdfdriverinfo;
-    names: ["!wdfkd.wdfdriverinfo"],
-    category: "objects and I/O",
-    usage: "!wdfkd.wdfdriverinfo <driver-name>",
-    summary: "Show a KMDF client driver and its WDF devices.",
-    details: "Give the driver name as !wdfkd.wdfldr lists it. The name is not case-sensitive, and `.sys` is optional. The command shows the DRIVER_OBJECT, the FxDriver, the WDFDRIVER handle, the _FX_DRIVER_GLOBALS, the KMDF version, the registry path, and the image. Then it shows each device object on the DeviceObject/NextDevice chain of the driver object, with the related WDFDEVICE and its kind and PnP state. A device object links to its WDFDEVICE through its DeviceExtension, which KMDF sets to point to the first context of the device. The command checks the context header, the type and owner of the object, and the device object of the FxDevice, and if a check fails, it lists the device object with the reason.",
-    completion: Driver,
-    target: Kernel,
+impl Render for WdfLoader {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_loader(self);
+    }
 }
 
-repl_command! {
-    cmd_wdfkd_wdfhandle;
-    names: ["!wdfkd.wdfhandle"],
-    category: "objects and I/O",
-    usage: "!wdfkd.wdfhandle <handle>",
-    summary: "Decode a WDF handle and show its object.",
-    details: "A handle is the address of its object, XORed with ~7. An offset handle has bit 0 set and points to a WDFOBJECT_OFFSET value inside the object, which the command subtracts from the address that the handle points to. The command shows the FxObject, its type (FX_OBJECT_TYPES), size, reference count, state (FxObjectState), flags, owning driver, and parent, and each context with its type name, size, and address. Then it names the command that shows the object in full: !wdfkd.wdfdevice, !wdfkd.wdfqueue, !wdfkd.wdfrequest, or !wdfkd.wdfiotarget for those types, !wdfkd.wdfdriverinfo for a WDFDRIVER, and !wdfkd.wdfobject, which adds the children of the object, for any other type. It shows an error if the value does not decode to a kernel address, or if the type, state, size, context header, or owning driver of the object is not valid.",
-    completion: Expression,
-    target: Kernel,
+/// Show a KMDF client driver and its WDF devices.
+///
+/// Give the driver name as !wdfkd.wdfldr lists it. The name is not
+/// case-sensitive, and `.sys` is optional. The command shows the DRIVER_OBJECT,
+/// the FxDriver, the WDFDRIVER handle, the _FX_DRIVER_GLOBALS, the KMDF
+/// version, the registry path, and the image. Then it shows each device object
+/// on the DeviceObject/NextDevice chain of the driver object, with the related
+/// WDFDEVICE and its kind and PnP state. A device object links to its WDFDEVICE
+/// through its DeviceExtension, which KMDF sets to point to the first context
+/// of the device. The command checks the context header, the type and owner of
+/// the object, and the device object of the FxDevice, and if a check fails, it
+/// lists the device object with the reason.
+#[command(
+    names = ["!wdfkd.wdfdriverinfo"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    usage = "!wdfkd.wdfdriverinfo <driver-name>"
+)]
+fn wdf_driver_info(
+    session: &Session,
+    #[arg(complete = Driver)] driver: String,
+) -> Result<WdfDriverInfo> {
+    session.target.wdf_driver_info(&driver)
 }
 
-repl_command! {
-    cmd_wdfkd_wdfobject;
-    names: ["!wdfkd.wdfobject"],
-    category: "objects and I/O",
-    usage: "!wdfkd.wdfobject <handle | FxObject>",
-    summary: "Show a KMDF object's header, contexts, and children.",
-    details: "Give a handle, as for !wdfkd.wdfhandle, or the address of an FxObject. The command shows what !wdfkd.wdfhandle shows: the handle, the type (FX_OBJECT_TYPES), size, reference count, state (FxObjectState), flags (FXOBJECT_FLAGS), owning driver, and parent, and each context with its type name, size, and address. Then it lists the children of the object (m_ChildListHead), each with its handle and type. The framework's own children, such as the packages of a device, have no handle. Use the command for an object whose type has no command of its own, such as a WDFMEMORY, WDFTIMER, or WDFWORKITEM. The object must pass the same checks as for !wdfkd.wdfhandle, and the list of children stops at a child whose m_ParentObject is not this object.",
-    completion: Expression,
-    target: Kernel,
+impl Render for WdfDriverInfo {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_driver_info(self);
+    }
 }
 
-repl_command! {
-    cmd_wdfkd_wdfdevice;
-    names: ["!wdfkd.wdfdevice"],
-    category: "objects and I/O",
-    usage: "!wdfkd.wdfdevice <WDFDEVICE>",
-    summary: "Show a WDFDEVICE and its device objects, state machines, queues, and I/O targets.",
-    details: "Shows the kind of the device (FDO, filter, PDO, or control), its WDM device object, the device object that it is attached to, and the PDO of the stack. It also shows the current states of the PnP, power, and power policy state machines (_WDF_DEVICE_PNP_STATE, _WDF_DEVICE_POWER_STATE, _WDF_DEVICE_POWER_POLICY_STATE), and the device and system power states. For a PDO, it shows the parent device, and for an FDO, the child lists and the default and self I/O targets. For each queue of the I/O package, it shows the dispatch type, the power management, and the counts of pending and driver-owned requests, and it marks the default queue. For each I/O target of the device (m_IoTargetsList), it shows the WDFIOTARGET handle, the kind of target, its state, and the device object that it sends to, and it marks the default target. Pass a WDFQUEUE to !wdfkd.wdfqueue and a WDFIOTARGET to !wdfkd.wdfiotarget.",
-    completion: Expression,
-    target: Kernel,
+/// Decode a WDF handle and show its object.
+///
+/// A handle is the address of its object, XORed with ~7. An offset handle has
+/// bit 0 set and points to a WDFOBJECT_OFFSET value inside the object, which
+/// the command subtracts from the address that the handle points to. The
+/// command shows the FxObject, its type (FX_OBJECT_TYPES), size, reference
+/// count, state (FxObjectState), flags, owning driver, and parent, and each
+/// context with its type name, size, and address. Then it names the command
+/// that shows the object in full: !wdfkd.wdfdevice, !wdfkd.wdfqueue,
+/// !wdfkd.wdfrequest, or !wdfkd.wdfiotarget for those types,
+/// !wdfkd.wdfdriverinfo for a WDFDRIVER, and !wdfkd.wdfobject, which adds the
+/// children of the object, for any other type. It shows an error if the value
+/// does not decode to a kernel address, or if the type, state, size, context
+/// header, or owning driver of the object is not valid.
+#[command(
+    names = ["!wdfkd.wdfhandle"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect
+)]
+fn wdf_handle(session: &Session, handle: u64) -> Result<WdfObject> {
+    session.target.wdf_handle(handle)
 }
 
-repl_command! {
-    cmd_wdfkd_wdfqueue;
-    names: ["!wdfkd.wdfqueue"],
-    category: "objects and I/O",
-    usage: "!wdfkd.wdfqueue <WDFQUEUE>",
-    summary: "Show a WDFQUEUE and its configuration, state, callbacks, and requests.",
-    details: "Shows the dispatch type of the queue, the state bits (_FX_IO_QUEUE_STATE), the power state, and the power management. It also shows the execution level, the synchronization scope, the request counts, and the Evt callbacks that the driver set. Then it shows the requests on three lists: the requests that wait in the queue, the requests that the driver marked cancelable, and the requests presented to the driver. For each request, it shows the WDFREQUEST handle, which you pass to !wdfkd.wdfrequest, the FxRequest, and the IRP. If a request is not valid, the command stops that list at the request and shows the reason.",
-    completion: Expression,
-    target: Kernel,
+impl Render for WdfObject {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_object(self);
+        field("View", object_command(self));
+    }
 }
 
-repl_command! {
-    cmd_wdfkd_wdfrequest;
-    names: ["!wdfkd.wdfrequest"],
-    category: "objects and I/O",
-    usage: "!wdfkd.wdfrequest <WDFREQUEST>",
-    summary: "Show a WDFREQUEST, its IRP, its queue, and the I/O target it was sent to.",
-    details: "Shows the FxRequest, its owning driver, parent, reference count, and object state. For the IRP of the request, it shows the current stack location: the major and minor function, the device object and its driver, and the buffer lengths of a read, a write, or a device control with its control code. It also shows the system buffer, the user buffer, and the MDL of the IRP; pass the IRP to !irp for all of its stack locations. If the IRP was freed or reused, the command shows why it is not a live IRP. The command shows whether the IRP came from the I/O manager or the framework or the driver allocated it (FxRequestAllocationSource), whether the request is completed or canceled, and whether its queue presented it to the driver. It shows the queue that the request came from or waits in (m_IoQueue) and the cancel-safe queue that holds the IRP: the requests that wait in the queue, the requests that the driver marked cancelable with its EvtRequestCancel routine, which the command shows, or the requests that an I/O target holds until it starts. A request that none of these holds cannot be canceled. For a request that the driver sent, it shows the I/O target (m_Target), the completion routine and its context, and the target flags (FxRequestTargetFlags). KMDF sets the verifier flags (FxRequestVerifierFlags) only when its verifier is on for the driver.",
-    completion: Expression,
-    target: Kernel,
+/// Show a KMDF object's header, contexts, and children.
+///
+/// Give a handle, as for !wdfkd.wdfhandle, or the address of an FxObject. The
+/// command shows what !wdfkd.wdfhandle shows: the handle, the type
+/// (FX_OBJECT_TYPES), size, reference count, state (FxObjectState), flags
+/// (FXOBJECT_FLAGS), owning driver, and parent, and each context with its type
+/// name, size, and address. Then it lists the children of the object
+/// (m_ChildListHead), each with its handle and type. The framework's own
+/// children, such as the packages of a device, have no handle. Use the command
+/// for an object whose type has no command of its own, such as a WDFMEMORY,
+/// WDFTIMER, or WDFWORKITEM. The object must pass the same checks as for
+/// !wdfkd.wdfhandle, and the list of children stops at a child whose
+/// m_ParentObject is not this object.
+#[command(
+    names = ["!wdfkd.wdfobject"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    usage = "!wdfkd.wdfobject <handle | FxObject>"
+)]
+fn wdf_object(session: &Session, object: u64) -> Result<WdfObjectDetail> {
+    session.target.wdf_object(object)
 }
 
-repl_command! {
-    cmd_wdfkd_wdfiotarget;
-    names: ["!wdfkd.wdfiotarget"],
-    category: "objects and I/O",
-    usage: "!wdfkd.wdfiotarget <WDFIOTARGET>",
-    summary: "Show a WDFIOTARGET, the device object it sends to, and the requests sent to it.",
-    details: "Shows the kind of the target: local (in the device's own stack, as the default target is), remote (a target that the driver opened with WdfIoTargetOpen), self, or a USB device or USB pipe, and whether it is the default I/O target of its device. It shows the state (_WDF_IO_TARGET_STATE), the open state of a remote target, the WDFDEVICE that the target belongs to, the device object that the target sends requests to and the driver of that device object, the PDO of that stack, the file object, the I/O count, and the stack size. Then it lists the requests on three lists: the requests sent to the target and not completed (m_SentIoListHead), the requests sent with WDF_REQUEST_SEND_OPTION_IGNORE_TARGET_STATE while the target was not started (m_IgnoredIoListHead), and the requests that the target holds until it starts (m_PendedQueue). For each request, it shows the WDFREQUEST handle, the FxRequest, and the IRP. A request without a handle is the framework's own, such as the request that a synchronous send builds. A list stops at a request whose m_Target is not this target, with the reason.",
-    completion: Expression,
-    target: Kernel,
+impl Render for WdfObjectDetail {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_object_detail(self);
+    }
 }
 
-repl_command! {
-    cmd_wdfkd_wdflogdump;
-    names: ["!wdfkd.wdflogdump"],
-    category: "objects and I/O",
-    usage: "!wdfkd.wdflogdump <driver-name>",
-    summary: "Show the In-Flight Recorder log of a KMDF driver, oldest record first.",
-    details: "Reads the IFR log of the driver (_FX_DRIVER_GLOBALS.WdfLogHeader). The command walks the records back from the newest record along PrevOffset, and stops at the first record written or at records that newer records overwrote. For each record, it shows the sequence number, the UTC time (only when the log keeps timestamps), the function, and the message. The command formats the message from the trace message format (TMF) annotations in the PDB for Wdf01000. For a record with a message that no loaded PDB declares, or with arguments that do not fit the message, it shows the message GUID, the message number, and the argument bytes. The command checks the header (its GUID, base, and size) and each record (signature, length, position, and sequence), and the walk stops at the first item that fails a check, with the reason.",
-    completion: Driver,
-    target: Kernel,
+/// Show a WDFDEVICE and its device objects, state machines, queues, and I/O
+/// targets.
+///
+/// Shows the kind of the device (FDO, filter, PDO, or control), its WDM device
+/// object, the device object that it is attached to, and the PDO of the stack.
+/// It also shows the current states of the PnP, power, and power policy state
+/// machines (_WDF_DEVICE_PNP_STATE, _WDF_DEVICE_POWER_STATE,
+/// _WDF_DEVICE_POWER_POLICY_STATE), and the device and system power states. For
+/// a PDO, it shows the parent device, and for an FDO, the child lists and the
+/// default and self I/O targets. For each queue of the I/O package, it shows
+/// the dispatch type, the power management, and the counts of pending and
+/// driver-owned requests, and it marks the default queue. For each I/O target
+/// of the device (m_IoTargetsList), it shows the WDFIOTARGET handle, the kind
+/// of target, its state, and the device object that it sends to, and it marks
+/// the default target. Pass a WDFQUEUE to !wdfkd.wdfqueue and a WDFIOTARGET to
+/// !wdfkd.wdfiotarget.
+#[command(
+    names = ["!wdfkd.wdfdevice"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    usage = "!wdfkd.wdfdevice <WDFDEVICE>"
+)]
+fn wdf_device(session: &Session, handle: u64) -> Result<WdfDeviceDetail> {
+    session.target.wdf_device(handle)
 }
 
-repl_command! {
-    cmd_wdfkd_wdfcrashdump;
-    names: ["!wdfkd.wdfcrashdump"],
-    category: "objects and I/O",
-    usage: "!wdfkd.wdfcrashdump [log | loader]",
-    summary: "Show the KMDF data in a crash dump: one driver's In-Flight Recorder log, or the client drivers.",
-    details: "When Windows writes a crash dump, Wdf01000 copies one client driver's In-Flight Recorder log into the dump's tagged data (WdfDumpGuid): the log of the driver whose code the bugcheck parameters point to, or of a driver set to keep its log in minidumps, or else of the last KMDF driver that ran on the processor that crashed. A minidump has no other copy of the log. Without an argument or with log, the command shows that log, oldest record first, as !wdfkd.wdflogdump shows a log in memory. Unlike WinDbg, it shows a log's only record once, and it keeps the oldest record that survives in a log that has wrapped. With loader, it lists the client drivers that Wdf01000 recorded (WdfDumpGuid2), with the KMDF version each bound to and its _FX_DRIVER_GLOBALS; the first entry is the framework itself. The command needs the PDB for Wdf01000.",
-    completion: None,
-    target: Kernel,
+impl Render for WdfDeviceDetail {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_device(self);
+    }
+}
+
+/// Show a WDFQUEUE and its configuration, state, callbacks, and requests.
+///
+/// Shows the dispatch type of the queue, the state bits (_FX_IO_QUEUE_STATE),
+/// the power state, and the power management. It also shows the execution
+/// level, the synchronization scope, the request counts, and the Evt callbacks
+/// that the driver set. Then it shows the requests on three lists: the requests
+/// that wait in the queue, the requests that the driver marked cancelable, and
+/// the requests presented to the driver. For each request, it shows the
+/// WDFREQUEST handle, which you pass to !wdfkd.wdfrequest, the FxRequest, and
+/// the IRP. If a request is not valid, the command stops that list at the
+/// request and shows the reason.
+#[command(
+    names = ["!wdfkd.wdfqueue"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    usage = "!wdfkd.wdfqueue <WDFQUEUE>"
+)]
+fn wdf_queue(session: &Session, handle: u64) -> Result<WdfQueueDetail> {
+    session.target.wdf_queue(handle)
+}
+
+impl Render for WdfQueueDetail {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_queue(self);
+    }
+}
+
+/// Show a WDFREQUEST, its IRP, its queue, and the I/O target it was sent to.
+///
+/// Shows the FxRequest, its owning driver, parent, reference count, and object
+/// state. For the IRP of the request, it shows the current stack location: the
+/// major and minor function, the device object and its driver, and the buffer
+/// lengths of a read, a write, or a device control with its control code. It
+/// also shows the system buffer, the user buffer, and the MDL of the IRP; pass
+/// the IRP to !irp for all of its stack locations. If the IRP was freed or
+/// reused, the command shows why it is not a live IRP. The command shows
+/// whether the IRP came from the I/O manager or the framework or the driver
+/// allocated it (FxRequestAllocationSource), whether the request is completed
+/// or canceled, and whether its queue presented it to the driver. It shows the
+/// queue that the request came from or waits in (m_IoQueue) and the cancel-safe
+/// queue that holds the IRP: the requests that wait in the queue, the requests
+/// that the driver marked cancelable with its EvtRequestCancel routine, which
+/// the command shows, or the requests that an I/O target holds until it starts.
+/// A request that none of these holds cannot be canceled. For a request that
+/// the driver sent, it shows the I/O target (m_Target), the completion routine
+/// and its context, and the target flags (FxRequestTargetFlags). KMDF sets the
+/// verifier flags (FxRequestVerifierFlags) only when its verifier is on for the
+/// driver.
+#[command(
+    names = ["!wdfkd.wdfrequest"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    usage = "!wdfkd.wdfrequest <WDFREQUEST>"
+)]
+fn wdf_request(session: &Session, handle: u64) -> Result<WdfRequestDetail> {
+    session.target.wdf_request(handle)
+}
+
+impl Render for WdfRequestDetail {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_request(self);
+    }
+}
+
+/// Show a WDFIOTARGET, the device object it sends to, and the requests sent to
+/// it.
+///
+/// Shows the kind of the target: local (in the device's own stack, as the
+/// default target is), remote (a target that the driver opened with
+/// WdfIoTargetOpen), self, or a USB device or USB pipe, and whether it is the
+/// default I/O target of its device. It shows the state (_WDF_IO_TARGET_STATE),
+/// the open state of a remote target, the WDFDEVICE that the target belongs to,
+/// the device object that the target sends requests to and the driver of that
+/// device object, the PDO of that stack, the file object, the I/O count, and
+/// the stack size. Then it lists the requests on three lists: the requests sent
+/// to the target and not completed (m_SentIoListHead), the requests sent with
+/// WDF_REQUEST_SEND_OPTION_IGNORE_TARGET_STATE while the target was not started
+/// (m_IgnoredIoListHead), and the requests that the target holds until it
+/// starts (m_PendedQueue). For each request, it shows the WDFREQUEST handle,
+/// the FxRequest, and the IRP. A request without a handle is the framework's
+/// own, such as the request that a synchronous send builds. A list stops at a
+/// request whose m_Target is not this target, with the reason.
+#[command(
+    names = ["!wdfkd.wdfiotarget"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    usage = "!wdfkd.wdfiotarget <WDFIOTARGET>"
+)]
+fn wdf_io_target(session: &Session, handle: u64) -> Result<WdfIoTargetDetail> {
+    session.target.wdf_io_target(handle)
+}
+
+impl Render for WdfIoTargetDetail {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_io_target(self);
+    }
+}
+
+/// Show the In-Flight Recorder log of a KMDF driver, oldest record first.
+///
+/// Reads the IFR log of the driver (_FX_DRIVER_GLOBALS.WdfLogHeader). The
+/// command walks the records back from the newest record along PrevOffset, and
+/// stops at the first record written or at records that newer records
+/// overwrote. For each record, it shows the sequence number, the UTC time (only
+/// when the log keeps timestamps), the function, and the message. The command
+/// formats the message from the trace message format (TMF) annotations in the
+/// PDB for Wdf01000. For a record with a message that no loaded PDB declares,
+/// or with arguments that do not fit the message, it shows the message GUID,
+/// the message number, and the argument bytes. The command checks the header
+/// (its GUID, base, and size) and each record (signature, length, position, and
+/// sequence), and the walk stops at the first item that fails a check, with the
+/// reason.
+#[command(
+    names = ["!wdfkd.wdflogdump"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    usage = "!wdfkd.wdflogdump <driver-name>"
+)]
+fn wdf_log(session: &Session, #[arg(complete = Driver)] driver: String) -> Result<WdfLogDump> {
+    session.target.wdf_log_dump(&driver)
+}
+
+impl Render for WdfLogDump {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_log(self);
+    }
+}
+
+/// Show the KMDF data in a crash dump: one driver's In-Flight Recorder log, or
+/// the client drivers.
+///
+/// When Windows writes a crash dump, Wdf01000 copies one client driver's
+/// In-Flight Recorder log into the dump's tagged data (WdfDumpGuid): the log of
+/// the driver whose code the bugcheck parameters point to, or of a driver set
+/// to keep its log in minidumps, or else of the last KMDF driver that ran on
+/// the processor that crashed. A minidump has no other copy of the log. Without
+/// an argument or with log, the command shows that log, oldest record first, as
+/// !wdfkd.wdflogdump shows a log in memory. Unlike WinDbg, it shows a log's
+/// only record once, and it keeps the oldest record that survives in a log that
+/// has wrapped. With loader, it lists the client drivers that Wdf01000 recorded
+/// (WdfDumpGuid2), with the KMDF version each bound to and its
+/// _FX_DRIVER_GLOBALS; the first entry is the framework itself. The command
+/// needs the PDB for Wdf01000.
+#[command(
+    names = ["!wdfkd.wdfcrashdump"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    usage = "!wdfkd.wdfcrashdump [log | loader]"
+)]
+fn wdf_crash_dump(
+    session: &Session,
+    #[arg(parse = crash_dump_part)] loader: Option<bool>,
+) -> Result<WdfCrashDump> {
+    let target = &session.target;
+    if loader.unwrap_or(false) {
+        target.wdf_crash_drivers().map(WdfCrashDump::Loader)
+    } else {
+        target.wdf_crash_log().map(WdfCrashDump::Log)
+    }
+}
+
+/// `!wdfkd.wdfcrashdump`'s word: `log` (or none) is `Some(false)` (or
+/// `None`), `loader` is `Some(true)`, in any case.
+fn crash_dump_part(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Option<bool>, ArgError> {
+    let Some(word) = cursor.word() else {
+        return Ok(None);
+    };
+    match word.to_ascii_lowercase().as_str() {
+        "log" => Ok(Some(false)),
+        "loader" => Ok(Some(true)),
+        other => Err(ArgError::Message(format!(
+            "!wdfkd.wdfcrashdump: '{other}' is neither log nor loader"
+        ))),
+    }
+}
+
+/// What `!wdfkd.wdfcrashdump` shows: the IFR log Wdf01000 copied into the
+/// dump, or with `loader`, the client drivers it recorded.
+#[record]
+pub enum WdfCrashDump {
+    Log(WdfLogDump),
+    Loader(Vec<WdfDumpDriver>),
+}
+
+impl Render for WdfCrashDump {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        match self {
+            Self::Log(log) => print_log(log),
+            Self::Loader(drivers) => print_dump_drivers(drivers),
+        }
+    }
 }
 
 /// A labeled line of a detail view.
@@ -325,11 +584,6 @@ fn object_command(object: &WdfObject) -> String {
         ),
         _ => format!("!wdfkd.wdfobject {handle}"),
     }
-}
-
-fn print_handle(object: &WdfObject) {
-    print_object(object);
-    field("View", object_command(object));
 }
 
 fn print_object(object: &WdfObject) {
@@ -565,10 +819,7 @@ fn callback_text(callback: &WdfCallback) -> String {
 
 /// `IRP_MJ_READ`, with the minor function when it has a name or is not 0.
 fn location_function_text(location: &WdfIrpLocation) -> String {
-    let major = format!(
-        "IRP_MJ_{}",
-        irp_major_function_name(location.major_function)
-    );
+    let major = location.major_function_name();
     match irp_minor_function_name(location.major_function, location.minor_function) {
         Some(minor) => format!("{major} IRP_MN_{minor}"),
         None if location.minor_function != 0 => {
@@ -817,26 +1068,23 @@ fn print_io_target(target: &WdfIoTargetDetail) {
 pub fn ifr_entry_line(entry: &WdfLogEntry) -> String {
     let record = &entry.record;
     let time = record
-        .timestamp
-        .and_then(format_filetime_precise)
+        .timestamp_utc()
         .map(|time| format!("{time} "))
         .unwrap_or_default();
     match &entry.text {
-        Ok(text) => {
+        DiagnosticValue::Available(text) => {
             let function = entry
-                .message
-                .as_ref()
-                .and_then(|message| message.function.as_deref())
+                .function()
                 .map(|function| format!("{function} - "))
                 .unwrap_or_default();
             format!("{}: {time}{function}{text}", record.sequence)
         }
-        Err(why) => {
+        DiagnosticValue::Unavailable(why) => {
             let args: String = record.args.iter().map(|b| format!("{b:02x}")).collect();
             format!(
                 "{}: {time}{} #{} {}  {}",
                 record.sequence,
-                format_guid(&record.message_guid, GuidStyle::Braced),
+                record.message_guid_text(),
                 record.message_number,
                 ui::muted(&format!("({why})")),
                 args
@@ -874,124 +1122,6 @@ fn print_log(log: &WdfLogDump) {
         ),
     }
     outln!();
-}
-
-impl ReplState<'_> {
-    /// Evaluate a handle argument; a failure is reported.
-    fn wdf_handle_arg(&self, invocation: &CommandInvocation<'_>, command: &str) -> Option<u64> {
-        let Some(text) = invocation.arg(0) else {
-            outln!("{}\n", command_help(command));
-            return None;
-        };
-        self.eval_or_report(text).map(|value: VirtAddr| value.0)
-    }
-
-    fn cmd_wdfkd_wdfldr(&mut self) -> Result<()> {
-        match self.ctx.target.wdf_loader() {
-            Ok(loader) => print_loader(&loader),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_wdfkd_wdfdriverinfo(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let name = require_arg!(invocation, 0, "!wdfkd.wdfdriverinfo");
-        match self.ctx.target.wdf_driver_info(name) {
-            Ok(info) => print_driver_info(&info),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_wdfkd_wdfhandle(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(handle) = self.wdf_handle_arg(&invocation, "!wdfkd.wdfhandle") else {
-            return Ok(());
-        };
-        match self.ctx.target.wdf_handle(handle) {
-            Ok(object) => print_handle(&object),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_wdfkd_wdfdevice(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(handle) = self.wdf_handle_arg(&invocation, "!wdfkd.wdfdevice") else {
-            return Ok(());
-        };
-        match self.ctx.target.wdf_device(handle) {
-            Ok(device) => print_device(&device),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_wdfkd_wdfqueue(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(handle) = self.wdf_handle_arg(&invocation, "!wdfkd.wdfqueue") else {
-            return Ok(());
-        };
-        match self.ctx.target.wdf_queue(handle) {
-            Ok(queue) => print_queue(&queue),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_wdfkd_wdfobject(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(value) = self.wdf_handle_arg(&invocation, "!wdfkd.wdfobject") else {
-            return Ok(());
-        };
-        match self.ctx.target.wdf_object(value) {
-            Ok(object) => print_object_detail(&object),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_wdfkd_wdfrequest(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(handle) = self.wdf_handle_arg(&invocation, "!wdfkd.wdfrequest") else {
-            return Ok(());
-        };
-        match self.ctx.target.wdf_request(handle) {
-            Ok(request) => print_request(&request),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_wdfkd_wdfiotarget(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(handle) = self.wdf_handle_arg(&invocation, "!wdfkd.wdfiotarget") else {
-            return Ok(());
-        };
-        match self.ctx.target.wdf_io_target(handle) {
-            Ok(target) => print_io_target(&target),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_wdfkd_wdflogdump(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let name = require_arg!(invocation, 0, "!wdfkd.wdflogdump");
-        match self.ctx.target.wdf_log_dump(name) {
-            Ok(log) => print_log(&log),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_wdfkd_wdfcrashdump(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        match invocation.arg(0).map(str::to_ascii_lowercase).as_deref() {
-            None | Some("log") => match self.ctx.target.wdf_crash_log() {
-                Ok(log) => print_log(&log),
-                Err(error) => error!("{error}"),
-            },
-            Some("loader") => match self.ctx.target.wdf_crash_drivers() {
-                Ok(drivers) => print_dump_drivers(&drivers),
-                Err(error) => error!("{error}"),
-            },
-            Some(other) => error!("!wdfkd.wdfcrashdump: '{other}' is neither log nor loader"),
-        }
-        Ok(())
-    }
 }
 
 fn print_dump_drivers(drivers: &[WdfDumpDriver]) {
