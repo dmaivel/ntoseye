@@ -126,6 +126,21 @@ jobs:
               exit 1
             }
           fi
+      # crates.io's trusted publishing can only publish a crate that already
+      # exists there, so a crate's first version is published by hand. Refuse
+      # the tag before anything is released if ntoseye-macros was never
+      # published, rather than failing in publish-crate after the GitHub
+      # release and the PyPI upload.
+      - name: Check the crates exist on crates.io
+        if: needs.plan.outputs.publishing == 'true'
+        run: |
+          for crate in ntoseye-macros ntoseye; do
+            status="$(curl -s -o /dev/null -w '%{http_code}' -A 'ntoseye release workflow' "https://crates.io/api/v1/crates/$crate")"
+            test "$status" = 200 || {
+              echo "$crate is not on crates.io (HTTP $status): publish its first version by hand with cargo publish -p $crate and an API token, then add this workflow as its trusted publisher" >&2
+              exit 1
+            }
+          done
       # dist publishes CHANGELOG.md's section for the version as the release
       # notes (the release's title is its tag), and with no section it
       # publishes none without failing. Check with the parser dist 0.30.3 uses,
