@@ -76,7 +76,9 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   Breakpoints, Symbols, Files]`, `live_only`, `capability =
 ///   <DebugCapability>`;
 /// - overrides: `usage = "..."` (else generated from the arguments),
-///   `completion = [Strategy, ...]` (else from the argument types),
+///   `completion = [Strategy, ...]` (one per word; else from the argument
+///   types) or `completion = Strategy` (every word, as `repl_command!`'s
+///   bare `completion: Expression`),
 ///   `python_name = "..."` (else the function's name), `style = RawTail |
 ///   ExpressionTail` (the line is not split into words, for a `raw`
 ///   argument), and `flow = Quit` (the flow the command ends with).

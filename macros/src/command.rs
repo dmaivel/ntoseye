@@ -70,7 +70,7 @@ struct Options {
     live_only: bool,
     capability: Option<Ident>,
     usage: Option<LitStr>,
-    completion: Option<Vec<Ident>>,
+    completion: Option<Completion>,
     /// `None` is `python = none`: REPL only.
     python: Option<Ident>,
     python_name: Option<LitStr>,
@@ -116,7 +116,7 @@ impl Options {
                 "live_only" => live_only = true,
                 "capability" => capability = Some(meta.value()?.parse()?),
                 "usage" => usage = Some(meta.value()?.parse()?),
-                "completion" => completion = Some(ident_list(meta.value()?)?),
+                "completion" => completion = Some(Completion::parse(meta.value()?)?),
                 "python" => python = Some(meta.value()?.parse::<Ident>()?),
                 "python_name" => python_name = Some(meta.value()?.parse()?),
                 "style" => style = Some(meta.value()?.parse()?),
@@ -165,6 +165,23 @@ fn lit_list(input: syn::parse::ParseStream<'_>) -> Result<Vec<LitStr>> {
     Ok(Punctuated::<LitStr, Token![,]>::parse_terminated(&content)?
         .into_iter()
         .collect())
+}
+
+/// `completion = ...`: a bare strategy completes every word with it (as
+/// `repl_command!`'s `completion: Expression`), a list one per word.
+enum Completion {
+    All(Ident),
+    PerArg(Vec<Ident>),
+}
+
+impl Completion {
+    fn parse(input: syn::parse::ParseStream<'_>) -> Result<Self> {
+        if input.peek(syn::token::Bracket) {
+            ident_list(input).map(Self::PerArg)
+        } else {
+            input.parse().map(Self::All)
+        }
+    }
 }
 
 /// `[A, B]` or a single `A`.
@@ -572,9 +589,16 @@ impl Command {
 
     fn completion(&self) -> TokenStream {
         let strategy = |ident: &Ident| quote!(crate::repl::CompletionStrategy::#ident);
-        if let Some(list) = &self.options.completion {
-            let list = list.iter().map(strategy);
-            return quote!(crate::repl::CompletionSpec::PerArg(&[#(#list),*]));
+        match &self.options.completion {
+            Some(Completion::All(ident)) => {
+                let strategy = strategy(ident);
+                return quote!(crate::repl::CompletionSpec::All(#strategy));
+            }
+            Some(Completion::PerArg(list)) => {
+                let list = list.iter().map(strategy);
+                return quote!(crate::repl::CompletionSpec::PerArg(&[#(#list),*]));
+            }
+            None => {}
         }
         let list: Vec<TokenStream> = self
             .args
