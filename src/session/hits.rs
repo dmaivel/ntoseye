@@ -694,7 +694,9 @@ pub fn resolve_watchpoint_stop(
         Err(error) => Some(error.to_string()),
     };
     if breakpoint.one_shot {
-        breakpoints.remove(backend, target, breakpoint.id)?;
+        // Kept, hidden, until the next resume removes it, so the stop can
+        // still describe it (its kind, action and `when=`).
+        breakpoints.mark_one_shot_hit(breakpoint.id)?;
     }
 
     Ok(WatchpointStopAction::Hit {

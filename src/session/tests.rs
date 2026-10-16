@@ -3428,6 +3428,36 @@ fn a_covered_watch_address_on_a_stop_at_a_planted_site_leaves_the_site_its_hit()
     assert_eq!(breakpoint.id, 1);
 }
 
+/// A one-shot watchpoint's hit is a breakpoint stop that names it, as a
+/// software one-shot's is: it is kept, hidden, until the next resume removes
+/// it (`resume_with_disposition`), not removed before the stop could
+/// describe it.
+#[test]
+fn a_one_shot_watchpoint_hit_is_a_breakpoint_stop() {
+    let mut backend = MockBackend::default().without_debug_registers().running();
+    backend.set("rip", 0x1020);
+    backend.queue_interrupt(stub_watch_event(0x1002));
+    let map = backend.register_map.clone();
+    let mut session = session_with_mock(backend);
+    session.register_map = map;
+    session.breakpoints = manager_with_hw(0, HwBreakpointAccess::Write, true);
+    session.breakpoints.set_one_shot(7, true).unwrap();
+
+    let RunOutcome::Stopped(stop) = session.run(Motion::Wait, &Cancel::poll()).unwrap() else {
+        panic!("no stop surfaced");
+    };
+    assert_eq!(stop.breakpoint().map(|hit| hit.id), Some(7), "{stop:?}");
+    assert!(
+        session.breakpoints.list().is_empty(),
+        "a fired one-shot is listed"
+    );
+    assert_eq!(
+        session.breakpoints.one_shot_hit_ids(),
+        [7],
+        "not held for the next resume"
+    );
+}
+
 #[test]
 fn a_stub_with_no_debug_registers_attributes_an_execute_breakpoint_by_the_stopped_pc() {
     let manager = manager_with_hw(0, HwBreakpointAccess::Execute, true);

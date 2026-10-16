@@ -470,8 +470,8 @@ impl Session {
             HitVerdict::Taken { condition_error } => condition_error.or(unchecked),
         };
         if breakpoint.one_shot {
-            let (breakpoints, backend, target) = self.breakpoint_sites();
-            breakpoints.remove(backend, target, breakpoint.id)?;
+            // Kept, hidden, until the next resume removes it.
+            self.breakpoints.mark_one_shot_hit(breakpoint.id)?;
         }
         let shown = self.enter_partition(partition).and_then(|()| match vp {
             Some(vp) => self.set_current_thread(&vp_thread_id(partition, vp)),
