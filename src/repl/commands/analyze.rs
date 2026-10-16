@@ -1358,22 +1358,20 @@ fn triage(session: &mut Session) -> Result<TriageReport> {
 /// Find what a hung system is doing (`!analyze -hang`): the thread on each
 /// processor with its stack, and the waiting threads with the most pending
 /// IRPs. The target must be a kernel.
-#[command(form_of = analyze, python = Inspect)]
+#[command(form_of = analyze, python = Inspect, target = Kernel)]
 fn hang(session: &mut Session) -> Result<HangReport> {
-    session.target.require_kernel()?;
     Ok(gather_hang_report(session))
 }
 
 /// Decode a bugcheck code and its parameters as if the target had stopped
 /// with it (`!analyze -show`), and for a DRIVER_POWER_STATE_FAILURE (0x9F),
 /// read what its parameters point to. The target must be a kernel.
-#[command(form_of = analyze, python = Inspect)]
+#[command(form_of = analyze, python = Inspect, target = Kernel)]
 fn decode_bugcheck(
     session: &mut Session,
     code: u32,
     #[arg(sdk, default = Vec::new(), positional)] parameters: Vec<u64>,
 ) -> Result<BugcheckDecoding> {
-    session.target.require_kernel()?;
     let mut slots = [0u64; 4];
     for (slot, value) in slots.iter_mut().zip(&parameters) {
         *slot = *value;

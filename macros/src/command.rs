@@ -77,9 +77,9 @@ fn grammar_path(parser: &Path) -> TokenStream {
 /// A form: one more SDK method of the command it names, from a function the
 /// command's REPL operation calls. It has no REPL presence of its own (the
 /// command's spec, usage and help cover it) and admits the command's
-/// effects, which the command hands it as `__FORM_<command>_<form>`; that
+/// effects, which the command hands it as `__FORM_<command>_<form>` (that
 /// constant exists only when the command lists the form in `forms`, so the
-/// two must agree.
+/// two must agree), with the effects the form declares in their place.
 fn expand_form(form: FormOptions, mut function: ItemFn) -> Result<TokenStream> {
     let receiver = Receiver::parse(&function)?;
     if receiver == Receiver::Repl {
@@ -127,7 +127,8 @@ fn expand_form(form: FormOptions, mut function: ItemFn) -> Result<TokenStream> {
         .filter(|attr| attr.path().is_ident("doc"))
         .map(docstring_line)
         .collect();
-    let effects = format_ident!("__FORM_{}_{}", form.command, function.sig.ident);
+    let base = format_ident!("__FORM_{}_{}", form.command, function.sig.ident);
+    let effects = form.effects.over(&base);
     let method = Method {
         function: &function.sig.ident,
         python_name: form.python_name.as_ref(),
@@ -135,7 +136,7 @@ fn expand_form(form: FormOptions, mut function: ItemFn) -> Result<TokenStream> {
         receiver,
         args: &args,
         output: &output,
-        effects: quote!(&#effects),
+        effects,
         run: None,
     };
     let python = form
@@ -205,6 +206,50 @@ struct FormOptions {
     command: Ident,
     python: Vec<Ident>,
     python_name: Option<LitStr>,
+    /// The effects the form declares in place of its command's: a form
+    /// that writes (`!gflag`'s set form), or one that needs more of the
+    /// target than the command's other forms.
+    effects: EffectOptions,
+}
+
+/// The effects a form declares; each one it leaves out is its command's.
+struct EffectOptions {
+    target: Option<Ident>,
+    state: Option<Ident>,
+    run: Option<Ident>,
+    writes: Option<Vec<Ident>>,
+    live_only: bool,
+    capability: Option<Ident>,
+}
+
+impl EffectOptions {
+    /// The form's effects: `base` (its command's) with what it declares.
+    fn over(&self, base: &Ident) -> TokenStream {
+        let effects = quote!(crate::session::effects);
+        let mut fields = Vec::new();
+        if let Some(target) = &self.target {
+            fields.push(quote!(target: #effects::TargetScope::#target));
+        }
+        if let Some(state) = &self.state {
+            fields.push(quote!(state: #effects::RunState::#state));
+        }
+        if let Some(run) = &self.run {
+            fields.push(quote!(run: #effects::RunEffect::#run));
+        }
+        if let Some(writes) = &self.writes {
+            fields.push(quote!(writes: &[#(#effects::Writes::#writes),*]));
+        }
+        if self.live_only {
+            fields.push(quote!(live_only: true));
+        }
+        if let Some(capability) = &self.capability {
+            fields.push(quote!(capability: Some(crate::dbg_backend::DebugCapability::#capability)));
+        }
+        if fields.is_empty() {
+            return quote!(&#base);
+        }
+        quote!(&const { #effects::Effects { #(#fields,)* ..#base } })
+    }
 }
 
 /// What `#[command(...)]` declares: a command, or a form of one.
@@ -238,7 +283,18 @@ impl Attr {
                 .get_ident()
                 .map(Ident::to_string)
                 .unwrap_or_default();
-            if !matches!(key.as_str(), "form_of" | "python" | "python_name") {
+            if !matches!(
+                key.as_str(),
+                "form_of"
+                    | "python"
+                    | "python_name"
+                    | "target"
+                    | "state"
+                    | "run"
+                    | "writes"
+                    | "live_only"
+                    | "capability"
+            ) {
                 command_keys.push(meta.path.span());
             }
             match key.as_str() {
@@ -286,8 +342,8 @@ impl Attr {
             if let Some(key) = command_keys.first() {
                 return Err(Error::new(
                     *key,
-                    "a form takes only `form_of`, `python` and `python_name`: its command \
-                     declares the rest",
+                    "a form takes only `form_of`, `python`, `python_name` and the effects it \
+                     changes: its command declares the rest",
                 ));
             }
             let python = python.ok_or_else(|| missing("python"))?;
@@ -301,6 +357,14 @@ impl Attr {
                 command,
                 python,
                 python_name,
+                effects: EffectOptions {
+                    target,
+                    state,
+                    run,
+                    writes: (!writes.is_empty()).then_some(writes),
+                    live_only,
+                    capability,
+                },
             }));
         }
         let names: Vec<LitStr> = names.ok_or_else(|| missing("names"))?;

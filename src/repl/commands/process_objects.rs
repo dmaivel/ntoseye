@@ -177,7 +177,7 @@ fn global_flags(session: &Session) -> Result<GlobalFlags> {
 /// which replaces nt!NtGlobalFlag. It is one 4-byte write to
 /// nt!NtGlobalFlag; the PEB copy does not change. The result's `change`
 /// has the value before and after.
-#[command(form_of = gflag, python = Inspect)]
+#[command(form_of = gflag, python = Inspect, writes = [Memory])]
 fn set_global_flags(session: &Session, change: GlobalFlagChange) -> Result<GlobalFlags> {
     let target = &session.target;
     let change = target.change_global_flag(change)?;

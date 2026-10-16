@@ -170,7 +170,10 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// before and calls the form it names (usually; a form may also be an SDK
 /// operation the REPL reaches its own way), returning a REPL-only enum of
 /// their results. A form has no help or reference entry of its own; its SDK
-/// method admits the command's effects. Its arguments are all the method's:
+/// method admits the command's effects, except those the form declares in
+/// their place (`target`, `state`, `run`, `writes`, `live_only`,
+/// `capability`): `!gflag`'s set form declares `writes = [Memory]`. Its
+/// arguments are all the method's:
 /// `Option<T>`, `default`, `positional` and `receiver` apply (a REPL-only
 /// option is refused), so a form can take what the REPL grammar has no word
 /// for, such as an object handle (`PyArg for ProcessInfo` takes a `Process`).
