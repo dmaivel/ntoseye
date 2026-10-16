@@ -150,6 +150,7 @@ reference/expressions
 :hidden:
 :caption: Internals
 
+internals/architecture
 internals/kd-reads
 Rust crate API (docs.rs) <https://docs.rs/ntoseye/latest/ntoseye/>
 ```
