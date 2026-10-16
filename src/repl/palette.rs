@@ -5,7 +5,7 @@
 use reedline::{EditCommand, Reedline, SearchDirection, SearchQuery};
 
 use super::native::palette::{self, Catalog, CommandEntry, Tab};
-use super::{CompletionStrategy, ReplState, TargetRequirement, command_registry};
+use super::{CompletionStrategy, ReplState, command_registry};
 use crate::target::TargetKind;
 
 /// The host command Alt+P sends the REPL loop.
@@ -27,6 +27,7 @@ impl ReplState<'_> {
 
     /// What the palette offers, with `recent` as the recent lines.
     pub fn palette_catalog(&self, recent: Vec<String>) -> Catalog {
+        self.caches.refresh_loaded_symbols(&self.ctx.target);
         Catalog {
             recent,
             commands: self.palette_commands(),
@@ -54,9 +55,7 @@ impl ReplState<'_> {
         // A user-mode minidump refuses the kernel commands (see `help`).
         let user_dump = self.ctx.target.kind() == TargetKind::UserDump;
         for (_, spec) in command_registry().command_names() {
-            if !seen.insert(spec.names[0])
-                || (user_dump && spec.target == TargetRequirement::Kernel)
-            {
+            if !seen.insert(spec.names[0]) || (user_dump && spec.effects.target.needs_kernel()) {
                 continue;
             }
             commands.push(CommandEntry {

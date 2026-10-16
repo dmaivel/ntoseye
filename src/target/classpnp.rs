@@ -8,14 +8,17 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::{Target, bounded_list_walk};
-use crate::backend::MemoryOps;
+use ntoseye_macros::record;
+
+use super::{Target, bounded_record_list_walk};
+use crate::bytes::before_nul;
 use crate::cpu_state::processor_count;
 use crate::error::{Error, Result};
 use crate::kuser_shared::KuserSharedData;
 use crate::layout::{StructRef, TypeInfo, Types, le_uint};
-use crate::target::srb::Srb;
-use crate::target::virtio_request::sense_text;
+use crate::memory::MemoryOps;
+use crate::target::srb::{Srb, srb_status_text};
+use crate::target::virtio_request::{scsi_command, sense_text};
 use crate::types::VirtAddr;
 
 const MAX_CLASS_DEVICES: usize = 1024;
@@ -28,40 +31,53 @@ const MAX_DESCRIPTOR: u64 = 0x1000;
 /// `IO_TYPE_DEVICE`, the `Type` of a `DEVICE_OBJECT`.
 const IO_TYPE_DEVICE: u64 = 3;
 
-/// A device's transfer packets: how many classpnp allocated, how many are
-/// free, and the ones it has sent down the stack.
-#[derive(Debug, Clone, Default)]
-pub struct ClassPackets {
-    /// The packets on `AllTransferPacketsList`.
-    pub total: u64,
-    /// Those on a free list: a NUMA node's, a processor's, or the one
-    /// packet classpnp keeps for forward progress.
-    pub free: u64,
-    pub in_flight: Vec<TransferPacket>,
-    /// Why a walk of the packets stopped short.
-    pub stopped: Vec<String>,
+/// A device's transfer packets as [`Target::class_packets`] walks them,
+/// which [`ClassDevice`] takes field by field.
+#[derive(Default)]
+struct ClassPackets {
+    total: u64,
+    free: u64,
+    in_flight: Vec<ClassTransferPacket>,
+    stopped: Vec<String>,
 }
 
 /// A transfer packet (`_TRANSFER_PACKET`) classpnp has sent down the stack
 /// and not seen completed.
-#[derive(Debug, Clone)]
-pub struct TransferPacket {
+#[record(impl)]
+pub struct ClassTransferPacket {
     pub address: VirtAddr,
     /// The IRP classpnp sent down, and the client's IRP it serves.
     pub irp: VirtAddr,
     pub original_irp: VirtAddr,
     pub srb: VirtAddr,
-    /// The SRB, decoded, or why it does not decode.
+    /// The SRB, decoded, or why it does not decode (empty in a listing,
+    /// which does not decode them).
+    #[record(skip)]
     pub request: std::result::Result<Srb, String>,
-    pub retries: u8,
+    pub retries_left: u8,
     pub timed_out: bool,
 }
 
+#[record]
+impl ClassTransferPacket {
+    /// The SRB, decoded.
+    #[record(getter)]
+    pub fn request(&self) -> Option<Srb> {
+        self.request.as_ref().ok().cloned()
+    }
+
+    /// Why `request` does not decode.
+    #[record(getter)]
+    pub fn request_error(&self) -> Option<String> {
+        self.request.as_ref().err().cloned()
+    }
+}
+
 /// A storage class device as `!storagekd.storclass` lists it.
-#[derive(Debug, Clone)]
+#[record]
 pub struct ClassDevice {
     /// `_CLASS_PRIVATE_FDO_DATA`, the entry on `classpnp!AllFdosList`.
-    pub private: VirtAddr,
+    pub private_data: VirtAddr,
     /// The FDO and its `_FUNCTIONAL_DEVICE_EXTENSION`; `None` when no
     /// transfer packet names the FDO.
     pub fdo: Option<VirtAddr>,
@@ -77,29 +93,65 @@ pub struct ClassDevice {
     pub bus_type: Option<String>,
     pub removable: bool,
     pub boot_device: bool,
-    pub packets: ClassPackets,
+    /// The transfer packets classpnp allocated (on
+    /// `AllTransferPacketsList`).
+    pub packets_total: u64,
+    /// Those on a free list: a NUMA node's, a processor's, or the one
+    /// packet classpnp keeps for forward progress.
+    pub packets_free: u64,
+    /// The packets classpnp has sent down the stack.
+    pub in_flight: Vec<ClassTransferPacket>,
+    /// Why a walk of the packets stopped short.
+    pub packets_stopped: Vec<String>,
 }
 
 /// One error classpnp logged (`_CLASS_ERROR_LOG_DATA`): the SRB that failed
 /// and its sense data.
-#[derive(Debug, Clone)]
-pub struct ClassErrorLogEntry {
+#[record(impl)]
+pub struct ClassError {
     pub tick: u64,
     /// Seconds from the error to the guest's current tick count.
+    #[record(skip)]
     pub age_seconds: Option<f64>,
-    pub port: u32,
+    /// `None` where classpnp did not know the port (it logs -1).
+    pub port: Option<u32>,
+    pub path: u8,
+    pub target: u8,
+    pub lun: u8,
     pub paging: bool,
     pub retried: bool,
     pub unhandled: bool,
+    #[record(hex)]
     pub srb_status: u8,
+    #[record(hex)]
     pub scsi_status: u8,
-    pub path_target_lun: (u8, u8, u8),
     pub cdb: Vec<u8>,
     pub sense: Option<String>,
 }
 
+#[record]
+impl ClassError {
+    /// Milliseconds from the error to the guest's current tick count.
+    #[record(getter)]
+    pub fn age_ms(&self) -> Option<u64> {
+        self.age_seconds.map(|seconds| (seconds * 1000.0) as u64)
+    }
+
+    /// The SRB status by name, with `QUEUE_FROZEN` and `AUTOSENSE_VALID`.
+    #[record(getter)]
+    pub fn srb_status_text(&self) -> String {
+        srb_status_text(self.srb_status)
+    }
+
+    /// The CDB's command, with its LBA and block count when it has them.
+    #[record(getter)]
+    pub fn command(&self) -> Option<String> {
+        scsi_command(&self.cdb)
+    }
+}
+
 /// One storage class device in detail.
-#[derive(Debug, Clone)]
+#[record]
 pub struct ClassDeviceDetail {
     pub device: ClassDevice,
     /// The lower device object, and the PDO under the stack.
@@ -113,13 +165,23 @@ pub struct ClassDeviceDetail {
     pub max_retries: u8,
     pub error_count: u32,
     /// The errors still in the 16-entry log, oldest first.
-    pub errors: Vec<ClassErrorLogEntry>,
+    pub errors: Vec<ClassError>,
+}
+
+/// A class device whose private data does not read.
+#[record]
+pub struct ClassUnreadable {
+    pub private_data: VirtAddr,
+    pub error: String,
 }
 
 /// The storage class devices on `classpnp!AllFdosList`.
-#[derive(Debug, Clone)]
-pub struct ClassDeviceList {
-    pub devices: Vec<std::result::Result<ClassDevice, (VirtAddr, String)>>,
+#[record]
+pub struct ClassDevices {
+    pub devices: Vec<ClassDevice>,
+    /// The entries whose private data does not read, in list order.
+    pub unreadable: Vec<ClassUnreadable>,
+    /// Why the walk of the list stopped short of its head.
     pub stopped: Option<String>,
 }
 
@@ -136,9 +198,9 @@ fn class_layout(types: Types<'_>, name: &str) -> Result<Arc<TypeInfo>> {
 /// `None` for offset 0 (no string) or one past the bytes read.
 fn descriptor_string(bytes: &[u8], offset: u64) -> Option<String> {
     let start = usize::try_from(offset).ok().filter(|&start| start != 0)?;
-    let rest = bytes.get(start..)?;
-    let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
-    let text = String::from_utf8_lossy(&rest[..end]).trim().to_string();
+    let text = String::from_utf8_lossy(before_nul(bytes.get(start..)?))
+        .trim()
+        .to_string();
     (!text.is_empty()).then_some(text)
 }
 
@@ -185,26 +247,33 @@ impl Target {
             })?;
         let link = class.private.field_offset("AllFdosListEntry")?;
         let memory = self.kernel_address_space();
-        let (links, termination) =
-            bounded_list_walk(head, MAX_CLASS_DEVICES, |at| memory.read::<VirtAddr>(at));
-        Ok((
-            links.into_iter().map(|at| at - link).collect(),
-            termination.diagnostic(),
-        ))
+        let (privates, termination) =
+            bounded_record_list_walk(head, link, MAX_CLASS_DEVICES, |at| {
+                memory.read::<VirtAddr>(at)
+            });
+        Ok((privates, termination.diagnostic()))
     }
 
     /// The storage class devices on `classpnp!AllFdosList`.
-    pub fn classpnp_devices(&self) -> Result<ClassDeviceList> {
+    pub fn classpnp_devices(&self) -> Result<ClassDevices> {
         let class = self.class_types()?;
         let (privates, stopped) = self.class_private_list(&class)?;
-        let devices = privates
-            .into_iter()
-            .map(|private| {
-                self.class_device(&class, private, false)
-                    .map_err(|error| (private, error.to_string()))
-            })
-            .collect();
-        Ok(ClassDeviceList { devices, stopped })
+        let mut devices = Vec::new();
+        let mut unreadable = Vec::new();
+        for private in privates {
+            match self.class_device(&class, private, false) {
+                Ok(device) => devices.push(device),
+                Err(error) => unreadable.push(ClassUnreadable {
+                    private_data: private,
+                    error: error.to_string(),
+                }),
+            }
+        }
+        Ok(ClassDevices {
+            devices,
+            unreadable,
+            stopped,
+        })
     }
 
     /// The class device at `address`: its FDO, its device extension, or its
@@ -305,7 +374,7 @@ impl Target {
             });
         let fdo = extension.and(fdo);
         let mut device = ClassDevice {
-            private,
+            private_data: private,
             fdo,
             extension,
             driver: None,
@@ -317,7 +386,10 @@ impl Target {
             bus_type: None,
             removable: false,
             boot_device: private_data.read_uint("IsBootDevice")? != 0,
-            packets,
+            packets_total: packets.total,
+            packets_free: packets.free,
+            in_flight: packets.in_flight,
+            packets_stopped: packets.stopped,
         };
         if let (Some(fdo), Some(extension)) = (fdo, extension) {
             let fde = class.at(&class.extension, extension).prefetch();
@@ -392,14 +464,15 @@ impl Target {
         let mut packets = ClassPackets::default();
         let all = private.addr() + private.layout().field_offset("AllTransferPacketsList")?;
         let list_link = class.packet.field_offset("AllPktsListEntry")?;
-        let (links, termination) =
-            bounded_list_walk(all, MAX_TRANSFER_PACKETS, |at| memory.read::<VirtAddr>(at));
+        let (all_packets, termination) =
+            bounded_record_list_walk(all, list_link, MAX_TRANSFER_PACKETS, |at| {
+                memory.read::<VirtAddr>(at)
+            });
         packets.stopped.extend(
             termination
                 .diagnostic()
                 .map(|why| format!("packet list: {why}")),
         );
-        let all_packets: Vec<VirtAddr> = links.into_iter().map(|at| at - list_link).collect();
 
         // classpnp frees a packet to its processor's list, and moves packets
         // between those and the per-node lists; a packet on neither, nor
@@ -482,13 +555,13 @@ impl Target {
             } else {
                 self.decode_srb(srb).map_err(|error| error.to_string())
             };
-            packets.in_flight.push(TransferPacket {
+            packets.in_flight.push(ClassTransferPacket {
                 address,
                 irp: packet.read_pointer("Irp")?,
                 original_irp: packet.read_pointer("OriginalIrp")?,
                 srb,
                 request,
-                retries: packet.read_uint("NumRetries")? as u8,
+                retries_left: packet.read_uint("NumRetries")? as u8,
                 timed_out: packet.read_uint("TimedOut")? != 0,
             });
         }
@@ -512,7 +585,7 @@ impl Target {
         &self,
         class: &ClassTypes<'_>,
         private: &StructRef<'_>,
-    ) -> Result<Vec<ClassErrorLogEntry>> {
+    ) -> Result<Vec<ClassError>> {
         let layout = class_layout(class.types, "_CLASS_ERROR_LOG_DATA")?;
         let entry_size = layout.size as u64;
         let logs_at = private.addr() + private.layout().field_offset("ErrorLogs")?;
@@ -542,22 +615,21 @@ impl Target {
             let mut cdb = srb.read_field_bytes("Cdb", 16)?;
             cdb.truncate(cdb_length);
             let sense = entry.read_field_bytes("SenseData", 18)?;
-            errors.push(ClassErrorLogEntry {
+            let port = entry.read_uint("PortNumber")? as u32;
+            errors.push(ClassError {
                 tick,
                 age_seconds: now.zip(increment).and_then(|(now, increment)| {
                     (now >= tick).then(|| (now - tick) as f64 * f64::from(increment) / 10_000_000.0)
                 }),
-                port: entry.read_uint("PortNumber")? as u32,
+                port: (port != u32::MAX).then_some(port),
                 paging: entry.read_bits("ErrorPaging")? != 0,
                 retried: entry.read_bits("ErrorRetried")? != 0,
                 unhandled: entry.read_bits("ErrorUnhandled")? != 0,
                 srb_status: srb.read_uint("SrbStatus")? as u8,
                 scsi_status: srb.read_uint("ScsiStatus")? as u8,
-                path_target_lun: (
-                    srb.read_uint("PathId")? as u8,
-                    srb.read_uint("TargetId")? as u8,
-                    srb.read_uint("Lun")? as u8,
-                ),
+                path: srb.read_uint("PathId")? as u8,
+                target: srb.read_uint("TargetId")? as u8,
+                lun: srb.read_uint("Lun")? as u8,
                 cdb,
                 sense: sense_text(&sense),
             });

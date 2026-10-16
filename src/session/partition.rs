@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::mem;
 
 use crate::breakpoints::{
-    Breakpoint, BreakpointConfig, BreakpointHitDisposition, BreakpointManager, PartitionFilter,
+    BreakpointConfig, BreakpointHitDisposition, BreakpointInfo, BreakpointManager, PartitionFilter,
     StepFrame,
 };
 use crate::dbg_backend::{DebugBackend, DebugCapability, StopEvent};
@@ -20,7 +20,7 @@ use crate::partition_backend::{PartitionBackend, PartitionVp};
 use crate::session::context::{
     refresh_windows_thread_context_for_backend_thread, update_target_context_from_registers,
 };
-use crate::session::{Session, StopResolution};
+use crate::session::{Selection, Session, StopResolution};
 use crate::target::Target;
 use crate::types::VirtAddr;
 
@@ -227,6 +227,38 @@ impl Session {
         self.partition_view.as_ref().map(|view| view.partition)
     }
 
+    /// Put back `selection`, taken with [`Self::take_selection`] in another
+    /// view than the one shown now (a scoped operation entered or left a
+    /// partition's, as `Debugger.select_partition` does). The view shown
+    /// keeps its own thread and selection. A selection of the target goes
+    /// back on the target and its backend, which the view now hides, with
+    /// the live register file lent to the operation (`lent`) when it was; a
+    /// guest partition's is dropped, as its target's selection is reset
+    /// when it is shown again.
+    pub fn restore_selection_behind_view(
+        &mut self,
+        mut selection: Selection,
+        lent: bool,
+    ) -> Result<()> {
+        if selection.partition.is_some() {
+            return Ok(());
+        }
+        let Some(view) = &mut self.partition_view else {
+            return Ok(());
+        };
+        if lent {
+            selection.put_live_registers(view.target.registers.take());
+        }
+        view.target.restore_selection(selection.target);
+        let switched = if view.thread == selection.current_thread {
+            Ok(())
+        } else {
+            view.backend.set_current_thread(&selection.current_thread)
+        };
+        view.thread = selection.current_thread;
+        switched
+    }
+
     /// Refuse `operation`, an instruction walk (`tc`, `pa`, `wt`), while a
     /// partition view is shown: each step there is a run of the target to
     /// the partition's breakpoints, too slow to walk with.
@@ -248,6 +280,15 @@ impl Session {
         match &mut self.partition_view {
             Some(view) => (&mut self.breakpoints, view.backend.as_mut(), &view.target),
             None => (&mut self.breakpoints, self.backend.as_mut(), &self.target),
+        }
+    }
+
+    /// The backend that runs and steps the target: the target's, also while
+    /// a partition view is shown, whose own backend runs nothing.
+    pub fn run_backend(&self) -> &dyn DebugBackend {
+        match &self.partition_view {
+            Some(view) => view.backend.as_ref(),
+            None => self.backend.as_ref(),
         }
     }
 
@@ -379,7 +420,7 @@ impl Session {
     /// surfaces in the target's view, saying what was not checked.
     pub(super) fn partition_hit(
         &mut self,
-        breakpoint: Breakpoint,
+        breakpoint: BreakpointInfo,
         partition: u64,
         vp: Option<u32>,
         event: StopEvent,
@@ -429,8 +470,8 @@ impl Session {
             HitVerdict::Taken { condition_error } => condition_error.or(unchecked),
         };
         if breakpoint.one_shot {
-            let (breakpoints, backend, target) = self.breakpoint_sites();
-            breakpoints.remove(backend, target, breakpoint.id)?;
+            // Kept, hidden, until the next resume removes it.
+            self.breakpoints.mark_one_shot_hit(breakpoint.id)?;
         }
         let shown = self.enter_partition(partition).and_then(|()| match vp {
             Some(vp) => self.set_current_thread(&vp_thread_id(partition, vp)),
@@ -466,7 +507,7 @@ enum HitVerdict {
 fn judge_partition_hit(
     breakpoints: &mut BreakpointManager,
     mut target: Option<&mut Target>,
-    breakpoint: &Breakpoint,
+    breakpoint: &BreakpointInfo,
     partition: u64,
     vp: Option<u32>,
 ) -> Result<HitVerdict> {

@@ -1,3 +1,8 @@
+//! Breakpoint commands: setting code, hardware and hypervisor breakpoints,
+//! listing them, and changing or clearing them by ID. The SDK's form is the
+//! live `Breakpoint` handles of `dbg.breakpoints`, whose data is the same
+//! [`BreakpointInfo`] record `bl` lists.
+
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -8,8 +13,8 @@ use tabled::settings::Padding;
 use owo_colors::OwoColorize;
 
 use crate::breakpoints::{
-    Breakpoint, BreakpointConfig, BreakpointManager, BreakpointScope, BreakpointSpec,
-    HypercallFilter, ThreadScope,
+    BreakpointCommands, BreakpointConfig, BreakpointId, BreakpointInfo, BreakpointScope,
+    BreakpointSpec, HypercallFilter, ThreadScope,
 };
 use crate::dbg_backend::HwBreakpointAccess;
 use crate::diagnostics;
@@ -17,167 +22,920 @@ use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix, parse_number_literal_text};
 use crate::guest::hypercalls;
 use crate::guest::vm_exits::{self, ExitFilter};
-use crate::session::InstructionBoundary;
+use crate::session::Session;
 use crate::target::decimal_pid_literal;
 use crate::ui;
+use ntoseye_macros::{command, grammar};
 
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::commands::thread::ThreadResolution;
 use crate::repl::*;
-use crate::types::{Dtb, VirtAddr};
+use crate::types::VirtAddr;
 
-repl_command! {
-    cmd_bp;
-    names: ["bp"],
-    usage: "bp [/1] [/a] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <address|file:line> [<passes>] [if <expr>] [do <commands>]",
-    summary: "Set a breakpoint.",
-    details: "The breakpoint replaces the first byte of the instruction at the address, so an instruction must start there. ntoseye confirms one by the symbol at the address, or by decoding from the start of the function around it, and refuses an address inside an instruction. When nothing near the address says where instructions start, or that code cannot be read, bp sets the breakpoint and warns that it could not check. /a skips the check. A file:line sets a source breakpoint, as bu does.",
-    completion: Expression,
-    run_state: Halted,
-}
-repl_command! {
-    cmd_bu;
-    names: ["bu"],
-    usage: "bu [/1] [/a] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <symbol|file:line> [<passes>] [if <expr>] [do <commands>]",
-    summary: "Set a deferred symbolic breakpoint.",
-    details: "A symbol with an offset, such as mydriver!DriverEntry+0x20, must name the start of an instruction, which ntoseye checks as bp does. Until the symbol resolves nothing says where its instructions start, so bu sets the breakpoint and warns that it could not check. /a skips the check. A file:line sets a source breakpoint on each address the line has.",
-    completion: Expression,
-    run_state: Halted,
-}
-
-repl_command! {
-    cmd_bm;
-    names: ["bm"],
-    usage: "bm [/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <symbol-pattern> [<passes>] [if <expr>] [do <commands>]",
-    summary: "Set deferred symbolic breakpoints on the symbols that match a pattern.",
-    details: "Only code symbols match, so bm skips the data symbols that the pattern also matches.",
-    completion: Expression,
-    run_state: Halted,
-}
-
-repl_command! {
-    cmd_ba;
-    names: ["ba"],
-    usage: "ba [/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <access><size> <address> [<passes>] [if <expr>] [do <commands>]",
-    summary: "Set a hardware (debug-register) breakpoint.",
-    details: "The access is e=execute, r=read/write, or w=write, and the size is 1, 2, 4, or 8 bytes. An execute breakpoint has size 1. The command is not available on a dump or on the `memory` backend. Example: ba w4 nt!MyGlobal. In VTL1 (the .vtl 1 view or a vCPU stopped in VTL1), ntoseye accepts only `ba e1`, and only on GDB backends. This breakpoint is global, so you cannot use /p or /t, which name NT processes and threads. Example: .vtl 1; ba e1 securekernel!SkeSelectProcessAddressSpace; g",
-    completion: [None, Expression],
-    run_state: Halted,
-}
-
-repl_command! {
-    cmd_hvbp;
-    names: ["!hvbp"],
-    usage: "!hvbp [/1] [/c <processor>] [/w \"<expr>\"] <code|name> [partition-id [vp-index]] [if <expr>] [do <commands>]",
-    summary: "Set a breakpoint that stops on a hypercall to the Windows hypervisor, optionally only from one partition or VP.",
-    details: "Sets a hardware execute breakpoint on the hypercall's handler, which the hypervisor's hypercall table gives (see !hvcalls), so it needs the gdb backend and a free debug register. The call is a call code, in the current radix, or its name: the TLFS name (HvCallPostMessage) or the name x hv!* shows (HvCall0004). Many codes share a handler, HvCallUnimplemented's for every code that is not implemented, so at each hit ntoseye reads the caller's call code from its RCX and resumes the target without a stop when it is another. The caller is the VP whose exit the processor handles: the guest partition's VP it serves, or the root partition's VP. With a partition ID, and a VP index in it, the breakpoint stops only for that caller; the IDs use the current radix, and ntoseye refuses a partition or VP that the hypervisor does not have. A hit whose caller ntoseye cannot tell, or whose caller matches but whose registers it cannot read, stops, so the filter does not hide a hit. /1, /c, /w, if, and do work as for ba; a condition sees the caller's registers at its VMCALL (as !hvcall decodes them), not the hypervisor's at the handler, and stops the hit with an error when they are not known. The command takes no pass count: set it with bpp. bl shows the filter. Needs the VM's hv-evmcs enlightenment. Example: !hvbp HvCallSendSyntheticClusterIpi 3; g",
-    run_state: Halted,
-    target: Kernel,
+/// What a breakpoint command set, as the REPL reports it.
+pub enum BreakpointsSet {
+    /// `bp`: a breakpoint at an address, and why ntoseye could not confirm
+    /// that an instruction starts there.
+    Address {
+        breakpoint: BreakpointInfo,
+        address: VirtAddr,
+        warning: Option<String>,
+    },
+    /// `bu`: a symbolic breakpoint.
+    Symbolic {
+        breakpoint: BreakpointInfo,
+        spec: String,
+        warning: Option<String>,
+    },
+    /// `bp`/`bu` given `file:line`: a breakpoint on each address it has.
+    Source {
+        breakpoints: Vec<BreakpointInfo>,
+        spec: String,
+    },
+    /// `bm`: how many matches it set, and those that failed.
+    Pattern {
+        count: usize,
+        limited: bool,
+        errors: Vec<String>,
+        spec: String,
+    },
+    /// `ba`.
+    Hardware {
+        breakpoint: BreakpointInfo,
+        address: VirtAddr,
+        access: HwBreakpointAccess,
+        len: u8,
+        condition: Option<String>,
+    },
+    /// `!hvbp` (`hypercall`) or `!hvexit` (`VM-exit`).
+    Hypervisor {
+        kind: &'static str,
+        breakpoint: Option<BreakpointInfo>,
+    },
 }
 
-repl_command! {
-    cmd_hvexit;
-    names: ["!hvexit"],
-    usage: "!hvexit [/1] [/c <processor>] [/w \"<expr>\"] <reason> [partition-id [vp-index]] [if <expr>] [do <commands>]",
-    summary: "Set a breakpoint that stops on a VM exit to the Windows hypervisor by its reason, optionally only from one partition or VP.",
-    details: "Sets a hardware execute breakpoint on the hypervisor's VM-exit entry point (hv!VmExitEntry, the host RIP of every eVMCS), so it needs the gdb backend, the VM's hv-evmcs enlightenment and a free debug register. The reason is a basic exit reason (Intel SDM Appendix C), as a decimal or 0x number, or a name as !hvvps shows it: cpuid, rdmsr, wrmsr, io_instruction, ept_violation, vmcall, hlt. Every exit enters there, so at each hit ntoseye reads the reason from the eVMCS the processor has loaded and resumes the target without a stop when it is another; the guest runs far slower while the breakpoint is set. With a guest partition's ID it rarely stops: that partition's VPs run only when the root partition's NT runs them, which it barely does then; !hvbp stops on a guest's hypercalls without slowing the rest. The caller is the VP whose exit it is, as for !hvbp: with a partition ID, and a VP index in it, the breakpoint stops only for that caller. The condition is evaluated on the caller's registers at its exit and reads the caller's memory. Example: !hvexit cpuid 6 if @rax==0x40000000",
-    run_state: Halted,
-    target: Kernel,
+/// What `bc`, `bd` or `be` did to each breakpoint it named: done, or why
+/// not.
+pub struct BreakpointUpdates {
+    verb: &'static str,
+    results: Vec<(u32, Option<String>)>,
 }
 
-repl_command! {
-    cmd_bl();
-    names: ["bl"],
-    usage: "bl",
-    summary: "List all breakpoints.",
-    details: "The status column shows `e` for enabled, `d` for disabled, or `o` for owed. An owed breakpoint is a kernel code breakpoint that waits for its page to become resident.",
+/// The words of a breakpoint-setting line, with their quoting kept: a
+/// quoted word is the command string.
+fn breakpoint_words<'a>(cursor: &mut ArgCursor<'a>) -> Vec<Cow<'a, str>> {
+    cursor.take_all(|_| true)
 }
 
-repl_command! {
-    cmd_bpcmds();
-    names: [".bpcmds"],
-    usage: ".bpcmds",
-    summary: "Print the commands that set the current breakpoints again.",
-    details: "The output has one line for each breakpoint, in ID order. An address breakpoint shows as `bp <address>`, a symbolic or source breakpoint as `bu <symbol>` (as `bm` creates it), a hardware breakpoint as `ba <access><size> <address>`, and a hypercall breakpoint as `!hvbp <code> [partition-id [vp-index]]`, without its pass count, which !hvbp does not take. Each line also has the /1, /p, /t, and /c options of the breakpoint, its condition (as /w), its pass count, and its command string. To set the same breakpoints again, run the lines, either by pasting them or by saving them to a file for `$$<`. WinDbg puts a breakpoint ID in each line, but these lines have none because the ntoseye bp command does not take one, so the new breakpoints get new IDs. A disabled breakpoint comes back enabled.",
+fn invalid(error: Error) -> ArgError {
+    ArgError::Message(error.to_string())
 }
 
-repl_command! {
-    cmd_gc -> Flow;
-    names: ["gc"],
-    usage: "gc",
-    summary: "Resume from the breakpoint that runs the current command string.",
-    details: "Use this command only in the command string of a breakpoint, where it stops the command string and resumes the target. You can put it at the end (`bp nt!NtClose \"r rcx; gc\"`) or in a branch (`bp nt!NtClose \"j (@rcx == 0) '' ; 'gc'\"`), and the commands after it do not run. A plain `g` in the command string does the same, as in WinDbg scripts, but ntoseye does not accept `g <address>` or other run control there.",
+/// `bp`, `bu` and `bm`'s line: a software breakpoint's options, target,
+/// pass count, condition and commands.
+#[grammar(
+    usage = "[/1] [/a] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <{}> [passes] [if <expr>] [do <commands>]",
+    complete = Expression
+)]
+fn code_breakpoint(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<ParsedBreakpointArgs, ArgError> {
+    cx.state
+        .ctx
+        .require_software_breakpoints()
+        .map_err(invalid)?;
+    let words = breakpoint_words(cursor);
+    parse_breakpoint_arguments(&words, cx.state.radix, cx.name, false).map_err(invalid)
 }
 
-repl_command! {
-    cmd_bc;
-    names: ["bc"],
-    usage: "bc <id|id-id|*>",
-    summary: "Clear one or more breakpoints by ID.",
-    completion: Breakpoint,
-    run_state: Halted,
+/// `bm`'s line: [`code_breakpoint`]'s, whose target is a symbol pattern
+/// and which takes no /a.
+#[grammar(
+    usage = "[/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <symbol-pattern> [passes] [if <expr>] [do <commands>]",
+    complete = Expression
+)]
+fn pattern_breakpoint(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<ParsedBreakpointArgs, ArgError> {
+    code_breakpoint(cx, cursor)
 }
 
-repl_command! {
-    cmd_bd;
-    names: ["bd"],
-    usage: "bd <id|id-id|*>",
-    summary: "Disable one or more breakpoints by ID.",
-    completion: Breakpoint,
-    run_state: Halted,
+/// `ba`'s line: the options, access and size, target, pass count,
+/// condition and commands.
+#[grammar(
+    usage = "[/1] [/p <pid>] [/t <tid|ethread>] [/c <processor>] [/w \"<expr>\"] <access><size> <address> [passes] [if <expr>] [do <commands>]",
+    complete = [None, Expression]
+)]
+fn hardware_breakpoint(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<ParsedBreakpointArgs, ArgError> {
+    let words = breakpoint_words(cursor);
+    parse_breakpoint_arguments(&words, cx.state.radix, cx.name, true).map_err(invalid)
 }
 
-repl_command! {
-    cmd_be;
-    names: ["be"],
-    usage: "be <id|id-id|*>",
-    summary: "Enable one or more breakpoints by ID.",
-    completion: Breakpoint,
-    run_state: Halted,
-}
-repl_command! {
-    cmd_bpc;
-    names: ["bpc"],
-    usage: "bpc <id> <condition|clear>",
-    summary: "Change or clear a breakpoint condition.",
-    completion: [Breakpoint, Expression],
+/// `!hvbp`'s and `!hvexit`'s line.
+#[grammar(
+    usage = "[/1] [/c <processor>] [/w \"<expr>\"] <{}> [partition-id [vp-index]] [if <expr>] [do <commands>]",
+    complete = None
+)]
+fn hypervisor_breakpoint(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<ParsedHypercallArgs, ArgError> {
+    let words = breakpoint_words(cursor);
+    parse_hypercall_arguments(&words, cx.state.radix, cx.name).map_err(invalid)
 }
 
-repl_command! {
-    cmd_bsc;
-    names: ["bsc"],
-    usage: "bsc <id> <condition> [\"commands\"]",
-    summary: "Set the condition and the commands of a breakpoint together.",
-    details: "This is the WinDbg update-conditional-breakpoint command. The breakpoint stops only when <condition> is nonzero, and then runs the quoted commands. Use semicolons between the commands (`bsc 0 @rcx==4 \"k; g\"`). If you do not give commands, bsc removes the current commands of the breakpoint.",
-    completion: [Breakpoint, Expression],
+/// `bc`/`bd`/`be`'s IDs: `id`, `first-last`, or `*`.
+#[grammar(usage = "<id|id-id|*>...", complete = Breakpoint)]
+fn breakpoint_ids(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<BreakpointIdSelection, ArgError> {
+    let words = cursor.take_all(|_| true);
+    let args = words.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+    if args.is_empty() {
+        return Err(ArgError::Missing);
+    }
+    parse_breakpoint_id_selectors(&args).map_err(invalid)
 }
 
-repl_command! {
-    cmd_bs;
-    names: ["bs", "bpa"],
-    usage: "bs <id> <commands|clear>",
-    summary: "Set or clear the command action of a breakpoint.",
-    completion: Breakpoint,
+/// The rest of the line, which a command needs.
+#[grammar(usage = "<{}|clear>", complete = Expression)]
+fn required_rest(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<String, ArgError> {
+    let text = cursor.rest();
+    if text.is_empty() {
+        Err(ArgError::Missing)
+    } else {
+        Ok(text)
+    }
 }
 
-repl_command! {
-    cmd_br;
-    names: ["br"],
-    usage: "br <id> <newid>",
-    summary: "Change the ID of a breakpoint.",
-    completion: Breakpoint,
+/// `bpp`'s pass count: a number in the current radix.
+#[grammar(usage = "<{}>", complete = [None])]
+fn pass_count(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<u64, ArgError> {
+    let text = cursor.word().ok_or(ArgError::Missing)?;
+    parse_radix_u64_text(&text, cx.state.radix, "pass count").map_err(invalid)
 }
 
-repl_command! {
-    cmd_bpp;
-    names: ["bpp"],
-    usage: "bpp <id> <passes>",
-    summary: "Reset the pass count of a breakpoint.",
-    completion: Breakpoint,
+/// `bsc`'s condition and commands: a quoted last word is the commands, and
+/// everything before it the condition, which may contain spaces.
+#[grammar(usage = "<condition> [\"commands\"]", complete = Expression)]
+fn condition_and_commands(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<(String, Option<String>), ArgError> {
+    let rest = cursor.take_all(|_| true);
+    let (condition_args, action) = match rest.split_last() {
+        Some((Cow::Owned(commands), condition)) => (
+            condition,
+            Some(commands.clone()).filter(|text| !text.is_empty()),
+        ),
+        _ => (&rest[..], None),
+    };
+    let condition = join_breakpoint_args(condition_args);
+    if condition.is_empty() {
+        return Err(ArgError::Missing);
+    }
+    Ok((condition, action))
 }
 
-struct CodeBreakpointArgs {
+/// Set a breakpoint.
+///
+/// The breakpoint replaces the first byte of the instruction at the address,
+/// so an instruction must start there. ntoseye confirms one by the symbol at
+/// the address, or by decoding from the start of the function around it, and
+/// refuses an address inside an instruction. When nothing near the address
+/// says where instructions start, or that code cannot be read, bp sets the
+/// breakpoint and warns that it could not check. /a skips the check. A
+/// file:line sets a source breakpoint, as bu does.
+#[command(
+    names = ["bp"],
+    category = "breakpoints and events",
+    kind = Action,
+    state = Halted,
+    writes = [Breakpoints],
+    python = none,
+)]
+fn set_breakpoint(
+    state: &mut ReplState<'_>,
+    #[arg(parse = code_breakpoint, name = "address|file:line")] args: ParsedBreakpointArgs,
+) -> Result<BreakpointsSet> {
+    let spec = args.target.clone();
+    let config = state.breakpoint_config(args)?;
+    let address = match Expr::eval_with_radix(&spec, &state.ctx.target, state.radix) {
+        Ok(address) => address,
+        Err(error) => match state.resolve_symbol_in_scope(&spec, config.scope.as_ref()) {
+            Some(address) => address,
+            // `bp queue.c:42` is a source line, which only fails as an
+            // expression.
+            None if BreakpointSpec::source(&spec, 0).is_some() => {
+                return set_source_breakpoint(state.ctx, spec, config);
+            }
+            None => return Err(error),
+        },
+    };
+    let set = state.ctx.set_code_breakpoint(address, config)?;
+    Ok(BreakpointsSet::Address {
+        breakpoint: added(state.ctx, set.id)?,
+        address,
+        warning: set.warning,
+    })
+}
+
+/// Set a deferred symbolic breakpoint.
+///
+/// A symbol with an offset, such as mydriver!DriverEntry+0x20, must name the
+/// start of an instruction, which ntoseye checks as bp does. Until the symbol
+/// resolves nothing says where its instructions start, so bu sets the
+/// breakpoint and warns that it could not check. /a skips the check. A
+/// file:line sets a source breakpoint on each address the line has.
+#[command(
+    names = ["bu"],
+    category = "breakpoints and events",
+    kind = Action,
+    state = Halted,
+    writes = [Breakpoints],
+    python = none,
+)]
+fn set_symbolic_breakpoint(
+    state: &mut ReplState<'_>,
+    #[arg(parse = code_breakpoint, name = "symbol|file:line")] args: ParsedBreakpointArgs,
+) -> Result<BreakpointsSet> {
+    let spec = args.target.clone();
+    let config = state.breakpoint_config(args)?;
+    if BreakpointSpec::source(&spec, 0).is_some() {
+        return set_source_breakpoint(state.ctx, spec, config);
+    }
+    let set = state.ctx.set_symbolic_breakpoint(spec.clone(), config)?;
+    Ok(BreakpointsSet::Symbolic {
+        breakpoint: added(state.ctx, set.id)?,
+        spec,
+        warning: set.warning,
+    })
+}
+
+/// Set deferred symbolic breakpoints on the symbols that match a pattern.
+///
+/// Only code symbols match, so bm skips the data symbols that the pattern
+/// also matches.
+#[command(
+    names = ["bm"],
+    category = "breakpoints and events",
+    kind = Action,
+    state = Halted,
+    writes = [Breakpoints],
+    python = none,
+)]
+fn set_pattern_breakpoints(
+    state: &mut ReplState<'_>,
+    #[arg(parse = pattern_breakpoint)] args: ParsedBreakpointArgs,
+) -> Result<BreakpointsSet> {
+    const BM_LIMIT: usize = 256;
+    let spec = args.target.clone();
+    let config = state.breakpoint_config(args)?;
+    let set = state.ctx.add_pattern_breakpoints(&spec, config, BM_LIMIT)?;
+    Ok(BreakpointsSet::Pattern {
+        count: set.ids.len(),
+        limited: set.limited,
+        errors: set.errors.iter().map(ToString::to_string).collect(),
+        spec,
+    })
+}
+
+/// Set a hardware (debug-register) breakpoint.
+///
+/// The access is e=execute, r=read/write, or w=write, and the size is 1, 2,
+/// 4, or 8 bytes. An execute breakpoint has size 1. The command is not
+/// available on a dump or on the `memory` backend. Example: ba w4
+/// nt!MyGlobal. In VTL1 (the .vtl 1 view or a vCPU stopped in VTL1), ntoseye
+/// accepts only `ba e1`, and only on GDB backends. This breakpoint is global,
+/// so you cannot use /p or /t, which name NT processes and threads. Example:
+/// .vtl 1; ba e1 securekernel!SkeSelectProcessAddressSpace; g
+#[command(
+    names = ["ba"],
+    category = "breakpoints and events",
+    kind = Action,
+    state = Halted,
+    writes = [Breakpoints],
+    python = none,
+)]
+fn set_hardware_breakpoint(
+    state: &mut ReplState<'_>,
+    #[arg(parse = hardware_breakpoint)] args: ParsedBreakpointArgs,
+) -> Result<BreakpointsSet> {
+    let Some(spec) = args.access_spec.as_deref() else {
+        return Err(Error::DebugInfo("ba: missing access/size".to_string()));
+    };
+    let (access, len) = parse_hw_breakpoint_spec(spec)?;
+    let target = args.target.clone();
+    let condition = args.condition.clone();
+    let config = state.breakpoint_config(args)?;
+    // A user-mode symbol under `/p` is the process's, as for `bp`.
+    let address = match Expr::eval_with_radix(&target, &state.ctx.target, state.radix) {
+        Ok(address) => address,
+        Err(error) => state
+            .resolve_symbol_in_scope(&target, config.scope.as_ref())
+            .ok_or(error)?,
+    };
+    let id = state
+        .ctx
+        .set_hardware_breakpoint(address, access, len, config)?;
+    Ok(BreakpointsSet::Hardware {
+        breakpoint: added(state.ctx, id)?,
+        address,
+        access,
+        len,
+        condition,
+    })
+}
+
+/// Set a breakpoint that stops on a hypercall to the Windows hypervisor, optionally only from one partition or VP.
+///
+/// Sets a hardware execute breakpoint on the hypercall's handler, which the
+/// hypervisor's hypercall table gives (see !hvcalls), so it needs the gdb
+/// backend and a free debug register. The call is a call code, in the current
+/// radix, or its name: the TLFS name (HvCallPostMessage) or the name x hv!*
+/// shows (HvCall0004). Many codes share a handler, HvCallUnimplemented's for
+/// every code that is not implemented, so at each hit ntoseye reads the
+/// caller's call code from its RCX and resumes the target without a stop
+/// when it is another. The caller is the VP whose exit the processor handles:
+/// the guest partition's VP it serves, or the root partition's VP. With a
+/// partition ID, and a VP index in it, the breakpoint stops only for that
+/// caller; the IDs use the current radix, and ntoseye refuses a partition or
+/// VP that the hypervisor does not have. A hit whose caller ntoseye cannot
+/// tell, or whose caller matches but whose registers it cannot read, stops,
+/// so the filter does not hide a hit. /1, /c, /w, if, and do work as for ba;
+/// a condition sees the caller's registers at its VMCALL (as !hvcall decodes
+/// them), not the hypervisor's at the handler, and stops the hit with an
+/// error when they are not known. The command takes no pass count: set it
+/// with bpp. bl shows the filter. Needs the VM's hv-evmcs enlightenment.
+/// Example: !hvbp HvCallSendSyntheticClusterIpi 3; g
+#[command(
+    names = ["!hvbp"],
+    category = "breakpoints and events",
+    kind = Action,
+    target = Kernel,
+    state = Halted,
+    writes = [Breakpoints],
+    python = none,
+)]
+fn set_hypercall_breakpoint(
+    state: &mut ReplState<'_>,
+    #[arg(parse = hypervisor_breakpoint, name = "code|name")] args: ParsedHypercallArgs,
+) -> Result<BreakpointsSet> {
+    let code = hypercall_code_text(&args.call, state.radix)?;
+    let (vp, config) = state.hypervisor_breakpoint_config(&args)?;
+    let id = state.ctx.add_hypercall_breakpoint(
+        HypercallFilter {
+            code,
+            partition: args.partition,
+            vp,
+        },
+        config,
+    )?;
+    Ok(BreakpointsSet::Hypervisor {
+        kind: "hypercall",
+        breakpoint: state.ctx.breakpoints.get(id).cloned(),
+    })
+}
+
+/// Set a breakpoint that stops on a VM exit to the Windows hypervisor by its reason, optionally only from one partition or VP.
+///
+/// Sets a hardware execute breakpoint on the hypervisor's VM-exit entry point
+/// (hv!VmExitEntry, the host RIP of every eVMCS), so it needs the gdb
+/// backend, the VM's hv-evmcs enlightenment and a free debug register. The
+/// reason is a basic exit reason (Intel SDM Appendix C), as a decimal or 0x
+/// number, or a name as !hvvps shows it: cpuid, rdmsr, wrmsr, io_instruction,
+/// ept_violation, vmcall, hlt. Every exit enters there, so at each hit
+/// ntoseye reads the reason from the eVMCS the processor has loaded and
+/// resumes the target without a stop when it is another; the guest runs far
+/// slower while the breakpoint is set. With a guest partition's ID it rarely
+/// stops: that partition's VPs run only when the root partition's NT runs
+/// them, which it barely does then; !hvbp stops on a guest's hypercalls
+/// without slowing the rest. The caller is the VP whose exit it is, as for
+/// !hvbp: with a partition ID, and a VP index in it, the breakpoint stops
+/// only for that caller. The condition is evaluated on the caller's registers
+/// at its exit and reads the caller's memory. Example: !hvexit cpuid 6 if
+/// @rax==0x40000000
+#[command(
+    names = ["!hvexit"],
+    category = "breakpoints and events",
+    kind = Action,
+    target = Kernel,
+    state = Halted,
+    writes = [Breakpoints],
+    python = none,
+)]
+fn set_exit_breakpoint(
+    state: &mut ReplState<'_>,
+    #[arg(parse = hypervisor_breakpoint, name = "reason")] args: ParsedHypercallArgs,
+) -> Result<BreakpointsSet> {
+    let reason = vm_exits::parse_reason(&args.call)?;
+    let (vp, config) = state.hypervisor_breakpoint_config(&args)?;
+    let id = state.ctx.add_exit_breakpoint(
+        ExitFilter {
+            reason,
+            partition: args.partition,
+            vp,
+        },
+        config,
+    )?;
+    Ok(BreakpointsSet::Hypervisor {
+        kind: "VM-exit",
+        breakpoint: state.ctx.breakpoints.get(id).cloned(),
+    })
+}
+
+/// The breakpoint `id` a command just set.
+fn added(session: &Session, id: u32) -> Result<BreakpointInfo> {
+    session
+        .breakpoints
+        .get(id)
+        .cloned()
+        .ok_or(Error::BPNotFound(id))
+}
+
+/// Set a source breakpoint on each address `file:line` has (`bu` and `bp`
+/// given a source line).
+fn set_source_breakpoint(
+    session: &mut Session,
     spec: String,
     config: BreakpointConfig,
+) -> Result<BreakpointsSet> {
+    let ids = session.add_source_breakpoint(spec.clone(), config)?;
+    let breakpoints = ids
+        .into_iter()
+        .map(|id| added(session, id))
+        .collect::<Result<_>>()?;
+    Ok(BreakpointsSet::Source { breakpoints, spec })
+}
+
+impl Render for BreakpointsSet {
+    fn render(&self, repl: &mut ReplState<'_>, (): ()) {
+        repl.caches.refresh_breakpoints(&repl.ctx.breakpoints);
+        match self {
+            BreakpointsSet::Address {
+                breakpoint,
+                address,
+                warning,
+            } => {
+                // Before the result, so the warning is not lost below it.
+                if let Some(warning) = warning {
+                    diagnostics::print_warning(warning);
+                }
+                outln!(
+                    "breakpoint {} set at {}{}{}\n",
+                    ui::bp_id(breakpoint.id),
+                    ui::addr(address.0),
+                    breakpoint
+                        .symbol
+                        .as_ref()
+                        .map(|symbol| format!(" ({})", ui::symbol(symbol)))
+                        .unwrap_or_default(),
+                    format!(" ({})", breakpoint.scope_label()).bright_black(),
+                );
+                // The target accepted the site into its own table but its
+                // page is out, so the opcode is owed. Say so rather than
+                // letting the confirmation imply an armed site.
+                if breakpoint.awaiting_page_in() {
+                    outln!(
+                        "{}\n",
+                        ui::muted(
+                            "  site is not resident; the target writes the breakpoint when the \
+                             page is paged in (`ba e1` traps a site that never pages in on its \
+                             own)"
+                        )
+                    );
+                }
+            }
+            BreakpointsSet::Symbolic {
+                breakpoint,
+                spec,
+                warning,
+            } => {
+                if let Some(warning) = warning {
+                    diagnostics::print_warning(warning);
+                }
+                outln!("symbolic breakpoint {}\n", ui::bp_id(breakpoint.id));
+                if breakpoint.deferred() {
+                    outln!(
+                        "  {} is deferred until '{}' resolves\n",
+                        ui::bp_id(breakpoint.id),
+                        spec
+                    );
+                }
+            }
+            BreakpointsSet::Source { breakpoints, spec } => match breakpoints.as_slice() {
+                [breakpoint] if breakpoint.deferred() => outln!(
+                    "source breakpoint {} deferred until '{}' resolves\n",
+                    ui::bp_id(breakpoint.id),
+                    spec
+                ),
+                [breakpoint] => outln!(
+                    "source breakpoint {} set for '{}'\n",
+                    ui::bp_id(breakpoint.id),
+                    spec
+                ),
+                breakpoints => {
+                    outln!(
+                        "{} source breakpoints set for '{}'\n",
+                        breakpoints.len(),
+                        spec
+                    )
+                }
+            },
+            BreakpointsSet::Pattern {
+                count,
+                limited,
+                errors,
+                spec,
+            } => {
+                for error in errors {
+                    error!("bm: {error}");
+                }
+                if *count == 0 {
+                    outln!("no code symbols match '{}'\n", spec);
+                } else {
+                    let suffix = if *limited {
+                        "; results limited to 256, refine the pattern"
+                    } else {
+                        ""
+                    };
+                    outln!("{} symbolic breakpoint(s) set{suffix}\n", count);
+                }
+            }
+            BreakpointsSet::Hardware {
+                breakpoint,
+                address,
+                access,
+                len,
+                condition,
+            } => {
+                let condition_label = condition
+                    .as_ref()
+                    .map(|condition| format!(" if {condition}"))
+                    .unwrap_or_default();
+                outln!(
+                    "hardware breakpoint {} ({} {}b) set at {}{}{}\n",
+                    ui::bp_id(breakpoint.id),
+                    access.label(),
+                    len,
+                    ui::addr(address.0),
+                    breakpoint
+                        .symbol
+                        .as_ref()
+                        .map(|s| format!(" ({})", ui::symbol(s)))
+                        .unwrap_or_default(),
+                    condition_label.bright_black(),
+                );
+            }
+            BreakpointsSet::Hypervisor { kind, breakpoint } => {
+                if let Some(bp) = breakpoint {
+                    outln!(
+                        "{kind} breakpoint {} set at {}{}{}\n",
+                        ui::bp_id(bp.id),
+                        ui::addr(bp.address.0),
+                        bp.symbol
+                            .as_ref()
+                            .map(|symbol| format!(" ({})", ui::symbol(symbol)))
+                            .unwrap_or_default(),
+                        format!(" ({})", bp.scope_label()).bright_black(),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// List all breakpoints.
+///
+/// The status column shows `e` for enabled, `d` for disabled, or `o` for
+/// owed. An owed breakpoint is a kernel code breakpoint that waits for its
+/// page to become resident.
+#[command(
+    names = ["bl"],
+    category = "breakpoints and events",
+    kind = Query,
+    python = Breakpoints,
+    python_name = "list",
+)]
+fn list_breakpoints(session: &Session) -> Result<Vec<BreakpointInfo>> {
+    Ok(session.breakpoints.list().into_iter().cloned().collect())
+}
+
+impl Render for Vec<BreakpointInfo> {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        if self.is_empty() {
+            outln!("no breakpoints set\n");
+            return;
+        }
+        #[cfg(feature = "cli")]
+        native::render(
+            || native::lists::breakpoints(self),
+            || print_breakpoint_list(self),
+        );
+        #[cfg(not(feature = "cli"))]
+        print_breakpoint_list(self);
+    }
+}
+
+/// Print the commands that set the current breakpoints again.
+///
+/// The output has one line for each breakpoint, in ID order. An address
+/// breakpoint shows as `bp <address>`, a symbolic or source breakpoint as `bu
+/// <symbol>` (as `bm` creates it), a hardware breakpoint as `ba
+/// <access><size> <address>`, and a hypercall breakpoint as `!hvbp <code>
+/// [partition-id [vp-index]]`, without its pass count, which !hvbp does not
+/// take. Each line also has the /1, /p, /t, and /c options of the breakpoint,
+/// its condition (as /w), its pass count, and its command string. To set the
+/// same breakpoints again, run the lines, either by pasting them or by saving
+/// them to a file for `$$<`. WinDbg puts a breakpoint ID in each line, but
+/// these lines have none because the ntoseye bp command does not take one, so
+/// the new breakpoints get new IDs. A disabled breakpoint comes back enabled.
+#[command(
+    names = [".bpcmds"],
+    category = "breakpoints and events",
+    kind = Query,
+    python = Breakpoints,
+    python_name = "commands",
+)]
+fn breakpoint_commands(session: &Session) -> Result<BreakpointCommands> {
+    Ok(BreakpointCommands {
+        commands: session
+            .breakpoints
+            .list()
+            .into_iter()
+            .filter_map(recreate_breakpoint)
+            .map(|(command, args)| breakpoint_command_line(command, &args))
+            .collect(),
+    })
+}
+
+impl Render for BreakpointCommands {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        for line in &self.commands {
+            outln!("{line}");
+        }
+    }
+}
+
+/// Resume from the breakpoint that runs the current command string.
+///
+/// Use this command only in the command string of a breakpoint, where it
+/// stops the command string and resumes the target. You can put it at the end
+/// (`bp nt!NtClose "r rcx; gc"`) or in a branch (`bp nt!NtClose "j (@rcx ==
+/// 0) '' ; 'gc'"`), and the commands after it do not run. A plain `g` in the
+/// command string does the same, as in WinDbg scripts, but ntoseye does not
+/// accept `g <address>` or other run control there.
+#[command(
+    names = ["gc"],
+    category = "breakpoints and events",
+    kind = Host,
+    python = none,
+)]
+fn resume_from_action(state: &mut ReplState<'_>) -> Result<Flow> {
+    if state.context != DispatchContext::BreakpointAction {
+        error!("gc resumes only from a breakpoint's command string; use g");
+        return Ok(Flow::Denied);
+    }
+    Ok(Flow::Jump(Jump::Resume))
+}
+
+/// The breakpoints `selection` names that exist, in its order.
+fn managed(session: &Session, selection: BreakpointIdSelection) -> Vec<u32> {
+    let managed = session.breakpoints.managed_ids();
+    match selection {
+        BreakpointIdSelection::All => managed,
+        BreakpointIdSelection::Ids(ids) => {
+            let managed: HashSet<u32> = managed.into_iter().collect();
+            ids.into_iter().filter(|id| managed.contains(id)).collect()
+        }
+    }
+}
+
+/// Apply `update` to each breakpoint `selection` names, as `verb` says.
+fn update_breakpoints(
+    session: &mut Session,
+    selection: BreakpointIdSelection,
+    verb: &'static str,
+    mut update: impl FnMut(&mut Session, u32) -> Result<()>,
+) -> BreakpointUpdates {
+    let results = managed(session, selection)
+        .into_iter()
+        .map(|id| (id, update(session, id).err().map(|error| error.to_string())))
+        .collect();
+    BreakpointUpdates { verb, results }
+}
+
+impl Render for BreakpointUpdates {
+    fn render(&self, repl: &mut ReplState<'_>, (): ()) {
+        let mut changed = false;
+        for (id, error) in &self.results {
+            match error {
+                None => {
+                    changed = true;
+                    outln!("breakpoint {} {}", ui::bp_id(*id), self.verb);
+                }
+                Some(error) => error!("{error}"),
+            }
+        }
+        if changed {
+            repl.caches.refresh_breakpoints(&repl.ctx.breakpoints);
+            outln!();
+        }
+    }
+}
+
+/// Clear one or more breakpoints by ID.
+#[command(
+    names = ["bc"],
+    category = "breakpoints and events",
+    kind = Action,
+    state = Halted,
+    writes = [Breakpoints],
+    python = none,
+)]
+fn clear_breakpoints(
+    session: &mut Session,
+    #[arg(parse = breakpoint_ids)] ids: BreakpointIdSelection,
+) -> Result<BreakpointUpdates> {
+    Ok(update_breakpoints(
+        session,
+        ids,
+        "cleared",
+        |session, id| session.remove_breakpoint(id),
+    ))
+}
+
+/// Disable one or more breakpoints by ID.
+#[command(
+    names = ["bd"],
+    category = "breakpoints and events",
+    kind = Action,
+    state = Halted,
+    writes = [Breakpoints],
+    python = none,
+)]
+fn disable_breakpoints(
+    session: &mut Session,
+    #[arg(parse = breakpoint_ids)] ids: BreakpointIdSelection,
+) -> Result<BreakpointUpdates> {
+    Ok(update_breakpoints(
+        session,
+        ids,
+        "disabled",
+        |session, id| session.disable_breakpoint(id),
+    ))
+}
+
+/// Enable one or more breakpoints by ID.
+#[command(
+    names = ["be"],
+    category = "breakpoints and events",
+    kind = Action,
+    state = Halted,
+    writes = [Breakpoints],
+    python = none,
+)]
+fn enable_breakpoints(
+    session: &mut Session,
+    #[arg(parse = breakpoint_ids)] ids: BreakpointIdSelection,
+) -> Result<BreakpointUpdates> {
+    Ok(update_breakpoints(
+        session,
+        ids,
+        "enabled",
+        |session, id| session.enable_breakpoint(id),
+    ))
+}
+
+/// Change or clear a breakpoint condition.
+#[command(
+    names = ["bpc"],
+    category = "breakpoints and events",
+    kind = Action,
+    writes = [Breakpoints],
+    python = none,
+)]
+fn set_condition(
+    state: &mut ReplState<'_>,
+    id: BreakpointId,
+    #[arg(parse = required_rest)] condition: String,
+) -> Result<()> {
+    let BreakpointId(id) = id;
+    let (condition, expr) = if condition.eq_ignore_ascii_case("clear") {
+        (None, None)
+    } else {
+        let expr = compile_repl_condition(Some(&condition), state.radix)?;
+        (Some(condition), expr)
+    };
+    state.ctx.breakpoints.set_condition(id, condition, expr)?;
+    outln!("breakpoint {} condition updated\n", ui::bp_id(id));
+    Ok(())
+}
+
+/// Set the condition and the commands of a breakpoint together.
+///
+/// This is the WinDbg update-conditional-breakpoint command. The breakpoint
+/// stops only when <condition> is nonzero, and then runs the quoted commands.
+/// Use semicolons between the commands (`bsc 0 @rcx==4 "k; g"`). If you do not
+/// give commands, bsc removes the current commands of the breakpoint.
+#[command(
+    names = ["bsc"],
+    category = "breakpoints and events",
+    kind = Action,
+    writes = [Breakpoints],
+    python = none,
+)]
+fn set_condition_and_commands(
+    state: &mut ReplState<'_>,
+    id: BreakpointId,
+    #[arg(parse = condition_and_commands)] update: (String, Option<String>),
+) -> Result<()> {
+    let BreakpointId(id) = id;
+    let (condition, action) = update;
+    let expr = compile_repl_condition(Some(&condition), state.radix)?;
+    let breakpoints = &mut state.ctx.breakpoints;
+    breakpoints.set_condition(id, Some(condition), expr)?;
+    breakpoints.set_action(id, action)?;
+    outln!(
+        "breakpoint {} condition and commands updated\n",
+        ui::bp_id(id)
+    );
+    Ok(())
+}
+
+/// Set or clear the command action of a breakpoint.
+#[command(
+    names = ["bs", "bpa"],
+    category = "breakpoints and events",
+    kind = Action,
+    writes = [Breakpoints],
+    python = none,
+)]
+fn set_commands(
+    session: &mut Session,
+    id: BreakpointId,
+    #[arg(parse = required_rest)] commands: String,
+) -> Result<()> {
+    let BreakpointId(id) = id;
+    let action = (!commands.eq_ignore_ascii_case("clear")).then_some(commands);
+    session.breakpoints.set_action(id, action)?;
+    outln!("breakpoint {} action updated\n", ui::bp_id(id));
+    Ok(())
+}
+
+/// Change the ID of a breakpoint.
+#[command(
+    names = ["br"],
+    category = "breakpoints and events",
+    kind = Action,
+    writes = [Breakpoints],
+    python = none,
+)]
+fn renumber_breakpoint(
+    state: &mut ReplState<'_>,
+    id: BreakpointId,
+    new_id: BreakpointId,
+) -> Result<()> {
+    let (BreakpointId(old_id), BreakpointId(new_id)) = (id, new_id);
+    state.ctx.breakpoints.renumber(old_id, new_id)?;
+    state.caches.refresh_breakpoints(&state.ctx.breakpoints);
+    outln!(
+        "breakpoint {} renumbered to {}\n",
+        ui::bp_id(old_id),
+        ui::bp_id(new_id)
+    );
+    Ok(())
+}
+
+/// Reset the pass count of a breakpoint.
+#[command(
+    names = ["bpp"],
+    category = "breakpoints and events",
+    kind = Action,
+    writes = [Breakpoints],
+    python = none,
+)]
+fn reset_pass_count(
+    session: &mut Session,
+    id: BreakpointId,
+    #[arg(parse = pass_count)] passes: u64,
+) -> Result<()> {
+    let BreakpointId(id) = id;
+    session.breakpoints.set_pass_count(id, passes)?;
+    outln!("breakpoint {} pass count reset\n", ui::bp_id(id));
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -531,7 +1289,7 @@ fn breakpoint_command_line(command: &str, args: &ParsedBreakpointArgs) -> String
 
 /// The command and arguments that set `bp` again; `None` for a debugger's
 /// internal stop.
-fn recreate_breakpoint(bp: &Breakpoint) -> Option<(&'static str, ParsedBreakpointArgs)> {
+fn recreate_breakpoint(bp: &BreakpointInfo) -> Option<(&'static str, ParsedBreakpointArgs)> {
     if bp.temporary {
         return None;
     }
@@ -601,7 +1359,7 @@ fn recreate_breakpoint(bp: &Breakpoint) -> Option<(&'static str, ParsedBreakpoin
 }
 
 /// The `bl` table: one row per breakpoint.
-fn print_breakpoint_list(bps: &[&Breakpoint]) {
+fn print_breakpoint_list(bps: &[BreakpointInfo]) {
     let mut builder = Builder::default();
     builder.push_record(vec![
         "ID".to_string(),
@@ -705,6 +1463,7 @@ fn parse_breakpoint_id_selectors(args: &[&str]) -> Result<BreakpointIdSelection>
     }
     Ok(BreakpointIdSelection::Ids(ids))
 }
+
 fn compile_repl_condition(
     condition: Option<&str>,
     radix: NumberRadix,
@@ -733,8 +1492,9 @@ fn parse_hw_breakpoint_spec(spec: &str) -> Result<(HwBreakpointAccess, u8)> {
         // Execute watches are always a single byte; allow the bare `e`.
         "" if matches!(access, HwBreakpointAccess::Execute) => 1,
         "" => {
-            return Err(Error::InvalidArgument(format!(
-                "missing size in '{spec}' (e.g. ba w4 <address>)"
+            return Err(Error::InvalidArgument(usage_error(
+                "ba",
+                format!("missing size in '{spec}'"),
             )));
         }
         other => other.parse().map_err(|_| {
@@ -744,49 +1504,7 @@ fn parse_hw_breakpoint_spec(spec: &str) -> Result<(HwBreakpointAccess, u8)> {
     Ok((access, len))
 }
 
-fn apply_breakpoint_updates(
-    ids: Vec<u32>,
-    breakpoints: &mut BreakpointManager,
-    caches: &ReplCaches,
-    verb: &str,
-    mut update: impl FnMut(&mut BreakpointManager, u32) -> Result<()>,
-) -> Result<()> {
-    let mut changed = false;
-    for id in ids {
-        match update(breakpoints, id) {
-            Ok(()) => {
-                changed = true;
-                outln!("breakpoint {} {verb}", ui::bp_id(id));
-            }
-            Err(error) => error!("{error}"),
-        }
-    }
-    if changed {
-        caches.refresh_breakpoints(breakpoints);
-        outln!();
-    }
-    Ok(())
-}
-
 impl ReplState<'_> {
-    fn breakpoint_id_arg(invocation: &CommandInvocation<'_>, command: &str) -> Option<u32> {
-        let Some(id_str) = invocation.arg(0) else {
-            outln!("{}\n", command_help(command));
-            return None;
-        };
-
-        match id_str.parse::<u32>() {
-            Ok(id) => Some(id),
-            Err(_) => {
-                error!("invalid breakpoint ID: {}", id_str);
-                None
-            }
-        }
-    }
-    fn parse_radix_u64(&self, value: &str, what: &str) -> Result<u64> {
-        parse_radix_u64_text(value, self.radix, what)
-    }
-
     fn breakpoint_scope(&self, pid: Option<u64>) -> Result<Option<BreakpointScope>> {
         let Some(pid) = pid else {
             return Ok(None);
@@ -864,367 +1582,6 @@ impl ReplState<'_> {
         })
     }
 
-    fn code_breakpoint_args(
-        &mut self,
-        invocation: &CommandInvocation<'_>,
-        command: &str,
-    ) -> Result<CodeBreakpointArgs> {
-        self.ctx.require_software_breakpoints()?;
-        let parsed = parse_breakpoint_arguments(&invocation.argv, self.radix, command, false)?;
-        let spec = parsed.target.clone();
-        Ok(CodeBreakpointArgs {
-            spec,
-            config: self.breakpoint_config(parsed)?,
-        })
-    }
-
-    fn report_breakpoint_result(&mut self, result: Result<u32>, label: &str) -> Option<u32> {
-        match result {
-            Ok(id) => {
-                self.caches.refresh_breakpoints(&self.ctx.breakpoints);
-                outln!("{label} {}\n", ui::bp_id(id));
-                Some(id)
-            }
-            Err(error) => {
-                error!("{error}");
-                None
-            }
-        }
-    }
-
-    fn cmd_bu(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let args = match self.code_breakpoint_args(&invocation, "bu") {
-            Ok(args) => args,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        if BreakpointSpec::source(&args.spec, 0).is_some() {
-            self.set_source_breakpoint(args);
-            return Ok(());
-        }
-        let warning = if args.config.unchecked {
-            None
-        } else {
-            match self.check_symbol_site(&args) {
-                Ok(warning) => warning,
-                Err(error) => {
-                    error!("{error}");
-                    return Ok(());
-                }
-            }
-        };
-
-        let spec = args.spec.clone();
-        let result = self.ctx.breakpoints.add_symbolic(
-            &mut *self.ctx.backend,
-            &self.ctx.target,
-            args.spec,
-            args.config,
-        );
-        if result.is_ok()
-            && let Some(warning) = warning
-        {
-            diagnostics::print_warning(warning);
-        }
-        if let Some(id) = self.report_breakpoint_result(result, "symbolic breakpoint") {
-            let bp = self
-                .ctx
-                .breakpoints
-                .list()
-                .into_iter()
-                .find(|bp| bp.id == id);
-            if bp.is_some_and(|bp| bp.deferred()) {
-                outln!(
-                    "  {} is deferred until '{}' resolves\n",
-                    ui::bp_id(id),
-                    spec
-                );
-            }
-        }
-        Ok(())
-    }
-
-    /// Set a source breakpoint on each address `file:line` has (`bu` and
-    /// `bp` given a source line).
-    fn set_source_breakpoint(&mut self, args: CodeBreakpointArgs) {
-        let spec = args.spec.clone();
-        match self.ctx.breakpoints.add_source(
-            &mut *self.ctx.backend,
-            &self.ctx.target,
-            args.spec,
-            args.config,
-        ) {
-            Ok(ids) => {
-                self.caches.refresh_breakpoints(&self.ctx.breakpoints);
-                if ids.len() == 1 {
-                    let deferred = self
-                        .ctx
-                        .breakpoints
-                        .list()
-                        .into_iter()
-                        .find(|bp| bp.id == ids[0])
-                        .is_some_and(|bp| bp.deferred());
-                    if deferred {
-                        outln!(
-                            "source breakpoint {} deferred until '{}' resolves\n",
-                            ui::bp_id(ids[0]),
-                            spec
-                        );
-                    } else {
-                        outln!(
-                            "source breakpoint {} set for '{}'\n",
-                            ui::bp_id(ids[0]),
-                            spec
-                        );
-                    }
-                } else {
-                    outln!("{} source breakpoints set for '{}'\n", ids.len(), spec);
-                }
-            }
-            Err(error) => error!("{error}"),
-        }
-    }
-
-    /// Check that an instruction starts where `bu`'s symbol resolves, as
-    /// [`Self::check_instruction_start`] does. A symbol's own start always
-    /// is one, but an offset into a symbol that does not resolve yet cannot
-    /// be checked, which the warning says.
-    fn check_symbol_site(&self, args: &CodeBreakpointArgs) -> Result<Option<String>> {
-        let target = &self.ctx.target;
-        let scope = args.config.scope.as_ref();
-        match BreakpointManager::resolve_symbol_in_scope(target, &args.spec, scope)? {
-            Some((_, 0)) => Ok(None),
-            Some((address, _)) => self
-                .check_instruction_start(BreakpointManager::resolution_dtb(target, scope), address),
-            None => match BreakpointSpec::split_symbol_offset(&args.spec) {
-                Some((symbol, offset)) if offset != 0 => Ok(Some(format!(
-                    "{} does not resolve yet, so ntoseye could not check that an instruction \
-                     starts at {}",
-                    symbol.trim(),
-                    args.spec
-                ))),
-                _ => Ok(None),
-            },
-        }
-    }
-
-    /// Check that an instruction starts at `address` in the address space
-    /// `dtb` before a software breakpoint goes there (see
-    /// [`Session::instruction_boundary`]). `Err` refuses an address inside
-    /// an instruction, where the breakpoint would corrupt it. Where nothing
-    /// confirms an instruction start, the breakpoint is set, as other
-    /// debuggers set any address they are given, with a warning saying so.
-    /// Shared by `bp`, `bu` and `g <address>`.
-    pub fn check_instruction_start(&self, dtb: Dtb, address: VirtAddr) -> Result<Option<String>> {
-        let symbols = &self.ctx.target.symbols;
-        let name = |address: VirtAddr| {
-            symbols
-                .format_closest_symbol_for_address(dtb, address)
-                .unwrap_or_else(|| format!("{:#x}", address.0))
-        };
-        let unconfirmed = match self.ctx.instruction_boundary(dtb, address) {
-            InstructionBoundary::Start => return Ok(None),
-            InstructionBoundary::Inside { instruction, from } => {
-                let decoding = if from == instruction {
-                    String::new()
-                } else {
-                    format!(", decoding from {}", name(from))
-                };
-                return Err(Error::Breakpoint(format!(
-                    "{} is inside the instruction at {}{decoding}; a breakpoint there would \
-                     corrupt that instruction",
-                    name(address),
-                    name(instruction)
-                )));
-            }
-            InstructionBoundary::NoAnchor => {
-                format!(
-                    "nothing near {} says where instructions start",
-                    name(address)
-                )
-            }
-            InstructionBoundary::Unreadable { from } => format!(
-                "the code from {} to {} cannot be read",
-                name(from),
-                name(address)
-            ),
-        };
-        Ok(Some(format!(
-            "{unconfirmed}, so ntoseye could not confirm that an instruction starts there"
-        )))
-    }
-
-    fn cmd_bm(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        const BM_LIMIT: usize = 256;
-        let args = match self.code_breakpoint_args(&invocation, "bm") {
-            Ok(args) => args,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        let set = self
-            .ctx
-            .add_pattern_breakpoints(&args.spec, args.config.clone(), BM_LIMIT)?;
-        for error in &set.errors {
-            error!("bm: {error}");
-        }
-        self.caches.refresh_breakpoints(&self.ctx.breakpoints);
-        if set.ids.is_empty() {
-            outln!("no code symbols match '{}'\n", args.spec);
-        } else {
-            let suffix = if set.limited {
-                "; results limited to 256, refine the pattern"
-            } else {
-                ""
-            };
-            outln!("{} symbolic breakpoint(s) set{suffix}\n", set.ids.len());
-        }
-        Ok(())
-    }
-
-    fn cmd_ba(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let parsed = match parse_breakpoint_arguments(&invocation.argv, self.radix, "ba", true) {
-            Ok(parsed) => parsed,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        let Some(spec_str) = parsed.access_spec.as_deref() else {
-            error!("ba: missing access/size");
-            return Ok(());
-        };
-        // Resolving these walks NT's process and thread lists, which say
-        // nothing about which VTL1 context executes the address.
-        if self.ctx.target.in_secure_address_space()
-            && (parsed.pid.is_some() || parsed.thread.is_some())
-        {
-            error!(
-                "ba: /p and /t name NT processes and threads; a VTL1 hardware breakpoint is global"
-            );
-            return Ok(());
-        }
-        let (access, len) = match parse_hw_breakpoint_spec(spec_str) {
-            Ok(parsed) => parsed,
-            Err(e) => {
-                error!("{}", e);
-                return Ok(());
-            }
-        };
-        let addr_str = parsed.target.clone();
-        let condition = parsed.condition.clone();
-        let config = match self.breakpoint_config(parsed) {
-            Ok(config) => config,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        // A user-mode symbol under `/p` is the process's, as for `bp`.
-        let address = match Expr::eval_with_radix(&addr_str, &self.ctx.target, self.radix) {
-            Ok(address) => address,
-            Err(error) => match self.resolve_symbol_in_scope(&addr_str, config.scope.as_ref()) {
-                Some(address) => address,
-                None => {
-                    error!("{error}");
-                    return Ok(());
-                }
-            },
-        };
-        let label_dtb = match config.scope.as_ref() {
-            Some(BreakpointScope::Process { dtb, .. }) => *dtb,
-            _ => self.ctx.target.current_dtb(),
-        };
-        let symbol = self
-            .ctx
-            .target
-            .symbols
-            .format_closest_symbol_for_address(label_dtb, address);
-
-        match self
-            .ctx
-            .add_hardware_breakpoint(address, access, len, symbol.clone(), config)
-        {
-            Ok(id) => {
-                self.caches.refresh_breakpoints(&self.ctx.breakpoints);
-                let condition_label = condition
-                    .as_ref()
-                    .map(|condition| format!(" if {condition}"))
-                    .unwrap_or_default();
-                outln!(
-                    "hardware breakpoint {} ({} {}b) set at {}{}{}\n",
-                    ui::bp_id(id),
-                    access.label(),
-                    len,
-                    ui::addr(address.0),
-                    symbol
-                        .map(|s| format!(" ({})", ui::symbol(&s)))
-                        .unwrap_or_default(),
-                    condition_label.bright_black(),
-                );
-            }
-            Err(e) => {
-                error!("{}", e);
-            }
-        }
-
-        Ok(())
-    }
-
-    fn cmd_hvbp(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let result = parse_hypercall_arguments(&invocation.argv, self.radix, "!hvbp")
-            .and_then(|parsed| self.add_hypercall_breakpoint(parsed));
-        self.report_hypervisor_breakpoint("hypercall", result);
-        Ok(())
-    }
-
-    fn cmd_hvexit(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let result = parse_hypercall_arguments(&invocation.argv, self.radix, "!hvexit")
-            .and_then(|parsed| self.add_exit_breakpoint(parsed));
-        self.report_hypervisor_breakpoint("VM-exit", result);
-        Ok(())
-    }
-
-    /// Print a hypervisor breakpoint `!hvbp` or `!hvexit` set, or why not.
-    fn report_hypervisor_breakpoint(&mut self, kind: &str, result: Result<u32>) {
-        let id = match result {
-            Ok(id) => id,
-            Err(error) => {
-                error!("{error}");
-                return;
-            }
-        };
-        self.caches.refresh_breakpoints(&self.ctx.breakpoints);
-        if let Some(bp) = self.ctx.breakpoints.get(id) {
-            outln!(
-                "{kind} breakpoint {} set at {}{}{}\n",
-                ui::bp_id(id),
-                ui::addr(bp.address.0),
-                bp.symbol
-                    .as_ref()
-                    .map(|symbol| format!(" ({})", ui::symbol(symbol)))
-                    .unwrap_or_default(),
-                format!(" ({})", bp.scope_label()).bright_black(),
-            );
-        }
-    }
-
-    fn add_hypercall_breakpoint(&mut self, parsed: ParsedHypercallArgs) -> Result<u32> {
-        let code = hypercall_code_text(&parsed.call, self.radix)?;
-        let (vp, config) = self.hypervisor_breakpoint_config(&parsed)?;
-        self.ctx.add_hypercall_breakpoint(
-            HypercallFilter {
-                code,
-                partition: parsed.partition,
-                vp,
-            },
-            config,
-        )
-    }
-
     /// The VP index and configuration a `!hvbp` or `!hvexit` command gives.
     fn hypervisor_breakpoint_config(
         &mut self,
@@ -1246,19 +1603,6 @@ impl ReplState<'_> {
             ..BreakpointConfig::default()
         };
         Ok((vp, config))
-    }
-
-    fn add_exit_breakpoint(&mut self, parsed: ParsedHypercallArgs) -> Result<u32> {
-        let reason = vm_exits::parse_reason(&parsed.call)?;
-        let (vp, config) = self.hypervisor_breakpoint_config(&parsed)?;
-        self.ctx.add_exit_breakpoint(
-            ExitFilter {
-                reason,
-                partition: parsed.partition,
-                vp,
-            },
-            config,
-        )
     }
 
     /// `bp /p <pid> mod!sym` names the address space the symbol lives in, but
@@ -1284,357 +1628,14 @@ impl ReplState<'_> {
             .ok()?;
         symbols.find_symbol_across_modules(*dtb, spec).ok()?
     }
-
-    fn cmd_bp(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let args = match self.code_breakpoint_args(&invocation, "bp") {
-            Ok(args) => args,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        let address = match Expr::eval_with_radix(&args.spec, &self.ctx.target, self.radix) {
-            Ok(address) => address,
-            Err(error) => {
-                match self.resolve_symbol_in_scope(&args.spec, args.config.scope.as_ref()) {
-                    Some(address) => address,
-                    // `bp queue.c:42` is a source line, which only fails as
-                    // an expression.
-                    None if BreakpointSpec::source(&args.spec, 0).is_some() => {
-                        self.set_source_breakpoint(args);
-                        return Ok(());
-                    }
-                    None => {
-                        error!("{error}");
-                        return Ok(());
-                    }
-                }
-            }
-        };
-        let label_dtb = match args.config.scope.as_ref() {
-            Some(BreakpointScope::Process { dtb, .. }) => *dtb,
-            _ => self.ctx.target.current_dtb(),
-        };
-        let warning = if args.config.unchecked {
-            None
-        } else {
-            match self.check_instruction_start(label_dtb, address) {
-                Ok(warning) => warning,
-                Err(error) => {
-                    error!("{error}");
-                    return Ok(());
-                }
-            }
-        };
-        let symbol = self
-            .ctx
-            .target
-            .symbols
-            .format_closest_symbol_for_address(label_dtb, address);
-        match self.ctx.breakpoints.add_configured(
-            &mut *self.ctx.backend,
-            &self.ctx.target,
-            address,
-            symbol.clone(),
-            args.config,
-        ) {
-            Ok(id) => {
-                self.caches.refresh_breakpoints(&self.ctx.breakpoints);
-                let breakpoint = self
-                    .ctx
-                    .breakpoints
-                    .list()
-                    .into_iter()
-                    .find(|bp| bp.id == id);
-                // Before the result, so the warning is not lost below it.
-                if let Some(warning) = warning {
-                    diagnostics::print_warning(warning);
-                }
-                outln!(
-                    "breakpoint {} set at {}{}{}\n",
-                    ui::bp_id(id),
-                    ui::addr(address.0),
-                    symbol
-                        .map(|symbol| format!(" ({})", ui::symbol(&symbol)))
-                        .unwrap_or_default(),
-                    breakpoint
-                        .as_ref()
-                        .map(|bp| format!(" ({})", bp.scope_label()))
-                        .unwrap_or_default()
-                        .bright_black(),
-                );
-                // The target accepted the site into its own table but its page
-                // is out, so the opcode is owed. Say so rather than letting the
-                // confirmation imply an armed site.
-                if breakpoint.is_some_and(|bp| bp.awaiting_page_in()) {
-                    outln!(
-                        "{}\n",
-                        ui::muted(
-                            "  site is not resident; the target writes the breakpoint when the \
-                             page is paged in (`ba e1` traps a site that never pages in on its \
-                             own)"
-                        )
-                    );
-                }
-            }
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn selected_breakpoint_ids(
-        &self,
-        invocation: &CommandInvocation<'_>,
-        command: &str,
-    ) -> Option<Vec<u32>> {
-        let args = invocation
-            .argv
-            .iter()
-            .map(|arg| arg.as_ref())
-            .collect::<Vec<_>>();
-        let selection = match parse_breakpoint_id_selectors(&args) {
-            Ok(selection) => selection,
-            Err(error) => {
-                if args.is_empty() {
-                    outln!("{}\n", command_help(command));
-                } else {
-                    error!("{error}");
-                }
-                return None;
-            }
-        };
-        let managed = self.ctx.breakpoints.managed_ids();
-        let managed_set = managed.iter().copied().collect::<HashSet<_>>();
-        Some(match selection {
-            BreakpointIdSelection::All => managed,
-            BreakpointIdSelection::Ids(ids) => ids
-                .into_iter()
-                .filter(|id| managed_set.contains(id))
-                .collect(),
-        })
-    }
-
-    fn cmd_bl(&mut self) -> Result<()> {
-        let bps = self.ctx.breakpoints.list();
-        if bps.is_empty() {
-            outln!("no breakpoints set\n");
-            return Ok(());
-        }
-
-        #[cfg(feature = "cli")]
-        native::render(
-            || native::lists::breakpoints(&bps),
-            || print_breakpoint_list(&bps),
-        );
-        #[cfg(not(feature = "cli"))]
-        print_breakpoint_list(&bps);
-        Ok(())
-    }
-
-    fn cmd_bpcmds(&mut self) -> Result<()> {
-        for bp in self.ctx.breakpoints.list() {
-            if let Some((command, args)) = recreate_breakpoint(bp) {
-                outln!("{}", breakpoint_command_line(command, &args));
-            }
-        }
-        Ok(())
-    }
-
-    fn cmd_gc(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
-        if !invocation.raw_tail.is_empty() {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(Flow::Continue);
-        }
-        if self.context != DispatchContext::BreakpointAction {
-            error!("gc resumes only from a breakpoint's command string; use g");
-            return Ok(Flow::Denied);
-        }
-        Ok(Flow::Jump(Jump::Resume))
-    }
-
-    fn cmd_bc(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(ids) = self.selected_breakpoint_ids(&invocation, "bc") else {
-            return Ok(());
-        };
-        let (breakpoints, backend, target) = self.ctx.breakpoint_sites();
-        apply_breakpoint_updates(
-            ids,
-            breakpoints,
-            &self.caches,
-            "cleared",
-            |breakpoints, id| breakpoints.remove(backend, target, id),
-        )
-    }
-
-    fn cmd_bd(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(ids) = self.selected_breakpoint_ids(&invocation, "bd") else {
-            return Ok(());
-        };
-        let (breakpoints, backend, target) = self.ctx.breakpoint_sites();
-        apply_breakpoint_updates(
-            ids,
-            breakpoints,
-            &self.caches,
-            "disabled",
-            |breakpoints, id| breakpoints.disable(backend, target, id),
-        )
-    }
-
-    fn cmd_be(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(ids) = self.selected_breakpoint_ids(&invocation, "be") else {
-            return Ok(());
-        };
-        let (breakpoints, backend, target) = self.ctx.breakpoint_sites();
-        apply_breakpoint_updates(
-            ids,
-            breakpoints,
-            &self.caches,
-            "enabled",
-            |breakpoints, id| breakpoints.enable(backend, target, id),
-        )
-    }
-    fn cmd_bpc(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(id) = Self::breakpoint_id_arg(&invocation, "bpc") else {
-            return Ok(());
-        };
-        let text = invocation.join_args(1);
-        if text.is_empty() {
-            outln!("{}\n", command_help("bpc"));
-            return Ok(());
-        }
-        let (condition, expr) = if text.eq_ignore_ascii_case("clear") {
-            (None, None)
-        } else {
-            let expr = match compile_repl_condition(Some(&text), self.radix) {
-                Ok(Some(expr)) => expr,
-                Ok(None) => unreachable!(),
-                Err(error) => {
-                    error!("{error}");
-                    return Ok(());
-                }
-            };
-            (Some(text), Some(expr))
-        };
-        match self.ctx.breakpoints.set_condition(id, condition, expr) {
-            Ok(()) => outln!("breakpoint {} condition updated\n", ui::bp_id(id)),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_bs(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(id) = Self::breakpoint_id_arg(&invocation, invocation.name) else {
-            return Ok(());
-        };
-        let text = invocation.join_args(1);
-        if text.is_empty() {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        let action = (!text.eq_ignore_ascii_case("clear")).then_some(text);
-        match self.ctx.breakpoints.set_action(id, action) {
-            Ok(()) => outln!("breakpoint {} action updated\n", ui::bp_id(id)),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_bsc(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(id) = Self::breakpoint_id_arg(&invocation, "bsc") else {
-            return Ok(());
-        };
-        // A quoted last argument is the commands; everything between is the
-        // condition, which may itself contain spaces.
-        let rest = invocation.argv.get(1..).unwrap_or(&[]);
-        let (condition_args, action) = match rest.split_last() {
-            Some((Cow::Owned(commands), condition)) => (
-                condition,
-                Some(commands.clone()).filter(|text| !text.is_empty()),
-            ),
-            _ => (rest, None),
-        };
-        let condition = join_breakpoint_args(condition_args);
-        if condition.is_empty() {
-            outln!("{}\n", command_help("bsc"));
-            return Ok(());
-        }
-        let expr = match compile_repl_condition(Some(&condition), self.radix) {
-            Ok(expr) => expr,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        let updated = self
-            .ctx
-            .breakpoints
-            .set_condition(id, Some(condition), expr)
-            .and_then(|()| self.ctx.breakpoints.set_action(id, action));
-        match updated {
-            Ok(()) => outln!(
-                "breakpoint {} condition and commands updated\n",
-                ui::bp_id(id)
-            ),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_br(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(old_id) = Self::breakpoint_id_arg(&invocation, "br") else {
-            return Ok(());
-        };
-        let Some(new_text) = invocation.arg(1) else {
-            outln!("{}\n", command_help("br"));
-            return Ok(());
-        };
-        let new_id = match new_text.parse::<u32>() {
-            Ok(id) => id,
-            Err(_) => {
-                error!("invalid breakpoint ID: {new_text}");
-                return Ok(());
-            }
-        };
-        match self.ctx.breakpoints.renumber(old_id, new_id) {
-            Ok(()) => {
-                self.caches.refresh_breakpoints(&self.ctx.breakpoints);
-                outln!(
-                    "breakpoint {} renumbered to {}\n",
-                    ui::bp_id(old_id),
-                    ui::bp_id(new_id)
-                );
-            }
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_bpp(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(id) = Self::breakpoint_id_arg(&invocation, "bpp") else {
-            return Ok(());
-        };
-        let Some(text) = invocation.arg(1) else {
-            outln!("{}\n", command_help("bpp"));
-            return Ok(());
-        };
-        let passes = match self.parse_radix_u64(text, "pass count") {
-            Ok(passes) => passes,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        match self.ctx.breakpoints.set_pass_count(id, passes) {
-            Ok(()) => outln!("breakpoint {} pass count reset\n", ui::bp_id(id)),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::breakpoints::BreakpointManager;
+    use crate::output::capture;
+    use crate::session::session_over_memory;
 
     #[test]
     fn breakpoint_option_numbers_honor_radix_prefixes() {
@@ -1788,5 +1789,49 @@ mod tests {
         assert!(hypercall_code_text("HvCallUnimplemented", NumberRadix::Hexadecimal).is_err());
         assert!(parse(&["/p", "4", "HvCallPostMessage"]).is_err());
         assert!(parse(&["/t", "4", "HvCallPostMessage"]).is_err());
+    }
+
+    /// `bp` and `bu` check their site in the session functions that the
+    /// SDK's `breakpoints.add` calls too, so the SDK refuses an address
+    /// inside an instruction exactly as `bp` does, and sets nothing there.
+    #[test]
+    fn bp_and_the_sdk_refuse_an_address_inside_an_instruction() {
+        // driver!Function starts with `mov [rsp+8], rbx`, five bytes long.
+        let mut code = [0x90u8; 0x40];
+        code[0x10..0x15].copy_from_slice(&[0x48, 0x89, 0x5c, 0x24, 0x08]);
+        let mut session = session_over_memory(0x1000, &code);
+        let dtb = session.target.current_dtb();
+        session.target.symbols.set_kernel(Some(1), dtb);
+        session
+            .target
+            .symbols
+            .inject_module_for_test(1, Vec::new(), &[("Function", 0x10)]);
+        session.target.symbols.inject_source_lines_for_test(
+            1,
+            dtb,
+            VirtAddr(0x1000),
+            0x40,
+            "driver.c",
+            &[],
+        );
+        let inside = "is inside the instruction at driver!Function";
+
+        let address = session
+            .set_code_breakpoint(VirtAddr(0x1012), BreakpointConfig::default())
+            .err()
+            .expect("the SDK's address breakpoint is refused");
+        assert!(address.to_string().contains(inside), "{address}");
+        let symbolic = session
+            .set_symbolic_breakpoint("driver!Function+2".into(), BreakpointConfig::default())
+            .err()
+            .expect("the SDK's symbolic breakpoint is refused");
+        assert!(symbolic.to_string().contains(inside), "{symbolic}");
+
+        let mut state = ReplState::for_oneshot(&mut session);
+        for line in ["bp 0x1012", "bu driver!Function+2"] {
+            let (_, text) = capture(|| state.dispatch_line(line));
+            assert!(text.contains(inside), "{line}: {text}");
+        }
+        assert!(session.breakpoints.list().is_empty());
     }
 }

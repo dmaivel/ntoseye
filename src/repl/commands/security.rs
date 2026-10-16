@@ -1,11 +1,14 @@
 use tabled::builder::Builder;
 
+use ntoseye_macros::{command, grammar};
+
 use crate::error::Result;
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
+use crate::session::Session;
 use crate::target::DiagnosticValue;
 use crate::target::security::{
-    AclDetail, ObjectSecurityDetail, SecurityDescriptorDetail, SessionDetail,
-    SessionProcessesDetail, SessionsDetail, SidDetail,
+    self, Acl, ObjectSecurity, SecurityDescriptor, SessionProcesses, Sessions, Sid,
 };
 use crate::types::VirtAddr;
 use crate::ui;
@@ -14,77 +17,265 @@ use super::diagnostics::{diagnostic_cell, diagnostic_hex};
 
 const MAX_SESSION_DISPLAY: usize = 64;
 
-repl_command! {
-    cmd_sd;
-    names: ["!sd", "sd"],
-    usage: "!sd <address> [1]",
-    summary: "Decode a SECURITY_DESCRIPTOR and its ACLs.",
-    details: "Decodes a self-relative or absolute security descriptor, and decodes each SID and each ACE separately. The optional 1 adds the names of well-known SIDs.",
-    completion: [Expression, None],
-    target: Kernel,
+/// The address of a command that takes exactly one expression: any other
+/// word count prints the help.
+#[grammar(usage = "<{}>", complete = [Expression])]
+fn single_address(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<VirtAddr, ArgError> {
+    if cursor.remaining() != 1 {
+        return Err(ArgError::Missing);
+    }
+    let text = cursor.word().ok_or(ArgError::Missing)?;
+    cx.eval(&text)
 }
 
-repl_command! {
-    cmd_acl;
-    names: ["!acl", "acl"],
-    usage: "!acl <address>",
-    summary: "Decode an ACL and its ACEs.",
-    completion: Expression,
+/// `!sd`'s optional `1` (the second word), checked before the address is
+/// evaluated: one or two words, and the second one must be `1`.
+#[grammar(usage = "")]
+fn sd_annotate(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<bool, ArgError> {
+    if !(1..=2).contains(&cursor.remaining()) {
+        return Err(ArgError::Missing);
+    }
+    match cursor.word_at(1).as_deref() {
+        None => Ok(false),
+        Some("1") => Ok(true),
+        Some(_) => Err(ArgError::Missing),
+    }
 }
 
-repl_command! {
-    cmd_sid;
-    names: ["!sid", "sid"],
-    usage: "!sid <address>",
-    summary: "Decode a SID in guest memory.",
-    completion: Expression,
+/// A session id: a signed decimal number.
+fn session_id(text: &str) -> std::result::Result<i64, ArgError> {
+    text.parse::<i64>().map_err(|_| {
+        ArgError::Message(format!(
+            "invalid session '{text}': expected a signed decimal value"
+        ))
+    })
 }
 
-repl_command! {
-    cmd_objsd;
-    names: ["!objsd", "objsd"],
-    usage: "!objsd <object>",
-    summary: "Decode the security descriptor that an object header references.",
-    details: "The command masks the low four bits of the OBJECT_HEADER.SecurityDescriptor fast reference before it decodes the descriptor.",
-    completion: Expression,
-    target: Kernel,
+/// `!session`'s `-s <id>`; anything else prints the help.
+#[grammar(usage = "[-s <id>]", complete = [None, Expression])]
+fn session_switch(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Option<i64>, ArgError> {
+    if cursor.remaining() == 0 {
+        return Ok(None);
+    }
+    if cursor.word().as_deref() != Some("-s") {
+        return Err(ArgError::Missing);
+    }
+    let text = cursor.word().ok_or(ArgError::Missing)?;
+    let session = session_id(&text)?;
+    if cursor.remaining() != 0 {
+        return Err(ArgError::Missing);
+    }
+    Ok(Some(session))
 }
 
-repl_command! {
-    cmd_session;
-    names: ["!session", "session"],
-    usage: "!session [-s <id>]",
-    summary: "List the sessions and the processes in each session.",
-    details: "The command reads session IDs from _EPROCESS.Session and _MM_SESSION_SPACE, or from the primary token if session space is opaque. Use -s -1 for the current session. The process walk stops at 4096 entries.",
-    completion: [None, Expression],
-    target: Kernel,
+/// `!sprocess`'s session: at most three words, the first a session id.
+#[grammar(usage = "[{}]", complete = [Expression])]
+fn sprocess_session(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Option<i64>, ArgError> {
+    if cursor.remaining() > 3 {
+        return Err(ArgError::Missing);
+    }
+    cursor.word().map(|text| session_id(&text)).transpose()
 }
 
-repl_command! {
-    cmd_sprocess;
-    names: ["!sprocess", "sprocess"],
-    usage: "!sprocess [session] [flags] [image]",
-    summary: "List the processes in a session.",
-    details: "The session is a signed decimal number. -1 and -2 select the current session, and -4 selects all sessions. If you do not give a session, the command uses the session of the attached process, if it is known. Flags default to 0 (brief output), and any non-zero value selects detailed output. The optional image argument is a glob that ignores case.",
-    completion: [Expression, Expression, None],
-    target: Kernel,
+/// Decode a SECURITY_DESCRIPTOR and its ACLs.
+///
+/// Decodes a self-relative or absolute security descriptor, and decodes each
+/// SID and each ACE separately. The optional 1 adds the names of well-known
+/// SIDs.
+#[command(
+    names = ["!sd", "sd"],
+    category = "security",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    python_name = "security_descriptor",
+)]
+fn sd(
+    session: &Session,
+    #[arg(render, parse = sd_annotate)] annotate_well_known: bool,
+    #[arg(parse = single_address_word)] address: VirtAddr,
+) -> Result<SecurityDescriptor> {
+    session.target.inspect_security_descriptor(address)
 }
 
-fn sid_text(sid: &SidDetail, annotate_well_known: bool) -> String {
+/// The next word as an address (after [`sd_annotate`] checked the line).
+#[grammar(usage = "<address> [1]", complete = [Expression, None])]
+fn single_address_word(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<VirtAddr, ArgError> {
+    let text = cursor.word().ok_or(ArgError::Missing)?;
+    cx.eval(&text)
+}
+
+impl Render<bool> for SecurityDescriptor {
+    fn render(&self, _: &mut ReplState<'_>, annotate_well_known: bool) {
+        print_security_descriptor(self, annotate_well_known);
+    }
+}
+
+/// Decode an ACL and its ACEs.
+#[command(
+    names = ["!acl", "acl"],
+    category = "security",
+    kind = Query,
+    target = Nt,
+    python = Inspect,
+)]
+fn acl(session: &Session, #[arg(parse = single_address)] address: VirtAddr) -> Result<Acl> {
+    session.target.inspect_acl(address)
+}
+
+impl Render for Acl {
+    fn render(&self, _: &mut ReplState<'_>, _: ()) {
+        print_acl(self, "ACL", false);
+    }
+}
+
+/// Decode a SID in guest memory.
+#[command(
+    names = ["!sid", "sid"],
+    category = "security",
+    kind = Query,
+    target = Nt,
+    python = Inspect,
+)]
+fn sid(session: &Session, #[arg(parse = single_address)] address: VirtAddr) -> Result<Sid> {
+    session.target.inspect_sid(address)
+}
+
+impl Render for Sid {
+    fn render(&self, _: &mut ReplState<'_>, _: ()) {
+        outln!(
+            "SID {}{}",
+            self.sid,
+            self.well_known
+                .as_deref()
+                .map(|name| format!(" ({name})"))
+                .unwrap_or_default()
+        );
+    }
+}
+
+/// Decode the security descriptor that an object header references.
+///
+/// The command masks the low four bits of the OBJECT_HEADER.SecurityDescriptor
+/// fast reference before it decodes the descriptor.
+#[command(
+    names = ["!objsd", "objsd"],
+    category = "security",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    python_name = "object_security",
+)]
+fn objsd(
+    session: &Session,
+    #[arg(parse = single_address)] object: VirtAddr,
+) -> Result<ObjectSecurity> {
+    session.target.inspect_object_security(object)
+}
+
+impl Render for ObjectSecurity {
+    fn render(&self, _: &mut ReplState<'_>, _: ()) {
+        print_object_security(self);
+    }
+}
+
+/// List the sessions and the processes in each session.
+///
+/// The command reads session IDs from _EPROCESS.Session and
+/// _MM_SESSION_SPACE, or from the primary token if session space is opaque.
+/// Use -s -1 for the current session. The process walk stops at 4096 entries.
+#[command(
+    names = ["!session", "session"],
+    category = "processes and modules",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    python_name = "sessions",
+)]
+fn session(
+    state: &Session,
+    #[arg(parse = session_switch, positional)] session: Option<i64>,
+) -> Result<Sessions> {
+    state.target.sessions(session)
+}
+
+impl Render for Sessions {
+    fn render(&self, repl: &mut ReplState<'_>, _: ()) {
+        *repl.caches.processes.write().unwrap() = self
+            .sessions
+            .iter()
+            .flat_map(|session| &session.processes)
+            .map(|process| (process.name.clone(), process.pid))
+            .collect();
+        print_sessions(self);
+    }
+}
+
+/// List the processes in a session.
+///
+/// The session is a signed decimal number. -1 and -2 select the current
+/// session, and -4 selects all sessions. If you do not give a session, the
+/// command uses the session of the attached process, if it is known. Flags
+/// default to 0 (brief output), and any non-zero value selects detailed
+/// output. The optional image argument is a glob that ignores case.
+#[command(
+    names = ["!sprocess", "sprocess"],
+    category = "processes and modules",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    python_name = "session_processes",
+)]
+fn sprocess(
+    state: &Session,
+    #[arg(parse = sprocess_session, positional)] session: Option<i64>,
+    #[arg(render, default = 0)] flags: u64,
+    image: Option<String>,
+) -> Result<SessionProcesses> {
+    state.target.session_processes(session, image.as_deref())
+}
+
+impl Render<u64> for SessionProcesses {
+    fn render(&self, repl: &mut ReplState<'_>, flags: u64) {
+        *repl.caches.processes.write().unwrap() = self
+            .processes
+            .iter()
+            .map(|row| (row.process.name.clone(), row.process.pid))
+            .collect();
+        print_session_processes(self, flags != 0);
+    }
+}
+
+fn sid_text(sid: &Sid, annotate_well_known: bool) -> String {
     if annotate_well_known && let Some(name) = sid.well_known.as_deref() {
         return format!("{} ({name})", sid.sid);
     }
     sid.sid.clone()
 }
 
-fn print_sid_diagnostic(value: &DiagnosticValue<SidDetail>, annotate_well_known: bool) -> String {
+fn print_sid_diagnostic(value: &DiagnosticValue<Sid>, annotate_well_known: bool) -> String {
     match value {
         DiagnosticValue::Available(sid) => sid_text(sid, annotate_well_known),
         DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
     }
 }
 
-fn print_acl(detail: &AclDetail, label: &str, annotate_well_known: bool) {
+fn print_acl(detail: &Acl, label: &str, annotate_well_known: bool) {
     let status = if detail.unknown_revision {
         " (unknown revision; ACEs not decoded)"
     } else if detail.bounded {
@@ -115,7 +306,7 @@ fn print_acl(detail: &AclDetail, label: &str, annotate_well_known: bool) {
 
 fn print_descriptor_component(
     label: &str,
-    value: &DiagnosticValue<Option<AclDetail>>,
+    value: &DiagnosticValue<Option<Acl>>,
     control: &DiagnosticValue<u16>,
     bit: u16,
     annotate_well_known: bool,
@@ -148,7 +339,7 @@ fn print_descriptor_component(
 
 fn print_sid_component(
     label: &str,
-    value: &DiagnosticValue<Option<SidDetail>>,
+    value: &DiagnosticValue<Option<Sid>>,
     annotate_well_known: bool,
 ) {
     match value {
@@ -162,7 +353,7 @@ fn print_sid_component(
     }
 }
 
-fn print_security_descriptor(detail: &SecurityDescriptorDetail, annotate_well_known: bool) {
+fn print_security_descriptor(detail: &SecurityDescriptor, annotate_well_known: bool) {
     outln!("SECURITY_DESCRIPTOR {}", ui::addr(detail.address.0));
     outln!(
         "  Revision              : {}",
@@ -200,7 +391,7 @@ fn print_security_descriptor(detail: &SecurityDescriptorDetail, annotate_well_kn
     }
 }
 
-fn print_object_security(detail: &ObjectSecurityDetail) {
+fn print_object_security(detail: &ObjectSecurity) {
     outln!(
         "object {} header {} SecurityDescriptor {} (fast-ref {:#x})",
         ui::addr(detail.object.0),
@@ -214,7 +405,7 @@ fn print_object_security(detail: &ObjectSecurityDetail) {
     }
 }
 
-fn print_session(detail: &SessionDetail) {
+fn print_session(detail: &security::Session) {
     match detail.id {
         Some(id) => outln!(
             "  Session {id}: {} process{}",
@@ -240,7 +431,7 @@ fn print_session(detail: &SessionDetail) {
             "    {:>6} {}  EPROCESS {}",
             process.pid,
             process.name,
-            ui::addr(process.eprocess_va.0)
+            ui::addr(process.eprocess.0)
         );
     }
     if detail.processes.len() > MAX_SESSION_DISPLAY {
@@ -251,7 +442,7 @@ fn print_session(detail: &SessionDetail) {
     }
 }
 
-fn print_sessions(detail: &SessionsDetail) {
+fn print_sessions(detail: &Sessions) {
     outln!("sessions: {}", detail.sessions.len());
     for session in &detail.sessions {
         print_session(session);
@@ -261,7 +452,7 @@ fn print_sessions(detail: &SessionsDetail) {
     }
 }
 
-fn print_session_processes(detail: &SessionProcessesDetail) {
+fn print_session_processes(detail: &SessionProcesses, detailed: bool) {
     outln!(
         "{}{} process{}",
         detail
@@ -272,13 +463,13 @@ fn print_session_processes(detail: &SessionProcessesDetail) {
         if detail.process_count == 1 { "" } else { "es" }
     );
     let mut builder = Builder::default();
-    if detail.detailed {
+    if detailed {
         builder.push_record(["PID", "Name", "EPROCESS", "DTB", "Session"]);
         for row in &detail.processes {
             builder.push_record([
                 row.process.pid.to_string(),
                 row.process.name.clone(),
-                ui::addr(row.process.eprocess_va.0),
+                ui::addr(row.process.eprocess.0),
                 ui::addr(row.process.dtb),
                 row.session
                     .map(|id| id.to_string())
@@ -296,174 +487,5 @@ fn print_session_processes(detail: &SessionProcessesDetail) {
     }
     if detail.truncated {
         outln!("process enumeration bounded at 4096");
-    }
-}
-
-fn parse_session_id(text: &str) -> Option<i64> {
-    match text.parse::<i64>() {
-        Ok(value) => Some(value),
-        Err(_) => {
-            error!("invalid session '{text}': expected a signed decimal value");
-            None
-        }
-    }
-}
-
-impl ReplState<'_> {
-    /// The address argument of a command that takes exactly one expression,
-    /// or `None` once usage or the evaluation error has been reported.
-    fn single_address_arg(
-        &self,
-        invocation: &CommandInvocation<'_>,
-        command: &str,
-    ) -> Option<VirtAddr> {
-        let [text] = invocation.argv.as_slice() else {
-            outln!("{}\n", command_help(command));
-            return None;
-        };
-        self.eval_or_report(text)
-    }
-
-    fn cmd_sd(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if invocation.argv.is_empty()
-            || invocation.argv.len() > 2
-            || invocation.arg(1).is_some_and(|flag| flag != "1")
-        {
-            outln!("{}\n", command_help("!sd"));
-            return Ok(());
-        }
-        let Some(text) = invocation.arg(0) else {
-            outln!("{}\n", command_help("!sd"));
-            return Ok(());
-        };
-        let Some(address) = self.eval_or_report(text) else {
-            return Ok(());
-        };
-        let annotate_well_known = invocation.arg(1) == Some("1");
-        match self
-            .ctx
-            .target
-            .inspect_security_descriptor(address, annotate_well_known)
-        {
-            Ok(detail) => print_security_descriptor(&detail, annotate_well_known),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_acl(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(address) = self.single_address_arg(&invocation, "!acl") else {
-            return Ok(());
-        };
-        match self.ctx.target.inspect_acl(address) {
-            Ok(detail) => print_acl(&detail, "ACL", false),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_sid(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(address) = self.single_address_arg(&invocation, "!sid") else {
-            return Ok(());
-        };
-        match self.ctx.target.inspect_sid(address) {
-            Ok(sid) => outln!(
-                "SID {}{}",
-                sid.sid,
-                sid.well_known
-                    .as_deref()
-                    .map(|name| format!(" ({name})"))
-                    .unwrap_or_default()
-            ),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_objsd(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(object) = self.single_address_arg(&invocation, "!objsd") else {
-            return Ok(());
-        };
-        match self.ctx.target.inspect_object_security(object) {
-            Ok(detail) => print_object_security(&detail),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_session(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let mut requested = None;
-        let mut index = 0;
-        while index < invocation.argv.len() {
-            if invocation.arg(index) != Some("-s") || requested.is_some() {
-                outln!("{}\n", command_help("!session"));
-                return Ok(());
-            }
-            index += 1;
-            let Some(text) = invocation.arg(index) else {
-                outln!("{}\n", command_help("!session"));
-                return Ok(());
-            };
-            requested = parse_session_id(text);
-            if requested.is_none() {
-                return Ok(());
-            }
-            index += 1;
-        }
-        match self.ctx.target.sessions(requested) {
-            Ok(detail) => {
-                let mut processes = Vec::new();
-                for session in &detail.sessions {
-                    processes.extend(
-                        session
-                            .processes
-                            .iter()
-                            .map(|process| (process.name.clone(), process.pid)),
-                    );
-                }
-                *self.caches.processes.write().unwrap() = processes.into_iter().collect();
-                print_sessions(&detail);
-            }
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_sprocess(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if invocation.argv.len() > 3 {
-            outln!("{}\n", command_help("!sprocess"));
-            return Ok(());
-        }
-        let selector = match invocation.arg(0) {
-            Some(text) => match parse_session_id(text) {
-                Some(selector) => Some(selector),
-                None => return Ok(()),
-            },
-            None => None,
-        };
-        let flags = match invocation.arg(1) {
-            Some(text) => match self.eval_or_report(text) {
-                Some(flags) => flags.0,
-                None => return Ok(()),
-            },
-            None => 0,
-        };
-        let image_filter = invocation.arg(2);
-        match self
-            .ctx
-            .target
-            .session_processes(selector, flags != 0, image_filter)
-        {
-            Ok(detail) => {
-                *self.caches.processes.write().unwrap() = detail
-                    .processes
-                    .iter()
-                    .map(|row| (row.process.name.clone(), row.process.pid))
-                    .collect();
-                print_session_processes(&detail);
-            }
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
     }
 }

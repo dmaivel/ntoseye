@@ -56,7 +56,8 @@ KMDF adds two blocks: a copy of one driver's In-Flight Recorder log, and the lis
 A driver can add its own data the same way, with `KeRegisterBugCheckReasonCallback` and `KbCallbackSecondaryDumpData`. To decode it in a script, read the block with the SDK:
 
 ```python
-blocks = dbg.inspect.version().dump.tagged_blocks
+dump = dbg.inspect.version().dump                # None on a live target
+blocks = dump.tagged_blocks if dump else []
 data = dbg.inspect.read_tagged("{12345678-1234-1234-1234-123456789abc}")
 ```
 

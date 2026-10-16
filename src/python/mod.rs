@@ -20,20 +20,19 @@ use crate::cli;
 use crate::error::Error;
 use crate::kd::KdMemorySource;
 use crate::session::Session;
-use crate::target::meta::decode_error_code;
-use crate::view::shape::{Typed, ViewValue};
-use crate::view::{self, PyShape};
+use crate::target::meta::{ErrorCode, decode_error_code};
 use crate::{Backend, TargetSpec};
 
 pub mod args;
 pub mod breakpoints;
+pub mod collection;
+pub mod command;
 pub mod context;
 pub mod debugger;
 pub mod embed;
 pub mod handle;
 pub mod hypervisor;
 pub mod inspect;
-pub mod iter;
 pub mod memory;
 pub mod module;
 pub mod process;
@@ -41,7 +40,6 @@ pub mod record;
 pub mod runcontrol;
 pub mod runner;
 pub mod secure;
-pub mod stop;
 pub mod symbols;
 #[cfg(test)]
 mod tests;
@@ -49,10 +47,10 @@ pub mod thread;
 pub mod types;
 pub mod userdump;
 
-use args::{AttachBackend, MemorySource};
+use args::AttachBackend;
 use handle::Actor;
 pub use handle::Debugger;
-use record::PlainDict;
+use record::{PlainDict, PyStyle, ToValue, Typed};
 
 /// Sanity caps for the raw byte APIs. The SDK is local and trusted, but an
 /// accidental huge length (`read(addr, 10**12)`) would allocate before the
@@ -190,11 +188,8 @@ fn handshake_timeout_arg(value: &Bound<'_, PyAny>) -> PyResult<Option<u64>> {
 
 /// A value as a plain `dict`: an entity's `to_dict()`, with its records and
 /// diagnostics converted.
-pub fn view_dict<'py, T: ViewValue<Source = T>>(
-    py: Python<'py>,
-    value: T,
-) -> PyResult<PlainDict<'py>> {
-    view::to_py(py, &T::view(value), PyShape::Plain)?
+pub fn plain_dict<'py, T: ToValue>(py: Python<'py>, value: &T) -> PyResult<PlainDict<'py>> {
+    record::to_py(py, &value.to_value(), PyStyle::Plain)?
         .cast_into::<PyDict>()
         .map(PlainDict)
         .map_err(|e| raise(e.to_string()))
@@ -222,7 +217,7 @@ pub fn view_dict<'py, T: ViewValue<Source = T>>(
     backend=AttachBackend(Some(Backend::Kd)),
     connect=None,
     key=None,
-    memory_source=MemorySource(KdMemorySource::Auto),
+    memory_source=KdMemorySource::Auto,
     *,
     kd_handshake_timeout: "int | None" = None,
 ))]
@@ -231,7 +226,7 @@ fn attach(
     backend: AttachBackend,
     connect: Option<&str>,
     key: Option<&str>,
-    memory_source: MemorySource,
+    memory_source: KdMemorySource,
     #[pyo3(from_py_with = handshake_timeout_arg)] kd_handshake_timeout: Option<u64>,
 ) -> PyResult<Debugger> {
     let spec = match backend.0 {
@@ -239,7 +234,7 @@ fn attach(
             backend,
             connect: connect.map(str::to_string),
             kdnet_key: key.map(str::to_string),
-            memory_source: memory_source.0,
+            memory_source,
             kd_handshake_timeout,
         },
         None => {
@@ -268,8 +263,8 @@ fn attach(
 /// Decode an NTSTATUS, Win32, or HRESULT code into its name and description
 /// (`!error`). This function does not need a target.
 #[pyfunction]
-fn decode_error(py: Python<'_>, code: u64) -> PyResult<Typed<'_, view::meta::ErrorCode>> {
-    Typed::new(py, view::meta::error_code(&decode_error_code(code)))
+fn decode_error(py: Python<'_>, code: u64) -> PyResult<Typed<'_, ErrorCode>> {
+    Typed::new(py, decode_error_code(code))
 }
 
 /// Run the `ntoseye` command line on `sys.argv` and return its exit status, as
@@ -285,51 +280,18 @@ fn cli_main(py: Python<'_>) -> PyResult<i32> {
 
 // The one list of what the SDK exports: the wheel's `PyInit__ntoseye`, the
 // REPL's embedded interpreter, and PyO3's introspection (the generated
-// `_ntoseye.pyi`) all read it. `with_shape_classes!` adds every result class
-// the views declare. Exceptions and the package re-exports live in
-// `ntoseye/__init__.py`.
-crate::view::with_shape_classes! {
+// `_ntoseye.pyi`) all read it. `with_sdk_classes!` (written by build.rs)
+// adds every class: `#[record]`s, `#[handle]`s and `#[pyclass]`es.
+// Exceptions and the package re-exports live in `ntoseye/__init__.py`.
+include!(concat!(env!("OUT_DIR"), "/sdk_classes.rs"));
+with_sdk_classes! {
 /// The native module of the ntoseye SDK. Import from `ntoseye`, which
 /// re-exports all of it.
 #[pymodule]
 pub mod _ntoseye {
-    #[pymodule_export]
-    use super::breakpoints::{Breakpoint, Breakpoints, Exceptions, Watchpoint};
     #[cfg(all(feature = "cli", feature = "python-extension"))]
     #[pymodule_export]
     use super::cli_main;
-    #[pymodule_export]
-    use super::handle::Debugger;
-    #[pymodule_export]
-    use super::inspect::Inspect;
-    #[pymodule_export]
-    use super::iter::{
-        BreakpointIterator, CpuIterator, DriverIterator, ExceptionPolicyIterator, HeapIterator,
-        MemoryRegionIterator, ModuleIterator, NameIterator, ProcessIterator, ThreadIterator,
-        UserThreadIterator,
-    };
-    #[pymodule_export]
-    use super::memory::Memory;
-    #[pymodule_export]
-    use super::module::{Device, Driver, Drivers, Module, Modules};
-    #[pymodule_export]
-    use super::process::{Heap, Heaps, Process, Processes, Regions};
-    #[pymodule_export]
-    use super::record::{BaseRecord, Record};
-    #[pymodule_export]
-    use super::hypervisor::{HypercallCaller, HypervisorPartition, HypervisorVtl, VirtualProcessor};
-    #[pymodule_export]
-    use super::secure::{SecureKernel, Trustlet};
-    #[pymodule_export]
-    use super::stop::{Stop, StopContext};
-    #[pymodule_export]
-    use super::symbols::Symbols;
-    #[pymodule_export]
-    use super::thread::{Cpu, Cpus, Frame, Msrs, Registers, Thread, Threads};
-    #[pymodule_export]
-    use super::types::{Struct, Type, Types};
-    #[pymodule_export]
-    use super::userdump::{UserDump, UserProcess, UserThread, UserThreads};
     #[pymodule_export]
     use super::{attach, decode_error};
 

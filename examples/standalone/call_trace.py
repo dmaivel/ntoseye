@@ -35,8 +35,8 @@ def main() -> None:
                 timed_out = True
                 print(f"timeout waiting for {args.symbol} after {args.timeout:g}s")
                 return
-            if bp not in stop.breakpoints:
-                print(f"stop: {type(stop).__name__} ({stop.symbol or '?'})")
+            if not stop.hit(bp):
+                print(f"stop: {stop.kind} ({stop.symbol or '?'})")
                 return
 
             call_stop = dbg.step(until="call")

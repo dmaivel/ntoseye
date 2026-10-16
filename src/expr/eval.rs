@@ -5,9 +5,9 @@
 use super::{
     Expr, ExprBinaryOp, ExprType, ExprUnaryOp, ExprValue, StringOp, strip_digit_separators,
 };
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::layout::{ParsedType, TypeInfo, bitfield_value, primitive_size};
+use crate::memory::MemoryOps;
 use crate::symbols::{LocalVariableLocation, ProcedureLocal, SymbolStore, glob_matches};
 use crate::target::Target;
 use crate::types::{Dtb, VirtAddr};

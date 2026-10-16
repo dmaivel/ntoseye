@@ -19,7 +19,11 @@ impl KdTransport {
         }
     }
 
+    /// Set how long a read waits, `None` for no limit. A zero timeout, as a
+    /// poll once a deadline is reached asks for, is the shortest a socket
+    /// takes, as sockets refuse zero.
     pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+        let timeout = timeout.map(|timeout| timeout.max(Duration::from_millis(1)));
         match self {
             Self::Serial(stream) => stream.set_read_timeout(timeout),
             Self::Network(stream) => stream.set_read_timeout(timeout),
@@ -77,5 +81,24 @@ impl Write for KdTransport {
             Self::Serial(stream) => stream.flush(),
             Self::Network(stream) => stream.flush(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A zero read timeout, a poll once a deadline is reached, is taken: a
+    /// read with nothing to read then times out, where the socket would
+    /// refuse the timeout itself.
+    #[test]
+    fn a_zero_read_timeout_polls() {
+        let (host, _kernel) = UnixStream::pair().unwrap();
+        let mut transport = KdTransport::from(host);
+
+        transport.set_read_timeout(Some(Duration::ZERO)).unwrap();
+        let read = transport.read(&mut [0u8; 1]);
+
+        assert_eq!(read.unwrap_err().kind(), io::ErrorKind::WouldBlock);
     }
 }

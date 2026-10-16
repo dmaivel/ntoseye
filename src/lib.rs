@@ -140,7 +140,6 @@ impl TargetSpec {
 #[macro_use]
 pub mod output;
 
-pub mod backend;
 pub mod blackbox;
 pub mod breakpoints;
 pub mod bugchecks;
@@ -149,6 +148,7 @@ pub mod bytes;
 pub mod cli;
 #[cfg(feature = "cli")]
 pub mod configure;
+pub mod cpu_context;
 pub mod cpu_state;
 #[cfg(feature = "dap")]
 pub mod dap;
@@ -188,7 +188,6 @@ pub mod target;
 #[cfg(any(feature = "dap", feature = "gdbserver"))]
 mod termination;
 pub mod trapframe;
-pub mod triage;
 pub mod triage_report;
 pub mod types;
 pub mod typeview;
@@ -196,8 +195,6 @@ pub mod typeview;
 pub mod ui;
 pub mod unwind;
 pub mod userdump;
-#[cfg(any(feature = "mcp", feature = "python"))]
-pub mod view;
 pub mod wpp;
 
 #[cfg(test)]

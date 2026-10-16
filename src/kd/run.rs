@@ -7,9 +7,8 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crate::bytes;
-use crate::dbg_backend::{ContinueDisposition, ModuleEvent, StopEvent};
+use crate::dbg_backend::{ContinueDisposition, ModuleEvent, RegisterMap, StopEvent};
 use crate::error::{Error, Result};
-use crate::gdb::RegisterMap;
 use crate::types::Arch;
 
 use super::breakpoints::{

@@ -13,37 +13,260 @@ use crate::types::VirtAddr;
 use crate::typeview::{MAX_ARRAY_ELEMENTS, TypeView};
 use crate::ui;
 
+use ntoseye_macros::{command, grammar};
+
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
 
 const MAX_LIST_ENTRIES: usize = 4096;
 pub const MAX_RECURSION_DEPTH: usize = 64;
 const MAX_DL_WORDS: usize = 64;
 
-repl_command! {
-    cmd_dt;
-    names: ["dt"],
-    usage: "dt [-r[N]] [-a[N]] [-v] [-y] [-l <field>] [module!]<type> [address] [field-pattern...]",
-    summary: "Show a type layout or a decoded structure.",
-    details: "-r expands nested structures, -a expands bounded arrays, and -v shows field sizes. -y matches names by case-insensitive prefix, and -l <field> walks a LIST_ENTRY field. ntoseye looks for a bare type name in the kernel PDB first, and then in the modules of the current address space. If the PDB of a module defines a member type, ntoseye names the type with that module (wdf01000!_WDF_DRIVER_GLOBALS) and expands it from that PDB. If the PDB only declares the type (a driver's _EPROCESS*), ntoseye resolves it as a bare name. Nested field paths use dots, and field patterns support * and ?. With -l, the given address is the first element, as in WinDbg, so the walk includes all nodes until it returns to that address. In memory, a list head and a record link look the same, so if you start at a list head instead of at `poi(ListHead)`, the command shows the head as one pseudo-record and does not drop a real record. If the list is empty, its link points to itself, and the command shows nothing. The walk keeps the entries that it collected, and reports null links, cycles, unreadable links, and when it reaches the entry limit.",
-    completion: Type,
+/// Show a type layout or a decoded structure.
+///
+/// -r expands nested structures, -a expands bounded arrays, and -v shows field
+/// sizes. -y matches names by case-insensitive prefix, and -l <field> walks a
+/// LIST_ENTRY field. ntoseye looks for a bare type name in the kernel PDB
+/// first, and then in the modules of the current address space. If the PDB of a
+/// module defines a member type, ntoseye names the type with that module
+/// (wdf01000!_WDF_DRIVER_GLOBALS) and expands it from that PDB. If the PDB only
+/// declares the type (a driver's _EPROCESS*), ntoseye resolves it as a bare
+/// name. Nested field paths use dots, and field patterns support * and ?. With
+/// -l, the given address is the first element, as in WinDbg, so the walk
+/// includes all nodes until it returns to that address. In memory, a list head
+/// and a record link look the same, so if you start at a list head instead of
+/// at `poi(ListHead)`, the command shows the head as one pseudo-record and does
+/// not drop a real record. If the list is empty, its link points to itself, and
+/// the command shows nothing. The walk keeps the entries that it collected, and
+/// reports null links, cycles, unreadable links, and when it reaches the entry
+/// limit.
+#[command(
+    names = ["dt"],
+    category = "symbols, types, and expressions",
+    kind = Query,
+    python = none,
+)]
+fn dt(state: &mut ReplState<'_>, #[arg(parse = dt_arguments)] parsed: ParsedDtArgs) -> Result<()> {
+    state.dt(parsed)
 }
 
-repl_command! {
-    cmd_dl;
-    names: ["dl"],
-    usage: "dl [-b] <address> <maxcount> [size]",
-    summary: "Dump a bounded _LIST_ENTRY chain.",
-    details: "By default, the walk follows Flink, and -b follows Blink. The optional size is the number of pointer-sized words that the command shows for each element, 2 by default. The given address is the first element, as in WinDbg, so the walk includes all nodes until it returns to that address. In memory, a list head and a record link look the same, so if you start at a list head instead of at `poi(ListHead)`, the command shows the head as one pseudo-record and does not drop a real record. If the list is empty, its link points to itself, and the command shows nothing. The walk keeps the entries that it collected, and reports null links, cycles, unreadable links, and when it reaches the entry limit. It does not report when it reaches the requested maxcount.",
-    completion: Expression,
+/// `dt`'s words.
+#[grammar(
+    usage = "[-r[N]] [-a[N]] [-v] [-y] [-l <field>] [module!]<type> [address] [field-pattern]...",
+    complete = Type
+)]
+fn dt_arguments(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<ParsedDtArgs, ArgError> {
+    parse_dt_args(&cursor.take_all(|_| true)).map_err(|error| {
+        if error == "missing type name" {
+            ArgError::Missing
+        } else {
+            ArgError::Message(format!("dt: {error}"))
+        }
+    })
 }
 
-repl_command! {
-    cmd_list_command -> Flow;
-    names: ["!list"],
-    usage: "!list -t [module!]<type>.<field> -x \"<commands>\" <address>",
-    summary: "Run commands for each element of a typed LIST_ENTRY chain.",
-    details: "Each command can get the element address as $extret, @extret, or @$extret. The walk stops at the head, at a repeated link, or after 4096 elements. The given address is the first element, as in WinDbg, so the walk includes all nodes until it returns to that address. In memory, a list head and a record link look the same, so if you start at a list head instead of at `poi(ListHead)`, the command uses the head as one pseudo-record and does not drop a real record. If the list is empty, its link points to itself, and the command runs nothing. The walk keeps the entries that it collected, and reports null links, cycles, unreadable links, and when it reaches the entry limit. Ctrl+C stops the commands between elements. A command that the session does not accept, for example a resume inside a breakpoint action, stops the element commands and the rest of the command line, but a command that only reports an error does not stop them.",
-    completion: Expression,
+/// Dump a bounded _LIST_ENTRY chain.
+///
+/// By default, the walk follows Flink, and -b follows Blink. The optional size
+/// is the number of pointer-sized words that the command shows for each
+/// element, 2 by default. The given address is the first element, as in WinDbg,
+/// so the walk includes all nodes until it returns to that address. In memory,
+/// a list head and a record link look the same, so if you start at a list head
+/// instead of at `poi(ListHead)`, the command shows the head as one
+/// pseudo-record and does not drop a real record. If the list is empty, its
+/// link points to itself, and the command shows nothing. The walk keeps the
+/// entries that it collected, and reports null links, cycles, unreadable links,
+/// and when it reaches the entry limit. It does not report when it reaches the
+/// requested maxcount.
+#[command(
+    names = ["dl"],
+    category = "memory and disassembly",
+    kind = Query,
+    python = none,
+)]
+fn dl(state: &mut ReplState<'_>, #[arg(parse = dl_arguments)] words: DlArgs) -> Result<()> {
+    state.dl(words)
+}
+
+/// `dl`'s words: `-b` anywhere, and two or three expressions.
+struct DlArgs {
+    backward: bool,
+    positional: Vec<String>,
+}
+
+#[grammar(usage = "[-b] <address> <maxcount> [size]", complete = Expression)]
+fn dl_arguments(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<DlArgs, ArgError> {
+    let backward = !cursor.take_all(|word| word == "-b").is_empty();
+    let positional: Vec<String> = cursor
+        .take_all(|_| true)
+        .into_iter()
+        .map(|word| word.into_owned())
+        .collect();
+    if !(2..=3).contains(&positional.len()) {
+        return Err(ArgError::Missing);
+    }
+    Ok(DlArgs {
+        backward,
+        positional,
+    })
+}
+
+/// `!list`'s words: `-t [module!]<type>.<field>`, `-x "<commands>"`, and the
+/// list head address, in any order.
+struct ListArguments {
+    type_field: String,
+    commands: String,
+    address: String,
+}
+
+#[grammar(
+    usage = "-t [module!]<type>.<field> -x \"<commands>\" <address>",
+    complete = Expression
+)]
+fn list_arguments(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<ListArguments, ArgError> {
+    let message = |text: &str| ArgError::Message(text.to_string());
+    let mut type_field = None;
+    let mut commands = None;
+    let mut positional = Vec::new();
+    while let Some(word) = cursor.word() {
+        match word.as_ref() {
+            "-t" => {
+                let value = cursor
+                    .word()
+                    .ok_or_else(|| message("!list: missing type after -t"))?;
+                type_field = Some(value.into_owned());
+            }
+            "-x" => {
+                let value = cursor
+                    .word()
+                    .ok_or_else(|| message("!list: missing commands after -x"))?;
+                commands = Some(value.into_owned());
+            }
+            arg if arg.starts_with('-') => {
+                return Err(ArgError::Message(format!("!list: unknown option `{arg}`")));
+            }
+            _ => positional.push(word.into_owned()),
+        }
+    }
+    let (Some(type_field), Some(commands), Some(address)) =
+        (type_field, commands, positional.first().cloned())
+    else {
+        return Err(ArgError::Missing);
+    };
+    if positional.len() > 1 {
+        return Err(message("!list accepts one list head address"));
+    }
+    Ok(ListArguments {
+        type_field,
+        commands,
+        address,
+    })
+}
+
+/// Run commands for each element of a typed LIST_ENTRY chain.
+///
+/// Each command can get the element address as $extret, @extret, or @$extret.
+/// The walk stops at the head, at a repeated link, or after 4096 elements. The
+/// given address is the first element, as in WinDbg, so the walk includes all
+/// nodes until it returns to that address. In memory, a list head and a record
+/// link look the same, so if you start at a list head instead of at
+/// `poi(ListHead)`, the command uses the head as one pseudo-record and does not
+/// drop a real record. If the list is empty, its link points to itself, and the
+/// command runs nothing. The walk keeps the entries that it collected, and
+/// reports null links, cycles, unreadable links, and when it reaches the entry
+/// limit. Ctrl+C stops the commands between elements. A command that the
+/// session does not accept, for example a resume inside a breakpoint action,
+/// stops the element commands and the rest of the command line, but a command
+/// that only reports an error does not stop them.
+#[command(
+    names = ["!list"],
+    category = "objects and I/O",
+    kind = Host,
+    python = none,
+)]
+fn list(
+    state: &mut ReplState<'_>,
+    #[arg(parse = list_arguments)] arguments: ListArguments,
+) -> Result<Flow> {
+    let ListArguments {
+        type_field,
+        commands,
+        address: address_text,
+    } = arguments;
+    let Some((type_name, field_name)) = type_field.rsplit_once('.') else {
+        error!(
+            "{}",
+            usage_error(
+                "!list",
+                format!("!list -t names no field in '{type_field}'")
+            )
+        );
+        return Ok(Flow::Continue);
+    };
+    let path = match parse_field_path(field_name) {
+        Ok(path) => path,
+        Err(error) => {
+            error!("!list: {}", error);
+            return Ok(Flow::Continue);
+        }
+    };
+    let type_info = match state.lookup_type(type_name) {
+        Some(type_info) => type_info,
+        None => {
+            error!("!list: type `{}` not found", type_name);
+            return Ok(Flow::Continue);
+        }
+    };
+    let head = match state.eval_or_report(&address_text) {
+        Some(address) if !address.is_zero() => address,
+        Some(_) => {
+            error!("!list requires a nonzero list head address");
+            return Ok(Flow::Continue);
+        }
+        None => return Ok(Flow::Continue),
+    };
+    let resolved = match state.resolve_field_path(type_info.as_ref(), &path) {
+        Ok(path) => path,
+        Err(error) => {
+            error!("!list -t {}: {}", type_field, error);
+            return Ok(Flow::Continue);
+        }
+    };
+    let (link_offset, next_offset, pointer_size) = match state.list_offsets(&resolved) {
+        Ok(offsets) => offsets,
+        Err(error) => {
+            error!("!list -t {}: {}", type_field, error);
+            return Ok(Flow::Continue);
+        }
+    };
+    let (records, termination) =
+        state.collect_typed_list(head, link_offset, next_offset, pointer_size);
+    let command = commands.replace("@$extret", "@extret");
+    let flow = state.in_command_loop("!list", |state| {
+        state.run_iterations("!list", records.len(), |state, index| {
+            state.ctx.target.user_vars.insert(
+                "extret".to_string(),
+                UserVar {
+                    value: records[index].0,
+                    source: "!list element".to_string(),
+                },
+            );
+            Some(Cow::Borrowed(command.as_str()))
+        })
+    })?;
+    if let Some(stop) = termination.diagnostic() {
+        outln!("!list: list walk stopped: {stop}");
+    }
+    Ok(flow)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -634,18 +857,7 @@ impl ReplState<'_> {
         (records, cursor.finish())
     }
 
-    fn cmd_dt(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let mut parsed = match parse_dt_args(&invocation.argv) {
-            Ok(parsed) => parsed,
-            Err(error) => {
-                if error == "missing type name" {
-                    outln!("{}\n", command_help("dt"));
-                } else {
-                    error!("dt: {}", error);
-                }
-                return Ok(());
-            }
-        };
+    fn dt(&mut self, mut parsed: ParsedDtArgs) -> Result<()> {
         let type_info = match self.lookup_type(&parsed.type_name) {
             Some(type_info) => type_info,
             None => {
@@ -794,24 +1006,17 @@ impl ReplState<'_> {
         }
     }
 
-    fn cmd_dl(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let mut positional = Vec::new();
-        let mut backward = false;
-        for arg in &invocation.argv {
-            if arg.as_ref() == "-b" {
-                backward = true;
-            } else {
-                positional.push(arg.as_ref());
-            }
-        }
-        if positional.len() < 2 || positional.len() > 3 {
-            outln!("{}\n", command_help("dl"));
-            return Ok(());
-        }
-        let Some(address) = self.eval_or_report(positional[0]) else {
+    fn dl(
+        &mut self,
+        DlArgs {
+            backward,
+            positional,
+        }: DlArgs,
+    ) -> Result<()> {
+        let Some(address) = self.eval_or_report(&positional[0]) else {
             return Ok(());
         };
-        let limit = match self.eval_or_report(positional[1]) {
+        let limit = match self.eval_or_report(&positional[1]) {
             Some(count) => count.0.min(MAX_LIST_ENTRIES as u64) as usize,
             None => return Ok(()),
         };
@@ -856,116 +1061,6 @@ impl ReplState<'_> {
             }
         }
         Ok(())
-    }
-
-    fn cmd_list_command(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
-        let mut type_field = None;
-        let mut commands = None;
-        let mut positional = Vec::new();
-        let mut index = 0;
-        while index < invocation.argv.len() {
-            match invocation.arg(index).unwrap_or_default() {
-                "-t" => {
-                    let Some(value) = invocation.arg(index + 1) else {
-                        error!("!list: missing type after -t");
-                        return Ok(Flow::Continue);
-                    };
-                    type_field = Some(value.to_string());
-                    index += 2;
-                }
-                "-x" => {
-                    let Some(value) = invocation.arg(index + 1) else {
-                        error!("!list: missing commands after -x");
-                        return Ok(Flow::Continue);
-                    };
-                    commands = Some(value.to_string());
-                    index += 2;
-                }
-                arg if arg.starts_with('-') => {
-                    error!("!list: unknown option `{arg}`");
-                    return Ok(Flow::Continue);
-                }
-                arg => {
-                    positional.push(arg.to_string());
-                    index += 1;
-                }
-            }
-        }
-        let Some(type_field) = type_field else {
-            outln!("{}\n", command_help("!list"));
-            return Ok(Flow::Continue);
-        };
-        let Some(commands) = commands else {
-            outln!("{}\n", command_help("!list"));
-            return Ok(Flow::Continue);
-        };
-        let Some(address_text) = positional.first() else {
-            outln!("{}\n", command_help("!list"));
-            return Ok(Flow::Continue);
-        };
-        if positional.len() > 1 {
-            error!("!list accepts one list head address");
-            return Ok(Flow::Continue);
-        }
-        let Some((type_name, field_name)) = type_field.rsplit_once('.') else {
-            error!("!list -t expects [module!]<type>.<field>");
-            return Ok(Flow::Continue);
-        };
-        let path = match parse_field_path(field_name) {
-            Ok(path) => path,
-            Err(error) => {
-                error!("!list: {}", error);
-                return Ok(Flow::Continue);
-            }
-        };
-        let type_info = match self.lookup_type(type_name) {
-            Some(type_info) => type_info,
-            None => {
-                error!("!list: type `{}` not found", type_name);
-                return Ok(Flow::Continue);
-            }
-        };
-        let head = match self.eval_or_report(address_text) {
-            Some(address) if !address.is_zero() => address,
-            Some(_) => {
-                error!("!list requires a nonzero list head address");
-                return Ok(Flow::Continue);
-            }
-            None => return Ok(Flow::Continue),
-        };
-        let resolved = match self.resolve_field_path(type_info.as_ref(), &path) {
-            Ok(path) => path,
-            Err(error) => {
-                error!("!list -t {}: {}", type_field, error);
-                return Ok(Flow::Continue);
-            }
-        };
-        let (link_offset, next_offset, pointer_size) = match self.list_offsets(&resolved) {
-            Ok(offsets) => offsets,
-            Err(error) => {
-                error!("!list -t {}: {}", type_field, error);
-                return Ok(Flow::Continue);
-            }
-        };
-        let (records, termination) =
-            self.collect_typed_list(head, link_offset, next_offset, pointer_size);
-        let command = commands.replace("@$extret", "@extret");
-        let flow = self.in_command_loop("!list", |state| {
-            state.run_iterations("!list", records.len(), |state, index| {
-                state.ctx.target.user_vars.insert(
-                    "extret".to_string(),
-                    UserVar {
-                        value: records[index].0,
-                        source: "!list element".to_string(),
-                    },
-                );
-                Some(Cow::Borrowed(command.as_str()))
-            })
-        })?;
-        if let Some(stop) = termination.diagnostic() {
-            outln!("!list: list walk stopped: {stop}");
-        }
-        Ok(flow)
     }
 }
 

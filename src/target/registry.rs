@@ -26,13 +26,14 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::{DiagnosticValue, Target, bounded_list_walk};
-use crate::backend::MemoryOps;
+use super::{DiagnosticValue, Target, bounded_record_list_walk};
 use crate::error::{Error, Result};
 use crate::layout::{TypeInfo, Types, utf16le_lossy, utf16le_nul_terminated};
-use crate::memory::AddressSpace;
+use crate::memory::{AddressSpace, MemoryOps};
 use crate::phys::PhysMem;
+use crate::target::etw::format_filetime_precise;
 use crate::types::VirtAddr;
+use ntoseye_macros::record;
 
 const MAX_HIVES: usize = 4096;
 /// The most subkeys, or values, read of one key.
@@ -149,8 +150,12 @@ pub fn key_flag_names(flags: u16) -> Vec<&'static str> {
         .collect()
 }
 
-/// A value's data, decoded by its type.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A value's data by its type: `str` for REG_SZ, REG_EXPAND_SZ, and
+/// REG_LINK, `list[str]` for REG_MULTI_SZ, `int` for REG_DWORD,
+/// REG_DWORD_BIG_ENDIAN, and REG_QWORD, and `bytes` for every other
+/// type and for a number whose data is not its size.
+#[record]
+#[derive(PartialEq, Eq)]
 pub enum RegData {
     /// `REG_SZ`, `REG_EXPAND_SZ`, and `REG_LINK`: the string up to its first
     /// NUL.
@@ -160,7 +165,7 @@ pub enum RegData {
     /// `REG_DWORD`, `REG_DWORD_BIG_ENDIAN`, and `REG_QWORD`.
     Number(u64),
     /// Every other type, and a number whose data is not its size.
-    Bytes(Vec<u8>),
+    Bytes(#[record(bytes)] Vec<u8>),
 }
 
 impl RegData {
@@ -206,12 +211,13 @@ pub struct HiveStorage {
 }
 
 /// A loaded hive (`_CMHIVE`).
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct Hive {
     pub address: VirtAddr,
-    /// The master hive (`nt!CmpMasterHive`), whose root is `\REGISTRY`.
+    /// The master hive (`nt!CmpMasterHive`), whose root is `\\REGISTRY`.
     pub master: bool,
-    /// Where it is mounted (`HiveRootPath`), `\REGISTRY` for the master
+    /// Where it is mounted (`HiveRootPath`), `\\REGISTRY` for the master
     /// hive.
     pub mount: Option<String>,
     /// The file it was loaded from (`FileUserName`, else `FileFullPath`).
@@ -220,41 +226,161 @@ pub struct Hive {
     pub base_block: VirtAddr,
     pub base_block_name: Option<String>,
     /// `_HBASE_BLOCK.RootCell`, the cell of its root key.
+    #[record(hex)]
     pub root_cell: DiagnosticValue<u32>,
     /// `_HHIVE.Version`, the format's minor version.
     pub version: u32,
     /// `_HHIVE.HiveFlags`.
+    #[record(hex)]
     pub flags: u32,
     /// The hive is one block of memory (a hive the boot loader loaded, read
     /// before its cell map exists).
     pub flat: bool,
+    #[record(skip)]
     pub stable: HiveStorage,
+    #[record(skip)]
     pub volatile: HiveStorage,
+}
+
+#[record]
+impl Hive {
+    /// The bytes of its stable storage.
+    #[record(getter, hex)]
+    pub fn stable_length(&self) -> u32 {
+        self.stable.length
+    }
+
+    /// The stable storage's cell map (`_HMAP_DIRECTORY`).
+    #[record(getter)]
+    pub fn stable_map(&self) -> VirtAddr {
+        self.stable.map
+    }
+
+    /// The bytes of its volatile storage.
+    #[record(getter, hex)]
+    pub fn volatile_length(&self) -> u32 {
+        self.volatile.length
+    }
+
+    /// The volatile storage's cell map (`_HMAP_DIRECTORY`).
+    #[record(getter)]
+    pub fn volatile_map(&self) -> VirtAddr {
+        self.volatile.map
+    }
+}
+
+/// A hive that does not read.
+#[record]
+pub struct RegistryUnreadable {
+    pub address: VirtAddr,
+    pub error: String,
+}
+
+/// A subkey or value cell that does not read.
+#[record]
+pub struct RegistryCellError {
+    #[record(hex)]
+    pub cell: u32,
+    pub error: String,
+}
+
+fn cell_errors<T>(entries: &[std::result::Result<T, (u32, String)>]) -> Vec<RegistryCellError> {
+    entries
+        .iter()
+        .filter_map(|entry| entry.as_ref().err())
+        .map(|(cell, error)| RegistryCellError {
+            cell: *cell,
+            error: error.clone(),
+        })
+        .collect()
 }
 
 pub type HiveEntry = std::result::Result<Hive, (VirtAddr, String)>;
 
 /// The loaded hives (`!reg hivelist`).
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct HiveList {
+    /// Each hive on `nt!CmpHiveListHead`, or its address and why it does
+    /// not read.
+    #[record(skip)]
     pub hives: Vec<HiveEntry>,
     /// Why the walk of `nt!CmpHiveListHead` stopped short.
     pub stopped: Option<String>,
 }
 
-/// Where a cell is (`!reg cellindex`).
+#[record]
+impl HiveList {
+    /// The hives that read.
+    #[record(getter, rename = "hives")]
+    pub fn readable(&self) -> Vec<Hive> {
+        self.hives.iter().flatten().cloned().collect()
+    }
+
+    /// The hives that do not read.
+    #[record(getter)]
+    pub fn unreadable(&self) -> Vec<RegistryUnreadable> {
+        self.hives
+            .iter()
+            .filter_map(|entry| entry.as_ref().err())
+            .map(|(address, error)| RegistryUnreadable {
+                address: *address,
+                error: error.clone(),
+            })
+            .collect()
+    }
+}
+
+/// Where a cell of a hive is (`!reg cellindex`).
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct CellLocation {
     pub hive: VirtAddr,
+    #[record(hex)]
     pub cell: u32,
     pub volatile: bool,
     /// The directory and table indexes and the offset in the block, from
     /// the cell index; `None` in a flat hive, which has no cell map.
+    #[record(skip)]
     pub map: Option<CellMapPath>,
     /// The cell: its size field, which its data follows.
     pub address: VirtAddr,
     /// The cell's size field: negative for a cell in use.
     pub size: DiagnosticValue<i32>,
+}
+
+#[record]
+impl CellLocation {
+    /// The cell map directory index; `None` in a flat hive.
+    #[record(getter)]
+    pub fn directory(&self) -> Option<u32> {
+        self.map.map(|map| map.directory)
+    }
+
+    /// The cell map table index; `None` in a flat hive.
+    #[record(getter)]
+    pub fn table(&self) -> Option<u32> {
+        self.map.map(|map| map.table)
+    }
+
+    /// The offset in the block; `None` in a flat hive.
+    #[record(getter, hex)]
+    pub fn offset(&self) -> Option<u32> {
+        self.map.map(|map| map.offset)
+    }
+
+    /// The block's `_HMAP_ENTRY`.
+    #[record(getter)]
+    pub fn map_entry(&self) -> Option<VirtAddr> {
+        self.map.map(|map| map.entry)
+    }
+
+    /// Where the map entry maps the block: its place in the bin that
+    /// holds it.
+    #[record(getter)]
+    pub fn block(&self) -> Option<VirtAddr> {
+        self.map.map(|map| map.block)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,28 +394,67 @@ pub struct CellMapPath {
     pub block: VirtAddr,
 }
 
-/// A symbolic link a path went through.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A symbolic link a path went through: the link's path and the path
+/// its `SymbolicLinkValue` holds.
+#[record]
+#[derive(PartialEq, Eq)]
 pub struct RegLink {
+    #[record(rename = "path")]
     pub from: String,
+    #[record(rename = "target")]
     pub to: String,
 }
 
 /// A subkey as its parent lists it.
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct RegSubkey {
     pub name: String,
+    #[record(hex)]
     pub cell: u32,
     /// Its key node (`_CM_KEY_NODE`).
     pub node: VirtAddr,
+    /// `_CM_KEY_NODE.Flags`.
+    #[record(hex)]
     pub flags: u16,
     /// A FILETIME.
     pub last_write: u64,
+    #[record(rename = "subkey_count")]
     pub subkeys: u32,
+    #[record(rename = "value_count")]
     pub values: u32,
 }
 
-/// Where a value's data is stored.
+#[record]
+impl RegSubkey {
+    /// The cell is in volatile storage.
+    #[record(getter)]
+    pub fn volatile(&self) -> bool {
+        self.cell & HCELL_VOLATILE != 0
+    }
+
+    /// The key is a symbolic link.
+    #[record(getter)]
+    pub fn symbolic_link(&self) -> bool {
+        self.flags & KEY_SYM_LINK != 0
+    }
+
+    /// A hive is mounted at the key.
+    #[record(getter)]
+    pub fn mount_point(&self) -> bool {
+        self.flags & KEY_HIVE_EXIT != 0
+    }
+
+    /// `last_write` as UTC.
+    #[record(getter)]
+    pub fn last_write_utc(&self) -> Option<String> {
+        format_filetime_precise(self.last_write)
+    }
+}
+
+/// Where a value's data is stored: `inline` in the value record, in a
+/// `cell`, or in `big` data segments.
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataStorage {
     /// In the value record itself (up to 4 bytes).
@@ -301,17 +466,38 @@ pub enum DataStorage {
 }
 
 /// A value (`_CM_KEY_VALUE`).
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct RegValue {
     /// Empty for the key's default value.
     pub name: String,
+    #[record(hex)]
     pub cell: u32,
     pub node: VirtAddr,
+    /// `REG_*`.
+    #[record(hex, rename = "type")]
     pub value_type: u32,
     /// The data's length in bytes.
     pub length: u32,
     pub storage: DataStorage,
+    /// The data's bytes.
+    #[record(bytes, rename = "raw")]
     pub data: DiagnosticValue<Vec<u8>>,
+}
+
+#[record]
+impl RegValue {
+    /// The type's name; `None` for a type Windows does not define.
+    #[record(getter)]
+    pub fn type_name(&self) -> Option<&'static str> {
+        value_type_name(self.value_type)
+    }
+
+    /// The data decoded by the value's type.
+    #[record(getter, rename = "data")]
+    pub fn decoded_data(&self) -> DiagnosticValue<RegData> {
+        self.decoded()
+    }
 }
 
 impl RegValue {
@@ -328,15 +514,18 @@ pub type RegSubkeyEntry = std::result::Result<RegSubkey, (u32, String)>;
 pub type RegValueEntry = std::result::Result<RegValue, (u32, String)>;
 
 /// A key with its subkeys and values (`!reg querykey`, `!reg keyinfo`).
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct RegKey {
     /// Its full path, with the names as the hives store them.
     pub path: String,
     pub hive: VirtAddr,
     /// Its cell; `None` for a key given by the address of its node.
+    #[record(hex)]
     pub cell: Option<u32>,
     pub node: VirtAddr,
     pub name: String,
+    #[record(hex)]
     pub flags: u16,
     /// A FILETIME.
     pub last_write: u64,
@@ -345,11 +534,54 @@ pub struct RegKey {
     /// The subkeys and values the key node counts.
     pub subkey_count: u32,
     pub value_count: u32,
+    /// Each subkey, or its cell and why it does not read.
+    #[record(skip)]
     pub subkeys: Vec<RegSubkeyEntry>,
+    /// Each value, or its cell and why it does not read.
+    #[record(skip)]
     pub values: Vec<RegValueEntry>,
     /// Subkey indexes and value lists that do not read, and counts that do
     /// not match.
     pub problems: Vec<String>,
+}
+
+#[record]
+impl RegKey {
+    /// The `KEY_*` names of `flags`.
+    #[record(getter)]
+    pub fn flag_names(&self) -> Vec<&'static str> {
+        key_flag_names(self.flags)
+    }
+
+    /// `last_write` as UTC.
+    #[record(getter)]
+    pub fn last_write_utc(&self) -> Option<String> {
+        format_filetime_precise(self.last_write)
+    }
+
+    /// The subkeys that read.
+    #[record(getter, rename = "subkeys")]
+    pub fn readable_subkeys(&self) -> Vec<RegSubkey> {
+        self.subkeys.iter().flatten().cloned().collect()
+    }
+
+    /// The values that read.
+    #[record(getter, rename = "values")]
+    pub fn key_values(&self) -> Vec<RegValue> {
+        self.values.iter().flatten().cloned().collect()
+    }
+
+    /// The subkey cells that do not read.
+    #[record(getter)]
+    pub fn unreadable_subkeys(&self) -> Vec<RegistryCellError> {
+        cell_errors(&self.subkeys)
+    }
+
+    /// The value cells that do not read.
+    #[record(getter)]
+    pub fn unreadable_values(&self) -> Vec<RegistryCellError> {
+        cell_errors(&self.values)
+    }
 }
 
 type Read<T> = std::result::Result<T, String>;
@@ -784,11 +1016,11 @@ fn read_hive_list(
     master: Option<VirtAddr>,
 ) -> Result<HiveList> {
     let link = types.layout("_CMHIVE")?.field_offset("HiveList")?;
-    let (links, termination) = bounded_list_walk(head, MAX_HIVES, |at| memory.read::<VirtAddr>(at));
-    let hives = links
+    let (addresses, termination) =
+        bounded_record_list_walk(head, link, MAX_HIVES, |at| memory.read::<VirtAddr>(at));
+    let hives = addresses
         .into_iter()
-        .map(|link_at| {
-            let address = link_at - link;
+        .map(|address| {
             read_hive(types, address, master == Some(address))
                 .map_err(|error| (address, error.to_string()))
         })

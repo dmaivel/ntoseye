@@ -17,6 +17,8 @@ use crate::symbols::ModuleSymbolStatus;
 use crate::target::{SelectedFrame, ThreadInfo};
 
 use crate::repl::commands::frames::print_indexed_stacktrace;
+use ntoseye_macros::command;
+
 use crate::repl::*;
 
 /// How deeply command loops may nest (a `.foreach` inside a `.foreach`, or an
@@ -39,53 +41,339 @@ const DEBUG_SYMTYPE_NONE: u64 = 0;
 const DEBUG_SYMTYPE_PDB: u64 = 3;
 const DEBUG_SYMTYPE_DEFERRED: u64 = 5;
 
-repl_command! {
-    cmd_foreach -> Flow;
-    names: [".foreach"],
-    usage: ".foreach [/pS n] [/ps n] ( Variable { InCommands } ) { OutCommands } | .foreach [options] /s ( Variable \"InString\" ) { OutCommands } | .foreach [options] /f ( Variable \"InFile\" ) { OutCommands }",
-    summary: "Run commands once for each token of a command's output, a string, or a file.",
-    details: "InCommands run first, with their output hidden. ntoseye shows their errors and warnings and does not use them as tokens. It splits the output (or InString, or the text of InFile) into tokens at spaces, tabs, and line breaks, and then runs OutCommands once for each token. In each run, the token replaces each whole-word occurrence of Variable, which must stand alone between spaces, or at the start or end of OutCommands. The token replaces `${Variable}` anywhere, also inside other text. If a token contains `;` or a quote, ntoseye inserts it as a quoted string, so the token cannot end its command and start a new one. /pS n skips the first n tokens, and /ps n skips n tokens after each token that the loop uses. For example, `.foreach /pS 2 /ps 4` uses the 3rd, 8th, 13th token, and so on. The skip counts are expressions in the current radix. OutCommands can contain several commands separated by `;`, another `.foreach`, or `!for_each_*`. Ctrl+C stops the loop. If the session does not permit a command (for example, a resume in a breakpoint action), the loop stops and the rest of the command line does not run. If a command only shows an error, the loop continues.",
-    completion: Expression,
-    style: ExpressionTail,
+/// Run commands once for each token of a command's output, a string, or a file.
+///
+/// InCommands run first, with their output hidden. ntoseye shows their errors
+/// and warnings and does not use them as tokens. It splits the output (or
+/// InString, or the text of InFile) into tokens at spaces, tabs, and line
+/// breaks, and then runs OutCommands once for each token. In each run, the
+/// token replaces each whole-word occurrence of Variable, which must stand
+/// alone between spaces, or at the start or end of OutCommands. The token
+/// replaces `${Variable}` anywhere, also inside other text. If a token contains
+/// `;` or a quote, ntoseye inserts it as a quoted string, so the token cannot
+/// end its command and start a new one. /pS n skips the first n tokens, and /ps
+/// n skips n tokens after each token that the loop uses. For example, `.foreach
+/// /pS 2 /ps 4` uses the 3rd, 8th, 13th token, and so on. The skip counts are
+/// expressions in the current radix. OutCommands can contain several commands
+/// separated by `;`, another `.foreach`, or `!for_each_*`. Ctrl+C stops the
+/// loop. If the session does not permit a command (for example, a resume in a
+/// breakpoint action), the loop stops and the rest of the command line does not
+/// run. If a command only shows an error, the loop continues.
+#[command(
+    names = [".foreach"],
+    category = "session",
+    kind = Host,
+    python = none,
+    style = ExpressionTail
+)]
+fn foreach(
+    state: &mut ReplState<'_>,
+    #[arg(
+        raw,
+        usage = "[/pS <count>] [/ps <count>] (<variable> { <in-commands> }) { <out-commands> } | [/pS <count>] [/ps <count>] /s (<variable> \"<in-string>\") { <out-commands> } | [/pS <count>] [/ps <count>] /f (<variable> \"<in-file>\") { <out-commands> }",
+        complete = Expression
+    )]
+    tail: String,
+    #[arg(invoked)] name: &str,
+) -> Result<Flow> {
+    if tail.is_empty() {
+        outln!("{}\n", command_help(name));
+        return Ok(Flow::Continue);
+    }
+    let spec = match parse_foreach(&tail) {
+        Ok(spec) => spec,
+        Err(error) => {
+            error!(".foreach: {error}");
+            return Ok(Flow::Continue);
+        }
+    };
+    let (Some(initial_skip), Some(skip)) = (
+        state.foreach_count("/pS", spec.initial_skip),
+        state.foreach_count("/ps", spec.skip),
+    ) else {
+        return Ok(Flow::Continue);
+    };
+    state.in_command_loop(".foreach", |state| {
+        let input = match &spec.source {
+            ForeachSource::Commands(commands) => {
+                // Only regular output becomes tokens: errors and warnings
+                // reach the user, not OutCommands.
+                let breakable = std::mem::replace(&mut state.breakable_loop, false);
+                let (flow, text) = output::capture_output(|| state.dispatch_line(commands));
+                state.breakable_loop = breakable;
+                if !matches!(flow, Ok(Flow::Continue)) {
+                    // The InCommands did not finish: show what they said,
+                    // since their refusal or failure is in it.
+                    out!("{text}");
+                }
+                match flow? {
+                    Flow::Continue => Cow::Owned(text),
+                    Flow::Quit => {
+                        error!(".foreach: quit is ignored inside a command loop");
+                        return Ok(Flow::Denied);
+                    }
+                    flow => return Ok(flow),
+                }
+            }
+            ForeachSource::String(text) => Cow::Borrowed(text.as_str()),
+            ForeachSource::File(path) => match std::fs::read_to_string(path) {
+                Ok(text) => Cow::Owned(text),
+                Err(error) => {
+                    error!(".foreach: failed to read '{path}': {error}");
+                    return Ok(Flow::Continue);
+                }
+            },
+        };
+        let tokens = foreach_tokens(&input, initial_skip, skip);
+        state.run_iterations(".foreach", tokens.len(), |_, index| {
+            let Ok(commands) = substitute(spec.body, single_alias(spec.variable, tokens[index]));
+            Some(Cow::Owned(commands))
+        })
+    })
 }
 
-repl_command! {
-    cmd_for_each_process -> Flow;
-    names: ["!for_each_process"],
-    usage: "!for_each_process [\"CommandString\"]",
-    summary: "Run commands once for each process in the target.",
-    details: "In CommandString, ntoseye replaces each whole-word `@#Process` with the EPROCESS address of the process, and `${@#Process}` anywhere. To use several commands, separate them with `;` and put the string in quotes. Without CommandString, the command runs `!process @#Process 0` for each process. The loop does not change the process context (`.process`, `$proc`), but `.process /p @#Process` in CommandString does, and this change stays after the loop. The loop uses the processes that `ps` shows, in the same order. Ctrl+C stops the loop. If the session does not permit a command (for example, a resume in a breakpoint action), the loop stops and the rest of the command line does not run. If a command only shows an error, the loop continues.",
-    style: ExpressionTail,
-    target: Kernel,
+/// Run commands once for each process in the target.
+///
+/// In CommandString, ntoseye replaces each whole-word `@#Process` with the
+/// EPROCESS address of the process, and `${@#Process}` anywhere. To use several
+/// commands, separate them with `;` and put the string in quotes. Without
+/// CommandString, the command runs `!process @#Process 0` for each process. The
+/// loop does not change the process context (`.process`, `$proc`), but
+/// `.process /p @#Process` in CommandString does, and this change stays after
+/// the loop. The loop uses the processes that `ps` shows, in the same order.
+/// Ctrl+C stops the loop. If the session does not permit a command (for
+/// example, a resume in a breakpoint action), the loop stops and the rest of
+/// the command line does not run. If a command only shows an error, the loop
+/// continues.
+#[command(
+    names = ["!for_each_process"],
+    category = "processes and modules",
+    kind = Host,
+    target = Kernel,
+    python = none,
+    style = ExpressionTail
+)]
+fn for_each_process(
+    state: &mut ReplState<'_>,
+    #[arg(raw, usage = "[\"<command-string>\"]", complete = None)] tail: String,
+    #[arg(invoked)] name: &str,
+) -> Result<Flow> {
+    let Some(command) = state.for_each_command(name, &tail, DEFAULT_PROCESS_COMMAND) else {
+        return Ok(Flow::Continue);
+    };
+    let processes = match state.ctx.target.matching_processes(None) {
+        Ok(processes) => processes,
+        Err(error) => {
+            error!("!for_each_process: failed to enumerate processes: {error}");
+            return Ok(Flow::Continue);
+        }
+    };
+    state.repeat_command(name, &command, &processes, |_, _, process| {
+        move |alias: &str| {
+            if alias != "@#Process" {
+                return Ok(None);
+            }
+            // A triage dump's one-process snapshot has no EPROCESS address.
+            if process.eprocess.is_zero() {
+                return Err(MissingValue(format!(
+                    "{} (PID {}) has no known EPROCESS address",
+                    process.name, process.pid
+                )));
+            }
+            Ok(Some(hex(process.eprocess.0)))
+        }
+    })
 }
 
-repl_command! {
-    cmd_for_each_thread -> Flow;
-    names: ["!for_each_thread"],
-    usage: "!for_each_thread [\"CommandString\"]",
-    summary: "Run commands once for each thread in the target, or in the `.process` process.",
-    details: "In CommandString, ntoseye replaces each whole-word `@#Thread` with the ETHREAD address of the thread, and `${@#Thread}` anywhere. To use several commands, separate them with `;` and put the string in quotes. Without CommandString, the command runs `!thread @#Thread 2` for each thread. If you select a process with `.process`, the loop uses only the threads of that process, and otherwise each thread that `threads` shows. The loop does not change the thread context (`.thread`, `$thread`). Ctrl+C stops the loop. If the session does not permit a command (for example, a resume in a breakpoint action), the loop stops and the rest of the command line does not run. If a command only shows an error, the loop continues.",
-    style: ExpressionTail,
-    target: Kernel,
+/// Run commands once for each thread in the target, or in the `.process`
+/// process.
+///
+/// In CommandString, ntoseye replaces each whole-word `@#Thread` with the
+/// ETHREAD address of the thread, and `${@#Thread}` anywhere. To use several
+/// commands, separate them with `;` and put the string in quotes. Without
+/// CommandString, the command runs `!thread @#Thread 2` for each thread. If you
+/// select a process with `.process`, the loop uses only the threads of that
+/// process, and otherwise each thread that `threads` shows. The loop does not
+/// change the thread context (`.thread`, `$thread`). Ctrl+C stops the loop. If
+/// the session does not permit a command (for example, a resume in a breakpoint
+/// action), the loop stops and the rest of the command line does not run. If a
+/// command only shows an error, the loop continues.
+#[command(
+    names = ["!for_each_thread"],
+    category = "processes and modules",
+    kind = Host,
+    target = Kernel,
+    python = none,
+    style = ExpressionTail
+)]
+fn for_each_thread(
+    state: &mut ReplState<'_>,
+    #[arg(raw, usage = "[\"<command-string>\"]", complete = None)] tail: String,
+    #[arg(invoked)] name: &str,
+) -> Result<Flow> {
+    let Some(command) = state.for_each_command(name, &tail, DEFAULT_THREAD_COMMAND) else {
+        return Ok(Flow::Continue);
+    };
+    let threads = match state.ctx.target.attached_process().cloned() {
+        Some(process) => state
+            .ctx
+            .target
+            .enumerate_threads_for_process_info(&process)
+            .map_err(|error| format!("{} (PID {}): {error}", process.name, process.pid)),
+        None => state
+            .ctx
+            .windows_threads()
+            .map(|(threads, _)| threads)
+            .map_err(|error| error.to_string()),
+    };
+    let threads = match threads {
+        Ok(threads) => threads,
+        Err(error) => {
+            error!("!for_each_thread: failed to enumerate threads: {error}");
+            return Ok(Flow::Continue);
+        }
+    };
+    state.repeat_command(name, &command, &threads, |_, _, thread: &ThreadInfo| {
+        move |alias: &str| Ok((alias == "@#Thread").then(|| hex(thread.ethread.0)))
+    })
 }
 
-repl_command! {
-    cmd_for_each_module -> Flow;
-    names: ["!for_each_module"],
-    usage: "!for_each_module [\"CommandString\"]",
-    summary: "Run commands once for each loaded module that `lm` shows.",
-    details: "The loop uses the modules of the current scope, in `lm` order. These are the modules of the `.process` process or, without one, the kernel modules (or the secure kernel modules under `.vtl 1`). CommandString can use the following aliases, which ntoseye replaces as whole words, or anywhere as `${@#Name}`. Alias names are case-sensitive. The aliases are @#ModuleIndex (the 0-based position), @#ModuleName (the `module!` name that `lm` shows), @#ImageName (the image name that `lm` shows), @#LoadedImageName (the full path from the loader if known, else the image name), @#SymbolFileName (the local PDB of the symbols, else the image name), @#Base, @#End, @#Size, @#TimeDateStamp, @#Checksum, @#FileVersion, @#ProductVersion, @#Flags (DEBUG_MODULE_USER_MODE for a process module), @#SymbolType (DEBUG_SYMTYPE_PDB, _DEFERRED while ntoseye gets the symbols, else _NONE), and @#ModuleNameSize, @#ImageNameSize, @#LoadedImageNameSize, @#SymbolFileNameSize (the string length plus one). If a value contains `;` or a quote, ntoseye inserts it as a quoted string, so the value cannot end its command and start a new one. Numbers are hex with a 0x prefix, so they are the same in all radixes. If a module does not have a value that an alias uses (for example, no timestamp or no version resource), ntoseye shows an error and skips the module. Without CommandString, the command runs `.echo @#ModuleIndex : @#Base @#End @#ModuleName @#ImageName  @#LoadedImageName`. Ctrl+C stops the loop. If the session does not permit a command (for example, a resume in a breakpoint action), the loop stops and the rest of the command line does not run. If a command only shows an error, the loop continues.",
-    style: ExpressionTail,
+/// Run commands once for each loaded module that `lm` shows.
+///
+/// The loop uses the modules of the current scope, in `lm` order. These are the
+/// modules of the `.process` process or, without one, the kernel modules (or
+/// the secure kernel modules under `.vtl 1`). CommandString can use the
+/// following aliases, which ntoseye replaces as whole words, or anywhere as
+/// `${@#Name}`. Alias names are case-sensitive. The aliases are @#ModuleIndex
+/// (the 0-based position), @#ModuleName (the `module!` name that `lm` shows),
+/// @#ImageName (the image name that `lm` shows), @#LoadedImageName (the full
+/// path from the loader if known, else the image name), @#SymbolFileName (the
+/// local PDB of the symbols, else the image name), @#Base, @#End, @#Size,
+/// @#TimeDateStamp, @#Checksum, @#FileVersion, @#ProductVersion, @#Flags
+/// (DEBUG_MODULE_USER_MODE for a process module), @#SymbolType
+/// (DEBUG_SYMTYPE_PDB, _DEFERRED while ntoseye gets the symbols, else _NONE),
+/// and @#ModuleNameSize, @#ImageNameSize, @#LoadedImageNameSize,
+/// @#SymbolFileNameSize (the string length plus one). If a value contains `;`
+/// or a quote, ntoseye inserts it as a quoted string, so the value cannot end
+/// its command and start a new one. Numbers are hex with a 0x prefix, so they
+/// are the same in all radixes. If a module does not have a value that an alias
+/// uses (for example, no timestamp or no version resource), ntoseye shows an
+/// error and skips the module. Without CommandString, the command runs `.echo
+/// @#ModuleIndex : @#Base @#End @#ModuleName @#ImageName  @#LoadedImageName`.
+/// Ctrl+C stops the loop. If the session does not permit a command (for
+/// example, a resume in a breakpoint action), the loop stops and the rest of
+/// the command line does not run. If a command only shows an error, the loop
+/// continues.
+#[command(
+    names = ["!for_each_module"],
+    category = "processes and modules",
+    kind = Host,
+    python = none,
+    style = ExpressionTail
+)]
+fn for_each_module(
+    state: &mut ReplState<'_>,
+    #[arg(raw, usage = "[\"<command-string>\"]", complete = None)] tail: String,
+    #[arg(invoked)] name: &str,
+) -> Result<Flow> {
+    let Some(command) = state.for_each_command(name, &tail, DEFAULT_MODULE_COMMAND) else {
+        return Ok(Flow::Continue);
+    };
+    // Version resources cost reads per module; only fetch them for a
+    // command that names them.
+    let versions = command.contains("@#FileVersion") || command.contains("@#ProductVersion");
+    let modules = if versions {
+        state.ctx.target.modules_with_versions()
+    } else {
+        state.ctx.target.modules()
+    };
+    let modules = match modules {
+        Ok(modules) => modules,
+        Err(error) => {
+            error!("!for_each_module: failed to list modules: {error}");
+            return Ok(Flow::Continue);
+        }
+    };
+    let dtb = state.ctx.target.process_dtb();
+    let user_mode = state.ctx.target.attached_process().is_some()
+        && !state.ctx.target.in_secure_address_space();
+    state.repeat_command(name, &command, &modules, |state, index, module| {
+        let symbols = &state.ctx.target.symbols;
+        let aliases = ModuleAliases {
+            index,
+            module,
+            user_mode,
+            symbol_file: symbols
+                .module_pdb_path(dtb, module.base_address)
+                .map(|path| path.display().to_string()),
+            symbol_status: symbols.module_symbol_status(dtb, module.base_address),
+        };
+        move |alias: &str| aliases.resolve(alias)
+    })
 }
 
-repl_command! {
-    cmd_for_each_frame -> Flow;
-    names: ["!for_each_frame"],
-    usage: "!for_each_frame [\"CommandString\"]",
-    summary: "Run commands once for each frame of the current stack, with that frame selected.",
-    details: "The loop uses the stack that `k` shows, up to 256 frames. For each frame, ntoseye shows the frame as `.frame` does and makes it the local context, as `.frame N` does, so `r`, `dv`, and `@$frame` use that frame. Then CommandString runs. To use several commands, separate them with `;` and put the string in quotes. After the loop, the local context is the same as before. Without CommandString, the command lists the frames and their indexes. Ctrl+C stops the loop. If the session does not permit a command (for example, a resume in a breakpoint action), the loop stops and the rest of the command line does not run. If a command only shows an error, the loop continues.",
-    run_state: HaltedOrParkedThread,
-    style: ExpressionTail,
+/// Run commands once for each frame of the current stack, with that frame
+/// selected.
+///
+/// The loop uses the stack that `k` shows, up to 256 frames. For each frame,
+/// ntoseye shows the frame as `.frame` does and makes it the local context, as
+/// `.frame N` does, so `r`, `dv`, and `@$frame` use that frame. Then
+/// CommandString runs. To use several commands, separate them with `;` and put
+/// the string in quotes. After the loop, the local context is the same as
+/// before. Without CommandString, the command lists the frames and their
+/// indexes. Ctrl+C stops the loop. If the session does not permit a command
+/// (for example, a resume in a breakpoint action), the loop stops and the rest
+/// of the command line does not run. If a command only shows an error, the loop
+/// continues.
+#[command(
+    names = ["!for_each_frame"],
+    category = "execution and stack",
+    kind = Host,
+    state = HaltedOrParkedThread,
+    python = none,
+    style = ExpressionTail
+)]
+fn for_each_frame(
+    state: &mut ReplState<'_>,
+    #[arg(raw, usage = "[\"<command-string>\"]", complete = None)] tail: String,
+    #[arg(invoked)] name: &str,
+) -> Result<Flow> {
+    let Some(command) = state.for_each_command(name, &tail, "") else {
+        return Ok(Flow::Continue);
+    };
+    let Some((trace, seed, live)) = state.recovered_trace(FOR_EACH_FRAME_LIMIT)? else {
+        return Ok(Flow::Continue);
+    };
+    let previous = state.ctx.target.selected_frame.clone();
+    if command.is_empty() {
+        let selected = previous.as_ref().map(|frame| frame.index);
+        print_indexed_stacktrace(
+            &trace,
+            FOR_EACH_FRAME_LIMIT,
+            0,
+            crate::repl::disasm::StackColumns::default(),
+            selected,
+        );
+        outln!();
+        return Ok(Flow::Continue);
+    }
+    let flow = state.in_command_loop(name, |state| {
+        state.run_iterations(name, trace.frames.len(), |state, index| {
+            let Some(frame) = SelectedFrame::from_recovered(&trace, index, Some(&seed), live)
+            else {
+                error!("{name}: skipped: frame {index} is unavailable");
+                return None;
+            };
+            state.ctx.select_frame(frame.clone());
+            state.print_selected_frame(&frame, false);
+            Some(Cow::Borrowed(command.as_str()))
+        })
+    });
+    match previous {
+        Some(frame) => state.ctx.select_frame(frame),
+        None => state.ctx.clear_selected_frame(),
+    }
+    flow
 }
 
 /// Where `.foreach` takes its tokens from.
@@ -545,226 +833,21 @@ impl ReplState<'_> {
         }
     }
 
-    fn cmd_foreach(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
-        if invocation.raw_tail.is_empty() {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(Flow::Continue);
-        }
-        let spec = match parse_foreach(invocation.raw_tail) {
-            Ok(spec) => spec,
-            Err(error) => {
-                error!(".foreach: {error}");
-                return Ok(Flow::Continue);
-            }
-        };
-        let (Some(initial_skip), Some(skip)) = (
-            self.foreach_count("/pS", spec.initial_skip),
-            self.foreach_count("/ps", spec.skip),
-        ) else {
-            return Ok(Flow::Continue);
-        };
-        self.in_command_loop(".foreach", |state| {
-            let input = match &spec.source {
-                ForeachSource::Commands(commands) => {
-                    // Only regular output becomes tokens: errors and warnings
-                    // reach the user, not OutCommands.
-                    let breakable = std::mem::replace(&mut state.breakable_loop, false);
-                    let (flow, text) = output::capture_output(|| state.dispatch_line(commands));
-                    state.breakable_loop = breakable;
-                    if !matches!(flow, Ok(Flow::Continue)) {
-                        // The InCommands did not finish: show what they said,
-                        // since their refusal or failure is in it.
-                        out!("{text}");
-                    }
-                    match flow? {
-                        Flow::Continue => Cow::Owned(text),
-                        Flow::Quit => {
-                            error!(".foreach: quit is ignored inside a command loop");
-                            return Ok(Flow::Denied);
-                        }
-                        flow => return Ok(flow),
-                    }
-                }
-                ForeachSource::String(text) => Cow::Borrowed(text.as_str()),
-                ForeachSource::File(path) => match std::fs::read_to_string(path) {
-                    Ok(text) => Cow::Owned(text),
-                    Err(error) => {
-                        error!(".foreach: failed to read '{path}': {error}");
-                        return Ok(Flow::Continue);
-                    }
-                },
-            };
-            let tokens = foreach_tokens(&input, initial_skip, skip);
-            state.run_iterations(".foreach", tokens.len(), |_, index| {
-                let Ok(commands) =
-                    substitute(spec.body, single_alias(spec.variable, tokens[index]));
-                Some(Cow::Owned(commands))
-            })
-        })
-    }
-
-    fn cmd_for_each_process(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
-        let Some(command) = self.for_each_command(&invocation, DEFAULT_PROCESS_COMMAND) else {
-            return Ok(Flow::Continue);
-        };
-        let processes = match self.ctx.target.matching_processes(None) {
-            Ok(processes) => processes,
-            Err(error) => {
-                error!("!for_each_process: failed to enumerate processes: {error}");
-                return Ok(Flow::Continue);
-            }
-        };
-        self.repeat_command(invocation.name, &command, &processes, |_, _, process| {
-            move |alias: &str| {
-                if alias != "@#Process" {
-                    return Ok(None);
-                }
-                // A triage dump's one-process snapshot has no EPROCESS address.
-                if process.eprocess_va.is_zero() {
-                    return Err(MissingValue(format!(
-                        "{} (PID {}) has no known EPROCESS address",
-                        process.name, process.pid
-                    )));
-                }
-                Ok(Some(hex(process.eprocess_va.0)))
-            }
-        })
-    }
-
-    fn cmd_for_each_thread(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
-        let Some(command) = self.for_each_command(&invocation, DEFAULT_THREAD_COMMAND) else {
-            return Ok(Flow::Continue);
-        };
-        let threads = match self.ctx.target.attached_process().cloned() {
-            Some(process) => self
-                .ctx
-                .target
-                .enumerate_threads_for_process_info(&process)
-                .map_err(|error| format!("{} (PID {}): {error}", process.name, process.pid)),
-            None => self
-                .ctx
-                .windows_threads()
-                .map(|(threads, _)| threads)
-                .map_err(|error| error.to_string()),
-        };
-        let threads = match threads {
-            Ok(threads) => threads,
-            Err(error) => {
-                error!("!for_each_thread: failed to enumerate threads: {error}");
-                return Ok(Flow::Continue);
-            }
-        };
-        self.repeat_command(
-            invocation.name,
-            &command,
-            &threads,
-            |_, _, thread: &ThreadInfo| {
-                move |alias: &str| Ok((alias == "@#Thread").then(|| hex(thread.ethread.0)))
-            },
-        )
-    }
-
-    fn cmd_for_each_module(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
-        let Some(command) = self.for_each_command(&invocation, DEFAULT_MODULE_COMMAND) else {
-            return Ok(Flow::Continue);
-        };
-        // Version resources cost reads per module; only fetch them for a
-        // command that names them.
-        let versions = command.contains("@#FileVersion") || command.contains("@#ProductVersion");
-        let modules = if versions {
-            self.ctx.target.modules_with_versions()
-        } else {
-            self.ctx.target.modules()
-        };
-        let modules = match modules {
-            Ok(modules) => modules,
-            Err(error) => {
-                error!("!for_each_module: failed to list modules: {error}");
-                return Ok(Flow::Continue);
-            }
-        };
-        let dtb = self.ctx.target.process_dtb();
-        let user_mode = self.ctx.target.attached_process().is_some()
-            && !self.ctx.target.in_secure_address_space();
-        self.repeat_command(
-            invocation.name,
-            &command,
-            &modules,
-            |state, index, module| {
-                let symbols = &state.ctx.target.symbols;
-                let aliases = ModuleAliases {
-                    index,
-                    module,
-                    user_mode,
-                    symbol_file: symbols
-                        .module_pdb_path(dtb, module.base_address)
-                        .map(|path| path.display().to_string()),
-                    symbol_status: symbols.module_symbol_status(dtb, module.base_address),
-                };
-                move |alias: &str| aliases.resolve(alias)
-            },
-        )
-    }
-
     /// The command a `!for_each_*` runs: its CommandString, else `default`
     /// (`""` for none). `None` when the invocation was only a help request or
     /// malformed.
-    fn for_each_command(
-        &self,
-        invocation: &CommandInvocation<'_>,
-        default: &str,
-    ) -> Option<String> {
-        if invocation.raw_tail == "-?" {
-            outln!("{}\n", command_help(invocation.name));
+    fn for_each_command(&self, name: &str, tail: &str, default: &str) -> Option<String> {
+        if tail == "-?" {
+            outln!("{}\n", command_help(name));
             return None;
         }
-        match command_string(invocation.raw_tail) {
+        match command_string(tail) {
             Ok(command) => Some(command.unwrap_or_else(|| default.to_string())),
             Err(error) => {
-                error!("{}: {error}", invocation.name);
+                error!("{name}: {error}");
                 None
             }
         }
-    }
-
-    fn cmd_for_each_frame(&mut self, invocation: CommandInvocation<'_>) -> Result<Flow> {
-        let Some(command) = self.for_each_command(&invocation, "") else {
-            return Ok(Flow::Continue);
-        };
-        let Some((trace, seed, live)) = self.recovered_trace(FOR_EACH_FRAME_LIMIT)? else {
-            return Ok(Flow::Continue);
-        };
-        let previous = self.ctx.target.selected_frame.clone();
-        if command.is_empty() {
-            let selected = previous.as_ref().map(|frame| frame.index);
-            print_indexed_stacktrace(
-                &trace,
-                FOR_EACH_FRAME_LIMIT,
-                0,
-                crate::repl::disasm::StackColumns::default(),
-                selected,
-            );
-            outln!();
-            return Ok(Flow::Continue);
-        }
-        let name = invocation.name;
-        let flow = self.in_command_loop(name, |state| {
-            state.run_iterations(name, trace.frames.len(), |state, index| {
-                let Some(frame) = SelectedFrame::from_recovered(&trace, index, Some(&seed), live)
-                else {
-                    error!("{name}: skipped: frame {index} is unavailable");
-                    return None;
-                };
-                state.ctx.select_frame(frame.clone());
-                state.print_selected_frame(&frame, false);
-                Some(Cow::Borrowed(command.as_str()))
-            })
-        });
-        match previous {
-            Some(frame) => self.ctx.select_frame(frame),
-            None => self.ctx.clear_selected_frame(),
-        }
-        flow
     }
 }
 

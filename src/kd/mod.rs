@@ -4,15 +4,16 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use ntoseye_macros::record;
+
 use crate::bytes;
 use crate::dbg_backend::{
     BackendCapability, BugcheckInfo, ContinueDisposition, DebugBackend, DebugCapability, DebugLog,
     DebugOutputPage, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, PciConfigAddress, ProcessorRead,
-    StopEvent, TebPath, TrapState,
+    RegisterMap, StopEvent, TebPath, TrapState, debug_registers,
 };
 use crate::debugger_data::DebuggerDataCandidate;
 use crate::error::{Error, Result};
-use crate::gdb::RegisterMap;
 use crate::kd::framing::KdFraming;
 use crate::memory::TranslationCache;
 use crate::notice::Notice;
@@ -54,14 +55,11 @@ pub fn trace_bytes_enabled() -> bool {
 pub mod api;
 mod breakpoints;
 mod connect;
-pub mod context;
-pub mod context_arm64;
 mod exit;
 pub mod framing;
 mod halt;
 mod handles;
 mod hw_breakpoints;
-pub mod hwbp;
 mod kdnet;
 mod memory;
 mod pump;
@@ -380,7 +378,9 @@ pub struct KdBackend {
     running_reason: &'static str,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Where KD reads guest memory.
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub enum KdMemorySource {
     Auto,
     Host,
@@ -504,7 +504,9 @@ impl DebugBackend for KdBackend {
     fn hardware_breakpoint_slots(&self) -> usize {
         match self.arch {
             Arch::Amd64 => usize::from(HW_BREAKPOINT_SLOTS),
-            Arch::Arm64 => usize::from(hwbp::ARM64_MAX_BREAKPOINTS + hwbp::ARM64_MAX_WATCHPOINTS),
+            Arch::Arm64 => usize::from(
+                debug_registers::ARM64_MAX_BREAKPOINTS + debug_registers::ARM64_MAX_WATCHPOINTS,
+            ),
         }
     }
 
@@ -512,7 +514,7 @@ impl DebugBackend for KdBackend {
         match self.arch {
             Arch::Amd64 => 0..usize::from(HW_BREAKPOINT_SLOTS),
             Arch::Arm64 => {
-                let slots = hwbp::arm64_slot_range(access);
+                let slots = debug_registers::arm64_slot_range(access);
                 usize::from(slots.start)..usize::from(slots.end)
             }
         }

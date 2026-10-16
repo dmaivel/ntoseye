@@ -3,16 +3,16 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
+use ntoseye_macros::record;
 use pelite::pe64::{Pe, PeView, image::IMAGE_DIRECTORY_ENTRY_EXCEPTION};
 
 use crate::{
-    backend::MemoryOps,
     breakpoints::BreakpointManager,
     bugchecks::looks_like_kernel_pointer,
+    dbg_backend::RegisterMap,
     error::{Error, Result},
-    gdb::RegisterMap,
     guest::{Image, ModuleInfo, ProcessInfo, SecureKernel, hypercalls::HypervisorSymbols},
-    memory::{AddressSpace, DTB_IDENTITY},
+    memory::{AddressSpace, DTB_IDENTITY, MemoryOps},
     pe::{CodeLayout, PeImage},
     phys::PhysMem,
     symbols::{
@@ -23,7 +23,7 @@ use crate::{
         SavedThreadRegisters, SavedVtlContext, Target, ThreadInfo, lookup_register,
     },
     trapframe::{decode_kswitch_frame_seed, decode_ktrap_frame_for_thread},
-    types::{Arch, CodeMachine, Dtb, VirtAddr},
+    types::{Arch, CodeMachine, Dtb, Keyed, VirtAddr},
 };
 
 /// Per-frame unwinder diagnostics, gated on `NTOSEYE_UNWIND_TRACE`. Prints which
@@ -42,8 +42,8 @@ macro_rules! unwind_trace {
     };
 }
 
-mod amd64;
-mod arm64;
+pub(crate) mod amd64;
+pub(crate) mod arm64;
 mod arm64ec;
 pub mod prolog;
 mod tracer;
@@ -51,11 +51,10 @@ mod walk;
 mod wow64;
 
 pub use amd64::{
-    FunctionEntryDetail, HandlerDetail, RuntimeFunctionDetail, UnwindCodeDetail, UnwindDetail,
-    UnwindInfoDetail,
+    Amd64UnwindCode, Amd64UnwindInfo, FunctionEntry, RuntimeFunction, Unwind, UnwindHandler,
 };
 use amd64::{Lookup, RUNTIME_FUNCTION_SIZE, lookup_runtime_function, runtime_function_at};
-pub use arm64::{Arm64CodeDetail, Arm64UnwindDetail};
+pub use arm64::{Arm64EpilogScope, Arm64PackedUnwind, Arm64UnwindCode, Arm64XdataUnwind};
 use arm64::{Arm64Lookup, call_return_address, lookup_arm64_runtime_function};
 use walk::{build_recovered_stacktrace_seeded, ensure_module_symbols};
 
@@ -98,6 +97,10 @@ pub struct ThreadTraceContext {
     pub hypervisor: Option<Arc<HypervisorSymbols>>,
 }
 
+/// How ntoseye recovered a frame. In the SDK, its tag: `current`, `seed`,
+/// `unwind`, `prolog` (read off its function's prolog, for the Windows
+/// hypervisor's code without its file), or `scan`.
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameSource {
     Current,
@@ -109,42 +112,40 @@ pub enum FrameSource {
     Scan,
 }
 
-impl FrameSource {
-    /// Stable lowercase tag for how a frame was recovered, surfaced by every
-    /// host. Explicit rather than derived from `Debug`, which would drift if a
-    /// variant were renamed.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            FrameSource::Current => "current",
-            FrameSource::Seed => "seed",
-            FrameSource::Unwind => "unwind",
-            FrameSource::Prolog => "prolog",
-            FrameSource::Scan => "scan",
-        }
-    }
-}
-
+/// One frame of a stack walk.
+#[record]
 #[derive(Debug, Clone)]
 pub struct StackFrame {
-    pub sp: u64,
+    /// The instruction pointer.
+    #[record(hex)]
     pub ip: u64,
-    /// `module!procedure+offset` at `ip`; for an inline frame,
-    /// `module!function`, the function inlined.
+    /// The stack pointer.
+    #[record(hex)]
+    pub sp: u64,
+    /// The symbol at `ip` (`module!procedure+offset`). For an inline frame,
+    /// `module!function`, the function inlined. Empty if no symbol
+    /// resolves.
     pub symbol: String,
+    /// True for a call that the compiler inlined into the physical frame
+    /// after it, so the call has no stack frame of its own. `symbol` is the
+    /// inlined function, and `ip` and `sp` are those of the physical frame.
+    pub inline: bool,
+    /// How ntoseye recovered the frame.
     pub source: FrameSource,
-    /// The frame's source line (see [`SymbolStore::frame_source_location`]).
+    /// The source line of the frame, if line information resolves it. For
+    /// an inline frame this is the line in the inlined function, and for a
+    /// caller it is the line of the call (see
+    /// [`SymbolStore::frame_source_location`]).
     pub source_location: Option<SourceLocation>,
     /// The hardware-pushed machine frame the walk crossed to reach this
     /// frame: the trap or interrupt that stopped it here. On Windows it is the
     /// tail of the handler's `_KTRAP_FRAME` (see
     /// [`crate::trapframe::ktrap_frame_at_machine_frame`]).
+    #[record(skip)]
     pub machine_frame: Option<u64>,
     /// Where the frame is in code, and which of the frames there it is.
+    #[record(skip)]
     pub code: CodeFrame,
-    /// The frame is a call the compiler inlined into the code of the
-    /// physical frame after it: it has no stack frame of its own, and shares
-    /// that frame's `ip`, `sp`, registers and `machine_frame`.
-    pub inline: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -647,14 +648,208 @@ pub fn format_symbol(debugger: &Target, trace: &ThreadTraceContext, addr: u64) -
     try_format_symbol(debugger, trace, addr).unwrap_or_else(|| format!("{addr:#x}"))
 }
 
-/// A VTL state the Windows hypervisor saved, with the symbol where it left
-/// off.
+/// One VTL of a virtual processor, as the Windows hypervisor last saved it
+/// in the VTL's Enlightened VMCS, with the symbol where it left off. A VMCS
+/// holds no general-purpose register other than `rsp`; `general_registers`
+/// has the others when they are known.
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct SavedVtl {
+    #[record(skip)]
     pub context: SavedVtlContext,
     /// The symbol at the saved `rip`, resolved in the state's own address
     /// space.
+    #[record(skip)]
     pub symbol: Option<String>,
+}
+
+#[record]
+impl SavedVtl {
+    /// 0 or 1.
+    #[record(getter)]
+    pub fn vtl(&self) -> u8 {
+        self.context.vtl
+    }
+
+    /// Whether the VP assist page names this state's eVMCS as current. The
+    /// current VTL is the one that entered the hypervisor or that the
+    /// hypervisor is about to enter.
+    #[record(getter)]
+    pub fn current(&self) -> bool {
+        self.context.state.current
+    }
+
+    #[record(getter)]
+    pub fn rip(&self) -> VirtAddr {
+        VirtAddr(self.context.state.rip)
+    }
+
+    /// The symbol at `rip` in the VTL's address space, if one resolves.
+    #[record(getter, rename = "symbol")]
+    pub fn saved_symbol(&self) -> Option<String> {
+        self.symbol.clone()
+    }
+
+    #[record(getter)]
+    pub fn rsp(&self) -> VirtAddr {
+        VirtAddr(self.context.state.rsp)
+    }
+
+    #[record(getter, hex)]
+    pub fn rflags(&self) -> u64 {
+        self.context.state.rflags
+    }
+
+    #[record(getter, hex)]
+    pub fn cr0(&self) -> u64 {
+        self.context.state.cr0
+    }
+
+    /// The page-table root of the VTL.
+    #[record(getter, hex)]
+    pub fn cr3(&self) -> u64 {
+        self.context.state.cr3
+    }
+
+    #[record(getter, hex)]
+    pub fn cr4(&self) -> u64 {
+        self.context.state.cr4
+    }
+
+    #[record(getter, hex)]
+    pub fn dr7(&self) -> u64 {
+        self.context.state.dr7
+    }
+
+    #[record(getter, hex)]
+    pub fn cs(&self) -> u16 {
+        self.context.state.cs
+    }
+
+    #[record(getter, hex)]
+    pub fn ss(&self) -> u16 {
+        self.context.state.ss
+    }
+
+    #[record(getter, hex)]
+    pub fn ds(&self) -> u16 {
+        self.context.state.ds
+    }
+
+    #[record(getter, hex)]
+    pub fn es(&self) -> u16 {
+        self.context.state.es
+    }
+
+    #[record(getter, hex)]
+    pub fn fs(&self) -> u16 {
+        self.context.state.fs
+    }
+
+    #[record(getter, hex)]
+    pub fn gs(&self) -> u16 {
+        self.context.state.gs
+    }
+
+    #[record(getter)]
+    pub fn fs_base(&self) -> VirtAddr {
+        VirtAddr(self.context.state.fs_base)
+    }
+
+    #[record(getter)]
+    pub fn gs_base(&self) -> VirtAddr {
+        VirtAddr(self.context.state.gs_base)
+    }
+
+    /// The VM-exit reason of the last exit from the VTL. Bits 15:0 hold the
+    /// basic reason, and bit 31 is set for a failed VM entry.
+    #[record(getter, hex)]
+    pub fn exit_reason(&self) -> u32 {
+        self.context.state.exit_reason
+    }
+
+    /// The name of the exit reason (`HLT`, `VMCALL`, ...), if it is a
+    /// common reason.
+    #[record(getter)]
+    pub fn exit_reason_name(&self) -> Option<&'static str> {
+        self.context.state.exit_reason_name()
+    }
+
+    /// Reason-specific detail of the last exit, such as the access that
+    /// caused an EPT violation (Intel SDM, exit qualification).
+    #[record(getter, hex)]
+    pub fn exit_qualification(&self) -> u64 {
+        self.context.state.exit_qualification
+    }
+
+    /// The vector and type of the event behind an exception or interrupt
+    /// exit (Intel SDM, VM-exit interruption information).
+    #[record(getter, hex)]
+    pub fn exit_interruption_info(&self) -> u32 {
+        self.context.state.exit_interruption_info
+    }
+
+    /// The length of the instruction that caused the exit, for exits that
+    /// an instruction caused.
+    #[record(getter)]
+    pub fn exit_instruction_length(&self) -> u32 {
+        self.context.state.exit_instruction_length
+    }
+
+    /// The hypervisor's VM-exit entry point.
+    #[record(getter)]
+    pub fn host_rip(&self) -> VirtAddr {
+        VirtAddr(self.context.state.host_rip)
+    }
+
+    /// The stack the hypervisor's VM-exit entry point runs on.
+    #[record(getter)]
+    pub fn host_rsp(&self) -> VirtAddr {
+        VirtAddr(self.context.state.host_rsp)
+    }
+
+    /// The vCPU is stopped on `host_rip`, and not by a breakpoint there.
+    /// KVM writes the eVMCS when it enters the hypervisor, and a stop from
+    /// outside can fall between a VM exit and that entry, so this state
+    /// may still describe the exit before the one in progress. The
+    /// guest's general-purpose registers are then still in the vCPU's own
+    /// registers. A breakpoint on `host_rip` fires after the write.
+    /// Only the current state, the exiting VTL's, can be behind; when no
+    /// state of the VP is current, every state is marked.
+    #[record(getter)]
+    pub fn may_be_stale(&self) -> bool {
+        self.context.may_be_stale
+    }
+
+    /// The guest's general-purpose registers other than `rsp` at the last
+    /// exit (`rax` to `r15`), read where the hypervisor's VM-exit entry
+    /// code saved them. Experimental: where that is, is read off the
+    /// entry code. None when they are not known: for a VTL that is not
+    /// the current one, while the vCPU is on `host_rip` (unless it stopped
+    /// there on a breakpoint, when they are the vCPU's own) or still saving
+    /// them, or when the entry code does not save them in one block.
+    #[record(getter, hex)]
+    pub fn general_registers(&self) -> Option<Keyed<u64>> {
+        self.context
+            .general_registers
+            .as_ref()
+            .ok()
+            .map(crate::guest::ordered_exit_gprs)
+    }
+
+    /// The physical address of the eVMCS page that ntoseye read the state
+    /// from.
+    #[record(getter, hex)]
+    pub fn evmcs(&self) -> u64 {
+        self.context.state.address
+    }
+
+    /// The hypercall of a VMCALL exit whose general-purpose registers are
+    /// known, with its input decoded.
+    #[record(getter)]
+    pub fn hypercall(&self) -> Option<crate::guest::hypercall_input::DecodedHypercall> {
+        self.context.hypercall.call().cloned()
+    }
 }
 
 impl SavedVtl {
@@ -868,7 +1063,7 @@ pub fn function_entry(
     debugger: &Target,
     trace: &ThreadTraceContext,
     address: u64,
-) -> Result<FunctionEntryDetail> {
+) -> Result<FunctionEntry> {
     let mut tracer = StackTracer::new(debugger, trace);
     let Some(module) = tracer.module_containing(address) else {
         return Err(Error::DebugInfo(format!(
@@ -905,7 +1100,7 @@ pub fn function_entry(
         amd64::EntryLookup::Found {
             entries,
             incomplete,
-        } => Ok(FunctionEntryDetail {
+        } => Ok(FunctionEntry {
             module,
             image_base: base,
             entries,
@@ -1469,9 +1664,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::{FrameSource, RegisterContext, build_stacktrace_with_register_values};
+    use crate::cpu_context::amd64::build_register_map;
     use crate::guest::ModuleInfo;
     use crate::guest::hypercalls::HypervisorSymbols;
-    use crate::kd::context::build_register_map;
     use crate::session::{Session, session_over_memory};
     use crate::target::{SavedThreadRegisters, SelectedFrame};
     use crate::types::VirtAddr;

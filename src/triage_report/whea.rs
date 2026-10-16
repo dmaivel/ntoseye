@@ -2,9 +2,10 @@
 //! carries and the bounded decoding of that `WHEA_ERROR_RECORD`.
 
 use super::{WheaFinding, WheaRecord, WheaRecordState, WheaSection, WheaSectionKind};
-use crate::backend::MemoryOps;
 use crate::bugchecks::BugcheckAnalysis;
 use crate::bytes::{read_u16, read_u32};
+use crate::memory::MemoryOps;
+use crate::target::etw::{GuidStyle, format_guid};
 use crate::types::VirtAddr;
 
 pub(super) fn whea_without_memory(bugcheck: &BugcheckAnalysis) -> Option<WheaFinding> {
@@ -118,7 +119,12 @@ fn decode_whea_header_and_read<M: MemoryOps<VirtAddr>>(
                 "WHEA section {index} range {offset:#x}..{section_end:#x} is outside record bounds {descriptors_end:#x}..{length:#x}"
             ));
         }
-        let section_type = format_guid(&record[descriptor + 16..descriptor + 32]);
+        let section_type = format_guid(
+            record[descriptor + 16..descriptor + 32]
+                .try_into()
+                .expect("a GUID spans 16 bytes"),
+            GuidStyle::Bare,
+        );
         sections.push(WheaSection {
             offset: offset as u32,
             length: section_length as u32,
@@ -149,23 +155,6 @@ fn whea_section_kind(section_type: &str) -> WheaSectionKind {
         "dc3ea0b0-a144-4797-b95b-53fa242b6e1d" => WheaSectionKind::X64Processor,
         _ => WheaSectionKind::Unknown,
     }
-}
-
-fn format_guid(bytes: &[u8]) -> String {
-    format!(
-        "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        read_u32(bytes, 0),
-        read_u16(bytes, 4),
-        read_u16(bytes, 6),
-        bytes[8],
-        bytes[9],
-        bytes[10],
-        bytes[11],
-        bytes[12],
-        bytes[13],
-        bytes[14],
-        bytes[15],
-    )
 }
 
 #[cfg(test)]

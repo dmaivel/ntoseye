@@ -3,9 +3,8 @@
 
 use std::collections::HashMap;
 
-use crate::dbg_backend::{DebugCapability, processor_index_from_backend_thread_id};
+use crate::dbg_backend::{DebugCapability, RegisterMap, processor_index_from_backend_thread_id};
 use crate::error::{Error, Result};
-use crate::gdb::RegisterMap;
 use crate::guest::hypervisor::guest_vp_label;
 use crate::memory::DTB_IDENTITY;
 use crate::session::{Selection, Session, ThreadContext, UserThreadSummary, VcpuInfo};
@@ -238,6 +237,7 @@ impl Session {
             target: self.target.take_selection(),
             current_thread: self.current_thread.clone(),
             parked_windows_thread: self.parked_windows_thread.take(),
+            partition: self.partition(),
         }
     }
 

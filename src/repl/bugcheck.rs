@@ -60,7 +60,7 @@ pub fn print_bugcheck_info(debugger: &Target, info: &BugcheckInfo) {
 }
 
 /// [`print_bugcheck_analysis`], as a card in Tern.
-fn show_bugcheck_analysis(analysis: &BugcheckAnalysis) {
+pub fn show_bugcheck_analysis(analysis: &BugcheckAnalysis) {
     #[cfg(feature = "cli")]
     native::render(
         || native::bugcheck::card(analysis),
@@ -164,7 +164,7 @@ pub fn print_ktrap_frame(frame: &KtrapFrame, rip_symbol: Option<&str>) {
     let kind = frame
         .amd64()
         .and_then(|frame| frame.kind)
-        .map(|kind| format!(" {}", ui::muted(&format!("({})", kind.as_str()))))
+        .map(|kind| format!(" {}", ui::muted(&format!("({})", kind))))
         .unwrap_or_default();
     outln!(
         "{} @ {}{kind}",

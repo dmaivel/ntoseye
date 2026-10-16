@@ -8,17 +8,18 @@ use super::stepping::{
 };
 use super::*;
 use crate::breakpoints::{
-    Breakpoint, BreakpointConfig, HardwareBreakpoint, HypercallFilter, PartitionFilter, StepFrame,
-    ThreadScope,
+    BreakpointConfig, BreakpointInfo, HardwareBreakpoint, HypercallFilter, PartitionFilter,
+    StepFrame, ThreadScope,
 };
+use crate::cpu_context::amd64::{REGISTER_BUFFER_SIZE, build_register_map};
+use crate::cpu_context::arm64;
 use crate::dbg_backend::{
-    ContinueDisposition, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, TrapState, clear_trap_flag,
+    ContinueDisposition, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, RegisterInfo, TrapState,
+    clear_trap_flag,
 };
 use crate::dmp::{IMAGE_FILE_MACHINE_ARM64, structs::Header64};
-use crate::exception_policy::ExceptionPolicyMode;
+use crate::exception_policy::{ExceptionPolicyFinalAction, ExceptionPolicyMode};
 use crate::guest::ModuleInfo;
-use crate::kd::context::{REGISTER_BUFFER_SIZE, build_register_map};
-use crate::kd::context_arm64;
 use crate::memory::PAGE_SIZE;
 use crate::partition_backend::PartitionVp;
 use crate::target::SelectedFrame;
@@ -27,7 +28,7 @@ use iced_x86::{Decoder, DecoderOptions};
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, Instant};
 
 /// DR6.BS (bit 14): a status bit outside B0-B3 that the functions under
@@ -229,14 +230,17 @@ impl MockBackend {
     /// Model a stub that owns the processor's debug registers and exposes
     /// none of them, as a GDB target description does.
     fn without_debug_registers(mut self) -> Self {
-        self.register_map = RegisterMap::parse_target_xml(
-            r#"<target><feature name="org.gnu.gdb.i386.core">
-                 <reg name="rsp" bitsize="64"/>
-                 <reg name="rip" bitsize="64"/>
-                 <reg name="eflags" bitsize="32"/>
-               </feature></target>"#,
-        )
-        .unwrap();
+        let register = |name: &str, offset, size, regnum| RegisterInfo {
+            name: name.to_string(),
+            offset,
+            size,
+            regnum,
+        };
+        self.register_map = RegisterMap::from_registers(vec![
+            register("rsp", 0, 8, 0),
+            register("rip", 8, 8, 1),
+            register("eflags", 16, 4, 2),
+        ]);
         self.regs = vec![0u8; 20];
         self
     }
@@ -253,6 +257,48 @@ impl MockBackend {
     pub fn with_pending_stop(mut self) -> Self {
         self.pending_stop = true;
         self
+    }
+
+    /// Take software breakpoints, as KD does.
+    pub fn with_breakpoints(mut self) -> Self {
+        self.allow_breakpoints = true;
+        self
+    }
+
+    /// Put processor 0 at `rip`, its stack at `rsp`, running `ethread`.
+    pub fn standing_at(mut self, rip: u64, rsp: u64, ethread: u64) -> Self {
+        self.land(Landing { rip, rsp, ethread });
+        self
+    }
+
+    /// Runs of every vCPU stop on a breakpoint at each `(rip, rsp,
+    /// ethread)` in turn, then run freely.
+    pub fn runs_stopping_at(mut self, stops: &[(u64, u64, u64)]) -> Self {
+        self.schedule
+            .extend(
+                stops
+                    .iter()
+                    .map(|&(rip, rsp, ethread)| Landing { rip, rsp, ethread }),
+            );
+        self
+    }
+
+    /// Make every register fetch take `delay`.
+    pub fn with_register_read_delay(mut self, delay: Duration) -> Self {
+        self.register_read_delay = delay;
+        self
+    }
+
+    /// The `set_breakpoint` / `remove_breakpoint` log, readable after the
+    /// backend moves into a session.
+    pub fn site_log(&self) -> Arc<Mutex<Vec<(u64, bool)>>> {
+        Arc::clone(&self.site_writes)
+    }
+
+    /// The count of runs of every vCPU, readable after the backend moves
+    /// into a session.
+    pub fn continue_count(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.continues)
     }
 
     /// Give `processor` MSR `msr`, read as `value`.
@@ -641,6 +687,16 @@ pub fn session_with_mock(backend: MockBackend) -> Session {
     session
 }
 
+/// A session over `code` at 0x1000 whose one vCPU (`p01.01`, a
+/// [`MockBackend::one_vcpu`]) runs the threads the backend lands it on.
+pub fn session_running_code(code: &[u8], backend: MockBackend) -> Session {
+    let threads = Arc::clone(&backend.threads);
+    let mut session = stepping_session(code, backend);
+    session.target.test_current_threads = Some(threads);
+    session.current_thread = "p01.01".into();
+    session
+}
+
 #[test]
 fn bugcheck_exception_record_uses_bugcheck_code() {
     let mut session = session_over_memory(0x1000, &[0; 0x100]);
@@ -751,8 +807,8 @@ fn page_in_result_reads_arm64_pc_alias_and_first_argument() {
     assert_eq!(session.target.arch(), Arch::Arm64);
 
     let mut backend = MockBackend {
-        register_map: context_arm64::build_register_map(),
-        regs: vec![0; context_arm64::REGISTER_BUFFER_SIZE],
+        register_map: arm64::build_register_map(),
+        regs: vec![0; arm64::REGISTER_BUFFER_SIZE],
         ..MockBackend::default()
     };
     backend.set("rip", 0x2000);
@@ -964,9 +1020,8 @@ fn with_target_halted_parks_a_genuine_pending_breakpoint() {
 
     assert_eq!(continues.load(Ordering::Relaxed), 0);
     assert!(!session.backend.is_running());
-    let cancel = AtomicBool::new(false);
     assert!(matches!(
-        session.wait_for_stop_bounded(Some(Duration::ZERO), &cancel),
+        session.wait_stop(&Cancel::poll(), true),
         Ok(ContinueOutcome::Breakpoint { id: 1, .. })
     ));
 }
@@ -1066,6 +1121,41 @@ fn absorbed_software_breakpoint_invalidates_stopped_inspection() {
     assert_eq!(session.target.current_dtb(), expected_dtb);
 }
 
+/// A breakpoint set where a one-shot breakpoint just fired, with the target
+/// still halted at the hit, takes the site over: it is not refused as the
+/// fired one's, which only the next resume would otherwise remove, and it
+/// is the one listed.
+#[test]
+fn a_breakpoint_takes_over_the_site_of_a_fired_one_shot() {
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1001);
+    let mut session = session_with_mock(backend);
+    let once = BreakpointConfig {
+        one_shot: true,
+        ..BreakpointConfig::default()
+    };
+    let fired = session
+        .add_breakpoint(VirtAddr(0x1000), None, once)
+        .unwrap();
+    let hit = session
+        .classify_stop_event(breakpoint_event(0x1000))
+        .unwrap();
+    assert!(
+        matches!(&hit, StopResolution::Breakpoint { breakpoint, .. } if breakpoint.id == fired),
+        "precondition: the one-shot breakpoint stops"
+    );
+
+    let taken = session.add_breakpoint(VirtAddr(0x1000), None, BreakpointConfig::default());
+
+    let taken = taken.unwrap();
+    let listed: Vec<_> = session.breakpoints.list().iter().map(|bp| bp.id).collect();
+    assert_eq!(listed, [taken]);
+    assert!(!session.breakpoints.list()[0].one_shot);
+}
+
 #[test]
 fn absorbed_watchpoint_invalidates_stopped_inspection() {
     let mut backend = MockBackend::default();
@@ -1094,7 +1184,7 @@ fn deferred_symbol_breakpoint(session: &mut Session) -> u32 {
     id
 }
 
-fn breakpoint_by_id(session: &Session, id: u32) -> Breakpoint {
+fn breakpoint_by_id(session: &Session, id: u32) -> BreakpointInfo {
     session
         .breakpoints
         .list()
@@ -1622,10 +1712,9 @@ fn a_watchpoint_hit_while_a_resume_leaves_its_site_is_the_next_stop() {
         .insert_for_test(1, VirtAddr(0x1000), true, None);
 
     let outcome = session
-        .continue_until_break(
-            Some(Duration::from_secs(1)),
-            &AtomicBool::new(false),
+        .continue_stop(
             ContinueDisposition::Handled,
+            &Cancel::within(Duration::from_secs(1)),
         )
         .unwrap();
     assert!(
@@ -1671,10 +1760,9 @@ fn a_resume_with_a_stop_kept_reports_it_without_leaving_a_site() {
     );
 
     let outcome = session
-        .continue_until_break(
-            Some(Duration::from_secs(1)),
-            &AtomicBool::new(false),
+        .continue_stop(
             ContinueDisposition::Handled,
+            &Cancel::within(Duration::from_secs(1)),
         )
         .unwrap();
     assert!(
@@ -1748,13 +1836,15 @@ fn step_loops_stop_at_a_diverted_step() {
 
     let mut session = diverted_session();
     let outcome = session
-        .step_until(StepMode::Into, 1_000, None, |_, flow| {
+        .step_until(StepMode::Into, 1_000, &Cancel::NEVER, |_, flow| {
             flow == crate::disasm::ControlFlow::Call
         })
         .unwrap();
     assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1030 }));
 
-    let trace = diverted_session().trace_calls(1_000, None).unwrap();
+    let trace = diverted_session()
+        .trace_calls(1_000, &Cancel::NEVER)
+        .unwrap();
     assert_eq!(trace.end, CallTraceEnd::Diverted);
     assert_eq!(trace.instructions, 0);
 }
@@ -1936,14 +2026,14 @@ fn a_resumed_walk_finishes_the_run_it_was_waiting_on() {
     session.pending_walk = pending(vec![(VirtAddr(0x1010), None)]);
 
     let outcome = session
-        .resume_step_until(StepMode::Over, 16, None, |ip, _| ip == 0x1010)
+        .resume_step_until(StepMode::Over, 16, &Cancel::NEVER, |ip, _| ip == 0x1010)
         .unwrap();
     assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1010 }));
     assert!(session.pending_walk.is_none());
 
     session.pending_walk = pending(vec![(VirtAddr(0x1030), None)]);
     let outcome = session
-        .step_until(StepMode::Over, 16, None, |ip, _| ip == 0x1010)
+        .step_until(StepMode::Over, 16, &Cancel::NEVER, |ip, _| ip == 0x1010)
         .unwrap();
     assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1010 }));
     assert!(session.pending_walk.is_none());
@@ -1954,7 +2044,7 @@ fn a_resumed_walk_finishes_the_run_it_was_waiting_on() {
     session.current_thread = "p01.02".into();
     session.pending_walk = pending(Vec::new());
     let outcome = session
-        .resume_step_until(StepMode::Over, 16, None, |ip, _| ip == 0x1011)
+        .resume_step_until(StepMode::Over, 16, &Cancel::NEVER, |ip, _| ip == 0x1011)
         .unwrap();
     assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1011 }));
     assert_eq!(session.current_thread, "p01.01");
@@ -1979,11 +2069,7 @@ fn walk_session(steps: &[Landing], runs: &[Landing]) -> (Session, Arc<AtomicUsiz
         ethread: WALKED,
     });
     let continues = Arc::clone(&backend.continues);
-    let threads = Arc::clone(&backend.threads);
-    let mut session = stepping_session(&[0x90u8; 0x40], backend);
-    session.target.test_current_threads = Some(threads);
-    session.current_thread = "p01.01".into();
-    (session, continues)
+    (session_running_code(&[0x90u8; 0x40], backend), continues)
 }
 
 /// A step that an interrupt switched to another thread goes on in the
@@ -2003,7 +2089,7 @@ fn a_walk_follows_its_thread_past_a_step_that_switched_it_out() {
     );
 
     let outcome = session
-        .step_until(StepMode::Into, 16, None, |ip, _| ip == 0x1002)
+        .step_until(StepMode::Into, 16, &Cancel::NEVER, |ip, _| ip == 0x1002)
         .unwrap();
     assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1002 }));
     assert_eq!(continues.load(Ordering::Relaxed), 3);
@@ -2019,10 +2105,36 @@ fn a_call_trace_follows_its_thread_past_a_step_that_switched_it_out() {
         &[at(0x1001, 0x2000, OTHER), at(0x1001, 0x2000, WALKED)],
     );
 
-    let trace = session.trace_calls(2, None).unwrap();
+    let trace = session.trace_calls(2, &Cancel::NEVER).unwrap();
     assert_eq!(trace.end, CallTraceEnd::Limit);
     assert_eq!(trace.instructions, 2);
     assert_eq!(continues.load(Ordering::Relaxed), 2);
+}
+
+/// A call trace that ends at a user breakpoint runs its action, as a step
+/// or a run that stops there does; the trace stays ended even when the
+/// action asks to resume.
+#[test]
+fn a_call_trace_ending_at_a_breakpoint_runs_its_action() {
+    let at = |rip, rsp, ethread| Landing { rip, rsp, ethread };
+    let (mut session, continues) = walk_session(&[at(0x1001, 0x2000, WALKED)], &[]);
+    session
+        .breakpoints
+        .insert_for_test(1, VirtAddr(0x1001), true, None);
+    session
+        .breakpoints
+        .set_action(1, Some("log".into()))
+        .unwrap();
+    let log = recording(&mut session, true);
+
+    let trace = session.trace_calls(100, &Cancel::NEVER).unwrap();
+    assert_eq!(trace.end, CallTraceEnd::Breakpoint);
+    assert_eq!(*log.lock(), ["action log"]);
+    assert_eq!(
+        continues.load(Ordering::Relaxed),
+        0,
+        "the action's resume ran"
+    );
 }
 
 /// A call trace whose thread never reaches the instruction a step left it
@@ -2039,7 +2151,7 @@ fn a_call_trace_ends_at_its_time_limit_while_other_threads_take_its_site() {
 
     let started = Instant::now();
     let trace = session
-        .trace_calls(100, Some(Duration::from_millis(300)))
+        .trace_calls(100, &Cancel::within(Duration::from_millis(300)))
         .unwrap();
     assert_eq!(trace.end, CallTraceEnd::Interrupted);
     assert_eq!(trace.instructions, 0);
@@ -2058,7 +2170,7 @@ fn a_walk_step_that_reached_its_successor_is_not_followed() {
         HashMap::from([(VirtAddr(WALKED), (VirtAddr(0x1000), VirtAddr(0x3000)))]);
 
     let outcome = session
-        .step_until(StepMode::Into, 16, None, |ip, _| ip == 0x1002)
+        .step_until(StepMode::Into, 16, &Cancel::NEVER, |ip, _| ip == 0x1002)
         .unwrap();
     assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1002 }));
     assert_eq!(continues.load(Ordering::Relaxed), 0);
@@ -2077,7 +2189,7 @@ fn a_walk_step_that_reached_its_successor_on_another_stack_is_followed() {
         HashMap::from([(VirtAddr(WALKED), (VirtAddr(0x1000), VirtAddr(0x3000)))]);
 
     let outcome = session
-        .step_until(StepMode::Into, 16, None, |ip, _| ip == 0x1002)
+        .step_until(StepMode::Into, 16, &Cancel::NEVER, |ip, _| ip == 0x1002)
         .unwrap();
     assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1002 }));
     assert_eq!(continues.load(Ordering::Relaxed), 1);
@@ -2153,14 +2265,14 @@ fn a_walk_resumed_past_a_hit_in_another_thread_goes_on_in_its_own() {
         .insert_for_test(1, VirtAddr(0x1030), true, None);
 
     let outcome = session
-        .step_until(StepMode::Into, 16, None, |ip, _| ip == 0x1002)
+        .step_until(StepMode::Into, 16, &Cancel::NEVER, |ip, _| ip == 0x1002)
         .unwrap();
     assert!(matches!(
         outcome,
         ContinueOutcome::Breakpoint { rip: 0x1030, .. }
     ));
     let outcome = session
-        .resume_step_until(StepMode::Into, 16, None, |ip, _| ip == 0x1002)
+        .resume_step_until(StepMode::Into, 16, &Cancel::NEVER, |ip, _| ip == 0x1002)
         .unwrap();
     assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1002 }));
 }
@@ -2207,7 +2319,7 @@ fn a_walk_its_timeout_cuts_short_in_a_run_ends_as_an_interrupt() {
         .step_until(
             StepMode::Over,
             16,
-            Some(Duration::from_millis(50)),
+            &Cancel::within(Duration::from_millis(50)),
             |ip, _| ip == 0x1010,
         )
         .unwrap();
@@ -2623,6 +2735,33 @@ fn show_partition_4(session: &mut Session) {
         vcpu: None,
     }];
     session.show_partition(4, partition_target, vps, "p4.1".to_string());
+}
+
+/// A run or step in a partition view runs the target, so it is admitted on
+/// the target's execution control, not refused for the view's backend,
+/// which runs nothing; over a crash dump, which has none, it still is.
+#[test]
+fn a_partition_view_admits_runs_on_the_targets_execution_control() {
+    use super::effects::{Effects, Refusal, RunEffect};
+    let run = Effects {
+        run: RunEffect::Run,
+        ..Effects::HALTED
+    };
+    let step = Effects {
+        run: RunEffect::Step,
+        ..Effects::HALTED
+    };
+    let mut live = session_with_mock(MockBackend::default());
+    show_partition_4(&mut live);
+    let mut dump = session_over_memory(0x1000, &[0; 0x100]);
+    show_partition_4(&mut dump);
+
+    assert!(live.admit(&run).is_ok());
+    assert!(live.admit(&step).is_ok());
+    assert!(matches!(
+        dump.admit(&run),
+        Err(Refusal::NoExecutionControl { backend: "dmp" })
+    ));
 }
 
 /// Every breakpoint is the target's, also in a partition view: one set there
@@ -3048,7 +3187,7 @@ fn a_load_trap_hit_a_break_filter_names_surfaces_the_module_load() {
     assert_eq!(module.base_address, VirtAddr(0x2000));
     assert_eq!(rip, LOAD_TRAP);
     assert!(matches!(
-        session.current_stop(),
+        session.current_stop.as_ref(),
         Some(ContinueOutcome::ModuleLoad { .. })
     ));
     assert_eq!(continues.load(Ordering::Relaxed), 0);
@@ -3096,7 +3235,7 @@ fn an_unload_trap_hit_a_break_filter_names_surfaces_the_module_unload() {
     assert_eq!(module.base_address, VirtAddr(0x2000));
     assert_eq!(rip, UNLOAD_TRAP);
     assert!(matches!(
-        session.current_stop(),
+        session.current_stop.as_ref(),
         Some(ContinueOutcome::ModuleUnload { .. })
     ));
     assert_eq!(continues.load(Ordering::Relaxed), 0);
@@ -3432,6 +3571,36 @@ fn a_covered_watch_address_on_a_stop_at_a_planted_site_leaves_the_site_its_hit()
     assert_eq!(breakpoint.id, 1);
 }
 
+/// A one-shot watchpoint's hit is a breakpoint stop that names it, as a
+/// software one-shot's is: it is kept, hidden, until the next resume removes
+/// it (`resume_with_disposition`), not removed before the stop could
+/// describe it.
+#[test]
+fn a_one_shot_watchpoint_hit_is_a_breakpoint_stop() {
+    let mut backend = MockBackend::default().without_debug_registers().running();
+    backend.set("rip", 0x1020);
+    backend.queue_interrupt(stub_watch_event(0x1002));
+    let map = backend.register_map.clone();
+    let mut session = session_with_mock(backend);
+    session.register_map = map;
+    session.breakpoints = manager_with_hw(0, HwBreakpointAccess::Write, true);
+    session.breakpoints.set_one_shot(7, true).unwrap();
+
+    let RunOutcome::Stopped(stop) = session.run(Motion::Wait, &Cancel::poll()).unwrap() else {
+        panic!("no stop surfaced");
+    };
+    assert_eq!(stop.breakpoint().map(|hit| hit.id), Some(7), "{stop:?}");
+    assert!(
+        session.breakpoints.list().is_empty(),
+        "a fired one-shot is listed"
+    );
+    assert_eq!(
+        session.breakpoints.one_shot_hit_ids(),
+        [7],
+        "not held for the next resume"
+    );
+}
+
 #[test]
 fn a_stub_with_no_debug_registers_attributes_an_execute_breakpoint_by_the_stopped_pc() {
     let manager = manager_with_hw(0, HwBreakpointAccess::Execute, true);
@@ -3565,4 +3734,315 @@ fn a_processor_filter_only_matches_the_vcpu_that_reported() {
     // An unresolvable id is reported rather than dropped: a filter must
     // never lose a hit silently.
     assert!(stopped_processor_matches(Some(1), ""));
+}
+
+/// Records what the driver asked its runner for, and resumes past each
+/// breakpoint action when `resume` says to.
+struct RecordingRunner {
+    log: Arc<Mutex<Vec<String>>>,
+    resume: bool,
+}
+
+impl ActionRunner for RecordingRunner {
+    fn breakpoint_action(&mut self, _session: &mut Session, action: &str) -> bool {
+        self.log.lock().push(format!("action {action}"));
+        self.resume
+    }
+
+    fn event_command(&mut self, _session: &mut Session, command: &str) {
+        self.log.lock().push(format!("command {command}"));
+    }
+}
+
+/// A session whose runner records into the returned log.
+fn recording(session: &mut Session, resume: bool) -> Arc<Mutex<Vec<String>>> {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    session.action_runner = Some(Box::new(RecordingRunner {
+        log: Arc::clone(&log),
+        resume,
+    }));
+    log
+}
+
+fn exception_event(code: u32, pc: u64) -> StopEvent {
+    StopEvent {
+        exception_code: Some(code),
+        exception_address: Some(pc),
+        program_counter: Some(pc),
+        ..breakpoint_event(pc)
+    }
+}
+
+/// A breakpoint hit the idle servicer parked runs its action when a wait
+/// surfaces it, as a hit a wait collects itself does.
+#[test]
+fn a_parked_breakpoint_runs_its_action_when_it_surfaces() {
+    let mut backend = MockBackend::default().running().with_pending_stop();
+    backend.set("rip", 0x1000);
+    backend.queue_interrupt(breakpoint_event(0x1000));
+    let mut session = session_with_mock(backend);
+    session
+        .breakpoints
+        .insert_for_test(1, VirtAddr(0x1000), true, None);
+    session
+        .breakpoints
+        .set_action(1, Some("log".into()))
+        .unwrap();
+    let log = recording(&mut session, false);
+
+    session.service_idle();
+    assert!(log.lock().is_empty(), "idle servicing ran the action");
+    assert!(!session.backend.is_running(), "the stop was not parked");
+
+    let outcome = session.run(Motion::Wait, &Cancel::poll()).unwrap();
+    let RunOutcome::Stopped(stop) = outcome else {
+        panic!("no stop surfaced");
+    };
+    assert_eq!(stop.breakpoint().map(|hit| hit.id), Some(1));
+    assert_eq!(*log.lock(), ["action log"]);
+}
+
+/// A break-in that surfaces a parked hit runs the hit's action, and a
+/// resume the action asks for is ignored: halt wins.
+#[test]
+fn a_break_runs_a_parked_hits_action_and_stays_halted() {
+    let mut backend = MockBackend::default().running().with_pending_stop();
+    backend.set("rip", 0x1000);
+    backend.queue_interrupt(breakpoint_event(0x1000));
+    let continues = Arc::clone(&backend.continues);
+    let mut session = session_with_mock(backend);
+    session
+        .breakpoints
+        .insert_for_test(1, VirtAddr(0x1000), true, None);
+    session
+        .breakpoints
+        .set_action(1, Some("gc".into()))
+        .unwrap();
+    let log = recording(&mut session, true);
+    session.service_idle();
+
+    let RunOutcome::Stopped(stop) = session.run(Motion::Break, &Cancel::NEVER).unwrap() else {
+        panic!("no stop surfaced");
+    };
+    assert_eq!(stop.breakpoint().map(|hit| hit.id), Some(1));
+    assert_eq!(*log.lock(), ["action gc"]);
+    assert_eq!(
+        continues.load(Ordering::Relaxed),
+        0,
+        "the action's resume ran"
+    );
+}
+
+/// A hit its breakpoint declines is absorbed and the target runs on; a
+/// wait whose deadline passed meanwhile ends there, handing the target
+/// back running, instead of waiting on as long as declined hits keep
+/// coming.
+#[test]
+fn a_wait_ends_at_its_deadline_between_declined_hits() {
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        ..MockBackend::default()
+    }
+    .running()
+    .with_pending_stop();
+    backend.set("rip", 0x1001);
+    for _ in 0..3 {
+        backend.queue_interrupt(breakpoint_event(0x1000));
+    }
+    let continues = Arc::clone(&backend.continues);
+    let mut session = session_with_mock(backend);
+    session
+        .breakpoints
+        .insert_for_test(1, VirtAddr(0x1000), true, None);
+    // Every hit is passed.
+    session.breakpoints.set_pass_count(1, 10).unwrap();
+
+    let outcome = session.run(Motion::Wait, &Cancel::poll()).unwrap();
+    assert!(matches!(outcome, RunOutcome::Running), "{outcome:?}");
+    assert_eq!(
+        continues.load(Ordering::Relaxed),
+        1,
+        "the wait went on past its deadline"
+    );
+}
+
+/// A continue or a step issued while a parked stop waits (an SDK `run()`
+/// after a `run(timeout=...)` that returned `None`) surfaces that stop,
+/// with its action, instead of resuming past it.
+#[test]
+fn a_resume_surfaces_a_parked_stop_instead_of_losing_it() {
+    let continue_ = Motion::Continue {
+        disposition: ContinueDisposition::Handled,
+    };
+    for motion in [continue_, Motion::Step] {
+        let mut backend = MockBackend::default().running().with_pending_stop();
+        backend.set("rip", 0x1000);
+        backend.queue_interrupt(breakpoint_event(0x1000));
+        let continues = Arc::clone(&backend.continues);
+        let mut session = session_with_mock(backend);
+        session
+            .breakpoints
+            .insert_for_test(1, VirtAddr(0x1000), true, None);
+        session
+            .breakpoints
+            .set_action(1, Some("log".into()))
+            .unwrap();
+        let log = recording(&mut session, false);
+        session.service_idle();
+        assert!(!session.backend.is_running(), "the stop was not parked");
+
+        let RunOutcome::Stopped(stop) = session.run(motion.clone(), &Cancel::poll()).unwrap()
+        else {
+            panic!("{motion:?}: no stop surfaced");
+        };
+        assert_eq!(stop.breakpoint().map(|hit| hit.id), Some(1), "{motion:?}");
+        assert_eq!(*log.lock(), ["action log"], "{motion:?}");
+        assert_eq!(continues.load(Ordering::Relaxed), 0, "{motion:?} resumed");
+    }
+}
+
+/// An action that resumes (`gc`) passes the hit, on a direct run as from
+/// the REPL: the run goes on, and with nothing else to stop it, a bounded
+/// wait hands the target back running.
+#[test]
+fn a_direct_run_resumes_past_a_hit_whose_action_says_so() {
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        one_vcpu: true,
+        schedule: VecDeque::from([Landing {
+            rip: 0x1000,
+            rsp: 0x2000,
+            ethread: 0,
+        }]),
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1010);
+    let continues = Arc::clone(&backend.continues);
+    let mut session = session_with_mock(backend);
+    session.current_thread = "p01.01".into();
+    session
+        .breakpoints
+        .insert_for_test(1, VirtAddr(0x1000), true, None);
+    session
+        .breakpoints
+        .set_action(1, Some(".echo hit; gc".into()))
+        .unwrap();
+    let log = recording(&mut session, true);
+
+    let continue_ = Motion::Continue {
+        disposition: ContinueDisposition::Handled,
+    };
+    let outcome = session
+        .run(continue_, &Cancel::within(Duration::from_millis(50)))
+        .unwrap();
+    assert!(matches!(outcome, RunOutcome::Running), "{outcome:?}");
+    assert_eq!(
+        *log.lock(),
+        [".echo hit; gc"].map(|a| format!("action {a}"))
+    );
+    assert!(session.backend.is_running());
+    assert_eq!(continues.load(Ordering::Relaxed), 2);
+}
+
+/// A `notify` policy continues past its exception on every host's wait and
+/// says so as a notice; the stop after it surfaces.
+#[test]
+fn a_notify_policy_continues_with_a_notice() {
+    const ACCESS_VIOLATION: u32 = 0xC000_0005;
+    const ILLEGAL_INSTRUCTION: u32 = 0xC000_001D;
+    let mut backend = MockBackend::default().running();
+    backend.set("rip", 0x1020);
+    backend.queue_interrupt(exception_event(ACCESS_VIOLATION, 0x1020));
+    backend.queue_interrupt(exception_event(ILLEGAL_INSTRUCTION, 0x1020));
+    let continues = Arc::clone(&backend.continues);
+    let mut session = session_with_mock(backend);
+    // `gh`: the mock acknowledges no other disposition.
+    session.exception_policies.set_with_options(
+        ACCESS_VIOLATION,
+        ExceptionPolicyMode::Notify,
+        Some("!analyze".into()),
+        Some(ExceptionPolicyFinalAction::Continue(
+            ContinueDisposition::Handled,
+        )),
+    );
+    let log = recording(&mut session, false);
+
+    let outcome = session.run(Motion::Wait, &Cancel::NEVER).unwrap();
+    let RunOutcome::Stopped(stop) = outcome else {
+        panic!("no stop surfaced");
+    };
+    assert_eq!(
+        stop.exception().map(|exception| exception.code),
+        Some(ILLEGAL_INSTRUCTION)
+    );
+    assert_eq!(continues.load(Ordering::Relaxed), 1);
+    assert_eq!(*log.lock(), ["command !analyze"]);
+    let notices: Vec<String> = session
+        .take_notices()
+        .into_iter()
+        .map(|notice| notice.text)
+        .collect();
+    assert!(
+        notices.contains(&"Exception 0xc0000005 (first chance) at 0x1020; continuing".into()),
+        "{notices:?}"
+    );
+}
+
+/// A run to an address whose host cancels it with `Halt` ends halted, as an
+/// interrupt stop, with its temporary site lifted: never as `Running` with
+/// the target secretly halted.
+#[test]
+fn a_cancelled_run_to_is_an_interrupt_stop() {
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        one_vcpu: true,
+        halts_only_on_interrupt: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1010);
+    backend.queue_interrupt(breakpoint_event(0x1050));
+    let sites = Arc::clone(&backend.site_writes);
+    let mut session = stepping_session(&[0x90u8; 0x80], backend);
+    session.current_thread = "p01.01".into();
+
+    let cancel = Cancel::within(Duration::from_millis(50)).with_behavior(CancelBehavior::Halt);
+    let run_to = Motion::RunTo {
+        address: VirtAddr(0x1040),
+        frame: None,
+        disposition: ContinueDisposition::Handled,
+    };
+    let outcome = session.run(run_to, &cancel).unwrap();
+    let RunOutcome::Stopped(stop) = outcome else {
+        panic!("a halted run reported Running");
+    };
+    assert!(matches!(stop.kind, StopKind::Interrupt), "{:?}", stop.kind);
+    assert!(!session.backend.is_running());
+    assert_eq!(sites.lock().last(), Some(&(0x1040, false)));
+    assert!(session.breakpoints.list().is_empty());
+}
+
+/// The same run handed back running (a remote client's budget) leaves its
+/// site armed, for a later wait to stop at.
+#[test]
+fn a_run_to_handed_back_running_leaves_its_site_armed() {
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        one_vcpu: true,
+        halts_only_on_interrupt: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1010);
+    let mut session = stepping_session(&[0x90u8; 0x80], backend);
+    session.current_thread = "p01.01".into();
+
+    let run_to = Motion::RunTo {
+        address: VirtAddr(0x1040),
+        frame: None,
+        disposition: ContinueDisposition::Handled,
+    };
+    let outcome = session
+        .run(run_to, &Cancel::within(Duration::from_millis(20)))
+        .unwrap();
+    assert!(matches!(outcome, RunOutcome::Running));
+    assert_eq!(session.breakpoints.list().len(), 1);
 }

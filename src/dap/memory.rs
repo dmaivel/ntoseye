@@ -7,9 +7,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Value, json};
 
-use crate::backend::MemoryOps;
 use crate::disasm::decode_preceding;
 use crate::error::Error;
+use crate::memory::MemoryOps;
 use crate::types::VirtAddr;
 
 use super::{Handled, Server, arg_bool, arg_i64, arg_str, parse_address, source_value};

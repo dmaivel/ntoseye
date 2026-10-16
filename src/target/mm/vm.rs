@@ -4,17 +4,16 @@
 use std::sync::Arc;
 
 use super::{
-    ProcessMemoryUsage, SystemMemorySummary, VmCounter, VmDetail, VmPageFileDetail, VmPoolDetail,
-    VmPteDetail, find_mi_state_fields,
+    ProcessMemoryUsage, SystemMemorySummary, VmCounter, VmDetail, VmPoolDetail, VmPteDetail,
+    VmUnit, find_mi_state_fields,
 };
-use crate::backend::MemoryOps;
 use crate::debugger_data::{
     DebuggerDataBlock, MetadataSource, MetadataValue, read_counter_from_getter,
 };
 use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
 use crate::layout::{ParsedType, TypeInfo};
-use crate::memory::PAGE_SIZE;
+use crate::memory::{MemoryOps, PAGE_SIZE};
 use crate::target::pool::read_kernel_global_u64;
 use crate::target::{DiagnosticMetric, DiagnosticValue, Target};
 use crate::types::VirtAddr;
@@ -43,7 +42,7 @@ fn global_metric(target: &Target, symbol: &str) -> DiagnosticMetric<u64> {
     }
 }
 
-fn named_counter(target: &Target, name: &str, unit: &'static str) -> VmCounter {
+fn named_counter(target: &Target, name: &str, unit: Option<VmUnit>) -> VmCounter {
     VmCounter {
         name: name.to_string(),
         value: global_metric(target, name),
@@ -51,7 +50,7 @@ fn named_counter(target: &Target, name: &str, unit: &'static str) -> VmCounter {
     }
 }
 
-fn mi_state_pool_field_unit(name: &str) -> &'static str {
+fn mi_state_pool_field_unit(name: &str) -> VmUnit {
     let leaf = name
         .to_ascii_lowercase()
         .rsplit('.')
@@ -62,9 +61,9 @@ fn mi_state_pool_field_unit(name: &str) -> &'static str {
         || (leaf.contains("allocated")
             && (leaf.contains("nonpagedpool") || leaf.contains("pagedpool")))
     {
-        "pages"
+        VmUnit::Pages
     } else {
-        "bytes"
+        VmUnit::Bytes
     }
 }
 
@@ -150,7 +149,7 @@ impl Target {
             .filter(|(name, _)| curated_mi_state_pool_field(name))
             .take(MAX_MI_STATE_FIELDS)
             .map(|(name, value)| VmCounter {
-                unit: mi_state_pool_field_unit(&name),
+                unit: Some(mi_state_pool_field_unit(&name)),
                 name,
                 value: available_metric(value),
             })
@@ -170,30 +169,28 @@ impl Target {
             ]
             .into_iter()
             .map(|(symbol, name)| {
-                let mut counter = named_counter(self, symbol, "");
+                let mut counter = named_counter(self, symbol, None);
                 counter.name = name.to_string();
                 counter
             })
             .collect(),
         };
-        let page_files = VmPageFileDetail {
-            counters: [
-                ("MmNumberOfPagingFiles", "number of paging files", ""),
-                (
-                    "MmTotalPagesForPagingFile",
-                    "pages for paging file",
-                    "pages",
-                ),
-                ("MmFreePages", "free paging pages", "pages"),
-            ]
-            .into_iter()
-            .map(|(symbol, name, unit)| {
-                let mut counter = named_counter(self, symbol, unit);
-                counter.name = name.to_string();
-                counter
-            })
-            .collect(),
-        };
+        let page_files = [
+            ("MmNumberOfPagingFiles", "number of paging files", None),
+            (
+                "MmTotalPagesForPagingFile",
+                "pages for paging file",
+                Some(VmUnit::Pages),
+            ),
+            ("MmFreePages", "free paging pages", Some(VmUnit::Pages)),
+        ]
+        .into_iter()
+        .map(|(symbol, name, unit)| {
+            let mut counter = named_counter(self, symbol, unit);
+            counter.name = name.to_string();
+            counter
+        })
+        .collect();
         Ok(VmDetail {
             system,
             pool,
@@ -225,7 +222,7 @@ impl Target {
         vm_layout: &TypeInfo,
         process: ProcessInfo,
     ) -> ProcessMemoryUsage {
-        let eprocess = process.eprocess_va;
+        let eprocess = process.eprocess;
         ProcessMemoryUsage::from_counters(process, |field| {
             self.process_memory_counter(eprocess_layout, vm_layout, eprocess, field)
         })

@@ -6,7 +6,9 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use crate::backend::MemoryOps;
+use ntoseye_macros::record;
+
+use crate::memory::MemoryOps;
 use crate::target::Target;
 use crate::target::virtio::{VRING_DESC_F_INDIRECT, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
 
@@ -32,18 +34,54 @@ pub enum RequestKind {
     Vsock,
 }
 
+/// What a queue's buffers hold, as the SDK names it: `blk`, `scsi`,
+/// `scsi_control`, `scsi_event`, `net`, `net_control`, `gpu`, or `vsock`.
+/// The REPL's `!vring /r ... /t` spells them with hyphens
+/// ([`request_kind_named`]).
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VirtioRequestKind {
+    Blk,
+    Scsi,
+    #[record(label = "scsi-control")]
+    ScsiControl,
+    #[record(label = "scsi-event")]
+    ScsiEvent,
+    Net,
+    #[record(label = "net-control")]
+    NetControl,
+    Gpu,
+    Vsock,
+}
+
 impl RequestKind {
-    /// The name `!vring /r ... /t` takes for it ([`request_kind_named`]).
-    pub fn name(self) -> &'static str {
+    /// Its name, without the net header's size.
+    pub fn sdk_kind(self) -> VirtioRequestKind {
         match self {
-            RequestKind::Block => "blk",
-            RequestKind::ScsiRequest => "scsi",
-            RequestKind::ScsiControl => "scsi-control",
-            RequestKind::ScsiEvent => "scsi-event",
-            RequestKind::NetPacket { .. } => "net",
-            RequestKind::NetControl => "net-control",
-            RequestKind::Gpu => "gpu",
-            RequestKind::Vsock => "vsock",
+            RequestKind::Block => VirtioRequestKind::Blk,
+            RequestKind::ScsiRequest => VirtioRequestKind::Scsi,
+            RequestKind::ScsiControl => VirtioRequestKind::ScsiControl,
+            RequestKind::ScsiEvent => VirtioRequestKind::ScsiEvent,
+            RequestKind::NetPacket { .. } => VirtioRequestKind::Net,
+            RequestKind::NetControl => VirtioRequestKind::NetControl,
+            RequestKind::Gpu => VirtioRequestKind::Gpu,
+            RequestKind::Vsock => VirtioRequestKind::Vsock,
+        }
+    }
+}
+
+impl From<VirtioRequestKind> for RequestKind {
+    /// A modern device's kind (`net` reads a 12-byte header).
+    fn from(kind: VirtioRequestKind) -> Self {
+        match kind {
+            VirtioRequestKind::Blk => RequestKind::Block,
+            VirtioRequestKind::Scsi => RequestKind::ScsiRequest,
+            VirtioRequestKind::ScsiControl => RequestKind::ScsiControl,
+            VirtioRequestKind::ScsiEvent => RequestKind::ScsiEvent,
+            VirtioRequestKind::Net => RequestKind::NetPacket { modern: true },
+            VirtioRequestKind::NetControl => RequestKind::NetControl,
+            VirtioRequestKind::Gpu => RequestKind::Gpu,
+            VirtioRequestKind::Vsock => RequestKind::Vsock,
         }
     }
 }

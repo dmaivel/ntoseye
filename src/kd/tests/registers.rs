@@ -44,7 +44,7 @@ fn arm64_hardware_slots_remain_two_data_and_eight_execute_slots() {
     let (_kernel, host) = UnixStream::pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.arch = Arch::Arm64;
-    backend.register_map = context_arm64::build_register_map();
+    backend.register_map = arm64::build_register_map();
     backend.exit_prepared = true;
 
     assert_eq!(backend.hardware_breakpoint_slots(), 10);
@@ -99,13 +99,13 @@ fn oversized_hardware_slot_ids_are_rejected_without_packets() {
 
 #[test]
 fn context_payload_rejects_short_buffers() {
-    let short = vec![0u8; context::CONTEXT_SIZE - 1];
+    let short = vec![0u8; amd64::CONTEXT_SIZE - 1];
     assert!(context_payload(&short).is_err());
 }
 
 #[test]
 fn append_control_registers_extends_context() {
-    let mut ctx = vec![0u8; context::CONTEXT_SIZE];
+    let mut ctx = vec![0u8; amd64::CONTEXT_SIZE];
     let mut special = vec![0u8; KSPECIAL_REGISTERS_MIN_SIZE];
     special[KSPECIAL_REGISTERS_CR0_OFFSET..KSPECIAL_REGISTERS_CR0_OFFSET + 8]
         .copy_from_slice(&0x8005_0033u64.to_le_bytes());
@@ -137,9 +137,9 @@ fn append_control_registers_extends_context() {
         .copy_from_slice(&0x402u64.to_le_bytes());
 
     append_control_registers_from_special(&mut ctx, &special).unwrap();
-    let map = context::build_register_map();
+    let map = amd64::build_register_map();
 
-    assert_eq!(ctx.len(), context::REGISTER_BUFFER_SIZE);
+    assert_eq!(ctx.len(), amd64::REGISTER_BUFFER_SIZE);
     assert_eq!(map.read_u64("cr0", &ctx).unwrap(), 0x8005_0033);
     assert_eq!(map.read_u64("cr2", &ctx).unwrap(), 0x1111_2222);
     assert_eq!(map.read_u64("cr3", &ctx).unwrap(), 0x1234_5000);
@@ -158,9 +158,9 @@ fn append_control_registers_extends_context() {
 
 #[test]
 fn context_debug_registers_update_special_registers() {
-    let mut ctx = vec![0u8; context::REGISTER_BUFFER_SIZE];
+    let mut ctx = vec![0u8; amd64::REGISTER_BUFFER_SIZE];
     let mut special = vec![0xa5; KSPECIAL_REGISTERS_MIN_SIZE];
-    let map = context::build_register_map();
+    let map = amd64::build_register_map();
     map.write_u64("dr0", &mut ctx, 0xffff_f804_1234_5678)
         .unwrap();
     map.write_u64("dr6", &mut ctx, 3).unwrap();
@@ -186,9 +186,9 @@ fn context_debug_registers_update_special_registers() {
 
 #[test]
 fn arm64_context_debug_registers_update_special_registers() {
-    let mut ctx = vec![0u8; context_arm64::CONTEXT_SIZE];
+    let mut ctx = vec![0u8; arm64::CONTEXT_SIZE];
     let mut special = vec![0xa5; ARM64_KSPECIAL_REGISTERS_MIN_SIZE];
-    let map = context_arm64::build_register_map();
+    let map = arm64::build_register_map();
     map.write_u64("bvr0", &mut ctx, 0x4000).unwrap();
     map.write_u64("bcr0", &mut ctx, 0xe9e1).unwrap();
     map.write_u64("wvr1", &mut ctx, 0x5000).unwrap();
@@ -259,14 +259,14 @@ fn arm64_registers_survive_refused_control_space() {
     let (kernel, host) = UnixStream::pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.arch = Arch::Arm64;
-    backend.register_map = context_arm64::build_register_map();
+    backend.register_map = arm64::build_register_map();
     backend.link.halt();
     backend.exit_prepared = true;
 
-    let mut ctx = vec![0u8; context_arm64::CONTEXT_SIZE];
-    bytes::write_u64(&mut ctx, context_arm64::OFFSET_PC, 0xffff_f800_1234_5678);
-    bytes::write_u64(&mut ctx, context_arm64::OFFSET_BVR0, 0xffff_f800_dead_0000);
-    bytes::write_u32(&mut ctx, context_arm64::OFFSET_BCR0, 0x1e5);
+    let mut ctx = vec![0u8; arm64::CONTEXT_SIZE];
+    bytes::write_u64(&mut ctx, arm64::OFFSET_PC, 0xffff_f800_1234_5678);
+    bytes::write_u64(&mut ctx, arm64::OFFSET_BVR0, 0xffff_f800_dead_0000);
+    bytes::write_u32(&mut ctx, arm64::OFFSET_BCR0, 0x1e5);
     let expected = ctx.clone();
 
     let worker = serve_manipulate(
@@ -284,7 +284,7 @@ fn arm64_registers_survive_refused_control_space() {
 
     let regs = backend.read_registers().unwrap();
 
-    assert_eq!(&regs[..context_arm64::CONTEXT_SIZE], &expected[..]);
+    assert_eq!(&regs[..arm64::CONTEXT_SIZE], &expected[..]);
     assert_eq!(
         backend.register_map.read_u64("bvr0", &regs).unwrap(),
         0xffff_f800_dead_0000
@@ -326,10 +326,9 @@ fn an_arm64_context_gets_its_real_x18() {
         }
     }
     let context = |cpsr: u32, x18: u64| {
-        let mut bytes = vec![0u8; context_arm64::CONTEXT_SIZE];
-        bytes[context_arm64::OFFSET_CPSR..context_arm64::OFFSET_CPSR + 4]
-            .copy_from_slice(&cpsr.to_le_bytes());
-        let at = context_arm64::OFFSET_X0 + 18 * 8;
+        let mut bytes = vec![0u8; arm64::CONTEXT_SIZE];
+        bytes[arm64::OFFSET_CPSR..arm64::OFFSET_CPSR + 4].copy_from_slice(&cpsr.to_le_bytes());
+        let at = arm64::OFFSET_X0 + 18 * 8;
         bytes[at..at + 8].copy_from_slice(&x18.to_le_bytes());
         bytes
     };

@@ -2,7 +2,9 @@
 //! lookup by the slot a stop reports, and their data-watch semantics.
 
 use super::install::BreakpointBackend;
-use super::{Breakpoint, BreakpointConfig, BreakpointManager, BreakpointScope, HardwareBreakpoint};
+use super::{
+    BreakpointConfig, BreakpointInfo, BreakpointManager, BreakpointScope, HardwareBreakpoint,
+};
 use crate::dbg_backend::{
     DebugBackend, HwBreakpointAccess, WatchpointAccess, validate_hw_breakpoint,
 };
@@ -10,7 +12,7 @@ use crate::error::{Error, Result};
 use crate::target::Target;
 use crate::types::VirtAddr;
 
-impl Breakpoint {
+impl BreakpointInfo {
     /// Data-watch semantics for this stop point. Execute-only debug-register
     /// breakpoints remain code breakpoints and deliberately return `None`.
     pub fn watchpoint(&self) -> Option<(WatchpointAccess, u8)> {
@@ -22,47 +24,9 @@ impl Breakpoint {
         };
         Some((access, hardware.len))
     }
-
-    /// The watched access name (`"write"`/`"read_write"`), or `None` for a
-    /// code breakpoint. Presentation surfaces share this instead of
-    /// destructuring [`Self::watchpoint`] themselves.
-    pub fn watch_access_name(&self) -> Option<&'static str> {
-        self.watchpoint().map(|(access, _)| access.name())
-    }
-
-    /// The watched byte width, or `None` for a code breakpoint.
-    pub fn watch_length(&self) -> Option<u8> {
-        self.watchpoint().map(|(_, length)| length)
-    }
 }
 
 impl BreakpointManager {
-    /// Set a hardware (debug-register) breakpoint. String conditions use the
-    /// core decimal expression contract.
-    pub fn add_hardware(
-        &mut self,
-        client: &mut dyn DebugBackend,
-        debugger: &Target,
-        address: VirtAddr,
-        access: HwBreakpointAccess,
-        len: u8,
-        symbol: Option<String>,
-        condition: Option<String>,
-    ) -> Result<u32> {
-        self.add_hardware_configured(
-            client,
-            debugger,
-            address,
-            access,
-            len,
-            symbol,
-            BreakpointConfig {
-                condition,
-                ..BreakpointConfig::default()
-            },
-        )
-    }
-
     /// Whether a hardware breakpoint at `address` with `config` is a VTL1
     /// one, held to VTL1's rules: one in the secure kernel, or set while
     /// the scope is VTL1's. A hypercall or VM-exit breakpoint is on the
@@ -120,6 +84,7 @@ impl BreakpointManager {
         }
         let condition_expr = Self::configured_condition(&config)?;
         validate_hw_breakpoint(access, len, address.0)?;
+        self.retire_one_shot_hits_at(client, debugger, address, true)?;
         self.ensure_site_available(address, true, None)?;
         let slot = self.free_hardware_slot(client, access)?;
         let automatic_scope = config.scope.is_none();
@@ -134,7 +99,7 @@ impl BreakpointManager {
         let pass_count = config.pass_count;
         self.breakpoints.insert(
             id,
-            Breakpoint {
+            BreakpointInfo {
                 id,
                 serial,
                 address,
@@ -215,7 +180,7 @@ impl BreakpointManager {
     }
 
     /// Find the enabled breakpoint in backend slot `slot`.
-    pub fn hardware_breakpoint_for_slot(&self, slot: usize) -> Option<Breakpoint> {
+    pub fn hardware_breakpoint_for_slot(&self, slot: usize) -> Option<BreakpointInfo> {
         self.breakpoints
             .values()
             .find(|bp| bp.enabled && bp.hardware.is_some_and(|hw| hw.slot == slot))

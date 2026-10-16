@@ -242,13 +242,13 @@ The command needs `Wdf01000.pdb`. `ntoseye` loads it when the dump opens, in a m
 - `wdf_log(driver)` for {command}`!wdfkd.wdflogdump`
 - `wdf_crash_log()` and `wdf_crash_drivers()` for {command}`!wdfkd.wdfcrashdump`
 - `rcdr_drivers()` and `rcdr_logs(driver)` for {command}`!rcdrkd.rcdrloglist`
-- `rcdr_log(driver, log=None)` for {command}`!rcdrkd.rcdrlogdump`, whose records are the same `WdfLogRecord`s as `wdf_log`'s, each with the log and partition it came from
+- `rcdr_log(driver, log=None)` for {command}`!rcdrkd.rcdrlogdump`, whose entries hold the same `WdfLogEntry`s as `wdf_log`'s, each with the log and partition it came from
 
 ```python
 for client in dbg.inspect.wdf_loader().clients:
     print(client.name, client.version)
-for record in dbg.inspect.wdf_log("kmdfsample").records:
-    print(record.sequence, record.function, record.text or record.error)
+for entry in dbg.inspect.wdf_log("kmdfsample").entries:
+    print(entry.record.sequence, entry.function, entry.text.value or entry.text.error)
 ```
 
 To follow each request that a device's queues hold to its IRP and to the target that it was sent to:

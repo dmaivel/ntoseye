@@ -44,14 +44,16 @@ def main() -> None:
 
                 rip = stop.rip or 0
                 symbol = stop.symbol or nearest(dbg, rip)
-                if bp not in stop.breakpoints:
-                    print(f"stop: {type(stop).__name__}  rip={rip:#x} ({symbol})")
-                    if isinstance(stop, (ntoseye.Stop.Bugcheck, ntoseye.Stop.Reboot)):
-                        break
+                if isinstance(stop, (ntoseye.Stop.Bugcheck, ntoseye.Stop.Reload)):
+                    print(f"stop: {stop.kind}  rip={rip:#x} ({symbol})")
+                    break
+                if not stop.hit(bp):
+                    print(f"other stop: {stop.kind}  rip={rip:#x} ({symbol})")
                     continue
 
                 hits += 1
-                registers = stop.cpu.registers
+                assert stop.cpu is not None  # a kernel stop is on a processor
+                registers = dbg.cpus[stop.cpu].registers
                 rcx = registers.rcx if "rcx" in registers else 0
                 print(f"hit #{hits}: rip={rip:#x} ({symbol})  bp={bp.id}  rcx={rcx:#x}")
                 for row in dbg.memory.disassemble(rip, 2):

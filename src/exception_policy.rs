@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use ntoseye_macros::record;
+
 use crate::dbg_backend::{ContinueDisposition, ModuleEvent, StopEvent};
 use crate::symbols::glob_matches;
 
@@ -7,7 +9,10 @@ const STATUS_BREAKPOINT: u32 = 0x8000_0003;
 const STATUS_SINGLE_STEP: u32 = 0x8000_0004;
 pub const EXCEPTION_COMMAND_RECURSION_LIMIT: usize = 4;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// An exception or module-event filter's mode: `break`, `second_chance`,
+/// `notify`, or `ignore`.
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub enum ExceptionPolicyMode {
     Break,
     SecondChance,
@@ -16,16 +21,6 @@ pub enum ExceptionPolicyMode {
 }
 
 impl ExceptionPolicyMode {
-    /// The mode's name in structured output and the SDK.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Break => "break",
-            Self::SecondChance => "second_chance",
-            Self::Notify => "notify",
-            Self::Ignore => "ignore",
-        }
-    }
-
     pub fn command(self) -> &'static str {
         match self {
             Self::Break => "sxe",
@@ -88,23 +83,92 @@ pub enum ExceptionPolicyAction {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One exception stop policy (`sx`).
+#[record(impl)]
+#[derive(PartialEq, Eq)]
 pub struct ExceptionPolicy {
+    /// The exception code.
+    #[record(hex)]
+    pub code: u32,
+    /// `break`, `second_chance`, `notify`, or `ignore`.
     pub mode: ExceptionPolicyMode,
+    /// The commands that run when the exception occurs.
     pub command: Option<String>,
+    #[record(skip)]
     pub final_action: Option<ExceptionPolicyFinalAction>,
 }
 
-/// A module event filter (`sx* ld[:<module>]` or `sx* ud[:<module>]`).
-/// `module` is a case-insensitive `*`/`?` glob over the image name, with or
-/// without its extension; `None` (bare `ld`/`ud`) matches every image. Only
-/// `Break` stops and only `Notify` reports; `command` runs at a `Break` stop.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[record]
+impl ExceptionPolicy {
+    /// The WinDbg alias of the code (`av`, `bp`, ...), if it has one.
+    #[record(getter)]
+    pub fn alias(&self) -> Option<&'static str> {
+        exception_alias(self.code)
+    }
+
+    /// An explicit final action: `break`, or continue as `handled` or
+    /// `not_handled`. None for the default action of the mode.
+    #[record(getter)]
+    pub fn disposition(&self) -> Option<FinalDisposition> {
+        self.final_action.map(|action| match action {
+            ExceptionPolicyFinalAction::Continue(ContinueDisposition::Handled) => {
+                FinalDisposition::Handled
+            }
+            ExceptionPolicyFinalAction::Continue(ContinueDisposition::NotHandled) => {
+                FinalDisposition::NotHandled
+            }
+            ExceptionPolicyFinalAction::Break => FinalDisposition::Break,
+        })
+    }
+}
+
+/// An exception policy's explicit final action: `break`, `handled` or
+/// `not_handled`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalDisposition {
+    Break,
+    Handled,
+    NotHandled,
+}
+
+/// One module load or unload filter (`sx* ld[:<module>]` or
+/// `sx* ud[:<module>]`). Only `break` stops and only `notify` reports;
+/// `command` runs at a `break` stop.
+#[record(impl)]
+#[derive(PartialEq, Eq)]
 pub struct ModuleEventPolicy {
+    #[record(skip)]
     pub event: ModuleEvent,
+    /// The image-name glob that the filter matches (case-insensitive `*`
+    /// and `?`), with or without extension. None for all modules (bare
+    /// `ld` or `ud`).
     pub module: Option<String>,
+    /// `break` stops at the event, and `notify` reports it.
+    /// `second_chance` and `ignore` let the load or unload continue with
+    /// no output.
     pub mode: ExceptionPolicyMode,
+    /// The commands that run at a `break` stop.
     pub command: Option<String>,
+}
+
+#[record]
+impl ModuleEventPolicy {
+    /// `ld` for a load filter, `ud` for an unload filter.
+    #[record(getter, rename = "event")]
+    pub fn event_kind(&self) -> &'static str {
+        self.event.as_str()
+    }
+}
+
+/// The configured exception policies and module load and unload filters
+/// (`sx`).
+#[record]
+pub struct EventPolicies {
+    /// In code order.
+    pub exceptions: Vec<ExceptionPolicy>,
+    /// In the order they were set.
+    pub module_events: Vec<ModuleEventPolicy>,
 }
 
 impl ModuleEventPolicy {
@@ -121,7 +185,7 @@ impl ModuleEventPolicy {
     /// The filter as `sx` spells it: `ld`, `ld:<module>`, `ud`, or
     /// `ud:<module>`.
     pub fn event_name(&self) -> String {
-        let event = self.event.filter_name();
+        let event = self.event.as_str();
         match &self.module {
             Some(module) => format!("{event}:{module}"),
             None => event.to_string(),
@@ -160,6 +224,7 @@ impl ExceptionPolicyTable {
         self.policies.insert(
             code,
             ExceptionPolicy {
+                code,
                 mode,
                 command,
                 final_action,
@@ -172,10 +237,11 @@ impl ExceptionPolicyTable {
         self.module_events.clear();
     }
 
-    pub fn entries(&self) -> impl Iterator<Item = (u32, &ExceptionPolicy)> + '_ {
-        self.policies.iter().map(|(&code, policy)| (code, policy))
+    pub fn entries(&self) -> impl Iterator<Item = &ExceptionPolicy> + '_ {
+        self.policies.values()
     }
 
+    #[cfg(test)]
     pub fn mode_for(&self, code: u32) -> Option<ExceptionPolicyMode> {
         self.policies.get(&code).map(|policy| policy.mode)
     }
@@ -298,11 +364,11 @@ pub fn parse_event_filter(value: &str) -> Result<EventFilter, String> {
     };
     let module_event = [ModuleEvent::Load, ModuleEvent::Unload]
         .into_iter()
-        .find(|kind| event.eq_ignore_ascii_case(kind.filter_name()));
+        .find(|kind| event.eq_ignore_ascii_case(kind.as_str()));
     if let Some(module_event) = module_event {
         return match argument {
             Some("") => {
-                let name = module_event.filter_name();
+                let name = module_event.as_str();
                 Err(format!(
                     "'{value}' names no module (use {name} or {name}:<module>)"
                 ))
@@ -314,6 +380,26 @@ pub fn parse_event_filter(value: &str) -> Result<EventFilter, String> {
         };
     }
     parse_exception_code(trimmed).map(EventFilter::Exception)
+}
+
+/// What an `sx*` command names, as given: an exception code, or text (an
+/// alias, a hexadecimal code, `ld[:<module>]`, `ud[:<module>]`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EventName {
+    Code(u64),
+    Text(String),
+}
+
+impl EventName {
+    /// The filter it names.
+    pub fn resolve(&self) -> Result<EventFilter, String> {
+        match self {
+            EventName::Code(code) => u32::try_from(*code)
+                .map(EventFilter::Exception)
+                .map_err(|_| format!("exception code {code:#x} does not fit in 32 bits")),
+            EventName::Text(text) => parse_event_filter(text),
+        }
+    }
 }
 
 fn parse_exception_code(value: &str) -> Result<u32, String> {

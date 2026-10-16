@@ -1,33 +1,34 @@
 //! Reading the halted guest: breakpoint-masked memory, disassembly,
-//! backtraces, exception/context records, and debugger-worker page-in.
+//! backtraces, exception/context records, version metadata, and
+//! debugger-worker page-in.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use crate::backend::MemoryOps;
 use crate::bugchecks::{
     BugcheckAnalysis, analyze_bugcheck, bugcheck_from_dump_info, current_bugcheck,
 };
 use crate::bytes;
-use crate::dbg_backend::processor_index_from_backend_thread_id;
+use crate::cpu_context::{amd64, arm64};
+use crate::dbg_backend::{ContinueDisposition, processor_index_from_backend_thread_id};
 use crate::disasm::{
-    DisasmRow, decode_code, decode_preceding, function_extent, instruction_containing,
+    DisasmRow, FunctionDisassembly, decode_code, decode_preceding, function_extent,
+    instruction_containing,
 };
 use crate::error::{Error, Result};
 use crate::guest::hypervisor::{HvPartition, HvVirtualProcessor, processor_guest_vp};
-use crate::kd::{context, context_arm64};
-use crate::memory::{PAGE_SIZE, read_page_chunks};
+use crate::memory::{self, MemoryOps, PAGE_SIZE, ScanFault, TerminatedRead, read_page_chunks};
 use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::{
-    ContinueOutcome, ExceptionRecord, InstructionBoundary, PageInReport, Session, TerminatedRead,
+    Cancel, ExceptionRecord, InstructionBoundary, Motion, PageInReport, RunOutcome, Session,
     VpRegisters,
 };
-use crate::target::usermode::ImageCheckDetail;
+use crate::target::meta::TargetVersion;
+use crate::target::usermode::ImageCheck;
 use crate::target::{CompareResult, SearchResult, SelectedFrame, ThreadInfo, exit_registers};
 use crate::types::{Arch, CodeMachine, Dtb, VirtAddr};
 use crate::unwind::{
-    FunctionEntryDetail, RecoveredStackTrace, StackTrace, ThreadStackSource, ThreadStackTrace,
+    FunctionEntry, RecoveredStackTrace, StackTrace, ThreadStackSource, ThreadStackTrace,
     build_parked_thread_recovered_stack, build_parked_thread_stack,
     build_stacktrace_with_register_values, build_thread_stacktrace, format_symbol, function_entry,
     function_range, guest_vp_running, halted_in_windows_hypervisor, resolve_thread_trace_context,
@@ -75,6 +76,7 @@ impl Session {
         let count = (read_u32(24) as usize).min(15);
         let parameters = (0..count).map(|index| read_u64(32 + index * 8)).collect();
         Ok(ExceptionRecord {
+            record_address: Some(address.0),
             code: read_u32(0),
             flags: read_u32(4),
             nested: read_u64(8),
@@ -87,11 +89,8 @@ impl Session {
     /// changing the selected backend context (`.cxr`).
     pub fn read_context_record(&self, address: VirtAddr) -> Result<HashMap<String, u64>> {
         let (size, map) = match self.target.arch() {
-            Arch::Amd64 => (context::CONTEXT_SIZE, context::build_register_map()),
-            Arch::Arm64 => (
-                context_arm64::CONTEXT_SIZE,
-                context_arm64::build_register_map(),
-            ),
+            Arch::Amd64 => (amd64::CONTEXT_SIZE, amd64::build_register_map()),
+            Arch::Arm64 => (arm64::CONTEXT_SIZE, arm64::build_register_map()),
         };
         let mut bytes = vec![0u8; size];
         self.read_record_bytes(address, &mut bytes)?;
@@ -107,6 +106,7 @@ impl Session {
                 .exception_code
                 .or_else(|| stop.bugcheck.as_ref().map(|info| info.code))?;
             return Some(ExceptionRecord {
+                record_address: None,
                 code,
                 flags: 0,
                 nested: 0,
@@ -116,6 +116,7 @@ impl Session {
         }
         if let Some(exception) = self.target.user_exception() {
             return Some(ExceptionRecord {
+                record_address: None,
                 code: exception.code,
                 flags: exception.flags,
                 nested: exception.record,
@@ -125,6 +126,7 @@ impl Session {
         }
         let exception = self.target.phys.dmp_info()?.exception.as_ref()?;
         Some(ExceptionRecord {
+            record_address: None,
             code: exception.code,
             flags: exception.flags,
             nested: 0,
@@ -202,7 +204,7 @@ impl Session {
     /// Compare `module`'s executable sections against its cached image
     /// (`!chkimg`), with this session's own breakpoints (and the bugcheck
     /// trap) masked back to the code they replaced.
-    pub fn check_image(&self, module: &str, include_diffs: bool) -> Result<ImageCheckDetail> {
+    pub fn check_image(&self, module: &str, include_diffs: bool) -> Result<ImageCheck> {
         let dtb = self.target.process_dtb();
         self.target
             .check_image(module, include_diffs, &|address, buf| {
@@ -212,7 +214,8 @@ impl Session {
 
     /// Read up to `max_units` NUL-terminated 1- or 2-byte units. The returned
     /// bytes exclude the terminator; a later unreadable page is reported with
-    /// the readable prefix, while a failure at the start remains an error.
+    /// the readable prefix, while a failure at the start, a running target
+    /// and a string past the top of the address space remain errors.
     pub fn read_terminated(
         &self,
         addr: VirtAddr,
@@ -227,45 +230,18 @@ impl Session {
         let max_bytes = max_units
             .checked_mul(unit)
             .ok_or_else(|| Error::InvalidArgument("string length overflows".to_string()))?;
-        let mut bytes = Vec::with_capacity(max_bytes.min(PAGE_SIZE));
-        let mut unreadable = false;
-        while bytes.len() < max_bytes {
-            let offset = u64::try_from(bytes.len())
-                .map_err(|_| Error::InvalidArgument("string address overflows".to_string()))?;
-            let current = addr
-                .0
-                .checked_add(offset)
-                .ok_or_else(|| Error::InvalidArgument("string address overflows".to_string()))?;
-            let page_remaining = PAGE_SIZE - VirtAddr(current).page_offset() as usize;
-            let chunk_len = page_remaining.min(max_bytes - bytes.len());
-            let mut page = [0u8; PAGE_SIZE];
-            if let Err(error) = self.read_masked(VirtAddr(current), &mut page[..chunk_len]) {
-                if matches!(&error, Error::TargetRunning(_)) {
-                    return Err(error);
-                }
-                if bytes.is_empty() {
-                    return Err(error);
-                }
-                unreadable = true;
-                break;
+        memory::read_terminated(addr, max_bytes, unit, |at, buf| {
+            // A wrapped address is a string past the top of the address space.
+            if at < addr {
+                return Err(ScanFault::Fatal(Error::InvalidArgument(
+                    "string address overflows".to_string(),
+                )));
             }
-
-            let first_new_unit = bytes.len() / unit;
-            bytes.extend_from_slice(&page[..chunk_len]);
-            let complete_units = bytes.len() / unit;
-            if let Some(index) = (first_new_unit..complete_units).find(|&index| {
-                let start = index * unit;
-                bytes[start..start + unit].iter().all(|byte| *byte == 0)
-            }) {
-                bytes.truncate(index * unit);
-                return Ok(TerminatedRead {
-                    bytes,
-                    unreadable: false,
-                });
-            }
-        }
-        bytes.truncate(bytes.len() - bytes.len() % unit);
-        Ok(TerminatedRead { bytes, unreadable })
+            self.read_masked(at, buf).map_err(|error| match error {
+                Error::TargetRunning(_) => ScanFault::Fatal(error),
+                error => ScanFault::Unreadable(error),
+            })
+        })
     }
 
     /// Read as much of `buf` as the guest will give with [`Self::read_masked`],
@@ -370,11 +346,56 @@ impl Session {
         }
     }
 
+    /// Check that an instruction starts at `address` in the address space
+    /// `dtb` before a software breakpoint goes there (see
+    /// [`Self::instruction_boundary`]). `Err` refuses an address inside an
+    /// instruction, where the breakpoint would corrupt it. Where nothing
+    /// confirms an instruction start, the breakpoint is set, as other
+    /// debuggers set any address they are given, and the warning returned
+    /// says so. Shared by `bp`, `bu` and `g <address>`.
+    pub fn check_instruction_start(&self, dtb: Dtb, address: VirtAddr) -> Result<Option<String>> {
+        let symbols = &self.target.symbols;
+        let name = |address: VirtAddr| {
+            symbols
+                .format_closest_symbol_for_address(dtb, address)
+                .unwrap_or_else(|| format!("{:#x}", address.0))
+        };
+        let unconfirmed = match self.instruction_boundary(dtb, address) {
+            InstructionBoundary::Start => return Ok(None),
+            InstructionBoundary::Inside { instruction, from } => {
+                let decoding = if from == instruction {
+                    String::new()
+                } else {
+                    format!(", decoding from {}", name(from))
+                };
+                return Err(Error::Breakpoint(format!(
+                    "{} is inside the instruction at {}{decoding}; a breakpoint there would \
+                     corrupt that instruction",
+                    name(address),
+                    name(instruction)
+                )));
+            }
+            InstructionBoundary::NoAnchor => {
+                format!(
+                    "nothing near {} says where instructions start",
+                    name(address)
+                )
+            }
+            InstructionBoundary::Unreadable { from } => format!(
+                "the code from {} to {} cannot be read",
+                name(from),
+                name(address)
+            ),
+        };
+        Ok(Some(format!(
+            "{unconfirmed}, so ntoseye could not confirm that an instruction starts there"
+        )))
+    }
+
     /// Disassemble the function containing `addr`: the one its runtime
     /// function entry describes, or else a leaf, which has none (see
-    /// [`Self::leaf_function_range`]). Returns its start symbol, byte
-    /// length, and decoded rows.
-    pub fn disassemble_function(&self, addr: VirtAddr) -> Result<(String, usize, Vec<DisasmRow>)> {
+    /// [`Self::leaf_function_range`]).
+    pub fn disassemble_function(&self, addr: VirtAddr) -> Result<FunctionDisassembly> {
         let dtb = self.target.current_dtb();
         let trace = resolve_thread_trace_context(&self.target, dtb);
         let (start, end) = match function_range(&self.target, &trace, addr.0) {
@@ -399,7 +420,11 @@ impl Session {
         let resolve = |target| format_symbol(&self.target, &trace, target);
         let machine = self.target.code_machine(VirtAddr(start));
         let rows = decode_code(&bytes, start, None, machine, resolve);
-        Ok((format_symbol(&self.target, &trace, start), len, rows))
+        Ok(FunctionDisassembly {
+            symbol: format_symbol(&self.target, &trace, start),
+            length: len,
+            rows,
+        })
     }
 
     /// The function containing `addr` that no runtime function entry
@@ -447,9 +472,25 @@ impl Session {
             .or_else(|| bugcheck_from_dump_info(&self.target))
     }
 
+    /// Add backend identity and a backend vCPU count fallback to the target
+    /// metadata. The target-only method remains useful for passive memory and
+    /// dump consumers that have no execution backend.
+    pub fn target_version(&mut self) -> Result<TargetVersion> {
+        let mut detail = self.target.target_version()?;
+        if detail.processors.is_none() {
+            detail.processors = self
+                .backend
+                .thread_list()
+                .ok()
+                .map(|threads| threads.len() as u16);
+        }
+        detail.backend = Some(self.backend.name().to_string());
+        Ok(detail)
+    }
+
     /// The function-table entry and unwind data for the function containing
     /// `addr` in the current address space (`.fnent`).
-    pub fn function_entry(&self, addr: VirtAddr) -> Result<FunctionEntryDetail> {
+    pub fn function_entry(&self, addr: VirtAddr) -> Result<FunctionEntry> {
         let trace = resolve_thread_trace_context(&self.target, self.target.current_dtb());
         function_entry(&self.target, &trace, addr.0)
     }
@@ -820,16 +861,17 @@ impl Session {
         // The worker signals completion at the same address KD break-ins land
         // on, which the transport would otherwise dismiss as its own noise.
         self.backend.surface_next_break_at(Some(worker_break.0));
-        self.resume()?;
-        let cancel = AtomicBool::new(false);
-        let outcome = self.wait_for_stop_bounded(Some(PAGE_IN_TIMEOUT), &cancel);
+        let resume = Motion::Continue {
+            disposition: ContinueDisposition::Handled,
+        };
+        let outcome = self.run(resume, &Cancel::within(PAGE_IN_TIMEOUT));
         self.backend.surface_next_break_at(None);
         match outcome? {
-            ContinueOutcome::Running => Err(Error::DebugInfo(format!(
+            RunOutcome::Running => Err(Error::DebugInfo(format!(
                 "the debugger worker did not report within {}s; the target is still running",
                 PAGE_IN_TIMEOUT.as_secs()
             ))),
-            _ => Ok(self.page_in_result(address, worker_break)),
+            RunOutcome::Stopped(_) => Ok(self.page_in_result(address, worker_break)),
         }
     }
 

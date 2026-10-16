@@ -4,13 +4,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::backend::MemoryOps;
 use crate::cpu_state::kprcb_for_processor;
 use crate::error::{Error, Result};
 use crate::layout::{ParsedType, TypeInfo, le_uint};
+use crate::memory::MemoryOps;
 use crate::target::sched::{layout_for, processor_indices};
 use crate::target::{DiagnosticValue, Target};
 use crate::types::VirtAddr;
+use ntoseye_macros::record;
 
 /// `_KSPIN_LOCK_QUEUE.Lock` low bits: the processor waits for the lock, or
 /// owns it (`LOCK_QUEUE_WAIT`, `LOCK_QUEUE_OWNER`).
@@ -50,16 +51,62 @@ pub enum QueuedLockState {
     Corrupt(String),
 }
 
-/// One processor's entry in a queued lock that it owns or waits for.
-#[derive(Debug, Clone)]
+/// A processor's role in a queued lock, without the details:
+/// `owner`, `waiting`, or `corrupt`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueuedLockRole {
+    Owner,
+    Waiting,
+    Corrupt,
+}
+
+/// The entry of a processor in a queued spinlock that it owns or waits for.
+#[record(impl)]
 pub struct QueuedLockHolder {
     pub processor: u16,
+    #[record(skip)]
     pub state: QueuedLockState,
 }
 
-/// One numbered queued spinlock and the processors owning or waiting for it.
-#[derive(Debug, Clone)]
+#[record]
+impl QueuedLockHolder {
+    /// `owner`, `waiting`, or `corrupt`. `corrupt` means that the bits of the
+    /// entry do not agree with the queue links.
+    #[record(getter, rename = "state")]
+    pub fn role(&self) -> QueuedLockRole {
+        match self.state {
+            QueuedLockState::Owner => QueuedLockRole::Owner,
+            QueuedLockState::Waiting(_) => QueuedLockRole::Waiting,
+            QueuedLockState::Corrupt(_) => QueuedLockRole::Corrupt,
+        }
+    }
+
+    /// The 1-based position in the wait queue after the owner. `None` if the
+    /// processor does not wait.
+    #[record(getter)]
+    pub fn wait_order(&self) -> Option<u32> {
+        match self.state {
+            QueuedLockState::Waiting(order) => Some(order),
+            _ => None,
+        }
+    }
+
+    /// How a corrupt entry does not agree with the queue links. `None` for
+    /// other entries.
+    #[record(getter)]
+    pub fn reason(&self) -> Option<String> {
+        match &self.state {
+            QueuedLockState::Corrupt(reason) => Some(reason.clone()),
+            _ => None,
+        }
+    }
+}
+
+/// A numbered queued spinlock and the processors that own it or wait for it.
+#[record]
 pub struct QueuedLock {
+    /// The `_KSPIN_LOCK_QUEUE_NUMBER` of the lock.
     pub number: u32,
     /// The `_KSPIN_LOCK_QUEUE_NUMBER` name without its `LockQueue` prefix and
     /// `Lock` suffix (`IoCancel`), from the PDB or else the WDK's list when
@@ -70,23 +117,24 @@ pub struct QueuedLock {
     pub holders: Vec<QueuedLockHolder>,
 }
 
-#[derive(Debug, Clone)]
+/// A processor whose state ntoseye could not read.
+#[record]
 pub struct ProcessorError {
     pub processor: u16,
     pub message: String,
 }
 
-/// Every numbered queued spinlock across the processors (`!qlocks`).
-#[derive(Debug, Clone)]
-pub struct QueuedLocksDetail {
-    /// Processors whose `_KPRCB.LockQueue` was read.
+/// All numbered queued spinlocks on all processors (`!qlocks`).
+#[record]
+pub struct QueuedLocks {
+    /// The processors whose `_KPRCB.LockQueue` ntoseye read.
     pub processors: Vec<u16>,
     pub locks: Vec<QueuedLock>,
     pub errors: Vec<ProcessorError>,
 }
 
-/// One request a sender posted in a processor's IPI mailbox list.
-#[derive(Debug, Clone)]
+/// A request that a sender put in the IPI mailbox list of a processor.
+#[record(impl)]
 pub struct IpiRequest {
     /// The `_REQUEST_MAILBOX` (the sender's slot in the receiver's
     /// `RequestMailbox` array).
@@ -94,22 +142,36 @@ pub struct IpiRequest {
     /// The sending processor, from the slot's index; `None` when the mailbox
     /// lies outside the receiver's array.
     pub sender: Option<u16>,
+    #[record(hex)]
     pub request_summary: DiagnosticValue<u64>,
     pub worker_routine: DiagnosticValue<VirtAddr>,
+    /// The symbol of the worker routine, if ntoseye can resolve it.
     pub worker_symbol: Option<String>,
     /// `RequestPacket.CurrentPacket`: the worker's three parameters.
+    #[record(hex)]
     pub parameters: DiagnosticValue<Vec<u64>>,
 }
 
-/// A `_KPRCB` IPI field this build declares, with its value.
-#[derive(Debug, Clone)]
+#[record]
+impl IpiRequest {
+    /// The type of the request summary, if the type is known.
+    #[record(getter)]
+    pub fn request_type(&self) -> DiagnosticValue<Option<&'static str>> {
+        self.request_summary
+            .map(|summary| ipi_request_type_name(*summary))
+    }
+}
+
+/// A `_KPRCB` IPI field and its value.
+#[record]
 pub struct IpiField {
     pub name: &'static str,
+    #[record(hex)]
     pub value: DiagnosticValue<u64>,
 }
 
-/// One processor's IPI state (`!ipi`).
-#[derive(Debug, Clone)]
+/// The IPI state of one processor.
+#[record(impl)]
 pub struct IpiProcessor {
     pub processor: u16,
     pub kprcb: VirtAddr,
@@ -125,8 +187,22 @@ pub struct IpiProcessor {
     pub awaiting: Vec<u16>,
 }
 
-#[derive(Debug, Clone)]
-pub struct IpiDetail {
+#[record]
+impl IpiProcessor {
+    /// The decoded `IpiFrozen` value (`Running`, `Frozen`, ...). `None` if the
+    /// build does not have the field.
+    #[record(getter)]
+    pub fn frozen_state(&self) -> Option<DiagnosticValue<&'static str>> {
+        self.fields
+            .iter()
+            .find(|field| field.name == "IpiFrozen")
+            .map(|field| field.value.map(|value| ipi_frozen_name(*value)))
+    }
+}
+
+/// The interprocessor interrupt state of each processor (`!ipi`).
+#[record]
+pub struct IpiState {
     pub processors: Vec<IpiProcessor>,
     pub errors: Vec<ProcessorError>,
 }
@@ -268,7 +344,7 @@ impl Target {
     /// Owner and waiters of every numbered queued spinlock, from each
     /// processor's `_KPRCB.LockQueue` entries. An unreadable processor block
     /// is reported and skipped.
-    pub fn queued_locks(&self) -> Result<QueuedLocksDetail> {
+    pub fn queued_locks(&self) -> Result<QueuedLocks> {
         let guest = self.guest()?;
         let prcb = layout_for(self, "_KPRCB")?;
         let field = prcb.field("LockQueue")?;
@@ -303,7 +379,7 @@ impl Target {
 
         let memory = guest.ntoskrnl.memory();
         let mut per_lock: Vec<Vec<LockEntry>> = (0..count).map(|_| Vec::new()).collect();
-        let mut detail = QueuedLocksDetail {
+        let mut detail = QueuedLocks {
             processors: Vec::new(),
             locks: Vec::new(),
             errors: Vec::new(),
@@ -363,7 +439,7 @@ impl Target {
     /// of [`IPI_FIELDS`] the build has, and the requests queued in the
     /// processor's mailbox list (`_KPRCB.Mailbox`, a list of the senders'
     /// slots in its `RequestMailbox` array) on builds that have one.
-    pub fn ipi_state(&self, processor: Option<u16>) -> Result<IpiDetail> {
+    pub fn ipi_state(&self, processor: Option<u16>) -> Result<IpiState> {
         let prcb = layout_for(self, "_KPRCB")?;
         let all = processor_indices(self)?;
         let selected = match processor {
@@ -377,7 +453,7 @@ impl Target {
             None => all.clone(),
         };
         let mailboxes = self.mailbox_layout(&prcb);
-        let mut detail = IpiDetail {
+        let mut detail = IpiState {
             processors: Vec::new(),
             errors: Vec::new(),
         };

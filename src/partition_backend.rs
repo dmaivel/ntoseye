@@ -7,9 +7,10 @@
 
 use std::time::Duration;
 
-use crate::dbg_backend::{BackendCapability, DebugBackend, DebugCapability, StopEvent};
+use crate::dbg_backend::{
+    BackendCapability, DebugBackend, DebugCapability, RegisterMap, StopEvent,
+};
 use crate::error::{Error, Result};
-use crate::gdb::RegisterMap;
 
 /// One VP of the partition: its thread ID (`p<partition>.<VP index + 1>`,
 /// so its processor number is its VP index, as the guest numbers its

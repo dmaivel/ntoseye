@@ -1,8 +1,9 @@
 """Check SDK values against the type annotations the stub declares for them:
-unions, lists, dicts, what a `Diagnostic` holds, and a result class's
-properties, recursively. Used by `test_stub_types.py` on a live guest, and
-run by the Rust tests (`src/view/shape.rs`) against each field wrapper's
-declared hint, which the stub prints."""
+unions, lists, dicts, `Literal`s, what a `Diagnostic` holds, and a result
+class's properties (with its base's, for a variant class nested in its base),
+recursively. Used by `test_stub_types.py` on a live guest,
+and run by the Rust tests (`src/python/record.rs`, `hints`) against each
+field type's declared hint, which the stub prints."""
 
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ import ast
 from collections.abc import Iterable, Mapping
 
 import ntoseye
-from ntoseye import BaseRecord, Diagnostic, Record
+from ntoseye import BaseRecord, Diagnostic
 
 BUILTINS: dict[str, type] = {
     "str": str,
@@ -34,14 +35,40 @@ def every(checks: Iterable[bool]) -> bool:
     return all(list(checks))
 
 
+def stub_classes(stub: ast.Module) -> dict[str, ast.ClassDef]:
+    """The stub's classes by qualified name: `Pcr`, and `Stop.Breakpoint` for
+    a variant class nested in its base."""
+    classes: dict[str, ast.ClassDef] = {}
+
+    def add(body: list[ast.stmt], prefix: str) -> None:
+        for node in body:
+            if isinstance(node, ast.ClassDef):
+                classes[prefix + node.name] = node
+                add(node.body, f"{prefix}{node.name}.")
+
+    add(stub.body, "")
+    return classes
+
+
 def class_name(hint: ast.expr) -> str | None:
-    """The name `hint` gives a class by: `Pcr`, or `ntoseye.Pcr` as a field
-    wrapper's hint spells it."""
+    """The qualified name `hint` gives a class by: `Pcr` or `Stop.Breakpoint`,
+    or `ntoseye.Pcr` and `typing.Literal` as a field type's hint spells them."""
     if isinstance(hint, ast.Name):
         return hint.id
-    if isinstance(hint, ast.Attribute) and ast.unparse(hint.value) == "ntoseye":
-        return hint.attr
+    if isinstance(hint, ast.Attribute):
+        if ast.unparse(hint.value) in ("ntoseye", "typing", "builtins"):
+            return hint.attr
+        outer = class_name(hint.value)
+        return None if outer is None else f"{outer}.{hint.attr}"
     return None
+
+
+def sdk_class(name: str) -> type | None:
+    """The `ntoseye` class with qualified name `name`, if there is one."""
+    found: object = ntoseye
+    for part in name.split("."):
+        found = getattr(found, part, None)
+    return found if isinstance(found, type) else None
 
 
 class Checker:
@@ -80,17 +107,27 @@ class Checker:
             return self.fail(isinstance(value, int) and not isinstance(value, bool), path, value, "int")
         if name in BUILTINS:
             return self.fail(isinstance(value, BUILTINS[name]), path, value, name)
-        cls = getattr(ntoseye, name, None)
-        if isinstance(cls, type):
+        cls = sdk_class(name)
+        if cls is not None:
             ok = isinstance(value, cls)
         else:
-            ok = type(value).__name__ == name and type(value).__module__ == "ntoseye"
+            # A class the stub lacks (a test's): by name, through its bases,
+            # so a nested variant class is its base's type.
+            ok = any(
+                c.__qualname__ == name and c.__module__ == "ntoseye" for c in type(value).__mro__
+            )
         if not self.fail(ok, path, value, name):
             return False
         return not isinstance(value, BaseRecord) or self.record(value, path)
 
     def generic(self, value: object, base: str | None, args: ast.expr, path: str) -> bool:
         items = args.elts if isinstance(args, ast.Tuple) else [args]
+        if base == "Literal":
+            self.forms.add("Literal")
+            texts = [item.value for item in items if isinstance(item, ast.Constant)]
+            assert len(texts) == len(items), ast.unparse(args)
+            ok = isinstance(value, str) and value in texts
+            return self.fail(ok, path, value, f"one of {texts}")
         if base == "list":
             if not isinstance(value, list):
                 return self.fail(False, path, value, "list")
@@ -98,7 +135,12 @@ class Checker:
         if base == "dict":
             if not isinstance(value, dict):
                 return self.fail(False, path, value, "dict")
-            return every(self.value(v, items[1], f"{path}[{k!r}]") for k, v in value.items())
+            self.forms.add("dict")
+            return every(
+                self.value(k, items[0], f"{path} key {k!r}")
+                and self.value(v, items[1], f"{path}[{k!r}]")
+                for k, v in value.items()
+            )
         assert base == "Diagnostic", base
         if not isinstance(value, Diagnostic):
             return self.fail(False, path, value, "Diagnostic")
@@ -110,24 +152,38 @@ class Checker:
         return self.value(value.value, items[0], f"{path}.value")
 
     def record(self, record: BaseRecord, path: str) -> bool:
-        if isinstance(record, Record):
-            self.forms.add("Record")
-            return True
         self.forms.add("class")
-        cls = self.classes.get(type(record).__name__)
+        qualname = type(record).__qualname__
+        if "." in qualname:
+            self.forms.add("variant")
+        cls = self.classes.get(qualname)
         if cls is None:
             return True
-        properties = [
-            node.name
-            for node in cls.body
-            if isinstance(node, ast.FunctionDef)
-            and any(ast.unparse(d) == "property" for d in node.decorator_list)
-        ]
-        self.fail(len(properties) == len(record), path, record, f"{len(properties)} fields")
+        # Each property's declaring class: a variant's own, else its base's.
+        properties: dict[str, ast.ClassDef] = {}
+        for owner in self.lineage(cls):
+            for node in owner.body:
+                if (
+                    isinstance(node, ast.FunctionDef)
+                    and any(ast.unparse(d) == "property" for d in node.decorator_list)
+                    and node.name not in properties
+                ):
+                    properties[node.name] = owner
+        fields = len(record.to_dict())
+        self.fail(len(properties) == fields, path, record, f"{len(properties)} fields")
         return every(
-            self.value(getattr(record, name), returns(cls, name), f"{path}.{name}")
-            for name in properties
+            self.value(getattr(record, name), returns(owner, name), f"{path}.{name}")
+            for name, owner in properties.items()
         )
+
+    def lineage(self, cls: ast.ClassDef) -> list[ast.ClassDef]:
+        """`cls`, then the stub classes it derives from, nearest first."""
+        found = [cls]
+        for base in cls.bases:
+            name = class_name(base)
+            if name is not None and name in self.classes:
+                found += self.lineage(self.classes[name])
+        return found
 
     def fail(self, ok: bool, path: str, value: object, expected: str) -> bool:
         if not ok:

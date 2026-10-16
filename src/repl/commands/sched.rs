@@ -1,13 +1,19 @@
+use ntoseye_macros::{command, grammar};
+
+use super::hardware::ready_processor;
 use crate::error::{Error, Result};
 use crate::expr::Expr;
+use crate::guest::ProcessInfo;
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::disasm::{format_stack_frame, more_frames};
 use crate::repl::*;
+use crate::session::Session;
 use crate::target::sched::{
-    ApcDetail, ApcListDetail, ApcSelector, FindStackDetail, ReadyQueuesDetail, StacksDetail,
-    TimerDetail, TimerListDetail, UniqStackDetail, UniqStackOptions, UniqStackScope,
-    UnwalkedThread, findstack_level,
+    Apc, ApcQueues, ApcSelector, DpcQueues, FindStack, KernelTimer, ReadyQueues, RunningProcessors,
+    ThreadStacks, TimerTable, UniqStackOptions, UniqStackScope, UniqStacks, UnwalkedThread,
+    findstack_level,
 };
-use crate::target::workqueue::{ExQueueDetail, WorkItemDetail};
+use crate::target::workqueue::{WorkItem, WorkQueueTypes, WorkQueues};
 use crate::target::{
     DiagnosticValue, ListTermination, ThreadInfo, kthread_state_name, wait_reason_name,
 };
@@ -16,96 +22,6 @@ use crate::ui;
 use crate::unwind::StackFrame;
 
 use super::diagnostics::{diagnostic_addr, diagnostic_cell};
-
-repl_command! {
-    cmd_running;
-    names: ["!running", "running"],
-    usage: "!running [-i] [-t]",
-    summary: "Show the thread that runs on each processor.",
-    details: "-i includes idle threads, and -t adds a short kernel stack, with a frame limit, for each processor.",
-    completion: None,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_ready;
-    names: ["!ready", "ready"],
-    usage: "!ready [processor]",
-    summary: "List the dispatcher ready queues of all processors or of one processor.",
-    details: "The command reads DispatcherReadyListHead from each _KPRCB, or ReadyListHead on newer builds. Each queue walk has an entry limit and, like `dt -l`, reports null links, cycles, unreadable links, and when it reaches its entry limit.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_dpcs;
-    names: ["!dpcs", "dpcs"],
-    usage: "!dpcs",
-    summary: "List the deferred procedure calls that are queued on each processor.",
-    details: "The command walks the two _KPRCB DpcData queues. Each walk detects cycles and has an entry limit.",
-    completion: None,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_exqueue;
-    names: ["!exqueue", "exqueue"],
-    usage: "!exqueue [flags]",
-    summary: "Show the executive worker queues with their pending work items and worker threads.",
-    details: "Windows 10 and later keep one _EX_WORK_QUEUE for each partition, NUMA node, and queue index (_EXQUEUEINDEX: ExPoolUntrusted, IoPoolUntrusted, ...). The command finds the queues from the ExPartition of each _EPARTITION. For each queue, it shows the thread count and limits, the concurrency (_KPRIQUEUE.MaximumCount), and the number of work items processed. Then it shows each pending _WORK_QUEUE_ITEM by priority, with its routine as a symbol and, for an IoQueueWorkItem item, the I/O routine, object, and context. After the items come the threads that serve the queue, with their state and wait reason. Each priority shows the WORK_QUEUE_TYPEs that map to it, and its running threads against the concurrency. The command reads these priorities from nt!ExpBuiltinPriorities (CriticalWorkQueue is 13, DelayedWorkQueue is 12, HyperCriticalWorkQueue is 15). The flags are the same as in WinDbg. 0x4 adds the stack of each worker thread (32 frames). 0x10, 0x20, and 0x40 show only the items of the critical, delayed, and hypercritical priorities. The command accepts 0x1 and 0x2, but it always lists the threads. Each list walk detects cycles and has an entry limit: 1,024 items for each priority and 4,096 threads for each queue.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_timer;
-    names: ["!timer", "timer"],
-    usage: "!timer [address-expression]",
-    summary: "List the kernel timers or decode one _KTIMER.",
-    details: "Without an address, the command walks _KPRCB.TimerTable.TimerEntries. With an address, it decodes one timer and its DPC.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_apc;
-    names: ["!apc", "apc"],
-    usage: "!apc [process|thread]",
-    summary: "List the kernel and user APCs of the selected thread, a process, or all threads.",
-    details: "With no argument, the command uses the current Windows thread. With *, it lists the APCs of all threads, in a walk that has a limit.",
-    completion: [Expression],
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_stacks;
-    names: ["!stacks", "stacks"],
-    usage: "!stacks [0|1|2] [filter]",
-    summary: "Show the state, wait reason, and top stack symbol of each thread.",
-    details: "Level 0 shows one frame. Levels 1 and 2 add the full stacks, with a frame limit. The optional filter matches process or stack symbols.",
-    completion: [None, Process],
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_findstack;
-    names: ["!findstack", "findstack"],
-    usage: "!findstack <symbol|module> [0|1|2]",
-    summary: "List the threads with a stack frame that matches a symbol or module.",
-    details: "The command walks the stack of each Windows thread, up to 64 frames, as !stacks 2 does. `module!name` matches frames in that module whose function starts with name, as in WinDbg, so `nt!KeWait` matches KeWaitForSingleObject and KeWaitForMultipleObjects, and `nt!` matches all frames in nt. A bare word matches a module by name or a function by prefix. With * or ?, the module and function are globs (`nt!*Wait*`). Matches ignore case. Display level 0 lists the matching threads and the number of frames that match, level 1 (the default) adds the matching frames, and level 2 shows the whole stack and marks the matching frames with *. The command cannot search a thread whose stack does not walk, such as a thread that runs on a processor while the target runs, and lists these threads after the matches.",
-    completion: [Symbol, None],
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_uniqstack;
-    names: ["!uniqstack", "uniqstack"],
-    usage: "!uniqstack [-v] [-n] [*|process]",
-    summary: "Group the threads by identical call stacks and show each unique stack once.",
-    details: "WinDbg's !uniqstack groups the user-mode stacks of the threads of the current process. This command groups the threads that the kernel schedules, using their stacks as !stacks 2 walks them: up to 64 frames, with the kernel frames first and then the user-mode frames below a system call. With no argument, the command uses the threads of the .process selection or, if no process is selected, the threads of all processes, which is the default in a kernel session. * selects all threads, and a PID, EPROCESS address, or name selects one process. Threads share a group when their frames have the same instruction pointers and the same truncation. The command shows each unique stack once, from its first thread, with the number of threads that share it and their thread IDs by process. The totals come after the groups. -n numbers the frames. -v shows how ntoseye recovered each frame (current, seed, unwind, or scan), as kv does, and this output replaces the x86 FPO data that WinDbg shows. The command does not accept the -b and -p options of WinDbg, because on x64 the first arguments go in registers, which a saved stack does not keep, and -p also needs private-symbol parameters for each frame. For one thread, use .thread and kp. Some stacks do not walk, such as the stack of a thread that runs on a processor while the target runs, and the command shows these threads in a separate list.",
-    completion: Process,
-    target: Kernel,
-}
 
 fn diagnostic_option_cell<T>(
     value: &DiagnosticValue<Option<T>>,
@@ -201,38 +117,39 @@ fn termination_message(termination: &ListTermination) -> Option<String> {
     termination.diagnostic()
 }
 
-impl ReplState<'_> {
-    fn cmd_running(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let mut include_idle = false;
-        let mut include_stacks = false;
-        for argument in &invocation.argv {
-            match argument.as_ref() {
-                "-i" => include_idle = true,
-                "-t" => include_stacks = true,
-                other => {
-                    outln!("{}\n", command_help("!running"));
-                    error!("unknown !running option '{other}'");
-                    return Ok(());
-                }
-            }
-        }
-        let detail = match self.ctx.inspect_running(include_idle, include_stacks) {
-            Ok(detail) => detail,
-            Err(error) => {
-                error!("failed to inspect running threads: {error}");
-                return Ok(());
-            }
-        };
-        if detail.processors.is_empty() {
+/// Show the thread that runs on each processor.
+///
+/// -i includes idle threads, and -t adds a short kernel stack, with a frame
+/// limit, for each processor.
+#[command(
+    names = ["!running", "running"],
+    category = "cpu",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+)]
+fn running(
+    session: &mut Session,
+    #[arg(switch = "-i")] include_idle: bool,
+    #[arg(switch = "-t")] include_stacks: bool,
+) -> Result<RunningProcessors> {
+    session
+        .inspect_running(include_idle, include_stacks)
+        .map_err(|error| Error::DebugInfo(format!("failed to inspect running threads: {error}")))
+}
+
+impl Render for RunningProcessors {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        if self.processors.is_empty() {
             outln!("no non-idle running threads\n");
-            return Ok(());
+            return;
         }
         let mut builder = tabled::builder::Builder::default();
         builder.push_record([
             "CPU", "KPCR", "KPRCB", "KTHREAD", "TID", "Process", "Priority", "Next", "Idle",
             "Stack",
         ]);
-        for processor in &detail.processors {
+        for processor in &self.processors {
             let current = match &processor.current_thread {
                 DiagnosticValue::Available(Some(thread)) => thread,
                 _ => {
@@ -265,58 +182,58 @@ impl ReplState<'_> {
             ]);
         }
         print_padded_table(builder);
-        Ok(())
     }
+}
 
-    fn cmd_ready(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if invocation.argv.is_empty() {
-            let detail = match self.ctx.target.inspect_ready_queues(None) {
-                Ok(detail) => detail,
-                Err(error) => {
-                    error!("failed to inspect ready queues: {error}");
-                    return Ok(());
-                }
-            };
-            print_ready_queues(&detail);
-            return Ok(());
-        }
-        let processor_text = invocation.join_args(0);
-        let processor = match Expr::eval_with_radix(&processor_text, &self.ctx.target, self.radix) {
-            Ok(value) => match u16::try_from(value.0) {
-                Ok(index) => Some(index),
-                Err(_) => {
-                    error!("processor index out of range: {:#x}", value.0);
-                    return Ok(());
-                }
-            },
-            Err(error) => {
-                error!("invalid processor '{processor_text}': {error}");
-                return Ok(());
-            }
-        };
-        let detail = match self.ctx.target.inspect_ready_queues(processor) {
-            Ok(detail) => detail,
-            Err(error) => {
-                error!("failed to inspect ready queues: {error}");
-                return Ok(());
-            }
-        };
-        print_ready_queues(&detail);
-        Ok(())
+/// List the dispatcher ready queues of all processors or of one processor.
+///
+/// The command reads DispatcherReadyListHead from each _KPRCB, or ReadyListHead
+/// on newer builds. Each queue walk has an entry limit and, like `dt -l`,
+/// reports null links, cycles, unreadable links, and when it reaches its entry
+/// limit.
+#[command(
+    names = ["!ready", "ready"],
+    category = "cpu",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+)]
+fn ready(
+    session: &mut Session,
+    #[arg(parse = ready_processor, positional)] processor: Option<u16>,
+) -> Result<ReadyQueues> {
+    session
+        .target
+        .inspect_ready_queues(processor)
+        .map_err(|error| Error::DebugInfo(format!("failed to inspect ready queues: {error}")))
+}
+
+impl Render for ReadyQueues {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_ready_queues(self);
     }
+}
 
-    fn cmd_dpcs(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if !invocation.argv.is_empty() {
-            outln!("{}\n", command_help("!dpcs"));
-            return Ok(());
-        }
-        let detail = match self.ctx.target.inspect_dpc_queues() {
-            Ok(detail) => detail,
-            Err(error) => {
-                error!("failed to inspect DPC queues: {error}");
-                return Ok(());
-            }
-        };
+/// List the deferred procedure calls that are queued on each processor.
+///
+/// The command walks the two _KPRCB DpcData queues. Each walk detects cycles
+/// and has an entry limit.
+#[command(
+    names = ["!dpcs", "dpcs"],
+    category = "cpu",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+)]
+fn dpcs(session: &mut Session) -> Result<DpcQueues> {
+    session
+        .target
+        .inspect_dpc_queues()
+        .map_err(|error| Error::DebugInfo(format!("failed to inspect DPC queues: {error}")))
+}
+
+impl Render for DpcQueues {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
         let mut builder = tabled::builder::Builder::default();
         builder.push_record([
             "CPU",
@@ -326,7 +243,7 @@ impl ReplState<'_> {
             "Context",
             "Importance",
         ]);
-        for queue in &detail.queues {
+        for queue in &self.queues {
             for entry in &queue.entries {
                 builder.push_record([
                     queue.processor.to_string(),
@@ -350,7 +267,7 @@ impl ReplState<'_> {
                 );
             }
         }
-        for error in &detail.errors {
+        for error in &self.errors {
             outln!(
                 "CPU {}: <unavailable: {}>",
                 error
@@ -359,85 +276,155 @@ impl ReplState<'_> {
                 error.message
             );
         }
-        if detail.total == 0 {
+        if self.total == 0 {
             outln!("DPC queues are empty or unavailable\n");
         } else {
             print_padded_table(builder);
         }
-        if detail.truncated {
+        if self.truncated {
             outln!("DPC output bounded at 4096 entries\n");
         }
-        Ok(())
     }
+}
 
-    fn cmd_exqueue(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let flags = match invocation.arg(0) {
-            Some(arg) => match self.eval_or_report(arg) {
-                Some(VirtAddr(flags)) => flags,
-                None => return Ok(()),
-            },
-            None => 0,
-        };
-        match self.ctx.inspect_work_queues(flags) {
-            Ok(detail) => print_work_queues(&detail),
-            Err(error) => error!("{error}"),
+/// Show the executive worker queues with their pending work items and worker
+/// threads.
+///
+/// Windows 10 and later keep one _EX_WORK_QUEUE for each partition, NUMA node,
+/// and queue index (_EXQUEUEINDEX: ExPoolUntrusted, IoPoolUntrusted, ...). The
+/// command finds the queues from the ExPartition of each _EPARTITION. For each
+/// queue, it shows the thread count and limits, the concurrency
+/// (_KPRIQUEUE.MaximumCount), and the number of work items processed. Then it
+/// shows each pending _WORK_QUEUE_ITEM by priority, with its routine as a
+/// symbol and, for an IoQueueWorkItem item, the I/O routine, object, and
+/// context. After the items come the threads that serve the queue, with their
+/// state and wait reason. Each priority shows the WORK_QUEUE_TYPEs that map to
+/// it, and its running threads against the concurrency. The command reads these
+/// priorities from nt!ExpBuiltinPriorities (CriticalWorkQueue is 13,
+/// DelayedWorkQueue is 12, HyperCriticalWorkQueue is 15). The flags are the
+/// same as in WinDbg. 0x4 adds the stack of each worker thread (32 frames).
+/// 0x10, 0x20, and 0x40 show only the items of the critical, delayed, and
+/// hypercritical priorities. The command accepts 0x1 and 0x2, but it always
+/// lists the threads. Each list walk detects cycles and has an entry limit:
+/// 1,024 items for each priority and 4,096 threads for each queue.
+#[command(
+    names = ["!exqueue", "exqueue"],
+    category = "cpu",
+    kind = Query,
+    target = Kernel,
+    forms = [work_queues],
+)]
+fn exqueue(session: &mut Session, #[arg(default = 0)] flags: u64) -> Result<WorkQueues> {
+    session.inspect_work_queues(flags)
+}
+
+/// Get the executive worker queues, their pending work items, and their
+/// worker threads (`!exqueue`). `include_stacks` adds the stack of each
+/// worker, and `queue_types` (`"critical"`, `"delayed"`, `"hypercritical"`)
+/// limits the listed items to the priorities of those types.
+#[command(form_of = exqueue, python = Inspect)]
+fn work_queues(
+    session: &mut Session,
+    #[arg(default = false)] include_stacks: bool,
+    queue_types: Option<WorkQueueTypes>,
+) -> Result<WorkQueues> {
+    let stacks = if include_stacks { 0x4 } else { 0 };
+    session.inspect_work_queues(stacks | queue_types.map_or(0, |types| types.0))
+}
+
+impl Render for WorkQueues {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_work_queues(self);
+    }
+}
+
+/// `!timer`'s address: an expression over the rest of the line.
+#[grammar(usage = "[{}]", complete = [Expression])]
+fn timer_address(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Option<VirtAddr>, ArgError> {
+    if cursor.remaining() == 0 {
+        return Ok(None);
+    }
+    let expression = cursor.rest();
+    Expr::eval_with_radix(&expression, &cx.state.ctx.target, cx.state.radix)
+        .map(Some)
+        .map_err(|error| {
+            ArgError::Message(format!("invalid timer address '{expression}': {error}"))
+        })
+}
+
+/// What `!timer` shows: the timer tables, or one timer.
+pub enum Timers {
+    Table(TimerTable),
+    /// One `_KTIMER`, and the interrupt time its due time is read against.
+    Timer(KernelTimer, DiagnosticValue<u64>),
+}
+
+/// List the kernel timers or decode one _KTIMER.
+///
+/// Without an address, the command walks _KPRCB.TimerTable.TimerEntries. With
+/// an address, it decodes one timer and its DPC.
+#[command(
+    names = ["!timer", "timer"],
+    category = "cpu",
+    kind = Query,
+    target = Kernel,
+    forms = [timers, timer],
+)]
+fn timer_command(
+    session: &mut Session,
+    #[arg(parse = timer_address)] address: Option<VirtAddr>,
+) -> Result<Timers> {
+    match address {
+        Some(address) => {
+            let timer = timer(session, address).map_err(|error| {
+                Error::DebugInfo(format!(
+                    "failed to inspect timer {}: {error}",
+                    ui::addr(address.0)
+                ))
+            })?;
+            Ok(Timers::Timer(timer, session.target.interrupt_time()))
         }
-        Ok(())
+        None => timers(session)
+            .map(Timers::Table)
+            .map_err(|error| Error::DebugInfo(format!("failed to enumerate timers: {error}"))),
     }
+}
 
-    fn cmd_timer(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if !invocation.argv.is_empty() {
-            let expression = invocation.join_args(0);
-            let address = match Expr::eval_with_radix(&expression, &self.ctx.target, self.radix) {
-                Ok(address) => address,
-                Err(error) => {
-                    error!("invalid timer address '{expression}': {error}");
-                    return Ok(());
-                }
-            };
-            let detail = match self.ctx.target.inspect_timer(address) {
-                Ok(detail) => detail,
-                Err(error) => {
-                    error!("failed to inspect timer {}: {error}", ui::addr(address.0));
-                    return Ok(());
-                }
-            };
-            print_timer_detail(&detail, interrupt_value(&self.ctx.target.interrupt_time()));
-            return Ok(());
+/// Read the kernel timer-table entries, up to a limit, and their DPCs
+/// (`!timer`).
+#[command(form_of = timer_command, python = Inspect)]
+fn timers(session: &Session) -> Result<TimerTable> {
+    session.target.timer_list()
+}
+
+/// Decode a `_KTIMER` and its DPC (`!timer address`).
+#[command(form_of = timer_command, python = Inspect)]
+fn timer(session: &Session, address: VirtAddr) -> Result<KernelTimer> {
+    session.target.inspect_timer(address)
+}
+
+impl Render for Timers {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        match self {
+            Self::Table(table) => print_timer_list(table),
+            Self::Timer(timer, now) => print_timer_detail(timer, interrupt_value(now)),
         }
-        let detail = match self.ctx.target.timer_list() {
-            Ok(detail) => detail,
-            Err(error) => {
-                error!("failed to enumerate timers: {error}");
-                return Ok(());
-            }
-        };
-        print_timer_list(&detail);
-        Ok(())
     }
+}
 
-    fn cmd_apc(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let argument = (!invocation.argv.is_empty()).then(|| invocation.join_args(0));
-        let selector = match self.parse_apc_selector(argument.as_deref()) {
-            Ok(selector) => selector,
-            Err(error) => {
-                error!("failed to select APC threads: {error}");
-                return Ok(());
-            }
-        };
-        let detail = match self.ctx.inspect_apcs(selector) {
-            Ok(detail) => detail,
-            Err(error) => {
-                error!("failed to inspect APCs: {error}");
-                return Ok(());
-            }
-        };
-        print_apcs(&detail);
-        Ok(())
-    }
-
-    fn parse_apc_selector(&self, argument: Option<&str>) -> Result<ApcSelector> {
-        let Some(argument) = argument else {
+/// `!apc`'s selection: `.` or nothing for the current thread, `*` for every
+/// thread, a number for a thread or process, or part of a process name.
+#[grammar(usage = "[.|*|thread|process]", complete = [Expression])]
+fn apc_selector(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<ApcSelector, ArgError> {
+    let argument = (cursor.remaining() != 0).then(|| cursor.rest());
+    let select = || -> Result<ApcSelector> {
+        let Some(argument) = argument.as_deref() else {
             return Ok(ApcSelector::CurrentThread);
         };
         if argument == "." {
@@ -446,13 +433,12 @@ impl ReplState<'_> {
         if argument == "*" {
             return Ok(ApcSelector::All);
         }
-        let value =
-            Expr::eval_with_radix(argument, &self.ctx.target, self.radix).map(|value| value.0);
-        if let Ok(value) = value {
-            return Ok(ApcSelector::Number(value));
+        let target = &cx.state.ctx.target;
+        if let Ok(value) = Expr::eval_with_radix(argument, target, cx.state.radix) {
+            return Ok(ApcSelector::Number(value.0));
         }
         let needle = argument.to_ascii_lowercase();
-        let processes = self.ctx.target.guest()?.enumerate_processes()?;
+        let processes = target.guest()?.enumerate_processes()?;
         let process = processes
             .iter()
             .find(|process| process.name.to_ascii_lowercase().contains(&needle))
@@ -460,91 +446,282 @@ impl ReplState<'_> {
                 Error::DebugInfo(format!("no process or thread matches '{argument}'"))
             })?;
         Ok(ApcSelector::Process(process.pid))
-    }
+    };
+    select().map_err(|error| ArgError::Message(format!("failed to select APC threads: {error}")))
+}
 
-    fn cmd_stacks(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let (level, filter_start) = match invocation.arg(0) {
-            None => (0, 0),
-            Some("0") => (0, 1),
-            Some("1") => (1, 1),
-            Some("2") => (2, 1),
-            Some(_) => (0, 0),
-        };
-        let filter =
-            (invocation.argv.len() > filter_start).then(|| invocation.join_args(filter_start));
-        let detail = match self.ctx.inspect_stacks(level, filter.as_deref()) {
-            Ok(detail) => detail,
-            Err(error) => {
-                error!("failed to inspect thread stacks: {error}");
-                return Ok(());
-            }
-        };
-        print_stacks(&detail);
-        Ok(())
-    }
+/// List the kernel and user APCs of the selected thread, a process, or all
+/// threads.
+///
+/// With no argument, the command uses the current Windows thread. With *, it
+/// lists the APCs of all threads, in a walk that has a limit.
+#[command(
+    names = ["!apc", "apc"],
+    category = "execution and stack",
+    kind = Query,
+    target = Kernel,
+    forms = [apcs, process_apcs, thread_apcs],
+)]
+fn apc(
+    session: &mut Session,
+    #[arg(parse = apc_selector)] selector: ApcSelector,
+) -> Result<ApcQueues> {
+    apcs(session, selector)
+        .map_err(|error| Error::DebugInfo(format!("failed to inspect APCs: {error}")))
+}
 
-    fn cmd_findstack(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let (pattern, level) = match (invocation.arg(0), invocation.arg(1), invocation.arg(2)) {
-            (None | Some("-?"), _, _) => {
-                outln!("{}\n", command_help("!findstack"));
-                return Ok(());
-            }
-            (Some(pattern), level, None) => match findstack_level(level) {
-                Ok(level) => (pattern.to_string(), level),
-                Err(error) => {
-                    error!("!findstack: {error}");
-                    return Ok(());
-                }
-            },
-            (Some(_), _, Some(extra)) => {
-                error!("!findstack: unexpected argument '{extra}'");
-                return Ok(());
-            }
-        };
-        match self.ctx.inspect_findstack(&pattern, level) {
-            Ok(detail) => print_findstack(&detail),
-            Err(error) => error!("!findstack: {error}"),
-        }
-        Ok(())
-    }
+/// Decode the kernel and user APC queues of all threads, of a process, or
+/// of a thread (`!apc`): `target` is a `Process`, a `Thread`, or an
+/// `_ETHREAD` address, and all threads by default.
+#[command(form_of = apc, python = Inspect)]
+fn apcs(
+    session: &mut Session,
+    #[arg(default = None, positional)] target: ApcSelector,
+) -> Result<ApcQueues> {
+    session.inspect_apcs(target)
+}
 
-    fn cmd_uniqstack(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let args: Vec<&str> = invocation.argv.iter().map(|arg| arg.as_ref()).collect();
-        let result = UniqStackOptions::parse(&args).and_then(|(options, scope)| {
-            let scope = self.uniqstack_scope(scope)?;
-            Ok((options, self.ctx.inspect_uniqstack(scope)?))
-        });
-        match result {
-            Ok((options, detail)) => print_uniqstack(&detail, options),
-            Err(error) => error!("!uniqstack: {error}"),
-        }
-        Ok(())
-    }
+/// Decode the kernel and user APC queues of this process (`!apc`).
+#[command(form_of = apc, python = Process, python_name = "apcs")]
+fn process_apcs(session: &mut Session, #[arg(receiver)] process: ProcessInfo) -> Result<ApcQueues> {
+    session.inspect_apcs(ApcSelector::Process(process.pid))
+}
 
-    /// The threads `!uniqstack` groups: `*` for every thread, one process
-    /// named as `.process` names it or by name (see
-    /// [`Self::process_for_selector_or_name`]), and by default the `.process`
-    /// selection, or every thread when none is selected.
-    pub fn uniqstack_scope(&self, argument: Option<&str>) -> Result<UniqStackScope> {
-        let process = match argument {
+/// Decode the APC lists of this thread (`!apc`).
+#[command(form_of = apc, python = Thread, python_name = "apcs")]
+fn thread_apcs(session: &mut Session, #[arg(receiver)] thread: ThreadInfo) -> Result<ApcQueues> {
+    session.inspect_apcs(ApcSelector::Thread(thread.ethread))
+}
+
+impl Render for ApcQueues {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_apcs(self);
+    }
+}
+
+/// `!stacks`' level: a leading 0, 1, or 2; anything else is the filter.
+#[grammar(usage = "[0|1|2]", complete = [None])]
+fn stacks_level(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<u8, ArgError> {
+    let level = match cursor.peek() {
+        Some("0") => 0,
+        Some("1") => 1,
+        Some("2") => 2,
+        _ => return Ok(0),
+    };
+    cursor.word();
+    Ok(level)
+}
+
+/// The words left, joined, or `None` when there are none.
+#[grammar(usage = "[{}]", complete = Process)]
+fn rest_of_line(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Option<String>, ArgError> {
+    Ok((cursor.remaining() != 0).then(|| cursor.rest()))
+}
+
+/// Show the state, wait reason, and top stack symbol of each thread.
+///
+/// Level 0 shows one frame. Levels 1 and 2 add the full stacks, with a frame
+/// limit. The optional filter matches process or stack symbols.
+#[command(
+    names = ["!stacks", "stacks"],
+    category = "execution and stack",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+)]
+fn stacks(
+    session: &mut Session,
+    #[arg(parse = stacks_level, default = 0)] level: u8,
+    #[arg(parse = rest_of_line)] filter: Option<String>,
+) -> Result<ThreadStacks> {
+    session
+        .inspect_stacks(level, filter.as_deref())
+        .map_err(|error| Error::DebugInfo(format!("failed to inspect thread stacks: {error}")))
+}
+
+impl Render for ThreadStacks {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_stacks(self);
+    }
+}
+
+/// `!findstack`'s pattern; `-?` asks for the help.
+#[grammar(usage = "<symbol|module>", complete = [Symbol])]
+fn findstack_pattern(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<String, ArgError> {
+    match cursor.word() {
+        None => Err(ArgError::Missing),
+        Some(word) if word == "-?" => Err(ArgError::Missing),
+        Some(word) => Ok(word.into_owned()),
+    }
+}
+
+/// `!findstack`'s display level: 0, 1 (the default), or 2.
+#[grammar(usage = "[0|1|2]", complete = [None])]
+fn findstack_display_level(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<u8, ArgError> {
+    let level = cursor.word();
+    // A word past the level is refused before the level is read.
+    if let Some(extra) = cursor.peek() {
+        return Err(ArgError::Message(format!(
+            "!findstack: unexpected argument '{extra}'"
+        )));
+    }
+    findstack_level(level.as_deref())
+        .map_err(|error| ArgError::Message(format!("!findstack: {error}")))
+}
+
+/// List the threads with a stack frame that matches a symbol or module.
+///
+/// The command walks the stack of each Windows thread, up to 64 frames, as
+/// !stacks 2 does. `module!name` matches frames in that module whose function
+/// starts with name, as in WinDbg, so `nt!KeWait` matches KeWaitForSingleObject
+/// and KeWaitForMultipleObjects, and `nt!` matches all frames in nt. A bare
+/// word matches a module by name or a function by prefix. With * or ?, the
+/// module and function are globs (`nt!*Wait*`). Matches ignore case. Display
+/// level 0 lists the matching threads and the number of frames that match,
+/// level 1 (the default) adds the matching frames, and level 2 shows the whole
+/// stack and marks the matching frames with *. The command cannot search a
+/// thread whose stack does not walk, such as a thread that runs on a processor
+/// while the target runs, and lists these threads after the matches.
+#[command(
+    names = ["!findstack", "findstack"],
+    category = "execution and stack",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+)]
+fn findstack(
+    session: &mut Session,
+    #[arg(parse = findstack_pattern)] symbol: String,
+    #[arg(parse = findstack_display_level, default = 1)] level: u8,
+) -> Result<FindStack> {
+    session
+        .inspect_findstack(&symbol, level)
+        .map_err(|error| Error::DebugInfo(format!("!findstack: {error}")))
+}
+
+impl Render for FindStack {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_findstack(self);
+    }
+}
+
+/// `!uniqstack`'s `-v`/`-n` words, wherever they are.
+#[grammar(usage = "[-v] [-n]")]
+fn uniqstack_options(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<UniqStackOptions, ArgError> {
+    let words = cursor.take_all(|word| word.len() > 1 && word.starts_with('-'));
+    let words: Vec<&str> = words.iter().map(AsRef::as_ref).collect();
+    UniqStackOptions::parse(&words)
+        .map(|(options, _)| options)
+        .map_err(|error| ArgError::Message(format!("!uniqstack: {error}")))
+}
+
+/// The threads `!uniqstack` groups: `*` for every thread, one process
+/// named as `.process` names it or by name (see
+/// [`ReplState::process_for_selector_or_name`]), and by default the
+/// `.process` selection, or every thread when none is selected.
+#[grammar(usage = "[*|process]", complete = [Process])]
+fn uniqstack_scope(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<UniqStackScope, ArgError> {
+    let argument = cursor.word();
+    if let (Some(first), Some(second)) = (&argument, cursor.peek()) {
+        return Err(ArgError::Message(format!(
+            "!uniqstack: {}",
+            Error::InvalidArgument(format!(
+                "!uniqstack takes one process or *, got '{first}' and '{second}'"
+            ))
+        )));
+    }
+    let state = &*cx.state;
+    let select = || -> Result<UniqStackScope> {
+        let process = match argument.as_deref() {
             Some("*") => return Ok(UniqStackScope::AllThreads),
-            None => match self.ctx.target.attached_process() {
+            None => match state.ctx.target.attached_process() {
                 Some(process) => process.clone(),
                 None => return Ok(UniqStackScope::AllThreads),
             },
             Some(selector) => {
-                let processes = self.ctx.target.matching_processes(None)?;
-                self.process_for_selector_or_name(selector, &processes)?
+                let processes = state.ctx.target.matching_processes(None)?;
+                state.process_for_selector_or_name(selector, &processes)?
             }
         };
         Ok(UniqStackScope::Process {
             pid: process.pid,
             name: process.name,
         })
+    };
+    select().map_err(|error| ArgError::Message(format!("!uniqstack: {error}")))
+}
+
+/// Group the threads by identical call stacks and show each unique stack once.
+///
+/// WinDbg's !uniqstack groups the user-mode stacks of the threads of the
+/// current process. This command groups the threads that the kernel schedules,
+/// using their stacks as !stacks 2 walks them: up to 64 frames, with the kernel
+/// frames first and then the user-mode frames below a system call. With no
+/// argument, the command uses the threads of the .process selection or, if no
+/// process is selected, the threads of all processes, which is the default in a
+/// kernel session. * selects all threads, and a PID, EPROCESS address, or name
+/// selects one process. Threads share a group when their frames have the same
+/// instruction pointers and the same truncation. The command shows each unique
+/// stack once, from its first thread, with the number of threads that share it
+/// and their thread IDs by process. The totals come after the groups. -n
+/// numbers the frames. -v shows how ntoseye recovered each frame (current,
+/// seed, unwind, or scan), as kv does, and this output replaces the x86 FPO
+/// data that WinDbg shows. The command does not accept the -b and -p options of
+/// WinDbg, because on x64 the first arguments go in registers, which a saved
+/// stack does not keep, and -p also needs private-symbol parameters for each
+/// frame. For one thread, use .thread and kp. Some stacks do not walk, such as
+/// the stack of a thread that runs on a processor while the target runs, and
+/// the command shows these threads in a separate list.
+#[command(
+    names = ["!uniqstack", "uniqstack"],
+    category = "execution and stack",
+    kind = Query,
+    target = Kernel,
+    forms = [uniqstack],
+)]
+fn uniqstack_command(
+    session: &mut Session,
+    #[arg(render, parse = uniqstack_options)] options: UniqStackOptions,
+    #[arg(parse = uniqstack_scope)] scope: UniqStackScope,
+) -> Result<UniqStacks> {
+    uniqstack(session, scope).map_err(|error| Error::DebugInfo(format!("!uniqstack: {error}")))
+}
+
+/// Group threads by identical call stacks (`!uniqstack`), using all threads
+/// unless `process` limits it to the threads of one process.
+#[command(form_of = uniqstack_command, python = Inspect)]
+fn uniqstack(
+    session: &mut Session,
+    #[arg(default = None, positional)] process: UniqStackScope,
+) -> Result<UniqStacks> {
+    session.inspect_uniqstack(process)
+}
+
+impl Render<UniqStackOptions> for UniqStacks {
+    fn render(&self, _: &mut ReplState<'_>, options: UniqStackOptions) {
+        print_uniqstack(self, options);
     }
 }
 
-fn print_ready_queues(detail: &ReadyQueuesDetail) {
+fn print_ready_queues(detail: &ReadyQueues) {
     let mut builder = tabled::builder::Builder::default();
     builder.push_record([
         "CPU",
@@ -632,7 +809,7 @@ fn interrupt_value(interrupt_time: &DiagnosticValue<u64>) -> Option<u64> {
 }
 
 /// `detail`'s due time, and how far it is from `now` (the interrupt time).
-fn format_due_time(detail: &TimerDetail, now: Option<u64>) -> String {
+fn format_due_time(detail: &KernelTimer, now: Option<u64>) -> String {
     let DiagnosticValue::Available(raw) = &detail.due_time else {
         return diagnostic_cell(&detail.due_time);
     };
@@ -656,7 +833,7 @@ fn format_due_time(detail: &TimerDetail, now: Option<u64>) -> String {
     }
 }
 
-fn timer_dpc_cell(detail: &TimerDetail) -> String {
+fn timer_dpc_cell(detail: &KernelTimer) -> String {
     if let DiagnosticValue::Unavailable(error) = &detail.dpc {
         if let DiagnosticValue::Available(Some(encoded)) = &detail.dpc_encoded {
             return format!("<encoded> {:#x}", encoded.0);
@@ -666,7 +843,7 @@ fn timer_dpc_cell(detail: &TimerDetail) -> String {
     routine_cell(&detail.dpc_routine, &detail.dpc_routine_symbol)
 }
 
-fn print_timer_detail(detail: &TimerDetail, now: Option<u64>) {
+fn print_timer_detail(detail: &KernelTimer, now: Option<u64>) {
     outln!("timer {}", ui::addr(detail.address.0));
     outln!("  DueTime : {}", format_due_time(detail, now));
     outln!("  Period  : {}", diagnostic_cell(&detail.period));
@@ -674,7 +851,7 @@ fn print_timer_detail(detail: &TimerDetail, now: Option<u64>) {
     outln!();
 }
 
-fn print_timer_list(detail: &TimerListDetail) {
+fn print_timer_list(detail: &TimerTable) {
     outln!(
         "interrupt time {}",
         match &detail.interrupt_time {
@@ -725,7 +902,7 @@ fn print_timer_list(detail: &TimerListDetail) {
     }
 }
 
-fn print_apc_detail(label: &str, detail: &ApcDetail) {
+fn print_apc_detail(label: &str, detail: &Apc) {
     outln!(
         "  {label:<6} APC {}  KernelRoutine {}  NormalRoutine {}",
         ui::addr(detail.address.0),
@@ -734,7 +911,7 @@ fn print_apc_detail(label: &str, detail: &ApcDetail) {
     );
 }
 
-fn print_apcs(detail: &ApcListDetail) {
+fn print_apcs(detail: &ApcQueues) {
     if let Some(error) = &detail.layout_error {
         outln!("APC layout: <unavailable: {error}>\n");
     }
@@ -773,7 +950,7 @@ fn print_apcs(detail: &ApcListDetail) {
     }
 }
 
-fn print_work_item(item: &WorkItemDetail) {
+fn print_work_item(item: &WorkItem) {
     let routine = |address: VirtAddr, symbol: &Option<String>| match symbol {
         Some(symbol) => format!("{} ({})", ui::symbol(symbol), ui::addr(address.0)),
         None => ui::addr(address.0).to_string(),
@@ -795,7 +972,7 @@ fn print_work_item(item: &WorkItemDetail) {
     }
 }
 
-fn print_work_queues(detail: &ExQueueDetail) {
+fn print_work_queues(detail: &WorkQueues) {
     if let Some(selected) = &detail.priority_filter {
         let list: Vec<String> = selected.iter().map(u8::to_string).collect();
         outln!("items listed for priorities {} only", list.join(", "));
@@ -833,9 +1010,9 @@ fn print_work_queues(detail: &ExQueueDetail) {
                 types,
                 priority.current_count,
                 queue.concurrency,
-                priority.items.len()
+                priority.work_items.len()
             );
-            for item in &priority.items {
+            for item in &priority.work_items {
                 print_work_item(item);
             }
             if let Some(stop) = termination_message(&priority.termination) {
@@ -887,7 +1064,7 @@ fn print_work_queues(detail: &ExQueueDetail) {
     }
 }
 
-fn print_stacks(detail: &StacksDetail) {
+fn print_stacks(detail: &ThreadStacks) {
     let frame_bound = match detail.level {
         1 => 32,
         2 => 64,
@@ -972,7 +1149,7 @@ fn print_unwalked(unwalked: &[UnwalkedThread]) {
     }
 }
 
-fn print_findstack(detail: &FindStackDetail) {
+fn print_findstack(detail: &FindStack) {
     for thread in &detail.threads {
         outln!(
             "Thread {}, {} frame(s) match",
@@ -1026,7 +1203,7 @@ fn print_findstack(detail: &FindStackDetail) {
     outln!();
 }
 
-fn print_uniqstack(detail: &UniqStackDetail, options: UniqStackOptions) {
+fn print_uniqstack(detail: &UniqStacks, options: UniqStackOptions) {
     match &detail.scope {
         UniqStackScope::AllThreads => {
             outln!("{} thread(s) of every process\n", detail.scanned_threads)

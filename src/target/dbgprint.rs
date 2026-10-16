@@ -3,8 +3,8 @@
 //! `!dbgprint` shows. A backend without KD's debug-print stream reads guest
 //! debug output from it.
 
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
+use crate::memory::MemoryOps;
 use crate::target::Target;
 use crate::types::VirtAddr;
 

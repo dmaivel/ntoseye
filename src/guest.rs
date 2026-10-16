@@ -1,9 +1,8 @@
-use crate::backend::MemoryOps;
 use crate::{
     dmp::DmpInfo,
     error::{Error, Result},
     layout::ParsedType,
-    memory::{DTB_IDENTITY, SectionLayout, SectionViews},
+    memory::{DTB_IDENTITY, MemoryOps, SectionLayout, SectionViews},
     pe::headers::CodeView,
     phys::PhysMem,
     symbols::SymbolStore,
@@ -11,8 +10,10 @@ use crate::{
     target::object::DriverObjectInfo,
     types::*,
 };
+use ntoseye_macros::record;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, atomic::AtomicBool};
+use vad::{MissingOffset, VadTreeOffsets};
 
 mod discovery;
 pub mod ept;
@@ -27,17 +28,18 @@ mod image;
 mod modules;
 pub mod pdb_recovery;
 mod process;
-mod secure_kernel;
+pub mod secure_kernel;
 mod symbol_load;
 mod trustlet_layout;
+pub mod vad;
 pub mod vm_exits;
 pub mod vp_registers;
 
 use discovery::{
     find_kernel, find_ntoskrnl, find_ntoskrnl_va, find_ntoskrnl_va_arm64, find_ntoskrnl_va_triage,
 };
-pub use evmcs::{EvmcsCache, EvmcsPages, EvmcsState, exit_reason_name};
-pub use exit_registers::{ENTRY_CODE_BYTES, EXIT_GPRS, ExitRegisterLayout};
+pub use evmcs::{EvmcsCache, EvmcsPages, EvmcsState};
+pub use exit_registers::{ENTRY_CODE_BYTES, EXIT_GPRS, ExitRegisterLayout, ordered_exit_gprs};
 pub use hypervisor::{
     HvMemory, HvPartition, HvProcessor, HvVirtualProcessor, HvVtl, privilege_names,
 };
@@ -45,43 +47,74 @@ pub use image::{Image, SymbolRef};
 pub use modules::{UNKNOWN_MODULE_NAME, merge_wow64_modules, walk_loader_list, walk_loader_list32};
 pub use secure_kernel::{SecureKernel, TrustletInfo};
 
-/// A process's identity and the root (`dtb`) of its address space.
-#[derive(Debug, Clone)]
+/// The identity of a process (`ps`, `!process 0 0`) and the root (`dtb`) of
+/// its address space.
+#[record(impl)]
 pub struct ProcessInfo {
+    /// The process identifier.
     pub pid: u64,
+    /// The image name.
     pub name: String,
+    /// The directory table base (page-table root).
+    #[record(hex)]
     pub dtb: Dtb,
-    pub eprocess_va: VirtAddr,
+    /// The `_EPROCESS` address.
+    pub eprocess: VirtAddr,
     /// The 32-bit PEB of a WOW64 process (`_EPROCESS.WoW64Process`), `None`
     /// for a native process.
     pub wow64_peb: Option<VirtAddr>,
 }
 
+#[record]
 impl ProcessInfo {
+    /// True if it is a 32-bit process that runs under WOW64.
+    #[record(getter, rename = "wow64")]
     pub fn is_wow64(&self) -> bool {
         self.wow64_peb.is_some()
     }
 }
 
-/// module metadata from PEB LDR list
-#[derive(Debug, Clone)]
+/// A loaded module (kernel or process image), as its loader list records it.
+#[record(impl)]
 pub struct ModuleInfo {
+    /// The image name.
     pub name: String,
+    /// The name without its extension, as `nt!` and `lm` name the module
+    /// (`nt` for the kernel).
     pub short_name: String,
+    /// The full image path, if the loader recorded one.
     pub path: Option<String>,
+    /// The base address of the loaded image.
+    #[record(rename = "base")]
     pub base_address: VirtAddr,
+    /// The size of the mapped image.
     pub size: u32,
     /// From a WOW64 process's 32-bit loader list: x86 code, 4-byte pointers.
     pub is_32bit: bool,
     pub entry_point: Option<VirtAddr>,
+    /// The PE timestamp, if the loader record contains one.
+    #[record(hex, rename = "timestamp")]
     pub time_date_stamp: Option<u32>,
+    #[record(hex)]
     pub checksum: Option<u32>,
+    /// The file version from the version resource of the image.
     pub file_version: Option<String>,
+    /// The product version from the version resource of the image.
     pub product_version: Option<String>,
     /// The image's CodeView record when the module list itself records it
     /// (a user-mode minidump's module stream), so its PDB is known without
     /// reading the image.
+    #[record(skip)]
     pub codeview: Option<CodeView>,
+}
+
+#[record]
+impl ModuleInfo {
+    /// The address after the last byte of the image.
+    #[record(getter, rename = "end")]
+    pub fn end_address(&self) -> VirtAddr {
+        VirtAddr(self.base_address.0.saturating_add(self.size as u64))
+    }
 }
 
 impl ModuleInfo {
@@ -134,10 +167,6 @@ impl ModuleInfo {
         }
     }
 
-    pub fn end_address(&self) -> VirtAddr {
-        VirtAddr(self.base_address.0.saturating_add(self.size as u64))
-    }
-
     pub fn contains_address(&self, address: VirtAddr) -> bool {
         address.0 >= self.base_address.0 && address.0 < self.end_address().0
     }
@@ -151,10 +180,14 @@ pub struct ProcessModulesDetail {
     pub wow64_termination: Option<ListTermination>,
 }
 
+/// One problem that ntoseye found when it loaded the symbols of a module.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleSymbolDiagnostic {
     pub module: String,
+    /// The load step that reported it.
     pub phase: &'static str,
+    /// The compiland of the problem, if the problem is specific to one compiland.
     pub compiland: Option<String>,
     pub message: String,
 }
@@ -178,19 +211,27 @@ pub enum PdbRecovery {
     Requested,
 }
 
+/// The result of a symbol reload. It counts the modules that loaded, had
+/// no PDB, were skipped, failed, or are still being fetched, and keeps the
+/// first diagnostics up to a limit.
+#[record]
 #[derive(Debug, Clone, Default)]
 pub struct ModuleSymbolLoadReport {
     pub total: usize,
     pub loaded: usize,
-    /// Symbol-bearing modules removed from this DTB since the previous refresh.
+    /// The number of modules with symbols that unloaded after the previous refresh.
     pub unloaded: usize,
     pub no_pdb: usize,
     pub skipped: usize,
     pub failed: usize,
     /// Handed to the background fetcher; not yet loaded or failed.
     pub fetching: usize,
+    /// The number of all diagnostics, including those after the limit of `diagnostics`.
     pub diagnostic_count: usize,
     pub diagnostics: Vec<ModuleSymbolDiagnostic>,
+    /// Why resolving the symbolic breakpoints again after the reload
+    /// failed (`.reload`, `ld`); `None` if it did not fail or did not run.
+    pub breakpoint_error: Option<String>,
 }
 
 pub struct Guest {
@@ -609,8 +650,8 @@ fn section_layout(kernel: &Image) -> Option<SectionLayout> {
     let eprocess = types.layout("_EPROCESS").ok()?;
     let kprocess = types.layout("_KPROCESS").ok()?;
     let tree = types.layout("_RTL_AVL_TREE").ok()?;
-    let node = types.layout("_RTL_BALANCED_NODE").ok()?;
     let short = types.layout("_MMVAD_SHORT").ok()?;
+    let links = VadTreeOffsets::resolve(types, &short, MissingOffset::Fail).ok()?;
     let vad = types.layout("_MMVAD").ok()?;
     let flags = types.layout("_MMVAD_FLAGS").ok()?;
     let ParsedType::Bitfield { pos, .. } = flags.fields.get("PrivateMemory")?.type_data else {
@@ -623,9 +664,9 @@ fn section_layout(kernel: &Image) -> Option<SectionLayout> {
             + kprocess.field_offset("DirectoryTableBase").ok()?,
         root_mask: kernel.arch().dtb_page_mask(),
         vad_root: eprocess.field_offset("VadRoot").ok()? + tree.field_offset("Root").ok()?,
-        left: node.field_offset("Left").ok()?,
-        right: node.field_offset("Right").ok()?,
-        vad_node: short.field_offset("VadNode").ok()?,
+        left: links.left,
+        right: links.right,
+        vad_node: links.vad_node,
         starting_vpn: short.field_offset("StartingVpn").ok()?,
         ending_vpn: short.field_offset("EndingVpn").ok()?,
         starting_vpn_high: short.field_offset("StartingVpnHigh").ok(),

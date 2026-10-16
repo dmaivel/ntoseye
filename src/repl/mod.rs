@@ -41,8 +41,7 @@ use crate::guest::ModuleSymbolLoadReport;
 use crate::output::{log_input_line, prompting};
 #[cfg(feature = "python")]
 use crate::python::embed;
-use crate::session::Session;
-use crate::session::stepping::FollowWatch;
+use crate::session::{Motion, Session};
 use crate::symbols::ntoseye_home;
 #[cfg(all(unix, feature = "cli"))]
 use crate::target::InterruptRequester;
@@ -66,17 +65,6 @@ pub const BREAK_STACKTRACE_DISPLAY_LIMIT: usize = 6;
 pub const BREAK_STACKTRACE_PROBE_LIMIT: usize = 64;
 #[cfg(feature = "cli")]
 const REPL_HISTORY_SIZE: usize = 5000;
-macro_rules! require_arg {
-    ($invocation:expr, $idx:expr, $cmd:expr) => {
-        match $invocation.arg($idx) {
-            Some(a) => a,
-            None => {
-                outln!("{}\n", command_help($cmd));
-                return Ok(());
-            }
-        }
-    };
-}
 
 pub fn error(msg: &str) {
     diagnostics::print_error(msg);
@@ -89,12 +77,12 @@ macro_rules! error {
 }
 
 mod aliases;
+pub mod args;
 mod bugcheck;
 mod command;
 mod commands;
 mod completion;
 mod disasm;
-mod heap;
 #[cfg(feature = "cli")]
 mod line_editor;
 mod memory_view;
@@ -106,18 +94,16 @@ mod remote;
 mod stop;
 #[cfg(feature = "cli")]
 mod tern_prompt;
+pub mod usage;
 
 pub use crate::exception_policy::*;
-pub use crate::repl_command;
+pub use crate::session::effects::{RunEffect, RunState, TargetScope};
 pub use aliases::*;
 pub use bugcheck::*;
 pub use command::*;
-pub use commands::{command_reference_json, json_string};
+pub use commands::{ReplActions, command_reference_json, json_string};
 pub use completion::*;
 pub use disasm::*;
-pub use heap::*;
-#[cfg(feature = "cli")]
-pub use line_editor::LineCompletion;
 #[cfg(feature = "cli")]
 use line_editor::{CustomPrompt, MyCompleter, TrackingHighlighter};
 pub use memory_view::*;
@@ -233,14 +219,6 @@ pub fn print_backend_capability_warning(capabilities: &[BackendCapability]) {
     outln!();
 }
 
-pub fn print_plain_table(builder: Builder) {
-    let mut table = builder.build();
-    table
-        .with(tabled::settings::Style::empty())
-        .with(Padding::zero());
-    outln!("{table}\n");
-}
-
 pub fn print_padded_table(builder: Builder) {
     let mut table = builder.build();
     table
@@ -294,9 +272,6 @@ pub struct ReplState<'a> {
     pub line: String,
     /// Who is dispatching; decides which [`RunEffect`]s a command may have.
     pub context: DispatchContext,
-    /// Set while a multi-step command (`pa`, `pt`, `wt`...) drives the
-    /// target: intermediate stops are not rendered, only the final one.
-    pub quiet_stops: bool,
     /// Where `ls` continues: the file and the line after the last one listed.
     pub source_cursor: Option<(PathBuf, u32)>,
     /// The pattern and address `#` continues with.
@@ -310,9 +285,6 @@ pub struct ReplState<'a> {
     /// keeps running and the host collects the stop on a later call with
     /// [`ReplState::collect_stop`].
     pub stop_wait: Option<StopWaitBudget>,
-    /// The watch on the thread a step's run-to site waits for, whose stops
-    /// the continue loop takes (see [`Session::watch_followed`]).
-    pub follow_watch: Option<FollowWatch>,
     /// Set once this dispatch rendered a stop the remote client has not seen
     /// (parked between calls, or collected while waiting for a halt), so a
     /// resume later on the same line is refused once rather than continuing
@@ -325,7 +297,7 @@ pub struct ReplState<'a> {
     pub line_depth: usize,
     /// The next line of debug output read from the kernel's DbgPrint
     /// buffer to print, for a backend without KD's stream, which prints
-    /// its own (see [`ReplState::print_kernel_prints`]).
+    /// its own: the interactive prompt prints them while a run waits.
     pub printed_debug_seq: u64,
     /// What `!virtio` and `!vring` last saw of each queue, to show what
     /// moved since.
@@ -418,11 +390,11 @@ pub struct ReplStore {
 impl ReplStore {
     /// Fresh REPL state for `ctx`: caches seeded from the current symbol
     /// context, persisted aliases loaded, default exception policies and radix.
+    /// The symbol and type indexes are built when a search first reads them.
     pub fn new(ctx: &Session, context: DispatchContext) -> Self {
-        let indexed_at = ctx.target.symbols.load_generation();
         let caches = ReplCaches {
-            symbols: Arc::new(RwLock::new(ctx.target.current_symbol_index())),
-            types: Arc::new(RwLock::new(ctx.target.current_types_index())),
+            symbols: Arc::default(),
+            types: Arc::default(),
             symbol_store: Arc::clone(&ctx.target.symbols),
             dtb: Arc::new(RwLock::new(ctx.target.current_dtb())),
             processes: Arc::new(RwLock::new(Vec::new())),
@@ -435,7 +407,7 @@ impl ReplStore {
             user_commands: Arc::new(RwLock::new(initial_user_commands())),
             aliases: Arc::new(RwLock::new(Vec::new())),
             partition: Arc::new(AtomicU64::new(ctx.partition().unwrap_or(0))),
-            indexed_at: Arc::new(AtomicU64::new(indexed_at)),
+            indexed_at: Arc::new(AtomicU64::new(NOT_INDEXED)),
         };
         caches.refresh_expression_context(&ctx.target);
         let aliases = UserAliases::load();
@@ -539,12 +511,10 @@ impl<'a> ReplState<'a> {
             breakable_loop: false,
             line: String::new(),
             context: store.context,
-            quiet_stops: false,
             source_cursor: store.source_cursor,
             disasm_search: store.disasm_search,
             disasm_cursor: store.disasm_cursor,
             stop_wait: None,
-            follow_watch: None,
             unseen_stop_rendered: false,
             line_depth: 0,
             printed_debug_seq: 0,
@@ -980,10 +950,9 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     // Process and driver lists are never walked ahead of use: completions
     // enumerate them on demand through the target loan below, and listing
     // commands refresh the fallback snapshots as a side effect.
-    let indexed_at = debugger.symbols.load_generation();
     let caches = ReplCaches {
-        symbols: Arc::new(RwLock::new(debugger.current_symbol_index())),
-        types: Arc::new(RwLock::new(debugger.current_types_index())),
+        symbols: Arc::default(),
+        types: Arc::default(),
         symbol_store: Arc::clone(&debugger.symbols),
         dtb: Arc::new(RwLock::new(debugger.current_dtb())),
         processes: Arc::new(RwLock::new(Vec::new())),
@@ -998,8 +967,14 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         aliases: Arc::new(RwLock::new(aliases.entries())),
         // A session starts on the target; only `.partition` shows a view.
         partition: Arc::new(AtomicU64::new(0)),
-        indexed_at: Arc::new(AtomicU64::new(indexed_at)),
+        indexed_at: Arc::new(AtomicU64::new(NOT_INDEXED)),
     };
+    // The tab completer reads the symbol and type indexes as the first line
+    // is typed, so they are built before the prompt. The plain REPL has no
+    // completer and builds them when a search first needs them.
+    if !plain {
+        caches.refresh_loaded_symbols(debugger);
+    }
     caches.refresh_expression_context(debugger);
 
     let target_loan = TargetLoan::default();
@@ -1049,12 +1024,10 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         breakable_loop: false,
         line: String::new(),
         context: DispatchContext::Interactive,
-        quiet_stops: false,
         source_cursor: None,
         disasm_search: DisasmSearch::default(),
         disasm_cursor: None,
         stop_wait: None,
-        follow_watch: None,
         unseen_stop_rendered: false,
         line_depth: 0,
         printed_debug_seq: 0,
@@ -1159,7 +1132,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                         }
 
                         if state.ctx.backend.is_running() {
-                            state.interrupt_running_vm()?;
+                            state.run_motion(Motion::Break);
                         } else {
                             outln!("{}", ui::muted("the target is already halted"));
                         }
@@ -1216,13 +1189,17 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::dbg_backend::BugcheckInfo;
+    use crate::dbg_backend::{BugcheckInfo, StopEvent};
     use crate::layout::{FieldInfo, ParsedType, TypeInfo};
     use crate::output::capture;
-    use crate::repl::{Flow, ReplState};
-    use crate::session::tests::{MockBackend, breakpoint_event, session_with_mock};
+    use crate::repl::{DispatchContext, Flow, RemoteClient, ReplState};
+    use crate::session::tests::{
+        MockBackend, breakpoint_event, session_running_code, session_with_mock,
+    };
     use crate::session::{Session, session_over_memory};
     use crate::types::VirtAddr;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
 
     use super::{
         bugcheck_fault_ip, looks_like_kernel_pointer, parse_byte_pattern, plausible_bugcheck_code,
@@ -1411,8 +1388,7 @@ mod tests {
         let mut session = session_with_mock(MockBackend::default().running());
         let mut state = remote_state(&mut session, 150);
         let started = std::time::Instant::now();
-        let (result, text) = capture(|| state.collect_stop());
-        result.unwrap();
+        let ((), text) = capture(|| state.collect_stop());
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
         assert!(text.contains("target still running"), "{text:?}");
         assert!(state.ctx.backend.is_running());
@@ -1424,8 +1400,7 @@ mod tests {
         backend.queue_interrupt(breakpoint_event(0x1000));
         let mut session = session_with_mock(backend);
         let mut state = remote_state(&mut session, 5_000);
-        let (result, text) = capture(|| state.collect_stop());
-        result.unwrap();
+        let ((), text) = capture(|| state.collect_stop());
         assert!(!state.ctx.backend.is_running());
         assert!(!text.contains("target still running"), "{text:?}");
     }
@@ -1530,7 +1505,7 @@ mod tests {
         assert!(!session.backend.is_running(), "the stop was not parked");
         let mut state = remote_state(&mut session, 5_000);
         let (begin, _) = capture(|| state.begin_remote_line("bd; g"));
-        assert!(begin.unwrap().is_none());
+        assert!(begin.is_none());
         let (result, text) = capture(|| state.dispatch_line("bd; g"));
         assert_eq!(result.unwrap(), Flow::Denied);
         assert!(
@@ -1542,6 +1517,25 @@ mod tests {
             !state.ctx.backend.is_running(),
             "the parked stop was continued past"
         );
+    }
+
+    /// `.pagein` resumes the target for the guest's worker, so every context
+    /// that must not move the target refuses it, as it refuses `g`.
+    #[test]
+    fn pagein_is_refused_where_run_control_is() {
+        for context in [
+            DispatchContext::BreakpointAction,
+            DispatchContext::ExceptionCommand,
+            DispatchContext::Remote(RemoteClient::Gdb),
+            DispatchContext::Remote(RemoteClient::Dap),
+        ] {
+            let mut session = session_with_mock(MockBackend::default());
+            let mut state = ReplState::for_oneshot(&mut session);
+            state.context = context;
+            let (result, text) = capture(|| state.dispatch_line(".pagein 1000"));
+            assert_eq!(result.unwrap(), Flow::Denied, "{context:?}: {text}");
+            assert!(text.contains("'.pagein'"), "{context:?}: {text}");
+        }
     }
 
     #[test]
@@ -1640,5 +1634,182 @@ mod tests {
             "{text:?}"
         );
         assert_eq!(text.lines().count(), 1, "{text:?}");
+    }
+
+    /// The `_ETHREAD` the mock's vCPU runs in the run-command tests below.
+    const THREAD: u64 = 0xffff_8000_0000_a000;
+    /// Its stack pointer.
+    const STACK: u64 = 0x2000;
+
+    /// A vCPU at `rip` in nops at 0x1000.., which takes breakpoints.
+    fn vcpu_at(rip: u64) -> MockBackend {
+        MockBackend::default()
+            .with_breakpoints()
+            .one_vcpu()
+            .standing_at(rip, STACK, THREAD)
+    }
+
+    fn rip(state: &mut ReplState<'_>) -> u64 {
+        let registers = state.ctx.backend.read_registers().unwrap();
+        state.ctx.register_map.read_u64("rip", &registers).unwrap()
+    }
+
+    /// `g` runs until the breakpoint `bp` set, and renders that hit.
+    #[test]
+    fn g_stops_at_the_breakpoint_bp_set() {
+        let backend = vcpu_at(0x1010).runs_stopping_at(&[(0x1000, STACK, THREAD)]);
+        let sites = backend.site_log();
+        let mut session = session_running_code(&[0x90; 0x40], backend);
+        let mut state = remote_state(&mut session, 5_000);
+
+        let (result, text) = capture(|| state.dispatch_line("bp 1000; g"));
+        assert_eq!(result.unwrap(), Flow::Continue);
+        assert!(text.contains("breakpoint #0"), "{text:?}");
+        assert!(!state.ctx.backend.is_running());
+        assert_eq!(rip(&mut state), 0x1000);
+        assert!(sites.lock().contains(&(0x1000, true)), "{:?}", sites.lock());
+    }
+
+    /// `t` executes one instruction and stops after it.
+    #[test]
+    fn t_steps_one_instruction() {
+        let mut session = session_running_code(&[0x90; 0x40], vcpu_at(0x1000));
+        let mut state = remote_state(&mut session, 5_000);
+
+        let (result, text) = capture(|| state.dispatch_line("t"));
+        assert_eq!(result.unwrap(), Flow::Continue, "{text:?}");
+        assert!(!state.ctx.backend.is_running());
+        assert_eq!(rip(&mut state), 0x1001, "{text:?}");
+    }
+
+    /// `p` on a call runs to the return site rather than stepping into the
+    /// callee, and lifts the temporary breakpoint it planted there.
+    #[test]
+    fn p_runs_over_a_call_to_its_return_site() {
+        let mut code = [0x90u8; 0x40];
+        code[..5].copy_from_slice(&[0xe8, 0x1b, 0x00, 0x00, 0x00]); // call 0x1020
+        let backend = vcpu_at(0x1000).runs_stopping_at(&[(0x1005, STACK, THREAD)]);
+        let sites = backend.site_log();
+        let continues = backend.continue_count();
+        let mut session = session_running_code(&code, backend);
+        let mut state = remote_state(&mut session, 5_000);
+
+        let (result, text) = capture(|| state.dispatch_line("p"));
+        assert_eq!(result.unwrap(), Flow::Continue, "{text:?}");
+        assert_eq!(rip(&mut state), 0x1005, "{text:?}");
+        assert_eq!(continues.load(Ordering::Relaxed), 1);
+        let sites = sites.lock();
+        assert!(sites.iter().all(|&(site, _)| site == 0x1005), "{sites:?}");
+        assert_eq!(sites.last(), Some(&(0x1005, false)));
+        assert!(state.ctx.breakpoints.list().is_empty());
+    }
+
+    /// A hit whose `do` action ends in `gc` runs the action and resumes: the
+    /// run goes on to the next breakpoint, which has no action and stops.
+    #[test]
+    fn a_do_action_ending_in_gc_resumes_past_its_hit() {
+        let backend =
+            vcpu_at(0x1020).runs_stopping_at(&[(0x1000, STACK, THREAD), (0x1010, STACK, THREAD)]);
+        let continues = backend.continue_count();
+        let mut session = session_running_code(&[0x90; 0x40], backend);
+        let mut state = remote_state(&mut session, 5_000);
+
+        let (result, text) =
+            capture(|| state.dispatch_line(r#"bp 1000 do ".echo action ran; gc"; bp 1010; g"#));
+        assert_eq!(result.unwrap(), Flow::Continue, "{text:?}");
+        assert_eq!(text.matches("action ran").count(), 1, "{text:?}");
+        assert_eq!(text.matches(" BREAK ").count(), 1, "{text:?}");
+        assert!(text.contains("├─ breakpoint #1"), "{text:?}");
+        assert_eq!(rip(&mut state), 0x1010);
+        assert_eq!(continues.load(Ordering::Relaxed), 2);
+    }
+
+    /// `bl` lists each breakpoint with its state, site, condition and
+    /// action; `bc` clears the ones it names, and `bc *` the rest.
+    #[test]
+    fn bl_lists_what_bp_set_and_bc_clears_it() {
+        let mut session = session_running_code(&[0x90; 0x40], vcpu_at(0x1020));
+        let mut state = remote_state(&mut session, 5_000);
+        let (result, text) = capture(|| {
+            state.dispatch_line(r#"bp 1000 if @rax == 5; bp 1010 do "r rax"; bp 1018; bd 2"#)
+        });
+        assert_eq!(result.unwrap(), Flow::Continue, "{text:?}");
+
+        let (result, text) = capture(|| state.dispatch_line("bl"));
+        result.unwrap();
+        let row = |id: &str| {
+            text.lines()
+                .find(|line| line.split_whitespace().any(|word| word == id))
+                .unwrap_or_else(|| panic!("no row for {id}: {text:?}"))
+                .to_string()
+        };
+        let (first, second, third) = (row("#0"), row("#1"), row("#2"));
+        assert!(first.contains("0000000000001000"), "{first:?}");
+        assert!(first.contains("@rax == 5"), "{first:?}");
+        assert!(second.contains("0000000000001010"), "{second:?}");
+        assert!(second.contains("r rax"), "{second:?}");
+        assert!(third.contains(" d "), "{third:?}");
+        assert!(first.contains(" e "), "{first:?}");
+
+        let (result, text) = capture(|| state.dispatch_line("bc 1"));
+        result.unwrap();
+        assert!(text.contains("breakpoint #1 cleared"), "{text:?}");
+        let ids = |state: &ReplState<'_>| -> Vec<u32> {
+            state
+                .ctx
+                .breakpoints
+                .list()
+                .iter()
+                .map(|bp| bp.id)
+                .collect()
+        };
+        assert_eq!(ids(&state), [0, 2]);
+
+        let (result, _) = capture(|| state.dispatch_line("bc *"));
+        result.unwrap();
+        assert!(ids(&state).is_empty());
+        let (result, text) = capture(|| state.dispatch_line("bl"));
+        result.unwrap();
+        assert!(text.contains("no breakpoints set"), "{text:?}");
+    }
+
+    /// `sxe` makes a first-chance exception the default policy passes on
+    /// stop the target, and its `-c` command runs at that stop.
+    #[test]
+    fn sxe_stops_on_the_exception_and_runs_its_command() {
+        const ACCESS_VIOLATION: u32 = 0xC000_0005;
+        let mut backend = vcpu_at(0x1020).running();
+        backend.queue_interrupt(StopEvent {
+            exception_code: Some(ACCESS_VIOLATION),
+            ..breakpoint_event(0x1020)
+        });
+        let mut session = session_running_code(&[0x90; 0x40], backend);
+        let mut state = remote_state(&mut session, 5_000);
+
+        let (result, text) = capture(|| state.dispatch_line(r#"sxe -c ".echo seen" -f break av"#));
+        assert_eq!(result.unwrap(), Flow::Continue, "{text:?}");
+        assert!(text.contains("sxe 0xc0000005 (av)"), "{text:?}");
+
+        let (flow, text) = capture(|| state.begin_remote_line(""));
+        assert_eq!(flow, Some(Flow::Continue));
+        assert!(!state.ctx.backend.is_running(), "{text:?}");
+        assert!(text.contains("seen"), "{text:?}");
+        assert!(text.contains("exception 0xc0000005"), "{text:?}");
+    }
+
+    /// A remote client's budget ends `wt` where it got to, halted, and the
+    /// trace says it was interrupted rather than running to its limit.
+    #[test]
+    fn wt_ends_within_the_remote_budget() {
+        let backend = vcpu_at(0x1000).with_register_read_delay(Duration::from_millis(5));
+        let mut session = session_running_code(&[0x90; 0x1000], backend);
+        let mut state = remote_state(&mut session, 150);
+
+        let started = Instant::now();
+        let (result, text) = capture(|| state.dispatch_line("wt"));
+        assert_eq!(result.unwrap(), Flow::Continue, "{text:?}");
+        assert!(started.elapsed() < Duration::from_secs(2), "{text:?}");
+        assert!(text.contains("wt interrupted after"), "{text:?}");
+        assert!(!state.ctx.backend.is_running());
     }
 }

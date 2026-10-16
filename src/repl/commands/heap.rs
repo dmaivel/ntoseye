@@ -1,24 +1,123 @@
 use tabled::builder::Builder;
 
 use crate::error::Result;
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
+use crate::session::Session;
 use crate::target::DiagnosticValue;
 use crate::target::heap::{
-    BlockMatch, HeapBlockDetail, HeapBlockSearchDetail, HeapDetail, HeapKind, HeapSelector,
-    HeapSummaryDetail, NT_ENTRY_EXTRA_PRESENT, NT_ENTRY_FILL_PATTERN, NT_ENTRY_LAST,
-    NT_ENTRY_VIRTUAL_ALLOC, NtEntry, NtHeapDetail, RangeKind, SegmentHeapDetail,
-    SegmentRangeDetail, SegmentSubsegment, VsChunk,
+    BlockMatch, HeapBlock, HeapBlockSearch, HeapDetail, HeapKind, HeapSelector, HeapSummaryDetail,
+    NT_ENTRY_EXTRA_PRESENT, NT_ENTRY_FILL_PATTERN, NT_ENTRY_LAST, NT_ENTRY_VIRTUAL_ALLOC, NtEntry,
+    NtHeapDetail, RangeKind, SegmentHeapDetail, SegmentRangeDetail, SegmentSubsegment, VsChunk,
 };
 use crate::types::VirtAddr;
 use crate::ui;
+use ntoseye_macros::{command, grammar};
 
-repl_command! {
-    cmd_heap;
-    names: ["!heap", "heap"],
-    usage: "!heap [-s] [-h|-a <heap>] [-x <address>] [-p -a <address>]",
-    summary: "Summarize, walk, or search the user-mode heaps of the attached process, or of a user-mode minidump's process.",
-    details: "With no arguments or with -s, the command lists each heap in the PEB with its kind and sizes. -h decodes the segments of one heap, and -a does the same and also lists each entry, chunk, and block. -x finds the block that contains an address, and -p -a does the same search. To identify a heap, use its index in the PEB list or its address. The command decodes NT heaps, including legacy-LFH blocks, and segment heaps, including VS, LFH, page, and large allocations. It gets the encoding keys from ntdll symbols. For NT heaps, it uses _HEAP.Encoding and finds legacy-LFH blocks through their user block regions. For segment heaps, it uses the keys in ntdll!RtlpHpHeapGlobals. In a WOW64 process, the command shows the 32-bit heaps and decodes them with the layouts and keys of ntdll32.",
-    completion: [None, Expression],
+/// Summarize, walk, or search the user-mode heaps of the attached process,
+/// or of a user-mode minidump's process.
+///
+/// With no arguments or with -s, the command lists each heap in the PEB with
+/// its kind and sizes. -h decodes the segments of one heap, and -a does the
+/// same and also lists each entry, chunk, and block. -x finds the block that
+/// contains an address, and -p -a does the same search. To identify a heap,
+/// use its index in the PEB list or its address. The command decodes NT
+/// heaps, including legacy-LFH blocks, and segment heaps, including VS, LFH,
+/// page, and large allocations. It gets the encoding keys from ntdll
+/// symbols. For NT heaps, it uses _HEAP.Encoding and finds legacy-LFH blocks
+/// through their user block regions. For segment heaps, it uses the keys in
+/// ntdll!RtlpHpHeapGlobals. In a WOW64 process, the command shows the 32-bit
+/// heaps and decodes them with the layouts and keys of ntdll32.
+#[command(
+    names = ["!heap", "heap"],
+    category = "user mode",
+    kind = Query,
+    target = Nt,
+    forms = [inspect_heap, find_block],
+)]
+fn heap(session: &Session, #[arg(parse = heap_query)] query: HeapQuery) -> Result<HeapReport> {
+    let target = &session.target;
+    Ok(match query {
+        HeapQuery::Summary => HeapReport::Summary(target.heap_summary()?),
+        HeapQuery::Detail { heap, entries } => {
+            // WinDbg's index-first selection: a value is an index when that
+            // index exists, otherwise a heap address.
+            let summary = target.heap_summary()?;
+            let selector = if usize::try_from(heap.0)
+                .ok()
+                .is_some_and(|index| summary.heaps.iter().any(|heap| heap.index == index))
+            {
+                HeapSelector::Index(heap.0 as usize)
+            } else {
+                HeapSelector::Address(heap)
+            };
+            HeapReport::Detail(inspect_heap(session, selector, entries)?)
+        }
+        HeapQuery::Find(address) => HeapReport::Find(find_block(session, address)?),
+    })
+}
+
+/// Decode this heap (`!heap -h`), with its entries if `list_entries` is
+/// true.
+#[command(form_of = heap, python = Heap, python_name = "inspect")]
+fn inspect_heap(
+    session: &Session,
+    #[arg(receiver)] heap: HeapSelector,
+    #[arg(default = false)] list_entries: bool,
+) -> Result<HeapDetail> {
+    session.target.inspect_heap(heap, list_entries)
+}
+
+/// Find the heap block that contains `address` (`!heap -x`).
+#[command(form_of = heap, python = Heaps)]
+fn find_block(session: &Session, address: VirtAddr) -> Result<HeapBlockSearch> {
+    session.target.find_heap_block(address)
+}
+
+/// What `!heap` was asked for, its expressions evaluated.
+pub enum HeapQuery {
+    Summary,
+    Detail { heap: VirtAddr, entries: bool },
+    Find(VirtAddr),
+}
+
+/// What `!heap` shows: the PEB's heap list, one heap, or a block search.
+pub enum HeapReport {
+    Summary(HeapSummaryDetail),
+    Detail(HeapDetail),
+    Find(HeapBlockSearch),
+}
+
+impl Render for HeapReport {
+    fn render(&self, repl: &mut ReplState<'_>, (): ()) {
+        match self {
+            Self::Summary(summary) => repl.heap_summary(summary),
+            Self::Detail(detail) => repl.heap_detail(detail),
+            Self::Find(search) => repl.heap_find(search),
+        }
+    }
+}
+
+#[grammar(
+    usage = "[-s] | [-h|-a] <heap> | -x <address> | -p -a <address>",
+    complete = [None, Expression]
+)]
+fn heap_query(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<HeapQuery, ArgError> {
+    let mut words = Vec::with_capacity(cursor.remaining());
+    while let Some(word) = cursor.word() {
+        words.push(word);
+    }
+    Ok(match parse_request(&words).ok_or(ArgError::Missing)? {
+        Request::Summary => HeapQuery::Summary,
+        Request::Detail { heap, entries } => HeapQuery::Detail {
+            heap: cx.eval(&heap)?,
+            entries,
+        },
+        Request::Find(text) => HeapQuery::Find(cx.eval(&text)?),
+    })
 }
 
 /// `HEAP_*` creation flags, as `_HEAP.Flags` records them.
@@ -129,7 +228,7 @@ fn vs_chunk_line(chunk: &VsChunk) -> String {
     line
 }
 
-fn heap_block_line(block: &HeapBlockDetail) -> String {
+fn heap_block_line(block: &HeapBlock) -> String {
     let mut line = format!(
         "{}  size {:<7}",
         ui::addr(block.address.0),
@@ -146,75 +245,7 @@ fn heap_block_line(block: &HeapBlockDetail) -> String {
 }
 
 impl ReplState<'_> {
-    fn cmd_heap(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(request) = parse_request(&invocation.argv) else {
-            outln!("{}\n", command_help("!heap"));
-            return Ok(());
-        };
-        match request {
-            Request::Summary => match self.ctx.target.heap_summary() {
-                Ok(summary) => self.heap_summary(&summary),
-                Err(error) => {
-                    error!("{error}");
-                    Ok(())
-                }
-            },
-            Request::Detail { heap, entries } => {
-                let Some(selector) = self.parse_heap_selector(&heap) else {
-                    return Ok(());
-                };
-                match self.ctx.target.inspect_heap(selector, entries) {
-                    Ok(detail) => {
-                        self.heap_detail(&detail);
-                        Ok(())
-                    }
-                    Err(error) => {
-                        error!("{error}");
-                        Ok(())
-                    }
-                }
-            }
-            Request::Find(text) => {
-                let Some(address) = self.eval_or_report(&text) else {
-                    return Ok(());
-                };
-                match self.ctx.target.find_heap_block(address) {
-                    Ok(detail) => {
-                        self.heap_find(&detail);
-                        Ok(())
-                    }
-                    Err(error) => {
-                        error!("{error}");
-                        Ok(())
-                    }
-                }
-            }
-        }
-    }
-
-    /// Preserve WinDbg's index-first selection while passing a plain selector
-    /// to the target core.  A numeric value is an index when that index exists;
-    /// otherwise it is interpreted as a heap address.
-    fn parse_heap_selector(&self, text: &str) -> Option<HeapSelector> {
-        let VirtAddr(value) = self.eval_or_report(text)?;
-        let summary = match self.ctx.target.heap_summary() {
-            Ok(summary) => summary,
-            Err(error) => {
-                error!("{error}");
-                return None;
-            }
-        };
-        if usize::try_from(value)
-            .ok()
-            .is_some_and(|index| summary.heaps.iter().any(|heap| heap.index == index))
-        {
-            Some(HeapSelector::Index(value as usize))
-        } else {
-            Some(HeapSelector::Address(VirtAddr(value)))
-        }
-    }
-
-    fn heap_summary(&self, summary: &HeapSummaryDetail) -> Result<()> {
+    fn heap_summary(&self, summary: &HeapSummaryDetail) {
         outln!(
             "{} process heap(s), PEB {}",
             summary.heaps.len(),
@@ -224,7 +255,7 @@ impl ReplState<'_> {
             outln!("heap list truncated at the decoder bound");
         }
         if summary.heaps.is_empty() {
-            return Ok(());
+            return;
         }
         let mut builder = Builder::default();
         builder.push_record([
@@ -280,7 +311,7 @@ impl ReplState<'_> {
             builder.push_record([
                 heap.index.to_string(),
                 ui::addr(heap.address.0),
-                heap_kind_name(heap.kind),
+                heap.kind.to_string(),
                 flags,
                 reserved,
                 committed,
@@ -289,7 +320,6 @@ impl ReplState<'_> {
             ]);
         }
         print_padded_table(builder);
-        Ok(())
     }
 
     fn heap_detail(&self, detail: &HeapDetail) {
@@ -438,8 +468,8 @@ impl ReplState<'_> {
             heap.large_allocations.len(),
             heap.large_reserved_pages * 0x1000,
             heap.large_committed_pages * 0x1000,
-            heap.keys.heap_key,
-            heap.keys.lfh_key
+            heap.encoding_keys.heap_key,
+            heap.encoding_keys.lfh_key
         );
         for context_detail in &detail.contexts {
             let context = &context_detail.context;
@@ -538,7 +568,7 @@ impl ReplState<'_> {
         }
     }
 
-    fn heap_find(&self, detail: &HeapBlockSearchDetail) {
+    fn heap_find(&self, detail: &HeapBlockSearch) {
         for error in &detail.errors {
             error!("{error}");
         }
@@ -556,7 +586,7 @@ impl ReplState<'_> {
             "{} is in heap {} ({} heap, index {})",
             ui::addr(detail.address.0),
             ui::addr(heap.address.0),
-            heap_kind_name(heap.kind),
+            heap.kind,
             heap.index
         );
         if let Some(block) = &detail.block {
@@ -615,9 +645,10 @@ fn print_block(block: &BlockMatch) {
         BlockMatch::NtSegmentOnly { segment, stopped } => {
             outln!("  segment {}", ui::addr(segment.0));
             match stopped {
-                Some((address, reason)) => outln!(
+                Some(stop) => outln!(
                     "  not reached: the entry walk stopped at {}: {reason}",
-                    ui::addr(address.0)
+                    ui::addr(stop.address.0),
+                    reason = stop.reason
                 ),
                 None => outln!("  in an uncommitted range or the segment header"),
             }

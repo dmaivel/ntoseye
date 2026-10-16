@@ -5,61 +5,74 @@ use std::sync::OnceLock;
 
 use linkme::distributed_slice;
 
-use crate::dbg_backend::{DebugCapability, halt_unreachable_reason};
 use crate::error::Result;
+use crate::repl::usage::ArgGrammar;
 use crate::repl::{CompletionStrategy, Flow, ReplState, error};
+use crate::session::effects::{Effects, Refusal};
+use crate::ui;
 
 #[distributed_slice]
 pub static COMMANDS: [CommandSpec];
 
+/// One command: its names and help (the REPL's `help`, the docs' command
+/// reference), how its arguments complete, what it needs and changes
+/// ([`Effects`], which [`crate::session::Session::admit`] enforces), and its
+/// handler. Every `#[command]` registers one in [`COMMANDS`].
 pub struct CommandSpec {
     pub names: &'static [&'static str],
+    /// The `help` listing's and the command reference's group.
+    pub category: &'static str,
+    pub kind: CommandKind,
+    /// Generated from `args`: a line per form of the command, each
+    /// starting with its canonical name (see [`crate::repl::usage`]).
     pub usage: &'static str,
     pub summary: &'static str,
     pub details: Option<&'static str>,
+    /// Generated from `args`: how each word of the line completes.
     pub completion: CompletionSpec,
-    pub run_state: Option<RunState>,
-    pub run: RunEffect,
+    /// The arguments the line gives, in order, with their grammar.
+    pub args: &'static [ArgGrammar],
+    pub effects: Effects,
     pub style: CommandStyle,
-    pub target: TargetRequirement,
     pub flow: Flow,
     pub handler: CommandHandler,
 }
 
-/// What a command needs of the target besides its run state. A halted
-/// user-mode minidump passes every run-state check, so a command that reads
-/// kernel structures says so here and is refused there with one message,
-/// whatever name or alias runs it.
+/// What a `#[command]` does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TargetRequirement {
-    Any,
-    /// A Windows kernel: a live target or a kernel dump.
-    Kernel,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RunState {
-    Halted,
-    /// Halted, unless the context is a parked Windows thread (`.thread`)
-    /// and no vCPU's registers: its stack, frames, and their recovered
-    /// registers are read from memory, which a running target (and the
-    /// memory backend, which always runs) serves live.
-    HaltedOrParkedThread,
-    Running,
-}
-
-/// What a command does to target execution, so dispatch contexts that must
-/// not let a command move the target (breakpoint actions, exception
-/// commands, a remote host with its own run-control) can refuse it by
-/// metadata rather than by a name list that aliases can bypass.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RunEffect {
-    /// Leaves execution state alone (or only pauses it).
-    None,
-    /// Executes one instruction and returns promptly.
-    Step,
-    /// Resumes until the next stop; may block indefinitely.
+pub enum CommandKind {
+    /// Reads state and returns a record.
+    Query,
+    /// Changes guest, debugger or symbol state and returns what changed.
+    Action,
+    /// Resumes or steps the target.
     Run,
+    /// Acts on the REPL itself (aliases, scripting, output); no SDK form.
+    Host,
+}
+
+/// How a `#[command]`'s result reads in the REPL. `O` is the command's
+/// render options, its `#[arg(render)]` arguments (one value, or a tuple
+/// in order): the WinDbg flags that only choose what the text shows, which
+/// the record never depends on. The text goes through `outln!`, which the
+/// host captures; the REPL state is there for what only the REPL keeps
+/// (completion caches, the inspection selection) and for text that
+/// composes further reads, such as a thread's stack.
+pub trait Render<O = ()> {
+    fn render(&self, repl: &mut ReplState<'_>, options: O);
+}
+
+/// An action that printed what it did as it went.
+impl Render for () {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {}
+}
+
+/// A result that is one line of text (a path the command wrote): the line
+/// and a blank one.
+impl Render for String {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        outln!("{self}\n");
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,23 +82,17 @@ pub enum CommandStyle {
     ExpressionTail,
 }
 
-#[derive(Clone, Copy)]
-pub enum CompletionSpec {
-    None,
-    All(CompletionStrategy),
-    PerArg(&'static [CompletionStrategy]),
+/// How a command's words complete: the `n`th word by `words[n]`, and every
+/// word after them by `rest`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompletionSpec {
+    pub words: &'static [CompletionStrategy],
+    pub rest: CompletionStrategy,
 }
 
 impl CompletionSpec {
     pub fn strategy_for_arg(self, index: usize) -> CompletionStrategy {
-        match self {
-            Self::None => CompletionStrategy::None,
-            Self::All(strategy) => strategy,
-            Self::PerArg(strategies) => strategies
-                .get(index)
-                .copied()
-                .unwrap_or(CompletionStrategy::None),
-        }
+        self.words.get(index).copied().unwrap_or(self.rest)
     }
 }
 
@@ -96,7 +103,6 @@ pub enum CommandHandler {
     /// passes on how they ended, so a refusal inside it abandons the rest of
     /// the line and reaches the host as one typed directly would.
     ArgsFlow(fn(&mut ReplState<'_>, CommandInvocation<'_>) -> Result<Flow>),
-    NoArgs(fn(&mut ReplState<'_>) -> Result<()>),
 }
 
 pub struct CommandInvocation<'a> {
@@ -108,16 +114,6 @@ pub struct CommandInvocation<'a> {
 impl<'a> CommandInvocation<'a> {
     pub fn arg(&self, index: usize) -> Option<&str> {
         self.argv.get(index).map(|arg| arg.as_ref())
-    }
-
-    pub fn join_args(&self, start: usize) -> String {
-        self.argv
-            .get(start..)
-            .unwrap_or(&[])
-            .iter()
-            .map(|arg| arg.as_ref())
-            .collect::<Vec<_>>()
-            .join(" ")
     }
 }
 
@@ -174,9 +170,21 @@ pub fn command_help(name: &str) -> String {
     spec_help(spec)
 }
 
+/// `reason`, then command `name`'s generated usage, its forms on one line
+/// joined by ` | `: what a command reports for a line it cannot read, so no
+/// message spells out a usage by hand.
+pub fn usage_error(name: &str, reason: impl std::fmt::Display) -> String {
+    match command_registry().get(name) {
+        Some(spec) => format!("{reason}; usage: {}", spec.usage.replace('\n', " | ")),
+        None => reason.to_string(),
+    }
+}
+
 /// A command's summary, usage and details as text.
 pub fn spec_help(spec: &CommandSpec) -> String {
-    let mut help = format!("{}\n(usage: {})", spec.summary, spec.usage);
+    // A form per line, under the first.
+    let usage = spec.usage.replace('\n', "\n        ");
+    let mut help = format!("{}\n(usage: {usage})", spec.summary);
     if let Some(detail) = spec.details {
         help.push('\n');
         help.push_str(detail);
@@ -502,206 +510,59 @@ pub fn report_command_parse_error(line: &str, err: CommandParseError) {
     );
 }
 
-/// Whether `spec` needs the target halted now, given the selected context.
-pub fn needs_halt(state: &ReplState<'_>, spec: &CommandSpec) -> bool {
-    match spec.run_state {
-        Some(RunState::Halted) => true,
-        Some(RunState::HaltedOrParkedThread) => state.ctx.parked_windows_thread().is_none(),
-        Some(RunState::Running) | None => false,
-    }
-}
-
-pub fn check_run_state(state: &ReplState<'_>, spec: &CommandSpec) -> bool {
-    match spec.run_state {
-        _ if needs_halt(state, spec) && state.ctx.backend.is_running() => {
-            let or_thread = if spec.run_state == Some(RunState::HaltedOrParkedThread) {
+/// Report why [`crate::session::Session::admit`] refused a command run as
+/// `typed`, worded as the REPL always has.
+pub fn report_refusal(typed: &str, refusal: Refusal) {
+    match refusal {
+        Refusal::KernelRequired(error) => error!("{typed}: {error}"),
+        Refusal::Running {
+            unreachable,
+            or_parked_thread,
+        } => {
+            let or_thread = if or_parked_thread {
                 ", or a thread selected with `.thread`"
             } else {
                 ""
             };
-            match halt_unreachable_reason(&*state.ctx.backend) {
+            match unreachable {
                 Some(reason) => error!("this command needs a halted target{or_thread}; {reason}"),
                 None => error!("VM is running; this command needs a halted target{or_thread}"),
             }
-            return false;
         }
         // `break` on a halted target has nothing to do, which is what it
         // was asked for: `break; bp ...; g` holds whichever state it starts
         // in.
-        Some(RunState::Running) if !state.ctx.backend.is_running() => {
-            outln!("{}", crate::ui::muted("the target is already halted"));
-            return false;
+        Refusal::AlreadyHalted => {
+            outln!("{}", ui::muted("the target is already halted"))
         }
-        // Halted without execution control is a static snapshot (a crash
-        // dump): a command that would run or step it could only fail on the
-        // way, or report a stop that never happened.
-        _ if spec.run != RunEffect::None
-            && !state.ctx.backend.is_running()
-            && !state.ctx.backend.capabilities().iter().any(|entry| {
-                entry.capability == DebugCapability::ExecutionControl && entry.supported
-            }) =>
-        {
-            error!(
-                "the {} backend cannot run or step the target",
-                state.ctx.backend.name()
-            );
-            return false;
+        Refusal::NoExecutionControl { backend } => {
+            error!("the {backend} backend cannot run or step the target")
         }
-        _ => {}
+        Refusal::StaticDump => error!("{typed} is not applicable to a static crash dump"),
+        Refusal::Unsupported {
+            capability,
+            backend,
+        } => error!(
+            "{typed} needs {} support, which the {backend} backend lacks",
+            capability.label()
+        ),
+        Refusal::Vtl1(refusal) => error!("{}", refusal.message(typed)),
     }
-
-    true
-}
-
-#[macro_export]
-macro_rules! repl_command {
-    (
-        $method:ident();
-        $($body:tt)*
-    ) => {
-        $crate::repl_command! {
-            @register
-            $crate::repl::CommandHandler::NoArgs(|state| state.$method());
-            $($body)*
-        }
-    };
-
-    (
-        $method:ident;
-        $($body:tt)*
-    ) => {
-        $crate::repl_command! {
-            @register
-            $crate::repl::CommandHandler::Args(|state, invocation| state.$method(invocation));
-            $($body)*
-        }
-    };
-
-    (
-        $method:ident -> Flow;
-        $($body:tt)*
-    ) => {
-        $crate::repl_command! {
-            @register
-            $crate::repl::CommandHandler::ArgsFlow(|state, invocation| state.$method(invocation));
-            $($body)*
-        }
-    };
-
-    (
-        names: [$($name:expr),+ $(,)?],
-        usage: $usage:expr,
-        summary: $summary:expr
-        $(, details: $details:expr)?
-        $(, completion: $completion:tt)?
-        $(, run_state: $run_state:ident)?
-        $(, run: $run:ident)?
-        $(, style: $style:ident)?
-        $(, target: $target:ident)?
-        , flow: $flow:ident
-        $(,)?
-    ) => {
-        $crate::repl_command! {
-            @register
-            $crate::repl::CommandHandler::NoArgs(|_state| Ok(()));
-            names: [$($name),+],
-            usage: $usage,
-            summary: $summary
-            $(, details: $details)?
-            $(, completion: $completion)?
-            $(, run_state: $run_state)?
-            $(, run: $run)?
-            $(, style: $style)?
-            $(, target: $target)?
-            , flow: $flow,
-        }
-    };
-
-    (
-        @register
-        $handler:expr;
-        names: [$($name:expr),+ $(,)?],
-        usage: $usage:expr,
-        summary: $summary:expr
-        $(, details: $details:expr)?
-        $(, completion: $completion:tt)?
-        $(, run_state: $run_state:ident)?
-        $(, run: $run:ident)?
-        $(, style: $style:ident)?
-        $(, target: $target:ident)?
-        $(, flow: $flow:ident)?
-        $(,)?
-    ) => {
-        const _: () = {
-            #[linkme::distributed_slice($crate::repl::COMMANDS)]
-            static COMMAND: $crate::repl::CommandSpec = $crate::repl::CommandSpec {
-                names: &[$($name),+],
-                usage: $usage,
-                summary: $summary,
-                details: $crate::repl_command!(@details $($details)?),
-                completion: $crate::repl_command!(@completion $($completion)?),
-                run_state: $crate::repl_command!(@run_state $($run_state)?),
-                run: $crate::repl_command!(@run $($run)?),
-                style: $crate::repl_command!(@style $($style)?),
-                target: $crate::repl_command!(@target $($target)?),
-                flow: $crate::repl_command!(@flow $($flow)?),
-                handler: $handler,
-            };
-        };
-    };
-
-    (@completion) => { $crate::repl::CompletionSpec::None };
-    (@completion None) => { $crate::repl::CompletionSpec::None };
-    (@completion [$($completion:ident),+ $(,)?]) => {
-        $crate::repl::CompletionSpec::PerArg(&[
-            $($crate::repl_command!(@completion_strategy $completion)),+
-        ])
-    };
-    (@completion $completion:ident) => {
-        $crate::repl::CompletionSpec::All($crate::repl_command!(@completion_strategy $completion))
-    };
-
-    (@completion_strategy None) => { $crate::repl::CompletionStrategy::None };
-    (@completion_strategy Symbol) => { $crate::repl::CompletionStrategy::Symbol };
-    (@completion_strategy Expression) => { $crate::repl::CompletionStrategy::Expression };
-    (@completion_strategy Type) => { $crate::repl::CompletionStrategy::Type };
-    (@completion_strategy Process) => { $crate::repl::CompletionStrategy::Process };
-    (@completion_strategy Thread) => { $crate::repl::CompletionStrategy::Thread };
-    (@completion_strategy Vcpu) => { $crate::repl::CompletionStrategy::Vcpu };
-    (@completion_strategy Breakpoint) => { $crate::repl::CompletionStrategy::Breakpoint };
-    (@completion_strategy Driver) => { $crate::repl::CompletionStrategy::Driver };
-    (@completion_strategy Alias) => { $crate::repl::CompletionStrategy::Alias };
-    (@completion_strategy RegistryKey) => { $crate::repl::CompletionStrategy::RegistryKey };
-
-    (@details) => { None };
-    (@details $details:expr) => { Some($details) };
-
-    (@run_state) => { None };
-    (@run_state Halted) => { Some($crate::repl::RunState::Halted) };
-    (@run_state HaltedOrParkedThread) => { Some($crate::repl::RunState::HaltedOrParkedThread) };
-    (@run_state Running) => { Some($crate::repl::RunState::Running) };
-
-    (@run) => { $crate::repl::RunEffect::None };
-    (@run Step) => { $crate::repl::RunEffect::Step };
-    (@run Run) => { $crate::repl::RunEffect::Run };
-
-    (@style) => { $crate::repl::CommandStyle::StructuredArgs };
-    (@style StructuredArgs) => { $crate::repl::CommandStyle::StructuredArgs };
-    (@style RawTail) => { $crate::repl::CommandStyle::RawTail };
-    (@style ExpressionTail) => { $crate::repl::CommandStyle::ExpressionTail };
-
-    (@target) => { $crate::repl::TargetRequirement::Any };
-    (@target Any) => { $crate::repl::TargetRequirement::Any };
-    (@target Kernel) => { $crate::repl::TargetRequirement::Kernel };
-
-    (@flow) => { $crate::repl::Flow::Continue };
-    (@flow Continue) => { $crate::repl::Flow::Continue };
-    (@flow Quit) => { $crate::repl::Flow::Quit };
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_errors_quote_the_generated_usage_on_one_line() {
+        assert_eq!(
+            usage_error("!reg", "!reg: unknown subcommand x"),
+            "!reg: unknown subcommand x; usage: !reg hivelist | \
+             !reg querykey|q <path> [-v <value>] | !reg keyinfo <hive> <knode> | \
+             !reg cellindex <hive> <cell>"
+        );
+    }
 
     #[test]
     fn parses_quoted_arguments() {
@@ -735,5 +596,52 @@ mod tests {
         assert_eq!(invocation.name, "?");
         assert!(invocation.argv.is_empty());
         assert_eq!(invocation.raw_tail, "rax + rbx");
+    }
+
+    /// Every argument that names a value (a `<placeholder>`, or a typed
+    /// argument's `{}`) has a completion at its words' position, or takes
+    /// the rest of the line; and no argument that takes words follows one
+    /// that takes the rest of the line, where it would have no position.
+    #[test]
+    fn completion_covers_every_argument() {
+        let mut uncovered = Vec::new();
+        for spec in COMMANDS {
+            let name = spec.names[0];
+            let mut at = 0;
+            let mut rest = None;
+            for arg in spec.args {
+                let grammar = arg.grammar;
+                let names_value = grammar.usage.contains('<') || grammar.usage.contains("{}");
+                if names_value && rest.is_some() {
+                    uncovered.push(format!(
+                        "{name}: `{}` follows an argument that takes the rest of the line",
+                        arg.name
+                    ));
+                }
+                if names_value && grammar.words.is_empty() && grammar.rest.is_none() {
+                    uncovered.push(format!(
+                        "{name}: `{}` ({}) has no completion",
+                        arg.name, grammar.usage
+                    ));
+                }
+                if rest.is_none() {
+                    assert_eq!(
+                        spec.completion.words.get(at..at + grammar.words.len()),
+                        Some(grammar.words),
+                        "{name}: `{}`'s words complete at their position",
+                        arg.name
+                    );
+                    at += grammar.words.len();
+                    rest = grammar.rest;
+                }
+            }
+            assert_eq!(spec.completion.words.len(), at, "{name}");
+            assert_eq!(
+                spec.completion.rest,
+                rest.unwrap_or(CompletionStrategy::None),
+                "{name}"
+            );
+        }
+        assert!(uncovered.is_empty(), "{}", uncovered.join("\n"));
     }
 }

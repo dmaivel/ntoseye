@@ -6,9 +6,10 @@
 //! reported on its own instead of failing the dump.
 
 use super::{PeImage, read_image_bytes, read_image_c_string};
-use crate::bytes::{get_u32, get_u64, read_u16, read_u32};
+use crate::bytes::{c_string_lossy, get_u32, get_u64, read_u16, read_u32};
 use crate::error::{Error, Result};
-use crate::symbols::SymbolStore;
+use crate::target::DiagnosticValue;
+use ntoseye_macros::record;
 use pelite::image::{
     GUID, IMAGE_DEBUG_TYPE_CODEVIEW, IMAGE_DIRECTORY_ENTRY_DEBUG, IMAGE_DIRECTORY_ENTRY_IMPORT,
     IMAGE_NT_OPTIONAL_HDR64_MAGIC,
@@ -17,87 +18,225 @@ use pelite::{PeView, Wrap};
 use std::borrow::Cow;
 
 /// `IMAGE_FILE_HEADER`.
+#[record(impl)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileHeader {
+    #[record(hex)]
     pub machine: u16,
     pub number_of_sections: u16,
+    #[record(hex)]
     pub time_date_stamp: u32,
+    #[record(hex)]
     pub pointer_to_symbol_table: u32,
     pub number_of_symbols: u32,
+    #[record(hex)]
     pub size_of_optional_header: u16,
+    #[record(hex)]
     pub characteristics: u16,
 }
 
-/// `IMAGE_OPTIONAL_HEADER32`/`64`, widened to one shape. `base_of_data`
-/// exists only in the 32-bit header.
+#[record]
+impl FileHeader {
+    /// `X64`, `X86`, `ARM64`, ...
+    #[record(getter)]
+    pub fn machine_name(&self) -> &'static str {
+        machine_name(self.machine)
+    }
+
+    /// The `IMAGE_FILE_*` flags that are set in `characteristics`.
+    #[record(getter)]
+    pub fn characteristics_names(&self) -> Vec<String> {
+        file_characteristics(self.characteristics)
+    }
+
+    /// Whether `IMAGE_FILE_DLL` is set.
+    pub fn is_dll(&self) -> bool {
+        self.characteristics & 0x2000 != 0
+    }
+}
+
+/// `IMAGE_OPTIONAL_HEADER32`/`64` (PE32 or PE32+), widened to one shape.
+/// `base_of_data` exists only in the 32-bit header.
+#[record(impl)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionalHeader {
+    #[record(hex)]
     pub magic: u16,
+    #[record(skip)]
     pub linker_version: (u8, u8),
+    #[record(hex)]
     pub size_of_code: u32,
+    #[record(hex)]
     pub size_of_initialized_data: u32,
+    #[record(hex)]
     pub size_of_uninitialized_data: u32,
+    /// The RVA of the entry point; 0 if the image has none.
+    #[record(hex, rename = "entry_point_rva")]
     pub address_of_entry_point: u32,
+    #[record(hex)]
     pub base_of_code: u32,
+    /// Only for PE32. `None` for PE32+.
+    #[record(hex)]
     pub base_of_data: Option<u32>,
+    /// The preferred base address for which the image was linked.
+    #[record(hex)]
     pub image_base: u64,
+    #[record(hex)]
     pub section_alignment: u32,
+    #[record(hex)]
     pub file_alignment: u32,
+    #[record(skip)]
     pub operating_system_version: (u16, u16),
+    #[record(skip)]
     pub image_version: (u16, u16),
+    #[record(skip)]
     pub subsystem_version: (u16, u16),
+    #[record(hex)]
     pub win32_version_value: u32,
+    #[record(hex)]
     pub size_of_image: u32,
+    #[record(hex)]
     pub size_of_headers: u32,
+    #[record(hex)]
     pub checksum: u32,
     pub subsystem: u16,
+    #[record(hex)]
     pub dll_characteristics: u16,
+    #[record(hex)]
     pub size_of_stack_reserve: u64,
+    #[record(hex)]
     pub size_of_stack_commit: u64,
+    #[record(hex)]
     pub size_of_heap_reserve: u64,
+    #[record(hex)]
     pub size_of_heap_commit: u64,
+    #[record(hex)]
     pub loader_flags: u32,
     pub number_of_rva_and_sizes: u32,
 }
 
+#[record]
+impl OptionalHeader {
+    /// `major.minor`.
+    #[record(getter, rename = "linker_version")]
+    pub fn linker_version_text(&self) -> String {
+        let (major, minor) = self.linker_version;
+        format!("{major}.{minor}")
+    }
+
+    /// `major.minor`.
+    #[record(getter, rename = "operating_system_version")]
+    pub fn operating_system_version_text(&self) -> String {
+        version_text(self.operating_system_version)
+    }
+
+    /// `major.minor`.
+    #[record(getter, rename = "image_version")]
+    pub fn image_version_text(&self) -> String {
+        version_text(self.image_version)
+    }
+
+    /// `major.minor`.
+    #[record(getter, rename = "subsystem_version")]
+    pub fn subsystem_version_text(&self) -> String {
+        version_text(self.subsystem_version)
+    }
+
+    /// `Native`, `Windows GUI`, ...
+    #[record(getter)]
+    pub fn subsystem_name(&self) -> &'static str {
+        subsystem_name(self.subsystem)
+    }
+
+    /// The `IMAGE_DLLCHARACTERISTICS_*` flags that are set.
+    #[record(getter)]
+    pub fn dll_characteristics_names(&self) -> Vec<String> {
+        dll_characteristics(self.dll_characteristics)
+    }
+
+    pub fn is_pe32_plus(&self) -> bool {
+        self.magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC
+    }
+}
+
 /// One `IMAGE_DATA_DIRECTORY` entry.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataDirectory {
+    /// The slot of the entry in the directory table.
     pub index: usize,
+    /// `Export`, `Import`, `Debug`, ...
     pub name: &'static str,
     /// An RVA, except for the security directory, whose value is a file
     /// offset (the certificate table is not mapped).
+    #[record(hex)]
     pub rva: u32,
+    #[record(hex)]
     pub size: u32,
 }
 
-/// `IMAGE_SECTION_HEADER`.
+/// One `IMAGE_SECTION_HEADER`.
+#[record(impl)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SectionHeader {
     pub name: String,
+    #[record(hex)]
     pub virtual_size: u32,
+    /// The RVA of the section.
+    #[record(hex)]
     pub virtual_address: u32,
+    #[record(hex)]
     pub size_of_raw_data: u32,
+    #[record(hex)]
     pub pointer_to_raw_data: u32,
+    #[record(hex)]
     pub pointer_to_relocations: u32,
+    #[record(hex)]
     pub pointer_to_linenumbers: u32,
     pub number_of_relocations: u16,
     pub number_of_linenumbers: u16,
+    #[record(hex)]
     pub characteristics: u32,
+}
+
+#[record]
+impl SectionHeader {
+    /// The `IMAGE_SCN_*` flags that are set, then the alignment and the
+    /// access, as WinDbg lists them.
+    #[record(getter)]
+    pub fn characteristics_names(&self) -> Vec<String> {
+        section_characteristics(self.characteristics)
+    }
+}
+
+/// One PE section with its name, RVA, mapped size, and `rwx` permissions
+/// (`Module.sections`).
+#[record]
+pub struct Section {
+    /// The section name (`.text`).
+    pub name: String,
+    /// The offset of the section from the image base.
+    #[record(hex)]
+    pub rva: u32,
+    /// The mapped size of the section.
+    #[record(hex)]
+    pub size: u32,
+    /// The mapped permissions as `rwx`, with `-` for a missing permission.
+    pub permissions: String,
 }
 
 /// Everything in the header page.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImageHeaders {
+pub struct PeHeaders {
     pub file: FileHeader,
     pub optional: OptionalHeader,
     pub directories: Vec<DataDirectory>,
     pub sections: Vec<SectionHeader>,
 }
 
-impl ImageHeaders {
+impl PeHeaders {
     pub fn is_pe32_plus(&self) -> bool {
-        self.optional.magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC
+        self.optional.is_pe32_plus()
     }
 
     pub fn directory(&self, index: usize) -> Option<&DataDirectory> {
@@ -105,17 +244,51 @@ impl ImageHeaders {
     }
 }
 
-/// The CodeView record an `IMAGE_DEBUG_TYPE_CODEVIEW` entry points at.
+/// A CodeView debug record (`IMAGE_DEBUG_TYPE_CODEVIEW`), which identifies
+/// the PDB that the image was built with.
+#[record(tagged, impl)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodeView {
     /// PDB 7.0: a GUID, an age, and the PDB path.
-    Rsds { guid: GUID, age: u32, path: String },
-    /// PDB 2.0: a timestamp signature, an age, and the PDB path.
-    Nb10 {
-        signature: u32,
+    Rsds {
+        #[record(skip)]
+        guid: GUID,
         age: u32,
+        /// The PDB path that the linker recorded.
+        #[record(rename = "pdb")]
         path: String,
     },
+    /// PDB 2.0: a timestamp signature, an age, and the PDB path.
+    Nb10 {
+        /// The PDB timestamp signature, for `NB10`.
+        #[record(hex)]
+        signature: u32,
+        age: u32,
+        /// The PDB path that the linker recorded.
+        #[record(rename = "pdb")]
+        path: String,
+    },
+}
+
+#[record]
+impl CodeView {
+    /// `RSDS` (PDB 7.0) or `NB10` (PDB 2.0).
+    #[record(getter)]
+    pub fn format(&self) -> &'static str {
+        match self {
+            Self::Rsds { .. } => "RSDS",
+            Self::Nb10 { .. } => "NB10",
+        }
+    }
+
+    /// The PDB GUID, for `RSDS`.
+    #[record(getter, rename = "guid")]
+    pub fn guid_text(&self) -> Option<String> {
+        match self {
+            Self::Rsds { guid, .. } => Some(guid.to_string()),
+            Self::Nb10 { .. } => None,
+        }
+    }
 }
 
 /// One `IMAGE_DEBUG_DIRECTORY` entry.
@@ -130,12 +303,62 @@ pub struct DebugDirectoryEntry {
     pub pointer_to_raw_data: u32,
 }
 
-/// A debug directory entry as `!dh` shows it, with its CodeView record
-/// decoded when it is one: `Err` says why the record could not be read.
+/// One `IMAGE_DEBUG_DIRECTORY` entry as `!dh` shows it, with its CodeView
+/// record decoded when it is one.
+#[record(impl)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DebugRecord {
+    #[record(skip)]
     pub entry: DebugDirectoryEntry,
-    pub codeview: Option<std::result::Result<CodeView, String>>,
+    /// The decoded CodeView record, or why it does not read. `None` for
+    /// other entry types.
+    pub codeview: Option<DiagnosticValue<CodeView>>,
+}
+
+#[record]
+impl DebugRecord {
+    /// The `IMAGE_DEBUG_TYPE_*` value.
+    #[record(getter, rename = "type")]
+    pub fn kind(&self) -> u32 {
+        self.entry.kind
+    }
+
+    /// `cv`, `pogo`, `repro`, ...
+    #[record(getter)]
+    pub fn type_name(&self) -> &'static str {
+        debug_type_name(self.entry.kind)
+    }
+
+    #[record(getter, hex)]
+    pub fn characteristics(&self) -> u32 {
+        self.entry.characteristics
+    }
+
+    #[record(getter, hex)]
+    pub fn time_date_stamp(&self) -> u32 {
+        self.entry.time_date_stamp
+    }
+
+    /// `major.minor`.
+    #[record(getter)]
+    pub fn version(&self) -> String {
+        version_text(self.entry.version)
+    }
+
+    #[record(getter, hex)]
+    pub fn size_of_data(&self) -> u32 {
+        self.entry.size_of_data
+    }
+
+    #[record(getter, hex)]
+    pub fn address_of_raw_data(&self) -> u32 {
+        self.entry.address_of_raw_data
+    }
+
+    #[record(getter, hex)]
+    pub fn pointer_to_raw_data(&self) -> u32 {
+        self.entry.pointer_to_raw_data
+    }
 }
 
 /// How an import names what it imports.
@@ -153,28 +376,102 @@ pub enum ImportName {
     Unreadable(String),
 }
 
-/// One import-name-table entry and the import address table slot beside
-/// it: what the loader bound there, or `None` when that slot is unreadable.
+/// One imported function: its import-name-table entry and the import
+/// address table slot beside it.
+#[record(impl)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportEntry {
+    #[record(skip)]
     pub name: ImportName,
+    /// The bound address in the import address table. `None` if that slot
+    /// does not read.
+    #[record(hex)]
     pub bound: Option<u64>,
 }
 
-/// One `IMAGE_IMPORT_DESCRIPTOR` and its entries.
+#[record]
+impl ImportEntry {
+    /// The imported name. `None` for an import by ordinal, or for an import
+    /// that ntoseye could not read.
+    #[record(getter, rename = "name")]
+    pub fn imported_name(&self) -> Option<String> {
+        match &self.name {
+            ImportName::Name { name, .. } => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    /// The export-name-table hint, for a named import.
+    #[record(getter)]
+    pub fn hint(&self) -> Option<u16> {
+        match &self.name {
+            ImportName::Name { hint, .. } => Some(*hint),
+            _ => None,
+        }
+    }
+
+    /// The ordinal, for an import by ordinal.
+    #[record(getter)]
+    pub fn ordinal(&self) -> Option<u16> {
+        match &self.name {
+            ImportName::Ordinal(ordinal) => Some(*ordinal),
+            _ => None,
+        }
+    }
+
+    /// The reason that ntoseye could not read the import name.
+    #[record(getter)]
+    pub fn error(&self) -> Option<String> {
+        match &self.name {
+            ImportName::Unreadable(error) => Some(error.clone()),
+            _ => None,
+        }
+    }
+}
+
+/// One `IMAGE_IMPORT_DESCRIPTOR`, which identifies a DLL that the image
+/// imports from, and its entries.
+#[record(impl)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportDescriptor {
     /// The module imported from, or why its name does not read.
+    #[record(skip)]
     pub name: std::result::Result<String, String>,
+    /// `OriginalFirstThunk`.
+    #[record(hex, rename = "import_name_table")]
     pub original_first_thunk: u32,
+    #[record(hex)]
     pub time_date_stamp: u32,
+    #[record(hex)]
     pub forwarder_chain: u32,
+    /// `FirstThunk`.
+    #[record(hex, rename = "import_address_table")]
     pub first_thunk: u32,
     pub entries: Vec<ImportEntry>,
     /// Why `entries` stops short of the table's end: a thunk that does not
     /// read, or no terminator within the bound. `None` when the table was
     /// read to its terminator.
     pub incomplete: Option<String>,
+}
+
+#[record]
+impl ImportDescriptor {
+    /// The DLL name. `None` if ntoseye could not read it.
+    #[record(getter, rename = "name")]
+    pub fn module_name(&self) -> Option<String> {
+        self.name.as_ref().ok().cloned()
+    }
+
+    /// The reason that ntoseye could not read the DLL name.
+    #[record(getter)]
+    pub fn name_error(&self) -> Option<String> {
+        self.name.as_ref().err().cloned()
+    }
+}
+
+/// `major.minor`.
+pub fn version_text((major, minor): (u16, u16)) -> String {
+    format!("{major}.{minor}")
 }
 
 const DEBUG_DIRECTORY_ENTRY_SIZE: usize = 28;
@@ -209,7 +506,7 @@ const DIRECTORY_NAMES: [&str; 16] = [
 
 /// Decode the file header, optional header, data directories, and section
 /// table from an image's header bytes.
-pub fn decode_headers(headers: &[u8]) -> Result<ImageHeaders> {
+pub fn decode_headers(headers: &[u8]) -> Result<PeHeaders> {
     let view = PeView::from_bytes(headers)?;
     let header = view.file_header();
     let file = FileHeader {
@@ -312,7 +609,7 @@ pub fn decode_headers(headers: &[u8]) -> Result<ImageHeaders> {
             characteristics: section.Characteristics,
         })
         .collect();
-    Ok(ImageHeaders {
+    Ok(PeHeaders {
         file,
         optional,
         directories,
@@ -380,7 +677,7 @@ impl DebugDirectoryEntry {
 }
 
 /// The debug directory of `image`, each CodeView record decoded.
-pub fn debug_directory(image: &PeImage, headers: &ImageHeaders) -> Result<Vec<DebugRecord>> {
+pub fn debug_directory(image: &PeImage, headers: &PeHeaders) -> Result<Vec<DebugRecord>> {
     let Some(directory) = headers.directory(IMAGE_DIRECTORY_ENTRY_DEBUG) else {
         return Ok(Vec::new());
     };
@@ -388,9 +685,7 @@ pub fn debug_directory(image: &PeImage, headers: &ImageHeaders) -> Result<Vec<De
     Ok(read_debug_directory(directory.rva, directory.size, read)?
         .into_iter()
         .map(|entry| DebugRecord {
-            codeview: entry
-                .read_codeview(read)
-                .map(|record| record.map_err(|error| error.to_string())),
+            codeview: entry.read_codeview(read).map(DiagnosticValue::from_result),
             entry,
         })
         .collect())
@@ -398,8 +693,7 @@ pub fn debug_directory(image: &PeImage, headers: &ImageHeaders) -> Result<Vec<De
 
 /// Decode an RSDS (PDB 7.0) or NB10 (PDB 2.0) CodeView record.
 pub fn decode_codeview(bytes: &[u8]) -> Result<CodeView> {
-    let path =
-        |start: usize| SymbolStore::read_c_string_lossy(bytes.get(start..).unwrap_or_default());
+    let path = |start: usize| c_string_lossy(bytes.get(start..).unwrap_or_default());
     match bytes.get(..4) {
         Some(b"RSDS") if bytes.len() >= 24 => Ok(CodeView::Rsds {
             guid: GUID {
@@ -428,7 +722,7 @@ pub fn decode_codeview(bytes: &[u8]) -> Result<CodeView> {
 /// The import descriptors and their entries. Only a descriptor that does not
 /// read fails the directory; a module name, an import name, or a thunk that
 /// does not read is reported in its descriptor beside the rest.
-pub fn imports(image: &PeImage, headers: &ImageHeaders) -> Result<Vec<ImportDescriptor>> {
+pub fn imports(image: &PeImage, headers: &PeHeaders) -> Result<Vec<ImportDescriptor>> {
     let Some(directory) = headers
         .directory(IMAGE_DIRECTORY_ENTRY_IMPORT)
         .filter(|directory| directory.rva != 0 && directory.size != 0)

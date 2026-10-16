@@ -20,7 +20,6 @@ const PAGE_SIZE_U64: u64 = PAGE_SIZE as u64;
 
 pub struct ParsedDump {
     pub headers: Header64,
-    pub dump_type: DumpType,
     pub physmem: PhysmemMap,
 }
 
@@ -124,11 +123,7 @@ pub fn parse(data: &[u8]) -> Result<ParsedDump> {
         }
     };
 
-    Ok(ParsedDump {
-        headers,
-        dump_type,
-        physmem,
-    })
+    Ok(ParsedDump { headers, physmem })
 }
 
 /// Build the physical memory map for a [`DumpType::Full`] dump.

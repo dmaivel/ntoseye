@@ -13,13 +13,15 @@ use std::io::{ErrorKind, Read};
 use std::path::Path;
 
 use memmap2::Mmap;
+use ntoseye_macros::record;
 
 use crate::bytes::get_u32;
+use crate::cpu_context::{amd64, arm64};
+use crate::dbg_backend::RegisterMap;
 use crate::error::{Error, Result};
-use crate::gdb::RegisterMap;
 use crate::guest::ModuleInfo;
-use crate::kd::{context, context_arm64};
 use crate::pe::headers::CodeView;
+use crate::target::mm::{memory_state_name, memory_type_name, page_protection_name};
 use crate::types::{Arch, VirtAddr};
 
 pub mod backend;
@@ -46,36 +48,82 @@ pub struct UserSystemInfo {
     pub service_pack: Option<String>,
 }
 
-/// `ThreadInfoListStream` entry: what the kernel knew of the thread.
-#[derive(Debug, Clone)]
-pub struct UserThreadInfo {
-    pub dump_flags: u32,
-    pub dump_error: u32,
+/// The process a user-mode minidump captured (`dbg.user_dump.process`).
+#[record]
+pub struct UserProcessInfo {
+    /// The process id, when the dump records it.
+    pub pid: Option<u32>,
+    /// The executable's file name, from the first module the dump lists.
+    pub name: Option<String>,
+}
+
+/// What the dump's thread-info stream (`ThreadInfoListStream`) records of
+/// a thread: what the kernel knew of it.
+#[record]
+pub struct UserThreadTimes {
+    /// The thread's exit status.
+    #[record(hex)]
     pub exit_status: u32,
+    /// When the thread started, as a FILETIME.
     pub create_time: u64,
+    /// When the thread exited, as a FILETIME (0 while it runs).
     pub exit_time: u64,
+    /// Kernel-mode time the thread had run, in 100 ns units.
     pub kernel_time: u64,
+    /// User-mode time the thread had run, in 100 ns units.
     pub user_time: u64,
+    /// The thread's start address.
+    #[record(hex)]
     pub start_address: u64,
+    /// The thread's processor affinity mask.
+    #[record(hex)]
     pub affinity: u64,
+}
+
+/// The part of a thread's stack that a dump captured.
+#[record]
+#[derive(Copy)]
+pub struct CapturedStack {
+    #[record(hex)]
+    pub start: u64,
+    /// Its size in bytes.
+    #[record(hex)]
+    pub size: u64,
 }
 
 /// A thread of the captured process (`MINIDUMP_THREAD`), with what the
 /// thread-info and thread-name streams add, matched by thread id.
-#[derive(Debug, Clone)]
-pub struct UserThread {
+#[record(impl)]
+pub struct UserThreadInfo {
+    /// The thread id.
     pub tid: u32,
     pub suspend_count: u32,
     pub priority_class: u32,
     pub priority: u32,
+    /// The `_TEB` address, 0 when the dump records none.
+    #[record(hex)]
     pub teb: u64,
-    /// The captured stack as `(start, size)`, `None` when the dump holds
-    /// none of it.
-    pub stack: Option<(u64, u64)>,
+    /// The captured stack, `None` when the dump holds none of it.
+    pub stack: Option<CapturedStack>,
     /// The thread's raw CONTEXT at the dump, or why it is unusable.
+    #[record(skip)]
     pub context: std::result::Result<Vec<u8>, String>,
+    /// The thread's description (`SetThreadDescription`), when the dump
+    /// records one.
     pub name: Option<String>,
-    pub info: Option<UserThreadInfo>,
+    /// What the dump's thread-info stream records of the thread, when it
+    /// has one.
+    pub times: Option<UserThreadTimes>,
+}
+
+#[record]
+impl UserThreadInfo {
+    /// Why the thread's recorded context is unusable, or `None` when it is
+    /// usable.
+    #[record(getter)]
+    pub fn context_error(&self) -> Option<String> {
+        self.context.as_ref().err().cloned()
+    }
 }
 
 /// A loaded module (`MINIDUMP_MODULE`).
@@ -94,29 +142,59 @@ pub struct UserModule {
     pub codeview: Option<CodeView>,
 }
 
-/// A module the process had unloaded (`MINIDUMP_UNLOADED_MODULE`).
+/// A module the process had unloaded (`UnloadedModuleListStream`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct UnloadedModule {
+    #[record(hex)]
     pub base: u64,
+    #[record(hex)]
     pub size: u32,
+    #[record(hex)]
     pub checksum: u32,
+    #[record(hex)]
     pub time_date_stamp: u32,
     pub name: String,
 }
 
-/// `ExceptionStream`: the exception the dump was written for.
+/// The exception a user-mode minidump was written for (`ExceptionStream`).
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct UserException {
+    /// The thread that raised it.
     pub thread_id: u32,
+    /// The exception code (an NTSTATUS, or an application's own code).
+    #[record(hex)]
     pub code: u32,
+    #[record(hex)]
     pub flags: u32,
-    /// `ExceptionRecord`: the address of a chained record, 0 for none.
+    /// The address of a chained `EXCEPTION_RECORD`, 0 for none.
+    #[record(hex)]
     pub record: u64,
+    /// Where the exception was raised.
+    #[record(hex)]
     pub address: u64,
+    #[record(hex)]
     pub parameters: Vec<u64>,
     /// The raw CONTEXT at the exception, or why it is unusable. It is stored
     /// in the dump file, not in the process's memory.
+    #[record(skip)]
     pub context: std::result::Result<Vec<u8>, String>,
+}
+
+#[record]
+impl UserException {
+    /// The NTSTATUS name of `code`, when it is one ntoseye knows.
+    #[record(getter)]
+    pub fn code_name(&self) -> Option<&'static str> {
+        crate::ntstatus::ntstatus_name(self.code)
+    }
+
+    /// Why the exception's CONTEXT is unusable, `None` when it is.
+    #[record(getter)]
+    pub fn context_error(&self) -> Option<String> {
+        self.context.as_ref().err().cloned()
+    }
 }
 
 /// What a user dump records besides its memory.
@@ -139,7 +217,7 @@ pub struct UserDumpInfo {
     pub time_zone: Option<UserTimeZone>,
     /// `MINIDUMP_MISC_INFO_4.BuildString`.
     pub build_string: Option<String>,
-    pub threads: Vec<UserThread>,
+    pub threads: Vec<UserThreadInfo>,
     pub modules: Vec<UserModule>,
     pub unloaded_modules: Vec<UnloadedModule>,
     pub exception: Option<UserException>,
@@ -167,31 +245,81 @@ pub struct UserTimeZone {
 }
 
 /// A handle the process held (`MINIDUMP_HANDLE_DESCRIPTOR` or
-/// `MINIDUMP_HANDLE_DESCRIPTOR_2`), as the dump records it.
+/// `MINIDUMP_HANDLE_DESCRIPTOR_2`), as the dump records it. The dump names
+/// no object address.
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct UserHandle {
+    #[record(hex)]
     pub handle: u64,
     pub type_name: Option<String>,
     pub object_name: Option<String>,
+    /// `OBJ_*` attribute flags.
+    #[record(hex)]
     pub attributes: u32,
+    #[record(hex)]
     pub granted_access: u32,
     pub handle_count: u32,
     pub pointer_count: u32,
 }
 
+#[record]
+impl UserHandle {
+    /// `attributes` as `OBJ_*` names.
+    #[record(getter)]
+    pub fn attribute_names(&self) -> Vec<String> {
+        crate::target::usermode::handles::handle_attribute_names(self.attributes)
+    }
+}
+
 /// `MINIDUMP_MEMORY_INFO`: one region of the address space, as
 /// `VirtualQueryEx` reported it.
+#[record(impl)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryRegion {
+    #[record(hex)]
     pub base: u64,
+    #[record(hex)]
     pub allocation_base: u64,
+    #[record(hex)]
     pub allocation_protect: u32,
+    #[record(hex)]
     pub size: u64,
     /// `MEM_COMMIT`, `MEM_RESERVE`, or `MEM_FREE`.
+    #[record(hex)]
     pub state: u32,
+    #[record(hex)]
     pub protect: u32,
     /// `MEM_IMAGE`, `MEM_MAPPED`, `MEM_PRIVATE`, or 0 for a free region.
+    #[record(hex)]
     pub kind: u32,
+}
+
+#[record]
+impl MemoryRegion {
+    /// `allocation_protect` as `PAGE_*` names.
+    #[record(getter)]
+    pub fn allocation_protect_name(&self) -> String {
+        page_protection_name(self.allocation_protect)
+    }
+
+    /// `MEM_COMMIT`, `MEM_RESERVE`, or `MEM_FREE`.
+    #[record(getter)]
+    pub fn state_name(&self) -> &'static str {
+        memory_state_name(self.state)
+    }
+
+    /// `protect` as `PAGE_*` names; empty for a free or reserved region.
+    #[record(getter)]
+    pub fn protect_name(&self) -> String {
+        page_protection_name(self.protect)
+    }
+
+    /// `MEM_IMAGE`, `MEM_MAPPED`, or `MEM_PRIVATE`; empty for a free region.
+    #[record(getter)]
+    pub fn kind_name(&self) -> &'static str {
+        memory_type_name(self.kind)
+    }
 }
 
 /// A dynamic function table (`MINIDUMP_FUNCTION_TABLE_DESCRIPTOR`): the
@@ -252,6 +380,14 @@ impl UserDumpInfo {
         self.modules.first().map(UserModule::file_name)
     }
 
+    /// The captured process, as far as the dump records it.
+    pub fn process(&self) -> UserProcessInfo {
+        UserProcessInfo {
+            pid: self.process_id,
+            name: self.process_name().map(str::to_string),
+        }
+    }
+
     /// `charmap.exe (pid 1234)`, as far as the dump records it.
     pub fn process_label(&self) -> String {
         let name = self.process_name().unwrap_or("process");
@@ -261,7 +397,7 @@ impl UserDumpInfo {
         }
     }
 
-    pub fn thread(&self, tid: u32) -> Option<&UserThread> {
+    pub fn thread(&self, tid: u32) -> Option<&UserThreadInfo> {
         self.threads.iter().find(|thread| thread.tid == tid)
     }
 
@@ -309,7 +445,7 @@ impl UserDumpInfo {
     }
 
     /// The thread a backend id names (see [`Self::backend_thread_id`]).
-    pub fn thread_for_backend_id(&self, id: &str) -> Option<&UserThread> {
+    pub fn thread_for_backend_id(&self, id: &str) -> Option<&UserThreadInfo> {
         self.threads
             .iter()
             .find(|thread| self.backend_thread_id(thread.tid).eq_ignore_ascii_case(id))
@@ -321,11 +457,8 @@ impl UserDumpInfo {
 /// stay zero: a user dump records none.
 pub fn register_buffer(arch: Arch, raw_context: &[u8]) -> Vec<u8> {
     let (context_size, buffer_size) = match arch {
-        Arch::Amd64 => (context::CONTEXT_SIZE, context::REGISTER_BUFFER_SIZE),
-        Arch::Arm64 => (
-            context_arm64::CONTEXT_SIZE,
-            context_arm64::REGISTER_BUFFER_SIZE,
-        ),
+        Arch::Amd64 => (amd64::CONTEXT_SIZE, amd64::REGISTER_BUFFER_SIZE),
+        Arch::Arm64 => (arm64::CONTEXT_SIZE, arm64::REGISTER_BUFFER_SIZE),
     };
     let mut buffer = vec![0u8; buffer_size];
     let length = raw_context.len().min(context_size);
@@ -344,11 +477,8 @@ pub fn context_registers(
     raw_context: &[u8],
 ) -> HashMap<String, u64> {
     let (size, flags_offset) = match arch {
-        Arch::Amd64 => (context::CONTEXT_SIZE, context::OFFSET_CONTEXT_FLAGS),
-        Arch::Arm64 => (
-            context_arm64::CONTEXT_SIZE,
-            context_arm64::OFFSET_CONTEXT_FLAGS,
-        ),
+        Arch::Amd64 => (amd64::CONTEXT_SIZE, amd64::OFFSET_CONTEXT_FLAGS),
+        Arch::Arm64 => (arm64::CONTEXT_SIZE, arm64::OFFSET_CONTEXT_FLAGS),
     };
     let raw_context = &raw_context[..raw_context.len().min(size)];
     let flags = get_u32(raw_context, flags_offset).unwrap_or(0);
@@ -362,16 +492,14 @@ pub fn context_registers(
         };
         match arch {
             Arch::Amd64 => {
-                (has(context::CONTEXT_SEGMENTS)
-                    || !["ds", "es", "fs", "gs"].contains(&name.as_str()))
-                    && (has(context::CONTEXT_DEBUG_REGISTERS) || !numbered("dr"))
-                    && (has(context::CONTEXT_FLOATING_POINT)
-                        || !(numbered("xmm") || name == "mxcsr"))
+                (has(amd64::CONTEXT_SEGMENTS) || !["ds", "es", "fs", "gs"].contains(&name.as_str()))
+                    && (has(amd64::CONTEXT_DEBUG_REGISTERS) || !numbered("dr"))
+                    && (has(amd64::CONTEXT_FLOATING_POINT) || !(numbered("xmm") || name == "mxcsr"))
             }
             Arch::Arm64 => {
-                (has(context_arm64::CONTEXT_FLOATING_POINT)
+                (has(arm64::CONTEXT_FLOATING_POINT)
                     || !(numbered("v") || name == "fpcr" || name == "fpsr"))
-                    && (has(context_arm64::CONTEXT_DEBUG_REGISTERS)
+                    && (has(arm64::CONTEXT_DEBUG_REGISTERS)
                         || !["bcr", "bvr", "wcr", "wvr"]
                             .iter()
                             .any(|prefix| numbered(prefix)))

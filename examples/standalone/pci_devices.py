@@ -25,21 +25,22 @@ def location(function: ntoseye.PciFunction) -> str:
 
 
 def describe(function: ntoseye.PciFunction) -> None:
-    print(f"\n{location(function)}  {function.vendor_id:04x}:{function.device_id:04x}  "
-          f"{function.class_name or 'unknown class'}  (rev {function.revision:#x})")
-    if function.subsystem_vendor_id is not None and function.subsystem_id is not None:
-        print(f"  subsystem  {function.subsystem_vendor_id:04x}:{function.subsystem_id:04x}")
-    print(f"  command    {', '.join(function.command_flags) or '-'}")
-    print(f"  status     {', '.join(function.status_flags) or '-'}")
-    if function.buses is not None:
-        buses = function.buses
+    header = function.header
+    print(f"\n{location(function)}  {header.vendor_id:04x}:{header.device_id:04x}  "
+          f"{function.class_name or 'unknown class'}  (rev {header.revision:#x})")
+    if header.subsystem_vendor_id is not None and header.subsystem_id is not None:
+        print(f"  subsystem  {header.subsystem_vendor_id:04x}:{header.subsystem_id:04x}")
+    print(f"  command    {', '.join(header.command_flags) or '-'}")
+    print(f"  status     {', '.join(header.status_flags) or '-'}")
+    if header.buses is not None:
+        buses = header.buses
         print(f"  buses      primary {buses.primary:#x}, secondary {buses.secondary:#x}, "
               f"subordinate {buses.subordinate:#x}")
-    for bar in function.bars:
+    for bar in header.bars:
         prefetch = ", prefetchable" if bar.prefetchable else ""
         print(f"  BAR{bar.index}       {bar.address:#x} ({bar.kind}{prefetch})")
-    if function.expansion_rom:  # None or 0 when there is none
-        print(f"  ROM        {function.expansion_rom:#x}")
+    if header.expansion_rom:  # None or 0 when there is none
+        print(f"  ROM        {header.expansion_rom:#x}")
     for capability in function.capabilities + function.extended_capabilities:
         name = capability.name or f"capability {capability.id:#x}"
         version = f" v{capability.version}" if capability.version is not None else ""
@@ -62,12 +63,13 @@ def main() -> None:
     functions = [
         function
         for function in scan.functions
-        if (args.vendor is None or function.vendor_id == args.vendor)
-        and (args.device is None or function.device_id == args.device)
+        if (args.vendor is None or function.header.vendor_id == args.vendor)
+        and (args.device is None or function.header.device_id == args.device)
     ]
     if args.vendor is None and args.device is None:
         for function in functions:
-            print(f"{location(function)}  {function.vendor_id:04x}:{function.device_id:04x}  "
+            header = function.header
+            print(f"{location(function)}  {header.vendor_id:04x}:{header.device_id:04x}  "
                   f"{function.class_name or 'unknown class'}")
     else:
         for function in functions:

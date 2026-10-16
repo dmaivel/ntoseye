@@ -4,6 +4,7 @@
 #[cfg(test)]
 use super::BreakpointScope;
 use super::{BreakpointHitDisposition, BreakpointHitResult, BreakpointManager};
+use crate::dbg_backend::DebugBackend;
 use crate::error::{Error, Result};
 use crate::target::Target;
 use crate::types::{Arch, VirtAddr};
@@ -32,6 +33,30 @@ impl BreakpointManager {
 
     pub fn one_shot_hit_ids(&self) -> Vec<u32> {
         self.one_shot_hits.iter().copied().collect()
+    }
+
+    /// Remove now, not at the next resume, the one-shot breakpoints that
+    /// fired at `address` (software, or `hardware`): a breakpoint set there
+    /// while the target is still halted at the hit takes the site over.
+    pub fn retire_one_shot_hits_at(
+        &mut self,
+        client: &mut dyn DebugBackend,
+        debugger: &Target,
+        address: VirtAddr,
+        hardware: bool,
+    ) -> Result<()> {
+        let fired: Vec<u32> = self
+            .breakpoints
+            .values()
+            .filter(|bp| {
+                self.one_shot_hits.contains(&bp.id)
+                    && bp.resolved
+                    && bp.address == address
+                    && bp.hardware.is_some() == hardware
+            })
+            .map(|bp| bp.id)
+            .collect();
+        self.remove_ids(client, debugger, fired)
     }
 
     pub fn check_breakpoint_hit(&self, rip: u64, dtb: u64, arch: Arch) -> BreakpointHitResult {
@@ -102,7 +127,7 @@ mod tests {
     use crate::breakpoints::install::{BreakpointBackend, BreakpointPatch};
     use crate::breakpoints::test_backend::SlotRecorder;
     use crate::breakpoints::{
-        Breakpoint, BreakpointHitDisposition, BreakpointHitResult, BreakpointManager,
+        BreakpointHitDisposition, BreakpointHitResult, BreakpointInfo, BreakpointManager,
         BreakpointScope, HardwareBreakpoint,
     };
     use crate::dbg_backend::HwBreakpointAccess;
@@ -113,7 +138,7 @@ mod tests {
         let mut manager = BreakpointManager::new();
         manager.breakpoints.insert(
             0,
-            Breakpoint {
+            BreakpointInfo {
                 id: 0,
                 address: VirtAddr(0x1000),
                 serial: 0,
@@ -156,7 +181,7 @@ mod tests {
         let mut manager = BreakpointManager::new();
         manager.breakpoints.insert(
             0,
-            Breakpoint {
+            BreakpointInfo {
                 id: 0,
                 address: VirtAddr(0x7ff7_1234_1000),
                 serial: 0,

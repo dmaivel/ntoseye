@@ -1,11 +1,11 @@
-use std::fmt;
+use std::fmt::{self, Write as _};
 
 use owo_colors::OwoColorize;
 
 use crate::disasm::DisasmRow;
 use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix};
-use crate::repl::CommandInvocation;
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::target::Target;
 use crate::types::VirtAddr;
 use crate::ui;
@@ -99,21 +99,51 @@ pub fn eval_range(
 }
 
 impl AddressRange {
-    pub fn parse(
-        invocation: &CommandInvocation<'_>,
-        debugger: &Target,
-        radix: NumberRadix,
+    /// A display command's `<address> [L<count>|length|end]`: without an
+    /// end, `default_count` elements of `item_size` bytes. A missing address
+    /// is an invalid range.
+    pub fn from_args(
+        cx: &ArgCx<'_, '_>,
+        cursor: &mut ArgCursor<'_>,
         default_count: u64,
         item_size: u64,
-    ) -> Result<Self> {
-        let start_arg = invocation.arg(0).ok_or(Error::InvalidRange)?;
-        let start = Expr::eval_with_radix(start_arg, debugger, radix)?;
-        match invocation.arg(1) {
-            Some(range_arg) => eval_range(range_arg, debugger, radix, start, item_size),
-            None => resolve_range(start, RangeEnd::Count(default_count), item_size),
+    ) -> std::result::Result<Self, ArgError> {
+        let message = |error: Error| ArgError::Message(error.to_string());
+        let start = cursor.word().ok_or_else(|| message(Error::InvalidRange))?;
+        let start = cx.eval(&start)?;
+        match cursor.word() {
+            Some(end) => eval_range_arg(cx, &end, start, item_size).map_err(message),
+            None => {
+                resolve_range(start, RangeEnd::Count(default_count), item_size).map_err(message)
+            }
         }
     }
 
+    /// `<address> <L<count>|end>` of bytes, as `.writemem` takes it: both
+    /// words are required.
+    pub fn required_from_args(
+        cx: &ArgCx<'_, '_>,
+        cursor: &mut ArgCursor<'_>,
+    ) -> std::result::Result<Self, ArgError> {
+        let invalid = || ArgError::Message(Error::InvalidRange.to_string());
+        let start = cursor.word().ok_or_else(invalid)?;
+        let start = cx.eval(&start)?;
+        let end = cursor.word().ok_or_else(invalid)?;
+        eval_range_arg(cx, &end, start, 1).map_err(|error| ArgError::Message(error.to_string()))
+    }
+}
+
+/// [`eval_range`] of a command's argument, in the REPL's radix.
+pub fn eval_range_arg(
+    cx: &ArgCx<'_, '_>,
+    end: &str,
+    start: VirtAddr,
+    item_size: u64,
+) -> Result<AddressRange> {
+    eval_range(end, &cx.state.ctx.target, cx.state.radix, start, item_size)
+}
+
+impl AddressRange {
     pub fn is_empty(&self) -> bool {
         self.start == self.end
     }
@@ -609,12 +639,49 @@ pub fn row_ascii(
         });
         emit(if !readable {
             AsciiCell::Unreadable
-        } else if byte.is_ascii_graphic() || *byte == b' ' {
+        } else if is_printable(*byte) {
             AsciiCell::Char(*byte as char)
         } else {
             AsciiCell::Dot
         });
     }
+}
+
+/// Whether a byte shows as itself in an ASCII column.
+fn is_printable(byte: u8) -> bool {
+    byte.is_ascii_graphic() || byte == b' '
+}
+
+/// How a byte shows in an ASCII column: itself when printable, else `.`.
+pub fn ascii_char(byte: u8) -> char {
+    if is_printable(byte) {
+        byte as char
+    } else {
+        '.'
+    }
+}
+
+/// The case of a hex dump's digits.
+#[derive(Clone, Copy, Debug)]
+pub enum HexCase {
+    Upper,
+    Lower,
+}
+
+/// One row of a hex dump: `bytes` as two-digit hex separated by spaces, and
+/// as their ASCII column. Offsets, indentation and padding are the caller's.
+pub fn hex_ascii_row(bytes: &[u8], case: HexCase) -> (String, String) {
+    let mut hex = String::with_capacity(bytes.len() * 3);
+    for (index, byte) in bytes.iter().enumerate() {
+        if index > 0 {
+            hex.push(' ');
+        }
+        let _ = match case {
+            HexCase::Upper => write!(hex, "{byte:02X}"),
+            HexCase::Lower => write!(hex, "{byte:02x}"),
+        };
+    }
+    (hex, bytes.iter().map(|&byte| ascii_char(byte)).collect())
 }
 
 #[cfg(test)]

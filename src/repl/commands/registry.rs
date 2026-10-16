@@ -5,8 +5,12 @@ use std::fmt::Display;
 
 use tabled::builder::Builder;
 
-use crate::error::Result;
+use ntoseye_macros::{command, grammar};
+
+use crate::error::{Error, Result};
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
+use crate::session::Session;
 use crate::target::DiagnosticValue;
 use crate::target::registry::{
     CellLocation, DataStorage, HiveList, RegData, RegKey, RegValue, key_flag_names, names_equal,
@@ -15,18 +19,6 @@ use crate::target::registry::{
 use crate::triage_report::time::filetime_to_iso;
 use crate::types::VirtAddr;
 use crate::ui;
-
-const USAGE: &str = "!reg hivelist | !reg querykey <path> [-v <value>] | !reg keyinfo <hive> <knode> | !reg cellindex <hive> <cell>";
-
-repl_command! {
-    cmd_reg;
-    names: ["!reg"],
-    usage: USAGE,
-    summary: "Show the loaded registry hives, and keys and values read from them.",
-    details: "The commands read the configuration manager's hives in kernel memory, so they work on every backend, live or in a crash dump, without the guest's help. hivelist lists each hive on nt!CmpHiveListHead: its _CMHIVE, the bytes of its stable and volatile storage, where it is mounted, such as \\REGISTRY\\MACHINE\\SYSTEM, and the file it was loaded from. querykey (or q) shows a key: its last write time, its subkeys, and its values with their data decoded by type, REG_SZ, REG_EXPAND_SZ, and REG_LINK as text, REG_MULTI_SZ as its strings separated by \\0, REG_DWORD, REG_DWORD_BIG_ENDIAN, and REG_QWORD as numbers, and other types as hex bytes. The path is a full one, \\REGISTRY\\MACHINE\\..., or starts with HKLM, HKU, HKCR (the machine's classes), or HKCC; HKCU depends on the user, so give that user's HKU\\<SID> instead. A path with spaces can be given unquoted. The path resolves as the kernel parses it: across the link of each hive to where it is mounted, and through symbolic links such as CurrentControlSet, which the output names. Long data is cut short in the list; -v <value> shows one value in full, its decoded data and every byte, and -v \"\" the default value. keyinfo shows the key whose _CM_KEY_NODE is at <knode> in the hive at <hive>, as querykey does, with its path found from its parents. cellindex shows where a cell of a hive is: the cell map directory and table, the map entry of its block and where it maps the block, and the cell's address and size. The bins of a hive loaded from a file are a view of the file in the Registry process, whose pages Windows loads as they are used and can trim; a cell whose page is not in memory, or not in the dump, is reported as such, and the rest of the key still shows.",
-    completion: [None, RegistryKey],
-    target: Kernel,
-}
 
 /// The most characters of a string, and bytes of binary data, a value
 /// list shows.
@@ -122,18 +114,8 @@ fn data_preview(value: &RegValue, truncated: &mut bool) -> String {
 /// Every byte, 16 to a line with their offset and ASCII.
 fn print_hex_dump(bytes: &[u8]) {
     for (line, chunk) in bytes.chunks(16).enumerate() {
-        let hex: Vec<String> = chunk.iter().map(|byte| format!("{byte:02X}")).collect();
-        let text: String = chunk
-            .iter()
-            .map(|&byte| {
-                if byte.is_ascii_graphic() || byte == b' ' {
-                    byte as char
-                } else {
-                    '.'
-                }
-            })
-            .collect();
-        outln!("  {:06x}  {:<47}  {text}", line * 16, hex.join(" "));
+        let (hex, text) = hex_ascii_row(chunk, HexCase::Upper);
+        outln!("  {:06x}  {hex:<47}  {text}", line * 16);
     }
 }
 
@@ -380,118 +362,257 @@ fn print_cell(location: &CellLocation) {
     outln!();
 }
 
-impl ReplState<'_> {
-    fn cmd_reg(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(subcommand) = invocation.arg(0) else {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        };
-        let rest: Vec<&str> = invocation.argv[1..]
-            .iter()
-            .map(|arg| arg.as_ref())
-            .collect();
-        match subcommand.to_ascii_lowercase().as_str() {
-            "hivelist" => match self.ctx.target.registry_hives() {
-                Ok(list) => print_hives(&list),
-                Err(error) => error!("!reg hivelist: {error}"),
-            },
-            "querykey" | "q" => self.reg_querykey(subcommand, &rest),
-            "keyinfo" => {
-                let [hive, node] = rest.as_slice() else {
-                    error!("!reg keyinfo: give the hive and the key node; usage: {USAGE}");
-                    return Ok(());
-                };
-                let (Some(hive), Some(node)) =
-                    (self.eval_or_report(hive), self.eval_or_report(node))
-                else {
-                    return Ok(());
-                };
-                match self.ctx.target.registry_key_at(hive, node) {
-                    Ok(key) => print_key(&key, "!reg querykey"),
-                    Err(error) => error!("!reg keyinfo: {error}"),
-                }
-            }
-            "cellindex" => {
-                let [hive, cell] = rest.as_slice() else {
-                    error!("!reg cellindex: give the hive and the cell index; usage: {USAGE}");
-                    return Ok(());
-                };
-                let (Some(hive), Some(VirtAddr(cell))) =
-                    (self.eval_or_report(hive), self.eval_or_report(cell))
-                else {
-                    return Ok(());
-                };
-                let Ok(cell) = u32::try_from(cell) else {
-                    error!("!reg cellindex: {cell:#x} is not a cell index, which is 32 bits");
-                    return Ok(());
-                };
-                match self.ctx.target.registry_cell(hive, cell) {
-                    Ok(location) => print_cell(&location),
-                    Err(error) => error!("!reg cellindex: {error}"),
-                }
-            }
-            other => error!("!reg: unknown subcommand {other}; usage: {USAGE}"),
-        }
-        Ok(())
-    }
+/// What `!reg` was asked for.
+pub enum RegRequest {
+    Hives,
+    /// `querykey` (or `q`, `command` names it) of `path`, or of its value
+    /// `value`.
+    Query {
+        command: String,
+        path: String,
+        value: Option<String>,
+    },
+    KeyAt {
+        hive: VirtAddr,
+        node: VirtAddr,
+    },
+    Cell {
+        hive: VirtAddr,
+        cell: u32,
+    },
+}
 
-    fn reg_querykey(&mut self, subcommand: &str, args: &[&str]) {
-        let command = format!("!reg {subcommand}");
-        let mut path = Vec::new();
-        let mut wanted = None;
-        let mut args = args.iter();
-        while let Some(&arg) = args.next() {
-            if arg == "-v" {
-                let Some(&name) = args.next() else {
-                    error!("{command}: -v needs a value name; usage: {USAGE}");
-                    return;
-                };
-                wanted = Some(name);
+/// `!reg`'s subcommand and its arguments.
+#[grammar(
+    usage = "hivelist | querykey|q <path> [-v <value>] | keyinfo <hive> <knode> | cellindex <hive> <cell>",
+    complete = [None, RegistryKey]
+)]
+fn reg_request(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<RegRequest, ArgError> {
+    let message = |text: String| ArgError::Message(text);
+    let subcommand = cursor.word().ok_or(ArgError::Missing)?.into_owned();
+    match subcommand.to_ascii_lowercase().as_str() {
+        "hivelist" => Ok(RegRequest::Hives),
+        "querykey" | "q" => {
+            let command = format!("!reg {subcommand}");
+            let mut path = Vec::new();
+            let mut value = None;
+            while let Some(word) = cursor.word() {
+                if word == "-v" {
+                    let Some(name) = cursor.word() else {
+                        return Err(ArgError::usage(
+                            cx.name,
+                            format!("{command}: -v needs a value name"),
+                        ));
+                    };
+                    value = Some(name.into_owned());
+                } else {
+                    path.push(word.into_owned());
+                }
+            }
+            if path.is_empty() {
+                return Err(ArgError::usage(
+                    cx.name,
+                    format!("{command}: give a key's full path"),
+                ));
+            }
+            Ok(RegRequest::Query {
+                command,
+                path: path.join(" "),
+                value,
+            })
+        }
+        "keyinfo" => {
+            let words: Vec<String> = std::iter::from_fn(|| cursor.word())
+                .map(|word| word.into_owned())
+                .collect();
+            let [hive, node] = words.as_slice() else {
+                return Err(ArgError::usage(
+                    cx.name,
+                    format!("{} keyinfo: give the hive and the key node", cx.name),
+                ));
+            };
+            Ok(RegRequest::KeyAt {
+                hive: cx.eval(hive)?,
+                node: cx.eval(node)?,
+            })
+        }
+        "cellindex" => {
+            let words: Vec<String> = std::iter::from_fn(|| cursor.word())
+                .map(|word| word.into_owned())
+                .collect();
+            let [hive, cell] = words.as_slice() else {
+                return Err(ArgError::usage(
+                    cx.name,
+                    format!("{} cellindex: give the hive and the cell index", cx.name),
+                ));
+            };
+            let hive = cx.eval(hive)?;
+            let VirtAddr(cell) = cx.eval(cell)?;
+            let cell = u32::try_from(cell).map_err(|_| {
+                message(format!(
+                    "!reg cellindex: {cell:#x} is not a cell index, which is 32 bits"
+                ))
+            })?;
+            Ok(RegRequest::Cell { hive, cell })
+        }
+        other => Err(ArgError::usage(
+            cx.name,
+            format!("{}: unknown subcommand {other}", cx.name),
+        )),
+    }
+}
+
+/// What `!reg` shows.
+pub enum RegOutput {
+    Hives(HiveList),
+    /// A key, and the command that read it (for the hint on cut data).
+    Key(RegKey, String),
+    Value(RegKey, RegValue),
+    Cell(CellLocation),
+}
+
+/// Show the loaded registry hives, and keys and values read from them.
+///
+/// The commands read the configuration manager's hives in kernel memory, so
+/// they work on every backend, live or in a crash dump, without the guest's
+/// help. hivelist lists each hive on nt!CmpHiveListHead: its _CMHIVE, the bytes
+/// of its stable and volatile storage, where it is mounted, such as
+/// \REGISTRY\MACHINE\SYSTEM, and the file it was loaded from. querykey (or q)
+/// shows a key: its last write time, its subkeys, and its values with their
+/// data decoded by type, REG_SZ, REG_EXPAND_SZ, and REG_LINK as text,
+/// REG_MULTI_SZ as its strings separated by \0, REG_DWORD,
+/// REG_DWORD_BIG_ENDIAN, and REG_QWORD as numbers, and other types as hex
+/// bytes. The path is a full one, \REGISTRY\MACHINE\..., or starts with HKLM,
+/// HKU, HKCR (the machine's classes), or HKCC; HKCU depends on the user, so
+/// give that user's HKU\<SID> instead. A path with spaces can be given
+/// unquoted. The path resolves as the kernel parses it: across the link of each
+/// hive to where it is mounted, and through symbolic links such as
+/// CurrentControlSet, which the output names. Long data is cut short in the
+/// list; -v <value> shows one value in full, its decoded data and every byte,
+/// and -v "" the default value. keyinfo shows the key whose _CM_KEY_NODE is at
+/// <knode> in the hive at <hive>, as querykey does, with its path found from
+/// its parents. cellindex shows where a cell of a hive is: the cell map
+/// directory and table, the map entry of its block and where it maps the block,
+/// and the cell's address and size. The bins of a hive loaded from a file are a
+/// view of the file in the Registry process, whose pages Windows loads as they
+/// are used and can trim; a cell whose page is not in memory, or not in the
+/// dump, is reported as such, and the rest of the key still shows.
+#[command(
+    names = ["!reg"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    forms = [registry_hives, registry_key, registry_value, registry_key_at, registry_cell],
+)]
+fn reg(session: &Session, #[arg(parse = reg_request)] request: RegRequest) -> Result<RegOutput> {
+    let failed = |command: &str, error: Error| Error::DebugInfo(format!("{command}: {error}"));
+    match request {
+        RegRequest::Hives => registry_hives(session)
+            .map(RegOutput::Hives)
+            .map_err(|error| failed("!reg hivelist", error)),
+        RegRequest::KeyAt { hive, node } => registry_key_at(session, hive, node)
+            .map(|key| RegOutput::Key(key, "!reg querykey".to_string()))
+            .map_err(|error| failed("!reg keyinfo", error)),
+        RegRequest::Cell { hive, cell } => registry_cell(session, hive, cell)
+            .map(RegOutput::Cell)
+            .map_err(|error| failed("!reg cellindex", error)),
+        RegRequest::Query {
+            command,
+            path,
+            value,
+        } => {
+            let key = registry_key(session, path).map_err(|error| failed(&command, error))?;
+            let Some(wanted) = value else {
+                return Ok(RegOutput::Key(key, command));
+            };
+            // `(Default)` as the list shows the default value names it too.
+            let wanted = if wanted.eq_ignore_ascii_case("(Default)") {
+                ""
             } else {
-                path.push(arg);
+                &wanted
+            };
+            let found = key
+                .values
+                .iter()
+                .flatten()
+                .find(|value| names_equal(&value.name, wanted))
+                .cloned();
+            match found {
+                Some(value) => Ok(RegOutput::Value(key, value)),
+                None => {
+                    let unreadable = key.values.iter().filter(|entry| entry.is_err()).count();
+                    Err(Error::DebugInfo(format!(
+                        "{command}: {} has no value named {}{}",
+                        key.path,
+                        value_name(wanted),
+                        if unreadable > 0 {
+                            format!(" among those that read ({unreadable} do not)")
+                        } else {
+                            String::new()
+                        }
+                    )))
+                }
             }
         }
-        if path.is_empty() {
-            error!("{command}: give a key's full path; usage: {USAGE}");
-            return;
-        }
-        let key = match self.ctx.target.registry_key(&path.join(" ")) {
-            Ok(key) => key,
-            Err(error) => {
-                error!("{command}: {error}");
-                return;
-            }
-        };
-        let Some(wanted) = wanted else {
-            print_key(&key, &command);
-            return;
-        };
-        // `(Default)` as the list shows the default value names it too.
-        let wanted = if wanted.eq_ignore_ascii_case("(Default)") {
-            ""
-        } else {
-            wanted
-        };
-        match key
-            .values
-            .iter()
-            .flatten()
-            .find(|value| names_equal(&value.name, wanted))
-        {
-            Some(value) => print_value(&key, value),
-            None => {
-                let unreadable = key.values.iter().filter(|entry| entry.is_err()).count();
-                error!(
-                    "{command}: {} has no value named {}{}",
-                    key.path,
-                    value_name(wanted),
-                    if unreadable > 0 {
-                        format!(" among those that read ({unreadable} do not)")
-                    } else {
-                        String::new()
-                    }
-                );
-            }
+    }
+}
+
+/// List the registry hives loaded in kernel memory, with where each is
+/// mounted and the file it was loaded from (`!reg hivelist`).
+#[command(form_of = reg, python = Inspect)]
+fn registry_hives(session: &Session) -> Result<HiveList> {
+    session.target.registry_hives()
+}
+
+/// Read the registry key at `path`, a full path such as
+/// `HKLM\SYSTEM\CurrentControlSet\Services\Tcpip` or
+/// `\REGISTRY\MACHINE\...`, with its subkeys and its values, each
+/// value's data typed by its type (`!reg querykey`).
+#[command(form_of = reg, python = Inspect)]
+fn registry_key(session: &Session, path: String) -> Result<RegKey> {
+    session.target.registry_key(&path)
+}
+
+/// Read the value `name` of the registry key at `path`; `""` names the
+/// key's default value. Its `data` is a `str`, a `list[str]`, an `int`,
+/// or `bytes`, by the value's type (`!reg querykey <path> -v <name>`).
+#[command(form_of = reg, python = Inspect)]
+fn registry_value(session: &Session, path: String, name: String) -> Result<RegValue> {
+    let key = session.target.registry_key(&path)?;
+    key.values
+        .iter()
+        .flatten()
+        .find(|value| names_equal(&value.name, &name))
+        .cloned()
+        .ok_or_else(|| {
+            Error::DebugInfo(format!("{} has no readable value named {name:?}", key.path))
+        })
+}
+
+/// Read the registry key whose key node (`_CM_KEY_NODE`) is at `node`
+/// in the hive at `hive` (`!reg keyinfo`).
+#[command(form_of = reg, python = Inspect)]
+fn registry_key_at(session: &Session, hive: VirtAddr, node: VirtAddr) -> Result<RegKey> {
+    session.target.registry_key_at(hive, node)
+}
+
+/// Find where cell index `cell` of the hive at `hive` is, through the
+/// hive's cell map (`!reg cellindex`).
+#[command(form_of = reg, python = Inspect)]
+fn registry_cell(session: &Session, hive: VirtAddr, cell: u32) -> Result<CellLocation> {
+    session.target.registry_cell(hive, cell)
+}
+
+impl Render for RegOutput {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        match self {
+            Self::Hives(list) => print_hives(list),
+            Self::Key(key, command) => print_key(key, command),
+            Self::Value(key, value) => print_value(key, value),
+            Self::Cell(location) => print_cell(location),
         }
     }
 }

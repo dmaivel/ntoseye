@@ -1,11 +1,51 @@
 use crate::diagnostics::{errors_reported, print_notice};
 use crate::expr::Expr;
 use crate::repl::*;
+use crate::session::effects::Refusal;
+use crate::session::{ActionRunner, Session};
 use crate::types::VirtAddr;
 use crate::ui;
 
 const ALIAS_RECURSION_LIMIT: usize = 16;
 const BREAKPOINT_ACTION_RECURSION_LIMIT: usize = 4;
+
+/// The REPL dispatcher as every session's [`ActionRunner`]: breakpoint `do`
+/// actions and filter `-c` commands run in a REPL of their own over the
+/// session, with the user's saved aliases and the session's pseudo-registers,
+/// whichever host drives the run. Output goes where the host's output goes.
+pub struct ReplActions;
+
+impl ReplActions {
+    fn with_state<T>(session: &mut Session, line: &str, f: impl FnOnce(&mut ReplState) -> T) -> T {
+        let store = ReplStore::new(session, DispatchContext::BreakpointAction);
+        let mut state = ReplState::attach(session, store);
+        state.line = line.to_string();
+        let result = f(&mut state);
+        drop(state.detach());
+        result
+    }
+}
+
+impl ActionRunner for ReplActions {
+    fn breakpoint_action(&mut self, session: &mut Session, action: &str) -> bool {
+        Self::with_state(session, action, |state| {
+            state
+                .dispatch_breakpoint_action(action)
+                .unwrap_or_else(|error| {
+                    error!("breakpoint action failed: {error}");
+                    false
+                })
+        })
+    }
+
+    fn event_command(&mut self, session: &mut Session, command: &str) {
+        Self::with_state(session, command, |state| {
+            if let Err(error) = state.dispatch_exception_command(command) {
+                error!("exception command failed: {error}");
+            }
+        })
+    }
+}
 
 pub mod address_space;
 pub mod analyze;
@@ -13,6 +53,7 @@ mod blackbox;
 pub mod breakpoints;
 mod cpu;
 mod diagnostics;
+mod disasm;
 pub mod display;
 mod dx;
 mod dx_model;
@@ -189,19 +230,22 @@ impl ReplState<'_> {
         let name = spec.names[0];
         match self.context {
             DispatchContext::Interactive => None,
-            DispatchContext::BreakpointAction if spec.run != RunEffect::None => Some(format!(
-                "run-control command '{name}' must not appear inside a breakpoint action; \
+            DispatchContext::BreakpointAction if spec.effects.run != RunEffect::None => {
+                Some(format!(
+                    "run-control command '{name}' must not appear inside a breakpoint action; \
                  use 'g' or 'gc' (no address) to continue"
-            )),
+                ))
+            }
             DispatchContext::ExceptionCommand
-                if spec.run != RunEffect::None || spec.run_state == Some(RunState::Running) =>
+                if spec.effects.run != RunEffect::None
+                    || spec.effects.state == RunState::Running =>
             {
                 Some(format!(
                     "run-control command '{name}' must not appear inside an exception command; \
                      use the policy's -f break, -f gh, or -f gn"
                 ))
             }
-            DispatchContext::Remote(RemoteClient::Dap) if spec.run == RunEffect::Run => {
+            DispatchContext::Remote(RemoteClient::Dap) if spec.effects.run == RunEffect::Run => {
                 Some(format!(
                     "'{name}' would block this session until the next stop; use the client's \
                  continue or step controls instead"
@@ -219,7 +263,7 @@ impl ReplState<'_> {
             )),
             // The client caches registers and memory for the stop it was last
             // told about; only its own resume packets may move the target.
-            DispatchContext::Remote(RemoteClient::Gdb) if spec.run != RunEffect::None => {
+            DispatchContext::Remote(RemoteClient::Gdb) if spec.effects.run != RunEffect::None => {
                 Some(format!(
                     "'{name}' would move the target behind the GDB client; use the client's \
                      continue or step controls instead"
@@ -291,15 +335,12 @@ impl ReplState<'_> {
     /// The per-command policy every dispatch path shares: the context's
     /// refusal of host commands and of run control, then a remote host's
     /// wait for the halt the command needs (against the target's state right
-    /// now, so a `break` earlier on the line counts), then the run-state
-    /// check. `None` means run it. `typed` is the name as the user wrote it,
-    /// which messages repeat (`k`, not the canonical `kn`).
+    /// now, so a `break` earlier on the line counts), then the command's
+    /// [`Effects`] through [`crate::session::Session::admit`], which the
+    /// Python SDK shares. `None` means run it. `typed` is the name as the
+    /// user wrote it, which messages repeat (`k`, not the canonical `kn`).
     fn admit(&mut self, spec: &CommandSpec, typed: &str) -> Result<Option<Flow>> {
         if let Some(reason) = self.host_command_denial(spec) {
-            error!("{reason}");
-            return Ok(Some(Flow::Denied));
-        }
-        if let Some(reason) = self.secure_denial(spec) {
             error!("{reason}");
             return Ok(Some(Flow::Denied));
         }
@@ -307,25 +348,28 @@ impl ReplState<'_> {
             error!("{reason}");
             return Ok(Some(Flow::Denied));
         }
-        if spec.target == TargetRequirement::Kernel
-            && let Err(error) = self.ctx.target.require_kernel()
-        {
-            error!("{typed}: {error}");
-            return Ok(Some(Flow::Continue));
-        }
-        if let Some(flow) = self.gate_remote_command(spec, typed)? {
+        if let Some(flow) = self.gate_remote_command(spec, typed) {
             return Ok(Some(flow));
         }
-        if !check_run_state(self, spec) {
-            return Ok(Some(Flow::Continue));
+        if let Err(refusal) = self.ctx.admit(&spec.effects) {
+            // A VTL1 refusal ends a script or event command as a context
+            // denial does: what follows was meant for the other VTL.
+            let flow = if matches!(refusal, Refusal::Vtl1(_)) {
+                Flow::Denied
+            } else {
+                Flow::Continue
+            };
+            report_refusal(typed, refusal);
+            return Ok(Some(flow));
         }
         Ok(None)
     }
 
     fn dispatch_one(&mut self, line: &str, depth: usize) -> Result<Flow> {
-        // WinDbg processor syntax (`~`, `~2s`, `~*k`) is one token with the
-        // selector glued on, so it never matches a registered name.
-        if line.trim_start().starts_with('~') {
+        // WinDbg processor syntax (`~2s`, `~*k`) is one token with the
+        // selector glued on, so it never matches a registered name; a bare
+        // `~` is the listing, which is.
+        if line.trim_start().starts_with('~') && line.trim() != "~" {
             if let Some(spec) = command_registry().get("~")
                 && let Some(flow) = self.admit(spec, "~")?
             {
@@ -378,13 +422,6 @@ impl ReplState<'_> {
                 return Ok(flow);
             }
             match spec.handler {
-                CommandHandler::NoArgs(handler) => {
-                    if !parsed.raw_tail.trim().is_empty() {
-                        outln!("{}\n", command_help(parsed.name));
-                        return Ok(Flow::Continue);
-                    }
-                    handler(self)?;
-                }
                 CommandHandler::Args(handler) => {
                     let Some(invocation) = invocation_or_report(line, &parsed, spec.style) else {
                         return Ok(Flow::Continue);

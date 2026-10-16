@@ -1,22 +1,26 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::IsTerminal;
 
-use crate::backend::MemoryOps;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix};
 use crate::layout::utf16le_nul_terminated;
+use crate::memory::MemoryOps;
 use crate::output;
 #[cfg(feature = "python")]
 use crate::python::embed;
 use crate::target::meta::{
-    ErrorCodeDetail, TargetTimeDetail, TargetUserDumpDetail, TargetVersionDetail,
-    UserDumpTimeDetail, decode_error_code, decode_error_code_as_ntstatus,
+    ErrorCode, ErrorCodeKind, TargetTime, TargetUserDump, TargetVersion, UserDumpTime,
+    decode_error_code, decode_error_code_as_ntstatus,
 };
 use crate::target::{Target, TargetKind};
 use crate::triage_report::time::filetime_to_iso;
 use crate::types::{Arch, CodeMachine, VirtAddr};
 
+use ntoseye_macros::{command, grammar};
+
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
+use crate::session::Session;
 
 const PRINTF_C_STRING_LIMIT: usize = 4096;
 const PRINTF_WIDE_STRING_LIMIT: usize = 2048;
@@ -56,424 +60,440 @@ fn print_help_listing(groups: &[HelpGroup]) {
     }
 }
 
-repl_command! {
-    cmd_reload_scripts();
-    names: ["reload-scripts"],
-    usage: "reload-scripts",
-    summary: "Reload custom commands and aliases.",
+/// Reload custom commands and aliases.
+#[command(names = ["reload-scripts"], category = "session", kind = Host, python = none)]
+fn reload_scripts(state: &mut ReplState<'_>) -> Result<()> {
+    #[cfg(feature = "python")]
+    {
+        let py_report = embed::load_commands_dir();
+        embed::print_script_load_report(&py_report);
+        *state.caches.user_commands.write().unwrap() = initial_user_commands();
+    }
+    #[cfg(not(feature = "python"))]
+    print_python_commands_notice();
+    let alias_report = state.reload_aliases();
+    print_alias_load_report(&alias_report);
+    Ok(())
 }
 
-repl_command! {
-    cmd_radix;
-    names: ["n"],
-    usage: "n [8|10|16]",
-    summary: "Show or set the default numeric radix for REPL expressions.",
+/// Show or set the default numeric radix for REPL expressions.
+#[command(
+    names = ["n"],
+    category = "symbols, types, and expressions",
+    kind = Host,
+    python = none,
+)]
+fn radix(state: &mut ReplState<'_>, #[arg(name = "8|10|16")] radix: Option<String>) -> Result<()> {
+    if let Some(value) = radix {
+        state.radix = match value.as_str() {
+            "8" => NumberRadix::Octal,
+            "10" => NumberRadix::Decimal,
+            "16" => NumberRadix::Hexadecimal,
+            _ => {
+                return Err(Error::DebugInfo(format!(
+                    "invalid radix '{value}' (use 8, 10, or 16)"
+                )));
+            }
+        };
+    }
+
+    let name = match state.radix {
+        NumberRadix::Octal => "octal",
+        NumberRadix::Decimal => "decimal",
+        NumberRadix::Hexadecimal => "hexadecimal",
+    };
+    outln!("radix {} ({name})\n", state.radix.value());
+    Ok(())
 }
 
-repl_command! {
-    cmd_effmach;
-    names: [".effmach"],
-    usage: ".effmach [x86|amd64|arm64|auto|.]",
-    summary: "Show or set the effective code machine.",
-    details: "With no argument, shows the selected machine. x86, amd64, and arm64 (on an ARM64 target only) make u, ub, uf, and editor disassembly decode all code as that instruction set, and auto or . goes back to selection by context and image. This selection covers the x86 images of a WOW64 program and, on ARM64, also an emulated x64 image and the x64 ranges of an ARM64X/ARM64EC hybrid. x86 also makes ds/dS read 32-bit (WOW64) string descriptors.",
+/// Show or set the effective code machine.
+///
+/// With no argument, shows the selected machine. x86, amd64, and arm64 (on an
+/// ARM64 target only) make u, ub, uf, and editor disassembly decode all code as
+/// that instruction set, and auto or . goes back to selection by context and
+/// image. This selection covers the x86 images of a WOW64 program and, on
+/// ARM64, also an emulated x64 image and the x64 ranges of an ARM64X/ARM64EC
+/// hybrid. x86 also makes ds/dS read 32-bit (WOW64) string descriptors.
+#[command(
+    names = [".effmach"],
+    category = "processes and modules",
+    kind = Action,
+    python = none,
+)]
+fn effmach(
+    session: &mut Session,
+    #[arg(name = "x86|amd64|arm64|auto|.")] machine: Option<String>,
+) -> Result<()> {
+    if let Some(machine) = machine {
+        let machine = machine.to_ascii_lowercase();
+        session.target.effmach = match machine.as_str() {
+            "x86" => Some(CodeMachine::X86),
+            "amd64" => Some(CodeMachine::Amd64),
+            "arm64" if session.target.arch() == Arch::Arm64 => Some(CodeMachine::Arm64),
+            "arm64" => {
+                return Err(Error::DebugInfo(
+                    "an AMD64 target runs no ARM64 code; use x86, amd64, or auto".to_string(),
+                ));
+            }
+            "." | "auto" => None,
+            _ => {
+                return Err(Error::DebugInfo(format!(
+                    "invalid effective machine '{machine}' (use x86, amd64, arm64, or auto)"
+                )));
+            }
+        };
+    }
+
+    let machine = session.target.effmach.map_or("auto", CodeMachine::label);
+    outln!("effective machine: {machine}\n");
+    Ok(())
 }
 
-repl_command! {
-    cmd_version();
-    names: ["vertarget", "version"],
-    usage: "vertarget",
-    summary: "Show version information for the target, kernel, symbols, processor, and debugger.",
+/// Print text without evaluating expressions in it.
+#[command(
+    names = [".echo", "echo"],
+    category = "session",
+    kind = Host,
+    python = none,
+    style = ExpressionTail
+)]
+fn echo(_state: &mut ReplState<'_>, #[arg(raw, usage = "[text]")] text: String) -> Result<()> {
+    let mut text = text.as_str();
+    if text.len() >= 2 && text.starts_with('"') && text.ends_with('"') {
+        text = &text[1..text.len() - 1];
+    }
+    outln!("{text}");
+    Ok(())
 }
 
-repl_command! {
-    cmd_time();
-    names: [".time"],
-    usage: ".time",
-    summary: "Show the target UTC time and the system uptime.",
+/// Print the current date and time of the host in UTC.
+#[command(names = [".echotime"], category = "session", kind = Host, python = none)]
+fn echotime(_state: &mut ReplState<'_>) -> Result<()> {
+    const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|since| u64::try_from(since.as_nanos() / 100).ok())
+        .and_then(|ticks| filetime_to_iso(ticks.checked_add(FILETIME_UNIX_EPOCH)?))
+        .ok_or_else(|| {
+            Error::DebugInfo("the host clock is outside the representable range".to_string())
+        })?;
+    outln!("Debugger (not debuggee) time: {now}\n");
+    Ok(())
 }
 
-repl_command! {
-    cmd_echo;
-    names: [".echo", "echo"],
-    usage: ".echo <text>",
-    summary: "Print text without evaluating expressions in it.",
-    style: ExpressionTail,
+/// Format debugger values with WinDbg-style printf specifiers.
+///
+/// Put the arguments after the format and separate them with commas, as in
+/// WinDbg (`.printf "%p %d\n", poi(@rcx + 8), @$t0`). If each argument is one
+/// word, you can separate them with spaces.
+#[command(
+    names = [".printf"],
+    category = "session",
+    kind = Host,
+    python = none,
+    style = ExpressionTail
+)]
+fn printf(
+    state: &mut ReplState<'_>,
+    #[arg(raw, usage = "\"<format>\" [, <argument>]...", complete = Expression)] tail: String,
+    #[arg(invoked)] name: &str,
+) -> Result<()> {
+    let Some((format, args)) = parse_printf_tail(&tail) else {
+        outln!("{}\n", command_help(name));
+        return Ok(());
+    };
+    // An unreadable argument is reported (the REPL prints the error), not
+    // propagated: `.printf` is the body of a log point, and a single bad read
+    // must not tear down the session that is running it.
+    let text = format_printf(&format, &args, &state.ctx.target, state.radix)?;
+    // WinDbg's `.printf` emits exactly the format's characters, which is
+    // why its examples end in `\n`; appending one here would double it.
+    out!("{text}");
+    Ok(())
 }
 
-repl_command! {
-    cmd_echotime();
-    names: [".echotime"],
-    usage: ".echotime",
-    summary: "Print the current date and time of the host in UTC.",
+/// Clear the terminal screen if stdout is a terminal.
+#[command(names = [".cls"], category = "session", kind = Host, python = none)]
+fn cls(_state: &mut ReplState<'_>) -> Result<()> {
+    if std::io::stdout().is_terminal() {
+        out!("\x1b[2J\x1b[H");
+    }
+    Ok(())
 }
 
-repl_command! {
-    cmd_printf;
-    names: [".printf"],
-    usage: ".printf \"format\" [, argument]...",
-    summary: "Format debugger values with WinDbg-style printf specifiers.",
-    details: "Put the arguments after the format and separate them with commas, as in WinDbg (`.printf \"%p %d\\n\", poi(@rcx + 8), @$t0`). If each argument is one word, you can separate them with spaces.",
-    completion: Expression,
-    style: ExpressionTail,
+/// Start a debugger transcript and replace any existing file.
+#[command(
+    names = [".logopen"],
+    category = "session",
+    kind = Host,
+    python = none,
+)]
+fn logopen(_state: &mut ReplState<'_>, file: String) -> Result<()> {
+    open_log_file(&file, false)
 }
 
-repl_command! {
-    cmd_cls();
-    names: [".cls"],
-    usage: ".cls",
-    summary: "Clear the terminal screen if stdout is a terminal.",
+/// Start a debugger transcript and append it to the file.
+#[command(
+    names = [".logappend"],
+    category = "session",
+    kind = Host,
+    python = none,
+)]
+fn logappend(_state: &mut ReplState<'_>, file: String) -> Result<()> {
+    open_log_file(&file, true)
 }
 
-repl_command! {
-    cmd_logopen;
-    names: [".logopen"],
-    usage: ".logopen <file>",
-    summary: "Start a debugger transcript and replace any existing file.",
+fn open_log_file(path: &str, append: bool) -> Result<()> {
+    output::open_log(path, append)
+        .map_err(|error| Error::DebugInfo(format!("failed to open log '{path}': {error}")))?;
+    outln!(
+        "log {} {}\n",
+        if append { "appending to" } else { "opened" },
+        path
+    );
+    Ok(())
 }
 
-repl_command! {
-    cmd_logappend;
-    names: [".logappend"],
-    usage: ".logappend <file>",
-    summary: "Start a debugger transcript and append it to the file.",
+/// Close the debugger transcript.
+#[command(names = [".logclose"], category = "session", kind = Host, python = none)]
+fn logclose(_state: &mut ReplState<'_>) -> Result<()> {
+    output::close_log();
+    outln!("log closed\n");
+    Ok(())
 }
 
-repl_command! {
-    cmd_logclose();
-    names: [".logclose"],
-    usage: ".logclose",
-    summary: "Close the debugger transcript.",
+/// List commands or show detailed help for one command.
+#[command(
+    names = [".hh", "help", ".help"],
+    category = "session",
+    kind = Host,
+    python = none,
+)]
+fn help(state: &mut ReplState<'_>, command: Option<String>) -> Result<()> {
+    if let Some(name) = command.as_deref() {
+        if let Some((_, help, _)) = state
+            .caches
+            .user_commands
+            .read()
+            .unwrap()
+            .iter()
+            .find(|(command, _, _)| command == name)
+        {
+            outln!("{name}\n{help}\n");
+            return Ok(());
+        }
+        if let Some((_, expansion)) = state
+            .aliases
+            .entries()
+            .into_iter()
+            .find(|(alias, _)| alias == name)
+        {
+            outln!("alias {name} {expansion}\n");
+            return Ok(());
+        }
+        match command_registry().get(name) {
+            None => error!("unknown command '{name}'"),
+            Some(spec) => {
+                let print_text = || outln!("{}\n", spec_help(spec));
+                #[cfg(feature = "cli")]
+                native::render(|| native::help::command(spec), print_text);
+                #[cfg(not(feature = "cli"))]
+                print_text();
+            }
+        }
+        return Ok(());
+    }
+
+    let mut groups: BTreeMap<&'static str, BTreeMap<&'static str, &'static CommandSpec>> =
+        BTreeMap::new();
+    // A user-mode minidump refuses every kernel command, so the listing
+    // leaves them out; `help <command>` still describes each.
+    let user_dump = state.ctx.target.kind() == TargetKind::UserDump;
+    let mut hidden = BTreeSet::new();
+    for (_, spec) in command_registry().command_names() {
+        let canonical = spec.names[0];
+        if user_dump && spec.effects.target.needs_kernel() {
+            hidden.insert(canonical);
+            continue;
+        }
+        groups
+            .entry(spec.category)
+            .or_default()
+            .insert(canonical, spec);
+    }
+    let mut listing: Vec<HelpGroup> = groups
+        .into_iter()
+        .map(|(category, specs)| HelpGroup {
+            title: category.to_string(),
+            entries: specs
+                .into_values()
+                .map(|spec| HelpEntry {
+                    name: spec.names[0].to_string(),
+                    summary: spec.summary.to_string(),
+                    aliases: spec.names[1..].join(", "),
+                })
+                .collect(),
+        })
+        .collect();
+
+    let user_commands = state.caches.user_commands.read().unwrap().clone();
+    if !user_commands.is_empty() {
+        listing.push(HelpGroup {
+            title: "python commands".to_string(),
+            entries: user_commands
+                .into_iter()
+                .map(|(name, help, _)| HelpEntry {
+                    summary: help.lines().next().unwrap_or("").to_string(),
+                    name,
+                    aliases: String::new(),
+                })
+                .collect(),
+        });
+    }
+    let aliases = state.aliases.entries();
+    if !aliases.is_empty() {
+        listing.push(HelpGroup {
+            title: "user aliases".to_string(),
+            entries: aliases
+                .into_iter()
+                .map(|(name, expansion)| HelpEntry {
+                    name,
+                    summary: expansion,
+                    aliases: String::new(),
+                })
+                .collect(),
+        });
+    }
+    #[cfg(feature = "cli")]
+    native::render(
+        || native::help::view(&listing),
+        || print_help_listing(&listing),
+    );
+    #[cfg(not(feature = "cli"))]
+    print_help_listing(&listing);
+    if !hidden.is_empty() {
+        outln!(
+            "{}\n",
+            ui::muted(&format!(
+                "{} commands that need a kernel target are not listed: this is a user-mode minidump",
+                hidden.len()
+            ))
+        );
+    }
+    Ok(())
 }
 
-repl_command! {
-    cmd_help;
-    names: [".hh", "help", ".help"],
-    usage: ".hh [command]",
-    summary: "List commands or show detailed help for one command.",
+/// Exit, remove the breakpoints of this session, and leave the guest running.
+///
+/// This is the WinDbg qd command (quit and detach), and ntoseye also accepts
+/// qd. If this session halted the guest, q resumes it. If q cannot remove a
+/// breakpoint from the guest, it leaves the guest halted, because if q resumed
+/// that guest, the breakpoint could trap when there is no debugger.
+#[command(
+    names = ["q", "quit", "qd"],
+    category = "session",
+    kind = Host,
+    python = none,
+    flow = Quit
+)]
+fn quit(_state: &mut ReplState<'_>) -> Result<()> {
+    // The host quits on the command's flow: it removes the breakpoints and
+    // resumes the guest it halted.
+    Ok(())
 }
 
-repl_command! {
-    cmd_error;
-    names: ["!error", "!ntstatus"],
-    usage: "!error <code>",
-    summary: "Decode an NTSTATUS, Win32, or HRESULT error code.",
-    completion: Expression,
+/// Show version information for the target, kernel, symbols, processor, and
+/// debugger.
+#[command(
+    names = ["vertarget", "version"],
+    category = "target control",
+    kind = Query,
+    target = Nt,
+    python = Inspect,
+    python_name = "version"
+)]
+fn target_version(session: &mut Session) -> Result<TargetVersion> {
+    session.target_version()
 }
 
-repl_command! {
-    names: ["q", "quit", "qd"],
-    usage: "q",
-    summary: "Exit, remove the breakpoints of this session, and leave the guest running.",
-    details: "This is the WinDbg qd command (quit and detach), and ntoseye also accepts qd. If this session halted the guest, q resumes it. If q cannot remove a breakpoint from the guest, it leaves the guest halted, because if q resumed that guest, the breakpoint could trap when there is no debugger.",
-    flow: Quit,
+impl Render for TargetVersion {
+    fn render(&self, _: &mut ReplState<'_>, _: ()) {
+        print_target_version(self);
+        outln!();
+    }
+}
+
+/// Show the target UTC time and the system uptime.
+#[command(
+    names = [".time"],
+    category = "target control",
+    kind = Query,
+    target = Nt,
+    python = Inspect,
+    python_name = "time"
+)]
+fn target_time(session: &Session) -> Result<TargetTime> {
+    session.target.target_time()
+}
+
+impl Render for TargetTime {
+    fn render(&self, _: &mut ReplState<'_>, _: ()) {
+        print_target_time(self);
+        outln!();
+    }
+}
+
+/// Decode an NTSTATUS, Win32, or HRESULT error code.
+#[command(
+    names = ["!error", "!ntstatus"],
+    category = "analysis",
+    kind = Query,
+    python = none,
+)]
+fn error_code(
+    _session: &Session,
+    #[arg(parse = error_code_arg)] code: u64,
+    #[arg(invoked)] name: &str,
+) -> Result<ErrorCode> {
+    Ok(if name == "!ntstatus" {
+        decode_error_code_as_ntstatus(code)
+    } else {
+        decode_error_code(code)
+    })
+}
+
+/// `!error`'s code: an expression in the current radix, of 32 bits.
+#[grammar(usage = "<{}>", complete = Expression)]
+fn error_code_arg(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<u64, ArgError> {
+    let text = cursor.word().ok_or(ArgError::Missing)?;
+    let code = cx
+        .eval(&text)
+        .map_err(|error| match error {
+            ArgError::Message(error) => {
+                ArgError::Message(format!("invalid error code '{text}': {error}"))
+            }
+            ArgError::Missing => ArgError::Missing,
+        })?
+        .0;
+    if u32::try_from(code).is_err() {
+        return Err(ArgError::Message(format!(
+            "error code '{text}' exceeds 32 bits"
+        )));
+    }
+    Ok(code)
+}
+
+impl Render for ErrorCode {
+    fn render(&self, _: &mut ReplState<'_>, _: ()) {
+        print_error_code(self);
+    }
 }
 
 impl ReplState<'_> {
-    fn cmd_reload_scripts(&mut self) -> Result<()> {
-        #[cfg(feature = "python")]
-        {
-            let py_report = embed::load_commands_dir();
-            embed::print_script_load_report(&py_report);
-            *self.caches.user_commands.write().unwrap() = initial_user_commands();
-        }
-        #[cfg(not(feature = "python"))]
-        print_python_commands_notice();
-        let alias_report = self.reload_aliases();
-        print_alias_load_report(&alias_report);
-        Ok(())
-    }
-
-    fn cmd_radix(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if let Some(value) = invocation.arg(0) {
-            self.radix = match value {
-                "8" => NumberRadix::Octal,
-                "10" => NumberRadix::Decimal,
-                "16" => NumberRadix::Hexadecimal,
-                _ => {
-                    error!("invalid radix '{value}' (use 8, 10, or 16)");
-                    return Ok(());
-                }
-            };
-        }
-
-        let name = match self.radix {
-            NumberRadix::Octal => "octal",
-            NumberRadix::Decimal => "decimal",
-            NumberRadix::Hexadecimal => "hexadecimal",
-        };
-        outln!("radix {} ({name})\n", self.radix.value());
-        Ok(())
-    }
-
-    fn cmd_effmach(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if invocation.argv.len() > 1 {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-
-        if let Some(machine) = invocation.arg(0) {
-            let machine = machine.to_ascii_lowercase();
-            self.ctx.target.effmach = match machine.as_str() {
-                "x86" => Some(CodeMachine::X86),
-                "amd64" => Some(CodeMachine::Amd64),
-                "arm64" if self.ctx.target.arch() == Arch::Arm64 => Some(CodeMachine::Arm64),
-                "arm64" => {
-                    error!("an AMD64 target runs no ARM64 code; use x86, amd64, or auto");
-                    return Ok(());
-                }
-                "." | "auto" => None,
-                _ => {
-                    error!(
-                        "invalid effective machine '{machine}' (use x86, amd64, arm64, or auto)"
-                    );
-                    return Ok(());
-                }
-            };
-        }
-
-        let machine = self.ctx.target.effmach.map_or("auto", CodeMachine::label);
-        outln!("effective machine: {machine}\n");
-        Ok(())
-    }
-
-    fn cmd_version(&mut self) -> Result<()> {
-        let detail = self.ctx.target_version()?;
-        print_target_version(&detail);
-        outln!();
-        Ok(())
-    }
-
-    fn cmd_time(&mut self) -> Result<()> {
-        let detail = self.ctx.target.target_time()?;
-        print_target_time(&detail);
-        outln!();
-        Ok(())
-    }
-
-    fn cmd_echotime(&mut self) -> Result<()> {
-        const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|since| u64::try_from(since.as_nanos() / 100).ok())
-            .and_then(|ticks| filetime_to_iso(ticks.checked_add(FILETIME_UNIX_EPOCH)?));
-        match now {
-            Some(now) => outln!("Debugger (not debuggee) time: {now}\n"),
-            None => error!("the host clock is outside the representable range"),
-        }
-        Ok(())
-    }
-
-    fn cmd_echo(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let mut text = invocation.raw_tail;
-        if text.len() >= 2 && text.starts_with('"') && text.ends_with('"') {
-            text = &text[1..text.len() - 1];
-        }
-        outln!("{text}");
-        Ok(())
-    }
-
-    fn cmd_printf(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some((format, args)) = parse_printf_tail(invocation.raw_tail) else {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        };
-        // An unreadable argument is reported, not propagated: `.printf` is
-        // the body of a log point, and a single bad read must not tear down
-        // the session that is running it.
-        let text = match format_printf(&format, &args, &self.ctx.target, self.radix) {
-            Ok(text) => text,
-            Err(error) => {
-                error!("{}", error);
-                return Ok(());
-            }
-        };
-        // WinDbg's `.printf` emits exactly the format's characters, which is
-        // why its examples end in `\n`; appending one here would double it.
-        out!("{text}");
-        Ok(())
-    }
-
-    fn cmd_cls(&mut self) -> Result<()> {
-        if std::io::stdout().is_terminal() {
-            out!("\x1b[2J\x1b[H");
-        }
-        Ok(())
-    }
-
-    fn cmd_logopen(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.open_log_file(&invocation, false)
-    }
-
-    fn cmd_logappend(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.open_log_file(&invocation, true)
-    }
-
-    fn open_log_file(&mut self, invocation: &CommandInvocation<'_>, append: bool) -> Result<()> {
-        let Some(path) = invocation.arg(0) else {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        };
-        if invocation.argv.len() != 1 {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        match output::open_log(path, append) {
-            Ok(()) => outln!(
-                "log {} {}\n",
-                if append { "appending to" } else { "opened" },
-                path
-            ),
-            Err(error) => error!("failed to open log '{}': {error}", path),
-        }
-        Ok(())
-    }
-
-    fn cmd_logclose(&mut self) -> Result<()> {
-        output::close_log();
-        outln!("log closed\n");
-        Ok(())
-    }
-
-    fn cmd_help(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if let Some(name) = invocation.arg(0) {
-            if let Some((_, help, _)) = self
-                .caches
-                .user_commands
-                .read()
-                .unwrap()
-                .iter()
-                .find(|(command, _, _)| command == name)
-            {
-                outln!("{name}\n{help}\n");
-                return Ok(());
-            }
-            if let Some((_, expansion)) = self
-                .aliases
-                .entries()
-                .into_iter()
-                .find(|(alias, _)| alias == name)
-            {
-                outln!("alias {name} {expansion}\n");
-                return Ok(());
-            }
-            match command_registry().get(name) {
-                None => error!("unknown command '{name}'"),
-                Some(spec) => {
-                    let print_text = || outln!("{}\n", spec_help(spec));
-                    #[cfg(feature = "cli")]
-                    native::render(|| native::help::command(spec), print_text);
-                    #[cfg(not(feature = "cli"))]
-                    print_text();
-                }
-            }
-            return Ok(());
-        }
-
-        let mut groups: BTreeMap<&'static str, BTreeMap<&'static str, &'static CommandSpec>> =
-            BTreeMap::new();
-        // A user-mode minidump refuses every kernel command, so the listing
-        // leaves them out; `help <command>` still describes each.
-        let user_dump = self.ctx.target.kind() == TargetKind::UserDump;
-        let mut hidden = BTreeSet::new();
-        for (_, spec) in command_registry().command_names() {
-            let canonical = spec.names[0];
-            if user_dump && spec.target == TargetRequirement::Kernel {
-                hidden.insert(canonical);
-                continue;
-            }
-            groups
-                .entry(command_category(canonical))
-                .or_default()
-                .insert(canonical, spec);
-        }
-        let mut listing: Vec<HelpGroup> = groups
-            .into_iter()
-            .map(|(category, specs)| HelpGroup {
-                title: category.to_string(),
-                entries: specs
-                    .into_values()
-                    .map(|spec| HelpEntry {
-                        name: spec.names[0].to_string(),
-                        summary: spec.summary.to_string(),
-                        aliases: spec.names[1..].join(", "),
-                    })
-                    .collect(),
-            })
-            .collect();
-
-        let user_commands = self.caches.user_commands.read().unwrap().clone();
-        if !user_commands.is_empty() {
-            listing.push(HelpGroup {
-                title: "python commands".to_string(),
-                entries: user_commands
-                    .into_iter()
-                    .map(|(name, help, _)| HelpEntry {
-                        summary: help.lines().next().unwrap_or("").to_string(),
-                        name,
-                        aliases: String::new(),
-                    })
-                    .collect(),
-            });
-        }
-        let aliases = self.aliases.entries();
-        if !aliases.is_empty() {
-            listing.push(HelpGroup {
-                title: "user aliases".to_string(),
-                entries: aliases
-                    .into_iter()
-                    .map(|(name, expansion)| HelpEntry {
-                        name,
-                        summary: expansion,
-                        aliases: String::new(),
-                    })
-                    .collect(),
-            });
-        }
-        #[cfg(feature = "cli")]
-        native::render(
-            || native::help::view(&listing),
-            || print_help_listing(&listing),
-        );
-        #[cfg(not(feature = "cli"))]
-        print_help_listing(&listing);
-        if !hidden.is_empty() {
-            outln!(
-                "{}\n",
-                ui::muted(&format!(
-                    "{} commands that need a kernel target are not listed: this is a user-mode minidump",
-                    hidden.len()
-                ))
-            );
-        }
-        Ok(())
-    }
-
-    fn cmd_error(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(text) = invocation.arg(0) else {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        };
-        let code = match Expr::eval_with_radix(text, &self.ctx.target, self.radix) {
-            Ok(value) => value.0,
-            Err(error) => {
-                error!("invalid error code '{text}': {error}");
-                return Ok(());
-            }
-        };
-        if u32::try_from(code).is_err() {
-            error!("error code '{text}' exceeds 32 bits");
-            return Ok(());
-        }
-        let detail = if invocation.name == "!ntstatus" {
-            decode_error_code_as_ntstatus(code)
-        } else {
-            decode_error_code(code)
-        };
-        print_error_code(&detail);
-        Ok(())
-    }
-
     pub fn cmd_user(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         #[cfg(feature = "python")]
         if embed::has_command(invocation.name) {
@@ -501,345 +521,20 @@ impl ReplState<'_> {
     }
 }
 
-const COMMAND_CATEGORIES: &[(&str, &str)] = &[
-    ("dS", "memory and disassembly"),
-    ("dW", "memory and disassembly"),
-    ("da", "memory and disassembly"),
-    ("db", "memory and disassembly"),
-    ("dc", "memory and disassembly"),
-    ("dd", "memory and disassembly"),
-    ("dds", "memory and disassembly"),
-    ("df", "memory and disassembly"),
-    ("dl", "memory and disassembly"),
-    ("dq", "memory and disassembly"),
-    ("dp", "memory and disassembly"),
-    ("dpp", "memory and disassembly"),
-    ("dqs", "memory and disassembly"),
-    ("ds", "memory and disassembly"),
-    ("du", "memory and disassembly"),
-    ("dw", "memory and disassembly"),
-    ("dyb", "memory and disassembly"),
-    ("eb", "memory and disassembly"),
-    ("ed", "memory and disassembly"),
-    ("ef", "memory and disassembly"),
-    ("eq", "memory and disassembly"),
-    ("ew", "memory and disassembly"),
-    ("ea", "memory and disassembly"),
-    ("eu", "memory and disassembly"),
-    ("eza", "memory and disassembly"),
-    ("ezu", "memory and disassembly"),
-    ("c", "memory and disassembly"),
-    ("f", "memory and disassembly"),
-    ("m", "memory and disassembly"),
-    ("s", "memory and disassembly"),
-    ("u", "memory and disassembly"),
-    ("ub", "memory and disassembly"),
-    ("#", "memory and disassembly"),
-    ("uf", "memory and disassembly"),
-    ("!db", "memory and disassembly"),
-    ("!dd", "memory and disassembly"),
-    ("!dq", "memory and disassembly"),
-    ("!dw", "memory and disassembly"),
-    ("!eb", "memory and disassembly"),
-    ("!ed", "memory and disassembly"),
-    ("!eq", "memory and disassembly"),
-    ("!search", "memory and disassembly"),
-    ("ib", "memory and disassembly"),
-    ("iw", "memory and disassembly"),
-    ("id", "memory and disassembly"),
-    ("ob", "memory and disassembly"),
-    ("ow", "memory and disassembly"),
-    ("od", "memory and disassembly"),
-    ("break", "execution and stack"),
-    ("g", "execution and stack"),
-    ("gh", "execution and stack"),
-    ("gn", "execution and stack"),
-    ("gu", "execution and stack"),
-    ("kn", "execution and stack"),
-    ("kd", "execution and stack"),
-    ("pa", "execution and stack"),
-    ("p", "execution and stack"),
-    ("pc", "execution and stack"),
-    ("ph", "execution and stack"),
-    ("pt", "execution and stack"),
-    ("r", "execution and stack"),
-    ("t", "execution and stack"),
-    ("ta", "execution and stack"),
-    ("tc", "execution and stack"),
-    ("th", "execution and stack"),
-    ("tt", "execution and stack"),
-    ("wt", "execution and stack"),
-    ("!analyze", "analysis"),
-    (".bugcheck", "analysis"),
-    (".enumtag", "analysis"),
-    ("!blackboxbsd", "analysis"),
-    ("!blackboxntfs", "analysis"),
-    ("!blackboxpci", "analysis"),
-    ("!blackboxpnp", "analysis"),
-    ("!blackboxwinlogon", "analysis"),
-    ("!apc", "execution and stack"),
-    ("!stacks", "execution and stack"),
-    ("!findstack", "execution and stack"),
-    ("!uniqstack", "execution and stack"),
-    ("!process", "processes and modules"),
-    (".vtl", "processes and modules"),
-    ("!trustlets", "processes and modules"),
-    ("!hvpartitions", "processes and modules"),
-    ("!hvvps", "processes and modules"),
-    ("!hvept", "processes and modules"),
-    ("!hveptdiff", "processes and modules"),
-    ("!hvcalls", "processes and modules"),
-    ("!hvcall", "processes and modules"),
-    ("!hvvmcs", "processes and modules"),
-    ("!hvr", "processes and modules"),
-    (".partition", "processes and modules"),
-    ("!hvd", "processes and modules"),
-    ("!hvu", "processes and modules"),
-    ("!session", "processes and modules"),
-    ("!sprocess", "processes and modules"),
-    ("!thread", "processes and modules"),
-    ("!vad", "processes and modules"),
-    (".effmach", "processes and modules"),
-    ("~", "processes and modules"),
-    ("attach", "processes and modules"),
-    ("detach", "processes and modules"),
-    ("drivers", "processes and modules"),
-    ("ld", "processes and modules"),
-    ("lm", "processes and modules"),
-    ("!dh", "processes and modules"),
-    ("lmv", "processes and modules"),
-    ("!lmi", "processes and modules"),
-    ("ps", "processes and modules"),
-    ("!for_each_process", "processes and modules"),
-    ("!for_each_thread", "processes and modules"),
-    ("!for_each_module", "processes and modules"),
-    ("threads", "processes and modules"),
-    ("vcpu", "processes and modules"),
-    ("!dlls", "user mode"),
-    ("!heap", "user mode"),
-    ("!peb", "user mode"),
-    ("!teb", "user mode"),
-    ("!gle", "user mode"),
-    ("ba", "breakpoints and events"),
-    ("bc", "breakpoints and events"),
-    ("bd", "breakpoints and events"),
-    ("be", "breakpoints and events"),
-    ("bl", "breakpoints and events"),
-    (".bpcmds", "breakpoints and events"),
-    ("gc", "breakpoints and events"),
-    ("bm", "breakpoints and events"),
-    ("bp", "breakpoints and events"),
-    ("bpc", "breakpoints and events"),
-    ("bpp", "breakpoints and events"),
-    ("br", "breakpoints and events"),
-    ("bs", "breakpoints and events"),
-    ("bsc", "breakpoints and events"),
-    ("bu", "breakpoints and events"),
-    ("!hvbp", "breakpoints and events"),
-    ("!hvexit", "breakpoints and events"),
-    ("sx", "breakpoints and events"),
-    ("sxd", "breakpoints and events"),
-    ("sxe", "breakpoints and events"),
-    ("sxi", "breakpoints and events"),
-    ("sxn", "breakpoints and events"),
-    ("sxr", "breakpoints and events"),
-    ("rdmsr", "cpu"),
-    ("wrmsr", "cpu"),
-    ("!cpuinfo", "cpu"),
-    ("!gdt", "cpu"),
-    ("dg", "cpu"),
-    ("!idt", "cpu"),
-    ("!irql", "cpu"),
-    ("!pcr", "cpu"),
-    ("!prcb", "cpu"),
-    ("!dpcs", "cpu"),
-    ("!exqueue", "cpu"),
-    ("!ready", "cpu"),
-    ("!running", "cpu"),
-    ("!timer", "cpu"),
-    ("!ca", "memory manager"),
-    ("!filecache", "memory manager"),
-    ("!qlocks", "cpu"),
-    ("!ipi", "cpu"),
-    ("!apic", "cpu"),
-    ("!ioapic", "cpu"),
-    ("!sysinfo", "cpu"),
-    ("!lookaside", "memory manager"),
-    ("!mdl", "memory manager"),
-    ("!memusage", "memory manager"),
-    ("!pfn", "memory manager"),
-    ("!pool", "memory manager"),
-    ("!poolfind", "memory manager"),
-    ("!poolused", "memory manager"),
-    ("!poolval", "memory manager"),
-    ("!pte", "memory manager"),
-    ("!ptov", "memory manager"),
-    ("!sysptes", "memory manager"),
-    ("!vm", "memory manager"),
-    ("!vprot", "memory manager"),
-    ("!vtop", "memory manager"),
-    ("callbacks", "objects and I/O"),
-    ("!alpc", "objects and I/O"),
-    ("!devnode", "objects and I/O"),
-    ("!devobj", "objects and I/O"),
-    ("!devstack", "objects and I/O"),
-    ("!drvobj", "objects and I/O"),
-    ("!fileobj", "objects and I/O"),
-    ("!fltkd.filters", "objects and I/O"),
-    ("!fltkd.instances", "objects and I/O"),
-    ("!fltkd.volumes", "objects and I/O"),
-    ("!handle", "objects and I/O"),
-    ("!htrace", "objects and I/O"),
-    ("!irp", "objects and I/O"),
-    ("!irpfind", "objects and I/O"),
-    ("!job", "processes and modules"),
-    ("!zombies", "processes and modules"),
-    ("!list", "objects and I/O"),
-    ("!locks", "objects and I/O"),
-    ("!object", "objects and I/O"),
-    ("!pnptriage", "objects and I/O"),
-    ("!poaction", "objects and I/O"),
-    ("!podev", "objects and I/O"),
-    ("!popolicy", "objects and I/O"),
-    ("!vpb", "objects and I/O"),
-    ("!pcitree", "objects and I/O"),
-    ("!pci", "objects and I/O"),
-    ("!ndiskd.minidriver", "objects and I/O"),
-    ("!ndiskd.miniport", "objects and I/O"),
-    ("!ndiskd.miniports", "objects and I/O"),
-    ("!ndiskd.protocol", "objects and I/O"),
-    ("!ndiskd.filterdriver", "objects and I/O"),
-    ("!ndiskd.filter", "objects and I/O"),
-    ("!ndiskd.oid", "objects and I/O"),
-    ("!ndiskd.nbl", "objects and I/O"),
-    ("!virtio", "objects and I/O"),
-    ("!vring", "objects and I/O"),
-    ("!storagekd.storadapter", "objects and I/O"),
-    ("!storagekd.storunit", "objects and I/O"),
-    ("!storagekd.storloglist", "objects and I/O"),
-    ("!storagekd.storlogirp", "objects and I/O"),
-    ("!storagekd.storlogsrb", "objects and I/O"),
-    ("!storagekd.storsrb", "objects and I/O"),
-    ("!storagekd.storclass", "objects and I/O"),
-    ("!rcdrkd.rcdrloglist", "objects and I/O"),
-    ("!rcdrkd.rcdrlogdump", "objects and I/O"),
-    ("!reg", "objects and I/O"),
-    ("ssdt", "objects and I/O"),
-    ("!wdfkd.wdfcrashdump", "objects and I/O"),
-    ("!wdfkd.wdfdevice", "objects and I/O"),
-    ("!wdfkd.wdfdriverinfo", "objects and I/O"),
-    ("!wdfkd.wdfhandle", "objects and I/O"),
-    ("!wdfkd.wdfiotarget", "objects and I/O"),
-    ("!wdfkd.wdfldr", "objects and I/O"),
-    ("!wdfkd.wdflogdump", "objects and I/O"),
-    ("!wdfkd.wdfobject", "objects and I/O"),
-    ("!wdfkd.wdfqueue", "objects and I/O"),
-    ("!wdfkd.wdfrequest", "objects and I/O"),
-    ("!acl", "security"),
-    ("!objsd", "security"),
-    ("!sd", "security"),
-    ("!sid", "security"),
-    ("!token", "security"),
-    ("!chkimg", "analysis"),
-    ("!error", "analysis"),
-    ("!gflag", "analysis"),
-    ("!verifier", "analysis"),
-    ("!wmitrace.logdump", "analysis"),
-    ("!wmitrace.logger", "analysis"),
-    ("!wmitrace.logsave", "analysis"),
-    ("!wmitrace.strdump", "analysis"),
-    ("?", "symbols, types, and expressions"),
-    ("display", "symbols, types, and expressions"),
-    ("undisplay", "symbols, types, and expressions"),
-    ("dt", "symbols, types, and expressions"),
-    ("dx", "symbols, types, and expressions"),
-    ("dv", "symbols, types, and expressions"),
-    ("ln", "symbols, types, and expressions"),
-    ("set", "symbols, types, and expressions"),
-    ("unset", "symbols, types, and expressions"),
-    ("vars", "symbols, types, and expressions"),
-    ("x", "symbols, types, and expressions"),
-    (".frame", "execution and stack"),
-    ("!for_each_frame", "execution and stack"),
-    (".fnent", "execution and stack"),
-    (".cxr", "execution and stack"),
-    (".ecxr", "execution and stack"),
-    (".exr", "execution and stack"),
-    (".trap", "execution and stack"),
-    (".vtlcxr", "execution and stack"),
-    (".thread", "execution and stack"),
-    (".process", "processes and modules"),
-    (".context", "processes and modules"),
-    (".readmem", "memory and disassembly"),
-    (".writemem", "memory and disassembly"),
-    (".pagein", "memory and disassembly"),
-    ("!address", "memory and disassembly"),
-    (".reload", "symbols, types, and expressions"),
-    (".sympath", "symbols, types, and expressions"),
-    (".sympath+", "symbols, types, and expressions"),
-    (".symfix", "symbols, types, and expressions"),
-    (".srcpath", "symbols, types, and expressions"),
-    (".srcpath+", "symbols, types, and expressions"),
-    (".fetchimage", "symbols, types, and expressions"),
-    ("ls", "symbols, types, and expressions"),
-    ("lsa", "symbols, types, and expressions"),
-    (".formats", "symbols, types, and expressions"),
-    ("n", "symbols, types, and expressions"),
-    ("irps", "objects and I/O"),
-    (".crash", "target control"),
-    (".reboot", "target control"),
-    (".dump", "target control"),
-    (".kdfiles", "target control"),
-    (".lastevent", "target control"),
-    (".time", "target control"),
-    ("vertarget", "target control"),
-    ("status", "target control"),
-    ("capabilities", "target control"),
-    ("!dbgprint", "target control"),
-    (".cls", "session"),
-    (".echo", "session"),
-    (".echotime", "session"),
-    (".printf", "session"),
-    (".foreach", "session"),
-    (".if", "session"),
-    (".elsif", "session"),
-    (".else", "session"),
-    (".while", "session"),
-    (".for", "session"),
-    (".do", "session"),
-    (".break", "session"),
-    (".continue", "session"),
-    (".block", "session"),
-    ("j", "session"),
-    ("$<", "session"),
-    ("$$", "session"),
-    (".sleep", "session"),
-    (".hh", "session"),
-    (".logopen", "session"),
-    (".logappend", "session"),
-    (".logclose", "session"),
-    (".shell", "session"),
-    ("ad", "session"),
-    ("al", "session"),
-    ("as", "session"),
-    ("reload-scripts", "session"),
-    ("q", "session"),
-];
-
 /// Every built-in command's help as JSON, for the documentation site's
 /// generated reference: `[{"category", "names", "usage", "summary",
 /// "details"}]` (`details` may be null), grouped as `.hh` groups them and
 /// sorted by category, then canonical name.
 pub fn command_reference_json() -> String {
     let mut specs: Vec<&CommandSpec> = COMMANDS.iter().collect();
-    specs.sort_by_key(|spec| (command_category(spec.names[0]), spec.names[0]));
+    specs.sort_by_key(|spec| (spec.category, spec.names[0]));
     let entries: Vec<String> = specs
         .into_iter()
         .map(|spec| {
             let names: Vec<String> = spec.names.iter().map(|name| json_string(name)).collect();
             format!(
                 "{{\"category\":{},\"names\":[{}],\"usage\":{},\"summary\":{},\"details\":{}}}",
-                json_string(command_category(spec.names[0])),
+                json_string(spec.category),
                 names.join(","),
                 json_string(spec.usage),
                 json_string(spec.summary),
@@ -873,23 +568,7 @@ pub fn json_string(value: &str) -> String {
     out
 }
 
-fn command_category(name: &str) -> &'static str {
-    if let Some((_, category)) = COMMAND_CATEGORIES
-        .iter()
-        .find(|(canonical, _)| *canonical == name)
-    {
-        return category;
-    }
-    if name.starts_with('.') {
-        "dot commands"
-    } else if name.starts_with('!') {
-        "extension commands"
-    } else {
-        "general"
-    }
-}
-
-fn print_target_version(detail: &TargetVersionDetail) {
+fn print_target_version(detail: &TargetVersion) {
     outln!("{}", ui::label("target version"));
     outln!(
         "  {} Windows {}.{} build {}{}",
@@ -1038,7 +717,7 @@ fn print_target_version(detail: &TargetVersionDetail) {
     }
 }
 
-fn print_target_time(detail: &TargetTimeDetail) {
+fn print_target_time(detail: &TargetTime) {
     outln!("{}", ui::label("target time"));
     if let Some(user_dump) = &detail.user_dump {
         print_user_dump_time(user_dump);
@@ -1061,7 +740,7 @@ fn print_target_time(detail: &TargetTimeDetail) {
 
 /// `vertarget` past the version line on a user-mode minidump: what its
 /// SystemInfo, MiscInfo, and header record. It has no kernel to describe.
-fn print_user_dump_version(detail: &TargetVersionDetail, user_dump: &TargetUserDumpDetail) {
+fn print_user_dump_version(detail: &TargetVersion, user_dump: &TargetUserDump) {
     let processor = if detail.architecture == "AMD64" {
         format!(
             "family {}, model {:#x}, stepping {:#x}",
@@ -1129,7 +808,7 @@ fn print_user_dump_version(detail: &TargetVersionDetail, user_dump: &TargetUserD
 
 /// `.time` on a user-mode minidump: when it was written and how long its
 /// process had run. It records no system clock or system uptime.
-fn print_user_dump_time(detail: &UserDumpTimeDetail) {
+fn print_user_dump_time(detail: &UserDumpTime) {
     let written = detail.written_iso.as_deref().unwrap_or("out of range");
     outln!(
         "  {} {written} ({:#x})",
@@ -1298,26 +977,26 @@ fn format_printf(
     Ok(output)
 }
 
-fn print_error_code(detail: &ErrorCodeDetail) {
-    match detail.kind.as_str() {
-        "NTSTATUS" => {
+fn print_error_code(detail: &ErrorCode) {
+    match detail.kind {
+        ErrorCodeKind::Ntstatus => {
             outln!("NTSTATUS {:#010x}: {}", detail.code, detail.name);
             outln!("  {}", detail.description);
         }
-        "HRESULT" => {
+        ErrorCodeKind::Hresult => {
             outln!("HRESULT {:#010x}: {}", detail.code, detail.name);
             outln!("  {}", detail.description);
             if let Some(win32) = detail.win32_code {
                 outln!("  Win32 code: {win32} ({win32:#x})");
             }
         }
-        "Win32" => outln!(
+        ErrorCodeKind::Win32 => outln!(
             "Win32 error {} ({:#x}): {}",
             detail.code,
             detail.code,
             detail.name
         ),
-        _ => outln!(
+        ErrorCodeKind::Unknown => outln!(
             "Unknown error code {} ({:#x}): {}",
             detail.code,
             detail.code,
@@ -1393,28 +1072,5 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result, "index=28 %");
-    }
-
-    #[test]
-    fn every_command_has_an_explicit_category() {
-        let canonical: Vec<&str> = COMMANDS.iter().map(|spec| spec.names[0]).collect();
-        let uncategorized: Vec<&str> = canonical
-            .iter()
-            .copied()
-            .filter(|name| !COMMAND_CATEGORIES.iter().any(|(key, _)| key == name))
-            .collect();
-        assert!(
-            uncategorized.is_empty(),
-            "commands missing from COMMAND_CATEGORIES: {uncategorized:?}"
-        );
-        let stale: Vec<&str> = COMMAND_CATEGORIES
-            .iter()
-            .map(|(key, _)| *key)
-            .filter(|key| !canonical.contains(key))
-            .collect();
-        assert!(
-            stale.is_empty(),
-            "COMMAND_CATEGORIES keys that are no command's canonical name: {stale:?}"
-        );
     }
 }

@@ -1,34 +1,30 @@
 //! Breakpoints and watchpoints (`dbg.breakpoints`) and exception stop
 //! policies (`dbg.exceptions`).
 
-use pyo3::exceptions::{PyKeyError, PyValueError};
+use ntoseye_macros::{collection, handle};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
-use super::args::{
-    CpuArg, Disposition, ExceptionCode, HypercallArg, PolicyMode, ProcessArg, ThreadArg,
-    WatchAccess, WhenCallback,
-};
+use super::args::{CpuArg, HypercallArg, ProcessArg, ThreadArg, WhenCallback};
+use super::command::{CommandHost, HostSession};
 use super::handle::{Debugger, Owner, require_halted};
-use super::iter::{BreakpointIterator, ExceptionPolicyIterator};
 use super::process::Process;
-use super::record::PlainDict;
+use super::record::Typed;
 use super::runcontrol::reject_condition_mutation;
 use super::symbols::Location;
 use super::thread::Thread;
-use super::{err, raise, symbol_not_found, view_dict};
+use super::{err, raise, symbol_not_found};
 use crate::breakpoints::{
-    Breakpoint as CoreBreakpoint, BreakpointConfig, BreakpointScope, HypercallFilter,
+    BreakpointConfig, BreakpointInfo, BreakpointManager, BreakpointScope, HypercallFilter,
 };
 use crate::dbg_backend::{HwBreakpointAccess, WatchpointAccess};
-use crate::exception_policy::{EventFilter, ExceptionPolicyFinalAction, parse_event_filter};
+use crate::exception_policy::{ExceptionPolicy, ModuleEventPolicy};
 use crate::guest::hypercalls::hypercall_code;
 use crate::guest::vm_exits::{self, ExitFilter};
+use crate::notice::Notice;
 use crate::session::Session;
-use crate::target::Target;
-use crate::types::{Dtb, VirtAddr};
-use crate::view;
-use crate::view::shape::Typed;
+use crate::types::VirtAddr;
 
 /// The code breakpoints and data watchpoints, with their IDs as keys
 /// (`dbg.breakpoints`).
@@ -37,15 +33,23 @@ pub struct Breakpoints {
     pub owner: Owner,
 }
 
+impl CommandHost for Breakpoints {
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Owner(&self.owner)
+    }
+}
+
 impl Breakpoints {
     pub fn new(owner: Owner) -> Breakpoints {
         Breakpoints { owner }
     }
 
-    fn snapshot(&self, py: Python<'_>) -> PyResult<Vec<CoreBreakpoint>> {
-        self.owner.with(py, |session| {
-            Ok(session.list_breakpoints().into_iter().cloned().collect())
-        })
+    /// The handle of the listed breakpoint numbered `id`.
+    fn listed(&self, py: Python<'_>, id: u32) -> PyResult<Option<Breakpoint>> {
+        let serial = self.owner.with(py, |session| {
+            Ok(session.breakpoints.listed(id).map(|bp| bp.serial))
+        })?;
+        Ok(serial.map(|serial| Breakpoint::new(py, self.owner.dbg(), id, serial)))
     }
 }
 
@@ -53,6 +57,12 @@ impl Breakpoints {
 #[pyclass(module = "ntoseye")]
 pub struct Exceptions {
     pub owner: Owner,
+}
+
+impl CommandHost for Exceptions {
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Owner(&self.owner)
+    }
 }
 
 impl Exceptions {
@@ -64,26 +74,47 @@ impl Exceptions {
 /// A breakpoint handle. Because a breakpoint stays when ntoseye builds the
 /// target again, and a symbolic breakpoint resolves again after a reboot, the
 /// handle has no generation stamp and becomes invalid only when the breakpoint
-/// is deleted.
-#[pyclass(subclass, module = "ntoseye")]
+/// is deleted, or, for a one-shot breakpoint, once it fired. Its properties
+/// are the breakpoint's state now, as `bl` lists it; a data watchpoint's
+/// `watch_access` and `watch_length` say what it watches.
+#[handle(
+    record = BreakpointInfo,
+    key = id,
+    fetch = Breakpoint::snapshot,
+    identity = Breakpoint::serial,
+    impl
+)]
 pub struct Breakpoint {
     owner: Owner,
     id: u32,
-    /// The core breakpoint's [`CoreBreakpoint::serial`]: a later breakpoint
+    /// The core breakpoint's [`BreakpointInfo::serial`]: a later breakpoint
     /// that reuses `id` is not this one.
     serial: u64,
 }
 
 impl Breakpoint {
-    fn snapshot(&self, py: Python<'_>) -> PyResult<Option<CoreBreakpoint>> {
+    fn new(py: Python<'_>, dbg: &Py<Debugger>, id: u32, serial: u64) -> Self {
+        Breakpoint {
+            owner: Owner::unstamped(py, dbg),
+            id,
+            serial,
+        }
+    }
+
+    pub fn serial(&self) -> u64 {
+        self.serial
+    }
+
+    /// The breakpoint's state, or `None` once it is gone: deleted, or a
+    /// one-shot breakpoint that fired.
+    fn live(&self, py: Python<'_>) -> PyResult<Option<BreakpointInfo>> {
         self.owner.with(py, |session| {
-            Ok(session.breakpoints.get_exact(self.id, self.serial).cloned())
+            Ok(session.breakpoints.live(self.id, self.serial).cloned())
         })
     }
 
-    fn require_snapshot(&self, py: Python<'_>) -> PyResult<CoreBreakpoint> {
-        self.snapshot(py)?
-            .ok_or_else(|| invalid_breakpoint(self.id))
+    fn snapshot(&self, py: Python<'_>) -> PyResult<BreakpointInfo> {
+        self.live(py)?.ok_or_else(|| invalid_breakpoint(self.id))
     }
 
     fn mutate(
@@ -95,11 +126,7 @@ impl Breakpoint {
         reject_condition_mutation()?;
         self.owner.with(py, |session| {
             require_halted(session, operation)?;
-            if session
-                .breakpoints
-                .get_exact(self.id, self.serial)
-                .is_none()
-            {
+            if session.breakpoints.live(self.id, self.serial).is_none() {
                 return Err(invalid_breakpoint(self.id));
             }
             change(session)
@@ -107,67 +134,34 @@ impl Breakpoint {
     }
 }
 
-/// A hardware data watchpoint.
-#[pyclass(extends = Breakpoint, module = "ntoseye")]
-pub struct Watchpoint {
-    access: String,
-    length: u8,
-}
-
-#[pymethods]
-impl Watchpoint {
-    /// The data access type (`"write"` or `"read_write"`).
-    #[getter]
-    fn access(&self) -> &str {
-        &self.access
-    }
-
-    /// The width of the watched memory access, in bytes.
-    #[getter]
-    fn length(&self) -> u8 {
-        self.length
-    }
-}
-
-#[pymethods]
+#[collection]
 impl Breakpoints {
-    /// The number of live breakpoints.
-    fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
-        Ok(self.snapshot(py)?.len())
+    fn enumerate(&self, py: Python<'_>) -> PyResult<Vec<Breakpoint>> {
+        let listed = self.owner.with(py, |session| {
+            Ok(session
+                .list_breakpoints()
+                .into_iter()
+                .map(|bp| (bp.id, bp.serial))
+                .collect::<Vec<_>>())
+        })?;
+        Ok(listed
+            .into_iter()
+            .map(|(id, serial)| Breakpoint::new(py, self.owner.dbg(), id, serial))
+            .collect())
     }
 
-    /// Iterate over a new snapshot of the breakpoint handles.
-    fn __iter__(&self, py: Python<'_>) -> PyResult<BreakpointIterator> {
-        let items = self
-            .snapshot(py)?
-            .iter()
-            .map(|bp| handle(py, self.owner.dbg(), bp))
-            .collect::<PyResult<Vec<_>>>()?;
-        Ok(BreakpointIterator::new(items))
-    }
-
-    /// Get a breakpoint by ID, or raise `KeyError` if the ID does not exist.
-    fn __getitem__(&self, py: Python<'_>, id: u32) -> PyResult<Py<Breakpoint>> {
-        self.get(py, id)?.ok_or_else(|| PyKeyError::new_err(id))
-    }
-
-    /// Get a breakpoint by ID, or `None` if the ID does not exist.
-    fn get(&self, py: Python<'_>, id: u32) -> PyResult<Option<Py<Breakpoint>>> {
-        let Some(bp) = self
-            .owner
-            .with(py, |session| Ok(session.breakpoints.get(id).cloned()))?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(handle(py, self.owner.dbg(), &bp)?))
-    }
-
-    fn __contains__(&self, py: Python<'_>, id: u32) -> PyResult<bool> {
-        self.owner
-            .with(py, |session| Ok(session.breakpoints.get(id).is_some()))
+    /// The breakpoint with an ID.
+    fn lookup(&self, py: Python<'_>, id: &u32) -> PyResult<Option<Breakpoint>> {
+        self.listed(py, *id)
     }
 
     /// Add a code breakpoint at an address or a symbolic spec.
+    ///
+    /// An instruction must start at the breakpoint, which ntoseye checks as
+    /// `bp` and `bu` do: it raises `NtoseyeError` for an address inside an
+    /// instruction, and when nothing says where instructions start there, it
+    /// sets the breakpoint and adds a warning to `dbg.notices()`.
+    /// `unchecked=True` skips the check (`bp /a`).
     ///
     /// `hardware=True` sets a debug-register execute breakpoint instead of
     /// patching code. The target resolves to an address once, when you call
@@ -175,13 +169,14 @@ impl Breakpoints {
     /// reboot. The secure kernel (VTL1) accepts only this kind of breakpoint,
     /// for example `add(dbg.secure_kernel.symbols["securekernel!Func"],
     /// hardware=True)`.
-    #[pyo3(signature = (target, condition=None, *, hardware=false, when=None, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None))]
+    #[pyo3(signature = (target, *, condition=None, hardware=false, unchecked=false, when=None, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None))]
     fn add(
         &self,
         py: Python<'_>,
         target: Location,
         condition: Option<String>,
         hardware: bool,
+        unchecked: bool,
         when: Option<WhenCallback>,
         pass_count: u64,
         one_shot: bool,
@@ -189,9 +184,14 @@ impl Breakpoints {
         thread: Option<ThreadArg<'_>>,
         processor: Option<CpuArg<'_>>,
         action: Option<String>,
-    ) -> PyResult<Py<Breakpoint>> {
+    ) -> PyResult<Breakpoint> {
         reject_condition_mutation()?;
-        let (config, callback) = build_config(
+        if hardware && unchecked {
+            return Err(PyValueError::new_err(
+                "unchecked applies to a software breakpoint, whose site must start an instruction",
+            ));
+        }
+        let (mut config, callback) = build_config(
             py,
             &self.owner,
             condition,
@@ -203,47 +203,58 @@ impl Breakpoints {
             processor,
             action,
         )?;
+        config.unchecked = unchecked;
         let bp = self.owner.with(py, |session| {
             require_halted(session, "breakpoints.add")?;
-            let id = match target {
-                target if hardware => add_hardware_execute(session, target, config.clone())?,
+            let dtb = BreakpointManager::resolution_dtb(&session.target, config.scope.as_ref());
+            if hardware {
+                let address = target.resolve(session, dtb)?;
+                let id = session
+                    .set_hardware_breakpoint(
+                        VirtAddr(address),
+                        HwBreakpointAccess::Execute,
+                        1,
+                        config,
+                    )
+                    .map_err(err)?;
+                return created(session, id);
+            }
+            let set = match target {
                 Location::Address(address) => session
-                    .add_breakpoint(VirtAddr(address), None, config.clone())
+                    .set_code_breakpoint(VirtAddr(address), config)
                     .map_err(err)?,
                 Location::Symbol(spec) => {
-                    let id = session
-                        .add_symbol_breakpoint(spec.clone(), config.clone())
+                    // A spec whose module is loaded but which does not
+                    // resolve is a typo, not a deferred breakpoint.
+                    let module_loaded = spec.split_once('!').is_none_or(|(module, _)| {
+                        session
+                            .target
+                            .symbols
+                            .module_base_by_name(dtb, module)
+                            .is_some()
+                    });
+                    let set = session
+                        .set_symbolic_breakpoint(spec.clone(), config)
                         .map_err(err)?;
-                    let live = session.breakpoint(id).cloned();
-                    let deferred_module = spec
-                        .split_once('!')
-                        .map(|(module, _)| {
-                            let dtb = scope_dtb(&session.target, config.scope.as_ref());
-                            session
-                                .target
-                                .symbols
-                                .module_base_by_name(dtb, module)
-                                .is_none()
-                        })
-                        .unwrap_or(false);
-                    if live.as_ref().is_none_or(|bp| !bp.resolved) && !deferred_module {
-                        session.remove_breakpoint(id).map_err(err)?;
+                    let resolved = session.breakpoint(set.id).is_some_and(|bp| bp.resolved);
+                    if !resolved && module_loaded {
+                        session.remove_breakpoint(set.id).map_err(err)?;
                         return Err(symbol_not_found(&spec));
                     }
-                    id
+                    set
                 }
             };
-            session
-                .breakpoint(id)
-                .cloned()
-                .ok_or_else(|| raise(format!("new breakpoint #{id} disappeared during creation")))
+            if let Some(warning) = set.warning {
+                session.push_notice(Notice::warning(warning));
+            }
+            created(session, set.id)
         })?;
         store_condition(py, self.owner.dbg(), bp.id, callback);
-        handle(py, self.owner.dbg(), &bp)
+        Ok(handle(py, self.owner.dbg(), &bp))
     }
 
     /// Add symbol-identity breakpoints for the names that match a glob (`bm`).
-    #[pyo3(signature = (pattern, condition=None, *, when=None, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None, limit=256))]
+    #[pyo3(signature = (pattern, *, condition=None, when=None, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None, limit=256))]
     fn add_pattern(
         &self,
         py: Python<'_>,
@@ -257,7 +268,7 @@ impl Breakpoints {
         processor: Option<CpuArg<'_>>,
         action: Option<String>,
         limit: usize,
-    ) -> PyResult<Vec<Py<Breakpoint>>> {
+    ) -> PyResult<Vec<Breakpoint>> {
         reject_condition_mutation()?;
         let (config, callback) = build_config(
             py,
@@ -280,13 +291,7 @@ impl Breakpoints {
             let breakpoints = set
                 .ids
                 .into_iter()
-                .map(|id| {
-                    session
-                        .breakpoints
-                        .get(id)
-                        .cloned()
-                        .ok_or_else(|| raise(format!("new breakpoint #{id} disappeared")))
-                })
+                .map(|id| created(session, id))
                 .collect::<PyResult<Vec<_>>>()?;
             Ok((breakpoints, errors))
         })?;
@@ -300,11 +305,16 @@ impl Breakpoints {
         if breakpoints.is_empty() {
             return Err(raise(format!("no code symbols match '{pattern}'")));
         }
-        make_handles(py, self.owner.dbg(), breakpoints, callback.as_ref())
+        Ok(make_handles(
+            py,
+            self.owner.dbg(),
+            breakpoints,
+            callback.as_ref(),
+        ))
     }
 
     /// Add a source breakpoint at each address that matches `file:line`.
-    #[pyo3(signature = (file, line, condition=None, *, when=None, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None))]
+    #[pyo3(signature = (file, line, *, condition=None, when=None, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None))]
     fn add_source(
         &self,
         py: Python<'_>,
@@ -318,7 +328,7 @@ impl Breakpoints {
         thread: Option<ThreadArg<'_>>,
         processor: Option<CpuArg<'_>>,
         action: Option<String>,
-    ) -> PyResult<Vec<Py<Breakpoint>>> {
+    ) -> PyResult<Vec<Breakpoint>> {
         reject_condition_mutation()?;
         let source = format!("{file}:{line}");
         let (config, callback) = build_config(
@@ -339,25 +349,24 @@ impl Breakpoints {
                 .add_source_breakpoint(source, config.clone())
                 .map_err(err)?;
             ids.into_iter()
-                .map(|id| {
-                    session
-                        .breakpoints
-                        .get(id)
-                        .cloned()
-                        .ok_or_else(|| raise(format!("new breakpoint #{id} disappeared")))
-                })
+                .map(|id| created(session, id))
                 .collect::<PyResult<Vec<_>>>()
         })?;
-        make_handles(py, self.owner.dbg(), breakpoints, callback.as_ref())
+        Ok(make_handles(
+            py,
+            self.owner.dbg(),
+            breakpoints,
+            callback.as_ref(),
+        ))
     }
 
     /// Add a hardware data watchpoint.
-    #[pyo3(signature = (target, *, access=WatchAccess(WatchpointAccess::Write), length=1, condition=None, when=None, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None))]
+    #[pyo3(signature = (target, *, access=WatchpointAccess::Write, length=1, condition=None, when=None, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None))]
     fn watch(
         &self,
         py: Python<'_>,
         target: Location,
-        access: WatchAccess,
+        access: WatchpointAccess,
         length: u8,
         condition: Option<String>,
         when: Option<WhenCallback>,
@@ -367,9 +376,8 @@ impl Breakpoints {
         thread: Option<ThreadArg<'_>>,
         processor: Option<CpuArg<'_>>,
         action: Option<String>,
-    ) -> PyResult<Py<Watchpoint>> {
+    ) -> PyResult<Breakpoint> {
         reject_condition_mutation()?;
-        let WatchAccess(access) = access;
         let (config, callback) = build_config(
             py,
             &self.owner,
@@ -384,23 +392,15 @@ impl Breakpoints {
         )?;
         let bp = self.owner.with(py, |session| {
             require_halted(session, "breakpoints.watch")?;
-            let dtb = scope_dtb(&session.target, config.scope.as_ref());
+            let dtb = BreakpointManager::resolution_dtb(&session.target, config.scope.as_ref());
             let address = target.resolve(session, dtb)?;
-            let symbol = match target {
-                Location::Symbol(spec) => Some(spec),
-                Location::Address(_) => None,
-            };
             let id = session
-                .add_watchpoint(VirtAddr(address), access, length, symbol, config)
+                .set_hardware_breakpoint(VirtAddr(address), access.into(), length, config)
                 .map_err(err)?;
-            session
-                .breakpoint(id)
-                .cloned()
-                .ok_or_else(|| raise(format!("new watchpoint #{id} disappeared during creation")))
+            created(session, id)
         })?;
         store_condition(py, self.owner.dbg(), bp.id, callback);
-        watchpoint_handle(py, self.owner.dbg(), &bp)?
-            .ok_or_else(|| raise(format!("breakpoint #{} is not a watchpoint", bp.id)))
+        Ok(handle(py, self.owner.dbg(), &bp))
     }
 
     /// Add a hypercall breakpoint, as `!hvbp` does: a debug-register execute
@@ -430,7 +430,7 @@ impl Breakpoints {
         one_shot: bool,
         processor: Option<CpuArg<'_>>,
         action: Option<String>,
-    ) -> PyResult<Py<Breakpoint>> {
+    ) -> PyResult<Breakpoint> {
         reject_condition_mutation()?;
         let code = match call {
             HypercallArg::Code(code) => code,
@@ -459,13 +459,10 @@ impl Breakpoints {
             let id = session
                 .add_hypercall_breakpoint(filter, config)
                 .map_err(err)?;
-            session
-                .breakpoint(id)
-                .cloned()
-                .ok_or_else(|| raise(format!("new breakpoint #{id} disappeared during creation")))
+            created(session, id)
         })?;
         store_condition(py, self.owner.dbg(), bp.id, callback);
-        handle(py, self.owner.dbg(), &bp)
+        Ok(handle(py, self.owner.dbg(), &bp))
     }
 
     /// Add a VM-exit breakpoint, as `!hvexit` does: a debug-register execute
@@ -492,7 +489,7 @@ impl Breakpoints {
         one_shot: bool,
         processor: Option<CpuArg<'_>>,
         action: Option<String>,
-    ) -> PyResult<Py<Breakpoint>> {
+    ) -> PyResult<Breakpoint> {
         reject_condition_mutation()?;
         let reason = match reason {
             HypercallArg::Code(reason) => reason,
@@ -519,112 +516,27 @@ impl Breakpoints {
         let bp = self.owner.with(py, |session| {
             require_halted(session, "breakpoints.add_exit")?;
             let id = session.add_exit_breakpoint(filter, config).map_err(err)?;
-            session
-                .breakpoint(id)
-                .cloned()
-                .ok_or_else(|| raise(format!("new breakpoint #{id} disappeared during creation")))
+            created(session, id)
         })?;
         store_condition(py, self.owner.dbg(), bp.id, callback);
-        handle(py, self.owner.dbg(), &bp)
+        Ok(handle(py, self.owner.dbg(), &bp))
     }
 }
 
-#[pymethods]
+#[handle]
 impl Breakpoint {
-    /// The breakpoint ID, which does not change.
+    /// The breakpoint's ID, which `bl` and `dbg.breakpoints` use; readable
+    /// after the breakpoint is gone.
     #[getter]
-    fn id(&self, py: Python<'_>) -> PyResult<u32> {
-        self.require_snapshot(py)?;
-        Ok(self.id)
-    }
-
-    /// The address from the most recent resolution.
-    #[getter]
-    fn address(&self, py: Python<'_>) -> PyResult<u64> {
-        Ok(self.require_snapshot(py)?.address.0)
-    }
-
-    /// The resolved display symbol, if known.
-    #[getter]
-    fn symbol(&self, py: Python<'_>) -> PyResult<Option<String>> {
-        Ok(self.require_snapshot(py)?.symbol)
-    }
-
-    /// The processor filter, if any.
-    #[getter]
-    fn processor(&self, py: Python<'_>) -> PyResult<Option<u16>> {
-        Ok(self.require_snapshot(py)?.processor)
-    }
-
-    /// What a hypercall breakpoint stops on: its call code and the caller's
-    /// partition and VP, if restricted. `None` for any other breakpoint.
-    #[getter]
-    fn hypercall<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Typed<'py, Option<view::execution::HypercallFilter>>> {
-        let filter = self.require_snapshot(py)?.hypercall;
-        Typed::new(py, filter.as_ref().map(view::execution::hypercall_filter))
-    }
-
-    /// What a VM-exit breakpoint stops on: its exit reason and the caller's
-    /// partition and VP, if restricted. `None` for any other breakpoint.
-    #[getter]
-    fn vm_exit<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Typed<'py, Option<view::execution::ExitFilter>>> {
-        let filter = self.require_snapshot(py)?.vm_exit;
-        Typed::new(py, filter.as_ref().map(view::execution::exit_filter))
-    }
-
-    /// The guest partition of the Windows hypervisor a breakpoint set in its
-    /// view (`Debugger.select_partition`) stops in, and the VP when
-    /// `processor=` named one. `None` for the target's own breakpoints.
-    #[getter]
-    fn partition<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Typed<'py, Option<view::execution::PartitionFilter>>> {
-        let filter = self.require_snapshot(py)?.partition;
-        Typed::new(py, filter.as_ref().map(view::execution::partition_filter))
-    }
-
-    /// The number of physical hits.
-    #[getter]
-    fn hit_count(&self, py: Python<'_>) -> PyResult<u64> {
-        Ok(self.require_snapshot(py)?.hit_count)
-    }
-
-    /// The number of hits that remain before this breakpoint stops the target.
-    #[getter]
-    fn remaining_pass_count(&self, py: Python<'_>) -> PyResult<u64> {
-        Ok(self.require_snapshot(py)?.remaining_pass_count)
-    }
-
-    /// The optional command action (`do` in WinDbg).
-    #[getter]
-    fn action(&self, py: Python<'_>) -> PyResult<Option<String>> {
-        Ok(self.require_snapshot(py)?.action)
-    }
-
-    /// True if this is a temporary run-to breakpoint.
-    #[getter]
-    fn temporary(&self, py: Python<'_>) -> PyResult<bool> {
-        Ok(self.require_snapshot(py)?.temporary)
-    }
-
-    /// The optional expression condition.
-    #[getter]
-    fn condition(&self, py: Python<'_>) -> PyResult<Option<String>> {
-        Ok(self.require_snapshot(py)?.condition)
+    fn id(&self) -> u32 {
+        self.id
     }
 
     /// Assigning an expression raises `ValueError` while a `when=` callback is
     /// attached, and `add()` also raises it if you give both.
     #[setter]
     fn set_condition(&self, py: Python<'_>, condition: Option<String>) -> PyResult<()> {
-        self.require_snapshot(py)?;
+        self.snapshot(py)?;
         if condition.is_some()
             && self
                 .owner
@@ -645,12 +557,6 @@ impl Breakpoint {
         })
     }
 
-    /// The requested number of hits before the breakpoint stops the target.
-    #[getter]
-    fn pass_count(&self, py: Python<'_>) -> PyResult<u64> {
-        Ok(self.require_snapshot(py)?.pass_count)
-    }
-
     #[setter]
     fn set_pass_count(&self, py: Python<'_>, pass_count: u64) -> PyResult<()> {
         self.mutate(py, "breakpoint.pass_count", |session| {
@@ -661,13 +567,6 @@ impl Breakpoint {
         })
     }
 
-    /// True if ntoseye removes the breakpoint after the first hit that stops
-    /// the target.
-    #[getter]
-    fn one_shot(&self, py: Python<'_>) -> PyResult<bool> {
-        Ok(self.require_snapshot(py)?.one_shot)
-    }
-
     #[setter]
     fn set_one_shot(&self, py: Python<'_>, one_shot: bool) -> PyResult<()> {
         self.mutate(py, "breakpoint.one_shot", |session| {
@@ -676,12 +575,6 @@ impl Breakpoint {
                 .set_one_shot(self.id, one_shot)
                 .map_err(err)
         })
-    }
-
-    /// True if this breakpoint is enabled.
-    #[getter]
-    fn enabled(&self, py: Python<'_>) -> PyResult<bool> {
-        Ok(self.require_snapshot(py)?.enabled)
     }
 
     #[setter]
@@ -695,26 +588,12 @@ impl Breakpoint {
         })
     }
 
-    /// The symbol or source identity that you used to make this breakpoint.
-    #[getter]
-    fn specification(&self, py: Python<'_>) -> PyResult<Option<String>> {
-        Ok(self
-            .require_snapshot(py)?
-            .specification()
-            .map(str::to_string))
-    }
-
-    /// True if the site is set at an address. A symbolic breakpoint whose
-    /// module is not loaded yet stays unresolved until the module loads.
-    #[getter]
-    fn resolved(&self, py: Python<'_>) -> PyResult<bool> {
-        Ok(self.require_snapshot(py)?.resolved)
-    }
-
-    /// True if the breakpoint still exists in this session.
+    /// True while the breakpoint exists in this session: False once it is
+    /// deleted, and for a one-shot breakpoint once its hit stopped the
+    /// target. The other properties raise `NtoseyeError` once it is False.
     #[getter]
     fn valid(&self, py: Python<'_>) -> PyResult<bool> {
-        Ok(self.snapshot(py)?.is_some())
+        Ok(self.live(py)?.is_some())
     }
 
     /// The process restriction, if the breakpoint has a process scope.
@@ -723,7 +602,7 @@ impl Breakpoint {
         let info = self.owner.with(py, |session| {
             let bp = session
                 .breakpoints
-                .get_exact(self.id, self.serial)
+                .live(self.id, self.serial)
                 .ok_or_else(|| invalid_breakpoint(self.id))?;
             let BreakpointScope::Process { pid, .. } = &bp.scope else {
                 return Ok(None);
@@ -747,7 +626,7 @@ impl Breakpoint {
         let info = self.owner.with(py, |session| {
             let bp = session
                 .breakpoints
-                .get_exact(self.id, self.serial)
+                .live(self.id, self.serial)
                 .ok_or_else(|| invalid_breakpoint(self.id))?;
             let Some(thread) = &bp.thread else {
                 return Ok(None);
@@ -757,15 +636,16 @@ impl Breakpoint {
         Ok(info.map(|info| Thread::from_owner(self.owner.derive(py), info)))
     }
 
-    /// Remove this breakpoint. A breakpoint that is already gone, such as a
-    /// one-shot breakpoint after its hit, is left as it is.
+    /// Remove this breakpoint. A breakpoint that is already gone, deleted or
+    /// a one-shot breakpoint whose hit stopped the target, is left as it is,
+    /// so deleting after the hit works.
     fn delete(&self, py: Python<'_>) -> PyResult<()> {
-        if self.snapshot(py)?.is_none() {
+        if self.live(py)?.is_none() {
             // The id's `when=` callback belongs to whichever breakpoint now
             // holds the id, if one does.
-            let reused = self
-                .owner
-                .with(py, |session| Ok(session.breakpoints.get(self.id).is_some()))?;
+            let reused = self.owner.with(py, |session| {
+                Ok(session.breakpoints.listed(self.id).is_some())
+            })?;
             if !reused {
                 self.owner.dbg().get().conditions.lock().remove(&self.id);
             }
@@ -778,13 +658,8 @@ impl Breakpoint {
         Ok(())
     }
 
-    /// Get the breakpoint state as a plain `dict`.
-    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        view_dict(py, view::execution::breakpoint(&self.require_snapshot(py)?))
-    }
-
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        match self.snapshot(py)? {
+        match self.live(py)? {
             Some(bp) => Ok(format!(
                 "<{} #{} {}{}>",
                 if bp.watchpoint().is_some() {
@@ -803,160 +678,55 @@ impl Breakpoint {
             None => Ok(format!("<Breakpoint #{} deleted>", self.id)),
         }
     }
-
-    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
-        other.extract::<PyRef<'_, Breakpoint>>().is_ok_and(|other| {
-            self.owner.same_debugger(&other.owner)
-                && self.id == other.id
-                && self.serial == other.serial
-        })
-    }
-
-    fn __hash__(&self) -> isize {
-        self.owner.identity_hash(self.serial)
-    }
 }
 
-#[pymethods]
+#[collection]
 impl Exceptions {
-    /// Set the stop policy for an exception (`sxe`/`sxd`/`sxn`/`sxi`), or set a
-    /// module filter: `"ld"` or `"ld:<module>"` for loads, `"ud"` or
-    /// `"ud:<module>"` for unloads. The module name is not case-sensitive, the
-    /// extension is optional, and `*`/`?` globs work. A `"break"` load filter
-    /// stops as `Stop.ModuleLoad` before the module entry point runs, and a
-    /// `"break"` unload filter stops as `Stop.ModuleUnload` after the driver's
-    /// unload routine, while the module is still listed. A `"notify"` filter
-    /// adds a `ModLoad:` or `Unload module` line to the queue in
-    /// `dbg.notices()`. `disposition` does not apply to `ld` or `ud`.
-    #[pyo3(signature = (code, mode, *, disposition=None))]
-    fn set(
-        &self,
-        py: Python<'_>,
-        code: ExceptionCode,
-        mode: PolicyMode,
-        disposition: Option<Disposition>,
-    ) -> PyResult<()> {
-        let PolicyMode(mode) = mode;
-        match event_filter(code)? {
-            EventFilter::Exception(code) => {
-                let final_action = disposition.map(|Disposition(disposition)| {
-                    ExceptionPolicyFinalAction::Continue(disposition)
-                });
-                self.owner.with(py, |session| {
-                    session
-                        .exception_policies
-                        .set_with_options(code, mode, None, final_action);
-                    Ok(())
-                })
-            }
-            EventFilter::Module(event, module) => {
-                if disposition.is_some() {
-                    return Err(PyValueError::new_err(
-                        "disposition does not apply to a module load or unload filter",
-                    ));
-                }
-                self.owner.with(py, |session| {
-                    session
-                        .set_module_event_filter(event, module, mode, None)
-                        .map_err(err)
-                })
-            }
-        }
+    fn enumerate<'py>(&self, py: Python<'py>) -> PyResult<Vec<Typed<'py, ExceptionPolicy>>> {
+        let rows = self.owner.with(py, |session| {
+            Ok(session
+                .exception_policies
+                .entries()
+                .cloned()
+                .collect::<Vec<_>>())
+        })?;
+        rows.into_iter().map(|row| Typed::new(py, row)).collect()
     }
 
     /// The module load and unload filters (`sx* ld[:<module>]` and
     /// `sx* ud[:<module>]`), in the order that you set them. Iterating over
     /// `dbg.exceptions` gives only the exception policies.
     #[getter]
-    fn module_events(
-        &self,
-        py: Python<'_>,
-    ) -> PyResult<Vec<Py<view::execution::py::ModuleEventPolicy>>> {
+    fn module_events<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<ModuleEventPolicy>>> {
         let rows = self.owner.with(py, |session| {
             Ok(session
                 .exception_policies
                 .module_event_entries()
-                .map(view::execution::module_event_policy)
+                .cloned()
                 .collect::<Vec<_>>())
         })?;
-        rows.into_iter()
-            .map(|row| row.into_class(py).map(Bound::unbind))
-            .collect()
-    }
-
-    /// Iterate over the configured exception-policy records.
-    fn __iter__(&self, py: Python<'_>) -> PyResult<ExceptionPolicyIterator> {
-        let rows = self.owner.with(py, |session| {
-            Ok(session
-                .exception_policies
-                .entries()
-                .map(|(code, policy)| view::execution::exception_policy(code, policy))
-                .collect::<Vec<_>>())
-        })?;
-        let records = rows
-            .into_iter()
-            .map(|row| row.into_class(py).map(Bound::unbind))
-            .collect::<PyResult<Vec<_>>>()?;
-        Ok(ExceptionPolicyIterator::new(records))
-    }
-
-    /// The number of configured policies.
-    fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
-        self.owner.with(py, |session| {
-            Ok(session.exception_policies.entries().count())
-        })
-    }
-
-    /// Remove all configured policies and module load and unload filters, so
-    /// ordinary exceptions break by default and module loads and unloads do
-    /// not stop.
-    fn reset(&self, py: Python<'_>) -> PyResult<()> {
-        self.owner.with(py, |session| {
-            session.exception_policies.reset();
-            Ok(())
-        })
+        Typed::new(py, rows)
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        Ok(format!("<Exceptions {} configured>", self.__len__(py)?))
+        Ok(format!(
+            "<Exceptions {} configured>",
+            self.enumerate(py)?.len()
+        ))
     }
 }
 
-/// The live handle for a core breakpoint: a `Breakpoint`, or a `Watchpoint`
-/// for data watchpoints.
-pub fn handle(py: Python<'_>, dbg: &Py<Debugger>, bp: &CoreBreakpoint) -> PyResult<Py<Breakpoint>> {
-    match watchpoint_handle(py, dbg, bp)? {
-        Some(watchpoint) => Ok(watchpoint.into_bound(py).into_super().unbind()),
-        None => Py::new(
-            py,
-            Breakpoint {
-                owner: Owner::unstamped(py, dbg),
-                id: bp.id,
-                serial: bp.serial,
-            },
-        ),
-    }
+/// The handle of a core breakpoint.
+fn handle(py: Python<'_>, dbg: &Py<Debugger>, bp: &BreakpointInfo) -> Breakpoint {
+    Breakpoint::new(py, dbg, bp.id, bp.serial)
 }
 
-/// The `Watchpoint` handle for a data watchpoint; `None` for a code breakpoint.
-fn watchpoint_handle(
-    py: Python<'_>,
-    dbg: &Py<Debugger>,
-    bp: &CoreBreakpoint,
-) -> PyResult<Option<Py<Watchpoint>>> {
-    let Some((access, length)) = bp.watchpoint() else {
-        return Ok(None);
-    };
-    let base = Breakpoint {
-        owner: Owner::unstamped(py, dbg),
-        id: bp.id,
-        serial: bp.serial,
-    };
-    let watchpoint = Watchpoint {
-        access: access.name().to_string(),
-        length,
-    };
-    Py::new(py, (watchpoint, base)).map(Some)
+/// The breakpoint `id` a method just set.
+fn created(session: &Session, id: u32) -> PyResult<BreakpointInfo> {
+    session
+        .breakpoint(id)
+        .cloned()
+        .ok_or_else(|| raise(format!("new breakpoint #{id} disappeared during creation")))
 }
 
 fn build_config(
@@ -974,6 +744,13 @@ fn build_config(
     if condition.is_some() && when.is_some() {
         return Err(PyValueError::new_err(
             "condition and when are mutually exclusive",
+        ));
+    }
+    // The session runs an action when the hit surfaces, before a `when=`
+    // callback could decline it; the callback can act itself.
+    if action.is_some() && when.is_some() {
+        return Err(PyValueError::new_err(
+            "action and when are mutually exclusive; act in the when callback",
         ));
     }
     let callback = when.map(|WhenCallback(callback)| callback);
@@ -1040,41 +817,6 @@ fn invalid_breakpoint(id: u32) -> pyo3::PyErr {
     raise(format!("breakpoint #{id} is no longer valid"))
 }
 
-fn scope_dtb(target: &Target, scope: Option<&BreakpointScope>) -> Dtb {
-    match scope {
-        Some(BreakpointScope::Process { dtb, .. }) => *dtb,
-        Some(BreakpointScope::Kernel) => target.kernel_dtb(),
-        None => target.current_dtb(),
-    }
-}
-
-/// Arm a one-byte debug-register execute breakpoint at `target`, resolved in
-/// the breakpoint's scope. A hardware site is an address, not a symbol
-/// identity, so a spec is kept only as its display symbol. Set in a
-/// partition view, it is the partition's (see
-/// [`Session::add_hardware_breakpoint`]).
-fn add_hardware_execute(
-    session: &mut Session,
-    target: Location,
-    config: BreakpointConfig,
-) -> PyResult<u32> {
-    let dtb = scope_dtb(&session.target, config.scope.as_ref());
-    let address = target.resolve(session, dtb)?;
-    let symbol = match target {
-        Location::Symbol(spec) => Some(spec),
-        Location::Address(_) => None,
-    };
-    session
-        .add_hardware_breakpoint(
-            VirtAddr(address),
-            HwBreakpointAccess::Execute,
-            1,
-            symbol,
-            config,
-        )
-        .map_err(err)
-}
-
 fn store_condition(py: Python<'_>, dbg: &Py<Debugger>, id: u32, callback: Option<Py<PyAny>>) {
     // A new breakpoint can reuse the id of one deleted outside the SDK
     // (`bc` through `command()`), whose `when=` must not carry over.
@@ -1088,9 +830,9 @@ fn store_condition(py: Python<'_>, dbg: &Py<Debugger>, id: u32, callback: Option
 fn make_handles(
     py: Python<'_>,
     dbg: &Py<Debugger>,
-    breakpoints: Vec<CoreBreakpoint>,
+    breakpoints: Vec<BreakpointInfo>,
     callback: Option<&Py<PyAny>>,
-) -> PyResult<Vec<Py<Breakpoint>>> {
+) -> Vec<Breakpoint> {
     breakpoints
         .iter()
         .map(|bp| {
@@ -1098,19 +840,4 @@ fn make_handles(
             handle(py, dbg, bp)
         })
         .collect()
-}
-
-fn event_filter(code: ExceptionCode) -> PyResult<EventFilter> {
-    match code {
-        ExceptionCode::Code(code) => {
-            u32::try_from(code)
-                .map(EventFilter::Exception)
-                .map_err(|_| {
-                    PyValueError::new_err(format!(
-                        "exception code {code:#x} does not fit in 32 bits"
-                    ))
-                })
-        }
-        ExceptionCode::Alias(alias) => parse_event_filter(&alias).map_err(PyValueError::new_err),
-    }
 }

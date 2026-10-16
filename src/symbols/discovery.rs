@@ -8,10 +8,11 @@ use super::{
     ModuleSymbolStatus, PdbIdentity, SymbolStore,
 };
 use crate::{
-    backend::MemoryOps,
     error::{Error, Result},
     guest::{Image, ModuleInfo},
-    memory, output,
+    memory,
+    memory::MemoryOps,
+    output,
     pe::{
         headers::{self, DebugDirectoryEntry, read_debug_directory},
         read_pe_header_page, size_of_image,
@@ -116,14 +117,6 @@ impl SymbolStore {
                 Some(Ok(headers::CodeView::Rsds { path, .. })) => Some(path),
                 _ => None,
             }))
-    }
-
-    pub fn read_c_string_lossy(bytes: &[u8]) -> String {
-        let nul = bytes
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(bytes.len());
-        String::from_utf8_lossy(&bytes[..nul]).into_owned()
     }
 
     pub fn load_from_binary(&self, object: &mut Image, name: &str) -> Result<Option<u128>> {

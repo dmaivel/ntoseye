@@ -353,6 +353,8 @@ impl SymbolStore {
     /// the unwinder read unwind tables without the target, or recover them
     /// when the in-memory `.pdata` is paged out or, as in the Windows
     /// hypervisor, never mapped. A copy in a local store is read in place.
+    /// A download that fails is not tried again until `.reload` or a change
+    /// of the symbol path (see [`Self::forget_unavailable`]).
     pub fn module_image_on_disk(
         &self,
         image_file_name: &str,
@@ -370,7 +372,19 @@ impl SymbolStore {
                 match self.local_image(&job, time_date_stamp, size_of_image) {
                     Some(path) => path,
                     None if fetch == ImageFetch::Download => {
-                        download_job(&job, output::progress_bar(0, "downloading symbols"))?;
+                        // A stack walk asks again for every thread it walks
+                        // and every walk after, and an image no server has
+                        // (any module not Microsoft's) or a host offline
+                        // would cost a request each time.
+                        if let Some(reason) = self.unavailable(&job) {
+                            return Err(Error::DebugInfo(reason));
+                        }
+                        if let Err(error) =
+                            download_job(&job, output::progress_bar(0, "downloading symbols"))
+                        {
+                            self.remember_unavailable(&job, &error.to_string());
+                            return Err(error);
+                        }
                         job.path.clone()
                     }
                     None => {

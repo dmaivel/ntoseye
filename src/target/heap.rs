@@ -4,13 +4,13 @@
 //! encodings ntdll applies to headers are the one thing the PDB cannot say
 //! and are pinned here, verified against live targets.
 
-use std::ops::Range;
 use std::sync::Arc;
 
-use crate::backend::MemoryOps;
+use ntoseye_macros::record;
+
 use crate::error::{Error, Result};
 use crate::layout::{ParsedType, TypeInfo, le_uint};
-use crate::memory::AddressSpace;
+use crate::memory::{AddressSpace, MemoryOps};
 use crate::phys::PhysMem;
 use crate::target::{DiagnosticValue, ListCursor, Target};
 use crate::types::{Dtb, VirtAddr};
@@ -57,14 +57,71 @@ pub enum HeapKind {
     Unknown(u32),
 }
 
-impl HeapKind {
-    pub fn name(self) -> &'static str {
+/// `nt`, `segment`, or `unknown (<signature>)`.
+impl std::fmt::Display for HeapKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Nt => "nt",
-            Self::Segment => "segment",
-            Self::Unknown(_) => "unknown",
+            Self::Nt => f.write_str("nt"),
+            Self::Segment => f.write_str("segment"),
+            Self::Unknown(signature) => write!(f, "unknown ({signature:#x})"),
         }
     }
+}
+
+impl HeapKind {
+    /// The kind without the signature of an unknown heap.
+    pub fn class(self) -> HeapClass {
+        match self {
+            Self::Nt => HeapClass::Nt,
+            Self::Segment => HeapClass::Segment,
+            Self::Unknown(_) => HeapClass::Unknown,
+        }
+    }
+
+    /// The `_HEAP.Signature` of an unknown heap (0 if ntoseye could not
+    /// classify it). None for NT and segment heaps.
+    pub fn signature(self) -> Option<u32> {
+        match self {
+            Self::Unknown(signature) => Some(signature),
+            _ => None,
+        }
+    }
+}
+
+/// The heap implementation: `nt`, `segment`, or `unknown`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeapClass {
+    Nt,
+    Segment,
+    Unknown,
+}
+
+/// Whether a heap block is allocated: `busy` or `free`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockState {
+    Busy,
+    Free,
+}
+
+impl BlockState {
+    fn of(busy: bool) -> Self {
+        if busy { Self::Busy } else { Self::Free }
+    }
+}
+
+/// The allocator unit of a [`HeapBlock`]: `nt_lfh_block`, `vs_chunk`, or
+/// `lfh_block`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeapBlockKind {
+    #[record(label = "nt-lfh-block")]
+    NtLfhBlock,
+    #[record(label = "vs-chunk")]
+    VsChunk,
+    #[record(label = "lfh-block")]
+    LfhBlock,
 }
 
 #[derive(Clone, Debug)]
@@ -287,38 +344,60 @@ impl<'a> HeapReader<'a> {
     }
 }
 
-#[derive(Clone, Debug)]
+/// An NT (`_HEAP`) heap.
+#[record]
 pub struct NtHeap {
     pub address: VirtAddr,
+    /// `_HEAP.Flags`.
+    #[record(hex)]
     pub flags: u32,
+    /// `_HEAP.ForceFlags`.
+    #[record(hex)]
     pub force_flags: u32,
-    /// Size of `_HEAP_ENTRY`: 16 on x64 (a private-data qword, then the
-    /// metadata qword), 8 on x86 (the metadata qword alone). Block sizes are
-    /// in this unit and it is the header every block starts with.
+    /// The size in bytes of the `_HEAP_ENTRY` that starts each block: 16 on
+    /// x64 (a private-data qword, then the metadata qword), 8 on x86 (the
+    /// metadata qword alone). Block sizes are in this unit.
     pub granule: u64,
-    /// XOR mask over the metadata qword of every `_HEAP_ENTRY`, when active.
+    /// The XOR mask on the metadata of each entry header. None if the
+    /// headers are not encoded.
+    #[record(hex)]
     pub encoding: Option<u64>,
+    /// The free space, in granules.
     pub total_free_units: u64,
+    /// `_HEAP.VirtualMemoryThreshold`, in granules.
     pub virtual_threshold: u32,
+    /// The front-end (LFH) heap. None if the heap has no front end.
     pub front_end: Option<VirtAddr>,
+    /// `_HEAP.FrontEndHeapType`.
     pub front_end_type: u8,
+    /// The segments, as decoded; `NtHeapDetail.segments` has them with
+    /// their entries.
+    #[record(skip)]
     pub segments: Vec<NtSegment>,
+    /// Blocks that are too large for a segment, which the heap allocates
+    /// separately.
     pub virtual_blocks: Vec<NtVirtualBlock>,
 }
 
-#[derive(Clone, Debug)]
+/// One `_HEAP_SEGMENT` of an NT heap.
+#[record(impl)]
 pub struct NtSegment {
+    /// The segment header.
     pub address: VirtAddr,
+    /// The first byte of the segment.
     pub base: VirtAddr,
     pub pages: u32,
     pub uncommitted_pages: u32,
     pub first_entry: VirtAddr,
     pub last_valid_entry: VirtAddr,
-    /// Uncommitted ranges the entry chain skips over.
-    pub uncommitted: Vec<Range<u64>>,
+    /// The uncommitted ranges that the entry chain skips.
+    pub uncommitted: Vec<NtUncommittedRange>,
 }
 
+#[record]
 impl NtSegment {
+    /// The first byte after the last page of the segment.
+    #[record(getter)]
     pub fn end(&self) -> VirtAddr {
         VirtAddr(self.base.0 + u64::from(self.pages) * PAGE)
     }
@@ -328,33 +407,73 @@ impl NtSegment {
     }
 }
 
-#[derive(Clone, Debug)]
+/// An uncommitted range of an NT-heap segment.
+#[record]
+#[derive(Copy)]
+pub struct NtUncommittedRange {
+    #[record(hex)]
+    pub start: u64,
+    /// The first byte after the range.
+    #[record(hex)]
+    pub end: u64,
+}
+
+impl NtUncommittedRange {
+    pub fn contains(&self, address: u64) -> bool {
+        (self.start..self.end).contains(&address)
+    }
+}
+
+/// An NT-heap block with a separate allocation (`_HEAP_VIRTUAL_ALLOC_ENTRY`).
+#[record]
 pub struct NtVirtualBlock {
+    /// The block header.
     pub entry: VirtAddr,
+    /// Committed bytes.
     pub commit_size: u64,
+    /// Reserved bytes.
     pub reserve_size: u64,
-    /// First user byte: the header's `BusyBlock` is the last thing before it.
+    /// First user byte: the header's `BusyBlock` is the last thing before
+    /// it.
     pub user: VirtAddr,
 }
 
-#[derive(Clone, Copy, Debug)]
+/// An NT-heap entry (`_HEAP_ENTRY`), decoded from its header.
+#[record(impl)]
+#[derive(Copy)]
 pub struct NtEntry {
+    /// The entry header.
     pub address: VirtAddr,
+    /// The size in bytes, with the header.
     pub size: u64,
+    /// The size in bytes of the previous entry.
     pub previous_size: u64,
+    /// The flags byte of the header.
+    #[record(hex)]
     pub flags: u8,
+    /// The number of unused bytes at the end of the block.
     pub unused_bytes: u8,
-    /// See [`NtHeap::granule`].
+    /// The header size in bytes (see [`NtHeap::granule`]).
     pub granule: u64,
-    /// The header's own XOR checksum held.
+    /// Whether the XOR checksum of the header is correct. Always true if the
+    /// headers are not encoded.
     pub checksum_ok: bool,
 }
 
+#[record]
 impl NtEntry {
     pub fn busy(&self) -> bool {
         self.flags & NT_ENTRY_BUSY != 0
     }
 
+    /// `busy` or `free`.
+    #[record(getter)]
+    pub fn state(&self) -> BlockState {
+        BlockState::of(self.busy())
+    }
+
+    /// First user byte.
+    #[record(getter)]
     pub fn user(&self) -> VirtAddr {
         self.address + self.granule
     }
@@ -363,7 +482,9 @@ impl NtEntry {
         self.address + self.size
     }
 
-    /// Bytes the caller asked for: the block less its header and slack.
+    /// The number of bytes that the caller requested: the block size minus
+    /// the header and the unused bytes.
+    #[record(getter)]
     pub fn user_size(&self) -> u64 {
         self.size
             .saturating_sub(self.granule)
@@ -376,23 +497,29 @@ impl NtEntry {
 #[derive(Clone, Debug)]
 pub struct NtWalk {
     pub entries: Vec<NtEntry>,
-    pub stopped: Option<(VirtAddr, &'static str)>,
+    pub stopped: Option<HeapWalkStop>,
 }
 
-/// A legacy-LFH user block region living inside one busy backend entry.
-#[derive(Clone, Debug)]
+/// A legacy-LFH user block region in one busy NT-heap entry.
+#[record(impl)]
 pub struct NtUserBlocks {
+    /// The `_HEAP_USERDATA_HEADER`.
     pub header: VirtAddr,
+    /// The `_HEAP_SUBSEGMENT` that owns the region.
     pub subsegment: VirtAddr,
+    /// Bytes per block.
     pub block_size: u64,
     pub block_count: u32,
     pub first_block: VirtAddr,
+    /// The distance in bytes between consecutive blocks.
     pub stride: u64,
-    /// One bit per block, set when busy (`_RTL_BITMAP` bit order: bit `i`
-    /// is byte `i / 8`, bit `i % 8`).
+    /// One bit for each block, set if the block is busy (`_RTL_BITMAP` bit
+    /// order: block `i` is byte `i / 8`, bit `i % 8`).
+    #[record(bytes)]
     pub busy: Vec<u8>,
 }
 
+#[record]
 impl NtUserBlocks {
     pub fn is_busy(&self, index: u32) -> bool {
         self.busy
@@ -400,6 +527,7 @@ impl NtUserBlocks {
             .is_some_and(|byte| byte >> (index % 8) & 1 != 0)
     }
 
+    #[record(getter)]
     pub fn busy_count(&self) -> u32 {
         (0..self.block_count).filter(|i| self.is_busy(*i)).count() as u32
     }
@@ -473,7 +601,10 @@ impl HeapReader<'_> {
             let ucr = self.read_struct(&ucr_layout, record)?;
             let start = ucr_layout.read(&ucr, 0, "Address")?;
             let size = ucr_layout.read(&ucr, 0, "Size")?;
-            uncommitted.push(start..start.saturating_add(size));
+            uncommitted.push(NtUncommittedRange {
+                start,
+                end: start.saturating_add(size),
+            });
         }
         uncommitted.sort_by_key(|range| range.start);
         Ok(NtSegment {
@@ -508,7 +639,7 @@ impl HeapReader<'_> {
             if let Some(gap) = segment
                 .uncommitted
                 .iter()
-                .find(|range| range.contains(&cursor.0))
+                .find(|range| range.contains(cursor.0))
             {
                 cursor = VirtAddr(gap.end);
                 run = None;
@@ -558,7 +689,13 @@ impl HeapReader<'_> {
         if stopped.is_none() && cursor < end && entries.len() >= MAX_ENTRIES {
             stopped = Some((cursor, "entry walk reached its bound"));
         }
-        NtWalk { entries, stopped }
+        NtWalk {
+            entries,
+            stopped: stopped.map(|(address, reason)| HeapWalkStop {
+                address,
+                reason: reason.to_string(),
+            }),
+        }
     }
 
     /// The legacy-LFH user block region a busy backend entry holds, if any.
@@ -648,9 +785,12 @@ fn decode_nt_entry(address: VirtAddr, raw: u64, encoding: Option<u64>, granule: 
     }
 }
 
-#[derive(Clone, Debug)]
+/// A segment heap (`_SEGMENT_HEAP`).
+#[record]
 pub struct SegmentHeap {
     pub address: VirtAddr,
+    /// `_SEGMENT_HEAP.GlobalFlags`.
+    #[record(hex)]
     pub global_flags: u32,
     pub reserved_pages: u64,
     pub committed_pages: u64,
@@ -659,85 +799,115 @@ pub struct SegmentHeap {
     pub vs_free_committed_pages: u64,
     pub large_reserved_pages: u64,
     pub large_committed_pages: u64,
+    /// The segment contexts, as decoded; `SegmentHeapDetail.contexts` has
+    /// them with their ranges.
+    #[record(skip)]
     pub contexts: Vec<SegContext>,
     pub large_allocations: Vec<LargeAllocation>,
     /// `ntdll!RtlpHpHeapGlobals`: the VS header key and the LFH offsets key.
-    pub keys: SegmentKeys,
-    /// Size of `_HEAP_VS_CHUNK_HEADER`: 16 on x64, 8 on x86. Chunk sizes are
-    /// in this unit and it is the header every chunk starts with.
+    #[record(rename = "keys")]
+    pub encoding_keys: SegmentKeys,
+    /// The size in bytes of the `_HEAP_VS_CHUNK_HEADER` that starts each VS
+    /// chunk: 16 on x64, 8 on x86. Chunk sizes are in this unit.
     pub granule: u64,
 }
 
-#[derive(Clone, Copy, Debug)]
+/// `ntdll!RtlpHpHeapGlobals`: the encoding keys of a segment heap.
+#[record]
+#[derive(Copy)]
 pub struct SegmentKeys {
+    /// The VS chunk header key (`HeapKey`).
+    #[record(hex)]
     pub heap_key: u64,
+    /// The LFH block-offsets key (`LfhKey`).
+    #[record(hex)]
     pub lfh_key: u64,
 }
 
-#[derive(Clone, Debug)]
+/// A segment context (`_HEAP_SEG_CONTEXT`) of a segment heap.
+#[record(impl)]
 pub struct SegContext {
+    /// Position in `SegContexts`.
     pub index: usize,
+    /// log2 of `unit_size`.
     pub unit_shift: u8,
+    #[record(hex)]
     pub segment_mask: u64,
+    /// The maximum allocation size for this context, in bytes.
     pub max_allocation_size: u32,
+    /// The page segments, as decoded; `SegmentContextDetail.segments` has
+    /// them with their ranges.
+    #[record(skip)]
     pub segments: Vec<PageSegment>,
 }
 
+#[record]
 impl SegContext {
+    /// Bytes per page-range unit.
+    #[record(getter)]
     pub fn unit_size(&self) -> u64 {
         1 << self.unit_shift
     }
 
+    /// Bytes per page segment.
+    #[record(getter)]
     pub fn segment_size(&self) -> u64 {
         (!self.segment_mask).wrapping_add(1)
     }
 }
 
-#[derive(Clone, Debug)]
+/// A page segment (`_HEAP_PAGE_SEGMENT`) of a segment context.
+#[record]
 pub struct PageSegment {
     pub address: VirtAddr,
+    /// The page ranges, as decoded; `SegmentPageDetail.ranges` has them
+    /// with their subsegments.
+    #[record(skip)]
     pub ranges: Vec<PageRange>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What a page range holds: `unused`, `free`, `page` (allocated directly
+/// from the segment), `vs`, or `lfh`.
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub enum RangeKind {
     /// Never handed out; past the segment's high-water mark.
     Unused,
     Free,
     /// Pages allocated straight from the segment for one block.
+    #[record(rename = "page")]
     Direct,
     Vs,
     Lfh,
 }
 
-impl RangeKind {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Unused => "unused",
-            Self::Free => "free",
-            Self::Direct => "page",
-            Self::Vs => "vs",
-            Self::Lfh => "lfh",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
+/// A page range (`_HEAP_PAGE_RANGE_DESCRIPTOR`) of a page segment.
+#[record(impl)]
+#[derive(Copy)]
 pub struct PageRange {
     pub address: VirtAddr,
     pub units: u64,
+    /// Bytes per unit.
     pub unit_size: u64,
+    /// The descriptor's `RangeFlags`.
+    #[record(hex)]
     pub flags: u8,
     pub committed_pages: u8,
+    /// The number of unused bytes at the end of the range.
     pub unused_bytes: u32,
     pub kind: RangeKind,
 }
 
+#[record]
 impl PageRange {
+    /// The size in bytes: `units * unit_size`.
+    #[record(getter)]
     pub fn size(&self) -> u64 {
         self.units * self.unit_size
     }
 
+    /// The first byte after the range.
+    #[record(getter)]
     pub fn end(&self) -> VirtAddr {
         self.address + self.size()
     }
@@ -747,26 +917,48 @@ impl PageRange {
     }
 }
 
-#[derive(Clone, Debug)]
+/// A segment-heap variable-size subsegment (`_HEAP_VS_SUBSEGMENT`).
+#[record(impl)]
 pub struct VsSubsegment {
     pub address: VirtAddr,
+    /// Whether the signature of the subsegment matches the expected value.
     pub signature_ok: bool,
+    /// The chunks, as decoded; `SegmentRangeDetail.blocks` lists them when
+    /// the entries were listed.
+    #[record(skip)]
     pub chunks: Vec<VsChunk>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[record]
+impl VsSubsegment {
+    /// The number of chunks that the walk found.
+    #[record(getter)]
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len()
+    }
+}
+
+/// A segment-heap VS chunk, decoded from its header.
+#[record(impl)]
+#[derive(Copy)]
 pub struct VsChunk {
     pub address: VirtAddr,
+    /// The size in bytes, with the header.
     pub size: u64,
+    /// The size in bytes of the previous chunk.
     pub previous_size: u64,
     pub busy: bool,
-    /// See [`SegmentHeap::granule`].
+    /// The header size in bytes (see [`SegmentHeap::granule`]).
     pub granule: u64,
-    /// Slack recorded in the chunk's last word, when the header says so.
+    /// The number of unused bytes, as recorded in the last word of the
+    /// chunk. None if the header records no unused bytes.
     pub unused_bytes: Option<u16>,
 }
 
+#[record]
 impl VsChunk {
+    /// First user byte.
+    #[record(getter)]
     pub fn user(&self) -> VirtAddr {
         self.address + self.granule
     }
@@ -775,6 +967,8 @@ impl VsChunk {
         self.address + self.size
     }
 
+    /// The number of bytes that the caller can use.
+    #[record(getter)]
     pub fn user_size(&self) -> u64 {
         self.size
             .saturating_sub(self.granule)
@@ -782,21 +976,26 @@ impl VsChunk {
     }
 }
 
-#[derive(Clone, Debug)]
+/// A segment-heap LFH subsegment (`_HEAP_LFH_SUBSEGMENT`).
+#[record(impl)]
 pub struct LfhSubsegment {
     pub address: VirtAddr,
+    /// Bytes per block.
     pub block_size: u64,
     pub block_count: u32,
     pub free_count: u32,
+    /// The LFH bucket of the subsegment.
     pub bucket: u16,
     pub first_block: VirtAddr,
-    /// Bitmap words (`BlockBitmap`'s element width: a qword on x64, a dword
-    /// on x86), each holding `blocks_per_word` blocks: the low half's bit is
-    /// set while the block is busy.
+    /// The `BlockBitmap` words (a qword on x64, a dword on x86), each
+    /// holding `blocks_per_word` blocks: the low bit for a block is set
+    /// while the block is busy.
+    #[record(hex)]
     pub bitmap: Vec<u64>,
     pub blocks_per_word: u32,
 }
 
+#[record]
 impl LfhSubsegment {
     pub fn is_busy(&self, index: u32) -> bool {
         self.bitmap
@@ -804,6 +1003,7 @@ impl LfhSubsegment {
             .is_some_and(|word| word >> (index % self.blocks_per_word) & 1 != 0)
     }
 
+    #[record(getter)]
     pub fn busy_count(&self) -> u32 {
         (0..self.block_count).filter(|i| self.is_busy(*i)).count() as u32
     }
@@ -813,16 +1013,23 @@ impl LfhSubsegment {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+/// A segment-heap large allocation (`_HEAP_LARGE_ALLOC_DATA`).
+#[record(impl)]
+#[derive(Copy)]
 pub struct LargeAllocation {
+    /// The metadata record of the allocation.
     pub metadata: VirtAddr,
     pub address: VirtAddr,
     pub pages: u64,
+    /// The number of unused bytes at the end of the allocation.
     pub unused_bytes: u16,
     pub extra_present: bool,
 }
 
+#[record]
 impl LargeAllocation {
+    /// The size in bytes: `pages` pages.
+    #[record(getter)]
     pub fn size(&self) -> u64 {
         self.pages * PAGE
     }
@@ -870,7 +1077,7 @@ impl HeapReader<'_> {
             large_committed_pages: heap.read(&image, 0, "LargeCommittedPages")?,
             contexts,
             large_allocations,
-            keys,
+            encoding_keys: keys,
             granule,
         })
     }
@@ -1017,8 +1224,9 @@ impl HeapReader<'_> {
             let address = first_chunk + at;
             let header = &bytes[at as usize..at as usize + granule as usize];
             let mut decoded = header.to_vec();
-            let sizes =
-                le_uint(&header[sizes_at..sizes_at + sizes_len]) ^ heap.keys.heap_key ^ address.0;
+            let sizes = le_uint(&header[sizes_at..sizes_at + sizes_len])
+                ^ heap.encoding_keys.heap_key
+                ^ address.0;
             decoded[sizes_at..sizes_at + sizes_len]
                 .copy_from_slice(&sizes.to_le_bytes()[..sizes_len]);
             let chunk_size = sizes_layout.read(&decoded, sizes_at, "UnsafeSize")? * granule;
@@ -1060,7 +1268,7 @@ impl HeapReader<'_> {
         let image = self.read_struct(&layout, range.address)?;
         let block_count = layout.read(&image, 0, "BlockCount")? as u32;
         let encoded = layout.read(&image, 0, "BlockOffsets")? as u32;
-        let decoded = encoded ^ heap.keys.lfh_key as u32 ^ (range.address.0 >> 12) as u32;
+        let decoded = encoded ^ heap.encoding_keys.lfh_key as u32 ^ (range.address.0 >> 12) as u32;
         let block_size = u64::from(decoded & 0xFFFF);
         let first_offset = u64::from(decoded >> 16);
         let word_size = layout
@@ -1097,32 +1305,47 @@ impl HeapReader<'_> {
     }
 }
 
-/// Where an address lands inside a heap.
-#[derive(Clone, Debug)]
+/// Where a searched address lands inside a heap, told apart by `kind`.
+#[record(tagged)]
 pub enum BlockMatch {
+    /// Inside an NT-heap entry.
     NtEntry {
+        /// The `_HEAP_SEGMENT` that contains the entry.
         segment: VirtAddr,
         entry: NtEntry,
     },
+    /// Inside a legacy-LFH block of an NT heap: block `index` of the user
+    /// block `region` in the busy `entry`.
     NtLfhBlock {
         segment: VirtAddr,
         entry: NtEntry,
         region: NtUserBlocks,
         index: u32,
     },
-    NtVirtual(NtVirtualBlock),
+    /// Inside an NT-heap virtually allocated block.
+    NtVirtual(#[record(rename = "block")] NtVirtualBlock),
     /// Inside a segment but not on the chain: the heap header, an
     /// uncommitted range, or past where the walk had to stop.
+    #[record(rename = "nt_segment")]
     NtSegmentOnly {
         segment: VirtAddr,
-        stopped: Option<(VirtAddr, &'static str)>,
+        /// Where the entry walk stopped, and why. None if the walk did not
+        /// stop early.
+        stopped: Option<HeapWalkStop>,
     },
-    Direct(PageRange),
+    /// A segment-heap range that the heap allocated directly from its
+    /// segment.
+    #[record(rename = "page")]
+    Direct(#[record(rename = "range")] PageRange),
+    /// Inside a segment-heap VS chunk.
     VsChunk {
         range: PageRange,
+        /// The `_HEAP_VS_SUBSEGMENT` that contains the chunk.
+        #[record(rename = "vs_subsegment")]
         subsegment: VirtAddr,
         chunk: VsChunk,
     },
+    /// Inside block `index` of a segment-heap LFH subsegment.
     LfhBlock {
         range: PageRange,
         subsegment: LfhSubsegment,
@@ -1130,8 +1353,11 @@ pub enum BlockMatch {
     },
     /// Inside a page range but outside its subsegment's blocks (header,
     /// bitmap, or trailing slack).
-    RangeOnly(PageRange),
-    Large(LargeAllocation),
+    #[record(rename = "range")]
+    RangeOnly(#[record(rename = "range")] PageRange),
+    /// Inside a segment-heap large allocation.
+    #[record(rename = "large")]
+    Large(#[record(rename = "allocation")] LargeAllocation),
 }
 
 impl HeapReader<'_> {
@@ -1153,7 +1379,7 @@ impl HeapReader<'_> {
         if segment
             .uncommitted
             .iter()
-            .any(|range| range.contains(&address.0))
+            .any(|range| range.contains(address.0))
         {
             return Ok(Some(BlockMatch::NtSegmentOnly {
                 segment: segment.address,
@@ -1256,148 +1482,257 @@ impl HeapReader<'_> {
 #[derive(Debug, Clone)]
 pub struct HeapSummaryDetail {
     pub peb: VirtAddr,
-    pub heaps: Vec<HeapSummaryItem>,
+    pub heaps: Vec<HeapInfo>,
     /// True when the PEB advertised more than `MAX_HEAPS` entries.
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone)]
-pub struct HeapSummaryItem {
+/// One heap of a process, from its PEB heap list (`!heap -s`).
+#[record(impl)]
+pub struct HeapInfo {
+    /// The index of the heap in the PEB list.
     pub index: usize,
+    /// The heap address.
     pub address: VirtAddr,
+    #[record(skip)]
     pub kind: HeapKind,
     /// Heap-wide sizes and allocator counts.  An unavailable value contains
     /// the layout, memory, or symbol error for this heap only.
-    pub stats: DiagnosticValue<HeapSummaryStats>,
+    pub stats: DiagnosticValue<HeapStats>,
 }
 
-#[derive(Debug, Clone)]
-pub struct HeapSummaryStats {
+#[record]
+impl HeapInfo {
+    #[record(getter, rename = "kind")]
+    pub fn kind_class(&self) -> HeapClass {
+        self.kind.class()
+    }
+
+    /// The `_HEAP.Signature` of an unknown heap (0 if ntoseye could not
+    /// classify it). None for NT and segment heaps.
+    #[record(getter, hex)]
+    pub fn signature(&self) -> Option<u32> {
+        self.kind.signature()
+    }
+}
+
+/// A heap's sizes, in bytes, and allocator counts (`!heap -s`).
+#[record]
+pub struct HeapStats {
+    /// The heap's flags.
+    #[record(hex)]
     pub flags: u32,
     pub reserved: u64,
     pub committed: u64,
     pub free: u64,
     pub segments: u64,
     pub virtual_blocks: u64,
+    /// The front-end allocator (the LFH), if the heap has one.
     pub front_end: Option<VirtAddr>,
-    pub front_end_type: u8,
     pub vs_subsegments: u64,
     pub lfh_subsegments: u64,
     pub page_allocations: u64,
     pub large_allocations: u64,
 }
 
-#[derive(Debug, Clone)]
+/// One decoded heap (`!heap -h|-a <heap>`, `Heap.inspect()`).
+#[record(impl)]
 pub struct HeapDetail {
+    /// Position in the PEB heap list.
     pub index: usize,
     pub address: VirtAddr,
+    #[record(skip)]
     pub kind: HeapKind,
+    /// Whether ntoseye walked and listed the entries, chunks, and blocks.
     pub list_entries: bool,
+    /// The NT (`_HEAP`) decoding. None for other heap kinds or if the
+    /// decoding failed.
     pub nt: Option<NtHeapDetail>,
+    /// The segment-heap decoding. None for other heap kinds or if the
+    /// decoding failed.
     pub segment: Option<SegmentHeapDetail>,
-    /// A failed decode for the selected heap.  The summary path instead
-    /// records the same failure in its per-item [`DiagnosticValue`].
+    /// The reason that ntoseye could not decode the heap.
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[record]
+impl HeapDetail {
+    #[record(getter, rename = "kind")]
+    pub fn kind_class(&self) -> HeapClass {
+        self.kind.class()
+    }
+
+    /// The `_HEAP.Signature` of an unknown heap (0 if ntoseye could not
+    /// classify it). None for NT and segment heaps.
+    #[record(getter, hex)]
+    pub fn signature(&self) -> Option<u32> {
+        self.kind.signature()
+    }
+}
+
+/// An NT heap with its segments.
+#[record]
 pub struct NtHeapDetail {
+    #[record(rename = "header")]
     pub heap: NtHeap,
     pub segments: Vec<NtSegmentDetail>,
 }
 
-#[derive(Debug, Clone)]
+/// An NT-heap segment with its entry chain.
+#[record]
 pub struct NtSegmentDetail {
+    #[record(rename = "header")]
     pub segment: NtSegment,
+    /// The entry chain of the segment. Empty unless the entries were listed.
     pub entries: Vec<NtEntryDetail>,
+    /// Where the chain walk stopped before `last_valid_entry`, and why. None
+    /// if the walk did not stop before `last_valid_entry`.
     pub stopped: Option<HeapWalkStop>,
 }
 
-#[derive(Debug, Clone)]
+/// An NT-heap entry with the legacy-LFH region it holds.
+#[record]
 pub struct NtEntryDetail {
+    #[record(rename = "header")]
     pub entry: NtEntry,
+    /// The legacy-LFH user block region in this busy entry. `None` if the
+    /// entry has no region or ntoseye cannot read it.
     pub lfh: Option<NtUserBlocks>,
-    /// Materialized legacy-LFH blocks when entry listing was requested.
-    pub lfh_blocks: Vec<HeapBlockDetail>,
+    /// The blocks of the region.
+    pub lfh_blocks: Vec<HeapBlock>,
+    /// Whether `lfh_blocks` stops at the walk limit.
     pub lfh_truncated: bool,
+    /// The reason that ntoseye could not read the LFH region of the entry.
     pub lfh_error: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+/// The address where a heap walk stopped, and the reason.
+#[record]
 pub struct HeapWalkStop {
     pub address: VirtAddr,
     pub reason: String,
 }
 
-#[derive(Debug, Clone)]
+/// A segment heap with its segment contexts.
+#[record]
 pub struct SegmentHeapDetail {
+    #[record(rename = "header")]
     pub heap: SegmentHeap,
     pub contexts: Vec<SegmentContextDetail>,
 }
 
-#[derive(Debug, Clone)]
+/// A segment context with its page segments.
+#[record]
 pub struct SegmentContextDetail {
+    #[record(rename = "header")]
     pub context: SegContext,
     pub segments: Vec<SegmentPageDetail>,
 }
 
-#[derive(Debug, Clone)]
+/// A page segment with its page ranges.
+#[record]
 pub struct SegmentPageDetail {
+    #[record(rename = "header")]
     pub segment: PageSegment,
     pub ranges: Vec<SegmentRangeDetail>,
 }
 
-#[derive(Debug, Clone)]
+/// A page range with its decoded subsegment.
+#[record]
 pub struct SegmentRangeDetail {
+    #[record(rename = "header")]
     pub range: PageRange,
+    /// The VS or LFH subsegment in the range. `None` for other kinds, or if
+    /// ntoseye cannot read the subsegment.
     pub subsegment: Option<SegmentSubsegment>,
-    /// Materialized VS chunks or segment-LFH blocks when entry listing was
-    /// requested.  The allocator-specific subsegment retains its raw data.
-    pub blocks: Vec<HeapBlockDetail>,
+    /// The VS chunks or LFH blocks of the subsegment. Empty unless the
+    /// entries were listed.
+    pub blocks: Vec<HeapBlock>,
+    /// The reason that ntoseye could not read the subsegment.
     pub error: Option<String>,
-    /// True when the VS chunk walk reached `MAX_ENTRIES`.
+    /// Whether the subsegment has more blocks than the walk limit.
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone)]
+/// A page range's subsegment: VS or LFH.
+#[record]
 pub enum SegmentSubsegment {
     Vs(VsSubsegment),
     Lfh(LfhSubsegment),
 }
 
-#[derive(Debug, Clone)]
-pub struct HeapBlockDetail {
+/// One block of a heap walk: an NT legacy-LFH block, a segment-heap VS
+/// chunk, or a segment-heap LFH block.
+#[record]
+pub struct HeapBlock {
     pub address: VirtAddr,
+    /// The size in bytes, with the header.
     pub size: u64,
+    /// The size in bytes of the previous block. None if the block kind
+    /// does not record it.
     pub previous_size: Option<u64>,
+    /// The header flags. None if the block kind has no header of its own.
+    #[record(hex)]
     pub flags: Option<u32>,
-    pub state: &'static str,
-    pub kind: &'static str,
+    /// `busy` or `free`.
+    pub state: BlockState,
+    pub kind: HeapBlockKind,
+    /// The number of unused bytes at the end of the block. None if the
+    /// block does not record them.
     pub unused_bytes: Option<u64>,
+    /// Whether the header checksum is correct. None if the block kind has
+    /// no checksum.
     pub checksum_ok: Option<bool>,
+    /// First user byte.
     pub user: Option<VirtAddr>,
+    /// The number of bytes that the caller can use.
     pub user_size: Option<u64>,
+    /// The position in the region or subsegment. None for VS chunks.
     pub index: Option<u32>,
 }
 
-#[derive(Debug, Clone)]
+/// A heap, identified by its PEB-list position, address, and kind.
+#[record(impl)]
 pub struct HeapIdentity {
+    /// Position in the PEB heap list.
     pub index: usize,
     pub address: VirtAddr,
+    #[record(skip)]
     pub kind: HeapKind,
 }
 
-#[derive(Debug, Clone)]
-pub struct HeapBlockSearchDetail {
+#[record]
+impl HeapIdentity {
+    #[record(getter, rename = "kind")]
+    pub fn kind_class(&self) -> HeapClass {
+        self.kind.class()
+    }
+
+    /// The `_HEAP.Signature` of an unknown heap (0 if ntoseye could not
+    /// classify it). None for NT and segment heaps.
+    #[record(getter, hex)]
+    pub fn signature(&self) -> Option<u32> {
+        self.kind.signature()
+    }
+}
+
+/// The heap block that contains an address (`!heap -x <addr>`,
+/// `Heaps.find_block()`).
+#[record]
+pub struct HeapBlockSearch {
+    /// The search address.
     pub address: VirtAddr,
+    /// Whether a heap contains the address.
     pub found: bool,
-    /// True when the PEB advertised more than `MAX_HEAPS` and the search
-    /// could not inspect entries past that bound.
+    /// Whether the PEB listed more heaps than the search bound, in which
+    /// case the search may have missed the block.
     pub truncated: bool,
+    /// The heap that contains the address. None if no heap contains it.
     pub heap: Option<HeapIdentity>,
+    /// The location of the address in the heap. None if no heap contains
+    /// it.
     pub block: Option<BlockMatch>,
-    /// Decode failures from heaps examined before a match (or before the
-    /// not-found result).  A malformed heap does not hide later heaps.
+    /// The heaps that ntoseye could not search, and the reasons.
     pub errors: Vec<String>,
 }
 
@@ -1407,10 +1742,7 @@ pub enum HeapSelector {
     Address(VirtAddr),
 }
 
-fn heap_summary_stats(
-    reader: &HeapReader<'_>,
-    heap: &ProcessHeap,
-) -> DiagnosticValue<HeapSummaryStats> {
+fn heap_summary_stats(reader: &HeapReader<'_>, heap: &ProcessHeap) -> DiagnosticValue<HeapStats> {
     if let Some(error) = heap.classification_error.as_ref() {
         return DiagnosticValue::unavailable(error.clone());
     }
@@ -1426,7 +1758,7 @@ fn heap_summary_stats(
                 .iter()
                 .map(|segment| u64::from(segment.uncommitted_pages) * PAGE)
                 .sum();
-            HeapSummaryStats {
+            HeapStats {
                 flags: nt.flags,
                 reserved,
                 committed: reserved.saturating_sub(uncommitted),
@@ -1434,7 +1766,6 @@ fn heap_summary_stats(
                 segments: nt.segments.len() as u64,
                 virtual_blocks: nt.virtual_blocks.len() as u64,
                 front_end: nt.front_end,
-                front_end_type: nt.front_end_type,
                 vs_subsegments: 0,
                 lfh_subsegments: 0,
                 page_allocations: 0,
@@ -1452,7 +1783,7 @@ fn heap_summary_stats(
                         .filter(|range| range.kind == kind)
                         .count() as u64
                 };
-                HeapSummaryStats {
+                HeapStats {
                     flags: segment.global_flags,
                     reserved: segment.reserved_pages.saturating_mul(PAGE),
                     committed: segment.committed_pages.saturating_mul(PAGE),
@@ -1464,7 +1795,6 @@ fn heap_summary_stats(
                         .sum(),
                     virtual_blocks: 0,
                     front_end: None,
-                    front_end_type: 0,
                     vs_subsegments: count(RangeKind::Vs),
                     lfh_subsegments: count(RangeKind::Lfh),
                     page_allocations: count(RangeKind::Direct),
@@ -1478,19 +1808,15 @@ fn heap_summary_stats(
     }
 }
 
-fn nt_lfh_block_detail(region: &NtUserBlocks, entry: &NtEntry, index: u32) -> HeapBlockDetail {
+fn nt_lfh_block_detail(region: &NtUserBlocks, entry: &NtEntry, index: u32) -> HeapBlock {
     let address = region.block(index);
-    HeapBlockDetail {
+    HeapBlock {
         address,
         size: region.block_size,
         previous_size: None,
         flags: None,
-        state: if region.is_busy(index) {
-            "busy"
-        } else {
-            "free"
-        },
-        kind: "nt-lfh-block",
+        state: BlockState::of(region.is_busy(index)),
+        kind: HeapBlockKind::NtLfhBlock,
         unused_bytes: None,
         checksum_ok: None,
         user: Some(address + entry.granule),
@@ -1499,14 +1825,14 @@ fn nt_lfh_block_detail(region: &NtUserBlocks, entry: &NtEntry, index: u32) -> He
     }
 }
 
-fn vs_block_detail(chunk: &VsChunk) -> HeapBlockDetail {
-    HeapBlockDetail {
+fn vs_block_detail(chunk: &VsChunk) -> HeapBlock {
+    HeapBlock {
         address: chunk.address,
         size: chunk.size,
         previous_size: Some(chunk.previous_size),
         flags: None,
-        state: if chunk.busy { "busy" } else { "free" },
-        kind: "vs-chunk",
+        state: BlockState::of(chunk.busy),
+        kind: HeapBlockKind::VsChunk,
         unused_bytes: chunk.unused_bytes.map(u64::from),
         checksum_ok: None,
         user: Some(chunk.user()),
@@ -1515,19 +1841,15 @@ fn vs_block_detail(chunk: &VsChunk) -> HeapBlockDetail {
     }
 }
 
-fn lfh_block_detail(subsegment: &LfhSubsegment, index: u32) -> HeapBlockDetail {
+fn lfh_block_detail(subsegment: &LfhSubsegment, index: u32) -> HeapBlock {
     let address = subsegment.block(index);
-    HeapBlockDetail {
+    HeapBlock {
         address,
         size: subsegment.block_size,
         previous_size: None,
         flags: None,
-        state: if subsegment.is_busy(index) {
-            "busy"
-        } else {
-            "free"
-        },
-        kind: "lfh-block",
+        state: BlockState::of(subsegment.is_busy(index)),
+        kind: HeapBlockKind::LfhBlock,
         unused_bytes: None,
         checksum_ok: None,
         user: Some(address),
@@ -1570,13 +1892,7 @@ fn nt_heap_detail(reader: &HeapReader<'_>, heap: &NtHeap, list_entries: bool) ->
                         }
                     })
                     .collect();
-                (
-                    entries,
-                    walk.stopped.map(|(address, reason)| HeapWalkStop {
-                        address,
-                        reason: reason.to_string(),
-                    }),
-                )
+                (entries, walk.stopped)
             } else {
                 (Vec::new(), None)
             };
@@ -1703,7 +2019,7 @@ impl Target {
                 .guest()?
                 .ntoskrnl
                 .types_in(process.dtb)
-                .struct_at("_EPROCESS", process.eprocess_va)?;
+                .struct_at("_EPROCESS", process.eprocess)?;
             let peb = eprocess.follow("Peb")?.addr();
             if peb.is_zero() {
                 return Err(Error::MissingPEB);
@@ -1725,7 +2041,7 @@ impl Target {
             truncated,
             heaps: heaps
                 .iter()
-                .map(|heap| HeapSummaryItem {
+                .map(|heap| HeapInfo {
                     index: heap.index,
                     address: heap.address,
                     kind: heap.kind,
@@ -1795,7 +2111,7 @@ impl Target {
     /// records per-heap layout, memory, and symbol failures encountered while
     /// searching; `found` is false with no `heap`/`block` when no allocation
     /// contains the address.
-    pub fn find_heap_block(&self, address: VirtAddr) -> Result<HeapBlockSearchDetail> {
+    pub fn find_heap_block(&self, address: VirtAddr) -> Result<HeapBlockSearch> {
         let (dtb, peb, wow64) = self.heap_context()?;
         let reader = HeapReader::new(self, dtb, wow64);
         let (heaps, truncated) = reader.process_heaps_with_status(peb)?;
@@ -1830,7 +2146,7 @@ impl Target {
                 }
             };
             if let Some(block) = block {
-                return Ok(HeapBlockSearchDetail {
+                return Ok(HeapBlockSearch {
                     address,
                     found: true,
                     truncated,
@@ -1844,7 +2160,7 @@ impl Target {
                 });
             }
         }
-        Ok(HeapBlockSearchDetail {
+        Ok(HeapBlockSearch {
             address,
             found: false,
             truncated,

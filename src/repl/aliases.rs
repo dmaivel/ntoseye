@@ -4,6 +4,8 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
+use ntoseye_macros::command;
+
 use crate::diagnostics;
 use crate::error::Result;
 use crate::repl::*;
@@ -271,29 +273,6 @@ pub fn splice_value(value: &str) -> Cow<'_, str> {
     }
 }
 
-repl_command! {
-    cmd_aliases();
-    names: ["al", "aliases"],
-    usage: "al",
-    summary: "List command aliases.",
-}
-
-repl_command! {
-    cmd_alias;
-    names: ["as", "alias"],
-    usage: "as <name> <expansion>",
-    summary: "Define a command alias.",
-    style: RawTail,
-}
-
-repl_command! {
-    cmd_unalias;
-    names: ["ad", "unalias"],
-    usage: "ad <name>",
-    summary: "Remove a command alias.",
-    completion: Alias,
-}
-
 impl ReplState<'_> {
     pub fn reload_aliases(&mut self) -> AliasLoadReport {
         let (aliases, report) = UserAliases::load_with_report();
@@ -305,48 +284,70 @@ impl ReplState<'_> {
     pub fn refresh_alias_cache(&self) {
         *self.caches.aliases.write().unwrap() = self.aliases.entries();
     }
+}
 
-    fn cmd_alias(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let (name, expansion) = match parse_alias_body(invocation.raw_tail) {
-            Ok(parts) => parts,
-            Err(err) => {
-                error!("{}", err);
-                return Ok(());
-            }
-        };
-        if let Err(e) = self.aliases.insert(name.to_string(), expansion.to_string()) {
-            error!("failed to save aliases: {}", e);
+/// List command aliases.
+#[command(names = ["al", "aliases"], category = "session", kind = Host, python = none)]
+fn aliases(state: &mut ReplState<'_>) -> Result<()> {
+    if state.aliases.map.is_empty() {
+        outln!("no aliases defined\n");
+        return Ok(());
+    }
+    for (name, expansion) in &state.aliases.map {
+        outln!("alias {} {}", name, expansion);
+    }
+    outln!();
+    Ok(())
+}
+
+/// Define a command alias.
+#[command(
+    names = ["as", "alias"],
+    category = "session",
+    kind = Host,
+    python = none,
+    style = RawTail
+)]
+fn alias(
+    state: &mut ReplState<'_>,
+    #[arg(raw, usage = "<name> <expansion>", complete = None)] tail: String,
+) -> Result<()> {
+    let (name, expansion) = match parse_alias_body(tail.as_str()) {
+        Ok(parts) => parts,
+        Err(err) => {
+            error!("{}", err);
             return Ok(());
         }
-        self.refresh_alias_cache();
-        outln!("alias {} {}\n", name, expansion);
-        Ok(())
+    };
+    if let Err(e) = state
+        .aliases
+        .insert(name.to_string(), expansion.to_string())
+    {
+        error!("failed to save aliases: {}", e);
+        return Ok(());
     }
+    state.refresh_alias_cache();
+    outln!("alias {} {}\n", name, expansion);
+    Ok(())
+}
 
-    fn cmd_unalias(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let name = require_arg!(invocation, 0, "unalias");
-        match self.aliases.remove(name) {
-            Ok(true) => {
-                self.refresh_alias_cache();
-                outln!("unalias {}\n", name);
-            }
-            Ok(false) => error!("no such alias: {}", name),
-            Err(e) => error!("failed to save aliases: {}", e),
+/// Remove a command alias.
+#[command(
+    names = ["ad", "unalias"],
+    category = "session",
+    kind = Host,
+    python = none,
+)]
+fn unalias(state: &mut ReplState<'_>, #[arg(complete = Alias)] name: String) -> Result<()> {
+    match state.aliases.remove(&name) {
+        Ok(true) => {
+            state.refresh_alias_cache();
+            outln!("unalias {}\n", name);
         }
-        Ok(())
+        Ok(false) => error!("no such alias: {}", name),
+        Err(e) => error!("failed to save aliases: {}", e),
     }
-
-    fn cmd_aliases(&mut self) -> Result<()> {
-        if self.aliases.map.is_empty() {
-            outln!("no aliases defined\n");
-            return Ok(());
-        }
-        for (name, expansion) in &self.aliases.map {
-            outln!("alias {} {}", name, expansion);
-        }
-        outln!();
-        Ok(())
-    }
+    Ok(())
 }
 
 #[cfg(test)]

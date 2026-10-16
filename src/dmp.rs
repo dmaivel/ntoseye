@@ -1,41 +1,34 @@
+use ntoseye_macros::record;
 use std::fs::File;
-use std::mem::offset_of;
 use std::path::Path;
 use std::time::Duration;
 
 use memmap2::Mmap;
 use zerocopy::FromBytes;
 
-use crate::backend::MemoryOps;
-use crate::bytes::{
-    get_u32, get_u64, read_u16, read_u32, read_u64, write_u16, write_u32, write_u64,
-};
-use crate::cpu_state;
+use crate::bytes::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64};
+use crate::cpu_context::{amd64, arm64};
 use crate::dbg_backend::{
-    BackendCapability, DebugBackend, DebugCapability, StopEvent,
+    BackendCapability, DebugBackend, DebugCapability, RegisterMap, StopEvent,
     processor_index_from_backend_thread_id,
 };
 use crate::debugger_data::{DebuggerDataCandidate, MetadataSource};
 use crate::error::{Error, Result};
-use crate::gdb::RegisterMap;
-use crate::kd::context;
-use crate::kd::context_arm64;
-use crate::layout::{ParsedType, TypeInfo};
-use crate::memory::PAGE_SIZE;
+use crate::memory::{MemoryOps, PAGE_SIZE};
 use crate::notice::Notice;
-use crate::target::Target;
-use crate::triage::{
-    TriageBlock, TriageDriver, TriagePrcbInfo, is_triage_dump, parse_drivers, parse_triage,
-};
-use crate::types::{Arch, PhysAddr, VirtAddr};
+use crate::types::{Arch, MAX_PROCESSORS, PhysAddr, VirtAddr};
 
 pub mod parse;
 pub mod structs;
 pub mod tagged;
+pub mod triage;
 
 use parse::ParsedDump;
-use structs::{Context, KdDebuggerData64};
+use structs::Context;
 use tagged::{TaggedBlock, tagged_blocks_at};
+use triage::{
+    TriageBlock, TriageDriver, TriagePrcbInfo, is_triage_dump, parse_drivers, parse_triage,
+};
 
 pub const IMAGE_FILE_MACHINE_AMD64: u32 = 0x8664;
 pub const IMAGE_FILE_MACHINE_ARM64: u32 = 0xaa64;
@@ -114,102 +107,176 @@ pub struct DmpContext {
     pub arm64: Option<DmpArm64Context>,
 }
 
+/// The exception a crash dump recorded.
+#[record(impl)]
 #[derive(Debug, Clone, Default)]
 pub struct DmpException {
+    /// The exception code (NTSTATUS).
+    #[record(hex)]
     pub code: u32,
     pub flags: u32,
+    /// Where the exception occurred.
+    #[record(hex)]
     pub address: u64,
+    /// The exception's `ExceptionInformation` parameters.
+    #[record(hex)]
     pub parameters: Vec<u64>,
 }
 
+#[record]
+impl DmpException {
+    /// The code's symbolic name.
+    #[record(getter)]
+    pub fn code_name(&self) -> &'static str {
+        crate::triage_report::exception_code_name(self.code)
+    }
+}
+
+/// The system that a crash dump comes from, as the system-info stream of
+/// the dump records it.
+#[record(impl)]
 #[derive(Debug, Clone, Default)]
 pub struct DmpSystemInfo {
     pub major_version: u32,
+    /// The build number.
     pub minor_version: u32,
+    /// When the dump was taken (FILETIME), 0 if the dump does not record it.
     pub system_time: i64,
+    /// The system uptime, in 100 ns units.
     pub system_up_time: i64,
+    /// `VER_NT_*`: 1 workstation, 2 domain controller, 3 server.
     pub product_type: u32,
+    /// The product suite (`VER_SUITE_*`) bits.
+    #[record(hex)]
     pub suite_mask: u32,
+    /// The machine type (`IMAGE_FILE_MACHINE_*`).
+    #[record(hex)]
     pub machine_image_type: u32,
     pub service_pack_build: u32,
 }
 
+#[record]
+impl DmpSystemInfo {
+    /// `I386`, `AMD64`, `ARM64`, or `Unknown`.
+    #[record(getter)]
+    pub fn machine(&self) -> &'static str {
+        match self.machine_image_type {
+            0x014c => "I386",
+            0x8664 => "AMD64",
+            0xAA64 => "ARM64",
+            _ => "Unknown",
+        }
+    }
+
+    /// `Workstation`, `DomainController`, `Server`, or `Unknown`.
+    #[record(getter)]
+    pub fn product(&self) -> &'static str {
+        match self.product_type {
+            1 => "Workstation",
+            2 => "DomainController",
+            3 => "Server",
+            _ => "Unknown",
+        }
+    }
+
+    /// When the dump was taken (ISO 8601 UTC). `None` if the dump does not
+    /// record it.
+    #[record(getter)]
+    pub fn system_time_utc(&self) -> Option<String> {
+        (self.system_time != 0)
+            .then(|| crate::triage_report::time::filetime_to_iso(self.system_time as u64))
+            .flatten()
+    }
+
+    /// The system uptime in seconds. `None` if the dump does not record it.
+    #[record(getter)]
+    pub fn system_up_time_secs(&self) -> Option<u64> {
+        (self.system_up_time > 0)
+            .then(|| u64::try_from(self.system_up_time / 10_000_000).ok())
+            .flatten()
+    }
+}
+
+/// A driver that the system unloaded recently, as the crash dump records it.
+#[record]
 #[derive(Debug, Clone)]
 pub struct UnloadedDriver {
     pub name: String,
+    #[record(hex)]
     pub start_address: u64,
+    #[record(hex)]
     pub end_address: u64,
 }
 
 impl DmpContext {
     pub fn from_bytes(buf: &[u8]) -> Self {
         let mut xmm = [0u128; 16];
-        if buf.len() >= context::OFFSET_XMM0 + 16 * 16 {
+        if buf.len() >= amd64::OFFSET_XMM0 + 16 * 16 {
             for (i, slot) in xmm.iter_mut().enumerate() {
-                let off = context::OFFSET_XMM0 + i * 16;
+                let off = amd64::OFFSET_XMM0 + i * 16;
                 let mut bytes = [0u8; 16];
                 bytes.copy_from_slice(&buf[off..off + 16]);
                 *slot = u128::from_le_bytes(bytes);
             }
         }
 
-        let has_lbr = buf.len() >= context::OFFSET_LAST_EXCEPTION_FROM_RIP + 8;
+        let has_lbr = buf.len() >= amd64::OFFSET_LAST_EXCEPTION_FROM_RIP + 8;
 
         Self {
-            rax: read_u64(buf, context::OFFSET_RAX),
-            rbx: read_u64(buf, context::OFFSET_RBX),
-            rcx: read_u64(buf, context::OFFSET_RCX),
-            rdx: read_u64(buf, context::OFFSET_RDX),
-            rsi: read_u64(buf, context::OFFSET_RSI),
-            rdi: read_u64(buf, context::OFFSET_RDI),
-            rbp: read_u64(buf, context::OFFSET_RBP),
-            rsp: read_u64(buf, context::OFFSET_RSP),
-            r8: read_u64(buf, context::OFFSET_R8),
-            r9: read_u64(buf, context::OFFSET_R9),
-            r10: read_u64(buf, context::OFFSET_R10),
-            r11: read_u64(buf, context::OFFSET_R11),
-            r12: read_u64(buf, context::OFFSET_R12),
-            r13: read_u64(buf, context::OFFSET_R13),
-            r14: read_u64(buf, context::OFFSET_R14),
-            r15: read_u64(buf, context::OFFSET_R15),
-            rip: read_u64(buf, context::OFFSET_RIP),
-            eflags: read_u32(buf, context::OFFSET_EFLAGS),
-            cs: read_u16(buf, context::OFFSET_SEG_CS),
-            ds: read_u16(buf, context::OFFSET_SEG_DS),
-            es: read_u16(buf, context::OFFSET_SEG_ES),
-            fs: read_u16(buf, context::OFFSET_SEG_FS),
-            gs: read_u16(buf, context::OFFSET_SEG_GS),
-            ss: read_u16(buf, context::OFFSET_SEG_SS),
-            dr0: read_u64(buf, context::OFFSET_DR0),
-            dr1: read_u64(buf, context::OFFSET_DR1),
-            dr2: read_u64(buf, context::OFFSET_DR2),
-            dr3: read_u64(buf, context::OFFSET_DR3),
-            dr6: read_u64(buf, context::OFFSET_DR6),
-            dr7: read_u64(buf, context::OFFSET_DR7),
-            mxcsr: read_u32(buf, context::OFFSET_MX_CSR),
+            rax: read_u64(buf, amd64::OFFSET_RAX),
+            rbx: read_u64(buf, amd64::OFFSET_RBX),
+            rcx: read_u64(buf, amd64::OFFSET_RCX),
+            rdx: read_u64(buf, amd64::OFFSET_RDX),
+            rsi: read_u64(buf, amd64::OFFSET_RSI),
+            rdi: read_u64(buf, amd64::OFFSET_RDI),
+            rbp: read_u64(buf, amd64::OFFSET_RBP),
+            rsp: read_u64(buf, amd64::OFFSET_RSP),
+            r8: read_u64(buf, amd64::OFFSET_R8),
+            r9: read_u64(buf, amd64::OFFSET_R9),
+            r10: read_u64(buf, amd64::OFFSET_R10),
+            r11: read_u64(buf, amd64::OFFSET_R11),
+            r12: read_u64(buf, amd64::OFFSET_R12),
+            r13: read_u64(buf, amd64::OFFSET_R13),
+            r14: read_u64(buf, amd64::OFFSET_R14),
+            r15: read_u64(buf, amd64::OFFSET_R15),
+            rip: read_u64(buf, amd64::OFFSET_RIP),
+            eflags: read_u32(buf, amd64::OFFSET_EFLAGS),
+            cs: read_u16(buf, amd64::OFFSET_SEG_CS),
+            ds: read_u16(buf, amd64::OFFSET_SEG_DS),
+            es: read_u16(buf, amd64::OFFSET_SEG_ES),
+            fs: read_u16(buf, amd64::OFFSET_SEG_FS),
+            gs: read_u16(buf, amd64::OFFSET_SEG_GS),
+            ss: read_u16(buf, amd64::OFFSET_SEG_SS),
+            dr0: read_u64(buf, amd64::OFFSET_DR0),
+            dr1: read_u64(buf, amd64::OFFSET_DR1),
+            dr2: read_u64(buf, amd64::OFFSET_DR2),
+            dr3: read_u64(buf, amd64::OFFSET_DR3),
+            dr6: read_u64(buf, amd64::OFFSET_DR6),
+            dr7: read_u64(buf, amd64::OFFSET_DR7),
+            mxcsr: read_u32(buf, amd64::OFFSET_MX_CSR),
             xmm,
             debug_control: if has_lbr {
-                read_u64(buf, context::OFFSET_DEBUG_CONTROL)
+                read_u64(buf, amd64::OFFSET_DEBUG_CONTROL)
             } else {
                 0
             },
             last_branch_to_rip: if has_lbr {
-                read_u64(buf, context::OFFSET_LAST_BRANCH_TO_RIP)
+                read_u64(buf, amd64::OFFSET_LAST_BRANCH_TO_RIP)
             } else {
                 0
             },
             last_branch_from_rip: if has_lbr {
-                read_u64(buf, context::OFFSET_LAST_BRANCH_FROM_RIP)
+                read_u64(buf, amd64::OFFSET_LAST_BRANCH_FROM_RIP)
             } else {
                 0
             },
             last_exception_to_rip: if has_lbr {
-                read_u64(buf, context::OFFSET_LAST_EXCEPTION_TO_RIP)
+                read_u64(buf, amd64::OFFSET_LAST_EXCEPTION_TO_RIP)
             } else {
                 0
             },
             last_exception_from_rip: if has_lbr {
-                read_u64(buf, context::OFFSET_LAST_EXCEPTION_FROM_RIP)
+                read_u64(buf, amd64::OFFSET_LAST_EXCEPTION_FROM_RIP)
             } else {
                 0
             },
@@ -221,7 +288,7 @@ impl DmpContext {
     /// deliberately bounds-checked so a truncated dump yields zero for the
     /// unavailable field instead of panicking while parsing an untrusted file.
     pub fn from_arm64_bytes(buf: &[u8]) -> Self {
-        if buf.len() < context_arm64::CONTEXT_SIZE {
+        if buf.len() < arm64::CONTEXT_SIZE {
             return Self {
                 arm64: Some(DmpArm64Context::default()),
                 ..Self::default()
@@ -229,37 +296,37 @@ impl DmpContext {
         }
         let mut x = [0u64; 31];
         for (i, slot) in x.iter_mut().enumerate() {
-            *slot = read_u64(buf, context_arm64::OFFSET_X0 + i * 8);
+            *slot = read_u64(buf, arm64::OFFSET_X0 + i * 8);
         }
         let mut v = [0u128; 32];
         for (i, slot) in v.iter_mut().enumerate() {
-            let off = context_arm64::OFFSET_V0 + i * 16;
+            let off = arm64::OFFSET_V0 + i * 16;
             let mut bytes = [0u8; 16];
             bytes.copy_from_slice(&buf[off..off + 16]);
             *slot = u128::from_le_bytes(bytes);
         }
         let mut bcr = [0u32; 8];
         for (i, slot) in bcr.iter_mut().enumerate() {
-            *slot = read_u32(buf, context_arm64::OFFSET_BCR0 + i * 4);
+            *slot = read_u32(buf, arm64::OFFSET_BCR0 + i * 4);
         }
         let mut bvr = [0u64; 8];
         for (i, slot) in bvr.iter_mut().enumerate() {
-            *slot = read_u64(buf, context_arm64::OFFSET_BVR0 + i * 8);
+            *slot = read_u64(buf, arm64::OFFSET_BVR0 + i * 8);
         }
         let mut wcr = [0u32; 2];
         for (i, slot) in wcr.iter_mut().enumerate() {
-            *slot = read_u32(buf, context_arm64::OFFSET_WCR0 + i * 4);
+            *slot = read_u32(buf, arm64::OFFSET_WCR0 + i * 4);
         }
         let mut wvr = [0u64; 2];
         for (i, slot) in wvr.iter_mut().enumerate() {
-            *slot = read_u64(buf, context_arm64::OFFSET_WVR0 + i * 8);
+            *slot = read_u64(buf, arm64::OFFSET_WVR0 + i * 8);
         }
 
-        let cpsr = read_u32(buf, context_arm64::OFFSET_CPSR);
-        let sp = read_u64(buf, context_arm64::OFFSET_SP);
-        let pc = read_u64(buf, context_arm64::OFFSET_PC);
-        let fpcr = read_u32(buf, context_arm64::OFFSET_FPCR);
-        let fpsr = read_u32(buf, context_arm64::OFFSET_FPSR);
+        let cpsr = read_u32(buf, arm64::OFFSET_CPSR);
+        let sp = read_u64(buf, arm64::OFFSET_SP);
+        let pc = read_u64(buf, arm64::OFFSET_PC);
+        let fpcr = read_u32(buf, arm64::OFFSET_FPCR);
+        let fpsr = read_u32(buf, arm64::OFFSET_FPSR);
         Self {
             arm64: Some(DmpArm64Context {
                 x,
@@ -292,106 +359,104 @@ impl DmpContext {
 
     pub fn to_register_buffer(&self, directory_table_base: u64) -> Vec<u8> {
         if let Some(ctx) = &self.arm64 {
-            let mut data = vec![0u8; context_arm64::REGISTER_BUFFER_SIZE];
-            data[context_arm64::OFFSET_CONTEXT_FLAGS..context_arm64::OFFSET_CONTEXT_FLAGS + 4]
-                .copy_from_slice(&context_arm64::CONTEXT_ALL.to_le_bytes());
-            data[context_arm64::OFFSET_CPSR..context_arm64::OFFSET_CPSR + 4]
+            let mut data = vec![0u8; arm64::REGISTER_BUFFER_SIZE];
+            data[arm64::OFFSET_CONTEXT_FLAGS..arm64::OFFSET_CONTEXT_FLAGS + 4]
+                .copy_from_slice(&arm64::CONTEXT_ALL.to_le_bytes());
+            data[arm64::OFFSET_CPSR..arm64::OFFSET_CPSR + 4]
                 .copy_from_slice(&ctx.cpsr.to_le_bytes());
             for (i, &value) in ctx.x.iter().enumerate() {
-                let off = context_arm64::OFFSET_X0 + i * 8;
+                let off = arm64::OFFSET_X0 + i * 8;
                 data[off..off + 8].copy_from_slice(&value.to_le_bytes());
             }
-            data[context_arm64::OFFSET_SP..context_arm64::OFFSET_SP + 8]
-                .copy_from_slice(&ctx.sp.to_le_bytes());
-            data[context_arm64::OFFSET_PC..context_arm64::OFFSET_PC + 8]
-                .copy_from_slice(&ctx.pc.to_le_bytes());
+            data[arm64::OFFSET_SP..arm64::OFFSET_SP + 8].copy_from_slice(&ctx.sp.to_le_bytes());
+            data[arm64::OFFSET_PC..arm64::OFFSET_PC + 8].copy_from_slice(&ctx.pc.to_le_bytes());
             for (i, &value) in ctx.v.iter().enumerate() {
-                let off = context_arm64::OFFSET_V0 + i * 16;
+                let off = arm64::OFFSET_V0 + i * 16;
                 data[off..off + 16].copy_from_slice(&value.to_le_bytes());
             }
-            data[context_arm64::OFFSET_FPCR..context_arm64::OFFSET_FPCR + 4]
+            data[arm64::OFFSET_FPCR..arm64::OFFSET_FPCR + 4]
                 .copy_from_slice(&ctx.fpcr.to_le_bytes());
-            data[context_arm64::OFFSET_FPSR..context_arm64::OFFSET_FPSR + 4]
+            data[arm64::OFFSET_FPSR..arm64::OFFSET_FPSR + 4]
                 .copy_from_slice(&ctx.fpsr.to_le_bytes());
             for (i, &value) in ctx.bcr.iter().enumerate() {
-                let off = context_arm64::OFFSET_BCR0 + i * 4;
+                let off = arm64::OFFSET_BCR0 + i * 4;
                 data[off..off + 4].copy_from_slice(&value.to_le_bytes());
             }
             for (i, &value) in ctx.bvr.iter().enumerate() {
-                let off = context_arm64::OFFSET_BVR0 + i * 8;
+                let off = arm64::OFFSET_BVR0 + i * 8;
                 data[off..off + 8].copy_from_slice(&value.to_le_bytes());
             }
             for (i, &value) in ctx.wcr.iter().enumerate() {
-                let off = context_arm64::OFFSET_WCR0 + i * 4;
+                let off = arm64::OFFSET_WCR0 + i * 4;
                 data[off..off + 4].copy_from_slice(&value.to_le_bytes());
             }
             for (i, &value) in ctx.wvr.iter().enumerate() {
-                let off = context_arm64::OFFSET_WVR0 + i * 8;
+                let off = arm64::OFFSET_WVR0 + i * 8;
                 data[off..off + 8].copy_from_slice(&value.to_le_bytes());
             }
-            data[context_arm64::OFFSET_CR3..context_arm64::OFFSET_CR3 + 8]
+            data[arm64::OFFSET_CR3..arm64::OFFSET_CR3 + 8]
                 .copy_from_slice(&directory_table_base.to_le_bytes());
             return data;
         }
-        let mut data = vec![0u8; context::REGISTER_BUFFER_SIZE];
+        let mut data = vec![0u8; amd64::REGISTER_BUFFER_SIZE];
 
-        write_u64(&mut data, context::OFFSET_RAX, self.rax);
-        write_u64(&mut data, context::OFFSET_RBX, self.rbx);
-        write_u64(&mut data, context::OFFSET_RCX, self.rcx);
-        write_u64(&mut data, context::OFFSET_RDX, self.rdx);
-        write_u64(&mut data, context::OFFSET_RSI, self.rsi);
-        write_u64(&mut data, context::OFFSET_RDI, self.rdi);
-        write_u64(&mut data, context::OFFSET_RBP, self.rbp);
-        write_u64(&mut data, context::OFFSET_RSP, self.rsp);
-        write_u64(&mut data, context::OFFSET_R8, self.r8);
-        write_u64(&mut data, context::OFFSET_R9, self.r9);
-        write_u64(&mut data, context::OFFSET_R10, self.r10);
-        write_u64(&mut data, context::OFFSET_R11, self.r11);
-        write_u64(&mut data, context::OFFSET_R12, self.r12);
-        write_u64(&mut data, context::OFFSET_R13, self.r13);
-        write_u64(&mut data, context::OFFSET_R14, self.r14);
-        write_u64(&mut data, context::OFFSET_R15, self.r15);
-        write_u64(&mut data, context::OFFSET_RIP, self.rip);
-        write_u32(&mut data, context::OFFSET_EFLAGS, self.eflags);
-        write_u16(&mut data, context::OFFSET_SEG_CS, self.cs);
-        write_u16(&mut data, context::OFFSET_SEG_DS, self.ds);
-        write_u16(&mut data, context::OFFSET_SEG_ES, self.es);
-        write_u16(&mut data, context::OFFSET_SEG_FS, self.fs);
-        write_u16(&mut data, context::OFFSET_SEG_GS, self.gs);
-        write_u16(&mut data, context::OFFSET_SEG_SS, self.ss);
-        write_u64(&mut data, context::OFFSET_DR0, self.dr0);
-        write_u64(&mut data, context::OFFSET_DR1, self.dr1);
-        write_u64(&mut data, context::OFFSET_DR2, self.dr2);
-        write_u64(&mut data, context::OFFSET_DR3, self.dr3);
-        write_u64(&mut data, context::OFFSET_DR6, self.dr6);
-        write_u64(&mut data, context::OFFSET_DR7, self.dr7);
-        write_u64(&mut data, context::OFFSET_CR3, directory_table_base);
-        write_u32(&mut data, context::OFFSET_MX_CSR, self.mxcsr);
+        write_u64(&mut data, amd64::OFFSET_RAX, self.rax);
+        write_u64(&mut data, amd64::OFFSET_RBX, self.rbx);
+        write_u64(&mut data, amd64::OFFSET_RCX, self.rcx);
+        write_u64(&mut data, amd64::OFFSET_RDX, self.rdx);
+        write_u64(&mut data, amd64::OFFSET_RSI, self.rsi);
+        write_u64(&mut data, amd64::OFFSET_RDI, self.rdi);
+        write_u64(&mut data, amd64::OFFSET_RBP, self.rbp);
+        write_u64(&mut data, amd64::OFFSET_RSP, self.rsp);
+        write_u64(&mut data, amd64::OFFSET_R8, self.r8);
+        write_u64(&mut data, amd64::OFFSET_R9, self.r9);
+        write_u64(&mut data, amd64::OFFSET_R10, self.r10);
+        write_u64(&mut data, amd64::OFFSET_R11, self.r11);
+        write_u64(&mut data, amd64::OFFSET_R12, self.r12);
+        write_u64(&mut data, amd64::OFFSET_R13, self.r13);
+        write_u64(&mut data, amd64::OFFSET_R14, self.r14);
+        write_u64(&mut data, amd64::OFFSET_R15, self.r15);
+        write_u64(&mut data, amd64::OFFSET_RIP, self.rip);
+        write_u32(&mut data, amd64::OFFSET_EFLAGS, self.eflags);
+        write_u16(&mut data, amd64::OFFSET_SEG_CS, self.cs);
+        write_u16(&mut data, amd64::OFFSET_SEG_DS, self.ds);
+        write_u16(&mut data, amd64::OFFSET_SEG_ES, self.es);
+        write_u16(&mut data, amd64::OFFSET_SEG_FS, self.fs);
+        write_u16(&mut data, amd64::OFFSET_SEG_GS, self.gs);
+        write_u16(&mut data, amd64::OFFSET_SEG_SS, self.ss);
+        write_u64(&mut data, amd64::OFFSET_DR0, self.dr0);
+        write_u64(&mut data, amd64::OFFSET_DR1, self.dr1);
+        write_u64(&mut data, amd64::OFFSET_DR2, self.dr2);
+        write_u64(&mut data, amd64::OFFSET_DR3, self.dr3);
+        write_u64(&mut data, amd64::OFFSET_DR6, self.dr6);
+        write_u64(&mut data, amd64::OFFSET_DR7, self.dr7);
+        write_u64(&mut data, amd64::OFFSET_CR3, directory_table_base);
+        write_u32(&mut data, amd64::OFFSET_MX_CSR, self.mxcsr);
         for (i, &val) in self.xmm.iter().enumerate() {
-            let off = context::OFFSET_XMM0 + i * 16;
+            let off = amd64::OFFSET_XMM0 + i * 16;
             data[off..off + 16].copy_from_slice(&val.to_le_bytes());
         }
         // Keep the buffer symmetric with from_bytes: PRCB-sourced raw CONTEXT
         // copies carry these, so the header-context buffer must too.
-        write_u64(&mut data, context::OFFSET_DEBUG_CONTROL, self.debug_control);
+        write_u64(&mut data, amd64::OFFSET_DEBUG_CONTROL, self.debug_control);
         write_u64(
             &mut data,
-            context::OFFSET_LAST_BRANCH_TO_RIP,
+            amd64::OFFSET_LAST_BRANCH_TO_RIP,
             self.last_branch_to_rip,
         );
         write_u64(
             &mut data,
-            context::OFFSET_LAST_BRANCH_FROM_RIP,
+            amd64::OFFSET_LAST_BRANCH_FROM_RIP,
             self.last_branch_from_rip,
         );
         write_u64(
             &mut data,
-            context::OFFSET_LAST_EXCEPTION_TO_RIP,
+            amd64::OFFSET_LAST_EXCEPTION_TO_RIP,
             self.last_exception_to_rip,
         );
         write_u64(
             &mut data,
-            context::OFFSET_LAST_EXCEPTION_FROM_RIP,
+            amd64::OFFSET_LAST_EXCEPTION_FROM_RIP,
             self.last_exception_from_rip,
         );
 
@@ -402,7 +467,7 @@ impl DmpContext {
 /// Clamp the untrusted header's processor count so a malformed dump can't
 /// drive an unbounded per-CPU register-buffer allocation.
 pub fn clamp_processors(n: u32) -> u32 {
-    n.clamp(1, u32::from(cpu_state::MAX_PROCESSORS))
+    n.clamp(1, u32::from(MAX_PROCESSORS))
 }
 
 #[derive(Debug, Clone)]
@@ -416,7 +481,6 @@ pub struct DmpInfo {
     pub is_triage: bool,
     pub ps_loaded_module_list: u64,
     pub debugger_data_block: Option<u64>,
-    pub ps_active_process_head: u64,
     pub triage_drivers: Vec<TriageDriver>,
     pub exception: Option<DmpException>,
     pub system_info: Option<DmpSystemInfo>,
@@ -440,17 +504,6 @@ impl DmpInfo {
         let machine = self.system_info.as_ref()?.machine_image_type;
         Arch::from_machine_type(u16::try_from(machine).ok()?)
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct TriageCrashInfo {
-    pub process_name: Option<String>,
-    pub process_id: Option<u64>,
-    pub parent_process_id: Option<u64>,
-    pub exit_status: Option<i32>,
-    pub create_time: Option<u64>,
-    pub thread_id: Option<u64>,
-    pub thread_exit_status: Option<i32>,
 }
 
 pub struct DmpMem {
@@ -570,12 +623,12 @@ impl DmpMem {
             directory_table_base: hdr.directory_table_base,
             bug_check_code: hdr.bug_check_code,
             bug_check_parameters: hdr.bug_check_code_parameters,
-            // Resolved by DmpBackend once guest virtual-memory translation is available.
+            // Read from KDBG by the session once guest virtual-memory
+            // translation is available.
             offset_prcb_context: None,
             number_processors: clamp_processors(hdr.number_processors),
             is_triage: false,
             ps_loaded_module_list: hdr.ps_loaded_module_list,
-            ps_active_process_head: hdr.ps_active_process_head,
             debugger_data_block: (hdr.kd_debugger_data_block != 0)
                 .then_some(hdr.kd_debugger_data_block),
             triage_drivers: Vec::new(),
@@ -713,13 +766,11 @@ pub struct DmpBackend {
     per_cpu_registers: Vec<Vec<u8>>,
     current_processor: usize,
     number_processors: u32,
-    prcb_context_offset: Option<u16>,
     // The dump header's CONTEXT record (the crashing CPU's) and DTB, kept so
     // the crash context can be re-seated after the PRCB pass (see
     // `select_crash_processor`)
     header_context: DmpContext,
     directory_table_base: u64,
-    triage_crash_info: Option<TriageCrashInfo>,
     debugger_data_hint: Option<DebuggerDataCandidate>,
     /// Dump-integrity and per-CPU context warnings raised while opening,
     /// drained by the session through [`DebugBackend::take_notices`].
@@ -730,9 +781,9 @@ impl DmpBackend {
     pub fn new(info: &DmpInfo) -> Self {
         let is_arm64 = info.context.is_arm64();
         let register_map = if is_arm64 {
-            context_arm64::build_register_map()
+            arm64::build_register_map()
         } else {
-            context::build_register_map()
+            amd64::build_register_map()
         };
         let n = info.number_processors.max(1) as usize;
 
@@ -742,14 +793,14 @@ impl DmpBackend {
         per_cpu.push(cpu0_data);
         for _ in 1..n {
             let mut data = if is_arm64 {
-                vec![0u8; context_arm64::REGISTER_BUFFER_SIZE]
+                vec![0u8; arm64::REGISTER_BUFFER_SIZE]
             } else {
-                vec![0u8; context::REGISTER_BUFFER_SIZE]
+                vec![0u8; amd64::REGISTER_BUFFER_SIZE]
             };
             let dtb_offset = if is_arm64 {
-                context_arm64::OFFSET_CR3
+                arm64::OFFSET_CR3
             } else {
-                context::OFFSET_CR3
+                amd64::OFFSET_CR3
             };
             data[dtb_offset..dtb_offset + 8]
                 .copy_from_slice(&info.directory_table_base.to_le_bytes());
@@ -761,7 +812,6 @@ impl DmpBackend {
             per_cpu_registers: per_cpu,
             current_processor: 0,
             number_processors: info.number_processors,
-            prcb_context_offset: info.offset_prcb_context,
             header_context: info.context.clone(),
             directory_table_base: info.directory_table_base,
             debugger_data_hint: info
@@ -770,7 +820,6 @@ impl DmpBackend {
                     address: VirtAddr(address),
                     source: MetadataSource::DumpHeader,
                 }),
-            triage_crash_info: None,
             notices: (!info.triage_signature_valid)
                 .then(|| {
                     Notice::warning(
@@ -787,104 +836,6 @@ impl DmpBackend {
         ctx.to_register_buffer(directory_table_base)
     }
 
-    fn read_prcb_contexts(&mut self, target: &Target, prcb_ctx_offset: u16) -> Result<()> {
-        let memory = target.guest()?.ntoskrnl.memory();
-        self.read_prcb_contexts_with(target, context::CONTEXT_SIZE, "PRCB", |prcb| {
-            memory.read(prcb + u64::from(prcb_ctx_offset))
-        })
-    }
-
-    fn read_prcb_contexts_with<F>(
-        &mut self,
-        target: &Target,
-        context_size: usize,
-        context_label: &str,
-        context_pointer: F,
-    ) -> Result<()>
-    where
-        F: Fn(VirtAddr) -> Result<VirtAddr>,
-    {
-        let memory = target.guest()?.ntoskrnl.memory();
-        for i in 0..self.per_cpu_registers.len() {
-            let index = u16::try_from(i).map_err(|_| {
-                Error::DebugInfo(format!("processor index {i} exceeds the supported bound"))
-            })?;
-            let prcb = match cpu_state::kprcb_for_processor(target, index) {
-                Ok(prcb) => prcb,
-                Err(error) => {
-                    self.notices.push(Notice::warning(format!(
-                        "KiProcessorBlock[{i}] unavailable: {error}"
-                    )));
-                    continue;
-                }
-            };
-            let context_ptr = match context_pointer(prcb) {
-                Ok(context_ptr) if !context_ptr.is_zero() => context_ptr,
-                Ok(_) => {
-                    self.notices.push(Notice::warning(format!(
-                        "PRCB[{i}] Context pointer is null, skipping"
-                    )));
-                    continue;
-                }
-                Err(error) => {
-                    self.notices.push(Notice::warning(format!(
-                        "failed to read {context_label}[{i}] context pointer: {error}"
-                    )));
-                    continue;
-                }
-            };
-
-            let mut ctx_buf = vec![0u8; context_size];
-            if let Err(error) = memory.read_bytes(context_ptr, &mut ctx_buf) {
-                self.notices.push(Notice::warning(format!(
-                    "failed to read {context_label}[{i}] context: {error}"
-                )));
-                continue;
-            }
-            self.per_cpu_registers[i][..context_size].copy_from_slice(&ctx_buf);
-        }
-        Ok(())
-    }
-
-    fn arm64_prcb_context_offset(target: &Target) -> Result<u64> {
-        let symbols = &target.symbols;
-        let prcb = symbols
-            .find_type_across_modules(target.kernel_dtb(), "_KPRCB")
-            .ok_or_else(|| Error::StructNotFound("_KPRCB".into()))?;
-        let processor_state = prcb.field("ProcessorState")?;
-        let state_name = match &processor_state.type_data {
-            ParsedType::Struct(name) | ParsedType::Union(name) => name,
-            other => {
-                return Err(Error::FieldTypeMismatch(
-                    format!("ProcessorState ({other})"),
-                    "struct".into(),
-                ));
-            }
-        };
-        let state = symbols
-            .find_type_across_modules(target.kernel_dtb(), state_name)
-            .ok_or_else(|| Error::StructNotFound(state_name.clone()))?;
-        let context_frame = state.field("ContextFrame")?;
-        let offset = processor_state.offset as u64 + context_frame.offset as u64;
-        let context_end = offset
-            .checked_add(context_arm64::CONTEXT_SIZE as u64)
-            .ok_or_else(|| Error::DebugInfo("ARM64 PRCB ContextFrame offset overflow".into()))?;
-        if context_end > prcb.size as u64 {
-            return Err(Error::DebugInfo(format!(
-                "ARM64 PRCB ContextFrame at {offset:#x} exceeds _KPRCB size {:#x}",
-                prcb.size
-            )));
-        }
-        Ok(offset)
-    }
-
-    fn read_arm64_prcb_contexts(&mut self, target: &Target) -> Result<()> {
-        let context_offset = Self::arm64_prcb_context_offset(target)?;
-        self.read_prcb_contexts_with(target, context_arm64::CONTEXT_SIZE, "ARM64 PRCB", |prcb| {
-            Ok(prcb + context_offset)
-        })
-    }
-
     /// Select the bugchecking CPU by matching the header CONTEXT against the
     /// per-CPU PRCB contexts; with no match, re-seat the header context on CPU 0.
     fn select_crash_processor(&mut self) {
@@ -895,13 +846,11 @@ impl DmpBackend {
 
         let matches_header = |regs: &Vec<u8>| {
             if self.header_context.is_arm64() {
-                read_u64(regs, context_arm64::OFFSET_PC)
-                    == self.header_context.instruction_pointer()
-                    && read_u64(regs, context_arm64::OFFSET_SP)
-                        == self.header_context.stack_pointer()
+                read_u64(regs, arm64::OFFSET_PC) == self.header_context.instruction_pointer()
+                    && read_u64(regs, arm64::OFFSET_SP) == self.header_context.stack_pointer()
             } else {
-                read_u64(regs, context::OFFSET_RIP) == self.header_context.instruction_pointer()
-                    && read_u64(regs, context::OFFSET_RSP) == self.header_context.stack_pointer()
+                read_u64(regs, amd64::OFFSET_RIP) == self.header_context.instruction_pointer()
+                    && read_u64(regs, amd64::OFFSET_RSP) == self.header_context.stack_pointer()
             }
         };
         match self.per_cpu_registers.iter().position(matches_header) {
@@ -914,79 +863,30 @@ impl DmpBackend {
         }
     }
 
-    fn read_u64_field(snap: &[u8], layout: &TypeInfo, field: &str) -> Option<u64> {
-        get_u64(snap, layout.field_offset(field).ok()? as usize)
+    /// The number of processors this dump holds a register context for.
+    pub fn processor_count(&self) -> usize {
+        self.per_cpu_registers.len()
     }
 
-    fn read_i32_field(snap: &[u8], layout: &TypeInfo, field: &str) -> Option<i32> {
-        get_u32(snap, layout.field_offset(field).ok()? as usize).map(u32::cast_signed)
-    }
-
-    fn extract_triage_crash_info(target: &Target, info: &DmpInfo) -> Option<TriageCrashInfo> {
-        let proc_snap = info.triage_process_snapshot.as_deref()?;
-        let dtb = target.kernel_dtb();
-
-        let eprocess_layout = target.symbols.find_type_across_modules(dtb, "_EPROCESS")?;
-
-        let process_name = eprocess_layout
-            .field_offset("ImageFileName")
-            .ok()
-            .and_then(|off| {
-                let off = off as usize;
-                if off + 15 <= proc_snap.len() {
-                    let name_buf = &proc_snap[off..off + 15];
-                    let end = name_buf.iter().position(|&c| c == 0).unwrap_or(15);
-                    let s = String::from_utf8_lossy(&name_buf[..end]).to_string();
-                    if s.is_empty() { None } else { Some(s) }
-                } else {
-                    None
-                }
-            });
-
-        let process_id = Self::read_u64_field(proc_snap, &eprocess_layout, "UniqueProcessId");
-        let parent_process_id =
-            Self::read_u64_field(proc_snap, &eprocess_layout, "InheritedFromUniqueProcessId");
-        let exit_status = Self::read_i32_field(proc_snap, &eprocess_layout, "ExitStatus");
-        let create_time = Self::read_u64_field(proc_snap, &eprocess_layout, "CreateTime");
-
-        let (thread_id, thread_exit_status) = info
-            .triage_thread_snapshot
-            .as_deref()
-            .and_then(|thread_snap| {
-                let ethread_layout = target.symbols.find_type_across_modules(dtb, "_ETHREAD")?;
-                let cid_off = ethread_layout.field_offset("Cid").ok()? as usize;
-                let client_id_layout =
-                    target.symbols.find_type_across_modules(dtb, "_CLIENT_ID")?;
-                let ut_off = client_id_layout.field_offset("UniqueThread").ok()? as usize;
-                let tid = get_u64(thread_snap, cid_off + ut_off);
-                let exit_st = Self::read_i32_field(thread_snap, &ethread_layout, "ExitStatus");
-                Some((tid, exit_st))
-            })
-            .unwrap_or((None, None));
-
-        Some(TriageCrashInfo {
-            process_name,
-            process_id,
-            parent_process_id,
-            exit_status,
-            create_time,
-            thread_id,
-            thread_exit_status,
-        })
-    }
-
-    pub fn triage_crash_info(&self) -> Option<&TriageCrashInfo> {
-        self.triage_crash_info.as_ref()
-    }
-
-    /// Full dumps need guest translation to read KDBG; triage dumps resolve
-    /// this from their embedded copy at parse time.
-    fn resolve_prcb_context_offset(&self, target: &Target) -> Option<u16> {
-        let kdbg = self.debugger_data_hint?.address;
-        let memory = target.guest().ok()?.ntoskrnl.memory();
-        let field = offset_of!(KdDebuggerData64, offset_prcb_context) as u64;
-        let offset: u16 = memory.read(kdbg + field).ok()?;
-        (offset > 0).then_some(offset)
+    /// Take each processor's register context, by index, as the kernel saved
+    /// it in the processor's PRCB, with warnings for those that could not be
+    /// read, and select the processor that bugchecked. The dump header holds
+    /// only the crashing processor's context, and finding the others takes
+    /// the kernel's symbols, so the session reads them once it has located
+    /// the kernel. A `None` context keeps what the processor had.
+    pub fn set_processor_contexts(
+        &mut self,
+        contexts: Vec<Option<Vec<u8>>>,
+        warnings: Vec<String>,
+    ) {
+        for (registers, context) in self.per_cpu_registers.iter_mut().zip(contexts) {
+            if let Some(context) = context {
+                registers[..context.len()].copy_from_slice(&context);
+            }
+        }
+        self.notices
+            .extend(warnings.into_iter().map(Notice::warning));
+        self.select_crash_processor();
     }
 
     fn unsupported(operation: &str) -> Error {
@@ -1006,38 +906,6 @@ impl DebugBackend for DmpBackend {
     fn take_notices(&mut self) -> Vec<Notice> {
         std::mem::take(&mut self.notices)
     }
-    fn initialize_from_target(&mut self, target: &Target) {
-        if self.header_context.is_arm64() {
-            if let Err(e) = self.read_arm64_prcb_contexts(target) {
-                self.notices.push(Notice::warning(format!(
-                    "could not read ARM64 PRCB ContextFrame contexts from dump: {e}"
-                )));
-            }
-            self.select_crash_processor();
-        } else {
-            let offset = self
-                .prcb_context_offset
-                .or_else(|| self.resolve_prcb_context_offset(target));
-            if let Some(offset) = offset {
-                self.prcb_context_offset = Some(offset);
-                if let Err(e) = self.read_prcb_contexts(target, offset) {
-                    self.notices.push(Notice::warning(format!(
-                        "could not read PRCB contexts from dump: {e}"
-                    )));
-                }
-                self.select_crash_processor();
-            }
-        }
-
-        if let Some(info) = target.phys.dmp_info() {
-            self.triage_crash_info = Self::extract_triage_crash_info(target, info);
-        }
-    }
-
-    fn triage_crash_info(&self) -> Option<&TriageCrashInfo> {
-        self.triage_crash_info.as_ref()
-    }
-
     fn target_debugger_data_hint(&mut self) -> Result<Option<DebuggerDataCandidate>> {
         Ok(self.debugger_data_hint)
     }
@@ -1157,19 +1025,18 @@ mod tests {
 
     #[test]
     fn arm64_context_header_round_trips_registers_and_debug_state() {
-        let mut raw = vec![0u8; context_arm64::CONTEXT_SIZE];
-        raw[context_arm64::OFFSET_CPSR..context_arm64::OFFSET_CPSR + 4]
+        let mut raw = vec![0u8; arm64::CONTEXT_SIZE];
+        raw[arm64::OFFSET_CPSR..arm64::OFFSET_CPSR + 4]
             .copy_from_slice(&0x6000_03c5u32.to_le_bytes());
-        raw[context_arm64::OFFSET_X0..context_arm64::OFFSET_X0 + 8]
+        raw[arm64::OFFSET_X0..arm64::OFFSET_X0 + 8]
             .copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
-        raw[context_arm64::OFFSET_SP..context_arm64::OFFSET_SP + 8]
+        raw[arm64::OFFSET_SP..arm64::OFFSET_SP + 8]
             .copy_from_slice(&0xffff_0000_1234_5000u64.to_le_bytes());
-        raw[context_arm64::OFFSET_PC..context_arm64::OFFSET_PC + 8]
+        raw[arm64::OFFSET_PC..arm64::OFFSET_PC + 8]
             .copy_from_slice(&0xffff_0000_0000_1000u64.to_le_bytes());
-        raw[context_arm64::OFFSET_BCR0..context_arm64::OFFSET_BCR0 + 4]
+        raw[arm64::OFFSET_BCR0..arm64::OFFSET_BCR0 + 4]
             .copy_from_slice(&0x0000_e9e1u32.to_le_bytes());
-        raw[context_arm64::OFFSET_WVR0..context_arm64::OFFSET_WVR0 + 8]
-            .copy_from_slice(&0x4000u64.to_le_bytes());
+        raw[arm64::OFFSET_WVR0..arm64::OFFSET_WVR0 + 8].copy_from_slice(&0x4000u64.to_le_bytes());
         let context = DmpContext::from_arm64_bytes(&raw);
         let arm = context.arm64.as_ref().unwrap();
         assert_eq!(arm.x[0], 0x1122_3344_5566_7788);
@@ -1178,7 +1045,7 @@ mod tests {
         assert_eq!(arm.bcr[0], 0x0000_e9e1);
         assert_eq!(arm.wvr[0], 0x4000);
 
-        let map = context_arm64::build_register_map();
+        let map = arm64::build_register_map();
         let data = context.to_register_buffer(0x1234_5000);
         assert_eq!(map.read_u64("x0", &data).unwrap(), arm.x[0]);
         assert_eq!(map.read_u64("pc", &data).unwrap(), arm.pc);
@@ -1197,7 +1064,6 @@ mod tests {
             number_processors: 1,
             is_triage: false,
             ps_loaded_module_list: 0,
-            ps_active_process_head: 0,
             debugger_data_block: None,
             triage_drivers: Vec::new(),
             exception: None,
@@ -1360,8 +1226,8 @@ mod tests {
             } else {
                 (0xfffff800aaaa0000 + i as u64, 0xfffff800bbbb0000 + i as u64)
             };
-            regs[context::OFFSET_RIP..context::OFFSET_RIP + 8].copy_from_slice(&rip.to_le_bytes());
-            regs[context::OFFSET_RSP..context::OFFSET_RSP + 8].copy_from_slice(&rsp.to_le_bytes());
+            regs[amd64::OFFSET_RIP..amd64::OFFSET_RIP + 8].copy_from_slice(&rip.to_le_bytes());
+            regs[amd64::OFFSET_RSP..amd64::OFFSET_RSP + 8].copy_from_slice(&rsp.to_le_bytes());
         }
 
         backend.select_crash_processor();
@@ -1376,7 +1242,7 @@ mod tests {
         let mut backend = DmpBackend::new(&info);
 
         for regs in backend.per_cpu_registers.iter_mut() {
-            regs[context::OFFSET_RIP..context::OFFSET_RIP + 8]
+            regs[amd64::OFFSET_RIP..amd64::OFFSET_RIP + 8]
                 .copy_from_slice(&0xfffff800cccc0000u64.to_le_bytes());
         }
 

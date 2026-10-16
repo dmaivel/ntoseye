@@ -2,10 +2,9 @@
 //! that read it and resolve its symbols and types, and [`SymbolRef`].
 
 use crate::{
-    backend::MemoryOps,
     error::{Error, Result},
     layout::Types,
-    memory::AddressSpace,
+    memory::{AddressSpace, MemoryOps},
     pe::{HeaderPage, PeImage, read_pe_header_page, read_pe_image, size_of_image},
     phys::PhysMem,
     symbols::SymbolStore,
@@ -154,15 +153,6 @@ impl Image {
             .symbol_rva(guid, &name)?
             .ok_or(Error::SymbolNotFound(name))?;
         Ok(SymbolRef { obj: self, rva })
-    }
-
-    pub fn closest_symbol(&self, address: VirtAddr) -> Result<(String, u32)> {
-        let guid = self.guid.ok_or(Error::ExpectedSymbols)?;
-        let result = self
-            .symbols
-            .closest_symbol(guid, self.base_address, address)
-            .ok_or(Error::UnknownAddress(address))?;
-        Ok(result)
     }
 
     /// The module's headers, read once from guest memory. Directories past

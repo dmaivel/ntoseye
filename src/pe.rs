@@ -3,12 +3,12 @@
 //! mapping an on-disk image file to its in-memory layout.
 
 use crate::{
-    backend::MemoryOps,
     bytes::{get_u16, get_u32, read_u16, read_u32},
     error::{Error, Result},
-    memory::{self, PAGE_SIZE},
+    memory::{self, MemoryOps, PAGE_SIZE},
     types::*,
 };
+use ntoseye_macros::record;
 use pelite::{
     PeFile, PeView, Wrap,
     image::{IMAGE_DIRECTORY_ENTRY_EXPORT, IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG},
@@ -54,35 +54,63 @@ impl AsRef<[u8]> for HeaderPage {
     }
 }
 
-/// One export recovered from a module's mapped PE export directory.
+/// One PE export (`Module.exports`, `!dh -e`), recovered from a module's
+/// mapped export directory. An export has a name or only an ordinal, and a
+/// forwarder has no address.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleExportInfo {
-    pub name: Option<String>,
     pub ordinal: u32,
+    /// `None` for an ordinal-only export.
+    pub name: Option<String>,
+    /// The RVA of the export. `None` for a forwarder.
+    #[record(hex)]
+    pub rva: Option<u32>,
+    /// The mapped address. `None` for a forwarder.
     pub address: Option<VirtAddr>,
+    /// The target of a forwarder (`OTHER.Function`).
     pub forwarder: Option<String>,
 }
 
 /// `IMAGE_EXPORT_DIRECTORY` and the DLL name it points at.
+#[record(impl)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportDirectory {
-    pub characteristics: u32,
-    pub time_date_stamp: u32,
-    pub version: (u16, u16),
+    /// The DLL name that the directory records.
     pub name: String,
+    #[record(hex)]
+    pub characteristics: u32,
+    #[record(hex)]
+    pub time_date_stamp: u32,
+    #[record(skip)]
+    pub version: (u16, u16),
     pub ordinal_base: u32,
     pub number_of_functions: u32,
     pub number_of_names: u32,
+    #[record(hex)]
     pub address_of_functions: u32,
+    #[record(hex)]
     pub address_of_names: u32,
+    #[record(hex)]
     pub address_of_name_ordinals: u32,
 }
 
-/// A mapped image's export directory and the exports it lists.
+#[record]
+impl ExportDirectory {
+    /// `major.minor`.
+    #[record(getter, rename = "version")]
+    pub fn version_text(&self) -> String {
+        headers::version_text(self.version)
+    }
+}
+
+/// A mapped image's export directory and the exports it lists (`!dh -e`).
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageExports {
-    /// `None` when the image exports nothing.
+    /// `None` if the image has no exports.
     pub directory: Option<ExportDirectory>,
+    #[record(rename = "entries")]
     pub exports: Vec<ModuleExportInfo>,
 }
 
@@ -311,11 +339,6 @@ pub struct CodeLayout {
 }
 
 impl CodeLayout {
-    /// The machine the image's header names.
-    pub fn machine(&self) -> CodeMachine {
-        self.machine
-    }
-
     pub fn machine_at(&self, rva: u32) -> CodeMachine {
         let index = self.ranges.partition_point(|&(start, _, _)| start <= rva);
         index
@@ -543,10 +566,10 @@ pub fn read_pe_exports(image: &PeImage, base: VirtAddr) -> Result<ImageExports> 
     let data = read_image_bytes(image, directory_rva, DIRECTORY_SIZE, "export directory")?;
     let u32_at = |offset| read_u32(&data, offset);
     let directory = ExportDirectory {
+        name: read_image_c_string(image, u32_at(12), "export DLL name")?,
         characteristics: u32_at(0),
         time_date_stamp: u32_at(4),
         version: (read_u16(&data, 8), read_u16(&data, 10)),
-        name: read_image_c_string(image, u32_at(12), "export DLL name")?,
         ordinal_base: u32_at(16),
         number_of_functions: u32_at(20),
         number_of_names: u32_at(24),
@@ -609,21 +632,22 @@ pub fn read_pe_exports(image: &PeImage, base: VirtAddr) -> Result<ImageExports> 
         let forwarder = (function_rva >= directory_rva && function_rva < forwarder_end)
             .then(|| read_image_c_string(image, function_rva, "export forwarder"))
             .transpose()?;
-        let address = forwarder
-            .is_none()
-            .then_some(VirtAddr(base.0.saturating_add(u64::from(function_rva))));
+        let rva = forwarder.is_none().then_some(function_rva);
+        let address = rva.map(|rva| VirtAddr(base.0.saturating_add(u64::from(rva))));
         let names = names_by_function.remove(&index).unwrap_or_default();
         if names.is_empty() {
             exports.push(ModuleExportInfo {
-                name: None,
                 ordinal,
+                name: None,
+                rva,
                 address,
                 forwarder,
             });
         } else {
             exports.extend(names.into_iter().map(|name| ModuleExportInfo {
-                name: Some(name),
                 ordinal,
+                name: Some(name),
+                rva,
                 address,
                 forwarder: forwarder.clone(),
             }));
@@ -878,9 +902,8 @@ mod tests {
         IMAGE_BLOCK, ModuleExportInfo, PE_HEADER_PROBE, PeImage, read_code_layout,
         read_image_c_string, read_pe_exports, read_pe_header_page, read_pe_image,
     };
-    use crate::backend::MemoryOps;
     use crate::error::{Error, Result};
-    use crate::memory::{AddressSpace, DTB_IDENTITY};
+    use crate::memory::{AddressSpace, DTB_IDENTITY, MemoryOps};
     use crate::types::CodeMachine;
     use crate::types::{PhysAddr, VirtAddr};
     use std::sync::Arc;
@@ -1248,18 +1271,21 @@ mod tests {
                 ModuleExportInfo {
                     name: Some("Alpha".into()),
                     ordinal: 5,
+                    rva: Some(0x1010),
                     address: Some(base + 0x1010u64),
                     forwarder: None,
                 },
                 ModuleExportInfo {
                     name: Some("Forwarded".into()),
                     ordinal: 6,
+                    rva: None,
                     address: None,
                     forwarder: Some("OTHER.Func".into()),
                 },
                 ModuleExportInfo {
                     name: None,
                     ordinal: 7,
+                    rva: Some(0x1020),
                     address: Some(base + 0x1020u64),
                     forwarder: None,
                 },

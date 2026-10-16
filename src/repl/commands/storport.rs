@@ -6,264 +6,408 @@
 
 use std::fmt::Display;
 
+use ntoseye_macros::{command, grammar};
 use tabled::builder::Builder;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
+use crate::session::Session;
 use crate::target::Target;
-use crate::target::classpnp::{ClassDevice, ClassDeviceDetail, ClassDeviceList};
+use crate::target::classpnp::{ClassDevice, ClassDeviceDetail, ClassDevices};
 use crate::target::etw::format_filetime_precise;
-use crate::target::srb::{Srb, srb_flag_names, srb_function_name, srb_status_text};
+use crate::target::srb::{Srb, srb_function_name, srb_status_text};
 use crate::target::storport::{
-    AdapterEntry, StorAdapter, StorEnum, StorLog, StorLogEntry, StorPortDrivers, StorUnit,
-    UnitEntry, adapter_verdict, log_request, unit_verdict,
+    StorAdapter, StorAdapterEntry, StorDrivers, StorEnumValue, StorLog, StorLogEntry, StorUnit,
+    StorUnitEntry, log_request,
 };
 use crate::target::virtio_request::{scsi_command, scsi_status};
 use crate::types::VirtAddr;
 use crate::ui;
 
-repl_command! {
-    cmd_storagekd_storadapter;
-    names: ["!storagekd.storadapter"],
-    usage: "!storagekd.storadapter [<adapter>]",
-    summary: "List the StorPort adapters, or show one adapter and its units.",
-    details: "Without an argument, walks storport's driver list (storport!RaidpPortData) and each driver's adapters, and shows one line per adapter: the miniport driver, the adapter extension (_RAID_ADAPTER_EXTENSION), the FDO, the PnP state, the port device name, the PCI location, the number of units, and the I/O state. With the address of an adapter extension or of its FDO, shows the adapter: its driver, device objects, PnP and power state, the miniport's own device extension (the HwDeviceExtension that StorPort passes to every Hw routine, which you read with dt and the miniport's private PDB) and its size, the flags (_FLAGS, _FLAGS2), the paging and crash-dump path counts, each I/O gateway's outstanding and waiting requests, and each unit with its bus/target/LUN, PDO, state, inquiry product, and I/O state. The command needs storport's PDB. It stops each list at the head, a null or repeated link, or 256 drivers or adapters, and says why it stopped early. Adapters of storport's native NVMe path are listed but not decoded.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_storagekd_storunit;
-    names: ["!storagekd.storunit"],
-    usage: "!storagekd.storunit <unit>",
-    summary: "Show a StorPort logical unit, its queue, and the requests the miniport holds.",
-    details: "Give the address of a unit extension (_RAID_UNIT_EXTENSION), as !storagekd.storadapter lists them, or of the unit's PDO. Shows the unit's bus/target/LUN, the inquiry vendor, product and revision, the adapter, the PnP and power state, the flags, the miniport's per-unit extension (StorPortGetLogicalUnit), and its device queue: the depth, whether it is frozen or locked, the pause and busy counts, and the requests waiting in storport. Then it lists each request that storport handed to the miniport and has not seen completed, from the unit's per-processor pending queues, with its _EXTENDED_REQUEST_BLOCK, IRP and SRB; use !irp on the IRP. It lists at most 256 requests and says why a list stopped early.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_storagekd_storloglist;
-    names: ["!storagekd.storloglist"],
-    usage: "!storagekd.storloglist <adapter> [<start> [<end>]] [L <count>]",
-    summary: "Show a StorPort adapter's internal log of requests, pauses, and resumes.",
-    details: "Give the address of an adapter extension or of its FDO, as !storagekd.storadapter lists them. StorPort keeps a ring of its last 256 events for each adapter (RaidLogList): requests it builds, starts, and sees completed, pauses and resumes of the adapter and its units, busy and ready notifications, timeouts, resets, and PnP and power IRPs. Each entry shows its number, its time (UTC), the event, and for a request its IRP, SRB, command, and SRB status, or else the four parameters StorPort logged, a code address by symbol. Without a range, the command shows the last 50 entries; <start> shows entries from that number, <start> <end> that range, and L <count> how many.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_storagekd_storlogirp;
-    names: ["!storagekd.storlogirp"],
-    usage: "!storagekd.storlogirp <adapter> <irp>",
-    summary: "Show the entries of a StorPort adapter's log that name an IRP.",
-    details: "Shows the entries of the adapter's internal log, as !storagekd.storloglist shows them, whose request is the IRP you give, or that log it as a parameter: when StorPort built, started, and saw the request completed.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_storagekd_storlogsrb;
-    names: ["!storagekd.storlogsrb"],
-    usage: "!storagekd.storlogsrb <adapter> <srb>",
-    summary: "Show the entries of a StorPort adapter's log that name an SRB.",
-    details: "Shows the entries of the adapter's internal log, as !storagekd.storloglist shows them, whose request carries the SRB you give, or that log it as a parameter.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_storagekd_storsrb;
-    names: ["!storagekd.storsrb"],
-    usage: "!storagekd.storsrb <srb>",
-    summary: "Decode an SRB: its function, status, command, address, data, and sense.",
-    details: "Decodes a STORAGE_REQUEST_BLOCK (an extended SRB, which StorPort, classpnp, and miniports use on Windows 8 and later) or a legacy SCSI_REQUEST_BLOCK with storport's public PDB: the SRB function, the SRB status with QUEUE_FROZEN and AUTOSENSE_VALID, the SCSI status, the command its CDB holds with its LBA and block count, the port, path, target, and LUN, the data buffer and length, the IRP (OriginalRequest), the flags by SRB_FLAGS_ name, the timeout, tag, and priority, the sense data when AUTOSENSE_VALID says it is valid, the class, port, and miniport contexts, and an extended SRB's extended data blocks. An address whose Function and Signature, or Length, are not an SRB's is refused.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_storagekd_storclass;
-    names: ["!storagekd.storclass"],
-    usage: "!storagekd.storclass [<device>]",
-    summary: "List the storage class devices (disks, CD-ROMs), or show one with its requests and errors.",
-    details: "Without an argument, walks classpnp!AllFdosList and shows each class device that classpnp drives for disk.sys, cdrom.sys, and the other class drivers: its FDO, class driver, device number, bus, vendor and product, and how many of its transfer packets are in flight. With the address of an FDO, its device extension, or its private data, shows the device: its identity and serial number, bus, lower device and PDO, capacity and sector size, timeout and retry limit, ErrorCount, each request in flight (a transfer packet that is not on classpnp's free lists) with its IRP, the client's IRP, the SRB, the command, and the retries, and the last 16 errors classpnp logged, each with its age, address, command, SRB and SCSI status, and sense key and code. The command needs the PDB for classpnp.sys.",
-    completion: Expression,
-    target: Kernel,
-}
-
-impl ReplState<'_> {
-    fn cmd_storagekd_storadapter(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(address) = invocation.arg(0) else {
-            match self.ctx.target.storport_drivers() {
-                Ok(drivers) => print_adapters(&drivers),
-                Err(error) => error!("!storagekd.storadapter: {error}"),
-            }
-            return Ok(());
-        };
-        let Some(address) = self.eval_or_report(address) else {
-            return Ok(());
-        };
-        match self.ctx.target.storport_adapter(address) {
-            Ok(adapter) => print_adapter(&adapter),
-            Err(error) => error!("!storagekd.storadapter: {error}"),
-        }
-        Ok(())
+/// List the StorPort adapters, or show one adapter and its units.
+///
+/// Without an argument, walks storport's driver list (storport!RaidpPortData)
+/// and each driver's adapters, and shows one line per adapter: the miniport
+/// driver, the adapter extension (_RAID_ADAPTER_EXTENSION), the FDO, the PnP
+/// state, the port device name, the PCI location, the number of units, and the
+/// I/O state. With the address of an adapter extension or of its FDO, shows the
+/// adapter: its driver, device objects, PnP and power state, the miniport's own
+/// device extension (the HwDeviceExtension that StorPort passes to every Hw
+/// routine, which you read with dt and the miniport's private PDB) and its
+/// size, the flags (_FLAGS, _FLAGS2), the paging and crash-dump path counts,
+/// each I/O gateway's outstanding and waiting requests, and each unit with its
+/// bus/target/LUN, PDO, state, inquiry product, and I/O state. The command
+/// needs storport's PDB. It stops each list at the head, a null or repeated
+/// link, or 256 drivers or adapters, and says why it stopped early. Adapters of
+/// storport's native NVMe path are listed but not decoded.
+#[command(
+    names = ["!storagekd.storadapter"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    forms = [storport_adapters, storport_adapter],
+)]
+fn storport_adapter_command(
+    session: &Session,
+    #[arg(name = "adapter")] address: Option<VirtAddr>,
+) -> Result<StorAdapterOrList> {
+    match address {
+        None => storport_adapters(session).map(StorAdapterOrList::Drivers),
+        Some(address) => storport_adapter(session, address).map(StorAdapterOrList::Adapter),
     }
+    .map_err(|error| Error::DebugInfo(format!("!storagekd.storadapter: {error}")))
+}
 
-    fn cmd_storagekd_storunit(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(address) = invocation.arg(0) else {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        };
-        let Some(address) = self.eval_or_report(address) else {
-            return Ok(());
-        };
-        match self.ctx.target.storport_unit(address) {
-            Ok(unit) => print_unit(&self.ctx.target, &unit),
-            Err(error) => error!("!storagekd.storunit: {error}"),
+/// List StorPort's drivers, their adapters, and their units
+/// (`!storagekd.storadapter`).
+#[command(form_of = storport_adapter_command, python = Inspect)]
+fn storport_adapters(session: &Session) -> Result<StorDrivers> {
+    session.target.storport_drivers()
+}
+
+/// Read the StorPort adapter whose extension or FDO is at `address`
+/// (`!storagekd.storadapter <address>`).
+#[command(form_of = storport_adapter_command, python = Inspect)]
+fn storport_adapter(session: &Session, address: VirtAddr) -> Result<StorAdapter> {
+    session.target.storport_adapter(address)
+}
+
+/// What `!storagekd.storadapter` shows: every driver and its adapters, or
+/// one adapter.
+enum StorAdapterOrList {
+    Drivers(StorDrivers),
+    Adapter(StorAdapter),
+}
+
+impl Render for StorAdapterOrList {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        match self {
+            Self::Drivers(drivers) => print_adapters(drivers),
+            Self::Adapter(adapter) => print_adapter(adapter),
         }
-        Ok(())
     }
+}
 
-    fn cmd_storagekd_storloglist(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        const USAGE: &str = "!storagekd.storloglist <adapter> [<start> [<end>]] [L <count>]";
-        let Some(address) = invocation.arg(0) else {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
+/// Show a StorPort logical unit, its queue, and the requests the miniport
+/// holds.
+///
+/// Give the address of a unit extension (_RAID_UNIT_EXTENSION), as
+/// !storagekd.storadapter lists them, or of the unit's PDO. Shows the unit's
+/// bus/target/LUN, the inquiry vendor, product and revision, the adapter, the
+/// PnP and power state, the flags, the miniport's per-unit extension
+/// (StorPortGetLogicalUnit), and its device queue: the depth, whether it is
+/// frozen or locked, the pause and busy counts, and the requests waiting in
+/// storport. Then it lists each request that storport handed to the miniport
+/// and has not seen completed, from the unit's per-processor pending queues,
+/// with its _EXTENDED_REQUEST_BLOCK, IRP and SRB; use !irp on the IRP. It lists
+/// at most 256 requests and says why a list stopped early.
+#[command(
+    names = ["!storagekd.storunit"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+)]
+fn storport_unit(session: &Session, #[arg(name = "unit")] address: VirtAddr) -> Result<StorUnit> {
+    session
+        .target
+        .storport_unit(address)
+        .map_err(|error| Error::DebugInfo(format!("!storagekd.storunit: {error}")))
+}
+
+impl Render for StorUnit {
+    fn render(&self, repl: &mut ReplState<'_>, (): ()) {
+        print_unit(&repl.ctx.target, self);
+    }
+}
+
+/// Show a StorPort adapter's internal log of requests, pauses, and resumes.
+///
+/// Give the address of an adapter extension or of its FDO, as
+/// !storagekd.storadapter lists them. StorPort keeps a ring of its last 256
+/// events for each adapter (RaidLogList): requests it builds, starts, and sees
+/// completed, pauses and resumes of the adapter and its units, busy and ready
+/// notifications, timeouts, resets, and PnP and power IRPs. Each entry shows
+/// its number, its time (UTC), the event, and for a request its IRP, SRB,
+/// command, and SRB status, or else the four parameters StorPort logged, a code
+/// address by symbol. Without a range, the command shows the last 50 entries;
+/// <start> shows entries from that number, <start> <end> that range, and L
+/// <count> how many.
+#[command(
+    names = ["!storagekd.storloglist"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+)]
+fn storport_log(
+    session: &Session,
+    #[arg(name = "adapter")] address: VirtAddr,
+    #[arg(render, parse = log_range)] range: LogRange,
+) -> Result<StorLog> {
+    session
+        .target
+        .storport_log(address)
+        .map_err(|error| Error::DebugInfo(format!("!storagekd.storloglist: {error}")))
+}
+
+/// The entries `!storagekd.storloglist` shows: up to two entry numbers (a
+/// start, and an end), and a count after `L`.
+#[derive(Debug, Default)]
+struct LogRange {
+    bounds: Vec<u64>,
+    count: Option<u64>,
+}
+
+/// `[<start> [<end>]] [L <count>]`, `L<count>` glued too.
+#[grammar(usage = "[start [end]] [L<count>]", complete = Expression)]
+fn log_range(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<LogRange, ArgError> {
+    let mut range = LogRange::default();
+    while let Some(arg) = cursor.word() {
+        let count_text = match arg.as_ref() {
+            "L" | "l" => match cursor.word() {
+                Some(text) => Some(text),
+                None => {
+                    return Err(ArgError::usage(
+                        cx.name,
+                        format!("{}: L needs a count", cx.name),
+                    ));
+                }
+            },
+            _ => arg
+                .strip_prefix(['L', 'l'])
+                .filter(|rest| !rest.is_empty())
+                .map(|rest| rest.to_string().into()),
         };
-        let Some(address) = self.eval_or_report(address) else {
-            return Ok(());
-        };
-        // The range: up to two entry numbers, and a count after `L`.
-        let mut bounds = Vec::new();
-        let mut count = None;
-        let mut args = invocation.argv[1..].iter().map(|arg| arg.as_ref());
-        while let Some(arg) = args.next() {
-            let count_text = match arg {
-                "L" | "l" => match args.next() {
-                    Some(text) => Some(text),
-                    None => {
-                        error!("!storagekd.storloglist: L needs a count; usage: {USAGE}");
-                        return Ok(());
-                    }
-                },
-                _ => arg.strip_prefix(['L', 'l']).filter(|rest| !rest.is_empty()),
-            };
-            let text = count_text.unwrap_or(arg);
-            let Some(value) = self.eval_or_report(text) else {
-                return Ok(());
-            };
-            if count_text.is_some() {
-                count = Some(value.0);
-            } else if bounds.len() < 2 {
-                bounds.push(value.0);
-            } else {
-                error!("!storagekd.storloglist: unexpected argument {arg}; usage: {USAGE}");
-                return Ok(());
-            }
+        let value = cx.eval(count_text.as_deref().unwrap_or(arg.as_ref()))?;
+        if count_text.is_some() {
+            range.count = Some(value.0);
+        } else if range.bounds.len() < 2 {
+            range.bounds.push(value.0);
+        } else {
+            return Err(ArgError::usage(
+                cx.name,
+                format!("{}: unexpected argument {arg}", cx.name),
+            ));
         }
-        let log = match self.ctx.target.storport_log(address) {
-            Ok(log) => log,
-            Err(error) => {
-                error!("!storagekd.storloglist: {error}");
-                return Ok(());
-            }
-        };
-        let count = count.unwrap_or(DEFAULT_LOG_ENTRIES);
-        let shown: Vec<&StorLogEntry> = match bounds.as_slice() {
+    }
+    Ok(range)
+}
+
+impl Render<LogRange> for StorLog {
+    fn render(&self, repl: &mut ReplState<'_>, range: LogRange) {
+        let count = range.count.unwrap_or(DEFAULT_LOG_ENTRIES);
+        let shown: Vec<&StorLogEntry> = match range.bounds.as_slice() {
             [] => {
-                let skip = log.entries.len().saturating_sub(count as usize);
-                log.entries[skip..].iter().collect()
+                let skip = self.entries.len().saturating_sub(count as usize);
+                self.entries[skip..].iter().collect()
             }
-            [start] => log
+            [start] => self
                 .entries
                 .iter()
                 .filter(|entry| entry.number >= *start)
                 .take(count as usize)
                 .collect(),
-            [start, end, ..] => log
+            [start, end, ..] => self
                 .entries
                 .iter()
                 .filter(|entry| (*start..=*end).contains(&entry.number))
                 .collect(),
         };
-        print_log(&self.ctx.target, &log, &shown, None);
-        Ok(())
+        print_log(&repl.ctx.target, self, &shown, None);
     }
+}
 
-    fn cmd_storagekd_storlogirp(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.storlog_naming(invocation, "IRP")
-    }
+/// Show the entries of a StorPort adapter's log that name an IRP.
+///
+/// Shows the entries of the adapter's internal log, as !storagekd.storloglist
+/// shows them, whose request is the IRP you give, or that log it as a
+/// parameter: when StorPort built, started, and saw the request completed.
+// No SDK method: filter `storport_log(address).entries` by their `irp`
+// (or `parameters`).
+#[command(
+    names = ["!storagekd.storlogirp"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = none,
+)]
+fn storlogirp(session: &Session, adapter: VirtAddr, irp: VirtAddr) -> Result<LogNaming> {
+    log_naming(
+        session,
+        "!storagekd.storlogirp",
+        adapter,
+        LogObject::Irp(irp),
+    )
+}
 
-    fn cmd_storagekd_storlogsrb(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.storlog_naming(invocation, "SRB")
-    }
+/// Show the entries of a StorPort adapter's log that name an SRB.
+///
+/// Shows the entries of the adapter's internal log, as !storagekd.storloglist
+/// shows them, whose request carries the SRB you give, or that log it as a
+/// parameter.
+// No SDK method: filter `storport_log(address).entries` by their `srb`
+// (or `parameters`).
+#[command(
+    names = ["!storagekd.storlogsrb"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = none,
+)]
+fn storlogsrb(session: &Session, adapter: VirtAddr, srb: VirtAddr) -> Result<LogNaming> {
+    log_naming(
+        session,
+        "!storagekd.storlogsrb",
+        adapter,
+        LogObject::Srb(srb),
+    )
+}
 
-    /// The adapter log's entries that name the IRP or SRB `what` the second
-    /// argument gives.
-    fn storlog_naming(&mut self, invocation: CommandInvocation<'_>, what: &str) -> Result<()> {
-        let (Some(adapter), Some(object)) = (invocation.arg(0), invocation.arg(1)) else {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
+/// The IRP or SRB whose log entries `!storagekd.storlogirp` and
+/// `!storagekd.storlogsrb` show.
+#[derive(Debug, Clone, Copy)]
+enum LogObject {
+    Irp(VirtAddr),
+    Srb(VirtAddr),
+}
+
+/// An adapter's log, and the IRP or SRB whose entries to show.
+#[derive(Debug)]
+struct LogNaming {
+    log: StorLog,
+    object: LogObject,
+}
+
+fn log_naming(
+    session: &Session,
+    name: &str,
+    adapter: VirtAddr,
+    object: LogObject,
+) -> Result<LogNaming> {
+    let log = session
+        .target
+        .storport_log(adapter)
+        .map_err(|error| Error::DebugInfo(format!("{name}: {error}")))?;
+    Ok(LogNaming { log, object })
+}
+
+impl Render for LogNaming {
+    fn render(&self, repl: &mut ReplState<'_>, (): ()) {
+        let (what, object) = match self.object {
+            LogObject::Irp(irp) => ("IRP", irp),
+            LogObject::Srb(srb) => ("SRB", srb),
         };
-        let Some(adapter) = self.eval_or_report(adapter) else {
-            return Ok(());
-        };
-        let Some(object) = self.eval_or_report(object) else {
-            return Ok(());
-        };
-        let log = match self.ctx.target.storport_log(adapter) {
-            Ok(log) => log,
-            Err(error) => {
-                error!("{}: {error}", invocation.name);
-                return Ok(());
-            }
-        };
-        let shown: Vec<&StorLogEntry> = log
+        let shown: Vec<&StorLogEntry> = self
+            .log
             .entries
             .iter()
-            .filter(|entry| match log_request(entry) {
-                Some(request) if what == "IRP" => request.irp == object,
-                Some(request) => request.srb == object,
-                None => entry.parameters.contains(&object.0),
+            .filter(|entry| match (log_request(entry), self.object) {
+                (Some(request), LogObject::Irp(irp)) => request.irp == irp,
+                (Some(request), LogObject::Srb(srb)) => request.srb == srb,
+                (None, _) => entry.parameters.contains(&object.0),
             })
             .collect();
-        print_log(&self.ctx.target, &log, &shown, Some((what, object)));
-        Ok(())
+        print_log(&repl.ctx.target, &self.log, &shown, Some((what, object)));
     }
+}
 
-    fn cmd_storagekd_storsrb(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(address) = invocation.arg(0) else {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        };
-        let Some(address) = self.eval_or_report(address) else {
-            return Ok(());
-        };
-        match self.ctx.target.decode_srb(address) {
-            Ok(srb) => print_srb(&srb),
-            Err(error) => error!("!storagekd.storsrb: {error}"),
-        }
-        Ok(())
+/// Decode an SRB: its function, status, command, address, data, and sense.
+///
+/// Decodes a STORAGE_REQUEST_BLOCK (an extended SRB, which StorPort, classpnp,
+/// and miniports use on Windows 8 and later) or a legacy SCSI_REQUEST_BLOCK
+/// with storport's public PDB: the SRB function, the SRB status with
+/// QUEUE_FROZEN and AUTOSENSE_VALID, the SCSI status, the command its CDB holds
+/// with its LBA and block count, the port, path, target, and LUN, the data
+/// buffer and length, the IRP (OriginalRequest), the flags by SRB_FLAGS_ name,
+/// the timeout, tag, and priority, the sense data when AUTOSENSE_VALID says it
+/// is valid, the class, port, and miniport contexts, and an extended SRB's
+/// extended data blocks. An address whose Function and Signature, or Length,
+/// are not an SRB's is refused.
+#[command(
+    names = ["!storagekd.storsrb"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+)]
+fn srb(session: &Session, #[arg(name = "srb")] address: VirtAddr) -> Result<Srb> {
+    session
+        .target
+        .decode_srb(address)
+        .map_err(|error| Error::DebugInfo(format!("!storagekd.storsrb: {error}")))
+}
+
+impl Render for Srb {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_srb(self);
     }
+}
 
-    fn cmd_storagekd_storclass(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(address) = invocation.arg(0) else {
-            match self.ctx.target.classpnp_devices() {
-                Ok(list) => print_class_devices(&list),
-                Err(error) => error!("!storagekd.storclass: {error}"),
-            }
-            return Ok(());
-        };
-        let Some(address) = self.eval_or_report(address) else {
-            return Ok(());
-        };
-        match self.ctx.target.classpnp_device(address) {
-            Ok(detail) => print_class_device(&detail),
-            Err(error) => error!("!storagekd.storclass: {error}"),
+/// List the storage class devices (disks, CD-ROMs), or show one with its
+/// requests and errors.
+///
+/// Without an argument, walks classpnp!AllFdosList and shows each class device
+/// that classpnp drives for disk.sys, cdrom.sys, and the other class drivers:
+/// its FDO, class driver, device number, bus, vendor and product, and how many
+/// of its transfer packets are in flight. With the address of an FDO, its
+/// device extension, or its private data, shows the device: its identity and
+/// serial number, bus, lower device and PDO, capacity and sector size, timeout
+/// and retry limit, ErrorCount, each request in flight (a transfer packet that
+/// is not on classpnp's free lists) with its IRP, the client's IRP, the SRB,
+/// the command, and the retries, and the last 16 errors classpnp logged, each
+/// with its age, address, command, SRB and SCSI status, and sense key and code.
+/// The command needs the PDB for classpnp.sys.
+#[command(
+    names = ["!storagekd.storclass"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    forms = [class_devices, class_device],
+)]
+fn class_device_command(
+    session: &Session,
+    #[arg(name = "device")] address: Option<VirtAddr>,
+) -> Result<ClassDeviceOrList> {
+    match address {
+        None => class_devices(session).map(ClassDeviceOrList::Devices),
+        Some(address) => class_device(session, address).map(ClassDeviceOrList::Device),
+    }
+    .map_err(|error| Error::DebugInfo(format!("!storagekd.storclass: {error}")))
+}
+
+/// List the storage class devices on `classpnp!AllFdosList`
+/// (`!storagekd.storclass`).
+#[command(form_of = class_device_command, python = Inspect)]
+fn class_devices(session: &Session) -> Result<ClassDevices> {
+    session.target.classpnp_devices()
+}
+
+/// Read the class device whose FDO, device extension, or private data
+/// is at `address`, with its requests in flight and its error log
+/// (`!storagekd.storclass <address>`).
+#[command(form_of = class_device_command, python = Inspect)]
+fn class_device(session: &Session, address: VirtAddr) -> Result<ClassDeviceDetail> {
+    session.target.classpnp_device(address)
+}
+
+/// What `!storagekd.storclass` shows: every class device, or one in
+/// detail.
+enum ClassDeviceOrList {
+    Devices(ClassDevices),
+    Device(ClassDeviceDetail),
+}
+
+impl Render for ClassDeviceOrList {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        match self {
+            Self::Devices(list) => print_class_devices(list),
+            Self::Device(detail) => print_class_device(detail),
         }
-        Ok(())
     }
 }
 
@@ -334,10 +478,9 @@ fn print_log(
     let mut builder = Builder::default();
     builder.push_record(["Entry", "Time (UTC)", "Event", "Details"]);
     for entry in shown {
-        let event = match &entry.reason.name {
-            Some(name) => name.strip_prefix("Log").unwrap_or(name).to_string(),
-            None => format!("{:#x}", entry.reason.value),
-        };
+        let event = entry
+            .event()
+            .unwrap_or_else(|| format!("{:#x}", entry.event_value()));
         builder.push_record([
             format!("{:#x}", entry.number),
             format_filetime_precise(entry.time).unwrap_or_else(|| format!("{:#x}", entry.time)),
@@ -403,7 +546,7 @@ fn print_srb(srb: &Srb) {
     if !srb.cdb.is_empty() {
         field("Command", cdb_text(&srb.cdb));
     }
-    if let Some((path, target, lun)) = srb.path_target_lun {
+    if let (Some(path), Some(target), Some(lun)) = (srb.path, srb.target, srb.lun) {
         field(
             "Address",
             match srb.port {
@@ -429,7 +572,7 @@ fn print_srb(srb: &Srb) {
         },
     );
     field("IRP", addr_or_none(srb.original_request));
-    let flags = srb_flag_names(srb.flags);
+    let flags = srb.flag_names();
     field(
         "Flags",
         if flags.is_empty() {
@@ -458,7 +601,9 @@ fn print_srb(srb: &Srb) {
             )
         },
     );
-    if let Some([class, port, miniport]) = srb.contexts {
+    if let (Some(class), Some(port), Some(miniport)) =
+        (srb.class_context, srb.port_context, srb.miniport_context)
+    {
         field(
             "Contexts",
             format!(
@@ -499,50 +644,42 @@ fn class_product(device: &ClassDevice) -> String {
 fn packets_text(device: &ClassDevice) -> String {
     format!(
         "{} in flight, {} free of {}",
-        device.packets.in_flight.len(),
-        device.packets.free,
-        device.packets.total
+        device.in_flight.len(),
+        device.packets_free,
+        device.packets_total
     )
 }
 
-fn print_class_devices(list: &ClassDeviceList) {
+fn print_class_devices(list: &ClassDevices) {
     let mut builder = Builder::default();
     builder.push_record([
         "FDO", "Driver", "Number", "Bus", "Product", "Packets", "Notes",
     ]);
-    let mut problems = Vec::new();
-    for entry in &list.devices {
-        match entry {
-            Ok(device) => {
-                let mut notes = Vec::new();
-                if device.boot_device {
-                    notes.push("boot");
-                }
-                if device.removable {
-                    notes.push("removable");
-                }
-                builder.push_record([
-                    device.fdo.map_or_else(
-                        || ui::muted(&format!("private {:x}", device.private.0)),
-                        |fdo| ui::addr(fdo.0),
-                    ),
-                    device.driver.clone().unwrap_or_else(|| "?".into()),
-                    device
-                        .device_number
-                        .map(|number| number.to_string())
-                        .unwrap_or_default(),
-                    device.bus_type.clone().unwrap_or_default(),
-                    class_product(device),
-                    packets_text(device),
-                    notes.join(" "),
-                ]);
-            }
-            Err((private, error)) => {
-                problems.push(format!("private data {}: {error}", ui::addr(private.0)))
-            }
+    for device in &list.devices {
+        let mut notes = Vec::new();
+        if device.boot_device {
+            notes.push("boot");
         }
+        if device.removable {
+            notes.push("removable");
+        }
+        builder.push_record([
+            device.fdo.map_or_else(
+                || ui::muted(&format!("private {:x}", device.private_data.0)),
+                |fdo| ui::addr(fdo.0),
+            ),
+            device.driver.clone().unwrap_or_else(|| "?".into()),
+            device
+                .device_number
+                .map(|number| number.to_string())
+                .unwrap_or_default(),
+            device.bus_type.clone().unwrap_or_default(),
+            class_product(device),
+            packets_text(device),
+            notes.join(" "),
+        ]);
     }
-    if list.devices.is_empty() {
+    if list.devices.is_empty() && list.unreadable.is_empty() {
         outln!(
             "{}\n",
             ui::muted("no class devices on classpnp!AllFdosList")
@@ -550,8 +687,15 @@ fn print_class_devices(list: &ClassDeviceList) {
     } else {
         print_padded_table(builder);
     }
-    for problem in problems {
-        outln!("{}", ui::muted(&problem));
+    for entry in &list.unreadable {
+        outln!(
+            "{}",
+            ui::muted(&format!(
+                "private data {}: {}",
+                ui::addr(entry.private_data.0),
+                entry.error
+            ))
+        );
     }
     stopped_line("device list", &list.stopped);
 }
@@ -583,7 +727,7 @@ fn print_class_device(detail: &ClassDeviceDetail) {
             device
                 .extension
                 .map_or_else(|| ui::muted("unknown"), |extension| ui::addr(extension.0)),
-            ui::addr(device.private.0)
+            ui::addr(device.private_data.0)
         ),
     );
     if let Some(driver) = &device.driver {
@@ -649,7 +793,7 @@ fn print_class_device(detail: &ClassDeviceDetail) {
     }
     field("Transfer packets", packets_text(device));
     outln!();
-    if device.packets.in_flight.is_empty() {
+    if device.in_flight.is_empty() {
         outln!("{}", ui::muted("no requests in flight"));
     } else {
         outln!("{}", ui::label("Requests in flight"));
@@ -663,7 +807,7 @@ fn print_class_device(detail: &ClassDeviceDetail) {
             "Status",
             "Retries left",
         ]);
-        for packet in &device.packets.in_flight {
+        for packet in &device.in_flight {
             let (command, status) = match &packet.request {
                 Ok(srb) => (
                     scsi_command(&srb.cdb).unwrap_or_default(),
@@ -680,14 +824,14 @@ fn print_class_device(detail: &ClassDeviceDetail) {
                 status,
                 format!(
                     "{}{}",
-                    packet.retries,
+                    packet.retries_left,
                     if packet.timed_out { ", timed out" } else { "" }
                 ),
             ]);
         }
         print_padded_table(builder);
     }
-    for stopped in &device.packets.stopped {
+    for stopped in &device.packets_stopped {
         outln!("{}", ui::muted(&format!("({stopped})")));
     }
     outln!();
@@ -721,19 +865,15 @@ fn print_class_device(detail: &ClassDeviceDetail) {
         if error.unhandled {
             notes.push("unhandled");
         }
-        let (path, target, lun) = error.path_target_lun;
-        // classpnp logs port -1 when it does not know the port.
-        let port = if error.port == u32::MAX {
-            "-".to_string()
-        } else {
-            error.port.to_string()
-        };
+        let port = error
+            .port
+            .map_or_else(|| "-".to_string(), |port| port.to_string());
         builder.push_record([
             error.age_seconds.map_or_else(
                 || format!("tick {:#x}", error.tick),
                 |age| format!("{age:.1} s ago"),
             ),
-            format!("{port}/{path}/{target}/{lun}"),
+            format!("{port}/{}/{}/{}", error.path, error.target, error.lun),
             scsi_command(&error.cdb).unwrap_or_default(),
             srb_status_text(error.srb_status),
             scsi_status(error.scsi_status),
@@ -751,7 +891,7 @@ fn field(label: &str, value: impl Display) {
 
 /// An enum value by name without the prefix its type gives every name
 /// (`DeviceStateWorking` reads `Working`), or its number.
-fn enum_text(value: &StorEnum, prefix: &str) -> String {
+fn enum_text(value: &StorEnumValue, prefix: &str) -> String {
     match &value.name {
         Some(name) => name.strip_prefix(prefix).unwrap_or(name).to_string(),
         None => format!("{:#x}", value.value),
@@ -772,7 +912,7 @@ fn stopped_line(what: &str, stopped: &Option<String>) {
     }
 }
 
-fn print_adapters(drivers: &StorPortDrivers) {
+fn print_adapters(drivers: &StorDrivers) {
     outln!(
         "{} (RaidpPortData {})",
         ui::label("StorPort adapters"),
@@ -791,7 +931,7 @@ fn print_adapters(drivers: &StorPortDrivers) {
                 ui::addr(driver.extension.0)
             ));
         }
-        for AdapterEntry { extension, adapter } in &driver.adapters {
+        for StorAdapterEntry { extension, adapter } in &driver.adapters {
             match adapter {
                 Ok(adapter) => builder.push_record([
                     driver.name.clone(),
@@ -801,7 +941,7 @@ fn print_adapters(drivers: &StorPortDrivers) {
                     adapter.device_name.clone(),
                     location_text(adapter),
                     adapter.units.len().to_string(),
-                    adapter_verdict(adapter),
+                    adapter.io(),
                 ]),
                 Err(why) => problems.push(format!(
                     "{}: adapter {}: {why}",
@@ -907,7 +1047,7 @@ fn print_adapter(adapter: &StorAdapter) {
         "I/O",
         format!(
             "{}  (pause count {}, busy count {})",
-            adapter_verdict(adapter),
+            adapter.io(),
             adapter.pause_count,
             adapter.busy_count
         ),
@@ -943,7 +1083,7 @@ fn product_text(unit: &StorUnit) -> String {
         .join(" ")
 }
 
-fn print_units(units: &[UnitEntry]) {
+fn print_units(units: &[StorUnitEntry]) {
     if units.is_empty() {
         outln!("{}\n", ui::muted("no units"));
         return;
@@ -952,18 +1092,15 @@ fn print_units(units: &[UnitEntry]) {
     let mut builder = Builder::default();
     builder.push_record(["B/T/L", "Unit", "PDO", "State", "Product", "I/O"]);
     let mut problems = Vec::new();
-    for UnitEntry { extension, unit } in units {
+    for StorUnitEntry { extension, unit } in units {
         match unit {
             Ok(unit) => builder.push_record([
-                format!(
-                    "{}/{}/{}",
-                    unit.address.path, unit.address.target, unit.address.lun
-                ),
+                format!("{}/{}/{}", unit.path, unit.target, unit.lun),
                 ui::addr(unit.extension.0),
                 ui::addr_opt(unit.device_object),
                 enum_text(&unit.state, "DeviceState"),
                 product_text(unit),
-                unit_verdict(&unit.queue, unit.requests.len()),
+                unit.io(),
             ]),
             Err(why) => problems.push(format!("unit {}: {why}", ui::addr(extension.0))),
         }
@@ -988,7 +1125,7 @@ fn print_unit(target: &Target, unit: &StorUnit) {
         "Address",
         format!(
             "bus {}, target {}, LUN {}",
-            unit.address.path, unit.address.target, unit.address.lun
+            unit.path, unit.target, unit.lun
         ),
     );
     field("Adapter", ui::addr_opt(unit.adapter));
@@ -1047,7 +1184,7 @@ fn print_unit(target: &Target, unit: &StorUnit) {
             queue.bypass_waiting
         ),
     );
-    field("I/O", unit_verdict(queue, unit.requests.len()));
+    field("I/O", unit.io());
     for stopped in &queue.waiting_stopped {
         outln!(
             "{}",

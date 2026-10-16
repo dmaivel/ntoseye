@@ -5,37 +5,59 @@
 //! parameters. The layout is taken from the PDB rather than hardcoded, so
 //! decoding tracks whatever build the guest is running.
 
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::layout::{FieldInfo, TypeInfo, le_uint};
+use crate::memory::MemoryOps;
 use crate::target::pool::kernel_symbol_address;
 use crate::target::{Arm64SavedRegisters, SavedThreadRegisters, Target};
 use crate::types::{Arch, Dtb, VirtAddr};
 use crate::unwind::{resolve_thread_trace_context, try_format_symbol};
+use ntoseye_macros::record;
 use std::sync::Arc;
 
 pub const KTRAP_FRAME_TYPE: &str = "_KTRAP_FRAME";
 pub const KSWITCH_FRAME_TYPE: &str = "_KSWITCH_FRAME";
 
-/// A decoded ARM64 `_KTRAP_FRAME` as described by the target PDB. ARM64 saves
-/// X0-X18 in the trap frame and keeps the control/debug state alongside the
-/// return context. Optional fields absent from a particular build are `None`
-/// rather than being filled from a guessed fixed offset.
+/// The ARM64 registers that a `_KTRAP_FRAME` saved, as the target's PDB
+/// lays the frame out. The frame holds x0-x18, fp (x29) and lr (x30), and
+/// keeps the control and debug state beside the return context. A field
+/// that the build's frame lacks is `None`.
+#[record]
 #[derive(Clone, Debug)]
 pub struct Arm64TrapFrame {
+    /// x0 to x18.
+    #[record(hex)]
     pub x: [u64; 19],
+    #[record(hex)]
     pub lr: u64,
+    #[record(hex)]
     pub fp: u64,
+    #[record(hex)]
     pub pc: u64,
+    #[record(hex)]
     pub sp: u64,
+    #[record(hex)]
     pub cpsr: Option<u64>,
+    #[record(hex)]
     pub esr: Option<u64>,
+    /// The faulting data address (FAR).
+    #[record(hex)]
     pub fault_address: Option<u64>,
+    /// Breakpoint control registers.
+    #[record(hex)]
     pub bcr: [Option<u64>; 8],
+    /// Breakpoint value registers.
+    #[record(hex)]
     pub bvr: [Option<u64>; 8],
+    /// Watchpoint control registers.
+    #[record(hex)]
     pub wcr: [Option<u64>; 2],
+    /// Watchpoint value registers.
+    #[record(hex)]
     pub wvr: [Option<u64>; 2],
+    /// The mode that the trap came from: 0 for kernel, 1 for user.
     pub previous_mode: Option<u8>,
+    /// The IRQL before the trap.
     pub previous_irql: Option<u8>,
 }
 
@@ -57,6 +79,10 @@ pub struct Arm64TrapFrame {
 /// does. The error code is written by the CPU for the exceptions that carry
 /// one (#DF, #TS, #NP, #SS, #GP, #PF, #AC, #CP); entries for the others
 /// reserve the slot unwritten, and the frame does not record the vector.
+///
+/// In the SDK, its name: `interrupt`, `exception`, `system call`, or
+/// `Zw call`.
+#[record]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrapKind {
     /// A hardware or software interrupt (`ExceptionActive` 0).
@@ -64,10 +90,12 @@ pub enum TrapKind {
     /// A processor exception (`ExceptionActive` 1).
     Exception,
     /// A `syscall` from user mode (`ExceptionActive` 2).
+    #[record(label = "system call")]
     SystemCall,
     /// A kernel-mode `Zw*` call into the system service dispatcher. Every
     /// `Zw*` stub builds the machine frame with rip `nt!KiServiceLinkage` and
     /// enters `KiServiceInternal`, which leaves `ExceptionActive` unwritten.
+    #[record(label = "Zw call")]
     ZwCall,
 }
 
@@ -97,15 +125,6 @@ impl TrapKind {
             Self::ZwCall => matches!(slot, Rbx | Rdi | Rsi),
         }
     }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Interrupt => "interrupt",
-            Self::Exception => "exception",
-            Self::SystemCall => "system call",
-            Self::ZwCall => "Zw call",
-        }
-    }
 }
 
 /// Whether `cs` is a Windows x64 code selector (`KGDT64_R0_CODE`,
@@ -129,55 +148,82 @@ enum Slot {
     PreviousIrql,
 }
 
-/// The x64 state saved by a `_KTRAP_FRAME`. The nonvolatile r12-r15 live in
-/// the accompanying `_KEXCEPTION_FRAME`, not the trap frame.
+/// The x64 registers that a `_KTRAP_FRAME` saved. The nonvolatile r12-r15
+/// live in the accompanying `_KEXCEPTION_FRAME`, not the trap frame.
 ///
 /// What a frame holds depends on the entry that built it, `kind` (see
-/// [`TrapKind`]). A slot that entry does not write is `None` rather than
-/// whatever it held.
+/// [`TrapKind`]). A register the entry does not write is `None` rather than
+/// whatever its slot held.
+#[record]
 #[derive(Clone, Debug)]
 pub struct Amd64TrapFrame {
-    /// `None` when the frame names no entry this decoder knows (no or an
-    /// unknown `ExceptionActive`); then only the machine frame and rbp,
-    /// which every entry writes, are trusted.
+    /// The entry that built the frame: `interrupt`, `exception`,
+    /// `system call`, or `Zw call`. `None` if the entry is unknown (no or
+    /// an unknown `ExceptionActive`), and then only the machine frame and
+    /// rbp, which every entry writes, are reliable.
     pub kind: Option<TrapKind>,
+    #[record(hex)]
     pub rax: Option<u64>,
+    #[record(hex)]
     pub rbx: Option<u64>,
+    #[record(hex)]
     pub rcx: Option<u64>,
+    #[record(hex)]
     pub rdx: Option<u64>,
+    #[record(hex)]
     pub rsi: Option<u64>,
+    #[record(hex)]
     pub rdi: Option<u64>,
+    #[record(hex)]
     pub rbp: u64,
+    #[record(hex)]
     pub rsp: u64,
+    #[record(hex)]
     pub r8: Option<u64>,
+    #[record(hex)]
     pub r9: Option<u64>,
+    #[record(hex)]
     pub r10: Option<u64>,
+    #[record(hex)]
     pub r11: Option<u64>,
+    #[record(hex)]
     pub rip: u64,
+    #[record(hex)]
     pub cs: u16,
+    #[record(hex)]
     pub ss: Option<u16>,
+    #[record(hex)]
     pub eflags: u32,
-    /// The exception's error code; stale for an exception whose vector
-    /// carries none (#DE, #BP, #UD, ...), which the frame cannot tell apart.
+    /// The exception error code, which is stale for an exception whose
+    /// vector carries none (#DE, #BP, #UD, ...): the frame cannot tell them
+    /// apart.
+    #[record(hex)]
     pub error_code: Option<u64>,
-    /// `KPROCESSOR_MODE` the trap came from (0 = kernel, 1 = user), from the
-    /// saved `cs` as Windows reads it: the `PreviousMode` field is set only
-    /// by system calls.
+    /// The mode that the trap came from: 0 for kernel, 1 for user. It is
+    /// read from the saved `cs`, as Windows reads it: the `PreviousMode`
+    /// field is set only by system calls.
     pub previous_mode: u8,
+    /// The IRQL before the trap, which only interrupts record.
     pub previous_irql: Option<u8>,
 }
 
+/// A `_KTRAP_FRAME`'s registers, as the frame's architecture names them.
+#[record]
 #[derive(Clone, Debug)]
 pub enum KtrapFrameData {
     Amd64(Amd64TrapFrame),
     Arm64(Box<Arm64TrapFrame>),
 }
 
-/// A decoded `_KTRAP_FRAME` with architecture-specific register names.
+/// A decoded `_KTRAP_FRAME` (`.trap`).
+#[record]
 #[derive(Clone, Debug)]
 pub struct KtrapFrame {
-    /// Guest-virtual address the frame was decoded from.
+    /// The address that ntoseye read the frame from.
+    #[record(hex)]
     pub address: u64,
+    /// The saved registers, by architecture.
+    #[record(rename = "frame")]
     pub data: KtrapFrameData,
 }
 
@@ -193,13 +239,6 @@ impl KtrapFrame {
         }
     }
 
-    pub fn stack_pointer(&self) -> u64 {
-        match &self.data {
-            KtrapFrameData::Amd64(frame) => frame.rsp,
-            KtrapFrameData::Arm64(frame) => frame.sp,
-        }
-    }
-
     pub fn amd64(&self) -> Option<&Amd64TrapFrame> {
         match &self.data {
             KtrapFrameData::Amd64(frame) => Some(frame),
@@ -207,7 +246,8 @@ impl KtrapFrame {
         }
     }
 
-    pub fn arm64(&self) -> Option<&Arm64TrapFrame> {
+    #[cfg(test)]
+    fn arm64(&self) -> Option<&Arm64TrapFrame> {
         match &self.data {
             KtrapFrameData::Amd64(_) => None,
             KtrapFrameData::Arm64(frame) => Some(frame),
@@ -772,7 +812,6 @@ mod tests {
         assert_eq!(arm.esr, Some(0x1234_5678));
         assert_eq!(arm.fault_address, Some(0x4000));
         assert_eq!(frame.instruction_pointer(), arm.pc);
-        assert_eq!(frame.stack_pointer(), arm.sp);
 
         let registers = SavedThreadRegisters::from(&frame);
         assert_eq!(registers.get("pc"), Some(arm.pc));

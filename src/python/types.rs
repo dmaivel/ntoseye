@@ -11,22 +11,22 @@ use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList};
 
+use super::args::AddressArg;
 use super::context::Space;
 use super::handle::Owner;
 use super::record::PlainDict;
+use super::record::Typed;
 use super::symbols::load_scope_symbols;
-use super::{err, raise, view_dict};
-use crate::backend::MemoryOps;
+use super::{err, plain_dict, raise};
+use crate::bytes::c_string_lossy;
 use crate::error::Result as CoreResult;
 use crate::layout::{
     EnumDef, FieldInfo, FieldValue, ParsedType, TypeInfo, bitfield_mask, le_uint, named_type,
     unqualified_type_name,
 };
-use crate::symbols::SymbolStore;
+use crate::memory::MemoryOps;
 use crate::target::{CODE_BITNESS_AMD64, CODE_BITNESS_X86};
 use crate::types::{Dtb, VirtAddr};
-use crate::view::shape::Typed;
-use crate::view::symbols;
 
 fn lookup_field<'a>(
     info: &'a TypeInfo,
@@ -154,14 +154,14 @@ impl Type {
         }
     }
 
-    /// The fields' views by name, in offset order.
-    fn field_views(&self) -> Vec<(String, symbols::Field)> {
+    /// The fields by name, in offset order.
+    fn field_layouts(&self) -> Vec<(String, FieldInfo)> {
         let Definition::Layout(info) = &self.definition else {
             return Vec::new();
         };
         info.fields_in_order()
             .into_iter()
-            .map(|(name, field)| (name.clone(), symbols::type_field(name, field)))
+            .map(|(name, field)| (name.clone(), field.clone()))
             .collect()
     }
 }
@@ -186,11 +186,8 @@ impl Type {
 
     /// Field layouts by name, in offset order. An enum has no fields.
     #[getter]
-    fn fields<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<IndexMap<String, Typed<'py, symbols::Field>>> {
-        self.field_views()
+    fn fields<'py>(&self, py: Python<'py>) -> PyResult<IndexMap<String, Typed<'py, FieldInfo>>> {
+        self.field_layouts()
             .into_iter()
             .map(|(name, field)| Ok((name, Typed::new(py, field)?)))
             .collect()
@@ -207,15 +204,17 @@ impl Type {
     }
 
     /// Bind this layout to an address as a reflective struct cursor.
-    fn at(&self, py: Python<'_>, addr: u64) -> PyResult<Struct> {
+    fn at(&self, py: Python<'_>, address: AddressArg) -> PyResult<Struct> {
         self.struct_info()?;
+        let addr = address.resolve(py, &self.owner, &self.space.context())?.0;
         Struct::new(py, &self.owner, self.space.clone(), &self.name, addr)
     }
 
     /// Walk an intrusive list whose head is at `head`, where `link_field` is
     /// the field that holds the links.
-    fn walk(&self, py: Python<'_>, head: u64, link_field: &str) -> PyResult<Vec<Struct>> {
+    fn walk(&self, py: Python<'_>, head: AddressArg, link_field: &str) -> PyResult<Vec<Struct>> {
         self.struct_info()?;
+        let head = head.resolve(py, &self.owner, &self.space.context())?.0;
         let addresses =
             list_record_addresses(py, &self.owner, &self.space, head, &self.name, link_field)?;
         addresses
@@ -229,8 +228,8 @@ impl Type {
         dict.set_item("name", &self.name)?;
         dict.set_item("size", self.size())?;
         let fields = PyDict::new(py);
-        for (name, field) in self.field_views() {
-            fields.set_item(name, view_dict(py, field)?)?;
+        for (name, field) in self.field_layouts() {
+            fields.set_item(name, plain_dict(py, &field)?)?;
         }
         dict.set_item("fields", fields)?;
         if let Definition::Enum(def) = &self.definition {
@@ -370,7 +369,7 @@ impl Struct {
                 return enum_value(py, &self.owner, &self.space, enum_name, le_uint(&bytes));
             }
             ParsedType::Array(_, _) if field.type_data.c_string_len().is_some() => {
-                SymbolStore::read_c_string_lossy(&bytes).into_bound_py_any(py)?
+                c_string_lossy(&bytes).into_bound_py_any(py)?
             }
             _ => match size {
                 1 | 2 | 4 | 8 => le_uint(&bytes).into_bound_py_any(py)?,
@@ -727,7 +726,7 @@ impl Struct {
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
         other.extract::<PyRef<'_, Struct>>().is_ok_and(|other| {
-            self.owner.same_debugger(&other.owner)
+            self.owner.same_target(&other.owner)
                 && self.addr == other.addr
                 && self.name == other.name
                 && self.dtb == other.dtb

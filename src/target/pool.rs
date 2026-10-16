@@ -2,15 +2,15 @@ use std::collections::{BTreeMap, HashSet};
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
-use crate::backend::MemoryOps;
-use crate::cpu_state::MAX_PROCESSORS;
+use ntoseye_macros::record;
+
 use crate::error::{Error, Result};
 use crate::layout::{FieldInfo, ParsedType, TypeInfo, le_uint};
-use crate::memory::PAGE_SIZE;
+use crate::memory::{MemoryOps, PAGE_SIZE};
 use crate::symbols::format_symbol_with_offset;
 use crate::target::Target;
-use crate::target::mm::find_mi_state_fields;
-use crate::types::VirtAddr;
+use crate::target::mm::{PoolBlockState, find_mi_state_fields};
+use crate::types::{MAX_PROCESSORS, VirtAddr};
 
 pub const POOL_ALIGN: u64 = 0x10;
 
@@ -144,15 +144,31 @@ const POOL_TABLE_READ_CHUNK: usize = 16 * 1024 * 1024;
 const BIG_POOL_ENTRY_CHUNK: u64 = 1024;
 const BIG_POOL_FLAG_MASK: u16 = 0x0fff;
 
+/// The pool usage of one tag (`!poolused`), summed over the processors'
+/// tracker tables and the big-pool table. A value is `None` if no source
+/// has an entry for that pool.
+#[record(impl)]
 #[derive(Clone, Debug)]
 pub struct PoolUsageRow {
+    #[record(hex)]
     pub tag: u32,
     pub nonpaged_allocs: Option<i64>,
     pub nonpaged_frees: Option<i64>,
+    /// In bytes.
     pub nonpaged_bytes: Option<i64>,
     pub paged_allocs: Option<i64>,
     pub paged_frees: Option<i64>,
+    /// In bytes.
     pub paged_bytes: Option<i64>,
+}
+
+#[record]
+impl PoolUsageRow {
+    /// The tag as its four characters.
+    #[record(getter)]
+    pub fn tag_name(&self) -> String {
+        tag_string(self.tag)
+    }
 }
 
 impl PoolUsageRow {
@@ -728,13 +744,13 @@ pub fn plausible_pool_tag(tag: u32) -> bool {
     tag == POOL_FREE_TAG || tag_looks_printable(tag)
 }
 
-pub fn pool_block_state(h: &PoolHeader) -> &'static str {
+pub fn pool_block_state(h: &PoolHeader) -> PoolBlockState {
     if h.synthetic_free || h.tag == POOL_FREE_TAG {
-        "Free"
+        PoolBlockState::Free
     } else if tag_looks_printable(h.tag) {
-        "Allocated"
+        PoolBlockState::Allocated
     } else {
-        "Allocated?"
+        PoolBlockState::AllocatedUnverified
     }
 }
 

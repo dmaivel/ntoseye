@@ -133,7 +133,7 @@ The cell is in the Registry process's address space, so read its data with {comm
 `dbg.inspect` has a method for each subcommand, and each returns typed records:
 
 - `registry_hives()` for `!reg hivelist`
-- `registry_key(path)` for `!reg querykey`, with the key's `subkeys` and `key_values`
+- `registry_key(path)` for `!reg querykey`, with the key's `subkeys` and `values`
 - `registry_value(path, name)` for one value, `-v`; `""` names the default value
 - `registry_key_at(hive, node)` for `!reg keyinfo`
 - `registry_cell(hive, cell)` for `!reg cellindex`
@@ -142,7 +142,7 @@ A value's `data` is a `str`, a `list[str]`, an `int`, or `bytes`, by the value's
 
 ```python
 key = dbg.inspect.registry_key(r"HKLM\SYSTEM\CurrentControlSet\Services\LanmanServer")
-for value in key.key_values:
+for value in key.values:
     print(value.name, value.type_name, value.data.value)
 
 start = dbg.inspect.registry_value(r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip", "Start")

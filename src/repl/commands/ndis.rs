@@ -3,98 +3,498 @@
 
 use std::fmt::Display;
 
+use ntoseye_macros::{command, grammar};
 use tabled::builder::Builder;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::ntstatus::ntstatus_name;
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::memory_view::{AsciiCell, MemoryDisplayMode, row_ascii, row_items};
 use crate::repl::*;
-use crate::target::Target;
+use crate::session::Session;
 use crate::target::ndis::{
-    MAX_NET_BUFFER_DATA, NdisDriver, NdisDriverList, NdisFilterDetail, NdisFilterDriver,
-    NdisFilterDriverList, NdisFilterListEntry, NdisMiniport, NdisMiniportDetail,
-    NdisMiniportListEntry, NdisNbl, NdisOidOwner, NdisOidRequest, NdisPendingOids,
-    NdisProtocolDetail, NdisProtocolList, link_speed_text, nbl_flag_names, oid_name,
+    MAX_NET_BUFFER_DATA, NdisDriver, NdisDriverList, NdisFilterDetail, NdisFilterDriverDetail,
+    NdisFilterDriverList, NdisFilterList, NdisFilterListEntry, NdisMinidriver, NdisMiniport,
+    NdisMiniportDetail, NdisMiniportList, NdisMiniportListEntry, NdisNbl, NdisNblChain,
+    NdisOidRequest, NdisPendingOids, NdisProtocolDetail, NdisProtocolList, link_speed_text,
+    oid_name,
 };
 use crate::types::VirtAddr;
 use crate::ui;
 
-repl_command! {
-    cmd_ndiskd_miniports();
-    names: ["!ndiskd.miniports"],
-    usage: "!ndiskd.miniports",
-    summary: "List the NDIS miniports (network adapters).",
-    details: "Walks ndis!ndisMiniportList and shows one line per miniport: the address of its _NDIS_MINIPORT_BLOCK, which !ndiskd.miniport takes, the service of its miniport driver, the miniport state (Running, Pausing, Paused, Restarting, Initializing, Halted), the media connect state with the transmit link speed (and the receive speed when it differs), the device power state, the interface index, and the friendly name. Virtual miniports, such as Hyper-V's adapters, are on the list too. The command needs the PDB for ndis.sys.",
-    target: Kernel,
+/// List the NDIS miniports (network adapters).
+///
+/// Walks ndis!ndisMiniportList and shows one line per miniport: the address of
+/// its _NDIS_MINIPORT_BLOCK, which !ndiskd.miniport takes, the service of its
+/// miniport driver, the miniport state (Running, Pausing, Paused, Restarting,
+/// Initializing, Halted), the media connect state with the transmit link speed
+/// (and the receive speed when it differs), the device power state, the
+/// interface index, and the friendly name. Virtual miniports, such as Hyper-V's
+/// adapters, are on the list too. The command needs the PDB for ndis.sys.
+#[command(
+    names = ["!ndiskd.miniports"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect
+)]
+fn ndis_miniports(session: &Session) -> Result<NdisMiniportList> {
+    session.target.ndis_miniports()
 }
 
-repl_command! {
-    cmd_ndiskd_miniport;
-    names: ["!ndiskd.miniport"],
-    usage: "!ndiskd.miniport [<miniport>]",
-    summary: "Show an NDIS miniport: its driver, state, filter stack, bindings, and pending OID.",
-    details: "Give the address that !ndiskd.miniports lists. The command shows the device name and instance ID, the miniport driver with its image and versions, the adapter context (MiniportAdapterContext, the driver's own context, which you can dt with the driver's PDB), the FDO and PDO (none for a virtual miniport), the miniport, PnP, and power states, the medium and link, the interface index and NetLuid, the reference count, the reset counts and the status of the last reset, the pending OID request with its OID, type, and buffer, and PendingReturnNBLCount. Then it shows the filter stack from the top down along each filter's LowerFilter link, with each filter's state, driver image, module context, and pending OID request, and the protocols bound to the miniport. A filter whose HigherFilter does not lead back ends the stack walk with the reason. Without an address, the command lists the miniports as !ndiskd.miniports does.",
-    completion: Expression,
-    target: Kernel,
+impl Render for NdisMiniportList {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_miniport_table(&self.entries);
+        print_stopped("miniport list", &self.stopped);
+    }
 }
 
-repl_command! {
-    cmd_ndiskd_minidriver;
-    names: ["!ndiskd.minidriver"],
-    usage: "!ndiskd.minidriver [<minidriver>]",
-    summary: "List the NDIS miniport drivers, or show one and its miniports.",
-    details: "Without an address, walks ndis!ndisMiniDriverList and shows each miniport driver's _NDIS_M_DRIVER_BLOCK, service name, image, NDIS version, driver version, and number of miniports. With the address of a driver block, as this list or !ndiskd.miniport shows it, the command shows the driver's DRIVER_OBJECT, the module its code is in, its versions, and its miniports.",
-    completion: Expression,
-    target: Kernel,
+/// What `!ndiskd.miniport` shows: the miniports, or one in detail.
+enum Miniports {
+    List(NdisMiniportList),
+    Miniport(NdisMiniportDetail),
 }
 
-repl_command! {
-    cmd_ndiskd_protocol;
-    names: ["!ndiskd.protocol"],
-    usage: "!ndiskd.protocol [<protocol>]",
-    summary: "List the NDIS protocol drivers, or show one and its bindings.",
-    details: "Without an address, walks ndis!ndisProtocolList and shows each protocol's _NDIS_PROTOCOL_BLOCK, name, image, NDIS version, driver version, and number of bindings. With the address of a protocol block, as this list or !ndiskd.miniport shows it, the command shows the protocol's driver context, flags, and BindAdapterHandlerEx, and each binding (_NDIS_OPEN_BLOCK) with the miniport it opened and the protocol's binding context. The command needs the PDB for ndis.sys.",
-    completion: Expression,
-    target: Kernel,
+/// Show an NDIS miniport: its driver, state, filter stack, bindings, and
+/// pending OID.
+///
+/// Give the address that !ndiskd.miniports lists. The command shows the device
+/// name and instance ID, the miniport driver with its image and versions, the
+/// adapter context (MiniportAdapterContext, the driver's own context, which you
+/// can dt with the driver's PDB), the FDO and PDO (none for a virtual
+/// miniport), the miniport, PnP, and power states, the medium and link, the
+/// interface index and NetLuid, the reference count, the reset counts and the
+/// status of the last reset, the pending OID request with its OID, type, and
+/// buffer, and PendingReturnNBLCount. Then it shows the filter stack from the
+/// top down along each filter's LowerFilter link, with each filter's state,
+/// driver image, module context, and pending OID request, and the protocols
+/// bound to the miniport. A filter whose HigherFilter does not lead back ends
+/// the stack walk with the reason. Without an address, the command lists the
+/// miniports as !ndiskd.miniports does.
+#[command(
+    names = ["!ndiskd.miniport"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    forms = [ndis_miniport],
+)]
+fn ndis_miniport_command(
+    session: &Session,
+    #[arg(name = "miniport")] address: Option<VirtAddr>,
+) -> Result<Miniports> {
+    let Some(address) = address else {
+        return ndis_miniports(session).map(Miniports::List);
+    };
+    ndis_miniport(session, address)
+        .map(Miniports::Miniport)
+        .map_err(|error| detail_error("!ndiskd.miniport", address, &error))
 }
 
-repl_command! {
-    cmd_ndiskd_filterdriver;
-    names: ["!ndiskd.filterdriver"],
-    usage: "!ndiskd.filterdriver [<filterdriver>]",
-    summary: "List the NDIS filter drivers, or show one and its filter modules.",
-    details: "Without an address, walks ndis!ndisFilterDriverList and shows each filter driver's _NDIS_FILTER_DRIVER_BLOCK, friendly name, service, image, NDIS version, driver version, and number of filter modules. With the address of a filter driver block, the command shows the driver's unique name (its GUID), DRIVER_OBJECT, the module its code is in, its driver context and flags, and its filter modules, one for each miniport it is attached to. The command needs the PDB for ndis.sys.",
-    completion: Expression,
-    target: Kernel,
+/// Read the NDIS miniport at `address` with its driver, filter stack,
+/// bindings, and pending OID request (`!ndiskd.miniport`).
+#[command(form_of = ndis_miniport_command, python = Inspect)]
+fn ndis_miniport(session: &Session, address: VirtAddr) -> Result<NdisMiniportDetail> {
+    session.target.ndis_miniport(address)
 }
 
-repl_command! {
-    cmd_ndiskd_filter;
-    names: ["!ndiskd.filter"],
-    usage: "!ndiskd.filter [<filter>]",
-    summary: "List the NDIS filter modules, or show one.",
-    details: "Without an address, walks ndis!ndisGlobalFilterList and shows each filter module of every miniport: its _NDIS_FILTER_BLOCK, state, driver image, miniport, and name. With the address of a filter block, as this list or !ndiskd.miniport shows it, the command shows the filter driver, the miniport, the filter modules above and below it on the miniport's stack, the module context (FilterModuleContext, which you can dt with the driver's PDB), the link the filter last saw indicated, the reference count, the NBLs and status indications NDIS dropped because the filter was not running, and the pending OID request. The command needs the PDB for ndis.sys.",
-    completion: Expression,
-    target: Kernel,
+impl Render for Miniports {
+    fn render(&self, repl: &mut ReplState<'_>, (): ()) {
+        match self {
+            Self::List(list) => list.render(repl, ()),
+            Self::Miniport(detail) => print_miniport(detail),
+        }
+    }
 }
 
-repl_command! {
-    cmd_ndiskd_oid();
-    names: ["!ndiskd.oid"],
-    usage: "!ndiskd.oid",
-    summary: "Show the OID requests that miniports and filters have not completed.",
-    details: "Reads the PendingOidRequest of every miniport on ndis!ndisMiniportList and every filter module on ndis!ndisGlobalFilterList, and shows each request with its owner, type, OID by its ntddndis.h name, and buffer. NDIS passes a miniport or filter one OID request at a time, apart from direct OID requests, so a request that stays here holds up the ones behind it. The command needs the PDB for ndis.sys.",
-    target: Kernel,
+/// What `!ndiskd.minidriver` shows: the miniport drivers, or one and its
+/// miniports.
+enum Minidrivers {
+    List(NdisDriverList),
+    Driver(NdisMinidriver),
 }
 
-repl_command! {
-    cmd_ndiskd_nbl;
-    names: ["!ndiskd.nbl"],
-    usage: "!ndiskd.nbl <nbl> [-chain] [-data]",
-    summary: "Show a NET_BUFFER_LIST and its NET_BUFFERs.",
-    details: "Shows the _NET_BUFFER_LIST at the address: its next and parent NBLs, its source handle with the miniport, filter module, or binding it names, its pool, context, Flags and NblFlags (by NDIS_NBL_FLAGS_ name), status, and child reference count, and each NET_BUFFER with its data length, data offset, current MDL and offset into it, and MDL chain. -chain lists every NBL on the Next chain from the address, with its NET_BUFFERs, bytes, source, and status. -data dumps each NET_BUFFER's data, up to 64 KiB of it, read through the MDLs' PFNs, so a buffer that is not mapped into system space reads too. The command needs the PDB for ndis.sys.",
-    completion: Expression,
-    target: Kernel,
+/// List the NDIS miniport drivers, or show one and its miniports.
+///
+/// Without an address, walks ndis!ndisMiniDriverList and shows each miniport
+/// driver's _NDIS_M_DRIVER_BLOCK, service name, image, NDIS version, driver
+/// version, and number of miniports. With the address of a driver block, as
+/// this list or !ndiskd.miniport shows it, the command shows the driver's
+/// DRIVER_OBJECT, the module its code is in, its versions, and its miniports.
+#[command(
+    names = ["!ndiskd.minidriver"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    forms = [ndis_minidrivers, ndis_minidriver],
+)]
+fn ndis_minidriver_command(
+    session: &Session,
+    #[arg(name = "minidriver")] address: Option<VirtAddr>,
+) -> Result<Minidrivers> {
+    let Some(address) = address else {
+        return ndis_minidrivers(session).map(Minidrivers::List);
+    };
+    ndis_minidriver(session, address)
+        .map(Minidrivers::Driver)
+        .map_err(|error| detail_error("!ndiskd.minidriver", address, &error))
+}
+
+/// List the NDIS miniport drivers (`!ndiskd.minidriver`).
+#[command(form_of = ndis_minidriver_command, python = Inspect)]
+fn ndis_minidrivers(session: &Session) -> Result<NdisDriverList> {
+    session.target.ndis_minidrivers()
+}
+
+/// Read the NDIS miniport driver block at `address` and its miniports
+/// (`!ndiskd.minidriver <address>`).
+#[command(form_of = ndis_minidriver_command, python = Inspect)]
+fn ndis_minidriver(session: &Session, address: VirtAddr) -> Result<NdisMinidriver> {
+    session.target.ndis_minidriver(address)
+}
+
+impl Render for Minidrivers {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        match self {
+            Self::List(list) => print_minidrivers(list),
+            Self::Driver(detail) => print_minidriver(detail),
+        }
+    }
+}
+
+/// What `!ndiskd.protocol` shows: the protocol drivers, or one and its
+/// bindings.
+enum Protocols {
+    List(NdisProtocolList),
+    Protocol(NdisProtocolDetail),
+}
+
+/// List the NDIS protocol drivers, or show one and its bindings.
+///
+/// Without an address, walks ndis!ndisProtocolList and shows each protocol's
+/// _NDIS_PROTOCOL_BLOCK, name, image, NDIS version, driver version, and number
+/// of bindings. With the address of a protocol block, as this list or
+/// !ndiskd.miniport shows it, the command shows the protocol's driver context,
+/// flags, and BindAdapterHandlerEx, and each binding (_NDIS_OPEN_BLOCK) with
+/// the miniport it opened and the protocol's binding context. The command needs
+/// the PDB for ndis.sys.
+#[command(
+    names = ["!ndiskd.protocol"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    forms = [ndis_protocols, ndis_protocol],
+)]
+fn ndis_protocol_command(
+    session: &Session,
+    #[arg(name = "protocol")] address: Option<VirtAddr>,
+) -> Result<Protocols> {
+    let Some(address) = address else {
+        return ndis_protocols(session).map(Protocols::List);
+    };
+    ndis_protocol(session, address)
+        .map(Protocols::Protocol)
+        .map_err(|error| detail_error("!ndiskd.protocol", address, &error))
+}
+
+/// List the NDIS protocol drivers (`!ndiskd.protocol`).
+#[command(form_of = ndis_protocol_command, python = Inspect)]
+fn ndis_protocols(session: &Session) -> Result<NdisProtocolList> {
+    session.target.ndis_protocols()
+}
+
+/// Read the NDIS protocol block at `address` and its bindings
+/// (`!ndiskd.protocol <address>`).
+#[command(form_of = ndis_protocol_command, python = Inspect)]
+fn ndis_protocol(session: &Session, address: VirtAddr) -> Result<NdisProtocolDetail> {
+    session.target.ndis_protocol_detail(address)
+}
+
+impl Render for Protocols {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        match self {
+            Self::List(list) => print_protocols(list),
+            Self::Protocol(detail) => print_protocol(detail),
+        }
+    }
+}
+
+/// What `!ndiskd.filterdriver` shows: the filter drivers, or one and its
+/// filter modules.
+enum FilterDrivers {
+    List(NdisFilterDriverList),
+    Driver(NdisFilterDriverDetail),
+}
+
+/// List the NDIS filter drivers, or show one and its filter modules.
+///
+/// Without an address, walks ndis!ndisFilterDriverList and shows each filter
+/// driver's _NDIS_FILTER_DRIVER_BLOCK, friendly name, service, image, NDIS
+/// version, driver version, and number of filter modules. With the address of a
+/// filter driver block, the command shows the driver's unique name (its GUID),
+/// DRIVER_OBJECT, the module its code is in, its driver context and flags, and
+/// its filter modules, one for each miniport it is attached to. The command
+/// needs the PDB for ndis.sys.
+#[command(
+    names = ["!ndiskd.filterdriver"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    forms = [ndis_filter_drivers, ndis_filter_driver],
+)]
+fn ndis_filter_driver_command(
+    session: &Session,
+    #[arg(name = "filterdriver")] address: Option<VirtAddr>,
+) -> Result<FilterDrivers> {
+    let Some(address) = address else {
+        return ndis_filter_drivers(session).map(FilterDrivers::List);
+    };
+    ndis_filter_driver(session, address)
+        .map(FilterDrivers::Driver)
+        .map_err(|error| detail_error("!ndiskd.filterdriver", address, &error))
+}
+
+/// List the NDIS filter drivers (`!ndiskd.filterdriver`).
+#[command(form_of = ndis_filter_driver_command, python = Inspect)]
+fn ndis_filter_drivers(session: &Session) -> Result<NdisFilterDriverList> {
+    session.target.ndis_filter_drivers()
+}
+
+/// Read the NDIS filter driver block at `address` and its filter
+/// modules (`!ndiskd.filterdriver <address>`).
+#[command(form_of = ndis_filter_driver_command, python = Inspect)]
+fn ndis_filter_driver(session: &Session, address: VirtAddr) -> Result<NdisFilterDriverDetail> {
+    session.target.ndis_filter_driver_detail(address)
+}
+
+impl Render for FilterDrivers {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        match self {
+            Self::List(list) => print_filter_drivers(list),
+            Self::Driver(detail) => print_filter_driver(detail),
+        }
+    }
+}
+
+/// What `!ndiskd.filter` shows: the filter modules, or one in detail.
+enum Filters {
+    List(NdisFilterList),
+    Filter(NdisFilterDetail),
+}
+
+/// List the NDIS filter modules, or show one.
+///
+/// Without an address, walks ndis!ndisGlobalFilterList and shows each filter
+/// module of every miniport: its _NDIS_FILTER_BLOCK, state, driver image,
+/// miniport, and name. With the address of a filter block, as this list or
+/// !ndiskd.miniport shows it, the command shows the filter driver, the
+/// miniport, the filter modules above and below it on the miniport's stack, the
+/// module context (FilterModuleContext, which you can dt with the driver's
+/// PDB), the link the filter last saw indicated, the reference count, the NBLs
+/// and status indications NDIS dropped because the filter was not running, and
+/// the pending OID request. The command needs the PDB for ndis.sys.
+#[command(
+    names = ["!ndiskd.filter"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    forms = [ndis_filters, ndis_filter],
+)]
+fn ndis_filter_command(
+    session: &Session,
+    #[arg(name = "filter")] address: Option<VirtAddr>,
+) -> Result<Filters> {
+    let Some(address) = address else {
+        return ndis_filters(session).map(Filters::List);
+    };
+    ndis_filter(session, address)
+        .map(Filters::Filter)
+        .map_err(|error| detail_error("!ndiskd.filter", address, &error))
+}
+
+/// List the NDIS filter modules of every miniport (`!ndiskd.filter`).
+#[command(form_of = ndis_filter_command, python = Inspect)]
+fn ndis_filters(session: &Session) -> Result<NdisFilterList> {
+    session.target.ndis_filters_all()
+}
+
+/// Read the NDIS filter module at `address` (`!ndiskd.filter <address>`).
+#[command(form_of = ndis_filter_command, python = Inspect)]
+fn ndis_filter(session: &Session, address: VirtAddr) -> Result<NdisFilterDetail> {
+    session.target.ndis_filter_detail(address)
+}
+
+impl Render for Filters {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        match self {
+            Self::List(list) => {
+                print_filter_table(&list.entries);
+                print_stopped("filter list", &list.stopped);
+            }
+            Self::Filter(detail) => print_filter(detail),
+        }
+    }
+}
+
+/// Show the OID requests that miniports and filters have not completed.
+///
+/// Reads the PendingOidRequest of every miniport on ndis!ndisMiniportList and
+/// every filter module on ndis!ndisGlobalFilterList, and shows each request
+/// with its owner, type, OID by its ntddndis.h name, and buffer. NDIS passes a
+/// miniport or filter one OID request at a time, apart from direct OID
+/// requests, so a request that stays here holds up the ones behind it. The
+/// command needs the PDB for ndis.sys.
+#[command(
+    names = ["!ndiskd.oid"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect
+)]
+fn ndis_oids(session: &Session) -> Result<NdisPendingOids> {
+    session.target.ndis_pending_oids()
+}
+
+impl Render for NdisPendingOids {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_pending_oids(self);
+    }
+}
+
+/// What `!ndiskd.nbl` shows: one NBL, or the NBLs on its `Next` chain
+/// (`-chain`).
+enum Nbls {
+    Nbl(NdisNbl),
+    Chain(NdisNblChain),
+}
+
+/// `!ndiskd.nbl`'s address, once its switches are taken: the one word that
+/// is not an option.
+#[grammar(usage = "<nbl>", complete = [Expression])]
+fn nbl_address(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<VirtAddr, ArgError> {
+    let mut address = None;
+    while let Some(word) = cursor.word() {
+        if word.len() > 1
+            && word.starts_with('-')
+            && word[1..].chars().all(|ch| ch.is_ascii_alphabetic())
+        {
+            return Err(ArgError::usage(
+                cx.name,
+                format!("{}: unknown option {word}", cx.name),
+            ));
+        }
+        if address.is_some() {
+            return Err(ArgError::usage(
+                cx.name,
+                format!("{}: unexpected argument {word}", cx.name),
+            ));
+        }
+        address = Some(word);
+    }
+    let Some(address) = address else {
+        return Err(ArgError::usage(
+            cx.name,
+            format!("{} needs a NET_BUFFER_LIST", cx.name),
+        ));
+    };
+    cx.eval(&address)
+}
+
+/// Show a NET_BUFFER_LIST and its NET_BUFFERs.
+///
+/// Shows the _NET_BUFFER_LIST at the address: its next and parent NBLs, its
+/// source handle with the miniport, filter module, or binding it names, its
+/// pool, context, Flags and NblFlags (by NDIS_NBL_FLAGS_ name), status, and
+/// child reference count, and each NET_BUFFER with its data length, data
+/// offset, current MDL and offset into it, and MDL chain. -chain lists every
+/// NBL on the Next chain from the address, with its NET_BUFFERs, bytes, source,
+/// and status. -data dumps each NET_BUFFER's data, up to 64 KiB of it, read
+/// through the MDLs' PFNs, so a buffer that is not mapped into system space
+/// reads too. The command needs the PDB for ndis.sys.
+#[command(
+    names = ["!ndiskd.nbl"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    forms = [ndis_nbl, ndis_nbl_chain],
+)]
+fn ndis_nbl_command(
+    session: &Session,
+    #[arg(parse = nbl_address)] address: VirtAddr,
+    #[arg(switch = "-chain")] chain: bool,
+    #[arg(switch = "-data")] data: bool,
+) -> Result<Nbls> {
+    let error = |error: Error| detail_error("!ndiskd.nbl", address, &error);
+    if chain {
+        return ndis_nbl_chain(session, address, data)
+            .map(Nbls::Chain)
+            .map_err(error);
+    }
+    ndis_nbl(session, address, data)
+        .map(Nbls::Nbl)
+        .map_err(error)
+}
+
+/// Decode the NET_BUFFER_LIST at `address` and its NET_BUFFERs
+/// (`!ndiskd.nbl`). With `data`, each NET_BUFFER's `data` holds up to
+/// 64 KiB of its frame, read through its MDLs' PFNs, or `data_error` why it
+/// does not read (`!ndiskd.nbl -data`).
+#[command(form_of = ndis_nbl_command, python = Inspect)]
+fn ndis_nbl(
+    session: &Session,
+    address: VirtAddr,
+    #[arg(default = false)] data: bool,
+) -> Result<NdisNbl> {
+    let target = &session.target;
+    let mut nbl = target.ndis_nbl(address)?;
+    if data {
+        target.ndis_read_nbl_data(&mut nbl);
+    }
+    Ok(nbl)
+}
+
+/// Decode the NET_BUFFER_LISTs on the `Next` chain from `address`
+/// (`!ndiskd.nbl -chain`). With `data`, each NET_BUFFER's `data` holds up
+/// to 64 KiB of its frame, or `data_error` why it does not read
+/// (`!ndiskd.nbl -chain -data`).
+#[command(form_of = ndis_nbl_command, python = Inspect)]
+fn ndis_nbl_chain(
+    session: &Session,
+    address: VirtAddr,
+    #[arg(default = false)] data: bool,
+) -> Result<NdisNblChain> {
+    let target = &session.target;
+    let mut chain = target.ndis_nbl_chain(address)?;
+    if data {
+        for nbl in &mut chain.nbls {
+            target.ndis_read_nbl_data(nbl);
+        }
+    }
+    Ok(chain)
+}
+
+impl Render for Nbls {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        match self {
+            Self::Nbl(nbl) => {
+                print_nbl(nbl);
+                print_nbl_data(nbl);
+            }
+            Self::Chain(chain) => {
+                print_nbl_chain(chain);
+                for nbl in &chain.nbls {
+                    print_nbl_data(nbl);
+                }
+            }
+        }
+    }
+}
+
+/// A detail form's error, with the command and the address it was given.
+fn detail_error(command: &str, address: VirtAddr, error: &Error) -> Error {
+    Error::DebugInfo(format!("{command} {:#x}: {error}", address.0))
 }
 
 /// A labeled line of a detail view.
@@ -140,10 +540,6 @@ fn media_text(miniport: &NdisMiniport) -> String {
     }
 }
 
-fn version_text((major, minor): (u8, u8)) -> String {
-    format!("{major}.{minor}")
-}
-
 fn oid_text(request: &NdisOidRequest) -> String {
     let name = oid_name(request.oid).unwrap_or("unknown OID");
     let mut text = format!(
@@ -154,7 +550,7 @@ fn oid_text(request: &NdisOidRequest) -> String {
         ui::addr_opt(request.buffer),
         request.buffer_length
     );
-    if let Some((output_length, method_id)) = request.method {
+    if let (Some(output_length), Some(method_id)) = (request.output_length, request.method_id) {
         text.push_str(&format!(
             ", output {output_length:#x} bytes, method {method_id:#x}"
         ));
@@ -168,11 +564,12 @@ fn oid_text(request: &NdisOidRequest) -> String {
     text
 }
 
-fn pending_oid_text(pending: &Option<std::result::Result<NdisOidRequest, String>>) -> String {
-    match pending {
-        None => ui::muted("none"),
-        Some(Ok(request)) => oid_text(request),
-        Some(Err(error)) => ui::muted(error),
+/// A pending OID request, why it does not decode, or a muted `none`.
+fn pending_oid_text(request: &Option<NdisOidRequest>, error: &Option<String>) -> String {
+    match (request, error) {
+        (Some(request), _) => oid_text(request),
+        (None, Some(error)) => ui::muted(error),
+        (None, None) => ui::muted("none"),
     }
 }
 
@@ -219,9 +616,9 @@ fn print_driver_fields(driver: &NdisDriver) {
         },
     );
     field("DRIVER_OBJECT", ui::addr_opt(driver.driver_object));
-    field("NDIS version", version_text(driver.ndis_version));
-    if let Some(version) = driver.driver_version {
-        field("Driver version", version_text(version));
+    field("NDIS version", &driver.ndis_version);
+    if let Some(version) = &driver.driver_version {
+        field("Driver version", version);
     }
 }
 
@@ -235,14 +632,14 @@ fn print_minidrivers(list: &NdisDriverList) {
         "Version",
         "Miniports",
     ]);
-    for entry in &list.drivers {
+    for entry in &list.entries {
         match entry {
             Ok(driver) => builder.push_record([
                 ui::addr(driver.address.0),
                 driver.service_name.clone(),
                 driver.image_name.clone(),
-                version_text(driver.ndis_version),
-                driver.driver_version.map(version_text).unwrap_or_default(),
+                driver.ndis_version.clone(),
+                driver.driver_version.clone().unwrap_or_default(),
                 driver.miniports.len().to_string(),
             ]),
             Err(unreadable) => builder.push_record([
@@ -259,7 +656,9 @@ fn print_minidrivers(list: &NdisDriverList) {
     print_stopped("driver list", &list.stopped);
 }
 
-fn print_minidriver(driver: &NdisDriver, miniports: &[NdisMiniportListEntry]) {
+fn print_minidriver(detail: &NdisMinidriver) {
+    let driver = &detail.driver;
+    let miniports = &detail.entries;
     field("Driver block", ui::addr(driver.address.0));
     print_driver_fields(driver);
     outln!();
@@ -271,7 +670,7 @@ fn print_minidriver(driver: &NdisDriver, miniports: &[NdisMiniportListEntry]) {
 }
 
 fn print_miniport(detail: &NdisMiniportDetail) {
-    let miniport = &detail.summary;
+    let miniport = &detail.miniport;
     field(
         "Miniport",
         format!(
@@ -290,24 +689,24 @@ fn print_miniport(detail: &NdisMiniportDetail) {
     if let Some(instance_id) = &detail.instance_id {
         field("Instance ID", instance_id);
     }
-    field("NDIS version", version_text(detail.ndis_version));
-    match &detail.driver {
-        Ok(driver) => {
+    field("NDIS version", &detail.ndis_version);
+    match (&detail.driver, &detail.driver_error) {
+        (Some(driver), _) => {
             let mut text = format!("{}  {}", ui::addr(driver.address.0), driver.service_name);
             if !driver.image_name.is_empty() {
                 text.push_str(&format!(" ({})", driver.image_name));
             }
-            if let Some(version) = driver.driver_version {
-                text.push_str(&format!(" v{}", version_text(version)));
+            if let Some(version) = &driver.driver_version {
+                text.push_str(&format!(" v{version}"));
             }
             field("Driver", text);
             field("DRIVER_OBJECT", ui::addr_opt(driver.driver_object));
         }
-        Err(error) => field("Driver", ui::muted(error)),
+        (None, error) => field("Driver", ui::muted(error.as_deref().unwrap_or_default())),
     }
     // A driver without a DRIVER_OBJECT has no module to look up; its image
     // name without the extension is the module name its PDB goes by.
-    let module = detail.driver.as_ref().ok().and_then(|driver| {
+    let module = detail.driver.as_ref().and_then(|driver| {
         driver.module.as_deref().or_else(|| {
             driver
                 .image_name
@@ -380,10 +779,13 @@ fn print_miniport(detail: &NdisMiniportDetail) {
         "Resets",
         format!(
             "internal {}, miniport {}, last status {:#x}",
-            detail.resets.0, detail.resets.1, detail.reset_status
+            detail.internal_resets, detail.miniport_resets, detail.reset_status
         ),
     );
-    field("Pending OID", pending_oid_text(&detail.pending_oid));
+    field(
+        "Pending OID",
+        pending_oid_text(&detail.pending_oid, &detail.pending_oid_error),
+    );
     field("Pending return NBLs", detail.pending_return_nbls);
     field(
         "Flags",
@@ -410,11 +812,11 @@ fn print_miniport(detail: &NdisMiniportDetail) {
         }
         print_padded_table(builder);
         for filter in &detail.filters {
-            if filter.pending_oid.is_some() {
+            if filter.pending_oid.is_some() || filter.pending_oid_error.is_some() {
                 outln!(
                     "filter {} pending OID: {}",
                     ui::addr(filter.address.0),
-                    pending_oid_text(&filter.pending_oid)
+                    pending_oid_text(&filter.pending_oid, &filter.pending_oid_error)
                 );
             }
         }
@@ -563,7 +965,10 @@ fn print_filter(detail: &NdisFilterDetail) {
             detail.dropped_status_indications
         ),
     );
-    field("Pending OID", pending_oid_text(&filter.pending_oid));
+    field(
+        "Pending OID",
+        pending_oid_text(&filter.pending_oid, &filter.pending_oid_error),
+    );
     field("Flags", format!("{:#x}", detail.flags));
 }
 
@@ -578,15 +983,15 @@ fn print_filter_drivers(list: &NdisFilterDriverList) {
         "Version",
         "Filters",
     ]);
-    for entry in &list.drivers {
+    for entry in &list.entries {
         match entry {
             Ok(driver) => builder.push_record([
                 ui::addr(driver.address.0),
                 driver.friendly_name.clone(),
                 driver.service_name.clone(),
                 driver.image_name.clone(),
-                version_text(driver.ndis_version),
-                version_text(driver.driver_version),
+                driver.ndis_version.clone(),
+                driver.driver_version.clone(),
                 driver.filters.len().to_string(),
             ]),
             Err(unreadable) => builder.push_record([
@@ -604,7 +1009,9 @@ fn print_filter_drivers(list: &NdisFilterDriverList) {
     print_stopped("filter driver list", &list.stopped);
 }
 
-fn print_filter_driver(driver: &NdisFilterDriver, filters: &[NdisFilterListEntry]) {
+fn print_filter_driver(detail: &NdisFilterDriverDetail) {
+    let driver = &detail.driver;
+    let filters = &detail.entries;
     field("Driver block", ui::addr(driver.address.0));
     field("Name", &driver.friendly_name);
     field("Unique name", &driver.unique_name);
@@ -618,8 +1025,8 @@ fn print_filter_driver(driver: &NdisFilterDriver, filters: &[NdisFilterListEntry
     );
     field("DRIVER_OBJECT", ui::addr_opt(driver.driver_object));
     field("Driver context", addr_or_none(driver.context));
-    field("NDIS version", version_text(driver.ndis_version));
-    field("Driver version", version_text(driver.driver_version));
+    field("NDIS version", &driver.ndis_version);
+    field("Driver version", &driver.driver_version);
     field("Flags", format!("{:#x}", driver.flags));
     outln!();
     outln!("{} ({})", ui::label("Filter modules"), filters.len());
@@ -639,14 +1046,14 @@ fn print_protocols(list: &NdisProtocolList) {
         "Version",
         "Bindings",
     ]);
-    for entry in &list.protocols {
+    for entry in &list.entries {
         match entry {
             Ok(protocol) => builder.push_record([
                 ui::addr(protocol.address.0),
                 protocol.name.clone(),
                 protocol.image_name.clone().unwrap_or_default(),
-                version_text(protocol.ndis_version),
-                version_text(protocol.driver_version),
+                protocol.ndis_version.clone(),
+                protocol.driver_version.clone(),
                 protocol.opens.len().to_string(),
             ]),
             Err(unreadable) => builder.push_record([
@@ -678,8 +1085,8 @@ fn print_protocol(detail: &NdisProtocolDetail) {
     if let Some(image) = &protocol.image_name {
         field("Image", image);
     }
-    field("NDIS version", version_text(protocol.ndis_version));
-    field("Driver version", version_text(protocol.driver_version));
+    field("NDIS version", &protocol.ndis_version);
+    field("Driver version", &protocol.driver_version);
     field("Driver context", addr_or_none(protocol.context));
     field(
         "BindAdapterHandlerEx",
@@ -719,15 +1126,9 @@ fn print_pending_oids(oids: &NdisPendingOids) {
         builder.push_record(["Owner", "Address", "Request", "Name"]);
         for pending in &oids.pending {
             builder.push_record([
-                match pending.owner {
-                    NdisOidOwner::Miniport => "miniport".to_string(),
-                    NdisOidOwner::Filter => "filter".to_string(),
-                },
+                pending.owner.to_string(),
                 ui::addr(pending.address.0),
-                match &pending.request {
-                    Ok(request) => oid_text(request),
-                    Err(error) => ui::muted(error),
-                },
+                pending_oid_text(&pending.request, &pending.error),
                 pending.name.clone().unwrap_or_default(),
             ]);
         }
@@ -758,7 +1159,7 @@ fn print_nbl(nbl: &NdisNbl) {
     );
     field("Pool", addr_or_none(nbl.pool));
     field("Context", addr_or_none(nbl.context));
-    let names = nbl_flag_names(nbl.nbl_flags);
+    let names = nbl.nbl_flag_names();
     field(
         "Flags",
         format!(
@@ -801,10 +1202,10 @@ fn print_nbl(nbl: &NdisNbl) {
     print_stopped("NET_BUFFER chain", &nbl.net_buffers_stopped);
 }
 
-fn print_nbl_chain(nbls: &[NdisNbl], stopped: &Option<String>) {
+fn print_nbl_chain(chain: &NdisNblChain) {
     let mut builder = Builder::default();
     builder.push_record(["NBL", "NET_BUFFERs", "Bytes", "Status", "Source"]);
-    for nbl in nbls {
+    for nbl in &chain.nbls {
         let bytes: u64 = nbl
             .net_buffers
             .iter()
@@ -821,13 +1222,18 @@ fn print_nbl_chain(nbls: &[NdisNbl], stopped: &Option<String>) {
         ]);
     }
     print_padded_table(builder);
-    print_stopped("NBL chain", stopped);
+    print_stopped("NBL chain", &chain.stopped);
 }
 
-/// Each NET_BUFFER's data as rows of 16 bytes, by offset into the frame.
-fn print_nbl_data(target: &Target, nbl: &NdisNbl) {
+/// Each NET_BUFFER's data as rows of 16 bytes, by offset into the frame,
+/// when it was read (`-data`).
+fn print_nbl_data(nbl: &NdisNbl) {
     let mode = MemoryDisplayMode::bytes();
-    for nb in &nbl.net_buffers {
+    let read = nbl
+        .net_buffers
+        .iter()
+        .filter(|nb| nb.data.is_some() || nb.data_error.is_some());
+    for nb in read {
         let shown = (nb.data_length as usize).min(MAX_NET_BUFFER_DATA);
         let mut title = format!(
             "{} {} ({:#x} bytes",
@@ -839,10 +1245,14 @@ fn print_nbl_data(target: &Target, nbl: &NdisNbl) {
             title.push_str(&format!(", the first {shown:#x} shown"));
         }
         outln!("{title})");
-        let data = match target.ndis_net_buffer_data(nb, MAX_NET_BUFFER_DATA) {
-            Ok(data) => data,
-            Err(error) => {
-                error!("NET_BUFFER {:#x}: {error}", nb.address.0);
+        let data = match (&nb.data, &nb.data_error) {
+            (Some(data), _) => data,
+            (None, error) => {
+                error!(
+                    "NET_BUFFER {:#x}: {}",
+                    nb.address.0,
+                    error.as_deref().unwrap_or_default()
+                );
                 continue;
             }
         };
@@ -858,175 +1268,5 @@ fn print_nbl_data(target: &Target, nbl: &NdisNbl) {
             outln!();
         }
         outln!();
-    }
-}
-
-impl ReplState<'_> {
-    fn cmd_ndiskd_miniports(&mut self) -> Result<()> {
-        match self.ctx.target.ndis_miniports() {
-            Ok(list) => {
-                print_miniport_table(&list.miniports);
-                print_stopped("miniport list", &list.stopped);
-            }
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_ndiskd_miniport(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(address) = invocation.arg(0) else {
-            return self.cmd_ndiskd_miniports();
-        };
-        let Some(address) = self.eval_or_report(address) else {
-            return Ok(());
-        };
-        match self.ctx.target.ndis_miniport(address) {
-            Ok(detail) => print_miniport(&detail),
-            Err(error) => error!("!ndiskd.miniport {:#x}: {error}", address.0),
-        }
-        Ok(())
-    }
-
-    fn cmd_ndiskd_minidriver(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(address) = invocation.arg(0) else {
-            match self.ctx.target.ndis_minidrivers() {
-                Ok(list) => print_minidrivers(&list),
-                Err(error) => error!("{error}"),
-            }
-            return Ok(());
-        };
-        let Some(address) = self.eval_or_report(address) else {
-            return Ok(());
-        };
-        match self.ctx.target.ndis_minidriver(address) {
-            Ok((driver, miniports)) => print_minidriver(&driver, &miniports),
-            Err(error) => error!("!ndiskd.minidriver {:#x}: {error}", address.0),
-        }
-        Ok(())
-    }
-
-    fn cmd_ndiskd_protocol(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(address) = invocation.arg(0) else {
-            match self.ctx.target.ndis_protocols() {
-                Ok(list) => print_protocols(&list),
-                Err(error) => error!("{error}"),
-            }
-            return Ok(());
-        };
-        let Some(address) = self.eval_or_report(address) else {
-            return Ok(());
-        };
-        match self.ctx.target.ndis_protocol_detail(address) {
-            Ok(detail) => print_protocol(&detail),
-            Err(error) => error!("!ndiskd.protocol {:#x}: {error}", address.0),
-        }
-        Ok(())
-    }
-
-    fn cmd_ndiskd_filterdriver(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(address) = invocation.arg(0) else {
-            match self.ctx.target.ndis_filter_drivers() {
-                Ok(list) => print_filter_drivers(&list),
-                Err(error) => error!("{error}"),
-            }
-            return Ok(());
-        };
-        let Some(address) = self.eval_or_report(address) else {
-            return Ok(());
-        };
-        match self.ctx.target.ndis_filter_driver_detail(address) {
-            Ok((driver, filters)) => print_filter_driver(&driver, &filters),
-            Err(error) => error!("!ndiskd.filterdriver {:#x}: {error}", address.0),
-        }
-        Ok(())
-    }
-
-    fn cmd_ndiskd_filter(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(address) = invocation.arg(0) else {
-            match self.ctx.target.ndis_filters_all() {
-                Ok(list) => {
-                    print_filter_table(&list.filters);
-                    print_stopped("filter list", &list.stopped);
-                }
-                Err(error) => error!("{error}"),
-            }
-            return Ok(());
-        };
-        let Some(address) = self.eval_or_report(address) else {
-            return Ok(());
-        };
-        match self.ctx.target.ndis_filter_detail(address) {
-            Ok(detail) => print_filter(&detail),
-            Err(error) => error!("!ndiskd.filter {:#x}: {error}", address.0),
-        }
-        Ok(())
-    }
-
-    fn cmd_ndiskd_oid(&mut self) -> Result<()> {
-        match self.ctx.target.ndis_pending_oids() {
-            Ok(oids) => print_pending_oids(&oids),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_ndiskd_nbl(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let mut chain = false;
-        let mut data = false;
-        let mut address = None;
-        for arg in &invocation.argv {
-            match arg.as_ref() {
-                "-chain" => chain = true,
-                "-data" => data = true,
-                flag if flag.len() > 1
-                    && flag.starts_with('-')
-                    && flag[1..].chars().all(|ch| ch.is_ascii_alphabetic()) =>
-                {
-                    error!(
-                        "!ndiskd.nbl: unknown option {flag}; usage: !ndiskd.nbl <nbl> [-chain] [-data]"
-                    );
-                    return Ok(());
-                }
-                text if address.is_none() => address = Some(text.to_string()),
-                text => {
-                    error!(
-                        "!ndiskd.nbl: unexpected argument {text}; usage: !ndiskd.nbl <nbl> [-chain] [-data]"
-                    );
-                    return Ok(());
-                }
-            }
-        }
-        let Some(address) = address else {
-            error!("usage: !ndiskd.nbl <nbl> [-chain] [-data]");
-            return Ok(());
-        };
-        let Some(address) = self.eval_or_report(&address) else {
-            return Ok(());
-        };
-        let target = &self.ctx.target;
-        if chain {
-            match target.ndis_nbl_chain(address) {
-                Ok((nbls, stopped)) => {
-                    print_nbl_chain(&nbls, &stopped);
-                    if data {
-                        for nbl in &nbls {
-                            print_nbl_data(target, nbl);
-                        }
-                    }
-                }
-                Err(error) => error!("!ndiskd.nbl {:#x}: {error}", address.0),
-            }
-            return Ok(());
-        }
-        match target.ndis_nbl(address) {
-            Ok(nbl) => {
-                print_nbl(&nbl);
-                if data {
-                    print_nbl_data(target, &nbl);
-                }
-            }
-            Err(error) => error!("!ndiskd.nbl {:#x}: {error}", address.0),
-        }
-        Ok(())
     }
 }

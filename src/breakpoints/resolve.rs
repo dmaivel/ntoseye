@@ -4,7 +4,7 @@
 
 use super::install::BreakpointBackend;
 use super::spec::CodeSite;
-use super::{Breakpoint, BreakpointConfig, BreakpointManager, BreakpointScope, BreakpointSpec};
+use super::{BreakpointConfig, BreakpointInfo, BreakpointManager, BreakpointScope, BreakpointSpec};
 use crate::dbg_backend::DebugBackend;
 use crate::error::{Error, Result};
 use crate::target::Target;
@@ -164,7 +164,7 @@ impl BreakpointManager {
     /// IDs, counters, conditions, actions, and enabled state survive address
     /// changes. Unavailable symbols remain deferred without backend state.
     fn expand_source_specs(&mut self, debugger: &Target) {
-        let roots: Vec<Breakpoint> = self
+        let roots: Vec<BreakpointInfo> = self
             .breakpoints
             .values()
             .filter(|bp| {
@@ -218,7 +218,7 @@ impl BreakpointManager {
     fn defer_symbolic_sites_if(
         &mut self,
         client: &mut dyn DebugBackend,
-        mut site_is_unloaded: impl FnMut(&Breakpoint) -> bool,
+        mut site_is_unloaded: impl FnMut(&BreakpointInfo) -> bool,
     ) -> usize {
         let ids = self
             .breakpoints

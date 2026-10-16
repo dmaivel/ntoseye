@@ -7,10 +7,11 @@ use std::collections::{BTreeMap, HashSet};
 use std::ops::ControlFlow;
 
 use super::{DiagnosticValue, Target, fast_ref_address};
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::layout::utf16le_lossy;
+use crate::memory::MemoryOps;
 use crate::types::VirtAddr;
+use ntoseye_macros::record;
 
 /// Subsections one `!ca` walks.
 const MAX_SUBSECTIONS: usize = 1024;
@@ -36,8 +37,9 @@ const VPB_FLAGS: [(u64, &str); 8] = [
     (0x80, "VPB_DISMOUNTING"),
 ];
 
-/// `!ca`: a `_CONTROL_AREA`, its segment, and its subsections.
-#[derive(Debug, Clone)]
+/// The `_CONTROL_AREA` of a section, with its segment and subsections
+/// (`!ca`).
+#[record]
 pub struct ControlAreaDetail {
     pub address: VirtAddr,
     pub segment: VirtAddr,
@@ -45,85 +47,106 @@ pub struct ControlAreaDetail {
     pub pfn_references: u64,
     pub mapped_views: u64,
     pub user_references: u64,
-    /// `u.LongFlags` and the `_MMSECTION_FLAGS` bits set in it.
+    /// `u.LongFlags`.
+    #[record(hex)]
     pub flags: u64,
+    /// The `_MMSECTION_FLAGS` bits set in `flags`.
     pub flag_names: Vec<String>,
     pub file_object: VirtAddr,
     pub file_name: DiagnosticValue<String>,
     pub segment_detail: DiagnosticValue<SegmentDetail>,
     pub subsections: Vec<SubsectionDetail>,
     /// Why the subsection walk stopped before a null `NextSubsection`.
+    /// `None` if the walk got to a null `NextSubsection`.
     pub subsections_stopped: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+/// A control area's `_SEGMENT`.
+#[record]
 pub struct SegmentDetail {
     pub total_ptes: u64,
+    /// Bytes.
+    #[record(hex)]
     pub size: u64,
     pub committed_pages: u64,
-    /// `None` for a data file's segment, whose prototype PTEs are in its
-    /// subsections.
+    /// `None` for the segment of a data file, whose prototype PTEs are in
+    /// its subsections.
     pub prototype_ptes: Option<VirtAddr>,
 }
 
-#[derive(Debug, Clone)]
+/// A `_SUBSECTION` after a control area.
+#[record]
 pub struct SubsectionDetail {
     pub address: VirtAddr,
+    /// Its first prototype PTE.
     pub base_pte: VirtAddr,
     pub ptes: u64,
     pub unused_ptes: u64,
+    #[record(hex)]
     pub starting_sector: u64,
+    #[record(hex)]
     pub sectors: u64,
-    /// The MM protection of `SubsectionFlags`.
+    /// The MM protection in `SubsectionFlags`.
+    #[record(hex)]
     pub protection: u64,
 }
 
-/// `!vpb`: a volume parameter block.
-#[derive(Debug, Clone)]
+/// A volume parameter block (`!vpb`).
+#[record]
 pub struct VpbDetail {
     pub address: VirtAddr,
+    #[record(hex)]
     pub flags: u64,
+    /// The `VPB_*` bits set in `flags`.
     pub flag_names: Vec<&'static str>,
     /// The mounted file system's volume device object.
     pub device_object: VirtAddr,
     pub device_name: Option<String>,
-    /// The storage device the volume is on.
+    /// The storage device that holds the volume.
     pub real_device: VirtAddr,
     pub real_device_name: Option<String>,
+    #[record(hex)]
     pub serial_number: u32,
     pub reference_count: u32,
     pub volume_label: String,
 }
 
-/// `!filecache`: the cache manager's mapped views, from its VACB arrays.
-#[derive(Debug, Clone)]
+/// The mapped views of the cache manager, from its VACB arrays
+/// (`!filecache`).
+#[record]
 pub struct FileCacheDetail {
     pub vacb_arrays: u64,
     /// `CcNumberOfFreeVacbs`.
     pub free_vacbs: DiagnosticValue<u64>,
-    /// VACBs mapping a view.
+    /// The VACBs that map a view.
     pub active_vacbs: u64,
     pub mapped_bytes: u64,
-    /// Present pages in the mapped views.
+    /// The bytes in the mapped views that are present in memory.
     pub valid_bytes: u64,
-    /// One entry per shared cache map with a mapped view, most valid first,
-    /// up to 1,024.
+    /// One entry for each shared cache map that has a mapped view, most
+    /// valid bytes first, up to 1,024 entries.
     pub files: Vec<CachedFile>,
-    /// The shared cache maps with a mapped view, listed or not.
+    /// The number of shared cache maps that have a mapped view, including
+    /// the maps that `files` does not list.
     pub file_count: u64,
+    /// Whether an interrupt request stopped the walk early.
     pub interrupted: bool,
 }
 
-#[derive(Debug, Clone)]
+/// A file that the cache manager maps a view of.
+#[record]
 pub struct CachedFile {
     pub shared_cache_map: VirtAddr,
     pub file_object: VirtAddr,
     pub file_name: DiagnosticValue<String>,
+    /// Bytes.
     pub file_size: DiagnosticValue<u64>,
+    /// Bytes.
     pub valid_data_length: DiagnosticValue<u64>,
     pub open_count: DiagnosticValue<u64>,
     pub dirty_pages: DiagnosticValue<u64>,
     pub mapped_vacbs: u64,
+    /// The bytes in the mapped views that are present in memory.
     pub valid_bytes: u64,
 }
 

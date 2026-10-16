@@ -531,11 +531,19 @@ fn run(cli: Cli) -> Result<()> {
     let mut ctx = Session::open_with_progress(&spec, &mut |line| {
         crate::output::write_stderr_fmt(format_args!("{}\n", line.bright_black()));
     })?;
-    if plain_repl {
+    let result = if plain_repl {
         start_plain_repl(&mut ctx)
     } else {
         start_repl(&mut ctx)
-    }
+    };
+    // The process ends with the REPL. The session still drops, so the
+    // backend resumes and detaches as it must, but the symbol store is
+    // millions of small allocations (every name of every loaded PDB), which
+    // take a noticeable fraction of a second to free one by one and which
+    // the operating system reclaims at exit anyway, so one reference to it
+    // is leaked to keep it from being freed.
+    std::mem::forget(std::sync::Arc::clone(&ctx.target.symbols));
+    result
 }
 
 fn live_spec(args: &TargetOptions, backend: Backend) -> TargetSpec {

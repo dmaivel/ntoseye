@@ -3,8 +3,10 @@
 //! page for each hypercall, and HvCallGetPartitionId (0x0046), which the
 //! current pages name without a code, from TLFS 6.0b.
 
+use ntoseye_macros::record;
+
 use super::evmcs::EvmcsState;
-use super::hv_layout::HypercallEntry;
+use super::hv_layout::Hypercall;
 use super::hypercall_input::{DecodedHypercall, HypercallControl};
 
 /// `(code, name, rep)`, in code order.
@@ -105,7 +107,7 @@ pub fn hypercall_code(name: &str) -> Option<u16> {
 
 /// The name ntoseye gives the handler of call code `code`: that of the
 /// lowest code it serves (see [`hypervisor_symbols`]).
-pub fn handler_name(table: &[HypercallEntry], code: u16) -> Option<String> {
+pub fn handler_name(table: &[Hypercall], code: u16) -> Option<String> {
     let handler = table.get(usize::from(code))?.handler;
     let lowest = table.iter().position(|entry| entry.handler == handler)?;
     Some(code_name(lowest))
@@ -120,30 +122,51 @@ fn code_name(code: usize) -> String {
     }
 }
 
-/// The virtual processor whose exit a processor in the Windows hypervisor
-/// handles, as a hypercall's caller: its partition, its index, the VTL it
-/// runs in, and what its exit says of the call.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HypercallCaller {
+/// The virtual processor whose hypercall a processor halted in the Windows
+/// hypervisor handles (`cpu.hypercall_caller()`), found as `!hvcall` and a
+/// hypercall breakpoint's filter find it: the call as the caller made it,
+/// and the caller's memory, which a hypercall breakpoint's condition reads.
+#[record(impl)]
+#[derive(PartialEq, Eq)]
+pub struct HypercallCallerInfo {
+    /// The caller's partition ID (the root partition's is 1).
+    #[record(hex, rename = "partition_id")]
     pub partition: u64,
-    /// The partition is the root partition.
+    /// Whether the caller is a VP of the root partition (Windows itself)
+    /// rather than of a guest partition.
     pub root: bool,
+    /// The caller's VP index in its partition.
+    #[record(rename = "vp_index")]
     pub vp: u32,
+    /// The VTL that made the call.
     pub vtl: u8,
+    #[record(skip)]
     pub input: HypercallInput,
     /// Its registers at its VMCALL, as `.vtlcxr` selects a saved state's:
     /// RIP, RSP, flags, control and segment registers from its eVMCS, and
     /// the general-purpose registers when they are known. A hypercall
     /// breakpoint's condition sees these.
+    #[record(skip)]
     pub registers: std::collections::HashMap<String, u64>,
     /// The calling VTL's state at its VMCALL, whose EPT and CR3 a hypercall
     /// breakpoint's condition reads the caller's memory through. `None`
     /// when the state ntoseye found is an older exit's, as its registers
     /// then are.
+    #[record(skip)]
     pub state: Option<EvmcsState>,
 }
 
-impl HypercallCaller {
+#[record]
+impl HypercallCallerInfo {
+    /// The call with its input decoded, as `!hvcall` shows it, or `None`
+    /// when the caller's registers are not known.
+    #[record(getter)]
+    pub fn hypercall(&self) -> Option<DecodedHypercall> {
+        self.input.call().cloned()
+    }
+}
+
+impl HypercallCallerInfo {
     /// `root partition VP 2 VTL0`, or `partition 0x4 VP 1 VTL0`.
     pub fn label(&self) -> String {
         if self.root {
@@ -298,7 +321,7 @@ pub fn hypercall_page_symbols(code: &[u8]) -> Vec<(&'static str, u32, u32)> {
 /// `VmExitEntry`, numbered after the first.
 pub fn hypervisor_symbols(
     base: u64,
-    table: &[HypercallEntry],
+    table: &[Hypercall],
     exit_entries: &[u64],
 ) -> Vec<(String, u32)> {
     let rva = |address: u64| u32::try_from(address.checked_sub(base)?).ok();
@@ -450,14 +473,16 @@ mod tests {
         );
     }
 
-    fn entry(rva: u64) -> HypercallEntry {
-        HypercallEntry {
+    fn entry(rva: u64) -> Hypercall {
+        Hypercall {
+            code: 0,
+            implemented: false,
             handler: BASE + rva,
             flags: 0,
-            input: 0,
-            input_element: 0,
-            output: 0,
-            output_element: 0,
+            input_size: 0,
+            input_element_size: 0,
+            output_size: 0,
+            output_element_size: 0,
         }
     }
 

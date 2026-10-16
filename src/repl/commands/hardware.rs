@@ -1,275 +1,429 @@
 //! Hang diagnosis from the processor blocks (`!qlocks`, `!ipi`), I/O-port
 //! access (`ib`/`iw`/`id`, `ob`/`ow`/`od`), and PCI (`!pcitree`, `!pci`).
 
-use crate::error::Result;
+use std::borrow::Cow;
+
+use ntoseye_macros::{command, grammar};
+
+use crate::error::{Error, Result};
 use crate::expr::Expr;
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
+use crate::session::Session;
 use crate::target::DiagnosticValue;
 use crate::target::hang::{
-    IpiProcessor, QueuedLockState, QueuedLocksDetail, ipi_frozen_name, ipi_request_type_name,
+    IpiProcessor, IpiState, QueuedLockState, QueuedLocks, ipi_frozen_name, ipi_request_type_name,
 };
 use crate::target::pci::{
-    CAPABILITY_PCI_EXPRESS, PCI_CONFIG_SIZE, PciFunctionConfig, PciRawRange, PciRequest, PciTree,
-    PciTreeBus, PciTreeDevice, capabilities, capability_name, class_name, command_flags,
-    extended_capabilities, extended_capability_name, parse_pci_request, status_flags,
+    CAPABILITY_PCI_EXPRESS, PCI_CONFIG_SIZE, PCI_EXTENDED_CONFIG_SIZE, PciFunction, PciQuery,
+    PciRawRange, PciRequest, PciScan, PciTree, PciTreeBus, PciTreeDevice, capabilities,
+    capability_name, class_name, command_flags, extended_capabilities, extended_capability_name,
+    parse_pci_request, status_flags,
 };
-use crate::types::VirtAddr;
 use crate::ui;
 
-repl_command! {
-    cmd_qlocks;
-    names: ["!qlocks", "qlocks"],
-    usage: "!qlocks",
-    summary: "Show which processors own or wait for each numbered queued spinlock.",
-    details: "Reads the _KPRCB.LockQueue entries of each processor, which hold one _KSPIN_LOCK_QUEUE for each _KSPIN_LOCK_QUEUE_NUMBER lock. The table has the same layout as in WinDbg, with one row for each lock and one column for each processor. O marks the owner, and 1-n marks the wait order, which the command finds by following the queue links from the owner. C marks an entry whose owner or wait bits do not agree with the links. The table shows only the numbered locks (KeAcquireQueuedSpinLock). In-stack queued spinlocks are on the stacks of the callers that acquire them.",
-    target: Kernel,
+/// Show which processors own or wait for each numbered queued spinlock.
+///
+/// Reads the _KPRCB.LockQueue entries of each processor, which hold one
+/// _KSPIN_LOCK_QUEUE for each _KSPIN_LOCK_QUEUE_NUMBER lock. The table has the
+/// same layout as in WinDbg, with one row for each lock and one column for each
+/// processor. O marks the owner, and 1-n marks the wait order, which the
+/// command finds by following the queue links from the owner. C marks an entry
+/// whose owner or wait bits do not agree with the links. The table shows only
+/// the numbered locks (KeAcquireQueuedSpinLock). In-stack queued spinlocks are
+/// on the stacks of the callers that acquire them.
+#[command(
+    names = ["!qlocks", "qlocks"],
+    category = "cpu",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    python_name = "queued_locks",
+)]
+fn qlocks(session: &mut Session) -> Result<QueuedLocks> {
+    session
+        .target
+        .queued_locks()
+        .map_err(|error| Error::DebugInfo(format!("failed to read the queued spinlocks: {error}")))
 }
 
-repl_command! {
-    cmd_ipi;
-    names: ["!ipi", "ipi"],
-    usage: "!ipi [processor]",
-    summary: "Show the interprocessor interrupt (IPI) state of one processor or of all processors.",
-    details: "For each processor, shows the IPI fields that its _KPRCB has on this Windows build. IpiFrozen is the freeze state that the debugger and KeFreezeExecution control (Running, Frozen, Freeze owner, ...). TargetCount and PacketBarrier apply to the processor as a sender and show the targets that did not finish its packet yet. The command also shows SelfIpiRequestSummary and IpiFrame, the trap frame of the IPI that the processor services now. Windows 10 and later builds have one mailbox for each sender, and on these builds the command also shows the requests that are in the queue of the processor and are not taken yet. For each request, it shows the sender, the request type, and for a packet, the worker routine and parameters. The request type (packet, TB flush, or cache flush) comes from RequestSummary. For the processor as a sender, the command also shows the processors whose queues still hold its request.",
-    completion: Expression,
-    target: Kernel,
+impl Render for QueuedLocks {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_queued_locks(self);
+    }
 }
 
-repl_command! {
-    cmd_pcitree;
-    names: ["!pcitree", "pcitree"],
-    usage: "!pcitree",
-    summary: "Show the PCI bus hierarchy that pci.sys tracks, with the functions on each bus.",
-    details: "Reads the pci.sys segment list (pci!PciSegmentList), the root buses of each segment, and the functions and child buses of each bus. The data comes from the extensions of the driver (pci!_PCI_BUS and pci!_PCI_DEVICE), which exist on Windows 8 and later. Because the command reads only guest memory, it works on all backends. A bus line shows the bus number and the FDO extension. A function line shows the device and function number, the vendor and device ID, the PDO extension (devext), the PDO (devstack, for !devstack), and the class code and name. The secondary bus of a bridge follows the bridge and is indented. The JSON output also has the PnP instance path of each function.",
-    target: Kernel,
+/// The processor of `!ipi` (one word) or `!ready` (the rest of the line),
+/// as an expression; omitted, every processor.
+fn processor_filter(
+    cx: &mut ArgCx<'_, '_>,
+    text: Option<String>,
+) -> std::result::Result<Option<u16>, ArgError> {
+    let Some(text) = text else {
+        return Ok(None);
+    };
+    let value = Expr::eval_with_radix(&text, &cx.state.ctx.target, cx.state.radix)
+        .map_err(|error| ArgError::Message(format!("invalid processor '{text}': {error}")))?
+        .0;
+    u16::try_from(value)
+        .map(Some)
+        .map_err(|_| ArgError::Message(format!("processor index out of range: {value:#x}")))
 }
 
-repl_command! {
-    cmd_pci;
-    names: ["!pci", "pci"],
-    usage: "!pci [flags] [bus [device [function [min max]]]]",
-    summary: "Read and decode PCI configuration space.",
-    details: "Scans a bus (0 by default) in the same way as WinDbg. The command reads function 0 of each device, and functions 1-7 when function 0 is multi-function, and prints one line for each function. The line shows device:function, vendor:device.revision, the command and status registers, the class, and the subsystem IDs or, for a bridge, the primary->secondary-subordinate buses. Cmd letters: i I/O space, m memory space, b bus master, w memory write and invalidate, p parity error response, s SERR. Sts letters: c capability list, 6 66 MHz, p master data parity error, A signaled target abort, s signaled system error. All arguments are hex. Flags: 0x1 is verbose and decodes the full header, including the class code, the header type, the command and status bits by name, the BARs, the expansion ROM, the bridge bus numbers, the interrupt pin and line, and the capability lists. 0x2 scans buses 0 through bus. 0x4 shows the raw bytes of the 64-byte header, and 0x8 shows the same bytes as dwords. 0x40 shows the capability lists (the PCI capabilities, and the extended capabilities of a PCI Express function). 0x100 shows the raw bytes of the 256-byte configuration space. If you give a device and a function, min and max dump that range, which can include extended space (0-0xfff). Configuration space contains device registers and is not RAM, so the command reads it through the backend. Over kd/kdnet, the HAL reads it (DbgKdGetBusDataApi, segment 0). Over gdb, the QEMU stub reads the ECAM page of the function in its physical-memory mode, and the command finds this page from the ACPI MCFG table that the HAL keeps. The memory and dump backends cannot read configuration space, but !pcitree works on them. The target must be halted.",
-    completion: Expression,
-    target: Kernel,
+/// `!ipi`'s processor: one word.
+#[grammar(usage = "[processor]", complete = [Expression])]
+fn ipi_processor(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Option<u16>, ArgError> {
+    let text = cursor.word().map(Cow::into_owned);
+    processor_filter(cx, text)
 }
 
-const PORT_READ_DETAILS: &str = "Reads the port (a byte for ib, a word for iw, a dword for id) on the current processor. The command uses the Windows KD protocol (DbgKdReadIoSpaceApi), so it needs the kd or kdnet backend and a halted target, and the GDB, memory, and dump backends have no I/O space. The port must be aligned to the access size. As on real hardware, a port read can change the device state (for example, a FIFO or a status latch).";
-
-const PORT_WRITE_DETAILS: &str = "Writes the value to the port (a byte for ob, a word for ow, a dword for od) on the current processor. The command uses the Windows KD protocol (DbgKdWriteIoSpaceApi), so it needs the kd or kdnet backend and a halted target. The port must be aligned to the access size, and the value must fit in it.";
-
-repl_command! {
-    cmd_ib;
-    names: ["ib"],
-    usage: "ib <port>",
-    summary: "Read a byte from an I/O port.",
-    details: PORT_READ_DETAILS,
-    completion: Expression,
-    target: Kernel,
+/// `!ready`'s processor: the rest of the line.
+#[grammar(usage = "[{}]", complete = [Expression])]
+pub fn ready_processor(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Option<u16>, ArgError> {
+    let text = (cursor.remaining() != 0).then(|| cursor.rest());
+    processor_filter(cx, text)
 }
 
-repl_command! {
-    cmd_ob;
-    names: ["ob"],
-    usage: "ob <port> <value>",
-    summary: "Write a byte to an I/O port.",
-    details: PORT_WRITE_DETAILS,
-    completion: Expression,
-    target: Kernel,
+/// Show the interprocessor interrupt (IPI) state of one processor or of all
+/// processors.
+///
+/// For each processor, shows the IPI fields that its _KPRCB has on this Windows
+/// build. IpiFrozen is the freeze state that the debugger and KeFreezeExecution
+/// control (Running, Frozen, Freeze owner, ...). TargetCount and PacketBarrier
+/// apply to the processor as a sender and show the targets that did not finish
+/// its packet yet. The command also shows SelfIpiRequestSummary and IpiFrame,
+/// the trap frame of the IPI that the processor services now. Windows 10 and
+/// later builds have one mailbox for each sender, and on these builds the
+/// command also shows the requests that are in the queue of the processor and
+/// are not taken yet. For each request, it shows the sender, the request type,
+/// and for a packet, the worker routine and parameters. The request type
+/// (packet, TB flush, or cache flush) comes from RequestSummary. For the
+/// processor as a sender, the command also shows the processors whose queues
+/// still hold its request.
+#[command(
+    names = ["!ipi", "ipi"],
+    category = "cpu",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+)]
+fn ipi(
+    session: &mut Session,
+    #[arg(parse = ipi_processor, positional)] processor: Option<u16>,
+) -> Result<IpiState> {
+    session
+        .target
+        .ipi_state(processor)
+        .map_err(|error| Error::DebugInfo(format!("failed to read IPI state: {error}")))
 }
 
-repl_command! {
-    cmd_iw;
-    names: ["iw"],
-    usage: "iw <port>",
-    summary: "Read a word from an I/O port.",
-    details: PORT_READ_DETAILS,
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_ow;
-    names: ["ow"],
-    usage: "ow <port> <value>",
-    summary: "Write a word to an I/O port.",
-    details: PORT_WRITE_DETAILS,
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_id;
-    names: ["id"],
-    usage: "id <port>",
-    summary: "Read a dword from an I/O port.",
-    details: PORT_READ_DETAILS,
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_od;
-    names: ["od"],
-    usage: "od <port> <value>",
-    summary: "Write a dword to an I/O port.",
-    details: PORT_WRITE_DETAILS,
-    completion: Expression,
-    target: Kernel,
-}
-
-impl ReplState<'_> {
-    fn cmd_ib(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.read_port(invocation, 1)
-    }
-
-    fn cmd_ob(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.write_port(invocation, 1)
-    }
-
-    fn cmd_iw(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.read_port(invocation, 2)
-    }
-
-    fn cmd_ow(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.write_port(invocation, 2)
-    }
-
-    fn cmd_id(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.read_port(invocation, 4)
-    }
-
-    fn cmd_od(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.write_port(invocation, 4)
-    }
-
-    /// `ib`/`iw`/`id`: WinDbg's `port: value` line.
-    fn read_port(&mut self, invocation: CommandInvocation<'_>, size: u8) -> Result<()> {
-        let [port] = invocation.argv.as_slice() else {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        };
-        let Some(VirtAddr(port)) = self.eval_or_report(port) else {
-            return Ok(());
-        };
-        match self.ctx.read_io_port(port, size) {
-            Ok(value) => outln!(
-                "{port:08x}: {value:0width$x}",
-                width = usize::from(size) * 2
-            ),
-            Err(error) => error!("{}: {error}", invocation.name),
-        }
-        Ok(())
-    }
-
-    fn write_port(&mut self, invocation: CommandInvocation<'_>, size: u8) -> Result<()> {
-        let [port, value] = invocation.argv.as_slice() else {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        };
-        let Some(VirtAddr(port)) = self.eval_or_report(port) else {
-            return Ok(());
-        };
-        let Some(VirtAddr(value)) = self.eval_or_report(value) else {
-            return Ok(());
-        };
-        if let Err(error) = self.ctx.write_io_port(port, size, value) {
-            error!("{}: {error}", invocation.name);
-        }
-        Ok(())
-    }
-    fn cmd_pcitree(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if !invocation.argv.is_empty() {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        match self.ctx.target.pci_tree() {
-            Ok(tree) => print_pci_tree(&tree),
-            Err(error) => error!("failed to read pci.sys's device tree: {error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_pci(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let mut values = Vec::with_capacity(invocation.argv.len());
-        for text in &invocation.argv {
-            let Some(VirtAddr(value)) = self.eval_or_report(text) else {
-                return Ok(());
-            };
-            values.push(value);
-        }
-        let request = match parse_pci_request(&values) {
-            Ok(request) => request,
-            Err(error) => {
-                error!("!pci: {error}");
-                return Ok(());
-            }
-        };
-        let scan = match self.ctx.scan_pci(&request.query) {
-            Ok(scan) => scan,
-            Err(error) => {
-                error!("!pci: {error}");
-                return Ok(());
-            }
-        };
-        print_pci_scan(&request, &scan.functions);
-        if scan.interrupted {
-            outln!("(interrupted)");
-        }
-        Ok(())
-    }
-
-    fn cmd_qlocks(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if !invocation.argv.is_empty() {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        match self.ctx.target.queued_locks() {
-            Ok(detail) => print_queued_locks(&detail),
-            Err(error) => error!("failed to read the queued spinlocks: {error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_ipi(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let processor = match invocation.arg(0) {
-            None => None,
-            Some(text) => match Expr::eval_with_radix(text, &self.ctx.target, self.radix) {
-                Ok(value) => match u16::try_from(value.0) {
-                    Ok(processor) => Some(processor),
-                    Err(_) => {
-                        error!("processor index out of range: {:#x}", value.0);
-                        return Ok(());
-                    }
-                },
-                Err(error) => {
-                    error!("invalid processor '{text}': {error}");
-                    return Ok(());
-                }
-            },
-        };
-        let detail = match self.ctx.target.ipi_state(processor) {
-            Ok(detail) => detail,
-            Err(error) => {
-                error!("failed to read IPI state: {error}");
-                return Ok(());
-            }
-        };
-        for processor in &detail.processors {
+impl Render for IpiState {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        for processor in &self.processors {
             print_ipi_processor(processor);
         }
-        for error in &detail.errors {
+        for error in &self.errors {
             outln!(
                 "processor {}: <unavailable: {}>",
                 error.processor,
                 error.message
             );
         }
-        Ok(())
     }
 }
 
-fn print_queued_locks(detail: &QueuedLocksDetail) {
+/// Show the PCI bus hierarchy that pci.sys tracks, with the functions on each
+/// bus.
+///
+/// Reads the pci.sys segment list (pci!PciSegmentList), the root buses of each
+/// segment, and the functions and child buses of each bus. The data comes from
+/// the extensions of the driver (pci!_PCI_BUS and pci!_PCI_DEVICE), which exist
+/// on Windows 8 and later. Because the command reads only guest memory, it
+/// works on all backends. A bus line shows the bus number and the FDO
+/// extension. A function line shows the device and function number, the vendor
+/// and device ID, the PDO extension (devext), the PDO (devstack, for
+/// !devstack), and the class code and name. The secondary bus of a bridge
+/// follows the bridge and is indented. The JSON output also has the PnP
+/// instance path of each function.
+#[command(
+    names = ["!pcitree", "pcitree"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    python_name = "pci_tree",
+)]
+fn pcitree(session: &mut Session) -> Result<PciTree> {
+    session
+        .target
+        .pci_tree()
+        .map_err(|error| Error::DebugInfo(format!("failed to read pci.sys's device tree: {error}")))
+}
+
+impl Render for PciTree {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_pci_tree(self);
+    }
+}
+
+/// `!pci`'s words, each an expression, as WinDbg reads them.
+#[grammar(usage = "[flags] [bus [device [function [min max]]]]", complete = Expression)]
+fn pci_request(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<PciRequest, ArgError> {
+    let mut values = Vec::with_capacity(cursor.remaining());
+    while let Some(text) = cursor.word() {
+        values.push(cx.eval(&text)?.0);
+    }
+    parse_pci_request(&values).map_err(|error| ArgError::Message(format!("!pci: {error}")))
+}
+
+/// A `!pci` scan and the request that chose what it shows.
+pub struct PciReport {
+    request: PciRequest,
+    scan: PciScan,
+}
+
+/// Read and decode PCI configuration space.
+///
+/// Scans a bus (0 by default) in the same way as WinDbg. The command reads
+/// function 0 of each device, and functions 1-7 when function 0 is
+/// multi-function, and prints one line for each function. The line shows
+/// device:function, vendor:device.revision, the command and status registers,
+/// the class, and the subsystem IDs or, for a bridge, the
+/// primary->secondary-subordinate buses. Cmd letters: i I/O space, m memory
+/// space, b bus master, w memory write and invalidate, p parity error response,
+/// s SERR. Sts letters: c capability list, 6 66 MHz, p master data parity
+/// error, A signaled target abort, s signaled system error. All arguments are
+/// hex. Flags: 0x1 is verbose and decodes the full header, including the class
+/// code, the header type, the command and status bits by name, the BARs, the
+/// expansion ROM, the bridge bus numbers, the interrupt pin and line, and the
+/// capability lists. 0x2 scans buses 0 through bus. 0x4 shows the raw bytes of
+/// the 64-byte header, and 0x8 shows the same bytes as dwords. 0x40 shows the
+/// capability lists (the PCI capabilities, and the extended capabilities of a
+/// PCI Express function). 0x100 shows the raw bytes of the 256-byte
+/// configuration space. If you give a device and a function, min and max dump
+/// that range, which can include extended space (0-0xfff). Configuration space
+/// contains device registers and is not RAM, so the command reads it through
+/// the backend. Over kd/kdnet, the HAL reads it (DbgKdGetBusDataApi, segment
+/// 0). Over gdb, the QEMU stub reads the ECAM page of the function in its
+/// physical-memory mode, and the command finds this page from the ACPI MCFG
+/// table that the HAL keeps. The memory and dump backends cannot read
+/// configuration space, but !pcitree works on them. The target must be halted.
+#[command(
+    names = ["!pci", "pci"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    forms = [pci],
+)]
+fn pci_command(
+    session: &mut Session,
+    #[arg(parse = pci_request)] request: PciRequest,
+) -> Result<PciReport> {
+    let scan = session
+        .scan_pci(&request.query)
+        .map_err(|error| Error::DebugInfo(format!("!pci: {error}")))?;
+    Ok(PciReport { request, scan })
+}
+
+/// Read and decode PCI configuration space (`!pci`) for the functions on
+/// `bus` (through `last_bus`), or for one `device` and `function`. It reads
+/// all 4 KiB of each function, with the extended capabilities, as `config`.
+/// This needs a halted target and a backend that can get to configuration
+/// space (kd/kdnet, or gdb on QEMU).
+#[command(form_of = pci_command, python = Inspect)]
+fn pci(
+    session: &mut Session,
+    #[arg(default = 0, positional)] bus: u8,
+    #[arg(positional)] device: Option<u8>,
+    #[arg(positional)] function: Option<u8>,
+    last_bus: Option<u8>,
+) -> Result<PciScan> {
+    session.scan_pci(&PciQuery {
+        segment: 0,
+        first_bus: bus,
+        last_bus: last_bus.unwrap_or(bus),
+        device,
+        function,
+        size: PCI_EXTENDED_CONFIG_SIZE,
+    })
+}
+
+impl Render for PciReport {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_pci_scan(&self.request, &self.scan.functions);
+        if self.scan.interrupted {
+            outln!("(interrupted)");
+        }
+    }
+}
+
+/// A value read from an I/O port, as `ib`/`iw`/`id` read it.
+pub struct PortValue {
+    port: u64,
+    size: u8,
+    value: u32,
+}
+
+impl Render for PortValue {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        outln!(
+            "{:08x}: {:0width$x}",
+            self.port,
+            self.value,
+            width = usize::from(self.size) * 2
+        );
+    }
+}
+
+/// `ib`/`iw`/`id`: `size` bytes from `port`, the error named as typed.
+fn read_port(session: &mut Session, name: &str, port: u64, size: u8) -> Result<PortValue> {
+    let value = session
+        .read_io_port(port, size)
+        .map_err(|error| Error::DebugInfo(format!("{name}: {error}")))?;
+    Ok(PortValue { port, size, value })
+}
+
+/// `ob`/`ow`/`od`: `value` as `size` bytes to `port`, the error named as
+/// typed.
+fn write_port(session: &mut Session, name: &str, port: u64, size: u8, value: u64) -> Result<()> {
+    session
+        .write_io_port(port, size, value)
+        .map_err(|error| Error::DebugInfo(format!("{name}: {error}")))
+}
+
+/// Read a byte from an I/O port.
+///
+/// Reads the port (a byte for ib, a word for iw, a dword for id) on the current
+/// processor. The command uses the Windows KD protocol (DbgKdReadIoSpaceApi),
+/// so it needs the kd or kdnet backend and a halted target, and the GDB,
+/// memory, and dump backends have no I/O space. The port must be aligned to the
+/// access size. As on real hardware, a port read can change the device state
+/// (for example, a FIFO or a status latch).
+#[command(
+    names = ["ib"],
+    category = "memory and disassembly",
+    kind = Action,
+    target = Kernel,
+    state = Halted,
+    writes = [Hardware],
+    capability = IoPorts,
+    python = none,
+)]
+fn ib(session: &mut Session, #[arg(invoked)] name: &str, port: u64) -> Result<PortValue> {
+    read_port(session, name, port, 1)
+}
+
+/// Write a byte to an I/O port.
+///
+/// Writes the value to the port (a byte for ob, a word for ow, a dword for od)
+/// on the current processor. The command uses the Windows KD protocol
+/// (DbgKdWriteIoSpaceApi), so it needs the kd or kdnet backend and a halted
+/// target. The port must be aligned to the access size, and the value must fit
+/// in it.
+#[command(
+    names = ["ob"],
+    category = "memory and disassembly",
+    kind = Action,
+    target = Kernel,
+    writes = [Hardware],
+    python = none,
+)]
+fn ob(session: &mut Session, #[arg(invoked)] name: &str, port: u64, value: u64) -> Result<()> {
+    write_port(session, name, port, 1, value)
+}
+
+/// Read a word from an I/O port.
+///
+/// Reads the port (a byte for ib, a word for iw, a dword for id) on the current
+/// processor. The command uses the Windows KD protocol (DbgKdReadIoSpaceApi),
+/// so it needs the kd or kdnet backend and a halted target, and the GDB,
+/// memory, and dump backends have no I/O space. The port must be aligned to the
+/// access size. As on real hardware, a port read can change the device state
+/// (for example, a FIFO or a status latch).
+#[command(
+    names = ["iw"],
+    category = "memory and disassembly",
+    kind = Action,
+    target = Kernel,
+    state = Halted,
+    writes = [Hardware],
+    capability = IoPorts,
+    python = none,
+)]
+fn iw(session: &mut Session, #[arg(invoked)] name: &str, port: u64) -> Result<PortValue> {
+    read_port(session, name, port, 2)
+}
+
+/// Write a word to an I/O port.
+///
+/// Writes the value to the port (a byte for ob, a word for ow, a dword for od)
+/// on the current processor. The command uses the Windows KD protocol
+/// (DbgKdWriteIoSpaceApi), so it needs the kd or kdnet backend and a halted
+/// target. The port must be aligned to the access size, and the value must fit
+/// in it.
+#[command(
+    names = ["ow"],
+    category = "memory and disassembly",
+    kind = Action,
+    target = Kernel,
+    writes = [Hardware],
+    python = none,
+)]
+fn ow(session: &mut Session, #[arg(invoked)] name: &str, port: u64, value: u64) -> Result<()> {
+    write_port(session, name, port, 2, value)
+}
+
+/// Read a dword from an I/O port.
+///
+/// Reads the port (a byte for ib, a word for iw, a dword for id) on the current
+/// processor. The command uses the Windows KD protocol (DbgKdReadIoSpaceApi),
+/// so it needs the kd or kdnet backend and a halted target, and the GDB,
+/// memory, and dump backends have no I/O space. The port must be aligned to the
+/// access size. As on real hardware, a port read can change the device state
+/// (for example, a FIFO or a status latch).
+#[command(
+    names = ["id"],
+    category = "memory and disassembly",
+    kind = Action,
+    target = Kernel,
+    state = Halted,
+    writes = [Hardware],
+    capability = IoPorts,
+    python = none,
+)]
+fn id(session: &mut Session, #[arg(invoked)] name: &str, port: u64) -> Result<PortValue> {
+    read_port(session, name, port, 4)
+}
+
+/// Write a dword to an I/O port.
+///
+/// Writes the value to the port (a byte for ob, a word for ow, a dword for od)
+/// on the current processor. The command uses the Windows KD protocol
+/// (DbgKdWriteIoSpaceApi), so it needs the kd or kdnet backend and a halted
+/// target. The port must be aligned to the access size, and the value must fit
+/// in it.
+#[command(
+    names = ["od"],
+    category = "memory and disassembly",
+    kind = Action,
+    target = Kernel,
+    writes = [Hardware],
+    python = none,
+)]
+fn od(session: &mut Session, #[arg(invoked)] name: &str, port: u64, value: u64) -> Result<()> {
+    write_port(session, name, port, 4, value)
+}
+
+fn print_queued_locks(detail: &QueuedLocks) {
     outln!("Key: O = Owner, 1-n = Wait order, blank = not owned/waiting, C = Corrupt\n");
     let width = detail
         .locks
@@ -512,7 +666,7 @@ const STATUS_LETTERS: [(u16, char); 5] = [
     (0x4000, 's'),
 ];
 
-fn print_pci_scan(request: &PciRequest, functions: &[PciFunctionConfig]) {
+fn print_pci_scan(request: &PciRequest, functions: &[PciFunction]) {
     if functions.is_empty() {
         let query = &request.query;
         let place = match (query.device, query.function) {
@@ -542,7 +696,7 @@ fn print_pci_scan(request: &PciRequest, functions: &[PciFunctionConfig]) {
     }
 }
 
-fn print_pci_function(request: &PciRequest, function: &PciFunctionConfig) {
+fn print_pci_function(request: &PciRequest, function: &PciFunction) {
     let config = &function.config;
     let header = &function.header;
     let class = class_name(header.base_class, header.sub_class)
@@ -606,7 +760,7 @@ fn print_pci_function(request: &PciRequest, function: &PciFunctionConfig) {
             outln!(
                 "{INDENT}BAR{} {} {:0width$x}{}",
                 bar.index,
-                bar.kind.name(),
+                bar.kind.as_str(),
                 bar.address,
                 if bar.prefetchable {
                     " prefetchable"

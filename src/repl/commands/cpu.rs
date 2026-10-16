@@ -1,20 +1,21 @@
 use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressStyle};
+use ntoseye_macros::{command, grammar};
 use owo_colors::OwoColorize;
 use tabled::builder::Builder;
 
-use crate::cpu_state;
-use crate::dbg_backend::{DebugCapability, processor_index_from_backend_thread_id};
+use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::error::{Error, Result};
 use crate::expr::Expr;
 use crate::output;
+use crate::repl::args::{ArgCursor, ArgCx, ArgError, FromArg};
 use crate::repl::*;
+use crate::session::Session;
 use crate::session::{UserThreadSummary, VcpuInfo};
 use crate::target::cpu::{
-    CpuInfoDetail, CpuTriageInfo, DescriptorDetail, GdtDetail, GdtEntryDetail, IdtDetail,
-    IdtEntryDetail, IrqlDetail, PcrDetail, PrcbDetail, ProcessorStateDetail,
-    SpecialRegistersDetail, msr_name, parse_msr_name,
+    CpuInfo, CpuTriageFallback, DescriptorRegister, Gdt, GdtDescriptor, Idt, IdtGate, Irql, Pcr,
+    Prcb, Processor, ProcessorStateArea, SpecialRegistersArea, msr_name, parse_msr_name,
 };
 use crate::target::{DiagnosticValue, ServedVp, Target};
 use crate::types::{Arch, VirtAddr};
@@ -34,175 +35,44 @@ enum TildeSelector {
     All,
 }
 
-repl_command! {
-    cmd_rdmsr;
-    names: ["rdmsr"],
-    usage: "rdmsr [/p <processor>] <msr>",
-    summary: "Read a model-specific register from a halted processor.",
-    details: "Reads one model-specific register on the selected processor, or on another processor that you select with /p. The dump and memory backends show that MSR access is unavailable.",
-    completion: [None, Expression, Expression],
-    run_state: Halted,
-    target: Kernel,
-}
+impl FromArg for Processor {
+    const COMPLETION: CompletionStrategy = CompletionStrategy::Expression;
 
-repl_command! {
-    cmd_wrmsr;
-    names: ["wrmsr"],
-    usage: "wrmsr <msr> <value>",
-    summary: "Write a model-specific register on the current processor.",
-    details: "Writes one model-specific register on the current processor. You can use a common IA32_* name instead of the numeric MSR.",
-    completion: [Expression, Expression],
-    run_state: Halted,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_pcr;
-    names: ["!pcr", "pcr"],
-    usage: "!pcr [processor]",
-    summary: "Show the main KPCR data of the selected processor.",
-    details: "Shows the KPCR and KPRCB addresses, the thread pointers, the descriptor registers, the TSS, and the available IRQL fields. On AMD64 Windows, kernel GS usually points to the KPCR, and backend GS-base registers are optional.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_prcb;
-    names: ["!prcb", "prcb"],
-    usage: "!prcb [processor]",
-    summary: "Show the main KPRCB data of the selected processor.",
-    details: "Shows the processor number, the thread pointers, the DPC and interrupt counters, and the available ProcessorState metadata of the selected KPRCB.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_irql;
-    names: ["!irql", "irql"],
-    usage: "!irql [processor]",
-    summary: "Show the current IRQL of a processor.",
-    details: "Shows the current IRQL and the Windows level name of the selected processor. At a KD break-in, this is the IRQL that the debugger sees, which can be different from the level before the break-in.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_idt;
-    names: ["!idt", "idt"],
-    usage: "!idt [vector]",
-    summary: "Decode one IDT entry or the bounded 256-entry IDT.",
-    details: "Shows one IDT vector or all 256 entries, with the handler, selector, gate type, DPL, presence, non-nt hooks, and KiIsrThunk chain hints of each entry.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_gdt;
-    names: ["!gdt", "gdt"],
-    usage: "!gdt",
-    summary: "Decode the bounded GDT of the current processor.",
-    details: "Shows the bounded GDT entries of the selected processor, with the base, limit, privilege, mode, and presence of each entry.",
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_dg;
-    names: ["dg"],
-    usage: "dg <first-selector> [last-selector]",
-    summary: "Decode segment selectors from the GDT of the current processor.",
-    details: "Shows each selector from the first to the last, in steps of 8 as WinDbg does. For each selector, it shows the descriptor base, limit, type, privilege level, size (Bg/Nb), granularity (Pg/By), presence (P/NP), long mode (Lo/Nl), and attribute flags. If a selector refers to an LDT (bit 2 set), dg reports this and does not decode the selector. 64-bit Windows has no LDT.",
-    completion: [Expression, Expression],
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_cpuinfo;
-    names: ["!cpuinfo", "cpuinfo"],
-    usage: "!cpuinfo",
-    summary: "Show processor identification, speed, and feature bits.",
-    details: "Shows the processor number, vendor, family, model, stepping, speed, and feature bits if they are available. For a field that is not available, ntoseye uses the triage-dump metadata.",
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_vcpus();
-    names: ["~", "vcpus"],
-    usage: "~",
-    summary: "List vCPU contexts and their RIP values.",
-    details: "`~Ns` selects processor N (zero-based), and `t` and `p` then step that processor. The vCPU id that the list shows also works in place of N (`~p01.03s`, `~p01.03k`). Over `kd` and `kdnet` on an AMD64 target, the other processors run during the step, as in WinDbg. On an ARM64 target, only the processor that stopped the target can step over `kd` or `kdnet`. If a vCPU halted in the Windows hypervisor (VBS), the list also shows where its VTL0 execution stopped, from the saved state of the hypervisor. `~Ns` on that vCPU selects the VTL0 context, and `.cxr` selects the hypervisor registers. A vCPU stopped on the hypervisor's VM-exit entry from outside shows its saved state as `(may be one exit behind)` and keeps the hypervisor registers: KVM writes that state when it enters the hypervisor, so it can still describe the previous exit. A breakpoint on the entry fires after that write, so a vCPU stopped on one shows the current exit.",
-    run_state: Halted,
-}
-
-repl_command! {
-    cmd_vcpu;
-    names: ["vcpu"],
-    usage: "vcpu <id>",
-    summary: "Switch to a different vCPU context.",
-    completion: Vcpu,
-    run_state: Halted,
-    target: Kernel,
-}
-
-fn current_processor(state: &ReplState<'_>) -> u16 {
-    processor_index_from_backend_thread_id(&state.ctx.current_thread).unwrap_or(0)
-}
-
-fn processor_count(state: &mut ReplState<'_>) -> u16 {
-    if let Ok(count) = cpu_state::processor_count(&state.ctx.target) {
-        return count.max(1);
-    }
-    // cpu_state intentionally only depends on Target. A live backend is the
-    // second source of truth when KeNumberProcessors is absent from a dump.
-    state
-        .ctx
-        .backend
-        .thread_list()
-        .ok()
-        .map(|threads| {
-            threads
-                .len()
-                .clamp(1, usize::from(cpu_state::MAX_PROCESSORS)) as u16
+    fn from_arg(cx: &mut ArgCx<'_, '_>, text: &str) -> std::result::Result<Self, ArgError> {
+        let value = cx.eval(text)?.0;
+        u16::try_from(value).map(Processor).map_err(|_| {
+            ArgError::Message(format!(
+                "processor index {value:#x} does not fit in 16 bits"
+            ))
         })
-        .unwrap_or(1)
-}
-
-pub fn parse_processor(state: &mut ReplState<'_>, text: Option<&str>) -> Result<u16> {
-    let count = processor_count(state);
-    let processor = match text {
-        Some(text) => {
-            let value = Expr::eval_with_radix(text, &state.ctx.target, state.radix)?.0;
-            u16::try_from(value).map_err(|_| {
-                Error::DebugInfo(format!(
-                    "processor index {value:#x} does not fit in 16 bits"
-                ))
-            })?
-        }
-        None => current_processor(state),
-    };
-    if processor >= count {
-        return Err(Error::DebugInfo(format!(
-            "processor {processor} out of range (target has {count} processor(s))"
-        )));
     }
-    Ok(processor)
 }
 
-fn command_capability(state: &ReplState<'_>, capability: DebugCapability) -> bool {
-    let capabilities = state.ctx.backend.capabilities();
-    if capabilities
-        .iter()
-        .any(|entry| entry.capability == capability && entry.supported)
-    {
-        true
-    } else {
-        if capability == DebugCapability::Msr {
-            error!(
-                "backend does not support model-specific registers (MSR access is live-backend only)"
-            );
-        } else {
-            error!("backend does not support {}", capability.label());
+/// The processor of a command that reads the current vCPU's and takes no
+/// processor word (`!idt`, `!gdt`, `!cpuinfo`): `None`, the current one.
+#[grammar(usage = "")]
+pub fn current_processor(
+    _: &mut ArgCx<'_, '_>,
+    _: &mut ArgCursor<'_>,
+) -> std::result::Result<Option<Processor>, ArgError> {
+    Ok(None)
+}
+
+/// An MSR by number or by its common `IA32_*` name.
+#[derive(Clone, Copy, Debug)]
+pub struct Msr(pub u32);
+
+impl FromArg for Msr {
+    const COMPLETION: CompletionStrategy = CompletionStrategy::Expression;
+
+    fn from_arg(cx: &mut ArgCx<'_, '_>, text: &str) -> std::result::Result<Self, ArgError> {
+        if let Some(msr) = parse_msr_name(text) {
+            return Ok(Msr(msr));
         }
-        false
+        let value = cx.eval(text)?.0;
+        u32::try_from(value)
+            .map(Msr)
+            .map_err(|_| ArgError::Message(format!("MSR {value:#x} does not fit in 32 bits")))
     }
 }
 
@@ -217,7 +87,7 @@ fn render_decimal(value: &DiagnosticValue<u64>) -> String {
     render_diagnostic(value, |value| format!("{value} ({value:#x})"))
 }
 
-fn render_descriptor(value: &DiagnosticValue<DescriptorDetail>) -> String {
+fn render_descriptor(value: &DiagnosticValue<DescriptorRegister>) -> String {
     render_diagnostic(value, |value| {
         format!("base {} limit {:#x}", ui::addr(value.base.0), value.limit)
     })
@@ -225,7 +95,7 @@ fn render_descriptor(value: &DiagnosticValue<DescriptorDetail>) -> String {
 
 /// An ARM64 `_KPCR` embeds its PRCB, which the first line names, and has
 /// no descriptor tables or TSS, so those rows are AMD64's alone.
-fn print_pcr(detail: &PcrDetail, arch: Arch) {
+fn print_pcr(detail: &Pcr, arch: Arch) {
     let amd64 = arch == Arch::Amd64;
     outln!(
         "KPCR for processor {} at {} (KPRCB {})",
@@ -270,7 +140,7 @@ fn print_pcr(detail: &PcrDetail, arch: Arch) {
     }
 }
 
-fn print_special_registers(value: &SpecialRegistersDetail) {
+fn print_special_registers(value: &SpecialRegistersArea) {
     outln!(
         "  SpecialRegisters    : {} ({} bytes, {})",
         ui::addr(value.address.0),
@@ -279,7 +149,7 @@ fn print_special_registers(value: &SpecialRegistersDetail) {
     );
 }
 
-fn print_processor_state(value: &ProcessorStateDetail) {
+fn print_processor_state(value: &ProcessorStateArea) {
     outln!(
         "  ProcessorState      : {} ({} bytes, {})",
         ui::addr(value.address.0),
@@ -299,7 +169,7 @@ fn print_processor_state(value: &ProcessorStateDetail) {
     }
 }
 
-fn print_prcb(detail: &PrcbDetail) {
+fn print_prcb(detail: &Prcb) {
     outln!(
         "KPRCB for processor {} at {}",
         detail.processor,
@@ -339,7 +209,7 @@ fn print_prcb(detail: &PrcbDetail) {
     }
 }
 
-fn print_irql(detail: &IrqlDetail) {
+fn print_irql(detail: &Irql) {
     match (&detail.value, &detail.level_name) {
         (DiagnosticValue::Available(value), DiagnosticValue::Available(name)) => {
             outln!("processor {} IRQL {} ({})", detail.processor, value, name);
@@ -353,7 +223,7 @@ fn print_irql(detail: &IrqlDetail) {
     }
 }
 
-fn print_idt_entry(detail: &IdtEntryDetail) {
+fn print_idt_entry(detail: &IdtGate) {
     let handler = match &detail.handler {
         DiagnosticValue::Available(handler) => *handler,
         DiagnosticValue::Unavailable(error) => {
@@ -394,7 +264,7 @@ fn print_idt_entry(detail: &IdtEntryDetail) {
     }
 }
 
-fn print_idt(detail: &IdtDetail) {
+fn print_idt(detail: &Idt) {
     outln!(
         "IDT processor {} base {} limit {:#x}",
         detail.processor,
@@ -406,7 +276,7 @@ fn print_idt(detail: &IdtDetail) {
     }
 }
 
-fn print_gdt_entry(detail: &GdtEntryDetail) {
+fn print_gdt_entry(detail: &GdtDescriptor) {
     match &detail.raw {
         DiagnosticValue::Available(_) => {}
         DiagnosticValue::Unavailable(error) => {
@@ -452,7 +322,7 @@ fn print_gdt_entry(detail: &GdtEntryDetail) {
     );
 }
 
-fn print_gdt(detail: &GdtDetail) {
+fn print_gdt(detail: &Gdt) {
     outln!(
         "GDT processor {} base {} limit {:#x} ({} entries)",
         detail.processor,
@@ -496,7 +366,7 @@ fn segment_type_name(system: bool, type_code: u8) -> String {
 }
 
 /// `dg`'s table, in WinDbg's columns.
-fn print_selectors(detail: &GdtDetail, selectors: impl Iterator<Item = u16>) {
+fn print_selectors(detail: &Gdt, selectors: impl Iterator<Item = u16>) {
     fn got<T: Clone>(value: &DiagnosticValue<T>) -> Option<T> {
         match value {
             DiagnosticValue::Available(value) => Some(value.clone()),
@@ -560,7 +430,7 @@ fn print_selectors(detail: &GdtDetail, selectors: impl Iterator<Item = u16>) {
     outln!();
 }
 
-pub fn print_cpuinfo(detail: &CpuInfoDetail) {
+pub fn print_cpuinfo(detail: &CpuInfo) {
     if detail.source == "triage-dump PRCB metadata" {
         outln!("CPU information from triage-dump PRCB metadata");
         outln!("  processor number    : {}", detail.processor);
@@ -617,7 +487,7 @@ pub fn print_cpuinfo(detail: &CpuInfoDetail) {
     }
 }
 
-fn print_triage_fallback(detail: &CpuTriageInfo) {
+fn print_triage_fallback(detail: &CpuTriageFallback) {
     outln!("CPU information from triage-dump PRCB metadata");
     outln!("  processor number    : {}", detail.processor_number);
     outln!("  vendor              : {}", detail.vendor);
@@ -631,15 +501,6 @@ fn print_triage_fallback(detail: &CpuTriageInfo) {
     outln!("  feature bits        : <unavailable>");
 }
 
-fn parse_msr(state: &ReplState<'_>, text: &str) -> Result<u32> {
-    if let Some(msr) = parse_msr_name(text) {
-        return Ok(msr);
-    }
-    let value = Expr::eval_with_radix(text, &state.ctx.target, state.radix)?.0;
-    u32::try_from(value)
-        .map_err(|_| Error::DebugInfo(format!("MSR {value:#x} does not fit in 32 bits")))
-}
-
 fn render_msr_value(target: &Target, value: u64) -> String {
     let raw = ui::addr(value).to_string();
     target
@@ -648,269 +509,434 @@ fn render_msr_value(target: &Target, value: u64) -> String {
         .unwrap_or(raw)
 }
 
+/// The processor of `rdmsr /p <processor>`; omitted, the current vCPU's.
+#[grammar(usage = "[/p <processor>]", complete = [None, Expression])]
+fn msr_processor(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Option<Processor>, ArgError> {
+    if !cursor
+        .peek()
+        .is_some_and(|word| word.eq_ignore_ascii_case(MSR_SWITCH))
+    {
+        return Ok(None);
+    }
+    cursor.word();
+    match cursor.word() {
+        Some(text) => Processor::from_arg(cx, &text).map(Some),
+        None => Err(ArgError::Missing),
+    }
+}
+
+/// An MSR's value on a processor, as `rdmsr` reads it.
+pub struct MsrValue {
+    pub processor: u16,
+    pub msr: u32,
+    pub value: u64,
+}
+
+/// Read a model-specific register from a halted processor.
+///
+/// Reads one model-specific register on the selected processor, or on
+/// another processor that you select with /p. The dump and memory backends
+/// show that MSR access is unavailable.
+#[command(
+    names = ["rdmsr"],
+    category = "cpu",
+    kind = Query,
+    target = Machine,
+    state = Halted,
+    capability = Msr,
+    python = none,
+)]
+fn rdmsr(
+    session: &mut Session,
+    #[arg(parse = msr_processor)] processor: Option<Processor>,
+    msr: Msr,
+) -> Result<MsrValue> {
+    let processor = session.processor(processor)?;
+    let Msr(msr) = msr;
+    let value = session.read_msr(processor, msr).map_err(|error| {
+        Error::DebugInfo(format!(
+            "failed to read {msr:#x} on processor {processor}: {error}"
+        ))
+    })?;
+    Ok(MsrValue {
+        processor,
+        msr,
+        value,
+    })
+}
+
+impl Render for MsrValue {
+    fn render(&self, repl: &mut ReplState<'_>, (): ()) {
+        outln!(
+            "processor {}  {} ({:#x}) = {}",
+            self.processor,
+            msr_name(self.msr).unwrap_or("MSR"),
+            self.msr,
+            render_msr_value(&repl.ctx.target, self.value)
+        );
+    }
+}
+
+/// An MSR write, as `wrmsr` made it.
+pub struct MsrWrite(MsrValue);
+
+/// Write a model-specific register on the current processor.
+///
+/// Writes one model-specific register on the current processor. You can use
+/// a common IA32_* name instead of the numeric MSR.
+#[command(
+    names = ["wrmsr"],
+    category = "cpu",
+    kind = Action,
+    target = Kernel,
+    state = Halted,
+    writes = [Registers],
+    capability = Msr,
+    python = none
+)]
+fn wrmsr(session: &mut Session, msr: Msr, value: u64) -> Result<MsrWrite> {
+    let processor = session.processor(None)?;
+    let Msr(msr) = msr;
+    session.write_msr(processor, msr, value).map_err(|error| {
+        Error::DebugInfo(format!(
+            "failed to write {msr:#x} on processor {processor}: {error}"
+        ))
+    })?;
+    Ok(MsrWrite(MsrValue {
+        processor,
+        msr,
+        value,
+    }))
+}
+
+impl Render for MsrWrite {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        let MsrValue {
+            processor,
+            msr,
+            value,
+        } = self.0;
+        outln!(
+            "processor {}  {} ({:#x}) <- {}",
+            processor,
+            msr_name(msr).unwrap_or("MSR"),
+            msr,
+            ui::addr(value)
+        );
+    }
+}
+
+/// Show the main KPCR data of the selected processor.
+///
+/// Shows the KPCR and KPRCB addresses, the thread pointers, the descriptor
+/// registers, the TSS, and the available IRQL fields. On AMD64 Windows,
+/// kernel GS usually points to the KPCR, and backend GS-base registers are
+/// optional.
+#[command(
+    names = ["!pcr", "pcr"],
+    category = "cpu",
+    kind = Query,
+    target = Kernel,
+    python = Cpu
+)]
+fn pcr(session: &mut Session, #[arg(receiver)] processor: Option<Processor>) -> Result<Pcr> {
+    let processor = session.processor(processor)?;
+    session.inspect_pcr(processor)
+}
+
+impl Render for Pcr {
+    fn render(&self, repl: &mut ReplState<'_>, (): ()) {
+        print_pcr(self, repl.ctx.target.arch());
+    }
+}
+
+/// Show the main KPRCB data of the selected processor.
+///
+/// Shows the processor number, the thread pointers, the DPC and interrupt
+/// counters, and the available ProcessorState metadata of the selected
+/// KPRCB.
+#[command(
+    names = ["!prcb", "prcb"],
+    category = "cpu",
+    kind = Query,
+    target = Kernel,
+    python = Cpu
+)]
+fn prcb(session: &mut Session, #[arg(receiver)] processor: Option<Processor>) -> Result<Prcb> {
+    let processor = session.processor(processor)?;
+    session.target.inspect_prcb(processor)
+}
+
+impl Render for Prcb {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_prcb(self);
+    }
+}
+
+/// Show the current IRQL of a processor.
+///
+/// Shows the current IRQL and the Windows level name of the selected
+/// processor. At a KD break-in, this is the IRQL that the debugger sees,
+/// which can be different from the level before the break-in.
+#[command(
+    names = ["!irql", "irql"],
+    category = "cpu",
+    kind = Query,
+    target = Kernel,
+    python = Cpu
+)]
+fn irql(session: &mut Session, #[arg(receiver)] processor: Option<Processor>) -> Result<Irql> {
+    let processor = session.processor(processor)?;
+    session.target.inspect_irql(processor)
+}
+
+impl Render for Irql {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_irql(self);
+    }
+}
+
+/// An IDT vector, `!idt`'s argument: 0 to 255.
+#[grammar(usage = "[vector]", complete = [Expression])]
+fn idt_vector(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Option<u16>, ArgError> {
+    let Some(text) = cursor.word() else {
+        return Ok(None);
+    };
+    let value = cx.eval(&text)?.0;
+    if value < u64::from(IDT_VECTOR_COUNT) {
+        Ok(Some(value as u16))
+    } else {
+        Err(ArgError::Message(format!(
+            "IDT vector {value:#x} is outside 0..255"
+        )))
+    }
+}
+
+/// Decode one IDT entry or the bounded 256-entry IDT.
+///
+/// Shows one IDT vector or all 256 entries, with the handler, selector, gate
+/// type, DPL, presence, non-nt hooks, and KiIsrThunk chain hints of each
+/// entry.
+#[command(
+    names = ["!idt", "idt"],
+    category = "cpu",
+    kind = Query,
+    target = Kernel,
+    python = Cpu,
+)]
+fn idt(
+    session: &mut Session,
+    #[arg(receiver, parse = current_processor)] processor: Option<Processor>,
+    #[arg(parse = idt_vector, positional)] vector: Option<u16>,
+) -> Result<Idt> {
+    if session.target.arch() == Arch::Arm64 {
+        return Err(Error::DebugInfo(
+            "!idt is not defined on ARM64 targets".into(),
+        ));
+    }
+    let processor = session.processor(processor)?;
+    session
+        .inspect_idt(processor, vector)
+        .map_err(|error| Error::DebugInfo(format!("IDTR unavailable: {error}")))
+}
+
+impl Render for Idt {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_idt(self);
+    }
+}
+
+/// The GDT of `processor`, for `!gdt` and `dg`, which `name` the error on an
+/// ARM64 target.
+fn read_gdt(session: &mut Session, processor: Option<Processor>, name: &str) -> Result<Gdt> {
+    if session.target.arch() == Arch::Arm64 {
+        return Err(Error::DebugInfo(format!(
+            "{name} is not defined on ARM64 targets"
+        )));
+    }
+    let processor = session.processor(processor)?;
+    session
+        .inspect_gdt(processor)
+        .map_err(|error| Error::DebugInfo(format!("GDTR unavailable: {error}")))
+}
+
+/// Decode the bounded GDT of the current processor.
+///
+/// Shows the bounded GDT entries of the selected processor, with the base,
+/// limit, privilege, mode, and presence of each entry.
+#[command(
+    names = ["!gdt", "gdt"],
+    category = "cpu",
+    kind = Query,
+    target = Kernel,
+    python = Cpu,
+)]
+fn gdt(
+    session: &mut Session,
+    #[arg(receiver, parse = current_processor)] processor: Option<Processor>,
+) -> Result<Gdt> {
+    read_gdt(session, processor, "!gdt")
+}
+
+impl Render for Gdt {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_gdt(self);
+    }
+}
+
+/// A segment selector, `dg`'s argument: 16 bits.
+#[derive(Clone, Copy, Debug)]
+pub struct Selector(pub u16);
+
+impl FromArg for Selector {
+    const COMPLETION: CompletionStrategy = CompletionStrategy::Expression;
+
+    fn from_arg(cx: &mut ArgCx<'_, '_>, text: &str) -> std::result::Result<Self, ArgError> {
+        match cx.eval(text)? {
+            VirtAddr(value) if value <= 0xffff => Ok(Selector(value as u16)),
+            _ => Err(ArgError::Message(format!(
+                "'{text}' is not a 16-bit selector"
+            ))),
+        }
+    }
+}
+
+/// The selectors `dg` decodes, with the GDT they index.
+pub struct Selectors {
+    gdt: Gdt,
+    first: u16,
+    last: u16,
+}
+
+/// Decode segment selectors from the GDT of the current processor.
+///
+/// Shows each selector from the first to the last, in steps of 8 as WinDbg
+/// does. For each selector, it shows the descriptor base, limit, type,
+/// privilege level, size (Bg/Nb), granularity (Pg/By), presence (P/NP), long
+/// mode (Lo/Nl), and attribute flags. If a selector refers to an LDT (bit 2
+/// set), dg reports this and does not decode the selector. 64-bit Windows has
+/// no LDT.
+#[command(
+    names = ["dg"],
+    category = "cpu",
+    kind = Query,
+    target = Kernel,
+    python = none,
+)]
+fn dg(
+    session: &mut Session,
+    #[arg(name = "first-selector")] first: Selector,
+    #[arg(name = "last-selector")] last: Option<Selector>,
+) -> Result<Selectors> {
+    let Selector(first) = first;
+    let last = last.map_or(first, |last| last.0);
+    if last < first {
+        return Err(Error::DebugInfo(format!(
+            "the last selector {last:#x} is below the first {first:#x}"
+        )));
+    }
+    let gdt = read_gdt(session, None, "dg")?;
+    Ok(Selectors { gdt, first, last })
+}
+
+impl Render for Selectors {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_selectors(&self.gdt, (self.first..=self.last).step_by(8));
+    }
+}
+
+/// Show processor identification, speed, and feature bits.
+///
+/// Shows the processor number, vendor, family, model, stepping, speed, and
+/// feature bits if they are available. For a field that is not available,
+/// ntoseye uses the triage-dump metadata.
+#[command(
+    names = ["!cpuinfo", "cpuinfo"],
+    category = "cpu",
+    kind = Query,
+    target = Kernel,
+    python = Cpu,
+)]
+fn cpuinfo(
+    session: &mut Session,
+    #[arg(receiver, parse = current_processor)] processor: Option<Processor>,
+) -> Result<CpuInfo> {
+    let processor = session.processor(processor)?;
+    session.target.inspect_cpuinfo(processor)
+}
+
+impl Render for CpuInfo {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_cpuinfo(self);
+    }
+}
+
+/// Switch to a different vCPU context.
+#[command(
+    names = ["vcpu"],
+    category = "processes and modules",
+    kind = Action,
+    target = Machine,
+    state = Halted,
+    python = none,
+)]
+fn vcpu(
+    state: &mut ReplState<'_>,
+    #[arg(name = "id", complete = Vcpu)] requested: String,
+) -> Result<()> {
+    let threads = state
+        .ctx
+        .backend
+        .thread_list()
+        .map_err(|e| Error::DebugInfo(format!("failed to get vCPU list: {e}")))?;
+
+    let thread_id = threads
+        .iter()
+        .find(|thread| thread.as_str() == requested)
+        .cloned()
+        .or_else(|| {
+            Expr::eval_with_radix(&requested, &state.ctx.target, state.radix)
+                .ok()
+                .and_then(|value| u16::try_from(value.0).ok())
+                .and_then(|number| {
+                    threads
+                        .iter()
+                        .find(|thread| {
+                            processor_index_from_backend_thread_id(thread) == Some(number)
+                        })
+                        .cloned()
+                        .or_else(|| threads.get(number as usize).cloned())
+                })
+        });
+    let Some(thread_id) = thread_id else {
+        return Err(Error::DebugInfo(format!(
+            "vCPU '{requested}' not found (use 'vcpus' to list vCPUs)"
+        )));
+    };
+
+    state
+        .ctx
+        .set_current_thread(&thread_id)
+        .map_err(|e| Error::DebugInfo(format!("failed to switch vCPU: {e}")))?;
+
+    state.clear_selected_frame();
+    state.caches.refresh_symbol_context(&state.ctx.target);
+    outln!("switched to vCPU {}\n", state.ctx.current_thread);
+
+    Ok(())
+}
+
 impl ReplState<'_> {
-    fn cmd_rdmsr(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if !command_capability(self, DebugCapability::Msr) {
-            return Ok(());
-        }
-        let (msr_text, processor_text) = match invocation.argv.as_slice() {
-            [msr] => (msr.as_ref(), None),
-            [switch, processor, msr] if switch.as_ref().eq_ignore_ascii_case(MSR_SWITCH) => {
-                (msr.as_ref(), Some(processor.as_ref()))
-            }
-            _ => {
-                outln!("{}\n", command_help(invocation.name));
-                return Ok(());
-            }
-        };
-        let processor = match parse_processor(self, processor_text) {
-            Ok(processor) => processor,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        let msr = match parse_msr(self, msr_text) {
-            Ok(msr) => msr,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        match self.ctx.read_msr(processor, msr) {
-            Ok(value) => outln!(
-                "processor {}  {} ({:#x}) = {}",
-                processor,
-                msr_name(msr).unwrap_or("MSR"),
-                msr,
-                render_msr_value(&self.ctx.target, value)
-            ),
-            Err(error) => error!(
-                "failed to read {:#x} on processor {}: {error}",
-                msr, processor
-            ),
-        }
-        Ok(())
-    }
-
-    fn cmd_wrmsr(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if !command_capability(self, DebugCapability::Msr) {
-            return Ok(());
-        }
-        if invocation.argv.len() != 2 {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        let msr = match parse_msr(self, require_arg!(invocation, 0, "wrmsr")) {
-            Ok(msr) => msr,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        let Some(VirtAddr(value)) = self.eval_or_report(require_arg!(invocation, 1, "wrmsr"))
-        else {
-            return Ok(());
-        };
-        let processor = current_processor(self);
-        match self.ctx.write_msr(processor, msr, value) {
-            Ok(()) => outln!(
-                "processor {}  {} ({:#x}) <- {}",
-                processor,
-                msr_name(msr).unwrap_or("MSR"),
-                msr,
-                ui::addr(value)
-            ),
-            Err(error) => error!(
-                "failed to write {:#x} on processor {}: {error}",
-                msr, processor
-            ),
-        }
-        Ok(())
-    }
-
-    fn cmd_pcr(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if invocation.argv.len() > 1 {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        let processor = match parse_processor(self, invocation.arg(0)) {
-            Ok(processor) => processor,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        match self.ctx.inspect_pcr(processor) {
-            Ok(detail) => print_pcr(&detail, self.ctx.target.arch()),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_prcb(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if invocation.argv.len() > 1 {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        let processor = match parse_processor(self, invocation.arg(0)) {
-            Ok(processor) => processor,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        match self.ctx.target.inspect_prcb(processor) {
-            Ok(detail) => print_prcb(&detail),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_irql(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if invocation.argv.len() > 1 {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        let processor = match parse_processor(self, invocation.arg(0)) {
-            Ok(processor) => processor,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        match self.ctx.target.inspect_irql(processor) {
-            Ok(detail) => print_irql(&detail),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_idt(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if invocation.argv.len() > 1 {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        if self.ctx.target.arch() == Arch::Arm64 {
-            error!("!idt is not defined on ARM64 targets");
-            return Ok(());
-        }
-        let vector = match invocation.arg(0) {
-            Some(text) => match self.eval_or_report(text) {
-                Some(value) if value.0 < u64::from(IDT_VECTOR_COUNT) => Some(value.0 as u16),
-                Some(value) => {
-                    error!("IDT vector {:#x} is outside 0..255", value.0);
-                    return Ok(());
-                }
-                None => return Ok(()),
-            },
-            None => None,
-        };
-        let processor = match parse_processor(self, None) {
-            Ok(processor) => processor,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        match self.ctx.inspect_idt(processor, vector) {
-            Ok(detail) => print_idt(&detail),
-            Err(error) => error!("IDTR unavailable: {error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_gdt(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if !invocation.argv.is_empty() {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        if self.ctx.target.arch() == Arch::Arm64 {
-            error!("!gdt is not defined on ARM64 targets");
-            return Ok(());
-        }
-        let processor = match parse_processor(self, None) {
-            Ok(processor) => processor,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        match self.ctx.inspect_gdt(processor) {
-            Ok(detail) => print_gdt(&detail),
-            Err(error) => error!("GDTR unavailable: {error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_dg(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let first_arg = require_arg!(invocation, 0, "dg");
-        let selector = |arg: &str| match self.eval_or_report(arg)? {
-            VirtAddr(value) if value <= 0xffff => Some(value as u16),
-            _ => {
-                error!("'{arg}' is not a 16-bit selector");
-                None
-            }
-        };
-        let Some(first) = selector(first_arg) else {
-            return Ok(());
-        };
-        let Some(last) = invocation.arg(1).map_or(Some(first), selector) else {
-            return Ok(());
-        };
-        if last < first {
-            error!("the last selector {last:#x} is below the first {first:#x}");
-            return Ok(());
-        }
-        if self.ctx.target.arch() == Arch::Arm64 {
-            error!("dg is not defined on ARM64 targets");
-            return Ok(());
-        }
-        let processor = match parse_processor(self, None) {
-            Ok(processor) => processor,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        let detail = match self.ctx.inspect_gdt(processor) {
-            Ok(detail) => detail,
-            Err(error) => {
-                error!("GDTR unavailable: {error}");
-                return Ok(());
-            }
-        };
-        print_selectors(&detail, (first..=last).step_by(8));
-        Ok(())
-    }
-
-    fn cmd_cpuinfo(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if !invocation.argv.is_empty() {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        let processor = match parse_processor(self, None) {
-            Ok(processor) => processor,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        match self.ctx.target.inspect_cpuinfo(processor) {
-            Ok(detail) => print_cpuinfo(&detail),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
     pub fn cmd_tilde(&mut self, line: &str) -> Result<Flow> {
         let body = line.trim().strip_prefix('~').unwrap_or_default();
         if self.ctx.target.user_dump().is_some() {
             self.cmd_tilde_user_dump(body, line);
-            return Ok(Flow::Continue);
-        }
-        if body.is_empty() {
-            self.cmd_vcpus()?;
             return Ok(Flow::Continue);
         }
         // A processor is named by its number or by the vCPU id `~` lists
@@ -1150,89 +1176,71 @@ impl ReplState<'_> {
             other => error!("unsupported thread command '{other}'; {USAGE}"),
         }
     }
+}
 
-    fn cmd_vcpus(&mut self) -> Result<()> {
-        // A user dump's contexts are its captured threads.
-        if let Some(threads) = self.ctx.user_threads() {
-            print_user_threads(&threads);
-            return Ok(());
-        }
-        let pb = output::native_progress_bar(0, "reading the vCPUs").unwrap_or_else(|| {
-            let pb = ProgressBar::new_spinner();
-            pb.set_style(
-                ProgressStyle::default_spinner()
-                    .template("{spinner:.black.bright} {msg}")
-                    .unwrap(),
-            );
-            pb.set_message(format!("{}", "Waiting on GDB...".bright_black()));
-            pb.enable_steady_tick(Duration::from_millis(100));
-            pb
-        });
-
-        let vcpus = match self.ctx.vcpus() {
-            Ok(vcpus) => vcpus,
-            Err(e) => {
-                pb.finish_and_clear();
-                error!("{}", e);
-                return Ok(());
-            }
-        };
-        self.caches.refresh_vcpus(self.ctx.backend.as_mut());
-
-        pb.finish_and_clear();
-
-        #[cfg(feature = "cli")]
-        native::render(|| native::lists::vcpus(&vcpus), || print_vcpus(&vcpus));
-        #[cfg(not(feature = "cli"))]
-        print_vcpus(&vcpus);
-
-        Ok(())
+/// List vCPU contexts and their RIP values.
+///
+/// `~Ns` selects processor N (zero-based), and `t` and `p` then step that
+/// processor. The vCPU id that the list shows also works in place of N
+/// (`~p01.03s`, `~p01.03k`). Over `kd` and `kdnet` on an AMD64 target, the
+/// other processors run during the step, as in WinDbg. On an ARM64 target,
+/// only the processor that stopped the target can step over `kd` or `kdnet`.
+/// If a vCPU halted in the Windows hypervisor (VBS), the list also shows
+/// where its VTL0 execution stopped, from the saved state of the hypervisor.
+/// `~Ns` on that vCPU selects the VTL0 context, and `.cxr` selects the
+/// hypervisor registers. A vCPU stopped on the hypervisor's VM-exit entry
+/// from outside shows its saved state as `(may be one exit behind)` and keeps
+/// the hypervisor registers: KVM writes that state when it enters the
+/// hypervisor, so it can still describe the previous exit. A breakpoint on
+/// the entry fires after that write, so a vCPU stopped on one shows the
+/// current exit.
+#[command(
+    names = ["~", "vcpus"],
+    category = "processes and modules",
+    kind = Query,
+    state = Halted,
+    python = none,
+)]
+fn vcpus(session: &mut Session) -> Result<Contexts> {
+    // A user dump's contexts are its captured threads.
+    if let Some(threads) = session.user_threads() {
+        return Ok(Contexts::UserThreads(threads));
     }
+    let pb = output::native_progress_bar(0, "reading the vCPUs").unwrap_or_else(|| {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.black.bright} {msg}")
+                .unwrap(),
+        );
+        pb.set_message(format!("{}", "Waiting on GDB...".bright_black()));
+        pb.enable_steady_tick(Duration::from_millis(100));
+        pb
+    });
+    let vcpus = session.vcpus();
+    pb.finish_and_clear();
+    vcpus.map(Contexts::Vcpus)
+}
 
-    fn cmd_vcpu(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let requested = require_arg!(invocation, 0, "vcpu");
+/// The register contexts `~` lists.
+enum Contexts {
+    Vcpus(Vec<VcpuInfo>),
+    /// A user-mode minidump's captured threads.
+    UserThreads(Vec<UserThreadSummary>),
+}
 
-        let threads = match self.ctx.backend.thread_list() {
-            Ok(t) => t,
-            Err(e) => {
-                error!("failed to get vCPU list: {e}");
-                return Ok(());
+impl Render for Contexts {
+    fn render(&self, repl: &mut ReplState<'_>, (): ()) {
+        match self {
+            Self::UserThreads(threads) => print_user_threads(threads),
+            Self::Vcpus(vcpus) => {
+                repl.caches.refresh_vcpus(repl.ctx.backend.as_mut());
+                #[cfg(feature = "cli")]
+                native::render(|| native::lists::vcpus(vcpus), || print_vcpus(vcpus));
+                #[cfg(not(feature = "cli"))]
+                print_vcpus(vcpus);
             }
-        };
-
-        let thread_id = threads
-            .iter()
-            .find(|thread| thread.as_str() == requested)
-            .cloned()
-            .or_else(|| {
-                Expr::eval_with_radix(requested, &self.ctx.target, self.radix)
-                    .ok()
-                    .and_then(|value| u16::try_from(value.0).ok())
-                    .and_then(|number| {
-                        threads
-                            .iter()
-                            .find(|thread| {
-                                processor_index_from_backend_thread_id(thread) == Some(number)
-                            })
-                            .cloned()
-                            .or_else(|| threads.get(number as usize).cloned())
-                    })
-            });
-        let Some(thread_id) = thread_id else {
-            error!("vCPU '{}' not found (use 'vcpus' to list vCPUs)", requested);
-            return Ok(());
-        };
-
-        if let Err(e) = self.ctx.set_current_thread(&thread_id) {
-            error!("failed to switch vCPU: {e}");
-            return Ok(());
         }
-
-        self.clear_selected_frame();
-        self.caches.refresh_symbol_context(&self.ctx.target);
-        outln!("switched to vCPU {}\n", self.ctx.current_thread);
-
-        Ok(())
     }
 }
 

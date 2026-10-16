@@ -2,13 +2,14 @@
 //! `KSPECIAL_REGISTERS` control space and MSRs, cached per halt.
 
 use crate::bytes;
-use crate::dbg_backend::TebPath;
+use crate::cpu_context::{amd64, arm64};
+use crate::dbg_backend::{TebPath, debug_registers};
 use crate::error::{Error, Result};
 use crate::types::{Arch, VirtAddr};
 
 use super::{
-    KD_REQUEST_TIMEOUT, KdBackend, STATUS_SINGLE_STEP, api, context, context_arm64, hwbp,
-    trace_enabled, with_framing_read_timeout,
+    KD_REQUEST_TIMEOUT, KdBackend, STATUS_SINGLE_STEP, api, trace_enabled,
+    with_framing_read_timeout,
 };
 
 pub(super) const AMD64_DEBUG_CONTROL_SPACE_KSPECIAL: u64 = 2;
@@ -73,8 +74,8 @@ pub(super) fn arm64_x18(
     teb_path: Option<TebPath>,
     source: &mut impl Arm64X18Source,
 ) -> Option<u64> {
-    let cpsr = bytes::read_u32(context, context_arm64::OFFSET_CPSR);
-    let x18_at = context_arm64::OFFSET_X0 + 18 * 8;
+    let cpsr = bytes::read_u32(context, arm64::OFFSET_CPSR);
+    let x18_at = arm64::OFFSET_X0 + 18 * 8;
     let x18 = u64::from_le_bytes(context.get(x18_at..x18_at + 8)?.try_into().ok()?);
     // CPSR.M[3:2] is the exception level the context was taken at.
     match (cpsr >> 2) & 3 {
@@ -94,27 +95,27 @@ pub(super) fn arm64_x18(
 const ARM64_DEBUG_REGISTER_OFFSETS: &[(usize, usize, usize, usize)] = &[
     (
         ARM64_KSPECIAL_REGISTERS_BVR0_OFFSET,
-        context_arm64::OFFSET_BVR0,
+        arm64::OFFSET_BVR0,
         8,
-        hwbp::ARM64_MAX_BREAKPOINTS as usize,
+        debug_registers::ARM64_MAX_BREAKPOINTS as usize,
     ),
     (
         ARM64_KSPECIAL_REGISTERS_BCR0_OFFSET,
-        context_arm64::OFFSET_BCR0,
+        arm64::OFFSET_BCR0,
         4,
-        hwbp::ARM64_MAX_BREAKPOINTS as usize,
+        debug_registers::ARM64_MAX_BREAKPOINTS as usize,
     ),
     (
         ARM64_KSPECIAL_REGISTERS_WVR0_OFFSET,
-        context_arm64::OFFSET_WVR0,
+        arm64::OFFSET_WVR0,
         8,
-        hwbp::ARM64_MAX_WATCHPOINTS as usize,
+        debug_registers::ARM64_MAX_WATCHPOINTS as usize,
     ),
     (
         ARM64_KSPECIAL_REGISTERS_WCR0_OFFSET,
-        context_arm64::OFFSET_WCR0,
+        arm64::OFFSET_WCR0,
         4,
-        hwbp::ARM64_MAX_WATCHPOINTS as usize,
+        debug_registers::ARM64_MAX_WATCHPOINTS as usize,
     ),
 ];
 
@@ -143,45 +144,45 @@ pub(super) fn append_control_registers_from_special(
         )));
     }
 
-    ctx.resize(context::REGISTER_BUFFER_SIZE, 0);
+    ctx.resize(amd64::REGISTER_BUFFER_SIZE, 0);
 
     let copy_reg = |ctx: &mut [u8], ctx_offset: usize, special_offset: usize| {
         ctx[ctx_offset..ctx_offset + 8]
             .copy_from_slice(&special[special_offset..special_offset + 8]);
     };
-    copy_reg(ctx, context::OFFSET_CR0, KSPECIAL_REGISTERS_CR0_OFFSET);
-    copy_reg(ctx, context::OFFSET_CR2, KSPECIAL_REGISTERS_CR2_OFFSET);
-    copy_reg(ctx, context::OFFSET_CR3, KSPECIAL_REGISTERS_CR3_OFFSET);
-    copy_reg(ctx, context::OFFSET_CR4, KSPECIAL_REGISTERS_CR4_OFFSET);
-    copy_reg(ctx, context::OFFSET_DR0, KSPECIAL_REGISTERS_DR0_OFFSET);
-    copy_reg(ctx, context::OFFSET_DR1, KSPECIAL_REGISTERS_DR1_OFFSET);
-    copy_reg(ctx, context::OFFSET_DR2, KSPECIAL_REGISTERS_DR2_OFFSET);
-    copy_reg(ctx, context::OFFSET_DR3, KSPECIAL_REGISTERS_DR3_OFFSET);
-    copy_reg(ctx, context::OFFSET_DR6, KSPECIAL_REGISTERS_DR6_OFFSET);
-    copy_reg(ctx, context::OFFSET_DR7, KSPECIAL_REGISTERS_DR7_OFFSET);
-    copy_reg(ctx, context::OFFSET_CR8, KSPECIAL_REGISTERS_CR8_OFFSET);
+    copy_reg(ctx, amd64::OFFSET_CR0, KSPECIAL_REGISTERS_CR0_OFFSET);
+    copy_reg(ctx, amd64::OFFSET_CR2, KSPECIAL_REGISTERS_CR2_OFFSET);
+    copy_reg(ctx, amd64::OFFSET_CR3, KSPECIAL_REGISTERS_CR3_OFFSET);
+    copy_reg(ctx, amd64::OFFSET_CR4, KSPECIAL_REGISTERS_CR4_OFFSET);
+    copy_reg(ctx, amd64::OFFSET_DR0, KSPECIAL_REGISTERS_DR0_OFFSET);
+    copy_reg(ctx, amd64::OFFSET_DR1, KSPECIAL_REGISTERS_DR1_OFFSET);
+    copy_reg(ctx, amd64::OFFSET_DR2, KSPECIAL_REGISTERS_DR2_OFFSET);
+    copy_reg(ctx, amd64::OFFSET_DR3, KSPECIAL_REGISTERS_DR3_OFFSET);
+    copy_reg(ctx, amd64::OFFSET_DR6, KSPECIAL_REGISTERS_DR6_OFFSET);
+    copy_reg(ctx, amd64::OFFSET_DR7, KSPECIAL_REGISTERS_DR7_OFFSET);
+    copy_reg(ctx, amd64::OFFSET_CR8, KSPECIAL_REGISTERS_CR8_OFFSET);
     // KDESCRIPTOR layout is Pad[3] (6 bytes), Limit (2 bytes), Base (8
     // bytes). The register map stores each value in a synthetic 8-byte slot;
     // only the descriptor's meaningful bytes are copied for the limits.
-    ctx[context::OFFSET_GDTR_LIMIT..context::OFFSET_GDTR_LIMIT + 2].copy_from_slice(
+    ctx[amd64::OFFSET_GDTR_LIMIT..amd64::OFFSET_GDTR_LIMIT + 2].copy_from_slice(
         &special[KSPECIAL_REGISTERS_GDTR_OFFSET + 6..KSPECIAL_REGISTERS_GDTR_OFFSET + 8],
     );
     copy_reg(
         ctx,
-        context::OFFSET_GDTR_BASE,
+        amd64::OFFSET_GDTR_BASE,
         KSPECIAL_REGISTERS_GDTR_OFFSET + 8,
     );
-    ctx[context::OFFSET_IDTR_LIMIT..context::OFFSET_IDTR_LIMIT + 2].copy_from_slice(
+    ctx[amd64::OFFSET_IDTR_LIMIT..amd64::OFFSET_IDTR_LIMIT + 2].copy_from_slice(
         &special[KSPECIAL_REGISTERS_IDTR_OFFSET + 6..KSPECIAL_REGISTERS_IDTR_OFFSET + 8],
     );
     copy_reg(
         ctx,
-        context::OFFSET_IDTR_BASE,
+        amd64::OFFSET_IDTR_BASE,
         KSPECIAL_REGISTERS_IDTR_OFFSET + 8,
     );
-    ctx[context::OFFSET_TR..context::OFFSET_TR + 2]
+    ctx[amd64::OFFSET_TR..amd64::OFFSET_TR + 2]
         .copy_from_slice(&special[KSPECIAL_REGISTERS_TR_OFFSET..KSPECIAL_REGISTERS_TR_OFFSET + 2]);
-    ctx[context::OFFSET_LDTR..context::OFFSET_LDTR + 2].copy_from_slice(
+    ctx[amd64::OFFSET_LDTR..amd64::OFFSET_LDTR + 2].copy_from_slice(
         &special[KSPECIAL_REGISTERS_LDTR_OFFSET..KSPECIAL_REGISTERS_LDTR_OFFSET + 2],
     );
     Ok(())
@@ -201,12 +202,12 @@ pub(super) fn update_special_debug_registers_from_context(
     context_payload(ctx)?;
 
     for (ctx_offset, special_offset) in [
-        (context::OFFSET_DR0, KSPECIAL_REGISTERS_DR0_OFFSET),
-        (context::OFFSET_DR1, KSPECIAL_REGISTERS_DR1_OFFSET),
-        (context::OFFSET_DR2, KSPECIAL_REGISTERS_DR2_OFFSET),
-        (context::OFFSET_DR3, KSPECIAL_REGISTERS_DR3_OFFSET),
-        (context::OFFSET_DR6, KSPECIAL_REGISTERS_DR6_OFFSET),
-        (context::OFFSET_DR7, KSPECIAL_REGISTERS_DR7_OFFSET),
+        (amd64::OFFSET_DR0, KSPECIAL_REGISTERS_DR0_OFFSET),
+        (amd64::OFFSET_DR1, KSPECIAL_REGISTERS_DR1_OFFSET),
+        (amd64::OFFSET_DR2, KSPECIAL_REGISTERS_DR2_OFFSET),
+        (amd64::OFFSET_DR3, KSPECIAL_REGISTERS_DR3_OFFSET),
+        (amd64::OFFSET_DR6, KSPECIAL_REGISTERS_DR6_OFFSET),
+        (amd64::OFFSET_DR7, KSPECIAL_REGISTERS_DR7_OFFSET),
     ] {
         special[special_offset..special_offset + 8]
             .copy_from_slice(&ctx[ctx_offset..ctx_offset + 8]);
@@ -225,11 +226,11 @@ pub(super) fn update_arm64_debug_registers_from_context(
             ARM64_KSPECIAL_REGISTERS_MIN_SIZE
         )));
     }
-    if ctx.len() < context_arm64::CONTEXT_SIZE {
+    if ctx.len() < arm64::CONTEXT_SIZE {
         return Err(Error::Kd(format!(
             "ARM64 CONTEXT buffer too short: {} bytes, expected {}",
             ctx.len(),
-            context_arm64::CONTEXT_SIZE
+            arm64::CONTEXT_SIZE
         )));
     }
     copy_arm64_debug_registers(special, ctx, false);
@@ -253,14 +254,14 @@ fn copy_arm64_debug_registers(dst: &mut [u8], src: &[u8], to_context: bool) {
 }
 
 pub(super) fn context_payload(data: &[u8]) -> Result<&[u8]> {
-    if data.len() < context::CONTEXT_SIZE {
+    if data.len() < amd64::CONTEXT_SIZE {
         return Err(Error::Kd(format!(
             "CONTEXT buffer too short: {} bytes, expected {}",
             data.len(),
-            context::CONTEXT_SIZE
+            amd64::CONTEXT_SIZE
         )));
     }
-    Ok(&data[..context::CONTEXT_SIZE])
+    Ok(&data[..amd64::CONTEXT_SIZE])
 }
 
 impl Arm64X18Source for KdBackend {
@@ -283,8 +284,8 @@ impl Arm64X18Source for KdBackend {
 impl KdBackend {
     fn context_flags(&self) -> u32 {
         match self.arch {
-            Arch::Amd64 => context::CONTEXT_ALL,
-            Arch::Arm64 => context_arm64::CONTEXT_ALL,
+            Arch::Amd64 => amd64::CONTEXT_ALL,
+            Arch::Arm64 => arm64::CONTEXT_ALL,
         }
     }
 
@@ -364,11 +365,11 @@ impl KdBackend {
                 append_control_registers_from_special(ctx, special)
             }
             Arch::Arm64 => {
-                if ctx.len() < context_arm64::CONTEXT_SIZE {
+                if ctx.len() < arm64::CONTEXT_SIZE {
                     return Err(Error::Kd(format!(
                         "ARM64 CONTEXT buffer too short: {} bytes, expected {}",
                         ctx.len(),
-                        context_arm64::CONTEXT_SIZE
+                        arm64::CONTEXT_SIZE
                     )));
                 }
                 let ttbr0 =
@@ -402,21 +403,21 @@ impl KdBackend {
                 };
                 let kernel_dtb = self.kernel_dtb_override;
                 if let Some(x18) = arm64_x18(ctx, self.teb_path, self) {
-                    let at = context_arm64::OFFSET_X0 + 18 * 8;
+                    let at = arm64::OFFSET_X0 + 18 * 8;
                     ctx[at..at + 8].copy_from_slice(&x18.to_le_bytes());
                 }
-                ctx.resize(context_arm64::REGISTER_BUFFER_SIZE, 0);
-                ctx[context_arm64::OFFSET_CR3..context_arm64::OFFSET_CR3 + 8]
+                ctx.resize(arm64::REGISTER_BUFFER_SIZE, 0);
+                ctx[arm64::OFFSET_CR3..arm64::OFFSET_CR3 + 8]
                     .copy_from_slice(&kernel_dtb.to_le_bytes());
-                ctx[context_arm64::OFFSET_TTBR0..context_arm64::OFFSET_TTBR0 + 8]
+                ctx[arm64::OFFSET_TTBR0..arm64::OFFSET_TTBR0 + 8]
                     .copy_from_slice(&ttbr0.to_le_bytes());
                 if let Some(special) = self.arm64_special_registers() {
                     copy_arm64_debug_registers(ctx, special, true);
                 }
                 if self.last_exception_code == STATUS_SINGLE_STEP {
-                    ctx[context_arm64::OFFSET_ESR..context_arm64::OFFSET_ESR + 8]
+                    ctx[arm64::OFFSET_ESR..arm64::OFFSET_ESR + 8]
                         .copy_from_slice(&esr.to_le_bytes());
-                    ctx[context_arm64::OFFSET_FAR..context_arm64::OFFSET_FAR + 8]
+                    ctx[arm64::OFFSET_FAR..arm64::OFFSET_FAR + 8]
                         .copy_from_slice(&far.to_le_bytes());
                 }
                 Ok(())
@@ -462,7 +463,7 @@ impl KdBackend {
                 }
             });
             if let Some(efer) = efer {
-                bytes::write_u64(&mut ctx, context::OFFSET_EFER, efer);
+                bytes::write_u64(&mut ctx, amd64::OFFSET_EFER, efer);
             }
         }
         kd_trace!("kd: read_registers: extended to {} bytes", ctx.len());
@@ -496,19 +497,15 @@ impl KdBackend {
                 self.write_special_registers(special)
             }
             Arch::Arm64 => {
-                if data.len() < context_arm64::CONTEXT_SIZE {
+                if data.len() < arm64::CONTEXT_SIZE {
                     return Err(Error::Kd(format!(
                         "ARM64 CONTEXT buffer too short: {} bytes, expected {}",
                         data.len(),
-                        context_arm64::CONTEXT_SIZE
+                        arm64::CONTEXT_SIZE
                     )));
                 }
                 with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
-                    api::set_context_chunked(
-                        framing,
-                        processor,
-                        &data[..context_arm64::CONTEXT_SIZE],
-                    )
+                    api::set_context_chunked(framing, processor, &data[..arm64::CONTEXT_SIZE])
                 })?;
                 // ARM64 hardware state is authoritative in KSPECIAL_REGISTERS,
                 // while CONTEXT exposes the same BVR/BCR and WVR/WCR fields.

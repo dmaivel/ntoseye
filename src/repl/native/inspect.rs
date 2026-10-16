@@ -8,7 +8,7 @@ use crate::repl::commands::frames::FrameLine;
 use crate::repl::print_sparse_registers;
 use crate::target::mm::{PoolBlockDetail, PoolPageDetail, PteLevel, PteWalk};
 use crate::target::{BuiltinVar, SelectedFrame, UserVar};
-use crate::types::{PageTableLevel, VirtAddr};
+use crate::types::{PageTableEntry, PageTableLevel, VirtAddr};
 
 /// The marker `native::stack::numbered` puts before the selected row.
 const PICK: &str = "\u{25b8} ";
@@ -91,7 +91,10 @@ pub fn pte(walk: &PteWalk, invalid_pte_mask: u64) -> View {
             (leaf.attributes.pfn << 12 & !(page_size - 1)) | (walk.address.0 & (page_size - 1));
         let mut value = vec![addr(physical)];
         if leaf.attributes.large_page {
-            value.push(span(format!("  large page ({})", leaf.level.name()), MUTED));
+            value.push(span(
+                format!("  large page ({})", leaf.level.as_str()),
+                MUTED,
+            ));
         }
         details = details.item("physical", value);
     }
@@ -100,7 +103,7 @@ pub fn pte(walk: &PteWalk, invalid_pte_mask: u64) -> View {
 
 fn pte_row(level: &PteLevel, invalid_pte_mask: u64) -> TableRow {
     let attributes = &level.attributes;
-    let value = level.value;
+    let value = PageTableEntry(level.value);
     let (pfn, flags) = if attributes.present {
         (
             span(format!("{:x}", attributes.pfn), NUMBER),
@@ -117,8 +120,8 @@ fn pte_row(level: &PteLevel, invalid_pte_mask: u64) -> TableRow {
     } else {
         (span("-", MUTED), vec![span("not present", MUTED)])
     };
-    TableRow::new(level.level.name())
-        .cell("level", span(level.level.name(), STRONG))
+    TableRow::new(level.level.as_str())
+        .cell("level", span(level.level.as_str(), STRONG))
         .cell("entry", span(format!("{:016x}", level.address.0), MUTED))
         .cell("contents", addr(value.0))
         .cell("pfn", pfn)
@@ -299,7 +302,7 @@ fn pool_row(block: &PoolBlockDetail) -> TableRow {
         .cell(
             "state",
             strong(
-                block.state.clone(),
+                block.state.to_string(),
                 if block.allocated { "success" } else { MUTED },
             ),
         )

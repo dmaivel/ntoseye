@@ -1,21 +1,13 @@
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::repl::*;
+use crate::session::Session;
 use crate::target::DiagnosticValue;
 use crate::target::ListTermination;
 use crate::target::meta::{
-    VerifierDetail, VerifierDriverDetail, VerifierDriverSummary, VerifierStatistics,
-    VerifierSuspectDriver,
+    Verifier, VerifierDriver, VerifierDriverSummary, VerifierStatistics, VerifierSuspectDriver,
 };
 use crate::ui;
-
-repl_command! {
-    cmd_verifier;
-    names: ["!verifier", "verifier"],
-    usage: "!verifier [module]",
-    summary: "Show the Driver Verifier status, statistics, and verified drivers.",
-    details: "Without a module, shows the verifier level and its decoded options, the aggregate (global) counters, and the configured driver list. The list contains the verified drivers from ViTargetDriversAvl and the configured drivers that are not loaded, from VfSuspectDriversList. With a module, shows the verified-driver counters and the image details of that driver: image, signing level, and load counts.",
-    target: Kernel,
-}
+use ntoseye_macros::command;
 
 fn diagnostic_error<T>(value: &DiagnosticValue<T>) -> Option<&str> {
     match value {
@@ -56,7 +48,7 @@ fn print_pool_stat(label: &str, allocations: &DiagnosticValue<u64>, bytes: &Diag
     }
 }
 
-fn print_level(detail: &VerifierDetail) -> bool {
+fn print_level(detail: &Verifier) -> bool {
     let DiagnosticValue::Available(level) = &detail.level else {
         if let DiagnosticValue::Unavailable(error) = &detail.level {
             outln!("Verify Level unavailable: {error}");
@@ -129,7 +121,7 @@ fn print_summary(stats: &VerifierStatistics) {
     print_hex_stat("Unloads", &stats.unloads);
 }
 
-fn print_driver_list(detail: &VerifierDetail) {
+fn print_driver_list(detail: &Verifier) {
     outln!();
     outln!("Driver Verification List");
     outln!("  Entry             State       NonPagedPool  PagedPool  Module");
@@ -200,7 +192,7 @@ fn print_suspect_driver(suspect: &VerifierSuspectDriver) {
     );
 }
 
-fn print_driver_details(driver: &VerifierDriverDetail) {
+fn print_driver_details(driver: &VerifierDriver) {
     outln!("Verifier driver {}", driver.module_name);
     print_value("Image base", &ui::addr(driver.image_base.0));
     print_hex_stat("Image size", &DiagnosticValue::Available(driver.image_size));
@@ -310,32 +302,59 @@ fn print_driver_details(driver: &VerifierDriverDetail) {
     }
 }
 
-impl ReplState<'_> {
-    fn cmd_verifier(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if invocation.argv.len() > 1 {
-            outln!("{}\n", command_help("!verifier"));
-            return Ok(());
-        }
-        if let Some(module) = invocation.arg(0) {
-            match self.ctx.target.verifier_driver(module) {
-                Ok(driver) => print_driver_details(&driver),
-                Err(error) => error!("{error}"),
-            }
-            return Ok(());
-        }
+/// Show the Driver Verifier status, statistics, and verified drivers.
+///
+/// Without a module, shows the verifier level and its decoded options, the
+/// aggregate (global) counters, and the configured driver list. The list
+/// contains the verified drivers from ViTargetDriversAvl and the configured
+/// drivers that are not loaded, from VfSuspectDriversList. With a module,
+/// shows the verified-driver counters and the image details of that driver:
+/// image, signing level, and load counts.
+#[command(
+    names = ["!verifier", "verifier"],
+    category = "analysis",
+    kind = Query,
+    target = Kernel,
+    forms = [verifier_status, verifier_driver],
+)]
+fn verifier(session: &Session, module: Option<String>) -> Result<VerifierReport> {
+    match module {
+        Some(module) => verifier_driver(session, module).map(VerifierReport::Driver),
+        None => verifier_status(session)
+            .map(VerifierReport::Status)
+            .map_err(|error| Error::DebugInfo(format!("verifier data unavailable: {error}"))),
+    }
+}
 
-        let detail = match self.ctx.target.verifier_status() {
-            Ok(detail) => detail,
-            Err(error) => {
-                error!("verifier data unavailable: {error}");
-                return Ok(());
+/// Get the Driver Verifier configuration and statistics (`!verifier`).
+#[command(form_of = verifier, python = Inspect, python_name = "verifier")]
+fn verifier_status(session: &Session) -> Result<Verifier> {
+    session.target.verifier_status()
+}
+
+/// Get the verifier data for this driver module (`!verifier <module>`).
+#[command(form_of = verifier, python = Module, python_name = "verifier")]
+fn verifier_driver(session: &Session, #[arg(receiver)] module: String) -> Result<VerifierDriver> {
+    session.target.verifier_driver(&module)
+}
+
+/// What `!verifier` read.
+enum VerifierReport {
+    Status(Verifier),
+    Driver(VerifierDriver),
+}
+
+impl Render for VerifierReport {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        match self {
+            Self::Driver(driver) => print_driver_details(driver),
+            Self::Status(detail) => {
+                if !print_level(detail) {
+                    return;
+                }
+                print_summary(&detail.statistics);
+                print_driver_list(detail);
             }
-        };
-        if !print_level(&detail) {
-            return Ok(());
         }
-        print_summary(&detail.statistics);
-        print_driver_list(&detail);
-        Ok(())
     }
 }

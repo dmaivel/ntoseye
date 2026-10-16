@@ -1,19 +1,23 @@
 //! sched: structured inspector data (shared by the REPL, Python SDK, and MCP).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::backend::MemoryOps;
-use crate::cpu_state::{MAX_PROCESSORS, kpcr_for_processor, kprcb_for_processor, processor_count};
+use ntoseye_macros::record;
+
+use crate::cpu_state::{kpcr_for_processor, kprcb_for_processor, processor_count};
+use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
 use crate::kuser_shared::KuserSharedData;
 use crate::layout::{ParsedType, StructRef, TypeInfo, Types};
+use crate::memory::MemoryOps;
 use crate::symbols::glob_matches;
 use crate::target::{
-    DiagnosticValue, ListTermination, Target, ThreadInfo, bounded_list_walk, fast_ref_address,
+    DiagnosticValue, ListCursor, ListTermination, Target, ThreadInfo, bounded_record_list_walk,
+    fast_ref_address,
 };
-use crate::types::VirtAddr;
+use crate::types::{MAX_PROCESSORS, VirtAddr};
 
 #[cfg(test)]
 use crate::target::sample_thread;
@@ -26,114 +30,168 @@ const READY_PRIORITY_COUNT: usize = 32;
 const DPC_QUEUE_COUNT: usize = 2;
 const TIMER_BUCKET_COUNT: usize = 256;
 
-#[derive(Debug, Clone)]
+/// A processor's running, next, and idle threads (`!running`).
+#[record]
 pub struct RunningProcessor {
+    /// The processor number.
     pub index: u16,
     pub kpcr: DiagnosticValue<VirtAddr>,
     pub prcb: DiagnosticValue<VirtAddr>,
+    /// The thread that runs on the processor. The value inside is `None` if
+    /// no thread runs.
     pub current_thread: DiagnosticValue<Option<ThreadInfo>>,
+    /// The thread selected to run next. The value inside is `None` if there
+    /// is no next thread.
     pub next_thread: DiagnosticValue<Option<ThreadInfo>>,
+    /// The processor's idle thread.
     pub idle_thread: DiagnosticValue<Option<ThreadInfo>>,
-    /// Present only when `include_stacks` was requested. The vector is bounded
-    /// to the short running-thread stack limit.
+    /// The first frames of the running thread; `None` if stacks were not
+    /// requested.
     pub short_stack: Option<DiagnosticValue<Vec<StackFrame>>>,
 }
 
-#[derive(Debug, Clone)]
-pub struct RunningDetail {
+/// The running threads of all processors (`!running`).
+#[record]
+pub struct RunningProcessors {
     pub processors: Vec<RunningProcessor>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ReadyQueueEntry {
+/// A thread on a dispatcher ready queue.
+#[record]
+pub struct ReadyThread {
+    /// The `_KTHREAD` linked on the queue.
     pub kthread: VirtAddr,
+    /// The decoded thread.
     pub thread: DiagnosticValue<ThreadInfo>,
 }
 
-#[derive(Debug, Clone)]
+/// The ready list of one processor for one priority.
+#[record]
 pub struct ReadyQueue {
     pub processor: u16,
     pub priority: u8,
-    pub entries: Vec<ReadyQueueEntry>,
+    pub entries: Vec<ReadyThread>,
+    /// How the list walk ended.
     pub termination: ListTermination,
 }
 
-#[derive(Debug, Clone)]
+/// A processor or queue read that failed during a scheduler walk.
+#[record]
 pub struct SchedulerError {
+    /// The processor of the error, if there is one.
     pub processor: Option<u16>,
+    /// The queue of the error, if there is one.
     pub queue: Option<u16>,
     pub message: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct ReadyQueuesDetail {
+/// The dispatcher ready queues (`!ready`).
+#[record]
+pub struct ReadyQueues {
+    /// The queues that are not empty.
     pub queues: Vec<ReadyQueue>,
+    /// The total number of threads in `queues`.
     pub total: usize,
+    /// Whether the walk stopped at its entry limit.
     pub truncated: bool,
     pub errors: Vec<SchedulerError>,
 }
 
-#[derive(Debug, Clone)]
-pub struct DpcDetail {
+/// A queued `_KDPC`.
+#[record]
+pub struct Dpc {
     pub address: VirtAddr,
+    /// `DeferredRoutine`.
     pub deferred_routine: DiagnosticValue<Option<VirtAddr>>,
+    /// `deferred_routine` as a symbol, if it resolves to one.
     pub deferred_routine_symbol: DiagnosticValue<Option<String>>,
+    /// `DeferredContext`.
     pub context: DiagnosticValue<Option<VirtAddr>>,
+    /// `Importance`.
     pub importance: DiagnosticValue<u8>,
 }
 
-#[derive(Debug, Clone)]
+/// One of a processor's DPC queues.
+#[record]
 pub struct DpcQueue {
     pub processor: u16,
+    /// 0 for the normal queue, 1 for the threaded queue.
     pub queue: u8,
-    pub entries: Vec<DpcDetail>,
+    pub entries: Vec<Dpc>,
+    /// How the list walk ended.
     pub termination: ListTermination,
 }
 
-#[derive(Debug, Clone)]
-pub struct DpcQueuesDetail {
+/// The queued DPCs of all processors (`!dpcs`).
+#[record]
+pub struct DpcQueues {
+    /// The queues that are not empty.
     pub queues: Vec<DpcQueue>,
+    /// The total number of DPCs in `queues`.
     pub total: usize,
+    /// Whether the walk stopped at its entry limit.
     pub truncated: bool,
     pub errors: Vec<SchedulerError>,
 }
 
-#[derive(Debug, Clone)]
-pub struct TimerDetail {
+/// A `_KTIMER` and its decoded DPC.
+#[record]
+pub struct KernelTimer {
     pub address: VirtAddr,
+    /// `DueTime`, the interrupt time when the timer expires (see
+    /// `TargetTime.interrupt_time`).
+    #[record(hex)]
     pub due_time: DiagnosticValue<u64>,
+    /// `Period` in milliseconds. 0 for a one-shot timer.
     pub period: DiagnosticValue<u32>,
+    /// `Dpc` in the encoded form that the kernel stores.
     pub dpc_encoded: DiagnosticValue<Option<VirtAddr>>,
+    /// The decoded `_KDPC` address. The value inside is `None` if the timer
+    /// has no DPC.
     pub dpc: DiagnosticValue<Option<VirtAddr>>,
+    /// The DPC's `DeferredRoutine`.
     pub dpc_routine: DiagnosticValue<Option<VirtAddr>>,
+    /// `dpc_routine` as a symbol, if it resolves to one.
     pub dpc_routine_symbol: DiagnosticValue<Option<String>>,
 }
 
-#[derive(Debug, Clone)]
-pub struct TimerListEntry {
+/// A timer in the timer table of a processor.
+#[record]
+pub struct TimerTableEntry {
     pub processor: u16,
+    /// The index of the timer-table bucket.
     pub bucket: u16,
-    pub timer: TimerDetail,
+    pub timer: KernelTimer,
 }
 
-#[derive(Debug, Clone)]
-pub struct TimerBucketTermination {
+/// A timer-table bucket whose list walk did not end at its head.
+#[record]
+pub struct TimerBucketEnd {
     pub processor: u16,
     pub bucket: u16,
     pub termination: ListTermination,
 }
 
-#[derive(Debug, Clone)]
-pub struct TimerListDetail {
+/// The timer tables of all processors (`!timer`).
+#[record]
+pub struct TimerTable {
+    /// The interrupt time (`KUSER_SHARED_DATA.InterruptTime`) when ntoseye
+    /// read the tables. The `due_time` of each entry uses this time scale.
+    #[record(hex)]
     pub interrupt_time: DiagnosticValue<u64>,
-    pub entries: Vec<TimerListEntry>,
-    pub terminations: Vec<TimerBucketTermination>,
+    pub entries: Vec<TimerTableEntry>,
+    /// The buckets whose walk did not end normally.
+    pub terminations: Vec<TimerBucketEnd>,
+    /// The number of timers in `entries`.
     pub total: usize,
+    /// Whether the walk stopped at its entry limit.
     pub truncated: bool,
     pub errors: Vec<SchedulerError>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The threads `!apc` inspects; `kind` says which.
+#[record(tagged)]
+#[derive(Copy, PartialEq, Eq)]
 pub enum ApcSelector {
     /// Select the Windows thread currently selected by the session.
     CurrentThread,
@@ -179,98 +237,161 @@ pub fn select_threads(
     (selector, selected)
 }
 
-#[derive(Debug, Clone)]
-pub struct ApcDetail {
+/// A queued `_KAPC`.
+#[record]
+pub struct Apc {
     pub address: VirtAddr,
+    /// `KernelRoutine`.
     pub kernel_routine: DiagnosticValue<Option<VirtAddr>>,
+    /// `kernel_routine` as a symbol, if it resolves to one.
     pub kernel_routine_symbol: DiagnosticValue<Option<String>>,
+    /// `NormalRoutine`. The value inside is `None` for a special kernel APC.
     pub normal_routine: DiagnosticValue<Option<VirtAddr>>,
+    /// `normal_routine` as a symbol, if it resolves to one.
     pub normal_routine_symbol: DiagnosticValue<Option<String>>,
 }
 
-#[derive(Debug, Clone)]
+/// The kernel-mode and user-mode APC queues of a thread.
+#[record]
 pub struct ApcThread {
     pub thread: ThreadInfo,
-    pub kernel: Vec<ApcDetail>,
-    pub user: Vec<ApcDetail>,
+    pub kernel: Vec<Apc>,
+    pub user: Vec<Apc>,
+    /// How the kernel-mode list walk ended.
     pub kernel_termination: ListTermination,
+    /// How the user-mode list walk ended.
     pub user_termination: ListTermination,
+    /// The error, if ntoseye could not read the APC state of the thread.
     pub state_error: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ApcListDetail {
+/// The APC queues of all threads, of one process, or of one thread
+/// (`!apc`).
+#[record]
+pub struct ApcQueues {
+    /// `all`, `current_thread`, or the selected thread or process.
     pub selector: ApcSelector,
     pub threads: Vec<ApcThread>,
+    /// The total number of APCs in `threads`.
     pub total: usize,
+    /// Whether the walk stopped at its entry limit.
     pub truncated: bool,
+    /// The error, if ntoseye could not resolve the APC layout.
     pub layout_error: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct StackThreadDetail {
+/// The state and walked stack of a thread (`!stacks`).
+#[record(impl)]
+pub struct ThreadStack {
     pub thread: ThreadInfo,
+    /// The backend thread (vCPU) that runs the thread, if the listing
+    /// resolves it.
+    #[record(skip)]
     pub active_vcpu: Option<String>,
+    /// The symbol of the top frame.
     pub top_symbol: DiagnosticValue<Option<String>>,
+    /// The frames, innermost first. Level 0 has the top frame, level 1 has
+    /// up to 32 frames, and level 2 has up to 64 frames.
     pub frames: Vec<StackFrame>,
+    /// The number of frames past the walk limit, which are not listed.
     pub truncated: usize,
+    /// The error, if the stack walk failed.
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct StacksDetail {
+#[record]
+impl ThreadStack {
+    /// The processor that runs the thread, if the listing resolves it.
+    /// `None` if no processor runs it, and while the target runs.
+    #[record(getter)]
+    pub fn active(&self) -> Option<u16> {
+        processor_number(self.active_vcpu.as_deref())
+    }
+}
+
+/// The zero-based processor a vCPU's backend thread id names, as `dbg.cpus`
+/// numbers it.
+fn processor_number(vcpu: Option<&str>) -> Option<u16> {
+    vcpu.and_then(processor_index_from_backend_thread_id)
+}
+
+/// Threads with their states and stacks (`!stacks`).
+#[record]
+pub struct ThreadStacks {
+    /// The detail level (0, 1, or 2), which sets the frame limit of the
+    /// walk.
     pub level: u8,
+    /// The symbol or module filter, if you gave one.
     pub filter: Option<String>,
     pub scanned_threads: usize,
     pub displayed_threads: usize,
+    /// Whether an interrupt stopped the walk before it finished.
     pub interrupted: bool,
-    pub threads: Vec<StackThreadDetail>,
+    pub threads: Vec<ThreadStack>,
 }
 
-/// A thread whose stack could not be walked, so `!findstack` cannot say
-/// whether it matches and `!uniqstack` cannot group it.
-#[derive(Debug, Clone)]
+/// A thread whose stack walk failed, so ntoseye could not search or group
+/// it.
+#[record]
 pub struct UnwalkedThread {
     pub thread: ThreadInfo,
+    /// The reason the walk failed.
     pub error: String,
 }
 
-/// A `!findstack` hit: the thread's walked stack (frames past the walk
-/// bound, counted in its `truncated`, are not searched) and which frames
-/// matched.
-#[derive(Debug, Clone)]
+/// A thread with a stack frame that matches the `!findstack` pattern.
+#[record(impl)]
 pub struct FindStackThread {
     pub thread: ThreadInfo,
+    /// The backend thread (vCPU) that runs the thread, if the listing
+    /// resolves it.
+    #[record(skip)]
     pub active_vcpu: Option<String>,
+    /// The whole walked stack.
+    #[record(skip)]
     pub stack: StackTrace,
-    /// Indices into `stack.frames` of the frames whose symbol matched.
+    /// The indexes in the walked stack (`frames`) of the frames that
+    /// matched, innermost first.
     pub matches: Vec<usize>,
 }
 
-#[derive(Debug, Clone)]
-pub struct FindStackDetail {
+/// Threads with a stack frame that matches a symbol or module
+/// (`!findstack`).
+#[record]
+pub struct FindStack {
     pub pattern: String,
+    /// The detail level. 0 counts the matches, 1 lists them, and 2 adds the
+    /// whole stacks.
     pub level: u8,
     pub scanned_threads: usize,
+    /// Whether an interrupt stopped the walk before it finished.
     pub interrupted: bool,
     pub threads: Vec<FindStackThread>,
     pub unwalked: Vec<UnwalkedThread>,
 }
 
-/// Threads whose walked stacks have the same frames (instruction pointers)
-/// and the same truncation. `stack` is the first thread's, whose stack
-/// pointers the others do not share.
-#[derive(Debug, Clone)]
+/// Threads whose walked stacks have the same frames and truncation.
+#[record(impl)]
 pub struct UniqStackGroup {
     pub threads: Vec<ThreadInfo>,
+    /// The stack of the first thread. The other threads have the same
+    /// instruction pointers, but their stack pointers can differ.
+    #[record(skip)]
     pub stack: StackTrace,
 }
 
-/// Which threads `!uniqstack` groups.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Which threads `!uniqstack` groups: `all`, or one `process`.
+#[record(tagged)]
+#[derive(PartialEq, Eq)]
 pub enum UniqStackScope {
+    #[record(rename = "all")]
     AllThreads,
-    Process { pid: u64, name: String },
+    Process {
+        /// The process ID.
+        pid: u64,
+        /// The image name of the process.
+        name: String,
+    },
 }
 
 /// `!uniqstack` display options.
@@ -334,21 +455,84 @@ impl UniqStackOptions {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct UniqStackDetail {
+/// Threads grouped by identical call stacks (`!uniqstack`).
+#[record(impl)]
+pub struct UniqStacks {
     pub scope: UniqStackScope,
     pub scanned_threads: usize,
+    /// Whether an interrupt stopped the walk before it finished.
     pub interrupted: bool,
-    /// In the order their first thread was walked.
+    /// The groups, in the order that ntoseye walked their first threads.
     pub groups: Vec<UniqStackGroup>,
     pub unwalked: Vec<UnwalkedThread>,
 }
 
-impl UniqStackDetail {
+#[record]
+impl UniqStacks {
     /// The threads whose stacks were walked and grouped: fewer than
     /// `scanned_threads` less `unwalked` when the walk was interrupted.
+    #[record(getter)]
     pub fn walked_threads(&self) -> usize {
         self.groups.iter().map(|group| group.threads.len()).sum()
+    }
+}
+
+#[record]
+impl FindStackThread {
+    /// The processor that runs the thread, if the listing resolves it.
+    /// `None` if no processor runs it, and while the target runs.
+    #[record(getter)]
+    pub fn active(&self) -> Option<u16> {
+        processor_number(self.active_vcpu.as_deref())
+    }
+
+    /// The number of frames that matched.
+    #[record(getter)]
+    pub fn match_count(&self) -> usize {
+        self.matches.len()
+    }
+
+    /// The frames that matched, in the order of `matches`.
+    #[record(getter)]
+    pub fn matching_frames(&self) -> Vec<StackFrame> {
+        self.matches
+            .iter()
+            .map(|&index| self.stack.frames[index].clone())
+            .collect()
+    }
+
+    /// The whole walked stack, innermost first.
+    #[record(getter)]
+    pub fn frames(&self) -> Vec<StackFrame> {
+        self.stack.frames.clone()
+    }
+
+    /// The number of frames past the walk limit, which were not searched.
+    #[record(getter)]
+    pub fn truncated(&self) -> usize {
+        self.stack.truncated
+    }
+}
+
+#[record]
+impl UniqStackGroup {
+    #[record(getter)]
+    pub fn thread_count(&self) -> usize {
+        self.threads.len()
+    }
+
+    /// The frames of the first thread, innermost first. The other threads
+    /// have the same instruction pointers, but their stack pointers can
+    /// differ.
+    #[record(getter)]
+    pub fn frames(&self) -> Vec<StackFrame> {
+        self.stack.frames.clone()
+    }
+
+    /// The number of frames past the walk limit, which were not compared.
+    #[record(getter)]
+    pub fn truncated(&self) -> usize {
+        self.stack.truncated
     }
 }
 
@@ -447,13 +631,18 @@ pub fn group_stacks(
     groups
 }
 
-/// `!process` columns and details. Each field is `None` when this build's
-/// layout lacks it or its read failed.
-#[derive(Debug, Clone, Default)]
+/// A process as `!process` shows it: its identity and the layout-sensitive
+/// `_EPROCESS` fields. Each field is `None` when this build's layout lacks
+/// it or its read failed.
+#[record]
 pub struct ProcessDetail {
+    #[record(rename = "info")]
+    pub process: ProcessInfo,
     pub session_id: Option<u32>,
+    /// The `_PEB`.
     pub peb: Option<VirtAddr>,
     pub parent_pid: Option<u64>,
+    #[record(hex)]
     pub directory_table_base: Option<u64>,
     pub object_table: Option<VirtAddr>,
     pub handle_count: Option<u64>,
@@ -473,16 +662,32 @@ pub struct ProcessDetail {
     pub job: Option<VirtAddr>,
 }
 
-/// Extended thread details. Each field is `None` when this build's layout
-/// lacks it or its read failed.
-#[derive(Debug, Clone, Default)]
-pub struct ThreadExtendedDetail {
+/// A thread as `!thread` shows it: the thread, the vCPU running it, and the
+/// `_ETHREAD`/`_KTHREAD` fields the listing adds. Each field is `None` when
+/// this build's layout lacks it or its read failed.
+#[record(impl)]
+pub struct ThreadDetail {
+    #[record(rename = "info")]
+    pub thread: ThreadInfo,
+    /// The backend thread (vCPU) running the thread (`p1.2`), or `None`
+    /// when it is not running.
+    #[record(skip)]
+    pub vcpu: Option<String>,
     pub win32_thread: Option<VirtAddr>,
     pub user_time: Option<u64>,
     pub kernel_time: Option<u64>,
     pub wait_time: Option<u64>,
     pub ready_time: Option<u64>,
     pub quantum_target: Option<u64>,
+}
+
+#[record]
+impl ThreadDetail {
+    /// The processor running the thread, or `None` when it is not running.
+    #[record(getter)]
+    pub fn cpu(&self) -> Option<u16> {
+        processor_number(self.vcpu.as_deref())
+    }
 }
 
 /// The integer at the first readable path below `root`. Every segment but
@@ -637,12 +842,16 @@ fn read_list_next(target: &Target, address: VirtAddr) -> Result<VirtAddr> {
         .read_field("Flink")
 }
 
-pub fn walk_list_nodes(
+/// The records of the kernel `_LIST_ENTRY` list at `head`, each
+/// `link_offset` before its link (0 when the link starts the record), at
+/// most `limit` and never more than [`MAX_LIST_ENTRIES`].
+pub fn walk_list_records(
     target: &Target,
     head: VirtAddr,
+    link_offset: u64,
     limit: usize,
 ) -> (Vec<VirtAddr>, ListTermination) {
-    bounded_list_walk(head, limit.min(MAX_LIST_ENTRIES), |address| {
+    bounded_record_list_walk(head, link_offset, limit.min(MAX_LIST_ENTRIES), |address| {
         read_list_next(target, address)
     })
 }
@@ -696,7 +905,7 @@ impl Target {
     /// processor is omitted when its current thread is the idle thread unless
     /// `include_idle` is true; each pointer and thread metadata field remains
     /// independently available or unavailable in the returned diagnostics.
-    pub fn running_data(&self, include_idle: bool) -> Result<RunningDetail> {
+    pub fn running_data(&self, include_idle: bool) -> Result<RunningProcessors> {
         let processors = processor_indices(self)?;
         let tcb_offset = layout_for(self, "_ETHREAD")
             .ok()
@@ -751,14 +960,14 @@ impl Target {
                 short_stack: None,
             });
         }
-        Ok(RunningDetail { processors: rows })
+        Ok(RunningProcessors { processors: rows })
     }
 
     /// Decode bounded dispatcher ready queues for all processors or one
     /// `processor`.  Queue/list termination is retained; a queue's `thread`
     /// diagnostic is unavailable when its link layout or thread metadata read
     /// fails, while `kthread` and other queues remain usable.
-    pub fn inspect_ready_queues(&self, processor: Option<u16>) -> Result<ReadyQueuesDetail> {
+    pub fn inspect_ready_queues(&self, processor: Option<u16>) -> Result<ReadyQueues> {
         let processors = selected_processor_indices(self, processor)?;
         let prcb_layout = layout_for(self, "_KPRCB")?;
         let ready_name = if prcb_layout.fields.contains_key("DispatcherReadyListHead") {
@@ -804,19 +1013,17 @@ impl Target {
                 }
                 let head = prcb + u64::from(ready_field.offset) + priority as u64 * stride;
                 let remaining = MAX_LIST_ENTRIES - total;
-                let (nodes, termination) = walk_list_nodes(self, head, remaining);
-                let mut entries = Vec::with_capacity(nodes.len());
-                for node in nodes {
-                    let kthread = thread_link_offset
-                        .map(|offset| node - offset)
-                        .unwrap_or(node);
+                let (kthreads, termination) =
+                    walk_list_records(self, head, thread_link_offset.unwrap_or(0), remaining);
+                let mut entries = Vec::with_capacity(kthreads.len());
+                for kthread in kthreads {
                     let thread = match thread_link_offset {
                         Some(_) => DiagnosticValue::from_result(
                             self.thread_info_from_ethread(kthread - ethread_tcb_offset),
                         ),
                         None => DiagnosticValue::unavailable("_KTHREAD link field not present"),
                     };
-                    entries.push(ReadyQueueEntry { kthread, thread });
+                    entries.push(ReadyThread { kthread, thread });
                     total += 1;
                     if total >= MAX_LIST_ENTRIES {
                         break;
@@ -830,7 +1037,7 @@ impl Target {
                 });
             }
         }
-        Ok(ReadyQueuesDetail {
+        Ok(ReadyQueues {
             queues,
             total,
             truncated: total >= MAX_LIST_ENTRIES,
@@ -881,7 +1088,7 @@ impl Target {
     /// Routine, context, importance, and list termination each retain their
     /// own unavailable diagnostic: a missing/unreadable `_KDPC` field affects
     /// only that field, and a bad list link affects only that queue.
-    pub fn inspect_dpc_queues(&self) -> Result<DpcQueuesDetail> {
+    pub fn inspect_dpc_queues(&self) -> Result<DpcQueues> {
         let processors = processor_indices(self)?;
         let prcb_layout = layout_for(self, "_KPRCB")?;
         let dpc_data = prcb_layout
@@ -954,14 +1161,14 @@ impl Target {
                 let data = prcb + u64::from(dpc_data.offset) + queue as u64 * data_stride;
                 let head = data + u64::from(dpc_list.offset);
                 let remaining = MAX_LIST_ENTRIES - total;
-                let (nodes, termination) = walk_list_nodes(self, head, remaining);
+                let (dpcs, termination) =
+                    walk_list_records(self, head, dpc_link_offset.unwrap_or(0), remaining);
                 let termination = match termination {
                     ListTermination::Null if singly_linked => ListTermination::Head,
                     other => other,
                 };
-                let mut entries = Vec::with_capacity(nodes.len());
-                for node in nodes {
-                    let dpc = dpc_link_offset.map(|offset| node - offset).unwrap_or(node);
+                let mut entries = Vec::with_capacity(dpcs.len());
+                for dpc in dpcs {
                     let routine = self.pointer_field("_KDPC", dpc, routine_field);
                     let context = self.pointer_field("_KDPC", dpc, context_field);
                     let importance = importance_field
@@ -984,7 +1191,7 @@ impl Target {
                             DiagnosticValue::unavailable("_KDPC link field not present"),
                         )
                     };
-                    entries.push(DpcDetail {
+                    entries.push(Dpc {
                         address: dpc,
                         deferred_routine_symbol: self.pointer_symbol(&routine, &trace),
                         deferred_routine: routine,
@@ -1004,7 +1211,7 @@ impl Target {
                 });
             }
         }
-        Ok(DpcQueuesDetail {
+        Ok(DpcQueues {
             queues,
             total,
             truncated: total >= MAX_LIST_ENTRIES,
@@ -1044,7 +1251,7 @@ impl Target {
         timer_layout: &TypeInfo,
         keys: Option<(u64, u64)>,
         trace: &ThreadTraceContext,
-    ) -> TimerDetail {
+    ) -> KernelTimer {
         let cursor = self
             .guest()
             .and_then(|guest| guest.ntoskrnl.types().struct_at("_KTIMER", timer));
@@ -1094,7 +1301,7 @@ impl Target {
                 let layout = match layout_for(self, "_KDPC") {
                     Ok(layout) => layout,
                     Err(error) => {
-                        return TimerDetail {
+                        return KernelTimer {
                             address: timer,
                             due_time,
                             period,
@@ -1116,7 +1323,7 @@ impl Target {
             }
         };
         let dpc_routine_symbol = self.pointer_symbol(&dpc_routine, trace);
-        TimerDetail {
+        KernelTimer {
             address: timer,
             due_time,
             period,
@@ -1131,7 +1338,7 @@ impl Target {
     /// `period`, encoded/decoded DPC pointers, and DPC routine are
     /// independent diagnostics; a missing field or encoding key marks only
     /// the affected value unavailable.
-    pub fn inspect_timer(&self, timer: VirtAddr) -> Result<TimerDetail> {
+    pub fn inspect_timer(&self, timer: VirtAddr) -> Result<KernelTimer> {
         let timer_layout = layout_for(self, "_KTIMER")?;
         let keys = self.timer_dpc_keys();
         let trace = resolve_thread_trace_context(self, self.kernel_dtb());
@@ -1142,7 +1349,7 @@ impl Target {
     /// list form keeps bucket/processor provenance and list termination while
     /// sharing the exact single-timer decoder; processor/table/list failures
     /// are retained in `errors` and per-timer diagnostics.
-    pub fn timer_list(&self) -> Result<TimerListDetail> {
+    pub fn timer_list(&self) -> Result<TimerTable> {
         let timer_layout = layout_for(self, "_KTIMER")?;
         let interrupt_time = self.interrupt_time();
         let keys = self.timer_dpc_keys();
@@ -1251,20 +1458,18 @@ impl Target {
                     + bucket as u64 * entry_stride
                     + u64::from(entry.offset);
                 let remaining = MAX_LIST_ENTRIES - total;
-                let (nodes, termination) = walk_list_nodes(self, head, remaining);
-                terminations.push(TimerBucketTermination {
+                let (timers, termination) =
+                    walk_list_records(self, head, timer_link_offset.unwrap_or(0), remaining);
+                terminations.push(TimerBucketEnd {
                     processor,
                     bucket: bucket as u16,
                     termination: termination.clone(),
                 });
-                for node in nodes {
-                    let timer = timer_link_offset
-                        .map(|offset| node - offset)
-                        .unwrap_or(node);
+                for timer in timers {
                     let detail = if timer_link_offset.is_some() {
                         self.decode_timer_with_context(timer, &timer_layout, keys, &trace)
                     } else {
-                        TimerDetail {
+                        KernelTimer {
                             address: timer,
                             due_time: DiagnosticValue::unavailable(
                                 "_KTIMER link field not present",
@@ -1282,7 +1487,7 @@ impl Target {
                             ),
                         }
                     };
-                    list_entries.push(TimerListEntry {
+                    list_entries.push(TimerTableEntry {
                         processor,
                         bucket: bucket as u16,
                         timer: detail,
@@ -1294,7 +1499,7 @@ impl Target {
                 }
             }
         }
-        Ok(TimerListDetail {
+        Ok(TimerTable {
             interrupt_time,
             entries: list_entries,
             terminations,
@@ -1353,26 +1558,43 @@ impl Target {
             .guest()?
             .ntoskrnl
             .types_in(process.dtb)
-            .struct_at("_EPROCESS", process.eprocess_va)?;
+            .struct_at("_EPROCESS", process.eprocess)?;
         parent_pid(&eprocess)
     }
 
     /// Read the layout-sensitive `_EPROCESS` fields `!process` reports,
     /// trying each build's field names in turn.
-    pub fn process_detail(&self, process: &ProcessInfo) -> ProcessDetail {
-        let session_id = self.process_session_id(process.eprocess_va);
-        let unavailable = || ProcessDetail {
-            session_id,
-            ..ProcessDetail::default()
+    pub fn process_detail(&self, process: ProcessInfo) -> ProcessDetail {
+        let session_id = self.process_session_id(process.eprocess);
+        let eprocess = self.guest().ok().and_then(|guest| {
+            let types = guest.ntoskrnl.types_in(process.dtb);
+            let eprocess = types.struct_at("_EPROCESS", process.eprocess).ok()?;
+            Some((types, eprocess.prefetch()))
+        });
+        let Some((types, eprocess)) = eprocess else {
+            return ProcessDetail {
+                process,
+                session_id,
+                peb: None,
+                parent_pid: None,
+                directory_table_base: None,
+                object_table: None,
+                handle_count: None,
+                vad_root: None,
+                token: None,
+                create_time: None,
+                user_time: None,
+                kernel_time: None,
+                quota_paged_pool: None,
+                quota_nonpaged_pool: None,
+                working_set_size: None,
+                commit_charge: None,
+                peak_virtual_size: None,
+                private_page_count: None,
+                debug_port: None,
+                job: None,
+            };
         };
-        let Ok(guest) = self.guest() else {
-            return unavailable();
-        };
-        let types = guest.ntoskrnl.types_in(process.dtb);
-        let Ok(eprocess) = types.struct_at("_EPROCESS", process.eprocess_va) else {
-            return unavailable();
-        };
-        let eprocess = eprocess.prefetch();
         let field = |paths: &[&[&str]]| read_first_uint(&eprocess, paths);
         let pointer = |name: &str| field(&[&[name]]).map(VirtAddr);
         // Newer builds keep the counters in `Vm.Instance`.
@@ -1419,26 +1641,32 @@ impl Target {
                 .or_else(|| field(&[&["NumberOfPrivatePages"]])),
             debug_port: pointer("DebugPort"),
             job: pointer("Job"),
+            process,
         }
     }
 
     /// Read the extended `_KTHREAD`/`_ETHREAD` fields shown by thread
-    /// listings, through the owning process's address space.
-    pub fn thread_extended_detail(&self, thread: &ThreadInfo) -> ThreadExtendedDetail {
-        let Ok(guest) = self.guest() else {
-            return ThreadExtendedDetail::default();
-        };
+    /// listings, through the owning process's address space. `vcpu` is the
+    /// vCPU running it, which the caller knows from the session.
+    pub fn thread_detail(&self, thread: ThreadInfo, vcpu: Option<String>) -> ThreadDetail {
+        let guest = self.guest().ok();
         let dtb = self
-            .thread_process_dtb(thread)
+            .thread_process_dtb(&thread)
             .unwrap_or_else(|| self.current_dtb());
-        let types = guest.ntoskrnl.types_in(dtb);
-        let ethread = types.struct_at("_ETHREAD", thread.ethread).ok();
-        let kthread = types.struct_at("_KTHREAD", thread.kthread).ok();
+        let types = guest.map(|guest| guest.ntoskrnl.types_in(dtb));
+        let ethread = types
+            .as_ref()
+            .and_then(|types| types.struct_at("_ETHREAD", thread.ethread).ok());
+        let kthread = types
+            .as_ref()
+            .and_then(|types| types.struct_at("_KTHREAD", thread.kthread).ok());
         let read = |root: &Option<StructRef<'_>>, name: &str| {
             root.as_ref()
                 .and_then(|root| read_first_uint(root, &[&[name]]))
         };
-        ThreadExtendedDetail {
+        ThreadDetail {
+            thread,
+            vcpu,
             win32_thread: read(&ethread, "Win32Thread").map(VirtAddr),
             user_time: read(&kthread, "UserTime").or_else(|| read(&ethread, "UserTime")),
             kernel_time: read(&kthread, "KernelTime").or_else(|| read(&ethread, "KernelTime")),
@@ -1457,7 +1685,7 @@ impl Target {
         let eprocess = guest
             .ntoskrnl
             .types_in(process.dtb)
-            .struct_at("_EPROCESS", process.eprocess_va)?;
+            .struct_at("_EPROCESS", process.eprocess)?;
         let eprocess_layout = guest.ntoskrnl.types().layout("_EPROCESS")?;
         let thread_list_head_offset = eprocess_layout.field_offset("ThreadListHead")?;
         let ethread_layout = guest.ntoskrnl.types().layout("_ETHREAD")?;
@@ -1465,17 +1693,12 @@ impl Target {
         let head = eprocess.addr() + thread_list_head_offset;
 
         let mut threads = Vec::new();
-        let mut visited = HashSet::new();
-        let mut current: VirtAddr = memory.read(head)?;
-
-        for _ in 0..16384 {
-            if current.is_zero() || current == head || !visited.insert(current.0) {
-                break;
-            }
-
+        let mut cursor = ListCursor::new(head, 16384);
+        cursor.advance(Ok(memory.read(head)?));
+        while let Some(current) = cursor.take_current() {
             let ethread = current - thread_list_entry_offset;
             threads.push(self.thread_info_from_ethread_with_hint(ethread, Some(process))?);
-            current = memory.read(current)?;
+            cursor.advance(Ok(memory.read(current)?));
         }
 
         Ok(threads)
@@ -1608,7 +1831,7 @@ impl Target {
             tid,
             pid: pid.or_else(|| owner.map(|process| process.pid)),
             process_name,
-            eprocess: eprocess.or_else(|| owner.map(|process| process.eprocess_va)),
+            eprocess: eprocess.or_else(|| owner.map(|process| process.eprocess)),
             state: read_kthread_u8("State"),
             wait_reason: read_kthread_u8("WaitReason"),
             priority: read_kthread_u8("Priority"),
@@ -1640,19 +1863,12 @@ impl Target {
         let irp_layout = self.guest.as_ref()?.ntoskrnl.types().layout("_IRP").ok()?;
         let thread_list_entry_offset = irp_layout.field_offset("ThreadListEntry").ok()?;
         let head = ethread + irp_list_offset;
-        let mut current: VirtAddr = memory.read(head).ok()?;
+        let mut cursor = ListCursor::new(head, 256);
+        cursor.advance(Ok(memory.read(head).ok()?));
         let mut irps = Vec::new();
-        let mut visited = HashSet::new();
-
-        for _ in 0..256 {
-            if current.is_zero() || current == head || !visited.insert(current.0) {
-                break;
-            }
+        while let Some(current) = cursor.take_current() {
             irps.push(current - thread_list_entry_offset);
-            current = match memory.read(current) {
-                Ok(next) => next,
-                Err(_) => break,
-            };
+            cursor.advance(memory.read(current).map_err(|error| error.to_string()));
         }
 
         Some(irps)

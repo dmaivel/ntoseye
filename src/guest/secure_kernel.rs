@@ -7,19 +7,20 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+use ntoseye_macros::record;
+
 use super::{
     Guest, Image, ModuleInfo,
     modules::module_info_from_record,
     trustlet_layout::{MAX_FUNCTION_BYTES, TrustletLayout},
 };
 use crate::{
-    backend::MemoryOps,
     error::{Error, Result},
-    memory::{AddressSpace, PAGE_SIZE, PFN_MASK},
+    memory::{AddressSpace, MemoryOps, PAGE_SIZE},
     phys::PhysMem,
     symbols::SymbolStore,
     target::bounded_list_walk,
-    types::{Arch, Dtb, PhysAddr, VirtAddr},
+    types::{Arch, Dtb, PFN_MASK, PhysAddr, VirtAddr},
 };
 
 const NX: u64 = 1 << 63;
@@ -33,12 +34,21 @@ pub struct SecureKernel {
     header_physical: PhysAddr,
 }
 
-#[derive(Debug, Clone)]
+/// An isolated user-mode process (trustlet) in VTL1, such as `LsaIso.exe`,
+/// as `!trustlets` lists it.
+#[record]
 pub struct TrustletInfo {
+    /// The address of the secure kernel's process object for this trustlet.
+    #[record(rename = "address")]
     pub process: VirtAddr,
+    /// The NT process ID of the trustlet's VTL0 counterpart.
     pub pid: u64,
+    /// The image name, from the NT process.
     pub name: String,
+    /// The trustlet's page-table root.
+    #[record(hex)]
     pub dtb: Dtb,
+    /// The trustlet ID from its creation attributes (1 for `LsaIso.exe`).
     pub trustlet_id: u64,
 }
 

@@ -5,8 +5,8 @@ use super::locals::live_range_contains;
 use super::lookup::preferred_symbol_records;
 use super::source::{SourceFileQuery, lookup_source_line, remap_source_file};
 use super::*;
-use crate::backend::MemoryOps;
 use crate::error::Result;
+use crate::memory::MemoryOps;
 use crate::types::{Arch, PhysAddr};
 use std::io::Write;
 use std::path::Path;
@@ -215,17 +215,17 @@ fn pdb_identity_requires_guid_and_non_stale_age() {
 
 #[test]
 fn duplicate_private_symbols_remain_candidates_while_public_symbols_take_precedence() {
-    let mut symbols = HashMap::new();
+    let mut symbols = FxHashMap::default();
     insert_symbol_rva(
         &mut symbols,
-        "duplicate".to_string(),
+        "duplicate",
         0x100,
         SymbolVisibility::Private,
         Some("first.obj".to_string()),
     );
     insert_symbol_rva(
         &mut symbols,
-        "duplicate".to_string(),
+        "duplicate",
         0x200,
         SymbolVisibility::Private,
         Some("second.obj".to_string()),
@@ -234,7 +234,7 @@ fn duplicate_private_symbols_remain_candidates_while_public_symbols_take_precede
 
     insert_symbol_rva(
         &mut symbols,
-        "duplicate".to_string(),
+        "duplicate",
         0x300,
         SymbolVisibility::Public,
         None,
@@ -263,9 +263,9 @@ fn symbol_resolution_reports_distinct_private_candidates() {
     );
     store.publish_symbol_rvas(
         1,
-        HashMap::from([(
-            "worker".to_string(),
-            vec![
+        FxHashMap::from_iter([(
+            "worker".into(),
+            smallvec![
                 IndexedSymbol {
                     rva: 0x100,
                     visibility: SymbolVisibility::Private,
@@ -311,9 +311,9 @@ fn public_symbol_is_the_unique_resolution_for_a_duplicate_name() {
     );
     store.publish_symbol_rvas(
         1,
-        HashMap::from([(
-            "worker".to_string(),
-            vec![
+        FxHashMap::from_iter([(
+            "worker".into(),
+            smallvec![
                 IndexedSymbol {
                     rva: 0x100,
                     visibility: SymbolVisibility::Private,
@@ -338,11 +338,11 @@ fn public_symbol_is_the_unique_resolution_for_a_duplicate_name() {
 fn closest_symbol_picks_nearest_lower_record_and_prefers_public_at_ties() {
     let store = SymbolStore::new();
     let base = VirtAddr(0x0000_0001_8000_0000);
-    let mut rvas = HashMap::new();
+    let mut rvas = FxHashMap::default();
     let mut insert = |name: &str, rva, visibility, compiland: Option<&str>| {
         insert_symbol_rva(
             &mut rvas,
-            name.to_string(),
+            name,
             rva,
             visibility,
             compiland.map(str::to_string),
@@ -567,9 +567,10 @@ fn source_lines_report_whether_the_local_file_is_the_one_compiled() {
     let recorded = r"C:\agent\src\driver.c";
     store.inject_source_lines_for_test(guid, dtb, base, 0x1000, recorded, &[(0x100, Some(4), 7)]);
     let checksum = source::source_digest(&SourceChecksum::Sha256([0; 32]), b"int compiled;\n");
-    store
-        .source_checksums
-        .insert(guid, HashMap::from([(recorded.to_string(), checksum)]));
+    store.source_checksums.insert(
+        guid,
+        FxHashMap::from_iter([(recorded.to_string(), checksum)]),
+    );
     store.set_source_paths(parse_source_paths(&[root.to_str().unwrap()]));
     let state = || {
         store

@@ -5,19 +5,19 @@
 use std::sync::Arc;
 
 use super::{
-    Breakpoint, BreakpointConfig, BreakpointManager, BreakpointScope, HypercallFilter,
+    BreakpointConfig, BreakpointInfo, BreakpointManager, BreakpointScope, HypercallFilter,
     PartitionFilter, ThreadScope,
 };
 use crate::error::{Error, Result};
 use crate::expr::Expr;
 use crate::guest::{
     ProcessInfo,
-    hypercalls::{HypercallCaller, HypercallInput, tlfs_hypercall},
+    hypercalls::{HypercallCallerInfo, HypercallInput, tlfs_hypercall},
 };
 use crate::target::{KTHREAD_STATE_TERMINATED, Target, ThreadInfo};
 use crate::types::{Arch, VirtAddr};
 
-impl Breakpoint {
+impl BreakpointInfo {
     /// What this breakpoint is restricted to: its address space, plus
     /// whichever of `/t`, `/c`, a hypercall filter and a guest partition
     /// narrowed it further.
@@ -135,7 +135,7 @@ impl HypercallFilter {
     /// VP match but whose registers are not known. A known exit that is not
     /// a VMCALL declines it: the handler then runs for no hypercall of the
     /// caller's.
-    pub fn matches(&self, caller: Option<&HypercallCaller>) -> bool {
+    pub fn matches(&self, caller: Option<&HypercallCallerInfo>) -> bool {
         let Some(caller) = caller else {
             return true;
         };
@@ -283,12 +283,12 @@ impl BreakpointManager {
 mod tests {
     use crate::breakpoints::test_backend::SlotRecorder;
     use crate::breakpoints::{
-        Breakpoint, BreakpointConfig, BreakpointManager, HypercallFilter, PartitionFilter,
+        BreakpointConfig, BreakpointInfo, BreakpointManager, HypercallFilter, PartitionFilter,
         ThreadScope,
     };
     use crate::guest::EvmcsState;
     use crate::guest::hypercall_input::decode_hypercall;
-    use crate::guest::hypercalls::{HypercallCaller, HypercallInput};
+    use crate::guest::hypercalls::{HypercallCallerInfo, HypercallInput};
     use crate::session::hits::evaluate_hit_condition;
     use crate::session::session_over_memory;
     use crate::target::{Target, ThreadInfo, sample_thread};
@@ -298,8 +298,8 @@ mod tests {
     /// NT's synthetic IPI, as RCX holds it live: fast, code 0x000b.
     const SEND_IPI: u64 = 0x1_000b;
 
-    fn caller(partition: u64, vp: u32, input: HypercallInput) -> HypercallCaller {
-        HypercallCaller {
+    fn caller(partition: u64, vp: u32, input: HypercallInput) -> HypercallCallerInfo {
+        HypercallCallerInfo {
             partition,
             root: partition == 0x1,
             vp,
@@ -434,7 +434,7 @@ mod tests {
 
     /// A breakpoint on the hypercall handler at 0x1000 of `target`, for
     /// call 0xb from any caller, with `condition`.
-    fn conditional_hypercall_breakpoint(target: &Target, condition: &str) -> Breakpoint {
+    fn conditional_hypercall_breakpoint(target: &Target, condition: &str) -> BreakpointInfo {
         let mut client = SlotRecorder::accepting();
         let mut manager = BreakpointManager::new();
         let id = manager
@@ -467,12 +467,12 @@ mod tests {
         let bp = conditional_hypercall_breakpoint(&session.target, "rdx == 0xfb");
         let hypervisor = HashMap::from([("rdx".to_string(), 0xfb), ("rip".to_string(), 0x1000)]);
         session.target.registers = Some(hypervisor.clone());
-        let with_rdx = |rdx| HypercallCaller {
+        let with_rdx = |rdx| HypercallCallerInfo {
             registers: HashMap::from([("rdx".to_string(), rdx)]),
             ..caller(4, 1, known(SEND_IPI))
         };
 
-        let holds = |target: &mut Target, caller: Option<&HypercallCaller>| {
+        let holds = |target: &mut Target, caller: Option<&HypercallCallerInfo>| {
             evaluate_hit_condition(target, &bp, caller)
         };
         assert!(holds(&mut session.target, Some(&with_rdx(0xfb))).unwrap());
@@ -538,7 +538,7 @@ mod tests {
             cs_access_rights: 0xa09b,
             ..EvmcsState::at(0, true)
         };
-        let caller_in = |state| HypercallCaller {
+        let caller_in = |state| HypercallCallerInfo {
             registers: HashMap::from([
                 ("rdx".to_string(), INPUT_GPA),
                 ("r8".to_string(), INPUT_VA),

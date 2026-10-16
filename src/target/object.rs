@@ -1,51 +1,71 @@
 //! Object-manager inspectors: names, directories, driver/device objects, IRPs, handles, file objects, resources, object headers, notify callbacks, SSDT.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::backend::MemoryOps;
+use ntoseye_macros::record;
+
 use crate::bugchecks::looks_like_kernel_pointer;
 use crate::error::{Error, Result};
-use crate::expr::{Expr, NumberRadix};
 use crate::guest::{Guest, ProcessInfo};
 use crate::layout::{StructRef, TypeInfo, Types};
-use crate::memory::PAGE_SIZE;
+use crate::memory::{MemoryOps, PAGE_SIZE};
+use crate::symbols::format_symbol_with_offset;
 use crate::types::VirtAddr;
 
 use super::{
-    DiagnosticValue, ListCursor, ListTermination, Target, bounded_list_walk, fast_ref_address,
+    DiagnosticValue, ListCursor, ListTermination, Target, bounded_record_list_walk,
+    fast_ref_address, irp_major_function_name, irp_minor_function_name, kthread_state_name,
+    wait_reason_name,
 };
 
-#[derive(Debug, Clone)]
+/// A `_DRIVER_OBJECT` from the Driver and FileSystem directories of the
+/// object manager (`drivers`).
+#[record]
 pub struct DriverObjectInfo {
+    /// The name of the driver object.
     pub name: String,
+    /// The `_DRIVER_OBJECT` address.
     pub object: VirtAddr,
+    /// The base address of the driver image.
+    #[record(rename = "start")]
     pub driver_start: VirtAddr,
+    /// The size of the driver image in bytes.
+    #[record(rename = "size")]
     pub driver_size: u64,
+    /// The first device on the chain of the driver. 0 if there is none.
     pub device_object: VirtAddr,
     pub driver_unload: VirtAddr,
 }
 
-/// A decoded `_IRP` and its `_IO_STACK_LOCATION`s.
-#[derive(Debug, Clone)]
+/// An `_IRP` and its I/O stack locations (`!irp`).
+#[record(impl)]
 pub struct IrpInfo {
     pub address: VirtAddr,
+    /// `Type`, which is `IO_TYPE_IRP` (6) for a valid IRP.
+    #[record(rename = "type")]
     pub irp_type: u16,
+    /// `Size` in bytes, including the stack locations.
     pub size: u16,
     pub stack_count: u8,
+    /// `CurrentLocation`, which is more than `stack_count` after the IRP
+    /// completes.
     pub current_location: u8,
     pub pending_returned: bool,
+    /// 0 for `KernelMode`, 1 for `UserMode`.
     pub requestor_mode: u8,
+    /// `IoStatus.Status` as an NTSTATUS. None if ntoseye cannot read it.
+    #[record(hex)]
     pub io_status: Option<u32>,
     pub user_event: VirtAddr,
     pub user_buffer: VirtAddr,
     pub mdl_address: VirtAddr,
-    /// `AssociatedIrp.SystemBuffer`, the buffered-I/O copy of the data.
+    /// `AssociatedIrp.SystemBuffer`, the copy of the data for buffered I/O.
     pub system_buffer: VirtAddr,
+    /// `Tail.Overlay.Thread`, the thread that issued the IRP.
     pub thread: VirtAddr,
-    /// Locations 1 to `StackCount` in order, the lowest driver's first;
-    /// empty when `StackCount` is implausible. A location that cannot be
-    /// read ends the list.
+    /// Every stack location, from location 1 (the lowest driver's) to
+    /// `stack_count`, ending early at one ntoseye cannot read; empty when
+    /// `StackCount` is implausible.
     pub stack: Vec<IoStackLocationInfo>,
 }
 
@@ -56,6 +76,16 @@ impl IrpInfo {
         usize::from(self.current_location)
             .checked_sub(1)
             .and_then(|index| self.stack.get(index))
+    }
+}
+
+#[record]
+impl IrpInfo {
+    /// The location that `CurrentLocation` names. None if the current
+    /// location is out of range or ntoseye cannot read it.
+    #[record(getter, rename = "current_stack")]
+    pub fn current_stack_location(&self) -> Option<IoStackLocationInfo> {
+        self.current_stack().cloned()
     }
 }
 
@@ -72,23 +102,51 @@ pub const SL_INVOKE_ON_CANCEL: u8 = 0x20;
 pub const SL_INVOKE_ON_SUCCESS: u8 = 0x40;
 pub const SL_INVOKE_ON_ERROR: u8 = 0x80;
 
-#[derive(Debug, Clone)]
+/// An `_IO_STACK_LOCATION`, which is the part of an IRP for one driver.
+#[record(impl)]
 pub struct IoStackLocationInfo {
     pub address: VirtAddr,
+    /// The `IRP_MJ_*` code.
     pub major_function: u8,
     pub minor_function: u8,
-    /// `Flags`: the `SL_*` flags of the request, such as
+    /// `Flags`, the request's `SL_*` flags, such as
     /// `SL_OVERRIDE_VERIFY_VOLUME`.
+    #[record(hex)]
     pub flags: u8,
-    /// `Control`: `SL_PENDING_RETURNED` and the `SL_INVOKE_ON_*` bits.
+    /// `Control`: `SL_PENDING_RETURNED` (0x01) and when the completion
+    /// routine runs, `SL_INVOKE_ON_CANCEL` (0x20), `SL_INVOKE_ON_SUCCESS`
+    /// (0x40) and `SL_INVOKE_ON_ERROR` (0x80).
+    #[record(hex)]
     pub control: u8,
-    /// `Parameters.Others.Argument1` to `Argument4`, which overlay the
-    /// first four pointer-sized words of every request's parameters.
+    /// `Parameters.Others.Argument1` to `Argument4`: the first four
+    /// words of the request's parameters, such as a read's length and
+    /// offset or an IOCTL's buffer lengths and code.
+    #[record(hex)]
     pub arguments: [u64; 4],
     pub device_object: VirtAddr,
     pub file_object: VirtAddr,
+    /// The completion routine that the driver of the next location up
+    /// set for when this location's driver completes the IRP.
     pub completion_routine: VirtAddr,
+    /// The context argument of the completion routine.
     pub context: VirtAddr,
+}
+
+#[record]
+impl IoStackLocationInfo {
+    /// The name of the major function (`IRP_MJ_READ`, ...).
+    #[record(getter)]
+    pub fn major_function_name(&self) -> String {
+        format!("IRP_MJ_{}", irp_major_function_name(self.major_function))
+    }
+
+    /// The name of the minor function (`IRP_MN_START_DEVICE`, ...), for
+    /// Plug and Play, power, WMI, and SCSI requests.
+    #[record(getter)]
+    pub fn minor_function_name(&self) -> Option<String> {
+        irp_minor_function_name(self.major_function, self.minor_function)
+            .map(|name| format!("IRP_MN_{name}"))
+    }
 }
 
 impl IoStackLocationInfo {
@@ -108,185 +166,323 @@ impl IoStackLocationInfo {
     }
 }
 
-/// A decoded `_DRIVER_OBJECT`: header fields, its `DeviceObject`/`NextDevice`
-/// chain, and the 28-entry `MajorFunction` dispatch table.
-#[derive(Debug, Clone)]
+/// A `_DRIVER_OBJECT` with its device chain and dispatch table (`!drvobj`).
+#[record]
 pub struct DriverObjectDetail {
     pub object: VirtAddr,
-    /// True when `object` was a pointer to a `_DRIVER_OBJECT` rather than one.
+    /// Whether the argument pointed to a pointer to the driver object.
     pub via_pointer: bool,
+    /// `DriverName`. None if ntoseye cannot read it.
     pub name: Option<String>,
     pub driver_start: VirtAddr,
+    /// The size of the driver image in bytes.
     pub driver_size: u64,
     pub driver_section: VirtAddr,
     pub driver_unload: VirtAddr,
-    pub device_chain: Vec<DeviceLink>,
-    /// `MajorFunction[0..=0x1b]` dispatch routines, indexed by `IRP_MJ_*` code.
-    pub dispatch: Vec<VirtAddr>,
+    /// The `DeviceObject`/`NextDevice` chain.
+    pub devices: Vec<DriverDeviceLink>,
+    /// The 28 `IRP_MJ_*` dispatch routines (`MajorFunction`), in `IRP_MJ_*`
+    /// code order.
+    pub dispatch: Vec<IrpDispatchRoutine>,
 }
 
-#[derive(Debug, Clone)]
-pub struct DeviceLink {
+/// One slot in the `MajorFunction` dispatch table.
+#[record(impl)]
+pub struct IrpDispatchRoutine {
+    /// The `IRP_MJ_*` code.
+    pub index: usize,
+    pub routine: VirtAddr,
+    /// The nearest symbol to the routine. None if no symbol resolves.
+    pub symbol: Option<String>,
+}
+
+#[record]
+impl IrpDispatchRoutine {
+    /// The name of the major function (`IRP_MJ_CREATE`, ...).
+    #[record(getter)]
+    pub fn name(&self) -> String {
+        format!("IRP_MJ_{}", irp_major_function_name(self.index as u8))
+    }
+}
+
+/// A device on the `DeviceObject`/`NextDevice` chain of a driver.
+#[record]
+pub struct DriverDeviceLink {
+    /// The `_DEVICE_OBJECT` address.
+    #[record(rename = "address")]
     pub device: VirtAddr,
     pub device_type: u32,
     pub flags: u32,
     pub characteristics: u32,
+    /// `AttachedDevice`, the device layered above this device. 0 if there is none.
     pub attached: VirtAddr,
+    /// `NextDevice`, the next device of the driver. 0 at the end of the chain.
     pub next: VirtAddr,
 }
 
-/// A decoded `_DEVICE_OBJECT` plus its `AttachedDevice` stack.
-#[derive(Debug, Clone)]
+/// A `_DEVICE_OBJECT` and the devices attached above it (`!devobj`).
+#[record]
 pub struct DeviceObjectDetail {
     pub object: VirtAddr,
+    /// Whether the argument pointed to a pointer to the device object.
     pub via_pointer: bool,
     pub device_type: u32,
     pub flags: u32,
     pub characteristics: u32,
     pub driver_object: VirtAddr,
+    /// The device layered directly above this device. 0 if there is none.
     pub attached_device: VirtAddr,
+    /// The next device of the driver. 0 at the end of the chain.
     pub next_device: VirtAddr,
     pub current_irp: VirtAddr,
     pub device_extension: VirtAddr,
-    pub attached_stack: Vec<DeviceStackEntry>,
+    /// The `AttachedDevice` chain, from the bottom up.
+    pub attached_stack: Vec<AttachedDevice>,
 }
 
-#[derive(Debug, Clone)]
-pub struct DeviceStackEntry {
+/// A device on the `AttachedDevice` stack of a device.
+#[record]
+pub struct AttachedDevice {
     pub device: VirtAddr,
     pub driver_object: VirtAddr,
     pub device_type: u32,
     pub flags: u32,
 }
 
-/// A decoded executive `_OBJECT_HEADER` and the body it precedes.
-#[derive(Debug, Clone)]
+/// An executive object's `_OBJECT_HEADER`, type, and name.
+#[record]
 pub struct ObjectHeaderDetail {
+    /// The address that you gave.
     pub input: VirtAddr,
-    /// "body" when the input pointed at the object body, "header" when it
-    /// pointed at the header itself.
-    pub mode: &'static str,
+    /// `body` if the input pointed to the object body, or `header` if it
+    /// pointed to the object header.
+    pub mode: ObjectHeaderInput,
     pub header: VirtAddr,
     pub body: VirtAddr,
     pub pointer_count: i64,
     pub handle_count: i64,
+    /// The decoded `TypeIndex` of the header. None if ntoseye cannot read it.
     pub type_index: Option<u64>,
+    /// The `_OBJECT_TYPE`. None if ntoseye cannot resolve it.
     pub type_object: Option<VirtAddr>,
     pub type_name: Option<String>,
+    /// The `InfoMask` of the header, which shows which optional headers
+    /// come before it.
     pub info_mask: Option<u8>,
+    /// The `_OBJECT_HEADER_NAME_INFO`. None if the object has none.
     pub name_info: Option<VirtAddr>,
+    /// None for an unnamed object.
     pub name: Option<String>,
 }
 
-/// An object and, for a directory, what it holds (`!object`).
-#[derive(Debug, Clone)]
+/// An executive object with its header, type, and name, and the entries of
+/// a directory (`!object`).
+#[record]
 pub struct ObjectDetail {
+    #[record(rename = "info")]
     pub header: ObjectHeaderDetail,
-    /// A directory's entries, by name; `None` for any other object.
+    /// The entries of a directory, by name. None for all other objects.
     pub entries: Option<Vec<ObjectDirectoryEntry>>,
 }
 
-/// One named object in an object directory.
-#[derive(Debug, Clone)]
+/// A named object in an object directory.
+#[record]
 pub struct ObjectDirectoryEntry {
     pub name: String,
     pub object: VirtAddr,
-    /// The object's type (`Directory`, `Driver`, `SymbolicLink`, ...),
-    /// `None` when its header cannot be decoded.
+    /// The type of the object (`Directory`, `Driver`, `SymbolicLink`, ...).
+    /// None if ntoseye cannot decode its header.
+    #[record(rename = "type")]
     pub type_name: Option<String>,
+}
+
+/// What `!object` names: an object by body or header address, or by its
+/// path in the object namespace (`\Driver\ACPI`).
+#[derive(Debug, Clone)]
+pub enum ObjectName {
+    Address(VirtAddr),
+    Path(String),
 }
 
 /// The object type name of an object directory.
 const DIRECTORY_TYPE: &str = "Directory";
 
-/// One process/thread/image notification callback registered with the kernel.
-#[derive(Debug, Clone)]
+/// What the address given to `inspect_object_header` pointed to: `body` or
+/// `header`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectHeaderInput {
+    Body,
+    Header,
+}
+
+/// The kind of a notification callback: `process`, `thread`, or `image`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotifyCallbackKind {
+    Process,
+    Thread,
+    Image,
+}
+
+/// Where ntoseye found an IRP: `thread` (an `IrpList`) or `device` (a
+/// `CurrentIrp`).
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrpSource {
+    Thread,
+    Device,
+}
+
+/// A process, thread, or image notification callback (`callbacks`).
+#[record]
 pub struct NotifyCallback {
-    /// "process", "thread", or "image".
-    pub kind: &'static str,
+    /// `process`, `thread`, or `image`.
+    pub kind: NotifyCallbackKind,
+    /// The slot of the callback in the kernel callback array.
     pub index: usize,
     pub function: VirtAddr,
+    /// The nearest symbol to the function. None if no symbol resolves.
+    pub symbol: Option<String>,
+    /// The `_EX_CALLBACK_ROUTINE_BLOCK`.
     pub block: VirtAddr,
+    /// The raw `_EX_FAST_REF` value of the slot.
     pub raw: VirtAddr,
     pub context: VirtAddr,
 }
 
-/// One system-service-table slot resolved to its target routine.
-#[derive(Debug, Clone)]
+/// A slot in a system-service table.
+#[record]
 pub struct SsdtEntry {
+    /// The system-service number.
     pub index: u32,
+    /// The routine that the slot resolves to.
     pub target: VirtAddr,
+    /// The symbol of the routine. None if no symbol resolves.
     pub symbol: Option<String>,
+    /// The module that contains the routine. None if no module contains it.
     pub module: Option<String>,
 }
 
-/// A system service descriptor table (the kernel SSDT or the win32k shadow).
-#[derive(Debug, Clone)]
+/// A system-service table, either the kernel SSDT or the win32k shadow (`ssdt`).
+#[record]
 pub struct SsdtTable {
+    /// The label of the table.
     pub label: String,
     pub base: VirtAddr,
+    /// The number of services.
     pub limit: u32,
     pub entries: Vec<SsdtEntry>,
 }
 
-/// An IRP discovered via an `_ETHREAD` `IrpList` or a `_DEVICE_OBJECT`
-/// `CurrentIrp`, with the context it was found in.
-#[derive(Debug, Clone)]
+/// An in-flight IRP that ntoseye found on the `IrpList` of a thread or in the
+/// `CurrentIrp` of a device (`irps`).
+#[record(impl)]
 pub struct IrpHit {
     pub irp: VirtAddr,
-    /// "thread" or "device".
-    pub source: &'static str,
+    /// Where ntoseye found the IRP: `thread` or `device`.
+    pub source: IrpSource,
     pub stack_count: u8,
     pub current_location: u8,
+    /// The process that issued the IRP. None if ntoseye found the IRP on a device.
     pub pid: Option<u64>,
+    /// The thread that issued the IRP. None if ntoseye found the IRP on a device.
     pub tid: Option<u64>,
     pub ethread: Option<VirtAddr>,
+    /// The `_KTHREAD.State` of the thread. None if ntoseye found the IRP on a
+    /// device.
     pub state: Option<u8>,
+    /// The `_KTHREAD.WaitReason` of the thread. None if ntoseye found the IRP
+    /// on a device.
     pub wait_reason: Option<u8>,
+    /// The driver that owns the device of the current stack location. None if
+    /// ntoseye cannot resolve it.
     pub driver: Option<String>,
+    /// The device of the current stack location. None if ntoseye cannot resolve it.
     pub device: Option<VirtAddr>,
 }
 
-#[derive(Debug, Clone)]
-pub struct HandleEntryDetail {
+#[record]
+impl IrpHit {
+    /// The state name of the thread. None if ntoseye found the IRP on a device.
+    #[record(getter)]
+    pub fn state_name(&self) -> Option<&'static str> {
+        self.state.map(kthread_state_name)
+    }
+
+    /// The wait-reason name of the thread. None if ntoseye found the IRP on a
+    /// device.
+    #[record(getter)]
+    pub fn wait_reason_name(&self) -> Option<&'static str> {
+        self.wait_reason.map(wait_reason_name)
+    }
+}
+
+/// A handle-table entry (`!handle <handle>`).
+#[record]
+pub struct HandleEntry {
+    #[record(hex)]
     pub handle: u64,
+    /// The `_HANDLE_TABLE_ENTRY`.
     pub entry: VirtAddr,
+    /// The body of the object.
     pub object: DiagnosticValue<VirtAddr>,
     pub type_name: DiagnosticValue<Option<String>>,
+    /// The name of the object, or None for an unnamed object.
     pub name: DiagnosticValue<Option<String>>,
+    #[record(hex)]
     pub granted_access: DiagnosticValue<u32>,
+    /// The attribute bits of the entry (inherit, protect-from-close, audit).
+    #[record(hex)]
     pub attributes: DiagnosticValue<u32>,
 }
 
-#[derive(Debug, Clone)]
-pub struct HandleTableSummary {
+/// The handle table of a process (`!handle`).
+#[record]
+pub struct HandleTable {
+    /// The process that owns the table.
     pub process: ProcessInfo,
+    /// The `_HANDLE_TABLE`.
     pub table: VirtAddr,
+    /// The level of the table (0-2), which is the number of pointer levels
+    /// before the entries.
     pub table_level: u8,
+    /// The handle count that the table reports.
     pub advertised_handles: usize,
     pub scanned_handles: usize,
+    /// The number of entries that ntoseye could not read.
     pub skipped_entries: usize,
+    /// Whether the enumeration stopped at its limit.
     pub truncated: bool,
-    pub entries: Vec<HandleEntryDetail>,
+    pub entries: Vec<HandleEntry>,
 }
 
-#[derive(Debug, Clone)]
-pub struct FileObjectDetail {
+/// A `_FILE_OBJECT` (`!fileobj`).
+#[record]
+pub struct FileObject {
     pub address: VirtAddr,
+    /// `Type`, which is `IO_TYPE_FILE` (5) for a valid file object.
     pub file_type: DiagnosticValue<i16>,
     pub size: DiagnosticValue<i16>,
     pub device_object: DiagnosticValue<VirtAddr>,
+    #[record(hex)]
     pub device_type: DiagnosticValue<u32>,
+    /// The object name of the device, or None for an unnamed device.
     pub device_name: DiagnosticValue<Option<String>>,
     pub file_name: DiagnosticValue<String>,
     pub related_file_object: DiagnosticValue<VirtAddr>,
+    #[record(hex)]
     pub flags: DiagnosticValue<u32>,
     pub current_byte_offset: DiagnosticValue<i64>,
+    /// The `FsContext` of the file system (its FCB).
     pub fs_context: DiagnosticValue<VirtAddr>,
+    /// The `FsContext2` of the file system (its CCB).
     pub fs_context2: DiagnosticValue<VirtAddr>,
     pub section_object_pointer: DiagnosticValue<VirtAddr>,
     pub private_cache_map: DiagnosticValue<VirtAddr>,
-    pub final_status: DiagnosticValue<i32>,
+    /// The NTSTATUS that the file object completed with.
+    #[record(hex)]
+    pub final_status: DiagnosticValue<u32>,
     pub lock_operation: DiagnosticValue<bool>,
     pub delete_pending: DiagnosticValue<bool>,
     pub read_access: DiagnosticValue<bool>,
@@ -297,27 +493,37 @@ pub struct FileObjectDetail {
     pub shared_delete: DiagnosticValue<bool>,
 }
 
+/// A thread that owns an executive resource.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceOwner {
     pub thread: VirtAddr,
+    /// The number of times that the thread acquired the resource.
     pub count: i32,
 }
 
-#[derive(Debug, Clone)]
-pub struct ResourceDetail {
+/// An `_ERESOURCE` (`!locks <address>`).
+#[record]
+pub struct ExecutiveResource {
     pub address: VirtAddr,
     pub active_count: DiagnosticValue<i16>,
+    #[record(hex)]
     pub flags: DiagnosticValue<u16>,
     pub contention_count: DiagnosticValue<u32>,
+    /// The number of threads that wait for shared access.
     pub shared_waiters: DiagnosticValue<u32>,
+    /// The number of threads that wait for exclusive access.
     pub exclusive_waiters: DiagnosticValue<u32>,
+    /// The threads that own the resource.
     pub owners: DiagnosticValue<Vec<ResourceOwner>>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ResourceListSummary {
+/// The executive-resource list of the kernel (`!locks`).
+#[record]
+pub struct ResourceList {
+    /// `nt!ExpSystemResourcesList`.
     pub head: VirtAddr,
-    pub resources: Vec<ResourceDetail>,
+    pub resources: Vec<ExecutiveResource>,
     pub termination: ListTermination,
 }
 
@@ -386,17 +592,17 @@ fn select_object_header_candidate(
     direct_candidate: Option<VirtAddr>,
     body_has_type: bool,
     direct_has_type: bool,
-) -> Option<(VirtAddr, VirtAddr, &'static str)> {
+) -> Option<(VirtAddr, VirtAddr, ObjectHeaderInput)> {
     match (body_candidate, direct_candidate) {
-        (Some(header), Some(_)) if body_has_type => Some((header, input, "body")),
+        (Some(header), Some(_)) if body_has_type => Some((header, input, ObjectHeaderInput::Body)),
         (Some(_), Some(header)) if direct_has_type => {
-            Some((header, header + body_offset, "header"))
+            Some((header, header + body_offset, ObjectHeaderInput::Header))
         }
         // Both locations are readable but neither decodes through the type
         // table. Guessing here would make an arbitrary pool address look valid.
         (Some(_), Some(_)) => None,
-        (Some(header), None) => Some((header, input, "body")),
-        (None, Some(header)) => Some((header, header + body_offset, "header")),
+        (Some(header), None) => Some((header, input, ObjectHeaderInput::Body)),
+        (None, Some(header)) => Some((header, header + body_offset, ObjectHeaderInput::Header)),
         (None, None) => None,
     }
 }
@@ -553,15 +759,12 @@ impl Target {
     }
 
     fn walk_object_directory_bucket(
-        mut entry: VirtAddr,
+        entry: VirtAddr,
         mut visit: impl FnMut(VirtAddr) -> Result<VirtAddr>,
     ) -> Result<()> {
-        let mut visited = HashSet::new();
-        for _ in 0..4096 {
-            if entry.is_zero() || !visited.insert(entry.0) {
-                break;
-            }
-            entry = visit(entry)?;
+        let mut cursor = ListCursor::from_first(entry, 4096);
+        while let Some(current) = cursor.take_current() {
+            cursor.advance(Ok(visit(current)?));
         }
         Ok(())
     }
@@ -636,13 +839,11 @@ impl Target {
         Ok(ObjectDetail { header, entries })
     }
 
-    /// What an `!object` argument names: an object namespace path (`\`,
-    /// `\Driver\ACPI`), else an address expression.
-    pub fn object_argument(&self, text: &str, radix: NumberRadix) -> Result<VirtAddr> {
-        if text.starts_with('\\') {
-            self.object_at_path(text)
-        } else {
-            Expr::eval_with_radix(text, self, radix)
+    /// The address of the object that `name` names.
+    pub fn object_address(&self, name: &ObjectName) -> Result<VirtAddr> {
+        match name {
+            ObjectName::Address(address) => Ok(*address),
+            ObjectName::Path(path) => self.object_at_path(path),
         }
     }
 
@@ -719,9 +920,10 @@ impl Target {
             .filter(|name| !name.is_empty())
     }
 
-    fn read_device_link(&self, device: VirtAddr) -> Result<DeviceLink> {
+    /// The `_DEVICE_OBJECT` at `device`, as its driver's chain lists it.
+    pub fn read_device_link(&self, device: VirtAddr) -> Result<DriverDeviceLink> {
         let d = self.kernel_struct("_DEVICE_OBJECT", device)?;
-        Ok(DeviceLink {
+        Ok(DriverDeviceLink {
             device,
             device_type: d.read_field("DeviceType")?,
             flags: d.read_field("Flags")?,
@@ -787,12 +989,17 @@ impl Target {
             device_chain.push(link);
         }
 
+        let dtb = self.kernel_dtb();
         let mut dispatch = Vec::with_capacity(28);
-        for i in 0..28u64 {
-            dispatch.push(
-                mem.read::<VirtAddr>(object + mf_off + i * 8)
-                    .unwrap_or(VirtAddr(0)),
-            );
+        for index in 0..28usize {
+            let routine = mem
+                .read::<VirtAddr>(object + mf_off + index as u64 * 8)
+                .unwrap_or(VirtAddr(0));
+            dispatch.push(IrpDispatchRoutine {
+                index,
+                routine,
+                symbol: self.format_code_address(dtb, routine),
+            });
         }
 
         Ok(DriverObjectDetail {
@@ -803,7 +1010,7 @@ impl Target {
             driver_size: drv.read_field::<u32>("DriverSize")? as u64,
             driver_section: drv.read_field("DriverSection")?,
             driver_unload: drv.read_field("DriverUnload")?,
-            device_chain,
+            devices: device_chain,
             dispatch,
         })
     }
@@ -853,7 +1060,7 @@ impl Target {
                 break;
             };
             let next: VirtAddr = d.read_field("AttachedDevice")?;
-            attached_stack.push(DeviceStackEntry {
+            attached_stack.push(AttachedDevice {
                 device: cur,
                 driver_object: d.read_field("DriverObject")?,
                 device_type: d.read_field("DeviceType")?,
@@ -927,7 +1134,7 @@ impl Target {
         entry_layout: &TypeInfo,
         entry: VirtAddr,
         handle: u64,
-    ) -> HandleEntryDetail {
+    ) -> HandleEntry {
         let object = (|| -> Result<VirtAddr> {
             if entry_layout.fields.contains_key("ObjectPointerBits") {
                 let bits =
@@ -986,7 +1193,7 @@ impl Target {
             Err(error) => DiagnosticValue::unavailable(error.to_string()),
         };
 
-        HandleEntryDetail {
+        HandleEntry {
             handle,
             entry,
             object: DiagnosticValue::from_result(object),
@@ -1005,7 +1212,7 @@ impl Target {
         // kernel's DTB maps even where a dump lacks the process's own page
         // directory.
         let types = self.guest()?.ntoskrnl.types_in(self.kernel_dtb());
-        let eprocess = types.struct_at("_EPROCESS", process.eprocess_va)?;
+        let eprocess = types.struct_at("_EPROCESS", process.eprocess)?;
         let table: VirtAddr = eprocess.read_field("ObjectTable")?;
         if table.is_zero() {
             return Err(Error::DebugInfo(
@@ -1035,7 +1242,7 @@ impl Target {
 
     /// List non-free handles in the selected/current process.  Both page-table
     /// traversal and slot count are bounded by `limit`.
-    pub fn enumerate_handles(&self, limit: usize) -> Result<HandleTableSummary> {
+    pub fn enumerate_handles(&self, limit: usize) -> Result<HandleTable> {
         self.enumerate_process_handles(self.selected_process_info()?, limit.clamp(1, 4096))
     }
 
@@ -1045,7 +1252,7 @@ impl Target {
         &self,
         process: ProcessInfo,
         limit: usize,
-    ) -> Result<HandleTableSummary> {
+    ) -> Result<HandleTable> {
         let (process, table, table_base, level, advertised, entry_layout) =
             self.handle_table_context(process)?;
         let scanned = advertised.min(limit);
@@ -1068,7 +1275,7 @@ impl Target {
                 entries.push(decoded);
             }
         }
-        Ok(HandleTableSummary {
+        Ok(HandleTable {
             process,
             table,
             table_level: level,
@@ -1081,7 +1288,7 @@ impl Target {
     }
 
     /// Decode one handle from the same selected/current process handle table.
-    pub fn inspect_handle(&self, handle: u64) -> Result<HandleEntryDetail> {
+    pub fn inspect_handle(&self, handle: u64) -> Result<HandleEntry> {
         if handle & 3 != 0 {
             return Err(Error::DebugInfo(format!(
                 "handle {handle:#x} is not 4-byte aligned"
@@ -1101,7 +1308,7 @@ impl Target {
     }
 
     /// Decode a `_FILE_OBJECT` strictly from the loaded kernel PDB layout.
-    pub fn inspect_file_object(&self, address: VirtAddr) -> Result<FileObjectDetail> {
+    pub fn inspect_file_object(&self, address: VirtAddr) -> Result<FileObject> {
         let types = self.guest()?.ntoskrnl.types_in(self.kernel_dtb());
         let layout = types.layout("_FILE_OBJECT")?;
         let read_ptr = |name| {
@@ -1132,7 +1339,7 @@ impl Target {
             Err(error) => DiagnosticValue::unavailable(error.to_string()),
         };
 
-        Ok(FileObjectDetail {
+        Ok(FileObject {
             address,
             file_type: DiagnosticValue::from_result(
                 self.read_kernel_layout_field(&layout, address, "Type"),
@@ -1178,7 +1385,7 @@ impl Target {
     }
 
     /// Decode one executive resource at an explicit address.
-    pub fn inspect_resource(&self, address: VirtAddr) -> Result<ResourceDetail> {
+    pub fn inspect_resource(&self, address: VirtAddr) -> Result<ExecutiveResource> {
         const MAX_RESOURCE_OWNERS: usize = 64;
         let types = self.guest()?.ntoskrnl.types_in(self.kernel_dtb());
         let layout = types.layout("_ERESOURCE")?;
@@ -1224,7 +1431,7 @@ impl Target {
             Ok(owners)
         })());
 
-        Ok(ResourceDetail {
+        Ok(ExecutiveResource {
             address,
             active_count: DiagnosticValue::from_result(self.read_kernel_layout_field(
                 &layout,
@@ -1256,20 +1463,21 @@ impl Target {
     /// Enumerate the kernel-maintained executive-resource list when the private
     /// list-head symbol and `_ERESOURCE.SystemResourcesList` metadata exist.
     /// There is deliberately no memory-scan fallback.
-    pub fn enumerate_resources(&self, limit: usize) -> Result<ResourceListSummary> {
+    pub fn enumerate_resources(&self, limit: usize) -> Result<ResourceList> {
         let limit = limit.clamp(1, 1024);
         let guest = self.guest()?;
         let head = guest.ntoskrnl.symbol("ExpSystemResourcesList")?.address();
         let layout = guest.ntoskrnl.types().layout("_ERESOURCE")?;
         let link_offset = layout.field_offset("SystemResourcesList")?;
         let memory = self.kernel_address_space();
-        let (links, termination) =
-            bounded_list_walk(head, limit, |link| memory.read::<VirtAddr>(link));
-        let resources = links
+        let (records, termination) = bounded_record_list_walk(head, link_offset, limit, |link| {
+            memory.read::<VirtAddr>(link)
+        });
+        let resources = records
             .into_iter()
-            .map(|link| self.inspect_resource(link - link_offset))
+            .map(|resource| self.inspect_resource(resource))
             .collect::<Result<Vec<_>>>()?;
-        Ok(ResourceListSummary {
+        Ok(ResourceList {
             head,
             resources,
             termination,
@@ -1404,10 +1612,10 @@ impl Target {
     /// the `Psp*NotifyRoutine` fast-ref arrays.
     pub fn enumerate_notify_callbacks(&self) -> Result<Vec<NotifyCallback>> {
         const MAX_NOTIFY: u64 = 64;
-        let sets: [(&str, &str); 3] = [
-            ("process", "PspCreateProcessNotifyRoutine"),
-            ("thread", "PspCreateThreadNotifyRoutine"),
-            ("image", "PspLoadImageNotifyRoutine"),
+        let sets: [(NotifyCallbackKind, &str); 3] = [
+            (NotifyCallbackKind::Process, "PspCreateProcessNotifyRoutine"),
+            (NotifyCallbackKind::Thread, "PspCreateThreadNotifyRoutine"),
+            (NotifyCallbackKind::Image, "PspLoadImageNotifyRoutine"),
         ];
 
         let guest = self.guest()?;
@@ -1435,6 +1643,7 @@ impl Target {
             .unwrap_or(16);
 
         let is_kernel = |a: VirtAddr| a.0 >= 0xffff_0000_0000_0000;
+        let dtb = self.kernel_dtb();
         let mut out = Vec::new();
 
         for (kind, symbol) in sets {
@@ -1474,6 +1683,7 @@ impl Target {
                     kind,
                     index: i as usize,
                     function,
+                    symbol: self.format_code_address(dtb, function),
                     block,
                     raw,
                     context,
@@ -1500,14 +1710,10 @@ impl Target {
             let target = VirtAddr((base.0 as i64 + offset) as u64);
             let resolved = self.symbols.find_closest_symbol_for_address(dtb, target);
             let (symbol, module) = match resolved {
-                Some((module, name, off)) => {
-                    let sym = if off == 0 {
-                        format!("{module}!{name}")
-                    } else {
-                        format!("{module}!{name}+{off:#x}")
-                    };
-                    (Some(sym), Some(module))
-                }
+                Some((module, name, off)) => (
+                    Some(format_symbol_with_offset(&module, &name, off)),
+                    Some(module),
+                ),
                 None => (None, None),
             };
             entries.push(SsdtEntry {
@@ -1631,11 +1837,10 @@ impl Target {
             };
 
             // Walk the process thread list (ETHREAD.ThreadListEntry).
-            let head = p.eprocess_va + head_off;
-            let (thread_links, _) = bounded_list_walk(head, 4096, |link| mem.read(link));
-            for node in thread_links {
-                let ethread = node - link_off;
-
+            let head = p.eprocess + head_off;
+            let (ethreads, _) =
+                bounded_record_list_walk(head, link_off, 4096, |link| mem.read(link));
+            for ethread in ethreads {
                 let tid = cid_off
                     .zip(unique_thread_off)
                     .and_then(|(c, u)| mem.read::<u64>(ethread + c + u).ok());
@@ -1643,14 +1848,15 @@ impl Target {
                 let wait = wait_off.and_then(|o| mem.read::<u8>(ethread + tcb_off + o).ok());
 
                 // Walk this thread's IrpList (IRP.ThreadListEntry).
-                let (irp_links, _) =
-                    bounded_list_walk(ethread + list_off, 256, |link| mem.read(link));
-                for inode in irp_links {
-                    let irp = inode - rec_off;
+                let (irps, _) =
+                    bounded_record_list_walk(ethread + list_off, rec_off, 256, |link| {
+                        mem.read(link)
+                    });
+                for irp in irps {
                     if let Some((sc, cl)) = self.plausible_irp(irp) {
                         out.push(IrpHit {
                             irp,
-                            source: "thread",
+                            source: IrpSource::Thread,
                             stack_count: sc,
                             current_location: cl,
                             pid: Some(p.pid),
@@ -1684,7 +1890,7 @@ impl Target {
                         {
                             out.push(IrpHit {
                                 irp: current_irp,
-                                source: "device",
+                                source: IrpSource::Device,
                                 stack_count: sc,
                                 current_location: cl,
                                 pid: None,
@@ -1787,7 +1993,7 @@ mod tests {
                 false,
                 true,
             ),
-            Some((input, VirtAddr(0x1030), "header"))
+            Some((input, VirtAddr(0x1030), ObjectHeaderInput::Header))
         );
     }
 

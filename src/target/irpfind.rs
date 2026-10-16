@@ -11,6 +11,8 @@
 use std::collections::HashMap;
 use std::ops::ControlFlow;
 
+use ntoseye_macros::record;
+
 use crate::error::{Error, Result};
 use crate::layout::{StructRef, Types};
 use crate::memory::PAGE_SIZE;
@@ -47,32 +49,26 @@ pub enum IrpCriteria {
 }
 
 impl IrpCriteria {
-    /// The criterion WinDbg names `name`, matching `value`.
-    pub fn parse(name: &str, value: u64) -> Result<Self> {
-        Ok(match name.to_ascii_lowercase().as_str() {
-            "arg" => Self::Arg(value),
-            "device" => Self::Device(VirtAddr(value)),
-            "fileobject" => Self::FileObject(VirtAddr(value)),
-            "mdlprocess" => Self::MdlProcess(VirtAddr(value)),
-            "thread" => Self::Thread(VirtAddr(value)),
-            "userevent" => Self::UserEvent(VirtAddr(value)),
-            other => {
-                return Err(Error::InvalidArgument(format!(
-                    "unknown !irpfind criteria '{other}' (arg, device, fileobject, mdlprocess, \
-                     thread, userevent)"
-                )));
-            }
-        })
+    /// The criterion `kind` names, matching `value`.
+    pub fn new(kind: IrpCriteriaKind, value: u64) -> Self {
+        match kind {
+            IrpCriteriaKind::Arg => Self::Arg(value),
+            IrpCriteriaKind::Device => Self::Device(VirtAddr(value)),
+            IrpCriteriaKind::FileObject => Self::FileObject(VirtAddr(value)),
+            IrpCriteriaKind::MdlProcess => Self::MdlProcess(VirtAddr(value)),
+            IrpCriteriaKind::Thread => Self::Thread(VirtAddr(value)),
+            IrpCriteriaKind::UserEvent => Self::UserEvent(VirtAddr(value)),
+        }
     }
 
-    pub fn name(self) -> &'static str {
+    pub fn name(self) -> IrpCriteriaKind {
         match self {
-            Self::Arg(_) => "arg",
-            Self::Device(_) => "device",
-            Self::FileObject(_) => "fileobject",
-            Self::MdlProcess(_) => "mdlprocess",
-            Self::Thread(_) => "thread",
-            Self::UserEvent(_) => "userevent",
+            Self::Arg(_) => IrpCriteriaKind::Arg,
+            Self::Device(_) => IrpCriteriaKind::Device,
+            Self::FileObject(_) => IrpCriteriaKind::FileObject,
+            Self::MdlProcess(_) => IrpCriteriaKind::MdlProcess,
+            Self::Thread(_) => IrpCriteriaKind::Thread,
+            Self::UserEvent(_) => IrpCriteriaKind::UserEvent,
         }
     }
 
@@ -88,9 +84,47 @@ impl IrpCriteria {
     }
 }
 
-/// The pool `!irpfind` searches.
+/// The name WinDbg gives an `!irpfind` criterion: `arg`, `device`,
+/// `fileobject`, `mdlprocess`, `thread`, or `userevent`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrpCriteriaKind {
+    Arg,
+    Device,
+    #[record(rename = "fileobject")]
+    FileObject,
+    #[record(rename = "mdlprocess")]
+    MdlProcess,
+    Thread,
+    #[record(rename = "userevent")]
+    UserEvent,
+}
+
+impl IrpCriteriaKind {
+    /// The criterion WinDbg names `name`, in any case.
+    pub fn parse(name: &str) -> Result<Self> {
+        Ok(match name.to_ascii_lowercase().as_str() {
+            "arg" => Self::Arg,
+            "device" => Self::Device,
+            "fileobject" => Self::FileObject,
+            "mdlprocess" => Self::MdlProcess,
+            "thread" => Self::Thread,
+            "userevent" => Self::UserEvent,
+            other => {
+                return Err(Error::InvalidArgument(format!(
+                    "unknown !irpfind criteria '{other}' (arg, device, fileobject, mdlprocess, \
+                     thread, userevent)"
+                )));
+            }
+        })
+    }
+}
+
+/// The pool `!irpfind` searches: `nonpaged` or `paged`.
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IrpPool {
+    #[record(rename = "nonpaged")]
     NonPaged,
     Paged,
 }
@@ -140,93 +174,78 @@ impl IrpPool {
     }
 }
 
-/// A parsed `!irpfind [-v] [pool-type [restart-address [criteria data]]]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IrpFindArgs {
-    /// `-v`: the text rendering adds each IRP's details.
-    pub verbose: bool,
-    pub pool: IrpPool,
-    /// Where to resume the page scan; a restart address of 0 is none.
-    pub restart: Option<VirtAddr>,
-    pub criteria: Option<IrpCriteria>,
-}
-
-impl IrpFindArgs {
-    pub const USAGE: &str = "!irpfind [-v] [pool-type [restart-address [criteria data]]]";
-
-    /// Parse `argv` as WinDbg does; `eval` evaluates the pool type, restart
-    /// address, and criteria data (the criteria name is a word).
-    pub fn parse<S: AsRef<str>>(argv: &[S], eval: impl Fn(&str) -> Result<u64>) -> Result<Self> {
-        let verbose = argv
-            .first()
-            .is_some_and(|arg| arg.as_ref().eq_ignore_ascii_case("-v"));
-        let rest = &argv[usize::from(verbose)..];
-        if rest.len() == 3 || rest.len() > 4 {
-            return Err(Error::InvalidArgument(format!("usage: {}", Self::USAGE)));
-        }
-        let pool = IrpPool::from_windbg(match rest.first() {
-            Some(text) => eval(text.as_ref())?,
-            None => 0,
-        })?;
-        let restart = match rest.get(1) {
-            Some(text) => Some(VirtAddr(eval(text.as_ref())?)).filter(|at| !at.is_zero()),
-            None => None,
-        };
-        let criteria = match (rest.get(2), rest.get(3)) {
-            (Some(name), Some(value)) => {
-                Some(IrpCriteria::parse(name.as_ref(), eval(value.as_ref())?)?)
-            }
-            _ => None,
-        };
-        Ok(Self {
-            verbose,
-            pool,
-            restart,
-            criteria,
-        })
-    }
-}
-
-/// One IRP found in pool.
-#[derive(Debug, Clone)]
+/// An IRP that `!irpfind` found in pool.
+#[record(impl)]
 pub struct IrpFindEntry {
     pub irp: IrpInfo,
-    /// The `_POOL_HEADER` before it; `None` for a big-pool allocation.
+    /// The `_POOL_HEADER` before the IRP. None for a big-pool allocation.
     pub pool_header: Option<VirtAddr>,
+    /// The pool tag of the allocation.
     pub tag: String,
     /// `Tail.Overlay.OriginalFileObject`.
     pub original_file_object: VirtAddr,
-    /// `MdlAddress->Process`, when there is an MDL.
+    /// `MdlAddress->Process`. None if the IRP has no MDL.
     pub mdl_process: Option<VirtAddr>,
-    /// Name of the driver owning the current stack location's device.
+    /// The driver that owns the device of the current stack location. None if
+    /// ntoseye cannot resolve it.
     pub driver: Option<String>,
 }
 
+#[record]
 impl IrpFindEntry {
-    /// Every stack location is used up: the IRP is being (or was) completed.
+    /// Whether all stack locations are used, which means that completion of
+    /// the IRP is in progress or done.
+    #[record(getter)]
     pub fn completed(&self) -> bool {
         self.irp.current_location > self.irp.stack_count
     }
 }
 
-/// The result of one `!irpfind` search.
-#[derive(Debug, Clone)]
+/// The criteria that an `!irpfind` search used to match IRPs.
+#[record]
+pub struct IrpFindCriteria {
+    /// `arg`, `device`, `fileobject`, `mdlprocess`, `thread`, or
+    /// `userevent`.
+    pub name: IrpCriteriaKind,
+    #[record(hex)]
+    pub value: u64,
+}
+
+/// One `!irpfind` pool scan.
+#[record(impl)]
 pub struct IrpFindDetail {
     pub pool: IrpPool,
     pub region_start: VirtAddr,
     pub region_end: VirtAddr,
-    /// Where the page scan began (the region start or the restart address).
+    /// The address where the page scan started: the region start or the
+    /// restart address.
     pub scan_start: VirtAddr,
+    #[record(skip)]
     pub criteria: Option<IrpCriteria>,
     pub scanned_pages: u64,
+    /// The result of the big-pool table scan.
     pub big_pool_status: String,
     pub irps: Vec<IrpFindEntry>,
-    /// The result bound left IRPs out: the page scan stopped at `restart`,
-    /// or big-pool allocations went unchecked (`big_pool_status` counts
-    /// them; no restart reaches those).
+    /// Whether the result limit caused ntoseye to leave out IRPs, which
+    /// happens when the page scan stopped at `restart` or ntoseye did not
+    /// check some big-pool allocations (`big_pool_status` counts them; no
+    /// restart reaches those).
     pub truncated: bool,
     pub interrupted: bool,
+    /// The address where the page scan can continue. None if the scan finished.
     pub restart: Option<VirtAddr>,
+}
+
+#[record]
+impl IrpFindDetail {
+    /// The criteria the scan matched. None if the scan has no filter.
+    #[record(getter, rename = "criteria")]
+    pub fn criteria_record(&self) -> Option<IrpFindCriteria> {
+        self.criteria.map(|criteria| IrpFindCriteria {
+            name: criteria.name(),
+            value: criteria.value(),
+        })
+    }
 }
 
 /// What `!irpfind` keeps: `sizeof(_IRP)` and `sizeof(_IO_STACK_LOCATION)`

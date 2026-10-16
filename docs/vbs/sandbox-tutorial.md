@@ -333,7 +333,8 @@ with ntoseye.attach("gdb", "127.0.0.1:1234") as dbg:
     bp = dbg.breakpoints.add("nt!NtClose", hardware=True)
     stop = dbg.run(timeout=60.0)                 # the hit shows the Sandbox again
     bp.delete()
-    print(dbg.partition, stop.cpu.id, stop.thread.process.name)
+    assert stop is not None and stop.thread is not None
+    print(dbg.partition, stop.cpu, stop.thread.process_name)
     stop = dbg.step_out()                        # gu, on the same thread
     print(stop.symbol)
     dbg.select_partition(1)                      # back to the target
@@ -341,7 +342,9 @@ with ntoseye.attach("gdb", "127.0.0.1:1234") as dbg:
     bp = dbg.breakpoints.add_hypercall("HvCallSendSyntheticClusterIpi", 4)
     stop = dbg.run(timeout=60.0)
     bp.delete()
-    caller = stop.cpu.hypercall_caller()
+    assert stop is not None and stop.cpu is not None
+    caller = dbg.cpus[stop.cpu].hypercall_caller()
+    assert caller is not None and caller.hypercall is not None
     vp_index = caller.vp_index                   # read before the switch
     print(caller.partition_id, vp_index, caller.hypercall.summary)
 

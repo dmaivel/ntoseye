@@ -192,9 +192,10 @@ Without the driver's state, it shows only the buffers that the device holds, and
 In the [Python SDK](../scripting/sdk.md), `dbg.inspect.virtio()` returns the devices that {command}`!virtio` lists, each queue with its indexes, state, signalling and ring addresses, and `dbg.inspect.vring(address)` returns a queue's ring with the buffers that the device holds or returned, their descriptors, and the decoded request of each. A queue's `progress` holds counters that only grow, modulo `modulus`, so two calls show what moved in between, as the Moved column does:
 
 ```python
-def ports(dbg):
-    serial = next(d for d in dbg.inspect.virtio() if d.kind == "console")
-    return {q.name: q.progress for q in serial.driver.queues if q.progress}
+def ports(dbg: ntoseye.Debugger) -> dict[str, ntoseye.QueueProgress]:
+    serial = next(d for d in dbg.inspect.virtio() if d.kind == "console" and d.driver)
+    assert serial.driver is not None
+    return {q.name: q.progress for q in serial.driver.queues if q.name and q.progress}
 
 before = ports(dbg)
 dbg.run(timeout=5.0)

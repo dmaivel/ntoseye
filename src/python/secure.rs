@@ -2,17 +2,18 @@
 //! views bound to VTL1 address spaces. VTL1 inspection is experimental; see
 //! the REPL's `.vtl` for the same scope.
 
+use ntoseye_macros::handle;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict};
+use pyo3::types::PyAny;
 
-use super::context::Space;
+use super::command::{CommandHost, HostSession};
+use super::context::{Context, Space};
 use super::err;
 use super::handle::Owner;
 use super::memory::Memory;
 use super::module::Modules;
 use super::process::Process;
-use super::record::PlainDict;
-use super::symbols::{self, Symbols};
+use super::symbols::Symbols;
 use super::types::Types;
 use crate::guest::TrustletInfo;
 use crate::types::Dtb;
@@ -40,6 +41,17 @@ impl SecureKernel {
 
     fn space(&self) -> Space {
         Space::Secure(self.root)
+    }
+}
+
+/// A command runs in the secure kernel's system address space.
+impl CommandHost for SecureKernel {
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Owner(&self.owner)
+    }
+
+    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
+        Ok(self.space().context())
     }
 }
 
@@ -109,16 +121,10 @@ impl SecureKernel {
             .collect())
     }
 
-    /// Evaluate a debugger expression in the symbol scope of the secure kernel.
-    /// Registers hold VTL0 state, and this method does not accept them.
-    fn eval(&self, py: Python<'_>, expr: &str) -> PyResult<u64> {
-        symbols::eval(py, &self.owner, &self.space(), expr)
-    }
-
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
         other
             .extract::<PyRef<'_, SecureKernel>>()
-            .is_ok_and(|other| self.owner.same_debugger(&other.owner) && self.root == other.root)
+            .is_ok_and(|other| self.owner.same_target(&other.owner) && self.root == other.root)
     }
 
     fn __hash__(&self) -> isize {
@@ -133,7 +139,7 @@ impl SecureKernel {
 /// An isolated user-mode process (trustlet) in VTL1, such as `LsaIso.exe`. Its
 /// read-only views go through the page tables of the trustlet, which map the
 /// user half of the trustlet and the secure kernel.
-#[pyclass(module = "ntoseye")]
+#[handle(record = TrustletInfo, key = process, context = self.space().context(), impl)]
 pub struct Trustlet {
     owner: Owner,
     info: TrustletInfo,
@@ -145,43 +151,8 @@ impl Trustlet {
     }
 }
 
-#[pymethods]
+#[handle]
 impl Trustlet {
-    /// The NT process ID of the trustlet's VTL0 counterpart.
-    #[getter]
-    fn pid(&self, py: Python<'_>) -> PyResult<u64> {
-        self.owner.check(py)?;
-        Ok(self.info.pid)
-    }
-
-    /// The image name, from the NT process.
-    #[getter]
-    fn name(&self, py: Python<'_>) -> PyResult<String> {
-        self.owner.check(py)?;
-        Ok(self.info.name.clone())
-    }
-
-    /// The trustlet ID from its creation attributes (1 for `LsaIso.exe`).
-    #[getter]
-    fn trustlet_id(&self, py: Python<'_>) -> PyResult<u64> {
-        self.owner.check(py)?;
-        Ok(self.info.trustlet_id)
-    }
-
-    /// The trustlet's page-table root.
-    #[getter]
-    fn dtb(&self, py: Python<'_>) -> PyResult<u64> {
-        self.owner.check(py)?;
-        Ok(self.info.dtb)
-    }
-
-    /// The address of the secure kernel's process object for this trustlet.
-    #[getter]
-    fn address(&self, py: Python<'_>) -> PyResult<u64> {
-        self.owner.check(py)?;
-        Ok(self.info.process.0)
-    }
-
     /// The NT process (VTL0 side), or `None` after the process exits.
     #[getter]
     fn process(&self, py: Python<'_>) -> PyResult<Option<Process>> {
@@ -218,34 +189,6 @@ impl Trustlet {
     fn types(&self, py: Python<'_>) -> PyResult<Types> {
         self.owner.check(py)?;
         Ok(Types::new(self.owner.clone_ref(py), self.space()))
-    }
-
-    /// Evaluate a debugger expression in this trustlet's address space.
-    fn eval(&self, py: Python<'_>, expr: &str) -> PyResult<u64> {
-        symbols::eval(py, &self.owner, &self.space(), expr)
-    }
-
-    /// Return the identity of the trustlet as a plain `dict` (`pid`, `name`,
-    /// `trustlet_id`, `dtb`, `address`). `!trustlets` lists the same fields.
-    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        self.owner.check(py)?;
-        let dict = PyDict::new(py);
-        dict.set_item("pid", self.info.pid)?;
-        dict.set_item("name", &self.info.name)?;
-        dict.set_item("trustlet_id", self.info.trustlet_id)?;
-        dict.set_item("dtb", self.info.dtb)?;
-        dict.set_item("address", self.info.process.0)?;
-        Ok(PlainDict(dict))
-    }
-
-    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
-        other.extract::<PyRef<'_, Trustlet>>().is_ok_and(|other| {
-            self.owner.same_debugger(&other.owner) && self.info.process == other.info.process
-        })
-    }
-
-    fn __hash__(&self) -> isize {
-        self.owner.identity_hash(self.info.process)
     }
 
     fn __repr__(&self) -> String {

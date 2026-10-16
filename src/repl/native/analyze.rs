@@ -9,16 +9,17 @@ use tern_sdk::{Node, View};
 use super::{MUTED, NUMBER, STRONG, SYMBOL, addr, bugcheck, span, stack, symbol};
 use crate::repl::StackColumns;
 use crate::repl::commands::analyze::{
-    ANALYZE_HANG_STACK_LIMIT, ANALYZE_MODULE_LIMIT, ANALYZE_STACK_LIMIT, ANALYZE_UNLOADED_LIMIT,
-    ANALYZE_VERBOSE_MODULE_LIMIT, ANALYZE_VERBOSE_UNLOADED_LIMIT, HangReport, HangThread,
-    USER_DUMP_NOT_APPLICABLE, code_owner_text, codeview_path, culprit_caller_text, culprit_label,
-    kmdf_log_summary, machine_name, product_name, signature_source, user_captured_text,
-    user_detail_modules, user_exception_verdict, user_no_culprit_text, user_process_label,
-    user_stack_heading, user_system_text,
+    ANALYZE_MODULE_LIMIT, ANALYZE_STACK_LIMIT, ANALYZE_UNLOADED_LIMIT,
+    ANALYZE_VERBOSE_MODULE_LIMIT, ANALYZE_VERBOSE_UNLOADED_LIMIT, USER_DUMP_NOT_APPLICABLE,
+    code_owner_text, codeview_path, culprit_caller_text, culprit_label, kmdf_log_summary,
+    machine_name, product_name, signature_source, user_captured_text, user_detail_modules,
+    user_exception_verdict, user_no_culprit_text, user_process_label, user_stack_heading,
+    user_system_text,
 };
 use crate::repl::commands::power::{duration_text, request_text};
 use crate::target::power::power_minor_name;
 use crate::target::{ThreadInfo, wait_reason_name};
+use crate::triage_report::hang::{ANALYZE_HANG_STACK_LIMIT, HangReport, HangThread};
 use crate::triage_report::{
     BlackboxState, CulpritSubject, POWER_THREAD_STACK_LIMIT, PowerFailureFinding, PowerThreadRole,
     TRIAGE_BACKTRACE_LIMIT, TriageReport, UserDumpTriage, UserExceptionFinding, WheaRecordState,
@@ -420,8 +421,8 @@ fn user_triage(report: &TriageReport, user: &UserDumpTriage, verbose: bool) -> V
     }
     if verbose && !user.exception_registers.is_empty() {
         let mut kv = ui::kv();
-        for (name, value) in &user.exception_registers {
-            kv = kv.item(name.as_str(), addr(*value));
+        for register in &user.exception_registers {
+            kv = kv.item(register.name.as_str(), addr(register.value));
         }
         card = card.child(section("exception registers", true).child(kv));
     }
@@ -602,7 +603,7 @@ fn faulting_context(report: &TriageReport) -> Section<()> {
             [
                 span(&process.name, STRONG),
                 span(format!(" (pid {}, eprocess ", process.pid), MUTED),
-                addr(process.eprocess_va.0),
+                addr(process.eprocess.0),
                 span(")", MUTED),
             ],
         );
@@ -983,11 +984,11 @@ fn power_section(finding: &PowerFailureFinding) -> Section<()> {
     let holder_device = failure
         .blocked_irp
         .as_ref()
-        .and_then(|blocked| blocked.holder.as_ref().ok())
+        .and_then(|blocked| blocked.holder.as_result().ok())
         .map(|holder| holder.device);
     if let Some(blocked) = &failure.blocked_irp {
         kv = kv.item("blocked IRP", addr(blocked.irp.0));
-        match &blocked.holder {
+        match blocked.holder.as_result() {
             Ok(holder) => {
                 kv = kv.item(
                     "request",
@@ -1000,7 +1001,7 @@ fn power_section(finding: &PowerFailureFinding) -> Section<()> {
                         "",
                     ),
                 );
-                let driver = match &holder.driver {
+                let driver = match holder.driver.as_result() {
                     Ok(driver) => span(driver.label(), SYMBOL),
                     Err(error) => span(format!("driver unreadable: {error}"), MUTED),
                 };
@@ -1090,7 +1091,7 @@ fn power_section(finding: &PowerFailureFinding) -> Section<()> {
             );
         for entry in &irps.entries {
             let row = TableRow::new(entry.data.0.to_string());
-            table = table.row(match &entry.irp {
+            table = table.row(match entry.irp.as_result() {
                 Ok(irp) => row
                     .cell("irp", addr(irp.irp.0))
                     .cell(
@@ -1107,12 +1108,12 @@ fn power_section(finding: &PowerFailureFinding) -> Section<()> {
                     .cell("pdo", addr(irp.pdo.0))
                     .cell(
                         "holder",
-                        match &irp.holder {
+                        match irp.holder.as_result() {
                             Ok(holder) => span(
-                                holder
-                                    .driver
-                                    .as_ref()
-                                    .map_or_else(|error| error.clone(), |driver| driver.label()),
+                                holder.driver.as_result().map_or_else(
+                                    |error| error.to_string(),
+                                    |driver| driver.label(),
+                                ),
                                 SYMBOL,
                             ),
                             Err(error) => span(error, MUTED),
@@ -1139,7 +1140,7 @@ fn power_section(finding: &PowerFailureFinding) -> Section<()> {
             );
         for entry in &workers.entries {
             let row = TableRow::new(entry.entry.0.to_string());
-            table = table.row(match &entry.worker {
+            table = table.row(match entry.worker.as_result() {
                 Ok(worker) => row
                     .cell("thread", addr(worker.thread.0))
                     .cell(

@@ -4,66 +4,155 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::{Target, bounded_list_walk};
-use crate::backend::MemoryOps;
+use super::{Target, bounded_record_list_walk};
 use crate::error::{Error, Result};
 use crate::layout::{StructRef, TypeInfo, Types};
+use crate::memory::MemoryOps;
 use crate::types::VirtAddr;
+use ntoseye_macros::record;
 
 const MAX_FRAMES: usize = 16;
 const MAX_FILTERS: usize = 256;
 const MAX_VOLUMES: usize = 256;
 const MAX_INSTANCES: usize = 256;
 
-/// A filter manager frame and the filters or volumes attached to it.
-#[derive(Debug, Clone)]
-pub struct FltFrame<T> {
+/// A filter manager frame (`_FLTP_FRAME`) and its registered minifilters.
+#[record]
+pub struct FltFilterFrame {
+    /// The `_FLTP_FRAME`.
     pub address: VirtAddr,
     pub frame_id: u64,
-    pub items: Vec<T>,
-    /// Why the frame's list walk stopped short of its head.
+    pub filters: Vec<FltFilterDetail>,
+    /// Why the walk of the frame's list stopped before the list head.
+    /// `None` if the walk completed.
     pub stopped: Option<String>,
 }
 
-/// The frames in `FltGlobals.FrameList`, each with its filters or volumes.
-#[derive(Debug, Clone)]
-pub struct FltFrames<T> {
-    pub frames: Vec<FltFrame<T>>,
+/// A filter manager frame and its minifilter instances.
+#[record]
+pub struct FltInstanceFrame {
+    /// The `_FLTP_FRAME`.
+    pub address: VirtAddr,
+    pub frame_id: u64,
+    pub instances: Vec<FltInstanceDetail>,
+    /// Why the walk of the frame's lists stopped before the list head.
+    /// `None` if the walk completed.
     pub stopped: Option<String>,
 }
 
-/// A registered minifilter (`_FLT_FILTER`).
-#[derive(Debug, Clone)]
+/// A filter manager frame and its volumes.
+#[record]
+pub struct FltVolumeFrame {
+    /// The `_FLTP_FRAME`.
+    pub address: VirtAddr,
+    pub frame_id: u64,
+    pub volumes: Vec<FltVolumeDetail>,
+    /// Why the walk of the frame's list stopped before the list head.
+    /// `None` if the walk completed.
+    pub stopped: Option<String>,
+}
+
+/// The registered minifilters of each filter manager frame
+/// (`!fltkd.filters`).
+#[record]
+pub struct FltFilters {
+    pub frames: Vec<FltFilterFrame>,
+    /// Why the walk of `FltGlobals.FrameList` stopped before the list
+    /// head. `None` if the walk completed.
+    pub stopped: Option<String>,
+}
+
+/// The minifilter instances of each filter manager frame
+/// (`!fltkd.instances`).
+#[record]
+pub struct FltInstances {
+    pub frames: Vec<FltInstanceFrame>,
+    /// Why the walk of `FltGlobals.FrameList` stopped before the list
+    /// head. `None` if the walk completed.
+    pub stopped: Option<String>,
+}
+
+/// The volumes of each filter manager frame (`!fltkd.volumes`).
+#[record]
+pub struct FltVolumes {
+    pub frames: Vec<FltVolumeFrame>,
+    /// Why the walk of `FltGlobals.FrameList` stopped before the list
+    /// head. `None` if the walk completed.
+    pub stopped: Option<String>,
+}
+
+/// A registered minifilter (`_FLT_FILTER`) and its instances.
+#[record]
 pub struct FltFilterDetail {
     pub address: VirtAddr,
     pub name: String,
     pub altitude: String,
     pub driver_object: VirtAddr,
     pub instances: Vec<FltInstanceDetail>,
+    /// Why the instance walk stopped before the list head. `None` if the
+    /// walk completed.
     pub instances_stopped: Option<String>,
 }
 
 /// A minifilter attached to a volume (`_FLT_INSTANCE`).
-#[derive(Debug, Clone)]
+#[record]
 pub struct FltInstanceDetail {
     pub address: VirtAddr,
     pub name: String,
     pub altitude: String,
+    /// Its `_FLT_FILTER`.
     pub filter: VirtAddr,
     pub filter_name: Option<String>,
+    /// Its `_FLT_VOLUME`.
     pub volume: VirtAddr,
     pub volume_name: Option<String>,
 }
 
-/// A volume the filter manager attached to (`_FLT_VOLUME`).
-#[derive(Debug, Clone)]
+/// A volume that the filter manager attached to (`_FLT_VOLUME`), and the
+/// instances on it.
+#[record]
 pub struct FltVolumeDetail {
     pub address: VirtAddr,
     pub device_name: String,
     /// The `_FLT_FILESYSTEM_TYPE` name without its `FLT_FSTYPE_` prefix.
     pub file_system: Option<String>,
     pub instances: Vec<FltInstanceDetail>,
+    /// Why the instance walk stopped before the list head. `None` if the
+    /// walk completed.
     pub instances_stopped: Option<String>,
+}
+
+/// The minifilter `!fltkd.instances` lists the instances of: a name
+/// (any case), or, when the text evaluates, its `_FLT_FILTER` address.
+#[derive(Debug, Clone)]
+pub struct FltFilterSelector {
+    pub name: String,
+    pub address: Option<VirtAddr>,
+}
+
+impl FltFilterSelector {
+    fn selects(&self, filter: &FltFilterDetail) -> bool {
+        filter.name.eq_ignore_ascii_case(&self.name) || self.address == Some(filter.address)
+    }
+}
+
+#[cfg(feature = "python")]
+impl crate::python::command::PyArg for FltFilterSelector {
+    type Py = crate::python::args::FltFilterArg;
+
+    fn from_py(value: Self::Py) -> Self {
+        use crate::python::args::FltFilterArg;
+        match value {
+            FltFilterArg::Address(address) => Self {
+                name: format!("{address:#x}"),
+                address: Some(VirtAddr(address)),
+            },
+            FltFilterArg::Name(name) => Self {
+                name,
+                address: None,
+            },
+        }
+    }
 }
 
 /// fltmgr's layouts, resolved once per command.
@@ -149,38 +238,28 @@ impl Target {
         limit: usize,
     ) -> (Vec<VirtAddr>, Option<String>) {
         let memory = self.kernel_address_space();
-        let (links, termination) =
-            bounded_list_walk(head, limit, |link| memory.read::<VirtAddr>(link));
-        (
-            links.into_iter().map(|link| link - link_offset).collect(),
-            termination.diagnostic(),
-        )
+        let (records, termination) = bounded_record_list_walk(head, link_offset, limit, |link| {
+            memory.read::<VirtAddr>(link)
+        });
+        (records, termination.diagnostic())
     }
 
-    /// Walk `FltGlobals.FrameList`, decoding each frame's records with
-    /// `records` (given the frame's address).
-    fn flt_frames<T>(
+    /// Walk `FltGlobals.FrameList`, decoding each frame with `frame`
+    /// (given the frame's address and id).
+    fn flt_frames<F>(
         &self,
         flt: &FltTypes<'_>,
-        mut records: impl FnMut(VirtAddr) -> Result<(Vec<T>, Option<String>)>,
-    ) -> Result<FltFrames<T>> {
+        mut frame: impl FnMut(VirtAddr, u64) -> Result<F>,
+    ) -> Result<(Vec<F>, Option<String>)> {
         let globals = self
             .symbols
             .find_symbol_across_modules(self.kernel_dtb(), "fltmgr!FltGlobals")?
             .ok_or_else(|| Error::SymbolNotFound("fltmgr!FltGlobals".into()))?;
         let head = flt.resource_list(&flt.globals, globals, "FrameList")?;
         let (frames, stopped) = self.flt_list(head, flt.frame.field_offset("Links")?, MAX_FRAMES);
-        let (frames, stopped) = decode_all(frames, stopped, |address| {
-            let frame_id = flt.at(&flt.frame, address).read_uint("FrameID")?;
-            let (items, stopped) = records(address)?;
-            Ok(FltFrame {
-                address,
-                frame_id,
-                items,
-                stopped,
-            })
-        });
-        Ok(FltFrames { frames, stopped })
+        Ok(decode_all(frames, stopped, |address| {
+            frame(address, flt.at(&flt.frame, address).read_uint("FrameID")?)
+        }))
     }
 
     /// A `_FLT_VOLUME`'s device name.
@@ -221,15 +300,15 @@ impl Target {
 
     /// `!fltkd.filters`: each frame's registered minifilters with their
     /// instances.
-    pub fn flt_filters(&self) -> Result<FltFrames<FltFilterDetail>> {
+    pub fn flt_filters(&self) -> Result<FltFilters> {
         let flt = self.flt_types()?;
         let filter_link = flt.primary_link(&flt.filter)?;
         let instance_link = flt.instance.field_offset("FilterLink")?;
         let mut volume_names = HashMap::new();
-        self.flt_frames(&flt, |frame| {
-            let head = flt.resource_list(&flt.frame, frame, "RegisteredFilters")?;
+        let (frames, stopped) = self.flt_frames(&flt, |address, frame_id| {
+            let head = flt.resource_list(&flt.frame, address, "RegisteredFilters")?;
             let (addresses, stopped) = self.flt_list(head, filter_link, MAX_FILTERS);
-            Ok(decode_all(addresses, stopped, |address| {
+            let (filters, stopped) = decode_all(addresses, stopped, |address| {
                 let filter = flt.at(&flt.filter, address);
                 let (instances, instances_stopped) = self.flt_instances_at(
                     &flt,
@@ -245,53 +324,51 @@ impl Target {
                     instances,
                     instances_stopped,
                 })
-            }))
-        })
+            });
+            Ok(FltFilterFrame {
+                address,
+                frame_id,
+                filters,
+                stopped,
+            })
+        })?;
+        Ok(FltFilters { frames, stopped })
     }
 
     /// `!fltkd.instances [filter]`: every minifilter instance, or those of
-    /// the filter named `filter` (its name, case-insensitively, or its
-    /// `_FLT_FILTER` address).
-    pub fn flt_instances(
-        &self,
-        filter: Option<&str>,
-        eval: impl Fn(&str) -> Result<VirtAddr>,
-    ) -> Result<FltFrames<FltInstanceDetail>> {
+    /// the filter `filter` selects.
+    pub fn flt_instances(&self, filter: Option<&FltFilterSelector>) -> Result<FltInstances> {
         let filters = self.flt_filters()?;
-        let address = filter.and_then(|text| eval(text).ok());
-        let selected = |detail: &FltFilterDetail| {
-            filter.is_none_or(|text| {
-                detail.name.eq_ignore_ascii_case(text) || address == Some(detail.address)
-            })
-        };
-        if filter.is_some()
+        let selected =
+            |detail: &FltFilterDetail| filter.is_none_or(|filter| filter.selects(detail));
+        if let Some(filter) = filter
             && !filters
                 .frames
                 .iter()
-                .any(|frame| frame.items.iter().any(selected))
+                .any(|frame| frame.filters.iter().any(selected))
         {
             return Err(Error::InvalidArgument(format!(
                 "no registered minifilter is '{}'",
-                filter.unwrap_or_default()
+                filter.name
             )));
         }
-        Ok(FltFrames {
+        Ok(FltInstances {
             frames: filters
                 .frames
                 .into_iter()
                 .map(|frame| {
                     let mut stopped = frame.stopped.into_iter().collect::<Vec<_>>();
-                    let mut items = Vec::new();
-                    for filter in frame.items.into_iter().filter(selected) {
+                    let mut instances = Vec::new();
+                    for filter in frame.filters.into_iter().filter(selected) {
                         if let Some(reason) = filter.instances_stopped {
                             stopped.push(format!("{}: {reason}", filter.name));
                         }
-                        items.extend(filter.instances);
+                        instances.extend(filter.instances);
                     }
-                    FltFrame {
+                    FltInstanceFrame {
                         address: frame.address,
                         frame_id: frame.frame_id,
-                        items,
+                        instances,
                         stopped: (!stopped.is_empty()).then(|| stopped.join("; ")),
                     }
                 })
@@ -302,7 +379,7 @@ impl Target {
 
     /// `!fltkd.volumes`: each frame's attached volumes with the instances on
     /// them.
-    pub fn flt_volumes(&self) -> Result<FltFrames<FltVolumeDetail>> {
+    pub fn flt_volumes(&self) -> Result<FltVolumes> {
         let flt = self.flt_types()?;
         let volume_link = flt.primary_link(&flt.volume)?;
         let instance_link = flt.primary_link(&flt.instance)?;
@@ -311,10 +388,10 @@ impl Target {
             .find_enum_across_modules(self.kernel_dtb(), "fltmgr!_FLT_FILESYSTEM_TYPE")
             .unwrap_or_default();
         let mut volume_names = HashMap::new();
-        self.flt_frames(&flt, |frame| {
-            let head = flt.resource_list(&flt.frame, frame, "AttachedVolumes")?;
+        let (frames, stopped) = self.flt_frames(&flt, |address, frame_id| {
+            let head = flt.resource_list(&flt.frame, address, "AttachedVolumes")?;
             let (addresses, stopped) = self.flt_list(head, volume_link, MAX_VOLUMES);
-            Ok(decode_all(addresses, stopped, |address| {
+            let (volumes, stopped) = decode_all(addresses, stopped, |address| {
                 let volume = flt.at(&flt.volume, address);
                 let kind = volume.read_uint("FileSystemType")?;
                 let (instances, instances_stopped) = self.flt_instances_at(
@@ -335,7 +412,14 @@ impl Target {
                     instances,
                     instances_stopped,
                 })
-            }))
-        })
+            });
+            Ok(FltVolumeFrame {
+                address,
+                frame_id,
+                volumes,
+                stopped,
+            })
+        })?;
+        Ok(FltVolumes { frames, stopped })
     }
 }

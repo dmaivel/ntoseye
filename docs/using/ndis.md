@@ -229,7 +229,7 @@ ntoseye reads the data through each MDL's PFNs, so a buffer that is not mapped i
 - `ndis_filter_drivers()` and `ndis_filter_driver(address)` for {command}`!ndiskd.filterdriver`
 - `ndis_protocols()` and `ndis_protocol(address)` for {command}`!ndiskd.protocol`
 - `ndis_oids()` for {command}`!ndiskd.oid`
-- `ndis_nbl(address)`, `ndis_nbl_chain(address)`, and `ndis_nbl_data(address)` for {command}`!ndiskd.nbl` and its `-chain` and `-data`; `ndis_nbl_data` returns each NET_BUFFER's data as `bytes`
+- `ndis_nbl(address)` and `ndis_nbl_chain(address)` for {command}`!ndiskd.nbl` and its `-chain`; with `data=True`, as `-data` does, each NET_BUFFER in `net_buffers` holds its data as `bytes` in `data`, or why it is not readable in `data_error`
 
 ```python
 for miniport in dbg.inspect.ndis_miniports().miniports:

@@ -2,7 +2,7 @@ import ntoseye.repl as repl
 
 
 @repl.command("pscount", "Count running processes.\n(usage: pscount [-v])")
-def pscount(dbg: repl.Debugger, *args: str):
+def pscount(dbg: repl.Debugger, *args: str) -> None:
     processes = dbg.processes
     print(f"{len(processes)} processes")
     if args and args[0] == "-v":

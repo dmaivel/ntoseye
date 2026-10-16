@@ -2,7 +2,6 @@
 //! step-until walks, and call tracing.
 
 use std::mem;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -11,25 +10,25 @@ use iced_x86::{
     Mnemonic, OpAccess, OpKind, Register,
 };
 
-use crate::backend::MemoryOps;
 use crate::breakpoints::{
     BreakpointManager, StepFrame, ThreadScope, lift_target_site, plant_target_site,
 };
 use crate::dbg_backend::{
-    ContinueDisposition, DebugBackend, HwBreakpointAccess, STEP_UNDER_WINDOWS_HYPERVISOR,
-    StopEvent, clear_trap_flag, processor_index_from_backend_thread_id,
+    ContinueDisposition, DebugBackend, HwBreakpointAccess, RegisterMap,
+    STEP_UNDER_WINDOWS_HYPERVISOR, StopEvent, clear_trap_flag,
+    processor_index_from_backend_thread_id,
 };
 use crate::disasm::{ControlFlow, classify};
 use crate::error::{Error, Result};
-use crate::gdb::RegisterMap;
+use crate::memory::MemoryOps;
 use crate::notice::Notice;
 use crate::session::breakpoints::event_word;
 use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::hits::{reported_watch_hit, stack_pointer};
 use crate::session::{
-    CallTrace, CallTraceEnd, CallTraceFrame, ContinueOutcome, ControlState, CurrentInstruction,
-    ModuleTrap, PendingWalk, STATUS_BREAKPOINT, STATUS_SINGLE_STEP, Session, StepKind, StepMode,
-    StepStack,
+    CallTrace, CallTraceEnd, CallTraceFrame, Cancel, CancelBehavior, ContinueOutcome, ControlState,
+    CurrentInstruction, ModuleTrap, PendingWalk, STATUS_BREAKPOINT, STATUS_SINGLE_STEP, Session,
+    StepKind, StepMode, StepStack,
 };
 use crate::target::{DiagnosticValue, KTHREAD_STATE_RUNNING, KTHREAD_STATE_STANDBY, Target};
 use crate::types::{Arch, Dtb, VirtAddr};
@@ -74,7 +73,7 @@ impl Session {
         // Advancing the VM spends any stop `service_idle` parked, so drop it (the
         // other advance paths clear it via `resume`; a bare single-step doesn't).
         self.parked_stop = None;
-        self.current_stop = None;
+        self.set_current_stop(None);
         self.target.breakpoint_stop = None;
         self.backend.set_current_thread(&self.current_thread)?;
         let mut stepped = match self.step_over_site_at_pc()? {
@@ -125,7 +124,7 @@ impl Session {
         }
         self.refresh_context_for_current_thread();
         let rip = self.current_rip();
-        self.current_stop = Some(ContinueOutcome::Step { rip });
+        self.set_current_stop(Some(ContinueOutcome::Step { rip }));
         // Under VBS the vCPU steps alone; an interrupt taken first can leave
         // it in the Windows hypervisor, waiting on the vCPUs held meanwhile.
         // Nothing can be stepped from there.
@@ -168,8 +167,7 @@ impl Session {
             .into_iter()
             .map(|address| (VirtAddr(address), frame.clone()))
             .collect();
-        let cancel = Arc::clone(&self.target.interrupt);
-        self.run_to_any(&sites, None, &cancel)
+        self.run_to_any(&sites, ContinueDisposition::Handled, &Cancel::NEVER)
     }
 
     /// Say that a step stopped where it was diverted (see [`Self::step_once`]).
@@ -319,12 +317,35 @@ impl Session {
     /// instruction *after* a `call`, otherwise a plain single-step. The shared
     /// decision used by the REPL `p` and [`Self::step_over`].
     pub fn step_over_target(&mut self) -> Result<StepKind> {
-        let instruction = self.current_instruction()?;
+        let instruction = match self.current_instruction() {
+            Ok(instruction) => instruction,
+            Err(error) => return Err(self.undecodable_step_over(error)),
+        };
         if instruction.is_call {
             Ok(StepKind::RunTo(VirtAddr(instruction.next_ip)))
         } else {
             Ok(StepKind::Single)
         }
+    }
+
+    /// Why a step over cannot decode the current instruction. Stepping
+    /// *over* needs it decoded to know whether it is a call, and it cannot
+    /// be read while its page is out; a single step executes the fetch
+    /// instead of reading it, which is what brings the page in.
+    fn undecodable_step_over(&mut self, error: Error) -> Error {
+        let ip = self.read_registers().ok().and_then(|registers| {
+            self.register_map
+                .read_u64("rip", &registers)
+                .or_else(|_| self.register_map.read_u64("pc", &registers))
+                .ok()
+        });
+        Error::DebugInfo(match (&error, ip) {
+            (Error::BadVirtualAddress(_) | Error::AddressNotInDump(_), Some(ip)) => format!(
+                "the page holding {ip:016x} is not resident, so the instruction cannot be \
+                 decoded to step over it; `t` single-steps through the fetch"
+            ),
+            _ => format!("failed to decode current instruction: {error}"),
+        })
     }
 
     /// The current frame's caller return address (the step-out target). Walks a
@@ -406,10 +427,10 @@ impl Session {
     }
 
     /// Step until `stop` accepts the instruction about to execute, into or
-    /// over calls per `mode`: the SDK's `step(until=)` and `run_to(step=)`.
+    /// over calls per `mode`: the SDK's `step(until=)` and `step_over(until=)`.
     /// Returns the `Step` there; a breakpoint, exception, or other stop met on
     /// the way is returned as is. An interrupt request ([`Target::interrupt`]),
-    /// or an elapsed `timeout` ends the walk where it is (see
+    /// or the host's `cancel` ends the walk where it is (see
     /// [`Self::cut_walk_short`]); `limit` instructions without a match is an
     /// error.
     ///
@@ -423,11 +444,11 @@ impl Session {
         &mut self,
         mode: StepMode,
         limit: usize,
-        timeout: Option<Duration>,
+        cancel: &Cancel<'_>,
         stop: impl Fn(u64, ControlFlow) -> bool,
     ) -> Result<ContinueOutcome> {
         self.pending_walk = None;
-        self.walk_until(mode, limit, timeout, stop)
+        self.walk_until(mode, limit, cancel, stop)
     }
 
     /// Go on with a [`Self::step_until`] walk another stop ended, after the
@@ -442,18 +463,23 @@ impl Session {
         &mut self,
         mode: StepMode,
         limit: usize,
-        timeout: Option<Duration>,
+        cancel: &Cancel<'_>,
         stop: impl Fn(u64, ControlFlow) -> bool,
     ) -> Result<ContinueOutcome> {
-        let deadline = timeout.map(|timeout| Instant::now() + timeout);
         if let Some(PendingWalk { vcpu, sites }) = self.pending_walk.take() {
             if sites.is_empty() {
                 self.pass_declined_hit(&vcpu)?;
             } else {
-                let cancel = Arc::clone(&self.target.interrupt);
-                match self.run_to_any(&sites, timeout, &cancel)? {
+                match self.run_to_any(
+                    &sites,
+                    ContinueDisposition::Handled,
+                    &cancel.with_behavior(CancelBehavior::Halt),
+                )? {
                     ContinueOutcome::Step { .. } => {}
-                    ContinueOutcome::Running => return Ok(self.cut_walk_short()),
+                    ContinueOutcome::Stopped {
+                        exception_code: None,
+                        ..
+                    } => return Ok(self.cut_walk_short()),
                     other => {
                         self.pending_walk = Some(PendingWalk { vcpu, sites });
                         return Ok(other);
@@ -461,8 +487,7 @@ impl Session {
                 }
             }
         }
-        let remaining = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
-        self.walk_until(mode, limit, remaining, stop)
+        self.walk_until(mode, limit, cancel, stop)
     }
 
     /// End a walk that an interrupt request or its timeout cut short, halted
@@ -485,20 +510,18 @@ impl Session {
         &mut self,
         mode: StepMode,
         limit: usize,
-        timeout: Option<Duration>,
+        cancel: &Cancel<'_>,
         stop: impl Fn(u64, ControlFlow) -> bool,
     ) -> Result<ContinueOutcome> {
         self.require_target_view("an instruction walk")?;
         self.require_steppable_vcpu()?;
         self.clear_selected_frame();
-        let deadline = timeout.map(|timeout| Instant::now() + timeout);
-        let remaining =
-            || deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
-        let cancel = Arc::clone(&self.target.interrupt);
+        // A walk's runs over calls end halted, as the walk does.
+        let run_cancel = cancel.with_behavior(CancelBehavior::Halt);
         let walked = windows_thread_on_backend_thread(&self.target, &self.current_thread)
             .map(|thread| ThreadScope::new(&thread));
         for _ in 0..limit {
-            if cancel.swap(false, Ordering::SeqCst) {
+            if self.target.interrupt.swap(false, Ordering::SeqCst) {
                 return Ok(self.cut_walk_short());
             }
             let (state, registers, bytes) = self.read_control()?;
@@ -507,19 +530,23 @@ impl Session {
                 self.note_stop(&outcome);
                 return Ok(outcome);
             }
-            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            if cancel.fired() {
                 return Ok(self.cut_walk_short());
             }
             let vcpu = self.current_thread.clone();
             let (step, sites) = match self.step_over_target()? {
                 StepKind::RunTo(next) if mode == StepMode::Over => {
                     let sites = vec![(next, self.step_frame(StepStack::CallReturn)?)];
-                    (self.run_to_any(&sites, remaining(), &cancel)?, sites)
+                    let step =
+                        self.run_to_any(&sites, ContinueDisposition::Handled, &run_cancel)?;
+                    (step, sites)
                 }
                 _ => match self.walk_step(&state, &registers, &bytes, walked.as_ref())? {
                     WalkStep::At(rip) => (ContinueOutcome::Step { rip }, Vec::new()),
                     WalkStep::Follow(sites) => {
-                        (self.run_to_any(&sites, remaining(), &cancel)?, sites)
+                        let step =
+                            self.run_to_any(&sites, ContinueDisposition::Handled, &run_cancel)?;
+                        (step, sites)
                     }
                     WalkStep::Stop(outcome) => {
                         self.note_stop(&outcome);
@@ -529,8 +556,11 @@ impl Session {
             };
             let rip = match step {
                 ContinueOutcome::Step { rip } => rip,
-                // `run_to` was cancelled or timed out and halted the target.
-                ContinueOutcome::Running => return Ok(self.cut_walk_short()),
+                // The run was cancelled, halting the target where it was.
+                ContinueOutcome::Stopped {
+                    exception_code: None,
+                    ..
+                } => return Ok(self.cut_walk_short()),
                 other => {
                     self.pending_walk = Some(PendingWalk { vcpu, sites });
                     return Ok(other);
@@ -717,10 +747,12 @@ impl Session {
     /// [`Self::step_until`]): a step an interrupt diverted runs until that
     /// thread has executed the instruction, which can take long when other
     /// threads keep reaching the instruction first. An interrupt request
-    /// ([`Target::interrupt`]) or `timeout` (both `Interrupted`), a
+    /// ([`Target::interrupt`]) or the host's `cancel` (both `Interrupted`), a
     /// breakpoint, a diverted step whose thread is not known, or a failed
-    /// step ends the trace early; [`CallTrace::end`] says which.
-    pub fn trace_calls(&mut self, limit: usize, timeout: Option<Duration>) -> Result<CallTrace> {
+    /// step ends the trace early; [`CallTrace::end`] says which. A trace
+    /// that ends at a user breakpoint runs its action, ignoring a resume
+    /// the action asks for.
+    pub fn trace_calls(&mut self, limit: usize, cancel: &Cancel<'_>) -> Result<CallTrace> {
         if limit == 0 {
             return Err(Error::InvalidArgument(
                 "the instruction limit must be greater than zero".into(),
@@ -740,14 +772,13 @@ impl Session {
         let (mut current, mut registers, mut bytes) = self.read_control()?;
         let walked = windows_thread_on_backend_thread(&self.target, &self.current_thread)
             .map(|thread| ThreadScope::new(&thread));
-        let cancel = Arc::clone(&self.target.interrupt);
-        let deadline = timeout.map(|timeout| Instant::now() + timeout);
-        let remaining =
-            || deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        let run_cancel = cancel.with_behavior(CancelBehavior::Halt);
         // Each open frame with the stack pointer it was entered with.
         let mut stack = vec![(frame(name(&self.target, &current)), current.sp)];
         let mut instructions = 0usize;
         let arm64 = self.target.arch() == Arch::Arm64;
+        // The user breakpoint the trace ended at, whose action runs then.
+        let mut hit = None;
         let end = loop {
             if instructions >= limit {
                 break CallTraceEnd::Limit;
@@ -755,23 +786,26 @@ impl Session {
             if self.target.interrupt.swap(false, Ordering::SeqCst) {
                 break CallTraceEnd::Interrupted;
             }
-            // A time limit ends the trace as Ctrl+C does, the target halted
-            // where the trace got to.
-            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            // The host's cancellation or time limit ends the trace as Ctrl+C
+            // does, the target halted where the trace got to.
+            if cancel.fired() {
                 break CallTraceEnd::Interrupted;
             }
             match self.walk_step(&current, &registers, &bytes, walked.as_ref()) {
                 Ok(WalkStep::At(_)) => {}
                 Ok(WalkStep::Follow(sites)) => {
-                    match self.run_to_any(&sites, remaining(), &cancel) {
+                    match self.run_to_any(&sites, ContinueDisposition::Handled, &run_cancel) {
                         Ok(ContinueOutcome::Step { .. }) => {}
                         // Cancelled or out of time: the target is halted where
                         // it was.
-                        Ok(ContinueOutcome::Running) => {
-                            cancel.store(false, Ordering::SeqCst);
-                            break CallTraceEnd::Interrupted;
+                        Ok(ContinueOutcome::Stopped {
+                            exception_code: None,
+                            ..
+                        }) => break CallTraceEnd::Interrupted,
+                        Ok(ContinueOutcome::Breakpoint { id, .. }) => {
+                            hit = Some(id);
+                            break CallTraceEnd::Breakpoint;
                         }
-                        Ok(ContinueOutcome::Breakpoint { .. }) => break CallTraceEnd::Breakpoint,
                         Ok(_) => {
                             break CallTraceEnd::Failed(
                                 "the target stopped on an exception while the traced thread was \
@@ -782,7 +816,8 @@ impl Session {
                         Err(error) => break CallTraceEnd::Failed(error.to_string()),
                     }
                 }
-                Ok(WalkStep::Stop(ContinueOutcome::Breakpoint { .. })) => {
+                Ok(WalkStep::Stop(ContinueOutcome::Breakpoint { id, .. })) => {
+                    hit = Some(id);
                     break CallTraceEnd::Breakpoint;
                 }
                 Ok(WalkStep::Stop(_)) => break CallTraceEnd::Diverted,
@@ -796,10 +831,8 @@ impl Session {
                 }
                 Err(error) => break CallTraceEnd::Failed(error.to_string()),
             };
-            if self
-                .code_breakpoint_after_step(current.ip, next.ip)
-                .is_some()
-            {
+            if let Some(id) = self.code_breakpoint_after_step(current.ip, next.ip) {
+                hit = Some(id);
                 break CallTraceEnd::Breakpoint;
             }
             let (open, entry_sp) = stack.last_mut().expect("the traced function's frame");
@@ -821,6 +854,16 @@ impl Session {
             current = next;
         };
 
+        // As at any other motion's stop, the breakpoint's action runs. The
+        // trace has ended, so a resume the action asks for is ignored, as
+        // for a halt.
+        if let Some(action) = hit
+            .and_then(|id| self.breakpoints.get(id))
+            .filter(|breakpoint| !breakpoint.temporary)
+            .and_then(|breakpoint| breakpoint.action.clone())
+        {
+            self.run_breakpoint_action(&action);
+        }
         let (mut root, _) = stack.remove(0);
         // Fold frames still open when the trace ended into their callers.
         let mut open: Vec<CallTraceFrame> = stack.into_iter().map(|(frame, _)| frame).collect();
@@ -867,33 +910,22 @@ impl Session {
         }))
     }
 
-    /// Run until `address` is reached, by the execution `frame` names when
-    /// given. If a breakpoint is already set there in
-    /// the current context this is a plain [`Self::continue_until_break`];
-    /// otherwise it installs a temporary breakpoint, runs to it, removes it, and
-    /// reports reaching it as [`ContinueOutcome::Step`]. A *different* breakpoint,
-    /// bugcheck, or exception en route is surfaced as-is. Blocks until a stop,
-    /// `timeout`, or `cancel` (checked between polls); the last two halt the
-    /// target where it is, remove the temp breakpoint, and return
-    /// [`ContinueOutcome::Running`]. The run-to-address primitive behind
-    /// [`Self::step_over`] / [`Self::step_out`].
-    pub fn run_to(
-        &mut self,
-        address: VirtAddr,
-        frame: Option<StepFrame>,
-        timeout: Option<Duration>,
-        cancel: &AtomicBool,
-    ) -> Result<ContinueOutcome> {
-        self.run_to_any(&[(address, frame)], timeout, cancel)
-    }
-
-    /// [`Self::run_to`] whichever of `sites` is reached first, each by the
-    /// execution its frame names.
-    fn run_to_any(
+    /// Run until whichever of `sites` is reached first, each by the
+    /// execution its frame names, resuming with `disposition`. A site where a
+    /// breakpoint is already set in the current context needs no temporary
+    /// one, and that breakpoint reports; otherwise a temporary breakpoint is
+    /// planted there, and reaching it is a [`ContinueOutcome::Step`]. A
+    /// *different* breakpoint, bugcheck, or exception en route is surfaced
+    /// as-is, the temporary sites removed. The host's `cancel` either halts
+    /// the target where it is ([`CancelBehavior::Halt`]), the sites removed,
+    /// or hands it back running with the sites left armed as one-shots
+    /// ([`CancelBehavior::ReturnRunning`]), which a later wait reports as the
+    /// step's end.
+    pub fn run_to_any(
         &mut self,
         sites: &[(VirtAddr, Option<StepFrame>)],
-        timeout: Option<Duration>,
-        cancel: &AtomicBool,
+        disposition: ContinueDisposition,
+        cancel: &Cancel<'_>,
     ) -> Result<ContinueOutcome> {
         let mut temporary = Vec::with_capacity(sites.len());
         for (address, frame) in sites {
@@ -919,12 +951,38 @@ impl Session {
             .iter()
             .find_map(|(_, frame)| frame.as_ref().map(|frame| frame.thread.clone()))
             .filter(|_| self.partition().is_none());
+        // A run handed back running leaves no stop to end a watch at.
         let watch = followed
             .as_ref()
+            .filter(|_| cancel.behavior == CancelBehavior::Halt)
             .and_then(|thread| self.watch_followed(thread, &temporary));
-        let outcome = self.wait_for_sites(followed.as_ref(), watch.as_ref(), timeout, cancel);
-
-        // A cancel or timeout leaves the VM running; halt it where it is (the
+        // The wait hands a cancelled run back running; this run then halts
+        // it, or leaves its sites armed for a later wait.
+        let mut outcome = self.wait_for_sites(
+            followed.as_ref(),
+            watch.as_ref(),
+            disposition,
+            &cancel.with_behavior(CancelBehavior::ReturnRunning),
+        );
+        if matches!(outcome, Ok(ContinueOutcome::Running)) {
+            if cancel.behavior == CancelBehavior::ReturnRunning {
+                return outcome;
+            }
+            // Halted where it is; a stop that raced the break-in is the
+            // run's own. The sites come out either way, so a break-in that
+            // fails still ends the run as cancelled.
+            outcome = Ok(self.halt().unwrap_or_else(|error| {
+                self.notices
+                    .push(Notice::warning(format!("failed to break in: {error}")));
+                ContinueOutcome::Stopped {
+                    rip: self.current_rip(),
+                    exception_code: None,
+                    first_chance: None,
+                    exception_address: None,
+                }
+            }));
+        }
+        // A failed wait can leave the VM running; halt it where it is (the
         // temp breakpoints' removal writes guest memory anyway).
         if self.backend.is_running() {
             let _ = self.interrupt();
@@ -944,8 +1002,8 @@ impl Session {
         Ok(outcome)
     }
 
-    /// Wait for one of a run's sites, as [`Self::continue_until_break`]
-    /// does, except that a run following a thread (`followed`) checks
+    /// Wait for one of a run's sites, as [`Self::continue_stop`] does,
+    /// except that a run following a thread (`followed`) checks
     /// between waits of [`FOLLOW_CHECK`] that the thread can still reach
     /// them. Switched out, a thread runs a pending termination when it is
     /// next scheduled, and an exited thread never reaches its sites. With a
@@ -955,32 +1013,31 @@ impl Session {
         &mut self,
         followed: Option<&ThreadScope>,
         watch: Option<&FollowWatch>,
-        timeout: Option<Duration>,
-        cancel: &AtomicBool,
+        mut disposition: ContinueDisposition,
+        cancel: &Cancel<'_>,
     ) -> Result<ContinueOutcome> {
         let Some(thread) = followed else {
-            return self.continue_until_break(timeout, cancel, ContinueDisposition::Handled);
+            return self.continue_stop(disposition, cancel);
         };
-        let deadline = timeout.map(|timeout| Instant::now() + timeout);
         loop {
-            let slice = deadline.map_or(FOLLOW_CHECK, |deadline| {
-                deadline
-                    .saturating_duration_since(Instant::now())
-                    .min(FOLLOW_CHECK)
-            });
-            let outcome =
-                self.continue_until_break(Some(slice), cancel, ContinueDisposition::Handled)?;
+            // Each slice hands back a running target, for the check below;
+            // the host's own cancellation applies as it says.
+            let slice = cancel
+                .until(Instant::now() + FOLLOW_CHECK)
+                .with_behavior(CancelBehavior::ReturnRunning);
+            let outcome = self.continue_stop(disposition, &slice)?;
+            disposition = ContinueDisposition::Handled;
             if let ContinueOutcome::Breakpoint { id, .. } = outcome
                 && let Some(watch) = watch.filter(|watch| watch.id == id)
             {
                 self.follow_watch_hit(watch)?;
                 continue;
             }
-            if !matches!(outcome, ContinueOutcome::Running)
-                || cancel.load(Ordering::SeqCst)
-                || deadline.is_some_and(|deadline| Instant::now() >= deadline)
-            {
+            if !matches!(outcome, ContinueOutcome::Running) {
                 return Ok(outcome);
+            }
+            if cancel.fired() {
+                return Ok(ContinueOutcome::Running);
             }
             // Read while the target runs; a read that fails proves nothing.
             let now = self.target.thread_info_from_ethread(thread.ethread);
@@ -1112,26 +1169,6 @@ impl Session {
             let (breakpoints, backend, target) = self.breakpoint_sites();
             let _ = breakpoints.remove(backend, target, id);
         }
-    }
-
-    /// Step over the current instruction: single-step it, or, if it's a `call`,
-    /// run to the instruction after it ([`ContinueOutcome::Step`] on completion).
-    /// Shared by the REPL `p` (target only) and the SDKs.
-    pub fn step_over(&mut self, cancel: &AtomicBool) -> Result<ContinueOutcome> {
-        match self.step_over_target()? {
-            StepKind::Single => self.step(),
-            StepKind::RunTo(addr) => {
-                let frame = self.step_frame(StepStack::CallReturn)?;
-                self.run_to(addr, frame, None, cancel)
-            }
-        }
-    }
-
-    /// Step out of the current function: run to the caller's return address.
-    pub fn step_out(&mut self, cancel: &AtomicBool) -> Result<ContinueOutcome> {
-        let target = self.step_out_target()?;
-        let frame = self.step_frame(StepStack::FunctionReturn)?;
-        self.run_to(target, frame, None, cancel)
     }
 }
 

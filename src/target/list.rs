@@ -4,19 +4,36 @@
 use std::collections::HashSet;
 use std::result;
 
-use super::Target;
-use crate::{backend::MemoryOps, error::Result, types::VirtAddr};
+use ntoseye_macros::record;
 
+use crate::{error::Result, types::VirtAddr};
+
+/// The end condition of a guest linked-list walk.
+#[record(tagged, impl)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListTermination {
+    /// The walk came back to the list head.
     Head,
     Null,
-    Cycle(VirtAddr),
+    /// A loop that does not go through the head.
+    Cycle(
+        /// The address where a cycle closed.
+        #[record(rename = "address")]
+        VirtAddr,
+    ),
+    /// The walk reached its limit.
     Bound,
-    Corrupt(String),
+    Corrupt(
+        /// The problem with a corrupt link.
+        #[record(rename = "error")]
+        String,
+    ),
 }
 
+#[record]
 impl ListTermination {
+    /// Why the walk ended before the list head, if it did.
+    #[record(getter)]
     pub fn diagnostic(&self) -> Option<String> {
         match self {
             Self::Head => None,
@@ -118,22 +135,40 @@ impl ListCursor {
     }
 }
 
+/// The links of the intrusive list at `head`, at most `limit`, each
+/// followed with `read_next`, and why the walk ended. For callers that check
+/// a link before taking its record; [`bounded_record_list_walk`] yields the
+/// records.
 pub fn bounded_list_walk<F>(
     head: VirtAddr,
+    limit: usize,
+    read_next: F,
+) -> (Vec<VirtAddr>, ListTermination)
+where
+    F: FnMut(VirtAddr) -> Result<VirtAddr>,
+{
+    bounded_record_list_walk(head, 0, limit, read_next)
+}
+
+/// [`bounded_list_walk`] yielding each entry's record, `link_offset` bytes
+/// before its link (`CONTAINING_RECORD`), rather than the link.
+pub fn bounded_record_list_walk<F>(
+    head: VirtAddr,
+    link_offset: u64,
     limit: usize,
     mut read_next: F,
 ) -> (Vec<VirtAddr>, ListTermination)
 where
     F: FnMut(VirtAddr) -> Result<VirtAddr>,
 {
-    let mut links = Vec::new();
+    let mut records = Vec::new();
     let mut cursor = ListCursor::new(head, limit);
     cursor.advance(read_next(head).map_err(|error| error.to_string()));
     while let Some(current) = cursor.take_current() {
-        links.push(current);
+        records.push(current - link_offset);
         cursor.advance(read_next(current).map_err(|error| error.to_string()));
     }
-    (links, cursor.finish())
+    (records, cursor.finish())
 }
 
 /// The links of the entries at the end of a doubly linked intrusive list
@@ -170,31 +205,6 @@ where
         }
     }
     links
-}
-
-impl Target {
-    /// Walk an intrusive `_LIST_ENTRY` from `head` (the list-head address) in
-    /// the current address space, returning each record's base
-    /// (`link_addr - link_offset`). Bounded (max 1000) and cycle-stopping,
-    /// mirroring the engine's `Types::list_at`; a bad link truncates the walk
-    /// rather than discarding the records already collected. Shared by the SDK
-    /// and MCP list walking; the typed cursor walk (`StructRef::list`) is the
-    /// richer form.
-    pub fn walk_list(&self, head: VirtAddr, link_offset: u64) -> Result<Vec<u64>> {
-        const MAX: usize = 1000;
-        let mem = self.context_memory();
-        let mut cursor = ListCursor::new(head, MAX);
-        cursor.advance(Ok(mem.read::<VirtAddr>(head)?));
-        let mut out = Vec::new();
-        while let Some(current) = cursor.take_current() {
-            out.push(current.0.wrapping_sub(link_offset));
-            cursor.advance(
-                mem.read::<VirtAddr>(current)
-                    .map_err(|error| error.to_string()),
-            );
-        }
-        Ok(out)
-    }
 }
 
 #[cfg(test)]

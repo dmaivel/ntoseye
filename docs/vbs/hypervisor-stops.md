@@ -17,7 +17,7 @@ When Windows runs its own hypervisor (VBS, Hyper-V, WSL2), the `gdb` backend ste
 
 The one difference is that a step sometimes ends early, in an interrupt handler or in another thread that the handler switched to. This happens in about 2 of 1,000 steps in kernel code, and ntoseye then shows a notice. Use {command}`g` to resume.
 
-Step-until walks ({command}`pa`, {command}`ta`, {command}`pc`, {command}`tc`, and the SDK's `until=` and `run_to(step=)`) and call traces ({command}`wt` and `trace_calls()`) do not end early at such a point. They run until their thread has executed the instruction, and then continue.
+Step-until walks ({command}`pa`, {command}`ta`, {command}`pc`, {command}`tc`, and the SDK's `step(until=)` and `step_over(until=)`) and call traces ({command}`wt` and `trace_calls()`) do not end early at such a point. They run until their thread has executed the instruction, and then continue.
 :::
 
 ## Where NT left off under the hypervisor

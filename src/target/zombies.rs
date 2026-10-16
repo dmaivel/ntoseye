@@ -9,14 +9,16 @@
 
 use std::ops::ControlFlow;
 
-use crate::backend::MemoryOps;
+use crate::bytes::c_string_lossy;
 use crate::error::{Error, Result};
 use crate::layout::StructRef;
+use crate::memory::MemoryOps;
 use crate::target::Target;
 use crate::target::pool::{
     NONPAGED_POOL, pool_header_tags, pool_layout, pool_range, scan_present_pool_pages,
 };
 use crate::types::VirtAddr;
+use ntoseye_macros::record;
 
 /// Stop after this many zombies of each kind.
 pub const MAX_ZOMBIES: usize = 4096;
@@ -37,6 +39,7 @@ const THREAD_OBJECT: u8 = 6;
 const THREAD_TERMINATED: u64 = 4;
 
 /// Which kinds `!zombies` looks for (WinDbg's flags: 1 processes, 2 threads).
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ZombieKinds {
     pub processes: bool,
@@ -60,48 +63,71 @@ impl ZombieKinds {
 
 /// Reference counts from the object header.
 #[derive(Debug, Clone, Copy)]
-pub struct ObjectCounts {
-    pub pointer_count: i64,
-    pub handle_count: i64,
+struct ObjectCounts {
+    pointer_count: i64,
+    handle_count: i64,
 }
 
-#[derive(Debug, Clone)]
+/// An exited process whose object still has references.
+#[record]
 pub struct ZombieProcess {
     pub eprocess: VirtAddr,
     pub pid: u64,
+    /// The image name.
     pub image: String,
-    /// `ExitTime`, a FILETIME.
+    /// `_EPROCESS.ExitTime`, a FILETIME.
+    #[record(hex)]
     pub exit_time: u64,
+    /// The exit NTSTATUS.
+    #[record(hex)]
     pub exit_status: u32,
-    pub counts: ObjectCounts,
+    /// Open handles to the object.
+    pub handle_count: i64,
+    /// References to the object.
+    pub pointer_count: i64,
 }
 
-#[derive(Debug, Clone)]
+/// A terminated thread whose object still has references.
+#[record]
 pub struct ZombieThread {
     pub ethread: VirtAddr,
     pub pid: u64,
     pub tid: u64,
-    /// `Tcb.Process`.
+    /// The owning `_EPROCESS` (`Tcb.Process`).
     pub process: VirtAddr,
-    /// The owning process's image name, when its object is readable.
+    /// The image name of the owning process. `None` if ntoseye cannot read it.
     pub image: Option<String>,
+    /// The exit NTSTATUS.
+    #[record(hex)]
     pub exit_status: u32,
-    pub counts: ObjectCounts,
+    /// Open handles to the object.
+    pub handle_count: i64,
+    /// References to the object.
+    pub pointer_count: i64,
 }
 
-#[derive(Debug, Clone)]
-pub struct ZombiesDetail {
+/// The exited processes and terminated threads that still have references
+/// (`!zombies`), which ntoseye finds with a scan of nonpaged pool.
+#[record]
+pub struct Zombies {
+    /// The kinds the scan looked for; the list of a kind it did not look for
+    /// is empty.
     pub kinds: ZombieKinds,
+    /// The start of the scanned pool region.
     pub region_start: VirtAddr,
+    /// The end of the scanned pool region.
     pub region_end: VirtAddr,
     pub scanned_pages: u64,
     pub processes: Vec<ZombieProcess>,
     pub threads: Vec<ZombieThread>,
-    /// Live objects of each kind decoded, to put the zombies in proportion.
+    /// The number of live processes that the scan found, to put the zombies
+    /// in proportion.
     pub live_processes: usize,
+    /// The number of live threads that the scan found.
     pub live_threads: usize,
-    /// The scan stopped early: interrupted, or at the result bound.
+    /// True if the scan was interrupted before it finished.
     pub interrupted: bool,
+    /// True if a result list reached its limit ([`MAX_ZOMBIES`]).
     pub truncated: bool,
 }
 
@@ -157,7 +183,7 @@ impl ObjectQuery {
 
 impl Target {
     /// Scan nonpaged pool for exited processes and threads still referenced.
-    pub fn zombies(&self, kinds: ZombieKinds) -> Result<ZombiesDetail> {
+    pub fn zombies(&self, kinds: ZombieKinds) -> Result<Zombies> {
         let guest = self.guest()?;
         let nt = &guest.ntoskrnl;
         let memory = nt.memory();
@@ -190,7 +216,7 @@ impl Target {
         let layout = pool_layout(self)?;
         let (region_start, region_end) = pool_range(self, &NONPAGED_POOL)?;
 
-        let mut detail = ZombiesDetail {
+        let mut detail = Zombies {
             kinds,
             region_start,
             region_end,
@@ -263,7 +289,8 @@ impl Target {
             image: image_file_name(&process).unwrap_or_default(),
             exit_time,
             exit_status: process.read_field("ExitStatus").unwrap_or(0),
-            counts,
+            handle_count: counts.handle_count,
+            pointer_count: counts.pointer_count,
         }))
     }
 
@@ -293,7 +320,8 @@ impl Target {
             process,
             image,
             exit_status: thread.read_field("ExitStatus").unwrap_or(0),
-            counts,
+            handle_count: counts.handle_count,
+            pointer_count: counts.pointer_count,
         }))
     }
 }
@@ -301,9 +329,5 @@ impl Target {
 /// `_EPROCESS.ImageFileName`, up to its NUL.
 fn image_file_name(process: &StructRef<'_>) -> Option<String> {
     let bytes = process.read_field_bytes("ImageFileName", 16).ok()?;
-    let end = bytes
-        .iter()
-        .position(|&byte| byte == 0)
-        .unwrap_or(bytes.len());
-    Some(String::from_utf8_lossy(&bytes[..end]).into_owned())
+    Some(c_string_lossy(&bytes))
 }

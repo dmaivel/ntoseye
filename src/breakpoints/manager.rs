@@ -3,16 +3,17 @@
 //! after a stop.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::BreakpointScope;
 use super::install::{BreakpointBackend, forget_site};
 use super::spec::CodeSite;
-use super::{Breakpoint, BreakpointConfig, BreakpointManager, PartitionFilter, StepFrame};
+use super::{BreakpointConfig, BreakpointInfo, BreakpointManager, PartitionFilter, StepFrame};
 #[cfg(test)]
 use super::{HardwareBreakpoint, install::BreakpointPatch};
-use crate::backend::MemoryOps;
 use crate::dbg_backend::{DebugBackend, HwBreakpointAccess};
 use crate::error::{Error, Result};
+use crate::memory::MemoryOps;
 use crate::target::Target;
 use crate::types::{Dtb, VirtAddr};
 
@@ -22,17 +23,16 @@ impl BreakpointManager {
             breakpoints: HashMap::new(),
             one_shot_hits: HashSet::new(),
             next_id: 0,
-            next_serial: 0,
             interrupted_hits: Vec::new(),
         }
     }
 
-    /// A fresh [`Breakpoint::serial`], distinct from every one handed out by
-    /// this manager before.
+    /// A fresh [`BreakpointInfo::serial`], distinct from every one handed
+    /// out before in this process, by any session: a breakpoint that reuses
+    /// an id, or another debugger's with the same id, is not this one.
     pub fn take_serial(&mut self) -> u64 {
-        let serial = self.next_serial;
-        self.next_serial += 1;
-        serial
+        static NEXT_SERIAL: AtomicU64 = AtomicU64::new(0);
+        NEXT_SERIAL.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Test-only: register a breakpoint directly, bypassing backend
@@ -55,7 +55,7 @@ impl BreakpointManager {
         let serial = self.take_serial();
         self.breakpoints.insert(
             id,
-            Breakpoint {
+            BreakpointInfo {
                 id,
                 serial,
                 address,
@@ -84,25 +84,6 @@ impl BreakpointManager {
                 backend,
             },
         );
-    }
-
-    pub fn add(
-        &mut self,
-        client: &mut dyn DebugBackend,
-        debugger: &Target,
-        address: VirtAddr,
-        symbol: Option<String>,
-        condition: Option<String>,
-    ) -> Result<u32> {
-        self.add_code_configured(
-            client,
-            debugger,
-            CodeSite::Address { address, symbol },
-            BreakpointConfig {
-                condition,
-                ..BreakpointConfig::default()
-            },
-        )
     }
 
     pub fn add_configured(
@@ -231,6 +212,7 @@ impl BreakpointManager {
 
         let (address, resolved, backend) = match address {
             Some(address) => {
+                self.retire_one_shot_hits_at(client, debugger, address, false)?;
                 self.ensure_site_available(address, false, None)?;
                 Self::validate_breakpoint_target(debugger, address, &scope)?;
                 let backend = Self::install_breakpoint(client, debugger, address, &scope)?;
@@ -244,7 +226,7 @@ impl BreakpointManager {
         let serial = self.take_serial();
         self.breakpoints.insert(
             id,
-            Breakpoint {
+            BreakpointInfo {
                 id,
                 serial,
                 address,
@@ -323,7 +305,7 @@ impl BreakpointManager {
     fn remove_if_uninstalled(
         &mut self,
         id: u32,
-        uninstall: impl FnOnce(&Breakpoint) -> Result<()>,
+        uninstall: impl FnOnce(&BreakpointInfo) -> Result<()>,
     ) -> Result<()> {
         let bp = self
             .breakpoints
@@ -348,7 +330,7 @@ impl BreakpointManager {
     fn remove_ids_if_uninstalled(
         &mut self,
         ids: impl IntoIterator<Item = u32>,
-        mut uninstall: impl FnMut(&Breakpoint) -> Result<()>,
+        mut uninstall: impl FnMut(&BreakpointInfo) -> Result<()>,
     ) -> Result<()> {
         let mut failures = Vec::new();
         for id in ids {
@@ -370,7 +352,7 @@ impl BreakpointManager {
     /// Forget a breakpoint whose site can no longer be restored (its address
     /// space is gone). The backend is told so it stops treating a hit at the
     /// stale address as ours.
-    pub fn discard(&mut self, client: &mut dyn DebugBackend, id: u32) -> Result<Breakpoint> {
+    pub fn discard(&mut self, client: &mut dyn DebugBackend, id: u32) -> Result<BreakpointInfo> {
         let bp = self.breakpoints.remove(&id).ok_or(Error::BPNotFound(id))?;
         Self::forget_backend_site(client, &bp);
         self.one_shot_hits.remove(&id);
@@ -533,7 +515,7 @@ impl BreakpointManager {
         ids
     }
 
-    pub fn list(&self) -> Vec<&Breakpoint> {
+    pub fn list(&self) -> Vec<&BreakpointInfo> {
         let mut bps: Vec<_> = self
             .breakpoints
             .values()
@@ -545,14 +527,22 @@ impl BreakpointManager {
 
     /// Find a managed breakpoint, including a one-shot hit retained until the
     /// next resume so the stop that reported it can expose its handle.
-    pub fn get(&self, id: u32) -> Option<&Breakpoint> {
+    pub fn get(&self, id: u32) -> Option<&BreakpointInfo> {
         self.breakpoints.get(&id)
     }
 
-    /// The breakpoint numbered `id`, only if it is still the one created
-    /// with `serial` and not a later breakpoint that reused the id.
-    pub fn get_exact(&self, id: u32, serial: u64) -> Option<&Breakpoint> {
-        self.get(id).filter(|bp| bp.serial == serial)
+    /// The breakpoint numbered `id` as [`Self::list`] lists it: not a
+    /// one-shot hit retained until the next resume, which is gone for the
+    /// user.
+    pub fn listed(&self, id: u32) -> Option<&BreakpointInfo> {
+        self.get(id)
+            .filter(|bp| !self.one_shot_hits.contains(&bp.id))
+    }
+
+    /// The listed breakpoint numbered `id`, only if it is still the one
+    /// created with `serial` and not a later breakpoint that reused the id.
+    pub fn live(&self, id: u32, serial: u64) -> Option<&BreakpointInfo> {
+        self.listed(id).filter(|bp| bp.serial == serial)
     }
 
     pub fn has_enabled_breakpoints(&self) -> bool {
@@ -704,8 +694,36 @@ mod tests {
         let new = manager.get(0).unwrap().serial;
 
         assert_ne!(old, new);
-        assert!(manager.get_exact(0, old).is_none());
-        assert_eq!(manager.get_exact(0, new).unwrap().address, VirtAddr(0x2000));
+        assert!(manager.live(0, old).is_none());
+        assert_eq!(manager.live(0, new).unwrap().address, VirtAddr(0x2000));
+    }
+
+    /// Another debugger's breakpoint with the same id is not this one
+    /// (`Stop.hit` compares serials).
+    #[test]
+    fn another_sessions_breakpoint_with_the_same_id_has_another_serial() {
+        let mut first = BreakpointManager::new();
+        let mut second = BreakpointManager::new();
+        first.insert_for_test(0, VirtAddr(0x1000), true, None);
+        second.insert_for_test(0, VirtAddr(0x1000), true, None);
+
+        assert_ne!(first.get(0).unwrap().serial, second.get(0).unwrap().serial);
+    }
+
+    #[test]
+    fn fired_one_shot_is_no_longer_listed() {
+        let mut manager = BreakpointManager::new();
+        manager.insert_for_test(3, VirtAddr(0x3000), true, None);
+        manager.breakpoints.get_mut(&3).unwrap().one_shot = true;
+        let serial = manager.get(3).unwrap().serial;
+        assert_eq!(manager.live(3, serial).unwrap().address, VirtAddr(0x3000));
+
+        manager.mark_one_shot_hit(3).unwrap();
+
+        // Held until the next resume removes it, but gone for hosts.
+        assert_eq!(manager.get(3).unwrap().serial, serial);
+        assert!(manager.listed(3).is_none());
+        assert!(manager.live(3, serial).is_none());
     }
 
     #[test]

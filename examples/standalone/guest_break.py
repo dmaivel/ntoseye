@@ -25,7 +25,7 @@ import ntoseye
 
 def where(stop: ntoseye.Stop) -> str:
     rip = f"{stop.rip:#018x}" if stop.rip is not None else "?"
-    return f"{stop.cpu.id}  {rip}  {stop.symbol or '?'}"
+    return f"CPU {stop.cpu}  {rip}  {stop.symbol or '?'}"
 
 
 def main() -> None:
@@ -53,15 +53,16 @@ def main() -> None:
             if dbg.stop is None:
                 dbg.interrupt()
             bp.delete()
-        if not isinstance(hit, ntoseye.Stop.Breakpoint):
+        if hit is None or not hit.hit(bp):
             raise SystemExit(f"{args.function} was not reached; use the guest while the script runs")
 
         # The hit shows the guest's view, on the VP that ran the code.
         thread = hit.thread
-        who = f"{thread.process.name} TID {thread.tid}" if thread and thread.process else "an unknown thread"
+        who = f"{thread.process_name or '?'} TID {thread.tid}" if thread is not None else "an unknown thread"
         shown = f"partition {dbg.partition:#x}" if dbg.partition is not None else "the target"
-        print(f"hit on {hit.cpu.id} in {shown}, by {who}:")
-        for frame in hit.cpu.backtrace(limit=args.frames):
+        assert hit.cpu is not None  # a kernel stop is on a processor
+        print(f"hit on CPU {hit.cpu} in {shown}, by {who}:")
+        for frame in dbg.cpus[hit.cpu].backtrace(limit=args.frames):
             print(f"  {frame.ip:#018x}  {frame.symbol or '?'}")
 
         for _ in range(args.steps):

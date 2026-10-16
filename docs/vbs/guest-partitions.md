@@ -120,7 +120,7 @@ The partition's VPs run on the target's processors, where the hypervisor moves t
 - Each step takes about 0.25 s, so {command}`tc`, {command}`pc`, {command}`ta`, {command}`pa` and {command}`wt`, which step instruction by instruction, are refused in the view.
 - A conditional branch takes two of the four debug registers, so a step there fails while three breakpoints hold theirs.
 
-In the SDK, `dbg.step()`, `dbg.step_over()`, `dbg.step_out()` and `dbg.run_to(address)` do the same while the view is shown.
+In the SDK, `dbg.step()`, `dbg.step_over()`, `dbg.step_out()` and `dbg.run(address=...)` do the same while the view is shown.
 
 ## Raw memory and code
 

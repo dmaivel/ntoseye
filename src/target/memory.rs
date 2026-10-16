@@ -1,27 +1,61 @@
 //! Reading guest memory in the target's scopes: address spaces and typed
 //! views over them, byte-pattern search, fields, and counted and C strings.
 
-use super::mm::PfnSelector;
-use super::{CODE_BITNESS_AMD64, CODE_BITNESS_X86, MemorySearchMatch, StringDescriptor, Target};
+use super::mm::{AddressKind, AddressModule, MemoryRegionInfo, PfnSelector};
+use super::{CODE_BITNESS_AMD64, CODE_BITNESS_X86, StringDescriptor, Target};
+use ntoseye_macros::record;
 use std::sync::atomic::Ordering;
 
 use crate::{
-    backend::MemoryOps,
     error::{Error, Result},
     guest::EvmcsState,
     layout::{StructRef, TypeInfo, Types},
-    memory::{AddressSpace, PAGE_SIZE, pattern_offsets, read_page_chunks},
+    memory::{
+        self, AddressSpace, MemoryOps, PAGE_SIZE, ScanFault, pattern_offsets, read_page_chunks,
+    },
     phys::PhysMem,
     types::{Dtb, PhysAddr, VirtAddr},
 };
 
 /// The most bytes one search scans.
 pub const MAX_SEARCH_BYTES: usize = 1 << 30;
+
+/// The space an SDK memory search runs in, which says how its matches are
+/// described: physical memory by offset only, an NT space by symbol, module
+/// and region, and a space NT does not describe (VTL1, a root outside NT) by
+/// symbol and that kind.
+#[derive(Debug, Clone, Copy)]
+pub enum SearchSpace {
+    Physical,
+    Virtual(Option<AddressKind>),
+}
 /// The most matches one search records. A pattern common in the range (a
 /// zero byte) would otherwise fill memory with them.
 pub const MAX_SEARCH_MATCHES: usize = 4096;
 /// Bytes read per step of a search.
 const SEARCH_CHUNK: usize = 1 << 20;
+
+/// Which memory an operation addresses: the virtual address space of the
+/// session's context, or guest-physical memory. The REPL names it by the
+/// command (`db` or `!db`); an SDK `Memory` binds it from its space
+/// (`dbg.memory` or `dbg.physical`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryKind {
+    Virtual,
+    Physical,
+}
+
+impl MemoryKind {
+    /// Refuse physical memory, for an operation on virtual addresses only.
+    pub fn require_virtual(self) -> Result<()> {
+        match self {
+            MemoryKind::Virtual => Ok(()),
+            MemoryKind::Physical => Err(Error::DebugInfo(
+                "not available on physical memory".to_string(),
+            )),
+        }
+    }
+}
 
 /// Whose memory expressions read ([`Target::expression_memory`],
 /// [`Target::read_expression_physical`]).
@@ -81,6 +115,9 @@ impl MemoryOps<VirtAddr> for ExpressionMemory<'_> {
 /// What [`Target::search`] found.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SearchResult {
+    /// The range searched.
+    pub start: VirtAddr,
+    pub length: usize,
     /// Where the pattern matched, overlapping matches included, in order.
     pub matches: Vec<u64>,
     /// Bytes of the range that could not be read and were skipped.
@@ -99,6 +136,9 @@ pub enum SearchStop {
 /// What [`Target::search_physical_pointer`] found.
 #[derive(Debug, Default)]
 pub struct PhysicalSearchResult {
+    /// The value searched for, and how far a hit may be from it.
+    pub data: u64,
+    pub delta: u64,
     /// The PFN range searched, inclusive.
     pub first_pfn: u64,
     pub last_pfn: u64,
@@ -132,9 +172,56 @@ fn pointer_search_hit(value: u64, data: u64, delta: u64) -> bool {
     (low..=data.saturating_add(delta)).contains(&value) || (value ^ low).count_ones() == 1
 }
 
+/// A memory-search hit, with its symbol and location data.
+#[record]
+pub struct MemorySearchMatch {
+    /// The address of the match.
+    pub address: VirtAddr,
+    /// The offset of the match from the start of the search.
+    #[record(hex)]
+    pub offset: u64,
+    /// The nearest symbol, if one resolves.
+    pub symbol: Option<String>,
+    /// The kind of address.
+    pub kind: AddressKind,
+    /// The module containing the match, if any.
+    pub module: Option<AddressModule>,
+    /// The module section containing the match, if any.
+    pub section: Option<String>,
+    /// The `_MI_SYSTEM_VA_TYPE` name, for a kernel-region match.
+    pub va_type: Option<String>,
+    /// The region containing the match, if any.
+    pub region: Option<MemoryRegionInfo>,
+}
+
+impl MemorySearchMatch {
+    /// A hit outside NT's address descriptions: `kind` is `physical`,
+    /// `vtl1`, or `foreign`.
+    pub fn undescribed(
+        address: u64,
+        offset: u64,
+        symbol: Option<String>,
+        kind: AddressKind,
+    ) -> Self {
+        Self {
+            address: VirtAddr(address),
+            offset,
+            symbol,
+            kind,
+            module: None,
+            section: None,
+            va_type: None,
+            region: None,
+        }
+    }
+}
+
 /// What [`Target::compare`] found.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct CompareResult {
+    /// The ranges compared, of the same length.
+    pub first: VirtAddr,
+    pub second: VirtAddr,
     /// Offsets into both ranges whose bytes differ, with the first range's
     /// byte and the second's, in order.
     pub differences: Vec<(usize, u8, u8)>,
@@ -170,6 +257,16 @@ impl Target {
     /// Memory view for the inspection address space ([`Self::current_dtb`]).
     pub fn context_memory(&self) -> AddressSpace<'_, PhysMem> {
         self.address_space(self.current_dtb())
+    }
+
+    /// Write `data` at `address` of `memory`: the inspection address space
+    /// ([`Self::context_memory`]) or guest-physical memory. Every host's
+    /// memory write (`eb`, `!eb`, `Memory.write`) goes through it.
+    pub fn write_memory(&self, memory: MemoryKind, address: u64, data: &[u8]) -> Result<()> {
+        match memory {
+            MemoryKind::Virtual => self.context_memory().write_bytes(VirtAddr(address), data),
+            MemoryKind::Physical => self.write_physical(address, data),
+        }
     }
 
     /// The virtual memory expressions read in the [`ExpressionScope`]: the
@@ -234,7 +331,11 @@ impl Target {
                 "search length {length:#x} exceeds the maximum of {MAX_SEARCH_BYTES:#x} bytes"
             )));
         }
-        let mut result = SearchResult::default();
+        let mut result = SearchResult {
+            start,
+            length,
+            ..SearchResult::default()
+        };
         if pattern.is_empty() || pattern.len() > length {
             return Ok(result);
         }
@@ -282,7 +383,11 @@ impl Target {
                 "compare length {length:#x} exceeds the maximum of {MAX_SEARCH_BYTES:#x} bytes"
             )));
         }
-        let mut result = CompareResult::default();
+        let mut result = CompareResult {
+            first,
+            second,
+            ..CompareResult::default()
+        };
         let mut offset = 0usize;
         while offset < length {
             if self.interrupt.load(Ordering::Relaxed) {
@@ -346,6 +451,8 @@ impl Target {
         }
         let page = PAGE_SIZE as u64;
         let mut result = PhysicalSearchResult {
+            data,
+            delta,
             first_pfn: first,
             last_pfn: last,
             ..PhysicalSearchResult::default()
@@ -427,11 +534,16 @@ impl Target {
             .copied()
             .map(|addr| {
                 let address = VirtAddr(addr);
+                let description = self.describe_address(address)?;
                 Ok(MemorySearchMatch {
                     address,
                     offset: addr.wrapping_sub(start.0),
                     symbol: self.closest_symbol_current_context(address),
-                    description: self.describe_address(address)?,
+                    kind: description.kind,
+                    module: description.module,
+                    section: description.section,
+                    va_type: description.va_type,
+                    region: description.region,
                 })
             })
             .collect()
@@ -496,26 +608,12 @@ impl Target {
     /// [`read_unicode_string`](Self::read_unicode_string).
     pub fn read_c_string(&self, addr: VirtAddr, max_len: usize) -> Result<String> {
         let mem = self.context_memory();
-        let mut bytes = Vec::new();
-        while bytes.len() < max_len {
-            let cur = addr + bytes.len() as u64;
-            let to_page_end = PAGE_SIZE - cur.page_offset() as usize;
-            let chunk = to_page_end.min(max_len - bytes.len());
-            let mut buf = vec![0u8; chunk];
-            match mem.read_bytes(cur, &mut buf) {
-                Ok(()) => {}
-                // Nothing readable at the very start is a real error; once we
-                // have some bytes, a fault just terminates the string.
-                Err(_) if !bytes.is_empty() => break,
-                Err(e) => return Err(e),
-            }
-            if let Some(nul) = buf.iter().position(|&b| b == 0) {
-                bytes.extend_from_slice(&buf[..nul]);
-                return Ok(String::from_utf8_lossy(&bytes).into_owned());
-            }
-            bytes.extend_from_slice(&buf);
-        }
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+        // Nothing readable at the very start is a real error; once there are
+        // some bytes, any fault just terminates the string.
+        let read = memory::read_terminated(addr, max_len, 1, |at, buf| {
+            mem.read_bytes(at, buf).map_err(ScanFault::Unreadable)
+        })?;
+        Ok(String::from_utf8_lossy(&read.bytes).into_owned())
     }
 
     pub fn read_layout_field<T>(&self, layout: &TypeInfo, base: VirtAddr, name: &str) -> Result<T>
@@ -524,17 +622,6 @@ impl Target {
     {
         self.context_memory()
             .read(base + layout.field_offset(name)?)
-    }
-
-    pub fn extract_layout_bits(
-        &self,
-        layout: &TypeInfo,
-        base: VirtAddr,
-        name: &str,
-    ) -> Result<u64> {
-        let field = layout.field(name)?;
-        let raw: u64 = self.context_memory().read(base + field.offset as u64)?;
-        Ok(field.decode(raw))
     }
 
     /// [`Self::read_layout_field`] of a kernel structure, read through the

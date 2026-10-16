@@ -4,6 +4,7 @@
 //! ring whose children name it as parent, and each VP's current VTL must be
 //! the entry of its VTL array that its level selects.
 
+use ntoseye_macros::record;
 use std::collections::{HashMap, HashSet};
 
 use super::EvmcsState;
@@ -16,52 +17,108 @@ const MAX_CHILDREN: usize = 4096;
 /// VTLs a VP can have (TLFS: VTL0 to VTL2).
 const MAX_VTLS: u8 = 3;
 
-/// One partition, as the hypervisor keeps it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A partition of the Windows hypervisor, as it was when listed.
+#[record(impl)]
+#[derive(PartialEq, Eq)]
 pub struct HvPartition {
+    /// The address of the hypervisor's partition object.
+    #[record(hex)]
     pub address: u64,
+    /// The partition ID (the root partition's is 1).
+    #[record(hex)]
     pub id: u64,
-    /// The parent's partition ID; `None` for the root partition.
+    /// The parent partition's ID, or `None` for the root partition.
+    #[record(hex, rename = "parent_id")]
     pub parent: Option<u64>,
-    /// `HV_PARTITION_PRIVILEGE_MASK`.
+    /// The partition's privileges, as the TLFS `HV_PARTITION_PRIVILEGE_MASK`.
+    #[record(hex)]
     pub privileges: u64,
+    /// The partition's virtual processors, by index.
     pub virtual_processors: Vec<HvVirtualProcessor>,
 }
 
-/// One virtual processor of a partition.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[record]
+impl HvPartition {
+    /// The TLFS names of the privileges in `privileges`
+    /// (`["AccessVpRunTimeReg", ..., "CreatePartitions", ...]`). Set bits
+    /// that the TLFS lists as reserved have no name and are left out.
+    #[record(getter)]
+    pub fn privilege_names(&self) -> Vec<&'static str> {
+        privilege_names(self.privileges).0
+    }
+}
+
+/// A virtual processor of a Windows hypervisor partition.
+#[record]
+#[derive(PartialEq, Eq)]
 pub struct HvVirtualProcessor {
+    /// The VP index in its partition.
     pub index: u32,
+    /// The address of the hypervisor's VP object.
+    #[record(hex)]
     pub address: u64,
-    /// The VTL it runs, or last ran, in.
+    /// The VTL that the VP runs, or last ran, in.
     pub vtl: u8,
-    /// Each VTL enabled on the VP, lowest first.
+    /// Each VTL enabled on the VP, lowest first (VTL0 and VTL1 under VBS).
     pub vtls: Vec<HvVtl>,
-    /// The processors whose current VP this is: the one that runs it, or
-    /// ran it last.
+    /// The processors whose current VP this is (the one that runs it, or
+    /// ran it last).
     pub processors: Vec<HvProcessor>,
 }
 
-/// A logical processor of the hypervisor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A logical processor whose current VP a VP is: the one that runs it, or
+/// ran it last.
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub struct HvProcessor {
-    /// Its processor block (its GS base in the hypervisor).
+    /// The processor block (the processor's GS base in the hypervisor).
+    #[record(hex)]
     pub block: u64,
-    /// Its processor number, where the layout names where the block keeps it.
+    /// The processor number, or None on builds before 10.0.19041.
     pub number: Option<u32>,
 }
 
-/// One VTL of a virtual processor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One VTL of a virtual processor: the hypervisor's context for it and, when
+/// found, its eVMCS and the guest state saved there.
+#[record(impl)]
+#[derive(PartialEq, Eq)]
 pub struct HvVtl {
+    /// The VTL (0 for NT, 1 for the secure kernel).
     pub level: u8,
-    /// The hypervisor's context object for this VTL.
+    /// The address of the hypervisor's context object for this VTL.
+    #[record(hex)]
     pub context: u64,
-    /// The physical address of the VTL's VMCS (an eVMCS under KVM), when the
-    /// layout names where the context keeps it.
+    /// The physical address of the VTL's VMCS (an eVMCS under KVM), or
+    /// `None` when ntoseye did not find where the context keeps it (no
+    /// `hv-evmcs`).
+    #[record(hex)]
     pub vmcs: Option<u64>,
     /// The guest state in that eVMCS, read after the walk.
+    #[record(skip)]
     pub state: Option<EvmcsState>,
+}
+
+#[record]
+impl HvVtl {
+    /// The VTL's EPT pointer, the root of its second-level address
+    /// translation, or `None` without the eVMCS.
+    #[record(getter, hex)]
+    pub fn ept_pointer(&self) -> Option<u64> {
+        self.state.map(|state| state.ept_pointer)
+    }
+
+    /// The guest RIP where the VTL left off, or `None` without the eVMCS.
+    #[record(getter, hex)]
+    pub fn rip(&self) -> Option<u64> {
+        self.state.map(|state| state.rip)
+    }
+
+    /// The basic reason (Intel SDM Appendix C) the VTL last left for the
+    /// hypervisor, or `None` without the eVMCS.
+    #[record(getter)]
+    pub fn exit_reason(&self) -> Option<u32> {
+        self.state.map(|state| state.exit_reason)
+    }
 }
 
 fn hv_error(detail: impl std::fmt::Display) -> Error {

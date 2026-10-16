@@ -13,7 +13,7 @@ import ntoseye.repl as repl
 
 
 @repl.command("pscount", "Count running processes.\n(usage: pscount [-v])")
-def pscount(dbg: repl.Debugger, *args: str):
+def pscount(dbg: repl.Debugger, *args: str) -> None:
     processes = dbg.processes
     print(f"{len(processes)} processes")
     if args and args[0] == "-v":
@@ -33,7 +33,7 @@ A keyword argument to `repl.command` binds a parameter, by its name, to one of t
 
 ```python
 @repl.command("pinfo", "Show a process.\n(usage: pinfo <process>)", target=repl.Process)
-def pinfo(dbg: repl.Debugger, target: str):
+def pinfo(dbg: repl.Debugger, target: str) -> None:
     ...
 ```
 

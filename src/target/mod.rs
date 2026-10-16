@@ -22,8 +22,8 @@ pub mod image;
 pub mod irpfind;
 pub mod job;
 mod lifecycle;
-mod list;
-mod memory;
+pub mod list;
+pub mod memory;
 pub mod meta;
 pub mod mm;
 pub mod ndis;
@@ -45,15 +45,17 @@ pub mod usermode;
 mod variables;
 pub mod virtio;
 pub mod virtio_request;
-mod vtl;
+pub mod vtl;
 pub mod wdf;
 pub mod workqueue;
 pub mod zombies;
 
-pub use list::{ListCursor, ListTermination, bounded_list_walk, links_back_to};
+pub use list::{
+    ListCursor, ListTermination, bounded_list_walk, bounded_record_list_walk, links_back_to,
+};
 pub use memory::{
     CompareResult, ExpressionMemory, ExpressionScope, MAX_SEARCH_BYTES, MAX_SEARCH_MATCHES,
-    SearchResult, SearchStop,
+    MemoryKind, PhysicalSearchResult, SearchResult, SearchStop,
 };
 pub use symbols::ReloadScope;
 pub use userdump::{TargetKind, UserProcess};
@@ -62,7 +64,6 @@ pub use vtl::{
     SavedVtlContext, ServedVp, VP_STATE_REGISTERS, exit_registers,
 };
 
-use self::mm::AddressDescription;
 use crate::{
     breakpoints::SiteJournal,
     debugger_data::{DebuggerDataBlock, MetadataSource, MetadataValue},
@@ -75,6 +76,7 @@ use crate::{
     types::{Arch, CodeMachine, Dtb, VirtAddr},
     unwind::RecoveredStackTrace,
 };
+use ntoseye_macros::record;
 
 /// A host's handle on [`Target::interrupt`], usable from any thread.
 #[derive(Clone)]
@@ -347,19 +349,12 @@ impl StringDescriptor {
     }
 }
 
-/// One memory-search hit, enriched with the same location/symbol context used
-/// by the SDK and MCP.
-#[derive(Debug, Clone)]
-pub struct MemorySearchMatch {
-    pub address: VirtAddr,
-    pub offset: u64,
-    pub symbol: Option<String>,
-    pub description: AddressDescription,
-}
-
+/// A symbol that a name search matched.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolSearchMatch {
     pub name: String,
+    /// `None` if the match does not resolve to a unique address.
     pub address: Option<VirtAddr>,
     pub module: Option<String>,
 }
@@ -436,16 +431,28 @@ impl SavedThreadRegisters {
     }
 }
 
-#[derive(Debug, Clone)]
+/// A Windows thread, as `threads`, `!thread`, and all scheduler listings
+/// show it. A field that the walk could not read is `None`.
+#[record(impl)]
 pub struct ThreadInfo {
+    /// The `_ETHREAD` address, which identifies the thread.
     pub ethread: VirtAddr,
+    /// The `_KTHREAD` address.
     pub kthread: VirtAddr,
+    /// The thread ID, or `None` if the thread has no ID (for example, an
+    /// idle thread).
     pub tid: Option<u64>,
+    /// The ID of the process that owns the thread.
     pub pid: Option<u64>,
+    /// The image name of the owning process.
     pub process_name: Option<String>,
+    /// The owning `_EPROCESS`.
     pub eprocess: Option<VirtAddr>,
+    /// `_KTHREAD.State`.
     pub state: Option<u8>,
+    /// `_KTHREAD.WaitReason`.
     pub wait_reason: Option<u8>,
+    /// The current scheduling priority.
     pub priority: Option<u8>,
     pub base_priority: Option<u8>,
     pub wait_irql: Option<u8>,
@@ -453,11 +460,29 @@ pub struct ThreadInfo {
     pub start_address: Option<VirtAddr>,
     pub win32_start_address: Option<VirtAddr>,
     pub teb: Option<VirtAddr>,
+    /// `_KTHREAD.KernelStack`, the saved stack pointer of a thread that is
+    /// not running.
     pub kernel_stack: Option<VirtAddr>,
     pub stack_base: Option<VirtAddr>,
     pub stack_limit: Option<VirtAddr>,
     pub trap_frame: Option<VirtAddr>,
+    /// The IRPs on the thread's `IrpList`.
     pub pending_irps: Option<Vec<VirtAddr>>,
+}
+
+#[record]
+impl ThreadInfo {
+    /// The name of the state (`Running`, `Waiting`, ...).
+    #[record(getter)]
+    pub fn state_name(&self) -> Option<&'static str> {
+        self.state.map(kthread_state_name)
+    }
+
+    /// The name of the wait reason (`Executive`, `UserRequest`, ...).
+    #[record(getter)]
+    pub fn wait_reason_name(&self) -> Option<&'static str> {
+        self.wait_reason.map(wait_reason_name)
+    }
 }
 
 #[cfg(test)]
@@ -795,6 +820,15 @@ impl<T> DiagnosticValue<T> {
         Self::Unavailable(error.into())
     }
 
+    /// The value, or why it could not be read, as a `Result` to match or
+    /// chain on.
+    pub fn as_result(&self) -> std::result::Result<&T, &str> {
+        match self {
+            Self::Available(value) => Ok(value),
+            Self::Unavailable(error) => Err(error),
+        }
+    }
+
     /// The value of `result`, or its error's text.
     pub fn from_result(result: Result<T>) -> Self {
         match result {
@@ -811,14 +845,6 @@ pub struct DiagnosticMetric<T> {
 }
 
 impl<T> DiagnosticMetric<T> {
-    /// The value mapped by `f`, with the same source, or the same error.
-    pub fn map<U>(&self, f: impl FnOnce(&T) -> U) -> DiagnosticMetric<U> {
-        DiagnosticMetric {
-            value: self.value.map(f),
-            source: self.source,
-        }
-    }
-
     fn available(value: MetadataValue<T>) -> Self {
         Self {
             value: DiagnosticValue::Available(value.value),

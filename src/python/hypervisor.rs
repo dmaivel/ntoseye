@@ -2,27 +2,27 @@
 //! (`dbg.hypervisor_partitions()`), as the REPL's `!hvpartitions` and
 //! `!hvvps` list them. Each call walks and validates them again.
 
+use std::collections::{BTreeMap, HashMap};
+
+use ntoseye_macros::handle;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::PyBytes;
 
 use super::handle::{Owner, require_halted};
 use super::memory::check_disassembly_count;
-use super::record::PlainDict;
-use super::{MAX_READ_LEN, err, raise, view_dict};
-use crate::guest::ept::{EptTranslation, differences};
-use crate::guest::hypercalls::HypercallCaller as Caller;
-use crate::guest::{HvPartition, HvVirtualProcessor, HvVtl, evmcs_fields, privilege_names};
+use super::record::{Hex, Typed};
+use super::{MAX_READ_LEN, err, raise};
+use crate::disasm::DisasmRow;
+use crate::guest::ept::{EptDifference, EptMapping, EptTranslation, differences};
+use crate::guest::evmcs_fields::{IoIntercepts, MsrIntercepts};
+use crate::guest::hypercalls::HypercallCallerInfo;
+use crate::guest::{HvPartition, HvVirtualProcessor, HvVtl, evmcs_fields};
+use crate::session::VpRegisters;
 use crate::target::CodeExtent;
-use crate::view::execution::{DisassembledInstruction, disasm_rows};
-use crate::view::hypervisor::{
-    DecodedHypercall, EptDifference, EptMapping, HypervisorProcessor, IoIntercepts, MsrIntercepts,
-    VpRegisters, decoded_hypercall, ept_difference, ept_mapping, hypervisor_processor,
-    io_intercepts, msr_intercepts, vp_registers,
-};
-use crate::view::shape::{Hex, Keyed, Typed};
+use crate::types::Keyed;
 
 /// A partition of the Windows hypervisor, as it was when listed.
-#[pyclass(module = "ntoseye", frozen)]
+#[handle(record = HvPartition, key = id, impl)]
 pub struct HypervisorPartition {
     owner: Owner,
     info: HvPartition,
@@ -34,45 +34,8 @@ impl HypervisorPartition {
     }
 }
 
-#[pymethods]
+#[handle]
 impl HypervisorPartition {
-    /// The address of the hypervisor's partition object.
-    #[getter]
-    fn address(&self, py: Python<'_>) -> PyResult<u64> {
-        self.owner.check(py)?;
-        Ok(self.info.address)
-    }
-
-    /// The partition ID (the root partition's is 1).
-    #[getter]
-    fn id(&self, py: Python<'_>) -> PyResult<u64> {
-        self.owner.check(py)?;
-        Ok(self.info.id)
-    }
-
-    /// The parent partition's ID, or `None` for the root partition.
-    #[getter]
-    fn parent_id(&self, py: Python<'_>) -> PyResult<Option<u64>> {
-        self.owner.check(py)?;
-        Ok(self.info.parent)
-    }
-
-    /// The partition's privileges, as the TLFS `HV_PARTITION_PRIVILEGE_MASK`.
-    #[getter]
-    fn privileges(&self, py: Python<'_>) -> PyResult<u64> {
-        self.owner.check(py)?;
-        Ok(self.info.privileges)
-    }
-
-    /// The TLFS names of the privileges in `privileges`
-    /// (`["AccessVpRunTimeReg", ..., "CreatePartitions", ...]`). Set bits
-    /// that the TLFS lists as reserved have no name and are left out.
-    #[getter]
-    fn privilege_names(&self, py: Python<'_>) -> PyResult<Vec<&'static str>> {
-        self.owner.check(py)?;
-        Ok(privilege_names(self.info.privileges).0)
-    }
-
     /// The partition's virtual processors, by index.
     #[getter]
     fn virtual_processors(&self, py: Python<'_>) -> PyResult<Vec<VirtualProcessor>> {
@@ -89,26 +52,6 @@ impl HypervisorPartition {
             .collect())
     }
 
-    /// Return the partition as a plain `dict` (`address`, `id`, `parent_id`,
-    /// `privileges`, `privilege_names`, and `virtual_processors`, a list of their dicts).
-    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        self.owner.check(py)?;
-        let dict = PyDict::new(py);
-        dict.set_item("address", self.info.address)?;
-        dict.set_item("id", self.info.id)?;
-        dict.set_item("parent_id", self.info.parent)?;
-        dict.set_item("privileges", self.info.privileges)?;
-        dict.set_item("privilege_names", privilege_names(self.info.privileges).0)?;
-        let vps = self
-            .info
-            .virtual_processors
-            .iter()
-            .map(|vp| vp_dict(py, vp))
-            .collect::<PyResult<Vec<_>>>()?;
-        dict.set_item("virtual_processors", vps)?;
-        Ok(PlainDict(dict))
-    }
-
     fn __repr__(&self) -> String {
         format!(
             "HypervisorPartition(id={:#x}, address={:#x}, virtual_processors={})",
@@ -120,7 +63,7 @@ impl HypervisorPartition {
 }
 
 /// A virtual processor of a Windows hypervisor partition.
-#[pyclass(module = "ntoseye", frozen)]
+#[handle(record = HvVirtualProcessor, key = address, impl)]
 pub struct VirtualProcessor {
     owner: Owner,
     /// The ID of the partition it belongs to.
@@ -128,82 +71,12 @@ pub struct VirtualProcessor {
     info: HvVirtualProcessor,
 }
 
-fn vtl_map<'py>(py: Python<'py>, vp: &HvVirtualProcessor) -> PyResult<Bound<'py, PyDict>> {
-    let map = PyDict::new(py);
-    for vtl in &vp.vtls {
-        map.set_item(vtl.level, vtl_dict(py, vtl)?)?;
-    }
-    Ok(map)
-}
-
-fn vtl_dict<'py>(py: Python<'py>, vtl: &HvVtl) -> PyResult<Bound<'py, PyDict>> {
-    let dict = PyDict::new(py);
-    dict.set_item("level", vtl.level)?;
-    dict.set_item("context", vtl.context)?;
-    dict.set_item("vmcs", vtl.vmcs)?;
-    dict.set_item("ept_pointer", vtl.state.map(|state| state.ept_pointer))?;
-    dict.set_item("rip", vtl.state.map(|state| state.rip))?;
-    dict.set_item("exit_reason", vtl.state.map(|state| state.exit_reason))?;
-    Ok(dict)
-}
-
-fn vp_dict<'py>(py: Python<'py>, vp: &HvVirtualProcessor) -> PyResult<Bound<'py, PyDict>> {
-    let dict = PyDict::new(py);
-    dict.set_item("index", vp.index)?;
-    dict.set_item("address", vp.address)?;
-    let processors = vp
-        .processors
-        .iter()
-        .map(|processor| view_dict(py, hypervisor_processor(processor)))
-        .collect::<PyResult<Vec<_>>>()?;
-    dict.set_item("processors", processors)?;
-    dict.set_item("vtl", vp.vtl)?;
-    dict.set_item("vtls", vtl_map(py, vp)?)?;
-    Ok(dict)
-}
-
-#[pymethods]
+#[handle]
 impl VirtualProcessor {
-    /// The VP index in its partition.
-    #[getter]
-    fn index(&self, py: Python<'_>) -> PyResult<u32> {
-        self.owner.check(py)?;
-        Ok(self.info.index)
-    }
-
-    /// The address of the hypervisor's VP object.
-    #[getter]
-    fn address(&self, py: Python<'_>) -> PyResult<u64> {
-        self.owner.check(py)?;
-        Ok(self.info.address)
-    }
-
-    /// The processors whose current VP this is (the one that runs it, or ran
-    /// it last).
-    #[getter]
-    fn processors<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<HypervisorProcessor>>> {
-        self.owner.check(py)?;
-        Typed::new(
-            py,
-            self.info
-                .processors
-                .iter()
-                .map(hypervisor_processor)
-                .collect(),
-        )
-    }
-
-    /// The VTL that the VP runs, or last ran, in.
-    #[getter]
-    fn vtl(&self, py: Python<'_>) -> PyResult<u8> {
-        self.owner.check(py)?;
-        Ok(self.info.vtl)
-    }
-
     /// Each VTL enabled on the VP, keyed by VTL (`{0: ..., 1: ...}` under
     /// VBS).
     #[getter]
-    fn vtls(&self, py: Python<'_>) -> PyResult<std::collections::BTreeMap<u8, HypervisorVtl>> {
+    fn vtls(&self, py: Python<'_>) -> PyResult<BTreeMap<u8, HypervisorVtl>> {
         self.owner.check(py)?;
         Ok(self
             .info
@@ -244,20 +117,7 @@ impl VirtualProcessor {
         let (Some(first), Some(second)) = mappings else {
             return Err(raise("an EPT is unreadable or not a 4-level walk"));
         };
-        Typed::new(
-            py,
-            differences(&first, &second)
-                .iter()
-                .map(ept_difference)
-                .collect(),
-        )
-    }
-
-    /// Return the VP as a plain `dict` (`index`, `address`, `processors`,
-    /// `vtl`, and `vtls`, a dict from each VTL to its dict).
-    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        self.owner.check(py)?;
-        Ok(PlainDict(vp_dict(py, &self.info)?))
+        Typed::new(py, differences(&first, &second))
     }
 
     /// The registers of VTL `vtl` of this VP, by default the VTL it runs
@@ -269,7 +129,7 @@ impl VirtualProcessor {
     /// are shared by a VP's VTLs and belong to the one it runs in; another
     /// VTL's are its eVMCS state alone, and `missing` says why. Reads the
     /// target now, so it must be halted. This feature is experimental.
-    #[pyo3(signature = (vtl=None))]
+    #[pyo3(signature = (*, vtl=None))]
     fn registers<'py>(
         &self,
         py: Python<'py>,
@@ -281,7 +141,7 @@ impl VirtualProcessor {
                 .vp_registers(self.partition, self.info.index, vtl)
                 .map_err(err)
         })?;
-        Typed::new(py, vp_registers(&found))
+        Typed::new(py, found)
     }
 
     fn __repr__(&self) -> String {
@@ -294,7 +154,7 @@ impl VirtualProcessor {
 
 /// One VTL of a virtual processor: the hypervisor's context for it and, when
 /// found, its eVMCS and the guest state saved there.
-#[pyclass(module = "ntoseye", frozen)]
+#[handle(record = HvVtl, key = context, impl)]
 pub struct HypervisorVtl {
     owner: Owner,
     info: HvVtl,
@@ -314,67 +174,15 @@ impl HypervisorVtl {
     }
 }
 
-#[pymethods]
+#[handle]
 impl HypervisorVtl {
-    /// The VTL (0 for NT, 1 for the secure kernel).
-    #[getter]
-    fn level(&self, py: Python<'_>) -> PyResult<u8> {
-        self.owner.check(py)?;
-        Ok(self.info.level)
-    }
-
-    /// The address of the hypervisor's context object for this VTL.
-    #[getter]
-    fn context(&self, py: Python<'_>) -> PyResult<u64> {
-        self.owner.check(py)?;
-        Ok(self.info.context)
-    }
-
-    /// The physical address of the VTL's eVMCS, or `None` when ntoseye did
-    /// not find where the context keeps it (no `hv-evmcs`).
-    #[getter]
-    fn vmcs(&self, py: Python<'_>) -> PyResult<Option<u64>> {
-        self.owner.check(py)?;
-        Ok(self.info.vmcs)
-    }
-
-    /// The VTL's EPT pointer, the root of its second-level address
-    /// translation, or `None` without the eVMCS.
-    #[getter]
-    fn ept_pointer(&self, py: Python<'_>) -> PyResult<Option<u64>> {
-        self.owner.check(py)?;
-        Ok(self.info.state.map(|state| state.ept_pointer))
-    }
-
-    /// The guest RIP where the VTL left off, or `None` without the eVMCS.
-    #[getter]
-    fn rip(&self, py: Python<'_>) -> PyResult<Option<u64>> {
-        self.owner.check(py)?;
-        Ok(self.info.state.map(|state| state.rip))
-    }
-
-    /// The basic reason (Intel SDM Appendix C) the VTL last left for the
-    /// hypervisor, or `None` without the eVMCS.
-    #[getter]
-    fn exit_reason(&self, py: Python<'_>) -> PyResult<Option<u32>> {
-        self.owner.check(py)?;
-        Ok(self.info.state.map(|state| state.exit_reason))
-    }
-
-    /// Return the VTL as a plain `dict` (`level`, `context`, `vmcs`,
-    /// `ept_pointer`, `rip`, `exit_reason`).
-    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        self.owner.check(py)?;
-        Ok(PlainDict(vtl_dict(py, &self.info)?))
-    }
-
     /// Read `size` bytes of the memory of this VTL's guest, as `!hvd` does:
     /// guest virtual memory through the VTL's page tables (its saved CR3),
     /// or with `physical=True` guest physical memory, both through the VTL's
     /// EPT. Raises `NtoseyeError` without the VTL's eVMCS state or when a
     /// page is not mapped, and for a virtual address unless the guest is in
     /// 4-level long-mode paging. The memory is read-only.
-    #[pyo3(signature = (address, size, physical = false))]
+    #[pyo3(signature = (address, size, *, physical = false))]
     fn read<'py>(
         &self,
         py: Python<'py>,
@@ -424,14 +232,14 @@ impl HypervisorVtl {
     /// when the first instruction is unreadable, without the VTL's eVMCS
     /// state, for real-mode or 16-bit code, and for a virtual address
     /// unless the guest is in 4-level long-mode paging.
-    #[pyo3(signature = (address, count, physical = false))]
+    #[pyo3(signature = (address, count, *, physical = false))]
     fn disassemble<'py>(
         &self,
         py: Python<'py>,
         address: u64,
         count: usize,
         physical: bool,
-    ) -> PyResult<Typed<'py, Vec<DisassembledInstruction>>> {
+    ) -> PyResult<Typed<'py, Vec<DisasmRow>>> {
         let Some(state) = self.info.state else {
             return Err(raise("this VTL has no eVMCS state"));
         };
@@ -445,21 +253,22 @@ impl HypervisorVtl {
         if let (true, Some(at)) = (code.rows.is_empty(), code.unreadable) {
             return Err(raise(format!("guest memory at {at:#x} is unreadable")));
         }
-        Typed::new(py, disasm_rows(&code.rows))
+        Typed::new(py, code.rows)
     }
 
     /// Every field of this VTL's eVMCS, read now, named as the TLFS names it
     /// (`guest_rip`, `msr_bitmap`, ...), as `!hvvmcs` shows them:
-    /// `fields.guest_rip` or `fields["guest_rip"]`. Raises `NtoseyeError`
-    /// without the VTL's eVMCS.
-    fn vmcs_fields<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Keyed<Hex>>> {
+    /// `fields["guest_rip"]`. Raises `NtoseyeError` without the VTL's eVMCS.
+    fn vmcs_fields<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Keyed<u64>, Hex>> {
         let vmcs = self.read_vmcs(py)?;
         Typed::new(
             py,
-            evmcs_fields::field_values(&vmcs)
-                .into_iter()
-                .map(|(name, _, _, value)| (name, value))
-                .collect(),
+            Keyed(
+                evmcs_fields::field_values(&vmcs)
+                    .into_iter()
+                    .map(|(name, _, _, value)| (name, value))
+                    .collect(),
+            ),
         )
     }
 
@@ -478,7 +287,7 @@ impl HypervisorVtl {
             })
             .map_err(err)
         })?;
-        Typed::new(py, msr_intercepts(&intercepts))
+        Typed::new(py, intercepts)
     }
 
     /// Which I/O instructions of this VTL exit, as `!hvvmcs -io` shows them:
@@ -493,7 +302,7 @@ impl HypervisorVtl {
             })
             .map_err(err)
         })?;
-        Typed::new(py, io_intercepts(&intercepts))
+        Typed::new(py, intercepts)
     }
 
     /// Translate a guest physical address through this VTL's EPT, as
@@ -512,7 +321,7 @@ impl HypervisorVtl {
             Ok(session.target.translate_guest_physical(&state, gpa))
         })?;
         match translation {
-            Some(EptTranslation::Mapped(info)) => Typed::new(py, ept_mapping(&info)).map(Some),
+            Some(EptTranslation::Mapped(info)) => Typed::new(py, info).map(Some),
             Some(EptTranslation::NotPresent { .. }) => Ok(None),
             None => Err(raise("the EPT is unreadable or not a 4-level walk")),
         }
@@ -534,49 +343,30 @@ impl HypervisorVtl {
 /// hypervisor handles (`cpu.hypercall_caller()`), found as `!hvcall` and a
 /// hypercall breakpoint's filter find it: the call as the caller made it,
 /// and the caller's memory, which a hypercall breakpoint's condition reads.
-#[pyclass(module = "ntoseye", frozen)]
+#[handle(
+    record = HypercallCallerInfo,
+    key = vp,
+    identity = HypercallCaller::identity,
+    impl
+)]
 pub struct HypercallCaller {
     owner: Owner,
-    info: Caller,
+    info: HypercallCallerInfo,
 }
 
 impl HypercallCaller {
-    pub fn new(owner: Owner, info: Caller) -> Self {
+    pub fn new(owner: Owner, info: HypercallCallerInfo) -> Self {
         Self { owner, info }
     }
+
+    /// The VP and VTL that made the call.
+    fn identity(&self) -> (u64, u32, u8) {
+        (self.info.partition, self.info.vp, self.info.vtl)
+    }
 }
 
-#[pymethods]
+#[handle]
 impl HypercallCaller {
-    /// The caller's partition ID (the root partition's is 1).
-    #[getter]
-    fn partition_id(&self, py: Python<'_>) -> PyResult<u64> {
-        self.owner.check(py)?;
-        Ok(self.info.partition)
-    }
-
-    /// Whether the caller is a VP of the root partition (Windows itself)
-    /// rather than of a guest partition.
-    #[getter]
-    fn root(&self, py: Python<'_>) -> PyResult<bool> {
-        self.owner.check(py)?;
-        Ok(self.info.root)
-    }
-
-    /// The caller's VP index in its partition.
-    #[getter]
-    fn vp_index(&self, py: Python<'_>) -> PyResult<u32> {
-        self.owner.check(py)?;
-        Ok(self.info.vp)
-    }
-
-    /// The VTL that made the call.
-    #[getter]
-    fn vtl(&self, py: Python<'_>) -> PyResult<u8> {
-        self.owner.check(py)?;
-        Ok(self.info.vtl)
-    }
-
     /// The caller's registers at its VMCALL by name (`rcx`, `rdx`, `r8`,
     /// `rip`, `cr3`, ...), as a hypercall breakpoint's condition sees them:
     /// RIP, RSP, flags, control and segment registers from the calling
@@ -584,17 +374,9 @@ impl HypercallCaller {
     /// recovered them. Empty when the state ntoseye found is an older
     /// exit's.
     #[getter]
-    fn registers(&self, py: Python<'_>) -> PyResult<std::collections::HashMap<String, u64>> {
+    fn registers(&self, py: Python<'_>) -> PyResult<HashMap<String, u64>> {
         self.owner.check(py)?;
         Ok(self.info.registers.clone())
-    }
-
-    /// The call with its input decoded, as `!hvcall` shows it, or `None`
-    /// when the caller's registers are not known.
-    #[getter]
-    fn hypercall<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Option<DecodedHypercall>>> {
-        self.owner.check(py)?;
-        Typed::new(py, self.info.input.call().map(decoded_hypercall))
     }
 
     /// Read `size` bytes of the caller's memory, as a hypercall
@@ -606,7 +388,7 @@ impl HypercallCaller {
     /// at the call is not known, when a page is not mapped, and for a
     /// virtual address unless the caller is in 4-level long-mode paging.
     /// The memory is read-only.
-    #[pyo3(signature = (address, size, physical = false))]
+    #[pyo3(signature = (address, size, *, physical = false))]
     fn read<'py>(
         &self,
         py: Python<'py>,
@@ -630,25 +412,6 @@ impl HypercallCaller {
                 .map_err(err)
         })?;
         Ok(PyBytes::new(py, &buf))
-    }
-
-    /// Return the caller as a plain `dict` (`partition_id`, `root`,
-    /// `vp_index`, `vtl`, `registers`, and `hypercall`, the call's dict or
-    /// `None`).
-    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        self.owner.check(py)?;
-        let dict = PyDict::new(py);
-        dict.set_item("partition_id", self.info.partition)?;
-        dict.set_item("root", self.info.root)?;
-        dict.set_item("vp_index", self.info.vp)?;
-        dict.set_item("vtl", self.info.vtl)?;
-        dict.set_item("registers", self.info.registers.clone())?;
-        let hypercall = match self.info.input.call() {
-            Some(call) => Some(view_dict(py, decoded_hypercall(call))?),
-            None => None,
-        };
-        dict.set_item("hypercall", hypercall)?;
-        Ok(PlainDict(dict))
     }
 
     fn __repr__(&self) -> String {

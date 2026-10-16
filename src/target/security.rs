@@ -2,13 +2,14 @@
 
 use std::collections::BTreeMap;
 
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
 use crate::layout::{StructRef, TypeInfo};
+use crate::memory::MemoryOps;
 use crate::symbols::glob_matches;
 use crate::target::{DiagnosticValue, Target, fast_ref_address};
 use crate::types::VirtAddr;
+use ntoseye_macros::record;
 
 const MAX_SESSION_PROCESSES: usize = 4096;
 
@@ -20,114 +21,137 @@ const SE_DACL_PRESENT: u16 = 0x0004;
 const SE_SACL_PRESENT: u16 = 0x0010;
 const SE_SELF_RELATIVE: u16 = 0x8000;
 
-/// A decoded SID.  `sid` is the canonical string form used by WinDbg, and
-/// `well_known` is populated for the built-in names recognized by this tool.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SidDetail {
+/// A decoded SID (`!sid`).
+#[record]
+#[derive(PartialEq, Eq)]
+pub struct Sid {
     pub address: VirtAddr,
+    /// The canonical string form (`S-1-5-18`).
+    #[record(rename = "text")]
     pub sid: String,
     pub revision: u8,
+    /// The identifier authority.
     pub authority: u64,
     pub sub_authorities: Vec<u32>,
+    /// The built-in name, if the SID is a well-known SID.
     pub well_known: Option<String>,
 }
 
-/// One ACE in an ACL.  The mask and SID are independent reads so a damaged
-/// ACE does not hide the type and inheritance flags that were decoded.
-#[derive(Debug, Clone)]
-pub struct AceDetail {
+/// An ACE in an ACL. ntoseye reads the mask and the SID separately, so a
+/// damaged body does not hide the type and flags of the header.
+#[record]
+pub struct Ace {
+    /// The position of the ACE in the ACL.
     pub index: usize,
+    #[record(rename = "type")]
     pub ace_type: u8,
     pub type_name: String,
+    /// The inheritance flags.
+    #[record(hex)]
     pub flags: u8,
     pub flag_names: String,
-    /// The access mask read from the ACE body; unavailable when that body
-    /// cannot be read independently of its header.
+    /// The access mask; unavailable when the ACE body cannot be read.
+    #[record(hex)]
     pub access_mask: DiagnosticValue<u32>,
-    /// The SID decoded from the ACE body; unavailable for a truncated or
-    /// unreadable SID while the ACE header remains usable.
-    pub sid: DiagnosticValue<SidDetail>,
+    /// The SID in the ACE body; unavailable for a truncated or unreadable SID.
+    pub sid: DiagnosticValue<Sid>,
 }
 
-/// A decoded ACL header and its bounded ACE list.
-#[derive(Debug, Clone)]
-pub struct AclDetail {
+/// A decoded ACL header and its ACEs (`!acl`).
+#[record]
+pub struct Acl {
     pub address: VirtAddr,
     pub revision: u8,
+    /// The size in bytes.
     pub size: u16,
     pub ace_count: u16,
-    pub aces: Vec<AceDetail>,
+    /// Whether `ace_count` is more than the decoder limit, in which case
+    /// `aces` contains only the first ACEs.
     pub bounded: bool,
+    /// Whether the decoder does not recognize `revision`, in which case
+    /// `aces` is empty.
     pub unknown_revision: bool,
+    pub aces: Vec<Ace>,
 }
 
-/// A decoded absolute or self-relative security descriptor.
-#[derive(Debug, Clone)]
-pub struct SecurityDescriptorDetail {
+/// A decoded absolute or self-relative security descriptor (`!sd`).
+#[record]
+pub struct SecurityDescriptor {
     pub address: VirtAddr,
-    /// The descriptor revision; unavailable when the Revision field cannot be
-    /// read from the descriptor image.
     pub revision: DiagnosticValue<u8>,
-    /// Raw SECURITY_DESCRIPTOR.Control; unavailable only when that field read
-    /// fails, independently of owner/group and ACL reads.
+    /// `SECURITY_DESCRIPTOR.Control`.
+    #[record(hex)]
     pub control: DiagnosticValue<u16>,
-    /// Names corresponding to the raw control bits; unavailable with Control.
+    /// The names of the control bits that are set.
     pub control_names: DiagnosticValue<String>,
-    /// Whether Control has SE_SELF_RELATIVE; unavailable with Control.
+    /// Whether `control` has `SE_SELF_RELATIVE`.
     pub self_relative: DiagnosticValue<bool>,
-    /// Owner SID, or Available(None) for a null owner pointer.
-    pub owner: DiagnosticValue<Option<SidDetail>>,
-    /// Group SID, or Available(None) for a null group pointer.
-    pub group: DiagnosticValue<Option<SidDetail>>,
-    /// DACL, or Available(None) when it is absent or a null unrestricted ACL.
-    pub dacl: DiagnosticValue<Option<AclDetail>>,
-    /// SACL, or Available(None) when it is absent or a null unrestricted ACL.
-    pub sacl: DiagnosticValue<Option<AclDetail>>,
+    /// The owner SID. Its value is `None` for a null owner.
+    pub owner: DiagnosticValue<Option<Sid>>,
+    /// The group SID. Its value is `None` for a null group.
+    pub group: DiagnosticValue<Option<Sid>>,
+    /// Its value is `None` if the DACL is absent or is a null (unrestricted) ACL.
+    pub dacl: DiagnosticValue<Option<Acl>>,
+    /// Its value is `None` if the SACL is absent or is a null ACL.
+    pub sacl: DiagnosticValue<Option<Acl>>,
+    /// Whether the revision is not 1.
     pub unsupported_revision: bool,
 }
 
-/// Security metadata read from an object header and its fast-reference.
-#[derive(Debug, Clone)]
-pub struct ObjectSecurityDetail {
+/// The security descriptor of an object, from its header (`!objsd`).
+#[record]
+pub struct ObjectSecurity {
     pub object: VirtAddr,
+    /// The `_OBJECT_HEADER`.
     pub header: VirtAddr,
+    /// `SecurityDescriptor`, a fast reference whose low bits hold a
+    /// reference count.
+    #[record(hex)]
     pub fast_reference: u64,
+    /// `fast_reference` without its count bits.
     pub descriptor_address: VirtAddr,
-    pub descriptor: Option<SecurityDescriptorDetail>,
+    /// `None` if the object has no descriptor.
+    pub descriptor: Option<SecurityDescriptor>,
 }
 
-/// One session group returned by [`Target::sessions`].
-#[derive(Debug, Clone)]
-pub struct SessionDetail {
+/// A session and its processes.
+#[record]
+pub struct Session {
+    /// `None` for processes whose session is unknown.
     pub id: Option<u64>,
+    /// The processes in the session.
     pub processes: Vec<ProcessInfo>,
 }
 
-/// Sessions and their processes.  `selected_session` is `None` when all
-/// sessions were requested (or when the selected process has no known ID).
-#[derive(Debug, Clone)]
-pub struct SessionsDetail {
+/// Sessions and their processes (`!session`).
+#[record]
+pub struct Sessions {
+    /// The requested session. `None` if you requested all sessions, or if the
+    /// selected process has no known ID.
     pub selected_session: Option<u64>,
-    pub sessions: Vec<SessionDetail>,
+    pub sessions: Vec<Session>,
     pub process_count: usize,
+    /// Whether the process walk stopped at its limit.
     pub truncated: bool,
 }
 
-/// A process row carrying the session ID used by `!sprocess -f` output.
-#[derive(Debug, Clone)]
-pub struct SessionProcessDetail {
+/// A process and its session (`!sprocess`).
+#[record]
+pub struct SessionProcess {
     pub process: ProcessInfo,
+    /// `None` if the session is unknown.
     pub session: Option<u64>,
 }
 
-/// Processes selected by a session and optional image glob.
-#[derive(Debug, Clone)]
-pub struct SessionProcessesDetail {
+/// The processes of a session, filtered by an image glob (`!sprocess`).
+#[record]
+pub struct SessionProcesses {
+    /// The selected session. `None` if you selected all sessions, or if the
+    /// session of the process is unknown.
     pub selected_session: Option<u64>,
-    pub detailed: bool,
-    pub image_glob: Option<String>,
-    pub processes: Vec<SessionProcessDetail>,
+    pub processes: Vec<SessionProcess>,
     pub process_count: usize,
+    /// Whether the process walk stopped at its limit.
     pub truncated: bool,
 }
 
@@ -183,8 +207,7 @@ fn read_sid_bounded<M: MemoryOps<VirtAddr>>(
     memory: &M,
     address: VirtAddr,
     max_len: usize,
-    annotate_well_known: bool,
-) -> Result<SidDetail> {
+) -> Result<Sid> {
     if max_len < 8 {
         return Err(Error::DebugInfo(format!(
             "SID at {:#x} has only {max_len} bytes available",
@@ -219,10 +242,8 @@ fn read_sid_bounded<M: MemoryOps<VirtAddr>>(
         sid.push('-');
         sid.push_str(&value.to_string());
     }
-    let well_known = annotate_well_known
-        .then(|| sid_name(&sid).map(str::to_string))
-        .flatten();
-    Ok(SidDetail {
+    let well_known = sid_name(&sid).map(str::to_string);
+    Ok(Sid {
         address,
         sid,
         revision,
@@ -290,11 +311,7 @@ fn ace_minimum_size(kind: u8) -> usize {
     if kind == 4 || object_ace(kind) { 12 } else { 8 }
 }
 
-fn decode_acl<M: MemoryOps<VirtAddr>>(
-    memory: &M,
-    address: VirtAddr,
-    annotate_well_known: bool,
-) -> Result<AclDetail> {
+fn decode_acl<M: MemoryOps<VirtAddr>>(memory: &M, address: VirtAddr) -> Result<Acl> {
     let mut header = [0u8; 8];
     memory.read_bytes(address, &mut header)?;
     let revision = header[0];
@@ -304,7 +321,7 @@ fn decode_acl<M: MemoryOps<VirtAddr>>(
         return Err(Error::DebugInfo(format!("invalid ACL size {size:#x}")));
     }
     if !matches!(revision, 2 | 4) {
-        return Ok(AclDetail {
+        return Ok(Acl {
             address,
             revision,
             size,
@@ -328,7 +345,7 @@ fn decode_acl<M: MemoryOps<VirtAddr>>(
         let mut ace_header = [0u8; 4];
         if let Err(error) = memory.read_bytes(ace_address, &mut ace_header) {
             let error = error.to_string();
-            aces.push(AceDetail {
+            aces.push(Ace {
                 index,
                 ace_type: 0xff,
                 type_name: ace_type_name(0xff).to_string(),
@@ -359,7 +376,7 @@ fn decode_acl<M: MemoryOps<VirtAddr>>(
             let object_flags = match memory.read::<u32>(ace_address + 8u64) {
                 Ok(value) => value,
                 Err(error) => {
-                    aces.push(AceDetail {
+                    aces.push(Ace {
                         index,
                         ace_type: kind,
                         type_name: ace_type_name(kind).to_string(),
@@ -383,14 +400,13 @@ fn decode_acl<M: MemoryOps<VirtAddr>>(
                 memory,
                 ace_address + sid_offset as u64,
                 ace_size - sid_offset,
-                annotate_well_known,
             ))
         } else {
             DiagnosticValue::unavailable(format!(
                 "ACE SID offset {sid_offset:#x} exceeds ACE size {ace_size:#x}"
             ))
         };
-        aces.push(AceDetail {
+        aces.push(Ace {
             index,
             ace_type: kind,
             type_name: ace_type_name(kind).to_string(),
@@ -401,7 +417,7 @@ fn decode_acl<M: MemoryOps<VirtAddr>>(
         });
         offset += ace_size;
     }
-    Ok(AclDetail {
+    Ok(Acl {
         address,
         revision,
         size,
@@ -477,20 +493,15 @@ fn sid_component<M: MemoryOps<VirtAddr>>(
     raw: Result<u64>,
     base: VirtAddr,
     self_relative: bool,
-    annotate_well_known: bool,
-) -> DiagnosticValue<Option<SidDetail>> {
+) -> DiagnosticValue<Option<Sid>> {
     match raw {
         Err(error) => DiagnosticValue::unavailable(error.to_string()),
         Ok(raw) => match descriptor_component(raw, base, self_relative) {
             None => DiagnosticValue::Available(None),
-            Some(address) => {
-                match read_sid_bounded(memory, address, usize::MAX, annotate_well_known) {
-                    Ok(sid) => DiagnosticValue::Available(Some(sid)),
-                    Err(error) => {
-                        DiagnosticValue::unavailable(format!("{:#x}: {error}", address.0))
-                    }
-                }
-            }
+            Some(address) => match read_sid_bounded(memory, address, usize::MAX) {
+                Ok(sid) => DiagnosticValue::Available(Some(sid)),
+                Err(error) => DiagnosticValue::unavailable(format!("{:#x}: {error}", address.0)),
+            },
         },
     }
 }
@@ -500,13 +511,12 @@ fn acl_component<M: MemoryOps<VirtAddr>>(
     raw: Result<u64>,
     base: VirtAddr,
     self_relative: bool,
-    annotate_well_known: bool,
-) -> DiagnosticValue<Option<AclDetail>> {
+) -> DiagnosticValue<Option<Acl>> {
     match raw {
         Err(error) => DiagnosticValue::unavailable(error.to_string()),
         Ok(raw) => match descriptor_component(raw, base, self_relative) {
             None => DiagnosticValue::Available(None),
-            Some(address) => match decode_acl(memory, address, annotate_well_known) {
+            Some(address) => match decode_acl(memory, address) {
                 Ok(acl) => DiagnosticValue::Available(Some(acl)),
                 Err(error) => DiagnosticValue::unavailable(format!("{:#x}: {error}", address.0)),
             },
@@ -519,8 +529,7 @@ impl Target {
         &self,
         memory: &M,
         address: VirtAddr,
-        annotate_well_known: bool,
-    ) -> Result<SecurityDescriptorDetail> {
+    ) -> Result<SecurityDescriptor> {
         let types = self.guest()?.ntoskrnl.types_in(self.kernel_dtb());
         let descriptor = types.struct_at("_SECURITY_DESCRIPTOR", address)?;
         let revision = DiagnosticValue::from_result(descriptor.read_field::<u8>("Revision"));
@@ -555,7 +564,6 @@ impl Target {
             ),
             address,
             self_relative_value,
-            annotate_well_known,
         );
         let group = sid_component(
             memory,
@@ -567,7 +575,6 @@ impl Target {
             ),
             address,
             self_relative_value,
-            annotate_well_known,
         );
         let dacl = match &control {
             DiagnosticValue::Available(value) if value & SE_DACL_PRESENT == 0 => {
@@ -583,7 +590,6 @@ impl Target {
                 ),
                 address,
                 self_relative_value,
-                annotate_well_known,
             ),
             DiagnosticValue::Unavailable(error) => {
                 DiagnosticValue::unavailable(format!("Control could not be read: {error}"))
@@ -603,7 +609,6 @@ impl Target {
                 ),
                 address,
                 self_relative_value,
-                annotate_well_known,
             ),
             DiagnosticValue::Unavailable(error) => {
                 DiagnosticValue::unavailable(format!("Control could not be read: {error}"))
@@ -611,7 +616,7 @@ impl Target {
         };
         let unsupported_revision =
             matches!(&revision, DiagnosticValue::Available(value) if *value != 1);
-        Ok(SecurityDescriptorDetail {
+        Ok(SecurityDescriptor {
             address,
             revision,
             control,
@@ -628,37 +633,32 @@ impl Target {
     /// Decode an absolute or self-relative `SECURITY_DESCRIPTOR`.  Revision
     /// and control reads are independent diagnostics; owner/group failures are
     /// reported in their own fields, while `dacl`/`sacl` report ACL-header or
-    /// ACE failures without discarding the other descriptor components.  The
-    /// `annotate_well_known` flag controls names on all nested SIDs.
-    pub fn inspect_security_descriptor(
-        &self,
-        address: VirtAddr,
-        annotate_well_known: bool,
-    ) -> Result<SecurityDescriptorDetail> {
+    /// ACE failures without discarding the other descriptor components.
+    pub fn inspect_security_descriptor(&self, address: VirtAddr) -> Result<SecurityDescriptor> {
         let memory = self.context_memory();
-        self.inspect_security_descriptor_in(&memory, address, annotate_well_known)
+        self.inspect_security_descriptor_in(&memory, address)
     }
 
     /// Decode an ACL header and up to 1024 ACEs at `address`.  A malformed ACL
     /// header or ACE size is fatal; each ACE's access mask and SID are
     /// independent diagnostics when their individual reads are unavailable.
-    pub fn inspect_acl(&self, address: VirtAddr) -> Result<AclDetail> {
+    pub fn inspect_acl(&self, address: VirtAddr) -> Result<Acl> {
         let memory = self.context_memory();
-        decode_acl(&memory, address, false)
+        decode_acl(&memory, address)
     }
 
     /// Decode a SID, including its revision, identifier authority,
     /// sub-authorities, canonical string, and recognized well-known name.
-    pub fn inspect_sid(&self, address: VirtAddr) -> Result<SidDetail> {
+    pub fn inspect_sid(&self, address: VirtAddr) -> Result<Sid> {
         let memory = self.context_memory();
-        read_sid_bounded(&memory, address, usize::MAX, true)
+        read_sid_bounded(&memory, address, usize::MAX)
     }
 
     /// Read `_OBJECT_HEADER.SecurityDescriptor`, mask its fast-reference low
     /// bits, and decode the referenced descriptor in the kernel address space.
     /// A null fast-reference yields `descriptor: None`; header and fast-ref
     /// reads remain fatal because no meaningful object-security detail exists.
-    pub fn inspect_object_security(&self, object: VirtAddr) -> Result<ObjectSecurityDetail> {
+    pub fn inspect_object_security(&self, object: VirtAddr) -> Result<ObjectSecurity> {
         let header = self.inspect_object_header(object)?;
         let object_header = self
             .guest()?
@@ -671,9 +671,9 @@ impl Target {
             None
         } else {
             let memory = self.kernel_address_space();
-            Some(self.inspect_security_descriptor_in(&memory, descriptor_address, true)?)
+            Some(self.inspect_security_descriptor_in(&memory, descriptor_address)?)
         };
-        Ok(ObjectSecurityDetail {
+        Ok(ObjectSecurity {
             object,
             header: header.header,
             fast_reference,
@@ -716,7 +716,7 @@ impl Target {
             .into_iter()
             .take(MAX_SESSION_PROCESSES)
             .map(|process| {
-                let session = self.process_session_id(process.eprocess_va).map(u64::from);
+                let session = self.process_session_id(process.eprocess).map(u64::from);
                 (process, session)
             })
             .collect();
@@ -728,7 +728,7 @@ impl Target {
             .and_then(|current| {
                 processes
                     .iter()
-                    .find(|(process, _)| process.eprocess_va == current.eprocess_va)
+                    .find(|(process, _)| process.eprocess == current.eprocess)
                     .and_then(|(_, session)| *session)
             })
             .or_else(|| {
@@ -738,7 +738,7 @@ impl Target {
                     .and_then(|eprocess| {
                         processes
                             .iter()
-                            .find(|(process, _)| process.eprocess_va == eprocess)
+                            .find(|(process, _)| process.eprocess == eprocess)
                             .and_then(|(_, session)| *session)
                     })
             })
@@ -767,7 +767,7 @@ impl Target {
     /// `Some(-4)` selects all sessions, and non-negative values select an ID;
     /// unknown session IDs remain valid empty results.  Session IDs first use
     /// `_EPROCESS.Session`/`_MM_SESSION_SPACE` and fall back to `_TOKEN.SessionId`.
-    pub fn sessions(&self, session: Option<i64>) -> Result<SessionsDetail> {
+    pub fn sessions(&self, session: Option<i64>) -> Result<Sessions> {
         let (processes, truncated) = self.collect_sessions()?;
         let selected_session = match session {
             Some(selector) => self.resolve_session_selector(selector, &processes)?,
@@ -779,12 +779,12 @@ impl Target {
                 groups.entry(process_session).or_default().push(process);
             }
         }
-        let sessions: Vec<SessionDetail> = groups
+        let sessions: Vec<Session> = groups
             .into_iter()
-            .map(|(id, processes)| SessionDetail { id, processes })
+            .map(|(id, processes)| Session { id, processes })
             .collect();
         let process_count = sessions.iter().map(|session| session.processes.len()).sum();
-        Ok(SessionsDetail {
+        Ok(Sessions {
             selected_session,
             sessions,
             process_count,
@@ -793,37 +793,30 @@ impl Target {
     }
 
     /// Enumerate up to 4096 processes, selecting the current session by
-    /// default, and apply the optional case-insensitive image glob.  A
-    /// non-zero `detailed` flag is represented by the returned boolean; it
-    /// does not alter which processes are selected.  `Some(-1)`/`Some(-2)`
+    /// default, and apply the optional case-insensitive image glob.
+    /// `Some(-1)`/`Some(-2)`
     /// selects the current session and `Some(-4)` selects all sessions.
     pub fn session_processes(
         &self,
         session: Option<i64>,
-        detailed: bool,
         image_glob: Option<&str>,
-    ) -> Result<SessionProcessesDetail> {
+    ) -> Result<SessionProcesses> {
         let (processes, truncated) = self.collect_sessions()?;
         let selected_session = match session {
             Some(selector) => self.resolve_session_selector(selector, &processes)?,
             None => self.current_session_id(&processes),
         };
-        let image_glob = image_glob.map(str::to_string);
         let processes: Vec<_> = processes
             .into_iter()
             .filter(|(process, process_session)| {
                 selected_session.is_none_or(|id| *process_session == Some(id))
-                    && image_glob
-                        .as_deref()
-                        .is_none_or(|pattern| glob_matches(pattern, &process.name, true))
+                    && image_glob.is_none_or(|pattern| glob_matches(pattern, &process.name, true))
             })
-            .map(|(process, session)| SessionProcessDetail { process, session })
+            .map(|(process, session)| SessionProcess { process, session })
             .collect();
         let process_count = processes.len();
-        Ok(SessionProcessesDetail {
+        Ok(SessionProcesses {
             selected_session,
-            detailed,
-            image_glob,
             processes,
             process_count,
             truncated,
@@ -834,8 +827,8 @@ impl Target {
 #[cfg(test)]
 mod tests {
     use super::{DiagnosticValue, decode_acl, read_sid_bounded};
-    use crate::backend::MemoryOps;
     use crate::error::{Error, Result};
+    use crate::memory::MemoryOps;
     use crate::session::session_over_memory;
     use crate::types::VirtAddr;
 
@@ -864,14 +857,12 @@ mod tests {
     #[test]
     fn decodes_sid_authority_sub_authorities_and_well_known_name() {
         let memory = TestMemory(vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0]);
-        let sid = read_sid_bounded(&memory, VirtAddr(0), usize::MAX, true).unwrap();
+        let sid = read_sid_bounded(&memory, VirtAddr(0), usize::MAX).unwrap();
         assert_eq!(sid.sid, "S-1-5-18");
         assert_eq!(sid.revision, 1);
         assert_eq!(sid.authority, 5);
         assert_eq!(sid.sub_authorities, vec![18]);
         assert_eq!(sid.well_known.as_deref(), Some("LOCAL SYSTEM"));
-        let unannotated = read_sid_bounded(&memory, VirtAddr(0), usize::MAX, false).unwrap();
-        assert_eq!(unannotated.well_known, None);
     }
 
     #[test]
@@ -893,7 +884,7 @@ mod tests {
         bytes[8..28].copy_from_slice(&[
             0, 0x10, 20, 0, 0x34, 0x12, 0, 0, 1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
         ]);
-        let acl = decode_acl(&TestMemory(bytes), VirtAddr(0), true).unwrap();
+        let acl = decode_acl(&TestMemory(bytes), VirtAddr(0)).unwrap();
         assert_eq!(acl.revision, 2);
         assert_eq!(acl.ace_count, 1);
         assert!(!acl.bounded);
@@ -912,30 +903,48 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A token SID and its `SE_GROUP_*` attributes.
+#[record]
+#[derive(PartialEq, Eq)]
 pub struct SidAndAttributes {
     pub sid: String,
+    #[record(hex)]
     pub attributes: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrivilegeInfo {
+/// A token privilege and its `SE_PRIVILEGE_*` attributes.
+#[record]
+#[derive(PartialEq, Eq)]
+pub struct TokenPrivilege {
+    #[record(hex)]
     pub luid: u64,
+    #[record(hex)]
     pub attributes: u32,
 }
 
-#[derive(Debug, Clone)]
-pub struct TokenDetail {
+/// The primary token of a process (`!token`).
+#[record]
+pub struct Token {
+    /// The process record.
     pub process: ProcessInfo,
+    /// The `_TOKEN`.
     pub token: VirtAddr,
+    #[record(hex)]
     pub token_id: DiagnosticValue<u64>,
+    /// The LUID of the logon session.
+    #[record(hex)]
     pub authentication_id: DiagnosticValue<u64>,
+    /// `TOKEN_TYPE`: 1 is primary, 2 is impersonation.
     pub token_type: DiagnosticValue<u32>,
+    /// `SECURITY_IMPERSONATION_LEVEL`.
     pub impersonation_level: DiagnosticValue<u32>,
+    /// `TokenFlags`.
+    #[record(hex)]
     pub flags: DiagnosticValue<u32>,
+    /// Its value is `None` if the token does not name a user.
     pub user: DiagnosticValue<Option<SidAndAttributes>>,
     pub groups: DiagnosticValue<Vec<SidAndAttributes>>,
-    pub privileges: DiagnosticValue<Vec<PrivilegeInfo>>,
+    pub privileges: DiagnosticValue<Vec<TokenPrivilege>>,
 }
 
 const SE_PRIVILEGE_ENABLED_BY_DEFAULT: u32 = 0x1;
@@ -945,7 +954,7 @@ fn decode_token_privilege_bitmaps(
     present: u64,
     enabled: u64,
     enabled_by_default: u64,
-) -> Vec<PrivilegeInfo> {
+) -> Vec<TokenPrivilege> {
     let mut remaining = present;
     let mut privileges = Vec::with_capacity(present.count_ones() as usize);
     while remaining != 0 {
@@ -958,7 +967,7 @@ fn decode_token_privilege_bitmaps(
         if enabled & mask != 0 {
             attributes |= SE_PRIVILEGE_ENABLED;
         }
-        privileges.push(PrivilegeInfo {
+        privileges.push(TokenPrivilege {
             luid: u64::from(bit),
             attributes,
         });
@@ -979,7 +988,7 @@ impl Target {
             return Err(Error::DebugInfo("SID pointer is null".to_string()));
         }
         let memory = self.context_memory();
-        read_sid_bounded(&memory, address, usize::MAX, false).map(|sid| sid.sid)
+        read_sid_bounded(&memory, address, usize::MAX).map(|sid| sid.sid)
     }
 
     fn read_token_id_field(
@@ -994,13 +1003,12 @@ impl Target {
 
     /// Decode the selected/current process primary token.  Independently
     /// unavailable optional fields retain their exact layout/read error.
-    pub fn inspect_process_token(&self) -> Result<TokenDetail> {
+    pub fn inspect_process_token(&self) -> Result<Token> {
         const MAX_TOKEN_ITEMS: usize = 256;
         let process = self.selected_process_info()?;
         let types = self.guest()?.ntoskrnl.types_in(process.dtb);
         let eprocess_layout = types.layout("_EPROCESS")?;
-        let raw_token: u64 =
-            self.read_layout_field(&eprocess_layout, process.eprocess_va, "Token")?;
+        let raw_token: u64 = self.read_layout_field(&eprocess_layout, process.eprocess, "Token")?;
         let token = fast_ref_address(raw_token);
         if token.is_zero() {
             return Err(Error::DebugInfo("_EPROCESS.Token is null".to_string()));
@@ -1070,7 +1078,7 @@ impl Target {
             ),
         };
 
-        let privileges = DiagnosticValue::from_result((|| -> Result<Vec<PrivilegeInfo>> {
+        let privileges = DiagnosticValue::from_result((|| -> Result<Vec<TokenPrivilege>> {
             let privileges = token + token_layout.field_offset("Privileges")?;
             let privileges_layout = types.layout("_SEP_TOKEN_PRIVILEGES")?;
             let present: u64 = self.read_layout_field(&privileges_layout, privileges, "Present")?;
@@ -1084,7 +1092,7 @@ impl Target {
             ))
         })());
 
-        Ok(TokenDetail {
+        Ok(Token {
             process,
             token,
             token_id,
@@ -1110,11 +1118,11 @@ mod moved_token_privilege_tests {
         assert_eq!(
             privileges,
             vec![
-                super::PrivilegeInfo {
+                super::TokenPrivilege {
                     luid: 2,
                     attributes: super::SE_PRIVILEGE_ENABLED_BY_DEFAULT,
                 },
-                super::PrivilegeInfo {
+                super::TokenPrivilege {
                     luid: 20,
                     attributes: super::SE_PRIVILEGE_ENABLED_BY_DEFAULT
                         | super::SE_PRIVILEGE_ENABLED,

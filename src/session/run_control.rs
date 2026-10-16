@@ -1,9 +1,6 @@
 //! Resuming the target and breaking in: the resume prologue, exception
 //! dispositions, interrupts, and edits made with the target briefly halted.
 
-use std::sync::atomic::AtomicBool;
-use std::time::Duration;
-
 use crate::dbg_backend::{ContinueDisposition, DebugCapability, StopEvent};
 use crate::error::{Error, Result};
 use crate::session::{ContinueOutcome, STATUS_BREAKPOINT, Session, StopResolution};
@@ -74,59 +71,6 @@ impl Session {
             })
     }
 
-    /// [`Self::interrupt`] keeping the classification: a breakpoint hit that
-    /// races the break-in is reported as that breakpoint (with its action and
-    /// condition result) rather than as a bare `STATUS_BREAKPOINT` stop. A
-    /// target that is not running is not broken into (KD would wait out its
-    /// break-in timeout): a stop parked by [`Self::with_target_halted`] or
-    /// [`Self::service_idle`] is surfaced, and a halted target reports the
-    /// stop it is halted at ([`Self::current_stop`]), or its pc.
-    pub fn interrupt_outcome(&mut self) -> Result<ContinueOutcome> {
-        if let Some(stop) = self.stop_without_breakin() {
-            return Ok(stop);
-        }
-        self.interrupt_classified()
-            .map(|(resolution, _)| self.continue_outcome_from_resolution(resolution))
-    }
-
-    /// [`Self::interrupt_outcome`] for a host that asked for the break-in and
-    /// reports it as such: the break-in the interrupt itself caused comes back
-    /// as a `Stopped` without an exception code. A parked stop, or a pending
-    /// guest exception (a real `int 3`) the break-in collected, keeps its code.
-    pub fn interrupt_requested(&mut self) -> Result<ContinueOutcome> {
-        if let Some(stop) = self.stop_without_breakin() {
-            return Ok(stop);
-        }
-        let (resolution, own_breakin_candidate) = self.interrupt_classified()?;
-        let own_breakin = self.is_own_breakin(&resolution, own_breakin_candidate);
-        let mut outcome = self.continue_outcome_from_resolution(resolution);
-        if own_breakin
-            && let ContinueOutcome::Stopped {
-                exception_code,
-                first_chance,
-                exception_address,
-                ..
-            } = &mut outcome
-        {
-            *exception_code = None;
-            *first_chance = None;
-            *exception_address = None;
-        }
-        self.note_stop(&outcome);
-        Ok(outcome)
-    }
-
-    /// The stop an interrupt reports without breaking in: a parked stop, or
-    /// the one a halted target is at. `None` when the target must be broken
-    /// into.
-    fn stop_without_breakin(&mut self) -> Option<ContinueOutcome> {
-        if let Some(parked) = self.parked_stop.take() {
-            return Some(parked);
-        }
-        (!self.backend.is_running() && !self.backend.has_pending_stop())
-            .then(|| self.halted_outcome())
-    }
-
     /// The stop a halted target is at, or a bare halt at its pc when it has
     /// not stopped since it last moved (attached halted).
     pub fn halted_outcome(&mut self) -> ContinueOutcome {
@@ -143,7 +87,7 @@ impl Session {
     /// `stop_is_assisted_refresh_breakin`: a STATUS_BREAKPOINT that classified
     /// as an ordinary stop and is not on one of our sites. A stop the backend
     /// already had pending (`candidate` false) wins even with the same status.
-    fn is_own_breakin(&self, resolution: &StopResolution, candidate: bool) -> bool {
+    pub fn is_own_breakin(&self, resolution: &StopResolution, candidate: bool) -> bool {
         let StopResolution::Stopped { event, .. } = resolution else {
             return false;
         };
@@ -159,7 +103,7 @@ impl Session {
     /// interrupts nor resumes the backend. If it is running, this method breaks
     /// in, runs `edit`, and resumes afterward unless the interrupt exposed a
     /// genuine pending stop. Such a stop is left halted and parked for the next
-    /// [`Self::wait_for_stop_bounded`], while an edit error still resumes an
+    /// wait ([`Self::run`]), while an edit error still resumes an
     /// otherwise ordinary break-in before returning the error. This primitive is
     /// shared by hosts that edit breakpoint state; it emits no notifications.
     pub fn with_target_halted<T>(
@@ -194,10 +138,9 @@ impl Session {
     /// Resume the VM. If sitting on one of our breakpoints, step past it first
     /// (otherwise the `int3` at RIP re-fires immediately), re-arm enabled
     /// breakpoints, then continue and drop the now-stale inspection caches.
-    /// The canonical resume prologue, shared by the REPL and the SDK.
-    ///
-    /// Does not poll for Ctrl+C or handle KD target-reload/reconnect the way the
-    /// REPL's continue loop does; those remain REPL concerns.
+    /// It waits for nothing: a run that ends on a stop goes through
+    /// [`Self::run`]. Only a resume that reports no stop calls it directly:
+    /// [`Self::with_target_halted`]'s own break-in, and gdbserver's detach.
     pub fn resume(&mut self) -> Result<()> {
         self.resume_with_disposition(ContinueDisposition::Handled)
     }
@@ -213,7 +156,7 @@ impl Session {
         self.target.breakpoint_stop = None;
         self.parked_windows_thread = None;
         self.parked_stop = None;
-        self.current_stop = None;
+        self.set_current_stop(None);
         self.module_refresh_report = None;
     }
 
@@ -256,7 +199,7 @@ impl Session {
         // observe is now spent; drop it so a later `wait_for_stop` doesn't replay
         // a stale event.
         self.parked_stop = None;
-        self.current_stop = None;
+        self.set_current_stop(None);
         // If a post-reboot rediscovery is still pending only because the module
         // list wasn't up yet, finish it from memory before continuing. We are
         // halted, so the next `continue` starts the pump with the reconnect-assist
@@ -302,24 +245,5 @@ impl Session {
         self.target.clear_context_dtb_override();
         self.target.clear_current_windows_thread_context();
         self.parked_windows_thread = None;
-    }
-
-    /// Resume the VM (unless already running, in which case no exception
-    /// acknowledgment is sent) with `disposition`, then wait up to `timeout`
-    /// for a meaningful stop; wrong-process int3 hits and false conditional
-    /// breakpoints are stepped over silently. `None` waits indefinitely;
-    /// `cancel` or an elapsed timeout returns [`ContinueOutcome::Running`]
-    /// with the VM left running. Non-resuming observation is
-    /// [`Self::wait_for_stop_bounded`].
-    pub fn continue_until_break(
-        &mut self,
-        timeout: Option<Duration>,
-        cancel: &AtomicBool,
-        disposition: ContinueDisposition,
-    ) -> Result<ContinueOutcome> {
-        if !self.backend.is_running() {
-            self.resume_with_disposition(disposition)?;
-        }
-        self.wait_for_stop_bounded(timeout, cancel)
     }
 }

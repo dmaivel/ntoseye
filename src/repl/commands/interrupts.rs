@@ -6,51 +6,27 @@ use std::fmt::Display;
 
 use tabled::builder::Builder;
 
-use super::cpu::{parse_processor, print_cpuinfo};
-use crate::error::Result;
+use ntoseye_macros::{command, grammar};
+
+use super::cpu::print_cpuinfo;
+use crate::error::{Error, Result};
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
+use crate::session::Session;
 use crate::target::apic::{
-    HalController, HalControllers, LocalApic, LvtEntry, bitmap_vectors, decode_icr, timer_divisor,
+    ApicLvt, HalController, HalControllerEntry, HalControllers, LVT_NAMES, LocalApic,
 };
+use crate::target::cpu::CpuInfo;
+use crate::target::cpu::Processor;
 use crate::target::smbios::{SmbiosTable, structure_fields, structure_name};
 use crate::ui;
-
-repl_command! {
-    cmd_apic;
-    names: ["!apic", "apic"],
-    usage: "!apic [processor]",
-    summary: "Show a processor's local APIC: its ID, priorities, LVT, timer, and pending vectors.",
-    details: "Reads the local APIC of the selected processor, or of the processor you give: in x2APIC mode through its MSRs (0x800-0x83f), in xAPIC mode through its registers at the physical address IA32_APIC_BASE names, read uncached. Both need a backend that reads MSRs and device registers: kd or kdnet. The target reads them on the processor that stopped it, so for another processor ntoseye switches the target to it and back, as rdmsr /p does. Shows the APIC ID and version, whether it is the bootstrap processor, the task and processor priorities, the spurious-interrupt vector register, the logical destination, the interrupt command register as an IPI (vector, delivery mode, destination), each local vector table entry (timer, LINT0, LINT1, error, performance counter, thermal, CMCI) with its vector, delivery mode, trigger, and mask, the timer's counts and divisor, the error status, and the vectors in service (ISR), requested (IRR), and level-triggered (TMR).",
-    completion: Expression,
-    run_state: Halted,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_ioapic();
-    names: ["!ioapic", "ioapic"],
-    usage: "!ioapic",
-    summary: "Show the I/O APIC and PIC lines as the HAL set them up.",
-    details: "Walks the HAL's registered interrupt controllers (nt!HalpRegisteredInterruptControllers) and shows each one, an I/O APIC or a legacy PIC, with its unit ID, ACPI resource ID, line range, and any problem the HAL recorded, then each line the HAL set up, from its own record of the line (_INTERRUPT_LINE_STATE): the line and its global system interrupt, the vector, the IRQL, edge or level trigger, polarity, and the processor target. This is what the HAL programmed into the redirection entries, read from kernel memory, so it works on every backend and in a kernel dump; it does not read the I/O APIC's registers.",
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_sysinfo;
-    names: ["!sysinfo", "sysinfo"],
-    usage: "!sysinfo machineid | smbios | cpuinfo",
-    summary: "Show the machine's SMBIOS identity, its SMBIOS tables, or its processor.",
-    details: "Reads the SMBIOS table the kernel found at boot (nt!WmipSMBiosTablePhysicalAddress) from physical memory. machineid shows the BIOS vendor, version, and date, and the system's and baseboard's manufacturer, product, and version, as WinDbg's !sysinfo machineid does. smbios lists every structure in the table with its type, handle, and length, and decodes the BIOS, system, baseboard, enclosure, processor, memory array, memory device, and mapped address structures. cpuinfo shows the current processor as !cpuinfo does.",
-    target: Kernel,
-}
 
 /// A labeled line of a detail view.
 fn field(label: &str, value: impl Display) {
     outln!("{} {value}", ui::label(&format!("{label:<20}")));
 }
 
-fn vectors_text(words: &[u32; 8]) -> String {
-    let vectors = bitmap_vectors(words);
+fn vectors_text(vectors: &[u8]) -> String {
     if vectors.is_empty() {
         ui::muted("none")
     } else {
@@ -62,7 +38,7 @@ fn vectors_text(words: &[u32; 8]) -> String {
     }
 }
 
-fn lvt_text(entry: &LvtEntry) -> String {
+fn lvt_text(entry: &ApicLvt) -> String {
     let mut text = format!(
         "{:#010x}  vector {:#04x}, {}",
         entry.raw, entry.vector, entry.delivery
@@ -94,7 +70,7 @@ fn print_apic(apic: &LocalApic) {
             apic.processor,
             apic.id,
             if apic.x2apic { "x2APIC" } else { "xAPIC" },
-            if apic.bsp() {
+            if apic.bootstrap_processor() {
                 ", bootstrap processor"
             } else {
                 ""
@@ -140,7 +116,7 @@ fn print_apic(apic: &LocalApic) {
         ),
     );
     field("Logical destination", format!("{:#x}", apic.ldr));
-    let icr = decode_icr(apic.icr, apic.x2apic);
+    let icr = &apic.icr;
     field(
         "Command (ICR)",
         format!(
@@ -155,10 +131,10 @@ fn print_apic(apic: &LocalApic) {
         ),
     );
     outln!();
-    for (name, entry) in &apic.lvt {
+    for name in LVT_NAMES {
         field(
             &format!("LVT {name}"),
-            match entry {
+            match apic.lvt.iter().find(|entry| entry.name == name) {
                 Some(entry) => lvt_text(entry),
                 None => ui::muted("not implemented"),
             },
@@ -170,7 +146,7 @@ fn print_apic(apic: &LocalApic) {
             "initial count {:#x}, current count {:#x}, divide by {}",
             apic.timer_initial,
             apic.timer_current,
-            timer_divisor(apic.timer_divide)
+            apic.timer_divisor()
         ),
     );
     field(
@@ -252,9 +228,12 @@ fn print_controllers(controllers: &HalControllers) {
     }
     for entry in &controllers.controllers {
         match entry {
-            Ok(controller) => print_controller(controller),
-            Err((address, error)) => {
-                error!("controller {:#x}: {error}", address.0);
+            HalControllerEntry::Controller(controller) => print_controller(controller),
+            HalControllerEntry::Unreadable(unreadable) => {
+                error!(
+                    "controller {:#x}: {}",
+                    unreadable.address.0, unreadable.error
+                );
             }
         }
     }
@@ -336,60 +315,175 @@ fn print_smbios(table: &SmbiosTable) {
     outln!();
 }
 
-impl ReplState<'_> {
-    fn cmd_apic(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let processor = match parse_processor(self, invocation.arg(0)) {
-            Ok(processor) => processor,
-            Err(error) => {
-                error!("!apic: {error}");
-                return Ok(());
-            }
-        };
-        match self.ctx.local_apic(processor) {
-            Ok(apic) => print_apic(&apic),
-            Err(error) => error!("!apic: {error}"),
-        }
-        Ok(())
+/// The processor of `!apic`, whose errors name the command.
+#[grammar(usage = "[processor]", complete = [Expression])]
+fn apic_processor(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Option<Processor>, ArgError> {
+    let Some(text) = cursor.word() else {
+        return Ok(None);
+    };
+    match <Processor as crate::repl::args::FromArg>::from_arg(cx, &text) {
+        Ok(processor) => Ok(Some(processor)),
+        Err(ArgError::Message(message)) => Err(ArgError::Message(format!("!apic: {message}"))),
+        Err(error) => Err(error),
     }
+}
 
-    fn cmd_ioapic(&mut self) -> Result<()> {
-        match self.ctx.target.hal_interrupt_controllers() {
-            Ok(controllers) => print_controllers(&controllers),
-            Err(error) => error!("!ioapic: {error}"),
-        }
-        Ok(())
+/// Show a processor's local APIC: its ID, priorities, LVT, timer, and pending
+/// vectors.
+///
+/// Reads the local APIC of the selected processor, or of the processor you
+/// give: in x2APIC mode through its MSRs (0x800-0x83f), in xAPIC mode through
+/// its registers at the physical address IA32_APIC_BASE names, read uncached.
+/// Both need a backend that reads MSRs and device registers: kd or kdnet. The
+/// target reads them on the processor that stopped it, so for another processor
+/// ntoseye switches the target to it and back, as rdmsr /p does. Shows the APIC
+/// ID and version, whether it is the bootstrap processor, the task and
+/// processor priorities, the spurious-interrupt vector register, the logical
+/// destination, the interrupt command register as an IPI (vector, delivery
+/// mode, destination), each local vector table entry (timer, LINT0, LINT1,
+/// error, performance counter, thermal, CMCI) with its vector, delivery mode,
+/// trigger, and mask, the timer's counts and divisor, the error status, and the
+/// vectors in service (ISR), requested (IRR), and level-triggered (TMR).
+#[command(
+    names = ["!apic", "apic"],
+    category = "cpu",
+    kind = Query,
+    target = Kernel,
+    state = Halted,
+    python = Cpu,
+)]
+fn apic(
+    session: &mut Session,
+    #[arg(receiver, parse = apic_processor)] processor: Option<Processor>,
+) -> Result<LocalApic> {
+    let prefixed = |error: Error| Error::DebugInfo(format!("!apic: {error}"));
+    let processor = session.processor(processor).map_err(prefixed)?;
+    session.local_apic(processor).map_err(prefixed)
+}
+
+impl Render for LocalApic {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_apic(self);
     }
+}
 
-    fn cmd_sysinfo(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let subcommand = invocation.arg(0).map(str::to_ascii_lowercase);
-        match subcommand.as_deref() {
-            Some("cpuinfo") => {
-                match parse_processor(self, None)
-                    .and_then(|processor| self.ctx.target.inspect_cpuinfo(processor))
-                {
-                    Ok(detail) => print_cpuinfo(&detail),
-                    Err(error) => error!("!sysinfo cpuinfo: {error}"),
-                }
-                return Ok(());
-            }
-            Some("machineid" | "smbios") => {}
-            _ => {
-                outln!("{}\n", command_help(invocation.name));
-                return Ok(());
-            }
+/// Show the I/O APIC and PIC lines as the HAL set them up.
+///
+/// Walks the HAL's registered interrupt controllers
+/// (nt!HalpRegisteredInterruptControllers) and shows each one, an I/O APIC or a
+/// legacy PIC, with its unit ID, ACPI resource ID, line range, and any problem
+/// the HAL recorded, then each line the HAL set up, from its own record of the
+/// line (_INTERRUPT_LINE_STATE): the line and its global system interrupt, the
+/// vector, the IRQL, edge or level trigger, polarity, and the processor target.
+/// This is what the HAL programmed into the redirection entries, read from
+/// kernel memory, so it works on every backend and in a kernel dump; it does
+/// not read the I/O APIC's registers.
+#[command(
+    names = ["!ioapic", "ioapic"],
+    category = "cpu",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    python_name = "interrupt_controllers",
+)]
+fn ioapic(session: &mut Session) -> Result<HalControllers> {
+    session
+        .target
+        .hal_interrupt_controllers()
+        .map_err(|error| Error::DebugInfo(format!("!ioapic: {error}")))
+}
+
+impl Render for HalControllers {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_controllers(self);
+    }
+}
+
+/// The `!sysinfo` section: `machineid`, `smbios`, or `cpuinfo`, in any case;
+/// anything else shows the help.
+#[grammar(usage = "<machineid|smbios|cpuinfo>", complete = [None])]
+fn sysinfo_section(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<String, ArgError> {
+    let section = cursor.word().map(|word| word.to_ascii_lowercase());
+    match section.as_deref() {
+        Some(section @ ("machineid" | "smbios" | "cpuinfo")) => Ok(section.to_string()),
+        _ => Err(ArgError::Missing),
+    }
+}
+
+/// Show the machine's SMBIOS identity, its SMBIOS tables, or its processor.
+///
+/// Reads the SMBIOS table the kernel found at boot
+/// (nt!WmipSMBiosTablePhysicalAddress) from physical memory. machineid shows
+/// the BIOS vendor, version, and date, and the system's and baseboard's
+/// manufacturer, product, and version, as WinDbg's !sysinfo machineid does.
+/// smbios lists every structure in the table with its type, handle, and length,
+/// and decodes the BIOS, system, baseboard, enclosure, processor, memory array,
+/// memory device, and mapped address structures. cpuinfo shows the current
+/// processor as !cpuinfo does.
+#[command(
+    names = ["!sysinfo", "sysinfo"],
+    category = "cpu",
+    kind = Query,
+    target = Kernel,
+    forms = [smbios],
+)]
+fn sysinfo(
+    session: &mut Session,
+    #[arg(parse = sysinfo_section)] section: String,
+) -> Result<SysInfo> {
+    match section.to_ascii_lowercase().as_str() {
+        "cpuinfo" => session
+            .processor(None)
+            .and_then(|processor| session.target.inspect_cpuinfo(processor))
+            .map(SysInfo::CpuInfo)
+            .map_err(|error| Error::DebugInfo(format!("!sysinfo cpuinfo: {error}"))),
+        section @ ("machineid" | "smbios") => {
+            let table =
+                smbios(session).map_err(|error| Error::DebugInfo(format!("!sysinfo: {error}")))?;
+            Ok(if section == "machineid" {
+                SysInfo::MachineId(table)
+            } else {
+                SysInfo::Smbios(table)
+            })
         }
-        let table = match self.ctx.target.smbios_table() {
-            Ok(table) => table,
-            Err(error) => {
-                error!("!sysinfo: {error}");
-                return Ok(());
-            }
-        };
-        if subcommand.as_deref() == Some("machineid") {
-            print_machine_id(&table);
-        } else {
-            print_smbios(&table);
+        other => Err(Error::InvalidArgument(usage_error(
+            "!sysinfo",
+            format!("unknown !sysinfo section '{other}'"),
+        ))),
+    }
+}
+
+/// Read the SMBIOS table the kernel found at boot
+/// (`nt!WmipSMBiosTablePhysicalAddress`) from physical memory, with every
+/// structure it holds (`!sysinfo smbios`; `!sysinfo machineid` shows the
+/// identity strings of the same table).
+#[command(form_of = sysinfo, python = Inspect)]
+fn smbios(session: &Session) -> Result<SmbiosTable> {
+    session.target.smbios_table()
+}
+
+/// What `!sysinfo` shows.
+enum SysInfo {
+    /// `machineid`: the identity lines from the SMBIOS table.
+    MachineId(SmbiosTable),
+    /// `smbios`: every structure of the table.
+    Smbios(SmbiosTable),
+    /// `cpuinfo`: the current processor, as `!cpuinfo` shows it.
+    CpuInfo(CpuInfo),
+}
+
+impl Render for SysInfo {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        match self {
+            Self::MachineId(table) => print_machine_id(table),
+            Self::Smbios(table) => print_smbios(table),
+            Self::CpuInfo(detail) => print_cpuinfo(detail),
         }
-        Ok(())
     }
 }

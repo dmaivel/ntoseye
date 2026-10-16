@@ -12,18 +12,18 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from stubcheck import Checker, returns
+from stubcheck import Checker, returns, stub_classes
 
 import ntoseye
 from ntoseye import Debugger
 
 STUB = ast.parse(Path(ntoseye.__file__).with_name("_ntoseye.pyi").read_text())
-CLASSES = {node.name: node for node in STUB.body if isinstance(node, ast.ClassDef)}
+CLASSES = stub_classes(STUB)
 
 
 def results(dbg: Debugger) -> list[tuple[object, str, Callable[[], object]]]:
     """(owner, method, call) for results that hold every kind of field: nested
-    classes, unions, lists, `Record`s, diagnostics that did and did not read,
+    classes, unions, lists, `dict`s, diagnostics that did and did not read,
     and metrics with a source."""
     inspect = dbg.inspect
     cpu = next(iter(dbg.cpus))
@@ -48,8 +48,8 @@ def results(dbg: Debugger) -> list[tuple[object, str, Callable[[], object]]]:
         (inspect, "dpcs", inspect.dpcs),
         (inspect, "ipi", inspect.ipi),
         (inspect, "timers", inspect.timers),
-        (inspect, "peb", lambda: inspect.peb(user)),
-        (inspect, "teb", lambda: inspect.teb(thread)),
+        (user, "decode_peb", user.decode_peb),
+        (thread, "decode_teb", thread.decode_teb),
         (cpu, "pcr", cpu.pcr),
         (cpu, "prcb", cpu.prcb),
     ]
@@ -124,7 +124,7 @@ def driver_results(dbg: Debugger) -> list[tuple[object, str, Callable[[], object
     power_irps = inspect.power_action().irps.value
     pdo: int | None = None
     if power_irps is not None:
-        pdo = next((irp.value.pdo for irp in power_irps.irps if irp.value is not None), None)
+        pdo = next((entry.power_irp.value.pdo for entry in power_irps.entries if entry.power_irp.value is not None), None)
     # A KMDF FDO, which has a default I/O target, and a request that a KMDF
     # driver holds, such as the one the balloon driver keeps for statistics.
     wdf_devices = [
@@ -196,7 +196,7 @@ def test_results_match_their_stub_types(halted: Debugger) -> None:
         checker.value(call(), returns(CLASSES[cls], method), f"{cls}.{method}()")
     assert checker.errors == []
     # The sample must keep exercising every kind of field.
-    assert checker.forms >= {"class", "Record", "available", "unavailable", "source"}
+    assert checker.forms >= {"class", "dict", "available", "unavailable", "source"}
 
 
 def user_dump_results(dbg: Debugger) -> list[tuple[object, str, Callable[[], object]]]:
@@ -215,8 +215,8 @@ def user_dump_results(dbg: Debugger) -> list[tuple[object, str, Callable[[], obj
         (inspect, "version", inspect.version),
         (inspect, "time", inspect.time),
         (inspect, "triage", inspect.triage),
-        (inspect, "peb", lambda: inspect.peb(user.process)),
-        (inspect, "teb", lambda: inspect.teb(thread)),
+        (user.process, "decode_peb", user.process.decode_peb),
+        (thread, "decode_teb", thread.decode_teb),
         (thread, "last_error", thread.last_error),
     ]
 

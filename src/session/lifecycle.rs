@@ -7,27 +7,63 @@ use std::time::Duration;
 
 use single_instance::SingleInstance;
 
-use crate::backend::MemoryOps;
 use crate::breakpoints::{BreakpointManager, SiteJournal, breakpoint_opcode};
 use crate::bugchecks::plausible_bugcheck_code;
+use crate::cpu_state;
 use crate::dbg_backend::{BugcheckInfo, DebugBackend, DebugCapability};
-use crate::dmp::DmpBackend;
+use crate::dmp::{DmpBackend, DmpInfo};
 use crate::error::{Error, Result};
 use crate::exception_policy::ExceptionPolicyTable;
 use crate::gdb::GdbClient;
 use crate::kd::{KdBackend, KdMemorySource};
+use crate::memory::MemoryOps;
 use crate::memory_backend::MemoryBackend;
 use crate::notice::Notice;
 use crate::phys::{HaltClock, PhysMem};
+#[cfg(feature = "repl")]
+use crate::repl::ReplActions;
 use crate::session::{ContinueOutcome, Session, StopResolution};
 use crate::symbols::ntoseye_home;
 use crate::target::{Target, TargetKind};
+use crate::types::VirtAddr;
 use crate::userdump::{self, UserDump, UserDumpBackend};
 use crate::{Backend, TargetSpec};
 
 /// How long [`Session::halt_for_exit`] gives an already-pending stop to land
 /// before breaking in.
 const EXIT_STOP_POLL: Duration = Duration::from_millis(200);
+
+/// Point a kernel `target` at its kernel's `KDDEBUGGER_DATA64`, trying the
+/// transport's candidate first. A user dump has no kernel to look in.
+fn locate_debugger_data(target: &mut Target, backend: &mut dyn DebugBackend) {
+    if target.kind() == TargetKind::Kernel {
+        let hint = backend.target_debugger_data_hint().ok().flatten();
+        target.refresh_debugger_data(hint);
+    }
+}
+
+/// Give a kernel dump's `backend` each processor's register context from
+/// its PRCB; the dump header holds only the crashing processor's. Failures
+/// become the backend's notices, and the header's context still stands. An
+/// AMD64 dump whose PRCB context offset is unknown keeps the header's
+/// context alone.
+fn read_processor_contexts(target: &Target, info: &DmpInfo, backend: &mut DmpBackend) {
+    let processors = backend.processor_count();
+    let saved = if info.context.is_arm64() {
+        cpu_state::read_arm64_prcb_contexts(target, processors)
+    } else {
+        // Triage dumps carry the offset from their embedded KDBG copy; full
+        // dumps read it from the KDBG the header names.
+        let offset = info.offset_prcb_context.or_else(|| {
+            cpu_state::prcb_context_offset(target, VirtAddr(info.debugger_data_block?))
+        });
+        let Some(offset) = offset else {
+            return;
+        };
+        cpu_state::read_amd64_prcb_contexts(target, processors, offset)
+    };
+    backend.set_processor_contexts(saved.contexts, saved.warnings);
+}
 
 pub(super) fn prepare_backend_after_cleanup(
     backend: &mut dyn DebugBackend,
@@ -68,12 +104,7 @@ impl Session {
                 if userdump::file_is_minidump(path)? {
                     return Self::open_user_dump(path);
                 }
-                let phys = Arc::new(PhysMem::dmp(path)?);
-                let info = phys
-                    .dmp_info()
-                    .expect("dmp_info must be Some for DMP backend")
-                    .clone();
-                Self::connect(phys, None, || Ok(Box::new(DmpBackend::new(&info))))
+                Self::open_kernel_dump(path)
             }
             TargetSpec::Live {
                 backend: backend @ (Backend::Kd | Backend::KdNet),
@@ -160,6 +191,23 @@ impl Session {
         let backend = UserDumpBackend::new(dump.info());
         let target = Target::with_user_dump(Arc::new(PhysMem::minidump(dump)))?;
         Self::new_with_target(target, Box::new(backend), None)
+    }
+
+    /// Open a kernel crash or triage dump. Each processor's context is read
+    /// out of that processor's PRCB, which takes the kernel's symbols, so
+    /// the backend gets them once the target has located the kernel and
+    /// before the session takes the backend over. Read-only, so no instance
+    /// lock is taken.
+    fn open_kernel_dump(path: &std::path::Path) -> Result<Self> {
+        let phys = Arc::new(PhysMem::dmp(path)?);
+        let info = phys
+            .dmp_info()
+            .expect("a kernel dump's memory carries its dump header");
+        let mut backend = DmpBackend::new(info);
+        let mut target = Target::with_phys(Arc::clone(&phys))?;
+        locate_debugger_data(&mut target, &mut backend);
+        read_processor_contexts(&target, info, &mut backend);
+        Self::with_located_target(target, Box::new(backend), None)
     }
 
     /// Connect KD/KDNET, select a validated memory source, and build the
@@ -319,14 +367,20 @@ impl Session {
         mut backend: Box<dyn DebugBackend>,
         journal: Option<&str>,
     ) -> Result<Self> {
+        locate_debugger_data(&mut target, backend.as_mut());
+        Self::with_located_target(target, backend, journal)
+    }
+
+    /// [`Self::new_with_target`] for a target that has already looked for
+    /// its kernel's debugger data.
+    fn with_located_target(
+        mut target: Target,
+        mut backend: Box<dyn DebugBackend>,
+        journal: Option<&str>,
+    ) -> Result<Self> {
         // A user dump has no kernel: no debugger data, DbgPrint buffer, or
         // kernel functions to trap.
         let kernel = target.kind() == TargetKind::Kernel;
-        if kernel {
-            let debugger_data_hint = backend.target_debugger_data_hint().ok().flatten();
-            target.refresh_debugger_data(debugger_data_hint);
-        }
-        backend.initialize_from_target(&target);
         // ARM64 register snapshots expose TTBR1 via the synthetic `cr3` slot;
         // hand the resolved kernel root to the backend so it can fill it.
         backend.set_kernel_dtb(target.kernel_dtb());
@@ -372,6 +426,12 @@ impl Session {
             parked_stop: None,
             pending_walk: None,
             current_stop: None,
+            stop_snapshot: None,
+            halt_requested: false,
+            #[cfg(feature = "repl")]
+            action_runner: Some(Box::new(ReplActions)),
+            #[cfg(not(feature = "repl"))]
+            action_runner: None,
             module_refresh_report: None,
             notices: Vec::new(),
             symbols_reconciled_at: 0,
@@ -420,21 +480,22 @@ impl Session {
                 parameters: dump.bug_check_parameters,
                 driver: None,
             };
-            session.current_stop = Some(ContinueOutcome::Bugcheck {
-                rip: Some(session.current_rip()).filter(|&rip| rip != 0),
+            let rip = Some(session.current_rip()).filter(|&rip| rip != 0);
+            session.set_current_stop(Some(ContinueOutcome::Bugcheck {
+                rip,
                 info: Some(info),
-            });
+            }));
         }
         // A user dump written for an exception sits at that exception.
         if let Some(exception) = session.target.user_exception() {
             let (code, address) = (exception.code, exception.address);
             session.target.last_exception_code = Some(code);
-            session.current_stop = Some(ContinueOutcome::Stopped {
+            session.set_current_stop(Some(ContinueOutcome::Stopped {
                 rip: address,
                 exception_code: Some(code),
                 first_chance: None,
                 exception_address: Some(address),
-            });
+            }));
         }
 
         Ok(session)

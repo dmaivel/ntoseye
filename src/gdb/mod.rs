@@ -5,16 +5,14 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use crate::dbg_backend::{
-    DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, PciConfigAddress,
-    STEP_UNDER_WINDOWS_HYPERVISOR, StopEvent,
+    DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, PciConfigAddress, RegisterInfo,
+    RegisterMap, STEP_UNDER_WINDOWS_HYPERVISOR, StopEvent, push_arm64_aliases,
 };
 use crate::error::{Error, Result};
 use crate::phys::HaltClock;
 use crate::types::Arch;
 
-pub mod registers;
-
-pub use registers::{RegisterInfo, RegisterMap, push_arm64_aliases};
+mod target_xml;
 
 /// Bytes of a packet shown per trace line.
 const TRACE_BYTES: usize = 200;
@@ -198,7 +196,7 @@ impl StopReply {
 
 /// The architecture a target description declares the stub is debugging.
 fn description_arch(xml: &str) -> Result<Arch> {
-    let Some(architecture) = RegisterMap::target_architecture(xml) else {
+    let Some(architecture) = target_xml::target_architecture(xml) else {
         return Err(Error::UnsupportedArchitecture(
             "the stub's target description declares no architecture".into(),
         ));
@@ -338,6 +336,9 @@ const PHYSICAL_READ_CHUNK: usize = 0x400;
 /// The first canonical upper-half (kernel) address on AMD64.
 const KERNEL_HALF: u64 = 0xffff_8000_0000_0000;
 
+/// The read timeout of a wait asked not to wait: a socket refuses zero.
+const MIN_READ_TIMEOUT: Duration = Duration::from_millis(1);
+
 fn gdb_connect_error(addr: &str, err: io::Error) -> Error {
     let message = match err.kind() {
         io::ErrorKind::ConnectionRefused => format!(
@@ -406,7 +407,7 @@ impl GdbClient {
         let description = client.fetch_target_description()?;
         client.arch = description_arch(&description)?;
         client.register_map =
-            client.build_register_map(&RegisterMap::parse_target_xml(&description)?)?;
+            client.build_register_map(&target_xml::parse_target_xml(&description)?)?;
 
         Ok(client)
     }
@@ -1336,7 +1337,7 @@ impl GdbClient {
             };
 
             let element = &result[start..end];
-            let href = RegisterMap::extract_attr(element, "href");
+            let href = target_xml::extract_attr(element, "href");
 
             if let Some(filename) = href {
                 let included_xml = self.fetch_feature_file(filename)?;
@@ -1515,6 +1516,10 @@ impl DebugBackend for GdbClient {
     }
 
     fn try_wait_for_stop(&mut self, timeout: Duration) -> Result<Option<StopEvent>> {
+        // The session polls once without waiting when its deadline is
+        // reached, and a socket refuses a zero read timeout: the shortest
+        // one it takes is that poll.
+        let timeout = timeout.max(MIN_READ_TIMEOUT);
         self.stream.get_ref().set_read_timeout(Some(timeout))?;
         let result = GdbClient::try_wait_for_stop(self);
         let _ = self.stream.get_ref().set_read_timeout(None);
@@ -1599,9 +1604,8 @@ mod tests {
         GdbClient, HaltCache, PacketReadState, RegisterMap, StopReply, StubFeatures, append_packet,
         description_arch, holds_stop_reply,
     };
-    use crate::breakpoints::BreakpointManager;
-    use crate::dbg_backend::{DebugBackend, HwBreakpointAccess};
-    use crate::gdb::registers::RegisterInfo;
+    use crate::breakpoints::{BreakpointConfig, BreakpointManager};
+    use crate::dbg_backend::{DebugBackend, HwBreakpointAccess, RegisterInfo};
     use crate::phys::HaltClock;
     use crate::session::{hits::hardware_breakpoint_hit, session_over_memory};
     use crate::types::{Arch, VirtAddr};
@@ -1708,14 +1712,14 @@ mod tests {
         let mut manager = BreakpointManager::new();
         for index in 0..300 {
             let id = manager
-                .add_hardware(
+                .add_hardware_configured(
                     &mut client,
                     &session.target,
                     VirtAddr(0x1000 + index),
                     HwBreakpointAccess::Execute,
                     1,
                     None,
-                    None,
+                    BreakpointConfig::default(),
                 )
                 .unwrap();
             assert_eq!(
@@ -1766,26 +1770,26 @@ mod tests {
         let mut manager = BreakpointManager::new();
         for index in 0..4 {
             manager
-                .add_hardware(
+                .add_hardware_configured(
                     &mut client,
                     &session.target,
                     VirtAddr(0x1000 + index),
                     HwBreakpointAccess::Execute,
                     1,
                     None,
-                    None,
+                    BreakpointConfig::default(),
                 )
                 .unwrap();
         }
         let error = manager
-            .add_hardware(
+            .add_hardware_configured(
                 &mut client,
                 &session.target,
                 VirtAddr(0x1004),
                 HwBreakpointAccess::Execute,
                 1,
                 None,
-                None,
+                BreakpointConfig::default(),
             )
             .unwrap_err();
         assert!(error.to_string().contains("E22"));
@@ -1793,14 +1797,14 @@ mod tests {
         assert_eq!(client.hardware_sites.len(), 4);
         manager.remove(&mut client, &session.target, 1).unwrap();
         let id = manager
-            .add_hardware(
+            .add_hardware_configured(
                 &mut client,
                 &session.target,
                 VirtAddr(0x1005),
                 HwBreakpointAccess::Execute,
                 1,
                 None,
-                None,
+                BreakpointConfig::default(),
             )
             .unwrap();
         assert_eq!(manager.hardware_breakpoint_for_slot(1).unwrap().id, id);
@@ -1814,27 +1818,27 @@ mod tests {
         let mut manager = BreakpointManager::new();
         for index in 0..300 {
             manager
-                .add_hardware(
+                .add_hardware_configured(
                     &mut client,
                     &session.target,
                     VirtAddr(0x1000 + index),
                     HwBreakpointAccess::Execute,
                     1,
                     None,
-                    None,
+                    BreakpointConfig::default(),
                 )
                 .unwrap();
         }
         manager.disable(&mut client, &session.target, 299).unwrap();
         let id = manager
-            .add_hardware(
+            .add_hardware_configured(
                 &mut client,
                 &session.target,
                 VirtAddr(0x2000),
                 HwBreakpointAccess::Write,
                 4,
                 None,
-                None,
+                BreakpointConfig::default(),
             )
             .unwrap();
         assert_eq!(manager.hardware_breakpoint_for_slot(300).unwrap().id, id);
@@ -2223,6 +2227,19 @@ mod tests {
         DebugBackend::wait_for_stop(&mut client).unwrap();
 
         assert!(!received.lock().iter().any(|packet| packet == "?"));
+    }
+
+    /// A wait whose deadline is reached polls once without waiting, as the
+    /// run driver asks with a zero timeout, which a socket refuses as its
+    /// read timeout: a running target with no stop is `None`, not an error.
+    #[test]
+    fn a_zero_timeout_wait_polls_a_running_target() {
+        let (mut client, _) = running_client_over_recording_stub();
+
+        let polled = DebugBackend::try_wait_for_stop(&mut client, Duration::ZERO);
+
+        assert!(matches!(polled, Ok(None)), "{polled:?}");
+        assert!(DebugBackend::is_running(&client));
     }
 
     #[test]

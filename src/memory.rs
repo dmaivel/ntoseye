@@ -1,4 +1,3 @@
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::types::*;
 use std::collections::HashMap;
@@ -6,12 +5,12 @@ use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+mod ops;
 mod sections;
 
+pub use ops::MemoryOps;
 pub use sections::{SectionLayout, SectionViews};
 
-/// x64 page-table entry physical-address field: bits 51:12 (MAXPHYADDR = 52).
-pub const PFN_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 pub const PAGE_SIZE: usize = 0x1000; // 4KiB
 
 /// Visit a byte range in chunks that never cross a virtual-memory page.
@@ -88,24 +87,88 @@ pub fn read_page_chunks(
     running.map(|()| (data, valid))
 }
 
+/// The readable contents of a NUL-terminated string, without the terminator.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TerminatedRead {
+    /// Readable bytes before the terminator or the first unreadable page.
+    pub bytes: Vec<u8>,
+    /// The string ran into an unreadable page before its terminator.
+    pub unreadable: bool,
+}
+
+/// How a [`read_terminated`] read failed.
+#[derive(Debug)]
+pub enum ScanFault {
+    /// The page is unreadable: the scan ends with the bytes before it, or
+    /// with this error when there are none.
+    Unreadable(Error),
+    /// The scan ends with this error, whatever it has read.
+    Fatal(Error),
+}
+
+/// Scan the string of `unit`-byte characters at `addr`, at most `max_bytes`
+/// long, for its first all-zero unit, reading a page at a time with `read`.
+/// A unit split by a page boundary is joined before the check, and the
+/// result holds whole units only. Addresses wrap at the top of the address
+/// space; `read` decides whether that is an error. `unit` must not be zero.
+pub fn read_terminated(
+    addr: VirtAddr,
+    max_bytes: usize,
+    unit: usize,
+    mut read: impl FnMut(VirtAddr, &mut [u8]) -> std::result::Result<(), ScanFault>,
+) -> Result<TerminatedRead> {
+    let mut bytes = Vec::with_capacity(max_bytes.min(PAGE_SIZE));
+    let mut unreadable = false;
+    while bytes.len() < max_bytes {
+        let start = bytes.len();
+        let current = addr + start as u64;
+        let page_remaining = PAGE_SIZE - current.page_offset() as usize;
+        bytes.resize(start + page_remaining.min(max_bytes - start), 0);
+        match read(current, &mut bytes[start..]) {
+            Ok(()) => {}
+            Err(ScanFault::Unreadable(error)) if start == 0 => return Err(error),
+            Err(ScanFault::Unreadable(_)) => {
+                bytes.truncate(start);
+                unreadable = true;
+                break;
+            }
+            Err(ScanFault::Fatal(error)) => return Err(error),
+        }
+        let complete_units = bytes.len() / unit;
+        if let Some(index) = (start / unit..complete_units).find(|&index| {
+            bytes[index * unit..(index + 1) * unit]
+                .iter()
+                .all(|&b| b == 0)
+        }) {
+            bytes.truncate(index * unit);
+            return Ok(TerminatedRead {
+                bytes,
+                unreadable: false,
+            });
+        }
+    }
+    bytes.truncate(bytes.len() - bytes.len() % unit);
+    Ok(TerminatedRead { bytes, unreadable })
+}
+
 /// Offsets of every occurrence of `pattern` in `haystack`, overlapping ones
-/// included. `pattern` must not be empty.
+/// included. `pattern` must not be empty. A search reads up to 1 GiB, so this
+/// uses `memmem`'s vectorized search rather than comparing a window at every
+/// byte, which was most of the time `s` took.
 pub fn pattern_offsets<'a>(
     haystack: &'a [u8],
     pattern: &'a [u8],
 ) -> impl Iterator<Item = usize> + 'a {
-    haystack
-        .windows(pattern.len())
-        .enumerate()
-        .filter_map(move |(offset, window)| (window == pattern).then_some(offset))
+    let finder = memchr::memmem::Finder::new(pattern);
+    let mut from = 0;
+    std::iter::from_fn(move || {
+        let at = from + finder.find(haystack.get(from..)?)?;
+        // On from the next byte, not past the match, so that overlapping
+        // occurrences are found too.
+        from = at + 1;
+        Some(at)
+    })
 }
-
-pub const PAGE_SHIFT: u32 = 12;
-pub const PTE_SHIFT: u8 = 12;
-pub const PDE_SHIFT: u8 = 21;
-pub const PDPTE_SHIFT: u8 = 30;
-pub const PML4E_SHIFT: u8 = 39;
-pub const PT_INDEX_MASK: u64 = 0x1FF;
 
 /// Sentinel DTB: `AddressSpace` skips page-table translation and treats
 /// virtual addresses as physical. Used by triage dumps, which only contain
@@ -172,7 +235,6 @@ pub struct AddressSpace<'a, B: MemoryOps<PhysAddr>> {
 pub struct Translation {
     pub address: PhysAddr,
     pub large: bool,
-    pub writable: bool,
     pub user: bool,
     /// Effective execute-never for the selected address-space half: AMD64 NX,
     /// AArch64 PXN for TTBR1 addresses, or AArch64 UXN for TTBR0 addresses.
@@ -209,7 +271,6 @@ impl Translation {
         Self {
             address: pdpte.huge_page_frame() + va.huge_page_offset(),
             large: true,
-            writable: pml4e.is_writable() && pdpte.is_writable(),
             user: pml4e.is_user() && pdpte.is_user(),
             nx: pml4e.is_nx() || pdpte.is_nx(),
             uxn: false,
@@ -226,7 +287,6 @@ impl Translation {
         Self {
             address: pde.large_page_frame() + va.large_page_offset(),
             large: true,
-            writable: pml4e.is_writable() && pdpte.is_writable() && pde.is_writable(),
             user: pml4e.is_user() && pdpte.is_user() && pde.is_user(),
             nx: pml4e.is_nx() || pdpte.is_nx() || pde.is_nx(),
             uxn: false,
@@ -244,10 +304,6 @@ impl Translation {
         Self {
             address: pte.page_frame() + va.page_offset(),
             large: false,
-            writable: pml4e.is_writable()
-                && pdpte.is_writable()
-                && pde.is_writable()
-                && pte.is_writable(),
             user: pml4e.is_user() && pdpte.is_user() && pde.is_user() && pte.is_user(),
             nx: pml4e.is_nx() || pdpte.is_nx() || pde.is_nx() || pte.is_nx(),
             uxn: false,
@@ -262,7 +318,6 @@ impl Translation {
         Self {
             address: pte.page_frame() + va.page_offset(),
             large: false,
-            writable: false,
             user: false,
             nx: false,
             uxn: false,
@@ -276,7 +331,6 @@ impl Translation {
         Self {
             address: frame + va.page_offset(),
             large: false,
-            writable: false,
             user: false,
             nx: false,
             uxn: false,
@@ -298,7 +352,6 @@ impl Translation {
         Self {
             address,
             large,
-            writable: leaf.arm64_is_writable(),
             user: leaf.arm64_is_user(),
             nx: if va.0 & (1 << 55) != 0 {
                 leaf.arm64_is_pxn()
@@ -551,7 +604,6 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
             return Ok(Some(Translation {
                 address: va.0,
                 large: false,
-                writable: false,
                 user: false,
                 nx: false,
                 uxn: false,
@@ -752,7 +804,6 @@ impl<'a, B: MemoryOps<PhysAddr>> MemoryOps<VirtAddr> for AddressSpace<'a, B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::MemoryOps;
     use std::sync::Arc;
 
     struct FakePhysMem {
@@ -1091,16 +1142,16 @@ mod tests {
         const PXN: u64 = 1 << 53;
         const UXN: u64 = 1 << 54;
 
-        // A thread's TEB: user, writable, never executed.
+        // A thread's TEB: user, never executed.
         let teb = read(USER | UXN | PXN, 0x26f_4000);
         assert_eq!(teb.address, 0x6000);
-        assert!(teb.user && teb.writable && teb.nx);
-        // User code: user, read-only, executable at EL0.
+        assert!(teb.user && teb.nx);
+        // User code: user, executable at EL0.
         let code = read(USER | READ_ONLY | PXN, 0x7762_0000);
-        assert!(code.user && !code.writable && !code.nx);
-        // Kernel code: EL1 only, read-only, executable at EL1.
+        assert!(code.user && !code.nx);
+        // Kernel code: EL1 only, executable at EL1.
         let kernel = read(READ_ONLY | UXN, 0xffff_f803_3f0e_b000);
-        assert!(!kernel.user && !kernel.writable && !kernel.nx && kernel.uxn);
+        assert!(!kernel.user && !kernel.nx && kernel.uxn);
     }
 
     struct CachingPhysMem {
@@ -1280,5 +1331,59 @@ mod tests {
 
         let (mem, va) = viewed_space(0x5000, 0);
         assert!(AddressSpace::new(&mem, 0x1000).read::<u64>(va).is_err());
+    }
+
+    #[test]
+    fn pattern_offsets_include_overlapping_matches() {
+        let offsets = |haystack: &[u8], pattern: &[u8]| {
+            pattern_offsets(haystack, pattern).collect::<Vec<_>>()
+        };
+        assert_eq!(offsets(b"aaaa", b"aa"), [0, 1, 2]);
+        assert_eq!(offsets(b"abcab", b"ab"), [0, 3]);
+        assert_eq!(offsets(b"ab", b"ab"), [0]);
+        assert_eq!(offsets(b"a", b"ab"), [] as [usize; 0]);
+    }
+
+    /// A fault on the first page is the scan's error; an unreadable later
+    /// page keeps the prefix and says so, unless the reader calls it fatal;
+    /// the prefix holds whole units only.
+    #[test]
+    fn terminated_scan_keeps_the_prefix_before_an_unreadable_page() {
+        const READABLE: u64 = 0x1000;
+        let end = READABLE + PAGE_SIZE as u64;
+        let read = |fatal: bool| {
+            move |at: VirtAddr, buf: &mut [u8]| {
+                if at.0 >= READABLE && at.0 < end {
+                    buf.fill(b'A');
+                    if at.0 + buf.len() as u64 == end {
+                        buf[buf.len() - 1] = 0;
+                    }
+                    return Ok(());
+                }
+                let error = Error::BadVirtualAddress(at);
+                Err(if fatal {
+                    ScanFault::Fatal(error)
+                } else {
+                    ScanFault::Unreadable(error)
+                })
+            }
+        };
+
+        assert!(read_terminated(VirtAddr(end), 8, 1, read(false)).is_err());
+
+        let tail = VirtAddr(end - 2);
+        let prefix = read_terminated(tail, 8, 1, read(false)).unwrap();
+        assert_eq!(prefix.bytes, b"A");
+        assert!(!prefix.unreadable);
+
+        let wide = read_terminated(VirtAddr(end - 3), 8, 2, read(false)).unwrap();
+        assert_eq!(
+            wide,
+            TerminatedRead {
+                bytes: b"AA".to_vec(),
+                unreadable: true
+            }
+        );
+        assert!(read_terminated(VirtAddr(end - 3), 8, 2, read(true)).is_err());
     }
 }

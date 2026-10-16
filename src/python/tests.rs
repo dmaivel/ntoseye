@@ -9,7 +9,7 @@ use std::process::id;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::embed::exec_script;
-use crate::triage::{TriageBlock, make_triage_dump};
+use crate::dmp::triage::{TriageBlock, make_triage_dump};
 
 /// Where the dump's one captured page lives (it holds `nop`s).
 const PAGE: u64 = 0xffff_f800_1234_5000;
@@ -75,13 +75,13 @@ fn a_crash_dump_stops_at_its_bugcheck() {
         r#"
 with ntoseye.attach("dmp", DUMP) as dbg:
     stop = dbg.stop
-    assert isinstance(stop, Stop.Bugcheck), repr(stop)
     assert isinstance(stop, Stop)
+    assert stop.kind == "bugcheck", repr(stop)
     assert stop.rip == PAGE + 0x678, hex(stop.rip)
-    assert stop.info is not None and stop.info.code == 0x50, stop.info
+    assert stop.bugcheck is not None and stop.bugcheck.code == 0x50, stop.bugcheck
     # Reading the current stop consumes nothing.
     for again in (dbg.stop, dbg.wait(0), dbg.interrupt()):
-        assert isinstance(again, Stop.Bugcheck), repr(again)
+        assert again.kind == "bugcheck", repr(again)
 "#,
     );
 }

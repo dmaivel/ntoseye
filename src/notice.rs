@@ -5,7 +5,10 @@
 
 use std::fmt;
 
+use ntoseye_macros::record;
+
 /// How much a notice matters.
+#[record]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NoticeLevel {
     /// Status: something happened that the operator may want to know.
@@ -14,18 +17,14 @@ pub enum NoticeLevel {
     Warning,
 }
 
-impl NoticeLevel {
-    /// The level's name in structured output and the SDK.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Info => "info",
-            Self::Warning => "warning",
-        }
-    }
-}
-
+/// Something the debugger reported beside a command's result.
+#[record]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Notice {
+    /// `"info"` for status, such as a background symbol fetch
+    /// finishing or a `ModLoad:` line of an `sxn ld` filter, or
+    /// `"warning"` for something that did not work as it should, such as
+    /// a breakpoint that failed to re-arm.
     pub level: NoticeLevel,
     pub text: String,
 }

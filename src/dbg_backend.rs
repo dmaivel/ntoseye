@@ -3,32 +3,39 @@ use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use ntoseye_macros::record;
+
 use crate::debugger_data::DebuggerDataCandidate;
-use crate::dmp::TriageCrashInfo;
 use crate::error::{Error, Result};
-use crate::gdb::RegisterMap;
 use crate::phys::PhysMem;
-use crate::target::Target;
 use crate::types::{KernelLocation, VirtAddr};
 
-/// One captured line of guest debug output (DbgPrint / kernel printf), with the
-/// host wall-clock time it completed and a monotonic sequence number used as the
-/// read cursor.
+pub mod debug_registers;
+mod registers;
+
+pub use registers::{RegisterInfo, RegisterMap, push_arm64_aliases, repeats_another_register};
+
+/// A captured line of guest debug output (DbgPrint, kernel printf).
+#[record]
 #[derive(Clone, Debug)]
 pub struct DebugLine {
+    /// A monotonic sequence number that serves as the read cursor.
     pub seq: u64,
+    /// The host wall-clock time when the line was complete, in milliseconds
+    /// since the Unix epoch.
     pub timestamp_ms: u64,
     pub text: String,
 }
 
-/// A window of debug lines returned by [`DebugBackend::read_debug_output`].
-/// `next_seq` is the cursor to pass on the next call to resume after the last
-/// returned line; `dropped` is set when `since_seq` predated the retained window
-/// (the bounded ring evicted lines the caller had not yet read).
+/// A page of captured guest debug output, plus the cursor for the next poll.
+#[record]
 #[derive(Clone, Debug, Default)]
 pub struct DebugOutputPage {
     pub lines: Vec<DebugLine>,
+    /// The cursor to give on the next call to continue after the last line.
     pub next_seq: u64,
+    /// Whether the bounded ring removed lines that the caller did not read
+    /// (the cursor predated the lines it keeps).
     pub dropped: bool,
 }
 
@@ -139,9 +146,14 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A bugcheck's code and its four parameters, and the driver the transport
+/// names for it.
+#[record]
+#[derive(PartialEq, Eq)]
 pub struct BugcheckInfo {
+    #[record(hex)]
     pub code: u32,
+    #[record(hex)]
     pub parameters: [u64; 4],
     pub driver: Option<String>,
 }
@@ -151,7 +163,8 @@ pub struct BugcheckInfo {
 /// Windows KD maps these choices to `DBG_CONTINUE` and
 /// `DBG_EXCEPTION_NOT_HANDLED`. Backends without a native exception
 /// disposition continue normally for either value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub enum ContinueDisposition {
     Handled,
     NotHandled,
@@ -162,14 +175,6 @@ impl ContinueDisposition {
         match self {
             Self::Handled => "handled",
             Self::NotHandled => "not handled",
-        }
-    }
-
-    /// Stable API spelling used by structured frontends.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Handled => "handled",
-            Self::NotHandled => "not_handled",
         }
     }
 }
@@ -250,10 +255,13 @@ pub struct StopEvent {
 }
 
 /// A kernel image entering or leaving the module list: the events `sx* ld`
-/// and `sx* ud` filter.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// and `sx* ud` filter, spelled as `sx` spells them.
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub enum ModuleEvent {
+    #[record(rename = "ld")]
     Load,
+    #[record(rename = "ud")]
     Unload,
 }
 
@@ -267,20 +275,11 @@ pub enum ProcessorRead {
     Device(u64),
 }
 
-impl ModuleEvent {
-    /// The event as `sx` spells it: `ld` or `ud`.
-    pub fn filter_name(self) -> &'static str {
-        match self {
-            Self::Load => "ld",
-            Self::Unload => "ud",
-        }
-    }
-}
-
 /// What memory access a hardware (debug-register) breakpoint traps on. The x86
 /// debug registers have no read-only condition, so a "read" watch is really
-/// read/write ([`Self::ReadWrite`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// read/write ([`Self::ReadWrite`]). Named in snake case.
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub enum HwBreakpointAccess {
     /// Instruction execution at the address (DR7 R/W = 00, length forced to 1).
     Execute,
@@ -312,27 +311,12 @@ impl HwBreakpointAccess {
 /// Semantic data-watch access exposed by host APIs. The transport may
 /// implement this with x86 debug registers, but callers request a watchpoint,
 /// not a software-vs-hardware breakpoint implementation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub enum WatchpointAccess {
     Write,
     /// x86 has no read-only data watch, so reads also trap writes.
     ReadWrite,
-}
-
-impl WatchpointAccess {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Write => "write",
-            Self::ReadWrite => "read/write",
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Write => "write",
-            Self::ReadWrite => "read_write",
-        }
-    }
 }
 
 impl std::str::FromStr for WatchpointAccess {
@@ -384,6 +368,8 @@ pub fn validate_hw_breakpoint(access: HwBreakpointAccess, len: u8, addr: u64) ->
     Ok(())
 }
 
+/// What a backend can do; the SDK shows its [`name`](Self::name).
+#[record]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DebugCapability {
     MemoryIntrospection,
@@ -411,34 +397,6 @@ pub enum DebugCapability {
 }
 
 impl DebugCapability {
-    /// Stable machine-readable identifier (the structured hosts' key).
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::MemoryIntrospection => "memory_introspection",
-            Self::ExecutionControl => "execution_control",
-            Self::InterruptTarget => "interrupt_target",
-            Self::SingleStep => "single_step",
-            Self::ReadRegisters => "read_registers",
-            Self::WriteRegisters => "write_registers",
-            Self::ThreadList => "thread_list",
-            Self::ThreadSelection => "thread_selection",
-            Self::KernelBreakpoints => "kernel_breakpoints",
-            Self::UserModeBreakpoints => "user_mode_breakpoints",
-            Self::Watchpoints => "watchpoints",
-            Self::TargetReloadDetection => "target_reload_detection",
-            Self::KernelBaseHint => "kernel_base_hint",
-            Self::BugcheckDetection => "bugcheck_detection",
-            Self::BugcheckDetails => "bugcheck_details",
-            Self::ModuleLoadEvents => "module_load_events",
-            Self::DebugOutput => "debug_output",
-            Self::Msr => "msr",
-            Self::IoPorts => "io_ports",
-            Self::PciConfig => "pci_config",
-            Self::TargetControl => "target_control",
-            Self::TargetFileIo => "target_file_io",
-        }
-    }
-
     pub fn label(self) -> &'static str {
         match self {
             Self::MemoryIntrospection => "memory introspection",
@@ -479,13 +437,23 @@ pub struct PciConfigAddress {
     pub ecam: Option<u64>,
 }
 
+/// A row of the capability matrix of the backend.
+#[record(impl)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BackendCapability {
+    /// Stable identifier (`memory_introspection`, ...).
     pub capability: DebugCapability,
     pub supported: bool,
 }
 
+#[record]
 impl BackendCapability {
+    /// Human-readable name.
+    #[record(getter)]
+    pub fn label(&self) -> &'static str {
+        self.capability.label()
+    }
+
     pub fn supported(capability: DebugCapability) -> Self {
         Self {
             capability,
@@ -776,16 +744,6 @@ pub trait DebugBackend {
     /// next resume. Empty for backends whose sites survive a stop.
     fn sites_dropped_by_stop(&self) -> Vec<u64> {
         Vec::new()
-    }
-
-    /// Called once after the [`Target`] is constructed, giving the backend a
-    /// chance to read guest state that requires symbol resolution. DmpBackend
-    /// uses this to extract per-CPU registers from the PRCB ContextFrame.
-    fn initialize_from_target(&mut self, _target: &Target) {}
-
-    /// Crash context extracted from triage dump EPROCESS/ETHREAD snapshots.
-    fn triage_crash_info(&self) -> Option<&TriageCrashInfo> {
-        None
     }
 
     /// Notify the backend about guest rediscovery progress after a transport

@@ -10,12 +10,13 @@ use std::collections::{BTreeMap, HashMap};
 use zerocopy::{FromBytes, Immutable, KnownLayout};
 
 use super::{
-    DynamicFunction, FunctionTable, MemoryRange, MemoryRegion, UnloadedModule, UserDumpInfo,
-    UserException, UserHandle, UserModule, UserSystemInfo, UserThread, UserThreadInfo,
-    UserTimeZone,
+    CapturedStack, DynamicFunction, FunctionTable, MemoryRange, MemoryRegion, UnloadedModule,
+    UserDumpInfo, UserException, UserHandle, UserModule, UserSystemInfo, UserThreadInfo,
+    UserThreadTimes, UserTimeZone,
 };
+use crate::cpu_context::{amd64, arm64};
 use crate::error::{Error, Result};
-use crate::kd::{context, context_arm64};
+use crate::layout::{utf16le_lossy, utf16le_nul_terminated};
 use crate::pe::headers::{MAX_CODEVIEW_BYTES, decode_codeview};
 use crate::types::Arch;
 
@@ -331,25 +332,7 @@ fn read_string(data: &[u8], rva: u64) -> std::result::Result<String, String> {
     }
     let bytes = located(data, rva + 4, u64::from(length))
         .ok_or_else(|| format!("string at {rva:#x} ({length} bytes) leaves the file"))?;
-    let units: Vec<u16> = bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|unit| u16::from_le_bytes(*unit))
-        .collect();
-    Ok(String::from_utf16_lossy(&units))
-}
-
-/// The UTF-16 string in a fixed buffer, up to its first NUL.
-fn fixed_utf16(bytes: &[u8]) -> String {
-    let units: Vec<u16> = bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|unit| u16::from_le_bytes(*unit))
-        .take_while(|unit| *unit != 0)
-        .collect();
-    String::from_utf16_lossy(&units)
+    Ok(utf16le_lossy(bytes))
 }
 
 /// What a `MINIDUMP_SYSTEM_INFO.PlatformId` that is not Windows NT names,
@@ -776,16 +759,16 @@ fn read_context(
 ) -> std::result::Result<Vec<u8>, String> {
     let (size, flags_offset, arch_flag, required) = match arch {
         Arch::Amd64 => (
-            context::CONTEXT_SIZE,
-            context::OFFSET_CONTEXT_FLAGS,
-            context::CONTEXT_AMD64,
-            context::CONTEXT_CONTROL | context::CONTEXT_INTEGER,
+            amd64::CONTEXT_SIZE,
+            amd64::OFFSET_CONTEXT_FLAGS,
+            amd64::CONTEXT_AMD64,
+            amd64::CONTEXT_CONTROL | amd64::CONTEXT_INTEGER,
         ),
         Arch::Arm64 => (
-            context_arm64::CONTEXT_SIZE,
-            context_arm64::OFFSET_CONTEXT_FLAGS,
-            context_arm64::CONTEXT_ARM64,
-            context_arm64::CONTEXT_CONTROL | context_arm64::CONTEXT_INTEGER,
+            arm64::CONTEXT_SIZE,
+            arm64::OFFSET_CONTEXT_FLAGS,
+            arm64::CONTEXT_ARM64,
+            arm64::CONTEXT_CONTROL | arm64::CONTEXT_INTEGER,
         ),
     };
     let (rva, data_size) = (location.rva, location.data_size);
@@ -821,7 +804,7 @@ fn parse_thread_list(
     arch: Arch,
     memory: &mut MemoryMap,
     notes: &mut Vec<String>,
-) -> Vec<UserThread> {
+) -> Vec<UserThreadInfo> {
     let Some(count) = read_at::<u32>(stream, 0) else {
         notes.push("ThreadListStream header is truncated; no threads are listed".into());
         return Vec::new();
@@ -853,8 +836,11 @@ fn parse_thread_list(
             &format!("thread {tid:#x} stack"),
             notes,
         )
-        .then_some((stack.start, stack_size));
-        threads.push(UserThread {
+        .then_some(CapturedStack {
+            start: stack.start,
+            size: stack_size,
+        });
+        threads.push(UserThreadInfo {
             tid,
             suspend_count: raw.suspend_count,
             priority_class: raw.priority_class,
@@ -863,13 +849,13 @@ fn parse_thread_list(
             stack: stack_range,
             context: read_context(data, raw.context, arch),
             name: None,
-            info: None,
+            times: None,
         });
     }
     threads
 }
 
-fn merge_thread_info(stream: &[u8], threads: &mut [UserThread], notes: &mut Vec<String>) {
+fn merge_thread_info(stream: &[u8], threads: &mut [UserThreadInfo], notes: &mut Vec<String>) {
     let Some(header) = read_at::<RawSizedListHeader>(stream, 0) else {
         notes.push("ThreadInfoListStream header is truncated; ignored".into());
         return;
@@ -895,9 +881,7 @@ fn merge_thread_info(stream: &[u8], threads: &mut [UserThread], notes: &mut Vec<
         };
         let tid = raw.thread_id;
         if let Some(thread) = threads.iter_mut().find(|thread| thread.tid == tid) {
-            thread.info = Some(UserThreadInfo {
-                dump_flags: raw.dump_flags,
-                dump_error: raw.dump_error,
+            thread.times = Some(UserThreadTimes {
                 exit_status: raw.exit_status,
                 create_time: raw.create_time,
                 exit_time: raw.exit_time,
@@ -913,7 +897,7 @@ fn merge_thread_info(stream: &[u8], threads: &mut [UserThread], notes: &mut Vec<
 fn merge_thread_names(
     data: &[u8],
     stream: &[u8],
-    threads: &mut [UserThread],
+    threads: &mut [UserThreadInfo],
     notes: &mut Vec<String>,
 ) {
     let Some(count) = read_at::<u32>(stream, 0) else {
@@ -1118,7 +1102,7 @@ fn parse_misc_info(stream: &[u8], info: &mut UserDumpInfo, notes: &mut Vec<Strin
     }
     let build_end = MISC_INFO_BUILD_STRING + MISC_INFO_BUILD_STRING_UNITS * 2;
     if flags & MISC4_BUILDSTRING != 0 && size >= build_end {
-        let build = fixed_utf16(&stream[MISC_INFO_BUILD_STRING..build_end]);
+        let build = utf16le_nul_terminated(&stream[MISC_INFO_BUILD_STRING..build_end]);
         info.build_string = (!build.is_empty()).then_some(build);
     }
 }
@@ -1131,10 +1115,14 @@ fn parse_time_zone(id: u32, zone: &[u8]) -> Option<UserTimeZone> {
     // DaylightDate, DaylightBias.
     let bias: i32 = read_at(zone, 0)?;
     let (name, extra) = match id {
-        TIME_ZONE_ID_UNKNOWN | TIME_ZONE_ID_STANDARD => {
-            (fixed_utf16(zone.get(4..68)?), read_at::<i32>(zone, 84)?)
-        }
-        TIME_ZONE_ID_DAYLIGHT => (fixed_utf16(zone.get(88..152)?), read_at::<i32>(zone, 168)?),
+        TIME_ZONE_ID_UNKNOWN | TIME_ZONE_ID_STANDARD => (
+            utf16le_nul_terminated(zone.get(4..68)?),
+            read_at::<i32>(zone, 84)?,
+        ),
+        TIME_ZONE_ID_DAYLIGHT => (
+            utf16le_nul_terminated(zone.get(88..152)?),
+            read_at::<i32>(zone, 168)?,
+        ),
         _ => return None,
     };
     Some(UserTimeZone {

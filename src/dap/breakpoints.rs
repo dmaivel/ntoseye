@@ -5,7 +5,7 @@ use std::result;
 
 use serde_json::{Value, json};
 
-use crate::breakpoints::{Breakpoint, BreakpointConfig};
+use crate::breakpoints::{BreakpointConfig, BreakpointInfo};
 use crate::dbg_backend::{ModuleEvent, WatchpointAccess};
 use crate::error::Result;
 use crate::exception_policy::ExceptionPolicyMode;
@@ -548,8 +548,8 @@ pub(super) struct BreakpointState {
     address: VirtAddr,
 }
 
-impl From<&Breakpoint> for BreakpointState {
-    fn from(breakpoint: &Breakpoint) -> Self {
+impl From<&BreakpointInfo> for BreakpointState {
+    fn from(breakpoint: &BreakpointInfo) -> Self {
         Self {
             resolved: breakpoint.resolved,
             address: breakpoint.address,
@@ -557,7 +557,7 @@ impl From<&Breakpoint> for BreakpointState {
     }
 }
 
-fn breakpoint_json(breakpoint: &Breakpoint, matches: usize) -> Value {
+fn breakpoint_json(breakpoint: &BreakpointInfo, matches: usize) -> Value {
     let mut value = json!({
         "id": breakpoint.id as i64,
         "verified": breakpoint.resolved,

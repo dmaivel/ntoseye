@@ -26,7 +26,7 @@ def main() -> None:
         prcb = dbg.types["_KPRCB"].at(dbg.cpus[args.cpu].prcb().kprcb)
         target = prcb.address_of("CurrentThread")
         watch = dbg.breakpoints.watch(target, access="write", length=8, processor=args.cpu)
-        print(f"write watchpoint {watch.id} at CPU {args.cpu} _KPRCB.CurrentThread = {watch.address:#x}")
+        print(f"write watchpoint {watch.id} at CPU {args.cpu} _KPRCB.CurrentThread = {target:#x}")
 
         timed_out = False
         timeout = None if args.timeout == 0 else args.timeout
@@ -35,8 +35,8 @@ def main() -> None:
             if stop is None:
                 timed_out = True
                 print(f"timeout waiting for a write after {args.timeout:g}s")
-            elif watch not in stop.breakpoints:
-                print(f"stop: {type(stop).__name__} ({stop.symbol or '?'})")
+            elif not stop.hit(watch):
+                print(f"stop: {stop.kind} ({stop.symbol or '?'})")
             else:
                 print(f"writer: {stop.symbol or '?'}")
                 thread = stop.thread
@@ -45,7 +45,7 @@ def main() -> None:
                 else:
                     print(f"thread: tid={thread.tid}")
                     try:
-                        for frame in thread.backtrace(limit=5):
+                        for frame in dbg.threads[thread].backtrace(limit=5):
                             print(f"  #{frame.index} {frame.symbol or hex(frame.ip)}")
                     except ntoseye.NtoseyeError as exc:
                         print(f"backtrace unavailable: {exc}")

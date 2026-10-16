@@ -1338,6 +1338,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "inventory"
+version = "0.3.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6928282826c822ad91bf1c9a1cb90a30ba1c26770749929b4656cd6be829cd7c"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "ipnet"
 version = "2.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1457,6 +1466,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "libmimalloc-sys"
+version = "0.1.49"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "linkme"
 version = "0.3.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1562,6 +1580,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mimalloc"
+version = "0.1.52"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
+dependencies = [
+ "libmimalloc-sys",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1651,8 +1678,11 @@ dependencies = [
  "libc",
  "linkme",
  "md-5",
+ "memchr",
  "memmap2",
+ "mimalloc",
  "nix 0.31.3",
+ "ntoseye-macros",
  "nu-ansi-term",
  "nucleo-matcher",
  "owo-colors",
@@ -1661,18 +1691,22 @@ dependencies = [
  "pelite",
  "pyo3",
  "pyo3-build-config",
+ "quote",
  "rayon",
  "reedline",
  "reqwest",
  "rmcp",
+ "rustc-hash",
  "schemars",
  "serde",
  "serde_json",
  "sha1",
  "sha2",
  "single-instance",
+ "smallvec",
  "spin",
  "subtle",
+ "syn 2.0.118",
  "tabled",
  "terminal_size",
  "tern-sdk",
@@ -1686,9 +1720,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ntoseye-macros"
+version = "0.49.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+]
+
+[[package]]
 name = "ntoseye-py"
 version = "0.49.1"
 dependencies = [
+ "mimalloc",
  "ntoseye",
  "pyo3",
 ]
@@ -1902,6 +1946,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4688ddedf473e32662b9b067670129a8afb8c18e351482c70d62ba4a88171e8b"
 dependencies = [
  "indexmap",
+ "inventory",
  "libc",
  "once_cell",
  "portable-atomic",

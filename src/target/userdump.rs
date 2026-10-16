@@ -8,15 +8,36 @@ use std::collections::HashMap;
 
 use super::Target;
 use crate::{
-    backend::MemoryOps,
+    dbg_backend::RegisterMap,
     error::{Error, Result},
-    gdb::RegisterMap,
     guest::ModuleInfo,
+    memory::MemoryOps,
     ntstatus::ntstatus_name,
     types::{Arch, VirtAddr},
-    unwind::{format_symbol, resolve_thread_trace_context},
-    userdump::{UserDump, UserDumpInfo, UserException, UserThread, context_registers},
+    unwind::{format_symbol, resolve_thread_trace_context, try_format_symbol},
+    userdump::{UserDump, UserDumpInfo, UserException, UserThreadInfo, context_registers},
 };
+
+/// The exception a user-mode minidump was written for, with its address
+/// named in the dump's modules.
+#[ntoseye_macros::record]
+pub struct UserExceptionDetail {
+    #[record(rename = "info")]
+    pub exception: UserException,
+    /// `info.address` as `module!function+offset`, when it resolves.
+    pub symbol: Option<String>,
+}
+
+impl Target {
+    /// The dump's exception, `None` when it records none or the target is
+    /// not a user dump.
+    pub fn user_exception_detail(&self) -> Option<UserExceptionDetail> {
+        let exception = self.user_dump_info()?.exception.clone()?;
+        let trace = resolve_thread_trace_context(self, 0);
+        let symbol = try_format_symbol(self, &trace, exception.address);
+        Some(UserExceptionDetail { exception, symbol })
+    }
+}
 
 /// What a target inspects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,7 +91,7 @@ impl Target {
     }
 
     /// The captured thread selected for inspection.
-    pub fn user_thread(&self) -> Option<&UserThread> {
+    pub fn user_thread(&self) -> Option<&UserThreadInfo> {
         let tid = self.user_process.as_ref()?.thread?;
         self.user_dump_info()?.thread(tid)
     }

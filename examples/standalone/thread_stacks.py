@@ -35,13 +35,13 @@ def main() -> None:
 
         for thread in threads:
             cpu = thread.cpu if args.backend != "memory" else None
-            where = f"on {cpu.id}" if cpu else ("paused snapshot" if args.backend == "memory" else "parked")
+            where = f"on CPU {cpu.number}" if cpu else ("paused snapshot" if args.backend == "memory" else "parked")
             print(
                 f"tid {thread.tid or '?':>5}  state={thread.state!s:<10} "
                 f"wait={thread.wait_reason!s:<14} {where}"
             )
             try:
-                for frame in thread.backtrace(args.frames):
+                for frame in thread.backtrace(limit=args.frames):
                     print(f"      {frame.ip:#x}  {frame.symbol}")
             except ntoseye.NtoseyeError as exc:
                 print(f"      (no stack: {exc})")

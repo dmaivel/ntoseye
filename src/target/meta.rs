@@ -2,15 +2,17 @@
 
 use std::collections::HashSet;
 
-use crate::backend::MemoryOps;
+use ntoseye_macros::record;
+
+use crate::bytes::before_nul;
 use crate::cpu_state::processor_count;
 use crate::dmp::tagged::known_tag;
 use crate::error::{Error, Result};
 use crate::guest::{Guest, ModuleInfo};
 use crate::kuser_shared::KuserSharedData;
 use crate::layout::{StructRef, Types};
+use crate::memory::MemoryOps;
 use crate::ntstatus::{ntstatus_name, win32_error_name};
-use crate::session::Session;
 use crate::symbols::ModuleSymbolStatus;
 use crate::target::{DiagnosticValue, ListCursor, ListTermination, Target};
 use crate::triage_report::time::{filetime_to_iso, unix_time_to_iso};
@@ -59,7 +61,39 @@ pub fn decode_verifier_level_flags(level: u64) -> Vec<String> {
         .collect()
 }
 
-#[derive(Debug, Clone)]
+/// A driver that Driver Verifier verifies, from the `!verifier` list.
+#[record]
+pub struct VerifierDriverSummary {
+    /// The verifier entry of the driver.
+    pub entry: VirtAddr,
+    /// The state of the entry (`Loaded`).
+    pub state: String,
+    /// The nonpaged pool that the driver holds, in bytes.
+    pub nonpaged_bytes: u64,
+    /// The paged pool that the driver holds, in bytes.
+    pub paged_bytes: u64,
+    /// The module name of the driver.
+    #[record(rename = "module")]
+    pub module_name: String,
+}
+
+/// A driver that is configured for verification, from the verifier
+/// suspect list.
+#[record]
+pub struct VerifierSuspectDriver {
+    /// The suspect-list entry.
+    pub address: VirtAddr,
+    pub full_name: String,
+    pub base_name: String,
+    /// The number of times that the driver loaded.
+    pub loads: u64,
+    /// The number of times that the driver unloaded.
+    pub unloads: u64,
+}
+
+/// The aggregate counters of Driver Verifier. ntoseye reads each counter
+/// separately, and each read can fail.
+#[record]
 pub struct VerifierStatistics {
     pub raise_irqls: DiagnosticValue<u64>,
     pub acquire_spin_locks: DiagnosticValue<u64>,
@@ -82,52 +116,55 @@ pub struct VerifierStatistics {
     pub unloads: DiagnosticValue<u64>,
 }
 
-#[derive(Debug, Clone)]
-pub struct VerifierSuspectDriver {
-    pub address: VirtAddr,
-    pub full_name: String,
-    pub base_name: String,
-    pub loads: u64,
-    pub unloads: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct VerifierDriverSummary {
-    pub entry: VirtAddr,
-    pub state: String,
-    pub nonpaged_bytes: u64,
-    pub paged_bytes: u64,
-    pub module_name: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct VerifierDetail {
+/// The Driver Verifier configuration, statistics, and drivers
+/// (`!verifier`). The drivers are the verified drivers and the configured
+/// suspect drivers that are not loaded.
+#[record]
+pub struct Verifier {
+    /// The verification level (`MmVerifierData.Level`).
+    #[record(hex)]
     pub level: DiagnosticValue<u64>,
+    /// The option flags (`VerifierOptionFlags`).
+    #[record(hex)]
     pub option_flags: DiagnosticValue<u64>,
     pub verify_mode: DiagnosticValue<u64>,
+    /// The names of the checks that `level` enables.
     pub level_options: DiagnosticValue<Vec<String>>,
     pub statistics: VerifierStatistics,
+    /// The verified drivers.
     pub drivers: DiagnosticValue<Vec<VerifierDriverSummary>>,
-    /// True when an AVL table advertised fewer elements than its reachable
-    /// tree, so the bounded walk stopped before visiting every link.
+    /// Whether the driver table gives a smaller entry count than the
+    /// number of linked entries, which means that the walk stopped before
+    /// it reached all drivers.
     pub drivers_truncated: bool,
+    /// The suspect drivers that are configured for verification but are
+    /// not loaded.
     pub configured_but_unloaded: DiagnosticValue<Vec<VerifierSuspectDriver>>,
-    /// Termination state of the bounded suspect-list walk.
+    /// How the suspect-list walk ended.
     pub suspect_list_termination: ListTermination,
 }
 
-#[derive(Debug, Clone)]
-pub struct VerifierDriverDetail {
+/// The image, signing level, and counters of one verified driver
+/// (`!verifier <module>`).
+#[record]
+pub struct VerifierDriver {
+    #[record(rename = "module")]
     pub module_name: String,
     pub image_base: VirtAddr,
+    /// The image size in bytes.
     pub image_size: u64,
+    /// The `_DRIVER_OBJECT` of the driver.
     pub driver_object: VirtAddr,
+    /// The signing level of the image (`SE_SIGNING_LEVEL`).
+    #[record(hex)]
     pub se_signing_level: u64,
     pub raise_irqls: u64,
     pub acquire_spin_locks: u64,
     pub synchronize_executions: u64,
     pub allocations_with_no_tag: u64,
     pub allocations_failed: u64,
+    /// The number of allocations that the verifier failed on purpose
+    /// (fault injection).
     pub allocations_failed_deliberately: u64,
     pub current_paged_pool_allocations: u64,
     pub paged_bytes: u64,
@@ -147,6 +184,8 @@ pub struct VerifierDriverDetail {
     pub peak_pages_for_mdl_bytes: u64,
     pub contiguous_memory_bytes: u64,
     pub peak_contiguous_memory_bytes: u64,
+    /// The suspect-list entry of the driver, with its load history.
+    /// `None` if the driver has no entry.
     pub suspect: Option<VerifierSuspectDriver>,
 }
 
@@ -493,8 +532,8 @@ fn driver_summary(driver: &VerifiedDriver) -> VerifierDriverSummary {
     }
 }
 
-fn driver_detail(driver: &VerifiedDriver) -> VerifierDriverDetail {
-    VerifierDriverDetail {
+fn driver_detail(driver: &VerifiedDriver) -> VerifierDriver {
+    VerifierDriver {
         module_name: driver.module_name.clone(),
         image_base: driver.image_base,
         image_size: driver.image_size,
@@ -538,7 +577,7 @@ impl Target {
     /// collection is unavailable. Every [`DiagnosticValue`] retains the exact
     /// field, layout, or bounded-walk error for only the value that was
     /// unavailable.
-    pub fn verifier_status(&self) -> Result<VerifierDetail> {
+    pub fn verifier_status(&self) -> Result<Verifier> {
         let guest = self.guest()?;
         let state = read_verifier_state(guest);
         let level_options = match &state.level {
@@ -583,7 +622,7 @@ impl Target {
             }
         };
 
-        Ok(VerifierDetail {
+        Ok(Verifier {
             level: state.level,
             option_flags: state.option_flags,
             verify_mode: state.verify_mode,
@@ -600,7 +639,7 @@ impl Target {
     /// range, signing level, verifier counters, and suspect-driver load counts.
     /// A missing module or an unreadable required field is returned as an error;
     /// optional suspect load counts are absent when no suspect entry is linked.
-    pub fn verifier_driver(&self, module: &str) -> Result<VerifierDriverDetail> {
+    pub fn verifier_driver(&self, module: &str) -> Result<VerifierDriver> {
         let guest = self.guest()?;
         let (mut drivers, _) = walk_verified_drivers(guest)?;
         let modules = self.kernel_modules().unwrap_or_default();
@@ -621,120 +660,173 @@ impl Target {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct TargetKernelDetail {
+/// The identity of the kernel image.
+#[record]
+pub struct TargetKernel {
+    /// The file name of the image.
     pub name: String,
+    /// The module name (`nt`).
     pub short_name: String,
     pub base: VirtAddr,
+    /// The image size in bytes.
     pub size: Option<u64>,
     pub file_version: Option<String>,
     pub product_version: Option<String>,
+    /// The GUID of the PDB, which identifies the symbols.
     pub pdb_guid: Option<String>,
+    /// The age of the PDB.
     pub pdb_age: Option<u32>,
 }
 
-#[derive(Debug, Clone)]
-pub struct TargetDumpMetadata {
+/// The data that a crash dump header records.
+#[record]
+pub struct TargetDump {
+    /// Whether the dump is a triage (minidump-style) dump.
     pub is_triage: bool,
+    /// The kernel page-table root that the dump records.
     pub directory_table_base: VirtAddr,
+    #[record(hex)]
     pub bugcheck_code: u32,
+    #[record(hex)]
     pub bugcheck_parameters: Vec<u64>,
     pub number_processors: u32,
     pub major_version: u32,
     pub minor_version: u32,
     pub product_type: u32,
+    /// The machine type (`IMAGE_FILE_MACHINE_*`).
     pub machine_image_type: u32,
     pub service_pack_build: u32,
+    /// The time when the dump was taken (FILETIME).
+    #[record(hex)]
     pub system_time: Option<u64>,
+    /// The system uptime in seconds.
     pub uptime_seconds: Option<u64>,
+    /// The exception code that the dump records.
+    #[record(hex)]
     pub exception_code: Option<u32>,
+    /// Whether the triage data of the dump overflowed.
     pub triage_overflowed: bool,
     pub kernel_base: Option<VirtAddr>,
-    /// The dump's tagged data blocks (`.enumtag`).
-    pub tagged_blocks: Vec<TaggedBlockInfo>,
+    /// The blocks that bugcheck callbacks added to the dump (`.enumtag`);
+    /// `Inspect.read_tagged` reads one.
+    pub tagged_blocks: Vec<TaggedBlock>,
 }
 
-/// One tagged data block of a dump: its tag, size, and, for a tag Windows
-/// writes, the global that holds it and what the block holds.
-#[derive(Debug, Clone)]
-pub struct TaggedBlockInfo {
+/// A tagged data block of a crash dump.
+#[record]
+pub struct TaggedBlock {
+    /// The GUID tag, `{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}`.
     pub tag: String,
+    /// The data's size in bytes.
     pub size: u64,
+    /// For a tag Windows writes, the global that holds it, such as
+    /// `nt!PopBlackBoxPnpGuid`.
     pub owner: Option<&'static str>,
+    /// For a tag Windows writes, what the block holds.
     pub holds: Option<&'static str>,
 }
 
-#[derive(Debug, Clone)]
-pub struct TargetVersionDetail {
+/// The version data of the target (`vertarget`), with the build,
+/// architecture, kernel, symbols, debugger version, time, and dump
+/// metadata.
+#[record]
+pub struct TargetVersion {
     pub major_version: Option<u64>,
     pub minor_version: Option<u64>,
     pub build_number: Option<u64>,
+    /// The build lab string.
     pub build_lab: Option<String>,
     pub architecture: String,
+    /// The number of processors in the target.
     pub processors: Option<u16>,
+    /// The product name.
     pub product: String,
-    pub kernel: Option<TargetKernelDetail>,
+    /// The kernel image. `None` if ntoseye did not find it.
+    pub kernel: Option<TargetKernel>,
+    /// The symbol status label of the kernel. `None` if ntoseye did not
+    /// find the kernel.
     pub symbol_status: Option<String>,
     pub debugger_version: String,
     pub symbol_path: String,
-    pub time: TargetTimeDetail,
+    pub time: TargetTime,
+    /// The backend attached to the target.
     pub backend: Option<String>,
-    pub dump: Option<TargetDumpMetadata>,
+    /// The crash dump header. `None` for a live target.
+    pub dump: Option<TargetDump>,
     /// What a user-mode minidump records of its process and how it was
-    /// written; `None` for a kernel target.
-    pub user_dump: Option<TargetUserDumpDetail>,
+    /// written. `None` for a kernel target.
+    pub user_dump: Option<TargetUserDump>,
 }
 
-/// A user-mode minidump's process and header, for `vertarget`.
-#[derive(Debug, Clone)]
-pub struct TargetUserDumpDetail {
+/// A user-mode minidump's process and header.
+#[record]
+pub struct TargetUserDump {
     pub process_name: Option<String>,
     pub process_id: Option<u32>,
-    /// `SystemInfoStream.ProcessorLevel` and `ProcessorRevision`: on AMD64
-    /// the family, and the model (high byte) and stepping (low byte).
+    /// `ProcessorLevel`: on AMD64, the processor family.
     pub processor_level: u16,
+    /// `ProcessorRevision`: on AMD64, the model (high byte) and stepping
+    /// (low byte).
+    #[record(hex)]
     pub processor_revision: u16,
     pub service_pack: Option<String>,
-    /// `MINIDUMP_HEADER.Flags`: the `MINIDUMP_TYPE` it was written with.
+    /// The `MINIDUMP_TYPE` flags the dump was written with.
+    #[record(hex)]
     pub flags: u64,
-    /// [`minidump_type_names`] of `flags`.
+    /// `flags` as `MINIDUMP_TYPE` names (`MiniDumpWithFullMemory`, ...).
     pub flag_names: Vec<String>,
     pub threads: usize,
     pub modules: usize,
+    /// The code of the exception the dump was written for.
+    #[record(hex)]
     pub exception_code: Option<u32>,
 }
 
-#[derive(Debug, Clone)]
-pub struct TargetTimeDetail {
+/// The UTC time and uptime of the target (`.time`). A user-mode minidump
+/// records neither: its `user_dump` says when it was written instead.
+#[record]
+pub struct TargetTime {
+    /// The UTC time of the target (FILETIME).
+    #[record(hex)]
     pub system_time: Option<u64>,
+    /// `system_time` as ISO 8601.
     pub system_time_iso: Option<String>,
+    /// `KUSER_SHARED_DATA.InterruptTime`: the time since boot, in 100 ns
+    /// units. The `due_time` of clock timers uses this clock.
+    #[record(hex)]
     pub interrupt_time: Option<u64>,
+    /// Seconds since boot.
     pub uptime_seconds: Option<u64>,
+    /// The uptime as formatted text.
     pub uptime: Option<String>,
-    /// What a user-mode minidump records of time; `None` for a kernel
-    /// target. A user dump records no system time or system uptime, so the
-    /// fields above stay `None` for one.
-    pub user_dump: Option<UserDumpTimeDetail>,
+    /// When a user-mode minidump was written, and its process's times.
+    /// `None` for a kernel target.
+    pub user_dump: Option<UserDumpTime>,
 }
 
-/// When a user-mode minidump was written and how long its process had run,
-/// from its header and `MiscInfoStream`.
-#[derive(Debug, Clone)]
-pub struct UserDumpTimeDetail {
-    /// `MINIDUMP_HEADER.TimeDateStamp`, seconds since 1970 (UTC).
+/// When a user-mode minidump was written (its header), and how long its
+/// process had run (`MiscInfoStream`), where it records them.
+#[record]
+pub struct UserDumpTime {
+    /// When the dump was written, in seconds since 1970 (UTC).
     pub written: u32,
+    /// `written` as ISO 8601 UTC.
     pub written_iso: Option<String>,
-    /// `written` in the system's time zone, `2026-10-11T08:17:41+02:00`.
+    /// `written` in the system's time zone.
     pub written_local: Option<String>,
     /// The name of that zone's period in effect.
     pub time_zone: Option<String>,
+    /// When the process started, in seconds since 1970 (UTC).
     pub process_created: Option<u32>,
+    /// `process_created` as ISO 8601 UTC.
     pub process_created_iso: Option<String>,
-    /// From process creation to the dump.
+    /// From the process's start to the dump, in seconds.
     pub process_uptime_seconds: Option<u64>,
+    /// `process_uptime_seconds` as formatted text.
     pub process_uptime: Option<String>,
-    /// User-mode and kernel-mode time the process had run, in seconds.
+    /// User-mode time the process had run, in seconds.
     pub user_time_seconds: Option<u32>,
+    /// Kernel-mode time the process had run, in seconds.
     pub kernel_time_seconds: Option<u32>,
 }
 
@@ -801,13 +893,13 @@ pub fn unix_to_local_iso(seconds: u64, bias: i32) -> Option<String> {
     ))
 }
 
-fn user_dump_time(info: &UserDumpInfo) -> UserDumpTimeDetail {
+fn user_dump_time(info: &UserDumpInfo) -> UserDumpTime {
     let written = info.time_date_stamp;
     let process_uptime_seconds = info
         .process_create_time
         .and_then(|created| written.checked_sub(created))
         .map(u64::from);
-    UserDumpTimeDetail {
+    UserDumpTime {
         written,
         written_iso: unix_time_to_iso(u64::from(written)),
         written_local: info
@@ -826,8 +918,8 @@ fn user_dump_time(info: &UserDumpInfo) -> UserDumpTimeDetail {
     }
 }
 
-fn user_dump_detail(info: &UserDumpInfo) -> TargetUserDumpDetail {
-    TargetUserDumpDetail {
+fn user_dump_detail(info: &UserDumpInfo) -> TargetUserDump {
+    TargetUserDump {
         process_name: info.process_name().map(str::to_string),
         process_id: info.process_id,
         processor_level: info.system.processor_level,
@@ -878,9 +970,9 @@ fn uptime_seconds(target: &Target, interrupt_time: Option<u64>) -> Option<u64> {
     })
 }
 
-fn target_time(target: &Target, kuser: &KuserSharedData<'_>) -> TargetTimeDetail {
+fn target_time(target: &Target, kuser: &KuserSharedData<'_>) -> TargetTime {
     if let Some(info) = target.user_dump_info() {
-        return TargetTimeDetail {
+        return TargetTime {
             system_time: None,
             system_time_iso: None,
             interrupt_time: None,
@@ -892,7 +984,7 @@ fn target_time(target: &Target, kuser: &KuserSharedData<'_>) -> TargetTimeDetail
     let system_time = system_time(target, kuser);
     let interrupt_time = kuser.interrupt_time();
     let uptime_seconds = uptime_seconds(target, interrupt_time);
-    TargetTimeDetail {
+    TargetTime {
         system_time,
         system_time_iso: system_time.and_then(filetime_to_iso),
         interrupt_time,
@@ -919,11 +1011,9 @@ fn shared_build_lab(target: &Target) -> Option<String> {
         .memory()
         .read_bytes(address, &mut bytes)
         .ok()?;
-    let end = bytes
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(bytes.len());
-    let text = String::from_utf8_lossy(&bytes[..end]).trim().to_string();
+    let text = String::from_utf8_lossy(before_nul(&bytes))
+        .trim()
+        .to_string();
     (!text.is_empty()).then_some(text)
 }
 
@@ -946,10 +1036,10 @@ fn product_label(product: Option<u64>) -> String {
     }
 }
 
-fn dump_metadata(target: &Target, kernel_base: Option<VirtAddr>) -> Option<TargetDumpMetadata> {
+fn dump_metadata(target: &Target, kernel_base: Option<VirtAddr>) -> Option<TargetDump> {
     target.phys.dmp_info().map(|info| {
         let system_info = info.system_info.as_ref();
-        TargetDumpMetadata {
+        TargetDump {
             is_triage: info.is_triage,
             directory_table_base: VirtAddr(info.directory_table_base),
             bugcheck_code: info.bug_check_code,
@@ -980,7 +1070,7 @@ fn dump_metadata(target: &Target, kernel_base: Option<VirtAddr>) -> Option<Targe
                 .iter()
                 .map(|block| {
                     let known = known_tag(&block.tag);
-                    TaggedBlockInfo {
+                    TaggedBlock {
                         tag: block.tag_text(),
                         size: block.data.len() as u64,
                         owner: known.map(|known| known.owner),
@@ -996,7 +1086,7 @@ impl Target {
     /// Decode target/kernel build strings, architecture, target-known
     /// processor count, kernel image and symbol status, debugger version, time
     /// metadata, and dump-header metadata when this target came from a dump.
-    pub fn target_version(&self) -> Result<TargetVersionDetail> {
+    pub fn target_version(&self) -> Result<TargetVersion> {
         let dump_info = self
             .phys
             .dmp_info()
@@ -1061,7 +1151,7 @@ impl Target {
                     }
                 })
         });
-        let kernel = base.map(|base| TargetKernelDetail {
+        let kernel = base.map(|base| TargetKernel {
             name: kernel_module
                 .as_ref()
                 .map(|module| module.name.clone())
@@ -1096,7 +1186,7 @@ impl Target {
             Some(info) => info.build_string.clone().filter(|text| !text.is_empty()),
             None => shared_build_lab(self),
         };
-        Ok(TargetVersionDetail {
+        Ok(TargetVersion {
             major_version: major,
             minor_version: minor,
             build_number: build,
@@ -1124,47 +1214,65 @@ impl Target {
     /// Decode target system time as raw FILETIME and ISO-8601 UTC, plus uptime
     /// in seconds and WinDbg-style day/hour/minute/second form. Missing KUSER
     /// data and missing dump metadata are represented by `None` fields.
-    pub fn target_time(&self) -> Result<TargetTimeDetail> {
+    pub fn target_time(&self) -> Result<TargetTime> {
         Ok(target_time(self, &KuserSharedData::new(self)))
     }
 }
 
-impl Session {
-    /// Add backend identity and a backend vCPU count fallback to the target
-    /// metadata. The target-only method remains useful for passive memory and
-    /// dump consumers that have no execution backend.
-    pub fn target_version(&mut self) -> Result<TargetVersionDetail> {
-        let mut detail = self.target.target_version()?;
-        if detail.processors.is_none() {
-            detail.processors = self
-                .backend
-                .thread_list()
-                .ok()
-                .map(|threads| threads.len() as u16);
-        }
-        detail.backend = Some(self.backend.name().to_string());
-        Ok(detail)
-    }
+/// The family of a decoded error code: `ntstatus`, `hresult`, `win32`, or
+/// `unknown` (a code wider than 32 bits).
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCodeKind {
+    #[record(label = "NTSTATUS")]
+    Ntstatus,
+    #[record(label = "HRESULT")]
+    Hresult,
+    #[record(label = "Win32")]
+    Win32,
+    Unknown,
 }
 
-#[derive(Debug, Clone)]
-pub struct ErrorCodeDetail {
+/// The severity of an NTSTATUS or HRESULT code: `success`,
+/// `informational`, `warning`, or `error`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorSeverity {
+    Success,
+    Informational,
+    Warning,
+    Error,
+}
+
+/// A decoded NTSTATUS, Win32, or HRESULT code (`!error`).
+#[record]
+pub struct ErrorCode {
+    #[record(hex)]
     pub code: u64,
-    pub kind: String,
+    pub kind: ErrorCodeKind,
+    /// The symbolic name of the code.
     pub name: String,
     pub description: String,
-    pub severity: Option<String>,
+    /// `success`, `informational`, `warning`, or `error`. `None` for a
+    /// Win32 code.
+    pub severity: Option<ErrorSeverity>,
+    /// The facility that the code encodes.
     pub facility: Option<u32>,
+    /// Whether the code is customer-defined (its C bit).
     pub customer: Option<bool>,
+    /// The Win32 error: the code itself, or the Win32 error that a
+    /// `HRESULT_FROM_WIN32` code wraps.
+    #[record(hex)]
     pub win32_code: Option<u32>,
+    /// The name of that Win32 error.
     pub win32_name: Option<String>,
 }
 
-fn decode_error_code_inner(code: u64, force_ntstatus: bool) -> ErrorCodeDetail {
+fn decode_error_code_inner(code: u64, force_ntstatus: bool) -> ErrorCode {
     let Some(raw) = u32::try_from(code).ok() else {
-        return ErrorCodeDetail {
+        return ErrorCode {
             code,
-            kind: "unknown".to_string(),
+            kind: ErrorCodeKind::Unknown,
             name: "UNKNOWN".to_string(),
             description: "error code exceeds 32 bits".to_string(),
             severity: None,
@@ -1178,22 +1286,22 @@ fn decode_error_code_inner(code: u64, force_ntstatus: bool) -> ErrorCodeDetail {
     let is_ntstatus = force_ntstatus || raw >= 0xc000_0000;
     if is_ntstatus {
         let severity = match raw >> 30 {
-            0 => "success",
-            1 => "informational",
-            2 => "warning",
-            _ => "error",
+            0 => ErrorSeverity::Success,
+            1 => ErrorSeverity::Informational,
+            2 => ErrorSeverity::Warning,
+            _ => ErrorSeverity::Error,
         };
         let facility = (raw >> 16) & 0x0fff;
         let customer = raw & 0x2000_0000 != 0;
-        return ErrorCodeDetail {
+        return ErrorCode {
             code,
-            kind: "NTSTATUS".to_string(),
+            kind: ErrorCodeKind::Ntstatus,
             name: ntstatus_name(raw).unwrap_or("STATUS_UNKNOWN").to_string(),
             description: format!(
                 "severity: {severity}; facility: {facility:#x}; customer: {}",
                 if customer { "yes" } else { "no" }
             ),
-            severity: Some(severity.to_string()),
+            severity: Some(severity),
             facility: Some(facility),
             customer: Some(customer),
             win32_code: None,
@@ -1206,9 +1314,9 @@ fn decode_error_code_inner(code: u64, force_ntstatus: bool) -> ErrorCodeDetail {
         let win32_code = (facility == 7).then_some(raw & 0xffff);
         let win32_name = win32_code.and_then(win32_error_name).map(str::to_string);
         let customer = raw & 0x2000_0000 != 0;
-        return ErrorCodeDetail {
+        return ErrorCode {
             code,
-            kind: "HRESULT".to_string(),
+            kind: ErrorCodeKind::Hresult,
             name: win32_name
                 .as_deref()
                 .unwrap_or("HRESULT_UNKNOWN")
@@ -1217,7 +1325,7 @@ fn decode_error_code_inner(code: u64, force_ntstatus: bool) -> ErrorCodeDetail {
                 "severity: error; facility: {facility:#x}; customer: {}",
                 if customer { "yes" } else { "no" }
             ),
-            severity: Some("error".to_string()),
+            severity: Some(ErrorSeverity::Error),
             facility: Some(facility),
             customer: Some(customer),
             win32_code,
@@ -1225,9 +1333,9 @@ fn decode_error_code_inner(code: u64, force_ntstatus: bool) -> ErrorCodeDetail {
         };
     }
 
-    ErrorCodeDetail {
+    ErrorCode {
         code,
-        kind: "Win32".to_string(),
+        kind: ErrorCodeKind::Win32,
         name: win32_error_name(raw).unwrap_or("ERROR_UNKNOWN").to_string(),
         description: format!("Win32 error {raw} ({raw:#x})"),
         severity: None,
@@ -1241,13 +1349,13 @@ fn decode_error_code_inner(code: u64, force_ntstatus: bool) -> ErrorCodeDetail {
 /// Decode a 32-bit NTSTATUS, Win32, or HRESULT value from a plain integer.
 /// Unknown values retain their classification and the structured bit-field
 /// description used by the REPL's `!error` output.
-pub fn decode_error_code(code: u64) -> ErrorCodeDetail {
+pub fn decode_error_code(code: u64) -> ErrorCode {
     decode_error_code_inner(code, false)
 }
 
 /// Decode the `!ntstatus` alias without exposing a REPL-specific flag in the
 /// SDK/MCP operation's public signature.
-pub fn decode_error_code_as_ntstatus(code: u64) -> ErrorCodeDetail {
+pub fn decode_error_code_as_ntstatus(code: u64) -> ErrorCode {
     decode_error_code_inner(code, true)
 }
 
@@ -1281,20 +1389,20 @@ mod tests {
     #[test]
     fn error_code_decoding_keeps_win32_hresult_and_ntstatus_metadata() {
         let win32 = decode_error_code(5);
-        assert_eq!(win32.kind, "Win32");
+        assert_eq!(win32.kind, ErrorCodeKind::Win32);
         assert_eq!(win32.name, "ERROR_ACCESS_DENIED");
         assert_eq!(win32.win32_code, Some(5));
 
         let hresult = decode_error_code(0x8007_0005);
-        assert_eq!(hresult.kind, "HRESULT");
+        assert_eq!(hresult.kind, ErrorCodeKind::Hresult);
         assert_eq!(hresult.name, "ERROR_ACCESS_DENIED");
         assert_eq!(hresult.facility, Some(7));
         assert_eq!(hresult.win32_code, Some(5));
 
         let ntstatus = decode_error_code(0xc000_0005);
-        assert_eq!(ntstatus.kind, "NTSTATUS");
+        assert_eq!(ntstatus.kind, ErrorCodeKind::Ntstatus);
         assert_eq!(ntstatus.name, "STATUS_ACCESS_VIOLATION");
-        assert_eq!(ntstatus.severity.as_deref(), Some("error"));
+        assert_eq!(ntstatus.severity, Some(ErrorSeverity::Error));
     }
 
     #[test]

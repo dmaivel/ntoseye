@@ -50,7 +50,7 @@ use crate::dbg_backend::DebugCapability;
 use crate::error::{Error, Result};
 use crate::gdb::{append_packet, trace_packet};
 use crate::repl::{ReplStore, supports_capability};
-use crate::session::{ContinueOutcome, Session};
+use crate::session::{Cancel, Motion, Session, Stop};
 use crate::termination;
 use crate::types::Arch;
 
@@ -143,7 +143,7 @@ fn serve_client(
     // client inspects memory live.
     if session.backend.is_running()
         && supports_capability(&session.capabilities(), DebugCapability::InterruptTarget)
-        && let Err(error) = session.interrupt_outcome()
+        && let Err(error) = session.run(Motion::Break, &Cancel::NEVER)
     {
         eprintln!("ntoseye-gdbserver: could not halt the target for the client: {error}");
     }
@@ -342,7 +342,7 @@ struct GdbTarget<'a> {
     step_thread: Option<Tid>,
     /// A stop that already happened (a completed step, a refused resume),
     /// reported by the next wait.
-    pending: Option<ContinueOutcome>,
+    pending: Option<Stop>,
     /// The pending stop is a resume that failed: the target did not move, so
     /// it is reported as `SIGINT`, which ends a client's stepping loop, not
     /// as a trap the client would take for a step.
@@ -420,6 +420,9 @@ impl<'a> GdbTarget<'a> {
         if self.terminating() || self.session.backend.is_running() {
             return;
         }
+        // Not `Session::run`: the driver resumes to reach and report the
+        // next stop, and returns a parked stop instead of resuming. A detach
+        // reports nothing and must leave the guest running either way.
         if supports_capability(
             &self.session.capabilities(),
             DebugCapability::ExecutionControl,

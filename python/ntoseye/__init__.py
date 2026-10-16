@@ -8,8 +8,8 @@
             print(proc.pid, proc.name)
         bp = dbg.breakpoints.add("nt!NtCreateFile")
         stop = dbg.run(timeout=5.0)
-        if stop is not None and bp in stop.breakpoints:
-            print(stop.thread.backtrace())
+        if stop is not None and stop.hit(bp) and stop.thread is not None:
+            print(dbg.threads[stop.thread].backtrace())
 
 For more information, see `docs/scripting/sdk.md` and `examples/`.
 """
@@ -126,7 +126,7 @@ class Diagnostic(Generic[_T]):
 def _summary(value: object) -> str:
     """A one-line rendering: scalars in full, records and lists by size."""
     if isinstance(value, BaseRecord):
-        return f"{type(value).__name__}(<{len(value)} fields>)"
+        return f"{type(value).__qualname__}(<{len(value.to_dict())} fields>)"
     if isinstance(value, list):
         return f"[<{len(value)} items>]"
     return repr(value)

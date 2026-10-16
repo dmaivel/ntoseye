@@ -1,23 +1,28 @@
 //! Presentation-free crash triage aggregation shared by debugger frontends.
 
 mod blackbox;
+pub mod crash_context;
 mod culprit;
-mod power;
+pub mod hang;
+pub mod power;
 mod signature;
 pub mod time;
-mod user;
+pub mod user;
 mod verifier;
 mod whea;
 
+use ntoseye_macros::record;
+
 use crate::bugchecks::{BugcheckAnalysis, bugcheck_trap_frame_on_stack, module_filename};
-use crate::dmp::{DmpException, DmpInfo, DmpSystemInfo, TriageCrashInfo, UnloadedDriver};
+use crate::dmp::triage::TriagePrcbInfo;
+use crate::dmp::{DmpException, DmpInfo, DmpSystemInfo, UnloadedDriver};
 use crate::guest::ModuleInfo;
 use crate::ntstatus::ntstatus_name;
 use crate::session::{RunStatus, Session};
-use crate::triage::TriagePrcbInfo;
 use crate::types::VirtAddr;
 use crate::unwind::StackTrace;
 use blackbox::blackbox_findings;
+pub use crash_context::TriageCrashInfo;
 use culprit::culprit_attribution;
 pub use power::{
     POWER_THREAD_STACK_LIMIT, PowerFailureFinding, PowerFailureThread, PowerThreadRole,
@@ -25,19 +30,27 @@ pub use power::{
 };
 use signature::failure_signature;
 pub use user::{
-    CodeOwner, ExceptionParameter, UserDumpTriage, UserExceptionFinding, UserExceptionKind,
-    UserFrame, UserProcessSummary, UserStackSource, UserStackThread,
+    CodeOwner, ExceptionParameter, UserDumpTriage, UserExceptionFinding, UserFrame,
+    UserProcessSummary, UserStackSource, UserStackThread,
 };
 use verifier::verifier_finding;
 use whea::{decode_whea_record, whea_without_memory};
 
-/// Canonical crash-code kind used by a failure signature.
+/// Canonical crash-code kind used by a failure signature: `bugcheck` or
+/// `exception`.
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureCodeKind {
     Bugcheck,
     Exception,
 }
 
+/// The source of a failure signature's location: `bugcheck_fault`,
+/// `exception_address`, `current_instruction`, `top_frame`,
+/// `power_failure_driver` (the driver a 0x9F names),
+/// `first_non_system_frame` (on a user-mode minidump, the first frame
+/// outside the system modules), or `code_only`.
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureSignatureSource {
     BugcheckFault,
@@ -54,19 +67,28 @@ pub enum FailureSignatureSource {
     CodeOnly,
 }
 
-/// Deterministic, address-independent identity for comparing failures.
+/// A deterministic identity for a failure that does not depend on
+/// addresses, so you can use it to compare failures.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FailureSignature {
     pub code_kind: FailureCodeKind,
+    /// The bugcheck or exception code.
+    #[record(hex)]
     pub code: u32,
+    /// The module at the failing location.
     pub module: Option<String>,
+    /// The symbol at the failing location.
     pub symbol: Option<String>,
     pub source: FailureSignatureSource,
-    /// Ordered, canonical components used to form `bucket`.
+    /// The ordered parts that make `bucket`.
     pub components: Vec<String>,
+    /// The failure bucket.
     pub bucket: String,
 }
 
+/// How sure an attribution is: `low`, `medium`, or `high`.
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CulpritConfidence {
     Low,
@@ -74,6 +96,12 @@ pub enum CulpritConfidence {
     High,
 }
 
+/// What an item of culprit evidence is: `recorded_broken_driver`,
+/// `recorded_bugcheck_driver`, `bugcheck_fault_address`,
+/// `exception_address`, `current_instruction`, `top_frame`,
+/// `power_failure_driver`, `pnp_lock_owner_stack`, or
+/// `first_non_system_frame`.
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CulpritEvidenceKind {
     RecordedBrokenDriver,
@@ -91,23 +119,34 @@ pub enum CulpritEvidenceKind {
     FirstNonSystemFrame,
 }
 
+/// One item of evidence for a culprit attribution.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CulpritEvidence {
     pub kind: CulpritEvidenceKind,
     pub detail: String,
+    /// The address that the evidence uses, if the evidence is an address.
+    #[record(hex)]
     pub address: Option<u64>,
 }
 
-/// Evidence-based attribution. Absence means the available evidence was not
-/// sufficient to name a non-kernel culprit.
+/// What the available evidence identifies as the cause of the crash: a
+/// module, or on a user-mode minidump, generated code no module holds.
+/// Absence means the evidence was not sufficient to name a non-kernel
+/// culprit.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CulpritAttribution {
     pub subject: CulpritSubject,
     pub confidence: CulpritConfidence,
+    /// The evidence that points to the culprit.
     pub evidence: Vec<CulpritEvidence>,
 }
 
-/// What a culprit attribution names.
+/// What a culprit attribution names: `kind` `module` (`module`, its name),
+/// or `dynamic_code` (`dynamic_code`: JIT-compiled or generated code that a
+/// dynamic function table covers, on a user-mode minidump).
+#[record(tagged)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CulpritSubject {
     Module(String),
@@ -116,12 +155,18 @@ pub enum CulpritSubject {
     DynamicCode(DynamicCodeCulprit),
 }
 
+/// Generated code a culprit attribution names: no module holds it, and a
+/// dynamic function table the process registered covers it.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DynamicCodeCulprit {
     /// The blamed frame's address.
+    #[record(hex)]
     pub address: u64,
     /// The dynamic function table covering it, `table_start..table_end`.
+    #[record(hex)]
     pub table_start: u64,
+    #[record(hex)]
     pub table_end: u64,
     /// The first frame further out that a module holds: the module code
     /// that called into the generated code.
@@ -138,31 +183,49 @@ impl CulpritAttribution {
     }
 }
 
+/// A verifier bugcheck parameter and what it means for the subcode.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifierArgument {
+    #[record(hex)]
     pub value: u64,
     pub description: String,
 }
 
+/// An address in a verifier bugcheck, and its role.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifierAddress {
     pub role: String,
+    #[record(hex)]
     pub address: u64,
 }
 
+/// A Driver Verifier bugcheck, decoded from its subcode.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifierFinding {
+    #[record(hex)]
     pub bugcheck_code: u32,
     pub bugcheck_name: String,
+    /// The verifier subcode (the first bugcheck parameter).
+    #[record(hex)]
     pub subcode: u64,
+    /// `True` if the decoder recognizes the subcode.
     pub known_subcode: bool,
-    /// A decoded meaning, or an explicit `unknown verifier subcode` label.
+    /// What the subcode means, or `unknown verifier subcode`.
     pub subcode_description: String,
+    /// The bugcheck parameters, with descriptions for the subcode.
     pub arguments: Vec<VerifierArgument>,
+    /// The driver that ntoseye attributes the violation to.
     pub associated_driver: Option<String>,
+    /// The addresses in the parameters, with their roles.
     pub addresses: Vec<VerifierAddress>,
 }
 
+/// What a WHEA section holds: `processor_generic`, `memory`,
+/// `pci_express`, `x64_processor`, or `unknown`.
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WheaSectionKind {
     ProcessorGeneric,
@@ -172,35 +235,54 @@ pub enum WheaSectionKind {
     Unknown,
 }
 
+/// One section of a WHEA error record.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WheaSection {
+    /// The section's offset in the record, in bytes.
     pub offset: u32,
+    /// The section's length in bytes.
     pub length: u32,
+    /// The section's error severity.
     pub severity: u32,
+    /// The section type GUID.
     pub section_type: String,
     pub kind: WheaSectionKind,
 }
 
+/// A decoded WHEA error record.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WheaRecord {
+    #[record(hex)]
     pub revision: u16,
+    /// The record's error severity (`WHEA_ERROR_SEVERITY`).
     pub severity: u32,
+    /// The record's length in bytes.
     pub length: u32,
     pub sections: Vec<WheaSection>,
 }
 
+/// A WHEA error record, `decoded`, or `unavailable` with the `reason`.
+#[record(tagged)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WheaRecordState {
     Decoded(WheaRecord),
     Unavailable { reason: String },
 }
 
+/// The WHEA error record of a hardware-error bugcheck.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WheaFinding {
+    /// The address of the record. `None` if the bugcheck does not give one.
+    #[record(hex)]
     pub record_address: Option<u64>,
     pub state: WheaRecordState,
 }
 
+/// A blackbox record of a crash dump: `pnp`, `ntfs`, `bsd`, or `winlogon`.
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlackboxKind {
     Pnp,
@@ -209,6 +291,9 @@ pub enum BlackboxKind {
     Winlogon,
 }
 
+/// What a dump holds of a blackbox: `decoded` (with `summary`, what it holds
+/// in one line), `malformed` (with the `reason`), or `absent`.
+#[record(tagged)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlackboxState {
     /// The dump has the block, and it decodes; `summary` says what it holds.
@@ -219,12 +304,17 @@ pub enum BlackboxState {
     Absent,
 }
 
+/// A blackbox record (pnp, ntfs, bsd, winlogon) of a crash dump: a block of
+/// its tagged data that ntoseye decodes as WinDbg's `!blackbox*` commands do.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlackboxFinding {
     pub kind: BlackboxKind,
+    /// `PnP`, `NTFS`, `BSD`, or `Winlogon`.
     pub name: String,
     /// The command that shows the whole record, such as `!blackboxpnp`.
     pub command: &'static str,
+    /// The block's size in bytes. `None` if the dump has no block.
     pub size: Option<u64>,
     pub state: BlackboxState,
 }
@@ -232,28 +322,46 @@ pub struct BlackboxFinding {
 /// Maximum number of frames collected for a one-shot triage report.
 pub const TRIAGE_BACKTRACE_LIMIT: usize = 64;
 
-/// A presentation-neutral first-pass debugger report.
-///
-/// Frontends decide how to format addresses and collection caps. Recorded
-/// facts, decoded findings, and explicitly labeled attribution evidence remain
-/// in this presentation-neutral model.
+/// The one-shot crash triage report (`!analyze`), with the run status, the
+/// bugcheck or exception, the backtrace, the modules, the dump records, and
+/// the findings.
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct TriageReport {
+    /// The target's run status.
     pub status: RunStatus,
+    /// The bugcheck, if the target is in a bugcheck.
     pub bugcheck: Option<BugcheckAnalysis>,
+    /// The exception that a dump recorded.
     pub exception: Option<DmpException>,
+    /// The system information of the dump.
     pub system_info: Option<DmpSystemInfo>,
+    /// The stack of the current thread (see the `backtrace` property).
+    #[record(skip)]
     pub backtrace: Option<StackTrace>,
+    /// The loaded modules.
     pub modules: Vec<ModuleInfo>,
+    /// The drivers the system unloaded recently, as the crash dump records
+    /// them.
     pub unloaded_drivers: Vec<UnloadedDriver>,
+    /// The process and thread that crashed, as a triage dump recorded them.
     pub crash_context: Option<TriageCrashInfo>,
+    /// The processor that crashed, as a triage dump recorded it.
     pub prcb: Option<TriagePrcbInfo>,
+    /// The driver that the dump records as broken.
     pub broken_driver: Option<String>,
-    /// `None` for non-dump targets; otherwise the dump's recorded overflow bit.
+    /// `True` if the triage data of the dump overflowed. `None` if the
+    /// target is not a dump.
     pub triage_overflowed: Option<bool>,
     pub failure_signature: Option<FailureSignature>,
+    /// What the evidence identifies as the cause: a module, or on a
+    /// user-mode minidump, JIT-compiled code. `None` if the evidence
+    /// identifies neither a non-kernel (or, on a user dump, non-system)
+    /// module nor generated code.
     pub culprit: Option<CulpritAttribution>,
+    /// The Driver Verifier violation of a verifier bugcheck.
     pub verifier: Option<VerifierFinding>,
+    /// The hardware error record of a WHEA bugcheck.
     pub whea: Option<WheaFinding>,
     pub blackboxes: Vec<BlackboxFinding>,
     /// The KMDF driver whose In-Flight Recorder log the dump holds.
@@ -263,13 +371,25 @@ pub struct TriageReport {
     /// What a user-mode minidump adds: the process, the exception decoded,
     /// and the frame the failure is blamed on. `None` for a kernel target.
     pub user: Option<UserDumpTriage>,
-    /// Best-effort collection failures that did not prevent the report.
+    /// Failures in best-effort data collection that did not stop the
+    /// report.
     pub warnings: Vec<String>,
+}
+
+#[record]
+impl TriageReport {
+    /// The stack of the current thread. `None` while the target runs or if
+    /// the unwind failed (see `warnings`).
+    #[record(getter, rename = "backtrace")]
+    pub fn backtrace_frames(&self) -> Option<Vec<crate::unwind::StackFrame>> {
+        self.backtrace.as_ref().map(|trace| trace.frames.clone())
+    }
 }
 
 /// The client driver whose In-Flight Recorder log Wdf01000 copied into a
 /// crash dump, and how many records it holds (`!wdfkd.wdfcrashdump` shows
 /// them).
+#[record]
 #[derive(Debug, Clone)]
 pub struct KmdfLogFinding {
     pub driver: String,
@@ -316,7 +436,7 @@ impl TriageReport {
                 Vec::new()
             }
         };
-        let crash_context = session.backend.triage_crash_info().cloned();
+        let crash_context = TriageCrashInfo::from_dump(&session.target);
 
         let mut report = Self::assemble(
             status,
@@ -484,15 +604,16 @@ fn names_match(left: &str, right: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::user::UserExceptionKind;
     use super::*;
     use crate::bugchecks::{BugcheckArg, BugcheckFault};
+    use crate::cpu_context::amd64::REGISTER_BUFFER_SIZE;
     use crate::dmp::DmpContext;
+    use crate::dmp::triage::TriageDriver;
     use crate::guest::ProcessInfo;
-    use crate::kd::context::REGISTER_BUFFER_SIZE;
     use crate::session::RunStatus;
     use crate::symbols::CodeFrame;
     use crate::target::power::{DeviceDriver, PowerCulprit, PowerFailure};
-    use crate::triage::TriageDriver;
     use crate::types::{Arch, VirtAddr};
     use crate::unwind::{FrameSource, StackFrame};
 
@@ -536,7 +657,7 @@ mod tests {
                 pid: 4,
                 name: "System".into(),
                 dtb: 0x1a_d000,
-                eprocess_va: VirtAddr(0xffff_8000_0000_1000),
+                eprocess: VirtAddr(0xffff_8000_0000_1000),
                 wow64_peb: None,
             }),
             stopped_process: None,
@@ -557,12 +678,10 @@ mod tests {
             number_processors: 2,
             is_triage: true,
             ps_loaded_module_list: 0,
-            ps_active_process_head: 0,
             debugger_data_block: None,
             triage_drivers: vec![TriageDriver {
                 name: "sample.sys".into(),
                 base: 0xffff_f800_1000_0000,
-                entry_point: 0xffff_f800_1000_1000,
                 size: 0x4000,
                 checksum: 0,
                 time_date_stamp: 0x1234,

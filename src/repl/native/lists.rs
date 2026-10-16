@@ -7,13 +7,13 @@ use tern_sdk::ui::{self, Column, Span, TableRow, TextAlign, Truncate};
 use tern_sdk::{Node, View};
 
 use super::{MUTED, NUMBER, STRONG, addr, span, symbol};
-use crate::breakpoints::{Breakpoint, BreakpointScope};
+use crate::breakpoints::{BreakpointInfo, BreakpointScope};
 use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::repl::commands::address_space::{
     PAGE_SHIFT, format_region_size, vad_protection_label, vad_type_label,
 };
-use crate::repl::commands::symbols::ModuleListing;
 use crate::session::VcpuInfo;
+use crate::symbols::ModuleListing;
 use crate::symbols::ModuleSymbolStatus;
 use crate::target::mm::{MemoryRegionInfo, VadType};
 use crate::target::sched::ProcessDetail;
@@ -90,10 +90,10 @@ pub fn modules(modules: &[ModuleListing], timestamp: bool) -> View {
                     None => none(),
                 },
             )
-            .cell("symbols", symbol_status(listing.status.as_ref()))
+            .cell("symbols", symbol_status(listing.symbols.status.as_ref()))
             .cell(
                 "source",
-                match &listing.source {
+                match &listing.symbols.source {
                     Some(source) => span(source.label(), MUTED),
                     None => none(),
                 },
@@ -128,21 +128,21 @@ pub fn module_details(modules: &[ModuleListing], timestamp: bool) -> View {
                     addr(module.end_address().0),
                 ],
             )
-            .item("symbols", symbol_status(listing.status.as_ref()))
+            .item("symbols", symbol_status(listing.symbols.status.as_ref()))
             .item(
                 "source",
-                match &listing.source {
+                match &listing.symbols.source {
                     Some(source) => span(source.label(), ""),
                     None => none(),
                 },
             );
-        kv = match listing.pdb {
+        kv = match listing.symbols.pdb {
             Some(identity) => kv
                 .item("pdb guid", span(format!("{:032X}", identity.guid), NUMBER))
                 .item("pdb age", span(identity.age.to_string(), NUMBER)),
             None => kv.item("pdb", none()),
         };
-        if let Some(ModuleSymbolStatus::Failed(reason)) = &listing.status {
+        if let Some(ModuleSymbolStatus::Failed(reason)) = &listing.symbols.status {
             kv = kv.item("error", span(reason, "error"));
         }
         if timestamp {
@@ -163,12 +163,9 @@ pub fn module_details(modules: &[ModuleListing], timestamp: bool) -> View {
 
 /// `!process`: a row per process with its `_EPROCESS` fields, the image name
 /// carrying the table. A field no process has gets no column.
-pub fn processes(processes: &[ProcessInfo], details: &[ProcessDetail]) -> View {
+pub fn processes(details: &[ProcessDetail]) -> View {
     let any = |has: fn(&ProcessInfo, &ProcessDetail) -> bool| {
-        processes
-            .iter()
-            .zip(details)
-            .any(|(process, detail)| has(process, detail))
+        details.iter().any(|detail| has(&detail.process, detail))
     };
     let optional = [
         (
@@ -224,12 +221,13 @@ pub fn processes(processes: &[ProcessInfo], details: &[ProcessDetail]) -> View {
             table = table.col(column);
         }
     }
-    for (process, detail) in processes.iter().zip(details) {
+    for detail in details {
+        let process = &detail.process;
         table = table.row(
-            TableRow::new(format!("{:x}", process.eprocess_va.0))
+            TableRow::new(format!("{:x}", process.eprocess.0))
                 .cell("pid", span(process.pid.to_string(), NUMBER))
                 .cell("image", span(&process.name, STRONG))
-                .cell("eprocess", pointer(Some(process.eprocess_va), MUTED))
+                .cell("eprocess", pointer(Some(process.eprocess), MUTED))
                 .cell("session", decimal(detail.session_id.map(u64::from)))
                 .cell("parent", decimal(detail.parent_pid))
                 .cell("handles", decimal(detail.handle_count))
@@ -264,12 +262,12 @@ pub fn ps(processes: &[ProcessInfo]) -> View {
         .col(Column::new("wow64", "Wow64").priority(4.0));
     for process in processes {
         table = table.row(
-            TableRow::new(format!("{:x}", process.eprocess_va.0))
+            TableRow::new(format!("{:x}", process.eprocess.0))
                 .cell("name", span(&process.name, STRONG))
                 .cell("pid", span(process.pid.to_string(), NUMBER))
                 .cell(
                     "eprocess",
-                    span(format!("{:016x}", process.eprocess_va.0), MUTED),
+                    span(format!("{:016x}", process.eprocess.0), MUTED),
                 )
                 .cell("dtb", span(format!("{:016x}", process.dtb), MUTED))
                 .cell(
@@ -287,10 +285,10 @@ pub fn ps(processes: &[ProcessInfo]) -> View {
 
 /// `bl`: a row per breakpoint, its state colored, the site carrying the
 /// table and the condition and command hiding first.
-pub fn breakpoints(breakpoints: &[&Breakpoint]) -> View {
+pub fn breakpoints(breakpoints: &[BreakpointInfo]) -> View {
     // Columns no breakpoint uses go: a pass count, a process or thread
     // filter, a condition, a command.
-    let any = |has: fn(&Breakpoint) -> bool| breakpoints.iter().any(|bp| has(bp));
+    let any = |has: fn(&BreakpointInfo) -> bool| breakpoints.iter().any(has);
     let mut table = ui::table()
         .col(Column::new("id", "ID").align(TextAlign::End).priority(9.0))
         .col(Column::new("state", "State").priority(8.0))
@@ -446,7 +444,7 @@ pub fn vcpus(vcpus: &[VcpuInfo]) -> View {
 }
 
 /// A breakpoint any thread anywhere stops at: what `bl` labels `global`.
-fn unscoped(bp: &Breakpoint) -> bool {
+fn unscoped(bp: &BreakpointInfo) -> bool {
     bp.scope == BreakpointScope::Kernel
         && bp.partition.is_none()
         && bp.thread.is_none()

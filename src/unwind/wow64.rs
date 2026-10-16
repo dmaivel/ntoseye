@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 use super::{FrameSource, RecoveredFrame, RecoveredStackTrace, ThreadTraceContext, expand_frame};
-use crate::backend::MemoryOps;
+use crate::memory::MemoryOps;
 use crate::target::{Target, ThreadInfo};
 use crate::types::VirtAddr;
 

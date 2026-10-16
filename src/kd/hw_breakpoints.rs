@@ -1,26 +1,27 @@
 //! Hardware breakpoint slots programmed into every processor's
-//! `KSPECIAL_REGISTERS` as one transaction; the bit encoding is [`super::hwbp`].
+//! `KSPECIAL_REGISTERS` as one transaction; the bit encoding is
+//! [`debug_registers`].
 
 use crate::bytes;
-use crate::dbg_backend::{DebugBackend, HwBreakpointAccess};
+use crate::dbg_backend::{DebugBackend, HwBreakpointAccess, debug_registers};
 use crate::error::{Error, Result};
 use crate::types::Arch;
 
+use super::KdBackend;
 use super::registers::{
     ARM64_KSPECIAL_REGISTERS_BCR0_OFFSET, ARM64_KSPECIAL_REGISTERS_BVR0_OFFSET,
     ARM64_KSPECIAL_REGISTERS_WCR0_OFFSET, ARM64_KSPECIAL_REGISTERS_WVR0_OFFSET,
     KSPECIAL_REGISTERS_DR0_OFFSET, KSPECIAL_REGISTERS_DR7_OFFSET,
 };
-use super::{KdBackend, hwbp};
 
 fn arm64_slot_offsets(slot: u8) -> Result<(usize, usize)> {
-    if hwbp::ARM64_WATCHPOINT_SLOTS.contains(&slot) {
+    if debug_registers::ARM64_WATCHPOINT_SLOTS.contains(&slot) {
         Ok((
             ARM64_KSPECIAL_REGISTERS_WVR0_OFFSET + slot as usize * 8,
             ARM64_KSPECIAL_REGISTERS_WCR0_OFFSET + slot as usize * 4,
         ))
-    } else if hwbp::ARM64_BREAKPOINT_SLOTS.contains(&slot) {
-        let index = (slot - hwbp::ARM64_BREAKPOINT_SLOTS.start) as usize;
+    } else if debug_registers::ARM64_BREAKPOINT_SLOTS.contains(&slot) {
+        let index = (slot - debug_registers::ARM64_BREAKPOINT_SLOTS.start) as usize;
         Ok((
             ARM64_KSPECIAL_REGISTERS_BVR0_OFFSET + index * 8,
             ARM64_KSPECIAL_REGISTERS_BCR0_OFFSET + index * 4,
@@ -28,13 +29,13 @@ fn arm64_slot_offsets(slot: u8) -> Result<(usize, usize)> {
     } else {
         Err(Error::Kd(format!(
             "invalid ARM64 hardware breakpoint slot {slot} (expected 0-{})",
-            hwbp::ARM64_BREAKPOINT_SLOTS.end - 1
+            debug_registers::ARM64_BREAKPOINT_SLOTS.end - 1
         )))
     }
 }
 
 fn arm64_slot_offsets_for_access(slot: u8, access: HwBreakpointAccess) -> Result<(usize, usize)> {
-    let slots = hwbp::arm64_slot_range(access);
+    let slots = debug_registers::arm64_slot_range(access);
     if slots.contains(&slot) {
         return arm64_slot_offsets(slot);
     }
@@ -188,13 +189,21 @@ impl KdBackend {
         let mut special = self.read_special_registers_uncached(self.current_processor)?;
         if matches!(access, HwBreakpointAccess::Execute) {
             bytes::write_u64(&mut special, address_offset, addr);
-            bytes::write_u32(&mut special, control_offset, hwbp::arm64_bcr_value(addr));
-        } else {
-            bytes::write_u64(&mut special, address_offset, hwbp::arm64_wvr_address(addr));
             bytes::write_u32(
                 &mut special,
                 control_offset,
-                hwbp::arm64_wcr_value(addr, access, len),
+                debug_registers::arm64_bcr_value(addr),
+            );
+        } else {
+            bytes::write_u64(
+                &mut special,
+                address_offset,
+                debug_registers::arm64_wvr_address(addr),
+            );
+            bytes::write_u32(
+                &mut special,
+                control_offset,
+                debug_registers::arm64_wcr_value(addr, access, len),
             );
         }
         self.write_special_registers(special)
@@ -224,7 +233,7 @@ impl KdBackend {
         let mut special = self.read_special_registers_uncached(self.current_processor)?;
         bytes::write_u64(&mut special, Self::kspecial_dr_offset(slot), addr);
         let dr7 = bytes::read_u64(&special, KSPECIAL_REGISTERS_DR7_OFFSET);
-        let dr7 = hwbp::dr7_set_slot(dr7, slot, access, len);
+        let dr7 = debug_registers::dr7_set_slot(dr7, slot, access, len);
         bytes::write_u64(&mut special, KSPECIAL_REGISTERS_DR7_OFFSET, dr7);
         self.write_special_registers(special)
     }
@@ -234,7 +243,7 @@ impl KdBackend {
     fn apply_dr_clear(&mut self, slot: u8) -> Result<()> {
         let mut special = self.read_special_registers_uncached(self.current_processor)?;
         let dr7 = bytes::read_u64(&special, KSPECIAL_REGISTERS_DR7_OFFSET);
-        let dr7 = hwbp::dr7_clear_slot(dr7, slot);
+        let dr7 = debug_registers::dr7_clear_slot(dr7, slot);
         bytes::write_u64(&mut special, KSPECIAL_REGISTERS_DR7_OFFSET, dr7);
         bytes::write_u64(&mut special, Self::kspecial_dr_offset(slot), 0);
         self.write_special_registers(special)

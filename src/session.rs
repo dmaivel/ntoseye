@@ -14,26 +14,26 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(test)]
 use crate::TargetSpec;
-use crate::breakpoints::{Breakpoint, BreakpointManager, StepFrame};
+use crate::breakpoints::{BreakpointInfo, BreakpointManager, StepFrame};
 use crate::dbg_backend::{
     BackendCapability, BugcheckInfo, DebugBackend, DebugCapability, DebugLog, DebugOutputPage,
-    LastEvent, ModuleEvent, StopEvent,
+    LastEvent, ModuleEvent, RegisterMap, StopEvent, processor_index_from_backend_thread_id,
 };
 use crate::disasm::ControlFlow;
+#[cfg(test)]
+use crate::dmp::triage::{TriageBlock, make_triage_dump};
 use crate::error::{Error, Result};
 use crate::exception_policy::ExceptionPolicyTable;
 use crate::expr::NumberRadix;
-use crate::gdb::RegisterMap;
 use crate::guest::{ModuleInfo, ModuleSymbolLoadReport, ProcessInfo};
 use crate::notice::Notice;
 use crate::session::lifecycle::InstanceGuard;
 use crate::session::partition::{KeptPartition, PartitionView};
 use crate::target::dbgprint::{PrintCursor, prints_between};
 use crate::target::{ReloadReport, ServedVp, Target, TargetSelection, ThreadInfo};
-#[cfg(test)]
-use crate::triage::{TriageBlock, make_triage_dump};
 use crate::types::VirtAddr;
 use crate::unwind::SavedVtl;
+use ntoseye_macros::record;
 
 /// Trace reload classification (lines prefixed `reload:`), gated on
 /// `NTOSEYE_KD_TRACE` like the KD packet trace so one capture correlates both.
@@ -67,6 +67,9 @@ macro_rules! step_trace {
 
 pub mod breakpoints;
 pub mod context;
+pub mod driver;
+pub mod effects;
+pub mod hardware;
 pub mod hits;
 pub mod inspection;
 pub mod lifecycle;
@@ -77,6 +80,11 @@ pub mod scheduler;
 pub mod stepping;
 pub mod stops;
 
+pub use driver::{
+    ActionRunner, BreakpointHit, Cancel, CancelBehavior, ExceptionStop, HitKind, Motion,
+    ReloadStop, RunOutcome, Stop, StopKind, WalkUntil,
+};
+
 /// How [`Session::continue_until_break`] returned: a stop worth surfacing, or a
 /// timeout with the VM still running (the caller polls again). Hosts render it.
 #[derive(Debug, Clone)]
@@ -84,11 +92,7 @@ pub enum ContinueOutcome {
     /// A scoped breakpoint hit (its condition, if any, held).
     Breakpoint {
         id: u32,
-        address: u64,
-        symbol: Option<String>,
         temporary: bool,
-        /// Optional frontend command action attached to the breakpoint.
-        action: Option<String>,
         rip: u64,
         /// Runtime condition failure. The stop is surfaced rather than skipped.
         condition_error: Option<String>,
@@ -146,14 +150,6 @@ pub enum ContinueOutcome {
     Halted { rip: u64 },
 }
 
-/// The readable contents of a NUL-terminated string, without the terminator.
-pub struct TerminatedRead {
-    /// Readable bytes before the terminator or the first unreadable page.
-    pub bytes: Vec<u8>,
-    /// The string ran into an unreadable page before its terminator.
-    pub unreadable: bool,
-}
-
 /// Whether an instruction starts at an address. See
 /// [`Session::instruction_boundary`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,89 +172,167 @@ pub enum InstructionBoundary {
 
 impl ContinueOutcome {
     /// A hit on `breakpoint` at `rip`.
-    fn breakpoint_hit(breakpoint: &Breakpoint, rip: u64, condition_error: Option<String>) -> Self {
+    fn breakpoint_hit(
+        breakpoint: &BreakpointInfo,
+        rip: u64,
+        condition_error: Option<String>,
+    ) -> Self {
         ContinueOutcome::Breakpoint {
             id: breakpoint.id,
-            address: breakpoint.address.0,
-            symbol: breakpoint.symbol.clone(),
             temporary: breakpoint.temporary,
-            action: breakpoint.action.clone(),
             rip,
             condition_error,
         }
     }
 }
 
-/// A "where am I" snapshot for the read-only status surface: whether the guest
-/// is running, and if halted, the current stop site and inspection scope.
-/// `coherent` is false after a reboot until the kernel's loaded-module list
-/// exists, so a host knows process/module enumeration is not yet meaningful.
-/// Halted there, kernel symbols work and resuming lets boot build the list;
-/// running, the host waits rather than reading stale state.
+/// Whether the target runs, and where it stopped: the read-only status
+/// surface. `coherent` is false after a reboot until the kernel's
+/// loaded-module list exists, so a host knows process/module enumeration is
+/// not yet meaningful.
+#[record]
 #[derive(Debug, Clone)]
 pub struct RunStatus {
     pub running: bool,
+    /// The selected backend thread/vCPU.
     pub current_thread: String,
-    /// Current instruction pointer when halted (None while running).
+    /// The instruction pointer when halted. None while the target runs.
+    #[record(hex)]
     pub rip: Option<u64>,
-    /// Nearest symbol to `rip` when halted; code outside NT is named for what
-    /// it is (`hv+0x3a6bde` in the Windows hypervisor).
+    /// The nearest symbol to `rip` when halted. For code outside NT, the
+    /// name identifies that code (`hv+0x3a6bde`).
     pub symbol: Option<String>,
-    /// For a vCPU halted in the Windows hypervisor, the VTL states it saved
-    /// for the vCPU's virtual processor.
+    /// For a vCPU halted in the Windows hypervisor, the VTL states that the
+    /// hypervisor saved for the vCPU's virtual processor, VTL0 first.
     pub saved_vtl: Vec<SavedVtl>,
     /// For a vCPU halted in the Windows hypervisor, the guest partition's
     /// virtual processor whose exit it handles, when it is not the root's.
     pub serving: Option<ServedVp>,
-    /// The guest partition's virtual processor the halted vCPU runs
-    /// (`partition 0x5 VP 2`), whose registers and code the vCPU then shows.
+    /// The guest partition's virtual processor that the halted vCPU runs
+    /// (`partition 0x5 VP 2`), whose registers and code the vCPU then
+    /// shows, or None.
     pub running_vp: Option<String>,
-    /// Attached process inspection scope, if any. This is where `dt`, `dq` and
-    /// friends read from; it is chosen with `.process` and survives resumes,
-    /// so it is not necessarily what the guest is executing.
+    /// The process that you selected with `.process`. `dt`, `dq`, and
+    /// similar commands read its memory, and the selection stays after the
+    /// target resumes.
     pub attached_process: Option<ProcessInfo>,
-    /// The process whose page tables the stopped vCPU has loaded (from CR3).
-    /// Refreshed at every stop.
+    /// The process whose page tables the stopped vCPU has loaded (from
+    /// CR3), refreshed at every stop.
     pub stopped_process: Option<ProcessInfo>,
-    /// The Windows thread the stopped vCPU is running, walked from its KPRCB
-    /// at this stop. Its owner can differ from `stopped_process`: a thread
-    /// attached to another address space with `KeStackAttachProcess` runs on
-    /// borrowed page tables.
+    /// The Windows thread that the stopped vCPU runs, walked from its KPRCB
+    /// at this stop. Its owner can be different from `stopped_process`
+    /// (`KeStackAttachProcess`).
     pub stopped_thread: Option<ThreadInfo>,
+    /// False after a reboot until the kernel's loaded-module list exists,
+    /// and process and module enumeration is not valid until then.
     pub coherent: bool,
-    /// Rediscovered `nt` base. A host caches it to detect a reboot (the base
-    /// changes) and invalidate stale addresses without parsing prose.
+    /// The `nt` base that ntoseye found again. It changes across a reboot,
+    /// so a host can cache it to notice one.
+    #[record(hex)]
     pub kernel_base: u64,
-    /// The hypervisor partition whose guest is inspected in place of the
-    /// target (`.partition`), if any: every other field is that guest's.
+    /// The hypervisor partition whose Windows guest is inspected in place
+    /// of the target (`.partition`), or None while the target is. Every
+    /// other field is then that guest's.
+    #[record(hex)]
     pub partition: Option<u64>,
 }
 
-/// The fields decoded from a 64-bit Windows `EXCEPTION_RECORD` by `.exr`.
+/// A decoded `EXCEPTION_RECORD64` (`.exr`).
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct ExceptionRecord {
+    /// The address that ntoseye read the record from. `None` for the
+    /// record of the current event, which ntoseye builds from the stop or
+    /// the dump without reading it from memory.
+    #[record(hex)]
+    pub record_address: Option<u64>,
+    /// The exception code (NTSTATUS).
+    #[record(hex)]
     pub code: u32,
+    #[record(hex)]
     pub flags: u32,
+    /// The address of a nested `EXCEPTION_RECORD`, or 0.
+    #[record(hex)]
     pub nested: u64,
+    /// Where the exception occurred.
+    #[record(hex, rename = "exception_address")]
     pub address: u64,
+    /// The exception's `ExceptionInformation` parameters.
+    #[record(hex)]
     pub parameters: Vec<u64>,
 }
 
-/// One call-tree node of a [`CallTrace`].
-#[derive(Debug, Clone)]
+#[record]
+impl ExceptionRecord {
+    /// The code's symbolic name.
+    #[record(getter)]
+    pub fn code_name(&self) -> &'static str {
+        crate::triage_report::exception_code_name(self.code)
+    }
+}
+
+/// One call-tree node of a `wt` trace.
+#[record]
 pub struct CallTraceFrame {
+    /// The called function.
     pub name: String,
+    /// The number of instructions stepped in the function itself.
     pub instructions: usize,
+    /// The calls that the function made.
     pub children: Vec<CallTraceFrame>,
 }
 
-/// The call tree `wt` collected ([`Session::trace_calls`]), how many
-/// instructions it single-stepped, and why it stopped.
-#[derive(Debug, Clone)]
+/// A `wt` call trace: the call tree, the instructions that it stepped, and
+/// why it stopped ([`Session::trace_calls`]).
+#[record(impl)]
 pub struct CallTrace {
     pub root: CallTraceFrame,
+    /// The number of single-stepped instructions.
     pub instructions: usize,
+    #[record(skip)]
     pub end: CallTraceEnd,
+}
+
+#[record]
+impl CallTrace {
+    /// `returned`, `limit`, `interrupted`, `breakpoint`, `diverted`, or
+    /// `failed`. `interrupted` means Ctrl+C or the `timeout` ended it.
+    /// `diverted` means that an interrupt diverted a step and the traced
+    /// thread is not known. Any value other than `returned` means that
+    /// the tree is partial.
+    #[record(getter, rename = "end")]
+    pub fn end_kind(&self) -> CallTraceEndKind {
+        match self.end {
+            CallTraceEnd::Returned => CallTraceEndKind::Returned,
+            CallTraceEnd::Limit => CallTraceEndKind::Limit,
+            CallTraceEnd::Interrupted => CallTraceEndKind::Interrupted,
+            CallTraceEnd::Breakpoint => CallTraceEndKind::Breakpoint,
+            CallTraceEnd::Diverted => CallTraceEndKind::Diverted,
+            CallTraceEnd::Failed(_) => CallTraceEndKind::Failed,
+        }
+    }
+
+    /// A description of the failure, for `failed`.
+    #[record(getter)]
+    pub fn error(&self) -> Option<String> {
+        match &self.end {
+            CallTraceEnd::Failed(error) => Some(error.clone()),
+            _ => None,
+        }
+    }
+}
+
+/// Why a call trace stopped, without the failure's description: a
+/// [`CallTraceEnd`]'s kind.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallTraceEndKind {
+    Returned,
+    Limit,
+    Interrupted,
+    Breakpoint,
+    Diverted,
+    Failed,
 }
 
 /// Why [`Session::trace_calls`] stopped tracing. Anything but `Returned`
@@ -292,7 +366,7 @@ pub struct ControlState {
 }
 
 /// Instruction cap for a step-until walk (`pc`/`tc`/`pa`/..., and the SDK's
-/// `step(until=)`/`run_to(step=)`) that never finds its target.
+/// `step(until=)`/`step_over(until=)`) that never finds its target.
 pub const STEP_UNTIL_LIMIT: usize = 100_000;
 
 /// The plan for a step-over of the current instruction: either a plain
@@ -358,7 +432,7 @@ pub enum BreakpointStopAction {
     /// A breakpoint the caller should surface (its condition, if any, held).
     /// Enabled breakpoints have already been re-armed.
     Hit {
-        breakpoint: Breakpoint,
+        breakpoint: BreakpointInfo,
         /// Runtime condition failure. The stop is surfaced rather than skipped.
         condition_error: Option<String>,
     },
@@ -376,7 +450,7 @@ pub enum BreakpointStopAction {
 pub enum WatchpointStopAction {
     /// A watchpoint whose condition held or failed to evaluate.
     Hit {
-        breakpoint: Breakpoint,
+        breakpoint: BreakpointInfo,
         condition_error: Option<String>,
     },
     /// A guest partition's breakpoint hit by one of its VPs, `vp` when the
@@ -384,7 +458,7 @@ pub enum WatchpointStopAction {
     /// condition are left to the partition's view (see
     /// [`Session::partition_hit`]).
     PartitionHit {
-        breakpoint: Breakpoint,
+        breakpoint: BreakpointInfo,
         partition: u64,
         vp: Option<u32>,
     },
@@ -406,7 +480,7 @@ pub enum StopResolution {
     ModulesChanged,
     /// A software or hardware breakpoint worth surfacing.
     Breakpoint {
-        breakpoint: Box<Breakpoint>,
+        breakpoint: Box<BreakpointInfo>,
         event: StopEvent,
         rip: u64,
         condition_error: Option<String>,
@@ -433,22 +507,39 @@ pub enum StopResolution {
     Stopped { event: StopEvent, rip: u64 },
 }
 
-/// The registers of one VTL of a Windows hypervisor VP (see
+/// The registers of one VTL of a Windows hypervisor VP (`!hvr`, see
 /// [`Session::vp_registers`]).
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct VpRegisters {
     /// RIP, RSP, flags, control and segment registers from the VTL's eVMCS,
     /// and the general-purpose registers when they are known; a vCPU's
     /// whole register file when it runs the VP.
+    #[record(skip)]
     pub registers: HashMap<String, u64>,
-    /// Where they are from: the vCPU that runs the VP now, the exit that a
-    /// vCPU in the hypervisor handles for it, or its last exit.
+    /// Where they are from: a vCPU that runs the VP now, the exit a vCPU
+    /// in the hypervisor handles for it, or its last exit.
     pub source: String,
     /// Why the general-purpose registers are missing, when they are.
     pub missing: Option<String>,
     /// The vCPU that runs the VP now, whose register file `registers` is;
     /// `None` when they are an exit's or the hypervisor's record of them.
+    #[record(skip)]
     pub vcpu: Option<String>,
+}
+
+#[record]
+impl VpRegisters {
+    /// RIP, RSP, flags, control and segment registers, and the
+    /// general-purpose ones when they are known, in
+    /// [`crate::target::VP_STATE_REGISTERS`] order.
+    #[record(getter, hex, rename = "registers")]
+    pub fn ordered_registers(&self) -> crate::types::Keyed<u64> {
+        crate::target::VP_STATE_REGISTERS
+            .iter()
+            .filter_map(|name| Some((*name, *self.registers.get(*name)?)))
+            .collect()
+    }
 }
 
 /// A thread a user-mode minidump captured, as `~` lists it.
@@ -474,28 +565,43 @@ pub struct UserThreadSummary {
     pub exception: bool,
 }
 
-/// A backend execution context (vCPU) and the guest code it is currently
-/// running. `symbol` is `None` when nothing resolves (render the raw `rip`);
-/// `error` is set when the vCPU's register context couldn't be read at all.
+/// A vCPU (backend execution context) and the guest code that it runs.
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct VcpuInfo {
-    /// Backend thread/vCPU id (e.g. `p1.1`).
+    /// The backend thread/vCPU ID (`p1.1`), which `~` shows.
+    #[record(skip)]
     pub id: String,
-    /// Instruction pointer, or `None` if the register context was unreadable.
+    /// None if ntoseye cannot read the register context.
+    #[record(hex)]
     pub rip: Option<u64>,
-    /// The address space the vCPU is executing in: `"kernel"`, a process name,
-    /// or `"unknown"`. Empty when the context could not be determined.
+    /// What the vCPU runs: `kernel`, a process name, `hypervisor`, `VTL1`,
+    /// a guest partition's VP (`partition 0x3 VP 1`), or `unknown`; `no
+    /// context` for a dump CPU whose context the dump lacks. Empty if
+    /// ntoseye cannot read the register context.
     pub context: String,
-    /// Nearest symbol to `rip` (`module!name+0x..`), if one resolved.
+    /// The nearest symbol to `rip`, if one resolves.
     pub symbol: Option<String>,
-    /// For a vCPU halted in the Windows hypervisor, the VTL states it saved
-    /// for the vCPU's virtual processor.
+    /// For a vCPU halted in the Windows hypervisor, the VTL states that the
+    /// hypervisor saved for the vCPU's virtual processor, VTL0 first.
     pub saved_vtl: Vec<SavedVtl>,
     /// For a vCPU halted in the Windows hypervisor, the guest partition's
-    /// virtual processor whose exit it handles, when it is not the root's.
+    /// virtual processor whose exit it handles or that it is about to
+    /// enter, when it is not one of the root partition's.
     pub serving: Option<ServedVp>,
-    /// Why the vCPU context was unavailable, if it was.
+    /// The reason that the register context is not available. None if it is
+    /// available.
     pub error: Option<String>,
+}
+
+#[record]
+impl VcpuInfo {
+    /// The zero-based processor number, as `dbg.cpus` numbers it; `None`
+    /// for a backend thread that is no processor.
+    #[record(getter)]
+    pub fn number(&self) -> Option<u16> {
+        processor_index_from_backend_thread_id(&self.id)
+    }
 }
 
 impl VcpuInfo {
@@ -568,9 +674,17 @@ pub struct Selection {
     target: TargetSelection,
     current_thread: String,
     parked_windows_thread: Option<VirtAddr>,
+    /// The partition view it was taken in ([`Session::partition`]).
+    partition: Option<u64>,
 }
 
 impl Selection {
+    /// The partition view the selection was taken in, `None` for the
+    /// target's own.
+    pub fn partition(&self) -> Option<u64> {
+        self.partition
+    }
+
     /// Whether the selection is a recovered register context (a caller frame,
     /// a `.cxr`/`.trap` record, the saved VTL0 state at a stop in the
     /// hypervisor) rather than the vCPU's own file or a parked thread, which
@@ -670,9 +784,8 @@ pub struct Session {
     pub register_map: RegisterMap,
     pub current_thread: String,
     /// Per-exception-code stop policy (`sxe`/`sxd`/`sxn`/`sxi`). Session state
-    /// so every host shares one table: the REPL loop applies it (including
-    /// its `-c` commands), and the shared [`Self::wait_for_stop_bounded`]
-    /// auto-continues the command-free `Continue` policies for the SDK/MCP.
+    /// so every host shares one table: the run driver ([`Self::run`]) applies
+    /// it for every host, `-c` commands and `notify` notices included.
     /// Its module-load filters (`sx* ld`) are applied by
     /// [`Self::classify_stop_event`] for every host.
     pub exception_policies: ExceptionPolicyTable,
@@ -718,6 +831,14 @@ pub struct Session {
     /// when the target moves. Unlike `parked_stop` it is not consumed by
     /// reading it, so any host can ask "where are we stopped, and why".
     current_stop: Option<ContinueOutcome>,
+    /// The [`Stop`] for `current_stop`, snapshotted when it surfaced.
+    stop_snapshot: Option<Stop>,
+    /// Set while a run's stop is the halt the host or the interrupt request
+    /// asked for: its breakpoint action may not resume past it.
+    halt_requested: bool,
+    /// Runs breakpoint actions and filter commands for every host; see
+    /// [`ActionRunner`]. Taken while one runs.
+    action_runner: Option<Box<dyn ActionRunner>>,
     /// The most recent per-stop module refresh report, retained so the REPL can
     /// render its existing module-symbol summary after the core reconciles
     /// breakpoints. Other hosts simply leave it unconsumed.
@@ -853,6 +974,12 @@ impl Session {
         let mut seen = std::collections::HashSet::new();
         notices.retain(|notice| seen.insert(notice.clone()));
         notices
+    }
+
+    /// Note something for the host's next output boundary: what an
+    /// operation could not check, without failing it.
+    pub fn push_notice(&mut self, notice: Notice) {
+        self.notices.push(notice);
     }
 }
 

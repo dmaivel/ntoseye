@@ -7,231 +7,178 @@ use tabled::builder::Builder;
 
 use owo_colors::OwoColorize;
 
-use crate::error::Result;
-use crate::expr::Expr;
-use crate::target::irpfind::{IrpFindArgs, IrpFindDetail};
+use ntoseye_macros::{command, grammar};
+
+use crate::error::{Error, Result};
+use crate::session::Session;
+use crate::target::irpfind::{IrpCriteria, IrpCriteriaKind, IrpFindDetail, IrpPool};
 use crate::target::object::{
-    IrpInfo, SL_INVOKE_ON_CANCEL, SL_INVOKE_ON_ERROR, SL_INVOKE_ON_SUCCESS, SL_PENDING_RETURNED,
+    DeviceObjectDetail, DriverObjectDetail, DriverObjectInfo, IrpHit, IrpInfo, IrpSource,
+    NotifyCallback, ObjectDetail, ObjectName, SL_INVOKE_ON_CANCEL, SL_INVOKE_ON_ERROR,
+    SL_INVOKE_ON_SUCCESS, SL_PENDING_RETURNED, SsdtTable,
 };
-use crate::target::{
-    irp_major_function_name, irp_minor_function_name, kthread_state_name, wait_reason_name,
-};
+use crate::target::{Target, irp_major_function_name, irp_minor_function_name};
 use crate::types::VirtAddr;
 use crate::ui;
 
+use crate::repl::args::{ArgCursor, ArgCx, ArgError, FromArg};
 use crate::repl::*;
 
-repl_command! {
-    cmd_drivers;
-    names: ["drivers"],
-    usage: "drivers [filter]",
-    summary: "List the driver objects in the \\Driver object directory.",
-    target: Kernel,
+/// A kernel address as its nearest symbol (styled), or the bare address
+/// when nothing resolves.
+fn kernel_symbol(target: &Target, address: VirtAddr) -> String {
+    target
+        .format_code_address(target.kernel_dtb(), address)
+        .map(|symbol| ui::symbol(&symbol))
+        .unwrap_or_else(|| ui::addr(address.0))
 }
 
-repl_command! {
-    cmd_drvobj;
-    names: ["!drvobj", "drvobj"],
-    usage: "!drvobj <driver-object-expression-or-name>",
-    summary: "Show a DRIVER_OBJECT with its device chain and dispatch table.",
-    completion: Driver,
-    target: Kernel,
+/// List the driver objects in the \Driver object directory.
+#[command(
+    names = ["drivers"],
+    category = "processes and modules",
+    kind = Query,
+    target = Kernel,
+    python = none,
+)]
+fn drivers(
+    session: &Session,
+    #[arg(render)] filter: Option<String>,
+) -> Result<Vec<DriverObjectInfo>> {
+    session
+        .target
+        .enumerate_driver_objects()
+        .map_err(|error| Error::DebugInfo(format!("failed to list drivers: {error}")))
 }
 
-repl_command! {
-    cmd_devobj;
-    names: ["!devobj", "devobj"],
-    usage: "!devobj <device-object-expression>",
-    summary: "Show a DEVICE_OBJECT and its attached stack.",
-    completion: Expression,
-    target: Kernel,
-}
+/// `drivers`: the drivers whose name contains `filter` or whose address
+/// starts with it.
+impl Render<Option<String>> for Vec<DriverObjectInfo> {
+    fn render(&self, repl: &mut ReplState<'_>, filter: Option<String>) {
+        let filter = filter.map(|filter| filter.to_lowercase());
+        let target = &repl.ctx.target;
+        let mut builder = Builder::default();
+        builder.push_record(vec![
+            "DriverObject".to_string(),
+            "Name".to_string(),
+            "DriverStart".to_string(),
+            "Size".to_string(),
+            "Module".to_string(),
+            "DeviceObject".to_string(),
+            "DriverUnload".to_string(),
+        ]);
 
-repl_command! {
-    cmd_irp;
-    names: ["!irp", "irp"],
-    usage: "!irp <address-expression> [detail]",
-    summary: "Show an IRP and its I/O stack locations.",
-    details: "Shows the IRP as WinDbg does: which stack location is current, the MDL, system buffer and thread, then each location from the lowest driver's up, the current one marked with > and a run of locations the IRP has not reached as one unused line. A location shows its major and minor function, flags and control, device and file, its completion routine and context with when the routine runs (Success, Error, Cancel) and whether its driver returned pending, the device's driver, and four arguments. The driver of the location below it in the list set that completion routine. With a second argument, such as 1, it first shows the IRP's status, requestor mode, user event and user buffer.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_irps;
-    names: ["irps"],
-    usage: "irps [process-filter|driver-filter]",
-    summary: "Find the in-flight IRPs in thread IrpLists and device CurrentIrp fields.",
-    completion: Process,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_irpfind;
-    names: ["!irpfind", "irpfind"],
-    usage: "!irpfind [-v] [pool-type [restart-address [criteria data]]]",
-    summary: "Scan pool for the IRPs that IoAllocateIrp allocates.",
-    details: "Scans the pool region for 16-byte-aligned _POOL_HEADERs with the tag Irp. On Windows 10 1803 and later, the region comes from MiState.Vs.SystemVaRegions, and otherwise it is MmNonPagedPoolStart/End or MmPagedPoolStart/End. The scan walks the page tables and reads only mapped pages, and big allocations come from PoolBigPageTable. The command counts a block only if its body is a live _IRP. In a live _IRP, Type is 6 (IoFreeIrp clears it), and Size is the header plus whole stack locations and at least IoSizeOfIrp(StackCount). A lookaside IRP keeps its larger packet size. CurrentLocation is at most StackCount + 1. For each IRP, the command shows its thread (Tail.Overlay.Thread), the process of its MDL, and the major function, minor function, device, and owning driver of the current stack location. If CurrentLocation is more than StackCount, the IRP shows as complete. -v also shows the pool header, I/O status, PendingReturned, UserEvent, UserBuffer, and OriginalFileObject, and also the file object and completion routine of the current location. pool-type is 0 (nonpaged, the default) or 1 (paged). The command does not accept 2 (special) or 4 (session), because these pool types have no region of their own on these builds. restart-address continues a scan from that page. The criteria are the same as in WinDbg: arg (Argument1-4 of a stack location), device (DeviceObject of a stack location), fileobject (Tail.Overlay.OriginalFileObject), mdlprocess (MdlAddress->Process), thread (Tail.Overlay.Thread), and userevent (UserEvent). Use 0 as the restart address to scan the whole pool. The scan stops after 4,096 IRPs, or when you press Ctrl-C, and then shows the command that continues the scan, with the criteria. The scan checks the big-pool allocations last. If the scan gets to the limit in the big-pool allocations, the command shows a message. A restart cannot get to the remaining big-pool allocations. A driver can build IRPs in its own allocations (IoInitializeIrp). These IRPs have the tag of that driver, so the scan does not find them. Use irps to list the IRPs in thread IrpLists.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_object;
-    names: ["!object", "object"],
-    usage: "!object <path|object-expression>",
-    summary: "Show an executive object header and body, and list the entries of a directory.",
-    details: "A path that starts with `\\` is the name of an object in the object namespace (`!object \\`, `!object \\Driver\\ACPI`). The command looks up the path from the root directory and ignores case. It does not follow symbolic links in the path. For a directory, the command lists the entries and their types.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_callbacks;
-    names: ["callbacks"],
-    usage: "callbacks [symbol-filter]",
-    summary: "List the process, thread, and image notification callbacks.",
-    completion: Symbol,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_ssdt();
-    names: ["ssdt"],
-    usage: "ssdt",
-    summary: "Show the SSDT and the shadow SSDT.",
-    target: Kernel,
-}
-
-impl ReplState<'_> {
-    fn cmd_drivers(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let filter = invocation.arg(0).map(|s| s.to_lowercase());
-
-        match self.ctx.target.enumerate_driver_objects() {
-            Ok(drivers) => {
-                let mut builder = Builder::default();
-                builder.push_record(vec![
-                    "DriverObject".to_string(),
-                    "Name".to_string(),
-                    "DriverStart".to_string(),
-                    "Size".to_string(),
-                    "Module".to_string(),
-                    "DeviceObject".to_string(),
-                    "DriverUnload".to_string(),
-                ]);
-
-                let mut count = 0;
-                for driver in &drivers {
-                    if let Some(ref f) = filter
-                        && !driver.name.to_lowercase().contains(f)
-                        && !format!("{:#x}", driver.object.0).starts_with(f)
-                    {
-                        continue;
-                    }
-                    count += 1;
-                    let module = self
-                        .ctx
-                        .target
-                        .symbols
-                        .find_module_for_address(self.ctx.target.kernel_dtb(), driver.driver_start)
-                        .map(|module| module.name)
-                        .unwrap_or_else(|| "-".to_string());
-                    builder.push_record(vec![
-                        ui::addr(driver.object.0).to_string(),
-                        driver.name.to_string(),
-                        ui::addr(driver.driver_start.0).to_string(),
-                        format!("0x{:x}", driver.driver_size),
-                        module.to_string(),
-                        ui::addr(driver.device_object.0).to_string(),
-                        ui::addr(driver.driver_unload.0),
-                    ]);
-                }
-
-                if count == 0 {
-                    outln!("{}\n", "no matching drivers".bright_black());
-                } else {
-                    print_padded_table(builder);
-                }
-                *self.caches.drivers.write().unwrap() = drivers;
+        let mut count = 0;
+        for driver in self {
+            if let Some(ref f) = filter
+                && !driver.name.to_lowercase().contains(f)
+                && !format!("{:#x}", driver.object.0).starts_with(f)
+            {
+                continue;
             }
-            Err(e) => {
-                error!("failed to list drivers: {}", e);
-            }
+            count += 1;
+            let module = target
+                .symbols
+                .find_module_for_address(target.kernel_dtb(), driver.driver_start)
+                .map(|module| module.name)
+                .unwrap_or_else(|| "-".to_string());
+            builder.push_record(vec![
+                ui::addr(driver.object.0).to_string(),
+                driver.name.to_string(),
+                ui::addr(driver.driver_start.0).to_string(),
+                format!("0x{:x}", driver.driver_size),
+                module.to_string(),
+                ui::addr(driver.device_object.0).to_string(),
+                ui::addr(driver.driver_unload.0),
+            ]);
         }
 
-        Ok(())
-    }
-
-    /// Render a kernel address as its nearest symbol (styled), falling back to
-    /// the bare address when nothing resolves.
-    fn fmt_kernel_symbol(&self, a: VirtAddr) -> String {
-        let dtb = self.ctx.target.kernel_dtb();
-        self.ctx
-            .target
-            .format_code_address(dtb, a)
-            .map(|s| ui::symbol(&s))
-            .unwrap_or_else(|| ui::addr(a.0))
-    }
-
-    fn resolve_driver_by_name(&self, name: &str) -> Option<VirtAddr> {
-        let full;
-        let needle = if name.starts_with("\\Driver\\") {
-            name
+        if count == 0 {
+            outln!("{}\n", "no matching drivers".bright_black());
         } else {
-            full = format!("\\Driver\\{name}");
-            full.as_str()
-        };
-        self.ctx
-            .target
-            .enumerate_driver_objects()
-            .ok()?
-            .into_iter()
-            .find(|d| d.name.eq_ignore_ascii_case(needle))
-            .map(|d| d.object)
+            print_padded_table(builder);
+        }
+        *repl.caches.drivers.write().unwrap() = self.clone();
     }
+}
 
-    fn cmd_drvobj(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(expr) = invocation.arg(0) else {
-            outln!("{}\n", command_help("drvobj"));
-            return Ok(());
-        };
+/// The driver object that `!drvobj` names: an expression, or else a driver
+/// name (`ACPI` or `\Driver\ACPI`).
+#[grammar(usage = "<driver-object|driver-name>", complete = [Driver])]
+fn driver_argument(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<VirtAddr, ArgError> {
+    let Some(text) = cursor.word() else {
+        return Err(ArgError::Missing);
+    };
+    if let Ok(address) = cx.eval(&text) {
+        return Ok(address);
+    }
+    let full;
+    let needle = if text.starts_with("\\Driver\\") {
+        &*text
+    } else {
+        full = format!("\\Driver\\{text}");
+        full.as_str()
+    };
+    cx.state
+        .ctx
+        .target
+        .enumerate_driver_objects()
+        .ok()
+        .and_then(|drivers| {
+            drivers
+                .into_iter()
+                .find(|driver| driver.name.eq_ignore_ascii_case(needle))
+        })
+        .map(|driver| driver.object)
+        .ok_or_else(|| {
+            ArgError::Message(format!("unknown driver object expression or name: {text}"))
+        })
+}
 
-        // An expression wins; otherwise treat the argument as a driver name.
-        let input = match Expr::eval_with_radix(expr, &self.ctx.target, self.radix) {
-            Ok(a) => Some(a),
-            Err(_) => self.resolve_driver_by_name(expr),
-        };
-        let Some(input) = input else {
-            error!("unknown driver object expression or name: {}", expr);
-            return Ok(());
-        };
+/// Show a DRIVER_OBJECT with its device chain and dispatch table.
+#[command(
+    names = ["!drvobj", "drvobj"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Driver,
+    python_name = "inspect",
+)]
+fn drvobj(
+    session: &Session,
+    #[arg(receiver, parse = driver_argument)] driver: VirtAddr,
+) -> Result<DriverObjectDetail> {
+    session.target.inspect_driver_object(driver)
+}
 
-        let drv = match self.ctx.target.inspect_driver_object(input) {
-            Ok(drv) => drv,
-            Err(e) => {
-                error!("{}", e);
-                return Ok(());
-            }
+impl Render for DriverObjectDetail {
+    fn render(&self, repl: &mut ReplState<'_>, (): ()) {
+        let target = &repl.ctx.target;
+        let mode = if self.via_pointer {
+            "pointer"
+        } else {
+            "direct"
         };
-
-        let mode = if drv.via_pointer { "pointer" } else { "direct" };
-        outln!("driver object {} ({})", ui::addr(drv.object.0), mode);
-        if let Some(name) = &drv.name {
+        outln!("driver object {} ({})", ui::addr(self.object.0), mode);
+        if let Some(name) = &self.name {
             outln!("  name          : {}", name);
         }
-        outln!("  driver start  : {}", ui::addr(drv.driver_start.0));
-        outln!("  driver size   : {:#x}", drv.driver_size);
-        outln!("  driver section: {}", ui::addr(drv.driver_section.0));
+        outln!("  driver start  : {}", ui::addr(self.driver_start.0));
+        outln!("  driver size   : {:#x}", self.driver_size);
+        outln!("  driver section: {}", ui::addr(self.driver_section.0));
         outln!(
             "  driver unload : {}",
-            self.fmt_kernel_symbol(drv.driver_unload)
+            kernel_symbol(target, self.driver_unload)
         );
 
         outln!("  devices:");
-        if drv.device_chain.is_empty() {
+        if self.devices.is_empty() {
             outln!("    {}", "(none)".bright_black());
         } else {
-            for d in &drv.device_chain {
+            for d in &self.devices {
                 outln!(
                     "    {} type={:#x} flags={:#x} characteristics={:#x} attached={} next={}",
                     ui::addr(d.device.0),
@@ -245,80 +192,104 @@ impl ReplState<'_> {
         }
 
         outln!("  dispatch table:");
-        for (i, fn_ptr) in drv.dispatch.iter().enumerate() {
+        for routine in &self.dispatch {
             outln!(
                 "    IRP_MJ_{:<28} {}",
-                irp_major_function_name(i as u8),
-                self.fmt_kernel_symbol(*fn_ptr)
+                irp_major_function_name(routine.index as u8),
+                routine
+                    .symbol
+                    .as_deref()
+                    .map(ui::symbol)
+                    .unwrap_or_else(|| ui::addr(routine.routine.0))
             );
         }
         outln!();
-
-        Ok(())
     }
+}
 
-    fn cmd_devobj(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(expr) = invocation.arg(0) else {
-            outln!("{}\n", command_help("devobj"));
-            return Ok(());
-        };
+/// Show a DEVICE_OBJECT and its attached stack.
+#[command(
+    names = ["!devobj", "devobj"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Device,
+    python_name = "inspect",
+)]
+fn devobj(
+    session: &Session,
+    #[arg(receiver, name = "device-object")] device: VirtAddr,
+) -> Result<DeviceObjectDetail> {
+    session.target.inspect_device_object(device)
+}
 
-        let Some(addr) = self.eval_or_report(expr) else {
-            return Ok(());
-        };
+impl Render for DeviceObjectDetail {
+    fn render(&self, repl: &mut ReplState<'_>, (): ()) {
+        outln!("device object {}", ui::addr(self.object.0));
+        outln!("    type            : {:#x}", self.device_type);
+        outln!("    flags           : {:#x}", self.flags);
+        outln!("    characteristics : {:#x}", self.characteristics);
+        outln!("    driver object   : {}", ui::addr(self.driver_object.0));
+        outln!("    attached device : {}", ui::addr(self.attached_device.0));
+        outln!("    next device     : {}", ui::addr(self.next_device.0));
+        outln!("    current irp     : {}", ui::addr(self.current_irp.0));
+        outln!(
+            "    device extension: {}",
+            ui::addr(self.device_extension.0)
+        );
 
-        let dev = match self.ctx.target.inspect_device_object(addr) {
-            Ok(dev) => dev,
-            Err(e) => {
-                error!("{}", e);
-                return Ok(());
-            }
-        };
-
-        outln!("device object {}", ui::addr(dev.object.0));
-        outln!("    type            : {:#x}", dev.device_type);
-        outln!("    flags           : {:#x}", dev.flags);
-        outln!("    characteristics : {:#x}", dev.characteristics);
-        outln!("    driver object   : {}", ui::addr(dev.driver_object.0));
-        outln!("    attached device : {}", ui::addr(dev.attached_device.0));
-        outln!("    next device     : {}", ui::addr(dev.next_device.0));
-        outln!("    current irp     : {}", ui::addr(dev.current_irp.0));
-        outln!("    device extension: {}", ui::addr(dev.device_extension.0));
-
-        if !dev.attached_stack.is_empty() {
+        if !self.attached_stack.is_empty() {
             outln!("attached stack:");
-            for (i, e) in dev.attached_stack.iter().enumerate() {
+            for (i, e) in self.attached_stack.iter().enumerate() {
                 outln!(
                     "  #{} {} driver={} type={:#x} flags={:#x}",
                     i + 1,
                     ui::addr(e.device.0),
-                    self.fmt_kernel_symbol(e.driver_object),
+                    kernel_symbol(&repl.ctx.target, e.driver_object),
                     e.device_type,
                     e.flags
                 );
             }
         }
         outln!();
-
-        Ok(())
     }
+}
 
-    fn cmd_irp(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(expr) = invocation.arg(0) else {
-            outln!("{}\n", command_help("irp"));
-            return Ok(());
-        };
+/// Show an IRP and its I/O stack locations.
+///
+/// Shows the IRP as WinDbg does: which stack location is current, the MDL,
+/// system buffer and thread, then each location from the lowest driver's up,
+/// the current one marked with > and a run of locations the IRP has not reached
+/// as one unused line. A location shows its major and minor function, flags and
+/// control, device and file, its completion routine and context with when the
+/// routine runs (Success, Error, Cancel) and whether its driver returned
+/// pending, the device's driver, and four arguments. The driver of the location
+/// below it in the list set that completion routine. With a second argument,
+/// such as 1, it first shows the IRP's status, requestor mode, user event and
+/// user buffer.
+#[command(
+    names = ["!irp", "irp"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+)]
+fn irp(
+    session: &Session,
+    address: VirtAddr,
+    #[arg(render)] detail: Option<String>,
+) -> Result<IrpInfo> {
+    session.target.inspect_irp(address).map_err(|error| {
+        Error::DebugInfo(format!(
+            "{} is not a readable _IRP: {error}",
+            ui::addr(address.0)
+        ))
+    })
+}
 
-        let Some(addr) = self.eval_or_report(expr) else {
-            return Ok(());
-        };
-        let irp = match self.ctx.target.inspect_irp(addr) {
-            Ok(irp) => irp,
-            Err(e) => {
-                error!("{} is not a readable _IRP: {}", ui::addr(addr.0), e);
-                return Ok(());
-            }
-        };
+impl Render<Option<String>> for IrpInfo {
+    fn render(&self, repl: &mut ReplState<'_>, detail: Option<String>) {
+        let irp = self;
         let (count, location) = (irp.stack_count, irp.current_location);
         if (1..=count).contains(&location) {
             let at = irp.current_stack().map_or_else(
@@ -345,10 +316,11 @@ impl ReplState<'_> {
             " {mdl}: {system_buffer}: Thread {}:  Irp stack trace.",
             ui::addr(irp.thread.0)
         );
-        if invocation.arg(1).is_some() {
-            self.print_irp_detail(&irp);
+        if detail.is_some() {
+            print_irp_detail(irp);
         }
         outln!("     cmd  flg cl Device   File     Completion-Context");
+        let target = &repl.ctx.target;
         let mut drivers = HashMap::new();
         let mut index = 0;
         while let Some(ios) = irp.stack.get(index) {
@@ -414,7 +386,7 @@ impl ReplState<'_> {
                 .then(|| {
                     drivers
                         .entry(ios.device_object)
-                        .or_insert_with(|| self.ctx.target.device_driver_name(ios.device_object))
+                        .or_insert_with(|| target.device_driver_name(ios.device_object))
                         .clone()
                 })
                 .flatten()
@@ -422,7 +394,7 @@ impl ReplState<'_> {
             let routine = if ios.completion_routine.is_zero() {
                 String::new()
             } else {
-                self.fmt_kernel_symbol(ios.completion_routine)
+                kernel_symbol(target, ios.completion_routine)
             };
             if !driver.is_empty() || !routine.is_empty() {
                 outln!("               {driver}  {routine}");
@@ -440,53 +412,70 @@ impl ReplState<'_> {
             );
         }
         outln!();
-        Ok(())
     }
+}
 
-    /// The IRP's own fields that `!irp <address> 1` shows, as WinDbg's
-    /// detail form does.
-    fn print_irp_detail(&self, irp: &IrpInfo) {
-        outln!(
-            "IoStatus.Status = {}",
-            irp.io_status
-                .map_or_else(|| "?".to_string(), |status| format!("{status:08x}"))
-        );
-        outln!(
-            "RequestorMode = {}",
-            if irp.requestor_mode == 0 {
-                "KernelMode"
-            } else {
-                "UserMode"
-            }
-        );
-        outln!("PendingReturned = {}", u8::from(irp.pending_returned));
-        outln!("UserEvent = {}", ui::addr(irp.user_event.0));
-        outln!("UserBuffer = {}", ui::addr(irp.user_buffer.0));
-    }
+/// The IRP's own fields that `!irp <address> 1` shows, as WinDbg's
+/// detail form does.
+fn print_irp_detail(irp: &IrpInfo) {
+    outln!(
+        "IoStatus.Status = {}",
+        irp.io_status
+            .map_or_else(|| "?".to_string(), |status| format!("{status:08x}"))
+    );
+    outln!(
+        "RequestorMode = {}",
+        if irp.requestor_mode == 0 {
+            "KernelMode"
+        } else {
+            "UserMode"
+        }
+    );
+    outln!("PendingReturned = {}", u8::from(irp.pending_returned));
+    outln!("UserEvent = {}", ui::addr(irp.user_event.0));
+    outln!("UserBuffer = {}", ui::addr(irp.user_buffer.0));
+}
 
-    fn cmd_irps(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let filter = invocation.arg(0);
+/// The next word, which a later argument also takes.
+#[grammar(usage = "")]
+fn peek_word(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Option<String>, ArgError> {
+    Ok(cursor.words().next().map(str::to_string))
+}
 
-        let hits = match self.ctx.target.discover_irps(filter) {
-            Ok(h) => h,
-            Err(e) => {
-                error!("{}", e);
-                return Ok(());
-            }
-        };
+/// Find the in-flight IRPs in thread IrpLists and device CurrentIrp fields.
+#[command(
+    names = ["irps"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+)]
+fn irps(
+    session: &Session,
+    #[arg(render, parse = peek_word)] shown: Option<String>,
+    #[arg(name = "process-filter|driver-filter", complete = Process)] filter: Option<String>,
+) -> Result<Vec<IrpHit>> {
+    session.target.discover_irps(filter.as_deref())
+}
 
-        if hits.is_empty() {
+/// `irps`: the IRPs found, or that none matched `filter`.
+impl Render<Option<String>> for Vec<IrpHit> {
+    fn render(&self, _: &mut ReplState<'_>, filter: Option<String>) {
+        if self.is_empty() {
             match filter {
                 Some(f) => outln!("  {}", format!("no IRPs found for '{}'", f).bright_black()),
                 None => outln!("  {}", "no IRPs found".bright_black()),
             }
             outln!();
-            return Ok(());
+            return;
         }
 
         outln!("  {:<16} {:<7} Details", "IRP", "Source");
-        for h in &hits {
-            let details = if h.source == "thread" {
+        for h in self {
+            let details = if h.source == IrpSource::Thread {
                 format!(
                     "pid={} tid={} ethread={} state={} wait={}",
                     h.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into()),
@@ -494,8 +483,8 @@ impl ReplState<'_> {
                     h.ethread
                         .map(|e| ui::addr(e.0))
                         .unwrap_or_else(|| "?".into()),
-                    h.state.map(kthread_state_name).unwrap_or("?"),
-                    h.wait_reason.map(wait_reason_name).unwrap_or("?"),
+                    h.state_name().unwrap_or("?"),
+                    h.wait_reason_name().unwrap_or("?"),
                 )
             } else {
                 format!(
@@ -509,39 +498,116 @@ impl ReplState<'_> {
             outln!(
                 "  {} {:<7} stack={:<2} current={:<2} {}",
                 ui::addr(h.irp.0),
-                h.source,
+                h.source.to_string(),
                 h.stack_count,
                 h.current_location,
                 details
             );
         }
         outln!();
-
-        Ok(())
     }
+}
 
-    fn cmd_irpfind(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let args = match IrpFindArgs::parse(&invocation.argv, |text| {
-            Expr::eval_with_radix(text, &self.ctx.target, self.radix).map(|value| value.0)
-        }) {
-            Ok(args) => args,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        match self
-            .ctx
-            .target
-            .irp_find(args.pool, args.restart, args.criteria)
-        {
-            Ok(detail) => self.print_irp_find(&detail, args.verbose),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
+/// A WinDbg pool type: 0 nonpaged, 1 paged.
+impl FromArg for IrpPool {
+    const COMPLETION: CompletionStrategy = CompletionStrategy::Expression;
+
+    fn from_arg(cx: &mut ArgCx<'_, '_>, text: &str) -> std::result::Result<Self, ArgError> {
+        IrpPool::from_windbg(cx.eval(text)?.0).map_err(|error| ArgError::Message(error.to_string()))
     }
+}
 
-    fn print_irp_find(&self, detail: &IrpFindDetail, verbose: bool) {
+/// A WinDbg `!irpfind` criteria name, in any case.
+impl FromArg for IrpCriteriaKind {
+    fn from_arg(_: &mut ArgCx<'_, '_>, text: &str) -> std::result::Result<Self, ArgError> {
+        IrpCriteriaKind::parse(text).map_err(|error| ArgError::Message(error.to_string()))
+    }
+}
+
+/// `!irpfind`'s pool type, once the line has a WinDbg shape: after `-v`,
+/// up to a pool type and restart address, or both and a criteria pair.
+#[grammar(usage = "[{}]", complete = [Expression])]
+fn irpfind_pool(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Option<IrpPool>, ArgError> {
+    let words = cursor.remaining();
+    if words == 3 {
+        return Err(ArgError::usage(
+            cx.name,
+            format!("{}: a criteria needs its data", cx.name),
+        ));
+    }
+    if words > 4 {
+        return Err(ArgError::usage(
+            cx.name,
+            format!("{}: too many arguments", cx.name),
+        ));
+    }
+    cursor
+        .word()
+        .map(|text| IrpPool::from_arg(cx, &text))
+        .transpose()
+}
+
+/// Scan pool for the IRPs that IoAllocateIrp allocates.
+///
+/// Scans the pool region for 16-byte-aligned _POOL_HEADERs with the tag Irp. On
+/// Windows 10 1803 and later, the region comes from MiState.Vs.SystemVaRegions,
+/// and otherwise it is MmNonPagedPoolStart/End or MmPagedPoolStart/End. The
+/// scan walks the page tables and reads only mapped pages, and big allocations
+/// come from PoolBigPageTable. The command counts a block only if its body is a
+/// live _IRP. In a live _IRP, Type is 6 (IoFreeIrp clears it), and Size is the
+/// header plus whole stack locations and at least IoSizeOfIrp(StackCount). A
+/// lookaside IRP keeps its larger packet size. CurrentLocation is at most
+/// StackCount + 1. For each IRP, the command shows its thread
+/// (Tail.Overlay.Thread), the process of its MDL, and the major function, minor
+/// function, device, and owning driver of the current stack location. If
+/// CurrentLocation is more than StackCount, the IRP shows as complete. -v also
+/// shows the pool header, I/O status, PendingReturned, UserEvent, UserBuffer,
+/// and OriginalFileObject, and also the file object and completion routine of
+/// the current location. pool-type is 0 (nonpaged, the default) or 1 (paged).
+/// The command does not accept 2 (special) or 4 (session), because these pool
+/// types have no region of their own on these builds. restart-address continues
+/// a scan from that page. The criteria are the same as in WinDbg: arg
+/// (Argument1-4 of a stack location), device (DeviceObject of a stack
+/// location), fileobject (Tail.Overlay.OriginalFileObject), mdlprocess
+/// (MdlAddress->Process), thread (Tail.Overlay.Thread), and userevent
+/// (UserEvent). Use 0 as the restart address to scan the whole pool. The scan
+/// stops after 4,096 IRPs, or when you press Ctrl-C, and then shows the command
+/// that continues the scan, with the criteria. The scan checks the big-pool
+/// allocations last. If the scan gets to the limit in the big-pool allocations,
+/// the command shows a message. A restart cannot get to the remaining big-pool
+/// allocations. A driver can build IRPs in its own allocations
+/// (IoInitializeIrp). These IRPs have the tag of that driver, so the scan does
+/// not find them. Use irps to list the IRPs in thread IrpLists.
+#[command(
+    names = ["!irpfind", "irpfind"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    python_name = "irp_find",
+)]
+fn irpfind(
+    session: &Session,
+    #[arg(render, switch = "-v")] verbose: bool,
+    #[arg(parse = irpfind_pool)] pool_type: Option<IrpPool>,
+    #[arg(name = "restart-address")] restart: Option<VirtAddr>,
+    criteria: Option<IrpCriteriaKind>,
+    #[arg(default = 0, name = "data")] value: u64,
+) -> Result<IrpFindDetail> {
+    let criteria = criteria.map(|kind| IrpCriteria::new(kind, value));
+    session.target.irp_find(
+        pool_type.unwrap_or(IrpPool::NonPaged),
+        restart.filter(|address| !address.is_zero()),
+        criteria,
+    )
+}
+
+impl Render<bool> for IrpFindDetail {
+    fn render(&self, repl: &mut ReplState<'_>, verbose: bool) {
+        let detail = self;
         outln!(
             "Searching {} pool ({} : {}) for Tag: Irp",
             detail.pool.name(),
@@ -623,7 +689,7 @@ impl ReplState<'_> {
                         "    stack location {}  FileObject {}  CompletionRoutine {}  Context {}",
                         ui::addr(stack.address.0),
                         ui::addr(stack.file_object.0),
-                        self.fmt_kernel_symbol(stack.completion_routine),
+                        kernel_symbol(&repl.ctx.target, stack.completion_routine),
                         ui::addr(stack.context.0)
                     );
                 }
@@ -661,27 +727,46 @@ impl ReplState<'_> {
         }
         outln!();
     }
+}
 
-    fn cmd_object(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(expr) = invocation.arg(0) else {
-            outln!("{}\n", command_help("object"));
-            return Ok(());
-        };
+/// An object namespace path (`\`, `\Driver\ACPI`), else an address
+/// expression.
+impl FromArg for ObjectName {
+    const COMPLETION: CompletionStrategy = CompletionStrategy::Expression;
 
-        let detail = match self
-            .ctx
-            .target
-            .object_argument(expr, self.radix)
-            .and_then(|addr| self.ctx.target.inspect_object(addr))
-        {
-            Ok(detail) => detail,
-            Err(e) => {
-                error!("{}", e);
-                return Ok(());
-            }
-        };
-        let o = &detail.header;
+    fn from_arg(cx: &mut ArgCx<'_, '_>, text: &str) -> std::result::Result<Self, ArgError> {
+        if text.starts_with('\\') {
+            Ok(ObjectName::Path(text.to_string()))
+        } else {
+            cx.eval(text).map(ObjectName::Address)
+        }
+    }
+}
 
+/// Show an executive object header and body, and list the entries of a directory.
+///
+/// A path that starts with `\` is the name of an object in the object namespace
+/// (`!object \`, `!object \Driver\ACPI`). The command looks up the path from
+/// the root directory and ignores case. It does not follow symbolic links in
+/// the path. For a directory, the command lists the entries and their types.
+#[command(
+    names = ["!object", "object"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+)]
+fn object(
+    session: &Session,
+    #[arg(name = "path|object-expression")] object: ObjectName,
+) -> Result<ObjectDetail> {
+    let target = &session.target;
+    target.inspect_object(target.object_address(&object)?)
+}
+
+impl Render for ObjectDetail {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        let o = &self.header;
         outln!("object {}", ui::addr(o.body.0));
         outln!("  input         : {} ({})", ui::addr(o.input.0), o.mode);
         outln!("  header        : {}", ui::addr(o.header.0));
@@ -705,7 +790,7 @@ impl ReplState<'_> {
         if let Some(name) = &o.name {
             outln!("  name          : {}", name);
         }
-        if let Some(entries) = &detail.entries {
+        if let Some(entries) = &self.entries {
             outln!("  entries       : {}", entries.len());
             let mut builder = Builder::default();
             builder.push_record(["Object", "Type", "Name"]);
@@ -718,41 +803,46 @@ impl ReplState<'_> {
             }
             outln!();
             print_padded_table(builder);
-            return Ok(());
+            return;
         }
         outln!();
-
-        Ok(())
     }
+}
 
-    fn cmd_callbacks(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let filter = invocation.arg(0).map(|s| s.to_lowercase());
+/// List the process, thread, and image notification callbacks.
+#[command(
+    names = ["callbacks"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+)]
+fn callbacks(
+    session: &Session,
+    #[arg(render, name = "symbol-filter", complete = Symbol)] filter: Option<String>,
+) -> Result<Vec<NotifyCallback>> {
+    session.target.enumerate_notify_callbacks()
+}
 
-        let callbacks = match self.ctx.target.enumerate_notify_callbacks() {
-            Ok(c) => c,
-            Err(e) => {
-                error!("{}", e);
-                return Ok(());
-            }
-        };
-
-        let dtb = self.ctx.target.kernel_dtb();
+/// `callbacks`: those whose symbol contains `filter`, by kind.
+impl Render<Option<String>> for Vec<NotifyCallback> {
+    fn render(&self, _: &mut ReplState<'_>, filter: Option<String>) {
+        let lowered = filter.as_ref().map(|filter| filter.to_lowercase());
         let mut printed = 0;
-        let mut last_kind = "";
-        for c in &callbacks {
-            let target = self
-                .ctx
-                .target
-                .format_code_address(dtb, c.function)
+        let mut last_kind = None;
+        for c in self {
+            let target = c
+                .symbol
+                .clone()
                 .unwrap_or_else(|| format!("0x{:x}", c.function.0));
-            if let Some(f) = &filter
+            if let Some(f) = &lowered
                 && !target.to_lowercase().contains(f)
             {
                 continue;
             }
-            if c.kind != last_kind {
+            if last_kind != Some(c.kind) {
                 outln!("{} callbacks:", c.kind);
-                last_kind = c.kind;
+                last_kind = Some(c.kind);
             }
             outln!(
                 "  [{:02}] fn={}  block={}  raw={}  ctx={}",
@@ -766,26 +856,30 @@ impl ReplState<'_> {
         }
 
         if printed == 0 {
-            match invocation.arg(0) {
+            match filter {
                 Some(f) => outln!("no callbacks matching '{}'", f),
                 None => outln!("no registered callbacks found"),
             }
         }
         outln!();
-
-        Ok(())
     }
+}
 
-    fn cmd_ssdt(&mut self) -> Result<()> {
-        let tables = match self.ctx.target.dump_ssdt() {
-            Ok(t) => t,
-            Err(e) => {
-                error!("{}", e);
-                return Ok(());
-            }
-        };
+/// Show the SSDT and the shadow SSDT.
+#[command(
+    names = ["ssdt"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect
+)]
+fn ssdt(session: &Session) -> Result<Vec<SsdtTable>> {
+    session.target.dump_ssdt()
+}
 
-        for (i, t) in tables.iter().enumerate() {
+impl Render for Vec<SsdtTable> {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        for (i, t) in self.iter().enumerate() {
             if i > 0 {
                 outln!();
             }
@@ -820,7 +914,5 @@ impl ReplState<'_> {
             }
         }
         outln!();
-
-        Ok(())
     }
 }

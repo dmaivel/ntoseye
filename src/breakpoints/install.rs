@@ -5,14 +5,13 @@
 use pelite::{PeView, image::IMAGE_SCN_MEM_EXECUTE};
 
 use super::journal::site_window;
-use super::{Breakpoint, BreakpointManager, BreakpointScope};
-use crate::backend::MemoryOps;
+use super::{BreakpointInfo, BreakpointManager, BreakpointScope};
 use crate::bugchecks::looks_like_kernel_pointer;
 use crate::dbg_backend::{DebugBackend, DebugCapability};
 use crate::error::{Error, Result};
 use crate::guest::ModuleInfo;
 use crate::kd::api::DBGKD_WRITE_PHYSICAL_MEMORY;
-use crate::memory::{AddressSpace, PAGE_SIZE};
+use crate::memory::{AddressSpace, MemoryOps, PAGE_SIZE};
 use crate::pe::read_pe_header_page;
 use crate::phys::PhysMem;
 use crate::target::Target;
@@ -190,7 +189,7 @@ impl BreakpointBackend {
     }
 }
 
-impl Breakpoint {
+impl BreakpointInfo {
     /// The target accepted this breakpoint but its site was not resident, so
     /// the target's own breakpoint table owes the opcode until the page is
     /// paged in (`nt!KdSetOwedBreakpoints` writes it then). Only a
@@ -328,7 +327,7 @@ impl BreakpointManager {
     pub(super) fn install_existing_breakpoint(
         client: &mut dyn DebugBackend,
         debugger: &Target,
-        bp: &Breakpoint,
+        bp: &BreakpointInfo,
     ) -> Result<()> {
         match (&bp.scope, &bp.backend) {
             // The target owns the byte whatever the scope filters hits on.
@@ -367,7 +366,7 @@ impl BreakpointManager {
     pub(super) fn uninstall_breakpoint(
         client: &mut dyn DebugBackend,
         debugger: &Target,
-        bp: &Breakpoint,
+        bp: &BreakpointInfo,
     ) -> Result<()> {
         match (&bp.scope, &bp.backend) {
             (_, BreakpointBackend::Kernel { .. }) => lift_target_site(client, debugger, bp.address),
@@ -395,7 +394,7 @@ impl BreakpointManager {
 
     /// Drop the backend's bookkeeping for a host-patched site that is being
     /// abandoned rather than restored (KD classifies stops by that set).
-    pub(super) fn forget_backend_site(client: &mut dyn DebugBackend, bp: &Breakpoint) {
+    pub(super) fn forget_backend_site(client: &mut dyn DebugBackend, bp: &BreakpointInfo) {
         if matches!(bp.backend, BreakpointBackend::GuestMemoryPatch { .. }) {
             client.note_breakpoint_uninstalled(bp.address.0);
         }
@@ -611,7 +610,7 @@ impl BreakpointManager {
     /// translations are cached per halt anyway. Scope is the fallback for an
     /// address space that cannot resolve the site at all, such as a
     /// non-resident page or a dump carrying no page tables.
-    fn site_is_in_view(debugger: &Target, bp: &Breakpoint, cr3: u64) -> bool {
+    fn site_is_in_view(debugger: &Target, bp: &BreakpointInfo, cr3: u64) -> bool {
         let owner = match &bp.scope {
             BreakpointScope::Process { dtb, .. } => *dtb,
             BreakpointScope::Kernel => debugger.kernel_dtb(),

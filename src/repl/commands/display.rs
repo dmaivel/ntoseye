@@ -5,28 +5,105 @@
 use crate::error::Result;
 use crate::expr::Expr;
 use crate::output::strip_ansi;
+use ntoseye_macros::command;
+
+use crate::repl::args::words;
 use crate::repl::*;
 use crate::session::{Display, Session};
 use crate::typeview::TypeView;
 use crate::ui;
 use crate::unwind::try_format_symbol_at;
 
-repl_command! {
-    cmd_display;
-    names: ["display"],
-    usage: "display [<expression>]",
-    summary: "Show an expression's value at every stop.",
-    details: "Each stop then ends with the display's value, marked when it changed since the last stop. The expression keeps the radix it was entered in. Without an expression, display lists the displays with their values now. undisplay removes them.",
-    completion: Expression,
-    style: ExpressionTail,
+/// Show an expression's value at every stop.
+///
+/// Each stop then ends with the display's value, marked when it changed since
+/// the last stop. The expression keeps the radix it was entered in. Without an
+/// expression, display lists the displays with their values now. undisplay
+/// removes them.
+#[command(
+    names = ["display"],
+    category = "symbols, types, and expressions",
+    kind = Host,
+    python = none,
+    style = ExpressionTail
+)]
+fn display(
+    state: &mut ReplState<'_>,
+    #[arg(raw, usage = "[expression]", complete = Expression)] tail: String,
+) -> Result<()> {
+    let expr = tail.as_str().trim();
+    if expr.is_empty() {
+        if state.ctx.displays.is_empty() {
+            outln!("no displays; display <expression> adds one\n");
+            return Ok(());
+        }
+        let shown = evaluate(state.ctx, false);
+        show(&shown);
+        return Ok(());
+    }
+    if let Err(error) = Expr::parse_with_radix(expr, state.radix) {
+        error!("{error}");
+        return Ok(());
+    }
+    let id = state
+        .ctx
+        .displays
+        .iter()
+        .map(|display| display.id)
+        .max()
+        .map_or(1, |id| id + 1);
+    state.ctx.displays.push(Display {
+        id,
+        expr: expr.to_owned(),
+        radix: state.radix,
+        last: None,
+    });
+    // Its value now, which the next stop compares with.
+    let shown = evaluate(state.ctx, true);
+    show(&shown[shown.len() - 1..]);
+    Ok(())
 }
 
-repl_command! {
-    cmd_undisplay;
-    names: ["undisplay"],
-    usage: "undisplay <number>... | *",
-    summary: "Stop showing displays at every stop.",
-    completion: None,
+/// Stop showing displays at every stop.
+#[command(
+    names = ["undisplay"],
+    category = "symbols, types, and expressions",
+    kind = Host,
+    python = none,
+)]
+fn undisplay(
+    state: &mut ReplState<'_>,
+    #[arg(parse = words, usage = "<number>... | *", complete = None)] numbers: Vec<String>,
+) -> Result<()> {
+    let args: Vec<&str> = numbers.iter().map(String::as_str).collect();
+    if args.is_empty() {
+        outln!("{}\n", command_help("undisplay"));
+        return Ok(());
+    }
+    if args == ["*"] {
+        let count = state.ctx.displays.len();
+        state.ctx.displays.clear();
+        outln!(
+            "removed {count} display{}\n",
+            if count == 1 { "" } else { "s" }
+        );
+        return Ok(());
+    }
+    for arg in args {
+        let Ok(id) = arg.parse::<u32>() else {
+            error!("not a display number: {arg}");
+            continue;
+        };
+        let before = state.ctx.displays.len();
+        state.ctx.displays.retain(|display| display.id != id);
+        if state.ctx.displays.len() == before {
+            error!("no display {id}");
+        } else {
+            outln!("removed display {id}");
+        }
+    }
+    outln!();
+    Ok(())
 }
 
 /// A display's value as the stop shows it.
@@ -177,73 +254,5 @@ fn show(shown: &[Shown]) {
     {
         print(shown);
         outln!();
-    }
-}
-
-impl ReplState<'_> {
-    fn cmd_display(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let expr = invocation.raw_tail.trim();
-        if expr.is_empty() {
-            if self.ctx.displays.is_empty() {
-                outln!("no displays; display <expression> adds one\n");
-                return Ok(());
-            }
-            let shown = evaluate(self.ctx, false);
-            show(&shown);
-            return Ok(());
-        }
-        if let Err(error) = Expr::parse_with_radix(expr, self.radix) {
-            error!("{error}");
-            return Ok(());
-        }
-        let id = self
-            .ctx
-            .displays
-            .iter()
-            .map(|display| display.id)
-            .max()
-            .map_or(1, |id| id + 1);
-        self.ctx.displays.push(Display {
-            id,
-            expr: expr.to_owned(),
-            radix: self.radix,
-            last: None,
-        });
-        // Its value now, which the next stop compares with.
-        let shown = evaluate(self.ctx, true);
-        show(&shown[shown.len() - 1..]);
-        Ok(())
-    }
-
-    fn cmd_undisplay(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let args: Vec<&str> = invocation.argv.iter().map(|arg| arg.as_ref()).collect();
-        if args.is_empty() {
-            outln!("{}\n", command_help("undisplay"));
-            return Ok(());
-        }
-        if args == ["*"] {
-            let count = self.ctx.displays.len();
-            self.ctx.displays.clear();
-            outln!(
-                "removed {count} display{}\n",
-                if count == 1 { "" } else { "s" }
-            );
-            return Ok(());
-        }
-        for arg in args {
-            let Ok(id) = arg.parse::<u32>() else {
-                error!("not a display number: {arg}");
-                continue;
-            };
-            let before = self.ctx.displays.len();
-            self.ctx.displays.retain(|display| display.id != id);
-            if self.ctx.displays.len() == before {
-                error!("no display {id}");
-            } else {
-                outln!("removed display {id}");
-            }
-        }
-        outln!();
-        Ok(())
     }
 }

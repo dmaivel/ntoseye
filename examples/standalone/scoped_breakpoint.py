@@ -2,7 +2,7 @@
 """Break only in one process, then step out and run to an address.
 
 Sets a process-scoped, pass-counted breakpoint with a debugger-expression
-condition, uses `step_out()` / `run_to()`, then demonstrates a one-shot
+condition, uses `step_out()` / `run(address=...)`, then demonstrates a one-shot
 breakpoint. Requires an execution-control backend (`gdb` or `kd`) and a
 running process to scope to.
 
@@ -50,32 +50,32 @@ def main() -> None:
                 if stop is None:
                     dbg.interrupt()
                     raise SystemExit(f"no hit within {args.timeout:g}s (is {args.process} doing anything?)")
-                if bp in stop.breakpoints:
+                if stop.hit(bp):
                     break
-                if isinstance(stop, (ntoseye.Stop.Bugcheck, ntoseye.Stop.Reboot)):
-                    raise SystemExit(f"target stopped with {type(stop).__name__} before the breakpoint")
-                print(f"other stop: {type(stop).__name__} at {stop.rip!r}; waiting again")
+                if isinstance(stop, (ntoseye.Stop.Bugcheck, ntoseye.Stop.Reload)):
+                    raise SystemExit(f"target stopped with a {stop.kind} before the breakpoint")
+                print(f"other stop: {stop.kind} at {stop.symbol or stop.rip}; waiting again")
 
             stopped_in = stop.process
             name = stopped_in.name if stopped_in else "unknown process"
             pid = stopped_in.pid if stopped_in else "?"
-            print(f"\nstop in {name} (pid {pid}), {type(stop).__name__}:")
-            if stop.thread:
-                for frame in stop.thread.backtrace(4):
+            print(f"\nstop in {name} (pid {pid}), {stop.kind}:")
+            if stop.thread is not None:
+                for frame in dbg.threads[stop.thread].backtrace(limit=4):
                     print(f"  {frame.ip:#x}  {frame.symbol}")
 
             out = dbg.step_out()
             rip = out.rip or 0
-            print(f"\nstep_out -> {rip:#x} ({out.symbol or dbg.symbols.nearest(rip)})")
+            print(f"\nstep_out -> {out.kind} at {rip:#x} ({out.symbol or dbg.symbols.nearest(rip)})")
 
             rows = dbg.memory.disassemble(rip, 3)
             if len(rows) < 3:
                 raise SystemExit("could not decode three instructions at the return address")
             target = rows[2].ip
-            reached = dbg.run_to(target, timeout=timeout)
+            reached = dbg.run(timeout=timeout, address=target)
             if reached is None:
-                raise SystemExit(f"run_to {target:#x} timed out")
-            print(f"run_to {target:#x} -> {type(reached).__name__} at {reached.rip!r}")
+                raise SystemExit(f"run(address={target:#x}) timed out")
+            print(f"run(address={target:#x}) -> {reached.kind} at {reached.symbol or reached.rip}")
 
             bp.delete()
             once = dbg.breakpoints.add(args.symbol, process=proc, one_shot=True)
@@ -85,7 +85,8 @@ def main() -> None:
                 once.delete()
                 print("\none-shot breakpoint did not fire in time; removed it")
             else:
-                print(f"\none-shot breakpoint {once.id} fired; still listed: {once.valid}")
+                listed = once in dbg.breakpoints
+                print(f"\none-shot breakpoint {once.id} stopped: {stop.hit(once)}; still listed: {listed}")
         finally:
             for handle in list(dbg.breakpoints):
                 try:

@@ -16,6 +16,8 @@
 
 use std::collections::HashMap;
 
+use ntoseye_macros::record;
+
 use super::hypercalls::{describe_hypercall_input, tlfs_hypercall};
 
 /// The bytes of a page, which an input in memory cannot cross (TLFS
@@ -359,44 +361,54 @@ impl HypercallControl {
     }
 }
 
-/// One field of a hypercall's input.
+/// One field of a hypercall's input, as the Hyper-V TLFS lays it out.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HypercallField {
     /// The TLFS parameter name, with its member for a structure
     /// (`ProcessorSet.ValidBanksMask`) and its index for an array
-    /// (`Message[2]`).
+    /// (`Message[2]`); `Input[n]` for the raw qwords of a call whose
+    /// layout ntoseye does not know.
     pub name: String,
     /// The offset in the input, from its first byte, rep list included.
     pub offset: u16,
-    /// In bytes, at most 8.
+    /// The size in bytes, at most 8.
     pub size: u8,
+    #[record(hex)]
     pub value: u64,
     /// What the value means, where it has a name or stands for a set:
     /// `HV_PARTITION_ID_SELF`, `VPs 0-3`, a register's TLFS name.
     pub meaning: Option<String>,
 }
 
-/// One element of a rep call's input list.
+/// One element of a rep hypercall's input list.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HypercallElement {
     pub index: u16,
     pub fields: Vec<HypercallField>,
 }
 
-/// The hypercall of a VMCALL exit with its input decoded: the one data model
-/// that the REPL (`!hvcall`), the views, the MCP trailer, and the SDK show.
+/// The hypercall of a VMCALL exit, with its input decoded as the Hyper-V
+/// TLFS lays it out (`!hvcall`): the one data model that the REPL, the MCP
+/// trailer, and the SDK show.
+#[record(impl)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedHypercall {
     /// The hypercall input value (RCX).
+    #[record(hex)]
     pub input_value: u64,
+    #[record(skip)]
     pub control: HypercallControl,
-    /// The TLFS name of the call code.
+    /// The TLFS name, or None for a code that the TLFS does not list.
     pub name: Option<&'static str>,
-    /// The GPA of the input parameters (RDX), for a call whose input is in
-    /// memory.
+    /// The guest physical address of the input (RDX), for a call whose
+    /// input is in memory.
+    #[record(hex)]
     pub input_gpa: Option<u64>,
-    /// The GPA of the output parameters (R8), for a call whose input is in
-    /// memory.
+    /// The guest physical address of the output (R8), for a call whose
+    /// input is in memory.
+    #[record(hex)]
     pub output_gpa: Option<u64>,
     /// Whether ntoseye knows the layout of the call's input. When it does
     /// not, `fields` holds the input as raw qwords, `Input[0]` on: RDX and
@@ -411,9 +423,47 @@ pub struct DecodedHypercall {
     pub unavailable: Option<String>,
 }
 
+#[record]
 impl DecodedHypercall {
+    /// The call code (bits 15:0 of the input value).
+    #[record(getter, hex)]
+    pub fn code(&self) -> u16 {
+        self.control.code
+    }
+
+    /// Whether the input is in registers (RDX, R8, and XMM0 to XMM5)
+    /// rather than in memory.
+    #[record(getter)]
+    pub fn fast(&self) -> bool {
+        self.control.fast
+    }
+
+    /// The size of the variable input header, in qwords.
+    #[record(getter)]
+    pub fn variable_header_size(&self) -> u16 {
+        self.control.variable_header_qwords
+    }
+
+    /// Whether the call is for the L0 hypervisor of a nested environment.
+    #[record(getter)]
+    pub fn nested(&self) -> bool {
+        self.control.nested
+    }
+
+    #[record(getter)]
+    pub fn rep_count(&self) -> u16 {
+        self.control.rep_count
+    }
+
+    /// The first rep element still to process; those before it are done.
+    #[record(getter)]
+    pub fn rep_start(&self) -> u16 {
+        self.control.rep_start
+    }
+
     /// The call on one line, as the stop header shows it:
     /// `hypercall 0x0003 HvCallFlushVirtualAddressList rep 0/12`.
+    #[record(getter)]
     pub fn summary(&self) -> String {
         describe_hypercall_input(self.input_value)
     }

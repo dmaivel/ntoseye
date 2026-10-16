@@ -1,16 +1,38 @@
 //! Global flags (`!gflag`): `nt!NtGlobalFlag` and the current process's
 //! `_PEB.NtGlobalFlag`, decoded by the GFlags table's names.
 
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
+#[cfg(feature = "repl")]
+use crate::expr::Expr;
 use crate::guest::ProcessInfo;
+use crate::memory::MemoryOps;
+#[cfg(feature = "python")]
+use crate::python::command::PyArg;
+#[cfg(feature = "repl")]
+use crate::repl::CompletionStrategy;
+#[cfg(feature = "repl")]
+use crate::repl::args::{ArgCx, ArgError, FromArg};
 use crate::target::{DiagnosticValue, Target};
 use crate::types::VirtAddr;
+use ntoseye_macros::record;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python-stubs")]
+use pyo3::inspect::PyStaticExpr;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python-stubs")]
+use pyo3::type_hint_identifier;
 
-/// One global flag: its bit, GFlags abbreviation, and description.
+/// One GFlags flag: its bit, GFlags abbreviation (`hpa`, `ust`, ...), and
+/// description.
+#[record]
 #[derive(Debug, Clone, Copy)]
 pub struct GlobalFlag {
+    /// The bit mask of the flag.
+    #[record(hex)]
     pub bit: u32,
+    /// The GFlags abbreviation; empty for 0x200, which has none.
     pub abbreviation: &'static str,
     pub description: &'static str,
 }
@@ -72,10 +94,12 @@ pub const GLOBAL_FLAGS: [GlobalFlag; 32] = [
 ];
 
 /// The flags set in `value`, in bit order.
-pub fn global_flags_set(value: u32) -> impl Iterator<Item = &'static GlobalFlag> {
+pub fn global_flags_set(value: u32) -> Vec<GlobalFlag> {
     GLOBAL_FLAGS
         .iter()
-        .filter(move |flag| value & flag.bit != 0)
+        .filter(|flag| value & flag.bit != 0)
+        .copied()
+        .collect()
 }
 
 /// A `!gflag` change to `NtGlobalFlag`.
@@ -130,16 +154,96 @@ impl GlobalFlagChange {
     }
 }
 
-/// `nt!NtGlobalFlag` and the current process's `_PEB.NtGlobalFlag`.
-#[derive(Debug, Clone)]
-pub struct GlobalFlagsDetail {
+/// `!gflag`'s change, its values in the current radix.
+#[cfg(feature = "repl")]
+impl FromArg for GlobalFlagChange {
+    const COMPLETION: CompletionStrategy = CompletionStrategy::Expression;
+
+    fn from_arg(cx: &mut ArgCx<'_, '_>, text: &str) -> std::result::Result<Self, ArgError> {
+        Self::parse(text, |text| {
+            Expr::eval_with_radix(text, &cx.state.ctx.target, cx.state.radix).map(|value| value.0)
+        })
+        .map_err(|error| ArgError::Message(error.to_string()))
+    }
+}
+
+/// The SDK's `change` argument: a `str` as `!gflag` takes it (`"+ust"`,
+/// `"-0x2000000"`, `"400"`), its values hex as in WinDbg.
+#[cfg(feature = "python")]
+pub struct GlobalFlagChangeArg(GlobalFlagChange);
+
+#[cfg(feature = "python")]
+impl<'a, 'py> FromPyObject<'a, 'py> for GlobalFlagChangeArg {
+    type Error = PyErr;
+
+    #[cfg(feature = "python-stubs")]
+    const INPUT_TYPE: PyStaticExpr = type_hint_identifier!("builtins", "str");
+
+    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        let text: String = obj.extract()?;
+        GlobalFlagChange::parse(&text, |value| {
+            let digits = value
+                .strip_prefix("0x")
+                .or_else(|| value.strip_prefix("0X"))
+                .unwrap_or(value);
+            u64::from_str_radix(digits, 16)
+                .map_err(|_| Error::InvalidArgument(format!("'{value}' is not a hex value")))
+        })
+        .map(Self)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+}
+
+#[cfg(feature = "python")]
+impl PyArg for GlobalFlagChange {
+    type Py = GlobalFlagChangeArg;
+    fn from_py(value: GlobalFlagChangeArg) -> Self {
+        value.0
+    }
+}
+
+/// `nt!NtGlobalFlag` and the `_PEB.NtGlobalFlag` of the current process
+/// (`!gflag`), and the change the command made to `nt!NtGlobalFlag`.
+#[record(impl)]
+pub struct GlobalFlags {
+    /// The address of `nt!NtGlobalFlag`.
     pub kernel_address: VirtAddr,
+    /// `nt!NtGlobalFlag`.
+    #[record(hex)]
     pub kernel: u32,
-    /// The current process, when there is one.
+    /// The current process. `None` if no process is selected.
     pub process: Option<ProcessInfo>,
-    /// Its PEB's flags; unavailable for a process without a PEB (System) or
-    /// with its PEB paged out.
+    /// The flags of the current process, read from its PEB; unavailable for
+    /// a process without a PEB (System) or with its PEB paged out.
+    #[record(hex)]
     pub process_flags: DiagnosticValue<u32>,
+    /// The change made to `nt!NtGlobalFlag` before the flags were read.
+    /// `None` if none was asked for.
+    pub change: Option<GlobalFlagUpdate>,
+}
+
+/// A change `!gflag` made to `nt!NtGlobalFlag`: its value before and after.
+#[record]
+pub struct GlobalFlagUpdate {
+    #[record(hex)]
+    pub old: u32,
+    #[record(hex)]
+    pub new: u32,
+}
+
+#[record]
+impl GlobalFlags {
+    /// The flags set in `nt!NtGlobalFlag`.
+    #[record(getter)]
+    pub fn kernel_flags(&self) -> Vec<GlobalFlag> {
+        global_flags_set(self.kernel)
+    }
+
+    /// The flags set in the PEB of the current process.
+    #[record(getter)]
+    pub fn process_flag_names(&self) -> DiagnosticValue<Vec<GlobalFlag>> {
+        self.process_flags.map(|&flags| global_flags_set(flags))
+    }
 }
 
 impl Target {
@@ -148,7 +252,7 @@ impl Target {
     }
 
     /// Read `nt!NtGlobalFlag` and the current process's PEB copy.
-    pub fn global_flags(&self) -> Result<GlobalFlagsDetail> {
+    pub fn global_flags(&self) -> Result<GlobalFlags> {
         let guest = self.guest()?;
         let kernel_address = self.nt_global_flag_address()?;
         let kernel: u32 = guest.ntoskrnl.memory().read(kernel_address)?;
@@ -158,7 +262,7 @@ impl Target {
             Some(process) => DiagnosticValue::from_result((|| {
                 let types = guest.ntoskrnl.types_in(process.dtb);
                 let peb = types
-                    .struct_at("_EPROCESS", process.eprocess_va)?
+                    .struct_at("_EPROCESS", process.eprocess)?
                     .read_pointer("Peb")?;
                 if peb.is_zero() {
                     return Err(Error::DebugInfo(format!("{} has no PEB", process.name)));
@@ -168,17 +272,18 @@ impl Target {
                     .read_field::<u32>("NtGlobalFlag")
             })()),
         };
-        Ok(GlobalFlagsDetail {
+        Ok(GlobalFlags {
             kernel_address,
             kernel,
             process,
             process_flags,
+            change: None,
         })
     }
 
     /// Apply `change` to `nt!NtGlobalFlag` with one 4-byte write, as `ed`
     /// would; returns the old and new values.
-    pub fn change_global_flag(&self, change: GlobalFlagChange) -> Result<(u32, u32)> {
+    pub fn change_global_flag(&self, change: GlobalFlagChange) -> Result<GlobalFlagUpdate> {
         let address = self.nt_global_flag_address()?;
         let old: u32 = self.guest()?.ntoskrnl.memory().read(address)?;
         let new = change.apply(old);
@@ -186,7 +291,7 @@ impl Target {
             self.context_memory()
                 .write_bytes(address, &new.to_le_bytes())?;
         }
-        Ok((old, new))
+        Ok(GlobalFlagUpdate { old, new })
     }
 }
 

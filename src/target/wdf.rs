@@ -5,10 +5,17 @@
 
 use std::sync::Arc;
 
-use super::{ListCursor, ListTermination, Target, bounded_list_walk};
-use crate::backend::MemoryOps;
+use ntoseye_macros::record;
+
+use super::etw::{GuidStyle, format_filetime_precise, format_guid};
+use super::{
+    DiagnosticValue, ListCursor, ListTermination, Target, bounded_list_walk,
+    bounded_record_list_walk, irp_major_function_name,
+};
+use crate::bytes::before_nul;
 use crate::error::{Error, Result};
 use crate::layout::{StructRef, TypeInfo, Types, le_uint};
+use crate::memory::MemoryOps;
 use crate::symbols::format_symbol_with_offset;
 use crate::types::VirtAddr;
 use crate::wpp::{TmfMessage, format_message};
@@ -80,14 +87,18 @@ const IO_TARGET_TYPES: &[&str] = &[
     "FX_TYPE_IO_TARGET_USB_PIPE",
 ];
 
-/// A PDB enum value and its name, when the enum has one for it.
+/// A PDB enum value and its name.
+#[record]
 #[derive(Debug, Clone)]
 pub struct WdfEnumValue {
+    #[record(hex)]
     pub value: u64,
+    /// `None` when the enum has no name for `value`.
     pub name: Option<String>,
 }
 
 /// The KMDF version a client bound to (`_WDF_BIND_INFO.Version`).
+#[record]
 #[derive(Debug, Clone, Copy)]
 pub struct WdfVersion {
     pub major: u32,
@@ -96,26 +107,34 @@ pub struct WdfVersion {
 }
 
 /// A KMDF client driver (`_FX_DRIVER_GLOBALS`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct WdfClient {
+    /// The `_FX_DRIVER_GLOBALS`.
     pub globals: VirtAddr,
-    /// `Public.DriverName`; `None` when it is empty or not printable.
+    /// `Public.DriverName`. `None` if it is empty or not printable.
     pub name: Option<String>,
-    /// `Driver`, the `FxDriver`; `None` before `WdfDriverCreate`.
+    /// `Driver`, the `FxDriver`. `None` before the driver calls
+    /// `WdfDriverCreate`.
     pub driver: Option<VirtAddr>,
     /// `Public.Driver`, the WDFDRIVER handle.
+    #[record(hex)]
     pub wdf_driver: Option<u64>,
     pub driver_object: VirtAddr,
-    /// The `DRIVER_OBJECT`'s `DriverName` (`\Driver\kdnic`): what names a
-    /// client whose `Public.DriverName` is empty.
+    /// The `DRIVER_OBJECT`'s `DriverName` (`kdnic` in the `Driver`
+    /// directory): what names a client whose `Public.DriverName` is empty.
     pub driver_object_name: Option<String>,
     /// The `FxDriver`'s `m_RegistryPath`.
     pub registry_path: Option<String>,
-    /// `WdfBindInfo->Version`; `None` when `WdfBindInfo` is null.
+    /// The KMDF version that the driver bound to (`WdfBindInfo->Version`).
+    /// `None` when `WdfBindInfo` is null.
     pub version: Option<WdfVersion>,
     pub image_base: VirtAddr,
+    /// Bytes.
+    #[record(hex)]
     pub image_size: u64,
-    /// `WdfLogHeader`, the IFR log's `_WDF_IFR_HEADER`; `None` without one.
+    /// `WdfLogHeader`, the `_WDF_IFR_HEADER` of the IFR log. `None` if the
+    /// driver has no IFR log.
     pub log_header: Option<VirtAddr>,
     /// `FxVerifierOn`.
     pub verifier_on: bool,
@@ -125,185 +144,290 @@ pub struct WdfClient {
     pub problems: Vec<String>,
 }
 
-/// The KMDF client drivers (`!wdfkd.wdfldr`).
+/// The KMDF client drivers on `FxLibraryGlobals.FxDriverGlobalsList`
+/// (`!wdfkd.wdfldr`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct WdfLoader {
     /// `Wdf01000!FxLibraryGlobals`.
     pub library_globals: VirtAddr,
     pub clients: Vec<WdfClient>,
-    /// Why the client list walk stopped short of its head.
+    /// Why the walk of the client list stopped before the list head. `None`
+    /// if the walk completed.
     pub stopped: Option<String>,
 }
 
-/// An object's address with its handle and type, as far as they read.
+/// The address, handle, and type of a KMDF object, as far as they read.
+#[record]
 #[derive(Debug, Clone)]
 pub struct WdfObjectRef {
     pub address: VirtAddr,
-    /// `None` for an object without a handle (`m_ObjectSize` 0) or unreadable.
+    /// `None` for an object without a handle (`m_ObjectSize` 0) or that does
+    /// not read.
+    #[record(hex)]
     pub handle: Option<u64>,
+    /// The `FX_OBJECT_TYPES` name of its `m_Type`.
     pub type_name: Option<String>,
 }
 
+/// A WDFDEVICE's kind, by its `m_PkgPnp`: `fdo`, `filter`, `pdo`, or
+/// `control` (a legacy device without one).
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WdfDeviceKind {
+    #[record(label = "FDO")]
+    Fdo,
+    Filter,
+    #[record(label = "PDO")]
+    Pdo,
+    Control,
+}
+
+impl WdfDeviceKind {
+    /// Whether it has an `FxPkgFdo` (an FDO or a filter).
+    fn is_fdo(self) -> bool {
+        matches!(self, Self::Fdo | Self::Filter)
+    }
+}
+
+/// A KMDF I/O target's kind: `local`, `remote`, `self`, `usb_device`, or
+/// `usb_pipe`.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WdfIoTargetKind {
+    Local,
+    Remote,
+    #[record(rename = "self")]
+    SelfTarget,
+    #[record(label = "USB device")]
+    UsbDevice,
+    #[record(label = "USB pipe")]
+    UsbPipe,
+}
+
 /// One of a driver's `DEVICE_OBJECT`s and the WDFDEVICE behind it.
+#[record]
 #[derive(Debug, Clone)]
 pub struct WdfDriverDevice {
     pub device_object: VirtAddr,
-    /// The `FxDevice`; `None` when the device object does not lead to one.
+    /// The `FxDevice`. `None` if the device object is not a WDFDEVICE of
+    /// this driver.
     pub device: Option<VirtAddr>,
+    /// The WDFDEVICE handle.
+    #[record(hex)]
     pub handle: Option<u64>,
-    pub kind: Option<&'static str>,
+    /// `FDO`, `filter`, `PDO`, or `control`.
+    pub kind: Option<WdfDeviceKind>,
+    /// `m_CurrentPnpState` (`_WDF_DEVICE_PNP_STATE`).
     pub pnp_state: Option<WdfEnumValue>,
-    /// Why the device object is not linked to a WDFDEVICE of this driver.
+    /// Why the device object does not link to a WDFDEVICE of this driver.
     pub unlinked: Option<String>,
 }
 
-/// A client driver and its devices (`!wdfkd.wdfdriverinfo`).
+/// A KMDF client driver and its device objects (`!wdfkd.wdfdriverinfo`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct WdfDriverInfo {
     pub client: WdfClient,
+    /// The driver object's `DeviceObject`/`NextDevice` chain.
     pub devices: Vec<WdfDriverDevice>,
-    /// Why the `DeviceObject`/`NextDevice` walk stopped before a null link.
+    /// Why the walk of the device chain stopped before a null link. `None`
+    /// if the walk got to a null link.
     pub devices_stopped: Option<String>,
 }
 
 /// One `FxContextHeader` of an object.
+#[record]
 #[derive(Debug, Clone)]
 pub struct WdfContext {
+    /// The `FxContextHeader`.
     pub header: VirtAddr,
     /// The context itself (`FxContextHeader.Context`).
     pub context: VirtAddr,
-    /// `ContextTypeInfo`; `None` for a header without a context type.
+    /// `ContextTypeInfo`, the `_WDF_OBJECT_CONTEXT_TYPE_INFO`. `None` for a
+    /// header without a context type.
     pub type_info: Option<VirtAddr>,
+    /// The context type's name.
     pub name: Option<String>,
     /// `ContextSize`, bytes.
+    #[record(hex)]
     pub size: Option<u64>,
 }
 
-/// A decoded WDF handle and the object it names (`!wdfkd.wdfhandle`).
+/// A WDF handle and the object it names (`!wdfkd.wdfhandle`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct WdfObject {
+    #[record(hex)]
     pub handle: u64,
+    /// The `FxObject`.
     pub address: VirtAddr,
-    /// The `WDFOBJECT_OFFSET` an offset handle subtracts.
+    /// For an offset handle, the `WDFOBJECT_OFFSET` value to subtract from
+    /// the address that the handle points to.
+    #[record(hex)]
     pub offset: Option<u16>,
+    /// `m_Type`.
+    #[record(hex)]
     pub type_value: u16,
-    /// The `FX_OBJECT_TYPES` name of `m_Type`.
+    /// Its `FX_OBJECT_TYPES` name.
     pub type_name: String,
-    /// `m_ObjectSize`, the object and its extra bytes.
+    /// `m_ObjectSize`: the size of the object and its extra bytes.
+    #[record(hex)]
     pub object_size: u16,
     pub refcount: i32,
+    /// `m_ObjectState` (`FxObjectState`).
     pub state: WdfEnumValue,
+    /// `m_ObjectFlags`.
+    #[record(hex)]
     pub flags: u16,
     /// The `FXOBJECT_FLAGS` set in `flags`.
     pub flag_names: Vec<String>,
+    /// The owning driver's `_FX_DRIVER_GLOBALS`.
     pub globals: VirtAddr,
-    /// The owning client's `DriverName`, when it has one.
+    /// The owning driver's `DriverName`, when it has one.
     pub driver: Option<String>,
     pub parent: Option<WdfObjectRef>,
     pub contexts: Vec<WdfContext>,
-    /// Why the context header chain stopped before a null `NextHeader`.
+    /// Why the walk of the context header chain stopped before a null
+    /// `NextHeader`. `None` if the walk got to a null `NextHeader`.
     pub contexts_stopped: Option<String>,
 }
 
-/// An object with its children (`!wdfkd.wdfobject`).
+/// A KMDF object with its children (`!wdfkd.wdfobject`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct WdfObjectDetail {
+    /// The object, as `!wdfkd.wdfhandle` shows it.
     pub object: WdfObject,
     /// The objects on `m_ChildListHead`, each of which names this object as
     /// its `m_ParentObject`.
     pub children: Vec<WdfObjectRef>,
-    /// Why the child list walk stopped short of its head.
+    /// Why the walk of the child list stopped before the list head. `None`
+    /// if the walk completed.
     pub children_stopped: Option<String>,
 }
 
 /// A queue of a device.
+#[record]
 #[derive(Debug, Clone)]
 pub struct WdfQueueSummary {
+    /// The WDFQUEUE handle.
+    #[record(hex)]
     pub handle: u64,
+    /// The `FxIoQueue`.
     pub address: VirtAddr,
+    /// `_WDF_IO_QUEUE_DISPATCH_TYPE`.
     pub dispatch_type: WdfEnumValue,
     pub power_managed: bool,
     /// Requests waiting in the queue (`m_Queue.m_RequestCount`).
     pub pending: i32,
     /// Requests the driver owns (`m_DriverIoCount`).
     pub driver_owned: i32,
+    /// Whether it is the default queue of the device.
     pub is_default: bool,
 }
 
-/// A WDFDEVICE (`!wdfkd.wdfdevice`).
+/// A WDFDEVICE with its device objects, state machines, queues, and I/O
+/// targets (`!wdfkd.wdfdevice`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct WdfDeviceDetail {
+    #[record(hex)]
     pub handle: u64,
+    /// The `FxDevice`.
     pub address: VirtAddr,
+    /// The owning driver's name, when it has one.
     pub driver: Option<String>,
+    /// The owning driver's `_FX_DRIVER_GLOBALS`.
     pub globals: VirtAddr,
     /// `FDO`, `filter`, `PDO`, or `control`.
-    pub kind: &'static str,
+    pub kind: WdfDeviceKind,
     pub device_object: VirtAddr,
     /// The device object this one is attached to (`m_AttachedDevice`).
     pub attached_device: VirtAddr,
-    /// The stack's PDO (`m_PhysicalDevice`).
+    /// The device stack's PDO (`m_PhysicalDevice`).
     pub physical_device: VirtAddr,
     pub device_name: Option<String>,
     /// A PDO's parent WDFDEVICE (`m_ParentDevice`).
     pub parent: Option<WdfObjectRef>,
+    /// `_WDF_DEVICE_PNP_STATE`.
     pub pnp_state: WdfEnumValue,
+    /// `_WDF_DEVICE_POWER_STATE`.
     pub power_state: WdfEnumValue,
+    /// `_WDF_DEVICE_POWER_POLICY_STATE`.
     pub power_policy_state: WdfEnumValue,
-    /// `m_PkgPnp`; null for a control device.
+    /// `m_PkgPnp`, the `FxPkgPnp`. Null for a control device.
     pub pkg_pnp: VirtAddr,
+    /// `_DEVICE_POWER_STATE`.
     pub device_power_state: Option<WdfEnumValue>,
+    /// `_SYSTEM_POWER_STATE`.
     pub system_power_state: Option<WdfEnumValue>,
+    /// The `FxPkgIo`.
     pub pkg_io: VirtAddr,
+    /// The default queue's WDFQUEUE handle.
+    #[record(hex)]
     pub default_queue: Option<u64>,
     pub queues: Vec<WdfQueueSummary>,
+    /// Why the walk of the queue list stopped before the list head. `None`
+    /// if the walk completed.
     pub queues_stopped: Option<String>,
-    /// An FDO's `m_DefaultDeviceList` and `m_StaticDeviceList` (WDFCHILDLIST).
+    /// An FDO's default child list (`m_DefaultDeviceList`, a WDFCHILDLIST).
+    #[record(hex)]
     pub default_child_list: Option<u64>,
+    /// An FDO's static child list (`m_StaticDeviceList`, a WDFCHILDLIST).
+    #[record(hex)]
     pub static_child_list: Option<u64>,
-    /// An FDO's default I/O target (`FxPkgFdo.m_DefaultTarget`), the next
-    /// device object down its stack.
+    /// An FDO's default I/O target (`FxPkgFdo.m_DefaultTarget`, a
+    /// WDFIOTARGET), the next device object down its stack.
+    #[record(hex)]
     pub default_io_target: Option<u64>,
-    /// An FDO's self I/O target (`FxPkgFdo.m_SelfTarget`), its own top.
+    /// An FDO's self I/O target (`FxPkgFdo.m_SelfTarget`, a WDFIOTARGET),
+    /// the top of its own stack.
+    #[record(hex)]
     pub self_io_target: Option<u64>,
-    /// The I/O targets on `m_IoTargetsList`.
+    /// The device's I/O targets (`m_IoTargetsList`).
     pub io_targets: Vec<WdfIoTargetSummary>,
+    /// Why the walk of the I/O target list stopped before the list head.
+    /// `None` if the walk completed.
     pub io_targets_stopped: Option<String>,
 }
 
 /// One of a device's I/O targets.
+#[record]
 #[derive(Debug, Clone)]
 pub struct WdfIoTargetSummary {
+    /// The WDFIOTARGET handle.
+    #[record(hex)]
     pub handle: u64,
+    /// The `FxIoTarget`.
     pub address: VirtAddr,
-    /// The `FX_OBJECT_TYPES` name.
+    /// Its `FX_OBJECT_TYPES` name.
     pub type_name: String,
-    /// See [`WdfIoTargetDetail::kind`].
-    pub kind: &'static str,
+    /// See [`WdfIoTargetDetail::kind`]: `local`, `remote`, `self`,
+    /// `USB device`, or `USB pipe`.
+    pub kind: WdfIoTargetKind,
     /// `m_State` (`_WDF_IO_TARGET_STATE`).
     pub state: WdfEnumValue,
-    /// `m_TargetDevice`.
+    /// `m_TargetDevice`, the device object that it sends requests to.
     pub target_device: VirtAddr,
     /// Whether it is the device's default I/O target.
     pub is_default: bool,
 }
 
 /// A request on one of a queue's lists.
+#[record]
 #[derive(Debug, Clone)]
 pub struct WdfRequestRef {
+    /// The WDFREQUEST handle.
+    #[record(hex)]
     pub handle: u64,
+    /// The `FxRequest`.
     pub address: VirtAddr,
     pub irp: VirtAddr,
 }
 
-/// A request list of a queue and why its walk stopped short.
-#[derive(Debug, Clone, Default)]
-pub struct WdfRequestList {
-    pub requests: Vec<WdfRequestRef>,
-    pub stopped: Option<String>,
-}
-
-/// A queue's event callback.
+/// An event callback the driver set.
+#[record]
 #[derive(Debug, Clone)]
 pub struct WdfCallback {
     /// `EvtIoRead`, ...
@@ -312,56 +436,90 @@ pub struct WdfCallback {
     pub symbol: Option<String>,
 }
 
-/// A WDFQUEUE (`!wdfkd.wdfqueue`).
+/// A WDFQUEUE with its configuration, state, and requests
+/// (`!wdfkd.wdfqueue`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct WdfQueueDetail {
+    #[record(hex)]
     pub handle: u64,
+    /// The `FxIoQueue`.
     pub address: VirtAddr,
+    /// The owning driver's name, when it has one.
     pub driver: Option<String>,
     pub device: Option<WdfObjectRef>,
+    /// `_WDF_IO_QUEUE_DISPATCH_TYPE`.
     pub dispatch_type: WdfEnumValue,
     /// `m_QueueState`.
+    #[record(hex)]
     pub state: u64,
     /// The `_FX_IO_QUEUE_STATE` bits set in `state`.
     pub state_names: Vec<String>,
+    /// `FxIoQueuePowerState`.
     pub power_state: WdfEnumValue,
     pub power_managed: bool,
     pub allow_zero_length_requests: bool,
     pub deleted: bool,
+    /// `_WDF_EXECUTION_LEVEL`.
     pub execution_level: WdfEnumValue,
+    /// `_WDF_SYNCHRONIZATION_SCOPE`.
     pub synchronization_scope: WdfEnumValue,
+    /// `m_MaxParallelQueuePresentedRequests`.
     pub max_parallel_requests: u64,
+    /// Requests waiting in the queue.
     pub pending_count: i32,
+    /// Requests the driver marked cancelable.
     pub driver_cancelable_count: i32,
+    /// Requests the driver owns.
     pub driver_owned_count: i32,
     pub two_phase_completions: i32,
+    /// The callbacks the driver set.
     pub callbacks: Vec<WdfCallback>,
     /// Requests waiting in the queue (`m_Queue`).
-    pub pending: WdfRequestList,
+    pub pending: Vec<WdfRequestRef>,
+    /// Why the walk of `pending` stopped early; `None` if it completed.
+    pub pending_stopped: Option<String>,
     /// Requests the driver marked cancelable (`m_DriverCancelable`).
-    pub driver_cancelable: WdfRequestList,
+    pub driver_cancelable: Vec<WdfRequestRef>,
+    /// Why the walk of `driver_cancelable` stopped early; `None` if it
+    /// completed.
+    pub driver_cancelable_stopped: Option<String>,
     /// Requests presented to the driver (`m_DriverOwned`).
-    pub driver_owned: WdfRequestList,
+    pub driver_owned: Vec<WdfRequestRef>,
+    /// Why the walk of `driver_owned` stopped early; `None` if it completed.
+    pub driver_owned_stopped: Option<String>,
 }
 
 /// The buffer lengths in a stack location's `Parameters` for its major
 /// function: a read's or write's `Length`, a device control's buffer
-/// lengths and control code. `None` where the major function has no such
-/// field.
+/// lengths and control code. Each is `None` when the major function has no
+/// such field.
+#[record]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WdfIoParameters {
+    /// A read's or write's `Length`.
+    #[record(hex)]
     pub length: Option<u32>,
+    /// A device control's `InputBufferLength`.
+    #[record(hex)]
     pub input_length: Option<u32>,
+    /// A device control's `OutputBufferLength`.
+    #[record(hex)]
     pub output_length: Option<u32>,
+    /// A device control's `IoControlCode`.
+    #[record(hex)]
     pub io_control_code: Option<u32>,
 }
 
-/// The stack location an IRP's `CurrentLocation` names.
+/// The stack location that an IRP's `CurrentLocation` names.
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct WdfIrpLocation {
-    /// Counted from 1, as `!irp` does.
+    /// The location number, counted from 1 as `!irp` does.
     pub number: u8,
+    /// The `_IO_STACK_LOCATION`.
     pub address: VirtAddr,
+    /// The `IRP_MJ_*` code.
     pub major_function: u8,
     pub minor_function: u8,
     pub device_object: VirtAddr,
@@ -371,7 +529,17 @@ pub struct WdfIrpLocation {
     pub parameters: WdfIoParameters,
 }
 
-/// The IRP a request carries.
+#[record]
+impl WdfIrpLocation {
+    /// The name of the major function (`IRP_MJ_READ`, ...).
+    #[record(getter)]
+    pub fn major_function_name(&self) -> String {
+        format!("IRP_MJ_{}", irp_major_function_name(self.major_function))
+    }
+}
+
+/// The IRP that a request carries.
+#[record]
 #[derive(Debug, Clone)]
 pub struct WdfRequestIrp {
     pub address: VirtAddr,
@@ -381,13 +549,14 @@ pub struct WdfRequestIrp {
     pub system_buffer: VirtAddr,
     pub user_buffer: VirtAddr,
     pub mdl_address: VirtAddr,
-    /// `None` when `CurrentLocation` names no location: the IRP has left
-    /// every driver of the stack.
+    /// `None` when `CurrentLocation` names no stack location, because the
+    /// IRP has left every driver of the stack.
     pub current: Option<WdfIrpLocation>,
 }
 
 /// Which `FxIrpQueue` a request's `m_IrpQueue` is, the cancel-safe queue
 /// that holds its IRP.
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WdfIrpQueueRole {
     /// Its queue's `m_Queue`: it waits to be presented.
@@ -399,111 +568,116 @@ pub enum WdfIrpQueueRole {
     TargetPended,
 }
 
-impl WdfIrpQueueRole {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::DriverCancelable => "driver_cancelable",
-            Self::TargetPended => "target_pended",
-        }
-    }
-}
-
-/// A WDFREQUEST (`!wdfkd.wdfrequest`).
+/// A WDFREQUEST with its IRP, its queue, and the I/O target it was sent
+/// to (`!wdfkd.wdfrequest`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct WdfRequestDetail {
+    #[record(hex)]
     pub handle: u64,
+    /// The `FxRequest`.
     pub address: VirtAddr,
+    /// The owning driver's name, when it has one.
     pub driver: Option<String>,
+    /// The owning driver's `_FX_DRIVER_GLOBALS`.
     pub globals: VirtAddr,
     pub refcount: i32,
     /// `m_ObjectState` (`FxObjectState`).
     pub object_state: WdfEnumValue,
     pub parent: Option<WdfObjectRef>,
-    /// `m_Irp.m_Irp`; null for a request without an IRP.
+    /// The IRP (`m_Irp.m_Irp`). Null for a request without an IRP.
     pub irp: VirtAddr,
-    /// The IRP decoded; `None` when it is null or failed its checks.
+    /// The IRP, decoded. `None` if `irp` is null or not a live IRP.
     pub irp_detail: Option<WdfRequestIrp>,
     /// Why `irp` is not a live IRP.
     pub irp_problem: Option<String>,
     /// `m_IrpAllocation` (`FxRequestAllocationSource`): whether the IRP
-    /// came from the I/O manager or the framework or driver allocated it.
+    /// came from the I/O manager (`REQUEST_ALLOCATED_FROM_IO`) or the
+    /// framework or the driver allocated it.
     pub irp_allocation: WdfEnumValue,
     /// `m_IrpReferenceCount`.
     pub irp_reference_count: i32,
     pub completed: bool,
     pub canceled: bool,
-    /// `m_Presented`: the queue has presented it to the driver.
+    /// `m_Presented`: whether its queue has presented it to the driver.
     pub presented: bool,
-    /// `m_TargetFlags` and its `FxRequestTargetFlags`.
+    /// `m_TargetFlags`.
+    #[record(hex)]
     pub target_flags: u64,
+    /// The `FxRequestTargetFlags` set in `target_flags`.
     pub target_flag_names: Vec<String>,
-    /// `m_VerifierFlags` and its `FxRequestVerifierFlags`; KMDF keeps
-    /// them only with the verifier on.
+    /// `m_VerifierFlags`, which KMDF keeps only with the verifier on.
+    #[record(hex)]
     pub verifier_flags: u64,
+    /// The `FxRequestVerifierFlags` set in `verifier_flags`.
     pub verifier_flag_names: Vec<String>,
     /// `m_CompletionState` (`FxRequestCompletionState`).
     pub completion_state: WdfEnumValue,
-    /// The queue it came from or is in (`m_IoQueue`).
+    /// The queue that it came from or is in (`m_IoQueue`).
     pub queue: Option<WdfObjectRef>,
-    /// `m_IrpQueue`: the cancel-safe queue that holds its IRP; null when
-    /// none does and the request cannot be canceled.
+    /// `m_IrpQueue`: the cancel-safe queue (`FxIrpQueue`) that holds its
+    /// IRP. Null if none does, and the request cannot be canceled.
     pub irp_queue: VirtAddr,
-    /// Which queue `irp_queue` is; `None` when it is null or none of its
-    /// queue's or target's.
+    /// Which queue `irp_queue` is: `pending` (its queue's waiting
+    /// requests), `driver_cancelable` (the driver marked it cancelable), or
+    /// `target_pended` (its I/O target holds it until the target starts).
+    /// `None` if `irp_queue` is null or none of these.
     pub irp_queue_role: Option<WdfIrpQueueRole>,
     /// The driver's `EvtRequestCancel` (`m_CancelRoutine`).
     pub cancel_routine: Option<WdfCallback>,
-    /// The I/O target it was sent to (`m_Target`).
+    /// The I/O target that it was sent to (`m_Target`).
     pub target: Option<WdfObjectRef>,
-    /// The driver's completion routine (`m_CompletionRoutine`) and its
-    /// context (`m_TargetCompletionContext`).
+    /// The completion routine set for its send (`m_CompletionRoutine`).
     pub completion_routine: Option<WdfCallback>,
+    /// The completion routine's context (`m_TargetCompletionContext`).
     pub completion_context: VirtAddr,
 }
 
 /// A request on one of an I/O target's lists.
+#[record]
 #[derive(Debug, Clone)]
 pub struct WdfTargetRequest {
+    /// The `FxRequest`.
     pub address: VirtAddr,
-    /// `None` for a request without a handle: the framework's own, such as
-    /// the one a synchronous send builds on the sender's stack.
+    /// The WDFREQUEST handle. `None` for the framework's own request that
+    /// has no handle, such as the one a synchronous send builds on the
+    /// sender's stack.
+    #[record(hex)]
     pub handle: Option<u64>,
     pub irp: VirtAddr,
 }
 
-/// A request list of an I/O target and why its walk stopped short.
-#[derive(Debug, Clone, Default)]
-pub struct WdfTargetRequestList {
-    pub requests: Vec<WdfTargetRequest>,
-    pub stopped: Option<String>,
-}
-
-/// A WDFIOTARGET (`!wdfkd.wdfiotarget`).
+/// A WDFIOTARGET with the device object that it sends to and the requests
+/// sent to it (`!wdfkd.wdfiotarget`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct WdfIoTargetDetail {
+    #[record(hex)]
     pub handle: u64,
+    /// The `FxIoTarget`.
     pub address: VirtAddr,
+    /// The owning driver's name, when it has one.
     pub driver: Option<String>,
+    /// The owning driver's `_FX_DRIVER_GLOBALS`.
     pub globals: VirtAddr,
-    /// The `FX_OBJECT_TYPES` name.
+    /// Its `FX_OBJECT_TYPES` name.
     pub type_name: String,
     /// `local` (a target in the device's own stack), `remote` (one the
     /// driver opened), `self`, `USB device`, or `USB pipe`.
-    pub kind: &'static str,
+    pub kind: WdfIoTargetKind,
     /// Whether it is its device's default I/O target.
     pub is_default: bool,
     /// `m_State` (`_WDF_IO_TARGET_STATE`).
     pub state: WdfEnumValue,
     /// A remote target's `m_OpenState` (`FxIoTargetRemoteOpenState`).
     pub open_state: Option<WdfEnumValue>,
-    /// The WDFDEVICE it belongs to (`m_DeviceBase`).
+    /// The WDFDEVICE that it belongs to (`m_DeviceBase`).
     pub device: Option<WdfObjectRef>,
-    /// `m_InStack`: the target is in the device's own stack.
+    /// `m_InStack`: whether the target is in the device's own stack.
     pub in_stack: bool,
     /// `m_InStackDevice`: the device's own device object.
     pub in_stack_device: VirtAddr,
-    /// `m_TargetDevice`, the device object requests are sent to.
+    /// `m_TargetDevice`, the device object that it sends requests to.
     pub target_device: VirtAddr,
     /// The name of `target_device`'s driver.
     pub target_driver: Option<String>,
@@ -511,64 +685,112 @@ pub struct WdfIoTargetDetail {
     pub target_pdo: VirtAddr,
     /// `m_TargetFileObject`.
     pub file_object: VirtAddr,
-    /// `m_IoCount`: one for the target itself and one for each request in
-    /// flight.
+    /// `m_IoCount`: one for the target and one for each request in flight.
     pub io_count: i32,
     /// `m_TargetStackSize`.
-    pub stack_size: i8,
-    /// Requests sent and not yet completed (`m_SentIoListHead`).
-    pub sent: WdfTargetRequestList,
+    pub stack_size: i32,
+    /// Requests sent and not completed (`m_SentIoListHead`).
+    pub sent: Vec<WdfTargetRequest>,
+    /// Why the walk of `sent` stopped early; `None` if it completed.
+    pub sent_stopped: Option<String>,
     /// Requests sent while the target was not started, with
     /// `WDF_REQUEST_SEND_OPTION_IGNORE_TARGET_STATE` (`m_IgnoredIoListHead`).
-    pub ignored: WdfTargetRequestList,
-    /// Requests held until the target starts (`m_PendedQueue`).
-    pub pended: WdfTargetRequestList,
+    pub ignored: Vec<WdfTargetRequest>,
+    /// Why the walk of `ignored` stopped early; `None` if it completed.
+    pub ignored_stopped: Option<String>,
+    /// Requests that the target holds until it starts (`m_PendedQueue`).
+    pub pended: Vec<WdfTargetRequest>,
+    /// Why the walk of `pended` stopped early; `None` if it completed.
+    pub pended_stopped: Option<String>,
 }
 
-/// One IFR record and its formatted message.
+/// An In-Flight Recorder record and its message.
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct WdfLogEntry {
     pub record: IfrRecord,
     /// The record's TMF message, when a loaded PDB declares it.
+    #[record(skip)]
     pub message: Option<Arc<TmfMessage>>,
-    /// The message with its arguments, or why it could not be formatted.
-    pub text: std::result::Result<String, String>,
+    /// The message formatted with its arguments, or why it is not.
+    pub text: DiagnosticValue<String>,
 }
 
-/// A client driver as Wdf01000 recorded it in a crash dump
+#[record]
+impl WdfLogEntry {
+    /// The TMF message's provider, when a loaded PDB declares it.
+    #[record(getter)]
+    pub fn provider(&self) -> Option<String> {
+        self.message
+            .as_ref()
+            .map(|message| message.provider.clone())
+    }
+
+    /// The TMF message's `FUNC=`.
+    #[record(getter)]
+    pub fn function(&self) -> Option<String> {
+        self.message.as_ref()?.function.clone()
+    }
+
+    /// The TMF message's `LEVEL=`.
+    #[record(getter)]
+    pub fn level(&self) -> Option<String> {
+        self.message.as_ref()?.level.clone()
+    }
+
+    /// The TMF message's `FLAGS=`.
+    #[record(getter)]
+    pub fn flags(&self) -> Option<String> {
+        self.message.as_ref()?.flags.clone()
+    }
+}
+
+/// A KMDF client driver as Wdf01000 recorded it in a crash dump
 /// (`!wdfkd.wdfcrashdump loader`).
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WdfDumpDriver {
     /// `None` for an entry without a printable name.
     pub name: Option<String>,
     /// The driver's `_FX_DRIVER_GLOBALS` at the crash.
     pub globals: VirtAddr,
-    /// The KMDF version that it bound to: major, minor, and build.
+    /// The major KMDF version that it bound to.
     pub major: u32,
+    /// The minor KMDF version that it bound to.
     pub minor: u32,
+    /// The build number of the KMDF version that it bound to.
     pub build: u32,
 }
 
-/// A client driver's In-Flight Recorder log (`!wdfkd.wdflogdump`).
+/// The In-Flight Recorder log of a client driver, oldest record first
+/// (`!wdfkd.wdflogdump`, `!wdfkd.wdfcrashdump`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct WdfLogDump {
     pub driver: String,
+    /// The `_FX_DRIVER_GLOBALS`; 0 in a crash dump that does not list the
+    /// driver.
     pub globals: VirtAddr,
     /// The `_WDF_IFR_HEADER`.
     pub header: VirtAddr,
     /// The record area (`Base`).
     pub base: VirtAddr,
+    /// The size of the record area, in bytes.
+    #[record(hex)]
     pub size: u64,
-    /// `Offset.Current`: where the next record goes.
+    /// `Offset.Current`: where KMDF writes the next record.
+    #[record(hex)]
     pub current: u16,
-    /// `Offset.Previous`: the newest record.
+    /// `Offset.Previous`: the newest record's offset.
+    #[record(hex)]
     pub previous: u16,
     /// The header's `Sequence`, the newest record's sequence number.
     pub sequence: i32,
-    /// `UseTimeStamp`: records are 'L2', with a timestamp.
+    /// `UseTimeStamp`: whether the records are 'L2', with a timestamp.
     pub use_timestamps: bool,
     /// Oldest first.
     pub entries: Vec<WdfLogEntry>,
+    /// Why the walk ended.
     pub end: IfrEnd,
 }
 
@@ -588,34 +810,63 @@ pub struct IfrRecordLayout {
     pub timestamp: usize,
 }
 
-/// One IFR record.
+/// An In-Flight Recorder record (`_WDF_IFR_RECORD`).
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct IfrRecord {
     /// Its offset in the log area.
+    #[record(hex)]
     pub offset: usize,
     /// `Length`: header and arguments.
+    #[record(hex)]
     pub length: usize,
     pub sequence: i32,
+    /// `PrevOffset`: the record before it.
+    #[record(hex)]
     pub prev_offset: usize,
     pub message_number: u16,
+    /// `MessageGuid`, as stored.
+    #[record(skip)]
     pub message_guid: [u8; 16],
-    /// FILETIME (UTC); an 'LR' record has none.
+    /// The FILETIME (UTC). `None` for an 'LR' record, which has no
+    /// timestamp.
     pub timestamp: Option<u64>,
     /// The WPP argument bytes after the header, padded to 4 bytes.
+    #[record(bytes)]
     pub args: Vec<u8>,
 }
 
-/// Why an IFR walk ended.
+#[record]
+impl IfrRecord {
+    /// `MessageGuid`, braced.
+    #[record(getter, rename = "message_guid")]
+    pub fn message_guid_text(&self) -> String {
+        format_guid(&self.message_guid, GuidStyle::Braced)
+    }
+
+    /// `timestamp` as UTC (`YYYY-MM-DD HH:MM:SS.fffffff`).
+    #[record(getter)]
+    pub fn timestamp_utc(&self) -> Option<String> {
+        self.timestamp.and_then(format_filetime_precise)
+    }
+}
+
+/// Why an IFR walk ended: `empty` (no record was ever written),
+/// `first_record` (the oldest record reached is the first the log held),
+/// `overwritten` (the records before the oldest one reached were
+/// overwritten), or `corrupt` (a record failed validation, and the walk
+/// stopped there).
+#[record(tagged)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IfrEnd {
-    /// No record was ever written.
     Empty,
-    /// The oldest record reached is the first the log held.
     FirstRecord,
-    /// The records before the oldest one reached were overwritten.
     Overwritten,
-    /// A record failed validation; the walk stopped there.
-    Corrupt(String),
+    Corrupt(
+        /// The item that failed validation.
+        #[record(rename = "corruption")]
+        String,
+    ),
 }
 
 impl IfrEnd {
@@ -851,13 +1102,13 @@ fn sent_request_problem(
 /// device's local one, so only `m_InStack` tells the two apart: the
 /// default target is in the device's own stack, and a target that the
 /// driver opens is not.
-fn io_target_kind(type_name: &str, in_stack: bool) -> &'static str {
+fn io_target_kind(type_name: &str, in_stack: bool) -> WdfIoTargetKind {
     match type_name {
-        "FX_TYPE_IO_TARGET_SELF" => "self",
-        "FX_TYPE_IO_TARGET_USB_DEVICE" => "USB device",
-        "FX_TYPE_IO_TARGET_USB_PIPE" => "USB pipe",
-        _ if in_stack => "local",
-        _ => "remote",
+        "FX_TYPE_IO_TARGET_SELF" => WdfIoTargetKind::SelfTarget,
+        "FX_TYPE_IO_TARGET_USB_DEVICE" => WdfIoTargetKind::UsbDevice,
+        "FX_TYPE_IO_TARGET_USB_PIPE" => WdfIoTargetKind::UsbPipe,
+        _ if in_stack => WdfIoTargetKind::Local,
+        _ => WdfIoTargetKind::Remote,
     }
 }
 
@@ -1045,7 +1296,7 @@ fn flag_names(variants: &[(String, i64)], value: u64) -> Vec<String> {
 /// (globals the framework keeps without a name), Err when it holds anything
 /// but printable ASCII.
 pub fn driver_name(bytes: &[u8]) -> std::result::Result<Option<String>, String> {
-    let text = &bytes[..bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len())];
+    let text = before_nul(bytes);
     if text.is_empty() {
         return Ok(None);
     }
@@ -1567,16 +1818,18 @@ impl Target {
 
     /// `m_PkgPnp`'s kind of device: `control` without one (a legacy device),
     /// else by the package's type.
-    fn wdf_device_kind(&self, wdf: &WdfTypes<'_>, device: &StructRef<'_>) -> Result<&'static str> {
+    fn wdf_device_kind(&self, wdf: &WdfTypes<'_>, device: &StructRef<'_>) -> Result<WdfDeviceKind> {
         if device.read_uint("m_Legacy")? != 0 {
-            return Ok("control");
+            return Ok(WdfDeviceKind::Control);
         }
         let pkg = device.read_pointer("m_PkgPnp")?;
         let header = self.wdf_object_header(wdf, pkg)?;
         Ok(match wdf.type_name(header.type_value) {
-            Some("FX_TYPE_PACKAGE_PDO") => "PDO",
-            Some("FX_TYPE_PACKAGE_FDO") if device.read_uint("m_Filter")? != 0 => "filter",
-            Some("FX_TYPE_PACKAGE_FDO") => "FDO",
+            Some("FX_TYPE_PACKAGE_PDO") => WdfDeviceKind::Pdo,
+            Some("FX_TYPE_PACKAGE_FDO") if device.read_uint("m_Filter")? != 0 => {
+                WdfDeviceKind::Filter
+            }
+            Some("FX_TYPE_PACKAGE_FDO") => WdfDeviceKind::Fdo,
             _ => {
                 return Err(Error::DebugInfo(format!(
                     "m_PkgPnp {:#x} is neither an FDO nor a PDO package (m_Type {:#x})",
@@ -1777,12 +2030,13 @@ impl Target {
         let head = object + wdf.object.field_offset("m_ChildListHead")?;
         let entry_offset = wdf.object.field_offset("m_ChildEntry")?;
         let memory = self.kernel_address_space();
-        let (links, termination) =
-            bounded_list_walk(head, MAX_CHILDREN, |link| memory.read::<VirtAddr>(link));
+        let (records, termination) =
+            bounded_record_list_walk(head, entry_offset, MAX_CHILDREN, |link| {
+                memory.read::<VirtAddr>(link)
+            });
         let mut stopped = termination.diagnostic();
-        let mut children = Vec::with_capacity(links.len());
-        for link in links {
-            let child = link - entry_offset;
+        let mut children = Vec::with_capacity(records.len());
+        for child in records {
             let header = self
                 .wdf_object_header(wdf, child)
                 .map_err(|error| format!("its FxObject header is unreadable: {error}"))
@@ -2000,7 +2254,7 @@ impl Target {
                 )),
             )
         };
-        let (default_child_list, static_child_list) = if matches!(kind, "FDO" | "filter") {
+        let (default_child_list, static_child_list) = if kind.is_fdo() {
             let fdo = wdf.at(&wdf.layout("FxPkgFdo")?, pkg_pnp);
             let list = |field: &str| -> Result<Option<u64>> {
                 let list = fdo.read_pointer(field)?;
@@ -2072,10 +2326,10 @@ impl Target {
     fn wdf_fdo_targets(
         &self,
         wdf: &WdfTypes<'_>,
-        kind: &str,
+        kind: WdfDeviceKind,
         pkg_pnp: VirtAddr,
     ) -> Result<(VirtAddr, VirtAddr)> {
-        if !matches!(kind, "FDO" | "filter") {
+        if !kind.is_fdo() {
             return Ok((VirtAddr(0), VirtAddr(0)));
         }
         let fdo = wdf.at(&wdf.layout("FxPkgFdo")?, pkg_pnp);
@@ -2106,12 +2360,13 @@ impl Target {
         let entry_offset = target_layout.field_offset("m_TransactionedEntry")?;
         let states = self.wdf_enum("_WDF_IO_TARGET_STATE");
         let memory = self.kernel_address_space();
-        let (links, termination) =
-            bounded_list_walk(head, MAX_IO_TARGETS, |link| memory.read::<VirtAddr>(link));
+        let (entries, termination) =
+            bounded_record_list_walk(head, link_offset, MAX_IO_TARGETS, |link| {
+                memory.read::<VirtAddr>(link)
+            });
         let mut stopped = termination.diagnostic();
-        let mut targets = Vec::with_capacity(links.len());
-        for link in links {
-            let entry = link - link_offset;
+        let mut targets = Vec::with_capacity(entries.len());
+        for entry in entries {
             let summary = wdf
                 .at(&entry_layout, entry)
                 .read_pointer("m_TransactionedObject")
@@ -2208,12 +2463,13 @@ impl Target {
         let csq_offset = request_layout.field_offset("m_CsqContext")?;
         let head = irp_queue + wdf.layout("FxIrpQueue")?.field_offset("m_Queue")?;
         let memory = self.kernel_address_space();
-        let (links, termination) =
-            bounded_list_walk(head, MAX_REQUESTS, |link| memory.read::<VirtAddr>(link));
+        let (irps, termination) =
+            bounded_record_list_walk(head, list_offset, MAX_REQUESTS, |link| {
+                memory.read::<VirtAddr>(link)
+            });
         let mut stopped = termination.diagnostic();
-        let mut requests = Vec::with_capacity(links.len());
-        for link in links {
-            let irp = link - list_offset;
+        let mut requests = Vec::with_capacity(irps.len());
+        for irp in irps {
             let request = memory
                 .read::<VirtAddr>(irp + context_offset)
                 .map_err(|error| error.to_string())
@@ -2252,12 +2508,13 @@ impl Target {
     ) -> Result<(Vec<T>, Option<String>)> {
         let link_offset = request_layout.field_offset(link)?;
         let memory = self.kernel_address_space();
-        let (links, termination) =
-            bounded_list_walk(head, MAX_REQUESTS, |link| memory.read::<VirtAddr>(link));
+        let (addresses, termination) =
+            bounded_record_list_walk(head, link_offset, MAX_REQUESTS, |link| {
+                memory.read::<VirtAddr>(link)
+            });
         let mut stopped = termination.diagnostic();
-        let mut requests = Vec::with_capacity(links.len());
-        for entry in links {
-            let address = entry - link_offset;
+        let mut requests = Vec::with_capacity(addresses.len());
+        for address in addresses {
             match check(address) {
                 Ok(request) => requests.push(request),
                 Err(why) => {
@@ -2275,12 +2532,10 @@ impl Target {
         wdf: &WdfTypes<'_>,
         request_layout: &Arc<TypeInfo>,
         irp_queue: VirtAddr,
-    ) -> Result<WdfRequestList> {
-        let (requests, stopped) =
-            self.wdf_irp_queue_walk(wdf, request_layout, irp_queue, |address| {
-                self.wdf_request_ref(wdf, request_layout, address)
-            })?;
-        Ok(WdfRequestList { requests, stopped })
+    ) -> Result<(Vec<WdfRequestRef>, Option<String>)> {
+        self.wdf_irp_queue_walk(wdf, request_layout, irp_queue, |address| {
+            self.wdf_request_ref(wdf, request_layout, address)
+        })
     }
 
     /// `!wdfkd.wdfqueue <handle>`: a WDFQUEUE's configuration, state, and
@@ -2318,6 +2573,16 @@ impl Target {
         let state = queue.read_uint("m_QueueState")?;
         let field =
             |name: &str| -> Result<VirtAddr> { Ok(address + queue_layout.field_offset(name)?) };
+        let (pending, pending_stopped) =
+            self.wdf_queue_irp_requests(&wdf, &request_layout, field("m_Queue")?)?;
+        let (driver_cancelable, driver_cancelable_stopped) =
+            self.wdf_queue_irp_requests(&wdf, &request_layout, field("m_DriverCancelable")?)?;
+        let (driver_owned, driver_owned_stopped) = self.wdf_request_link_walk(
+            &request_layout,
+            field("m_DriverOwned")?,
+            "m_OwnerListEntry2",
+            |address| self.wdf_request_ref(&wdf, &request_layout, address),
+        )?;
         Ok(WdfQueueDetail {
             handle,
             address,
@@ -2354,21 +2619,12 @@ impl Target {
             driver_owned_count: queue.read_uint("m_DriverIoCount")? as u32 as i32,
             two_phase_completions: queue.read_uint("m_TwoPhaseCompletions")? as u32 as i32,
             callbacks,
-            pending: self.wdf_queue_irp_requests(&wdf, &request_layout, field("m_Queue")?)?,
-            driver_cancelable: self.wdf_queue_irp_requests(
-                &wdf,
-                &request_layout,
-                field("m_DriverCancelable")?,
-            )?,
-            driver_owned: {
-                let (requests, stopped) = self.wdf_request_link_walk(
-                    &request_layout,
-                    field("m_DriverOwned")?,
-                    "m_OwnerListEntry2",
-                    |address| self.wdf_request_ref(&wdf, &request_layout, address),
-                )?;
-                WdfRequestList { requests, stopped }
-            },
+            pending,
+            pending_stopped,
+            driver_cancelable,
+            driver_cancelable_stopped,
+            driver_owned,
+            driver_owned_stopped,
         })
     }
 
@@ -2578,15 +2834,13 @@ impl Target {
         let target = wdf.at(&target_layout, address);
         let field =
             |name: &str| -> Result<VirtAddr> { Ok(address + target_layout.field_offset(name)?) };
-        let list = |head: &str| -> Result<WdfTargetRequestList> {
-            let (requests, stopped) = self.wdf_request_link_walk(
-                &request_layout,
-                field(head)?,
-                "m_ListEntry",
-                |request| self.wdf_sent_request(&wdf, &request_layout, request, address),
-            )?;
-            Ok(WdfTargetRequestList { requests, stopped })
+        let list = |head: &str| -> Result<(Vec<WdfTargetRequest>, Option<String>)> {
+            self.wdf_request_link_walk(&request_layout, field(head)?, "m_ListEntry", |request| {
+                self.wdf_sent_request(&wdf, &request_layout, request, address)
+            })
         };
+        let (sent, sent_stopped) = list("m_SentIoListHead")?;
+        let (ignored, ignored_stopped) = list("m_IgnoredIoListHead")?;
         let (pended, pended_stopped) =
             self.wdf_irp_queue_walk(&wdf, &request_layout, field("m_PendedQueue")?, |request| {
                 self.wdf_sent_request(&wdf, &request_layout, request, address)
@@ -2595,16 +2849,17 @@ impl Target {
         let kind = io_target_kind(&object.type_name, in_stack);
         let remote_layout = wdf.layout("FxIoTargetRemote")?;
         // Only an object as large as an FxIoTargetRemote has its fields.
-        let open_state =
-            if kind == "remote" && usize::from(object.header.object_size) >= remote_layout.size {
-                let remote = wdf.at(&remote_layout, address);
-                Some(enum_value(
-                    &self.wdf_enum("FxIoTargetRemoteOpenState"),
-                    remote.read_uint("m_OpenState")?,
-                ))
-            } else {
-                None
-            };
+        let open_state = if kind == WdfIoTargetKind::Remote
+            && usize::from(object.header.object_size) >= remote_layout.size
+        {
+            let remote = wdf.at(&remote_layout, address);
+            Some(enum_value(
+                &self.wdf_enum("FxIoTargetRemoteOpenState"),
+                remote.read_uint("m_OpenState")?,
+            ))
+        } else {
+            None
+        };
         let device = object.header.device;
         let default_target = self.wdf_default_target(&wdf, device);
         let target_device = target.read_pointer("m_TargetDevice")?;
@@ -2631,13 +2886,13 @@ impl Target {
             target_pdo: target.read_pointer("m_TargetPdo")?,
             file_object: target.read_pointer("m_TargetFileObject")?,
             io_count: target.read_uint("m_IoCount")? as u32 as i32,
-            stack_size: target.read_uint("m_TargetStackSize")? as u8 as i8,
-            sent: list("m_SentIoListHead")?,
-            ignored: list("m_IgnoredIoListHead")?,
-            pended: WdfTargetRequestList {
-                requests: pended,
-                stopped: pended_stopped,
-            },
+            stack_size: (target.read_uint("m_TargetStackSize")? as u8 as i8).into(),
+            sent,
+            sent_stopped,
+            ignored,
+            ignored_stopped,
+            pended,
+            pended_stopped,
         })
     }
 
@@ -2715,8 +2970,11 @@ impl Target {
                     .symbols
                     .wpp_message(&record.message_guid, record.message_number);
                 let text = match &message {
-                    Some(message) => format_message(message, &record.args, pointer_size),
-                    None => Err("no loaded PDB declares this message".into()),
+                    Some(message) => match format_message(message, &record.args, pointer_size) {
+                        Ok(text) => DiagnosticValue::Available(text),
+                        Err(why) => DiagnosticValue::Unavailable(why),
+                    },
+                    None => DiagnosticValue::unavailable("no loaded PDB declares this message"),
                 };
                 WdfLogEntry {
                     record,
@@ -3271,14 +3529,23 @@ mod tests {
 
     #[test]
     fn remote_targets_share_the_local_type_and_differ_in_m_in_stack() {
-        assert_eq!(io_target_kind("FX_TYPE_IO_TARGET", true), "local");
-        assert_eq!(io_target_kind("FX_TYPE_IO_TARGET", false), "remote");
+        assert_eq!(
+            io_target_kind("FX_TYPE_IO_TARGET", true),
+            WdfIoTargetKind::Local
+        );
+        assert_eq!(
+            io_target_kind("FX_TYPE_IO_TARGET", false),
+            WdfIoTargetKind::Remote
+        );
         // The derived classes' types win over m_InStack.
         assert_eq!(
             io_target_kind("FX_TYPE_IO_TARGET_USB_PIPE", true),
-            "USB pipe"
+            WdfIoTargetKind::UsbPipe
         );
-        assert_eq!(io_target_kind("FX_TYPE_IO_TARGET_SELF", false), "self");
+        assert_eq!(
+            io_target_kind("FX_TYPE_IO_TARGET_SELF", false),
+            WdfIoTargetKind::SelfTarget
+        );
     }
 
     #[test]

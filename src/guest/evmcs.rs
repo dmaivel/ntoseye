@@ -21,9 +21,8 @@ use std::sync::{
 
 use super::Guest;
 use crate::{
-    backend::MemoryOps,
     error::{Error, Result},
-    memory::PAGE_SIZE,
+    memory::{MemoryOps, PAGE_SIZE},
     phys::PhysMem,
     types::{CodeMachine, PhysAddr},
 };

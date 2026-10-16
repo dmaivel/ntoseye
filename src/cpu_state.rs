@@ -1,16 +1,18 @@
 //! Per-processor kernel state: `_KPCR` / `_KPRCB` location and processor
-//! count, shared by the CPU and scheduler commands.
+//! count, shared by the CPU and scheduler commands, and the register
+//! contexts the kernel saved in each `_KPRCB`, which a crash dump keeps.
 
-use crate::backend::MemoryOps;
+use std::mem::offset_of;
+
+use crate::cpu_context::{amd64, arm64};
 use crate::dbg_backend::TebPath;
+use crate::debugger_data::KdDebuggerData64;
 use crate::error::{Error, Result};
 use crate::guest::Image;
+use crate::layout::ParsedType;
+use crate::memory::MemoryOps;
 use crate::target::Target;
-use crate::types::VirtAddr;
-
-/// Upper bound on processor indexes; `KiProcessorBlock` is sized by
-/// `MAXIMUM_PROCESSORS`.
-pub const MAX_PROCESSORS: u16 = 2048;
+use crate::types::{MAX_PROCESSORS, VirtAddr};
 
 fn kernel(target: &Target) -> Result<&Image> {
     Ok(&target.guest()?.ntoskrnl)
@@ -115,4 +117,157 @@ pub fn processor_count(target: &Target) -> Result<u16> {
                 .into(),
         ))
     }
+}
+
+/// The register contexts the kernel saved in processors' `_KPRCB`s.
+#[derive(Debug)]
+pub struct PrcbContexts {
+    /// Each processor's raw `CONTEXT`, by index; `None` where it could not
+    /// be read.
+    pub contexts: Vec<Option<Vec<u8>>>,
+    /// Why a context, or the rest of them, could not be read.
+    pub warnings: Vec<String>,
+}
+
+impl PrcbContexts {
+    fn new(processors: usize) -> Self {
+        Self {
+            contexts: vec![None; processors],
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Read each processor's `context_size`-byte context at the address
+    /// `context_pointer` gives for its `_KPRCB`, warning of each one that
+    /// cannot be read.
+    fn read<F>(
+        &mut self,
+        target: &Target,
+        context_size: usize,
+        context_label: &str,
+        context_pointer: F,
+    ) -> Result<()>
+    where
+        F: Fn(VirtAddr) -> Result<VirtAddr>,
+    {
+        let memory = kernel(target)?.memory();
+        for (i, slot) in self.contexts.iter_mut().enumerate() {
+            let index = u16::try_from(i).map_err(|_| {
+                Error::DebugInfo(format!("processor index {i} exceeds the supported bound"))
+            })?;
+            let prcb = match kprcb_for_processor(target, index) {
+                Ok(prcb) => prcb,
+                Err(error) => {
+                    self.warnings
+                        .push(format!("KiProcessorBlock[{i}] unavailable: {error}"));
+                    continue;
+                }
+            };
+            let context_ptr = match context_pointer(prcb) {
+                Ok(context_ptr) if !context_ptr.is_zero() => context_ptr,
+                Ok(_) => {
+                    self.warnings
+                        .push(format!("PRCB[{i}] Context pointer is null, skipping"));
+                    continue;
+                }
+                Err(error) => {
+                    self.warnings.push(format!(
+                        "failed to read {context_label}[{i}] context pointer: {error}"
+                    ));
+                    continue;
+                }
+            };
+            let mut context = vec![0u8; context_size];
+            if let Err(error) = memory.read_bytes(context_ptr, &mut context) {
+                self.warnings.push(format!(
+                    "failed to read {context_label}[{i}] context: {error}"
+                ));
+                continue;
+            }
+            *slot = Some(context);
+        }
+        Ok(())
+    }
+}
+
+/// `KDDEBUGGER_DATA64.OffsetPrcbContext` in the debugger data block at
+/// `debugger_data`: where an AMD64 `_KPRCB` points to its context. `None`
+/// when unreadable or zero.
+pub fn prcb_context_offset(target: &Target, debugger_data: VirtAddr) -> Option<u16> {
+    let memory = kernel(target).ok()?.memory();
+    let field = offset_of!(KdDebuggerData64, offset_prcb_context) as u64;
+    let offset: u16 = memory.read(debugger_data + field).ok()?;
+    (offset > 0).then_some(offset)
+}
+
+/// Processors `0..processors`' AMD64 contexts, each through the pointer at
+/// `context_offset` in its `_KPRCB`.
+pub fn read_amd64_prcb_contexts(
+    target: &Target,
+    processors: usize,
+    context_offset: u16,
+) -> PrcbContexts {
+    let mut saved = PrcbContexts::new(processors);
+    let read = kernel(target).and_then(|nt| {
+        let memory = nt.memory();
+        saved.read(target, amd64::CONTEXT_SIZE, "PRCB", |prcb| {
+            memory.read(prcb + u64::from(context_offset))
+        })
+    });
+    if let Err(error) = read {
+        saved
+            .warnings
+            .push(format!("could not read PRCB contexts from dump: {error}"));
+    }
+    saved
+}
+
+/// Processors `0..processors`' ARM64 contexts, each its `_KPRCB`'s
+/// `ProcessorState.ContextFrame`.
+pub fn read_arm64_prcb_contexts(target: &Target, processors: usize) -> PrcbContexts {
+    let mut saved = PrcbContexts::new(processors);
+    let read = arm64_prcb_context_offset(target).and_then(|context_offset| {
+        saved.read(target, arm64::CONTEXT_SIZE, "ARM64 PRCB", |prcb| {
+            Ok(prcb + context_offset)
+        })
+    });
+    if let Err(error) = read {
+        saved.warnings.push(format!(
+            "could not read ARM64 PRCB ContextFrame contexts from dump: {error}"
+        ));
+    }
+    saved
+}
+
+/// The offset of `ProcessorState.ContextFrame` in an ARM64 `_KPRCB`.
+fn arm64_prcb_context_offset(target: &Target) -> Result<u64> {
+    let symbols = &target.symbols;
+    let prcb = symbols
+        .find_type_across_modules(target.kernel_dtb(), "_KPRCB")
+        .ok_or_else(|| Error::StructNotFound("_KPRCB".into()))?;
+    let processor_state = prcb.field("ProcessorState")?;
+    let state_name = match &processor_state.type_data {
+        ParsedType::Struct(name) | ParsedType::Union(name) => name,
+        other => {
+            return Err(Error::FieldTypeMismatch(
+                format!("ProcessorState ({other})"),
+                "struct".into(),
+            ));
+        }
+    };
+    let state = symbols
+        .find_type_across_modules(target.kernel_dtb(), state_name)
+        .ok_or_else(|| Error::StructNotFound(state_name.clone()))?;
+    let context_frame = state.field("ContextFrame")?;
+    let offset = processor_state.offset as u64 + context_frame.offset as u64;
+    let context_end = offset
+        .checked_add(arm64::CONTEXT_SIZE as u64)
+        .ok_or_else(|| Error::DebugInfo("ARM64 PRCB ContextFrame offset overflow".into()))?;
+    if context_end > prcb.size as u64 {
+        return Err(Error::DebugInfo(format!(
+            "ARM64 PRCB ContextFrame at {offset:#x} exceeds _KPRCB size {:#x}",
+            prcb.size
+        )));
+    }
+    Ok(offset)
 }

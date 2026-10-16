@@ -39,10 +39,6 @@ impl SymbolStore {
         self.merged_index(&self.index_types, dtb, false, "Building type completions")
     }
 
-    pub fn merged_enum_index(&self, dtb: Option<Dtb>) -> SymbolIndex {
-        self.merged_index(&self.index_enums, dtb, false, "Building enum completions")
-    }
-
     /// Merge the per-module indexes in `source` that are visible from `dtb`
     /// (all modules when `None`) into one searchable index. `qualify` prefixes
     /// each name with its module's short name, which symbol completion needs
@@ -73,10 +69,13 @@ impl SymbolStore {
             .into_par_iter()
             .map(|(guid, short)| {
                 let names = match source.get(&guid) {
+                    // `concat` sizes each name once; `format!` went through
+                    // the formatting machinery and grew the String, and was
+                    // most of this merge.
                     Some(index) if qualify => index
                         .names
                         .iter()
-                        .map(|name| format!("{short}!{name}"))
+                        .map(|name| [short.as_str(), "!", name].concat())
                         .collect(),
                     Some(index) => index.names.clone(),
                     None => Vec::new(),
@@ -391,6 +390,6 @@ impl SymbolStore {
             return None;
         }
         let first = entries.partition_point(|entry| entry.rva < rva);
-        Some((entries[first].name.clone(), offset))
+        Some((entries[first].name.to_string(), offset))
     }
 }

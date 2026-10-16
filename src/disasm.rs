@@ -6,6 +6,9 @@ use iced_x86::{
 
 use std::fmt::Write as _;
 
+use ntoseye_macros::record;
+
+use crate::bytes::before_nul;
 use crate::types::{Arch, CodeMachine};
 
 /// Control-flow class for the instruction at the start of a byte buffer.
@@ -141,7 +144,7 @@ pub fn disasm_formatter() -> NasmFormatter {
 /// A semantic classification for one disassembly token, assigned by the
 /// decoder and turned into color by the presentation layer. Color-agnostic on
 /// purpose: core decodes, `ui` owns the palette.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum AsmKind {
     Mnemonic,
     Register,
@@ -152,6 +155,7 @@ pub enum AsmKind {
 }
 
 /// One formatted token of an instruction: its text and semantic kind.
+#[derive(Clone, Debug)]
 pub struct AsmToken {
     pub text: String,
     pub kind: AsmKind,
@@ -183,23 +187,41 @@ impl FormatterOutput for TokenSink<'_> {
     }
 }
 
-/// One decoded instruction, ready to render: address, space-joined hex bytes,
-/// the asm as semantic [`AsmToken`]s, and an optional symbol comment for a
-/// branch / rip-relative target. [`Self::mnemonic`] and [`Self::operands`]
-/// describe the same instruction structurally, for callers that follow code
+/// One decoded instruction. `asm` is its text; `mnemonic` and `operands`
+/// describe the same instruction structurally, for code that follows code
 /// instead of reading it.
+#[record(impl)]
 pub struct DisasmRow {
+    /// The address of the instruction.
+    #[record(hex)]
     pub ip: u64,
+    /// The bytes of the instruction, in hex.
     pub hex: String,
-    /// Encoded length in bytes.
+    /// The instruction length in bytes.
     pub length: usize,
+    /// The asm as semantic tokens, for colored rendering.
+    #[record(skip)]
     pub tokens: Vec<AsmToken>,
+    /// The resolved branch or rip-relative target, if there is one.
     pub comment: Option<String>,
+    #[record(skip)]
     decoded: Decoded,
+}
+
+/// A disassembled function (`uf`).
+#[record]
+pub struct FunctionDisassembly {
+    /// The symbol at the start of the function.
+    pub symbol: String,
+    /// The length of the function in bytes.
+    pub length: usize,
+    /// Its instructions, from its start.
+    pub rows: Vec<DisasmRow>,
 }
 
 /// The instruction behind a row, kept so that only callers that want its
 /// structure pay for it.
+#[derive(Clone, Debug)]
 enum Decoded {
     X86 {
         instruction: Instruction,
@@ -210,6 +232,7 @@ enum Decoded {
 }
 
 /// What an instruction operand is.
+#[record]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperandKind {
     Register,
@@ -220,44 +243,38 @@ pub enum OperandKind {
     Other,
 }
 
-impl OperandKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Register => "register",
-            Self::Memory => "memory",
-            Self::Immediate => "immediate",
-            Self::Branch => "branch",
-            Self::Other => "other",
-        }
-    }
-}
-
-/// One explicit operand of a decoded instruction. Fields that do not apply to
-/// `kind` are `None`; register names are lowercase.
+/// One explicit operand of a decoded instruction. Fields that do not apply
+/// to its `kind` are None.
+#[record]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DisasmOperand {
+    /// `register`, `memory`, `immediate`, `branch` (a branch or PC-relative
+    /// label target), or `other`.
     pub kind: OperandKind,
-    /// The operand as the formatted instruction text shows it.
+    /// The operand as `asm` shows it.
     pub text: String,
-    /// Register operand: the register as written (`r8d`, `w3`).
+    /// A register operand's register as written, lowercase (`r8d`, `w3`).
     pub register: Option<String>,
-    /// Register operand: the architectural register it is part of (`r8`, `x3`).
+    /// The architectural register that `register` is part of (`r8` for
+    /// `r8d`, `x3` for `w3`; vector registers stay as written).
     pub full_register: Option<String>,
-    /// Memory operand: full base register (`rip` when RIP-relative).
+    /// A memory operand's base register, full and lowercase (`rip` when
+    /// RIP-relative).
     pub base: Option<String>,
-    /// Memory operand: full index register.
+    /// A memory operand's index register, full and lowercase.
     pub index: Option<String>,
-    /// Memory operand: index scale, when there is an index.
+    /// The scale of `index`.
     pub scale: Option<u32>,
-    /// Memory operand: signed displacement (relative to the next instruction
-    /// when RIP-relative).
+    /// A memory operand's signed displacement: relative to the next
+    /// instruction when RIP-relative, and the writeback offset of an ARM64
+    /// post-indexed operand.
     pub displacement: Option<i64>,
-    /// Memory operand: access size in bytes, when known.
+    /// A memory operand's access size in bytes, when known (x86 only).
     pub size: Option<u32>,
-    /// Memory operand: x86 segment override (`gs`).
+    /// A memory operand's x86 segment override (`gs`).
     pub segment: Option<String>,
-    /// Immediate operand: its value, signed when the instruction sign-extends
-    /// it; branch operand: the target address.
+    /// An immediate operand's value (negative when the instruction
+    /// sign-extends it), or a branch operand's target address.
     pub immediate: Option<i128>,
 }
 
@@ -287,19 +304,20 @@ fn mask_code_address(bitness: u32, address: u64) -> u64 {
     }
 }
 
+#[record]
 impl DisasmRow {
-    /// Plain instruction text for MCP, Python, and JSON output.
-    /// Use `ui::disasm_asm` for colored rendering.
+    /// The instruction text.
+    #[record(getter)]
     pub fn asm(&self) -> String {
         self.tokens.iter().map(|t| t.text.as_str()).collect()
     }
 
-    /// The lowercase mnemonic without prefixes, as `asm` shows it (`.inst`
-    /// for an ARM64 word that encodes no instruction). `formatter` is a
-    /// [`disasm_formatter`], for x86 rows.
-    pub fn mnemonic(&self, formatter: &mut NasmFormatter) -> String {
+    /// The lowercase mnemonic, without prefixes (`mov`, `ldr`). `.inst`
+    /// for an ARM64 word that encodes no instruction.
+    #[record(getter)]
+    pub fn mnemonic(&self) -> String {
         match &self.decoded {
-            Decoded::X86 { instruction, .. } => x86_mnemonic(instruction, formatter),
+            Decoded::X86 { instruction, .. } => x86_mnemonic(instruction, &mut disasm_formatter()),
             Decoded::Arm64(word) => match bad64::decode(*word, self.ip) {
                 Ok(instruction) => instruction.op().mnem().to_string(),
                 Err(_) => ".inst".to_string(),
@@ -307,14 +325,14 @@ impl DisasmRow {
         }
     }
 
-    /// The explicit operands, in instruction order, as `asm` shows them.
-    /// `formatter` is a [`disasm_formatter`], for x86 rows.
-    pub fn operands(&self, formatter: &mut NasmFormatter) -> Vec<DisasmOperand> {
+    /// The explicit operands, in instruction order.
+    #[record(getter)]
+    pub fn operands(&self) -> Vec<DisasmOperand> {
         match &self.decoded {
             Decoded::X86 {
                 instruction,
                 bitness,
-            } => x86_operands(instruction, *bitness, formatter),
+            } => x86_operands(instruction, *bitness, &mut disasm_formatter()),
             Decoded::Arm64(word) => bad64::decode(*word, self.ip)
                 .map(|instruction| {
                     instruction
@@ -998,8 +1016,7 @@ fn arm64_operand_tokens(op: &bad64::Operand) -> Vec<AsmToken> {
         bad64::Operand::Name(_) => t.push(&op.to_string(), AsmKind::Text),
         bad64::Operand::StrImm { str, imm } => {
             // A NUL-padded ASCII name from the C decoder.
-            let end = str.iter().position(|&b| b == 0).unwrap_or(str.len());
-            let name = std::str::from_utf8(&str[..end]).unwrap_or("?");
+            let name = std::str::from_utf8(before_nul(str)).unwrap_or("?");
             t.push(name, AsmKind::Text);
             t.space();
             t.push(&format!("#{imm:#x}"), AsmKind::Number);
@@ -1292,11 +1309,10 @@ mod tests {
     }
 
     fn structure(row: &DisasmRow) -> Structure {
-        let mut formatter = disasm_formatter();
         Structure {
-            mnemonic: row.mnemonic(&mut formatter),
+            mnemonic: row.mnemonic(),
             length: row.length,
-            operands: row.operands(&mut formatter),
+            operands: row.operands(),
         }
     }
 

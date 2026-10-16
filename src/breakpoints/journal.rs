@@ -15,8 +15,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use crate::backend::MemoryOps;
-use crate::memory::PAGE_SIZE;
+use crate::memory::{MemoryOps, PAGE_SIZE};
 use crate::types::PhysAddr;
 
 /// Original bytes kept per site, starting at the patched address: the

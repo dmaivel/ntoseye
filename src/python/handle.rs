@@ -2,6 +2,7 @@
 //! `Session`, and every handle reaches it through [`Owner`], which also refuses
 //! handles minted before the guest was rebuilt (a reboot).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -16,12 +17,14 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
+use super::command::{CommandHost, HostSession, admit};
 use super::context::{Context, in_context};
-use super::{ErrorKind, err, error, raise};
-use crate::dbg_backend::halt_unreachable_reason;
+use super::record::{RecordClass, ToValue};
+use super::{ErrorKind, error, raise};
 use crate::error::{Error, Result as CoreResult};
 use crate::repl::ReplStore;
 use crate::session::Session;
+use crate::session::effects::Effects;
 use crate::target::InterruptRequester;
 
 /// How often an idle owner thread services the guest (see [`Actor`]); the
@@ -43,9 +46,9 @@ const SIGNAL_POLL: Duration = Duration::from_millis(100);
 ///
 /// You can use it from any Python thread, and the session thread runs the calls
 /// one at a time. A call that waits (`run()`, `wait()`) releases the GIL.
-/// Ctrl+C (`KeyboardInterrupt`) during a call stops a wait, step, or trace
-/// early and raises the exception, and during a `command()` that resumes the
-/// target it breaks in, as in the REPL. Between calls the session continues to
+/// Ctrl+C (`KeyboardInterrupt`) during a call that runs or waits on the
+/// target breaks in, as in the REPL, and raises the exception; the target is
+/// left halted where it was. Between calls the session continues to
 /// service the guest, resuming breakpoint hits in the wrong process and hits
 /// with a false condition so the guest does not stay frozen. A debugger that
 /// ntoseye gives to a REPL custom command is valid only on the REPL thread, and
@@ -270,6 +273,12 @@ impl Drop for Actor {
     }
 }
 
+impl CommandHost for Debugger {
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Debugger(self)
+    }
+}
+
 impl Debugger {
     fn with_handle(inner: SessionHandle, generation: Arc<AtomicU64>) -> Self {
         Debugger {
@@ -371,22 +380,7 @@ impl Debugger {
 /// Require a halted target before an operation that reads registers or
 /// patches guest/backend state, raising `TargetRunningError` otherwise.
 pub fn require_halted(session: &mut Session, operation: &str) -> PyResult<()> {
-    // KD can leave is_running() stale-true while the VM is physically halted
-    // (a caught-but-undrained stop); settle it first.
-    session.settle_pending_stop().map_err(err)?;
-    if !session.backend.is_running() {
-        return Ok(());
-    }
-    Err(match halt_unreachable_reason(&*session.backend) {
-        Some(reason) => error(
-            ErrorKind::TargetRunning,
-            format!("{operation} needs a halted target; {reason}"),
-        ),
-        None => error(
-            ErrorKind::TargetRunning,
-            format!("{operation} requires the VM to be halted; call interrupt() first"),
-        ),
-    })
+    admit(session, &Effects::HALTED, operation)
 }
 
 /// How a handle reaches its debugger. A `stamped` owner remembers the target
@@ -450,6 +444,14 @@ impl Owner {
         self.dbg.as_ptr() == other.dbg.as_ptr()
     }
 
+    /// Whether `other` belongs to the same debugger and was minted for the
+    /// same target generation: a handle from before a reload names an
+    /// object of the old kernel, which a fresh one at the same address is
+    /// not. Handle equality is this and the handle's key.
+    pub fn same_target(&self, other: &Owner) -> bool {
+        self.same_debugger(other) && self.generation == other.generation
+    }
+
     /// Accept this handle as an argument to a call on `dbg`: it must be that
     /// debugger's and current. `what` names it in the `ValueError`.
     pub fn require_argument_of(&self, py: Python<'_>, dbg: &Owner, what: &str) -> PyResult<()> {
@@ -467,6 +469,7 @@ impl Owner {
     pub fn identity_hash(&self, key: impl Hash) -> isize {
         let mut hasher = DefaultHasher::new();
         (self.dbg.as_ptr() as usize).hash(&mut hasher);
+        self.generation.hash(&mut hasher);
         key.hash(&mut hasher);
         hasher.finish() as isize
     }
@@ -506,6 +509,22 @@ fn stale_check(minted: Option<u64>, current: u64) -> PyResult<()> {
         )),
         _ => Ok(()),
     }
+}
+
+/// An SDK handle on one guest or debugger object, with a record of it:
+/// what `#[handle]` (the `ntoseye-macros` crate) generates for a class
+/// and its `#[handle] impl` block. The class gets a property per record
+/// field, `info`, `to_dict()`, and an identity (`==`, `hash`) by its key.
+pub trait Handle: Sized {
+    type Record: ToValue + RecordClass + Clone;
+
+    /// The record, once the handle is checked valid: the one it holds, if
+    /// it is from the current target generation, or the object's state now.
+    fn record(&self, py: Python<'_>) -> PyResult<Cow<'_, Self::Record>>;
+
+    /// Whether `record`, a record of this handle's kind, describes this
+    /// object: its key field matches.
+    fn describes(&self, py: Python<'_>, record: &Bound<'_, PyAny>) -> PyResult<bool>;
 }
 
 #[cfg(test)]

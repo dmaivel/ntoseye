@@ -1,416 +1,423 @@
 use crate::dbg_backend::DebugCapability;
 use crate::diagnostics::print_warning;
-use crate::dump_writer::{collect_dump_metadata, write_kernel_dump};
+use crate::dump_writer::{DumpWrite, collect_dump_metadata, write_kernel_dump};
 use crate::error::{Error, Result};
 use crate::kd::{KdFileMapping, kd_files, load_map_file};
 use crate::output;
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
+use crate::session::{Motion, Session};
 use indicatif::ProgressStyle;
+use ntoseye_macros::{command, grammar};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-repl_command! {
-    cmd_reboot();
-    names: [".reboot", "reboot", ".restart", "restart"],
-    usage: ".reboot",
-    summary: "Reboot the debug target and reload its kernel context.",
-    details: "ntoseye sends the reboot without confirmation, and handles the next KD state-change through the normal target-reload path.",
-    run_state: Halted,
-    run: Run,
+/// Reboot the debug target and reload its kernel context.
+///
+/// ntoseye sends the reboot without confirmation, and handles the next KD
+/// state-change through the normal target-reload path.
+#[command(
+    names = [".reboot", "reboot", ".restart", "restart"],
+    category = "target control",
+    kind = Run,
+    target = Nt,
+    state = Halted,
+    run = Run,
+    capability = TargetControl,
+    python = Debugger,
+)]
+fn reboot(session: &mut Session) -> Result<Motion> {
+    session
+        .request_reboot()
+        .map_err(|error| Error::DebugInfo(format!("failed to reboot target: {error}")))?;
+    outln!("Target is rebooting; waiting for target reload.");
+    Ok(Motion::Wait)
 }
 
-repl_command! {
-    cmd_crash();
-    names: [".crash", "crash"],
-    usage: ".crash",
-    summary: "Force a MANUALLY_INITIATED_CRASH (bugcheck 0xE2).",
-    details: "Windows first writes its crash dump, which often takes a minute, and the target ignores break-ins during this time. Then Windows reboots or, if automatic restart is disabled, breaks in. Ctrl+C stops the wait.",
-    run_state: Halted,
-    run: Run,
+/// Force a MANUALLY_INITIATED_CRASH (bugcheck 0xE2).
+///
+/// Windows first writes its crash dump, which often takes a minute, and the
+/// target ignores break-ins during this time. Then Windows reboots or, if
+/// automatic restart is disabled, breaks in. Ctrl+C stops the wait.
+#[command(
+    names = [".crash", "crash"],
+    category = "target control",
+    kind = Run,
+    target = Nt,
+    state = Halted,
+    run = Run,
+    capability = TargetControl,
+    python = Debugger,
+)]
+fn crash(session: &mut Session) -> Result<Motion> {
+    session
+        .request_crash()
+        .map_err(|error| Error::DebugInfo(format!("failed to force target bugcheck: {error}")))?;
+    outln!(
+        "Forcing target bugcheck 0xE2 (MANUALLY_INITIATED_CRASH); the target writes its crash \
+         dump before rebooting or breaking in."
+    );
+    Ok(Motion::Wait)
 }
 
-repl_command! {
-    cmd_dump;
-    names: [".dump", "dump"],
-    usage: ".dump [/f] [/ma] <file>",
-    summary: "Write a full PAGEDU64 kernel dump from the halted target.",
-    details: ".dump accepts both /f and /ma as WinDbg-compatible full-dump switches. ntoseye writes the dump as a stream, page by page, and you can cancel it with Ctrl+C.",
-    completion: None,
-    run_state: Halted,
+/// Write a full PAGEDU64 kernel dump from the halted target.
+///
+/// .dump accepts both /f and /ma as WinDbg-compatible full-dump switches.
+/// ntoseye writes the dump as a stream, page by page, and you can cancel it
+/// with Ctrl+C.
+#[command(
+    names = [".dump", "dump"],
+    category = "target control",
+    kind = Action,
+    target = Nt,
+    state = Halted,
+    live_only,
+    capability = MemoryIntrospection,
+    writes = [Files],
+    python = Debugger,
+)]
+fn write_dump(session: &mut Session, #[arg(parse = dump_path)] path: String) -> Result<DumpWrite> {
+    let (metadata, total_pages) = collect_dump_metadata(session)
+        .and_then(|metadata| metadata.total_pages().map(|pages| (metadata, pages)))
+        .map_err(|error| Error::DebugInfo(format!("cannot prepare dump: {error}")))?;
+    let memory = &*session.target.phys;
+    let progress = output::progress_bar(total_pages, "writing dump");
+    progress.set_style(
+        ProgressStyle::with_template("Writing dump [{bar:40}] {pos}/{len}")?.progress_chars("#-"),
+    );
+    let interrupt = Arc::clone(&session.target.interrupt);
+    interrupt.store(false, Ordering::SeqCst);
+    let result = write_kernel_dump(
+        &path,
+        memory,
+        &metadata,
+        || interrupt.swap(false, Ordering::SeqCst),
+        || progress.inc(1),
+    );
+    progress.finish_and_clear();
+    let unreadable_pages =
+        result.map_err(|error| Error::DebugInfo(format!("failed to write dump: {error}")))?;
+    Ok(DumpWrite {
+        path,
+        unreadable_pages,
+    })
 }
 
-repl_command! {
-    cmd_kdfiles;
-    names: [".kdfiles"],
-    usage: ".kdfiles [<map-file>] [-m <target> <host>] [-d <target>] [-c]",
-    summary: "Serve driver images from host files using a driver replacement map.",
-    details: "Without arguments, .kdfiles shows the mappings and serving statistics. A path loads a WinDbg map file of three-line records: `map`, the target name, and the host path. -m adds a mapping, -d removes one, and -c clears the map. Target names match case-insensitively on path suffix boundaries, and a bare filename matches any directory. Changes apply at the next driver load, so the guest can load a rebuilt driver without you copying it into the guest. See the driver replacement map guide.",
-    completion: None,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_status();
-    names: ["status"],
-    usage: "status",
-    summary: "Show the current VM status.",
-}
-
-repl_command! {
-    cmd_capabilities();
-    names: ["capabilities"],
-    usage: "capabilities",
-    summary: "Show the backend capabilities.",
-}
-
-repl_command! {
-    cmd_dbgprint;
-    names: ["!dbgprint", "dbgprint"],
-    usage: "!dbgprint [count]",
-    summary: "Show guest debug output (DbgPrint).",
-    details: "Shows the last count lines, 50 by default, or all with 0. Over kd and kdnet, it shows what the KD stream delivered since ntoseye attached, and before anything arrived, the kernel's buffer. On the other backends, including a crash dump, it shows the kernel's own DbgPrint buffer (KdPrintCircularBuffer), as WinDbg's !dbgprint does, which also holds what was printed before ntoseye attached. The buffer is 4 KB by default and keeps only the newest output. A print that the debug filter drops (nt!Kd_DEFAULT_Mask, Kd_<component>_Mask) reaches neither.",
-    target: Kernel,
-}
-
-fn target_control_available(state: &ReplState<'_>) -> bool {
-    let capabilities = state.ctx.capabilities();
-    if supports_capability(&capabilities, DebugCapability::TargetControl) {
-        true
-    } else {
-        error!(
-            "target control is not supported by the {} backend",
-            state.ctx.backend.name()
-        );
-        false
-    }
-}
-
-impl ReplState<'_> {
-    fn cmd_kdfiles(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        match invocation.argv.first().map(|arg| arg.as_ref()) {
-            None => {
-                self.show_kdfiles();
-                return Ok(());
-            }
-            Some("-c") => {
-                if invocation.argv.len() != 1 {
-                    outln!("{}\n", command_help(invocation.name));
-                    return Ok(());
-                }
-                kd_files().clear();
-                outln!("Driver replacement map cleared.");
-            }
-            Some("-d") => {
-                let Some(target) = invocation.arg(1).filter(|_| invocation.argv.len() == 2) else {
-                    outln!("{}\n", command_help(invocation.name));
-                    return Ok(());
-                };
-                if kd_files().remove(target) {
-                    outln!("Removed mapping for {target}.");
-                } else {
-                    error!("no mapping for {target}");
-                    return Ok(());
-                }
-            }
-            Some("-m") => {
-                let (Some(target), Some(host)) = (invocation.arg(1), invocation.arg(2)) else {
-                    outln!("{}\n", command_help(invocation.name));
-                    return Ok(());
-                };
-                if invocation.argv.len() != 3 {
-                    outln!("{}\n", command_help(invocation.name));
-                    return Ok(());
-                }
-                match kd_files().add(target, Path::new(host)) {
-                    Ok(mapping) => {
-                        outln!("Mapped {} -> {}.", mapping.target, mapping.host.display())
-                    }
-                    Err(error) => {
-                        error!("{error}");
-                        return Ok(());
-                    }
-                }
-            }
-            Some(path) => match load_map_file(Path::new(path)) {
-                Ok(mappings) => {
-                    let count = mappings.len();
-                    kd_files().set(mappings);
-                    outln!(
-                        "Loaded {count} mapping{} from {path}.",
-                        if count == 1 { "" } else { "s" }
-                    );
-                }
-                Err(error) => {
-                    error!("{error}");
-                    return Ok(());
-                }
-            },
+impl Render for DumpWrite {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        if self.unreadable_pages != 0 {
+            outln!("{} pages unreadable (zero-filled)", self.unreadable_pages);
         }
-        self.warn_if_file_io_unsupported();
-        Ok(())
-    }
-
-    fn show_kdfiles(&mut self) {
-        let mappings = kd_files().mappings();
-        if mappings.is_empty() {
-            outln!("No driver replacement map. Use `.kdfiles -m <target> <host>`.\n");
-            return;
-        }
-        let width = mappings
-            .iter()
-            .map(|mapping| mapping.target.chars().count())
-            .max()
-            .unwrap_or(0);
-        for KdFileMapping { target, host } in &mappings {
-            outln!("{target:<width$}  ->  {}", host.display());
-        }
-        let stats = kd_files().stats();
-        outln!();
-        outln!(
-            "served {} open{}, {} byte{} read, {} refused",
-            stats.opened,
-            if stats.opened == 1 { "" } else { "s" },
-            stats.bytes_read,
-            if stats.bytes_read == 1 { "" } else { "s" },
-            stats.refused
-        );
-        self.warn_if_file_io_unsupported();
-        outln!();
-    }
-
-    fn warn_if_file_io_unsupported(&mut self) {
-        let capabilities = self.ctx.capabilities();
-        if !supports_capability(&capabilities, DebugCapability::TargetFileIo) {
-            print_warning(format!(
-                "the {} backend cannot serve target file requests; the map will never be consulted",
-                self.ctx.backend.name()
-            ));
-        }
-    }
-
-    fn cmd_reboot(&mut self) -> Result<()> {
-        if !target_control_available(self) {
-            return Ok(());
-        }
-        if let Err(error) = self.ctx.request_reboot() {
-            error!("failed to reboot target: {error}");
-            return Ok(());
-        }
-        outln!("Target is rebooting; waiting for target reload.");
-        self.wait_for_stop_after_resume()
-    }
-
-    fn cmd_crash(&mut self) -> Result<()> {
-        if !target_control_available(self) {
-            return Ok(());
-        }
-        if let Err(error) = self.ctx.request_crash() {
-            error!("failed to force target bugcheck: {error}");
-            return Ok(());
-        }
-        outln!(
-            "Forcing target bugcheck 0xE2 (MANUALLY_INITIATED_CRASH); the target writes its crash dump before rebooting or breaking in."
-        );
-        self.wait_for_stop_after_resume()
-    }
-
-    fn cmd_dump(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(path) = parse_dump_arguments(&invocation) else {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        };
-
-        let capabilities = self.ctx.capabilities();
-        if !supports_capability(&capabilities, DebugCapability::MemoryIntrospection) {
-            error!(
-                "dump writing is not supported by the {} backend",
-                self.ctx.backend.name()
-            );
-            return Ok(());
-        }
-
-        if self.ctx.target.phys.is_dump() {
-            error!(".dump is not applicable to a static crash dump");
-            return Ok(());
-        }
-
-        let (metadata, total_pages) = match collect_dump_metadata(self.ctx)
-            .and_then(|metadata| metadata.total_pages().map(|pages| (metadata, pages)))
-        {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                error!("cannot prepare dump: {error}");
-                return Ok(());
-            }
-        };
-        let memory = &*self.ctx.target.phys;
-        let progress = output::progress_bar(total_pages, "writing dump");
-        progress.set_style(
-            ProgressStyle::with_template("Writing dump [{bar:40}] {pos}/{len}")?
-                .progress_chars("#-"),
-        );
-        let interrupt = Arc::clone(&self.ctx.target.interrupt);
-        interrupt.store(false, Ordering::SeqCst);
-        let result = write_kernel_dump(
-            path,
-            memory,
-            &metadata,
-            || interrupt.swap(false, Ordering::SeqCst),
-            || progress.inc(1),
-        );
-        progress.finish_and_clear();
-        match result {
-            Ok(unreadable_pages) => {
-                if unreadable_pages != 0 {
-                    outln!("{unreadable_pages} pages unreadable (zero-filled)");
-                }
-                outln!("Wrote full kernel dump to {}.", path)
-            }
-            Err(error) => error!("failed to write dump: {error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_status(&mut self) -> Result<()> {
-        if self.ctx.backend.is_running() {
-            outln!("VM is running\n");
-        } else {
-            if let Err(e) = self
-                .ctx
-                .backend
-                .set_current_thread(&self.ctx.current_thread)
-            {
-                error!("failed to select execution context: {e}");
-                return Ok(());
-            }
-            print_stop_separator();
-            print_break_context(self.ctx);
-        }
-
-        Ok(())
-    }
-
-    fn cmd_capabilities(&mut self) -> Result<()> {
-        // A user dump's "contexts" are its threads, and what it cannot do
-        // is what a snapshot of one process lacks.
-        let note = self.ctx.target.user_dump_info().map(|info| {
-            format!(
-                "user-mode minidump of {}: a static snapshot of one process, whose contexts are its {} captured threads; its memory is read-only, with no physical addresses or page tables, and no kernel",
-                info.process_label(),
-                info.threads.len()
-            )
-        });
-        print_backend_capabilities(&self.ctx.capabilities(), note.as_deref());
-
-        Ok(())
-    }
-
-    /// Show guest debug output (DbgPrint), the last `count` lines (default
-    /// 50, or all when `count` is 0): over KD what its stream delivered, and
-    /// on other backends what the kernel's own DbgPrint buffer holds,
-    /// including what was printed before ntoseye attached, as WinDbg's
-    /// `!dbgprint` shows.
-    fn cmd_dbgprint(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        const DEFAULT_TAIL: usize = 50;
-        let count = match invocation.arg(0) {
-            Some(arg) => arg
-                .parse::<usize>()
-                .map_err(|_| Error::DebugInfo(format!("invalid count: {arg}")))?,
-            None => DEFAULT_TAIL,
-        };
-
-        if !self.ctx.backend_streams_debug_output() {
-            return self.print_kernel_print_buffer(count);
-        }
-        let page = self.ctx.read_debug_output(0);
-        if page.lines.is_empty() {
-            // Nothing printed since attach: what the kernel printed before
-            // it, such as the drivers that failed at boot, is in its buffer.
-            outln!("{}", ui::muted("no debug output since ntoseye attached"));
-            if self.print_kernel_print_buffer(count).is_err() {
-                outln!();
-            }
-            return Ok(());
-        }
-
-        let start = if count == 0 {
-            0
-        } else {
-            page.lines.len().saturating_sub(count)
-        };
-        for line in &page.lines[start..] {
-            outln!(
-                "{} {}",
-                ui::muted(&fmt_timestamp(line.timestamp_ms)),
-                line.text
-            );
-        }
-        outln!();
-
-        Ok(())
-    }
-
-    /// The last `count` lines of the kernel's DbgPrint buffer (all when 0),
-    /// oldest first.
-    fn print_kernel_print_buffer(&mut self, count: usize) -> Result<()> {
-        let target = &self.ctx.target;
-        let position = target.kernel_print_position()?;
-        let buffer = target.kernel_print_buffer(&position)?;
-        let bytes = crate::target::dbgprint::chronological(&buffer, position.cursor);
-        let text = String::from_utf8_lossy(&bytes).replace('\0', "");
-        let lines: Vec<&str> = text
-            .lines()
-            .map(|line| line.trim_end_matches('\r'))
-            .filter(|line| !line.is_empty())
-            .collect();
-        let wrapped = match position.cursor.rollovers {
-            0 => "not wrapped yet".to_string(),
-            1 => "wrapped once, so it starts mid-way".to_string(),
-            n => format!("wrapped {n} times, so it starts mid-way"),
-        };
-        outln!(
-            "{}",
-            ui::muted(&format!(
-                "kernel DbgPrint buffer at {:#x}, {} bytes, {wrapped}",
-                position.buffer.0, position.size
-            ))
-        );
-        if lines.is_empty() {
-            outln!("{}\n", ui::muted("the buffer is empty"));
-            return Ok(());
-        }
-        let start = if count == 0 {
-            0
-        } else {
-            lines.len().saturating_sub(count)
-        };
-        for line in &lines[start..] {
-            outln!("{line}");
-        }
-        outln!();
-        Ok(())
+        outln!("Wrote full kernel dump to {}.", self.path)
     }
 }
 
-fn parse_dump_arguments<'a>(invocation: &'a CommandInvocation<'a>) -> Option<&'a str> {
+/// `.dump`'s file, among the full-dump switches.
+#[grammar(usage = "[/f] [/ma] <file>", complete = None)]
+fn dump_path(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<String, ArgError> {
     let mut path = None;
-    for argument in &invocation.argv {
-        let argument = argument.as_ref();
+    while let Some(argument) = cursor.word() {
         if argument.starts_with('/') {
             match argument.to_ascii_lowercase().as_str() {
                 "/f" | "/ma" => {}
                 // Unix absolute paths also start with `/`; once both known
                 // switches are excluded, treat the first such token as the
                 // requested file rather than rejecting `/tmp/out.dmp`.
-                _ if path.is_none() => path = Some(argument),
-                _ => return None,
+                _ if path.is_none() => path = Some(argument.into_owned()),
+                _ => return Err(ArgError::Missing),
             }
-        } else if path.replace(argument).is_some() {
-            return None;
+        } else if path.replace(argument.into_owned()).is_some() {
+            return Err(ArgError::Missing);
         }
     }
-    path
+    path.ok_or(ArgError::Missing)
+}
+
+/// What `.kdfiles` does to the driver replacement map.
+pub enum KdFilesChange {
+    Show,
+    Clear,
+    Remove(String),
+    Add { target: String, host: String },
+    Load(String),
+}
+
+/// What `.kdfiles` changed, for its message.
+pub enum KdFilesChanged {
+    Shown,
+    Cleared,
+    Removed(String),
+    Added(KdFileMapping),
+    Loaded { count: usize, path: String },
+}
+
+/// Serve driver images from host files using a driver replacement map.
+///
+/// Without arguments, .kdfiles shows the mappings and serving statistics. A
+/// path loads a WinDbg map file of three-line records: `map`, the target
+/// name, and the host path. -m adds a mapping, -d removes one, and -c clears
+/// the map. Target names match case-insensitively on path suffix boundaries,
+/// and a bare filename matches any directory. Changes apply at the next
+/// driver load, so the guest can load a rebuilt driver without you copying
+/// it into the guest. See the driver replacement map guide.
+#[command(
+    names = [".kdfiles"],
+    category = "target control",
+    kind = Action,
+    target = Kernel,
+    python = none,
+)]
+fn kdfiles(
+    _session: &Session,
+    #[arg(parse = kdfiles_change)] change: KdFilesChange,
+) -> Result<KdFilesChanged> {
+    Ok(match change {
+        KdFilesChange::Show => KdFilesChanged::Shown,
+        KdFilesChange::Clear => {
+            kd_files().clear();
+            KdFilesChanged::Cleared
+        }
+        KdFilesChange::Remove(target) => {
+            if !kd_files().remove(&target) {
+                return Err(Error::DebugInfo(format!("no mapping for {target}")));
+            }
+            KdFilesChanged::Removed(target)
+        }
+        KdFilesChange::Add { target, host } => KdFilesChanged::Added(
+            kd_files()
+                .add(&target, Path::new(&host))
+                .map_err(|error| Error::DebugInfo(error.to_string()))?,
+        ),
+        KdFilesChange::Load(path) => {
+            let mappings = load_map_file(Path::new(&path))
+                .map_err(|error| Error::DebugInfo(error.to_string()))?;
+            let count = mappings.len();
+            kd_files().set(mappings);
+            KdFilesChanged::Loaded { count, path }
+        }
+    })
+}
+
+/// `.kdfiles`' words: none, `-c`, `-d <target>`, `-m <target> <host>`, or a
+/// map file; any other shape shows the help.
+#[grammar(usage = "[map-file] | -m <target> <host> | -d <target> | -c", complete = None)]
+fn kdfiles_change(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<KdFilesChange, ArgError> {
+    let words: Vec<String> = cursor.words().map(str::to_string).collect();
+    while cursor.word().is_some() {}
+    let word = |index: usize| words.get(index).cloned();
+    Ok(match (words.first().map(String::as_str), words.len()) {
+        (None, _) => KdFilesChange::Show,
+        (Some("-c"), 1) => KdFilesChange::Clear,
+        (Some("-d"), 2) => KdFilesChange::Remove(word(1).unwrap_or_default()),
+        (Some("-m"), 3) => KdFilesChange::Add {
+            target: word(1).unwrap_or_default(),
+            host: word(2).unwrap_or_default(),
+        },
+        (Some("-c" | "-d" | "-m"), _) => return Err(ArgError::Missing),
+        (Some(path), _) => KdFilesChange::Load(path.to_string()),
+    })
+}
+
+impl Render for KdFilesChanged {
+    fn render(&self, state: &mut ReplState<'_>, (): ()) {
+        match self {
+            Self::Shown => {
+                show_kdfiles(state);
+                return;
+            }
+            Self::Cleared => outln!("Driver replacement map cleared."),
+            Self::Removed(target) => outln!("Removed mapping for {target}."),
+            Self::Added(mapping) => {
+                outln!("Mapped {} -> {}.", mapping.target, mapping.host.display())
+            }
+            Self::Loaded { count, path } => outln!(
+                "Loaded {count} mapping{} from {path}.",
+                if *count == 1 { "" } else { "s" }
+            ),
+        }
+        warn_if_file_io_unsupported(state);
+    }
+}
+
+fn show_kdfiles(state: &mut ReplState<'_>) {
+    let mappings = kd_files().mappings();
+    if mappings.is_empty() {
+        outln!("No driver replacement map. Use `.kdfiles -m <target> <host>`.\n");
+        return;
+    }
+    let width = mappings
+        .iter()
+        .map(|mapping| mapping.target.chars().count())
+        .max()
+        .unwrap_or(0);
+    for KdFileMapping { target, host } in &mappings {
+        outln!("{target:<width$}  ->  {}", host.display());
+    }
+    let stats = kd_files().stats();
+    outln!();
+    outln!(
+        "served {} open{}, {} byte{} read, {} refused",
+        stats.opened,
+        if stats.opened == 1 { "" } else { "s" },
+        stats.bytes_read,
+        if stats.bytes_read == 1 { "" } else { "s" },
+        stats.refused
+    );
+    warn_if_file_io_unsupported(state);
+    outln!();
+}
+
+fn warn_if_file_io_unsupported(state: &mut ReplState<'_>) {
+    let capabilities = state.ctx.capabilities();
+    if !supports_capability(&capabilities, DebugCapability::TargetFileIo) {
+        print_warning(format!(
+            "the {} backend cannot serve target file requests; the map will never be consulted",
+            state.ctx.backend.name()
+        ));
+    }
+}
+
+/// Show the current VM status.
+#[command(names = ["status"], category = "target control", kind = Query, python = none)]
+fn status(state: &mut ReplState<'_>) -> Result<()> {
+    if state.ctx.backend.is_running() {
+        outln!("VM is running\n");
+        return Ok(());
+    }
+    state
+        .ctx
+        .backend
+        .set_current_thread(&state.ctx.current_thread)
+        .map_err(|e| Error::DebugInfo(format!("failed to select execution context: {e}")))?;
+    print_stop_separator();
+    print_break_context(state.ctx);
+    Ok(())
+}
+
+/// Show the backend capabilities.
+#[command(names = ["capabilities"], category = "target control", kind = Query, python = none)]
+fn capabilities(state: &mut ReplState<'_>) -> Result<()> {
+    // A user dump's "contexts" are its threads, and what it cannot do
+    // is what a snapshot of one process lacks.
+    let note = state.ctx.target.user_dump_info().map(|info| {
+        format!(
+            "user-mode minidump of {}: a static snapshot of one process, whose contexts are its {} captured threads; its memory is read-only, with no physical addresses or page tables, and no kernel",
+            info.process_label(),
+            info.threads.len()
+        )
+    });
+    print_backend_capabilities(&state.ctx.capabilities(), note.as_deref());
+    Ok(())
+}
+
+/// Show guest debug output (DbgPrint).
+///
+/// Shows the last count lines, 50 by default, or all with 0. Over kd and
+/// kdnet, it shows what the KD stream delivered since ntoseye attached, and
+/// before anything arrived, the kernel's buffer. On the other backends,
+/// including a crash dump, it shows the kernel's own DbgPrint buffer
+/// (KdPrintCircularBuffer), as WinDbg's !dbgprint does, which also holds
+/// what was printed before ntoseye attached. The buffer is 4 KB by default
+/// and keeps only the newest output. A print that the debug filter drops
+/// (nt!Kd_DEFAULT_Mask, Kd_<component>_Mask) reaches neither.
+#[command(
+    names = ["!dbgprint", "dbgprint"],
+    category = "target control",
+    kind = Query,
+    target = Kernel,
+    python = none,
+)]
+fn dbgprint(state: &mut ReplState<'_>, #[arg(parse = dbgprint_count)] count: usize) -> Result<()> {
+    if !state.ctx.backend_streams_debug_output() {
+        return print_kernel_print_buffer(state, count);
+    }
+    let page = state.ctx.read_debug_output(0);
+    if page.lines.is_empty() {
+        // Nothing printed since attach: what the kernel printed before
+        // it, such as the drivers that failed at boot, is in its buffer.
+        outln!("{}", ui::muted("no debug output since ntoseye attached"));
+        if print_kernel_print_buffer(state, count).is_err() {
+            outln!();
+        }
+        return Ok(());
+    }
+    let start = if count == 0 {
+        0
+    } else {
+        page.lines.len().saturating_sub(count)
+    };
+    for line in &page.lines[start..] {
+        outln!(
+            "{} {}",
+            ui::muted(&fmt_timestamp(line.timestamp_ms)),
+            line.text
+        );
+    }
+    outln!();
+    Ok(())
+}
+
+/// `!dbgprint`'s count of lines, a decimal number; 50 when omitted.
+#[grammar(usage = "[count]", complete = [None])]
+fn dbgprint_count(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<usize, ArgError> {
+    const DEFAULT_TAIL: usize = 50;
+    match cursor.word() {
+        None => Ok(DEFAULT_TAIL),
+        Some(arg) => arg
+            .parse::<usize>()
+            .map_err(|_| ArgError::Message(format!("invalid count: {arg}"))),
+    }
+}
+
+/// The last `count` lines of the kernel's DbgPrint buffer (all when 0),
+/// oldest first.
+fn print_kernel_print_buffer(state: &mut ReplState<'_>, count: usize) -> Result<()> {
+    let target = &state.ctx.target;
+    let position = target.kernel_print_position()?;
+    let buffer = target.kernel_print_buffer(&position)?;
+    let bytes = crate::target::dbgprint::chronological(&buffer, position.cursor);
+    let text = String::from_utf8_lossy(&bytes).replace('\0', "");
+    let lines: Vec<&str> = text
+        .lines()
+        .map(|line| line.trim_end_matches('\r'))
+        .filter(|line| !line.is_empty())
+        .collect();
+    let wrapped = match position.cursor.rollovers {
+        0 => "not wrapped yet".to_string(),
+        1 => "wrapped once, so it starts mid-way".to_string(),
+        n => format!("wrapped {n} times, so it starts mid-way"),
+    };
+    outln!(
+        "{}",
+        ui::muted(&format!(
+            "kernel DbgPrint buffer at {:#x}, {} bytes, {wrapped}",
+            position.buffer.0, position.size
+        ))
+    );
+    if lines.is_empty() {
+        outln!("{}\n", ui::muted("the buffer is empty"));
+        return Ok(());
+    }
+    let start = if count == 0 {
+        0
+    } else {
+        lines.len().saturating_sub(count)
+    };
+    for line in &lines[start..] {
+        outln!("{line}");
+    }
+    outln!();
+    Ok(())
 }
 
 /// Render a Unix-millis timestamp as a `HH:MM:SS.mmm` UTC time-of-day prefix.

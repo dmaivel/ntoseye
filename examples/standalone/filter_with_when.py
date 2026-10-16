@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Use a Python `when` predicate to stop only in a named process.
 
-A predicate that raises is surfaced on the stop as `stop.condition_error`.
+A predicate that raises is surfaced on the stop as
+`stop.breakpoint.condition_error`.
 Requires an execution-control backend (`gdb` or `kd`).
 
     python3 filter_with_when.py --backend gdb --connect 127.0.0.1:1234
@@ -42,14 +43,17 @@ def main() -> None:
                     timed_out = True
                     print(f"timeout waiting for a stop after {args.timeout:g}s")
                     break
-                if bp not in stop.breakpoints:
-                    print(f"stop: {type(stop).__name__} ({stop.symbol or '?'})")
-                    if isinstance(stop, (ntoseye.Stop.Bugcheck, ntoseye.Stop.Reboot)):
+                match stop:
+                    case ntoseye.Stop.Breakpoint(breakpoint=hit) if stop.hit(bp):
+                        if hit.condition_error is not None:
+                            print(f"when predicate failed: {hit.condition_error}")
+                            break
+                    case ntoseye.Stop.Bugcheck() | ntoseye.Stop.Reload():
+                        print(f"stop: {stop.kind} ({stop.symbol or '?'})")
                         break
-                    continue
-                if isinstance(stop, ntoseye.Stop.Breakpoint) and stop.condition_error is not None:
-                    print(f"when predicate failed: {stop.condition_error}")
-                    break
+                    case _:
+                        print(f"other stop: {stop.kind} ({stop.symbol or '?'})")
+                        continue
 
                 process = stop.process
                 if process is None:
@@ -57,7 +61,8 @@ def main() -> None:
                     continue
                 thread = stop.thread
                 tid = thread.tid if thread is not None and thread.tid is not None else "?"
-                registers = stop.cpu.registers
+                assert stop.cpu is not None  # a kernel stop is on a processor
+                registers = dbg.cpus[stop.cpu].registers
                 first_argument = registers.rcx if "rcx" in registers else 0
                 hits += 1
                 print(

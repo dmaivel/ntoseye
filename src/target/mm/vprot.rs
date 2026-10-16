@@ -2,16 +2,17 @@
 //! holding it and the page-table and prototype PTEs of its pages.
 
 use super::paging::PteSelfMap;
-use super::{MemoryRegionInfo, VadType, VprotDetail};
-use crate::backend::MemoryOps;
+use super::{MemoryBasicInformation, MemoryRegionInfo, VadType};
 use crate::bugchecks::looks_like_kernel_pointer;
 use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
+use crate::guest::vad::vad_node_offset;
 use crate::layout::{FieldInfo, ParsedType, TypeInfo};
-use crate::memory::{AddressSpace, PAGE_SIZE};
+use crate::memory::{AddressSpace, MemoryOps, PAGE_SIZE};
 use crate::phys::PhysMem;
 use crate::target::Target;
 use crate::types::{Arch, PageTableEntry, PageTableLevel, VirtAddr};
+use crate::userdump::MemoryRegion;
 
 pub const MEM_COMMIT: u32 = 0x1000;
 pub const MEM_RESERVE: u32 = 0x2000;
@@ -375,13 +376,39 @@ fn software_state(protection: u64) -> PageState {
     (protection != MM_DECOMMIT).then(|| page_protection(protection))
 }
 
+impl MemoryBasicInformation {
+    /// What `VirtualQuery` reports for `address` in a region of a minidump's
+    /// memory-info list: the region from the address's page on.
+    fn in_user_dump_region(region: &MemoryRegion, address: VirtAddr) -> Self {
+        let page = address.0 & !(PAGE_SIZE as u64 - 1);
+        let base_address = page.max(region.base);
+        Self {
+            process: None,
+            address,
+            base_address: VirtAddr(base_address),
+            allocation_base: VirtAddr(region.allocation_base),
+            allocation_protect: region.allocation_protect,
+            region_size: region.base + region.size - base_address,
+            state: region.state,
+            protect: region.protect,
+            kind: region.kind,
+            vad: None,
+            truncated: false,
+        }
+    }
+}
+
 impl Target {
     /// `!vprot`: the region of `process`'s address space starting at the page
     /// holding `address` whose pages share one state and protection, as
     /// `VirtualQuery` reports it. The VAD gives the allocation base,
     /// protection, and type; the page tables (and the prototype PTEs of a
     /// section view) give each page's state and protection.
-    pub fn virtual_query(&self, process: &ProcessInfo, address: VirtAddr) -> Result<VprotDetail> {
+    pub fn virtual_query(
+        &self,
+        process: &ProcessInfo,
+        address: VirtAddr,
+    ) -> Result<MemoryBasicInformation> {
         if !matches!(self.arch(), Arch::Amd64 | Arch::Arm64) {
             return Err(Error::UnsupportedArchitecture(
                 "!vprot decodes AMD64 and ARM64 page tables only".into(),
@@ -413,8 +440,8 @@ impl Target {
                 .filter(|start| *start > base.0)
                 .min()
                 .unwrap_or(user_end);
-            return Ok(VprotDetail {
-                process: process.clone(),
+            return Ok(MemoryBasicInformation {
+                process: Some(process.clone()),
                 address,
                 base_address: base,
                 allocation_base: VirtAddr(0),
@@ -454,8 +481,8 @@ impl Target {
         } else {
             MEM_MAPPED
         };
-        Ok(VprotDetail {
-            process: process.clone(),
+        Ok(MemoryBasicInformation {
+            process: Some(process.clone()),
             address,
             base_address: base,
             allocation_base: region.start,
@@ -473,6 +500,25 @@ impl Target {
         })
     }
 
+    /// `!vprot` on a user-mode minidump: the region of its memory-info list
+    /// that holds `address`, which records what `VirtualQuery` returned when
+    /// the dump was written, from the page of `address` on.
+    pub fn user_virtual_query(&self, address: VirtAddr) -> Result<MemoryBasicInformation> {
+        let info = self.user_dump_info().ok_or(Error::NotSupported)?;
+        if info.regions.is_none() {
+            return Err(Error::DebugInfo(
+                "!vprot: the minidump has no memory-info list".to_string(),
+            ));
+        }
+        let region = info.region(address.0).ok_or_else(|| {
+            Error::DebugInfo(format!(
+                "!vprot: the minidump's memory-info list has no region holding {:016x}",
+                address.0
+            ))
+        })?;
+        Ok(MemoryBasicInformation::in_user_dump_region(region, address))
+    }
+
     fn page_walk<'a>(
         &'a self,
         process: &ProcessInfo,
@@ -482,7 +528,7 @@ impl Target {
         let types = guest.ntoskrnl.types();
         let kernel = self.kernel_address_space();
         let vad_short = types.layout("_MMVAD_SHORT")?;
-        let vad = region.node_address - vad_short.field_offset("VadNode").unwrap_or(0);
+        let vad = region.node_address - vad_node_offset(&vad_short);
         let flags_offset = vad_short.field_offset("u")?;
         let flags: u32 = kernel.read(vad + flags_offset)?;
         let private = region.private_memory.unwrap_or(false);
@@ -558,5 +604,30 @@ mod tests {
     fn decommitted_software_pte_is_reserved() {
         assert_eq!(software_state(MM_DECOMMIT), None);
         assert_eq!(software_state(0x14), Some(PAGE_READWRITE | PAGE_GUARD));
+    }
+
+    #[test]
+    fn user_dump_virtual_query_starts_at_the_address_page() {
+        let region = MemoryRegion {
+            base: 0x7ff6_0000_0000,
+            allocation_base: 0x7ff5_ffff_0000,
+            allocation_protect: 0x80,
+            size: 0x5000,
+            state: 0x1000,
+            protect: 0x20,
+            kind: 0x100_0000,
+        };
+        let query =
+            |address| MemoryBasicInformation::in_user_dump_region(&region, VirtAddr(address));
+        let middle = query(0x7ff6_0000_2345);
+        assert_eq!(middle.base_address, VirtAddr(0x7ff6_0000_2000));
+        assert_eq!(middle.region_size, 0x3000);
+        assert_eq!(middle.allocation_base, VirtAddr(0x7ff5_ffff_0000));
+        let first = query(0x7ff6_0000_0010);
+        assert_eq!(first.base_address, VirtAddr(region.base));
+        assert_eq!(first.region_size, region.size);
+        let last = query(0x7ff6_0000_4fff);
+        assert_eq!(last.base_address, VirtAddr(0x7ff6_0000_4000));
+        assert_eq!(last.region_size, 0x1000);
     }
 }

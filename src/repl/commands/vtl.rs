@@ -1,147 +1,31 @@
+use ntoseye_macros::{command, grammar};
 use tabled::builder::Builder;
 
 use super::memory::MAX_DISASSEMBLY_INSTRUCTIONS;
 use super::memory::MAX_DISPLAY_BYTES;
 use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::error::{Error, Result};
+use crate::guest::hv_layout::Hypercall;
 use crate::guest::{
     EvmcsState, HvPartition, HvProcessor, HvVirtualProcessor,
     ept::{self, Access, EptTranslation},
-    evmcs_fields::{self, IoIntercepts, MsrIntercepts},
+    evmcs_fields::{self, IoIntercepts, MsrIntercepts, MsrRange, PortRange},
     hypercall_input::{DecodedHypercall, HypercallField},
-    hypercalls::{HypercallCaller, HypercallInput, tlfs_hypercall},
+    hypercalls::{HypercallCallerInfo, HypercallInput},
     privilege_names,
 };
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::memory_view::{MemoryDisplayMode, display_memory_with_validity, eval_range};
 use crate::repl::*;
+use crate::session::Session;
 use crate::target::{CodeExtent, VP_STATE_REGISTERS};
 use crate::types::VirtAddr;
 use crate::ui;
 use crate::unwind::{halted_in_windows_hypervisor, try_format_symbol_at};
 use std::collections::{HashMap, HashSet};
 
-repl_command! {
-    cmd_vtl;
-    names: [".vtl"],
-    usage: ".vtl [0|1 [pid]]",
-    summary: "Select NT (VTL0) or secure-kernel (VTL1) memory inspection, or show which one is active.",
-    details: "VTL1 requires AMD64 direct host memory. `.vtl 1` changes the scope of reads and symbols, but does not change the VTL of the CPU. With no argument, `.vtl` shows the current scope. `.vtl 0` goes back to the NT kernel. After `.vtl 1`, it returns to the view the stop selected, which at a stop in the Windows hypervisor is where NT left off; otherwise, at a stop in VTL1 or in the Windows hypervisor, it selects the address space of the vCPU, where you use `.vtlcxr` or `.thread` to select NT. `.vtl 1` selects the system address space of the secure kernel, and `.vtl 1 <pid>` selects the address space of a trustlet by its NT PID, which is always decimal. The VTL1 scope is a read-only memory view. Registers, stepping, software breakpoints, writes, and NT-specific extensions need .vtl 0. To stop in VTL1, set a hardware execute breakpoint there (`ba e1 securekernel!<function>`, GDB backends), and then resume with a plain `g`, which first goes back to the live context. A vCPU stopped in VTL1 shows its real registers, stack, and memory. With no argument, `.vtl` also shows whether reads follow such a live stop or the manual view.",
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_trustlets();
-    names: ["!trustlets"],
-    usage: "!trustlets",
-    summary: "List the validated VTL1 processes with their NT identities and address-space roots.",
-    details: "Reads SkpsProcessList through the page tables of the secure kernel. Each row shows the secure-kernel process object, the NT PID and image name, the trustlet ID, and the address-space root. If the internal layout is not supported, the command gives an error and does not guess offsets. The command does not change the scope.",
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_hvpartitions();
-    names: ["!hvpartitions"],
-    usage: "!hvpartitions",
-    summary: "Show the partitions of the Windows hypervisor as a tree, with their virtual processors.",
-    details: "Walks the hypervisor's partition objects from its processor blocks, which come from the eVMCS pages (the VM's hv-evmcs enlightenment) or from a vCPU stopped in the hypervisor. Each child partition is below its parent, with its partition ID and object, and below each partition are its privilege mask (HV_PARTITION_PRIVILEGE_MASK) with the TLFS names, then each VP: the processor whose current VP it is, the VTL it runs or last ran in (the other enabled VTLs after it), the guest RIP where that VTL left off, named from symbols for the root partition's VPs, and why it last left for the hypervisor. !hvvps shows each VTL of a partition's VPs in full. hvix64 has no public symbols, so the offsets are read off the hypervisor's own code and each object is validated before it is shown; if the layout is not recognized, the command gives an error and does not guess offsets. Intel hosts only.",
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_hvvps;
-    names: ["!hvvps"],
-    usage: "!hvvps [partition-id]",
-    summary: "List the virtual processors of a Windows hypervisor partition (the root by default).",
-    details: "Each row is one VTL enabled on a VP, and * marks the VTL the VP runs or last ran in. CPU is the processor whose current VP it is (the one that runs it, or ran it last), by number, or by processor block on builds before 10.0.19041, which keep no number there. The row shows the hypervisor's context object for the VTL and, when found, the physical address of the VTL's eVMCS with the EPT pointer (the root of the VTL's second-level address translation), the guest RIP where the VTL left off, and why it last left for the hypervisor. The eVMCS columns need the VM's hv-evmcs enlightenment. The partition ID uses the current radix. See !hvpartitions for where the objects come from.",
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_hvept;
-    names: ["!hvept"],
-    usage: "!hvept [-v] <address> [partition-id [vp-index]]",
-    summary: "Translate a guest physical address through each VTL's EPT (second-level address translation) of a Windows hypervisor VP.",
-    details: "Walks the extended page tables that each enabled VTL's eVMCS names, by default for the VP the current vCPU's processor runs (with -v the root partition's), or the root partition's VP 0. The address is guest physical, or with -v virtual in the current address space (the .process or VTL1 scope), which the command translates through the guest's page tables first; that space is the root partition's, so -v takes only a root partition VP. Each row shows the VTL, its EPT pointer, the host physical address, the access that every level of the walk allows (r, w, and x, where x is supervisor-mode execute when the VTL uses mode-based execute control), user-mode execute under that control, the page size, and the memory type, or the level where the walk found no entry. This is how memory integrity (HVCI) and the secure kernel set page permissions that NT cannot change. The address and IDs use the current radix. Needs the VM's hv-evmcs enlightenment. See !hvpartitions for where the objects come from.",
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_hveptdiff;
-    names: ["!hveptdiff"],
-    usage: "!hveptdiff [partition-id [vp-index]]",
-    summary: "List the guest physical ranges that VTL0's and VTL1's EPTs of a Windows hypervisor VP map differently.",
-    details: "Walks the whole EPT of VTL0 and of VTL1 of a VP, by default the one the current vCPU's processor runs (a guest partition's first), else the root partition's VP 0, and lists each range of guest physical memory that the two map with different access, or that only one of them maps, with the access in each (r, w, x, and u for user-mode execute under mode-based execute control). Adjacent ranges that differ the same way are merged. These are the pages that the secure kernel and memory integrity (HVCI) protect from NT. The IDs use the current radix. Needs VBS and the VM's hv-evmcs enlightenment.",
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_hvcalls;
-    names: ["!hvcalls"],
-    usage: "!hvcalls [-a]",
-    summary: "List the hypercalls the Windows hypervisor implements, from its hypercall table.",
-    details: "Reads the hypervisor's hypercall table and shows, for each call code, the name the Hyper-V TLFS gives it (when the TLFS documents it), whether it is a simple or a rep call (var marks a variable-size input header), the sizes of its fixed input and output and of each rep element, and its handler in the hv image. Codes that share the handler of the reserved code 0 are not implemented; -a lists them too. Needs the VM's hv-evmcs enlightenment or a vCPU stopped in the hypervisor.",
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_hvcall();
-    names: ["!hvcall"],
-    usage: "!hvcall",
-    summary: "Decode the hypercall that the current vCPU's processor handles in the Windows hypervisor.",
-    details: "For a vCPU halted in the Windows hypervisor, for example on a breakpoint on a hypercall handler (ba e1 hv!HvCallFlushVirtualAddressList), shows the hypercall of the VMCALL exit that its processor handles: the caller (a VTL of the root partition, or the guest partition's VP that the processor serves), the call code with its TLFS name, the flags (fast, variable header size, nested), a rep call's start and count, the GPAs of the input and output, and each field of the input as the Hyper-V TLFS lays it out, with names for special values, processor sets, flags, and the common register names, then each element of a rep call's input list. A slow call's input is read at its GPA through the EPT of the calling VTL. A fast call's input is RDX and R8, then, for an XMM fast call, XMM0 to XMM5 as the hypervisor's VM-exit entry code saved them; when they are not known, it says what is missing. A call whose layout ntoseye does not know shows its input as raw qwords. The command needs the general-purpose registers of the exit, which ntoseye reads where the hypervisor's VM-exit entry code saved them, so it explains why when the vCPU is still on the entry or the last exit was not a VMCALL. Needs the VM's hv-evmcs enlightenment.",
-    run_state: Halted,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_hvvmcs;
-    names: ["!hvvmcs"],
-    usage: "!hvvmcs [-msr|-io] [partition-id [vp-index [vtl]]]",
-    summary: "Show the eVMCS of a VTL of a Windows hypervisor VP, or the MSRs and I/O ports it intercepts.",
-    details: "Reads the Enlightened VMCS of a VTL, by default the VP the current vCPU's processor runs (a guest partition's first, else the root partition's) and the VTL it runs in, and shows each field with its offset and value. With -msr, it shows the MSRs whose reads and writes the VTL's MSR bitmap intercepts, with the architectural MSRs each range holds, and then the architectural MSRs the VTL reads and writes without an exit; MSRs outside the bitmap's 0x0-0x1fff and 0xc0000000-0xc0001fff always exit. With -io the I/O ports its I/O bitmaps intercept, or that every access is intercepted when the VM-execution controls do not use the bitmaps. The layout is the Hyper-V TLFS's, so this does not depend on the hypervisor build. The IDs use the current radix. Needs the VM's hv-evmcs enlightenment.",
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_hvd;
-    names: ["!hvd"],
-    usage: "!hvd [-p] [-b|-d|-q] [<partition-id> <vp-index>] <address> [range]",
-    summary: "Display the memory of a Windows hypervisor partition's guest (a Hyper-V VM, WSL2, Windows Sandbox).",
-    details: "Reads the guest's memory through the EPT of the VTL its VP runs in, as its eVMCS names them: guest virtual memory through the VP's page tables (its CR3), or with -p guest physical memory. Without a partition and VP it reads the guest VP that the current vCPU's processor runs, as ~ and a stop in the hypervisor name it. -b shows bytes (the default), -d dwords, and -q qwords. The range is L<count>, an end address, or a byte length, as for db. Unreadable pages show as ??. The memory is read-only, and ntoseye has no symbols for the guest. The numbers use the current radix. Needs the VM's hv-evmcs enlightenment.",
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_hvu;
-    names: ["!hvu"],
-    usage: "!hvu [-p] [<partition-id> <vp-index>] <address> [range]",
-    summary: "Disassemble the memory of a Windows hypervisor partition's guest (a Hyper-V VM, WSL2, Windows Sandbox).",
-    details: "Reads the guest's memory as !hvd does: guest virtual memory through the page tables (CR3) and EPT of the VTL its VP runs in, or with -p guest physical memory through the EPT. Without a partition and VP it reads the guest VP that the current vCPU's processor runs. The code decodes in the mode the VTL left off in, by its eVMCS: 64-bit in IA-32e mode with a 64-bit code segment, else 32-bit; real mode and 16-bit code give an error. The range is as for u: L<count> instructions (8 by default), or an end address or byte length, listing every instruction that starts before the range ends. The listing stops at the first unreadable page and says where. ntoseye has no symbols for the guest, so branch targets and RIP-relative operands show as addresses. The numbers use the current radix. Needs the VM's hv-evmcs enlightenment.",
-    target: Kernel,
-}
-
 /// How two VTLs' access to a range differs: VTL0's, then VTL1's.
 type DifferenceKind = (Option<Access>, Option<Access>);
-
-repl_command! {
-    cmd_hvr;
-    names: ["!hvr"],
-    usage: "!hvr [partition-id vp-index [vtl]]",
-    summary: "Show the registers of a VTL of a Windows hypervisor VP, whether or not a processor runs it.",
-    details: "By default the VP the current vCPU's processor runs (a guest partition's first, else the root partition's) and the VTL it runs in. For a VP that a vCPU runs now, they are that vCPU's; for one whose exit a vCPU in the hypervisor handles, those of that exit; otherwise those the VP saved at its last exit, read from its register block through the descriptor of its register region, which no processor maps while the VP does not run. The VP resumes with them but for what the hypervisor writes as the exit's result, such as a hypercall's status in RAX. RIP, RSP, flags, control and segment registers come from the VTL's eVMCS. The general-purpose registers are shared by a VP's VTLs and belong to the one it runs in; another VTL shows its eVMCS state only. The IDs use the current radix. Needs the VM's hv-evmcs enlightenment; builds before 10.0.17763 keep the saved registers on the processor's stack, so a VP no processor runs has none there.",
-    run_state: Halted,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_partition;
-    names: [".partition"],
-    usage: ".partition [partition-id]",
-    summary: "Inspect the Windows guest that a Windows hypervisor partition runs (a Windows Sandbox, a Hyper-V VM) in place of the target, or show which is inspected.",
-    details: "With a partition ID, the session inspects that partition's guest instead of the target: its memory is read through the partition's EPT, its NT kernel is found from the page-table root of a VP in kernel mode, and its symbols are loaded, so lm, !process, dt, db, u, k and the other inspection commands read the guest. Its VPs are the threads (p<partition>.<VP index + 1>, so ~Ns selects VP N), with their VTL0 registers, as !hvr <partition> <vp> 0 shows them: a VP that runs in VTL1 has VTL0's RIP, RSP, flags, control and segment registers there, without its general-purpose registers. The target stays halted while the view is shown. eb, ed and the other writes go to the guest's memory through its EPT, and r <register>=<value> to the vCPU that runs the selected VP at the stop; a VP no vCPU runs has its registers in the hypervisor's memory, and is refused. ba sets a hardware breakpoint of the partition's, which stops only on its VPs (/c names a VP); bp, bu and bm are refused. g leaves the view and runs the target, and a hit of the partition's breakpoint shows the view again on the VP that hit it. t, p and gu step the thread of the selected VP, on whichever VP it runs next, and g <address> runs until any of the partition's VPs reaches the address: each is a run of the target to a breakpoint of the partition's. Walks (tc, pa, wt) are refused. bl lists every breakpoint, the target's too. The root partition's ID (0x1) returns to the target. Without an ID, it shows which partition is inspected. The ID uses the current radix. Needs the VM's hv-evmcs enlightenment and a 64-bit Windows guest; breakpoints and steps need the gdb backend.",
-    run_state: Halted,
-    target: Kernel,
-}
 
 /// `registers` three to a row in [`VP_STATE_REGISTERS`] order, as `r` lays
 /// them out, leaving out the ones not known.
@@ -377,7 +261,7 @@ fn memory_type_name(memory_type: u8) -> &'static str {
 
 /// What `!hvcall` shows for `caller`, the VP whose exit a processor
 /// handles: the lines of its decoded hypercall, or why it has none.
-fn hypercall_report(caller: &HypercallCaller) -> std::result::Result<Vec<String>, String> {
+fn hypercall_report(caller: &HypercallCallerInfo) -> std::result::Result<Vec<String>, String> {
     let label = caller.label();
     match &caller.input {
         HypercallInput::Known(call) => Ok(hypercall_lines(&label, call)),
@@ -508,197 +392,12 @@ fn field_lines(fields: &[HypercallField]) -> Vec<String> {
         .collect()
 }
 
-/// Commands that only read memory through the current root or are
-/// debugger-local, so they mean the same in any VTL1 address space. No VTL0
-/// register file or mediated write may be interpreted as belonging to the
-/// secure kernel. Aliases pass this same gate.
-fn secure_inspection_command(spec: &CommandSpec) -> bool {
-    matches!(
-        spec.names[0],
-        ".vtl"
-            | "!trustlets"
-            | "!hvpartitions"
-            | "!hvvps"
-            | "!hvept"
-            | "!hveptdiff"
-            | "!hvcalls"
-            | "!hvvmcs"
-            | "!hvr"
-            | "!hvd"
-            | "!hvu"
-            | ".process"
-            | "attach"
-            | "detach"
-            | ".context"
-            | "db"
-            | "dw"
-            | "dW"
-            | "dc"
-            | "dd"
-            | "dq"
-            | "dp"
-            | "dds"
-            | "dqs"
-            | "dyb"
-            | "dpp"
-            | "da"
-            | "du"
-            | "ds"
-            | "dS"
-            | "u"
-            | "uf"
-            | "ub"
-            | "dt"
-            | "dl"
-            | "!list"
-            | "x"
-            | "ln"
-            // An explicit root and a page walk; no NT state.
-            | "!vtop"
-            | "?"
-            | "set"
-            | "vars"
-            | "unset"
-            | "lm"
-            | "lmv"
-            | ".reload"
-            | "ld"
-            | ".fetchimage"
-            | ".sympath"
-            | ".sympath+"
-            | ".symfix"
-            | ".srcpath"
-            | ".srcpath+"
-            | "n"
-            | ".effmach"
-            | ".echo"
-            | ".printf"
-            // Each command it runs passes this gate itself.
-            | ".foreach"
-            // Walks `lm`'s list, the secure kernel's in VTL1.
-            | "!for_each_module"
-            // Script control flow; each command it runs passes this gate.
-            | ".if"
-            | ".elsif"
-            | ".else"
-            | ".while"
-            | ".for"
-            | ".do"
-            | ".break"
-            | ".continue"
-            | ".block"
-            | "j"
-            | "$<"
-            | "$$"
-            | ".sleep"
-            | ".cls"
-            | ".logopen"
-            | ".logappend"
-            | ".logclose"
-            | ".hh"
-            | "!error"
-            | "q"
-            | "capabilities"
-    )
-}
-
-/// Breakpoint bookkeeping and the one resume a VTL1 stop can be reached and
-/// left with. The core accepts only GDB hardware execute breakpoints in a
-/// VTL1 space; software sites (`bp`, `g <address>`, stepping) would patch or
-/// trap code VTL0 cannot see. `g` is refused with an address by its handler.
-fn secure_hardware_workflow_command(spec: &CommandSpec) -> bool {
-    matches!(
-        spec.names[0],
-        "ba" | "bl" | ".bpcmds" | "bc" | "bd" | "be" | "bpc" | "bs" | "br" | "bpp" | "g" | "gc"
-    )
-}
-
-/// vCPU state that is genuinely VTL1's when the backend is stopped there:
-/// the live register file (read-only: `r` refuses assignment), its stack,
-/// frames, and the processor list, and `.vtlcxr`, which selects a saved
-/// VTL state the hypervisor wrote and writes nothing, so a selected VTL1
-/// state has a way back to VTL0's. NT structures (KPCR, threads,
-/// processes) and `.cxr` (a context record read from memory) stay refused
-/// because the secure kernel's state is not laid out as NT's.
-fn live_secure_vcpu_command(spec: &CommandSpec) -> bool {
-    matches!(
-        spec.names[0],
-        "r" | "kn"
-            | ".frame"
-            | ".vtlcxr"
-            | "!for_each_frame"
-            | "dv"
-            | "~"
-            | "vcpu"
-            | "rdmsr"
-            | "break"
-            | "status"
-            | ".lastevent"
-    )
-}
-
-/// Whether the explicit `.vtl 1` scope admits `spec`. The scope is a memory
-/// view, not a claim that the backend is stopped in VTL1, so it has no
-/// register file: only reads, the hardware breakpoint workflow, and a plain
-/// `g` (which leaves the scope before resuming) run in it.
-pub fn secure_scope_admits(spec: &CommandSpec) -> bool {
-    secure_inspection_command(spec) || secure_hardware_workflow_command(spec)
-}
-
-/// Whether a live stop whose read root is a VTL1 root admits `spec`: what
-/// the explicit scope admits plus the real vCPU state.
-pub fn live_secure_admits(spec: &CommandSpec) -> bool {
-    secure_scope_admits(spec) || live_secure_vcpu_command(spec) || secure_step_command(spec)
-}
-
-/// Run control a live VTL1 stop can take without writing secure-kernel code:
-/// steps run the vCPU alone to debug-register sites on an instruction's
-/// successors, and run-to targets (`p` over a call, `gu`, `g <address>`)
-/// in secure-kernel code take a debug-register site too. A software site
-/// anywhere in VTL1 is still refused by the breakpoint core.
-fn secure_step_command(spec: &CommandSpec) -> bool {
-    matches!(spec.names[0], "t" | "p" | "gu" | "pa" | "ta" | "wt")
-}
-
 impl ReplState<'_> {
-    /// Why the current VTL1 address space refuses `spec`, if it does. Decided
-    /// on the resolved command, after alias expansion, so an alias cannot
-    /// reach a write or an NT extension from VTL1.
-    pub fn secure_denial(&self, spec: &CommandSpec) -> Option<String> {
-        let target = &self.ctx.target;
-        let name = spec.names[0];
-        if target.in_secure_scope() {
-            return (!secure_scope_admits(spec)).then(|| {
-                format!(
-                    "'{name}' is unavailable in the .vtl 1 memory view (reads, `ba e1`, and plain g \
-                     only); use .vtl 0 first"
-                )
-            });
-        }
-        if target.in_secure_address_space() && !live_secure_admits(spec) {
-            if target
-                .selected_frame
-                .as_ref()
-                .is_some_and(|frame| !frame.is_live())
-            {
-                return Some(format!(
-                    "'{name}' is unavailable while a VTL1 context is selected, which is \
-                     read-only; .vtlcxr goes back to VTL0's"
-                ));
-            }
-            return Some(format!(
-                "'{name}' is unavailable while the vCPU is stopped in VTL1: it needs NT state, \
-                 or writes VTL1 memory, registers, or code"
-            ));
-        }
-        None
-    }
-
     /// Leave the explicit VTL1 scope before a VTL0 selection (`.vtl 0`,
     /// `.process`, `attach`, `detach`, `.context`) or a resume. The live
     /// register file and the root it implies come back, which is a VTL1 root
     /// again when the vCPU is stopped there.
-    pub(super) fn leave_vtl1(&mut self) {
+    pub fn leave_vtl1(&mut self) {
         if self.ctx.target.in_secure_scope() {
             self.ctx.target.leave_secure_scope();
             self.ctx.restore_live_register_cache();
@@ -706,16 +405,13 @@ impl ReplState<'_> {
         }
     }
 
-    fn cmd_vtl(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if let Err(error) = self.select_vtl(invocation) {
-            error!("{error}");
-        }
-        Ok(())
-    }
-
-    fn select_vtl(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
+    fn select_vtl(&mut self, argv: &[String]) -> Result<()> {
         let mut live_hint = false;
-        match (invocation.arg(0), invocation.arg(1), invocation.argv.len()) {
+        match (
+            argv.first().map(String::as_str),
+            argv.get(1).map(String::as_str),
+            argv.len(),
+        ) {
             (None, _, _) => {}
             (Some("0"), None, 1) => {
                 // A live VTL1 stop has no explicit scope to leave; its root
@@ -745,9 +441,10 @@ impl ReplState<'_> {
                 self.caches.refresh_symbol_context(&self.ctx.target);
             }
             _ => {
-                return Err(Error::InvalidArgument(
-                    "usage: .vtl [0|1 [pid]]".to_string(),
-                ));
+                return Err(Error::InvalidArgument(usage_error(
+                    ".vtl",
+                    ".vtl takes 0, or 1 and an optional PID",
+                )));
             }
         }
         let target = &self.ctx.target;
@@ -797,44 +494,6 @@ impl ReplState<'_> {
         Ok(())
     }
 
-    fn cmd_hvpartitions(&mut self) -> Result<()> {
-        let partitions = match self.ctx.target.hypervisor_partitions() {
-            Ok(partitions) => partitions,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        // Each partition under its parent, once: the root, then any whose
-        // parent the walk did not find (or whose parents loop).
-        let mut seen = HashSet::new();
-        let mut forest = Vec::new();
-        for partition in &partitions {
-            let orphan = partition
-                .parent
-                .is_none_or(|parent| !partitions.iter().any(|p| p.id == parent));
-            if orphan && !seen.contains(&partition.id) {
-                forest.push(self.partition_node(partition, &partitions, &mut seen));
-            }
-        }
-        for partition in &partitions {
-            if !seen.contains(&partition.id) {
-                forest.push(self.partition_node(partition, &partitions, &mut seen));
-            }
-        }
-        let print = || {
-            for node in &forest {
-                outln!("{}", partition_tree(node, 0));
-            }
-            outln!();
-        };
-        #[cfg(feature = "cli")]
-        native::render(|| native::trees::partitions(&forest), print);
-        #[cfg(not(feature = "cli"))]
-        print();
-        Ok(())
-    }
-
     /// `partition` with its VPs and its child partitions nested below it. A
     /// partition in `seen` is not nested again.
     fn partition_node<'a>(
@@ -870,486 +529,6 @@ impl ReplState<'_> {
         }
     }
 
-    fn cmd_hvvps(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if invocation.argv.len() > 1 {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        let id = match invocation.arg(0) {
-            Some(text) => match self.eval_or_report(text) {
-                Some(value) => Some(value.0),
-                None => return Ok(()),
-            },
-            None => None,
-        };
-        let partitions = match self.ctx.target.hypervisor_partitions() {
-            Ok(partitions) => partitions,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        let partition = match id {
-            Some(id) => partitions.into_iter().find(|p| p.id == id),
-            None => partitions.into_iter().next(),
-        };
-        let Some(partition) = partition else {
-            error!("no partition with ID {:#x}", id.unwrap_or_default());
-            return Ok(());
-        };
-        let mut table = Builder::default();
-        table.push_record([
-            "VP",
-            "Address",
-            "CPU",
-            "VTL",
-            "Context",
-            "eVMCS",
-            "EPT pointer",
-            "Guest RIP",
-            "Last exit",
-        ]);
-        for vp in &partition.virtual_processors {
-            for (row, vtl) in vp.vtls.iter().enumerate() {
-                let current = if vtl.level == vp.vtl { "*" } else { "" };
-                let state = vtl.state.as_ref();
-                table.push_record([
-                    if row == 0 {
-                        vp.index.to_string()
-                    } else {
-                        String::new()
-                    },
-                    if row == 0 {
-                        ui::addr(vp.address)
-                    } else {
-                        String::new()
-                    },
-                    if row == 0 {
-                        processors_text(&vp.processors)
-                    } else {
-                        String::new()
-                    },
-                    format!("{}{current}", vtl.level),
-                    ui::addr(vtl.context),
-                    vtl.vmcs
-                        .map_or_else(String::new, |page| format!("{page:x}")),
-                    state.map_or_else(String::new, |state| format!("{:x}", state.ept_pointer)),
-                    state.map_or_else(String::new, |state| ui::addr(state.rip)),
-                    state
-                        .and_then(|state| state.exit_reason_name())
-                        .unwrap_or_default()
-                        .to_string(),
-                ]);
-            }
-        }
-        print_padded_table(table);
-        // A partition with no VPs yet links nothing either way.
-        let mut vtls = partition
-            .virtual_processors
-            .iter()
-            .flat_map(|vp| &vp.vtls)
-            .peekable();
-        let unlinked = vtls.peek().is_some() && vtls.all(|vtl| vtl.vmcs.is_none());
-        if unlinked && self.ctx.target.evmcs_found() == Some(true) {
-            outln!(
-                "{}\n",
-                ui::muted(
-                    "eVMCS pages were found, but not where this hypervisor build's VTL contexts keep theirs"
-                )
-            );
-        }
-        Ok(())
-    }
-
-    fn cmd_hvept(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let virtual_address = matches!(invocation.arg(0), Some("-v" | "/v"));
-        let arguments = &invocation.argv[usize::from(virtual_address)..];
-        if arguments.is_empty() || arguments.len() > 3 {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        let Some(values) = self.eval_all(arguments) else {
-            return Ok(());
-        };
-        let Some(SelectedVp {
-            partition: id,
-            root,
-            vp,
-        }) = self.hypervisor_vp(
-            values.get(1).copied(),
-            values.get(2).copied(),
-            virtual_address,
-        )
-        else {
-            return Ok(());
-        };
-        // -v translates through NT's page tables, which are the root
-        // partition's; a guest's addresses mean nothing there.
-        if virtual_address && !root {
-            error!(
-                "-v translates through the root partition's address space; read a guest partition's virtual memory with !hvd"
-            );
-            return Ok(());
-        }
-        outln!(
-            "{}",
-            ui::muted(&format!("VP {} of partition {id:#x}", vp.index))
-        );
-        let gpa = if virtual_address {
-            match self.ctx.target.virt_to_phys(None, VirtAddr(values[0])) {
-                Ok(Some(gpa)) => {
-                    outln!(
-                        "{} {} {} {:x}",
-                        ui::muted("virtual"),
-                        ui::addr(values[0]),
-                        ui::muted("-> guest physical"),
-                        gpa
-                    );
-                    gpa
-                }
-                Ok(None) => {
-                    error!(
-                        "{} is not mapped in the current address space",
-                        ui::addr(values[0])
-                    );
-                    return Ok(());
-                }
-                Err(error) => {
-                    error!("{error}");
-                    return Ok(());
-                }
-            }
-        } else {
-            values[0]
-        };
-        let mut table = Builder::default();
-        table.push_record([
-            "VTL",
-            "EPT pointer",
-            "Host physical",
-            "Access",
-            "User exec",
-            "Page",
-            "Type",
-        ]);
-        for vtl in &vp.vtls {
-            let Some(state) = &vtl.state else {
-                table.push_record([vtl.level.to_string(), "no eVMCS state".to_string()]);
-                continue;
-            };
-            let mut row = vec![vtl.level.to_string(), format!("{:x}", state.ept_pointer)];
-            match self.ctx.target.translate_guest_physical(state, gpa) {
-                Some(EptTranslation::Mapped(mapping)) => {
-                    let bit = |allowed: bool, letter: char| if allowed { letter } else { '-' };
-                    row.extend([
-                        format!("{:x}", mapping.host_physical),
-                        [
-                            bit(mapping.read, 'r'),
-                            bit(mapping.write, 'w'),
-                            bit(mapping.execute, 'x'),
-                        ]
-                        .iter()
-                        .collect(),
-                        mapping
-                            .user_execute
-                            .map_or_else(String::new, |allowed| bit(allowed, 'x').to_string()),
-                        match mapping.page_size {
-                            0x1000 => "4K".to_string(),
-                            0x20_0000 => "2M".to_string(),
-                            _ => "1G".to_string(),
-                        },
-                        memory_type_name(mapping.memory_type).to_string(),
-                    ]);
-                }
-                Some(EptTranslation::NotPresent { level }) => {
-                    row.push(format!("not mapped (no level-{level} entry)"));
-                }
-                None => row.push("unreadable EPT".to_string()),
-            }
-            table.push_record(row);
-        }
-        print_padded_table(table);
-        Ok(())
-    }
-
-    fn cmd_hveptdiff(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if invocation.argv.len() > 2 {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        let Some(values) = self.eval_all(&invocation.argv) else {
-            return Ok(());
-        };
-        let Some(SelectedVp {
-            partition: id, vp, ..
-        }) = self.hypervisor_vp(values.first().copied(), values.get(1).copied(), false)
-        else {
-            return Ok(());
-        };
-        outln!(
-            "{}",
-            ui::muted(&format!("VP {} of partition {id:#x}", vp.index))
-        );
-        let states: Vec<_> = [0, 1]
-            .iter()
-            .map(|level| {
-                vp.vtls
-                    .iter()
-                    .find(|vtl| vtl.level == *level)
-                    .and_then(|vtl| vtl.state)
-            })
-            .collect();
-        let (Some(vtl0), Some(vtl1)) = (states[0], states[1]) else {
-            error!(
-                "VP {} of partition {id:#x} has no eVMCS state for both VTL0 and VTL1",
-                vp.index
-            );
-            return Ok(());
-        };
-        let mut mappings = Vec::new();
-        for (level, state) in [(0, &vtl0), (1, &vtl1)] {
-            let Some(leaves) = self.ctx.target.guest_physical_mappings(state) else {
-                error!("VTL{level}'s EPT is unreadable or not a 4-level walk");
-                return Ok(());
-            };
-            let bytes: u64 = leaves.iter().map(|leaf| leaf.size).sum();
-            outln!(
-                "{} EPT {:x}: {} mappings, {}",
-                ui::muted(&format!("VTL{level}")),
-                state.ept_pointer,
-                leaves.len(),
-                size_text(bytes)
-            );
-            mappings.push(leaves);
-        }
-        let differences = ept::differences(&mappings[0], &mappings[1]);
-        // How the VTLs differ, largest first, before the ranges themselves.
-        let mut kinds: Vec<(DifferenceKind, usize, u64)> = Vec::new();
-        for difference in &differences {
-            let kind = (difference.first, difference.second);
-            match kinds.iter_mut().find(|(seen, _, _)| *seen == kind) {
-                Some((_, ranges, bytes)) => {
-                    *ranges += 1;
-                    *bytes += difference.end - difference.start;
-                }
-                None => kinds.push((kind, 1, difference.end - difference.start)),
-            }
-        }
-        kinds.sort_by_key(|&(_, _, bytes)| std::cmp::Reverse(bytes));
-        let mut summary = Builder::default();
-        summary.push_record(["VTL0", "VTL1", "Ranges", "Size"]);
-        for ((first, second), ranges, bytes) in &kinds {
-            summary.push_record([
-                access_text(*first),
-                access_text(*second),
-                ranges.to_string(),
-                size_text(*bytes),
-            ]);
-        }
-        outln!();
-        print_padded_table(summary);
-        let mut table = Builder::default();
-        table.push_record(["Start", "End", "Size", "VTL0", "VTL1"]);
-        for difference in &differences {
-            table.push_record([
-                format!("{:x}", difference.start),
-                format!("{:x}", difference.end - 1),
-                size_text(difference.end - difference.start),
-                access_text(difference.first),
-                access_text(difference.second),
-            ]);
-        }
-        let total: u64 = differences.iter().map(|d| d.end - d.start).sum();
-        print_padded_table(table);
-        outln!(
-            "{} ranges differ, {} in all\n",
-            differences.len(),
-            size_text(total)
-        );
-        Ok(())
-    }
-
-    fn cmd_hvcalls(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let all = match invocation.argv.as_slice() {
-            [] => false,
-            [flag] if matches!(flag.as_ref(), "-a" | "/a") => true,
-            _ => {
-                outln!("{}\n", command_help(invocation.name));
-                return Ok(());
-            }
-        };
-        let (base, table) = match self.ctx.target.hypercalls() {
-            Ok(found) => found,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        let unassigned = table[0].handler;
-        let mut table_out = Builder::default();
-        table_out.push_record([
-            "Code", "Name", "Kind", "Input", "Rep in", "Output", "Rep out", "Handler",
-        ]);
-        let mut implemented = 0;
-        for (code, entry) in table.iter().enumerate() {
-            let assigned = entry.handler != unassigned || code == 0;
-            implemented += usize::from(entry.handler != unassigned);
-            if !assigned && !all {
-                continue;
-            }
-            let name = tlfs_hypercall(code as u16).map_or("", |(name, _)| name);
-            let mut kind = if entry.rep() { "rep" } else { "simple" }.to_string();
-            if entry.variable_header() {
-                kind.push_str("+var");
-            }
-            let size = |bytes: u16| {
-                if bytes == 0 {
-                    String::new()
-                } else {
-                    format!("{bytes:#x}")
-                }
-            };
-            table_out.push_record([
-                format!("{code:#06x}"),
-                name.to_string(),
-                kind,
-                size(entry.input),
-                size(entry.input_element),
-                size(entry.output),
-                size(entry.output_element),
-                format!("hv+{:#x}", entry.handler - base),
-            ]);
-        }
-        print_padded_table(table_out);
-        outln!(
-            "{implemented} of {} codes implemented; code 0's handler serves the rest\n",
-            table.len()
-        );
-        Ok(())
-    }
-
-    fn cmd_hvcall(&mut self) -> Result<()> {
-        if let Err(error) = self
-            .ctx
-            .backend
-            .set_current_thread(&self.ctx.current_thread)
-        {
-            error!("failed to select execution context: {error}");
-            return Ok(());
-        }
-        let regs = match self.ctx.read_registers() {
-            Ok(regs) => regs,
-            Err(error) => {
-                error!("failed to read registers: {error}");
-                return Ok(());
-            }
-        };
-        let target = &self.ctx.target;
-        let map = &self.ctx.register_map;
-        let (Ok(cr3), Ok(rip)) = (
-            map.read_u64(target.arch().dtb_register(), &regs),
-            map.read_u64("rip", &regs),
-        ) else {
-            error!("the vCPU's CR3 and RIP are unavailable");
-            return Ok(());
-        };
-        if !halted_in_windows_hypervisor(target, cr3, rip) {
-            error!(
-                "{} is not halted in the Windows hypervisor; !hvcall decodes the hypercall a VP made at a stop there, such as on a hypercall handler (ba e1 hv!HvCallFlushVirtualAddressList)",
-                ui::thread_id(&self.ctx.current_thread)
-            );
-            return Ok(());
-        }
-        let processor = processor_index_from_backend_thread_id(&self.ctx.current_thread);
-        let Some(caller) = processor.and_then(|number| target.hypercall_caller(cr3, rip, number))
-        else {
-            if target.evmcs_found() == Some(false) {
-                error!(
-                    "no Enlightened VMCS in guest RAM: the VM must expose hv-evmcs (libvirt <evmcs state=\"on\"/>) for the Windows hypervisor to use one"
-                );
-            } else {
-                error!(
-                    "the caller is unknown: the hypervisor's partitions cannot be walked, or the processor serves no guest partition's VP and no saved state of its root partition VP is current"
-                );
-            }
-            return Ok(());
-        };
-        match hypercall_report(&caller) {
-            Ok(lines) => {
-                for line in lines {
-                    outln!("{line}");
-                }
-                outln!();
-            }
-            Err(reason) => error!("{reason}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_hvvmcs(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let view = match invocation.arg(0) {
-            Some("-msr" | "/msr") => "msr",
-            Some("-io" | "/io") => "io",
-            _ => "fields",
-        };
-        let arguments = &invocation.argv[usize::from(view != "fields")..];
-        if arguments.len() > 3 {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        let Some(values) = self.eval_all(arguments) else {
-            return Ok(());
-        };
-        let Some(SelectedVp {
-            partition: id, vp, ..
-        }) = self.hypervisor_vp(values.first().copied(), values.get(1).copied(), false)
-        else {
-            return Ok(());
-        };
-        let level = values.get(2).map_or(vp.vtl, |&level| level as u8);
-        let Some(page) = vp
-            .vtls
-            .iter()
-            .find(|vtl| vtl.level == level)
-            .and_then(|vtl| vtl.vmcs)
-        else {
-            error!(
-                "VP {} of partition {id:#x} has no eVMCS for VTL{level}",
-                vp.index
-            );
-            return Ok(());
-        };
-        let mut vmcs = vec![0u8; 0x400];
-        if let Err(error) = self.ctx.target.read_physical(page, &mut vmcs) {
-            error!("{error}");
-            return Ok(());
-        }
-        outln!(
-            "{} {page:x}\n",
-            ui::muted(&format!(
-                "VP {} of partition {id:#x}, VTL{level}: eVMCS",
-                vp.index
-            ))
-        );
-        match view {
-            "msr" => self.print_msr_intercepts(&vmcs),
-            "io" => self.print_io_intercepts(&vmcs),
-            _ => {
-                let mut table = Builder::default();
-                table.push_record(["Field", "Offset", "Value"]);
-                for (name, offset, size, value) in evmcs_fields::field_values(&vmcs) {
-                    table.push_record([
-                        name.to_string(),
-                        format!("{offset:#05x}"),
-                        format!("{value:0width$x}", width = usize::from(size) * 2),
-                    ]);
-                }
-                print_padded_table(table);
-            }
-        }
-        Ok(())
-    }
-
     /// The MSRs the eVMCS `vmcs` intercepts: through its MSR bitmap when the
     /// primary controls use one (bit 28), else every MSR.
     fn print_msr_intercepts(&mut self, vmcs: &[u8]) {
@@ -1374,7 +553,7 @@ impl ReplState<'_> {
         let mut table = Builder::default();
         table.push_record(["Access", "First MSR", "Last MSR", "Names"]);
         for (access, ranges) in [("read", &read), ("write", &write)] {
-            for &(first, last) in ranges {
+            for &MsrRange { first, last } in ranges {
                 let names = evmcs_fields::msr_names(first, last);
                 let shown = names.iter().take(4).copied().collect::<Vec<_>>().join(" ");
                 table.push_record([
@@ -1428,7 +607,7 @@ impl ReplState<'_> {
         let ports = match evmcs_fields::io_intercepts(vmcs, |address, page| {
             target.read_physical(address, page)
         }) {
-            Ok(IoIntercepts::None) => {
+            Ok(IoIntercepts::Never) => {
                 outln!("no I/O instruction exits: the controls use no I/O bitmaps\n");
                 return;
             }
@@ -1444,159 +623,10 @@ impl ReplState<'_> {
         };
         let mut table = Builder::default();
         table.push_record(["First port", "Last port"]);
-        for (first, last) in ports {
+        for PortRange { first, last } in ports {
             table.push_record([format!("{first:#x}"), format!("{last:#x}")]);
         }
         print_padded_table(table);
-    }
-
-    fn cmd_hvd(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let mut physical = false;
-        let (mut mode, mut item) = (MemoryDisplayMode::bytes(), 1);
-        let mut arguments = invocation.argv.as_slice();
-        while let Some(flag) = arguments.first().filter(|text| text.starts_with('-')) {
-            match flag.as_ref() {
-                "-p" => physical = true,
-                "-b" => (mode, item) = (MemoryDisplayMode::bytes(), 1),
-                "-d" => (mode, item) = (MemoryDisplayMode::dwords(), 4),
-                "-q" => (mode, item) = (MemoryDisplayMode::qwords(), 8),
-                _ => break,
-            }
-            arguments = &arguments[1..];
-        }
-        // `<partition-id> <vp-index> <address> [range]`, or `<address>
-        // [range]` for the guest VP the current vCPU's processor runs.
-        if !(1..=4).contains(&arguments.len()) {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        let (selector, arguments) = arguments.split_at(if arguments.len() >= 3 { 2 } else { 0 });
-        let Some(selector) = self.eval_all(selector) else {
-            return Ok(());
-        };
-        let Some(address) = self.eval_or_report(&arguments[0]) else {
-            return Ok(());
-        };
-        let start = VirtAddr(address.0);
-        let range = match arguments.get(1) {
-            Some(text) => eval_range(text, &self.ctx.target, self.radix, start, item),
-            None => eval_range("L80", &self.ctx.target, NumberRadix::Hexadecimal, start, 1),
-        };
-        let range = match range {
-            Ok(range) if range.len() <= MAX_DISPLAY_BYTES => range,
-            Ok(_) => {
-                error!("display range exceeds the maximum of {MAX_DISPLAY_BYTES:#x} bytes");
-                return Ok(());
-            }
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        let Some(state) = self.guest_memory_state("!hvd", &selector, physical) else {
-            return Ok(());
-        };
-        // Page by page, so an unmapped page does not hide the rest.
-        let mut data = vec![0u8; range.len()];
-        let mut valid = vec![false; range.len()];
-        let mut offset = 0;
-        while offset < data.len() {
-            let address = range.start.0 + offset as u64;
-            let chunk = ((0x1000 - (address & 0xfff)) as usize).min(data.len() - offset);
-            let target = &mut data[offset..offset + chunk];
-            if self
-                .ctx
-                .target
-                .read_guest_partition(&state, !physical, address, target)
-                .is_ok()
-            {
-                valid[offset..offset + chunk].fill(true);
-            }
-            offset += chunk;
-        }
-        let print_text = || display_memory_with_validity(range.start, &data, Some(&valid), &mode);
-        #[cfg(feature = "cli")]
-        native::render(
-            || native::memory::dump(range.start, &data, Some(&valid), &mode),
-            print_text,
-        );
-        #[cfg(not(feature = "cli"))]
-        print_text();
-        Ok(())
-    }
-
-    fn cmd_hvu(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        const DEFAULT_INSTRUCTIONS: usize = 8;
-        let mut arguments = invocation.argv.as_slice();
-        let physical = arguments.first().is_some_and(|flag| flag == "-p");
-        if physical {
-            arguments = &arguments[1..];
-        }
-        // As for !hvd: `<partition-id> <vp-index> <address> [range]`, or
-        // `<address> [range]` for the guest VP the current vCPU's processor
-        // runs.
-        if !(1..=4).contains(&arguments.len()) {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        let (selector, arguments) = arguments.split_at(if arguments.len() >= 3 { 2 } else { 0 });
-        let Some(selector) = self.eval_all(selector) else {
-            return Ok(());
-        };
-        let Some(address) = self.eval_or_report(&arguments[0]) else {
-            return Ok(());
-        };
-        // As for u: `L<count>` counts instructions; an end address or a
-        // length lists every instruction that starts before the range ends.
-        let extent = match arguments.get(1) {
-            None => CodeExtent::Count(DEFAULT_INSTRUCTIONS),
-            Some(text) => match windbg_count_expression(text) {
-                Some(count) => match self.eval_or_report(count) {
-                    Some(count) if (1..=MAX_DISASSEMBLY_INSTRUCTIONS as u64).contains(&count.0) => {
-                        CodeExtent::Count(count.0 as usize)
-                    }
-                    Some(_) => {
-                        error!("instruction count must be 1..{MAX_DISASSEMBLY_INSTRUCTIONS}");
-                        return Ok(());
-                    }
-                    None => return Ok(()),
-                },
-                None => match eval_range(text, &self.ctx.target, self.radix, address, 1) {
-                    Ok(range) if range.len() <= MAX_DISPLAY_BYTES => {
-                        CodeExtent::Before(range.end.0)
-                    }
-                    Ok(_) => {
-                        error!("range exceeds the maximum of {MAX_DISPLAY_BYTES:#x} bytes");
-                        return Ok(());
-                    }
-                    Err(error) => {
-                        error!("{error}");
-                        return Ok(());
-                    }
-                },
-            },
-        };
-        let Some(state) = self.guest_memory_state("!hvu", &selector, physical) else {
-            return Ok(());
-        };
-        let code = match self
-            .ctx
-            .target
-            .disassemble_guest_partition(&state, !physical, address.0, extent)
-        {
-            Ok(code) => code,
-            Err(error) => {
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        render_rows(&code.rows, |_| None);
-        if let Some(at) = code.unreadable {
-            let space = if physical { "physical" } else { "virtual" };
-            error!("guest {space} memory at {at:#x} is unreadable");
-        }
-        outln!();
-        Ok(())
     }
 
     /// The saved state of the VTL that a guest partition's VP runs in, for
@@ -1617,7 +647,13 @@ impl ReplState<'_> {
         } = self.hypervisor_vp(selector.first().copied(), selector.get(1).copied(), false)?;
         if root && selector.is_empty() {
             error!(
-                "{command} reads a guest partition's memory, and the current vCPU's processor runs none; name one: {command} <partition-id> <vp-index> <address>"
+                "{}",
+                usage_error(
+                    command,
+                    format!(
+                        "{command} reads a guest partition's memory, and the current vCPU's processor runs none; name one"
+                    ),
+                )
             );
             return None;
         }
@@ -1646,10 +682,10 @@ impl ReplState<'_> {
 
     /// Each of `arguments` evaluated, or `None` after reporting the first
     /// that does not evaluate.
-    fn eval_all(&mut self, arguments: &[std::borrow::Cow<'_, str>]) -> Option<Vec<u64>> {
+    fn eval_all(&mut self, arguments: &[impl AsRef<str>]) -> Option<Vec<u64>> {
         arguments
             .iter()
-            .map(|text| self.eval_or_report(text).map(|value| value.0))
+            .map(|text| self.eval_or_report(text.as_ref()).map(|value| value.0))
             .collect()
     }
 
@@ -1703,113 +739,1169 @@ impl ReplState<'_> {
             vp,
         })
     }
+}
 
-    fn cmd_partition(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if invocation.argv.len() > 1 {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        if invocation.argv.is_empty() {
-            match self.ctx.partition() {
-                Some(partition) => outln!(
-                    "inspecting partition {partition:#x}; .partition with the root partition's ID returns to the target\n"
-                ),
-                None => outln!("inspecting the target (the root partition)\n"),
-            }
-            return Ok(());
-        }
-        let Some(arguments) = self.eval_all(&invocation.argv) else {
-            return Ok(());
-        };
-        let result = self.ctx.enter_partition(arguments[0]);
-        self.caches
-            .refresh_partition(self.ctx.partition(), &self.ctx.target);
-        match result {
-            Ok(()) => match self.ctx.partition() {
-                Some(partition) => {
-                    let kernel = self
-                        .ctx
-                        .target
-                        .kernel_base()
-                        .map_or_else(|| "?".to_string(), |base| format!("{:#x}", base.0));
-                    let vps = self.ctx.backend.thread_list().unwrap_or_default();
-                    outln!(
-                        "inspecting partition {partition:#x}: nt at {kernel}, VPs {}\n",
-                        vps.join(" ")
-                    );
-                }
-                None => outln!("inspecting the target (the root partition)\n"),
-            },
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
+/// Every word of the line, for a hypervisor command whose grammar its
+/// body reads (optional leading flags, then a variable number of values).
+#[grammar(operation)]
+fn all_words(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Vec<String>, ArgError> {
+    let mut words = Vec::with_capacity(cursor.remaining());
+    while let Some(word) = cursor.word() {
+        words.push(word.into_owned());
     }
+    Ok(words)
+}
 
-    fn cmd_hvr(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if !matches!(invocation.argv.len(), 0 | 2 | 3) {
-            outln!("{}\n", command_help(invocation.name));
+/// Select NT (VTL0) or secure-kernel (VTL1) memory inspection, or show which
+/// one is active.
+///
+/// VTL1 requires AMD64 direct host memory. `.vtl 1` changes the scope of reads
+/// and symbols, but does not change the VTL of the CPU. With no argument,
+/// `.vtl` shows the current scope. `.vtl 0` goes back to the NT kernel. After
+/// `.vtl 1`, it returns to the view the stop selected, which at a stop in the
+/// Windows hypervisor is where NT left off; otherwise, at a stop in VTL1 or in
+/// the Windows hypervisor, it selects the address space of the vCPU, where you
+/// use `.vtlcxr` or `.thread` to select NT. `.vtl 1` selects the system address
+/// space of the secure kernel, and `.vtl 1 <pid>` selects the address space of
+/// a trustlet by its NT PID, which is always decimal. The VTL1 scope is a
+/// read-only memory view. Registers, stepping, software breakpoints, writes,
+/// and NT-specific extensions need .vtl 0. To stop in VTL1, set a hardware
+/// execute breakpoint there (`ba e1 securekernel!<function>`, GDB backends),
+/// and then resume with a plain `g`, which first goes back to the live context.
+/// A vCPU stopped in VTL1 shows its real registers, stack, and memory. With no
+/// argument, `.vtl` also shows whether reads follow such a live stop or the
+/// manual view.
+#[command(
+    names = [".vtl"],
+    category = "processes and modules",
+    kind = Action,
+    target = Machine,
+    python = none,
+)]
+fn vtl(
+    repl: &mut ReplState<'_>,
+    #[arg(parse = all_words, usage = "[0|1 [pid]]", complete = None)] argv: Vec<String>,
+) -> Result<()> {
+    if let Err(error) = repl.select_vtl(&argv) {
+        error!("{error}");
+    }
+    Ok(())
+}
+
+/// List the validated VTL1 processes with their NT identities and address-space
+/// roots.
+///
+/// Reads SkpsProcessList through the page tables of the secure kernel. Each row
+/// shows the secure-kernel process object, the NT PID and image name, the
+/// trustlet ID, and the address-space root. If the internal layout is not
+/// supported, the command gives an error and does not guess offsets. The
+/// command does not change the scope.
+#[command(
+    names = ["!trustlets"],
+    category = "processes and modules",
+    kind = Query,
+    target = Machine,
+    python = none,
+)]
+fn trustlets(repl: &mut ReplState<'_>) -> Result<()> {
+    let processes = match repl.ctx.target.trustlets() {
+        Ok(processes) => processes,
+        Err(error) => {
+            error!("{error}");
             return Ok(());
         }
-        let Some(arguments) = self.eval_all(&invocation.argv) else {
+    };
+    let mut table = Builder::default();
+    table.push_record(["SK process", "NT PID", "Image", "Trustlet ID", "DTB"]);
+    for process in processes {
+        table.push_record([
+            ui::addr(process.process.0),
+            process.pid.to_string(),
+            process.name,
+            process.trustlet_id.to_string(),
+            ui::addr(process.dtb),
+        ]);
+    }
+    print_padded_table(table);
+    Ok(())
+}
+
+/// Show the partitions of the Windows hypervisor as a tree, with their virtual
+/// processors.
+///
+/// Walks the hypervisor's partition objects from its processor blocks, which
+/// come from the eVMCS pages (the VM's hv-evmcs enlightenment) or from a vCPU
+/// stopped in the hypervisor. Each child partition is below its parent, with
+/// its partition ID and object, and below each partition are its privilege mask
+/// (HV_PARTITION_PRIVILEGE_MASK) with the TLFS names, then each VP: the
+/// processor whose current VP it is, the VTL it runs or last ran in (the other
+/// enabled VTLs after it), the guest RIP where that VTL left off, named from
+/// symbols for the root partition's VPs, and why it last left for the
+/// hypervisor. !hvvps shows each VTL of a partition's VPs in full. hvix64 has
+/// no public symbols, so the offsets are read off the hypervisor's own code and
+/// each object is validated before it is shown; if the layout is not
+/// recognized, the command gives an error and does not guess offsets. Intel
+/// hosts only.
+#[command(
+    names = ["!hvpartitions"],
+    category = "processes and modules",
+    kind = Query,
+    target = Machine,
+    python = none,
+)]
+fn hvpartitions(repl: &mut ReplState<'_>) -> Result<()> {
+    let partitions = match repl.ctx.target.hypervisor_partitions() {
+        Ok(partitions) => partitions,
+        Err(error) => {
+            error!("{error}");
             return Ok(());
-        };
-        let Some(SelectedVp { partition, vp, .. }) =
-            self.hypervisor_vp(arguments.first().copied(), arguments.get(1).copied(), false)
-        else {
+        }
+    };
+    // Each partition under its parent, once: the root, then any whose
+    // parent the walk did not find (or whose parents loop).
+    let mut seen = HashSet::new();
+    let mut forest = Vec::new();
+    for partition in &partitions {
+        let orphan = partition
+            .parent
+            .is_none_or(|parent| !partitions.iter().any(|p| p.id == parent));
+        if orphan && !seen.contains(&partition.id) {
+            forest.push(repl.partition_node(partition, &partitions, &mut seen));
+        }
+    }
+    for partition in &partitions {
+        if !seen.contains(&partition.id) {
+            forest.push(repl.partition_node(partition, &partitions, &mut seen));
+        }
+    }
+    let print = || {
+        for node in &forest {
+            outln!("{}", partition_tree(node, 0));
+        }
+        outln!();
+    };
+    #[cfg(feature = "cli")]
+    native::render(|| native::trees::partitions(&forest), print);
+    #[cfg(not(feature = "cli"))]
+    print();
+    Ok(())
+}
+
+/// List the virtual processors of a Windows hypervisor partition (the root by
+/// default).
+///
+/// Each row is one VTL enabled on a VP, and * marks the VTL the VP runs or last
+/// ran in. CPU is the processor whose current VP it is (the one that runs it,
+/// or ran it last), by number, or by processor block on builds before
+/// 10.0.19041, which keep no number there. The row shows the hypervisor's
+/// context object for the VTL and, when found, the physical address of the
+/// VTL's eVMCS with the EPT pointer (the root of the VTL's second-level address
+/// translation), the guest RIP where the VTL left off, and why it last left for
+/// the hypervisor. The eVMCS columns need the VM's hv-evmcs enlightenment. The
+/// partition ID uses the current radix. See !hvpartitions for where the objects
+/// come from.
+#[command(
+    names = ["!hvvps"],
+    category = "processes and modules",
+    kind = Query,
+    target = Machine,
+    python = none,
+)]
+fn hvvps(
+    repl: &mut ReplState<'_>,
+    #[arg(invoked)] name: &str,
+    #[arg(parse = all_words, usage = "[partition-id]", complete = None)] argv: Vec<String>,
+) -> Result<()> {
+    if argv.len() > 1 {
+        outln!("{}\n", command_help(name));
+        return Ok(());
+    }
+    let id = match argv.first().map(String::as_str) {
+        Some(text) => match repl.eval_or_report(text) {
+            Some(value) => Some(value.0),
+            None => return Ok(()),
+        },
+        None => None,
+    };
+    let partitions = match repl.ctx.target.hypervisor_partitions() {
+        Ok(partitions) => partitions,
+        Err(error) => {
+            error!("{error}");
             return Ok(());
-        };
-        let vtl = match arguments.get(2).map(|vtl| u8::try_from(*vtl)) {
-            None => None,
-            Some(Ok(vtl)) => Some(vtl),
-            Some(Err(_)) => {
-                error!("VTL {:#x} is out of range", arguments[2]);
+        }
+    };
+    let partition = match id {
+        Some(id) => partitions.into_iter().find(|p| p.id == id),
+        None => partitions.into_iter().next(),
+    };
+    let Some(partition) = partition else {
+        error!("no partition with ID {:#x}", id.unwrap_or_default());
+        return Ok(());
+    };
+    let mut table = Builder::default();
+    table.push_record([
+        "VP",
+        "Address",
+        "CPU",
+        "VTL",
+        "Context",
+        "eVMCS",
+        "EPT pointer",
+        "Guest RIP",
+        "Last exit",
+    ]);
+    for vp in &partition.virtual_processors {
+        for (row, vtl) in vp.vtls.iter().enumerate() {
+            let current = if vtl.level == vp.vtl { "*" } else { "" };
+            let state = vtl.state.as_ref();
+            table.push_record([
+                if row == 0 {
+                    vp.index.to_string()
+                } else {
+                    String::new()
+                },
+                if row == 0 {
+                    ui::addr(vp.address)
+                } else {
+                    String::new()
+                },
+                if row == 0 {
+                    processors_text(&vp.processors)
+                } else {
+                    String::new()
+                },
+                format!("{}{current}", vtl.level),
+                ui::addr(vtl.context),
+                vtl.vmcs
+                    .map_or_else(String::new, |page| format!("{page:x}")),
+                state.map_or_else(String::new, |state| format!("{:x}", state.ept_pointer)),
+                state.map_or_else(String::new, |state| ui::addr(state.rip)),
+                state
+                    .and_then(|state| state.exit_reason_name())
+                    .unwrap_or_default()
+                    .to_string(),
+            ]);
+        }
+    }
+    print_padded_table(table);
+    // A partition with no VPs yet links nothing either way.
+    let mut vtls = partition
+        .virtual_processors
+        .iter()
+        .flat_map(|vp| &vp.vtls)
+        .peekable();
+    let unlinked = vtls.peek().is_some() && vtls.all(|vtl| vtl.vmcs.is_none());
+    if unlinked && repl.ctx.target.evmcs_found() == Some(true) {
+        outln!(
+            "{}\n",
+            ui::muted(
+                "eVMCS pages were found, but not where this hypervisor build's VTL contexts keep theirs"
+            )
+        );
+    }
+    Ok(())
+}
+
+/// Translate a guest physical address through each VTL's EPT (second-level
+/// address translation) of a Windows hypervisor VP.
+///
+/// Walks the extended page tables that each enabled VTL's eVMCS names, by
+/// default for the VP the current vCPU's processor runs (with -v the root
+/// partition's), or the root partition's VP 0. The address is guest physical,
+/// or with -v virtual in the current address space (the .process or VTL1
+/// scope), which the command translates through the guest's page tables first;
+/// that space is the root partition's, so -v takes only a root partition VP.
+/// Each row shows the VTL, its EPT pointer, the host physical address, the
+/// access that every level of the walk allows (r, w, and x, where x is
+/// supervisor-mode execute when the VTL uses mode-based execute control),
+/// user-mode execute under that control, the page size, and the memory type, or
+/// the level where the walk found no entry. This is how memory integrity (HVCI)
+/// and the secure kernel set page permissions that NT cannot change. The
+/// address and IDs use the current radix. Needs the VM's hv-evmcs
+/// enlightenment. See !hvpartitions for where the objects come from.
+#[command(
+    names = ["!hvept"],
+    category = "processes and modules",
+    kind = Query,
+    target = Machine,
+    python = none,
+)]
+fn hvept(
+    repl: &mut ReplState<'_>,
+    #[arg(invoked)] name: &str,
+    #[arg(parse = all_words, usage = "[-v] <address> [partition-id [vp-index]]", complete = None)]
+    argv: Vec<String>,
+) -> Result<()> {
+    let virtual_address = matches!(argv.first().map(String::as_str), Some("-v" | "/v"));
+    let arguments = &argv[usize::from(virtual_address)..];
+    if arguments.is_empty() || arguments.len() > 3 {
+        outln!("{}\n", command_help(name));
+        return Ok(());
+    }
+    let Some(values) = repl.eval_all(arguments) else {
+        return Ok(());
+    };
+    let Some(SelectedVp {
+        partition: id,
+        root,
+        vp,
+    }) = repl.hypervisor_vp(
+        values.get(1).copied(),
+        values.get(2).copied(),
+        virtual_address,
+    )
+    else {
+        return Ok(());
+    };
+    // -v translates through NT's page tables, which are the root
+    // partition's; a guest's addresses mean nothing there.
+    if virtual_address && !root {
+        error!(
+            "-v translates through the root partition's address space; read a guest partition's virtual memory with !hvd"
+        );
+        return Ok(());
+    }
+    outln!(
+        "{}",
+        ui::muted(&format!("VP {} of partition {id:#x}", vp.index))
+    );
+    let gpa = if virtual_address {
+        match repl.ctx.target.virt_to_phys(None, VirtAddr(values[0])) {
+            Ok(Some(gpa)) => {
+                outln!(
+                    "{} {} {} {:x}",
+                    ui::muted("virtual"),
+                    ui::addr(values[0]),
+                    ui::muted("-> guest physical"),
+                    gpa
+                );
+                gpa
+            }
+            Ok(None) => {
+                error!(
+                    "{} is not mapped in the current address space",
+                    ui::addr(values[0])
+                );
                 return Ok(());
             }
-        };
-        match self.ctx.vp_registers(partition, vp.index, vtl) {
-            Ok(found) => {
-                outln!(
-                    "partition {partition:#x} VP {} VTL{}  {}",
-                    vp.index,
-                    vtl.unwrap_or(vp.vtl),
-                    ui::muted(&format!("from {}", found.source))
-                );
-                if let Some(missing) = &found.missing {
-                    outln!(
-                        "{}",
-                        ui::muted(&format!("no general-purpose registers: {missing}"))
-                    );
-                }
-                print_vp_registers(&found.registers);
-                outln!();
-            }
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_trustlets(&mut self) -> Result<()> {
-        let processes = match self.ctx.target.trustlets() {
-            Ok(processes) => processes,
             Err(error) => {
                 error!("{error}");
                 return Ok(());
             }
-        };
-        let mut table = Builder::default();
-        table.push_record(["SK process", "NT PID", "Image", "Trustlet ID", "DTB"]);
-        for process in processes {
-            table.push_record([
-                ui::addr(process.process.0),
-                process.pid.to_string(),
-                process.name,
-                process.trustlet_id.to_string(),
-                ui::addr(process.dtb),
-            ]);
         }
-        print_padded_table(table);
-        Ok(())
+    } else {
+        values[0]
+    };
+    let mut table = Builder::default();
+    table.push_record([
+        "VTL",
+        "EPT pointer",
+        "Host physical",
+        "Access",
+        "User exec",
+        "Page",
+        "Type",
+    ]);
+    for vtl in &vp.vtls {
+        let Some(state) = &vtl.state else {
+            table.push_record([vtl.level.to_string(), "no eVMCS state".to_string()]);
+            continue;
+        };
+        let mut row = vec![vtl.level.to_string(), format!("{:x}", state.ept_pointer)];
+        match repl.ctx.target.translate_guest_physical(state, gpa) {
+            Some(EptTranslation::Mapped(mapping)) => {
+                let bit = |allowed: bool, letter: char| if allowed { letter } else { '-' };
+                row.extend([
+                    format!("{:x}", mapping.host_physical),
+                    [
+                        bit(mapping.read, 'r'),
+                        bit(mapping.write, 'w'),
+                        bit(mapping.execute, 'x'),
+                    ]
+                    .iter()
+                    .collect(),
+                    mapping
+                        .user_execute
+                        .map_or_else(String::new, |allowed| bit(allowed, 'x').to_string()),
+                    match mapping.page_size {
+                        0x1000 => "4K".to_string(),
+                        0x20_0000 => "2M".to_string(),
+                        _ => "1G".to_string(),
+                    },
+                    memory_type_name(mapping.memory_type).to_string(),
+                ]);
+            }
+            Some(EptTranslation::NotPresent { level }) => {
+                row.push(format!("not mapped (no level-{level} entry)"));
+            }
+            None => row.push("unreadable EPT".to_string()),
+        }
+        table.push_record(row);
     }
+    print_padded_table(table);
+    Ok(())
+}
+
+/// List the guest physical ranges that VTL0's and VTL1's EPTs of a Windows
+/// hypervisor VP map differently.
+///
+/// Walks the whole EPT of VTL0 and of VTL1 of a VP, by default the one the
+/// current vCPU's processor runs (a guest partition's first), else the root
+/// partition's VP 0, and lists each range of guest physical memory that the two
+/// map with different access, or that only one of them maps, with the access in
+/// each (r, w, x, and u for user-mode execute under mode-based execute
+/// control). Adjacent ranges that differ the same way are merged. These are the
+/// pages that the secure kernel and memory integrity (HVCI) protect from NT.
+/// The IDs use the current radix. Needs VBS and the VM's hv-evmcs
+/// enlightenment.
+#[command(
+    names = ["!hveptdiff"],
+    category = "processes and modules",
+    kind = Query,
+    target = Machine,
+    python = none,
+)]
+fn hveptdiff(
+    repl: &mut ReplState<'_>,
+    #[arg(invoked)] name: &str,
+    #[arg(parse = all_words, usage = "[partition-id [vp-index]]", complete = None)] argv: Vec<
+        String,
+    >,
+) -> Result<()> {
+    if argv.len() > 2 {
+        outln!("{}\n", command_help(name));
+        return Ok(());
+    }
+    let Some(values) = repl.eval_all(&argv) else {
+        return Ok(());
+    };
+    let Some(SelectedVp {
+        partition: id, vp, ..
+    }) = repl.hypervisor_vp(values.first().copied(), values.get(1).copied(), false)
+    else {
+        return Ok(());
+    };
+    outln!(
+        "{}",
+        ui::muted(&format!("VP {} of partition {id:#x}", vp.index))
+    );
+    let states: Vec<_> = [0, 1]
+        .iter()
+        .map(|level| {
+            vp.vtls
+                .iter()
+                .find(|vtl| vtl.level == *level)
+                .and_then(|vtl| vtl.state)
+        })
+        .collect();
+    let (Some(vtl0), Some(vtl1)) = (states[0], states[1]) else {
+        error!(
+            "VP {} of partition {id:#x} has no eVMCS state for both VTL0 and VTL1",
+            vp.index
+        );
+        return Ok(());
+    };
+    let mut mappings = Vec::new();
+    for (level, state) in [(0, &vtl0), (1, &vtl1)] {
+        let Some(leaves) = repl.ctx.target.guest_physical_mappings(state) else {
+            error!("VTL{level}'s EPT is unreadable or not a 4-level walk");
+            return Ok(());
+        };
+        let bytes: u64 = leaves.iter().map(|leaf| leaf.size).sum();
+        outln!(
+            "{} EPT {:x}: {} mappings, {}",
+            ui::muted(&format!("VTL{level}")),
+            state.ept_pointer,
+            leaves.len(),
+            size_text(bytes)
+        );
+        mappings.push(leaves);
+    }
+    let differences = ept::differences(&mappings[0], &mappings[1]);
+    // How the VTLs differ, largest first, before the ranges themselves.
+    let mut kinds: Vec<(DifferenceKind, usize, u64)> = Vec::new();
+    for difference in &differences {
+        let kind = (difference.first, difference.second);
+        match kinds.iter_mut().find(|(seen, _, _)| *seen == kind) {
+            Some((_, ranges, bytes)) => {
+                *ranges += 1;
+                *bytes += difference.end - difference.start;
+            }
+            None => kinds.push((kind, 1, difference.end - difference.start)),
+        }
+    }
+    kinds.sort_by_key(|&(_, _, bytes)| std::cmp::Reverse(bytes));
+    let mut summary = Builder::default();
+    summary.push_record(["VTL0", "VTL1", "Ranges", "Size"]);
+    for ((first, second), ranges, bytes) in &kinds {
+        summary.push_record([
+            access_text(*first),
+            access_text(*second),
+            ranges.to_string(),
+            size_text(*bytes),
+        ]);
+    }
+    outln!();
+    print_padded_table(summary);
+    let mut table = Builder::default();
+    table.push_record(["Start", "End", "Size", "VTL0", "VTL1"]);
+    for difference in &differences {
+        table.push_record([
+            format!("{:x}", difference.start),
+            format!("{:x}", difference.end - 1),
+            size_text(difference.end - difference.start),
+            access_text(difference.first),
+            access_text(difference.second),
+        ]);
+    }
+    let total: u64 = differences.iter().map(|d| d.end - d.start).sum();
+    print_padded_table(table);
+    outln!(
+        "{} ranges differ, {} in all\n",
+        differences.len(),
+        size_text(total)
+    );
+    Ok(())
+}
+
+/// List the hypercalls the Windows hypervisor implements, from its hypercall
+/// table.
+///
+/// Reads the hypervisor's hypercall table and shows, for each call code, the
+/// name the Hyper-V TLFS gives it (when the TLFS documents it), whether it is a
+/// simple or a rep call (var marks a variable-size input header), the sizes of
+/// its fixed input and output and of each rep element, and its handler in the
+/// hv image. Codes that share the handler of the reserved code 0 are not
+/// implemented; -a lists them too. Needs the VM's hv-evmcs enlightenment or a
+/// vCPU stopped in the hypervisor.
+#[command(
+    names = ["!hvcalls"],
+    category = "processes and modules",
+    kind = Query,
+    target = Machine,
+    forms = [hypercalls],
+)]
+fn hvcalls(
+    repl: &mut ReplState<'_>,
+    #[arg(invoked)] name: &str,
+    #[arg(parse = all_words, usage = "[-a]", complete = None)] argv: Vec<String>,
+) -> Result<()> {
+    let all = match argv.as_slice() {
+        [] => false,
+        [flag] if matches!(flag.as_ref(), "-a" | "/a") => true,
+        _ => {
+            outln!("{}\n", command_help(name));
+            return Ok(());
+        }
+    };
+    let (base, table) = match repl.ctx.target.hypercalls() {
+        Ok(found) => found,
+        Err(error) => {
+            error!("{error}");
+            return Ok(());
+        }
+    };
+    let mut table_out = Builder::default();
+    table_out.push_record([
+        "Code", "Name", "Kind", "Input", "Rep in", "Output", "Rep out", "Handler",
+    ]);
+    let mut implemented = 0;
+    for entry in &table {
+        implemented += usize::from(entry.implemented);
+        if !entry.implemented && entry.code != 0 && !all {
+            continue;
+        }
+        let mut kind = if entry.rep() { "rep" } else { "simple" }.to_string();
+        if entry.variable_header() {
+            kind.push_str("+var");
+        }
+        let size = |bytes: u16| {
+            if bytes == 0 {
+                String::new()
+            } else {
+                format!("{bytes:#x}")
+            }
+        };
+        table_out.push_record([
+            format!("{:#06x}", entry.code),
+            entry.name().unwrap_or_default().to_string(),
+            kind,
+            size(entry.input_size),
+            size(entry.input_element_size),
+            size(entry.output_size),
+            size(entry.output_element_size),
+            format!("hv+{:#x}", entry.handler - base),
+        ]);
+    }
+    print_padded_table(table_out);
+    outln!(
+        "{implemented} of {} codes implemented; code 0's handler serves the rest\n",
+        table.len()
+    );
+    Ok(())
+}
+
+/// The Windows hypervisor's hypercall table, one entry per call code, as
+/// `!hvcalls -a` lists it. Needs the VM's `hv-evmcs` enlightenment or a
+/// vCPU stopped in the hypervisor. This feature is experimental.
+#[command(form_of = hvcalls, python = Debugger)]
+fn hypercalls(session: &Session) -> Result<Vec<Hypercall>> {
+    Ok(session.target.hypercalls()?.1)
+}
+
+/// Decode the hypercall that the current vCPU's processor handles in the
+/// Windows hypervisor.
+///
+/// For a vCPU halted in the Windows hypervisor, for example on a breakpoint on
+/// a hypercall handler (ba e1 hv!HvCallFlushVirtualAddressList), shows the
+/// hypercall of the VMCALL exit that its processor handles: the caller (a VTL
+/// of the root partition, or the guest partition's VP that the processor
+/// serves), the call code with its TLFS name, the flags (fast, variable header
+/// size, nested), a rep call's start and count, the GPAs of the input and
+/// output, and each field of the input as the Hyper-V TLFS lays it out, with
+/// names for special values, processor sets, flags, and the common register
+/// names, then each element of a rep call's input list. A slow call's input is
+/// read at its GPA through the EPT of the calling VTL. A fast call's input is
+/// RDX and R8, then, for an XMM fast call, XMM0 to XMM5 as the hypervisor's
+/// VM-exit entry code saved them; when they are not known, it says what is
+/// missing. A call whose layout ntoseye does not know shows its input as raw
+/// qwords. The command needs the general-purpose registers of the exit, which
+/// ntoseye reads where the hypervisor's VM-exit entry code saved them, so it
+/// explains why when the vCPU is still on the entry or the last exit was not a
+/// VMCALL. Needs the VM's hv-evmcs enlightenment.
+#[command(
+    names = ["!hvcall"],
+    category = "processes and modules",
+    kind = Query,
+    target = Kernel,
+    state = Halted,
+    python = none,
+)]
+fn hvcall(repl: &mut ReplState<'_>) -> Result<()> {
+    if let Err(error) = repl
+        .ctx
+        .backend
+        .set_current_thread(&repl.ctx.current_thread)
+    {
+        error!("failed to select execution context: {error}");
+        return Ok(());
+    }
+    let regs = match repl.ctx.read_registers() {
+        Ok(regs) => regs,
+        Err(error) => {
+            error!("failed to read registers: {error}");
+            return Ok(());
+        }
+    };
+    let target = &repl.ctx.target;
+    let map = &repl.ctx.register_map;
+    let (Ok(cr3), Ok(rip)) = (
+        map.read_u64(target.arch().dtb_register(), &regs),
+        map.read_u64("rip", &regs),
+    ) else {
+        error!("the vCPU's CR3 and RIP are unavailable");
+        return Ok(());
+    };
+    if !halted_in_windows_hypervisor(target, cr3, rip) {
+        error!(
+            "{} is not halted in the Windows hypervisor; !hvcall decodes the hypercall a VP made at a stop there, such as on a hypercall handler (ba e1 hv!HvCallFlushVirtualAddressList)",
+            ui::thread_id(&repl.ctx.current_thread)
+        );
+        return Ok(());
+    }
+    let processor = processor_index_from_backend_thread_id(&repl.ctx.current_thread);
+    let Some(caller) = processor.and_then(|number| target.hypercall_caller(cr3, rip, number))
+    else {
+        if target.evmcs_found() == Some(false) {
+            error!(
+                "no Enlightened VMCS in guest RAM: the VM must expose hv-evmcs (libvirt <evmcs state=\"on\"/>) for the Windows hypervisor to use one"
+            );
+        } else {
+            error!(
+                "the caller is unknown: the hypervisor's partitions cannot be walked, or the processor serves no guest partition's VP and no saved state of its root partition VP is current"
+            );
+        }
+        return Ok(());
+    };
+    match hypercall_report(&caller) {
+        Ok(lines) => {
+            for line in lines {
+                outln!("{line}");
+            }
+            outln!();
+        }
+        Err(reason) => error!("{reason}"),
+    }
+    Ok(())
+}
+
+/// Show the eVMCS of a VTL of a Windows hypervisor VP, or the MSRs and I/O
+/// ports it intercepts.
+///
+/// Reads the Enlightened VMCS of a VTL, by default the VP the current vCPU's
+/// processor runs (a guest partition's first, else the root partition's) and
+/// the VTL it runs in, and shows each field with its offset and value. With
+/// -msr, it shows the MSRs whose reads and writes the VTL's MSR bitmap
+/// intercepts, with the architectural MSRs each range holds, and then the
+/// architectural MSRs the VTL reads and writes without an exit; MSRs outside
+/// the bitmap's 0x0-0x1fff and 0xc0000000-0xc0001fff always exit. With -io the
+/// I/O ports its I/O bitmaps intercept, or that every access is intercepted
+/// when the VM-execution controls do not use the bitmaps. The layout is the
+/// Hyper-V TLFS's, so this does not depend on the hypervisor build. The IDs use
+/// the current radix. Needs the VM's hv-evmcs enlightenment.
+#[command(
+    names = ["!hvvmcs"],
+    category = "processes and modules",
+    kind = Query,
+    target = Machine,
+    python = none,
+)]
+fn hvvmcs(
+    repl: &mut ReplState<'_>,
+    #[arg(invoked)] name: &str,
+    #[arg(parse = all_words, usage = "[-msr|-io] [partition-id [vp-index [vtl]]]", complete = None)]
+    argv: Vec<String>,
+) -> Result<()> {
+    let view = match argv.first().map(String::as_str) {
+        Some("-msr" | "/msr") => "msr",
+        Some("-io" | "/io") => "io",
+        _ => "fields",
+    };
+    let arguments = &argv[usize::from(view != "fields")..];
+    if arguments.len() > 3 {
+        outln!("{}\n", command_help(name));
+        return Ok(());
+    }
+    let Some(values) = repl.eval_all(arguments) else {
+        return Ok(());
+    };
+    let Some(SelectedVp {
+        partition: id, vp, ..
+    }) = repl.hypervisor_vp(values.first().copied(), values.get(1).copied(), false)
+    else {
+        return Ok(());
+    };
+    let level = values.get(2).map_or(vp.vtl, |&level| level as u8);
+    let Some(page) = vp
+        .vtls
+        .iter()
+        .find(|vtl| vtl.level == level)
+        .and_then(|vtl| vtl.vmcs)
+    else {
+        error!(
+            "VP {} of partition {id:#x} has no eVMCS for VTL{level}",
+            vp.index
+        );
+        return Ok(());
+    };
+    let mut vmcs = vec![0u8; 0x400];
+    if let Err(error) = repl.ctx.target.read_physical(page, &mut vmcs) {
+        error!("{error}");
+        return Ok(());
+    }
+    outln!(
+        "{} {page:x}\n",
+        ui::muted(&format!(
+            "VP {} of partition {id:#x}, VTL{level}: eVMCS",
+            vp.index
+        ))
+    );
+    match view {
+        "msr" => repl.print_msr_intercepts(&vmcs),
+        "io" => repl.print_io_intercepts(&vmcs),
+        _ => {
+            let mut table = Builder::default();
+            table.push_record(["Field", "Offset", "Value"]);
+            for (name, offset, size, value) in evmcs_fields::field_values(&vmcs) {
+                table.push_record([
+                    name.to_string(),
+                    format!("{offset:#05x}"),
+                    format!("{value:0width$x}", width = usize::from(size) * 2),
+                ]);
+            }
+            print_padded_table(table);
+        }
+    }
+    Ok(())
+}
+
+/// Display the memory of a Windows hypervisor partition's guest (a Hyper-V VM,
+/// WSL2, Windows Sandbox).
+///
+/// Reads the guest's memory through the EPT of the VTL its VP runs in, as its
+/// eVMCS names them: guest virtual memory through the VP's page tables (its
+/// CR3), or with -p guest physical memory. Without a partition and VP it reads
+/// the guest VP that the current vCPU's processor runs, as ~ and a stop in the
+/// hypervisor name it. -b shows bytes (the default), -d dwords, and -q qwords.
+/// The range is L<count>, an end address, or a byte length, as for db.
+/// Unreadable pages show as ??. The memory is read-only, and ntoseye has no
+/// symbols for the guest. The numbers use the current radix. Needs the VM's
+/// hv-evmcs enlightenment.
+#[command(
+    names = ["!hvd"],
+    category = "processes and modules",
+    kind = Query,
+    target = Machine,
+    python = none,
+)]
+fn hvd(
+    repl: &mut ReplState<'_>,
+    #[arg(invoked)] name: &str,
+    #[arg(parse = all_words, usage = "[-p] [-b|-d|-q] [partition-id vp-index] <address> [range]", complete = None)]
+    argv: Vec<String>,
+) -> Result<()> {
+    let mut physical = false;
+    let (mut mode, mut item) = (MemoryDisplayMode::bytes(), 1);
+    let mut arguments = argv.as_slice();
+    while let Some(flag) = arguments.first().filter(|text| text.starts_with('-')) {
+        match flag.as_ref() {
+            "-p" => physical = true,
+            "-b" => (mode, item) = (MemoryDisplayMode::bytes(), 1),
+            "-d" => (mode, item) = (MemoryDisplayMode::dwords(), 4),
+            "-q" => (mode, item) = (MemoryDisplayMode::qwords(), 8),
+            _ => break,
+        }
+        arguments = &arguments[1..];
+    }
+    // `<partition-id> <vp-index> <address> [range]`, or `<address>
+    // [range]` for the guest VP the current vCPU's processor runs.
+    if !(1..=4).contains(&arguments.len()) {
+        outln!("{}\n", command_help(name));
+        return Ok(());
+    }
+    let (selector, arguments) = arguments.split_at(if arguments.len() >= 3 { 2 } else { 0 });
+    let Some(selector) = repl.eval_all(selector) else {
+        return Ok(());
+    };
+    let Some(address) = repl.eval_or_report(&arguments[0]) else {
+        return Ok(());
+    };
+    let start = VirtAddr(address.0);
+    let range = match arguments.get(1) {
+        Some(text) => eval_range(text, &repl.ctx.target, repl.radix, start, item),
+        None => eval_range("L80", &repl.ctx.target, NumberRadix::Hexadecimal, start, 1),
+    };
+    let range = match range {
+        Ok(range) if range.len() <= MAX_DISPLAY_BYTES => range,
+        Ok(_) => {
+            error!("display range exceeds the maximum of {MAX_DISPLAY_BYTES:#x} bytes");
+            return Ok(());
+        }
+        Err(error) => {
+            error!("{error}");
+            return Ok(());
+        }
+    };
+    let Some(state) = repl.guest_memory_state("!hvd", &selector, physical) else {
+        return Ok(());
+    };
+    // Page by page, so an unmapped page does not hide the rest.
+    let mut data = vec![0u8; range.len()];
+    let mut valid = vec![false; range.len()];
+    let mut offset = 0;
+    while offset < data.len() {
+        let address = range.start.0 + offset as u64;
+        let chunk = ((0x1000 - (address & 0xfff)) as usize).min(data.len() - offset);
+        let target = &mut data[offset..offset + chunk];
+        if repl
+            .ctx
+            .target
+            .read_guest_partition(&state, !physical, address, target)
+            .is_ok()
+        {
+            valid[offset..offset + chunk].fill(true);
+        }
+        offset += chunk;
+    }
+    let print_text = || display_memory_with_validity(range.start, &data, Some(&valid), &mode);
+    #[cfg(feature = "cli")]
+    native::render(
+        || native::memory::dump(range.start, &data, Some(&valid), &mode),
+        print_text,
+    );
+    #[cfg(not(feature = "cli"))]
+    print_text();
+    Ok(())
+}
+
+/// Disassemble the memory of a Windows hypervisor partition's guest (a Hyper-V
+/// VM, WSL2, Windows Sandbox).
+///
+/// Reads the guest's memory as !hvd does: guest virtual memory through the page
+/// tables (CR3) and EPT of the VTL its VP runs in, or with -p guest physical
+/// memory through the EPT. Without a partition and VP it reads the guest VP
+/// that the current vCPU's processor runs. The code decodes in the mode the VTL
+/// left off in, by its eVMCS: 64-bit in IA-32e mode with a 64-bit code segment,
+/// else 32-bit; real mode and 16-bit code give an error. The range is as for u:
+/// L<count> instructions (8 by default), or an end address or byte length,
+/// listing every instruction that starts before the range ends. The listing
+/// stops at the first unreadable page and says where. ntoseye has no symbols
+/// for the guest, so branch targets and RIP-relative operands show as
+/// addresses. The numbers use the current radix. Needs the VM's hv-evmcs
+/// enlightenment.
+#[command(
+    names = ["!hvu"],
+    category = "processes and modules",
+    kind = Query,
+    target = Machine,
+    python = none,
+)]
+fn hvu(
+    repl: &mut ReplState<'_>,
+    #[arg(invoked)] name: &str,
+    #[arg(parse = all_words, usage = "[-p] [partition-id vp-index] <address> [range]", complete = None)]
+    argv: Vec<String>,
+) -> Result<()> {
+    const DEFAULT_INSTRUCTIONS: usize = 8;
+    let mut arguments = argv.as_slice();
+    let physical = arguments.first().is_some_and(|flag| flag == "-p");
+    if physical {
+        arguments = &arguments[1..];
+    }
+    // As for !hvd: `<partition-id> <vp-index> <address> [range]`, or
+    // `<address> [range]` for the guest VP the current vCPU's processor
+    // runs.
+    if !(1..=4).contains(&arguments.len()) {
+        outln!("{}\n", command_help(name));
+        return Ok(());
+    }
+    let (selector, arguments) = arguments.split_at(if arguments.len() >= 3 { 2 } else { 0 });
+    let Some(selector) = repl.eval_all(selector) else {
+        return Ok(());
+    };
+    let Some(address) = repl.eval_or_report(&arguments[0]) else {
+        return Ok(());
+    };
+    // As for u: `L<count>` counts instructions; an end address or a
+    // length lists every instruction that starts before the range ends.
+    let extent = match arguments.get(1) {
+        None => CodeExtent::Count(DEFAULT_INSTRUCTIONS),
+        Some(text) => match windbg_count_expression(text) {
+            Some(count) => match repl.eval_or_report(count) {
+                Some(count) if (1..=MAX_DISASSEMBLY_INSTRUCTIONS as u64).contains(&count.0) => {
+                    CodeExtent::Count(count.0 as usize)
+                }
+                Some(_) => {
+                    error!("instruction count must be 1..{MAX_DISASSEMBLY_INSTRUCTIONS}");
+                    return Ok(());
+                }
+                None => return Ok(()),
+            },
+            None => match eval_range(text, &repl.ctx.target, repl.radix, address, 1) {
+                Ok(range) if range.len() <= MAX_DISPLAY_BYTES => CodeExtent::Before(range.end.0),
+                Ok(_) => {
+                    error!("range exceeds the maximum of {MAX_DISPLAY_BYTES:#x} bytes");
+                    return Ok(());
+                }
+                Err(error) => {
+                    error!("{error}");
+                    return Ok(());
+                }
+            },
+        },
+    };
+    let Some(state) = repl.guest_memory_state("!hvu", &selector, physical) else {
+        return Ok(());
+    };
+    let code = match repl
+        .ctx
+        .target
+        .disassemble_guest_partition(&state, !physical, address.0, extent)
+    {
+        Ok(code) => code,
+        Err(error) => {
+            error!("{error}");
+            return Ok(());
+        }
+    };
+    render_rows(&code.rows, |_| None);
+    if let Some(at) = code.unreadable {
+        let space = if physical { "physical" } else { "virtual" };
+        error!("guest {space} memory at {at:#x} is unreadable");
+    }
+    outln!();
+    Ok(())
+}
+
+/// Show the registers of a VTL of a Windows hypervisor VP, whether or not a
+/// processor runs it.
+///
+/// By default the VP the current vCPU's processor runs (a guest partition's
+/// first, else the root partition's) and the VTL it runs in. For a VP that a
+/// vCPU runs now, they are that vCPU's; for one whose exit a vCPU in the
+/// hypervisor handles, those of that exit; otherwise those the VP saved at its
+/// last exit, read from its register block through the descriptor of its
+/// register region, which no processor maps while the VP does not run. The VP
+/// resumes with them but for what the hypervisor writes as the exit's result,
+/// such as a hypercall's status in RAX. RIP, RSP, flags, control and segment
+/// registers come from the VTL's eVMCS. The general-purpose registers are
+/// shared by a VP's VTLs and belong to the one it runs in; another VTL shows
+/// its eVMCS state only. The IDs use the current radix. Needs the VM's hv-evmcs
+/// enlightenment; builds before 10.0.17763 keep the saved registers on the
+/// processor's stack, so a VP no processor runs has none there.
+#[command(
+    names = ["!hvr"],
+    category = "processes and modules",
+    kind = Query,
+    target = Machine,
+    state = Halted,
+    python = none,
+)]
+fn hvr(
+    repl: &mut ReplState<'_>,
+    #[arg(invoked)] name: &str,
+    #[arg(parse = all_words, usage = "[partition-id vp-index [vtl]]", complete = None)] argv: Vec<
+        String,
+    >,
+) -> Result<()> {
+    if !matches!(argv.len(), 0 | 2 | 3) {
+        outln!("{}\n", command_help(name));
+        return Ok(());
+    }
+    let Some(arguments) = repl.eval_all(&argv) else {
+        return Ok(());
+    };
+    let Some(SelectedVp { partition, vp, .. }) =
+        repl.hypervisor_vp(arguments.first().copied(), arguments.get(1).copied(), false)
+    else {
+        return Ok(());
+    };
+    let vtl = match arguments.get(2).map(|vtl| u8::try_from(*vtl)) {
+        None => None,
+        Some(Ok(vtl)) => Some(vtl),
+        Some(Err(_)) => {
+            error!("VTL {:#x} is out of range", arguments[2]);
+            return Ok(());
+        }
+    };
+    match repl.ctx.vp_registers(partition, vp.index, vtl) {
+        Ok(found) => {
+            outln!(
+                "partition {partition:#x} VP {} VTL{}  {}",
+                vp.index,
+                vtl.unwrap_or(vp.vtl),
+                ui::muted(&format!("from {}", found.source))
+            );
+            if let Some(missing) = &found.missing {
+                outln!(
+                    "{}",
+                    ui::muted(&format!("no general-purpose registers: {missing}"))
+                );
+            }
+            print_vp_registers(&found.registers);
+            outln!();
+        }
+        Err(error) => error!("{error}"),
+    }
+    Ok(())
+}
+
+/// Inspect the Windows guest that hypervisor partition `partition_id`
+/// runs (a Windows Sandbox, a Hyper-V VM) in place of the target, as
+/// `.partition` does: `memory`, `processes`, `modules`, `symbols`,
+/// `types` and `threads` then read that guest, through its EPT, and the
+/// vCPUs are its VPs, with their VTL0 registers. The target stays
+/// halted. `memory.write` writes the guest's memory through its EPT, and
+/// a register write goes to the target's vCPU that runs the selected VP at
+/// the stop; a VP no vCPU runs has its registers in the hypervisor's
+/// memory, and raises `NtoseyeError`. `breakpoints.add(..., hardware=True)`
+/// and `breakpoints.watch` set the partition's breakpoints, which stop
+/// only on its VPs (`processor=` names one) and need the gdb backend;
+/// software breakpoints raise. `run` leaves the view and runs the
+/// target, and a hit of the partition's breakpoint returns in its view,
+/// on the VP that hit it. `step`, `step_over` and `step_out` step the
+/// thread of the selected VP, and `run(address=...)` runs until any of its
+/// VPs reaches an address, each a run of the target to a breakpoint of the
+/// partition's; `step(until=...)` and `trace_calls` raise. The root
+/// partition's ID (1) returns to the target. Handles minted on either side
+/// of a switch go stale (`generation` advances). The target must be halted.
+/// This feature is experimental.
+#[command(form_of = partition, python = Debugger)]
+fn select_partition(session: &mut Session, partition_id: u64) -> Result<()> {
+    session.enter_partition(partition_id)
+}
+
+/// Inspect the Windows guest that a Windows hypervisor partition runs (a
+/// Windows Sandbox, a Hyper-V VM) in place of the target, or show which is
+/// inspected.
+///
+/// With a partition ID, the session inspects that partition's guest instead of
+/// the target: its memory is read through the partition's EPT, its NT kernel is
+/// found from the page-table root of a VP in kernel mode, and its symbols are
+/// loaded, so lm, !process, dt, db, u, k and the other inspection commands read
+/// the guest. Its VPs are the threads (p<partition>.<VP index + 1>, so ~Ns
+/// selects VP N), with their VTL0 registers, as !hvr <partition> <vp> 0 shows
+/// them: a VP that runs in VTL1 has VTL0's RIP, RSP, flags, control and segment
+/// registers there, without its general-purpose registers. The target stays
+/// halted while the view is shown. eb, ed and the other writes go to the
+/// guest's memory through its EPT, and r <register>=<value> to the vCPU that
+/// runs the selected VP at the stop; a VP no vCPU runs has its registers in the
+/// hypervisor's memory, and is refused. ba sets a hardware breakpoint of the
+/// partition's, which stops only on its VPs (/c names a VP); bp, bu and bm are
+/// refused. g leaves the view and runs the target, and a hit of the partition's
+/// breakpoint shows the view again on the VP that hit it. t, p and gu step the
+/// thread of the selected VP, on whichever VP it runs next, and g <address>
+/// runs until any of the partition's VPs reaches the address: each is a run of
+/// the target to a breakpoint of the partition's. Walks (tc, pa, wt) are
+/// refused. bl lists every breakpoint, the target's too. The root partition's
+/// ID (0x1) returns to the target. Without an ID, it shows which partition is
+/// inspected. The ID uses the current radix. Needs the VM's hv-evmcs
+/// enlightenment and a 64-bit Windows guest; breakpoints and steps need the gdb
+/// backend.
+#[command(
+    names = [".partition"],
+    category = "processes and modules",
+    kind = Action,
+    target = Kernel,
+    state = Halted,
+    forms = [select_partition],
+)]
+fn partition(
+    repl: &mut ReplState<'_>,
+    #[arg(invoked)] name: &str,
+    #[arg(parse = all_words, usage = "[partition-id]", complete = None)] argv: Vec<String>,
+) -> Result<()> {
+    if argv.len() > 1 {
+        outln!("{}\n", command_help(name));
+        return Ok(());
+    }
+    if argv.is_empty() {
+        match repl.ctx.partition() {
+            Some(partition) => outln!(
+                "inspecting partition {partition:#x}; .partition with the root partition's ID returns to the target\n"
+            ),
+            None => outln!("inspecting the target (the root partition)\n"),
+        }
+        return Ok(());
+    }
+    let Some(arguments) = repl.eval_all(&argv) else {
+        return Ok(());
+    };
+    let result = select_partition(repl.ctx, arguments[0]);
+    repl.caches
+        .refresh_partition(repl.ctx.partition(), &repl.ctx.target);
+    match result {
+        Ok(()) => match repl.ctx.partition() {
+            Some(partition) => {
+                let kernel = repl
+                    .ctx
+                    .target
+                    .kernel_base()
+                    .map_or_else(|| "?".to_string(), |base| format!("{:#x}", base.0));
+                let vps = repl.ctx.backend.thread_list().unwrap_or_default();
+                outln!(
+                    "inspecting partition {partition:#x}: nt at {kernel}, VPs {}\n",
+                    vps.join(" ")
+                );
+            }
+            None => outln!("inspecting the target (the root partition)\n"),
+        },
+        Err(error) => error!("{error}"),
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1817,6 +1909,7 @@ mod tests {
     use super::*;
     use crate::guest::hypercall_input::decode_hypercall;
     use crate::output::capture;
+    use crate::session::effects::Refusal;
     use crate::session::tests::{MockBackend, session_with_mock};
 
     fn spec(name: &str) -> &'static CommandSpec {
@@ -1826,7 +1919,7 @@ mod tests {
     }
 
     /// `caller`'s hypercall as `!hvcall` prints it, line by line.
-    fn hvcall_output(caller: HypercallCaller) -> Vec<String> {
+    fn hvcall_output(caller: HypercallCallerInfo) -> Vec<String> {
         let (result, text) = capture(|| {
             for line in hypercall_report(&caller)? {
                 outln!("{line}");
@@ -1839,7 +1932,7 @@ mod tests {
 
     /// Root partition VP 2's hypercall `value`, whose input page holds
     /// `parts`, each `(offset, qword)`.
-    fn root_caller(value: u64, parts: &[(usize, u64)]) -> HypercallCaller {
+    fn root_caller(value: u64, parts: &[(usize, u64)]) -> HypercallCallerInfo {
         let mut page = vec![0u8; 0x1000];
         for &(offset, qword) in parts {
             page[offset..offset + 8].copy_from_slice(&qword.to_le_bytes());
@@ -1848,7 +1941,7 @@ mod tests {
             buf.copy_from_slice(&page[..buf.len()]);
             Ok(())
         });
-        HypercallCaller {
+        HypercallCallerInfo {
             partition: 1,
             root: true,
             vp: 2,
@@ -1915,7 +2008,7 @@ mod tests {
     /// Without a decoded call `!hvcall` says why rather than print a tree.
     #[test]
     fn hvcall_explains_an_exit_with_no_known_call() {
-        let caller = |input| HypercallCaller {
+        let caller = |input| HypercallCallerInfo {
             partition: 4,
             root: false,
             vp: 1,
@@ -1981,51 +2074,71 @@ mod tests {
         assert_eq!(default_vp(&partitions, None, false), Some((0, 0)));
     }
 
+    /// Which commands `admit` lets through in a VTL1 address space, by
+    /// their declared effects: `.vtl 1` view first (`scope`), else a live
+    /// VTL1 stop.
+    fn vtl1_admits(scope: bool) -> impl Fn(&str) -> bool {
+        let mut session = session_with_mock(MockBackend::default());
+        let root = session.target.current_dtb();
+        session.target.symbols.set_secure_roots(root, []);
+        if scope {
+            session.target.enter_secure_scope(root);
+        }
+        // Another refusal (a capability the mock lacks) means VTL1 let it
+        // through.
+        move |name| !matches!(session.admit(&spec(name).effects), Err(Refusal::Vtl1(_)))
+    }
+
+    /// The `.vtl 1` view is memory alone: reads, the debugger's own state,
+    /// breakpoint bookkeeping (a software site in VTL1 is the breakpoint
+    /// core's to refuse) and a resume, which leaves the view first.
     #[test]
-    fn memory_view_admits_the_hardware_breakpoint_workflow_without_registers_or_writes() {
+    fn memory_view_admits_reads_and_breakpoints_but_no_vcpu_state_nt_or_writes() {
+        let admits = vtl1_admits(true);
         for name in [
-            "ba", "bl", "bc", "bd", "be", "g", "continue", "db", "u", "x", "!vtop", ".vtl",
+            "ba",
+            "bp",
+            "bl",
+            "bc",
+            "bd",
+            "be",
+            "g",
+            "gh",
+            "continue",
+            "db",
+            "u",
+            "x",
+            "!vtop",
+            ".vtl",
+            ".reload",
+            ".writemem",
         ] {
-            assert!(secure_scope_admits(spec(name)), "'{name}' refused");
+            assert!(admits(name), "'{name}' refused");
         }
         for name in [
-            "bp", "bu", "bm", "gh", "gn", "t", "p", "gu", "pa", "wt", "r", "k", ".frame", "~",
-            "vcpu", "eb", "ed", "f", ".readmem", "!eb", "wrmsr", "!process", "!thread", "!pcr",
+            "t", "p", "gu", "pa", "wt", "r", "k", ".frame", "~", "vcpu", "rdmsr", "eb", "ed", "f",
+            ".readmem", "!eb", "wrmsr", "!process", "!thread", "!pcr", "!peb",
         ] {
-            assert!(!secure_scope_admits(spec(name)), "'{name}' admitted");
+            assert!(!admits(name), "'{name}' admitted");
         }
     }
 
+    /// A live VTL1 stop has the vCPU's own state and runs and steps (which
+    /// take debug-register sites there), but no NT structures and no writes.
     #[test]
-    fn live_vtl1_stop_admits_vcpu_state_and_steps_but_not_nt_extensions_or_writes() {
+    fn live_vtl1_stop_admits_vcpu_state_and_steps_but_not_nt_reads_or_writes() {
+        let admits = vtl1_admits(false);
         for name in [
-            "r", "k", "kb", ".frame", "~", "vcpu", "break", "status", "ba", "bl", "g", "db", "u",
-            ".vtl", "t", "p", "gu", "pa", "ta", "wt", ".vtlcxr",
+            "r", "k", "kb", ".frame", "~", "vcpu", "rdmsr", "status", "ba", "bl", "g", "gn", "db",
+            "u", ".vtl", "t", "p", "gu", "pa", "ta", "tc", "wt", ".vtlcxr", ".process",
         ] {
-            assert!(live_secure_admits(spec(name)), "'{name}' refused");
+            assert!(admits(name), "'{name}' refused");
         }
         for name in [
-            "bp", "bu", "bm", "gh", "gn", "eb", "eq", "f", ".readmem", "!eb", "wrmsr", "!process",
-            "!thread", ".thread", "!pcr", "!prcb", "!irql", "!idt", ".cxr", ".trap", "!peb",
-            "!pte",
+            "eb", "eq", "f", ".readmem", "!eb", "wrmsr", "!process", "!thread", ".thread", "!pcr",
+            "!prcb", "!irql", "!idt", ".cxr", ".trap", "!peb", "!pte", ".pagein", ".crash",
         ] {
-            assert!(!live_secure_admits(spec(name)), "'{name}' admitted");
-        }
-    }
-
-    /// Only run control whose temporary sites become debug-register sites
-    /// in VTL1 may leave a VTL1 stop, so a new run command stays refused
-    /// until someone decides it is VTL1-safe.
-    #[test]
-    fn only_g_and_hardware_steps_move_the_target_from_a_vtl1_address_space() {
-        for spec in COMMANDS.iter() {
-            if spec.run != RunEffect::None && live_secure_admits(spec) {
-                assert!(
-                    matches!(spec.names[0], "g" | "t" | "p" | "gu" | "pa" | "ta" | "wt"),
-                    "'{}' admitted",
-                    spec.names[0]
-                );
-            }
+            assert!(!admits(name), "'{name}' admitted");
         }
     }
 
@@ -2051,8 +2164,13 @@ mod tests {
 
         let (result, _) = capture(|| state.dispatch_line("eb 1000 cc"));
         assert_eq!(result.unwrap(), Flow::Denied);
-        let (result, _) = capture(|| state.dispatch_line("bp 1000"));
-        assert_eq!(result.unwrap(), Flow::Denied);
+        // The breakpoint core refuses a software site in VTL1 code.
+        let (result, text) = capture(|| state.dispatch_line("bp 1000"));
+        result.unwrap();
+        assert!(
+            state.ctx.breakpoints.list().is_empty(),
+            "bp set a site: {text}"
+        );
         assert!(!state.ctx.backend.is_running(), "bp resumed");
 
         let (result, _) = capture(|| state.dispatch_line("g"));

@@ -2,13 +2,12 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::backend::MemoryOps;
 use crate::dmp::{DmpInfo, DmpMem};
 use crate::error::{Error, Result};
 use crate::guest::ept::EptMemory;
 use crate::host::VmHandle;
 use crate::kd::KdMemory;
-use crate::memory::{SectionViews, TranslationCache};
+use crate::memory::{MemoryOps, SectionViews, TranslationCache};
 use crate::types::{Dtb, PhysAddr, VirtAddr};
 use crate::userdump::UserDump;
 

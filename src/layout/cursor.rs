@@ -3,9 +3,8 @@ use std::sync::Arc;
 use zerocopy::{FromBytes, IntoBytes};
 
 use super::{ParsedType, TypeInfo, le_uint, utf16le_lossy};
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
-use crate::memory::AddressSpace;
+use crate::memory::{AddressSpace, MemoryOps};
 use crate::phys::PhysMem;
 use crate::symbols::SymbolStore;
 use crate::target::ListCursor;

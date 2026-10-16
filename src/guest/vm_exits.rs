@@ -6,8 +6,9 @@
 //! loaded, which the CPU filled in at the exit.
 
 use super::evmcs::exit_reason_name;
-use super::hypercalls::HypercallCaller;
+use super::hypercalls::HypercallCallerInfo;
 use crate::error::{Error, Result};
+use ntoseye_macros::record;
 
 /// The highest basic exit reason the SDM assigns as of this writing; the
 /// field is 16 bits, so higher numbers are still accepted.
@@ -45,12 +46,25 @@ pub fn parse_reason(text: &str) -> Result<u16> {
 /// What a VM-exit breakpoint stops on: a basic exit reason (Intel SDM
 /// Vol. 3D, Appendix C), optionally only from one partition or one of its
 /// VPs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[record(impl)]
+#[derive(Copy, PartialEq, Eq)]
 pub struct ExitFilter {
+    /// The basic exit reason (Intel SDM Appendix C).
     pub reason: u16,
+    /// The caller's partition ID. None for any caller.
     pub partition: Option<u64>,
-    /// Set only with `partition`: a VP index names a VP of one partition.
+    /// The caller's VP index in `partition`. None for any VP. Set only with
+    /// `partition`: a VP index names a VP of one partition.
     pub vp: Option<u32>,
+}
+
+#[record]
+impl ExitFilter {
+    /// Its name, or None for a reason ntoseye does not name.
+    #[record(getter)]
+    pub fn name(&self) -> Option<&'static str> {
+        exit_reason_name(u32::from(self.reason))
+    }
 }
 
 impl ExitFilter {
@@ -58,7 +72,7 @@ impl ExitFilter {
     /// filter's reason from this filter's caller. As for a hypercall
     /// filter, what is not known does not decline a hit: an unknown caller
     /// matches, and so does a caller whose state is an older exit's.
-    pub fn matches(&self, caller: Option<&HypercallCaller>) -> bool {
+    pub fn matches(&self, caller: Option<&HypercallCallerInfo>) -> bool {
         let Some(caller) = caller else {
             return true;
         };
@@ -94,10 +108,10 @@ impl ExitFilter {
 mod tests {
     use super::{ExitFilter, parse_reason};
     use crate::guest::EvmcsState;
-    use crate::guest::hypercalls::{HypercallCaller, HypercallInput};
+    use crate::guest::hypercalls::{HypercallCallerInfo, HypercallInput};
 
-    fn caller(partition: u64, vp: u32, reason: Option<u32>) -> HypercallCaller {
-        HypercallCaller {
+    fn caller(partition: u64, vp: u32, reason: Option<u32>) -> HypercallCallerInfo {
+        HypercallCallerInfo {
             partition,
             root: partition == 1,
             vp,

@@ -3,16 +3,14 @@
 //! filters reject.
 
 use crate::breakpoints::{
-    Breakpoint, BreakpointHitDisposition, BreakpointHitResult, BreakpointManager, ThreadScope,
+    BreakpointHitDisposition, BreakpointHitResult, BreakpointInfo, BreakpointManager, ThreadScope,
 };
 use crate::dbg_backend::{
-    ContinueDisposition, DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, StopEvent,
-    processor_index_from_backend_thread_id,
+    ContinueDisposition, DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, RegisterMap,
+    StopEvent, debug_registers, processor_index_from_backend_thread_id,
 };
 use crate::error::{Error, Result};
-use crate::gdb::RegisterMap;
-use crate::guest::hypercalls::HypercallCaller;
-use crate::kd::hwbp;
+use crate::guest::hypercalls::HypercallCallerInfo;
 use crate::notice::Notice;
 use crate::session::context::{
     refresh_windows_thread_context_for_backend_thread, update_target_context_from_registers,
@@ -216,11 +214,11 @@ pub fn stopped_guest_vp(target: &Target, stopped: &str) -> Result<Option<(u64, u
 /// whose processor cannot be resolved has an unknown caller, so it matches.
 pub fn stopped_caller_matches(
     target: &mut Target,
-    breakpoint: &Breakpoint,
+    breakpoint: &BreakpointInfo,
     stopped: &str,
     cr3: u64,
     rip: u64,
-) -> (bool, Option<HypercallCaller>) {
+) -> (bool, Option<HypercallCallerInfo>) {
     if breakpoint.hypercall.is_none() && breakpoint.vm_exit.is_none() {
         return (true, None);
     }
@@ -254,8 +252,8 @@ pub fn stopped_caller_matches(
 /// the hit with the error.
 pub fn evaluate_hit_condition(
     target: &mut Target,
-    breakpoint: &Breakpoint,
-    caller: Option<&HypercallCaller>,
+    breakpoint: &BreakpointInfo,
+    caller: Option<&HypercallCallerInfo>,
 ) -> Result<bool> {
     if (breakpoint.hypercall.is_none() && breakpoint.vm_exit.is_none())
         || breakpoint.condition_expr.is_none()
@@ -311,7 +309,7 @@ pub fn hardware_breakpoint_hit(
     register_map: &RegisterMap,
     breakpoints: &BreakpointManager,
     event: &StopEvent,
-) -> Result<Option<Breakpoint>> {
+) -> Result<Option<BreakpointInfo>> {
     if event.is_bugcheck || !breakpoints.has_enabled_hardware_breakpoints() {
         return Ok(None);
     }
@@ -391,7 +389,7 @@ pub fn reported_watch_hit(
     slots: usize,
     watch: Option<u64>,
     pc: Option<u64>,
-) -> Option<Breakpoint> {
+) -> Option<BreakpointInfo> {
     let hit = watchpoint_covering(breakpoints, slots, watch?)?;
     (!pc.is_some_and(|pc| execute_site_at(breakpoints, slots, pc))).then_some(hit)
 }
@@ -402,7 +400,7 @@ fn watchpoint_covering(
     breakpoints: &BreakpointManager,
     slots: usize,
     address: u64,
-) -> Option<Breakpoint> {
+) -> Option<BreakpointInfo> {
     (0..slots)
         .filter_map(|slot| breakpoints.hardware_breakpoint_for_slot(slot))
         .find(|bp| {
@@ -446,7 +444,7 @@ fn execute_breakpoint_at_pc(
     slots: usize,
     event: &StopEvent,
     regs: &mut [u8],
-) -> Result<Option<Breakpoint>> {
+) -> Result<Option<BreakpointInfo>> {
     let Some(pc) = register_map
         .read_u64("rip", regs)
         .or_else(|_| register_map.read_u64("pc", regs))
@@ -482,7 +480,7 @@ fn arm64_hardware_breakpoint_hit(
     breakpoints: &BreakpointManager,
     event: &StopEvent,
     regs: &[u8],
-) -> Result<Option<Breakpoint>> {
+) -> Result<Option<BreakpointInfo>> {
     let pc = register_map
         .read_u64("pc", regs)
         .or_else(|_| register_map.read_u64("rip", regs))
@@ -494,7 +492,7 @@ fn arm64_hardware_breakpoint_hit(
     // that caused the data watchpoint. Require FAR as evidence: without it a
     // plain single-step must not be mistaken for a data breakpoint.
     if far != 0 {
-        for slot in hwbp::ARM64_WATCHPOINT_SLOTS {
+        for slot in debug_registers::ARM64_WATCHPOINT_SLOTS {
             let Some(bp) = breakpoints.hardware_breakpoint_for_slot(usize::from(slot)) else {
                 continue;
             };
@@ -526,7 +524,7 @@ fn arm64_hardware_breakpoint_hit(
     }
 
     if hit.is_none() {
-        for slot in hwbp::ARM64_BREAKPOINT_SLOTS {
+        for slot in debug_registers::ARM64_BREAKPOINT_SLOTS {
             let Some(bp) = breakpoints.hardware_breakpoint_for_slot(usize::from(slot)) else {
                 continue;
             };
@@ -534,7 +532,7 @@ fn arm64_hardware_breakpoint_hit(
             if hw.access != HwBreakpointAccess::Execute {
                 continue;
             }
-            let index = slot - hwbp::ARM64_BREAKPOINT_SLOTS.start;
+            let index = slot - debug_registers::ARM64_BREAKPOINT_SLOTS.start;
             let control = register_map
                 .read_u64(format!("bcr{index}"), regs)
                 .unwrap_or(0);
@@ -696,7 +694,9 @@ pub fn resolve_watchpoint_stop(
         Err(error) => Some(error.to_string()),
     };
     if breakpoint.one_shot {
-        breakpoints.remove(backend, target, breakpoint.id)?;
+        // Kept, hidden, until the next resume removes it, so the stop can
+        // still describe it (its kind, action and `when=`).
+        breakpoints.mark_one_shot_hit(breakpoint.id)?;
     }
 
     Ok(WatchpointStopAction::Hit {

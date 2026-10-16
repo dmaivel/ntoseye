@@ -5,24 +5,26 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ntoseye_macros::record;
+
 use super::{SymbolSearchMatch, Target, lookup_register};
 use crate::{
-    backend::MemoryOps,
     error::{Error, Result},
     guest::{Guest, ModuleInfo, ModuleSymbolLoadReport, PdbRecovery, SessionSpace},
-    memory::AddressSpace,
+    memory::{AddressSpace, MemoryOps},
     pe::{ModuleExportInfo, PeImage, read_pe_exports, read_pe_image, read_pe_version_info},
     symbols::{
         CodeFrame, InlineFrame, LocalVariableLocation, ProcedureLocal, SourceLineExtent,
-        SourceLocation, SymbolCandidate, SymbolIndex, SymbolStore, format_symbol_with_offset,
-        glob_matches,
+        SourceLocation, Symbol, SymbolCandidate, SymbolIndex, SymbolStore,
+        format_symbol_with_offset, glob_matches,
     },
     types::{Dtb, VirtAddr},
     unwind::frame_base_for_register_values,
 };
 
 /// Which modules [`Target::reload_module_symbols`] reloads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub enum ReloadScope {
     /// The inspection scope's, as `lm` lists them: the selected process's
     /// user-mode modules, else the kernel's.
@@ -373,6 +375,17 @@ impl Target {
             .map(|(module, name, offset)| format_symbol_with_offset(&module, &name, offset))
     }
 
+    /// The symbol nearest below `address` in the inspection scope.
+    pub fn nearest_symbol(&self, address: VirtAddr) -> Option<Symbol> {
+        self.nearest_symbol_current_context(address)
+            .map(|(module, name, offset)| Symbol {
+                module,
+                name,
+                address: VirtAddr(address.0.saturating_sub(u64::from(offset))),
+                offset,
+            })
+    }
+
     pub fn source_location(&self, address: VirtAddr) -> Option<SourceLocation> {
         self.symbols.source_location(self.current_dtb(), address)
     }
@@ -506,10 +519,6 @@ impl Target {
 
     pub fn current_types_index(&self) -> SymbolIndex {
         self.symbols.merged_types_index(Some(self.current_dtb()))
-    }
-
-    pub fn current_enums_index(&self) -> SymbolIndex {
-        self.symbols.merged_enum_index(Some(self.current_dtb()))
     }
 }
 

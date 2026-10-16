@@ -1,18 +1,16 @@
 //! Stop ingestion: classifying raw backend stops, waiting for the next
 //! meaningful one, and tracking the stop the target is halted at.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use crate::breakpoints::{Breakpoint, BreakpointManager};
+use crate::breakpoints::{BreakpointInfo, BreakpointManager};
 use crate::dbg_backend::{
     ContinueDisposition, DebugBackend, LastEvent, ModuleEvent, StopEvent, clear_trap_flag,
     processor_index_from_backend_thread_id,
 };
 use crate::error::Result;
-use crate::exception_policy::{ExceptionPolicyAction, ExceptionPolicyMode};
+use crate::exception_policy::ExceptionPolicyMode;
 use crate::guest::{ModuleInfo, ProcessInfo};
-use crate::kd::trace_enabled;
 use crate::session::context::{
     refresh_windows_thread_context_for_backend_thread, update_target_context_from_registers,
     windows_thread_on_backend_thread,
@@ -20,18 +18,12 @@ use crate::session::context::{
 use crate::session::hits::{resolve_watchpoint_stop, rewind_thread_off_breakpoint};
 use crate::session::reload::ReloadDisposition;
 use crate::session::{
-    BreakpointStopAction, ContinueOutcome, RunStatus, STATUS_BREAKPOINT, STATUS_SINGLE_STEP,
-    Session, StopResolution, WatchpointStopAction,
+    BreakpointStopAction, Cancel, ContinueOutcome, RunStatus, STATUS_BREAKPOINT,
+    STATUS_SINGLE_STEP, Session, StopResolution, WatchpointStopAction,
 };
 use crate::target::{BreakpointStop, HYPERVISOR_CONTEXT, ThreadInfo};
 use crate::types::{Arch, VirtAddr};
 use crate::unwind::{UNKNOWN_CONTEXT, try_format_symbol_at};
-
-/// The low bits of a CR3/DTB that select the page-directory base physical
-/// frame (PCID and reserved/canonical bits masked out), for comparing the
-/// address space a vCPU runs in against a process's DTB.
-/// How often the run-control poll loop wakes to check for a stop.
-const CONTINUE_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// How long a background `service_idle` pass spends absorbing caught stops before
 /// returning to the actor's job queue. Small so a real tool call is never held off
@@ -80,13 +72,15 @@ impl Session {
             _ => None,
         };
         self.select_stop_context_default();
-        self.current_stop = Some(self.continue_outcome_from_resolution(resolution.clone()));
+        let outcome = self.continue_outcome_from_resolution(resolution.clone());
+        self.set_current_stop(Some(outcome));
     }
 
-    /// The stop the target is halted at, if it has stopped since it last
-    /// moved; see [`Self::note_stop`].
-    pub fn current_stop(&self) -> Option<&ContinueOutcome> {
-        self.current_stop.as_ref()
+    /// Record `stop` as the stop the target is halted at (`None`: it moved),
+    /// dropping the snapshot of the one before.
+    pub fn set_current_stop(&mut self, stop: Option<ContinueOutcome>) {
+        self.current_stop = stop;
+        self.stop_snapshot = None;
     }
 
     /// Record `outcome` as the stop the target is halted at, for a host that
@@ -98,7 +92,7 @@ impl Session {
             outcome,
             ContinueOutcome::Running | ContinueOutcome::Halted { .. }
         ) {
-            self.current_stop = Some(outcome.clone());
+            self.set_current_stop(Some(outcome.clone()));
         }
     }
 
@@ -108,7 +102,7 @@ impl Session {
         if let Some(last_event) = &mut self.last_event {
             last_event.disposition = Some(disposition);
         }
-        self.current_stop = None;
+        self.set_current_stop(None);
     }
 
     pub(super) fn continue_outcome_from_resolution(
@@ -154,20 +148,21 @@ impl Session {
     /// `is_running()` still holds stale running state.
     ///
     /// Debugger-generated noise is still absorbed so read/status surfaces match
-    /// normal run control. Reload stops keep their deferred `TargetReloaded`
-    /// notification for the next wait surface.
+    /// normal run control. A real stop is parked, so the next wait surfaces it
+    /// (and runs its action); a reload keeps its deferred notification.
     pub fn settle_pending_stop(&mut self) -> Result<()> {
         if !self.backend.has_pending_stop() {
             return Ok(());
         }
         let event = self.backend.wait_for_stop()?;
-        if matches!(
-            self.classify_stop_event(event)?,
-            StopResolution::TargetReloaded { .. }
-        ) {
+        match self.classify_stop_event(event)? {
+            StopResolution::Resumed | StopResolution::ModulesChanged => {}
             // Settling is intentionally non-surfacing. Preserve the single
             // reboot notification for the next explicit wait.
-            self.reload_surface_pending = true;
+            StopResolution::TargetReloaded { .. } => self.reload_surface_pending = true,
+            resolution => {
+                self.parked_stop = Some(self.continue_outcome_from_resolution(resolution));
+            }
         }
         Ok(())
     }
@@ -176,25 +171,24 @@ impl Session {
     /// background servicer caught but no tool call has drained (chiefly a
     /// wrong-process hit on a shared-page breakpoint), so the guest is not left
     /// frozen between tool calls. Noise is resumed; a real stop, a reboot
-    /// included, is parked for the next `wait_for_stop`.
+    /// included, is parked for the next wait, which runs its action and its
+    /// filter's command; this runs none.
     pub fn service_idle(&mut self) {
         if self.parked_stop.is_some() || !self.backend.has_pending_stop() {
             return;
         }
-        let never_cancel = AtomicBool::new(false);
-        match self.wait_for_stop_bounded(Some(SERVICE_IDLE_BUDGET), &never_cancel) {
-            Ok(ContinueOutcome::Running) | Err(_) => {}
+        match self.wait_stop(&Cancel::within(SERVICE_IDLE_BUDGET), false) {
+            Ok(ContinueOutcome::Running | ContinueOutcome::Halted { .. }) | Err(_) => {}
             Ok(outcome) => {
                 self.parked_stop = Some(outcome);
             }
         }
     }
 
-    /// Hand over a stop [`Self::service_idle`] parked while the host was idle,
-    /// for hosts that render stops themselves rather than through
-    /// [`Self::wait_for_stop_bounded`]. The VM is halted at it.
-    pub fn take_parked_stop(&mut self) -> Option<ContinueOutcome> {
-        self.parked_stop.take()
+    /// Whether a stop waits to surface: one parked while the host was idle,
+    /// or one the backend caught and no wait drained yet.
+    pub fn stop_pending(&self) -> bool {
+        self.parked_stop.is_some() || self.backend.has_pending_stop()
     }
 
     /// Resolve the stopped vCPU's process and Windows thread from the target,
@@ -305,7 +299,7 @@ impl Session {
     /// recorded as the stop the target is halted at.
     pub(super) fn watchpoint_hit(
         &mut self,
-        breakpoint: Breakpoint,
+        breakpoint: BreakpointInfo,
         event: StopEvent,
         condition_error: Option<String>,
     ) -> StopResolution {
@@ -546,103 +540,6 @@ impl Session {
         };
         self.record_visible_stop(&resolution);
         Ok(resolution)
-    }
-
-    /// Wait up to `timeout` for the next meaningful stop **without resuming**:
-    /// drains a held stop, drives the reboot / breakpoint classification, absorbs
-    /// debugger noise (assist break-ins, stray single-steps, wrong-process and
-    /// false-condition hits), and returns the stop worth surfacing (or
-    /// [`ContinueOutcome::Running`] on timeout/cancel). Because it never resumes, a
-    /// caller already halted at an interesting site (e.g. the early-boot reload)
-    /// observes it in place instead of blowing past it; that separation is why
-    /// the MCP surface splits resume from wait.
-    pub fn wait_for_stop_bounded(
-        &mut self,
-        timeout: Option<Duration>,
-        cancel: &AtomicBool,
-    ) -> Result<ContinueOutcome> {
-        // A stop `service_idle` caught and parked while the host was idle is
-        // the proper event for this wait: surface it before waiting for a new
-        // one, so every host (not just one) sees it as its real event.
-        if let Some(parked) = self.parked_stop.take() {
-            return Ok(parked);
-        }
-        let deadline = timeout.map(|t| Instant::now() + t);
-        loop {
-            if cancel.load(Ordering::Relaxed) {
-                return Ok(ContinueOutcome::Running);
-            }
-            // Wait one poll interval at a time so `cancel` and the deadline stay
-            // responsive; an indefinite wait (`deadline == None`) just keeps going.
-            let poll = match deadline {
-                Some(dl) => {
-                    let remaining = dl.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        return Ok(ContinueOutcome::Running);
-                    }
-                    remaining.min(CONTINUE_POLL_INTERVAL)
-                }
-                None => CONTINUE_POLL_INTERVAL,
-            };
-
-            let event = match self.backend.try_wait_for_stop(poll)? {
-                Some(event) => event,
-                None => {
-                    // Halted with nothing pending: report the park instead of
-                    // spinning out the timeout.
-                    if !self.backend.is_running() {
-                        // Flush a reload nobody surfaced before reporting a plain halt.
-                        if self.reload_surface_pending {
-                            self.reload_surface_pending = false;
-                            return Ok(ContinueOutcome::TargetReloaded {
-                                rip: self
-                                    .last_event
-                                    .as_ref()
-                                    .and_then(|last| last.stop.program_counter),
-                                kernel_base: self.target.kernel_base().map(|a| a.0),
-                                coherent: self.kernel_coherent(),
-                            });
-                        }
-                        let rip = self
-                            .backend
-                            .read_registers()
-                            .ok()
-                            .and_then(|regs| self.register_map.read_u64("rip", &regs).ok())
-                            .unwrap_or(0);
-                        return Ok(ContinueOutcome::Halted { rip });
-                    }
-                    continue;
-                }
-            };
-            match self.classify_stop_event(event)? {
-                StopResolution::Resumed | StopResolution::ModulesChanged => continue,
-                resolution @ StopResolution::TargetReloaded { coherent, .. } => {
-                    reload_trace!(
-                        "continue: SURFACE target_reloaded base={} coherent={}",
-                        self.target.kernel_base().map_or_else(
-                            || "none".to_string(),
-                            |address| format!("{:#x}", address.0)
-                        ),
-                        coherent,
-                    );
-                    return Ok(self.continue_outcome_from_resolution(resolution));
-                }
-                StopResolution::Stopped { event, .. }
-                    if let ExceptionPolicyAction::Continue {
-                        disposition,
-                        command: None,
-                        ..
-                    } = self.exception_policies.action_for(&event) =>
-                {
-                    // A policy with a command needs the REPL to run it, so it
-                    // surfaces here; the command-free ones are pure run control.
-                    self.continue_backend(disposition)?;
-                    self.record_continuation_disposition(disposition);
-                    continue;
-                }
-                resolution => return Ok(self.continue_outcome_from_resolution(resolution)),
-            }
-        }
     }
 
     /// Block until the backend produces a meaningful stop, routing every raw

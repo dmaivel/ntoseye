@@ -3,8 +3,7 @@
 
 use super::{BuiltinVar, Target, ThreadInfo};
 use crate::{
-    backend::MemoryOps,
-    memory::PAGE_SIZE,
+    memory::{MemoryOps, PAGE_SIZE},
     types::{Arch, VirtAddr},
     unwind::return_address_for_register_values,
 };
@@ -23,10 +22,6 @@ impl ThreadInfo {
                 .any(|known| known.eq_ignore_ascii_case(name))
         })?;
         Some((register.read)(self))
-    }
-
-    pub fn pseudo_register_value(&self, name: &str) -> Option<u64> {
-        self.pseudo_register(name).flatten()
     }
 }
 
@@ -203,11 +198,9 @@ impl Target {
             "ntbase" | "kernelbase" => self.guest.as_ref().map(|g| g.ntoskrnl.base_address.0),
             "processbase" | "imagebase" => self.current_process_image_base(),
             "processdtb" => self.process.as_ref().map(|p| p.dtb),
-            "attachedeprocess" | "attachedprocess" => {
-                self.process.as_ref().map(|p| p.eprocess_va.0)
-            }
+            "attachedeprocess" | "attachedprocess" => self.process.as_ref().map(|p| p.eprocess.0),
             "attachedpid" => self.process.as_ref().map(|p| p.pid),
-            "eprocess" | "process" => self.process.as_ref().map(|p| p.eprocess_va.0),
+            "eprocess" | "process" => self.process.as_ref().map(|p| p.eprocess.0),
             "peb" => self.current_process_peb(),
             "pid" => self.process.as_ref().map(|p| p.pid),
             // `$t0`-`$t19` are WinDbg's twenty writable slots, kept as the
@@ -251,7 +244,7 @@ impl Target {
     /// `_EPROCESS`. A System-context stop has none, which stays `None` so the
     /// expression reports an error rather than handing back zero.
     fn current_process_peb(&self) -> Option<u64> {
-        let eprocess_va = self.process.as_ref()?.eprocess_va;
+        let eprocess_va = self.process.as_ref()?.eprocess;
         let peb: VirtAddr = self
             .guest()
             .ok()?
@@ -367,7 +360,7 @@ impl Target {
                 },
                 BuiltinVar {
                     name: "attachedeprocess",
-                    value: process.eprocess_va.0,
+                    value: process.eprocess.0,
                     source: "attached process EPROCESS",
                 },
                 BuiltinVar {
@@ -382,7 +375,7 @@ impl Target {
                 vars.extend([
                     BuiltinVar {
                         name: "eprocess",
-                        value: process.eprocess_va.0,
+                        value: process.eprocess.0,
                         source: "attached process EPROCESS",
                     },
                     BuiltinVar {
@@ -447,12 +440,12 @@ mod tests {
     fn thread_pseudo_registers_are_case_insensitive_and_optional() {
         let mut thread = sample_thread();
         assert_eq!(
-            thread.pseudo_register_value("TrapFrame"),
+            thread.pseudo_register("TrapFrame").flatten(),
             thread.trap_frame.map(|addr| addr.0)
         );
         thread.teb = None;
-        assert_eq!(thread.pseudo_register_value("TEB"), None);
-        assert_eq!(thread.pseudo_register_value("unknown"), None);
+        assert_eq!(thread.pseudo_register("TEB"), Some(None));
+        assert_eq!(thread.pseudo_register("unknown"), None);
     }
 
     #[test]
@@ -490,7 +483,8 @@ mod tests {
 
         for name in NAMES {
             let value = thread
-                .pseudo_register_value(name)
+                .pseudo_register(name)
+                .flatten()
                 .unwrap_or_else(|| panic!("{name} should resolve for the sample thread"));
             assert_eq!(session.target.builtin_variable_value(name), Some(value));
             assert!(

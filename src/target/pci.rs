@@ -2,14 +2,12 @@
 //! space read through the backend and decoded (`!pci`).
 
 use std::collections::HashSet;
-use std::sync::atomic::Ordering;
 
-use crate::backend::MemoryOps;
-use crate::dbg_backend::PciConfigAddress;
 use crate::error::{Error, Result};
-use crate::session::Session;
+use crate::memory::MemoryOps;
 use crate::target::Target;
 use crate::types::VirtAddr;
+use ntoseye_macros::record;
 
 /// Conventional configuration space; the rest of the 4 KiB is PCI Express
 /// extended space.
@@ -36,8 +34,8 @@ const MAX_EXTENDED_CAPABILITIES: usize = 960;
 pub const CAPABILITY_PCI_EXPRESS: u16 = 0x10;
 
 /// pci.sys's view of the hierarchy: segments, their root buses, and each
-/// bus's functions and child buses.
-#[derive(Debug, Clone)]
+/// bus's functions and child buses (`!pcitree`).
+#[record]
 pub struct PciTree {
     pub segments: Vec<PciTreeSegment>,
     /// The walk stopped at [`MAX_TREE_NODES`] or a nesting/link limit.
@@ -47,7 +45,8 @@ pub struct PciTree {
     pub errors: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+/// A PCI segment and its root buses.
+#[record]
 pub struct PciTreeSegment {
     /// The `pci!_PCI_SEGMENT`.
     pub address: VirtAddr,
@@ -55,7 +54,9 @@ pub struct PciTreeSegment {
     pub root_buses: Vec<PciTreeBus>,
 }
 
-#[derive(Debug, Clone)]
+/// A bus that pci.sys enumerated, with the devices on it and the buses
+/// behind its bridges.
+#[record]
 pub struct PciTreeBus {
     /// The bus FDO's extension (`pci!_PCI_BUS`).
     pub extension: VirtAddr,
@@ -68,7 +69,8 @@ pub struct PciTreeBus {
     pub child_buses: Vec<PciTreeBus>,
 }
 
-#[derive(Debug, Clone)]
+/// A device that pci.sys enumerated.
+#[record(impl)]
 pub struct PciTreeDevice {
     /// The function PDO's extension (`pci!_PCI_DEVICE`).
     pub extension: VirtAddr,
@@ -77,17 +79,35 @@ pub struct PciTreeDevice {
     pub bus: u32,
     pub device: u8,
     pub function: u8,
+    #[record(hex)]
     pub vendor_id: u16,
+    #[record(hex)]
     pub device_id: u16,
+    #[record(hex)]
     pub revision: u8,
+    #[record(hex)]
     pub base_class: u8,
+    #[record(hex)]
     pub sub_class: u8,
+    #[record(hex)]
     pub prog_if: u8,
+    #[record(hex)]
     pub subsystem_vendor_id: u16,
+    #[record(hex)]
     pub subsystem_id: u16,
+    #[record(hex)]
     pub header_type: u8,
-    /// The PnP instance path of the PDO's device node (`PCI\VEN_...`).
+    /// The PnP instance path of the device, if pci.sys recorded one.
     pub instance_path: Option<String>,
+}
+
+#[record]
+impl PciTreeDevice {
+    /// The name of the class code, if it is known.
+    #[record(getter)]
+    pub fn class_name(&self) -> Option<String> {
+        class_name(self.base_class, self.sub_class)
+    }
 }
 
 /// One ACPI MCFG allocation: segment `segment`'s buses `start_bus..=end_bus`
@@ -143,14 +163,46 @@ pub fn parse_mcfg(bytes: &[u8]) -> Vec<EcamWindow> {
 
 /// A function's configuration space as read (256 bytes, or 4 KiB with
 /// extended space), with where it is and its decoded header.
-#[derive(Debug, Clone)]
-pub struct PciFunctionConfig {
+#[record(impl)]
+pub struct PciFunction {
     pub segment: u16,
     pub bus: u8,
     pub device: u8,
     pub function: u8,
     pub header: PciHeader,
+    /// The configuration space as read.
+    #[record(bytes)]
     pub config: Vec<u8>,
+}
+
+#[record]
+impl PciFunction {
+    /// The name of the class code, if it is known.
+    #[record(getter)]
+    pub fn class_name(&self) -> Option<String> {
+        class_name(self.header.base_class, self.header.sub_class)
+    }
+
+    /// The capability list.
+    #[record(getter)]
+    pub fn capabilities(&self) -> Vec<PciCapability> {
+        capabilities(&self.header, &self.config)
+    }
+
+    /// The PCI Express extended capabilities. Empty for a conventional
+    /// function, or if only 256 bytes were read.
+    #[record(getter)]
+    pub fn extended_capabilities(&self) -> Vec<PciCapability> {
+        let express = self
+            .capabilities()
+            .iter()
+            .any(|capability| capability.id == CAPABILITY_PCI_EXPRESS);
+        if express && self.config.len() > PCI_CONFIG_SIZE {
+            extended_capabilities(&self.config)
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 /// What `!pci` scans: one segment's buses `first_bus..=last_bus`, optionally
@@ -285,39 +337,110 @@ pub fn parse_pci_request(values: &[u64]) -> Result<PciRequest> {
     })
 }
 
-#[derive(Debug, Clone)]
+/// The functions that a `!pci` scan found.
+#[record]
 pub struct PciScan {
-    pub functions: Vec<PciFunctionConfig>,
+    pub functions: Vec<PciFunction>,
     /// The scan stopped at a host interrupt.
     pub interrupted: bool,
 }
 
 /// The decoded type 0/1/2 configuration header.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[record(impl)]
+#[derive(PartialEq, Eq)]
 pub struct PciHeader {
+    #[record(hex)]
     pub vendor_id: u16,
+    #[record(hex)]
     pub device_id: u16,
+    #[record(hex)]
     pub command: u16,
+    #[record(hex)]
     pub status: u16,
+    #[record(hex)]
     pub revision: u8,
+    #[record(hex)]
     pub prog_if: u8,
+    #[record(hex)]
     pub sub_class: u8,
+    #[record(hex)]
     pub base_class: u8,
+    #[record(hex)]
     pub cache_line_size: u8,
+    #[record(hex)]
     pub latency_timer: u8,
     /// Layout in the low 7 bits; bit 7 marks a multi-function device.
+    #[record(hex)]
     pub header_type: u8,
+    #[record(hex)]
     pub bist: u8,
     pub bars: Vec<PciBar>,
     /// Type 0 subsystem IDs (type 2 keeps them at 0x40).
+    #[record(skip)]
     pub subsystem: Option<(u16, u16)>,
     /// Expansion ROM base register (type 0 at 0x30, type 1 at 0x38).
+    #[record(hex)]
     pub expansion_rom: Option<u32>,
     /// Type 1/2 primary, secondary, subordinate bus numbers.
+    #[record(skip)]
     pub buses: Option<(u8, u8, u8)>,
+    #[record(hex)]
     pub capabilities_pointer: u8,
+    #[record(hex)]
     pub interrupt_line: u8,
+    /// 0 for none, 1-4 for INTA#-INTD#.
     pub interrupt_pin: u8,
+}
+
+/// The bus numbers of a type 1 or type 2 header.
+#[record]
+pub struct PciBuses {
+    pub primary: u8,
+    pub secondary: u8,
+    pub subordinate: u8,
+}
+
+#[record]
+impl PciHeader {
+    #[record(getter)]
+    pub fn multifunction(&self) -> bool {
+        self.header_type & 0x80 != 0
+    }
+
+    /// The names of the bits that are set in the command register.
+    #[record(getter)]
+    pub fn command_flags(&self) -> Vec<&'static str> {
+        command_flags(self.command)
+    }
+
+    /// The names of the bits that are set in the status register.
+    #[record(getter)]
+    pub fn status_flags(&self) -> Vec<&'static str> {
+        status_flags(self.status)
+    }
+
+    /// Type 0 and 2 headers only.
+    #[record(getter, hex)]
+    pub fn subsystem_vendor_id(&self) -> Option<u16> {
+        self.subsystem.map(|(vendor, _)| vendor)
+    }
+
+    /// Type 0 and 2 headers only.
+    #[record(getter, hex)]
+    pub fn subsystem_id(&self) -> Option<u16> {
+        self.subsystem.map(|(_, id)| id)
+    }
+
+    /// Type 1 and 2 headers only.
+    #[record(getter, rename = "buses")]
+    pub fn bus_numbers(&self) -> Option<PciBuses> {
+        self.buses
+            .map(|(primary, secondary, subordinate)| PciBuses {
+                primary,
+                secondary,
+                subordinate,
+            })
+    }
 }
 
 impl PciHeader {
@@ -325,57 +448,73 @@ impl PciHeader {
         self.header_type & 0x7f
     }
 
-    pub fn multifunction(&self) -> bool {
-        self.header_type & 0x80 != 0
-    }
-
     pub fn has_capabilities(&self) -> bool {
         self.status & 0x10 != 0
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What a BAR decodes: `io`, `mem32`, `mem1m`, or `mem64`.
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub enum PciBarKind {
     Io,
+    #[record(rename = "mem32")]
     Memory32,
     /// Below 1 MiB (legacy type 01b).
+    #[record(rename = "mem1m")]
     Memory1M,
+    #[record(rename = "mem64")]
     Memory64,
-}
-
-impl PciBarKind {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Io => "io",
-            Self::Memory32 => "mem32",
-            Self::Memory1M => "mem1m",
-            Self::Memory64 => "mem64",
-        }
-    }
 }
 
 /// A base address register: its index, the raw register (both halves of a
 /// 64-bit BAR), and the address it decodes to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub struct PciBar {
+    /// The BAR number (0-5).
     pub index: u8,
+    #[record(hex)]
     pub raw: u64,
     pub kind: PciBarKind,
+    #[record(hex)]
     pub address: u64,
     pub prefetchable: bool,
 }
 
 /// A capability-list entry: its offset, ID, and (extended capabilities) the
 /// version.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[record(impl)]
+#[derive(Copy, PartialEq, Eq)]
 pub struct PciCapability {
+    /// The offset of the entry in configuration space.
+    #[record(hex)]
     pub offset: u16,
+    #[record(hex)]
     pub id: u16,
+    /// The version of an extended capability. `None` for a standard one.
     pub version: Option<u8>,
+}
+
+#[record]
+impl PciCapability {
+    /// The name of the capability, if it is known.
+    #[record(getter)]
+    pub fn name(&self) -> Option<&'static str> {
+        match self.version {
+            Some(_) => extended_capability_name(self.id),
+            None => capability_name(self.id),
+        }
+    }
 }
 
 fn u16_at(config: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([config[offset], config[offset + 1]])
+}
+
+/// No function answered the configuration read: its vendor ID is all ones.
+pub fn function_absent(config: &[u8]) -> bool {
+    u16_at(config, 0) == u16::MAX
 }
 
 fn u32_at(config: &[u8], offset: usize) -> u32 {
@@ -1077,157 +1216,6 @@ impl TreeWalk<'_> {
             .ok()?
             .unicode_string("InstancePath")
             .ok()
-    }
-}
-
-/// [`Error::TargetRunning`] payload for configuration-space reads.
-const PCI_CONFIG_NEEDS_HALT: &str = "PCI configuration space is read on a halted target.";
-
-impl Session {
-    /// Refuse a configuration-space read the backend cannot make, saying why,
-    /// or one the target cannot take while running.
-    fn check_pci_config(&self) -> Result<()> {
-        if !self.backend.supports_pci_config() {
-            return Err(Error::DebugInfo(format!(
-                "the {} backend cannot read PCI configuration space: it is device registers \
-                 (the ECAM window or ports 0xcf8/0xcfc), not the RAM this backend reads; use \
-                 the gdb backend (QEMU) or kd/kdnet",
-                self.backend.name()
-            )));
-        }
-        if self.backend.is_running() {
-            return Err(Error::TargetRunning(PCI_CONFIG_NEEDS_HALT));
-        }
-        Ok(())
-    }
-
-    /// Read `len` bytes of a function's configuration space from `offset`.
-    fn read_function_config(
-        &mut self,
-        windows: &[EcamWindow],
-        segment: u16,
-        bus: u8,
-        device: u8,
-        function: u8,
-        offset: u16,
-        len: usize,
-    ) -> Result<Vec<u8>> {
-        let ecam = windows
-            .iter()
-            .find_map(|window| window.function_page(segment, bus, device, function));
-        let mut config = vec![0; len];
-        self.backend.read_pci_config(
-            PciConfigAddress {
-                segment,
-                bus,
-                device,
-                function,
-                ecam,
-            },
-            offset,
-            &mut config,
-        )?;
-        Ok(config)
-    }
-
-    /// Scan configuration space as `!pci` does: each device's function 0,
-    /// and functions 1-7 of a multi-function device, reading `query.size`
-    /// bytes of every function whose vendor ID is not all-ones. A named
-    /// function is read whatever function 0 says.
-    pub fn scan_pci(&mut self, query: &PciQuery) -> Result<PciScan> {
-        if let Some(device) = query.device.filter(|device| *device >= PCI_MAX_DEVICES) {
-            return Err(Error::InvalidArgument(format!(
-                "PCI device {device:#x} is out of range (0-0x1f)"
-            )));
-        }
-        if let Some(function) = query
-            .function
-            .filter(|function| *function >= PCI_MAX_FUNCTIONS)
-        {
-            return Err(Error::InvalidArgument(format!(
-                "PCI function {function:#x} is out of range (0-7)"
-            )));
-        }
-        if query.first_bus > query.last_bus {
-            return Err(Error::InvalidArgument(format!(
-                "bus range {:#x}-{:#x} is empty",
-                query.first_bus, query.last_bus
-            )));
-        }
-        self.check_pci_config()?;
-        let size = query.size.clamp(0x40, PCI_EXTENDED_CONFIG_SIZE);
-        // Only the gdb backend needs them; a missing table is its error then.
-        let windows = self.target.pci_ecam_windows().unwrap_or_default();
-        let interrupt = std::sync::Arc::clone(&self.target.interrupt);
-        let mut scan = PciScan {
-            functions: Vec::new(),
-            interrupted: false,
-        };
-        for bus in query.first_bus..=query.last_bus {
-            let devices = match query.device {
-                Some(device) => device..=device,
-                None => 0..=PCI_MAX_DEVICES - 1,
-            };
-            for device in devices {
-                if interrupt.load(Ordering::Relaxed) {
-                    scan.interrupted = true;
-                    return Ok(scan);
-                }
-                let functions = match query.function {
-                    Some(function) => function..=function,
-                    None => {
-                        let head = self.read_function_config(
-                            &windows,
-                            query.segment,
-                            bus,
-                            device,
-                            0,
-                            0,
-                            0x10,
-                        )?;
-                        if u16_at(&head, 0) == u16::MAX {
-                            continue;
-                        }
-                        let last = if head[0x0e] & 0x80 != 0 {
-                            PCI_MAX_FUNCTIONS - 1
-                        } else {
-                            0
-                        };
-                        0..=last
-                    }
-                };
-                for function in functions {
-                    let config = self.read_function_config(
-                        &windows,
-                        query.segment,
-                        bus,
-                        device,
-                        function,
-                        0,
-                        size,
-                    )?;
-                    if u16_at(&config, 0) == u16::MAX {
-                        continue;
-                    }
-                    let Some(header) = parse_header(&config) else {
-                        return Err(Error::DebugInfo(format!(
-                            "PCI {bus:02x}:{device:02x}.{function} returned {} bytes of \
-                             configuration space, short of its 64-byte header",
-                            config.len()
-                        )));
-                    };
-                    scan.functions.push(PciFunctionConfig {
-                        segment: query.segment,
-                        bus,
-                        device,
-                        function,
-                        header,
-                        config,
-                    });
-                }
-            }
-        }
-        Ok(scan)
     }
 }
 

@@ -23,6 +23,15 @@ pub const EXIT_GPRS: [&str; 15] = [
     "r15",
 ];
 
+/// An exit's general-purpose registers in [`EXIT_GPRS`] order, as the SDK
+/// shows them.
+pub fn ordered_exit_gprs(registers: &HashMap<&'static str, u64>) -> crate::types::Keyed<u64> {
+    EXIT_GPRS
+        .iter()
+        .filter_map(|name| Some((*name, *registers.get(name)?)))
+        .collect()
+}
+
 const EXIT_GPR_REGISTERS: [Register; 15] = [
     Register::RAX,
     Register::RCX,

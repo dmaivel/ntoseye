@@ -3,12 +3,11 @@
 
 use std::collections::HashSet;
 
-use super::{PteLevel, PteWalk, PtovDetail, PtovMapping, VtopDetail, VtopLevel};
-use crate::backend::MemoryOps;
+use super::{PteLevel, PteWalk, PtovDetail, PtovMapping, VtopDetail};
 use crate::error::{Error, Result};
-use crate::memory::{AddressSpace, DTB_IDENTITY, PAGE_SIZE, PFN_MASK, Residency};
+use crate::memory::{AddressSpace, DTB_IDENTITY, MemoryOps, PAGE_SIZE, Residency};
 use crate::target::Target;
-use crate::types::{Arch, Dtb, PageTableEntry, PageTableLevel, VirtAddr};
+use crate::types::{Arch, Dtb, PFN_MASK, PageTableEntry, PageTableLevel, VirtAddr};
 
 const MAX_PTOV_TABLE_PAGES: usize = 65_536;
 const MAX_PTOV_RESULTS: usize = 32;
@@ -89,18 +88,10 @@ impl Target {
             let walk_transition = walk
                 .pte
                 .as_ref()
-                .is_some_and(|level| level.value.is_transition());
+                .is_some_and(|level| PageTableEntry(level.value).is_transition());
             let large_entry = walk.levels().any(|level| level.attributes.large_page);
             let large = physical.is_some() && large_entry;
-            let levels = walk
-                .levels()
-                .map(|level| VtopLevel {
-                    level: level.level,
-                    address: level.address,
-                    value: level.value.0,
-                    attributes: level.attributes.clone(),
-                })
-                .collect();
+            let levels = walk.levels().cloned().collect();
             return Ok(VtopDetail {
                 address,
                 dtb,
@@ -233,7 +224,7 @@ impl Target {
             Ok(PteLevel {
                 level,
                 address: at,
-                value,
+                value: value.0,
                 attributes: value.attributes(arch, level, address),
             })
         };
@@ -286,7 +277,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
         .checked_add((va.pml4_index() as u64) * 8)
         .ok_or_else(|| Error::DebugInfo("PML4 address overflow".to_string()))?;
     let pml4e: PageTableEntry = memory.read(pml4_address)?;
-    levels.push(VtopLevel {
+    levels.push(PteLevel {
         level: PageTableLevel::Pxe,
         address: VirtAddr(pml4_address),
         value: pml4e.0,
@@ -308,7 +299,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
         .checked_add((va.pdpt_index() as u64) * 8)
         .ok_or_else(|| Error::DebugInfo("PDPT address overflow".to_string()))?;
     let pdpte: PageTableEntry = memory.read(pdpt_address)?;
-    levels.push(VtopLevel {
+    levels.push(PteLevel {
         level: PageTableLevel::Ppe,
         address: VirtAddr(pdpt_address),
         value: pdpte.0,
@@ -342,7 +333,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
         .checked_add((va.pd_index() as u64) * 8)
         .ok_or_else(|| Error::DebugInfo("PD address overflow".to_string()))?;
     let pde: PageTableEntry = memory.read(pde_address)?;
-    levels.push(VtopLevel {
+    levels.push(PteLevel {
         level: PageTableLevel::Pde,
         address: VirtAddr(pde_address),
         value: pde.0,
@@ -376,7 +367,7 @@ fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDe
         .checked_add((va.pt_index() as u64) * 8)
         .ok_or_else(|| Error::DebugInfo("PT address overflow".to_string()))?;
     let pte: PageTableEntry = memory.read(pte_address)?;
-    levels.push(VtopLevel {
+    levels.push(PteLevel {
         level: PageTableLevel::Pte,
         address: VirtAddr(pte_address),
         value: pte.0,

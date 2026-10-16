@@ -4,10 +4,9 @@
 //! `_MI_SYSTEM_PTE_TYPE`.
 
 use super::{SystemPteRun, SystemPteTypeDetail, SystemPtesDetail};
-use crate::backend::MemoryOps;
 use crate::error::{Error, Result};
 use crate::layout::ParsedType;
-use crate::memory::PAGE_SIZE;
+use crate::memory::{MemoryOps, PAGE_SIZE};
 use crate::target::Target;
 use crate::types::VirtAddr;
 
@@ -121,11 +120,10 @@ impl Target {
     }
 
     /// Report each system-PTE bitmap allocator: its counters, the VA range
-    /// it hands out, and the free runs its bitmap holds (listed when flag
-    /// 0x1 is set). A build without `_MI_SYSTEM_PTE_TYPE` allocators
+    /// it hands out, and the free runs its bitmap holds (listed when
+    /// `list_free_runs`). A build without `_MI_SYSTEM_PTE_TYPE` allocators
     /// in `MiState` (before Windows 10) is refused.
-    pub fn system_ptes(&self, flags: u64) -> Result<SystemPtesDetail> {
-        let list_free_runs = flags & 1 != 0;
+    pub fn system_ptes(&self, list_free_runs: bool) -> Result<SystemPtesDetail> {
         let guest = self.guest()?;
         let ntos = &guest.ntoskrnl;
         let types = ntos.types();
@@ -186,7 +184,6 @@ impl Target {
 
         let memory = ntos.memory();
         let mut detail = SystemPtesDetail {
-            flags,
             types: Vec::with_capacity(allocators.len()),
             total: 0,
             free: 0,

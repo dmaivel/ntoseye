@@ -1,9 +1,21 @@
-use crate::memory::{
-    PAGE_SHIFT, PDE_SHIFT, PDPTE_SHIFT, PFN_MASK, PML4E_SHIFT, PT_INDEX_MASK, PTE_SHIFT,
-};
 use std::fmt;
 use std::ops::{Add, AddAssign, Sub, SubAssign};
+
+use ntoseye_macros::record;
 use zerocopy::{FromBytes, Immutable, IntoBytes};
+
+/// x64 page-table entry physical-address field: bits 51:12 (MAXPHYADDR = 52).
+pub const PFN_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+pub const PAGE_SHIFT: u32 = 12;
+pub const PTE_SHIFT: u8 = 12;
+pub const PDE_SHIFT: u8 = 21;
+pub const PDPTE_SHIFT: u8 = 30;
+pub const PML4E_SHIFT: u8 = 39;
+pub const PT_INDEX_MASK: u64 = 0x1FF;
+
+/// Upper bound on processor indexes; `KiProcessorBlock` is sized by
+/// `MAXIMUM_PROCESSORS`.
+pub const MAX_PROCESSORS: u16 = 2048;
 
 #[derive(
     Default,
@@ -108,6 +120,18 @@ impl Sub<u32> for VirtAddr {
     }
 }
 
+/// An object whose keys are data, not a schema (registers a state may or may
+/// not hold, fields a Windows build may or may not have), in order. In the
+/// SDK a `Record`, whose attributes are its keys.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Keyed<T>(pub Vec<(&'static str, T)>);
+
+impl<T> FromIterator<(&'static str, T)> for Keyed<T> {
+    fn from_iter<I: IntoIterator<Item = (&'static str, T)>>(fields: I) -> Self {
+        Self(fields.into_iter().collect())
+    }
+}
+
 pub type PhysAddr = u64;
 
 pub type Dtb = PhysAddr;
@@ -132,14 +156,6 @@ pub enum CodeMachine {
 }
 
 impl CodeMachine {
-    /// The processor's own instruction set.
-    pub const fn native(arch: Arch) -> Self {
-        match arch {
-            Arch::Amd64 => Self::Amd64,
-            Arch::Arm64 => Self::Arm64,
-        }
-    }
-
     pub const fn label(self) -> &'static str {
         match self {
             Self::X86 => "x86",
@@ -218,35 +234,36 @@ pub struct PageTableEntry(pub u64);
 /// [`PageTableEntry::attributes`]. For an entry pointing at a lower table,
 /// `writable`, `user`, and `nx` are the restrictions it places on what lies
 /// below.
+#[record]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PteAttributes {
     pub present: bool,
+    /// Whether the entry maps a large page instead of pointing to a lower
+    /// table.
     pub large_page: bool,
     pub writable: bool,
     pub user: bool,
     pub nx: bool,
+    /// The frame the entry points at.
+    #[record(hex)]
     pub pfn: u64,
+    /// WinDbg's flag string for the entry.
     pub flags: String,
 }
 
+/// A page-table level, by WinDbg's name for its entries: `PXE`, `PPE`,
+/// `PDE`, or `PTE`.
+#[record]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PageTableLevel {
+    #[record(label = "PXE")]
     Pxe,
+    #[record(label = "PPE")]
     Ppe,
+    #[record(label = "PDE")]
     Pde,
+    #[record(label = "PTE")]
     Pte,
-}
-
-impl PageTableLevel {
-    /// WinDbg's name for an entry at this level.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Pxe => "PXE",
-            Self::Ppe => "PPE",
-            Self::Pde => "PDE",
-            Self::Pte => "PTE",
-        }
-    }
 }
 
 impl VirtAddr {

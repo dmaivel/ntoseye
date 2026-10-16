@@ -9,10 +9,9 @@ use pelite::pe64::{Pe, PeView, image::IMAGE_SCN_MEM_EXECUTE};
 
 use super::{CachedModule, OwnedModule, StackPage, StackTracer, ThreadTraceContext};
 use crate::{
-    backend::MemoryOps,
     error::{Error, Result},
     guest::{Image, ModuleInfo},
-    memory::{PAGE_SIZE, read_page_chunks},
+    memory::{MemoryOps, PAGE_SIZE, read_page_chunks},
     pe::{CodeLayout, PeImage, pe_headers_end},
     symbols::ImageFetch,
     target::Target,
