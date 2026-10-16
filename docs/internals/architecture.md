@@ -2,6 +2,38 @@
 
 This page is for contributors. It describes how one definition serves the REPL, the Python SDK, the command reference and the other hosts (DAP, gdbserver, MCP), and what to write to add a command or an SDK method.
 
+## Layers
+
+The crate is six layers. `src/lib.rs` declares them bottom to top, and each is a folder with a layer file (`src/nt.rs` declares the modules in `src/nt/`). A module may use its own layer and the layers before it, never a later one:
+
+| Layer | Modules | What it is |
+| --- | --- | --- |
+| `base` | `bytes`, `error`, `notice`, `output`, `diagnostics`, `types`, `ntstatus`, `time`, `memory`, `disasm` | Byte and text helpers, errors, notices and output, the core types, memory access, the disassembler |
+| `backend` | `dbg_backend`, `kd`, `gdb`, `host`, `phys`, `memory_backend`, `partition_backend`, `cpu_context`, `debugger_data` | The debug transports and memory sources, and the register and debugger-data formats they speak |
+| `nt` | `target`, `guest`, `layout`, `symbols`, `pe`, `unwind`, `trapframe`, `cpu_state`, `kuser_shared`, `wpp`, `dmp`, `userdump`, `dump_writer`, `breakpoints`, `bugchecks`, `expr` | The Windows model over a backend, with its dump formats, breakpoints and expressions |
+| `session` | `session`, with `exception_policy`, `typeview` and `dump` inside it | A debugging session: run control, stops, inspection |
+| `analysis` | `blackbox`, `triage_report` | Reports built over a session (`!analyze`, `!blackbox`) |
+| `hosts` | `repl`, `python`, `mcp`, `dap`, `gdbserver`, `cli`, `configure`, `ui`, `termination` | The front ends |
+
+The crate root keeps `Backend`, `TargetSpec` and the default endpoints, which `Session::open` takes; they count as the session layer.
+
+Modules of one layer may use each other. The Windows model is one web: the target, the guest, layouts, symbols and stacks read each other. So are the hosts, as their features allow: the SDK runs commands through the REPL's dispatcher, and the CLI starts MCP, DAP and gdbserver. One reference goes up a layer on purpose: the backend's `PhysMem` (`backend::phys`) is the enum of every memory the model reads, so it names the dump readers (`nt::dmp`, `nt::userdump`) and a partition's EPT (`nt::guest`).
+
+Some modules sit where their dependencies put them:
+
+- The dump formats are part of `nt`: their parsers build model records (a `ModuleInfo` with its CodeView, named memory regions), and the model reads their streams back. Gathering a live session's dump header is the session's (`session::dump`).
+- `breakpoints`, `bugchecks` and `expr` are part of `nt`: the target owns the breakpoint site journal, stack walks use the breakpoints' kernel-space test, the model uses the bugcheck module's pointer and module-name helpers, and ETW resolves logger names as expressions. None of them uses anything above `nt`.
+- `typeview` reads guest values through a `Session`, so it is in `session`, and `analysis` is above `session` because the triage reports are built from one.
+
+The core names no host. Where the session needs one, the host installs it: every host opens its sessions through `repl::open_session`, which installs the REPL dispatcher as the session's `ActionRunner`. A host's view of a model type lives in the host: `FromArg` impls in `src/hosts/repl/args.rs`, `PyArg` impls in `src/hosts/python/args.rs`, and SDK methods on a record's class in a `#[pymethods]` block under `src/hosts/python/` (`Stop.hit()` is one). The `#[record]` macro, which the model's types carry, names `crate::hosts::python` only in the code it emits under `cfg(feature = "python")`.
+
+`build.rs` enforces the layers on every build, whatever the features. It walks the module tree from `src/lib.rs`, reads every `crate::`, `$crate::`, `self::` and `super::` path in `use` trees, code, attributes and macro bodies, and fails the build on one that names a later layer, unless its module and target are in `ALLOWED` (the three `PhysMem` references). Test code (`#[cfg(test)]`) is not checked, since a test of a lower module may build its fixture from a higher one. A violation fails the build at its line:
+
+```text
+a module uses a later layer (layers, bottom to top: base, backend, nt, session, analysis, hosts; see build.rs and docs/internals/architecture.md):
+  src/base/bytes.rs:11: crate::base::bytes uses crate::nt::target::Target::generation, but nt comes after base
+```
+
 ## Records: one type per concept
 
 Each Windows-model concept has one Rust type, and that type is also its SDK class. A model struct or enum carries `#[record]` (the `ntoseye-macros` crate, `macros/src/record.rs`):

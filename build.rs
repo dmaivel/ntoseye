@@ -6,6 +6,9 @@
 //!
 //! With `python`, also list the SDK's classes (`#[record]`s, `#[handle]`s
 //! and `#[pyclass]`es) in `$OUT_DIR/sdk_classes.rs`.
+//!
+//! Always, fail the build when a module uses a later layer than its own
+//! (see `layers`).
 
 use std::path::Path;
 use std::process::Command;
@@ -59,8 +62,435 @@ fn main() {
     #[cfg(feature = "python-embed")]
     pyo3_build_config::add_python_framework_link_args();
 
+    layers::check();
+
     #[cfg(feature = "python")]
     classes::write();
+}
+
+/// The module tree as rustc reads it from `src/lib.rs`: where a `mod x;` is
+/// (`#[path]` included), and which items exist only in a test build.
+mod tree {
+    use std::path::{Path, PathBuf};
+
+    use syn::{Attribute, Item, ItemMod};
+
+    /// Where a child module's items are.
+    pub enum Child<'a> {
+        /// An inline module, and the directory of its `mod x;` files.
+        Inline(&'a [Item], PathBuf),
+        /// A module file, and the directory of its `mod x;` files.
+        File(PathBuf, PathBuf),
+    }
+
+    /// Child module `child` of a module in `file`, whose `mod x;` files are
+    /// in `dir`. A `#[path]` at a file's top level is relative to the file's
+    /// directory; in an inline module, to that module's directory: that is
+    /// `path_base`.
+    pub fn child<'a>(child: &'a ItemMod, file: &Path, dir: &Path, path_base: &Path) -> Child<'a> {
+        let name = child.ident.to_string();
+        let explicit = child_path(&child.attrs, file).map(|explicit| path_base.join(explicit));
+        match (&child.content, explicit) {
+            // An inline module's `#[path]` names its directory.
+            (Some((_, items)), explicit) => {
+                Child::Inline(items, explicit.unwrap_or_else(|| dir.join(&name)))
+            }
+            // A `#[path]` file's own modules are beside it, as a `mod.rs`'s
+            // are.
+            (None, Some(child_file)) => {
+                let child_dir = child_file.parent().unwrap_or(Path::new("")).to_path_buf();
+                Child::File(child_file, child_dir)
+            }
+            (None, None) => {
+                let child_dir = dir.join(&name);
+                let flat = dir.join(format!("{name}.rs"));
+                let nested = child_dir.join("mod.rs");
+                Child::File(if flat.exists() { flat } else { nested }, child_dir)
+            }
+        }
+    }
+
+    /// A module's `#[path = "..."]`.
+    fn child_path(attrs: &[Attribute], file: &Path) -> Option<String> {
+        let attr = attrs.iter().find(|attr| attr.path().is_ident("path"))?;
+        match &attr.meta {
+            syn::Meta::NameValue(syn::MetaNameValue {
+                value:
+                    syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(path),
+                        ..
+                    }),
+                ..
+            }) => Some(path.value()),
+            _ => panic!(
+                "{}: #[path] takes a string, #[path = \"...\"]",
+                file.display()
+            ),
+        }
+    }
+
+    /// The predicates of the `#[cfg]`s in `attrs`.
+    pub fn predicates(attrs: &[Attribute]) -> Vec<syn::Meta> {
+        attrs
+            .iter()
+            .filter(|attr| attr.path().is_ident("cfg"))
+            .map(|attr| {
+                attr.parse_args::<syn::Meta>()
+                    .unwrap_or_else(|error| panic!("#[cfg(...)]: {error}"))
+            })
+            .collect()
+    }
+
+    /// Whether `predicate` holds only in a test build: `test`, an `all`
+    /// with such a part, or an `any` of only such parts. `not(test)` and
+    /// `any(test, x)` hold outside tests too.
+    fn requires_test(predicate: &syn::Meta) -> bool {
+        let parts = |list: &syn::MetaList| {
+            list.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            )
+            .unwrap_or_else(|error| panic!("#[cfg(...)]: {error}"))
+        };
+        match predicate {
+            syn::Meta::Path(path) => path.is_ident("test"),
+            syn::Meta::List(list) if list.path.is_ident("all") => {
+                parts(list).iter().any(requires_test)
+            }
+            syn::Meta::List(list) if list.path.is_ident("any") => {
+                let parts = parts(list);
+                !parts.is_empty() && parts.iter().all(requires_test)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether an item with `attrs` exists only in a test build.
+    pub fn test_only(attrs: &[Attribute]) -> bool {
+        predicates(attrs).iter().any(requires_test)
+    }
+}
+
+/// Fails the build when a module uses a layer after its own. `src/lib.rs`
+/// declares the layers bottom to top ([`LAYERS`](layers::LAYERS)): a module
+/// may use its own layer and the ones before it, and a later one only
+/// through [`ALLOWED`](layers::ALLOWED). The crate root's own items
+/// (`Backend`, `TargetSpec`, the default endpoints) are what
+/// `Session::open` takes, so they count as the session layer.
+///
+/// The check reads every `crate::`, `$crate::`, `self::` and `super::` path
+/// in the source, in `use` trees, code, attributes and macro bodies, under
+/// every feature, so a reference behind a feature gate fails every build.
+/// Test code (`#[cfg(test)]`) is not checked: a test of a lower module may
+/// build its fixture from a higher one, such as a `Session` over a dump.
+mod layers {
+    use std::path::Path;
+
+    use proc_macro2::{Delimiter, Spacing, Span, TokenStream, TokenTree};
+    use syn::visit::{self, Visit};
+    use syn::{Attribute, ImplItem, Item, UseTree};
+
+    use super::tree::{self, Child, test_only};
+
+    /// The layers, bottom to top.
+    pub const LAYERS: [&str; 6] = ["base", "backend", "nt", "session", "analysis", "hosts"];
+
+    /// The layer of the crate root's own items: the session's.
+    const ROOT: usize = 3;
+
+    /// The references from a module to a later layer that are deliberate:
+    /// the backend's physical-memory source, `PhysMem`, is the enum of every
+    /// memory the Windows model reads, a crash dump's, a user dump's and a
+    /// partition's EPT among them.
+    pub const ALLOWED: [(&str, &str); 3] = [
+        ("crate::backend::phys", "crate::nt::dmp"),
+        ("crate::backend::phys", "crate::nt::userdump"),
+        ("crate::backend::phys", "crate::nt::guest"),
+    ];
+
+    struct Violation {
+        at: String,
+        module: String,
+        target: String,
+        from: usize,
+        to: usize,
+    }
+
+    pub fn check() {
+        let mut violations = Vec::new();
+        file(
+            Path::new("src/lib.rs"),
+            &["crate".to_string()],
+            Path::new("src"),
+            &mut violations,
+        );
+        if violations.is_empty() {
+            return;
+        }
+        let lines: String = violations
+            .iter()
+            .map(|violation| {
+                format!(
+                    "\n  {}: {} uses {}, but {} comes after {}",
+                    violation.at,
+                    violation.module,
+                    violation.target,
+                    LAYERS[violation.to],
+                    LAYERS[violation.from],
+                )
+            })
+            .collect();
+        panic!(
+            "a module uses a later layer (layers, bottom to top: {}; see build.rs and \
+             docs/internals/architecture.md):{lines}",
+            LAYERS.join(", "),
+        );
+    }
+
+    /// Check module `module`, in `file`, whose `mod x;` files are in `dir`.
+    fn file(file: &Path, module: &[String], dir: &Path, violations: &mut Vec<Violation>) {
+        let source = std::fs::read_to_string(file)
+            .unwrap_or_else(|error| panic!("{}: {error}", file.display()));
+        let ast =
+            syn::parse_file(&source).unwrap_or_else(|error| panic!("{}: {error}", file.display()));
+        let path_base = file.parent().unwrap_or(Path::new(""));
+        items(&ast.items, file, module, dir, path_base, violations);
+    }
+
+    fn items(
+        items: &[Item],
+        file: &Path,
+        module: &[String],
+        dir: &Path,
+        path_base: &Path,
+        violations: &mut Vec<Violation>,
+    ) {
+        for item in items {
+            if test_only(attrs(item)) {
+                continue;
+            }
+            if let Item::Mod(child) = item {
+                let mut path = module.to_vec();
+                path.push(child.ident.to_string());
+                match tree::child(child, file, dir, path_base) {
+                    Child::Inline(items, child_dir) => {
+                        self::items(items, file, &path, &child_dir, &child_dir, violations)
+                    }
+                    Child::File(child_file, child_dir) => {
+                        self::file(&child_file, &path, &child_dir, violations)
+                    }
+                }
+                continue;
+            }
+            let mut references = References {
+                module,
+                found: Vec::new(),
+            };
+            references.visit_item(item);
+            let from = rank(module);
+            for (target, span) in references.found {
+                let to = rank(&target);
+                if to <= from || allowed(module, &target) {
+                    continue;
+                }
+                violations.push(Violation {
+                    at: format!("{}:{}", file.display(), span.start().line),
+                    module: module.join("::"),
+                    target: target.join("::"),
+                    from,
+                    to,
+                });
+            }
+        }
+    }
+
+    /// The layer a `crate::` path is in: the layer it names, or the crate
+    /// root's.
+    fn rank(path: &[String]) -> usize {
+        path.get(1)
+            .and_then(|name| LAYERS.iter().position(|layer| layer == name))
+            .unwrap_or(ROOT)
+    }
+
+    fn allowed(module: &[String], target: &[String]) -> bool {
+        let within = |path: &[String], prefix: &str| {
+            let path = path.join("::");
+            path == prefix || path.starts_with(&format!("{prefix}::"))
+        };
+        ALLOWED
+            .iter()
+            .any(|(from, to)| within(module, from) && within(target, to))
+    }
+
+    fn attrs(item: &Item) -> &[Attribute] {
+        match item {
+            Item::Const(item) => &item.attrs,
+            Item::Enum(item) => &item.attrs,
+            Item::ExternCrate(item) => &item.attrs,
+            Item::Fn(item) => &item.attrs,
+            Item::ForeignMod(item) => &item.attrs,
+            Item::Impl(item) => &item.attrs,
+            Item::Macro(item) => &item.attrs,
+            Item::Mod(item) => &item.attrs,
+            Item::Static(item) => &item.attrs,
+            Item::Struct(item) => &item.attrs,
+            Item::Trait(item) => &item.attrs,
+            Item::TraitAlias(item) => &item.attrs,
+            Item::Type(item) => &item.attrs,
+            Item::Union(item) => &item.attrs,
+            Item::Use(item) => &item.attrs,
+            _ => &[],
+        }
+    }
+
+    /// The crate paths an item names, made absolute from `module`.
+    struct References<'a> {
+        module: &'a [String],
+        found: Vec<(Vec<String>, Span)>,
+    }
+
+    impl References<'_> {
+        /// Record `segments` if it is a `crate::`, `self::` or `super::`
+        /// path; any other path is a local name or another crate's.
+        fn add(&mut self, segments: Vec<String>, span: Span) {
+            let mut path = match segments.first().map(String::as_str) {
+                Some("crate") => Vec::new(),
+                Some("self" | "super") => self.module.to_vec(),
+                _ => return,
+            };
+            for segment in segments {
+                match segment.as_str() {
+                    "self" => {}
+                    "super" => {
+                        path.pop();
+                    }
+                    _ => path.push(segment),
+                }
+            }
+            // `crate` alone (`pub(crate)`) names the crate, not an item.
+            if path.len() > 1 {
+                self.found.push((path, span));
+            }
+        }
+
+        /// Record each path of a `use` tree under `prefix`.
+        fn use_tree(&mut self, tree: &UseTree, prefix: &mut Vec<String>) {
+            match tree {
+                UseTree::Path(path) => {
+                    prefix.push(path.ident.to_string());
+                    self.use_tree(&path.tree, prefix);
+                    prefix.pop();
+                }
+                UseTree::Name(name) => {
+                    let mut path = prefix.clone();
+                    path.push(name.ident.to_string());
+                    self.add(path, name.ident.span());
+                }
+                UseTree::Rename(rename) => {
+                    let mut path = prefix.clone();
+                    path.push(rename.ident.to_string());
+                    self.add(path, rename.ident.span());
+                }
+                UseTree::Glob(glob) => self.add(prefix.clone(), glob.star_token.span),
+                UseTree::Group(group) => {
+                    for tree in &group.items {
+                        self.use_tree(tree, prefix);
+                    }
+                }
+            }
+        }
+
+        /// Record the `crate::` and `$crate::` paths in a macro's or an
+        /// attribute's tokens.
+        fn tokens(&mut self, tokens: TokenStream) {
+            let tokens: Vec<TokenTree> = tokens.into_iter().collect();
+            let mut index = 0;
+            while index < tokens.len() {
+                match &tokens[index] {
+                    TokenTree::Group(group) => self.tokens(group.stream()),
+                    TokenTree::Ident(ident) if ident == "crate" => {
+                        let mut segments = vec![ident.to_string()];
+                        while let (Some(TokenTree::Punct(first)), Some(TokenTree::Punct(second))) =
+                            (tokens.get(index + 1), tokens.get(index + 2))
+                            && first.as_char() == ':'
+                            && first.spacing() == Spacing::Joint
+                            && second.as_char() == ':'
+                        {
+                            match tokens.get(index + 3) {
+                                Some(TokenTree::Ident(next)) => segments.push(next.to_string()),
+                                // `crate::{a, b::c}`.
+                                Some(TokenTree::Group(group))
+                                    if group.delimiter() == Delimiter::Brace =>
+                                {
+                                    if let Ok(tree) = syn::parse2::<UseTree>(
+                                        TokenTree::Group(group.clone()).into(),
+                                    ) {
+                                        self.use_tree(&tree, &mut segments);
+                                    }
+                                    segments.clear();
+                                    index += 3;
+                                    break;
+                                }
+                                _ => break,
+                            }
+                            index += 3;
+                        }
+                        if segments.len() > 1 {
+                            self.add(segments, ident.span());
+                        }
+                    }
+                    _ => {}
+                }
+                index += 1;
+            }
+        }
+    }
+
+    impl<'ast> Visit<'ast> for References<'_> {
+        fn visit_item(&mut self, item: &'ast Item) {
+            if !test_only(attrs(item)) {
+                visit::visit_item(self, item);
+            }
+        }
+
+        fn visit_impl_item(&mut self, item: &'ast ImplItem) {
+            let attrs = match item {
+                ImplItem::Const(item) => &item.attrs,
+                ImplItem::Fn(item) => &item.attrs,
+                ImplItem::Type(item) => &item.attrs,
+                ImplItem::Macro(item) => &item.attrs,
+                _ => return visit::visit_impl_item(self, item),
+            };
+            if !test_only(attrs) {
+                visit::visit_impl_item(self, item);
+            }
+        }
+
+        fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+            self.use_tree(&item.tree, &mut Vec::new());
+        }
+
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            if let Some(first) = path.segments.first() {
+                let segments = path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect();
+                self.add(segments, first.ident.span());
+            }
+            visit::visit_path(self, path);
+        }
+
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            self.tokens(mac.tokens.clone());
+            visit::visit_macro(self, mac);
+        }
+
+        fn visit_meta_list(&mut self, list: &'ast syn::MetaList) {
+            self.tokens(list.tokens.clone());
+            visit::visit_meta_list(self, list);
+        }
+    }
 }
 
 /// Finds every SDK class (a `#[record]` struct or `tagged` enum, a
@@ -93,6 +523,8 @@ mod classes {
 
     use quote::ToTokens;
     use syn::{Attribute, Fields, ImplItem, Item, ItemImpl, LitStr};
+
+    use super::tree::{self, Child, predicates, test_only};
 
     struct Class {
         cfgs: Vec<String>,
@@ -188,18 +620,6 @@ mod classes {
             .collect()
     }
 
-    /// The predicates of the `#[cfg]`s in `attrs`.
-    fn predicates(attrs: &[Attribute]) -> Vec<syn::Meta> {
-        attrs
-            .iter()
-            .filter(|attr| attr.path().is_ident("cfg"))
-            .map(|attr| {
-                attr.parse_args::<syn::Meta>()
-                    .unwrap_or_else(|error| panic!("#[cfg(...)]: {error}"))
-            })
-            .collect()
-    }
-
     /// `attrs`' `#[cfg]`s, for comparing two members' conditions.
     fn conditions(attrs: &[Attribute]) -> Vec<Cfg> {
         predicates(attrs)
@@ -218,53 +638,6 @@ mod classes {
                 }
             })
             .collect()
-    }
-
-    /// Whether `predicate` holds only in a test build: `test`, an `all`
-    /// with such a part, or an `any` of only such parts. `not(test)` and
-    /// `any(test, x)` hold outside tests too.
-    fn requires_test(predicate: &syn::Meta) -> bool {
-        let parts = |list: &syn::MetaList| {
-            list.parse_args_with(
-                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
-            )
-            .unwrap_or_else(|error| panic!("#[cfg(...)]: {error}"))
-        };
-        match predicate {
-            syn::Meta::Path(path) => path.is_ident("test"),
-            syn::Meta::List(list) if list.path.is_ident("all") => {
-                parts(list).iter().any(requires_test)
-            }
-            syn::Meta::List(list) if list.path.is_ident("any") => {
-                let parts = parts(list);
-                !parts.is_empty() && parts.iter().all(requires_test)
-            }
-            _ => false,
-        }
-    }
-
-    /// Whether an item with `attrs` exists only in a test build.
-    fn test_only(attrs: &[Attribute]) -> bool {
-        predicates(attrs).iter().any(requires_test)
-    }
-
-    /// A module's `#[path = "..."]`.
-    fn child_path(attrs: &[Attribute], file: &Path) -> Option<String> {
-        let attr = attrs.iter().find(|attr| attr.path().is_ident("path"))?;
-        match &attr.meta {
-            syn::Meta::NameValue(syn::MetaNameValue {
-                value:
-                    syn::Expr::Lit(syn::ExprLit {
-                        lit: syn::Lit::Str(path),
-                        ..
-                    }),
-                ..
-            }) => Some(path.value()),
-            _ => panic!(
-                "{}: #[path] takes a string, #[path = \"...\"]",
-                file.display()
-            ),
-        }
     }
 
     /// The attribute named `name` (by its last path segment).
@@ -586,8 +959,6 @@ mod classes {
                 .unwrap_or_else(|error| panic!("{}: {error}", file.display()));
             let ast = syn::parse_file(&source)
                 .unwrap_or_else(|error| panic!("{}: {error}", file.display()));
-            // A `#[path]` at a file's top level is relative to the file's
-            // directory; in an inline module, to that module's directory.
             let path_base = file.parent().unwrap_or(Path::new(""));
             self.items(&ast.items, file, module, dir, cfgs, path_base);
         }
@@ -738,36 +1109,13 @@ mod classes {
                         }
                         let mut child_cfgs = cfgs.to_vec();
                         child_cfgs.extend(self::cfgs(&child.attrs));
-                        let name = child.ident.to_string();
-                        let path = format!("{module}::{name}");
-                        let explicit =
-                            child_path(&child.attrs, file).map(|explicit| path_base.join(explicit));
-                        match &child.content {
-                            Some((_, items)) => {
-                                // An inline module's `#[path]` names its
-                                // directory.
-                                let child_dir = explicit.unwrap_or_else(|| dir.join(&name));
+                        let path = format!("{module}::{}", child.ident);
+                        match tree::child(child, file, dir, path_base) {
+                            Child::Inline(items, child_dir) => {
                                 self.items(items, file, &path, &child_dir, &child_cfgs, &child_dir)
                             }
-                            None => {
-                                let (child_file, child_dir) = match explicit {
-                                    // A `#[path]` file's own modules are
-                                    // beside it, as a `mod.rs`'s are.
-                                    Some(child_file) => {
-                                        let child_dir = child_file
-                                            .parent()
-                                            .unwrap_or(Path::new(""))
-                                            .to_path_buf();
-                                        (child_file, child_dir)
-                                    }
-                                    None => {
-                                        let child_dir = dir.join(&name);
-                                        let flat = dir.join(format!("{name}.rs"));
-                                        let nested = child_dir.join("mod.rs");
-                                        (if flat.exists() { flat } else { nested }, child_dir)
-                                    }
-                                };
-                                self.file(&child_file, &path, &child_dir, &child_cfgs);
+                            Child::File(child_file, child_dir) => {
+                                self.file(&child_file, &path, &child_dir, &child_cfgs)
                             }
                         }
                         continue;

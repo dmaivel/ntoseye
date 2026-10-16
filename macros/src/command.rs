@@ -22,7 +22,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let mut function: ItemFn = syn::parse2(item)?;
     let options = match Attr::parse(attr)? {
         Attr::Command(options) => *options,
-        Attr::Form(form) => return expand_form(form, function),
+        Attr::Form(form) => return expand_form(*form, function),
     };
     let help = Help::from_docs(&function.attrs, function.sig.ident.span())?;
     let receiver = Receiver::parse(&function)?;
@@ -269,7 +269,7 @@ impl EffectOptions {
 /// What `#[command(...)]` declares: a command, or a form of one.
 enum Attr {
     Command(Box<Options>),
-    Form(FormOptions),
+    Form(Box<FormOptions>),
 }
 
 impl Attr {
@@ -367,7 +367,7 @@ impl Attr {
                     "a form is an SDK method: `python = Object`",
                 ));
             }
-            return Ok(Self::Form(FormOptions {
+            return Ok(Self::Form(Box::new(FormOptions {
                 command,
                 python,
                 python_name,
@@ -379,7 +379,7 @@ impl Attr {
                     live_only,
                     capability,
                 },
-            }));
+            })));
         }
         let names: Vec<LitStr> = names.ok_or_else(|| missing("names"))?;
         if names.is_empty() {

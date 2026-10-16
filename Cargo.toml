@@ -109,9 +109,11 @@ python-stubs = ["python", "pyo3/experimental-inspect"]
 
 [build-dependencies]
 pyo3-build-config = { version = "0.29.2", optional = true }
-# build.rs reads the sources for the `#[record]` classes the SDK exports.
+# build.rs reads the sources for the `#[record]` classes the SDK exports, and
+# for the paths that must not cross the layers upward (with their lines).
+proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
-syn = { version = "2", features = ["full"] }
+syn = { version = "2", features = ["full", "visit"] }
 
 [dev-dependencies]
 parking_lot = "0.12"
