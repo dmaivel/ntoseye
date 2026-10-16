@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::fmt;
 
 use ntoseye_macros::record;
 
@@ -21,23 +20,7 @@ pub enum ExceptionPolicyMode {
     Ignore,
 }
 
-impl fmt::Display for ExceptionPolicyMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
-    }
-}
-
 impl ExceptionPolicyMode {
-    /// The mode's name in structured output and the SDK.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Break => "break",
-            Self::SecondChance => "second_chance",
-            Self::Notify => "notify",
-            Self::Ignore => "ignore",
-        }
-    }
-
     pub fn command(self) -> &'static str {
         match self {
             Self::Break => "sxe",

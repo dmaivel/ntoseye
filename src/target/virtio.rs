@@ -6,8 +6,6 @@
 //! its PDB, and from the rings themselves in guest memory, whose layout
 //! the virtio specification fixes.
 
-use std::fmt;
-
 use ntoseye_macros::record;
 
 use crate::error::{Error, Result};
@@ -105,15 +103,6 @@ pub enum QueueRole {
     /// The driver hands the device requests to complete, which should not
     /// wait long.
     Requests,
-}
-
-impl fmt::Display for QueueRole {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::DeviceFills => "device_fills",
-            Self::Requests => "requests",
-        })
-    }
 }
 
 /// The specification's name and role of queue `index` of a device of type

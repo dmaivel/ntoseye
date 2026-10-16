@@ -305,7 +305,7 @@ class AlpcMessage(BaseRecord):
     @property
     def owner_port(self, /) -> int: ...
     @property
-    def owner_port_kind(self, /) -> str |None:
+    def owner_port_kind(self, /) -> Literal["ALPC_CONNECTION_PORT", "ALPC_SERVER_COMMUNICATION_PORT", "ALPC_CLIENT_COMMUNICATION_PORT"] |None:
         """
         The port type of the owner port.
         """
@@ -320,7 +320,7 @@ class AlpcMessage(BaseRecord):
         The port whose queue holds the message.
         """
     @property
-    def port_queue_kind(self, /) -> str |None: ...
+    def port_queue_kind(self, /) -> Literal["ALPC_CONNECTION_PORT", "ALPC_SERVER_COMMUNICATION_PORT", "ALPC_CLIENT_COMMUNICATION_PORT"] |None: ...
     @property
     def port_queue_owner(self, /) -> int |None:
         """
@@ -408,7 +408,7 @@ class AlpcPort(BaseRecord):
     @property
     def handle_count(self, /) -> int: ...
     @property
-    def kind(self, /) -> str |None: ...
+    def kind(self, /) -> Literal["ALPC_CONNECTION_PORT", "ALPC_SERVER_COMMUNICATION_PORT", "ALPC_CLIENT_COMMUNICATION_PORT"] |None: ...
     @property
     def max_message_length(self, /) -> int |None:
         """
@@ -537,7 +537,7 @@ class Amd64TrapFrame(BaseRecord):
         apart.
         """
     @property
-    def kind(self, /) -> str |None:
+    def kind(self, /) -> Literal["interrupt", "exception", "system call", "Zw call"] |None:
         """
         The entry that built the frame: `interrupt`, `exception`,
         `system call`, or `Zw call`. `None` if the entry is unknown (no or
@@ -734,7 +734,7 @@ class ApcSelector(BaseRecord):
     The threads `!apc` inspects; `kind` says which.
     """
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["current_thread", "thread", "process", "number", "all"]:
         """
         The variant: `current_thread`, `thread`, `process`, `number`, `all`.
         """
@@ -1038,7 +1038,7 @@ class BackendCapability(BaseRecord):
     A row of the capability matrix of the backend.
     """
     @property
-    def capability(self, /) -> str:
+    def capability(self, /) -> Literal["memory_introspection", "execution_control", "interrupt_target", "single_step", "read_registers", "write_registers", "thread_list", "thread_selection", "kernel_breakpoints", "user_mode_breakpoints", "watchpoints", "target_reload_detection", "kernel_base_hint", "bugcheck_detection", "bugcheck_details", "module_load_events", "debug_output", "msr", "io_ports", "pci_config", "target_control", "target_file_io"]:
         """
         Stable identifier (`memory_introspection`, ...).
         """
@@ -1148,7 +1148,7 @@ class BlackboxFinding(BaseRecord):
         The command that shows the whole record, such as `!blackboxpnp`.
         """
     @property
-    def kind(self, /) -> str: ...
+    def kind(self, /) -> Literal["pnp", "ntfs", "bsd", "winlogon"]: ...
     @property
     def name(self, /) -> str:
         """
@@ -1169,7 +1169,7 @@ class BlackboxState(BaseRecord):
     in one line), `malformed` (with the `reason`), or `absent`.
     """
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["decoded", "malformed", "absent"]:
         """
         The variant: `decoded`, `malformed`, `absent`.
         """
@@ -1194,7 +1194,7 @@ class BlockMatch(BaseRecord):
     @property
     def index(self, /) -> int |None: ...
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["nt-entry", "nt-lfh-block", "nt-virtual", "nt-segment", "page", "vs-chunk", "lfh-block", "range", "large"]:
         """
         The variant: `nt-entry`, `nt-lfh-block`, `nt-virtual`, `nt-segment`, `page`, `vs-chunk`, `lfh-block`, `range`, `large`.
         """
@@ -1451,7 +1451,7 @@ class BreakpointHit(BaseRecord):
     A breakpoint hit that stopped the target.
     """
     @property
-    def access(self, /) -> str |None:
+    def access(self, /) -> Literal["execute", "write", "read_write"] |None:
         """
         A debug-register breakpoint's access and length.
         """
@@ -1475,7 +1475,7 @@ class BreakpointHit(BaseRecord):
     @property
     def id(self, /) -> int: ...
     @property
-    def kind(self, /) -> str: ...
+    def kind(self, /) -> Literal["code", "hardware", "watch", "hypercall", "vm_exit"]: ...
     @property
     def length(self, /) -> int |None: ...
     @property
@@ -1991,7 +1991,7 @@ class CapturedRange(BaseRecord):
     @property
     def start(self, /) -> int: ...
     @property
-    def usage(self, /) -> str: ...
+    def usage(self, /) -> Literal["Free", "Image", "Stack", "TEB", "PEB", "Heap", "<unknown>"]: ...
 
 @final
 class CellLocation(BaseRecord):
@@ -2266,7 +2266,7 @@ class CodeOwner(BaseRecord):
     it).
     """
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["module", "dynamic_code", "unowned"]:
         """
         The variant: `module`, `dynamic_code`, `unowned`.
         """
@@ -2300,7 +2300,7 @@ class CodeView(BaseRecord):
         The PDB GUID, for `RSDS`.
         """
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["rsds", "nb10"]:
         """
         The variant: `rsds`, `nb10`.
         """
@@ -2646,7 +2646,7 @@ class CulpritAttribution(BaseRecord):
     culprit.
     """
     @property
-    def confidence(self, /) -> str: ...
+    def confidence(self, /) -> Literal["low", "medium", "high"]: ...
     @property
     def evidence(self, /) -> list[CulpritEvidence]:
         """
@@ -2668,7 +2668,7 @@ class CulpritEvidence(BaseRecord):
     @property
     def detail(self, /) -> str: ...
     @property
-    def kind(self, /) -> str: ...
+    def kind(self, /) -> Literal["recorded_broken_driver", "recorded_bugcheck_driver", "bugcheck_fault_address", "exception_address", "current_instruction", "top_frame", "power_failure_driver", "pnp_lock_owner_stack", "first_non_system_frame"]: ...
 
 @final
 class CulpritSubject(BaseRecord):
@@ -2680,7 +2680,7 @@ class CulpritSubject(BaseRecord):
     @property
     def dynamic_code(self, /) -> DynamicCodeCulprit |None: ...
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["module", "dynamic_code"]:
         """
         The variant: `module`, `dynamic_code`.
         """
@@ -3574,7 +3574,7 @@ class DisasmOperand(BaseRecord):
         A memory operand's index register, full and lowercase.
         """
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["register", "memory", "immediate", "branch", "other"]:
         """
         `register`, `memory`, `immediate`, `branch` (a branch or PC-relative
         label target), or `other`.
@@ -4725,7 +4725,7 @@ class EtwRecord(BaseRecord):
         braced.
         """
     @property
-    def header(self, /) -> str:
+    def header(self, /) -> Literal["system", "compact", "perfinfo", "classic", "instance", "event", "message"]:
         """
         The trace header at the start of the record (`event` for
         `EVENT_HEADER`, ...).
@@ -4829,7 +4829,7 @@ class ExceptionPolicy(BaseRecord):
         `not_handled`. None for the default action of the mode.
         """
     @property
-    def mode(self, /) -> str:
+    def mode(self, /) -> Literal["break", "second_chance", "notify", "ignore"]:
         """
         `break`, `second_chance`, `notify`, or `ignore`.
         """
@@ -5057,7 +5057,7 @@ class FailureSignature(BaseRecord):
         The bugcheck or exception code.
         """
     @property
-    def code_kind(self, /) -> str: ...
+    def code_kind(self, /) -> Literal["bugcheck", "exception"]: ...
     @property
     def components(self, /) -> list[str]:
         """
@@ -5069,7 +5069,7 @@ class FailureSignature(BaseRecord):
         The module at the failing location.
         """
     @property
-    def source(self, /) -> str: ...
+    def source(self, /) -> Literal["bugcheck_fault", "exception_address", "current_instruction", "top_frame", "power_failure_driver", "first_non_system_frame", "code_only"]: ...
     @property
     def symbol(self, /) -> str |None:
         """
@@ -6885,7 +6885,7 @@ class IfrEnd(BaseRecord):
         The item that failed validation.
         """
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["empty", "first_record", "overwritten", "corrupt"]:
         """
         The variant: `empty`, `first_record`, `overwritten`, `corrupt`.
         """
@@ -6952,7 +6952,7 @@ class ImageByteDiff(BaseRecord):
         The byte in the cached image.
         """
     @property
-    def kind(self, /) -> str |None:
+    def kind(self, /) -> Literal["import optimization", "retpoline", "KiPatchSelf/JMP thunk", "kernel VA region rebase"] |None:
         """
         The self-patch kind of the byte. `None` for a genuine mismatch.
         """
@@ -7176,7 +7176,7 @@ class ImageSelfPatchRange(BaseRecord):
         The function that contains the patch, if a symbol covers it.
         """
     @property
-    def kind(self, /) -> str: ...
+    def kind(self, /) -> Literal["import optimization", "retpoline", "KiPatchSelf/JMP thunk", "kernel VA region rebase"]: ...
     @property
     def size(self, /) -> int:
         """
@@ -8415,7 +8415,7 @@ class IoIntercepts(BaseRecord):
         bitmaps but unconditional I/O exiting.
         """
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["none", "every", "bitmaps"]:
         """
         The variant: `none`, `every`, `bitmaps`.
         """
@@ -8661,7 +8661,7 @@ class IrpFindDetail(BaseRecord):
     @property
     def irps(self, /) -> list[IrpFindEntry]: ...
     @property
-    def pool(self, /) -> str: ...
+    def pool(self, /) -> Literal["nonpaged", "paged"]: ...
     @property
     def region_end(self, /) -> int: ...
     @property
@@ -9316,7 +9316,7 @@ class ListTermination(BaseRecord):
         The problem with a corrupt link.
         """
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["head", "null", "cycle", "bound", "corrupt"]:
         """
         The variant: `head`, `null`, `cycle`, `bound`, `corrupt`.
         """
@@ -9515,7 +9515,7 @@ class LocalVariableLocation(BaseRecord):
     `register_relative`, `frame_relative`, or `unavailable`.
     """
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["register", "register_relative", "frame_relative", "unavailable"]:
         """
         The variant: `register`, `register_relative`, `frame_relative`, `unavailable`.
         """
@@ -10203,7 +10203,7 @@ class ModuleEventPolicy(BaseRecord):
         `ld` for a load filter, `ud` for an unload filter.
         """
     @property
-    def mode(self, /) -> str:
+    def mode(self, /) -> Literal["break", "second_chance", "notify", "ignore"]:
         """
         `break` stops at the event, and `notify` reports it.
         `second_chance` and `ignore` let the load or unload continue with
@@ -10480,7 +10480,7 @@ class MsrIntercepts(BaseRecord):
         bitmap.
         """
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["every", "bitmap"]:
         """
         The variant: `every`, `bitmap`.
         """
@@ -11182,7 +11182,7 @@ class NdisPendingOid(BaseRecord):
         The miniport's friendly name, or the filter module's.
         """
     @property
-    def owner(self, /) -> str: ...
+    def owner(self, /) -> Literal["miniport", "filter"]: ...
     @property
     def request(self, /) -> NdisOidRequest |None: ...
 
@@ -11326,7 +11326,7 @@ class Notice(BaseRecord):
     Something the debugger reported beside a command's result.
     """
     @property
-    def level(self, /) -> str:
+    def level(self, /) -> Literal["info", "warning"]:
         """
         `"info"` for status, such as a background symbol fetch
         finishing or a `ModLoad:` line of an `sxn ld` filter, or
@@ -11998,7 +11998,7 @@ class PageRange(BaseRecord):
         The descriptor's `RangeFlags`.
         """
     @property
-    def kind(self, /) -> str: ...
+    def kind(self, /) -> Literal["unused", "free", "page", "vs", "lfh"]: ...
     @property
     def size(self, /) -> int:
         """
@@ -12063,7 +12063,7 @@ class PciBar(BaseRecord):
         The BAR number (0-5).
         """
     @property
-    def kind(self, /) -> str: ...
+    def kind(self, /) -> Literal["io", "mem32", "mem1m", "mem64"]: ...
     @property
     def prefetchable(self, /) -> bool: ...
     @property
@@ -12639,7 +12639,7 @@ class PfnSelector(BaseRecord):
     address (shifted by the page size before indexing the PFN database).
     """
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["pfn", "physical_address"]:
         """
         The variant: `pfn`, `physical_address`.
         """
@@ -12786,7 +12786,7 @@ class PoolFindDetail(BaseRecord):
     @property
     def matches(self, /) -> list[PoolFindMatch]: ...
     @property
-    def pool_type(self, /) -> str |None:
+    def pool_type(self, /) -> Literal["NonPagedPool", "PagedPool"] |None:
         """
         The pool that the search was limited to, if any.
         """
@@ -12818,7 +12818,7 @@ class PoolFindMatch(BaseRecord):
         The `PoolBigPageTable` index, for a big-pool match.
         """
     @property
-    def pool_type(self, /) -> str |None:
+    def pool_type(self, /) -> Literal["NonPagedPool", "PagedPool"] |None:
         """
         The pool, when known.
         """
@@ -12996,7 +12996,7 @@ class PoolUsageDetail(BaseRecord):
         Whether more tags matched than are listed.
         """
     @property
-    def sort(self, /) -> str: ...
+    def sort(self, /) -> Literal["tag", "nonpaged_bytes", "paged_bytes"]: ...
     @property
     def tag_filter(self, /) -> str |None:
         """
@@ -13420,7 +13420,7 @@ class PowerState(BaseRecord):
     @property
     def device(self, /) -> PowerEnum |None: ...
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["system", "device"]:
         """
         The variant: `system`, `device`.
         """
@@ -13440,7 +13440,7 @@ class PowerThreadRole(BaseRecord):
     @property
     def irp(self, /) -> int |None: ...
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["irp_worker", "pnp_lock_owner"]:
         """
         The variant: `irp_worker`, `pnp_lock_owner`.
         """
@@ -14056,7 +14056,7 @@ class PteLevel(BaseRecord):
     @property
     def attributes(self, /) -> PteAttributes: ...
     @property
-    def level(self, /) -> str: ...
+    def level(self, /) -> Literal["PXE", "PPE", "PDE", "PTE"]: ...
     @property
     def value(self, /) -> int:
         """
@@ -15613,7 +15613,7 @@ class Signal(BaseRecord):
     notifications (kicks).
     """
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["on", "off", "after", "at"]:
         """
         The variant: `on`, `off`, `after`, `at`.
         """
@@ -15713,7 +15713,7 @@ class SourceLocation(BaseRecord):
         applies.
         """
     @property
-    def local_state(self, /) -> str |None:
+    def local_state(self, /) -> Literal["found", "missing", "differs"] |None:
         """
         `found`, `missing`, or `differs`. `found` means that the file is
         there and, if the PDB records a checksum, that it is the compiled
@@ -15969,7 +15969,7 @@ class StackFrame(BaseRecord):
         The instruction pointer.
         """
     @property
-    def source(self, /) -> str:
+    def source(self, /) -> Literal["current", "seed", "unwind", "prolog", "scan"]:
         """
         How ntoseye recovered the frame.
         """
@@ -16046,7 +16046,7 @@ class Stop(BaseRecord):
         `process`.
         """
     @property
-    def kind(self, /) -> str: ...
+    def kind(self, /) -> Literal["breakpoint", "exception", "interrupt", "step", "module_load", "module_unload", "bugcheck", "reload", "entry"]: ...
     @property
     def module(self, /) -> ModuleInfo |None:
         """
@@ -16678,7 +16678,7 @@ class SymbolCandidate(BaseRecord):
     @property
     def module(self, /) -> str: ...
     @property
-    def visibility(self, /) -> str:
+    def visibility(self, /) -> Literal["public", "private"]:
         """
         `public` or `private`.
         """
@@ -18086,7 +18086,7 @@ class UniqStackScope(BaseRecord):
     Which threads `!uniqstack` groups: `all`, or one `process`.
     """
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["all", "process"]:
         """
         The variant: `all`, `process`.
         """
@@ -18197,7 +18197,7 @@ class UserAddressReport(BaseRecord):
     @property
     def address_captured(self, /) -> bool |None: ...
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["region", "map", "captured_range", "captured_ranges"]:
         """
         The variant: `region`, `map`, `captured_range`, `captured_ranges`.
         """
@@ -18461,7 +18461,7 @@ class UserExceptionFinding(BaseRecord):
     @property
     def flags(self, /) -> int: ...
     @property
-    def kind(self, /) -> str: ...
+    def kind(self, /) -> Literal["ntstatus", "cpp_exception", "clr_exception", "well_known", "application_defined", "unknown"]: ...
     @property
     def module_caller(self, /) -> UserFrame |None:
         """
@@ -18512,7 +18512,7 @@ class UserFrame(BaseRecord):
     @property
     def owner(self, /) -> CodeOwner: ...
     @property
-    def source(self, /) -> str: ...
+    def source(self, /) -> Literal["current", "seed", "unwind", "prolog", "scan"]: ...
     @property
     def symbol(self, /) -> str: ...
 
@@ -18707,7 +18707,7 @@ class UserRegion(BaseRecord):
         The region, as `VirtualQueryEx` reported it.
         """
     @property
-    def usage(self, /) -> str: ...
+    def usage(self, /) -> Literal["Free", "Image", "Stack", "TEB", "PEB", "Heap", "<unknown>"]: ...
 
 @final
 class UserStackThread(BaseRecord):
@@ -18722,7 +18722,7 @@ class UserStackThread(BaseRecord):
     @property
     def name(self, /) -> str |None: ...
     @property
-    def source(self, /) -> str: ...
+    def source(self, /) -> Literal["exception_context", "thread_context"]: ...
     @property
     def tid(self, /) -> int: ...
 
@@ -19292,7 +19292,7 @@ class VirtQueue(BaseRecord):
         A split queue's ring.
         """
     @property
-    def role(self, /) -> str |None:
+    def role(self, /) -> Literal["device_fills", "requests"] |None:
         """
         `device_fills` for a queue whose buffers wait until the device has
         something (receive, events), `requests` for one whose buffers
@@ -20800,7 +20800,7 @@ class WdfRequestDetail(BaseRecord):
         IRP. Null if none does, and the request cannot be canceled.
         """
     @property
-    def irp_queue_role(self, /) -> str |None:
+    def irp_queue_role(self, /) -> Literal["pending", "driver_cancelable", "target_pended"] |None:
         """
         Which queue `irp_queue` is: `pending` (its queue's waiting
         requests), `driver_cancelable` (the driver marked it cancelable), or
@@ -21001,7 +21001,7 @@ class WheaRecordState(BaseRecord):
     @property
     def decoded(self, /) -> WheaRecord |None: ...
     @property
-    def kind(self, /) -> str:
+    def kind(self, /) -> Literal["decoded", "unavailable"]:
         """
         The variant: `decoded`, `unavailable`.
         """
@@ -21014,7 +21014,7 @@ class WheaSection(BaseRecord):
     One section of a WHEA error record.
     """
     @property
-    def kind(self, /) -> str: ...
+    def kind(self, /) -> Literal["processor_generic", "memory", "pci_express", "x64_processor", "unknown"]: ...
     @property
     def length(self, /) -> int:
         """

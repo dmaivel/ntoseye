@@ -45,15 +45,6 @@ pub enum FailureCodeKind {
     Exception,
 }
 
-impl std::fmt::Display for FailureCodeKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Bugcheck => "bugcheck",
-            Self::Exception => "exception",
-        })
-    }
-}
-
 /// The source of a failure signature's location: `bugcheck_fault`,
 /// `exception_address`, `current_instruction`, `top_frame`,
 /// `power_failure_driver` (the driver a 0x9F names),
@@ -74,20 +65,6 @@ pub enum FailureSignatureSource {
     /// which called the system code that raised the exception.
     FirstNonSystemFrame,
     CodeOnly,
-}
-
-impl std::fmt::Display for FailureSignatureSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::BugcheckFault => "bugcheck_fault",
-            Self::ExceptionAddress => "exception_address",
-            Self::CurrentInstruction => "current_instruction",
-            Self::TopFrame => "top_frame",
-            Self::PowerFailureDriver => "power_failure_driver",
-            Self::FirstNonSystemFrame => "first_non_system_frame",
-            Self::CodeOnly => "code_only",
-        })
-    }
 }
 
 /// A deterministic identity for a failure that does not depend on
@@ -119,16 +96,6 @@ pub enum CulpritConfidence {
     High,
 }
 
-impl std::fmt::Display for CulpritConfidence {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-        })
-    }
-}
-
 /// What an item of culprit evidence is: `recorded_broken_driver`,
 /// `recorded_bugcheck_driver`, `bugcheck_fault_address`,
 /// `exception_address`, `current_instruction`, `top_frame`,
@@ -150,22 +117,6 @@ pub enum CulpritEvidenceKind {
     /// On a user-mode minidump, the first frame outside the system modules
     /// on the faulting thread's stack is in the module.
     FirstNonSystemFrame,
-}
-
-impl std::fmt::Display for CulpritEvidenceKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::RecordedBrokenDriver => "recorded_broken_driver",
-            Self::RecordedBugcheckDriver => "recorded_bugcheck_driver",
-            Self::BugcheckFaultAddress => "bugcheck_fault_address",
-            Self::ExceptionAddress => "exception_address",
-            Self::CurrentInstruction => "current_instruction",
-            Self::TopFrame => "top_frame",
-            Self::PowerFailureDriver => "power_failure_driver",
-            Self::PnpLockOwnerStack => "pnp_lock_owner_stack",
-            Self::FirstNonSystemFrame => "first_non_system_frame",
-        })
-    }
 }
 
 /// One item of evidence for a culprit attribution.
@@ -284,18 +235,6 @@ pub enum WheaSectionKind {
     Unknown,
 }
 
-impl std::fmt::Display for WheaSectionKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::ProcessorGeneric => "processor_generic",
-            Self::Memory => "memory",
-            Self::PciExpress => "pci_express",
-            Self::X64Processor => "x64_processor",
-            Self::Unknown => "unknown",
-        })
-    }
-}
-
 /// One section of a WHEA error record.
 #[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -350,17 +289,6 @@ pub enum BlackboxKind {
     Ntfs,
     Bsd,
     Winlogon,
-}
-
-impl std::fmt::Display for BlackboxKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Pnp => "pnp",
-            Self::Ntfs => "ntfs",
-            Self::Bsd => "bsd",
-            Self::Winlogon => "winlogon",
-        })
-    }
 }
 
 /// What a dump holds of a blackbox: `decoded` (with `summary`, what it holds

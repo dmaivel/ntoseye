@@ -4,7 +4,6 @@
 //! inspectors and private helpers for one area of the memory manager.
 
 use std::collections::HashSet;
-use std::fmt;
 
 use ntoseye_macros::record;
 
@@ -271,23 +270,10 @@ pub struct PtovDetail {
 #[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolType {
+    #[record(rename = "NonPagedPool")]
     NonPaged,
+    #[record(rename = "PagedPool")]
     Paged,
-}
-
-impl PoolType {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::NonPaged => "NonPagedPool",
-            Self::Paged => "PagedPool",
-        }
-    }
-}
-
-impl fmt::Display for PoolType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
-    }
 }
 
 /// A `_POOL_HEADER` block in a pool page.
@@ -442,18 +428,9 @@ pub struct PoolUsageDetail {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolUsageSort {
     Tag,
+    #[record(rename = "nonpaged_bytes")]
     NonPagedBytes,
     PagedBytes,
-}
-
-impl fmt::Display for PoolUsageSort {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Tag => "tag",
-            Self::NonPagedBytes => "nonpaged_bytes",
-            Self::PagedBytes => "paged_bytes",
-        })
-    }
 }
 
 /// A pool allocation with the search tag (`!poolfind`).

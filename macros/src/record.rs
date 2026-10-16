@@ -405,6 +405,31 @@ fn class_hint(name: &Ident) -> TokenStream {
     quote!(<#class as pyo3::PyTypeInfo>::TYPE_HINT)
 }
 
+/// `typing.Literal[...]` of `texts`, the strings a value can be.
+fn literal_hint(texts: &[String]) -> TokenStream {
+    quote! {
+        pyo3::type_hint_subscript!(
+            pyo3::type_hint_identifier!("typing", "Literal"),
+            #(pyo3::inspect::PyStaticExpr::Constant {
+                value: pyo3::inspect::PyStaticConstant::Str(#texts),
+            }),*
+        )
+    }
+}
+
+/// Refuse two variants that share a text: the value would not say which.
+fn distinct(texts: &[(String, Span)], what: &str) -> Result<()> {
+    for (index, (text, span)) in texts.iter().enumerate() {
+        if texts[..index].iter().any(|(earlier, _)| earlier == text) {
+            return Err(Error::new(
+                *span,
+                format!("two variants have the {what} `{text}`"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Add `Debug` and `Clone` to the item's derives, unless it has them.
 fn derives(attrs: &mut Vec<Attribute>) -> Result<()> {
     let has = |want: &str| -> Result<bool> {
@@ -519,24 +544,56 @@ fn enumeration(flags: Flags, mut item: ItemEnum) -> Result<TokenStream> {
     })
 }
 
-/// A fieldless enum: its `Display` text.
+/// A fieldless enum: each variant's text (its `rename`, else its snake_case
+/// name), which is its `as_str()`, its `Display` and its SDK value, typed as
+/// the `Literal` of every variant's text.
 fn fieldless_enum(item: &mut ItemEnum) -> Result<TokenStream> {
+    let mut texts = Vec::new();
+    let mut arms = Vec::new();
     for variant in &mut item.variants {
         let opts = Opts::take(&mut variant.attrs)?;
-        if let Some(span) = opts.span {
+        opts.field_only()?;
+        if opts.skip || opts.mode != Mode::Plain {
             return Err(Error::new(
-                span,
-                "a fieldless record enum shows its `Display` text; its variants take no options",
+                opts.span.unwrap_or_else(|| variant.span()),
+                "a fieldless record enum's variant takes only `rename`, for its text",
             ));
         }
+        let text = opts
+            .rename
+            .map_or_else(|| snake_case(&variant.ident), |rename| rename.value());
+        let ident = &variant.ident;
+        arms.push(quote!(Self::#ident => #text,));
+        texts.push((text, variant.ident.span()));
     }
-    Ok(to_value(
-        &item.ident,
+    distinct(&texts, "text")?;
+    let texts: Vec<String> = texts.into_iter().map(|(text, _)| text).collect();
+    let name = &item.ident;
+    let to_value = to_value(
+        name,
         quote!(crate::python::record::Value::Str(
-            ::std::string::ToString::to_string(self)
+            ::std::string::String::from(self.as_str())
         )),
-        quote!(pyo3::type_hint_identifier!("builtins", "str")),
-    ))
+        literal_hint(&texts),
+    );
+    Ok(quote! {
+        impl #name {
+            /// The variant's text: its `Display`, and its value in the SDK.
+            pub const fn as_str(&self) -> &'static str {
+                match self {
+                    #(#arms)*
+                }
+            }
+        }
+
+        impl ::std::fmt::Display for #name {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        #to_value
+    })
 }
 
 /// An enum whose variants each hold one value: the value, typed as the union
@@ -615,7 +672,7 @@ fn tagged(flags: &Flags, item: &mut ItemEnum) -> Result<TokenStream> {
         let kind = opts
             .rename
             .map_or_else(|| snake_case(&variant.ident), |rename| rename.value());
-        kinds.push(kind.clone());
+        kinds.push((kind.clone(), variant.ident.span()));
         let single =
             matches!(&variant.fields, Fields::Unnamed(fields) if fields.unnamed.len() == 1);
         let mut bindings = Vec::new();
@@ -685,6 +742,8 @@ fn tagged(flags: &Flags, item: &mut ItemEnum) -> Result<TokenStream> {
         };
         variants.push((pattern, kind, filled));
     }
+    distinct(&kinds, "kind")?;
+    let kinds: Vec<String> = kinds.into_iter().map(|(kind, _)| kind).collect();
     let kind_docs = {
         let listed = kinds
             .iter()
@@ -694,10 +753,14 @@ fn tagged(flags: &Flags, item: &mut ItemEnum) -> Result<TokenStream> {
         let text = format!(" The variant: {listed}.");
         vec![syn::parse_quote!(#[doc = #text])]
     };
+    // `kind` is typed as the `Literal` of the kinds, through a type that
+    // exists only for its hint.
+    let kind_type = format_ident!("__{}RecordKind", unraw(&name));
+    let kind_hint = literal_hint(&kinds);
     let mut all = vec![Getter {
         key: "kind".to_string(),
         property: "kind".to_string(),
-        ty: quote!(&'static str),
+        ty: quote!(#kind_type),
         mode: Mode::Plain,
         docs: kind_docs,
     }];
@@ -727,6 +790,20 @@ fn tagged(flags: &Flags, item: &mut ItemEnum) -> Result<TokenStream> {
     Ok(quote! {
         #to_value
         #class
+
+        #[cfg(feature = "python")]
+        #[doc(hidden)]
+        #[allow(non_camel_case_types)]
+        pub enum #kind_type {}
+
+        #[cfg(feature = "python")]
+        impl<M> crate::python::record::ToValue<M> for #kind_type {
+            fn to_value(&self) -> crate::python::record::Value {
+                match *self {}
+            }
+            #[cfg(feature = "python-stubs")]
+            const HINT: pyo3::inspect::PyStaticExpr = #kind_hint;
+        }
     })
 }
 

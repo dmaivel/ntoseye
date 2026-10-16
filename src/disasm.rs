@@ -243,24 +243,6 @@ pub enum OperandKind {
     Other,
 }
 
-impl OperandKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Register => "register",
-            Self::Memory => "memory",
-            Self::Immediate => "immediate",
-            Self::Branch => "branch",
-            Self::Other => "other",
-        }
-    }
-}
-
-impl std::fmt::Display for OperandKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 /// One explicit operand of a decoded instruction. Fields that do not apply
 /// to its `kind` are None.
 #[record]

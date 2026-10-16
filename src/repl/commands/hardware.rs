@@ -766,7 +766,7 @@ fn print_pci_function(request: &PciRequest, function: &PciFunction) {
             outln!(
                 "{INDENT}BAR{} {} {:0width$x}{}",
                 bar.index,
-                bar.kind.name(),
+                bar.kind.as_str(),
                 bar.address,
                 if bar.prefetchable {
                     " prefetchable"

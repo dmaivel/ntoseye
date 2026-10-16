@@ -1,8 +1,8 @@
 """Check SDK values against the type annotations the stub declares for them:
-unions, lists, dicts, what a `Diagnostic` holds, and a result class's
-properties, recursively. Used by `test_stub_types.py` on a live guest, and
-run by the Rust tests (`src/view/shape.rs`) against each field wrapper's
-declared hint, which the stub prints."""
+unions, lists, dicts, `Literal`s, what a `Diagnostic` holds, and a result
+class's properties, recursively. Used by `test_stub_types.py` on a live guest,
+and run by the Rust tests (`src/python/record.rs`, `hints`) against each
+field type's declared hint, which the stub prints."""
 
 from __future__ import annotations
 
@@ -35,11 +35,11 @@ def every(checks: Iterable[bool]) -> bool:
 
 
 def class_name(hint: ast.expr) -> str | None:
-    """The name `hint` gives a class by: `Pcr`, or `ntoseye.Pcr` as a field
-    wrapper's hint spells it."""
+    """The name `hint` gives a class by: `Pcr`, or `ntoseye.Pcr` and
+    `typing.Literal` as a field type's hint spells them."""
     if isinstance(hint, ast.Name):
         return hint.id
-    if isinstance(hint, ast.Attribute) and ast.unparse(hint.value) == "ntoseye":
+    if isinstance(hint, ast.Attribute) and ast.unparse(hint.value) in ("ntoseye", "typing"):
         return hint.attr
     return None
 
@@ -91,6 +91,12 @@ class Checker:
 
     def generic(self, value: object, base: str | None, args: ast.expr, path: str) -> bool:
         items = args.elts if isinstance(args, ast.Tuple) else [args]
+        if base == "Literal":
+            self.forms.add("Literal")
+            texts = [item.value for item in items if isinstance(item, ast.Constant)]
+            assert len(texts) == len(items), ast.unparse(args)
+            ok = isinstance(value, str) and value in texts
+            return self.fail(ok, path, value, f"one of {texts}")
         if base == "list":
             if not isinstance(value, list):
                 return self.fail(False, path, value, "list")

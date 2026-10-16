@@ -649,15 +649,15 @@ fn print_captured_ranges(ranges: &[CapturedRange]) {
 
 fn usage_cell(entry: &UserRegion) -> String {
     match &entry.detail {
-        Some(detail) => format!("{} [{detail}]", entry.usage.label()),
-        None => entry.usage.label().to_string(),
+        Some(detail) => format!("{} [{detail}]", entry.usage.as_str()),
+        None => entry.usage.as_str().to_string(),
     }
 }
 
 fn captured_usage_cell(range: &CapturedRange) -> String {
     match &range.detail {
-        Some(detail) => format!("{} [{detail}]", range.usage.label()),
-        None => range.usage.label().to_string(),
+        Some(detail) => format!("{} [{detail}]", range.usage.as_str()),
+        None => range.usage.as_str().to_string(),
     }
 }
 

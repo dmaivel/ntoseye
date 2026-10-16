@@ -535,16 +535,6 @@ pub enum WdfIrpQueueRole {
     TargetPended,
 }
 
-impl std::fmt::Display for WdfIrpQueueRole {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Pending => "pending",
-            Self::DriverCancelable => "driver_cancelable",
-            Self::TargetPended => "target_pended",
-        })
-    }
-}
-
 /// A WDFREQUEST with its IRP, its queue, and the I/O target it was sent
 /// to (`!wdfkd.wdfrequest`).
 #[record]

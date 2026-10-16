@@ -639,10 +639,7 @@ mod tests {
 /// which compiles the hints.
 #[cfg(all(test, feature = "python-stubs", feature = "python-embed"))]
 mod hints {
-    use std::fmt;
-
     use ntoseye_macros::record;
-    use pyo3::prelude::*;
     use pyo3::types::PyDict;
 
     use super::*;
@@ -663,12 +660,8 @@ mod hints {
     #[record]
     pub enum Color {
         Red,
-    }
-
-    impl fmt::Display for Color {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("red")
-        }
+        #[record(rename = "dark blue")]
+        DarkBlue,
     }
 
     #[record(tagged)]
@@ -680,7 +673,8 @@ mod hints {
 
     /// Declares `Every` with the fields given (and their attributes),
     /// `every()` building it from their values, and `hints()` naming each
-    /// field's hint in its mode, then the computed property's.
+    /// field's hint in its mode, then the computed property's, then a
+    /// nested record's (a dotted path).
     macro_rules! every {
         ($($(#[$attr:meta])* $field:ident: $ty:ty [$mode:ty] = $value:expr),* $(,)?) => {
             #[record(impl)]
@@ -698,6 +692,7 @@ mod hints {
             fn hints() -> Vec<(&'static str, String)> {
                 let mut hints = vec![$((stringify!($field), <$ty as ToValue<$mode>>::HINT.to_string())),*];
                 hints.push(("computed", <Option<u64> as ToValue<Hex>>::HINT.to_string()));
+                hints.push(("end_cycle.kind", <__EndRecordKind as ToValue>::HINT.to_string()));
                 hints
             }
         };
@@ -737,6 +732,7 @@ mod hints {
         either_nested: Either [Plain] = Either::Nested(Inner { id: 9 }),
         either_hex: Either [Plain] = Either::Flags(0x10),
         color: Color [Plain] = Color::Red,
+        renamed_color: Color [Plain] = Color::DarkBlue,
         end_head: End [Plain] = End::Head,
         end_cycle: End [Plain] = End::Cycle(VirtAddr(0x30)),
         end_corrupt: End [Plain] = End::Corrupt { error: "bad link".into() },
@@ -764,15 +760,21 @@ mod hints {
                 r#"
 checker = Checker({})
 for name, hint in HINTS:
-    checker.value(getattr(value, name), ast.parse(hint, mode="eval").body, name)
+    field = value
+    for part in name.split("."):
+        field = getattr(field, part)
+    checker.value(field, ast.parse(hint, mode="eval").body, name)
 assert checker.errors == [], checker.errors
-assert len(value) == len(HINTS), value.keys()
+assert len(value) == len([name for name, _ in HINTS if "." not in name]), value.keys()
 assert "hidden" not in value and "work_items" not in value and "items" in value, value.keys()
-assert value.color == "red" and value.computed == 2, (value.color, value.computed)
+assert value.color == "red" and value.renamed_color == "dark blue", value
+assert value.computed == 2, value.computed
 assert value.end_head.kind == "head" and value.end_head.address is None, value.end_head
 assert value.end_cycle.kind == "cycle" and value.end_cycle.address == 0x30, value.end_cycle
 assert value.end_corrupt.error == "bad link", value.end_corrupt
-assert checker.forms >= {"class", "Record", "available", "unavailable", "source"}, checker.forms
+assert checker.forms >= {"class", "Record", "available", "unavailable", "source", "Literal"}, checker.forms
+color = ast.parse(dict(HINTS)["color"], mode="eval").body
+assert not checker.value("blue", color, "blue") and checker.errors, "a Literal admits only its texts"
 "#
             );
             let code = std::ffi::CString::new(source).unwrap();

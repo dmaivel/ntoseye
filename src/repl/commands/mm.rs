@@ -908,7 +908,7 @@ fn print_pfn(detail: &PfnDetail) {
 }
 
 fn print_pte_entry(level: &PteLevel) {
-    let name = level.level.name();
+    let name = level.level.as_str();
     let (address, raw, attributes) = (level.address.0, level.value, &level.attributes);
     if attributes.present {
         outln!(
@@ -1060,7 +1060,7 @@ fn print_pool_find(detail: &PoolFindDetail) {
                 m.size,
                 m.state,
                 if m.allocated { "allocated" } else { "free" },
-                m.pool_type.map_or("unknown", PoolType::name)
+                m.pool_type.map_or("unknown", |kind| kind.as_str())
             );
         }
         if let Some(stopped_at) = range.stopped_at {
@@ -1079,7 +1079,7 @@ fn print_pool_find(detail: &PoolFindDetail) {
             m.tag_name,
             m.size,
             m.state,
-            m.pool_type.map_or("unknown", PoolType::name),
+            m.pool_type.map_or("unknown", |kind| kind.as_str()),
             m.table_entry.map_or_else(
                 || "".to_string(),
                 |entry| format!(
@@ -1161,7 +1161,7 @@ fn pte_level_cell(level: &PteLevel, invalid_pte_mask: u64) -> String {
     };
     format!(
         "{} at {:X}\ncontains {:016X}\n{decoded}",
-        level.level.name(),
+        level.level.as_str(),
         level.address,
         ui::Value(value.0),
     )

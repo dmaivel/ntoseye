@@ -823,27 +823,10 @@ pub enum RangeKind {
     Unused,
     Free,
     /// Pages allocated straight from the segment for one block.
+    #[record(rename = "page")]
     Direct,
     Vs,
     Lfh,
-}
-
-impl RangeKind {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Unused => "unused",
-            Self::Free => "free",
-            Self::Direct => "page",
-            Self::Vs => "vs",
-            Self::Lfh => "lfh",
-        }
-    }
-}
-
-impl std::fmt::Display for RangeKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.name())
-    }
 }
 
 /// A page range (`_HEAP_PAGE_RANGE_DESCRIPTOR`) of a page segment.

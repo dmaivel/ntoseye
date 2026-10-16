@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-use std::fmt;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -323,16 +322,6 @@ impl HwBreakpointAccess {
     }
 }
 
-impl fmt::Display for HwBreakpointAccess {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Execute => "execute",
-            Self::Write => "write",
-            Self::ReadWrite => "read_write",
-        })
-    }
-}
-
 /// Semantic data-watch access exposed by host APIs. The transport may
 /// implement this with x86 debug registers, but callers request a watchpoint,
 /// not a software-vs-hardware breakpoint implementation.
@@ -430,34 +419,6 @@ pub enum DebugCapability {
 }
 
 impl DebugCapability {
-    /// Stable machine-readable identifier (the structured hosts' key).
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::MemoryIntrospection => "memory_introspection",
-            Self::ExecutionControl => "execution_control",
-            Self::InterruptTarget => "interrupt_target",
-            Self::SingleStep => "single_step",
-            Self::ReadRegisters => "read_registers",
-            Self::WriteRegisters => "write_registers",
-            Self::ThreadList => "thread_list",
-            Self::ThreadSelection => "thread_selection",
-            Self::KernelBreakpoints => "kernel_breakpoints",
-            Self::UserModeBreakpoints => "user_mode_breakpoints",
-            Self::Watchpoints => "watchpoints",
-            Self::TargetReloadDetection => "target_reload_detection",
-            Self::KernelBaseHint => "kernel_base_hint",
-            Self::BugcheckDetection => "bugcheck_detection",
-            Self::BugcheckDetails => "bugcheck_details",
-            Self::ModuleLoadEvents => "module_load_events",
-            Self::DebugOutput => "debug_output",
-            Self::Msr => "msr",
-            Self::IoPorts => "io_ports",
-            Self::PciConfig => "pci_config",
-            Self::TargetControl => "target_control",
-            Self::TargetFileIo => "target_file_io",
-        }
-    }
-
     pub fn label(self) -> &'static str {
         match self {
             Self::MemoryIntrospection => "memory introspection",
@@ -483,12 +444,6 @@ impl DebugCapability {
             Self::TargetControl => "reboot / forced crash",
             Self::TargetFileIo => "host-served target files",
         }
-    }
-}
-
-impl fmt::Display for DebugCapability {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
     }
 }
 

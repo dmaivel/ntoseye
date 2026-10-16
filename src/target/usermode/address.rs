@@ -7,8 +7,6 @@
 //! `ProcessHeaps` array names when that array was captured. A region none
 //! of these explain is `<unknown>`, not guessed at.
 
-use std::fmt;
-
 use ntoseye_macros::record;
 
 use crate::error::{Error, Result};
@@ -40,34 +38,21 @@ const MAX_PROCESS_HEAPS: u32 = 1024;
 #[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RegionUsage {
+    #[record(rename = "Free")]
     Free,
+    #[record(rename = "Image")]
     Image,
+    #[record(rename = "Stack")]
     Stack,
+    #[record(rename = "TEB")]
     Teb,
+    #[record(rename = "PEB")]
     Peb,
+    #[record(rename = "Heap")]
     Heap,
     /// In use, for nothing the dump identifies.
+    #[record(rename = "<unknown>")]
     Unknown,
-}
-
-impl RegionUsage {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Free => "Free",
-            Self::Image => "Image",
-            Self::Stack => "Stack",
-            Self::Teb => "TEB",
-            Self::Peb => "PEB",
-            Self::Heap => "Heap",
-            Self::Unknown => "<unknown>",
-        }
-    }
-}
-
-impl fmt::Display for RegionUsage {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
-    }
 }
 
 /// A thread's stack, as its TEB's `NT_TIB` bounds it, else as far as the
@@ -399,7 +384,7 @@ pub fn summarize(regions: &[UserRegion]) -> AddressSummary {
     for entry in regions {
         let region = &entry.region;
         summary.total = summary.total.saturating_add(region.size);
-        add(&mut summary.by_usage, entry.usage.label(), region.size);
+        add(&mut summary.by_usage, entry.usage.as_str(), region.size);
         add(
             &mut summary.by_state,
             &state_label(region.state),

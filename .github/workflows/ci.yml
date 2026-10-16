@@ -77,7 +77,7 @@ jobs:
       # record field form's hint against the value it renders, with no guest.
       - name: Test the SDK type hints
         if: matrix.label == 'default'
-        run: cargo test --locked -p ntoseye --features python-stubs --lib view::record::hints
+        run: cargo test --locked -p ntoseye --features python-stubs --lib python::record::hints
       # What `cargo install ntoseye` builds: the packaged crates alone, which
       # the release publishes only after the GitHub release and wheels. The
       # macros are packaged with ntoseye, which resolves them from there.

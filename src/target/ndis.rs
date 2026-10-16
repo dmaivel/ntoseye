@@ -816,15 +816,6 @@ pub enum NdisOidOwner {
     Filter,
 }
 
-impl std::fmt::Display for NdisOidOwner {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Miniport => "miniport",
-            Self::Filter => "filter",
-        })
-    }
-}
-
 /// An OID request a miniport or filter module has not completed.
 #[record]
 pub struct NdisPendingOid {

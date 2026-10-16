@@ -252,12 +252,15 @@ pub struct LastError32 {
 #[record]
 #[derive(Copy, PartialEq, Eq)]
 pub enum SelfPatchKind {
+    #[record(rename = "import optimization")]
     ImportOptimization,
     Retpoline,
+    #[record(rename = "KiPatchSelf/JMP thunk")]
     KiPatchSelf,
     /// A relocated address of a kernel VA region (the PFN database, the
     /// page tables, ...) the kernel moved to a randomized top-level slot at
     /// boot: the image holds the region's old fixed base.
+    #[record(rename = "kernel VA region rebase")]
     RegionRebase,
 }
 
@@ -268,21 +271,6 @@ impl SelfPatchKind {
         Self::KiPatchSelf,
         Self::RegionRebase,
     ];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::ImportOptimization => "import optimization",
-            Self::Retpoline => "retpoline",
-            Self::KiPatchSelf => "KiPatchSelf/JMP thunk",
-            Self::RegionRebase => "kernel VA region rebase",
-        }
-    }
-}
-
-impl std::fmt::Display for SelfPatchKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.name())
-    }
 }
 
 /// The number of bytes that ntoseye identifies as known kernel self-patches,

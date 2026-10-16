@@ -7,7 +7,6 @@
 //! and policy commands through the session's [`ActionRunner`]. Hosts only map
 //! a [`Stop`] to their own rendering or protocol.
 
-use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -376,34 +375,6 @@ pub struct ReloadStop {
     pub kernel_base: Option<u64>,
     /// Whether the kernel's module list exists yet.
     pub coherent: bool,
-}
-
-impl fmt::Display for StopKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            StopKind::Breakpoint => "breakpoint",
-            StopKind::Exception => "exception",
-            StopKind::Interrupt => "interrupt",
-            StopKind::Step => "step",
-            StopKind::ModuleLoad => "module_load",
-            StopKind::ModuleUnload => "module_unload",
-            StopKind::Bugcheck => "bugcheck",
-            StopKind::Reload => "reload",
-            StopKind::Entry => "entry",
-        })
-    }
-}
-
-impl fmt::Display for HitKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            HitKind::Code => "code",
-            HitKind::Hardware => "hardware",
-            HitKind::Watch => "watch",
-            HitKind::Hypercall => "hypercall",
-            HitKind::VmExit => "vm_exit",
-        })
-    }
 }
 
 impl BreakpointHit {

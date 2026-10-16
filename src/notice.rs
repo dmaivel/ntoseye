@@ -17,22 +17,6 @@ pub enum NoticeLevel {
     Warning,
 }
 
-impl NoticeLevel {
-    /// The level's name in structured output and the SDK.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Info => "info",
-            Self::Warning => "warning",
-        }
-    }
-}
-
-impl fmt::Display for NoticeLevel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
-    }
-}
-
 /// Something the debugger reported beside a command's result.
 #[record]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

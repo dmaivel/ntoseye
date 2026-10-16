@@ -104,15 +104,6 @@ pub enum SymbolVisibility {
     Private,
 }
 
-impl fmt::Display for SymbolVisibility {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Public => "public",
-            Self::Private => "private",
-        })
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IndexedSymbol {
     rva: u32,
@@ -500,16 +491,6 @@ pub enum LocalSourceState {
     Missing,
     /// A file is there, but its checksum is not the one compiled.
     Differs,
-}
-
-impl fmt::Display for LocalSourceState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Found => "found",
-            Self::Missing => "missing",
-            Self::Differs => "differs",
-        })
-    }
 }
 
 /// A source file checksum the compiler records in the PDB.

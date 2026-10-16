@@ -91,7 +91,10 @@ pub fn pte(walk: &PteWalk, invalid_pte_mask: u64) -> View {
             (leaf.attributes.pfn << 12 & !(page_size - 1)) | (walk.address.0 & (page_size - 1));
         let mut value = vec![addr(physical)];
         if leaf.attributes.large_page {
-            value.push(span(format!("  large page ({})", leaf.level.name()), MUTED));
+            value.push(span(
+                format!("  large page ({})", leaf.level.as_str()),
+                MUTED,
+            ));
         }
         details = details.item("physical", value);
     }
@@ -117,8 +120,8 @@ fn pte_row(level: &PteLevel, invalid_pte_mask: u64) -> TableRow {
     } else {
         (span("-", MUTED), vec![span("not present", MUTED)])
     };
-    TableRow::new(level.level.name())
-        .cell("level", span(level.level.name(), STRONG))
+    TableRow::new(level.level.as_str())
+        .cell("level", span(level.level.as_str(), STRONG))
         .cell("entry", span(format!("{:016x}", level.address.0), MUTED))
         .cell("contents", addr(value.0))
         .cell("pfn", pfn)

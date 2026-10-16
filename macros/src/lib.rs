@@ -37,13 +37,17 @@ use proc_macro::TokenStream;
 ///
 /// On an enum:
 ///
-/// - fieldless: the value is the variant's `Display` text, typed `str`;
+/// - fieldless: each variant has a text, its `rename` or else its snake_case
+///   name. The macro generates `as_str()` and `Display` from the texts, and
+///   the value is the variant's text, typed as the `typing.Literal` of every
+///   variant's text;
 /// - every variant one unnamed field: the union of the variants' types
 ///   (the value is the variant's own);
 /// - `#[record(tagged)]`: a class with `kind` (the snake_case variant name,
-///   or the variant's `rename`) and each variant field as an optional
-///   property, named by the field, its `rename`, or for a variant's single
-///   unnamed field the variant's snake_case name.
+///   or the variant's `rename`; typed as the `Literal` of the kinds) and
+///   each variant field as an optional property, named by the field, its
+///   `rename`, or for a variant's single unnamed field the variant's
+///   snake_case name.
 #[proc_macro_attribute]
 pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
     record::expand(attr.into(), item.into())

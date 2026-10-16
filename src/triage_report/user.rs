@@ -127,15 +127,6 @@ pub enum UserStackSource {
     ThreadContext,
 }
 
-impl std::fmt::Display for UserStackSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::ExceptionContext => "exception_context",
-            Self::ThreadContext => "thread_context",
-        })
-    }
-}
-
 /// The thread a user dump report's stack belongs to.
 #[record]
 #[derive(Debug, Clone)]
@@ -165,19 +156,6 @@ pub enum UserExceptionKind {
     /// chose.
     ApplicationDefined,
     Unknown,
-}
-
-impl std::fmt::Display for UserExceptionKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Ntstatus => "ntstatus",
-            Self::CppException => "cpp_exception",
-            Self::ClrException => "clr_exception",
-            Self::WellKnown => "well_known",
-            Self::ApplicationDefined => "application_defined",
-            Self::Unknown => "unknown",
-        })
-    }
 }
 
 /// One `ExceptionInformation` entry, with what it means for the code when

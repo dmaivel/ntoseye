@@ -9,7 +9,6 @@
 //! `PoolBigPageTable` instead.
 
 use std::collections::HashMap;
-use std::fmt;
 use std::ops::ControlFlow;
 
 use ntoseye_macros::record;
@@ -95,17 +94,9 @@ impl IrpCriteria {
 #[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IrpPool {
+    #[record(rename = "nonpaged")]
     NonPaged,
     Paged,
-}
-
-impl fmt::Display for IrpPool {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::NonPaged => "nonpaged",
-            Self::Paged => "paged",
-        })
-    }
 }
 
 impl IrpPool {

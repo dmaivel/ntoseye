@@ -909,7 +909,7 @@ fn print_event(event: &EtwEvent) {
         event.processor,
         ids,
         time,
-        ui::muted(record.kind.name()),
+        ui::muted(record.kind.as_str()),
         what
     );
     if let Some(format) = &event.message_format {

@@ -486,7 +486,7 @@ fn owner_label(owner: VirtAddr, name: &Option<String>) -> String {
 }
 
 fn kind_name(kind: Option<AlpcPortKind>) -> &'static str {
-    kind.map_or("unknown", AlpcPortKind::name)
+    kind.map_or("unknown", |kind| kind.as_str())
 }
 
 fn print_alpc_connection(connection: &AlpcConnection) {

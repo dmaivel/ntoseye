@@ -458,27 +458,13 @@ impl PciHeader {
 #[derive(Copy, PartialEq, Eq)]
 pub enum PciBarKind {
     Io,
+    #[record(rename = "mem32")]
     Memory32,
     /// Below 1 MiB (legacy type 01b).
+    #[record(rename = "mem1m")]
     Memory1M,
+    #[record(rename = "mem64")]
     Memory64,
-}
-
-impl std::fmt::Display for PciBarKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.name())
-    }
-}
-
-impl PciBarKind {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Io => "io",
-            Self::Memory32 => "mem32",
-            Self::Memory1M => "mem1m",
-            Self::Memory64 => "mem64",
-        }
-    }
 }
 
 /// A base address register: its index, the raw register (both halves of a

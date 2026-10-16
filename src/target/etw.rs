@@ -429,35 +429,18 @@ pub enum EtwHeaderKind {
     /// Compact `SYSTEM_TRACE_HEADER` (types 0x03/0x04).
     Compact,
     /// `PERFINFO_TRACE_HEADER` (types 0x10/0x11).
+    #[record(rename = "perfinfo")]
     PerfInfo,
     /// `EVENT_TRACE_HEADER` (classic providers, types 0x0a/0x14).
+    #[record(rename = "classic")]
     FullHeader,
     /// `EVENT_INSTANCE_GUID_HEADER` (types 0x0b/0x15).
     Instance,
     /// `EVENT_HEADER` (manifest and TraceLogging providers, types 0x12/0x13).
+    #[record(rename = "event")]
     EventHeader,
     /// `MESSAGE_TRACE_HEADER` (WPP and other `TraceMessage` callers).
     Message,
-}
-
-impl EtwHeaderKind {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::System => "system",
-            Self::Compact => "compact",
-            Self::PerfInfo => "perfinfo",
-            Self::FullHeader => "classic",
-            Self::Instance => "instance",
-            Self::EventHeader => "event",
-            Self::Message => "message",
-        }
-    }
-}
-
-impl std::fmt::Display for EtwHeaderKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.name())
-    }
 }
 
 /// The `EVENT_DESCRIPTOR` of an `EVENT_HEADER` event.
@@ -924,13 +907,13 @@ fn decode_record(
     if len < header_len {
         return Err(format!(
             "{} record size {size:#x} is below its {header_len:#x}-byte header",
-            kind.name()
+            kind.as_str()
         ));
     }
     if len > bytes.len() {
         return Err(format!(
             "{} record size {size:#x} runs past the buffer's data end",
-            kind.name()
+            kind.as_str()
         ));
     }
     let bytes = &bytes[..len];
@@ -952,7 +935,7 @@ fn decode_record(
         extended: Vec::new(),
         payload: Vec::new(),
     };
-    let truncated = || format!("{} header is truncated", kind.name());
+    let truncated = || format!("{} header is truncated", kind.as_str());
 
     let payload_start = match kind {
         EtwHeaderKind::System | EtwHeaderKind::Compact => {

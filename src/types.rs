@@ -256,28 +256,14 @@ pub struct PteAttributes {
 #[record]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PageTableLevel {
+    #[record(rename = "PXE")]
     Pxe,
+    #[record(rename = "PPE")]
     Ppe,
+    #[record(rename = "PDE")]
     Pde,
+    #[record(rename = "PTE")]
     Pte,
-}
-
-impl PageTableLevel {
-    /// WinDbg's name for an entry at this level.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Pxe => "PXE",
-            Self::Ppe => "PPE",
-            Self::Pde => "PDE",
-            Self::Pte => "PTE",
-        }
-    }
-}
-
-impl fmt::Display for PageTableLevel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
-    }
 }
 
 impl VirtAddr {

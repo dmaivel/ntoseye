@@ -112,27 +112,6 @@ pub enum FrameSource {
     Scan,
 }
 
-impl FrameSource {
-    /// Stable lowercase tag for how a frame was recovered, surfaced by every
-    /// host. Explicit rather than derived from `Debug`, which would drift if a
-    /// variant were renamed.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            FrameSource::Current => "current",
-            FrameSource::Seed => "seed",
-            FrameSource::Unwind => "unwind",
-            FrameSource::Prolog => "prolog",
-            FrameSource::Scan => "scan",
-        }
-    }
-}
-
-impl std::fmt::Display for FrameSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 /// One frame of a stack walk.
 #[record]
 #[derive(Debug, Clone)]

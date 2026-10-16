@@ -5,7 +5,6 @@
 //! of its communication info points back at it.
 
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 
 use crate::error::{Error, Result};
 use crate::guest::ProcessInfo;
@@ -28,28 +27,14 @@ const MAX_PROCESS_HANDLES: usize = 1 << 16;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlpcPortKind {
     /// The named port a server listens on.
+    #[record(rename = "ALPC_CONNECTION_PORT")]
     Connection,
     /// The server's end of one connection.
+    #[record(rename = "ALPC_SERVER_COMMUNICATION_PORT")]
     ServerCommunication,
     /// The client's end of one connection.
+    #[record(rename = "ALPC_CLIENT_COMMUNICATION_PORT")]
     ClientCommunication,
-}
-
-impl AlpcPortKind {
-    /// WinDbg's name for the kind.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Connection => "ALPC_CONNECTION_PORT",
-            Self::ServerCommunication => "ALPC_SERVER_COMMUNICATION_PORT",
-            Self::ClientCommunication => "ALPC_CLIENT_COMMUNICATION_PORT",
-        }
-    }
-}
-
-impl fmt::Display for AlpcPortKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
-    }
 }
 
 /// `PORT_MESSAGE.u2.s2.Type`'s message kind (its low byte), by the

@@ -13,7 +13,6 @@ use crate::target::{Arm64SavedRegisters, SavedThreadRegisters, Target};
 use crate::types::{Arch, Dtb, VirtAddr};
 use crate::unwind::{resolve_thread_trace_context, try_format_symbol};
 use ntoseye_macros::record;
-use std::fmt;
 use std::sync::Arc;
 
 pub const KTRAP_FRAME_TYPE: &str = "_KTRAP_FRAME";
@@ -91,10 +90,12 @@ pub enum TrapKind {
     /// A processor exception (`ExceptionActive` 1).
     Exception,
     /// A `syscall` from user mode (`ExceptionActive` 2).
+    #[record(rename = "system call")]
     SystemCall,
     /// A kernel-mode `Zw*` call into the system service dispatcher. Every
     /// `Zw*` stub builds the machine frame with rip `nt!KiServiceLinkage` and
     /// enters `KiServiceInternal`, which leaves `ExceptionActive` unwritten.
+    #[record(rename = "Zw call")]
     ZwCall,
 }
 
@@ -123,21 +124,6 @@ impl TrapKind {
             Self::SystemCall => !matches!(slot, R11 | ErrorCode | PreviousIrql),
             Self::ZwCall => matches!(slot, Rbx | Rdi | Rsi),
         }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Interrupt => "interrupt",
-            Self::Exception => "exception",
-            Self::SystemCall => "system call",
-            Self::ZwCall => "Zw call",
-        }
-    }
-}
-
-impl fmt::Display for TrapKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 
