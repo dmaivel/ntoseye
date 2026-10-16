@@ -10,11 +10,16 @@ use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
 
+use ntoseye_macros::record;
+
 use super::{Target, bounded_record_list_walk};
 use crate::bytes::before_nul;
 use crate::error::{Error, Result};
 use crate::layout::{ParsedType, StructRef, TypeInfo, Types, le_uint, utf16le_nul_terminated};
 use crate::memory::MemoryOps;
+use crate::target::etw::format_filetime_precise;
+use crate::target::srb::srb_status_text;
+use crate::target::virtio_request::scsi_command;
 use crate::types::VirtAddr;
 
 const MAX_DRIVERS: usize = 256;
@@ -38,15 +43,19 @@ const IO_TYPE_DEVICE: u64 = 3;
 const INTERFACE_PCI_BUS: &str = "PCIBus";
 
 /// A value of one of storport's enums, with its name when the PDB has one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StorEnum {
+#[record]
+#[derive(PartialEq, Eq)]
+pub struct StorEnumValue {
+    #[record(hex)]
     pub value: u64,
     pub name: Option<String>,
 }
 
-/// storport's drivers and their adapters, from `RaidpPortData`.
-#[derive(Debug, Clone)]
-pub struct StorPortDrivers {
+/// storport's drivers and their adapters, from `RaidpPortData`
+/// (`!storagekd.storadapter`).
+#[record]
+pub struct StorDrivers {
+    /// `storport!RaidpPortData`.
     pub port_data: VirtAddr,
     pub drivers: Vec<StorDriver>,
     /// Why the walk of the driver list stopped short of its head.
@@ -54,57 +63,78 @@ pub struct StorPortDrivers {
 }
 
 /// A driver that called `StorPortInitialize` (`_RAID_DRIVER_EXTENSION`).
-#[derive(Debug, Clone)]
+#[record]
 pub struct StorDriver {
     pub extension: VirtAddr,
     pub driver_object: VirtAddr,
     /// The service name (`storahci`), from the driver object's name.
     pub name: String,
-    pub adapters: Vec<AdapterEntry>,
+    pub adapters: Vec<StorAdapterEntry>,
     /// Why the walk of the adapter list stopped short of its head.
     pub stopped: Option<String>,
 }
 
 /// One entry of a driver's adapter list: a StorPort adapter, or why it is
 /// not shown.
-#[derive(Debug, Clone)]
-pub struct AdapterEntry {
+#[record(impl)]
+pub struct StorAdapterEntry {
     pub extension: VirtAddr,
+    #[record(skip)]
     pub adapter: std::result::Result<StorAdapter, String>,
+}
+
+#[record]
+impl StorAdapterEntry {
+    /// The adapter, when it reads.
+    #[record(getter, rename = "adapter")]
+    pub fn adapter_record(&self) -> Option<StorAdapter> {
+        self.adapter.as_ref().ok().cloned()
+    }
+
+    /// Why the adapter is not shown.
+    #[record(getter)]
+    pub fn error(&self) -> Option<String> {
+        self.adapter.as_ref().err().cloned()
+    }
 }
 
 /// A StorPort adapter (`_RAID_ADAPTER_EXTENSION`), the FDO storport creates
 /// for each device the miniport drives.
-#[derive(Debug, Clone)]
+#[record(impl)]
 pub struct StorAdapter {
     pub extension: VirtAddr,
+    /// The `_RAID_DRIVER_EXTENSION`.
     pub driver: VirtAddr,
     pub driver_object: VirtAddr,
     pub driver_name: String,
     pub fdo: VirtAddr,
     pub pdo: VirtAddr,
     pub lower: VirtAddr,
-    /// `\Device\RaidPort0`.
+    /// The FDO's full name, its `Device` directory included
+    /// (`\Device\RaidPort0`).
     pub device_name: String,
     /// The SCSI port number (`\\.\Scsi0:`).
     pub port_number: u32,
     pub miniport_name: Option<String>,
     pub adapter_id: Option<String>,
-    pub state: StorEnum,
+    pub state: StorEnumValue,
     pub flags: Vec<String>,
-    pub interface: StorEnum,
+    pub interface: StorEnumValue,
     /// Bus, device, and function of a PCI adapter.
+    #[record(skip)]
     pub pci: Option<(u32, u32, u32)>,
     /// The miniport registered as a virtual miniport.
     pub virtual_miniport: bool,
     /// The miniport's own device extension, the one StorPort passes to every
     /// Hw routine: the structure its private PDB describes.
     pub hw_device_extension: VirtAddr,
+    #[record(hex)]
     pub hw_device_extension_size: Option<u64>,
     /// The size of the per-unit extension the miniport asked for.
+    #[record(hex)]
     pub lu_extension_size: Option<u64>,
-    pub system_power: StorEnum,
-    pub device_power: StorEnum,
+    pub system_power: StorEnumValue,
+    pub device_power: StorEnumValue,
     pub paging_paths: u32,
     pub dump_paths: u32,
     pub hiber_paths: u32,
@@ -112,18 +142,36 @@ pub struct StorAdapter {
     pub pause_count: u32,
     /// `StorPortBusy` calls not yet readied.
     pub busy_count: u32,
-    pub gateways: Vec<Gateway>,
+    pub gateways: Vec<StorGateway>,
     /// Why the gateways are not all shown.
     pub gateways_error: Option<String>,
-    pub units: Vec<UnitEntry>,
+    pub units: Vec<StorUnitEntry>,
     /// Why the walk of the unit list stopped short of its head.
     pub units_stopped: Option<String>,
 }
 
+#[record]
+impl StorAdapter {
+    /// `bb:dd.f` of a PCI adapter.
+    #[record(getter)]
+    pub fn pci_location(&self) -> Option<String> {
+        self.pci
+            .map(|(bus, device, function)| format!("{bus:02x}:{device:02x}.{function:x}"))
+    }
+
+    /// What holds the adapter's requests, as `!storagekd.storadapter` says
+    /// it: `idle`, `2 with the miniport`, `paused`, ...
+    #[record(getter)]
+    pub fn io(&self) -> String {
+        adapter_verdict(self)
+    }
+}
+
 /// An adapter's I/O gateway (`_STOR_IO_GATEWAY`): what limits the requests
 /// the adapter sends to the miniport.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Gateway {
+#[record]
+#[derive(Copy, PartialEq, Eq)]
+pub struct StorGateway {
     pub address: VirtAddr,
     /// Requests the miniport holds.
     pub outstanding: u32,
@@ -136,31 +184,50 @@ pub struct Gateway {
 }
 
 /// One entry of an adapter's unit list.
-#[derive(Debug, Clone)]
-pub struct UnitEntry {
+#[record(impl)]
+pub struct StorUnitEntry {
     pub extension: VirtAddr,
+    #[record(skip)]
     pub unit: std::result::Result<StorUnit, String>,
+}
+
+#[record]
+impl StorUnitEntry {
+    /// The unit, when it reads.
+    #[record(getter, rename = "unit")]
+    pub fn unit_record(&self) -> Option<StorUnit> {
+        self.unit.as_ref().ok().cloned()
+    }
+
+    /// Why the unit is not shown.
+    #[record(getter)]
+    pub fn error(&self) -> Option<String> {
+        self.unit.as_ref().err().cloned()
+    }
 }
 
 /// A logical unit (`_RAID_UNIT_EXTENSION`), the PDO storport creates for
 /// each LUN the miniport reports.
-#[derive(Debug, Clone)]
+#[record(impl)]
 pub struct StorUnit {
     pub extension: VirtAddr,
     pub device_object: VirtAddr,
     pub adapter: VirtAddr,
-    pub address: UnitAddress,
+    /// The unit's SCSI address.
+    pub path: u8,
+    pub target: u8,
+    pub lun: u8,
     pub vendor: String,
     pub product: String,
     pub revision: String,
-    pub state: StorEnum,
-    pub device_power: StorEnum,
+    pub state: StorEnumValue,
+    pub device_power: StorEnumValue,
     pub flags: Vec<String>,
     /// The miniport's per-unit extension (`StorPortGetLogicalUnit`); null
     /// when the miniport asked for none.
     pub lu_extension: VirtAddr,
     pub max_queue_depth: u32,
-    pub queue: UnitQueue,
+    pub queue: StorQueue,
     /// The requests the miniport holds for the unit, from storport's pending
     /// queue.
     pub requests: Vec<StorRequest>,
@@ -168,17 +235,20 @@ pub struct StorUnit {
     pub requests_stopped: Vec<String>,
 }
 
-/// The SCSI address of a unit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UnitAddress {
-    pub path: u8,
-    pub target: u8,
-    pub lun: u8,
+#[record]
+impl StorUnit {
+    /// What holds the unit's requests, as `!storagekd.storunit` says it:
+    /// `idle`, `1 with the miniport`, `frozen`, ...
+    #[record(getter)]
+    pub fn io(&self) -> String {
+        unit_verdict(&self.queue, self.requests.len())
+    }
 }
 
 /// A unit's device queue (`_EXTENDED_DEVICE_QUEUE`).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct UnitQueue {
+#[record]
+#[derive(PartialEq, Eq, Default)]
+pub struct StorQueue {
     /// How many requests the queue lets the miniport hold.
     pub depth: i32,
     /// `StorPortPauseDevice` calls not yet resumed.
@@ -203,7 +273,8 @@ pub struct UnitQueue {
 
 /// A request the miniport holds: storport's `_EXTENDED_REQUEST_BLOCK` and
 /// the IRP and SRB it carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub struct StorRequest {
     pub xrb: VirtAddr,
     pub irp: VirtAddr,
@@ -213,21 +284,78 @@ pub struct StorRequest {
 }
 
 /// An entry of an adapter's internal log (`_RAID_LOG_ENTRY`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[record(impl)]
+#[derive(PartialEq, Eq)]
 pub struct StorLogEntry {
     /// The entry's number: storport numbers them from 1 as it writes them.
     pub number: u64,
     /// When storport wrote it, as a FILETIME (UTC).
     pub time: u64,
     /// `_DBG_LOG_REASON`.
-    pub reason: StorEnum,
+    #[record(skip)]
+    pub reason: StorEnumValue,
+    #[record(hex)]
     pub parameters: [u64; 4],
+}
+
+#[record]
+impl StorLogEntry {
+    /// `time` as text (UTC).
+    #[record(getter)]
+    pub fn time_utc(&self) -> Option<String> {
+        format_filetime_precise(self.time)
+    }
+
+    /// `_DBG_LOG_REASON` without its `Log` prefix.
+    #[record(getter)]
+    pub fn event(&self) -> Option<String> {
+        self.reason
+            .name
+            .as_deref()
+            .map(|name| name.strip_prefix("Log").unwrap_or(name).to_string())
+    }
+
+    #[record(getter, hex)]
+    pub fn event_value(&self) -> u64 {
+        self.reason.value
+    }
+
+    /// For an entry of the request path: its IRP.
+    #[record(getter)]
+    pub fn irp(&self) -> Option<VirtAddr> {
+        log_request(self).map(|request| request.irp)
+    }
+
+    /// For an entry of the request path: its SRB.
+    #[record(getter)]
+    pub fn srb(&self) -> Option<VirtAddr> {
+        log_request(self).map(|request| request.srb)
+    }
+
+    /// For an entry of the request path: its CDB's operation code.
+    #[record(getter, hex)]
+    pub fn opcode(&self) -> Option<u8> {
+        log_request(self).map(|request| request.opcode)
+    }
+
+    /// For an entry of the request path: the command its operation code
+    /// names.
+    #[record(getter)]
+    pub fn command(&self) -> Option<String> {
+        log_request(self).and_then(|request| scsi_command(&[request.opcode]))
+    }
+
+    /// For an entry of the request path: its SRB status, by name.
+    #[record(getter)]
+    pub fn srb_status(&self) -> Option<String> {
+        log_request(self).map(|request| srb_status_text(request.srb_status))
+    }
 }
 
 /// A StorPort adapter's internal log (`!storagekd.storloglist`): a ring of
 /// `RaidLogListSize` entries that storport writes as it starts, completes,
 /// pauses, and resumes requests.
-#[derive(Debug, Clone)]
+#[record]
 pub struct StorLog {
     pub adapter: VirtAddr,
     pub driver_name: String,
@@ -289,7 +417,7 @@ pub fn log_ring_numbers(newest: u64, size: u32) -> Range<u64> {
 
 /// What a unit's queue state means, in words: the requests the miniport
 /// holds, those waiting in storport, and why the queue does not move.
-pub fn unit_verdict(queue: &UnitQueue, outstanding: usize) -> String {
+pub fn unit_verdict(queue: &StorQueue, outstanding: usize) -> String {
     let mut parts = Vec::new();
     if outstanding > 0 {
         parts.push(format!("{outstanding} with the miniport"));
@@ -453,8 +581,8 @@ impl<'a> StorTypes<'a> {
     }
 }
 
-fn stor_enum(variants: &[(String, i64)], value: u64) -> StorEnum {
-    StorEnum {
+fn stor_enum(variants: &[(String, i64)], value: u64) -> StorEnumValue {
+    StorEnumValue {
         value,
         name: enum_name(variants, value),
     }
@@ -501,7 +629,7 @@ impl Target {
 
     /// Every driver on storport's driver list, with its adapters and their
     /// units.
-    pub fn storport_drivers(&self) -> Result<StorPortDrivers> {
+    pub fn storport_drivers(&self) -> Result<StorDrivers> {
         let stor = self.stor_types()?;
         let pointer = self
             .symbols
@@ -516,7 +644,7 @@ impl Target {
         let memory = self.kernel_address_space();
         let port_data = memory.read::<VirtAddr>(pointer)?;
         if port_data.is_zero() {
-            return Ok(StorPortDrivers {
+            return Ok(StorDrivers {
                 port_data,
                 drivers: Vec::new(),
                 stopped: None,
@@ -532,7 +660,7 @@ impl Target {
         for extension in extensions {
             drivers.push(self.stor_driver(&stor, &driver_layout, extension)?);
         }
-        Ok(StorPortDrivers {
+        Ok(StorDrivers {
             port_data,
             drivers,
             stopped,
@@ -591,7 +719,7 @@ impl Target {
     /// The adapter on a driver's adapter list at `link`. An adapter of
     /// storport's native NVMe path has a different layout, which these
     /// commands do not read.
-    fn stor_adapter_entry(&self, stor: &StorTypes<'_>, extension: VirtAddr) -> AdapterEntry {
+    fn stor_adapter_entry(&self, stor: &StorTypes<'_>, extension: VirtAddr) -> StorAdapterEntry {
         let adapter = self
             .stor_object_type(stor, extension)
             .map_err(|error| format!("its ObjectType is unreadable: {error}"))
@@ -603,7 +731,7 @@ impl Target {
                     Err(not_a_raid_adapter(stor, object_type))
                 }
             });
-        AdapterEntry { extension, adapter }
+        StorAdapterEntry { extension, adapter }
     }
 
     fn stor_object_type(&self, stor: &StorTypes<'_>, address: VirtAddr) -> Result<u64> {
@@ -817,7 +945,7 @@ impl Target {
                             ))
                         }
                     });
-                UnitEntry { extension, unit }
+                StorUnitEntry { extension, unit }
             })
             .collect();
         Ok(StorAdapter {
@@ -856,7 +984,11 @@ impl Target {
 
     /// The adapter's gateways: `InUseGatewayCount` of them in a row at
     /// `Gateway`.
-    fn stor_gateways(&self, stor: &StorTypes<'_>, adapter: &StructRef<'_>) -> Result<Vec<Gateway>> {
+    fn stor_gateways(
+        &self,
+        stor: &StorTypes<'_>,
+        adapter: &StructRef<'_>,
+    ) -> Result<Vec<StorGateway>> {
         let first = adapter.read_pointer("Gateway")?;
         if first.is_zero() {
             return Ok(Vec::new());
@@ -872,7 +1004,7 @@ impl Target {
         (0..count)
             .map(|index| {
                 let gateway = stor.at(&layout, first + index * size).prefetch();
-                Ok(Gateway {
+                Ok(StorGateway {
                     address: gateway.addr(),
                     outstanding: gateway.read_uint("Outstanding")? as u32,
                     outstanding_max: gateway.read_uint("OutstandingMax")? as u32,
@@ -910,7 +1042,7 @@ impl Target {
         let waiting = count_list("DeviceOverflowList")?;
         let bypass_waiting = count_list("ByPassList")?;
         let flag = |field: &str| -> Result<bool> { Ok(device_queue.read_uint(field)? != 0) };
-        let queue = UnitQueue {
+        let queue = StorQueue {
             depth: device_queue.read_uint("Depth")? as u32 as i32,
             pause_count: device_queue.read_uint("PauseCount")? as u32 as i32,
             busy_count: device_queue.read_uint("BusyCount")? as u32 as i32,
@@ -929,11 +1061,9 @@ impl Target {
             extension,
             device_object: unit.read_pointer("DeviceObject")?,
             adapter: unit.read_pointer("Adapter")?,
-            address: UnitAddress {
-                path: address.read_uint("PathId")? as u8,
-                target: address.read_uint("TargetId")? as u8,
-                lun: address.read_uint("Lun")? as u8,
-            },
+            path: address.read_uint("PathId")? as u8,
+            target: address.read_uint("TargetId")? as u8,
+            lun: address.read_uint("Lun")? as u8,
             vendor: text("VendorId")?,
             product: text("ProductId")?,
             revision: text("ProductRevision")?,
@@ -1200,14 +1330,14 @@ mod tests {
 
     #[test]
     fn unit_verdict_names_what_holds_the_queue() {
-        let idle = UnitQueue {
+        let idle = StorQueue {
             depth: 31,
             power_locked: true,
-            ..UnitQueue::default()
+            ..StorQueue::default()
         };
         assert_eq!(unit_verdict(&idle, 0), "idle");
         assert_eq!(unit_verdict(&idle, 2), "2 with the miniport");
-        let held = UnitQueue {
+        let held = StorQueue {
             waiting: 3,
             bypass_waiting: 1,
             frozen: true,
@@ -1219,15 +1349,15 @@ mod tests {
             unit_verdict(&held, 1),
             "1 with the miniport, 4 waiting, frozen, paused (1), busy (2)"
         );
-        let locked = UnitQueue {
+        let locked = StorQueue {
             locked: true,
             ..idle
         };
         assert_eq!(unit_verdict(&locked, 0), "locked");
     }
 
-    fn adapter_with(gateways: Vec<Gateway>, pause_count: u32, busy_count: u32) -> StorAdapter {
-        let unknown = StorEnum {
+    fn adapter_with(gateways: Vec<StorGateway>, pause_count: u32, busy_count: u32) -> StorAdapter {
+        let unknown = StorEnumValue {
             value: 0,
             name: None,
         };
@@ -1267,7 +1397,7 @@ mod tests {
 
     #[test]
     fn adapter_verdict_sums_gateways() {
-        let gateway = Gateway {
+        let gateway = StorGateway {
             address: VirtAddr(0),
             outstanding: 0,
             outstanding_max: 31,
@@ -1276,12 +1406,12 @@ mod tests {
             paused: 0,
         };
         assert_eq!(adapter_verdict(&adapter_with(vec![gateway], 0, 0)), "idle");
-        let busy = Gateway {
+        let busy = StorGateway {
             outstanding: 2,
             pending: 5,
             ..gateway
         };
-        let paused = Gateway {
+        let paused = StorGateway {
             outstanding: 1,
             paused: 1,
             ..gateway

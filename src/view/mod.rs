@@ -24,7 +24,6 @@ pub mod record;
 pub mod registry;
 pub mod sched;
 pub mod security;
-pub mod storage;
 pub mod symbols;
 pub mod triage;
 pub mod userdump;

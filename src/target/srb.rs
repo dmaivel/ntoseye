@@ -6,11 +6,13 @@
 
 use std::sync::Arc;
 
+use ntoseye_macros::record;
+
 use crate::error::{Error, Result};
 use crate::layout::{StructRef, TypeInfo, Types};
 use crate::memory::MemoryOps;
 use crate::target::Target;
-use crate::target::virtio_request::sense_text;
+use crate::target::virtio_request::{scsi_command, sense_text};
 use crate::types::VirtAddr;
 
 /// `SRB_FUNCTION_STORAGE_REQUEST_BLOCK`: the `Function` of every extended
@@ -171,7 +173,7 @@ pub fn srb_flag_names(flags: u32) -> Vec<String> {
 }
 
 /// One block of an extended SRB's extended data (`SRBEX_DATA`).
-#[derive(Debug, Clone)]
+#[record]
 pub struct SrbExData {
     pub address: VirtAddr,
     /// `_SRBEXDATATYPE` without its `SrbExDataType` prefix (`ScsiCdb16`).
@@ -180,25 +182,34 @@ pub struct SrbExData {
 }
 
 /// A decoded SRB (`!storagekd.storsrb`).
-#[derive(Debug, Clone)]
+#[record(impl)]
 pub struct Srb {
     pub address: VirtAddr,
     /// A `STORAGE_REQUEST_BLOCK`, rather than a `SCSI_REQUEST_BLOCK`.
     pub extended: bool,
     /// `SrbFunction` of an extended SRB, else `Function`.
+    #[record(hex)]
     pub function: u32,
+    #[record(hex)]
     pub srb_status: u8,
+    #[record(hex)]
     pub scsi_status: Option<u8>,
+    #[record(hex)]
     pub flags: u32,
-    /// Port, path, target, and LUN; a legacy SRB has no port.
+    /// An extended SRB's port; a legacy one has none.
     pub port: Option<u16>,
-    pub path_target_lun: Option<(u8, u8, u8)>,
+    /// The path, target, and LUN, when the SRB has a BTL8 address.
+    pub path: Option<u8>,
+    pub target: Option<u8>,
+    pub lun: Option<u8>,
     pub data_transfer_length: u32,
     pub data_buffer: VirtAddr,
+    /// Seconds.
     pub timeout: u32,
     /// `OriginalRequest`: the IRP the SRB carries.
     pub original_request: VirtAddr,
     pub next_srb: VirtAddr,
+    #[record(hex)]
     pub request_tag: Option<u32>,
     pub priority: Option<u16>,
     pub cdb: Vec<u8>,
@@ -208,9 +219,38 @@ pub struct Srb {
     /// holds some.
     pub sense: Option<String>,
     /// The contexts an extended SRB keeps for the class driver, the port
-    /// driver, and the miniport.
-    pub contexts: Option<[VirtAddr; 3]>,
+    /// driver, and the miniport; a legacy one has none.
+    pub class_context: Option<VirtAddr>,
+    pub port_context: Option<VirtAddr>,
+    pub miniport_context: Option<VirtAddr>,
     pub ex_data: Vec<SrbExData>,
+}
+
+#[record]
+impl Srb {
+    /// The function by `SRB_FUNCTION_*` name, without the prefix.
+    #[record(getter)]
+    pub fn function_name(&self) -> Option<&'static str> {
+        srb_function_name(self.function)
+    }
+
+    /// The status by name, with `QUEUE_FROZEN` and `AUTOSENSE_VALID`.
+    #[record(getter)]
+    pub fn srb_status_text(&self) -> String {
+        srb_status_text(self.srb_status)
+    }
+
+    /// The `SRB_FLAGS_*` names of the flags.
+    #[record(getter)]
+    pub fn flag_names(&self) -> Vec<String> {
+        srb_flag_names(self.flags)
+    }
+
+    /// The CDB's command, with its LBA and block count when it has them.
+    #[record(getter)]
+    pub fn command(&self) -> Option<String> {
+        scsi_command(&self.cdb)
+    }
 }
 
 fn srb_layout(types: Types<'_>, name: &str) -> Result<Arc<TypeInfo>> {
@@ -279,11 +319,9 @@ impl Target {
             scsi_status: Some(srb.read_uint("ScsiStatus")? as u8),
             flags: srb.read_uint("SrbFlags")? as u32,
             port: None,
-            path_target_lun: Some((
-                srb.read_uint("PathId")? as u8,
-                srb.read_uint("TargetId")? as u8,
-                srb.read_uint("Lun")? as u8,
-            )),
+            path: Some(srb.read_uint("PathId")? as u8),
+            target: Some(srb.read_uint("TargetId")? as u8),
+            lun: Some(srb.read_uint("Lun")? as u8),
             data_transfer_length: srb.read_uint("DataTransferLength")? as u32,
             data_buffer: srb.read_pointer("DataBuffer")?,
             timeout: srb.read_uint("TimeOutValue")? as u32,
@@ -295,7 +333,9 @@ impl Target {
             sense: self.srb_sense(srb_status, sense_buffer, sense_length),
             sense_buffer,
             sense_length,
-            contexts: None,
+            class_context: None,
+            port_context: None,
+            miniport_context: None,
             ex_data: Vec::new(),
         })
     }
@@ -342,21 +382,19 @@ impl Target {
             });
         }
         let address_offset = srb.read_uint("AddressOffset")?;
-        let (port, path_target_lun) = if address_offset == 0 {
-            (None, None)
+        let (port, path, target, lun) = if address_offset == 0 {
+            (None, None, None, None)
         } else {
             let btl = types.struct_at("storport!_STOR_ADDR_BTL8", address + address_offset)?;
             if btl.read_uint("Type")? == STOR_ADDRESS_TYPE_BTL8 {
                 (
                     Some(btl.read_uint("Port")? as u16),
-                    Some((
-                        btl.read_uint("Path")? as u8,
-                        btl.read_uint("Target")? as u8,
-                        btl.read_uint("Lun")? as u8,
-                    )),
+                    Some(btl.read_uint("Path")? as u8),
+                    Some(btl.read_uint("Target")? as u8),
+                    Some(btl.read_uint("Lun")? as u8),
                 )
             } else {
-                (None, None)
+                (None, None, None, None)
             }
         };
         let (scsi_status, sense_buffer, sense_length, cdb) = match cdb_block {
@@ -376,7 +414,9 @@ impl Target {
             scsi_status,
             flags: srb.read_uint("SrbFlags")? as u32,
             port,
-            path_target_lun,
+            path,
+            target,
+            lun,
             data_transfer_length: srb.read_uint("DataTransferLength")? as u32,
             data_buffer: srb.read_pointer("DataBuffer")?,
             timeout: srb.read_uint("TimeOutValue")? as u32,
@@ -388,11 +428,9 @@ impl Target {
             sense: self.srb_sense(srb_status, sense_buffer, sense_length),
             sense_buffer,
             sense_length,
-            contexts: Some([
-                srb.read_pointer("ClassContext")?,
-                srb.read_pointer("PortContext")?,
-                srb.read_pointer("MiniportContext")?,
-            ]),
+            class_context: Some(srb.read_pointer("ClassContext")?),
+            port_context: Some(srb.read_pointer("PortContext")?),
+            miniport_context: Some(srb.read_pointer("MiniportContext")?),
             ex_data,
         })
     }
