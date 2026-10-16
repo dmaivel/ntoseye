@@ -35,7 +35,7 @@ use std::time::Duration;
 use crate::diagnostics;
 use crate::error::Error;
 use crate::kd::KdMemorySource;
-use crate::repl::{RemoteClient, ReplStore, StopWaitBudget, run_remote_command};
+use crate::repl::{RemoteClient, ReplStore, StopWaitBudget, open_session, run_remote_command};
 use crate::session::{RunStatus, Session};
 use crate::{Backend, TargetSpec};
 
@@ -130,7 +130,7 @@ fn spawn_session(
 
     std::thread::spawn(move || {
         let is_dump = matches!(spec, TargetSpec::Dump(_));
-        let mut actor = match Session::open_with_progress(&spec, &mut |line| eprintln!("{line}")) {
+        let mut actor = match open_session(&spec, &mut |line| eprintln!("{line}")) {
             Ok(mut ctx) => {
                 let contexts = opened_contexts(&mut ctx);
                 // An agent reads every stop; a step shows what changed.

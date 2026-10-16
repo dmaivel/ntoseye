@@ -11,10 +11,6 @@ use crate::dbg_backend::{HwBreakpointAccess, WatchpointAccess};
 use crate::expr::Expr;
 use crate::guest::hypercalls::tlfs_hypercall;
 use crate::guest::vm_exits::ExitFilter;
-#[cfg(feature = "repl")]
-use crate::repl::CompletionStrategy;
-#[cfg(feature = "repl")]
-use crate::repl::args::{ArgCx, ArgError, FromArg};
 use crate::types::{Dtb, VirtAddr};
 use ntoseye_macros::record;
 
@@ -327,14 +323,3 @@ pub struct BreakpointCommands {
 /// whatever the radix, as `bl` prints it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BreakpointId(pub u32);
-
-#[cfg(feature = "repl")]
-impl FromArg for BreakpointId {
-    const COMPLETION: CompletionStrategy = CompletionStrategy::Breakpoint;
-
-    fn from_arg(_: &mut ArgCx<'_, '_>, text: &str) -> Result<Self, ArgError> {
-        text.parse()
-            .map(BreakpointId)
-            .map_err(|_| ArgError::Message(format!("invalid breakpoint ID: {text}")))
-    }
-}

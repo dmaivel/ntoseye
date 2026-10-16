@@ -1,4 +1,6 @@
+use crate::TargetSpec;
 use crate::diagnostics::{errors_reported, print_notice};
+use crate::error::Result;
 use crate::expr::Expr;
 use crate::repl::*;
 use crate::session::effects::Refusal;
@@ -8,6 +10,15 @@ use crate::ui;
 
 const ALIAS_RECURSION_LIMIT: usize = 16;
 const BREAKPOINT_ACTION_RECURSION_LIMIT: usize = 4;
+
+/// Open a session for a host: [`Session::open_with_progress`], with the REPL
+/// dispatcher installed to run its stops' breakpoint actions and filter
+/// commands. Every host opens its sessions here.
+pub fn open_session(spec: &TargetSpec, progress: &mut dyn FnMut(&str)) -> Result<Session> {
+    let mut session = Session::open_with_progress(spec, progress)?;
+    session.set_action_runner(Box::new(ReplActions));
+    Ok(session)
+}
 
 /// The REPL dispatcher as every session's [`ActionRunner`]: breakpoint `do`
 /// actions and filter `-c` commands run in a REPL of their own over the

@@ -136,25 +136,6 @@ impl FltFilterSelector {
     }
 }
 
-#[cfg(feature = "python")]
-impl crate::python::command::PyArg for FltFilterSelector {
-    type Py = crate::python::args::FltFilterArg;
-
-    fn from_py(value: Self::Py) -> Self {
-        use crate::python::args::FltFilterArg;
-        match value {
-            FltFilterArg::Address(address) => Self {
-                name: format!("{address:#x}"),
-                address: Some(VirtAddr(address)),
-            },
-            FltFilterArg::Name(name) => Self {
-                name,
-                address: None,
-            },
-        }
-    }
-}
-
 /// fltmgr's layouts, resolved once per command.
 struct FltTypes<'a> {
     types: Types<'a>,

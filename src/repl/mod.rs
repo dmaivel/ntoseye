@@ -101,7 +101,7 @@ pub use crate::session::effects::{RunEffect, RunState, TargetScope};
 pub use aliases::*;
 pub use bugcheck::*;
 pub use command::*;
-pub use commands::{ReplActions, command_reference_json, json_string};
+pub use commands::{ReplActions, command_reference_json, json_string, open_session};
 pub use completion::*;
 pub use disasm::*;
 #[cfg(feature = "cli")]
@@ -1192,7 +1192,7 @@ mod tests {
     use crate::dbg_backend::{BugcheckInfo, StopEvent};
     use crate::layout::{FieldInfo, ParsedType, TypeInfo};
     use crate::output::capture;
-    use crate::repl::{DispatchContext, Flow, RemoteClient, ReplState};
+    use crate::repl::{DispatchContext, Flow, RemoteClient, ReplActions, ReplState};
     use crate::session::tests::{
         MockBackend, breakpoint_event, session_running_code, session_with_mock,
     };
@@ -1712,6 +1712,7 @@ mod tests {
             vcpu_at(0x1020).runs_stopping_at(&[(0x1000, STACK, THREAD), (0x1010, STACK, THREAD)]);
         let continues = backend.continue_count();
         let mut session = session_running_code(&[0x90; 0x40], backend);
+        session.set_action_runner(Box::new(ReplActions));
         let mut state = remote_state(&mut session, 5_000);
 
         let (result, text) =
@@ -1784,6 +1785,7 @@ mod tests {
             ..breakpoint_event(0x1020)
         });
         let mut session = session_running_code(&[0x90; 0x40], backend);
+        session.set_action_runner(Box::new(ReplActions));
         let mut state = remote_state(&mut session, 5_000);
 
         let (result, text) = capture(|| state.dispatch_line(r#"sxe -c ".echo seen" -f break av"#));

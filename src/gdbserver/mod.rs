@@ -49,7 +49,7 @@ use crate::TargetSpec;
 use crate::dbg_backend::DebugCapability;
 use crate::error::{Error, Result};
 use crate::gdb::{append_packet, trace_packet};
-use crate::repl::{ReplStore, supports_capability};
+use crate::repl::{ReplStore, open_session, supports_capability};
 use crate::session::{Cancel, Motion, Session, Stop};
 use crate::termination;
 use crate::types::Arch;
@@ -80,7 +80,7 @@ pub fn run(spec: TargetSpec, listen: &str) -> Result<()> {
     let addr = listener
         .local_addr()
         .map_err(|error| Error::DebugInfo(error.to_string()))?;
-    let mut session = Session::open_with_progress(&spec, &mut |line| eprintln!("{line}"))?;
+    let mut session = open_session(&spec, &mut |line| eprintln!("{line}"))?;
     // IDA opens the kernel's file over the connection on every attach and
     // waits one second for the answer, so have it cached before a client
     // asks: a download inside that request would time the client out.

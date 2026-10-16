@@ -23,10 +23,6 @@ use crate::exception_policy::ExceptionPolicyAction;
 use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::kd::trace_enabled;
 use crate::notice::Notice;
-#[cfg(feature = "python")]
-use crate::python::breakpoints::Breakpoint;
-#[cfg(feature = "python")]
-use crate::python::record;
 use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::{
     ContinueOutcome, STEP_UNTIL_LIMIT, Session, StepKind, StepMode, StepStack, StopResolution,
@@ -229,9 +225,10 @@ impl<'a> Cancel<'a> {
 
 /// Runs the commands a stop carries: a breakpoint's `do` action, and the
 /// `-c` command of the exception or module-event filter that stopped it.
-/// The REPL's dispatcher is the one implementation; every session built
-/// with the REPL gets it, so every host runs them the same way. Output goes
-/// to whatever the host captures or prints at the time.
+/// The REPL's dispatcher is the one implementation; every host installs it
+/// ([`Session::set_action_runner`]) on the sessions it opens, so every host
+/// runs them the same way. Output goes to whatever the host captures or
+/// prints at the time.
 pub trait ActionRunner {
     /// Run a breakpoint's action. `true` when it asks to resume (`gc`, or a
     /// plain `g`), which passes the hit as a false condition would.
@@ -251,7 +248,7 @@ pub trait ActionRunner {
 /// The parts are records, not live handles; the collections take them as
 /// keys: `dbg.threads[stop.thread]`, `dbg.processes[stop.process]`,
 /// `dbg.modules[stop.module]`; `dbg.cpus[stop.cpu]` is the processor.
-#[record(impl)]
+#[record]
 pub struct Stop {
     /// The kind of stop, in snake case.
     #[record(flatten)]
@@ -279,22 +276,6 @@ pub struct Stop {
     pub vtl: Option<u8>,
     /// The hypervisor partition whose view (`.partition`) shows the stop.
     pub partition: Option<u64>,
-}
-
-#[record]
-impl Stop {
-    /// Whether breakpoint `bp` is the one that stopped the target. `bp`
-    /// may be deleted since (a one-shot breakpoint that fired); a later
-    /// breakpoint that reuses its id, or another debugger's, is not it.
-    #[record(python)]
-    fn hit(slf: &pyo3::Bound<'_, Self>, bp: pyo3::PyRef<'_, Breakpoint>) -> pyo3::PyResult<bool> {
-        use pyo3::types::PyAnyMethods;
-        if !slf.is_instance_of::<StopKindBreakpointPy>() {
-            return Ok(false);
-        }
-        let hit = record::field(slf.as_any(), "breakpoint")?;
-        Ok(hit.getattr("serial")?.extract::<u64>()? == bp.serial())
-    }
 }
 
 impl Stop {
@@ -867,8 +848,14 @@ impl Session {
         }
     }
 
+    /// Install the host's [`ActionRunner`], which runs every later stop's
+    /// breakpoint action and filter command.
+    pub fn set_action_runner(&mut self, runner: Box<dyn ActionRunner>) {
+        self.action_runner = Some(runner);
+    }
+
     /// Run a breakpoint's action; whether it asked to resume. A session
-    /// without a runner (built without the REPL), or one already running an
+    /// without a runner (no host installed one), or one already running an
     /// action, runs none.
     pub(super) fn run_breakpoint_action(&mut self, action: &str) -> bool {
         let Some(mut runner) = self.action_runner.take() else {

@@ -10,17 +10,33 @@ use std::time::{Duration, Instant};
 
 use pyo3::prelude::*;
 
+use super::breakpoints::Breakpoint;
 use super::command::admit;
 use super::handle::Debugger;
-use super::record::{ToValue, Typed};
+use super::record::{self, ToValue, Typed};
 use super::{err, raise, timeout_arg};
 use crate::error::Result;
 use crate::output;
+use crate::session::driver::{StopKindBreakpointPy, StopPy};
 use crate::session::effects::Effects;
 use crate::session::{Cancel, CancelBehavior, Motion, RunOutcome, Session, Stop};
 
 thread_local! {
     static IN_CONDITION: Cell<bool> = const { Cell::new(false) };
+}
+
+#[pymethods]
+impl StopPy {
+    /// Whether breakpoint `bp` is the one that stopped the target. `bp`
+    /// may be deleted since (a one-shot breakpoint that fired); a later
+    /// breakpoint that reuses its id, or another debugger's, is not it.
+    fn hit(slf: &Bound<'_, Self>, bp: PyRef<'_, Breakpoint>) -> PyResult<bool> {
+        if !slf.is_instance_of::<StopKindBreakpointPy>() {
+            return Ok(false);
+        }
+        let hit = record::field(slf.as_any(), "breakpoint")?;
+        Ok(hit.getattr("serial")?.extract::<u64>()? == bp.serial())
+    }
 }
 
 /// Reject run-control or breakpoint mutation while a Python `when=` callback

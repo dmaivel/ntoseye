@@ -520,6 +520,8 @@ mod classes {
                 let mut all: Vec<&Member> = get(&self.record, record).iter().collect();
                 all.extend(get(&self.computed, record));
                 all.extend(get(&self.methods, record));
+                // A host's `#[pymethods]` on the record's class.
+                all.extend(get(&self.methods, &format!("{record}Py")));
                 let to_dict = generated("to_dict", "BaseRecord");
                 all.push(&to_dict);
                 unique(&format!("{record} ({at})"), &all);
@@ -541,8 +543,9 @@ mod classes {
                 unique(&format!("{handle} ({at})"), &all);
             }
             for (class, members) in &self.methods {
-                let known = self.records.iter().any(|(record, _)| record == class)
-                    || self.handles.iter().any(|(handle, _, _)| handle == class);
+                let known = self.records.iter().any(|(record, _)| {
+                    record == class || class.strip_suffix("Py") == Some(record.as_str())
+                }) || self.handles.iter().any(|(handle, _, _)| handle == class);
                 if !known {
                     unique(class, &members.iter().collect::<Vec<_>>());
                 }

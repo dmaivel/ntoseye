@@ -8,11 +8,13 @@ use std::borrow::Cow;
 
 use ntoseye_macros::grammar;
 
+use crate::breakpoints::BreakpointId;
 use crate::expr::Expr;
 use crate::repl::{
     CommandInvocation, CompletionStrategy, ReplState, command_help, error, usage_error,
 };
 use crate::target::MemoryKind;
+use crate::target::gflag::GlobalFlagChange;
 use crate::types::VirtAddr;
 
 /// What a parser may use: the REPL (radix, target, caches) and the name the
@@ -98,6 +100,28 @@ impl FromArg for usize {
 impl FromArg for String {
     fn from_arg(_: &mut ArgCx<'_, '_>, text: &str) -> Result<Self, ArgError> {
         Ok(text.to_string())
+    }
+}
+
+impl FromArg for BreakpointId {
+    const COMPLETION: CompletionStrategy = CompletionStrategy::Breakpoint;
+
+    fn from_arg(_: &mut ArgCx<'_, '_>, text: &str) -> Result<Self, ArgError> {
+        text.parse()
+            .map(BreakpointId)
+            .map_err(|_| ArgError::Message(format!("invalid breakpoint ID: {text}")))
+    }
+}
+
+/// `!gflag`'s change, its values in the current radix.
+impl FromArg for GlobalFlagChange {
+    const COMPLETION: CompletionStrategy = CompletionStrategy::Expression;
+
+    fn from_arg(cx: &mut ArgCx<'_, '_>, text: &str) -> Result<Self, ArgError> {
+        Self::parse(text, |text| {
+            Expr::eval_with_radix(text, &cx.state.ctx.target, cx.state.radix).map(|value| value.0)
+        })
+        .map_err(|error| ArgError::Message(error.to_string()))
     }
 }
 

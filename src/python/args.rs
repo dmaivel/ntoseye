@@ -20,12 +20,17 @@ use super::process::{Heap, Process};
 use super::thread::{Cpu, Thread};
 use crate::Backend;
 use crate::dbg_backend::ContinueDisposition;
+use crate::error::Error;
 use crate::exception_policy::{EventName, ExceptionPolicyFinalAction};
+use crate::expr::NumberRadix;
 use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::session::WalkUntil;
 #[cfg(feature = "python-stubs")]
 use crate::session::driver::StopPy;
 use crate::target::ThreadInfo;
+use crate::target::etw::EtwLoggerRef;
+use crate::target::fltmgr::FltFilterSelector;
+use crate::target::gflag::GlobalFlagChange;
 use crate::target::heap::HeapInfo;
 use crate::target::object::{DriverDeviceLink, DriverObjectInfo, ObjectName};
 use crate::target::sched::{ApcSelector, UniqStackScope};
@@ -360,6 +365,79 @@ pub enum HypercallArg {
 pub enum FltFilterArg {
     Address(u64),
     Name(String),
+}
+
+impl PyArg for FltFilterSelector {
+    type Py = FltFilterArg;
+
+    fn from_py(value: FltFilterArg) -> Self {
+        match value {
+            FltFilterArg::Address(address) => Self {
+                name: format!("{address:#x}"),
+                address: Some(VirtAddr(address)),
+            },
+            FltFilterArg::Name(name) => Self {
+                name,
+                address: None,
+            },
+        }
+    }
+}
+
+/// An ETW session as the SDK names it: its logger id or `_WMI_LOGGER_CONTEXT`
+/// address, or its name.
+#[derive(FromPyObject)]
+pub enum EtwLoggerArg {
+    Value(u64),
+    Name(String),
+}
+
+impl PyArg for EtwLoggerRef {
+    type Py = EtwLoggerArg;
+
+    /// A value is written in hex, which reads the same in every radix.
+    fn from_py(value: EtwLoggerArg) -> Self {
+        let text = match value {
+            EtwLoggerArg::Value(value) => format!("{value:#x}"),
+            EtwLoggerArg::Name(name) => name,
+        };
+        Self {
+            text,
+            radix: NumberRadix::Hexadecimal,
+        }
+    }
+}
+
+/// The SDK's `change` argument: a `str` as `!gflag` takes it (`"+ust"`,
+/// `"-0x2000000"`, `"400"`), its values hex as in WinDbg.
+pub struct GlobalFlagChangeArg(GlobalFlagChange);
+
+impl<'a, 'py> FromPyObject<'a, 'py> for GlobalFlagChangeArg {
+    type Error = PyErr;
+
+    #[cfg(feature = "python-stubs")]
+    const INPUT_TYPE: PyStaticExpr = type_hint_identifier!("builtins", "str");
+
+    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        let text: String = obj.extract()?;
+        GlobalFlagChange::parse(&text, |value| {
+            let digits = value
+                .strip_prefix("0x")
+                .or_else(|| value.strip_prefix("0X"))
+                .unwrap_or(value);
+            u64::from_str_radix(digits, 16)
+                .map_err(|_| Error::InvalidArgument(format!("'{value}' is not a hex value")))
+        })
+        .map(Self)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+}
+
+impl PyArg for GlobalFlagChange {
+    type Py = GlobalFlagChangeArg;
+    fn from_py(value: GlobalFlagChangeArg) -> Self {
+        value.0
+    }
 }
 
 /// An executive object by body or header address, by object namespace

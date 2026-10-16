@@ -28,8 +28,6 @@ use crate::expr::{Expr, NumberRadix};
 use crate::kuser_shared::KuserSharedData;
 use crate::layout::TypeInfo;
 use crate::memory::MemoryOps;
-#[cfg(feature = "python")]
-use crate::python::command::PyArg;
 use crate::target::{ListCursor, Target};
 use crate::triage_report::time::filetime_to_iso;
 use crate::types::VirtAddr;
@@ -1069,32 +1067,6 @@ fn decode_record(
 pub struct EtwLoggerRef {
     pub text: String,
     pub radix: NumberRadix,
-}
-
-/// A session as the SDK names it: its logger id or `_WMI_LOGGER_CONTEXT`
-/// address, or its name.
-#[cfg(feature = "python")]
-#[derive(pyo3::FromPyObject)]
-pub enum EtwLoggerArg {
-    Value(u64),
-    Name(String),
-}
-
-#[cfg(feature = "python")]
-impl PyArg for EtwLoggerRef {
-    type Py = EtwLoggerArg;
-
-    /// A value is written in hex, which reads the same in every radix.
-    fn from_py(value: EtwLoggerArg) -> Self {
-        let text = match value {
-            EtwLoggerArg::Value(value) => format!("{value:#x}"),
-            EtwLoggerArg::Name(name) => name,
-        };
-        Self {
-            text,
-            radix: NumberRadix::Hexadecimal,
-        }
-    }
 }
 
 /// How a logger's raw timestamps become FILETIMEs.

@@ -2,27 +2,11 @@
 //! `_PEB.NtGlobalFlag`, decoded by the GFlags table's names.
 
 use crate::error::{Error, Result};
-#[cfg(feature = "repl")]
-use crate::expr::Expr;
 use crate::guest::ProcessInfo;
 use crate::memory::MemoryOps;
-#[cfg(feature = "python")]
-use crate::python::command::PyArg;
-#[cfg(feature = "repl")]
-use crate::repl::CompletionStrategy;
-#[cfg(feature = "repl")]
-use crate::repl::args::{ArgCx, ArgError, FromArg};
 use crate::target::{DiagnosticValue, Target};
 use crate::types::VirtAddr;
 use ntoseye_macros::record;
-#[cfg(feature = "python")]
-use pyo3::exceptions::PyValueError;
-#[cfg(feature = "python-stubs")]
-use pyo3::inspect::PyStaticExpr;
-#[cfg(feature = "python")]
-use pyo3::prelude::*;
-#[cfg(feature = "python-stubs")]
-use pyo3::type_hint_identifier;
 
 /// One GFlags flag: its bit, GFlags abbreviation (`hpa`, `ust`, ...), and
 /// description.
@@ -151,54 +135,6 @@ impl GlobalFlagChange {
             Self::Clear(bits) => current & !bits,
             Self::Replace(value) => value,
         }
-    }
-}
-
-/// `!gflag`'s change, its values in the current radix.
-#[cfg(feature = "repl")]
-impl FromArg for GlobalFlagChange {
-    const COMPLETION: CompletionStrategy = CompletionStrategy::Expression;
-
-    fn from_arg(cx: &mut ArgCx<'_, '_>, text: &str) -> std::result::Result<Self, ArgError> {
-        Self::parse(text, |text| {
-            Expr::eval_with_radix(text, &cx.state.ctx.target, cx.state.radix).map(|value| value.0)
-        })
-        .map_err(|error| ArgError::Message(error.to_string()))
-    }
-}
-
-/// The SDK's `change` argument: a `str` as `!gflag` takes it (`"+ust"`,
-/// `"-0x2000000"`, `"400"`), its values hex as in WinDbg.
-#[cfg(feature = "python")]
-pub struct GlobalFlagChangeArg(GlobalFlagChange);
-
-#[cfg(feature = "python")]
-impl<'a, 'py> FromPyObject<'a, 'py> for GlobalFlagChangeArg {
-    type Error = PyErr;
-
-    #[cfg(feature = "python-stubs")]
-    const INPUT_TYPE: PyStaticExpr = type_hint_identifier!("builtins", "str");
-
-    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
-        let text: String = obj.extract()?;
-        GlobalFlagChange::parse(&text, |value| {
-            let digits = value
-                .strip_prefix("0x")
-                .or_else(|| value.strip_prefix("0X"))
-                .unwrap_or(value);
-            u64::from_str_radix(digits, 16)
-                .map_err(|_| Error::InvalidArgument(format!("'{value}' is not a hex value")))
-        })
-        .map(Self)
-        .map_err(|error| PyValueError::new_err(error.to_string()))
-    }
-}
-
-#[cfg(feature = "python")]
-impl PyArg for GlobalFlagChange {
-    type Py = GlobalFlagChangeArg;
-    fn from_py(value: GlobalFlagChangeArg) -> Self {
-        value.0
     }
 }
 

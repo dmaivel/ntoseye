@@ -16,8 +16,7 @@ use crate::{
     Backend, TargetSpec, configure, diagnostics,
     error::{Error, Result},
     kd::KdMemorySource,
-    repl::{command_reference_json, json_string, start_plain_repl, start_repl},
-    session::Session,
+    repl::{command_reference_json, json_string, open_session, start_plain_repl, start_repl},
     symbols,
 };
 
@@ -515,7 +514,7 @@ fn run(cli: Cli) -> Result<()> {
     if !plain_repl {
         native::detect();
     }
-    let mut ctx = Session::open_with_progress(&spec, &mut |line| {
+    let mut ctx = open_session(&spec, &mut |line| {
         crate::output::write_stderr_fmt(format_args!("{}\n", line.bright_black()));
     })?;
     let result = if plain_repl {

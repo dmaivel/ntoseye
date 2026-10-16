@@ -20,8 +20,7 @@ use crate::memory::MemoryOps;
 use crate::memory_backend::MemoryBackend;
 use crate::notice::Notice;
 use crate::phys::{HaltClock, PhysMem};
-#[cfg(feature = "repl")]
-use crate::repl::ReplActions;
+
 use crate::session::{ContinueOutcome, Session, StopResolution};
 use crate::symbols::ntoseye_home;
 use crate::target::{Target, TargetKind};
@@ -418,9 +417,6 @@ impl Session {
             current_stop: None,
             stop_snapshot: None,
             halt_requested: false,
-            #[cfg(feature = "repl")]
-            action_runner: Some(Box::new(ReplActions)),
-            #[cfg(not(feature = "repl"))]
             action_runner: None,
             module_refresh_report: None,
             notices: Vec::new(),

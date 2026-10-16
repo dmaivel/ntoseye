@@ -32,7 +32,7 @@ use crate::dbg_backend::DebugCapability;
 use crate::error::{Error, Result};
 use crate::kd::KdMemorySource;
 use crate::layout::ParsedType;
-use crate::repl::ReplStore;
+use crate::repl::{ReplStore, open_session};
 use crate::session::{Cancel, Motion, RunOutcome, Session, StepMode};
 use crate::symbols::{CodeFrame, SourceLocation, parse_source_paths, parse_symbol_sources};
 use crate::target::ReloadScope;
@@ -250,9 +250,7 @@ pub fn run(spec: Option<TargetSpec>, port: Option<u16>) -> Result<()> {
     };
 
     let session = match spec {
-        Some(spec) => Some(Session::open_with_progress(&spec, &mut |line| {
-            eprintln!("{line}")
-        })?),
+        Some(spec) => Some(open_session(&spec, &mut |line| eprintln!("{line}"))?),
         None => None,
     };
 
@@ -625,7 +623,7 @@ impl Server {
             return Ok(None);
         }
         let spec = target_spec(args)?;
-        let mut session = Session::open_with_progress(&spec, &mut |line| eprintln!("{line}"))
+        let mut session = open_session(&spec, &mut |line| eprintln!("{line}"))
             .map_err(|error| error.to_string())?;
         share_cancel(&mut session, &self.cancel);
         self.session = Some(session);

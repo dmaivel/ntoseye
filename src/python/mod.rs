@@ -19,7 +19,7 @@ use pyo3::types::{PyDict, PyType};
 use crate::cli;
 use crate::error::Error;
 use crate::kd::KdMemorySource;
-use crate::session::Session;
+use crate::repl::open_session;
 use crate::target::meta::{ErrorCode, decode_error_code};
 use crate::{Backend, TargetSpec};
 
@@ -230,11 +230,7 @@ fn attach(
     };
     // Opening can take seconds (symbol downloads); other Python threads run.
     let actor = py
-        .detach(|| {
-            Actor::spawn(move || {
-                Session::open_with_progress(&spec, &mut |line| eprintln!("{line}"))
-            })
-        })
+        .detach(|| Actor::spawn(move || open_session(&spec, &mut |line| eprintln!("{line}"))))
         .map_err(err)?;
     Ok(Debugger::owned(actor))
 }
