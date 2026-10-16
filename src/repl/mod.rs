@@ -48,7 +48,7 @@ use crate::target::InterruptRequester;
 #[cfg(feature = "cli")]
 use crate::target::Target;
 #[cfg(feature = "cli")]
-use crate::triage_report::time::filetime_to_iso;
+use crate::time::filetime_to_iso;
 #[cfg(feature = "cli")]
 use crate::types::VirtAddr;
 use crate::ui;

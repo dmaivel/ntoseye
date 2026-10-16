@@ -3,6 +3,7 @@ use ntoseye_macros::record;
 use crate::bytes::{c_string_lossy, get_u32, get_u64};
 use crate::layout::TypeInfo;
 use crate::target::Target;
+use crate::time::filetime_to_iso;
 
 /// The process and thread that crashed, as a triage dump recorded them: it
 /// snapshots their `EPROCESS` and `ETHREAD` as raw bytes rather than as
@@ -28,7 +29,7 @@ impl TriageCrashInfo {
     /// convert the recorded time.
     #[record(getter)]
     pub fn create_time_utc(&self) -> Option<String> {
-        self.create_time.and_then(super::time::filetime_to_iso)
+        self.create_time.and_then(filetime_to_iso)
     }
 }
 

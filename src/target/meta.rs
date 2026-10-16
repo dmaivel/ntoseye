@@ -15,7 +15,7 @@ use crate::memory::MemoryOps;
 use crate::ntstatus::{ntstatus_name, win32_error_name};
 use crate::symbols::ModuleSymbolStatus;
 use crate::target::{DiagnosticValue, ListCursor, ListTermination, Target};
-use crate::triage_report::time::{filetime_to_iso, unix_time_to_iso};
+use crate::time::{filetime_to_iso, unix_time_to_iso};
 use crate::types::VirtAddr;
 use crate::userdump::UserDumpInfo;
 

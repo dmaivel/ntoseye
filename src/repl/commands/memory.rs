@@ -21,7 +21,7 @@ use crate::target::{
     CODE_BITNESS_X86, CompareResult, MAX_SEARCH_BYTES, MAX_SEARCH_MATCHES, MemoryKind,
     SearchResult, SearchStop, StringDescriptor,
 };
-use crate::triage_report::time::days_to_ymd;
+use crate::time::days_to_ymd;
 use crate::types::VirtAddr;
 use crate::ui;
 use crate::unwind::{resolve_thread_trace_context, try_format_symbol};

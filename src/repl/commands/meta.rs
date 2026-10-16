@@ -13,7 +13,7 @@ use crate::target::meta::{
     decode_error_code, decode_error_code_as_ntstatus,
 };
 use crate::target::{Target, TargetKind};
-use crate::triage_report::time::filetime_to_iso;
+use crate::time::filetime_to_iso;
 use crate::types::{Arch, CodeMachine, VirtAddr};
 
 use ntoseye_macros::{command, grammar};

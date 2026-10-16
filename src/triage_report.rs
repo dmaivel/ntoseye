@@ -6,7 +6,7 @@ mod culprit;
 pub mod hang;
 pub mod power;
 mod signature;
-pub mod time;
+
 pub mod user;
 mod verifier;
 mod whea;
@@ -17,7 +17,7 @@ use crate::bugchecks::{BugcheckAnalysis, bugcheck_trap_frame_on_stack, module_fi
 use crate::dmp::triage::TriagePrcbInfo;
 use crate::dmp::{DmpException, DmpInfo, DmpSystemInfo, UnloadedDriver};
 use crate::guest::ModuleInfo;
-use crate::ntstatus::ntstatus_name;
+
 use crate::session::{RunStatus, Session};
 use crate::types::VirtAddr;
 use crate::unwind::StackTrace;
@@ -578,10 +578,6 @@ fn canonical_module_component(name: &str) -> String {
         .map(|(stem, _)| stem)
         .unwrap_or(filename)
         .to_ascii_lowercase()
-}
-
-pub fn exception_code_name(code: u32) -> &'static str {
-    ntstatus_name(code).unwrap_or("unknown")
 }
 
 fn module_name_matches(recorded: &str, module: &ModuleInfo) -> bool {

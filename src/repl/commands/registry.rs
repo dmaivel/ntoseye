@@ -16,7 +16,7 @@ use crate::target::registry::{
     CellLocation, DataStorage, HiveList, RegData, RegKey, RegValue, key_flag_names, names_equal,
     value_type_name,
 };
-use crate::triage_report::time::filetime_to_iso;
+use crate::time::filetime_to_iso;
 use crate::types::VirtAddr;
 use crate::ui;
 

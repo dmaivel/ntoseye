@@ -282,6 +282,11 @@ pub fn ntstatus_name(code: u32) -> Option<&'static str> {
         .map(|(_, name)| *name)
 }
 
+/// An exception code's NTSTATUS name, or `unknown`.
+pub fn exception_code_name(code: u32) -> &'static str {
+    ntstatus_name(code).unwrap_or("unknown")
+}
+
 pub fn win32_error_name(code: u32) -> Option<&'static str> {
     WIN32_NAMES
         .iter()

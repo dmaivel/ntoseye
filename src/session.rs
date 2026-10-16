@@ -27,6 +27,7 @@ use crate::exception_policy::ExceptionPolicyTable;
 use crate::expr::NumberRadix;
 use crate::guest::{ModuleInfo, ModuleSymbolLoadReport, ProcessInfo};
 use crate::notice::Notice;
+use crate::ntstatus::exception_code_name;
 use crate::session::lifecycle::InstanceGuard;
 use crate::session::partition::{KeptPartition, PartitionView};
 use crate::target::dbgprint::{PrintCursor, prints_between};
@@ -267,7 +268,7 @@ impl ExceptionRecord {
     /// The code's symbolic name.
     #[record(getter)]
     pub fn code_name(&self) -> &'static str {
-        crate::triage_report::exception_code_name(self.code)
+        exception_code_name(self.code)
     }
 }
 

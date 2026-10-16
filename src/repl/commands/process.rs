@@ -12,7 +12,7 @@ use crate::guest::ProcessInfo;
 use crate::symbols::glob_matches;
 use crate::target::sched::ProcessDetail;
 use crate::target::{AttachReport, decimal_pid_literal, process_by_name, process_matches};
-use crate::triage_report::time::filetime_to_iso;
+use crate::time::filetime_to_iso;
 use crate::types::VirtAddr;
 use crate::ui;
 

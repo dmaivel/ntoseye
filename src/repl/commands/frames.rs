@@ -8,11 +8,11 @@ use crate::diagnostics;
 use ntoseye_macros::{command, grammar};
 
 use crate::error::{Error, Result};
+use crate::ntstatus::exception_code_name;
 use crate::session::effects::{Effects, Writes};
 use crate::session::{ExceptionRecord, Session};
 use crate::target::{MemoryKind, SavedThreadRegisters, SelectedFrame, lookup_register};
 use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current, trap_frame_rip_symbol};
-use crate::triage_report::exception_code_name;
 use crate::types::{Arch, VirtAddr};
 use crate::unwind::{
     Arm64UnwindCode, FrameSource, FunctionEntry, RecoveredStackTrace, StackTrace, UNKNOWN_CONTEXT,

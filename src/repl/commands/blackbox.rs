@@ -13,7 +13,7 @@ use crate::dmp::tagged::{TaggedBlock, known_tag};
 use crate::error::{Error, Result};
 use crate::session::Session;
 use crate::target::etw::{GuidStyle, format_guid, parse_guid};
-use crate::triage_report::time::filetime_to_iso;
+use crate::time::filetime_to_iso;
 use crate::types::VirtAddr;
 use crate::ui;
 

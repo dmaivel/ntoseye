@@ -16,6 +16,8 @@ use crate::debugger_data::{DebuggerDataCandidate, MetadataSource};
 use crate::error::{Error, Result};
 use crate::memory::{MemoryOps, PAGE_SIZE};
 use crate::notice::Notice;
+use crate::ntstatus::exception_code_name;
+use crate::time::filetime_to_iso;
 use crate::types::{Arch, MAX_PROCESSORS, PhysAddr, VirtAddr};
 
 pub mod parse;
@@ -128,7 +130,7 @@ impl DmpException {
     /// The code's symbolic name.
     #[record(getter)]
     pub fn code_name(&self) -> &'static str {
-        crate::triage_report::exception_code_name(self.code)
+        exception_code_name(self.code)
     }
 }
 
@@ -184,7 +186,7 @@ impl DmpSystemInfo {
     #[record(getter)]
     pub fn system_time_utc(&self) -> Option<String> {
         (self.system_time != 0)
-            .then(|| crate::triage_report::time::filetime_to_iso(self.system_time as u64))
+            .then(|| filetime_to_iso(self.system_time as u64))
             .flatten()
     }
 

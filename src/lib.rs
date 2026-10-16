@@ -175,6 +175,7 @@ pub mod symbols;
 pub mod target;
 #[cfg(any(feature = "dap", feature = "gdbserver"))]
 mod termination;
+pub mod time;
 pub mod trapframe;
 pub mod triage_report;
 pub mod types;

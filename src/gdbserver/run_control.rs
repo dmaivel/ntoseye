@@ -16,11 +16,11 @@ use gdbstub::target::ext::base::multithread::{
 
 use crate::dbg_backend::{ContinueDisposition, ModuleEvent};
 use crate::gdb::trace_packet;
+use crate::ntstatus::exception_code_name;
 use crate::output;
 use crate::repl::STATUS_BREAKPOINT;
 use crate::session::stops::module_event_line;
 use crate::session::{Cancel, Motion, RunOutcome, Stop, StopKind};
-use crate::triage_report::exception_code_name;
 
 use super::connection::Client;
 use super::{GdbTarget, PlantedKind};

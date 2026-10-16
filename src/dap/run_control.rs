@@ -9,10 +9,10 @@ use serde_json::json;
 use crate::dbg_backend::{ContinueDisposition, ModuleEvent};
 use crate::disasm::{fallthrough_run_end, instruction_length};
 use crate::guest::ModuleInfo;
+use crate::ntstatus::exception_code_name;
 use crate::output;
 use crate::session::stops::module_event_line;
 use crate::session::{Cancel, Motion, RunOutcome, StepMode, StepStack, Stop, StopKind};
-use crate::triage_report::exception_code_name;
 use crate::types::VirtAddr;
 
 use super::wire::Request;

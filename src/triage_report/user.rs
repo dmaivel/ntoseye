@@ -17,6 +17,7 @@ use crate::memory::MemoryOps;
 use crate::ntstatus::ntstatus_name;
 use crate::session::Session;
 use crate::target::mm::{memory_state_name, memory_type_name, page_protection_name};
+use crate::time::unix_time_to_iso;
 use crate::types::{Arch, VirtAddr};
 use crate::unwind::{
     FrameSource, StackTrace, build_stacktrace_with_register_values, format_symbol,
@@ -92,14 +93,14 @@ impl UserProcessSummary {
     /// When the dump was written (ISO 8601 UTC).
     #[record(getter)]
     pub fn dump_time_utc(&self) -> Option<String> {
-        super::time::unix_time_to_iso(u64::from(self.dump_time))
+        unix_time_to_iso(u64::from(self.dump_time))
     }
 
     /// When the process was created (ISO 8601 UTC).
     #[record(getter)]
     pub fn create_time_utc(&self) -> Option<String> {
         self.create_time
-            .and_then(|time| super::time::unix_time_to_iso(u64::from(time)))
+            .and_then(|time| unix_time_to_iso(u64::from(time)))
     }
 
     /// User-mode time the process had run, in seconds.

@@ -7,6 +7,7 @@ use tern_sdk::ui::{self, Column, Section, Span, TableRow, TextAlign, Tone, Trunc
 use tern_sdk::{Node, View};
 
 use super::{MUTED, NUMBER, STRONG, SYMBOL, addr, bugcheck, span, stack, symbol};
+use crate::ntstatus::exception_code_name;
 use crate::repl::StackColumns;
 use crate::repl::commands::analyze::{
     ANALYZE_MODULE_LIMIT, ANALYZE_STACK_LIMIT, ANALYZE_UNLOADED_LIMIT,
@@ -19,12 +20,11 @@ use crate::repl::commands::analyze::{
 use crate::repl::commands::power::{duration_text, request_text};
 use crate::target::power::power_minor_name;
 use crate::target::{ThreadInfo, wait_reason_name};
+use crate::time::{filetime_to_iso, unix_time_to_iso};
 use crate::triage_report::hang::{ANALYZE_HANG_STACK_LIMIT, HangReport, HangThread};
 use crate::triage_report::{
     BlackboxState, CulpritSubject, POWER_THREAD_STACK_LIMIT, PowerFailureFinding, PowerThreadRole,
     TRIAGE_BACKTRACE_LIMIT, TriageReport, UserDumpTriage, UserExceptionFinding, WheaRecordState,
-    exception_code_name,
-    time::{filetime_to_iso, unix_time_to_iso},
 };
 
 fn section(title: &str, collapsed: bool) -> Section<()> {

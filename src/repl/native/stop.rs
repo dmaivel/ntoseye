@@ -9,9 +9,9 @@ use tern_sdk::{Node, View};
 
 use super::{MUTED, STRONG, addr, code, ran_row, source, span, spans, stack, symbol};
 use crate::disasm::DisasmRow;
+use crate::ntstatus::exception_code_name;
 use crate::repl::StackColumns;
 use crate::target::{ThreadInfo, kthread_state_name};
-use crate::triage_report::exception_code_name;
 use crate::unwind::StackTrace;
 
 /// What a stop shows, as the text renderer gathers it.
