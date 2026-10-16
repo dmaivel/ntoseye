@@ -105,14 +105,6 @@ impl Inspect {
         )
     }
 
-    /// Get the Driver Verifier configuration and statistics (`!verifier`).
-    fn verifier<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::meta::Verifier>> {
-        self.typed(py, |session| {
-            let detail = session.target.verifier_status().map_err(err)?;
-            Ok(view::meta::verifier(&detail))
-        })
-    }
-
     /// Analyze the current bugcheck, or return `None` if no bugcheck is in
     /// progress on the target.
     fn bugcheck<'py>(

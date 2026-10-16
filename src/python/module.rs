@@ -21,7 +21,7 @@ use crate::symbols::{ImageSource, ModuleListing, ModuleSymbols};
 use crate::target::object::DriverObjectInfo;
 use crate::types::{Dtb, VirtAddr};
 use crate::view::record::Typed;
-use crate::view::{self};
+
 use ntoseye_macros::record;
 use pelite::PeView;
 
@@ -318,17 +318,6 @@ impl Module {
             }
         })?;
         Typed::new(py, view)
-    }
-
-    /// Get the verifier data for this driver module.
-    fn verifier<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::meta::VerifierDriver>> {
-        // Driver Verifier is NT's; it never tracks secure-kernel modules.
-        self.space.require_nt("verifier")?;
-        let name = self.info.short_name.clone();
-        let detail = self.owner.with_in(py, &self.context(), |session| {
-            session.target.verifier_driver(&name).map_err(err)
-        })?;
-        Typed::new(py, view::meta::verifier_driver(&detail))
     }
 
     /// The module as a plain `dict`.

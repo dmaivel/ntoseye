@@ -440,6 +440,15 @@ impl CommandHost for Module {
     fn context(&self, _py: Python<'_>) -> PyResult<Context> {
         Ok(Module::context(self))
     }
+
+    /// A kernel command reads NT's state about the module, which a
+    /// secure-kernel module does not have (Driver Verifier never tracks one).
+    fn refuse(&self, operation: &str, effects: &Effects) -> PyResult<()> {
+        if effects.target == TargetScope::Kernel {
+            self.space.require_nt(operation)?;
+        }
+        Ok(())
+    }
 }
 
 /// A module binds its short name (`!chkimg nt`).

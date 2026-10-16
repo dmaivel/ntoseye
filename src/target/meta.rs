@@ -61,7 +61,39 @@ pub fn decode_verifier_level_flags(level: u64) -> Vec<String> {
         .collect()
 }
 
-#[derive(Debug, Clone)]
+/// A driver that Driver Verifier verifies, from the `!verifier` list.
+#[record]
+pub struct VerifierDriverSummary {
+    /// The verifier entry of the driver.
+    pub entry: VirtAddr,
+    /// The state of the entry (`Loaded`).
+    pub state: String,
+    /// The nonpaged pool that the driver holds, in bytes.
+    pub nonpaged_bytes: u64,
+    /// The paged pool that the driver holds, in bytes.
+    pub paged_bytes: u64,
+    /// The module name of the driver.
+    #[record(rename = "module")]
+    pub module_name: String,
+}
+
+/// A driver that is configured for verification, from the verifier
+/// suspect list.
+#[record]
+pub struct VerifierSuspectDriver {
+    /// The suspect-list entry.
+    pub address: VirtAddr,
+    pub full_name: String,
+    pub base_name: String,
+    /// The number of times that the driver loaded.
+    pub loads: u64,
+    /// The number of times that the driver unloaded.
+    pub unloads: u64,
+}
+
+/// The aggregate counters of Driver Verifier. ntoseye reads each counter
+/// separately, and each read can fail.
+#[record]
 pub struct VerifierStatistics {
     pub raise_irqls: DiagnosticValue<u64>,
     pub acquire_spin_locks: DiagnosticValue<u64>,
@@ -84,52 +116,55 @@ pub struct VerifierStatistics {
     pub unloads: DiagnosticValue<u64>,
 }
 
-#[derive(Debug, Clone)]
-pub struct VerifierSuspectDriver {
-    pub address: VirtAddr,
-    pub full_name: String,
-    pub base_name: String,
-    pub loads: u64,
-    pub unloads: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct VerifierDriverSummary {
-    pub entry: VirtAddr,
-    pub state: String,
-    pub nonpaged_bytes: u64,
-    pub paged_bytes: u64,
-    pub module_name: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct VerifierDetail {
+/// The Driver Verifier configuration, statistics, and drivers
+/// (`!verifier`). The drivers are the verified drivers and the configured
+/// suspect drivers that are not loaded.
+#[record]
+pub struct Verifier {
+    /// The verification level (`MmVerifierData.Level`).
+    #[record(hex)]
     pub level: DiagnosticValue<u64>,
+    /// The option flags (`VerifierOptionFlags`).
+    #[record(hex)]
     pub option_flags: DiagnosticValue<u64>,
     pub verify_mode: DiagnosticValue<u64>,
+    /// The names of the checks that `level` enables.
     pub level_options: DiagnosticValue<Vec<String>>,
     pub statistics: VerifierStatistics,
+    /// The verified drivers.
     pub drivers: DiagnosticValue<Vec<VerifierDriverSummary>>,
-    /// True when an AVL table advertised fewer elements than its reachable
-    /// tree, so the bounded walk stopped before visiting every link.
+    /// Whether the driver table gives a smaller entry count than the
+    /// number of linked entries, which means that the walk stopped before
+    /// it reached all drivers.
     pub drivers_truncated: bool,
+    /// The suspect drivers that are configured for verification but are
+    /// not loaded.
     pub configured_but_unloaded: DiagnosticValue<Vec<VerifierSuspectDriver>>,
-    /// Termination state of the bounded suspect-list walk.
+    /// How the suspect-list walk ended.
     pub suspect_list_termination: ListTermination,
 }
 
-#[derive(Debug, Clone)]
-pub struct VerifierDriverDetail {
+/// The image, signing level, and counters of one verified driver
+/// (`!verifier <module>`).
+#[record]
+pub struct VerifierDriver {
+    #[record(rename = "module")]
     pub module_name: String,
     pub image_base: VirtAddr,
+    /// The image size in bytes.
     pub image_size: u64,
+    /// The `_DRIVER_OBJECT` of the driver.
     pub driver_object: VirtAddr,
+    /// The signing level of the image (`SE_SIGNING_LEVEL`).
+    #[record(hex)]
     pub se_signing_level: u64,
     pub raise_irqls: u64,
     pub acquire_spin_locks: u64,
     pub synchronize_executions: u64,
     pub allocations_with_no_tag: u64,
     pub allocations_failed: u64,
+    /// The number of allocations that the verifier failed on purpose
+    /// (fault injection).
     pub allocations_failed_deliberately: u64,
     pub current_paged_pool_allocations: u64,
     pub paged_bytes: u64,
@@ -149,6 +184,8 @@ pub struct VerifierDriverDetail {
     pub peak_pages_for_mdl_bytes: u64,
     pub contiguous_memory_bytes: u64,
     pub peak_contiguous_memory_bytes: u64,
+    /// The suspect-list entry of the driver, with its load history.
+    /// `None` if the driver has no entry.
     pub suspect: Option<VerifierSuspectDriver>,
 }
 
@@ -495,8 +532,8 @@ fn driver_summary(driver: &VerifiedDriver) -> VerifierDriverSummary {
     }
 }
 
-fn driver_detail(driver: &VerifiedDriver) -> VerifierDriverDetail {
-    VerifierDriverDetail {
+fn driver_detail(driver: &VerifiedDriver) -> VerifierDriver {
+    VerifierDriver {
         module_name: driver.module_name.clone(),
         image_base: driver.image_base,
         image_size: driver.image_size,
@@ -540,7 +577,7 @@ impl Target {
     /// collection is unavailable. Every [`DiagnosticValue`] retains the exact
     /// field, layout, or bounded-walk error for only the value that was
     /// unavailable.
-    pub fn verifier_status(&self) -> Result<VerifierDetail> {
+    pub fn verifier_status(&self) -> Result<Verifier> {
         let guest = self.guest()?;
         let state = read_verifier_state(guest);
         let level_options = match &state.level {
@@ -585,7 +622,7 @@ impl Target {
             }
         };
 
-        Ok(VerifierDetail {
+        Ok(Verifier {
             level: state.level,
             option_flags: state.option_flags,
             verify_mode: state.verify_mode,
@@ -602,7 +639,7 @@ impl Target {
     /// range, signing level, verifier counters, and suspect-driver load counts.
     /// A missing module or an unreadable required field is returned as an error;
     /// optional suspect load counts are absent when no suspect entry is linked.
-    pub fn verifier_driver(&self, module: &str) -> Result<VerifierDriverDetail> {
+    pub fn verifier_driver(&self, module: &str) -> Result<VerifierDriver> {
         let guest = self.guest()?;
         let (mut drivers, _) = walk_verified_drivers(guest)?;
         let modules = self.kernel_modules().unwrap_or_default();

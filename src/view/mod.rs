@@ -6,7 +6,6 @@ pub mod backend;
 pub mod bugcheck;
 pub mod execution;
 pub mod hypervisor;
-pub mod meta;
 pub mod record;
 
 pub mod triage;
