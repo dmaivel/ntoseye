@@ -75,6 +75,13 @@ impl PyArg for u16 {
     }
 }
 
+impl PyArg for i64 {
+    type Py = i64;
+    fn from_py(value: i64) -> Self {
+        value
+    }
+}
+
 impl PyArg for bool {
     type Py = bool;
     fn from_py(value: bool) -> Self {

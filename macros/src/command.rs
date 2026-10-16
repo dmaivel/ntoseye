@@ -926,8 +926,9 @@ impl Command {
             });
         }
         let receiver = match self.receiver {
-            Receiver::SessionMut => quote!(session),
-            Receiver::Session => quote!(&*session),
+            // Not `session`: a keyword argument may be named that (`!session`).
+            Receiver::SessionMut => quote!(__session),
+            Receiver::Session => quote!(&*__session),
             Receiver::Repl => unreachable!("validated"),
         };
         let function = &self.function;
@@ -950,7 +951,7 @@ impl Command {
                     #(#params),*
                 ) -> pyo3::PyResult<crate::view::record::Typed<'py, #output>> {
                     #(#bindings)*
-                    #command::run(py, self, #operation, &SPEC.effects, move |session| {
+                    #command::run(py, self, #operation, &SPEC.effects, move |__session| {
                         self::#function(#receiver, #(#call),*)
                     })
                 }
