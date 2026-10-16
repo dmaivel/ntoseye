@@ -937,7 +937,8 @@ impl Cpu {
     /// guest partition's VP that it serves, else the root partition's VP on
     /// this processor. A `when=` callback of `breakpoints.add_hypercall()`
     /// reads the caller's registers and memory through it
-    /// (`stop.cpu.hypercall_caller()`), as the breakpoint's condition does.
+    /// (`dbg.cpus[stop.cpu].hypercall_caller()`), as the breakpoint's
+    /// condition does.
     /// `None` when the vCPU is not halted in the hypervisor, or the caller is
     /// unknown: the partitions cannot be walked, or no saved state of a VP
     /// that the processor runs is current.

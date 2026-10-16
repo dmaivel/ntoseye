@@ -68,7 +68,7 @@ Use these views directly, without selecting or attaching to a global process.
 
 `dbg.cpus` is keyed by processor number. A `Cpu` decodes its processor's state: `pcr()`, `prcb()`, `irql()`, `idt()`, `gdt()`, and `info()`. With `kd` or `kdnet`, `cpu.msr["IA32_LSTAR"]` reads a model-specific register and `cpu.apic()` the local APIC, as {command}`rdmsr` `/p` and {command}`!apic` do: KD runs these reads on the processor that reported the stop, so ntoseye switches the target to the processor you asked for and back. `dbg.inspect.interrupt_controllers()` returns the interrupt controllers and lines that {command}`!ioapic` shows, and `dbg.inspect.smbios()` the SMBIOS structures of {command}`!sysinfo` `smbios`, each with its fields by the specification's names.
 
-Handles such as `Process`, `Module`, `Thread`, `Frame`, and struct cursors are stamped with the target generation. After a reboot (`Stop.Reboot`), discard the old handles and query them again, because an old handle raises `ntoseye.StaleHandleError` when you use it. Old handles stay hashable and printable, so a set or dict that holds them continues to work.
+Handles such as `Process`, `Module`, `Thread`, `Frame`, and struct cursors are stamped with the target generation. After a reboot (a stop whose `kind` is `"reload"`), discard the old handles and query them again, because an old handle raises `ntoseye.StaleHandleError` when you use it. Old handles stay hashable and printable, so a set or dict that holds them continues to work.
 
 If your code caches raw addresses, use `dbg.generation` to detect a rebuild. `Breakpoint` handles are not stamped: breakpoints stay after a reboot, and ntoseye resolves symbolic breakpoints again in the new kernel.
 
@@ -78,21 +78,24 @@ The `dmp` backend also opens a Windows [user-mode minidump](../using/dumps.md#us
 
 ```python
 with ntoseye.attach("dmp", "powershell-exception.dmp") as dbg:
-    dump = dbg.user_dump
+    dump = dbg.user_dump                                # None on a kernel target
+    assert dump is not None
     print(dump.process.name, dump.process.pid)          # powershell.exe 4340
     for thread in dump.threads:                         # UserThread, keyed by TID
         print(hex(thread.tid), thread.name, thread.backtrace(3)[0])
-    exception = dump.exception                          # UserDumpException or None
-    print(hex(exception.code), exception.symbol)        # 0xe0d7e5e1 kernelbase!RaiseException+0x8a
+    exception = dump.exception                          # UserExceptionDetail or None
+    if exception is not None:
+        print(hex(exception.exception.code), exception.symbol)  # 0xe0d7e5e1 kernelbase!RaiseException+0x8a
     frame = dump.exception_context()                    # the .ecxr registers, as a Frame
     report = dbg.inspect.triage()                       # what !analyze reports
-    print(report.failure_signature.bucket, report.culprit.kind)
+    if report.failure_signature and report.culprit:
+        print(report.failure_signature.bucket, report.culprit.subject.kind)
 ```
 
 - `dump.process` has the PID, the image name, the PEB as an `ntdll!_PEB` cursor, and `memory`, `modules`, and `threads` views. `dbg.memory`, `dbg.symbols`, `dbg.types`, and `dbg.modules` are the process's too.
 - `dump.threads[tid]` is a `UserThread`: its TID, name, TEB (an `ntdll!_TEB` cursor), captured stack range, suspend count and priority, what the dump's thread-info stream records (start address, creation and exit times, CPU times, exit status, affinity), `registers`, `backtrace()`, and `last_error()`. `dump.current_thread` is the thread selected for inspection and `dump.exception_thread` the one that raised the exception.
 - `dump.handles` lists the recorded handles, `dump.regions` the address-space regions with their use, and `dump.region(address)` the one holding an address; each is `None` when the dump does not record it. `dump.unloaded_modules` lists the modules the process had unloaded, and `dump.notes` what the parser dropped and why.
-- `dbg.inspect.peb()` and `dbg.inspect.teb()` take `dump.process` and a `UserThread`. `dbg.inspect.version().user_dump` and `dbg.inspect.time().user_dump` hold what {command}`vertarget` and {command}`.time` show. `dbg.inspect.triage()` returns the report of {command}`analyze`: `report.user` holds the exception, the process, and the faulting stack, and `report.culprit` is a module, or, with `kind` `dynamic_code`, JIT-compiled code that no module holds.
+- `dump.process.decode_peb()` and a `UserThread`'s `decode_teb()` decode the PEB and TEB, as {command}`!peb` and {command}`!teb` do. `dbg.inspect.version().user_dump` and `dbg.inspect.time().user_dump` hold what {command}`vertarget` and {command}`.time` show. `dbg.inspect.triage()` returns the report of {command}`analyze`: `report.user` holds the exception, the process, and the faulting stack, and `report.culprit.subject` is a module, or, with `kind` `dynamic_code`, JIT-compiled code that no module holds.
 
 Kernel APIs, such as `dbg.processes`, `dbg.threads`, `dbg.cpus`, `dbg.drivers`, and the kernel reports of `dbg.inspect`, raise `NtoseyeError` with `this needs a kernel target`. `dbg.physical` and address translation raise `NtoseyeError` too, because the dump has no physical memory or page tables. Run control, breakpoints, and writes are refused as in a kernel dump.
 
@@ -109,7 +112,7 @@ print(dbg.memory.read(kernel_fn, 16).hex())
 
 `dbg.symbols.import_image(path)` copies a PE file into the symbol cache under the key in its own header and returns its path there, as {command}`.fetchimage` `/f` does. Use it for an image that no symbol server has, such as the Windows hypervisor's `hvix64.exe`, whose stacks then unwind exactly ([VBS](../vbs/hypervisor-stops.md)).
 
-To find a type, use `dbg.types[name]` or `proc.types[name]`. `Type.fields` maps names to `Field` layouts in offset order, and for an enum, `Type.values` maps member names to values. `.at(address)` makes a live cursor, and `.read()` returns a snapshot dictionary.
+To find a type, use `dbg.types[name]` or `proc.types[name]`. `Type.fields` maps names to `FieldInfo` layouts in offset order, and for an enum, `Type.values` maps member names to values. `.at(address)` makes a live cursor, and `.read()` returns a snapshot dictionary.
 
 You can get the fields of a cursor as attributes. Pointer fields stay integer addresses, so to dereference a typed pointer, use `follow("Field")`. `address_of("Field")` gives the address of a field (C's `&cursor->Field`) for a watchpoint or a raw read.
 
@@ -128,7 +131,7 @@ If the value of a PDB enum field is a defined member, the field returns a cached
 
 To read or assign a field with no risk of a name collision, use `cursor["Field"]`, because the usual `cursor.Field` form can find a cursor member first. A `Struct` cursor reads live data and stays tied to its original address space.
 
-`memory.disassemble(address, count)` returns `DisassembledInstruction` records. Besides the text (`asm`), each one has its `length`, its `mnemonic`, and its `operands` in order. An `Operand` has a `kind` (`register`, `memory`, `immediate`, `branch`, or `other`) and the fields for that kind: the register as written and the full register it is part of (`r8d` and `r8`), the base, index, scale, displacement, size, and segment of a memory operand, or the value of an immediate or a branch target. So code that follows instructions does not have to parse `asm`:
+`memory.disassemble(address, count)` returns `DisasmRow` records. Besides the text (`asm`), each one has its `length`, its `mnemonic`, and its `operands` in order. A `DisasmOperand` has a `kind` (`register`, `memory`, `immediate`, `branch`, or `other`) and the fields for that kind: the register as written and the full register it is part of (`r8d` and `r8`), the base, index, scale, displacement, size, and segment of a memory operand, or the value of an immediate or a branch target. So code that follows instructions does not have to parse `asm`:
 
 ```python
 for ins in dbg.memory.disassemble(kernel_fn, 8):
@@ -170,15 +173,16 @@ address = sk.symbols["securekernel!SkeSelectProcessAddressSpace"]
 bp = dbg.breakpoints.add(address, hardware=True)
 try:
     stop = dbg.run(timeout=10.0)
-    if isinstance(stop, ntoseye.Stop.Breakpoint) and bp in stop.breakpoints:
-        print(stop.symbol, stop.cpu.registers["rip"], stop.cpu.registers["cr3"])
+    if stop is not None and stop.hit(bp):
+        cpu = dbg.cpus[stop.cpu]
+        print(stop.symbol, cpu.registers["rip"], cpu.registers["cr3"])
         print(dbg.command("k"))
 finally:
     dbg.interrupt()
     bp.delete()
 ```
 
-`stop.cpu.registers` shows the real stopped CPU. At a VTL1 stop it is read-only, and `stop.thread` and `stop.process` are `None` instead of the suspended NT thread and process. `run()` continues normally.
+`dbg.cpus[stop.cpu].registers` shows the real stopped CPU. At a VTL1 stop it is read-only, and `stop.thread` and `stop.process` are `None` instead of the suspended NT thread and process. `run()` continues normally.
 
 Hardware execution breakpoints support these options:
 
@@ -190,7 +194,7 @@ Hardware execution breakpoints support these options:
 
 They share the hardware slots and resolve only once, and you must make them again after a reboot.
 
-`step()`, `step_over()`, `step_out()`, `run_to()`, and `trace_calls()` work at VTL1 stops. In secure-kernel code, their temporary breakpoints are debug-register breakpoints in free slots, so these functions never patch the code.
+`step()`, `step_over()`, `step_out()`, `run(address=...)`, and `trace_calls()` work at VTL1 stops. In secure-kernel code, their temporary breakpoints are debug-register breakpoints in free slots, so these functions never patch the code.
 
 ntoseye does not accept NT process and thread filters, software breakpoints, or data watches in secure modules. For more information, see [VTL1 limits](../vbs/secure-kernel.md#breakpoints-and-stepping-in-vtl1).
 
@@ -198,7 +202,7 @@ ntoseye does not accept NT process and thread filters, software breakpoints, or 
 
 Under VBS, idle vCPUs usually stop in the Windows hypervisor itself. For a vCPU that stopped there, `cpu.saved_vtl` lists the VTL states that the hypervisor saved for its virtual processor, VTL0 first, as the {command}`.vtlcxr` command does.
 
-Each `SavedVtlState` holds this data:
+Each `SavedVtl` holds this data:
 
 - The location where the VTL stopped: `rip`, `symbol`, and `rsp`.
 - The control registers and the segment registers of the VTL.
@@ -232,7 +236,7 @@ print([frame.symbol for frame in cpu.backtrace(limit=4)])         # ['hv+0x3a6bd
 print([frame.symbol for frame in cpu.backtrace(limit=4, vtl=1)])  # ['hvcall!VtlReturn64+0xd', 'securekernel!SkpReturnFromNormalMode']
 ```
 
-A processor that runs a guest partition's VP, such as WSL2's, enters the hypervisor for that VP's exits. `cpu.serving` is that VP, as the stop header's `serving` line names it, or `None` when the processor runs one of the root partition's VPs. A `ServedVp` has `partition_id`, `vp_index`, `vtl`, `rip` (where that VTL left off), `current` (whether the processor handles this VP's exit now, rather than having run it last), `exit_reason` and `exit_reason_name`, `general_registers`, and `hypercall`, each as in `SavedVtlState`.
+A processor that runs a guest partition's VP, such as WSL2's, enters the hypervisor for that VP's exits. `cpu.serving` is that VP, as the stop header's `serving` line names it, or `None` when the processor runs one of the root partition's VPs. A `ServedVp` has `partition_id`, `vp_index`, `vtl`, `rip` (where that VTL left off), `current` (whether the processor handles this VP's exit now, rather than having run it last), `exit_reason` and `exit_reason_name`, `general_registers`, and `hypercall`, each as in `SavedVtl`.
 
 A `DecodedHypercall` has the hypercall input value (`input_value`, RCX), `code`, `name` (the TLFS name, or `None`), `fast`, `variable_header_size` (in qwords), `nested`, `rep_start` and `rep_count`, and `input_gpa` and `output_gpa` (`None` for a fast call). `fields` lists the fields of the input as the Hyper-V TLFS lays them out, each a `HypercallField` with `name`, `offset`, `size`, `value`, and `meaning` (a name for the value, such as `HV_PARTITION_ID_SELF`, `VPs 0-3`, or a register's TLFS name, or `None`). `elements` lists a rep call's input list, each a `HypercallElement` with its `index` and its `fields`. `decoded` is `False` for a call whose layout ntoseye does not know, whose `fields` are then raw qwords (`Input[0]`, ...), and `unavailable` says why some of the input is missing: an unreadable input page, or an XMM fast call's XMM registers when their saved values are not known. `summary` is the one-line form of the stop header ([VBS](../vbs/hypercalls.md#hypercall-breakpoints-and-decoding)).
 
@@ -240,7 +244,8 @@ A `DecodedHypercall` has the hypercall input value (`input_value`, RCX), `code`,
 bp = dbg.breakpoints.add_hypercall("HvCallFlushVirtualAddressList")
 stop = dbg.run(timeout=10.0)
 bp.delete()
-cpu = stop.cpu
+assert stop is not None, "no flush in 10 s"
+cpu = dbg.cpus[stop.cpu]
 served = cpu.serving
 calls = [served.hypercall] if served and served.current else [s.hypercall for s in cpu.saved_vtl if s.current]
 for call in filter(None, calls):
@@ -253,9 +258,9 @@ for call in filter(None, calls):
 
 ### Hypervisor partitions
 
-`dbg.hypervisor_partitions()` lists the partitions of the Windows hypervisor, root first, as {command}`!hvpartitions` and {command}`!hvvps` do. Each call walks them again. Each partition has `address`, `id`, `parent_id` (`None` for the root partition), `privileges`, `privilege_names` (the TLFS names of the set privileges), and `virtual_processors`. Each VP has `index`, `address`, `processors` (a `HypervisorProcessor` with the `number` and processor `block` of each processor whose current VP it is), `vtl` (the VTL that it runs or last ran in), and `vtls`, a `dict` from each VTL enabled on the VP to a `HypervisorVtl`. A `HypervisorVtl` has `level`, `context` (the hypervisor's context object), and, from the VTL's eVMCS, `vmcs` (its physical address), `ept_pointer`, `rip`, and `exit_reason`, which are `None` without `hv-evmcs` or for a VP that has not started. All of these have `to_dict()`.
+`dbg.hypervisor_partitions()` lists the partitions of the Windows hypervisor, root first, as {command}`!hvpartitions` and {command}`!hvvps` do. Each call walks them again. Each partition has `address`, `id`, `parent_id` (`None` for the root partition), `privileges`, `privilege_names` (the TLFS names of the set privileges), and `virtual_processors`. Each VP has `index`, `address`, `processors` (an `HvProcessor` with the `number` and processor `block` of each processor whose current VP it is), `vtl` (the VTL that it runs or last ran in), and `vtls`, a `dict` from each VTL enabled on the VP to a `HypervisorVtl`. A `HypervisorVtl` has `level`, `context` (the hypervisor's context object), and, from the VTL's eVMCS, `vmcs` (its physical address), `ept_pointer`, `rip`, and `exit_reason`, which are `None` without `hv-evmcs` or for a VP that has not started. All of these have `to_dict()`.
 
-`vtl.translate(gpa)` translates a guest physical address through the VTL's EPT, as {command}`!hvept` does. It returns an `EptMapping`, with `host_physical`, `page_size`, `read`, `write`, `execute`, `user_execute` (`None` without mode-based execute control), `memory_type`, and the `entries` of the walk, or `None` when no entry maps the address. `vtl.read(address, size, physical=False)` reads the memory of the VTL's guest, as {command}`!hvd` does: guest virtual memory through the VTL's page tables, or guest physical memory, both through its EPT. `vtl.translate_virtual(address)` returns the `(guest_physical, host_physical)` addresses of a guest virtual address, or `None`. `vtl.disassemble(address, count, physical=False)` disassembles the VTL's guest code from the same memory, as {command}`!hvu` does, into `DisassembledInstruction` records like `memory.disassemble()`. It decodes 64-bit code when the VTL left off in IA-32e mode with a 64-bit code segment, else 32-bit code, and raises `NtoseyeError` for real-mode or 16-bit code. There are no symbols for a guest, so comments are addresses. The listing stops at the first unreadable page, so it can be shorter than `count`; it raises `NtoseyeError` when the first instruction is unreadable. `vtl.vmcs_fields()` reads the VTL's eVMCS as a `Record` whose fields are the TLFS field names (`fields.guest_rip`), as {command}`!hvvmcs` shows them. `vtl.msr_intercepts()` decodes which `RDMSR`s and `WRMSR`s of the VTL exit, as `!hvvmcs -msr` does: an `MsrIntercepts` with `every` (`True` when the controls use no MSR bitmap, so every access exits), the bitmap's physical address `bitmap`, the `read` and `write` ranges that exit (each an `MsrRange` with `first`, `last`, and the `names` of the architectural MSRs in it), and `read_without_exit` and `write_without_exit`, the MSRs ntoseye names that the VTL accesses without an exit. MSRs outside the bitmap's 0x0-0x1fff and 0xc0000000-0xc0001fff always exit. `vtl.io_intercepts()` does the same for I/O instructions, as `!hvvmcs -io` does: an `IoIntercepts` with `every` and the `ports` ranges that the I/O bitmaps intercept, which are empty when no I/O instruction exits. `dbg.hypercalls()` lists the hypervisor's hypercall table, as `!hvcalls -a` does: a `Hypercall` for each call code with `code`, `name` (the TLFS name, or `None`), `implemented`, `rep`, `variable_header`, the input and output sizes, and `handler`. `vp.ept_differences()` lists the ranges that VTL0's and VTL1's EPTs map differently, as {command}`!hveptdiff` does: an `EptDifference` with `start`, `end` (exclusive), and `vtl0` and `vtl1`, each VTL's access as text such as `"r-x"`, or `None` where that VTL maps nothing.
+`vtl.translate(gpa)` translates a guest physical address through the VTL's EPT, as {command}`!hvept` does. It returns an `EptMapping`, with `host_physical`, `page_size`, `read`, `write`, `execute`, `user_execute` (`None` without mode-based execute control), `memory_type`, and the `entries` of the walk, or `None` when no entry maps the address. `vtl.read(address, size, physical=False)` reads the memory of the VTL's guest, as {command}`!hvd` does: guest virtual memory through the VTL's page tables, or guest physical memory, both through its EPT. `vtl.translate_virtual(address)` returns the `(guest_physical, host_physical)` addresses of a guest virtual address, or `None`. `vtl.disassemble(address, count, physical=False)` disassembles the VTL's guest code from the same memory, as {command}`!hvu` does, into `DisasmRow` records like `memory.disassemble()`. It decodes 64-bit code when the VTL left off in IA-32e mode with a 64-bit code segment, else 32-bit code, and raises `NtoseyeError` for real-mode or 16-bit code. There are no symbols for a guest, so comments are addresses. The listing stops at the first unreadable page, so it can be shorter than `count`; it raises `NtoseyeError` when the first instruction is unreadable. `vtl.vmcs_fields()` reads the VTL's eVMCS as a `Record` whose fields are the TLFS field names (`fields.guest_rip`), as {command}`!hvvmcs` shows them. `vtl.msr_intercepts()` decodes which `RDMSR`s and `WRMSR`s of the VTL exit, as `!hvvmcs -msr` does: an `MsrIntercepts` with `every` (`True` when the controls use no MSR bitmap, so every access exits), the bitmap's physical address `bitmap`, the `read` and `write` ranges that exit (each an `MsrRange` with `first`, `last`, and the `names` of the architectural MSRs in it), and `read_without_exit` and `write_without_exit`, the MSRs ntoseye names that the VTL accesses without an exit. MSRs outside the bitmap's 0x0-0x1fff and 0xc0000000-0xc0001fff always exit. `vtl.io_intercepts()` does the same for I/O instructions, as `!hvvmcs -io` does: an `IoIntercepts` with `every` and the `ports` ranges that the I/O bitmaps intercept, which are empty when no I/O instruction exits. `dbg.hypercalls()` lists the hypervisor's hypercall table, as `!hvcalls -a` does: a `Hypercall` for each call code with `code`, `name` (the TLFS name, or `None`), `implemented`, `rep`, `variable_header`, the input and output sizes, and `handler`. `vp.ept_differences()` lists the ranges that VTL0's and VTL1's EPTs map differently, as {command}`!hveptdiff` does: an `EptDifference` with `start`, `end` (exclusive), and `vtl0` and `vtl1`, each VTL's access as text such as `"r-x"`, or `None` where that VTL maps nothing.
 
 ```python
 root = dbg.hypervisor_partitions()[0]
@@ -264,13 +269,15 @@ for vp in root.virtual_processors:
         print(vp.index, vtl.level, hex(vtl.context), vtl.vmcs and hex(vtl.vmcs), vtl.ept_pointer and hex(vtl.ept_pointer))
 
 gpa = dbg.memory.translate(dbg.symbols["nt!KeBugCheckEx"])
+assert gpa is not None
 for vtl in root.virtual_processors[0].vtls.values():
     print(vtl.level, vtl.translate(gpa))     # EptMapping(host_physical=..., read=True, write=False, execute=True, ...) in VTL0 under HVCI
 
 guest = dbg.hypervisor_partitions()[1].virtual_processors[0]
 vtl = guest.vtls[guest.vtl]
-for ins in vtl.disassemble(vtl.rip, 4):  # where the guest's VP left off
-    print(hex(ins.ip), ins.asm)
+if vtl.rip is not None:
+    for ins in vtl.disassemble(vtl.rip, 4):  # where the guest's VP left off
+        print(hex(ins.ip), ins.asm)
 ```
 
 This needs the `hv-evmcs` enlightenment or a vCPU that is stopped in the hypervisor, and an Intel host, and it raises `NtoseyeError` if ntoseye does not recognize the hypervisor build ([supported builds](../vbs/partitions.md#how-ntoseye-finds-them)). This feature is experimental.
@@ -281,15 +288,15 @@ This needs the `hv-evmcs` enlightenment or a vCPU that is stopped in the hypervi
 guest = next(p for p in dbg.hypervisor_partitions() if p.parent_id is not None)
 bp = dbg.breakpoints.add_hypercall("HvCallSendSyntheticClusterIpi", guest.id)
 stop = dbg.run(timeout=10.0)
-if isinstance(stop, ntoseye.Stop.Breakpoint) and bp in stop.breakpoints:
-    print(stop.cpu.id, bp.hypercall)
+if stop is not None and stop.hit(bp):
+    print(stop.cpu, bp.hypercall)
 ```
 
-A `when=` callback reads the caller through `stop.cpu.hypercall_caller()`, as `!hvcall` finds it: a `HypercallCaller` with the caller's `partition_id`, `root`, `vp_index` and `vtl`, its `registers` at the `VMCALL` (a `dict` of what a condition sees), the decoded `hypercall`, and `read(address, size, physical=False)`, which reads the caller's memory as a condition does. It works at any stop in the hypervisor, and is `None` on a vCPU that is not halted there or whose caller is unknown. This callback stops only for the flushes of one address space:
+A `when=` callback reads the caller through `dbg.cpus[stop.cpu].hypercall_caller()`, as `!hvcall` finds it: a `HypercallCaller` with the caller's `partition_id`, `root`, `vp_index` and `vtl`, its `registers` at the `VMCALL` (a `dict` of what a condition sees), the decoded `hypercall`, and `read(address, size, physical=False)`, which reads the caller's memory as a condition does. It works at any stop in the hypervisor, and is `None` on a vCPU that is not halted there or whose caller is unknown. This callback stops only for the flushes of one address space:
 
 ```python
 def in_space(stop: ntoseye.Stop) -> bool:
-    caller = stop.cpu.hypercall_caller()
+    caller = dbg.cpus[stop.cpu].hypercall_caller()
     if caller is None or caller.hypercall is None or caller.hypercall.fast:
         return True
     space = caller.read(caller.registers["rdx"], 8, physical=True)
@@ -298,13 +305,14 @@ def in_space(stop: ntoseye.Stop) -> bool:
 dbg.breakpoints.add_hypercall("HvCallFlushVirtualAddressList", guest.id, when=in_space)
 ```
 
-`dbg.breakpoints.add_exit(reason, partition=None, vp=None)` sets a breakpoint that stops on a VM exit, as {command}`!hvexit` does ([how](../using/breakpoints.md#vm-exit-breakpoints)). `reason` is a basic exit reason or its name (`"rdmsr"`, `"ept_violation"`), and the other arguments are those of `add_hypercall()`. `Breakpoint.vm_exit` gives what the breakpoint stops on, and `stop.cpu.hypercall_caller()` gives the caller at the stop, with its `registers` at the exit:
+`dbg.breakpoints.add_exit(reason, partition=None, vp=None)` sets a breakpoint that stops on a VM exit, as {command}`!hvexit` does ([how](../using/breakpoints.md#vm-exit-breakpoints)). `reason` is a basic exit reason or its name (`"rdmsr"`, `"ept_violation"`), and the other arguments are those of `add_hypercall()`. `Breakpoint.vm_exit` gives what the breakpoint stops on, and `dbg.cpus[stop.cpu].hypercall_caller()` gives the caller at the stop, with its `registers` at the exit:
 
 ```python
 bp = dbg.breakpoints.add_exit("rdmsr", partition=1)
 stop = dbg.run(timeout=10.0)
-caller = stop.cpu.hypercall_caller()
-print(caller.vp_index, hex(caller.registers["rcx"]))
+caller = dbg.cpus[stop.cpu].hypercall_caller() if stop is not None else None
+if caller is not None:
+    print(caller.vp_index, hex(caller.registers["rcx"]))
 bp.delete()
 ```
 
@@ -321,28 +329,29 @@ It uses the root that is loaded when you read `cpu.memory`. A root outside NT an
 ```python
 cpu = next(cpu for cpu in dbg.cpus if cpu.saved_vtl)
 hv = cpu.memory                                 # the hypervisor's address space
-print(hex(hv.dtb), hv.translate(cpu.rip))
-print(hv.disassemble(cpu.rip, 4))
+if cpu.rip is not None:
+    print(hex(hv.dtb), hv.translate(cpu.rip))
+    print(hv.disassemble(cpu.rip, 4))
 ```
 
 ## Run control and breakpoints
 
-`run(timeout=None)` resumes the target and waits, and `wait(timeout=None)` waits without resuming it. Both return a `Stop` when ntoseye sees a stop, or `None` when the timeout expires. Timeouts are in seconds, and `None` waits with no time limit.
+`run(timeout=None)` resumes the target and waits, and `wait(timeout=None)` waits without resuming it. Both return a `Stop` when ntoseye sees a stop, or `None` when the timeout expires. Timeouts are in seconds, and `None` waits with no time limit, so `run(timeout=0)` resumes the target without waiting.
 
-`cont()` resumes the target without waiting, and `interrupt()` breaks in and returns a `Stop`.
+`run(address=addr)` runs to a temporary breakpoint at an address or a symbol, as {command}`g` with an address does, and `run(disposition="handled")` or `"not_handled"` resumes past an exception stop as {command}`gh` and {command}`gn` do. `interrupt()` breaks in and returns a `Stop`.
 
 ### Steps
 
-`step()`, `step_over()`, `step_out()`, and `run_to()` give synchronous run control:
+`step()`, `step_over()`, `step_out()`, and `run(address=...)` give synchronous run control:
 
 - `step(until="call")` steps to the next call instruction, and the values `"ret"` and `"branch"` step to the next instruction of that type.
-- `run_to(addr, step="over")` single-steps to an address instead of running there.
+- `step(until=addr)` and `step_over(until=addr)` single-step to an address instead of running there, into or over calls.
 
 `step_over()` across a call and `step_out()` stop only when the stepping thread returns, so if that thread waits, the step waits as long.
 
-A step-until walk (`until=` or `run_to(step=)`) also follows the thread that it started in, and so does `trace_calls()`. If an interrupt switches that thread out during a step, the walk waits until the thread executes that instruction at the same call depth, on any vCPU. If the thread exits first, the walk fails with an error that says so, and `trace_calls()` ends as `failed`.
+A step-until walk (`until=`) also follows the thread that it started in, and so does `trace_calls()`. If an interrupt switches that thread out during a step, the walk waits until the thread executes that instruction at the same call depth, on any vCPU. If the thread exits first, the walk fails with an error that says so, and `trace_calls()` ends as `failed`.
 
-These functions, and also `step(until=...)` and `step_over(until=...)`, have a `timeout=` argument in seconds. When the timeout expires, the function interrupts the target at its current location and returns that stop, a `Stop.Interrupt`. A `Stop.Step` from a walk means it got where it was going. Under VBS, an interrupted vCPU can be in the Windows hypervisor, where steps are refused until the target resumes.
+These functions have a `timeout=` argument in seconds. When the timeout expires, the function interrupts the target at its current location and returns that stop, whose `kind` is `"interrupt"`. A `"step"` stop from a walk means it got where it was going. Under VBS, an interrupted vCPU can be in the Windows hypervisor, where steps are refused until the target resumes.
 
 `trace_calls()` records the call tree until the current function returns, the same as {command}`wt`. Because it follows its thread too, a trace can wait a long time on a busy guest when other threads keep reaching an instruction before the traced one. `trace_calls(timeout=...)` ends it as `interrupted` when the time runs out, with the target halted where the trace got to and the tree it recorded so far.
 
@@ -350,30 +359,34 @@ These functions, and also `step(until=...)` and `step_over(until=...)`, have a `
 
 While the target is stopped, its stop stays current until the target moves again. `dbg.stop`, `wait()`, and `interrupt()` all return this stop, and reading it does not consume it.
 
-The stop kinds are `ntoseye.Stop.Breakpoint`, `.Exception`, `.Interrupt`, `.Step`, `.ModuleLoad`, `.ModuleUnload`, `.Bugcheck`, and `.Reboot`. To examine the specific stop, use `isinstance`, which works on Python 3.9 and later. The shared fields include `rip`, `symbol`, `thread`, `process`, `cpu`, and `breakpoints`.
+A `Stop` is a record of why the target stopped, taken at the stop. Its `kind` is one of `"breakpoint"`, `"exception"`, `"interrupt"`, `"step"`, `"module_load"`, `"module_unload"`, `"bugcheck"`, `"reload"` (the target rebooted or ntoseye found its kernel again), and `"entry"` (nothing stopped the target since the debugger attached). Every stop has `rip`, `symbol`, `cpu`, `thread`, `process`, `inspection_process`, `vtl`, and `partition`, and the part that its kind describes: `breakpoint`, `exception`, `module`, `bugcheck`, or `reload`, each `None` for the other kinds.
 
-For the other stop kinds, `stop.breakpoints` is empty, so `if bp in stop.breakpoints:` works without checking the stop type first. A crash dump that you open with `backend="dmp"` is stopped at its bugcheck, so its `dbg.stop` is a `Stop.Bugcheck`.
+`stop.hit(bp)` tells whether breakpoint `bp` stopped the target, so `if stop.hit(bp):` works without checking the kind first, and also for a one-shot breakpoint that the hit deleted. A crash dump that you open with `backend="dmp"` is stopped at its bugcheck, so its `dbg.stop` has the kind `"bugcheck"`. For the analysis that {command}`!analyze` makes of it, call `dbg.inspect.bugcheck()`.
+
+The parts are records, not live handles. The collections take them as keys: `dbg.threads[stop.thread]`, `dbg.processes[stop.process]`, `dbg.cpus[stop.cpu]` (a vCPU ID such as `"p1.2"`), and `dbg.modules[stop.module]`.
 
 ```python
 bp = dbg.breakpoints.add("nt!NtCreateFile")
 stop = dbg.run(timeout=10.0)
 if stop is None:
     print("still running")
-elif isinstance(stop, ntoseye.Stop.Breakpoint) and bp in stop.breakpoints:
+elif stop.hit(bp):
     print("hit", stop.symbol, stop.thread)
+    if stop.thread is not None:
+        print(dbg.threads[stop.thread].backtrace(4))
 ```
 
 ### Exceptions and module loads
 
-`dbg.exceptions.set(code, mode)` sets an exception policy, for example `"av"` or `0xC0000005`, or a module filter, as the REPL's {command}`sx` commands do: `"ld"` or `"ld:<module>"` for loads, `"ud"` or `"ud:<module>"` for unloads. `dbg.exceptions.module_events` lists the module filters, each with its `event` (`"ld"` or `"ud"`).
+`dbg.exceptions.set(code, mode)` sets an exception policy, for example for `"av"` or `0xC0000005`, as the REPL's {command}`sx` commands do, and returns it. `dbg.exceptions.set_module_event(event, module, mode)` sets a module filter: `event` is `"ld"` for loads or `"ud"` for unloads, and `module` a module name, or `None` for every module. `dbg.exceptions.module_events` lists the module filters, each with its `event`.
 
-With a `"break"` load filter, the load of a matching kernel module stops the target as `Stop.ModuleLoad`, whose `module` field is the loaded `Module`. The stop occurs before the module's `DriverEntry` runs, and the deferred breakpoints in the module are already armed. A `"break"` unload filter stops as `Stop.ModuleUnload` after the driver's unload routine has run, while the module is still listed.
+With a `"break"` load filter, the load of a matching kernel module stops the target with the kind `"module_load"`, whose `module` is the loaded module's `ModuleInfo`; `dbg.modules[stop.module]` gives its `Module`. The stop occurs before the module's `DriverEntry` runs, and the deferred breakpoints in the module are already armed. A `"break"` unload filter stops with the kind `"module_unload"` after the driver's unload routine has run, while the module is still listed.
 
 ```python
-dbg.exceptions.set("ld:mydriver", "break")
+dbg.exceptions.set_module_event("ld", "mydriver", "break")
 stop = dbg.run()
-if isinstance(stop, ntoseye.Stop.ModuleLoad):
-    print(stop.module.name, hex(stop.module.base))
+if stop is not None and stop.kind == "module_load" and stop.module is not None:
+    print(stop.module.name, hex(stop.module.base_address))
     dbg.breakpoints.add("mydriver!MyDispatchCreate")
 ```
 
@@ -390,10 +403,10 @@ bp = dbg.breakpoints.add(
 )
 ```
 
-A `when` callback runs on the thread that waits in `run()`, `wait()`, `run_to()`, `step()`, `step_over()`, or `step_out()`, and receives the `Stop`.
+A `when` callback runs on the thread that waits in `run()`, `wait()`, `step()`, `step_over()`, or `step_out()`, and receives the `Stop`.
 
-- If the callback returns false, ntoseye resumes past the hit. For a step or `run_to(step=...)`, the step continues.
-- If the callback raises an exception, ntoseye returns the hit and puts the error in `stop.condition_error`.
+- If the callback returns false, ntoseye resumes past the hit. For a step, the step continues.
+- If the callback raises an exception, ntoseye returns the hit and puts the error in `stop.breakpoint.condition_error`.
 
 The callback must not resume or step the target, or add or delete breakpoints, and ntoseye raises an error if it does. If the breakpoint hits when no call waits, the target stays stopped until a later wait.
 
@@ -424,7 +437,7 @@ All SDK exceptions derive from `ntoseye.NtoseyeError`:
 
 The SDK raises `ValueError` before it touches the target when an argument is not one of its fixed choices, for example `backend="windbg"` or `until="calls"`, or when a combination of arguments is not valid, for example `backend="kdnet"` without `key`.
 
-Decoded results, for example `dbg.inspect.pci()`, `thread.inspect()`, a `Field`, a `Symbol`, or a `MemoryRegion`, are records with one typed property for each field, so an editor can complete the property names and a type checker finds a misspelled name. [Results](../reference/sdk/index.md#results) lists each property.
+Decoded results, for example `dbg.inspect.pci()`, `thread.inspect()`, a `FieldInfo`, a `Symbol`, or a `MemoryRegionInfo`, are records with one typed property for each field, so an editor can complete the property names and a type checker finds a misspelled name. [Results](../reference/sdk/index.md#results) lists each property.
 
 A result always has every field of its class. If a field does not apply, its value is `None`, or empty or false where the documentation of the field says so. You can also read a record as a mapping, with `keys()` and `record["field"]`. `to_dict()` returns the same fields as plain nested `dict`s, and you can call it on a record, a process, a thread, a module, a CPU, a driver, or a breakpoint.
 

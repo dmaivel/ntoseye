@@ -427,7 +427,7 @@ impl Session {
     }
 
     /// Step until `stop` accepts the instruction about to execute, into or
-    /// over calls per `mode`: the SDK's `step(until=)` and `run_to(step=)`.
+    /// over calls per `mode`: the SDK's `step(until=)` and `step_over(until=)`.
     /// Returns the `Step` there; a breakpoint, exception, or other stop met on
     /// the way is returned as is. An interrupt request ([`Target::interrupt`]),
     /// or the host's `cancel` ends the walk where it is (see

@@ -267,4 +267,4 @@ For a crash inside a driver, as in the example on this page, use [NotMyFault](ht
 
 ## From scripts
 
-In the [Python SDK](../scripting/sdk.md), a bugcheck comes as a `Stop.Bugcheck` whose `info` holds the code, the arguments, and the culprit. `dbg.inspect.bugcheck()` returns the same data for the current stop, and `dbg.inspect.triage()` returns the full `!analyze` report, with a 0x9F's findings in `power`. `dbg.inspect.power_action()` and `dbg.inspect.device_power(device)` return what {command}`!poaction` and {command}`!podev` show.
+In the [Python SDK](../scripting/sdk.md), a bugcheck comes as a `Stop` whose `kind` is `"bugcheck"`, and whose `bugcheck` holds the code, the parameters, and the driver. `dbg.inspect.bugcheck()` returns the analysis of the current bugcheck, with its name, description, arguments, and fault site, and `dbg.inspect.triage()` returns the full `!analyze` report, with a 0x9F's findings in `power`. `dbg.inspect.power_action()` and `dbg.inspect.device_power(address)`, which takes a device object's address, return what {command}`!poaction` and {command}`!podev` show.

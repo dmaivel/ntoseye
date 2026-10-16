@@ -54,7 +54,7 @@ def main() -> None:
                     break
                 if stop.kind in ("bugcheck", "reload"):
                     raise SystemExit(f"target stopped with a {stop.kind} before the breakpoint")
-                print(f"other stop: {stop.kind} at {stop.rip!r}; waiting again")
+                print(f"other stop: {stop.kind} at {stop.symbol or stop.rip}; waiting again")
 
             stopped_in = stop.process
             name = stopped_in.name if stopped_in else "unknown process"
@@ -66,7 +66,7 @@ def main() -> None:
 
             out = dbg.step_out()
             rip = out.rip or 0
-            print(f"\nstep_out -> {rip:#x} ({out.symbol or dbg.symbols.nearest(rip)})")
+            print(f"\nstep_out -> {out.kind} at {rip:#x} ({out.symbol or dbg.symbols.nearest(rip)})")
 
             rows = dbg.memory.disassemble(rip, 3)
             if len(rows) < 3:
@@ -75,7 +75,7 @@ def main() -> None:
             reached = dbg.run(timeout=timeout, address=target)
             if reached is None:
                 raise SystemExit(f"run(address={target:#x}) timed out")
-            print(f"run(address={target:#x}) -> {reached.kind} at {reached.rip!r}")
+            print(f"run(address={target:#x}) -> {reached.kind} at {reached.symbol or reached.rip}")
 
             bp.delete()
             once = dbg.breakpoints.add(args.symbol, process=proc, one_shot=True)
@@ -85,7 +85,8 @@ def main() -> None:
                 once.delete()
                 print("\none-shot breakpoint did not fire in time; removed it")
             else:
-                print(f"\none-shot breakpoint {once.id} fired; still listed: {once.valid}")
+                listed = any(handle.id == once.id for handle in dbg.breakpoints)
+                print(f"\none-shot breakpoint {once.id} stopped: {stop.hit(once)}; still listed: {listed}")
         finally:
             for handle in list(dbg.breakpoints):
                 try:

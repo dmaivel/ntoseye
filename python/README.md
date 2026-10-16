@@ -71,10 +71,14 @@ pip install pytest mypy
 pytest tests                        # target-free surface tests
 mypy --strict -p ntoseye            # the stub and package type-check
 NTOSEYE_TEST_BACKEND=kd NTOSEYE_TEST_CONNECT=/tmp/ntoseye-kd.sock pytest tests
+NTOSEYE_TEST_BACKEND=gdb NTOSEYE_TEST_CONNECT=127.0.0.1:1234 pytest tests
 ```
 
-The last command also runs `tests/test_live.py` on a guest, which breaks in,
-steps, sets breakpoints on hot kernel functions, and resumes the guest.
+The last two commands also run `tests/test_live.py` and
+`tests/test_stub_types.py` on a guest, over KD or QEMU's GDB stub. They break
+in, step, set breakpoints on hot kernel functions, and resume the guest. The
+tests of breakpoints in the Windows hypervisor, the secure kernel, and guest
+partitions need the `gdb` backend, and skip on `kd`.
 
 By default (`auto`), the tests read guest memory from the VM process when they
 can. Add `NTOSEYE_TEST_MEMORY_SOURCE=kd` to read it over KD instead, which

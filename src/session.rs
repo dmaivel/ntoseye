@@ -353,7 +353,7 @@ pub struct ControlState {
 }
 
 /// Instruction cap for a step-until walk (`pc`/`tc`/`pa`/..., and the SDK's
-/// `step(until=)`/`run_to(step=)`) that never finds its target.
+/// `step(until=)`/`step_over(until=)`) that never finds its target.
 pub const STEP_UNTIL_LIMIT: usize = 100_000;
 
 /// The plan for a step-over of the current instruction: either a plain

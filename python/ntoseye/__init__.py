@@ -8,8 +8,8 @@
             print(proc.pid, proc.name)
         bp = dbg.breakpoints.add("nt!NtCreateFile")
         stop = dbg.run(timeout=5.0)
-        if stop is not None and bp in stop.breakpoints:
-            print(stop.thread.backtrace())
+        if stop is not None and stop.hit(bp) and stop.thread is not None:
+            print(dbg.threads[stop.thread].backtrace())
 
 For more information, see `docs/scripting/sdk.md` and `examples/`.
 """

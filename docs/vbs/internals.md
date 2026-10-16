@@ -87,7 +87,7 @@ In a test of 150 seconds of steps and call traces on a 4-vCPU guest, with a brea
 
 A watchpoint's hit ends the runs instead, because a data watchpoint traps after the access: the vCPU that made the hit would not stop on it again in the next run, and the hit would be lost. The step ends on that hit, with the target halted where it was made, and a breakpoint resume reports it as its stop, with nothing run in between. A hit that the watchpoint declines (its thread, processor, pass count, or condition) ends a step where its vCPU waits, as below; a resume goes on past it, as past any declined hit.
 
-After these runs, the step stops and reports its location if it is still in an interrupt handler, if the handler switched out the step's thread, or if the handler hit a breakpoint during the runs. The report includes a notice that gives the reason. Stepping loops ({command}`wt`, `step(until=...)`, `run_to(step=...)`) also stop there, because the handler can wait on a vCPU that the loop holds. {command}`wt` ends as `diverted`.
+After these runs, the step stops and reports its location if it is still in an interrupt handler, if the handler switched out the step's thread, or if the handler hit a breakpoint during the runs. The report includes a notice that gives the reason. Stepping loops ({command}`wt`, `step(until=...)`, `step_over(until=...)`) also stop there, because the handler can wait on a vCPU that the loop holds. {command}`wt` ends as `diverted`.
 
 A handler can be in the hypervisor for a moment, in a call that it makes, such as a spin loop's notification of a long wait. When the second is up with the vCPU there, after it was seen in the handler, the runs continue for up to 250 ms more until the vCPU is back in NT, where the step can end.
 

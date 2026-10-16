@@ -2406,7 +2406,8 @@ class Cpu:
         guest partition's VP that it serves, else the root partition's VP on
         this processor. A `when=` callback of `breakpoints.add_hypercall()`
         reads the caller's registers and memory through it
-        (`stop.cpu.hypercall_caller()`), as the breakpoint's condition does.
+        (`dbg.cpus[stop.cpu].hypercall_caller()`), as the breakpoint's
+        condition does.
         `None` when the vCPU is not halted in the hypervisor, or the caller is
         unknown: the partitions cannot be walked, or no saved state of a VP
         that the processor runs is current.
@@ -2996,8 +2997,8 @@ class Debugger:
         software breakpoints raise. `run` leaves the view and runs the
         target, and a hit of the partition's breakpoint returns in its view,
         on the VP that hit it. `step`, `step_over` and `step_out` step the
-        thread of the selected VP, and `run_to` runs until any of its VPs
-        reaches an address, each a run of the target to a breakpoint of the
+        thread of the selected VP, and `run(address=...)` runs until any of its
+        VPs reaches an address, each a run of the target to a breakpoint of the
         partition's; `step(until=...)` and `trace_calls` raise. The root
         partition's ID (1) returns to the target. Handles minted on either side
         of a switch go stale (`generation` advances). The target must be halted.

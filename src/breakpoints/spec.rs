@@ -84,7 +84,7 @@ impl BreakpointSpec {
     /// available, so it is looked up in the breakpoint's own address space
     /// and the offset applied afterwards. Returns the resolved address and
     /// the offset that was applied. Hosts resolving a `[module!]symbol[+off]`
-    /// spec (the SDK's `run_to`, watchpoints) share it.
+    /// spec (the SDK's `run(address=)`, watchpoints) share it.
     pub fn resolve_symbol_offset(
         debugger: &Target,
         dtb: Dtb,

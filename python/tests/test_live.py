@@ -59,16 +59,16 @@ def require_single_step(dbg: Debugger) -> None:
     break-in usually lands in the Windows hypervisor, which is not stepped."""
     if not any(row.capability == "single_step" and row.supported for row in dbg.capabilities):
         pytest.skip("this target refuses single steps")
-    dbg.run_to("nt!NtClose", timeout=10.0)
+    dbg.run(timeout=10.0, address="nt!NtClose")
 
 
 def test_current_stop_is_read_not_consumed(halted: Debugger) -> None:
     require_single_step(halted)
     stop = halted.step()
-    assert isinstance(stop, Stop.Step)
+    assert stop.kind == "step"
     # Every read of a halted target reports the stop it is halted at.
     for current in (halted.stop, halted.stop, halted.wait(0), halted.interrupt()):
-        assert isinstance(current, Stop.Step)
+        assert current is not None and current.kind == "step"
         assert current.rip == stop.rip
 
 
@@ -77,23 +77,23 @@ def test_false_predicate_never_surfaces(halted: Debugger) -> None:
     halted.breakpoints.add(HOT, when=lambda stop: seen.append(stop))
     assert halted.run(timeout=1.0) is None
     assert seen, "the predicate never ran"
-    assert all(isinstance(stop, Stop.Breakpoint) for stop in seen)
+    assert all(stop.kind == "breakpoint" for stop in seen)
 
 
 def test_true_predicate_surfaces_its_breakpoint(halted: Debugger) -> None:
     bp = halted.breakpoints.add(HOT, when=lambda stop: True)
     stop = halted.run(timeout=5.0)
-    assert isinstance(stop, Stop.Breakpoint)
-    assert bp in stop.breakpoints
+    assert stop is not None and stop.kind == "breakpoint"
+    assert stop.hit(bp)
     assert stop.rip == bp.address
 
 
 def test_failing_predicate_surfaces_with_its_error(halted: Debugger) -> None:
     halted.breakpoints.add(HOT, when=lambda stop: 1 // 0)
     stop = halted.run(timeout=5.0)
-    assert isinstance(stop, Stop.Breakpoint)
-    assert stop.condition_error is not None
-    assert "ZeroDivisionError" in stop.condition_error
+    assert stop is not None and stop.breakpoint is not None
+    assert stop.breakpoint.condition_error is not None
+    assert "ZeroDivisionError" in stop.breakpoint.condition_error
 
 
 def test_steps_resume_past_false_predicates(halted: Debugger) -> None:
@@ -114,7 +114,7 @@ def test_steps_resume_past_false_predicates(halted: Debugger) -> None:
         if EXITED not in str(error):
             raise
         return
-    assert isinstance(over, (Stop.Step, Stop.Interrupt))
+    assert over.kind in ("step", "interrupt")
     # Stepping out follows the same thread, which can exit under that load
     # too. The interrupt can also halt the vCPU taking a VM exit, in the
     # Windows hypervisor, or running a guest partition's VP, where no step
@@ -124,18 +124,18 @@ def test_steps_resume_past_false_predicates(halted: Debugger) -> None:
         out = halted.step_out(timeout=20.0)
     except ntoseye.NtoseyeError as error:
         message = str(error)
-        refused_after_interrupt = isinstance(over, Stop.Interrupt) and (
+        refused_after_interrupt = over.kind == "interrupt" and (
             IN_HYPERVISOR in message or IN_GUEST_VP in message or NO_CALLER in message
         )
         if EXITED not in message and not refused_after_interrupt:
             raise
         return
-    assert isinstance(out, (Stop.Step, Stop.Interrupt))
+    assert out.kind in ("step", "interrupt")
 
 
 def test_run_to_symbol_stops_there(halted: Debugger) -> None:
-    stop = halted.run_to("nt!NtClose", timeout=10.0)
-    assert isinstance(stop, Stop.Step)
+    stop = halted.run(timeout=10.0, address="nt!NtClose")
+    assert stop is not None and stop.kind == "step"
     assert stop.rip == halted.symbols["nt!NtClose"]
 
 
@@ -217,7 +217,7 @@ def test_secure_kernel_views_are_isolated_from_vtl0(halted: Debugger) -> None:
 
 def test_kernel_memory_reads_at_a_stop_in_the_hypervisor(halted: Debugger) -> None:
     stop = halted.stop
-    if stop is None or stop.cpu is None or not stop.cpu.saved_vtl:
+    if stop is None or not halted.cpus[stop.cpu].saved_vtl:
         pytest.skip("the stop is not in the Windows hypervisor with saved VTL state (needs VBS and hv-evmcs)")
     # The stop's own vCPU runs on the hypervisor's page tables; the kernel
     # scope still reads NT.
@@ -526,18 +526,18 @@ def test_a_guest_partitions_breakpoint_stops_in_its_view(halted: Debugger) -> No
         deleted = False
         try:
             stop = halted.run(timeout=30.0)
-            assert stop is not None and bp in stop.breakpoints, stop
+            assert stop is not None and stop.hit(bp), stop
             assert halted.partition == guest.id
             vps = [f"p{guest.id:x}.{vp.index + 1:x}" for vp in guest.virtual_processors]
-            assert stop.cpu.id in vps
+            assert stop.cpu in vps
             assert stop.rip == swap
-            assert stop.cpu.backtrace(limit=1)[0].symbol == "nt!KiSwapContext"
+            assert halted.cpus[stop.cpu].backtrace(limit=1)[0].symbol == "nt!KiSwapContext"
             # Every context switch runs it: left set, it stops the step on
             # another VP's hit before the step's own site.
             bp.delete()
             deleted = True
             step = halted.step()
-            assert isinstance(step, ntoseye.Stop.Step), step
+            assert step.kind == "step", step
             assert halted.partition == guest.id
             assert (step.symbol or "").startswith("nt!KiSwapContext+"), step.symbol
         finally:
@@ -597,8 +597,8 @@ def test_saved_general_registers_are_the_exits(halted: Debugger) -> None:
         finally:
             halted.interrupt()
             entry.delete()
-        assert isinstance(stop, Stop.Breakpoint)
-        exiting = stop.cpu
+        assert stop is not None and stop.kind == "breakpoint"
+        exiting = halted.cpus[stop.cpu]
         truth = {name: exiting.registers[name] for name in GPRS}
         # The entry also takes the exits of a guest partition's VP (a Hyper-V
         # VM or WSL2 inside the target), whose eVMCS is then the current one:
@@ -614,8 +614,8 @@ def test_saved_general_registers_are_the_exits(halted: Debugger) -> None:
         finally:
             halted.interrupt()
             stored.delete()
-        assert isinstance(stop, Stop.Breakpoint) and stop.cpu.id == exiting.id
-        saved = next(saved for saved in stop.cpu.saved_vtl if saved.current)
+        assert stop is not None and stop.kind == "breakpoint" and stop.cpu == exiting.id
+        saved = next(saved for saved in halted.cpus[stop.cpu].saved_vtl if saved.current)
         assert (saved.vtl, saved.rip, saved.exit_reason) == (at_entry.vtl, at_entry.rip, at_entry.exit_reason)
         assert saved.general_registers is not None
         assert {name: getattr(saved.general_registers, name) for name in GPRS} == truth
@@ -654,14 +654,15 @@ def test_hypercall_breakpoint_stops_only_for_its_call_and_caller(halted: Debugge
                 stop = halted.run(timeout=30.0)
                 who = "the root" if index is None else f"the root's VP {index}"
                 assert stop is not None, f"no synthetic IPI from {who} in 30 s"
-                assert isinstance(stop, Stop.Breakpoint) and bp in stop.breakpoints
-                saved = next((saved for saved in stop.cpu.saved_vtl if saved.current), None)
+                assert stop.hit(bp)
+                cpu = halted.cpus[stop.cpu]
+                saved = next((saved for saved in cpu.saved_vtl if saved.current), None)
                 if saved is None or saved.general_registers is None:
                     continue
                 assert saved.general_registers.rcx & 0xFFFF == 0x000B
                 if index is not None:
-                    assert stop.cpu == halted.cpus[index]
-                callers.append(stop.cpu)
+                    assert cpu == halted.cpus[index]
+                callers.append(cpu)
         finally:
             halted.interrupt()
             bp.delete()
@@ -689,8 +690,9 @@ def test_a_hypercall_stop_decodes_the_call_from_the_callers_registers(halted: De
     try:
         for _ in range(ATTEMPTS * 3):
             stop = halted.run(timeout=10.0)
-            assert isinstance(stop, Stop.Breakpoint) and bp in stop.breakpoints
-            saved = next((saved for saved in stop.cpu.saved_vtl if saved.current), None)
+            assert stop is not None and stop.hit(bp)
+            cpu = halted.cpus[stop.cpu]
+            saved = next((saved for saved in cpu.saved_vtl if saved.current), None)
             if saved is None or saved.general_registers is None:
                 continue
             call = saved.hypercall
@@ -711,7 +713,7 @@ def test_a_hypercall_stop_decodes_the_call_from_the_callers_registers(halted: De
                 assert mask == registers.r8
             else:
                 assert call.input_gpa == registers.rdx
-            served = stop.cpu.serving
+            served = cpu.serving
             assert served is None or not served.current
             decoded += 1
     finally:
@@ -769,8 +771,8 @@ def test_flush_gva_ranges_decode_in_the_format_their_flags_select(halted: Debugg
     try:
         for _ in range(ATTEMPTS):
             stop = halted.run(timeout=10.0)
-            assert isinstance(stop, Stop.Breakpoint) and bp in stop.breakpoints
-            caller = stop.cpu.hypercall_caller()
+            assert stop is not None and stop.hit(bp)
+            caller = halted.cpus[stop.cpu].hypercall_caller()
             assert caller is not None and caller.partition_id == root.id
             call = caller.hypercall
             assert call is not None and call.code == 0x0003
@@ -805,8 +807,8 @@ def test_a_hypercall_condition_reads_the_callers_memory(halted: Debugger) -> Non
     try:
         for _ in range(ATTEMPTS):
             stop = halted.run(timeout=10.0)
-            assert isinstance(stop, Stop.Breakpoint) and bp in stop.breakpoints
-            assert stop.condition_error is None
+            assert stop is not None and stop.breakpoint is not None and stop.hit(bp)
+            assert stop.breakpoint.condition_error is None
     finally:
         bp.delete()
     bp = halted.breakpoints.add_hypercall(0x0003, root.id, condition=NOT_AT_VMCALL)
@@ -822,9 +824,9 @@ def test_a_hypercall_condition_reads_the_callers_memory(halted: Debugger) -> Non
     )
     try:
         stop = halted.run(timeout=30.0)
-        assert isinstance(stop, Stop.Breakpoint) and bp in stop.breakpoints, "no slow flush of the root in 30 s"
-        assert stop.condition_error is None
-        caller = stop.cpu.hypercall_caller()
+        assert stop is not None and stop.breakpoint is not None and stop.hit(bp), "no slow flush of the root in 30 s"
+        assert stop.breakpoint.condition_error is None
+        caller = halted.cpus[stop.cpu].hypercall_caller()
         assert caller is not None and caller.hypercall is not None
         call = caller.hypercall
         assert not call.fast and call.input_gpa == caller.registers["rdx"]
@@ -844,7 +846,7 @@ def test_a_hypercall_callback_reads_its_caller(halted: Debugger) -> None:
     in_nt: list[ntoseye.HypercallCaller | None] = []
 
     def check(stop: Stop) -> bool:
-        caller = stop.cpu.hypercall_caller()
+        caller = halted.cpus[stop.cpu].hypercall_caller()
         callers.append(caller)
         if caller is None or caller.hypercall is None:
             return True
@@ -862,10 +864,10 @@ def test_a_hypercall_callback_reads_its_caller(halted: Debugger) -> None:
     finally:
         halted.interrupt()
         bp.delete()
-    assert isinstance(stop, Stop.Breakpoint) and bp in stop.breakpoints, (
+    assert stop is not None and stop.breakpoint is not None and stop.hit(bp), (
         "no slow flush of the root, or no vCPU in NT at a flush, in 30 s"
     )
-    assert stop.condition_error is None
+    assert stop.breakpoint.condition_error is None
     assert all(caller is not None and caller.partition_id == root.id and caller.root for caller in callers)
     assert set(code) == {VMCALL}
     assert all(rdx == gpa for rdx, gpa in inputs)
@@ -881,12 +883,13 @@ def test_secure_hardware_breakpoint_preserves_code_and_cpu_identity(halted: Debu
     try:
         for _ in range(2):
             stop = halted.run(timeout=10.0)
-            assert isinstance(stop, Stop.Breakpoint)
-            assert stop.rip == address and bp in stop.breakpoints
+            assert stop is not None and stop.kind == "breakpoint"
+            assert stop.rip == address and stop.hit(bp)
             assert stop.symbol == "securekernel!SkeSelectProcessAddressSpace"
             assert stop.thread is None and stop.process is None
-            assert stop.cpu.thread is None and stop.cpu.process is None
-            assert stop.cpu.registers["rip"] == address
+            cpu = halted.cpus[stop.cpu]
+            assert cpu.thread is None and cpu.process is None
+            assert cpu.registers["rip"] == address
     finally:
         halted.interrupt()
         bp.delete()
@@ -916,22 +919,22 @@ def secure_step_scenario(halted: Debugger, address: int) -> bool:
     bp = halted.breakpoints.add(address, hardware=True)
     try:
         stop = halted.run(timeout=10.0)
-        if isinstance(stop, Stop.Interrupt):
+        if stop is not None and stop.kind == "interrupt":
             return False
-        assert isinstance(stop, Stop.Breakpoint)
+        assert stop is not None and stop.kind == "breakpoint"
         bp.delete()
         # Which sites a step plants is pinned by the Rust unit tests; this is
         # the live path. step_out's run-to site goes through the breakpoint
         # manager, which refuses a software site in the secure kernel.
         halted.notices()
         step = halted.step()
-        assert isinstance(step, Stop.Step)
+        assert step.kind == "step"
         assert step.rip != address
         if any(DIVERTED in notice.text for notice in halted.notices()):
             return False
         assert (step.symbol or "").startswith("securekernel!")
         out = halted.step_out()
-        assert isinstance(out, Stop.Step)
+        assert out.kind == "step"
         assert (out.symbol or "").startswith("securekernel!")
         assert out.thread is None
         assert not list(halted.breakpoints), "a temporary site was left behind"
@@ -977,8 +980,8 @@ def test_a_vm_exit_breakpoint_stops_on_its_reason_from_its_caller(halted: Debugg
         assert bp.vm_exit is not None and bp.vm_exit.reason == 31
         for _ in range(10):
             stop = halted.run(timeout=10.0)
-            assert isinstance(stop, Stop.Breakpoint) and bp in stop.breakpoints
-            caller = stop.cpu.hypercall_caller()
+            assert stop is not None and stop.hit(bp)
+            caller = halted.cpus[stop.cpu].hypercall_caller()
             assert caller is not None and caller.partition_id == root.id
             assert caller.read(caller.registers["rip"], 2) == b"\x0f\x32"
     finally:
@@ -1105,4 +1108,8 @@ def test_dx_queries_agree_with_the_sdk(halted: Debugger) -> None:
         "dx Debugger.Utility.Collections.FromListEntry(*(nt!_LIST_ENTRY*)&nt!PsActiveProcessHead, "
         '"nt!_EPROCESS", "ActiveProcessLinks").Count(), d'
     )
-    assert count.split(":")[-1].strip() == str(len(list(halted.processes)))
+    # The output can go on with a note the session reports, such as the gdb
+    # backend's bugcheck trap being armed.
+    walked = re.search(r"\.Count\(\), d : (\d+)$", count, flags=re.M)
+    assert walked is not None, count
+    assert int(walked.group(1)) == len(list(halted.processes))

@@ -4,10 +4,12 @@
 The default `kd` backend inspects per-CPU state and reads model-specific
 registers. Use `--backend memory` for passive reads from a paused guest; the
 memory backend cannot halt to query CPUs or read MSRs.
+`--backend dmp --connect <path>` reads a kernel dump instead.
 An optional full dump is written while the target is halted.
 
     python3 kernel_snapshot.py
     python3 kernel_snapshot.py --backend memory
+    python3 kernel_snapshot.py --backend dmp --connect MEMORY.DMP
     python3 kernel_snapshot.py --dump /tmp/snapshot.dmp
 """
 
@@ -17,7 +19,7 @@ import ntoseye
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--backend", default="kd", choices=["memory", "gdb", "kd"])
+    ap.add_argument("--backend", default="kd", choices=["memory", "gdb", "kd", "dmp"])
     ap.add_argument("--connect", default=None)
     ap.add_argument("--dump", default=None, help="also write a full kernel dump here")
     args = ap.parse_args()
