@@ -1,0 +1,734 @@
+use std::collections::HashMap;
+
+use owo_colors::OwoColorize;
+
+use crate::backend::dbg_backend::{RegisterMap, repeats_another_register};
+use crate::base::error::Error;
+use crate::base::memory::MemoryOps;
+use crate::base::types::{CodeMachine, VirtAddr};
+#[cfg(feature = "cli")]
+use crate::hosts::repl::native;
+use crate::hosts::ui;
+use crate::nt::symbols::{LocalSourceState, SourceLocation};
+use crate::nt::target::Target;
+use crate::nt::unwind::{
+    FrameSource, StackFrame, StackTrace, ThreadTraceContext, build_thread_stacktrace,
+    format_symbol, preferred_code_dtb,
+};
+use crate::session::Session;
+
+pub fn print_section(title: &str) {
+    outln!("\n{}", ui::label(title));
+}
+
+/// Begin a stop block: a blank line. A native stop card brings its own
+/// spacing.
+pub fn print_stop_separator() {
+    #[cfg(feature = "cli")]
+    native::omit(|| outln!());
+    #[cfg(not(feature = "cli"))]
+    outln!();
+}
+
+/// Print the detail lines attached to an event banner: muted `├─` for middle
+/// children, `└─` for the last. `indent` is 1 space below a badge banner,
+/// 4 spaces for a nested level; it is never derived from the badge width.
+///
+/// Children may contain `\n` (see [`wrap_prose`]): continuation lines get a
+/// `│` gutter while the branch continues, bare spaces after the last child.
+pub fn print_event_children(indent: &str, children: &[String]) {
+    for line in event_children_lines(indent, children) {
+        outln!("{line}");
+    }
+}
+
+/// The lines [`print_event_children`] prints, for a subtree that is itself
+/// a child: join them with `\n` under its head line, and the parent's
+/// gutter continues past them.
+pub fn event_children_lines(indent: &str, children: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (idx, child) in children.iter().enumerate() {
+        let last = idx + 1 == children.len();
+        let glyph = if last { "└─" } else { "├─" };
+        let mut lines = child.lines();
+        if let Some(first) = lines.next() {
+            out.push(format!("{indent}{} {}", ui::muted(glyph), first));
+        }
+        for continuation in lines {
+            if last {
+                out.push(format!("{indent}   {continuation}"));
+            } else {
+                out.push(format!("{indent}{}  {continuation}", ui::muted("│")));
+            }
+        }
+    }
+    out
+}
+
+/// Tree child with a dim wrapped prose tail. `hang` is the child-relative
+/// indent of continuation lines; `col` the absolute column where the prose
+/// starts on screen, from which the wrap width is derived.
+pub fn wrapped_dim_tail(prefix: String, hang: usize, prose: &str, col: usize) -> String {
+    let lines = wrap_prose(prose, col);
+    let mut out = format!("{prefix}{}", ui::muted(&lines[0]));
+    for line in &lines[1..] {
+        out.push_str(&format!("\n{}{}", " ".repeat(hang), ui::muted(line)));
+    }
+    out
+}
+
+/// Wrap plain prose for display starting at terminal column `col`, capped at
+/// 100 columns of prose. Returns a single line when stdout is not a terminal
+/// (piped output wants one line per field) or the terminal is too narrow.
+/// A word longer than the width stays whole on its own line: a name split
+/// in two reads as two names. Wrap before styling; width math over ANSI
+/// escapes miscounts.
+pub fn wrap_prose(text: &str, col: usize) -> Vec<String> {
+    let Some((terminal_size::Width(w), _)) = terminal_size::terminal_size() else {
+        return vec![text.to_string()];
+    };
+    let width = (w as usize).saturating_sub(col).min(100);
+    if width < 20 {
+        return vec![text.to_string()];
+    }
+    textwrap::wrap(text, textwrap::Options::new(width).break_words(false))
+        .into_iter()
+        .map(|line| line.into_owned())
+        .collect()
+}
+
+pub fn format_rflags(flags: u64) -> String {
+    const FLAGS: &[(u64, &str)] = &[
+        (0, "CF"),
+        (2, "PF"),
+        (4, "AF"),
+        (6, "ZF"),
+        (7, "SF"),
+        (8, "TF"),
+        (9, "IF"),
+        (10, "DF"),
+        (11, "OF"),
+        (14, "NT"),
+        (16, "RF"),
+        (17, "VM"),
+        (18, "AC"),
+        (19, "VIF"),
+        (20, "VIP"),
+        (21, "ID"),
+    ];
+
+    let mut names = FLAGS
+        .iter()
+        .filter_map(|(bit, name)| ((flags & (1u64 << bit)) != 0).then_some(*name))
+        .collect::<Vec<_>>();
+
+    let iopl = (flags >> 12) & 0x3;
+    if iopl != 0 {
+        names.push(match iopl {
+            1 => "IOPL1",
+            2 => "IOPL2",
+            _ => "IOPL3",
+        });
+    }
+
+    if names.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", names.join(" "))
+    }
+}
+
+/// AArch64 condition-flag summary aligned beneath the 16-hex-digit `cpsr`
+/// value: each flag letter sits under the hex digit that contains its bit
+/// (NZCV under the digit for bits 31-28, DAIF under the digits for bits 11-8
+/// and 7-4). Multiple flags in one digit are joined in bit order, pushing any
+/// later column right.
+fn format_cpsr(flags: u64) -> String {
+    const FLAGS: &[(u32, &str)] = &[
+        (31, "N"),
+        (30, "Z"),
+        (29, "C"),
+        (28, "V"),
+        (9, "D"),
+        (8, "A"),
+        (7, "I"),
+        (6, "F"),
+    ];
+    // Per hex-digit columns; digit 0 covers bits 63-60, digit 15 bits 3-0.
+    let mut columns: [Vec<&str>; 16] = std::array::from_fn(|_| Vec::new());
+    for (bit, name) in FLAGS {
+        if flags & (1u64 << bit) != 0 {
+            columns[15 - (bit / 4) as usize].push(name);
+        }
+    }
+    let mut line = vec![' '; 16];
+    for (idx, names) in columns.iter().enumerate() {
+        if names.is_empty() {
+            continue;
+        }
+        let text: String = names.concat();
+        let len = text.len();
+        if idx + len > line.len() {
+            continue;
+        }
+        for i in (idx..line.len() - len).rev() {
+            line[i + len] = line[i];
+        }
+        for (i, ch) in text.chars().enumerate() {
+            line[idx + i] = ch;
+        }
+    }
+    line.into_iter().collect()
+}
+
+/// Print the general-purpose register grid. `embedded` is true inside the
+/// break/status dump (`registers` section header, 2-space indent); standalone
+/// `registers` passes false so it reads flush-left with no header, matching
+/// `disasm`. The row layout follows the register map's architecture.
+/// Print a recovered (partial) register set sorted by name, one row per
+/// register at `indent` columns, under an optional heading line.
+pub fn print_sparse_registers(
+    registers: &HashMap<String, u64>,
+    heading: Option<&str>,
+    indent: usize,
+) {
+    let mut names: Vec<_> = registers
+        .keys()
+        .filter(|name| !repeats_another_register(name, registers))
+        .collect();
+    names.sort();
+    if let Some(heading) = heading {
+        outln!("{heading}");
+    }
+    for name in names {
+        outln!("{:indent$}{:<8} {}", "", name, ui::addr(registers[name]));
+    }
+}
+
+/// The general-purpose registers in `regs`, as a grid. With `before`, the
+/// register file of the previous stop on the same thread, the values that
+/// changed since stand out.
+pub fn print_registers(
+    register_map: &RegisterMap,
+    regs: &[u8],
+    before: Option<&[u8]>,
+    embedded: bool,
+) {
+    let read_reg_value = |name: &str| register_map.read_u64(name, regs);
+    let styled_value = |name: &str| -> String {
+        match read_reg_value(name) {
+            Ok(value) if changed(register_map, name, value, before) => {
+                ui::changed(&ui::addr(value))
+            }
+            Ok(value) => ui::addr(value),
+            Err(_) => ui::muted(&format!("{:<16}", "N/A")),
+        }
+    };
+    let cell = |name: &str| {
+        format!(
+            "{} {}",
+            ui::muted(&format!("{name:<3}")),
+            styled_value(name)
+        )
+    };
+
+    let indent = if embedded { "  " } else { "" };
+    if embedded {
+        print_section("registers");
+    }
+
+    // ARM64 register map: x0-x30 grid plus fp/lr/sp/pc and cpsr flags.
+    if read_reg_value("pc").is_ok() {
+        for row in [
+            ["x0", "x1", "x2", "x3"],
+            ["x4", "x5", "x6", "x7"],
+            ["x8", "x9", "x10", "x11"],
+            ["x12", "x13", "x14", "x15"],
+            ["x16", "x17", "x18", "x19"],
+            ["x20", "x21", "x22", "x23"],
+            ["x24", "x25", "x26", "x27"],
+        ] {
+            outln!(
+                "{indent}{}   {}   {}   {}",
+                cell(row[0]),
+                cell(row[1]),
+                cell(row[2]),
+                cell(row[3])
+            );
+        }
+        outln!(
+            "{indent}{}   {}   {}   {}",
+            cell("x28"),
+            cell("fp"),
+            cell("lr"),
+            cell("sp")
+        );
+        let cpsr = read_reg_value("cpsr").unwrap_or(0);
+        outln!(
+            "{indent}{}   {} {}",
+            cell("pc"),
+            ui::muted("cpsr"),
+            styled_value("cpsr")
+        );
+        let flags = format_cpsr(cpsr);
+        if !flags.is_empty() {
+            // Align under the cpsr hex value: cell("pc") (4 + 16 chars) +
+            // the "   cpsr " label, i.e. 28 columns.
+            outln!("{indent}                            {flags}");
+        }
+        return;
+    }
+
+    let rflags = read_reg_value("eflags").unwrap_or(0);
+    for row in [
+        ["rax", "rbx", "rcx"],
+        ["rdx", "rsi", "rdi"],
+        ["rsp", "rbp", "rip"],
+        ["r8", "r9", "r10"],
+        ["r11", "r12", "r13"],
+    ] {
+        outln!(
+            "{indent}{}   {}   {}",
+            cell(row[0]),
+            cell(row[1]),
+            cell(row[2])
+        );
+    }
+    outln!(
+        "{indent}{}   {}   {} {}{}",
+        cell("r14"),
+        cell("r15"),
+        ui::muted("rfl"),
+        styled_value("eflags"),
+        format_rflags(rflags)
+    );
+}
+
+/// Whether register `name`, now `value`, held something else in `before`.
+pub fn changed(register_map: &RegisterMap, name: &str, value: u64, before: Option<&[u8]>) -> bool {
+    before
+        .and_then(|before| register_map.read_u64(name, before).ok())
+        .is_some_and(|was| was != value)
+}
+
+/// The general-purpose registers, in the order the grid shows them.
+const AMD64_REGISTERS: [&str; 18] = [
+    "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rsp", "rbp", "rip", "r8", "r9", "r10", "r11", "r12",
+    "r13", "r14", "r15", "eflags",
+];
+const ARM64_EXTRA_REGISTERS: [&str; 5] = ["fp", "lr", "sp", "pc", "cpsr"];
+
+/// The general-purpose registers that changed since `before`, on one line
+/// as `name=value` pairs: what a compact stop shows after a step.
+pub fn print_changed_registers(register_map: &RegisterMap, regs: &[u8], before: Option<&[u8]>) {
+    let arm64 = register_map.read_u64("pc", regs).is_ok();
+    let arm64_names = (0..=28)
+        .map(|index| format!("x{index}"))
+        .chain(ARM64_EXTRA_REGISTERS.map(String::from));
+    let names: Vec<String> = if arm64 {
+        arm64_names.collect()
+    } else {
+        AMD64_REGISTERS.map(String::from).to_vec()
+    };
+    let pairs: Vec<String> = names
+        .iter()
+        .filter_map(|name| {
+            let value = register_map.read_u64(name, regs).ok()?;
+            changed(register_map, name, value, before)
+                .then(|| format!("{name}={}", ui::addr(value)))
+        })
+        .collect();
+    if pairs.is_empty() {
+        outln!("{}", ui::muted("no register changed"));
+    } else {
+        outln!("{} {}", ui::muted("changed"), pairs.join("  "));
+    }
+}
+
+// Decoding lives in core; the REPL owns the *rendering*
+// (`format_disasm_line`/`render_rows` below).
+pub use crate::base::disasm::{
+    AsmToken, DisasmRow, decode_code, decode_preceding, decode_rows, decode_rows_arm64,
+    disasm_formatter,
+};
+
+/// Width of the byte column for a listing: the longest hex string among the
+/// rows about to be printed, so the asm column always aligns and never gets
+/// pushed right by a long (up to 15-byte) instruction.
+pub fn hex_column_width<'a>(hexes: impl Iterator<Item = &'a str>) -> usize {
+    hexes.map(str::len).max().unwrap_or(0)
+}
+
+/// Render one disassembly line: yellow `>` cursor on the current
+/// instruction, dim bytes, dim `;` comment with symbol. The single source of
+/// truth for a disassembled instruction, shared by both call sites.
+///
+/// `hex_width` is the byte column width, computed per listing via
+/// [`hex_column_width`] so the asm column stays aligned without overfilling.
+pub fn format_disasm_line(
+    ip: u64,
+    hex: &str,
+    tokens: &[AsmToken],
+    comment: Option<&str>,
+    marker: Option<bool>,
+    hex_width: usize,
+) -> String {
+    // `marker` is None for a plain listing (no cursor column); Some(current) for
+    // the break/status view, where the current instruction gets a yellow `>`
+    let prefix = match marker {
+        Some(true) => format!(" {} ", ">".yellow().bold()),
+        Some(false) => "   ".to_string(),
+        None => String::new(),
+    };
+    let bytes = format!("{hex:<hex_width$}").bright_black().to_string();
+    let asm = ui::disasm_asm(tokens);
+    let comment = comment
+        .map(|sym| format!(" {} {}", ui::muted(";"), ui::symbol(sym)))
+        .unwrap_or_default();
+    format!("{}{}  {}  {}{}", prefix, ui::addr(ip), bytes, asm, comment)
+}
+
+/// Print decoded rows in the house style, sizing the byte column once across
+/// all rows so the asm column aligns. `marker_for` gives each row its cursor
+/// state: `None` for a plain listing (`disasm`), `Some(current)` for the
+/// break/status view where the current instruction gets a `>`.
+pub fn render_rows(rows: &[DisasmRow], marker_for: impl Fn(u64) -> Option<bool>) {
+    let width = hex_column_width(rows.iter().map(|row| row.hex.as_str()));
+    for row in rows {
+        outln!(
+            "{}",
+            format_disasm_line(
+                row.ip,
+                &row.hex,
+                &row.tokens,
+                row.comment.as_deref(),
+                marker_for(row.ip),
+                width,
+            )
+        );
+    }
+}
+
+const DISASM_CONTEXT_BYTES: usize = 64;
+const DISASM_CONTEXT_INSTRUCTIONS: usize = 7;
+
+/// Why the instruction at `pc` could not be read, in the terms the user can
+/// act on.
+///
+/// A page that is not resident is the normal outcome of an execute breakpoint
+/// on code nothing has run yet: a code breakpoint fault outranks the code page
+/// fault of the instruction fetch (Intel SDM, "Priority Among Concurrent
+/// Events": code breakpoint fault is priority 7, faults from fetching the next
+/// instruction priority 8), so the trap is delivered before the page is
+/// faulted in. The bytes appear once the instruction is actually fetched, so a
+/// single step reveals them.
+pub fn non_resident_note(pc: u64, error: &Error) -> String {
+    match error {
+        Error::BadVirtualAddress(_) | Error::AddressNotInDump(_) | Error::PartialRead(0) => {
+            format!(
+                "  (the page holding {pc:#x} is not resident, so there is nothing to decode yet; \
+                 an execute breakpoint traps before the fetch that pages it in, and `t` \
+                 single-steps through the fetch)"
+            )
+        }
+        error => format!("  (could not read memory at {pc:#x}: {error})"),
+    }
+}
+
+fn decode_disasm_context(
+    bytes_at_rip: &[u8],
+    rip: u64,
+    machine: CodeMachine,
+    resolve: impl Fn(u64) -> String,
+) -> Vec<DisasmRow> {
+    decode_code(
+        bytes_at_rip,
+        rip,
+        Some(DISASM_CONTEXT_INSTRUCTIONS),
+        machine,
+        resolve,
+    )
+}
+
+pub fn print_disasm_context(session: &Session, trace: &ThreadTraceContext, rip: u64) {
+    print_disasm_lines(session, trace, rip, DISASM_CONTEXT_INSTRUCTIONS);
+}
+
+/// [`print_disasm_context`] with at most `count` instructions.
+pub fn print_disasm_lines(session: &Session, trace: &ThreadTraceContext, rip: u64, count: usize) {
+    print_section("disasm");
+    match disasm_context_rows(session, trace, rip) {
+        Ok(rows) => render_rows(&rows[..rows.len().min(count)], |ip| Some(ip == rip)),
+        Err(note) => outln!("{}", ui::muted(&note)),
+    }
+}
+
+/// The instructions a stop shows from `rip`, or the note saying why they
+/// can't be read.
+pub fn disasm_context_rows(
+    session: &Session,
+    trace: &ThreadTraceContext,
+    rip: u64,
+) -> std::result::Result<Vec<DisasmRow>, String> {
+    let debugger = &session.target;
+
+    let active_memory = debugger.address_space(trace.active_dtb);
+    let code_dtb = preferred_code_dtb(trace, rip);
+    let code_memory = debugger.address_space(code_dtb);
+    let mut bytes = [0u8; DISASM_CONTEXT_BYTES];
+
+    let read = match active_memory.read_bytes(VirtAddr(rip), &mut bytes) {
+        Ok(()) => Ok(()),
+        Err(active_error) if code_dtb == trace.active_dtb => Err(active_error),
+        Err(_) => code_memory.read_bytes(VirtAddr(rip), &mut bytes),
+    };
+    if let Err(error) = read {
+        return Err(non_resident_note(rip, &error));
+    }
+
+    session.mask_code(VirtAddr(rip), &mut bytes, trace.active_dtb);
+
+    let resolve = |target: u64| format_symbol(debugger, trace, target);
+    Ok(decode_disasm_context(
+        &bytes,
+        rip,
+        debugger.code_machine(VirtAddr(rip)),
+        resolve,
+    ))
+}
+
+/// Print the stack frames. `embedded` is true inside the break/status dump:
+/// bold `stack` header, 2-space indent, and no child-SP column (the return
+/// address is the token you act on). Standalone `k` passes false:
+/// flush-left, full child-SP + retaddr columns.
+pub fn print_stacktrace(
+    debugger: &Target,
+    register_map: &RegisterMap,
+    regs: &[u8],
+    build_limit: usize,
+    display_limit: usize,
+    embedded: bool,
+) {
+    let stacktrace = thread_stacktrace(debugger, register_map, regs, build_limit);
+    print_stacktrace_data(&stacktrace, display_limit, embedded);
+}
+
+/// The stack of the selected thread from `regs`, walked `build_limit`
+/// frames deep.
+pub fn thread_stacktrace(
+    debugger: &Target,
+    register_map: &RegisterMap,
+    regs: &[u8],
+    build_limit: usize,
+) -> StackTrace {
+    build_thread_stacktrace(
+        debugger,
+        register_map,
+        regs,
+        debugger.windows_thread_selection.as_ref(),
+        build_limit,
+    )
+    .into_stacktrace()
+}
+
+/// Render an already-collected stack trace in the same layout as [`print_stacktrace`].
+pub fn print_stacktrace_data(stacktrace: &StackTrace, display_limit: usize, embedded: bool) {
+    print_stacktrace_data_with(stacktrace, display_limit, embedded, StackColumns::default());
+}
+
+pub fn print_stacktrace_data_with_provenance(
+    stacktrace: &StackTrace,
+    display_limit: usize,
+    embedded: bool,
+) {
+    let columns = StackColumns {
+        provenance: true,
+        ..StackColumns::default()
+    };
+    print_stacktrace_data_with(stacktrace, display_limit, embedded, columns);
+}
+
+/// The optional columns of the `k` family: `kv`'s provenance and `kf`'s
+/// frame sizes.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StackColumns {
+    pub provenance: bool,
+    pub frame_size: bool,
+}
+
+/// `kf`'s memory column: how many stack bytes separate a frame from the
+/// physical frame before it. Blank for the first physical frame, for an
+/// inline frame (which has no stack of its own), and where the stack pointer
+/// drops, which is a switch to another stack rather than a frame size.
+pub fn frame_size_cell(previous_sp: Option<u64>, sp: u64) -> String {
+    match previous_sp.and_then(|previous| sp.checked_sub(previous)) {
+        Some(size) => format!("{size:>8x}"),
+        None => format!("{:8}", ""),
+    }
+}
+
+fn format_source_location(location: &SourceLocation) -> String {
+    let (label, path) = match &location.local {
+        Some(local) => (
+            match local.state {
+                LocalSourceState::Found => "local",
+                LocalSourceState::Missing => "mapped",
+                LocalSourceState::Differs => "differs",
+            },
+            local.path.display().to_string(),
+        ),
+        None => ("recorded", location.file.clone()),
+    };
+    match location.column {
+        Some(column) => format!("[{label} {path}:{}:{column}]", location.line),
+        None => format!("[{label} {path}:{}]", location.line),
+    }
+}
+
+pub fn print_stacktrace_data_with(
+    stacktrace: &StackTrace,
+    display_limit: usize,
+    embedded: bool,
+    columns: StackColumns,
+) {
+    let indent = if embedded { "  " } else { "" };
+    if embedded {
+        print_section("stack");
+    }
+
+    let shown = stacktrace.frames.len().min(display_limit);
+
+    let mut previous_sp = None;
+    for (num, frame) in stacktrace.frames.iter().take(shown).enumerate() {
+        if columns.frame_size {
+            let size = if frame.inline {
+                frame_size_cell(None, frame.sp)
+            } else {
+                frame_size_cell(previous_sp.replace(frame.sp), frame.sp)
+            };
+            outln!(
+                "{indent}{} {} {}",
+                ui::muted(&format!("#{num:<2}")),
+                size,
+                format_stack_frame(None, frame, !embedded, columns.provenance)
+            );
+        } else {
+            outln!(
+                "{indent}{}",
+                format_stack_frame(Some(num), frame, !embedded, columns.provenance)
+            );
+        }
+    }
+
+    let hidden = stacktrace.frames.len().saturating_sub(display_limit) + stacktrace.truncated;
+    if hidden > 0 {
+        outln!("{indent}{}", more_frames(hidden));
+    }
+}
+
+/// The tag after the symbol of a call the compiler inlined, in the `k`
+/// family and `.frame`.
+pub fn inline_tag() -> String {
+    "[inline]".bright_black().to_string()
+}
+
+/// One frame line in `k`'s layout: the frame `number` when given, the child
+/// SP when `with_sp`, the return address, then the symbol, whether it is an
+/// inline frame, how the frame was recovered (always with
+/// `show_provenance`, as `kv` shows it, else only a stack scan's guess), and
+/// its source line.
+pub fn format_stack_frame(
+    number: Option<usize>,
+    frame: &StackFrame,
+    with_sp: bool,
+    show_provenance: bool,
+) -> String {
+    let mut line = String::new();
+    if let Some(number) = number {
+        line.push_str(&ui::muted(&format!("#{number:<2}")));
+        line.push(' ');
+    }
+    if with_sp {
+        line.push_str(&ui::addr(frame.sp));
+        line.push_str("  ");
+    }
+    line.push_str(&ui::addr(frame.ip));
+    let mut annotations = Vec::new();
+    if !frame.symbol.starts_with("0x") {
+        annotations.push(ui::symbol(&frame.symbol));
+    }
+    if frame.inline {
+        annotations.push(inline_tag());
+    }
+    // A guess, by a stack scan or a prolog read, is marked always.
+    if show_provenance || matches!(frame.source, FrameSource::Scan | FrameSource::Prolog) {
+        annotations.push(
+            format!("[{}]", frame.source.as_str())
+                .bright_black()
+                .to_string(),
+        );
+    }
+    if let Some(location) = frame.source_location.as_ref() {
+        annotations.push(format_source_location(location).bright_black().to_string());
+    }
+    if !annotations.is_empty() {
+        line.push_str("  ");
+        line.push_str(&annotations.join(" "));
+    }
+    line
+}
+
+/// The note under a stack for the frames not shown or not walked.
+pub fn more_frames(hidden: usize) -> String {
+    format!("... {hidden} more frames")
+        .bright_black()
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nt::symbols::LocalSource;
+
+    #[test]
+    fn stop_disassembly_starts_at_rip_and_only_looks_forward() {
+        let rip = 0xffff_f807_c0e1_3ae0;
+        let rows = decode_disasm_context(&[0x90; 8], rip, CodeMachine::Amd64, |_| String::new());
+        let ips = rows.iter().map(|row| row.ip).collect::<Vec<_>>();
+
+        assert_eq!(ips, (rip..rip + 7).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn cpsr_flags_align_under_hex_digits() {
+        assert_eq!(format_cpsr(0x6000_0044), "        ZC    F ");
+        assert_eq!(format_cpsr(0x8000_01c4), "        N    AIF");
+        assert_eq!(format_cpsr(0x0000_0000), "                ");
+    }
+
+    #[test]
+    fn source_location_labels_recorded_and_local_paths() {
+        let recorded = SourceLocation {
+            file: r"C:\build\driver.c".into(),
+            line: 42,
+            column: Some(7),
+            local: None,
+        };
+        assert_eq!(
+            format_source_location(&recorded),
+            r"[recorded C:\build\driver.c:42:7]"
+        );
+
+        let local = SourceLocation {
+            local: Some(LocalSource {
+                path: "/checkout/driver.c".into(),
+                state: LocalSourceState::Found,
+            }),
+            ..recorded
+        };
+        assert_eq!(
+            format_source_location(&local),
+            "[local /checkout/driver.c:42:7]"
+        );
+    }
+}

@@ -12,28 +12,24 @@ use std::time::{Duration, Instant};
 
 use ntoseye_macros::record;
 
-use crate::breakpoints::{BreakpointInfo, StepFrame};
-use crate::dbg_backend::{
+use crate::backend::dbg_backend::{
     BugcheckInfo, ContinueDisposition, HwBreakpointAccess, ModuleEvent,
     processor_index_from_backend_thread_id,
 };
-use crate::disasm::ControlFlow;
-use crate::error::Result;
-use crate::exception_policy::ExceptionPolicyAction;
-use crate::guest::{ModuleInfo, ProcessInfo};
-use crate::kd::trace_enabled;
-use crate::notice::Notice;
-#[cfg(feature = "python")]
-use crate::python::breakpoints::Breakpoint;
-#[cfg(feature = "python")]
-use crate::python::record;
+use crate::backend::kd::trace_enabled;
+use crate::base::disasm::ControlFlow;
+use crate::base::error::Result;
+use crate::base::notice::Notice;
+use crate::base::types::VirtAddr;
+use crate::nt::breakpoints::{BreakpointInfo, StepFrame};
+use crate::nt::guest::{ModuleInfo, ProcessInfo};
+use crate::nt::target::ThreadInfo;
+use crate::nt::unwind::try_format_symbol_at;
 use crate::session::context::windows_thread_on_backend_thread;
+use crate::session::exception_policy::ExceptionPolicyAction;
 use crate::session::{
     ContinueOutcome, STEP_UNTIL_LIMIT, Session, StepKind, StepMode, StepStack, StopResolution,
 };
-use crate::target::ThreadInfo;
-use crate::types::VirtAddr;
-use crate::unwind::try_format_symbol_at;
 
 /// How often a wait wakes to check the host's cancellation, the session's
 /// interrupt request, and its deadline.
@@ -134,7 +130,7 @@ pub enum RunOutcome {
 }
 
 /// What a host's cancellation or deadline does to a run in progress. The
-/// session's interrupt request ([`crate::target::Target::interrupt`], raised
+/// session's interrupt request ([`crate::nt::target::Target::interrupt`], raised
 /// by Ctrl+C, a DAP `pause`, a Python `KeyboardInterrupt`) always halts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelBehavior {
@@ -229,9 +225,10 @@ impl<'a> Cancel<'a> {
 
 /// Runs the commands a stop carries: a breakpoint's `do` action, and the
 /// `-c` command of the exception or module-event filter that stopped it.
-/// The REPL's dispatcher is the one implementation; every session built
-/// with the REPL gets it, so every host runs them the same way. Output goes
-/// to whatever the host captures or prints at the time.
+/// The REPL's dispatcher is the one implementation; every host installs it
+/// ([`Session::set_action_runner`]) on the sessions it opens, so every host
+/// runs them the same way. Output goes to whatever the host captures or
+/// prints at the time.
 pub trait ActionRunner {
     /// Run a breakpoint's action. `true` when it asks to resume (`gc`, or a
     /// plain `g`), which passes the hit as a false condition would.
@@ -251,7 +248,7 @@ pub trait ActionRunner {
 /// The parts are records, not live handles; the collections take them as
 /// keys: `dbg.threads[stop.thread]`, `dbg.processes[stop.process]`,
 /// `dbg.modules[stop.module]`; `dbg.cpus[stop.cpu]` is the processor.
-#[record(impl)]
+#[record]
 pub struct Stop {
     /// The kind of stop, in snake case.
     #[record(flatten)]
@@ -279,22 +276,6 @@ pub struct Stop {
     pub vtl: Option<u8>,
     /// The hypervisor partition whose view (`.partition`) shows the stop.
     pub partition: Option<u64>,
-}
-
-#[record]
-impl Stop {
-    /// Whether breakpoint `bp` is the one that stopped the target. `bp`
-    /// may be deleted since (a one-shot breakpoint that fired); a later
-    /// breakpoint that reuses its id, or another debugger's, is not it.
-    #[record(python)]
-    fn hit(slf: &pyo3::Bound<'_, Self>, bp: pyo3::PyRef<'_, Breakpoint>) -> pyo3::PyResult<bool> {
-        use pyo3::types::PyAnyMethods;
-        if !slf.is_instance_of::<StopKindBreakpointPy>() {
-            return Ok(false);
-        }
-        let hit = record::field(slf.as_any(), "breakpoint")?;
-        Ok(hit.getattr("serial")?.extract::<u64>()? == bp.serial())
-    }
 }
 
 impl Stop {
@@ -867,8 +848,14 @@ impl Session {
         }
     }
 
+    /// Install the host's [`ActionRunner`], which runs every later stop's
+    /// breakpoint action and filter command.
+    pub fn set_action_runner(&mut self, runner: Box<dyn ActionRunner>) {
+        self.action_runner = Some(runner);
+    }
+
     /// Run a breakpoint's action; whether it asked to resume. A session
-    /// without a runner (built without the REPL), or one already running an
+    /// without a runner (no host installed one), or one already running an
     /// action, runs none.
     pub(super) fn run_breakpoint_action(&mut self, action: &str) -> bool {
         let Some(mut runner) = self.action_runner.take() else {

@@ -57,7 +57,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         /// The usage fragment and completion of the parser of the same name.
         #[doc(hidden)]
         #vis mod #ident {
-            pub const GRAMMAR: ::std::option::Option<crate::repl::usage::Grammar> = #grammar;
+            pub const GRAMMAR: ::std::option::Option<crate::hosts::repl::usage::Grammar> = #grammar;
         }
     })
 }
@@ -72,7 +72,7 @@ pub fn literal(usage: &LitStr, complete: Option<&Completion>) -> Result<TokenStr
             "an argument the line has no word for completes nothing",
         ));
     }
-    let strategy = |ident: &Ident| quote!(crate::repl::CompletionStrategy::#ident);
+    let strategy = |ident: &Ident| quote!(crate::hosts::repl::CompletionStrategy::#ident);
     let (words, rest) = match complete {
         None => (Vec::new(), quote!(::std::option::Option::None)),
         Some(Completion::PerArg(list)) => (
@@ -85,7 +85,7 @@ pub fn literal(usage: &LitStr, complete: Option<&Completion>) -> Result<TokenStr
         }
     };
     Ok(quote! {
-        crate::repl::usage::Grammar {
+        crate::hosts::repl::usage::Grammar {
             usage: #usage,
             words: &[#(#words),*],
             rest: #rest,
@@ -93,7 +93,7 @@ pub fn literal(usage: &LitStr, complete: Option<&Completion>) -> Result<TokenStr
     })
 }
 
-/// Refuse a fragment that breaks the notation (`crate::repl::usage`):
+/// Refuse a fragment that breaks the notation (`crate::hosts::repl::usage`):
 /// unbalanced `[]`/`<>`, or a `|` that is neither inline (`a|b`) nor a
 /// form separator (` | `).
 pub fn check_notation(usage: &str, span: Span) -> Result<()> {

@@ -1,0 +1,1119 @@
+use std::collections::VecDeque;
+use std::ops::Range;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use ntoseye_macros::record;
+
+use crate::backend::debugger_data::DebuggerDataCandidate;
+use crate::backend::phys::PhysMem;
+use crate::base::error::{Error, Result};
+use crate::base::types::{KernelLocation, VirtAddr};
+
+pub mod debug_registers;
+mod registers;
+
+pub use registers::{RegisterInfo, RegisterMap, push_arm64_aliases, repeats_another_register};
+
+/// A captured line of guest debug output (DbgPrint, kernel printf).
+#[record]
+#[derive(Clone, Debug)]
+pub struct DebugLine {
+    /// A monotonic sequence number that serves as the read cursor.
+    pub seq: u64,
+    /// The host wall-clock time when the line was complete, in milliseconds
+    /// since the Unix epoch.
+    pub timestamp_ms: u64,
+    pub text: String,
+}
+
+/// A page of captured guest debug output, plus the cursor for the next poll.
+#[record]
+#[derive(Clone, Debug, Default)]
+pub struct DebugOutputPage {
+    pub lines: Vec<DebugLine>,
+    /// The cursor to give on the next call to continue after the last line.
+    pub next_seq: u64,
+    /// Whether the bounded ring removed lines that the caller did not read
+    /// (the cursor predated the lines it keeps).
+    pub dropped: bool,
+}
+
+/// Thread-safe, bounded, line-oriented ring buffer of guest debug output.
+/// Chunks are split on `\n`; each line gets a timestamp and a monotonic `seq`.
+/// Reads are snapshot+cursor and never drain, so consumers track their own
+/// position.
+#[derive(Clone)]
+pub struct DebugLog {
+    inner: Arc<Mutex<DebugLogInner>>,
+}
+
+struct DebugLogInner {
+    lines: VecDeque<DebugLine>,
+    /// Bytes received since the last newline; a line is emitted only once
+    /// terminated, mirroring how a terminal line-buffers the same stream.
+    partial: String,
+    next_seq: u64,
+    capacity: usize,
+}
+
+impl DebugLog {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(DebugLogInner {
+                lines: VecDeque::new(),
+                partial: String::new(),
+                next_seq: 0,
+                capacity: capacity.max(1),
+            })),
+        }
+    }
+
+    /// Append a raw chunk of debug output, splitting it into timestamped lines.
+    /// Invalid UTF-8 is replaced lossily so the ring always holds valid text.
+    pub fn record(&self, bytes: &[u8]) {
+        let text = String::from_utf8_lossy(bytes);
+        let mut inner = self.inner.lock().unwrap();
+        // Stamped under the lock so `seq` order and timestamps agree even when
+        // the foreground loop and the pump race to record.
+        inner.push_text(&text, now_ms());
+    }
+
+    /// Lines with `seq >= since_seq`, plus the cursor to resume after them.
+    pub fn read_since(&self, since_seq: u64) -> DebugOutputPage {
+        let inner = self.inner.lock().unwrap();
+        let dropped = inner
+            .lines
+            .front()
+            .is_some_and(|first| since_seq < first.seq);
+        let lines = inner
+            .lines
+            .iter()
+            .filter(|line| line.seq >= since_seq)
+            .cloned()
+            .collect();
+        DebugOutputPage {
+            lines,
+            next_seq: inner.next_seq,
+            dropped,
+        }
+    }
+}
+
+impl DebugLogInner {
+    /// A print with no newline is flushed as a line once it reaches this
+    /// size, so a guest that never terminates its output cannot grow the
+    /// partial buffer without bound.
+    const MAX_PARTIAL_LINE: usize = 4096;
+
+    fn push_text(&mut self, text: &str, now_ms: u64) {
+        for ch in text.chars() {
+            if ch == '\n' {
+                let mut line = std::mem::take(&mut self.partial);
+                // Normalize CRLF so Windows prints don't leave a trailing CR
+                if line.ends_with('\r') {
+                    line.pop();
+                }
+                self.push_line(line, now_ms);
+            } else {
+                self.partial.push(ch);
+                if self.partial.len() >= Self::MAX_PARTIAL_LINE {
+                    let line = std::mem::take(&mut self.partial);
+                    self.push_line(line, now_ms);
+                }
+            }
+        }
+    }
+
+    fn push_line(&mut self, text: String, now_ms: u64) {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        self.lines.push_back(DebugLine {
+            seq,
+            timestamp_ms: now_ms,
+            text,
+        });
+        while self.lines.len() > self.capacity {
+            self.lines.pop_front();
+        }
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// A bugcheck's code and its four parameters, and the driver the transport
+/// names for it.
+#[record]
+#[derive(PartialEq, Eq)]
+pub struct BugcheckInfo {
+    #[record(hex)]
+    pub code: u32,
+    #[record(hex)]
+    pub parameters: [u64; 4],
+    pub driver: Option<String>,
+}
+
+/// How an exception stop is acknowledged when execution resumes.
+///
+/// Windows KD maps these choices to `DBG_CONTINUE` and
+/// `DBG_EXCEPTION_NOT_HANDLED`. Backends without a native exception
+/// disposition continue normally for either value.
+#[record]
+#[derive(Copy, PartialEq, Eq)]
+pub enum ContinueDisposition {
+    Handled,
+    NotHandled,
+}
+
+impl ContinueDisposition {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Handled => "handled",
+            Self::NotHandled => "not handled",
+        }
+    }
+}
+
+impl std::str::FromStr for ContinueDisposition {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "handled" => Ok(Self::Handled),
+            "not_handled" | "not-handled" => Ok(Self::NotHandled),
+            _ => Err(Error::InvalidArgument(format!(
+                "invalid continuation disposition '{value}' (use 'handled' or 'not_handled')"
+            ))),
+        }
+    }
+}
+/// Session-visible details for the most recently observed stop and, after a
+/// resume, the disposition used to acknowledge it.
+#[derive(Clone, Debug)]
+pub struct LastEvent {
+    pub stop: StopEvent,
+    pub disposition: Option<ContinueDisposition>,
+}
+
+impl LastEvent {
+    pub fn new(stop: StopEvent) -> Self {
+        Self {
+            stop,
+            disposition: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+/// Backend-neutral stop event
+///
+/// `first_chance` and `exception_address` are populated only when the
+/// transport provides an exception record. They remain `None` for synthetic
+/// stops and backends that expose only a generic stop signal.
+pub struct StopEvent {
+    /// Backend execution-context id, if the stop packet provided one
+    pub thread_id: Option<String>,
+    /// Backend exception/status code, when the stop packet carries one
+    pub exception_code: Option<u32>,
+    /// Whether this is the exception's first debugger notification.
+    pub first_chance: Option<bool>,
+    /// Address from the exception record, when distinct metadata is available.
+    pub exception_address: Option<u64>,
+    /// Program counter reported by the stop packet, when available
+    pub program_counter: Option<u64>,
+    /// Data address a hardware watchpoint trapped on, when the transport
+    /// reports it with the stop instead of leaving it in debug registers.
+    pub watchpoint_address: Option<u64>,
+    /// Set when the stop was surfaced because the guest is processing a
+    /// bugcheck (KD load-symbols teardown caught by the backend)
+    pub is_bugcheck: bool,
+    /// Structured bugcheck details decoded from KD debug output, when the
+    /// target provided them before the stop packet
+    pub bugcheck: Option<BugcheckInfo>,
+    /// Set when the transport observed the target reset its KD packet stream,
+    /// which usually means the guest rebooted and debugger state must be rebuilt.
+    pub target_reloaded: bool,
+    /// Kernel/module base reported by the stop packet, when available.
+    pub target_kernel_base_hint: Option<VirtAddr>,
+    /// Set when the transport surfaced a kernel module load/unload notification.
+    pub modules_changed: bool,
+    /// The load or unload a module notification reports, with the base of
+    /// the image; `None` for every other stop.
+    pub module_event: Option<(ModuleEvent, VirtAddr)>,
+    /// Set when this stop was caused by a debugger-generated assist break-in
+    /// during a target refresh/reconnect sequence, rather than by a user break
+    /// or target exception.
+    pub assisted_breakin: bool,
+    /// The stop is a break-in the host requested (a GDB stub's `SIGINT` stop
+    /// reply), not a trap the guest took. Unrelated to `assisted_breakin`.
+    pub break_in: bool,
+}
+
+/// A kernel image entering or leaving the module list: the events `sx* ld`
+/// and `sx* ud` filter, spelled as `sx` spells them.
+#[record]
+#[derive(Copy, PartialEq, Eq)]
+pub enum ModuleEvent {
+    #[record(rename = "ld")]
+    Load,
+    #[record(rename = "ud")]
+    Unload,
+}
+
+/// A register read that runs on a given processor
+/// ([`DebugBackend::read_on_processor`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessorRead {
+    /// A model-specific register.
+    Msr(u32),
+    /// The 32-bit device register at a physical address, read uncached.
+    Device(u64),
+}
+
+/// What memory access a hardware (debug-register) breakpoint traps on. The x86
+/// debug registers have no read-only condition, so a "read" watch is really
+/// read/write ([`Self::ReadWrite`]). Named in snake case.
+#[record]
+#[derive(Copy, PartialEq, Eq)]
+pub enum HwBreakpointAccess {
+    /// Instruction execution at the address (DR7 R/W = 00, length forced to 1).
+    Execute,
+    /// Data write to the address (DR7 R/W = 01).
+    Write,
+    /// Data read or write at the address (DR7 R/W = 11).
+    ReadWrite,
+}
+
+impl HwBreakpointAccess {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Execute => "execute",
+            Self::Write => "write",
+            Self::ReadWrite => "read/write",
+        }
+    }
+
+    /// The WinDbg-style access letter (`e`/`w`/`r`).
+    pub fn letter(self) -> char {
+        match self {
+            Self::Execute => 'e',
+            Self::Write => 'w',
+            Self::ReadWrite => 'r',
+        }
+    }
+}
+
+/// Semantic data-watch access exposed by host APIs. The transport may
+/// implement this with x86 debug registers, but callers request a watchpoint,
+/// not a software-vs-hardware breakpoint implementation.
+#[record]
+#[derive(Copy, PartialEq, Eq)]
+pub enum WatchpointAccess {
+    Write,
+    /// x86 has no read-only data watch, so reads also trap writes.
+    ReadWrite,
+}
+
+impl std::str::FromStr for WatchpointAccess {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "write" => Ok(Self::Write),
+            "read_write" | "read/write" => Ok(Self::ReadWrite),
+            _ => Err(Error::InvalidArgument(format!(
+                "invalid watchpoint access '{value}' (use 'write' or 'read_write')"
+            ))),
+        }
+    }
+}
+
+impl From<WatchpointAccess> for HwBreakpointAccess {
+    fn from(access: WatchpointAccess) -> Self {
+        match access {
+            WatchpointAccess::Write => Self::Write,
+            WatchpointAccess::ReadWrite => Self::ReadWrite,
+        }
+    }
+}
+
+/// Number of x86 debug-register breakpoint slots (DR0-DR3).
+pub const HW_BREAKPOINT_SLOTS: u8 = 4;
+
+/// Validate a hardware breakpoint's access/length/address against x86's rules,
+/// backend-independent: execute breakpoints are one byte; data widths are
+/// 1/2/4/8; and the address must be aligned to its length (an unaligned DR
+/// address silently never fires). `Err` carries a user-facing reason.
+pub fn validate_hw_breakpoint(access: HwBreakpointAccess, len: u8, addr: u64) -> Result<()> {
+    if matches!(access, HwBreakpointAccess::Execute) && len != 1 {
+        return Err(Error::InvalidArgument(
+            "execute hardware breakpoints must be 1 byte".into(),
+        ));
+    }
+    if !matches!(len, 1 | 2 | 4 | 8) {
+        return Err(Error::InvalidArgument(format!(
+            "invalid hardware breakpoint length {len} (use 1, 2, 4, or 8)"
+        )));
+    }
+    if !addr.is_multiple_of(len as u64) {
+        return Err(Error::InvalidArgument(format!(
+            "hardware breakpoint address {addr:#x} must be {len}-byte aligned"
+        )));
+    }
+    Ok(())
+}
+
+/// What a backend can do; the SDK shows its [`name`](Self::name).
+#[record]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DebugCapability {
+    MemoryIntrospection,
+    ExecutionControl,
+    InterruptTarget,
+    SingleStep,
+    ReadRegisters,
+    WriteRegisters,
+    ThreadList,
+    ThreadSelection,
+    KernelBreakpoints,
+    UserModeBreakpoints,
+    Watchpoints,
+    TargetReloadDetection,
+    KernelBaseHint,
+    BugcheckDetection,
+    BugcheckDetails,
+    ModuleLoadEvents,
+    DebugOutput,
+    Msr,
+    IoPorts,
+    PciConfig,
+    TargetControl,
+    TargetFileIo,
+}
+
+impl DebugCapability {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::MemoryIntrospection => "memory introspection",
+            Self::ExecutionControl => "execution control",
+            Self::InterruptTarget => "target interrupt",
+            Self::SingleStep => "single step",
+            Self::ReadRegisters => "register read",
+            Self::WriteRegisters => "register write",
+            Self::ThreadList => "context enumeration",
+            Self::ThreadSelection => "context selection",
+            Self::KernelBreakpoints => "kernel breakpoints",
+            Self::UserModeBreakpoints => "usermode breakpoints",
+            Self::Watchpoints => "data watchpoints",
+            Self::TargetReloadDetection => "target reload detection",
+            Self::KernelBaseHint => "kernel base hint",
+            Self::BugcheckDetection => "bugcheck stop detection",
+            Self::BugcheckDetails => "bugcheck details",
+            Self::ModuleLoadEvents => "module load events",
+            Self::DebugOutput => "debug output",
+            Self::Msr => "model-specific registers",
+            Self::IoPorts => "I/O ports",
+            Self::PciConfig => "PCI configuration space",
+            Self::TargetControl => "reboot / forced crash",
+            Self::TargetFileIo => "host-served target files",
+        }
+    }
+}
+
+/// A PCI function's configuration space: its segment, bus, device, and
+/// function, and the physical address of its 4 KiB page in the firmware's
+/// ECAM window (from the ACPI MCFG table) when one covers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PciConfigAddress {
+    pub segment: u16,
+    pub bus: u8,
+    pub device: u8,
+    pub function: u8,
+    pub ecam: Option<u64>,
+}
+
+/// A row of the capability matrix of the backend.
+#[record(impl)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackendCapability {
+    /// Stable identifier (`memory_introspection`, ...).
+    pub capability: DebugCapability,
+    pub supported: bool,
+}
+
+#[record]
+impl BackendCapability {
+    /// Human-readable name.
+    #[record(getter)]
+    pub fn label(&self) -> &'static str {
+        self.capability.label()
+    }
+
+    pub fn supported(capability: DebugCapability) -> Self {
+        Self {
+            capability,
+            supported: true,
+        }
+    }
+
+    pub fn unsupported(capability: DebugCapability) -> Self {
+        Self {
+            capability,
+            supported: false,
+        }
+    }
+}
+
+/// The refusal a halted-only operation owes a backend that can never halt.
+///
+/// Without execution control a backend reports `is_running()` forever, so
+/// "the VM is running, break in first" names a state the user cannot reach.
+pub fn halt_unreachable_reason(backend: &dyn DebugBackend) -> Option<String> {
+    let controllable = backend
+        .capabilities()
+        .iter()
+        .any(|entry| entry.capability == DebugCapability::ExecutionControl && entry.supported);
+    (!controllable).then(|| format!("the {} backend cannot halt the target", backend.name()))
+}
+
+/// Single-step residue a resume has to clear: RFLAGS.TF and the DR6 B0-B3
+/// breakpoint-status bits.
+#[derive(Debug, Clone, Copy)]
+pub struct TrapState {
+    pub eflags: u64,
+    pub dr6: u64,
+}
+
+impl TrapState {
+    /// Nothing for [`clear_trap_flag`] to write.
+    pub fn is_clean(&self) -> bool {
+        self.eflags & (1 << 8) == 0 && self.dr6 & 0b1111 == 0
+    }
+}
+
+/// Clear the trap flag (`TF`, RFLAGS bit 8) and DR6's B0-B3 status bits on the
+/// currently selected thread, best-effort, so an absorbed single-step leaves
+/// no residue for the next resume. ARM64 has neither x86 field, so its
+/// single-step state is acknowledged by KD's ARM64 continue request instead.
+/// A transport that reports TF and DR6 with the stop answers this without a
+/// register fetch, which is what keeps an absorbed breakpoint hit cheap.
+pub fn clear_trap_flag(backend: &mut dyn DebugBackend, register_map: &RegisterMap) -> Result<()> {
+    if backend
+        .stop_trap_state()
+        .is_some_and(|state| state.is_clean())
+    {
+        return Ok(());
+    }
+    if let Ok(mut regs) = backend.read_registers() {
+        let mut dirty = false;
+        if let Ok(eflags) = register_map.read_u64("eflags", &regs) {
+            let cleared = eflags & !(1u64 << 8);
+            if cleared != eflags && register_map.write_u64("eflags", &mut regs, cleared).is_ok() {
+                dirty = true;
+            }
+        }
+        if let Ok(dr6) = register_map.read_u64("dr6", &regs) {
+            let cleared = dr6 & !0b1111u64;
+            if cleared != dr6 && register_map.write_u64("dr6", &mut regs, cleared).is_ok() {
+                dirty = true;
+            }
+        }
+        if dirty {
+            backend.write_registers(&regs)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// The zero-based processor a backend thread id names. Backends report one
+/// thread per processor as `p<pid>.<tid>` with a one-based hex `tid`.
+pub fn processor_index_from_backend_thread_id(thread_id: &str) -> Option<u16> {
+    let (_pid, tid) = thread_id.strip_prefix('p')?.split_once('.')?;
+    u16::from_str_radix(tid, 16).ok()?.checked_sub(1)
+}
+
+/// Why a host single step is refused while Windows runs its own hypervisor.
+/// KVM steps the vCPU, not Windows: the step can complete inside the
+/// hypervisor with the trap flag still set in Windows, which then takes the
+/// trap itself (a kernel debugger freezes the guest waiting for its host).
+pub const STEP_UNDER_WINDOWS_HYPERVISOR: &str = "single-stepping is unsafe over the GDB stub while \
+     Windows runs its own hypervisor (VBS, Hyper-V): a step can complete inside the hypervisor and \
+     leave its trap to Windows. Use the kd or kdnet backend to step";
+
+/// Where the current thread's TEB is: the pointer to the current thread at
+/// `kpcr + current_thread` (`_KPCR.Prcb.CurrentThread`), and the TEB pointer
+/// at `thread + teb` (`_KTHREAD.Teb`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TebPath {
+    pub current_thread: u64,
+    pub teb: u64,
+}
+
+/// Debug transport abstraction; guest memory access is provided separately by
+/// [`crate::backend::phys::PhysMem`].
+pub trait DebugBackend {
+    fn register_map(&self) -> &RegisterMap;
+    /// Short lowercase transport name for status surfaces (e.g. the REPL
+    /// prompt): "kd", "gdb", "dmp".
+    fn name(&self) -> &'static str {
+        "dbg"
+    }
+
+    /// Provide the kernel page-table root (CR3 on AMD64, TTBR1_EL1 on ARM64)
+    /// once guest discovery resolves it, so register snapshots can expose the
+    /// DTB. No-op on backends whose register file carries the DTB natively.
+    fn set_kernel_dtb(&mut self, _dtb: u64) {}
+
+    /// Provide where the current thread's TEB is, from the kernel's PDB, so
+    /// a register snapshot whose transport drops the TEB (KD on ARM64 in
+    /// user mode, where `x18` holds it) can fill it. No-op elsewhere.
+    fn set_teb_path(&mut self, _path: Option<TebPath>) {}
+
+    fn read_registers(&mut self) -> Result<Vec<u8>>;
+    fn write_registers(&mut self, data: &[u8]) -> Result<()>;
+
+    /// Whether [`Self::read_registers`] starts with a Windows `CONTEXT` for
+    /// the target's architecture, as KD's register file and a crash dump's
+    /// are. Other backends' layouts are translated by register name.
+    fn registers_are_context(&self) -> bool {
+        false
+    }
+
+    /// TF and DR6 as the current stop reported them, where the transport can
+    /// say without a register fetch.
+    ///
+    /// KD carries both in every state change, which lets an absorbed
+    /// breakpoint hit skip a 1.7 KB `CONTEXT` reply it would read two fields
+    /// from. `None` means ask the registers: no report, a report for another
+    /// architecture, or a host register write that outdated it.
+    fn stop_trap_state(&mut self) -> Option<TrapState> {
+        None
+    }
+
+    /// Report, rather than absorb, the next stop at `address` after a resume.
+    ///
+    /// KD discards re-breaks at the address its own break-ins land on, which
+    /// is also where the guest's debugger worker signals completion with
+    /// `DbgBreakPointWithStatus`. This says one such break was asked for.
+    /// One-shot, consumed by the next resume.
+    fn surface_next_break_at(&mut self, _address: Option<u64>) {}
+
+    fn set_breakpoint(&mut self, addr: u64) -> Result<()>;
+    fn remove_breakpoint(&mut self, addr: u64) -> Result<()>;
+
+    /// Whether a breakpoint planted with [`Self::set_breakpoint`] is taken
+    /// out by the target when the session that planted it dies without
+    /// removing it. KD's live in Windows' own breakpoint table, which the next
+    /// session releases. A backend that answers `false` has its sites
+    /// journaled, so the next attach to the same boot restores them.
+    fn reclaims_abandoned_breakpoints(&self) -> bool {
+        true
+    }
+
+    fn supports_user_mode_breakpoints(&self) -> bool {
+        false
+    }
+
+    /// Whether this backend's hardware breakpoints trap in the host, before
+    /// a hypervisor inside the guest sees the `#DB`, so they can stop code
+    /// Windows' hypervisor isolates (VTL1). Debug registers Windows programs
+    /// for its own debugger (KD) trap inside the guest and cannot.
+    fn hardware_breakpoints_trap_in_host(&self) -> bool {
+        false
+    }
+
+    /// Whether the backend can install global data watchpoints. KD implements
+    /// these with x86 debug registers; other transports report `false`.
+    fn supports_watchpoints(&self) -> bool {
+        false
+    }
+
+    /// Hardware-breakpoint slots the manager can allocate. GDB grows its
+    /// logical records as sites are accepted; the stub enforces its own limit.
+    /// AMD64 KD uses four DR0-DR3 slots; ARM64 KD exposes eight execute slots
+    /// and two data-watch slots through one global ID space.
+    fn hardware_breakpoint_slots(&self) -> usize {
+        usize::from(HW_BREAKPOINT_SLOTS)
+    }
+
+    /// Backend slots available for a hardware breakpoint access mode.
+    /// Backends with separate execute/watchpoint banks override this range;
+    /// the default covers all slots used by AMD64 debug registers.
+    fn hardware_slot_range(&self, access: HwBreakpointAccess) -> Range<usize> {
+        let _ = access;
+        0..self.hardware_breakpoint_slots()
+    }
+
+    /// Program backend slot `slot` to trap on `access` at `addr` over
+    /// `len` bytes (1/2/4/8; execute forces 1), on every processor.
+    fn set_hardware_breakpoint(
+        &mut self,
+        _slot: usize,
+        _addr: u64,
+        _access: HwBreakpointAccess,
+        _len: u8,
+    ) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    /// Disable backend slot `slot` on every processor.
+    fn clear_hardware_breakpoint(&mut self, _slot: usize) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    fn optional_capabilities(&self) -> Vec<BackendCapability> {
+        vec![
+            BackendCapability {
+                capability: DebugCapability::UserModeBreakpoints,
+                supported: self.supports_user_mode_breakpoints(),
+            },
+            BackendCapability {
+                capability: DebugCapability::Watchpoints,
+                supported: self.supports_watchpoints(),
+            },
+            BackendCapability::unsupported(DebugCapability::TargetReloadDetection),
+            BackendCapability::unsupported(DebugCapability::KernelBaseHint),
+            BackendCapability::unsupported(DebugCapability::BugcheckDetection),
+            BackendCapability::unsupported(DebugCapability::BugcheckDetails),
+            BackendCapability::unsupported(DebugCapability::ModuleLoadEvents),
+            BackendCapability::unsupported(DebugCapability::DebugOutput),
+            BackendCapability {
+                capability: DebugCapability::Msr,
+                supported: self.supports_msr(),
+            },
+            BackendCapability {
+                capability: DebugCapability::IoPorts,
+                supported: self.supports_io_ports(),
+            },
+            BackendCapability {
+                capability: DebugCapability::PciConfig,
+                supported: self.supports_pci_config(),
+            },
+            BackendCapability {
+                capability: DebugCapability::TargetControl,
+                supported: self.supports_target_control(),
+            },
+            BackendCapability {
+                capability: DebugCapability::TargetFileIo,
+                supported: self.supports_target_file_io(),
+            },
+        ]
+    }
+
+    fn capabilities(&self) -> Vec<BackendCapability> {
+        let mut capabilities = vec![
+            BackendCapability::supported(DebugCapability::MemoryIntrospection),
+            BackendCapability::supported(DebugCapability::ExecutionControl),
+            BackendCapability::supported(DebugCapability::InterruptTarget),
+            // Where the trap flag is unsafe, the session steps by running the
+            // vCPU alone to the instruction's successors instead.
+            BackendCapability::supported(DebugCapability::SingleStep),
+            BackendCapability::supported(DebugCapability::ReadRegisters),
+            BackendCapability::supported(DebugCapability::WriteRegisters),
+            BackendCapability::supported(DebugCapability::ThreadList),
+            BackendCapability::supported(DebugCapability::ThreadSelection),
+            BackendCapability::supported(DebugCapability::KernelBreakpoints),
+        ];
+        capabilities.extend(self.optional_capabilities());
+        capabilities
+    }
+
+    /// Notify the backend about a breakpoint patched outside `set_breakpoint`
+    fn note_breakpoint_installed(&mut self, _addr: u64) {}
+    fn note_breakpoint_uninstalled(&mut self, _addr: u64) {}
+
+    /// Whether the target removes, steps over, and reinstalls its breakpoint sites.
+    ///
+    /// KD owns this lifecycle. Host-side re-arming can leave an installed `int3`
+    /// untracked, causing resume to mistake it for a hard-coded breakpoint.
+    /// GDB stubs leave patched bytes in place, so the host manages them.
+    fn target_manages_breakpoint_sites(&self) -> bool {
+        false
+    }
+
+    /// Sites the target dropped from its own breakpoint table when it
+    /// reported the last stop. Windows deletes every `KdpBreakpointTable`
+    /// entry inside the instruction stream it reports (up to 16 bytes from
+    /// the stop PC), so those need [`Self::set_breakpoint`] again before the
+    /// next resume. Empty for backends whose sites survive a stop.
+    fn sites_dropped_by_stop(&self) -> Vec<u64> {
+        Vec::new()
+    }
+
+    /// Notify the backend about guest rediscovery progress after a transport
+    /// reload. Backends can use this to tune reconnect assistance while booting.
+    fn note_target_rediscovery_pending(&mut self) {}
+    fn note_target_rediscovery_complete(&mut self) {}
+
+    /// Where the transport says the kernel is after a target reload. KD reads
+    /// it from GetVersion and the page-table root, so the rebuild needs no RAM
+    /// scan (which cannot succeed early in boot). Transports without a native
+    /// answer return None and the guest scanner discovers the kernel.
+    fn target_kernel_location(&mut self) -> Result<Option<KernelLocation>> {
+        Ok(None)
+    }
+
+    /// Best-effort debugger-data block address reported by the transport or
+    /// snapshot container. The target validates the remote header before use.
+    fn target_debugger_data_hint(&mut self) -> Result<Option<DebuggerDataCandidate>> {
+        Ok(None)
+    }
+
+    fn continue_execution(&mut self) -> Result<()>;
+    /// Continue with an explicit exception disposition. Ordinary handled
+    /// continuation maps to every transport. A backend must override this
+    /// method before accepting `NotHandled`; silently degrading `gn` to `g`
+    /// would change guest exception dispatch.
+    fn continue_execution_with_disposition(
+        &mut self,
+        disposition: ContinueDisposition,
+    ) -> Result<()> {
+        match disposition {
+            ContinueDisposition::Handled => self.continue_execution(),
+            ContinueDisposition::NotHandled => Err(Error::ExceptionDispositionUnsupported),
+        }
+    }
+    fn step(&mut self) -> Result<()>;
+
+    /// Tell a backend whose single steps the host performs (a hypervisor's
+    /// GDB stub) whether Windows runs nested under its own hypervisor.
+    fn set_windows_hypervisor(&mut self, _running: bool) {}
+
+    /// Whether a halted vCPU can be inside the Windows hypervisor: the
+    /// backend halts the VM's vCPUs themselves and Windows runs under its own
+    /// hypervisor. A backend inside Windows (KD) only stops in NT.
+    fn halts_in_windows_hypervisor(&self) -> bool {
+        false
+    }
+
+    /// Whether a single step is unsafe on this target; see
+    /// [`STEP_UNDER_WINDOWS_HYPERVISOR`]. Steps and breakpoints are then run
+    /// past with [`Self::continue_current_thread`] to temporary sites instead.
+    fn single_step_unsafe(&self) -> bool {
+        false
+    }
+
+    /// Resume only the selected thread, with every other one held.
+    fn continue_current_thread(&mut self) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    /// Resume only `threads`, with every other one held: a vCPU that would
+    /// end every run at once (stopped on a breakpoint it traps on again)
+    /// stays out of a run that others need time in.
+    fn continue_threads(&mut self, _threads: &[String]) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    /// Keep the stop the last wait returned, with the target halted at it,
+    /// for the next wait (or interrupt) to return again: a resume until then
+    /// leaves the target where it is, as if it had stopped there at once. A
+    /// run that ends on a stop it is not about (another vCPU's watchpoint
+    /// hit while one runs past an instruction) hands it on this way.
+    fn keep_last_stop(&mut self) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    /// Whether a stop is kept (see [`Self::keep_last_stop`]).
+    fn stop_kept(&self) -> bool {
+        false
+    }
+
+    fn interrupt(&mut self) -> Result<StopEvent>;
+
+    /// Block until the target stops
+    fn wait_for_stop(&mut self) -> Result<StopEvent>;
+
+    /// Poll for a stop
+    fn try_wait_for_stop(&mut self, timeout: Duration) -> Result<Option<StopEvent>>;
+
+    fn thread_list(&mut self) -> Result<Vec<String>>;
+    fn set_current_thread(&mut self, thread_id: &str) -> Result<()>;
+
+    /// Return the currently stopped execution context
+    fn stopped_thread_id(&mut self) -> Result<String>;
+
+    fn is_running(&self) -> bool;
+
+    /// Whether a stop has been caught but not yet drained by the foreground; in
+    /// that window `is_running()` is stale. Default `false`: backends that stop
+    /// synchronously have no such window.
+    fn has_pending_stop(&self) -> bool {
+        false
+    }
+
+    /// Best-effort target cleanup before the frontend exits.
+    ///
+    /// `leave_running` means the frontend wants the guest executing after exit.
+    /// Backends with background servicing threads can override this to make
+    /// teardown explicit instead of relying on `Drop` timing.
+    fn prepare_for_exit(&mut self, leave_running: bool) -> Result<()> {
+        if leave_running && !self.is_running() {
+            self.continue_execution()?;
+        }
+        Ok(())
+    }
+
+    /// Read captured guest debug output (DbgPrint) at or after `since_seq`.
+    /// Default empty: only transports with a native debug-print stream (KD)
+    /// capture anything; see [`DebugCapability::DebugOutput`].
+    fn read_debug_output(&self, _since_seq: u64) -> DebugOutputPage {
+        DebugOutputPage::default()
+    }
+
+    /// Drain operator-facing diagnostics the backend raised mid-operation
+    /// (e.g. breakpoint table entries it reclaimed from a dead session).
+    /// Default empty; the session forwards them to the host.
+    fn take_notices(&mut self) -> Vec<crate::base::notice::Notice> {
+        Vec::new()
+    }
+
+    /// Return (and clear) whether a kernel module/driver loaded or unloaded since
+    /// the last call, used to invalidate module-dependent caches (driver
+    /// completions). Default `false`: backends without a load event rely instead
+    /// on the per-stop module-list diff.
+    fn take_modules_changed(&mut self) -> bool {
+        false
+    }
+
+    /// Revalidate host memory after rebuilding the target. A reboot or hypervisor
+    /// remap can invalidate the attach-time identity check. Backends without host
+    /// memory mappings return `Ok(())`.
+    fn revalidate_host_memory(&mut self, _phys: &PhysMem) -> Result<()> {
+        Ok(())
+    }
+
+    /// Whether the transport can read/write model-specific registers
+    /// (`rdmsr`/`wrmsr`). KD implements this with
+    /// `DbgKdReadMachineSpecificRegister`; other transports report `false`.
+    fn supports_msr(&self) -> bool {
+        false
+    }
+
+    /// Read model-specific register `msr` on `processor`. On ARM64, `msr` is
+    /// the Windows KD encoding of an AArch64 system register.
+    fn read_msr(&mut self, _processor: u16, _msr: u32) -> Result<u64> {
+        Err(Error::NotSupported)
+    }
+
+    /// Write model-specific register `msr` on `processor`.
+    fn write_msr(&mut self, _processor: u16, _msr: u32, _value: u64) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    /// Whether the transport can read and write I/O ports (`ib`/`ob`). KD
+    /// implements this with `DbgKdReadIoSpaceApi`/`DbgKdWriteIoSpaceApi`;
+    /// a GDB stub, host memory, and a dump have no I/O space.
+    fn supports_io_ports(&self) -> bool {
+        false
+    }
+
+    /// Read `size` (1, 2, or 4) bytes from I/O port `port` on the current
+    /// processor.
+    fn read_io_port(&mut self, _port: u64, _size: u8) -> Result<u32> {
+        Err(Error::NotSupported)
+    }
+
+    /// Write the low `size` (1, 2, or 4) bytes of `value` to I/O port `port`
+    /// on the current processor.
+    fn write_io_port(&mut self, _port: u64, _size: u8, _value: u32) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    /// Read device registers at physical address `address` on `processor`,
+    /// mapped uncached, with one access of `buf.len()` bytes: KD asks the
+    /// target (`DbgKdReadPhysicalMemoryApi`, uncached) with `processor`
+    /// holding it, so a register each processor has its own of, such as the
+    /// local APIC's, is `processor`'s. Host memory, a GDB stub's physical
+    /// reads, and a dump reach RAM only.
+    fn read_device_memory(
+        &mut self,
+        _processor: u16,
+        _address: u64,
+        _buf: &mut [u8],
+    ) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    /// Several MSR and 32-bit device-register reads on `processor`, each
+    /// with its own result: KD switches to the processor once for all of
+    /// them rather than once per read.
+    fn read_on_processor(
+        &mut self,
+        processor: u16,
+        reads: &[ProcessorRead],
+    ) -> Result<Vec<Result<u64>>> {
+        Ok(reads
+            .iter()
+            .map(|read| match *read {
+                ProcessorRead::Msr(msr) => self.read_msr(processor, msr),
+                ProcessorRead::Device(address) => {
+                    let mut bytes = [0u8; 4];
+                    self.read_device_memory(processor, address, &mut bytes)
+                        .map(|()| u64::from(u32::from_le_bytes(bytes)))
+                }
+            })
+            .collect())
+    }
+
+    /// Whether the transport can read PCI configuration space (`!pci`). KD
+    /// asks the HAL (`DbgKdGetBusDataApi`); a QEMU GDB stub reads the ECAM
+    /// window in its physical-memory mode. Host memory and a dump hold only
+    /// RAM, and configuration space is device registers.
+    fn supports_pci_config(&self) -> bool {
+        false
+    }
+
+    /// Read `buf.len()` bytes of `function`'s configuration space from
+    /// `offset`.
+    fn read_pci_config(
+        &mut self,
+        _function: PciConfigAddress,
+        _offset: u16,
+        _buf: &mut [u8],
+    ) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    /// Whether the transport can reboot the target or force a bugcheck
+    /// (`.reboot` / `.crash`). KD implements these with `DbgKdRebootApi` and
+    /// `DbgKdCauseBugCheckApi`.
+    fn supports_target_control(&self) -> bool {
+        false
+    }
+
+    /// Whether the transport supports target file requests for `.kdfiles`.
+    fn supports_target_file_io(&self) -> bool {
+        false
+    }
+
+    /// Reboot the target. The target is gone after this returns; the caller
+    /// treats the next stop as a reload.
+    fn reboot_target(&mut self) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    /// Force a `MANUALLY_INITIATED_CRASH` (0xE2) bugcheck on the target.
+    fn cause_bugcheck(&mut self) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_thread_ids_parse_as_zero_based_processors() {
+        assert_eq!(processor_index_from_backend_thread_id("p1.1"), Some(0));
+        assert_eq!(processor_index_from_backend_thread_id("p1.a"), Some(9));
+        // QEMU pads both fields: `p01.01` is its first vCPU.
+        assert_eq!(processor_index_from_backend_thread_id("p01.01"), Some(0));
+        assert_eq!(processor_index_from_backend_thread_id("p01.0a"), Some(9));
+        assert_eq!(processor_index_from_backend_thread_id("p1.0"), None);
+        assert_eq!(processor_index_from_backend_thread_id("bad"), None);
+    }
+
+    #[test]
+    fn debug_log_splits_lines_and_strips_crlf() {
+        let log = DebugLog::new(16);
+        log.record(b"DriverEntry failed\r\nhello ");
+        log.record(b"world\n");
+        let page = log.read_since(0);
+        let texts: Vec<&str> = page.lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, vec!["DriverEntry failed", "hello world"]);
+        assert_eq!(page.next_seq, 2);
+        assert!(!page.dropped);
+    }
+
+    #[test]
+    fn debug_log_buffers_unterminated_partial() {
+        let log = DebugLog::new(16);
+        log.record(b"no newline yet");
+        assert!(log.read_since(0).lines.is_empty());
+        log.record(b"\n");
+        assert_eq!(log.read_since(0).lines.len(), 1);
+    }
+
+    #[test]
+    fn debug_log_cursor_returns_only_new_lines() {
+        let log = DebugLog::new(16);
+        log.record(b"one\ntwo\n");
+        let first = log.read_since(0);
+        assert_eq!(first.lines.len(), 2);
+        log.record(b"three\n");
+        let next = log.read_since(first.next_seq);
+        let texts: Vec<&str> = next.lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, vec!["three"]);
+        assert_eq!(next.next_seq, 3);
+    }
+
+    #[test]
+    fn debug_log_evicts_oldest_and_flags_dropped() {
+        let log = DebugLog::new(2);
+        log.record(b"a\nb\nc\n");
+        let page = log.read_since(0);
+        let texts: Vec<&str> = page.lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, vec!["b", "c"]);
+        assert!(page.dropped);
+        assert!(!log.read_since(1).dropped);
+    }
+
+    #[test]
+    fn validate_hw_execute_must_be_one_byte() {
+        assert!(validate_hw_breakpoint(HwBreakpointAccess::Execute, 1, 0x1003).is_ok());
+        assert!(validate_hw_breakpoint(HwBreakpointAccess::Execute, 4, 0x1000).is_err());
+        assert!(validate_hw_breakpoint(HwBreakpointAccess::Execute, 2, 0x1000).is_err());
+        assert!(validate_hw_breakpoint(HwBreakpointAccess::Execute, 8, 0x1000).is_err());
+    }
+
+    #[test]
+    fn validate_hw_data_widths_when_aligned() {
+        for access in [HwBreakpointAccess::Write, HwBreakpointAccess::ReadWrite] {
+            assert!(validate_hw_breakpoint(access, 1, 0x1003).is_ok());
+            assert!(validate_hw_breakpoint(access, 2, 0x1000).is_ok());
+            assert!(validate_hw_breakpoint(access, 4, 0x1000).is_ok());
+            assert!(validate_hw_breakpoint(access, 8, 0x2000).is_ok());
+        }
+    }
+
+    #[test]
+    fn validate_hw_rejects_invalid_lengths() {
+        for len in [0u8, 3, 5, 16] {
+            assert!(validate_hw_breakpoint(HwBreakpointAccess::Write, len, 0x1000).is_err());
+            assert!(validate_hw_breakpoint(HwBreakpointAccess::ReadWrite, len, 0x1000).is_err());
+        }
+    }
+
+    #[test]
+    fn validate_hw_requires_length_alignment() {
+        assert!(validate_hw_breakpoint(HwBreakpointAccess::Write, 4, 0x1002).is_err());
+        assert!(validate_hw_breakpoint(HwBreakpointAccess::Write, 2, 0x1001).is_err());
+        assert!(validate_hw_breakpoint(HwBreakpointAccess::ReadWrite, 8, 0x1004).is_err());
+        assert!(validate_hw_breakpoint(HwBreakpointAccess::Write, 1, 0x1001).is_ok());
+        assert!(validate_hw_breakpoint(HwBreakpointAccess::ReadWrite, 1, 0x1003).is_ok());
+    }
+
+    #[test]
+    fn semantic_watchpoint_access_parses() {
+        assert_eq!(
+            "write".parse::<WatchpointAccess>().unwrap(),
+            WatchpointAccess::Write
+        );
+        assert_eq!(
+            "read_write".parse::<WatchpointAccess>().unwrap(),
+            WatchpointAccess::ReadWrite
+        );
+        assert_eq!(
+            "read/write".parse::<WatchpointAccess>().unwrap(),
+            WatchpointAccess::ReadWrite
+        );
+        assert!("read".parse::<WatchpointAccess>().is_err());
+    }
+}

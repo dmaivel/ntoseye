@@ -146,14 +146,14 @@ fn structure(config: Config, attr: TokenStream, item: ItemStruct) -> Result<Toke
     }
     let name = &item.ident;
     let record = &config.record;
-    let command = quote!(crate::python::command);
+    let command = quote!(crate::hosts::python::command);
     let context = config.context.as_ref().map(|context| {
         quote! {
             #[allow(unused_variables)]
             fn context(
                 &self,
                 py: pyo3::Python<'_>,
-            ) -> pyo3::PyResult<crate::python::context::Context> {
+            ) -> pyo3::PyResult<crate::hosts::python::context::Context> {
                 ::std::result::Result::Ok(#context)
             }
         }
@@ -200,7 +200,7 @@ fn structure(config: Config, attr: TokenStream, item: ItemStruct) -> Result<Toke
 
                 fn from_py_in(
                     py: pyo3::Python<'_>,
-                    owner: &crate::python::handle::Owner,
+                    owner: &crate::hosts::python::handle::Owner,
                     value: pyo3::Py<#name>,
                 ) -> pyo3::PyResult<Self> {
                     let handle = value.get();
@@ -218,7 +218,7 @@ fn structure(config: Config, attr: TokenStream, item: ItemStruct) -> Result<Toke
         #item
 
         #[cfg(not(test))]
-        const _: () = crate::python::record::exported::<#name>();
+        const _: () = crate::hosts::python::record::exported::<#name>();
 
         impl #command::CommandHost for #name {
             fn session(&self) -> #command::HostSession<'_> {
@@ -408,7 +408,7 @@ pub fn methods(input: TokenStream) -> Result<TokenStream> {
     }
     let own = |python: &str| written.iter().any(|name| name == python);
     let record = &config.record;
-    let python = quote!(crate::python);
+    let python = quote!(crate::hosts::python);
     let field = |entry: &Entry| {
         let index = &entry.index;
         (

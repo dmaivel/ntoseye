@@ -2,7 +2,7 @@
 unions, lists, dicts, `Literal`s, what a `Diagnostic` holds, and a result
 class's properties (with its base's, for a variant class nested in its base),
 recursively. Used by `test_stub_types.py` on a live guest,
-and run by the Rust tests (`src/python/record.rs`, `hints`) against each
+and run by the Rust tests (`src/hosts/python/record.rs`, `hints`) against each
 field type's declared hint, which the stub prints."""
 
 from __future__ import annotations

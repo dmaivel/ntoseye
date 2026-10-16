@@ -1,0 +1,259 @@
+use std::num::ParseIntError;
+use std::path::PathBuf;
+
+use hex::FromHexError;
+use indicatif::style::TemplateError;
+use thiserror::Error;
+
+use crate::base::types::{PhysAddr, VirtAddr};
+
+#[derive(Debug, Error)]
+pub enum Error {
+    #[cfg(target_os = "linux")]
+    #[error(transparent)]
+    Nix(#[from] nix::Error),
+
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    #[error(transparent)]
+    Pdb2(#[from] pdb2::Error),
+
+    #[error(transparent)]
+    Reqwest(#[from] reqwest::Error),
+
+    #[error(transparent)]
+    PeLite(#[from] pelite::Error),
+
+    #[error(transparent)]
+    ParseInt(#[from] ParseIntError),
+
+    #[error(transparent)]
+    Hex(#[from] FromHexError),
+
+    #[error(transparent)]
+    Indicatif(#[from] TemplateError),
+
+    #[cfg(feature = "cli")]
+    #[error(transparent)]
+    CtrlC(#[from] ctrlc::Error),
+
+    #[error("GDB protocol failure: {0}")]
+    Rsp(String),
+
+    /// Invalid command input, independent of the backend.
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
+
+    #[error("KD protocol failure: {0}")]
+    Kd(String),
+    #[error("KD protocol failure: send exceeded retry budget: {0}")]
+    KdSendExhausted(String),
+    #[error("KD protocol failure: kernel returned NTSTATUS {ntstatus:#x} for api {api:#x}")]
+    KdStatus { ntstatus: u32, api: u32 },
+
+    #[error("breakpoint: {0}")]
+    Breakpoint(String),
+
+    /// The stub refused a site; optional step markers can be skipped, unlike
+    /// a transport failure that leaves the state of the site unknown.
+    #[error(
+        "GDB protocol failure: stub refused a hardware breakpoint at {address:#x}: {response}.\n\
+         The stub may have no hardware breakpoint slots left."
+    )]
+    HardwareBreakpointRefused { address: u64, response: String },
+
+    /// A code breakpoint refused because its address is not code: a
+    /// non-executable page or section.
+    #[error("breakpoint: refusing breakpoint at {address:#x}: {reason}")]
+    NotCode { address: u64, reason: String },
+
+    #[error("Register '{0}' not found")]
+    RegisterNotFound(String),
+
+    #[error("Register '{0}' is wider than 64 bits (a 128-bit register has '{0}l' / '{0}h' halves)")]
+    RegisterTooWide(String),
+
+    #[error("Breakpoint '{0}' not found")]
+    BPNotFound(u32),
+
+    #[error("the current backend does not support this")]
+    NotSupported,
+
+    /// The payload says what the halted target is needed for.
+    #[error("target is running; `break` first, or wait for the next stop. {0}")]
+    TargetRunning(&'static str),
+
+    #[error("the current backend does not support register writes")]
+    RegisterWriteUnsupported,
+
+    #[error("the current backend cannot continue an exception as not handled")]
+    ExceptionDispositionUnsupported,
+
+    #[error("{0}")]
+    DebugInfo(String),
+
+    #[error("step-until limit ({0} instructions) reached")]
+    StepLimit(usize),
+
+    #[error("PDB file not found for {0:?}")]
+    PdbNotFound(PathBuf),
+
+    #[error("Ntoskrnl not found")]
+    NtoskrnlNotFound,
+
+    /// A kernel operation on a user-mode minidump.
+    #[error("this needs a kernel target; a user-mode minidump holds one process and no kernel")]
+    KernelRequired,
+
+    /// A physical-memory or page-table operation on a user-mode minidump.
+    #[error(
+        "a user-mode minidump holds captured process memory by virtual address; it has no \
+         physical memory or page tables"
+    )]
+    NoPhysicalMemory,
+
+    #[error("unsupported dump: {0}")]
+    UnsupportedDump(String),
+
+    #[error("secure kernel (VTL1): {0}")]
+    SecureKernel(String),
+
+    #[error("hypervisor-saved VTL state: {0}")]
+    SavedVtlState(String),
+
+    #[error("Windows hypervisor: {0}")]
+    Hypervisor(String),
+
+    #[error("PE view failed")]
+    ViewFailed,
+
+    #[error("Storage directory wasn't found")]
+    StorageNotFound,
+
+    #[error("Symbol '{0}' not found")]
+    SymbolNotFound(String),
+
+    #[error("Symbol '{name}' is ambiguous: {candidates}", candidates = .candidates.join(", "))]
+    AmbiguousSymbol {
+        name: String,
+        candidates: Vec<String>,
+    },
+
+    #[error("Unsupported target architecture: {0}")]
+    UnsupportedArchitecture(String),
+
+    #[error("Process '{0}' not found")]
+    ProcessNotFound(u64),
+
+    #[error("Structure '{0}' not found")]
+    StructNotFound(String),
+
+    #[error("Field '{0}' not found")]
+    FieldNotFound(String),
+
+    #[error("Field '{0}' is not a {1}")]
+    FieldTypeMismatch(String, String),
+
+    #[error("Invalid expression: {0}")]
+    InvalidExpression(String),
+
+    #[error("Expected loaded symbols")]
+    ExpectedSymbols,
+
+    #[error("Process missing PEB (kernel process?)")]
+    MissingPEB,
+
+    #[error("Process missing ImageBase")]
+    MissingImageBase,
+
+    #[error("Process image not found")]
+    MissingImage,
+
+    #[error("no usable guest RAM mapping found in the VM process")]
+    NoVmMemoryRegion,
+
+    #[error(
+        "VM process not found\n  KVM (QEMU/Linux): no process has /dev/kvm open\n  VMware: no vmware-vmx process found with /dev/vmmon open. Is the VM powered on?\n  macOS (UTM): no qemu-aarch64-softmmu process found. Is the VM powered on?"
+    )]
+    VmNotFound,
+
+    #[error(
+        "permission denied accessing VM process (PID {pid}): {detail}\n\
+         macOS restricts task_for_pid to root or the com.apple.security.cs.debugger entitlement.\n\
+         UTM's QEMU is a normal (sandboxed) third-party process, not SIP-protected, so run ntoseye as root:\n\
+         sudo ntoseye ...\n\
+         (or sign ntoseye with the debugger entitlement and approve it in System Settings > Privacy & Security > Developer Tools)"
+    )]
+    TaskForPidDenied { pid: i32, detail: String },
+
+    #[error(
+        "the VM runs under HVF (QEMU's -accel hvf), and QEMU before 10.1 (UTM 5.0.5 ships \
+         10.0.12) aborts such a VM as soon as a debugger connects to its GDB stub and enables \
+         guest debugging.\n\
+         Turn off \"Use Hypervisor\" in the VM's QEMU settings in UTM to use the gdb backend, \
+         or use --backend memory, kd, or kdnet, which never enable it (see the UTM setup guide). \
+         With QEMU 10.1 or later, set NTOSEYE_GDB_ON_HVF=1 to connect anyway"
+    )]
+    GdbAbortsHvfVm,
+
+    #[error(
+        "permission denied reading from VM process (PID {pid}).\n\
+         /proc/sys/kernel/yama/ptrace_scope is currently {scope}. To allow attaching, run:\n    \
+             echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope\n\
+         (or run ntoseye as root)"
+    )]
+    PtraceDenied { pid: i32, scope: String },
+
+    #[error("Another instance of ntoseye is already attached to {0}")]
+    AlreadyRunning(String),
+
+    #[error("Data doesn't fit in buffer")]
+    BufferNotEnough,
+
+    #[error("Invalid range")]
+    InvalidRange,
+
+    #[error("Partial read: {0}b")]
+    PartialRead(usize),
+
+    #[error("Partial write: {0}b")]
+    PartialWrite(usize),
+
+    #[error("Bad virtual address: {0:x}")]
+    BadVirtualAddress(VirtAddr),
+
+    #[error("Address {0:x} is not captured in the triage dump's memory snapshot")]
+    AddressNotInDump(VirtAddr),
+
+    /// A read of a user-mode minidump's memory reached `address`, which the
+    /// dump did not capture; the bytes before it were read. `resumes` is
+    /// where captured memory starts again, `None` when nothing above does.
+    #[error("Address {address:x} is not in the minidump's captured memory")]
+    NotCaptured {
+        address: VirtAddr,
+        resumes: Option<VirtAddr>,
+    },
+
+    #[error("Bad physical address: {0:x}")]
+    BadPhysicalAddress(PhysAddr),
+
+    #[error("crash dump is read-only")]
+    ReadOnlyDump,
+
+    #[error("invalid crash dump: {0}")]
+    InvalidDump(String),
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// Tolerate a failed read in a best-effort reader (a missing page becomes
+/// `None`), except a running target: that refusal is not about the page and
+/// stands for the whole operation.
+pub fn best_effort<T>(result: Result<T>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error @ Error::TargetRunning(_)) => Err(error),
+        Err(_) => Ok(None),
+    }
+}

@@ -10,18 +10,24 @@ use iced_x86::{
     Mnemonic, OpAccess, OpKind, Register,
 };
 
-use crate::breakpoints::{
-    BreakpointManager, StepFrame, ThreadScope, lift_target_site, plant_target_site,
-};
-use crate::dbg_backend::{
+use crate::backend::dbg_backend::{
     ContinueDisposition, DebugBackend, HwBreakpointAccess, RegisterMap,
     STEP_UNDER_WINDOWS_HYPERVISOR, StopEvent, clear_trap_flag,
     processor_index_from_backend_thread_id,
 };
-use crate::disasm::{ControlFlow, classify};
-use crate::error::{Error, Result};
-use crate::memory::MemoryOps;
-use crate::notice::Notice;
+use crate::base::disasm::{ControlFlow, classify};
+use crate::base::error::{Error, Result};
+use crate::base::memory::MemoryOps;
+use crate::base::notice::Notice;
+use crate::base::types::{Arch, Dtb, VirtAddr};
+use crate::nt::breakpoints::{
+    BreakpointManager, StepFrame, ThreadScope, lift_target_site, plant_target_site,
+};
+use crate::nt::target::{DiagnosticValue, KTHREAD_STATE_RUNNING, KTHREAD_STATE_STANDBY, Target};
+use crate::nt::unwind::{
+    build_stacktrace, guest_vp_running, halted_in_windows_hypervisor, preferred_code_dtb,
+    resolve_thread_trace_context, thread_root, try_format_symbol_at,
+};
 use crate::session::breakpoints::event_word;
 use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::hits::{reported_watch_hit, stack_pointer};
@@ -29,12 +35,6 @@ use crate::session::{
     CallTrace, CallTraceEnd, CallTraceFrame, Cancel, CancelBehavior, ContinueOutcome, ControlState,
     CurrentInstruction, ModuleTrap, PendingWalk, STATUS_BREAKPOINT, STATUS_SINGLE_STEP, Session,
     StepKind, StepMode, StepStack,
-};
-use crate::target::{DiagnosticValue, KTHREAD_STATE_RUNNING, KTHREAD_STATE_STANDBY, Target};
-use crate::types::{Arch, Dtb, VirtAddr};
-use crate::unwind::{
-    build_stacktrace, guest_vp_running, halted_in_windows_hypervisor, preferred_code_dtb,
-    resolve_thread_trace_context, thread_root, try_format_symbol_at,
 };
 
 impl Session {

@@ -1689,6 +1689,7 @@ dependencies = [
  "parking_lot",
  "pdb2",
  "pelite",
+ "proc-macro2",
  "pyo3",
  "pyo3-build-config",
  "quote",

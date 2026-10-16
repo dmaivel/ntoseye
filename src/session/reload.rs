@@ -1,15 +1,15 @@
 //! Guest reboot detection, and the target rebuild and module-list
 //! rediscovery that follow it.
 
-use crate::breakpoints::BreakpointManager;
-use crate::bugchecks::looks_like_kernel_pointer;
-use crate::dbg_backend::StopEvent;
-use crate::error::Result;
-use crate::kd::{kd_files, trace_enabled};
-use crate::notice::Notice;
+use crate::backend::dbg_backend::StopEvent;
+use crate::backend::kd::{kd_files, trace_enabled};
+use crate::base::error::Result;
+use crate::base::notice::Notice;
+use crate::base::types::VirtAddr;
+use crate::nt::breakpoints::BreakpointManager;
+use crate::nt::bugchecks::looks_like_kernel_pointer;
+use crate::nt::target::{ReloadReport, Target};
 use crate::session::{STATUS_BREAKPOINT, Session, TargetReloadOutcome};
-use crate::target::{ReloadReport, Target};
-use crate::types::VirtAddr;
 
 /// How [`Session::classify_reload_stop`] classified a freshly observed stop:
 /// real stop, reboot artifact, or transport noise.
@@ -259,7 +259,7 @@ impl Session {
             // Before re-resolving breakpoints: a stub may plant them through
             // this root, and the old boot's is gone.
             backend.set_kernel_dtb(target.kernel_dtb());
-            backend.set_teb_path(crate::cpu_state::teb_path(target));
+            backend.set_teb_path(crate::nt::cpu_state::teb_path(target));
             // A reboot may have turned the Windows hypervisor on or off.
             backend.set_windows_hypervisor(target.windows_hypervisor_running());
             let debugger_data_hint = backend.target_debugger_data_hint().ok().flatten();

@@ -9,6 +9,7 @@ use syn::{
     Path, PathArguments, Result, ReturnType, Token, Type,
 };
 
+use crate::docstring::plain_links;
 use crate::grammar;
 
 /// A local the generated code binds, with `mixed_site` hygiene, so an
@@ -22,7 +23,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let mut function: ItemFn = syn::parse2(item)?;
     let options = match Attr::parse(attr)? {
         Attr::Command(options) => *options,
-        Attr::Form(form) => return expand_form(form, function),
+        Attr::Form(form) => return expand_form(*form, function),
     };
     let help = Help::from_docs(&function.attrs, function.sig.ident.span())?;
     let receiver = Receiver::parse(&function)?;
@@ -163,25 +164,27 @@ fn expand_form(form: FormOptions, mut function: ItemFn) -> Result<TokenStream> {
     })
 }
 
-/// A doc line as the Python docstring takes it: backslashes doubled and
-/// `"""` escaped, because the stub writes the docstring verbatim into a
-/// `"""` literal, where `\R` would be an invalid escape and `"""` would end
-/// it. (The help text keeps the doc comment as written; a record field's
-/// doc comment escapes by hand instead.)
+/// A doc line as the Python docstring takes it: intra-doc links as plain
+/// text (`docstring::plain_links`), backslashes doubled and `"""` escaped,
+/// because the stub writes the docstring verbatim into a `"""` literal,
+/// where `\R` would be an invalid escape and `"""` would end it. (The help
+/// text keeps the doc comment as written; a record field's doc comment
+/// escapes by hand instead.)
 fn docstring_line(attr: &Attribute) -> Attribute {
     if let Meta::NameValue(value) = &attr.meta
         && let Expr::Lit(ExprLit {
             lit: Lit::Str(text),
             ..
         }) = &value.value
-        && (text.value().contains('\\') || text.value().contains("\"\"\""))
     {
-        let escaped = text
-            .value()
+        let line = text.value();
+        let docstring = plain_links(&line)
             .replace('\\', "\\\\")
             .replace("\"\"\"", "\\\"\\\"\\\"");
-        let escaped = LitStr::new(&escaped, text.span());
-        return syn::parse_quote!(#[doc = #escaped]);
+        if docstring != line {
+            let docstring = LitStr::new(&docstring, text.span());
+            return syn::parse_quote!(#[doc = #docstring]);
+        }
     }
     attr.clone()
 }
@@ -255,7 +258,9 @@ impl EffectOptions {
             fields.push(quote!(live_only: true));
         }
         if let Some(capability) = &self.capability {
-            fields.push(quote!(capability: Some(crate::dbg_backend::DebugCapability::#capability)));
+            fields.push(
+                quote!(capability: Some(crate::backend::dbg_backend::DebugCapability::#capability)),
+            );
         }
         if fields.is_empty() {
             return quote!(&#base);
@@ -267,7 +272,7 @@ impl EffectOptions {
 /// What `#[command(...)]` declares: a command, or a form of one.
 enum Attr {
     Command(Box<Options>),
-    Form(FormOptions),
+    Form(Box<FormOptions>),
 }
 
 impl Attr {
@@ -365,7 +370,7 @@ impl Attr {
                     "a form is an SDK method: `python = Object`",
                 ));
             }
-            return Ok(Self::Form(FormOptions {
+            return Ok(Self::Form(Box::new(FormOptions {
                 command,
                 python,
                 python_name,
@@ -377,7 +382,7 @@ impl Attr {
                     live_only,
                     capability,
                 },
-            }));
+            })));
         }
         let names: Vec<LitStr> = names.ok_or_else(|| missing("names"))?;
         if names.is_empty() {
@@ -995,7 +1000,7 @@ impl Command {
     /// grammar it declares (`#[grammar]`), and a `raw` argument, or one
     /// whose parser hands its words to the operation, by its own `usage`.
     fn grammar(&self) -> Result<Vec<TokenStream>> {
-        let usage = quote!(crate::repl::usage);
+        let usage = quote!(crate::hosts::repl::usage);
         let mut grammars = Vec::new();
         for arg in self.args.iter().filter(|arg| !arg.hosted() && !arg.sdk) {
             let name = arg.usage_name();
@@ -1007,10 +1012,12 @@ impl Command {
                 (quote!(&[#(#words),*]), rest)
             };
             let value_completion = || match &arg.complete {
-                Some(Completion::All(ident)) => quote!(crate::repl::CompletionStrategy::#ident),
+                Some(Completion::All(ident)) => {
+                    quote!(crate::hosts::repl::CompletionStrategy::#ident)
+                }
                 _ => {
                     let ty = arg.value_type();
-                    quote!(<#ty as crate::repl::args::FromArg>::COMPLETION)
+                    quote!(<#ty as crate::hosts::repl::args::FromArg>::COMPLETION)
                 }
             };
             let (text, (words, rest)) = if let Some(switch) = &arg.switch {
@@ -1065,7 +1072,7 @@ impl Command {
         } = &self.options;
         let name = &names[0];
         let grammar = self.grammar()?;
-        let usage = quote!(crate::repl::usage);
+        let usage = quote!(crate::hosts::repl::usage);
         let summary = &self.help.summary;
         let details = match &self.help.details {
             Some(details) => quote!(Some(#details)),
@@ -1092,25 +1099,25 @@ impl Command {
             const USAGE_LEN: usize = #usage::usage_len(#name, ARGS);
             const USAGE: [u8; USAGE_LEN] = #usage::usage_bytes(#name, ARGS);
             const WORDS_LEN: usize = #usage::completion_len(ARGS);
-            const WORDS: [crate::repl::CompletionStrategy; WORDS_LEN] =
+            const WORDS: [crate::hosts::repl::CompletionStrategy; WORDS_LEN] =
                 #usage::completion_words(ARGS);
-            #[linkme::distributed_slice(crate::repl::COMMANDS)]
-            static SPEC: crate::repl::CommandSpec = crate::repl::CommandSpec {
+            #[linkme::distributed_slice(crate::hosts::repl::COMMANDS)]
+            static SPEC: crate::hosts::repl::CommandSpec = crate::hosts::repl::CommandSpec {
                 names: &[#(#names),*],
                 category: #category,
-                kind: crate::repl::CommandKind::#kind,
+                kind: crate::hosts::repl::CommandKind::#kind,
                 usage: #usage::usage_text(&USAGE),
                 summary: #summary,
                 details: #details,
-                completion: crate::repl::CompletionSpec {
+                completion: crate::hosts::repl::CompletionSpec {
                     words: &WORDS,
                     rest: #usage::completion_rest(ARGS),
                 },
                 args: ARGS,
                 effects: #effects,
-                style: crate::repl::CommandStyle::#style,
-                flow: crate::repl::Flow::#flow,
-                handler: crate::repl::CommandHandler::#handler(repl),
+                style: crate::hosts::repl::CommandStyle::#style,
+                flow: crate::hosts::repl::Flow::#flow,
+                handler: crate::hosts::repl::CommandHandler::#handler(repl),
             };
         })
     }
@@ -1137,7 +1144,7 @@ impl Command {
             .as_ref()
             .map_or_else(|| quote!(None), |ident| quote!(#ident));
         let capability = match capability {
-            Some(ident) => quote!(Some(crate::dbg_backend::DebugCapability::#ident)),
+            Some(ident) => quote!(Some(crate::backend::dbg_backend::DebugCapability::#ident)),
             None => quote!(None),
         };
         quote! {
@@ -1176,7 +1183,7 @@ impl Command {
     /// declares them, run the operation (on each value of an `each`
     /// argument), and render the result with the render options.
     fn repl(&self) -> TokenStream {
-        let args = quote!(crate::repl::args);
+        let args = quote!(crate::hosts::repl::args);
         let [
             cx,
             cursor,
@@ -1334,16 +1341,16 @@ impl Command {
             _ if self.is_run() && self.returns_motion() => quote! {
                 match self::#function(#receiver, #(#call_args),*) {
                     Ok(#value) => #state.run_motion(#value),
-                    Err(#error) => crate::repl::error(&#error.to_string()),
+                    Err(#error) => crate::hosts::repl::error(&#error.to_string()),
                 }
                 Ok(())
             },
             // The operation drives the run within the REPL's stop budget.
             _ if self.is_run() => quote! {
-                let #cancel = crate::repl::run_cancel(#state.stop_wait.as_ref());
+                let #cancel = crate::hosts::repl::run_cancel(#state.stop_wait.as_ref());
                 match self::#function(#receiver, #(#call_args),*) {
-                    Ok(#value) => crate::repl::Render::render(&#value, #state, #options),
-                    Err(#error) => crate::repl::error(&#error.to_string()),
+                    Ok(#value) => crate::hosts::repl::Render::render(&#value, #state, #options),
+                    Err(#error) => crate::hosts::repl::error(&#error.to_string()),
                 }
                 Ok(())
             },
@@ -1355,19 +1362,19 @@ impl Command {
                         match self::#function(#receiver, #(#call_args),*) {
                             Ok(#value) => #values.push(#value),
                             Err(#error) => {
-                                crate::repl::error(&#error.to_string());
+                                crate::hosts::repl::error(&#error.to_string());
                                 return Ok(());
                             }
                         }
                     }
-                    crate::repl::Render::render(&#values, #state, #options);
+                    crate::hosts::repl::Render::render(&#values, #state, #options);
                     Ok(())
                 }
             }
             None => quote! {
                 match self::#function(#receiver, #(#call_args),*) {
-                    Ok(#value) => crate::repl::Render::render(&#value, #state, #options),
-                    Err(#error) => crate::repl::error(&#error.to_string()),
+                    Ok(#value) => crate::hosts::repl::Render::render(&#value, #state, #options),
+                    Err(#error) => crate::hosts::repl::error(&#error.to_string()),
                 }
                 Ok(())
             },
@@ -1377,15 +1384,15 @@ impl Command {
         let run = match &self.options.flow {
             Some(flow) if !returns_flow => quote! {
                 #[allow(clippy::redundant_closure_call)]
-                let () = (|| -> crate::error::Result<()> { #run })()?;
-                Ok(crate::repl::Flow::#flow)
+                let () = (|| -> crate::base::error::Result<()> { #run })()?;
+                Ok(crate::hosts::repl::Flow::#flow)
             },
             _ => run,
         };
         let (returns, parse_failed) = if self.flow_handler() {
             (
-                quote!(crate::repl::Flow),
-                quote!(crate::repl::Flow::Continue),
+                quote!(crate::hosts::repl::Flow),
+                quote!(crate::hosts::repl::Flow::Continue),
             )
         } else {
             (quote!(()), quote!(()))
@@ -1402,9 +1409,9 @@ impl Command {
             }
 
             fn repl(
-                #state: &mut crate::repl::ReplState<'_>,
-                #invocation: crate::repl::CommandInvocation<'_>,
-            ) -> crate::error::Result<#returns> {
+                #state: &mut crate::hosts::repl::ReplState<'_>,
+                #invocation: crate::hosts::repl::CommandInvocation<'_>,
+            ) -> crate::base::error::Result<#returns> {
                 let #name = #invocation.name;
                 let mut #cursor = #args::ArgCursor::new(#invocation);
                 let #outcome = parse(
@@ -1487,7 +1494,7 @@ impl Method<'_> {
     /// receiver does not bind and the REPL does not render become Python
     /// arguments, those that may be omitted keyword-only (`Arg::keyword`),
     /// and the call runs on the session thread through
-    /// `crate::python::command::run`, which admits the effects.
+    /// `crate::hosts::python::command::run`, which admits the effects.
     fn python(&self, object: &Ident) -> Result<TokenStream> {
         let python_name = self
             .python_name
@@ -1495,7 +1502,7 @@ impl Method<'_> {
         let method = format_ident!("command_{}", self.function);
         let operation = format!("{object}.{python_name}");
         let docs = self.docs;
-        let command = quote!(crate::python::command);
+        let command = quote!(crate::hosts::python::command);
         let [slf, py, borrowed, host, owner, session, cancel] = [
             "slf", "py", "borrowed", "host", "owner", "session", "cancel",
         ]
@@ -1590,7 +1597,7 @@ impl Method<'_> {
             self::#function(#receiver, #(#call),*)
         };
         if let Some(run) = self.run {
-            let runcontrol = quote!(crate::python::runcontrol);
+            let runcontrol = quote!(crate::hosts::python::runcontrol);
             let (driver, output, closure) = match run {
                 RunMode::Cancellable => (
                     quote!(run_cancellable),
@@ -1620,7 +1627,7 @@ impl Method<'_> {
                         #slf: &pyo3::Bound<'py, Self>,
                         #py: pyo3::Python<'py>,
                         #(#params),*
-                    ) -> pyo3::PyResult<crate::python::record::Typed<'py, #output>> {
+                    ) -> pyo3::PyResult<crate::hosts::python::record::Typed<'py, #output>> {
                         #prologue
                         #(#bindings)*
                         #runcontrol::#driver(#py, #host, #operation, #effects, timeout, #closure)
@@ -1638,7 +1645,7 @@ impl Method<'_> {
                     #slf: &pyo3::Bound<'py, Self>,
                     #py: pyo3::Python<'py>,
                     #(#params),*
-                ) -> pyo3::PyResult<crate::python::record::Typed<'py, #output>> {
+                ) -> pyo3::PyResult<crate::hosts::python::record::Typed<'py, #output>> {
                     #prologue
                     #(#bindings)*
                     #command::run(#py, #host, #operation, #effects, move |#session| {

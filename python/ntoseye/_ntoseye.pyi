@@ -531,7 +531,7 @@ class Amd64TrapFrame(BaseRecord):
     live in the accompanying `_KEXCEPTION_FRAME`, not the trap frame.
     
     What a frame holds depends on the entry that built it, `kind` (see
-    [`TrapKind`]). A register the entry does not write is `None` rather than
+    `TrapKind`). A register the entry does not write is `None` rather than
     whatever its slot held.
     """
     __match_args__: Final[tuple[Literal["kind"], Literal["rax"], Literal["rbx"], Literal["rcx"], Literal["rdx"], Literal["rsi"], Literal["rdi"], Literal["rbp"], Literal["rsp"], Literal["r8"], Literal["r9"], Literal["r10"], Literal["r11"], Literal["rip"], Literal["cs"], Literal["ss"], Literal["eflags"], Literal["error_code"], Literal["previous_mode"], Literal["previous_irql"]]]
@@ -2188,7 +2188,7 @@ class CachedFile(BaseRecord):
 class CallTrace(BaseRecord):
     """
     A `wt` call trace: the call tree, the instructions that it stepped, and
-    why it stopped ([`Session::trace_calls`]).
+    why it stopped (`trace_calls`).
     """
     __match_args__: Final[tuple[Literal["root"], Literal["instructions"]]]
     @property
@@ -3474,7 +3474,7 @@ class DecodedHypercall(BaseRecord):
         """
         Whether ntoseye knows the layout of the call's input. When it does
         not, `fields` holds the input as raw qwords, `Input[0]` on: RDX and
-        R8 for a fast call, else the first [`RAW_QWORDS`] of the input page.
+        R8 for a fast call, else the first `RAW_QWORDS` of the input page.
         """
     @property
     def elements(self, /) -> list[HypercallElement]:
@@ -9373,7 +9373,7 @@ class IpiProcessor(BaseRecord):
     @property
     def fields(self, /) -> list[IpiField]:
         """
-        The IPI fields of [`IPI_FIELDS`] this build's `_KPRCB` has.
+        The IPI fields of `IPI_FIELDS` this build's `_KPRCB` has.
         """
     @property
     def frozen_state(self, /) -> Diagnostic[str] |None:
@@ -10378,7 +10378,7 @@ class LocalApic(BaseRecord):
     @property
     def lvt(self, /) -> list[ApicLvt]:
         """
-        The LVT entries the APIC implements, in [`LVT_NAMES`] order.
+        The LVT entries the APIC implements, in `LVT_NAMES` order.
         """
     @property
     def lvt_missing(self, /) -> list[str]:
@@ -12436,7 +12436,7 @@ class NtEntry(BaseRecord):
     @property
     def granule(self, /) -> int:
         """
-        The header size in bytes (see [`NtHeap::granule`]).
+        The header size in bytes (see `granule`).
         """
     @property
     def previous_size(self, /) -> int:
@@ -13340,7 +13340,7 @@ class PciTree(BaseRecord):
     @property
     def truncated(self, /) -> bool:
         """
-        The walk stopped at [`MAX_TREE_NODES`] or a nesting/link limit.
+        The walk stopped at `MAX_TREE_NODES` or a nesting/link limit.
         """
 
 @final
@@ -15183,7 +15183,7 @@ class ProcessorStateArea(BaseRecord):
 class PteAttributes(BaseRecord):
     """
     A page-table entry decoded at its level; see
-    [`PageTableEntry::attributes`]. For an entry pointing at a lower table,
+    `attributes`. For an entry pointing at a lower table,
     `writable`, `user`, and `nx` are the restrictions it places on what lies
     below.
     """
@@ -17259,7 +17259,7 @@ class StackFrame(BaseRecord):
         The source line of the frame, if line information resolves it. For
         an inline frame this is the line in the inlined function, and for a
         caller it is the line of the call (see
-        [`SymbolStore::frame_source_location`]).
+        `frame_source_location`).
         """
     @property
     def sp(self, /) -> int:
@@ -20952,7 +20952,7 @@ class VirtQueue(BaseRecord):
     @property
     def event_idx(self, /) -> bool:
         """
-        The device and driver use event indexes (see [`VirtioDriver`]).
+        The device and driver use event indexes (see `VirtioDriver`).
         """
     @property
     def index(self, /) -> int:
@@ -20973,7 +20973,7 @@ class VirtQueue(BaseRecord):
     def name(self, /) -> str |None:
         """
         Its name where the virtio specification fixes it, such as `rx 0`
-        or `request 2`, when the device's type is known ([`name_queues`]).
+        or `request 2`, when the device's type is known (`name_queues`).
         """
     @property
     def notifications(self, /) -> Signal |None:
@@ -21348,7 +21348,7 @@ class VmPteDetail(BaseRecord):
 class VpRegisters(BaseRecord):
     """
     The registers of one VTL of a Windows hypervisor VP (`!hvr`, see
-    [`Session::vp_registers`]).
+    `vp_registers`).
     """
     __match_args__: Final[tuple[Literal["source"], Literal["missing"]]]
     @property
@@ -21361,7 +21361,7 @@ class VpRegisters(BaseRecord):
         """
         RIP, RSP, flags, control and segment registers, and the
         general-purpose ones when they are known, in
-        [`crate::target::VP_STATE_REGISTERS`] order.
+        `VP_STATE_REGISTERS` order.
         """
     @property
     def source(self, /) -> str:
@@ -21419,7 +21419,7 @@ class VsChunk(BaseRecord):
     @property
     def granule(self, /) -> int:
         """
-        The header size in bytes (see [`SegmentHeap::granule`]).
+        The header size in bytes (see `granule`).
         """
     @property
     def previous_size(self, /) -> int:
@@ -22042,7 +22042,7 @@ class WdfIoTargetSummary(BaseRecord):
     @property
     def kind(self, /) -> Literal["local", "remote", "self", "usb_device", "usb_pipe"]:
         """
-        See [`WdfIoTargetDetail::kind`]: `local`, `remote`, `self`,
+        See `kind`: `local`, `remote`, `self`,
         `USB device`, or `USB pipe`.
         """
     @property
@@ -23101,7 +23101,7 @@ class Zombies(BaseRecord):
     @property
     def truncated(self, /) -> bool:
         """
-        True if a result list reached its limit ([`MAX_ZOMBIES`]).
+        True if a result list reached its limit (`MAX_ZOMBIES`).
         """
 
 def _cli_main() -> int:

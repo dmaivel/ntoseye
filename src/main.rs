@@ -4,5 +4,5 @@
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() {
-    ntoseye::cli::main();
+    ntoseye::hosts::cli::main();
 }

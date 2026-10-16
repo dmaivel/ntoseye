@@ -4,23 +4,23 @@
 use std::mem::take;
 use std::sync::Arc;
 
-use crate::breakpoints::{
+use crate::backend::dbg_backend::{
+    BugcheckInfo, DebugCapability, HwBreakpointAccess, ModuleEvent, WatchpointAccess,
+};
+use crate::backend::partition_backend::PartitionBackend;
+use crate::base::error::{Error, Result};
+use crate::base::memory::MemoryOps;
+use crate::base::notice::Notice;
+use crate::base::types::{Arch, VirtAddr};
+use crate::nt::breakpoints::{
     BreakpointConfig, BreakpointInfo, BreakpointManager, BreakpointScope, BreakpointSpec,
     HypercallFilter, ThreadScope, lift_target_site, plant_target_site,
 };
-use crate::dbg_backend::{
-    BugcheckInfo, DebugCapability, HwBreakpointAccess, ModuleEvent, WatchpointAccess,
-};
-use crate::error::{Error, Result};
-use crate::exception_policy::ExceptionPolicyMode;
-use crate::expr::Expr;
-use crate::guest::vm_exits::ExitFilter;
-use crate::guest::{ModuleSymbolLoadReport, hypercalls};
-use crate::memory::MemoryOps;
-use crate::notice::Notice;
-use crate::partition_backend::PartitionBackend;
+use crate::nt::expr::Expr;
+use crate::nt::guest::vm_exits::ExitFilter;
+use crate::nt::guest::{ModuleSymbolLoadReport, hypercalls};
+use crate::session::exception_policy::ExceptionPolicyMode;
 use crate::session::{ModuleTrap, Session, TrapSite};
-use crate::types::{Arch, VirtAddr};
 
 /// What [`Session::add_pattern_breakpoints`] set.
 pub struct PatternBreakpoints {
@@ -509,7 +509,7 @@ impl Session {
     /// partition's: `addr` is the partition's, a hit by any other VP than
     /// the partition's is resumed, `/c` names a VP of it, and its thread
     /// filter and condition are checked in its view at the hit (see
-    /// [`crate::breakpoints::PartitionFilter`]). In VTL1 it is global: NT's
+    /// [`crate::nt::breakpoints::PartitionFilter`]). In VTL1 it is global: NT's
     /// processes and threads say nothing about which VTL1 context executes
     /// an address, so a process or thread filter is refused. Returns the id.
     pub fn add_hardware_breakpoint(

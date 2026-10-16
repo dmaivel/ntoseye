@@ -43,17 +43,18 @@ def main() -> None:
                     timed_out = True
                     print(f"timeout waiting for a stop after {args.timeout:g}s")
                     break
-                match stop:
-                    case ntoseye.Stop.Breakpoint(breakpoint=hit) if stop.hit(bp):
-                        if hit.condition_error is not None:
-                            print(f"when predicate failed: {hit.condition_error}")
-                            break
-                    case ntoseye.Stop.Bugcheck() | ntoseye.Stop.Reload():
-                        print(f"stop: {stop.kind} ({stop.symbol or '?'})")
+                # `match stop:` reads the same on Python 3.10+; isinstance
+                # keeps the example running on 3.9, the oldest the SDK supports.
+                if isinstance(stop, ntoseye.Stop.Breakpoint) and stop.hit(bp):
+                    if stop.breakpoint.condition_error is not None:
+                        print(f"when predicate failed: {stop.breakpoint.condition_error}")
                         break
-                    case _:
-                        print(f"other stop: {stop.kind} ({stop.symbol or '?'})")
-                        continue
+                elif isinstance(stop, (ntoseye.Stop.Bugcheck, ntoseye.Stop.Reload)):
+                    print(f"stop: {stop.kind} ({stop.symbol or '?'})")
+                    break
+                else:
+                    print(f"other stop: {stop.kind} ({stop.symbol or '?'})")
+                    continue
 
                 process = stop.process
                 if process is None:

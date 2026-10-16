@@ -1,0 +1,797 @@
+//! The breakpoint table's lifecycle: adding code breakpoints, enabling,
+//! disabling, removing and renumbering them, and reinstalling their sites
+//! after a stop.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use super::BreakpointScope;
+use super::install::{BreakpointBackend, forget_site};
+use super::spec::CodeSite;
+use super::{BreakpointConfig, BreakpointInfo, BreakpointManager, PartitionFilter, StepFrame};
+#[cfg(test)]
+use super::{HardwareBreakpoint, install::BreakpointPatch};
+use crate::backend::dbg_backend::{DebugBackend, HwBreakpointAccess};
+use crate::base::error::{Error, Result};
+use crate::base::memory::MemoryOps;
+use crate::base::types::{Dtb, VirtAddr};
+use crate::nt::target::Target;
+
+impl BreakpointManager {
+    pub fn new() -> Self {
+        Self {
+            breakpoints: HashMap::new(),
+            one_shot_hits: HashSet::new(),
+            next_id: 0,
+            interrupted_hits: Vec::new(),
+        }
+    }
+
+    /// A fresh [`BreakpointInfo::serial`], distinct from every one handed
+    /// out before in this process, by any session: a breakpoint that reuses
+    /// an id, or another debugger's with the same id, is not this one.
+    pub fn take_serial(&mut self) -> u64 {
+        static NEXT_SERIAL: AtomicU64 = AtomicU64::new(0);
+        NEXT_SERIAL.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Test-only: register a breakpoint directly, bypassing backend
+    /// installation. `hardware: Some(..)` makes a DR breakpoint; `None` a
+    /// kernel int3 with a dummy displaced byte.
+    #[cfg(test)]
+    pub fn insert_for_test(
+        &mut self,
+        id: u32,
+        address: VirtAddr,
+        enabled: bool,
+        hardware: Option<HardwareBreakpoint>,
+    ) {
+        let backend = match hardware {
+            Some(_) => BreakpointBackend::Hardware,
+            None => BreakpointBackend::Kernel {
+                original: Some(BreakpointPatch::single(0x90)),
+            },
+        };
+        let serial = self.take_serial();
+        self.breakpoints.insert(
+            id,
+            BreakpointInfo {
+                id,
+                serial,
+                address,
+                enabled,
+                symbol: None,
+                spec: None,
+                resolved: true,
+                scope: BreakpointScope::Kernel,
+                automatic_scope: false,
+                thread: None,
+                processor: None,
+                min_stack_pointer: None,
+                hypercall: None,
+                vm_exit: None,
+                partition: None,
+                condition: None,
+                condition_expr: None,
+                pass_count: 0,
+                hit_count: 0,
+                remaining_pass_count: 0,
+                one_shot: false,
+                action: None,
+                temporary: false,
+                unchecked: false,
+                hardware,
+                backend,
+            },
+        );
+    }
+
+    pub fn add_configured(
+        &mut self,
+        client: &mut dyn DebugBackend,
+        debugger: &Target,
+        address: VirtAddr,
+        symbol: Option<String>,
+        config: BreakpointConfig,
+    ) -> Result<u32> {
+        self.add_code_configured(
+            client,
+            debugger,
+            CodeSite::Address { address, symbol },
+            config,
+        )
+    }
+
+    /// A one-shot breakpoint for a run to `address`; `frame` restricts it to
+    /// a step's execution, and `partition` makes it a guest partition's (see
+    /// [`PartitionFilter`]), whose code only a debug register traps.
+    pub fn add_temporary_code(
+        &mut self,
+        client: &mut dyn DebugBackend,
+        debugger: &Target,
+        address: VirtAddr,
+        frame: Option<StepFrame>,
+        partition: Option<PartitionFilter>,
+    ) -> Result<u32> {
+        let config = BreakpointConfig {
+            scope: match partition {
+                // `debugger` is the target, whose processes are not the
+                // partition's: the step's thread alone says whose hit it is.
+                Some(_) => Some(BreakpointScope::Kernel),
+                // A user-space target is in the process the stop is in,
+                // whichever process inspection is attached to.
+                None => (!Self::is_kernel_space(debugger.arch(), address))
+                    .then(|| {
+                        debugger.process_for_cr3(debugger.normalize_dtb(debugger.current_dtb()))
+                    })
+                    .flatten()
+                    .map(|process| BreakpointScope::process(&process)),
+            },
+            thread: frame.as_ref().map(|frame| frame.thread.clone()),
+            partition,
+            ..BreakpointConfig::default()
+        };
+        // Secure-kernel code is never patched, and a partition's cannot be:
+        // a run-to there (`p` over a call, `gu`) takes a debug-register slot
+        // for the run instead.
+        let (id, hardware) = if partition.is_some() || debugger.is_secure_address(address) {
+            let id = self.add_hardware_configured(
+                client,
+                debugger,
+                address,
+                HwBreakpointAccess::Execute,
+                1,
+                None,
+                config,
+            )?;
+            (id, true)
+        } else {
+            let id =
+                self.add_code_configured(client, debugger, CodeSite::Temporary(address), config)?;
+            (id, false)
+        };
+        if let Some(bp) = self.breakpoints.get_mut(&id) {
+            bp.temporary |= hardware;
+            bp.min_stack_pointer = frame.and_then(|frame| frame.min_stack_pointer);
+        }
+        Ok(id)
+    }
+
+    /// A debugger-internal write watchpoint on the `len` bytes at kernel
+    /// `address`, in a free debug-register slot.
+    pub fn add_temporary_watch(
+        &mut self,
+        client: &mut dyn DebugBackend,
+        debugger: &Target,
+        address: VirtAddr,
+        len: u8,
+    ) -> Result<u32> {
+        let id = self.add_hardware_configured(
+            client,
+            debugger,
+            address,
+            HwBreakpointAccess::Write,
+            len,
+            None,
+            BreakpointConfig::default(),
+        )?;
+        if let Some(bp) = self.breakpoints.get_mut(&id) {
+            bp.temporary = true;
+        }
+        Ok(id)
+    }
+
+    pub(super) fn add_code_configured(
+        &mut self,
+        client: &mut dyn DebugBackend,
+        debugger: &Target,
+        site: CodeSite,
+        config: BreakpointConfig,
+    ) -> Result<u32> {
+        let temporary = matches!(site, CodeSite::Temporary(_));
+        let (address, symbol, spec) = match site {
+            CodeSite::Address { address, symbol } => (Some(address), symbol, None),
+            CodeSite::Spec { spec, address } => {
+                (address, Some(spec.label().to_string()), Some(spec))
+            }
+            CodeSite::Temporary(address) => (Some(address), None, None),
+        };
+        let condition_expr = Self::configured_condition(&config)?;
+        let automatic_scope = config.scope.is_none();
+        let fallback_scope = config
+            .scope
+            .unwrap_or_else(|| Self::scope_for_current_context(debugger));
+        let scope = if automatic_scope {
+            address
+                .map(|address| Self::scope_for_address(debugger, address, &fallback_scope))
+                .unwrap_or(fallback_scope)
+        } else {
+            fallback_scope
+        };
+        Self::validate_scope_capability(client, debugger.arch(), address, &scope)?;
+
+        let (address, resolved, backend) = match address {
+            Some(address) => {
+                self.retire_one_shot_hits_at(client, debugger, address, false)?;
+                self.ensure_site_available(address, false, None)?;
+                Self::validate_breakpoint_target(debugger, address, &scope)?;
+                let backend = Self::install_breakpoint(client, debugger, address, &scope)?;
+                (address, true, backend)
+            }
+            None => (VirtAddr(0), false, BreakpointBackend::Deferred),
+        };
+        let pass_count = config.pass_count;
+        let id = self.next_id;
+        self.next_id += 1;
+        let serial = self.take_serial();
+        self.breakpoints.insert(
+            id,
+            BreakpointInfo {
+                id,
+                serial,
+                address,
+                enabled: true,
+                symbol,
+                spec,
+                resolved,
+                scope,
+                automatic_scope,
+                condition: config.condition,
+                condition_expr,
+                pass_count,
+                hit_count: 0,
+                remaining_pass_count: pass_count.saturating_sub(1),
+                one_shot: config.one_shot,
+                action: config.action,
+                temporary,
+                unchecked: config.unchecked,
+                thread: config.thread,
+                processor: config.processor,
+                min_stack_pointer: None,
+                hypercall: config.hypercall,
+                vm_exit: config.vm_exit,
+                partition: config.partition,
+                hardware: None,
+                backend,
+            },
+        );
+        Ok(id)
+    }
+
+    pub(super) fn ensure_site_available(
+        &self,
+        address: VirtAddr,
+        hardware: bool,
+        exclude_id: Option<u32>,
+    ) -> Result<()> {
+        if let Some(existing) = self.breakpoints.values().find(|bp| {
+            Some(bp.id) != exclude_id
+                && bp.resolved
+                && bp.address == address
+                && bp.hardware.is_some() == hardware
+        }) {
+            let kind = if hardware { "hardware" } else { "software" };
+            return Err(Error::Breakpoint(format!(
+                "{kind} breakpoint {} already owns address {:#x}",
+                existing.id, address.0
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn remove(
+        &mut self,
+        client: &mut dyn DebugBackend,
+        debugger: &Target,
+        id: u32,
+    ) -> Result<()> {
+        self.remove_if_uninstalled(id, |bp| Self::uninstall_breakpoint(client, debugger, bp))
+    }
+
+    pub(super) fn remove_ids(
+        &mut self,
+        client: &mut dyn DebugBackend,
+        debugger: &Target,
+        ids: impl IntoIterator<Item = u32>,
+    ) -> Result<()> {
+        self.remove_ids_if_uninstalled(ids, |bp| Self::uninstall_breakpoint(client, debugger, bp))
+    }
+
+    pub fn remove_all(&mut self, client: &mut dyn DebugBackend, debugger: &Target) -> Result<()> {
+        let ids = self.managed_ids();
+        self.remove_ids(client, debugger, ids)
+    }
+
+    fn remove_if_uninstalled(
+        &mut self,
+        id: u32,
+        uninstall: impl FnOnce(&BreakpointInfo) -> Result<()>,
+    ) -> Result<()> {
+        let bp = self
+            .breakpoints
+            .get(&id)
+            .cloned()
+            .ok_or(Error::BPNotFound(id))?;
+
+        if bp.enabled && bp.resolved {
+            uninstall(&bp)?;
+        }
+        self.breakpoints.remove(&id);
+        self.one_shot_hits.remove(&id);
+        self.forget_interrupted_hits(id);
+
+        if self.breakpoints.is_empty() {
+            self.next_id = 0;
+        }
+
+        Ok(())
+    }
+
+    fn remove_ids_if_uninstalled(
+        &mut self,
+        ids: impl IntoIterator<Item = u32>,
+        mut uninstall: impl FnMut(&BreakpointInfo) -> Result<()>,
+    ) -> Result<()> {
+        let mut failures = Vec::new();
+        for id in ids {
+            if let Err(error) = self.remove_if_uninstalled(id, |bp| uninstall(bp)) {
+                failures.push(format!("#{id}: {error}"));
+            }
+        }
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Breakpoint(format!(
+                "failed to uninstall breakpoints: {}",
+                failures.join("; ")
+            )))
+        }
+    }
+
+    /// Forget a breakpoint whose site can no longer be restored (its address
+    /// space is gone). The backend is told so it stops treating a hit at the
+    /// stale address as ours.
+    pub fn discard(&mut self, client: &mut dyn DebugBackend, id: u32) -> Result<BreakpointInfo> {
+        let bp = self.breakpoints.remove(&id).ok_or(Error::BPNotFound(id))?;
+        Self::forget_backend_site(client, &bp);
+        self.one_shot_hits.remove(&id);
+        self.forget_interrupted_hits(id);
+        if self.breakpoints.is_empty() {
+            self.next_id = 0;
+        }
+        Ok(bp)
+    }
+
+    /// Rename a managed breakpoint without changing its installed backend
+    /// site.  Breakpoint IDs are the user-facing handles, so one-shot state
+    /// must move with the entry as well.
+    pub fn renumber(&mut self, id: u32, new_id: u32) -> Result<()> {
+        if id == new_id {
+            if self.breakpoints.contains_key(&id) {
+                return Ok(());
+            }
+            return Err(Error::BPNotFound(id));
+        }
+        if self.breakpoints.contains_key(&new_id) {
+            return Err(Error::Breakpoint(format!(
+                "breakpoint ID {new_id} is already in use"
+            )));
+        }
+        let mut bp = self.breakpoints.remove(&id).ok_or(Error::BPNotFound(id))?;
+        bp.id = new_id;
+        self.breakpoints.insert(new_id, bp);
+        if self.one_shot_hits.remove(&id) {
+            self.one_shot_hits.insert(new_id);
+        }
+        for (hit, _) in &mut self.interrupted_hits {
+            if *hit == id {
+                *hit = new_id;
+            }
+        }
+        self.next_id = self.next_id.max(new_id.saturating_add(1));
+        Ok(())
+    }
+
+    pub fn enable(
+        &mut self,
+        client: &mut dyn DebugBackend,
+        debugger: &Target,
+        id: u32,
+    ) -> Result<()> {
+        let snapshot = self
+            .breakpoints
+            .get(&id)
+            .cloned()
+            .ok_or(Error::BPNotFound(id))?;
+        if snapshot.enabled {
+            return Ok(());
+        }
+        if snapshot.resolved {
+            self.ensure_site_available(snapshot.address, snapshot.hardware.is_some(), Some(id))?;
+            let backend = if matches!(
+                &snapshot.backend,
+                BreakpointBackend::Deferred | BreakpointBackend::Kernel { original: None }
+            ) {
+                Some(Self::install_breakpoint(
+                    client,
+                    debugger,
+                    snapshot.address,
+                    &snapshot.scope,
+                )?)
+            } else {
+                Self::install_existing_breakpoint(client, debugger, &snapshot)?;
+                None
+            };
+            if let Some(backend) = backend {
+                self.breakpoints
+                    .get_mut(&id)
+                    .ok_or(Error::BPNotFound(id))?
+                    .backend = backend;
+            }
+        }
+        self.breakpoints
+            .get_mut(&id)
+            .ok_or(Error::BPNotFound(id))?
+            .enabled = true;
+        Ok(())
+    }
+
+    /// Disable a breakpoint. An execution interrupted on its site then runs
+    /// through it unreported, so it is forgotten.
+    pub fn disable(
+        &mut self,
+        client: &mut dyn DebugBackend,
+        debugger: &Target,
+        id: u32,
+    ) -> Result<()> {
+        self.lift(client, debugger, id)?;
+        self.forget_interrupted_hits(id);
+        Ok(())
+    }
+
+    /// Disable a breakpoint to run the instruction under it, re-enabled
+    /// straight after. Other executions are held meanwhile, or, when they
+    /// are let run, stopped by the temporary site the run plants on the
+    /// instruction, so an interrupted one still returns to an armed site;
+    /// what it remembers of them is kept.
+    pub fn lift(
+        &mut self,
+        client: &mut dyn DebugBackend,
+        debugger: &Target,
+        id: u32,
+    ) -> Result<()> {
+        let bp = self.breakpoints.get_mut(&id).ok_or(Error::BPNotFound(id))?;
+
+        if !bp.enabled {
+            return Ok(());
+        }
+        if bp.resolved {
+            Self::uninstall_breakpoint(client, debugger, bp)?;
+        }
+        bp.enabled = false;
+        Ok(())
+    }
+
+    pub fn disable_guest_memory_patch_in_address_space(
+        &mut self,
+        client: &mut dyn DebugBackend,
+        debugger: &Target,
+        id: u32,
+        dtb: Dtb,
+    ) -> Result<()> {
+        let bp = self.breakpoints.get_mut(&id).ok_or(Error::BPNotFound(id))?;
+
+        if !bp.enabled {
+            return Ok(());
+        }
+
+        match &bp.backend {
+            BreakpointBackend::GuestMemoryPatch { original } => {
+                let memory = debugger.address_space(dtb);
+                memory.write_bytes(bp.address, original.as_slice())?;
+                forget_site(debugger, &memory, bp.address);
+                client.note_breakpoint_uninstalled(bp.address.0);
+                bp.enabled = false;
+                Ok(())
+            }
+            BreakpointBackend::Kernel { .. } => Err(Error::Breakpoint(
+                "cannot address-space-disable a kernel breakpoint".into(),
+            )),
+            BreakpointBackend::Hardware => Err(Error::Breakpoint(
+                "cannot address-space-disable a hardware breakpoint".into(),
+            )),
+            // Nothing was ever patched in any address space.
+            BreakpointBackend::Deferred => {
+                bp.enabled = false;
+                Ok(())
+            }
+        }
+    }
+
+    pub fn managed_ids(&self) -> Vec<u32> {
+        let mut ids = self.breakpoints.keys().copied().collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids
+    }
+
+    pub fn list(&self) -> Vec<&BreakpointInfo> {
+        let mut bps: Vec<_> = self
+            .breakpoints
+            .values()
+            .filter(|bp| !self.one_shot_hits.contains(&bp.id))
+            .collect();
+        bps.sort_by_key(|bp| bp.id);
+        bps
+    }
+
+    /// Find a managed breakpoint, including a one-shot hit retained until the
+    /// next resume so the stop that reported it can expose its handle.
+    pub fn get(&self, id: u32) -> Option<&BreakpointInfo> {
+        self.breakpoints.get(&id)
+    }
+
+    /// The breakpoint numbered `id` as [`Self::list`] lists it: not a
+    /// one-shot hit retained until the next resume, which is gone for the
+    /// user.
+    pub fn listed(&self, id: u32) -> Option<&BreakpointInfo> {
+        self.get(id)
+            .filter(|bp| !self.one_shot_hits.contains(&bp.id))
+    }
+
+    /// The listed breakpoint numbered `id`, only if it is still the one
+    /// created with `serial` and not a later breakpoint that reused the id.
+    pub fn live(&self, id: u32, serial: u64) -> Option<&BreakpointInfo> {
+        self.listed(id).filter(|bp| bp.serial == serial)
+    }
+
+    pub fn has_enabled_breakpoints(&self) -> bool {
+        self.breakpoints
+            .values()
+            .any(|bp| bp.enabled && bp.resolved)
+    }
+
+    /// Remember that the execution with stack pointer `rsp` was interrupted
+    /// on breakpoint `id`'s site, before its instruction, while running past
+    /// the hit reported there. Bounded: the oldest are dropped first.
+    pub fn note_interrupted_hit(&mut self, id: u32, rsp: u64) {
+        const KEPT: usize = 64;
+        if !self.breakpoints.contains_key(&id) || self.interrupted_hits.contains(&(id, rsp)) {
+            return;
+        }
+        if self.interrupted_hits.len() == KEPT {
+            self.interrupted_hits.remove(0);
+        }
+        self.interrupted_hits.push((id, rsp));
+    }
+
+    /// Whether a hit at `rip` with stack pointer `rsp` is an interrupted
+    /// execution returning to the site it was reported at; it is forgotten
+    /// then. Kernel stacks are unique to their thread, and that thread
+    /// cannot get past the armed site without hitting it, so its next hit
+    /// there is always the return.
+    pub fn take_interrupted_hit(&mut self, rip: u64, rsp: u64) -> bool {
+        let Some(id) = self.breakpoint_id_at_address(rip) else {
+            return false;
+        };
+        let Some(index) = self
+            .interrupted_hits
+            .iter()
+            .position(|hit| *hit == (id, rsp))
+        else {
+            return false;
+        };
+        self.interrupted_hits.remove(index);
+        true
+    }
+
+    /// Forget that the execution with stack pointer `rsp` was interrupted on
+    /// breakpoint `id`'s site: it is running past it now.
+    pub fn forget_interrupted_hit(&mut self, id: u32, rsp: u64) {
+        self.interrupted_hits.retain(|hit| *hit != (id, rsp));
+    }
+
+    fn forget_interrupted_hits(&mut self, id: u32) {
+        self.interrupted_hits.retain(|(hit, _)| *hit != id);
+    }
+
+    pub fn has_interrupted_hits(&self) -> bool {
+        !self.interrupted_hits.is_empty()
+    }
+
+    pub fn refresh_enabled(
+        &mut self,
+        client: &mut dyn DebugBackend,
+        debugger: &Target,
+    ) -> Result<()> {
+        let mut enabled: Vec<_> = self
+            .breakpoints
+            .values()
+            .filter(|bp| bp.enabled && bp.resolved && bp.hardware.is_none())
+            .cloned()
+            .collect();
+        enabled.sort_by_key(|bp| bp.id);
+        let dropped = client.sites_dropped_by_stop();
+
+        for bp in enabled {
+            // A target that owns its sites keeps them across a stop, except
+            // the ones it dropped while reporting it; lifting and rewriting
+            // the survivors would only churn its table. A site whose
+            // displaced byte we never saw still goes through the reinstall
+            // below, to pick that byte up now the page is resident.
+            if client.target_manages_breakpoint_sites()
+                && matches!(&bp.backend, BreakpointBackend::Kernel { original: Some(_) })
+                && !dropped.contains(&bp.address.0)
+            {
+                continue;
+            }
+            // A restore that fails for any reason other than an absent page
+            // leaves an `int3` at a site we can no longer account for, and
+            // re-patching over it strands that byte: the saved original is
+            // written back to whatever the address resolves to next, while the
+            // old frame keeps the breakpoint. Surface the failure instead.
+            let uninstalled = match Self::uninstall_breakpoint(client, debugger, &bp) {
+                Ok(()) => true,
+                // Nothing to restore: the page is gone, and the reinstall
+                // below fails the same way and reports it.
+                Err(Error::BadVirtualAddress(_) | Error::AddressNotInDump(_)) => false,
+                Err(error) => return Err(error),
+            };
+            if uninstalled && matches!(&bp.backend, BreakpointBackend::Kernel { original: None }) {
+                let backend = Self::install_breakpoint(client, debugger, bp.address, &bp.scope)?;
+                self.breakpoints
+                    .get_mut(&bp.id)
+                    .ok_or(Error::BPNotFound(bp.id))?
+                    .backend = backend;
+            } else {
+                Self::install_existing_breakpoint(client, debugger, &bp)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::backend::dbg_backend::HwBreakpointAccess;
+    use crate::base::error::Error;
+    use crate::base::types::VirtAddr;
+    use crate::nt::breakpoints::{BreakpointManager, HardwareBreakpoint};
+
+    #[test]
+    fn failed_uninstall_keeps_breakpoint_managed_for_retry() {
+        let mut manager = BreakpointManager::new();
+        manager.insert_for_test(
+            7,
+            VirtAddr(0x1000),
+            true,
+            Some(HardwareBreakpoint {
+                access: HwBreakpointAccess::Execute,
+                len: 1,
+                slot: 0,
+            }),
+        );
+
+        let result = manager.remove_if_uninstalled(7, |_| {
+            Err(Error::Kd("injected hardware clear failure".into()))
+        });
+        assert!(result.is_err());
+        assert_eq!(manager.list().len(), 1);
+        assert_eq!(manager.list()[0].id, 7);
+        assert!(manager.has_enabled_hardware_breakpoints());
+    }
+
+    #[test]
+    fn reused_id_gets_a_new_serial() {
+        let mut manager = BreakpointManager::new();
+        manager.insert_for_test(0, VirtAddr(0x1000), true, None);
+        let old = manager.get(0).unwrap().serial;
+        manager.remove_if_uninstalled(0, |_| Ok(())).unwrap();
+        assert_eq!(manager.next_id, 0);
+
+        manager.insert_for_test(0, VirtAddr(0x2000), true, None);
+        let new = manager.get(0).unwrap().serial;
+
+        assert_ne!(old, new);
+        assert!(manager.live(0, old).is_none());
+        assert_eq!(manager.live(0, new).unwrap().address, VirtAddr(0x2000));
+    }
+
+    /// Another debugger's breakpoint with the same id is not this one
+    /// (`Stop.hit` compares serials).
+    #[test]
+    fn another_sessions_breakpoint_with_the_same_id_has_another_serial() {
+        let mut first = BreakpointManager::new();
+        let mut second = BreakpointManager::new();
+        first.insert_for_test(0, VirtAddr(0x1000), true, None);
+        second.insert_for_test(0, VirtAddr(0x1000), true, None);
+
+        assert_ne!(first.get(0).unwrap().serial, second.get(0).unwrap().serial);
+    }
+
+    #[test]
+    fn fired_one_shot_is_no_longer_listed() {
+        let mut manager = BreakpointManager::new();
+        manager.insert_for_test(3, VirtAddr(0x3000), true, None);
+        manager.breakpoints.get_mut(&3).unwrap().one_shot = true;
+        let serial = manager.get(3).unwrap().serial;
+        assert_eq!(manager.live(3, serial).unwrap().address, VirtAddr(0x3000));
+
+        manager.mark_one_shot_hit(3).unwrap();
+
+        // Held until the next resume removes it, but gone for hosts.
+        assert_eq!(manager.get(3).unwrap().serial, serial);
+        assert!(manager.listed(3).is_none());
+        assert!(manager.live(3, serial).is_none());
+    }
+
+    #[test]
+    fn renumber_moves_breakpoint_and_preserves_one_shot_state() {
+        let mut manager = BreakpointManager::new();
+        manager.insert_for_test(2, VirtAddr(0x2000), true, None);
+        manager.breakpoints.get_mut(&2).unwrap().one_shot = true;
+        manager.mark_one_shot_hit(2).unwrap();
+
+        manager.renumber(2, 7).unwrap();
+
+        assert!(!manager.breakpoints.contains_key(&2));
+        assert_eq!(manager.breakpoints.get(&7).unwrap().id, 7);
+        assert_eq!(manager.one_shot_hit_ids(), vec![7]);
+        assert!(manager.renumber(7, 7).is_ok());
+        manager.insert_for_test(8, VirtAddr(0x8000), true, None);
+        assert!(manager.renumber(7, 8).is_err());
+        assert!(manager.breakpoints.contains_key(&7));
+    }
+
+    #[test]
+    fn source_batch_rollback_removes_only_locations_added_by_the_batch() {
+        let mut manager = BreakpointManager::new();
+        manager.insert_for_test(1, VirtAddr(0x1000), true, None);
+        manager.insert_for_test(2, VirtAddr(0x2000), true, None);
+        manager.insert_for_test(9, VirtAddr(0x9000), true, None);
+
+        manager
+            .remove_ids_if_uninstalled([2, 1], |_| Ok(()))
+            .unwrap();
+
+        let ids: Vec<_> = manager.list().into_iter().map(|bp| bp.id).collect();
+        assert_eq!(ids, vec![9]);
+    }
+
+    #[test]
+    fn source_batch_rollback_reports_failed_uninstall_and_keeps_it_managed() {
+        let mut manager = BreakpointManager::new();
+        manager.insert_for_test(1, VirtAddr(0x1000), true, None);
+        manager.insert_for_test(2, VirtAddr(0x2000), true, None);
+        manager.insert_for_test(9, VirtAddr(0x9000), true, None);
+
+        let error = manager
+            .remove_ids_if_uninstalled([2, 1], |bp| {
+                if bp.id == 2 {
+                    Err(Error::Kd("injected rollback failure".into()))
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("#2"));
+        assert!(error.to_string().contains("injected rollback failure"));
+        let ids: Vec<_> = manager.list().into_iter().map(|bp| bp.id).collect();
+        assert_eq!(ids, vec![2, 9]);
+    }
+
+    #[test]
+    fn physical_breakpoint_sites_reject_same_kind_collisions() {
+        let mut manager = BreakpointManager::new();
+        let address = VirtAddr(0x4000);
+        manager.insert_for_test(2, address, false, None);
+
+        let error = manager
+            .ensure_site_available(address, false, None)
+            .expect_err("disabled breakpoints still own their physical site");
+        assert!(error.to_string().contains("breakpoint 2 already owns"));
+        assert!(manager.ensure_site_available(address, true, None).is_ok());
+    }
+}

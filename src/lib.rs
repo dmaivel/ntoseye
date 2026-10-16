@@ -1,6 +1,9 @@
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("This application only runs on Linux and macOS hosts.");
 
+use crate::backend::kd::{self, KdMemorySource};
+use crate::base::error::{Error, Result};
+
 pub const DEFAULT_GDB_ADDR: &str = "127.0.0.1:1234";
 pub const DEFAULT_KD_SOCKET: &str = "/tmp/ntoseye-kd.sock";
 pub const DEFAULT_KDNET_ADDR: &str = "0.0.0.0:50000";
@@ -76,15 +79,15 @@ pub enum TargetSpec {
         /// Initial KD/KDNET handshake timeout in positive integer seconds.
         /// `None` uses `NTOSEYE_KD_TIMEOUT`, or 8 seconds when it is unset.
         kd_handshake_timeout: Option<u64>,
-        memory_source: kd::KdMemorySource,
+        memory_source: KdMemorySource,
     },
 }
 
 impl TargetSpec {
     /// Reject argument combinations that cannot work before touching any
     /// transport, with the same wording for every host.
-    pub fn validate(&self) -> error::Result<()> {
-        let invalid = |message: &str| error::Error::InvalidArgument(message.to_string());
+    pub fn validate(&self) -> Result<()> {
+        let invalid = |message: &str| Error::InvalidArgument(message.to_string());
         let Self::Live {
             backend,
             connect,
@@ -108,7 +111,7 @@ impl TargetSpec {
             _ => {}
         }
         if !matches!(backend, Backend::Kd | Backend::KdNet)
-            && *memory_source != kd::KdMemorySource::Auto
+            && *memory_source != KdMemorySource::Auto
         {
             return Err(invalid(
                 "memory_source is only valid for kd and kdnet backends",
@@ -137,65 +140,29 @@ impl TargetSpec {
     }
 }
 
-#[macro_use]
-pub mod output;
+// The layers, bottom to top. Each uses only the layers before it, and
+// build.rs fails the build on a reference to a later one (see
+// docs/internals/architecture.md for the map and its exceptions).
 
-pub mod blackbox;
-pub mod breakpoints;
-pub mod bugchecks;
-pub mod bytes;
-#[cfg(feature = "cli")]
-pub mod cli;
-#[cfg(feature = "cli")]
-pub mod configure;
-pub mod cpu_context;
-pub mod cpu_state;
-#[cfg(feature = "dap")]
-pub mod dap;
-pub mod dbg_backend;
-pub mod debugger_data;
-pub mod diagnostics;
-pub mod disasm;
-pub mod dmp;
-pub mod dump_writer;
-pub mod error;
-pub mod exception_policy;
-pub mod expr;
-pub mod gdb;
-#[cfg(feature = "gdbserver")]
-pub mod gdbserver;
-pub mod guest;
-pub mod host;
-pub mod kd;
-pub mod kuser_shared;
-pub mod layout;
-#[cfg(feature = "mcp")]
-pub mod mcp;
-pub mod memory;
-pub mod memory_backend;
-pub mod notice;
-pub mod ntstatus;
-pub mod partition_backend;
-pub mod pe;
-pub mod phys;
-#[cfg(feature = "python")]
-pub mod python;
-#[cfg(feature = "repl")]
-pub mod repl;
+/// Byte and text helpers, errors, notices, output and the core types.
+#[macro_use]
+pub mod base;
+
+/// The debug transports: KD, the GDB stub, host and partition memory.
+pub mod backend;
+
+/// The Windows model over a backend: the target, its guest, symbols, stacks,
+/// dump formats and breakpoints.
+pub mod nt;
+
+/// A debugging session: run control, stops and inspection.
 pub mod session;
-pub mod symbols;
-pub mod target;
-#[cfg(any(feature = "dap", feature = "gdbserver"))]
-mod termination;
-pub mod trapframe;
-pub mod triage_report;
-pub mod types;
-pub mod typeview;
-#[cfg(feature = "repl")]
-pub mod ui;
-pub mod unwind;
-pub mod userdump;
-pub mod wpp;
+
+/// Reports built over a session: `!analyze` triage and the blackbox.
+pub mod analysis;
+
+/// The front ends: the REPL, the Python SDK, MCP, DAP, gdbserver and the CLI.
+pub mod hosts;
 
 #[cfg(test)]
 mod tests {
@@ -209,7 +176,7 @@ mod tests {
                 connect: None,
                 kdnet_key: (backend == Backend::KdNet).then(|| "1.2.3.4".into()),
                 kd_handshake_timeout: Some(20),
-                memory_source: kd::KdMemorySource::Auto,
+                memory_source: KdMemorySource::Auto,
             };
             assert_eq!(
                 spec.validate().is_ok(),
@@ -226,12 +193,9 @@ mod tests {
                 connect: None,
                 kdnet_key: None,
                 kd_handshake_timeout: Some(seconds),
-                memory_source: kd::KdMemorySource::Auto,
+                memory_source: KdMemorySource::Auto,
             };
-            assert!(matches!(
-                spec.validate(),
-                Err(error::Error::InvalidArgument(_))
-            ));
+            assert!(matches!(spec.validate(), Err(Error::InvalidArgument(_))));
         }
     }
 }

@@ -2,16 +2,18 @@
 //! that thread, processor, hypercall-caller, pass-count, or condition
 //! filters reject.
 
-use crate::breakpoints::{
-    BreakpointHitDisposition, BreakpointHitResult, BreakpointInfo, BreakpointManager, ThreadScope,
-};
-use crate::dbg_backend::{
+use crate::backend::dbg_backend::{
     ContinueDisposition, DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, RegisterMap,
     StopEvent, debug_registers, processor_index_from_backend_thread_id,
 };
-use crate::error::{Error, Result};
-use crate::guest::hypercalls::HypercallCallerInfo;
-use crate::notice::Notice;
+use crate::base::error::{Error, Result};
+use crate::base::notice::Notice;
+use crate::base::types::Arch;
+use crate::nt::breakpoints::{
+    BreakpointHitDisposition, BreakpointHitResult, BreakpointInfo, BreakpointManager, ThreadScope,
+};
+use crate::nt::guest::hypercalls::HypercallCallerInfo;
+use crate::nt::target::{BreakpointStop, ExpressionScope, Target};
 use crate::session::context::{
     refresh_windows_thread_context_for_backend_thread, update_target_context_from_registers,
 };
@@ -19,8 +21,6 @@ use crate::session::stops::set_current_thread_from_stop;
 use crate::session::{
     BreakpointStopAction, STATUS_SINGLE_STEP, Session, WatchpointStopAction, step_trace_enabled,
 };
-use crate::target::{BreakpointStop, ExpressionScope, Target};
-use crate::types::Arch;
 
 impl Session {
     /// Classify a freshly observed stop at (`rip`, `cr3`) against our breakpoints,
@@ -207,8 +207,8 @@ pub fn stopped_guest_vp(target: &Target, stopped: &str) -> Result<Option<(u64, u
 
 /// Whether a hit reported on `stopped`, at `rip` on root `cr3`, is the
 /// hypercall or VM exit from the caller a hypervisor breakpoint names (see
-/// [`crate::breakpoints::HypercallFilter::matches`] and
-/// [`crate::guest::vm_exits::ExitFilter::matches`]), with the
+/// [`crate::nt::breakpoints::HypercallFilter::matches`] and
+/// [`crate::nt::guest::vm_exits::ExitFilter::matches`]), with the
 /// caller found, whose registers the breakpoint's condition sees (see
 /// [`evaluate_hit_condition`]). Resolved only for such a breakpoint. A stop
 /// whose processor cannot be resolved has an unknown caller, so it matches.
