@@ -136,7 +136,8 @@ pub enum Refusal {
         capability: DebugCapability,
         backend: &'static str,
     },
-    /// A writing operation in the `.vtl 1` memory view, which is read-only.
+    /// An operation that writes guest or debugger state (anything but host
+    /// files) in the `.vtl 1` memory view, which is read-only.
     ReadOnlyVtl1,
 }
 
@@ -182,7 +183,11 @@ impl Session {
                 backend: self.backend.name(),
             });
         }
-        if !effects.writes.is_empty() && self.target.in_secure_scope() {
+        // The `.vtl 1` view is read-only for the guest; a file the debugger
+        // writes on the host changes nothing in it.
+        if effects.writes.iter().any(|write| *write != Writes::Files)
+            && self.target.in_secure_scope()
+        {
             return Err(Refusal::ReadOnlyVtl1);
         }
         Ok(())
