@@ -2097,6 +2097,32 @@ fn a_call_trace_follows_its_thread_past_a_step_that_switched_it_out() {
     assert_eq!(continues.load(Ordering::Relaxed), 2);
 }
 
+/// A call trace that ends at a user breakpoint runs its action, as a step
+/// or a run that stops there does; the trace stays ended even when the
+/// action asks to resume.
+#[test]
+fn a_call_trace_ending_at_a_breakpoint_runs_its_action() {
+    let at = |rip, rsp, ethread| Landing { rip, rsp, ethread };
+    let (mut session, continues) = walk_session(&[at(0x1001, 0x2000, WALKED)], &[]);
+    session
+        .breakpoints
+        .insert_for_test(1, VirtAddr(0x1001), true, None);
+    session
+        .breakpoints
+        .set_action(1, Some("log".into()))
+        .unwrap();
+    let log = recording(&mut session, true);
+
+    let trace = session.trace_calls(100, &Cancel::NEVER).unwrap();
+    assert_eq!(trace.end, CallTraceEnd::Breakpoint);
+    assert_eq!(*log.lock(), ["action log"]);
+    assert_eq!(
+        continues.load(Ordering::Relaxed),
+        0,
+        "the action's resume ran"
+    );
+}
+
 /// A call trace whose thread never reaches the instruction a step left it
 /// short of, while other threads keep reaching it first, ends as
 /// interrupted when its time limit runs out instead of waiting on the
@@ -3657,6 +3683,37 @@ fn a_parked_breakpoint_runs_its_action_when_it_surfaces() {
     };
     assert_eq!(stop.breakpoint().map(|hit| hit.id), Some(1));
     assert_eq!(*log.lock(), ["action log"]);
+}
+
+/// A break-in that surfaces a parked hit runs the hit's action, and a
+/// resume the action asks for is ignored: halt wins.
+#[test]
+fn a_break_runs_a_parked_hits_action_and_stays_halted() {
+    let mut backend = MockBackend::default().running().with_pending_stop();
+    backend.set("rip", 0x1000);
+    backend.queue_interrupt(breakpoint_event(0x1000));
+    let continues = Arc::clone(&backend.continues);
+    let mut session = session_with_mock(backend);
+    session
+        .breakpoints
+        .insert_for_test(1, VirtAddr(0x1000), true, None);
+    session
+        .breakpoints
+        .set_action(1, Some("gc".into()))
+        .unwrap();
+    let log = recording(&mut session, true);
+    session.service_idle();
+
+    let RunOutcome::Stopped(stop) = session.run(Motion::Break, &Cancel::NEVER).unwrap() else {
+        panic!("no stop surfaced");
+    };
+    assert_eq!(stop.breakpoint().map(|hit| hit.id), Some(1));
+    assert_eq!(*log.lock(), ["action gc"]);
+    assert_eq!(
+        continues.load(Ordering::Relaxed),
+        0,
+        "the action's resume ran"
+    );
 }
 
 /// A hit its breakpoint declines is absorbed and the target runs on; a

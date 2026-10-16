@@ -485,9 +485,11 @@ fn notify_line(code: u32, first_chance: Option<bool>, address: Option<u64>) -> S
 
 impl Session {
     /// Move the target per `motion` and report where it stopped, the one
-    /// run-control entry point for every host. A breakpoint hit whose action
-    /// asks to resume is passed as a declined hit is ([`Self::decline`]),
-    /// unless the session's interrupt request arrived meanwhile.
+    /// run-control entry point for every host. Every breakpoint stop runs
+    /// its action; a hit whose action asks to resume is passed as a declined
+    /// hit is ([`Self::decline`]), unless a halt was asked for (a
+    /// `Motion::Break`, a cancellation that halts) or the session's
+    /// interrupt request arrived meanwhile: halt wins.
     pub fn run(&mut self, motion: Motion, cancel: &Cancel<'_>) -> Result<RunOutcome> {
         let stepping = self.current_thread.clone();
         let mut motion = self.plan(motion)?;
@@ -502,12 +504,13 @@ impl Session {
             }
             self.note_stop(&outcome);
             let stop = self.current_snapshot(outcome);
-            let action = stop
-                .breakpoint()
-                .and_then(|hit| hit.action.clone())
-                .filter(|_| !self.halt_requested);
-            if let Some(action) = action
+            // The action runs for every breakpoint stop. A halt that was
+            // asked for (`Motion::Break`, a cancellation that halts, Ctrl+C)
+            // wins over a resume the action asks for: the target stays at
+            // the hit.
+            if let Some(action) = stop.breakpoint().and_then(|hit| hit.action.clone())
                 && self.run_breakpoint_action(&action)
+                && !self.halt_requested
                 // A Ctrl+C taken meanwhile breaks in at the hit instead of
                 // being lost to the action's resume.
                 && !self.target.interrupt.swap(false, Ordering::SeqCst)
@@ -867,7 +870,7 @@ impl Session {
     /// Run a breakpoint's action; whether it asked to resume. A session
     /// without a runner (built without the REPL), or one already running an
     /// action, runs none.
-    fn run_breakpoint_action(&mut self, action: &str) -> bool {
+    pub(super) fn run_breakpoint_action(&mut self, action: &str) -> bool {
         let Some(mut runner) = self.action_runner.take() else {
             return false;
         };

@@ -749,7 +749,9 @@ impl Session {
     /// threads keep reaching the instruction first. An interrupt request
     /// ([`Target::interrupt`]) or the host's `cancel` (both `Interrupted`), a
     /// breakpoint, a diverted step whose thread is not known, or a failed
-    /// step ends the trace early; [`CallTrace::end`] says which.
+    /// step ends the trace early; [`CallTrace::end`] says which. A trace
+    /// that ends at a user breakpoint runs its action, ignoring a resume
+    /// the action asks for.
     pub fn trace_calls(&mut self, limit: usize, cancel: &Cancel<'_>) -> Result<CallTrace> {
         if limit == 0 {
             return Err(Error::InvalidArgument(
@@ -775,6 +777,8 @@ impl Session {
         let mut stack = vec![(frame(name(&self.target, &current)), current.sp)];
         let mut instructions = 0usize;
         let arm64 = self.target.arch() == Arch::Arm64;
+        // The user breakpoint the trace ended at, whose action runs then.
+        let mut hit = None;
         let end = loop {
             if instructions >= limit {
                 break CallTraceEnd::Limit;
@@ -798,7 +802,10 @@ impl Session {
                             exception_code: None,
                             ..
                         }) => break CallTraceEnd::Interrupted,
-                        Ok(ContinueOutcome::Breakpoint { .. }) => break CallTraceEnd::Breakpoint,
+                        Ok(ContinueOutcome::Breakpoint { id, .. }) => {
+                            hit = Some(id);
+                            break CallTraceEnd::Breakpoint;
+                        }
                         Ok(_) => {
                             break CallTraceEnd::Failed(
                                 "the target stopped on an exception while the traced thread was \
@@ -809,7 +816,8 @@ impl Session {
                         Err(error) => break CallTraceEnd::Failed(error.to_string()),
                     }
                 }
-                Ok(WalkStep::Stop(ContinueOutcome::Breakpoint { .. })) => {
+                Ok(WalkStep::Stop(ContinueOutcome::Breakpoint { id, .. })) => {
+                    hit = Some(id);
                     break CallTraceEnd::Breakpoint;
                 }
                 Ok(WalkStep::Stop(_)) => break CallTraceEnd::Diverted,
@@ -823,10 +831,8 @@ impl Session {
                 }
                 Err(error) => break CallTraceEnd::Failed(error.to_string()),
             };
-            if self
-                .code_breakpoint_after_step(current.ip, next.ip)
-                .is_some()
-            {
+            if let Some(id) = self.code_breakpoint_after_step(current.ip, next.ip) {
+                hit = Some(id);
                 break CallTraceEnd::Breakpoint;
             }
             let (open, entry_sp) = stack.last_mut().expect("the traced function's frame");
@@ -848,6 +854,16 @@ impl Session {
             current = next;
         };
 
+        // As at any other motion's stop, the breakpoint's action runs. The
+        // trace has ended, so a resume the action asks for is ignored, as
+        // for a halt.
+        if let Some(action) = hit
+            .and_then(|id| self.breakpoints.get(id))
+            .filter(|breakpoint| !breakpoint.temporary)
+            .and_then(|breakpoint| breakpoint.action.clone())
+        {
+            self.run_breakpoint_action(&action);
+        }
         let (mut root, _) = stack.remove(0);
         // Fold frames still open when the trace ended into their callers.
         let mut open: Vec<CallTraceFrame> = stack.into_iter().map(|(frame, _)| frame).collect();
