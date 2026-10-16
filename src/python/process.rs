@@ -345,13 +345,13 @@ impl Process {
     }
 
     /// Decode the kernel and user APC queues of this process (`!apc`).
-    fn apcs<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::sched::ApcQueues>> {
+    fn apcs<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, crate::target::sched::ApcQueues>> {
         let detail = self.owner.with_in(py, &self.context(), |session| {
             session
                 .inspect_apcs(ApcSelector::Process(self.info.pid))
                 .map_err(err)
         })?;
-        Typed::new(py, view::sched::apcs(&detail))
+        Typed::new(py, detail)
     }
 
     /// Evaluate a debugger expression in the symbol scope of this process.

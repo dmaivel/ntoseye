@@ -9,12 +9,12 @@ use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::error::{Error, Result};
 use crate::session::Session;
 use crate::target::sched::{
-    ApcDetail, ApcLayout, ApcListDetail, ApcSelector, ApcThread, FindStackDetail, FindStackThread,
-    MAX_LIST_ENTRIES, RunningDetail, StackThreadDetail, StacksDetail, UniqStackDetail,
-    UniqStackScope, UnwalkedThread, findstack_level_error, frame_symbol_matches, group_stacks,
-    select_threads, walk_list_records,
+    Apc, ApcLayout, ApcQueues, ApcSelector, ApcThread, FindStack, FindStackThread,
+    MAX_LIST_ENTRIES, RunningProcessors, ThreadStack, ThreadStacks, UniqStackScope, UniqStacks,
+    UnwalkedThread, findstack_level_error, frame_symbol_matches, group_stacks, select_threads,
+    walk_list_records,
 };
-use crate::target::workqueue::ExQueueDetail;
+use crate::target::workqueue::WorkQueues;
 use crate::target::{DiagnosticValue, ListTermination, ThreadInfo};
 use crate::types::VirtAddr;
 use crate::unwind::{ThreadStackTrace, ThreadTraceContext, resolve_thread_trace_context};
@@ -29,7 +29,7 @@ impl Session {
     /// plus each decoded worker thread's bounded stack when flag 0x4 is set,
     /// walked as [`Session::inspect_stacks`] walks them. Workers left when
     /// the host interrupts have their stack marked unavailable.
-    pub fn inspect_work_queues(&mut self, flags: u64) -> Result<ExQueueDetail> {
+    pub fn inspect_work_queues(&mut self, flags: u64) -> Result<WorkQueues> {
         let mut detail = self.target.executive_work_queues(flags)?;
         if flags & 0x4 == 0 {
             return Ok(detail);
@@ -80,7 +80,7 @@ impl Session {
         &mut self,
         include_idle: bool,
         include_stacks: bool,
-    ) -> Result<RunningDetail> {
+    ) -> Result<RunningProcessors> {
         let mut detail = self.target.running_data(include_idle)?;
         if include_stacks {
             let vcpus = self.processor_vcpus();
@@ -127,19 +127,14 @@ impl Session {
         }
     }
 
-    fn decode_apc(
-        &self,
-        apc: VirtAddr,
-        layout: &ApcLayout,
-        trace: &ThreadTraceContext,
-    ) -> ApcDetail {
+    fn decode_apc(&self, apc: VirtAddr, layout: &ApcLayout, trace: &ThreadTraceContext) -> Apc {
         let kernel = self
             .target
             .pointer_field("_KAPC", apc, layout.kernel_routine);
         let normal = self
             .target
             .pointer_field("_KAPC", apc, layout.normal_routine);
-        ApcDetail {
+        Apc {
             address: apc,
             kernel_routine_symbol: self.target.pointer_symbol(&kernel, trace),
             kernel_routine: kernel,
@@ -152,7 +147,7 @@ impl Session {
     /// thread, one PID/EPROCESS, or all threads.  APC list walks are bounded and
     /// preserve their per-list termination; layout failure is retained in
     /// `layout_error` while thread metadata still remains usable.
-    pub fn inspect_apcs(&self, selector: ApcSelector) -> Result<ApcListDetail> {
+    pub fn inspect_apcs(&self, selector: ApcSelector) -> Result<ApcQueues> {
         let (selector, threads) = self.select_apc_threads(selector)?;
         let layout = self.target.apc_layout();
         let layout_error = layout.as_ref().err().map(ToString::to_string);
@@ -234,7 +229,7 @@ impl Session {
         if selected_count > APC_THREAD_DISPLAY_LIMIT {
             truncated = true;
         }
-        Ok(ApcListDetail {
+        Ok(ApcQueues {
             selector,
             threads: detail_threads,
             total,
@@ -272,7 +267,7 @@ impl Session {
     /// case-insensitive process/symbol filter before returning structured rows.
     /// Each top symbol/stack read is independently diagnostic; unreadable
     /// thread metadata remains visible with its unavailable field.
-    pub fn inspect_stacks(&mut self, level: u8, filter: Option<&str>) -> Result<StacksDetail> {
+    pub fn inspect_stacks(&mut self, level: u8, filter: Option<&str>) -> Result<ThreadStacks> {
         let level = level.min(2);
         let filter = filter.map(|value| value.to_ascii_lowercase());
         let (threads, active_vcpus) = self.windows_threads()?;
@@ -323,7 +318,7 @@ impl Session {
                 if !symbol_match && !process_match {
                     return;
                 }
-                details.push(StackThreadDetail {
+                details.push(ThreadStack {
                     active_vcpu: active_vcpus.get(&thread.ethread.0).cloned(),
                     thread,
                     top_symbol,
@@ -332,7 +327,7 @@ impl Session {
                     error,
                 });
             });
-        Ok(StacksDetail {
+        Ok(ThreadStacks {
             level,
             filter,
             scanned_threads,
@@ -346,7 +341,7 @@ impl Session {
     /// [`MAX_STACK_FRAMES_LEVEL_2`] frames) has a frame matching `pattern`
     /// (see [`frame_symbol_matches`]). Threads whose stacks do not walk are
     /// listed apart: whether they match is unknown.
-    pub fn inspect_findstack(&mut self, pattern: &str, level: u8) -> Result<FindStackDetail> {
+    pub fn inspect_findstack(&mut self, pattern: &str, level: u8) -> Result<FindStack> {
         if pattern.is_empty() {
             return Err(Error::InvalidArgument(
                 "!findstack needs a symbol or module".into(),
@@ -388,7 +383,7 @@ impl Session {
                 }),
             },
         );
-        Ok(FindStackDetail {
+        Ok(FindStack {
             pattern: pattern.to_string(),
             level,
             scanned_threads,
@@ -401,7 +396,7 @@ impl Session {
     /// `!uniqstack`: the threads of `scope`, grouped by identical walked
     /// stacks (up to [`MAX_STACK_FRAMES_LEVEL_2`] frames; see
     /// [`group_stacks`]).
-    pub fn inspect_uniqstack(&mut self, scope: UniqStackScope) -> Result<UniqStackDetail> {
+    pub fn inspect_uniqstack(&mut self, scope: UniqStackScope) -> Result<UniqStacks> {
         let (mut threads, active_vcpus) = self.windows_threads()?;
         if let UniqStackScope::Process { pid, .. } = &scope {
             threads.retain(|thread| thread.pid == Some(*pid));
@@ -421,7 +416,7 @@ impl Session {
                 }),
             },
         );
-        Ok(UniqStackDetail {
+        Ok(UniqStacks {
             scope,
             scanned_threads,
             interrupted,

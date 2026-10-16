@@ -92,7 +92,9 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   the name, unsplit (with `style = RawTail`, quotes and `;` intact);
 ///   `invoked`: a `&str`, the name the command was typed as;
 /// - `parse = path`: a custom parser `fn(&mut ArgCx, &mut ArgCursor) ->
-///   Result<T, ArgError>`; `each = path`: one returning `Vec<T>`, which the
+///   Result<T, ArgError>`, which may take a `default` too: the SDK keyword's
+///   default, as the parser gives the REPL's; `each = path`: one returning
+///   `Vec<T>`, which the
 ///   REPL runs the operation on in turn, rendering the `Vec` of results;
 /// - `render`: a display option (WinDbg's flags that only choose what the
 ///   text shows), not passed to the function: the REPL passes the render

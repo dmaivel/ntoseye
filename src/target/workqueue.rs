@@ -13,6 +13,7 @@ use crate::target::sched::walk_list_records;
 use crate::target::{DiagnosticValue, ListTermination, Target, ThreadInfo};
 use crate::types::VirtAddr;
 use crate::unwind::StackFrame;
+use ntoseye_macros::record;
 
 /// `WORK_QUEUE_TYPE` names from wdm.h, in value order; `nt!ExpBuiltinPriorities`
 /// holds the queue priority of each.
@@ -32,82 +33,116 @@ const MAX_QUEUE_INDEXES: u64 = 64;
 const MAX_ITEMS_PER_PRIORITY: usize = 1024;
 const MAX_THREADS_PER_QUEUE: usize = 4096;
 
-/// An `_IO_WORKITEM` queued through `IoQueueWorkItem`: its `WorkItem`'s
-/// routine is `nt!IopProcessWorkItem`, which calls `Routine`.
-#[derive(Debug, Clone)]
-pub struct IoWorkItemDetail {
-    /// The `_IO_WORKITEM` holding the queued `_WORK_QUEUE_ITEM`.
+/// An `_IO_WORKITEM` that `IoQueueWorkItem` queued. Its work item runs
+/// `nt!IopProcessWorkItem`, which calls `routine`.
+#[record]
+pub struct IoWorkItem {
+    /// The `_IO_WORKITEM` that holds the queued `_WORK_QUEUE_ITEM`.
     pub address: VirtAddr,
     pub routine: VirtAddr,
+    /// `routine` as a symbol, when one resolves.
     pub routine_symbol: Option<String>,
+    /// The device or driver object that the item was allocated for.
     pub io_object: VirtAddr,
     pub context: VirtAddr,
 }
 
-/// One pending `_WORK_QUEUE_ITEM`.
-#[derive(Debug, Clone)]
-pub struct WorkItemDetail {
+/// A pending `_WORK_QUEUE_ITEM`.
+#[record]
+pub struct WorkItem {
     pub address: VirtAddr,
+    /// `WorkerRoutine`.
     pub routine: VirtAddr,
+    /// `routine` as a symbol, when one resolves.
     pub routine_symbol: Option<String>,
     pub parameter: VirtAddr,
-    pub io: Option<IoWorkItemDetail>,
+    /// The I/O work item that owns this item, if `IoQueueWorkItem` queued
+    /// it.
+    #[record(rename = "io_work_item")]
+    pub io: Option<IoWorkItem>,
 }
 
-/// One of a queue's 32 priority lists.
-#[derive(Debug, Clone)]
+/// One of the 32 priority lists of a work queue.
+#[record]
 pub struct WorkQueuePriority {
     pub priority: u8,
-    /// The `WORK_QUEUE_TYPE`s `ExQueueWorkItem` maps to this priority.
+    /// The `WORK_QUEUE_TYPE`s that `ExQueueWorkItem` maps to this priority.
     pub queue_types: Vec<&'static str>,
-    /// `CurrentCount[priority]`: threads running an item of this priority.
+    /// `CurrentCount[priority]`, the number of threads that run an item of
+    /// this priority.
     pub current_count: i32,
-    pub items: Vec<WorkItemDetail>,
+    /// The pending work items (key `items`).
+    #[record(rename = "items")]
+    pub work_items: Vec<WorkItem>,
+    /// How the list walk ended.
     pub termination: ListTermination,
 }
 
-/// A thread serving a queue.
-#[derive(Debug, Clone)]
+/// A thread that serves a work queue.
+#[record(impl)]
 pub struct WorkerThread {
     pub kthread: VirtAddr,
     pub thread: DiagnosticValue<ThreadInfo>,
-    /// Filled when stacks were requested for a thread that decoded.
+    /// The stack of the thread; `None` if stacks were not requested or the
+    /// thread did not decode.
+    #[record(skip)]
     pub stack: Option<DiagnosticValue<Vec<StackFrame>>>,
 }
 
-/// One `_EX_WORK_QUEUE`.
-#[derive(Debug, Clone)]
-pub struct WorkQueueDetail {
+#[record]
+impl WorkerThread {
+    /// The stack of the thread; `None` if stacks were not requested or the
+    /// thread did not decode.
+    #[cfg(feature = "python")]
+    #[record(getter, rename = "stack")]
+    pub fn stack_frames(&self) -> Option<DiagnosticValue<Vec<crate::view::execution::StackFrame>>> {
+        self.stack
+            .as_ref()
+            .map(|stack| stack.map(|frames| crate::view::execution::stack_frames(frames)))
+    }
+}
+
+/// An `_EX_WORK_QUEUE`.
+#[record]
+pub struct WorkQueue {
     pub address: VirtAddr,
     /// The `_EPARTITION` it belongs to.
     pub partition: VirtAddr,
+    /// The NUMA node.
     pub node: u16,
     pub queue_index: u32,
+    /// The name of `queue_index`, if it is a known index.
     pub queue_index_name: Option<String>,
     pub items_processed: u32,
     pub items_processed_last_pass: u32,
     pub thread_count: i32,
     pub min_threads: u64,
     pub max_threads: i32,
-    /// `_KPRIQUEUE.MaximumCount`: how many threads may run items at once.
+    /// `_KPRIQUEUE.MaximumCount`, the maximum number of threads that can run
+    /// items at the same time.
     pub concurrency: u32,
-    /// Items on all 32 lists, shown or not.
+    /// The number of items on all 32 priority lists, including items that
+    /// are not listed.
     pub pending: u64,
-    /// The lists holding items or running threads, restricted to the
-    /// requested priorities.
+    /// The priority lists that hold items or have running threads, limited
+    /// to the requested priorities.
     pub priorities: Vec<WorkQueuePriority>,
     pub threads: Vec<WorkerThread>,
+    /// How the worker-thread list walk ended.
     pub threads_termination: ListTermination,
 }
 
-/// Every executive worker queue (`!exqueue`).
-#[derive(Debug, Clone)]
-pub struct ExQueueDetail {
+/// All executive worker queues (`!exqueue`).
+#[record]
+pub struct WorkQueues {
+    /// The `!exqueue` flags.
+    #[record(hex)]
     pub flags: u64,
-    /// The priorities flags 0x10/0x20/0x40 selected; `None` shows all.
+    /// The priorities that flags 0x10, 0x20, and 0x40 selected. `None` means
+    /// all priorities.
     pub priority_filter: Option<Vec<u8>>,
-    pub queues: Vec<WorkQueueDetail>,
-    /// Partitions or queues that could not be decoded.
+    pub queues: Vec<WorkQueue>,
+    /// The partitions or queues that ntoseye could not decode.
     pub errors: Vec<String>,
 }
 
@@ -158,7 +193,7 @@ impl Target {
     /// (routine symbolized; an `_IO_WORKITEM` also by its I/O routine), and
     /// the threads serving it. Flags 0x10, 0x20, and 0x40 restrict the
     /// listed items to the critical, delayed, and hypercritical priorities.
-    pub fn executive_work_queues(&self, flags: u64) -> Result<ExQueueDetail> {
+    pub fn executive_work_queues(&self, flags: u64) -> Result<WorkQueues> {
         let guest = self.guest()?;
         let ntos = &guest.ntoskrnl;
         let types = ntos.types();
@@ -216,7 +251,7 @@ impl Target {
         }
         let symbol = |address: VirtAddr| self.format_code_address(ntos.dtb(), address);
 
-        let mut detail = ExQueueDetail {
+        let mut detail = WorkQueues {
             flags,
             priority_filter: priority_filter.clone(),
             queues: Vec::new(),
@@ -303,7 +338,7 @@ impl Target {
                         if !shown || (work_items.is_empty() && current_count == 0) {
                             continue;
                         }
-                        let items = work_items
+                        let shown_items = work_items
                             .into_iter()
                             .map(|item| work_item(types, item, io_item, io_work_item, &symbol))
                             .collect();
@@ -315,7 +350,7 @@ impl Target {
                                 .map(|(name, _)| *name)
                                 .collect(),
                             current_count,
-                            items,
+                            work_items: shown_items,
                             termination,
                         });
                     }
@@ -336,7 +371,7 @@ impl Target {
                         })
                         .collect();
                     let queue_index: u32 = work_queue.read_field("QueueIndex")?;
-                    detail.queues.push(WorkQueueDetail {
+                    detail.queues.push(WorkQueue {
                         address: queue,
                         partition,
                         node: node as u16,
@@ -375,7 +410,7 @@ fn work_item(
     io_item: u64,
     io_work_item: Option<VirtAddr>,
     symbol: &impl Fn(VirtAddr) -> Option<String>,
-) -> WorkItemDetail {
+) -> WorkItem {
     let item = types.struct_at("_WORK_QUEUE_ITEM", address).ok();
     let read = |name: &str| {
         item.as_ref()
@@ -388,7 +423,7 @@ fn work_item(
         .flatten()
         .and_then(|io| {
             let routine = io.read_pointer("Routine").ok()?;
-            Some(IoWorkItemDetail {
+            Some(IoWorkItem {
                 address: io.addr(),
                 routine,
                 routine_symbol: symbol(routine),
@@ -396,7 +431,7 @@ fn work_item(
                 context: io.read_pointer("Context").ok()?,
             })
         });
-    WorkItemDetail {
+    WorkItem {
         address,
         routine,
         routine_symbol: symbol(routine),

@@ -21,14 +21,16 @@ use crate::target::irpfind::{IrpCriteria, IrpPool};
 use crate::target::mm::{PfnSelector, PoolType, PoolUsageSort};
 use crate::target::pci::{PCI_EXTENDED_CONFIG_SIZE, PciQuery, PciScan};
 use crate::target::registry::names_equal;
-use crate::target::sched::{ApcSelector, UniqStackScope};
+use crate::target::sched::{
+    ApcQueues, ApcSelector, KernelTimer, TimerTable, UniqStackScope, UniqStacks,
+};
+use crate::target::workqueue::WorkQueues;
 use crate::target::zombies::ZombieKinds;
 use crate::triage_report::TriageReport;
 use crate::types::VirtAddr;
 
 use crate::view::mm;
 use crate::view::record::{ToView, Typed};
-use crate::view::sched;
 use crate::view::{self};
 
 /// System-wide reports and helpers that decode an object at an address
@@ -345,47 +347,6 @@ impl Inspect {
         })
     }
 
-    /// Get the current, next, and idle threads on each processor (`!running`).
-    #[pyo3(signature = (include_idle=false, include_stacks=false))]
-    fn running<'py>(
-        &self,
-        py: Python<'py>,
-        include_idle: bool,
-        include_stacks: bool,
-    ) -> PyResult<Typed<'py, sched::RunningProcessors>> {
-        self.typed(py, |session| {
-            let detail = session
-                .inspect_running(include_idle, include_stacks)
-                .map_err(err)?;
-            Ok(view::sched::running(&detail))
-        })
-    }
-
-    /// Read the dispatcher ready queues, up to a limit, for all processors or
-    /// for one processor (`!ready`).
-    #[pyo3(signature = (processor=None))]
-    fn ready<'py>(
-        &self,
-        py: Python<'py>,
-        processor: Option<u16>,
-    ) -> PyResult<Typed<'py, sched::ReadyQueues>> {
-        self.typed(py, |session| {
-            let detail = session
-                .target
-                .inspect_ready_queues(processor)
-                .map_err(err)?;
-            Ok(view::sched::ready_queues(&detail))
-        })
-    }
-
-    /// Get the DPCs that are queued on each processor (`!dpcs`).
-    fn dpcs<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, sched::DpcQueues>> {
-        self.typed(py, |session| {
-            let detail = session.target.inspect_dpc_queues().map_err(err)?;
-            Ok(view::sched::dpc_queues(&detail))
-        })
-    }
-
     /// Read and decode PCI configuration space (`!pci`) for the functions on
     /// `bus` (through `last_bus`), or for one `device` and `function`. It reads
     /// all 4 KiB of each function, with the extended capabilities, as `config`.
@@ -423,7 +384,7 @@ impl Inspect {
         py: Python<'py>,
         include_stacks: bool,
         queue_types: Option<Vec<String>>,
-    ) -> PyResult<Typed<'py, sched::WorkQueues>> {
+    ) -> PyResult<Typed<'py, WorkQueues>> {
         let mut flags = if include_stacks { 0x4 } else { 0 };
         for name in queue_types.unwrap_or_default() {
             flags |= match name.as_str() {
@@ -439,31 +400,27 @@ impl Inspect {
         }
         self.typed(py, |session| {
             let detail = session.inspect_work_queues(flags).map_err(err)?;
-            Ok(view::sched::work_queues(&detail))
+            Ok(detail)
         })
     }
 
     /// Read the kernel timer-table entries, up to a limit, and their DPCs
     /// (`!timer`).
-    fn timers<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, sched::TimerTable>> {
+    fn timers<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, TimerTable>> {
         self.typed(py, |session| {
             let detail = session.target.timer_list().map_err(err)?;
-            Ok(view::sched::timer_list(&detail))
+            Ok(detail)
         })
     }
 
     /// Decode a `_KTIMER` and its DPC (`!timer address`).
-    fn timer<'py>(
-        &self,
-        py: Python<'py>,
-        address: u64,
-    ) -> PyResult<Typed<'py, sched::KernelTimer>> {
+    fn timer<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Typed<'py, KernelTimer>> {
         self.typed(py, |session| {
             let detail = session
                 .target
                 .inspect_timer(VirtAddr(address))
                 .map_err(err)?;
-            Ok(view::sched::timer(&detail))
+            Ok(detail)
         })
     }
 
@@ -474,7 +431,7 @@ impl Inspect {
         &self,
         py: Python<'py>,
         target: Option<ApcTarget<'_>>,
-    ) -> PyResult<Typed<'py, sched::ApcQueues>> {
+    ) -> PyResult<Typed<'py, ApcQueues>> {
         let selector = match target {
             None => ApcSelector::All,
             Some(ApcTarget::Process(process)) => {
@@ -493,39 +450,7 @@ impl Inspect {
         };
         self.typed(py, |session| {
             let detail = session.inspect_apcs(selector).map_err(err)?;
-            Ok(view::sched::apcs(&detail))
-        })
-    }
-
-    /// Get the thread states, wait reasons, and stacks, up to a limit
-    /// (`!stacks`).
-    #[pyo3(signature = (level=0, filter=None))]
-    fn stacks<'py>(
-        &self,
-        py: Python<'py>,
-        level: u8,
-        filter: Option<&str>,
-    ) -> PyResult<Typed<'py, sched::ThreadStacks>> {
-        self.typed(py, |session| {
-            let detail = session.inspect_stacks(level, filter).map_err(err)?;
-            Ok(view::sched::stacks(&detail))
-        })
-    }
-
-    /// List the threads that have a stack frame that matches a symbol or module
-    /// (`!findstack`). The pattern is `module!prefix`, a module or function
-    /// prefix alone, or a glob with `*`/`?`. `level` 0 counts the matching
-    /// frames, 1 lists them, and 2 adds the full stack.
-    #[pyo3(signature = (symbol, level=1))]
-    fn findstack<'py>(
-        &self,
-        py: Python<'py>,
-        symbol: &str,
-        level: u8,
-    ) -> PyResult<Typed<'py, sched::FindStack>> {
-        self.typed(py, |session| {
-            let detail = session.inspect_findstack(symbol, level).map_err(err)?;
-            Ok(view::sched::findstack(&detail))
+            Ok(detail)
         })
     }
 
@@ -536,7 +461,7 @@ impl Inspect {
         &self,
         py: Python<'py>,
         process: Option<PyRef<'_, Process>>,
-    ) -> PyResult<Typed<'py, sched::UniqStacks>> {
+    ) -> PyResult<Typed<'py, UniqStacks>> {
         let scope = match process {
             None => UniqStackScope::AllThreads,
             Some(process) => {
@@ -551,7 +476,7 @@ impl Inspect {
         };
         self.typed(py, |session| {
             let detail = session.inspect_uniqstack(scope).map_err(err)?;
-            Ok(view::sched::uniqstack(&detail))
+            Ok(detail)
         })
     }
 

@@ -302,14 +302,14 @@ impl Thread {
     }
 
     /// Decode the APC lists of this thread (`!apc`).
-    fn apcs<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::sched::ApcQueues>> {
+    fn apcs<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, crate::target::sched::ApcQueues>> {
         let context = self.context(self.process_info(py)?);
         let detail = self.owner.with_in(py, &context, |session| {
             session
                 .inspect_apcs(ApcSelector::Thread(self.info.ethread))
                 .map_err(err)
         })?;
-        Typed::new(py, view::sched::apcs(&detail))
+        Typed::new(py, detail)
     }
 
     /// Decode the saved `_KTRAP_FRAME` (`!trap`).

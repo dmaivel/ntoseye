@@ -1,6 +1,8 @@
 //! Hang diagnosis from the processor blocks (`!qlocks`, `!ipi`), I/O-port
 //! access (`ib`/`iw`/`id`, `ob`/`ow`/`od`), and PCI (`!pcitree`, `!pci`).
 
+use std::borrow::Cow;
+
 use ntoseye_macros::command;
 
 use crate::error::{Error, Result};
@@ -51,22 +53,39 @@ impl Render for QueuedLocks {
     }
 }
 
-/// The processor of `!ipi` or `!ready`: an expression over the rest of the
-/// line; omitted, every processor.
-pub fn processor_filter(
+/// The processor of `!ipi` (one word) or `!ready` (the rest of the line),
+/// as an expression; omitted, every processor.
+fn processor_filter(
     cx: &mut ArgCx<'_, '_>,
-    cursor: &mut ArgCursor<'_>,
+    text: Option<String>,
 ) -> std::result::Result<Option<u16>, ArgError> {
-    if cursor.remaining() == 0 {
+    let Some(text) = text else {
         return Ok(None);
-    }
-    let text = cursor.rest();
+    };
     let value = Expr::eval_with_radix(&text, &cx.state.ctx.target, cx.state.radix)
         .map_err(|error| ArgError::Message(format!("invalid processor '{text}': {error}")))?
         .0;
     u16::try_from(value)
         .map(Some)
         .map_err(|_| ArgError::Message(format!("processor index out of range: {value:#x}")))
+}
+
+/// `!ipi`'s processor: one word.
+fn ipi_processor(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Option<u16>, ArgError> {
+    let text = cursor.word().map(Cow::into_owned);
+    processor_filter(cx, text)
+}
+
+/// `!ready`'s processor: the rest of the line.
+pub fn ready_processor(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Option<u16>, ArgError> {
+    let text = (cursor.remaining() != 0).then(|| cursor.rest());
+    processor_filter(cx, text)
 }
 
 /// Show the interprocessor interrupt (IPI) state of one processor or of all
@@ -96,7 +115,7 @@ pub fn processor_filter(
 )]
 fn ipi(
     session: &mut Session,
-    #[arg(parse = processor_filter)] processor: Option<u16>,
+    #[arg(parse = ipi_processor)] processor: Option<u16>,
 ) -> Result<IpiState> {
     session
         .target

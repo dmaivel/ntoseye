@@ -113,6 +113,17 @@ impl<'i> ArgCursor<'i> {
         self.words.iter().flatten().next().map(AsRef::as_ref)
     }
 
+    /// Every word left that `wanted` accepts, in order, taken; the others
+    /// stay for the arguments after (`!uniqstack`'s `-v`/`-n` anywhere
+    /// before or after its process).
+    pub fn take_all(&mut self, wanted: impl Fn(&str) -> bool) -> Vec<Cow<'i, str>> {
+        self.words
+            .iter_mut()
+            .filter(|word| word.as_deref().is_some_and(&wanted))
+            .filter_map(Option::take)
+            .collect()
+    }
+
     /// The `index`th word left (`word_at(0)` is [`Self::word`]), for a grammar
     /// whose words are not in parameter order (`!process <process> [flags]
     /// [image]` reads the image with the process).

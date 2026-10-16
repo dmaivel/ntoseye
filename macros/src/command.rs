@@ -399,10 +399,12 @@ fn take_args(function: &mut ItemFn) -> Result<Vec<Arg>> {
             })?;
         }
         typed.attrs = kept;
-        // A custom parser may return an `Option` of its own.
+        // A custom parser may return an `Option` of its own, and may name
+        // the `default` the SDK's keyword takes (its parser supplies the
+        // REPL's).
         let custom = arg.parse.is_some() || arg.each.is_some();
         let sources = [
-            arg.default.is_some(),
+            arg.default.is_some() && arg.parse.is_none(),
             arg.current,
             arg.switch.is_some(),
             arg.rest,
