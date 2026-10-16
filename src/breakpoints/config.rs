@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use super::{
-    Breakpoint, BreakpointConfig, BreakpointManager, BreakpointScope, HypercallFilter,
+    BreakpointConfig, BreakpointInfo, BreakpointManager, BreakpointScope, HypercallFilter,
     PartitionFilter, ThreadScope,
 };
 use crate::error::{Error, Result};
@@ -17,7 +17,7 @@ use crate::guest::{
 use crate::target::{KTHREAD_STATE_TERMINATED, Target, ThreadInfo};
 use crate::types::{Arch, VirtAddr};
 
-impl Breakpoint {
+impl BreakpointInfo {
     /// What this breakpoint is restricted to: its address space, plus
     /// whichever of `/t`, `/c`, a hypercall filter and a guest partition
     /// narrowed it further.
@@ -283,7 +283,7 @@ impl BreakpointManager {
 mod tests {
     use crate::breakpoints::test_backend::SlotRecorder;
     use crate::breakpoints::{
-        Breakpoint, BreakpointConfig, BreakpointManager, HypercallFilter, PartitionFilter,
+        BreakpointConfig, BreakpointInfo, BreakpointManager, HypercallFilter, PartitionFilter,
         ThreadScope,
     };
     use crate::guest::EvmcsState;
@@ -434,7 +434,7 @@ mod tests {
 
     /// A breakpoint on the hypercall handler at 0x1000 of `target`, for
     /// call 0xb from any caller, with `condition`.
-    fn conditional_hypercall_breakpoint(target: &Target, condition: &str) -> Breakpoint {
+    fn conditional_hypercall_breakpoint(target: &Target, condition: &str) -> BreakpointInfo {
         let mut client = SlotRecorder::accepting();
         let mut manager = BreakpointManager::new();
         let id = manager

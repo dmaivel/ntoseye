@@ -2,7 +2,9 @@
 //! lookup by the slot a stop reports, and their data-watch semantics.
 
 use super::install::BreakpointBackend;
-use super::{Breakpoint, BreakpointConfig, BreakpointManager, BreakpointScope, HardwareBreakpoint};
+use super::{
+    BreakpointConfig, BreakpointInfo, BreakpointManager, BreakpointScope, HardwareBreakpoint,
+};
 use crate::dbg_backend::{
     DebugBackend, HwBreakpointAccess, WatchpointAccess, validate_hw_breakpoint,
 };
@@ -10,7 +12,7 @@ use crate::error::{Error, Result};
 use crate::target::Target;
 use crate::types::VirtAddr;
 
-impl Breakpoint {
+impl BreakpointInfo {
     /// Data-watch semantics for this stop point. Execute-only debug-register
     /// breakpoints remain code breakpoints and deliberately return `None`.
     pub fn watchpoint(&self) -> Option<(WatchpointAccess, u8)> {
@@ -21,18 +23,6 @@ impl Breakpoint {
             HwBreakpointAccess::Execute => return None,
         };
         Some((access, hardware.len))
-    }
-
-    /// The watched access name (`"write"`/`"read_write"`), or `None` for a
-    /// code breakpoint. Presentation surfaces share this instead of
-    /// destructuring [`Self::watchpoint`] themselves.
-    pub fn watch_access_name(&self) -> Option<&'static str> {
-        self.watchpoint().map(|(access, _)| access.name())
-    }
-
-    /// The watched byte width, or `None` for a code breakpoint.
-    pub fn watch_length(&self) -> Option<u8> {
-        self.watchpoint().map(|(_, length)| length)
     }
 }
 
@@ -108,7 +98,7 @@ impl BreakpointManager {
         let pass_count = config.pass_count;
         self.breakpoints.insert(
             id,
-            Breakpoint {
+            BreakpointInfo {
                 id,
                 serial,
                 address,
@@ -189,7 +179,7 @@ impl BreakpointManager {
     }
 
     /// Map a DR6 status bit to the enabled breakpoint in DR slot `slot`.
-    pub fn hardware_breakpoint_for_slot(&self, slot: u8) -> Option<Breakpoint> {
+    pub fn hardware_breakpoint_for_slot(&self, slot: u8) -> Option<BreakpointInfo> {
         self.breakpoints
             .values()
             .find(|bp| bp.enabled && bp.hardware.is_some_and(|hw| hw.slot == slot))

@@ -102,7 +102,7 @@ mod tests {
     use crate::breakpoints::install::{BreakpointBackend, BreakpointPatch};
     use crate::breakpoints::test_backend::SlotRecorder;
     use crate::breakpoints::{
-        Breakpoint, BreakpointHitDisposition, BreakpointHitResult, BreakpointManager,
+        BreakpointHitDisposition, BreakpointHitResult, BreakpointInfo, BreakpointManager,
         BreakpointScope, HardwareBreakpoint,
     };
     use crate::dbg_backend::HwBreakpointAccess;
@@ -113,7 +113,7 @@ mod tests {
         let mut manager = BreakpointManager::new();
         manager.breakpoints.insert(
             0,
-            Breakpoint {
+            BreakpointInfo {
                 id: 0,
                 address: VirtAddr(0x1000),
                 serial: 0,
@@ -156,7 +156,7 @@ mod tests {
         let mut manager = BreakpointManager::new();
         manager.breakpoints.insert(
             0,
-            Breakpoint {
+            BreakpointInfo {
                 id: 0,
                 address: VirtAddr(0x7ff7_1234_1000),
                 serial: 0,

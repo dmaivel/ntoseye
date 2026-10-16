@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use ntoseye_macros::record;
 
-use crate::breakpoints::{Breakpoint, StepFrame};
+use crate::breakpoints::{BreakpointInfo, StepFrame};
 use crate::dbg_backend::{BugcheckInfo, ContinueDisposition, HwBreakpointAccess, ModuleEvent};
 use crate::disasm::ControlFlow;
 use crate::error::Result;
@@ -386,7 +386,7 @@ impl fmt::Display for HitKind {
 }
 
 impl BreakpointHit {
-    fn new(breakpoint: &Breakpoint, condition_error: Option<String>) -> Self {
+    fn new(breakpoint: &BreakpointInfo, condition_error: Option<String>) -> Self {
         let kind = match (
             breakpoint.hypercall,
             breakpoint.vm_exit,

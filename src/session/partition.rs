@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::mem;
 
 use crate::breakpoints::{
-    Breakpoint, BreakpointConfig, BreakpointHitDisposition, BreakpointManager, PartitionFilter,
+    BreakpointConfig, BreakpointHitDisposition, BreakpointInfo, BreakpointManager, PartitionFilter,
     StepFrame,
 };
 use crate::dbg_backend::{DebugBackend, DebugCapability, StopEvent};
@@ -379,7 +379,7 @@ impl Session {
     /// surfaces in the target's view, saying what was not checked.
     pub(super) fn partition_hit(
         &mut self,
-        breakpoint: Breakpoint,
+        breakpoint: BreakpointInfo,
         partition: u64,
         vp: Option<u32>,
         event: StopEvent,
@@ -466,7 +466,7 @@ enum HitVerdict {
 fn judge_partition_hit(
     breakpoints: &mut BreakpointManager,
     mut target: Option<&mut Target>,
-    breakpoint: &Breakpoint,
+    breakpoint: &BreakpointInfo,
     partition: u64,
     vp: Option<u32>,
 ) -> Result<HitVerdict> {

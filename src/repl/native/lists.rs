@@ -7,7 +7,7 @@ use tern_sdk::ui::{self, Column, Span, TableRow, TextAlign, Truncate};
 use tern_sdk::{Node, View};
 
 use super::{MUTED, NUMBER, STRONG, addr, span, symbol};
-use crate::breakpoints::{Breakpoint, BreakpointScope};
+use crate::breakpoints::{BreakpointInfo, BreakpointScope};
 use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::repl::commands::address_space::{
     PAGE_SHIFT, format_region_size, vad_protection_label, vad_type_label,
@@ -285,10 +285,10 @@ pub fn ps(processes: &[ProcessInfo]) -> View {
 
 /// `bl`: a row per breakpoint, its state colored, the site carrying the
 /// table and the condition and command hiding first.
-pub fn breakpoints(breakpoints: &[&Breakpoint]) -> View {
+pub fn breakpoints(breakpoints: &[BreakpointInfo]) -> View {
     // Columns no breakpoint uses go: a pass count, a process or thread
     // filter, a condition, a command.
-    let any = |has: fn(&Breakpoint) -> bool| breakpoints.iter().any(|bp| has(bp));
+    let any = |has: fn(&BreakpointInfo) -> bool| breakpoints.iter().any(has);
     let mut table = ui::table()
         .col(Column::new("id", "ID").align(TextAlign::End).priority(9.0))
         .col(Column::new("state", "State").priority(8.0))
@@ -444,7 +444,7 @@ pub fn vcpus(vcpus: &[VcpuInfo]) -> View {
 }
 
 /// A breakpoint any thread anywhere stops at: what `bl` labels `global`.
-fn unscoped(bp: &Breakpoint) -> bool {
+fn unscoped(bp: &BreakpointInfo) -> bool {
     bp.scope == BreakpointScope::Kernel
         && bp.partition.is_none()
         && bp.thread.is_none()

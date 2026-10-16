@@ -8,8 +8,8 @@ use super::stepping::{
 };
 use super::*;
 use crate::breakpoints::{
-    Breakpoint, BreakpointConfig, HardwareBreakpoint, HypercallFilter, PartitionFilter, StepFrame,
-    ThreadScope,
+    BreakpointConfig, BreakpointInfo, HardwareBreakpoint, HypercallFilter, PartitionFilter,
+    StepFrame, ThreadScope,
 };
 use crate::cpu_context::amd64::{REGISTER_BUFFER_SIZE, build_register_map};
 use crate::cpu_context::arm64;
@@ -1083,7 +1083,7 @@ fn deferred_symbol_breakpoint(session: &mut Session) -> u32 {
     id
 }
 
-fn breakpoint_by_id(session: &Session, id: u32) -> Breakpoint {
+fn breakpoint_by_id(session: &Session, id: u32) -> BreakpointInfo {
     session
         .breakpoints
         .list()

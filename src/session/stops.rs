@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use crate::breakpoints::{Breakpoint, BreakpointManager};
+use crate::breakpoints::{BreakpointInfo, BreakpointManager};
 use crate::dbg_backend::{
     ContinueDisposition, DebugBackend, LastEvent, ModuleEvent, StopEvent, clear_trap_flag,
     processor_index_from_backend_thread_id,
@@ -305,7 +305,7 @@ impl Session {
     /// recorded as the stop the target is halted at.
     pub(super) fn watchpoint_hit(
         &mut self,
-        breakpoint: Breakpoint,
+        breakpoint: BreakpointInfo,
         event: StopEvent,
         condition_error: Option<String>,
     ) -> StopResolution {

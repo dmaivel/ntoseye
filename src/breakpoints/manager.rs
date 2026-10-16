@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use super::BreakpointScope;
 use super::install::{BreakpointBackend, forget_site};
 use super::spec::CodeSite;
-use super::{Breakpoint, BreakpointConfig, BreakpointManager, PartitionFilter, StepFrame};
+use super::{BreakpointConfig, BreakpointInfo, BreakpointManager, PartitionFilter, StepFrame};
 #[cfg(test)]
 use super::{HardwareBreakpoint, install::BreakpointPatch};
 use crate::dbg_backend::{DebugBackend, HwBreakpointAccess};
@@ -55,7 +55,7 @@ impl BreakpointManager {
         let serial = self.take_serial();
         self.breakpoints.insert(
             id,
-            Breakpoint {
+            BreakpointInfo {
                 id,
                 serial,
                 address,
@@ -225,7 +225,7 @@ impl BreakpointManager {
         let serial = self.take_serial();
         self.breakpoints.insert(
             id,
-            Breakpoint {
+            BreakpointInfo {
                 id,
                 serial,
                 address,
@@ -304,7 +304,7 @@ impl BreakpointManager {
     fn remove_if_uninstalled(
         &mut self,
         id: u32,
-        uninstall: impl FnOnce(&Breakpoint) -> Result<()>,
+        uninstall: impl FnOnce(&BreakpointInfo) -> Result<()>,
     ) -> Result<()> {
         let bp = self
             .breakpoints
@@ -329,7 +329,7 @@ impl BreakpointManager {
     fn remove_ids_if_uninstalled(
         &mut self,
         ids: impl IntoIterator<Item = u32>,
-        mut uninstall: impl FnMut(&Breakpoint) -> Result<()>,
+        mut uninstall: impl FnMut(&BreakpointInfo) -> Result<()>,
     ) -> Result<()> {
         let mut failures = Vec::new();
         for id in ids {
@@ -351,7 +351,7 @@ impl BreakpointManager {
     /// Forget a breakpoint whose site can no longer be restored (its address
     /// space is gone). The backend is told so it stops treating a hit at the
     /// stale address as ours.
-    pub fn discard(&mut self, client: &mut dyn DebugBackend, id: u32) -> Result<Breakpoint> {
+    pub fn discard(&mut self, client: &mut dyn DebugBackend, id: u32) -> Result<BreakpointInfo> {
         let bp = self.breakpoints.remove(&id).ok_or(Error::BPNotFound(id))?;
         Self::forget_backend_site(client, &bp);
         self.one_shot_hits.remove(&id);
@@ -514,7 +514,7 @@ impl BreakpointManager {
         ids
     }
 
-    pub fn list(&self) -> Vec<&Breakpoint> {
+    pub fn list(&self) -> Vec<&BreakpointInfo> {
         let mut bps: Vec<_> = self
             .breakpoints
             .values()
@@ -526,13 +526,13 @@ impl BreakpointManager {
 
     /// Find a managed breakpoint, including a one-shot hit retained until the
     /// next resume so the stop that reported it can expose its handle.
-    pub fn get(&self, id: u32) -> Option<&Breakpoint> {
+    pub fn get(&self, id: u32) -> Option<&BreakpointInfo> {
         self.breakpoints.get(&id)
     }
 
     /// The breakpoint numbered `id`, only if it is still the one created
     /// with `serial` and not a later breakpoint that reused the id.
-    pub fn get_exact(&self, id: u32, serial: u64) -> Option<&Breakpoint> {
+    pub fn get_exact(&self, id: u32, serial: u64) -> Option<&BreakpointInfo> {
         self.get(id).filter(|bp| bp.serial == serial)
     }
 

@@ -5,8 +5,8 @@ use std::mem::take;
 use std::sync::Arc;
 
 use crate::breakpoints::{
-    Breakpoint, BreakpointConfig, BreakpointScope, HypercallFilter, ThreadScope, lift_target_site,
-    plant_target_site,
+    BreakpointConfig, BreakpointInfo, BreakpointScope, HypercallFilter, ThreadScope,
+    lift_target_site, plant_target_site,
 };
 use crate::dbg_backend::{
     BugcheckInfo, DebugCapability, HwBreakpointAccess, ModuleEvent, WatchpointAccess,
@@ -571,12 +571,12 @@ impl Session {
     }
 
     /// List all breakpoints.
-    pub fn list_breakpoints(&self) -> Vec<&Breakpoint> {
+    pub fn list_breakpoints(&self) -> Vec<&BreakpointInfo> {
         self.breakpoints.list()
     }
 
     /// Return one breakpoint by id.
-    pub fn breakpoint(&self, id: u32) -> Option<&Breakpoint> {
+    pub fn breakpoint(&self, id: u32) -> Option<&BreakpointInfo> {
         self.breakpoints.list().into_iter().find(|bp| bp.id == id)
     }
 

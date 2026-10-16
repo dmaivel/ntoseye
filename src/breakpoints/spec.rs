@@ -2,7 +2,7 @@
 //! `[module!]symbol[+off]` specs, resolving them to addresses, and what a
 //! code breakpoint is planted on.
 
-use super::{Breakpoint, BreakpointSpec};
+use super::{BreakpointInfo, BreakpointSpec};
 use crate::error::Result;
 use crate::expr::{Expr, NumberRadix};
 use crate::target::Target;
@@ -128,15 +128,7 @@ impl BreakpointSpec {
     }
 }
 
-impl Breakpoint {
-    pub fn resolved_address(&self) -> Option<VirtAddr> {
-        self.resolved.then_some(self.address)
-    }
-
-    pub fn deferred(&self) -> bool {
-        self.spec.is_some() && !self.resolved
-    }
-
+impl BreakpointInfo {
     pub fn specification(&self) -> Option<&str> {
         self.spec.as_ref().map(BreakpointSpec::label)
     }

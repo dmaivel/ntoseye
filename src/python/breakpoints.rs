@@ -18,7 +18,7 @@ use super::symbols::Location;
 use super::thread::Thread;
 use super::{err, raise, symbol_not_found, view_dict};
 use crate::breakpoints::{
-    Breakpoint as CoreBreakpoint, BreakpointConfig, BreakpointScope, HypercallFilter,
+    BreakpointConfig, BreakpointInfo, BreakpointScope, HypercallFilter, PartitionFilter,
 };
 use crate::dbg_backend::{HwBreakpointAccess, WatchpointAccess};
 use crate::exception_policy::{EventFilter, ExceptionPolicyFinalAction, parse_event_filter};
@@ -42,7 +42,7 @@ impl Breakpoints {
         Breakpoints { owner }
     }
 
-    fn snapshot(&self, py: Python<'_>) -> PyResult<Vec<CoreBreakpoint>> {
+    fn snapshot(&self, py: Python<'_>) -> PyResult<Vec<BreakpointInfo>> {
         self.owner.with(py, |session| {
             Ok(session.list_breakpoints().into_iter().cloned().collect())
         })
@@ -69,19 +69,19 @@ impl Exceptions {
 pub struct Breakpoint {
     owner: Owner,
     id: u32,
-    /// The core breakpoint's [`CoreBreakpoint::serial`]: a later breakpoint
+    /// The core breakpoint's [`BreakpointInfo::serial`]: a later breakpoint
     /// that reuses `id` is not this one.
     serial: u64,
 }
 
 impl Breakpoint {
-    fn snapshot(&self, py: Python<'_>) -> PyResult<Option<CoreBreakpoint>> {
+    fn snapshot(&self, py: Python<'_>) -> PyResult<Option<BreakpointInfo>> {
         self.owner.with(py, |session| {
             Ok(session.breakpoints.get_exact(self.id, self.serial).cloned())
         })
     }
 
-    fn require_snapshot(&self, py: Python<'_>) -> PyResult<CoreBreakpoint> {
+    fn require_snapshot(&self, py: Python<'_>) -> PyResult<BreakpointInfo> {
         self.snapshot(py)?
             .ok_or_else(|| invalid_breakpoint(self.id))
     }
@@ -559,35 +559,23 @@ impl Breakpoint {
     /// What a hypercall breakpoint stops on: its call code and the caller's
     /// partition and VP, if restricted. `None` for any other breakpoint.
     #[getter]
-    fn hypercall<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Typed<'py, Option<view::execution::HypercallFilter>>> {
-        let filter = self.require_snapshot(py)?.hypercall;
-        Typed::new(py, filter.as_ref().map(view::execution::hypercall_filter))
+    fn hypercall<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Option<HypercallFilter>>> {
+        Typed::new(py, self.require_snapshot(py)?.hypercall)
     }
 
     /// What a VM-exit breakpoint stops on: its exit reason and the caller's
     /// partition and VP, if restricted. `None` for any other breakpoint.
     #[getter]
-    fn vm_exit<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Typed<'py, Option<view::execution::ExitFilter>>> {
-        let filter = self.require_snapshot(py)?.vm_exit;
-        Typed::new(py, filter.as_ref().map(view::execution::exit_filter))
+    fn vm_exit<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Option<ExitFilter>>> {
+        Typed::new(py, self.require_snapshot(py)?.vm_exit)
     }
 
     /// The guest partition of the Windows hypervisor a breakpoint set in its
     /// view (`Debugger.select_partition`) stops in, and the VP when
     /// `processor=` named one. `None` for the target's own breakpoints.
     #[getter]
-    fn partition<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Typed<'py, Option<view::execution::PartitionFilter>>> {
-        let filter = self.require_snapshot(py)?.partition;
-        Typed::new(py, filter.as_ref().map(view::execution::partition_filter))
+    fn partition<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Option<PartitionFilter>>> {
+        Typed::new(py, self.require_snapshot(py)?.partition)
     }
 
     /// The number of physical hits.
@@ -778,12 +766,15 @@ impl Breakpoint {
         Ok(())
     }
 
-    /// Get the breakpoint state as a plain `dict`.
+    /// The breakpoint's state now, as `bl` lists it.
+    #[getter]
+    fn info<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, BreakpointInfo>> {
+        Typed::new(py, self.require_snapshot(py)?)
+    }
+
+    /// Get the breakpoint state (`info`) as a plain `dict`.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        view_dict(
-            py,
-            &view::execution::breakpoint(&self.require_snapshot(py)?),
-        )
+        view_dict(py, &self.require_snapshot(py)?)
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -927,7 +918,7 @@ impl Exceptions {
 
 /// The live handle for a core breakpoint: a `Breakpoint`, or a `Watchpoint`
 /// for data watchpoints.
-pub fn handle(py: Python<'_>, dbg: &Py<Debugger>, bp: &CoreBreakpoint) -> PyResult<Py<Breakpoint>> {
+pub fn handle(py: Python<'_>, dbg: &Py<Debugger>, bp: &BreakpointInfo) -> PyResult<Py<Breakpoint>> {
     match watchpoint_handle(py, dbg, bp)? {
         Some(watchpoint) => Ok(watchpoint.into_bound(py).into_super().unbind()),
         None => Py::new(
@@ -945,7 +936,7 @@ pub fn handle(py: Python<'_>, dbg: &Py<Debugger>, bp: &CoreBreakpoint) -> PyResu
 fn watchpoint_handle(
     py: Python<'_>,
     dbg: &Py<Debugger>,
-    bp: &CoreBreakpoint,
+    bp: &BreakpointInfo,
 ) -> PyResult<Option<Py<Watchpoint>>> {
     let Some((access, length)) = bp.watchpoint() else {
         return Ok(None);
@@ -1098,7 +1089,7 @@ fn store_condition(py: Python<'_>, dbg: &Py<Debugger>, id: u32, callback: Option
 fn make_handles(
     py: Python<'_>,
     dbg: &Py<Debugger>,
-    breakpoints: Vec<CoreBreakpoint>,
+    breakpoints: Vec<BreakpointInfo>,
     callback: Option<&Py<PyAny>>,
 ) -> PyResult<Vec<Py<Breakpoint>>> {
     breakpoints

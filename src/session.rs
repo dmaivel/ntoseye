@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(test)]
 use crate::TargetSpec;
-use crate::breakpoints::{Breakpoint, BreakpointManager, StepFrame};
+use crate::breakpoints::{BreakpointInfo, BreakpointManager, StepFrame};
 use crate::dbg_backend::{
     BackendCapability, BugcheckInfo, DebugBackend, DebugCapability, DebugLog, DebugOutputPage,
     LastEvent, ModuleEvent, RegisterMap, StopEvent,
@@ -176,7 +176,11 @@ pub enum InstructionBoundary {
 
 impl ContinueOutcome {
     /// A hit on `breakpoint` at `rip`.
-    fn breakpoint_hit(breakpoint: &Breakpoint, rip: u64, condition_error: Option<String>) -> Self {
+    fn breakpoint_hit(
+        breakpoint: &BreakpointInfo,
+        rip: u64,
+        condition_error: Option<String>,
+    ) -> Self {
         ContinueOutcome::Breakpoint {
             id: breakpoint.id,
             address: breakpoint.address.0,
@@ -422,7 +426,7 @@ pub enum BreakpointStopAction {
     /// A breakpoint the caller should surface (its condition, if any, held).
     /// Enabled breakpoints have already been re-armed.
     Hit {
-        breakpoint: Breakpoint,
+        breakpoint: BreakpointInfo,
         /// Runtime condition failure. The stop is surfaced rather than skipped.
         condition_error: Option<String>,
     },
@@ -440,7 +444,7 @@ pub enum BreakpointStopAction {
 pub enum WatchpointStopAction {
     /// A watchpoint whose condition held or failed to evaluate.
     Hit {
-        breakpoint: Breakpoint,
+        breakpoint: BreakpointInfo,
         condition_error: Option<String>,
     },
     /// A guest partition's breakpoint hit by one of its VPs, `vp` when the
@@ -448,7 +452,7 @@ pub enum WatchpointStopAction {
     /// condition are left to the partition's view (see
     /// [`Session::partition_hit`]).
     PartitionHit {
-        breakpoint: Breakpoint,
+        breakpoint: BreakpointInfo,
         partition: u64,
         vp: Option<u32>,
     },
@@ -470,7 +474,7 @@ pub enum StopResolution {
     ModulesChanged,
     /// A software or hardware breakpoint worth surfacing.
     Breakpoint {
-        breakpoint: Box<Breakpoint>,
+        breakpoint: Box<BreakpointInfo>,
         event: StopEvent,
         rip: u64,
         condition_error: Option<String>,
