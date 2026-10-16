@@ -10,17 +10,17 @@ use crate::layout::{FieldInfo, ParsedType, TypeInfo, le_uint};
 use crate::memory::MemoryOps;
 use crate::target::{DiagnosticValue, Target};
 use crate::types::{Arch, VirtAddr};
+use ntoseye_macros::record;
 
 const MAX_FIELD_BYTES: usize = 0x1000;
 const IDT_VECTOR_COUNT: u16 = 256;
 const MAX_GDT_ENTRIES: usize = 256;
 
-/// A decoded descriptor-table register.
-#[derive(Debug, Clone)]
-pub struct DescriptorDetail {
-    pub base: VirtAddr,
-    pub limit: u64,
-}
+/// A processor by number (`!pcr 1`), which the session checks against the
+/// processor count. A command whose processor is omitted reads the one the
+/// current vCPU is; a `Cpu` binds its own.
+#[derive(Clone, Copy, Debug)]
+pub struct Processor(pub u16);
 
 /// An x86 descriptor table whose register a processor's `_KPRCB` saves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,155 +55,244 @@ impl DescriptorTable {
     }
 }
 
-/// All KPCR/KPRCB fields displayed by `!pcr`.
-#[derive(Debug, Clone)]
-pub struct PcrDetail {
+/// A descriptor-table register (IDTR/GDTR).
+#[record]
+pub struct DescriptorRegister {
+    pub base: VirtAddr,
+    /// The table limit: the table size in bytes, minus one.
+    pub limit: u64,
+}
+
+/// The location of `_KSPECIAL_REGISTERS` in a processor state.
+#[record]
+pub struct SpecialRegistersArea {
+    pub address: VirtAddr,
+    /// The size of the structure in bytes.
+    pub size: u64,
+    /// The type name.
+    pub name: String,
+}
+
+/// The `_KPROCESSOR_STATE` embedded in a `_KPRCB`.
+#[record]
+pub struct ProcessorStateArea {
+    pub address: VirtAddr,
+    /// The size of the structure in bytes.
+    pub size: u64,
+    /// The type name.
+    pub name: String,
+    /// The address of the `_CONTEXT` embedded in the processor state.
+    pub context_frame: DiagnosticValue<VirtAddr>,
+    pub special_registers: DiagnosticValue<SpecialRegistersArea>,
+}
+
+/// The main KPCR and KPRCB data of a processor (`!pcr`). A field is a
+/// diagnostic if its read can fail separately from the other reads.
+#[record]
+pub struct Pcr {
+    /// The processor number.
     pub processor: u16,
+    /// The `_KPCR` address.
     pub kpcr: DiagnosticValue<VirtAddr>,
+    /// The `_KPRCB` address.
     pub kprcb: VirtAddr,
+    /// `_KPCR.KdVersionBlock`.
     pub kd_version_block: DiagnosticValue<VirtAddr>,
+    /// `_KPCR.CurrentPrcb`.
     pub current_prcb: DiagnosticValue<VirtAddr>,
+    /// The current IRQL.
     pub irql: DiagnosticValue<u64>,
+    /// `_KPCR.Self`.
     pub self_pcr: DiagnosticValue<VirtAddr>,
+    /// The running `_KTHREAD`.
     pub current_thread: DiagnosticValue<VirtAddr>,
+    /// The `_KTHREAD` selected to run next.
     pub next_thread: DiagnosticValue<VirtAddr>,
+    /// The idle `_KTHREAD` of the processor.
     pub idle_thread: DiagnosticValue<VirtAddr>,
-    pub idtr: DiagnosticValue<DescriptorDetail>,
-    pub gdtr: DiagnosticValue<DescriptorDetail>,
+    /// The interrupt descriptor table register.
+    pub idtr: DiagnosticValue<DescriptorRegister>,
+    /// The global descriptor table register.
+    pub gdtr: DiagnosticValue<DescriptorRegister>,
+    /// The address of the task state segment.
     pub tss_base: DiagnosticValue<VirtAddr>,
 }
 
-/// Processor-control-block fields displayed by `!prcb`.
-#[derive(Debug, Clone)]
-pub struct PrcbDetail {
+/// Selected `_KPRCB` fields of a processor (`!prcb`).
+#[record]
+pub struct Prcb {
+    /// The processor number.
     pub processor: u16,
+    /// The `_KPRCB` address.
     pub kprcb: VirtAddr,
+    /// `_KPRCB.Number`.
     pub number: DiagnosticValue<u64>,
+    /// The running `_KTHREAD`.
     pub current_thread: DiagnosticValue<VirtAddr>,
+    /// The `_KTHREAD` selected to run next.
     pub next_thread: DiagnosticValue<VirtAddr>,
+    /// The idle `_KTHREAD` of the processor.
     pub idle_thread: DiagnosticValue<VirtAddr>,
+    /// `_KPRCB.DpcRoutineActive`.
     pub dpc_routine_active: DiagnosticValue<u64>,
+    /// `_KPRCB.InterruptCount`.
     pub interrupt_count: DiagnosticValue<u64>,
-    pub processor_state: DiagnosticValue<ProcessorStateDetail>,
+    pub processor_state: DiagnosticValue<ProcessorStateArea>,
 }
 
-/// Nested `_KPROCESSOR_STATE` data shown by `!prcb`.
-#[derive(Debug, Clone)]
-pub struct ProcessorStateDetail {
-    pub address: VirtAddr,
-    pub size: u64,
-    pub name: String,
-    /// Address of the `_CONTEXT` embedded in the processor state.
-    pub context_frame: DiagnosticValue<VirtAddr>,
-    pub special_registers: DiagnosticValue<SpecialRegistersDetail>,
-}
-
-/// Nested `_KSPECIAL_REGISTERS` location shown by `!prcb`.
-#[derive(Debug, Clone)]
-pub struct SpecialRegistersDetail {
-    pub address: VirtAddr,
-    pub size: u64,
-    pub name: String,
-}
-
-/// Current IRQL and its architecture-specific Windows level name.
-#[derive(Debug, Clone)]
-pub struct IrqlDetail {
+/// The current IRQL of a processor (`!irql`).
+#[record]
+pub struct Irql {
+    /// The processor number.
     pub processor: u16,
+    /// The IRQL.
     pub value: DiagnosticValue<u64>,
+    /// The Windows name of the level (`DISPATCH_LEVEL`, ...).
     pub level_name: DiagnosticValue<String>,
-    /// At a KD break-in this is the debugger-observed IRQL, which can differ
-    /// from the level that was active immediately before the break-in.
+    /// A note about KD break-ins. At a KD break-in, `value` is the IRQL
+    /// that the debugger sees, which can differ from the level
+    /// immediately before the break-in.
     pub note: String,
 }
 
-/// One decoded AMD64 interrupt-gate entry.
-#[derive(Debug, Clone)]
-pub struct IdtEntryDetail {
+/// One decoded AMD64 IDT gate.
+#[record]
+pub struct IdtGate {
     pub vector: u16,
+    /// The address of the gate in the table.
     pub address: VirtAddr,
+    /// The interrupt handler that the gate points to.
     pub handler: DiagnosticValue<VirtAddr>,
+    /// The symbol of the handler. The diagnostic value is None if no
+    /// symbol resolved.
     pub symbol: DiagnosticValue<Option<String>>,
+    /// The code segment selector.
     pub selector: DiagnosticValue<u16>,
+    /// The interrupt stack table index (0: none).
     pub ist: DiagnosticValue<u8>,
+    /// The raw gate type.
     pub gate_type: DiagnosticValue<u8>,
+    /// `interrupt`, `trap`, `task`, or `reserved`.
     pub gate_name: DiagnosticValue<String>,
+    /// The descriptor privilege level.
     pub dpl: DiagnosticValue<u8>,
     pub present: DiagnosticValue<bool>,
+    /// Whether the handler is in a module other than NT.
     pub non_nt_hook: DiagnosticValue<bool>,
+    /// For a handler in `KiIsrThunk` (a chained interrupt), the offset of
+    /// the handler in `KiIsrThunk` and the location of
+    /// `_KINTERRUPT.DispatchCode`. The diagnostic value is None for other
+    /// handlers.
     pub ki_isr_thunk: DiagnosticValue<Option<String>>,
 }
 
-/// An IDT descriptor and one vector or the bounded full table.
-#[derive(Debug, Clone)]
-pub struct IdtDetail {
+/// The IDT of a processor (`!idt`), with one vector or the bounded full
+/// table.
+#[record]
+pub struct Idt {
+    /// The processor number.
     pub processor: u16,
+    /// The address of the table.
     pub base: VirtAddr,
+    /// The table limit: the table size in bytes, minus one.
     pub limit: u64,
+    /// The requested vector, or None for the full table.
     pub vector: Option<u16>,
+    /// Whether the descriptor is shorter than the full table.
     pub truncated: bool,
-    pub entries: Vec<IdtEntryDetail>,
+    pub entries: Vec<IdtGate>,
 }
 
-/// One decoded GDT descriptor. System descriptors consume a second raw slot,
-/// retained in `high_raw` when it is available.
-#[derive(Debug, Clone)]
-pub struct GdtEntryDetail {
+/// One decoded GDT descriptor. A system descriptor uses two slots.
+#[record]
+pub struct GdtDescriptor {
+    /// The slot index.
     pub index: u64,
+    /// The 8 raw bytes of the descriptor.
+    #[record(hex)]
     pub raw: DiagnosticValue<u64>,
+    /// The second slot of a system descriptor. The diagnostic value is
+    /// None for other descriptors.
+    #[record(hex)]
     pub high_raw: DiagnosticValue<Option<u64>>,
+    /// The segment base.
     pub base: DiagnosticValue<VirtAddr>,
+    /// The segment limit, in bytes.
     pub limit: DiagnosticValue<u64>,
+    /// The raw type field.
     pub type_code: DiagnosticValue<u8>,
+    /// `system` or `code/data`.
     pub descriptor_kind: DiagnosticValue<String>,
+    /// The descriptor privilege level.
     pub dpl: DiagnosticValue<u8>,
     pub present: DiagnosticValue<bool>,
+    /// The L bit: a 64-bit code segment.
     pub long_mode: DiagnosticValue<bool>,
+    /// The D/B bit: 32-bit default operand size.
     pub default_size: DiagnosticValue<bool>,
+    /// The G bit: the limit is in 4 KiB pages.
     pub granularity: DiagnosticValue<bool>,
 }
 
-/// A GDT descriptor and its bounded entries.
-#[derive(Debug, Clone)]
-pub struct GdtDetail {
+/// The GDT of a processor and its bounded descriptors (`!gdt`).
+#[record]
+pub struct Gdt {
+    /// The processor number.
     pub processor: u16,
+    /// The address of the table.
     pub base: VirtAddr,
+    /// The table limit: the table size in bytes, minus one.
     pub limit: u64,
+    /// The number of slots that the limit describes, which can be larger
+    /// than the number of decoded entries.
     pub entry_count: u64,
+    /// Whether the table has more than 256 slots.
     pub truncated: bool,
-    pub entries: Vec<GdtEntryDetail>,
+    pub entries: Vec<GdtDescriptor>,
 }
 
-/// One `_KPRCB` feature-bit field, retaining independent read failures.
-#[derive(Debug, Clone)]
+/// One `_KPRCB` feature-bit field.
+#[record]
 pub struct CpuFeatureBits {
+    /// The `_KPRCB` field.
     pub name: String,
+    #[record(hex)]
     pub value: DiagnosticValue<u64>,
 }
 
-/// Triage PRCB metadata retained when a discovered KPRCB is unreadable.
-#[derive(Debug, Clone)]
-pub struct CpuTriageInfo {
+/// The triage PRCB metadata of the dump, which ntoseye uses when it
+/// cannot read the KPRCB.
+#[record]
+pub struct CpuTriageFallback {
     pub processor_number: u16,
     pub vendor: String,
     pub family: u16,
+    /// The processor speed, in MHz.
     pub mhz: u32,
 }
 
-/// CPU identity and feature fields gathered from `_KPRCB` or triage metadata.
-#[derive(Debug, Clone)]
-pub struct CpuInfoDetail {
+/// The vendor, family, model, speed, and feature bits of a processor
+/// (`!cpuinfo`).
+#[record]
+pub struct CpuInfo {
+    /// The processor number.
     pub processor: u16,
+    /// The `_KPRCB` address.
     pub kprcb: DiagnosticValue<VirtAddr>,
+    /// The source of the values: `_KPRCB` or `triage-dump PRCB metadata`.
     pub source: String,
+    /// The vendor string (`GenuineIntel`, ...).
     pub vendor: DiagnosticValue<String>,
+    /// `_KPRCB.CpuVendor`.
     pub vendor_id: DiagnosticValue<u64>,
     pub family: DiagnosticValue<u64>,
     pub model: DiagnosticValue<u64>,
     pub stepping: DiagnosticValue<u64>,
+    /// The processor speed, in MHz.
     pub mhz: DiagnosticValue<u64>,
     pub feature_bits: Vec<CpuFeatureBits>,
-    pub triage_fallback: Option<CpuTriageInfo>,
+    /// The triage metadata, present if ntoseye could not find the KPRCB.
+    pub triage_fallback: Option<CpuTriageFallback>,
 }
 
 const KD_BREAKIN_NOTE: &str = "At a KD break-in, this is the debugger's observed IRQL and may differ from the level before the break-in.";
@@ -358,9 +447,9 @@ fn descriptor_from_layout(
     base: VirtAddr,
     base_names: &[&str],
     limit_names: &[&str],
-) -> Result<DescriptorDetail> {
+) -> Result<DescriptorRegister> {
     let layout = layout(target, type_name)?;
-    Ok(DescriptorDetail {
+    Ok(DescriptorRegister {
         base: VirtAddr(field_u64(target, &layout, base, base_names)?),
         limit: field_u64(target, &layout, base, limit_names)?,
     })
@@ -370,7 +459,7 @@ fn descriptor_from_prcb(
     target: &Target,
     prcb: VirtAddr,
     names: &[&str],
-) -> Result<DescriptorDetail> {
+) -> Result<DescriptorRegister> {
     let prcb_layout = layout(target, "_KPRCB")?;
     let (processor_state, processor_state_base) = nested_field(
         target,
@@ -394,7 +483,7 @@ fn descriptor_from_prcb(
         "_KDESCRIPTOR",
     );
     match descriptor {
-        Ok((descriptor_layout, descriptor_base)) => Ok(DescriptorDetail {
+        Ok((descriptor_layout, descriptor_base)) => Ok(DescriptorRegister {
             base: VirtAddr(field_u64(
                 target,
                 &descriptor_layout,
@@ -418,12 +507,12 @@ fn descriptor_from_prcb(
                 Err(_) => return Err(nested_error),
             };
             if bytes.len() >= 16 {
-                Ok(DescriptorDetail {
+                Ok(DescriptorRegister {
                     base: VirtAddr(le_uint(&bytes[8..16])),
                     limit: le_uint(&bytes[6..8]),
                 })
             } else if bytes.len() >= 10 {
-                Ok(DescriptorDetail {
+                Ok(DescriptorRegister {
                     base: VirtAddr(le_uint(&bytes[2..10])),
                     limit: le_uint(&bytes[0..2]),
                 })
@@ -440,7 +529,7 @@ pub fn descriptor_from_target(
     target: &Target,
     location: &CpuLocation,
     table: DescriptorTable,
-) -> Result<DescriptorDetail> {
+) -> Result<DescriptorRegister> {
     descriptor_from_prcb(target, location.kprcb, table.special_register_names()).or_else(|_| {
         let kpcr = match &location.kpcr {
             DiagnosticValue::Available(kpcr) => *kpcr,
@@ -485,7 +574,7 @@ impl Target {
     /// Decode `_KPCR`/`_KPRCB` essentials for `processor`. Address, IRQL, and
     /// thread fields become unavailable when their individual layout or memory
     /// reads fail; descriptor values likewise retain nested PDB/read errors.
-    pub fn inspect_pcr(&self, processor: u16) -> Result<PcrDetail> {
+    pub fn inspect_pcr(&self, processor: u16) -> Result<Pcr> {
         let location = cpu_location(self, processor)?;
         let kpcr_fields = match &location.kpcr {
             DiagnosticValue::Available(kpcr) => layout(self, "_KPCR").ok().map(|kpcr_layout| {
@@ -545,7 +634,7 @@ impl Target {
                 DiagnosticValue::unavailable(error),
             )
         });
-        Ok(PcrDetail {
+        Ok(Pcr {
             processor: location.processor,
             kpcr: location.kpcr.clone(),
             kprcb: location.kprcb,
@@ -573,7 +662,7 @@ impl Target {
     /// Decode selected `_KPRCB` fields and nested ProcessorState metadata.
     /// Every scalar read is retained as a `DiagnosticValue` so partial PDBs do
     /// not make unrelated processor counters disappear.
-    pub fn inspect_prcb(&self, processor: u16) -> Result<PrcbDetail> {
+    pub fn inspect_prcb(&self, processor: u16) -> Result<Prcb> {
         let location = cpu_location(self, processor)?;
         let prcb_layout = layout(self, "_KPRCB")?;
         let processor_state = DiagnosticValue::from_result(
@@ -594,14 +683,14 @@ impl Target {
                         "_KSPECIAL_REGISTERS",
                     )
                     .map(|(special_layout, special_base)| {
-                        SpecialRegistersDetail {
+                        SpecialRegistersArea {
                             address: special_base,
                             size: special_layout.size as u64,
                             name: special_layout.name.clone(),
                         }
                     }),
                 );
-                ProcessorStateDetail {
+                ProcessorStateArea {
                     address: state_base,
                     size: state_layout.size as u64,
                     name: state_layout.name.clone(),
@@ -614,7 +703,7 @@ impl Target {
                 }
             }),
         );
-        Ok(PrcbDetail {
+        Ok(Prcb {
             processor: location.processor,
             kprcb: location.kprcb,
             number: DiagnosticValue::from_result(field_u64(
@@ -660,7 +749,7 @@ impl Target {
     /// Decode current IRQL from `_KPCR` and `_KPRCB`, preferring the KPCR
     /// field. `value` and `level_name` are unavailable together only when both
     /// memory/layout paths fail; `note` records KD break-in semantics.
-    pub fn inspect_irql(&self, processor: u16) -> Result<IrqlDetail> {
+    pub fn inspect_irql(&self, processor: u16) -> Result<Irql> {
         let location = cpu_location(self, processor)?;
         let value = match &location.kpcr {
             DiagnosticValue::Available(kpcr) => layout(self, "_KPCR")
@@ -683,7 +772,7 @@ impl Target {
             }
             DiagnosticValue::Unavailable(error) => DiagnosticValue::unavailable(error.clone()),
         };
-        Ok(IrqlDetail {
+        Ok(Irql {
             processor: location.processor,
             value,
             level_name,
@@ -695,7 +784,7 @@ impl Target {
     /// from target memory. Handler, selector, gate, presence, hook, and symbol
     /// fields carry individual byte/symbol failures; `truncated` reports a
     /// descriptor shorter than the full bounded table.
-    pub fn inspect_idt(&self, processor: u16, vector: Option<u16>) -> Result<IdtDetail> {
+    pub fn inspect_idt(&self, processor: u16, vector: Option<u16>) -> Result<Idt> {
         if self.arch() == Arch::Arm64 {
             return Err(Error::DebugInfo(
                 "!idt is not defined on ARM64 targets".into(),
@@ -710,7 +799,7 @@ impl Target {
     /// Decode vendor, family/model/stepping, speed, and `_KPRCB` feature
     /// fields. Each PDB/memory read is independent; triage PRCB metadata is
     /// used as a complete fallback when the processor block cannot be found.
-    pub fn inspect_cpuinfo(&self, processor: u16) -> Result<CpuInfoDetail> {
+    pub fn inspect_cpuinfo(&self, processor: u16) -> Result<CpuInfo> {
         let location = match cpu_location(self, processor) {
             Ok(location) => location,
             Err(error) => {
@@ -723,7 +812,7 @@ impl Target {
                         |message: &str| DiagnosticValue::unavailable(message.to_string());
                     let unavailable_num =
                         |message: &str| DiagnosticValue::unavailable(message.to_string());
-                    return Ok(CpuInfoDetail {
+                    return Ok(CpuInfo {
                         processor: info.processor_number,
                         kprcb: unavailable_addr("KPRCB address unavailable in triage metadata"),
                         source: "triage-dump PRCB metadata".to_string(),
@@ -822,7 +911,7 @@ impl Target {
             self.phys
                 .dmp_info()
                 .and_then(|dump| dump.triage_prcb_info.as_ref())
-                .map(|info| CpuTriageInfo {
+                .map(|info| CpuTriageFallback {
                     processor_number: info.processor_number,
                     vendor: info.vendor_string.clone(),
                     family: info.cpu_type,
@@ -831,7 +920,7 @@ impl Target {
         } else {
             None
         };
-        Ok(CpuInfoDetail {
+        Ok(CpuInfo {
             processor: location.processor,
             kprcb: DiagnosticValue::Available(location.kprcb),
             source: "_KPRCB".to_string(),
@@ -900,8 +989,8 @@ fn interrupt_chain_hint(target: &Target, handler: u64) -> Option<String> {
     }))
 }
 
-fn unavailable_idt_entry(vector: u16, address: VirtAddr, error: String) -> IdtEntryDetail {
-    IdtEntryDetail {
+fn unavailable_idt_entry(vector: u16, address: VirtAddr, error: String) -> IdtGate {
+    IdtGate {
         vector,
         address,
         handler: DiagnosticValue::unavailable(error.clone()),
@@ -917,7 +1006,7 @@ fn unavailable_idt_entry(vector: u16, address: VirtAddr, error: String) -> IdtEn
     }
 }
 
-fn decode_idt_entry(target: &Target, base: u64, vector: u16) -> IdtEntryDetail {
+fn decode_idt_entry(target: &Target, base: u64, vector: u16) -> IdtGate {
     let address = VirtAddr(base.wrapping_add(u64::from(vector) * 16));
     let mut bytes = [0u8; 16];
     let read = kernel(target).and_then(|nt| nt.memory().read_bytes(address, &mut bytes));
@@ -953,7 +1042,7 @@ fn decode_idt_entry(target: &Target, base: u64, vector: u16) -> IdtEntryDetail {
             .as_ref()
             .is_some_and(|module| !is_nt_module(&module.name))
             || symbol_module_is_hook;
-        return IdtEntryDetail {
+        return IdtGate {
             vector,
             address,
             handler: DiagnosticValue::Available(VirtAddr(offset)),
@@ -975,9 +1064,9 @@ fn decode_idt_entry(target: &Target, base: u64, vector: u16) -> IdtEntryDetail {
 pub fn decode_idt(
     target: &Target,
     processor: u16,
-    descriptor: DescriptorDetail,
+    descriptor: DescriptorRegister,
     vector: Option<u16>,
-) -> IdtDetail {
+) -> Idt {
     let vectors: Vec<u16> = vector
         .map(|vector| vec![vector])
         .unwrap_or_else(|| (0..IDT_VECTOR_COUNT).collect());
@@ -990,7 +1079,7 @@ pub fn decode_idt(
         Some(vector) => u64::from(vector) >= descriptor_entries,
         None => descriptor.limit < (u64::from(IDT_VECTOR_COUNT) * 16 - 1),
     };
-    IdtDetail {
+    Idt {
         processor,
         base: descriptor.base,
         limit: descriptor.limit,
@@ -1006,8 +1095,8 @@ fn is_system_descriptor(raw: u64) -> bool {
     system && matches!(typ, 0x2 | 0x9 | 0xb)
 }
 
-fn unavailable_gdt_entry(index: usize, error: String) -> GdtEntryDetail {
-    GdtEntryDetail {
+fn unavailable_gdt_entry(index: usize, error: String) -> GdtDescriptor {
+    GdtDescriptor {
         index: index as u64,
         raw: DiagnosticValue::unavailable(error.clone()),
         high_raw: DiagnosticValue::unavailable(error.clone()),
@@ -1023,7 +1112,7 @@ fn unavailable_gdt_entry(index: usize, error: String) -> GdtEntryDetail {
     }
 }
 
-fn decode_gdt_entry(index: usize, raw: u64, high_raw: Result<Option<u64>>) -> GdtEntryDetail {
+fn decode_gdt_entry(index: usize, raw: u64, high_raw: Result<Option<u64>>) -> GdtDescriptor {
     let high_value = match high_raw.as_ref() {
         Ok(value) => DiagnosticValue::Available(*value),
         Err(error) => DiagnosticValue::unavailable(error.to_string()),
@@ -1055,7 +1144,7 @@ fn decode_gdt_entry(index: usize, raw: u64, high_raw: Result<Option<u64>>) -> Gd
     let type_code = ((raw >> 40) & 0xf) as u8;
     let long_mode = raw & (1 << 53) != 0;
     let default_size = raw & (1 << 54) != 0;
-    GdtEntryDetail {
+    GdtDescriptor {
         index: index as u64,
         raw: DiagnosticValue::Available(raw),
         high_raw: high_value,
@@ -1076,7 +1165,7 @@ fn decode_gdt_entry(index: usize, raw: u64, high_raw: Result<Option<u64>>) -> Gd
 }
 
 /// Decode the GDT `descriptor` names, bounded to 256 entries.
-pub fn decode_gdt(target: &Target, processor: u16, descriptor: DescriptorDetail) -> GdtDetail {
+pub fn decode_gdt(target: &Target, processor: u16, descriptor: DescriptorRegister) -> Gdt {
     let raw_count = descriptor.limit.saturating_add(8) / 8;
     let count = usize::try_from(raw_count).unwrap_or(MAX_GDT_ENTRIES + 1);
     let truncated = count > MAX_GDT_ENTRIES;
@@ -1084,7 +1173,7 @@ pub fn decode_gdt(target: &Target, processor: u16, descriptor: DescriptorDetail)
     let memory = match kernel(target) {
         Ok(kernel) => kernel.memory(),
         Err(error) => {
-            return GdtDetail {
+            return Gdt {
                 processor,
                 base: descriptor.base,
                 limit: descriptor.limit,
@@ -1126,7 +1215,7 @@ pub fn decode_gdt(target: &Target, processor: u16, descriptor: DescriptorDetail)
             index += 1;
         }
     }
-    GdtDetail {
+    Gdt {
         processor,
         base: descriptor.base,
         limit: descriptor.limit,

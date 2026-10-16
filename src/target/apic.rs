@@ -12,6 +12,7 @@ use crate::layout::{TypeInfo, Types};
 use crate::memory::MemoryOps;
 use crate::target::{Target, bounded_list_walk};
 use crate::types::VirtAddr;
+use ntoseye_macros::record;
 
 /// `IA32_APIC_BASE`.
 pub const IA32_APIC_BASE: u32 = 0x1b;
@@ -122,9 +123,15 @@ fn apic_words(x2apic: bool) -> Vec<(ApicRegister, u32)> {
 }
 
 /// A local vector table entry, decoded (Intel SDM vol. 3, 11.5.1).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LvtEntry {
+#[record]
+#[derive(PartialEq, Eq)]
+pub struct ApicLvt {
+    /// `Timer`, `LINT0`, `LINT1`, `Error`, `PerfMon`, `Thermal`, or
+    /// `CMCI`.
+    pub name: &'static str,
+    #[record(hex)]
     pub raw: u32,
+    #[record(hex)]
     pub vector: u8,
     /// `Fixed`, `SMI`, `NMI`, `INIT`, `ExtINT`, or the mode in hex.
     pub delivery: String,
@@ -137,9 +144,15 @@ pub struct LvtEntry {
     pub timer_mode: Option<&'static str>,
 }
 
-/// Decode an LVT entry; `timer` reads bits 17-18 as the timer mode.
-pub fn decode_lvt(raw: u32, timer: bool) -> LvtEntry {
-    LvtEntry {
+/// The local vector table entries in register order.
+pub const LVT_NAMES: [&str; 7] = [
+    "Timer", "LINT0", "LINT1", "Error", "PerfMon", "Thermal", "CMCI",
+];
+
+/// Decode LVT entry `name`; `timer` reads bits 17-18 as the timer mode.
+pub fn decode_lvt(name: &'static str, raw: u32, timer: bool) -> ApicLvt {
+    ApicLvt {
+        name,
         raw,
         vector: raw as u8,
         delivery: match (raw >> 8) & 7 {
@@ -165,9 +178,12 @@ pub fn decode_lvt(raw: u32, timer: bool) -> LvtEntry {
 }
 
 /// The interrupt command register, decoded.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IcrValue {
+#[record]
+#[derive(PartialEq, Eq)]
+pub struct ApicIcr {
+    #[record(hex)]
     pub raw: u64,
+    #[record(hex)]
     pub vector: u8,
     pub delivery: String,
     pub logical: bool,
@@ -176,14 +192,15 @@ pub struct IcrValue {
     pub level_triggered: bool,
     /// `none`, `self`, `all`, or `all-but-self`.
     pub shorthand: &'static str,
+    #[record(hex)]
     pub destination: u32,
 }
 
 /// Decode the ICR; an x2APIC ICR keeps its 32-bit destination in the high
 /// half, an xAPIC one its 8-bit destination in the top byte.
-pub fn decode_icr(raw: u64, x2apic: bool) -> IcrValue {
+pub fn decode_icr(raw: u64, x2apic: bool) -> ApicIcr {
     let low = raw as u32;
-    IcrValue {
+    ApicIcr {
         raw,
         vector: low as u8,
         delivery: match (low >> 8) & 7 {
@@ -233,40 +250,75 @@ pub fn timer_divisor(raw: u32) -> u32 {
     if code == 7 { 1 } else { 2 << code }
 }
 
-/// A processor's local APIC, read through its x2APIC MSRs. A register the
-/// processor does not implement (the thermal or CMCI LVT) is `None`.
-#[derive(Debug, Clone)]
+/// A processor's local APIC (`!apic`), read through its x2APIC MSRs or
+/// its xAPIC registers.
+#[record(impl)]
 pub struct LocalApic {
     pub processor: u16,
+    /// `IA32_APIC_BASE`.
+    #[record(hex)]
     pub apic_base: u64,
     /// In x2APIC mode, read through MSRs; else through its registers.
     pub x2apic: bool,
+    #[record(hex)]
     pub id: u32,
+    #[record(hex)]
     pub version: u32,
+    #[record(hex)]
     pub tpr: u32,
+    #[record(hex)]
     pub ppr: u32,
+    #[record(hex)]
     pub ldr: u32,
+    /// The spurious-interrupt vector register.
+    #[record(hex)]
     pub svr: u32,
+    /// `None` when the error status does not read.
+    #[record(hex)]
     pub esr: Option<u32>,
-    pub icr: u64,
-    pub isr: [u32; 8],
-    pub tmr: [u32; 8],
-    pub irr: [u32; 8],
-    pub lvt: Vec<(&'static str, Option<LvtEntry>)>,
+    pub icr: ApicIcr,
+    /// The LVT entries the APIC implements, in [`LVT_NAMES`] order.
+    pub lvt: Vec<ApicLvt>,
+    /// The ones it does not (the thermal or CMCI entry).
+    pub lvt_missing: Vec<&'static str>,
+    #[record(hex)]
     pub timer_initial: u32,
+    #[record(hex)]
     pub timer_current: u32,
+    /// The timer's divide configuration register.
+    #[record(hex)]
     pub timer_divide: u32,
+    /// The vectors in service, requested, and level-triggered.
+    pub isr: Vec<u8>,
+    pub irr: Vec<u8>,
+    pub tmr: Vec<u8>,
 }
 
+#[record]
 impl LocalApic {
-    pub fn bsp(&self) -> bool {
+    #[record(getter)]
+    pub fn bootstrap_processor(&self) -> bool {
         self.apic_base & APIC_BASE_BSP != 0
     }
 
+    #[record(getter)]
     pub fn enabled(&self) -> bool {
         self.apic_base & APIC_BASE_ENABLE != 0
     }
 
+    #[record(getter)]
+    pub fn software_enabled(&self) -> bool {
+        self.svr & (1 << 8) != 0
+    }
+
+    /// The divisor `timer_divide` selects.
+    #[record(getter)]
+    pub fn timer_divisor(&self) -> u32 {
+        timer_divisor(self.timer_divide)
+    }
+}
+
+impl LocalApic {
     /// The reads of the registers of a local APIC whose `IA32_APIC_BASE` is
     /// `apic_base`: in x2APIC mode its MSRs, in xAPIC mode its registers at
     /// the physical base `apic_base` names, read uncached.
@@ -321,15 +373,17 @@ impl LocalApic {
         let version = read(ApicRegister::Version)? as u32;
         let max_lvt = (version >> 16) & 0xff;
         let mut lvt = Vec::new();
-        for (name, register, timer) in [
-            ("Timer", ApicRegister::LvtTimer, true),
-            ("LINT0", ApicRegister::LvtLint0, false),
-            ("LINT1", ApicRegister::LvtLint1, false),
-            ("Error", ApicRegister::LvtError, false),
-            ("PerfMon", ApicRegister::LvtPerf, false),
-            ("Thermal", ApicRegister::LvtThermal, false),
-            ("CMCI", ApicRegister::Cmci, false),
-        ] {
+        let mut lvt_missing = Vec::new();
+        for (name, register) in LVT_NAMES.into_iter().zip([
+            ApicRegister::LvtTimer,
+            ApicRegister::LvtLint0,
+            ApicRegister::LvtLint1,
+            ApicRegister::LvtError,
+            ApicRegister::LvtPerf,
+            ApicRegister::LvtThermal,
+            ApicRegister::Cmci,
+        ]) {
+            let timer = register == ApicRegister::LvtTimer;
             // The version register says how many LVT entries the APIC has
             // past the first; the thermal and CMCI entries are optional.
             let optional = matches!(register, ApicRegister::LvtThermal | ApicRegister::Cmci);
@@ -340,14 +394,17 @@ impl LocalApic {
             };
             let entry = if present {
                 match read(register) {
-                    Ok(raw) => Some(decode_lvt(raw as u32, timer)),
+                    Ok(raw) => Some(decode_lvt(name, raw as u32, timer)),
                     Err(_) if optional => None,
                     Err(error) => return Err(error),
                 }
             } else {
                 None
             };
-            lvt.push((name, entry));
+            match entry {
+                Some(entry) => lvt.push(entry),
+                None => lvt_missing.push(name),
+            }
         }
         Ok(Self {
             processor,
@@ -360,11 +417,12 @@ impl LocalApic {
             ldr: read(ApicRegister::Ldr)? as u32,
             svr: read(ApicRegister::Svr)? as u32,
             esr: read(ApicRegister::Esr).ok().map(|value| value as u32),
-            icr,
-            isr,
-            tmr,
-            irr,
+            icr: decode_icr(icr, x2apic),
+            isr: bitmap_vectors(&isr),
+            tmr: bitmap_vectors(&tmr),
+            irr: bitmap_vectors(&irr),
             lvt,
+            lvt_missing,
             timer_initial: read(ApicRegister::TimerInitial)? as u32,
             timer_current: read(ApicRegister::TimerCurrent)? as u32,
             timer_divide: read(ApicRegister::TimerDivide)? as u32,
@@ -374,11 +432,12 @@ impl LocalApic {
 
 /// A line of an interrupt controller as the HAL set it
 /// (`_INTERRUPT_LINE_STATE`).
-#[derive(Debug, Clone)]
+#[record]
 pub struct HalLine {
     pub line: i64,
     /// The global system interrupt, for a pin.
     pub gsi: Option<u64>,
+    #[record(hex)]
     pub vector: u32,
     /// The IRQL the line's interrupt runs at (`Priority`).
     pub irql: u32,
@@ -387,11 +446,12 @@ pub struct HalLine {
     /// `_INTERRUPT_TARGET_TYPE` without its prefix, and the target ID the
     /// type uses.
     pub target: String,
+    #[record(hex)]
     pub flags: u32,
 }
 
 /// A range of a controller's lines (`_INTERRUPT_LINES`).
-#[derive(Debug, Clone)]
+#[record]
 pub struct HalLineRange {
     pub address: VirtAddr,
     /// `_INTERRUPT_LINE_TYPE` without its prefix (`StandardPin`).
@@ -405,11 +465,12 @@ pub struct HalLineRange {
 
 /// An interrupt controller the HAL registered
 /// (`_REGISTERED_INTERRUPT_CONTROLLER`).
-#[derive(Debug, Clone)]
+#[record]
 pub struct HalController {
     pub address: VirtAddr,
     /// `_KNOWN_CONTROLLER_TYPE` without its prefix (`Apic`, `Pic`).
     pub kind: String,
+    #[record(hex)]
     pub unit_id: u32,
     /// The ACPI ID the HAL gave the controller's device.
     pub resource_id: String,
@@ -421,10 +482,26 @@ pub struct HalController {
     pub ranges_stopped: Option<String>,
 }
 
-/// The controllers on `nt!HalpRegisteredInterruptControllers`.
-#[derive(Debug, Clone)]
+/// A controller that does not read.
+#[record]
+pub struct HalUnreadable {
+    pub address: VirtAddr,
+    pub error: String,
+}
+
+/// A controller on the HAL's list: read, or why it did not read.
+#[record]
+pub enum HalControllerEntry {
+    Controller(HalController),
+    Unreadable(HalUnreadable),
+}
+
+/// The interrupt controllers on `nt!HalpRegisteredInterruptControllers`
+/// (`!ioapic`), in list order.
+#[record]
 pub struct HalControllers {
-    pub controllers: Vec<std::result::Result<HalController, (VirtAddr, String)>>,
+    pub controllers: Vec<HalControllerEntry>,
+    /// Why the walk stopped before the list head.
     pub stopped: Option<String>,
 }
 
@@ -472,10 +549,15 @@ impl Target {
             bounded_list_walk(head, MAX_CONTROLLERS, |at| memory.read::<VirtAddr>(at));
         let controllers = links
             .into_iter()
-            .map(|address| {
-                self.hal_controller(types, &controller, address)
-                    .map_err(|error| (address, error.to_string()))
-            })
+            .map(
+                |address| match self.hal_controller(types, &controller, address) {
+                    Ok(controller) => HalControllerEntry::Controller(controller),
+                    Err(error) => HalControllerEntry::Unreadable(HalUnreadable {
+                        address,
+                        error: error.to_string(),
+                    }),
+                },
+            )
             .collect();
         Ok(HalControllers {
             controllers,
@@ -602,18 +684,18 @@ mod tests {
     #[test]
     fn lvt_entries_decode_mode_mask_and_trigger() {
         // LINT0 as Windows leaves it: ExtINT, masked.
-        let lint0 = decode_lvt(0x0001_0700, false);
+        let lint0 = decode_lvt("LINT0", 0x0001_0700, false);
         assert_eq!(lint0.delivery, "ExtINT");
         assert!(lint0.masked && !lint0.level && lint0.timer_mode.is_none());
         // LINT1: NMI, level-sensitive bit set by firmware.
-        let lint1 = decode_lvt(0x0000_8400, false);
+        let lint1 = decode_lvt("LINT1", 0x0000_8400, false);
         assert_eq!(lint1.delivery, "NMI");
         assert!(lint1.level && !lint1.masked);
         // A periodic timer on vector 0xd1, and a TSC-deadline one.
-        let timer = decode_lvt(0x0002_00d1, true);
+        let timer = decode_lvt("Timer", 0x0002_00d1, true);
         assert_eq!((timer.vector, timer.timer_mode), (0xd1, Some("periodic")));
         assert_eq!(
-            decode_lvt(0x0004_00d1, true).timer_mode,
+            decode_lvt("Timer", 0x0004_00d1, true).timer_mode,
             Some("TSC-deadline")
         );
     }
@@ -693,14 +775,17 @@ mod tests {
 
         let apic = session.local_apic(2).unwrap();
 
-        assert!(apic.x2apic && apic.enabled() && !apic.bsp());
+        assert!(apic.x2apic && apic.enabled() && !apic.bootstrap_processor());
         assert_eq!(apic.id, 0x105);
-        assert_eq!(decode_icr(apic.icr, apic.x2apic).destination, 3);
-        assert_eq!(bitmap_vectors(&apic.isr), [0xd1]);
-        assert_eq!(timer_divisor(apic.timer_divide), 1);
-        let lvt: HashMap<_, _> = apic.lvt.into_iter().collect();
-        assert!(lvt["Thermal"].as_ref().is_some_and(|entry| entry.masked));
-        assert!(lvt["CMCI"].is_none());
+        assert_eq!(apic.icr.destination, 3);
+        assert_eq!(apic.isr, [0xd1]);
+        assert_eq!(apic.timer_divisor(), 1);
+        assert!(
+            apic.lvt
+                .iter()
+                .any(|entry| entry.name == "Thermal" && entry.masked)
+        );
+        assert_eq!(apic.lvt_missing, ["CMCI"]);
     }
 
     #[test]
@@ -726,12 +811,17 @@ mod tests {
 
         let apic = session.local_apic(1).unwrap();
 
-        assert!(!apic.x2apic && apic.enabled() && !apic.bsp());
+        assert!(!apic.x2apic && apic.enabled() && !apic.bootstrap_processor());
         assert_eq!(apic.id, 1);
-        assert_eq!(apic.icr, 0x0300_0000_0000_40fd);
-        assert_eq!(decode_icr(apic.icr, apic.x2apic).destination, 3);
-        assert_eq!(bitmap_vectors(&apic.irr), [0x2f]);
-        let lvt: HashMap<_, _> = apic.lvt.into_iter().collect();
-        assert_eq!(lvt["CMCI"].as_ref().map(|entry| entry.vector), Some(0xf2));
+        assert_eq!(apic.icr.raw, 0x0300_0000_0000_40fd);
+        assert_eq!(apic.icr.destination, 3);
+        assert_eq!(apic.irr, [0x2f]);
+        assert_eq!(
+            apic.lvt
+                .iter()
+                .find(|entry| entry.name == "CMCI")
+                .map(|entry| entry.vector),
+            Some(0xf2)
+        );
     }
 }

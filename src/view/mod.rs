@@ -4,13 +4,11 @@
 
 pub mod backend;
 pub mod bugcheck;
-pub mod cpu;
 pub mod execution;
 pub mod fs;
 pub mod hardware;
 pub mod heap;
 pub mod hypervisor;
-pub mod machine;
 pub mod meta;
 pub mod mm;
 pub mod module;

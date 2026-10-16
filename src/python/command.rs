@@ -11,17 +11,19 @@ use pyo3::prelude::*;
 use super::context::Context;
 use super::handle::Owner;
 use super::{ErrorKind, err, error, raise};
+use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::error::Result;
 use crate::guest::ProcessInfo;
 use crate::session::Session;
 use crate::session::effects::{Effects, Refusal, RunState};
 use crate::target::ThreadInfo;
+use crate::target::cpu::Processor;
 use crate::types::VirtAddr;
 use crate::view::record::{ToView, Typed};
 
 pub use super::inspect::Inspect;
 pub use super::process::Process;
-pub use super::thread::Thread;
+pub use super::thread::{Cpu, Thread};
 
 /// An SDK object a `#[command]` method can be placed on: the debugger it
 /// runs in and the context (process, thread) its calls run in.
@@ -46,6 +48,20 @@ pub trait PyArg: Sized {
 impl PyArg for u64 {
     type Py = u64;
     fn from_py(value: u64) -> Self {
+        value
+    }
+}
+
+impl PyArg for u8 {
+    type Py = u8;
+    fn from_py(value: u8) -> Self {
+        value
+    }
+}
+
+impl PyArg for u16 {
+    type Py = u16;
+    fn from_py(value: u16) -> Self {
         value
     }
 }
@@ -179,5 +195,24 @@ impl CommandHost for Thread {
 impl Bind<ThreadInfo> for Thread {
     fn bind(&self) -> ThreadInfo {
         self.info.clone()
+    }
+}
+
+impl CommandHost for Cpu {
+    fn owner(&self) -> &Owner {
+        &self.owner
+    }
+
+    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
+        Ok(Context::vcpu(self.id.clone()))
+    }
+}
+
+/// A `Cpu` is its processor; an id that names none (not `p<pid>.<tid>`)
+/// leaves it to the session, which reads the current vCPU's, the `Cpu`'s
+/// own in its context.
+impl Bind<Option<Processor>> for Cpu {
+    fn bind(&self) -> Option<Processor> {
+        processor_index_from_backend_thread_id(&self.id).map(Processor)
     }
 }

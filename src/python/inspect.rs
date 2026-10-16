@@ -1184,26 +1184,6 @@ impl Inspect {
         })
     }
 
-    /// List the interrupt controllers the HAL registered and the lines it
-    /// set up on each (`!ioapic`).
-    fn interrupt_controllers<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Typed<'py, view::machine::HalControllers>> {
-        self.typed(py, |session| {
-            let list = session.target.hal_interrupt_controllers().map_err(err)?;
-            Ok(view::machine::controllers(&list))
-        })
-    }
-
-    /// Read the SMBIOS table the kernel found at boot (`!sysinfo smbios`).
-    fn smbios<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::machine::SmbiosTable>> {
-        self.typed(py, |session| {
-            let table = session.target.smbios_table().map_err(err)?;
-            Ok(view::machine::smbios_table(&table))
-        })
-    }
-
     /// List the registry hives loaded in kernel memory, with where each is
     /// mounted and the file it was loaded from (`!reg hivelist`).
     fn registry_hives<'py>(

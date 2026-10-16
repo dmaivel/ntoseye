@@ -5,20 +5,21 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use crate::cpu_state;
 use crate::dbg_backend::{PciConfigAddress, processor_index_from_backend_thread_id};
 use crate::error::{Error, Result};
 use crate::session::Session;
 use crate::target::DiagnosticValue;
 use crate::target::apic::{IA32_APIC_BASE, LocalApic, apic_read_error};
 use crate::target::cpu::{
-    DescriptorDetail, DescriptorTable, GdtDetail, IdtDetail, PcrDetail, cpu_location, decode_gdt,
+    DescriptorRegister, DescriptorTable, Gdt, Idt, Pcr, Processor, cpu_location, decode_gdt,
     decode_idt, descriptor_from_target, validate_idt_vector,
 };
 use crate::target::pci::{
     EcamWindow, PCI_EXTENDED_CONFIG_SIZE, PCI_MAX_DEVICES, PCI_MAX_FUNCTIONS, PciFunctionConfig,
     PciQuery, PciScan, function_absent, parse_header,
 };
-use crate::types::{Arch, VirtAddr};
+use crate::types::{Arch, MAX_PROCESSORS, VirtAddr};
 
 /// [`Error::TargetRunning`] payload for MSR access.
 const MSRS_NEED_HALT: &str = "MSRs are read on a halted processor.";
@@ -28,11 +29,42 @@ const PORTS_NEED_HALT: &str = "I/O ports are accessed on a halted target.";
 const PCI_CONFIG_NEEDS_HALT: &str = "PCI configuration space is read on a halted target.";
 
 impl Session {
+    /// The number of processors: `KeNumberProcessors`, else the backend's
+    /// vCPUs.
+    pub fn processor_count(&mut self) -> u16 {
+        if let Ok(count) = cpu_state::processor_count(&self.target) {
+            return count.max(1);
+        }
+        // cpu_state intentionally only depends on Target. A live backend is the
+        // second source of truth when KeNumberProcessors is absent from a dump.
+        self.backend
+            .thread_list()
+            .ok()
+            .map(|threads| threads.len().clamp(1, usize::from(MAX_PROCESSORS)) as u16)
+            .unwrap_or(1)
+    }
+
+    /// `processor`, or the current vCPU's, checked against the processor
+    /// count.
+    pub fn processor(&mut self, processor: Option<Processor>) -> Result<u16> {
+        let count = self.processor_count();
+        let processor = processor.map_or_else(
+            || processor_index_from_backend_thread_id(&self.current_thread).unwrap_or(0),
+            |processor| processor.0,
+        );
+        if processor >= count {
+            return Err(Error::DebugInfo(format!(
+                "processor {processor} out of range (target has {count} processor(s))"
+            )));
+        }
+        Ok(processor)
+    }
+
     fn current_processor_for_cpu(&self) -> u16 {
         processor_index_from_backend_thread_id(&self.current_thread).unwrap_or(0)
     }
 
-    fn backend_descriptor(&mut self, name: &str) -> Result<DescriptorDetail> {
+    fn backend_descriptor(&mut self, name: &str) -> Result<DescriptorRegister> {
         let names = self.register_map.names();
         if !names
             .iter()
@@ -47,7 +79,7 @@ impl Session {
             .register_map
             .read_u64(&limit_name, &registers)
             .unwrap_or(0);
-        Ok(DescriptorDetail {
+        Ok(DescriptorRegister {
             base: VirtAddr(base),
             limit,
         })
@@ -57,7 +89,7 @@ impl Session {
         &mut self,
         processor: u16,
         table: DescriptorTable,
-    ) -> Result<DescriptorDetail> {
+    ) -> Result<DescriptorRegister> {
         if processor != self.current_processor_for_cpu() {
             return Err(Error::DebugInfo(
                 "IDTR/GDTR ProcessorState is valid only for the halting processor".into(),
@@ -73,7 +105,7 @@ impl Session {
     /// Decode KPCR/KPRCB essentials, using halted backend descriptor registers
     /// only when target-memory descriptor fields are unavailable; all other
     /// diagnostic values retain their target-memory layout/read errors.
-    pub fn inspect_pcr(&mut self, processor: u16) -> Result<PcrDetail> {
+    pub fn inspect_pcr(&mut self, processor: u16) -> Result<Pcr> {
         let mut detail = self.target.inspect_pcr(processor)?;
         let idtr = self.descriptor_for_cpu(processor, DescriptorTable::Idt);
         detail.idtr = DiagnosticValue::from_result(idtr);
@@ -85,7 +117,7 @@ impl Session {
     /// Decode one IDT vector or all 256 vectors from the halted processor's
     /// IDTR, falling back to backend register reads when PDB state is absent;
     /// each entry field preserves its own memory/symbol diagnostic.
-    pub fn inspect_idt(&mut self, processor: u16, vector: Option<u16>) -> Result<IdtDetail> {
+    pub fn inspect_idt(&mut self, processor: u16, vector: Option<u16>) -> Result<Idt> {
         if self.target.arch() == Arch::Arm64 {
             return Err(Error::DebugInfo(
                 "!idt is not defined on ARM64 targets".into(),
@@ -99,7 +131,7 @@ impl Session {
     /// Decode the halted processor's bounded GDT, falling back to backend GDTR
     /// registers when PDB state is absent; each entry field preserves its own
     /// raw/descriptor diagnostic.
-    pub fn inspect_gdt(&mut self, processor: u16) -> Result<GdtDetail> {
+    pub fn inspect_gdt(&mut self, processor: u16) -> Result<Gdt> {
         if self.target.arch() == Arch::Arm64 {
             return Err(Error::DebugInfo(
                 "!gdt is not defined on ARM64 targets".into(),

@@ -6,7 +6,9 @@
 use crate::error::{Error, Result};
 use crate::memory::MemoryOps;
 use crate::target::Target;
+use crate::target::cpu::CpuInfo;
 use crate::target::etw::{GuidStyle, format_guid};
+use ntoseye_macros::record;
 
 /// The longest table read; SMBIOS 2.x tables are at most 64 KiB.
 const MAX_TABLE: u64 = 0x10000;
@@ -14,15 +16,44 @@ const MAX_TABLE: u64 = 0x10000;
 const END_OF_TABLE: u8 = 127;
 
 /// One SMBIOS structure: its header, its formatted area, and its strings.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[record(impl)]
+#[derive(PartialEq, Eq)]
 pub struct SmbiosStructure {
+    /// The structure type (0 BIOS, 1 system, 4 processor, 17 memory
+    /// device, ...).
     pub kind: u8,
+    #[record(hex)]
     pub handle: u16,
     /// The formatted area, header included, so offsets are the
     /// specification's.
     pub formatted: Vec<u8>,
     /// The strings, string 1 first.
     pub strings: Vec<String>,
+}
+
+/// A field of an SMBIOS structure, by the specification's name.
+#[record]
+pub struct SmbiosField {
+    pub name: &'static str,
+    pub value: String,
+}
+
+#[record]
+impl SmbiosStructure {
+    /// The DMTF name of the type.
+    #[record(getter)]
+    pub fn kind_name(&self) -> &'static str {
+        structure_name(self.kind)
+    }
+
+    /// The fields `!sysinfo smbios` decodes for its type.
+    #[record(getter)]
+    pub fn fields(&self) -> Vec<SmbiosField> {
+        structure_fields(self)
+            .into_iter()
+            .map(|(name, value)| SmbiosField { name, value })
+            .collect()
+    }
 }
 
 impl SmbiosStructure {
@@ -59,16 +90,27 @@ impl SmbiosStructure {
     }
 }
 
-/// The SMBIOS table the kernel found.
-#[derive(Debug, Clone)]
+/// The SMBIOS table the kernel found at boot (`!sysinfo smbios`).
+#[record(impl)]
 pub struct SmbiosTable {
+    #[record(hex)]
     pub physical_address: u64,
     pub length: u32,
     /// The version the entry point gave, as `(major, minor)`.
+    #[record(skip)]
     pub version: (u8, u8),
     pub structures: Vec<SmbiosStructure>,
     /// Why the parse stopped before End-of-Table.
     pub stopped: Option<String>,
+}
+
+#[record]
+impl SmbiosTable {
+    /// The version the entry point gave (`2.8`).
+    #[record(getter, rename = "version")]
+    pub fn version_text(&self) -> String {
+        format!("{}.{}", self.version.0, self.version.1)
+    }
 }
 
 impl SmbiosTable {
@@ -78,6 +120,17 @@ impl SmbiosTable {
             .iter()
             .find(|structure| structure.kind == kind)
     }
+}
+
+/// What `!sysinfo` shows.
+#[record]
+pub enum SysInfo {
+    /// `machineid`: the identity lines from the SMBIOS table.
+    MachineId(SmbiosTable),
+    /// `smbios`: every structure of the table.
+    Smbios(SmbiosTable),
+    /// `cpuinfo`: the current processor, as `!cpuinfo` shows it.
+    CpuInfo(CpuInfo),
 }
 
 /// Parse the structures of an SMBIOS table: each a header (type, length,
