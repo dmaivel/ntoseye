@@ -311,8 +311,11 @@ fn write_port(session: &mut Session, name: &str, port: u64, size: u8, value: u64
 #[command(
     names = ["ib"],
     category = "memory and disassembly",
-    kind = Query,
+    kind = Action,
     target = Kernel,
+    state = Halted,
+    writes = [Hardware],
+    capability = IoPorts,
     python = none,
 )]
 fn ib(session: &mut Session, #[arg(invoked)] name: &str, port: u64) -> Result<PortValue> {
@@ -349,8 +352,11 @@ fn ob(session: &mut Session, #[arg(invoked)] name: &str, port: u64, value: u64) 
 #[command(
     names = ["iw"],
     category = "memory and disassembly",
-    kind = Query,
+    kind = Action,
     target = Kernel,
+    state = Halted,
+    writes = [Hardware],
+    capability = IoPorts,
     python = none,
 )]
 fn iw(session: &mut Session, #[arg(invoked)] name: &str, port: u64) -> Result<PortValue> {
@@ -387,8 +393,11 @@ fn ow(session: &mut Session, #[arg(invoked)] name: &str, port: u64, value: u64) 
 #[command(
     names = ["id"],
     category = "memory and disassembly",
-    kind = Query,
+    kind = Action,
     target = Kernel,
+    state = Halted,
+    writes = [Hardware],
+    capability = IoPorts,
     python = none,
 )]
 fn id(session: &mut Session, #[arg(invoked)] name: &str, port: u64) -> Result<PortValue> {
