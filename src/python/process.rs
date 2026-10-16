@@ -273,14 +273,6 @@ impl Process {
         })
     }
 
-    /// Get the process token and its security information.
-    fn token<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::security::Token>> {
-        let detail = self.owner.with_in(py, &self.context(), |session| {
-            session.target.inspect_process_token().map_err(err)
-        })?;
-        Typed::new(py, view::security::token(&detail))
-    }
-
     /// Decode a handle in the handle table of this process.
     fn handle<'py>(&self, py: Python<'py>, value: u64) -> PyResult<Typed<'py, HandleEntry>> {
         let entry = self.owner.with_in(py, &self.context(), |session| {

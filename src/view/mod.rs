@@ -15,7 +15,6 @@ pub mod pnp;
 pub mod power;
 pub mod record;
 pub mod registry;
-pub mod security;
 pub mod symbols;
 pub mod triage;
 pub mod userdump;

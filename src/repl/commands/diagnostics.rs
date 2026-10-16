@@ -10,6 +10,7 @@ use crate::target::mm::SystemMemorySummary;
 use crate::target::object::{
     ExecutiveResource, FileObject, HandleEntry, HandleTable, ResourceList,
 };
+use crate::target::security::Token;
 use crate::target::usermode::handles::{
     handle_attribute_names, handle_type_counts, handle_type_label,
 };
@@ -18,16 +19,6 @@ use crate::types::VirtAddr;
 use crate::ui;
 use crate::userdump::UserHandle;
 use ntoseye_macros::command;
-
-repl_command! {
-    cmd_token();
-    names: ["!token"],
-    category: "security",
-    usage: "!token",
-    summary: "Show the primary token of the selected or current process.",
-    details: "The command shows the token IDs, user and groups, privileges, type, impersonation level, and flags. It gets each field independently, and if the metadata or memory for a field is missing, it shows this in that field.",
-    target: Kernel,
-}
 
 /// Show the system memory-use counters and the counters of a limited number
 /// of processes.
@@ -230,74 +221,6 @@ fn print_resource(detail: &ExecutiveResource) {
         DiagnosticValue::Unavailable(error) => {
             outln!("  owners             : <unavailable: {error}>")
         }
-    }
-}
-
-impl ReplState<'_> {
-    fn cmd_token(&mut self) -> Result<()> {
-        match self.ctx.target.inspect_process_token() {
-            Ok(token) => {
-                outln!(
-                    "token: {} ({})  {}",
-                    token.process.name,
-                    token.process.pid,
-                    ui::addr(token.token.0)
-                );
-                outln!("  token id           : {}", diagnostic_hex(&token.token_id));
-                outln!(
-                    "  authentication id  : {}",
-                    diagnostic_hex(&token.authentication_id)
-                );
-                outln!(
-                    "  type               : {}",
-                    diagnostic_cell(&token.token_type)
-                );
-                outln!(
-                    "  impersonation      : {}",
-                    diagnostic_cell(&token.impersonation_level)
-                );
-                outln!("  flags              : {}", diagnostic_hex(&token.flags));
-                match &token.user {
-                    DiagnosticValue::Available(Some(user)) => outln!(
-                        "  user               : {} attributes {:#x}",
-                        user.sid,
-                        user.attributes
-                    ),
-                    DiagnosticValue::Available(None) => outln!("  user               : none"),
-                    DiagnosticValue::Unavailable(error) => {
-                        outln!("  user               : <unavailable: {error}>")
-                    }
-                }
-                match &token.groups {
-                    DiagnosticValue::Available(groups) => {
-                        outln!("  groups ({})", groups.len());
-                        for group in groups {
-                            outln!("    {} attributes {:#x}", group.sid, group.attributes);
-                        }
-                    }
-                    DiagnosticValue::Unavailable(error) => {
-                        outln!("  groups             : <unavailable: {error}>")
-                    }
-                }
-                match &token.privileges {
-                    DiagnosticValue::Available(privileges) => {
-                        outln!("  privileges ({})", privileges.len());
-                        for privilege in privileges {
-                            outln!(
-                                "    LUID {:#x} attributes {:#x}",
-                                privilege.luid,
-                                privilege.attributes
-                            );
-                        }
-                    }
-                    DiagnosticValue::Unavailable(error) => {
-                        outln!("  privileges         : <unavailable: {error}>")
-                    }
-                }
-            }
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
     }
 }
 
@@ -697,6 +620,96 @@ impl Render for Locks {
                     }
                 );
                 list.resources.iter().for_each(print_resource);
+            }
+        }
+    }
+}
+
+/// Show the primary token of the selected or current process.
+///
+/// The command shows the token IDs, user and groups, privileges, type,
+/// impersonation level, and flags. It gets each field independently, and if
+/// the metadata or memory for a field is missing, it shows this in that field.
+#[command(
+    names = ["!token"],
+    category = "security",
+    kind = Query,
+    target = Kernel,
+    python = Process,
+    usage = "!token"
+)]
+fn token(session: &Session, #[arg(render, parse = no_words)] none: ()) -> Result<Token> {
+    session.target.inspect_process_token()
+}
+
+/// No argument: any word prints the help, as `!token` always did.
+fn no_words(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<(), ArgError> {
+    match cursor.remaining() {
+        0 => Ok(()),
+        _ => Err(ArgError::Missing),
+    }
+}
+
+impl Render for Token {
+    fn render(&self, _: &mut ReplState<'_>, _: ()) {
+        outln!(
+            "token: {} ({})  {}",
+            self.process.name,
+            self.process.pid,
+            ui::addr(self.token.0)
+        );
+        outln!("  token id           : {}", diagnostic_hex(&self.token_id));
+        outln!(
+            "  authentication id  : {}",
+            diagnostic_hex(&self.authentication_id)
+        );
+        outln!(
+            "  type               : {}",
+            diagnostic_cell(&self.token_type)
+        );
+        outln!(
+            "  impersonation      : {}",
+            diagnostic_cell(&self.impersonation_level)
+        );
+        outln!("  flags              : {}", diagnostic_hex(&self.flags));
+        match &self.user {
+            DiagnosticValue::Available(Some(user)) => outln!(
+                "  user               : {} attributes {:#x}",
+                user.sid,
+                user.attributes
+            ),
+            DiagnosticValue::Available(None) => outln!("  user               : none"),
+            DiagnosticValue::Unavailable(error) => {
+                outln!("  user               : <unavailable: {error}>")
+            }
+        }
+        match &self.groups {
+            DiagnosticValue::Available(groups) => {
+                outln!("  groups ({})", groups.len());
+                for group in groups {
+                    outln!("    {} attributes {:#x}", group.sid, group.attributes);
+                }
+            }
+            DiagnosticValue::Unavailable(error) => {
+                outln!("  groups             : <unavailable: {error}>")
+            }
+        }
+        match &self.privileges {
+            DiagnosticValue::Available(privileges) => {
+                outln!("  privileges ({})", privileges.len());
+                for privilege in privileges {
+                    outln!(
+                        "    LUID {:#x} attributes {:#x}",
+                        privilege.luid,
+                        privilege.attributes
+                    );
+                }
+            }
+            DiagnosticValue::Unavailable(error) => {
+                outln!("  privileges         : <unavailable: {error}>")
             }
         }
     }
