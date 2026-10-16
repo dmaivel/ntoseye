@@ -849,12 +849,7 @@ pub fn triage_report(report: &ReportDetail, module_limit: usize) -> TriageReport
             .backtrace
             .as_ref()
             .map(|trace| stack_frames(&trace.frames)),
-        modules: report
-            .modules
-            .iter()
-            .take(module_limit)
-            .cloned()
-            .collect(),
+        modules: report.modules.iter().take(module_limit).cloned().collect(),
         modules_total: report.modules.len(),
         unloaded_drivers: report
             .unloaded_drivers

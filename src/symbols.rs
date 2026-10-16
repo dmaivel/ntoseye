@@ -802,7 +802,9 @@ impl ModuleSymbols {
     /// The source of the PDB, if known.
     #[record(getter, rename = "source")]
     pub fn source_name(&self) -> Option<String> {
-        self.source.as_ref().map(|source| source.label().to_string())
+        self.source
+            .as_ref()
+            .map(|source| source.label().to_string())
     }
 
     /// The GUID of the loaded PDB as 32 hex digits. `None` if there is no PDB.
@@ -1067,7 +1069,12 @@ impl SymbolStore {
     /// The symbol source path as `.sympath` shows it.
     pub fn symbol_path(&self) -> SymbolPath {
         SymbolPath {
-            sources: self.sources.read().iter().map(ToString::to_string).collect(),
+            sources: self
+                .sources
+                .read()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
         }
     }
 

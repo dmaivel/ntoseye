@@ -18,11 +18,11 @@ use crate::pe;
 use crate::pe::ModuleExportInfo;
 use crate::pe::headers::Section;
 use crate::symbols::{ImageSource, ModuleListing, ModuleSymbols};
-use ntoseye_macros::record;
 use crate::target::object::DriverObjectInfo;
 use crate::types::{Dtb, VirtAddr};
 use crate::view::record::Typed;
 use crate::view::{self};
+use ntoseye_macros::record;
 use pelite::PeView;
 
 /// A collection of modules: `dbg.modules` (kernel), `proc.modules` (loader
@@ -309,7 +309,10 @@ impl Module {
                 Ok(ModuleDetail::Process(module))
             } else {
                 Ok(ModuleDetail::Kernel(ModuleListing {
-                    symbols: session.target.symbols.module_symbols(dtb, info.base_address),
+                    symbols: session
+                        .target
+                        .symbols
+                        .module_symbols(dtb, info.base_address),
                     module: info,
                 }))
             }

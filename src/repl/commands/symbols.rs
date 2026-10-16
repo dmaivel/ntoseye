@@ -26,7 +26,10 @@ use crate::ui;
 use crate::repl::*;
 
 /// The first word; `x` ignores the words after it, as it always did.
-fn first_word(_: &mut ArgCx<'_, '_>, cursor: &mut ArgCursor<'_>) -> std::result::Result<String, ArgError> {
+fn first_word(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<String, ArgError> {
     let first = cursor.word().ok_or(ArgError::Missing)?.into_owned();
     cursor.rest();
     Ok(first)
@@ -127,7 +130,10 @@ fn x(state: &mut ReplState<'_>, #[arg(parse = first_word)] query: String) -> Res
 
 /// The next word as an address, left for the argument after, which takes it
 /// too: `ln` names the address it was given when no symbol covers it.
-fn peek_address(cx: &mut ArgCx<'_, '_>, cursor: &mut ArgCursor<'_>) -> std::result::Result<VirtAddr, ArgError> {
+fn peek_address(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<VirtAddr, ArgError> {
     let word = cursor.words().next().ok_or(ArgError::Missing)?.to_string();
     cx.eval(&word)
 }
@@ -217,7 +223,10 @@ fn ev(state: &mut ReplState<'_>, #[arg(raw)] expression: String) -> Result<()> {
 }
 
 /// Every word left, at least one.
-fn some_words(cx: &mut ArgCx<'_, '_>, cursor: &mut ArgCursor<'_>) -> std::result::Result<Vec<String>, ArgError> {
+fn some_words(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Vec<String>, ArgError> {
     let words = words(cx, cursor)?;
     if words.is_empty() {
         return Err(ArgError::Missing);
@@ -352,12 +361,18 @@ impl Render for SourcePath {
 }
 
 /// `ls [.] [first][,count]`.
-fn ls_arguments(_: &mut ArgCx<'_, '_>, cursor: &mut ArgCursor<'_>) -> std::result::Result<LsArgs, ArgError> {
+fn ls_arguments(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<LsArgs, ArgError> {
     parse_ls_args(&cursor.take_all(|_| true)).ok_or(ArgError::Missing)
 }
 
 /// `lsa [address][,first][,count]`.
-fn lsa_arguments(_: &mut ArgCx<'_, '_>, cursor: &mut ArgCursor<'_>) -> std::result::Result<LsaArgs, ArgError> {
+fn lsa_arguments(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<LsaArgs, ArgError> {
     parse_lsa_args(&cursor.take_all(|_| true)).ok_or(ArgError::Missing)
 }
 
@@ -853,9 +868,7 @@ fn list_modules(target: &Target, filter: &ModuleFilter) -> Result<Vec<ModuleList
     };
     let modules = if kernel {
         target.kernel_modules_with_versions()
-    } else if filter.user
-        && target.attached_process().is_none()
-        && target.user_modules().is_none()
+    } else if filter.user && target.attached_process().is_none() && target.user_modules().is_none()
     {
         Ok(Vec::new())
     } else {
@@ -947,9 +960,7 @@ fn source_file_at(
         ));
     };
     match &location.local {
-        Some(local) if local.state == LocalSourceState::Found => {
-            Ok((local.path.clone(), location))
-        }
+        Some(local) if local.state == LocalSourceState::Found => Ok((local.path.clone(), location)),
         Some(local) if local.state == LocalSourceState::Differs => Err(format!(
             "{} is not the source compiled for {} (its checksum differs from the one {} records)",
             local.path.display(),

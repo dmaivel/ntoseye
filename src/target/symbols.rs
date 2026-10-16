@@ -13,8 +13,8 @@ use crate::{
     pe::{ModuleExportInfo, PeImage, read_pe_exports, read_pe_image, read_pe_version_info},
     symbols::{
         CodeFrame, InlineFrame, LocalVariableLocation, ProcedureLocal, SourceLineExtent,
-        SourceLocation, Symbol, SymbolCandidate, SymbolIndex, SymbolStore, format_symbol_with_offset,
-        glob_matches,
+        SourceLocation, Symbol, SymbolCandidate, SymbolIndex, SymbolStore,
+        format_symbol_with_offset, glob_matches,
     },
     types::{Dtb, VirtAddr},
     unwind::frame_base_for_register_values,

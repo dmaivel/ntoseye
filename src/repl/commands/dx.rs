@@ -19,8 +19,8 @@ use crate::typeview::TypeView;
 use super::dx_model::{self as model, ModelValue};
 use super::dx_query;
 use super::types::MAX_RECURSION_DEPTH;
-use crate::repl::*;
 use crate::repl::args::{ArgCursor, ArgCx, ArgError};
+use crate::repl::*;
 use ntoseye_macros::command;
 
 /// Show a typed expression's value and its fields.
@@ -72,7 +72,8 @@ fn dx_request(
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<DxRequest, ArgError> {
     let raw = cursor.raw();
-    let args = parse_dx_args(&raw).map_err(|message| ArgError::Message(format!("dx: {message}")))?;
+    let args =
+        parse_dx_args(&raw).map_err(|message| ArgError::Message(format!("dx: {message}")))?;
     if args.text.is_empty() {
         return Err(ArgError::Missing);
     }

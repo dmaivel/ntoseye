@@ -281,11 +281,7 @@ fn print_file_headers(detail: &ImageHeaders) {
     };
     outln!("File Type: {file_type}");
     outln!("FILE HEADER VALUES");
-    outln!(
-        "{:>8X} machine ({})",
-        file.machine,
-        file.machine_name()
-    );
+    outln!("{:>8X} machine ({})", file.machine, file.machine_name());
     outln!("{:>8X} number of sections", file.number_of_sections);
     outln!("{:>8X} time date stamp", file.time_date_stamp);
     outln!(

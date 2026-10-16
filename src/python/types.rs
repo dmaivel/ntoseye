@@ -185,10 +185,7 @@ impl Type {
 
     /// Field layouts by name, in offset order. An enum has no fields.
     #[getter]
-    fn fields<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<IndexMap<String, Typed<'py, FieldInfo>>> {
+    fn fields<'py>(&self, py: Python<'py>) -> PyResult<IndexMap<String, Typed<'py, FieldInfo>>> {
         self.field_layouts()
             .into_iter()
             .map(|(name, field)| Ok((name, Typed::new(py, field)?)))

@@ -12,8 +12,8 @@ use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::repl::commands::address_space::{
     PAGE_SHIFT, format_region_size, vad_protection_label, vad_type_label,
 };
-use crate::symbols::ModuleListing;
 use crate::session::VcpuInfo;
+use crate::symbols::ModuleListing;
 use crate::symbols::ModuleSymbolStatus;
 use crate::target::mm::{MemoryRegionInfo, VadType};
 use crate::target::sched::ProcessDetail;

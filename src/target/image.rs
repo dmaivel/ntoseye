@@ -248,8 +248,8 @@ impl Target {
         let debug = DiagnosticValue::from_result(debug_directory(&image_bytes, &headers));
         let exports =
             exports.then(|| DiagnosticValue::from_result(read_pe_exports(&image_bytes, base)));
-        let imports = imports
-            .then(|| DiagnosticValue::from_result(pe_imports(&image_bytes, &headers)));
+        let imports =
+            imports.then(|| DiagnosticValue::from_result(pe_imports(&image_bytes, &headers)));
         let PeHeaders {
             file,
             optional,

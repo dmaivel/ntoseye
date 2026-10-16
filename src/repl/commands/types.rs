@@ -997,7 +997,13 @@ impl ReplState<'_> {
         }
     }
 
-    fn dl(&mut self, DlArgs { backward, positional }: DlArgs) -> Result<()> {
+    fn dl(
+        &mut self,
+        DlArgs {
+            backward,
+            positional,
+        }: DlArgs,
+    ) -> Result<()> {
         let Some(address) = self.eval_or_report(&positional[0]) else {
             return Ok(());
         };
