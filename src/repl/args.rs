@@ -123,6 +123,14 @@ impl<'i> ArgCursor<'i> {
         self.words.iter().flatten().count()
     }
 
+    /// The words left, in order, without taking them: for a grammar that
+    /// checks the whole line before its parsers take their words
+    /// (`!wmitrace.logdump [-t count] <logger>` reports its first bad word,
+    /// wherever it is).
+    pub fn words(&self) -> impl Iterator<Item = &str> {
+        self.words.iter().flatten().map(|word| &**word)
+    }
+
     /// Whether the line has `switch` (any case), which is consumed.
     pub fn switch(&mut self, switch: &str) -> bool {
         let mut found = false;
@@ -202,6 +210,7 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(args.word().as_deref(), Some("4"));
+        assert_eq!(args.words().collect::<Vec<_>>(), ["tail", "of", "line"]);
         assert_eq!(args.word_at(1).as_deref(), Some("of"));
         assert_eq!(args.remaining(), 2);
         assert_eq!(args.rest(), "tail line");
