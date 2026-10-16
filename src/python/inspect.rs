@@ -295,31 +295,6 @@ impl Inspect {
         Ok(Device::new(owner, address))
     }
 
-    /// Decode the device stack that contains a device object or devnode
-    /// (`!devstack`).
-    fn device_stack<'py>(
-        &self,
-        py: Python<'py>,
-        device_or_node: DeviceArg<'_>,
-    ) -> PyResult<Typed<'py, view::pnp::DeviceStack>> {
-        let address = match device_or_node {
-            DeviceArg::Device(device) => {
-                device
-                    .owner
-                    .require_argument_of(py, &self.owner, "device")?;
-                device.address
-            }
-            DeviceArg::Address(address) => address,
-        };
-        self.typed(py, |session| {
-            let detail = session
-                .target
-                .inspect_device_stack(VirtAddr(address))
-                .map_err(err)?;
-            Ok(view::pnp::device_stack(&detail))
-        })
-    }
-
     /// Decode a CONTEXT record and return its register set as a `Frame` (`.cxr`).
     fn context_record(&self, py: Python<'_>, address: u64) -> PyResult<Frame> {
         let registers = self.owner.with_in(py, &Context::default(), |session| {
@@ -359,32 +334,6 @@ impl Inspect {
                 .read_exception_record(VirtAddr(address))
                 .map_err(err)?;
             Ok(view::bugcheck::exception_record(Some(address), &record))
-        })
-    }
-
-    /// Decode a PnP device node (`!devnode`), and optionally its subtree up to
-    /// a limit.
-    #[pyo3(signature = (node=None, recurse=false))]
-    fn devnode<'py>(
-        &self,
-        py: Python<'py>,
-        node: Option<u64>,
-        recurse: bool,
-    ) -> PyResult<Typed<'py, view::pnp::DevNode>> {
-        self.typed(py, |session| {
-            let detail = session
-                .target
-                .inspect_devnode(node.map(VirtAddr), recurse)
-                .map_err(err)?;
-            Ok(view::pnp::devnode(&detail))
-        })
-    }
-
-    /// Get the device nodes that have PnP problems (`!pnptriage`).
-    fn pnp_triage<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::pnp::PnpTriage>> {
-        self.typed(py, |session| {
-            let detail = session.target.pnp_triage().map_err(err)?;
-            Ok(view::pnp::pnp_triage(&detail))
         })
     }
 

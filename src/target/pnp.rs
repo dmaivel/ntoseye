@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use crate::error::{Error, Result};
 use crate::target::Target;
 use crate::types::VirtAddr;
+use ntoseye_macros::record;
 
 const MAX_DEVNODES: usize = 4096;
 const MAX_DEVICE_STACK: usize = 64;
@@ -12,87 +13,132 @@ const DEVICE_NODE_STARTED: u32 = 0x30a;
 const DEVICE_NODE_REMOVED: u32 = 0x314;
 const DEVICE_NODE_DELETED: u32 = 0x316;
 
-/// One nonzero entry from a `_DEVICE_NODE.StateHistory` ring.
-#[derive(Debug, Clone)]
+/// A nonzero entry in the `StateHistory` ring of a device node.
+#[record]
 pub struct StateHistoryEntry {
+    /// Its slot in the ring.
     pub index: u32,
+    #[record(hex)]
     pub state: u32,
     pub state_name: String,
 }
 
-/// The compact device-node identity used by subtree and triage listings.
-#[derive(Debug, Clone)]
+/// The identity and state of a device node, as the subtree and triage
+/// lists show them.
+#[record]
 pub struct DevNodeSummary {
+    /// The `_DEVICE_NODE`.
     pub address: VirtAddr,
+    /// Its physical device object.
     pub pdo: VirtAddr,
     pub instance_path: String,
     pub service_name: String,
+    /// `PNP_DEVNODE_STATE`.
+    #[record(hex)]
     pub state: u32,
     pub state_name: String,
+    /// The `CM_PROB_*` problem code. 0 for none.
+    #[record(hex)]
     pub problem: u32,
+    /// The problem code's name, when it is a known one.
     pub problem_name: Option<String>,
+    #[record(hex)]
     pub problem_status: u32,
+    /// The IRP that PnP waits on. 0 for none.
     pub pending_irp: VirtAddr,
+    /// `Level`, the depth of the node in the device tree.
     pub depth: u32,
 }
 
-/// A decoded `_DEVICE_NODE`, optionally followed by a bounded flat subtree.
-#[derive(Debug, Clone)]
+/// A decoded `_DEVICE_NODE` and, if requested, its flat subtree
+/// (`!devnode`).
+#[record]
 pub struct DevNodeDetail {
     pub address: VirtAddr,
+    /// Its physical device object.
     pub pdo: VirtAddr,
     pub parent: VirtAddr,
     pub sibling: VirtAddr,
     pub child: VirtAddr,
     pub instance_path: String,
     pub service_name: String,
+    /// `PNP_DEVNODE_STATE`.
+    #[record(hex)]
     pub state: u32,
     pub state_name: String,
+    #[record(hex)]
     pub previous_state: u32,
     pub previous_state_name: String,
     pub state_history: Vec<StateHistoryEntry>,
+    /// `StateHistoryEntry`, the next slot in the ring.
     pub state_history_entry: u32,
+    #[record(hex)]
     pub flags: u32,
+    #[record(hex)]
     pub user_flags: u32,
+    #[record(hex)]
     pub completion_status: u32,
+    /// The `CM_PROB_*` problem code. 0 for none.
+    #[record(hex)]
     pub problem: u32,
+    /// The problem code's name, when it is a known one.
     pub problem_name: Option<String>,
+    #[record(hex)]
     pub problem_status: u32,
+    /// The IRP that PnP waits on. 0 for none.
     pub pending_irp: VirtAddr,
+    /// The nodes below this node, in depth-first order. Empty if the
+    /// request was not recursive.
     pub subtree: Vec<DevNodeSummary>,
+    /// Whether the walk of the subtree stopped at its limit.
     pub subtree_truncated: bool,
 }
 
-/// One device object in an ordered top-filter-to-PDO device stack.
-#[derive(Debug, Clone)]
+/// A device object in a device stack.
+#[record]
 pub struct DeviceStackEntry {
     pub device_object: VirtAddr,
     pub driver_object: VirtAddr,
     pub driver_name: String,
     pub device_extension: VirtAddr,
     pub object_name: String,
+    /// Whether this is the device that the stack was requested for.
     pub is_argument: bool,
 }
 
-/// A bounded device stack and the devnode associated with its PDO, when any.
-#[derive(Debug, Clone)]
+/// A device stack from the top filter to the PDO, and the device node of
+/// the PDO (`!devstack`).
+#[record]
 pub struct DeviceStackDetail {
+    /// The address that you gave: a device object, a pointer to a device
+    /// object, or a device node.
     pub argument: VirtAddr,
+    /// The device object where the stack walk started.
     pub requested_device: VirtAddr,
+    /// The stack, top filter first.
     pub entries: Vec<DeviceStackEntry>,
+    /// `None` if the PDO has no device node, or if ntoseye cannot read it.
+    /// `pdo_devnode_error` gives the reason.
     pub pdo_devnode: Option<DevNodeSummary>,
     pub pdo_devnode_error: Option<String>,
+    /// Whether the stack walk stopped at its limit.
     pub truncated: bool,
 }
 
-/// PnP triage buckets built from one bounded device-node walk.
-#[derive(Debug, Clone)]
+/// PnP triage groups from one limited walk of the device tree
+/// (`!pnptriage`).
+#[record]
 pub struct PnpTriageDetail {
+    /// Nodes with a problem code.
     pub problems: Vec<DevNodeSummary>,
+    /// Nodes that are not started, not removed, and not deleted.
     pub not_started: Vec<DevNodeSummary>,
+    /// Nodes with a pending IRP.
     pub pending_irps: Vec<DevNodeSummary>,
+    /// The number of nodes walked.
     pub total: u64,
     pub started: u64,
+    /// Whether the walk stopped at its limit of 4096 nodes.
     pub truncated: bool,
 }
 

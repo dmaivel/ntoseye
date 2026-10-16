@@ -1,43 +1,16 @@
-use std::borrow::Cow;
+use ntoseye_macros::command;
 
+use crate::error::Result;
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
+use crate::session::Session;
 use crate::target::pnp::{
     DevNodeDetail, DevNodeSummary, DeviceStackDetail, PnpTriageDetail, StateHistoryEntry,
 };
+use crate::types::VirtAddr;
 use crate::ui;
 
 const HISTORY_DISPLAY_LIMIT: usize = 5;
-
-repl_command! {
-    cmd_devnode;
-    names: ["!devnode", "devnode"],
-    category: "objects and I/O",
-    usage: "!devnode [node|0] [-r]",
-    summary: "Show a PnP device node and, optionally, its subtree.",
-    details: "Shows the instance path, the service, the state and state history, the flags, the problem code, and the pending IRP of a device node. If you do not give a node, or give 0, the command shows the root device node. Use -r, or a trailing 1 as in WinDbg, to walk the subtree of the node, with one node on each line.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_devstack;
-    names: ["!devstack", "devstack"],
-    category: "objects and I/O",
-    usage: "!devstack <device-object|devnode>",
-    summary: "Show the device stack for a DEVICE_OBJECT or device node.",
-    details: "The argument can be any DEVICE_OBJECT in the stack, or the DEVICE_NODE of the stack. The command shows the stack from the top filter down to the PDO, with the !DevObj, !DrvObj, !DevExt, and object name of each device, and a `>` marks the argument. After the stack, the command shows the device node of the PDO.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_pnptriage;
-    names: ["!pnptriage", "pnptriage"],
-    category: "objects and I/O",
-    usage: "!pnptriage",
-    summary: "Show the PnP device nodes that have problems, pending IRPs, or incomplete starts.",
-    target: Kernel,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DevNodeRequest {
@@ -45,13 +18,13 @@ struct DevNodeRequest {
     recursive: bool,
 }
 
-fn parse_devnode_request(argv: &[Cow<'_, str>]) -> Option<DevNodeRequest> {
+fn parse_devnode_request<'a>(argv: impl IntoIterator<Item = &'a str>) -> Option<DevNodeRequest> {
     let mut node = None;
     let mut root = false;
     let mut recursive = false;
 
     for argument in argv {
-        match argument.as_ref() {
+        match argument {
             "-r" | "1" => {
                 if recursive {
                     return None;
@@ -253,57 +226,114 @@ fn print_pnp_triage(triage: &PnpTriageDetail) {
     );
 }
 
-impl ReplState<'_> {
-    fn cmd_devnode(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(request) = parse_devnode_request(&invocation.argv) else {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        };
-        let node = match request.node {
-            Some(text) => match self.eval_or_report(&text) {
-                Some(address) => Some(address),
-                None => return Ok(()),
-            },
-            None => None,
-        };
-
-        match self.ctx.target.inspect_devnode(node, request.recursive) {
-            Ok(detail) if request.recursive => {
-                print_devnode_tree(&detail.subtree, detail.subtree_truncated)
-            }
-            Ok(detail) => print_devnode(&detail),
-            Err(error) => error!("{error}"),
+/// `!devnode`'s node: the line is checked whole first (`[node|0] [-r|1]`,
+/// in any order), then the node's word, if any, is taken.
+fn devnode_node(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Option<VirtAddr>, ArgError> {
+    let request = parse_devnode_request(cursor.words()).ok_or(ArgError::Missing)?;
+    let words: Vec<String> = cursor.words().map(str::to_string).collect();
+    // Take every word but the recursion flag, which `devnode_recurse` takes.
+    let mut kept = 0;
+    for word in &words {
+        if word == "-r" || word == "1" {
+            kept += 1;
+        } else {
+            cursor.word_at(kept);
         }
-        Ok(())
     }
+    request.node.map(|text| cx.eval(&text)).transpose()
+}
 
-    fn cmd_devstack(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if invocation.argv.len() != 1 {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        let text = invocation.arg(0).unwrap_or_default();
-        let Some(address) = self.eval_or_report(text) else {
-            return Ok(());
-        };
+/// `!devnode`'s `-r` (or WinDbg's trailing `1`), left by `devnode_node`.
+fn devnode_recurse(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Option<bool>, ArgError> {
+    Ok(cursor.word().map(|_| true))
+}
 
-        match self.ctx.target.inspect_device_stack(address) {
-            Ok(stack) => print_device_stack(&stack),
-            Err(error) => error!("{error}"),
+/// Show a PnP device node and, optionally, its subtree.
+///
+/// Shows the instance path, the service, the state and state history, the
+/// flags, the problem code, and the pending IRP of a device node. If you do not
+/// give a node, or give 0, the command shows the root device node. Use -r, or a
+/// trailing 1 as in WinDbg, to walk the subtree of the node, with one node on
+/// each line.
+#[command(
+    names = ["!devnode", "devnode"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    usage = "!devnode [node|0] [-r]",
+    completion = [Expression]
+)]
+fn devnode(
+    session: &Session,
+    #[arg(parse = devnode_node)] node: Option<VirtAddr>,
+    #[arg(parse = devnode_recurse)] recurse: Option<bool>,
+) -> Result<DevNodeDetail> {
+    session
+        .target
+        .inspect_devnode(node, recurse.unwrap_or(false))
+}
+
+impl Render for DevNodeDetail {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        // A recursive walk lists the node itself first.
+        if self.subtree.is_empty() {
+            print_devnode(self);
+        } else {
+            print_devnode_tree(&self.subtree, self.subtree_truncated);
         }
-        Ok(())
     }
+}
 
-    fn cmd_pnptriage(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if !invocation.argv.is_empty() {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        match self.ctx.target.pnp_triage() {
-            Ok(triage) => print_pnp_triage(&triage),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
+/// Show the device stack for a DEVICE_OBJECT or device node.
+///
+/// The argument can be any DEVICE_OBJECT in the stack, or the DEVICE_NODE of
+/// the stack. The command shows the stack from the top filter down to the PDO,
+/// with the !DevObj, !DrvObj, !DevExt, and object name of each device, and a
+/// `>` marks the argument. After the stack, the command shows the device node
+/// of the PDO.
+#[command(
+    names = ["!devstack", "devstack"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    python_name = "device_stack",
+    usage = "!devstack <device-object|devnode>"
+)]
+fn devstack(session: &Session, device_or_node: VirtAddr) -> Result<DeviceStackDetail> {
+    session.target.inspect_device_stack(device_or_node)
+}
+
+impl Render for DeviceStackDetail {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_device_stack(self);
+    }
+}
+
+/// Show the PnP device nodes that have problems, pending IRPs, or incomplete
+/// starts.
+#[command(
+    names = ["!pnptriage", "pnptriage"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    python_name = "pnp_triage"
+)]
+fn pnptriage(session: &Session) -> Result<PnpTriageDetail> {
+    session.target.pnp_triage()
+}
+
+impl Render for PnpTriageDetail {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_pnp_triage(self);
     }
 }
 
@@ -312,8 +342,7 @@ mod tests {
     use super::*;
 
     fn parse(args: &[&str]) -> Option<DevNodeRequest> {
-        let argv: Vec<Cow<'_, str>> = args.iter().map(|arg| Cow::Borrowed(*arg)).collect();
-        parse_devnode_request(&argv)
+        parse_devnode_request(args.iter().copied())
     }
 
     #[test]

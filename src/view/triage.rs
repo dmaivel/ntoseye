@@ -6,7 +6,6 @@ use ntoseye_macros::record;
 use super::bugcheck::{Bugcheck, bugcheck};
 use super::execution::{run_status, stack_frames};
 use super::module::module;
-use super::pnp::device_stack;
 use super::power::{power_driver, power_irp, power_irp_holder, power_irp_list, power_worker_list};
 use crate::dmp::triage::TriagePrcbInfo;
 use crate::dmp::{self, DmpException, DmpSystemInfo};
@@ -337,7 +336,7 @@ pub struct PowerFailure {
     #[record(hex)]
     pub device: Option<u64>,
     /// The stack of `device`.
-    pub device_stack: Option<DiagnosticValue<super::pnp::DeviceStack>>,
+    pub device_stack: Option<DiagnosticValue<crate::target::pnp::DeviceStackDetail>>,
     /// 0x3: the blocked IRP.
     pub blocked_irp: Option<BlockedPowerIrp>,
     /// 0x3: the power IRPs on the list that `TRIAGE_9F_POWER` names.
@@ -790,7 +789,7 @@ fn unloaded_driver(driver: &dmp::UnloadedDriver) -> UnloadedDriver {
 fn power_failure(finding: &PowerDetail) -> PowerFailure {
     let failure = &finding.failure;
     let diagnostic = |value: &std::result::Result<_, String>| match value {
-        Ok(stack) => DiagnosticValue::Available(device_stack(stack)),
+        Ok(stack) => DiagnosticValue::Available(stack.clone()),
         Err(error) => DiagnosticValue::unavailable(error.clone()),
     };
     PowerFailure {
