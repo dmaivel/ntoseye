@@ -9,8 +9,8 @@ use crate::output;
 #[cfg(feature = "python")]
 use crate::python::embed;
 use crate::target::meta::{
-    ErrorCodeDetail, TargetTimeDetail, TargetUserDumpDetail, TargetVersionDetail,
-    UserDumpTimeDetail, decode_error_code, decode_error_code_as_ntstatus,
+    ErrorCode, TargetTime, TargetUserDump, TargetVersion, UserDumpTime, decode_error_code,
+    decode_error_code_as_ntstatus,
 };
 use crate::target::{Target, TargetKind};
 use crate::triage_report::time::filetime_to_iso;
@@ -18,6 +18,7 @@ use crate::types::{Arch, CodeMachine, VirtAddr};
 
 use ntoseye_macros::command;
 
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
 use crate::session::Session;
 
@@ -57,31 +58,6 @@ fn print_help_listing(groups: &[HelpGroup]) {
         }
         outln!();
     }
-}
-
-repl_command! {
-    cmd_version();
-    names: ["vertarget", "version"],
-    category: "target control",
-    usage: "vertarget",
-    summary: "Show version information for the target, kernel, symbols, processor, and debugger.",
-}
-
-repl_command! {
-    cmd_time();
-    names: [".time"],
-    category: "target control",
-    usage: ".time",
-    summary: "Show the target UTC time and the system uptime.",
-}
-
-repl_command! {
-    cmd_error;
-    names: ["!error", "!ntstatus"],
-    category: "analysis",
-    usage: "!error <code>",
-    summary: "Decode an NTSTATUS, Win32, or HRESULT error code.",
-    completion: Expression,
 }
 
 /// Reload custom commands and aliases.
@@ -432,46 +408,96 @@ fn quit(_state: &mut ReplState<'_>) -> Result<()> {
     Ok(())
 }
 
-impl ReplState<'_> {
-    fn cmd_version(&mut self) -> Result<()> {
-        let detail = self.ctx.target_version()?;
-        print_target_version(&detail);
-        outln!();
-        Ok(())
-    }
+/// Show version information for the target, kernel, symbols, processor, and
+/// debugger.
+#[command(
+    names = ["vertarget", "version"],
+    category = "target control",
+    kind = Query,
+    python = Inspect,
+    python_name = "version"
+)]
+fn target_version(session: &mut Session) -> Result<TargetVersion> {
+    session.target_version()
+}
 
-    fn cmd_time(&mut self) -> Result<()> {
-        let detail = self.ctx.target.target_time()?;
-        print_target_time(&detail);
+impl Render for TargetVersion {
+    fn render(&self, _: &mut ReplState<'_>, _: ()) {
+        print_target_version(self);
         outln!();
-        Ok(())
     }
+}
 
-    fn cmd_error(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(text) = invocation.arg(0) else {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        };
-        let code = match Expr::eval_with_radix(text, &self.ctx.target, self.radix) {
-            Ok(value) => value.0,
-            Err(error) => {
-                error!("invalid error code '{text}': {error}");
-                return Ok(());
+/// Show the target UTC time and the system uptime.
+#[command(
+    names = [".time"],
+    category = "target control",
+    kind = Query,
+    python = Inspect,
+    python_name = "time"
+)]
+fn target_time(session: &Session) -> Result<TargetTime> {
+    session.target.target_time()
+}
+
+impl Render for TargetTime {
+    fn render(&self, _: &mut ReplState<'_>, _: ()) {
+        print_target_time(self);
+        outln!();
+    }
+}
+
+/// Decode an NTSTATUS, Win32, or HRESULT error code.
+#[command(
+    names = ["!error", "!ntstatus"],
+    category = "analysis",
+    kind = Query,
+    python = none,
+    usage = "!error <code>",
+    completion = Expression
+)]
+fn error_code(
+    _session: &Session,
+    #[arg(parse = error_code_arg)] code: u64,
+    #[arg(invoked)] name: &str,
+) -> Result<ErrorCode> {
+    Ok(if name == "!ntstatus" {
+        decode_error_code_as_ntstatus(code)
+    } else {
+        decode_error_code(code)
+    })
+}
+
+/// `!error`'s code: an expression in the current radix, of 32 bits.
+fn error_code_arg(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<u64, ArgError> {
+    let text = cursor.word().ok_or(ArgError::Missing)?;
+    let code = cx
+        .eval(&text)
+        .map_err(|error| match error {
+            ArgError::Message(error) => {
+                ArgError::Message(format!("invalid error code '{text}': {error}"))
             }
-        };
-        if u32::try_from(code).is_err() {
-            error!("error code '{text}' exceeds 32 bits");
-            return Ok(());
-        }
-        let detail = if invocation.name == "!ntstatus" {
-            decode_error_code_as_ntstatus(code)
-        } else {
-            decode_error_code(code)
-        };
-        print_error_code(&detail);
-        Ok(())
+            ArgError::Missing => ArgError::Missing,
+        })?
+        .0;
+    if u32::try_from(code).is_err() {
+        return Err(ArgError::Message(format!(
+            "error code '{text}' exceeds 32 bits"
+        )));
     }
+    Ok(code)
+}
 
+impl Render for ErrorCode {
+    fn render(&self, _: &mut ReplState<'_>, _: ()) {
+        print_error_code(self);
+    }
+}
+
+impl ReplState<'_> {
     pub fn cmd_user(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
         #[cfg(feature = "python")]
         if embed::has_command(invocation.name) {
@@ -546,7 +572,7 @@ pub fn json_string(value: &str) -> String {
     out
 }
 
-fn print_target_version(detail: &TargetVersionDetail) {
+fn print_target_version(detail: &TargetVersion) {
     outln!("{}", ui::label("target version"));
     outln!(
         "  {} Windows {}.{} build {}{}",
@@ -695,7 +721,7 @@ fn print_target_version(detail: &TargetVersionDetail) {
     }
 }
 
-fn print_target_time(detail: &TargetTimeDetail) {
+fn print_target_time(detail: &TargetTime) {
     outln!("{}", ui::label("target time"));
     if let Some(user_dump) = &detail.user_dump {
         print_user_dump_time(user_dump);
@@ -718,7 +744,7 @@ fn print_target_time(detail: &TargetTimeDetail) {
 
 /// `vertarget` past the version line on a user-mode minidump: what its
 /// SystemInfo, MiscInfo, and header record. It has no kernel to describe.
-fn print_user_dump_version(detail: &TargetVersionDetail, user_dump: &TargetUserDumpDetail) {
+fn print_user_dump_version(detail: &TargetVersion, user_dump: &TargetUserDump) {
     let processor = if detail.architecture == "AMD64" {
         format!(
             "family {}, model {:#x}, stepping {:#x}",
@@ -786,7 +812,7 @@ fn print_user_dump_version(detail: &TargetVersionDetail, user_dump: &TargetUserD
 
 /// `.time` on a user-mode minidump: when it was written and how long its
 /// process had run. It records no system clock or system uptime.
-fn print_user_dump_time(detail: &UserDumpTimeDetail) {
+fn print_user_dump_time(detail: &UserDumpTime) {
     let written = detail.written_iso.as_deref().unwrap_or("out of range");
     outln!(
         "  {} {written} ({:#x})",
@@ -955,7 +981,7 @@ fn format_printf(
     Ok(output)
 }
 
-fn print_error_code(detail: &ErrorCodeDetail) {
+fn print_error_code(detail: &ErrorCode) {
     match detail.kind.as_str() {
         "NTSTATUS" => {
             outln!("NTSTATUS {:#010x}: {}", detail.code, detail.name);

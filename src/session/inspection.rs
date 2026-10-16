@@ -23,7 +23,7 @@ use crate::session::{
     Cancel, ExceptionRecord, InstructionBoundary, Motion, PageInReport, RunOutcome, Session,
     VpRegisters,
 };
-use crate::target::meta::TargetVersionDetail;
+use crate::target::meta::TargetVersion;
 use crate::target::usermode::ImageCheck;
 use crate::target::{CompareResult, SearchResult, SelectedFrame, ThreadInfo, exit_registers};
 use crate::types::{Arch, CodeMachine, Dtb, VirtAddr};
@@ -425,7 +425,7 @@ impl Session {
     /// Add backend identity and a backend vCPU count fallback to the target
     /// metadata. The target-only method remains useful for passive memory and
     /// dump consumers that have no execution backend.
-    pub fn target_version(&mut self) -> Result<TargetVersionDetail> {
+    pub fn target_version(&mut self) -> Result<TargetVersion> {
         let mut detail = self.target.target_version()?;
         if detail.processors.is_none() {
             detail.processors = self

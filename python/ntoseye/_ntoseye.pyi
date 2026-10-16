@@ -8094,7 +8094,7 @@ class Inspect:
         """
     def time(self, /) -> TargetTime:
         """
-        Get the target system time and uptime (`.time`).
+        Show the target UTC time and the system uptime.
         """
     def timer(self, /, address: int) -> KernelTimer:
         """
@@ -8124,8 +8124,8 @@ class Inspect:
         """
     def version(self, /) -> TargetVersion:
         """
-        Get the target, kernel, symbol, processor, and debugger version
-        information (`vertarget`).
+        Show version information for the target, kernel, symbols, processor, and
+        debugger.
         """
     def virtio(self, /, address: int |None = None, module: str |None = None) -> list[VirtioFunction] |VirtioDriver:
         """

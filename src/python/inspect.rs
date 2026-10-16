@@ -345,23 +345,6 @@ impl Inspect {
         })
     }
 
-    /// Get the target, kernel, symbol, processor, and debugger version
-    /// information (`vertarget`).
-    fn version<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::meta::TargetVersion>> {
-        self.typed_any(py, |session| {
-            let detail = session.target_version().map_err(err)?;
-            Ok(view::meta::target_version(&detail))
-        })
-    }
-
-    /// Get the target system time and uptime (`.time`).
-    fn time<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::meta::TargetTime>> {
-        self.typed_any(py, |session| {
-            let detail = session.target.target_time().map_err(err)?;
-            Ok(view::meta::target_time(&detail))
-        })
-    }
-
     /// Analyze the current bugcheck, or return `None` if no bugcheck is in
     /// progress on the target.
     fn bugcheck<'py>(

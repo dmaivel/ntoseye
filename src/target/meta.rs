@@ -2,6 +2,8 @@
 
 use std::collections::HashSet;
 
+use ntoseye_macros::record;
+
 use crate::bytes::before_nul;
 use crate::cpu_state::processor_count;
 use crate::dmp::tagged::known_tag;
@@ -621,120 +623,173 @@ impl Target {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct TargetKernelDetail {
+/// The identity of the kernel image.
+#[record]
+pub struct TargetKernel {
+    /// The file name of the image.
     pub name: String,
+    /// The module name (`nt`).
     pub short_name: String,
     pub base: VirtAddr,
+    /// The image size in bytes.
     pub size: Option<u64>,
     pub file_version: Option<String>,
     pub product_version: Option<String>,
+    /// The GUID of the PDB, which identifies the symbols.
     pub pdb_guid: Option<String>,
+    /// The age of the PDB.
     pub pdb_age: Option<u32>,
 }
 
-#[derive(Debug, Clone)]
-pub struct TargetDumpMetadata {
+/// The data that a crash dump header records.
+#[record]
+pub struct TargetDump {
+    /// Whether the dump is a triage (minidump-style) dump.
     pub is_triage: bool,
+    /// The kernel page-table root that the dump records.
     pub directory_table_base: VirtAddr,
+    #[record(hex)]
     pub bugcheck_code: u32,
+    #[record(hex)]
     pub bugcheck_parameters: Vec<u64>,
     pub number_processors: u32,
     pub major_version: u32,
     pub minor_version: u32,
     pub product_type: u32,
+    /// The machine type (`IMAGE_FILE_MACHINE_*`).
     pub machine_image_type: u32,
     pub service_pack_build: u32,
+    /// The time when the dump was taken (FILETIME).
+    #[record(hex)]
     pub system_time: Option<u64>,
+    /// The system uptime in seconds.
     pub uptime_seconds: Option<u64>,
+    /// The exception code that the dump records.
+    #[record(hex)]
     pub exception_code: Option<u32>,
+    /// Whether the triage data of the dump overflowed.
     pub triage_overflowed: bool,
     pub kernel_base: Option<VirtAddr>,
-    /// The dump's tagged data blocks (`.enumtag`).
-    pub tagged_blocks: Vec<TaggedBlockInfo>,
+    /// The blocks that bugcheck callbacks added to the dump (`.enumtag`);
+    /// `Inspect.read_tagged` reads one.
+    pub tagged_blocks: Vec<TaggedBlock>,
 }
 
-/// One tagged data block of a dump: its tag, size, and, for a tag Windows
-/// writes, the global that holds it and what the block holds.
-#[derive(Debug, Clone)]
-pub struct TaggedBlockInfo {
+/// A tagged data block of a crash dump.
+#[record]
+pub struct TaggedBlock {
+    /// The GUID tag, `{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}`.
     pub tag: String,
+    /// The data's size in bytes.
     pub size: u64,
+    /// For a tag Windows writes, the global that holds it, such as
+    /// `nt!PopBlackBoxPnpGuid`.
     pub owner: Option<&'static str>,
+    /// For a tag Windows writes, what the block holds.
     pub holds: Option<&'static str>,
 }
 
-#[derive(Debug, Clone)]
-pub struct TargetVersionDetail {
+/// The version data of the target (`vertarget`), with the build,
+/// architecture, kernel, symbols, debugger version, time, and dump
+/// metadata.
+#[record]
+pub struct TargetVersion {
     pub major_version: Option<u64>,
     pub minor_version: Option<u64>,
     pub build_number: Option<u64>,
+    /// The build lab string.
     pub build_lab: Option<String>,
     pub architecture: String,
+    /// The number of processors in the target.
     pub processors: Option<u16>,
+    /// The product name.
     pub product: String,
-    pub kernel: Option<TargetKernelDetail>,
+    /// The kernel image. `None` if ntoseye did not find it.
+    pub kernel: Option<TargetKernel>,
+    /// The symbol status label of the kernel. `None` if ntoseye did not
+    /// find the kernel.
     pub symbol_status: Option<String>,
     pub debugger_version: String,
     pub symbol_path: String,
-    pub time: TargetTimeDetail,
+    pub time: TargetTime,
+    /// The backend attached to the target.
     pub backend: Option<String>,
-    pub dump: Option<TargetDumpMetadata>,
+    /// The crash dump header. `None` for a live target.
+    pub dump: Option<TargetDump>,
     /// What a user-mode minidump records of its process and how it was
-    /// written; `None` for a kernel target.
-    pub user_dump: Option<TargetUserDumpDetail>,
+    /// written. `None` for a kernel target.
+    pub user_dump: Option<TargetUserDump>,
 }
 
-/// A user-mode minidump's process and header, for `vertarget`.
-#[derive(Debug, Clone)]
-pub struct TargetUserDumpDetail {
+/// A user-mode minidump's process and header.
+#[record]
+pub struct TargetUserDump {
     pub process_name: Option<String>,
     pub process_id: Option<u32>,
-    /// `SystemInfoStream.ProcessorLevel` and `ProcessorRevision`: on AMD64
-    /// the family, and the model (high byte) and stepping (low byte).
+    /// `ProcessorLevel`: on AMD64, the processor family.
     pub processor_level: u16,
+    /// `ProcessorRevision`: on AMD64, the model (high byte) and stepping
+    /// (low byte).
+    #[record(hex)]
     pub processor_revision: u16,
     pub service_pack: Option<String>,
-    /// `MINIDUMP_HEADER.Flags`: the `MINIDUMP_TYPE` it was written with.
+    /// The `MINIDUMP_TYPE` flags the dump was written with.
+    #[record(hex)]
     pub flags: u64,
-    /// [`minidump_type_names`] of `flags`.
+    /// `flags` as `MINIDUMP_TYPE` names (`MiniDumpWithFullMemory`, ...).
     pub flag_names: Vec<String>,
     pub threads: usize,
     pub modules: usize,
+    /// The code of the exception the dump was written for.
+    #[record(hex)]
     pub exception_code: Option<u32>,
 }
 
-#[derive(Debug, Clone)]
-pub struct TargetTimeDetail {
+/// The UTC time and uptime of the target (`.time`). A user-mode minidump
+/// records neither: its `user_dump` says when it was written instead.
+#[record]
+pub struct TargetTime {
+    /// The UTC time of the target (FILETIME).
+    #[record(hex)]
     pub system_time: Option<u64>,
+    /// `system_time` as ISO 8601.
     pub system_time_iso: Option<String>,
+    /// `KUSER_SHARED_DATA.InterruptTime`: the time since boot, in 100 ns
+    /// units. The `due_time` of clock timers uses this clock.
+    #[record(hex)]
     pub interrupt_time: Option<u64>,
+    /// Seconds since boot.
     pub uptime_seconds: Option<u64>,
+    /// The uptime as formatted text.
     pub uptime: Option<String>,
-    /// What a user-mode minidump records of time; `None` for a kernel
-    /// target. A user dump records no system time or system uptime, so the
-    /// fields above stay `None` for one.
-    pub user_dump: Option<UserDumpTimeDetail>,
+    /// When a user-mode minidump was written, and its process's times.
+    /// `None` for a kernel target.
+    pub user_dump: Option<UserDumpTime>,
 }
 
-/// When a user-mode minidump was written and how long its process had run,
-/// from its header and `MiscInfoStream`.
-#[derive(Debug, Clone)]
-pub struct UserDumpTimeDetail {
-    /// `MINIDUMP_HEADER.TimeDateStamp`, seconds since 1970 (UTC).
+/// When a user-mode minidump was written (its header), and how long its
+/// process had run (`MiscInfoStream`), where it records them.
+#[record]
+pub struct UserDumpTime {
+    /// When the dump was written, in seconds since 1970 (UTC).
     pub written: u32,
+    /// `written` as ISO 8601 UTC.
     pub written_iso: Option<String>,
-    /// `written` in the system's time zone, `2026-10-11T08:17:41+02:00`.
+    /// `written` in the system's time zone.
     pub written_local: Option<String>,
     /// The name of that zone's period in effect.
     pub time_zone: Option<String>,
+    /// When the process started, in seconds since 1970 (UTC).
     pub process_created: Option<u32>,
+    /// `process_created` as ISO 8601 UTC.
     pub process_created_iso: Option<String>,
-    /// From process creation to the dump.
+    /// From the process's start to the dump, in seconds.
     pub process_uptime_seconds: Option<u64>,
+    /// `process_uptime_seconds` as formatted text.
     pub process_uptime: Option<String>,
-    /// User-mode and kernel-mode time the process had run, in seconds.
+    /// User-mode time the process had run, in seconds.
     pub user_time_seconds: Option<u32>,
+    /// Kernel-mode time the process had run, in seconds.
     pub kernel_time_seconds: Option<u32>,
 }
 
@@ -801,13 +856,13 @@ pub fn unix_to_local_iso(seconds: u64, bias: i32) -> Option<String> {
     ))
 }
 
-fn user_dump_time(info: &UserDumpInfo) -> UserDumpTimeDetail {
+fn user_dump_time(info: &UserDumpInfo) -> UserDumpTime {
     let written = info.time_date_stamp;
     let process_uptime_seconds = info
         .process_create_time
         .and_then(|created| written.checked_sub(created))
         .map(u64::from);
-    UserDumpTimeDetail {
+    UserDumpTime {
         written,
         written_iso: unix_time_to_iso(u64::from(written)),
         written_local: info
@@ -826,8 +881,8 @@ fn user_dump_time(info: &UserDumpInfo) -> UserDumpTimeDetail {
     }
 }
 
-fn user_dump_detail(info: &UserDumpInfo) -> TargetUserDumpDetail {
-    TargetUserDumpDetail {
+fn user_dump_detail(info: &UserDumpInfo) -> TargetUserDump {
+    TargetUserDump {
         process_name: info.process_name().map(str::to_string),
         process_id: info.process_id,
         processor_level: info.system.processor_level,
@@ -878,9 +933,9 @@ fn uptime_seconds(target: &Target, interrupt_time: Option<u64>) -> Option<u64> {
     })
 }
 
-fn target_time(target: &Target, kuser: &KuserSharedData<'_>) -> TargetTimeDetail {
+fn target_time(target: &Target, kuser: &KuserSharedData<'_>) -> TargetTime {
     if let Some(info) = target.user_dump_info() {
-        return TargetTimeDetail {
+        return TargetTime {
             system_time: None,
             system_time_iso: None,
             interrupt_time: None,
@@ -892,7 +947,7 @@ fn target_time(target: &Target, kuser: &KuserSharedData<'_>) -> TargetTimeDetail
     let system_time = system_time(target, kuser);
     let interrupt_time = kuser.interrupt_time();
     let uptime_seconds = uptime_seconds(target, interrupt_time);
-    TargetTimeDetail {
+    TargetTime {
         system_time,
         system_time_iso: system_time.and_then(filetime_to_iso),
         interrupt_time,
@@ -944,10 +999,10 @@ fn product_label(product: Option<u64>) -> String {
     }
 }
 
-fn dump_metadata(target: &Target, kernel_base: Option<VirtAddr>) -> Option<TargetDumpMetadata> {
+fn dump_metadata(target: &Target, kernel_base: Option<VirtAddr>) -> Option<TargetDump> {
     target.phys.dmp_info().map(|info| {
         let system_info = info.system_info.as_ref();
-        TargetDumpMetadata {
+        TargetDump {
             is_triage: info.is_triage,
             directory_table_base: VirtAddr(info.directory_table_base),
             bugcheck_code: info.bug_check_code,
@@ -978,7 +1033,7 @@ fn dump_metadata(target: &Target, kernel_base: Option<VirtAddr>) -> Option<Targe
                 .iter()
                 .map(|block| {
                     let known = known_tag(&block.tag);
-                    TaggedBlockInfo {
+                    TaggedBlock {
                         tag: block.tag_text(),
                         size: block.data.len() as u64,
                         owner: known.map(|known| known.owner),
@@ -994,7 +1049,7 @@ impl Target {
     /// Decode target/kernel build strings, architecture, target-known
     /// processor count, kernel image and symbol status, debugger version, time
     /// metadata, and dump-header metadata when this target came from a dump.
-    pub fn target_version(&self) -> Result<TargetVersionDetail> {
+    pub fn target_version(&self) -> Result<TargetVersion> {
         let dump_info = self
             .phys
             .dmp_info()
@@ -1059,7 +1114,7 @@ impl Target {
                     }
                 })
         });
-        let kernel = base.map(|base| TargetKernelDetail {
+        let kernel = base.map(|base| TargetKernel {
             name: kernel_module
                 .as_ref()
                 .map(|module| module.name.clone())
@@ -1094,7 +1149,7 @@ impl Target {
             Some(info) => info.build_string.clone().filter(|text| !text.is_empty()),
             None => shared_build_lab(self),
         };
-        Ok(TargetVersionDetail {
+        Ok(TargetVersion {
             major_version: major,
             minor_version: minor,
             build_number: build,
@@ -1122,27 +1177,39 @@ impl Target {
     /// Decode target system time as raw FILETIME and ISO-8601 UTC, plus uptime
     /// in seconds and WinDbg-style day/hour/minute/second form. Missing KUSER
     /// data and missing dump metadata are represented by `None` fields.
-    pub fn target_time(&self) -> Result<TargetTimeDetail> {
+    pub fn target_time(&self) -> Result<TargetTime> {
         Ok(target_time(self, &KuserSharedData::new(self)))
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct ErrorCodeDetail {
+/// A decoded NTSTATUS, Win32, or HRESULT code (`!error`).
+#[record]
+pub struct ErrorCode {
+    #[record(hex)]
     pub code: u64,
+    /// `NTSTATUS`, `HRESULT`, `Win32`, or `unknown`.
     pub kind: String,
+    /// The symbolic name of the code.
     pub name: String,
     pub description: String,
+    /// `success`, `informational`, `warning`, or `error`. `None` for a
+    /// Win32 code.
     pub severity: Option<String>,
+    /// The facility that the code encodes.
     pub facility: Option<u32>,
+    /// Whether the code is customer-defined (its C bit).
     pub customer: Option<bool>,
+    /// The Win32 error: the code itself, or the Win32 error that a
+    /// `HRESULT_FROM_WIN32` code wraps.
+    #[record(hex)]
     pub win32_code: Option<u32>,
+    /// The name of that Win32 error.
     pub win32_name: Option<String>,
 }
 
-fn decode_error_code_inner(code: u64, force_ntstatus: bool) -> ErrorCodeDetail {
+fn decode_error_code_inner(code: u64, force_ntstatus: bool) -> ErrorCode {
     let Some(raw) = u32::try_from(code).ok() else {
-        return ErrorCodeDetail {
+        return ErrorCode {
             code,
             kind: "unknown".to_string(),
             name: "UNKNOWN".to_string(),
@@ -1165,7 +1232,7 @@ fn decode_error_code_inner(code: u64, force_ntstatus: bool) -> ErrorCodeDetail {
         };
         let facility = (raw >> 16) & 0x0fff;
         let customer = raw & 0x2000_0000 != 0;
-        return ErrorCodeDetail {
+        return ErrorCode {
             code,
             kind: "NTSTATUS".to_string(),
             name: ntstatus_name(raw).unwrap_or("STATUS_UNKNOWN").to_string(),
@@ -1186,7 +1253,7 @@ fn decode_error_code_inner(code: u64, force_ntstatus: bool) -> ErrorCodeDetail {
         let win32_code = (facility == 7).then_some(raw & 0xffff);
         let win32_name = win32_code.and_then(win32_error_name).map(str::to_string);
         let customer = raw & 0x2000_0000 != 0;
-        return ErrorCodeDetail {
+        return ErrorCode {
             code,
             kind: "HRESULT".to_string(),
             name: win32_name
@@ -1205,7 +1272,7 @@ fn decode_error_code_inner(code: u64, force_ntstatus: bool) -> ErrorCodeDetail {
         };
     }
 
-    ErrorCodeDetail {
+    ErrorCode {
         code,
         kind: "Win32".to_string(),
         name: win32_error_name(raw).unwrap_or("ERROR_UNKNOWN").to_string(),
@@ -1221,13 +1288,13 @@ fn decode_error_code_inner(code: u64, force_ntstatus: bool) -> ErrorCodeDetail {
 /// Decode a 32-bit NTSTATUS, Win32, or HRESULT value from a plain integer.
 /// Unknown values retain their classification and the structured bit-field
 /// description used by the REPL's `!error` output.
-pub fn decode_error_code(code: u64) -> ErrorCodeDetail {
+pub fn decode_error_code(code: u64) -> ErrorCode {
     decode_error_code_inner(code, false)
 }
 
 /// Decode the `!ntstatus` alias without exposing a REPL-specific flag in the
 /// SDK/MCP operation's public signature.
-pub fn decode_error_code_as_ntstatus(code: u64) -> ErrorCodeDetail {
+pub fn decode_error_code_as_ntstatus(code: u64) -> ErrorCode {
     decode_error_code_inner(code, true)
 }
 

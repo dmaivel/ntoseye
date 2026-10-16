@@ -20,7 +20,7 @@ use crate::cli;
 use crate::error::Error;
 use crate::kd::KdMemorySource;
 use crate::session::Session;
-use crate::target::meta::decode_error_code;
+use crate::target::meta::{ErrorCode, decode_error_code};
 use crate::view::record::{ToView, Typed};
 use crate::view::{self, PyShape};
 use crate::{Backend, TargetSpec};
@@ -244,8 +244,8 @@ fn attach(
 /// Decode an NTSTATUS, Win32, or HRESULT code into its name and description
 /// (`!error`). This function does not need a target.
 #[pyfunction]
-fn decode_error(py: Python<'_>, code: u64) -> PyResult<Typed<'_, view::meta::ErrorCode>> {
-    Typed::new(py, view::meta::error_code(&decode_error_code(code)))
+fn decode_error(py: Python<'_>, code: u64) -> PyResult<Typed<'_, ErrorCode>> {
+    Typed::new(py, decode_error_code(code))
 }
 
 /// Run the `ntoseye` command line on `sys.argv` and return its exit status, as
