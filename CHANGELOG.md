@@ -13,7 +13,7 @@ Keeping this file:
 - To release, rename "## Unreleased" to "## vX.Y.Z (YYYY-MM-DD)", the version in Cargo.toml. The release workflow refuses a tag whose version has no section here, or an empty one; dist publishes the section as the release notes, under the tag as the release title.
 -->
 
-## Unreleased
+## v0.50.0 (2026-10-16)
 
 The Python SDK is now generated from the same definitions as the REPL: each command's SDK method takes the same arguments, runs the same checks, and returns the record the command prints, with the command's help as its docstring. Results are typed records that behave as values, and a stop is one `Stop` hierarchy that `match` and `isinstance()` narrow to the kind of stop and its own parts. Scripts written for v0.49 need changes; the [Python SDK guide](https://ntoseye.com/scripting/sdk/) shows the current API, and the [SDK reference](https://ntoseye.com/reference/sdk/) lists every class.
 
