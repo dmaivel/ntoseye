@@ -245,13 +245,25 @@ fn print_kernel_regions(
 }
 
 /// `!address -summary` on a user-mode minidump: only the summary. The
-/// minidump's address list takes at most one word.
-#[grammar(usage = "[-summary]")]
+/// minidump's address list takes at most one word. A kernel target has no
+/// summary, which is refused here rather than read as an address. The
+/// usage of both target kinds is the address's (see [`address_arg`]).
+#[grammar(usage = "")]
 fn summary_switch(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<bool, ArgError> {
     if cx.state.ctx.target.kind() != TargetKind::UserDump {
+        if cursor
+            .words()
+            .any(|word| word.eq_ignore_ascii_case("-summary"))
+        {
+            return Err(ArgError::Message(
+                "!address -summary needs a user-mode minidump; give an address on a kernel \
+                 target"
+                    .into(),
+            ));
+        }
         return Ok(false);
     }
     if cursor.remaining() > 1 {
@@ -260,9 +272,10 @@ fn summary_switch(
     Ok(cursor.switch("-summary"))
 }
 
-/// `!address`'s address: required on a kernel target; a user-mode
-/// minidump without one lists its regions.
-#[grammar(usage = "[address]", complete = [Expression])]
+/// `!address`'s address: required on a kernel target (the first usage
+/// line); a user-mode minidump without one lists its regions, and takes
+/// `-summary` (the second).
+#[grammar(usage = "<address> | [-summary] [address]", complete = [Expression])]
 fn address_arg(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -841,6 +854,28 @@ fn print_vprot(detail: &MemoryBasicInformation) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::output::capture;
+    use crate::session::tests::{MockBackend, session_with_mock};
+
+    /// A kernel target has no `!address -summary`: it is refused for what it
+    /// is, in any case, not evaluated as an address, and the usage shows the
+    /// address the kernel needs.
+    #[test]
+    fn summary_on_a_kernel_target_is_refused_and_the_usage_says_so() {
+        let mut session = session_with_mock(MockBackend::default());
+        let mut state = ReplState::for_oneshot(&mut session);
+        let (result, text) = capture(|| state.dispatch_line("!address -SUMMARY"));
+        result.unwrap();
+        assert!(
+            text.contains("!address -summary needs a user-mode minidump"),
+            "{text}"
+        );
+        let spec = command_registry().get("!address").unwrap();
+        assert_eq!(
+            spec.usage,
+            "!address <address>\n!address [-summary] [address]"
+        );
+    }
 
     fn region(vad_type: u64, private_memory: bool) -> MemoryRegionInfo {
         MemoryRegionInfo {
