@@ -3659,6 +3659,39 @@ fn a_parked_breakpoint_runs_its_action_when_it_surfaces() {
     assert_eq!(*log.lock(), ["action log"]);
 }
 
+/// A hit its breakpoint declines is absorbed and the target runs on; a
+/// wait whose deadline passed meanwhile ends there, handing the target
+/// back running, instead of waiting on as long as declined hits keep
+/// coming.
+#[test]
+fn a_wait_ends_at_its_deadline_between_declined_hits() {
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        ..MockBackend::default()
+    }
+    .running()
+    .with_pending_stop();
+    backend.set("rip", 0x1001);
+    for _ in 0..3 {
+        backend.queue_interrupt(breakpoint_event(0x1000));
+    }
+    let continues = Arc::clone(&backend.continues);
+    let mut session = session_with_mock(backend);
+    session
+        .breakpoints
+        .insert_for_test(1, VirtAddr(0x1000), true, None);
+    // Every hit is passed.
+    session.breakpoints.set_pass_count(1, 10).unwrap();
+
+    let outcome = session.run(Motion::Wait, &Cancel::poll()).unwrap();
+    assert!(matches!(outcome, RunOutcome::Running), "{outcome:?}");
+    assert_eq!(
+        continues.load(Ordering::Relaxed),
+        1,
+        "the wait went on past its deadline"
+    );
+}
+
 /// A continue or a step issued while a parked stop waits (an SDK `run()`
 /// after a `run(timeout=...)` that returned `None`) surfaces that stop,
 /// with its action, instead of resuming past it.

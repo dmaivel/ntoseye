@@ -768,14 +768,21 @@ impl Session {
                     coherent,
                 );
             }
-            let outcome = match resolution {
-                StopResolution::Resumed | StopResolution::ModulesChanged => continue,
-                resolution => self.continue_outcome_from_resolution(resolution),
-            };
-            if self.surface_policy(&outcome, hosted)? {
-                continue;
+            if !matches!(
+                resolution,
+                StopResolution::Resumed | StopResolution::ModulesChanged
+            ) {
+                let outcome = self.continue_outcome_from_resolution(resolution);
+                if !self.surface_policy(&outcome, hosted)? {
+                    return Ok(outcome);
+                }
             }
-            return Ok(outcome);
+            // Absorbed, and the target runs on. A hot site whose condition
+            // stays false keeps the backend reporting stops, so the poll
+            // above never comes back empty: the deadline is checked here too.
+            if cancel.fired() {
+                return self.cancelled(cancel);
+            }
         }
     }
 
