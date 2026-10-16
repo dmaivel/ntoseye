@@ -191,6 +191,14 @@ def test_reload_makes_old_handles_stale(halted: Debugger) -> None:
     assert halted.processes[4].name == "System"
 
 
+def test_debugger_methods_refuse_a_stale_handle_argument(halted: Debugger) -> None:
+    system = halted.processes[4]
+    halted.reload()
+    with pytest.raises(ntoseye.StaleHandleError):
+        halted.run(timeout=1.0, address=system)
+    assert halted.stop is not None
+
+
 def test_ctrl_c_ends_run(halted: Debugger) -> None:
     start = time.monotonic()
     with ctrl_c_after(0.5), pytest.raises(KeyboardInterrupt):

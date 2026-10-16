@@ -6,6 +6,7 @@
 //! hand-written methods' `require_halted` and kernel checks go through, so
 //! the SDK refuses with the same decision as the REPL.
 
+use pyo3::PyClass;
 use pyo3::prelude::*;
 
 use super::args::{AddressArg, BytesArg};
@@ -54,6 +55,22 @@ pub trait CommandHost {
     fn prepare(&self, _session: &mut Session) -> PyResult<()> {
         Ok(())
     }
+
+    /// The owner a handle argument must belong to: the object's own, or,
+    /// for the `Debugger`, the debugger itself.
+    fn argument_owner(slf: &Bound<'_, Self>) -> PyResult<Owner>
+    where
+        Self: PyClass,
+    {
+        let py = slf.py();
+        match slf.borrow().session() {
+            HostSession::Owner(owner) => Ok(owner.clone_ref(py)),
+            HostSession::Debugger(_) => {
+                let debugger = slf.as_any().cast::<Debugger>()?;
+                Ok(Owner::unstamped(py, &debugger.clone().unbind()))
+            }
+        }
+    }
 }
 
 /// A `#[arg(receiver)]` argument the object supplies: a `Thread` handle is
@@ -71,16 +88,7 @@ pub enum HostSession<'a> {
     Debugger(&'a Debugger),
 }
 
-impl<'a> HostSession<'a> {
-    /// The owner a handle argument must belong to; `None` on the
-    /// `Debugger`, whose methods take no handles.
-    pub fn owner(&self) -> Option<&'a Owner> {
-        match self {
-            Self::Owner(owner) => Some(*owner),
-            Self::Debugger(_) => None,
-        }
-    }
-
+impl HostSession<'_> {
     /// Run `f` scoped to `context` on the session thread.
     fn with_in<R: Send>(
         &self,
@@ -118,21 +126,17 @@ pub trait PyArg: Sized {
 pub trait SdkArg: Sized {
     type Py;
 
-    /// Convert `value` for a method of an object of `owner`'s debugger:
-    /// [`PyArg::from_py_in`], or [`PyArg::from_py`] for a `Debugger` run
-    /// method, which has no `owner` (and takes no handle).
-    fn from_sdk(py: Python<'_>, owner: Option<&Owner>, value: Self::Py) -> PyResult<Pending<Self>>;
+    /// Convert `value` for a method of an object of `owner`'s debugger
+    /// ([`CommandHost::argument_owner`]): a handle argument must belong to
+    /// it and be current.
+    fn from_sdk(py: Python<'_>, owner: &Owner, value: Self::Py) -> PyResult<Pending<Self>>;
 }
 
 impl<T: PyArg> SdkArg for T {
     type Py = T::Py;
 
-    fn from_sdk(py: Python<'_>, owner: Option<&Owner>, value: Self::Py) -> PyResult<Pending<T>> {
-        let value = match owner {
-            Some(owner) => T::from_py_in(py, owner, value)?,
-            None => T::from_py(value),
-        };
-        Ok(Pending::Ready(value))
+    fn from_sdk(py: Python<'_>, owner: &Owner, value: Self::Py) -> PyResult<Pending<T>> {
+        Ok(Pending::Ready(T::from_py_in(py, owner, value)?))
     }
 }
 
@@ -184,11 +188,7 @@ impl PyArg for Vec<u8> {
 impl SdkArg for VirtAddr {
     type Py = AddressArg;
 
-    fn from_sdk(
-        py: Python<'_>,
-        owner: Option<&Owner>,
-        value: AddressArg,
-    ) -> PyResult<Pending<Self>> {
+    fn from_sdk(py: Python<'_>, owner: &Owner, value: AddressArg) -> PyResult<Pending<Self>> {
         value.pending(py, owner, |address| address)
     }
 }
@@ -198,7 +198,7 @@ impl SdkArg for Option<VirtAddr> {
 
     fn from_sdk(
         py: Python<'_>,
-        owner: Option<&Owner>,
+        owner: &Owner,
         value: Option<AddressArg>,
     ) -> PyResult<Pending<Self>> {
         value.map_or(Ok(Pending::Ready(None)), |value| {

@@ -1349,8 +1349,13 @@ impl Method<'_> {
         // The arguments converted on the session thread ([`Pending`]).
         let mut pending = Vec::new();
         let mut keywords = false;
-        // The `Debugger` has no `Owner` to check a handle argument against.
-        let owner = quote!(#command::CommandHost::session(self).owner());
+        // The object, and the owner a handle argument must belong to (for
+        // the `Debugger`, the debugger itself).
+        let prologue = quote! {
+            let __borrowed = slf.borrow();
+            let __host = &*__borrowed;
+            let __owner = <Self as #command::CommandHost>::argument_owner(slf)?;
+        };
         for arg in self.args {
             if arg.render || arg.cancel {
                 continue;
@@ -1358,7 +1363,8 @@ impl Method<'_> {
             let ident = &arg.ident;
             let ty = &arg.ty;
             if arg.receiver {
-                bindings.push(quote!(let #ident: #ty = <Self as #command::Bind<#ty>>::bind(self);));
+                bindings
+                    .push(quote!(let #ident: #ty = <Self as #command::Bind<#ty>>::bind(__host);));
                 continue;
             }
             if arg.keyword() && !keywords {
@@ -1378,7 +1384,7 @@ impl Method<'_> {
             }
             params.push(quote!(#ident: <#ty as #command::SdkArg>::Py));
             bindings.push(quote! {
-                let #ident = <#ty as #command::SdkArg>::from_sdk(py, #owner, #ident)?;
+                let #ident = <#ty as #command::SdkArg>::from_sdk(py, &__owner, #ident)?;
             });
             pending.push(ident);
             signature.push(if arg.sdk {
@@ -1455,12 +1461,13 @@ impl Method<'_> {
                     #(#docs)*
                     #[pyo3(name = #python_name, signature = (#(#signature),*))]
                     fn #method<'py>(
-                        &self,
+                        slf: &pyo3::Bound<'py, Self>,
                         py: pyo3::Python<'py>,
                         #(#params),*
                     ) -> pyo3::PyResult<crate::python::record::Typed<'py, #output>> {
+                        #prologue
                         #(#bindings)*
-                        #runcontrol::#driver(py, self, #operation, #effects, timeout, #closure)
+                        #runcontrol::#driver(py, __host, #operation, #effects, timeout, #closure)
                     }
                 }
             });
@@ -1472,12 +1479,13 @@ impl Method<'_> {
                 #(#docs)*
                 #[pyo3(name = #python_name, signature = (#(#signature),*))]
                 fn #method<'py>(
-                    &self,
+                    slf: &pyo3::Bound<'py, Self>,
                     py: pyo3::Python<'py>,
                     #(#params),*
                 ) -> pyo3::PyResult<crate::python::record::Typed<'py, #output>> {
+                    #prologue
                     #(#bindings)*
-                    #command::run(py, self, #operation, #effects, move |__session| {
+                    #command::run(py, __host, #operation, #effects, move |__session| {
                         #body
                     })
                 }

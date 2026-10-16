@@ -97,11 +97,7 @@ pub enum UntilArg {
 impl SdkArg for Option<WalkUntil> {
     type Py = Option<UntilArg>;
 
-    fn from_sdk(
-        py: Python<'_>,
-        owner: Option<&Owner>,
-        value: Option<UntilArg>,
-    ) -> PyResult<Pending<Self>> {
+    fn from_sdk(py: Python<'_>, owner: &Owner, value: Option<UntilArg>) -> PyResult<Pending<Self>> {
         match value {
             None => Ok(Pending::Ready(None)),
             Some(UntilArg::Flow(Until(until))) => Ok(Pending::Ready(Some(until))),
@@ -137,12 +133,9 @@ pub enum AddressObject {
 
 impl AddressObject {
     /// The object's address; the handle must belong to `owner`'s debugger.
-    fn address(self, py: Python<'_>, owner: Option<&Owner>) -> PyResult<VirtAddr> {
-        fn record<R: PyArg>(py: Python<'_>, owner: Option<&Owner>, value: R::Py) -> PyResult<R> {
-            match owner {
-                Some(owner) => R::from_py_in(py, owner, value),
-                None => Ok(R::from_py(value)),
-            }
+    fn address(self, py: Python<'_>, owner: &Owner) -> PyResult<VirtAddr> {
+        fn record<R: PyArg>(py: Python<'_>, owner: &Owner, value: R::Py) -> PyResult<R> {
+            R::from_py_in(py, owner, value)
         }
         Ok(match self {
             Self::Process(handle) => record::<ProcessInfo>(py, owner, handle)?.eprocess,
@@ -161,7 +154,7 @@ impl AddressArg {
     pub fn pending<T>(
         self,
         py: Python<'_>,
-        owner: Option<&Owner>,
+        owner: &Owner,
         finish: fn(VirtAddr) -> T,
     ) -> PyResult<Pending<T>> {
         Ok(match self {
@@ -174,7 +167,7 @@ impl AddressArg {
     /// The address, for a hand-written method of an object of `owner`'s
     /// debugger: an expression is evaluated in `context`.
     pub fn resolve(self, py: Python<'_>, owner: &Owner, context: &Context) -> PyResult<VirtAddr> {
-        match self.pending(py, Some(owner), |address| address)? {
+        match self.pending(py, owner, |address| address)? {
             Pending::Ready(address) => Ok(address),
             pending => owner.with_in(py, context, |session| pending.resolve(session).map_err(err)),
         }
@@ -380,7 +373,7 @@ pub enum ObjectArg {
 }
 
 impl ObjectArg {
-    fn name(self, py: Python<'_>, owner: Option<&Owner>) -> PyResult<ObjectName> {
+    fn name(self, py: Python<'_>, owner: &Owner) -> PyResult<ObjectName> {
         Ok(match self {
             ObjectArg::Address(address) => ObjectName::Address(VirtAddr(address)),
             ObjectArg::Path(path) => ObjectName::Path(path),
@@ -392,11 +385,7 @@ impl ObjectArg {
 impl SdkArg for ObjectName {
     type Py = ObjectArg;
 
-    fn from_sdk(
-        py: Python<'_>,
-        owner: Option<&Owner>,
-        value: ObjectArg,
-    ) -> PyResult<Pending<Self>> {
+    fn from_sdk(py: Python<'_>, owner: &Owner, value: ObjectArg) -> PyResult<Pending<Self>> {
         value.name(py, owner).map(Pending::Ready)
     }
 }
