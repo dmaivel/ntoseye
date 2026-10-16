@@ -628,18 +628,40 @@ pub fn load_map_file(path: &Path) -> Result<Vec<KdFileMapping>> {
 #[cfg(test)]
 mod tests {
     use std::env::temp_dir;
-    use std::fs::create_dir_all;
+    use std::fs::{create_dir_all, remove_dir, remove_file};
+    use std::ops::Deref;
     use std::process::id;
 
     use super::*;
 
-    fn temp_file(name: &str, contents: &[u8]) -> PathBuf {
-        let dir = temp_dir().join(format!("ntoseye-kdfiles-{}", id()));
+    /// A file alone in a `ntoseye-kdfiles-<pid>-<name>` temp directory, which
+    /// is removed with it when dropped.
+    struct TempFile(PathBuf);
+
+    impl Deref for TempFile {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = remove_file(&self.0);
+            if let Some(dir) = self.0.parent() {
+                let _ = remove_dir(dir);
+            }
+        }
+    }
+
+    fn temp_file(name: &str, contents: &[u8]) -> TempFile {
+        let dir = temp_dir().join(format!("ntoseye-kdfiles-{}-{name}", id()));
         create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         let mut file = File::create(&path).unwrap();
         file.write_all(contents).unwrap();
-        path
+        TempFile(path)
     }
 
     fn create_payload(name: &str) -> Vec<u8> {
