@@ -191,8 +191,12 @@ impl Session {
             });
         }
         // The `.vtl 1` view is read-only for the guest; a file the debugger
-        // writes on the host changes nothing in it.
-        if effects.writes.iter().any(|write| *write != Writes::Files)
+        // writes on the host, or its symbol state (`.reload` of the secure
+        // kernel's modules), changes nothing in it.
+        if effects
+            .writes
+            .iter()
+            .any(|write| !matches!(write, Writes::Files | Writes::Symbols))
             && self.target.in_secure_scope()
         {
             return Err(Refusal::ReadOnlyVtl1);
