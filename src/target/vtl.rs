@@ -18,7 +18,7 @@ use crate::{
         PdbRecovery, SecureKernel, SessionSpace, TrustletInfo,
         ept::{self, EptTranslation},
         hv_layout,
-        hv_layout::HypercallEntry,
+        hv_layout::Hypercall,
         hypercall_input::{self, DecodedHypercall},
         hypercalls::{self, HypercallCaller, HypercallInput},
         hypervisor::{self, HvVirtualProcessor},
@@ -1546,7 +1546,7 @@ impl Target {
 
     /// The Windows hypervisor's hypercall table, indexed by call code, and
     /// the base of its image.
-    pub fn hypercalls(&self) -> Result<(u64, Vec<HypercallEntry>)> {
+    pub fn hypercalls(&self) -> Result<(u64, Vec<Hypercall>)> {
         let HypervisorLocation { memory, image, .. } = self.locate_hypervisor()?;
         let loaded = hypervisor_image(&memory, &image)?;
         let table = hv_layout::hypercall_table(&loaded.view())?;

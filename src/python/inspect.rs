@@ -7,6 +7,7 @@ use super::command::admit;
 use super::context::Context;
 use super::handle::Owner;
 use super::module::Device;
+use super::record::{ToValue, Typed};
 use super::thread::Frame;
 use super::{err, raise};
 use crate::session::Session;
@@ -14,7 +15,6 @@ use crate::session::effects::Effects;
 use crate::target::etw::parse_guid;
 use crate::trapframe::{KtrapFrame, read_ktrap_frame};
 use crate::types::VirtAddr;
-use crate::view::record::{ToView, Typed};
 
 /// System-wide reports and helpers that decode an object at an address
 /// (`dbg.inspect`). The results are typed `Record`s. On a user-mode
@@ -33,7 +33,7 @@ impl Inspect {
 
     /// Run `build` in the session and return its result as the SDK does. It
     /// reads the kernel, so a user-mode minidump refuses it.
-    fn typed<'py, T: ToView<M> + Send, M>(
+    fn typed<'py, T: ToValue<M> + Send, M>(
         &self,
         py: Python<'py>,
         build: impl FnOnce(&mut Session) -> PyResult<T> + Send,
@@ -45,7 +45,7 @@ impl Inspect {
     }
 
     /// [`Self::typed`] for a report that applies to every target.
-    fn typed_any<'py, T: ToView<M> + Send, M>(
+    fn typed_any<'py, T: ToValue<M> + Send, M>(
         &self,
         py: Python<'py>,
         build: impl FnOnce(&mut Session) -> PyResult<T> + Send,

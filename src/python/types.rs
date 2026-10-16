@@ -14,8 +14,9 @@ use pyo3::types::{PyAny, PyBytes, PyDict, PyList};
 use super::context::Space;
 use super::handle::Owner;
 use super::record::PlainDict;
+use super::record::Typed;
 use super::symbols::load_scope_symbols;
-use super::{err, raise, view_dict};
+use super::{err, plain_dict, raise};
 use crate::bytes::c_string_lossy;
 use crate::error::Result as CoreResult;
 use crate::layout::{
@@ -25,7 +26,6 @@ use crate::layout::{
 use crate::memory::MemoryOps;
 use crate::target::{CODE_BITNESS_AMD64, CODE_BITNESS_X86};
 use crate::types::{Dtb, VirtAddr};
-use crate::view::record::Typed;
 
 fn lookup_field<'a>(
     info: &'a TypeInfo,
@@ -226,7 +226,7 @@ impl Type {
         dict.set_item("size", self.size())?;
         let fields = PyDict::new(py);
         for (name, field) in self.field_layouts() {
-            fields.set_item(name, view_dict(py, &field)?)?;
+            fields.set_item(name, plain_dict(py, &field)?)?;
         }
         dict.set_item("fields", fields)?;
         if let Definition::Enum(def) = &self.definition {

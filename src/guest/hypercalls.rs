@@ -4,7 +4,7 @@
 //! current pages name without a code, from TLFS 6.0b.
 
 use super::evmcs::EvmcsState;
-use super::hv_layout::HypercallEntry;
+use super::hv_layout::Hypercall;
 use super::hypercall_input::{DecodedHypercall, HypercallControl};
 
 /// `(code, name, rep)`, in code order.
@@ -105,7 +105,7 @@ pub fn hypercall_code(name: &str) -> Option<u16> {
 
 /// The name ntoseye gives the handler of call code `code`: that of the
 /// lowest code it serves (see [`hypervisor_symbols`]).
-pub fn handler_name(table: &[HypercallEntry], code: u16) -> Option<String> {
+pub fn handler_name(table: &[Hypercall], code: u16) -> Option<String> {
     let handler = table.get(usize::from(code))?.handler;
     let lowest = table.iter().position(|entry| entry.handler == handler)?;
     Some(code_name(lowest))
@@ -298,7 +298,7 @@ pub fn hypercall_page_symbols(code: &[u8]) -> Vec<(&'static str, u32, u32)> {
 /// `VmExitEntry`, numbered after the first.
 pub fn hypervisor_symbols(
     base: u64,
-    table: &[HypercallEntry],
+    table: &[Hypercall],
     exit_entries: &[u64],
 ) -> Vec<(String, u32)> {
     let rva = |address: u64| u32::try_from(address.checked_sub(base)?).ok();
@@ -450,14 +450,16 @@ mod tests {
         );
     }
 
-    fn entry(rva: u64) -> HypercallEntry {
-        HypercallEntry {
+    fn entry(rva: u64) -> Hypercall {
+        Hypercall {
+            code: 0,
+            implemented: false,
             handler: BASE + rva,
             flags: 0,
-            input: 0,
-            input_element: 0,
-            output: 0,
-            output_element: 0,
+            input_size: 0,
+            input_element_size: 0,
+            output_size: 0,
+            output_element_size: 0,
         }
     }
 

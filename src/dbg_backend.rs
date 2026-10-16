@@ -16,24 +16,27 @@ mod registers;
 
 pub use registers::{RegisterInfo, RegisterMap, push_arm64_aliases, repeats_another_register};
 
-/// One captured line of guest debug output (DbgPrint / kernel printf), with the
-/// host wall-clock time it completed and a monotonic sequence number used as the
-/// read cursor.
+/// A captured line of guest debug output (DbgPrint, kernel printf).
+#[record]
 #[derive(Clone, Debug)]
 pub struct DebugLine {
+    /// A monotonic sequence number that serves as the read cursor.
     pub seq: u64,
+    /// The host wall-clock time when the line was complete, in milliseconds
+    /// since the Unix epoch.
     pub timestamp_ms: u64,
     pub text: String,
 }
 
-/// A window of debug lines returned by [`DebugBackend::read_debug_output`].
-/// `next_seq` is the cursor to pass on the next call to resume after the last
-/// returned line; `dropped` is set when `since_seq` predated the retained window
-/// (the bounded ring evicted lines the caller had not yet read).
+/// A page of captured guest debug output, plus the cursor for the next poll.
+#[record]
 #[derive(Clone, Debug, Default)]
 pub struct DebugOutputPage {
     pub lines: Vec<DebugLine>,
+    /// The cursor to give on the next call to continue after the last line.
     pub next_seq: u64,
+    /// Whether the bounded ring removed lines that the caller did not read
+    /// (the cursor predated the lines it keeps).
     pub dropped: bool,
 }
 
@@ -398,6 +401,8 @@ pub fn validate_hw_breakpoint(access: HwBreakpointAccess, len: u8, addr: u64) ->
     Ok(())
 }
 
+/// What a backend can do; the SDK shows its [`name`](Self::name).
+#[record]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DebugCapability {
     MemoryIntrospection,
@@ -481,6 +486,12 @@ impl DebugCapability {
     }
 }
 
+impl fmt::Display for DebugCapability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// A PCI function's configuration space: its segment, bus, device, and
 /// function, and the physical address of its 4 KiB page in the firmware's
 /// ECAM window (from the ACPI MCFG table) when one covers it.
@@ -493,13 +504,23 @@ pub struct PciConfigAddress {
     pub ecam: Option<u64>,
 }
 
+/// A row of the capability matrix of the backend.
+#[record(impl)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BackendCapability {
+    /// Stable identifier (`memory_introspection`, ...).
     pub capability: DebugCapability,
     pub supported: bool,
 }
 
+#[record]
 impl BackendCapability {
+    /// Human-readable name.
+    #[record(getter)]
+    pub fn label(&self) -> &'static str {
+        self.capability.label()
+    }
+
     pub fn supported(capability: DebugCapability) -> Self {
         Self {
             capability,

@@ -17,17 +17,19 @@ use super::inspect::Inspect;
 use super::memory::Memory;
 use super::module::{Drivers, Modules};
 use super::process::Processes;
+use super::record::Typed;
 use super::secure::SecureKernel;
 use super::symbols::{self, Symbols};
 use super::thread::{Cpus, Threads};
 use super::types::Types;
 use super::userdump::UserDump;
 use super::{err, raise, runcontrol, runner};
+use crate::dbg_backend::{BackendCapability, DebugOutputPage};
 use crate::dump_writer::{collect_dump_metadata, write_kernel_dump};
+use crate::guest::hv_layout::Hypercall;
+use crate::notice::Notice;
 use crate::session::Stop;
 use crate::session::effects::Effects;
-use crate::view;
-use crate::view::record::Typed;
 
 fn namespace_owner(slf: &Bound<'_, Debugger>) -> Owner {
     Owner::unstamped(slf.py(), slf.as_unbound())
@@ -153,22 +155,11 @@ impl Debugger {
     /// The Windows hypervisor's hypercall table, one entry per call code, as
     /// `!hvcalls -a` lists it. Needs the VM's `hv-evmcs` enlightenment or a
     /// vCPU stopped in the hypervisor. This feature is experimental.
-    fn hypercalls<'py>(
-        slf: &Bound<'py, Self>,
-    ) -> PyResult<Typed<'py, Vec<view::hypervisor::Hypercall>>> {
+    fn hypercalls<'py>(slf: &Bound<'py, Self>) -> PyResult<Typed<'py, Vec<Hypercall>>> {
         let py = slf.py();
         let owner = namespace_owner(slf);
         let (_, table) = owner.with(py, |session| session.target.hypercalls().map_err(err))?;
-        let unassigned = table.first().map(|entry| entry.handler);
-        // Each entry's code is its index, a u16.
-        Typed::new(
-            py,
-            table
-                .iter()
-                .zip(0..=u16::MAX)
-                .map(|(entry, code)| view::hypervisor::hypercall(code, entry, unassigned))
-                .collect(),
-        )
+        Typed::new(py, table)
     }
 
     /// Running processes, keyed by PID: `processes[4]`, `.find(name)`.
@@ -242,17 +233,9 @@ impl Debugger {
     /// The capability matrix of the backend, which shows the operations that
     /// the transport supports.
     #[getter]
-    fn capabilities<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Typed<'py, Vec<view::backend::BackendCapability>>> {
+    fn capabilities<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<BackendCapability>>> {
         let rows = self.with_session(|session| Ok(session.capabilities()))?;
-        Typed::new(
-            py,
-            rows.iter()
-                .map(view::backend::capability)
-                .collect::<Vec<_>>(),
-        )
+        Typed::new(py, rows)
     }
 
     /// Evaluate a debugger (MASM) expression in kernel scope to an integer,
@@ -325,13 +308,9 @@ impl Debugger {
     /// Captured guest debug output (DbgPrint) since sequence `since`. To poll
     /// only for new lines, pass the previous `next_seq`.
     #[pyo3(signature = (since=0))]
-    fn debug_log<'py>(
-        &self,
-        py: Python<'py>,
-        since: u64,
-    ) -> PyResult<Typed<'py, view::backend::DebugLog>> {
+    fn debug_log<'py>(&self, py: Python<'py>, since: u64) -> PyResult<Typed<'py, DebugOutputPage>> {
         let page = self.with_session(|session| Ok(session.read_debug_output(since)))?;
-        Typed::new(py, view::backend::debug_log(&page))
+        Typed::new(py, page)
     }
 
     /// Remove and return what the debugger reported since the last call, in
@@ -340,9 +319,9 @@ impl Debugger {
     /// host memory that no longer matched after a reload, or `"info"` for
     /// status, such as a background symbol fetch finishing, a breakpoint
     /// slot that was reclaimed, or the `ModLoad:` line of an `sxn ld` filter.
-    fn notices<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<view::backend::Notice>>> {
+    fn notices<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<Notice>>> {
         let notices = self.with_session(|session| Ok(session.take_notices()))?;
-        Typed::new(py, notices.iter().map(view::backend::notice).collect())
+        Typed::new(py, notices)
     }
 
     /// Remove all breakpoints, let the target run, and end the session. This

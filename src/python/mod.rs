@@ -21,8 +21,6 @@ use crate::error::Error;
 use crate::kd::KdMemorySource;
 use crate::session::Session;
 use crate::target::meta::{ErrorCode, decode_error_code};
-use crate::view::record::{ToView, Typed};
-use crate::view::{self, PyShape};
 use crate::{Backend, TargetSpec};
 
 pub mod args;
@@ -52,7 +50,7 @@ pub mod userdump;
 use args::{AttachBackend, MemorySource};
 use handle::Actor;
 pub use handle::Debugger;
-use record::PlainDict;
+use record::{PlainDict, PyStyle, ToValue, Typed};
 
 /// Sanity caps for the raw byte APIs. The SDK is local and trusted, but an
 /// accidental huge length (`read(addr, 10**12)`) would allocate before the
@@ -181,8 +179,8 @@ pub fn timeout_arg(timeout: Option<f64>) -> PyResult<Option<Duration>> {
 
 /// A value as a plain `dict`: an entity's `to_dict()`, with its records and
 /// diagnostics converted.
-pub fn view_dict<'py, T: ToView>(py: Python<'py>, value: &T) -> PyResult<PlainDict<'py>> {
-    view::to_py(py, &value.to_view(), PyShape::Plain)?
+pub fn plain_dict<'py, T: ToValue>(py: Python<'py>, value: &T) -> PyResult<PlainDict<'py>> {
+    record::to_py(py, &value.to_value(), PyStyle::Plain)?
         .cast_into::<PyDict>()
         .map(PlainDict)
         .map_err(|e| raise(e.to_string()))

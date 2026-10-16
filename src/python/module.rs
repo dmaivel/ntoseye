@@ -10,7 +10,8 @@ use super::context::{Context, Space};
 use super::handle::Owner;
 use super::iter::{DriverIterator, ModuleIterator};
 use super::record::PlainDict;
-use super::{MAX_READ_LEN, err, raise, symbol_not_found, view_dict};
+use super::record::Typed;
+use super::{MAX_READ_LEN, err, plain_dict, raise, symbol_not_found};
 use crate::error::Error;
 use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::memory::PAGE_SIZE;
@@ -20,7 +21,6 @@ use crate::pe::headers::Section;
 use crate::symbols::{ImageSource, ModuleListing, ModuleSymbols};
 use crate::target::object::DriverObjectInfo;
 use crate::types::{Dtb, VirtAddr};
-use crate::view::record::Typed;
 
 use ntoseye_macros::record;
 use pelite::PeView;
@@ -323,7 +323,7 @@ impl Module {
     /// The module as a plain `dict`.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
-        view_dict(py, &self.info)
+        plain_dict(py, &self.info)
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -529,7 +529,7 @@ impl Driver {
     /// The driver object as a plain `dict`.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
-        view_dict(py, &self.info)
+        plain_dict(py, &self.info)
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {

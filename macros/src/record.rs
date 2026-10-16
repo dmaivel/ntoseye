@@ -69,7 +69,7 @@ impl Flags {
     }
 }
 
-/// How a field's integers and bytes render: the `M` of `ToView<M>`.
+/// How a field's integers and bytes render: the `M` of `ToValue<M>`.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum Mode {
     #[default]
@@ -81,9 +81,9 @@ enum Mode {
 impl Mode {
     fn tokens(self) -> TokenStream {
         match self {
-            Self::Plain => quote!(crate::view::record::Plain),
-            Self::Hex => quote!(crate::view::record::Hex),
-            Self::Bytes => quote!(crate::view::record::Bytes),
+            Self::Plain => quote!(crate::python::record::Plain),
+            Self::Hex => quote!(crate::python::record::Hex),
+            Self::Bytes => quote!(crate::python::record::Bytes),
         }
     }
 }
@@ -232,7 +232,7 @@ fn docs(attrs: &[Attribute]) -> Vec<Attribute> {
 struct Getter {
     key: String,
     property: String,
-    /// The Rust type of the value, whose `ToView<mode>` types the property.
+    /// The Rust type of the value, whose `ToValue<mode>` types the property.
     ty: TokenStream,
     mode: Mode,
     docs: Vec<Attribute>,
@@ -255,8 +255,8 @@ impl Getter {
             #[pyo3(name = #property)]
             fn #ident<'py>(
                 slf: &pyo3::Bound<'py, Self>,
-            ) -> pyo3::PyResult<crate::view::record::Typed<'py, #ty, #mode>> {
-                ::std::result::Result::Ok(crate::view::record::Typed::converted(
+            ) -> pyo3::PyResult<crate::python::record::Typed<'py, #ty, #mode>> {
+                ::std::result::Result::Ok(crate::python::record::Typed::converted(
                     slf.as_super().get().field(slf.py(), #key)?,
                 ))
             }
@@ -357,7 +357,7 @@ fn class(name: &Ident, docs: &[Attribute], getters: &[Getter], has_impl: bool) -
                 &self,
                 py: pyo3::Python<'py>,
             ) -> pyo3::PyResult<pyo3::Bound<'py, #class>> {
-                let typed = crate::view::record::Typed::<Self>::of(py, self)?;
+                let typed = crate::python::record::Typed::<Self>::of(py, self)?;
                 ::std::result::Result::Ok(typed.into_bound().cast_into::<#class>()?)
             }
         }
@@ -366,32 +366,32 @@ fn class(name: &Ident, docs: &[Attribute], getters: &[Getter], has_impl: bool) -
     }
 }
 
-/// `View::Shaped` of `fields`, plus the computed properties for a record
+/// `Value::Record` of `fields`, plus the computed properties for a record
 /// with an impl block.
 fn shaped(name: &Ident, fields: TokenStream, has_impl: bool) -> TokenStream {
     let class = class_ident(name);
     let computed = has_impl.then(|| {
         quote! {
-            <Self as crate::view::record::RecordImpl>::computed(self, &mut fields);
+            <Self as crate::python::record::RecordImpl>::computed(self, &mut fields);
         }
     });
     quote! {
         #[allow(unused_mut)]
-        let mut fields: ::std::vec::Vec<(&'static str, crate::view::View)> = #fields;
+        let mut fields: ::std::vec::Vec<(&'static str, crate::python::record::Value)> = #fields;
         #computed
-        crate::view::View::Shaped(crate::view::record::Shaped {
+        crate::python::record::Value::Record(crate::python::record::RecordFields {
             fields,
             class: #class::wrap,
         })
     }
 }
 
-/// `impl<M> ToView<M> for Name`.
-fn to_view(name: &Ident, body: TokenStream, hint: TokenStream) -> TokenStream {
+/// `impl<M> ToValue<M> for Name`.
+fn to_value(name: &Ident, body: TokenStream, hint: TokenStream) -> TokenStream {
     quote! {
         #[cfg(feature = "python")]
-        impl<M> crate::view::record::ToView<M> for #name {
-            fn to_view(&self) -> crate::view::View {
+        impl<M> crate::python::record::ToValue<M> for #name {
+            fn to_value(&self) -> crate::python::record::Value {
                 #body
             }
             #[cfg(feature = "python-stubs")]
@@ -467,7 +467,7 @@ fn structure(flags: Flags, mut item: ItemStruct) -> Result<TokenStream> {
         let ty = &field.ty;
         let mode = opts.mode.tokens();
         values.push(quote! {
-            (#key, <#ty as crate::view::record::ToView<#mode>>::to_view(&self.#ident))
+            (#key, <#ty as crate::python::record::ToValue<#mode>>::to_value(&self.#ident))
         });
         getters.push(Getter {
             key,
@@ -482,11 +482,11 @@ fn structure(flags: Flags, mut item: ItemStruct) -> Result<TokenStream> {
     let name = &item.ident;
     let has_impl = flags.has_impl.is_some();
     let body = shaped(name, quote!(::std::vec![#(#values),*]), has_impl);
-    let to_view = to_view(name, body, class_hint(name));
+    let to_value = to_value(name, body, class_hint(name));
     let class = class(name, &docs(&item.attrs), &getters, has_impl);
     Ok(quote! {
         #item
-        #to_view
+        #to_value
         #class
     })
 }
@@ -530,11 +530,11 @@ fn fieldless_enum(item: &mut ItemEnum) -> Result<TokenStream> {
             ));
         }
     }
-    Ok(to_view(
+    Ok(to_value(
         &item.ident,
-        quote!(crate::view::View::Str(::std::string::ToString::to_string(
-            self
-        ))),
+        quote!(crate::python::record::Value::Str(
+            ::std::string::ToString::to_string(self)
+        )),
         quote!(pyo3::type_hint_identifier!("builtins", "str")),
     ))
 }
@@ -571,9 +571,9 @@ fn union(item: &mut ItemEnum) -> Result<TokenStream> {
         let mode = opts.mode.tokens();
         let ident = &variant.ident;
         arms.push(quote! {
-            Self::#ident(value) => <#ty as crate::view::record::ToView<#mode>>::to_view(value),
+            Self::#ident(value) => <#ty as crate::python::record::ToValue<#mode>>::to_value(value),
         });
-        hints.push(quote!(<#ty as crate::view::record::ToView<#mode>>::HINT));
+        hints.push(quote!(<#ty as crate::python::record::ToValue<#mode>>::HINT));
     }
     let hint = hints
         .into_iter()
@@ -588,7 +588,11 @@ fn union(item: &mut ItemEnum) -> Result<TokenStream> {
             }
         })
         .expect("variants");
-    Ok(to_view(&item.ident, quote!(match self { #(#arms)* }), hint))
+    Ok(to_value(
+        &item.ident,
+        quote!(match self { #(#arms)* }),
+        hint,
+    ))
 }
 
 /// A tagged enum: a class with `kind` and every variant's fields, each
@@ -667,7 +671,7 @@ fn tagged(flags: &Flags, item: &mut ItemEnum) -> Result<TokenStream> {
             let mode = opts.mode.tokens();
             filled.push((
                 position,
-                quote!(<#ty as crate::view::record::ToView<#mode>>::to_view(#binding)),
+                quote!(<#ty as crate::python::record::ToValue<#mode>>::to_value(#binding)),
             ));
         }
         let ident = &variant.ident;
@@ -705,23 +709,23 @@ fn tagged(flags: &Flags, item: &mut ItemEnum) -> Result<TokenStream> {
             let key = &all[position + 1].key;
             match filled.iter().find(|(at, _)| *at == position) {
                 Some((_, value)) => quote!((#key, #value)),
-                None => quote!((#key, crate::view::View::Null)),
+                None => quote!((#key, crate::python::record::Value::Null)),
             }
         });
         quote! {
             #[allow(unused_variables)]
             #pattern => ::std::vec![
-                ("kind", crate::view::View::Str(::std::string::String::from(#kind))),
+                ("kind", crate::python::record::Value::Str(::std::string::String::from(#kind))),
                 #(#values),*
             ],
         }
     });
     let has_impl = flags.has_impl.is_some();
     let body = shaped(&name, quote!(match self { #(#arms)* }), has_impl);
-    let to_view = to_view(&name, body, class_hint(&name));
+    let to_value = to_value(&name, body, class_hint(&name));
     let class = class(&name, &docs(&item.attrs), &all, has_impl);
     Ok(quote! {
-        #to_view
+        #to_value
         #class
     })
 }
@@ -802,7 +806,7 @@ fn implementation(mut item: ItemImpl) -> Result<TokenStream> {
         )?;
         let mode = opts.mode.tokens();
         values.push(quote! {
-            fields.push((#key, <#ty as crate::view::record::ToView<#mode>>::to_view(&self.#ident())));
+            fields.push((#key, <#ty as crate::python::record::ToValue<#mode>>::to_value(&self.#ident())));
         });
         getters.push(Getter {
             key,
@@ -825,10 +829,10 @@ fn implementation(mut item: ItemImpl) -> Result<TokenStream> {
         #item
 
         #[cfg(feature = "python")]
-        impl crate::view::record::RecordImpl for #name {
+        impl crate::python::record::RecordImpl for #name {
             fn computed(
                 &self,
-                fields: &mut ::std::vec::Vec<(&'static str, crate::view::View)>,
+                fields: &mut ::std::vec::Vec<(&'static str, crate::python::record::Value)>,
             ) {
                 #(#values)*
             }

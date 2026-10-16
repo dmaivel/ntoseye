@@ -10,7 +10,7 @@ use crate::guest::{
     ept::{self, Access, EptTranslation},
     evmcs_fields::{self, IoIntercepts, MsrIntercepts, MsrRange, PortRange},
     hypercall_input::{DecodedHypercall, HypercallField},
-    hypercalls::{HypercallCaller, HypercallInput, tlfs_hypercall},
+    hypercalls::{HypercallCaller, HypercallInput},
     privilege_names,
 };
 use crate::repl::args::{ArgCursor, ArgCx, ArgError};
@@ -1480,19 +1480,16 @@ fn hvcalls(
             return Ok(());
         }
     };
-    let unassigned = table[0].handler;
     let mut table_out = Builder::default();
     table_out.push_record([
         "Code", "Name", "Kind", "Input", "Rep in", "Output", "Rep out", "Handler",
     ]);
     let mut implemented = 0;
-    for (code, entry) in table.iter().enumerate() {
-        let assigned = entry.handler != unassigned || code == 0;
-        implemented += usize::from(entry.handler != unassigned);
-        if !assigned && !all {
+    for entry in &table {
+        implemented += usize::from(entry.implemented);
+        if !entry.implemented && entry.code != 0 && !all {
             continue;
         }
-        let name = tlfs_hypercall(code as u16).map_or("", |(name, _)| name);
         let mut kind = if entry.rep() { "rep" } else { "simple" }.to_string();
         if entry.variable_header() {
             kind.push_str("+var");
@@ -1505,13 +1502,13 @@ fn hvcalls(
             }
         };
         table_out.push_record([
-            format!("{code:#06x}"),
-            name.to_string(),
+            format!("{:#06x}", entry.code),
+            entry.name().unwrap_or_default().to_string(),
             kind,
-            size(entry.input),
-            size(entry.input_element),
-            size(entry.output),
-            size(entry.output_element),
+            size(entry.input_size),
+            size(entry.input_element_size),
+            size(entry.output_size),
+            size(entry.output_element_size),
             format!("hv+{:#x}", entry.handler - base),
         ]);
     }

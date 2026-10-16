@@ -2702,25 +2702,7 @@ class DataDirectory(BaseRecord):
     def size(self, /) -> int: ...
 
 @final
-class DebugLog(BaseRecord):
-    """
-    A page of captured guest debug output.
-    """
-    @property
-    def dropped(self, /) -> bool:
-        """
-        Whether the bounded ring removed lines that the caller did not read.
-        """
-    @property
-    def lines(self, /) -> list[DebugLogLine]: ...
-    @property
-    def next_seq(self, /) -> int:
-        """
-        The cursor to give on the next call to continue after the last line.
-        """
-
-@final
-class DebugLogLine(BaseRecord):
+class DebugLine(BaseRecord):
     """
     A captured line of guest debug output (DbgPrint, kernel printf).
     """
@@ -2736,6 +2718,25 @@ class DebugLogLine(BaseRecord):
         """
         The host wall-clock time when the line was complete, in milliseconds
         since the Unix epoch.
+        """
+
+@final
+class DebugOutputPage(BaseRecord):
+    """
+    A page of captured guest debug output, plus the cursor for the next poll.
+    """
+    @property
+    def dropped(self, /) -> bool:
+        """
+        Whether the bounded ring removed lines that the caller did not read
+        (the cursor predated the lines it keeps).
+        """
+    @property
+    def lines(self, /) -> list[DebugLine]: ...
+    @property
+    def next_seq(self, /) -> int:
+        """
+        The cursor to give on the next call to continue after the last line.
         """
 
 @final
@@ -2845,7 +2846,7 @@ class Debugger:
         target ignores break-ins during this time. Then Windows reboots or, if
         automatic restart is disabled, breaks in. Ctrl+C stops the wait.
         """
-    def debug_log(self, /, since: int = 0) -> DebugLog:
+    def debug_log(self, /, since: int = 0) -> DebugOutputPage:
         """
         Captured guest debug output (DbgPrint) since sequence `since`. To poll
         only for new lines, pass the previous `next_seq`.
@@ -5016,16 +5017,6 @@ class ExportDirectory(BaseRecord):
         """
 
 @final
-class ExpressionValue(BaseRecord):
-    """
-    An evaluated debugger expression (`?`).
-    """
-    @property
-    def expression(self, /) -> str: ...
-    @property
-    def value(self, /) -> int: ...
-
-@final
 class FailureSignature(BaseRecord):
     """
     A deterministic identity for a failure that does not depend on
@@ -6395,7 +6386,9 @@ class HvProcessor(BaseRecord):
 @final
 class Hypercall(BaseRecord):
     """
-    One call code of the hypervisor's hypercall table.
+    One call code of the hypervisor's hypercall table, as the hypervisor
+    dispatches it: its handler, its kind, and the sizes of its fixed input
+    and output and of each rep element.
     """
     @property
     def code(self, /) -> int: ...
@@ -6404,7 +6397,8 @@ class Hypercall(BaseRecord):
     @property
     def implemented(self, /) -> bool:
         """
-        Whether the call has its own handler, not the reserved code 0's.
+        Whether the call has its own handler, not the reserved code 0's,
+        which unimplemented codes share.
         """
     @property
     def input_element_size(self, /) -> int: ...

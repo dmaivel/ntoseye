@@ -11,6 +11,7 @@ use pyo3::prelude::*;
 use super::args::{AddressArg, BytesArg};
 use super::context::Context;
 use super::handle::Owner;
+use super::record::{ToValue, Typed};
 use super::{ErrorKind, err, error, raise};
 use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::error::Result;
@@ -22,7 +23,6 @@ use crate::target::cpu::Processor;
 use crate::target::image::ImageRef;
 use crate::target::{MemoryKind, ThreadInfo};
 use crate::types::VirtAddr;
-use crate::view::record::{ToView, Typed};
 
 pub use super::breakpoints::{Breakpoints, Exceptions};
 use super::context::Space;
@@ -278,7 +278,7 @@ pub fn run<'py, H, T>(
 ) -> PyResult<Typed<'py, T>>
 where
     H: CommandHost + Sync,
-    T: ToView + Send,
+    T: ToValue + Send,
 {
     host.refuse(operation, effects)?;
     let context = host.context(py)?;

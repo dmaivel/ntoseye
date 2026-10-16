@@ -10,10 +10,11 @@ use super::handle::{Debugger, Owner, require_halted};
 use super::iter::{BreakpointIterator, ExceptionPolicyIterator};
 use super::process::Process;
 use super::record::PlainDict;
+use super::record::Typed;
 use super::runcontrol::reject_condition_mutation;
 use super::symbols::Location;
 use super::thread::Thread;
-use super::{err, raise, symbol_not_found, view_dict};
+use super::{err, plain_dict, raise, symbol_not_found};
 use crate::breakpoints::{
     BreakpointConfig, BreakpointInfo, BreakpointScope, HypercallFilter, PartitionFilter,
 };
@@ -24,7 +25,6 @@ use crate::guest::vm_exits::{self, ExitFilter};
 use crate::session::Session;
 use crate::target::Target;
 use crate::types::{Dtb, VirtAddr};
-use crate::view::record::Typed;
 
 /// The code breakpoints and data watchpoints, with their IDs as keys
 /// (`dbg.breakpoints`).
@@ -770,7 +770,7 @@ impl Breakpoint {
 
     /// Get the breakpoint state (`info`) as a plain `dict`.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        view_dict(py, &self.require_snapshot(py)?)
+        plain_dict(py, &self.require_snapshot(py)?)
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {

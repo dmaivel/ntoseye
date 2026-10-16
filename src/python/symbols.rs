@@ -5,6 +5,7 @@ use pyo3::prelude::*;
 use super::command::CommandHost;
 use super::context::{Context, Space};
 use super::handle::Owner;
+use super::record::Typed;
 use super::{err, raise, symbol_not_found};
 use crate::breakpoints::BreakpointSpec;
 use crate::expr::Expr;
@@ -15,7 +16,6 @@ use crate::symbols::{
 };
 use crate::target::SymbolSearchMatch;
 use crate::types::{Dtb, VirtAddr};
-use crate::view::record::Typed;
 
 /// Symbol lookup in one address space (`dbg.symbols`, `proc.symbols`).
 #[pyclass(module = "ntoseye")]

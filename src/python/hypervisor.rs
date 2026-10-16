@@ -8,7 +8,8 @@ use pyo3::types::{PyBytes, PyDict};
 use super::handle::{Owner, require_halted};
 use super::memory::check_disassembly_count;
 use super::record::PlainDict;
-use super::{MAX_READ_LEN, err, raise, view_dict};
+use super::record::{Hex, Typed};
+use super::{MAX_READ_LEN, err, plain_dict, raise};
 use crate::disasm::DisasmRow;
 use crate::guest::HvProcessor;
 use crate::guest::ept::{EptDifference, EptMapping};
@@ -20,7 +21,6 @@ use crate::guest::{HvPartition, HvVirtualProcessor, HvVtl, evmcs_fields, privile
 use crate::session::VpRegisters;
 use crate::target::CodeExtent;
 use crate::types::Keyed;
-use crate::view::record::{Hex, Typed};
 
 /// A partition of the Windows hypervisor, as it was when listed.
 #[pyclass(module = "ntoseye", frozen)]
@@ -155,7 +155,7 @@ fn vp_dict<'py>(py: Python<'py>, vp: &HvVirtualProcessor) -> PyResult<Bound<'py,
     let processors = vp
         .processors
         .iter()
-        .map(|processor| view_dict(py, processor))
+        .map(|processor| plain_dict(py, processor))
         .collect::<PyResult<Vec<_>>>()?;
     dict.set_item("processors", processors)?;
     dict.set_item("vtl", vp.vtl)?;
@@ -634,7 +634,7 @@ impl HypercallCaller {
         dict.set_item("vtl", self.info.vtl)?;
         dict.set_item("registers", self.info.registers.clone())?;
         let hypercall = match self.info.input.call() {
-            Some(call) => Some(view_dict(py, call)?),
+            Some(call) => Some(plain_dict(py, call)?),
             None => None,
         };
         dict.set_item("hypercall", hypercall)?;

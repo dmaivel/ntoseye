@@ -14,7 +14,7 @@ use super::record::PlainDict;
 use super::symbols::{self, Symbols};
 use super::thread::Threads;
 use super::types::{Struct, Types};
-use super::{err, view_dict};
+use super::{err, plain_dict};
 use crate::guest::ProcessInfo;
 use crate::target::mm::{MemoryRegionInfo, MemoryRegionInfoPy};
 use crate::types::VirtAddr;
@@ -277,7 +277,7 @@ impl Process {
     /// `eprocess`, `wow64_peb`, `wow64`).
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
-        view_dict(py, &self.info)
+        plain_dict(py, &self.info)
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {

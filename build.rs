@@ -5,7 +5,7 @@
 //! `python-embed`, also point the binary at a macOS framework Python.
 //!
 //! With `python`, also list the SDK's `#[record]` classes (see
-//! `src/view/record.rs`) in `$OUT_DIR/record_classes.rs`.
+//! `src/python/record.rs`) in `$OUT_DIR/record_classes.rs`.
 
 use std::path::Path;
 use std::process::Command;
@@ -80,7 +80,7 @@ mod records {
 
     struct Class {
         cfgs: Vec<String>,
-        /// The class's Rust path, `crate::view::process::ZombiesPy`.
+        /// The class's Rust path, `crate::target::zombies::ZombiesPy`.
         path: String,
     }
 

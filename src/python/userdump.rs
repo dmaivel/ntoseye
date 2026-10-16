@@ -13,6 +13,7 @@ use super::iter::UserThreadIterator;
 use super::memory::Memory;
 use super::module::Modules;
 use super::record::PlainDict;
+use super::record::Typed;
 use super::thread::{Frame, Registers};
 use super::types::Struct;
 use super::{err, raise};
@@ -22,7 +23,6 @@ use crate::target::usermode::address::UserRegion;
 use crate::userdump::{
     UnloadedModule, UserDumpInfo, UserHandle, UserThread as DumpThread, UserThreadInfo,
 };
-use crate::view::record::Typed;
 
 /// Why a user-dump handle cannot be served: the debugger's target is not
 /// one (a borrowed debugger whose REPL opened something else).

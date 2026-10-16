@@ -3,10 +3,13 @@
 //! fields are recovered from the handlers of TLFS hypercalls, found through
 //! the image's hypercall table, and validated against memory before use.
 
-use crate::error::{Error, Result};
 use iced_x86::{
     Code, Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind, Register,
 };
+use ntoseye_macros::record;
+
+use crate::error::{Error, Result};
+use crate::guest::hypercalls::tlfs_hypercall;
 
 /// Bytes of one hypercall table entry: handler, call code, then sizes.
 const ENTRY_BYTES: usize = 0x18;
@@ -29,16 +32,6 @@ pub struct ImageView<'a> {
     pub code: Vec<(u32, u32)>,
     /// `(start, end)` RVAs of data sections that may hold the table.
     pub data: Vec<(u32, u32)>,
-}
-
-impl HypercallEntry {
-    pub fn rep(&self) -> bool {
-        self.flags & 1 != 0
-    }
-
-    pub fn variable_header(&self) -> bool {
-        self.flags & 2 != 0
-    }
 }
 
 impl ImageView<'_> {
@@ -397,24 +390,53 @@ fn step(regs: &mut Regs, instruction: &Instruction, trace: &mut Trace) {
     };
 }
 
-/// One entry of the hypercall table, as the hypervisor dispatches a call
-/// code: its handler, its flags, and the sizes of its fixed input and
-/// output and of each rep element.
+/// One call code of the hypervisor's hypercall table, as the hypervisor
+/// dispatches it: its handler, its kind, and the sizes of its fixed input
+/// and output and of each rep element.
+#[record(impl)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HypercallEntry {
+pub struct Hypercall {
+    #[record(hex)]
+    pub code: u16,
+    /// Whether the call has its own handler, not the reserved code 0's,
+    /// which unimplemented codes share.
+    pub implemented: bool,
+    #[record(hex)]
     pub handler: u64,
     /// Bit 0: a rep call. Bit 1: the input has a variable-size header (the
     /// TLFS `...Ex` calls). Bit 2 is set on HvCallVtlCall and
     /// HvCallVtlReturn.
+    #[record(skip)]
     pub flags: u16,
-    pub input: u16,
-    pub input_element: u16,
-    pub output: u16,
-    pub output_element: u16,
+    pub input_size: u16,
+    pub input_element_size: u16,
+    pub output_size: u16,
+    pub output_element_size: u16,
+}
+
+#[record]
+impl Hypercall {
+    /// The TLFS name, or None for a code that the TLFS does not list.
+    #[record(getter)]
+    pub fn name(&self) -> Option<&'static str> {
+        tlfs_hypercall(self.code).map(|(name, _)| name)
+    }
+
+    /// Whether the call is a rep hypercall.
+    #[record(getter)]
+    pub fn rep(&self) -> bool {
+        self.flags & 1 != 0
+    }
+
+    /// Whether the call takes a variable-size header.
+    #[record(getter)]
+    pub fn variable_header(&self) -> bool {
+        self.flags & 2 != 0
+    }
 }
 
 /// The hypercall table, indexed by call code.
-pub fn hypercall_table(image: &ImageView<'_>) -> Result<Vec<HypercallEntry>> {
+pub fn hypercall_table(image: &ImageView<'_>) -> Result<Vec<Hypercall>> {
     for &(start, end) in &image.data {
         let end = (end as usize).min(image.bytes.len());
         let mut rva = start as usize;
@@ -426,17 +448,23 @@ pub fn hypercall_table(image: &ImageView<'_>) -> Result<Vec<HypercallEntry>> {
                     break;
                 }
                 let field = |offset| image.u16_at(at + offset).unwrap_or(0);
-                entries.push(HypercallEntry {
+                entries.push(Hypercall {
+                    code,
+                    implemented: false,
                     handler,
                     flags: field(0xa),
-                    input: field(0xc),
-                    input_element: field(0xe),
-                    output: field(0x10),
-                    output_element: field(0x12),
+                    input_size: field(0xc),
+                    input_element_size: field(0xe),
+                    output_size: field(0x10),
+                    output_element_size: field(0x12),
                 });
                 at += ENTRY_BYTES;
             }
             if entries.len() >= MIN_ENTRIES {
+                let unassigned = entries[0].handler;
+                for entry in &mut entries {
+                    entry.implemented = entry.handler != unassigned;
+                }
                 return Ok(entries);
             }
             rva += 8;
@@ -474,7 +502,7 @@ pub struct PartitionLayout {
     pub vmcs: Vec<(i64, i64)>,
 }
 
-fn handler(table: &[HypercallEntry], code: u16) -> Result<u64> {
+fn handler(table: &[Hypercall], code: u16) -> Result<u64> {
     table
         .get(usize::from(code))
         .map(|entry| entry.handler)
@@ -492,7 +520,7 @@ fn load_of(value: &Value) -> Option<(&Value, i64)> {
 /// `HvCallGetNextChildPartition(parent, previous)` calls: the end test
 /// compares `previous.sibling.Flink` with `&previous.parent.children`, and
 /// the next child's ID is loaded at a negative offset from its link.
-fn child_list(image: &ImageView<'_>, table: &[HypercallEntry]) -> Result<(i64, i64, i64, i64)> {
+fn child_list(image: &ImageView<'_>, table: &[Hypercall]) -> Result<(i64, i64, i64, i64)> {
     let entry = handler(table, CALL_GET_NEXT_CHILD_PARTITION)?;
     for callee in walk(image, entry, &[]).calls {
         let trace = walk(image, callee, &[]);
@@ -548,7 +576,7 @@ fn gs_rooted(value: &Value) -> bool {
 /// `(current partition values, id, privileges)` from
 /// `HvCallGetPartitionId`: it stores the current partition's ID to its
 /// output after testing the AccessPartitionId privilege (bit 33).
-fn partition_id(image: &ImageView<'_>, table: &[HypercallEntry]) -> Result<(Vec<Value>, i64, i64)> {
+fn partition_id(image: &ImageView<'_>, table: &[Hypercall]) -> Result<(Vec<Value>, i64, i64)> {
     let trace = walk(image, handler(table, CALL_GET_PARTITION_ID)?, &[]);
     let mut current = Vec::new();
     let mut id = None;
@@ -586,7 +614,7 @@ const MAX_VPS: u64 = 0x10000;
 /// The traces of the functions the VP hypercalls call, and of those they
 /// call, each with its function's address: where the VP lookup is. Each is
 /// walked once, in parallel.
-fn vp_lookup_traces(image: &ImageView<'_>, table: &[HypercallEntry]) -> Result<Vec<(u64, Trace)>> {
+fn vp_lookup_traces(image: &ImageView<'_>, table: &[Hypercall]) -> Result<Vec<(u64, Trace)>> {
     use rayon::prelude::*;
     let mut first = Vec::new();
     for code in [
@@ -656,7 +684,7 @@ fn vp_array(traces: &[(u64, Trace)]) -> Result<(i64, u32)> {
 
 /// `(current VTL, VTL array, level)` from `HvCallVtlReturn(vp)`: it reads
 /// the current VTL's level and indexes the VP's VTL array with it.
-fn vtl_fields(image: &ImageView<'_>, table: &[HypercallEntry]) -> Result<(i64, i64, i64)> {
+fn vtl_fields(image: &ImageView<'_>, table: &[Hypercall]) -> Result<(i64, i64, i64)> {
     let trace = walk(image, handler(table, CALL_VTL_RETURN)?, &[]);
     trace
         .accesses
@@ -675,7 +703,7 @@ fn vtl_fields(image: &ImageView<'_>, table: &[HypercallEntry]) -> Result<(i64, i
 
 /// The VP's enabled-VTL mask from `HvCallVtlCall(vp)`: it ANDs the VTLs
 /// above the current one with the mask to pick the VTL to call.
-fn enabled_vtls(image: &ImageView<'_>, table: &[HypercallEntry]) -> Result<i64> {
+fn enabled_vtls(image: &ImageView<'_>, table: &[Hypercall]) -> Result<i64> {
     walk(image, handler(table, CALL_VTL_CALL)?, &[])
         .and_loads
         .iter()
@@ -688,12 +716,7 @@ fn enabled_vtls(image: &ImageView<'_>, table: &[HypercallEntry]) -> Result<i64> 
 
 /// The values reaching the processor block's current VP: those whose
 /// current VTL's level the VP hypercalls read, `[[vp + current] + level]`.
-fn current_vp(
-    image: &ImageView<'_>,
-    table: &[HypercallEntry],
-    current: i64,
-    level: i64,
-) -> Vec<Value> {
+fn current_vp(image: &ImageView<'_>, table: &[Hypercall], current: i64, level: i64) -> Vec<Value> {
     let mut found = Vec::new();
     for code in [CALL_GET_VP_REGISTERS, CALL_SET_VP_REGISTERS] {
         let Ok(entry) = handler(table, code) else {
@@ -1255,11 +1278,11 @@ mod tests {
                 // the build's own.
                 if let Some((input, element)) = input_layout(code)
                     && entry.handler != table[0].handler
-                    && (entry.input, entry.input_element) != (input, element)
+                    && (entry.input_size, entry.input_element_size) != (input, element)
                 {
                     failures.push(format!(
                         "{path}: {code:#x} input {:#x}+{:#x} in the table, {input:#x}+{element:#x} decoded",
-                        entry.input, entry.input_element
+                        entry.input_size, entry.input_element_size
                     ));
                 }
             }

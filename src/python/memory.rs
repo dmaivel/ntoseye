@@ -6,6 +6,7 @@ use pyo3::types::PyBytes;
 use super::command::admit;
 use super::context::Space;
 use super::handle::Owner;
+use super::record::Typed;
 use super::symbols::load_scope_symbols;
 use super::{MAX_READ_LEN, err, raise};
 use crate::error::Error;
@@ -16,7 +17,6 @@ use crate::target::MemoryKind;
 use crate::target::mm::VtopDetail;
 use crate::target::{CODE_BITNESS_X86, StringDescriptor};
 use crate::types::VirtAddr;
-use crate::view::record::Typed;
 
 /// A guest address space: `dbg.memory` (kernel), `proc.memory`, `cpu.memory`,
 /// or `dbg.physical`.

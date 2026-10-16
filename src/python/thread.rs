@@ -16,8 +16,9 @@ use super::iter::{CpuIterator, NameIterator, ThreadIterator};
 use super::memory::Memory;
 use super::process::Process;
 use super::record::PlainDict;
+use super::record::Typed;
 use super::types::{Struct, enum_value};
-use super::{err, view_dict};
+use super::{err, plain_dict};
 use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::guest::ProcessInfo;
 use crate::session::context::windows_thread_on_backend_thread;
@@ -28,7 +29,6 @@ use crate::target::{SelectedFrame, ServedVp, ThreadInfo, cpu};
 use crate::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current};
 use crate::types::VirtAddr;
 use crate::unwind::{RecoveredFrame, SavedVtl, StackFrame, halted_in_windows_hypervisor};
-use crate::view::record::Typed;
 
 /// A collection of threads: `dbg.threads` (all threads) or `proc.threads`.
 #[pyclass(module = "ntoseye")]
@@ -311,7 +311,7 @@ impl Thread {
     /// The thread as a plain `dict`.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
-        view_dict(py, &self.info)
+        plain_dict(py, &self.info)
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -1020,7 +1020,7 @@ impl Cpu {
 
     /// The processor as a plain `dict`.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
-        view_dict(py, &self.current_info(py)?)
+        plain_dict(py, &self.current_info(py)?)
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {

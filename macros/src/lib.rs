@@ -1,6 +1,6 @@
 //! Procedural macros for ntoseye. They expand to paths inside the `ntoseye`
-//! crate (`crate::view::record`, `crate::python::record`, `crate::repl`,
-//! `crate::python::command`), so only that crate can use them.
+//! crate (`crate::python::record`, `crate::repl`, `crate::python::command`),
+//! so only that crate can use them.
 
 mod command;
 mod record;
@@ -13,8 +13,8 @@ use proc_macro::TokenStream;
 /// (adding `Debug` and `Clone` derives if missing) and, under the `python`
 /// feature, emits:
 ///
-/// - `impl<M> ToView<M>` (`crate::view::record`), which renders the fields in
-///   order as a `View::Shaped`;
+/// - `impl<M> ToValue<M>` (`crate::python::record`), which renders the
+///   fields in order as a `Value::Record`;
 /// - `<Name>Py`, a frozen `ntoseye.<Name>` class extending `BaseRecord`, with
 ///   a typed property per field (the struct's and fields' doc comments become
 ///   its docstrings), which `build.rs` exports from the SDK module;

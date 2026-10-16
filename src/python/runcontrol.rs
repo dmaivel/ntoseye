@@ -12,12 +12,12 @@ use pyo3::prelude::*;
 
 use super::command::admit;
 use super::handle::Debugger;
+use super::record::{ToValue, Typed};
 use super::{err, raise, timeout_arg};
 use crate::error::Result;
 use crate::output;
 use crate::session::effects::Effects;
 use crate::session::{Cancel, CancelBehavior, Motion, RunOutcome, Session, Stop, StopKind};
-use crate::view::record::{ToView, Typed};
 
 thread_local! {
     static IN_CONDITION: Cell<bool> = const { Cell::new(false) };
@@ -232,7 +232,7 @@ pub fn run_motion_to_stop<'py>(
 
 /// A `#[command(kind = Run)]` method whose operation drives the run itself
 /// (`trace_calls`): `timeout` (seconds) halts it where it got to.
-pub fn run_cancellable<'py, T: ToView + Send>(
+pub fn run_cancellable<'py, T: ToValue + Send>(
     py: Python<'py>,
     dbg: &Debugger,
     operation: &str,

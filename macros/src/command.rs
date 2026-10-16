@@ -1456,7 +1456,7 @@ impl Method<'_> {
                         &self,
                         py: pyo3::Python<'py>,
                         #(#params),*
-                    ) -> pyo3::PyResult<crate::view::record::Typed<'py, #output>> {
+                    ) -> pyo3::PyResult<crate::python::record::Typed<'py, #output>> {
                         #(#bindings)*
                         #runcontrol::#driver(py, self, #operation, #effects, timeout, #closure)
                     }
@@ -1473,7 +1473,7 @@ impl Method<'_> {
                     &self,
                     py: pyo3::Python<'py>,
                     #(#params),*
-                ) -> pyo3::PyResult<crate::view::record::Typed<'py, #output>> {
+                ) -> pyo3::PyResult<crate::python::record::Typed<'py, #output>> {
                     #(#bindings)*
                     #command::run(py, self, #operation, #effects, move |__session| {
                         #body
