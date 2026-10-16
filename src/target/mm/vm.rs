@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use super::{
-    ProcessMemoryUsage, SystemMemorySummary, VmCounter, VmDetail, VmPageFileDetail, VmPoolDetail,
-    VmPteDetail, find_mi_state_fields,
+    ProcessMemoryUsage, SystemMemorySummary, VmCounter, VmDetail, VmPoolDetail, VmPteDetail,
+    find_mi_state_fields,
 };
 use crate::debugger_data::{
     DebuggerDataBlock, MetadataSource, MetadataValue, read_counter_from_getter,
@@ -175,24 +175,22 @@ impl Target {
             })
             .collect(),
         };
-        let page_files = VmPageFileDetail {
-            counters: [
-                ("MmNumberOfPagingFiles", "number of paging files", ""),
-                (
-                    "MmTotalPagesForPagingFile",
-                    "pages for paging file",
-                    "pages",
-                ),
-                ("MmFreePages", "free paging pages", "pages"),
-            ]
-            .into_iter()
-            .map(|(symbol, name, unit)| {
-                let mut counter = named_counter(self, symbol, unit);
-                counter.name = name.to_string();
-                counter
-            })
-            .collect(),
-        };
+        let page_files = [
+            ("MmNumberOfPagingFiles", "number of paging files", ""),
+            (
+                "MmTotalPagesForPagingFile",
+                "pages for paging file",
+                "pages",
+            ),
+            ("MmFreePages", "free paging pages", "pages"),
+        ]
+        .into_iter()
+        .map(|(symbol, name, unit)| {
+            let mut counter = named_counter(self, symbol, unit);
+            counter.name = name.to_string();
+            counter
+        })
+        .collect();
         Ok(VmDetail {
             system,
             pool,

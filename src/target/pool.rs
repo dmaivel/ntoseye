@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
+use ntoseye_macros::record;
+
 use crate::error::{Error, Result};
 use crate::layout::{FieldInfo, ParsedType, TypeInfo, le_uint};
 use crate::memory::{MemoryOps, PAGE_SIZE};
@@ -142,15 +144,31 @@ const POOL_TABLE_READ_CHUNK: usize = 16 * 1024 * 1024;
 const BIG_POOL_ENTRY_CHUNK: u64 = 1024;
 const BIG_POOL_FLAG_MASK: u16 = 0x0fff;
 
+/// The pool usage of one tag (`!poolused`), summed over the processors'
+/// tracker tables and the big-pool table. A value is `None` if no source
+/// has an entry for that pool.
+#[record(impl)]
 #[derive(Clone, Debug)]
 pub struct PoolUsageRow {
+    #[record(hex)]
     pub tag: u32,
     pub nonpaged_allocs: Option<i64>,
     pub nonpaged_frees: Option<i64>,
+    /// In bytes.
     pub nonpaged_bytes: Option<i64>,
     pub paged_allocs: Option<i64>,
     pub paged_frees: Option<i64>,
+    /// In bytes.
     pub paged_bytes: Option<i64>,
+}
+
+#[record]
+impl PoolUsageRow {
+    /// The tag as its four characters.
+    #[record(getter)]
+    pub fn tag_name(&self) -> String {
+        tag_string(self.tag)
+    }
 }
 
 impl PoolUsageRow {

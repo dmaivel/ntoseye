@@ -1,5 +1,7 @@
 use std::fmt;
 use std::ops::{Add, AddAssign, Sub, SubAssign};
+
+use ntoseye_macros::record;
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 /// x64 page-table entry physical-address field: bits 51:12 (MAXPHYADDR = 52).
@@ -220,17 +222,26 @@ pub struct PageTableEntry(pub u64);
 /// [`PageTableEntry::attributes`]. For an entry pointing at a lower table,
 /// `writable`, `user`, and `nx` are the restrictions it places on what lies
 /// below.
+#[record]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PteAttributes {
     pub present: bool,
+    /// Whether the entry maps a large page instead of pointing to a lower
+    /// table.
     pub large_page: bool,
     pub writable: bool,
     pub user: bool,
     pub nx: bool,
+    /// The frame the entry points at.
+    #[record(hex)]
     pub pfn: u64,
+    /// WinDbg's flag string for the entry.
     pub flags: String,
 }
 
+/// A page-table level, by WinDbg's name for its entries: `PXE`, `PPE`,
+/// `PDE`, or `PTE`.
+#[record]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PageTableLevel {
     Pxe,
@@ -248,6 +259,12 @@ impl PageTableLevel {
             Self::Pde => "PDE",
             Self::Pte => "PTE",
         }
+    }
+}
+
+impl fmt::Display for PageTableLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
     }
 }
 

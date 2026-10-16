@@ -9,7 +9,6 @@ pub mod fs;
 pub mod heap;
 pub mod hypervisor;
 pub mod meta;
-pub mod mm;
 pub mod module;
 pub mod object;
 pub mod pnp;

@@ -13,6 +13,7 @@ use crate::layout::utf16le_lossy;
 use crate::memory::pattern_offsets;
 use crate::session::Session;
 use crate::session::effects::{Effects, TargetScope, Writes};
+use crate::target::mm::VtopDetail;
 use crate::target::{CODE_BITNESS_X86, StringDescriptor};
 use crate::target::{MAX_SEARCH_BYTES, MemoryKind, MemorySearchMatch};
 use crate::types::VirtAddr;
@@ -340,36 +341,17 @@ impl Memory {
         })
     }
 
-    /// Get the full page-table walk and the final translation (`!pte` + `!vtop`).
-    fn translation<'py>(
-        &self,
-        py: Python<'py>,
-        addr: u64,
-    ) -> PyResult<Typed<'py, view::mm::AddressTranslation>> {
+    /// Get the page-table walk and the final translation of `addr` in this
+    /// space's page tables (`!vtop` with this space's DTB). It works in every
+    /// virtual space, VTL1 and roots outside NT included.
+    fn translation<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Typed<'py, VtopDetail>> {
         self.space.require_virtual()?;
         let detail = self.owner.with_in(py, &self.space.context(), |session| {
             require_page_tables(session)?;
             let dtb = self.space.dtb(&session.target)?;
             session.target.vtop(dtb, VirtAddr(addr)).map_err(err)
         })?;
-        Typed::new(py, view::mm::vtop(&detail))
-    }
-
-    /// Map a physical address back to virtual addresses with the page tables of
-    /// this space (`!ptov`).
-    fn ptov<'py>(
-        &self,
-        py: Python<'py>,
-        physical: u64,
-    ) -> PyResult<Typed<'py, view::mm::ReverseTranslation>> {
-        self.space.require_virtual()?;
-        self.space.require_nt("ptov")?;
-        let context = self.space.context();
-        let detail = self.owner.with_in(py, &context, |session| {
-            require_page_tables(session)?;
-            session.target.ptov(physical).map_err(err)
-        })?;
-        Typed::new(py, view::mm::ptov(&detail))
+        Typed::new(py, detail)
     }
 
     /// The directory-table base that this space uses. A user-mode minidump

@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use super::{LookasideDetail, LookasideListsDetail};
+use super::{LookasideDetail, LookasideListsDetail, PoolTag};
 use crate::error::{Error, Result};
 use crate::layout::TypeInfo;
 use crate::memory::MemoryOps;
@@ -28,7 +28,9 @@ impl Target {
             None => DiagnosticValue::unavailable(format!("{name} unavailable")),
         };
         let tag = match field("Tag") {
-            DiagnosticValue::Available(value) => DiagnosticValue::Available(value as u32),
+            DiagnosticValue::Available(value) => DiagnosticValue::Available(PoolTag {
+                value: value as u32,
+            }),
             DiagnosticValue::Unavailable(error) => DiagnosticValue::unavailable(error),
         };
         Ok(LookasideDetail {

@@ -10,6 +10,7 @@ use pyo3::prelude::*;
 #[cfg(feature = "python-stubs")]
 use pyo3::{PyTypeInfo, type_hint_identifier, type_hint_subscript};
 
+use super::command::PyArg;
 use super::module::Device;
 use super::process::Process;
 use super::thread::{Cpu, Thread};
@@ -20,6 +21,7 @@ use crate::kd::KdMemorySource;
 #[cfg(feature = "python-stubs")]
 use crate::session::driver::StopPy;
 use crate::session::{StepMode, WalkUntil};
+use crate::target::mm::{PoolType, PoolUsageSort};
 
 /// A string argument restricted to fixed spellings, typed as
 /// `typing.Literal[...]` in the stubs.
@@ -114,6 +116,37 @@ literal_arg! {
         "second_chance" => ExceptionPolicyMode::SecondChance,
         "notify" => ExceptionPolicyMode::Notify,
         "ignore" => ExceptionPolicyMode::Ignore,
+    }
+}
+
+literal_arg! {
+    /// `Inspect.pool_usage(sort=...)`: `!poolused`'s order.
+    PoolSort(PoolUsageSort) {
+        "tag" => PoolUsageSort::Tag,
+        "nonpaged" => PoolUsageSort::NonPagedBytes,
+        "paged" => PoolUsageSort::PagedBytes,
+    }
+}
+
+impl PyArg for PoolUsageSort {
+    type Py = PoolSort;
+    fn from_py(value: PoolSort) -> Self {
+        value.0
+    }
+}
+
+literal_arg! {
+    /// `Inspect.pool_find(pool_type=...)`: the pool `!poolfind` searches.
+    PoolKind(PoolType) {
+        "nonpaged" => PoolType::NonPaged,
+        "paged" => PoolType::Paged,
+    }
+}
+
+impl PyArg for PoolType {
+    type Py = PoolKind;
+    fn from_py(value: PoolKind) -> Self {
+        value.0
     }
 }
 

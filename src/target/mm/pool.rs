@@ -150,12 +150,12 @@ impl Target {
     }
 
     /// Aggregate bounded pool tracker and big-page usage rows, filtering and
-    /// sorting them before returning the neutral result.
+    /// sorting them before returning the neutral result. The sort picks the
+    /// rows kept when more tags match than the result holds.
     pub fn pool_usage(
         &self,
         sort: PoolUsageSort,
         tag_filter: Option<&str>,
-        include_counts: bool,
     ) -> Result<PoolUsageDetail> {
         let summary = collect_pool_usage(self);
         let mut rows = summary
@@ -189,7 +189,6 @@ impl Target {
             big_status: summary.big.status,
             sort,
             tag_filter: tag_filter.map(str::to_string),
-            include_counts,
         })
     }
 

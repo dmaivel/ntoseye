@@ -4,14 +4,16 @@
 //! inspectors and private helpers for one area of the memory manager.
 
 use std::collections::HashSet;
+use std::fmt;
+
+use ntoseye_macros::record;
 
 use super::{DiagnosticMetric, DiagnosticValue, Target};
 use crate::guest::ProcessInfo;
 use crate::layout::{ParsedType, TypeInfo};
 use crate::memory::PAGE_SIZE;
-use crate::target::pool::{PoolUsageRow, kernel_symbol_address, read_pool_field};
-use crate::types::{Dtb, PageTableEntry, PageTableLevel, PteAttributes, VirtAddr};
-use ntoseye_macros::record;
+use crate::target::pool::{PoolUsageRow, kernel_symbol_address, read_pool_field, tag_string};
+use crate::types::{Dtb, PageTableLevel, PteAttributes, VirtAddr};
 
 mod lookaside;
 mod mdl;
@@ -29,52 +31,64 @@ pub use vprot::{
 
 const MAX_MI_FIELDS: usize = 64;
 
-/// A system-wide or page-file counter shown by `!vm`.
+/// A named memory-manager counter (`!vm`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct VmCounter {
     pub name: String,
     pub value: DiagnosticMetric<u64>,
+    /// The unit of `value`: `pages`, `bytes`, or empty for a plain count.
     pub unit: &'static str,
 }
 
-/// Pool counters and symbol-backed pool fields shown by `!vm`.
+/// Pool counters and the pool fields of `MiState` (`!vm`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct VmPoolDetail {
     pub nonpaged_pool_bytes: DiagnosticMetric<u64>,
     pub nonpaged_pool_maximum: DiagnosticMetric<u64>,
     pub paged_pool_pages: DiagnosticMetric<u64>,
+    /// The symbol-backed pool fields of `MiState`.
     pub fields: Vec<VmCounter>,
 }
 
-/// System PTE counters shown by `!vm`.
+/// System PTE counters (`!vm`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct VmPteDetail {
     pub counters: Vec<VmCounter>,
 }
 
-/// Paging-file counters shown by `!vm`.
-#[derive(Debug, Clone)]
-pub struct VmPageFileDetail {
-    pub counters: Vec<VmCounter>,
-}
-
-/// Complete bounded `!vm` result. `system` retains the existing memory summary,
-/// while pool/PTE/page-file counters carry their individual source and failure.
+/// Virtual-memory statistics (`!vm`). Each counter carries its own source
+/// and read failure, so one that cannot be read leaves the others.
+#[record]
 #[derive(Debug, Clone)]
 pub struct VmDetail {
+    /// The system memory counters and, when requested, per-process usage.
     pub system: SystemMemorySummary,
     pub pool: VmPoolDetail,
     pub pte: VmPteDetail,
-    pub page_files: VmPageFileDetail,
+    /// Paging-file counters.
+    pub page_files: Vec<VmCounter>,
+    /// Whether per-process usage was requested.
     pub include_processes: bool,
 }
 
-/// `!pfn` input selector. A physical-address selector is shifted by the page
-/// size before indexing the PFN database.
+/// What `!pfn` decodes: a page-frame number, or the frame of a physical
+/// address (shifted by the page size before indexing the PFN database).
+#[record(tagged)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PfnSelector {
-    Pfn(u64),
-    PhysicalAddress(u64),
+    Pfn(
+        /// The page-frame number or physical address given.
+        #[record(hex, rename = "value")]
+        u64,
+    ),
+    PhysicalAddress(
+        /// The page-frame number or physical address given.
+        #[record(hex, rename = "value")]
+        u64,
+    ),
 }
 
 impl PfnSelector {
@@ -93,81 +107,168 @@ impl PfnSelector {
     }
 }
 
-/// A decoded `_MMPFN` record. A member the layout lacks is decoded from the
-/// record's raw bits at its known offset, so only `page_color`, which has no
-/// such fallback, can be unavailable. Union members the page's state does
-/// not use are `None`.
+/// The `PageLocation` of a PFN, which is the list that holds the page.
+#[record(impl)]
+#[derive(Debug, Clone, Copy)]
+pub struct PageLocation {
+    pub value: u8,
+}
+
+#[record]
+impl PageLocation {
+    /// The `_MMLISTS` name (`ActiveAndValid`, `StandbyPageList`, ...).
+    #[record(getter)]
+    pub fn name(&self) -> &'static str {
+        match self.value & 0x7 {
+            0 => "ZeroedPageList",
+            1 => "FreePageList",
+            2 => "StandbyPageList",
+            3 => "ModifiedPageList",
+            4 => "ModifiedNoWritePageList",
+            5 => "BadPageList",
+            6 => "ActiveAndValid",
+            _ => "TransitionPage",
+        }
+    }
+}
+
+/// The `CacheAttribute` of a PFN.
+#[record(impl)]
+#[derive(Debug, Clone, Copy)]
+pub struct CacheAttribute {
+    pub value: u8,
+}
+
+#[record]
+impl CacheAttribute {
+    /// The `_MI_PFN_CACHE_ATTRIBUTE` name (`MmCached`, ...).
+    #[record(getter)]
+    pub fn name(&self) -> &'static str {
+        match self.value & 0x3 {
+            0 => "MmNonCached",
+            1 => "MmCached",
+            2 => "MmWriteCombined",
+            _ => "MmNotMapped",
+        }
+    }
+}
+
+/// A decoded `_MMPFN` record (`!pfn`). A member the layout lacks is decoded
+/// from the record's raw bits at its known offset, so only `page_color`,
+/// which has no such fallback, can be unavailable. Union members that the
+/// page state does not use are `None`: the list links when the page is not
+/// on a list, `share_count` and `ws_index` when the page is not active, and
+/// `event` when the page is not in transition.
+#[record]
 #[derive(Debug, Clone)]
 pub struct PfnDetail {
     pub selector: PfnSelector,
+    /// The page frame number.
+    #[record(hex)]
     pub pfn: u64,
+    /// The `_MMPFN` record's address.
     pub record: VirtAddr,
+    /// The requested physical address, for a physical-address selector.
+    #[record(hex)]
     pub physical_address: Option<u64>,
     pub pte_address: VirtAddr,
+    #[record(hex)]
     pub original_pte: u64,
     pub reference_count: u64,
+    #[record(hex)]
     pub flink: Option<u64>,
+    #[record(hex)]
     pub blink: Option<u64>,
+    #[record(hex)]
     pub node_flink_low: Option<u64>,
+    #[record(hex)]
     pub node_blink_low: Option<u64>,
     pub share_count: Option<u64>,
+    /// The working-set index.
+    #[record(hex)]
     pub ws_index: Option<u64>,
+    #[record(hex)]
     pub event: Option<u64>,
     pub used_entry_count: u64,
+    /// Not available if the `_MMPFN` of this build has no `PageColor`.
     pub page_color: DiagnosticValue<u64>,
+    /// The PFN of the page table that holds the PTE of the page.
+    #[record(hex)]
     pub pte_frame: u64,
-    pub page_location: u8,
+    pub page_location: PageLocation,
     pub modified: bool,
-    pub cache_attribute: u8,
+    pub cache_attribute: CacheAttribute,
     pub priority: u8,
 }
 
-/// One page-table level reached by [`Target::vtop`].
+/// One page-table level of a walk (`!pte`, `!vtop`): where its entry is,
+/// the entry as read, and the entry decoded at its level.
+#[record]
 #[derive(Debug, Clone)]
-pub struct VtopLevel {
+pub struct PteLevel {
     pub level: PageTableLevel,
+    /// The entry's address: virtual through NT's self-map, physical in an
+    /// explicit walk.
     pub address: VirtAddr,
+    /// The entry as read.
+    #[record(hex)]
     pub value: u64,
     pub attributes: PteAttributes,
 }
 
-/// Explicit page-table translation, including every readable level and the
-/// final physical address (when present).
+/// A virtual address translated through the page tables of a DTB
+/// (`!vtop`), with every level read.
+#[record]
 #[derive(Debug, Clone)]
 pub struct VtopDetail {
     pub address: VirtAddr,
+    #[record(hex)]
     pub dtb: Dtb,
-    pub levels: Vec<VtopLevel>,
+    /// The levels read, top down.
+    pub levels: Vec<PteLevel>,
+    /// The physical address; `None` when the address is not mapped.
+    #[record(hex)]
     pub physical: Option<u64>,
+    /// Whether a large page maps it.
     pub large: bool,
-    /// The leaf was a transition PTE: `physical` is a real frame the guest
-    /// still holds, but nothing maps it here and it cannot be written.
+    /// Whether the leaf is a transition PTE. If true, `physical` is a frame
+    /// that the guest still holds, but nothing maps it here and it cannot be
+    /// written.
     pub transition: bool,
-    /// Nothing maps the page here; `physical` is the frame its section PTE
-    /// holds, a page of a shared image or file view the process has not
-    /// touched. It cannot be written either.
+    /// Whether nothing maps the page here. If true, `physical` is the frame
+    /// that the page's section PTE holds, for a page of a shared image or
+    /// file view that is not touched yet. It cannot be written either.
     pub section: bool,
 }
 
-/// One reverse page-table mapping found by `!ptov`.
+/// A virtual address that maps a physical page (`!ptov`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct PtovMapping {
     pub virtual_address: VirtAddr,
+    /// Whether a large page maps it.
     pub large: bool,
 }
 
-/// Bounded reverse page-table walk result.
+/// The virtual addresses that map a physical address (`!ptov`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct PtovDetail {
+    #[record(hex)]
     pub physical: u64,
+    #[record(hex)]
     pub dtb: Dtb,
     pub mappings: Vec<PtovMapping>,
+    /// The number of page-table pages that the walk read.
     pub table_pages: usize,
+    /// Whether the walk stopped at its limit before the end.
     pub bounded: bool,
+    /// Whether an interrupt request stopped the walk.
     pub interrupted: bool,
 }
 
-/// Classification used by `!poolfind` and pool-page results.
+/// A pool: `NonPagedPool` or `PagedPool`.
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolType {
     NonPaged,
@@ -183,95 +284,161 @@ impl PoolType {
     }
 }
 
-/// A normal `_POOL_HEADER` block in a page.
+impl fmt::Display for PoolType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// A `_POOL_HEADER` block in a pool page.
+#[record]
 #[derive(Debug, Clone)]
 pub struct PoolBlockDetail {
+    /// The pool header's address.
     pub header: VirtAddr,
+    /// The address of the allocation, immediately after the header.
     pub body: VirtAddr,
+    /// The block size in bytes, with the header.
     pub size: u64,
+    /// The previous block's size in bytes.
     pub previous_size: u64,
+    /// The header's `PoolType` bits.
     pub pool_type: u8,
+    #[record(hex)]
     pub tag: u32,
+    /// The tag as its four characters.
     pub tag_name: String,
     pub allocated: bool,
+    /// Whether the block holds the requested address.
     pub marked: bool,
+    /// `allocated`, `free`, or a description of what is wrong.
     pub state: String,
+    /// The offset of the requested address in the block, if the block holds it.
+    #[record(hex)]
     pub target_offset: Option<u64>,
 }
 
-/// Large allocation represented by `PoolBigPageTable`.
+/// A large allocation from `PoolBigPageTable`.
+#[record]
 #[derive(Debug, Clone)]
 pub struct BigPoolDetail {
+    /// The allocation's address.
     pub address: VirtAddr,
+    /// The requested address.
     pub target: VirtAddr,
+    /// The allocation size in bytes.
     pub size: u64,
+    /// The offset of the requested address in the allocation.
+    #[record(hex)]
     pub offset: u64,
+    #[record(hex)]
     pub tag: u32,
+    /// The tag as its four characters.
     pub tag_name: String,
+    /// The address of the `PoolBigPageTable` entry.
     pub entry: VirtAddr,
+    /// The entry's index in `PoolBigPageTable`.
     pub index: u64,
     pub nonpaged: bool,
+    #[record(hex)]
     pub pattern: u8,
+    #[record(hex)]
     pub pool_flags: u16,
     pub slush_size: u16,
 }
 
-/// Bounded result for the pool page containing an address.
+/// The pool page holding an address (`!pool`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct PoolPageDetail {
+    /// The requested address.
     pub target: VirtAddr,
+    /// The page's address.
     pub page: VirtAddr,
+    /// The layout of the page: its pool kind, or the reason that the page
+    /// could not be decoded.
     pub page_kind: String,
+    /// The pool range holding the page, when known.
     pub region: Option<PoolRegionDetail>,
     pub blocks: Vec<PoolBlockDetail>,
+    /// The index in `blocks` of the block that holds the requested address.
     pub target_index: Option<usize>,
+    /// The large allocation that holds the address, if the address is in one.
     pub big: Option<BigPoolDetail>,
+    /// Set if the page belongs to the segment heap, whose blocks have no
+    /// pool headers.
     pub segment_heap_hint: Option<String>,
+    /// The nearest symbol to the address, if one resolves.
     pub near_symbol: Option<String>,
+    /// The reason that no blocks were decoded, if none were.
     pub message: Option<String>,
 }
 
-/// `!poolval`: the blocks of one pool page and the first inconsistency
-/// among their headers, `None` when the page is consistent.
+/// The blocks of the pool page that holds an address, with a check of
+/// header consistency (`!poolval`).
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct PoolValidationDetail {
     pub address: VirtAddr,
+    /// The page's address.
     pub page: VirtAddr,
+    /// The pool range holding the page, when known.
     pub region: Option<PoolRegionDetail>,
     /// `chained` (the classic pool) or `segment heap`.
     pub layout: String,
     pub blocks: Vec<PoolBlockDetail>,
+    /// The first inconsistency found.
     pub problem: Option<PoolProblem>,
 }
 
-/// A pool header inconsistency: the header it is found at and what is wrong.
+#[record]
+impl PoolValidationDetail {
+    /// Whether the headers are consistent (`problem` is `None`).
+    #[record(getter)]
+    pub fn valid(&self) -> bool {
+        self.problem.is_none()
+    }
+}
+
+/// A pool header inconsistency.
+#[record]
 #[derive(Debug, Clone)]
 pub struct PoolProblem {
+    /// The header where the problem is.
     pub header: VirtAddr,
+    /// What is wrong.
     pub message: String,
 }
 
-/// Virtual pool range metadata attached to a pool-page result.
+/// A virtual pool range.
+#[record]
 #[derive(Debug, Clone)]
 pub struct PoolRegionDetail {
     pub name: String,
     pub start: VirtAddr,
+    /// The end of the range (exclusive).
     pub end: VirtAddr,
 }
 
-/// Aggregated tracker rows returned by `!poolused`.
+/// Pool usage by tag, from the pool tracker (`!poolused`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct PoolUsageDetail {
     pub rows: Vec<PoolUsageRow>,
+    /// Whether more tags matched than are listed.
     pub rows_truncated: bool,
+    /// The read status of the pool tracker table.
     pub tracker_status: String,
+    /// The read status of the big-pool table.
     pub big_status: String,
     pub sort: PoolUsageSort,
+    /// The tag pattern that filters the rows, if any.
     pub tag_filter: Option<String>,
-    pub include_counts: bool,
 }
 
-/// Sort order for [`Target::pool_usage`].
+/// The order of `!poolused`'s rows: `tag`, `nonpaged_bytes`, or
+/// `paged_bytes` (largest first).
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolUsageSort {
     Tag,
@@ -279,66 +446,104 @@ pub enum PoolUsageSort {
     PagedBytes,
 }
 
-impl PoolUsageSort {
-    pub fn name(self) -> &'static str {
-        match self {
+impl fmt::Display for PoolUsageSort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
             Self::Tag => "tag",
             Self::NonPagedBytes => "nonpaged_bytes",
             Self::PagedBytes => "paged_bytes",
-        }
+        })
     }
 }
 
-/// One match found by the bounded `!poolfind` scan.
+/// A pool allocation with the search tag (`!poolfind`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct PoolFindMatch {
+    /// Where the search found the allocation: a pool range scan or the big-pool
+    /// table.
     pub source: String,
     pub address: VirtAddr,
+    /// Size in bytes.
     pub size: u64,
+    #[record(hex)]
     pub tag: u32,
+    /// The tag as its four characters.
     pub tag_name: String,
     pub allocated: bool,
     pub state: String,
+    /// The pool, when known.
     pub pool_type: Option<PoolType>,
+    /// The `PoolBigPageTable` entry, for a big-pool match.
     pub table_entry: Option<VirtAddr>,
+    /// The `PoolBigPageTable` index, for a big-pool match.
     pub index: Option<u64>,
 }
 
-/// Bounded pool-tag scan result, including scan status rather than printing it.
+/// A pool-tag search (`!poolfind`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct PoolFindDetail {
+    /// The searched tag.
     pub tag: String,
+    /// The pool that the search was limited to, if any.
     pub pool_type: Option<PoolType>,
     pub matches: Vec<PoolFindMatch>,
+    /// The number of matches found, including those past the listing limit.
     pub found: usize,
     pub ranges: Vec<PoolFindRange>,
+    /// The read status of the big-pool table, if the search included it.
     pub big_status: Option<String>,
+    /// Whether more matches were found than are listed.
     pub truncated: bool,
+    /// Whether an interrupt request stopped the search.
     pub interrupted: bool,
 }
 
-/// One virtual pool range's scan status.
+/// How far `!poolfind` scanned one virtual pool range.
+#[record]
 #[derive(Debug, Clone)]
 pub struct PoolFindRange {
     pub name: String,
     pub start: VirtAddr,
+    /// The end of the range (exclusive).
     pub end: VirtAddr,
-    /// Pages the range spans, mapped or not.
+    /// The number of pages in the range, mapped or not.
     pub pages: u64,
-    /// Mapped pages read.
+    /// The number of mapped pages that the scan read.
     pub scanned_pages: u64,
-    /// The mapped page the scan stopped at, unread, when the match bound or
-    /// an interrupt ended it early.
+    /// The mapped page where the scan stopped, if the match limit or an
+    /// interrupt stopped it early. The scan did not read this page.
     pub stopped_at: Option<VirtAddr>,
 }
 
-/// A decoded `_GENERAL_LOOKASIDE` record. Each counter is independently
-/// diagnostic because stripped PDBs commonly omit one or more members.
+/// A pool tag.
+#[record(impl)]
+#[derive(Debug, Clone, Copy)]
+pub struct PoolTag {
+    #[record(hex)]
+    pub value: u32,
+}
+
+#[record]
+impl PoolTag {
+    /// The tag as its four characters.
+    #[record(getter)]
+    pub fn name(&self) -> String {
+        tag_string(self.value)
+    }
+}
+
+/// A decoded `_GENERAL_LOOKASIDE` list (`!lookaside`). Each counter is
+/// read on its own, because stripped PDBs often omit some members.
+#[record]
 #[derive(Debug, Clone)]
 pub struct LookasideDetail {
     pub address: VirtAddr,
+    /// The position in the list walk.
     pub index: usize,
-    pub tag: DiagnosticValue<u32>,
+    pub tag: DiagnosticValue<PoolTag>,
+    /// The allocation size in bytes.
     pub size: DiagnosticValue<u64>,
     pub depth: DiagnosticValue<u64>,
     pub total_allocates: DiagnosticValue<u64>,
@@ -346,103 +551,145 @@ pub struct LookasideDetail {
     pub allocate_misses: DiagnosticValue<u64>,
 }
 
-/// Both exported lookaside-list roots and their bounded records.
+/// The system lookaside lists (`!lookaside`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct LookasideListsDetail {
     pub records: Vec<LookasideDetail>,
     pub nonpaged_count: usize,
     pub paged_count: usize,
+    /// How the nonpaged list walk ended.
     pub nonpaged_termination: String,
+    /// How the paged list walk ended.
     pub paged_termination: String,
+    /// Whether an interrupt request stopped the walk.
     pub interrupted: bool,
+    /// Whether the walk stopped at its limit before the end.
     pub truncated: bool,
 }
 
-/// A decoded `_MDL` header and the page-frame array that follows it (`!mdl`).
+/// What `!lookaside` shows: one list it was given, or every system list.
+#[record]
+#[derive(Debug, Clone)]
+pub enum Lookaside {
+    List(LookasideDetail),
+    Lists(LookasideListsDetail),
+}
+
+/// A decoded `_MDL` header and the page-frame array that follows it
+/// (`!mdl`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct MdlDetail {
     pub address: VirtAddr,
     pub next: VirtAddr,
-    /// `Size`: bytes of header plus PFN array the allocation holds.
+    /// The size in bytes of the header and the PFN array in the allocation.
     pub size: u16,
+    #[record(hex)]
     pub flags: u16,
-    /// `MDL_*` names of the set `flags` bits, low bit first.
+    /// The `MDL_*` names of the set `flags` bits, low bit first.
     pub flag_names: Vec<&'static str>,
     pub process: VirtAddr,
     pub mapped_system_va: VirtAddr,
     pub start_va: VirtAddr,
     pub byte_count: u32,
+    #[record(hex)]
     pub byte_offset: u32,
-    /// Pages the described buffer spans (`ADDRESS_AND_SIZE_TO_SPAN_PAGES`).
+    /// The number of pages that the described buffer spans
+    /// (`ADDRESS_AND_SIZE_TO_SPAN_PAGES`).
     pub spanned_pages: u64,
-    /// PFN slots `Size` leaves after the header.
+    /// The number of PFN slots that `size` leaves after the header.
     pub capacity: u64,
-    /// Where the PFN array starts (just past the header).
+    /// The start of the PFN array, immediately after the header.
     pub pfn_array: VirtAddr,
+    #[record(hex)]
     pub pfns: Vec<u64>,
-    /// Fewer PFNs are listed than the buffer spans: a smaller count was
-    /// requested.
+    /// Whether the list has fewer PFNs than the buffer spans, which happens
+    /// when a smaller count was requested.
     pub truncated: bool,
 }
 
-/// A run of free system PTEs: clear bits in an allocation bitmap.
+/// A run of free system PTEs, which is a sequence of clear bits in an
+/// allocation bitmap.
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SystemPteRun {
-    /// Address of the run's first PTE.
+    /// The address of the first PTE in the run.
     pub pte: VirtAddr,
-    /// Virtual address that PTE maps.
+    /// The virtual address that this PTE maps, if `MmPteBase` is known.
     pub va: Option<VirtAddr>,
-    /// Length in PTEs.
+    /// The length in PTEs.
     pub ptes: u64,
 }
 
 /// One `_MI_SYSTEM_PTE_TYPE` bitmap allocator (`!sysptes`). Counts are in
 /// PTEs; the bitmap may cover several PTEs per bit (`ptes_per_bit`).
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct SystemPteTypeDetail {
     /// The `MiState` path of the allocator, e.g. `Vs.SystemPteInfo`.
     pub name: String,
     pub address: VirtAddr,
-    /// `VaType`'s `_MI_SYSTEM_VA_TYPE` name, without the `MiVa` prefix.
+    /// The `_MI_SYSTEM_VA_TYPE` name, without the `MiVa` prefix.
     pub va_type: Option<String>,
+    #[record(hex)]
     pub flags: u32,
+    /// The number of PTEs that each bitmap bit covers.
     pub ptes_per_bit: u64,
     pub base_pte: VirtAddr,
-    /// Virtual address `base_pte` maps; `None` without `MmPteBase`.
+    /// The virtual address that `base_pte` maps. `None` without `MmPteBase`.
     pub base_va: Option<VirtAddr>,
     pub bitmap: VirtAddr,
     pub bitmap_bits: u64,
-    /// `TotalSystemPtes`: PTEs made available so far; the rest of the
-    /// bitmap is reserved (its bits set) until the allocator expands.
+    /// `TotalSystemPtes`, the number of PTEs made available so far; the rest
+    /// of the bitmap is reserved (its bits set) until the allocator expands.
     pub total: u64,
     /// `TotalFreeSystemPtes`.
     pub free: u64,
     pub failures: u32,
-    /// Free PTEs counted from the bitmap's clear bits. It differs from
-    /// `free` only when the target allocated between the two reads.
+    /// The free PTEs, counted from the clear bits of the bitmap. It differs
+    /// from `free` only when the target allocated between the two reads.
     pub bitmap_free: u64,
-    /// Bitmap bytes that could not be read (counted as allocated).
+    /// The bitmap bytes that could not be read, which count as allocated.
     pub unreadable_bitmap_bytes: u64,
-    /// Bits past the bound on how much of one bitmap is read (a corrupt
-    /// `SizeOfBitMap`); they are left out of every count.
+    /// The bits past the read limit for one bitmap (a corrupt
+    /// `SizeOfBitMap`), which no count includes.
     pub unscanned_bitmap_bits: u64,
     pub free_run_count: u64,
     pub largest_free_run: u64,
-    /// The free runs in address order, when listing was requested; bounded.
+    /// The free runs in address order, if the list was requested; bounded.
     pub free_runs: Vec<SystemPteRun>,
     pub free_runs_truncated: bool,
-    /// `TrackingBitmap` is allocated: the kernel tracks which driver
-    /// mapped each PTE (`TrackPtes`).
+    /// Whether the kernel tracks which driver mapped each PTE (`TrackPtes`).
     pub tracking: bool,
 }
 
-/// Every system-PTE bitmap allocator in `MiState` (`!sysptes`).
+#[record]
+impl SystemPteTypeDetail {
+    /// `total` minus `free`.
+    #[record(getter)]
+    pub fn used(&self) -> u64 {
+        self.total.saturating_sub(self.free)
+    }
+}
+
+/// Every system-PTE bitmap allocator in `MiState` (`!sysptes`). Counts
+/// are in PTEs.
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct SystemPtesDetail {
-    pub flags: u64,
     pub types: Vec<SystemPteTypeDetail>,
     pub total: u64,
     pub free: u64,
+}
+
+#[record]
+impl SystemPtesDetail {
+    /// `total` minus `free`.
+    #[record(getter)]
+    pub fn used(&self) -> u64 {
+        self.total.saturating_sub(self.free)
+    }
 }
 
 fn nested_type_name(data: &ParsedType) -> Option<&str> {
@@ -806,17 +1053,14 @@ pub struct SystemMemorySummary {
     pub truncated: bool,
 }
 
-pub struct PteLevel {
-    pub level: PageTableLevel,
-    pub address: VirtAddr,
-    pub value: PageTableEntry,
-    pub attributes: PteAttributes,
-}
-
+/// The page-table entries that map an address, read through NT's self-map
+/// (`!pte`).
+#[record]
 pub struct PteWalk {
     pub address: VirtAddr,
     /// The address space the walk was performed in (the attached process DTB
     /// when attached, else the kernel), so callers know what was walked.
+    #[record(hex)]
     pub dtb: Dtb,
     pub pxe: PteLevel,
     /// The levels below the PXE, each present only when the one above it

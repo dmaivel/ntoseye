@@ -18,7 +18,6 @@ use crate::session::Session;
 use crate::session::effects::Effects;
 use crate::target::etw::parse_guid;
 use crate::target::irpfind::{IrpCriteria, IrpPool};
-use crate::target::mm::{PfnSelector, PoolType, PoolUsageSort};
 use crate::target::pci::{PCI_EXTENDED_CONFIG_SIZE, PciQuery, PciScan};
 use crate::target::registry::names_equal;
 use crate::target::sched::{
@@ -28,8 +27,6 @@ use crate::target::workqueue::WorkQueues;
 use crate::target::zombies::ZombieKinds;
 use crate::triage_report::TriageReport;
 use crate::types::VirtAddr;
-
-use crate::view::mm;
 use crate::view::record::{ToView, Typed};
 use crate::view::{self};
 
@@ -706,179 +703,6 @@ impl Inspect {
         self.typed(py, |session| {
             let detail = session.target.flt_volumes().map_err(err)?;
             Ok(view::fs::flt_volumes(&detail))
-        })
-    }
-
-    /// Get the system memory, pool, PTE, and page-file counters (`!vm`).
-    #[pyo3(signature = (include_processes=true))]
-    fn vm<'py>(
-        &self,
-        py: Python<'py>,
-        include_processes: bool,
-    ) -> PyResult<Typed<'py, mm::VmStatistics>> {
-        self.typed(py, |session| {
-            let detail = session.target.inspect_vm(include_processes).map_err(err)?;
-            Ok(view::mm::vm(&detail))
-        })
-    }
-
-    /// Decode an `_MMPFN` by page-frame number or physical address (`!pfn`).
-    #[pyo3(signature = (value, physical_address=false))]
-    fn pfn<'py>(
-        &self,
-        py: Python<'py>,
-        value: u64,
-        physical_address: bool,
-    ) -> PyResult<Typed<'py, mm::Pfn>> {
-        let selector = if physical_address {
-            PfnSelector::PhysicalAddress(value)
-        } else {
-            PfnSelector::Pfn(value)
-        };
-        self.typed(py, |session| {
-            let detail = session.target.inspect_pfn(selector).map_err(err)?;
-            Ok(view::mm::pfn(&detail))
-        })
-    }
-
-    /// Decode the pool page or big-pool allocation that contains `address`
-    /// (`!pool`).
-    fn pool<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Typed<'py, mm::PoolPage>> {
-        self.typed(py, |session| {
-            let detail = session
-                .target
-                .inspect_pool(VirtAddr(address))
-                .map_err(err)?;
-            Ok(view::mm::pool_page(&detail))
-        })
-    }
-
-    /// Check the block headers of the pool page that contains `address`, and
-    /// return the first inconsistency (`!poolval`).
-    fn pool_validate<'py>(
-        &self,
-        py: Python<'py>,
-        address: u64,
-    ) -> PyResult<Typed<'py, mm::PoolValidation>> {
-        self.typed(py, |session| {
-            let detail = session
-                .target
-                .validate_pool(VirtAddr(address))
-                .map_err(err)?;
-            Ok(view::mm::pool_validation(&detail))
-        })
-    }
-
-    /// Add up pool tracker usage by tag (`!poolused`).
-    #[pyo3(signature = (tag=None, *, sort="tag", include_counts=false))]
-    fn pool_usage<'py>(
-        &self,
-        py: Python<'py>,
-        tag: Option<&str>,
-        sort: &str,
-        include_counts: bool,
-    ) -> PyResult<Typed<'py, mm::PoolUsage>> {
-        let sort = match sort {
-            "tag" => PoolUsageSort::Tag,
-            "nonpaged" => PoolUsageSort::NonPagedBytes,
-            "paged" => PoolUsageSort::PagedBytes,
-            other => {
-                return Err(raise(format!(
-                    "unknown pool_usage sort '{other}' (tag, nonpaged, paged)"
-                )));
-            }
-        };
-        self.typed(py, |session| {
-            let detail = session
-                .target
-                .pool_usage(sort, tag, include_counts)
-                .map_err(err)?;
-            Ok(view::mm::pool_usage(&detail))
-        })
-    }
-
-    /// Find pool allocations by tag (`!poolfind`), optionally in one pool type
-    /// only.
-    #[pyo3(signature = (tag, pool_type=None))]
-    fn pool_find<'py>(
-        &self,
-        py: Python<'py>,
-        tag: &str,
-        pool_type: Option<&str>,
-    ) -> PyResult<Typed<'py, mm::PoolSearch>> {
-        let pool_type = match pool_type {
-            None => None,
-            Some("nonpaged") => Some(PoolType::NonPaged),
-            Some("paged") => Some(PoolType::Paged),
-            Some(other) => {
-                return Err(raise(format!(
-                    "unknown pool type '{other}' (nonpaged, paged)"
-                )));
-            }
-        };
-        self.typed(py, |session| {
-            let detail = session.target.pool_find(tag, pool_type).map_err(err)?;
-            Ok(view::mm::pool_find(&detail))
-        })
-    }
-
-    /// List exported nonpaged and paged `GENERAL_LOOKASIDE` lists (`!lookaside`).
-    fn lookasides<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, mm::LookasideLists>> {
-        self.typed(py, |session| {
-            let detail = session.target.lookaside_lists().map_err(err)?;
-            Ok(view::mm::lookaside_lists(&detail))
-        })
-    }
-
-    /// Decode one `GENERAL_LOOKASIDE` (`!lookaside address`).
-    fn lookaside<'py>(
-        &self,
-        py: Python<'py>,
-        address: u64,
-    ) -> PyResult<Typed<'py, mm::LookasideList>> {
-        self.typed(py, |session| {
-            let detail = session
-                .target
-                .inspect_lookaside(VirtAddr(address))
-                .map_err(err)?;
-            Ok(view::mm::lookaside(&detail))
-        })
-    }
-
-    /// Decode an `_MDL` and the page frames after its header (`!mdl`).
-    /// `pfn_count` replaces the page count that `ByteCount` spans from
-    /// `ByteOffset`.
-    #[pyo3(signature = (address, pfn_count=None))]
-    fn mdl<'py>(
-        &self,
-        py: Python<'py>,
-        address: u64,
-        pfn_count: Option<u64>,
-    ) -> PyResult<Typed<'py, mm::Mdl>> {
-        self.typed(py, |session| {
-            let detail = session
-                .target
-                .inspect_mdl(VirtAddr(address), pfn_count)
-                .map_err(err)?;
-            Ok(view::mm::mdl(&detail))
-        })
-    }
-
-    /// Get the system PTE usage from each `_MI_SYSTEM_PTE_TYPE` bitmap
-    /// allocator (`!sysptes`). `free_runs` lists the free blocks of each
-    /// allocator.
-    #[pyo3(signature = (free_runs=false))]
-    fn system_ptes<'py>(
-        &self,
-        py: Python<'py>,
-        free_runs: bool,
-    ) -> PyResult<Typed<'py, mm::SystemPtes>> {
-        self.typed(py, |session| {
-            let detail = session
-                .target
-                .system_ptes(u64::from(free_runs))
-                .map_err(err)?;
-            Ok(view::mm::system_ptes(&detail))
         })
     }
 
