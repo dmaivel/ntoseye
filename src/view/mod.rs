@@ -6,7 +6,6 @@ pub mod backend;
 pub mod bugcheck;
 pub mod execution;
 pub mod fs;
-pub mod hardware;
 pub mod heap;
 pub mod hypervisor;
 pub mod meta;

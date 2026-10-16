@@ -19,13 +19,13 @@ use crate::session::effects::Effects;
 use crate::target::etw::parse_guid;
 use crate::target::irpfind::{IrpCriteria, IrpPool};
 use crate::target::mm::{PfnSelector, PoolType, PoolUsageSort};
-use crate::target::pci::{PCI_EXTENDED_CONFIG_SIZE, PciQuery, PciRawRange};
+use crate::target::pci::{PCI_EXTENDED_CONFIG_SIZE, PciQuery, PciScan};
 use crate::target::registry::names_equal;
 use crate::target::sched::{ApcSelector, UniqStackScope};
 use crate::target::zombies::ZombieKinds;
 use crate::triage_report::TriageReport;
 use crate::types::VirtAddr;
-use crate::view::hardware;
+
 use crate::view::mm;
 use crate::view::record::{ToView, Typed};
 use crate::view::sched;
@@ -386,43 +386,12 @@ impl Inspect {
         })
     }
 
-    /// Get the processors that own or wait for each numbered queued spinlock
-    /// (`!qlocks`).
-    fn queued_locks<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, hardware::QueuedLocks>> {
-        self.typed(py, |session| {
-            let detail = session.target.queued_locks().map_err(err)?;
-            Ok(view::hardware::queued_locks(&detail))
-        })
-    }
-
-    /// Get the interprocessor-interrupt state of all processors or of one
-    /// processor (`!ipi`).
-    #[pyo3(signature = (processor=None))]
-    fn ipi<'py>(
-        &self,
-        py: Python<'py>,
-        processor: Option<u16>,
-    ) -> PyResult<Typed<'py, hardware::IpiState>> {
-        self.typed(py, |session| {
-            let detail = session.target.ipi_state(processor).map_err(err)?;
-            Ok(view::hardware::ipi(&detail))
-        })
-    }
-
-    /// Get the PCI bus hierarchy that pci.sys tracks (`!pcitree`).
-    fn pci_tree<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, hardware::PciTree>> {
-        self.typed(py, |session| {
-            let tree = session.target.pci_tree().map_err(err)?;
-            Ok(view::hardware::pci_tree(&tree))
-        })
-    }
-
     /// Read and decode PCI configuration space (`!pci`) for the functions on
     /// `bus` (through `last_bus`), or for one `device` and `function`. It reads
-    /// all 4 KiB of each function, with the extended capabilities, and `raw`
-    /// adds the data as hex. This needs a halted target and a backend that can
-    /// get to configuration space (kd/kdnet, or gdb on QEMU).
-    #[pyo3(signature = (bus=0, device=None, function=None, *, last_bus=None, raw=false))]
+    /// all 4 KiB of each function, with the extended capabilities, as `config`.
+    /// This needs a halted target and a backend that can get to configuration
+    /// space (kd/kdnet, or gdb on QEMU).
+    #[pyo3(signature = (bus=0, device=None, function=None, *, last_bus=None))]
     fn pci<'py>(
         &self,
         py: Python<'py>,
@@ -430,8 +399,7 @@ impl Inspect {
         device: Option<u8>,
         function: Option<u8>,
         last_bus: Option<u8>,
-        raw: bool,
-    ) -> PyResult<Typed<'py, hardware::PciScan>> {
+    ) -> PyResult<Typed<'py, PciScan>> {
         self.typed(py, |session| {
             let query = PciQuery {
                 segment: 0,
@@ -441,13 +409,7 @@ impl Inspect {
                 function,
                 size: PCI_EXTENDED_CONFIG_SIZE,
             };
-            let scan = session.scan_pci(&query).map_err(err)?;
-            let raw = raw.then_some(PciRawRange {
-                start: 0,
-                end: PCI_EXTENDED_CONFIG_SIZE,
-                dwords: false,
-            });
-            Ok(view::hardware::pci(&scan, raw))
+            session.scan_pci(&query).map_err(err)
         })
     }
 

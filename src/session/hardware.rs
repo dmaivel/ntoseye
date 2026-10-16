@@ -16,7 +16,7 @@ use crate::target::cpu::{
     decode_idt, descriptor_from_target, validate_idt_vector,
 };
 use crate::target::pci::{
-    EcamWindow, PCI_EXTENDED_CONFIG_SIZE, PCI_MAX_DEVICES, PCI_MAX_FUNCTIONS, PciFunctionConfig,
+    EcamWindow, PCI_EXTENDED_CONFIG_SIZE, PCI_MAX_DEVICES, PCI_MAX_FUNCTIONS, PciFunction,
     PciQuery, PciScan, function_absent, parse_header,
 };
 use crate::types::{Arch, MAX_PROCESSORS, VirtAddr};
@@ -386,7 +386,7 @@ impl Session {
                             config.len()
                         )));
                     };
-                    scan.functions.push(PciFunctionConfig {
+                    scan.functions.push(PciFunction {
                         segment: query.segment,
                         bus,
                         device,
