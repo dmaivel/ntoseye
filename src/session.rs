@@ -650,9 +650,17 @@ pub struct Selection {
     target: TargetSelection,
     current_thread: String,
     parked_windows_thread: Option<VirtAddr>,
+    /// The partition view it was taken in ([`Session::partition`]).
+    partition: Option<u64>,
 }
 
 impl Selection {
+    /// The partition view the selection was taken in, `None` for the
+    /// target's own.
+    pub fn partition(&self) -> Option<u64> {
+        self.partition
+    }
+
     /// Whether the selection is a recovered register context (a caller frame,
     /// a `.cxr`/`.trap` record, the saved VTL0 state at a stop in the
     /// hypervisor) rather than the vCPU's own file or a parked thread, which

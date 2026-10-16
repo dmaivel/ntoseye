@@ -183,10 +183,17 @@ pub fn in_context<R>(
         }
     }
     let result = apply(session, ctx).and_then(|()| f(session));
-    if same_vcpu {
-        saved.put_live_registers(session.target.registers.take());
+    // An operation that showed another partition view swapped in that
+    // view's target, backend and thread, which keep their own selection.
+    let restored = if session.partition() == saved.partition() {
+        if same_vcpu {
+            saved.put_live_registers(session.target.registers.take());
+        }
+        session.restore_selection(saved)
+    } else {
+        session.restore_selection_behind_view(saved, same_vcpu)
     }
-    let restored = session.restore_selection(saved).map_err(err);
+    .map_err(err);
     let value = result?;
     restored?;
     Ok(value)
@@ -214,4 +221,39 @@ fn apply(session: &mut Session, ctx: &Context) -> PyResult<()> {
         session.select_frame_index(index).map_err(err)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Context, in_context};
+    use crate::cpu_context::amd64::REGISTER_BUFFER_SIZE;
+    use crate::partition_backend::PartitionVp;
+    use crate::session::session_over_memory;
+    use crate::session::tests::{MockBackend, session_with_mock};
+
+    /// A scoped operation that shows a partition view, as
+    /// `Debugger.select_partition` does, leaves it shown on its own VP,
+    /// instead of failing to select the target's vCPU on the view's
+    /// backend; leaving the view gives the target its thread back.
+    #[test]
+    fn a_scoped_operation_can_show_a_partition_view() {
+        let mut session = session_with_mock(MockBackend::default());
+        let thread = session.current_thread.clone();
+        let shown = in_context(&mut session, &Context::default(), |session| {
+            let target = session_over_memory(0x1000, &[0; 0x100]).target;
+            let vps = vec![PartitionVp {
+                id: "p4.1".to_string(),
+                registers: vec![0; REGISTER_BUFFER_SIZE],
+                vcpu: None,
+            }];
+            session.show_partition(4, target, vps, "p4.1".to_string());
+            Ok(())
+        });
+
+        assert!(shown.is_ok(), "{shown:?}");
+        assert_eq!(session.partition(), Some(4));
+        assert_eq!(session.current_thread, "p4.1");
+        assert!(session.leave_partition());
+        assert_eq!(session.current_thread, thread);
+    }
 }

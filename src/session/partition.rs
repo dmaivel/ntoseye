@@ -20,7 +20,7 @@ use crate::partition_backend::{PartitionBackend, PartitionVp};
 use crate::session::context::{
     refresh_windows_thread_context_for_backend_thread, update_target_context_from_registers,
 };
-use crate::session::{Session, StopResolution};
+use crate::session::{Selection, Session, StopResolution};
 use crate::target::Target;
 use crate::types::VirtAddr;
 
@@ -225,6 +225,38 @@ impl Session {
     /// The partition whose view is shown, if any.
     pub fn partition(&self) -> Option<u64> {
         self.partition_view.as_ref().map(|view| view.partition)
+    }
+
+    /// Put back `selection`, taken with [`Self::take_selection`] in another
+    /// view than the one shown now (a scoped operation entered or left a
+    /// partition's, as `Debugger.select_partition` does). The view shown
+    /// keeps its own thread and selection. A selection of the target goes
+    /// back on the target and its backend, which the view now hides, with
+    /// the live register file lent to the operation (`lent`) when it was; a
+    /// guest partition's is dropped, as its target's selection is reset
+    /// when it is shown again.
+    pub fn restore_selection_behind_view(
+        &mut self,
+        mut selection: Selection,
+        lent: bool,
+    ) -> Result<()> {
+        if selection.partition.is_some() {
+            return Ok(());
+        }
+        let Some(view) = &mut self.partition_view else {
+            return Ok(());
+        };
+        if lent {
+            selection.put_live_registers(view.target.registers.take());
+        }
+        view.target.restore_selection(selection.target);
+        let switched = if view.thread == selection.current_thread {
+            Ok(())
+        } else {
+            view.backend.set_current_thread(&selection.current_thread)
+        };
+        view.thread = selection.current_thread;
+        switched
     }
 
     /// Refuse `operation`, an instruction walk (`tc`, `pa`, `wt`), while a

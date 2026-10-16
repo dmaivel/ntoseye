@@ -237,6 +237,7 @@ impl Session {
             target: self.target.take_selection(),
             current_thread: self.current_thread.clone(),
             parked_windows_thread: self.parked_windows_thread.take(),
+            partition: self.partition(),
         }
     }
 
