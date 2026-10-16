@@ -162,6 +162,9 @@ fn expand_form(form: FormOptions, mut function: ItemFn) -> Result<TokenStream> {
         .map(|object| method.python(object))
         .collect::<Result<TokenStream>>()?;
     Ok(quote! {
+        // A form is an SDK method first: the REPL may reach its operation
+        // another way (`sdk` forms), so without Python it may go unused.
+        #[cfg_attr(not(feature = "python"), allow(dead_code))]
         #function
 
         #[doc(hidden)]
