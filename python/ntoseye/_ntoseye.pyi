@@ -695,7 +695,7 @@ class ApcQueues(BaseRecord):
         The error, if ntoseye could not resolve the APC layout.
         """
     @property
-    def selector(self, /) -> str |ApcSelection:
+    def selector(self, /) -> ApcSelector:
         """
         `all`, `current_thread`, or the selected thread or process.
         """
@@ -713,21 +713,21 @@ class ApcQueues(BaseRecord):
         """
 
 @final
-class ApcSelection(BaseRecord):
+class ApcSelector(BaseRecord):
     """
-    The thread or process that `!apc` inspects.
+    The threads `!apc` inspects; `kind` says which.
     """
     @property
     def kind(self, /) -> str:
         """
-        `thread`, `process`, or `number`. A `number` is not yet resolved to
-        a thread or a process.
+        The variant: `current_thread`, `thread`, `process`, `number`, `all`.
         """
     @property
-    def value(self, /) -> int:
-        """
-        The given value: an ETHREAD, KTHREAD, or TID, or a PID or EPROCESS.
-        """
+    def number(self, /) -> int |None: ...
+    @property
+    def process(self, /) -> int |None: ...
+    @property
+    def thread(self, /) -> int |None: ...
 
 @final
 class ApcThread(BaseRecord):
@@ -759,7 +759,7 @@ class ApcThread(BaseRecord):
 @final
 class ApicIcr(BaseRecord):
     """
-    The interrupt command register.
+    The interrupt command register, decoded.
     """
     @property
     def delivery(self, /) -> str: ...
@@ -786,7 +786,7 @@ class ApicIcr(BaseRecord):
 @final
 class ApicLvt(BaseRecord):
     """
-    A local vector table entry.
+    A local vector table entry, decoded (Intel SDM vol. 3, 11.5.1).
     """
     @property
     def active_low(self, /) -> bool: ...
@@ -2160,9 +2160,22 @@ class Cpu:
     def __repr__(self, /) -> str: ...
     def apic(self, /) -> LocalApic:
         """
-        Read this processor's local APIC (`!apic`): through its x2APIC MSRs,
-        or its xAPIC registers. Needs the kd or kdnet backend, which
-        switches the target to this processor for the reads.
+        Show a processor's local APIC: its ID, priorities, LVT, timer, and pending
+        vectors.
+        
+        Reads the local APIC of the selected processor, or of the processor you
+        give: in x2APIC mode through its MSRs (0x800-0x83f), in xAPIC mode through
+        its registers at the physical address IA32_APIC_BASE names, read uncached.
+        Both need a backend that reads MSRs and device registers: kd or kdnet. The
+        target reads them on the processor that stopped it, so for another processor
+        ntoseye switches the target to it and back, as rdmsr /p does. Shows the APIC
+        ID and version, whether it is the bootstrap processor, the task and
+        processor priorities, the spurious-interrupt vector register, the logical
+        destination, the interrupt command register as an IPI (vector, delivery
+        mode, destination), each local vector table entry (timer, LINT0, LINT1,
+        error, performance counter, thermal, CMCI) with its vector, delivery mode,
+        trigger, and mask, the timer's counts and divisor, the error status, and the
+        vectors in service (ISR), requested (IRR), and level-triggered (TMR).
         """
     def backtrace(self, /, limit: int = 64, vtl: int |None = None) -> list[Frame]:
         """
@@ -2178,7 +2191,10 @@ class Cpu:
         """
     def gdt(self, /) -> Gdt:
         """
-        Decode the GDT of this processor (`!gdt`).
+        Decode the bounded GDT of the current processor.
+        
+        Shows the bounded GDT entries of the selected processor, with the base,
+        limit, privilege, mode, and presence of each entry.
         """
     def hypercall_caller(self, /) -> HypercallCaller |None:
         """
@@ -2199,15 +2215,27 @@ class Cpu:
         """
     def idt(self, /, vector: int |None = None) -> Idt:
         """
-        Decode one IDT vector, or the full table up to a limit (`!idt`).
+        Decode one IDT entry or the bounded 256-entry IDT.
+        
+        Shows one IDT vector or all 256 entries, with the handler, selector, gate
+        type, DPL, presence, non-nt hooks, and KiIsrThunk chain hints of each
+        entry.
         """
     def info(self, /) -> CpuInfo:
         """
-        Read the processor vendor, family, model, speed, and feature bits (`!cpuinfo`).
+        Show processor identification, speed, and feature bits.
+        
+        Shows the processor number, vendor, family, model, stepping, speed, and
+        feature bits if they are available. For a field that is not available,
+        ntoseye uses the triage-dump metadata.
         """
     def irql(self, /) -> Irql:
         """
-        Read the current IRQL of this processor (`!irql`).
+        Show the current IRQL of a processor.
+        
+        Shows the current IRQL and the Windows level name of the selected
+        processor. At a KD break-in, this is the IRQL that the debugger sees,
+        which can be different from the level before the break-in.
         """
     @property
     def memory(self, /) -> Memory:
@@ -2224,11 +2252,20 @@ class Cpu:
         """
     def pcr(self, /) -> Pcr:
         """
-        Decode the essential KPCR and KPRCB fields of this processor (`!pcr`).
+        Show the main KPCR data of the selected processor.
+        
+        Shows the KPCR and KPRCB addresses, the thread pointers, the descriptor
+        registers, the TSS, and the available IRQL fields. On AMD64 Windows,
+        kernel GS usually points to the KPCR, and backend GS-base registers are
+        optional.
         """
     def prcb(self, /) -> Prcb:
         """
-        Decode the `_KPRCB` of this processor (`!prcb`).
+        Show the main KPRCB data of the selected processor.
+        
+        Shows the processor number, the thread pointers, the DPC and interrupt
+        counters, and the available ProcessorState metadata of the selected
+        KPRCB.
         """
     @property
     def process(self, /) -> Process |None:
@@ -3666,7 +3703,8 @@ class DumpSystemInfo(BaseRecord):
 @final
 class EptDifference(BaseRecord):
     """
-    A guest physical range that VTL0's and VTL1's EPTs map differently.
+    A range of guest physical memory, `start..end`, that two EPTs map
+    differently: with different access, or in one of them only (`None`).
     """
     @property
     def end(self, /) -> int:
@@ -3696,20 +3734,19 @@ class EptMapping(BaseRecord):
     @property
     def entries(self, /) -> list[int]:
         """
-        The entry of each level of the walk, from the PML4 down.
+        The entry of each level, from the PML4 down.
         """
     @property
     def execute(self, /) -> bool:
         """
-        Execute access: supervisor-mode only when `user_execute` is not
-        None.
+        Supervisor-mode execute when `user_execute` is known, else any.
         """
     @property
     def host_physical(self, /) -> int: ...
     @property
     def memory_type(self, /) -> int:
         """
-        The EPT memory type (0 UC, 1 WC, 4 WT, 5 WP, 6 WB).
+        The memory type of the leaf entry (0 UC, 1 WC, 4 WT, 5 WP, 6 WB).
         """
     @property
     def page_size(self, /) -> int:
@@ -3717,12 +3754,14 @@ class EptMapping(BaseRecord):
         The size of the mapping page: 4 KiB, 2 MiB, or 1 GiB.
         """
     @property
-    def read(self, /) -> bool: ...
+    def read(self, /) -> bool:
+        """
+        Each access is allowed only if every entry of the walk allows it.
+        """
     @property
     def user_execute(self, /) -> bool |None:
         """
-        User-mode execute access when the VTL uses mode-based execute
-        control, else None.
+        User-mode execute, when the VTL uses mode-based execute control.
         """
     @property
     def write(self, /) -> bool: ...
@@ -4907,9 +4946,9 @@ class FindStackThread(BaseRecord):
         no vCPU runs it, and while the target runs.
         """
     @property
-    def frames(self, /) -> list[StackFrame] |None:
+    def frames(self, /) -> list[StackFrame]:
         """
-        The whole walked stack, innermost first. `None` below level 2.
+        The whole walked stack, innermost first.
         """
     @property
     def match_count(self, /) -> int:
@@ -4917,17 +4956,16 @@ class FindStackThread(BaseRecord):
         The number of frames that matched.
         """
     @property
-    def matching_frames(self, /) -> list[StackFrame] |None:
+    def matching_frames(self, /) -> list[StackFrame]:
         """
-        The frames that matched. `None` at level 0.
+        The frames that matched.
         """
     @property
     def thread(self, /) -> ThreadInfo: ...
     @property
-    def truncated(self, /) -> int |None:
+    def truncated(self, /) -> int:
         """
-        The number of frames past the walk limit, which ntoseye did not
-        search. `None` below level 2.
+        The number of frames past the walk limit, which were not searched.
         """
 
 @final
@@ -5361,13 +5399,19 @@ class HalController(BaseRecord):
     @property
     def min_line(self, /) -> int: ...
     @property
-    def problem(self, /) -> str |None: ...
+    def problem(self, /) -> str |None:
+        """
+        `_INTERRUPT_PROBLEM` without its prefix; `None` for no problem.
+        """
     @property
     def ranges(self, /) -> list[HalLineRange]: ...
     @property
     def ranges_stopped(self, /) -> str |None: ...
     @property
-    def resource_id(self, /) -> str: ...
+    def resource_id(self, /) -> str:
+        """
+        The ACPI ID the HAL gave the controller's device.
+        """
     @property
     def unit_id(self, /) -> int: ...
 
@@ -5375,19 +5419,20 @@ class HalController(BaseRecord):
 class HalControllers(BaseRecord):
     """
     The interrupt controllers on `nt!HalpRegisteredInterruptControllers`
-    (`!ioapic`).
+    (`!ioapic`), in list order.
     """
     @property
-    def controllers(self, /) -> list[HalController]: ...
+    def controllers(self, /) -> list[HalController |HalUnreadable]: ...
     @property
-    def stopped(self, /) -> str |None: ...
-    @property
-    def unreadable(self, /) -> list[HalUnreadable]: ...
+    def stopped(self, /) -> str |None:
+        """
+        Why the walk stopped before the list head.
+        """
 
 @final
 class HalLine(BaseRecord):
     """
-    A line of an interrupt controller as the HAL set it up
+    A line of an interrupt controller as the HAL set it
     (`_INTERRUPT_LINE_STATE`).
     """
     @property
@@ -5400,7 +5445,7 @@ class HalLine(BaseRecord):
     @property
     def irql(self, /) -> int:
         """
-        The IRQL its interrupt runs at.
+        The IRQL the line's interrupt runs at (`Priority`).
         """
     @property
     def level(self, /) -> bool: ...
@@ -5411,7 +5456,8 @@ class HalLine(BaseRecord):
     @property
     def target(self, /) -> str:
         """
-        `_INTERRUPT_TARGET_TYPE` without its prefix, with its ID.
+        `_INTERRUPT_TARGET_TYPE` without its prefix, and the target ID the
+        type uses.
         """
     @property
     def vector(self, /) -> int: ...
@@ -5433,7 +5479,7 @@ class HalLineRange(BaseRecord):
     @property
     def lines(self, /) -> list[HalLine]:
         """
-        The lines the HAL set up.
+        The lines the HAL set up; the others are unused.
         """
     @property
     def max_line(self, /) -> int: ...
@@ -6145,6 +6191,23 @@ class Heaps:
     def get(self, /, index: int) -> Heap |None: ...
 
 @final
+class HvProcessor(BaseRecord):
+    """
+    A logical processor whose current VP a VP is: the one that runs it, or
+    ran it last.
+    """
+    @property
+    def block(self, /) -> int:
+        """
+        The processor block (the processor's GS base in the hypervisor).
+        """
+    @property
+    def number(self, /) -> int |None:
+        """
+        The processor number, or None on builds before 10.0.19041.
+        """
+
+@final
 class Hypercall(BaseRecord):
     """
     One call code of the hypervisor's hypercall table.
@@ -6358,23 +6421,6 @@ class HypervisorPartition:
     def virtual_processors(self, /) -> list[VirtualProcessor]:
         """
         The partition's virtual processors, by index.
-        """
-
-@final
-class HypervisorProcessor(BaseRecord):
-    """
-    A logical processor whose current VP a VP is: the one that runs it, or
-    ran it last.
-    """
-    @property
-    def block(self, /) -> int:
-        """
-        The processor block (the processor's GS base in the hypervisor).
-        """
-    @property
-    def number(self, /) -> int |None:
-        """
-        The processor number, or None on builds before 10.0.19041.
         """
 
 @final
@@ -7353,7 +7399,10 @@ class Inspect:
         """
     def dpcs(self, /) -> DpcQueues:
         """
-        Get the DPCs that are queued on each processor (`!dpcs`).
+        List the deferred procedure calls that are queued on each processor.
+        
+        The command walks the two _KPRCB DpcData queues. Each walk detects cycles
+        and has an entry limit.
         """
     def etw_events(self, /, logger: int |str, count: int |None = None) -> EtwEventDump:
         """
@@ -7463,10 +7512,19 @@ class Inspect:
         """
     def findstack(self, /, symbol: str, level: int = 1) -> FindStack:
         """
-        List the threads that have a stack frame that matches a symbol or module
-        (`!findstack`). The pattern is `module!prefix`, a module or function
-        prefix alone, or a glob with `*`/`?`. `level` 0 counts the matching
-        frames, 1 lists them, and 2 adds the full stack.
+        List the threads with a stack frame that matches a symbol or module.
+        
+        The command walks the stack of each Windows thread, up to 64 frames, as
+        !stacks 2 does. `module!name` matches frames in that module whose function
+        starts with name, as in WinDbg, so `nt!KeWait` matches KeWaitForSingleObject
+        and KeWaitForMultipleObjects, and `nt!` matches all frames in nt. A bare
+        word matches a module by name or a function by prefix. With * or ?, the
+        module and function are globs (`nt!*Wait*`). Matches ignore case. Display
+        level 0 lists the matching threads and the number of frames that match,
+        level 1 (the default) adds the matching frames, and level 2 shows the whole
+        stack and marks the matching frames with *. The command cannot search a
+        thread whose stack does not walk, such as a thread that runs on a processor
+        while the target runs, and lists these threads after the matches.
         """
     def flt_filters(self, /) -> FltFilters:
         """
@@ -7491,13 +7549,36 @@ class Inspect:
         """
     def interrupt_controllers(self, /) -> HalControllers:
         """
-        List the interrupt controllers the HAL registered and the lines it
-        set up on each (`!ioapic`).
+        Show the I/O APIC and PIC lines as the HAL set them up.
+        
+        Walks the HAL's registered interrupt controllers
+        (nt!HalpRegisteredInterruptControllers) and shows each one, an I/O APIC or a
+        legacy PIC, with its unit ID, ACPI resource ID, line range, and any problem
+        the HAL recorded, then each line the HAL set up, from its own record of the
+        line (_INTERRUPT_LINE_STATE): the line and its global system interrupt, the
+        vector, the IRQL, edge or level trigger, polarity, and the processor target.
+        This is what the HAL programmed into the redirection entries, read from
+        kernel memory, so it works on every backend and in a kernel dump; it does
+        not read the I/O APIC's registers.
         """
     def ipi(self, /, processor: int |None = None) -> IpiState:
         """
-        Get the interprocessor-interrupt state of all processors or of one
-        processor (`!ipi`).
+        Show the interprocessor interrupt (IPI) state of one processor or of all
+        processors.
+        
+        For each processor, shows the IPI fields that its _KPRCB has on this Windows
+        build. IpiFrozen is the freeze state that the debugger and KeFreezeExecution
+        control (Running, Frozen, Freeze owner, ...). TargetCount and PacketBarrier
+        apply to the processor as a sender and show the targets that did not finish
+        its packet yet. The command also shows SelfIpiRequestSummary and IpiFrame,
+        the trap frame of the IPI that the processor services now. Windows 10 and
+        later builds have one mailbox for each sender, and on these builds the
+        command also shows the requests that are in the queue of the processor and
+        are not taken yet. For each request, it shows the sender, the request type,
+        and for a packet, the worker routine and parameters. The request type
+        (packet, TB flush, or cache flush) comes from RequestSummary. For the
+        processor as a sender, the command also shows the processors whose queues
+        still hold its request.
         """
     def irp(self, /, address: int) -> Irp:
         """
@@ -7662,17 +7743,29 @@ class Inspect:
         Decode the security descriptor that the header of an object references
         (`!objsd`).
         """
-    def pci(self, /, bus: int = 0, device: int |None = None, function: int |None = None, *, last_bus: int |None = None, raw: bool = False) -> PciScan:
+    def pci(self, /, bus: int = 0, device: int |None = None, function: int |None = None, *, last_bus: int |None = None) -> PciScan:
         """
         Read and decode PCI configuration space (`!pci`) for the functions on
         `bus` (through `last_bus`), or for one `device` and `function`. It reads
-        all 4 KiB of each function, with the extended capabilities, and `raw`
-        adds the data as hex. This needs a halted target and a backend that can
-        get to configuration space (kd/kdnet, or gdb on QEMU).
+        all 4 KiB of each function, with the extended capabilities, as `config`.
+        This needs a halted target and a backend that can get to configuration
+        space (kd/kdnet, or gdb on QEMU).
         """
     def pci_tree(self, /) -> PciTree:
         """
-        Get the PCI bus hierarchy that pci.sys tracks (`!pcitree`).
+        Show the PCI bus hierarchy that pci.sys tracks, with the functions on each
+        bus.
+        
+        Reads the pci.sys segment list (pci!PciSegmentList), the root buses of each
+        segment, and the functions and child buses of each bus. The data comes from
+        the extensions of the driver (pci!_PCI_BUS and pci!_PCI_DEVICE), which exist
+        on Windows 8 and later. Because the command reads only guest memory, it
+        works on all backends. A bus line shows the bus number and the FDO
+        extension. A function line shows the device and function number, the vendor
+        and device ID, the PDO extension (devext), the PDO (devstack, for
+        !devstack), and the class code and name. The secondary bus of a bridge
+        follows the bridge and is indented. The JSON output also has the PnP
+        instance path of each function.
         """
     def peb(self, /, process: Process |UserProcess, address: int |None = None) -> Peb:
         """
@@ -7714,8 +7807,16 @@ class Inspect:
         """
     def queued_locks(self, /) -> QueuedLocks:
         """
-        Get the processors that own or wait for each numbered queued spinlock
-        (`!qlocks`).
+        Show which processors own or wait for each numbered queued spinlock.
+        
+        Reads the _KPRCB.LockQueue entries of each processor, which hold one
+        _KSPIN_LOCK_QUEUE for each _KSPIN_LOCK_QUEUE_NUMBER lock. The table has the
+        same layout as in WinDbg, with one row for each lock and one column for each
+        processor. O marks the owner, and 1-n marks the wait order, which the
+        command finds by following the queue links from the owner. C marks an entry
+        whose owner or wait bits do not agree with the links. The table shows only
+        the numbered locks (KeAcquireQueuedSpinLock). In-stack queued spinlocks are
+        on the stacks of the callers that acquire them.
         """
     def rcdr_log(self, /, driver: str, log: int |None = None) -> RcdrLogDump:
         """
@@ -7757,8 +7858,12 @@ class Inspect:
         """
     def ready(self, /, processor: int |None = None) -> ReadyQueues:
         """
-        Read the dispatcher ready queues, up to a limit, for all processors or
-        for one processor (`!ready`).
+        List the dispatcher ready queues of all processors or of one processor.
+        
+        The command reads DispatcherReadyListHead from each _KPRCB, or ReadyListHead
+        on newer builds. Each queue walk has an entry limit and, like `dt -l`,
+        reports null links, cycles, unreadable links, and when it reaches its entry
+        limit.
         """
     def registry_cell(self, /, hive: int, cell: int) -> RegistryCell:
         """
@@ -7799,7 +7904,10 @@ class Inspect:
         """
     def running(self, /, include_idle: bool = False, include_stacks: bool = False) -> RunningProcessors:
         """
-        Get the current, next, and idle threads on each processor (`!running`).
+        Show the thread that runs on each processor.
+        
+        -i includes idle threads, and -t adds a short kernel stack, with a frame
+        limit, for each processor.
         """
     def security_descriptor(self, /, address: int, annotate_well_known: bool = False) -> SecurityDescriptor:
         """
@@ -7815,10 +7923,6 @@ class Inspect:
         """
         Decode a SID into its string form, authority, and well-known name
         (`!sid`).
-        """
-    def smbios(self, /) -> SmbiosTable:
-        """
-        Read the SMBIOS table the kernel found at boot (`!sysinfo smbios`).
         """
     def srb(self, /, address: int) -> Srb:
         """
@@ -7842,8 +7946,10 @@ class Inspect:
         """
     def stacks(self, /, level: int = 0, filter: str |None = None) -> ThreadStacks:
         """
-        Get the thread states, wait reasons, and stacks, up to a limit
-        (`!stacks`).
+        Show the state, wait reason, and top stack symbol of each thread.
+        
+        Level 0 shows one frame. Levels 1 and 2 add the full stacks, with a frame
+        limit. The optional filter matches process or stack symbols.
         """
     def storport_adapter(self, /, address: int |None = None) -> StorDrivers |StorAdapter:
         """
@@ -7894,6 +8000,19 @@ class Inspect:
         and has not seen completed, from the unit's per-processor pending queues,
         with its _EXTENDED_REQUEST_BLOCK, IRP and SRB; use !irp on the IRP. It lists
         at most 256 requests and says why a list stopped early.
+        """
+    def sysinfo(self, /, section: str) -> SmbiosTable |SmbiosTable |CpuInfo:
+        """
+        Show the machine's SMBIOS identity, its SMBIOS tables, or its processor.
+        
+        Reads the SMBIOS table the kernel found at boot
+        (nt!WmipSMBiosTablePhysicalAddress) from physical memory. machineid shows
+        the BIOS vendor, version, and date, and the system's and baseboard's
+        manufacturer, product, and version, as WinDbg's !sysinfo machineid does.
+        smbios lists every structure in the table with its type, handle, and length,
+        and decodes the BIOS, system, baseboard, enclosure, processor, memory array,
+        memory device, and mapped address structures. cpuinfo shows the current
+        processor as !cpuinfo does.
         """
     def system_ptes(self, /, free_runs: bool = False) -> SystemPtes:
         """
@@ -8274,6 +8393,16 @@ class IoWorkItem(BaseRecord):
         """
 
 @final
+class IpiField(BaseRecord):
+    """
+    A `_KPRCB` IPI field and its value.
+    """
+    @property
+    def name(self, /) -> str: ...
+    @property
+    def value(self, /) -> Diagnostic[int]: ...
+
+@final
 class IpiProcessor(BaseRecord):
     """
     The IPI state of one processor.
@@ -8281,13 +8410,12 @@ class IpiProcessor(BaseRecord):
     @property
     def awaiting(self, /) -> list[int]:
         """
-        The processors whose pending list holds a request from this processor.
+        Processors whose pending list holds a request from this one.
         """
     @property
-    def fields(self, /) -> Record:
+    def fields(self, /) -> list[IpiField]:
         """
-        The `_KPRCB` IPI fields that this build has, by name, each as a
-        `Diagnostic` of its value.
+        The IPI fields of [`IPI_FIELDS`] this build's `_KPRCB` has.
         """
     @property
     def frozen_state(self, /) -> Diagnostic[str] |None:
@@ -8300,15 +8428,14 @@ class IpiProcessor(BaseRecord):
     @property
     def pending(self, /) -> Diagnostic[list[IpiRequest]]:
         """
-        The requests in the queue of this processor that are not taken yet, in
-        list order. Unavailable on builds without a mailbox for each sender, or
-        if ntoseye cannot read the list.
+        Requests queued to this processor and not yet taken, in list order;
+        unavailable on builds without per-sender mailboxes or when the list
+        cannot be read.
         """
     @property
     def pending_truncated(self, /) -> bool:
         """
-        Whether the walk of the pending list stopped at its limit or at a
-        repeated mailbox.
+        Whether the pending walk stopped at its bound or a repeated mailbox.
         """
     @property
     def processor(self, /) -> int: ...
@@ -8321,12 +8448,13 @@ class IpiRequest(BaseRecord):
     @property
     def mailbox(self, /) -> int:
         """
-        The `_REQUEST_MAILBOX` slot of the sender in the array of the receiver.
+        The `_REQUEST_MAILBOX` (the sender's slot in the receiver's
+        `RequestMailbox` array).
         """
     @property
     def parameters(self, /) -> Diagnostic[list[int]]:
         """
-        The three parameters of the worker (`RequestPacket.CurrentPacket`).
+        `RequestPacket.CurrentPacket`: the worker's three parameters.
         """
     @property
     def request_summary(self, /) -> Diagnostic[int]: ...
@@ -8338,8 +8466,8 @@ class IpiRequest(BaseRecord):
     @property
     def sender(self, /) -> int |None:
         """
-        The processor that sent the request. `None` if the mailbox is outside
-        the array of the receiver.
+        The sending processor, from the slot's index; `None` when the mailbox
+        lies outside the receiver's array.
         """
     @property
     def worker_routine(self, /) -> Diagnostic[int]: ...
@@ -9056,7 +9184,8 @@ class LoaderTerminations(BaseRecord):
 @final
 class LocalApic(BaseRecord):
     """
-    A processor's local APIC (`!apic`).
+    A processor's local APIC (`!apic`), read through its x2APIC MSRs or
+    its xAPIC registers.
     """
     @property
     def apic_base(self, /) -> int:
@@ -9088,7 +9217,7 @@ class LocalApic(BaseRecord):
     @property
     def lvt(self, /) -> list[ApicLvt]:
         """
-        The LVT entries the APIC implements.
+        The LVT entries the APIC implements, in [`LVT_NAMES`] order.
         """
     @property
     def lvt_missing(self, /) -> list[str]:
@@ -9109,7 +9238,15 @@ class LocalApic(BaseRecord):
     @property
     def timer_current(self, /) -> int: ...
     @property
-    def timer_divisor(self, /) -> int: ...
+    def timer_divide(self, /) -> int:
+        """
+        The timer's divide configuration register.
+        """
+    @property
+    def timer_divisor(self, /) -> int:
+        """
+        The divisor `timer_divide` selects.
+        """
     @property
     def timer_initial(self, /) -> int: ...
     @property
@@ -11276,58 +11413,22 @@ class PartitionFilter(BaseRecord):
 @final
 class PciBar(BaseRecord):
     """
-    A base address register.
+    A base address register: its index, the raw register (both halves of a
+    64-bit BAR), and the address it decodes to.
     """
     @property
-    def address(self, /) -> int:
-        """
-        The decoded base address.
-        """
+    def address(self, /) -> int: ...
     @property
     def index(self, /) -> int:
         """
         The BAR number (0-5).
         """
     @property
-    def kind(self, /) -> str:
-        """
-        `io`, `memory32`, or `memory64`.
-        """
+    def kind(self, /) -> str: ...
     @property
     def prefetchable(self, /) -> bool: ...
     @property
-    def raw(self, /) -> int:
-        """
-        The raw register value (both halves for a 64-bit BAR).
-        """
-
-@final
-class PciBus(BaseRecord):
-    """
-    A bus that pci.sys enumerated, with the devices on it and the buses
-    behind its bridges.
-    """
-    @property
-    def bridge_pdo(self, /) -> int:
-        """
-        The physical device object of the bridge. 0 for a root bus.
-        """
-    @property
-    def child_buses(self, /) -> list[PciBus]: ...
-    @property
-    def devices(self, /) -> list[PciTreeDevice]: ...
-    @property
-    def extension(self, /) -> int:
-        """
-        The pci.sys bus extension.
-        """
-    @property
-    def number(self, /) -> int: ...
-    @property
-    def subordinate(self, /) -> int:
-        """
-        The highest bus number behind this bus.
-        """
+    def raw(self, /) -> int: ...
 
 @final
 class PciBuses(BaseRecord):
@@ -11344,7 +11445,8 @@ class PciBuses(BaseRecord):
 @final
 class PciCapability(BaseRecord):
     """
-    An entry in a capability list.
+    A capability-list entry: its offset, ID, and (extended capabilities) the
+    version.
     """
     @property
     def id(self, /) -> int: ...
@@ -11361,48 +11463,67 @@ class PciCapability(BaseRecord):
     @property
     def version(self, /) -> int |None:
         """
-        The version of an extended capability. `None` for a standard capability.
-        """
-
-@final
-class PciConfigBytes(BaseRecord):
-    """
-    The raw configuration bytes that the caller requested.
-    """
-    @property
-    def bytes(self, /) -> str:
-        """
-        The bytes, as hex.
-        """
-    @property
-    def offset(self, /) -> int:
-        """
-        The offset of the first byte.
+        The version of an extended capability. `None` for a standard one.
         """
 
 @final
 class PciFunction(BaseRecord):
     """
-    The decoded configuration space of one function.
+    A function's configuration space as read (256 bytes, or 4 KiB with
+    extended space), with where it is and its decoded header.
+    """
+    @property
+    def bus(self, /) -> int: ...
+    @property
+    def capabilities(self, /) -> list[PciCapability]:
+        """
+        The capability list.
+        """
+    @property
+    def class_name(self, /) -> str |None:
+        """
+        The name of the class code, if it is known.
+        """
+    @property
+    def config(self, /) -> bytes:
+        """
+        The configuration space as read.
+        """
+    @property
+    def device(self, /) -> int: ...
+    @property
+    def extended_capabilities(self, /) -> list[PciCapability]:
+        """
+        The PCI Express extended capabilities. Empty for a conventional
+        function, or if only 256 bytes were read.
+        """
+    @property
+    def function(self, /) -> int: ...
+    @property
+    def header(self, /) -> PciHeader: ...
+    @property
+    def segment(self, /) -> int: ...
+
+@final
+class PciHeader(BaseRecord):
+    """
+    The decoded type 0/1/2 configuration header.
     """
     @property
     def bars(self, /) -> list[PciBar]: ...
     @property
     def base_class(self, /) -> int: ...
     @property
-    def bus(self, /) -> int: ...
+    def bist(self, /) -> int: ...
     @property
     def buses(self, /) -> PciBuses |None:
         """
         Type 1 and 2 headers only.
         """
     @property
-    def capabilities(self, /) -> list[PciCapability]: ...
+    def cache_line_size(self, /) -> int: ...
     @property
-    def class_name(self, /) -> str |None:
-        """
-        The name of the class code, if it is known.
-        """
+    def capabilities_pointer(self, /) -> int: ...
     @property
     def command(self, /) -> int: ...
     @property
@@ -11411,29 +11532,17 @@ class PciFunction(BaseRecord):
         The names of the bits that are set in the command register.
         """
     @property
-    def config(self, /) -> PciConfigBytes |None:
-        """
-        The requested raw range (`raw=True`). Otherwise `None`.
-        """
-    @property
-    def device(self, /) -> int: ...
-    @property
     def device_id(self, /) -> int: ...
     @property
     def expansion_rom(self, /) -> int |None:
         """
-        The expansion ROM base register (types 0 and 1).
+        Expansion ROM base register (type 0 at 0x30, type 1 at 0x38).
         """
     @property
-    def extended_capabilities(self, /) -> list[PciCapability]:
+    def header_type(self, /) -> int:
         """
-        The PCI Express extended capabilities. Empty for a conventional
-        function, or if ntoseye read only 256 bytes.
+        Layout in the low 7 bits; bit 7 marks a multi-function device.
         """
-    @property
-    def function(self, /) -> int: ...
-    @property
-    def header_type(self, /) -> int: ...
     @property
     def interrupt_line(self, /) -> int: ...
     @property
@@ -11442,13 +11551,13 @@ class PciFunction(BaseRecord):
         0 for none, 1-4 for INTA#-INTD#.
         """
     @property
+    def latency_timer(self, /) -> int: ...
+    @property
     def multifunction(self, /) -> bool: ...
     @property
     def prog_if(self, /) -> int: ...
     @property
     def revision(self, /) -> int: ...
-    @property
-    def segment(self, /) -> int: ...
     @property
     def status(self, /) -> int: ...
     @property
@@ -11481,47 +11590,59 @@ class PciScan(BaseRecord):
     @property
     def interrupted(self, /) -> bool:
         """
-        Whether an interrupt request stopped the scan early.
+        The scan stopped at a host interrupt.
         """
-
-@final
-class PciSegment(BaseRecord):
-    """
-    A PCI segment and its root buses.
-    """
-    @property
-    def address(self, /) -> int:
-        """
-        The pci.sys segment record.
-        """
-    @property
-    def root_buses(self, /) -> list[PciBus]: ...
-    @property
-    def segment(self, /) -> int: ...
 
 @final
 class PciTree(BaseRecord):
     """
-    The PCI hierarchy that pci.sys tracks (`!pcitree`).
+    pci.sys's view of the hierarchy: segments, their root buses, and each
+    bus's functions and child buses (`!pcitree`).
     """
     @property
     def errors(self, /) -> list[str]:
         """
-        Each bus or function that ntoseye could not read, after which the
-        walk does not continue in the list that holds it.
+        Each bus or function that could not be read, and why; the walk
+        skipped the rest of the list it was on.
         """
     @property
-    def segments(self, /) -> list[PciSegment]: ...
+    def segments(self, /) -> list[PciTreeSegment]: ...
     @property
     def truncated(self, /) -> bool:
         """
-        Whether the walk stopped at its limit before the end.
+        The walk stopped at [`MAX_TREE_NODES`] or a nesting/link limit.
         """
+
+@final
+class PciTreeBus(BaseRecord):
+    """
+    A bus that pci.sys enumerated, with the devices on it and the buses
+    behind its bridges.
+    """
+    @property
+    def bridge_pdo(self, /) -> int:
+        """
+        The PDO of the bridge that produces this bus (the root bus's comes
+        from ACPI).
+        """
+    @property
+    def child_buses(self, /) -> list[PciTreeBus]: ...
+    @property
+    def devices(self, /) -> list[PciTreeDevice]: ...
+    @property
+    def extension(self, /) -> int:
+        """
+        The bus FDO's extension (`pci!_PCI_BUS`).
+        """
+    @property
+    def number(self, /) -> int: ...
+    @property
+    def subordinate(self, /) -> int: ...
 
 @final
 class PciTreeDevice(BaseRecord):
     """
-    A device that pci.sys enumerated (`!pcitree`).
+    A device that pci.sys enumerated.
     """
     @property
     def base_class(self, /) -> int: ...
@@ -11537,9 +11658,14 @@ class PciTreeDevice(BaseRecord):
     @property
     def device_id(self, /) -> int: ...
     @property
+    def device_object(self, /) -> int:
+        """
+        The PDO, bottom of the function's device stack.
+        """
+    @property
     def extension(self, /) -> int:
         """
-        The pci.sys device extension.
+        The function PDO's extension (`pci!_PCI_DEVICE`).
         """
     @property
     def function(self, /) -> int: ...
@@ -11549,11 +11675,6 @@ class PciTreeDevice(BaseRecord):
     def instance_path(self, /) -> str |None:
         """
         The PnP instance path of the device, if pci.sys recorded one.
-        """
-    @property
-    def pdo(self, /) -> int:
-        """
-        The physical device object of the device.
         """
     @property
     def prog_if(self, /) -> int: ...
@@ -11567,6 +11688,21 @@ class PciTreeDevice(BaseRecord):
     def subsystem_vendor_id(self, /) -> int: ...
     @property
     def vendor_id(self, /) -> int: ...
+
+@final
+class PciTreeSegment(BaseRecord):
+    """
+    A PCI segment and its root buses.
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The `pci!_PCI_SEGMENT`.
+        """
+    @property
+    def number(self, /) -> int: ...
+    @property
+    def root_buses(self, /) -> list[PciTreeBus]: ...
 
 @final
 class Pcr(BaseRecord):
@@ -13218,13 +13354,14 @@ class QueuedLock(BaseRecord):
     @property
     def lock(self, /) -> int |None:
         """
-        The spinlock, from the first processor entry that identifies it.
+        The spinlock itself, from the first processor entry that names it.
         """
     @property
     def name(self, /) -> str:
         """
-        The name of the queue number without the `LockQueue` prefix and the
-        `Lock` suffix (`IoCancel`). `LockQueue[n]` if the name is not known.
+        The `_KSPIN_LOCK_QUEUE_NUMBER` name without its `LockQueue` prefix and
+        `Lock` suffix (`IoCancel`), from the PDB or else the WDK's list when
+        the array has its 17 entries; `LockQueue[n]` otherwise.
         """
     @property
     def number(self, /) -> int:
@@ -14053,7 +14190,7 @@ class RunningProcessor(BaseRecord):
     @property
     def short_stack(self, /) -> Diagnostic[list[StackFrame]] |None:
         """
-        The first frames of the running thread. `None` if stacks were not
+        The first frames of the running thread; `None` if stacks were not
         requested.
         """
 
@@ -14647,7 +14784,7 @@ class SmbiosField(BaseRecord):
 @final
 class SmbiosStructure(BaseRecord):
     """
-    An SMBIOS structure.
+    One SMBIOS structure: its header, its formatted area, and its strings.
     """
     @property
     def fields(self, /) -> list[SmbiosField]:
@@ -14657,7 +14794,8 @@ class SmbiosStructure(BaseRecord):
     @property
     def formatted(self, /) -> list[int]:
         """
-        The formatted area, its header included.
+        The formatted area, header included, so offsets are the
+        specification's.
         """
     @property
     def handle(self, /) -> int: ...
@@ -14668,7 +14806,10 @@ class SmbiosStructure(BaseRecord):
         device, ...).
         """
     @property
-    def kind_name(self, /) -> str: ...
+    def kind_name(self, /) -> str:
+        """
+        The DMTF name of the type.
+        """
     @property
     def strings(self, /) -> list[str]:
         """
@@ -17027,29 +17168,28 @@ class UniqStackGroup(BaseRecord):
     @property
     def truncated(self, /) -> int:
         """
-        The number of frames past the walk limit, which ntoseye did not
-        compare.
+        The number of frames past the walk limit, which were not compared.
         """
 
 @final
 class UniqStackScope(BaseRecord):
     """
-    The threads that `!uniqstack` grouped.
+    Which threads `!uniqstack` groups: `all`, or one `process`.
     """
     @property
     def kind(self, /) -> str:
         """
-        `all` or `process`.
+        The variant: `all`, `process`.
         """
     @property
     def name(self, /) -> str |None:
         """
-        The image name of the process. `None` for `all`.
+        The image name of the process.
         """
     @property
     def pid(self, /) -> int |None:
         """
-        The process ID. `None` for `all`.
+        The process ID.
         """
 
 @final
@@ -17076,7 +17216,8 @@ class UniqStacks(BaseRecord):
     @property
     def walked_threads(self, /) -> int:
         """
-        The number of threads whose stacks ntoseye walked and grouped.
+        The threads whose stacks were walked and grouped: fewer than
+        `scanned_threads` less `unwalked` when the walk was interrupted.
         """
 
 @final
@@ -18499,7 +18640,7 @@ class VirtualProcessor:
         The VP index in its partition.
         """
     @property
-    def processors(self, /) -> list[HypervisorProcessor]:
+    def processors(self, /) -> list[HvProcessor]:
         """
         The processors whose current VP this is (the one that runs it, or ran
         it last).
@@ -20134,7 +20275,7 @@ class WorkerThread(BaseRecord):
     @property
     def stack(self, /) -> Diagnostic[list[StackFrame]] |None:
         """
-        The stack of the thread. `None` if stacks were not requested or the
+        The stack of the thread; `None` if stacks were not requested or the
         thread did not decode.
         """
     @property

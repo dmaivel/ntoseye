@@ -97,7 +97,7 @@ pub struct PciTreeDevice {
     pub subsystem_id: u16,
     #[record(hex)]
     pub header_type: u8,
-    /// The PnP instance path of the PDO's device node (`PCI\VEN_...`).
+    /// The PnP instance path of the device, if pci.sys recorded one.
     pub instance_path: Option<String>,
 }
 
