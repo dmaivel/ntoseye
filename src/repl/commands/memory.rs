@@ -1015,6 +1015,9 @@ fn pagein_request(
     kind = Action,
     target = Kernel,
     state = Halted,
+    run = Run,
+    writes = [Memory],
+    live_only,
     forms = [page_in],
 )]
 fn pagein(

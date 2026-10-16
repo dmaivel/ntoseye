@@ -1192,7 +1192,7 @@ mod tests {
     use crate::dbg_backend::{BugcheckInfo, StopEvent};
     use crate::layout::{FieldInfo, ParsedType, TypeInfo};
     use crate::output::capture;
-    use crate::repl::{Flow, ReplState};
+    use crate::repl::{DispatchContext, Flow, RemoteClient, ReplState};
     use crate::session::tests::{
         MockBackend, breakpoint_event, session_running_code, session_with_mock,
     };
@@ -1517,6 +1517,25 @@ mod tests {
             !state.ctx.backend.is_running(),
             "the parked stop was continued past"
         );
+    }
+
+    /// `.pagein` resumes the target for the guest's worker, so every context
+    /// that must not move the target refuses it, as it refuses `g`.
+    #[test]
+    fn pagein_is_refused_where_run_control_is() {
+        for context in [
+            DispatchContext::BreakpointAction,
+            DispatchContext::ExceptionCommand,
+            DispatchContext::Remote(RemoteClient::Gdb),
+            DispatchContext::Remote(RemoteClient::Dap),
+        ] {
+            let mut session = session_with_mock(MockBackend::default());
+            let mut state = ReplState::for_oneshot(&mut session);
+            state.context = context;
+            let (result, text) = capture(|| state.dispatch_line(".pagein 1000"));
+            assert_eq!(result.unwrap(), Flow::Denied, "{context:?}: {text}");
+            assert!(text.contains("'.pagein'"), "{context:?}: {text}");
+        }
     }
 
     #[test]
