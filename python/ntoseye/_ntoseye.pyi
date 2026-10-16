@@ -7254,7 +7254,8 @@ class Inspect:
     def apcs(self, /, target: Process |Thread |int |None = None) -> ApcQueues:
         """
         Decode the kernel and user APC queues of all threads, of a process, or
-        of a thread (`!apc`).
+        of a thread (`!apc`): `target` is a `Process`, a `Thread`, or an
+        `_ETHREAD` address, and all threads by default.
         """
     def bugcheck(self, /) -> Bugcheck |None:
         """
@@ -7265,22 +7266,16 @@ class Inspect:
         """
         List the process, thread, and image notification callbacks.
         """
-    def class_device(self, /, address: int |None = None) -> ClassDevices |ClassDeviceDetail:
+    def class_device(self, /, address: int) -> ClassDeviceDetail:
         """
-        List the storage class devices (disks, CD-ROMs), or show one with its
-        requests and errors.
-        
-        Without an argument, walks classpnp!AllFdosList and shows each class device
-        that classpnp drives for disk.sys, cdrom.sys, and the other class drivers:
-        its FDO, class driver, device number, bus, vendor and product, and how many
-        of its transfer packets are in flight. With the address of an FDO, its
-        device extension, or its private data, shows the device: its identity and
-        serial number, bus, lower device and PDO, capacity and sector size, timeout
-        and retry limit, ErrorCount, each request in flight (a transfer packet that
-        is not on classpnp's free lists) with its IRP, the client's IRP, the SRB,
-        the command, and the retries, and the last 16 errors classpnp logged, each
-        with its age, address, command, SRB and SCSI status, and sense key and code.
-        The command needs the PDB for classpnp.sys.
+        Read the class device whose FDO, device extension, or private data
+        is at `address`, with its requests in flight and its error log
+        (`!storagekd.storclass <address>`).
+        """
+    def class_devices(self, /) -> ClassDevices:
+        """
+        List the storage class devices on `classpnp!AllFdosList`
+        (`!storagekd.storclass`).
         """
     def context_record(self, /, address: int) -> Frame:
         """
@@ -7343,98 +7338,62 @@ class Inspect:
         The command walks the two _KPRCB DpcData queues. Each walk detects cycles
         and has an entry limit.
         """
+    def etw_buffers(self, /, logger: int |str) -> EtwLoggerBuffers:
+        """
+        List the trace buffers on the GlobalList of an ETW trace session
+        (`!wmitrace.strdump logger`).
+        """
+    def etw_crash_events(self, /, logger: int |str, count: int |None = None) -> EtwEventDump:
+        """
+        Decode the events of an ETW trace session that Windows saved in a
+        crash dump, oldest first (`!wmitrace.logdump` in a minidump).
+        `logger` is the logger ID or the session name, and `count` keeps
+        only the most recent events.
+        """
+    def etw_crash_save(self, /, logger: int |str, path: str) -> EtwLogSave:
+        """
+        Save the buffers of an ETW trace session that Windows saved in a crash
+        dump as an .etl file at `path` on the host (`!wmitrace.logsave` in a
+        minidump). `logger` is the logger ID or the session name.
+        """
+    def etw_crash_session(self, /, logger: int |str) -> EtwDumpLogger:
+        """
+        Show one ETW trace session that Windows saved in a crash dump, with its
+        buffers (`!wmitrace.logger` and `!wmitrace.strdump logger` in a
+        minidump). `logger` is the logger ID or the session name.
+        """
+    def etw_crash_sessions(self, /) -> EtwDumpData:
+        """
+        List the ETW trace sessions that Windows saved as it wrote a crash
+        dump, and their buffers (`!wmitrace.strdump` in a minidump): the
+        sessions started with `EVENT_TRACE_ADDTO_TRIAGE_DUMP`, such as
+        EventLog-System. A minidump has no other copy of them; in a kernel or
+        full dump, `etw_loggers()` reads every session from memory.
+        """
     def etw_events(self, /, logger: int |str, count: int |None = None) -> EtwEventDump:
         """
-        Show the events that are still in the buffers of an ETW trace session,
-        oldest first.
-        
-        Reads each buffer on the GlobalList of the session: the current buffer of
-        each processor, the buffers that wait for a flush, and the free buffers,
-        whose events ETW delivered but did not overwrite yet. The command decodes
-        each event record by its trace header. EVENT_HEADER is for manifest and
-        TraceLogging providers and gives the provider GUID, event id, version,
-        opcode, task, level, and keyword. EVENT_TRACE_HEADER is for classic
-        providers. SYSTEM_TRACE_HEADER and PERFINFO_TRACE_HEADER are for kernel
-        events and give the group and hook id. MESSAGE_TRACE_HEADER is for WPP and
-        gives the message GUID and number. The command prints each event as
-        [cpu]pid.tid::time, with its payload in hex (the first 256 bytes). The ids
-        are hex, and the time is UTC, converted from the clock of the session. When
-        a loaded PDB declares the trace message format (TMF) of a WPP message, the
-        command prints the message formatted: the provider, the function, and the
-        rendered text. If the payload does not fit its TMF, it prints the message
-        raw, with the reason. The public Microsoft Wdf01000.pdb contains the TMF of
-        KMDF, but for other providers the TMF is only in the private PDB of the
-        provider, so add the PDB directory of the driver with .sympath+ and then use
-        .reload for the driver. -t count keeps the most recent count events. If the
-        records in a buffer stop being valid, the command reports the buffer with
-        the offset and does not resynchronize. In a minidump, the command decodes
-        the buffers that Windows saved in the tagged data of the dump (see
-        !wmitrace.strdump), which hold the same events as the buffers in memory.
+        Decode the events that are still in the buffers of an ETW trace session,
+        oldest first (`!wmitrace.logdump`). `count` keeps only the most recent
+        events. For a WPP message, `message_format.text` is the message rendered
+        from the TMF that a loaded PDB declares, and the raw `record.payload` is
+        always kept.
         """
-    def etw_logger(self, /, logger: int |str) -> EtwLogger |EtwDumpLogger:
+    def etw_logger(self, /, logger: int |str) -> EtwLogger:
         """
-        Show the configuration and counters of one ETW trace session.
-        
-        Decodes the _WMI_LOGGER_CONTEXT of the session. The command shows the logger
-        mode with its EVENT_TRACE_*_MODE names, and the context flags that are set
-        (from the PDB bitfields). It shows the buffer size, the buffer counts
-        (minimum, maximum, allocated, free, peak), and the buffers written, then the
-        events and buffers lost, the real-time delivery, the clock type, the start
-        time, and the flush timer. Last come the logger thread, the consumers, and
-        the log file. The command does not show events. To see them, use
-        !wmitrace.logdump. In a minidump, the command shows the few fields that the
-        tagged data of the dump records for the session: the logger mode, the buffer
-        size, the number of buffers, the clock type, and the start time.
+        Decode the `_WMI_LOGGER_CONTEXT` of one ETW trace session
+        (`!wmitrace.logger`). `logger` is the logger ID, the context address, or
+        the session name.
         """
-    def etw_loggers(self, /, logger: int |str |None = None) -> EtwLoggerTable |EtwLoggerBuffers |EtwDumpData |EtwDumpLogger:
+    def etw_loggers(self, /) -> EtwLoggerTable:
         """
-        List the active ETW trace sessions, or the trace buffers of one session.
-        
-        Without an argument, lists all active loggers of the host silo from the
-        EtwpLoggerContext array of nt!EtwpHostSiloState. For each logger, it shows
-        the id, the _WMI_LOGGER_CONTEXT, the name, the logger mode, and the buffer
-        size, and also the buffers allocated/in use/free, the buffers written, the
-        events lost, and the log file. With a logger argument, it lists each
-        _WMI_BUFFER_HEADER on the GlobalList of the logger. The argument is the
-        logger id, the session name, or the _WMI_LOGGER_CONTEXT address, and the
-        session name match ignores case. For each buffer, the command shows the
-        state (free, logging, flush, ...), the processor of the buffer, the sequence
-        number, and the number of bytes that hold events. The command also lists the
-        sessions that `logman query -ets` does not show (secure and private
-        sessions). A minidump holds no kernel pool, so in a minidump the command
-        lists instead the sessions that Windows saved in the tagged data of the dump
-        (nt!EtwSecondaryDumpDataGuid, see .enumtag): those started with
-        EVENT_TRACE_ADDTO_TRIAGE_DUMP. For each session, it shows the id, the name,
-        the logger mode, the buffer size, the clock, the start time, and the buffers
-        saved, which are all the buffers on the GlobalList of the session. With a
-        logger argument, it lists these buffers, each at its offset in the tagged
-        data.
+        List the active ETW trace sessions (`!wmitrace.strdump`).
         """
     def etw_save(self, /, logger: int |str, path: str) -> EtwLogSave:
         """
-        Save the in-memory buffers of an ETW trace session as an .etl file on the
-        host.
-        
-        Writes an .etl file that ETW consumers such as tracerpt can open. The file
-        starts with a header buffer that holds the logfile header event
-        (TRACE_LOGFILE_HEADER). This event records the buffer size, the OS version
-        and build, the processor count, the timer resolution, and the CPU speed, and
-        also the boot time, the QPC frequency, the start reference and clock type of
-        the session, and the session names. After the header buffer comes each
-        buffer on the GlobalList of the session that holds events. The command seals
-        each buffer as the logger does when it flushes a buffer, by setting the
-        valid length and filling the rest of the buffer with 0xff. Each buffer ends
-        after its last record that decodes, so the file holds the events that
-        !wmitrace.logdump shows. The current buffer of a processor can end in a
-        record that is not fully written yet. The file also includes buffers that
-        the logger already flushed to the log file of the session, if their events
-        are still in memory. The command leaves out an unreadable buffer, and after
-        it writes the file, it lists each unreadable buffer and each buffer that it
-        cut short. The time zone data records only the current bias. If a buffer is
-        compressed, the command gives an error. In a minidump, the command saves the
-        buffers of the tagged data of the dump (see !wmitrace.strdump), with the
-        boot time, the QPC frequency, the timer resolution, and the CPU speed that
-        the tagged data records.
+        Save the in-memory buffers of an ETW trace session as an .etl file at
+        `path` on the host (`!wmitrace.logsave`), which ETW consumers such as
+        tracerpt open. `logger` is the logger ID, the context address, or the
+        session name.
         """
     def exception_record(self, /, address: int) -> ExceptionRecord:
         """
@@ -7609,13 +7568,14 @@ class Inspect:
         jobs, the parent and root job, and the silo state. Flag 2 lists the
         processes assigned to the job (from ProcessListHead).
         """
-    def lookaside(self, /, address: int |None = None) -> LookasideDetail |LookasideListsDetail:
+    def lookaside(self, /, address: int) -> LookasideDetail:
         """
-        List or decode GENERAL_LOOKASIDE caches.
-        
-        With no argument, the command walks the exported nonpaged and paged
-        lookaside lists and detects cycles. With an address, it decodes only that
-        entry.
+        Decode one `GENERAL_LOOKASIDE` (`!lookaside address`).
+        """
+    def lookasides(self, /) -> LookasideListsDetail:
+        """
+        List the exported nonpaged and paged `GENERAL_LOOKASIDE` lists
+        (`!lookaside`), detecting cycles.
         """
     def mdl(self, /, address: int, pfn_count: int |None = None) -> MdlDetail:
         """
@@ -7640,60 +7600,36 @@ class Inspect:
         recognized public getter code, and EPROCESS.Vm counters. It does not scan
         physical memory, and it does not walk all VADs.
         """
-    def ndis_filter(self, /, address: int |None = None) -> NdisFilterList |NdisFilterDetail:
+    def ndis_filter(self, /, address: int) -> NdisFilterDetail:
         """
-        List the NDIS filter modules, or show one.
-        
-        Without an address, walks ndis!ndisGlobalFilterList and shows each filter
-        module of every miniport: its _NDIS_FILTER_BLOCK, state, driver image,
-        miniport, and name. With the address of a filter block, as this list or
-        !ndiskd.miniport shows it, the command shows the filter driver, the
-        miniport, the filter modules above and below it on the miniport's stack, the
-        module context (FilterModuleContext, which you can dt with the driver's
-        PDB), the link the filter last saw indicated, the reference count, the NBLs
-        and status indications NDIS dropped because the filter was not running, and
-        the pending OID request. The command needs the PDB for ndis.sys.
+        Read the NDIS filter module at `address` (`!ndiskd.filter <address>`).
         """
-    def ndis_filter_driver(self, /, address: int |None = None) -> NdisFilterDriverList |NdisFilterDriverDetail:
+    def ndis_filter_driver(self, /, address: int) -> NdisFilterDriverDetail:
         """
-        List the NDIS filter drivers, or show one and its filter modules.
-        
-        Without an address, walks ndis!ndisFilterDriverList and shows each filter
-        driver's _NDIS_FILTER_DRIVER_BLOCK, friendly name, service, image, NDIS
-        version, driver version, and number of filter modules. With the address of a
-        filter driver block, the command shows the driver's unique name (its GUID),
-        DRIVER_OBJECT, the module its code is in, its driver context and flags, and
-        its filter modules, one for each miniport it is attached to. The command
-        needs the PDB for ndis.sys.
+        Read the NDIS filter driver block at `address` and its filter
+        modules (`!ndiskd.filterdriver <address>`).
         """
-    def ndis_minidriver(self, /, address: int |None = None) -> NdisDriverList |NdisMinidriver:
+    def ndis_filter_drivers(self, /) -> NdisFilterDriverList:
         """
-        List the NDIS miniport drivers, or show one and its miniports.
-        
-        Without an address, walks ndis!ndisMiniDriverList and shows each miniport
-        driver's _NDIS_M_DRIVER_BLOCK, service name, image, NDIS version, driver
-        version, and number of miniports. With the address of a driver block, as
-        this list or !ndiskd.miniport shows it, the command shows the driver's
-        DRIVER_OBJECT, the module its code is in, its versions, and its miniports.
+        List the NDIS filter drivers (`!ndiskd.filterdriver`).
         """
-    def ndis_miniport(self, /, address: int |None = None) -> NdisMiniportList |NdisMiniportDetail:
+    def ndis_filters(self, /) -> NdisFilterList:
         """
-        Show an NDIS miniport: its driver, state, filter stack, bindings, and
-        pending OID.
-        
-        Give the address that !ndiskd.miniports lists. The command shows the device
-        name and instance ID, the miniport driver with its image and versions, the
-        adapter context (MiniportAdapterContext, the driver's own context, which you
-        can dt with the driver's PDB), the FDO and PDO (none for a virtual
-        miniport), the miniport, PnP, and power states, the medium and link, the
-        interface index and NetLuid, the reference count, the reset counts and the
-        status of the last reset, the pending OID request with its OID, type, and
-        buffer, and PendingReturnNBLCount. Then it shows the filter stack from the
-        top down along each filter's LowerFilter link, with each filter's state,
-        driver image, module context, and pending OID request, and the protocols
-        bound to the miniport. A filter whose HigherFilter does not lead back ends
-        the stack walk with the reason. Without an address, the command lists the
-        miniports as !ndiskd.miniports does.
+        List the NDIS filter modules of every miniport (`!ndiskd.filter`).
+        """
+    def ndis_minidriver(self, /, address: int) -> NdisMinidriver:
+        """
+        Read the NDIS miniport driver block at `address` and its miniports
+        (`!ndiskd.minidriver <address>`).
+        """
+    def ndis_minidrivers(self, /) -> NdisDriverList:
+        """
+        List the NDIS miniport drivers (`!ndiskd.minidriver`).
+        """
+    def ndis_miniport(self, /, address: int) -> NdisMiniportDetail:
+        """
+        Read the NDIS miniport at `address` with its driver, filter stack,
+        bindings, and pending OID request (`!ndiskd.miniport`).
         """
     def ndis_miniports(self, /) -> NdisMiniportList:
         """
@@ -7707,19 +7643,19 @@ class Inspect:
         interface index, and the friendly name. Virtual miniports, such as Hyper-V's
         adapters, are on the list too. The command needs the PDB for ndis.sys.
         """
-    def ndis_nbl(self, /, address: int, chain: bool = False, data: bool = False) -> NdisNbl |NdisNblChain:
+    def ndis_nbl(self, /, address: int, *, data: bool = False) -> NdisNbl:
         """
-        Show a NET_BUFFER_LIST and its NET_BUFFERs.
-        
-        Shows the _NET_BUFFER_LIST at the address: its next and parent NBLs, its
-        source handle with the miniport, filter module, or binding it names, its
-        pool, context, Flags and NblFlags (by NDIS_NBL_FLAGS_ name), status, and
-        child reference count, and each NET_BUFFER with its data length, data
-        offset, current MDL and offset into it, and MDL chain. -chain lists every
-        NBL on the Next chain from the address, with its NET_BUFFERs, bytes, source,
-        and status. -data dumps each NET_BUFFER's data, up to 64 KiB of it, read
-        through the MDLs' PFNs, so a buffer that is not mapped into system space
-        reads too. The command needs the PDB for ndis.sys.
+        Decode the NET_BUFFER_LIST at `address` and its NET_BUFFERs
+        (`!ndiskd.nbl`). With `data`, each NET_BUFFER's `data` holds up to
+        64 KiB of its frame, read through its MDLs' PFNs, or `data_error` why it
+        does not read (`!ndiskd.nbl -data`).
+        """
+    def ndis_nbl_chain(self, /, address: int, *, data: bool = False) -> NdisNblChain:
+        """
+        Decode the NET_BUFFER_LISTs on the `Next` chain from `address`
+        (`!ndiskd.nbl -chain`). With `data`, each NET_BUFFER's `data` holds up
+        to 64 KiB of its frame, or `data_error` why it does not read
+        (`!ndiskd.nbl -chain -data`).
         """
     def ndis_oids(self, /) -> NdisPendingOids:
         """
@@ -7732,17 +7668,14 @@ class Inspect:
         requests, so a request that stays here holds up the ones behind it. The
         command needs the PDB for ndis.sys.
         """
-    def ndis_protocol(self, /, address: int |None = None) -> NdisProtocolList |NdisProtocolDetail:
+    def ndis_protocol(self, /, address: int) -> NdisProtocolDetail:
         """
-        List the NDIS protocol drivers, or show one and its bindings.
-        
-        Without an address, walks ndis!ndisProtocolList and shows each protocol's
-        _NDIS_PROTOCOL_BLOCK, name, image, NDIS version, driver version, and number
-        of bindings. With the address of a protocol block, as this list or
-        !ndiskd.miniport shows it, the command shows the protocol's driver context,
-        flags, and BindAdapterHandlerEx, and each binding (_NDIS_OPEN_BLOCK) with
-        the miniport it opened and the protocol's binding context. The command needs
-        the PDB for ndis.sys.
+        Read the NDIS protocol block at `address` and its bindings
+        (`!ndiskd.protocol <address>`).
+        """
+    def ndis_protocols(self, /) -> NdisProtocolList:
+        """
+        List the NDIS protocol drivers (`!ndiskd.protocol`).
         """
     def object(self, /, object: int |str) -> ObjectDetail:
         """
@@ -7860,6 +7793,11 @@ class Inspect:
         the numbered locks (KeAcquireQueuedSpinLock). In-stack queued spinlocks are
         on the stacks of the callers that acquire them.
         """
+    def rcdr_drivers(self, /) -> RcdrDriverList:
+        """
+        List the drivers the WPP recorder keeps logs for
+        (`!rcdrkd.rcdrloglist`).
+        """
     def rcdr_log(self, /, driver: str, log: int |None = None) -> RcdrLogDump:
         """
         Show a driver's WPP recorder log records, oldest first.
@@ -7876,20 +7814,10 @@ class Inspect:
         PDB to the symbol path for its messages. The walk is !wdfkd.wdflogdump's:
         the records share KMDF's IFR format.
         """
-    def rcdr_log_list(self, /, driver: str |None = None) -> RcdrDriverList |RcdrLogs:
+    def rcdr_logs(self, /, driver: str) -> RcdrLogs:
         """
-        List the drivers the WPP recorder keeps logs for, or one driver's logs.
-        
-        WppRecorder.sys keeps in-flight logs for each driver built with WPP's
-        recorder, such as the inbox USB, storage, and network drivers, and KMDF
-        drivers' own WPP messages. Without an argument, lists those drivers: each
-        one's recorder context (_WPP_AUTOLOG_CONTEXT), name, image base, and number
-        of logs. With a driver, given by its name (with or without .sys) or its
-        context, lists its logs: each _WPP_AUTOLOG_HEADER, its identifier, size, and
-        the offsets of its normal and error partitions, and marks the default log
-        and a deleted one. The recorder keeps no list of its drivers; the command
-        finds each through the bugcheck callback the recorder registers for it, so
-        it needs the PDB for WppRecorder.sys.
+        List the WPP recorder logs of `driver`, by its name with or without
+        `.sys` or its recorder context (`!rcdrkd.rcdrloglist <driver>`).
         """
     def read_tagged(self, /, tag: str) -> bytes:
         """
@@ -7942,7 +7870,7 @@ class Inspect:
     def resources(self, /, limit: int = 256) -> ResourceList:
         """
         List the entries of the symbol-backed executive-resource list
-        (`!locks`).
+        (`!locks`), at most `limit` of them.
         """
     def running(self, /, include_idle: bool = False, include_stacks: bool = False) -> RunningProcessors:
         """
@@ -7981,6 +7909,13 @@ class Inspect:
         """
         Decode a SID in guest memory.
         """
+    def smbios(self, /) -> SmbiosTable:
+        """
+        Read the SMBIOS table the kernel found at boot
+        (`nt!WmipSMBiosTablePhysicalAddress`) from physical memory, with every
+        structure it holds (`!sysinfo smbios`; `!sysinfo machineid` shows the
+        identity strings of the same table).
+        """
     def srb(self, /, address: int) -> Srb:
         """
         Decode an SRB: its function, status, command, address, data, and sense.
@@ -8007,24 +7942,15 @@ class Inspect:
         Level 0 shows one frame. Levels 1 and 2 add the full stacks, with a frame
         limit. The optional filter matches process or stack symbols.
         """
-    def storport_adapter(self, /, address: int |None = None) -> StorDrivers |StorAdapter:
+    def storport_adapter(self, /, address: int) -> StorAdapter:
         """
-        List the StorPort adapters, or show one adapter and its units.
-        
-        Without an argument, walks storport's driver list (storport!RaidpPortData)
-        and each driver's adapters, and shows one line per adapter: the miniport
-        driver, the adapter extension (_RAID_ADAPTER_EXTENSION), the FDO, the PnP
-        state, the port device name, the PCI location, the number of units, and the
-        I/O state. With the address of an adapter extension or of its FDO, shows the
-        adapter: its driver, device objects, PnP and power state, the miniport's own
-        device extension (the HwDeviceExtension that StorPort passes to every Hw
-        routine, which you read with dt and the miniport's private PDB) and its
-        size, the flags (_FLAGS, _FLAGS2), the paging and crash-dump path counts,
-        each I/O gateway's outstanding and waiting requests, and each unit with its
-        bus/target/LUN, PDO, state, inquiry product, and I/O state. The command
-        needs storport's PDB. It stops each list at the head, a null or repeated
-        link, or 256 drivers or adapters, and says why it stopped early. Adapters of
-        storport's native NVMe path are listed but not decoded.
+        Read the StorPort adapter whose extension or FDO is at `address`
+        (`!storagekd.storadapter <address>`).
+        """
+    def storport_adapters(self, /) -> StorDrivers:
+        """
+        List StorPort's drivers, their adapters, and their units
+        (`!storagekd.storadapter`).
         """
     def storport_log(self, /, address: int) -> StorLog:
         """
@@ -8056,19 +7982,6 @@ class Inspect:
         and has not seen completed, from the unit's per-processor pending queues,
         with its _EXTENDED_REQUEST_BLOCK, IRP and SRB; use !irp on the IRP. It lists
         at most 256 requests and says why a list stopped early.
-        """
-    def sysinfo(self, /, section: str) -> SmbiosTable |SmbiosTable |CpuInfo:
-        """
-        Show the machine's SMBIOS identity, its SMBIOS tables, or its processor.
-        
-        Reads the SMBIOS table the kernel found at boot
-        (nt!WmipSMBiosTablePhysicalAddress) from physical memory. machineid shows
-        the BIOS vendor, version, and date, and the system's and baseboard's
-        manufacturer, product, and version, as WinDbg's !sysinfo machineid does.
-        smbios lists every structure in the table with its type, handle, and length,
-        and decodes the BIOS, system, baseboard, enclosure, processor, memory array,
-        memory device, and mapped address structures. cpuinfo shows the current
-        processor as !cpuinfo does.
         """
     def system_ptes(self, /, free_runs: bool = False) -> SystemPtesDetail:
         """
@@ -8127,18 +8040,18 @@ class Inspect:
         Show version information for the target, kernel, symbols, processor, and
         debugger.
         """
-    def virtio(self, /, address: int |None = None, module: str |None = None) -> list[VirtioFunction] |VirtioDriver:
+    def virtio(self, /) -> list[VirtioFunction]:
         """
-        List the virtio devices and the state of their virtqueues.
-        
-        Lists the virtio PCI functions with their device type and driver. With a
-        virtio-win driver's private PDB loaded, it also shows each queue's
-        indexes and state: what the device holds, what it returned that the
-        driver has not taken back, and what the driver has not published or
-        kicked. Moved compares with the previous look in guest time, and from the
-        second look the state names a queue that did not move. With an address,
-        shows the virtio_device there, typed by the module you give or by the
-        driver that owns it. See the virtio devices guide.
+        List the virtio PCI functions (`!virtio`), with the state of each
+        queue where the driver's private PDB types it. A queue's `progress`
+        counters only grow, so two calls show what moved in between.
+        """
+    def virtio_driver(self, /, address: int, module: str |None = None) -> VirtioDriver:
+        """
+        Read the `virtio_device` at `address` as its virtio-win driver sees it,
+        with its queues, named when its PCI function is found
+        (`!virtio <address> [module]`). `module` names the driver whose PDB
+        types it, by default the one that owns it.
         """
     def vm(self, /, include_processes: bool = True) -> VmDetail:
         """
@@ -8159,21 +8072,20 @@ class Inspect:
         device object points to the VPB. If the Type at the address is not
         IO_TYPE_VPB, the command shows an error.
         """
-    def vring(self, /, address: int |None = None, module: str |None = None, kind: str |None = None, raw: tuple[int, int, int, int] |None = None) -> VirtioRing:
+    def vring(self, /, address: int, module: str |None = None, *, kind: Literal["blk", "scsi", "scsi-control", "scsi-event", "net", "net-control", "gpu", "vsock"] |None = None) -> VirtioRing:
         """
-        Show a virtqueue's ring, its signalling, and its outstanding buffers.
-        
-        Give a virtqueue address that !virtio lists. Shows the ring's indexes and
-        state, when the driver wants interrupts and the device wants
-        notifications (and for a split ring whether an interrupt was due), and up
-        to 64 buffers the device holds or returned, with their descriptors (W
-        device-writable, N continues, I indirect table). Under each buffer, a line
-        decodes the request and the device's answer from the virtio
-        specification's layouts, such as a block sector and status or a SCSI
-        command and its sense. /r reads a split ring from its size and kernel
-        addresses for a driver without a PDB, and /t names what its buffers hold:
-        blk, scsi, scsi-control, scsi-event, net, net-control, gpu, or vsock. See
-        the virtio devices guide.
+        Read the virtio-win virtqueue at `address` (`!vring`): its ring, the
+        buffers the device holds or returned, and the request each carries.
+        `module` names the driver whose PDB types it, by default the one its
+        `add_buf` routine is in. `kind` says what its buffers hold, by default
+        what its device's type and the queue's index say.
+        """
+    def vring_raw(self, /, size: int, desc: int, avail: int, used: int, *, kind: Literal["blk", "scsi", "scsi-control", "scsi-event", "net", "net-control", "gpu", "vsock"] |None = None) -> VirtioRing:
+        """
+        Read a split ring from its size and the kernel addresses of its
+        descriptor table, avail ring and used ring (`!vring /r`), for a driver
+        without a PDB. `kind` says what its buffers hold, for decoding their
+        requests (`/t`).
         """
     def vtop(self, /, directory_base: int, address: int) -> VtopDetail:
         """
@@ -8183,23 +8095,18 @@ class Inspect:
         address. A directory base of zero uses the current context, and for a large
         page, the walk stops at its leaf level.
         """
-    def wdf_crash_dump(self, /, loader: bool |None = None) -> WdfLogDump |list[WdfDumpDriver]:
+    def wdf_crash_drivers(self, /) -> list[WdfDumpDriver]:
         """
-        Show the KMDF data in a crash dump: one driver's In-Flight Recorder log, or
-        the client drivers.
-        
-        When Windows writes a crash dump, Wdf01000 copies one client driver's
-        In-Flight Recorder log into the dump's tagged data (WdfDumpGuid): the log of
-        the driver whose code the bugcheck parameters point to, or of a driver set
-        to keep its log in minidumps, or else of the last KMDF driver that ran on
-        the processor that crashed. A minidump has no other copy of the log. Without
-        an argument or with log, the command shows that log, oldest record first, as
-        !wdfkd.wdflogdump shows a log in memory. Unlike WinDbg, it shows a log's
-        only record once, and it keeps the oldest record that survives in a log that
-        has wrapped. With loader, it lists the client drivers that Wdf01000 recorded
-        (WdfDumpGuid2), with the KMDF version each bound to and its
-        _FX_DRIVER_GLOBALS; the first entry is the framework itself. The command
-        needs the PDB for Wdf01000.
+        List the KMDF client drivers that KMDF recorded in a crash dump, with
+        their version and globals (`!wdfkd.wdfcrashdump loader`).
+        """
+    def wdf_crash_log(self, /) -> WdfLogDump:
+        """
+        Get the In-Flight Recorder log of the one KMDF client driver that
+        KMDF copied into a crash dump (`!wdfkd.wdfcrashdump`): the driver
+        that the bugcheck parameters point to, or one set to keep its log in
+        minidumps, or else the last one that ran on the processor that
+        crashed. A minidump has no other copy of it.
         """
     def wdf_device(self, /, handle: int) -> WdfDeviceDetail:
         """
@@ -8360,7 +8267,7 @@ class Inspect:
         verifier flags (FxRequestVerifierFlags) only when its verifier is on for the
         driver.
         """
-    def work_queues(self, /, include_stacks: bool = False, queue_types: Sequence[str] |None = None) -> WorkQueues:
+    def work_queues(self, /, include_stacks: bool = False, queue_types: Sequence[Literal["critical", "delayed", "hypercritical"]] |None = None) -> WorkQueues:
         """
         Get the executive worker queues, their pending work items, and their
         worker threads (`!exqueue`). `include_stacks` adds the stack of each
