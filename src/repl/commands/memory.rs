@@ -1017,7 +1017,6 @@ fn pagein_request(
     state = Halted,
     run = Run,
     writes = [Memory],
-    live_only,
     forms = [page_in],
 )]
 fn pagein(

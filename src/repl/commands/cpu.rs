@@ -594,7 +594,6 @@ pub struct MsrWrite(MsrValue);
     target = Kernel,
     state = Halted,
     writes = [Registers],
-    live_only,
     capability = Msr,
     python = none
 )]

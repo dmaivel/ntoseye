@@ -332,7 +332,6 @@ fn ib(session: &mut Session, #[arg(invoked)] name: &str, port: u64) -> Result<Po
     kind = Action,
     target = Kernel,
     writes = [Hardware],
-    live_only,
     python = none,
 )]
 fn ob(session: &mut Session, #[arg(invoked)] name: &str, port: u64, value: u64) -> Result<()> {
@@ -371,7 +370,6 @@ fn iw(session: &mut Session, #[arg(invoked)] name: &str, port: u64) -> Result<Po
     kind = Action,
     target = Kernel,
     writes = [Hardware],
-    live_only,
     python = none,
 )]
 fn ow(session: &mut Session, #[arg(invoked)] name: &str, port: u64, value: u64) -> Result<()> {
@@ -410,7 +408,6 @@ fn id(session: &mut Session, #[arg(invoked)] name: &str, port: u64) -> Result<Po
     kind = Action,
     target = Kernel,
     writes = [Hardware],
-    live_only,
     python = none,
 )]
 fn od(session: &mut Session, #[arg(invoked)] name: &str, port: u64, value: u64) -> Result<()> {

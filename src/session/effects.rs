@@ -18,6 +18,8 @@ pub struct Effects {
     /// The state the operation changes besides execution.
     pub writes: &'static [Writes],
     /// Refused on a crash dump or user-mode minidump, which never change.
+    /// Writing guest state (`Writes::{Memory, Registers, Hardware}`)
+    /// implies it.
     pub live_only: bool,
     /// A backend capability the operation needs.
     pub capability: Option<DebugCapability>,
@@ -52,6 +54,14 @@ impl Effects {
         state: RunState::Halted,
         ..Effects::NONE
     };
+
+    /// Whether the operation writes the guest's memory, registers or
+    /// devices, which a dump does not have and VTL0 cannot write in VTL1.
+    pub fn writes_guest(&self) -> bool {
+        self.writes
+            .iter()
+            .any(|write| matches!(write, Writes::Memory | Writes::Registers | Writes::Hardware))
+    }
 
     /// Whether the operation needs the target halted now: a
     /// [`RunState::HaltedOrParkedThread`] operation does not while a parked
@@ -154,7 +164,8 @@ pub enum Refusal {
     AlreadyHalted,
     /// The operation runs or steps a static snapshot (a crash dump).
     NoExecutionControl { backend: &'static str },
-    /// A `live_only` operation on a crash dump or minidump.
+    /// A `live_only` operation, or one that writes guest state, on a crash
+    /// dump or minidump.
     StaticDump,
     /// The backend lacks the declared capability.
     Unsupported {
@@ -241,7 +252,7 @@ impl Session {
                 backend: runner.name(),
             });
         }
-        if effects.live_only && self.target.phys.is_dump() {
+        if (effects.live_only || effects.writes_guest()) && self.target.phys.is_dump() {
             return Err(Refusal::StaticDump);
         }
         if let Some(capability) = effects.capability
@@ -272,11 +283,7 @@ impl Session {
         if !target.in_secure_address_space() {
             return None;
         }
-        let writes_guest = effects
-            .writes
-            .iter()
-            .any(|write| matches!(write, Writes::Memory | Writes::Registers | Writes::Hardware));
-        let refused = effects.target.reads_nt() || writes_guest;
+        let refused = effects.target.reads_nt() || effects.writes_guest();
         if target.in_secure_scope() {
             let needs_vcpu =
                 effects.state != RunState::Any && effects.writes != [Writes::Breakpoints];
