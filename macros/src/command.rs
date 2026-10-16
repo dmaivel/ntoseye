@@ -77,7 +77,11 @@ fn expand_form(form: FormOptions, mut function: ItemFn) -> Result<TokenStream> {
             "a form is an SDK method: its first parameter is `&Session` or `&mut Session`",
         ));
     }
-    if !function.attrs.iter().any(|attr| attr.path().is_ident("doc")) {
+    if !function
+        .attrs
+        .iter()
+        .any(|attr| attr.path().is_ident("doc"))
+    {
         return Err(Error::new(
             function.sig.ident.span(),
             "a form needs a doc comment: its SDK method's docstring",
@@ -319,7 +323,10 @@ impl Attr {
             }
             let python = python.ok_or_else(|| missing("python"))?;
             if python.is_empty() {
-                return Err(Error::new(span, "a form is an SDK method: `python = Object`"));
+                return Err(Error::new(
+                    span,
+                    "a form is an SDK method: `python = Object`",
+                ));
             }
             if sdk && word.is_some() {
                 return Err(Error::new(span, "an `sdk` form has no REPL `word`"));
@@ -1309,4 +1316,3 @@ impl Method<'_> {
         })
     }
 }
-

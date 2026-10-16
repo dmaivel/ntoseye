@@ -762,11 +762,18 @@ mod tests {
         let registry = command_registry();
         let usage = |name: &str| -> Vec<Option<&str>> {
             let spec = registry.get(name).unwrap();
-            spec.forms.iter().map(|form| form.map(|form| form.usage)).collect()
+            spec.forms
+                .iter()
+                .map(|form| form.map(|form| form.usage))
+                .collect()
         };
         assert_eq!(
             usage("!alpc"),
-            [Some("/p <port>"), Some("/m <message>"), Some("/lpp [process]")]
+            [
+                Some("/p <port>"),
+                Some("/m <message>"),
+                Some("/lpp [process]")
+            ]
         );
         assert_eq!(usage("!apc"), [Some("[process|thread]"), None, None]);
         assert_eq!(
