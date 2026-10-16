@@ -16,14 +16,12 @@ pub static COMMANDS: [CommandSpec];
 /// One command: its names and help (the REPL's `help`, the docs' command
 /// reference), how its arguments complete, what it needs and changes
 /// ([`Effects`], which [`crate::session::Session::admit`] enforces), and its
-/// handler. `#[command]` and `repl_command!` both register one in
-/// [`COMMANDS`].
+/// handler. Every `#[command]` registers one in [`COMMANDS`].
 pub struct CommandSpec {
     pub names: &'static [&'static str],
     /// The `help` listing's and the command reference's group.
     pub category: &'static str,
-    /// `None` for a `repl_command!`, which does not declare it.
-    pub kind: Option<CommandKind>,
+    pub kind: CommandKind,
     pub usage: &'static str,
     pub summary: &'static str,
     pub details: Option<&'static str>,
@@ -118,7 +116,6 @@ pub enum CommandHandler {
     /// passes on how they ended, so a refusal inside it abandons the rest of
     /// the line and reaches the host as one typed directly would.
     ArgsFlow(fn(&mut ReplState<'_>, CommandInvocation<'_>) -> Result<Flow>),
-    NoArgs(fn(&mut ReplState<'_>) -> Result<()>),
 }
 
 pub struct CommandInvocation<'a> {
@@ -565,163 +562,6 @@ pub fn report_refusal(typed: &str, refusal: Refusal) {
              first"
         ),
     }
-}
-
-#[macro_export]
-macro_rules! repl_command {
-    (
-        $method:ident();
-        $($body:tt)*
-    ) => {
-        $crate::repl_command! {
-            @register
-            $crate::repl::CommandHandler::NoArgs(|state| state.$method());
-            $($body)*
-        }
-    };
-
-    (
-        $method:ident;
-        $($body:tt)*
-    ) => {
-        $crate::repl_command! {
-            @register
-            $crate::repl::CommandHandler::Args(|state, invocation| state.$method(invocation));
-            $($body)*
-        }
-    };
-
-    (
-        $method:ident -> Flow;
-        $($body:tt)*
-    ) => {
-        $crate::repl_command! {
-            @register
-            $crate::repl::CommandHandler::ArgsFlow(|state, invocation| state.$method(invocation));
-            $($body)*
-        }
-    };
-
-    (
-        names: [$($name:expr),+ $(,)?],
-        category: $category:expr,
-        usage: $usage:expr,
-        summary: $summary:expr
-        $(, details: $details:expr)?
-        $(, completion: $completion:tt)?
-        $(, run_state: $run_state:ident)?
-        $(, run: $run:ident)?
-        $(, style: $style:ident)?
-        $(, target: $target:ident)?
-        , flow: $flow:ident
-        $(,)?
-    ) => {
-        $crate::repl_command! {
-            @register
-            $crate::repl::CommandHandler::NoArgs(|_state| Ok(()));
-            names: [$($name),+],
-            category: $category,
-            usage: $usage,
-            summary: $summary
-            $(, details: $details)?
-            $(, completion: $completion)?
-            $(, run_state: $run_state)?
-            $(, run: $run)?
-            $(, style: $style)?
-            $(, target: $target)?
-            , flow: $flow,
-        }
-    };
-
-    (
-        @register
-        $handler:expr;
-        names: [$($name:expr),+ $(,)?],
-        category: $category:expr,
-        usage: $usage:expr,
-        summary: $summary:expr
-        $(, details: $details:expr)?
-        $(, completion: $completion:tt)?
-        $(, run_state: $run_state:ident)?
-        $(, run: $run:ident)?
-        $(, style: $style:ident)?
-        $(, target: $target:ident)?
-        $(, flow: $flow:ident)?
-        $(,)?
-    ) => {
-        const _: () = {
-            #[linkme::distributed_slice($crate::repl::COMMANDS)]
-            static COMMAND: $crate::repl::CommandSpec = $crate::repl::CommandSpec {
-                names: &[$($name),+],
-                category: $category,
-                kind: None,
-                usage: $usage,
-                summary: $summary,
-                details: $crate::repl_command!(@details $($details)?),
-                completion: $crate::repl_command!(@completion $($completion)?),
-                forms: &[],
-                effects: $crate::session::effects::Effects {
-                    target: $crate::repl_command!(@target $($target)?),
-                    state: $crate::repl_command!(@run_state $($run_state)?),
-                    run: $crate::repl_command!(@run $($run)?),
-                    ..$crate::session::effects::Effects::NONE
-                },
-                style: $crate::repl_command!(@style $($style)?),
-                flow: $crate::repl_command!(@flow $($flow)?),
-                handler: $handler,
-            };
-        };
-    };
-
-    (@completion) => { $crate::repl::CompletionSpec::None };
-    (@completion None) => { $crate::repl::CompletionSpec::None };
-    (@completion [$($completion:ident),+ $(,)?]) => {
-        $crate::repl::CompletionSpec::PerArg(&[
-            $($crate::repl_command!(@completion_strategy $completion)),+
-        ])
-    };
-    (@completion $completion:ident) => {
-        $crate::repl::CompletionSpec::All($crate::repl_command!(@completion_strategy $completion))
-    };
-
-    (@completion_strategy None) => { $crate::repl::CompletionStrategy::None };
-    (@completion_strategy Symbol) => { $crate::repl::CompletionStrategy::Symbol };
-    (@completion_strategy Expression) => { $crate::repl::CompletionStrategy::Expression };
-    (@completion_strategy Type) => { $crate::repl::CompletionStrategy::Type };
-    (@completion_strategy Process) => { $crate::repl::CompletionStrategy::Process };
-    (@completion_strategy Thread) => { $crate::repl::CompletionStrategy::Thread };
-    (@completion_strategy Vcpu) => { $crate::repl::CompletionStrategy::Vcpu };
-    (@completion_strategy Breakpoint) => { $crate::repl::CompletionStrategy::Breakpoint };
-    (@completion_strategy Driver) => { $crate::repl::CompletionStrategy::Driver };
-    (@completion_strategy Alias) => { $crate::repl::CompletionStrategy::Alias };
-    (@completion_strategy RegistryKey) => { $crate::repl::CompletionStrategy::RegistryKey };
-
-    (@details) => { None };
-    (@details $details:expr) => { Some($details) };
-
-    (@run_state) => { $crate::session::effects::RunState::Any };
-    (@run_state Halted) => { $crate::session::effects::RunState::Halted };
-    (@run_state HaltedOrParkedThread) => {
-        $crate::session::effects::RunState::HaltedOrParkedThread
-    };
-    (@run_state Running) => { $crate::session::effects::RunState::Running };
-
-    (@run) => { $crate::session::effects::RunEffect::None };
-    (@run Step) => { $crate::session::effects::RunEffect::Step };
-    (@run Run) => { $crate::session::effects::RunEffect::Run };
-
-    (@style) => { $crate::repl::CommandStyle::StructuredArgs };
-    (@style StructuredArgs) => { $crate::repl::CommandStyle::StructuredArgs };
-    (@style RawTail) => { $crate::repl::CommandStyle::RawTail };
-    (@style ExpressionTail) => { $crate::repl::CommandStyle::ExpressionTail };
-
-    (@target) => { $crate::session::effects::TargetScope::Any };
-    (@target Any) => { $crate::session::effects::TargetScope::Any };
-    (@target Kernel) => { $crate::session::effects::TargetScope::Kernel };
-
-    (@flow) => { $crate::repl::Flow::Continue };
-    (@flow Continue) => { $crate::repl::Flow::Continue };
-    (@flow Quit) => { $crate::repl::Flow::Quit };
 }
 
 #[cfg(test)]

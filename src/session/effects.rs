@@ -1,5 +1,5 @@
 //! What an operation needs of the target and what it changes, declared once
-//! per command (`#[command(target = ..., state = ...)]`, `repl_command!`) and
+//! per command (`#[command(target = ..., state = ...)]`) and
 //! enforced by [`Session::admit`], which the REPL dispatcher and the Python
 //! SDK both call before running it. Each host words a [`Refusal`] its own way
 //! (the REPL prefixes the typed name, the SDK raises a typed exception), so

@@ -418,13 +418,6 @@ impl ReplState<'_> {
                 return Ok(flow);
             }
             match spec.handler {
-                CommandHandler::NoArgs(handler) => {
-                    if !parsed.raw_tail.trim().is_empty() {
-                        outln!("{}\n", command_help(parsed.name));
-                        return Ok(Flow::Continue);
-                    }
-                    handler(self)?;
-                }
                 CommandHandler::Args(handler) => {
                     let Some(invocation) = invocation_or_report(line, &parsed, spec.style) else {
                         return Ok(Flow::Continue);

@@ -395,8 +395,8 @@ fn lit_list(input: syn::parse::ParseStream<'_>) -> Result<Vec<LitStr>> {
         .collect())
 }
 
-/// `completion = ...`: a bare strategy completes every word with it (as
-/// `repl_command!`'s `completion: Expression`), a list one per word.
+/// `completion = ...`: a bare strategy completes every word with it, a list
+/// one per word.
 enum Completion {
     All(Ident),
     PerArg(Vec<Ident>),
@@ -972,7 +972,7 @@ impl Command {
             crate::repl::CommandSpec {
                 names: &[#(#names),*],
                 category: #category,
-                kind: Some(crate::repl::CommandKind::#kind),
+                kind: crate::repl::CommandKind::#kind,
                 usage: #usage,
                 summary: #summary,
                 details: #details,
