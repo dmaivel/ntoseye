@@ -631,7 +631,7 @@ def test_saved_general_registers_are_the_exits(halted: Debugger) -> None:
         saved = next(saved for saved in halted.cpus[stop.cpu].saved_vtl if saved.current)
         assert (saved.vtl, saved.rip, saved.exit_reason) == (at_entry.vtl, at_entry.rip, at_entry.exit_reason)
         assert saved.general_registers is not None
-        assert {name: getattr(saved.general_registers, name) for name in GPRS} == truth
+        assert {name: saved.general_registers[name] for name in GPRS} == truth
     assert compared == ATTEMPTS, f"only {compared} exits of the root partition's VPs were caught"
 
 
