@@ -2559,6 +2559,33 @@ fn show_partition_4(session: &mut Session) {
     session.show_partition(4, partition_target, vps, "p4.1".to_string());
 }
 
+/// A run or step in a partition view runs the target, so it is admitted on
+/// the target's execution control, not refused for the view's backend,
+/// which runs nothing; over a crash dump, which has none, it still is.
+#[test]
+fn a_partition_view_admits_runs_on_the_targets_execution_control() {
+    use super::effects::{Effects, Refusal, RunEffect};
+    let run = Effects {
+        run: RunEffect::Run,
+        ..Effects::HALTED
+    };
+    let step = Effects {
+        run: RunEffect::Step,
+        ..Effects::HALTED
+    };
+    let mut live = session_with_mock(MockBackend::default());
+    show_partition_4(&mut live);
+    let mut dump = session_over_memory(0x1000, &[0; 0x100]);
+    show_partition_4(&mut dump);
+
+    assert!(live.admit(&run).is_ok());
+    assert!(live.admit(&step).is_ok());
+    assert!(matches!(
+        dump.admit(&run),
+        Err(Refusal::NoExecutionControl { backend: "dmp" })
+    ));
+}
+
 /// Every breakpoint is the target's, also in a partition view: one set there
 /// is the partition's, on VP 0 when `/c 0` names it, and programmed into the
 /// target's debug registers; a software one is refused, as it would be

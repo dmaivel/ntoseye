@@ -283,6 +283,15 @@ impl Session {
         }
     }
 
+    /// The backend that runs and steps the target: the target's, also while
+    /// a partition view is shown, whose own backend runs nothing.
+    pub fn run_backend(&self) -> &dyn DebugBackend {
+        match &self.partition_view {
+            Some(view) => view.backend.as_ref(),
+            None => self.backend.as_ref(),
+        }
+    }
+
     /// Write `after`, the register file of the VP selected in a partition
     /// view as patched from `before`, to the target's vCPU that runs the VP
     /// at the stop, whose registers the VP's are: only the registers the two

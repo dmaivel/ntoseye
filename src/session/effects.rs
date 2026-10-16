@@ -170,13 +170,18 @@ impl Session {
         }
         // Halted without execution control is a static snapshot (a crash
         // dump): a command that would run or step it could only fail on the
-        // way, or report a stop that never happened.
+        // way, or report a stop that never happened. A partition view's
+        // backend runs nothing: a run there runs the target, through the
+        // target's backend, which the view keeps aside.
+        let runner = self.run_backend();
         if effects.run != RunEffect::None
             && !running
-            && !self.supports(DebugCapability::ExecutionControl)
+            && !runner.capabilities().iter().any(|entry| {
+                entry.capability == DebugCapability::ExecutionControl && entry.supported
+            })
         {
             return Err(Refusal::NoExecutionControl {
-                backend: self.backend.name(),
+                backend: runner.name(),
             });
         }
         if effects.live_only && self.target.phys.is_dump() {
