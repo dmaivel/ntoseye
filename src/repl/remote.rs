@@ -35,7 +35,7 @@ pub fn run_remote_command(
     let errors = diagnostics::errors_reported();
     let (flow, mut text) = output::capture(|| {
         let line = state.line.clone();
-        if let Some(flow) = state.begin_remote_line(&line)? {
+        if let Some(flow) = state.begin_remote_line(&line) {
             return Ok(flow);
         }
         state.dispatch_line(&line)

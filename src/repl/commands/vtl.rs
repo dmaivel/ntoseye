@@ -580,7 +580,7 @@ impl ReplState<'_> {
     /// `.process`, `attach`, `detach`, `.context`) or a resume. The live
     /// register file and the root it implies come back, which is a VTL1 root
     /// again when the vCPU is stopped there.
-    pub(super) fn leave_vtl1(&mut self) {
+    pub fn leave_vtl1(&mut self) {
         if self.ctx.target.in_secure_scope() {
             self.ctx.target.leave_secure_scope();
             self.ctx.restore_live_register_cache();

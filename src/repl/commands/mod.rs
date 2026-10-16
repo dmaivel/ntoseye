@@ -351,7 +351,7 @@ impl ReplState<'_> {
             error!("{reason}");
             return Ok(Some(Flow::Denied));
         }
-        if let Some(flow) = self.gate_remote_command(spec, typed)? {
+        if let Some(flow) = self.gate_remote_command(spec, typed) {
             return Ok(Some(flow));
         }
         if let Err(refusal) = self.ctx.admit(&spec.effects) {

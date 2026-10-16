@@ -24,6 +24,7 @@ use crate::types::VirtAddr;
 use crate::view::record::{ToView, Typed};
 
 use super::context::Space;
+pub use super::handle::Debugger;
 pub use super::inspect::Inspect;
 pub use super::memory::Memory;
 pub use super::module::{Device, Driver, Module};

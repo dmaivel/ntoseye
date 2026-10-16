@@ -1,12 +1,21 @@
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::time::Duration;
 
 use owo_colors::OwoColorize;
 
-use crate::dbg_backend::{BugcheckInfo, ModuleEvent, processor_index_from_backend_thread_id};
+use crate::dbg_backend::{
+    BugcheckInfo, ContinueDisposition, ModuleEvent, processor_index_from_backend_thread_id,
+};
+use crate::diagnostics::print_notice;
+use crate::error::{Error, Result};
 use crate::guest::ModuleInfo;
 use crate::repl::commands::display;
 use crate::session::stops::module_event_line;
-use crate::session::{BreakpointHit, HitKind, Session, ShownStop, Stop, StopKind};
+use crate::session::{
+    BreakpointHit, Cancel, CancelBehavior, HitKind, Motion, RunOutcome, Session, ShownStop, Stop,
+    StopKind,
+};
 use crate::target::{HYPERVISOR_CONTEXT, Target, ThreadInfo, kthread_state_name};
 use crate::types::VirtAddr;
 use crate::ui;
@@ -92,10 +101,18 @@ pub fn refresh_stop_caches_post(debugger: &Target, caches: &ReplCaches) {
     caches.refresh_expression_context(debugger);
 }
 
-/// Render a stop [`Session::run`] reported: the cause the break banner
-/// names, then the stopped context. Every REPL path that surfaces a stop
-/// (a wait, a step, a parked stop, a break-in) renders it here.
-pub fn print_stop(session: &mut Session, caches: &ReplCaches, stop: &Stop) {
+/// A stop [`Session::run`] reported: the cause the break banner names, then
+/// the stopped context, then what the core noted meanwhile. Every REPL path
+/// that surfaces a stop (a run command, a wait, a parked stop, a break-in)
+/// renders it here.
+impl Render for Stop {
+    fn render(&self, repl: &mut ReplState<'_>, (): ()) {
+        print_stop(repl.ctx, &repl.caches, self);
+        repl.flush_notices();
+    }
+}
+
+fn print_stop(session: &mut Session, caches: &ReplCaches, stop: &Stop) {
     session.target.selected_frame = None;
     refresh_stop_caches_pre(session, caches);
     refresh_stop_caches_post(&session.target, caches);
@@ -678,4 +695,339 @@ pub fn print_break_context_at(
     );
     #[cfg(not(feature = "cli"))]
     print_stop_text(session, &stop);
+}
+
+/// How long `g` on a running target waits for a stop it already reported.
+const PENDING_STOP_POLL: Duration = Duration::from_millis(100);
+
+/// The cancellation of a run a dispatch drives within its stop `budget`: a
+/// remote client's budget hands the target back running when it is spent;
+/// the interactive prompt (no budget) waits for a stop or Ctrl+C (the
+/// session's interrupt request, which halts).
+fn budget_cancel<'a>(
+    budget: Option<&'a StopWaitBudget>,
+    tick: Option<&'a dyn Fn(&mut Session)>,
+) -> Cancel<'a> {
+    Cancel {
+        flag: budget.map(|budget| &*budget.cancel),
+        deadline: budget.and_then(|budget| budget.deadline),
+        behavior: CancelBehavior::ReturnRunning,
+        tick,
+    }
+}
+
+/// The cancellation a `kind = Run` command that drives its own run (`wt`)
+/// gets: Ctrl+C or a remote client's budget ends it, halted where it got to.
+pub fn run_cancel(budget: Option<&StopWaitBudget>) -> Cancel<'_> {
+    budget_cancel(budget, None).with_behavior(CancelBehavior::Halt)
+}
+
+impl ReplState<'_> {
+    /// Drive a run command's motion and render where it ended: the REPL
+    /// half of `#[command(kind = Run)]`.
+    pub fn run_motion(&mut self, motion: Motion) {
+        // `.vtl 1` is a memory view, not the vCPU's context: resume from the
+        // live context so the stop that follows is rendered as itself.
+        self.leave_vtl1();
+        // What the operation noted before the run (an unconfirmed `g`
+        // site), above the run it is about.
+        self.flush_notices();
+        match motion {
+            Motion::Continue { disposition } => self.resume(disposition),
+            Motion::Break => {
+                self.clear_selected_frame();
+                let outcome = self.ctx.run(Motion::Break, &Cancel::NEVER);
+                self.report_run(outcome, "failed to interrupt");
+            }
+            Motion::Wait => {
+                let outcome = self.drive(Motion::Wait, true);
+                self.report_run(outcome, "error waiting for stop");
+            }
+            Motion::Step => {
+                let outcome = self.drive(Motion::Step, false);
+                self.report_run(outcome, "failed to step");
+            }
+            Motion::StepOver | Motion::StepOut => {
+                let failure = if matches!(motion, Motion::StepOver) {
+                    "failed to step over"
+                } else {
+                    "failed to step out"
+                };
+                match self.ctx.plan(motion) {
+                    Ok(planned) => {
+                        let outcome = self.drive(planned, true);
+                        self.report_run(outcome, failure);
+                    }
+                    Err(error) => error!("{error}"),
+                }
+            }
+            Motion::RunTo { address, .. } => {
+                let outcome = self.drive(motion, true);
+                self.report_run(
+                    outcome,
+                    &format!("failed to run to {}", ui::addr(address.0)),
+                );
+            }
+            // A walk into or over calls; a remote client's budget ends it
+            // where it is.
+            Motion::Walk { .. } => match self.drive(motion, false) {
+                Err(error @ Error::StepLimit(_)) => {
+                    error!("{error}");
+                    print_stop_separator();
+                    print_break_context(self.ctx);
+                }
+                outcome => self.report_run(outcome, "failed while stepping"),
+            },
+        }
+    }
+
+    /// Resume (`g`, `gh`, `gn` without an address) and render the stop. On
+    /// a running target, a stop it already reported is rendered; otherwise
+    /// it keeps the run it is on.
+    fn resume(&mut self, disposition: ContinueDisposition) {
+        self.clear_selected_frame();
+        if self.ctx.backend.is_running() {
+            let cancel = Cancel::within(PENDING_STOP_POLL);
+            match self.ctx.run(Motion::Wait, &cancel) {
+                Ok(RunOutcome::Stopped(stop)) => stop.render(self, ()),
+                Ok(RunOutcome::Running) => error!("VM is running"),
+                Err(e) => error!("error checking running VM: {e}"),
+            }
+            return;
+        }
+        let motion = Motion::Continue { disposition };
+        // A remote host's bounded wait for a stop nothing is set to cause
+        // only spends its budget; an empty line waits for one anyway, and a
+        // wait with no limit waits, ended by Ctrl+C as at the prompt.
+        if self.stop_wait_bounded() && !self.stop_is_set() {
+            match self.ctx.run(motion, &Cancel::poll()) {
+                Ok(RunOutcome::Running) => outln!(
+                    "{}",
+                    ui::muted(
+                        "the target runs on: no breakpoint or event filter is set to stop it, so \
+                         this does not wait (an empty line waits for a stop anyway)"
+                    )
+                ),
+                outcome => self.report_run(outcome, "failed to continue"),
+            }
+            return;
+        }
+        let outcome = self.drive(motion, true);
+        self.report_run(outcome, "failed to continue");
+    }
+
+    /// Run `motion` through the session's driver within this dispatch's
+    /// stop budget, printing what arrives while it runs: guest prints (for a
+    /// backend without KD's stream), notices, and, for a run that waits at
+    /// the prompt and `announce`s it, the running indicator. Breakpoint
+    /// actions print as they run.
+    fn drive(&mut self, motion: Motion, announce: bool) -> Result<RunOutcome> {
+        let announce = announce && self.stop_wait.is_none();
+        let announced = Cell::new(false);
+        let printed = Cell::new(self.printed_debug_seq);
+        let interactive = self.context == DispatchContext::Interactive;
+        let tick = |session: &mut Session| {
+            if announce && !announced.get() && session.backend.is_running() {
+                announced.set(true);
+                let print = || {
+                    outln!(
+                        "{}",
+                        "VM running, waiting for stop (Ctrl+C to pause)...".bright_black()
+                    )
+                };
+                #[cfg(feature = "cli")]
+                native::running(print);
+                #[cfg(not(feature = "cli"))]
+                print();
+            }
+            if interactive && !session.backend_streams_debug_output() {
+                let page = session.read_debug_output(printed.get());
+                printed.set(page.next_seq);
+                for line in page.lines {
+                    eprintln!("{}", line.text);
+                }
+            }
+            for notice in session.take_notices() {
+                print_notice(&notice);
+            }
+        };
+        self.clear_selected_frame();
+        let cancel = budget_cancel(self.stop_wait.as_ref(), Some(&tick));
+        let outcome = self.ctx.run(motion, &cancel);
+        self.printed_debug_seq = printed.get();
+        if announced.get() {
+            // A wait that ended without a stop (an error, a spent budget)
+            // still stops the indicator.
+            #[cfg(feature = "cli")]
+            native::finish_running();
+            // Past the `^C` the terminal echoed.
+            if let Ok(RunOutcome::Stopped(stop)) = &outcome
+                && stop.kind == StopKind::Interrupt
+            {
+                outln!();
+            }
+        }
+        outcome
+    }
+
+    /// Render what a run ended on: its stop, or that a remote client's
+    /// budget handed the target back still running. `failure` names what
+    /// failed for an error.
+    fn report_run(&mut self, outcome: Result<RunOutcome>, failure: &str) {
+        match outcome {
+            Ok(RunOutcome::Stopped(stop)) => stop.render(self, ()),
+            Ok(RunOutcome::Running) => self.print_still_running(),
+            Err(error) => {
+                error!("{failure}: {error}");
+                if self.ctx.backend.is_running() {
+                    outln!(
+                        "{}",
+                        ui::muted("target still running; use `break` to try again")
+                    );
+                }
+            }
+        }
+    }
+
+    /// Say that a remote client's stop budget ran out with the target still
+    /// running, and how to go on.
+    fn print_still_running(&self) {
+        let hint = if self.context == DispatchContext::Remote(RemoteClient::Sdk) {
+            "target still running; `dbg.wait()` to keep waiting, or `dbg.interrupt()` to \
+             break in"
+        } else {
+            "target still running; call again to keep waiting, or `break` to interrupt"
+        };
+        outln!("{}", ui::muted(hint));
+    }
+
+    /// Collect the next stop for a host that hands control back while the
+    /// target runs: a stop the idle servicer already parked is rendered at
+    /// once; otherwise wait (within [`ReplState::stop_wait`]) for one and
+    /// render it. A halted target with nothing pending returns immediately.
+    pub fn collect_stop(&mut self) {
+        if self.ctx.backend.is_running() || self.ctx.stop_pending() {
+            self.run_motion(Motion::Wait);
+        }
+    }
+
+    /// The start of a call from a host that hands control back while the
+    /// target runs: a stop parked since the last call is rendered first, and
+    /// an empty line only waits for the next stop. Returns the flow to report
+    /// instead of dispatching `line`; `None` means dispatch it (each command
+    /// on it is then admitted by [`ReplState::gate_remote_command`]).
+    pub fn begin_remote_line(&mut self, line: &str) -> Option<Flow> {
+        self.surface_parked_stop();
+        if line.is_empty() {
+            self.collect_stop();
+            return Some(Flow::Continue);
+        }
+        None
+    }
+
+    /// Admit one resolved command for a remote host, against the target's
+    /// state at this point in the line (a `break` earlier on the same line
+    /// has already halted it). As WinDbg queues input typed at a running
+    /// debuggee, a command that needs the target halted (or would move it)
+    /// waits within the stop budget for the halt; nothing runs while the
+    /// target is still running. MCP refuses one resume against a stop the
+    /// client has not seen; the SDK has no such gate because the stop is
+    /// exposed as `dbg.stop`. Returns the flow to report instead of running
+    /// the command; `None` means run it now.
+    pub fn gate_remote_command(&mut self, spec: &CommandSpec, typed: &str) -> Option<Flow> {
+        let client = match self.context {
+            DispatchContext::Remote(client)
+                if matches!(client, RemoteClient::Mcp | RemoteClient::Sdk) =>
+            {
+                client
+            }
+            _ => return None,
+        };
+        let name = typed;
+        let moves = spec.effects.run != RunEffect::None;
+        let needs_halt = spec.effects.needs_halt(self.ctx);
+        if self.ctx.backend.is_running() && (moves || needs_halt) {
+            // Waiting out a time limit for a stop no breakpoint will cause
+            // only spends it. The guest can still stop by itself (a
+            // bugcheck, a `DbgBreakPoint` over KD), which an empty line
+            // waits for, as does a wait with no limit, which a caller ends
+            // with Ctrl+C as at the prompt.
+            let can_stop = !self.stop_wait_bounded()
+                || self.ctx.backend.has_pending_stop()
+                || self.stop_is_set();
+            if !can_stop {
+                outln!(
+                    "'{name}' was not run: the target is running and no breakpoint or event \
+                     filter is set to stop it. `break` halts it (`break; {name}` on one line), \
+                     and an empty line waits for a stop anyway."
+                );
+                return Some(Flow::Denied);
+            }
+            self.collect_stop();
+            if self.ctx.backend.is_running() {
+                outln!("'{name}' was not run.");
+                return Some(Flow::Denied);
+            }
+            self.unseen_stop_rendered = true;
+        }
+        if client == RemoteClient::Mcp && self.unseen_stop_rendered && moves {
+            outln!(
+                "the target stopped (above); '{name}' was not run so the stop is not \
+                 skipped. Re-issue it to continue."
+            );
+            return Some(Flow::Denied);
+        }
+        None
+    }
+
+    /// Render a stop the idle servicer parked (or the backend caught) since
+    /// the last dispatch, if any, without waiting: its action runs first, and
+    /// one that resumes leaves nothing to render. Returns whether one was
+    /// rendered; a remote host then refuses to resume past it on this call.
+    pub fn surface_parked_stop(&mut self) -> bool {
+        if !self.ctx.stop_pending() {
+            return false;
+        }
+        self.clear_selected_frame();
+        match self.ctx.run(Motion::Wait, &Cancel::poll()) {
+            Ok(RunOutcome::Stopped(stop)) => {
+                stop.render(self, ());
+                self.unseen_stop_rendered = true;
+                true
+            }
+            Ok(RunOutcome::Running) => {
+                self.flush_notices();
+                false
+            }
+            Err(error) => {
+                error!("error collecting the stop: {error}");
+                false
+            }
+        }
+    }
+
+    /// Whether something the user set will stop the target: an enabled
+    /// breakpoint, or a module load or unload filter that breaks (`sxe ld`,
+    /// `sxe ud:<module>`). What stops it unasked, a bugcheck or a
+    /// `DbgBreakPoint` over KD, does not count.
+    fn stop_is_set(&self) -> bool {
+        self.ctx
+            .breakpoints
+            .list()
+            .iter()
+            .any(|breakpoint| breakpoint.enabled)
+            || self
+                .ctx
+                .exception_policies
+                .module_event_entries()
+                .any(|policy| policy.mode == ExceptionPolicyMode::Break)
+    }
+
+    /// Whether this dispatch's wait for a stop has a time limit: an MCP
+    /// call's, or an SDK call given a timeout.
+    fn stop_wait_bounded(&self) -> bool {
+        self.stop_wait
+            .as_ref()
+            .is_some_and(|budget| budget.deadline.is_some())
+    }
 }

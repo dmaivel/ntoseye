@@ -1,6 +1,5 @@
 //! Debugger execution-state [`View`] builders: run status,
-//! vCPUs, breakpoints, exception policies, stacks, call traces, and
-//! disassembly.
+//! vCPUs, breakpoints, exception policies, stacks, and disassembly.
 
 use ntoseye_macros::record;
 
@@ -9,7 +8,6 @@ use crate::exception_policy::{self, ExceptionPolicyFinalAction, exception_alias}
 use crate::guest::exit_reason_name;
 use crate::guest::hypercalls::tlfs_hypercall;
 use crate::guest::vm_exits;
-use crate::session::{self, CallTraceEnd};
 use crate::types::VirtAddr;
 
 /// A code breakpoint or data watchpoint (`bl`).
@@ -108,34 +106,6 @@ pub struct PartitionFilter {
     pub vp: Option<u32>,
 }
 
-/// A `wt` call trace: why it stopped, the instructions that it stepped,
-/// and the call tree.
-#[record]
-pub struct CallTrace {
-    /// `returned`, `limit`, `interrupted`, `breakpoint`, `diverted`, or
-    /// `failed`. `interrupted` means Ctrl+C or the `timeout` ended it.
-    /// `diverted` means that an interrupt diverted a step and the traced
-    /// thread is not known. Any value other than `returned` means that
-    /// the tree is partial.
-    pub end: &'static str,
-    /// A description of the failure, for `failed`.
-    pub error: Option<String>,
-    /// The number of single-stepped instructions.
-    pub instructions: usize,
-    pub root: CallTraceFrame,
-}
-
-/// One call-tree node of a `wt` trace.
-#[record]
-pub struct CallTraceFrame {
-    /// The called function.
-    pub name: String,
-    /// The number of instructions stepped in the function itself.
-    pub instructions: usize,
-    /// The calls that the function made.
-    pub children: Vec<CallTraceFrame>,
-}
-
 /// One exception stop policy (`sx`).
 #[record]
 pub struct ExceptionPolicy {
@@ -230,32 +200,6 @@ pub fn breakpoint(bp: &Breakpoint) -> BreakpointStatus {
         temporary: bp.temporary,
         watch_access: bp.watch_access_name(),
         watch_length: bp.watch_length(),
-    }
-}
-
-/// A `wt` call trace.
-pub fn call_trace(trace: &session::CallTrace) -> CallTrace {
-    let (end, error) = match &trace.end {
-        CallTraceEnd::Returned => ("returned", None),
-        CallTraceEnd::Limit => ("limit", None),
-        CallTraceEnd::Interrupted => ("interrupted", None),
-        CallTraceEnd::Breakpoint => ("breakpoint", None),
-        CallTraceEnd::Diverted => ("diverted", None),
-        CallTraceEnd::Failed(error) => ("failed", Some(error.clone())),
-    };
-    CallTrace {
-        end,
-        error,
-        instructions: trace.instructions,
-        root: call_trace_frame(&trace.root),
-    }
-}
-
-fn call_trace_frame(frame: &session::CallTraceFrame) -> CallTraceFrame {
-    CallTraceFrame {
-        name: frame.name.clone(),
-        instructions: frame.instructions,
-        children: frame.children.iter().map(call_trace_frame).collect(),
     }
 }
 

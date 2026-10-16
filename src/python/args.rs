@@ -20,9 +20,9 @@ use crate::dbg_backend::{ContinueDisposition, WatchpointAccess};
 use crate::exception_policy::ExceptionPolicyMode;
 use crate::guest::ProcessInfo;
 use crate::kd::KdMemorySource;
+use crate::session::WalkUntil;
 #[cfg(feature = "python-stubs")]
 use crate::session::driver::StopPy;
-use crate::session::{StepMode, WalkUntil};
 use crate::target::ReloadScope;
 use crate::target::ThreadInfo;
 use crate::target::irpfind::IrpPool;
@@ -93,8 +93,15 @@ literal_arg! {
     }
 }
 
+impl PyArg for ContinueDisposition {
+    type Py = Disposition;
+    fn from_py(value: Disposition) -> Self {
+        value.0
+    }
+}
+
 literal_arg! {
-    /// `step(until=...)`: the instruction class the walk stops before.
+    /// An instruction class a step walk stops before.
     Until(WalkUntil) {
         "call" => WalkUntil::Call,
         "ret" => WalkUntil::Return,
@@ -102,11 +109,22 @@ literal_arg! {
     }
 }
 
-literal_arg! {
-    /// `run_to(step=...)`.
-    Step(StepMode) {
-        "over" => StepMode::Over,
-        "into" => StepMode::Into,
+/// `step(until=...)`, `step_over(until=...)`: the instruction class the
+/// walk stops before (`tc`/`tt`/`th`), or the address it stops at
+/// (`ta`/`pa`).
+#[derive(FromPyObject)]
+pub enum UntilArg {
+    Flow(Until),
+    Address(u64),
+}
+
+impl PyArg for WalkUntil {
+    type Py = UntilArg;
+    fn from_py(value: UntilArg) -> Self {
+        match value {
+            UntilArg::Flow(Until(until)) => until,
+            UntilArg::Address(address) => WalkUntil::Address(VirtAddr(address)),
+        }
     }
 }
 

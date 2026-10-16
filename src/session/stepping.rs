@@ -317,12 +317,35 @@ impl Session {
     /// instruction *after* a `call`, otherwise a plain single-step. The shared
     /// decision used by the REPL `p` and [`Self::step_over`].
     pub fn step_over_target(&mut self) -> Result<StepKind> {
-        let instruction = self.current_instruction()?;
+        let instruction = match self.current_instruction() {
+            Ok(instruction) => instruction,
+            Err(error) => return Err(self.undecodable_step_over(error)),
+        };
         if instruction.is_call {
             Ok(StepKind::RunTo(VirtAddr(instruction.next_ip)))
         } else {
             Ok(StepKind::Single)
         }
+    }
+
+    /// Why a step over cannot decode the current instruction. Stepping
+    /// *over* needs it decoded to know whether it is a call, and it cannot
+    /// be read while its page is out; a single step executes the fetch
+    /// instead of reading it, which is what brings the page in.
+    fn undecodable_step_over(&mut self, error: Error) -> Error {
+        let ip = self.read_registers().ok().and_then(|registers| {
+            self.register_map
+                .read_u64("rip", &registers)
+                .or_else(|_| self.register_map.read_u64("pc", &registers))
+                .ok()
+        });
+        Error::DebugInfo(match (&error, ip) {
+            (Error::BadVirtualAddress(_) | Error::AddressNotInDump(_), Some(ip)) => format!(
+                "the page holding {ip:016x} is not resident, so the instruction cannot be \
+                 decoded to step over it; `t` single-steps through the fetch"
+            ),
+            _ => format!("failed to decode current instruction: {error}"),
+        })
     }
 
     /// The current frame's caller return address (the step-out target). Walks a

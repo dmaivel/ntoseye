@@ -274,21 +274,55 @@ impl ExceptionRecord {
     }
 }
 
-/// One call-tree node of a [`CallTrace`].
-#[derive(Debug, Clone)]
+/// One call-tree node of a `wt` trace.
+#[record]
 pub struct CallTraceFrame {
+    /// The called function.
     pub name: String,
+    /// The number of instructions stepped in the function itself.
     pub instructions: usize,
+    /// The calls that the function made.
     pub children: Vec<CallTraceFrame>,
 }
 
-/// The call tree `wt` collected ([`Session::trace_calls`]), how many
-/// instructions it single-stepped, and why it stopped.
-#[derive(Debug, Clone)]
+/// A `wt` call trace: the call tree, the instructions that it stepped, and
+/// why it stopped ([`Session::trace_calls`]).
+#[record(impl)]
 pub struct CallTrace {
     pub root: CallTraceFrame,
+    /// The number of single-stepped instructions.
     pub instructions: usize,
+    #[record(skip)]
     pub end: CallTraceEnd,
+}
+
+#[record]
+impl CallTrace {
+    /// `returned`, `limit`, `interrupted`, `breakpoint`, `diverted`, or
+    /// `failed`. `interrupted` means Ctrl+C or the `timeout` ended it.
+    /// `diverted` means that an interrupt diverted a step and the traced
+    /// thread is not known. Any value other than `returned` means that
+    /// the tree is partial.
+    #[record(getter, rename = "end")]
+    pub fn end_name(&self) -> &'static str {
+        match self.end {
+            CallTraceEnd::Returned => "returned",
+            CallTraceEnd::Limit => "limit",
+            CallTraceEnd::Interrupted => "interrupted",
+            CallTraceEnd::Breakpoint => "breakpoint",
+            CallTraceEnd::Diverted => "diverted",
+            CallTraceEnd::Failed(_) => "failed",
+        }
+    }
+
+    /// A description of the failure, for `failed`.
+    #[record(getter)]
+    pub fn error(&self) -> Option<String> {
+        match &self.end {
+            CallTraceEnd::Failed(error) => Some(error.clone()),
+            _ => None,
+        }
+    }
 }
 
 /// Why [`Session::trace_calls`] stopped tracing. Anything but `Returned`

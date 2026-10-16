@@ -8,7 +8,6 @@ use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use pyo3::{PyTraverseError, PyVisit};
 
-use super::args::{Disposition, Step, Until};
 use super::breakpoints::{Breakpoints, Exceptions};
 use super::command::admit;
 use super::context::Space;
@@ -19,13 +18,11 @@ use super::memory::Memory;
 use super::module::{Drivers, Modules};
 use super::process::Processes;
 use super::secure::SecureKernel;
-use super::symbols::Location;
 use super::symbols::{self, Symbols};
 use super::thread::{Cpus, Threads};
 use super::types::Types;
 use super::userdump::UserDump;
 use super::{err, raise, runcontrol, runner};
-use crate::dbg_backend::ContinueDisposition;
 use crate::dump_writer::{collect_dump_metadata, write_kernel_dump};
 use crate::session::Stop;
 use crate::session::effects::Effects;
@@ -221,8 +218,8 @@ impl Debugger {
 
     /// The current stop when the target is halted. `None` when the target runs.
     #[getter]
-    fn stop<'py>(slf: &Bound<'py, Self>) -> PyResult<Typed<'py, Option<Stop>>> {
-        runcontrol::current_stop(slf)
+    fn stop<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Option<Stop>>> {
+        runcontrol::current_stop(py, self)
     }
 
     /// False after a reboot until the module list of the kernel exists. During
@@ -274,121 +271,22 @@ impl Debugger {
         runner::command(slf, line, timeout)
     }
 
-    /// Resume the target without a wait, and acknowledge the current exception
-    /// as `handled` or `not_handled` (KD only).
-    #[pyo3(signature = (disposition=Disposition(ContinueDisposition::Handled)))]
-    fn cont(slf: &Bound<'_, Self>, disposition: Disposition) -> PyResult<()> {
-        runcontrol::cont(slf, disposition.0)
-    }
-
-    /// Resume and wait for the next stop, resuming again automatically after a
-    /// hit in the wrong process or a hit with a false condition. Returns the
-    /// `Stop`, or `None` if the target is still running after `timeout`
-    /// seconds.
-    #[pyo3(signature = (timeout=None, *, disposition=Disposition(ContinueDisposition::Handled)))]
-    fn run<'py>(
-        slf: &Bound<'py, Self>,
-        timeout: Option<f64>,
-        disposition: Disposition,
-    ) -> PyResult<Option<Typed<'py, Stop>>> {
-        runcontrol::run(slf, timeout, disposition.0)
-    }
-
     /// Wait for the next stop without resuming. If the target is already
     /// halted, return the current stop immediately, and return `None` if the
     /// target is still running after `timeout`.
     #[pyo3(signature = (timeout=None))]
     fn wait<'py>(
-        slf: &Bound<'py, Self>,
+        &self,
+        py: Python<'py>,
         timeout: Option<f64>,
-    ) -> PyResult<Option<Typed<'py, Stop>>> {
-        runcontrol::wait(slf, timeout)
+    ) -> PyResult<Typed<'py, Option<Stop>>> {
+        runcontrol::wait(py, self, timeout)
     }
 
-    /// Run until execution reaches `target` (`g <addr>`), which is an address
-    /// or a symbolic `module!name[+off]`. With `step="over"`/`"into"`,
-    /// single-step to it (`pa`/`ta`). Other stops on the way are returned as
-    /// they are. With `timeout`, if execution does not reach `target` in time,
-    /// the target is interrupted where it is, and the stop's
-    /// kind is `"interrupt"`.
-    #[pyo3(signature = (target, timeout=None, *, step=None))]
-    fn run_to<'py>(
-        slf: &Bound<'py, Self>,
-        target: Location,
-        timeout: Option<f64>,
-        step: Option<Step>,
-    ) -> PyResult<Option<Typed<'py, Stop>>> {
-        runcontrol::run_to(slf, target, timeout, step.map(|Step(mode)| mode))
-    }
-
-    /// Single-step one instruction. With `until` ("call", "ret", "branch"),
-    /// step into instructions until the next instruction of that kind
-    /// (`tc`/`tt`/`th`). With `timeout` (seconds), an `until` walk that does
-    /// not end in time is interrupted where it is, and the stop's
-    /// kind is `"interrupt"`: a `"step"` stop always ends a walk where it was going.
-    /// Under VBS on the gdb backend, the other vCPUs can run while the step's
-    /// vCPU waits on them; a watchpoint hit one of them makes meanwhile ends
-    /// the step, and is returned instead.
-    #[pyo3(signature = (until=None, timeout=None))]
-    fn step<'py>(
-        slf: &Bound<'py, Self>,
-        until: Option<Until>,
-        timeout: Option<f64>,
-    ) -> PyResult<Typed<'py, Stop>> {
-        runcontrol::step(slf, until.map(|Until(flow)| flow), timeout)
-    }
-
-    /// Step over the current instruction. With `until`, step over instructions
-    /// until the next call, ret, or branch (`pc`/`pt`/`ph`). Stepping over a
-    /// call runs the target until the stepping thread returns from it. With
-    /// `timeout` (seconds), a run or walk that does not end in time is
-    /// interrupted where it is, and the stop's kind is `"interrupt"`.
-    #[pyo3(signature = (until=None, timeout=None))]
-    fn step_over<'py>(
-        slf: &Bound<'py, Self>,
-        until: Option<Until>,
-        timeout: Option<f64>,
-    ) -> PyResult<Typed<'py, Stop>> {
-        runcontrol::step_over(slf, until.map(|Until(flow)| flow), timeout)
-    }
-
-    /// Run until the stepping thread returns from the current function (`gu`).
-    /// With `timeout` (seconds), the thread is interrupted where it is if it
-    /// does not return in time, and the stop's kind is `"interrupt"`.
-    #[pyo3(signature = (timeout=None))]
-    fn step_out<'py>(slf: &Bound<'py, Self>, timeout: Option<f64>) -> PyResult<Typed<'py, Stop>> {
-        runcontrol::step_out(slf, timeout)
-    }
-
-    /// Trace calls until the current function returns (`wt`), single-stepping
-    /// at most `limit` instructions. Returns `{end, error, instructions,
-    /// root}`, where `root` is the call tree and `end` gives the reason that
-    /// tracing stopped. With `timeout` (seconds), a trace that is still
-    /// running then ends as `interrupted`, halted where it got to: a step
-    /// that follows the traced thread waits for it to run the instruction,
-    /// which can take long when other threads keep reaching it first.
-    #[pyo3(signature = (limit=10_000, timeout=None))]
-    fn trace_calls<'py>(
-        slf: &Bound<'py, Self>,
-        limit: usize,
-        timeout: Option<f64>,
-    ) -> PyResult<Typed<'py, view::execution::CallTrace>> {
-        runcontrol::trace_calls(slf, limit, timeout)
-    }
-
-    /// Break into the running target and return the stop that results.
-    fn interrupt<'py>(slf: &Bound<'py, Self>) -> PyResult<Typed<'py, Stop>> {
-        runcontrol::interrupt(slf)
-    }
-
-    /// Reboot the target (`.reboot`). The next stop is of kind `"reload"`.
-    fn reboot(slf: &Bound<'_, Self>) -> PyResult<()> {
-        runcontrol::reboot(slf)
-    }
-
-    /// Crash the target on purpose (`.crash`), which causes a bugcheck stop.
-    fn crash(slf: &Bound<'_, Self>) -> PyResult<()> {
-        runcontrol::crash(slf)
+    /// Break into the running target and return the stop that results. On a
+    /// halted target, return the stop it is halted at (`break` refuses it).
+    fn interrupt<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Stop>> {
+        runcontrol::interrupt(py, self)
     }
 
     /// Rebuild the guest state now (find the kernel again). Stops already do

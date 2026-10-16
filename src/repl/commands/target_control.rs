@@ -6,74 +6,59 @@ use crate::kd::{KdFileMapping, kd_files, load_map_file};
 use crate::output;
 use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
-use crate::session::Session;
+use crate::session::{Motion, Session};
 use indicatif::ProgressStyle;
 use ntoseye_macros::command;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-repl_command! {
-    cmd_reboot();
-    names: [".reboot", "reboot", ".restart", "restart"],
-    category: "target control",
-    usage: ".reboot",
-    summary: "Reboot the debug target and reload its kernel context.",
-    details: "ntoseye sends the reboot without confirmation, and handles the next KD state-change through the normal target-reload path.",
-    run_state: Halted,
-    run: Run,
+/// Reboot the debug target and reload its kernel context.
+///
+/// ntoseye sends the reboot without confirmation, and handles the next KD
+/// state-change through the normal target-reload path.
+#[command(
+    names = [".reboot", "reboot", ".restart", "restart"],
+    category = "target control",
+    kind = Run,
+    state = Halted,
+    run = Run,
+    capability = TargetControl,
+    python = Debugger,
+    usage = ".reboot"
+)]
+fn reboot(session: &mut Session) -> Result<Motion> {
+    session
+        .request_reboot()
+        .map_err(|error| Error::DebugInfo(format!("failed to reboot target: {error}")))?;
+    outln!("Target is rebooting; waiting for target reload.");
+    Ok(Motion::Wait)
 }
 
-repl_command! {
-    cmd_crash();
-    names: [".crash", "crash"],
-    category: "target control",
-    usage: ".crash",
-    summary: "Force a MANUALLY_INITIATED_CRASH (bugcheck 0xE2).",
-    details: "Windows first writes its crash dump, which often takes a minute, and the target ignores break-ins during this time. Then Windows reboots or, if automatic restart is disabled, breaks in. Ctrl+C stops the wait.",
-    run_state: Halted,
-    run: Run,
-}
-
-fn target_control_available(state: &ReplState<'_>) -> bool {
-    let capabilities = state.ctx.capabilities();
-    if supports_capability(&capabilities, DebugCapability::TargetControl) {
-        true
-    } else {
-        error!(
-            "target control is not supported by the {} backend",
-            state.ctx.backend.name()
-        );
-        false
-    }
-}
-
-impl ReplState<'_> {
-    fn cmd_reboot(&mut self) -> Result<()> {
-        if !target_control_available(self) {
-            return Ok(());
-        }
-        if let Err(error) = self.ctx.request_reboot() {
-            error!("failed to reboot target: {error}");
-            return Ok(());
-        }
-        outln!("Target is rebooting; waiting for target reload.");
-        self.wait_for_stop_after_resume()
-    }
-
-    fn cmd_crash(&mut self) -> Result<()> {
-        if !target_control_available(self) {
-            return Ok(());
-        }
-        if let Err(error) = self.ctx.request_crash() {
-            error!("failed to force target bugcheck: {error}");
-            return Ok(());
-        }
-        outln!(
-            "Forcing target bugcheck 0xE2 (MANUALLY_INITIATED_CRASH); the target writes its crash dump before rebooting or breaking in."
-        );
-        self.wait_for_stop_after_resume()
-    }
+/// Force a MANUALLY_INITIATED_CRASH (bugcheck 0xE2).
+///
+/// Windows first writes its crash dump, which often takes a minute, and the
+/// target ignores break-ins during this time. Then Windows reboots or, if
+/// automatic restart is disabled, breaks in. Ctrl+C stops the wait.
+#[command(
+    names = [".crash", "crash"],
+    category = "target control",
+    kind = Run,
+    state = Halted,
+    run = Run,
+    capability = TargetControl,
+    python = Debugger,
+    usage = ".crash"
+)]
+fn crash(session: &mut Session) -> Result<Motion> {
+    session
+        .request_crash()
+        .map_err(|error| Error::DebugInfo(format!("failed to force target bugcheck: {error}")))?;
+    outln!(
+        "Forcing target bugcheck 0xE2 (MANUALLY_INITIATED_CRASH); the target writes its crash \
+         dump before rebooting or breaking in."
+    );
+    Ok(Motion::Wait)
 }
 
 /// Write a full PAGEDU64 kernel dump from the halted target.

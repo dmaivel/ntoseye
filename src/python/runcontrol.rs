@@ -1,6 +1,8 @@
-//! Run control for `Debugger` on the session's driver ([`Session::run`]):
-//! resuming, waiting, stepping, and the Python `when=` breakpoint
-//! conditions that decide whether a hit surfaces.
+//! The SDK half of `#[command(kind = Run)]`: driving a run command's motion
+//! on the session's driver ([`Session::run`]) for `Debugger`'s generated
+//! run methods (`run`, `step`, `step_over`, `step_out`, `trace_calls`,
+//! `reboot`, `crash`), plus `wait` and `interrupt`, and the Python `when=`
+//! breakpoint conditions that decide whether a hit surfaces.
 
 use std::cell::Cell;
 use std::collections::HashSet;
@@ -10,35 +12,12 @@ use pyo3::prelude::*;
 
 use super::command::admit;
 use super::handle::Debugger;
-use super::symbols::Location;
 use super::{err, raise, timeout_arg};
-use crate::dbg_backend::ContinueDisposition;
+use crate::error::Result;
 use crate::output;
-use crate::session::effects::{Effects, RunEffect, RunState};
-use crate::session::{
-    Cancel, CancelBehavior, Motion, RunOutcome, Session, StepMode, Stop, StopKind, WalkUntil,
-};
-use crate::types::VirtAddr;
-use crate::view;
-use crate::view::record::Typed;
-
-/// What the run-control methods need, as the REPL's run commands declare
-/// it (`g`; `t`/`p`; `gu`, `pa`, `wt`, `.reboot`, `.crash`), so
-/// [`admit`] refuses them as it refuses those.
-const RESUME: Effects = Effects {
-    run: RunEffect::Run,
-    ..Effects::NONE
-};
-const STEP: Effects = Effects {
-    state: RunState::Halted,
-    run: RunEffect::Step,
-    ..Effects::NONE
-};
-const HALTED_RUN: Effects = Effects {
-    state: RunState::Halted,
-    run: RunEffect::Run,
-    ..Effects::NONE
-};
+use crate::session::effects::Effects;
+use crate::session::{Cancel, CancelBehavior, Motion, RunOutcome, Session, Stop, StopKind};
+use crate::view::record::{ToView, Typed};
 
 thread_local! {
     static IN_CONDITION: Cell<bool> = const { Cell::new(false) };
@@ -73,37 +52,40 @@ impl Drop for ConditionGuard {
 /// The stop the target is halted at, or `None` while it runs. Reading it
 /// consumes nothing: a stop caught while idle is still delivered to the next
 /// wait (and its action run there).
-pub fn current_stop<'py>(dbg: &Bound<'py, Debugger>) -> PyResult<Typed<'py, Option<Stop>>> {
-    let stop = dbg
-        .get()
-        .with_session(|session| session.halted_stop().map_err(err))?;
-    Typed::new(dbg.py(), stop)
+pub fn current_stop<'py>(py: Python<'py>, dbg: &Debugger) -> PyResult<Typed<'py, Option<Stop>>> {
+    let stop = dbg.with_session(|session| session.halted_stop().map_err(err))?;
+    Typed::new(py, stop)
 }
 
-/// Run `motion` once on the session, writing what breakpoint actions and
-/// filter commands printed meanwhile to `sys.stdout`.
+/// Write what the session printed meanwhile (breakpoint actions, filter
+/// commands, a command's own lines) to `sys.stdout`.
+fn forward(py: Python<'_>, printed: String) -> PyResult<()> {
+    if !printed.is_empty() {
+        py.import("sys")?
+            .getattr("stdout")?
+            .call_method1("write", (printed,))?;
+    }
+    Ok(())
+}
+
+/// Run `motion` once on the session, forwarding what it printed.
 fn drive(
-    dbg: &Bound<'_, Debugger>,
+    py: Python<'_>,
+    dbg: &Debugger,
     motion: Motion,
     deadline: Option<Instant>,
     behavior: CancelBehavior,
 ) -> PyResult<RunOutcome> {
-    let (outcome, printed) = dbg.get().with_session(move |session| {
+    let (outcome, printed) = dbg.with_session(move |session| {
         let cancel = Cancel {
             flag: None,
             deadline,
             behavior,
             tick: None,
         };
-        let (outcome, printed) = output::capture(|| session.run(motion, &cancel));
-        Ok((outcome, printed))
+        Ok(output::capture(|| session.run(motion, &cancel)))
     })?;
-    if !printed.is_empty() {
-        let py = dbg.py();
-        py.import("sys")?
-            .getattr("stdout")?
-            .call_method1("write", (printed,))?;
-    }
+    forward(py, printed)?;
     prune_conditions(dbg)?;
     outcome.map_err(err)
 }
@@ -113,53 +95,39 @@ fn drive(
 /// passed by going on with the same motion ([`Session::decline`]). `None`:
 /// the target is still running when `timeout` ran out (`ReturnRunning`).
 fn settle<'py>(
-    dbg: &Bound<'py, Debugger>,
+    py: Python<'py>,
+    dbg: &Debugger,
     motion: Motion,
     timeout: Option<Duration>,
     behavior: CancelBehavior,
 ) -> PyResult<Option<Typed<'py, Stop>>> {
     let deadline = timeout.map(|timeout| Instant::now() + timeout);
-    let (mut motion, stepping) = dbg.get().with_session(|session| {
+    let (mut motion, stepping) = dbg.with_session(|session| {
         let stepping = session.current_thread.clone();
         Ok((session.plan(motion).map_err(err)?, stepping))
     })?;
     loop {
-        let RunOutcome::Stopped(stop) = drive(dbg, motion.clone(), deadline, behavior)? else {
+        let RunOutcome::Stopped(stop) = drive(py, dbg, motion.clone(), deadline, behavior)? else {
             return Ok(None);
         };
-        if let Some(stop) = surface(dbg, stop)? {
+        if let Some(stop) = surface(py, dbg, stop)? {
             return Ok(Some(stop));
         }
         let declined = motion;
-        motion = dbg
-            .get()
-            .with_session(|session| session.decline(declined, &stepping).map_err(err))?;
+        motion = dbg.with_session(|session| session.decline(declined, &stepping).map_err(err))?;
     }
-}
-
-/// [`settle`] for a motion that always ends on a stop: one that `timeout`
-/// cuts short is halted where it is.
-fn settle_stop<'py>(
-    dbg: &Bound<'py, Debugger>,
-    motion: Motion,
-    timeout: Option<Duration>,
-) -> PyResult<Typed<'py, Stop>> {
-    settle(dbg, motion, timeout, CancelBehavior::Halt)?
-        .ok_or_else(|| raise("the target is running; no stop to report"))
 }
 
 /// The SDK's `stop`, first asking its breakpoint's `when=` callback.
 /// `None` means the callback declined the hit; a callback that raises
 /// surfaces the hit with `condition_error`, as a failed `condition=` does.
-fn surface<'py>(dbg: &Bound<'py, Debugger>, stop: Stop) -> PyResult<Option<Typed<'py, Stop>>> {
-    let py = dbg.py();
+fn surface<'py>(py: Python<'py>, dbg: &Debugger, stop: Stop) -> PyResult<Option<Typed<'py, Stop>>> {
     let condition = stop
         .breakpoint
         .as_ref()
         .filter(|_| stop.kind == StopKind::Breakpoint)
         .and_then(|hit| {
-            dbg.get()
-                .conditions
+            dbg.conditions
                 .lock()
                 .get(&hit.id)
                 .map(|callable| callable.clone_ref(py))
@@ -180,9 +148,7 @@ fn surface<'py>(dbg: &Bound<'py, Debugger>, stop: Stop) -> PyResult<Option<Typed
         Ok(false) => Ok(None),
         Err(error) => {
             let error = error.to_string();
-            let failed = dbg
-                .get()
-                .with_session(|session| Ok(session.fail_stop_condition(error)))?;
+            let failed = dbg.with_session(|session| Ok(session.fail_stop_condition(error)))?;
             Typed::new(py, failed.unwrap_or(stop)).map(Some)
         }
     }
@@ -190,169 +156,136 @@ fn surface<'py>(dbg: &Bound<'py, Debugger>, stop: Stop) -> PyResult<Option<Typed
 
 /// Drop `when=` callbacks of breakpoints that no longer exist (a one-shot
 /// that fired, a reload that cleared them).
-fn prune_conditions(dbg: &Bound<'_, Debugger>) -> PyResult<()> {
-    let live = dbg.get().with_session(|session| {
+pub fn prune_conditions(dbg: &Debugger) -> PyResult<()> {
+    let live = dbg.with_session(|session| {
         Ok(session
             .breakpoints
             .managed_ids()
             .into_iter()
             .collect::<HashSet<_>>())
     })?;
-    dbg.get()
-        .conditions
-        .lock()
-        .retain(|id, _| live.contains(id));
+    dbg.conditions.lock().retain(|id, _| live.contains(id));
     Ok(())
 }
 
-/// Resume without waiting. A stop already waiting surfaces (its action runs)
-/// and stays the current stop, which the next wait reports.
-pub fn cont(dbg: &Bound<'_, Debugger>, disposition: ContinueDisposition) -> PyResult<()> {
+/// Admit a run command and run its operation for the motion it plans,
+/// forwarding what the operation printed (`.reboot`'s announcement).
+fn plan_run(
+    py: Python<'_>,
+    dbg: &Debugger,
+    operation: &str,
+    effects: &Effects,
+    f: impl FnOnce(&mut Session) -> Result<Motion> + Send,
+) -> PyResult<Motion> {
     reject_condition_mutation()?;
-    dbg.get()
-        .with_session(|session| admit(session, &RESUME, "cont"))?;
-    drive(
-        dbg,
-        Motion::Continue { disposition },
-        Some(Instant::now()),
-        CancelBehavior::ReturnRunning,
-    )
-    .map(drop)
-}
-
-pub fn run<'py>(
-    dbg: &Bound<'py, Debugger>,
-    timeout: Option<f64>,
-    disposition: ContinueDisposition,
-) -> PyResult<Option<Typed<'py, Stop>>> {
-    reject_condition_mutation()?;
-    let timeout = timeout_arg(timeout)?;
-    dbg.get()
-        .with_session(|session| admit(session, &RESUME, "run"))?;
-    settle(
-        dbg,
-        Motion::Continue { disposition },
-        timeout,
-        CancelBehavior::ReturnRunning,
-    )
-}
-
-pub fn wait<'py>(
-    dbg: &Bound<'py, Debugger>,
-    timeout: Option<f64>,
-) -> PyResult<Option<Typed<'py, Stop>>> {
-    let timeout = timeout_arg(timeout)?;
-    settle(dbg, Motion::Wait, timeout, CancelBehavior::ReturnRunning)
-}
-
-pub fn run_to<'py>(
-    dbg: &Bound<'py, Debugger>,
-    location: Location,
-    timeout: Option<f64>,
-    step: Option<StepMode>,
-) -> PyResult<Option<Typed<'py, Stop>>> {
-    reject_condition_mutation()?;
-    let timeout = timeout_arg(timeout)?;
-    let address = dbg.get().with_session(|session| {
-        admit(session, &HALTED_RUN, "run_to")?;
-        location
-            .resolve(session, session.target.current_dtb())
-            .map(VirtAddr)
+    let (motion, printed) = dbg.with_session(|session| {
+        admit(session, effects, operation)?;
+        Ok(output::capture(|| f(session)))
     })?;
-    let motion = match step {
-        None => Motion::RunTo {
-            address,
-            frame: None,
-            disposition: ContinueDisposition::Handled,
-        },
-        Some(mode) => Motion::walk(mode, WalkUntil::Address(address)),
-    };
-    settle_stop(dbg, motion, timeout).map(Some)
+    forward(py, printed)?;
+    motion.map_err(err)
 }
 
-pub fn step<'py>(
-    dbg: &Bound<'py, Debugger>,
-    until: Option<WalkUntil>,
+/// A run or wait hands back a running target when the timeout ends; any
+/// other motion is halted where it got to.
+fn timeout_behavior(motion: &Motion) -> CancelBehavior {
+    match motion {
+        Motion::Continue { .. } | Motion::Wait => CancelBehavior::ReturnRunning,
+        _ => CancelBehavior::Halt,
+    }
+}
+
+/// A `#[command(kind = Run)]` method admitted on a running target (`run`):
+/// the stop its motion ends on, or `None` if the target is still running
+/// when `timeout` (seconds) ran out.
+pub fn run_motion<'py>(
+    py: Python<'py>,
+    dbg: &Debugger,
+    operation: &str,
+    effects: &Effects,
     timeout: Option<f64>,
+    f: impl FnOnce(&mut Session) -> Result<Motion> + Send,
+) -> PyResult<Typed<'py, Option<Stop>>> {
+    let timeout = timeout_arg(timeout)?;
+    let motion = plan_run(py, dbg, operation, effects, f)?;
+    let behavior = timeout_behavior(&motion);
+    let stop = settle(py, dbg, motion, timeout, behavior)?;
+    Ok(optional(py, stop))
+}
+
+/// A `#[command(kind = Run)]` method on a halted target (`step`): the stop
+/// its motion ends on; a `timeout` (seconds) halts it where it got to.
+pub fn run_motion_to_stop<'py>(
+    py: Python<'py>,
+    dbg: &Debugger,
+    operation: &str,
+    effects: &Effects,
+    timeout: Option<f64>,
+    f: impl FnOnce(&mut Session) -> Result<Motion> + Send,
 ) -> PyResult<Typed<'py, Stop>> {
-    reject_condition_mutation()?;
     let timeout = timeout_arg(timeout)?;
-    dbg.get()
-        .with_session(|session| admit(session, &STEP, "step"))?;
-    let motion = until.map_or(Motion::Step, |until| Motion::walk(StepMode::Into, until));
-    settle_stop(dbg, motion, timeout)
+    let motion = plan_run(py, dbg, operation, effects, f)?;
+    let behavior = timeout_behavior(&motion);
+    settle(py, dbg, motion, timeout, behavior)?
+        .ok_or_else(|| raise("the target is running; no stop to report"))
 }
 
-pub fn step_over<'py>(
-    dbg: &Bound<'py, Debugger>,
-    until: Option<WalkUntil>,
+/// A `#[command(kind = Run)]` method whose operation drives the run itself
+/// (`trace_calls`): `timeout` (seconds) halts it where it got to.
+pub fn run_cancellable<'py, T: ToView + Send>(
+    py: Python<'py>,
+    dbg: &Debugger,
+    operation: &str,
+    effects: &Effects,
     timeout: Option<f64>,
-) -> PyResult<Typed<'py, Stop>> {
+    f: impl FnOnce(&mut Session, &Cancel<'_>) -> Result<T> + Send,
+) -> PyResult<Typed<'py, T>> {
     reject_condition_mutation()?;
-    let timeout = timeout_arg(timeout)?;
-    dbg.get()
-        .with_session(|session| admit(session, &STEP, "step_over"))?;
-    let motion = until.map_or(Motion::StepOver, |until| {
-        Motion::walk(StepMode::Over, until)
-    });
-    settle_stop(dbg, motion, timeout)
-}
-
-pub fn step_out<'py>(
-    dbg: &Bound<'py, Debugger>,
-    timeout: Option<f64>,
-) -> PyResult<Typed<'py, Stop>> {
-    reject_condition_mutation()?;
-    let timeout = timeout_arg(timeout)?;
-    dbg.get()
-        .with_session(|session| admit(session, &STEP, "step_out"))?;
-    settle_stop(dbg, Motion::StepOut, timeout)
-}
-
-pub fn trace_calls<'py>(
-    dbg: &Bound<'py, Debugger>,
-    limit: usize,
-    timeout: Option<f64>,
-) -> PyResult<Typed<'py, view::execution::CallTrace>> {
-    reject_condition_mutation()?;
-    let timeout = timeout_arg(timeout)?;
-    let deadline = timeout.map(|timeout| Instant::now() + timeout);
-    let trace = dbg.get().with_session(move |session: &mut Session| {
-        admit(session, &HALTED_RUN, "trace_calls")?;
+    let deadline = timeout_arg(timeout)?.map(|timeout| Instant::now() + timeout);
+    let (value, printed) = dbg.with_session(move |session| {
+        admit(session, effects, operation)?;
         let cancel = Cancel {
             flag: None,
             deadline,
             behavior: CancelBehavior::Halt,
             tick: None,
         };
-        session.trace_calls(limit, &cancel).map_err(err)
+        Ok(output::capture(|| f(session, &cancel)))
     })?;
+    forward(py, printed)?;
     prune_conditions(dbg)?;
-    Typed::new(dbg.py(), view::execution::call_trace(&trace))
+    Typed::new(py, value.map_err(err)?)
 }
 
-pub fn interrupt<'py>(dbg: &Bound<'py, Debugger>) -> PyResult<Typed<'py, Stop>> {
+/// A stop that may not have come, typed as `Stop | None`.
+fn optional<'py>(py: Python<'py>, stop: Option<Typed<'py, Stop>>) -> Typed<'py, Option<Stop>> {
+    Typed::converted(stop.map_or_else(|| py.None().into_bound(py), Typed::into_bound))
+}
+
+/// `Debugger.wait`: the next stop without resuming, or `None` if the target
+/// is still running after `timeout` seconds.
+pub fn wait<'py>(
+    py: Python<'py>,
+    dbg: &Debugger,
+    timeout: Option<f64>,
+) -> PyResult<Typed<'py, Option<Stop>>> {
+    let timeout = timeout_arg(timeout)?;
+    let stop = settle(
+        py,
+        dbg,
+        Motion::Wait,
+        timeout,
+        CancelBehavior::ReturnRunning,
+    )?;
+    Ok(optional(py, stop))
+}
+
+/// `Debugger.interrupt`: break into a running target, or report the stop a
+/// halted one is at.
+pub fn interrupt<'py>(py: Python<'py>, dbg: &Debugger) -> PyResult<Typed<'py, Stop>> {
     reject_condition_mutation()?;
-    match drive(dbg, Motion::Break, None, CancelBehavior::Halt)? {
-        RunOutcome::Stopped(stop) => Typed::new(dbg.py(), stop),
+    match drive(py, dbg, Motion::Break, None, CancelBehavior::Halt)? {
+        RunOutcome::Stopped(stop) => Typed::new(py, stop),
         RunOutcome::Running => Err(raise("the target is running; no stop to report")),
     }
-}
-
-pub fn reboot(dbg: &Bound<'_, Debugger>) -> PyResult<()> {
-    reject_condition_mutation()?;
-    dbg.get().with_session(|session| {
-        admit(session, &HALTED_RUN, "reboot")?;
-        session.request_reboot().map_err(err)
-    })?;
-    prune_conditions(dbg)
-}
-
-pub fn crash(dbg: &Bound<'_, Debugger>) -> PyResult<()> {
-    reject_condition_mutation()?;
-    dbg.get().with_session(|session| {
-        admit(session, &HALTED_RUN, "crash")?;
-        session.request_crash().map_err(err)
-    })?;
-    prune_conditions(dbg)
 }

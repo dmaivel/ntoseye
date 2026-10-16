@@ -41,7 +41,7 @@ use crate::guest::ModuleSymbolLoadReport;
 use crate::output::{log_input_line, prompting};
 #[cfg(feature = "python")]
 use crate::python::embed;
-use crate::session::Session;
+use crate::session::{Motion, Session};
 use crate::symbols::ntoseye_home;
 #[cfg(all(unix, feature = "cli"))]
 use crate::target::InterruptRequester;
@@ -1132,7 +1132,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                         }
 
                         if state.ctx.backend.is_running() {
-                            state.interrupt_running_vm()?;
+                            state.run_motion(Motion::Break);
                         } else {
                             outln!("{}", ui::muted("the target is already halted"));
                         }
@@ -1384,8 +1384,7 @@ mod tests {
         let mut session = session_with_mock(MockBackend::default().running());
         let mut state = remote_state(&mut session, 150);
         let started = std::time::Instant::now();
-        let (result, text) = capture(|| state.collect_stop());
-        result.unwrap();
+        let ((), text) = capture(|| state.collect_stop());
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
         assert!(text.contains("target still running"), "{text:?}");
         assert!(state.ctx.backend.is_running());
@@ -1397,8 +1396,7 @@ mod tests {
         backend.queue_interrupt(breakpoint_event(0x1000));
         let mut session = session_with_mock(backend);
         let mut state = remote_state(&mut session, 5_000);
-        let (result, text) = capture(|| state.collect_stop());
-        result.unwrap();
+        let ((), text) = capture(|| state.collect_stop());
         assert!(!state.ctx.backend.is_running());
         assert!(!text.contains("target still running"), "{text:?}");
     }
@@ -1503,7 +1501,7 @@ mod tests {
         assert!(!session.backend.is_running(), "the stop was not parked");
         let mut state = remote_state(&mut session, 5_000);
         let (begin, _) = capture(|| state.begin_remote_line("bd; g"));
-        assert!(begin.unwrap().is_none());
+        assert!(begin.is_none());
         let (result, text) = capture(|| state.dispatch_line("bd; g"));
         assert_eq!(result.unwrap(), Flow::Denied);
         assert!(
