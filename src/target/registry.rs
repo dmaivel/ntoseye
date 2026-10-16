@@ -215,9 +215,9 @@ pub struct HiveStorage {
 #[derive(Debug, Clone)]
 pub struct Hive {
     pub address: VirtAddr,
-    /// The master hive (`nt!CmpMasterHive`), whose root is `\REGISTRY`.
+    /// The master hive (`nt!CmpMasterHive`), whose root is `\\REGISTRY`.
     pub master: bool,
-    /// Where it is mounted (`HiveRootPath`), `\REGISTRY` for the master
+    /// Where it is mounted (`HiveRootPath`), `\\REGISTRY` for the master
     /// hive.
     pub mount: Option<String>,
     /// The file it was loaded from (`FileUserName`, else `FileFullPath`).

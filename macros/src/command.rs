@@ -20,7 +20,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         .attrs
         .iter()
         .filter(|attr| attr.path().is_ident("doc"))
-        .cloned()
+        .map(docstring_line)
         .collect();
     let command = Command {
         options,
@@ -56,6 +56,24 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
             #python
         };
     })
+}
+
+/// A doc line as the Python docstring takes it: backslashes doubled, because
+/// the stub writes the docstring verbatim into a `"""` literal, where `\R`
+/// would be an invalid escape. (The help text keeps the doc comment as
+/// written; a record field's doc comment escapes by hand instead.)
+fn docstring_line(attr: &Attribute) -> Attribute {
+    if let Meta::NameValue(value) = &attr.meta
+        && let Expr::Lit(ExprLit {
+            lit: Lit::Str(text),
+            ..
+        }) = &value.value
+        && text.value().contains('\\')
+    {
+        let escaped = LitStr::new(&text.value().replace('\\', "\\\\"), text.span());
+        return syn::parse_quote!(#[doc = #escaped]);
+    }
+    attr.clone()
 }
 
 /// The `#[command(...)]` attribute.
