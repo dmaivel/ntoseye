@@ -2069,7 +2069,27 @@ class ClassDevice(BaseRecord):
         transfer packet names the FDO.
         """
     @property
-    def packets(self, /) -> ClassPackets: ...
+    def in_flight(self, /) -> list[ClassTransferPacket]:
+        """
+        The packets classpnp has sent down the stack.
+        """
+    @property
+    def packets_free(self, /) -> int:
+        """
+        Those on a free list: a NUMA node's, a processor's, or the one
+        packet classpnp keeps for forward progress.
+        """
+    @property
+    def packets_stopped(self, /) -> list[str]:
+        """
+        Why a walk of the packets stopped short.
+        """
+    @property
+    def packets_total(self, /) -> int:
+        """
+        The transfer packets classpnp allocated (on
+        `AllTransferPacketsList`).
+        """
     @property
     def private_data(self, /) -> int:
         """
@@ -2188,31 +2208,6 @@ class ClassError(BaseRecord):
     def tick(self, /) -> int: ...
     @property
     def unhandled(self, /) -> bool: ...
-
-@final
-class ClassPackets(BaseRecord):
-    """
-    A device's transfer packets: how many classpnp allocated, how many are
-    free, and the ones it has sent down the stack.
-    """
-    @property
-    def free(self, /) -> int:
-        """
-        Those on a free list: a NUMA node's, a processor's, or the one
-        packet classpnp keeps for forward progress.
-        """
-    @property
-    def in_flight(self, /) -> list[ClassTransferPacket]: ...
-    @property
-    def stopped(self, /) -> list[str]:
-        """
-        Why a walk of the packets stopped short.
-        """
-    @property
-    def total(self, /) -> int:
-        """
-        The packets on `AllTransferPacketsList`.
-        """
 
 @final
 class ClassTransferPacket(BaseRecord):
@@ -20203,10 +20198,15 @@ class WdfIoTargetDetail(BaseRecord):
     @property
     def handle(self, /) -> int: ...
     @property
-    def ignored(self, /) -> WdfTargetRequestList:
+    def ignored(self, /) -> list[WdfTargetRequest]:
         """
         Requests sent while the target was not started, with
         `WDF_REQUEST_SEND_OPTION_IGNORE_TARGET_STATE` (`m_IgnoredIoListHead`).
+        """
+    @property
+    def ignored_stopped(self, /) -> str |None:
+        """
+        Why the walk of `ignored` stopped early; `None` if it completed.
         """
     @property
     def in_stack(self, /) -> bool:
@@ -20240,14 +20240,24 @@ class WdfIoTargetDetail(BaseRecord):
         A remote target's `m_OpenState` (`FxIoTargetRemoteOpenState`).
         """
     @property
-    def pended(self, /) -> WdfTargetRequestList:
+    def pended(self, /) -> list[WdfTargetRequest]:
         """
         Requests that the target holds until it starts (`m_PendedQueue`).
         """
     @property
-    def sent(self, /) -> WdfTargetRequestList:
+    def pended_stopped(self, /) -> str |None:
+        """
+        Why the walk of `pended` stopped early; `None` if it completed.
+        """
+    @property
+    def sent(self, /) -> list[WdfTargetRequest]:
         """
         Requests sent and not completed (`m_SentIoListHead`).
+        """
+    @property
+    def sent_stopped(self, /) -> str |None:
+        """
+        Why the walk of `sent` stopped early; `None` if it completed.
         """
     @property
     def stack_size(self, /) -> int:
@@ -20620,7 +20630,7 @@ class WdfQueueDetail(BaseRecord):
         The owning driver's name, when it has one.
         """
     @property
-    def driver_cancelable(self, /) -> WdfRequestList:
+    def driver_cancelable(self, /) -> list[WdfRequestRef]:
         """
         Requests the driver marked cancelable (`m_DriverCancelable`).
         """
@@ -20630,7 +20640,13 @@ class WdfQueueDetail(BaseRecord):
         Requests the driver marked cancelable.
         """
     @property
-    def driver_owned(self, /) -> WdfRequestList:
+    def driver_cancelable_stopped(self, /) -> str |None:
+        """
+        Why the walk of `driver_cancelable` stopped early; `None` if it
+        completed.
+        """
+    @property
+    def driver_owned(self, /) -> list[WdfRequestRef]:
         """
         Requests presented to the driver (`m_DriverOwned`).
         """
@@ -20638,6 +20654,11 @@ class WdfQueueDetail(BaseRecord):
     def driver_owned_count(self, /) -> int:
         """
         Requests the driver owns.
+        """
+    @property
+    def driver_owned_stopped(self, /) -> str |None:
+        """
+        Why the walk of `driver_owned` stopped early; `None` if it completed.
         """
     @property
     def execution_level(self, /) -> WdfEnumValue:
@@ -20652,7 +20673,7 @@ class WdfQueueDetail(BaseRecord):
         `m_MaxParallelQueuePresentedRequests`.
         """
     @property
-    def pending(self, /) -> WdfRequestList:
+    def pending(self, /) -> list[WdfRequestRef]:
         """
         Requests waiting in the queue (`m_Queue`).
         """
@@ -20660,6 +20681,11 @@ class WdfQueueDetail(BaseRecord):
     def pending_count(self, /) -> int:
         """
         Requests waiting in the queue.
+        """
+    @property
+    def pending_stopped(self, /) -> str |None:
+        """
+        Why the walk of `pending` stopped early; `None` if it completed.
         """
     @property
     def power_managed(self, /) -> bool: ...
@@ -20885,19 +20911,6 @@ class WdfRequestIrp(BaseRecord):
     def user_buffer(self, /) -> int: ...
 
 @final
-class WdfRequestList(BaseRecord):
-    """
-    A request list of a queue.
-    """
-    @property
-    def requests(self, /) -> list[WdfRequestRef]: ...
-    @property
-    def stopped(self, /) -> str |None:
-        """
-        Why the walk stopped early. `None` if the walk completed.
-        """
-
-@final
 class WdfRequestRef(BaseRecord):
     """
     A request on one of a queue's lists.
@@ -20934,19 +20947,6 @@ class WdfTargetRequest(BaseRecord):
         """
     @property
     def irp(self, /) -> int: ...
-
-@final
-class WdfTargetRequestList(BaseRecord):
-    """
-    A request list of an I/O target.
-    """
-    @property
-    def requests(self, /) -> list[WdfTargetRequest]: ...
-    @property
-    def stopped(self, /) -> str |None:
-        """
-        Why the walk stopped early. `None` if the walk completed.
-        """
 
 @final
 class WdfVersion(BaseRecord):

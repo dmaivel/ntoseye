@@ -16,7 +16,7 @@ use crate::target::wdf::{
     IfrEnd, WdfCallback, WdfClient, WdfDeviceDetail, WdfDriverInfo, WdfDumpDriver, WdfEnumValue,
     WdfIoParameters, WdfIoTargetDetail, WdfIrpLocation, WdfIrpQueueRole, WdfLoader, WdfLogDump,
     WdfLogEntry, WdfObject, WdfObjectDetail, WdfObjectRef, WdfQueueDetail, WdfRequestDetail,
-    WdfRequestList, WdfTargetRequestList,
+    WdfRequestRef, WdfTargetRequest,
 };
 use crate::ui;
 
@@ -774,9 +774,9 @@ fn io_target_state_text(state: &WdfEnumValue) -> String {
     )
 }
 
-fn print_requests(title: &str, list: &WdfRequestList) {
-    outln!("{} ({})", ui::label(title), list.requests.len());
-    for request in &list.requests {
+fn print_requests(title: &str, requests: &[WdfRequestRef], stopped: &Option<String>) {
+    outln!("{} ({})", ui::label(title), requests.len());
+    for request in requests {
         outln!(
             "   WDFREQUEST {}  FxRequest {}  IRP {}",
             ui::addr(request.handle),
@@ -784,7 +784,7 @@ fn print_requests(title: &str, list: &WdfRequestList) {
             ui::addr_opt(request.irp)
         );
     }
-    print_stopped("   ", "list", &list.stopped);
+    print_stopped("   ", "list", stopped);
 }
 
 fn print_queue(queue: &WdfQueueDetail) {
@@ -814,9 +814,17 @@ fn print_queue(queue: &WdfQueueDetail) {
         field(callback.name, callback_text(callback));
     }
     outln!();
-    print_requests("Pending requests", &queue.pending);
-    print_requests("Driver cancelable requests", &queue.driver_cancelable);
-    print_requests("Driver owned requests", &queue.driver_owned);
+    print_requests("Pending requests", &queue.pending, &queue.pending_stopped);
+    print_requests(
+        "Driver cancelable requests",
+        &queue.driver_cancelable,
+        &queue.driver_cancelable_stopped,
+    );
+    print_requests(
+        "Driver owned requests",
+        &queue.driver_owned,
+        &queue.driver_owned_stopped,
+    );
 }
 
 fn yes_no(value: bool) -> &'static str {
@@ -992,9 +1000,9 @@ fn print_request(request: &WdfRequestDetail) {
     }
 }
 
-fn print_target_requests(title: &str, list: &WdfTargetRequestList) {
-    outln!("{} ({})", ui::label(title), list.requests.len());
-    for request in &list.requests {
+fn print_target_requests(title: &str, requests: &[WdfTargetRequest], stopped: &Option<String>) {
+    outln!("{} ({})", ui::label(title), requests.len());
+    for request in requests {
         let handle = request
             .handle
             .map_or_else(|| ui::muted("none (the framework's own)"), ui::addr);
@@ -1004,7 +1012,7 @@ fn print_target_requests(title: &str, list: &WdfTargetRequestList) {
             ui::addr_opt(request.irp)
         );
     }
-    print_stopped("   ", "list", &list.stopped);
+    print_stopped("   ", "list", stopped);
 }
 
 fn print_io_target(target: &WdfIoTargetDetail) {
@@ -1072,9 +1080,13 @@ fn print_io_target(target: &WdfIoTargetDetail) {
     field("I/O count", target.io_count);
     field("Stack size", target.stack_size);
     outln!();
-    print_target_requests("Sent requests", &target.sent);
-    print_target_requests("Requests sent ignoring the target state", &target.ignored);
-    print_target_requests("Pended requests", &target.pended);
+    print_target_requests("Sent requests", &target.sent, &target.sent_stopped);
+    print_target_requests(
+        "Requests sent ignoring the target state",
+        &target.ignored,
+        &target.ignored_stopped,
+    );
+    print_target_requests("Pended requests", &target.pended, &target.pended_stopped);
 }
 
 /// An IFR record as one line: its sequence number, its time when it has

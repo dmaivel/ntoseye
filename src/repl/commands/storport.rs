@@ -652,9 +652,9 @@ fn class_product(device: &ClassDevice) -> String {
 fn packets_text(device: &ClassDevice) -> String {
     format!(
         "{} in flight, {} free of {}",
-        device.packets.in_flight.len(),
-        device.packets.free,
-        device.packets.total
+        device.in_flight.len(),
+        device.packets_free,
+        device.packets_total
     )
 }
 
@@ -801,7 +801,7 @@ fn print_class_device(detail: &ClassDeviceDetail) {
     }
     field("Transfer packets", packets_text(device));
     outln!();
-    if device.packets.in_flight.is_empty() {
+    if device.in_flight.is_empty() {
         outln!("{}", ui::muted("no requests in flight"));
     } else {
         outln!("{}", ui::label("Requests in flight"));
@@ -815,7 +815,7 @@ fn print_class_device(detail: &ClassDeviceDetail) {
             "Status",
             "Retries left",
         ]);
-        for packet in &device.packets.in_flight {
+        for packet in &device.in_flight {
             let (command, status) = match &packet.request {
                 Ok(srb) => (
                     scsi_command(&srb.cdb).unwrap_or_default(),
@@ -839,7 +839,7 @@ fn print_class_device(detail: &ClassDeviceDetail) {
         }
         print_padded_table(builder);
     }
-    for stopped in &device.packets.stopped {
+    for stopped in &device.packets_stopped {
         outln!("{}", ui::muted(&format!("({stopped})")));
     }
     outln!();

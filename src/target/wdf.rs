@@ -391,15 +391,6 @@ pub struct WdfRequestRef {
     pub irp: VirtAddr,
 }
 
-/// A request list of a queue.
-#[record]
-#[derive(Debug, Clone, Default)]
-pub struct WdfRequestList {
-    pub requests: Vec<WdfRequestRef>,
-    /// Why the walk stopped early. `None` if the walk completed.
-    pub stopped: Option<String>,
-}
-
 /// An event callback the driver set.
 #[record]
 #[derive(Debug, Clone)]
@@ -450,11 +441,18 @@ pub struct WdfQueueDetail {
     /// The callbacks the driver set.
     pub callbacks: Vec<WdfCallback>,
     /// Requests waiting in the queue (`m_Queue`).
-    pub pending: WdfRequestList,
+    pub pending: Vec<WdfRequestRef>,
+    /// Why the walk of `pending` stopped early; `None` if it completed.
+    pub pending_stopped: Option<String>,
     /// Requests the driver marked cancelable (`m_DriverCancelable`).
-    pub driver_cancelable: WdfRequestList,
+    pub driver_cancelable: Vec<WdfRequestRef>,
+    /// Why the walk of `driver_cancelable` stopped early; `None` if it
+    /// completed.
+    pub driver_cancelable_stopped: Option<String>,
     /// Requests presented to the driver (`m_DriverOwned`).
-    pub driver_owned: WdfRequestList,
+    pub driver_owned: Vec<WdfRequestRef>,
+    /// Why the walk of `driver_owned` stopped early; `None` if it completed.
+    pub driver_owned_stopped: Option<String>,
 }
 
 /// The buffer lengths in a stack location's `Parameters` for its major
@@ -614,15 +612,6 @@ pub struct WdfTargetRequest {
     pub irp: VirtAddr,
 }
 
-/// A request list of an I/O target.
-#[record]
-#[derive(Debug, Clone, Default)]
-pub struct WdfTargetRequestList {
-    pub requests: Vec<WdfTargetRequest>,
-    /// Why the walk stopped early. `None` if the walk completed.
-    pub stopped: Option<String>,
-}
-
 /// A WDFIOTARGET with the device object that it sends to and the requests
 /// sent to it (`!wdfkd.wdfiotarget`).
 #[record]
@@ -666,12 +655,18 @@ pub struct WdfIoTargetDetail {
     /// `m_TargetStackSize`.
     pub stack_size: i32,
     /// Requests sent and not completed (`m_SentIoListHead`).
-    pub sent: WdfTargetRequestList,
+    pub sent: Vec<WdfTargetRequest>,
+    /// Why the walk of `sent` stopped early; `None` if it completed.
+    pub sent_stopped: Option<String>,
     /// Requests sent while the target was not started, with
     /// `WDF_REQUEST_SEND_OPTION_IGNORE_TARGET_STATE` (`m_IgnoredIoListHead`).
-    pub ignored: WdfTargetRequestList,
+    pub ignored: Vec<WdfTargetRequest>,
+    /// Why the walk of `ignored` stopped early; `None` if it completed.
+    pub ignored_stopped: Option<String>,
     /// Requests that the target holds until it starts (`m_PendedQueue`).
-    pub pended: WdfTargetRequestList,
+    pub pended: Vec<WdfTargetRequest>,
+    /// Why the walk of `pended` stopped early; `None` if it completed.
+    pub pended_stopped: Option<String>,
 }
 
 /// An In-Flight Recorder record and its message.
@@ -2500,12 +2495,10 @@ impl Target {
         wdf: &WdfTypes<'_>,
         request_layout: &Arc<TypeInfo>,
         irp_queue: VirtAddr,
-    ) -> Result<WdfRequestList> {
-        let (requests, stopped) =
-            self.wdf_irp_queue_walk(wdf, request_layout, irp_queue, |address| {
-                self.wdf_request_ref(wdf, request_layout, address)
-            })?;
-        Ok(WdfRequestList { requests, stopped })
+    ) -> Result<(Vec<WdfRequestRef>, Option<String>)> {
+        self.wdf_irp_queue_walk(wdf, request_layout, irp_queue, |address| {
+            self.wdf_request_ref(wdf, request_layout, address)
+        })
     }
 
     /// `!wdfkd.wdfqueue <handle>`: a WDFQUEUE's configuration, state, and
@@ -2543,6 +2536,16 @@ impl Target {
         let state = queue.read_uint("m_QueueState")?;
         let field =
             |name: &str| -> Result<VirtAddr> { Ok(address + queue_layout.field_offset(name)?) };
+        let (pending, pending_stopped) =
+            self.wdf_queue_irp_requests(&wdf, &request_layout, field("m_Queue")?)?;
+        let (driver_cancelable, driver_cancelable_stopped) =
+            self.wdf_queue_irp_requests(&wdf, &request_layout, field("m_DriverCancelable")?)?;
+        let (driver_owned, driver_owned_stopped) = self.wdf_request_link_walk(
+            &request_layout,
+            field("m_DriverOwned")?,
+            "m_OwnerListEntry2",
+            |address| self.wdf_request_ref(&wdf, &request_layout, address),
+        )?;
         Ok(WdfQueueDetail {
             handle,
             address,
@@ -2579,21 +2582,12 @@ impl Target {
             driver_owned_count: queue.read_uint("m_DriverIoCount")? as u32 as i32,
             two_phase_completions: queue.read_uint("m_TwoPhaseCompletions")? as u32 as i32,
             callbacks,
-            pending: self.wdf_queue_irp_requests(&wdf, &request_layout, field("m_Queue")?)?,
-            driver_cancelable: self.wdf_queue_irp_requests(
-                &wdf,
-                &request_layout,
-                field("m_DriverCancelable")?,
-            )?,
-            driver_owned: {
-                let (requests, stopped) = self.wdf_request_link_walk(
-                    &request_layout,
-                    field("m_DriverOwned")?,
-                    "m_OwnerListEntry2",
-                    |address| self.wdf_request_ref(&wdf, &request_layout, address),
-                )?;
-                WdfRequestList { requests, stopped }
-            },
+            pending,
+            pending_stopped,
+            driver_cancelable,
+            driver_cancelable_stopped,
+            driver_owned,
+            driver_owned_stopped,
         })
     }
 
@@ -2803,15 +2797,13 @@ impl Target {
         let target = wdf.at(&target_layout, address);
         let field =
             |name: &str| -> Result<VirtAddr> { Ok(address + target_layout.field_offset(name)?) };
-        let list = |head: &str| -> Result<WdfTargetRequestList> {
-            let (requests, stopped) = self.wdf_request_link_walk(
-                &request_layout,
-                field(head)?,
-                "m_ListEntry",
-                |request| self.wdf_sent_request(&wdf, &request_layout, request, address),
-            )?;
-            Ok(WdfTargetRequestList { requests, stopped })
+        let list = |head: &str| -> Result<(Vec<WdfTargetRequest>, Option<String>)> {
+            self.wdf_request_link_walk(&request_layout, field(head)?, "m_ListEntry", |request| {
+                self.wdf_sent_request(&wdf, &request_layout, request, address)
+            })
         };
+        let (sent, sent_stopped) = list("m_SentIoListHead")?;
+        let (ignored, ignored_stopped) = list("m_IgnoredIoListHead")?;
         let (pended, pended_stopped) =
             self.wdf_irp_queue_walk(&wdf, &request_layout, field("m_PendedQueue")?, |request| {
                 self.wdf_sent_request(&wdf, &request_layout, request, address)
@@ -2857,12 +2849,12 @@ impl Target {
             file_object: target.read_pointer("m_TargetFileObject")?,
             io_count: target.read_uint("m_IoCount")? as u32 as i32,
             stack_size: (target.read_uint("m_TargetStackSize")? as u8 as i8).into(),
-            sent: list("m_SentIoListHead")?,
-            ignored: list("m_IgnoredIoListHead")?,
-            pended: WdfTargetRequestList {
-                requests: pended,
-                stopped: pended_stopped,
-            },
+            sent,
+            sent_stopped,
+            ignored,
+            ignored_stopped,
+            pended,
+            pended_stopped,
         })
     }
 

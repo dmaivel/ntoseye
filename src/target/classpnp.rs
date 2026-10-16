@@ -31,19 +31,14 @@ const MAX_DESCRIPTOR: u64 = 0x1000;
 /// `IO_TYPE_DEVICE`, the `Type` of a `DEVICE_OBJECT`.
 const IO_TYPE_DEVICE: u64 = 3;
 
-/// A device's transfer packets: how many classpnp allocated, how many are
-/// free, and the ones it has sent down the stack.
-#[record]
+/// A device's transfer packets as [`Target::class_packets`] walks them,
+/// which [`ClassDevice`] takes field by field.
 #[derive(Default)]
-pub struct ClassPackets {
-    /// The packets on `AllTransferPacketsList`.
-    pub total: u64,
-    /// Those on a free list: a NUMA node's, a processor's, or the one
-    /// packet classpnp keeps for forward progress.
-    pub free: u64,
-    pub in_flight: Vec<ClassTransferPacket>,
-    /// Why a walk of the packets stopped short.
-    pub stopped: Vec<String>,
+struct ClassPackets {
+    total: u64,
+    free: u64,
+    in_flight: Vec<ClassTransferPacket>,
+    stopped: Vec<String>,
 }
 
 /// A transfer packet (`_TRANSFER_PACKET`) classpnp has sent down the stack
@@ -98,7 +93,16 @@ pub struct ClassDevice {
     pub bus_type: Option<String>,
     pub removable: bool,
     pub boot_device: bool,
-    pub packets: ClassPackets,
+    /// The transfer packets classpnp allocated (on
+    /// `AllTransferPacketsList`).
+    pub packets_total: u64,
+    /// Those on a free list: a NUMA node's, a processor's, or the one
+    /// packet classpnp keeps for forward progress.
+    pub packets_free: u64,
+    /// The packets classpnp has sent down the stack.
+    pub in_flight: Vec<ClassTransferPacket>,
+    /// Why a walk of the packets stopped short.
+    pub packets_stopped: Vec<String>,
 }
 
 /// One error classpnp logged (`_CLASS_ERROR_LOG_DATA`): the SRB that failed
@@ -382,7 +386,10 @@ impl Target {
             bus_type: None,
             removable: false,
             boot_device: private_data.read_uint("IsBootDevice")? != 0,
-            packets,
+            packets_total: packets.total,
+            packets_free: packets.free,
+            in_flight: packets.in_flight,
+            packets_stopped: packets.stopped,
         };
         if let (Some(fdo), Some(extension)) = (fdo, extension) {
             let fde = class.at(&class.extension, extension).prefetch();
