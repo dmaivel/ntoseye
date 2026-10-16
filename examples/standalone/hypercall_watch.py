@@ -3,7 +3,8 @@
 
 A hypercall breakpoint (`breakpoints.add_hypercall()`) fires in the
 hypervisor's handler of one call, from one partition. Its `when=` callback
-reads the caller through `stop.cpu.hypercall_caller()`: here it counts the
+reads the caller through the stopped vCPU, `dbg.cpus[stop.cpu]`, and its
+`hypercall_caller()`: here it counts the
 callers for a while without stopping, then lets one hit stop. The stop shows
 the hypervisor's own stack (`cpu.backtrace()`), the decoded call, and, for a
 Windows guest, the stack in the guest's kernel of the VP that made the call,
@@ -38,7 +39,7 @@ def main() -> None:
         deadline: float = time.monotonic() + args.seconds
 
         def count_caller(stop: ntoseye.Stop) -> bool:
-            caller = stop.cpu.hypercall_caller()
+            caller = dbg.cpus[stop.cpu].hypercall_caller()
             if caller is None:
                 return True
             callers[(caller.vp_index, caller.vtl)] += 1
@@ -57,10 +58,10 @@ def main() -> None:
 
         for (vp, vtl), count in sorted(callers.items()):
             print(f"  VP {vp} VTL{vtl}: {count} calls")
-        if not isinstance(stop, ntoseye.Stop.Breakpoint):
+        if stop is None or not stop.hit(bp):
             raise SystemExit("no call stopped; use the guest while the script runs")
 
-        cpu = stop.cpu
+        cpu = dbg.cpus[stop.cpu]
         caller = cpu.hypercall_caller()
         if caller is None:
             raise SystemExit(f"stopped on {cpu.id}, but its caller is unknown")

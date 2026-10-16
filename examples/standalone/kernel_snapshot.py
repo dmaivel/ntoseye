@@ -48,8 +48,8 @@ def main() -> None:
         print(f"\nsessions:\n  {dbg.inspect.sessions()}")
 
         if args.dump:
-            unreadable = dbg.write_dump(args.dump)
-            print(f"\nwrote {args.dump} ({unreadable} unreadable pages)")
+            written = dbg.write_dump(args.dump)
+            print(f"\nwrote {written.path} ({written.unreadable_pages} unreadable pages)")
 
     if args.dump:
         with ntoseye.attach(backend="dmp", connect=args.dump) as dump:

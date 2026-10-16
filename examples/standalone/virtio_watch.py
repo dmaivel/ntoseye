@@ -34,35 +34,47 @@ import ntoseye
 Key = tuple[str, int, int]
 
 
-def queues(devices: list[ntoseye.VirtioDevice]) -> dict[Key, ntoseye.Virtqueue]:
+def table(queue: ntoseye.VirtQueue) -> int:
+    """The queue's descriptor table (split rings), 0 for a packed ring."""
+    return queue.ring.desc if queue.ring is not None else 0
+
+
+def queues(devices: list[ntoseye.VirtioFunction]) -> dict[Key, ntoseye.VirtQueue]:
     return {
-        (device.location, queue.address, queue.desc or 0): queue
+        (device.location, queue.address, table(queue)): queue
         for device in devices
         if device.driver is not None
         for queue in device.driver.queues
     }
 
 
-def stall(before: ntoseye.Virtqueue, now: ntoseye.Virtqueue, moved: dict[str, int | None], seconds: float) -> str | None:
+def stall(
+    queue: ntoseye.VirtQueue,
+    before: ntoseye.QueueProgress,
+    now: ntoseye.QueueProgress,
+    moved: dict[str, int | None],
+    seconds: float,
+) -> str | None:
     """`!virtio`'s rule for a queue that should have moved and did not."""
     if before.returned and now.returned and moved["taken back"] == 0:
-        due = ", though an interrupt was due" if now.interrupt_due else ""
+        due = ", though an interrupt was due" if queue.interrupt_due else ""
         return f"not taken back for {seconds:.1f} s{due}"
     returned_any = moved["completed"] if moved["completed"] is not None else moved["taken back"]
-    if now.role == "requests" and before.with_device and now.with_device and returned_any == 0 and not now.returned:
+    if queue.role == "requests" and before.with_device and now.with_device and returned_any == 0 and not now.returned:
         return f"the device returned nothing for {seconds:.1f} s"
     return None
 
 
-def show_ring(dbg: ntoseye.Debugger, module: str, queue: ntoseye.Virtqueue) -> None:
+def show_ring(dbg: ntoseye.Debugger, module: str, queue: ntoseye.VirtQueue) -> None:
     ring = dbg.inspect.vring(queue.address, module)
     for label, buffers in (("with the device", ring.with_device), ("returned", ring.returned)):
         for buffer in buffers:
             count = len(buffer.descriptors)
             what = buffer.request or buffer.broken or f"{count} descriptor{'' if count == 1 else 's'}"
             print(f"      {label} [{buffer.position}] head {buffer.head}: {what}")
-    if ring.broken:
-        print(f"      ring: {ring.broken}")
+    packed = ring.queue.packed_ring if ring.queue is not None else None
+    if packed is not None and packed.broken:
+        print(f"      ring: {packed.broken}")
 
 
 def main() -> None:
@@ -105,7 +117,7 @@ def main() -> None:
                 if now.error:
                     print(f"{label} unreadable: {now.error}")
                     continue
-                before = first.get((device.location, now.address, now.desc or 0))
+                before = first.get((device.location, now.address, table(now)))
                 if before is None:
                     print(f"{label} {now.state} (set up again since the first look)")
                     continue
@@ -121,8 +133,8 @@ def main() -> None:
                     "taken back": (n.taken_back - b.taken_back) % n.modulus,
                 }
                 counts = ", ".join(f"+{v} {k}" for k, v in moved.items() if v is not None)
-                why = stall(before, now, moved, seconds)
-                idle = not (any(moved.values()) or now.with_device or now.returned or before.with_device)
+                why = stall(now, b, n, moved, seconds)
+                idle = not (any(moved.values()) or n.with_device or n.returned or b.with_device)
                 if idle and why is None and not args.all:
                     quiet += 1
                     continue

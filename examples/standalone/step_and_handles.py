@@ -40,10 +40,10 @@ def main() -> None:
                     print(f"timeout waiting for {args.symbol} after {args.timeout:g}s")
                     dbg.interrupt()
                     return
-                if isinstance(stop, (ntoseye.Stop.Bugcheck, ntoseye.Stop.Reboot)):
-                    print(f"stop: {type(stop).__name__} before reaching the breakpoint")
+                if stop.kind in ("bugcheck", "reload"):
+                    print(f"stop: {stop.kind} before reaching the breakpoint")
                     return
-                if bp in stop.breakpoints:
+                if stop.hit(bp):
                     break
 
             rip = stop.rip or 0
@@ -56,7 +56,7 @@ def main() -> None:
                 symbol = step.symbol or nearest(dbg, ip)
                 rows = dbg.memory.disassemble(ip, 1)
                 asm = rows[0].asm if rows else "?"
-                print(f"  step #{number}: {type(step).__name__}  rip={ip:#x} ({symbol})  {asm}")
+                print(f"  step #{number}: {step.kind}  rip={ip:#x} ({symbol})  {asm}")
 
             print("\nbreakpoint list (handles):")
             listed = list(dbg.breakpoints)

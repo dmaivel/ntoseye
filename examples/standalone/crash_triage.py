@@ -24,8 +24,13 @@ def main() -> None:
     with ntoseye.attach("dmp", args.dump) as dbg:
         stop = dbg.stop
         bugcheck_info: dict[str, object] | None = None
-        if isinstance(stop, ntoseye.Stop.Bugcheck) and stop.info is not None:
-            bugcheck_info = stop.info.to_dict()
+        bugcheck_error: str | None = None
+        try:
+            bugcheck = dbg.inspect.bugcheck()
+            if bugcheck is not None:
+                bugcheck_info = bugcheck.to_dict()
+        except ntoseye.NtoseyeError as exc:
+            bugcheck_error = str(exc)
 
         triage: dict[str, object] | None = None
         triage_error: str | None = None
@@ -40,13 +45,14 @@ def main() -> None:
         backtrace_error: str | None = None
         if thread is not None:
             try:
-                frames = thread.backtrace(limit=16)
-            except ntoseye.NtoseyeError as exc:
+                frames = dbg.threads[thread].backtrace(limit=16)
+            except (ntoseye.NtoseyeError, KeyError) as exc:
                 backtrace_error = str(exc)
 
         report: dict[str, object] = {
             "stop": stop.to_dict() if stop is not None else None,
             "bugcheck_info": bugcheck_info,
+            "bugcheck_error": bugcheck_error,
             "triage": triage,
             "triage_error": triage_error,
             "thread": thread_data,
@@ -61,10 +67,10 @@ def main() -> None:
             print("stop: unavailable")
         else:
             print(f"stop: {stop!r}")
-        if isinstance(stop, ntoseye.Stop.Bugcheck):
-            print(f"bugcheck info: {bugcheck_info if bugcheck_info is not None else 'unavailable'}")
+        if bugcheck_info is not None:
+            print(f"bugcheck: {bugcheck_info}")
         else:
-            print(f"stop is {type(stop).__name__}, not a Bugcheck")
+            print(f"bugcheck: {bugcheck_error or 'none recorded'}")
         if triage is None:
             print(f"triage unavailable: {triage_error or 'no report'}")
         else:
