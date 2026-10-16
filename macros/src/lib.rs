@@ -4,6 +4,7 @@
 
 mod collection;
 mod command;
+mod docstring;
 mod grammar;
 mod handle;
 mod record;

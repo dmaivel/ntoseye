@@ -8,6 +8,8 @@ use syn::{
     PathArguments, Result, ReturnType, Token, Type,
 };
 
+use crate::docstring::python_doc;
+
 pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let flags = Flags::parse(attr)?;
     let mut item: ItemImpl = syn::parse2(item)?;
@@ -106,7 +108,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         }),
         (Some(lookup), false) => {
             let key = lookup_key(lookup)?;
-            let docs: Vec<&Attribute> = docs(&lookup.attrs).collect();
+            let docs = docs(&lookup.attrs);
             let (key_type, find) = if flags.records {
                 let key_type = quote!(#python_crate::collection::Key<'py, #key, #element>);
                 helpers.push(quote! {
@@ -337,8 +339,12 @@ impl Matcher {
     }
 }
 
-fn docs(attrs: &[Attribute]) -> impl Iterator<Item = &Attribute> {
-    attrs.iter().filter(|attr| attr.path().is_ident("doc"))
+fn docs(attrs: &[Attribute]) -> Vec<Attribute> {
+    attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("doc"))
+        .map(python_doc)
+        .collect()
 }
 
 /// The `T` of `fn enumerate(...) -> PyResult<Vec<T>>`.

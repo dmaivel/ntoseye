@@ -9,6 +9,8 @@ use syn::{
     Path, Result, ReturnType, Token, Type,
 };
 
+use crate::docstring::python_doc;
+
 pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let flags = Flags::parse(attr)?;
     match syn::parse2::<Item>(item)? {
@@ -296,7 +298,7 @@ fn docs(attrs: &[Attribute]) -> Vec<Attribute> {
     attrs
         .iter()
         .filter(|attr| attr.path().is_ident("doc"))
-        .cloned()
+        .map(python_doc)
         .collect()
 }
 

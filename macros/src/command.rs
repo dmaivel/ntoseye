@@ -9,6 +9,7 @@ use syn::{
     Path, PathArguments, Result, ReturnType, Token, Type,
 };
 
+use crate::docstring::plain_links;
 use crate::grammar;
 
 /// A local the generated code binds, with `mixed_site` hygiene, so an
@@ -163,25 +164,27 @@ fn expand_form(form: FormOptions, mut function: ItemFn) -> Result<TokenStream> {
     })
 }
 
-/// A doc line as the Python docstring takes it: backslashes doubled and
-/// `"""` escaped, because the stub writes the docstring verbatim into a
-/// `"""` literal, where `\R` would be an invalid escape and `"""` would end
-/// it. (The help text keeps the doc comment as written; a record field's
-/// doc comment escapes by hand instead.)
+/// A doc line as the Python docstring takes it: intra-doc links as plain
+/// text (`docstring::plain_links`), backslashes doubled and `"""` escaped,
+/// because the stub writes the docstring verbatim into a `"""` literal,
+/// where `\R` would be an invalid escape and `"""` would end it. (The help
+/// text keeps the doc comment as written; a record field's doc comment
+/// escapes by hand instead.)
 fn docstring_line(attr: &Attribute) -> Attribute {
     if let Meta::NameValue(value) = &attr.meta
         && let Expr::Lit(ExprLit {
             lit: Lit::Str(text),
             ..
         }) = &value.value
-        && (text.value().contains('\\') || text.value().contains("\"\"\""))
     {
-        let escaped = text
-            .value()
+        let line = text.value();
+        let docstring = plain_links(&line)
             .replace('\\', "\\\\")
             .replace("\"\"\"", "\\\"\\\"\\\"");
-        let escaped = LitStr::new(&escaped, text.span());
-        return syn::parse_quote!(#[doc = #escaped]);
+        if docstring != line {
+            let docstring = LitStr::new(&docstring, text.span());
+            return syn::parse_quote!(#[doc = #docstring]);
+        }
     }
     attr.clone()
 }
