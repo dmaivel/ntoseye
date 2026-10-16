@@ -11,7 +11,6 @@ use pyo3::prelude::*;
 use pyo3::{PyTypeInfo, type_hint_identifier, type_hint_subscript};
 
 use super::command::PyArg;
-use super::module::Device;
 use super::process::Process;
 use super::thread::{Cpu, Thread};
 use crate::Backend;
@@ -204,13 +203,6 @@ pub enum ApcTarget<'py> {
     Process(PyRef<'py, Process>),
     Thread(PyRef<'py, Thread>),
     Ethread(u64),
-}
-
-/// A device object by handle, or a device or devnode address.
-#[derive(FromPyObject)]
-pub enum DeviceArg<'py> {
-    Device(PyRef<'py, Device>),
-    Address(u64),
 }
 
 /// An exception by NTSTATUS code or WinDbg alias (`av`, `bpe`, ...).

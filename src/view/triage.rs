@@ -6,7 +6,6 @@ use ntoseye_macros::record;
 use super::bugcheck::{Bugcheck, bugcheck};
 use super::execution::{run_status, stack_frames};
 use super::module::module;
-use super::power::{power_driver, power_irp, power_irp_holder, power_irp_list, power_worker_list};
 use crate::dmp::triage::TriagePrcbInfo;
 use crate::dmp::{self, DmpException, DmpSystemInfo};
 use crate::target::DiagnosticValue;
@@ -294,16 +293,16 @@ pub struct BlockedPowerIrp {
     #[record(hex)]
     pub irp: u64,
     /// The driver of the IRP's current stack location.
-    pub holder: DiagnosticValue<super::power::PowerIrpHolder>,
+    pub holder: DiagnosticValue<crate::target::power::IrpHolder>,
     /// The IRP's entry on the power IRP list. `None` when it is not on
     /// the list.
-    pub data: Option<super::power::PowerIrp>,
+    pub data: Option<crate::target::power::PowerIrp>,
 }
 
 /// The driver that a DRIVER_POWER_STATE_FAILURE names, and why.
 #[record]
 pub struct PowerFailureCulprit {
-    pub driver: super::power::PowerDriver,
+    pub driver: crate::target::power::DeviceDriver,
     /// The device object that ties the driver to the failure.
     #[record(hex)]
     pub device: u64,
@@ -341,10 +340,10 @@ pub struct PowerFailure {
     /// 0x3: the blocked IRP.
     pub blocked_irp: Option<BlockedPowerIrp>,
     /// 0x3: the power IRPs on the list that `TRIAGE_9F_POWER` names.
-    pub irps: Option<super::power::PowerIrpList>,
+    pub irps: Option<crate::target::power::PowerIrpList>,
     /// 0x3: the IRP worker threads on the list that `TRIAGE_9F_POWER`
     /// names.
-    pub workers: Option<super::power::PowerWorkerList>,
+    pub workers: Option<crate::target::power::PowerWorkerList>,
     /// 0x4: the thread that holds the PnP lock.
     #[record(hex)]
     pub pnp_lock_owner: Option<u64>,
@@ -800,18 +799,15 @@ fn power_failure(finding: &PowerDetail) -> PowerFailure {
         device_stack: failure.stack.as_ref().map(diagnostic),
         blocked_irp: failure.blocked_irp.as_ref().map(|blocked| BlockedPowerIrp {
             irp: blocked.irp.0,
-            holder: match &blocked.holder {
-                Ok(holder) => DiagnosticValue::Available(power_irp_holder(holder)),
-                Err(error) => DiagnosticValue::unavailable(error.clone()),
-            },
-            data: blocked.data.as_ref().map(power_irp),
+            holder: blocked.holder.clone(),
+            data: blocked.data.clone(),
         }),
-        irps: failure.irps.as_ref().map(power_irp_list),
-        workers: failure.workers.as_ref().map(power_worker_list),
+        irps: failure.irps.clone(),
+        workers: failure.workers.clone(),
         pnp_lock_owner: failure.pnp_lock_owner.map(|thread| thread.0),
         timeout_seconds: failure.timeout_seconds,
         culprit: failure.culprit.as_ref().map(|culprit| PowerFailureCulprit {
-            driver: power_driver(&culprit.driver),
+            driver: culprit.driver.clone(),
             device: culprit.device.0,
             reason: culprit.reason.clone(),
         }),

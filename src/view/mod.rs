@@ -8,7 +8,6 @@ pub mod execution;
 pub mod hypervisor;
 pub mod meta;
 pub mod module;
-pub mod power;
 pub mod record;
 pub mod symbols;
 pub mod triage;

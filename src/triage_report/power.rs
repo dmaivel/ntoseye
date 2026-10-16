@@ -63,7 +63,7 @@ pub fn power_failure_finding(
         let mut listed: Vec<_> = workers
             .entries
             .iter()
-            .filter_map(|entry| entry.worker.as_ref().ok())
+            .filter_map(|entry| entry.worker.as_result().ok())
             .filter(|worker| !worker.thread.is_zero())
             .collect();
         listed.sort_by_key(|worker| worker.irp.is_zero());

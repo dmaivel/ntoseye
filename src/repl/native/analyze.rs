@@ -983,11 +983,11 @@ fn power_section(finding: &PowerFailureFinding) -> Section<()> {
     let holder_device = failure
         .blocked_irp
         .as_ref()
-        .and_then(|blocked| blocked.holder.as_ref().ok())
+        .and_then(|blocked| blocked.holder.as_result().ok())
         .map(|holder| holder.device);
     if let Some(blocked) = &failure.blocked_irp {
         kv = kv.item("blocked IRP", addr(blocked.irp.0));
-        match &blocked.holder {
+        match blocked.holder.as_result() {
             Ok(holder) => {
                 kv = kv.item(
                     "request",
@@ -1000,7 +1000,7 @@ fn power_section(finding: &PowerFailureFinding) -> Section<()> {
                         "",
                     ),
                 );
-                let driver = match &holder.driver {
+                let driver = match holder.driver.as_result() {
                     Ok(driver) => span(driver.label(), SYMBOL),
                     Err(error) => span(format!("driver unreadable: {error}"), MUTED),
                 };
@@ -1090,7 +1090,7 @@ fn power_section(finding: &PowerFailureFinding) -> Section<()> {
             );
         for entry in &irps.entries {
             let row = TableRow::new(entry.data.0.to_string());
-            table = table.row(match &entry.irp {
+            table = table.row(match entry.irp.as_result() {
                 Ok(irp) => row
                     .cell("irp", addr(irp.irp.0))
                     .cell(
@@ -1107,12 +1107,12 @@ fn power_section(finding: &PowerFailureFinding) -> Section<()> {
                     .cell("pdo", addr(irp.pdo.0))
                     .cell(
                         "holder",
-                        match &irp.holder {
+                        match irp.holder.as_result() {
                             Ok(holder) => span(
-                                holder
-                                    .driver
-                                    .as_ref()
-                                    .map_or_else(|error| error.clone(), |driver| driver.label()),
+                                holder.driver.as_result().map_or_else(
+                                    |error| error.to_string(),
+                                    |driver| driver.label(),
+                                ),
                                 SYMBOL,
                             ),
                             Err(error) => span(error, MUTED),
@@ -1139,7 +1139,7 @@ fn power_section(finding: &PowerFailureFinding) -> Section<()> {
             );
         for entry in &workers.entries {
             let row = TableRow::new(entry.entry.0.to_string());
-            table = table.row(match &entry.worker {
+            table = table.row(match entry.worker.as_result() {
                 Ok(worker) => row
                     .cell("thread", addr(worker.thread.0))
                     .cell(

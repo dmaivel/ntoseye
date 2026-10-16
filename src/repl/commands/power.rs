@@ -2,45 +2,19 @@
 //! (`!poaction`), a device's power state (`!podev`), and the system power
 //! policy (`!popolicy`).
 
+use ntoseye_macros::command;
+
+use crate::error::{Error, Result};
 use crate::repl::*;
+use crate::session::Session;
+use crate::target::DiagnosticValue;
 use crate::target::power::{
     DO_POWER_INRUSH, DO_POWER_PAGABLE, DevicePower, IRP_MJ_POWER, IrpHolder, PowerActionDetail,
     PowerIrp, PowerIrpList, PowerPolicy, PowerState, PowerWorkerList, dynamic_throttle_name,
     power_action_flag_names, power_action_state_name, power_event_code_names, power_minor_name,
 };
+use crate::types::VirtAddr;
 use crate::ui;
-
-repl_command! {
-    cmd_poaction;
-    names: ["!poaction", "poaction"],
-    category: "objects and I/O",
-    usage: "!poaction",
-    summary: "Show the system power action and the power IRPs in flight.",
-    details: "Shows nt!PopAction: the power action in progress, its state and flags, and the system state being entered, with the device notification pass when one runs. Then lists every power IRP the power manager has allocated, from nt!PopIrpList: its PDO, the device it was sent to, its minor function and the power state it asks for, where it is pending now (the driver of its current stack location), and how long the drivers have had it when the power IRP watchdog runs. Last come the threads that pass power IRPs to drivers, from nt!PopIrpThreadList, with the IRP and device each is working on.",
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_podev;
-    names: ["!podev", "podev"],
-    category: "objects and I/O",
-    usage: "!podev <device-object>",
-    summary: "Show the power state of a device object.",
-    details: "Shows the device's driver and power flags, the system and device power states its driver last set with PoSetPowerState (from the PowerFlags of its DEVOBJ_EXTENSION), the idle detection the driver registered, if any, the device state PnP records in the device node of the stack, whether the driver registered with the power framework and the device power IRP that it has outstanding, and the power IRPs on nt!PopIrpList sent to any device of the stack.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_popolicy;
-    names: ["!popolicy", "popolicy"],
-    category: "objects and I/O",
-    usage: "!popolicy [address]",
-    summary: "Show the system power policy in effect.",
-    details: "Decodes the SYSTEM_POWER_POLICY that nt!PopPolicy points to, or the one at the address you give: the action for the power button, the sleep button, closing the lid, idling, and overheating, with each action's flags and notification events, the idle timeout and sensitivity, the lightest and deepest sleep states, the display and disk timeouts, the throttling settings, and the battery discharge levels.",
-    completion: Expression,
-    target: Kernel,
-}
 
 /// A time in 100 ns units, in seconds to a tenth.
 pub fn duration_text(units: u64) -> String {
@@ -63,8 +37,8 @@ pub fn request_text(major: u8, minor: u8, state: Option<&PowerState>) -> String 
 /// `\Driver\USBHUB3 (USBHUB3.SYS) device ffff…, stack location 11 of 14`.
 pub fn holder_text(holder: &IrpHolder) -> String {
     let driver = match &holder.driver {
-        Ok(driver) => ui::symbol(&driver.label()),
-        Err(error) => ui::muted(&format!("driver unreadable: {error}")),
+        DiagnosticValue::Available(driver) => ui::symbol(&driver.label()),
+        DiagnosticValue::Unavailable(error) => ui::muted(&format!("driver unreadable: {error}")),
     };
     format!(
         "{driver}  device {}  stack location {} of {}{}",
@@ -102,12 +76,12 @@ fn print_power_irp(irp: &PowerIrp, indent: &str) {
         }
     );
     match &irp.holder {
-        Ok(holder) => outln!(
+        DiagnosticValue::Available(holder) => outln!(
             "{indent}  {} {}",
             ui::muted("pending in"),
             holder_text(holder)
         ),
-        Err(error) => outln!(
+        DiagnosticValue::Unavailable(error) => outln!(
             "{indent}  {} {}",
             ui::muted("pending in"),
             ui::muted(&format!("unknown: {error}"))
@@ -151,8 +125,8 @@ pub fn print_power_irp_list(list: &PowerIrpList, indent: &str) {
     }
     for entry in &list.entries {
         match &entry.irp {
-            Ok(irp) => print_power_irp(irp, &format!("{indent}  ")),
-            Err(error) => outln!(
+            DiagnosticValue::Available(irp) => print_power_irp(irp, &format!("{indent}  ")),
+            DiagnosticValue::Unavailable(error) => outln!(
                 "{indent}  {} {}",
                 ui::addr(entry.data.0),
                 ui::muted(&format!("unreadable: {error}"))
@@ -177,7 +151,7 @@ pub fn print_power_worker_list(list: &PowerWorkerList, indent: &str) {
     }
     for entry in &list.entries {
         match &entry.worker {
-            Ok(worker) => {
+            DiagnosticValue::Available(worker) => {
                 let kind = if worker.is_static {
                     "static"
                 } else {
@@ -202,7 +176,7 @@ pub fn print_power_worker_list(list: &PowerWorkerList, indent: &str) {
                     );
                 }
             }
-            Err(error) => outln!(
+            DiagnosticValue::Unavailable(error) => outln!(
                 "{indent}  {} {}",
                 ui::addr(entry.entry.0),
                 ui::muted(&format!("unreadable: {error}"))
@@ -261,7 +235,7 @@ fn print_power_action(detail: &PowerActionDetail) {
     );
     match &action.devices {
         None => outln!("  Device notification: none in progress"),
-        Some(Ok(devices)) => {
+        Some(DiagnosticValue::Available(devices)) => {
             outln!(
                 "  Device notification {}: minor {:#x}, {}, thread {}, status {:#010x}{}{}{}",
                 ui::addr(devices.address.0),
@@ -278,28 +252,30 @@ fn print_power_action(detail: &PowerActionDetail) {
                 if devices.cancelled { ", cancelled" } else { "" }
             );
         }
-        Some(Err(error)) => outln!(
+        Some(DiagnosticValue::Unavailable(error)) => outln!(
             "  Device notification: {}",
             ui::muted(&format!("unreadable: {error}"))
         ),
     }
     outln!();
     match &detail.irps {
-        Ok(list) => print_power_irp_list(list, ""),
-        Err(error) => error!("power IRP list: {error}"),
+        DiagnosticValue::Available(list) => print_power_irp_list(list, ""),
+        DiagnosticValue::Unavailable(error) => error!("power IRP list: {error}"),
     }
     outln!();
     match &detail.workers {
-        Ok(list) => print_power_worker_list(list, ""),
-        Err(error) => error!("IRP worker list: {error}"),
+        DiagnosticValue::Available(list) => print_power_worker_list(list, ""),
+        DiagnosticValue::Unavailable(error) => error!("IRP worker list: {error}"),
     }
 }
 
 fn print_device_power(power: &DevicePower) {
     outln!("Device object {} is for:", ui::addr(power.device.0));
     match &power.driver {
-        Ok(driver) => outln!("  {}", ui::symbol(&driver.label())),
-        Err(error) => outln!("  {}", ui::muted(&format!("driver unreadable: {error}"))),
+        DiagnosticValue::Available(driver) => outln!("  {}", ui::symbol(&driver.label())),
+        DiagnosticValue::Unavailable(error) => {
+            outln!("  {}", ui::muted(&format!("driver unreadable: {error}")))
+        }
     }
     let mut device_flags = Vec::new();
     if power.flags & DO_POWER_PAGABLE != 0 {
@@ -318,7 +294,7 @@ fn print_device_power(power: &DevicePower) {
     );
     match &power.idle {
         None => outln!("Idle detection: not registered"),
-        Some(Ok(idle)) => {
+        Some(DiagnosticValue::Available(idle)) => {
             outln!("Idle detection: {}", ui::addr(idle.address.0));
             outln!(
                 "  IdleCount {}  BusyCount {}  BusyReference {}  TotalBusyCount {}",
@@ -339,14 +315,14 @@ fn print_device_power(power: &DevicePower) {
                 idle.current_state.label()
             );
         }
-        Some(Err(error)) => outln!(
+        Some(DiagnosticValue::Unavailable(error)) => outln!(
             "Idle detection: {}",
             ui::muted(&format!("unreadable: {error}"))
         ),
     }
     match &power.devnode {
         None => outln!("DevNode: none"),
-        Some(Ok(node)) => {
+        Some(DiagnosticValue::Available(node)) => {
             outln!(
                 "DevNode {} \"{}\"",
                 ui::addr(node.address.0),
@@ -367,17 +343,21 @@ fn print_device_power(power: &DevicePower) {
                 );
             }
         }
-        Some(Err(error)) => outln!("DevNode: {}", ui::muted(&format!("unreadable: {error}"))),
+        Some(DiagnosticValue::Unavailable(error)) => {
+            outln!("DevNode: {}", ui::muted(&format!("unreadable: {error}")))
+        }
     }
     match &power.irps {
-        Ok(irps) if irps.is_empty() => outln!("Power IRPs for the stack: none"),
-        Ok(irps) => {
+        DiagnosticValue::Available(irps) if irps.is_empty() => {
+            outln!("Power IRPs for the stack: none")
+        }
+        DiagnosticValue::Available(irps) => {
             outln!("Power IRPs for the stack (nt!PopIrpList):");
             for irp in irps {
                 print_power_irp(irp, "  ");
             }
         }
-        Err(error) => outln!(
+        DiagnosticValue::Unavailable(error) => outln!(
             "Power IRPs for the stack: {}",
             ui::muted(&format!("unavailable: {error}"))
         ),
@@ -485,51 +465,94 @@ fn print_power_policy(policy: &PowerPolicy) {
     }
 }
 
-impl ReplState<'_> {
-    fn cmd_poaction(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if !invocation.argv.is_empty() {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        match self.ctx.target.power_action() {
-            Ok(detail) => print_power_action(&detail),
-            Err(error) => error!("!poaction: {error}"),
-        }
-        Ok(())
-    }
+/// Show the system power action and the power IRPs in flight.
+///
+/// Shows nt!PopAction: the power action in progress, its state and flags, and
+/// the system state being entered, with the device notification pass when one
+/// runs. Then lists every power IRP the power manager has allocated, from
+/// nt!PopIrpList: its PDO, the device it was sent to, its minor function and
+/// the power state it asks for, where it is pending now (the driver of its
+/// current stack location), and how long the drivers have had it when the power
+/// IRP watchdog runs. Last come the threads that pass power IRPs to drivers,
+/// from nt!PopIrpThreadList, with the IRP and device each is working on.
+#[command(
+    names = ["!poaction", "poaction"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    python_name = "power_action"
+)]
+fn poaction(session: &Session) -> Result<PowerActionDetail> {
+    session
+        .target
+        .power_action()
+        .map_err(|error| Error::DebugInfo(format!("!poaction: {error}")))
+}
 
-    fn cmd_podev(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if invocation.argv.len() != 1 {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
-        let Some(device) = self.eval_or_report(invocation.arg(0).unwrap_or_default()) else {
-            return Ok(());
-        };
-        match self.ctx.target.device_power(device) {
-            Ok(power) => print_device_power(&power),
-            Err(error) => error!("!podev: {error}"),
-        }
-        Ok(())
+impl Render for PowerActionDetail {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_power_action(self);
     }
+}
 
-    fn cmd_popolicy(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let address = match invocation.argv.len() {
-            0 => None,
-            1 => match self.eval_or_report(invocation.arg(0).unwrap_or_default()) {
-                Some(address) => Some(address),
-                None => return Ok(()),
-            },
-            _ => {
-                outln!("{}\n", command_help(invocation.name));
-                return Ok(());
-            }
-        };
-        match self.ctx.target.power_policy(address) {
-            Ok(policy) => print_power_policy(&policy),
-            Err(error) => error!("!popolicy: {error}"),
-        }
-        Ok(())
+/// Show the power state of a device object.
+///
+/// Shows the device's driver and power flags, the system and device power
+/// states its driver last set with PoSetPowerState (from the PowerFlags of its
+/// DEVOBJ_EXTENSION), the idle detection the driver registered, if any, the
+/// device state PnP records in the device node of the stack, whether the driver
+/// registered with the power framework and the device power IRP that it has
+/// outstanding, and the power IRPs on nt!PopIrpList sent to any device of the
+/// stack.
+#[command(
+    names = ["!podev", "podev"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    python_name = "device_power",
+    usage = "!podev <device-object>"
+)]
+fn podev(session: &Session, device: VirtAddr) -> Result<DevicePower> {
+    session
+        .target
+        .device_power(device)
+        .map_err(|error| Error::DebugInfo(format!("!podev: {error}")))
+}
+
+impl Render for DevicePower {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_device_power(self);
+    }
+}
+
+/// Show the system power policy in effect.
+///
+/// Decodes the SYSTEM_POWER_POLICY that nt!PopPolicy points to, or the one at
+/// the address you give: the action for the power button, the sleep button,
+/// closing the lid, idling, and overheating, with each action's flags and
+/// notification events, the idle timeout and sensitivity, the lightest and
+/// deepest sleep states, the display and disk timeouts, the throttling
+/// settings, and the battery discharge levels.
+#[command(
+    names = ["!popolicy", "popolicy"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = none,
+    usage = "!popolicy [address]"
+)]
+fn popolicy(session: &Session, address: Option<VirtAddr>) -> Result<PowerPolicy> {
+    session
+        .target
+        .power_policy(address)
+        .map_err(|error| Error::DebugInfo(format!("!popolicy: {error}")))
+}
+
+impl Render for PowerPolicy {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_power_policy(self);
     }
 }
 

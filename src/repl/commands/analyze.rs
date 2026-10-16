@@ -630,7 +630,7 @@ fn print_power_failure(finding: &PowerFailureFinding) {
             ui::addr(blocked.irp.0),
             ui::muted("(!irp)")
         );
-        match &blocked.holder {
+        match blocked.holder.as_result() {
             Ok(holder) => {
                 outln!(
                     "  {} {}",
@@ -675,7 +675,7 @@ fn print_power_failure(finding: &PowerFailureFinding) {
             let holder = failure
                 .blocked_irp
                 .as_ref()
-                .and_then(|blocked| blocked.holder.as_ref().ok())
+                .and_then(|blocked| blocked.holder.as_result().ok())
                 .map(|holder| holder.device);
             for entry in &stack.entries {
                 let marker = if Some(entry.device_object) == holder {

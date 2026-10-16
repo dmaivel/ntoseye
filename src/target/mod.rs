@@ -812,6 +812,15 @@ impl<T> DiagnosticValue<T> {
         Self::Unavailable(error.into())
     }
 
+    /// The value, or why it could not be read, as a `Result` to match or
+    /// chain on.
+    pub fn as_result(&self) -> std::result::Result<&T, &str> {
+        match self {
+            Self::Available(value) => Ok(value),
+            Self::Unavailable(error) => Err(error),
+        }
+    }
+
     /// The value of `result`, or its error's text.
     pub fn from_result(result: Result<T>) -> Self {
         match result {

@@ -16,7 +16,7 @@
 
 use std::cell::OnceCell;
 
-use super::Target;
+use super::{DiagnosticValue, Target};
 use crate::bugchecks::module_filename;
 use crate::error::{Error, Result};
 use crate::guest::ModuleInfo;
@@ -25,6 +25,7 @@ use crate::layout::{ParsedType, StructRef, Types};
 use crate::target::object::{IrpInfo, SL_PENDING_RETURNED};
 use crate::target::pnp::DeviceStackDetail;
 use crate::types::VirtAddr;
+use ntoseye_macros::record;
 
 /// More power IRPs than the power manager has allocated at once.
 const MAX_POWER_IRPS: usize = 1024;
@@ -138,14 +139,18 @@ pub fn power_minor_name(minor: u8) -> Option<&'static str> {
 /// A value of one of the kernel's power enums, with its name when the PDB
 /// has one, less the enum's common prefix (`Working` for
 /// `PowerSystemWorking`, `D3` for `PowerDeviceD3`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[record(impl)]
+#[derive(PartialEq, Eq)]
 pub struct PowerEnum {
     pub value: u64,
+    /// The name; `None` when the PDB has no name for the value.
     pub name: Option<String>,
 }
 
+#[record]
 impl PowerEnum {
     /// The name, or the value in hex.
+    #[record(getter)]
     pub fn label(&self) -> String {
         self.name
             .clone()
@@ -153,8 +158,10 @@ impl PowerEnum {
     }
 }
 
-/// The power state a power IRP or a stack location asks for.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The power state a power IRP or a stack location asks for: a `system`
+/// or a `device` state.
+#[record(tagged)]
+#[derive(PartialEq, Eq)]
 pub enum PowerState {
     System(PowerEnum),
     Device(PowerEnum),
@@ -169,7 +176,8 @@ impl PowerState {
 }
 
 /// A driver, found from one of its device objects or its driver object.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[record]
+#[derive(PartialEq, Eq)]
 pub struct DeviceDriver {
     pub driver_object: VirtAddr,
     /// `\Driver\viostor`; empty when the driver object has no name.
@@ -192,24 +200,26 @@ impl DeviceDriver {
 }
 
 /// Where an IRP is pending: the driver of its current stack location.
-#[derive(Debug, Clone)]
+#[record]
 pub struct IrpHolder {
     /// `CurrentLocation`, counted from 1 as `!irp` does.
     pub location: u8,
     pub stack_count: u8,
     pub stack_location: VirtAddr,
+    #[record(hex)]
     pub major_function: u8,
+    #[record(hex)]
     pub minor_function: u8,
     /// The state that location's power request asks for.
     pub state: Option<PowerState>,
     /// The location's driver returned `STATUS_PENDING` for it.
     pub pending_returned: bool,
     pub device: VirtAddr,
-    pub driver: std::result::Result<DeviceDriver, String>,
+    pub driver: DiagnosticValue<DeviceDriver>,
 }
 
 /// A power IRP the power manager allocated (`_POP_IRP_DATA`).
-#[derive(Debug, Clone)]
+#[record(impl)]
 pub struct PowerIrp {
     pub data: VirtAddr,
     pub irp: VirtAddr,
@@ -230,17 +240,36 @@ pub struct PowerIrp {
     /// current time is unreadable.
     pub pending: Option<u64>,
     /// Where the IRP is now, or why that is unknown.
-    pub holder: std::result::Result<IrpHolder, String>,
+    pub holder: DiagnosticValue<IrpHolder>,
 }
 
-#[derive(Debug, Clone)]
+#[record]
+impl PowerIrp {
+    /// `IRP_MN_SET_POWER`, `IRP_MN_QUERY_POWER`, `IRP_MN_WAIT_WAKE`, or
+    /// `IRP_MN_POWER_SEQUENCE`.
+    #[record(getter)]
+    pub fn minor_name(&self) -> Option<&'static str> {
+        power_minor_name(self.minor_function)
+    }
+
+    /// How long ago the watchdog was armed, in milliseconds.
+    #[record(getter)]
+    pub fn pending_ms(&self) -> Option<u64> {
+        self.pending.map(|pending| pending / 10_000)
+    }
+}
+
+/// An entry on a list of `_POP_IRP_DATA`: the power IRP, or why it does
+/// not decode.
+#[record]
 pub struct PowerIrpEntry {
+    /// The `_POP_IRP_DATA`.
     pub data: VirtAddr,
-    pub irp: std::result::Result<PowerIrp, String>,
+    pub irp: DiagnosticValue<PowerIrp>,
 }
 
 /// The power IRPs on a list of `_POP_IRP_DATA`, normally `nt!PopIrpList`.
-#[derive(Debug, Clone)]
+#[record]
 pub struct PowerIrpList {
     pub head: VirtAddr,
     /// The symbol of the head, such as `nt!PopIrpList`, when it is one.
@@ -251,7 +280,7 @@ pub struct PowerIrpList {
 }
 
 /// A thread that passes power IRPs to drivers (`_POP_IRP_WORKER_ENTRY`).
-#[derive(Debug, Clone)]
+#[record]
 pub struct PowerWorker {
     pub thread: VirtAddr,
     /// The IRP it is passing to a driver, or 0 while it waits for work.
@@ -262,14 +291,16 @@ pub struct PowerWorker {
     pub is_static: bool,
 }
 
-#[derive(Debug, Clone)]
+/// An entry on a list of `_POP_IRP_WORKER_ENTRY`: the worker, or why it
+/// does not decode.
+#[record]
 pub struct PowerWorkerEntry {
     pub entry: VirtAddr,
-    pub worker: std::result::Result<PowerWorker, String>,
+    pub worker: DiagnosticValue<PowerWorker>,
 }
 
 /// The IRP worker threads on a list, normally `nt!PopIrpThreadList`.
-#[derive(Debug, Clone)]
+#[record]
 pub struct PowerWorkerList {
     pub head: VirtAddr,
     pub head_name: Option<&'static str>,
@@ -279,12 +310,14 @@ pub struct PowerWorkerList {
 
 /// The device notification pass of a system power action
 /// (`_POP_DEVICE_SYS_STATE`, `PopAction.DevState`).
-#[derive(Debug, Clone)]
+#[record]
 pub struct DeviceNotifyState {
     pub address: VirtAddr,
+    #[record(hex)]
     pub irp_minor: u8,
     pub system_state: PowerEnum,
     pub thread: VirtAddr,
+    #[record(hex)]
     pub status: u32,
     pub failed_device: VirtAddr,
     pub waking: bool,
@@ -292,7 +325,7 @@ pub struct DeviceNotifyState {
 }
 
 /// The system power action (`nt!PopAction`).
-#[derive(Debug, Clone)]
+#[record(impl)]
 pub struct PowerAction {
     pub address: VirtAddr,
     pub updates: u8,
@@ -312,21 +345,38 @@ pub struct PowerAction {
     pub hiber_context: VirtAddr,
     pub action_worker_thread: VirtAddr,
     /// The device notification pass in progress, when there is one.
-    pub devices: Option<std::result::Result<DeviceNotifyState, String>>,
+    pub devices: Option<DiagnosticValue<DeviceNotifyState>>,
+}
+
+#[record]
+impl PowerAction {
+    /// `Idle`, `NewRequest`, `Callout`, or `SetSystemState`.
+    #[record(getter)]
+    pub fn state_name(&self) -> Option<&'static str> {
+        power_action_state_name(self.state)
+    }
+
+    /// The `POWER_ACTION_*` flags, such as `QUERY_ALLOWED`.
+    #[record(getter)]
+    pub fn flag_names(&self) -> Vec<&'static str> {
+        power_action_flag_names(self.flags)
+    }
 }
 
 /// `!poaction`: the power action, the power IRPs, and the IRP worker
 /// threads.
-#[derive(Debug, Clone)]
+#[record]
 pub struct PowerActionDetail {
     pub action: PowerAction,
-    pub irps: std::result::Result<PowerIrpList, String>,
-    pub workers: std::result::Result<PowerWorkerList, String>,
+    /// The power IRPs on `nt!PopIrpList`.
+    pub irps: DiagnosticValue<PowerIrpList>,
+    /// The IRP worker threads on `nt!PopIrpThreadList`.
+    pub workers: DiagnosticValue<PowerWorkerList>,
 }
 
 /// The idle detection a driver registered with
 /// `PoRegisterDeviceForIdleDetection` (`_DEVICE_OBJECT_POWER_EXTENSION`).
-#[derive(Debug, Clone)]
+#[record]
 pub struct IdleDetection {
     pub address: VirtAddr,
     pub idle_count: u32,
@@ -344,7 +394,7 @@ pub struct IdleDetection {
 }
 
 /// The power fields of the device node of a device's stack.
-#[derive(Debug, Clone)]
+#[record]
 pub struct DevNodePower {
     pub address: VirtAddr,
     pub instance_path: String,
@@ -359,10 +409,10 @@ pub struct DevNodePower {
 }
 
 /// `!podev`: a device object's power state.
-#[derive(Debug, Clone)]
+#[record(impl)]
 pub struct DevicePower {
     pub device: VirtAddr,
-    pub driver: std::result::Result<DeviceDriver, String>,
+    pub driver: DiagnosticValue<DeviceDriver>,
     /// `DEVICE_OBJECT.Flags`, for `DO_POWER_PAGABLE` and `DO_POWER_INRUSH`.
     pub flags: u32,
     pub extension: VirtAddr,
@@ -371,10 +421,25 @@ pub struct DevicePower {
     pub system_state: PowerEnum,
     /// The last device state the driver set with `PoSetPowerState`.
     pub device_state: PowerEnum,
-    pub idle: Option<std::result::Result<IdleDetection, String>>,
-    pub devnode: Option<std::result::Result<DevNodePower, String>>,
+    pub idle: Option<DiagnosticValue<IdleDetection>>,
+    pub devnode: Option<DiagnosticValue<DevNodePower>>,
     /// The power IRPs on `nt!PopIrpList` sent to the device's stack.
-    pub irps: std::result::Result<Vec<PowerIrp>, String>,
+    pub irps: DiagnosticValue<Vec<PowerIrp>>,
+}
+
+#[record]
+impl DevicePower {
+    /// `DO_POWER_PAGABLE`: the driver handles power IRPs at PASSIVE_LEVEL.
+    #[record(getter)]
+    pub fn power_pagable(&self) -> bool {
+        self.flags & DO_POWER_PAGABLE != 0
+    }
+
+    /// `DO_POWER_INRUSH`: the device draws inrush current at power-up.
+    #[record(getter)]
+    pub fn power_inrush(&self) -> bool {
+        self.flags & DO_POWER_INRUSH != 0
+    }
 }
 
 /// A `POWER_ACTION_POLICY`: what the system does for an event.
@@ -434,7 +499,7 @@ pub struct PowerCulprit {
 #[derive(Debug, Clone)]
 pub struct BlockedIrp {
     pub irp: VirtAddr,
-    pub holder: std::result::Result<IrpHolder, String>,
+    pub holder: DiagnosticValue<IrpHolder>,
     /// The IRP's entry on the power IRP list, when it is there.
     pub data: Option<PowerIrp>,
 }
@@ -650,9 +715,7 @@ impl<'a> PowerReader<'a> {
             state,
             pending_returned: location.control & SL_PENDING_RETURNED != 0,
             device: location.device_object,
-            driver: self
-                .device_driver(location.device_object)
-                .map_err(|error| error.to_string()),
+            driver: DiagnosticValue::from_result(self.device_driver(location.device_object)),
         })
     }
 
@@ -712,9 +775,9 @@ impl<'a> PowerReader<'a> {
             .then(|| self.now.map(|now| now.saturating_sub(watchdog_start)))
             .flatten();
         let holder = if irp.is_zero() {
-            Err("the entry names no IRP".to_string())
+            DiagnosticValue::unavailable("the entry names no IRP")
         } else {
-            self.irp_holder(irp).map_err(|error| error.to_string())
+            DiagnosticValue::from_result(self.irp_holder(irp))
         };
         Ok(PowerIrp {
             data: data.addr(),
@@ -736,7 +799,7 @@ impl<'a> PowerReader<'a> {
         let (entries, stopped) = self.collect_list(head, "_POP_IRP_DATA", MAX_POWER_IRPS, |data| {
             PowerIrpEntry {
                 data: data.addr(),
-                irp: self.power_irp(data).map_err(|error| error.to_string()),
+                irp: DiagnosticValue::from_result(self.power_irp(data)),
             }
         });
         PowerIrpList {
@@ -764,7 +827,7 @@ impl<'a> PowerReader<'a> {
             self.collect_list(head, "_POP_IRP_WORKER_ENTRY", MAX_IRP_WORKERS, |entry| {
                 PowerWorkerEntry {
                     entry: entry.addr(),
-                    worker: self.worker(entry).map_err(|error| error.to_string()),
+                    worker: DiagnosticValue::from_result(self.worker(entry)),
                 }
             });
         PowerWorkerList {
@@ -810,10 +873,8 @@ impl<'a> PowerReader<'a> {
             .struct_at("_POP_POWER_ACTION", address)?
             .prefetch();
         let dev_state = action.read_pointer("DevState").unwrap_or(VirtAddr(0));
-        let devices = (!dev_state.is_zero()).then(|| {
-            self.device_notify_state(dev_state)
-                .map_err(|error| error.to_string())
-        });
+        let devices = (!dev_state.is_zero())
+            .then(|| DiagnosticValue::from_result(self.device_notify_state(dev_state)));
         Ok(PowerAction {
             address,
             updates: action.read_field("Updates")?,
@@ -937,35 +998,37 @@ impl<'a> PowerReader<'a> {
         }
         let power_flags = extension.read_uint("PowerFlags")? as u32;
         let dope = extension.read_pointer("Dope")?;
-        let idle = (!dope.is_zero()).then(|| {
-            self.idle_detection(dope, device)
-                .map_err(|error| error.to_string())
-        });
+        let idle = (!dope.is_zero())
+            .then(|| DiagnosticValue::from_result(self.idle_detection(dope, device)));
         let own_devnode = extension.read_pointer("DeviceNode").unwrap_or(VirtAddr(0));
         let devnode = Some(own_devnode)
             .filter(|node| !node.is_zero())
             .or(stack_devnode)
-            .map(|node| self.devnode_power(node).map_err(|error| error.to_string()));
+            .map(|node| DiagnosticValue::from_result(self.devnode_power(node)));
         let irps = match irp_list {
-            None => Err("nt!PopIrpList is not in the kernel's symbols".to_string()),
+            None => DiagnosticValue::unavailable("nt!PopIrpList is not in the kernel's symbols"),
             Some(head) => {
                 let list = self.irp_list(head, Some("nt!PopIrpList"));
                 match list.stopped {
-                    Some(stopped) if list.entries.is_empty() => Err(stopped),
-                    _ => Ok(list
-                        .entries
-                        .into_iter()
-                        .filter_map(|entry| entry.irp.ok())
-                        .filter(|irp| irp_concerns(irp, device, stack))
-                        .collect()),
+                    Some(stopped) if list.entries.is_empty() => {
+                        DiagnosticValue::Unavailable(stopped)
+                    }
+                    _ => DiagnosticValue::Available(
+                        list.entries
+                            .into_iter()
+                            .filter_map(|entry| match entry.irp {
+                                DiagnosticValue::Available(irp) => Some(irp),
+                                DiagnosticValue::Unavailable(_) => None,
+                            })
+                            .filter(|irp| irp_concerns(irp, device, stack))
+                            .collect(),
+                    ),
                 }
             }
         };
         Ok(DevicePower {
             device,
-            driver: self
-                .driver(object.read_pointer("DriverObject")?)
-                .map_err(|error| error.to_string()),
+            driver: DiagnosticValue::from_result(self.driver(object.read_pointer("DriverObject")?)),
             flags,
             extension: extension_address,
             power_flags,
@@ -1177,7 +1240,7 @@ impl<'a> PowerReader<'a> {
         let data = irps.as_ref().and_then(|list| {
             list.entries
                 .iter()
-                .filter_map(|entry| entry.irp.as_ref().ok())
+                .filter_map(|entry| entry.irp.as_result().ok())
                 .find(|entry| entry.irp == irp)
                 .cloned()
         });
@@ -1189,9 +1252,9 @@ impl<'a> PowerReader<'a> {
                 list.head.0
             ));
         }
-        let holder = self.irp_holder(irp).map_err(|error| error.to_string());
-        if let Ok(holder) = &holder {
-            match &holder.driver {
+        let holder = DiagnosticValue::from_result(self.irp_holder(irp));
+        if let DiagnosticValue::Available(holder) = &holder {
+            match holder.driver.as_result() {
                 Ok(driver) => {
                     failure.culprit = Some(PowerCulprit {
                         driver: driver.clone(),
@@ -1236,7 +1299,10 @@ impl<'a> PowerReader<'a> {
 /// Whether a power IRP was sent to `device` or its stack, or is pending in
 /// one of them.
 fn irp_concerns(irp: &PowerIrp, device: VirtAddr, stack: &[VirtAddr]) -> bool {
-    let holder = irp.holder.as_ref().map(|holder| holder.device).ok();
+    let holder = match &irp.holder {
+        DiagnosticValue::Available(holder) => Some(holder.device),
+        DiagnosticValue::Unavailable(_) => None,
+    };
     [
         Some(irp.pdo),
         Some(irp.target_device),
@@ -1265,14 +1331,14 @@ impl Target {
     pub fn power_action(&self) -> Result<PowerActionDetail> {
         let reader = self.power_reader()?;
         let action = reader.power_action(self.kernel_symbol_address("PopAction")?)?;
-        let irps = self
-            .kernel_symbol_address("PopIrpList")
-            .map(|head| reader.irp_list(head, Some("nt!PopIrpList")))
-            .map_err(|error| error.to_string());
-        let workers = self
-            .kernel_symbol_address("PopIrpThreadList")
-            .map(|head| reader.worker_list(head, Some("nt!PopIrpThreadList")))
-            .map_err(|error| error.to_string());
+        let irps = DiagnosticValue::from_result(
+            self.kernel_symbol_address("PopIrpList")
+                .map(|head| reader.irp_list(head, Some("nt!PopIrpList"))),
+        );
+        let workers = DiagnosticValue::from_result(
+            self.kernel_symbol_address("PopIrpThreadList")
+                .map(|head| reader.worker_list(head, Some("nt!PopIrpThreadList"))),
+        );
         Ok(PowerActionDetail {
             action,
             irps,
@@ -1685,7 +1751,7 @@ mod tests {
         assert!(culprit.reason.contains("stack location 2 of 3"));
 
         let blocked = failure.blocked_irp.expect("the blocked IRP");
-        let holder = blocked.holder.expect("where it is pending");
+        let holder = blocked.holder.as_result().expect("where it is pending");
         assert_eq!(holder.location, 2);
         assert_eq!(holder.device, VirtAddr(HOLDER_DEVICE));
         assert!(holder.pending_returned);
@@ -1709,7 +1775,7 @@ mod tests {
         let [entry] = workers.entries.as_slice() else {
             panic!("one worker: {:?}", workers.entries);
         };
-        let worker = entry.worker.as_ref().unwrap();
+        let worker = entry.worker.as_result().unwrap();
         assert_eq!(worker.irp, VirtAddr(IRP));
         assert_eq!(
             worker.driver.as_deref(),
@@ -1743,7 +1809,7 @@ mod tests {
         // CurrentLocation past StackCount: the IRP is in no driver, so no
         // driver is blamed.
         let blocked = failure.blocked_irp.expect("the blocked IRP");
-        assert!(blocked.holder.is_err());
+        assert!(blocked.holder.as_result().is_err());
         assert!(blocked.data.is_some());
         assert!(failure.culprit.is_none());
     }
