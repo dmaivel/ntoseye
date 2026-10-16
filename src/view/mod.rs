@@ -5,7 +5,6 @@
 pub mod backend;
 pub mod bugcheck;
 pub mod execution;
-pub mod fs;
 pub mod hypervisor;
 pub mod meta;
 pub mod module;

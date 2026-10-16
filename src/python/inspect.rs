@@ -3,7 +3,7 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use super::args::{ApcTarget, DeviceArg, FltFilterArg};
+use super::args::{ApcTarget, DeviceArg};
 use super::command::admit;
 use super::context::Context;
 use super::handle::Owner;
@@ -12,7 +12,6 @@ use super::process::Process;
 use super::thread::{Frame, trap_frame_view};
 use super::{err, raise};
 use crate::bugchecks::{bugcheck_from_dump_info, current_bugcheck};
-use crate::error::Error;
 use crate::session::Session;
 use crate::session::effects::Effects;
 use crate::target::alpc::{AlpcMessage, AlpcPort, AlpcProcessPorts};
@@ -360,84 +359,6 @@ impl Inspect {
                 .read_exception_record(VirtAddr(address))
                 .map_err(err)?;
             Ok(view::bugcheck::exception_record(Some(address), &record))
-        })
-    }
-
-    /// Decode the `_CONTROL_AREA` of a section, with its segment and its
-    /// subsections (`!ca`).
-    fn control_area<'py>(
-        &self,
-        py: Python<'py>,
-        address: u64,
-    ) -> PyResult<Typed<'py, view::fs::ControlArea>> {
-        self.typed(py, |session| {
-            let detail = session
-                .target
-                .inspect_control_area(VirtAddr(address))
-                .map_err(err)?;
-            Ok(view::fs::control_area(&detail))
-        })
-    }
-
-    /// Decode a volume parameter block (`!vpb`).
-    fn vpb<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Typed<'py, view::fs::Vpb>> {
-        self.typed(py, |session| {
-            let detail = session.target.inspect_vpb(VirtAddr(address)).map_err(err)?;
-            Ok(view::fs::vpb(&detail))
-        })
-    }
-
-    /// Get the mapped views of the cache manager for each file, from its VACB
-    /// arrays (`!filecache`).
-    fn file_cache<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::fs::FileCache>> {
-        self.typed(py, |session| {
-            let detail = session.target.file_cache().map_err(err)?;
-            Ok(view::fs::file_cache(&detail))
-        })
-    }
-
-    /// Get the registered minifilters of each filter manager frame, with their
-    /// instances (`!fltkd.filters`).
-    fn flt_filters<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::fs::FltFilters>> {
-        self.typed(py, |session| {
-            let detail = session.target.flt_filters().map_err(err)?;
-            Ok(view::fs::flt_filters(&detail))
-        })
-    }
-
-    /// Get minifilter instances with their filter and volume
-    /// (`!fltkd.instances`): all instances, or the instances of one filter
-    /// given by name or by `_FLT_FILTER` address.
-    #[pyo3(signature = (filter=None))]
-    fn flt_instances<'py>(
-        &self,
-        py: Python<'py>,
-        filter: Option<FltFilterArg>,
-    ) -> PyResult<Typed<'py, view::fs::FltInstances>> {
-        let (text, address) = match filter {
-            Some(FltFilterArg::Address(address)) => (Some(format!("{address:#x}")), Some(address)),
-            Some(FltFilterArg::Name(name)) => (Some(name), None),
-            None => (None, None),
-        };
-        self.typed(py, |session| {
-            let detail = session
-                .target
-                .flt_instances(text.as_deref(), |_| {
-                    address
-                        .map(VirtAddr)
-                        .ok_or_else(|| Error::InvalidArgument("not a filter address".into()))
-                })
-                .map_err(err)?;
-            Ok(view::fs::flt_instances(&detail))
-        })
-    }
-
-    /// Get the volumes of each filter manager frame, with the instances on them
-    /// (`!fltkd.volumes`).
-    fn flt_volumes<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::fs::FltVolumes>> {
-        self.typed(py, |session| {
-            let detail = session.target.flt_volumes().map_err(err)?;
-            Ok(view::fs::flt_volumes(&detail))
         })
     }
 

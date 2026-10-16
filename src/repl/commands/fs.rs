@@ -5,77 +5,19 @@
 use tabled::builder::Builder;
 
 use super::diagnostics::diagnostic_cell;
+use ntoseye_macros::command;
+
 use crate::error::Result;
-use crate::expr::Expr;
+use crate::repl::args::{ArgCx, ArgError, FromArg};
 use crate::repl::*;
+use crate::session::Session;
 use crate::target::DiagnosticValue;
-use crate::target::fltmgr::{FltFrames, FltInstanceDetail};
+use crate::target::fltmgr::{
+    FltFilterSelector, FltFilters, FltInstanceDetail, FltInstances, FltVolumes,
+};
 use crate::target::fs::{ControlAreaDetail, FileCacheDetail, VpbDetail};
 use crate::types::VirtAddr;
 use crate::ui;
-
-repl_command! {
-    cmd_ca;
-    names: ["!ca", "ca"],
-    category: "memory manager",
-    usage: "!ca <control-area>",
-    summary: "Decode the control area of a section, with its segment and subsections.",
-    details: "Shows the section, PFN, mapped-view, and user reference counts, the _MMSECTION_FLAGS that are set, and the backing file object and its name. It also shows the segment (PTE count, size, committed pages, and prototype PTEs) and, for each subsection, the base PTE, the PTE count, the starting sector, the sector count, and the protection. The command reads up to 1,024 subsections along NextSubsection, starting from the subsection after the control area, and stops at a subsection that points to a different control area. To find a control area, use the SectionObjectPointer of a file object or the Subsection of a VAD.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_vpb;
-    names: ["!vpb", "vpb"],
-    category: "objects and I/O",
-    usage: "!vpb <vpb>",
-    summary: "Decode a volume parameter block.",
-    details: "Shows the VPB_* flags, the volume device of the mounted file system, and the storage device below it, with their object names. It also shows the reference count, the serial number, and the volume label. The Vpb field of a device object points to the VPB. If the Type at the address is not IO_TYPE_VPB, the command shows an error.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_filecache();
-    names: ["!filecache", "filecache"],
-    category: "memory manager",
-    usage: "!filecache",
-    summary: "Show the views that the cache manager has mapped, for each file.",
-    details: "Walks the VACB arrays (CcVacbArrays) to find the views in use, and groups the views by shared cache map. For each file, the command shows its name, the mapped 256 KB views, the pages of these views that are present in memory, the dirty pages, the file size, and the open count, with the file that has the most present data first. The summary shows the VACBs in use and free, and the bytes mapped and present. The command lists up to 1,024 files, and you can interrupt the walk.",
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_fltkd_filters();
-    names: ["!fltkd.filters"],
-    category: "objects and I/O",
-    usage: "!fltkd.filters",
-    summary: "List the registered minifilters and their instances.",
-    details: "Walks each filter manager frame in fltmgr!FltGlobals and its registered filters. For each filter, the command shows its altitude and its attached instances, with their names and altitudes. The command uses the types from the PDB of fltmgr.",
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_fltkd_instances;
-    names: ["!fltkd.instances"],
-    category: "objects and I/O",
-    usage: "!fltkd.instances [filter]",
-    summary: "List minifilter instances with their filter and volume.",
-    details: "Lists each instance of each registered filter. To list the instances of one filter, give its name (`WdFilter`) or its _FLT_FILTER address. For each instance, the command shows its name, altitude, filter, and the volume that it is attached to.",
-    completion: Expression,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_fltkd_volumes();
-    names: ["!fltkd.volumes"],
-    category: "objects and I/O",
-    usage: "!fltkd.volumes",
-    summary: "List the volumes that the filter manager is attached to, with their instances.",
-    details: "Walks the attached volumes of each filter manager frame. For each volume, the command shows the device name, the file-system type, and the attached instances with their names and altitudes.",
-    target: Kernel,
-}
 
 fn print_control_area(detail: &ControlAreaDetail) {
     outln!("ControlArea  @ {}", ui::addr(detail.address.0));
@@ -250,60 +192,114 @@ fn print_stopped(indent: &str, stopped: &Option<String>) {
     }
 }
 
-/// Each frame of a `!fltkd.*` listing under `title`, its items printed by
-/// `item`.
-fn print_flt_frames<T>(detail: &FltFrames<T>, title: &str, mut item: impl FnMut(&T)) {
-    for frame in &detail.frames {
-        outln!(
-            "{title}: {} \"Frame {}\"",
-            ui::addr(frame.address.0),
-            frame.frame_id
-        );
-        for entry in &frame.items {
-            item(entry);
-        }
-        print_stopped("   ", &frame.stopped);
-    }
-    print_stopped("", &detail.stopped);
-    outln!();
+/// The header line of a `!fltkd.*` frame.
+fn print_frame_title(title: &str, address: VirtAddr, frame_id: u64) {
+    outln!("{title}: {} \"Frame {frame_id}\"", ui::addr(address.0));
 }
 
-impl ReplState<'_> {
-    fn cmd_ca(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let expr = require_arg!(invocation, 0, "!ca");
-        let Some(address) = self.eval_or_report(expr) else {
-            return Ok(());
-        };
-        match self.ctx.target.inspect_control_area(address) {
-            Ok(detail) => print_control_area(&detail),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
+/// Decode the control area of a section, with its segment and subsections.
+///
+/// Shows the section, PFN, mapped-view, and user reference counts, the
+/// _MMSECTION_FLAGS that are set, and the backing file object and its name. It
+/// also shows the segment (PTE count, size, committed pages, and prototype
+/// PTEs) and, for each subsection, the base PTE, the PTE count, the starting
+/// sector, the sector count, and the protection. The command reads up to 1,024
+/// subsections along NextSubsection, starting from the subsection after the
+/// control area, and stops at a subsection that points to a different control
+/// area. To find a control area, use the SectionObjectPointer of a file object
+/// or the Subsection of a VAD.
+#[command(
+    names = ["!ca", "ca"],
+    category = "memory manager",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    python_name = "control_area",
+    usage = "!ca <control-area>"
+)]
+fn ca(session: &Session, address: VirtAddr) -> Result<ControlAreaDetail> {
+    session.target.inspect_control_area(address)
+}
 
-    fn cmd_vpb(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let expr = require_arg!(invocation, 0, "!vpb");
-        let Some(address) = self.eval_or_report(expr) else {
-            return Ok(());
-        };
-        match self.ctx.target.inspect_vpb(address) {
-            Ok(detail) => print_vpb(&detail),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
+impl Render for ControlAreaDetail {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_control_area(self);
     }
+}
 
-    fn cmd_filecache(&mut self) -> Result<()> {
-        match self.ctx.target.file_cache() {
-            Ok(detail) => print_file_cache(&detail),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
+/// Decode a volume parameter block.
+///
+/// Shows the VPB_* flags, the volume device of the mounted file system, and the
+/// storage device below it, with their object names. It also shows the
+/// reference count, the serial number, and the volume label. The Vpb field of a
+/// device object points to the VPB. If the Type at the address is not
+/// IO_TYPE_VPB, the command shows an error.
+#[command(
+    names = ["!vpb", "vpb"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    usage = "!vpb <vpb>"
+)]
+fn vpb(session: &Session, address: VirtAddr) -> Result<VpbDetail> {
+    session.target.inspect_vpb(address)
+}
+
+impl Render for VpbDetail {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_vpb(self);
     }
+}
 
-    fn cmd_fltkd_filters(&mut self) -> Result<()> {
-        match self.ctx.target.flt_filters() {
-            Ok(detail) => print_flt_frames(&detail, "Filter List", |filter| {
+/// Show the views that the cache manager has mapped, for each file.
+///
+/// Walks the VACB arrays (CcVacbArrays) to find the views in use, and groups
+/// the views by shared cache map. For each file, the command shows its name,
+/// the mapped 256 KB views, the pages of these views that are present in
+/// memory, the dirty pages, the file size, and the open count, with the file
+/// that has the most present data first. The summary shows the VACBs in use and
+/// free, and the bytes mapped and present. The command lists up to 1,024 files,
+/// and you can interrupt the walk.
+#[command(
+    names = ["!filecache", "filecache"],
+    category = "memory manager",
+    kind = Query,
+    target = Kernel,
+    python = Inspect
+)]
+fn file_cache(session: &Session) -> Result<FileCacheDetail> {
+    session.target.file_cache()
+}
+
+impl Render for FileCacheDetail {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_file_cache(self);
+    }
+}
+
+/// List the registered minifilters and their instances.
+///
+/// Walks each filter manager frame in fltmgr!FltGlobals and its registered
+/// filters. For each filter, the command shows its altitude and its attached
+/// instances, with their names and altitudes. The command uses the types from
+/// the PDB of fltmgr.
+#[command(
+    names = ["!fltkd.filters"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect
+)]
+fn flt_filters(session: &Session) -> Result<FltFilters> {
+    session.target.flt_filters()
+}
+
+impl Render for FltFilters {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        for frame in &self.frames {
+            print_frame_title("Filter List", frame.address, frame.frame_id);
+            for filter in &frame.filters {
                 outln!(
                     "   FLT_FILTER: {} \"{}\" \"{}\"",
                     ui::addr(filter.address.0),
@@ -314,29 +310,81 @@ impl ReplState<'_> {
                     print_flt_instance(instance, "      ", false);
                 }
                 print_stopped("      ", &filter.instances_stopped);
-            }),
-            Err(error) => error!("{error}"),
+            }
+            print_stopped("   ", &frame.stopped);
         }
-        Ok(())
+        print_stopped("", &self.stopped);
+        outln!();
     }
+}
 
-    fn cmd_fltkd_instances(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let target = &self.ctx.target;
-        let radix = self.radix;
-        match target.flt_instances(invocation.arg(0), |text| {
-            Expr::eval_with_radix(text, target, radix)
-        }) {
-            Ok(detail) => print_flt_frames(&detail, "Instance List", |instance| {
-                print_flt_instance(instance, "   ", true)
-            }),
-            Err(error) => error!("{error}"),
+/// A minifilter's name, or its `_FLT_FILTER` address when the word
+/// evaluates.
+impl FromArg for FltFilterSelector {
+    const COMPLETION: CompletionStrategy = CompletionStrategy::Expression;
+
+    fn from_arg(cx: &mut ArgCx<'_, '_>, text: &str) -> std::result::Result<Self, ArgError> {
+        Ok(Self {
+            name: text.to_string(),
+            address: cx.eval(text).ok(),
+        })
+    }
+}
+
+/// List minifilter instances with their filter and volume.
+///
+/// Lists each instance of each registered filter. To list the instances of one
+/// filter, give its name (`WdFilter`) or its _FLT_FILTER address. For each
+/// instance, the command shows its name, altitude, filter, and the volume that
+/// it is attached to.
+#[command(
+    names = ["!fltkd.instances"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    usage = "!fltkd.instances [filter]"
+)]
+fn flt_instances(session: &Session, filter: Option<FltFilterSelector>) -> Result<FltInstances> {
+    session.target.flt_instances(filter.as_ref())
+}
+
+impl Render for FltInstances {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        for frame in &self.frames {
+            print_frame_title("Instance List", frame.address, frame.frame_id);
+            for instance in &frame.instances {
+                print_flt_instance(instance, "   ", true);
+            }
+            print_stopped("   ", &frame.stopped);
         }
-        Ok(())
+        print_stopped("", &self.stopped);
+        outln!();
     }
+}
 
-    fn cmd_fltkd_volumes(&mut self) -> Result<()> {
-        match self.ctx.target.flt_volumes() {
-            Ok(detail) => print_flt_frames(&detail, "Volume List", |volume| {
+/// List the volumes that the filter manager is attached to, with their
+/// instances.
+///
+/// Walks the attached volumes of each filter manager frame. For each volume,
+/// the command shows the device name, the file-system type, and the attached
+/// instances with their names and altitudes.
+#[command(
+    names = ["!fltkd.volumes"],
+    category = "objects and I/O",
+    kind = Query,
+    target = Kernel,
+    python = Inspect
+)]
+fn flt_volumes(session: &Session) -> Result<FltVolumes> {
+    session.target.flt_volumes()
+}
+
+impl Render for FltVolumes {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        for frame in &self.frames {
+            print_frame_title("Volume List", frame.address, frame.frame_id);
+            for volume in &frame.volumes {
                 outln!(
                     "   FLT_VOLUME: {} \"{}\"  {}",
                     ui::addr(volume.address.0),
@@ -347,9 +395,10 @@ impl ReplState<'_> {
                     print_flt_instance(instance, "      ", false);
                 }
                 print_stopped("      ", &volume.instances_stopped);
-            }),
-            Err(error) => error!("{error}"),
+            }
+            print_stopped("   ", &frame.stopped);
         }
-        Ok(())
+        print_stopped("", &self.stopped);
+        outln!();
     }
 }
