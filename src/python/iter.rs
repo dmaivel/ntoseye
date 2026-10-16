@@ -12,7 +12,7 @@ use super::process::{Heap, Process};
 use super::thread::{Cpu, Thread};
 use super::userdump::UserThread;
 use crate::view::execution::ExceptionPolicyPy;
-use crate::view::mm::MemoryRegionPy;
+use crate::target::mm::MemoryRegionInfoPy;
 
 macro_rules! typed_iterator {
     ($(#[$doc:meta])* $name:ident($item:ty)) => {
@@ -71,7 +71,7 @@ typed_iterator! {
 }
 typed_iterator! {
     /// Iterator over `proc.regions`.
-    MemoryRegionIterator(Py<MemoryRegionPy>)
+    MemoryRegionIterator(Py<MemoryRegionInfoPy>)
 }
 typed_iterator! {
     /// Iterator over `proc.heaps`.

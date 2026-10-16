@@ -1,17 +1,15 @@
 //! Neutral value-tree views for memory-manager inspectors.
 
-use crate::guest::ProcessInfo;
 use crate::target::DiagnosticMetric;
 use crate::target::DiagnosticValue;
 use ntoseye_macros::record;
 
 use crate::target::mm::{
-    self as target_mm, BigPoolDetail, LookasideDetail, LookasideListsDetail, MdlDetail,
-    MemoryRegionInfo, PfnDetail, PoolBlockDetail, PoolFindDetail, PoolFindMatch, PoolFindRange,
-    PoolPageDetail, PoolRegionDetail, PoolType, PoolUsageDetail, PoolValidationDetail, PtovDetail,
-    PtovMapping, SystemMemorySummary, SystemPteTypeDetail, SystemPtesDetail, VadProtection,
-    VadType, VmDetail, VprotDetail, VtopDetail, VtopLevel, memory_state_name, memory_type_name,
-    page_protection_name,
+    self as target_mm, AddressModule, BigPoolDetail, LookasideDetail, LookasideListsDetail,
+    MdlDetail, MemoryRegionInfo, PfnDetail, PoolBlockDetail, PoolFindDetail, PoolFindMatch,
+    PoolFindRange, PoolPageDetail, PoolRegionDetail, PoolType, PoolUsageDetail,
+    PoolValidationDetail, PtovDetail, PtovMapping, SystemMemorySummary, SystemPteTypeDetail,
+    SystemPtesDetail, VmDetail, VtopDetail, VtopLevel,
 };
 use crate::target::pool::{PoolUsageRow, tag_string};
 use crate::target::{self};
@@ -45,7 +43,7 @@ pub struct VmPte {
 /// Virtual-memory statistics (`!vm`).
 #[record]
 pub struct VmStatistics {
-    pub system: SystemMemoryUsage,
+    pub system: SystemMemorySummary,
     pub pool: VmPool,
     pub pte: VmPte,
     /// Paging-file counters.
@@ -548,96 +546,6 @@ pub struct SystemPtes {
     pub used: u64,
 }
 
-/// The loaded module that contains an address.
-#[record]
-pub struct AddressModule {
-    /// The module's image name.
-    pub name: String,
-    /// The module's base address.
-    pub base: VirtAddr,
-    /// The module's image size.
-    pub size: u32,
-    /// The offset of the address from `base`.
-    #[record(hex)]
-    pub offset: u64,
-}
-
-/// One VAD or kernel region (`proc.regions` items, address context).
-#[record]
-pub struct MemoryRegion {
-    /// The first address of the region.
-    pub start: VirtAddr,
-    /// The end of the region (exclusive).
-    pub end: VirtAddr,
-    /// Size in bytes.
-    pub size: u64,
-    /// The VAD protection value, if known. It is an index into the memory
-    /// manager's protection table, not a `PAGE_*` mask.
-    pub protection: Option<u64>,
-    /// The VAD type (`_MI_VAD_TYPE`), when known.
-    pub vad_type: Option<u64>,
-    /// Whether the region is private (not shared or mapped).
-    pub private_memory: Option<bool>,
-    /// The committed pages that are charged to the region.
-    pub commit_charge: Option<u64>,
-    /// A description: the mapped file, or the kernel region kind.
-    pub details: Option<String>,
-}
-
-/// The data that `VirtualQuery` reports for an address (`!vprot`). Each
-/// `MEM_*`/`PAGE_*` value has its name next to it.
-#[record]
-pub struct MemoryBasicInformation {
-    pub process: ProcessInfo,
-    pub address: VirtAddr,
-    pub base_address: VirtAddr,
-    /// The VAD's start; zero for free memory.
-    pub allocation_base: VirtAddr,
-    #[record(hex)]
-    pub allocation_protect: u32,
-    pub allocation_protect_name: String,
-    /// The number of bytes from `base_address` to the first page with a
-    /// different state or protection, or to the end of the VAD.
-    #[record(hex)]
-    pub region_size: u64,
-    #[record(hex)]
-    pub state: u32,
-    pub state_name: &'static str,
-    #[record(hex)]
-    pub protect: u32,
-    pub protect_name: String,
-    #[record(hex)]
-    pub r#type: u32,
-    pub type_name: &'static str,
-    /// The VAD node; `None` for free memory.
-    pub vad: Option<VirtAddr>,
-    /// Whether the scan stopped before the end of the region, at its limit
-    /// or at a page table that it cannot read. If true, `region_size` is a
-    /// lower bound.
-    pub truncated: bool,
-}
-
-/// What an address belongs to: a loaded module (and section), a process VAD
-/// region, a kernel region, or nothing that ntoseye recognizes.
-#[record]
-pub struct AddressDescription {
-    pub address: VirtAddr,
-    /// The address space of the lookup.
-    #[record(hex)]
-    pub dtb: u64,
-    /// `kernel-module`, `user-image`, `kernel-region`, `private`,
-    /// `mapped`, or `unknown`.
-    pub kind: &'static str,
-    /// The module containing the address, if any.
-    pub module: Option<AddressModule>,
-    /// The module section containing the address, if any.
-    pub section: Option<String>,
-    /// The `_MI_SYSTEM_VA_TYPE` name, for a kernel region.
-    pub va_type: Option<String>,
-    /// The region containing the address, if any.
-    pub region: Option<MemoryRegion>,
-}
-
 /// A memory-search hit, with its symbol and location data.
 #[record]
 pub struct MemorySearchMatch {
@@ -659,36 +567,7 @@ pub struct MemorySearchMatch {
     /// The `_MI_SYSTEM_VA_TYPE` name, for a kernel-region match.
     pub va_type: Option<String>,
     /// The region containing the match, if any.
-    pub region: Option<MemoryRegion>,
-}
-
-/// One process's memory counters, in bytes.
-#[record]
-pub struct ProcessMemoryUsage {
-    pub process: ProcessInfo,
-    pub virtual_size: DiagnosticValue<u64>,
-    pub peak_virtual_size: DiagnosticValue<u64>,
-    pub working_set_size: DiagnosticValue<u64>,
-    pub peak_working_set_size: DiagnosticValue<u64>,
-    pub pagefile_usage: DiagnosticValue<u64>,
-    pub peak_pagefile_usage: DiagnosticValue<u64>,
-    pub private_usage: DiagnosticValue<u64>,
-}
-
-/// System memory counters and per-process usage (`!memusage`).
-#[record]
-pub struct SystemMemoryUsage {
-    pub physical_pages: DiagnosticMetric<u64>,
-    pub available_pages: DiagnosticMetric<u64>,
-    pub committed_pages: DiagnosticMetric<u64>,
-    pub commit_limit_pages: DiagnosticMetric<u64>,
-    pub paged_pool_pages: DiagnosticMetric<u64>,
-    pub nonpaged_pool_bytes: DiagnosticMetric<u64>,
-    pub processes: Vec<ProcessMemoryUsage>,
-    /// The number of processes, including those past the listing limit.
-    pub process_count: usize,
-    /// Whether more processes exist than are listed.
-    pub truncated: bool,
+    pub region: Option<MemoryRegionInfo>,
 }
 
 fn vm_counter(counter: &target_mm::VmCounter) -> VmCounter {
@@ -702,7 +581,7 @@ fn vm_counter(counter: &target_mm::VmCounter) -> VmCounter {
 /// `!vm`'s statistics.
 pub fn vm(detail: &VmDetail) -> VmStatistics {
     VmStatistics {
-        system: memory_usage(&detail.system),
+        system: detail.system.clone(),
         pool: VmPool {
             nonpaged_pool_bytes: detail.pool.nonpaged_pool_bytes.clone(),
             nonpaged_pool_maximum: detail.pool.nonpaged_pool_maximum.clone(),
@@ -1077,63 +956,6 @@ pub fn system_ptes(detail: &SystemPtesDetail) -> SystemPtes {
     }
 }
 
-fn address_module(m: &target_mm::AddressModule) -> AddressModule {
-    AddressModule {
-        name: m.name.clone(),
-        base: m.base,
-        size: m.size,
-        offset: m.offset,
-    }
-}
-
-/// One VAD or kernel region.
-pub fn memory_region(r: &MemoryRegionInfo) -> MemoryRegion {
-    MemoryRegion {
-        start: r.start,
-        end: r.end,
-        size: r.size(),
-        protection: r.protection.map(VadProtection::raw),
-        vad_type: r.vad_type.map(VadType::raw),
-        private_memory: r.private_memory,
-        commit_charge: r.commit_charge,
-        details: r.details.clone(),
-    }
-}
-
-/// `!vprot`'s `VirtualQuery` fields.
-pub fn vprot(detail: &VprotDetail) -> MemoryBasicInformation {
-    MemoryBasicInformation {
-        process: detail.process.clone(),
-        address: detail.address,
-        base_address: detail.base_address,
-        allocation_base: detail.allocation_base,
-        allocation_protect: detail.allocation_protect,
-        allocation_protect_name: page_protection_name(detail.allocation_protect),
-        region_size: detail.region_size,
-        state: detail.state,
-        state_name: memory_state_name(detail.state),
-        protect: detail.protect,
-        protect_name: page_protection_name(detail.protect),
-        r#type: detail.kind,
-        type_name: memory_type_name(detail.kind),
-        vad: detail.vad,
-        truncated: detail.truncated,
-    }
-}
-
-/// What an address belongs to (`!address`).
-pub fn address_description(d: &target_mm::AddressDescription) -> AddressDescription {
-    AddressDescription {
-        address: d.address,
-        dtb: d.dtb,
-        kind: d.kind,
-        module: d.module.as_ref().map(address_module),
-        section: d.section.clone(),
-        va_type: d.va_type.clone(),
-        region: d.region.as_ref().map(memory_region),
-    }
-}
-
 /// A memory-search hit, with what its address belongs to.
 pub fn memory_search_match(m: &target::MemorySearchMatch) -> MemorySearchMatch {
     let d = &m.description;
@@ -1142,10 +964,10 @@ pub fn memory_search_match(m: &target::MemorySearchMatch) -> MemorySearchMatch {
         offset: m.offset,
         symbol: m.symbol.clone(),
         kind: d.kind,
-        module: d.module.as_ref().map(address_module),
+        module: d.module.clone(),
         section: d.section.clone(),
         va_type: d.va_type.clone(),
-        region: d.region.as_ref().map(memory_region),
+        region: d.region.clone(),
     }
 }
 
@@ -1166,33 +988,5 @@ pub fn undescribed_search_match(
         section: None,
         va_type: None,
         region: None,
-    }
-}
-
-fn process_memory_usage(usage: &target_mm::ProcessMemoryUsage) -> ProcessMemoryUsage {
-    ProcessMemoryUsage {
-        process: usage.process.clone(),
-        virtual_size: usage.virtual_size.clone(),
-        peak_virtual_size: usage.peak_virtual_size.clone(),
-        working_set_size: usage.working_set_size.clone(),
-        peak_working_set_size: usage.peak_working_set_size.clone(),
-        pagefile_usage: usage.pagefile_usage.clone(),
-        peak_pagefile_usage: usage.peak_pagefile_usage.clone(),
-        private_usage: usage.private_usage.clone(),
-    }
-}
-
-/// System memory counters and per-process usage.
-pub fn memory_usage(summary: &SystemMemorySummary) -> SystemMemoryUsage {
-    SystemMemoryUsage {
-        physical_pages: summary.physical_pages.clone(),
-        available_pages: summary.available_pages.clone(),
-        committed_pages: summary.committed_pages.clone(),
-        commit_limit_pages: summary.commit_limit_pages.clone(),
-        paged_pool_pages: summary.paged_pool_pages.clone(),
-        nonpaged_pool_bytes: summary.nonpaged_pool_bytes.clone(),
-        processes: summary.processes.iter().map(process_memory_usage).collect(),
-        process_count: summary.process_count,
-        truncated: summary.truncated,
     }
 }

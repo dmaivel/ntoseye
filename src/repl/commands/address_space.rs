@@ -12,7 +12,7 @@ use crate::guest::ModuleInfo;
 use crate::memory::PAGE_SIZE;
 use crate::target::TargetKind;
 use crate::target::mm::{
-    MEM_FREE, MemoryRegionInfo, VadProtection, VadType, VprotDetail, memory_state_name,
+    MEM_FREE, MemoryBasicInformation, MemoryRegionInfo, VadProtection, VadType, memory_state_name,
     memory_type_name, page_protection_name,
 };
 use crate::target::usermode::address::{
@@ -671,13 +671,15 @@ fn print_address_summary(summary: &AddressSummary) {
     );
 }
 
-fn print_vprot(detail: &VprotDetail) {
-    outln!(
-        "{} {} ({})",
-        ui::label("process"),
-        detail.process.name,
-        ui::Value(detail.process.pid)
-    );
+fn print_vprot(detail: &MemoryBasicInformation) {
+    if let Some(process) = &detail.process {
+        outln!(
+            "{} {} ({})",
+            ui::label("process"),
+            process.name,
+            ui::Value(process.pid)
+        );
+    }
     print_virtual_query(
         &VirtualQuery {
             base_address: detail.base_address.0,

@@ -409,7 +409,7 @@ impl Memory {
         &self,
         py: Python<'py>,
         addr: u64,
-    ) -> PyResult<Typed<'py, view::mm::AddressDescription>> {
+    ) -> PyResult<Typed<'py, crate::target::mm::AddressDescription>> {
         self.space.require_virtual()?;
         self.space.require_nt("describe")?;
         let context = self.space.context();
@@ -422,7 +422,7 @@ impl Memory {
             }
             session.target.describe_address(VirtAddr(addr)).map_err(err)
         })?;
-        Typed::new(py, view::mm::address_description(&detail))
+        Typed::new(py, detail)
     }
 
     /// Get the function-table entry and unwind info (AMD64 or ARM64) of the

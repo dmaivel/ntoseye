@@ -307,13 +307,12 @@ impl Inspect {
         &self,
         py: Python<'py>,
         process_limit: usize,
-    ) -> PyResult<Typed<'py, mm::SystemMemoryUsage>> {
+    ) -> PyResult<Typed<'py, crate::target::mm::SystemMemorySummary>> {
         self.typed(py, |session| {
-            let detail = session
+            session
                 .target
                 .memory_use_summary(process_limit)
-                .map_err(err)?;
-            Ok(view::mm::memory_usage(&detail))
+                .map_err(err)
         })
     }
 

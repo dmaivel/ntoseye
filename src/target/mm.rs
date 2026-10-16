@@ -11,6 +11,7 @@ use crate::layout::{ParsedType, TypeInfo};
 use crate::memory::PAGE_SIZE;
 use crate::target::pool::{PoolUsageRow, kernel_symbol_address, read_pool_field};
 use crate::types::{Dtb, PageTableEntry, PageTableLevel, PteAttributes, VirtAddr};
+use ntoseye_macros::record;
 
 mod lookaside;
 mod mdl;
@@ -534,22 +535,49 @@ pub(crate) fn find_mi_state_fields(target: &Target, predicates: &[&str]) -> Vec<
     fields
 }
 
-#[derive(Debug, Clone)]
+/// One VAD region of a process (`!vad`, `proc.regions` items, address
+/// context).
+#[record(impl)]
 pub struct MemoryRegionInfo {
+    /// The VAD's node in the process's VAD tree.
     pub node_address: VirtAddr,
+    /// The node's depth in the VAD tree.
     pub level: usize,
+    /// The first address of the region.
     pub start: VirtAddr,
+    /// The end of the region (exclusive).
     pub end: VirtAddr,
+    #[record(skip)]
     pub protection: Option<VadProtection>,
+    #[record(skip)]
     pub vad_type: Option<VadType>,
+    /// Whether the region is private (not shared or mapped).
     pub private_memory: Option<bool>,
+    /// The committed pages that are charged to the region.
     pub commit_charge: Option<u64>,
+    /// A description: the mapped file.
     pub details: Option<String>,
 }
 
+#[record]
 impl MemoryRegionInfo {
+    /// Size in bytes.
+    #[record(getter)]
     pub fn size(&self) -> u64 {
         self.end.0.saturating_sub(self.start.0)
+    }
+
+    /// The VAD protection value, if known. It is an index into the memory
+    /// manager's protection table, not a `PAGE_*` mask.
+    #[record(getter, rename = "protection")]
+    pub fn protection_value(&self) -> Option<u64> {
+        self.protection.map(VadProtection::raw)
+    }
+
+    /// The VAD type (`_MI_VAD_TYPE`), when known.
+    #[record(getter, rename = "vad_type")]
+    pub fn vad_type_value(&self) -> Option<u64> {
+        self.vad_type.map(VadType::raw)
     }
 }
 
@@ -642,56 +670,100 @@ impl VadType {
     }
 }
 
-/// `!vprot`: what `VirtualQuery` reports for an address. `state`, `protect`,
-/// `allocation_protect`, and `kind` are the `MEM_*` and `PAGE_*` values.
-#[derive(Debug, Clone)]
-pub struct VprotDetail {
-    pub process: ProcessInfo,
+/// The data that `VirtualQuery` reports for an address (`!vprot`). Each
+/// `MEM_*`/`PAGE_*` value has its name next to it.
+#[record(impl)]
+pub struct MemoryBasicInformation {
+    /// The process whose address space holds the address; `None` on a
+    /// user-mode minidump, whose memory-info list gives the region.
+    pub process: Option<ProcessInfo>,
     pub address: VirtAddr,
     pub base_address: VirtAddr,
     /// The VAD's start; zero for free memory.
     pub allocation_base: VirtAddr,
+    #[record(hex)]
     pub allocation_protect: u32,
-    /// From `base_address` to the first page whose state or protection
-    /// differs, or the end of the VAD.
+    /// The number of bytes from `base_address` to the first page with a
+    /// different state or protection, or to the end of the VAD.
+    #[record(hex)]
     pub region_size: u64,
+    #[record(hex)]
     pub state: u32,
+    #[record(hex)]
     pub protect: u32,
+    /// The `MEM_*` type (`MEMORY_BASIC_INFORMATION.Type`).
+    #[record(hex, rename = "type")]
     pub kind: u32,
-    /// The VAD node, `None` for free memory.
+    /// The VAD node; `None` for free memory.
     pub vad: Option<VirtAddr>,
-    /// The scan stopped at its bound or an unreadable page table before the
-    /// region ended, so `region_size` is a lower bound.
+    /// Whether the scan stopped before the end of the region, at its limit
+    /// or at a page table that it cannot read. If true, `region_size` is a
+    /// lower bound.
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone)]
+#[record]
+impl MemoryBasicInformation {
+    #[record(getter)]
+    pub fn allocation_protect_name(&self) -> String {
+        page_protection_name(self.allocation_protect)
+    }
+
+    #[record(getter)]
+    pub fn state_name(&self) -> &'static str {
+        memory_state_name(self.state)
+    }
+
+    #[record(getter)]
+    pub fn protect_name(&self) -> String {
+        page_protection_name(self.protect)
+    }
+
+    #[record(getter)]
+    pub fn type_name(&self) -> &'static str {
+        memory_type_name(self.kind)
+    }
+}
+
+/// The loaded module that contains an address.
+#[record]
 pub struct AddressModule {
+    /// The module's image name.
     pub name: String,
+    /// The module's base address.
     pub base: VirtAddr,
+    /// The module's image size.
     pub size: u32,
+    /// The offset of the address from `base`.
+    #[record(hex)]
     pub offset: u64,
 }
 
 /// What an address belongs to: a loaded module (and section), a process VAD
-/// region, or nothing recognized. Complements `pte_traverse` (how it's mapped)
-/// with where it lives.
-#[derive(Debug, Clone)]
+/// region, a kernel region, or nothing that ntoseye recognizes. Complements
+/// `pte_traverse` (how it's mapped) with where it lives.
+#[record]
 pub struct AddressDescription {
     pub address: VirtAddr,
+    /// The address space of the lookup.
+    #[record(hex)]
     pub dtb: Dtb,
-    /// "kernel-module", "user-image", "kernel-region", "private", "mapped", or
-    /// "unknown".
+    /// `kernel-module`, `user-image`, `kernel-region`, `private`,
+    /// `mapped`, or `unknown`.
     pub kind: &'static str,
+    /// The module containing the address, if any.
     pub module: Option<AddressModule>,
+    /// The module section containing the address, if any.
     pub section: Option<String>,
-    /// For a "kernel-region" hit: the `MI_SYSTEM_VA_TYPE` name (e.g.
+    /// The `_MI_SYSTEM_VA_TYPE` name, for a kernel region (e.g.
     /// `KernelStacks`, `PagedPool`, `SystemPtes`).
     pub va_type: Option<String>,
+    /// The VAD region containing the address, if any.
     pub region: Option<MemoryRegionInfo>,
 }
 
-#[derive(Debug, Clone)]
+/// One process's memory counters, in bytes.
+#[record]
 pub struct ProcessMemoryUsage {
     pub process: ProcessInfo,
     pub virtual_size: DiagnosticValue<u64>,
@@ -718,7 +790,8 @@ impl ProcessMemoryUsage {
     }
 }
 
-#[derive(Debug, Clone)]
+/// System memory counters and per-process usage (`!memusage`).
+#[record]
 pub struct SystemMemorySummary {
     pub physical_pages: DiagnosticMetric<u64>,
     pub available_pages: DiagnosticMetric<u64>,
@@ -727,7 +800,9 @@ pub struct SystemMemorySummary {
     pub paged_pool_pages: DiagnosticMetric<u64>,
     pub nonpaged_pool_bytes: DiagnosticMetric<u64>,
     pub processes: Vec<ProcessMemoryUsage>,
+    /// The number of processes, including those past the listing limit.
     pub process_count: usize,
+    /// Whether more processes exist than are listed.
     pub truncated: bool,
 }
 

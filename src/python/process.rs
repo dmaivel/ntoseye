@@ -17,11 +17,10 @@ use super::types::{Struct, Types};
 use super::{err, view_dict};
 use crate::guest::ProcessInfo;
 use crate::target::heap::HeapSelector;
-use crate::target::mm::MemoryRegionInfo;
+use crate::target::mm::{MemoryRegionInfo, MemoryRegionInfoPy};
 use crate::target::sched::ApcSelector;
 use crate::types::VirtAddr;
 use crate::view;
-use crate::view::mm::MemoryRegionPy;
 use crate::view::record::Typed;
 
 /// The running processes, with their PIDs as keys (`dbg.processes`). Each
@@ -280,7 +279,7 @@ impl Process {
         &self,
         py: Python<'py>,
         address: u64,
-    ) -> PyResult<Typed<'py, view::mm::MemoryBasicInformation>> {
+    ) -> PyResult<Typed<'py, crate::target::mm::MemoryBasicInformation>> {
         let info = self.info.clone();
         let detail = self.owner.with_in(py, &self.context(), |session| {
             session
@@ -288,7 +287,7 @@ impl Process {
                 .virtual_query(&info, VirtAddr(address))
                 .map_err(err)
         })?;
-        Typed::new(py, view::mm::vprot(&detail))
+        Typed::new(py, detail)
     }
 
     /// Get the process token and its security information.
@@ -407,15 +406,15 @@ impl Regions {
 #[pymethods]
 impl Regions {
     /// Find the VAD region that contains `addr`, or return `None`.
-    fn at<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Option<Bound<'py, MemoryRegionPy>>> {
+    fn at<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Option<Bound<'py, MemoryRegionInfoPy>>> {
         self.snapshot(py)?
             .iter()
             .find(|region| addr >= region.start.0 && addr < region.end.0)
-            .map(|region| view::mm::memory_region(region).into_class(py))
+            .map(|region| region.into_class(py))
             .transpose()
     }
 
-    fn __getitem__<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, MemoryRegionPy>> {
+    fn __getitem__<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Bound<'py, MemoryRegionInfoPy>> {
         self.at(py, addr)?
             .ok_or_else(|| PyKeyError::new_err(format!("no VAD region contains {addr:#x}")))
     }
@@ -428,11 +427,7 @@ impl Regions {
         let regions = self
             .snapshot(py)?
             .iter()
-            .map(|region| {
-                view::mm::memory_region(region)
-                    .into_class(py)
-                    .map(Bound::unbind)
-            })
+            .map(|region| region.into_class(py).map(Bound::unbind))
             .collect::<PyResult<_>>()?;
         Ok(MemoryRegionIterator::new(regions))
     }
