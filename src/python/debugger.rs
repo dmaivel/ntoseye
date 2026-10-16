@@ -242,7 +242,7 @@ impl Debugger {
 
     /// Captured guest debug output (DbgPrint) since sequence `since`. To poll
     /// only for new lines, pass the previous `next_seq`.
-    #[pyo3(signature = (since=0))]
+    #[pyo3(signature = (*, since=0))]
     fn debug_log<'py>(&self, py: Python<'py>, since: u64) -> PyResult<Typed<'py, DebugOutputPage>> {
         let page = self.with_session(|session| Ok(session.read_debug_output(since)))?;
         Typed::new(py, page)

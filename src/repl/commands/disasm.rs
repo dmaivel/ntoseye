@@ -73,7 +73,7 @@ fn instruction_count(count: u64) -> Result<usize> {
 fn disassemble(
     session: &Session,
     #[arg(receiver, parse = virtual_memory)] memory: MemoryKind,
-    #[arg(parse = listing_start)] addr: VirtAddr,
+    #[arg(parse = listing_start)] address: VirtAddr,
     #[arg(parse = listing_extent)] count: DisasmExtent,
     #[arg(render, parse = continues_listing)] continues: ContinuesListing,
 ) -> Result<Vec<DisasmRow>> {
@@ -88,35 +88,35 @@ fn disassemble(
             (count as u64 * max_instruction_bytes, Some(count), None)
         }
         DisasmExtent::Through(value) => {
-            let end = if value < addr.0 {
-                addr.0.checked_add(value)
+            let end = if value < address.0 {
+                address.0.checked_add(value)
             } else {
                 value.checked_add(1)
             }
             .ok_or(Error::InvalidRange)?;
             // The last instruction may run past the end.
-            (end - addr.0 + max_instruction_bytes - 1, None, Some(end))
+            (end - address.0 + max_instruction_bytes - 1, None, Some(end))
         }
     };
 
     // An instruction window may run past the end of the mapped image;
     // keep what is readable up to the first unreadable page.
     let mut bytes: Vec<u8> = vec![0u8; byte_len as usize];
-    if session.read_masked(addr, &mut bytes).is_err() {
-        let page_end = addr
+    if session.read_masked(address, &mut bytes).is_err() {
+        let page_end = address
             .0
-            .checked_add(PAGE_SIZE as u64 - addr.page_offset())
+            .checked_add(PAGE_SIZE as u64 - address.page_offset())
             .ok_or(Error::InvalidRange)?;
-        let readable = page_end.saturating_sub(addr.0).min(byte_len) as usize;
+        let readable = page_end.saturating_sub(address.0).min(byte_len) as usize;
         bytes.truncate(readable);
-        session.read_masked(addr, &mut bytes)?;
+        session.read_masked(address, &mut bytes)?;
     }
 
     let target = &session.target;
     let trace = resolve_thread_trace_context(target, target.current_dtb());
     let resolve = |address: u64| format_symbol(target, &trace, address);
-    let machine = target.code_machine(addr);
-    let mut rows = decode_code(&bytes, addr.0, instruction_limit, machine, resolve);
+    let machine = target.code_machine(address);
+    let mut rows = decode_code(&bytes, address.0, instruction_limit, machine, resolve);
     if let Some(end) = last_start {
         rows.retain(|row| row.ip < end);
     }
@@ -208,10 +208,10 @@ impl Render for Vec<DisasmRow> {
 fn disassemble_function(
     session: &Session,
     #[arg(receiver, parse = virtual_memory)] memory: MemoryKind,
-    #[arg(parse = address_or_ip)] addr: VirtAddr,
+    #[arg(parse = address_or_ip)] address: VirtAddr,
 ) -> Result<FunctionDisassembly> {
     memory.require_virtual()?;
-    session.disassemble_function(addr)
+    session.disassemble_function(address)
 }
 
 /// `uf`'s address, `@rip` without one.
@@ -261,11 +261,11 @@ impl Render for FunctionDisassembly {
 fn disassemble_back(
     session: &Session,
     #[arg(receiver, parse = virtual_memory)] memory: MemoryKind,
-    addr: VirtAddr,
+    address: VirtAddr,
     #[arg(parse = back_count)] count: u64,
 ) -> Result<Vec<DisasmRow>> {
     memory.require_virtual()?;
-    session.disassemble_back(addr, instruction_count(count)?)
+    session.disassemble_back(address, instruction_count(count)?)
 }
 
 /// `ub`'s count: `L<count>`, `L?<count>`, or a bare count; 8 without one.

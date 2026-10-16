@@ -191,10 +191,10 @@ fn frame_request(
 fn fnent(
     session: &Session,
     #[arg(receiver, parse = virtual_memory)] memory: MemoryKind,
-    addr: VirtAddr,
+    address: VirtAddr,
 ) -> Result<FunctionEntry> {
     memory.require_virtual()?;
-    session.function_entry(addr)
+    session.function_entry(address)
 }
 
 impl Render for FunctionEntry {

@@ -41,7 +41,7 @@ def main() -> None:
                 f"wait={thread.wait_reason!s:<14} {where}"
             )
             try:
-                for frame in thread.backtrace(args.frames):
+                for frame in thread.backtrace(limit=args.frames):
                     print(f"      {frame.ip:#x}  {frame.symbol}")
             except ntoseye.NtoseyeError as exc:
                 print(f"      (no stack: {exc})")

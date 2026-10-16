@@ -1075,7 +1075,7 @@ fn pagein(
     Ok(())
 }
 
-/// Make `addr` resident with the guest debugger worker (`.pagein`), which
+/// Make `address` resident with the guest debugger worker (`.pagein`), which
 /// resumes the guest. When the worker completes, the guest stops and the
 /// method returns, and `dbg.stop` shows that stop.
 #[command(form_of = pagein, python = Memory, sdk)]
@@ -1083,10 +1083,10 @@ fn page_in(
     session: &mut Session,
     #[arg(receiver)] memory: MemoryKind,
     #[arg(receiver)] process: Option<ProcessInfo>,
-    addr: VirtAddr,
+    address: VirtAddr,
 ) -> Result<bool> {
     memory.require_virtual()?;
-    let report = session.page_in(addr, process.map(|process| process.eprocess.0))?;
+    let report = session.page_in(address, process.map(|process| process.eprocess.0))?;
     if !report.from_worker {
         return Err(Error::DebugInfo(
             "the target stopped for another reason before the worker reported".to_string(),

@@ -129,7 +129,7 @@ impl VirtualProcessor {
     /// are shared by a VP's VTLs and belong to the one it runs in; another
     /// VTL's are its eVMCS state alone, and `missing` says why. Reads the
     /// target now, so it must be halted. This feature is experimental.
-    #[pyo3(signature = (vtl=None))]
+    #[pyo3(signature = (*, vtl=None))]
     fn registers<'py>(
         &self,
         py: Python<'py>,
@@ -182,7 +182,7 @@ impl HypervisorVtl {
     /// EPT. Raises `NtoseyeError` without the VTL's eVMCS state or when a
     /// page is not mapped, and for a virtual address unless the guest is in
     /// 4-level long-mode paging. The memory is read-only.
-    #[pyo3(signature = (address, size, physical = false))]
+    #[pyo3(signature = (address, size, *, physical = false))]
     fn read<'py>(
         &self,
         py: Python<'py>,
@@ -232,7 +232,7 @@ impl HypervisorVtl {
     /// when the first instruction is unreadable, without the VTL's eVMCS
     /// state, for real-mode or 16-bit code, and for a virtual address
     /// unless the guest is in 4-level long-mode paging.
-    #[pyo3(signature = (address, count, physical = false))]
+    #[pyo3(signature = (address, count, *, physical = false))]
     fn disassemble<'py>(
         &self,
         py: Python<'py>,
@@ -388,7 +388,7 @@ impl HypercallCaller {
     /// at the call is not known, when a page is not mapped, and for a
     /// virtual address unless the caller is in 4-level long-mode paging.
     /// The memory is read-only.
-    #[pyo3(signature = (address, size, physical = false))]
+    #[pyo3(signature = (address, size, *, physical = false))]
     fn read<'py>(
         &self,
         py: Python<'py>,

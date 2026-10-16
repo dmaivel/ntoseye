@@ -204,9 +204,9 @@ impl Type {
     }
 
     /// Bind this layout to an address as a reflective struct cursor.
-    fn at(&self, py: Python<'_>, addr: AddressArg) -> PyResult<Struct> {
+    fn at(&self, py: Python<'_>, address: AddressArg) -> PyResult<Struct> {
         self.struct_info()?;
-        let addr = addr.resolve(py, &self.owner, &self.space.context())?.0;
+        let addr = address.resolve(py, &self.owner, &self.space.context())?.0;
         Struct::new(py, &self.owner, self.space.clone(), &self.name, addr)
     }
 

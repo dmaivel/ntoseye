@@ -1870,7 +1870,7 @@ class Breakpoints:
         """
     def __iter__(self, /) -> Iterator[Breakpoint]: ...
     def __len__(self, /) -> int: ...
-    def add(self, /, target: int |str, condition: str |None = None, *, hardware: bool = False, when: Callable[[Stop], object] |None = None, pass_count: int = 0, one_shot: bool = False, process: Process |int |None = None, thread: Thread |int |None = None, processor: Cpu |int |None = None, action: str |None = None) -> Breakpoint:
+    def add(self, /, target: int |str, *, condition: str |None = None, hardware: bool = False, when: Callable[[Stop], object] |None = None, pass_count: int = 0, one_shot: bool = False, process: Process |int |None = None, thread: Thread |int |None = None, processor: Cpu |int |None = None, action: str |None = None) -> Breakpoint:
         """
         Add a code breakpoint at an address or a symbolic spec.
         
@@ -1912,11 +1912,11 @@ class Breakpoints:
         backend and the VM's hv-evmcs enlightenment. This feature is
         experimental.
         """
-    def add_pattern(self, /, pattern: str, condition: str |None = None, *, when: Callable[[Stop], object] |None = None, pass_count: int = 0, one_shot: bool = False, process: Process |int |None = None, thread: Thread |int |None = None, processor: Cpu |int |None = None, action: str |None = None, limit: int = 256) -> list[Breakpoint]:
+    def add_pattern(self, /, pattern: str, *, condition: str |None = None, when: Callable[[Stop], object] |None = None, pass_count: int = 0, one_shot: bool = False, process: Process |int |None = None, thread: Thread |int |None = None, processor: Cpu |int |None = None, action: str |None = None, limit: int = 256) -> list[Breakpoint]:
         """
         Add symbol-identity breakpoints for the names that match a glob (`bm`).
         """
-    def add_source(self, /, file: str, line: int, condition: str |None = None, *, when: Callable[[Stop], object] |None = None, pass_count: int = 0, one_shot: bool = False, process: Process |int |None = None, thread: Thread |int |None = None, processor: Cpu |int |None = None, action: str |None = None) -> list[Breakpoint]:
+    def add_source(self, /, file: str, line: int, *, condition: str |None = None, when: Callable[[Stop], object] |None = None, pass_count: int = 0, one_shot: bool = False, process: Process |int |None = None, thread: Thread |int |None = None, processor: Cpu |int |None = None, action: str |None = None) -> list[Breakpoint]:
         """
         Add a source breakpoint at each address that matches `file:line`.
         """
@@ -2714,7 +2714,7 @@ class Cpu:
         trigger, and mask, the timer's counts and divisor, the error status, and the
         vectors in service (ISR), requested (IRR), and level-triggered (TMR).
         """
-    def backtrace(self, /, limit: int = 64, vtl: int |None = None) -> list[Frame]:
+    def backtrace(self, /, *, limit: int = 64, vtl: int |None = None) -> list[Frame]:
         """
         Walk this processor's stack from its own registers, whatever `.thread`,
         `.cxr` or `.frame` selected. Halted in the Windows hypervisor, the
@@ -3217,7 +3217,7 @@ class Debugger:
         target ignores break-ins during this time. Then Windows reboots or, if
         automatic restart is disabled, breaks in. Ctrl+C stops the wait.
         """
-    def debug_log(self, /, since: int = 0) -> DebugOutputPage:
+    def debug_log(self, /, *, since: int = 0) -> DebugOutputPage:
         """
         Captured guest debug output (DbgPrint) since sequence `since`. To poll
         only for new lines, pass the previous `next_seq`.
@@ -6865,9 +6865,9 @@ class Heaps:
     def __getitem__(self, index: int, /) -> Heap: ...
     def __iter__(self, /) -> Iterator[Heap]: ...
     def __len__(self, /) -> int: ...
-    def find_block(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> HeapBlockSearch:
+    def find_block(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> HeapBlockSearch:
         """
-        Find the heap block that contains `addr` (`!heap -x`).
+        Find the heap block that contains `address` (`!heap -x`).
         """
     def get(self, /, index: int) -> Heap |None:
         """
@@ -7171,7 +7171,7 @@ class HypercallCaller:
         """
         The caller's partition ID (the root partition's is 1).
         """
-    def read(self, /, address: int, size: int, physical: bool = False) -> bytes:
+    def read(self, /, address: int, size: int, *, physical: bool = False) -> bytes:
         """
         Read `size` bytes of the caller's memory, as a hypercall
         breakpoint's condition reads it: guest virtual memory through the
@@ -7393,7 +7393,7 @@ class HypervisorVtl:
         """
         The address of the hypervisor's context object for this VTL.
         """
-    def disassemble(self, /, address: int, count: int, physical: bool = False) -> list[DisasmRow]:
+    def disassemble(self, /, address: int, count: int, *, physical: bool = False) -> list[DisasmRow]:
         """
         Disassemble `count` instructions of this VTL's guest at `address`, as
         `!hvu` does: read as `read` reads it (guest virtual, or with
@@ -7445,7 +7445,7 @@ class HypervisorVtl:
         0xc0000000-0xc0001fff always exit. Raises `NtoseyeError` without the
         VTL's eVMCS, or when the bitmap is unreadable.
         """
-    def read(self, /, address: int, size: int, physical: bool = False) -> bytes:
+    def read(self, /, address: int, size: int, *, physical: bool = False) -> bytes:
         """
         Read `size` bytes of the memory of this VTL's guest, as `!hvd` does:
         guest virtual memory through the VTL's page tables (its saved CR3),
@@ -10606,7 +10606,7 @@ class Memory:
         user-mode minidump, `Debugger.user_dump.address_report(address)` reads
         the dump's memory-info list instead.
         """
-    def disassemble(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, count: int) -> list[DisasmRow]:
+    def disassemble(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap, count: int) -> list[DisasmRow]:
         """
         Disassemble memory at a symbol or address.
         
@@ -10617,11 +10617,11 @@ class Memory:
         steps, or when you select another frame, thread, or process, it starts at
         the instruction pointer instead.
         """
-    def disassemble_back(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, count: int) -> list[DisasmRow]:
+    def disassemble_back(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap, count: int) -> list[DisasmRow]:
         """
         Disassemble the instructions that end at an address.
         """
-    def disassemble_function(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> FunctionDisassembly:
+    def disassemble_function(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> FunctionDisassembly:
         """
         Disassemble the function that contains an address.
         
@@ -10636,7 +10636,7 @@ class Memory:
         The directory-table base that this space uses. A user-mode minidump
         has none, and raises `NtoseyeError`.
         """
-    def function_entry(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> FunctionEntry:
+    def function_entry(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> FunctionEntry:
         """
         Show the function table entry and unwind info of the function that
         contains an address.
@@ -10652,9 +10652,9 @@ class Memory:
         instruction that it undoes, and the exception handler. If a function table
         is paged out, .fnent reads it from the image file on disk.
         """
-    def page_in(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> bool:
+    def page_in(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> bool:
         """
-        Make `addr` resident with the guest debugger worker (`.pagein`), which
+        Make `address` resident with the guest debugger worker (`.pagein`), which
         resumes the guest. When the worker completes, the guest stops and the
         method returns, and `dbg.stop` shows that stop.
         """
@@ -10675,50 +10675,50 @@ class Memory:
         The command walks the page tables in reverse and detects cycles in them. The
         walk stops after 32 mappings or 65,536 table pages.
         """
-    def read(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, n: int) -> bytes:
+    def read(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap, size: int) -> bytes:
         """
-        Read `n` bytes. A virtual read hides the breakpoint opcodes of this
+        Read `size` bytes. A virtual read hides the breakpoint opcodes of this
         debugger.
         """
-    def read_ansi_string(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, bits: int |None = None) -> str:
+    def read_ansi_string(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap, *, bits: int |None = None) -> str:
         """
-        Decode the `_STRING`/`ANSI_STRING` descriptor at `addr` (`ds`). `bits`
+        Decode the `_STRING`/`ANSI_STRING` descriptor at `address` (`ds`). `bits`
         sets the layout, as in `read_unicode_string`.
         """
-    def read_pointer(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> int:
+    def read_pointer(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> int:
         """
-        Read a pointer-sized value at `addr` (`poi`).
+        Read a pointer-sized value at `address` (`poi`).
         """
-    def read_string(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, max_len: int = 256) -> str:
+    def read_string(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap, *, max_len: int = 256) -> str:
         """
-        Read a NUL-terminated ANSI string at `addr` (`da`).
+        Read a NUL-terminated ANSI string at `address` (`da`).
         """
-    def read_u16(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> int:
+    def read_u16(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> int:
         """
         Read a little-endian 16-bit integer.
         """
-    def read_u32(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> int:
+    def read_u32(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> int:
         """
         Read a little-endian 32-bit integer.
         """
-    def read_u64(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> int:
+    def read_u64(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> int:
         """
         Read a little-endian 64-bit integer.
         """
-    def read_u8(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> int:
+    def read_u8(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> int:
         """
         Read a little-endian byte.
         """
-    def read_unicode_string(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, bits: int |None = None) -> str:
+    def read_unicode_string(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap, *, bits: int |None = None) -> str:
         """
-        Decode the `_UNICODE_STRING` descriptor at `addr` (`dS`). `bits` sets
+        Decode the `_UNICODE_STRING` descriptor at `address` (`dS`). `bits` sets
         the layout: 32 for the x86 descriptors of a WOW64 process and 64 for
         native descriptors. By default, the `.effmach` setting selects the
         layout.
         """
-    def read_wstring(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, max_len: int = 256) -> str:
+    def read_wstring(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap, *, max_len: int = 256) -> str:
         """
-        Read a NUL-terminated UTF-16 string at `addr` (`du`).
+        Read a NUL-terminated UTF-16 string at `address` (`du`).
         """
     def search(self, /, pattern: bytes, start: int |str |Process |Thread |Module |Driver |Device |Heap, length: int) -> list[MemorySearchMatch]:
         """
@@ -10727,33 +10727,33 @@ class Memory:
         the breakpoints of this session read as the code that they replaced, and
         the search returns a maximum of 4096 matches.
         """
-    def translate(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> int |None:
+    def translate(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> int |None:
         """
         Translate a virtual address with the page tables of this space (`!vtop`).
         """
-    def translation(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> VtopDetail:
+    def translation(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> VtopDetail:
         """
-        Get the page-table walk and the final translation of `addr` in this
+        Get the page-table walk and the final translation of `address` in this
         space's page tables (`!vtop` with this space's DTB). It works in every
         virtual space, VTL1 and roots outside NT included.
         """
-    def write(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, data: bytes) -> None:
+    def write(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap, data: bytes) -> None:
         """
         Write bytes to this address space.
         """
-    def write_u16(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, value: int) -> None:
+    def write_u16(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap, value: int) -> None:
         """
         Write a little-endian 16-bit integer.
         """
-    def write_u32(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, value: int) -> None:
+    def write_u32(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap, value: int) -> None:
         """
         Write a little-endian 32-bit integer.
         """
-    def write_u64(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, value: int) -> None:
+    def write_u64(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap, value: int) -> None:
         """
         Write a little-endian 64-bit integer.
         """
-    def write_u8(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap, value: int) -> None:
+    def write_u8(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap, value: int) -> None:
         """
         Write a little-endian byte.
         """
@@ -11058,7 +11058,7 @@ class Module:
         memory as they are mapped, so the values are the ones that the loader left
         there.
         """
-    def image(self, /, zero_fill: bool = False) -> bytes:
+    def image(self, /, *, zero_fill: bool = False) -> bytes:
         """
         The mapped image in memory layout, for pefile/LIEF. A page that is not
         readable raises `MemoryAccessError`, unless `zero_fill` is set, which
@@ -18122,10 +18122,10 @@ class Symbols:
         return its path in the cache (`.fetchimage /f`). Use it for an image that
         no symbol server has, such as the Windows hypervisor's `hvix64.exe`.
         """
-    def locals_at(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> list[ProcedureLocal]:
+    def locals_at(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> list[ProcedureLocal]:
         """
         List the PDB layouts of the locals and parameters of the innermost frame
-        at `addr`, which are those of the inlined call if the compiler inlined a
+        at `address`, which are those of the inlined call if the compiler inlined a
         call there. This method does not evaluate the values.
         """
     def nearest(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> Symbol |None:
@@ -18155,7 +18155,7 @@ class Symbols:
         """
         Set the symbol source path back to the defaults, the ntoseye cache and the Microsoft symbol server.
         """
-    def search(self, /, query: str, limit: int = 50) -> list[SymbolSearchMatch]:
+    def search(self, /, query: str, *, limit: int = 50) -> list[SymbolSearchMatch]:
         """
         Search symbol names by fuzzy match. Use `module!query` to search in one module.
         """
@@ -18163,7 +18163,7 @@ class Symbols:
         """
         Get all loaded addresses that match a source file and line.
         """
-    def source_location(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> SourceLocation |None:
+    def source_location(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> SourceLocation |None:
         """
         Get the PDB source metadata and the mapped local path for an address.
         """
@@ -18727,7 +18727,7 @@ class Thread:
         """
         Decode the APC lists of this thread (`!apc`).
         """
-    def backtrace(self, /, limit: int = 64) -> list[Frame]:
+    def backtrace(self, /, *, limit: int = 64) -> list[Frame]:
         """
         Recover the stack of this thread from live registers or its parked context.
         If the processor of the thread is halted in the Windows hypervisor, the
@@ -19517,7 +19517,7 @@ class Type:
     A named PDB struct or union layout, or an enum definition.
     """
     def __repr__(self, /) -> str: ...
-    def at(self, /, addr: int |str |Process |Thread |Module |Driver |Device |Heap) -> Struct:
+    def at(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> Struct:
         """
         Bind this layout to an address as a reflective struct cursor.
         """
@@ -20352,7 +20352,7 @@ class UserThread:
     def __eq__(self, other: object, /) -> bool: ...
     def __hash__(self, /) -> int: ...
     def __repr__(self, /) -> str: ...
-    def backtrace(self, /, limit: int = 64) -> list[Frame]:
+    def backtrace(self, /, *, limit: int = 64) -> list[Frame]:
         """
         Recover the thread's stack from its recorded registers.
         """
@@ -21215,7 +21215,7 @@ class VirtualProcessor:
         The processors whose current VP this is (the one that runs it, or
         ran it last).
         """
-    def registers(self, /, vtl: int |None = None) -> VpRegisters:
+    def registers(self, /, *, vtl: int |None = None) -> VpRegisters:
         """
         The registers of VTL `vtl` of this VP, by default the VTL it runs
         in, as `!hvr` shows them, whether or not a processor runs it: those

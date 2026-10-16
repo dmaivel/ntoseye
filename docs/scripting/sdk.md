@@ -82,7 +82,7 @@ with ntoseye.attach("dmp", "powershell-exception.dmp") as dbg:
     assert dump is not None
     print(dump.process.name, dump.process.pid)          # powershell.exe 4340
     for thread in dump.threads:                         # UserThread, keyed by TID
-        print(hex(thread.tid), thread.name, thread.backtrace(3)[0])
+        print(hex(thread.tid), thread.name, thread.backtrace(limit=3)[0])
     exception = dump.exception                          # UserExceptionDetail or None
     if exception is not None:
         print(hex(exception.info.code), exception.symbol)  # 0xe0d7e5e1 kernelbase!RaiseException+0x8a
@@ -390,7 +390,7 @@ match dbg.run(timeout=10.0):
     case Stop.Breakpoint(breakpoint=hit) as stop if stop.hit(bp):
         print("hit", hit.symbol, stop.thread)
         if stop.thread is not None:
-            print(dbg.threads[stop.thread].backtrace(4))
+            print(dbg.threads[stop.thread].backtrace(limit=4))
     case Stop.Exception(exception=raised):
         print("exception", hex(raised.code))
     case stop:

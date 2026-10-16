@@ -213,7 +213,7 @@ impl Thread {
     /// Recover the stack of this thread from live registers or its parked context.
     /// If the processor of the thread is halted in the Windows hypervisor, the
     /// unwind starts from the VTL0 state that the hypervisor saved, where NT stopped.
-    #[pyo3(signature = (limit=64))]
+    #[pyo3(signature = (*, limit=64))]
     fn backtrace(&self, py: Python<'_>, limit: usize) -> PyResult<Vec<Frame>> {
         let process = self.process_info(py)?;
         let context = self.context(process.clone());
@@ -795,7 +795,7 @@ impl Cpu {
     /// in the hypervisor. Frames outside NT's address spaces have no locals.
     /// `thread.backtrace()` walks a Windows thread instead, from where NT left
     /// off when its processor is in the hypervisor.
-    #[pyo3(signature = (limit=64, vtl=None))]
+    #[pyo3(signature = (*, limit=64, vtl=None))]
     fn backtrace(&self, py: Python<'_>, limit: usize, vtl: Option<u8>) -> PyResult<Vec<Frame>> {
         let context = self.context();
         let (frames, thread, process) = self.owner.with_in(py, &context, |session| {

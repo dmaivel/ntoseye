@@ -244,7 +244,7 @@ impl Module {
     /// readable raises `MemoryAccessError`, unless `zero_fill` is set, which
     /// fills such pages with zeros (for example, a kernel's discarded INIT
     /// section).
-    #[pyo3(signature = (zero_fill=false))]
+    #[pyo3(signature = (*, zero_fill=false))]
     fn image<'py>(&self, py: Python<'py>, zero_fill: bool) -> PyResult<Bound<'py, PyBytes>> {
         let bytes = self.image_bytes(py, zero_fill)?;
         Ok(PyBytes::new(py, &bytes))

@@ -69,13 +69,13 @@ fn inspect_heap(
     session.target.inspect_heap(heap, list_entries)
 }
 
-/// Find the heap block that contains `addr` (`!heap -x`).
+/// Find the heap block that contains `address` (`!heap -x`).
 #[command(form_of = heap, python = Heaps, word = "-x")]
 fn find_block(
     session: &Session,
-    #[arg(name = "address", complete = Expression)] addr: VirtAddr,
+    #[arg(complete = Expression)] address: VirtAddr,
 ) -> Result<HeapBlockSearch> {
-    session.target.find_heap_block(addr)
+    session.target.find_heap_block(address)
 }
 
 /// What `!heap` was asked for, its expressions evaluated.

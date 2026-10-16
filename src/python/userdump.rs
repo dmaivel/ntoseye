@@ -382,7 +382,7 @@ impl UserThread {
     }
 
     /// Recover the thread's stack from its recorded registers.
-    #[pyo3(signature = (limit=64))]
+    #[pyo3(signature = (*, limit=64))]
     fn backtrace(&self, py: Python<'_>, limit: usize) -> PyResult<Vec<Frame>> {
         let (frames, live) = self.owner.with_in(py, &self.context(), |session| {
             let (trace, _, live) = session

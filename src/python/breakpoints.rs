@@ -166,7 +166,7 @@ impl Breakpoints {
     /// reboot. The secure kernel (VTL1) accepts only this kind of breakpoint,
     /// for example `add(dbg.secure_kernel.symbols["securekernel!Func"],
     /// hardware=True)`.
-    #[pyo3(signature = (target, condition=None, *, hardware=false, when=None, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None))]
+    #[pyo3(signature = (target, *, condition=None, hardware=false, when=None, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None))]
     fn add(
         &self,
         py: Python<'_>,
@@ -234,7 +234,7 @@ impl Breakpoints {
     }
 
     /// Add symbol-identity breakpoints for the names that match a glob (`bm`).
-    #[pyo3(signature = (pattern, condition=None, *, when=None, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None, limit=256))]
+    #[pyo3(signature = (pattern, *, condition=None, when=None, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None, limit=256))]
     fn add_pattern(
         &self,
         py: Python<'_>,
@@ -300,7 +300,7 @@ impl Breakpoints {
     }
 
     /// Add a source breakpoint at each address that matches `file:line`.
-    #[pyo3(signature = (file, line, condition=None, *, when=None, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None))]
+    #[pyo3(signature = (file, line, *, condition=None, when=None, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None))]
     fn add_source(
         &self,
         py: Python<'_>,

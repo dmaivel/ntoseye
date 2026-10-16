@@ -351,7 +351,14 @@ fn python_name(item: &ImplItem) -> Result<Option<String>> {
                 if meta.path.is_ident("name") {
                     name = Some(meta.value()?.parse::<LitStr>()?.value());
                 } else if meta.input.peek(Token![=]) {
-                    meta.value()?.parse::<syn::Expr>()?;
+                    let value = meta.value()?;
+                    // `signature = (address, *, physical = false)` is no
+                    // expression.
+                    if value.peek(syn::token::Paren) {
+                        value.parse::<proc_macro2::Group>()?;
+                    } else {
+                        value.parse::<syn::Expr>()?;
+                    }
                 } else if meta.input.peek(syn::token::Paren) {
                     let _group: proc_macro2::Group = meta.input.parse()?;
                 }

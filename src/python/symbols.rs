@@ -97,7 +97,7 @@ impl Symbols {
     }
 
     /// Search symbol names by fuzzy match. Use `module!query` to search in one module.
-    #[pyo3(signature = (query, limit=50))]
+    #[pyo3(signature = (query, *, limit=50))]
     fn search<'py>(
         &self,
         py: Python<'py>,
@@ -117,9 +117,9 @@ impl Symbols {
     fn source_location<'py>(
         &self,
         py: Python<'py>,
-        addr: AddressArg,
+        address: AddressArg,
     ) -> PyResult<Typed<'py, Option<SourceLocation>>> {
-        let addr = addr.resolve(py, &self.owner, &self.space.context())?.0;
+        let addr = address.resolve(py, &self.owner, &self.space.context())?.0;
         let location = scoped(py, &self.owner, &self.space, |session| {
             Ok(session.target.source_location(VirtAddr(addr)))
         })?;
@@ -139,14 +139,14 @@ impl Symbols {
     }
 
     /// List the PDB layouts of the locals and parameters of the innermost frame
-    /// at `addr`, which are those of the inlined call if the compiler inlined a
+    /// at `address`, which are those of the inlined call if the compiler inlined a
     /// call there. This method does not evaluate the values.
     fn locals_at<'py>(
         &self,
         py: Python<'py>,
-        addr: AddressArg,
+        address: AddressArg,
     ) -> PyResult<Typed<'py, Vec<ProcedureLocal>>> {
-        let addr = addr.resolve(py, &self.owner, &self.space.context())?.0;
+        let addr = address.resolve(py, &self.owner, &self.space.context())?.0;
         let rows = scoped(py, &self.owner, &self.space, |session| {
             let locals = session
                 .target

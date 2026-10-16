@@ -61,7 +61,7 @@ def main() -> None:
             pid = stopped_in.pid if stopped_in else "?"
             print(f"\nstop in {name} (pid {pid}), {stop.kind}:")
             if stop.thread is not None:
-                for frame in dbg.threads[stop.thread].backtrace(4):
+                for frame in dbg.threads[stop.thread].backtrace(limit=4):
                     print(f"  {frame.ip:#x}  {frame.symbol}")
 
             out = dbg.step_out()
