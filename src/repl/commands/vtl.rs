@@ -5,6 +5,7 @@ use super::memory::MAX_DISASSEMBLY_INSTRUCTIONS;
 use super::memory::MAX_DISPLAY_BYTES;
 use crate::dbg_backend::processor_index_from_backend_thread_id;
 use crate::error::{Error, Result};
+use crate::guest::hv_layout::Hypercall;
 use crate::guest::{
     EvmcsState, HvPartition, HvProcessor, HvVirtualProcessor,
     ept::{self, Access, EptTranslation},
@@ -16,6 +17,7 @@ use crate::guest::{
 use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::memory_view::{MemoryDisplayMode, display_memory_with_validity, eval_range};
 use crate::repl::*;
+use crate::session::Session;
 use crate::target::{CodeExtent, VP_STATE_REGISTERS};
 use crate::types::VirtAddr;
 use crate::ui;
@@ -1457,7 +1459,7 @@ fn hveptdiff(
     category = "processes and modules",
     kind = Query,
     target = Kernel,
-    python = none,
+    forms = [hypercalls],
     usage = "!hvcalls [-a]"
 )]
 fn hvcalls(
@@ -1518,6 +1520,14 @@ fn hvcalls(
         table.len()
     );
     Ok(())
+}
+
+/// The Windows hypervisor's hypercall table, one entry per call code, as
+/// `!hvcalls -a` lists it. Needs the VM's `hv-evmcs` enlightenment or a
+/// vCPU stopped in the hypervisor. This feature is experimental.
+#[command(form_of = hvcalls, python = Debugger, sdk)]
+fn hypercalls(session: &Session) -> Result<Vec<Hypercall>> {
+    Ok(session.target.hypercalls()?.1)
 }
 
 /// Decode the hypercall that the current vCPU's processor handles in the
@@ -1967,6 +1977,31 @@ fn hvr(
     Ok(())
 }
 
+/// Inspect the Windows guest that hypervisor partition `partition_id`
+/// runs (a Windows Sandbox, a Hyper-V VM) in place of the target, as
+/// `.partition` does: `memory`, `processes`, `modules`, `symbols`,
+/// `types` and `threads` then read that guest, through its EPT, and the
+/// vCPUs are its VPs, with their VTL0 registers. The target stays
+/// halted. `memory.write` writes the guest's memory through its EPT, and
+/// a register write goes to the target's vCPU that runs the selected VP at
+/// the stop; a VP no vCPU runs has its registers in the hypervisor's
+/// memory, and raises `NtoseyeError`. `breakpoints.add(..., hardware=True)`
+/// and `breakpoints.watch` set the partition's breakpoints, which stop
+/// only on its VPs (`processor=` names one) and need the gdb backend;
+/// software breakpoints raise. `run` leaves the view and runs the
+/// target, and a hit of the partition's breakpoint returns in its view,
+/// on the VP that hit it. `step`, `step_over` and `step_out` step the
+/// thread of the selected VP, and `run_to` runs until any of its VPs
+/// reaches an address, each a run of the target to a breakpoint of the
+/// partition's; `step(until=...)` and `trace_calls` raise. The root
+/// partition's ID (1) returns to the target. Handles minted on either side
+/// of a switch go stale (`generation` advances). The target must be halted.
+/// This feature is experimental.
+#[command(form_of = partition, python = Debugger)]
+fn select_partition(session: &mut Session, partition_id: u64) -> Result<()> {
+    session.enter_partition(partition_id)
+}
+
 /// Inspect the Windows guest that a Windows hypervisor partition runs (a
 /// Windows Sandbox, a Hyper-V VM) in place of the target, or show which is
 /// inspected.
@@ -2000,7 +2035,7 @@ fn hvr(
     kind = Action,
     target = Kernel,
     state = Halted,
-    python = none,
+    forms = [select_partition],
     usage = ".partition [partition-id]"
 )]
 fn partition(
@@ -2024,7 +2059,7 @@ fn partition(
     let Some(arguments) = repl.eval_all(&argv) else {
         return Ok(());
     };
-    let result = repl.ctx.enter_partition(arguments[0]);
+    let result = select_partition(repl.ctx, arguments[0]);
     repl.caches
         .refresh_partition(repl.ctx.partition(), &repl.ctx.target);
     match result {

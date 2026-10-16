@@ -5,7 +5,7 @@ use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict};
 
-use super::command::{Bind, CommandHost};
+use super::command::{Bind, CommandHost, HostSession};
 use super::context::{Context, Space};
 use super::handle::Owner;
 use super::iter::{DriverIterator, ModuleIterator};
@@ -611,8 +611,8 @@ impl Bind<ImageSource> for Module {
 }
 
 impl CommandHost for Driver {
-    fn owner(&self) -> &Owner {
-        &self.owner
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Owner(&self.owner)
     }
 
     fn context(&self, _py: Python<'_>) -> PyResult<Context> {
@@ -628,8 +628,8 @@ impl Bind<VirtAddr> for Driver {
 }
 
 impl CommandHost for Device {
-    fn owner(&self) -> &Owner {
-        &self.owner
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Owner(&self.owner)
     }
 
     fn context(&self, _py: Python<'_>) -> PyResult<Context> {

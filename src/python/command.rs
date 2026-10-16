@@ -9,7 +9,7 @@
 use pyo3::prelude::*;
 
 use super::args::{AddressArg, BytesArg};
-use super::context::Context;
+use super::context::{Context, in_context};
 use super::handle::Owner;
 use super::record::{ToValue, Typed};
 use super::{ErrorKind, err, error, raise};
@@ -41,7 +41,7 @@ use crate::target::memory::SearchSpace;
 /// An SDK object a `#[command]` method can be placed on: the debugger it
 /// runs in and the context (process, thread) its calls run in.
 pub trait CommandHost {
-    fn owner(&self) -> &Owner;
+    fn session(&self) -> HostSession<'_>;
     fn context(&self, py: Python<'_>) -> PyResult<Context>;
 
     /// Refuse an operation this object cannot run, before it reaches the
@@ -63,6 +63,41 @@ pub trait CommandHost {
 /// the thread `!thread` inspects.
 pub trait Bind<T> {
     fn bind(&self) -> T;
+}
+
+/// How a [`CommandHost`] reaches its session.
+pub enum HostSession<'a> {
+    /// A handle or namespace, through its owner, which a handle argument
+    /// must share.
+    Owner(&'a Owner),
+    /// The debugger itself (`Debugger.write_dump`).
+    Debugger(&'a Debugger),
+}
+
+impl<'a> HostSession<'a> {
+    /// The owner a handle argument must belong to; `None` on the
+    /// `Debugger`, whose methods take no handles.
+    pub fn owner(&self) -> Option<&'a Owner> {
+        match self {
+            Self::Owner(owner) => Some(*owner),
+            Self::Debugger(_) => None,
+        }
+    }
+
+    /// Run `f` scoped to `context` on the session thread.
+    fn with_in<R: Send>(
+        &self,
+        py: Python<'_>,
+        context: &Context,
+        f: impl FnOnce(&mut Session) -> PyResult<R> + Send,
+    ) -> PyResult<R> {
+        match self {
+            Self::Owner(owner) => owner.with_in(py, context, f),
+            Self::Debugger(debugger) => {
+                debugger.with_session(|session| in_context(session, context, f))
+            }
+        }
+    }
 }
 
 /// How a command argument arrives from Python: as `Py`, which the stub
@@ -282,7 +317,7 @@ where
 {
     host.refuse(operation, effects)?;
     let context = host.context(py)?;
-    let value = host.owner().with_in(py, &context, |session| {
+    let value = host.session().with_in(py, &context, |session| {
         admit(session, effects, operation)?;
         host.prepare(session)?;
         f(session).map_err(err)
@@ -331,8 +366,18 @@ pub fn admit(session: &mut Session, effects: &Effects, operation: &str) -> PyRes
 }
 
 impl CommandHost for Inspect {
-    fn owner(&self) -> &Owner {
-        &self.owner
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Owner(&self.owner)
+    }
+
+    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
+        Ok(Context::default())
+    }
+}
+
+impl CommandHost for Debugger {
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Debugger(self)
     }
 
     fn context(&self, _py: Python<'_>) -> PyResult<Context> {
@@ -341,8 +386,8 @@ impl CommandHost for Inspect {
 }
 
 impl CommandHost for Breakpoints {
-    fn owner(&self) -> &Owner {
-        &self.owner
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Owner(&self.owner)
     }
 
     fn context(&self, _py: Python<'_>) -> PyResult<Context> {
@@ -351,8 +396,8 @@ impl CommandHost for Breakpoints {
 }
 
 impl CommandHost for Exceptions {
-    fn owner(&self) -> &Owner {
-        &self.owner
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Owner(&self.owner)
     }
 
     fn context(&self, _py: Python<'_>) -> PyResult<Context> {
@@ -361,8 +406,8 @@ impl CommandHost for Exceptions {
 }
 
 impl CommandHost for Process {
-    fn owner(&self) -> &Owner {
-        &self.owner
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Owner(&self.owner)
     }
 
     fn context(&self, _py: Python<'_>) -> PyResult<Context> {
@@ -377,8 +422,8 @@ impl Bind<ProcessInfo> for Process {
 }
 
 impl CommandHost for Thread {
-    fn owner(&self) -> &Owner {
-        &self.owner
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Owner(&self.owner)
     }
 
     fn context(&self, py: Python<'_>) -> PyResult<Context> {
@@ -393,8 +438,8 @@ impl Bind<ThreadInfo> for Thread {
 }
 
 impl CommandHost for Cpu {
-    fn owner(&self) -> &Owner {
-        &self.owner
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Owner(&self.owner)
     }
 
     fn context(&self, _py: Python<'_>) -> PyResult<Context> {
@@ -414,8 +459,8 @@ impl Bind<Option<Processor>> for Cpu {
 /// A `Memory` runs a command in its space's context: `proc.memory` in the
 /// process's, `dbg.memory` and `dbg.physical` in the kernel's.
 impl CommandHost for Memory {
-    fn owner(&self) -> &Owner {
-        &self.owner
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Owner(&self.owner)
     }
 
     fn context(&self, _py: Python<'_>) -> PyResult<Context> {
@@ -449,8 +494,8 @@ impl Bind<MemoryKind> for Memory {
 /// A process's heap list: its calls run in the process, with its module
 /// symbols loaded (the heap decoders read ntdll's).
 impl CommandHost for Heaps {
-    fn owner(&self) -> &Owner {
-        &self.owner
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Owner(&self.owner)
     }
 
     fn context(&self, _py: Python<'_>) -> PyResult<Context> {
@@ -464,8 +509,8 @@ impl CommandHost for Heaps {
 
 /// One heap: its calls run in its process, as the heap list's do.
 impl CommandHost for Heap {
-    fn owner(&self) -> &Owner {
-        &self.owner
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Owner(&self.owner)
     }
 
     fn context(&self, _py: Python<'_>) -> PyResult<Context> {
@@ -510,8 +555,8 @@ impl Bind<SearchSpace> for Memory {
 
 /// A user-mode minidump's process: the dump's one address space.
 impl CommandHost for UserProcess {
-    fn owner(&self) -> &Owner {
-        &self.owner
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Owner(&self.owner)
     }
 
     fn context(&self, _py: Python<'_>) -> PyResult<Context> {
@@ -521,8 +566,8 @@ impl CommandHost for UserProcess {
 
 /// A user-mode minidump's thread: its calls run with it selected.
 impl CommandHost for UserThread {
-    fn owner(&self) -> &Owner {
-        UserThread::owner(self)
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Owner(UserThread::owner(self))
     }
 
     fn context(&self, _py: Python<'_>) -> PyResult<Context> {
@@ -532,8 +577,8 @@ impl CommandHost for UserThread {
 
 /// A module: its calls run in the address space it is loaded in.
 impl CommandHost for Module {
-    fn owner(&self) -> &Owner {
-        &self.owner
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Owner(&self.owner)
     }
 
     fn context(&self, _py: Python<'_>) -> PyResult<Context> {

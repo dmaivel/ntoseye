@@ -1343,13 +1343,8 @@ impl Method<'_> {
         // The arguments converted on the session thread ([`Pending`]).
         let mut pending = Vec::new();
         let mut keywords = false;
-        // A run command's method is the `Debugger`'s own, which has no
-        // `Owner` to check a handle argument against.
-        let owner = if self.run.is_some() {
-            quote!(::std::option::Option::None)
-        } else {
-            quote!(::std::option::Option::Some(#command::CommandHost::owner(self)))
-        };
+        // The `Debugger` has no `Owner` to check a handle argument against.
+        let owner = quote!(#command::CommandHost::session(self).owner());
         for arg in self.args {
             if arg.render || arg.cancel {
                 continue;

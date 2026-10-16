@@ -2,7 +2,7 @@
 
 use pyo3::prelude::*;
 
-use super::command::CommandHost;
+use super::command::{CommandHost, HostSession};
 use super::context::{Context, Space};
 use super::handle::Owner;
 use super::record::Typed;
@@ -178,20 +178,6 @@ impl Symbols {
         })
     }
 
-    /// Copy a PE file into the symbol cache under the key in its own header, and
-    /// return its path in the cache (`.fetchimage /f`). Use it for an image that
-    /// no symbol server has, such as the Windows hypervisor's `hvix64.exe`.
-    fn import_image(&self, py: Python<'_>, path: String) -> PyResult<String> {
-        scoped(py, &self.owner, &self.space, move |session| {
-            let imported = session
-                .target
-                .symbols
-                .import_image(std::path::Path::new(&path))
-                .map_err(err)?;
-            Ok(imported.to_string_lossy().into_owned())
-        })
-    }
-
     /// The ordered source-path mappings (`.srcpath`). An assignment replaces all of them.
     #[getter(source_path)]
     fn source_path(&self, py: Python<'_>) -> PyResult<Vec<String>> {
@@ -234,8 +220,8 @@ impl Symbols {
 /// Symbol commands (`ln`, `.reload`, `.symfix`) run in the handle's
 /// address space, with its module symbols loaded first.
 impl CommandHost for Symbols {
-    fn owner(&self) -> &Owner {
-        &self.owner
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Owner(&self.owner)
     }
 
     fn context(&self, py: Python<'_>) -> PyResult<Context> {

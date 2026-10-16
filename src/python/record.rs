@@ -444,6 +444,15 @@ impl ToValue<Bytes> for Vec<u8> {
     const HINT: PyStaticExpr = type_hint_identifier!("builtins", "bytes");
 }
 
+/// An action that reports nothing (`Debugger.select_partition`): `None`.
+impl ToValue for () {
+    fn to_value(&self) -> Value {
+        Value::Null
+    }
+    #[cfg(feature = "python-stubs")]
+    const HINT: PyStaticExpr = type_hint_identifier!("builtins", "None");
+}
+
 impl<M, T: ToValue<M>> ToValue<M> for Keyed<T> {
     fn to_value(&self) -> Value {
         Value::Object(
@@ -704,6 +713,7 @@ mod hints {
         name: &'static str [Plain] = "name",
         absent: Option<u8> [Plain] = None,
         present: Option<u8> [Plain] = Some(1),
+        unit: () [Plain] = (),
         list: Vec<Inner> [Plain] = vec![Inner { id: 1 }],
         #[record(hex)] array: [u64; 2] [Hex] = [1, 2],
         boxed: Box<Inner> [Plain] = Box::new(Inner { id: 2 }),

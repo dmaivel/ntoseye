@@ -2994,10 +2994,9 @@ class Debugger:
         thread of the selected VP, and `run_to` runs until any of its VPs
         reaches an address, each a run of the target to a breakpoint of the
         partition's; `step(until=...)` and `trace_calls` raise. The root
-        partition's ID (1) returns to the
-        target. Handles minted on either side of a switch go stale
-        (`generation` advances). The target must be halted. This feature is
-        experimental.
+        partition's ID (1) returns to the target. Handles minted on either side
+        of a switch go stale (`generation` advances). The target must be halted.
+        This feature is experimental.
         """
     def step(self, /, until: Literal["call", "ret", "branch"] |int |str |None = None, timeout: float |None = None) -> Stop:
         """
@@ -3061,11 +3060,13 @@ class Debugger:
         halted, return the current stop immediately, and return `None` if the
         target is still running after `timeout`.
         """
-    def write_dump(self, /, path: str) -> int:
+    def write_dump(self, /, path: str) -> DumpWrite:
         """
-        Write a full `PAGEDU64` kernel dump of the halted target to `path`
-        (`.dump /f`). Returns the number of unreadable pages that were filled
-        with zeros.
+        Write a full PAGEDU64 kernel dump from the halted target.
+        
+        .dump accepts both /f and /ma as WinDbg-compatible full-dump switches.
+        ntoseye writes the dump as a stream, page by page, and you can cancel it
+        with Ctrl+C.
         """
 
 @final
@@ -3982,6 +3983,19 @@ class Drivers:
     def get(self, /, name: str) -> Driver |None:
         """
         Find a driver object by name, with or without its directory prefix.
+        """
+
+@final
+class DumpWrite(BaseRecord):
+    """
+    A kernel dump that `.dump` wrote.
+    """
+    @property
+    def path(self, /) -> str: ...
+    @property
+    def unreadable_pages(self, /) -> int:
+        """
+        The pages that could not be read, written as zeros.
         """
 
 @final
@@ -10051,20 +10065,11 @@ class Module:
         """
     def fetch_image(self, /) -> str:
         """
-        Download the PE file of a loaded module into the symbol cache, or copy a file into it, and print its path.
-        
-        The command finds the file by the TimeDateStamp and SizeOfImage values
-        in the mapped PE header of the module. These values are the
-        symbol-server key, so the file is the same build that is running, and a
-        disassembler database that you make from this file rebases onto the live
-        module. A copy in a local directory on the symbol path, at its root or in
-        symbol-store layout, is used before a symbol server. `/f` copies a PE
-        file that you have into the cache under the key in its own header, with
-        the name of its PDB, so ntoseye finds it for the module that runs that
-        build. Use it for the Windows hypervisor, which Microsoft's symbol server
-        does not have: copy C:\\Windows\\System32\\hvix64.exe from the guest and run
-        `.fetchimage /f hvix64.exe`, after which the stacks of a vCPU in the
-        hypervisor unwind through the file's unwind data.
+        Download the module's PE file into the symbol cache and return its path
+        there (`.fetchimage`). The file is found by the TimeDateStamp and
+        SizeOfImage values in the module's mapped PE header, the symbol-server
+        key, so it is the same build that is running; a copy in a local
+        directory on the symbol path is used before a symbol server.
         """
     @property
     def file_version(self, /) -> str |None:

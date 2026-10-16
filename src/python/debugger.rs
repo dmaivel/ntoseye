@@ -2,8 +2,6 @@
 //! lifecycle. Areas with their own module (run control, the command runner,
 //! symbols) are delegated there; this file only wires them onto the class.
 
-use std::sync::atomic::Ordering;
-
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use pyo3::{PyTraverseError, PyVisit};
@@ -11,7 +9,7 @@ use pyo3::{PyTraverseError, PyVisit};
 use super::breakpoints::{Breakpoints, Exceptions};
 use super::command::admit;
 use super::context::Space;
-use super::handle::{Debugger, Owner, require_halted};
+use super::handle::{Debugger, Owner};
 use super::hypervisor::HypervisorPartition;
 use super::inspect::Inspect;
 use super::memory::Memory;
@@ -23,10 +21,8 @@ use super::symbols::{self, Symbols};
 use super::thread::{Cpus, Threads};
 use super::types::Types;
 use super::userdump::UserDump;
-use super::{err, raise, runcontrol, runner};
+use super::{err, runcontrol, runner};
 use crate::dbg_backend::{BackendCapability, DebugOutputPage};
-use crate::dump_writer::{collect_dump_metadata, write_kernel_dump};
-use crate::guest::hv_layout::Hypercall;
 use crate::notice::Notice;
 use crate::session::Stop;
 use crate::session::effects::Effects;
@@ -115,51 +111,12 @@ impl Debugger {
             .collect())
     }
 
-    /// Inspect the Windows guest that hypervisor partition `partition_id`
-    /// runs (a Windows Sandbox, a Hyper-V VM) in place of the target, as
-    /// `.partition` does: `memory`, `processes`, `modules`, `symbols`,
-    /// `types` and `threads` then read that guest, through its EPT, and the
-    /// vCPUs are its VPs, with their VTL0 registers. The target stays
-    /// halted. `memory.write` writes the guest's memory through its EPT, and
-    /// a register write goes to the target's vCPU that runs the selected VP at
-    /// the stop; a VP no vCPU runs has its registers in the hypervisor's
-    /// memory, and raises `NtoseyeError`. `breakpoints.add(..., hardware=True)`
-    /// and `breakpoints.watch` set the partition's breakpoints, which stop
-    /// only on its VPs (`processor=` names one) and need the gdb backend;
-    /// software breakpoints raise. `run` leaves the view and runs the
-    /// target, and a hit of the partition's breakpoint returns in its view,
-    /// on the VP that hit it. `step`, `step_over` and `step_out` step the
-    /// thread of the selected VP, and `run_to` runs until any of its VPs
-    /// reaches an address, each a run of the target to a breakpoint of the
-    /// partition's; `step(until=...)` and `trace_calls` raise. The root
-    /// partition's ID (1) returns to the
-    /// target. Handles minted on either side of a switch go stale
-    /// (`generation` advances). The target must be halted. This feature is
-    /// experimental.
-    fn select_partition(slf: &Bound<'_, Self>, partition_id: u64) -> PyResult<()> {
-        let py = slf.py();
-        namespace_owner(slf).with(py, |session| {
-            require_halted(session, "Debugger.select_partition")?;
-            session.enter_partition(partition_id).map_err(err)
-        })
-    }
-
     /// The ID of the hypervisor partition inspected in place of the target
     /// (see `select_partition`), or `None` while the target is.
     #[getter]
     fn partition(slf: &Bound<'_, Self>) -> PyResult<Option<u64>> {
         let py = slf.py();
         namespace_owner(slf).with(py, |session| Ok(session.partition()))
-    }
-
-    /// The Windows hypervisor's hypercall table, one entry per call code, as
-    /// `!hvcalls -a` lists it. Needs the VM's `hv-evmcs` enlightenment or a
-    /// vCPU stopped in the hypervisor. This feature is experimental.
-    fn hypercalls<'py>(slf: &Bound<'py, Self>) -> PyResult<Typed<'py, Vec<Hypercall>>> {
-        let py = slf.py();
-        let owner = namespace_owner(slf);
-        let (_, table) = owner.with(py, |session| session.target.hypercalls().map_err(err))?;
-        Typed::new(py, table)
     }
 
     /// Running processes, keyed by PID: `processes[4]`, `.find(name)`.
@@ -280,28 +237,6 @@ impl Debugger {
         self.with_session(|session| {
             admit(session, &Effects::KERNEL, "Debugger.reload")?;
             session.reload().map_err(err)
-        })
-    }
-
-    /// Write a full `PAGEDU64` kernel dump of the halted target to `path`
-    /// (`.dump /f`). Returns the number of unreadable pages that were filled
-    /// with zeros.
-    fn write_dump(&self, path: &str) -> PyResult<u64> {
-        self.with_session(|session| {
-            require_halted(session, "write_dump")?;
-            if session.target.phys.is_dump() {
-                return Err(raise("write_dump is not applicable to a static crash dump"));
-            }
-            let metadata = collect_dump_metadata(session).map_err(err)?;
-            let cancel = &session.target.interrupt;
-            write_kernel_dump(
-                path,
-                &session.target.phys,
-                &metadata,
-                || cancel.load(Ordering::Relaxed),
-                || {},
-            )
-            .map_err(err)
         })
     }
 

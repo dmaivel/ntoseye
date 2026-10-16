@@ -1,6 +1,6 @@
 use crate::dbg_backend::DebugCapability;
 use crate::diagnostics::print_warning;
-use crate::dump_writer::{collect_dump_metadata, write_kernel_dump};
+use crate::dump_writer::{DumpWrite, collect_dump_metadata, write_kernel_dump};
 use crate::error::{Error, Result};
 use crate::kd::{KdFileMapping, kd_files, load_map_file};
 use crate::output;
@@ -74,7 +74,7 @@ fn crash(session: &mut Session) -> Result<Motion> {
     live_only,
     capability = MemoryIntrospection,
     writes = [Files],
-    python = none,
+    python = Debugger,
     usage = ".dump [/f] [/ma] <file>",
     completion = None
 )]
@@ -103,13 +103,6 @@ fn write_dump(session: &mut Session, #[arg(parse = dump_path)] path: String) -> 
         path,
         unreadable_pages,
     })
-}
-
-/// A kernel dump `.dump` wrote.
-pub struct DumpWrite {
-    pub path: String,
-    /// The pages that could not be read, written as zeros.
-    pub unreadable_pages: u64,
 }
 
 impl Render for DumpWrite {

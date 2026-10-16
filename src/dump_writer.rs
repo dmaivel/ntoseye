@@ -9,6 +9,8 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use ntoseye_macros::record;
+
 use crate::dmp::structs::{ExceptionRecord64, Header64};
 
 use crate::bugchecks::current_bugcheck;
@@ -28,6 +30,15 @@ const FULL_DUMP_TYPE: u32 = 1;
 /// `PHYSICAL_MEMORY_RUN64` entries after its sixteen-byte descriptor prefix.
 pub const MAX_PHYSICAL_MEMORY_RUNS: usize = 42;
 const TEMP_CREATE_RETRIES: usize = 16;
+
+/// A kernel dump that `.dump` wrote.
+#[record]
+pub struct DumpWrite {
+    pub path: String,
+    /// The pages that could not be read, written as zeros.
+    pub unreadable_pages: u64,
+}
+
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn machine_image_type(arch: Arch) -> u32 {

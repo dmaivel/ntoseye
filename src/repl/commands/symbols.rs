@@ -683,21 +683,38 @@ fn image_source(
     category = "symbols, types, and expressions",
     kind = Action,
     writes = [Symbols],
-    python = Module,
-    python_name = "fetch_image",
+    forms = [fetch_image, import_image],
     usage = ".fetchimage <module>  or  .fetchimage /f <file>",
     completion = Symbol
 )]
 fn fetchimage(
     session: &Session,
-    #[arg(receiver, parse = image_source)] image: ImageSource,
+    #[arg(parse = image_source)] image: ImageSource,
 ) -> Result<String> {
+    fetch_image(session, image)
+}
+
+/// Download the module's PE file into the symbol cache and return its path
+/// there (`.fetchimage`). The file is found by the TimeDateStamp and
+/// SizeOfImage values in the module's mapped PE header, the symbol-server
+/// key, so it is the same build that is running; a copy in a local
+/// directory on the symbol path is used before a symbol server.
+#[command(form_of = fetchimage, python = Module)]
+fn fetch_image(session: &Session, #[arg(receiver)] image: ImageSource) -> Result<String> {
     let target = &session.target;
     let path = match image {
         ImageSource::Module(name) => target.fetch_module_image(&name)?,
         ImageSource::File(file) => target.symbols.import_image(&file)?,
     };
     Ok(path.display().to_string())
+}
+
+/// Copy a PE file into the symbol cache under the key in its own header, and
+/// return its path in the cache (`.fetchimage /f`). Use it for an image that
+/// no symbol server has, such as the Windows hypervisor's `hvix64.exe`.
+#[command(form_of = fetchimage, python = Symbols, word = "/f")]
+fn import_image(session: &Session, path: String) -> Result<String> {
+    fetch_image(session, ImageSource::File(PathBuf::from(path)))
 }
 
 /// `lm`'s words that choose what the text shows: `v` (the details) and `t`
