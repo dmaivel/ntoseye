@@ -5,10 +5,7 @@ use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
-use super::args::{
-    CpuArg, Disposition, ExceptionCode, HypercallArg, PolicyMode, ProcessArg, ThreadArg,
-    WatchAccess, WhenCallback,
-};
+use super::args::{CpuArg, HypercallArg, ProcessArg, ThreadArg, WatchAccess, WhenCallback};
 use super::handle::{Debugger, Owner, require_halted};
 use super::iter::{BreakpointIterator, ExceptionPolicyIterator};
 use super::process::Process;
@@ -21,13 +18,12 @@ use crate::breakpoints::{
     BreakpointConfig, BreakpointInfo, BreakpointScope, HypercallFilter, PartitionFilter,
 };
 use crate::dbg_backend::{HwBreakpointAccess, WatchpointAccess};
-use crate::exception_policy::{EventFilter, ExceptionPolicyFinalAction, parse_event_filter};
+use crate::exception_policy::ModuleEventPolicy;
 use crate::guest::hypercalls::hypercall_code;
 use crate::guest::vm_exits::{self, ExitFilter};
 use crate::session::Session;
 use crate::target::Target;
 use crate::types::{Dtb, VirtAddr};
-use crate::view;
 use crate::view::record::Typed;
 
 /// The code breakpoints and data watchpoints, with their IDs as keys
@@ -813,69 +809,19 @@ impl Breakpoint {
 
 #[pymethods]
 impl Exceptions {
-    /// Set the stop policy for an exception (`sxe`/`sxd`/`sxn`/`sxi`), or set a
-    /// module filter: `"ld"` or `"ld:<module>"` for loads, `"ud"` or
-    /// `"ud:<module>"` for unloads. The module name is not case-sensitive, the
-    /// extension is optional, and `*`/`?` globs work. A `"break"` load filter
-    /// stops (kind `"module_load"`) before the module entry point runs, and a
-    /// `"break"` unload filter stops (kind `"module_unload"`) after the driver's
-    /// unload routine, while the module is still listed. A `"notify"` filter
-    /// adds a `ModLoad:` or `Unload module` line to the queue in
-    /// `dbg.notices()`. `disposition` does not apply to `ld` or `ud`.
-    #[pyo3(signature = (code, mode, *, disposition=None))]
-    fn set(
-        &self,
-        py: Python<'_>,
-        code: ExceptionCode,
-        mode: PolicyMode,
-        disposition: Option<Disposition>,
-    ) -> PyResult<()> {
-        let PolicyMode(mode) = mode;
-        match event_filter(code)? {
-            EventFilter::Exception(code) => {
-                let final_action = disposition.map(|Disposition(disposition)| {
-                    ExceptionPolicyFinalAction::Continue(disposition)
-                });
-                self.owner.with(py, |session| {
-                    session
-                        .exception_policies
-                        .set_with_options(code, mode, None, final_action);
-                    Ok(())
-                })
-            }
-            EventFilter::Module(event, module) => {
-                if disposition.is_some() {
-                    return Err(PyValueError::new_err(
-                        "disposition does not apply to a module load or unload filter",
-                    ));
-                }
-                self.owner.with(py, |session| {
-                    session
-                        .set_module_event_filter(event, module, mode, None)
-                        .map_err(err)
-                })
-            }
-        }
-    }
-
     /// The module load and unload filters (`sx* ld[:<module>]` and
     /// `sx* ud[:<module>]`), in the order that you set them. Iterating over
     /// `dbg.exceptions` gives only the exception policies.
     #[getter]
-    fn module_events(
-        &self,
-        py: Python<'_>,
-    ) -> PyResult<Vec<Py<view::execution::ModuleEventPolicyPy>>> {
+    fn module_events<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<ModuleEventPolicy>>> {
         let rows = self.owner.with(py, |session| {
             Ok(session
                 .exception_policies
                 .module_event_entries()
-                .map(view::execution::module_event_policy)
+                .cloned()
                 .collect::<Vec<_>>())
         })?;
-        rows.into_iter()
-            .map(|row| row.into_class(py).map(Bound::unbind))
-            .collect()
+        Typed::new(py, rows)
     }
 
     /// Iterate over the configured exception-policy records.
@@ -884,7 +830,7 @@ impl Exceptions {
             Ok(session
                 .exception_policies
                 .entries()
-                .map(|(code, policy)| view::execution::exception_policy(code, policy))
+                .cloned()
                 .collect::<Vec<_>>())
         })?;
         let records = rows
@@ -1099,19 +1045,4 @@ fn make_handles(
             handle(py, dbg, bp)
         })
         .collect()
-}
-
-fn event_filter(code: ExceptionCode) -> PyResult<EventFilter> {
-    match code {
-        ExceptionCode::Code(code) => {
-            u32::try_from(code)
-                .map(EventFilter::Exception)
-                .map_err(|_| {
-                    PyValueError::new_err(format!(
-                        "exception code {code:#x} does not fit in 32 bits"
-                    ))
-                })
-        }
-        ExceptionCode::Alias(alias) => parse_event_filter(&alias).map_err(PyValueError::new_err),
-    }
 }

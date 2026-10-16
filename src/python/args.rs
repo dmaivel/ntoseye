@@ -17,7 +17,7 @@ use super::process::Process;
 use super::thread::{Cpu, Thread};
 use crate::Backend;
 use crate::dbg_backend::{ContinueDisposition, WatchpointAccess};
-use crate::exception_policy::ExceptionPolicyMode;
+use crate::exception_policy::{EventName, ExceptionPolicyFinalAction, ExceptionPolicyMode};
 use crate::guest::ProcessInfo;
 use crate::kd::KdMemorySource;
 use crate::session::WalkUntil;
@@ -143,6 +143,30 @@ literal_arg! {
         "second_chance" => ExceptionPolicyMode::SecondChance,
         "notify" => ExceptionPolicyMode::Notify,
         "ignore" => ExceptionPolicyMode::Ignore,
+    }
+}
+
+impl PyArg for ExceptionPolicyMode {
+    type Py = PolicyMode;
+    fn from_py(value: PolicyMode) -> Self {
+        value.0
+    }
+}
+
+literal_arg! {
+    /// An exception policy's explicit final action (`-f`): break, or
+    /// continue as handled or not handled.
+    FinalAction(ExceptionPolicyFinalAction) {
+        "break" => ExceptionPolicyFinalAction::Break,
+        "handled" => ExceptionPolicyFinalAction::Continue(ContinueDisposition::Handled),
+        "not_handled" => ExceptionPolicyFinalAction::Continue(ContinueDisposition::NotHandled),
+    }
+}
+
+impl PyArg for ExceptionPolicyFinalAction {
+    type Py = FinalAction;
+    fn from_py(value: FinalAction) -> Self {
+        value.0
     }
 }
 
@@ -321,6 +345,16 @@ impl PyArg for WorkQueueTypes {
 pub enum ExceptionCode {
     Code(u64),
     Alias(String),
+}
+
+impl PyArg for EventName {
+    type Py = ExceptionCode;
+    fn from_py(value: ExceptionCode) -> Self {
+        match value {
+            ExceptionCode::Code(code) => EventName::Code(code),
+            ExceptionCode::Alias(text) => EventName::Text(text),
+        }
+    }
 }
 
 /// A hypercall by call code, or by name: its TLFS name or the name

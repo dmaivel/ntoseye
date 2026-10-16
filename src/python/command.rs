@@ -23,7 +23,7 @@ use crate::target::{MemoryKind, ThreadInfo};
 use crate::types::VirtAddr;
 use crate::view::record::{ToView, Typed};
 
-pub use super::breakpoints::Breakpoints;
+pub use super::breakpoints::{Breakpoints, Exceptions};
 use super::context::Space;
 pub use super::handle::Debugger;
 pub use super::inspect::Inspect;
@@ -271,6 +271,16 @@ impl CommandHost for Inspect {
 }
 
 impl CommandHost for Breakpoints {
+    fn owner(&self) -> &Owner {
+        &self.owner
+    }
+
+    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
+        Ok(Context::default())
+    }
+}
+
+impl CommandHost for Exceptions {
     fn owner(&self) -> &Owner {
         &self.owner
     }

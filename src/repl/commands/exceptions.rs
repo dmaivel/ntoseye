@@ -1,66 +1,80 @@
-use crate::dbg_backend::{ContinueDisposition, ModuleEvent};
-use crate::error::Result;
+//! Exception stop policies and module load and unload filters (`sx*`), and
+//! the last target event (`.lastevent`).
+
+use ntoseye_macros::command;
+
+use crate::dbg_backend::{ContinueDisposition, LastEvent};
+use crate::error::{Error, Result};
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
+use crate::session::Session;
 use crate::ui;
 
-repl_command! {
-    cmd_sxe;
-    names: ["sxe"],
-    category: "breakpoints and events",
-    usage: "sxe [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]|ud[:<module>]>",
-    summary: "Break when an exception occurs or a kernel module loads or unloads.",
-    details: "-c runs commands at the stop, and -f sets an explicit final action: break, handled, or not handled. `sxe ld` stops when a kernel image loads, and `sxe ld:<module>` stops when that module loads. The module name is case-insensitive, the extension is optional, and you can use `*`/`?` globs. The stop occurs after ntoseye lists the module and arms its deferred breakpoints, and before its entry point runs. `sxe ud` and `sxe ud:<module>` stop when a kernel image unloads, after its driver's unload routine has run and while the image is still in the module list. `-c` works with `sxe ld` and `sxe ud`, but `-f` does not apply to them. `sxn ld` prints a `ModLoad:` line and continues, `sxn ud` prints an `Unload module` line and continues, and `sxd` and `sxi` let the load or unload continue with no output. A named filter has precedence over bare `ld` or `ud`.",
+/// An `sx*` line's words, checked in order as WinDbg reads them: `-c
+/// <commands>`, `-f <break|gh|gn>`, and one event, in any order. Returns
+/// the event; `-c` and `-f` are left for [`event_command`] and
+/// [`final_action`], which the check made sure are well formed.
+fn event_name(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<EventName, ArgError> {
+    let words: Vec<String> = cursor.words().map(str::to_string).collect();
+    let mut event = None;
+    let mut index = 0;
+    while index < words.len() {
+        match words[index].as_str() {
+            "-c" => {
+                if words.get(index + 1).is_none() {
+                    return Err(ArgError::Message(
+                        "-c requires a quoted command string".to_string(),
+                    ));
+                }
+                index += 2;
+            }
+            "-f" => {
+                let Some(value) = words.get(index + 1) else {
+                    return Err(ArgError::Message(
+                        "-f requires break, gh, or gn".to_string(),
+                    ));
+                };
+                parse_exception_final_action(value).map_err(ArgError::Message)?;
+                index += 2;
+            }
+            _ if event.is_none() => {
+                event = Some(index);
+                index += 1;
+            }
+            _ => return Err(ArgError::Missing),
+        }
+    }
+    let index = event.ok_or(ArgError::Missing)?;
+    let word = cursor.word_at(index).ok_or(ArgError::Missing)?;
+    Ok(EventName::Text(word.into_owned()))
 }
 
-repl_command! {
-    cmd_sxd;
-    names: ["sxd"],
-    category: "breakpoints and events",
-    usage: "sxd [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]|ud[:<module>]>",
-    summary: "Pass first-chance exceptions and break on second chance.",
-    details: "-c runs commands at the stop, and -f sets an explicit final action: break, handled, or not handled. `sxd ld[:<module>]` and `sxd ud[:<module>]` let the load or unload continue with no output. See sxe.",
+/// The value after `option` (`-c`, `-f`), taken with it.
+fn option_value(cursor: &mut ArgCursor<'_>, option: &str) -> Option<String> {
+    let index = cursor.words().position(|word| word == option)?;
+    cursor.word_at(index);
+    cursor.word_at(index).map(|value| value.into_owned())
 }
 
-repl_command! {
-    cmd_sxn;
-    names: ["sxn"],
-    category: "breakpoints and events",
-    usage: "sxn [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]|ud[:<module>]>",
-    summary: "Show a notification for exceptions and pass them without a break.",
-    details: "-c runs commands at the stop, and -f sets an explicit final action: break, handled, or not handled. `sxn ld[:<module>]` prints a `ModLoad:` line at the load and continues, and `sxn ud[:<module>]` prints an `Unload module` line at the unload and continues. See sxe.",
+/// `-c <commands>`.
+fn event_command(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Option<String>, ArgError> {
+    Ok(option_value(cursor, "-c"))
 }
 
-repl_command! {
-    cmd_sxi;
-    names: ["sxi"],
-    category: "breakpoints and events",
-    usage: "sxi [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]|ud[:<module>]>",
-    summary: "Pass exceptions without a break or a notification.",
-    details: "-c runs commands at the stop, and -f sets an explicit final action: break, handled, or not handled. `sxi ld[:<module>]` and `sxi ud[:<module>]` let the load or unload continue with no output. See sxe.",
-}
-
-repl_command! {
-    cmd_sx();
-    names: ["sx", "sxl"],
-    category: "breakpoints and events",
-    usage: "sx or sxl",
-    summary: "List the configured exception policies and module load and unload filters.",
-}
-
-repl_command! {
-    cmd_sxr();
-    names: ["sxr"],
-    category: "breakpoints and events",
-    usage: "sxr",
-    summary: "Reset exception policies to the default break behavior, and clear module load and unload filters.",
-}
-
-repl_command! {
-    cmd_lastevent();
-    names: [".lastevent"],
-    category: "target control",
-    usage: ".lastevent",
-    summary: "Show the most recent target event that ntoseye observed.",
+/// `-f <break|gh|gn>`.
+fn final_action(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Option<ExceptionPolicyFinalAction>, ArgError> {
+    option_value(cursor, "-f")
+        .map(|value| parse_exception_final_action(&value).map_err(ArgError::Message))
+        .transpose()
 }
 
 /// Early feedback when a policy is set: refuse literal run-control commands
@@ -97,162 +111,210 @@ fn module_event_label(mode: ExceptionPolicyMode) -> &'static str {
     }
 }
 
-impl ReplState<'_> {
-    fn set_exception_policy(
-        &mut self,
-        invocation: CommandInvocation<'_>,
-        mode: ExceptionPolicyMode,
-    ) -> Result<()> {
-        let mut code_arg = None;
-        let mut command = None;
-        let mut final_action = None;
-        let mut index = 0;
-        while index < invocation.argv.len() {
-            match invocation.arg(index).expect("index is in bounds") {
-                "-c" => {
-                    let Some(value) = invocation.arg(index + 1) else {
-                        error!("-c requires a quoted command string");
-                        return Ok(());
-                    };
-                    command = Some(value.to_string());
-                    index += 2;
-                }
-                "-f" => {
-                    let Some(value) = invocation.arg(index + 1) else {
-                        error!("-f requires break, gh, or gn");
-                        return Ok(());
-                    };
-                    final_action = match parse_exception_final_action(value) {
-                        Ok(action) => Some(action),
-                        Err(err) => {
-                            error!("{err}");
-                            return Ok(());
-                        }
-                    };
-                    index += 2;
-                }
-                value if code_arg.is_none() => {
-                    code_arg = Some(value);
-                    index += 1;
-                }
-                _ => {
-                    outln!("{}\n", command_help(invocation.name));
-                    return Ok(());
-                }
+/// Break when an exception occurs or a kernel module loads or unloads.
+///
+/// -c runs commands at the stop, and -f sets an explicit final action:
+/// break, handled, or not handled. `sxe ld` stops when a kernel image loads,
+/// and `sxe ld:<module>` stops when that module loads. The module name is
+/// case-insensitive, the extension is optional, and you can use `*`/`?`
+/// globs. The stop occurs after ntoseye lists the module and arms its
+/// deferred breakpoints, and before its entry point runs. `sxe ud` and `sxe
+/// ud:<module>` stop when a kernel image unloads, after its driver's unload
+/// routine has run and while the image is still in the module list. `-c`
+/// works with `sxe ld` and `sxe ud`, but `-f` does not apply to them. `sxn
+/// ld` prints a `ModLoad:` line and continues, `sxn ud` prints an `Unload
+/// module` line and continues, and `sxd` and `sxi` let the load or unload
+/// continue with no output. A named filter has precedence over bare `ld` or
+/// `ud`.
+#[command(
+    names = ["sxe"],
+    category = "breakpoints and events",
+    kind = Action,
+    python = Exceptions,
+    python_name = "set",
+    usage = "sxe [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]|ud[:<module>]>",
+    completion = None
+)]
+fn set_event_policy(
+    session: &mut Session,
+    #[arg(parse = event_name)] code: EventName,
+    #[arg(sdk, default = None)] mode: Option<ExceptionPolicyMode>,
+    #[arg(parse = event_command, keyword, default = None)] command: Option<String>,
+    #[arg(parse = final_action, keyword, default = None)] disposition: Option<
+        ExceptionPolicyFinalAction,
+    >,
+) -> Result<EventPolicy> {
+    let mode = mode.unwrap_or(ExceptionPolicyMode::Break);
+    let filter = code.resolve().map_err(Error::DebugInfo)?;
+    let code = match filter {
+        EventFilter::Exception(code) => code,
+        EventFilter::Module(event, module) => {
+            let name = event.filter_name();
+            if disposition.is_some() {
+                return Err(Error::DebugInfo(format!(
+                    "-f does not apply to {name}: a module event either stops (sxe) or continues"
+                )));
             }
-        }
-        let Some(value) = code_arg else {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        };
-        let code = match parse_event_filter(value) {
-            Ok(EventFilter::Exception(code)) => code,
-            Ok(EventFilter::Module(event, module)) => {
-                self.set_module_event_filter(event, module, mode, command, final_action);
-                return Ok(());
+            if command.is_some() && mode != ExceptionPolicyMode::Break {
+                return Err(Error::DebugInfo(format!(
+                    "-c applies to {name} only with sxe, where it runs at the stop"
+                )));
             }
-            Err(err) => {
-                error!("{err}");
-                return Ok(());
+            if let Some(event_command) = command.as_deref() {
+                validate_exception_command(event_command).map_err(Error::DebugInfo)?;
             }
-        };
-        if command.is_some() && final_action.is_none() {
-            error!("-c requires an explicit final action: -f break, -f gh, or -f gn");
-            return Ok(());
+            session.set_module_event_filter(event, module, mode, command)?;
+            let policy = session
+                .exception_policies
+                .module_event_entries()
+                .last()
+                .expect("the filter was just set");
+            return Ok(EventPolicy::Module(policy.clone()));
         }
-        if let Some(event_command) = command.as_deref()
-            && let Err(err) = validate_exception_command(event_command)
-        {
-            error!("{err}");
-            return Ok(());
+    };
+    if command.is_some() && disposition.is_none() {
+        return Err(Error::DebugInfo(
+            "-c requires an explicit final action: -f break, -f gh, or -f gn".to_string(),
+        ));
+    }
+    if let Some(event_command) = command.as_deref() {
+        validate_exception_command(event_command).map_err(Error::DebugInfo)?;
+    }
+    session
+        .exception_policies
+        .set_with_options(code, mode, command, disposition);
+    let policy = session
+        .exception_policies
+        .entries()
+        .find(|policy| policy.code == code)
+        .expect("the policy was just set");
+    Ok(EventPolicy::Exception(policy.clone()))
+}
+
+impl Render for EventPolicy {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        match self {
+            EventPolicy::Exception(policy) => {
+                let alias = policy
+                    .alias()
+                    .map(|alias| format!(" ({alias})"))
+                    .unwrap_or_default();
+                let final_label = policy
+                    .final_action
+                    .map(|action| format!(", final {}", action.label()))
+                    .unwrap_or_default();
+                outln!(
+                    "{} {:#010x}{alias}: {}{final_label}\n",
+                    policy.mode.command(),
+                    policy.code,
+                    policy.mode.label()
+                );
+            }
+            EventPolicy::Module(policy) => outln!(
+                "{} {}: {}\n",
+                policy.mode.command(),
+                policy.event_name(),
+                module_event_label(policy.mode)
+            ),
         }
-        self.ctx
-            .exception_policies
-            .set_with_options(code, mode, command, final_action);
-        let alias = exception_alias(code)
-            .map(|alias| format!(" ({alias})"))
-            .unwrap_or_default();
-        let final_label = final_action
-            .map(|action| format!(", final {}", action.label()))
-            .unwrap_or_default();
-        outln!(
-            "{} {code:#010x}{alias}: {}{final_label}\n",
-            mode.command(),
-            mode.label()
-        );
-        Ok(())
     }
+}
 
-    fn set_module_event_filter(
-        &mut self,
-        event: ModuleEvent,
-        module: Option<String>,
-        mode: ExceptionPolicyMode,
-        command: Option<String>,
-        final_action: Option<ExceptionPolicyFinalAction>,
-    ) {
-        let name = event.filter_name();
-        if final_action.is_some() {
-            error!("-f does not apply to {name}: a module event either stops (sxe) or continues");
-            return;
-        }
-        if command.is_some() && mode != ExceptionPolicyMode::Break {
-            error!("-c applies to {name} only with sxe, where it runs at the stop");
-            return;
-        }
-        if let Some(event_command) = command.as_deref()
-            && let Err(err) = validate_exception_command(event_command)
-        {
-            error!("{err}");
-            return;
-        }
-        if let Err(err) = self
-            .ctx
-            .set_module_event_filter(event, module, mode, command)
-        {
-            error!("{err}");
-            return;
-        }
-        let policy = self
-            .ctx
-            .exception_policies
-            .module_event_entries()
-            .last()
-            .expect("the filter was just set");
-        outln!(
-            "{} {}: {}\n",
-            mode.command(),
-            policy.event_name(),
-            module_event_label(mode)
-        );
-    }
+/// Pass first-chance exceptions and break on second chance.
+///
+/// -c runs commands at the stop, and -f sets an explicit final action:
+/// break, handled, or not handled. `sxd ld[:<module>]` and `sxd
+/// ud[:<module>]` let the load or unload continue with no output. See sxe.
+#[command(
+    names = ["sxd"],
+    category = "breakpoints and events",
+    kind = Action,
+    python = none,
+    usage = "sxd [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]|ud[:<module>]>",
+    completion = None
+)]
+fn set_second_chance(
+    session: &mut Session,
+    #[arg(parse = event_name)] code: EventName,
+    #[arg(parse = event_command)] command: Option<String>,
+    #[arg(parse = final_action)] disposition: Option<ExceptionPolicyFinalAction>,
+) -> Result<EventPolicy> {
+    let mode = Some(ExceptionPolicyMode::SecondChance);
+    set_event_policy(session, code, mode, command, disposition)
+}
 
-    fn cmd_sxe(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.set_exception_policy(invocation, ExceptionPolicyMode::Break)
-    }
+/// Show a notification for exceptions and pass them without a break.
+///
+/// -c runs commands at the stop, and -f sets an explicit final action:
+/// break, handled, or not handled. `sxn ld[:<module>]` prints a `ModLoad:`
+/// line at the load and continues, and `sxn ud[:<module>]` prints an `Unload
+/// module` line at the unload and continues. See sxe.
+#[command(
+    names = ["sxn"],
+    category = "breakpoints and events",
+    kind = Action,
+    python = none,
+    usage = "sxn [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]|ud[:<module>]>",
+    completion = None
+)]
+fn set_notify(
+    session: &mut Session,
+    #[arg(parse = event_name)] code: EventName,
+    #[arg(parse = event_command)] command: Option<String>,
+    #[arg(parse = final_action)] disposition: Option<ExceptionPolicyFinalAction>,
+) -> Result<EventPolicy> {
+    let mode = Some(ExceptionPolicyMode::Notify);
+    set_event_policy(session, code, mode, command, disposition)
+}
 
-    fn cmd_sxd(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.set_exception_policy(invocation, ExceptionPolicyMode::SecondChance)
-    }
+/// Pass exceptions without a break or a notification.
+///
+/// -c runs commands at the stop, and -f sets an explicit final action:
+/// break, handled, or not handled. `sxi ld[:<module>]` and `sxi
+/// ud[:<module>]` let the load or unload continue with no output. See sxe.
+#[command(
+    names = ["sxi"],
+    category = "breakpoints and events",
+    kind = Action,
+    python = none,
+    usage = "sxi [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]|ud[:<module>]>",
+    completion = None
+)]
+fn set_ignore(
+    session: &mut Session,
+    #[arg(parse = event_name)] code: EventName,
+    #[arg(parse = event_command)] command: Option<String>,
+    #[arg(parse = final_action)] disposition: Option<ExceptionPolicyFinalAction>,
+) -> Result<EventPolicy> {
+    let mode = Some(ExceptionPolicyMode::Ignore);
+    set_event_policy(session, code, mode, command, disposition)
+}
 
-    fn cmd_sxn(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.set_exception_policy(invocation, ExceptionPolicyMode::Notify)
-    }
+/// List the configured exception policies and module load and unload filters.
+#[command(
+    names = ["sx", "sxl"],
+    category = "breakpoints and events",
+    kind = Query,
+    python = none,
+    usage = "sx or sxl"
+)]
+fn event_policies(session: &Session) -> Result<EventPolicies> {
+    let policies = &session.exception_policies;
+    Ok(EventPolicies {
+        exceptions: policies.entries().cloned().collect(),
+        module_events: policies.module_event_entries().cloned().collect(),
+    })
+}
 
-    fn cmd_sxi(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        self.set_exception_policy(invocation, ExceptionPolicyMode::Ignore)
-    }
-
-    fn cmd_sx(&mut self) -> Result<()> {
-        let entries: Vec<_> = self.ctx.exception_policies.entries().collect();
-        let module_events: Vec<_> = self.ctx.exception_policies.module_event_entries().collect();
-        if entries.is_empty() && module_events.is_empty() {
+impl Render for EventPolicies {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        if self.exceptions.is_empty() && self.module_events.is_empty() {
             outln!("No exception policies configured (ordinary exceptions break by default).\n");
-            return Ok(());
+            return;
         }
-        if !module_events.is_empty() {
+        if !self.module_events.is_empty() {
             outln!("Module load and unload filters:");
-            for policy in module_events {
+            for policy in &self.module_events {
                 let command = policy
                     .command
                     .as_deref()
@@ -265,14 +327,15 @@ impl ReplState<'_> {
                     policy.mode.command()
                 );
             }
-            if entries.is_empty() {
+            if self.exceptions.is_empty() {
                 outln!();
-                return Ok(());
+                return;
             }
         }
         outln!("Exception policies:");
-        for (code, policy) in entries {
-            let alias = exception_alias(code)
+        for policy in &self.exceptions {
+            let alias = policy
+                .alias()
                 .map(|alias| format!(" {alias:<4}"))
                 .unwrap_or_else(|| "     ".to_string());
             let final_action = policy
@@ -285,55 +348,111 @@ impl ReplState<'_> {
                 .map(|command| format!("  -c {command:?}"))
                 .unwrap_or_default();
             outln!(
-                "  {code:#010x}{alias}  {:<13} ({}){final_action}{command}",
+                "  {:#010x}{alias}  {:<13} ({}){final_action}{command}",
+                policy.code,
                 policy.mode.label(),
                 policy.mode.command()
             );
         }
         outln!();
-        Ok(())
     }
+}
 
-    fn cmd_sxr(&mut self) -> Result<()> {
-        self.ctx.exception_policies.reset();
+/// The exception policies were reset (`sxr`).
+pub struct PoliciesReset;
+
+/// Reset exception policies to the default break behavior, and clear module load and unload filters.
+#[command(
+    names = ["sxr"],
+    category = "breakpoints and events",
+    kind = Action,
+    python = none,
+    usage = "sxr"
+)]
+fn reset_event_policies(session: &mut Session) -> Result<PoliciesReset> {
+    session.exception_policies.reset();
+    Ok(PoliciesReset)
+}
+
+impl Render for PoliciesReset {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
         outln!(
             "Exception policies reset; ordinary exceptions break by default and module loads and unloads do not stop.\n"
         );
-        Ok(())
     }
+}
 
-    fn cmd_lastevent(&mut self) -> Result<()> {
-        let Some(last) = &self.ctx.last_event else {
-            if let Some(info) = self.ctx.target.user_dump_info()
-                && let Some(exception) = &info.exception
-            {
-                // A minidump runs nothing; its event is the exception it was
-                // written for, which does not record the chance.
-                let alias = exception_alias(exception.code)
-                    .map(|alias| format!(" ({alias})"))
-                    .unwrap_or_default();
-                outln!("Last event (the minidump's exception record):");
-                outln!("  code:        {:#010x}{alias}", exception.code);
-                outln!("  chance:      unavailable");
-                outln!("  address:     {}", ui::addr(exception.address));
-                outln!(
-                    "  thread:      {}\n",
-                    info.backend_thread_id(exception.thread_id)
-                );
-                return Ok(());
+/// The most recent target event: the stop the debugger last saw, or a
+/// minidump's exception record.
+pub enum LastEventReport {
+    Event(LastEvent),
+    /// A minidump runs nothing; its event is the exception it was written
+    /// for, which does not record the chance.
+    Minidump {
+        code: u32,
+        address: u64,
+        thread: String,
+    },
+    None,
+}
+
+/// Show the most recent target event that ntoseye observed.
+#[command(
+    names = [".lastevent"],
+    category = "target control",
+    kind = Query,
+    python = none,
+    usage = ".lastevent"
+)]
+fn last_event(session: &Session) -> Result<LastEventReport> {
+    if let Some(last) = &session.last_event {
+        return Ok(LastEventReport::Event(last.clone()));
+    }
+    Ok(session
+        .target
+        .user_dump_info()
+        .and_then(|info| {
+            info.exception
+                .as_ref()
+                .map(|exception| LastEventReport::Minidump {
+                    code: exception.code,
+                    address: exception.address,
+                    thread: info.backend_thread_id(exception.thread_id),
+                })
+        })
+        .unwrap_or(LastEventReport::None))
+}
+
+impl Render for LastEventReport {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        let alias = |code: u32| {
+            exception_alias(code)
+                .map(|alias| format!(" ({alias})"))
+                .unwrap_or_default()
+        };
+        let last = match self {
+            LastEventReport::None => {
+                outln!("No target event has been observed.\n");
+                return;
             }
-            outln!("No target event has been observed.\n");
-            return Ok(());
+            LastEventReport::Minidump {
+                code,
+                address,
+                thread,
+            } => {
+                outln!("Last event (the minidump's exception record):");
+                outln!("  code:        {code:#010x}{}", alias(*code));
+                outln!("  chance:      unavailable");
+                outln!("  address:     {}", ui::addr(*address));
+                outln!("  thread:      {thread}\n");
+                return;
+            }
+            LastEventReport::Event(last) => last,
         };
         let stop = &last.stop;
         outln!("Last event:");
         match stop.exception_code {
-            Some(code) => {
-                let alias = exception_alias(code)
-                    .map(|alias| format!(" ({alias})"))
-                    .unwrap_or_default();
-                outln!("  code:        {code:#010x}{alias}");
-            }
+            Some(code) => outln!("  code:        {code:#010x}{}", alias(code)),
             None => outln!("  code:        unavailable"),
         }
         let chance = match stop.first_chance {
@@ -351,7 +470,6 @@ impl ReplState<'_> {
             .map(ContinueDisposition::label)
             .unwrap_or("not yet continued");
         outln!("  disposition: {disposition}\n");
-        Ok(())
     }
 }
 
