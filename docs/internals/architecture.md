@@ -36,7 +36,7 @@ impl Job {
 
 In Python, a record is a value, like a frozen dataclass. `BaseRecord` gives it `==` (same class, equal fields), `hash` (a `TypeError` when a field is unhashable), `repr`, and `to_dict()`, and each class has `__match_args__`, its properties in order. It is not a container: it has no `len`, iteration or `record["field"]`, so a script reads fields as attributes. A `Keyed` field is a plain `dict[str, T]`.
 
-The runtime that turns a record into Python objects is `src/python/record.rs` (`ToValue`, `Typed`, `to_py`). `build.rs` walks the module tree from `src/lib.rs` and exports every record class from the `_ntoseye` module, so a new record needs no list entry. For this reason, a record must be an item in a module that `crate::python` can see, not the output of a `macro_rules!`. Everything Python-specific is behind `cfg(feature = "python")`, so the core builds with `--no-default-features`.
+The runtime that turns a record into Python objects is `src/python/record.rs` (`ToValue`, `Typed`, `to_py`). `build.rs` walks the module tree from `src/lib.rs` and exports every record class from the `_ntoseye` module, so a new record needs no list entry. For this reason, a record must be an item in a module that `crate::python` can see, written with `#[record]` itself, not the output of a `macro_rules!` or a `cfg_attr`. `build.rs` writes an `ExportedClass` impl for each record and handle class it exports, which their macros require, so one it cannot see fails to compile at its name. Everything Python-specific is behind `cfg(feature = "python")`, so the core builds with `--no-default-features`.
 
 ## Commands: one function per operation
 

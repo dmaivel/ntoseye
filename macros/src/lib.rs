@@ -33,13 +33,13 @@ use proc_macro::TokenStream;
 /// - `bytes`: a `Vec<u8>` (possibly wrapped) is Python `bytes`;
 /// - `skip`: Rust only; Python does not see the field;
 /// - `rename = "key"`: the record key. The property takes the key too,
-/// unless the key would hide `BaseRecord.to_dict` or is a Python keyword
+///   unless the key would hide `BaseRecord.to_dict` or is a Python keyword
 ///   (`class`), in which case the property keeps the Rust name. The key
 ///   must be a Python identifier;
 /// - `flatten`: the field (keyed `kind`) is a `tagged` enum declared with
-/// `base = Name` for this struct: the struct's class is a base, and each
-/// value is the subclass of its variant, with `kind` and the variant's
-/// fields after the fields before it (`Stop.Breakpoint`).
+///   `base = Name` for this struct: the struct's class is a base, and each
+///   value is the subclass of its variant, with `kind` and the variant's
+///   fields after the fields before it (`Stop.Breakpoint`).
 ///
 /// A record cannot have generics or lifetimes: its class is one concrete
 /// Python type. A field the record shows, a variant and a variant's field
@@ -104,7 +104,7 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// attribute takes:
 ///
 /// - `names = [...]` (the first is canonical), `category = "..."`,
-/// `kind = Query | Action | Run | Host`, and `python = Object | [Object,
+///   `kind = Query | Action | Run | Host`, and `python = Object | [Object,
 ///   ...] | none` (one method on each class: a kernel and a user-dump
 ///   class can share a command; a list names at least one class, and
 ///   `none` stands alone);
@@ -116,8 +116,8 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   Breakpoints, Symbols, Files]`, `live_only`, `capability =
 ///   <DebugCapability>`;
 /// - `python_name = "..."` (else the function's name), `style = RawTail |
-/// ExpressionTail` (the line is not split into words, for a `raw`
-/// argument), and `flow = Quit` (the flow the command ends with once it
+///   ExpressionTail` (the line is not split into words, for a `raw`
+///   argument), and `flow = Quit` (the flow the command ends with once it
 ///   ran; a line that does not parse ends with `Continue`; refused on a
 ///   function that returns its own `Flow`).
 ///
