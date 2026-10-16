@@ -26,7 +26,7 @@ def main() -> None:
         prcb = dbg.types["_KPRCB"].at(dbg.cpus[args.cpu].prcb().kprcb)
         target = prcb.address_of("CurrentThread")
         watch = dbg.breakpoints.watch(target, access="write", length=8, processor=args.cpu)
-        print(f"write watchpoint {watch.id} at CPU {args.cpu} _KPRCB.CurrentThread = {watch.address:#x}")
+        print(f"write watchpoint {watch.id} at CPU {args.cpu} _KPRCB.CurrentThread = {target:#x}")
 
         timed_out = False
         timeout = None if args.timeout == 0 else args.timeout

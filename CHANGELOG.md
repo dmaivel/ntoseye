@@ -17,6 +17,12 @@ Keeping this file:
 
 ### Changed
 
+- **Breaking:** Python SDK handles and collections behave alike. Every handle (`Process`, `Thread`, `Module`, `Cpu`, `Heap`, `Driver`, `Device`, `Breakpoint`, `Trustlet`, `UserThread`, the hypervisor handles) has its record as `info`, each of the record's fields as a property, `to_dict()`, and `==`/`hash`. Every collection iterates as a typed `Iterator[...]` (the `ProcessIterator`-style classes are gone), and `get()`/`[]`/`in` take its key, or a record of its items (`dbg.drivers[info]`, `dump.threads[thread_info]`). `Regions.at(address)` is `Regions.get(address)`, and `Threads.at(address)` returns `None` instead of raising when no thread has that `_ETHREAD`.
+- **Breaking:** `dbg.breakpoints.watch()` returns a `Breakpoint`, whose `watch_access` and `watch_length` replace `Watchpoint.access` and `.length`; `Breakpoint.address` is `None` for a breakpoint that has not resolved. A one-shot breakpoint that fired is no longer listed: its handle's `valid` is `False` and `delete()` does nothing.
+- **Breaking:** Python SDK record keys follow their handles: `ModuleInfo.base` and `.timestamp` (were `base_address` and `time_date_stamp`, as in `stop.module`), `DriverObjectInfo.start` and `.size` (were `driver_start` and `driver_size`), and `DriverDeviceLink.address` (was `device`).
+- **Breaking:** `UserThread`'s thread-info stream fields (`start_address`, `create_time`, `exit_time`, `kernel_time`, `user_time`, `exit_status`, `affinity`) moved to `UserThread.times`, a `UserThreadTimes` or `None`, and `UserThread.stack` is a `CapturedStack` (`start`, `size`) instead of a tuple. The heap list's records are `HeapInfo` and `HeapStats`.
+- **Breaking:** `Cpu.info()` (`!cpuinfo`) is `Cpu.cpuinfo()`; `Cpu.info` is the processor's `VcpuInfo` record, as on every handle. `Inspect.pool_usage(sort=...)` takes `"nonpaged_bytes"` and `"paged_bytes"`, and `Inspect.pool_find(pool_type=...)` takes `"NonPagedPool"` and `"PagedPool"`, the values the results hold.
+
 - `q` exits sooner, by 0.2 s on a minidump of a process with many modules loaded.
 - `k` and `~*k` on a minidump that lacks a module's code ask the symbol server for the module's image once per session, as for PDBs, instead of at every stack walk when the server does not have it or cannot be reached; `.reload` asks again. Offline, ten `~*k` on an ARM64 minidump took 1.7 s and now take 0.3 s.
 - `s` searches about ten times faster: 256 MiB of a user-mode minidump's address space in 45 ms instead of 420 ms.
@@ -27,7 +33,7 @@ Keeping this file:
 
 ### Removed
 
-- The Python SDK no longer defines `HeapSummary`, `HeapOverview`, `HeapStats`, `LoaderModules`, and `RegisterValue`. No SDK method returned them; they were left over from MCP's removed JSON output. `Heap.inspect()` still returns `HeapDetail`, and `Module.inspect()` still returns `ModuleDetail`.
+- The Python SDK no longer defines `HeapSummary`, `HeapOverview`, `LoaderModules`, and `RegisterValue`. No SDK method returned them; they were left over from MCP's removed JSON output. `Heap.inspect()` still returns `HeapDetail`, and `Module.inspect()` still returns `ModuleDetail`.
 
 ## v0.49.1 (2026-10-14)
 

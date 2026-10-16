@@ -66,7 +66,7 @@ A process has views that use its own address space:
 
 Use these views directly, without selecting or attaching to a global process.
 
-`dbg.cpus` is the sequence of processors: `dbg.cpus[n]` is processor `n`, and `cpu.number` is its number. A `Cpu` decodes its processor's state: `pcr()`, `prcb()`, `irql()`, `idt()`, `gdt()`, and `info()`. With `kd` or `kdnet`, `cpu.msr["IA32_LSTAR"]` reads a model-specific register and `cpu.apic()` the local APIC, as {command}`rdmsr` `/p` and {command}`!apic` do: KD runs these reads on the processor that reported the stop, so ntoseye switches the target to the processor you asked for and back. `dbg.inspect.interrupt_controllers()` returns the interrupt controllers and lines that {command}`!ioapic` shows, and `dbg.inspect.smbios()` the SMBIOS structures of {command}`!sysinfo` `smbios`, each with its fields by the specification's names.
+`dbg.cpus` is the sequence of processors: `dbg.cpus[n]` is processor `n`, and `cpu.number` is its number. A `Cpu` decodes its processor's state: `pcr()`, `prcb()`, `irql()`, `idt()`, `gdt()`, and `cpuinfo()`. With `kd` or `kdnet`, `cpu.msr["IA32_LSTAR"]` reads a model-specific register and `cpu.apic()` the local APIC, as {command}`rdmsr` `/p` and {command}`!apic` do: KD runs these reads on the processor that reported the stop, so ntoseye switches the target to the processor you asked for and back. `dbg.inspect.interrupt_controllers()` returns the interrupt controllers and lines that {command}`!ioapic` shows, and `dbg.inspect.smbios()` the SMBIOS structures of {command}`!sysinfo` `smbios`, each with its fields by the specification's names.
 
 Handles such as `Process`, `Module`, `Thread`, `Frame`, and struct cursors are stamped with the target generation. After a reboot (a stop whose `kind` is `"reload"`), discard the old handles and query them again, because an old handle raises `ntoseye.StaleHandleError` when you use it. Old handles stay hashable and printable, so a set or dict that holds them continues to work.
 
@@ -93,7 +93,7 @@ with ntoseye.attach("dmp", "powershell-exception.dmp") as dbg:
 ```
 
 - `dump.process` has the PID, the image name, the PEB as an `ntdll!_PEB` cursor, and `memory`, `modules`, and `threads` views. `dbg.memory`, `dbg.symbols`, `dbg.types`, and `dbg.modules` are the process's too.
-- `dump.threads[tid]` is a `UserThread`: its TID, name, TEB (an `ntdll!_TEB` cursor), captured stack range, suspend count and priority, what the dump's thread-info stream records (start address, creation and exit times, CPU times, exit status, affinity), `registers`, `backtrace()`, and `last_error()`. `dump.current_thread` is the thread selected for inspection and `dump.exception_thread` the one that raised the exception.
+- `dump.threads[tid]` is a `UserThread`: its TID, name, TEB (an `ntdll!_TEB` cursor), captured `stack` (a `CapturedStack` with `start` and `size`), suspend count and priority, `times`, what the dump's thread-info stream records (start address, creation and exit times, CPU times, exit status, affinity; `None` without one), `registers`, `backtrace()`, and `last_error()`. `dump.current_thread` is the thread selected for inspection and `dump.exception_thread` the one that raised the exception.
 - `dump.handles` lists the recorded handles, `dump.regions` the address-space regions with their use, and `dump.region(address)` the one holding an address; each is `None` when the dump does not record it. `dump.unloaded_modules` lists the modules the process had unloaded, and `dump.notes` what the parser dropped and why.
 - `dump.process.decode_peb()` and a `UserThread`'s `decode_teb()` decode the PEB and TEB, as {command}`!peb` and {command}`!teb` do. `dbg.inspect.version().user_dump` and `dbg.inspect.time().user_dump` hold what {command}`vertarget` and {command}`.time` show. `dbg.inspect.triage()` returns the report of {command}`analyze`: `report.user` holds the exception, the process, and the faulting stack, and `report.culprit.subject` is a module, or, with `kind` `dynamic_code`, JIT-compiled code that no module holds.
 
@@ -386,13 +386,13 @@ With a `"break"` load filter, the load of a matching kernel module stops the tar
 dbg.exceptions.set_module_event("ld", "mydriver", "break")
 stop = dbg.run()
 if stop is not None and stop.kind == "module_load" and stop.module is not None:
-    print(stop.module.name, hex(stop.module.base_address))
+    print(stop.module.name, hex(stop.module.base))
     dbg.breakpoints.add("mydriver!MyDispatchCreate")
 ```
 
 ### Breakpoint handles and conditions
 
-`dbg.breakpoints` is a live collection that you can iterate over, keyed by breakpoint ID. A breakpoint handle owns its state: to change it, set `bp.enabled`, `bp.condition`, or `bp.pass_count`, and to remove the breakpoint, call `bp.delete()`.
+`dbg.breakpoints` is a live collection that you can iterate over, keyed by breakpoint ID. `dbg.breakpoints.watch(...)` returns a `Breakpoint` too, whose `watch_access` and `watch_length` say what it watches. A one-shot breakpoint leaves the collection once it fires: its handle's `valid` is `False` and `delete()` does nothing. A breakpoint handle owns its state: to change it, set `bp.enabled`, `bp.condition`, or `bp.pass_count`, and to remove the breakpoint, call `bp.delete()`.
 
 `add()` accepts a debugger-expression condition with `condition=` or a Python predicate with `when=`:
 
@@ -439,7 +439,9 @@ The SDK raises `ValueError` before it touches the target when an argument is not
 
 Decoded results, for example `dbg.inspect.pci()`, `thread.inspect()`, a `FieldInfo`, a `Symbol`, or a `MemoryRegionInfo`, are records with one typed property for each field, so an editor can complete the property names and a type checker finds a misspelled name. [Results](../reference/sdk/index.md#results) lists each property.
 
-A result always has every field of its class. If a field does not apply, its value is `None`, or empty or false where the documentation of the field says so. You can also read a record as a mapping, with `keys()` and `record["field"]`. `to_dict()` returns the same fields as plain nested `dict`s, and you can call it on a record, a process, a thread, a module, a CPU, a driver, or a breakpoint.
+A result always has every field of its class. If a field does not apply, its value is `None`, or empty or false where the documentation of the field says so. You can also read a record as a mapping, with `keys()` and `record["field"]`. `to_dict()` returns the same fields as plain nested `dict`s.
+
+A handle (a process, a thread, a module, a CPU, a driver, a breakpoint, and the others) has its record's fields as properties too, and the record itself as `info`; `to_dict()` is `info`'s. Two handles are equal when they name the same object, and a collection takes the handle's record as a key: `dbg.threads[stop.thread]`. Iterating over a collection walks a fresh list.
 
 `ntoseye.build` is the commit stamp in the compiled extension: `<commit>`, `<commit>-dirty`, or `unknown`. After you rebuild, compare this value if a long-lived Python interpreter might still have an older native module loaded.
 

@@ -94,9 +94,17 @@ A generated method runs through `python::command::run`. That function takes the 
 - `refuse()` and `prepare()` are optional. They refuse an operation that the object cannot run, and set up the session after admission (for example, a `Heap` loads its process's symbols).
 - A `#[arg(receiver)]` argument comes from the object through `Bind<T>`. For example, a `Thread` binds the `ThreadInfo` that `!thread` takes.
 
-A Python argument type implements `PyArg`, whose `Py` type is what the stub shows. Addresses also accept a debugger expression, which is evaluated on the session thread. Run commands get a `timeout` and the `when=` handling of `python::runcontrol`.
+A Python argument type implements `PyArg`, whose `Py` type is what the stub shows. A fieldless `#[record]` enum is one already, taking its variants' texts (`Literal[...]` in the stub), and a handle's record is one taking the handle (`ProcessInfo` takes a `Process`). Addresses also accept a debugger expression, which is evaluated on the session thread. Run commands get a `timeout` and the `when=` handling of `python::runcontrol`.
 
-Some SDK methods are written by hand. These are live handles and their collections (`dbg.processes`, `Thread`), properties and setters (`Symbols.path`), mapping objects (`Cpu.msr`), cursor reads (`Debugger.debug_log`), and operations that no command performs. They return model records through `Typed` as well.
+### Handles and collections
+
+A live handle (`Process`, `Thread`, `Module`, `Breakpoint`) is a struct with `#[handle(record = R, key = field, ...)]` (`macros/src/handle.rs`). It holds its `Owner` and its record `R` (or, with `fetch = f`, reads the record now, as a `Cpu` or a `Breakpoint` does). The macro makes the frozen class, a typed property for each of `R`'s properties (with its doc comment), `info` (the record), `to_dict()`, `==` and `hash` by the key (or by `identity = f`), and the `CommandHost` (its `context`, `refuse` and `prepare` given as expressions), `Bind<R>` and `PyArg` for `R`. A `#[handle] impl` block adds hand-written methods; a property it defines replaces the record's.
+
+A collection (`dbg.processes`) is an impl block with `#[collection]` (`macros/src/collection.rs`). It writes `fn enumerate`, which lists the items, and `fn lookup` for a key; the macro makes `__len__`, a typed `__iter__`, `__getitem__`, `get` and `__contains__`, and `find`/`at` from matcher functions marked `#[collection(find)]` or `#[collection(at)]`. `#[collection(records)]` also takes an item's record as a key (`dbg.threads[stop.thread]`), and `#[collection(sequence)]` indexes by position.
+
+Every SDK class reaches the module without a list: `build.rs` finds each `#[record]`, `#[handle]` and `#[pyclass]` and writes their `#[pymodule_export]`s.
+
+Some SDK methods are written by hand. These are properties and setters (`Symbols.path`), mapping objects (`Cpu.msr`), cursor reads (`Debugger.debug_log`), and operations that no command performs. They return model records through `Typed` as well.
 
 ## Adding a command
 
@@ -109,6 +117,6 @@ Some SDK methods are written by hand. These are live handles and their collectio
 ## Adding an SDK method
 
 1. If a REPL command performs the operation, generate the method: use `python = Object` on the command, or add a form (`form_of`) when the command is several operations or the method needs arguments that the line has no word for. Use `python_name` to choose the Python name.
-2. On a class that has no commands yet, implement `CommandHost`, and `Bind<T>` for each argument that the object supplies.
+2. On a class that has no commands yet, implement `CommandHost`, and `Bind<T>` for each argument that the object supplies. A `#[handle]` has both. A generated method's Python name must not be one of the class's record properties, which the handle macro cannot see.
 3. Write a method by hand only for the cases listed above. Return records, and route halt and kernel checks through `python::command::admit`.
 4. Regenerate the stub and check it, as `python/README.md` describes: `maturin develop --generate-stubs`, then `mypy --strict -p ntoseye` and the target-free tests in `python/tests`. A script-visible change is an SDK change, and belongs in the changelog.

@@ -3,7 +3,7 @@ The native module of the ntoseye SDK. Import from `ntoseye`, which
 re-exports all of it.
 """
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from ntoseye import Diagnostic
 from typing import Any, Final, Literal, final
 
@@ -1060,7 +1060,7 @@ class BaseRecord:
     def __dir__(self, /) -> list[str]: ...
     def __eq__(self, other: object, /) -> bool: ...
     def __getitem__(self, key: str, /) -> Any: ...
-    def __iter__(self, /) -> NameIterator: ...
+    def __iter__(self, /) -> Iterator[str]: ...
     def __len__(self, /) -> int: ...
     def __repr__(self, /) -> str: ...
     def get(self, /, key: str, default: Any |None = None) -> Any:
@@ -1291,12 +1291,15 @@ class BootStatus(BaseRecord):
     @property
     def version(self, /) -> int: ...
 
+@final
 class Breakpoint:
     """
     A breakpoint handle. Because a breakpoint stays when ntoseye builds the
     target again, and a symbolic breakpoint resolves again after a reboot, the
     handle has no generation stamp and becomes invalid only when the breakpoint
-    is deleted.
+    is deleted, or, for a one-shot breakpoint, once it fired. Its properties
+    are the breakpoint's state now, as `bl` lists it; a data watchpoint's
+    `watch_access` and `watch_length` say what it watches.
     """
     def __eq__(self, other: object, /) -> bool: ...
     def __hash__(self, /) -> int: ...
@@ -1304,17 +1307,18 @@ class Breakpoint:
     @property
     def action(self, /) -> str |None:
         """
-        The optional command action (`do` in WinDbg).
+        The commands that run when the breakpoint breaks.
         """
     @property
-    def address(self, /) -> int:
+    def address(self, /) -> int |None:
         """
-        The address from the most recent resolution.
+        The resolved address; None while a symbolic or source breakpoint is
+        deferred.
         """
     @property
     def condition(self, /) -> str |None:
         """
-        The optional expression condition.
+        The condition expression that a hit must satisfy.
         """
     @condition.setter
     def condition(self, /, condition: str |None) -> None:
@@ -1322,58 +1326,58 @@ class Breakpoint:
         Assigning an expression raises `ValueError` while a `when=` callback is
         attached, and `add()` also raises it if you give both.
         """
+    @property
+    def deferred(self, /) -> bool:
+        """
+        Whether a symbolic or source specification waits for resolution.
+        """
     def delete(self, /) -> None:
         """
-        Remove this breakpoint. A breakpoint that is already gone, such as a
-        one-shot breakpoint after its hit, is left as it is.
+        Remove this breakpoint. A breakpoint that is already gone, deleted or
+        a one-shot breakpoint whose hit stopped the target, is left as it is,
+        so deleting after the hit works.
         """
     @property
-    def enabled(self, /) -> bool:
-        """
-        True if this breakpoint is enabled.
-        """
+    def enabled(self, /) -> bool: ...
     @enabled.setter
     def enabled(self, /, enabled: bool) -> None: ...
     @property
-    def hit_count(self, /) -> int:
-        """
-        The number of physical hits.
-        """
+    def hit_count(self, /) -> int: ...
     @property
     def hypercall(self, /) -> HypercallFilter |None:
         """
-        What a hypercall breakpoint stops on: its call code and the caller's
-        partition and VP, if restricted. `None` for any other breakpoint.
+        The hypercall a hit must be handling, and from which caller, for a
+        hypercall breakpoint (`!hvbp`). None for any other breakpoint.
         """
     @property
     def id(self, /) -> int:
         """
-        The breakpoint ID, which does not change.
+        The breakpoint's ID, which `bl` and `dbg.breakpoints` use; readable
+        after the breakpoint is gone.
         """
     @property
     def info(self, /) -> BreakpointInfo:
         """
-        The breakpoint's state now, as `bl` lists it.
+        The `BreakpointInfo` record of this handle: its properties as one value.
         """
     @property
     def one_shot(self, /) -> bool:
         """
-        True if ntoseye removes the breakpoint after the first hit that stops
-        the target.
+        Whether ntoseye removes the breakpoint after its first break.
         """
     @one_shot.setter
     def one_shot(self, /, one_shot: bool) -> None: ...
     @property
     def partition(self, /) -> PartitionFilter |None:
         """
-        The guest partition of the Windows hypervisor a breakpoint set in its
-        view (`Debugger.select_partition`) stops in, and the VP when
-        `processor=` named one. `None` for the target's own breakpoints.
+        The guest partition of the Windows hypervisor whose VPs a hit must be
+        on, for a breakpoint set in its view (`.partition`). None for the
+        target's own breakpoints.
         """
     @property
     def pass_count(self, /) -> int:
         """
-        The requested number of hits before the breakpoint stops the target.
+        The requested hit number. Both 0 and 1 break on the first hit.
         """
     @pass_count.setter
     def pass_count(self, /, pass_count: int) -> None: ...
@@ -1385,33 +1389,41 @@ class Breakpoint:
     @property
     def processor(self, /) -> int |None:
         """
-        The processor filter, if any.
+        The only processor that can report a hit (`/c`). None if there is no
+        processor restriction.
         """
     @property
     def remaining_pass_count(self, /) -> int:
         """
-        The number of hits that remain before this breakpoint stops the target.
+        The number of hits that remain before the breakpoint breaks.
         """
     @property
     def resolved(self, /) -> bool:
         """
-        True if the site is set at an address. A symbolic breakpoint whose
-        module is not loaded yet stays unresolved until the module loads.
+        Whether the breakpoint resolved to an address. Use it to tell a
+        deferred breakpoint from a disabled one.
+        """
+    @property
+    def scope(self, /) -> str:
+        """
+        `global`, or the process that the breakpoint is limited to
+        (`name (pid)`).
         """
     @property
     def specification(self, /) -> str |None:
         """
-        The symbol or source identity that you used to make this breakpoint.
+        The symbolic or source specification (`bu`/`bm`), which ntoseye
+        keeps when it resolves the breakpoint again.
         """
     @property
     def symbol(self, /) -> str |None:
         """
-        The resolved display symbol, if known.
+        The display name of the current resolution.
         """
     @property
     def temporary(self, /) -> bool:
         """
-        True if this is a temporary run-to breakpoint.
+        Whether this is a temporary run-to breakpoint.
         """
     @property
     def thread(self, /) -> Thread |None:
@@ -1420,18 +1432,37 @@ class Breakpoint:
         """
     def to_dict(self, /) -> dict[str, Any]:
         """
-        Get the breakpoint state (`info`) as a plain `dict`.
+        The record (`info`) as a plain `dict`.
+        """
+    @property
+    def unchecked(self, /) -> bool:
+        """
+        Set with `bp /a` or `bu /a`: without confirming that an instruction
+        starts at the address.
         """
     @property
     def valid(self, /) -> bool:
         """
-        True if the breakpoint still exists in this session.
+        True while the breakpoint exists in this session: False once it is
+        deleted, and for a one-shot breakpoint once its hit stopped the
+        target. The other properties raise `NtoseyeError` once it is False.
         """
     @property
     def vm_exit(self, /) -> ExitFilter |None:
         """
-        What a VM-exit breakpoint stops on: its exit reason and the caller's
-        partition and VP, if restricted. `None` for any other breakpoint.
+        The VM exit a hit must be handling, and from which caller, for a
+        VM-exit breakpoint (`!hvexit`). None for any other breakpoint.
+        """
+    @property
+    def watch_access(self, /) -> str |None:
+        """
+        `write` or `read_write` for a data watchpoint. None for a code
+        breakpoint.
+        """
+    @property
+    def watch_length(self, /) -> int |None:
+        """
+        The watched width in bytes. None for a code breakpoint.
         """
 
 @final
@@ -1608,32 +1639,18 @@ class BreakpointInfo(BaseRecord):
         """
 
 @final
-class BreakpointIterator:
-    """
-    Iterator over `dbg.breakpoints`.
-    """
-    def __iter__(self, /) -> BreakpointIterator: ...
-    def __next__(self, /) -> Breakpoint: ...
-
-@final
 class Breakpoints:
     """
     The code breakpoints and data watchpoints, with their IDs as keys
     (`dbg.breakpoints`).
     """
-    def __contains__(self, id: int, /) -> bool: ...
-    def __getitem__(self, id: int, /) -> Breakpoint:
+    def __contains__(self, key: Any, /) -> bool: ...
+    def __getitem__(self, key: int, /) -> Breakpoint:
         """
-        Get a breakpoint by ID, or raise `KeyError` if the ID does not exist.
+        The breakpoint with an ID.
         """
-    def __iter__(self, /) -> BreakpointIterator:
-        """
-        Iterate over a new snapshot of the breakpoint handles.
-        """
-    def __len__(self, /) -> int:
-        """
-        The number of live breakpoints.
-        """
+    def __iter__(self, /) -> Iterator[Breakpoint]: ...
+    def __len__(self, /) -> int: ...
     def add(self, /, target: int |str, condition: str |None = None, *, hardware: bool = False, when: Callable[[Stop], object] |None = None, pass_count: int = 0, one_shot: bool = False, process: Process |int |None = None, thread: Thread |int |None = None, processor: Cpu |int |None = None, action: str |None = None) -> Breakpoint:
         """
         Add a code breakpoint at an address or a symbolic spec.
@@ -1700,9 +1717,9 @@ class Breakpoints:
         these lines have none because the ntoseye bp command does not take one, so
         the new breakpoints get new IDs. A disabled breakpoint comes back enabled.
         """
-    def get(self, /, id: int) -> Breakpoint |None:
+    def get(self, /, key: int) -> Breakpoint |None:
         """
-        Get a breakpoint by ID, or `None` if the ID does not exist.
+        The breakpoint with an ID.
         """
     def list(self, /) -> list[BreakpointInfo]:
         """
@@ -1712,7 +1729,7 @@ class Breakpoints:
         owed. An owed breakpoint is a kernel code breakpoint that waits for its
         page to become resident.
         """
-    def watch(self, /, target: int |str, *, access: Literal["write", "read_write"] = ..., length: int = 1, condition: str |None = None, when: Callable[[Stop], object] |None = None, pass_count: int = 0, one_shot: bool = False, process: Process |int |None = None, thread: Thread |int |None = None, processor: Cpu |int |None = None, action: str |None = None) -> Watchpoint:
+    def watch(self, /, target: int |str, *, access: Literal["write", "read_write"] = ..., length: int = 1, condition: str |None = None, when: Callable[[Stop], object] |None = None, pass_count: int = 0, one_shot: bool = False, process: Process |int |None = None, thread: Thread |int |None = None, processor: Cpu |int |None = None, action: str |None = None) -> Breakpoint:
         """
         Add a hardware data watchpoint.
         """
@@ -1992,6 +2009,19 @@ class CapturedRange(BaseRecord):
     def start(self, /) -> int: ...
     @property
     def usage(self, /) -> Literal["Free", "Image", "Stack", "TEB", "PEB", "Heap", "<unknown>"]: ...
+
+@final
+class CapturedStack(BaseRecord):
+    """
+    The part of a thread's stack that a dump captured.
+    """
+    @property
+    def size(self, /) -> int:
+        """
+        Its size in bytes.
+        """
+    @property
+    def start(self, /) -> int: ...
 
 @final
 class CellLocation(BaseRecord):
@@ -2392,6 +2422,28 @@ class Cpu:
         `thread.backtrace()` walks a Windows thread instead, from where NT left
         off when its processor is in the hypervisor.
         """
+    @property
+    def context(self, /) -> str:
+        """
+        What the vCPU runs: `kernel`, a process name, `hypervisor`, `VTL1`,
+        a guest partition's VP (`partition 0x3 VP 1`), or `unknown`; `no
+        context` for a dump CPU whose context the dump lacks. Empty if
+        ntoseye cannot read the register context.
+        """
+    def cpuinfo(self, /) -> CpuInfo:
+        """
+        Show processor identification, speed, and feature bits.
+        
+        Shows the processor number, vendor, family, model, stepping, speed, and
+        feature bits if they are available. For a field that is not available,
+        ntoseye uses the triage-dump metadata.
+        """
+    @property
+    def error(self, /) -> str |None:
+        """
+        The reason that the register context is not available. None if it is
+        available.
+        """
     def gdt(self, /) -> Gdt:
         """
         Decode the bounded GDT of the current processor.
@@ -2420,13 +2472,10 @@ class Cpu:
         type, DPL, presence, non-nt hooks, and KiIsrThunk chain hints of each
         entry.
         """
-    def info(self, /) -> CpuInfo:
+    @property
+    def info(self, /) -> VcpuInfo:
         """
-        Show processor identification, speed, and feature bits.
-        
-        Shows the processor number, vendor, family, model, stepping, speed, and
-        feature bits if they are available. For a field that is not available,
-        ntoseye uses the triage-dump metadata.
+        The `VcpuInfo` record of this handle: its properties as one value.
         """
     def irql(self, /) -> Irql:
         """
@@ -2486,32 +2535,25 @@ class Cpu:
     @property
     def rip(self, /) -> int |None:
         """
-        The instruction pointer, which needs a halted target.
+        None if ntoseye cannot read the register context.
         """
     @property
     def saved_vtl(self, /) -> list[SavedVtl]:
         """
-        The VTL states that the hypervisor saved for this virtual processor
-        (`.vtlcxr`), for a vCPU halted in the Windows hypervisor (VBS). VTL0
-        comes first, and each state has the point where the VTL stopped, its
-        control and segment registers, and the last exit that it took. This
-        needs `hv-evmcs` on the VM, and the list is empty without it or if the
-        saved state does not pass validation.
+        For a vCPU halted in the Windows hypervisor, the VTL states that the
+        hypervisor saved for the vCPU's virtual processor, VTL0 first.
         """
     @property
     def serving(self, /) -> ServedVp |None:
         """
-        The guest partition's virtual processor that this processor serves,
-        for a vCPU halted in the Windows hypervisor: the VP whose exit it
-        handles or that it is about to enter, with its partition ID, VP index,
-        VTL, where it left off, its last exit, and the hypercall it made.
-        None when the processor runs one of the root partition's VPs, or the
-        hypervisor's partitions cannot be walked (no `hv-evmcs`).
+        For a vCPU halted in the Windows hypervisor, the guest partition's
+        virtual processor whose exit it handles or that it is about to
+        enter, when it is not one of the root partition's.
         """
     @property
     def symbol(self, /) -> str |None:
         """
-        The symbol at `rip`, if it resolves to one.
+        The nearest symbol to `rip`, if one resolves.
         """
     @property
     def thread(self, /) -> Thread |None:
@@ -2520,7 +2562,7 @@ class Cpu:
         """
     def to_dict(self, /) -> dict[str, Any]:
         """
-        The processor as a plain `dict`.
+        The record (`info`) as a plain `dict`.
         """
 
 @final
@@ -2587,14 +2629,6 @@ class CpuInfo(BaseRecord):
         """
 
 @final
-class CpuIterator:
-    """
-    Iterator over `dbg.cpus`.
-    """
-    def __iter__(self, /) -> CpuIterator: ...
-    def __next__(self, /) -> Cpu: ...
-
-@final
 class CpuTriageFallback(BaseRecord):
     """
     The triage PRCB metadata of the dump, which ntoseye uses when it
@@ -2618,17 +2652,13 @@ class Cpus:
     The processors of the target, by number (`dbg.cpus[0]`,
     `dbg.cpus[stop.cpu]`). The target must be halted to list them.
     """
-    def __getitem__(self, index: int, /) -> Cpu:
-        """
-        The processor numbered `index` (negative from the end); raise
-        `IndexError` when there is none.
-        """
-    def __iter__(self, /) -> CpuIterator: ...
+    def __getitem__(self, index: int, /) -> Cpu: ...
+    def __iter__(self, /) -> Iterator[Cpu]: ...
     def __len__(self, /) -> int: ...
     def __repr__(self, /) -> str: ...
     def get(self, /, index: int) -> Cpu |None:
         """
-        The processor numbered `index` (`stop.cpu`, negative from the end);
+        The item at position `index` (negative from the end), or
         `None` if there is none.
         """
 
@@ -3328,7 +3358,7 @@ class DevNodeSummary(BaseRecord):
 @final
 class Device:
     """
-    One `_DEVICE_OBJECT`.
+    One `_DEVICE_OBJECT`, on its driver's device chain.
     """
     def __eq__(self, other: object, /) -> bool: ...
     def __hash__(self, /) -> int: ...
@@ -3338,11 +3368,35 @@ class Device:
         """
         The `_DEVICE_OBJECT` address.
         """
+    @property
+    def attached(self, /) -> int:
+        """
+        `AttachedDevice`, the device layered above this device. 0 if there is none.
+        """
+    @property
+    def characteristics(self, /) -> int: ...
+    @property
+    def device_type(self, /) -> int: ...
+    @property
+    def flags(self, /) -> int: ...
+    @property
+    def info(self, /) -> DriverDeviceLink:
+        """
+        The `DriverDeviceLink` record of this handle: its properties as one value.
+        """
     def inspect(self, /) -> DeviceObjectDetail:
         """
         Show a DEVICE_OBJECT and its attached stack.
         """
-    def to_dict(self, /) -> dict[str, Any]: ...
+    @property
+    def next(self, /) -> int:
+        """
+        `NextDevice`, the next device of the driver. 0 at the end of the chain.
+        """
+    def to_dict(self, /) -> dict[str, Any]:
+        """
+        The record (`info`) as a plain `dict`.
+        """
 
 @final
 class DeviceDriver(BaseRecord):
@@ -3814,9 +3868,21 @@ class Driver:
     def __hash__(self, /) -> int: ...
     def __repr__(self, /) -> str: ...
     @property
+    def device_object(self, /) -> int:
+        """
+        The first device on the chain of the driver. 0 if there is none.
+        """
+    @property
     def devices(self, /) -> list[Device]:
         """
         The device objects that this driver created.
+        """
+    @property
+    def driver_unload(self, /) -> int: ...
+    @property
+    def info(self, /) -> DriverObjectInfo:
+        """
+        The `DriverObjectInfo` record of this handle: its properties as one value.
         """
     def inspect(self, /) -> DriverObjectDetail:
         """
@@ -3835,7 +3901,7 @@ class Driver:
     @property
     def size(self, /) -> int:
         """
-        The size of the driver image.
+        The size of the driver image in bytes.
         """
     @property
     def start(self, /) -> int:
@@ -3844,7 +3910,7 @@ class Driver:
         """
     def to_dict(self, /) -> dict[str, Any]:
         """
-        The driver object as a plain `dict`.
+        The record (`info`) as a plain `dict`.
         """
 
 @final
@@ -3853,14 +3919,17 @@ class DriverDeviceLink(BaseRecord):
     A device on the `DeviceObject`/`NextDevice` chain of a driver.
     """
     @property
+    def address(self, /) -> int:
+        """
+        The `_DEVICE_OBJECT` address.
+        """
+    @property
     def attached(self, /) -> int:
         """
         `AttachedDevice`, the device layered above this device. 0 if there is none.
         """
     @property
     def characteristics(self, /) -> int: ...
-    @property
-    def device(self, /) -> int: ...
     @property
     def device_type(self, /) -> int: ...
     @property
@@ -3870,14 +3939,6 @@ class DriverDeviceLink(BaseRecord):
         """
         `NextDevice`, the next device of the driver. 0 at the end of the chain.
         """
-
-@final
-class DriverIterator:
-    """
-    Iterator over `dbg.drivers`.
-    """
-    def __iter__(self, /) -> DriverIterator: ...
-    def __next__(self, /) -> Driver: ...
 
 @final
 class DriverObjectDetail(BaseRecord):
@@ -3931,18 +3992,27 @@ class DriverObjectInfo(BaseRecord):
         The first device on the chain of the driver. 0 if there is none.
         """
     @property
-    def driver_size(self, /) -> int:
+    def driver_unload(self, /) -> int: ...
+    @property
+    def name(self, /) -> str:
+        """
+        The name of the driver object.
+        """
+    @property
+    def object(self, /) -> int:
+        """
+        The `_DRIVER_OBJECT` address.
+        """
+    @property
+    def size(self, /) -> int:
         """
         The size of the driver image in bytes.
         """
     @property
-    def driver_start(self, /) -> int: ...
-    @property
-    def driver_unload(self, /) -> int: ...
-    @property
-    def name(self, /) -> str: ...
-    @property
-    def object(self, /) -> int: ...
+    def start(self, /) -> int:
+        """
+        The base address of the driver image.
+        """
 
 @final
 class DriverQueueState(BaseRecord):
@@ -3977,17 +4047,22 @@ class Drivers:
     The driver objects in the `Driver` directory of the object manager, keyed
     by name (`dbg.drivers`).
     """
-    def __contains__(self, name: str, /) -> bool: ...
-    def __getitem__(self, name: str, /) -> Driver: ...
-    def __iter__(self, /) -> DriverIterator: ...
+    def __contains__(self, key: Any, /) -> bool: ...
+    def __getitem__(self, key: str |DriverObjectInfo, /) -> Driver:
+        """
+        The driver object with a name, with or without its directory prefix,
+        or the one a `DriverObjectInfo` record describes.
+        """
+    def __iter__(self, /) -> Iterator[Driver]: ...
     def __len__(self, /) -> int: ...
-    def at(self, /, addr: int) -> Driver |None:
+    def at(self, /, address: int) -> Driver |None:
         """
-        Find the driver object or image that contains `addr`.
+        The driver object at `address`, or the one whose image contains it.
         """
-    def get(self, /, name: str) -> Driver |None:
+    def get(self, /, key: str |DriverObjectInfo) -> Driver |None:
         """
-        Find a driver object by name, with or without its directory prefix.
+        The driver object with a name, with or without its directory prefix,
+        or the one a `DriverObjectInfo` record describes.
         """
 
 @final
@@ -4830,14 +4905,6 @@ class ExceptionPolicy(BaseRecord):
         """
 
 @final
-class ExceptionPolicyIterator:
-    """
-    Iterator over `dbg.exceptions`.
-    """
-    def __iter__(self, /) -> ExceptionPolicyIterator: ...
-    def __next__(self, /) -> ExceptionPolicy: ...
-
-@final
 class ExceptionRecord(BaseRecord):
     """
     A decoded `EXCEPTION_RECORD64` (`.exr`).
@@ -4904,14 +4971,8 @@ class Exceptions:
     """
     The stop policy for each exception (`dbg.exceptions`, `sx*`).
     """
-    def __iter__(self, /) -> ExceptionPolicyIterator:
-        """
-        Iterate over the configured exception-policy records.
-        """
-    def __len__(self, /) -> int:
-        """
-        The number of configured policies.
-        """
+    def __iter__(self, /) -> Iterator[ExceptionPolicy]: ...
+    def __len__(self, /) -> int: ...
     def __repr__(self, /) -> str: ...
     @property
     def module_events(self, /) -> list[ModuleEventPolicy]:
@@ -6099,12 +6160,31 @@ class Heap:
         """
         The index of the heap in the PEB list.
         """
+    @property
+    def info(self, /) -> HeapInfo:
+        """
+        The `HeapInfo` record of this handle: its properties as one value.
+        """
     def inspect(self, /, list_entries: bool = False) -> HeapDetail:
         """
         Decode this heap (`!heap -h`), with its entries if `list_entries` is
         true.
         """
-    def to_dict(self, /) -> dict[str, Any]: ...
+    @property
+    def kind(self, /) -> str:
+        """
+        `nt`, `segment`, or `unknown (<signature>)`.
+        """
+    @property
+    def stats(self, /) -> Diagnostic[HeapStats]:
+        """
+        Heap-wide sizes and allocator counts.  An unavailable value contains
+        the layout, memory, or symbol error for this heap only.
+        """
+    def to_dict(self, /) -> dict[str, Any]:
+        """
+        The record (`info`) as a plain `dict`.
+        """
 
 @final
 class HeapBlock(BaseRecord):
@@ -6266,12 +6346,65 @@ class HeapIdentity(BaseRecord):
         """
 
 @final
-class HeapIterator:
+class HeapInfo(BaseRecord):
     """
-    Iterator over `proc.heaps`.
+    One heap of a process, from its PEB heap list (`!heap -s`).
     """
-    def __iter__(self, /) -> HeapIterator: ...
-    def __next__(self, /) -> Heap: ...
+    @property
+    def address(self, /) -> int:
+        """
+        The heap address.
+        """
+    @property
+    def index(self, /) -> int:
+        """
+        The index of the heap in the PEB list.
+        """
+    @property
+    def kind(self, /) -> str:
+        """
+        `nt`, `segment`, or `unknown (<signature>)`.
+        """
+    @property
+    def stats(self, /) -> Diagnostic[HeapStats]:
+        """
+        Heap-wide sizes and allocator counts.  An unavailable value contains
+        the layout, memory, or symbol error for this heap only.
+        """
+
+@final
+class HeapStats(BaseRecord):
+    """
+    A heap's sizes, in bytes, and allocator counts (`!heap -s`).
+    """
+    @property
+    def committed(self, /) -> int: ...
+    @property
+    def flags(self, /) -> int:
+        """
+        The heap's flags.
+        """
+    @property
+    def free(self, /) -> int: ...
+    @property
+    def front_end(self, /) -> int |None:
+        """
+        The front-end allocator (the LFH), if the heap has one.
+        """
+    @property
+    def large_allocations(self, /) -> int: ...
+    @property
+    def lfh_subsegments(self, /) -> int: ...
+    @property
+    def page_allocations(self, /) -> int: ...
+    @property
+    def reserved(self, /) -> int: ...
+    @property
+    def segments(self, /) -> int: ...
+    @property
+    def virtual_blocks(self, /) -> int: ...
+    @property
+    def vs_subsegments(self, /) -> int: ...
 
 @final
 class HeapWalkStop(BaseRecord):
@@ -6288,15 +6421,18 @@ class Heaps:
     """
     The PEB heap list of a process.
     """
-    def __contains__(self, index: int, /) -> bool: ...
     def __getitem__(self, index: int, /) -> Heap: ...
-    def __iter__(self, /) -> HeapIterator: ...
+    def __iter__(self, /) -> Iterator[Heap]: ...
     def __len__(self, /) -> int: ...
     def find_block(self, /, addr: int |str) -> HeapBlockSearch:
         """
         Find the heap block that contains `addr` (`!heap -x`).
         """
-    def get(self, /, index: int) -> Heap |None: ...
+    def get(self, /, index: int) -> Heap |None:
+        """
+        The item at position `index` (negative from the end), or
+        `None` if there is none.
+        """
 
 @final
 class Hive(BaseRecord):
@@ -6392,6 +6528,44 @@ class HiveList(BaseRecord):
         """
 
 @final
+class HvPartition(BaseRecord):
+    """
+    A partition of the Windows hypervisor, as it was when listed.
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The address of the hypervisor's partition object.
+        """
+    @property
+    def id(self, /) -> int:
+        """
+        The partition ID (the root partition's is 1).
+        """
+    @property
+    def parent_id(self, /) -> int |None:
+        """
+        The parent partition's ID, or `None` for the root partition.
+        """
+    @property
+    def privilege_names(self, /) -> list[str]:
+        """
+        The TLFS names of the privileges in `privileges`
+        (`["AccessVpRunTimeReg", ..., "CreatePartitions", ...]`). Set bits
+        that the TLFS lists as reserved have no name and are left out.
+        """
+    @property
+    def privileges(self, /) -> int:
+        """
+        The partition's privileges, as the TLFS `HV_PARTITION_PRIVILEGE_MASK`.
+        """
+    @property
+    def virtual_processors(self, /) -> list[HvVirtualProcessor]:
+        """
+        The partition's virtual processors, by index.
+        """
+
+@final
 class HvProcessor(BaseRecord):
     """
     A logical processor whose current VP a VP is: the one that runs it, or
@@ -6406,6 +6580,79 @@ class HvProcessor(BaseRecord):
     def number(self, /) -> int |None:
         """
         The processor number, or None on builds before 10.0.19041.
+        """
+
+@final
+class HvVirtualProcessor(BaseRecord):
+    """
+    A virtual processor of a Windows hypervisor partition.
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The address of the hypervisor's VP object.
+        """
+    @property
+    def index(self, /) -> int:
+        """
+        The VP index in its partition.
+        """
+    @property
+    def processors(self, /) -> list[HvProcessor]:
+        """
+        The processors whose current VP this is (the one that runs it, or
+        ran it last).
+        """
+    @property
+    def vtl(self, /) -> int:
+        """
+        The VTL that the VP runs, or last ran, in.
+        """
+    @property
+    def vtls(self, /) -> list[HvVtl]:
+        """
+        Each VTL enabled on the VP, lowest first (VTL0 and VTL1 under VBS).
+        """
+
+@final
+class HvVtl(BaseRecord):
+    """
+    One VTL of a virtual processor: the hypervisor's context for it and, when
+    found, its eVMCS and the guest state saved there.
+    """
+    @property
+    def context(self, /) -> int:
+        """
+        The address of the hypervisor's context object for this VTL.
+        """
+    @property
+    def ept_pointer(self, /) -> int |None:
+        """
+        The VTL's EPT pointer, the root of its second-level address
+        translation, or `None` without the eVMCS.
+        """
+    @property
+    def exit_reason(self, /) -> int |None:
+        """
+        The basic reason (Intel SDM Appendix C) the VTL last left for the
+        hypervisor, or `None` without the eVMCS.
+        """
+    @property
+    def level(self, /) -> int:
+        """
+        The VTL (0 for NT, 1 for the secure kernel).
+        """
+    @property
+    def rip(self, /) -> int |None:
+        """
+        The guest RIP where the VTL left off, or `None` without the eVMCS.
+        """
+    @property
+    def vmcs(self, /) -> int |None:
+        """
+        The physical address of the VTL's VMCS (an eVMCS under KVM), or
+        `None` when ntoseye did not find where the context keeps it (no
+        `hv-evmcs`).
         """
 
 @final
@@ -6457,12 +6704,19 @@ class HypercallCaller:
     hypercall breakpoint's filter find it: the call as the caller made it,
     and the caller's memory, which a hypercall breakpoint's condition reads.
     """
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self, /) -> int: ...
     def __repr__(self, /) -> str: ...
     @property
     def hypercall(self, /) -> DecodedHypercall |None:
         """
         The call with its input decoded, as `!hvcall` shows it, or `None`
         when the caller's registers are not known.
+        """
+    @property
+    def info(self, /) -> HypercallCallerInfo:
+        """
+        The `HypercallCallerInfo` record of this handle: its properties as one value.
         """
     @property
     def partition_id(self, /) -> int:
@@ -6499,9 +6753,43 @@ class HypercallCaller:
         """
     def to_dict(self, /) -> dict[str, Any]:
         """
-        Return the caller as a plain `dict` (`partition_id`, `root`,
-        `vp_index`, `vtl`, `registers`, and `hypercall`, the call's dict or
-        `None`).
+        The record (`info`) as a plain `dict`.
+        """
+    @property
+    def vp_index(self, /) -> int:
+        """
+        The caller's VP index in its partition.
+        """
+    @property
+    def vtl(self, /) -> int:
+        """
+        The VTL that made the call.
+        """
+
+@final
+class HypercallCallerInfo(BaseRecord):
+    """
+    The virtual processor whose hypercall a processor halted in the Windows
+    hypervisor handles (`cpu.hypercall_caller()`), found as `!hvcall` and a
+    hypercall breakpoint's filter find it: the call as the caller made it,
+    and the caller's memory, which a hypercall breakpoint's condition reads.
+    """
+    @property
+    def hypercall(self, /) -> DecodedHypercall |None:
+        """
+        The call with its input decoded, as `!hvcall` shows it, or `None`
+        when the caller's registers are not known.
+        """
+    @property
+    def partition_id(self, /) -> int:
+        """
+        The caller's partition ID (the root partition's is 1).
+        """
+    @property
+    def root(self, /) -> bool:
+        """
+        Whether the caller is a VP of the root partition (Windows itself)
+        rather than of a guest partition.
         """
     @property
     def vp_index(self, /) -> int:
@@ -6594,6 +6882,8 @@ class HypervisorPartition:
     """
     A partition of the Windows hypervisor, as it was when listed.
     """
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self, /) -> int: ...
     def __repr__(self, /) -> str: ...
     @property
     def address(self, /) -> int:
@@ -6604,6 +6894,11 @@ class HypervisorPartition:
     def id(self, /) -> int:
         """
         The partition ID (the root partition's is 1).
+        """
+    @property
+    def info(self, /) -> HvPartition:
+        """
+        The `HvPartition` record of this handle: its properties as one value.
         """
     @property
     def parent_id(self, /) -> int |None:
@@ -6624,8 +6919,7 @@ class HypervisorPartition:
         """
     def to_dict(self, /) -> dict[str, Any]:
         """
-        Return the partition as a plain `dict` (`address`, `id`, `parent_id`,
-        `privileges`, `privilege_names`, and `virtual_processors`, a list of their dicts).
+        The record (`info`) as a plain `dict`.
         """
     @property
     def virtual_processors(self, /) -> list[VirtualProcessor]:
@@ -6639,6 +6933,8 @@ class HypervisorVtl:
     One VTL of a virtual processor: the hypervisor's context for it and, when
     found, its eVMCS and the guest state saved there.
     """
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self, /) -> int: ...
     def __repr__(self, /) -> str: ...
     @property
     def context(self, /) -> int:
@@ -6669,6 +6965,11 @@ class HypervisorVtl:
         """
         The basic reason (Intel SDM Appendix C) the VTL last left for the
         hypervisor, or `None` without the eVMCS.
+        """
+    @property
+    def info(self, /) -> HvVtl:
+        """
+        The `HvVtl` record of this handle: its properties as one value.
         """
     def io_intercepts(self, /) -> IoIntercepts:
         """
@@ -6708,8 +7009,7 @@ class HypervisorVtl:
         """
     def to_dict(self, /) -> dict[str, Any]:
         """
-        Return the VTL as a plain `dict` (`level`, `context`, `vmcs`,
-        `ept_pointer`, `rip`, `exit_reason`).
+        The record (`info`) as a plain `dict`.
         """
     def translate(self, /, gpa: int) -> EptMapping |None:
         """
@@ -6728,8 +7028,9 @@ class HypervisorVtl:
     @property
     def vmcs(self, /) -> int |None:
         """
-        The physical address of the VTL's eVMCS, or `None` when ntoseye did
-        not find where the context keeps it (no `hv-evmcs`).
+        The physical address of the VTL's VMCS (an eVMCS under KVM), or
+        `None` when ntoseye did not find where the context keeps it (no
+        `hv-evmcs`).
         """
     def vmcs_fields(self, /) -> Record:
         """
@@ -7846,7 +8147,7 @@ class Inspect:
         """
         Show the pool page that contains an address.
         """
-    def pool_find(self, /, tag: str, pool_type: Literal["nonpaged", "paged"] |None = None) -> PoolFindDetail:
+    def pool_find(self, /, tag: str, pool_type: Literal["NonPagedPool", "PagedPool"] |None = None) -> PoolFindDetail:
         """
         Find pool blocks with a matching tag.
         
@@ -7857,7 +8158,7 @@ class Inspect:
         (0) or paged (1) pool. The scan stops after 1,024 matches, and you can
         interrupt it.
         """
-    def pool_usage(self, /, tag: str |None = None, sort: Literal["tag", "nonpaged", "paged"] = ...) -> PoolUsageDetail:
+    def pool_usage(self, /, tag: str |None = None, sort: Literal["tag", "nonpaged_bytes", "paged_bytes"] = ...) -> PoolUsageDetail:
         """
         Show pool tracker usage by tag.
         
@@ -9983,14 +10284,6 @@ class MemoryRegionInfo(BaseRecord):
         """
 
 @final
-class MemoryRegionIterator:
-    """
-    Iterator over `proc.regions`.
-    """
-    def __iter__(self, /) -> MemoryRegionIterator: ...
-    def __next__(self, /) -> MemoryRegionInfo: ...
-
-@final
 class MemorySearchMatch(BaseRecord):
     """
     A memory-search hit, with its symbol and location data.
@@ -10070,6 +10363,15 @@ class Module:
         the results for each section.
         """
     @property
+    def checksum(self, /) -> int |None: ...
+    @property
+    def end(self, /) -> int:
+        """
+        The address after the last byte of the image.
+        """
+    @property
+    def entry_point(self, /) -> int |None: ...
+    @property
     def exports(self, /) -> list[ModuleExportInfo]:
         """
         The exports from the mapped PE export directory.
@@ -10134,9 +10436,19 @@ class Module:
         PDB name, GUID, and age. Last, it shows whether symbols are loaded, where
         they come from, and the local PDB file.
         """
+    @property
+    def info(self, /) -> ModuleInfo:
+        """
+        The `ModuleInfo` record of this handle: its properties as one value.
+        """
     def inspect(self, /) -> ModuleListing |LoaderModule:
         """
         The symbol status, load diagnostics, and PDB identity (`lmv`).
+        """
+    @property
+    def is_32bit(self, /) -> bool:
+        """
+        From a WOW64 process's 32-bit loader list: x86 code, 4-byte pointers.
         """
     @property
     def name(self, /) -> str:
@@ -10163,6 +10475,12 @@ class Module:
         The PE sections and their mapped permissions.
         """
     @property
+    def short_name(self, /) -> str:
+        """
+        The name without its extension, as `nt!` and `lm` name the module
+        (`nt` for the kernel).
+        """
+    @property
     def size(self, /) -> int:
         """
         The size of the mapped image.
@@ -10179,7 +10497,7 @@ class Module:
         """
     def to_dict(self, /) -> dict[str, Any]:
         """
-        The module as a plain `dict`.
+        The record (`info`) as a plain `dict`.
         """
     def verifier(self, /) -> VerifierDriver:
         """
@@ -10297,7 +10615,10 @@ class ModuleInfo(BaseRecord):
     A loaded module (kernel or process image), as its loader list records it.
     """
     @property
-    def base_address(self, /) -> int: ...
+    def base(self, /) -> int:
+        """
+        The base address of the loaded image.
+        """
     @property
     def checksum(self, /) -> int |None: ...
     @property
@@ -10308,32 +10629,46 @@ class ModuleInfo(BaseRecord):
     @property
     def entry_point(self, /) -> int |None: ...
     @property
-    def file_version(self, /) -> str |None: ...
+    def file_version(self, /) -> str |None:
+        """
+        The file version from the version resource of the image.
+        """
     @property
     def is_32bit(self, /) -> bool:
         """
         From a WOW64 process's 32-bit loader list: x86 code, 4-byte pointers.
         """
     @property
-    def name(self, /) -> str: ...
+    def name(self, /) -> str:
+        """
+        The image name.
+        """
     @property
-    def path(self, /) -> str |None: ...
+    def path(self, /) -> str |None:
+        """
+        The full image path, if the loader recorded one.
+        """
     @property
-    def product_version(self, /) -> str |None: ...
+    def product_version(self, /) -> str |None:
+        """
+        The product version from the version resource of the image.
+        """
     @property
-    def short_name(self, /) -> str: ...
+    def short_name(self, /) -> str:
+        """
+        The name without its extension, as `nt!` and `lm` name the module
+        (`nt` for the kernel).
+        """
     @property
-    def size(self, /) -> int: ...
+    def size(self, /) -> int:
+        """
+        The size of the mapped image.
+        """
     @property
-    def time_date_stamp(self, /) -> int |None: ...
-
-@final
-class ModuleIterator:
-    """
-    Iterator over `dbg.modules` / `proc.modules`.
-    """
-    def __iter__(self, /) -> ModuleIterator: ...
-    def __next__(self, /) -> Module: ...
+    def timestamp(self, /) -> int |None:
+        """
+        The PE timestamp, if the loader record contains one.
+        """
 
 @final
 class ModuleListing(BaseRecord):
@@ -10445,21 +10780,23 @@ class Modules:
     lists), or `dbg.secure_kernel.modules` (secure kernel), keyed by short
     name or by a `ModuleInfo` record (`stop.module`).
     """
-    def __contains__(self, key: str |ModuleInfo, /) -> bool: ...
+    def __contains__(self, key: Any, /) -> bool: ...
     def __getitem__(self, key: str |ModuleInfo, /) -> Module:
         """
-        Get a module by short name or `ModuleInfo` record, or raise
-        `KeyError` if no module matches.
+        The module with a short name, ignoring case (`"nt"` is ntoskrnl),
+        or the module loaded at the base of a `ModuleInfo` record
+        (`stop.module`).
         """
-    def __iter__(self, /) -> ModuleIterator: ...
+    def __iter__(self, /) -> Iterator[Module]: ...
     def __len__(self, /) -> int: ...
-    def at(self, /, addr: int) -> Module |None:
+    def at(self, /, address: int) -> Module |None:
         """
-        The module that contains `addr`, or `None` if no module contains it.
+        The module that contains `address`, or `None` if no module contains
+        it.
         """
     def get(self, /, key: str |ModuleInfo) -> Module |None:
         """
-        Find a module by its short name, ignoring case (`"nt"` is ntoskrnl),
+        The module with a short name, ignoring case (`"nt"` is ntoskrnl),
         or the module loaded at the base of a `ModuleInfo` record
         (`stop.module`).
         """
@@ -10524,15 +10861,6 @@ class Msrs:
     def __getitem__(self, key: int |str, /) -> int: ...
     def __repr__(self, /) -> str: ...
     def __setitem__(self, key: int |str, value: int, /) -> None: ...
-
-@final
-class NameIterator:
-    """
-    Iterator over names, for example the fields of a record or the registers
-    of a register file.
-    """
-    def __iter__(self, /) -> NameIterator: ...
-    def __next__(self, /) -> str: ...
 
 @final
 class NdisDriver(BaseRecord):
@@ -13625,12 +13953,12 @@ class Process:
     @property
     def dtb(self, /) -> int:
         """
-        The process page-table root.
+        The directory table base (page-table root).
         """
     @property
     def eprocess(self, /) -> int:
         """
-        The `_EPROCESS` virtual address.
+        The `_EPROCESS` address.
         """
     def eval(self, /, expr: str) -> int:
         """
@@ -13665,6 +13993,11 @@ class Process:
     def heaps(self, /) -> Heaps:
         """
         The heaps in the PEB of this process.
+        """
+    @property
+    def info(self, /) -> ProcessInfo:
+        """
+        The `ProcessInfo` record of this handle: its properties as one value.
         """
     def inspect(self, /) -> ProcessDetail:
         """
@@ -13763,8 +14096,7 @@ class Process:
         """
     def to_dict(self, /) -> dict[str, Any]:
         """
-        Get the process identity as a plain `dict` (`pid`, `name`, `dtb`,
-        `eprocess`, `wow64_peb`, `wow64`).
+        The record (`info`) as a plain `dict`.
         """
     def token(self, /) -> Token:
         """
@@ -13782,7 +14114,13 @@ class Process:
     @property
     def wow64(self, /) -> bool:
         """
-        True if this process has a WOW64 (32-bit) PEB.
+        True if it is a 32-bit process that runs under WOW64.
+        """
+    @property
+    def wow64_peb(self, /) -> int |None:
+        """
+        The 32-bit PEB of a WOW64 process (`_EPROCESS.WoW64Process`), `None`
+        for a native process.
         """
 
 @final
@@ -13851,14 +14189,20 @@ class ProcessInfo(BaseRecord):
         The directory table base (page-table root).
         """
     @property
-    def eprocess(self, /) -> int: ...
+    def eprocess(self, /) -> int:
+        """
+        The `_EPROCESS` address.
+        """
     @property
     def name(self, /) -> str:
         """
         The image name.
         """
     @property
-    def pid(self, /) -> int: ...
+    def pid(self, /) -> int:
+        """
+        The process identifier.
+        """
     @property
     def wow64(self, /) -> bool:
         """
@@ -13870,14 +14214,6 @@ class ProcessInfo(BaseRecord):
         The 32-bit PEB of a WOW64 process (`_EPROCESS.WoW64Process`), `None`
         for a native process.
         """
-
-@final
-class ProcessIterator:
-    """
-    Iterator over `dbg.processes`.
-    """
-    def __iter__(self, /) -> ProcessIterator: ...
-    def __next__(self, /) -> Process: ...
 
 @final
 class ProcessMemoryUsage(BaseRecord):
@@ -13947,31 +14283,25 @@ class Processes:
     """
     The running processes, with their PIDs as keys (`dbg.processes`). Each
     iteration reads the process list again, and `find(name)` matches image
-    names. A `ProcessInfo` record (`stop.process`) is a key too: it gives the
-    handle of the process it describes, listed or not (the idle process is
-    not).
+    names. A `ProcessInfo` record (`stop.process`) is a key too: it names the
+    listed process it describes.
     """
-    def __contains__(self, key: Any, /) -> bool:
-        """
-        Whether a process with the PID is listed; for a `ProcessInfo` record,
-        whether its process (PID and `_EPROCESS`) is.
-        """
+    def __contains__(self, key: Any, /) -> bool: ...
     def __getitem__(self, key: int |ProcessInfo, /) -> Process:
         """
-        Get a process by PID, or raise `KeyError` if no listed process has
-        it. A `ProcessInfo` record (`dbg.processes[stop.process]`) gives the
-        process it describes.
+        The process with a PID, or the process a `ProcessInfo` record
+        describes (`dbg.processes[stop.process]`).
         """
-    def __iter__(self, /) -> ProcessIterator: ...
+    def __iter__(self, /) -> Iterator[Process]: ...
     def __len__(self, /) -> int: ...
     def find(self, /, name: str) -> list[Process]:
         """
-        Find all processes whose image name is an exact match, ignoring case.
+        The processes whose image name is an exact match, ignoring case.
         """
     def get(self, /, key: int |ProcessInfo) -> Process |None:
         """
-        Find a process by PID, or `None` if no listed process has it. A
-        `ProcessInfo` record (`stop.process`) gives the process it describes.
+        The process with a PID, or the process a `ProcessInfo` record
+        describes (`dbg.processes[stop.process]`).
         """
 
 @final
@@ -14672,15 +15002,18 @@ class RegValue(BaseRecord):
 @final
 class Regions:
     """
-    The VAD regions of a process (`!vad`).
+    The VAD regions of a process (`!vad`), keyed by an address they hold.
     """
-    def __contains__(self, addr: int, /) -> bool: ...
-    def __getitem__(self, addr: int, /) -> MemoryRegionInfo: ...
-    def __iter__(self, /) -> MemoryRegionIterator: ...
-    def __len__(self, /) -> int: ...
-    def at(self, /, addr: int) -> MemoryRegionInfo |None:
+    def __contains__(self, key: Any, /) -> bool: ...
+    def __getitem__(self, key: int, /) -> MemoryRegionInfo:
         """
-        Find the VAD region that contains `addr`, or return `None`.
+        The VAD region that contains `address`.
+        """
+    def __iter__(self, /) -> Iterator[MemoryRegionInfo]: ...
+    def __len__(self, /) -> int: ...
+    def get(self, /, key: int) -> MemoryRegionInfo |None:
+        """
+        The VAD region that contains `address`.
         """
 
 @final
@@ -14701,7 +15034,7 @@ class Registers:
     def __contains__(self, name: str, /) -> bool: ...
     def __getattr__(self, name: str, /) -> int: ...
     def __getitem__(self, name: str, /) -> int: ...
-    def __iter__(self, /) -> NameIterator: ...
+    def __iter__(self, /) -> Iterator[str]: ...
     def __len__(self, /) -> int: ...
     def __repr__(self, /) -> str: ...
     def __setattr__(self, name: str, value: Any, /) -> None: ...
@@ -17337,6 +17670,8 @@ class Thread:
         unwind starts from the VTL0 state that the hypervisor saved, where NT stopped.
         """
     @property
+    def base_priority(self, /) -> int |None: ...
+    @property
     def cpu(self, /) -> Cpu |None:
         """
         The processor that runs the thread, or `None` if the thread is not running.
@@ -17350,9 +17685,19 @@ class Thread:
         selected thread (~<n>s), and the layouts of the dump's ntdll.
         """
     @property
+    def eprocess(self, /) -> int |None:
+        """
+        The owning `_EPROCESS`.
+        """
+    @property
     def ethread(self, /) -> int:
         """
         The `_ETHREAD` address, which identifies the thread.
+        """
+    @property
+    def info(self, /) -> ThreadInfo:
+        """
+        The `ThreadInfo` record of this handle: its properties as one value.
         """
     def inspect(self, /) -> ThreadDetail:
         """
@@ -17369,6 +17714,14 @@ class Thread:
         processor has no stack.
         """
     @property
+    def kernel_stack(self, /) -> int |None:
+        """
+        `_KTHREAD.KernelStack`, the saved stack pointer of a thread that is
+        not running.
+        """
+    @property
+    def kernel_stack_resident(self, /) -> bool |None: ...
+    @property
     def kthread(self, /) -> int:
         """
         The `_KTHREAD` address.
@@ -17384,9 +17737,19 @@ class Thread:
         The typed `_ETHREAD` object.
         """
     @property
+    def pending_irps(self, /) -> list[int] |None:
+        """
+        The IRPs on the thread's `IrpList`.
+        """
+    @property
     def pid(self, /) -> int |None:
         """
         The ID of the process that owns the thread.
+        """
+    @property
+    def priority(self, /) -> int |None:
+        """
+        The current scheduling priority.
         """
     @property
     def process(self, /) -> Process |None:
@@ -17394,9 +17757,25 @@ class Thread:
         The process that owns the thread.
         """
     @property
+    def process_name(self, /) -> str |None:
+        """
+        The image name of the owning process.
+        """
+    @property
+    def stack_base(self, /) -> int |None: ...
+    @property
+    def stack_limit(self, /) -> int |None: ...
+    @property
+    def start_address(self, /) -> int |None: ...
+    @property
     def state(self, /) -> int |None:
         """
         The scheduler state, as a `_KTHREAD_STATE` member (`IntEnum`).
+        """
+    @property
+    def state_name(self, /) -> str |None:
+        """
+        The name of the state (`Running`, `Waiting`, ...).
         """
     @property
     def teb(self, /) -> Struct |None:
@@ -17406,22 +17785,31 @@ class Thread:
     @property
     def tid(self, /) -> int |None:
         """
-        The thread ID, or `None` if the thread has no ID (for example, an idle
-        thread).
+        The thread ID, or `None` if the thread has no ID (for example, an
+        idle thread).
         """
     def to_dict(self, /) -> dict[str, Any]:
         """
-        The thread as a plain `dict`.
+        The record (`info`) as a plain `dict`.
         """
     def trap_frame(self, /) -> KtrapFrame:
         """
         Decode the saved `_KTRAP_FRAME` (`!trap`).
         """
     @property
+    def wait_irql(self, /) -> int |None: ...
+    @property
     def wait_reason(self, /) -> int |None:
         """
         The reason the thread waits, as a `_KWAIT_REASON` member (`IntEnum`).
         """
+    @property
+    def wait_reason_name(self, /) -> str |None:
+        """
+        The name of the wait reason (`Executive`, `UserRequest`, ...).
+        """
+    @property
+    def win32_start_address(self, /) -> int |None: ...
 
 @final
 class ThreadDetail(BaseRecord):
@@ -17464,7 +17852,10 @@ class ThreadInfo(BaseRecord):
         The owning `_EPROCESS`.
         """
     @property
-    def ethread(self, /) -> int: ...
+    def ethread(self, /) -> int:
+        """
+        The `_ETHREAD` address, which identifies the thread.
+        """
     @property
     def kernel_stack(self, /) -> int |None:
         """
@@ -17474,14 +17865,20 @@ class ThreadInfo(BaseRecord):
     @property
     def kernel_stack_resident(self, /) -> bool |None: ...
     @property
-    def kthread(self, /) -> int: ...
+    def kthread(self, /) -> int:
+        """
+        The `_KTHREAD` address.
+        """
     @property
     def pending_irps(self, /) -> list[int] |None:
         """
         The IRPs on the thread's `IrpList`.
         """
     @property
-    def pid(self, /) -> int |None: ...
+    def pid(self, /) -> int |None:
+        """
+        The ID of the process that owns the thread.
+        """
     @property
     def priority(self, /) -> int |None:
         """
@@ -17511,7 +17908,11 @@ class ThreadInfo(BaseRecord):
     @property
     def teb(self, /) -> int |None: ...
     @property
-    def tid(self, /) -> int |None: ...
+    def tid(self, /) -> int |None:
+        """
+        The thread ID, or `None` if the thread has no ID (for example, an
+        idle thread).
+        """
     @property
     def trap_frame(self, /) -> int |None: ...
     @property
@@ -17528,14 +17929,6 @@ class ThreadInfo(BaseRecord):
         """
     @property
     def win32_start_address(self, /) -> int |None: ...
-
-@final
-class ThreadIterator:
-    """
-    Iterator over `dbg.threads` / `proc.threads`.
-    """
-    def __iter__(self, /) -> ThreadIterator: ...
-    def __next__(self, /) -> Thread: ...
 
 @final
 class ThreadStack(BaseRecord):
@@ -17606,24 +17999,25 @@ class Threads:
     A collection of threads: `dbg.threads` (all threads) or `proc.threads`,
     keyed by TID or by a `ThreadInfo` record (`stop.thread`).
     """
-    def __contains__(self, key: int |ThreadInfo, /) -> bool: ...
+    def __contains__(self, key: Any, /) -> bool: ...
     def __getitem__(self, key: int |ThreadInfo, /) -> Thread:
         """
-        Get the thread with a TID, or the thread a `ThreadInfo` record
-        describes (`dbg.threads[stop.thread]`); raise `KeyError` if no thread
-        matches.
+        The thread with a TID, or the thread a `ThreadInfo` record describes
+        (`dbg.threads[stop.thread]`, which also finds an idle thread, which
+        has no TID).
         """
-    def __iter__(self, /) -> ThreadIterator: ...
+    def __iter__(self, /) -> Iterator[Thread]: ...
     def __len__(self, /) -> int: ...
     def __repr__(self, /) -> str: ...
-    def at(self, /, address: int) -> Thread:
+    def at(self, /, address: int) -> Thread |None:
         """
-        Get the thread at an ETHREAD or KTHREAD address.
+        The thread at an ETHREAD or KTHREAD address, or `None`.
         """
     def get(self, /, key: int |ThreadInfo) -> Thread |None:
         """
-        Get the thread with a TID, or the thread a `ThreadInfo` record
-        describes; `None` if no thread matches.
+        The thread with a TID, or the thread a `ThreadInfo` record describes
+        (`dbg.threads[stop.thread]`, which also finds an idle thread, which
+        has no TID).
         """
 
 @final
@@ -17961,6 +18355,11 @@ class Trustlet:
         Evaluate a debugger expression in this trustlet's address space.
         """
     @property
+    def info(self, /) -> TrustletInfo:
+        """
+        The `TrustletInfo` record of this handle: its properties as one value.
+        """
+    @property
     def memory(self, /) -> Memory:
         """
         Virtual memory, read through the page tables of the trustlet.
@@ -17988,8 +18387,7 @@ class Trustlet:
         """
     def to_dict(self, /) -> dict[str, Any]:
         """
-        Return the identity of the trustlet as a plain `dict` (`pid`, `name`,
-        `trustlet_id`, `dtb`, `address`). `!trustlets` lists the same fields.
+        The record (`info`) as a plain `dict`.
         """
     @property
     def trustlet_id(self, /) -> int:
@@ -18001,6 +18399,38 @@ class Trustlet:
         """
         PDB types, read through the memory of the trustlet (`nt!` types by
         name).
+        """
+
+@final
+class TrustletInfo(BaseRecord):
+    """
+    An isolated user-mode process (trustlet) in VTL1, such as `LsaIso.exe`,
+    as `!trustlets` lists it.
+    """
+    @property
+    def address(self, /) -> int:
+        """
+        The address of the secure kernel's process object for this trustlet.
+        """
+    @property
+    def dtb(self, /) -> int:
+        """
+        The trustlet's page-table root.
+        """
+    @property
+    def name(self, /) -> str:
+        """
+        The image name, from the NT process.
+        """
+    @property
+    def pid(self, /) -> int:
+        """
+        The NT process ID of the trustlet's VTL0 counterpart.
+        """
+    @property
+    def trustlet_id(self, /) -> int:
+        """
+        The trustlet ID from its creation attributes (1 for `LsaIso.exe`).
         """
 
 @final
@@ -18554,6 +18984,8 @@ class UserProcess:
     is the only one, so it has no EPROCESS or page-table root; `memory`,
     `modules`, and `threads` are the dump's.
     """
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self, /) -> int: ...
     def __repr__(self, /) -> str: ...
     def decode_peb(self, /, address: int |str |None = None) -> Peb:
         """
@@ -18566,6 +18998,11 @@ class UserProcess:
         thread's TEB names, and the layouts of the dump's ntdll. It decodes the
         process parameters with their PDB layouts. To list the loader modules,
         use !dlls.
+        """
+    @property
+    def info(self, /) -> UserProcessInfo:
+        """
+        The `UserProcessInfo` record of this handle: its properties as one value.
         """
     def loader_modules(self, /, containing: int |str |None = None) -> LoaderModules:
         """
@@ -18609,7 +19046,26 @@ class UserProcess:
         """
         The captured threads.
         """
-    def to_dict(self, /) -> dict[str, Any]: ...
+    def to_dict(self, /) -> dict[str, Any]:
+        """
+        The record (`info`) as a plain `dict`.
+        """
+
+@final
+class UserProcessInfo(BaseRecord):
+    """
+    The process a user-mode minidump captured (`dbg.user_dump.process`).
+    """
+    @property
+    def name(self, /) -> str |None:
+        """
+        The executable's file name, from the first module the dump lists.
+        """
+    @property
+    def pid(self, /) -> int |None:
+        """
+        The process id, when the dump records it.
+        """
 
 @final
 class UserProcessSummary(BaseRecord):
@@ -18737,21 +19193,15 @@ class UserThread:
     def __eq__(self, other: object, /) -> bool: ...
     def __hash__(self, /) -> int: ...
     def __repr__(self, /) -> str: ...
-    @property
-    def affinity(self, /) -> int |None:
-        """
-        The thread's processor affinity mask, when the dump records thread
-        info.
-        """
     def backtrace(self, /, limit: int = 64) -> list[Frame]:
         """
         Recover the thread's stack from its recorded registers.
         """
     @property
-    def create_time(self, /) -> int |None:
+    def context_error(self, /) -> str |None:
         """
-        When the thread started, as a FILETIME, when the dump records thread
-        info.
+        Why the thread's recorded context is unusable, or `None` when it is
+        usable.
         """
     def decode_teb(self, /, address: int |str |None = None) -> Teb:
         """
@@ -18767,17 +19217,6 @@ class UserThread:
         Whether this thread raised the exception the dump was written for.
         """
     @property
-    def exit_status(self, /) -> int |None:
-        """
-        The thread's exit status, when the dump records thread info.
-        """
-    @property
-    def exit_time(self, /) -> int |None:
-        """
-        When the thread exited, as a FILETIME (0 while it runs), when the
-        dump records thread info.
-        """
-    @property
     def id(self, /) -> str:
         """
         The backend's id for the thread, `<pid>.<tid>` in hex as WinDbg
@@ -18789,10 +19228,9 @@ class UserThread:
         The thread's position in the dump's thread list, which `~N` names.
         """
     @property
-    def kernel_time(self, /) -> int |None:
+    def info(self, /) -> UserThreadInfo:
         """
-        Kernel-mode time the thread had run, in 100 ns units, when the dump
-        records thread info.
+        The `UserThreadInfo` record of this handle: its properties as one value.
         """
     def last_error(self, /) -> LastError:
         """
@@ -18816,15 +19254,9 @@ class UserThread:
         one raises `NtoseyeError` when the thread's context is unusable.
         """
     @property
-    def stack(self, /) -> tuple[int, int] |None:
+    def stack(self, /) -> CapturedStack |None:
         """
-        The captured stack as `(start, size)`, or `None` when the dump holds
-        none of it.
-        """
-    @property
-    def start_address(self, /) -> int |None:
-        """
-        The thread's start address, when the dump records thread info.
+        The captured stack, `None` when the dump holds none of it.
         """
     @property
     def suspend_count(self, /) -> int: ...
@@ -18838,43 +19270,122 @@ class UserThread:
         """
         The thread id.
         """
+    @property
+    def times(self, /) -> UserThreadTimes |None:
+        """
+        What the dump's thread-info stream records of the thread, when it
+        has one.
+        """
     def to_dict(self, /) -> dict[str, Any]:
         """
-        The thread as a plain `dict`.
-        """
-    @property
-    def user_time(self, /) -> int |None:
-        """
-        User-mode time the thread had run, in 100 ns units, when the dump
-        records thread info.
+        The record (`info`) as a plain `dict`.
         """
 
 @final
-class UserThreadIterator:
+class UserThreadInfo(BaseRecord):
     """
-    Iterator over `dbg.user_dump.threads`.
+    A thread of the captured process (`MINIDUMP_THREAD`), with what the
+    thread-info and thread-name streams add, matched by thread id.
     """
-    def __iter__(self, /) -> UserThreadIterator: ...
-    def __next__(self, /) -> UserThread: ...
+    @property
+    def context_error(self, /) -> str |None:
+        """
+        Why the thread's recorded context is unusable, or `None` when it is
+        usable.
+        """
+    @property
+    def name(self, /) -> str |None:
+        """
+        The thread's description (`SetThreadDescription`), when the dump
+        records one.
+        """
+    @property
+    def priority(self, /) -> int: ...
+    @property
+    def priority_class(self, /) -> int: ...
+    @property
+    def stack(self, /) -> CapturedStack |None:
+        """
+        The captured stack, `None` when the dump holds none of it.
+        """
+    @property
+    def suspend_count(self, /) -> int: ...
+    @property
+    def teb(self, /) -> int:
+        """
+        The `_TEB` address, 0 when the dump records none.
+        """
+    @property
+    def tid(self, /) -> int:
+        """
+        The thread id.
+        """
+    @property
+    def times(self, /) -> UserThreadTimes |None:
+        """
+        What the dump's thread-info stream records of the thread, when it
+        has one.
+        """
+
+@final
+class UserThreadTimes(BaseRecord):
+    """
+    What the dump's thread-info stream (`ThreadInfoListStream`) records of
+    a thread: what the kernel knew of it.
+    """
+    @property
+    def affinity(self, /) -> int:
+        """
+        The thread's processor affinity mask.
+        """
+    @property
+    def create_time(self, /) -> int:
+        """
+        When the thread started, as a FILETIME.
+        """
+    @property
+    def exit_status(self, /) -> int:
+        """
+        The thread's exit status.
+        """
+    @property
+    def exit_time(self, /) -> int:
+        """
+        When the thread exited, as a FILETIME (0 while it runs).
+        """
+    @property
+    def kernel_time(self, /) -> int:
+        """
+        Kernel-mode time the thread had run, in 100 ns units.
+        """
+    @property
+    def start_address(self, /) -> int:
+        """
+        The thread's start address.
+        """
+    @property
+    def user_time(self, /) -> int:
+        """
+        User-mode time the thread had run, in 100 ns units.
+        """
 
 @final
 class UserThreads:
     """
     The threads of a user-mode minidump (`dbg.user_dump.threads`), by
-    thread id.
+    thread id, in the dump's order.
     """
-    def __contains__(self, tid: int, /) -> bool: ...
-    def __getitem__(self, tid: int, /) -> UserThread:
+    def __contains__(self, key: Any, /) -> bool: ...
+    def __getitem__(self, key: int |UserThreadInfo, /) -> UserThread:
         """
-        Get the thread with a TID, or raise `KeyError` if no thread has that
-        TID.
+        The thread with a TID.
         """
-    def __iter__(self, /) -> UserThreadIterator: ...
+    def __iter__(self, /) -> Iterator[UserThread]: ...
     def __len__(self, /) -> int: ...
     def __repr__(self, /) -> str: ...
-    def get(self, /, tid: int) -> UserThread |None:
+    def get(self, /, key: int |UserThreadInfo) -> UserThread |None:
         """
-        Get the thread with a TID, or `None` if no thread has that TID.
+        The thread with a TID.
         """
 
 @final
@@ -19504,6 +20015,8 @@ class VirtualProcessor:
     """
     A virtual processor of a Windows hypervisor partition.
     """
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self, /) -> int: ...
     def __repr__(self, /) -> str: ...
     @property
     def address(self, /) -> int:
@@ -19522,10 +20035,15 @@ class VirtualProcessor:
         The VP index in its partition.
         """
     @property
+    def info(self, /) -> HvVirtualProcessor:
+        """
+        The `HvVirtualProcessor` record of this handle: its properties as one value.
+        """
+    @property
     def processors(self, /) -> list[HvProcessor]:
         """
-        The processors whose current VP this is (the one that runs it, or ran
-        it last).
+        The processors whose current VP this is (the one that runs it, or
+        ran it last).
         """
     def registers(self, /, vtl: int |None = None) -> VpRegisters:
         """
@@ -19541,8 +20059,7 @@ class VirtualProcessor:
         """
     def to_dict(self, /) -> dict[str, Any]:
         """
-        Return the VP as a plain `dict` (`index`, `address`, `processors`,
-        `vtl`, and `vtls`, a dict from each VTL to its dict).
+        The record (`info`) as a plain `dict`.
         """
     @property
     def vtl(self, /) -> int:
@@ -19779,22 +20296,6 @@ class VtopDetail(BaseRecord):
         Whether the leaf is a transition PTE. If true, `physical` is a frame
         that the guest still holds, but nothing maps it here and it cannot be
         written.
-        """
-
-@final
-class Watchpoint(Breakpoint):
-    """
-    A hardware data watchpoint.
-    """
-    @property
-    def access(self, /) -> str:
-        """
-        The data access type (`"write"` or `"read_write"`).
-        """
-    @property
-    def length(self, /) -> int:
-        """
-        The width of the watched memory access, in bytes.
         """
 
 @final

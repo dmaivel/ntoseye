@@ -96,6 +96,19 @@ def test_failing_predicate_surfaces_with_its_error(halted: Debugger) -> None:
     assert "ZeroDivisionError" in stop.breakpoint.condition_error
 
 
+def test_a_fired_one_shot_is_gone(halted: Debugger) -> None:
+    bp = halted.breakpoints.add(HOT, one_shot=True)
+    assert bp.valid and bp.id in halted.breakpoints
+    stop = halted.run(timeout=5.0)
+    assert stop is not None and stop.hit(bp)
+    # It fired: the collection no longer lists it, its handle is invalid,
+    # and deleting it again does nothing.
+    assert not bp.valid
+    assert bp.id not in halted.breakpoints
+    bp.delete()
+    assert not bp.valid
+
+
 def test_steps_resume_past_false_predicates(halted: Debugger) -> None:
     require_single_step(halted)
     halted.breakpoints.add(HOT, when=lambda stop: False)
