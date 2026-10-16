@@ -3629,6 +3629,41 @@ fn a_parked_breakpoint_runs_its_action_when_it_surfaces() {
     assert_eq!(*log.lock(), ["action log"]);
 }
 
+/// A continue or a step issued while a parked stop waits (an SDK `run()`
+/// after a `run(timeout=...)` that returned `None`) surfaces that stop,
+/// with its action, instead of resuming past it.
+#[test]
+fn a_resume_surfaces_a_parked_stop_instead_of_losing_it() {
+    let continue_ = Motion::Continue {
+        disposition: ContinueDisposition::Handled,
+    };
+    for motion in [continue_, Motion::Step] {
+        let mut backend = MockBackend::default().running().with_pending_stop();
+        backend.set("rip", 0x1000);
+        backend.queue_interrupt(breakpoint_event(0x1000));
+        let continues = Arc::clone(&backend.continues);
+        let mut session = session_with_mock(backend);
+        session
+            .breakpoints
+            .insert_for_test(1, VirtAddr(0x1000), true, None);
+        session
+            .breakpoints
+            .set_action(1, Some("log".into()))
+            .unwrap();
+        let log = recording(&mut session, false);
+        session.service_idle();
+        assert!(!session.backend.is_running(), "the stop was not parked");
+
+        let RunOutcome::Stopped(stop) = session.run(motion.clone(), &Cancel::poll()).unwrap()
+        else {
+            panic!("{motion:?}: no stop surfaced");
+        };
+        assert_eq!(stop.breakpoint().map(|hit| hit.id), Some(1), "{motion:?}");
+        assert_eq!(*log.lock(), ["action log"], "{motion:?}");
+        assert_eq!(continues.load(Ordering::Relaxed), 0, "{motion:?} resumed");
+    }
+}
+
 /// An action that resumes (`gc`) passes the hit, on a direct run as from
 /// the REPL: the run goes on, and with nothing else to stop it, a bounded
 /// wait hands the target back running.

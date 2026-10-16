@@ -575,7 +575,19 @@ impl Session {
 
     /// One attempt at a planned `motion`, and whether its stop is new (not
     /// the one the target was already halted at, whose action already ran).
+    /// A motion that would resume a halted target first surfaces a stop
+    /// parked while the host was idle, one the backend holds, or a reload
+    /// owed to the host, as that motion's stop: resuming would lose it.
     fn advance(&mut self, motion: &Motion, cancel: &Cancel<'_>) -> Result<(ContinueOutcome, bool)> {
+        if !matches!(motion, Motion::Wait | Motion::Break)
+            && !self.backend.is_running()
+            && !self.halted_with_nothing_pending()
+        {
+            match self.wait_stop(cancel, true)? {
+                ContinueOutcome::Halted { .. } => {}
+                outcome => return Ok((outcome, true)),
+            }
+        }
         Ok(match motion {
             Motion::Continue { disposition } => (self.continue_stop(*disposition, cancel)?, true),
             Motion::Wait => {
