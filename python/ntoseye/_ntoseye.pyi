@@ -2960,7 +2960,7 @@ class Debugger:
         rebuild. A user-mode minidump has no kernel to find, and raises
         `NtoseyeError`.
         """
-    def run(self, /, address: int |str |None = None, timeout: float |None = None, *, disposition: Literal["handled", "not_handled"] |None = None) -> Stop |None:
+    def run(self, /, timeout: float |None = None, *, address: int |str |None = None, disposition: Literal["handled", "not_handled"] |None = None) -> Stop |None:
         """
         Resume VM execution.
         
