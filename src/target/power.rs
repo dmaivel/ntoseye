@@ -488,17 +488,21 @@ pub struct PowerPolicy {
 }
 
 /// The driver a DRIVER_POWER_STATE_FAILURE names, and why.
+#[record]
 #[derive(Debug, Clone)]
 pub struct PowerCulprit {
     pub driver: DeviceDriver,
+    /// The device object that ties the driver to the failure.
     pub device: VirtAddr,
     pub reason: String,
 }
 
 /// The IRP of a 0x9F/0x3: where it is pending, and its `_POP_IRP_DATA`.
+#[record]
 #[derive(Debug, Clone)]
 pub struct BlockedIrp {
     pub irp: VirtAddr,
+    /// The driver of the IRP's current stack location.
     pub holder: DiagnosticValue<IrpHolder>,
     /// The IRP's entry on the power IRP list, when it is there.
     pub data: Option<PowerIrp>,
@@ -506,14 +510,19 @@ pub struct BlockedIrp {
 
 /// What a DRIVER_POWER_STATE_FAILURE (0x9F) names as stuck, by subtype
 /// (parameter 1).
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct PowerFailure {
+    /// Parameter 1.
+    #[record(hex)]
     pub subtype: u64,
     pub description: &'static str,
     /// The device object the parameters name: the PDO for 0x3 and 0x5, the
     /// device for 0x1, 0x2, and 0x500.
     pub device: Option<VirtAddr>,
-    /// The stack of `device`, or why it is unknown.
+    /// The stack of `device`, or why it is unknown (see the `device_stack`
+    /// property).
+    #[record(skip)]
     pub stack: Option<std::result::Result<DeviceStackDetail, String>>,
     /// 0x3: the blocked IRP.
     pub blocked_irp: Option<BlockedIrp>,
@@ -528,6 +537,18 @@ pub struct PowerFailure {
     pub culprit: Option<PowerCulprit>,
     /// What could not be read, and why.
     pub notes: Vec<String>,
+}
+
+#[record]
+impl PowerFailure {
+    /// The stack of `device`, or why it is unknown.
+    #[record(getter)]
+    pub fn device_stack(&self) -> Option<DiagnosticValue<DeviceStackDetail>> {
+        self.stack.as_ref().map(|stack| match stack {
+            Ok(stack) => DiagnosticValue::Available(stack.clone()),
+            Err(error) => DiagnosticValue::unavailable(error.clone()),
+        })
+    }
 }
 
 /// What a 0x9F subtype means, for the subtypes Microsoft documents.

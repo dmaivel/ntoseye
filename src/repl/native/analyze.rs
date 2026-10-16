@@ -9,8 +9,8 @@ use tern_sdk::{Node, View};
 use super::{MUTED, NUMBER, STRONG, SYMBOL, addr, bugcheck, span, stack, symbol};
 use crate::repl::StackColumns;
 use crate::repl::commands::analyze::{
-    ANALYZE_HANG_STACK_LIMIT, ANALYZE_MODULE_LIMIT, ANALYZE_STACK_LIMIT, ANALYZE_UNLOADED_LIMIT,
-    ANALYZE_VERBOSE_MODULE_LIMIT, ANALYZE_VERBOSE_UNLOADED_LIMIT, HangReport, HangThread,
+    ANALYZE_MODULE_LIMIT, ANALYZE_STACK_LIMIT, ANALYZE_UNLOADED_LIMIT,
+    ANALYZE_VERBOSE_MODULE_LIMIT, ANALYZE_VERBOSE_UNLOADED_LIMIT,
     USER_DUMP_NOT_APPLICABLE, code_owner_text, codeview_path, culprit_caller_text, culprit_label,
     kmdf_log_summary, machine_name, product_name, signature_source, user_captured_text,
     user_detail_modules, user_exception_verdict, user_no_culprit_text, user_process_label,
@@ -18,6 +18,7 @@ use crate::repl::commands::analyze::{
 };
 use crate::repl::commands::power::{duration_text, request_text};
 use crate::target::power::power_minor_name;
+use crate::triage_report::hang::{ANALYZE_HANG_STACK_LIMIT, HangReport, HangThread};
 use crate::target::{ThreadInfo, wait_reason_name};
 use crate::triage_report::{
     BlackboxState, CulpritSubject, POWER_THREAD_STACK_LIMIT, PowerFailureFinding, PowerThreadRole,
@@ -420,8 +421,8 @@ fn user_triage(report: &TriageReport, user: &UserDumpTriage, verbose: bool) -> V
     }
     if verbose && !user.exception_registers.is_empty() {
         let mut kv = ui::kv();
-        for (name, value) in &user.exception_registers {
-            kv = kv.item(name.as_str(), addr(*value));
+        for register in &user.exception_registers {
+            kv = kv.item(register.name.as_str(), addr(register.value));
         }
         card = card.child(section("exception registers", true).child(kv));
     }

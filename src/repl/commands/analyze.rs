@@ -1,11 +1,10 @@
-use crate::bugchecks::BugcheckAnalysis;
-use crate::cpu_state;
+use crate::bugchecks::{BugcheckAnalysis, analyze_bugcheck};
 use crate::dbg_backend::BugcheckInfo;
 use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix};
 use crate::guest::ModuleInfo;
 use crate::pe::headers::CodeView;
-use crate::target::{Target, ThreadInfo, wait_reason_name};
+use crate::target::{Target, wait_reason_name};
 use crate::triage_report::{
     BlackboxState, CodeOwner, CulpritAttribution, CulpritSubject, FailureSignatureSource,
     KmdfLogFinding, POWER_THREAD_STACK_LIMIT, PowerFailureFinding, PowerThreadRole,
@@ -14,62 +13,25 @@ use crate::triage_report::{
     time::{filetime_to_iso, unix_time_to_iso},
 };
 use crate::ui;
-use crate::unwind::{FrameSource, StackTrace};
+use crate::unwind::FrameSource;
 
 use super::power::{
     duration_text, holder_text, print_power_irp_list, print_power_worker_list, request_text,
 };
 use crate::repl::*;
-
-repl_command! {
-    cmd_analyze;
-    names: ["!analyze", "analyze"],
-    category: "analysis",
-    usage: "!analyze [-v] [-show <bugcheck-code> [p1 p2 p3 p4]] [-hang]",
-    summary: "Show a first-pass crash triage report.",
-    details: "Without -v, the command shows the short verdict: the bugcheck line, the failure signature, the culprit, the verifier and WHEA findings, and the relevant modules. -v adds the full bugcheck arguments, the faulting context, the stack, and all modules. For a DRIVER_POWER_STATE_FAILURE (0x9F), the report names what is stuck: for subtype 0x3, the blocked IRP, the driver whose stack location it is pending in, which becomes the culprit, the device stack of the PDO, and the power IRP worker threads with their stacks; for 0x4, the thread that holds the PnP lock and its stack; for 0x1, 0x2, and 0x500, the driver of the device or driver object in the parameters. -show decodes a bugcheck code when there is no crash, and for a 0x9F reads what its parameters point to in the target. -hang triages the waits on each processor. On a user-mode minidump, the report is the exception the dump was written for: its code, flags, and decoded parameters, the faulting thread and module, the stack from the exception's context, and the first frame outside the system modules (ntdll, kernelbase, the C++ and .NET runtimes), which the signature and the culprit name; -v adds the whole stack, the exception's registers, the faulting and culprit modules' details, and all modules. -show and -hang need a kernel.",
-    completion: Expression,
-}
-
-repl_command! {
-    cmd_bugcheck();
-    names: [".bugcheck"],
-    category: "analysis",
-    usage: ".bugcheck",
-    summary: "Show the bugcheck code and its four parameters.",
-    details: "Uses the bugcheck that the stop reported. If there is none, it uses the bugcheck in nt!KiBugCheckData, as $bug_code and $bug_param1-4 do, and if there is none there, the bugcheck in the crash dump header. !analyze uses the same order.",
-    target: Kernel,
-}
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
+use crate::repl::bugcheck::show_bugcheck_analysis;
+use crate::session::Session;
+use crate::triage_report::hang::{
+    ANALYZE_HANG_STACK_LIMIT, BugcheckDecoding, HangReport, HangThread, gather_hang_report,
+};
+use ntoseye_macros::command;
 
 pub const ANALYZE_STACK_LIMIT: usize = 16;
 pub const ANALYZE_MODULE_LIMIT: usize = 16;
 pub const ANALYZE_UNLOADED_LIMIT: usize = 12;
 pub const ANALYZE_VERBOSE_MODULE_LIMIT: usize = 4096;
 pub const ANALYZE_VERBOSE_UNLOADED_LIMIT: usize = 4096;
-const ANALYZE_HANG_PROCESSOR_LIMIT: u16 = 256;
-const ANALYZE_HANG_THREAD_LIMIT: usize = 32;
-/// Frames shown per processor in `!analyze -hang`.
-pub const ANALYZE_HANG_STACK_LIMIT: usize = 8;
-const KTHREAD_STATE_WAITING: u8 = 5;
-
-/// What `!analyze -hang` found, gathered once for both renderers.
-pub struct HangReport {
-    /// One entry per processor, in order; empty when the count is unknown.
-    pub processors: Vec<HangProcessor>,
-    /// The waiting threads, most pending IRPs first, or why there are none.
-    pub waiting: std::result::Result<Vec<ThreadInfo>, String>,
-}
-
-pub struct HangProcessor {
-    pub processor: u16,
-    /// The thread running on it, or why it is unknown.
-    pub current: std::result::Result<HangThread, String>,
-}
-
-pub struct HangThread {
-    pub thread: ThreadInfo,
-    pub stack: std::result::Result<StackTrace, String>,
-}
 
 /// The text `source:` of a failure signature.
 pub fn signature_source(source: FailureSignatureSource) -> &'static str {
@@ -102,26 +64,42 @@ pub fn product_name(product_type: u32) -> &'static str {
     }
 }
 
+/// What `!analyze`'s line asks for.
 #[derive(Default)]
-struct AnalyzeOptions {
+pub struct AnalyzeOptions {
     verbose: bool,
     hang: bool,
     show: Option<BugcheckInfo>,
 }
 
+/// `!analyze`'s options: `-v`, `-hang` and `-show <code> [p1 p2 p3 p4]`, in
+/// any order; a bad one shows the help, then the error.
+fn analyze_options(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<AnalyzeOptions, ArgError> {
+    let argv: Vec<String> = cursor.words().map(str::to_string).collect();
+    while cursor.word().is_some() {}
+    parse_analyze_options(&argv, &cx.state.ctx.target, cx.state.radix).map_err(|error| {
+        outln!("{}\n", command_help(cx.name));
+        ArgError::Message(error.to_string())
+    })
+}
+
 fn parse_analyze_options(
-    invocation: &CommandInvocation<'_>,
+    argv: &[String],
     target: &Target,
     radix: NumberRadix,
 ) -> Result<AnalyzeOptions> {
+    let arg = |index: usize| argv.get(index).map(String::as_str);
     let mut options = AnalyzeOptions::default();
     let mut index = 0;
-    while index < invocation.argv.len() {
-        match invocation.arg(index).unwrap_or_default() {
+    while index < argv.len() {
+        match arg(index).unwrap_or_default() {
             "-v" | "/v" => options.verbose = true,
             "-hang" | "/hang" => options.hang = true,
             "-show" | "/show" => {
-                let code_text = invocation.arg(index + 1).ok_or_else(|| {
+                let code_text = arg(index + 1).ok_or_else(|| {
                     Error::InvalidArgument("-show requires a bugcheck code".into())
                 })?;
                 let code = Expr::eval_with_radix(code_text, target, radix)
@@ -135,7 +113,7 @@ fn parse_analyze_options(
                 let mut parameters = [0u64; 4];
                 let mut consumed = 2;
                 for (slot, parameter) in parameters.iter_mut().enumerate() {
-                    let Some(text) = invocation.arg(index + 2 + slot) else {
+                    let Some(text) = arg(index + 2 + slot) else {
                         break;
                     };
                     if text.starts_with('-') || text.starts_with('/') {
@@ -176,64 +154,6 @@ fn print_bugcheck_header(analysis: &BugcheckAnalysis) {
             ui::symbol(driver)
         ),
         None => outln!("bugcheck {:#010x} {}", analysis.code, analysis.name),
-    }
-}
-
-fn gather_hang_report(state: &mut ReplState<'_>) -> HangReport {
-    let processor_count = cpu_state::processor_count(&state.ctx.target)
-        .ok()
-        .or_else(|| {
-            state
-                .ctx
-                .backend
-                .thread_list()
-                .ok()
-                .map(|threads| threads.len() as u16)
-        })
-        .unwrap_or(0)
-        .min(ANALYZE_HANG_PROCESSOR_LIMIT);
-    let vcpus = state.ctx.processor_vcpus();
-    let mut processors = Vec::with_capacity(usize::from(processor_count));
-    for processor in 0..processor_count {
-        let current = match state
-            .ctx
-            .target
-            .current_windows_thread_for_processor(processor)
-        {
-            Ok(thread) => {
-                let vcpu = vcpus.get(&processor).map(String::as_str);
-                let stack = state
-                    .ctx
-                    .backtrace_thread(&thread, vcpu, ANALYZE_HANG_STACK_LIMIT)
-                    .map(|trace| trace.stacktrace)
-                    .map_err(|error| error.to_string());
-                Ok(HangThread { thread, stack })
-            }
-            Err(error) => Err(error.to_string()),
-        };
-        processors.push(HangProcessor { processor, current });
-    }
-
-    let waiting = state
-        .ctx
-        .target
-        .enumerate_threads()
-        .map(|mut threads| {
-            threads.retain(|thread| thread.state == Some(KTHREAD_STATE_WAITING));
-            threads.sort_by_key(|thread| {
-                (
-                    std::cmp::Reverse(thread.pending_irps.as_ref().map_or(0, Vec::len)),
-                    std::cmp::Reverse(thread.wait_reason.unwrap_or(0)),
-                    thread.ethread.0,
-                )
-            });
-            threads.truncate(ANALYZE_HANG_THREAD_LIMIT);
-            threads
-        })
-        .map_err(|error| error.to_string());
-    HangReport {
-        processors,
-        waiting,
     }
 }
 
@@ -1062,8 +982,12 @@ fn print_user_triage_report(report: &TriageReport, user: &UserDumpTriage, verbos
         for row in user.exception_registers.chunks(3) {
             let cells: Vec<String> = row
                 .iter()
-                .map(|(name, value)| {
-                    format!("{} {}", ui::muted(&format!("{name:<6}")), ui::addr(*value))
+                .map(|register| {
+                    format!(
+                        "{} {}",
+                        ui::muted(&format!("{:<6}", register.name)),
+                        ui::addr(register.value)
+                    )
                 })
                 .collect();
             outln!("  {}", cells.join("   "));
@@ -1320,14 +1244,32 @@ pub fn codeview_path(codeview: &CodeView) -> &str {
     }
 }
 
-impl ReplState<'_> {
-    fn cmd_bugcheck(&mut self) -> Result<()> {
-        let Some(analysis) = self.ctx.bugcheck() else {
+/// Show the bugcheck code and its four parameters.
+///
+/// Uses the bugcheck that the stop reported. If there is none, it uses the
+/// bugcheck in nt!KiBugCheckData, as $bug_code and $bug_param1-4 do, and if
+/// there is none there, the bugcheck in the crash dump header. !analyze uses
+/// the same order.
+#[command(
+    names = [".bugcheck"],
+    category = "analysis",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    usage = ".bugcheck"
+)]
+fn bugcheck(session: &Session) -> Result<Option<BugcheckAnalysis>> {
+    Ok(session.bugcheck())
+}
+
+impl Render for Option<BugcheckAnalysis> {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        let Some(analysis) = self else {
             outln!(
                 "{}\n",
                 ui::muted("no bugcheck: the target has not bugchecked")
             );
-            return Ok(());
+            return;
         };
         outln!("Bugcheck code {:08x} ({})", analysis.code, analysis.name);
         let arguments: Vec<String> = analysis
@@ -1340,68 +1282,162 @@ impl ReplState<'_> {
             outln!("{}", ui::muted(&format!("from {source}")));
         }
         outln!();
-        Ok(())
     }
+}
 
-    fn cmd_analyze(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let options = match parse_analyze_options(&invocation, &self.ctx.target, self.radix) {
-            Ok(options) => options,
-            Err(error) => {
-                outln!("{}\n", command_help(invocation.name));
-                error!("{error}");
-                return Ok(());
-            }
-        };
-        // -show and -hang read kernel structures; the report itself does not.
-        let kernel_option = if options.show.is_some() {
-            Some("-show")
-        } else {
-            options.hang.then_some("-hang")
-        };
-        if let Some(option) = kernel_option
-            && let Err(error) = self.ctx.target.require_kernel()
-        {
-            error!("{} {option}: {error}", invocation.name);
-            return Ok(());
-        }
-        if let Some(info) = &options.show {
-            print_bugcheck_info(&self.ctx.target, info);
-            // The structures a 0x9F's parameters point to, read from the
-            // target as for a real stop.
-            if let Some(finding) = power_failure_finding(self.ctx, info.code, &info.parameters) {
+/// Show a first-pass crash triage report.
+///
+/// Without -v, the command shows the short verdict: the bugcheck line, the
+/// failure signature, the culprit, the verifier and WHEA findings, and the
+/// relevant modules. -v adds the full bugcheck arguments, the faulting
+/// context, the stack, and all modules. For a DRIVER_POWER_STATE_FAILURE
+/// (0x9F), the report names what is stuck: for subtype 0x3, the blocked IRP,
+/// the driver whose stack location it is pending in, which becomes the
+/// culprit, the device stack of the PDO, and the power IRP worker threads with
+/// their stacks; for 0x4, the thread that holds the PnP lock and its stack;
+/// for 0x1, 0x2, and 0x500, the driver of the device or driver object in the
+/// parameters. -show decodes a bugcheck code when there is no crash, and for a
+/// 0x9F reads what its parameters point to in the target. -hang triages the
+/// waits on each processor. On a user-mode minidump, the report is the
+/// exception the dump was written for: its code, flags, and decoded
+/// parameters, the faulting thread and module, the stack from the exception's
+/// context, and the first frame outside the system modules (ntdll, kernelbase,
+/// the C++ and .NET runtimes), which the signature and the culprit name; -v
+/// adds the whole stack, the exception's registers, the faulting and culprit
+/// modules' details, and all modules. -show and -hang need a kernel.
+#[command(
+    names = ["!analyze", "analyze"],
+    category = "analysis",
+    kind = Query,
+    forms = [triage, hang, decode_bugcheck],
+    usage = "!analyze [-v] [-show <bugcheck-code> [p1 p2 p3 p4]] [-hang]",
+    completion = Expression
+)]
+fn analyze(
+    session: &mut Session,
+    #[arg(parse = analyze_options)] options: AnalyzeOptions,
+    #[arg(invoked)] name: &str,
+) -> Result<Analysis> {
+    // -show and -hang read kernel structures; the report itself does not.
+    let kernel_option = if options.show.is_some() {
+        Some("-show")
+    } else {
+        options.hang.then_some("-hang")
+    };
+    if let Some(option) = kernel_option {
+        session
+            .target
+            .require_kernel()
+            .map_err(|error| Error::DebugInfo(format!("{name} {option}: {error}")))?;
+    }
+    let show = options
+        .show
+        .map(|info| decode_bugcheck(session, info.code, info.parameters.to_vec()));
+    let body = if options.hang {
+        Some(AnalysisBody::Hang(hang(session)?))
+    } else if show.is_none() || options.verbose {
+        Some(AnalysisBody::Report(triage(session)?))
+    } else {
+        None
+    };
+    Ok(Analysis {
+        show: show.transpose()?,
+        body,
+        verbose: options.verbose,
+    })
+}
+
+/// Make the structured one-shot crash and debug report (`!analyze`).
+#[command(form_of = analyze, python = Inspect)]
+fn triage(session: &mut Session) -> Result<TriageReport> {
+    Ok(TriageReport::build(session))
+}
+
+/// Find what a hung system is doing (`!analyze -hang`): the thread on each
+/// processor with its stack, and the waiting threads with the most pending
+/// IRPs. The target must be a kernel.
+#[command(form_of = analyze, python = Inspect, word = "-hang")]
+fn hang(session: &mut Session) -> Result<HangReport> {
+    session.target.require_kernel()?;
+    Ok(gather_hang_report(session))
+}
+
+/// Decode a bugcheck code and its parameters as if the target had stopped
+/// with it (`!analyze -show`), and for a DRIVER_POWER_STATE_FAILURE (0x9F),
+/// read what its parameters point to. The target must be a kernel.
+#[command(form_of = analyze, python = Inspect, word = "-show")]
+fn decode_bugcheck(
+    session: &mut Session,
+    #[arg(name = "bugcheck-code")] code: u32,
+    #[arg(sdk, default = Vec::new())] parameters: Vec<u64>,
+) -> Result<BugcheckDecoding> {
+    session.target.require_kernel()?;
+    let mut slots = [0u64; 4];
+    for (slot, value) in slots.iter_mut().zip(&parameters) {
+        *slot = *value;
+    }
+    let info = BugcheckInfo {
+        code,
+        parameters: slots,
+        driver: None,
+    };
+    Ok(BugcheckDecoding {
+        analysis: analyze_bugcheck(&session.target, &info),
+        // The structures a 0x9F's parameters point to, read from the target
+        // as for a real stop.
+        power: power_failure_finding(session, code, &slots),
+    })
+}
+
+/// What `!analyze` read: the decoded `-show` bugcheck, then the report or
+/// the hang analysis.
+pub struct Analysis {
+    show: Option<BugcheckDecoding>,
+    body: Option<AnalysisBody>,
+    verbose: bool,
+}
+
+enum AnalysisBody {
+    Report(TriageReport),
+    Hang(HangReport),
+}
+
+impl Render for Analysis {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        if let Some(show) = &self.show {
+            show_bugcheck_analysis(&show.analysis);
+            if let Some(finding) = &show.power {
                 #[cfg(feature = "cli")]
                 native::render(
-                    || native::analyze::power_failure(&finding),
-                    || print_power_failure(&finding),
+                    || native::analyze::power_failure(finding),
+                    || print_power_failure(finding),
                 );
                 #[cfg(not(feature = "cli"))]
-                print_power_failure(&finding);
-            }
-            if !options.verbose && !options.hang {
-                outln!();
-                return Ok(());
+                print_power_failure(finding);
             }
         }
-        if options.hang {
-            let report = gather_hang_report(self);
-            #[cfg(feature = "cli")]
-            native::render(
-                || native::analyze::hang(&report),
-                || print_hang_report(&report),
-            );
-            #[cfg(not(feature = "cli"))]
-            print_hang_report(&report);
-        } else {
-            let report = TriageReport::build(self.ctx);
-            #[cfg(feature = "cli")]
-            native::render(
-                || native::analyze::triage(&report, options.verbose),
-                || print_triage_report(&report, options.verbose),
-            );
-            #[cfg(not(feature = "cli"))]
-            print_triage_report(&report, options.verbose);
+        match &self.body {
+            Some(AnalysisBody::Hang(report)) => {
+                #[cfg(feature = "cli")]
+                native::render(
+                    || native::analyze::hang(report),
+                    || print_hang_report(report),
+                );
+                #[cfg(not(feature = "cli"))]
+                print_hang_report(report);
+            }
+            Some(AnalysisBody::Report(report)) => {
+                let verbose = self.verbose;
+                #[cfg(feature = "cli")]
+                native::render(
+                    || native::analyze::triage(report, verbose),
+                    || print_triage_report(report, verbose),
+                );
+                #[cfg(not(feature = "cli"))]
+                print_triage_report(report, verbose);
+            }
+            None => {}
         }
         outln!();
-        Ok(())
     }
 }

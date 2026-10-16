@@ -3,12 +3,9 @@
 //! [`record`]).
 
 pub mod backend;
-pub mod bugcheck;
 pub mod execution;
 pub mod hypervisor;
 pub mod record;
-
-pub mod triage;
 
 /// A node in the value tree the SDK builds its results from.
 pub enum View {

@@ -3,10 +3,11 @@
 // Audited against all 379 linked code pages on 2026-07-16.
 
 use crate::dbg_backend::BugcheckInfo;
+use ntoseye_macros::record;
 use crate::error::Result;
 use crate::memory::MemoryOps;
 use crate::target::Target;
-use crate::trapframe::{KtrapFrame, ktrap_frame_at_machine_frame, read_ktrap_frame};
+use crate::trapframe::{KtrapFrame, KtrapFrameData, ktrap_frame_at_machine_frame, read_ktrap_frame};
 use crate::types::VirtAddr;
 use crate::unwind::{StackTrace, ThreadTraceContext, format_symbol, resolve_thread_trace_context};
 
@@ -24,53 +25,93 @@ pub const GENERIC_BUGCHECK_ARGS: [&str; 4] = ["", "", "", ""];
 /// Number of u64 slots in `nt!KiBugCheckData` (BugCheckCode + 4 parameters).
 pub const BUGCHECK_DATA_SLOTS: usize = 5;
 
-/// A bugcheck argument paired with its documented meaning (empty when the code
-/// has no documented arguments).
+/// One bugcheck parameter and what it means for the code.
+#[record]
 #[derive(Clone, Debug)]
 pub struct BugcheckArg {
+    #[record(hex)]
     pub value: u64,
+    /// What this parameter holds for the bugcheck code. Empty if the code
+    /// has no documented meaning for this parameter.
     pub description: String,
 }
 
-/// The faulting instruction a bugcheck points at, when its parameters carry one.
+/// The instruction a bugcheck faulted at.
+#[record]
 #[derive(Clone, Debug)]
 pub struct BugcheckFault {
+    /// The faulting instruction pointer.
+    #[record(hex)]
     pub ip: u64,
+    /// The symbol at `ip`.
     pub symbol: String,
+    /// The driver that contains `ip`. `None` if `ip` is not in a loaded
+    /// driver.
     pub driver: Option<String>,
 }
 
-/// A trap-frame address carried by a bugcheck parameter, with either the
-/// decoded `_KTRAP_FRAME` or the reason decoding failed.
+/// A trap frame that a bugcheck parameter points to, with its decoded
+/// registers or the reason that decoding failed.
+#[record(impl)]
 #[derive(Clone, Debug)]
 pub struct BugcheckTrapFrame {
+    /// The address that ntoseye read the frame from.
+    #[record(hex)]
     pub address: u64,
+    /// The decoded frame (see the `frame` property).
+    #[record(skip)]
     pub frame: Option<KtrapFrame>,
-    /// Symbol for the frame's instruction pointer, when the frame decoded.
+    /// The symbol at the interrupted instruction, when the frame decoded.
     pub rip_symbol: Option<String>,
-    /// Decode failure reason; `None` exactly when `frame` is present.
+    /// The reason that decoding failed. `None` exactly when `frame` is
+    /// present.
     pub error: Option<String>,
 }
 
-/// A decoded, presentation-free bugcheck: the code resolved to a name and
-/// per-argument descriptions, the responsible driver (from the KD stream or the
-/// fault site), and the fault instruction when derivable. Hosts (REPL/SDK/MCP)
-/// render or serialize this; one source of truth for bugcheck analysis.
+#[record]
+impl BugcheckTrapFrame {
+    /// The saved registers. `None` if decoding failed.
+    #[record(getter, rename = "frame")]
+    pub fn registers(&self) -> Option<KtrapFrameData> {
+        self.frame.as_ref().map(|frame| frame.data.clone())
+    }
+}
+
+/// A decoded bugcheck (BSOD): the code resolved to a name and per-parameter
+/// descriptions, the responsible driver (from the dump record, the KD stream
+/// or the fault site), and the faulting instruction if ntoseye identified it.
+/// One source of truth for bugcheck analysis.
+#[record(impl)]
 #[derive(Clone, Debug)]
 pub struct BugcheckAnalysis {
+    /// The bugcheck code.
     pub code: u32,
+    /// The symbolic name (`IRQL_NOT_LESS_OR_EQUAL`).
     pub name: String,
+    /// What the bugcheck means. `None` if the code has no description.
     pub description: Option<String>,
+    /// The responsible driver, from the dump record or from the fault site.
     pub driver: Option<String>,
+    /// The four bugcheck parameters, each with its meaning for this code.
     pub args: Vec<BugcheckArg>,
+    /// The faulting instruction. `None` if ntoseye did not identify one.
     pub fault: Option<BugcheckFault>,
-    /// Trap frames named by the bugcheck parameters, decoded from the guest.
+    /// The trap frames that the parameters point to.
     pub trap_frames: Vec<BugcheckTrapFrame>,
     /// Set only when the data was not where it should have been, naming
     /// where it was instead: `nt!KiBugCheckData` holding a pointer to the
     /// real slots rather than the slots themselves. `None` is the normal
     /// case, including every bugcheck the target reported itself.
     pub source: Option<String>,
+}
+
+#[record]
+impl BugcheckAnalysis {
+    /// The code as zero-padded hex text (`0x0000000a`).
+    #[record(getter)]
+    pub fn code_hex(&self) -> String {
+        format!("{:#010x}", self.code)
+    }
 }
 
 /// Detailed result of resolving the frozen guest's `nt!KiBugCheckData`.

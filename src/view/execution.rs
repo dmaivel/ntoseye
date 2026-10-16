@@ -6,14 +6,11 @@ use ntoseye_macros::record;
 
 use crate::breakpoints::{self, Breakpoint};
 use crate::exception_policy::{self, ExceptionPolicyFinalAction, exception_alias};
-use crate::guest::ProcessInfo;
 use crate::guest::exit_reason_name;
 use crate::guest::hypercalls::tlfs_hypercall;
 use crate::guest::vm_exits;
 use crate::session::{self, CallTraceEnd};
-use crate::target::{ServedVp, ThreadInfo};
 use crate::types::VirtAddr;
-use crate::unwind::SavedVtl;
 
 /// A code breakpoint or data watchpoint (`bl`).
 #[record]
@@ -109,50 +106,6 @@ pub struct PartitionFilter {
     /// The VP index a hit must be on (`/c` in the view). None for any of
     /// the partition's VPs.
     pub vp: Option<u32>,
-}
-
-/// Whether the target runs, and where it stopped.
-#[record]
-pub struct RunStatus {
-    pub running: bool,
-    /// The selected backend thread/vCPU.
-    pub current_thread: String,
-    /// The instruction pointer when halted. None while the target runs.
-    #[record(hex)]
-    pub rip: Option<u64>,
-    /// The nearest symbol to `rip` when halted. For code outside NT, the
-    /// name identifies that code (`hv+0x3a6bde`).
-    pub symbol: Option<String>,
-    /// For a vCPU halted in the Windows hypervisor, the VTL states that the
-    /// hypervisor saved for the vCPU's virtual processor, VTL0 first.
-    pub saved_vtl: Vec<SavedVtl>,
-    /// For a vCPU halted in the Windows hypervisor, the guest partition's
-    /// virtual processor it serves, as `VcpuInfo.serving`.
-    pub serving: Option<ServedVp>,
-    /// The guest partition's virtual processor that the halted vCPU runs
-    /// (`partition 0x5 VP 2`), whose registers and code the vCPU then
-    /// shows, or None.
-    pub running_vp: Option<String>,
-    /// The process that you selected with `.process`. `dt`, `dq`, and
-    /// similar commands read its memory, and the selection stays after the
-    /// target resumes.
-    pub attached_process: Option<ProcessInfo>,
-    /// The process whose page tables the stopped vCPU has loaded.
-    pub stopped_process: Option<ProcessInfo>,
-    /// The Windows thread that the stopped vCPU runs. Its owner can be
-    /// different from `stopped_process` (`KeStackAttachProcess`).
-    pub stopped_thread: Option<ThreadInfo>,
-    /// False after a reboot until the kernel's loaded-module list exists,
-    /// and process and module enumeration is not valid until then.
-    pub coherent: bool,
-    /// The `nt` base that ntoseye found again. It changes across a reboot.
-    #[record(hex)]
-    pub kernel_base: u64,
-    /// The hypervisor partition whose Windows guest is inspected in place
-    /// of the target (`.partition`), or None while the target is. Every
-    /// other field is then that guest's.
-    #[record(hex)]
-    pub partition: Option<u64>,
 }
 
 /// A `wt` call trace: why it stopped, the instructions that it stepped,
@@ -277,24 +230,6 @@ pub fn breakpoint(bp: &Breakpoint) -> BreakpointStatus {
         temporary: bp.temporary,
         watch_access: bp.watch_access_name(),
         watch_length: bp.watch_length(),
-    }
-}
-
-pub fn run_status(status: &session::RunStatus) -> RunStatus {
-    RunStatus {
-        running: status.running,
-        current_thread: status.current_thread.clone(),
-        rip: status.rip,
-        symbol: status.symbol.clone(),
-        saved_vtl: status.saved_vtl.clone(),
-        serving: status.serving.clone(),
-        running_vp: status.running_vp.clone(),
-        attached_process: status.attached_process.clone(),
-        stopped_process: status.stopped_process.clone(),
-        stopped_thread: status.stopped_thread.clone(),
-        coherent: status.coherent,
-        kernel_base: status.kernel_base,
-        partition: status.partition,
     }
 }
 

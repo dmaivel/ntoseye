@@ -1,4 +1,5 @@
 use std::fs::File;
+use ntoseye_macros::record;
 use std::path::Path;
 use std::time::Duration;
 
@@ -106,30 +107,104 @@ pub struct DmpContext {
     pub arm64: Option<DmpArm64Context>,
 }
 
+/// The exception a crash dump recorded.
+#[record(impl)]
 #[derive(Debug, Clone, Default)]
 pub struct DmpException {
+    /// The exception code (NTSTATUS).
+    #[record(hex)]
     pub code: u32,
     pub flags: u32,
+    /// Where the exception occurred.
+    #[record(hex)]
     pub address: u64,
+    /// The exception's `ExceptionInformation` parameters.
+    #[record(hex)]
     pub parameters: Vec<u64>,
 }
 
+#[record]
+impl DmpException {
+    /// The code's symbolic name.
+    #[record(getter)]
+    pub fn code_name(&self) -> &'static str {
+        crate::triage_report::exception_code_name(self.code)
+    }
+}
+
+/// The system that a crash dump comes from, as the system-info stream of
+/// the dump records it.
+#[record(impl)]
 #[derive(Debug, Clone, Default)]
 pub struct DmpSystemInfo {
     pub major_version: u32,
+    /// The build number.
     pub minor_version: u32,
+    /// When the dump was taken (FILETIME), 0 if the dump does not record it.
     pub system_time: i64,
+    /// The system uptime, in 100 ns units.
     pub system_up_time: i64,
+    /// `VER_NT_*`: 1 workstation, 2 domain controller, 3 server.
     pub product_type: u32,
+    /// The product suite (`VER_SUITE_*`) bits.
+    #[record(hex)]
     pub suite_mask: u32,
+    /// The machine type (`IMAGE_FILE_MACHINE_*`).
+    #[record(hex)]
     pub machine_image_type: u32,
     pub service_pack_build: u32,
 }
 
+#[record]
+impl DmpSystemInfo {
+    /// `I386`, `AMD64`, `ARM64`, or `Unknown`.
+    #[record(getter)]
+    pub fn machine(&self) -> &'static str {
+        match self.machine_image_type {
+            0x014c => "I386",
+            0x8664 => "AMD64",
+            0xAA64 => "ARM64",
+            _ => "Unknown",
+        }
+    }
+
+    /// `Workstation`, `DomainController`, `Server`, or `Unknown`.
+    #[record(getter)]
+    pub fn product(&self) -> &'static str {
+        match self.product_type {
+            1 => "Workstation",
+            2 => "DomainController",
+            3 => "Server",
+            _ => "Unknown",
+        }
+    }
+
+    /// When the dump was taken (ISO 8601 UTC). `None` if the dump does not
+    /// record it.
+    #[record(getter)]
+    pub fn system_time_utc(&self) -> Option<String> {
+        (self.system_time != 0)
+            .then(|| crate::triage_report::time::filetime_to_iso(self.system_time as u64))
+            .flatten()
+    }
+
+    /// The system uptime in seconds. `None` if the dump does not record it.
+    #[record(getter)]
+    pub fn system_up_time_secs(&self) -> Option<u64> {
+        (self.system_up_time > 0)
+            .then(|| u64::try_from(self.system_up_time / 10_000_000).ok())
+            .flatten()
+    }
+}
+
+/// A driver that the system unloaded recently, as the crash dump records it.
+#[record]
 #[derive(Debug, Clone)]
 pub struct UnloadedDriver {
     pub name: String,
+    #[record(hex)]
     pub start_address: u64,
+    #[record(hex)]
     pub end_address: u64,
 }
 

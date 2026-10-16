@@ -119,12 +119,19 @@ impl TriageDriver {
     }
 }
 
+/// The main `_KPRCB` data of the crashed processor, as a triage dump
+/// recorded it.
+#[ntoseye_macros::record]
 #[derive(Debug, Clone, Default)]
 pub struct TriagePrcbInfo {
+    /// The `_KTHREAD` running on the processor.
+    #[record(hex)]
     pub current_thread: u64,
     pub processor_number: u16,
+    /// The processor's clock speed in MHz.
     pub mhz: u32,
     pub cpu_type: u16,
+    /// The CPU vendor (`GenuineIntel`, `AuthenticAMD`, ...).
     pub vendor_string: String,
 }
 

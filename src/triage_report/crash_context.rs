@@ -1,18 +1,35 @@
+use ntoseye_macros::record;
+
 use crate::bytes::{c_string_lossy, get_u32, get_u64};
 use crate::layout::TypeInfo;
 use crate::target::Target;
 
-/// The crashing process and thread of a triage dump, which snapshots their
-/// `EPROCESS` and `ETHREAD` as raw bytes rather than as mapped memory.
+/// The process and thread that crashed, as a triage dump recorded them: it
+/// snapshots their `EPROCESS` and `ETHREAD` as raw bytes rather than as
+/// mapped memory. A field is `None` if the dump does not record it.
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct TriageCrashInfo {
     pub process_name: Option<String>,
     pub process_id: Option<u64>,
     pub parent_process_id: Option<u64>,
+    /// The process's exit status (NTSTATUS).
     pub exit_status: Option<i32>,
+    /// When the process was created (FILETIME).
     pub create_time: Option<u64>,
     pub thread_id: Option<u64>,
+    /// The thread's exit status (NTSTATUS).
     pub thread_exit_status: Option<i32>,
+}
+
+#[record]
+impl TriageCrashInfo {
+    /// When the process was created (ISO 8601 UTC). `None` if ntoseye cannot
+    /// convert the recorded time.
+    #[record(getter)]
+    pub fn create_time_utc(&self) -> Option<String> {
+        self.create_time.and_then(super::time::filetime_to_iso)
+    }
 }
 
 impl TriageCrashInfo {

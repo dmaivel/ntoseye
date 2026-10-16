@@ -6,6 +6,8 @@
 
 use std::collections::HashMap;
 
+use ntoseye_macros::record;
+
 use super::culprit::{is_user_system_module, user_culprit_attribution};
 use super::signature::user_failure_signature;
 use super::{TRIAGE_BACKTRACE_LIMIT, TriageReport};
@@ -24,26 +26,40 @@ use crate::userdump::{UserDumpInfo, UserException};
 
 /// What `!analyze` reports for a user-mode minidump beyond the fields it
 /// shares with a kernel report (the stack, the modules, the signature and
-/// the culprit).
+/// the culprit): the process, the exception decoded, and the frame the
+/// failure is blamed on.
+#[record]
 #[derive(Debug, Clone)]
 pub struct UserDumpTriage {
     pub process: UserProcessSummary,
     /// The exception the dump was written for; `None` when it records none.
     pub exception: Option<UserExceptionFinding>,
     /// The thread whose stack the report's `backtrace` is, and the context
-    /// the walk started from.
+    /// the walk started from. `None` if no thread is selected.
     pub stack_thread: Option<UserStackThread>,
     /// The general-purpose registers of the exception's context, in display
     /// order. Empty without an exception, or when its context is unusable.
-    pub exception_registers: Vec<(String, u64)>,
+    pub exception_registers: Vec<RegisterValue>,
+}
+
+/// A register of the exception's context.
+#[record]
+#[derive(Debug, Clone)]
+pub struct RegisterValue {
+    pub name: String,
+    #[record(hex)]
+    pub value: u64,
 }
 
 /// The captured process, as the dump's streams record it.
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct UserProcessSummary {
     /// The executable's file name, from the first module the dump lists.
     pub name: Option<String>,
     pub pid: Option<u32>,
+    /// The architecture (see the `arch` property).
+    #[record(skip)]
     pub arch: Arch,
     pub major_version: u32,
     pub minor_version: u32,
@@ -54,7 +70,9 @@ pub struct UserProcessSummary {
     pub dump_time: u32,
     /// When the process was created, in seconds since 1970 (UTC).
     pub create_time: Option<u32>,
-    /// User-mode and kernel-mode time the process had run, in seconds.
+    /// User-mode and kernel-mode time the process had run, in seconds (see
+    /// the `user_time_secs` and `kernel_time_secs` properties).
+    #[record(skip)]
     pub cpu_times: Option<(u32, u32)>,
     pub threads: usize,
     pub modules: usize,
@@ -63,7 +81,44 @@ pub struct UserProcessSummary {
     pub handles: Option<usize>,
 }
 
-/// Where a report's stack was walked from.
+#[record]
+impl UserProcessSummary {
+    /// `AMD64` or `ARM64`.
+    #[record(getter, rename = "arch")]
+    pub fn arch_name(&self) -> &'static str {
+        self.arch.label()
+    }
+
+    /// When the dump was written (ISO 8601 UTC).
+    #[record(getter)]
+    pub fn dump_time_utc(&self) -> Option<String> {
+        super::time::unix_time_to_iso(u64::from(self.dump_time))
+    }
+
+    /// When the process was created (ISO 8601 UTC).
+    #[record(getter)]
+    pub fn create_time_utc(&self) -> Option<String> {
+        self.create_time
+            .and_then(|time| super::time::unix_time_to_iso(u64::from(time)))
+    }
+
+    /// User-mode time the process had run, in seconds.
+    #[record(getter)]
+    pub fn user_time_secs(&self) -> Option<u32> {
+        self.cpu_times.map(|(user, _)| user)
+    }
+
+    /// Kernel-mode time the process had run, in seconds.
+    #[record(getter)]
+    pub fn kernel_time_secs(&self) -> Option<u32> {
+        self.cpu_times.map(|(_, kernel)| kernel)
+    }
+}
+
+/// Where a report's stack was walked from: `exception_context` (the
+/// exception's CONTEXT, as `.ecxr` selects it) or `thread_context` (the
+/// selected thread's, as `k` walks it).
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserStackSource {
     /// The exception's CONTEXT, as `.ecxr` selects it.
@@ -72,6 +127,17 @@ pub enum UserStackSource {
     ThreadContext,
 }
 
+impl std::fmt::Display for UserStackSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ExceptionContext => "exception_context",
+            Self::ThreadContext => "thread_context",
+        })
+    }
+}
+
+/// The thread a user dump report's stack belongs to.
+#[record]
 #[derive(Debug, Clone)]
 pub struct UserStackThread {
     pub tid: u32,
@@ -81,7 +147,10 @@ pub struct UserStackThread {
     pub source: UserStackSource,
 }
 
-/// What kind of code an exception code is.
+/// What kind of code an exception code is: `ntstatus`, `cpp_exception`,
+/// `clr_exception`, `well_known`, `application_defined` (customer bit set,
+/// no name), or `unknown`.
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserExceptionKind {
     /// An NTSTATUS, raised by the system or with its value.
@@ -98,17 +167,39 @@ pub enum UserExceptionKind {
     Unknown,
 }
 
+impl std::fmt::Display for UserExceptionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Ntstatus => "ntstatus",
+            Self::CppException => "cpp_exception",
+            Self::ClrException => "clr_exception",
+            Self::WellKnown => "well_known",
+            Self::ApplicationDefined => "application_defined",
+            Self::Unknown => "unknown",
+        })
+    }
+}
+
 /// One `ExceptionInformation` entry, with what it means for the code when
 /// that is known.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExceptionParameter {
+    #[record(hex)]
     pub value: u64,
+    /// What the entry is for the code (`access`, `address`, `ThrowInfo`,
+    /// ...). `None` if the code defines no meaning.
     pub label: Option<&'static str>,
     /// The value decoded: an access type, a status name, a module.
     pub meaning: Option<String>,
 }
 
-/// What holds a code address.
+/// What holds a code address: `kind` `module` (`name`, and `system` when
+/// it is part of Windows or a language runtime), `dynamic_code` (no module;
+/// a dynamic function table covers it, `table_start..table_end`), or
+/// `unowned` (`region`: the memory, as the dump's memory-info list records
+/// it).
+#[record(tagged)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodeOwner {
     /// A loaded module. `system` when it is part of Windows or a language
@@ -124,28 +215,35 @@ pub enum CodeOwner {
 }
 
 /// A frame of the report's stack, as the analysis uses it.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserFrame {
     /// The frame's index in the report's `backtrace`.
     pub index: usize,
+    #[record(hex)]
     pub ip: u64,
     pub symbol: String,
     pub source: FrameSource,
     pub owner: CodeOwner,
 }
 
-/// The exception the dump was written for, decoded.
+/// The exception a user-mode minidump was written for, decoded.
+#[record]
 #[derive(Debug, Clone)]
 pub struct UserExceptionFinding {
+    #[record(hex)]
     pub code: u32,
     pub kind: UserExceptionKind,
     /// The code's name, or what kind of code it is when it has none.
     pub name: &'static str,
+    #[record(hex)]
     pub flags: u32,
     /// The `EXCEPTION_*` flags set, with any unknown bits in hex.
     pub flag_names: Vec<String>,
     /// The address of a chained exception record, 0 for none.
+    #[record(hex)]
     pub record: u64,
+    #[record(hex)]
     pub address: u64,
     pub symbol: String,
     /// What holds the exception address: the faulting module.
@@ -641,7 +739,7 @@ fn frame_where(
         })
 }
 
-fn general_registers(arch: Arch, values: &HashMap<String, u64>) -> Vec<(String, u64)> {
+fn general_registers(arch: Arch, values: &HashMap<String, u64>) -> Vec<RegisterValue> {
     let names: Vec<String> = match arch {
         Arch::Amd64 => AMD64_REGISTERS.map(String::from).to_vec(),
         Arch::Arm64 => (0..=28)
@@ -651,7 +749,10 @@ fn general_registers(arch: Arch, values: &HashMap<String, u64>) -> Vec<(String, 
     };
     names
         .into_iter()
-        .filter_map(|name| values.get(&name).map(|value| (name.clone(), *value)))
+        .filter_map(|name| {
+            let value = *values.get(&name)?;
+            Some(RegisterValue { name, value })
+        })
         .collect()
 }
 

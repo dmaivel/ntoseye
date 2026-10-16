@@ -110,6 +110,13 @@ impl PyArg for usize {
     }
 }
 
+impl PyArg for Vec<u64> {
+    type Py = Vec<u64>;
+    fn from_py(value: Vec<u64>) -> Self {
+        value
+    }
+}
+
 impl PyArg for i64 {
     type Py = i64;
     fn from_py(value: i64) -> Self {

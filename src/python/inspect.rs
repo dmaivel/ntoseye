@@ -9,15 +9,12 @@ use super::handle::Owner;
 use super::module::Device;
 use super::thread::Frame;
 use super::{err, raise};
-use crate::bugchecks::{bugcheck_from_dump_info, current_bugcheck};
 use crate::session::Session;
 use crate::session::effects::Effects;
 use crate::target::etw::parse_guid;
 use crate::trapframe::{KtrapFrame, read_ktrap_frame};
-use crate::triage_report::TriageReport;
 use crate::types::VirtAddr;
 use crate::view::record::{ToView, Typed};
-use crate::view::{self};
 
 /// System-wide reports and helpers that decode an object at an address
 /// (`dbg.inspect`). The results are typed `Record`s. On a user-mode
@@ -103,28 +100,6 @@ impl Inspect {
             None,
             registers,
         )
-    }
-
-    /// Analyze the current bugcheck, or return `None` if no bugcheck is in
-    /// progress on the target.
-    fn bugcheck<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Typed<'py, Option<view::bugcheck::Bugcheck>>> {
-        let detail = self.owner.with_in(py, &Context::default(), |session| {
-            Ok(current_bugcheck(&session.target)
-                .or_else(|| bugcheck_from_dump_info(&session.target))
-                .map(|analysis| view::bugcheck::bugcheck(&analysis)))
-        })?;
-        Typed::new(py, detail)
-    }
-
-    /// Make the structured one-shot crash and debug report (`!analyze`).
-    fn triage<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::triage::TriageReport>> {
-        self.typed_any(py, |session| {
-            let report = TriageReport::build(session);
-            Ok(view::triage::triage_report(&report, usize::MAX))
-        })
     }
 
     /// Read the data of the crash dump's block tagged `tag` (`.enumtag`), a

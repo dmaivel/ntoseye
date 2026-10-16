@@ -8,13 +8,20 @@ use std::collections::HashMap;
 use crate::session::Session;
 use crate::target::power::{PowerFailure, power_failure_description};
 use crate::types::VirtAddr;
-use crate::unwind::StackTrace;
+use crate::target::DiagnosticValue;
+use crate::unwind::{StackFrame, StackTrace};
+use ntoseye_macros::record;
 
 /// Frames walked of each thread a 0x9F names.
 pub const POWER_THREAD_STACK_LIMIT: usize = 16;
 /// Threads whose stacks a 0x9F report walks.
 const POWER_THREAD_LIMIT: usize = 16;
 
+/// Why a DRIVER_POWER_STATE_FAILURE names a thread: `kind` `irp_worker`
+/// (a power IRP worker thread, passing `irp` to `device`, or waiting for
+/// work when both are 0) or `pnp_lock_owner` (the thread that holds the PnP
+/// lock, 0x4).
+#[record(tagged)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PowerThreadRole {
     /// A power IRP worker thread, passing `irp` to `device`, or waiting for
@@ -24,15 +31,34 @@ pub enum PowerThreadRole {
     PnpLockOwner,
 }
 
+/// A thread that a DRIVER_POWER_STATE_FAILURE names, with its stack.
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct PowerFailureThread {
     pub role: PowerThreadRole,
+    /// The `_ETHREAD`.
     pub thread: VirtAddr,
+    /// The thread's stack, or why it did not unwind (see the `stack`
+    /// property).
+    #[record(skip)]
     pub stack: std::result::Result<StackTrace, String>,
 }
 
-/// What a DRIVER_POWER_STATE_FAILURE names, read from the target, and the
-/// stacks of the threads involved.
+#[record]
+impl PowerFailureThread {
+    /// The thread's stack, or why it did not unwind.
+    #[record(getter, rename = "stack")]
+    pub fn stack_frames(&self) -> DiagnosticValue<Vec<StackFrame>> {
+        match &self.stack {
+            Ok(trace) => DiagnosticValue::Available(trace.frames.clone()),
+            Err(error) => DiagnosticValue::unavailable(error.clone()),
+        }
+    }
+}
+
+/// What a DRIVER_POWER_STATE_FAILURE (0x9F) names, read from the target,
+/// and the stacks of the threads involved.
+#[record]
 #[derive(Debug, Clone)]
 pub struct PowerFailureFinding {
     pub failure: PowerFailure,

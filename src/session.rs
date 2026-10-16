@@ -189,48 +189,54 @@ impl ContinueOutcome {
     }
 }
 
-/// A "where am I" snapshot for the read-only status surface: whether the guest
-/// is running, and if halted, the current stop site and inspection scope.
-/// `coherent` is false after a reboot until the kernel's loaded-module list
-/// exists, so a host knows process/module enumeration is not yet meaningful.
-/// Halted there, kernel symbols work and resuming lets boot build the list;
-/// running, the host waits rather than reading stale state.
+/// Whether the target runs, and where it stopped: the read-only status
+/// surface. `coherent` is false after a reboot until the kernel's
+/// loaded-module list exists, so a host knows process/module enumeration is
+/// not yet meaningful.
+#[record]
 #[derive(Debug, Clone)]
 pub struct RunStatus {
     pub running: bool,
+    /// The selected backend thread/vCPU.
     pub current_thread: String,
-    /// Current instruction pointer when halted (None while running).
+    /// The instruction pointer when halted. None while the target runs.
+    #[record(hex)]
     pub rip: Option<u64>,
-    /// Nearest symbol to `rip` when halted; code outside NT is named for what
-    /// it is (`hv+0x3a6bde` in the Windows hypervisor).
+    /// The nearest symbol to `rip` when halted. For code outside NT, the
+    /// name identifies that code (`hv+0x3a6bde`).
     pub symbol: Option<String>,
-    /// For a vCPU halted in the Windows hypervisor, the VTL states it saved
-    /// for the vCPU's virtual processor.
+    /// For a vCPU halted in the Windows hypervisor, the VTL states that the
+    /// hypervisor saved for the vCPU's virtual processor, VTL0 first.
     pub saved_vtl: Vec<SavedVtl>,
     /// For a vCPU halted in the Windows hypervisor, the guest partition's
     /// virtual processor whose exit it handles, when it is not the root's.
     pub serving: Option<ServedVp>,
-    /// The guest partition's virtual processor the halted vCPU runs
-    /// (`partition 0x5 VP 2`), whose registers and code the vCPU then shows.
+    /// The guest partition's virtual processor that the halted vCPU runs
+    /// (`partition 0x5 VP 2`), whose registers and code the vCPU then
+    /// shows, or None.
     pub running_vp: Option<String>,
-    /// Attached process inspection scope, if any. This is where `dt`, `dq` and
-    /// friends read from; it is chosen with `.process` and survives resumes,
-    /// so it is not necessarily what the guest is executing.
+    /// The process that you selected with `.process`. `dt`, `dq`, and
+    /// similar commands read its memory, and the selection stays after the
+    /// target resumes.
     pub attached_process: Option<ProcessInfo>,
-    /// The process whose page tables the stopped vCPU has loaded (from CR3).
-    /// Refreshed at every stop.
+    /// The process whose page tables the stopped vCPU has loaded (from
+    /// CR3), refreshed at every stop.
     pub stopped_process: Option<ProcessInfo>,
-    /// The Windows thread the stopped vCPU is running, walked from its KPRCB
-    /// at this stop. Its owner can differ from `stopped_process`: a thread
-    /// attached to another address space with `KeStackAttachProcess` runs on
-    /// borrowed page tables.
+    /// The Windows thread that the stopped vCPU runs, walked from its KPRCB
+    /// at this stop. Its owner can be different from `stopped_process`
+    /// (`KeStackAttachProcess`).
     pub stopped_thread: Option<ThreadInfo>,
+    /// False after a reboot until the kernel's loaded-module list exists,
+    /// and process and module enumeration is not valid until then.
     pub coherent: bool,
-    /// Rediscovered `nt` base. A host caches it to detect a reboot (the base
-    /// changes) and invalidate stale addresses without parsing prose.
+    /// The `nt` base that ntoseye found again. It changes across a reboot,
+    /// so a host can cache it to notice one.
+    #[record(hex)]
     pub kernel_base: u64,
-    /// The hypervisor partition whose guest is inspected in place of the
-    /// target (`.partition`), if any: every other field is that guest's.
+    /// The hypervisor partition whose Windows guest is inspected in place
+    /// of the target (`.partition`), or None while the target is. Every
+    /// other field is then that guest's.
+    #[record(hex)]
     pub partition: Option<u64>,
 }
 

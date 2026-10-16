@@ -60,7 +60,7 @@ pub fn print_bugcheck_info(debugger: &Target, info: &BugcheckInfo) {
 }
 
 /// [`print_bugcheck_analysis`], as a card in Tern.
-fn show_bugcheck_analysis(analysis: &BugcheckAnalysis) {
+pub fn show_bugcheck_analysis(analysis: &BugcheckAnalysis) {
     #[cfg(feature = "cli")]
     native::render(
         || native::bugcheck::card(analysis),
