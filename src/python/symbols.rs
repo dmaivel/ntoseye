@@ -9,7 +9,6 @@ use super::handle::Owner;
 use super::record::Typed;
 use super::{err, raise, symbol_not_found};
 use crate::breakpoints::BreakpointSpec;
-use crate::expr::Expr;
 use crate::session::Session;
 use crate::symbols::{
     CodeFrame, ProcedureLocal, SourceLocation, SymbolCandidate, parse_source_paths,
@@ -244,16 +243,6 @@ pub fn scoped<R: Send>(
     owner.with_in(py, &context, |session| {
         load_scope_symbols(session, space)?;
         f(session)
-    })
-}
-
-/// Evaluate a MASM expression in `space` (registers: the stopped vCPU's).
-pub fn eval(py: Python<'_>, owner: &Owner, space: &Space, expr: &str) -> PyResult<u64> {
-    space.require_virtual()?;
-    scoped(py, owner, space, |session| {
-        Expr::eval(expr, &session.target)
-            .map(|value| value.0)
-            .map_err(err)
     })
 }
 

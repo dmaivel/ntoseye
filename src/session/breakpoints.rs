@@ -5,8 +5,8 @@ use std::mem::take;
 use std::sync::Arc;
 
 use crate::breakpoints::{
-    BreakpointConfig, BreakpointInfo, BreakpointScope, HypercallFilter, ThreadScope,
-    lift_target_site, plant_target_site,
+    BreakpointConfig, BreakpointInfo, BreakpointManager, BreakpointScope, BreakpointSpec,
+    HypercallFilter, ThreadScope, lift_target_site, plant_target_site,
 };
 use crate::dbg_backend::{
     BugcheckInfo, DebugCapability, HwBreakpointAccess, ModuleEvent, WatchpointAccess,
@@ -29,6 +29,14 @@ pub struct PatternBreakpoints {
     pub errors: Vec<Error>,
     /// Whether the match count reached the limit, so more may match.
     pub limited: bool,
+}
+
+/// A code breakpoint that [`Session::set_code_breakpoint`] or
+/// [`Session::set_symbolic_breakpoint`] set, and why ntoseye could not
+/// confirm that an instruction starts at its site, when it could not.
+pub struct CheckedBreakpoint {
+    pub id: u32,
+    pub warning: Option<String>,
 }
 
 impl Session {
@@ -58,6 +66,83 @@ impl Session {
         self.require_software_breakpoints()?;
         self.breakpoints
             .add_symbolic(self.backend.as_mut(), &self.target, symbol, config)
+    }
+
+    /// Set a software breakpoint at `address` as `bp` does, for every host
+    /// that takes the address from a user: an instruction must start there
+    /// ([`Self::check_instruction_start`]) unless `config.unchecked` (`/a`),
+    /// and the breakpoint is labelled by the closest symbol in the address
+    /// space its scope resolves in.
+    pub fn set_code_breakpoint(
+        &mut self,
+        address: VirtAddr,
+        config: BreakpointConfig,
+    ) -> Result<CheckedBreakpoint> {
+        self.require_software_breakpoints()?;
+        let dtb = BreakpointManager::resolution_dtb(&self.target, config.scope.as_ref());
+        let warning = if config.unchecked {
+            None
+        } else {
+            self.check_instruction_start(dtb, address)?
+        };
+        let symbol = self
+            .target
+            .symbols
+            .format_closest_symbol_for_address(dtb, address);
+        let id = self.breakpoints.add_configured(
+            self.backend.as_mut(),
+            &self.target,
+            address,
+            symbol,
+            config,
+        )?;
+        Ok(CheckedBreakpoint { id, warning })
+    }
+
+    /// Set a symbolic breakpoint as `bu` does, for every host that takes the
+    /// spec from a user: a symbol with an offset must name the start of an
+    /// instruction, checked as [`Self::set_code_breakpoint`] checks an
+    /// address, unless `config.unchecked`.
+    pub fn set_symbolic_breakpoint(
+        &mut self,
+        spec: String,
+        config: BreakpointConfig,
+    ) -> Result<CheckedBreakpoint> {
+        self.require_software_breakpoints()?;
+        let warning = if config.unchecked {
+            None
+        } else {
+            self.check_symbol_site(&spec, config.scope.as_ref())?
+        };
+        let id =
+            self.breakpoints
+                .add_symbolic(self.backend.as_mut(), &self.target, spec, config)?;
+        Ok(CheckedBreakpoint { id, warning })
+    }
+
+    /// Check that an instruction starts where a symbolic breakpoint's `spec`
+    /// resolves in `scope`. A symbol's own start always is one, but an
+    /// offset into a symbol that does not resolve yet cannot be checked,
+    /// which the warning says.
+    fn check_symbol_site(
+        &self,
+        spec: &str,
+        scope: Option<&BreakpointScope>,
+    ) -> Result<Option<String>> {
+        let target = &self.target;
+        match BreakpointManager::resolve_symbol_in_scope(target, spec, scope)? {
+            Some((_, 0)) => Ok(None),
+            Some((address, _)) => self
+                .check_instruction_start(BreakpointManager::resolution_dtb(target, scope), address),
+            None => match BreakpointSpec::split_symbol_offset(spec) {
+                Some((symbol, offset)) if offset != 0 => Ok(Some(format!(
+                    "{} does not resolve yet, so ntoseye could not check that an instruction starts \
+                     at {spec}",
+                    symbol.trim(),
+                ))),
+                _ => Ok(None),
+            },
+        }
     }
 
     /// Set one source identity for every address matching `file:line`, or one
@@ -400,12 +485,33 @@ impl Session {
         self.add_hardware_breakpoint(addr, access.into(), len, symbol, config)
     }
 
+    /// Set a debug-register breakpoint or data watch as `ba` does, for every
+    /// host that takes the address from a user: labelled by the closest
+    /// symbol in the address space its scope resolves in (see
+    /// [`Self::add_hardware_breakpoint`]).
+    pub fn set_hardware_breakpoint(
+        &mut self,
+        address: VirtAddr,
+        access: HwBreakpointAccess,
+        len: u8,
+        config: BreakpointConfig,
+    ) -> Result<u32> {
+        let dtb = BreakpointManager::resolution_dtb(&self.target, config.scope.as_ref());
+        let symbol = self
+            .target
+            .symbols
+            .format_closest_symbol_for_address(dtb, address);
+        self.add_hardware_breakpoint(address, access, len, symbol, config)
+    }
+
     /// Set a debug-register breakpoint or data watch (`ba`) at `addr`, with
     /// an optional display `symbol`. Set in a partition view, it is the
     /// partition's: `addr` is the partition's, a hit by any other VP than
     /// the partition's is resumed, `/c` names a VP of it, and its thread
     /// filter and condition are checked in its view at the hit (see
-    /// [`crate::breakpoints::PartitionFilter`]). Returns the id.
+    /// [`crate::breakpoints::PartitionFilter`]). In VTL1 it is global: NT's
+    /// processes and threads say nothing about which VTL1 context executes
+    /// an address, so a process or thread filter is refused. Returns the id.
     pub fn add_hardware_breakpoint(
         &mut self,
         addr: VirtAddr,
@@ -414,6 +520,16 @@ impl Session {
         symbol: Option<String>,
         config: BreakpointConfig,
     ) -> Result<u32> {
+        if self.target.in_secure_address_space()
+            && (matches!(config.scope, Some(BreakpointScope::Process { .. }))
+                || config.thread.is_some())
+        {
+            return Err(Error::Breakpoint(
+                "a VTL1 hardware breakpoint is global: a process or thread filter (/p, /t) \
+                 names NT's processes and threads"
+                    .to_string(),
+            ));
+        }
         let config = match self.partition() {
             Some(partition) => self.partition_breakpoint_config(partition, addr, config)?,
             None => config,

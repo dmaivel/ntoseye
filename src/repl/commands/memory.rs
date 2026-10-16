@@ -1148,13 +1148,31 @@ impl Render for ValuesWritten {
     }
 }
 
-/// Write `bytes` at `address` in the inspection space; `noun` names what
-/// they are in an error.
-fn write_virtual(session: &Session, address: VirtAddr, bytes: &[u8], noun: &str) -> Result<()> {
+/// Write `bytes` at `address` in `memory`: the inspection space's virtual
+/// addresses, or guest-physical ones. `noun` names what they are in an
+/// error. Every memory-writing command and SDK method writes through it.
+pub fn write_memory(
+    session: &Session,
+    memory: MemoryKind,
+    address: VirtAddr,
+    bytes: &[u8],
+    noun: &str,
+) -> Result<()> {
     session
         .target
-        .write_memory(MemoryKind::Virtual, address.0, bytes)
-        .map_err(|error| Error::DebugInfo(format!("failed to write {noun}: {error}")))
+        .write_memory(memory, address.0, bytes)
+        .map_err(|error| {
+            let space = match memory {
+                MemoryKind::Virtual => "",
+                MemoryKind::Physical => "physical ",
+            };
+            Error::DebugInfo(format!("failed to write {space}{noun}: {error}"))
+        })
+}
+
+/// Write `bytes` at `address` in the inspection space.
+fn write_virtual(session: &Session, address: VirtAddr, bytes: &[u8], noun: &str) -> Result<()> {
+    write_memory(session, MemoryKind::Virtual, address, bytes, noun)
 }
 
 /// Write `values` as `unit`s at `address`.
@@ -1216,7 +1234,7 @@ pub fn write_values(
     category = "memory and disassembly",
     kind = Action,
     writes = [Memory],
-    python = none,
+    forms = [write_bytes, write_u8],
 )]
 fn eb(
     session: &Session,
@@ -1226,13 +1244,35 @@ fn eb(
     write_integers(session, address, values, WriteUnit::Byte)
 }
 
+/// Write bytes to this address space.
+#[command(form_of = eb, python = Memory, python_name = "write")]
+fn write_bytes(
+    session: &Session,
+    #[arg(receiver)] memory: MemoryKind,
+    address: VirtAddr,
+    data: Vec<u8>,
+) -> Result<()> {
+    write_memory(session, memory, address, &data, "bytes")
+}
+
+/// Write a little-endian byte.
+#[command(form_of = eb, python = Memory)]
+fn write_u8(
+    session: &Session,
+    #[arg(receiver)] memory: MemoryKind,
+    address: VirtAddr,
+    value: u8,
+) -> Result<()> {
+    write_memory(session, memory, address, &[value], WriteUnit::Byte.noun())
+}
+
 /// Write one or more words (2 bytes) to memory.
 #[command(
     names = ["ew"],
     category = "memory and disassembly",
     kind = Action,
     writes = [Memory],
-    python = none,
+    forms = [write_u16],
 )]
 fn ew(
     session: &Session,
@@ -1242,13 +1282,25 @@ fn ew(
     write_integers(session, address, values, WriteUnit::Word)
 }
 
+/// Write a little-endian 16-bit integer.
+#[command(form_of = ew, python = Memory)]
+fn write_u16(
+    session: &Session,
+    #[arg(receiver)] memory: MemoryKind,
+    address: VirtAddr,
+    value: u16,
+) -> Result<()> {
+    let bytes = value.to_le_bytes();
+    write_memory(session, memory, address, &bytes, WriteUnit::Word.noun())
+}
+
 /// Write one or more doublewords (4 bytes) to memory.
 #[command(
     names = ["ed"],
     category = "memory and disassembly",
     kind = Action,
     writes = [Memory],
-    python = none,
+    forms = [write_u32],
 )]
 fn ed(
     session: &Session,
@@ -1258,13 +1310,25 @@ fn ed(
     write_integers(session, address, values, WriteUnit::Dword)
 }
 
+/// Write a little-endian 32-bit integer.
+#[command(form_of = ed, python = Memory)]
+fn write_u32(
+    session: &Session,
+    #[arg(receiver)] memory: MemoryKind,
+    address: VirtAddr,
+    value: u32,
+) -> Result<()> {
+    let bytes = value.to_le_bytes();
+    write_memory(session, memory, address, &bytes, WriteUnit::Dword.noun())
+}
+
 /// Write one or more quadwords (8 bytes) to memory.
 #[command(
     names = ["eq"],
     category = "memory and disassembly",
     kind = Action,
     writes = [Memory],
-    python = none,
+    forms = [write_u64],
 )]
 fn eq(
     session: &Session,
@@ -1272,6 +1336,18 @@ fn eq(
     #[arg(parse = write_values)] values: Vec<u64>,
 ) -> Result<ValuesWritten> {
     write_integers(session, address, values, WriteUnit::Qword)
+}
+
+/// Write a little-endian 64-bit integer.
+#[command(form_of = eq, python = Memory)]
+fn write_u64(
+    session: &Session,
+    #[arg(receiver)] memory: MemoryKind,
+    address: VirtAddr,
+    value: u64,
+) -> Result<()> {
+    let bytes = value.to_le_bytes();
+    write_memory(session, memory, address, &bytes, WriteUnit::Qword.noun())
 }
 
 /// `ef`/`eD`'s `<number>...`: decimal floating-point literals.

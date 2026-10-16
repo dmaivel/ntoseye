@@ -480,11 +480,20 @@ pub struct PoliciesReset;
     names = ["sxr"],
     category = "breakpoints and events",
     kind = Action,
-    python = none,
+    forms = [reset],
 )]
 fn reset_event_policies(session: &mut Session) -> Result<PoliciesReset> {
-    session.exception_policies.reset();
+    reset(session)?;
     Ok(PoliciesReset)
+}
+
+/// Remove all configured policies and module load and unload filters, so
+/// ordinary exceptions break by default and module loads and unloads do not
+/// stop (`sxr`).
+#[command(form_of = reset_event_policies, python = Exceptions)]
+fn reset(session: &mut Session) -> Result<()> {
+    session.exception_policies.reset();
+    Ok(())
 }
 
 impl Render for PoliciesReset {

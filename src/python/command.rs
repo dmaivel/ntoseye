@@ -27,6 +27,7 @@ pub use super::inspect::Inspect;
 pub use super::memory::Memory;
 pub use super::module::{Device, Driver, Module};
 pub use super::process::{Heap, Heaps, Process};
+pub use super::secure::{SecureKernel, Trustlet};
 pub use super::symbols::Symbols;
 pub use super::thread::{Cpu, Thread};
 pub use super::userdump::{UserDump, UserProcess, UserThread};

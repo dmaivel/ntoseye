@@ -17,7 +17,7 @@ use super::module::{Drivers, Modules};
 use super::process::Processes;
 use super::record::Typed;
 use super::secure::SecureKernel;
-use super::symbols::{self, Symbols};
+use super::symbols::Symbols;
 use super::thread::{Cpus, Threads};
 use super::types::Types;
 use super::userdump::UserDump;
@@ -193,13 +193,6 @@ impl Debugger {
     fn capabilities<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<BackendCapability>>> {
         let rows = self.with_session(|session| Ok(session.capabilities()))?;
         Typed::new(py, rows)
-    }
-
-    /// Evaluate a debugger (MASM) expression in kernel scope to an integer,
-    /// using the registers of the stopped vCPU (on a user-mode minidump, of
-    /// the selected thread).
-    fn eval(slf: &Bound<'_, Self>, expr: &str) -> PyResult<u64> {
-        symbols::eval(slf.py(), &namespace_owner(slf), &Space::Kernel, expr)
     }
 
     /// Run a REPL command line and return its text output without styling. If a

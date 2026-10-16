@@ -2,7 +2,7 @@ use owo_colors::OwoColorize;
 
 use ntoseye_macros::{command, grammar};
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::memory::PAGE_SIZE;
 use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
@@ -12,7 +12,8 @@ use crate::types::VirtAddr;
 use crate::ui;
 
 use super::memory::{
-    MemoryDump, WriteUnit, dump_memory, print_search_stop, write_address, write_values,
+    MemoryDump, WriteUnit, dump_memory, print_search_stop, write_address, write_memory,
+    write_values,
 };
 
 /// A physical display command's `<address> [L<count>|length|end]`.
@@ -124,12 +125,7 @@ fn write_physical(
     unit: WriteUnit,
 ) -> Result<PhysicalWritten> {
     let bytes = unit.encode(values);
-    session
-        .target
-        .write_memory(MemoryKind::Physical, address.0, &bytes)
-        .map_err(|error| {
-            Error::DebugInfo(format!("failed to write physical {}: {error}", unit.noun()))
-        })?;
+    write_memory(session, MemoryKind::Physical, address, &bytes, unit.noun())?;
     Ok(PhysicalWritten {
         address: address.0,
         len: bytes.len(),

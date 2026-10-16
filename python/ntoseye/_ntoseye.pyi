@@ -1698,7 +1698,7 @@ class BreakpointHit(BaseRecord):
     """
     A breakpoint hit that stopped the target.
     """
-    __match_args__: Final[tuple[Literal["id"], Literal["kind"], Literal["address"], Literal["access"], Literal["length"], Literal["exit_reason"], Literal["symbol"], Literal["temporary"], Literal["action"], Literal["condition_error"]]]
+    __match_args__: Final[tuple[Literal["id"], Literal["serial"], Literal["kind"], Literal["address"], Literal["access"], Literal["length"], Literal["exit_reason"], Literal["symbol"], Literal["temporary"], Literal["action"], Literal["condition_error"]]]
     @property
     def access(self, /) -> Literal["execute", "write", "read_write"] |None:
         """
@@ -1727,6 +1727,13 @@ class BreakpointHit(BaseRecord):
     def kind(self, /) -> Literal["code", "hardware", "watch", "hypercall", "vm_exit"]: ...
     @property
     def length(self, /) -> int |None: ...
+    @property
+    def serial(self, /) -> int:
+        """
+        Which breakpoint this is among every one created in this process: a
+        later breakpoint that reuses `id`, or another debugger's, has
+        another.
+        """
     @property
     def symbol(self, /) -> str |None: ...
     @property
@@ -1870,9 +1877,15 @@ class Breakpoints:
         """
     def __iter__(self, /) -> Iterator[Breakpoint]: ...
     def __len__(self, /) -> int: ...
-    def add(self, /, target: int |str, *, condition: str |None = None, hardware: bool = False, when: Callable[[Stop], object] |None = None, pass_count: int = 0, one_shot: bool = False, process: Process |int |None = None, thread: Thread |int |None = None, processor: Cpu |int |None = None, action: str |None = None) -> Breakpoint:
+    def add(self, /, target: int |str, *, condition: str |None = None, hardware: bool = False, unchecked: bool = False, when: Callable[[Stop], object] |None = None, pass_count: int = 0, one_shot: bool = False, process: Process |int |None = None, thread: Thread |int |None = None, processor: Cpu |int |None = None, action: str |None = None) -> Breakpoint:
         """
         Add a code breakpoint at an address or a symbolic spec.
+        
+        An instruction must start at the breakpoint, which ntoseye checks as
+        `bp` and `bu` do: it raises `NtoseyeError` for an address inside an
+        instruction, and when nothing says where instructions start there, it
+        sets the breakpoint and adds a warning to `dbg.notices()`.
+        `unchecked=True` skips the check (`bp /a`).
         
         `hardware=True` sets a debug-register execute breakpoint instead of
         patching code. The target resolves to an address once, when you call
@@ -3230,9 +3243,12 @@ class Debugger:
         """
     def eval(self, /, expr: str) -> int:
         """
-        Evaluate a debugger (MASM) expression in kernel scope to an integer,
-        using the registers of the stopped vCPU (on a user-mode minidump, of
-        the selected thread).
+        Evaluate a debugger (MASM) expression to an integer (`?`) in this
+        object's scope: the debugger's is the kernel's, with the registers of the
+        stopped vCPU (on a user-mode minidump, of the selected thread); a
+        process's resolves the symbols of its modules, which it loads first; a
+        VTL1 address space's (the secure kernel's, a trustlet's) has no
+        registers, as the live ones hold VTL0 state.
         """
     @property
     def exceptions(self, /) -> Exceptions:
@@ -5366,8 +5382,8 @@ class Exceptions:
     def reset(self, /) -> None:
         """
         Remove all configured policies and module load and unload filters, so
-        ordinary exceptions break by default and module loads and unloads do
-        not stop.
+        ordinary exceptions break by default and module loads and unloads do not
+        stop (`sxr`).
         """
     def set(self, /, code: int |str, *, mode: Literal["break", "second_chance", "notify", "ignore"] |None = None, command: str |None = None, disposition: Literal["break", "handled", "not_handled"] |None = None) -> ExceptionPolicy:
         """
@@ -14775,7 +14791,12 @@ class Process:
         """
     def eval(self, /, expr: str) -> int:
         """
-        Evaluate a debugger expression in the symbol scope of this process.
+        Evaluate a debugger (MASM) expression to an integer (`?`) in this
+        object's scope: the debugger's is the kernel's, with the registers of the
+        stopped vCPU (on a user-mode minidump, of the selected thread); a
+        process's resolves the symbols of its modules, which it loads first; a
+        VTL1 address space's (the secure kernel's, a trustlet's) has no
+        registers, as the live ones hold VTL0 state.
         """
     def handle(self, /, value: int) -> HandleEntry:
         """
@@ -16371,8 +16392,12 @@ class SecureKernel:
         """
     def eval(self, /, expr: str) -> int:
         """
-        Evaluate a debugger expression in the symbol scope of the secure kernel.
-        Registers hold VTL0 state, and this method does not accept them.
+        Evaluate a debugger (MASM) expression to an integer (`?`) in this
+        object's scope: the debugger's is the kernel's, with the registers of the
+        stopped vCPU (on a user-mode minidump, of the selected thread); a
+        process's resolves the symbols of its modules, which it loads first; a
+        VTL1 address space's (the secure kernel's, a trustlet's) has no
+        registers, as the live ones hold VTL0 state.
         """
     @property
     def memory(self, /) -> Memory:
@@ -17290,7 +17315,8 @@ class Stop(BaseRecord):
     def hit(self, /, bp: Breakpoint) -> bool:
         """
         Whether breakpoint `bp` is the one that stopped the target. `bp`
-        may be deleted since (a one-shot breakpoint that fired).
+        may be deleted since (a one-shot breakpoint that fired); a later
+        breakpoint that reuses its id, or another debugger's, is not it.
         """
     @property
     def inspection_process(self, /) -> ProcessInfo |None:
@@ -19429,7 +19455,12 @@ class Trustlet:
         """
     def eval(self, /, expr: str) -> int:
         """
-        Evaluate a debugger expression in this trustlet's address space.
+        Evaluate a debugger (MASM) expression to an integer (`?`) in this
+        object's scope: the debugger's is the kernel's, with the registers of the
+        stopped vCPU (on a user-mode minidump, of the selected thread); a
+        process's resolves the symbols of its modules, which it loads first; a
+        VTL1 address space's (the secure kernel's, a trustlet's) has no
+        registers, as the live ones hold VTL0 state.
         """
     @property
     def info(self, /) -> TrustletInfo:

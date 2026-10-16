@@ -15,14 +15,16 @@ use super::runcontrol::reject_condition_mutation;
 use super::symbols::Location;
 use super::thread::Thread;
 use super::{err, raise, symbol_not_found};
-use crate::breakpoints::{BreakpointConfig, BreakpointInfo, BreakpointScope, HypercallFilter};
+use crate::breakpoints::{
+    BreakpointConfig, BreakpointInfo, BreakpointManager, BreakpointScope, HypercallFilter,
+};
 use crate::dbg_backend::{HwBreakpointAccess, WatchpointAccess};
 use crate::exception_policy::{ExceptionPolicy, ModuleEventPolicy};
 use crate::guest::hypercalls::hypercall_code;
 use crate::guest::vm_exits::{self, ExitFilter};
+use crate::notice::Notice;
 use crate::session::Session;
-use crate::target::Target;
-use crate::types::{Dtb, VirtAddr};
+use crate::types::VirtAddr;
 
 /// The code breakpoints and data watchpoints, with their IDs as keys
 /// (`dbg.breakpoints`).
@@ -155,19 +157,26 @@ impl Breakpoints {
 
     /// Add a code breakpoint at an address or a symbolic spec.
     ///
+    /// An instruction must start at the breakpoint, which ntoseye checks as
+    /// `bp` and `bu` do: it raises `NtoseyeError` for an address inside an
+    /// instruction, and when nothing says where instructions start there, it
+    /// sets the breakpoint and adds a warning to `dbg.notices()`.
+    /// `unchecked=True` skips the check (`bp /a`).
+    ///
     /// `hardware=True` sets a debug-register execute breakpoint instead of
     /// patching code. The target resolves to an address once, when you call
     /// this method, and does not resolve again after a module reload or a
     /// reboot. The secure kernel (VTL1) accepts only this kind of breakpoint,
     /// for example `add(dbg.secure_kernel.symbols["securekernel!Func"],
     /// hardware=True)`.
-    #[pyo3(signature = (target, *, condition=None, hardware=false, when=None, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None))]
+    #[pyo3(signature = (target, *, condition=None, hardware=false, unchecked=false, when=None, pass_count=0, one_shot=false, process=None, thread=None, processor=None, action=None))]
     fn add(
         &self,
         py: Python<'_>,
         target: Location,
         condition: Option<String>,
         hardware: bool,
+        unchecked: bool,
         when: Option<WhenCallback>,
         pass_count: u64,
         one_shot: bool,
@@ -177,7 +186,12 @@ impl Breakpoints {
         action: Option<String>,
     ) -> PyResult<Breakpoint> {
         reject_condition_mutation()?;
-        let (config, callback) = build_config(
+        if hardware && unchecked {
+            return Err(PyValueError::new_err(
+                "unchecked applies to a software breakpoint, whose site must start an instruction",
+            ));
+        }
+        let (mut config, callback) = build_config(
             py,
             &self.owner,
             condition,
@@ -189,40 +203,51 @@ impl Breakpoints {
             processor,
             action,
         )?;
+        config.unchecked = unchecked;
         let bp = self.owner.with(py, |session| {
             require_halted(session, "breakpoints.add")?;
-            let id = match target {
-                target if hardware => add_hardware_execute(session, target, config.clone())?,
+            let dtb = BreakpointManager::resolution_dtb(&session.target, config.scope.as_ref());
+            if hardware {
+                let address = target.resolve(session, dtb)?;
+                let id = session
+                    .set_hardware_breakpoint(
+                        VirtAddr(address),
+                        HwBreakpointAccess::Execute,
+                        1,
+                        config,
+                    )
+                    .map_err(err)?;
+                return created(session, id);
+            }
+            let set = match target {
                 Location::Address(address) => session
-                    .add_breakpoint(VirtAddr(address), None, config.clone())
+                    .set_code_breakpoint(VirtAddr(address), config)
                     .map_err(err)?,
                 Location::Symbol(spec) => {
-                    let id = session
-                        .add_symbol_breakpoint(spec.clone(), config.clone())
+                    // A spec whose module is loaded but which does not
+                    // resolve is a typo, not a deferred breakpoint.
+                    let module_loaded = spec.split_once('!').is_none_or(|(module, _)| {
+                        session
+                            .target
+                            .symbols
+                            .module_base_by_name(dtb, module)
+                            .is_some()
+                    });
+                    let set = session
+                        .set_symbolic_breakpoint(spec.clone(), config)
                         .map_err(err)?;
-                    let live = session.breakpoint(id).cloned();
-                    let deferred_module = spec
-                        .split_once('!')
-                        .map(|(module, _)| {
-                            let dtb = scope_dtb(&session.target, config.scope.as_ref());
-                            session
-                                .target
-                                .symbols
-                                .module_base_by_name(dtb, module)
-                                .is_none()
-                        })
-                        .unwrap_or(false);
-                    if live.as_ref().is_none_or(|bp| !bp.resolved) && !deferred_module {
-                        session.remove_breakpoint(id).map_err(err)?;
+                    let resolved = session.breakpoint(set.id).is_some_and(|bp| bp.resolved);
+                    if !resolved && module_loaded {
+                        session.remove_breakpoint(set.id).map_err(err)?;
                         return Err(symbol_not_found(&spec));
                     }
-                    id
+                    set
                 }
             };
-            session
-                .breakpoint(id)
-                .cloned()
-                .ok_or_else(|| raise(format!("new breakpoint #{id} disappeared during creation")))
+            if let Some(warning) = set.warning {
+                session.push_notice(Notice::warning(warning));
+            }
+            created(session, set.id)
         })?;
         store_condition(py, self.owner.dbg(), bp.id, callback);
         Ok(handle(py, self.owner.dbg(), &bp))
@@ -266,13 +291,7 @@ impl Breakpoints {
             let breakpoints = set
                 .ids
                 .into_iter()
-                .map(|id| {
-                    session
-                        .breakpoints
-                        .get(id)
-                        .cloned()
-                        .ok_or_else(|| raise(format!("new breakpoint #{id} disappeared")))
-                })
+                .map(|id| created(session, id))
                 .collect::<PyResult<Vec<_>>>()?;
             Ok((breakpoints, errors))
         })?;
@@ -330,13 +349,7 @@ impl Breakpoints {
                 .add_source_breakpoint(source, config.clone())
                 .map_err(err)?;
             ids.into_iter()
-                .map(|id| {
-                    session
-                        .breakpoints
-                        .get(id)
-                        .cloned()
-                        .ok_or_else(|| raise(format!("new breakpoint #{id} disappeared")))
-                })
+                .map(|id| created(session, id))
                 .collect::<PyResult<Vec<_>>>()
         })?;
         Ok(make_handles(
@@ -379,19 +392,12 @@ impl Breakpoints {
         )?;
         let bp = self.owner.with(py, |session| {
             require_halted(session, "breakpoints.watch")?;
-            let dtb = scope_dtb(&session.target, config.scope.as_ref());
+            let dtb = BreakpointManager::resolution_dtb(&session.target, config.scope.as_ref());
             let address = target.resolve(session, dtb)?;
-            let symbol = match target {
-                Location::Symbol(spec) => Some(spec),
-                Location::Address(_) => None,
-            };
             let id = session
-                .add_watchpoint(VirtAddr(address), access, length, symbol, config)
+                .set_hardware_breakpoint(VirtAddr(address), access.into(), length, config)
                 .map_err(err)?;
-            session
-                .breakpoint(id)
-                .cloned()
-                .ok_or_else(|| raise(format!("new watchpoint #{id} disappeared during creation")))
+            created(session, id)
         })?;
         store_condition(py, self.owner.dbg(), bp.id, callback);
         Ok(handle(py, self.owner.dbg(), &bp))
@@ -453,10 +459,7 @@ impl Breakpoints {
             let id = session
                 .add_hypercall_breakpoint(filter, config)
                 .map_err(err)?;
-            session
-                .breakpoint(id)
-                .cloned()
-                .ok_or_else(|| raise(format!("new breakpoint #{id} disappeared during creation")))
+            created(session, id)
         })?;
         store_condition(py, self.owner.dbg(), bp.id, callback);
         Ok(handle(py, self.owner.dbg(), &bp))
@@ -513,10 +516,7 @@ impl Breakpoints {
         let bp = self.owner.with(py, |session| {
             require_halted(session, "breakpoints.add_exit")?;
             let id = session.add_exit_breakpoint(filter, config).map_err(err)?;
-            session
-                .breakpoint(id)
-                .cloned()
-                .ok_or_else(|| raise(format!("new breakpoint #{id} disappeared during creation")))
+            created(session, id)
         })?;
         store_condition(py, self.owner.dbg(), bp.id, callback);
         Ok(handle(py, self.owner.dbg(), &bp))
@@ -708,16 +708,6 @@ impl Exceptions {
         Typed::new(py, rows)
     }
 
-    /// Remove all configured policies and module load and unload filters, so
-    /// ordinary exceptions break by default and module loads and unloads do
-    /// not stop.
-    fn reset(&self, py: Python<'_>) -> PyResult<()> {
-        self.owner.with(py, |session| {
-            session.exception_policies.reset();
-            Ok(())
-        })
-    }
-
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         Ok(format!(
             "<Exceptions {} configured>",
@@ -729,6 +719,14 @@ impl Exceptions {
 /// The handle of a core breakpoint.
 fn handle(py: Python<'_>, dbg: &Py<Debugger>, bp: &BreakpointInfo) -> Breakpoint {
     Breakpoint::new(py, dbg, bp.id, bp.serial)
+}
+
+/// The breakpoint `id` a method just set.
+fn created(session: &Session, id: u32) -> PyResult<BreakpointInfo> {
+    session
+        .breakpoint(id)
+        .cloned()
+        .ok_or_else(|| raise(format!("new breakpoint #{id} disappeared during creation")))
 }
 
 fn build_config(
@@ -817,41 +815,6 @@ fn processor_argument(py: Python<'_>, dbg: &Owner, value: CpuArg<'_>) -> PyResul
 
 fn invalid_breakpoint(id: u32) -> pyo3::PyErr {
     raise(format!("breakpoint #{id} is no longer valid"))
-}
-
-fn scope_dtb(target: &Target, scope: Option<&BreakpointScope>) -> Dtb {
-    match scope {
-        Some(BreakpointScope::Process { dtb, .. }) => *dtb,
-        Some(BreakpointScope::Kernel) => target.kernel_dtb(),
-        None => target.current_dtb(),
-    }
-}
-
-/// Arm a one-byte debug-register execute breakpoint at `target`, resolved in
-/// the breakpoint's scope. A hardware site is an address, not a symbol
-/// identity, so a spec is kept only as its display symbol. Set in a
-/// partition view, it is the partition's (see
-/// [`Session::add_hardware_breakpoint`]).
-fn add_hardware_execute(
-    session: &mut Session,
-    target: Location,
-    config: BreakpointConfig,
-) -> PyResult<u32> {
-    let dtb = scope_dtb(&session.target, config.scope.as_ref());
-    let address = target.resolve(session, dtb)?;
-    let symbol = match target {
-        Location::Symbol(spec) => Some(spec),
-        Location::Address(_) => None,
-    };
-    session
-        .add_hardware_breakpoint(
-            VirtAddr(address),
-            HwBreakpointAccess::Execute,
-            1,
-            symbol,
-            config,
-        )
-        .map_err(err)
 }
 
 fn store_condition(py: Python<'_>, dbg: &Py<Debugger>, id: u32, callback: Option<Py<PyAny>>) {

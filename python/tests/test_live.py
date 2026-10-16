@@ -152,6 +152,17 @@ def test_run_to_symbol_stops_there(halted: Debugger) -> None:
     assert stop.rip == halted.symbols["nt!NtClose"]
 
 
+def test_an_address_inside_an_instruction_is_refused_as_bp_refuses_it(halted: Debugger) -> None:
+    start = halted.symbols["nt!NtClose"]
+    assert halted.memory.disassemble(start, 1)[0].length > 1
+    inside = start + 1
+    refusal = "is inside the instruction at nt!NtClose"
+    with pytest.raises(ntoseye.NtoseyeError, match=refusal):
+        halted.breakpoints.add(inside)
+    assert refusal in halted.command(f"bp {inside:#x}")
+    assert not list(halted.breakpoints)
+
+
 def test_trace_calls_returns_a_call_tree(halted: Debugger) -> None:
     for _ in range(ATTEMPTS):
         require_single_step(halted)

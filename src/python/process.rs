@@ -210,11 +210,6 @@ impl Process {
         })
     }
 
-    /// Evaluate a debugger expression in the symbol scope of this process.
-    fn eval(&self, py: Python<'_>, expr: &str) -> PyResult<u64> {
-        symbols::eval(py, &self.owner, &self.space(), expr)
-    }
-
     fn __repr__(&self) -> String {
         format!(
             "Process(pid={}, name={:?}, eprocess={:#x})",

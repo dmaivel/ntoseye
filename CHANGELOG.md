@@ -66,6 +66,7 @@ The Python SDK is now generated from the same definitions as the REPL: each comm
 - `Cpu.pcr()` and the other per-processor SDK methods refuse a processor number the target does not have, as `!pcr 99` does.
 - `Symbols.reload()` reports breakpoints it could not resolve again in its `breakpoint_error` instead of raising.
 - A step over a call whose page is not resident, or whose code does not decode, says why on every host, not only in the REPL.
+- The SDK's `breakpoints.add()` refuses an address inside an instruction, as `bp` and `bu` do, instead of setting a breakpoint that corrupts it; where it cannot check, it puts the warning in `dbg.notices()`, and `unchecked=True` skips the check, as `bp /a` does. Its breakpoints and `watch()`'s are named by their closest symbol in `bl`, as the REPL's are, and in VTL1 a hardware one refuses `process=` and `thread=`, as `ba /p` and `/t` do.
 
 ### Removed
 

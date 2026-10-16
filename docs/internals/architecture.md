@@ -142,7 +142,7 @@ Every SDK class reaches the module without a list: `build.rs` finds each `#[reco
 
 `build.rs` also fails the build on a name clash, which PyO3 would resolve silently by keeping one of the two: two SDK classes with one Python name, or two members of one class with one Python name. It collects a class's members from every source: a record's properties and `#[record(getter)]`s, a handle's generated members (`info`, `to_dict`, its record's properties), a `#[collection]`'s protocol, `#[command(python = ...)]` methods and forms, and hand-written `#[pymethods]`. A `#[handle] impl` item with the name of a generated property replaces it on purpose, and is not a clash.
 
-Some SDK methods are written by hand. These are properties and setters (`Symbols.path`), mapping objects (`Cpu.msr`), cursor reads (`Debugger.debug_log`), and operations that no command performs. They return model records through `Typed` as well.
+Some SDK methods are written by hand. These are properties and setters (`Symbols.path`), mapping objects (`Cpu.msr`), cursor reads (`Debugger.debug_log`), and operations that no command performs. They return model records through `Typed` as well. A method that performs a command's operation but returns a live handle or takes a Python callback, such as `breakpoints.add()` (`bp`, `bu`, `ba`) with its `when=`, is a thin wrapper: it calls the session function that the command calls (`Session::set_code_breakpoint`, `set_symbolic_breakpoint`, `set_hardware_breakpoint`), which holds the operation's checks, so the two cannot drift.
 
 ## Adding a command
 

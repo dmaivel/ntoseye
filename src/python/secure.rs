@@ -6,13 +6,14 @@ use ntoseye_macros::handle;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
-use super::context::Space;
+use super::command::{CommandHost, HostSession};
+use super::context::{Context, Space};
 use super::err;
 use super::handle::Owner;
 use super::memory::Memory;
 use super::module::Modules;
 use super::process::Process;
-use super::symbols::{self, Symbols};
+use super::symbols::Symbols;
 use super::types::Types;
 use crate::guest::TrustletInfo;
 use crate::types::Dtb;
@@ -40,6 +41,17 @@ impl SecureKernel {
 
     fn space(&self) -> Space {
         Space::Secure(self.root)
+    }
+}
+
+/// A command runs in the secure kernel's system address space.
+impl CommandHost for SecureKernel {
+    fn session(&self) -> HostSession<'_> {
+        HostSession::Owner(&self.owner)
+    }
+
+    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
+        Ok(self.space().context())
     }
 }
 
@@ -109,12 +121,6 @@ impl SecureKernel {
             .collect())
     }
 
-    /// Evaluate a debugger expression in the symbol scope of the secure kernel.
-    /// Registers hold VTL0 state, and this method does not accept them.
-    fn eval(&self, py: Python<'_>, expr: &str) -> PyResult<u64> {
-        symbols::eval(py, &self.owner, &self.space(), expr)
-    }
-
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
         other
             .extract::<PyRef<'_, SecureKernel>>()
@@ -133,7 +139,7 @@ impl SecureKernel {
 /// An isolated user-mode process (trustlet) in VTL1, such as `LsaIso.exe`. Its
 /// read-only views go through the page tables of the trustlet, which map the
 /// user half of the trustlet and the secure kernel.
-#[handle(record = TrustletInfo, key = process, impl)]
+#[handle(record = TrustletInfo, key = process, context = self.space().context(), impl)]
 pub struct Trustlet {
     owner: Owner,
     info: TrustletInfo,
@@ -183,11 +189,6 @@ impl Trustlet {
     fn types(&self, py: Python<'_>) -> PyResult<Types> {
         self.owner.check(py)?;
         Ok(Types::new(self.owner.clone_ref(py), self.space()))
-    }
-
-    /// Evaluate a debugger expression in this trustlet's address space.
-    fn eval(&self, py: Python<'_>, expr: &str) -> PyResult<u64> {
-        symbols::eval(py, &self.owner, &self.space(), expr)
     }
 
     fn __repr__(&self) -> String {

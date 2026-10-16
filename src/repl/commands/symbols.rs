@@ -193,7 +193,7 @@ impl Render<VirtAddr> for Option<Symbol> {
     names = ["?", "ev"],
     category = "symbols, types, and expressions",
     kind = Query,
-    python = none,
+    forms = [eval],
     style = ExpressionTail,
 )]
 fn ev(
@@ -219,6 +219,21 @@ fn ev(
     }
 
     Ok(())
+}
+
+/// Evaluate a debugger (MASM) expression to an integer (`?`) in this
+/// object's scope: the debugger's is the kernel's, with the registers of the
+/// stopped vCPU (on a user-mode minidump, of the selected thread); a
+/// process's resolves the symbols of its modules, which it loads first; a
+/// VTL1 address space's (the secure kernel's, a trustlet's) has no
+/// registers, as the live ones hold VTL0 state.
+#[command(form_of = ev, python = [Debugger, Process, SecureKernel, Trustlet])]
+fn eval(session: &Session, expr: String) -> Result<u64> {
+    let target = &session.target;
+    if let Some(process) = target.attached_process() {
+        target.load_process_module_symbols(process.pid, process.dtb, None)?;
+    }
+    Ok(Expr::eval(&expr, target)?.0)
 }
 
 /// Every word left, at least one.

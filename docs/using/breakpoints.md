@@ -49,7 +49,7 @@ If nothing near the address says where its instructions start, or that code cann
 
 `/a` skips the check, for code where decoding from the function's start is wrong about an address, such as code that jumps into the middle of its own instructions. For {command}`g`, use `ba e1 /1 <address>` and then {command}`g` instead.
 
-A `ba e1` breakpoint does not write to memory, so it needs no check. ntoseye checks only these commands, not the breakpoints that the Python SDK and DAP clients set.
+The Python SDK's `dbg.breakpoints.add()` makes the same check, with the same refusal: it raises `NtoseyeError` for an address inside an instruction, puts the warning in `dbg.notices()` when it cannot check, and skips the check with `unchecked=True`. A `ba e1` breakpoint, and `add(..., hardware=True)`, does not write to memory, so it needs no check. ntoseye does not check the breakpoints that DAP and GDB clients set.
 
 ## Breakpoints on non-resident pages
 

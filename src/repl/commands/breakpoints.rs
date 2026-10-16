@@ -13,8 +13,8 @@ use tabled::settings::Padding;
 use owo_colors::OwoColorize;
 
 use crate::breakpoints::{
-    BreakpointCommands, BreakpointConfig, BreakpointId, BreakpointInfo, BreakpointManager,
-    BreakpointScope, BreakpointSpec, HypercallFilter, ThreadScope,
+    BreakpointCommands, BreakpointConfig, BreakpointId, BreakpointInfo, BreakpointScope,
+    BreakpointSpec, HypercallFilter, ThreadScope,
 };
 use crate::dbg_backend::HwBreakpointAccess;
 use crate::diagnostics;
@@ -244,32 +244,11 @@ fn set_breakpoint(
             None => return Err(error),
         },
     };
-    let label_dtb = match config.scope.as_ref() {
-        Some(BreakpointScope::Process { dtb, .. }) => *dtb,
-        _ => state.ctx.target.current_dtb(),
-    };
-    let warning = if config.unchecked {
-        None
-    } else {
-        state.ctx.check_instruction_start(label_dtb, address)?
-    };
-    let symbol = state
-        .ctx
-        .target
-        .symbols
-        .format_closest_symbol_for_address(label_dtb, address);
-    let session = &mut *state.ctx;
-    let id = session.breakpoints.add_configured(
-        &mut *session.backend,
-        &session.target,
-        address,
-        symbol,
-        config,
-    )?;
+    let set = state.ctx.set_code_breakpoint(address, config)?;
     Ok(BreakpointsSet::Address {
-        breakpoint: added(session, id)?,
+        breakpoint: added(state.ctx, set.id)?,
         address,
-        warning,
+        warning: set.warning,
     })
 }
 
@@ -297,22 +276,11 @@ fn set_symbolic_breakpoint(
     if BreakpointSpec::source(&spec, 0).is_some() {
         return set_source_breakpoint(state.ctx, spec, config);
     }
-    let warning = if config.unchecked {
-        None
-    } else {
-        check_symbol_site(state.ctx, &spec, config.scope.as_ref())?
-    };
-    let session = &mut *state.ctx;
-    let id = session.breakpoints.add_symbolic(
-        &mut *session.backend,
-        &session.target,
-        spec.clone(),
-        config,
-    )?;
+    let set = state.ctx.set_symbolic_breakpoint(spec.clone(), config)?;
     Ok(BreakpointsSet::Symbolic {
-        breakpoint: added(session, id)?,
+        breakpoint: added(state.ctx, set.id)?,
         spec,
-        warning,
+        warning: set.warning,
     })
 }
 
@@ -368,14 +336,6 @@ fn set_hardware_breakpoint(
     let Some(spec) = args.access_spec.as_deref() else {
         return Err(Error::DebugInfo("ba: missing access/size".to_string()));
     };
-    // Resolving these walks NT's process and thread lists, which say
-    // nothing about which VTL1 context executes the address.
-    if state.ctx.target.in_secure_address_space() && (args.pid.is_some() || args.thread.is_some()) {
-        return Err(Error::DebugInfo(
-            "ba: /p and /t name NT processes and threads; a VTL1 hardware breakpoint is global"
-                .to_string(),
-        ));
-    }
     let (access, len) = parse_hw_breakpoint_spec(spec)?;
     let target = args.target.clone();
     let condition = args.condition.clone();
@@ -387,18 +347,9 @@ fn set_hardware_breakpoint(
             .resolve_symbol_in_scope(&target, config.scope.as_ref())
             .ok_or(error)?,
     };
-    let label_dtb = match config.scope.as_ref() {
-        Some(BreakpointScope::Process { dtb, .. }) => *dtb,
-        _ => state.ctx.target.current_dtb(),
-    };
-    let symbol = state
-        .ctx
-        .target
-        .symbols
-        .format_closest_symbol_for_address(label_dtb, address);
     let id = state
         .ctx
-        .add_hardware_breakpoint(address, access, len, symbol, config)?;
+        .set_hardware_breakpoint(address, access, len, config)?;
     Ok(BreakpointsSet::Hardware {
         breakpoint: added(state.ctx, id)?,
         address,
@@ -521,42 +472,12 @@ fn set_source_breakpoint(
     spec: String,
     config: BreakpointConfig,
 ) -> Result<BreakpointsSet> {
-    let ids = session.breakpoints.add_source(
-        &mut *session.backend,
-        &session.target,
-        spec.clone(),
-        config,
-    )?;
+    let ids = session.add_source_breakpoint(spec.clone(), config)?;
     let breakpoints = ids
         .into_iter()
         .map(|id| added(session, id))
         .collect::<Result<_>>()?;
     Ok(BreakpointsSet::Source { breakpoints, spec })
-}
-
-/// Check that an instruction starts where `bu`'s symbol resolves, as
-/// [`Session::check_instruction_start`] does. A symbol's own start always is
-/// one, but an offset into a symbol that does not resolve yet cannot be
-/// checked, which the warning says.
-fn check_symbol_site(
-    session: &Session,
-    spec: &str,
-    scope: Option<&BreakpointScope>,
-) -> Result<Option<String>> {
-    let target = &session.target;
-    match BreakpointManager::resolve_symbol_in_scope(target, spec, scope)? {
-        Some((_, 0)) => Ok(None),
-        Some((address, _)) => session
-            .check_instruction_start(BreakpointManager::resolution_dtb(target, scope), address),
-        None => match BreakpointSpec::split_symbol_offset(spec) {
-            Some((symbol, offset)) if offset != 0 => Ok(Some(format!(
-                "{} does not resolve yet, so ntoseye could not check that an instruction starts \
-                 at {spec}",
-                symbol.trim(),
-            ))),
-            _ => Ok(None),
-        },
-    }
 }
 
 impl Render for BreakpointsSet {
@@ -1711,6 +1632,9 @@ impl ReplState<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::breakpoints::BreakpointManager;
+    use crate::output::capture;
+    use crate::session::session_over_memory;
 
     #[test]
     fn breakpoint_option_numbers_honor_radix_prefixes() {
@@ -1864,5 +1788,49 @@ mod tests {
         assert!(hypercall_code_text("HvCallUnimplemented", NumberRadix::Hexadecimal).is_err());
         assert!(parse(&["/p", "4", "HvCallPostMessage"]).is_err());
         assert!(parse(&["/t", "4", "HvCallPostMessage"]).is_err());
+    }
+
+    /// `bp` and `bu` check their site in the session functions that the
+    /// SDK's `breakpoints.add` calls too, so the SDK refuses an address
+    /// inside an instruction exactly as `bp` does, and sets nothing there.
+    #[test]
+    fn bp_and_the_sdk_refuse_an_address_inside_an_instruction() {
+        // driver!Function starts with `mov [rsp+8], rbx`, five bytes long.
+        let mut code = [0x90u8; 0x40];
+        code[0x10..0x15].copy_from_slice(&[0x48, 0x89, 0x5c, 0x24, 0x08]);
+        let mut session = session_over_memory(0x1000, &code);
+        let dtb = session.target.current_dtb();
+        session.target.symbols.set_kernel(Some(1), dtb);
+        session
+            .target
+            .symbols
+            .inject_module_for_test(1, Vec::new(), &[("Function", 0x10)]);
+        session.target.symbols.inject_source_lines_for_test(
+            1,
+            dtb,
+            VirtAddr(0x1000),
+            0x40,
+            "driver.c",
+            &[],
+        );
+        let inside = "is inside the instruction at driver!Function";
+
+        let address = session
+            .set_code_breakpoint(VirtAddr(0x1012), BreakpointConfig::default())
+            .err()
+            .expect("the SDK's address breakpoint is refused");
+        assert!(address.to_string().contains(inside), "{address}");
+        let symbolic = session
+            .set_symbolic_breakpoint("driver!Function+2".into(), BreakpointConfig::default())
+            .err()
+            .expect("the SDK's symbolic breakpoint is refused");
+        assert!(symbolic.to_string().contains(inside), "{symbolic}");
+
+        let mut state = ReplState::for_oneshot(&mut session);
+        for line in ["bp 0x1012", "bu driver!Function+2"] {
+            let (_, text) = capture(|| state.dispatch_line(line));
+            assert!(text.contains(inside), "{line}: {text}");
+        }
+        assert!(session.breakpoints.list().is_empty());
     }
 }

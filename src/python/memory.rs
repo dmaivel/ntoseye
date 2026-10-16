@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use super::args::AddressArg;
-use super::command::{Bind, CommandHost, HostSession, admit};
+use super::command::{Bind, CommandHost, HostSession};
 use super::context::Context;
 use super::context::Space;
 use super::handle::Owner;
@@ -16,7 +16,7 @@ use crate::error::Error;
 use crate::guest::ProcessInfo;
 use crate::layout::utf16le_lossy;
 use crate::session::Session;
-use crate::session::effects::{Effects, TargetScope, Writes};
+use crate::session::effects::Effects;
 use crate::target::MemoryKind;
 use crate::target::memory::SearchSpace;
 use crate::target::mm::{AddressKind, VtopDetail};
@@ -131,21 +131,6 @@ impl Memory {
         Ok(bytes)
     }
 
-    /// Write `data` at `addr`, admitted as the REPL admits `eb` or `!eb`.
-    fn write_bytes(&self, py: Python<'_>, addr: u64, data: &[u8]) -> PyResult<()> {
-        self.space.require_writable()?;
-        check_read_len(data.len())?;
-        let context = self.space.context();
-        let (memory, effects) = match self.space {
-            Space::Physical => (MemoryKind::Physical, &PHYSICAL_WRITE),
-            _ => (MemoryKind::Virtual, &VIRTUAL_WRITE),
-        };
-        self.owner.with_in(py, &context, |session| {
-            admit(session, effects, "Memory.write")?;
-            session.target.write_memory(memory, addr, data).map_err(err)
-        })
-    }
-
     /// Decode the `kind` descriptor at `addr` in the `bits`-wide layout, or
     /// the one `.effmach` selects.
     fn read_descriptor(
@@ -172,19 +157,6 @@ impl Memory {
         })
     }
 }
-
-/// The effects of a virtual memory write, `eb`'s.
-const VIRTUAL_WRITE: Effects = Effects {
-    writes: &[Writes::Memory],
-    ..Effects::NONE
-};
-
-/// The effects of a physical memory write, `!eb`'s.
-const PHYSICAL_WRITE: Effects = Effects {
-    target: TargetScope::Kernel,
-    writes: &[Writes::Memory],
-    ..Effects::NONE
-};
 
 fn check_read_len(n: usize) -> PyResult<()> {
     if n > MAX_READ_LEN {
@@ -220,12 +192,6 @@ impl Memory {
         Ok(PyBytes::new(py, &bytes))
     }
 
-    /// Write bytes to this address space.
-    fn write(&self, py: Python<'_>, address: AddressArg, data: &[u8]) -> PyResult<()> {
-        let addr = self.address(py, address)?;
-        self.write_bytes(py, addr, data)
-    }
-
     /// Read a little-endian byte.
     fn read_u8(&self, py: Python<'_>, address: AddressArg) -> PyResult<u8> {
         let addr = self.address(py, address)?;
@@ -248,30 +214,6 @@ impl Memory {
     fn read_u64(&self, py: Python<'_>, address: AddressArg) -> PyResult<u64> {
         let addr = self.address(py, address)?;
         Ok(u64::from_le_bytes(self.read_fixed::<8>(py, addr)?))
-    }
-
-    /// Write a little-endian byte.
-    fn write_u8(&self, py: Python<'_>, address: AddressArg, value: u8) -> PyResult<()> {
-        let addr = self.address(py, address)?;
-        self.write_bytes(py, addr, &value.to_le_bytes())
-    }
-
-    /// Write a little-endian 16-bit integer.
-    fn write_u16(&self, py: Python<'_>, address: AddressArg, value: u16) -> PyResult<()> {
-        let addr = self.address(py, address)?;
-        self.write_bytes(py, addr, &value.to_le_bytes())
-    }
-
-    /// Write a little-endian 32-bit integer.
-    fn write_u32(&self, py: Python<'_>, address: AddressArg, value: u32) -> PyResult<()> {
-        let addr = self.address(py, address)?;
-        self.write_bytes(py, addr, &value.to_le_bytes())
-    }
-
-    /// Write a little-endian 64-bit integer.
-    fn write_u64(&self, py: Python<'_>, address: AddressArg, value: u64) -> PyResult<()> {
-        let addr = self.address(py, address)?;
-        self.write_bytes(py, addr, &value.to_le_bytes())
     }
 
     /// The guest pointer width, in bytes (`$ptrsize`).
