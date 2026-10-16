@@ -51,17 +51,6 @@ fn bitfield_extraction_covers_the_whole_word() {
 }
 
 #[test]
-fn wide_text_pairs_surrogates_and_stops_at_nul_only_when_terminated() {
-    // "a", U+1F600 as a surrogate pair, NUL, "b".
-    let bytes: Vec<u8> = [0x61u16, 0xd83d, 0xde00, 0, 0x62]
-        .into_iter()
-        .flat_map(u16::to_le_bytes)
-        .collect();
-    assert_eq!(utf16le_nul_terminated(&bytes), "a\u{1f600}");
-    assert_eq!(utf16le_lossy(&bytes), "a\u{1f600}\0b");
-}
-
-#[test]
 fn unnamed_aggregates_are_keyed_by_field_list_and_shown_by_pdb_name() {
     // A named type keeps its name, `#` and all; only an unnamed one with
     // its own field list (not a forward reference) gets the index.

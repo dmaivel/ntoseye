@@ -1,11 +1,12 @@
 use crate::dbg_backend::DebugCapability;
 use crate::diagnostics::print_warning;
-use crate::dump_writer::{DumpWrite, collect_dump_metadata, write_kernel_dump};
+use crate::dump_writer::{DumpWrite, write_kernel_dump};
 use crate::error::{Error, Result};
 use crate::kd::{KdFileMapping, kd_files, load_map_file};
 use crate::output;
 use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
+use crate::session::dump::collect_dump_metadata;
 use crate::session::{Motion, Session};
 use indicatif::ProgressStyle;
 use ntoseye_macros::{command, grammar};

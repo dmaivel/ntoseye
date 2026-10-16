@@ -14,9 +14,9 @@ use super::{
     UserDumpInfo, UserException, UserHandle, UserModule, UserSystemInfo, UserThreadInfo,
     UserThreadTimes, UserTimeZone,
 };
+use crate::bytes::{utf16le_lossy, utf16le_nul_terminated};
 use crate::cpu_context::{amd64, arm64};
 use crate::error::{Error, Result};
-use crate::layout::{utf16le_lossy, utf16le_nul_terminated};
 use crate::pe::headers::{MAX_CODEVIEW_BYTES, decode_codeview};
 use crate::types::Arch;
 

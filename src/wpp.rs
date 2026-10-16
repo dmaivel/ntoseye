@@ -22,7 +22,8 @@
 
 use std::sync::{Arc, OnceLock};
 
-use crate::layout::{EnumDef, le_uint, utf16le_lossy};
+use crate::bytes::utf16le_lossy;
+use crate::layout::{EnumDef, le_uint};
 use crate::ntstatus::{ntstatus_name, win32_error_name};
 use crate::target::etw::{GuidStyle, format_guid, parse_guid};
 

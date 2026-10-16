@@ -13,9 +13,9 @@ use std::sync::Arc;
 use ntoseye_macros::record;
 
 use super::{Target, bounded_record_list_walk};
-use crate::bytes::before_nul;
+use crate::bytes::{before_nul, utf16le_nul_terminated};
 use crate::error::{Error, Result};
-use crate::layout::{ParsedType, StructRef, TypeInfo, Types, le_uint, utf16le_nul_terminated};
+use crate::layout::{ParsedType, StructRef, TypeInfo, Types, le_uint};
 use crate::memory::MemoryOps;
 use crate::target::etw::format_filetime_precise;
 use crate::target::srb::srb_status_text;

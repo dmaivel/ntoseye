@@ -1,3 +1,4 @@
+use crate::bytes::utf16le_nul_terminated;
 use crate::bytes::{c_string_lossy, read_u16, read_u32, read_u64};
 use crate::cpu_context::{amd64, arm64};
 use crate::debugger_data::KdDebuggerData64;
@@ -11,7 +12,6 @@ use crate::dmp::{
 };
 use crate::error::{Error, Result};
 use crate::guest::ModuleInfo;
-use crate::layout::utf16le_nul_terminated;
 use crate::types::VirtAddr;
 use std::mem::{offset_of, size_of};
 

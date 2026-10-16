@@ -5,10 +5,10 @@ use std::iter::repeat_n;
 use std::result;
 use std::sync::Arc;
 
-use crate::bytes::before_nul;
+use crate::bytes::{before_nul, utf16le_lossy};
 use crate::layout::{
     FieldInfo, ParsedType, TypeInfo, abi_layout, bitfield_value, find_field, le_uint, named_type,
-    nested_layout_name, primitive_size, utf16le_lossy,
+    nested_layout_name, primitive_size,
 };
 use crate::session::Session;
 use crate::types::{Dtb, VirtAddr};

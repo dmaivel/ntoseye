@@ -27,8 +27,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::{DiagnosticValue, Target, bounded_record_list_walk};
+use crate::bytes::{utf16le_lossy, utf16le_nul_terminated};
 use crate::error::{Error, Result};
-use crate::layout::{TypeInfo, Types, utf16le_lossy, utf16le_nul_terminated};
+use crate::layout::{TypeInfo, Types};
 use crate::memory::{AddressSpace, MemoryOps};
 use crate::phys::PhysMem;
 use crate::target::etw::format_filetime_precise;

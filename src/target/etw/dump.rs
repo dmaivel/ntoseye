@@ -25,11 +25,11 @@ use super::{
     EventCollector, LogFileLogger, LogFileSystem, MAX_BUFFER_SIZE, TimeBase, etw_buffer,
     format_filetime_precise, logger_mode_names,
 };
+use crate::bytes::utf16le_lossy;
 use crate::bytes::{read_u32, read_u64};
 use crate::error::{Error, Result};
 use crate::expr::Expr;
 use crate::kuser_shared::KuserSharedData;
-use crate::layout::utf16le_lossy;
 use crate::target::Target;
 use crate::types::VirtAddr;
 use ntoseye_macros::record;

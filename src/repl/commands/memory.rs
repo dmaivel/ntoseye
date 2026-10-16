@@ -6,10 +6,10 @@ use owo_colors::OwoColorize;
 
 use ntoseye_macros::{command, grammar};
 
+use crate::bytes::utf16le_lossy;
 use crate::error::{Error, Result, best_effort};
 use crate::expr::Expr;
 use crate::guest::ProcessInfo;
-use crate::layout::utf16le_lossy;
 use crate::memory::{
     MemoryOps, TerminatedRead, for_each_page_chunk, pattern_offsets, read_page_chunks,
 };

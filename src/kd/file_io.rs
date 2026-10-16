@@ -39,10 +39,10 @@ use std::io::{ErrorKind, Read, Result as IoResult, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
+use crate::bytes::utf16le_nul_terminated;
 use crate::bytes::{read_u32, read_u64, write_u32, write_u64};
 use crate::error::{Error, Result};
 use crate::kd::framing::{KdFraming, PACKET_MAX_SIZE, PACKET_TYPE_KD_FILE_IO};
-use crate::layout::utf16le_nul_terminated;
 
 use super::{
     DBGKD_CLOSE_FILE_API, DBGKD_CREATE_FILE_API, DBGKD_FILE_IO_HEADER_SIZE, DBGKD_READ_FILE_API,

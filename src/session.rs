@@ -69,6 +69,7 @@ macro_rules! step_trace {
 pub mod breakpoints;
 pub mod context;
 pub mod driver;
+pub mod dump;
 pub mod effects;
 pub mod hardware;
 pub mod hits;

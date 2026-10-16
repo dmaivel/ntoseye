@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use zerocopy::{FromBytes, IntoBytes};
 
-use super::{ParsedType, TypeInfo, le_uint, utf16le_lossy};
+use super::{ParsedType, TypeInfo, le_uint};
+use crate::bytes::utf16le_lossy;
 use crate::error::{Error, Result};
 use crate::memory::{AddressSpace, MemoryOps};
 use crate::phys::PhysMem;

@@ -4,9 +4,9 @@
 //! PnP event in progress, winlogon's state, and the PCI configuration
 //! snapshot. The layouts and checks follow WinDbg's `ext.dll`.
 
+use crate::bytes::utf16le_nul_terminated;
 use crate::bytes::{c_string_lossy, read_u16, read_u32, read_u64};
 use crate::dmp::tagged::TaggedBlock;
-use crate::layout::utf16le_nul_terminated;
 use crate::target::etw::{GuidStyle, format_guid, parse_guid};
 use ntoseye_macros::record;
 

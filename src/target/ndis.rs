@@ -6,8 +6,9 @@ use std::sync::Arc;
 
 use ntoseye_macros::record;
 
+use crate::bytes::utf16le_lossy;
 use crate::error::{Error, Result};
-use crate::layout::{StructRef, TypeInfo, Types, utf16le_lossy};
+use crate::layout::{StructRef, TypeInfo, Types};
 use crate::memory::MemoryOps;
 use crate::ntstatus::ntstatus_name;
 use crate::target::{ListCursor, ListTermination, Target};

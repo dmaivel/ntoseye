@@ -5,12 +5,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::bytes::c_string_lossy;
+use crate::bytes::{c_string_lossy, utf16le_lossy, utf16le_nul_terminated};
 use crate::error::{Error, Result};
 use crate::expr::{Expr, ExprValue, NumberRadix};
 use crate::layout::{
     ParsedType, TypeInfo, abi_layout, bitfield_value, is_signed_primitive, named_type,
-    nested_layout_name, utf16le_lossy, utf16le_nul_terminated, windbg_type_name,
+    nested_layout_name, windbg_type_name,
 };
 use crate::target::ThreadInfo;
 use crate::types::VirtAddr;

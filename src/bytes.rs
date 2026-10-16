@@ -1,4 +1,5 @@
-//! Little-endian integer access and C-string termination in byte buffers.
+//! Little-endian integer access, C-string termination and UTF-16 text in
+//! byte buffers.
 //!
 //! `get_*` return `None` when the field runs past the buffer and suit
 //! offsets taken from untrusted data. `read_*` and `write_*` index directly
@@ -72,6 +73,32 @@ pub fn c_string_lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(before_nul(bytes)).into_owned()
 }
 
+/// Decode little-endian UTF-16 (`WCHAR` text), replacing unpaired surrogates.
+/// A trailing odd byte is not a code unit and is dropped.
+pub fn utf16le_lossy(bytes: &[u8]) -> String {
+    decode_utf16le(utf16le_units(bytes))
+}
+
+/// [`utf16le_lossy`] up to the first NUL unit, for a `WCHAR` buffer that
+/// holds a terminated string.
+pub fn utf16le_nul_terminated(bytes: &[u8]) -> String {
+    decode_utf16le(utf16le_units(bytes).take_while(|unit| *unit != 0))
+}
+
+fn utf16le_units(bytes: &[u8]) -> impl Iterator<Item = u16> + '_ {
+    bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|unit| u16::from_le_bytes(*unit))
+}
+
+fn decode_utf16le(units: impl Iterator<Item = u16>) -> String {
+    char::decode_utf16(units)
+        .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,5 +112,16 @@ mod tests {
         assert_eq!(before_nul(b"\0abc"), b"");
         assert_eq!(before_nul(b""), b"");
         assert_eq!(c_string_lossy(b"a\xffb\0c"), "a\u{fffd}b");
+    }
+
+    #[test]
+    fn wide_text_pairs_surrogates_and_stops_at_nul_only_when_terminated() {
+        // "a", U+1F600 as a surrogate pair, NUL, "b".
+        let bytes: Vec<u8> = [0x61u16, 0xd83d, 0xde00, 0, 0x62]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(utf16le_nul_terminated(&bytes), "a\u{1f600}");
+        assert_eq!(utf16le_lossy(&bytes), "a\u{1f600}\0b");
     }
 }

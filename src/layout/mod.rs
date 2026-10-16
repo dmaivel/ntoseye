@@ -294,32 +294,6 @@ pub fn bitfield_value(raw: u64, pos: u8, len: u8) -> u64 {
     raw.checked_shr(u32::from(pos)).unwrap_or(0) & bitfield_mask(len)
 }
 
-/// Decode little-endian UTF-16 (`WCHAR` text), replacing unpaired surrogates.
-/// A trailing odd byte is not a code unit and is dropped.
-pub fn utf16le_lossy(bytes: &[u8]) -> String {
-    decode_utf16le(utf16le_units(bytes))
-}
-
-/// [`utf16le_lossy`] up to the first NUL unit, for a `WCHAR` buffer that
-/// holds a terminated string.
-pub fn utf16le_nul_terminated(bytes: &[u8]) -> String {
-    decode_utf16le(utf16le_units(bytes).take_while(|unit| *unit != 0))
-}
-
-fn utf16le_units(bytes: &[u8]) -> impl Iterator<Item = u16> + '_ {
-    bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|unit| u16::from_le_bytes(*unit))
-}
-
-fn decode_utf16le(units: impl Iterator<Item = u16>) -> String {
-    char::decode_utf16(units)
-        .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
-        .collect()
-}
-
 /// Byte width of a primitive type name, as the PDB spells it or as a user
 /// writes it in an expression; `None` for anything else.
 pub fn primitive_size(name: &str) -> Option<u64> {

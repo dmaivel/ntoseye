@@ -5,9 +5,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::layout::{
-    FieldInfo, ParsedType, TypeInfo, named_type, nested_layout_name, utf16le_lossy,
-};
+use crate::bytes::utf16le_lossy;
+use crate::layout::{FieldInfo, ParsedType, TypeInfo, named_type, nested_layout_name};
 use crate::session::Session;
 use crate::types::VirtAddr;
 use crate::typeview::TypeView;

@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::ops::ControlFlow;
 
 use super::{DiagnosticValue, Target, fast_ref_address};
+use crate::bytes::utf16le_lossy;
 use crate::error::{Error, Result};
-use crate::layout::utf16le_lossy;
 use crate::memory::MemoryOps;
 use crate::types::VirtAddr;
 use ntoseye_macros::record;

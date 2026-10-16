@@ -4,9 +4,9 @@
 use super::vad::{MissingOffset, VadTreeOffsets, vad_tree_link};
 use super::{Guest, ModuleInfo, ProcessInfo, ProcessModulesDetail};
 use crate::{
-    bytes::{read_u16, read_u32},
+    bytes::{read_u16, read_u32, utf16le_lossy},
     error::{Error, Result},
-    layout::{StructRef, Types, utf16le_lossy},
+    layout::{StructRef, Types},
     memory,
     memory::MemoryOps,
     pe::read_pe_version_info,
