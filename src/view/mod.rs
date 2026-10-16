@@ -10,7 +10,6 @@ pub mod meta;
 pub mod record;
 
 pub mod triage;
-pub mod userdump;
 
 /// A node in the value tree the SDK builds its results from.
 pub enum View {

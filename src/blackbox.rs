@@ -7,7 +7,8 @@
 use crate::bytes::{c_string_lossy, read_u16, read_u32, read_u64};
 use crate::dmp::tagged::TaggedBlock;
 use crate::layout::utf16le_nul_terminated;
-use crate::target::etw::parse_guid;
+use crate::target::etw::{GuidStyle, format_guid, parse_guid};
+use ntoseye_macros::record;
 
 pub const BSD_TAG: &str = "{f57308df-cc45-4e01-ad76-29a4ebb010ec}";
 pub const NTFS_TAG: &str = "{00afe9c4-940d-4213-8016-cd3719b5bc20}";
@@ -32,6 +33,7 @@ fn u8_at(data: &[u8], offset: usize) -> u8 {
 
 /// The boot status data (`RTL_BSD_DATA`) the boot manager and the kernel
 /// keep in `bootstat.dat`. Sections past `version` (its size) are absent.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootStatus {
     pub version: u32,
@@ -58,6 +60,8 @@ pub struct BootStatus {
     pub feature_configuration_state: Option<u32>,
 }
 
+/// The power transition section of the boot status data.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PowerTransition {
     pub power_button_timestamp: u64,
@@ -75,6 +79,8 @@ pub struct PowerTransition {
     pub last_update_boot_id: u32,
 }
 
+/// The error info section of the boot status data.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BsdErrorInfo {
     pub boot_id: u32,
@@ -84,6 +90,8 @@ pub struct BsdErrorInfo {
     pub status: u32,
 }
 
+/// The power button section of the boot status data.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PowerButton {
     pub last_press_time: u64,
@@ -102,6 +110,8 @@ pub struct PowerButton {
     pub transition_latest_checkpoint_sequence_number: u32,
 }
 
+/// The power transition extension of the boot status data.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionExtension {
     pub shutdown_device_type: u8,
@@ -213,6 +223,7 @@ pub fn decode_boot_status(block: &[u8]) -> Result<BootStatus, String> {
 }
 
 /// One NTFS blackbox record.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NtfsRecord {
     /// `1` slow I/O timeout, `2` oplock break timeout.
@@ -353,9 +364,11 @@ pub fn decode_ntfs(data: &[u8]) -> Result<Vec<NtfsRecord>, String> {
 }
 
 /// The PnP event in progress, or the last one.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PnpBlackbox {
-    pub activity_id: [u8; 16],
+    /// The activity GUID, braced and in upper case.
+    pub activity_id: String,
     pub activity_time: u64,
     pub event_information: i32,
     pub event_in_progress: u8,
@@ -373,7 +386,10 @@ pub fn decode_pnp(data: &[u8]) -> Result<PnpBlackbox, String> {
     }
     let veto_at = read_u32(data, 0x28) as usize;
     Ok(PnpBlackbox {
-        activity_id: data[..16].try_into().unwrap_or_default(),
+        activity_id: format_guid(
+            &data[..16].try_into().unwrap_or_default(),
+            GuidStyle::BracedUpper,
+        ),
         activity_time: read_u64(data, 0x10),
         event_information: read_u32(data, 0x18) as i32,
         event_in_progress: u8_at(data, 0x1c),
@@ -386,6 +402,7 @@ pub fn decode_pnp(data: &[u8]) -> Result<PnpBlackbox, String> {
 }
 
 /// What winlogon was doing.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WinlogonBlackbox {
     pub thread_name: String,
@@ -407,6 +424,7 @@ pub fn decode_winlogon(data: &[u8]) -> Result<WinlogonBlackbox, String> {
 }
 
 /// One function's configuration header as pci.sys recorded it.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PciRecord {
     pub bus: u8,

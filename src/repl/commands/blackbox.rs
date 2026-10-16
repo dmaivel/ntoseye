@@ -2,221 +2,211 @@
 //! in it (`!blackboxbsd`, `!blackboxntfs`, `!blackboxpnp`,
 //! `!blackboxwinlogon`, `!blackboxpci`), as WinDbg shows them.
 
-use std::sync::Arc;
-
 use crate::blackbox::{
-    BSD_TAG, BootStatus, NTFS_OPLOCK_BREAK_TIMEOUT, NTFS_SLOW_IO_TIMEOUT, NTFS_TAG, PCI_TAG,
-    PNP_TAG, WINLOGON_TAG, decode_boot_status, decode_ntfs, decode_pci, decode_pnp,
-    decode_winlogon, feature_configuration_state_name, ntfs_break_reason_name,
-    ntfs_record_kind_name, pci_command_flags, pci_status_flags, tagged_block,
+    BSD_TAG, BootStatus, NTFS_OPLOCK_BREAK_TIMEOUT, NTFS_SLOW_IO_TIMEOUT, NTFS_TAG, NtfsRecord,
+    PCI_TAG, PNP_TAG, PciRecord, PnpBlackbox, WINLOGON_TAG, WinlogonBlackbox, decode_boot_status,
+    decode_ntfs, decode_pci, decode_pnp, decode_winlogon, feature_configuration_state_name,
+    ntfs_break_reason_name, ntfs_record_kind_name, pci_command_flags, pci_status_flags,
+    tagged_block,
 };
 use crate::dmp::tagged::{TaggedBlock, known_tag};
-use crate::error::Result;
+use crate::error::{Error, Result};
+use crate::session::Session;
 use crate::target::etw::{GuidStyle, format_guid, parse_guid};
 use crate::triage_report::time::filetime_to_iso;
 use crate::types::VirtAddr;
 use crate::ui;
 
 use crate::repl::*;
-
-repl_command! {
-    cmd_enumtag;
-    names: [".enumtag"],
-    category: "analysis",
-    usage: ".enumtag [tag]",
-    summary: "List the tagged data blocks that bugcheck callbacks added to the crash dump.",
-    details: "Each block shows its GUID tag, its size, who writes it, and its first bytes; with a tag, every byte of that block. A tag that Windows writes names its global and what it holds, such as nt!PopBlackBoxPnpGuid, the PnP blackbox that !blackboxpnp decodes. For another tag, such as a driver's KBUGCHECK_REASON_CALLBACK data, ntoseye looks for its bytes in the kernel modules' images and names the global that holds it, when the dump has the image and its symbols are loaded. The SDK reads a block with Debugger.read_tagged.",
-    completion: None,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_blackboxbsd;
-    names: ["!blackboxbsd"],
-    category: "analysis",
-    usage: "!blackboxbsd",
-    summary: "Show the boot status data (bootstat.dat) the crash dump recorded.",
-    details: "Whether the last boot succeeded and shut down, the boot IDs of the last successful and abnormal shutdowns, the power transition and power button state, and the feature configuration state, as WinDbg's !blackboxbsd shows them.",
-    completion: None,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_blackboxntfs;
-    names: ["!blackboxntfs"],
-    category: "analysis",
-    usage: "!blackboxntfs",
-    summary: "Show the NTFS slow I/O and oplock break timeouts the crash dump recorded.",
-    details: "Each record shows its type and length; a slow I/O timeout its IRP, SCB, and waiting thread, and an oplock break timeout its reason (the NTFS routine), IRP, SCB, and the owning and breaking processes, as WinDbg's !blackboxntfs shows them.",
-    completion: None,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_blackboxpnp;
-    names: ["!blackboxpnp"],
-    category: "analysis",
-    usage: "!blackboxpnp",
-    summary: "Show the PnP event the crash dump recorded.",
-    details: "The PnP activity, its time, the event, whether it was in progress, the device's problem code, the veto, and the device instance ID, as WinDbg's !blackboxpnp shows them.",
-    completion: None,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_blackboxwinlogon;
-    names: ["!blackboxwinlogon"],
-    category: "analysis",
-    usage: "!blackboxwinlogon",
-    summary: "Show what winlogon was doing when the crash dump was written.",
-    completion: None,
-    target: Kernel,
-}
-
-repl_command! {
-    cmd_blackboxpci;
-    names: ["!blackboxpci"],
-    category: "analysis",
-    usage: "!blackboxpci",
-    summary: "List the PCI functions pci.sys recorded in the crash dump, with their command and status.",
-    details: "Each function shows its bus, device, and function, its vendor and device IDs and revision, and its command and status registers with their flags as WinDbg's !blackboxpci shows them: i (I/O), m (memory), b (bus master), v (VGA palette snoop), p (parity), s (SERR) for the command, and c (capability list), 6 (66 MHz), P (master data parity error), A (signaled target abort), S (signaled system error) for the status. WinDbg prints the command register's value as the status value; ntoseye prints the status register's.",
-    completion: None,
-    target: Kernel,
-}
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
+use ntoseye_macros::command;
 
 /// How many 16-byte lines `.enumtag` shows of each block without a tag.
 const ENUMTAG_PREVIEW_LINES: usize = 4;
 
-impl ReplState<'_> {
-    /// The dump's tagged blocks, or why there are none.
-    fn tagged_blocks(&self, command: &str) -> Option<&[TaggedBlock]> {
-        let Some(dump) = self.ctx.target.phys.dmp_info() else {
-            error!("{command}: tagged data is in crash dumps; this target is live");
-            return None;
-        };
-        if dump.tagged_blocks.is_empty() {
-            error!("{command}: the dump has no tagged data");
-            return None;
-        }
-        Some(&dump.tagged_blocks)
+/// The dump's tagged blocks, or why there are none.
+fn tagged_blocks<'s>(session: &'s Session, command: &str) -> Result<&'s [TaggedBlock]> {
+    let Some(dump) = session.target.phys.dmp_info() else {
+        return Err(Error::DebugInfo(format!(
+            "{command}: tagged data is in crash dumps; this target is live"
+        )));
+    };
+    if dump.tagged_blocks.is_empty() {
+        return Err(Error::DebugInfo(format!(
+            "{command}: the dump has no tagged data"
+        )));
     }
+    Ok(&dump.tagged_blocks)
+}
 
-    /// The data of the block tagged `tag`, or a message that the dump has
-    /// none.
-    fn blackbox_block(&self, command: &str, tag: &str, what: &str) -> Option<Arc<[u8]>> {
-        let blocks = self.tagged_blocks(command)?;
-        let block = tagged_block(blocks, tag);
-        if block.is_none() {
-            error!("{command}: the dump has no {what}");
+/// The data of the block tagged `tag`, or that the dump has none.
+fn blackbox_block<'s>(
+    session: &'s Session,
+    command: &str,
+    tag: &str,
+    what: &str,
+) -> Result<&'s [u8]> {
+    tagged_block(tagged_blocks(session, command)?, tag)
+        .map(|block| &*block.data)
+        .ok_or_else(|| Error::DebugInfo(format!("{command}: the dump has no {what}")))
+}
+
+/// A blackbox decoder's failure, prefixed with its command.
+fn decoded<T>(command: &str, result: std::result::Result<T, String>) -> Result<T> {
+    result.map_err(|reason| Error::DebugInfo(format!("{command}: {reason}")))
+}
+
+/// List the tagged data blocks that bugcheck callbacks added to the crash
+/// dump.
+///
+/// Each block shows its GUID tag, its size, who writes it, and its first
+/// bytes; with a tag, every byte of that block. A tag that Windows writes
+/// names its global and what it holds, such as nt!PopBlackBoxPnpGuid, the PnP
+/// blackbox that !blackboxpnp decodes. For another tag, such as a driver's
+/// KBUGCHECK_REASON_CALLBACK data, ntoseye looks for its bytes in the kernel
+/// modules' images and names the global that holds it, when the dump has the
+/// image and its symbols are loaded. The SDK reads a block with
+/// Debugger.read_tagged.
+#[command(
+    names = [".enumtag"],
+    category = "analysis",
+    kind = Query,
+    target = Kernel,
+    python = none,
+    usage = ".enumtag [tag]",
+    completion = None
+)]
+fn enumtag(state: &mut ReplState<'_>, #[arg(parse = enumtag_tag)] only: Option<[u8; 16]>) -> Result<()> {
+    let blocks = tagged_blocks(state.ctx, ".enumtag")?;
+    let mut shown = 0;
+    for block in blocks
+        .iter()
+        .filter(|block| only.is_none_or(|tag| block.tag == tag))
+    {
+        shown += 1;
+        let tag = format_guid(&block.tag, GuidStyle::BracedUpper);
+        let owner = match known_tag(&block.tag) {
+            Some(known) => format!("{}: {}", known.owner, known.holds),
+            None => tag_owner(state.ctx, &block.tag)
+                .unwrap_or_else(|| "writer not found in the dump's images".to_string()),
+        };
+        outln!(
+            "{tag} - {:#x} bytes  {}",
+            block.data.len(),
+            ui::muted(&owner)
+        );
+        let lines = if only.is_some() {
+            usize::MAX
+        } else {
+            ENUMTAG_PREVIEW_LINES
+        };
+        for line in block.data.chunks(16).take(lines) {
+            let (hex, text) = hex_ascii_row(line, HexCase::Upper);
+            outln!("  {hex:<47}  {text}");
         }
-        block.map(|block| Arc::clone(&block.data))
-    }
-
-    fn cmd_enumtag(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let only = match invocation.arg(0) {
-            None => None,
-            Some(text) => match parse_guid(text) {
-                Some(tag) => Some(tag),
-                None => {
-                    error!(".enumtag: '{text}' is not a GUID");
-                    return Ok(());
-                }
-            },
-        };
-        let Some(blocks) = self.tagged_blocks(".enumtag") else {
-            return Ok(());
-        };
-        let mut shown = 0;
-        for block in blocks
-            .iter()
-            .filter(|block| only.is_none_or(|tag| block.tag == tag))
-        {
-            shown += 1;
-            let tag = format_guid(&block.tag, GuidStyle::BracedUpper);
-            let owner = match known_tag(&block.tag) {
-                Some(known) => format!("{}: {}", known.owner, known.holds),
-                None => self
-                    .tag_owner(&block.tag)
-                    .unwrap_or_else(|| "writer not found in the dump's images".to_string()),
-            };
+        let rest = block.data.len().saturating_sub(16 * lines);
+        if rest > 0 {
             outln!(
-                "{tag} - {:#x} bytes  {}",
-                block.data.len(),
-                ui::muted(&owner)
+                "  {}",
+                ui::muted(&format!(
+                    "... {rest:#x} more bytes; .enumtag {tag} shows them all"
+                ))
             );
-            let lines = if only.is_some() {
-                usize::MAX
-            } else {
-                ENUMTAG_PREVIEW_LINES
-            };
-            for line in block.data.chunks(16).take(lines) {
-                let (hex, text) = hex_ascii_row(line, HexCase::Upper);
-                outln!("  {hex:<47}  {text}");
-            }
-            let rest = block.data.len().saturating_sub(16 * lines);
-            if rest > 0 {
-                outln!(
-                    "  {}",
-                    ui::muted(&format!(
-                        "... {rest:#x} more bytes; .enumtag {tag} shows them all"
-                    ))
-                );
-            }
-            outln!();
         }
-        if shown == 0 {
-            error!(".enumtag: the dump has no block with that tag");
-        }
-        Ok(())
+        outln!();
     }
-
-    /// The global that holds `tag` in a kernel module's image, for a tag
-    /// that Windows does not write itself: a driver keeps the GUID it tags
-    /// its data with in a global. `module+offset` when no symbol starts
-    /// there.
-    fn tag_owner(&self, tag: &[u8; 16]) -> Option<String> {
-        let modules = self.ctx.target.kernel_modules().ok()?;
-        modules.iter().find_map(|module| {
-            let found = self
-                .ctx
-                .search(module.base_address, tag, module.size as usize)
-                .ok()?;
-            let hit = *found.matches.first()?;
-            Some(
-                match self
-                    .ctx
-                    .target
-                    .nearest_symbol_current_context(VirtAddr(hit))
-                {
-                    Some((owner, name, 0)) => format!("{owner}!{name}"),
-                    _ => format!("{}+{:#x}", module.short_name, hit - module.base_address.0),
-                },
-            )
-        })
+    if shown == 0 {
+        return Err(Error::DebugInfo(
+            ".enumtag: the dump has no block with that tag".into(),
+        ));
     }
+    Ok(())
+}
 
-    fn cmd_blackboxbsd(&mut self, _invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(data) = self.blackbox_block("!blackboxbsd", BSD_TAG, "boot status data") else {
-            return Ok(());
-        };
-        match decode_boot_status(&data) {
-            Ok(bsd) => print_boot_status(&bsd),
-            Err(reason) => error!("!blackboxbsd: {reason}"),
-        }
-        Ok(())
+/// `.enumtag`'s tag, a GUID.
+fn enumtag_tag(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Option<[u8; 16]>, ArgError> {
+    let Some(text) = cursor.word() else {
+        return Ok(None);
+    };
+    parse_guid(&text)
+        .map(Some)
+        .ok_or_else(|| ArgError::Message(format!(".enumtag: '{text}' is not a GUID")))
+}
+
+/// The global that holds `tag` in a kernel module's image, for a tag that
+/// Windows does not write itself: a driver keeps the GUID it tags its data
+/// with in a global. `module+offset` when no symbol starts there.
+fn tag_owner(session: &Session, tag: &[u8; 16]) -> Option<String> {
+    let modules = session.target.kernel_modules().ok()?;
+    modules.iter().find_map(|module| {
+        let found = session
+            .search(module.base_address, tag, module.size as usize)
+            .ok()?;
+        let hit = *found.matches.first()?;
+        Some(
+            match session
+                .target
+                .nearest_symbol_current_context(VirtAddr(hit))
+            {
+                Some((owner, name, 0)) => format!("{owner}!{name}"),
+                _ => format!("{}+{:#x}", module.short_name, hit - module.base_address.0),
+            },
+        )
+    })
+}
+
+/// Show the boot status data (bootstat.dat) the crash dump recorded.
+///
+/// Whether the last boot succeeded and shut down, the boot IDs of the last
+/// successful and abnormal shutdowns, the power transition and power button
+/// state, and the feature configuration state, as WinDbg's !blackboxbsd shows
+/// them.
+#[command(
+    names = ["!blackboxbsd"],
+    category = "analysis",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    usage = "!blackboxbsd",
+    completion = None
+)]
+fn blackbox_bsd(session: &Session) -> Result<BootStatus> {
+    let data = blackbox_block(session, "!blackboxbsd", BSD_TAG, "boot status data")?;
+    decoded("!blackboxbsd", decode_boot_status(data))
+}
+
+impl Render for BootStatus {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_boot_status(self);
     }
+}
 
-    fn cmd_blackboxntfs(&mut self, _invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(data) = self.blackbox_block("!blackboxntfs", NTFS_TAG, "NTFS blackbox") else {
-            return Ok(());
-        };
-        let records = match decode_ntfs(&data) {
-            Ok(records) => records,
-            Err(reason) => {
-                error!("!blackboxntfs: {reason}");
-                return Ok(());
-            }
-        };
+/// Show the NTFS slow I/O and oplock break timeouts the crash dump recorded.
+///
+/// Each record shows its type and length; a slow I/O timeout its IRP, SCB,
+/// and waiting thread, and an oplock break timeout its reason (the NTFS
+/// routine), IRP, SCB, and the owning and breaking processes, as WinDbg's
+/// !blackboxntfs shows them.
+#[command(
+    names = ["!blackboxntfs"],
+    category = "analysis",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    usage = "!blackboxntfs",
+    completion = None
+)]
+fn blackbox_ntfs(session: &Session) -> Result<Vec<NtfsRecord>> {
+    let data = blackbox_block(session, "!blackboxntfs", NTFS_TAG, "NTFS blackbox")?;
+    decoded("!blackboxntfs", decode_ntfs(data))
+}
+
+impl Render for Vec<NtfsRecord> {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        let records = self;
         outln!("NTFS Blackbox Data");
         let pointer = |label: &str, value: u64| {
             if value == 0 {
@@ -271,79 +261,111 @@ impl ReplState<'_> {
             count(NTFS_OPLOCK_BREAK_TIMEOUT)
         );
         outln!();
-        Ok(())
     }
+}
 
-    fn cmd_blackboxpnp(&mut self, _invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(data) = self.blackbox_block("!blackboxpnp", PNP_TAG, "PnP blackbox") else {
-            return Ok(());
-        };
-        match decode_pnp(&data) {
-            Ok(pnp) => {
-                outln!(
-                    "    PnpActivityId      : {}",
-                    format_guid(&pnp.activity_id, GuidStyle::BracedUpper)
-                );
-                outln!("    PnpActivityTime    : {}", pnp.activity_time);
-                outln!("    PnpEventInformation: {}", pnp.event_information);
-                outln!("    PnpEventInProgress : {}", pnp.event_in_progress);
-                outln!("    PnpProblemCode     : {}", pnp.problem_code);
-                outln!("    PnpVetoType        : {}", pnp.veto_type);
-                outln!("    DeviceId           : {}", pnp.device_id);
-                outln!(
-                    "    VetoString         : {}",
-                    pnp.veto_string.unwrap_or_default()
-                );
-                outln!();
-            }
-            Err(reason) => error!("!blackboxpnp: {reason}"),
-        }
-        Ok(())
+/// Show the PnP event the crash dump recorded.
+///
+/// The PnP activity, its time, the event, whether it was in progress, the
+/// device's problem code, the veto, and the device instance ID, as WinDbg's
+/// !blackboxpnp shows them.
+#[command(
+    names = ["!blackboxpnp"],
+    category = "analysis",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    usage = "!blackboxpnp",
+    completion = None
+)]
+fn blackbox_pnp(session: &Session) -> Result<PnpBlackbox> {
+    let data = blackbox_block(session, "!blackboxpnp", PNP_TAG, "PnP blackbox")?;
+    decoded("!blackboxpnp", decode_pnp(data))
+}
+
+impl Render for PnpBlackbox {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        outln!("    PnpActivityId      : {}", self.activity_id);
+        outln!("    PnpActivityTime    : {}", self.activity_time);
+        outln!("    PnpEventInformation: {}", self.event_information);
+        outln!("    PnpEventInProgress : {}", self.event_in_progress);
+        outln!("    PnpProblemCode     : {}", self.problem_code);
+        outln!("    PnpVetoType        : {}", self.veto_type);
+        outln!("    DeviceId           : {}", self.device_id);
+        outln!(
+            "    VetoString         : {}",
+            self.veto_string.as_deref().unwrap_or_default()
+        );
+        outln!();
     }
+}
 
-    fn cmd_blackboxwinlogon(&mut self, _invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(data) =
-            self.blackbox_block("!blackboxwinlogon", WINLOGON_TAG, "winlogon blackbox")
-        else {
-            return Ok(());
-        };
-        match decode_winlogon(&data) {
-            Ok(winlogon) => {
-                outln!("    ThreadName         : {}", winlogon.thread_name);
-                outln!("    IsOperationPending : {}", winlogon.is_operation_pending);
-                outln!();
-            }
-            Err(reason) => error!("!blackboxwinlogon: {reason}"),
-        }
-        Ok(())
+/// Show what winlogon was doing when the crash dump was written.
+#[command(
+    names = ["!blackboxwinlogon"],
+    category = "analysis",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    usage = "!blackboxwinlogon",
+    completion = None
+)]
+fn blackbox_winlogon(session: &Session) -> Result<WinlogonBlackbox> {
+    let data = blackbox_block(session, "!blackboxwinlogon", WINLOGON_TAG, "winlogon blackbox")?;
+    decoded("!blackboxwinlogon", decode_winlogon(data))
+}
+
+impl Render for WinlogonBlackbox {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        outln!("    ThreadName         : {}", self.thread_name);
+        outln!("    IsOperationPending : {}", self.is_operation_pending);
+        outln!();
     }
+}
 
-    fn cmd_blackboxpci(&mut self, _invocation: CommandInvocation<'_>) -> Result<()> {
-        let Some(data) = self.blackbox_block("!blackboxpci", PCI_TAG, "PCI blackbox") else {
-            return Ok(());
-        };
-        match decode_pci(&data) {
-            Ok(records) => {
-                for pci in &records {
-                    outln!(
-                        "{:02x}:{:02x}:{:x}  {:04x}:{:04x}.{:02x}  Cmd[{:04x}:{}]  Sts[{:04x}:{}]",
-                        pci.bus,
-                        pci.device,
-                        pci.function,
-                        pci.vendor_id,
-                        pci.device_id,
-                        pci.revision,
-                        pci.command,
-                        pci_command_flags(pci.command),
-                        pci.status,
-                        pci_status_flags(pci.status)
-                    );
-                }
-                outln!();
-            }
-            Err(reason) => error!("!blackboxpci: {reason}"),
+/// List the PCI functions pci.sys recorded in the crash dump, with their
+/// command and status.
+///
+/// Each function shows its bus, device, and function, its vendor and device
+/// IDs and revision, and its command and status registers with their flags as
+/// WinDbg's !blackboxpci shows them: i (I/O), m (memory), b (bus master), v
+/// (VGA palette snoop), p (parity), s (SERR) for the command, and c
+/// (capability list), 6 (66 MHz), P (master data parity error), A (signaled
+/// target abort), S (signaled system error) for the status. WinDbg prints the
+/// command register's value as the status value; ntoseye prints the status
+/// register's.
+#[command(
+    names = ["!blackboxpci"],
+    category = "analysis",
+    kind = Query,
+    target = Kernel,
+    python = Inspect,
+    usage = "!blackboxpci",
+    completion = None
+)]
+fn blackbox_pci(session: &Session) -> Result<Vec<PciRecord>> {
+    let data = blackbox_block(session, "!blackboxpci", PCI_TAG, "PCI blackbox")?;
+    decoded("!blackboxpci", decode_pci(data))
+}
+
+impl Render for Vec<PciRecord> {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        for pci in self {
+            outln!(
+                "{:02x}:{:02x}:{:x}  {:04x}:{:04x}.{:02x}  Cmd[{:04x}:{}]  Sts[{:04x}:{}]",
+                pci.bus,
+                pci.device,
+                pci.function,
+                pci.vendor_id,
+                pci.device_id,
+                pci.revision,
+                pci.command,
+                pci_command_flags(pci.command),
+                pci.status,
+                pci_status_flags(pci.status)
+            );
         }
-        Ok(())
+        outln!();
     }
 }
 

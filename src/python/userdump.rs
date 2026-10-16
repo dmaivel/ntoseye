@@ -17,8 +17,11 @@ use super::thread::{Frame, Registers};
 use super::types::Struct;
 use super::{err, raise};
 use crate::session::Session;
-use crate::userdump::{UserDumpInfo, UserThread as DumpThread, UserThreadInfo};
-use crate::view;
+use crate::target::userdump::UserExceptionDetail;
+use crate::target::usermode::address::UserRegion;
+use crate::userdump::{
+    UnloadedModule, UserDumpInfo, UserHandle, UserThread as DumpThread, UserThreadInfo,
+};
 use crate::view::record::Typed;
 
 /// Why a user-dump handle cannot be served: the debugger's target is not
@@ -125,13 +128,8 @@ impl UserDump {
     fn exception<'py>(
         &self,
         py: Python<'py>,
-    ) -> PyResult<Typed<'py, Option<view::userdump::UserDumpException>>> {
-        let exception = self.read(py, |session, info| {
-            Ok(info
-                .exception
-                .as_ref()
-                .map(|exception| view::userdump::exception(&session.target, exception)))
-        })?;
+    ) -> PyResult<Typed<'py, Option<UserExceptionDetail>>> {
+        let exception = self.read(py, |session, _| Ok(session.target.user_exception_detail()))?;
         Typed::new(py, exception)
     }
 
@@ -176,13 +174,8 @@ impl UserDump {
     fn handles<'py>(
         &self,
         py: Python<'py>,
-    ) -> PyResult<Typed<'py, Option<Vec<view::userdump::UserDumpHandle>>>> {
-        let handles = self.read(py, |_, info| {
-            Ok(info
-                .handles
-                .as_ref()
-                .map(|handles| handles.iter().map(view::userdump::handle).collect()))
-        })?;
+    ) -> PyResult<Typed<'py, Option<Vec<UserHandle>>>> {
+        let handles = self.read(py, |_, info| Ok(info.handles.clone()))?;
         Typed::new(py, handles)
     }
 
@@ -193,15 +186,13 @@ impl UserDump {
     fn regions<'py>(
         &self,
         py: Python<'py>,
-    ) -> PyResult<Typed<'py, Option<Vec<view::userdump::UserDumpRegion>>>> {
+    ) -> PyResult<Typed<'py, Option<Vec<UserRegion>>>> {
         let regions = self.read(py, |session, info| {
             if info.regions.is_none() {
                 return Ok(None);
             }
             let map = session.target.user_address_map().map_err(err)?;
-            Ok(Some(
-                map.regions.iter().map(view::userdump::region).collect(),
-            ))
+            Ok(Some(map.regions.clone()))
         })?;
         Typed::new(py, regions)
     }
@@ -212,13 +203,13 @@ impl UserDump {
         &self,
         py: Python<'py>,
         address: u64,
-    ) -> PyResult<Typed<'py, Option<view::userdump::UserDumpRegion>>> {
+    ) -> PyResult<Typed<'py, Option<UserRegion>>> {
         let region = self.read(py, |session, info| {
             if info.regions.is_none() {
                 return Ok(None);
             }
             let map = session.target.user_address_map().map_err(err)?;
-            Ok(map.region_at(address).map(view::userdump::region))
+            Ok(map.region_at(address).cloned())
         })?;
         Typed::new(py, region)
     }
@@ -228,14 +219,8 @@ impl UserDump {
     fn unloaded_modules<'py>(
         &self,
         py: Python<'py>,
-    ) -> PyResult<Typed<'py, Vec<view::userdump::UserDumpUnloadedModule>>> {
-        let modules = self.read(py, |_, info| {
-            Ok(info
-                .unloaded_modules
-                .iter()
-                .map(view::userdump::unloaded_module)
-                .collect())
-        })?;
+    ) -> PyResult<Typed<'py, Vec<UnloadedModule>>> {
+        let modules = self.read(py, |_, info| Ok(info.unloaded_modules.clone()))?;
         Typed::new(py, modules)
     }
 

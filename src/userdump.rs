@@ -94,29 +94,59 @@ pub struct UserModule {
     pub codeview: Option<CodeView>,
 }
 
-/// A module the process had unloaded (`MINIDUMP_UNLOADED_MODULE`).
+/// A module the process had unloaded (`UnloadedModuleListStream`).
+#[record]
 #[derive(Debug, Clone)]
 pub struct UnloadedModule {
+    #[record(hex)]
     pub base: u64,
+    #[record(hex)]
     pub size: u32,
+    #[record(hex)]
     pub checksum: u32,
+    #[record(hex)]
     pub time_date_stamp: u32,
     pub name: String,
 }
 
-/// `ExceptionStream`: the exception the dump was written for.
+/// The exception a user-mode minidump was written for (`ExceptionStream`).
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct UserException {
+    /// The thread that raised it.
     pub thread_id: u32,
+    /// The exception code (an NTSTATUS, or an application's own code).
+    #[record(hex)]
     pub code: u32,
+    #[record(hex)]
     pub flags: u32,
-    /// `ExceptionRecord`: the address of a chained record, 0 for none.
+    /// The address of a chained `EXCEPTION_RECORD`, 0 for none.
+    #[record(hex)]
     pub record: u64,
+    /// Where the exception was raised.
+    #[record(hex)]
     pub address: u64,
+    #[record(hex)]
     pub parameters: Vec<u64>,
     /// The raw CONTEXT at the exception, or why it is unusable. It is stored
     /// in the dump file, not in the process's memory.
+    #[record(skip)]
     pub context: std::result::Result<Vec<u8>, String>,
+}
+
+#[record]
+impl UserException {
+    /// The NTSTATUS name of `code`, when it is one ntoseye knows.
+    #[record(getter)]
+    pub fn code_name(&self) -> Option<&'static str> {
+        crate::ntstatus::ntstatus_name(self.code)
+    }
+
+    /// Why the exception's CONTEXT is unusable, `None` when it is.
+    #[record(getter)]
+    pub fn context_error(&self) -> Option<String> {
+        self.context.as_ref().err().cloned()
+    }
 }
 
 /// What a user dump records besides its memory.
@@ -167,16 +197,31 @@ pub struct UserTimeZone {
 }
 
 /// A handle the process held (`MINIDUMP_HANDLE_DESCRIPTOR` or
-/// `MINIDUMP_HANDLE_DESCRIPTOR_2`), as the dump records it.
+/// `MINIDUMP_HANDLE_DESCRIPTOR_2`), as the dump records it. The dump names
+/// no object address.
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct UserHandle {
+    #[record(hex)]
     pub handle: u64,
     pub type_name: Option<String>,
     pub object_name: Option<String>,
+    /// `OBJ_*` attribute flags.
+    #[record(hex)]
     pub attributes: u32,
+    #[record(hex)]
     pub granted_access: u32,
     pub handle_count: u32,
     pub pointer_count: u32,
+}
+
+#[record]
+impl UserHandle {
+    /// `attributes` as `OBJ_*` names.
+    #[record(getter)]
+    pub fn attribute_names(&self) -> Vec<String> {
+        crate::target::usermode::handles::handle_attribute_names(self.attributes)
+    }
 }
 
 /// `MINIDUMP_MEMORY_INFO`: one region of the address space, as
