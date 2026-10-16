@@ -192,25 +192,6 @@ pub enum HypercallArg {
     Name(String),
 }
 
-/// An ETW trace session by logger id or `_WMI_LOGGER_CONTEXT` address, or by
-/// session name.
-#[derive(FromPyObject)]
-pub enum LoggerArg {
-    Value(u64),
-    Name(String),
-}
-
-impl LoggerArg {
-    /// The logger as a `!wmitrace` argument: an id or address in hex (read
-    /// the same in every radix), or the name as given.
-    pub fn text(&self) -> String {
-        match self {
-            LoggerArg::Value(value) => format!("{value:#x}"),
-            LoggerArg::Name(name) => name.clone(),
-        }
-    }
-}
-
 /// A minifilter by its `_FLT_FILTER` address or its name (`"WdFilter"`).
 #[derive(FromPyObject)]
 pub enum FltFilterArg {

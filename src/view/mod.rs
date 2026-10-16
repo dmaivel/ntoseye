@@ -5,7 +5,6 @@
 pub mod backend;
 pub mod bugcheck;
 pub mod cpu;
-pub mod etw;
 pub mod execution;
 pub mod fs;
 pub mod hardware;

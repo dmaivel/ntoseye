@@ -3,7 +3,7 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use super::args::{ApcTarget, DeviceArg, FltFilterArg, LoggerArg, ObjectArg};
+use super::args::{ApcTarget, DeviceArg, FltFilterArg, ObjectArg};
 use super::command::admit;
 use super::context::{Context, in_context};
 use super::handle::Owner;
@@ -14,7 +14,6 @@ use super::userdump::{UserProcess, UserThread};
 use super::{err, raise};
 use crate::bugchecks::{bugcheck_from_dump_info, current_bugcheck};
 use crate::error::Error;
-use crate::expr::NumberRadix;
 use crate::session::Session;
 use crate::session::effects::Effects;
 use crate::target::etw::parse_guid;
@@ -1217,105 +1216,6 @@ impl Inspect {
         self.typed(py, |session_state| {
             let detail = session_state.target.sessions(session).map_err(err)?;
             Ok(view::security::sessions(&detail))
-        })
-    }
-
-    /// List the active ETW trace sessions (`!wmitrace.strdump`).
-    fn etw_loggers<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::etw::EtwLoggerTable>> {
-        self.typed(py, |session| {
-            let table = session.target.etw_loggers().map_err(err)?;
-            Ok(view::etw::logger_table(&table))
-        })
-    }
-
-    /// Decode the `_WMI_LOGGER_CONTEXT` of one ETW trace session
-    /// (`!wmitrace.logger`). `logger` is the logger ID, the context address, or
-    /// the session name.
-    fn etw_logger<'py>(
-        &self,
-        py: Python<'py>,
-        logger: LoggerArg,
-    ) -> PyResult<Typed<'py, view::etw::EtwLogger>> {
-        self.typed(py, |session| {
-            let detail = session
-                .target
-                .etw_logger(&logger.text(), NumberRadix::Hexadecimal)
-                .map_err(err)?;
-            Ok(view::etw::logger(&detail))
-        })
-    }
-
-    /// List the trace buffers on the GlobalList of an ETW trace session
-    /// (`!wmitrace.strdump logger`).
-    fn etw_buffers<'py>(
-        &self,
-        py: Python<'py>,
-        logger: LoggerArg,
-    ) -> PyResult<Typed<'py, view::etw::EtwLoggerBuffers>> {
-        self.typed(py, |session| {
-            let detail = session
-                .target
-                .etw_logger_buffers(&logger.text(), NumberRadix::Hexadecimal)
-                .map_err(err)?;
-            Ok(view::etw::logger_buffers(&detail))
-        })
-    }
-
-    /// Decode the events that are still in the buffers of an ETW trace session,
-    /// oldest first (`!wmitrace.logdump`). `count` keeps only the most recent
-    /// events. For a WPP message, `message.text` is the message rendered from
-    /// the TMF that a loaded PDB declares, and the raw `payload` is always
-    /// kept.
-    #[pyo3(signature = (logger, count=None))]
-    fn etw_events<'py>(
-        &self,
-        py: Python<'py>,
-        logger: LoggerArg,
-        count: Option<usize>,
-    ) -> PyResult<Typed<'py, view::etw::EtwEventDump>> {
-        self.typed(py, |session| {
-            let dump = session
-                .target
-                .etw_log_dump(&logger.text(), NumberRadix::Hexadecimal, count)
-                .map_err(err)?;
-            Ok(view::etw::event_dump(&dump))
-        })
-    }
-
-    /// List the ETW trace sessions that Windows saved as it wrote a crash
-    /// dump, and their buffers (`!wmitrace.strdump` in a minidump): the
-    /// sessions started with `EVENT_TRACE_ADDTO_TRIAGE_DUMP`, such as
-    /// EventLog-System. A minidump has no other copy of them; in a kernel or
-    /// full dump, `etw_loggers()` reads every session from memory.
-    fn etw_crash_sessions<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Typed<'py, view::etw::EtwCrashData>> {
-        self.typed(py, |session| {
-            let data = session.target.etw_crash_data().map_err(err)?;
-            Ok(view::etw::crash_data(&data))
-        })
-    }
-
-    /// Decode the events of an ETW trace session that Windows saved in a
-    /// crash dump, oldest first (`!wmitrace.logdump` in a minidump).
-    /// `logger` is the logger ID or the session name, and `count` keeps
-    /// only the most recent events.
-    #[pyo3(signature = (logger, count=None))]
-    fn etw_crash_events<'py>(
-        &self,
-        py: Python<'py>,
-        logger: LoggerArg,
-        count: Option<usize>,
-    ) -> PyResult<Typed<'py, view::etw::EtwCrashEvents>> {
-        self.typed(py, |session| {
-            let target = &session.target;
-            let data = target.etw_crash_data().map_err(err)?;
-            let saved = target
-                .etw_dump_logger(&data, &logger.text(), NumberRadix::Hexadecimal)
-                .map_err(err)?;
-            let events = target.etw_dump_events(&data, saved, count).map_err(err)?;
-            Ok(view::etw::crash_events(saved, &events))
         })
     }
 

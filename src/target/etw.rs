@@ -28,10 +28,13 @@ use crate::expr::{Expr, NumberRadix};
 use crate::kuser_shared::KuserSharedData;
 use crate::layout::TypeInfo;
 use crate::memory::MemoryOps;
+#[cfg(feature = "python")]
+use crate::python::command::PyArg;
 use crate::target::{ListCursor, Target};
 use crate::triage_report::time::filetime_to_iso;
 use crate::types::VirtAddr;
 use crate::wpp::{TmfMessage, format_message};
+use ntoseye_macros::record;
 
 pub mod dump;
 
@@ -281,19 +284,25 @@ impl EtwClock {
     }
 }
 
-/// One active trace session, decoded from its `_WMI_LOGGER_CONTEXT`.
-#[derive(Debug, Clone)]
+/// An active ETW trace session, decoded from its `_WMI_LOGGER_CONTEXT`.
+#[record(impl)]
 pub struct EtwLogger {
+    /// The `_WMI_LOGGER_CONTEXT`.
     pub address: VirtAddr,
     pub logger_id: u32,
-    /// `LoggerName` and `LogFileName`, `None` when their buffer is
-    /// unreadable (pool freed or paged out while a session stops).
+    /// `LoggerName`. `None` if ntoseye cannot read its buffer, which can
+    /// happen when the pool is freed or paged out while a session stops.
     pub name: Option<String>,
+    /// `LogFileName`. `None` if ntoseye cannot read its buffer.
     pub log_file_name: Option<String>,
+    #[record(hex)]
     pub logger_mode: u32,
-    /// Names of the `Flags` bitfields that are set, from the PDB.
-    pub flag_names: Vec<String>,
+    #[record(hex)]
     pub flags: u32,
+    /// The `Flags` bitfields that are set, from the PDB.
+    pub flag_names: Vec<String>,
+    pub collection_on: bool,
+    /// Bytes per buffer.
     pub buffer_size: u32,
     pub maximum_event_size: u32,
     pub minimum_buffers: u32,
@@ -306,69 +315,113 @@ pub struct EtwLogger {
     pub log_buffers_lost: u32,
     pub real_time_buffers_delivered: u32,
     pub real_time_buffers_lost: u32,
-    pub maximum_file_size: u32,
-    pub flush_timer: u32,
-    pub flush_threshold: u32,
+    pub consumers: u32,
+    /// `ClockType`: what the event timestamps count.
+    #[record(skip)]
     pub clock: EtwClock,
     /// `StartTime`, a FILETIME.
     pub start_time: u64,
     /// `ReferenceTime`: the system time (FILETIME) at the clock value
     /// `reference_clock`, from which event timestamps are converted.
+    #[record(skip)]
     pub reference_system_time: u64,
+    #[record(skip)]
     pub reference_clock: u64,
+    pub flush_timer: u32,
+    pub flush_threshold: u32,
+    pub maximum_file_size: u32,
     pub logger_thread: VirtAddr,
     pub logger_status: i32,
-    pub consumers: u32,
+    #[record(skip)]
     pub instance_guid: [u8; 16],
-    pub collection_on: bool,
 }
 
+#[record]
 impl EtwLogger {
-    /// Buffers taken from the free pool (`NumberOfBuffers -
-    /// BuffersAvailable`): current on a processor, full, or being flushed.
+    /// The `EVENT_TRACE_*_MODE` bits that are set in `logger_mode`.
+    #[record(getter)]
+    pub fn logger_mode_names(&self) -> Vec<&'static str> {
+        logger_mode_names(self.logger_mode)
+    }
+
+    /// The buffers taken from the free pool (`number_of_buffers -
+    /// buffers_available`). Each of these buffers is current on a processor,
+    /// full, or in a flush.
+    #[record(getter)]
     pub fn buffers_in_use(&self) -> i64 {
         i64::from(self.number_of_buffers) - i64::from(self.buffers_available)
     }
+
+    /// `ClockType` (`EVENT_TRACE_CLOCK_*`).
+    #[record(getter)]
+    pub fn clock_type(&self) -> u32 {
+        self.clock.raw()
+    }
+
+    /// The name of what the event timestamps count.
+    #[record(getter, rename = "clock")]
+    pub fn clock_name(&self) -> &'static str {
+        self.clock.name()
+    }
+
+    /// `start_time` as UTC (`YYYY-MM-DD HH:MM:SS.fffffff`). `None` if it is
+    /// out of range.
+    #[record(getter)]
+    pub fn start_time_utc(&self) -> Option<String> {
+        format_filetime_precise(self.start_time)
+    }
+
+    /// `InstanceGuid`, braced.
+    #[record(getter, rename = "instance_guid")]
+    pub fn instance_guid_text(&self) -> String {
+        format_guid(&self.instance_guid, GuidStyle::Braced)
+    }
 }
 
-/// Every active logger of the host silo.
-#[derive(Debug, Clone)]
+/// All active ETW loggers of the host silo (`!wmitrace.strdump`).
+#[record]
 pub struct EtwLoggerTable {
     pub silo_state: VirtAddr,
-    /// `EtwpLoggerContext`: the array of `MaxLoggers` context pointers.
+    /// `EtwpLoggerContext`: the array of `max_loggers` context pointers.
     pub context_array: VirtAddr,
     pub max_loggers: u32,
     pub loggers: Vec<EtwLogger>,
 }
 
-/// One trace buffer (`_WMI_BUFFER_HEADER`) of a logger.
-#[derive(Debug, Clone)]
+/// A trace buffer of a logger (`_WMI_BUFFER_HEADER`).
+#[record]
 pub struct EtwBuffer {
     /// The buffer's kernel address or, for a buffer out of a minidump's ETW
-    /// data (see [`dump`]), the offset of its header in that block.
+    /// data, the offset of its header in that block.
     pub address: VirtAddr,
     pub state: u32,
     pub state_name: String,
     pub processor: u16,
     pub sequence_number: i64,
+    /// The raw timestamp in the clock of the logger.
     pub timestamp: u64,
     pub saved_offset: u32,
     pub current_offset: u32,
-    pub reference_count: i32,
-    /// Bytes of the buffer holding the header and complete events.
+    /// The number of bytes in the buffer that hold the header and complete
+    /// events.
     pub data_end: u32,
+    pub reference_count: i32,
 }
 
-/// A logger and the buffers on its `GlobalList`.
-#[derive(Debug, Clone)]
+/// A logger and the buffers on its `GlobalList`
+/// (`!wmitrace.strdump <logger>`).
+#[record]
 pub struct EtwLoggerBuffers {
     pub logger: EtwLogger,
     pub buffers: Vec<EtwBuffer>,
-    /// Why the `GlobalList` walk ended before returning to its head.
+    /// Why the walk of the `GlobalList` stopped before it came back to the
+    /// list head. `None` if the walk completed.
     pub list_stop: Option<String>,
 }
 
-/// Which trace header an event record starts with.
+/// Which trace header an event record starts with: `system`, `compact`,
+/// `perfinfo`, `classic`, `instance`, `event` or `message`.
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EtwHeaderKind {
     /// `SYSTEM_TRACE_HEADER` (kernel events, types 0x01/0x02).
@@ -401,7 +454,14 @@ impl EtwHeaderKind {
     }
 }
 
-/// `EVENT_DESCRIPTOR` of an `EVENT_HEADER` event.
+impl std::fmt::Display for EtwHeaderKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// The `EVENT_DESCRIPTOR` of an `EVENT_HEADER` event.
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EtwEventDescriptor {
     pub id: u16,
@@ -410,55 +470,133 @@ pub struct EtwEventDescriptor {
     pub level: u8,
     pub opcode: u8,
     pub task: u16,
+    #[record(hex)]
     pub keyword: u64,
 }
 
-/// The fields a `MESSAGE_TRACE_HEADER` carries after itself, as its
-/// `TRACE_MESSAGE_*` option flags select.
+/// The fields that follow a `MESSAGE_TRACE_HEADER`, as the
+/// `TRACE_MESSAGE_*` option flags of the header select them. A field is
+/// `None` if the flags do not select it.
+#[record(impl)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EtwMessage {
+    /// The message number.
     pub number: u16,
+    #[record(hex)]
     pub option_flags: u16,
     pub sequence: Option<u32>,
+    #[record(skip)]
     pub guid: Option<[u8; 16]>,
     pub component_id: Option<u32>,
 }
 
+#[record]
+impl EtwMessage {
+    /// The message GUID, braced.
+    #[record(getter, rename = "guid")]
+    pub fn guid_text(&self) -> Option<String> {
+        braced_guid(self.guid.as_ref())
+    }
+}
+
 /// An `EVENT_HEADER` extended data item.
+#[record(impl)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EtwExtendedItem {
+    /// `EVENT_HEADER_EXT_TYPE_*`.
+    #[record(rename = "type")]
     pub ext_type: u16,
+    /// The bytes of the item.
+    #[record(bytes)]
     pub data: Vec<u8>,
 }
 
-/// One event record decoded out of a buffer's bytes.
+#[record]
+impl EtwExtendedItem {
+    /// The name of the type, if it is known.
+    #[record(getter)]
+    pub fn type_name(&self) -> Option<&'static str> {
+        extended_type_name(self.ext_type)
+    }
+}
+
+/// `Class.Type`/`Level`/`Version` of a classic event.
+#[record]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EtwEventClass {
+    pub r#type: u8,
+    pub level: u8,
+    pub version: u16,
+}
+
+/// An event record decoded from a trace buffer. A field is `None` if the
+/// header kind of the event does not have it.
+#[record(impl)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EtwRecord {
-    /// Offset of the record in its buffer.
+    /// The offset of the record in its buffer.
     pub offset: u32,
+    /// The trace header at the start of the record (`event` for
+    /// `EVENT_HEADER`, ...).
+    #[record(rename = "header")]
     pub kind: EtwHeaderKind,
     pub header_type: u8,
-    /// Record size, header included (unaligned).
+    /// The record size, with the header included (unaligned).
     pub size: u16,
-    /// Raw timestamp in the logger's clock; a WPP message without
-    /// `TRACE_MESSAGE_TIMESTAMP` has none.
+    /// The raw timestamp in the clock of the logger. A WPP message without
+    /// `TRACE_MESSAGE_TIMESTAMP` has no timestamp.
     pub timestamp: Option<u64>,
-    pub thread_id: Option<u32>,
     pub process_id: Option<u32>,
-    /// Provider (`EVENT_HEADER`), event class (`EVENT_TRACE_HEADER`) or
-    /// message (`MESSAGE_TRACE_HEADER`) GUID.
+    pub thread_id: Option<u32>,
+    /// The provider GUID (`EVENT_HEADER`), event class GUID
+    /// (`EVENT_TRACE_HEADER`), or message GUID (`MESSAGE_TRACE_HEADER`).
+    #[record(skip)]
     pub guid: Option<[u8; 16]>,
     pub descriptor: Option<EtwEventDescriptor>,
     /// `EVENT_HEADER.Flags`.
+    #[record(hex)]
     pub event_flags: Option<u16>,
+    #[record(skip)]
     pub activity_id: Option<[u8; 16]>,
-    /// Kernel hook id (group << 8 | type) of system and perfinfo events.
+    /// The kernel hook id (group << 8 | type) of system and perfinfo events.
+    #[record(hex)]
     pub hook_id: Option<u16>,
-    /// `Class.Type`/`Level`/`Version` of a classic event.
-    pub class: Option<(u8, u8, u16)>,
+    /// The class of a classic event.
+    #[record(rename = "class")]
+    pub event_class: Option<EtwEventClass>,
     pub message: Option<EtwMessage>,
     pub extended: Vec<EtwExtendedItem>,
+    /// The user data of the event.
+    #[record(bytes)]
     pub payload: Vec<u8>,
+}
+
+#[record]
+impl EtwRecord {
+    /// The provider GUID (`EVENT_HEADER`), event class GUID
+    /// (`EVENT_TRACE_HEADER`), or message GUID (`MESSAGE_TRACE_HEADER`),
+    /// braced.
+    #[record(getter, rename = "guid")]
+    pub fn guid_text(&self) -> Option<String> {
+        braced_guid(self.guid.as_ref())
+    }
+
+    /// `EVENT_HEADER.ActivityId`, braced.
+    #[record(getter, rename = "activity_id")]
+    pub fn activity_id_text(&self) -> Option<String> {
+        braced_guid(self.activity_id.as_ref())
+    }
+
+    /// The `EVENT_TRACE_GROUP_*` name of the hook id, if it is known.
+    #[record(getter)]
+    pub fn group(&self) -> Option<&'static str> {
+        self.hook_id.and_then(event_trace_group_name)
+    }
+}
+
+/// A GUID as ETW names it, braced.
+fn braced_guid(guid: Option<&[u8; 16]>) -> Option<String> {
+    guid.map(|guid| format_guid(guid, GuidStyle::Braced))
 }
 
 /// Where a buffer's event walk stopped short of its data end.
@@ -468,17 +606,38 @@ pub struct EtwDecodeStop {
     pub reason: String,
 }
 
-/// A WPP message with the TMF an indexed PDB declares for it.
+/// A WPP message rendered from the trace message format (TMF) that a loaded
+/// PDB declares for it.
+#[record(impl)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EtwMessageFormat {
-    /// The TMF's provider (component) name.
+    /// The provider (component) name from the TMF.
     pub provider: String,
+    /// The function that traced the message.
     pub function: Option<String>,
+    /// The trace level from the TMF (`TRACE_LEVEL_ERROR`, or a number).
     pub level: Option<String>,
+    /// The trace flag name from the TMF.
     pub flags: Option<String>,
     /// The rendered message, or why the payload does not fit the TMF's
     /// argument types.
+    #[record(skip)]
     pub text: std::result::Result<String, String>,
+}
+
+#[record]
+impl EtwMessageFormat {
+    /// The message text, rendered from its TMF and the payload.
+    #[record(getter, rename = "text")]
+    pub fn rendered(&self) -> Option<String> {
+        self.text.clone().ok()
+    }
+
+    /// Why the payload does not fit the argument types of the TMF.
+    #[record(getter)]
+    pub fn format_error(&self) -> Option<String> {
+        self.text.clone().err()
+    }
 }
 
 /// Render a WPP message record from the TMF `lookup` finds for its message
@@ -500,54 +659,112 @@ pub fn format_message_record(
     })
 }
 
-/// An event with the buffer it came from and its time.
-#[derive(Debug, Clone)]
+/// An event that ntoseye decoded from a trace buffer, with the buffer it
+/// came from and its time.
+#[record(impl)]
 pub struct EtwEvent {
-    /// The [`EtwBuffer::address`] of its buffer.
+    /// The buffer that the event came from (its `EtwBuffer.address`).
     pub buffer: VirtAddr,
     pub processor: u16,
-    /// FILETIME, when the logger's clock converts to one.
+    /// The FILETIME, if the clock of the logger converts to one.
     pub system_time: Option<u64>,
     pub record: EtwRecord,
-    /// A WPP message's TMF rendering; `None` when no indexed PDB declares
-    /// its TMF, or the record is not a WPP message.
+    /// The message rendered from its TMF, for a WPP message whose trace
+    /// message format a loaded PDB declares; else `None`.
     pub message_format: Option<EtwMessageFormat>,
 }
 
-/// A buffer whose events could not all be decoded.
-#[derive(Debug, Clone)]
+#[record]
+impl EtwEvent {
+    /// `system_time` as UTC (`YYYY-MM-DD HH:MM:SS.fffffff`).
+    #[record(getter)]
+    pub fn system_time_utc(&self) -> Option<String> {
+        self.system_time.and_then(format_filetime_precise)
+    }
+}
+
+/// A buffer in which ntoseye could not decode all events.
+#[record]
 pub struct EtwBufferIssue {
-    /// The [`EtwBuffer::address`] of the buffer.
+    /// The `EtwBuffer.address` of the buffer.
     pub buffer: VirtAddr,
+    /// The position in the buffer where the walk stopped.
     pub offset: u32,
     pub reason: String,
 }
 
-/// `!wmitrace.logdump`: a logger's in-memory events in time order.
-#[derive(Debug, Clone)]
+/// An ETW trace session: an active one, from its `_WMI_LOGGER_CONTEXT`, or
+/// in a minidump one that Windows saved in the dump's ETW data.
+#[record]
+pub enum EtwSession {
+    Active(EtwLogger),
+    Saved(dump::EtwDumpLogger),
+}
+
+impl EtwSession {
+    pub fn logger_id(&self) -> u32 {
+        match self {
+            Self::Active(logger) => logger.logger_id,
+            Self::Saved(logger) => logger.logger_id,
+        }
+    }
+
+    /// The session name; `None` if it could not be read.
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::Active(logger) => logger.name.as_deref(),
+            Self::Saved(logger) => Some(&logger.name),
+        }
+    }
+
+    pub fn buffer_size(&self) -> u32 {
+        match self {
+            Self::Active(logger) => logger.buffer_size,
+            Self::Saved(logger) => logger.buffer_size,
+        }
+    }
+
+    pub fn clock(&self) -> EtwClock {
+        match self {
+            Self::Active(logger) => logger.clock,
+            Self::Saved(logger) => logger.clock,
+        }
+    }
+}
+
+/// What `!wmitrace.strdump` lists: the active sessions, or the buffers of
+/// one; in a minidump, the sessions of its ETW data, or one of them with
+/// its buffers.
+#[record]
+pub enum EtwLoggerList {
+    Active(EtwLoggerTable),
+    Buffers(EtwLoggerBuffers),
+    Saved(dump::EtwDumpData),
+    SavedBuffers(dump::EtwDumpLogger),
+}
+
+/// The events still in the buffers of a session, oldest first
+/// (`!wmitrace.logdump`).
+#[record]
 pub struct EtwEventDump {
-    pub logger: EtwLogger,
-    /// Why the `GlobalList` walk ended before returning to its head.
+    pub logger: EtwSession,
+    pub buffers_walked: usize,
+    /// Why the walk of the `GlobalList`, or of a minidump's ETW data,
+    /// stopped before its end. `None` if the walk completed.
     pub list_stop: Option<String>,
+    /// The number of events found before a count kept the most recent.
+    pub total_events: usize,
     /// QPC frequency used for PerfCounter timestamps.
     pub qpc_frequency: Option<u64>,
     /// Processor speed used for CpuCycle timestamps.
     pub cpu_mhz: Option<u64>,
-    pub events: EtwEvents,
-}
-
-/// Events decoded out of a logger's buffers, oldest first.
-#[derive(Debug, Clone)]
-pub struct EtwEvents {
-    pub buffers_walked: usize,
-    /// Buffers skipped whole (compressed) and walks that stopped early.
+    /// The buffers that ntoseye skipped fully (compressed or unreadable), and
+    /// the walks that stopped early.
     pub issues: Vec<EtwBufferIssue>,
-    /// Events found before `most_recent` kept the newest.
-    pub total_events: usize,
-    pub events: Vec<EtwEvent>,
-    /// Why some WPP messages have no `message_format`; `None` when every
-    /// one has.
+    /// Why some WPP messages have no `message_format`. `None` if all
+    /// messages have one.
     pub message_format_note: Option<String>,
+    pub events: Vec<EtwEvent>,
 }
 
 /// Why WPP messages among `events` have no TMF rendering, when some do not.
@@ -741,7 +958,7 @@ fn decode_record(
         event_flags: None,
         activity_id: None,
         hook_id: None,
-        class: None,
+        event_class: None,
         message: None,
         extended: Vec::new(),
         payload: Vec::new(),
@@ -762,7 +979,11 @@ fn decode_record(
             header_len
         }
         EtwHeaderKind::FullHeader | EtwHeaderKind::Instance => {
-            record.class = Some((bytes[4], bytes[5], get_u16(bytes, 6).ok_or_else(truncated)?));
+            record.event_class = Some(EtwEventClass {
+                r#type: bytes[4],
+                level: bytes[5],
+                version: get_u16(bytes, 6).ok_or_else(truncated)?,
+            });
             record.thread_id = get_u32(bytes, 8);
             record.process_id = get_u32(bytes, 12);
             record.timestamp = Some(get_u64(bytes, 16).ok_or_else(truncated)?);
@@ -869,48 +1090,38 @@ fn decode_record(
     Ok(record)
 }
 
-/// `!wmitrace.logdump`'s arguments: `[-t count] <logger>`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LogDumpArguments {
-    pub logger: String,
-    /// `-t`: keep only this many of the most recent events.
-    pub most_recent: Option<usize>,
+/// The session a `!wmitrace` command names: a session name (matched
+/// without case) or else an expression, read in `radix`, for a logger id or
+/// a `_WMI_LOGGER_CONTEXT` address (in a minidump, a logger id).
+#[derive(Debug, Clone)]
+pub struct EtwLoggerRef {
+    pub text: String,
+    pub radix: NumberRadix,
 }
 
-impl LogDumpArguments {
-    /// Parse `[-t count] <logger>`; `None` when no logger is named. The count
-    /// is decimal, or hex with `0x`, whatever the radix, as WinDbg takes it.
-    pub fn parse<'a>(args: impl IntoIterator<Item = &'a str>) -> Result<Option<Self>> {
-        let mut most_recent = None;
-        let mut logger = None;
-        let mut args = args.into_iter();
-        while let Some(arg) = args.next() {
-            if arg.eq_ignore_ascii_case("-t") {
-                let count = args
-                    .next()
-                    .ok_or_else(|| Error::InvalidArgument("-t needs a count of events".into()))?;
-                let parsed = match count
-                    .strip_prefix("0x")
-                    .or_else(|| count.strip_prefix("0X"))
-                {
-                    Some(hex) => usize::from_str_radix(hex, 16),
-                    None => count.parse(),
-                };
-                most_recent = Some(parsed.map_err(|_| {
-                    Error::InvalidArgument(format!("-t count '{count}' is not a number"))
-                })?);
-            } else if logger.is_none() {
-                logger = Some(arg.to_string());
-            } else {
-                return Err(Error::InvalidArgument(format!(
-                    "unexpected argument '{arg}': quote a session name that has spaces; filtering by a GUID file is not supported"
-                )));
-            }
+/// A session as the SDK names it: its logger id or `_WMI_LOGGER_CONTEXT`
+/// address, or its name.
+#[cfg(feature = "python")]
+#[derive(pyo3::FromPyObject)]
+pub enum EtwLoggerArg {
+    Value(u64),
+    Name(String),
+}
+
+#[cfg(feature = "python")]
+impl PyArg for EtwLoggerRef {
+    type Py = EtwLoggerArg;
+
+    /// A value is written in hex, which reads the same in every radix.
+    fn from_py(value: EtwLoggerArg) -> Self {
+        let text = match value {
+            EtwLoggerArg::Value(value) => format!("{value:#x}"),
+            EtwLoggerArg::Name(name) => name,
+        };
+        Self {
+            text,
+            radix: NumberRadix::Hexadecimal,
         }
-        Ok(logger.map(|logger| Self {
-            logger,
-            most_recent,
-        }))
     }
 }
 
@@ -1057,9 +1268,17 @@ impl EventCollector {
         }));
     }
 
-    /// The events in time order; `most_recent` keeps only that many of the
-    /// newest.
-    fn finish(mut self, most_recent: Option<usize>) -> EtwEvents {
+    /// The events of `logger` in time order; `most_recent` keeps only that
+    /// many of the newest. `list_stop` is why the walk of its buffers ended
+    /// early, and `qpc_frequency` and `cpu_mhz` converted their timestamps.
+    fn finish(
+        mut self,
+        logger: EtwSession,
+        list_stop: Option<String>,
+        qpc_frequency: Option<u64>,
+        cpu_mhz: Option<u64>,
+        most_recent: Option<usize>,
+    ) -> EtwEventDump {
         self.events
             .sort_by_key(|(order, event)| (*order, event.buffer.0, event.record.offset));
         let total_events = self.events.len();
@@ -1069,10 +1288,14 @@ impl EventCollector {
             .skip(most_recent.map_or(0, |count| total_events.saturating_sub(count)))
             .map(|(_, event)| event)
             .collect();
-        EtwEvents {
+        EtwEventDump {
+            logger,
             buffers_walked: self.walked,
-            issues: self.issues,
+            list_stop,
             total_events,
+            qpc_frequency,
+            cpu_mhz,
+            issues: self.issues,
             message_format_note: message_format_note(&events),
             events,
         }
@@ -1163,8 +1386,7 @@ impl Target {
         if self.phys.dmp_info().is_some_and(|dump| dump.is_triage) {
             return Err(Error::DebugInfo(
                 "a minidump does not hold the kernel's ETW sessions, only those Windows saved \
-                 in it at the crash, which the !wmitrace commands and the SDK's \
-                 etw_crash_sessions() and etw_crash_events() read"
+                 in it at the crash, which the !wmitrace commands read"
                     .into(),
             ));
         }
@@ -1278,20 +1500,20 @@ impl Target {
         })
     }
 
-    /// The active logger `text` names: a session name (without case), a
-    /// logger id, or a `_WMI_LOGGER_CONTEXT` address, evaluated with `radix`.
-    pub fn etw_logger(&self, text: &str, radix: NumberRadix) -> Result<EtwLogger> {
+    /// The active logger `logger` names: a session name (without case), a
+    /// logger id, or a `_WMI_LOGGER_CONTEXT` address.
+    pub fn etw_logger(&self, logger: &EtwLoggerRef) -> Result<EtwLogger> {
         let table = self.etw_loggers()?;
-        select_logger(&table, text, |text| {
-            Expr::eval_with_radix(text, self, radix)
+        select_logger(&table, &logger.text, |text| {
+            Expr::eval_with_radix(text, self, logger.radix)
         })
         .cloned()
     }
 
-    /// The logger `text` names (see [`Self::etw_logger`]) and every buffer on
-    /// its `GlobalList`.
-    pub fn etw_logger_buffers(&self, text: &str, radix: NumberRadix) -> Result<EtwLoggerBuffers> {
-        let logger = self.etw_logger(text, radix)?;
+    /// The active logger `logger` names (see [`Self::etw_logger`]) and every
+    /// buffer on its `GlobalList`.
+    pub fn etw_logger_buffers(&self, logger: &EtwLoggerRef) -> Result<EtwLoggerBuffers> {
+        let logger = self.etw_logger(logger)?;
         let types = self.etw_types()?;
         let (buffers, list_stop) = self.read_etw_buffers(&types, &logger)?;
         Ok(EtwLoggerBuffers {
@@ -1391,15 +1613,15 @@ impl Target {
         Ok(types.buffer(address, &header, data_end))
     }
 
-    /// `!wmitrace.logdump`: the events in the buffers of the logger `text`
-    /// names, oldest first; `most_recent` keeps only that many of the newest.
+    /// `!wmitrace.logdump`: the events in the buffers of the active logger
+    /// `logger` names, oldest first; `most_recent` keeps only that many of
+    /// the newest.
     pub fn etw_log_dump(
         &self,
-        text: &str,
-        radix: NumberRadix,
+        logger: &EtwLoggerRef,
         most_recent: Option<usize>,
     ) -> Result<EtwEventDump> {
-        let logger = self.etw_logger(text, radix)?;
+        let logger = self.etw_logger(logger)?;
         let types = self.etw_types()?;
         let (buffers, list_stop) = self.read_etw_buffers(&types, &logger)?;
         let qpc_frequency = KuserSharedData::new(self).qpc_frequency();
@@ -1436,13 +1658,13 @@ impl Target {
             }
             collector.add(self, &types, &time, buffer, &data[..end]);
         }
-        Ok(EtwEventDump {
-            logger,
+        Ok(collector.finish(
+            EtwSession::Active(logger),
             list_stop,
             qpc_frequency,
             cpu_mhz,
-            events: collector.finish(most_recent),
-        })
+            most_recent,
+        ))
     }
 
     /// Processor 0's rated speed (`_KPRCB.MHz`), which converts CpuCycle
@@ -1459,21 +1681,38 @@ impl Target {
     }
 }
 
-/// `!wmitrace.logsave`: a logger's in-memory buffers as an .etl file.
-#[derive(Debug, Clone)]
+/// The buffers of a session as an .etl file: a header buffer, then each
+/// buffer that holds events.
+#[record(impl)]
 pub struct EtwLogFile {
-    pub logger_id: u32,
-    pub name: Option<String>,
-    pub buffer_size: u32,
-    /// Buffers with events written after the header buffer.
+    pub logger: EtwSession,
+    /// The buffers with events written after the header buffer.
     pub buffers: usize,
-    /// Why the `GlobalList` walk, or the walk of the dump's ETW data, ended
-    /// early.
+    /// Why the walk of the `GlobalList`, or of a minidump's ETW data, ended
+    /// early. `None` if the walk completed.
     pub list_stop: Option<String>,
-    /// Buffers left out (unreadable) and buffers cut short before a record
-    /// that does not decode.
+    /// The buffers left out (unreadable) and the buffers cut short before a
+    /// record that does not decode.
     pub issues: Vec<EtwBufferIssue>,
+    #[record(skip)]
     pub bytes: Vec<u8>,
+}
+
+#[record]
+impl EtwLogFile {
+    /// Bytes in the file.
+    #[record(getter)]
+    pub fn size(&self) -> usize {
+        self.bytes.len()
+    }
+}
+
+/// An .etl file that `!wmitrace.logsave` wrote on the host.
+#[record]
+pub struct EtwLogSave {
+    /// Where the file was written.
+    pub path: String,
+    pub file: EtwLogFile,
 }
 
 /// What the logfile header event records besides the logger's own fields.
@@ -1775,11 +2014,11 @@ fn write_logfile_header_buffer(
 }
 
 impl Target {
-    /// `!wmitrace.logsave`: the logger `text` names as an .etl file: a header
-    /// buffer, then each of its buffers that holds events, sealed as the
-    /// logger flushes them after its last record that decodes.
-    pub fn etw_log_file(&self, text: &str, radix: NumberRadix) -> Result<EtwLogFile> {
-        let logger = self.etw_logger(text, radix)?;
+    /// `!wmitrace.logsave`: the active logger `logger` names as an .etl
+    /// file: a header buffer, then each of its buffers that holds events,
+    /// sealed as the logger flushes them after its last record that decodes.
+    pub fn etw_log_file(&self, logger: &EtwLoggerRef) -> Result<EtwLogFile> {
+        let logger = self.etw_logger(logger)?;
         let types = self.etw_types()?;
         let (buffers, list_stop) = self.read_etw_buffers(&types, &logger)?;
         let guest = self.guest()?;
@@ -1803,9 +2042,7 @@ impl Target {
             |buffer, slot| memory.read_bytes(buffer.address, slot),
         )?;
         Ok(EtwLogFile {
-            logger_id: logger.logger_id,
-            name: logger.name,
-            buffer_size: logger.buffer_size,
+            logger: EtwSession::Active(logger),
             buffers,
             list_stop,
             issues,
@@ -2179,7 +2416,14 @@ mod tests {
             ]
         );
         let classic = &records[0];
-        assert_eq!(classic.class, Some((2, 4, 1)));
+        assert_eq!(
+            classic.event_class,
+            Some(EtwEventClass {
+                r#type: 2,
+                level: 4,
+                version: 1
+            })
+        );
         assert_eq!(
             (classic.thread_id, classic.process_id),
             (Some(0x11), Some(0x22))
@@ -2225,31 +2469,6 @@ mod tests {
         let stop = stop.unwrap();
         assert_eq!(stop.offset, 0);
         assert!(stop.reason.contains("extended data item at +0x50"));
-    }
-
-    #[test]
-    fn parses_logdump_arguments() {
-        let parse = |args: &[&str]| LogDumpArguments::parse(args.iter().copied());
-        let arguments = |logger: &str, most_recent| {
-            Some(LogDumpArguments {
-                logger: logger.to_string(),
-                most_recent,
-            })
-        };
-        assert_eq!(parse(&[]).unwrap(), None);
-        assert_eq!(parse(&["-t", "5"]).unwrap(), None);
-        assert_eq!(parse(&["0x24"]).unwrap(), arguments("0x24", None));
-        assert_eq!(
-            parse(&["-t", "0x10", "NT Kernel Logger"]).unwrap(),
-            arguments("NT Kernel Logger", Some(0x10))
-        );
-        assert_eq!(
-            parse(&["NtfsLog", "-T", "10"]).unwrap(),
-            arguments("NtfsLog", Some(10))
-        );
-        assert!(parse(&["NtfsLog", "-t"]).is_err());
-        assert!(parse(&["-t", "ten", "NtfsLog"]).is_err());
-        assert!(parse(&["NT", "Kernel"]).is_err());
     }
 
     /// `_WMI_BUFFER_HEADER` offsets of the 26200 kernel PDB.

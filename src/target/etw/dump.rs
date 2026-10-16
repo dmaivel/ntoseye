@@ -21,16 +21,18 @@
 use std::sync::Arc;
 
 use super::{
-    BufferHeaderOffsets, EtwBuffer, EtwClock, EtwEvents, EtwLogFile, EventCollector, LogFileLogger,
-    LogFileSystem, MAX_BUFFER_SIZE, TimeBase, etw_buffer,
+    BufferHeaderOffsets, EtwBuffer, EtwClock, EtwEventDump, EtwLogFile, EtwLoggerRef, EtwSession,
+    EventCollector, LogFileLogger, LogFileSystem, MAX_BUFFER_SIZE, TimeBase, etw_buffer,
+    format_filetime_precise, logger_mode_names,
 };
 use crate::bytes::{read_u32, read_u64};
 use crate::error::{Error, Result};
-use crate::expr::{Expr, NumberRadix};
+use crate::expr::Expr;
 use crate::kuser_shared::KuserSharedData;
 use crate::layout::utf16le_lossy;
 use crate::target::Target;
 use crate::types::VirtAddr;
+use ntoseye_macros::record;
 
 /// `nt!EtwSecondaryDumpDataGuid`, {2B88B710-1C93-4F7C-B06C-655ECC50DECC},
 /// as it lies in memory.
@@ -44,44 +46,99 @@ const LOGGER_HEADER_SIZE: usize = 0x30;
 /// buffer, so no buffer's `BufferSize` can be taken for it.
 const LOGGER_SIGNATURE: u32 = 0x01eb_afe1;
 
-/// The sessions of a minidump's ETW data, and the system fields that the
-/// logfile header of an .etl records.
-#[derive(Debug, Clone)]
+/// The ETW trace sessions that Windows saved as it wrote a minidump
+/// (tagged data `nt!EtwSecondaryDumpDataGuid`): the sessions started with
+/// `EVENT_TRACE_ADDTO_TRIAGE_DUMP`, such as EventLog-System, and the system
+/// fields that the logfile header of an .etl records.
+#[record(impl)]
 pub struct EtwDumpData {
     /// `KeMaximumIncrement`, the clock interrupt interval in 100 ns.
     pub timer_resolution: u32,
     /// `NtBuildNumber`, its top nibble the free or checked build.
+    #[record(hex)]
     pub build_number: u32,
     /// `EtwCPUSpeedInMHz`.
     pub cpu_mhz: u32,
     /// `EtwpBootTime`, a FILETIME.
     pub boot_time: u64,
-    /// `EtwPerfFreq`, the QPC frequency.
+    /// `EtwPerfFreq`, the QPC frequency of PerfCounter timestamps.
     pub perf_frequency: u64,
     pub loggers: Vec<EtwDumpLogger>,
-    /// Why the walk of the block ended before its end.
+    /// Why the walk of the data stopped before its end. `None` if it read
+    /// all of it.
     pub stop: Option<String>,
+    #[record(skip)]
     data: Arc<[u8]>,
 }
 
-/// A session of a minidump's ETW data: what its header records of its
-/// `_WMI_LOGGER_CONTEXT`, and its buffers.
-#[derive(Debug, Clone)]
+#[record]
+impl EtwDumpData {
+    /// Bytes of the ETW data.
+    #[record(getter)]
+    pub fn size(&self) -> usize {
+        self.data.len()
+    }
+
+    /// `boot_time` as UTC. `None` if it is out of range.
+    #[record(getter)]
+    pub fn boot_time_utc(&self) -> Option<String> {
+        format_filetime_precise(self.boot_time)
+    }
+}
+
+/// An ETW trace session that Windows saved in a minidump: what the
+/// session's header in the dump records of its `_WMI_LOGGER_CONTEXT`, and
+/// its buffers.
+#[record(impl)]
 pub struct EtwDumpLogger {
     pub logger_id: u32,
     pub name: String,
+    #[record(hex)]
     pub logger_mode: u32,
+    #[record(skip)]
     pub clock: EtwClock,
+    /// Bytes per buffer.
     pub buffer_size: u32,
     /// `StartTime`, a FILETIME.
     pub start_time: u64,
     /// `ReferenceTime`: the system time (FILETIME) at the clock value
     /// `reference_clock`.
+    #[record(skip)]
     pub reference_system_time: u64,
+    #[record(skip)]
     pub reference_clock: u64,
-    /// The buffers, each [`EtwBuffer::address`] the offset of its header in
-    /// the block, and `data_end` its bytes in the block.
+    /// The buffers saved of the session, which are all the buffers on its
+    /// `GlobalList`. A buffer's `address` is the offset of its header in the
+    /// dump's ETW data, and its `data_end` its bytes there.
     pub buffers: Vec<EtwBuffer>,
+}
+
+#[record]
+impl EtwDumpLogger {
+    /// The `EVENT_TRACE_*_MODE` bits that are set in `logger_mode`.
+    #[record(getter)]
+    pub fn logger_mode_names(&self) -> Vec<&'static str> {
+        logger_mode_names(self.logger_mode)
+    }
+
+    /// `ClockType` (`EVENT_TRACE_CLOCK_*`).
+    #[record(getter)]
+    pub fn clock_type(&self) -> u32 {
+        self.clock.raw()
+    }
+
+    /// The name of what the event timestamps count.
+    #[record(getter, rename = "clock")]
+    pub fn clock_name(&self) -> &'static str {
+        self.clock.name()
+    }
+
+    /// `start_time` as UTC (`YYYY-MM-DD HH:MM:SS.fffffff`). `None` if it is
+    /// out of range.
+    #[record(getter)]
+    pub fn start_time_utc(&self) -> Option<String> {
+        format_filetime_precise(self.start_time)
+    }
 }
 
 impl EtwDumpLogger {
@@ -97,11 +154,6 @@ impl EtwDumpLogger {
 }
 
 impl EtwDumpData {
-    /// Size of the block in bytes.
-    pub fn size(&self) -> usize {
-        self.data.len()
-    }
-
     /// The header and events of `buffer`, one of this block's.
     fn buffer_bytes(&self, buffer: &EtwBuffer) -> &[u8] {
         let start = buffer.address.0 as usize;
@@ -283,37 +335,20 @@ impl Target {
     /// sessions from; `None` for a live target and a full or kernel dump,
     /// whose memory holds the sessions themselves.
     pub fn etw_dump_data(&self) -> Result<Option<EtwDumpData>> {
-        if !self.phys.dmp_info().is_some_and(|dump| dump.is_triage) {
+        let Some(dump) = self.phys.dmp_info().filter(|dump| dump.is_triage) else {
             return Ok(None);
-        }
-        self.etw_crash_data().map(Some)
-    }
-
-    /// The ETW sessions Windows saved in a crash dump, of any kind, as
-    /// tagged data: the SDK's `etw_crash_sessions()`.
-    pub fn etw_crash_data(&self) -> Result<EtwDumpData> {
-        let dump = self.phys.dmp_info().ok_or_else(|| {
-            Error::DebugInfo(
-                "Windows saves ETW sessions as it writes a crash dump; a live target's \
-                 sessions are in its memory, which etw_loggers() and !wmitrace read"
-                    .into(),
-            )
-        })?;
+        };
         let block = dump
             .tagged_blocks
             .iter()
             .find(|block| block.tag == ETW_DUMP_DATA_TAG)
             .ok_or_else(|| {
-                Error::DebugInfo(if dump.is_triage {
+                Error::DebugInfo(
                     "a minidump does not hold the kernel's ETW sessions, only the tagged data \
                      nt!EtwSecondaryDumpDataGuid of those that log to triage dumps, and this \
                      one has none"
-                        .into()
-                } else {
-                    "this dump has no tagged data nt!EtwSecondaryDumpDataGuid, the ETW \
-                     sessions that log to triage dumps"
-                        .into()
-                })
+                        .into(),
+                )
             })?;
         let types = self.etw_types()?;
         parse_dump_data(
@@ -321,6 +356,7 @@ impl Target {
             &types.offsets,
             &types.buffer_states,
         )
+        .map(Some)
     }
 
     /// `!wmitrace.logdump` in a minidump: the events in `logger`'s buffers,
@@ -330,7 +366,7 @@ impl Target {
         data: &EtwDumpData,
         logger: &EtwDumpLogger,
         most_recent: Option<usize>,
-    ) -> Result<EtwEvents> {
+    ) -> Result<EtwEventDump> {
         let types = self.etw_types()?;
         let time = logger.time_base(data);
         let mut collector = EventCollector::default();
@@ -339,18 +375,25 @@ impl Target {
                 collector.add(self, &types, &time, buffer, data.buffer_bytes(buffer));
             }
         }
-        Ok(collector.finish(most_recent))
+        Ok(collector.finish(
+            EtwSession::Saved(logger.clone()),
+            data.stop.clone(),
+            Some(data.perf_frequency),
+            Some(u64::from(data.cpu_mhz)),
+            most_recent,
+        ))
     }
 
-    /// The session of `data` that `text` names: its name (without case), or
-    /// its logger id evaluated with `radix`.
+    /// The session of `data` that `logger` names: its name (without case),
+    /// or its logger id.
     pub fn etw_dump_logger<'d>(
         &self,
         data: &'d EtwDumpData,
-        text: &str,
-        radix: NumberRadix,
+        logger: &EtwLoggerRef,
     ) -> Result<&'d EtwDumpLogger> {
-        data.logger(text, |text| Expr::eval_with_radix(text, self, radix))
+        data.logger(&logger.text, |text| {
+            Expr::eval_with_radix(text, self, logger.radix)
+        })
     }
 
     /// `!wmitrace.logsave` in a minidump: `logger`'s buffers as an .etl file.
@@ -384,9 +427,7 @@ impl Target {
             },
         )?;
         Ok(EtwLogFile {
-            logger_id: logger.logger_id,
-            name: Some(logger.name.clone()),
-            buffer_size: logger.buffer_size,
+            logger: EtwSession::Saved(logger.clone()),
             buffers,
             list_stop: data.stop.clone(),
             issues,
