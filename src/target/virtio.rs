@@ -1229,7 +1229,7 @@ impl Target {
             }
         }
         if let Ok(list) = self.ndis_miniports() {
-            let addresses = list.miniports.iter().map(|entry| match entry {
+            let addresses = list.entries.iter().map(|entry| match entry {
                 Ok(miniport) => miniport.address,
                 Err(unreadable) => unreadable.address,
             });

@@ -14,7 +14,6 @@ pub mod machine;
 pub mod meta;
 pub mod mm;
 pub mod module;
-pub mod ndis;
 pub mod object;
 pub mod pnp;
 pub mod power;
