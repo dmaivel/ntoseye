@@ -4926,23 +4926,29 @@ class Exceptions:
         ordinary exceptions break by default and module loads and unloads do
         not stop.
         """
-    def set(self, /, code: int |str, mode: Literal["break", "second_chance", "notify", "ignore"] |None = None, *, command: str |None = None, disposition: Literal["break", "handled", "not_handled"] |None = None) -> ExceptionPolicy |ModuleEventPolicy:
+    def set(self, /, code: int |str, mode: Literal["break", "second_chance", "notify", "ignore"] |None = None, *, command: str |None = None, disposition: Literal["break", "handled", "not_handled"] |None = None) -> ExceptionPolicy:
         """
-        Break when an exception occurs or a kernel module loads or unloads.
+        Set how the debugger handles an exception, by NTSTATUS code or WinDbg
+        alias (`av`, `bpe`, ...), and return its policy.
         
-        -c runs commands at the stop, and -f sets an explicit final action:
-        break, handled, or not handled. `sxe ld` stops when a kernel image loads,
-        and `sxe ld:<module>` stops when that module loads. The module name is
-        case-insensitive, the extension is optional, and you can use `*`/`?`
-        globs. The stop occurs after ntoseye lists the module and arms its
-        deferred breakpoints, and before its entry point runs. `sxe ud` and `sxe
-        ud:<module>` stop when a kernel image unloads, after its driver's unload
-        routine has run and while the image is still in the module list. `-c`
-        works with `sxe ld` and `sxe ud`, but `-f` does not apply to them. `sxn
-        ld` prints a `ModLoad:` line and continues, `sxn ud` prints an `Unload
-        module` line and continues, and `sxd` and `sxi` let the load or unload
-        continue with no output. A named filter has precedence over bare `ld` or
-        `ud`.
+        `mode` is `break` (the default), `second_chance`, `notify` or `ignore`.
+        `command` runs at the stop, which needs an explicit `disposition`: break,
+        or continue the exception as handled or not handled. For a module load
+        or unload filter, use `set_module_event`.
+        """
+    def set_module_event(self, /, event: Literal["ld", "ud"], module: str |None = None, mode: Literal["break", "second_chance", "notify", "ignore"] |None = None, *, command: str |None = None) -> ModuleEventPolicy:
+        """
+        Set a filter for a kernel module load (`ld`) or unload (`ud`), and return
+        it.
+        
+        `module` limits it to one image (a case-insensitive name; the extension
+        is optional, and `*`/`?` globs match); without it, the filter applies to
+        every image. `mode` is `break` (the default; a load stops after ntoseye
+        lists the module and arms its deferred breakpoints, an unload while the
+        image is still listed), `notify` (a `ModLoad:` or `Unload module` notice,
+        then the target continues), or `second_chance` or `ignore` (it
+        continues). `command` runs at the stop, so only with `break`. A named
+        filter has precedence over a bare one.
         """
 
 @final

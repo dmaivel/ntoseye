@@ -16,7 +16,7 @@ use super::handle::Owner;
 use super::process::Process;
 use super::thread::{Cpu, Thread};
 use crate::Backend;
-use crate::dbg_backend::{ContinueDisposition, WatchpointAccess};
+use crate::dbg_backend::{ContinueDisposition, ModuleEvent, WatchpointAccess};
 use crate::exception_policy::{EventName, ExceptionPolicyFinalAction, ExceptionPolicyMode};
 use crate::guest::ProcessInfo;
 use crate::kd::KdMemorySource;
@@ -166,6 +166,21 @@ literal_arg! {
 impl PyArg for ExceptionPolicyMode {
     type Py = PolicyMode;
     fn from_py(value: PolicyMode) -> Self {
+        value.0
+    }
+}
+
+literal_arg! {
+    /// A module event a filter is for: a load (`ld`) or an unload (`ud`).
+    ModuleEventArg(ModuleEvent) {
+        "ld" => ModuleEvent::Load,
+        "ud" => ModuleEvent::Unload,
+    }
+}
+
+impl PyArg for ModuleEvent {
+    type Py = ModuleEventArg;
+    fn from_py(value: ModuleEventArg) -> Self {
         value.0
     }
 }

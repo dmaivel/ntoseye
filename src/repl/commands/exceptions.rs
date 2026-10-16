@@ -3,7 +3,7 @@
 
 use ntoseye_macros::command;
 
-use crate::dbg_backend::{ContinueDisposition, LastEvent};
+use crate::dbg_backend::{ContinueDisposition, LastEvent, ModuleEvent};
 use crate::error::{Error, Result};
 use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
@@ -126,52 +126,71 @@ fn module_event_label(mode: ExceptionPolicyMode) -> &'static str {
 /// module` line and continues, and `sxd` and `sxi` let the load or unload
 /// continue with no output. A named filter has precedence over bare `ld` or
 /// `ud`.
+// The forms are SDK-only: the line's grammar (`-c`, `-f` and the event in
+// any order, `ld:<module>`) has no form words, so `sxe` parses it and calls
+// the operation the event names.
 #[command(
     names = ["sxe"],
     category = "breakpoints and events",
     kind = Action,
-    python = Exceptions,
-    python_name = "set",
+    forms = [set_exception_policy, set_module_event],
     usage = "sxe [-c <commands>] [-f <break|gh|gn>] <exception-code|alias|ld[:<module>]|ud[:<module>]>",
     completion = None
 )]
-fn set_event_policy(
+fn sxe(
     session: &mut Session,
     #[arg(parse = event_name)] code: EventName,
-    #[arg(sdk, default = None)] mode: Option<ExceptionPolicyMode>,
-    #[arg(parse = event_command, keyword, default = None)] command: Option<String>,
-    #[arg(parse = final_action, keyword, default = None)] disposition: Option<
-        ExceptionPolicyFinalAction,
-    >,
+    #[arg(parse = event_command)] command: Option<String>,
+    #[arg(parse = final_action)] disposition: Option<ExceptionPolicyFinalAction>,
 ) -> Result<EventPolicy> {
-    let mode = mode.unwrap_or(ExceptionPolicyMode::Break);
-    let filter = code.resolve().map_err(Error::DebugInfo)?;
-    let code = match filter {
-        EventFilter::Exception(code) => code,
+    set_event_policy(
+        session,
+        code,
+        ExceptionPolicyMode::Break,
+        command,
+        disposition,
+    )
+}
+
+/// What an `sx*` command set: an exception's policy, or a module load or
+/// unload filter.
+enum EventPolicy {
+    Exception(ExceptionPolicy),
+    Module(ModuleEventPolicy),
+}
+
+/// An `sx*` line's operation: the policy of the exception, or the filter of
+/// the module event (`ld[:<module>]`, `ud[:<module>]`), that `code` names.
+fn set_event_policy(
+    session: &mut Session,
+    code: EventName,
+    mode: ExceptionPolicyMode,
+    command: Option<String>,
+    disposition: Option<ExceptionPolicyFinalAction>,
+) -> Result<EventPolicy> {
+    match code.resolve().map_err(Error::DebugInfo)? {
+        EventFilter::Exception(code) => {
+            set_exception(session, code, mode, command, disposition).map(EventPolicy::Exception)
+        }
         EventFilter::Module(event, module) => {
-            let name = event.filter_name();
             if disposition.is_some() {
                 return Err(Error::DebugInfo(format!(
-                    "-f does not apply to {name}: a module event either stops (sxe) or continues"
+                    "-f does not apply to {}: a module event either stops (sxe) or continues",
+                    event.filter_name()
                 )));
             }
-            if command.is_some() && mode != ExceptionPolicyMode::Break {
-                return Err(Error::DebugInfo(format!(
-                    "-c applies to {name} only with sxe, where it runs at the stop"
-                )));
-            }
-            if let Some(event_command) = command.as_deref() {
-                validate_exception_command(event_command).map_err(Error::DebugInfo)?;
-            }
-            session.set_module_event_filter(event, module, mode, command)?;
-            let policy = session
-                .exception_policies
-                .module_event_entries()
-                .last()
-                .expect("the filter was just set");
-            return Ok(EventPolicy::Module(policy.clone()));
+            set_module_filter(session, event, module, mode, command).map(EventPolicy::Module)
         }
-    };
+    }
+}
+
+fn set_exception(
+    session: &mut Session,
+    code: u32,
+    mode: ExceptionPolicyMode,
+    command: Option<String>,
+    disposition: Option<ExceptionPolicyFinalAction>,
+) -> Result<ExceptionPolicy> {
     if command.is_some() && disposition.is_none() {
         return Err(Error::DebugInfo(
             "-c requires an explicit final action: -f break, -f gh, or -f gn".to_string(),
@@ -188,7 +207,90 @@ fn set_event_policy(
         .entries()
         .find(|policy| policy.code == code)
         .expect("the policy was just set");
-    Ok(EventPolicy::Exception(policy.clone()))
+    Ok(policy.clone())
+}
+
+fn set_module_filter(
+    session: &mut Session,
+    event: ModuleEvent,
+    module: Option<String>,
+    mode: ExceptionPolicyMode,
+    command: Option<String>,
+) -> Result<ModuleEventPolicy> {
+    if command.is_some() && mode != ExceptionPolicyMode::Break {
+        return Err(Error::DebugInfo(format!(
+            "-c applies to {} only with sxe, where it runs at the stop",
+            event.filter_name()
+        )));
+    }
+    if let Some(event_command) = command.as_deref() {
+        validate_exception_command(event_command).map_err(Error::DebugInfo)?;
+    }
+    session.set_module_event_filter(event, module, mode, command)?;
+    let policy = session
+        .exception_policies
+        .module_event_entries()
+        .last()
+        .expect("the filter was just set");
+    Ok(policy.clone())
+}
+
+/// Set how the debugger handles an exception, by NTSTATUS code or WinDbg
+/// alias (`av`, `bpe`, ...), and return its policy.
+///
+/// `mode` is `break` (the default), `second_chance`, `notify` or `ignore`.
+/// `command` runs at the stop, which needs an explicit `disposition`: break,
+/// or continue the exception as handled or not handled. For a module load
+/// or unload filter, use `set_module_event`.
+#[command(form_of = sxe, python = Exceptions, python_name = "set", sdk)]
+fn set_exception_policy(
+    session: &mut Session,
+    code: EventName,
+    mode: Option<ExceptionPolicyMode>,
+    #[arg(keyword)] command: Option<String>,
+    #[arg(keyword)] disposition: Option<ExceptionPolicyFinalAction>,
+) -> Result<ExceptionPolicy> {
+    let mode = mode.unwrap_or(ExceptionPolicyMode::Break);
+    match code.resolve().map_err(Error::DebugInfo)? {
+        EventFilter::Exception(code) => set_exception(session, code, mode, command, disposition),
+        EventFilter::Module(event, _) => Err(Error::InvalidArgument(format!(
+            "{} is a module event, not an exception: use set_module_event(\"{}\", ...)",
+            event.filter_name(),
+            event.filter_name()
+        ))),
+    }
+}
+
+/// Set a filter for a kernel module load (`ld`) or unload (`ud`), and return
+/// it.
+///
+/// `module` limits it to one image (a case-insensitive name; the extension
+/// is optional, and `*`/`?` globs match); without it, the filter applies to
+/// every image. `mode` is `break` (the default; a load stops after ntoseye
+/// lists the module and arms its deferred breakpoints, an unload while the
+/// image is still listed), `notify` (a `ModLoad:` or `Unload module` notice,
+/// then the target continues), or `second_chance` or `ignore` (it
+/// continues). `command` runs at the stop, so only with `break`. A named
+/// filter has precedence over a bare one.
+#[command(form_of = sxe, python = Exceptions, sdk)]
+fn set_module_event(
+    session: &mut Session,
+    event: ModuleEvent,
+    module: Option<String>,
+    mode: Option<ExceptionPolicyMode>,
+    #[arg(keyword)] command: Option<String>,
+) -> Result<ModuleEventPolicy> {
+    let module = match module.as_deref().map(str::trim) {
+        Some("") => {
+            return Err(Error::InvalidArgument(format!(
+                "an empty module name names no module (omit it to filter every {})",
+                event.filter_name()
+            )));
+        }
+        trimmed => trimmed.map(str::to_string),
+    };
+    let mode = mode.unwrap_or(ExceptionPolicyMode::Break);
+    set_module_filter(session, event, module, mode, command)
 }
 
 impl Render for EventPolicy {
@@ -239,8 +341,13 @@ fn set_second_chance(
     #[arg(parse = event_command)] command: Option<String>,
     #[arg(parse = final_action)] disposition: Option<ExceptionPolicyFinalAction>,
 ) -> Result<EventPolicy> {
-    let mode = Some(ExceptionPolicyMode::SecondChance);
-    set_event_policy(session, code, mode, command, disposition)
+    set_event_policy(
+        session,
+        code,
+        ExceptionPolicyMode::SecondChance,
+        command,
+        disposition,
+    )
 }
 
 /// Show a notification for exceptions and pass them without a break.
@@ -263,8 +370,13 @@ fn set_notify(
     #[arg(parse = event_command)] command: Option<String>,
     #[arg(parse = final_action)] disposition: Option<ExceptionPolicyFinalAction>,
 ) -> Result<EventPolicy> {
-    let mode = Some(ExceptionPolicyMode::Notify);
-    set_event_policy(session, code, mode, command, disposition)
+    set_event_policy(
+        session,
+        code,
+        ExceptionPolicyMode::Notify,
+        command,
+        disposition,
+    )
 }
 
 /// Pass exceptions without a break or a notification.
@@ -286,8 +398,13 @@ fn set_ignore(
     #[arg(parse = event_command)] command: Option<String>,
     #[arg(parse = final_action)] disposition: Option<ExceptionPolicyFinalAction>,
 ) -> Result<EventPolicy> {
-    let mode = Some(ExceptionPolicyMode::Ignore);
-    set_event_policy(session, code, mode, command, disposition)
+    set_event_policy(
+        session,
+        code,
+        ExceptionPolicyMode::Ignore,
+        command,
+        disposition,
+    )
 }
 
 /// List the configured exception policies and module load and unload filters.

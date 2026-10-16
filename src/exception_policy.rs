@@ -146,14 +146,6 @@ impl ModuleEventPolicy {
     }
 }
 
-/// What an `sx*` command set: an exception's policy, or a module load or
-/// unload filter.
-#[record]
-pub enum EventPolicy {
-    Exception(ExceptionPolicy),
-    Module(ModuleEventPolicy),
-}
-
 /// The configured exception policies and module load and unload filters
 /// (`sx`).
 #[record]
