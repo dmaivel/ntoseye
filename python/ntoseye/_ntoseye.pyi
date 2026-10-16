@@ -1351,6 +1351,11 @@ class Breakpoint:
         The breakpoint ID, which does not change.
         """
     @property
+    def info(self, /) -> BreakpointInfo:
+        """
+        The breakpoint's state now, as `bl` lists it.
+        """
+    @property
     def one_shot(self, /) -> bool:
         """
         True if ntoseye removes the breakpoint after the first hit that stops
@@ -1415,7 +1420,7 @@ class Breakpoint:
         """
     def to_dict(self, /) -> dict[str, Any]:
         """
-        Get the breakpoint state as a plain `dict`.
+        Get the breakpoint state (`info`) as a plain `dict`.
         """
     @property
     def valid(self, /) -> bool:
@@ -1427,6 +1432,17 @@ class Breakpoint:
         """
         What a VM-exit breakpoint stops on: its exit reason and the caller's
         partition and VP, if restricted. `None` for any other breakpoint.
+        """
+
+@final
+class BreakpointCommands(BaseRecord):
+    """
+    The commands that set the current breakpoints again (`.bpcmds`).
+    """
+    @property
+    def commands(self, /) -> list[str]:
+        """
+        One command line per breakpoint, in ID order.
         """
 
 @final
@@ -1468,17 +1484,9 @@ class BreakpointHit(BaseRecord):
     def temporary(self, /) -> bool: ...
 
 @final
-class BreakpointIterator:
+class BreakpointInfo(BaseRecord):
     """
-    Iterator over `dbg.breakpoints`.
-    """
-    def __iter__(self, /) -> BreakpointIterator: ...
-    def __next__(self, /) -> Breakpoint: ...
-
-@final
-class BreakpointStatus(BaseRecord):
-    """
-    A code breakpoint or data watchpoint (`bl`).
+    A code breakpoint or data watchpoint (`bl`), as the debugger keeps it.
     """
     @property
     def action(self, /) -> str |None:
@@ -1488,7 +1496,8 @@ class BreakpointStatus(BaseRecord):
     @property
     def address(self, /) -> int |None:
         """
-        None while a symbolic or source breakpoint is deferred.
+        The resolved address; None while a symbolic or source breakpoint is
+        deferred.
         """
     @property
     def condition(self, /) -> str |None:
@@ -1520,9 +1529,9 @@ class BreakpointStatus(BaseRecord):
     @property
     def partition(self, /) -> PartitionFilter |None:
         """
-        The guest partition of the Windows hypervisor whose VPs a hit
-        must be on, for a breakpoint set in its view (`.partition`). None
-        for the target's own breakpoints.
+        The guest partition of the Windows hypervisor whose VPs a hit must be
+        on, for a breakpoint set in its view (`.partition`). None for the
+        target's own breakpoints.
         """
     @property
     def pass_count(self, /) -> int:
@@ -1564,12 +1573,21 @@ class BreakpointStatus(BaseRecord):
         The display name of the current resolution.
         """
     @property
-    def temporary(self, /) -> bool: ...
+    def temporary(self, /) -> bool:
+        """
+        Whether this is a temporary run-to breakpoint.
+        """
     @property
     def thread(self, /) -> str |None:
         """
         The only thread that can report a hit (`/t`: `tid N` or
         `ethread 0x...`). None if there is no thread restriction.
+        """
+    @property
+    def unchecked(self, /) -> bool:
+        """
+        Set with `bp /a` or `bu /a`: without confirming that an instruction
+        starts at the address.
         """
     @property
     def vm_exit(self, /) -> ExitFilter |None:
@@ -1588,6 +1606,14 @@ class BreakpointStatus(BaseRecord):
         """
         The watched width in bytes. None for a code breakpoint.
         """
+
+@final
+class BreakpointIterator:
+    """
+    Iterator over `dbg.breakpoints`.
+    """
+    def __iter__(self, /) -> BreakpointIterator: ...
+    def __next__(self, /) -> Breakpoint: ...
 
 @final
 class Breakpoints:
@@ -1658,9 +1684,33 @@ class Breakpoints:
         """
         Add a source breakpoint at each address that matches `file:line`.
         """
+    def commands(self, /) -> BreakpointCommands:
+        """
+        Print the commands that set the current breakpoints again.
+        
+        The output has one line for each breakpoint, in ID order. An address
+        breakpoint shows as `bp <address>`, a symbolic or source breakpoint as `bu
+        <symbol>` (as `bm` creates it), a hardware breakpoint as `ba
+        <access><size> <address>`, and a hypercall breakpoint as `!hvbp <code>
+        [partition-id [vp-index]]`, without its pass count, which !hvbp does not
+        take. Each line also has the /1, /p, /t, and /c options of the breakpoint,
+        its condition (as /w), its pass count, and its command string. To set the
+        same breakpoints again, run the lines, either by pasting them or by saving
+        them to a file for `$$<`. WinDbg puts a breakpoint ID in each line, but
+        these lines have none because the ntoseye bp command does not take one, so
+        the new breakpoints get new IDs. A disabled breakpoint comes back enabled.
+        """
     def get(self, /, id: int) -> Breakpoint |None:
         """
         Get a breakpoint by ID, or `None` if the ID does not exist.
+        """
+    def list(self, /) -> list[BreakpointInfo]:
+        """
+        List all breakpoints.
+        
+        The status column shows `e` for enabled, `d` for disabled, or `o` for
+        owed. An owed breakpoint is a kernel code breakpoint that waits for its
+        page to become resident.
         """
     def watch(self, /, target: int |str, *, access: Literal["write", "read_write"] = ..., length: int = 1, condition: str |None = None, when: Callable[[Stop], object] |None = None, pass_count: int = 0, one_shot: bool = False, process: Process |int |None = None, thread: Thread |int |None = None, processor: Cpu |int |None = None, action: str |None = None) -> Watchpoint:
         """
@@ -1879,8 +1929,8 @@ class CachedFile(BaseRecord):
 @final
 class CallTrace(BaseRecord):
     """
-    A `wt` call trace: why it stopped, the instructions that it stepped,
-    and the call tree.
+    A `wt` call trace: the call tree, the instructions that it stepped, and
+    why it stopped ([`Session::trace_calls`]).
     """
     @property
     def end(self, /) -> str:
@@ -2782,19 +2832,18 @@ class Debugger:
         next stop, which then becomes `dbg.stop`. Command loops and `.sleep`
         also end when `timeout` elapses.
         """
-    def cont(self, /, disposition: Literal["handled", "not_handled"] = ...) -> None:
-        """
-        Resume the target without a wait, and acknowledge the current exception
-        as `handled` or `not_handled` (KD only).
-        """
     @property
     def cpus(self, /) -> Cpus:
         """
         The processors (vCPUs) of the target: `cpus[0].registers.rip`.
         """
-    def crash(self, /) -> None:
+    def crash(self, /, timeout: float |None = None) -> Stop:
         """
-        Crash the target on purpose (`.crash`), which causes a bugcheck stop.
+        Force a MANUALLY_INITIATED_CRASH (bugcheck 0xE2).
+        
+        Windows first writes its crash dump, which often takes a minute, and the
+        target ignores break-ins during this time. Then Windows reboots or, if
+        automatic restart is disabled, breaks in. Ctrl+C stops the wait.
         """
     def debug_log(self, /, since: int = 0) -> DebugLog:
         """
@@ -2849,7 +2898,8 @@ class Debugger:
         """
     def interrupt(self, /) -> Stop:
         """
-        Break into the running target and return the stop that results.
+        Break into the running target and return the stop that results. On a
+        halted target, return the stop it is halted at (`break` refuses it).
         """
     @property
     def memory(self, /) -> Memory:
@@ -2890,9 +2940,12 @@ class Debugger:
         """
         Running processes, keyed by PID: `processes[4]`, `.find(name)`.
         """
-    def reboot(self, /) -> None:
+    def reboot(self, /, timeout: float |None = None) -> Stop:
         """
-        Reboot the target (`.reboot`). The next stop is of kind `"reload"`.
+        Reboot the debug target and reload its kernel context.
+        
+        ntoseye sends the reboot without confirmation, and handles the next KD
+        state-change through the normal target-reload path.
         """
     def reload(self, /) -> None:
         """
@@ -2901,21 +2954,17 @@ class Debugger:
         rebuild. A user-mode minidump has no kernel to find, and raises
         `NtoseyeError`.
         """
-    def run(self, /, timeout: float |None = None, *, disposition: Literal["handled", "not_handled"] = ...) -> Stop |None:
+    def run(self, /, address: int |str |None = None, timeout: float |None = None, *, disposition: Literal["handled", "not_handled"] |None = None) -> Stop |None:
         """
-        Resume and wait for the next stop, resuming again automatically after a
-        hit in the wrong process or a hit with a false condition. Returns the
-        `Stop`, or `None` if the target is still running after `timeout`
-        seconds.
-        """
-    def run_to(self, /, target: int |str, timeout: float |None = None, *, step: Literal["over", "into"] |None = None) -> Stop |None:
-        """
-        Run until execution reaches `target` (`g <addr>`), which is an address
-        or a symbolic `module!name[+off]`. With `step="over"`/`"into"`,
-        single-step to it (`pa`/`ta`). Other stops on the way are returned as
-        they are. With `timeout`, if execution does not reach `target` in time,
-        the target is interrupted where it is, and the stop's
-        kind is `"interrupt"`.
+        Resume VM execution.
+        
+        With an address, g runs to a temporary breakpoint at that address.
+        ntoseye checks that an instruction starts there as bp does: it refuses an
+        address inside an instruction and warns when it cannot check. In
+        secure-kernel code, this breakpoint uses a debug register, and ntoseye
+        never patches the code. The .vtl 1 memory view accepts only g without an
+        address, which leaves the view before it resumes the VM. To stop in VTL1,
+        use `ba e1`.
         """
     @property
     def secure_kernel(self, /) -> SecureKernel:
@@ -2949,30 +2998,26 @@ class Debugger:
         (`generation` advances). The target must be halted. This feature is
         experimental.
         """
-    def step(self, /, until: Literal["call", "ret", "branch"] |None = None, timeout: float |None = None) -> Stop:
+    def step(self, /, until: Literal["call", "ret", "branch"] |int |str |None = None, timeout: float |None = None) -> Stop:
         """
-        Single-step one instruction. With `until` ("call", "ret", "branch"),
-        step into instructions until the next instruction of that kind
-        (`tc`/`tt`/`th`). With `timeout` (seconds), an `until` walk that does
-        not end in time is interrupted where it is, and the stop's
-        kind is `"interrupt"`: a `"step"` stop always ends a walk where it was going.
-        Under VBS on the gdb backend, the other vCPUs can run while the step's
-        vCPU waits on them; a watchpoint hit one of them makes meanwhile ends
-        the step, and is returned instead.
+        Step one instruction (step into).
         """
     def step_out(self, /, timeout: float |None = None) -> Stop:
         """
-        Run until the stepping thread returns from the current function (`gu`).
-        With `timeout` (seconds), the thread is interrupted where it is if it
-        does not return in time, and the stop's kind is `"interrupt"`.
+        Run until the current function returns.
+        
+        gu stops at the return address only when the thread that you step returns
+        from this call. Other threads that get to the address, and deeper calls of
+        the same function, continue to run.
         """
-    def step_over(self, /, until: Literal["call", "ret", "branch"] |None = None, timeout: float |None = None) -> Stop:
+    def step_over(self, /, until: Literal["call", "ret", "branch"] |int |str |None = None, timeout: float |None = None) -> Stop:
         """
-        Step over the current instruction. With `until`, step over instructions
-        until the next call, ret, or branch (`pc`/`pt`/`ph`). Stepping over a
-        call runs the target until the stepping thread returns from it. With
-        `timeout` (seconds), a run or walk that does not end in time is
-        interrupted where it is, and the stop's kind is `"interrupt"`.
+        Step over the current instruction.
+        
+        If the instruction is a call, p runs to the instruction after the call and
+        stops there only when the thread that you step returns from that call.
+        Other threads that get to the address, and deeper calls of the same code,
+        continue to run.
         """
     @property
     def stop(self, /) -> Stop |None:
@@ -2993,13 +3038,7 @@ class Debugger:
         """
     def trace_calls(self, /, limit: int = 10000, timeout: float |None = None) -> CallTrace:
         """
-        Trace calls until the current function returns (`wt`), single-stepping
-        at most `limit` instructions. Returns `{end, error, instructions,
-        root}`, where `root` is the call tree and `end` gives the reason that
-        tracing stopped. With `timeout` (seconds), a trace that is still
-        running then ends as `interrupted`, halted where it got to: a step
-        that follows the traced thread waits for it to run the instruction,
-        which can take long when other threads keep reaching it first.
+        Watch and trace calls until the current function returns.
         """
     @property
     def types(self, /) -> Types:
@@ -4702,6 +4741,23 @@ class EtwRecord(BaseRecord):
         """
 
 @final
+class EventPolicies(BaseRecord):
+    """
+    The configured exception policies and module load and unload filters
+    (`sx`).
+    """
+    @property
+    def exceptions(self, /) -> list[ExceptionPolicy]:
+        """
+        In code order.
+        """
+    @property
+    def module_events(self, /) -> list[ModuleEventPolicy]:
+        """
+        In the order they were set.
+        """
+
+@final
 class ExceptionParameter(BaseRecord):
     """
     One `ExceptionInformation` entry, with what it means for the code when
@@ -4850,17 +4906,23 @@ class Exceptions:
         ordinary exceptions break by default and module loads and unloads do
         not stop.
         """
-    def set(self, /, code: int |str, mode: Literal["break", "second_chance", "notify", "ignore"], *, disposition: Literal["handled", "not_handled"] |None = None) -> None:
+    def set(self, /, code: int |str, mode: Literal["break", "second_chance", "notify", "ignore"] |None = None, *, command: str |None = None, disposition: Literal["break", "handled", "not_handled"] |None = None) -> ExceptionPolicy |ModuleEventPolicy:
         """
-        Set the stop policy for an exception (`sxe`/`sxd`/`sxn`/`sxi`), or set a
-        module filter: `"ld"` or `"ld:<module>"` for loads, `"ud"` or
-        `"ud:<module>"` for unloads. The module name is not case-sensitive, the
-        extension is optional, and `*`/`?` globs work. A `"break"` load filter
-        stops (kind `"module_load"`) before the module entry point runs, and a
-        `"break"` unload filter stops (kind `"module_unload"`) after the driver's
-        unload routine, while the module is still listed. A `"notify"` filter
-        adds a `ModLoad:` or `Unload module` line to the queue in
-        `dbg.notices()`. `disposition` does not apply to `ld` or `ud`.
+        Break when an exception occurs or a kernel module loads or unloads.
+        
+        -c runs commands at the stop, and -f sets an explicit final action:
+        break, handled, or not handled. `sxe ld` stops when a kernel image loads,
+        and `sxe ld:<module>` stops when that module loads. The module name is
+        case-insensitive, the extension is optional, and you can use `*`/`?`
+        globs. The stop occurs after ntoseye lists the module and arms its
+        deferred breakpoints, and before its entry point runs. `sxe ud` and `sxe
+        ud:<module>` stop when a kernel image unloads, after its driver's unload
+        routine has run and while the image is still in the module list. `-c`
+        works with `sxe ld` and `sxe ud`, but `-f` does not apply to them. `sxn
+        ld` prints a `ModLoad:` line and continues, `sxn ud` prints an `Unload
+        module` line and continues, and `sxd` and `sxi` let the load or unload
+        continue with no output. A named filter has precedence over bare `ld` or
+        `ud`.
         """
 
 @final
@@ -4895,9 +4957,9 @@ class ExecutiveResource(BaseRecord):
 @final
 class ExitFilter(BaseRecord):
     """
-    What a VM-exit breakpoint (`!hvexit`) stops on: one basic exit
-    reason, from any VP or from one partition or VP of the Windows
-    hypervisor.
+    What a VM-exit breakpoint stops on: a basic exit reason (Intel SDM
+    Vol. 3D, Appendix C), optionally only from one partition or one of its
+    VPs.
     """
     @property
     def name(self, /) -> str |None:
@@ -4917,7 +4979,8 @@ class ExitFilter(BaseRecord):
     @property
     def vp(self, /) -> int |None:
         """
-        The caller's VP index in `partition`. None for any VP.
+        The caller's VP index in `partition`. None for any VP. Set only with
+        `partition`: a VP index names a VP of one partition.
         """
 
 @final
@@ -6213,7 +6276,7 @@ class Heaps:
     def __getitem__(self, index: int, /) -> Heap: ...
     def __iter__(self, /) -> HeapIterator: ...
     def __len__(self, /) -> int: ...
-    def find_block(self, /, addr: int) -> HeapBlockSearch:
+    def find_block(self, /, addr: int |str) -> HeapBlockSearch:
         """
         Find the heap block that contains `addr` (`!heap -x`).
         """
@@ -6477,8 +6540,13 @@ class HypercallField(BaseRecord):
 @final
 class HypercallFilter(BaseRecord):
     """
-    What a hypercall breakpoint (`!hvbp`) stops on: one call code, from
-    any caller or from one partition or VP of the Windows hypervisor.
+    A hypercall breakpoint's filter (`!hvbp`): the call code a hit's caller
+    made, and the partition, and VP index in it, the caller must be.
+    
+    The breakpoint is on the call's handler, which the hypervisor runs for
+    every caller and, for a handler several codes share, for each of them.
+    Like the thread filter, the caller is known only once the hit arrives:
+    the VP whose exit the processor handles, and the code in its RCX.
     """
     @property
     def code(self, /) -> int:
@@ -6498,7 +6566,8 @@ class HypercallFilter(BaseRecord):
     @property
     def vp(self, /) -> int |None:
         """
-        The caller's VP index in `partition`. None for any VP.
+        The caller's VP index in `partition`. None for any VP. Set only with
+        `partition`: a VP index names a VP of one partition.
         """
 
 @final
@@ -7195,15 +7264,15 @@ class Inspect:
     raise `NtoseyeError`.
     """
     def __repr__(self, /) -> str: ...
-    def acl(self, /, address: int) -> Acl:
+    def acl(self, /, address: int |str) -> Acl:
         """
         Decode an ACL and its ACEs.
         """
-    def alpc_message(self, /, address: int) -> AlpcMessage:
+    def alpc_message(self, /, address: int |str) -> AlpcMessage:
         """
         Decode an ALPC message, a `_KALPC_MESSAGE` (`!alpc /m`).
         """
-    def alpc_port(self, /, address: int) -> AlpcPort:
+    def alpc_port(self, /, address: int |str) -> AlpcPort:
         """
         Decode an ALPC port (`!alpc /p`). The result has the port kind, owner,
         connection, state, and queues, and for a connection port also its
@@ -7279,7 +7348,7 @@ class Inspect:
         """
         List the process, thread, and image notification callbacks.
         """
-    def class_device(self, /, address: int) -> ClassDeviceDetail:
+    def class_device(self, /, address: int |str) -> ClassDeviceDetail:
         """
         Read the class device whose FDO, device extension, or private data
         is at `address`, with its requests in flight and its error log
@@ -7294,7 +7363,7 @@ class Inspect:
         """
         Decode a CONTEXT record and return its register set as a `Frame` (`.cxr`).
         """
-    def control_area(self, /, address: int) -> ControlAreaDetail:
+    def control_area(self, /, address: int |str) -> ControlAreaDetail:
         """
         Decode the control area of a section, with its segment and subsections.
         
@@ -7318,7 +7387,7 @@ class Inspect:
         """
         Return a handle for the `_DEVICE_OBJECT` at `address` (`!devobj`).
         """
-    def device_power(self, /, device: int) -> DevicePower:
+    def device_power(self, /, device: int |str) -> DevicePower:
         """
         Show the power state of a device object.
         
@@ -7330,7 +7399,7 @@ class Inspect:
         outstanding, and the power IRPs on nt!PopIrpList sent to any device of the
         stack.
         """
-    def device_stack(self, /, device_or_node: int) -> DeviceStackDetail:
+    def device_stack(self, /, device_or_node: int |str) -> DeviceStackDetail:
         """
         Show the device stack for a DEVICE_OBJECT or device node.
         
@@ -7340,7 +7409,7 @@ class Inspect:
         `>` marks the argument. After the stack, the command shows the device node
         of the PDO.
         """
-    def devnode(self, /, node: int |None = None, recurse: bool |None = None) -> DevNodeDetail:
+    def devnode(self, /, node: int |str |None = None, recurse: bool |None = None) -> DevNodeDetail:
         """
         Show a PnP device node and, optionally, its subtree.
         
@@ -7414,7 +7483,7 @@ class Inspect:
         tracerpt open. `logger` is the logger ID, the context address, or the
         session name.
         """
-    def exception_record(self, /, address: int |None = None) -> ExceptionRecord:
+    def exception_record(self, /, address: int |str |None = None) -> ExceptionRecord:
         """
         Show an EXCEPTION_RECORD64.
         """
@@ -7430,7 +7499,7 @@ class Inspect:
         free, and the bytes mapped and present. The command lists up to 1,024 files,
         and you can interrupt the walk.
         """
-    def file_object(self, /, address: int) -> FileObject:
+    def file_object(self, /, address: int |str) -> FileObject:
         """
         Decode a FILE_OBJECT and its relations to its device and name.
         """
@@ -7529,7 +7598,7 @@ class Inspect:
         processor as a sender, the command also shows the processors whose queues
         still hold its request.
         """
-    def irp(self, /, address: int) -> IrpInfo:
+    def irp(self, /, address: int |str) -> IrpInfo:
         """
         Show an IRP and its I/O stack locations.
         
@@ -7544,7 +7613,7 @@ class Inspect:
         such as 1, it first shows the IRP's status, requestor mode, user event and
         user buffer.
         """
-    def irp_find(self, /, pool_type: Literal["nonpaged", "paged"] |None = None, restart: int |None = None, criteria: str |None = None, value: int = 0) -> IrpFindDetail:
+    def irp_find(self, /, pool_type: Literal["nonpaged", "paged"] |None = None, restart: int |str |None = None, criteria: str |None = None, value: int = 0) -> IrpFindDetail:
         """
         Scan pool for the IRPs that IoAllocateIrp allocates.
         
@@ -7582,7 +7651,7 @@ class Inspect:
         """
         Find the in-flight IRPs in thread IrpLists and device CurrentIrp fields.
         """
-    def job(self, /, address: int |None = None) -> Job:
+    def job(self, /, address: int |str |None = None) -> Job:
         """
         Show a job object and the processes in it.
         
@@ -7593,7 +7662,7 @@ class Inspect:
         jobs, the parent and root job, and the silo state. Flag 2 lists the
         processes assigned to the job (from ProcessListHead).
         """
-    def lookaside(self, /, address: int) -> LookasideDetail:
+    def lookaside(self, /, address: int |str) -> LookasideDetail:
         """
         Decode one `GENERAL_LOOKASIDE` (`!lookaside address`).
         """
@@ -7602,7 +7671,7 @@ class Inspect:
         List the exported nonpaged and paged `GENERAL_LOOKASIDE` lists
         (`!lookaside`), detecting cycles.
         """
-    def mdl(self, /, address: int, pfn_count: int |None = None) -> MdlDetail:
+    def mdl(self, /, address: int |str, pfn_count: int |None = None) -> MdlDetail:
         """
         Decode a memory descriptor list and the page frames it describes.
         
@@ -7625,11 +7694,11 @@ class Inspect:
         recognized public getter code, and EPROCESS.Vm counters. It does not scan
         physical memory, and it does not walk all VADs.
         """
-    def ndis_filter(self, /, address: int) -> NdisFilterDetail:
+    def ndis_filter(self, /, address: int |str) -> NdisFilterDetail:
         """
         Read the NDIS filter module at `address` (`!ndiskd.filter <address>`).
         """
-    def ndis_filter_driver(self, /, address: int) -> NdisFilterDriverDetail:
+    def ndis_filter_driver(self, /, address: int |str) -> NdisFilterDriverDetail:
         """
         Read the NDIS filter driver block at `address` and its filter
         modules (`!ndiskd.filterdriver <address>`).
@@ -7642,7 +7711,7 @@ class Inspect:
         """
         List the NDIS filter modules of every miniport (`!ndiskd.filter`).
         """
-    def ndis_minidriver(self, /, address: int) -> NdisMinidriver:
+    def ndis_minidriver(self, /, address: int |str) -> NdisMinidriver:
         """
         Read the NDIS miniport driver block at `address` and its miniports
         (`!ndiskd.minidriver <address>`).
@@ -7651,7 +7720,7 @@ class Inspect:
         """
         List the NDIS miniport drivers (`!ndiskd.minidriver`).
         """
-    def ndis_miniport(self, /, address: int) -> NdisMiniportDetail:
+    def ndis_miniport(self, /, address: int |str) -> NdisMiniportDetail:
         """
         Read the NDIS miniport at `address` with its driver, filter stack,
         bindings, and pending OID request (`!ndiskd.miniport`).
@@ -7668,14 +7737,14 @@ class Inspect:
         interface index, and the friendly name. Virtual miniports, such as Hyper-V's
         adapters, are on the list too. The command needs the PDB for ndis.sys.
         """
-    def ndis_nbl(self, /, address: int, *, data: bool = False) -> NdisNbl:
+    def ndis_nbl(self, /, address: int |str, *, data: bool = False) -> NdisNbl:
         """
         Decode the NET_BUFFER_LIST at `address` and its NET_BUFFERs
         (`!ndiskd.nbl`). With `data`, each NET_BUFFER's `data` holds up to
         64 KiB of its frame, read through its MDLs' PFNs, or `data_error` why it
         does not read (`!ndiskd.nbl -data`).
         """
-    def ndis_nbl_chain(self, /, address: int, *, data: bool = False) -> NdisNblChain:
+    def ndis_nbl_chain(self, /, address: int |str, *, data: bool = False) -> NdisNblChain:
         """
         Decode the NET_BUFFER_LISTs on the `Next` chain from `address`
         (`!ndiskd.nbl -chain`). With `data`, each NET_BUFFER's `data` holds up
@@ -7693,7 +7762,7 @@ class Inspect:
         requests, so a request that stays here holds up the ones behind it. The
         command needs the PDB for ndis.sys.
         """
-    def ndis_protocol(self, /, address: int) -> NdisProtocolDetail:
+    def ndis_protocol(self, /, address: int |str) -> NdisProtocolDetail:
         """
         Read the NDIS protocol block at `address` and its bindings
         (`!ndiskd.protocol <address>`).
@@ -7711,7 +7780,7 @@ class Inspect:
         the root directory and ignores case. It does not follow symbolic links in
         the path. For a directory, the command lists the entries and their types.
         """
-    def object_security(self, /, object: int) -> ObjectSecurity:
+    def object_security(self, /, object: int |str) -> ObjectSecurity:
         """
         Decode the security descriptor that an object header references.
         
@@ -7754,7 +7823,7 @@ class Inspect:
         Show the PnP device nodes that have problems, pending IRPs, or incomplete
         starts.
         """
-    def pool(self, /, address: int) -> PoolPageDetail:
+    def pool(self, /, address: int |str) -> PoolPageDetail:
         """
         Show the pool page that contains an address.
         """
@@ -7778,7 +7847,7 @@ class Inspect:
         paged bytes, and bit 0 (1) shows the alloc/free columns. The tag match is
         case-sensitive and supports * and ?.
         """
-    def pool_validate(self, /, address: int) -> PoolValidationDetail:
+    def pool_validate(self, /, address: int |str) -> PoolValidationDetail:
         """
         Check the block headers of the pool page that contains an address.
         
@@ -7823,7 +7892,7 @@ class Inspect:
         List the drivers the WPP recorder keeps logs for
         (`!rcdrkd.rcdrloglist`).
         """
-    def rcdr_log(self, /, driver: str, log: int |None = None) -> RcdrLogDump:
+    def rcdr_log(self, /, driver: str, log: int |str |None = None) -> RcdrLogDump:
         """
         Show a driver's WPP recorder log records, oldest first.
         
@@ -7860,7 +7929,7 @@ class Inspect:
         reports null links, cycles, unreadable links, and when it reaches its entry
         limit.
         """
-    def registry_cell(self, /, hive: int, cell: int) -> CellLocation:
+    def registry_cell(self, /, hive: int |str, cell: int) -> CellLocation:
         """
         Find where cell index `cell` of the hive at `hive` is, through the
         hive's cell map (`!reg cellindex`).
@@ -7877,7 +7946,7 @@ class Inspect:
         `\\REGISTRY\\MACHINE\\...`, with its subkeys and its values, each
         value's data typed by its type (`!reg querykey`).
         """
-    def registry_key_at(self, /, hive: int, node: int) -> RegKey:
+    def registry_key_at(self, /, hive: int |str, node: int |str) -> RegKey:
         """
         Read the registry key whose key node (`_CM_KEY_NODE`) is at `node`
         in the hive at `hive` (`!reg keyinfo`).
@@ -7888,7 +7957,7 @@ class Inspect:
         key's default value. Its `data` is a `str`, a `list[str]`, an `int`,
         or `bytes`, by the value's type (`!reg querykey <path> -v <name>`).
         """
-    def resource(self, /, address: int) -> ExecutiveResource:
+    def resource(self, /, address: int |str) -> ExecutiveResource:
         """
         Decode an executive resource (`!locks address`).
         """
@@ -7904,7 +7973,7 @@ class Inspect:
         -i includes idle threads, and -t adds a short kernel stack, with a frame
         limit, for each processor.
         """
-    def security_descriptor(self, /, address: int) -> SecurityDescriptor:
+    def security_descriptor(self, /, address: int |str) -> SecurityDescriptor:
         """
         Decode a SECURITY_DESCRIPTOR and its ACLs.
         
@@ -7930,7 +7999,7 @@ class Inspect:
         _MM_SESSION_SPACE, or from the primary token if session space is opaque.
         Use -s -1 for the current session. The process walk stops at 4096 entries.
         """
-    def sid(self, /, address: int) -> Sid:
+    def sid(self, /, address: int |str) -> Sid:
         """
         Decode a SID in guest memory.
         """
@@ -7941,7 +8010,7 @@ class Inspect:
         structure it holds (`!sysinfo smbios`; `!sysinfo machineid` shows the
         identity strings of the same table).
         """
-    def srb(self, /, address: int) -> Srb:
+    def srb(self, /, address: int |str) -> Srb:
         """
         Decode an SRB: its function, status, command, address, data, and sense.
         
@@ -7967,7 +8036,7 @@ class Inspect:
         Level 0 shows one frame. Levels 1 and 2 add the full stacks, with a frame
         limit. The optional filter matches process or stack symbols.
         """
-    def storport_adapter(self, /, address: int) -> StorAdapter:
+    def storport_adapter(self, /, address: int |str) -> StorAdapter:
         """
         Read the StorPort adapter whose extension or FDO is at `address`
         (`!storagekd.storadapter <address>`).
@@ -7977,7 +8046,7 @@ class Inspect:
         List StorPort's drivers, their adapters, and their units
         (`!storagekd.storadapter`).
         """
-    def storport_log(self, /, address: int) -> StorLog:
+    def storport_log(self, /, address: int |str) -> StorLog:
         """
         Show a StorPort adapter's internal log of requests, pauses, and resumes.
         
@@ -7992,7 +8061,7 @@ class Inspect:
         <start> shows entries from that number, <start> <end> that range, and L
         <count> how many.
         """
-    def storport_unit(self, /, address: int) -> StorUnit:
+    def storport_unit(self, /, address: int |str) -> StorUnit:
         """
         Show a StorPort logical unit, its queue, and the requests the miniport
         holds.
@@ -8034,7 +8103,7 @@ class Inspect:
         """
         Show the target UTC time and the system uptime.
         """
-    def timer(self, /, address: int) -> KernelTimer:
+    def timer(self, /, address: int |str) -> KernelTimer:
         """
         Decode a `_KTIMER` and its DPC (`!timer address`).
         """
@@ -8071,7 +8140,7 @@ class Inspect:
         queue where the driver's private PDB types it. A queue's `progress`
         counters only grow, so two calls show what moved in between.
         """
-    def virtio_driver(self, /, address: int, module: str |None = None) -> VirtioDriver:
+    def virtio_driver(self, /, address: int |str, module: str |None = None) -> VirtioDriver:
         """
         Read the `virtio_device` at `address` as its virtio-win driver sees it,
         with its queues, named when its PCI function is found
@@ -8087,7 +8156,7 @@ class Inspect:
         accepts bits 1, 2, and 3 but ignores them. If the command cannot read a
         counter, it still shows the other counters.
         """
-    def vpb(self, /, address: int) -> VpbDetail:
+    def vpb(self, /, address: int |str) -> VpbDetail:
         """
         Decode a volume parameter block.
         
@@ -8097,7 +8166,7 @@ class Inspect:
         device object points to the VPB. If the Type at the address is not
         IO_TYPE_VPB, the command shows an error.
         """
-    def vring(self, /, address: int, module: str |None = None, *, kind: Literal["blk", "scsi", "scsi-control", "scsi-event", "net", "net-control", "gpu", "vsock"] |None = None) -> VirtioRing:
+    def vring(self, /, address: int |str, module: str |None = None, *, kind: Literal["blk", "scsi", "scsi-control", "scsi-event", "net", "net-control", "gpu", "vsock"] |None = None) -> VirtioRing:
         """
         Read the virtio-win virtqueue at `address` (`!vring`): its ring, the
         buffers the device holds or returned, and the request each carries.
@@ -8105,14 +8174,14 @@ class Inspect:
         `add_buf` routine is in. `kind` says what its buffers hold, by default
         what its device's type and the queue's index say.
         """
-    def vring_raw(self, /, size: int, desc: int, avail: int, used: int, *, kind: Literal["blk", "scsi", "scsi-control", "scsi-event", "net", "net-control", "gpu", "vsock"] |None = None) -> VirtioRing:
+    def vring_raw(self, /, size: int, desc: int |str, avail: int |str, used: int |str, *, kind: Literal["blk", "scsi", "scsi-control", "scsi-event", "net", "net-control", "gpu", "vsock"] |None = None) -> VirtioRing:
         """
         Read a split ring from its size and the kernel addresses of its
         descriptor table, avail ring and used ring (`!vring /r`), for a driver
         without a PDB. `kind` says what its buffers hold, for decoding their
         requests (`/t`).
         """
-    def vtop(self, /, directory_base: int, address: int) -> VtopDetail:
+    def vtop(self, /, directory_base: int, address: int |str) -> VtopDetail:
         """
         Translate a virtual address with an explicit directory base.
         
@@ -9563,7 +9632,7 @@ class Memory:
     A guest address space: `dbg.memory` (kernel), `proc.memory`, `cpu.memory`,
     or `dbg.physical`.
     """
-    def describe(self, /, addr: int |None = None) -> AddressDescription |UserAddressReport:
+    def describe(self, /, addr: int |str |None = None) -> AddressDescription |UserAddressReport:
         """
         Show the module and section, or the VAD region, that an address belongs
         to.
@@ -9578,7 +9647,7 @@ class Memory:
         ProcessHeaps array; it is <unknown> for any other region. A dump without
         a memory-info list shows the memory ranges it captured instead.
         """
-    def disassemble(self, /, addr: int, count: int) -> list[DisasmRow]:
+    def disassemble(self, /, addr: int |str, count: int) -> list[DisasmRow]:
         """
         Disassemble memory at a symbol or address.
         
@@ -9589,11 +9658,11 @@ class Memory:
         steps, or when you select another frame, thread, or process, it starts at
         the instruction pointer instead.
         """
-    def disassemble_back(self, /, addr: int, count: int) -> list[DisasmRow]:
+    def disassemble_back(self, /, addr: int |str, count: int) -> list[DisasmRow]:
         """
         Disassemble the instructions that end at an address.
         """
-    def disassemble_function(self, /, addr: int) -> FunctionDisassembly:
+    def disassemble_function(self, /, addr: int |str) -> FunctionDisassembly:
         """
         Disassemble the function that contains an address.
         
@@ -9608,7 +9677,7 @@ class Memory:
         The directory-table base that this space uses. A user-mode minidump
         has none, and raises `NtoseyeError`.
         """
-    def function_entry(self, /, addr: int) -> FunctionEntry:
+    def function_entry(self, /, addr: int |str) -> FunctionEntry:
         """
         Show the function table entry and unwind info of the function that
         contains an address.
@@ -9624,7 +9693,7 @@ class Memory:
         instruction that it undoes, and the exception handler. If a function table
         is paged out, .fnent reads it from the image file on disk.
         """
-    def page_in(self, /, addr: int) -> bool:
+    def page_in(self, /, addr: int |str) -> bool:
         """
         Make `addr` resident with the guest debugger worker (`.pagein`), which
         resumes the guest. When the worker completes, the guest stops and the
@@ -9635,7 +9704,7 @@ class Memory:
         """
         The guest pointer width, in bytes (`$ptrsize`).
         """
-    def pte(self, /, address: int) -> PteWalk:
+    def pte(self, /, address: int |str) -> PteWalk:
         """
         Show the page table entries for an address.
         """
@@ -10111,7 +10180,8 @@ class Module:
 class ModuleEventPolicy(BaseRecord):
     """
     One module load or unload filter (`sx* ld[:<module>]` or
-    `sx* ud[:<module>]`).
+    `sx* ud[:<module>]`). Only `break` stops and only `notify` reports;
+    `command` runs at a `break` stop.
     """
     @property
     def command(self, /) -> str |None:
@@ -10133,8 +10203,9 @@ class ModuleEventPolicy(BaseRecord):
     @property
     def module(self, /) -> str |None:
         """
-        The image-name glob that the filter matches, with or without
-        extension. None for all modules (bare `ld` or `ud`).
+        The image-name glob that the filter matches (case-insensitive `*`
+        and `?`), with or without extension. None for all modules (bare
+        `ld` or `ud`).
         """
 
 @final
@@ -11941,8 +12012,14 @@ class PageSegment(BaseRecord):
 @final
 class PartitionFilter(BaseRecord):
     """
-    The guest partition a breakpoint set in its view (`.partition`)
-    stops in: a hit by any other VP than the partition's resumes.
+    A partition breakpoint's filter: the guest partition of the Windows
+    hypervisor (a Windows Sandbox, a Hyper-V VM) a hit must be on, and the VP
+    index in it, if restricted.
+    
+    The breakpoint is a debug register of the target's processors, which
+    traps whatever code a processor runs at its address: the partition's, or
+    another partition's or the target's own mapped there. Which VP ran it is
+    known only once the hit arrives, from the processor's current VP.
     """
     @property
     def partition(self, /) -> int:
@@ -13516,7 +13593,7 @@ class Process:
         """
         Decode the kernel and user APC queues of this process (`!apc`).
         """
-    def decode_peb(self, /, address: int |None = None) -> Peb:
+    def decode_peb(self, /, address: int |str |None = None) -> Peb:
         """
         Decode the process environment block and process parameters of the
         current process.
@@ -13583,7 +13660,7 @@ class Process:
         explorer.exe` shows explorer.exe, and `!process svchost 0` lists each
         svchost.exe. `ps` keeps its short legacy list format.
         """
-    def loader_modules(self, /, containing: int |None = None) -> LoaderModules:
+    def loader_modules(self, /, containing: int |str |None = None) -> LoaderModules:
         """
         List the modules in the loader lists of the current process.
         
@@ -13629,7 +13706,7 @@ class Process:
         """
         The parent process identifier.
         """
-    def protection(self, /, address: int) -> MemoryBasicInformation:
+    def protection(self, /, address: int |str) -> MemoryBasicInformation:
         """
         Show the VirtualQuery data for a user address.
         
@@ -16627,7 +16704,7 @@ class Symbols:
         at `addr`, which are those of the inlined call if the compiler inlined a
         call there. This method does not evaluate the values.
         """
-    def nearest(self, /, address: int) -> Symbol |None:
+    def nearest(self, /, address: int |str) -> Symbol |None:
         """
         List the symbol nearest to an address.
         """
@@ -17225,7 +17302,7 @@ class Thread:
         """
         The processor that runs the thread, or `None` if the thread is not running.
         """
-    def decode_teb(self, /, address: int |None = None) -> Teb:
+    def decode_teb(self, /, address: int |str |None = None) -> Teb:
         """
         Decode a thread environment block.
         
@@ -18437,7 +18514,7 @@ class UserProcess:
     `modules`, and `threads` are the dump's.
     """
     def __repr__(self, /) -> str: ...
-    def decode_peb(self, /, address: int |None = None) -> Peb:
+    def decode_peb(self, /, address: int |str |None = None) -> Peb:
         """
         Decode the process environment block and process parameters of the
         current process.
@@ -18449,7 +18526,7 @@ class UserProcess:
         process parameters with their PDB layouts. To list the loader modules,
         use !dlls.
         """
-    def loader_modules(self, /, containing: int |None = None) -> LoaderModules:
+    def loader_modules(self, /, containing: int |str |None = None) -> LoaderModules:
         """
         List the modules in the loader lists of the current process.
         
@@ -18635,7 +18712,7 @@ class UserThread:
         When the thread started, as a FILETIME, when the dump records thread
         info.
         """
-    def decode_teb(self, /, address: int |None = None) -> Teb:
+    def decode_teb(self, /, address: int |str |None = None) -> Teb:
         """
         Decode a thread environment block.
         
