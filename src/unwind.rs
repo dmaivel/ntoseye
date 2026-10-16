@@ -42,8 +42,8 @@ macro_rules! unwind_trace {
     };
 }
 
-mod amd64;
-mod arm64;
+pub(crate) mod amd64;
+pub(crate) mod arm64;
 mod arm64ec;
 pub mod prolog;
 mod tracer;
@@ -51,11 +51,10 @@ mod walk;
 mod wow64;
 
 pub use amd64::{
-    FunctionEntryDetail, HandlerDetail, RuntimeFunctionDetail, UnwindCodeDetail, UnwindDetail,
-    UnwindInfoDetail,
+    Amd64UnwindCode, Amd64UnwindInfo, FunctionEntry, RuntimeFunction, Unwind, UnwindHandler,
 };
 use amd64::{Lookup, RUNTIME_FUNCTION_SIZE, lookup_runtime_function, runtime_function_at};
-pub use arm64::{Arm64CodeDetail, Arm64UnwindDetail};
+pub use arm64::{Arm64EpilogScope, Arm64PackedUnwind, Arm64UnwindCode, Arm64XdataUnwind};
 use arm64::{Arm64Lookup, call_return_address, lookup_arm64_runtime_function};
 use walk::{build_recovered_stacktrace_seeded, ensure_module_symbols};
 
@@ -1082,7 +1081,7 @@ pub fn function_entry(
     debugger: &Target,
     trace: &ThreadTraceContext,
     address: u64,
-) -> Result<FunctionEntryDetail> {
+) -> Result<FunctionEntry> {
     let mut tracer = StackTracer::new(debugger, trace);
     let Some(module) = tracer.module_containing(address) else {
         return Err(Error::DebugInfo(format!(
@@ -1119,7 +1118,7 @@ pub fn function_entry(
         amd64::EntryLookup::Found {
             entries,
             incomplete,
-        } => Ok(FunctionEntryDetail {
+        } => Ok(FunctionEntry {
             module,
             image_base: base,
             entries,

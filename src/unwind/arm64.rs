@@ -5,8 +5,10 @@
 
 use std::ops::Range;
 
+use ntoseye_macros::record;
+
 use super::amd64::{
-    DynamicCode, EntryLookup, HandlerDetail, RuntimeFunctionDetail, UnwindBytes, UnwindDetail,
+    DynamicCode, EntryLookup, RuntimeFunction, Unwind, UnwindBytes, UnwindHandler,
 };
 use super::{RegisterContext, StackTracer, Unwound, image_u32, runtime_functions};
 use crate::{
@@ -680,43 +682,86 @@ fn run_codes(
     Some(resume)
 }
 
-/// ARM64 unwind data, as `.fnent` shows it.
+/// ARM64 unwind data that is packed into the `.pdata` entry (flag 1 or 2).
+/// It describes a canonical prolog, and ntoseye lists it as the codes that
+/// it represents.
+#[record(impl)]
 #[derive(Debug, Clone)]
-pub enum Arm64UnwindDetail {
-    /// Packed into the `.pdata` entry (flag 1 or 2): a canonical prolog,
-    /// listed as the codes it stands for. `frame_size` is in bytes.
-    Packed {
-        flag: u32,
-        reg_f: u32,
-        reg_i: u32,
-        homes_arguments: bool,
-        cr: u32,
-        frame_size: u32,
-        codes: Vec<Arm64CodeDetail>,
-    },
-    /// An `.xdata` record. `scopes` are each epilog's start (bytes from the
-    /// function's) and first code's index.
-    Xdata {
-        version: u32,
-        exception_data: bool,
-        epilog_in_header: bool,
-        epilog_count: u32,
-        code_words: u32,
-        scopes: Vec<(u32, u32)>,
-        codes: Vec<Arm64CodeDetail>,
-        handler: Option<HandlerDetail>,
-        /// Bytes of the record, the handler's RVA included.
-        size: usize,
-    },
+pub struct Arm64PackedUnwind {
+    /// 1, or 2 for a function fragment without a prolog.
+    pub flag: u32,
+    /// The `RegF` field: the saved non-volatile floating-point registers.
+    pub reg_f: u32,
+    /// The `RegI` field: the saved non-volatile integer registers.
+    pub reg_i: u32,
+    /// Whether the prolog stores the argument registers in their home
+    /// locations.
+    pub homes_arguments: bool,
+    /// The `CR` field: whether and how the prolog saves the frame chain
+    /// and the link register.
+    pub cr: u32,
+    /// The size of the frame, in bytes.
+    pub frame_size: u32,
+    pub codes: Vec<Arm64UnwindCode>,
+}
+
+#[record]
+impl Arm64PackedUnwind {
+    /// `packed`.
+    #[record(getter)]
+    pub fn form(&self) -> &'static str {
+        "packed"
+    }
+}
+
+/// An ARM64 `.xdata` unwind record.
+#[record(impl)]
+#[derive(Debug, Clone)]
+pub struct Arm64XdataUnwind {
+    pub version: u32,
+    /// The `X` bit: exception data (a handler) follows.
+    pub exception_data: bool,
+    /// The `E` bit: the header describes a single epilog.
+    pub epilog_in_header: bool,
+    pub epilog_count: u32,
+    /// The number of 32-bit words of unwind codes.
+    pub code_words: u32,
+    pub epilog_scopes: Vec<Arm64EpilogScope>,
+    /// The size of the record in bytes, including the RVA of the handler.
+    pub size: usize,
+    pub codes: Vec<Arm64UnwindCode>,
+    pub handler: Option<UnwindHandler>,
+}
+
+#[record]
+impl Arm64XdataUnwind {
+    /// `xdata`.
+    #[record(getter)]
+    pub fn form(&self) -> &'static str {
+        "xdata"
+    }
+}
+
+/// One ARM64 epilog scope.
+#[record]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Arm64EpilogScope {
+    /// The start of the epilog, in bytes from the start of the function.
+    #[record(hex)]
+    pub start_offset: u32,
+    /// The index of the first unwind code of the epilog.
+    pub first_code: u32,
 }
 
 /// One ARM64 unwind code.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Arm64CodeDetail {
-    /// Its first byte's index in the code bytes.
+pub struct Arm64UnwindCode {
+    /// The index of its first byte in the code bytes.
     pub index: usize,
+    #[record(hex)]
     pub bytes: Vec<u8>,
-    /// Its name and the prolog instruction it stands for.
+    /// Its name and the prolog instruction that it represents.
     pub description: String,
 }
 
@@ -740,19 +785,18 @@ pub fn describe_arm64_function_entry(
         Arm64Lookup::Missing => return EntryLookup::Leaf,
         Arm64Lookup::Unreadable => return EntryLookup::Holed,
     };
-    let Some(unwind) = describe_arm64_unwind(image, function.unwind_data, |rva| {
-        symbol(base + u64::from(rva))
-    }) else {
+    let Some(unwind) = describe_arm64_unwind(image, function.unwind_data, base, &symbol) else {
         return EntryLookup::Holed;
     };
     EntryLookup::Found {
-        entries: vec![RuntimeFunctionDetail {
-            begin: function.begin,
-            end: function.end,
-            unwind_data: function.unwind_data,
-            symbol: symbol(base + u64::from(function.begin)),
-            unwind: Some(UnwindDetail::Arm64(unwind)),
-        }],
+        entries: vec![RuntimeFunction::new(
+            base,
+            function.begin,
+            function.end,
+            function.unwind_data,
+            &symbol,
+            Some(unwind),
+        )],
         incomplete: None,
     }
 }
@@ -760,15 +804,16 @@ pub fn describe_arm64_function_entry(
 fn describe_arm64_unwind(
     image: &PeImage,
     unwind_data: u32,
-    symbol: impl Fn(u32) -> String,
-) -> Option<Arm64UnwindDetail> {
+    base: u64,
+    symbol: impl Fn(u64) -> String,
+) -> Option<Unwind> {
     Some(match read_program(image, unwind_data)? {
         Program::Packed(unwind_data) => {
             let packed = Packed::new(unwind_data);
             let codes = packed
                 .codes()
                 .map_or_else(Vec::new, |(prolog, _)| describe_arm64_codes(&prolog, 0));
-            Arm64UnwindDetail::Packed {
+            Unwind::Packed(Arm64PackedUnwind {
                 flag: packed.flag,
                 reg_f: packed.reg_f,
                 reg_i: packed.reg_i,
@@ -776,17 +821,18 @@ fn describe_arm64_unwind(
                 cr: packed.cr,
                 frame_size: packed.frame_size * 16,
                 codes,
-            }
+            })
         }
         Program::Full(xdata) => {
             let exception_data = xdata.header & (1 << 20) != 0;
             let handler = if exception_data {
                 let rva = image_u32(&image.read(xdata.end, 4)?, 0)?;
-                Some(HandlerDetail {
+                Some(UnwindHandler::new(
+                    base,
                     rva,
-                    symbol: symbol(rva),
-                    data_rva: u32::try_from(xdata.end + 4).ok()?,
-                })
+                    u32::try_from(xdata.end + 4).ok()?,
+                    symbol,
+                ))
             } else {
                 None
             };
@@ -803,21 +849,24 @@ fn describe_arm64_unwind(
                     .max()
                     .unwrap_or(0)
             };
-            Arm64UnwindDetail::Xdata {
+            Unwind::Xdata(Arm64XdataUnwind {
                 version: (xdata.header >> 18) & 3,
                 exception_data,
                 epilog_in_header: xdata.epilog_in_header,
                 epilog_count: xdata.epilog_count,
                 code_words: (xdata.codes.len() / 4) as u32,
-                scopes: xdata
+                epilog_scopes: xdata
                     .scopes
                     .iter()
-                    .map(|scope| ((scope & 0x3ffff) * 4, scope >> 22))
+                    .map(|scope| Arm64EpilogScope {
+                        start_offset: (scope & 0x3ffff) * 4,
+                        first_code: scope >> 22,
+                    })
                     .collect(),
                 codes: describe_arm64_codes(&xdata.codes, last_sequence),
                 handler,
                 size,
-            }
+            })
         }
     })
 }
@@ -825,27 +874,27 @@ fn describe_arm64_unwind(
 /// Each unwind code in `codes`, framed by its length, up to the `end` of
 /// the sequence starting at or after `last_sequence`: what follows it pads
 /// the code words.
-fn describe_arm64_codes(codes: &[u8], last_sequence: usize) -> Vec<Arm64CodeDetail> {
+fn describe_arm64_codes(codes: &[u8], last_sequence: usize) -> Vec<Arm64UnwindCode> {
     let mut described = Vec::new();
     let mut at = 0;
     while let Some(&op) = codes.get(at) {
         if at > last_sequence
             && described
                 .last()
-                .is_some_and(|code: &Arm64CodeDetail| matches!(code.bytes[0], 0xe4 | 0xe5))
+                .is_some_and(|code: &Arm64UnwindCode| matches!(code.bytes[0], 0xe4 | 0xe5))
         {
             break;
         }
         let len = code_len(op);
         let Some(bytes) = codes.get(at..at + len) else {
-            described.push(Arm64CodeDetail {
+            described.push(Arm64UnwindCode {
                 index: at,
                 bytes: codes[at..].to_vec(),
                 description: "(truncated)".into(),
             });
             break;
         };
-        described.push(Arm64CodeDetail {
+        described.push(Arm64UnwindCode {
             index: at,
             bytes: bytes.to_vec(),
             description: describe_arm64_code(bytes),

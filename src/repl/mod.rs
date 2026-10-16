@@ -65,17 +65,6 @@ pub const BREAK_STACKTRACE_DISPLAY_LIMIT: usize = 6;
 pub const BREAK_STACKTRACE_PROBE_LIMIT: usize = 64;
 #[cfg(feature = "cli")]
 const REPL_HISTORY_SIZE: usize = 5000;
-macro_rules! require_arg {
-    ($invocation:expr, $idx:expr, $cmd:expr) => {
-        match $invocation.arg($idx) {
-            Some(a) => a,
-            None => {
-                outln!("{}\n", command_help($cmd));
-                return Ok(());
-            }
-        }
-    };
-}
 
 pub fn error(msg: &str) {
     diagnostics::print_error(msg);

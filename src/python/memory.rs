@@ -16,7 +16,6 @@ use crate::target::MemoryKind;
 use crate::target::mm::VtopDetail;
 use crate::target::{CODE_BITNESS_X86, StringDescriptor};
 use crate::types::VirtAddr;
-use crate::view;
 use crate::view::record::Typed;
 
 /// A guest address space: `dbg.memory` (kernel), `proc.memory`, `cpu.memory`,
@@ -283,21 +282,6 @@ impl Memory {
             require_page_tables(session)?;
             self.space.dtb(&session.target)
         })
-    }
-
-    /// Get the function-table entry and unwind info (AMD64 or ARM64) of the
-    /// function that contains `addr`, with the chained parents (`.fnent`).
-    fn function_entry<'py>(
-        &self,
-        py: Python<'py>,
-        addr: u64,
-    ) -> PyResult<Typed<'py, view::execution::FunctionEntry>> {
-        self.space.require_virtual()?;
-        let context = self.space.context();
-        let detail = self.owner.with_in(py, &context, |session| {
-            session.function_entry(VirtAddr(addr)).map_err(err)
-        })?;
-        Typed::new(py, view::execution::function_entry(&detail))
     }
 }
 

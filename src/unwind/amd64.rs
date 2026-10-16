@@ -14,6 +14,7 @@ use super::{
     AMD64_REGISTER_NAMES, RegisterContext, StackTracer, Unwound, image_u32, runtime_functions,
 };
 use crate::memory::{AddressSpace, MemoryOps};
+use ntoseye_macros::record;
 use crate::pe::{CodeLayout, PeImage};
 use crate::phys::PhysMem;
 use crate::types::{CodeMachine, VirtAddr};
@@ -900,76 +901,158 @@ fn slot_u16(codes: &[UnwindCodeSlot], index: usize) -> Option<u16> {
     Some(u16::from_le_bytes([slot.code_offset, slot.raw_op_info]))
 }
 
-/// A runtime function and its unwind data, as `.fnent` shows them.
+/// The function-table entry that covers an address, and the entry of each
+/// chained parent (`.fnent`).
+#[record]
 #[derive(Debug, Clone)]
-pub struct FunctionEntryDetail {
+pub struct FunctionEntry {
+    /// The module that contains the function.
     pub module: String,
+    #[record(hex)]
     pub image_base: u64,
-    /// The entry covering the address, then each parent its chained unwind
-    /// info names, in order.
-    pub entries: Vec<RuntimeFunctionDetail>,
-    /// Why the chain ends before its last parent, when it does.
+    /// The entry that covers the address, then each parent that its chained
+    /// unwind info names, in order.
+    pub entries: Vec<RuntimeFunction>,
+    /// The reason that the chain ends before its last parent. None if the
+    /// chain is complete.
     pub incomplete: Option<String>,
 }
 
-/// One function-table entry (RVAs) and the unwind data it points at.
+/// One function-table entry and its unwind data. Addresses are absolute,
+/// and the `*_rva` fields hold the raw image-relative values.
+#[record]
 #[derive(Debug, Clone)]
-pub struct RuntimeFunctionDetail {
-    pub begin: u32,
-    pub end: u32,
-    /// The unwind info's RVA; on ARM64, the packed unwind data itself when
-    /// its low two bits (the flag) are not zero.
+pub struct RuntimeFunction {
+    #[record(hex)]
+    pub begin: u64,
+    #[record(hex)]
+    pub end: u64,
+    #[record(hex)]
+    pub begin_rva: u32,
+    #[record(hex)]
+    pub end_rva: u32,
+    /// The address of the unwind info. None for ARM64 packed unwind data.
+    #[record(hex)]
+    pub unwind_info: Option<u64>,
+    /// The raw unwind word of the entry: the RVA of the unwind info, or
+    /// the packed unwind data on ARM64 when its low two bits (the flag) are
+    /// not zero.
+    #[record(hex)]
     pub unwind_data: u32,
     /// The symbol at `begin`.
     pub symbol: String,
-    /// `None` when the unwind info is unreadable.
-    pub unwind: Option<UnwindDetail>,
+    /// The decoded unwind data. None if ntoseye cannot read it.
+    pub unwind: Option<Unwind>,
 }
 
-/// An entry's unwind data, by architecture.
+/// An entry's decoded unwind data, by form.
+#[record]
 #[derive(Debug, Clone)]
-pub enum UnwindDetail {
-    Amd64(UnwindInfoDetail),
-    Arm64(super::arm64::Arm64UnwindDetail),
+pub enum Unwind {
+    Amd64(Amd64UnwindInfo),
+    Packed(super::arm64::Arm64PackedUnwind),
+    Xdata(super::arm64::Arm64XdataUnwind),
 }
 
+/// AMD64 `UNWIND_INFO`.
+#[record(impl)]
 #[derive(Debug, Clone)]
-pub struct UnwindInfoDetail {
+pub struct Amd64UnwindInfo {
     pub version: u8,
+    /// `UNW_FLAG_*` bits.
     pub flags: u8,
+    /// The size of the prolog, in bytes.
     pub prolog_size: u8,
+    /// The number of unwind-code slots.
     pub code_count: u8,
-    /// The frame pointer register, when the function establishes one.
+    /// The frame pointer register, if the function sets one up.
     pub frame_register: Option<&'static str>,
     /// The frame pointer's offset from the stack pointer, in bytes.
     pub frame_offset: u32,
-    pub codes: Vec<UnwindCodeDetail>,
+    /// The size of the structure in bytes, covering the header, the codes,
+    /// and the handler RVA or the chained entry, but not the handler's
+    /// data.
+    pub size: usize,
+    pub codes: Vec<Amd64UnwindCode>,
     /// The exception or termination handler, for `UNW_FLAG_EHANDLER` or
     /// `UNW_FLAG_UHANDLER`.
-    pub handler: Option<HandlerDetail>,
-    /// Bytes of the structure: header, codes, and the handler RVA or the
-    /// chained entry, without the handler's own data.
-    pub size: usize,
+    pub handler: Option<UnwindHandler>,
 }
 
+#[record]
+impl Amd64UnwindInfo {
+    /// `amd64`.
+    #[record(getter)]
+    pub fn form(&self) -> &'static str {
+        "amd64"
+    }
+}
+
+/// The exception or termination handler of an unwind info.
+#[record]
 #[derive(Debug, Clone)]
-pub struct HandlerDetail {
-    pub rva: u32,
+pub struct UnwindHandler {
+    #[record(hex)]
+    pub address: u64,
     pub symbol: String,
-    /// Where the handler's language-specific data starts.
-    pub data_rva: u32,
+    /// The start address of the language-specific data of the handler.
+    #[record(hex)]
+    pub data: u64,
 }
 
+/// One AMD64 unwind code.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnwindCodeDetail {
-    /// Index of the code's first slot.
+pub struct Amd64UnwindCode {
+    /// The index of the first slot of the code.
     pub slot: usize,
-    /// Offset in the prolog of the end of the instruction it undoes.
+    /// The prolog offset of the end of the instruction that the code
+    /// undoes.
     pub code_offset: u8,
+    /// The `UWOP_*` operation.
     pub op: u8,
+    /// The info nibble of the operation.
     pub op_info: u8,
-    /// The operation and its operands, e.g. `UWOP_SAVE_NONVOL rbx at +0x30`.
+    /// The operation and its operands, for example
+    /// `UWOP_SAVE_NONVOL rbx at +0x30`.
     pub description: String,
+}
+
+impl RuntimeFunction {
+    /// The entry `begin..end` (RVAs) of the image at `base`, whose unwind
+    /// word is `unwind_data`; `symbol` names an absolute address.
+    pub(super) fn new(
+        base: u64,
+        begin: u32,
+        end: u32,
+        unwind_data: u32,
+        symbol: impl Fn(u64) -> String,
+        unwind: Option<Unwind>,
+    ) -> Self {
+        let va = |rva: u32| base.wrapping_add(u64::from(rva));
+        Self {
+            begin: va(begin),
+            end: va(end),
+            begin_rva: begin,
+            end_rva: end,
+            unwind_info: (!matches!(unwind, Some(Unwind::Packed(_)))).then(|| va(unwind_data)),
+            unwind_data,
+            symbol: symbol(va(begin)),
+            unwind,
+        }
+    }
+}
+
+impl UnwindHandler {
+    /// The handler at `rva` of the image at `base`, its data at `data_rva`.
+    pub(super) fn new(base: u64, rva: u32, data_rva: u32, symbol: impl Fn(u64) -> String) -> Self {
+        let address = base.wrapping_add(u64::from(rva));
+        Self {
+            address,
+            symbol: symbol(address),
+            data: base.wrapping_add(u64::from(data_rva)),
+        }
+    }
 }
 
 /// What [`primary_function_begin`] found.
@@ -1017,7 +1100,7 @@ pub enum EntryLookup {
     /// The entry and its chained parents, and why the chain ends early when
     /// it does.
     Found {
-        entries: Vec<RuntimeFunctionDetail>,
+        entries: Vec<RuntimeFunction>,
         incomplete: Option<String>,
     },
     /// No entry covers the address: a leaf function, or not code.
@@ -1056,9 +1139,7 @@ pub fn describe_function_entry(
             incomplete = Some(format!("chain not followed past {MAX_CHAIN_DEPTH} parents"));
             break;
         }
-        let described = describe_unwind_info(image, function.UnwindData, |rva| {
-            symbol(base_address + u64::from(rva))
-        });
+        let described = describe_unwind_info(image, function.UnwindData, base_address, &symbol);
         if described.is_none() {
             incomplete = Some(format!(
                 "unwind info at RVA {:#x} is unreadable",
@@ -1067,15 +1148,16 @@ pub fn describe_function_entry(
         }
         let unwind = described.map(|(info, parent)| {
             next = parent;
-            UnwindDetail::Amd64(info)
+            Unwind::Amd64(info)
         });
-        entries.push(RuntimeFunctionDetail {
-            begin: function.BeginAddress,
-            end: function.EndAddress,
-            unwind_data: function.UnwindData,
-            symbol: symbol(base_address + u64::from(function.BeginAddress)),
+        entries.push(RuntimeFunction::new(
+            base_address,
+            function.BeginAddress,
+            function.EndAddress,
+            function.UnwindData,
+            &symbol,
             unwind,
-        });
+        ));
     }
     EntryLookup::Found {
         entries,
@@ -1088,8 +1170,9 @@ pub fn describe_function_entry(
 fn describe_unwind_info(
     image: &PeImage,
     rva: u32,
-    symbol: impl Fn(u32) -> String,
-) -> Option<(UnwindInfoDetail, Option<RUNTIME_FUNCTION>)> {
+    base: u64,
+    symbol: impl Fn(u64) -> String,
+) -> Option<(Amd64UnwindInfo, Option<RUNTIME_FUNCTION>)> {
     let parsed = parse_unwind_info(image, rva)?;
     let flags = parsed.version_flags >> 3;
     let tail_offset = parsed.tail_offset;
@@ -1099,14 +1182,15 @@ fn describe_unwind_info(
         size += RUNTIME_FUNCTION_SIZE;
     } else if flags & (UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER) != 0 {
         let handler_rva = image_u32(&image.read(tail_offset, 4)?, 0)?;
-        handler = Some(HandlerDetail {
-            rva: handler_rva,
-            symbol: symbol(handler_rva),
-            data_rva: u32::try_from(tail_offset + 4).ok()?,
-        });
+        handler = Some(UnwindHandler::new(
+            base,
+            handler_rva,
+            u32::try_from(tail_offset + 4).ok()?,
+            symbol,
+        ));
         size += 4;
     }
-    let info = UnwindInfoDetail {
+    let info = Amd64UnwindInfo {
         version: parsed.version_flags & 0x7,
         flags,
         prolog_size: parsed.size_of_prolog,
@@ -1124,7 +1208,7 @@ fn describe_unwind_info(
 /// Each unwind code with its operands, as the unwinder reads them. A code
 /// whose operation is unknown or whose operand slots run past the array
 /// ends the list with a note, since the slots after it cannot be framed.
-fn describe_unwind_codes(codes: &[UnwindCodeSlot]) -> Vec<UnwindCodeDetail> {
+fn describe_unwind_codes(codes: &[UnwindCodeSlot]) -> Vec<Amd64UnwindCode> {
     let register = |number: u8| AMD64_REGISTER_NAMES[usize::from(number & 0xf)];
     let u32_at = |index: usize| {
         Some(u32::from(slot_u16(codes, index)?) | u32::from(slot_u16(codes, index + 1)?) << 16)
@@ -1184,7 +1268,7 @@ fn describe_unwind_codes(codes: &[UnwindCodeSlot]) -> Vec<UnwindCodeDetail> {
             _ => None,
         };
         let complete = description.is_some();
-        described.push(UnwindCodeDetail {
+        described.push(Amd64UnwindCode {
             slot: index,
             code_offset: code.code_offset,
             op: code.unwind_op,

@@ -238,6 +238,11 @@ pub struct RunStatus {
 #[record(impl)]
 #[derive(Debug, Clone)]
 pub struct ExceptionRecord {
+    /// The address that ntoseye read the record from. `None` for the
+    /// record of the current event, which ntoseye builds from the stop or
+    /// the dump without reading it from memory.
+    #[record(hex)]
+    pub record_address: Option<u64>,
     /// The exception code (NTSTATUS).
     #[record(hex)]
     pub code: u32,

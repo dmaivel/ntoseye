@@ -10,7 +10,7 @@ use super::module::Device;
 use super::thread::Frame;
 use super::{err, raise};
 use crate::bugchecks::{bugcheck_from_dump_info, current_bugcheck};
-use crate::session::{ExceptionRecord, Session};
+use crate::session::Session;
 use crate::trapframe::{KtrapFrame, read_ktrap_frame};
 use crate::session::effects::Effects;
 use crate::target::etw::parse_guid;
@@ -107,19 +107,6 @@ impl Inspect {
             None,
             registers,
         )
-    }
-
-    /// Decode an `EXCEPTION_RECORD64` (`.exr`).
-    fn exception_record<'py>(
-        &self,
-        py: Python<'py>,
-        address: u64,
-    ) -> PyResult<Typed<'py, ExceptionRecord>> {
-        self.typed_any(py, |session| {
-            session
-                .read_exception_record(VirtAddr(address))
-                .map_err(err)
-        })
     }
 
     /// Get the Driver Verifier configuration and statistics (`!verifier`).

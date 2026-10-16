@@ -28,7 +28,7 @@ use crate::target::usermode::ImageCheck;
 use crate::target::{CompareResult, SearchResult, SelectedFrame, ThreadInfo, exit_registers};
 use crate::types::{Arch, CodeMachine, Dtb, VirtAddr};
 use crate::unwind::{
-    FunctionEntryDetail, RecoveredStackTrace, StackTrace, ThreadStackSource, ThreadStackTrace,
+    FunctionEntry, RecoveredStackTrace, StackTrace, ThreadStackSource, ThreadStackTrace,
     build_parked_thread_recovered_stack, build_parked_thread_stack,
     build_stacktrace_with_register_values, build_thread_stacktrace, format_symbol, function_entry,
     function_range, guest_vp_running, halted_in_windows_hypervisor, resolve_thread_trace_context,
@@ -76,6 +76,7 @@ impl Session {
         let count = (read_u32(24) as usize).min(15);
         let parameters = (0..count).map(|index| read_u64(32 + index * 8)).collect();
         Ok(ExceptionRecord {
+            record_address: Some(address.0),
             code: read_u32(0),
             flags: read_u32(4),
             nested: read_u64(8),
@@ -105,6 +106,7 @@ impl Session {
                 .exception_code
                 .or_else(|| stop.bugcheck.as_ref().map(|info| info.code))?;
             return Some(ExceptionRecord {
+                record_address: None,
                 code,
                 flags: 0,
                 nested: 0,
@@ -114,6 +116,7 @@ impl Session {
         }
         if let Some(exception) = self.target.user_exception() {
             return Some(ExceptionRecord {
+                record_address: None,
                 code: exception.code,
                 flags: exception.flags,
                 nested: exception.record,
@@ -123,6 +126,7 @@ impl Session {
         }
         let exception = self.target.phys.dmp_info()?.exception.as_ref()?;
         Some(ExceptionRecord {
+            record_address: None,
             code: exception.code,
             flags: exception.flags,
             nested: 0,
@@ -440,7 +444,7 @@ impl Session {
 
     /// The function-table entry and unwind data for the function containing
     /// `addr` in the current address space (`.fnent`).
-    pub fn function_entry(&self, addr: VirtAddr) -> Result<FunctionEntryDetail> {
+    pub fn function_entry(&self, addr: VirtAddr) -> Result<FunctionEntry> {
         let trace = resolve_thread_trace_context(&self.target, self.target.current_dtb());
         function_entry(&self.target, &trace, addr.0)
     }
