@@ -5,7 +5,15 @@ What changed in each release of ntoseye, newest first. The command-line tool, th
 <!--
 Keeping this file:
 
-- Add a line under "## Unreleased
+- Add a line under "## Unreleased" in the commit that makes the change users will notice: a new command, option or SDK API, changed behavior or output, a fixed bug, a removal. Refactors, tests, CI and docs rewording get none. Start the section at the top if it is not there.
+- Group the lines under "### Added", "### Changed", "### Fixed" and "### Removed", in that order, leaving out empty groups. A fix to something not yet released is no "Fixed" line; amend the line that added it. A change that breaks scripts starts with "**Breaking:**" and comes first in its group.
+- A release with a theme opens with one or two sentences before the groups, saying what users can now do. A release without one goes straight to the groups.
+- Say what users can now do, or what went wrong and no longer does, not how. Name commands and SDK APIs in backticks as users type them.
+- Link only with absolute https://ntoseye.com/... URLs. The same text is shown in the GitHub release, in this file on GitHub, and on the docs site, which each resolve a relative link differently.
+- To release, rename "## Unreleased" to "## vX.Y.Z (YYYY-MM-DD)", the version in Cargo.toml. The release workflow refuses a tag whose version has no section here, or an empty one; dist publishes the section as the release notes, under the tag as the release title.
+-->
+
+## Unreleased
 
 The Python SDK is now generated from the same definitions as the REPL: each command's SDK method takes the same arguments, runs the same checks, and returns the record the command prints, with the command's help as its docstring. Results are typed records that behave as values, and a stop is one `Stop` hierarchy that `match` and `isinstance()` narrow to the kind of stop and its own parts. Scripts written for v0.49 need changes; the [Python SDK guide](https://ntoseye.com/scripting/sdk/) shows the current API, and the [SDK reference](https://ntoseye.com/reference/sdk/) lists every class.
 
