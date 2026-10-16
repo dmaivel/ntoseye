@@ -9,15 +9,16 @@ use super::handle::{Owner, require_halted};
 use super::memory::check_disassembly_count;
 use super::record::PlainDict;
 use super::{MAX_READ_LEN, err, raise, view_dict};
+use crate::guest::HvProcessor;
+use crate::guest::ept::{EptDifference, EptMapping};
 use crate::guest::ept::{EptTranslation, differences};
 use crate::guest::hypercalls::HypercallCaller as Caller;
 use crate::guest::{HvPartition, HvVirtualProcessor, HvVtl, evmcs_fields, privilege_names};
 use crate::target::CodeExtent;
 use crate::view::execution::{DisassembledInstruction, disasm_rows};
 use crate::view::hypervisor::{
-    DecodedHypercall, EptDifference, EptMapping, HypervisorProcessor, IoIntercepts, MsrIntercepts,
-    VpRegisters, decoded_hypercall, ept_difference, ept_mapping, hypervisor_processor,
-    io_intercepts, msr_intercepts, vp_registers,
+    DecodedHypercall, IoIntercepts, MsrIntercepts, VpRegisters, decoded_hypercall, io_intercepts,
+    msr_intercepts, vp_registers,
 };
 use crate::view::record::{Hex, Keyed, Typed};
 
@@ -154,7 +155,7 @@ fn vp_dict<'py>(py: Python<'py>, vp: &HvVirtualProcessor) -> PyResult<Bound<'py,
     let processors = vp
         .processors
         .iter()
-        .map(|processor| view_dict(py, &hypervisor_processor(processor)))
+        .map(|processor| view_dict(py, processor))
         .collect::<PyResult<Vec<_>>>()?;
     dict.set_item("processors", processors)?;
     dict.set_item("vtl", vp.vtl)?;
@@ -181,16 +182,9 @@ impl VirtualProcessor {
     /// The processors whose current VP this is (the one that runs it, or ran
     /// it last).
     #[getter]
-    fn processors<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<HypervisorProcessor>>> {
+    fn processors<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<HvProcessor>>> {
         self.owner.check(py)?;
-        Typed::new(
-            py,
-            self.info
-                .processors
-                .iter()
-                .map(hypervisor_processor)
-                .collect(),
-        )
+        Typed::of(py, &self.info.processors)
     }
 
     /// The VTL that the VP runs, or last ran, in.
@@ -244,13 +238,7 @@ impl VirtualProcessor {
         let (Some(first), Some(second)) = mappings else {
             return Err(raise("an EPT is unreadable or not a 4-level walk"));
         };
-        Typed::new(
-            py,
-            differences(&first, &second)
-                .iter()
-                .map(ept_difference)
-                .collect(),
-        )
+        Typed::new(py, differences(&first, &second))
     }
 
     /// Return the VP as a plain `dict` (`index`, `address`, `processors`,
@@ -514,7 +502,7 @@ impl HypervisorVtl {
             Ok(session.target.translate_guest_physical(&state, gpa))
         })?;
         match translation {
-            Some(EptTranslation::Mapped(info)) => Typed::new(py, ept_mapping(&info)).map(Some),
+            Some(EptTranslation::Mapped(info)) => Typed::new(py, info).map(Some),
             Some(EptTranslation::NotPresent { .. }) => Ok(None),
             None => Err(raise("the EPT is unreadable or not a 4-level walk")),
         }

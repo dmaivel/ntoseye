@@ -4,6 +4,7 @@
 //! ring whose children name it as parent, and each VP's current VTL must be
 //! the entry of its VTL array that its level selects.
 
+use ntoseye_macros::record;
 use std::collections::{HashMap, HashSet};
 
 use super::EvmcsState;
@@ -42,12 +43,15 @@ pub struct HvVirtualProcessor {
     pub processors: Vec<HvProcessor>,
 }
 
-/// A logical processor of the hypervisor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A logical processor whose current VP a VP is: the one that runs it, or
+/// ran it last.
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub struct HvProcessor {
-    /// Its processor block (its GS base in the hypervisor).
+    /// The processor block (the processor's GS base in the hypervisor).
+    #[record(hex)]
     pub block: u64,
-    /// Its processor number, where the layout names where the block keeps it.
+    /// The processor number, or None on builds before 10.0.19041.
     pub number: Option<u32>,
 }
 

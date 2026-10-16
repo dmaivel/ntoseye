@@ -5,6 +5,7 @@
 use crate::error::{Error, Result};
 use crate::memory::MemoryOps;
 use crate::types::PhysAddr;
+use ntoseye_macros::record;
 
 /// Physical-address bits of an EPT pointer or entry.
 const ADDRESS: u64 = 0x000f_ffff_ffff_f000;
@@ -33,11 +34,15 @@ pub enum EptTranslation {
     },
 }
 
-/// A mapped guest physical address and the access the walk allows.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Where a guest physical address goes through one VTL's EPT, and the
+/// access that every level of the walk allows.
+#[record]
+#[derive(PartialEq, Eq)]
 pub struct EptMapping {
+    #[record(hex)]
     pub host_physical: u64,
-    /// 4 KiB, 2 MiB, or 1 GiB.
+    /// The size of the mapping page: 4 KiB, 2 MiB, or 1 GiB.
+    #[record(hex)]
     pub page_size: u64,
     /// Each access is allowed only if every entry of the walk allows it.
     pub read: bool,
@@ -49,6 +54,7 @@ pub struct EptMapping {
     /// The memory type of the leaf entry (0 UC, 1 WC, 4 WT, 5 WP, 6 WB).
     pub memory_type: u8,
     /// The entry of each level, from the PML4 down.
+    #[record(hex)]
     pub entries: Vec<u64>,
 }
 
@@ -230,18 +236,42 @@ pub fn leaves(
 
 /// A range of guest physical memory, `start..end`, that two EPTs map
 /// differently: with different access, or in one of them only (`None`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Difference {
+#[record(impl)]
+#[derive(Copy, PartialEq, Eq)]
+pub struct EptDifference {
+    #[record(hex)]
     pub start: u64,
+    /// The end of the range (exclusive).
+    #[record(hex)]
     pub end: u64,
+    /// VTL0's access.
+    #[record(skip)]
     pub first: Option<Access>,
+    /// VTL1's access.
+    #[record(skip)]
     pub second: Option<Access>,
+}
+
+#[record]
+impl EptDifference {
+    /// VTL0's access as `r-x`-style text, with `u` for user-mode execute
+    /// under mode-based execute control, or None where VTL0 maps nothing.
+    #[record(getter)]
+    pub fn vtl0(&self) -> Option<String> {
+        self.first.map(|access| access.to_string())
+    }
+
+    /// VTL1's access, as `vtl0` gives VTL0's.
+    #[record(getter)]
+    pub fn vtl1(&self) -> Option<String> {
+        self.second.map(|access| access.to_string())
+    }
 }
 
 /// The ranges where the leaves `first` and `second` (each in address order,
 /// as [`leaves`] gives them) differ, adjacent ranges that differ the same way
 /// merged.
-pub fn differences(first: &[Leaf], second: &[Leaf]) -> Vec<Difference> {
+pub fn differences(first: &[Leaf], second: &[Leaf]) -> Vec<EptDifference> {
     let mut bounds: Vec<u64> = first
         .iter()
         .chain(second)
@@ -264,7 +294,7 @@ pub fn differences(first: &[Leaf], second: &[Leaf]) -> Vec<Difference> {
             .map(|leaf| leaf.access)
     }
     let (mut a, mut b) = (0, 0);
-    let mut out: Vec<Difference> = Vec::new();
+    let mut out: Vec<EptDifference> = Vec::new();
     for pair in bounds.windows(2) {
         let (start, end) = (pair[0], pair[1]);
         let (first, second) = (at(first, &mut a, start), at(second, &mut b, start));
@@ -275,7 +305,7 @@ pub fn differences(first: &[Leaf], second: &[Leaf]) -> Vec<Difference> {
             Some(last) if last.end == start && last.first == first && last.second == second => {
                 last.end = end;
             }
-            _ => out.push(Difference {
+            _ => out.push(EptDifference {
                 start,
                 end,
                 first,
@@ -522,13 +552,13 @@ mod tests {
         assert_eq!(
             differences(&large, &small),
             [
-                Difference {
+                EptDifference {
                     start: 0x20_3000,
                     end: 0x20_5000,
                     first: Some(access(RWX)),
                     second: Some(access(READ | EXECUTE)),
                 },
-                Difference {
+                EptDifference {
                     start: 0x20_7000,
                     end: 0x20_8000,
                     first: Some(access(RWX)),
