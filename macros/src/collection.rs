@@ -44,7 +44,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let enumerate = enumerate
         .ok_or_else(|| Error::new_spanned(&item.self_ty, "a collection needs `fn enumerate`"))?;
     let element = element(&enumerate)?;
-    let python_crate = quote!(crate::python);
+    let python_crate = quote!(crate::hosts::python);
     let mut generated = vec![quote! {
         fn __len__(&self, py: pyo3::Python<'_>) -> pyo3::PyResult<usize> {
             ::std::result::Result::Ok(Self::enumerate(self, py)?.len())
@@ -321,10 +321,10 @@ impl Matcher {
                 fn at(
                     &self,
                     py: pyo3::Python<'_>,
-                    #param: crate::python::args::AddressArg,
+                    #param: crate::hosts::python::args::AddressArg,
                 ) -> pyo3::PyResult<::std::option::Option<#element>> {
                     let #param: #ty = #param
-                        .resolve(py, &self.owner, &crate::python::context::Context::default())?
+                        .resolve(py, &self.owner, &crate::hosts::python::context::Context::default())?
                         .0;
                     ::std::result::Result::Ok(
                         Self::enumerate(self, py)?

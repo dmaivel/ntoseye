@@ -36,7 +36,7 @@ impl Job {
 
 In Python, a record is a value, like a frozen dataclass. `BaseRecord` gives it `==` (same class, equal fields), `hash` (a `TypeError` when a field is unhashable), `repr`, and `to_dict()`, and each class has `__match_args__`, its properties in order. It is not a container: it has no `len`, iteration or `record["field"]`, so a script reads fields as attributes. A `Keyed` field is a plain `dict[str, T]`.
 
-The runtime that turns a record into Python objects is `src/python/record.rs` (`ToValue`, `Typed`, `to_py`). `build.rs` walks the module tree from `src/lib.rs` and exports every record class from the `_ntoseye` module, so a new record needs no list entry. For this reason, a record must be an item in a module that `crate::python` can see, written with `#[record]` itself, not the output of a `macro_rules!` or a `cfg_attr`. `build.rs` writes an `ExportedClass` impl for each record and handle class it exports, which their macros require, so one it cannot see fails to compile at its name. Everything Python-specific is behind `cfg(feature = "python")`, so the core builds with `--no-default-features`.
+The runtime that turns a record into Python objects is `src/hosts/python/record.rs` (`ToValue`, `Typed`, `to_py`). `build.rs` walks the module tree from `src/lib.rs` and exports every record class from the `_ntoseye` module, so a new record needs no list entry. For this reason, a record must be an item in a module that `crate::hosts::python` can see, written with `#[record]` itself, not the output of a `macro_rules!` or a `cfg_attr`. `build.rs` writes an `ExportedClass` impl for each record and handle class it exports, which their macros require, so one it cannot see fails to compile at its name. Everything Python-specific is behind `cfg(feature = "python")`, so the core builds with `--no-default-features`.
 
 ## Commands: one function per operation
 
@@ -62,13 +62,13 @@ impl Render for Job {
   - `Action` changes guest, debugger or symbol state and returns a record of the change, or `()`.
   - `Run` resumes or steps the target. It returns the `Motion` to drive, and the host drives it to a `Stop`.
   - `Host` acts on the REPL itself (aliases, scripts, logging), and has no SDK form.
-- Arguments after the receiver (`&Session`, `&mut Session`, or `&mut ReplState` for a REPL-only command) are parsed in order by `FromArg` (`src/repl/args.rs`). `#[arg(...)]` options cover defaults, the current process or thread, switches, the rest of the line, custom parsers (`parse = f`), and display flags (`render`), which go to `Render` and never to the function or to Python.
+- Arguments after the receiver (`&Session`, `&mut Session`, or `&mut ReplState` for a REPL-only command) are parsed in order by `FromArg` (`src/hosts/repl/args.rs`). `#[arg(...)]` options cover defaults, the current process or thread, switches, the rest of the line, custom parsers (`parse = f`), and display flags (`render`), which go to `Render` and never to the function or to Python.
 - `Render` prints the REPL text through `outln!`. The hosts capture that output. The renderer also gets the `ReplState`, for things that only the REPL keeps, such as completion caches and the selected thread.
-- The macro registers a `CommandSpec` in the `COMMANDS` slice (`src/repl/command.rs`). `help`, completion, `--dump-command-reference` (and the generated command reference in these docs), MCP and the REPL dispatcher all read that one registry.
+- The macro registers a `CommandSpec` in the `COMMANDS` slice (`src/hosts/repl/command.rs`). `help`, completion, `--dump-command-reference` (and the generated command reference in these docs), MCP and the REPL dispatcher all read that one registry.
 
 ### Usage lines and completion
 
-Nobody writes a command's usage line or its completion by hand. The macro generates both from the arguments (`src/repl/usage.rs`), so they cannot drift from what the parser accepts, and it refuses a `usage =` or `completion =` key on `#[command]`.
+Nobody writes a command's usage line or its completion by hand. The macro generates both from the arguments (`src/hosts/repl/usage.rs`), so they cannot drift from what the parser accepts, and it refuses a `usage =` or `completion =` key on `#[command]`.
 
 The notation follows WinDbg's documentation and POSIX:
 
@@ -92,7 +92,7 @@ Each argument contributes a fragment and the completion of its words:
 - A custom parser (`parse = f`, `each = f`) declares its words next to its code with `#[grammar(usage = "<address> [L<count>|length|end]", complete = [Expression, Expression])]`. In the fragment, `{}` stands for the argument's name, so a parser that several commands share can name each use. `usage = ""` declares a parser that reads no word of its own, and a bare `complete = Strategy` completes every word, for a parser that takes the rest of the line.
 - A parser that only hands the words to the operation, which reads them itself, is `#[grammar(operation)]`. Each argument that uses it describes the words with `#[arg(usage = "...", complete = ...)]`, as may a `raw` or `rest` argument, whose operation reads its text.
 
-The usage line is the command name and the fragments in parameter order. The completion of the `n`th word is the `n`th of the arguments' words in order; after an argument that takes the rest of the line, every word completes as it does. A test in `src/repl/command.rs` checks that every argument which names a value has a completion position.
+The usage line is the command name and the fragments in parameter order. The completion of the `n`th word is the `n`th of the arguments' words in order; after an argument that takes the rest of the line, every word completes as it does. A test in `src/hosts/repl/command.rs` checks that every argument which names a value has a completion position.
 
 ### Forms: several SDK methods behind one REPL name
 
@@ -113,7 +113,7 @@ A form of a command can declare its own effects in place of the command's (`!gfl
 
 `Session::admit(&Effects)` (`src/session/effects.rs`) makes the decision for every host and returns a `Refusal`. It checks in a fixed order, so every host refuses one operation for one reason: the target kind, the VTL1 address space, the run state, execution control (a `run` on a target that cannot run, such as a crash dump), the static dump (`live_only` and guest writes), then the capability. The REPL reports a refusal with the message that it has always printed (`report_refusal`). The SDK raises the matching exception (`python::command::admit`), for example `TargetRunningError`. Hand-written SDK methods go through the same function.
 
-Before `admit`, the REPL's dispatcher (`ReplState::admit`, `src/repl/commands/mod.rs`) applies gates that depend on where the line came from, which no SDK call has, in this order:
+Before `admit`, the REPL's dispatcher (`ReplState::admit`, `src/hosts/repl/commands/mod.rs`) applies gates that depend on where the line came from, which no SDK call has, in this order:
 
 - `host_command_denial`: `.shell` runs host programs only at the interactive prompt;
 - `run_control_denial`: a breakpoint action or an exception command may not move the target (by its `run` effect, or `state = Running` for an exception command), a GDB client may not have it moved behind its back, a DAP client may not block on a `run = Run`, and a remote host may not run `q` (`flow = Quit`);
@@ -131,14 +131,14 @@ Two resumes call `Session::resume` instead of the driver, because neither is a r
 
 ## The Python SDK
 
-A generated method runs through `python::command::run`. That function takes the object's context, admits the command's effects on the session thread, calls the function, and returns the result as its record class (`Typed<R>`). The class that a method is placed on implements `CommandHost` (`src/python/command.rs`):
+A generated method runs through `python::command::run`. That function takes the object's context, admits the command's effects on the session thread, calls the function, and returns the result as its record class (`Typed<R>`). The class that a method is placed on implements `CommandHost` (`src/hosts/python/command.rs`):
 
 - `session()` says how the object reaches its session: through its `Owner` for a handle or a namespace, or directly for the `Debugger`.
 - `context()` gives the process or thread that its calls run in.
 - `refuse()` and `prepare()` are optional. They refuse an operation that the object cannot run, and set up the session after admission (for example, a `Heap` loads its process's symbols).
 - A `#[arg(receiver)]` argument comes from the object through `Bind<T>`. For example, a `Thread` binds the `ThreadInfo` that `!thread` takes.
 
-A Python argument type implements `PyArg`, whose `Py` type is what the stub shows. A fieldless `#[record]` enum is one already, taking its variants' texts (`Literal[...]` in the stub), and a handle's record is one taking the handle (`ProcessInfo` takes a `Process`). A `VirtAddr` argument is an `AddressArg` (`src/python/args.rs`): an `int`, a debugger expression, which is evaluated on the session thread in the method's context, or a handle, which gives its object's address (a `Process` its `_EPROCESS`, a `Module` its base, ...; also `Thread`, `Driver`, `Device` and `Heap`) and must belong to the same debugger. Hand-written methods take `AddressArg` too, through `AddressArg::resolve` or `AddressArg::pending`. Run commands get a `timeout` and the `when=` handling of `python::runcontrol`.
+A Python argument type implements `PyArg`, whose `Py` type is what the stub shows. A fieldless `#[record]` enum is one already, taking its variants' texts (`Literal[...]` in the stub), and a handle's record is one taking the handle (`ProcessInfo` takes a `Process`). A `VirtAddr` argument is an `AddressArg` (`src/hosts/python/args.rs`): an `int`, a debugger expression, which is evaluated on the session thread in the method's context, or a handle, which gives its object's address (a `Process` its `_EPROCESS`, a `Module` its base, ...; also `Thread`, `Driver`, `Device` and `Heap`) and must belong to the same debugger. Hand-written methods take `AddressArg` too, through `AddressArg::resolve` or `AddressArg::pending`. Run commands get a `timeout` and the `when=` handling of `python::runcontrol`.
 
 The arguments a method is about (an address, a name, an object) are positional. An argument that may be omitted (`Option<T>`, `default`, `switch`, `sdk`) is a mode, flag or option, so the generated method makes it keyword-only, after the `*`; `#[arg(positional)]` keeps an omittable subject positional (`job(address=None)`, `pool_usage(tag=None, *, sort=...)`).
 
@@ -157,9 +157,9 @@ Some SDK methods are written by hand. These are properties and setters (`Symbols
 ## Adding a command
 
 1. Make the result a model record: add `#[record]` to the model type (or write a new one next to the model), and use `#[record(skip)]` for fields that only the REPL needs.
-2. Write the function with `#[command]` next to the other commands of its area in `src/repl/commands/`. Put the help text in the doc comment, and declare `kind`, `category`, the effects, and `python = Object` or `python = none`.
+2. Write the function with `#[command]` next to the other commands of its area in `src/hosts/repl/commands/`. Put the help text in the doc comment, and declare `kind`, `category`, the effects, and `python = Object` or `python = none`.
 3. Implement `Render` for the result, reading the record.
-4. For a new kind of argument, implement `FromArg` (and `Current` if it has a current value) in `src/repl/args.rs`, and `PyArg` if Python takes it in `src/python/args.rs`, so the model's module names no host; or write a `parse = f` parser, with its `#[grammar]`, for a grammar of the command's own.
+4. For a new kind of argument, implement `FromArg` (and `Current` if it has a current value) in `src/hosts/repl/args.rs`, and `PyArg` if Python takes it in `src/hosts/python/args.rs`, so the model's module names no host; or write a `parse = f` parser, with its `#[grammar]`, for a grammar of the command's own.
 5. Check `help <name>`, the REPL text, and `ntoseye --dump-command-reference`. A change in the reference is a change in the docs.
 
 ## Adding an SDK method

@@ -14,26 +14,26 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(test)]
 use crate::TargetSpec;
-use crate::breakpoints::{BreakpointInfo, BreakpointManager, StepFrame};
-use crate::dbg_backend::{
+use crate::backend::dbg_backend::{
     BackendCapability, BugcheckInfo, DebugBackend, DebugCapability, DebugLog, DebugOutputPage,
     LastEvent, ModuleEvent, RegisterMap, StopEvent, processor_index_from_backend_thread_id,
 };
-use crate::disasm::ControlFlow;
+use crate::base::disasm::ControlFlow;
+use crate::base::error::{Error, Result};
+use crate::base::notice::Notice;
+use crate::base::ntstatus::exception_code_name;
+use crate::base::types::VirtAddr;
+use crate::nt::breakpoints::{BreakpointInfo, BreakpointManager, StepFrame};
 #[cfg(test)]
-use crate::dmp::triage::{TriageBlock, make_triage_dump};
-use crate::error::{Error, Result};
-use crate::exception_policy::ExceptionPolicyTable;
-use crate::expr::NumberRadix;
-use crate::guest::{ModuleInfo, ModuleSymbolLoadReport, ProcessInfo};
-use crate::notice::Notice;
-use crate::ntstatus::exception_code_name;
+use crate::nt::dmp::triage::{TriageBlock, make_triage_dump};
+use crate::nt::expr::NumberRadix;
+use crate::nt::guest::{ModuleInfo, ModuleSymbolLoadReport, ProcessInfo};
+use crate::nt::target::dbgprint::{PrintCursor, prints_between};
+use crate::nt::target::{ReloadReport, ServedVp, Target, TargetSelection, ThreadInfo};
+use crate::nt::unwind::SavedVtl;
+use crate::session::exception_policy::ExceptionPolicyTable;
 use crate::session::lifecycle::InstanceGuard;
 use crate::session::partition::{KeptPartition, PartitionView};
-use crate::target::dbgprint::{PrintCursor, prints_between};
-use crate::target::{ReloadReport, ServedVp, Target, TargetSelection, ThreadInfo};
-use crate::types::VirtAddr;
-use crate::unwind::SavedVtl;
 use ntoseye_macros::record;
 
 /// Trace reload classification (lines prefixed `reload:`), gated on
@@ -71,6 +71,7 @@ pub mod context;
 pub mod driver;
 pub mod dump;
 pub mod effects;
+pub mod exception_policy;
 pub mod hardware;
 pub mod hits;
 pub mod inspection;
@@ -81,6 +82,7 @@ pub mod run_control;
 pub mod scheduler;
 pub mod stepping;
 pub mod stops;
+pub mod typeview;
 
 pub use driver::{
     ActionRunner, BreakpointHit, Cancel, CancelBehavior, ExceptionStop, HitKind, Motion,
@@ -102,7 +104,7 @@ pub enum ContinueOutcome {
     /// The guest is processing a bugcheck (BSOD). `info` carries the code +
     /// parameters when the backend decoded them from the KD stream; otherwise
     /// read `nt!KiBugCheckData` from memory with
-    /// [`crate::bugchecks::current_bugcheck`].
+    /// [`crate::nt::bugchecks::current_bugcheck`].
     Bugcheck {
         rip: Option<u64>,
         info: Option<BugcheckInfo>,
@@ -534,10 +536,10 @@ pub struct VpRegisters {
 impl VpRegisters {
     /// RIP, RSP, flags, control and segment registers, and the
     /// general-purpose ones when they are known, in
-    /// [`crate::target::VP_STATE_REGISTERS`] order.
+    /// [`crate::nt::target::VP_STATE_REGISTERS`] order.
     #[record(getter, hex, rename = "registers")]
-    pub fn ordered_registers(&self) -> crate::types::Keyed<u64> {
-        crate::target::VP_STATE_REGISTERS
+    pub fn ordered_registers(&self) -> crate::base::types::Keyed<u64> {
+        crate::nt::target::VP_STATE_REGISTERS
             .iter()
             .filter_map(|name| Some((*name, *self.registers.get(*name)?)))
             .collect()

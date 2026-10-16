@@ -97,9 +97,9 @@ enum Mode {
 impl Mode {
     fn tokens(self) -> TokenStream {
         match self {
-            Self::Plain => quote!(crate::python::record::Plain),
-            Self::Hex => quote!(crate::python::record::Hex),
-            Self::Bytes => quote!(crate::python::record::Bytes),
+            Self::Plain => quote!(crate::hosts::python::record::Plain),
+            Self::Hex => quote!(crate::hosts::python::record::Hex),
+            Self::Bytes => quote!(crate::hosts::python::record::Bytes),
         }
     }
 }
@@ -336,9 +336,9 @@ impl Getter {
             #[pyo3(name = #property)]
             fn #ident<'py>(
                 slf: &pyo3::Bound<'py, Self>,
-            ) -> pyo3::PyResult<crate::python::record::Typed<'py, #ty, #mode>> {
-                ::std::result::Result::Ok(crate::python::record::Typed::converted(
-                    crate::python::record::field(slf.as_any(), #key)?,
+            ) -> pyo3::PyResult<crate::hosts::python::record::Typed<'py, #ty, #mode>> {
+                ::std::result::Result::Ok(crate::hosts::python::record::Typed::converted(
+                    crate::hosts::python::record::field(slf.as_any(), #key)?,
                 ))
             }
         }
@@ -363,7 +363,7 @@ impl Getter {
             quote!(#kind #ident #property #index { #(#docs)* };),
             quote! {
                 #[cfg(feature = "python")]
-                impl crate::python::record::Field<#index> for #name {
+                impl crate::hosts::python::record::Field<#index> for #name {
                     type Type = #ty;
                     type Mode = #mode;
                 }
@@ -551,7 +551,7 @@ fn class(
     let checked = Ident::new(&class.to_string(), name.span());
     quote! {
         #[cfg(all(feature = "python", not(test)))]
-        const _: () = crate::python::record::exported::<#checked>();
+        const _: () = crate::hosts::python::record::exported::<#checked>();
 
         #[cfg(feature = "python")]
         #(#docs)*
@@ -560,12 +560,12 @@ fn class(
             name = #python_name,
             frozen,
             #subclass
-            extends = crate::python::record::BaseRecord
+            extends = crate::hosts::python::record::BaseRecord
         )]
         pub struct #class;
 
         #[cfg(feature = "python")]
-        impl crate::python::record::RecordClass for #name {
+        impl crate::hosts::python::record::RecordClass for #name {
             type Class = #class;
         }
 
@@ -577,7 +577,7 @@ fn class(
             #[allow(dead_code)]
             pub fn wrap<'py>(
                 py: pyo3::Python<'py>,
-                record: crate::python::record::BaseRecord,
+                record: crate::hosts::python::record::BaseRecord,
             ) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::PyAny>> {
                 let init = pyo3::PyClassInitializer::from(record).add_subclass(#class);
                 ::std::result::Result::Ok(pyo3::Bound::new(py, init)?.into_any())
@@ -592,7 +592,7 @@ fn class(
                 &self,
                 py: pyo3::Python<'py>,
             ) -> pyo3::PyResult<pyo3::Bound<'py, #class>> {
-                let typed = crate::python::record::Typed::<Self>::of(py, self)?;
+                let typed = crate::hosts::python::record::Typed::<Self>::of(py, self)?;
                 ::std::result::Result::Ok(typed.into_bound().cast_into::<#class>()?)
             }
         }
@@ -607,16 +607,16 @@ fn class(
 fn shaped(push: TokenStream, class: TokenStream, has_impl: bool) -> TokenStream {
     let computed = has_impl.then(|| {
         quote! {
-            <Self as crate::python::record::RecordImpl>::computed(self, &mut fields);
+            <Self as crate::hosts::python::record::RecordImpl>::computed(self, &mut fields);
         }
     });
     quote! {
         #[allow(unused_mut)]
-        let mut fields: ::std::vec::Vec<(&'static str, crate::python::record::Value)> =
+        let mut fields: ::std::vec::Vec<(&'static str, crate::hosts::python::record::Value)> =
             ::std::vec::Vec::new();
         #push
         #computed
-        crate::python::record::Value::Record(crate::python::record::RecordFields {
+        crate::hosts::python::record::Value::Record(crate::hosts::python::record::RecordFields {
             fields,
             class: #class,
         })
@@ -627,8 +627,8 @@ fn shaped(push: TokenStream, class: TokenStream, has_impl: bool) -> TokenStream 
 fn to_value(name: &Ident, body: TokenStream, hint: TokenStream) -> TokenStream {
     quote! {
         #[cfg(feature = "python")]
-        impl<M> crate::python::record::ToValue<M> for #name {
-            fn to_value(&self) -> crate::python::record::Value {
+        impl<M> crate::hosts::python::record::ToValue<M> for #name {
+            fn to_value(&self) -> crate::hosts::python::record::Value {
                 #body
             }
             #[cfg(feature = "python-stubs")]
@@ -770,9 +770,9 @@ fn structure(flags: Flags, mut item: ItemStruct) -> Result<TokenStream> {
                     "one field is flattened, keyed `kind`, with no `hex` or `bytes`",
                 ));
             }
-            let variants = quote!(<#ty as crate::python::record::Variants>);
+            let variants = quote!(<#ty as crate::hosts::python::record::Variants>);
             values.push(quote! {
-                fields.push((#key, crate::python::record::Value::Str(
+                fields.push((#key, crate::hosts::python::record::Value::Str(
                     ::std::string::String::from(#variants::kind(&self.#ident)),
                 )));
                 #variants::payload(&self.#ident, &mut fields);
@@ -792,7 +792,7 @@ fn structure(flags: Flags, mut item: ItemStruct) -> Result<TokenStream> {
         values.push(quote! {
             fields.push((
                 #key,
-                <#ty as crate::python::record::ToValue<#mode>>::to_value(&self.#ident),
+                <#ty as crate::hosts::python::record::ToValue<#mode>>::to_value(&self.#ident),
             ));
         });
         getters.push(Getter {
@@ -898,7 +898,7 @@ fn fieldless_enum(item: &mut ItemEnum) -> Result<TokenStream> {
     let name = &item.ident;
     let to_value = to_value(
         name,
-        quote!(crate::python::record::Value::Str(
+        quote!(crate::hosts::python::record::Value::Str(
             ::std::string::String::from(self.as_str())
         )),
         hint.clone(),
@@ -948,7 +948,7 @@ fn fieldless_enum(item: &mut ItemEnum) -> Result<TokenStream> {
         }
 
         #[cfg(feature = "python")]
-        impl crate::python::command::PyArg for #name {
+        impl crate::hosts::python::command::PyArg for #name {
             type Py = Self;
             fn from_py(value: Self) -> Self {
                 value
@@ -991,9 +991,9 @@ fn union(item: &mut ItemEnum) -> Result<TokenStream> {
         let mode = opts.mode.tokens();
         let ident = &variant.ident;
         arms.push(quote! {
-            Self::#ident(value) => <#ty as crate::python::record::ToValue<#mode>>::to_value(value),
+            Self::#ident(value) => <#ty as crate::hosts::python::record::ToValue<#mode>>::to_value(value),
         });
-        hints.push(quote!(<#ty as crate::python::record::ToValue<#mode>>::HINT));
+        hints.push(quote!(<#ty as crate::hosts::python::record::ToValue<#mode>>::HINT));
     }
     let hint = hints
         .into_iter()
@@ -1086,7 +1086,7 @@ fn tagged(flags: &Flags, item: &mut ItemEnum) -> Result<TokenStream> {
             pushes.push(quote! {
                 fields.push((
                     #key,
-                    <#ty as crate::python::record::ToValue<#mode>>::to_value(#binding),
+                    <#ty as crate::hosts::python::record::ToValue<#mode>>::to_value(#binding),
                 ));
             });
             getters.push(Getter {
@@ -1139,7 +1139,7 @@ fn tagged(flags: &Flags, item: &mut ItemEnum) -> Result<TokenStream> {
     let kind_hint = literal_hint(&kinds);
     let variants = quote! {
         #[cfg(feature = "python")]
-        impl crate::python::record::Variants for #name {
+        impl crate::hosts::python::record::Variants for #name {
             type Kind = #kind_type;
 
             fn kind(&self) -> &'static str {
@@ -1150,14 +1150,14 @@ fn tagged(flags: &Flags, item: &mut ItemEnum) -> Result<TokenStream> {
 
             fn payload(
                 &self,
-                fields: &mut ::std::vec::Vec<(&'static str, crate::python::record::Value)>,
+                fields: &mut ::std::vec::Vec<(&'static str, crate::hosts::python::record::Value)>,
             ) {
                 match self {
                     #(#payload_arms)*
                 }
             }
 
-            fn class(&self) -> crate::python::record::Wrap {
+            fn class(&self) -> crate::hosts::python::record::Wrap {
                 match self {
                     #(#class_arms)*
                 }
@@ -1170,8 +1170,8 @@ fn tagged(flags: &Flags, item: &mut ItemEnum) -> Result<TokenStream> {
         pub enum #kind_type {}
 
         #[cfg(feature = "python")]
-        impl<M> crate::python::record::ToValue<M> for #kind_type {
-            fn to_value(&self) -> crate::python::record::Value {
+        impl<M> crate::hosts::python::record::ToValue<M> for #kind_type {
+            fn to_value(&self) -> crate::hosts::python::record::Value {
                 match *self {}
             }
             #[cfg(feature = "python-stubs")]
@@ -1204,14 +1204,14 @@ fn tagged(flags: &Flags, item: &mut ItemEnum) -> Result<TokenStream> {
     };
     let has_impl = flags.has_impl.is_some();
     let push = quote! {
-        fields.push(("kind", crate::python::record::Value::Str(
-            ::std::string::String::from(crate::python::record::Variants::kind(self)),
+        fields.push(("kind", crate::hosts::python::record::Value::Str(
+            ::std::string::String::from(crate::hosts::python::record::Variants::kind(self)),
         )));
-        crate::python::record::Variants::payload(self, &mut fields);
+        crate::hosts::python::record::Variants::payload(self, &mut fields);
     };
     let body = shaped(
         push,
-        quote!(crate::python::record::Variants::class(self)),
+        quote!(crate::hosts::python::record::Variants::class(self)),
         has_impl,
     );
     let to_value = to_value(&name, body, class_hint(&name));
@@ -1284,7 +1284,7 @@ fn variant_subclass(
             /// The class around a record's fields.
             pub fn wrap<'py>(
                 py: pyo3::Python<'py>,
-                record: crate::python::record::BaseRecord,
+                record: crate::hosts::python::record::BaseRecord,
             ) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::PyAny>> {
                 let init = pyo3::PyClassInitializer::from(record)
                     .add_subclass(#base_class)
@@ -1337,8 +1337,8 @@ fn variant_subclass(
         pub enum #kind_type {}
 
         #[cfg(feature = "python")]
-        impl<M> crate::python::record::ToValue<M> for #kind_type {
-            fn to_value(&self) -> crate::python::record::Value {
+        impl<M> crate::hosts::python::record::ToValue<M> for #kind_type {
+            fn to_value(&self) -> crate::hosts::python::record::Value {
                 match *self {}
             }
             #[cfg(feature = "python-stubs")]
@@ -1539,7 +1539,7 @@ fn implementation(mut item: ItemImpl) -> Result<TokenStream> {
         )?;
         let mode = opts.mode.tokens();
         values.push(quote! {
-            fields.push((#key, <#ty as crate::python::record::ToValue<#mode>>::to_value(&self.#ident())));
+            fields.push((#key, <#ty as crate::hosts::python::record::ToValue<#mode>>::to_value(&self.#ident())));
         });
         getters.push(Getter {
             key,
@@ -1568,10 +1568,10 @@ fn implementation(mut item: ItemImpl) -> Result<TokenStream> {
         #item
 
         #[cfg(feature = "python")]
-        impl crate::python::record::RecordImpl for #name {
+        impl crate::hosts::python::record::RecordImpl for #name {
             fn computed(
                 &self,
-                fields: &mut ::std::vec::Vec<(&'static str, crate::python::record::Value)>,
+                fields: &mut ::std::vec::Vec<(&'static str, crate::hosts::python::record::Value)>,
             ) {
                 #(#values)*
             }

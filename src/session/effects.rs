@@ -5,8 +5,8 @@
 //! (the REPL prefixes the typed name, the SDK raises a typed exception), so
 //! the decision is shared and the messages stay the hosts'.
 
-use crate::dbg_backend::{DebugCapability, halt_unreachable_reason};
-use crate::error::Error;
+use crate::backend::dbg_backend::{DebugCapability, halt_unreachable_reason};
+use crate::base::error::Error;
 use crate::session::Session;
 
 /// Everything admission checks about one operation.

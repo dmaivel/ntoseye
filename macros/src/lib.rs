@@ -1,5 +1,5 @@
 //! Procedural macros for ntoseye. They expand to paths inside the `ntoseye`
-//! crate (`crate::python::record`, `crate::repl`, `crate::python::command`),
+//! crate (`crate::hosts::python::record`, `crate::hosts::repl`, `crate::hosts::python::command`),
 //! so only that crate can use them.
 
 mod collection;
@@ -18,7 +18,7 @@ use proc_macro::TokenStream;
 /// (adding `Debug` and `Clone` derives if missing) and, under the `python`
 /// feature, emits:
 ///
-/// - `impl<M> ToValue<M>` (`crate::python::record`), which renders the
+/// - `impl<M> ToValue<M>` (`crate::hosts::python::record`), which renders the
 ///   fields in order as a `Value::Record`;
 /// - `<Name>Py`, a frozen `ntoseye.<Name>` class extending `BaseRecord`, with
 ///   a typed property per field (the struct's and fields' doc comments become
@@ -122,7 +122,7 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   function that returns its own `Flow`).
 ///
 /// There is no `usage` or `completion` key: both are generated from the
-/// arguments (`crate::repl::usage` has the notation), so they cannot drift
+/// arguments (`crate::hosts::repl::usage` has the notation), so they cannot drift
 /// from what the line accepts. A typed argument is `<name>`, or `[name]`
 /// when it may be omitted, completed as its `FromArg::COMPLETION`; a switch
 /// is `[/x]`; `rest` is `[name]...`; a custom parser gives the fragment and
@@ -223,7 +223,7 @@ pub fn command(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```
 ///
 /// - `usage = "..."`: the words the parser reads, in the usage notation
-///   (`crate::repl::usage`); `{}` stands for the argument's name, so a
+///   (`crate::hosts::repl::usage`); `{}` stands for the argument's name, so a
 ///   shared parser can name each use (`<{}>`). Empty for a parser that
 ///   reads no word of its own;
 /// - `complete = [Strategy, ...]`: the completion of each word, in order;

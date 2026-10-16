@@ -7,25 +7,25 @@ use std::time::Duration;
 
 use single_instance::SingleInstance;
 
-use crate::breakpoints::{BreakpointManager, SiteJournal, breakpoint_opcode};
-use crate::bugchecks::plausible_bugcheck_code;
-use crate::cpu_state;
-use crate::dbg_backend::{BugcheckInfo, DebugBackend, DebugCapability};
-use crate::dmp::{DmpBackend, DmpInfo};
-use crate::error::{Error, Result};
-use crate::exception_policy::ExceptionPolicyTable;
-use crate::gdb::GdbClient;
-use crate::kd::{KdBackend, KdMemorySource};
-use crate::memory::MemoryOps;
-use crate::memory_backend::MemoryBackend;
-use crate::notice::Notice;
-use crate::phys::{HaltClock, PhysMem};
+use crate::backend::dbg_backend::{BugcheckInfo, DebugBackend, DebugCapability};
+use crate::backend::gdb::GdbClient;
+use crate::backend::kd::{KdBackend, KdMemorySource};
+use crate::backend::memory_backend::MemoryBackend;
+use crate::backend::phys::{HaltClock, PhysMem};
+use crate::base::error::{Error, Result};
+use crate::base::memory::MemoryOps;
+use crate::base::notice::Notice;
+use crate::nt::breakpoints::{BreakpointManager, SiteJournal, breakpoint_opcode};
+use crate::nt::bugchecks::plausible_bugcheck_code;
+use crate::nt::cpu_state;
+use crate::nt::dmp::{DmpBackend, DmpInfo};
+use crate::session::exception_policy::ExceptionPolicyTable;
 
+use crate::base::types::VirtAddr;
+use crate::nt::symbols::ntoseye_home;
+use crate::nt::target::{Target, TargetKind};
+use crate::nt::userdump::{self, UserDump, UserDumpBackend};
 use crate::session::{ContinueOutcome, Session, StopResolution};
-use crate::symbols::ntoseye_home;
-use crate::target::{Target, TargetKind};
-use crate::types::VirtAddr;
-use crate::userdump::{self, UserDump, UserDumpBackend};
 use crate::{Backend, TargetSpec};
 
 /// How long [`Session::halt_for_exit`] gives an already-pending stop to land
@@ -373,7 +373,7 @@ impl Session {
         // ARM64 register snapshots expose TTBR1 via the synthetic `cr3` slot;
         // hand the resolved kernel root to the backend so it can fill it.
         backend.set_kernel_dtb(target.kernel_dtb());
-        backend.set_teb_path(crate::cpu_state::teb_path(&target));
+        backend.set_teb_path(crate::nt::cpu_state::teb_path(&target));
         backend.set_windows_hypervisor(target.windows_hypervisor_running());
         let register_map = backend.register_map().clone();
 

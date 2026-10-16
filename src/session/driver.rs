@@ -12,24 +12,24 @@ use std::time::{Duration, Instant};
 
 use ntoseye_macros::record;
 
-use crate::breakpoints::{BreakpointInfo, StepFrame};
-use crate::dbg_backend::{
+use crate::backend::dbg_backend::{
     BugcheckInfo, ContinueDisposition, HwBreakpointAccess, ModuleEvent,
     processor_index_from_backend_thread_id,
 };
-use crate::disasm::ControlFlow;
-use crate::error::Result;
-use crate::exception_policy::ExceptionPolicyAction;
-use crate::guest::{ModuleInfo, ProcessInfo};
-use crate::kd::trace_enabled;
-use crate::notice::Notice;
+use crate::backend::kd::trace_enabled;
+use crate::base::disasm::ControlFlow;
+use crate::base::error::Result;
+use crate::base::notice::Notice;
+use crate::base::types::VirtAddr;
+use crate::nt::breakpoints::{BreakpointInfo, StepFrame};
+use crate::nt::guest::{ModuleInfo, ProcessInfo};
+use crate::nt::target::ThreadInfo;
+use crate::nt::unwind::try_format_symbol_at;
 use crate::session::context::windows_thread_on_backend_thread;
+use crate::session::exception_policy::ExceptionPolicyAction;
 use crate::session::{
     ContinueOutcome, STEP_UNTIL_LIMIT, Session, StepKind, StepMode, StepStack, StopResolution,
 };
-use crate::target::ThreadInfo;
-use crate::types::VirtAddr;
-use crate::unwind::try_format_symbol_at;
 
 /// How often a wait wakes to check the host's cancellation, the session's
 /// interrupt request, and its deadline.
@@ -130,7 +130,7 @@ pub enum RunOutcome {
 }
 
 /// What a host's cancellation or deadline does to a run in progress. The
-/// session's interrupt request ([`crate::target::Target::interrupt`], raised
+/// session's interrupt request ([`crate::nt::target::Target::interrupt`], raised
 /// by Ctrl+C, a DAP `pause`, a Python `KeyboardInterrupt`) always halts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelBehavior {

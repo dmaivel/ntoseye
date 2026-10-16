@@ -3,27 +3,27 @@
 
 use std::time::Duration;
 
-use crate::breakpoints::{BreakpointInfo, BreakpointManager};
-use crate::dbg_backend::{
+use crate::backend::dbg_backend::{
     ContinueDisposition, DebugBackend, LastEvent, ModuleEvent, StopEvent, clear_trap_flag,
     processor_index_from_backend_thread_id,
 };
-use crate::error::Result;
-use crate::exception_policy::ExceptionPolicyMode;
-use crate::guest::{ModuleInfo, ProcessInfo};
+use crate::base::error::Result;
+use crate::base::types::{Arch, VirtAddr};
+use crate::nt::breakpoints::{BreakpointInfo, BreakpointManager};
+use crate::nt::guest::{ModuleInfo, ProcessInfo};
+use crate::nt::target::{BreakpointStop, HYPERVISOR_CONTEXT, ThreadInfo};
+use crate::nt::unwind::{UNKNOWN_CONTEXT, try_format_symbol_at};
 use crate::session::context::{
     refresh_windows_thread_context_for_backend_thread, update_target_context_from_registers,
     windows_thread_on_backend_thread,
 };
+use crate::session::exception_policy::ExceptionPolicyMode;
 use crate::session::hits::{resolve_watchpoint_stop, rewind_thread_off_breakpoint};
 use crate::session::reload::ReloadDisposition;
 use crate::session::{
     BreakpointStopAction, Cancel, ContinueOutcome, RunStatus, STATUS_BREAKPOINT,
     STATUS_SINGLE_STEP, Session, StopResolution, WatchpointStopAction,
 };
-use crate::target::{BreakpointStop, HYPERVISOR_CONTEXT, ThreadInfo};
-use crate::types::{Arch, VirtAddr};
-use crate::unwind::{UNKNOWN_CONTEXT, try_format_symbol_at};
 
 /// How long a background `service_idle` pass spends absorbing caught stops before
 /// returning to the actor's job queue. Small so a real tool call is never held off
@@ -650,7 +650,7 @@ impl Session {
             ExceptionPolicyMode::Break => Some(module),
             ExceptionPolicyMode::Notify => {
                 self.notices
-                    .push(crate::notice::Notice::info(module_event_line(
+                    .push(crate::base::notice::Notice::info(module_event_line(
                         kind, &module,
                     )));
                 None

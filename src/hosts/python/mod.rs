@@ -1,0 +1,285 @@
+//! The `ntoseye` Python SDK (the `_ntoseye` extension module and the REPL's
+//! embedded interpreter): namespaces and typed handles bound to an address
+//! space, with no global inspection selection.
+//!
+//! Every handle reaches the session through [`handle::Owner`] or
+//! [`handle::Debugger::with_session`], and scoped work goes through
+//! [`context::in_context`], so the user's REPL selection is never disturbed.
+
+#[cfg(all(feature = "cli", feature = "python-extension"))]
+use std::ffi::OsString;
+use std::time::Duration;
+
+use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyDict, PyType};
+
+use crate::backend::kd::KdMemorySource;
+use crate::base::error::Error;
+#[cfg(all(feature = "cli", feature = "python-extension"))]
+use crate::hosts::cli;
+use crate::hosts::repl::open_session;
+use crate::nt::target::meta::{ErrorCode, decode_error_code};
+use crate::{Backend, TargetSpec};
+
+pub mod args;
+pub mod breakpoints;
+pub mod collection;
+pub mod command;
+pub mod context;
+pub mod debugger;
+pub mod embed;
+pub mod handle;
+pub mod hypervisor;
+pub mod inspect;
+pub mod memory;
+pub mod module;
+pub mod process;
+pub mod record;
+pub mod runcontrol;
+pub mod runner;
+pub mod secure;
+pub mod symbols;
+#[cfg(test)]
+mod tests;
+pub mod thread;
+pub mod types;
+pub mod userdump;
+
+use args::AttachBackend;
+use handle::Actor;
+pub use handle::Debugger;
+use record::{PlainDict, PyStyle, ToValue, Typed};
+
+/// Sanity caps for the raw byte APIs. The SDK is local and trusted, but an
+/// accidental huge length (`read(addr, 10**12)`) would allocate before the
+/// read and OOM the interpreter; reject it as a clean error instead.
+pub const MAX_READ_LEN: usize = 1 << 28; // 256 MiB
+
+/// The SDK's exception classes. They are declared in the package's own
+/// Python (`ntoseye/__init__.py`), which is their one definition for both the
+/// runtime and type checkers; this side only looks them up to raise them.
+#[derive(Clone, Copy)]
+pub enum ErrorKind {
+    /// `NtoseyeError`, the base of the others.
+    Ntoseye,
+    /// `MemoryAccessError`: an unmapped or partially readable range.
+    MemoryAccess,
+    /// `TargetRunningError`: the operation needs a halted target.
+    TargetRunning,
+    /// `StaleHandleError`: a handle from before a reboot.
+    StaleHandle,
+    /// `SymbolNotFoundError`, also a `LookupError`.
+    SymbolNotFound,
+}
+
+impl ErrorKind {
+    /// `SymbolNotFound` is the last variant.
+    const COUNT: usize = ErrorKind::SymbolNotFound as usize + 1;
+
+    fn name(self) -> &'static str {
+        match self {
+            ErrorKind::Ntoseye => "NtoseyeError",
+            ErrorKind::MemoryAccess => "MemoryAccessError",
+            ErrorKind::TargetRunning => "TargetRunningError",
+            ErrorKind::StaleHandle => "StaleHandleError",
+            ErrorKind::SymbolNotFound => "SymbolNotFoundError",
+        }
+    }
+}
+
+static ERROR_TYPES: [PyOnceLock<Py<PyType>>; ErrorKind::COUNT] =
+    [const { PyOnceLock::new() }; ErrorKind::COUNT];
+
+/// An object the package's own Python declares (`ntoseye/__init__.py`): the
+/// exceptions, `Diagnostic` (Python so that it can be generic), and the
+/// helpers records share with it.
+pub fn package_attr<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+    // Embedded, `ntoseye` must be the binary's own package even when one is
+    // needed before any script ran: importing it first would load whichever
+    // `ntoseye` is on `sys.path` (a checkout or wheel), whose objects scripts
+    // never see.
+    #[cfg(feature = "python-embed")]
+    embed::install_package(py)?;
+    py.import("ntoseye")?.getattr(name)
+}
+
+/// An SDK exception of `kind` carrying `message`. Callable from the session
+/// thread (it takes the GIL to look the class up); a package that failed to
+/// import surfaces as that import error instead.
+pub fn error(kind: ErrorKind, message: impl std::fmt::Display) -> PyErr {
+    let message = message.to_string();
+    Python::attach(|py| {
+        let class = ERROR_TYPES[kind as usize].get_or_try_init(py, || {
+            Ok::<_, PyErr>(
+                package_attr(py, kind.name())?
+                    .cast_into::<PyType>()?
+                    .unbind(),
+            )
+        });
+        match class {
+            Ok(class) => PyErr::from_type(class.bind(py).clone(), message),
+            Err(error) => error,
+        }
+    })
+}
+
+/// Raise `SymbolNotFoundError(message)`.
+pub fn symbol_not_found(message: impl std::fmt::Display) -> PyErr {
+    error(ErrorKind::SymbolNotFound, message)
+}
+
+/// Map a core error to its Python exception: memory faults become
+/// `MemoryAccessError`, a running target `TargetRunningError`, an unresolved
+/// symbol `SymbolNotFoundError`, a bad argument `ValueError`, everything else
+/// `NtoseyeError`.
+pub fn err(core: Error) -> PyErr {
+    let kind = match core {
+        Error::InvalidArgument(message) => return PyValueError::new_err(message),
+        Error::BadVirtualAddress(_)
+        | Error::AddressNotInDump(_)
+        | Error::NotCaptured { .. }
+        | Error::BadPhysicalAddress(_)
+        | Error::PartialRead(_)
+        | Error::PartialWrite(_)
+        | Error::BufferNotEnough
+        | Error::InvalidRange => ErrorKind::MemoryAccess,
+        Error::TargetRunning(_) => ErrorKind::TargetRunning,
+        Error::SymbolNotFound(_) => ErrorKind::SymbolNotFound,
+        // Only a user-mode minidump refuses so: point at what it does have.
+        Error::KernelRequired => {
+            return error(
+                ErrorKind::Ntoseye,
+                format!("{core}; Debugger.user_dump has its process and threads"),
+            );
+        }
+        _ => ErrorKind::Ntoseye,
+    };
+    error(kind, core)
+}
+
+/// Raise an `NtoseyeError` from a message (SDK-level errors, not core faults).
+pub fn raise(message: impl std::fmt::Display) -> PyErr {
+    error(ErrorKind::Ntoseye, message)
+}
+
+/// A `timeout` argument: seconds as a float, `None` for no limit.
+pub fn timeout_arg(timeout: Option<f64>) -> PyResult<Option<Duration>> {
+    match timeout {
+        None => Ok(None),
+        Some(seconds) if seconds.is_finite() && seconds >= 0.0 => {
+            Ok(Some(Duration::from_secs_f64(seconds)))
+        }
+        Some(seconds) => Err(PyValueError::new_err(format!(
+            "timeout must be a non-negative number of seconds, got {seconds}"
+        ))),
+    }
+}
+
+/// A value as a plain `dict`: an entity's `to_dict()`, with its records and
+/// diagnostics converted.
+pub fn plain_dict<'py, T: ToValue>(py: Python<'py>, value: &T) -> PyResult<PlainDict<'py>> {
+    record::to_py(py, &value.to_value(), PyStyle::Plain)?
+        .cast_into::<PyDict>()
+        .map(PlainDict)
+        .map_err(|e| raise(e.to_string()))
+}
+
+/// Attach to a guest and return a `Debugger`.
+///
+/// `backend` is one of `"kd"` (default), `"kdnet"`, `"gdb"`, `"memory"`, or
+/// `"dmp"`. `connect` is the backend target: a socket path or address for
+/// kd/kdnet/gdb, or the dump file path for dmp: a kernel crash dump, or a
+/// Windows user-mode minidump, whose process and threads `Debugger.user_dump`
+/// holds. Without `connect`, the function uses the default of the backend,
+/// but dmp has no default and needs a path. kdnet needs `key`.
+/// `memory_source` is `auto`, `host`, or `kd` for KD/KDNET.
+///
+/// For kd/kdnet/gdb, the function takes an instance lock for the target before
+/// it makes the backend, so a second live attach to the same target fails
+/// immediately without interfering with the handshake that the first session
+/// owns. The memory and dmp backends are passive.
+#[pyfunction]
+#[pyo3(signature = (
+    backend=AttachBackend(Some(Backend::Kd)),
+    connect=None,
+    key=None,
+    memory_source=KdMemorySource::Auto,
+))]
+fn attach(
+    py: Python<'_>,
+    backend: AttachBackend,
+    connect: Option<&str>,
+    key: Option<&str>,
+    memory_source: KdMemorySource,
+) -> PyResult<Debugger> {
+    let spec = match backend.0 {
+        Some(backend) => TargetSpec::Live {
+            backend,
+            connect: connect.map(str::to_string),
+            kdnet_key: key.map(str::to_string),
+            memory_source,
+        },
+        None => {
+            let path = connect.ok_or_else(|| {
+                PyValueError::new_err("the dmp backend needs a dump file path: connect=<path>")
+            })?;
+            TargetSpec::Dump(path.into())
+        }
+    };
+    // Opening can take seconds (symbol downloads); other Python threads run.
+    let actor = py
+        .detach(|| Actor::spawn(move || open_session(&spec, &mut |line| eprintln!("{line}"))))
+        .map_err(err)?;
+    Ok(Debugger::owned(actor))
+}
+
+/// Decode an NTSTATUS, Win32, or HRESULT code into its name and description
+/// (`!error`). This function does not need a target.
+#[pyfunction]
+fn decode_error(py: Python<'_>, code: u64) -> PyResult<Typed<'_, ErrorCode>> {
+    Typed::new(py, decode_error_code(code))
+}
+
+/// Run the `ntoseye` command line on `sys.argv` and return its exit status, as
+/// the `ntoseye` script of the wheel does. The function releases the GIL for
+/// the full session, and custom commands get the GIL again while they run.
+#[cfg(all(feature = "cli", feature = "python-extension"))]
+#[pyfunction]
+#[pyo3(name = "_cli_main")]
+fn cli_main(py: Python<'_>) -> PyResult<i32> {
+    let argv: Vec<OsString> = py.import("sys")?.getattr("argv")?.extract()?;
+    Ok(py.detach(|| cli::run_with_args(argv)))
+}
+
+// The one list of what the SDK exports: the wheel's `PyInit__ntoseye`, the
+// REPL's embedded interpreter, and PyO3's introspection (the generated
+// `_ntoseye.pyi`) all read it. `with_sdk_classes!` (written by build.rs)
+// adds every class: `#[record]`s, `#[handle]`s and `#[pyclass]`es.
+// Exceptions and the package re-exports live in `ntoseye/__init__.py`.
+include!(concat!(env!("OUT_DIR"), "/sdk_classes.rs"));
+with_sdk_classes! {
+/// The native module of the ntoseye SDK. Import from `ntoseye`, which
+/// re-exports all of it.
+#[pymodule]
+pub mod _ntoseye {
+    #[cfg(all(feature = "cli", feature = "python-extension"))]
+    #[pymodule_export]
+    use super::cli_main;
+    #[pymodule_export]
+    use super::{attach, decode_error};
+
+    /// The ntoseye release version of this extension.
+    #[pymodule_export]
+    #[allow(non_upper_case_globals)]
+    const __version__: &str = env!("CARGO_PKG_VERSION");
+
+    /// The git commit of this extension build (`<commit>`, `<commit>-dirty`, or
+    /// `unknown`). Use it to find a stale extension in a long-lived
+    /// interpreter.
+    #[pymodule_export]
+    #[allow(non_upper_case_globals)]
+    const build: &str = env!("NTOSEYE_BUILD");
+}
+}

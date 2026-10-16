@@ -96,8 +96,8 @@ mod classes {
 
     struct Class {
         cfgs: Vec<String>,
-        /// The class's Rust path, `crate::target::zombies::ZombiesPy`
-        /// (a record's) or `crate::python::process::Process`.
+        /// The class's Rust path, `crate::nt::target::zombies::ZombiesPy`
+        /// (a record's) or `crate::hosts::python::process::Process`.
         path: String,
         /// A `#[record]`'s or `#[handle]`'s class, which requires its
         /// `ExportedClass` impl.
@@ -162,7 +162,7 @@ mod classes {
             if class.checked {
                 writeln!(
                     checked,
-                    "{cfgs}impl crate::python::record::ExportedClass for {} {{}}",
+                    "{cfgs}impl crate::hosts::python::record::ExportedClass for {} {{}}",
                     class.path
                 )
                 .unwrap();

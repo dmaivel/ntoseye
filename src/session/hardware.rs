@@ -5,21 +5,21 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use crate::cpu_state;
-use crate::dbg_backend::{PciConfigAddress, processor_index_from_backend_thread_id};
-use crate::error::{Error, Result};
-use crate::session::Session;
-use crate::target::DiagnosticValue;
-use crate::target::apic::{IA32_APIC_BASE, LocalApic, apic_read_error};
-use crate::target::cpu::{
+use crate::backend::dbg_backend::{PciConfigAddress, processor_index_from_backend_thread_id};
+use crate::base::error::{Error, Result};
+use crate::base::types::{Arch, MAX_PROCESSORS, VirtAddr};
+use crate::nt::cpu_state;
+use crate::nt::target::DiagnosticValue;
+use crate::nt::target::apic::{IA32_APIC_BASE, LocalApic, apic_read_error};
+use crate::nt::target::cpu::{
     DescriptorRegister, DescriptorTable, Gdt, Idt, Pcr, Processor, cpu_location, decode_gdt,
     decode_idt, descriptor_from_target, validate_idt_vector,
 };
-use crate::target::pci::{
+use crate::nt::target::pci::{
     EcamWindow, PCI_EXTENDED_CONFIG_SIZE, PCI_MAX_DEVICES, PCI_MAX_FUNCTIONS, PciFunction,
     PciQuery, PciScan, function_absent, parse_header,
 };
-use crate::types::{Arch, MAX_PROCESSORS, VirtAddr};
+use crate::session::Session;
 
 /// [`Error::TargetRunning`] payload for MSR access.
 const MSRS_NEED_HALT: &str = "MSRs are read on a halted processor.";

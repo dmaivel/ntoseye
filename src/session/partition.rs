@@ -8,21 +8,21 @@
 use std::collections::HashMap;
 use std::mem;
 
-use crate::breakpoints::{
+use crate::backend::dbg_backend::{DebugBackend, DebugCapability, StopEvent};
+use crate::backend::partition_backend::{PartitionBackend, PartitionVp};
+use crate::base::error::{Error, Result};
+use crate::base::notice::Notice;
+use crate::base::types::VirtAddr;
+use crate::nt::breakpoints::{
     BreakpointConfig, BreakpointHitDisposition, BreakpointInfo, BreakpointManager, PartitionFilter,
     StepFrame,
 };
-use crate::dbg_backend::{DebugBackend, DebugCapability, StopEvent};
-use crate::error::{Error, Result};
-use crate::guest::HvPartition;
-use crate::notice::Notice;
-use crate::partition_backend::{PartitionBackend, PartitionVp};
+use crate::nt::guest::HvPartition;
+use crate::nt::target::Target;
 use crate::session::context::{
     refresh_windows_thread_context_for_backend_thread, update_target_context_from_registers,
 };
 use crate::session::{Selection, Session, StopResolution};
-use crate::target::Target;
-use crate::types::VirtAddr;
 
 /// What a partition view replaced, put back when it is left. The session's
 /// breakpoints are not: every one is the target's, a partition's included,
@@ -46,7 +46,7 @@ pub struct PartitionView {
 /// for checking its breakpoints' hits (see [`Session::partition_hit`]):
 /// building one walks the partition's EPT and finds and loads its kernel,
 /// most of what a view costs. What it reads of the guest is memoized per
-/// halt of the target (see [`crate::phys::PhysMem::halt_epoch`]), so it is
+/// halt of the target (see [`crate::backend::phys::PhysMem::halt_epoch`]), so it is
 /// not stale after a run. The partition's ID and VTL0 EPT pointer key it:
 /// a reloaded hypervisor can give another partition the ID.
 pub struct KeptPartition {

@@ -1,0 +1,1234 @@
+use std::cell::RefCell;
+use std::io::Cursor;
+use std::rc::Rc;
+
+use super::memory::MAX_DISASSEMBLE_INSTRUCTIONS;
+use super::variables::VARIABLES_BASE;
+use super::*;
+use crate::backend::cpu_context::amd64::{OFFSET_RIP, OFFSET_RSP};
+use crate::nt::expr::Expr;
+use crate::nt::guest::ProcessInfo;
+use crate::nt::layout::{FieldInfo, TypeInfo};
+use crate::nt::symbols::{
+    CodeFrame, LocalSource, LocalSourceState, LocalVariableLocation, ProcedureLocal,
+};
+use crate::nt::target::SelectedFrame;
+use crate::session::exception_policy::ExceptionPolicyMode;
+use crate::session::tests::{MockBackend, session_with_mock};
+use crate::session::{StopKind, session_over_memory};
+
+#[test]
+fn a_disassembly_request_cannot_ask_for_unbounded_work() {
+    let session = session_over_memory(0x1000, &[0x90u8; 0x40]);
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, _sink) = server_with_sink(Some(session), rx);
+
+    let answer = server
+        .on_disassemble(&json!({
+            "memoryReference": "0x1000",
+            "instructionCount": i64::MAX,
+            "instructionOffset": i64::MIN,
+        }))
+        .expect("the request is answered, not refused")
+        .expect("a body is returned");
+
+    let instructions = answer["instructions"].as_array().expect("instructions");
+    assert_eq!(instructions.len(), MAX_DISASSEMBLE_INSTRUCTIONS);
+}
+
+#[test]
+fn a_short_backward_decode_keeps_the_reference_at_its_offset() {
+    // Nothing is mapped below 0x1000, so the eight instructions before
+    // the reference cannot be decoded. The client takes the reference's
+    // address from row `-instructionOffset`, so the hole goes in front.
+    let session = session_over_memory(0x1000, &[0x90u8; 0x1000]);
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, _sink) = server_with_sink(Some(session), rx);
+
+    let answer = server
+        .on_disassemble(&json!({
+            "memoryReference": "0x1000",
+            "instructionOffset": -8,
+            "instructionCount": 16,
+        }))
+        .unwrap()
+        .unwrap();
+
+    let instructions = answer["instructions"].as_array().unwrap();
+    assert_eq!(instructions.len(), 16);
+    for row in &instructions[..8] {
+        assert_eq!(row["address"], "-1", "{row}");
+        assert_eq!(row["presentationHint"], "invalid");
+    }
+    assert_eq!(instructions[8]["address"], "0x1000");
+    assert_eq!(instructions[9]["address"], "0x1001");
+}
+
+#[test]
+fn an_interrupt_stop_is_a_pause_stop() {
+    // A `pause` that cancels a step halts the target where it is, which the
+    // driver reports as an interrupt: the stop the client's `pause` asked
+    // for.
+    let mut session = session_over_memory(0x1000, &[0x90u8; 0x40]);
+    let mut stop = session.unreported_stop();
+    stop.kind = StopKind::Interrupt;
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, sink) = server_with_sink(Some(session), rx);
+    server.state = RunState::Running;
+
+    server.report_stop(stop);
+
+    assert!(matches!(server.state, RunState::Halted));
+    let messages = decode_sink(&sink);
+    let stopped = messages
+        .iter()
+        .find(|message| message["event"] == "stopped")
+        .unwrap_or_else(|| panic!("no stopped event in {messages:?}"));
+    assert_eq!(stopped["body"]["reason"], "pause");
+}
+
+#[test]
+fn terminate_keeps_serving_until_the_client_disconnects() {
+    // The client follows `terminated` with its own `disconnect`.
+    let session = session_over_memory(0x1000, &[0u8; 0x40]);
+    let messages = serve_script_with(
+        Some(session),
+        &[
+            request(1, "terminate"),
+            request(2, "threads"),
+            request(3, "disconnect"),
+        ],
+    );
+
+    let responses: Vec<&Value> = messages
+        .iter()
+        .filter(|message| message["type"] == "response")
+        .collect();
+    assert_eq!(responses.len(), 3, "{messages:?}");
+    assert_eq!(responses[0]["command"], "terminate");
+    assert_eq!(responses[0]["success"], true);
+    assert_eq!(responses[1]["command"], "threads");
+    assert_eq!(responses[1]["success"], false, "the target was released");
+    assert_eq!(responses[2]["command"], "disconnect");
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message["event"] == "terminated")
+            .count(),
+        1,
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn one_object_keeps_one_reference_however_often_it_is_asked_for() {
+    const COUNT: u32 = 2048;
+    let mut memory = vec![0u8; COUNT as usize * 8];
+    for index in 0..COUNT as usize {
+        // Distinct pointees, so each row names a different guest object.
+        memory[index * 8..index * 8 + 8]
+            .copy_from_slice(&(0x1000u64 + index as u64 * 8).to_le_bytes());
+    }
+    let session = session_over_memory(0x1000, &memory);
+    let dtb = session.target.current_dtb();
+    session.target.symbols.set_kernel(Some(1), dtb);
+    session.target.symbols.inject_module_for_test(
+        1,
+        vec![TypeInfo {
+            name: "_NODE".to_string(),
+            pointer_size: 8,
+            size: 8,
+            fields: Default::default(),
+        }],
+        &[],
+    );
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, _sink) = server_with_sink(Some(session), rx);
+    let array = server.var_ref(VarRef::Elements {
+        element: ParsedType::Pointer(Box::new(ParsedType::Struct("_NODE".to_string()))),
+        count: COUNT,
+        element_size: 8,
+        address: VirtAddr(0x1000),
+        dtb,
+    });
+    let page = |server: &mut Server| {
+        let body = server
+            .on_variables(&json!({
+                "variablesReference": array,
+                "filter": "indexed",
+                "start": 0,
+                "count": 64,
+            }))
+            .unwrap()
+            .unwrap();
+        body["variables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["variablesReference"].as_i64().unwrap())
+            .collect::<Vec<_>>()
+    };
+
+    let first = page(&mut server);
+    assert_eq!(first.len(), 64);
+    let after_first = server.vars.len();
+
+    // The same 64 rows, asked for four more times.
+    for _ in 0..4 {
+        assert_eq!(page(&mut server), first, "a row changed reference");
+    }
+    assert_eq!(
+        server.vars.len(),
+        after_first,
+        "re-reading one window grew the reference table"
+    );
+
+    server.invalidate_stop_state();
+    assert!(server.vars.is_empty());
+}
+
+#[test]
+fn addresses_parse_from_hex_and_decimal() {
+    assert_eq!(
+        parse_address("0xfffff80012345678").unwrap(),
+        0xfffff800_12345678
+    );
+    assert_eq!(parse_address(" 0X10 ").unwrap(), 0x10);
+    assert_eq!(parse_address("4096").unwrap(), 4096);
+    assert!(parse_address("nt!KeBugCheckEx").is_err());
+}
+
+#[test]
+fn source_without_a_local_file_is_not_advertised_as_openable() {
+    // Neither a missing file nor one that is not the source compiled.
+    for state in [LocalSourceState::Missing, LocalSourceState::Differs] {
+        let location = SourceLocation {
+            file: "d:\\src\\driver.c".to_string(),
+            line: 42,
+            column: None,
+            local: Some(LocalSource {
+                path: PathBuf::from("/tmp/checkout/driver.c"),
+                state,
+            }),
+        };
+        let value = source_value(&location);
+        assert!(value.get("path").is_none(), "{state:?}");
+        assert_eq!(value["name"], json!("driver.c"));
+    }
+}
+
+#[test]
+fn dump_targets_take_precedence_over_live_backend_arguments() {
+    let spec = target_spec(&json!({"dump": "/tmp/crash.dmp", "backend": "gdb"})).unwrap();
+    assert!(matches!(spec, TargetSpec::Dump(path) if path.ends_with("crash.dmp")));
+}
+
+/// A `Write` the loop can own while the test keeps reading what it wrote.
+struct Sink(Rc<RefCell<Vec<u8>>>);
+
+impl Write for Sink {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Run the server loop over a scripted client with no target attached and
+/// return the messages it wrote back, decoded.
+fn serve_script(requests: &[Value]) -> Vec<Value> {
+    serve_script_with(None, requests)
+}
+
+/// Run the server loop over a scripted client and return the messages it
+/// wrote back, decoded, in the order they were written.
+fn serve_script_with(session: Option<Session>, requests: &[Value]) -> Vec<Value> {
+    let (tx, rx) = mpsc::channel();
+    for request in requests {
+        tx.send(ClientMessage::Message(request.clone())).unwrap();
+    }
+    tx.send(ClientMessage::Eof).unwrap();
+
+    let (mut server, sink) = server_with_sink(session, rx);
+    server.serve();
+    decode_sink(&sink)
+}
+
+/// A server writing into a buffer the test can read, for handlers driven
+/// directly instead of through the loop.
+fn server_with_sink(
+    session: Option<Session>,
+    rx: Receiver<ClientMessage>,
+) -> (Server, Rc<RefCell<Vec<u8>>>) {
+    let sink = Rc::new(RefCell::new(Vec::new()));
+    let server = Server::new(
+        session,
+        Box::new(Sink(Rc::clone(&sink))),
+        rx,
+        Arc::new(AtomicBool::new(false)),
+    );
+    (server, sink)
+}
+
+fn decode_sink(sink: &Rc<RefCell<Vec<u8>>>) -> Vec<Value> {
+    let written = sink.borrow().clone();
+    let mut input = Cursor::new(written);
+    let mut messages = Vec::new();
+    while let Some(message) = wire::read_message(&mut input).unwrap() {
+        messages.push(message);
+    }
+    messages
+}
+
+fn request(seq: i64, command: &str) -> Value {
+    json!({"seq": seq, "type": "request", "command": command})
+}
+
+#[test]
+fn a_termination_signal_releases_the_target_before_the_loop_exits() {
+    // The loop must detach before exiting.
+    let session = session_over_memory(0x1000, &[0u8; 0x40]);
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, sink) = server_with_sink(Some(session), rx);
+    server.terminating.store(true, Ordering::SeqCst);
+
+    server.serve();
+
+    assert!(server.session.is_none(), "the target was not released");
+    let messages = decode_sink(&sink);
+    assert!(
+        messages.iter().any(|message| {
+            message["event"] == "output"
+                && message["body"]["output"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("detached"))
+        }),
+        "{messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["event"] == "terminated"),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn a_console_context_change_invalidates_the_clients_view() {
+    // `.thread` in the console repoints the stack and variables; frame ids
+    // and variable references from the previous context must die with it.
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, sink) = server_with_sink(None, rx);
+    server.supports_invalidated = true;
+    server.frames.push(FrameRef {
+        thread: 1,
+        index: 0,
+        ip: 0x1000,
+        sp: 0x2000,
+        code: CodeFrame::at(VirtAddr(0x1000)),
+        inline: false,
+        symbol: "0x1000".to_string(),
+        source_location: None,
+        frame_base: None,
+        registers: HashMap::new(),
+        seed_registers: HashMap::new(),
+        seed_live: true,
+        thread_walk: None,
+        label: false,
+        dtb: 0,
+    });
+    server.vars.push(VarRef::Locals(0));
+
+    server.invalidate_context();
+
+    let messages = decode_sink(&sink);
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert_eq!(messages[0]["event"], "invalidated");
+    assert_eq!(
+        messages[0]["body"]["areas"],
+        json!(["stacks", "variables", "registers"])
+    );
+    assert!(server.frames.is_empty() && server.vars.is_empty());
+}
+
+/// `.cxr` in the console repoints the stack without moving the address space
+/// or the vCPU; the client is still told its stack is stale.
+#[test]
+fn a_console_cxr_invalidates_the_clients_view() {
+    let base = 0x1000;
+    let record = 0x100;
+    let mut memory = vec![0u8; 0x1000];
+    memory[record + OFFSET_RIP..record + OFFSET_RIP + 8].copy_from_slice(&0x1010u64.to_le_bytes());
+    memory[record + OFFSET_RSP..record + OFFSET_RSP + 8].copy_from_slice(&0x1800u64.to_le_bytes());
+    let session = session_over_memory(base, &memory);
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, sink) = server_with_sink(Some(session), rx);
+    server.supports_invalidated = true;
+
+    let response = server
+        .on_evaluate(&json!({
+            "expression": format!(".cxr {:#x}", base + record as u64),
+            "context": "repl",
+        }))
+        .unwrap()
+        .unwrap();
+
+    let result = response["result"].as_str().unwrap();
+    assert!(result.contains("selected context"), "{result}");
+    let messages = decode_sink(&sink);
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["event"] == "invalidated"),
+        "{messages:?}"
+    );
+}
+
+/// A console command that moves the context drops the frame ids handed out,
+/// and the client keeps naming its last frame until it walks the stack
+/// again. The next console command runs in the console's context instead
+/// of failing; a watch, which needs that frame's registers, still refuses.
+#[test]
+fn a_console_command_with_a_stale_frame_id_still_runs() {
+    let session = session_over_memory(0x1000, &[0u8; 0x100]);
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, _sink) = server_with_sink(Some(session), rx);
+
+    let response = server
+        .on_evaluate(&json!({"expression": "? 0x1234+0x1111", "context": "repl", "frameId": 7}))
+        .unwrap()
+        .unwrap();
+
+    let result = response["result"].as_str().unwrap();
+    assert!(result.contains("2345"), "{result}");
+    let watch = server.on_evaluate(&json!({"expression": "1+1", "context": "watch", "frameId": 7}));
+    assert!(
+        watch.is_err_and(|error| error.contains("stale frame id 7")),
+        "a watch on a stale frame must refuse"
+    );
+}
+
+/// A client walks every stopped thread. Showing another vCPU's stack must not
+/// select that vCPU, which would drop the context the console selected.
+#[test]
+fn walking_another_vcpu_keeps_the_consoles_context() {
+    let mut session = session_with_mock(MockBackend::default().one_vcpu());
+    session.current_thread = "p01.01".to_string();
+    session.select_frame(SelectedFrame::from_registers(
+        0,
+        HashMap::from([("rip".to_string(), 0x1010), ("rsp".to_string(), 0x1080)]),
+    ));
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, _sink) = server_with_sink(Some(session), rx);
+    server.threads = stack::dap_threads(vec!["p01.01".to_string(), "p01.02".to_string()], |_| None);
+
+    server.on_stack_trace(&json!({"threadId": 2})).unwrap();
+
+    let session = server.session.as_ref().unwrap();
+    assert_eq!(session.current_thread, "p01.01");
+    assert!(session.target.selected_frame.is_some());
+    let body = server
+        .on_stack_trace(&json!({"threadId": 1}))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        body["stackFrames"][0]["instructionPointerReference"],
+        "0x1010"
+    );
+}
+
+#[test]
+fn stack_frames_use_recovered_symbol_and_source_metadata() {
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, _sink) = server_with_sink(None, rx);
+    server.lines_start_at_1 = true;
+    server.columns_start_at_1 = true;
+    server.frames.push(FrameRef {
+        thread: 1,
+        index: 0,
+        ip: 0x1234,
+        sp: 0x2000,
+        code: CodeFrame::at(VirtAddr(0x1234)),
+        inline: false,
+        symbol: "driver!RecoveredRoutine+0x4".to_string(),
+        source_location: Some(SourceLocation {
+            file: r"C:\build\driver.c".to_string(),
+            line: 42,
+            column: Some(7),
+            local: None,
+        }),
+        frame_base: None,
+        registers: HashMap::new(),
+        seed_registers: HashMap::new(),
+        seed_live: true,
+        thread_walk: None,
+        label: false,
+        dtb: 0,
+    });
+
+    let frame = server.frame_value(0);
+
+    assert_eq!(frame["name"], "driver!RecoveredRoutine+0x4");
+    assert_eq!(frame["line"], 42);
+    assert_eq!(frame["column"], 7);
+    assert_eq!(frame["source"]["origin"], "recorded as C:\\build\\driver.c");
+}
+
+/// A frame's locals live where the frame was recovered. A parked thread's
+/// stack is walked in its own process, which need not be the console's
+/// inspection context.
+#[test]
+fn locals_come_from_the_address_space_the_frame_was_recovered_in() {
+    let session = session_over_memory(0x1000, &[0u8; 0x40]);
+    let inspection_dtb = session.target.current_dtb();
+    let process_dtb = 0x1a_b000;
+    assert_ne!(inspection_dtb, process_dtb);
+    session.target.symbols.set_kernel(Some(1), inspection_dtb);
+    session
+        .target
+        .symbols
+        .register_module_for_test(2, "driver", process_dtb);
+    let base = 0x3000_0000;
+    session.target.symbols.inject_procedure_locals_for_test(
+        2,
+        0x10,
+        vec![ProcedureLocal {
+            name: "count".to_string(),
+            type_name: "ULONG".to_string(),
+            type_data: ParsedType::Primitive("ULONG".to_string()),
+            byte_size: Some(4),
+            is_parameter: false,
+            location: LocalVariableLocation::Register {
+                register: "rbx".to_string(),
+            },
+        }],
+    );
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, _sink) = server_with_sink(Some(session), rx);
+    let ip = base + 0x10;
+    server.frames.push(FrameRef {
+        thread: 1,
+        index: 1,
+        ip,
+        sp: 0x2000,
+        code: CodeFrame::at(VirtAddr(ip)),
+        inline: false,
+        symbol: "driver!Routine+0x10".to_string(),
+        source_location: None,
+        frame_base: None,
+        registers: HashMap::from([("rip".to_string(), ip), ("rbx".to_string(), 0x2a)]),
+        seed_registers: HashMap::new(),
+        seed_live: true,
+        thread_walk: None,
+        label: false,
+        dtb: process_dtb,
+    });
+
+    let locals = rows(server.local_variables(0).unwrap());
+
+    let value = row(&locals, "count")["value"].as_str().unwrap();
+    assert!(value.starts_with("0x2a"), "{value}");
+}
+
+#[test]
+fn watches_evaluate_in_the_address_space_the_frame_was_recovered_in() {
+    let mut session = session_over_memory(0x1000, &[0u8; 0x40]);
+    let inspection_dtb = session.target.current_dtb();
+    let process_dtb = 0x1a_b000;
+    session.target.symbols.set_kernel(Some(1), inspection_dtb);
+    session
+        .target
+        .symbols
+        .register_module_for_test(2, "driver", process_dtb);
+    let base = 0x3000_0000;
+    session.target.symbols.inject_procedure_locals_for_test(
+        2,
+        0x10,
+        vec![ProcedureLocal {
+            name: "count".to_string(),
+            type_name: "ULONG".to_string(),
+            type_data: ParsedType::Primitive("ULONG".to_string()),
+            byte_size: Some(4),
+            is_parameter: false,
+            location: LocalVariableLocation::Register {
+                register: "rbx".to_string(),
+            },
+        }],
+    );
+    // The console is scoped to an unrelated process; the watch still reads
+    // the frame's.
+    let attached_dtb = 0x2c_d000;
+    session.target.enter_process_scope(ProcessInfo {
+        pid: 8,
+        name: "other.exe".to_string(),
+        dtb: attached_dtb,
+        eprocess: VirtAddr(0),
+        wow64_peb: None,
+    });
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, _sink) = server_with_sink(Some(session), rx);
+    let ip = base + 0x10;
+    server.frames.push(FrameRef {
+        thread: 1,
+        index: 1,
+        ip,
+        sp: 0x2000,
+        code: CodeFrame::at(VirtAddr(ip)),
+        inline: false,
+        symbol: "driver!Routine+0x10".to_string(),
+        source_location: None,
+        frame_base: None,
+        registers: HashMap::from([("rip".to_string(), ip), ("rbx".to_string(), 0x2a)]),
+        seed_registers: HashMap::new(),
+        seed_live: true,
+        thread_walk: None,
+        label: false,
+        dtb: process_dtb,
+    });
+
+    let response = server
+        .on_evaluate(&json!({
+            "expression": "count",
+            "context": "watch",
+            "frameId": 1,
+        }))
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        response["result"].as_str().unwrap().starts_with("0x2a"),
+        "{response}"
+    );
+    let target = &server.session.as_ref().unwrap().target;
+    assert_eq!(target.current_dtb(), attached_dtb);
+}
+
+#[test]
+fn requests_before_an_attach_fail_instead_of_going_unanswered() {
+    // Every request must produce exactly one response, or the client hangs
+    // waiting for one.
+    let messages = serve_script(&[
+        request(1, "initialize"),
+        request(2, "threads"),
+        request(3, "modules"),
+        request(4, "restart"),
+    ]);
+
+    let responses: Vec<&Value> = messages
+        .iter()
+        .filter(|message| message["type"] == "response")
+        .collect();
+    assert_eq!(responses.len(), 4, "{messages:?}");
+    assert_eq!(responses[1]["success"], false);
+    assert!(
+        responses[1]["message"].as_str().unwrap().contains("attach"),
+        "{:?}",
+        responses[1]
+    );
+    assert_eq!(responses[2]["success"], false);
+    assert_eq!(responses[3]["success"], false);
+    assert!(
+        responses[3]["message"]
+            .as_str()
+            .unwrap()
+            .contains("restart"),
+        "{:?}",
+        responses[3]
+    );
+}
+
+#[test]
+fn disconnect_is_answered_before_the_loop_exits() {
+    let messages = serve_script(&[request(1, "disconnect")]);
+
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["event"] == "terminated"),
+        "{messages:?}"
+    );
+    assert!(
+        messages.iter().any(|message| message["type"] == "response"
+            && message["command"] == "disconnect"
+            && message["success"] == true),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn instruction_and_data_breakpoints_honor_hit_conditions() {
+    let session = session_over_memory(0x1000, &[0u8; 0x40]);
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, _sink) = server_with_sink(Some(session), rx);
+
+    // Reject non-decimal pass counts for both breakpoint kinds.
+    for (request, args) in [
+        (
+            "instruction",
+            json!({"breakpoints": [{"instructionReference": "0x1000", "hitCondition": ">5"}]}),
+        ),
+        (
+            "data",
+            json!({"breakpoints": [{"dataId": "0x1000:4", "hitCondition": ">5"}]}),
+        ),
+    ] {
+        let body = match request {
+            "instruction" => server.on_set_instruction_breakpoints(&args),
+            _ => server.on_set_data_breakpoints(&args),
+        }
+        .expect("handler answers")
+        .expect("body");
+        let entry = &body["breakpoints"][0];
+        assert_eq!(entry["verified"], json!(false), "{request}: {body}");
+        assert!(
+            entry["message"]
+                .as_str()
+                .is_some_and(|text| text.contains("decimal pass count")),
+            "{request} breakpoint ignored its hit condition: {body}"
+        );
+    }
+}
+
+#[test]
+fn exception_filters_become_first_and_second_chance_policy() {
+    let session = session_over_memory(0x1000, &[0u8; 0x40]);
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, _sink) = server_with_sink(Some(session), rx);
+    const AV: u32 = 0xc000_0005;
+    const DZ: u32 = 0xc000_0094;
+
+    // A checked filter breaks at the first chance; an unchecked one only at
+    // the second.
+    server
+        .on_set_exception_breakpoints(&json!({"filters": ["av"]}))
+        .expect("filters apply");
+    let policies = &server.session.as_ref().unwrap().exception_policies;
+    assert_eq!(policies.mode_for(AV), Some(ExceptionPolicyMode::Break));
+    assert_eq!(
+        policies.mode_for(DZ),
+        Some(ExceptionPolicyMode::SecondChance)
+    );
+
+    // A later request replaces the earlier one.
+    server
+        .on_set_exception_breakpoints(&json!({"filters": ["dz"]}))
+        .expect("filters apply");
+    let policies = &server.session.as_ref().unwrap().exception_policies;
+    assert_eq!(
+        policies.mode_for(AV),
+        Some(ExceptionPolicyMode::SecondChance)
+    );
+    assert_eq!(policies.mode_for(DZ), Some(ExceptionPolicyMode::Break));
+
+    // An unknown filter or a condition is refused, and changes nothing.
+    assert!(
+        server
+            .on_set_exception_breakpoints(&json!({"filters": ["bogus"]}))
+            .is_err()
+    );
+    assert!(
+        server
+            .on_set_exception_breakpoints(&json!({
+                "filters": [],
+                "filterOptions": [{"filterId": "av", "condition": "x"}],
+            }))
+            .is_err()
+    );
+    let policies = &server.session.as_ref().unwrap().exception_policies;
+    assert_eq!(policies.mode_for(DZ), Some(ExceptionPolicyMode::Break));
+}
+
+#[test]
+fn disconnect_releases_the_target_before_answering() {
+    // Detach must precede the disconnect response.
+    let session = session_over_memory(0x1000, &[0u8; 0x40]);
+    let messages = serve_script_with(Some(session), &[request(1, "disconnect")]);
+
+    let detached = messages
+        .iter()
+        .position(|message| {
+            message["event"] == "output"
+                && message["body"]["output"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("detached"))
+        })
+        .unwrap_or_else(|| panic!("no detach notice in {messages:?}"));
+    let answered = messages
+        .iter()
+        .position(|message| message["type"] == "response" && message["command"] == "disconnect")
+        .unwrap_or_else(|| panic!("no disconnect response in {messages:?}"));
+
+    assert!(
+        detached < answered,
+        "target was released after the response: {messages:?}"
+    );
+}
+
+#[test]
+fn variable_windows_follow_the_requested_page_and_filter() {
+    let memory: Vec<u8> = (0..64u8).collect();
+    let session = session_over_memory(0x1000, &memory);
+    let dtb = session.target.current_dtb();
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, _sink) = server_with_sink(Some(session), rx);
+    let elements = server.var_ref(VarRef::Elements {
+        element: ParsedType::Primitive("UCHAR".to_string()),
+        count: 64,
+        element_size: 1,
+        address: VirtAddr(0x1000),
+        dtb,
+    });
+
+    let page = |server: &mut Server, args: Value| -> Vec<(String, String)> {
+        server
+            .on_variables(&args)
+            .expect("handler answers")
+            .expect("body")["variables"]
+            .as_array()
+            .expect("variables array")
+            .iter()
+            .map(|row| {
+                (
+                    row["name"].as_str().unwrap_or_default().to_string(),
+                    row["value"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect()
+    };
+
+    let second = page(
+        &mut server,
+        json!({"variablesReference": elements, "filter": "indexed", "start": 16, "count": 4}),
+    );
+    assert_eq!(
+        second,
+        vec![
+            ("[16]".to_string(), "0x10".to_string()),
+            ("[17]".to_string(), "0x11".to_string()),
+            ("[18]".to_string(), "0x12".to_string()),
+            ("[19]".to_string(), "0x13".to_string()),
+        ]
+    );
+
+    // A window past the end is empty, not wrapped around to the start.
+    assert!(
+        page(
+            &mut server,
+            json!({"variablesReference": elements, "start": 64, "count": 4})
+        )
+        .is_empty()
+    );
+
+    // Array children are indexed, so a request for the named half of the
+    // same reference has nothing to answer with.
+    assert!(
+        page(
+            &mut server,
+            json!({"variablesReference": elements, "filter": "named"})
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn named_children_honor_the_requested_window() {
+    let mut server = server_with_node_layout();
+    let dtb = inspection_dtb(&server);
+    let fields = server.var_ref(VarRef::Fields {
+        type_name: "_NODE".to_string(),
+        address: VirtAddr(0x1000),
+        dtb,
+    });
+
+    let all = rows(
+        server
+            .on_variables(&json!({"variablesReference": fields}))
+            .unwrap(),
+    );
+    assert!(all.len() >= 3, "expected several fields, got {all:?}");
+
+    let windowed = rows(
+        server
+            .on_variables(&json!({"variablesReference": fields, "start": 1, "count": 1}))
+            .unwrap(),
+    );
+    assert_eq!(windowed.len(), 1);
+    assert_eq!(windowed[0]["name"], all[1]["name"]);
+
+    // An `indexed` request against named children answers empty rather
+    // than handing back the fields again.
+    assert!(
+        rows(
+            server
+                .on_variables(&json!({"variablesReference": fields, "filter": "indexed"}))
+                .unwrap()
+        )
+        .is_empty()
+    );
+}
+
+/// A server over a synthetic dump target carrying one `_NODE` layout:
+/// `Value` = 0x2a, `Next` pointing back at the node, `Nil` null.
+fn server_with_node_layout() -> Server {
+    let mut memory = [0u8; 0x40];
+    memory[0..4].copy_from_slice(&0x2au32.to_le_bytes());
+    memory[8..16].copy_from_slice(&0x1000u64.to_le_bytes());
+    let session = session_over_memory(0x1000, &memory);
+    let dtb = session.target.current_dtb();
+    session.target.symbols.set_kernel(Some(1), dtb);
+    let pointer = ParsedType::Pointer(Box::new(ParsedType::Struct("_NODE".to_string())));
+    let fields = [
+        (
+            "Value".to_string(),
+            FieldInfo {
+                offset: 0,
+                size: 4,
+                type_data: ParsedType::Primitive("ULONG".to_string()),
+            },
+        ),
+        (
+            "Next".to_string(),
+            FieldInfo {
+                offset: 8,
+                size: 8,
+                type_data: pointer.clone(),
+            },
+        ),
+        (
+            "Nil".to_string(),
+            FieldInfo {
+                offset: 16,
+                size: 8,
+                type_data: pointer,
+            },
+        ),
+    ];
+    session.target.symbols.inject_module_for_test(
+        1,
+        vec![TypeInfo {
+            name: "_NODE".to_string(),
+            pointer_size: 8,
+            size: 24,
+            fields: fields.into_iter().collect(),
+        }],
+        &[],
+    );
+
+    let (_, rx) = mpsc::channel();
+    Server::new(
+        Some(session),
+        Box::new(Sink(Rc::new(RefCell::new(Vec::new())))),
+        rx,
+        Arc::new(AtomicBool::new(false)),
+    )
+}
+
+fn inspection_dtb(server: &Server) -> Dtb {
+    server.session.as_ref().unwrap().target.current_dtb()
+}
+
+fn rows(body: Option<Value>) -> Vec<Value> {
+    body.unwrap()["variables"].as_array().unwrap().clone()
+}
+
+fn row<'a>(rows: &'a [Value], name: &str) -> &'a Value {
+    rows.iter()
+        .find(|row| row["name"] == name)
+        .unwrap_or_else(|| panic!("no row named {name} in {rows:?}"))
+}
+
+#[test]
+fn structs_open_into_field_rows_with_decoded_values() {
+    let mut server = server_with_node_layout();
+
+    let dtb = inspection_dtb(&server);
+    let fields = rows(
+        server
+            .field_variables("_NODE", VirtAddr(0x1000), dtb)
+            .unwrap(),
+    );
+
+    assert_eq!(row(&fields, "Value")["value"], "0x2a");
+    assert_eq!(row(&fields, "Value")["memoryReference"], "0x1000");
+    // A scalar is a leaf: no expander arrow.
+    assert_eq!(row(&fields, "Value")["variablesReference"], 0);
+    assert_eq!(row(&fields, "Next")["value"], "0x1000");
+}
+
+#[test]
+fn evaluated_members_read_values_but_data_watches_select_storage() {
+    let mut server = server_with_node_layout();
+    let expression = "((_NODE*)0x1000)->Next->Value";
+    let response = server
+        .on_evaluate(&json!({
+            "expression": expression,
+            "context": "watch",
+        }))
+        .unwrap()
+        .unwrap();
+    assert_eq!(response["result"], "0x2a");
+    assert_eq!(
+        server.data_expression_target(expression).unwrap(),
+        (0x1000, 4)
+    );
+    assert_eq!(
+        server
+            .data_expression_target("&((_NODE*)0x1000)->Value")
+            .unwrap(),
+        (0x1000, 4)
+    );
+    assert_eq!(
+        server
+            .data_expression_target("((_NODE*)0x1000)->Next")
+            .unwrap(),
+        (0x1008, 8)
+    );
+    let target = &server.session.as_ref().unwrap().target;
+    assert_eq!(
+        Expr::eval("((_NODE*)0x1000)->Value == 0n42", target)
+            .unwrap()
+            .0,
+        1
+    );
+    assert!(Expr::eval("((_NODE*)0x1000).Value", target).is_err());
+    assert!(Expr::eval("(*((_NODE*)0x1000))->Value", target).is_err());
+    assert_eq!(
+        Expr::eval("(*((_NODE*)0x1000)).Value", target).unwrap().0,
+        42
+    );
+}
+
+#[test]
+fn a_pointer_row_opens_its_pointee_and_a_null_one_does_not() {
+    let mut server = server_with_node_layout();
+    let dtb = inspection_dtb(&server);
+    let fields = rows(
+        server
+            .field_variables("_NODE", VirtAddr(0x1000), dtb)
+            .unwrap(),
+    );
+
+    // A null pointer has nothing to open: an expander arrow there would
+    // lead to an empty list the user cannot tell from an empty struct.
+    assert_eq!(row(&fields, "Nil")["variablesReference"], 0);
+
+    let reference = row(&fields, "Next")["variablesReference"].as_i64().unwrap();
+    assert!(reference >= VARIABLES_BASE);
+    let pointee = rows(
+        server
+            .on_variables(&json!({"variablesReference": reference}))
+            .unwrap(),
+    );
+
+    assert_eq!(row(&pointee, "Value")["value"], "0x2a");
+}
+
+#[test]
+fn stale_and_unknown_references_are_refused_rather_than_answered_empty() {
+    let mut server = server_with_node_layout();
+    let dtb = inspection_dtb(&server);
+
+    assert!(
+        server
+            .on_variables(&json!({"variablesReference": VARIABLES_BASE + 7}))
+            .is_err()
+    );
+    assert!(
+        server
+            .field_variables("_MISSING", VirtAddr(0x1000), dtb)
+            .is_err()
+    );
+}
+
+/// A server whose guest holds `code` at 0x1000, recorded by the PDB as one
+/// source line covering exactly those bytes.
+fn server_over_one_line(code: &[u8]) -> Server {
+    let session = session_over_memory(0x1000, code);
+    let dtb = session.target.current_dtb();
+    session.target.symbols.set_kernel(Some(1), dtb);
+    session.target.symbols.inject_source_lines_for_test(
+        1,
+        dtb,
+        VirtAddr(0x1000),
+        0x1000,
+        "driver.c",
+        &[(0, Some(code.len() as u32), 42)],
+    );
+
+    let (_, rx) = mpsc::channel();
+    Server::new(
+        Some(session),
+        Box::new(Sink(Rc::new(RefCell::new(Vec::new())))),
+        rx,
+        Arc::new(AtomicBool::new(false)),
+    )
+}
+
+#[test]
+fn a_branch_free_line_is_covered_by_one_run_instead_of_many_steps() {
+    // mov rax, rcx / add rax, 1 / mov rcx, rax / xor edx, edx
+    let code = [
+        0x48, 0x89, 0xc8, 0x48, 0x83, 0xc0, 0x01, 0x48, 0x89, 0xc1, 0x31, 0xd2,
+    ];
+    let mut server = server_over_one_line(&code);
+
+    assert_eq!(
+        server.coalescible_line_end(0x1000).unwrap(),
+        Some(VirtAddr(0x1000 + code.len() as u64))
+    );
+    // From inside the line, only the remainder is covered.
+    assert_eq!(
+        server.coalescible_line_end(0x1003).unwrap(),
+        Some(VirtAddr(0x1000 + code.len() as u64))
+    );
+}
+
+#[test]
+fn a_line_is_only_covered_up_to_its_first_control_flow_instruction() {
+    // mov rax, rcx / add rax, 1 / call rax / mov rcx, rax
+    let code = [
+        0x48, 0x89, 0xc8, 0x48, 0x83, 0xc0, 0x01, 0xff, 0xd0, 0x48, 0x89, 0xc1,
+    ];
+    let mut server = server_over_one_line(&code);
+
+    // Running past the call would skip the callee the client may step into.
+    assert_eq!(
+        server.coalescible_line_end(0x1000).unwrap(),
+        Some(VirtAddr(0x1007))
+    );
+    // Standing on the call itself: nothing to coalesce, so step it.
+    assert_eq!(server.coalescible_line_end(0x1007).unwrap(), None);
+}
+
+#[test]
+fn one_instruction_and_unmapped_addresses_are_left_to_the_stepper() {
+    let code = [0x48, 0x89, 0xc8, 0x48, 0x83, 0xc0, 0x01];
+    let mut server = server_over_one_line(&code);
+
+    // A single remaining instruction: a step costs less than planting and
+    // removing a breakpoint.
+    assert_eq!(server.coalescible_line_end(0x1003).unwrap(), None);
+    // No line record covers this address at all.
+    assert_eq!(server.coalescible_line_end(0x9000).unwrap(), None);
+}
+
+/// The label between a hypervisor vCPU's own frames and the saved state's
+/// is shown as a label, with no instruction pointer, and a request naming
+/// it (scopes, which would install its context) is refused: it has none.
+#[test]
+fn a_label_frame_shows_as_a_label_and_has_no_scopes() {
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, _sink) = server_with_sink(None, rx);
+    for (symbol, label) in [
+        ("hv+0x3a6bde", false),
+        ("VTL0, as the hypervisor saved it", true),
+    ] {
+        server.frames.push(FrameRef {
+            thread: 1,
+            index: 0,
+            ip: 0x1000,
+            sp: 0x2000,
+            code: CodeFrame::at(VirtAddr(0x1000)),
+            inline: false,
+            symbol: symbol.to_string(),
+            source_location: None,
+            frame_base: None,
+            registers: HashMap::new(),
+            seed_registers: HashMap::new(),
+            seed_live: !label,
+            thread_walk: None,
+            label,
+            dtb: 0,
+        });
+    }
+
+    let value = server.frame_value(1);
+    assert_eq!(value["presentationHint"], "label");
+    assert_eq!(value["name"], "VTL0, as the hypervisor saved it");
+    assert!(value.get("instructionPointerReference").is_none());
+    assert!(
+        server
+            .frame_value(0)
+            .get("instructionPointerReference")
+            .is_some()
+    );
+    assert!(server.on_scopes(&json!({"frameId": 2})).is_err());
+    assert!(server.on_scopes(&json!({"frameId": 1})).is_ok());
+}
+
+fn thread_ids(threads: &[stack::DapThread]) -> Vec<i64> {
+    threads.iter().map(|thread| thread.id).collect()
+}
+
+#[test]
+fn a_user_dumps_threads_are_named_by_their_thread_ids() {
+    let ids = vec!["10f4.7c4".to_string(), "10f4.cc4".to_string()];
+    let tid = |id: &str| u32::from_str_radix(id.rsplit('.').next()?, 16).ok();
+
+    let threads = stack::dap_threads(ids.clone(), tid);
+
+    assert_eq!(thread_ids(&threads), [0x7c4, 0xcc4]);
+    assert_eq!(threads[1].backend, "10f4.cc4");
+    // vCPUs have no thread id and keep their positions.
+    assert_eq!(thread_ids(&stack::dap_threads(ids, |_| None)), [1, 2]);
+}
+
+#[test]
+fn a_thread_list_that_repeats_a_thread_id_keeps_positions() {
+    // Two threads cannot share a DAP id, and neither can be told apart by
+    // its thread id; nor can a thread whose id is 0, or that has none.
+    for tids in [[0x10, 0x10, 0x20], [0x10, 0, 0x20]] {
+        let ids: Vec<String> = (0..tids.len()).map(|index| index.to_string()).collect();
+        let tid = |id: &str| id.parse::<usize>().ok().map(|index| tids[index]);
+
+        assert_eq!(
+            thread_ids(&stack::dap_threads(ids, tid)),
+            [1, 2, 3],
+            "{tids:?}"
+        );
+    }
+    let ids = vec!["a".to_string(), "b".to_string()];
+    let tid = |id: &str| (id == "a").then_some(0x10);
+    assert_eq!(thread_ids(&stack::dap_threads(ids, tid)), [1, 2]);
+}
+
+#[test]
+fn a_changed_thread_list_announces_threads_by_their_ids() {
+    let mut session = session_with_mock(MockBackend::default().one_vcpu());
+    session.current_thread = "p01.01".to_string();
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, sink) = server_with_sink(Some(session), rx);
+    server.threads = vec![
+        stack::DapThread {
+            id: 1,
+            backend: "p01.01".to_string(),
+        },
+        stack::DapThread {
+            id: 2,
+            backend: "p01.02".to_string(),
+        },
+    ];
+
+    server.sync_threads();
+
+    // The session's one vCPU replaces both: 1 stays, 2 exits.
+    let events: Vec<(Value, Value)> = decode_sink(&sink)
+        .into_iter()
+        .filter(|message| message["event"] == "thread")
+        .map(|message| {
+            (
+                message["body"]["reason"].clone(),
+                message["body"]["threadId"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(events, [(json!("exited"), json!(2))]);
+    assert_eq!(
+        server.dap_thread_id("p01.02"),
+        1,
+        "an unknown context falls back to the first thread"
+    );
+}

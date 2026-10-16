@@ -5,34 +5,36 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::bugchecks::{
-    BugcheckAnalysis, analyze_bugcheck, bugcheck_from_dump_info, current_bugcheck,
-};
-use crate::bytes;
-use crate::cpu_context::{amd64, arm64};
-use crate::dbg_backend::{ContinueDisposition, processor_index_from_backend_thread_id};
-use crate::disasm::{
+use crate::backend::cpu_context::{amd64, arm64};
+use crate::backend::dbg_backend::{ContinueDisposition, processor_index_from_backend_thread_id};
+use crate::base::bytes;
+use crate::base::disasm::{
     DisasmRow, FunctionDisassembly, decode_code, decode_preceding, function_extent,
     instruction_containing,
 };
-use crate::error::{Error, Result};
-use crate::guest::hypervisor::{HvPartition, HvVirtualProcessor, processor_guest_vp};
-use crate::memory::{self, MemoryOps, PAGE_SIZE, ScanFault, TerminatedRead, read_page_chunks};
-use crate::session::context::windows_thread_on_backend_thread;
-use crate::session::{
-    Cancel, ExceptionRecord, InstructionBoundary, Motion, PageInReport, RunOutcome, Session,
-    VpRegisters,
+use crate::base::error::{Error, Result};
+use crate::base::memory::{
+    self, MemoryOps, PAGE_SIZE, ScanFault, TerminatedRead, read_page_chunks,
 };
-use crate::target::meta::TargetVersion;
-use crate::target::usermode::ImageCheck;
-use crate::target::{CompareResult, SearchResult, SelectedFrame, ThreadInfo, exit_registers};
-use crate::types::{Arch, CodeMachine, Dtb, VirtAddr};
-use crate::unwind::{
+use crate::base::types::{Arch, CodeMachine, Dtb, VirtAddr};
+use crate::nt::bugchecks::{
+    BugcheckAnalysis, analyze_bugcheck, bugcheck_from_dump_info, current_bugcheck,
+};
+use crate::nt::guest::hypervisor::{HvPartition, HvVirtualProcessor, processor_guest_vp};
+use crate::nt::target::meta::TargetVersion;
+use crate::nt::target::usermode::ImageCheck;
+use crate::nt::target::{CompareResult, SearchResult, SelectedFrame, ThreadInfo, exit_registers};
+use crate::nt::unwind::{
     FunctionEntry, RecoveredStackTrace, StackTrace, ThreadStackSource, ThreadStackTrace,
     build_parked_thread_recovered_stack, build_parked_thread_stack,
     build_stacktrace_with_register_values, build_thread_stacktrace, format_symbol, function_entry,
     function_range, guest_vp_running, halted_in_windows_hypervisor, resolve_thread_trace_context,
     saved_vtls,
+};
+use crate::session::context::windows_thread_on_backend_thread;
+use crate::session::{
+    Cancel, ExceptionRecord, InstructionBoundary, Motion, PageInReport, RunOutcome, Session,
+    VpRegisters,
 };
 
 /// `DBG_STATUS_WORKER`, the status the kernel's debugger worker passes to
@@ -158,7 +160,7 @@ impl Session {
     }
 
     /// Read guest virtual memory in the inspection address space
-    /// ([`Target::current_dtb`](crate::target::Target::current_dtb)) with our
+    /// ([`Target::current_dtb`](crate::nt::target::Target::current_dtb)) with our
     /// own breakpoint patch bytes masked back to the original code, so every
     /// host (REPL, MCP, SDK) sees the same bytes the guest would run.
     pub fn read_masked(&self, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
@@ -166,7 +168,7 @@ impl Session {
     }
 
     /// Search the inspection address space for `pattern`
-    /// ([`Target::search`](crate::target::Target::search)) as
+    /// ([`Target::search`](crate::nt::target::Target::search)) as
     /// [`Self::read_masked`] reads it, so a breakpoint this session planted
     /// neither hides the original bytes nor matches as an `int3`.
     pub fn search(&self, start: VirtAddr, pattern: &[u8], length: usize) -> Result<SearchResult> {
@@ -176,7 +178,7 @@ impl Session {
     }
 
     /// Compare two ranges of the inspection address space
-    /// ([`Target::compare`](crate::target::Target::compare)) as
+    /// ([`Target::compare`](crate::nt::target::Target::compare)) as
     /// [`Self::read_masked`] reads them, so a breakpoint this session planted
     /// is compared as the byte it displaced.
     pub fn compare(

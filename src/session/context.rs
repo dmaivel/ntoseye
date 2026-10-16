@@ -3,18 +3,20 @@
 
 use std::collections::HashMap;
 
-use crate::dbg_backend::{DebugCapability, RegisterMap, processor_index_from_backend_thread_id};
-use crate::error::{Error, Result};
-use crate::guest::hypervisor::guest_vp_label;
-use crate::memory::DTB_IDENTITY;
-use crate::session::{Selection, Session, ThreadContext, UserThreadSummary, VcpuInfo};
-use crate::target::{HYPERVISOR_CONTEXT, SelectedFrame, Target, ThreadInfo};
-use crate::types::VirtAddr;
-use crate::unwind::{
+use crate::backend::dbg_backend::{
+    DebugCapability, RegisterMap, processor_index_from_backend_thread_id,
+};
+use crate::base::error::{Error, Result};
+use crate::base::memory::DTB_IDENTITY;
+use crate::base::types::VirtAddr;
+use crate::nt::guest::hypervisor::guest_vp_label;
+use crate::nt::target::{HYPERVISOR_CONTEXT, SelectedFrame, Target, ThreadInfo};
+use crate::nt::unwind::{
     UNKNOWN_CONTEXT, guest_vp_running, halted_in_windows_hypervisor, resolve_thread_trace_context,
     resolve_thread_trace_context_at, saved_vtls, try_format_symbol,
 };
-use crate::userdump::register_buffer;
+use crate::nt::userdump::register_buffer;
+use crate::session::{Selection, Session, ThreadContext, UserThreadSummary, VcpuInfo};
 
 pub(super) fn update_target_context_from_registers(
     target: &mut Target,

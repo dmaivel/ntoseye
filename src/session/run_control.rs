@@ -1,8 +1,8 @@
 //! Resuming the target and breaking in: the resume prologue, exception
 //! dispositions, interrupts, and edits made with the target briefly halted.
 
-use crate::dbg_backend::{ContinueDisposition, DebugCapability, StopEvent};
-use crate::error::{Error, Result};
+use crate::backend::dbg_backend::{ContinueDisposition, DebugCapability, StopEvent};
+use crate::base::error::{Error, Result};
 use crate::session::{ContinueOutcome, STATUS_BREAKPOINT, Session, StopResolution};
 
 /// How many noise stops [`Session::interrupt`] resumes past before surfacing

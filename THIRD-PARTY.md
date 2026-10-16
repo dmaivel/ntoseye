@@ -4,7 +4,7 @@ ntoseye is MIT licensed (see [LICENSE](LICENSE)). Third-party code and its licen
 
 ## kdmp-parser
 
-Files: `src/dmp/structs.rs`, `src/dmp/parse.rs`
+Files: `src/nt/dmp/structs.rs`, `src/nt/dmp/parse.rs`
 
 The dump structures and physical-memory map builders are adapted from [kdmp-parser](https://github.com/0vercl0k/kdmp-parser-rs) 0.8.1 by Axel '0vercl0k' Souchet, licensed under MIT.
 

@@ -5,19 +5,19 @@
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
-use crate::dbg_backend::processor_index_from_backend_thread_id;
-use crate::error::{Error, Result};
-use crate::session::Session;
-use crate::target::sched::{
+use crate::backend::dbg_backend::processor_index_from_backend_thread_id;
+use crate::base::error::{Error, Result};
+use crate::base::types::VirtAddr;
+use crate::nt::target::sched::{
     Apc, ApcLayout, ApcQueues, ApcSelector, ApcThread, FindStack, FindStackThread,
     MAX_LIST_ENTRIES, RunningProcessors, ThreadStack, ThreadStacks, UniqStackScope, UniqStacks,
     UnwalkedThread, findstack_level_error, frame_symbol_matches, group_stacks, select_threads,
     walk_list_records,
 };
-use crate::target::workqueue::WorkQueues;
-use crate::target::{DiagnosticValue, ListTermination, ThreadInfo};
-use crate::types::VirtAddr;
-use crate::unwind::{ThreadStackTrace, ThreadTraceContext, resolve_thread_trace_context};
+use crate::nt::target::workqueue::WorkQueues;
+use crate::nt::target::{DiagnosticValue, ListTermination, ThreadInfo};
+use crate::nt::unwind::{ThreadStackTrace, ThreadTraceContext, resolve_thread_trace_context};
+use crate::session::Session;
 
 const MAX_RUNNING_STACK_FRAMES: usize = 8;
 const MAX_STACK_FRAMES_LEVEL_1: usize = 32;
@@ -25,7 +25,7 @@ const MAX_STACK_FRAMES_LEVEL_2: usize = 64;
 const APC_THREAD_DISPLAY_LIMIT: usize = 16_384;
 
 impl Session {
-    /// [`Target::executive_work_queues`](crate::target::Target::executive_work_queues),
+    /// [`Target::executive_work_queues`](crate::nt::target::Target::executive_work_queues),
     /// plus each decoded worker thread's bounded stack when flag 0x4 is set,
     /// walked as [`Session::inspect_stacks`] walks them. Workers left when
     /// the host interrupts have their stack marked unavailable.

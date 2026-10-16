@@ -7,22 +7,22 @@ use super::stepping::{
     RELEASE_BUDGET, RunPast, site_successors, stack_floor, step_over_current_breakpoint,
 };
 use super::*;
-use crate::breakpoints::{
+use crate::backend::cpu_context::amd64::{REGISTER_BUFFER_SIZE, build_register_map};
+use crate::backend::cpu_context::arm64;
+use crate::backend::dbg_backend::{
+    ContinueDisposition, HwBreakpointAccess, RegisterInfo, TrapState, clear_trap_flag,
+};
+use crate::backend::partition_backend::PartitionVp;
+use crate::base::memory::PAGE_SIZE;
+use crate::base::types::{Arch, VirtAddr};
+use crate::nt::breakpoints::{
     BreakpointConfig, BreakpointInfo, HardwareBreakpoint, HypercallFilter, PartitionFilter,
     StepFrame, ThreadScope,
 };
-use crate::cpu_context::amd64::{REGISTER_BUFFER_SIZE, build_register_map};
-use crate::cpu_context::arm64;
-use crate::dbg_backend::{
-    ContinueDisposition, HwBreakpointAccess, RegisterInfo, TrapState, clear_trap_flag,
-};
-use crate::dmp::{IMAGE_FILE_MACHINE_ARM64, structs::Header64};
-use crate::exception_policy::{ExceptionPolicyFinalAction, ExceptionPolicyMode};
-use crate::guest::ModuleInfo;
-use crate::memory::PAGE_SIZE;
-use crate::partition_backend::PartitionVp;
-use crate::target::SelectedFrame;
-use crate::types::{Arch, VirtAddr};
+use crate::nt::dmp::{IMAGE_FILE_MACHINE_ARM64, structs::Header64};
+use crate::nt::guest::ModuleInfo;
+use crate::nt::target::SelectedFrame;
+use crate::session::exception_policy::{ExceptionPolicyFinalAction, ExceptionPolicyMode};
 use iced_x86::{Decoder, DecoderOptions};
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
@@ -742,7 +742,7 @@ fn a_status_snapshot_keeps_the_selected_thread_and_frame() {
         ..MockBackend::default()
     });
     session.current_thread = "p1.1".to_string();
-    let thread = crate::target::sample_thread();
+    let thread = crate::nt::target::sample_thread();
     session.target.set_parked_windows_thread(thread.clone());
     session.parked_windows_thread = Some(thread.ethread);
     session.select_frame(SelectedFrame::from_registers(
@@ -840,7 +840,7 @@ fn memory_reads_follow_the_halted_context_root() {
 /// them with WOW64 ntdll's layout instead of the kernel's 64-bit one.
 #[test]
 fn string_descriptors_follow_the_requested_width() {
-    use crate::layout::{FieldInfo, ParsedType, TypeInfo};
+    use crate::nt::layout::{FieldInfo, ParsedType, TypeInfo};
 
     let mut memory = [0u8; 0x40];
     memory[0..2].copy_from_slice(&4u16.to_le_bytes());
@@ -900,7 +900,7 @@ fn string_descriptors_follow_the_requested_width() {
     let unicode = VirtAddr(0x1000);
 
     let native = session.target.read_unicode_string(unicode, 64);
-    session.target.effmach = Some(crate::types::CodeMachine::X86);
+    session.target.effmach = Some(crate::base::types::CodeMachine::X86);
     let bits = session.target.data_bitness();
 
     assert!(
@@ -1823,7 +1823,7 @@ fn step_loops_stop_at_a_diverted_step() {
     let mut session = diverted_session();
     let outcome = session
         .step_until(StepMode::Into, 1_000, &Cancel::NEVER, |_, flow| {
-            flow == crate::disasm::ControlFlow::Call
+            flow == crate::base::disasm::ControlFlow::Call
         })
         .unwrap();
     assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1030 }));

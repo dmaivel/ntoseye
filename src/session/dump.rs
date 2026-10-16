@@ -1,13 +1,13 @@
 //! The header metadata of a full kernel dump of a live session (`.dump`),
-//! which [`write_kernel_dump`](crate::dump_writer::write_kernel_dump) writes
+//! which [`write_kernel_dump`](crate::nt::dump_writer::write_kernel_dump) writes
 //! with the target's physical memory.
 
-use crate::bugchecks::current_bugcheck;
-use crate::dump_writer::{DumpException, DumpMetadata, context_from_registers, physical_runs};
-use crate::error::Result;
+use crate::base::error::Result;
+use crate::base::types::MAX_PROCESSORS;
+use crate::nt::bugchecks::current_bugcheck;
+use crate::nt::dump_writer::{DumpException, DumpMetadata, context_from_registers, physical_runs};
+use crate::nt::target::Target;
 use crate::session::Session;
-use crate::target::Target;
-use crate::types::MAX_PROCESSORS;
 
 const WINDOWS_MAJOR_VERSION: u32 = 0xf;
 
