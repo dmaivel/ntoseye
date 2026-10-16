@@ -3,6 +3,7 @@
 //! after a stop.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::BreakpointScope;
 use super::install::{BreakpointBackend, forget_site};
@@ -22,17 +23,16 @@ impl BreakpointManager {
             breakpoints: HashMap::new(),
             one_shot_hits: HashSet::new(),
             next_id: 0,
-            next_serial: 0,
             interrupted_hits: Vec::new(),
         }
     }
 
-    /// A fresh [`Breakpoint::serial`], distinct from every one handed out by
-    /// this manager before.
+    /// A fresh [`BreakpointInfo::serial`], distinct from every one handed
+    /// out before in this process, by any session: a breakpoint that reuses
+    /// an id, or another debugger's with the same id, is not this one.
     pub fn take_serial(&mut self) -> u64 {
-        let serial = self.next_serial;
-        self.next_serial += 1;
-        serial
+        static NEXT_SERIAL: AtomicU64 = AtomicU64::new(0);
+        NEXT_SERIAL.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Test-only: register a breakpoint directly, bypassing backend
@@ -696,6 +696,18 @@ mod tests {
         assert_ne!(old, new);
         assert!(manager.live(0, old).is_none());
         assert_eq!(manager.live(0, new).unwrap().address, VirtAddr(0x2000));
+    }
+
+    /// Another debugger's breakpoint with the same id is not this one
+    /// (`Stop.hit` compares serials).
+    #[test]
+    fn another_sessions_breakpoint_with_the_same_id_has_another_serial() {
+        let mut first = BreakpointManager::new();
+        let mut second = BreakpointManager::new();
+        first.insert_for_test(0, VirtAddr(0x1000), true, None);
+        second.insert_for_test(0, VirtAddr(0x1000), true, None);
+
+        assert_ne!(first.get(0).unwrap().serial, second.get(0).unwrap().serial);
     }
 
     #[test]

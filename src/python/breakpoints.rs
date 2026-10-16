@@ -99,12 +99,7 @@ impl Breakpoint {
         }
     }
 
-    /// The breakpoint's ID, whether or not it still exists.
-    pub fn raw_id(&self) -> u32 {
-        self.id
-    }
-
-    fn serial(&self) -> u64 {
+    pub fn serial(&self) -> u64 {
         self.serial
     }
 

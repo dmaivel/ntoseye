@@ -284,7 +284,8 @@ pub struct Stop {
 #[record]
 impl Stop {
     /// Whether breakpoint `bp` is the one that stopped the target. `bp`
-    /// may be deleted since (a one-shot breakpoint that fired).
+    /// may be deleted since (a one-shot breakpoint that fired); a later
+    /// breakpoint that reuses its id, or another debugger's, is not it.
     #[record(python)]
     fn hit(slf: &pyo3::Bound<'_, Self>, bp: pyo3::PyRef<'_, Breakpoint>) -> pyo3::PyResult<bool> {
         use pyo3::types::PyAnyMethods;
@@ -292,7 +293,7 @@ impl Stop {
             return Ok(false);
         }
         let hit = record::field(slf.as_any(), "breakpoint")?;
-        Ok(hit.getattr("id")?.extract::<u32>()? == bp.raw_id())
+        Ok(hit.getattr("serial")?.extract::<u64>()? == bp.serial())
     }
 }
 
@@ -376,6 +377,10 @@ pub enum StopKind {
 #[record]
 pub struct BreakpointHit {
     pub id: u32,
+    /// Which breakpoint this is among every one created in this process: a
+    /// later breakpoint that reuses `id`, or another debugger's, has
+    /// another.
+    pub serial: u64,
     pub kind: HitKind,
     /// The planted or watched address, not necessarily where it stopped.
     #[record(hex)]
@@ -451,6 +456,7 @@ impl BreakpointHit {
         };
         BreakpointHit {
             id: breakpoint.id,
+            serial: breakpoint.serial,
             kind,
             address: breakpoint.address.0,
             access: breakpoint.hardware.map(|hardware| hardware.access),
