@@ -74,6 +74,17 @@ impl FromArg for u64 {
     }
 }
 
+/// A count (`wt [count]`): an expression that fits the host's word.
+impl FromArg for usize {
+    const COMPLETION: CompletionStrategy = CompletionStrategy::Expression;
+
+    fn from_arg(cx: &mut ArgCx<'_, '_>, text: &str) -> Result<Self, ArgError> {
+        let value = cx.eval(text)?.0;
+        usize::try_from(value)
+            .map_err(|_| ArgError::Message(format!("{}: {text} is too large", cx.name)))
+    }
+}
+
 impl FromArg for String {
     fn from_arg(_: &mut ArgCx<'_, '_>, text: &str) -> Result<Self, ArgError> {
         Ok(text.to_string())

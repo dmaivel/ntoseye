@@ -346,6 +346,52 @@ impl Session {
         }
     }
 
+    /// Check that an instruction starts at `address` in the address space
+    /// `dtb` before a software breakpoint goes there (see
+    /// [`Self::instruction_boundary`]). `Err` refuses an address inside an
+    /// instruction, where the breakpoint would corrupt it. Where nothing
+    /// confirms an instruction start, the breakpoint is set, as other
+    /// debuggers set any address they are given, and the warning returned
+    /// says so. Shared by `bp`, `bu` and `g <address>`.
+    pub fn check_instruction_start(&self, dtb: Dtb, address: VirtAddr) -> Result<Option<String>> {
+        let symbols = &self.target.symbols;
+        let name = |address: VirtAddr| {
+            symbols
+                .format_closest_symbol_for_address(dtb, address)
+                .unwrap_or_else(|| format!("{:#x}", address.0))
+        };
+        let unconfirmed = match self.instruction_boundary(dtb, address) {
+            InstructionBoundary::Start => return Ok(None),
+            InstructionBoundary::Inside { instruction, from } => {
+                let decoding = if from == instruction {
+                    String::new()
+                } else {
+                    format!(", decoding from {}", name(from))
+                };
+                return Err(Error::Breakpoint(format!(
+                    "{} is inside the instruction at {}{decoding}; a breakpoint there would \
+                     corrupt that instruction",
+                    name(address),
+                    name(instruction)
+                )));
+            }
+            InstructionBoundary::NoAnchor => {
+                format!(
+                    "nothing near {} says where instructions start",
+                    name(address)
+                )
+            }
+            InstructionBoundary::Unreadable { from } => format!(
+                "the code from {} to {} cannot be read",
+                name(from),
+                name(address)
+            ),
+        };
+        Ok(Some(format!(
+            "{unconfirmed}, so ntoseye could not confirm that an instruction starts there"
+        )))
+    }
+
     /// Disassemble the function containing `addr`: the one its runtime
     /// function entry describes, or else a leaf, which has none (see
     /// [`Self::leaf_function_range`]).

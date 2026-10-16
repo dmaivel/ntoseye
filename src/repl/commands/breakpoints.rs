@@ -17,13 +17,12 @@ use crate::error::{Error, Result};
 use crate::expr::{Expr, NumberRadix, parse_number_literal_text};
 use crate::guest::hypercalls;
 use crate::guest::vm_exits::{self, ExitFilter};
-use crate::session::InstructionBoundary;
 use crate::target::decimal_pid_literal;
 use crate::ui;
 
 use crate::repl::commands::thread::ThreadResolution;
 use crate::repl::*;
-use crate::types::{Dtb, VirtAddr};
+use crate::types::VirtAddr;
 
 repl_command! {
     cmd_bp;
@@ -1005,15 +1004,16 @@ impl ReplState<'_> {
     }
 
     /// Check that an instruction starts where `bu`'s symbol resolves, as
-    /// [`Self::check_instruction_start`] does. A symbol's own start always
-    /// is one, but an offset into a symbol that does not resolve yet cannot
-    /// be checked, which the warning says.
+    /// [`crate::session::Session::check_instruction_start`] does. A symbol's
+    /// own start always is one, but an offset into a symbol that does not
+    /// resolve yet cannot be checked, which the warning says.
     fn check_symbol_site(&self, args: &CodeBreakpointArgs) -> Result<Option<String>> {
         let target = &self.ctx.target;
         let scope = args.config.scope.as_ref();
         match BreakpointManager::resolve_symbol_in_scope(target, &args.spec, scope)? {
             Some((_, 0)) => Ok(None),
             Some((address, _)) => self
+                .ctx
                 .check_instruction_start(BreakpointManager::resolution_dtb(target, scope), address),
             None => match BreakpointSpec::split_symbol_offset(&args.spec) {
                 Some((symbol, offset)) if offset != 0 => Ok(Some(format!(
@@ -1025,52 +1025,6 @@ impl ReplState<'_> {
                 _ => Ok(None),
             },
         }
-    }
-
-    /// Check that an instruction starts at `address` in the address space
-    /// `dtb` before a software breakpoint goes there (see
-    /// [`Session::instruction_boundary`]). `Err` refuses an address inside
-    /// an instruction, where the breakpoint would corrupt it. Where nothing
-    /// confirms an instruction start, the breakpoint is set, as other
-    /// debuggers set any address they are given, with a warning saying so.
-    /// Shared by `bp`, `bu` and `g <address>`.
-    pub fn check_instruction_start(&self, dtb: Dtb, address: VirtAddr) -> Result<Option<String>> {
-        let symbols = &self.ctx.target.symbols;
-        let name = |address: VirtAddr| {
-            symbols
-                .format_closest_symbol_for_address(dtb, address)
-                .unwrap_or_else(|| format!("{:#x}", address.0))
-        };
-        let unconfirmed = match self.ctx.instruction_boundary(dtb, address) {
-            InstructionBoundary::Start => return Ok(None),
-            InstructionBoundary::Inside { instruction, from } => {
-                let decoding = if from == instruction {
-                    String::new()
-                } else {
-                    format!(", decoding from {}", name(from))
-                };
-                return Err(Error::Breakpoint(format!(
-                    "{} is inside the instruction at {}{decoding}; a breakpoint there would \
-                     corrupt that instruction",
-                    name(address),
-                    name(instruction)
-                )));
-            }
-            InstructionBoundary::NoAnchor => {
-                format!(
-                    "nothing near {} says where instructions start",
-                    name(address)
-                )
-            }
-            InstructionBoundary::Unreadable { from } => format!(
-                "the code from {} to {} cannot be read",
-                name(from),
-                name(address)
-            ),
-        };
-        Ok(Some(format!(
-            "{unconfirmed}, so ntoseye could not confirm that an instruction starts there"
-        )))
     }
 
     fn cmd_bm(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
@@ -1335,7 +1289,7 @@ impl ReplState<'_> {
         let warning = if args.config.unchecked {
             None
         } else {
-            match self.check_instruction_start(label_dtb, address) {
+            match self.ctx.check_instruction_start(label_dtb, address) {
                 Ok(warning) => warning,
                 Err(error) => {
                     error!("{error}");

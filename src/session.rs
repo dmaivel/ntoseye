@@ -912,6 +912,12 @@ impl Session {
         notices.retain(|notice| seen.insert(notice.clone()));
         notices
     }
+
+    /// Note something for the host's next output boundary: what an
+    /// operation could not check, without failing it.
+    pub fn push_notice(&mut self, notice: Notice) {
+        self.notices.push(notice);
+    }
 }
 
 /// The result of `Session::perform_target_reload`: the guest-reload outcome plus the

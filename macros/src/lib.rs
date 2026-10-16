@@ -109,6 +109,8 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   word for it and passes `expr`, Python's keyword defaults to `expr`;
 /// - `keyword`: keyword-only in Python (after a `*`); every Python argument
 ///   after it must be `keyword` too;
+/// - `cancel`: a `kind = Run` command's `&Cancel`, which the host supplies
+///   (the REPL's stop budget, the SDK's `timeout`);
 /// - `name = "..."`, `complete = Strategy`: its usage name and completion.
 ///
 /// The function returns `Result<R>`. The REPL renders `R` with
@@ -143,6 +145,15 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// command hands the form its effects as `__FORM_<command>_<form>` and takes
 /// its usage as `__FORM_USAGE_<command>_<form>`), and both live in one
 /// module.
+///
+/// A `kind = Run` command takes `&mut Session` and either returns the
+/// `Motion` its host drives through `Session::run`, or takes a `cancel`
+/// argument and drives the run itself (`wt`). The REPL drives a motion with
+/// its wait loop (`ReplState::run_motion`) and renders the `Stop`; the SDK
+/// method takes a `timeout` (before any keyword-only arguments), settles the
+/// motion with the `when=` callbacks (`python::runcontrol`) and returns the
+/// `Stop`, or `Stop | None` for a command admitted on a running target
+/// (`state = Any`), which can still be running when the timeout ends.
 #[proc_macro_attribute]
 pub fn command(attr: TokenStream, item: TokenStream) -> TokenStream {
     command::expand(attr.into(), item.into())

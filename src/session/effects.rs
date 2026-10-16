@@ -192,11 +192,13 @@ impl Session {
         }
         // The `.vtl 1` view is read-only for the guest; a file the debugger
         // writes on the host, or its symbol state (`.reload` of the secure
-        // kernel's modules), changes nothing in it.
+        // kernel's modules), changes nothing in it, and the breakpoint table
+        // is the debugger's (`ba e1` is how a VTL1 stop is reached; the
+        // breakpoint core refuses a site that would patch VTL1 code).
         if effects
             .writes
             .iter()
-            .any(|write| !matches!(write, Writes::Files | Writes::Symbols))
+            .any(|write| !matches!(write, Writes::Files | Writes::Symbols | Writes::Breakpoints))
             && self.target.in_secure_scope()
         {
             return Err(Refusal::ReadOnlyVtl1);

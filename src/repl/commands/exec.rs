@@ -478,7 +478,10 @@ impl ReplState<'_> {
         // run, which writes nothing.
         let patched = self.ctx.partition().is_none() && !self.ctx.target.is_secure_address(address);
         let check =
-            patched.then(|| self.check_instruction_start(self.ctx.target.current_dtb(), address));
+            patched.then(|| {
+                self.ctx
+                    .check_instruction_start(self.ctx.target.current_dtb(), address)
+            });
         match check {
             Some(Ok(Some(warning))) => diagnostics::print_warning(warning),
             Some(Err(error)) => {

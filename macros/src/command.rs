@@ -155,6 +155,7 @@ fn expand_form(form: FormOptions, mut function: ItemFn) -> Result<TokenStream> {
         args: &args,
         output: &output,
         effects: quote!(&#effects),
+        run: None,
     };
     let python = form
         .python
@@ -539,6 +540,9 @@ struct Arg {
     raw: bool,
     /// The name the command was typed as (`echo` or `.echo`).
     invoked: bool,
+    /// A `kind = Run` command's cancellation (`&Cancel`), which the host
+    /// supplies: the REPL's stop budget, the SDK's `timeout`.
+    cancel: bool,
     parse: Option<Path>,
     /// A custom parser that names several values: the REPL runs the
     /// operation on each and renders them together.
@@ -572,7 +576,12 @@ impl Arg {
     }
 
     fn positional(&self) -> bool {
-        self.switch.is_none() && !self.raw && !self.invoked && !self.sdk
+        self.switch.is_none() && !self.raw && !self.invoked && !self.sdk && !self.cancel
+    }
+
+    /// Supplied by the host, not parsed from the line.
+    fn hosted(&self) -> bool {
+        self.invoked || self.cancel
     }
 
     /// The type whose `FromArg`/`PyArg` reads it: `T` of an `Option<T>`.
@@ -604,6 +613,7 @@ fn take_args(function: &mut ItemFn) -> Result<Vec<Arg>> {
             rest: false,
             raw: false,
             invoked: false,
+            cancel: false,
             parse: None,
             each: None,
             receiver: false,
@@ -633,6 +643,7 @@ fn take_args(function: &mut ItemFn) -> Result<Vec<Arg>> {
                     "rest" => arg.rest = true,
                     "raw" => arg.raw = true,
                     "invoked" => arg.invoked = true,
+                    "cancel" => arg.cancel = true,
                     "parse" => arg.parse = Some(meta.value()?.parse()?),
                     "each" => arg.each = Some(meta.value()?.parse()?),
                     "receiver" => arg.receiver = true,
@@ -644,7 +655,7 @@ fn take_args(function: &mut ItemFn) -> Result<Vec<Arg>> {
                         return Err(meta.error(
                             "expected `render`, `default = ...`, `current`, `switch = \"/x\"`, \
                              `rest`, `raw`, `invoked`, `parse = path`, `each = path`, `receiver`, \
-                             `sdk`, `keyword`, `name = \"...\"` or `complete = Strategy`",
+                             `sdk`, `keyword`, `cancel`, `name = \"...\"` or `complete = Strategy`",
                         ));
                     }
                 }
@@ -664,6 +675,7 @@ fn take_args(function: &mut ItemFn) -> Result<Vec<Arg>> {
             arg.rest,
             arg.raw,
             arg.invoked,
+            arg.cancel,
             arg.parse.is_some(),
             arg.each.is_some(),
             arg.optional.is_some() && !custom && !arg.sdk,
@@ -673,7 +685,13 @@ fn take_args(function: &mut ItemFn) -> Result<Vec<Arg>> {
             return Err(Error::new(
                 arg.span,
                 "an argument takes one of `Option<T>`, `default`, `current`, `switch`, `rest`, \
-                 `raw`, `invoked`, `parse`, `each` and `sdk`",
+                 `raw`, `invoked`, `cancel`, `parse`, `each` and `sdk`",
+            ));
+        }
+        if arg.cancel && (arg.render || arg.receiver || arg.keyword) {
+            return Err(Error::new(
+                arg.span,
+                "a `cancel` argument is the host's, nothing else",
             ));
         }
         if arg.sdk && (arg.default.is_none() || arg.receiver) {
@@ -759,7 +777,40 @@ impl Command {
         self.returns_flow() || self.options.flow.is_some()
     }
 
+    fn is_run(&self) -> bool {
+        self.options.kind == "Run"
+    }
+
+    /// Whether a `kind = Run` command returns the [`Motion`] its host drives
+    /// (rather than driving the run itself through a `cancel` argument).
+    fn returns_motion(&self) -> bool {
+        matches!(&self.output, Type::Path(path)
+            if path.path.segments.last().is_some_and(|segment| segment.ident == "Motion"))
+    }
+
     fn validate(&self) -> Result<()> {
+        let cancels = self.args.iter().filter(|arg| arg.cancel).count();
+        if self.is_run() && (cancels > 1 || (cancels == 1) == self.returns_motion()) {
+            return Err(Error::new(
+                self.function.span(),
+                "a `kind = Run` command returns the `Motion` its host drives, or takes one \
+                 `#[arg(cancel)] cancel: &Cancel` and drives the run itself",
+            ));
+        }
+        if !self.is_run()
+            && let Some(arg) = self.args.iter().find(|arg| arg.cancel)
+        {
+            return Err(Error::new(
+                arg.span,
+                "a `cancel` argument belongs to a `kind = Run` command",
+            ));
+        }
+        if self.is_run() && self.receiver != Receiver::SessionMut {
+            return Err(Error::new(
+                self.function.span(),
+                "a `kind = Run` command takes `&mut Session`",
+            ));
+        }
         if let Some(object) = self.options.python.first()
             && (self.options.kind == "Host" || self.returns_flow())
         {
@@ -832,7 +883,7 @@ impl Command {
         }
         let mut usage = self.options.names[0].value();
         for arg in &self.args {
-            let part = if arg.invoked || arg.sdk {
+            let part = if arg.hosted() || arg.sdk {
                 continue;
             } else if let Some(switch) = &arg.switch {
                 format!("[{}]", switch.value())
@@ -1014,7 +1065,7 @@ impl Command {
         for arg in self
             .args
             .iter()
-            .filter(|arg| arg.switch.is_none() && !arg.invoked)
+            .filter(|arg| arg.switch.is_none() && !arg.hosted())
         {
             let ident = &arg.ident;
             let ty = &arg.ty;
@@ -1063,7 +1114,7 @@ impl Command {
         let parsed: Vec<&Ident> = self
             .args
             .iter()
-            .filter(|arg| !arg.invoked)
+            .filter(|arg| !arg.hosted())
             .map(|arg| &arg.ident)
             .collect();
         let invoked: Vec<&Ident> = self
@@ -1075,7 +1126,7 @@ impl Command {
         let parsed_types: Vec<TokenStream> = self
             .args
             .iter()
-            .filter(|arg| !arg.invoked)
+            .filter(|arg| !arg.hosted())
             .map(|arg| {
                 let ty = &arg.ty;
                 if arg.each.is_some() {
@@ -1098,7 +1149,9 @@ impl Command {
             .filter(|arg| !arg.render)
             .map(|arg| {
                 let ident = &arg.ident;
-                if arg.each.is_some() {
+                if arg.cancel {
+                    quote!(&__cancel)
+                } else if arg.each.is_some() {
                     quote!(item)
                 } else if self.args.iter().any(|arg| arg.each.is_some()) {
                     quote!(::std::clone::Clone::clone(&#ident))
@@ -1121,6 +1174,24 @@ impl Command {
         let returns_flow = self.returns_flow();
         let run = match self.args.iter().find(|arg| arg.each.is_some()) {
             _ if returns_flow => quote!(self::#function(#receiver, #(#call_args),*)),
+            // The REPL drives the motion and renders the stop.
+            _ if self.is_run() && self.returns_motion() => quote! {
+                match self::#function(#receiver, #(#call_args),*) {
+                    Ok(motion) => state.run_motion(motion),
+                    Err(error) => crate::repl::error(&error.to_string()),
+                }
+                Ok(())
+            },
+            // The operation drives the run within the REPL's stop budget.
+            _ if self.is_run() => quote! {
+                let __cancel = crate::repl::run_cancel(state.stop_wait.as_ref());
+                let value = self::#function(#receiver, #(#call_args),*);
+                match value {
+                    Ok(value) => crate::repl::Render::render(&value, state, #options),
+                    Err(error) => crate::repl::error(&error.to_string()),
+                }
+                Ok(())
+            },
             Some(each) => {
                 let ident = &each.ident;
                 quote! {
@@ -1205,6 +1276,19 @@ impl Command {
             args: &self.args,
             output: &self.output,
             effects: quote!(&SPEC.effects),
+            run: self.is_run().then(|| {
+                if self.returns_motion() {
+                    RunMode::Motion {
+                        may_run_on: self
+                            .options
+                            .state
+                            .as_ref()
+                            .is_none_or(|state| state == "Any"),
+                    }
+                } else {
+                    RunMode::Cancellable
+                }
+            }),
         };
         self.options
             .python
@@ -1225,6 +1309,19 @@ struct Method<'a> {
     output: &'a Type,
     /// The `&Effects` it admits.
     effects: TokenStream,
+    /// How it drives a `kind = Run` command's run.
+    run: Option<RunMode>,
+}
+
+/// How a `kind = Run` command's SDK method drives the run, through
+/// `python::runcontrol`.
+#[derive(Clone, Copy)]
+enum RunMode {
+    /// The command returns the `Motion`; `may_run_on` when it is admitted on
+    /// a running target (`state = Any`), which a timeout can leave running.
+    Motion { may_run_on: bool },
+    /// The command drives the run itself through its `cancel` argument.
+    Cancellable,
 }
 
 impl Method<'_> {
@@ -1245,7 +1342,7 @@ impl Method<'_> {
         let mut bindings = Vec::new();
         let mut keywords = false;
         for arg in self.args {
-            if arg.render {
+            if arg.render || arg.cancel {
                 continue;
             }
             let ident = &arg.ident;
@@ -1256,6 +1353,11 @@ impl Method<'_> {
             }
             if arg.keyword && !keywords {
                 keywords = true;
+                // A run's `timeout` goes before the keyword-only arguments.
+                if self.run.is_some() {
+                    params.push(quote!(timeout: ::std::option::Option<f64>));
+                    signature.push(quote!(timeout = None));
+                }
                 signature.push(quote!(*));
             } else if keywords && !arg.keyword {
                 return Err(Error::new(
@@ -1264,12 +1366,18 @@ impl Method<'_> {
                 ));
             }
             params.push(quote!(#ident: <#ty as #command::PyArg>::Py));
-            bindings.push(quote! {
-                let #ident = <#ty as #command::PyArg>::from_py_in(
-                    py,
-                    #command::CommandHost::owner(self),
-                    #ident,
-                )?;
+            // A run command's method is the `Debugger`'s own, which has no
+            // `Owner` to check a handle argument against.
+            bindings.push(if self.run.is_some() {
+                quote!(let #ident = <#ty as #command::PyArg>::from_py(#ident);)
+            } else {
+                quote! {
+                    let #ident = <#ty as #command::PyArg>::from_py_in(
+                        py,
+                        #command::CommandHost::owner(self),
+                        #ident,
+                    )?;
+                }
             });
             signature.push(if arg.sdk {
                 let default = arg.default.as_ref().unwrap();
@@ -1284,6 +1392,10 @@ impl Method<'_> {
                 quote!(#ident)
             });
         }
+        if self.run.is_some() && !keywords {
+            params.push(quote!(timeout: ::std::option::Option<f64>));
+            signature.push(quote!(timeout = None));
+        }
         let receiver = match self.receiver {
             // Not `session`: a keyword argument may be named that (`!session`).
             Receiver::SessionMut => quote!(__session),
@@ -1291,14 +1403,59 @@ impl Method<'_> {
             Receiver::Repl => unreachable!("validated"),
         };
         let function = self.function;
-        let call: Vec<&Ident> = self
+        let call: Vec<TokenStream> = self
             .args
             .iter()
             .filter(|arg| !arg.render)
-            .map(|arg| &arg.ident)
+            .map(|arg| {
+                if arg.cancel {
+                    quote!(__cancel)
+                } else {
+                    let ident = &arg.ident;
+                    quote!(#ident)
+                }
+            })
             .collect();
         let output = self.output;
         let effects = &self.effects;
+        if let Some(run) = self.run {
+            let runcontrol = quote!(crate::python::runcontrol);
+            let (driver, output, closure) = match run {
+                RunMode::Cancellable => (
+                    quote!(run_cancellable),
+                    quote!(#output),
+                    quote!(move |__session, __cancel| self::#function(#receiver, #(#call),*)),
+                ),
+                // A run admitted on a running target (`g`) can still be
+                // running when the timeout ends; any other ends on a stop.
+                RunMode::Motion { may_run_on: true } => (
+                    quote!(run_motion),
+                    quote!(::std::option::Option<crate::session::Stop>),
+                    quote!(move |__session| self::#function(#receiver, #(#call),*)),
+                ),
+                RunMode::Motion { may_run_on: false } => (
+                    quote!(run_motion_to_stop),
+                    quote!(crate::session::Stop),
+                    quote!(move |__session| self::#function(#receiver, #(#call),*)),
+                ),
+            };
+            return Ok(quote! {
+                #[cfg(feature = "python")]
+                #[pyo3::pymethods]
+                impl #command::#object {
+                    #(#docs)*
+                    #[pyo3(name = #python_name, signature = (#(#signature),*))]
+                    fn #method<'py>(
+                        &self,
+                        py: pyo3::Python<'py>,
+                        #(#params),*
+                    ) -> pyo3::PyResult<crate::view::record::Typed<'py, #output>> {
+                        #(#bindings)*
+                        #runcontrol::#driver(py, self, #operation, #effects, timeout, #closure)
+                    }
+                }
+            });
+        }
         Ok(quote! {
             #[cfg(feature = "python")]
             #[pyo3::pymethods]
