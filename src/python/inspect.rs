@@ -3,7 +3,7 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use super::args::{ApcTarget, DeviceArg, FltFilterArg, ObjectArg};
+use super::args::{ApcTarget, DeviceArg, FltFilterArg};
 use super::command::admit;
 use super::context::{Context, in_context};
 use super::handle::Owner;
@@ -18,7 +18,6 @@ use crate::session::Session;
 use crate::session::effects::Effects;
 use crate::target::alpc::{AlpcMessage, AlpcPort, AlpcProcessPorts};
 use crate::target::etw::parse_guid;
-use crate::target::irpfind::{IrpCriteria, IrpPool};
 use crate::target::object::{ExecutiveResource, ResourceList};
 use crate::target::pci::{PCI_EXTENDED_CONFIG_SIZE, PciQuery, PciScan};
 use crate::target::registry::names_equal;
@@ -90,64 +89,6 @@ impl Inspect {
         "<Inspect namespace>".to_string()
     }
 
-    /// Decode an in-flight `_IRP` and its I/O stack locations (`!irp`).
-    fn irp<'py>(&self, py: Python<'py>, address: u64) -> PyResult<Typed<'py, view::object::Irp>> {
-        self.typed(py, |session| {
-            let detail = session.target.inspect_irp(VirtAddr(address)).map_err(err)?;
-            Ok(view::object::irp(&detail))
-        })
-    }
-
-    /// Find in-flight IRPs, with an optional filter by process or driver
-    /// (`irps`).
-    #[pyo3(signature = (filter=None))]
-    fn irps<'py>(
-        &self,
-        py: Python<'py>,
-        filter: Option<&str>,
-    ) -> PyResult<Typed<'py, Vec<view::object::InFlightIrp>>> {
-        self.typed(py, |session| {
-            let hits = session.target.discover_irps(filter).map_err(err)?;
-            Ok(hits.iter().map(view::object::irp_hit).collect::<Vec<_>>())
-        })
-    }
-
-    /// Find IRPs by scanning pool for the allocations of `IoAllocateIrp`
-    /// (`!irpfind`). `pool_type` is `"nonpaged"` or `"paged"`, and `restart`
-    /// continues the scan from an address. `criteria` is one of the WinDbg
-    /// criteria (`"arg"`, `"device"`, `"fileobject"`, `"mdlprocess"`,
-    /// `"thread"`, `"userevent"`), which the scan matches against `value`.
-    #[pyo3(signature = (pool_type="nonpaged", restart=None, criteria=None, value=0))]
-    fn irp_find<'py>(
-        &self,
-        py: Python<'py>,
-        pool_type: &str,
-        restart: Option<u64>,
-        criteria: Option<&str>,
-        value: u64,
-    ) -> PyResult<Typed<'py, view::object::IrpFindResult>> {
-        let pool = match pool_type {
-            "nonpaged" => IrpPool::NonPaged,
-            "paged" => IrpPool::Paged,
-            other => {
-                return Err(raise(format!(
-                    "unknown pool type '{other}' (nonpaged, paged)"
-                )));
-            }
-        };
-        let criteria = criteria
-            .map(|name| IrpCriteria::parse(name, value))
-            .transpose()
-            .map_err(err)?;
-        self.typed(py, |session| {
-            let detail = session
-                .target
-                .irp_find(pool, restart.map(VirtAddr), criteria)
-                .map_err(err)?;
-            Ok(view::object::irp_find(&detail))
-        })
-    }
-
     /// Decode an ALPC port (`!alpc /p`). The result has the port kind, owner,
     /// connection, state, and queues, and for a connection port also its
     /// connections. `address` is the body or the header of the port object.
@@ -197,25 +138,6 @@ impl Inspect {
         })
     }
 
-    /// Decode an executive object header and resolve the type and name of the
-    /// object, also listing the entries of a directory (`!object`). `object` is
-    /// the address of the object, or its path in the object namespace
-    /// (`"\\Driver\\ACPI"`).
-    fn object<'py>(
-        &self,
-        py: Python<'py>,
-        object: ObjectArg,
-    ) -> PyResult<Typed<'py, view::object::ExecutiveObject>> {
-        self.typed(py, |session| {
-            let address = match object {
-                ObjectArg::Address(address) => VirtAddr(address),
-                ObjectArg::Path(path) => session.target.object_at_path(&path).map_err(err)?,
-            };
-            let detail = session.target.inspect_object(address).map_err(err)?;
-            Ok(view::object::object(&detail))
-        })
-    }
-
     /// Decode an executive resource (`!locks address`).
     fn resource<'py>(
         &self,
@@ -236,36 +158,6 @@ impl Inspect {
     fn resources<'py>(&self, py: Python<'py>, limit: usize) -> PyResult<Typed<'py, ResourceList>> {
         self.typed(py, |session| {
             session.target.enumerate_resources(limit).map_err(err)
-        })
-    }
-
-    /// List the process, thread, and image notification callbacks.
-    fn callbacks<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Typed<'py, Vec<view::object::NotifyCallback>>> {
-        self.typed(py, |session| {
-            let callbacks = session.target.enumerate_notify_callbacks().map_err(err)?;
-            let dtb = session.target.guest().map_err(err)?.ntoskrnl.dtb();
-            Ok(callbacks
-                .iter()
-                .map(|callback| {
-                    let symbol = session.target.format_code_address(dtb, callback.function);
-                    view::object::notify_callback(callback, symbol)
-                })
-                .collect::<Vec<_>>())
-        })
-    }
-
-    /// Get the kernel SSDT, and the win32k shadow table if it is initialized
-    /// (`!ssdt`).
-    fn ssdt<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<view::object::SsdtTable>>> {
-        self.typed(py, |session| {
-            let tables = session.target.dump_ssdt().map_err(err)?;
-            Ok(tables
-                .iter()
-                .map(view::object::ssdt_table)
-                .collect::<Vec<_>>())
         })
     }
 

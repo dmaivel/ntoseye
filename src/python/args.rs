@@ -21,7 +21,10 @@ use crate::kd::KdMemorySource;
 #[cfg(feature = "python-stubs")]
 use crate::session::driver::StopPy;
 use crate::session::{StepMode, WalkUntil};
+use crate::target::irpfind::IrpPool;
 use crate::target::mm::{PoolType, PoolUsageSort};
+use crate::target::object::ObjectName;
+use crate::types::VirtAddr;
 
 /// A string argument restricted to fixed spellings, typed as
 /// `typing.Literal[...]` in the stubs.
@@ -238,4 +241,29 @@ pub enum FltFilterArg {
 pub enum ObjectArg {
     Address(u64),
     Path(String),
+}
+
+impl PyArg for ObjectName {
+    type Py = ObjectArg;
+    fn from_py(value: ObjectArg) -> Self {
+        match value {
+            ObjectArg::Address(address) => ObjectName::Address(VirtAddr(address)),
+            ObjectArg::Path(path) => ObjectName::Path(path),
+        }
+    }
+}
+
+literal_arg! {
+    /// `irp_find(pool_type=...)`: the pool `!irpfind` scans.
+    IrpPoolArg(IrpPool) {
+        "nonpaged" => IrpPool::NonPaged,
+        "paged" => IrpPool::Paged,
+    }
+}
+
+impl PyArg for IrpPool {
+    type Py = IrpPoolArg;
+    fn from_py(value: IrpPoolArg) -> Self {
+        value.0
+    }
 }

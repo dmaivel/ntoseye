@@ -5,6 +5,7 @@ use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict};
 
+use super::command::{Bind, CommandHost};
 use super::context::{Context, Space};
 use super::handle::Owner;
 use super::iter::{DriverIterator, ModuleIterator};
@@ -628,7 +629,7 @@ impl Driver {
                 .inspect_driver_object(self.info.object)
                 .map(|detail| {
                     detail
-                        .device_chain
+                        .devices
                         .into_iter()
                         .map(|device| device.device.0)
                         .collect()
@@ -641,22 +642,10 @@ impl Driver {
             .collect())
     }
 
-    /// Inspect the `_DRIVER_OBJECT`, its devices, and its dispatch table.
-    fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::object::DriverObject>> {
-        let view = self.owner.with(py, |session| {
-            let detail = session
-                .target
-                .inspect_driver_object(self.info.object)
-                .map_err(err)?;
-            Ok(view::object::driver_object(&session.target, &detail))
-        })?;
-        Typed::new(py, view)
-    }
-
     /// The driver object as a plain `dict`.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
-        view_dict(py, &view::object::driver_object_info(&self.info))
+        view_dict(py, &self.info)
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -700,17 +689,6 @@ impl Device {
         Ok(self.address)
     }
 
-    /// Inspect this `_DEVICE_OBJECT` and its attachment stack.
-    fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::object::DeviceObject>> {
-        let detail = self.owner.with(py, |session| {
-            session
-                .target
-                .inspect_device_object(VirtAddr(self.address))
-                .map_err(err)
-        })?;
-        Typed::new(py, view::object::device_object(&detail))
-    }
-
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
         let out = PyDict::new(py);
@@ -730,5 +708,39 @@ impl Device {
 
     fn __repr__(&self) -> String {
         format!("Device(address={:#x})", self.address)
+    }
+}
+
+impl CommandHost for Driver {
+    fn owner(&self) -> &Owner {
+        &self.owner
+    }
+
+    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
+        Ok(Context::default())
+    }
+}
+
+/// `!drvobj` inspects the driver object.
+impl Bind<VirtAddr> for Driver {
+    fn bind(&self) -> VirtAddr {
+        self.info.object
+    }
+}
+
+impl CommandHost for Device {
+    fn owner(&self) -> &Owner {
+        &self.owner
+    }
+
+    fn context(&self, _py: Python<'_>) -> PyResult<Context> {
+        Ok(Context::default())
+    }
+}
+
+/// `!devobj` inspects the device object.
+impl Bind<VirtAddr> for Device {
+    fn bind(&self) -> VirtAddr {
+        VirtAddr(self.address)
     }
 }

@@ -10,7 +10,6 @@ pub mod heap;
 pub mod hypervisor;
 pub mod meta;
 pub mod module;
-pub mod object;
 pub mod pnp;
 pub mod power;
 pub mod record;
