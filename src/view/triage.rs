@@ -10,6 +10,7 @@ use super::power::{power_driver, power_irp, power_irp_holder, power_irp_list, po
 use crate::dmp::triage::TriagePrcbInfo;
 use crate::dmp::{self, DmpException, DmpSystemInfo};
 use crate::target::DiagnosticValue;
+use crate::target::pnp::DeviceStackDetail;
 use crate::triage_report::{
     BlackboxFinding, BlackboxKind, BlackboxState, CodeOwner as CodeOwnerDetail, CulpritAttribution,
     CulpritConfidence, CulpritEvidenceKind, CulpritSubject, FailureCodeKind,
@@ -336,7 +337,7 @@ pub struct PowerFailure {
     #[record(hex)]
     pub device: Option<u64>,
     /// The stack of `device`.
-    pub device_stack: Option<DiagnosticValue<crate::target::pnp::DeviceStackDetail>>,
+    pub device_stack: Option<DiagnosticValue<DeviceStackDetail>>,
     /// 0x3: the blocked IRP.
     pub blocked_irp: Option<BlockedPowerIrp>,
     /// 0x3: the power IRPs on the list that `TRIAGE_9F_POWER` names.
@@ -788,7 +789,7 @@ fn unloaded_driver(driver: &dmp::UnloadedDriver) -> UnloadedDriver {
 
 fn power_failure(finding: &PowerDetail) -> PowerFailure {
     let failure = &finding.failure;
-    let diagnostic = |value: &std::result::Result<_, String>| match value {
+    let diagnostic = |value: &std::result::Result<DeviceStackDetail, String>| match value {
         Ok(stack) => DiagnosticValue::Available(stack.clone()),
         Err(error) => DiagnosticValue::unavailable(error.clone()),
     };

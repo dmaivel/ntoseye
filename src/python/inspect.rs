@@ -18,7 +18,7 @@ use crate::target::alpc::{AlpcMessage, AlpcPort, AlpcProcessPorts};
 use crate::target::etw::parse_guid;
 use crate::target::object::{ExecutiveResource, ResourceList};
 use crate::target::pci::{PCI_EXTENDED_CONFIG_SIZE, PciQuery, PciScan};
-use crate::target::registry::names_equal;
+use crate::target::registry::{CellLocation, HiveList, RegKey, RegValue, names_equal};
 use crate::target::sched::{
     ApcQueues, ApcSelector, KernelTimer, TimerTable, UniqStackScope, UniqStacks,
 };
@@ -420,28 +420,17 @@ impl Inspect {
 
     /// List the registry hives loaded in kernel memory, with where each is
     /// mounted and the file it was loaded from (`!reg hivelist`).
-    fn registry_hives<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Typed<'py, view::registry::RegistryHives>> {
-        self.typed(py, |session| {
-            let list = session.target.registry_hives().map_err(err)?;
-            Ok(view::registry::hives(&list))
-        })
+    fn registry_hives<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, HiveList>> {
+        self.typed(py, |session| session.target.registry_hives().map_err(err))
     }
 
     /// Read the registry key at `path`, a full path such as
     /// `HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip` or
     /// `\\REGISTRY\\MACHINE\\...`, with its subkeys and its values, each
     /// value's data typed by its type (`!reg querykey`).
-    fn registry_key<'py>(
-        &self,
-        py: Python<'py>,
-        path: String,
-    ) -> PyResult<Typed<'py, view::registry::RegistryKey>> {
+    fn registry_key<'py>(&self, py: Python<'py>, path: String) -> PyResult<Typed<'py, RegKey>> {
         self.typed(py, move |session| {
-            let key = session.target.registry_key(&path).map_err(err)?;
-            Ok(view::registry::key(&key))
+            session.target.registry_key(&path).map_err(err)
         })
     }
 
@@ -453,14 +442,14 @@ impl Inspect {
         py: Python<'py>,
         path: String,
         name: String,
-    ) -> PyResult<Typed<'py, view::registry::RegistryValue>> {
+    ) -> PyResult<Typed<'py, RegValue>> {
         self.typed(py, move |session| {
             let key = session.target.registry_key(&path).map_err(err)?;
             key.values
                 .iter()
                 .flatten()
                 .find(|value| names_equal(&value.name, &name))
-                .map(view::registry::value)
+                .cloned()
                 .ok_or_else(|| raise(format!("{} has no readable value named {name:?}", key.path)))
         })
     }
@@ -472,13 +461,12 @@ impl Inspect {
         py: Python<'py>,
         hive: u64,
         node: u64,
-    ) -> PyResult<Typed<'py, view::registry::RegistryKey>> {
+    ) -> PyResult<Typed<'py, RegKey>> {
         self.typed(py, move |session| {
-            let key = session
+            session
                 .target
                 .registry_key_at(VirtAddr(hive), VirtAddr(node))
-                .map_err(err)?;
-            Ok(view::registry::key(&key))
+                .map_err(err)
         })
     }
 
@@ -489,13 +477,12 @@ impl Inspect {
         py: Python<'py>,
         hive: u64,
         cell: u32,
-    ) -> PyResult<Typed<'py, view::registry::RegistryCell>> {
+    ) -> PyResult<Typed<'py, CellLocation>> {
         self.typed(py, move |session| {
-            let location = session
+            session
                 .target
                 .registry_cell(VirtAddr(hive), cell)
-                .map_err(err)?;
-            Ok(view::registry::cell(&location))
+                .map_err(err)
         })
     }
 
