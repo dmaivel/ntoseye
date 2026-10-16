@@ -13,7 +13,7 @@ use crate::{
     pe::{ModuleExportInfo, PeImage, read_pe_exports, read_pe_image, read_pe_version_info},
     symbols::{
         CodeFrame, InlineFrame, LocalVariableLocation, ProcedureLocal, SourceLineExtent,
-        SourceLocation, SymbolCandidate, SymbolIndex, SymbolStore, format_symbol_with_offset,
+        SourceLocation, Symbol, SymbolCandidate, SymbolIndex, SymbolStore, format_symbol_with_offset,
         glob_matches,
     },
     types::{Dtb, VirtAddr},
@@ -370,6 +370,17 @@ impl Target {
     pub fn closest_symbol_current_context(&self, address: VirtAddr) -> Option<String> {
         self.nearest_symbol_current_context(address)
             .map(|(module, name, offset)| format_symbol_with_offset(&module, &name, offset))
+    }
+
+    /// The symbol nearest below `address` in the inspection scope.
+    pub fn nearest_symbol(&self, address: VirtAddr) -> Option<Symbol> {
+        self.nearest_symbol_current_context(address)
+            .map(|(module, name, offset)| Symbol {
+                module,
+                name,
+                address: VirtAddr(address.0.saturating_sub(u64::from(offset))),
+                offset,
+            })
     }
 
     pub fn source_location(&self, address: VirtAddr) -> Option<SourceLocation> {

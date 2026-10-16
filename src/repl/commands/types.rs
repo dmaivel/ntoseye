@@ -22,24 +22,98 @@ const MAX_LIST_ENTRIES: usize = 4096;
 pub const MAX_RECURSION_DEPTH: usize = 64;
 const MAX_DL_WORDS: usize = 64;
 
-repl_command! {
-    cmd_dt;
-    names: ["dt"],
-    category: "symbols, types, and expressions",
-    usage: "dt [-r[N]] [-a[N]] [-v] [-y] [-l <field>] [module!]<type> [address] [field-pattern...]",
-    summary: "Show a type layout or a decoded structure.",
-    details: "-r expands nested structures, -a expands bounded arrays, and -v shows field sizes. -y matches names by case-insensitive prefix, and -l <field> walks a LIST_ENTRY field. ntoseye looks for a bare type name in the kernel PDB first, and then in the modules of the current address space. If the PDB of a module defines a member type, ntoseye names the type with that module (wdf01000!_WDF_DRIVER_GLOBALS) and expands it from that PDB. If the PDB only declares the type (a driver's _EPROCESS*), ntoseye resolves it as a bare name. Nested field paths use dots, and field patterns support * and ?. With -l, the given address is the first element, as in WinDbg, so the walk includes all nodes until it returns to that address. In memory, a list head and a record link look the same, so if you start at a list head instead of at `poi(ListHead)`, the command shows the head as one pseudo-record and does not drop a real record. If the list is empty, its link points to itself, and the command shows nothing. The walk keeps the entries that it collected, and reports null links, cycles, unreadable links, and when it reaches the entry limit.",
-    completion: Type,
+/// Show a type layout or a decoded structure.
+///
+/// -r expands nested structures, -a expands bounded arrays, and -v shows field
+/// sizes. -y matches names by case-insensitive prefix, and -l <field> walks a
+/// LIST_ENTRY field. ntoseye looks for a bare type name in the kernel PDB
+/// first, and then in the modules of the current address space. If the PDB of a
+/// module defines a member type, ntoseye names the type with that module
+/// (wdf01000!_WDF_DRIVER_GLOBALS) and expands it from that PDB. If the PDB only
+/// declares the type (a driver's _EPROCESS*), ntoseye resolves it as a bare
+/// name. Nested field paths use dots, and field patterns support * and ?. With
+/// -l, the given address is the first element, as in WinDbg, so the walk
+/// includes all nodes until it returns to that address. In memory, a list head
+/// and a record link look the same, so if you start at a list head instead of
+/// at `poi(ListHead)`, the command shows the head as one pseudo-record and does
+/// not drop a real record. If the list is empty, its link points to itself, and
+/// the command shows nothing. The walk keeps the entries that it collected, and
+/// reports null links, cycles, unreadable links, and when it reaches the entry
+/// limit.
+#[command(
+    names = ["dt"],
+    category = "symbols, types, and expressions",
+    kind = Query,
+    python = none,
+    usage = "dt [-r[N]] [-a[N]] [-v] [-y] [-l <field>] [module!]<type> [address] [field-pattern...]",
+    completion = Type
+)]
+fn dt(state: &mut ReplState<'_>, #[arg(parse = dt_arguments)] parsed: ParsedDtArgs) -> Result<()> {
+    state.dt(parsed)
 }
 
-repl_command! {
-    cmd_dl;
-    names: ["dl"],
-    category: "memory and disassembly",
-    usage: "dl [-b] <address> <maxcount> [size]",
-    summary: "Dump a bounded _LIST_ENTRY chain.",
-    details: "By default, the walk follows Flink, and -b follows Blink. The optional size is the number of pointer-sized words that the command shows for each element, 2 by default. The given address is the first element, as in WinDbg, so the walk includes all nodes until it returns to that address. In memory, a list head and a record link look the same, so if you start at a list head instead of at `poi(ListHead)`, the command shows the head as one pseudo-record and does not drop a real record. If the list is empty, its link points to itself, and the command shows nothing. The walk keeps the entries that it collected, and reports null links, cycles, unreadable links, and when it reaches the entry limit. It does not report when it reaches the requested maxcount.",
-    completion: Expression,
+/// `dt`'s words.
+fn dt_arguments(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<ParsedDtArgs, ArgError> {
+    parse_dt_args(&cursor.take_all(|_| true)).map_err(|error| {
+        if error == "missing type name" {
+            ArgError::Missing
+        } else {
+            ArgError::Message(format!("dt: {error}"))
+        }
+    })
+}
+
+/// Dump a bounded _LIST_ENTRY chain.
+///
+/// By default, the walk follows Flink, and -b follows Blink. The optional size
+/// is the number of pointer-sized words that the command shows for each
+/// element, 2 by default. The given address is the first element, as in WinDbg,
+/// so the walk includes all nodes until it returns to that address. In memory,
+/// a list head and a record link look the same, so if you start at a list head
+/// instead of at `poi(ListHead)`, the command shows the head as one
+/// pseudo-record and does not drop a real record. If the list is empty, its
+/// link points to itself, and the command shows nothing. The walk keeps the
+/// entries that it collected, and reports null links, cycles, unreadable links,
+/// and when it reaches the entry limit. It does not report when it reaches the
+/// requested maxcount.
+#[command(
+    names = ["dl"],
+    category = "memory and disassembly",
+    kind = Query,
+    python = none,
+    usage = "dl [-b] <address> <maxcount> [size]",
+    completion = Expression
+)]
+fn dl(state: &mut ReplState<'_>, #[arg(parse = dl_arguments)] words: DlArgs) -> Result<()> {
+    state.dl(words)
+}
+
+/// `dl`'s words: `-b` anywhere, and two or three expressions.
+struct DlArgs {
+    backward: bool,
+    positional: Vec<String>,
+}
+
+fn dl_arguments(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<DlArgs, ArgError> {
+    let backward = !cursor.take_all(|word| word == "-b").is_empty();
+    let positional: Vec<String> = cursor
+        .take_all(|_| true)
+        .into_iter()
+        .map(|word| word.into_owned())
+        .collect();
+    if !(2..=3).contains(&positional.len()) {
+        return Err(ArgError::Missing);
+    }
+    Ok(DlArgs {
+        backward,
+        positional,
+    })
 }
 
 /// `!list`'s words: `-t [module!]<type>.<field>`, `-x "<commands>"`, and the
@@ -774,18 +848,7 @@ impl ReplState<'_> {
         (records, cursor.finish())
     }
 
-    fn cmd_dt(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let mut parsed = match parse_dt_args(&invocation.argv) {
-            Ok(parsed) => parsed,
-            Err(error) => {
-                if error == "missing type name" {
-                    outln!("{}\n", command_help("dt"));
-                } else {
-                    error!("dt: {}", error);
-                }
-                return Ok(());
-            }
-        };
+    fn dt(&mut self, mut parsed: ParsedDtArgs) -> Result<()> {
         let type_info = match self.lookup_type(&parsed.type_name) {
             Some(type_info) => type_info,
             None => {
@@ -934,24 +997,11 @@ impl ReplState<'_> {
         }
     }
 
-    fn cmd_dl(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let mut positional = Vec::new();
-        let mut backward = false;
-        for arg in &invocation.argv {
-            if arg.as_ref() == "-b" {
-                backward = true;
-            } else {
-                positional.push(arg.as_ref());
-            }
-        }
-        if positional.len() < 2 || positional.len() > 3 {
-            outln!("{}\n", command_help("dl"));
-            return Ok(());
-        }
-        let Some(address) = self.eval_or_report(positional[0]) else {
+    fn dl(&mut self, DlArgs { backward, positional }: DlArgs) -> Result<()> {
+        let Some(address) = self.eval_or_report(&positional[0]) else {
             return Ok(());
         };
-        let limit = match self.eval_or_report(positional[1]) {
+        let limit = match self.eval_or_report(&positional[1]) {
             Some(count) => count.0.min(MAX_LIST_ENTRIES as u64) as usize,
             None => return Ok(()),
         };

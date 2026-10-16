@@ -6,7 +6,6 @@ use super::record::Keyed;
 use ntoseye_macros::record;
 
 use super::hypervisor::{DecodedHypercall, ServedVp, decoded_hypercall, exit_registers, served_vp};
-use super::symbols::source_location;
 use crate::breakpoints::{self, Breakpoint};
 use crate::exception_policy::{self, ExceptionPolicyFinalAction, exception_alias};
 use crate::guest::ProcessInfo;
@@ -300,7 +299,7 @@ pub struct StackFrame {
     /// The source line of the frame, if line information resolves it. For
     /// an inline frame this is the line in the inlined function, and for a
     /// caller it is the line of the call.
-    pub source_location: Option<super::symbols::SourceLocation>,
+    pub source_location: Option<crate::symbols::SourceLocation>,
 }
 
 /// The function-table entry that covers an address, and the entry of each
@@ -676,7 +675,7 @@ pub fn stack_frame(index: usize, frame: &unwind::StackFrame) -> StackFrame {
         symbol: frame.symbol.clone(),
         inline: frame.inline,
         source: frame.source.as_str(),
-        source_location: frame.source_location.as_ref().map(source_location),
+        source_location: frame.source_location.clone(),
     }
 }
 

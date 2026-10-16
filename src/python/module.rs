@@ -15,11 +15,12 @@ use crate::error::Error;
 use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::memory::PAGE_SIZE;
 use crate::pe;
-use crate::target::ReloadScope;
-use crate::target::image::DhParts;
+use crate::pe::ModuleExportInfo;
+use crate::pe::headers::Section;
+use crate::symbols::{ImageSource, ModuleListing, ModuleSymbols};
+use ntoseye_macros::record;
 use crate::target::object::DriverObjectInfo;
 use crate::types::{Dtb, VirtAddr};
-use crate::view::module::Section;
 use crate::view::record::Typed;
 use crate::view::{self};
 use pelite::PeView;
@@ -237,36 +238,30 @@ impl Module {
 
     /// The PE sections and their mapped permissions.
     #[getter]
-    fn sections<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<view::module::Section>>> {
+    fn sections<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<Section>>> {
         Typed::new(py, self.section_data(py)?)
     }
 
     /// The exports from the mapped PE export directory.
     #[getter]
-    fn exports<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<view::module::Export>>> {
+    fn exports<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, Vec<ModuleExportInfo>>> {
         let base = self.info.base_address;
         let exports = self.owner.with_in(py, &self.context(), |session| {
             let dtb = self.space.dtb(&session.target)?;
             session.target.module_exports(dtb, base).map_err(err)
         })?;
-        Typed::new(
-            py,
-            exports
-                .iter()
-                .map(|export| view::module::export(export, base.0))
-                .collect(),
-        )
+        Typed::new(py, exports)
     }
 
     /// The symbol status and PDB identity of the module (`lmv`).
     #[getter]
-    fn symbols<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::module::ModuleSymbols>> {
-        let info = self.info.clone();
-        let view = self.owner.with_in(py, &self.context(), |session| {
+    fn symbols<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, ModuleSymbols>> {
+        let base = self.info.base_address;
+        let symbols = self.owner.with_in(py, &self.context(), |session| {
             let dtb = self.space.dtb(&session.target)?;
-            Ok(view::module::module_symbols(&session.target, &info, dtb))
+            Ok(session.target.symbols.module_symbols(dtb, base))
         })?;
-        Typed::new(py, view)
+        Typed::new(py, symbols)
     }
 
     /// The mapped image in memory layout, for pefile/LIEF. A page that is not
@@ -294,7 +289,7 @@ impl Module {
     }
 
     /// The symbol status, load diagnostics, and PDB identity (`lmv`).
-    fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::module::ModuleDetail>> {
+    fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, ModuleDetail>> {
         let info = self.info.clone();
         let process = matches!(self.space, Space::Process(_));
         let view = self.owner.with_in(py, &self.context(), |session| {
@@ -311,82 +306,15 @@ impl Module {
                             info.name
                         )))
                     })?;
-                Ok(view::module::ModuleDetail::Process(module))
+                Ok(ModuleDetail::Process(module))
             } else {
-                Ok(view::module::ModuleDetail::Kernel(
-                    view::module::module_with_symbols(&session.target, &info, dtb),
-                ))
+                Ok(ModuleDetail::Kernel(ModuleListing {
+                    symbols: session.target.symbols.module_symbols(dtb, info.base_address),
+                    module: info,
+                }))
             }
         })?;
         Typed::new(py, view)
-    }
-
-    /// Select, fetch, and index symbols for this module (`ld`, `.reload`).
-    fn reload_symbols<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Typed<'py, view::module::SymbolReloadReport>> {
-        let name = self.info.short_name.clone();
-        let report = self.owner.with_in(py, &self.context(), |session| {
-            session
-                .target
-                .reload_module_symbols(ReloadScope::Current, Some(&name))
-                .map_err(err)
-        })?;
-        Typed::new(py, view::module::module_symbol_report(&report))
-    }
-
-    /// The PE headers of the mapped image (`!dh`), including the file and
-    /// optional headers, data directories, sections, and the debug directory
-    /// with its PDB identity. `exports` and `imports` add those directories.
-    #[pyo3(signature = (exports=false, imports=false))]
-    fn headers<'py>(
-        &self,
-        py: Python<'py>,
-        exports: bool,
-        imports: bool,
-    ) -> PyResult<Typed<'py, view::module::ImageHeaders>> {
-        let info = self.info.clone();
-        let parts = DhParts {
-            exports,
-            imports,
-            ..DhParts::HEADERS
-        };
-        let view = self.owner.with_in(py, &self.context(), |session| {
-            let dtb = self.space.dtb(&session.target)?;
-            session
-                .target
-                .image_headers(dtb, info.base_address, Some(&info), parts)
-                .map(|detail| view::module::image_headers(&detail))
-                .map_err(err)
-        })?;
-        Typed::new(py, view)
-    }
-
-    /// The image identity of the module (`!lmi`): the machine, time stamp,
-    /// size, checksum, and characteristics from the headers, and the debug
-    /// directory with the CodeView PDB name, GUID, and age. The symbol state
-    /// and the local PDB file follow.
-    fn image_info<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Typed<'py, view::module::ModuleImageInfo>> {
-        let info = self.info.clone();
-        let view = self.owner.with_in(py, &self.context(), |session| {
-            let dtb = self.space.dtb(&session.target)?;
-            let detail = session.target.image_info(dtb, info).map_err(err)?;
-            Ok(view::module::module_image_info(&session.target, &detail))
-        })?;
-        Typed::new(py, view)
-    }
-
-    /// Fetch the matching image from the symbol server cache (`.fetchimage`).
-    fn fetch_image(&self, py: Python<'_>) -> PyResult<String> {
-        let name = self.info.name.clone();
-        let path = self.owner.with_in(py, &self.context(), |session| {
-            session.target.fetch_module_image(&name).map_err(err)
-        })?;
-        Ok(path.to_string_lossy().into_owned())
     }
 
     /// Get the verifier data for this driver module.
@@ -403,7 +331,7 @@ impl Module {
     /// The module as a plain `dict`.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;
-        view_dict(py, &view::module::module(&self.info))
+        view_dict(py, &self.info)
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -672,6 +600,21 @@ impl Device {
 
     fn __repr__(&self) -> String {
         format!("Device(address={:#x})", self.address)
+    }
+}
+
+/// A module as `Module.inspect()` decodes it: a kernel module with its
+/// symbols' state, or a process module from its loader list.
+#[record]
+pub enum ModuleDetail {
+    Kernel(ModuleListing),
+    Process(crate::target::usermode::LoaderModule),
+}
+
+/// A module binds its image for `.fetchimage`.
+impl Bind<ImageSource> for Module {
+    fn bind(&self) -> ImageSource {
+        ImageSource::Module(self.info.name.clone())
     }
 }
 

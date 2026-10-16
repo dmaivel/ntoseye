@@ -9,6 +9,7 @@ use crate::{
 };
 use dashmap::DashMap;
 use memmap2::Mmap;
+use ntoseye_macros::record;
 use pdb2::TypeIndex;
 use rustc_hash::FxHashMap;
 use smallvec::{SmallVec, smallvec};
@@ -95,10 +96,21 @@ fn server_urls(index_path: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether a symbol is a public (exported or PDB public) or a private one.
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymbolVisibility {
     Public,
     Private,
+}
+
+impl fmt::Display for SymbolVisibility {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Public => "public",
+            Self::Private => "private",
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,11 +139,51 @@ struct AddressEntry {
     name: Arc<str>,
 }
 
+/// The symbol nearest below an address (`ln`, `Symbols.nearest()`).
+#[record(impl)]
+pub struct Symbol {
+    /// The module that contains the symbol.
+    pub module: String,
+    /// The symbol name.
+    pub name: String,
+    /// The address of the symbol.
+    pub address: VirtAddr,
+    /// The distance in bytes from the symbol to the queried address.
+    pub offset: u32,
+}
+
+#[record]
+impl Symbol {
+    /// `module!name+0xoffset`.
+    #[record(python)]
+    fn __str__(slf: &pyo3::Bound<'_, Self>) -> pyo3::PyResult<String> {
+        use pyo3::types::PyAnyMethods;
+        let record = slf.as_super().get();
+        let py = slf.py();
+        Ok(format_symbol_with_offset(
+            &record.field(py, "module")?.extract::<String>()?,
+            &record.field(py, "name")?.extract::<String>()?,
+            record.field(py, "offset")?.extract()?,
+        ))
+    }
+}
+
+impl Symbol {
+    /// `module!name+0xoffset`.
+    pub fn label(&self) -> String {
+        format_symbol_with_offset(&self.module, &self.name, self.offset)
+    }
+}
+
+/// One definition that a symbol name resolves to.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolCandidate {
     pub module: String,
     pub address: VirtAddr,
+    /// `public` or `private`.
     pub visibility: SymbolVisibility,
+    /// The compiland that defines a private symbol.
     pub compiland: Option<String>,
 }
 
@@ -385,15 +437,40 @@ impl PdbIdentity {
     }
 }
 
+/// PDB source metadata for an address.
+#[record(impl)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceLocation {
-    /// Path recorded in the PDB.
+    /// The source file as the PDB records it.
     pub file: String,
     pub line: u32,
+    /// `None` if the PDB records no column.
     pub column: Option<u32>,
     /// The file on this machine the source path maps it to, `None` when no
     /// mapping applies.
+    #[record(skip)]
     pub local: Option<LocalSource>,
+}
+
+#[record]
+impl SourceLocation {
+    /// The local file that the source path maps it to. `None` if no mapping
+    /// applies.
+    #[record(getter)]
+    pub fn local_path(&self) -> Option<String> {
+        self.local
+            .as_ref()
+            .map(|local| local.path.display().to_string())
+    }
+
+    /// `found`, `missing`, or `differs`. `found` means that the file is
+    /// there and, if the PDB records a checksum, that it is the compiled
+    /// file. `differs` means that the file is there but its checksum does
+    /// not match the compiled file. `None` if `local_path` is `None`.
+    #[record(getter)]
+    pub fn local_state(&self) -> Option<LocalSourceState> {
+        self.local.as_ref().map(|local| local.state)
+    }
 }
 
 impl SourceLocation {
@@ -413,6 +490,8 @@ pub struct LocalSource {
     pub state: LocalSourceState,
 }
 
+/// Whether a recorded source file is on this machine.
+#[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalSourceState {
     /// The file is there and, when the PDB records a checksum, has it.
@@ -421,6 +500,16 @@ pub enum LocalSourceState {
     Missing,
     /// A file is there, but its checksum is not the one compiled.
     Differs,
+}
+
+impl fmt::Display for LocalSourceState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Found => "found",
+            Self::Missing => "missing",
+            Self::Differs => "differs",
+        })
+    }
 }
 
 /// A source file checksum the compiler records in the PDB.
@@ -452,19 +541,29 @@ pub struct SourceLineExtent {
     pub end: Option<VirtAddr>,
 }
 
+/// A PDB local or parameter.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcedureLocal {
     pub name: String,
+    /// The PDB type spelling.
     pub type_name: String,
     /// Structured form of the local's type for hosts that decode it (the DAP
     /// variables tree); `Unknown` means the PDB recipe could not be resolved.
     /// `type_name` remains the display string.
+    #[record(skip)]
     pub type_data: ParsedType,
+    /// `None` if the size of the type is unknown.
     pub byte_size: Option<u64>,
+    /// True for a parameter, False for a local.
+    #[record(rename = "parameter")]
     pub is_parameter: bool,
     pub location: LocalVariableLocation,
 }
 
+/// The location of a local variable: `kind` is `register`,
+/// `register_relative`, `frame_relative`, or `unavailable`.
+#[record(tagged)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LocalVariableLocation {
     /// The variable's value is held directly in a register.
@@ -676,6 +775,87 @@ impl ModuleSymbolSource {
     }
 }
 
+/// The symbol status and PDB identity of a module (`lm v`, `Module.symbols`).
+#[record(impl)]
+pub struct ModuleSymbols {
+    #[record(skip)]
+    pub status: Option<ModuleSymbolStatus>,
+    #[record(skip)]
+    pub source: Option<ModuleSymbolSource>,
+    #[record(skip)]
+    pub pdb: Option<PdbIdentity>,
+}
+
+#[record]
+impl ModuleSymbols {
+    /// `loaded`, `no-pdb`, `skipped`, `failed`, `fetching` or `unknown`.
+    #[record(getter, rename = "status")]
+    pub fn status_name(&self) -> String {
+        match (&self.status, &self.pdb) {
+            (Some(status), _) => status.label(),
+            (None, Some(_)) => "loaded",
+            (None, None) => "unknown",
+        }
+        .to_string()
+    }
+
+    /// The source of the PDB, if known.
+    #[record(getter, rename = "source")]
+    pub fn source_name(&self) -> Option<String> {
+        self.source.as_ref().map(|source| source.label().to_string())
+    }
+
+    /// The GUID of the loaded PDB as 32 hex digits. `None` if there is no PDB.
+    #[record(getter)]
+    pub fn pdb_guid(&self) -> Option<String> {
+        self.pdb.map(|identity| format!("{:032X}", identity.guid))
+    }
+
+    /// The age of the loaded PDB. `None` if there is no PDB.
+    #[record(getter)]
+    pub fn pdb_age(&self) -> Option<u32> {
+        self.pdb.map(|identity| identity.age)
+    }
+
+    /// The reason for the load failure, for status `failed`.
+    #[record(getter)]
+    pub fn error(&self) -> Option<String> {
+        match &self.status {
+            Some(ModuleSymbolStatus::Failed(error)) => Some(error.clone()),
+            _ => None,
+        }
+    }
+}
+
+/// A loaded module with its symbols' state (`lm`, a kernel module's
+/// `Module.inspect()`).
+#[record]
+pub struct ModuleListing {
+    pub module: ModuleInfo,
+    pub symbols: ModuleSymbols,
+}
+
+/// The ordered symbol source path (`.sympath`): local directories and
+/// symbol servers, tried in order.
+#[record]
+pub struct SymbolPath {
+    pub sources: Vec<String>,
+}
+
+/// The ordered local source path mappings (`.srcpath`).
+#[record]
+pub struct SourcePath {
+    pub mappings: Vec<String>,
+}
+
+/// What `.fetchimage` puts in the symbol cache: a loaded module's image,
+/// fetched by its header's key, or a PE file copied under its own key.
+#[derive(Debug, Clone)]
+pub enum ImageSource {
+    Module(String),
+    File(PathBuf),
+}
+
 #[derive(Debug, Clone)]
 pub enum ModuleSymbolDiscovery {
     Ready {
@@ -882,6 +1062,25 @@ impl SymbolStore {
     pub fn reset_symbol_sources(&self) {
         *self.sources.write() = DEFAULT_SYMBOL_SOURCES.clone();
         self.forget_unavailable();
+    }
+
+    /// The symbol source path as `.sympath` shows it.
+    pub fn symbol_path(&self) -> SymbolPath {
+        SymbolPath {
+            sources: self.sources.read().iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    /// The source path mappings as `.srcpath` shows them.
+    pub fn source_path(&self) -> SourcePath {
+        SourcePath {
+            mappings: self
+                .source_paths
+                .read()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        }
     }
 
     pub fn source_paths(&self) -> Vec<SourcePathMapping> {
@@ -1354,6 +1553,15 @@ impl SymbolStore {
         self.module_status
             .get(&Self::module_key(dtb, base_address))
             .map(|status| status.clone())
+    }
+
+    /// The symbol state of the module at `base_address`.
+    pub fn module_symbols(&self, dtb: Dtb, base_address: VirtAddr) -> ModuleSymbols {
+        ModuleSymbols {
+            status: self.module_symbol_status(dtb, base_address),
+            source: self.module_symbol_source(dtb, base_address),
+            pdb: self.module_pdb_identity(dtb, base_address),
+        }
     }
 
     pub fn module_pdb_identity(&self, dtb: Dtb, base_address: VirtAddr) -> Option<PdbIdentity> {

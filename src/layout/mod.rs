@@ -4,6 +4,7 @@
 use std::fmt;
 
 use indexmap::IndexMap;
+use ntoseye_macros::record;
 
 use crate::error::{Error, Result};
 
@@ -123,11 +124,25 @@ impl fmt::Display for ParsedType {
     }
 }
 
+/// The PDB layout of a field: its byte offset, byte size, and type.
+#[record(impl)]
 #[derive(Debug, Clone)]
 pub struct FieldInfo {
+    /// The byte offset in the containing type.
     pub offset: u32,
+    /// The size in bytes.
     pub size: u64,
+    #[record(skip)]
     pub type_data: ParsedType,
+}
+
+#[record]
+impl FieldInfo {
+    /// The PDB type spelling.
+    #[record(getter, rename = "type")]
+    pub fn type_name(&self) -> String {
+        self.type_data.to_string()
+    }
 }
 
 impl FieldInfo {

@@ -73,7 +73,7 @@ impl ProcessInfo {
 }
 
 /// A loaded module (kernel or process image), as its loader list records it.
-#[record]
+#[record(impl)]
 pub struct ModuleInfo {
     pub name: String,
     pub short_name: String,
@@ -94,6 +94,15 @@ pub struct ModuleInfo {
     /// reading the image.
     #[record(skip)]
     pub codeview: Option<CodeView>,
+}
+
+#[record]
+impl ModuleInfo {
+    /// The address after the last byte of the image.
+    #[record(getter, rename = "end")]
+    pub fn end_address(&self) -> VirtAddr {
+        VirtAddr(self.base_address.0.saturating_add(self.size as u64))
+    }
 }
 
 impl ModuleInfo {
@@ -146,10 +155,6 @@ impl ModuleInfo {
         }
     }
 
-    pub fn end_address(&self) -> VirtAddr {
-        VirtAddr(self.base_address.0.saturating_add(self.size as u64))
-    }
-
     pub fn contains_address(&self, address: VirtAddr) -> bool {
         address.0 >= self.base_address.0 && address.0 < self.end_address().0
     }
@@ -163,10 +168,14 @@ pub struct ProcessModulesDetail {
     pub wow64_termination: Option<ListTermination>,
 }
 
+/// One problem that ntoseye found when it loaded the symbols of a module.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleSymbolDiagnostic {
     pub module: String,
+    /// The load step that reported it.
     pub phase: &'static str,
+    /// The compiland of the problem, if the problem is specific to one compiland.
     pub compiland: Option<String>,
     pub message: String,
 }
@@ -190,19 +199,27 @@ pub enum PdbRecovery {
     Requested,
 }
 
+/// The result of a symbol reload. It counts the modules that loaded, had
+/// no PDB, were skipped, failed, or are still being fetched, and keeps the
+/// first diagnostics up to a limit.
+#[record]
 #[derive(Debug, Clone, Default)]
 pub struct ModuleSymbolLoadReport {
     pub total: usize,
     pub loaded: usize,
-    /// Symbol-bearing modules removed from this DTB since the previous refresh.
+    /// The number of modules with symbols that unloaded after the previous refresh.
     pub unloaded: usize,
     pub no_pdb: usize,
     pub skipped: usize,
     pub failed: usize,
     /// Handed to the background fetcher; not yet loaded or failed.
     pub fetching: usize,
+    /// The number of all diagnostics, including those after the limit of `diagnostics`.
     pub diagnostic_count: usize,
     pub diagnostics: Vec<ModuleSymbolDiagnostic>,
+    /// Why resolving the symbolic breakpoints again after the reload
+    /// failed (`.reload`, `ld`); `None` if it did not fail or did not run.
+    pub breakpoint_error: Option<String>,
 }
 
 pub struct Guest {

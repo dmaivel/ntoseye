@@ -23,6 +23,7 @@ use crate::kd::KdMemorySource;
 #[cfg(feature = "python-stubs")]
 use crate::session::driver::StopPy;
 use crate::session::{StepMode, WalkUntil};
+use crate::target::ReloadScope;
 use crate::target::ThreadInfo;
 use crate::target::irpfind::IrpPool;
 use crate::target::mm::{PoolType, PoolUsageSort};
@@ -348,6 +349,22 @@ literal_arg! {
 impl PyArg for IrpPool {
     type Py = IrpPoolArg;
     fn from_py(value: IrpPoolArg) -> Self {
+        value.0
+    }
+}
+
+literal_arg! {
+    /// `Symbols.reload(scope=...)`: whose modules `.reload` reloads.
+    ReloadScopeArg(ReloadScope) {
+        "current" => ReloadScope::Current,
+        "kernel" => ReloadScope::Kernel,
+        "user" => ReloadScope::User,
+    }
+}
+
+impl PyArg for ReloadScope {
+    type Py = ReloadScopeArg;
+    fn from_py(value: ReloadScopeArg) -> Self {
         value.0
     }
 }

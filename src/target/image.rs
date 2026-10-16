@@ -1,6 +1,8 @@
-//! `!dh`: a mapped PE image's headers, found by module name or by any
-//! address inside a module (or an image base no loader list names), in the
-//! module-list scope (`.process`) and then the kernel's.
+//! `!dh` and `!lmi`: a mapped PE image's headers, found by module name or by
+//! any address inside a module (or an image base no loader list names), in
+//! the module-list scope (`.process`) and then the kernel's.
+
+use ntoseye_macros::record;
 
 use super::{DiagnosticValue, Target};
 use crate::bugchecks::looks_like_kernel_pointer;
@@ -8,9 +10,11 @@ use crate::error::{Error, Result};
 use crate::guest::ModuleInfo;
 use crate::memory::MemoryOps;
 use crate::pe::headers::{
-    DebugRecord, ImageHeaders, ImportDescriptor, debug_directory, decode_headers, imports,
+    DataDirectory, DebugRecord, FileHeader, ImportDescriptor, OptionalHeader, PeHeaders,
+    SectionHeader, debug_directory, decode_headers, imports as pe_imports,
 };
 use crate::pe::{ImageExports, PeImage, read_pe_exports};
+use crate::symbols::ModuleSymbols;
 use crate::types::{Dtb, VirtAddr};
 
 /// Which parts of the image `!dh` shows (`-f`, `-s`, `-e`, `-i`).
@@ -82,91 +86,187 @@ impl DhParts {
     }
 }
 
-/// What `!dh` shows for one image. Each directory is read on its own: a
-/// discarded or paged-out one (a driver's `INIT`-resident import table) is
-/// `Unavailable` beside the headers that did read.
+/// The image `!dh` or `!lmi` describes: its base, the loaded module there
+/// (`None` for an image base no loader list names), and the address space it
+/// is mapped in when the caller knows it (an SDK module handle's); `None`
+/// leaves that to the command (see [`Target::inspect_image_headers`] and
+/// [`Target::module_image_info`]).
 #[derive(Debug, Clone)]
-pub struct ImageHeadersDetail {
+pub struct ImageRef {
     pub base: VirtAddr,
-    /// The loader's name for the image, `None` for a base no list names.
+    pub module: Option<ModuleInfo>,
+    pub dtb: Option<Dtb>,
+}
+
+/// The headers of a mapped image (`!dh`). Each directory is read on its own:
+/// a discarded or paged-out one (a driver's `INIT`-resident import table) is
+/// unavailable beside the headers that did read.
+#[record(impl)]
+pub struct ImageHeaders {
+    pub base: VirtAddr,
+    /// The loaded module at `base`, if there is one.
     pub module: Option<String>,
-    pub parts: DhParts,
-    pub headers: ImageHeaders,
-    /// Present when [`DhParts::sections`] was asked for.
-    pub debug: Option<DiagnosticValue<Vec<DebugRecord>>>,
-    /// Present when [`DhParts::exports`] was asked for.
+    #[record(rename = "file_header")]
+    pub file: FileHeader,
+    #[record(rename = "optional_header")]
+    pub optional: OptionalHeader,
+    #[record(rename = "data_directories")]
+    pub directories: Vec<DataDirectory>,
+    pub sections: Vec<SectionHeader>,
+    /// The debug directory, with each CodeView record decoded.
+    #[record(rename = "debug_directory")]
+    pub debug: DiagnosticValue<Vec<DebugRecord>>,
+    /// The export directory. `None` if you did not ask for it.
     pub exports: Option<DiagnosticValue<ImageExports>>,
-    /// Present when [`DhParts::imports`] was asked for.
+    /// The import descriptors. `None` if you did not ask for them.
     pub imports: Option<DiagnosticValue<Vec<ImportDescriptor>>>,
 }
 
-/// What `!lmi` shows for one loaded module: its identity from the mapped
-/// headers and debug directory. Its symbol state is read from the symbol
-/// store under `dtb`, the address space the module's symbols load in.
-#[derive(Debug, Clone)]
+#[record]
+impl ImageHeaders {
+    /// `PE32` or `PE32+`.
+    #[record(getter)]
+    pub fn format(&self) -> &'static str {
+        if self.optional.is_pe32_plus() {
+            "PE32+"
+        } else {
+            "PE32"
+        }
+    }
+
+    /// The mapped entry point. `None` if the image has no entry point.
+    #[record(getter, hex)]
+    pub fn entry_point(&self) -> Option<u64> {
+        let rva = self.optional.address_of_entry_point;
+        (rva != 0).then(|| self.base.0.wrapping_add(rva.into()))
+    }
+}
+
+/// The image identity of a loaded module (`!lmi`): the file-header identity
+/// from its mapped headers, the debug directory, which includes the CodeView
+/// PDB name, GUID, and age, and the symbol state.
+#[record(impl)]
 pub struct ModuleImageInfo {
     pub module: ModuleInfo,
-    pub dtb: Dtb,
-    pub headers: ImageHeaders,
+    #[record(skip)]
+    pub headers: PeHeaders,
+    #[record(rename = "debug_directory")]
     pub debug: DiagnosticValue<Vec<DebugRecord>>,
+    /// The symbol state, from the symbol store under the address space the
+    /// module's symbols load in.
+    pub symbols: ModuleSymbols,
+    /// The local PDB file, if a PDB is loaded.
+    pub symbol_file: Option<String>,
+}
+
+#[record]
+impl ModuleImageInfo {
+    #[record(getter, hex)]
+    pub fn machine(&self) -> u16 {
+        self.headers.file.machine
+    }
+
+    /// `X64`, `X86`, `ARM64`, ...
+    #[record(getter)]
+    pub fn machine_name(&self) -> &'static str {
+        self.headers.file.machine_name()
+    }
+
+    #[record(getter, hex)]
+    pub fn time_date_stamp(&self) -> u32 {
+        self.headers.file.time_date_stamp
+    }
+
+    #[record(getter, hex)]
+    pub fn size_of_image(&self) -> u32 {
+        self.headers.optional.size_of_image
+    }
+
+    #[record(getter, hex)]
+    pub fn checksum(&self) -> u32 {
+        self.headers.optional.checksum
+    }
+
+    #[record(getter, hex)]
+    pub fn characteristics(&self) -> u16 {
+        self.headers.file.characteristics
+    }
+
+    /// The `IMAGE_FILE_*` flags that are set in `characteristics`.
+    #[record(getter)]
+    pub fn characteristics_names(&self) -> Vec<String> {
+        self.headers.file.characteristics_names()
+    }
 }
 
 impl Target {
-    /// `!lmi <module|address>`: the loaded module `text` names (see
-    /// [`Self::resolve_image`]) with its headers and debug directory.
-    pub fn module_image_info(
-        &self,
-        text: &str,
-        eval: impl FnOnce(&str) -> Result<VirtAddr>,
-    ) -> Result<ModuleImageInfo> {
-        let (base, module) = self.resolve_image(text, eval)?;
-        let module = module.ok_or_else(|| {
-            Error::DebugInfo(format!("{:#x} is the base of no loaded module", base.0))
+    /// `!lmi`: the loaded module of `image` with its headers, debug
+    /// directory, and symbol state. Its symbols are those loaded under
+    /// `image.dtb`, else the kernel's for a kernel module and the module-list
+    /// scope's for any other.
+    pub fn module_image_info(&self, image: ImageRef) -> Result<ModuleImageInfo> {
+        let module = image.module.ok_or_else(|| {
+            Error::DebugInfo(format!(
+                "{:#x} is the base of no loaded module",
+                image.base.0
+            ))
         })?;
-        let dtb = if looks_like_kernel_pointer(base.0) {
-            self.kernel_dtb()
-        } else {
-            self.process_dtb()
-        };
-        self.image_info(dtb, module)
-    }
-
-    /// [`ModuleImageInfo`] of `module`, loaded in `dtb`'s address space.
-    pub fn image_info(&self, dtb: Dtb, module: ModuleInfo) -> Result<ModuleImageInfo> {
-        let (image, headers) = self.decoded_image(dtb, module.base_address)?;
+        let base = module.base_address;
+        let dtb = image.dtb.unwrap_or_else(|| {
+            if looks_like_kernel_pointer(base.0) {
+                self.kernel_dtb()
+            } else {
+                self.process_dtb()
+            }
+        });
+        let (image, headers) = self.decoded_image(dtb, base)?;
         let debug = DiagnosticValue::from_result(debug_directory(&image, &headers));
         Ok(ModuleImageInfo {
+            symbols: self.symbols.module_symbols(dtb, base),
+            symbol_file: self
+                .symbols
+                .module_pdb_path(dtb, base)
+                .map(|path| path.display().to_string()),
             module,
-            dtb,
             headers,
             debug,
         })
     }
 
-    /// `!dh [options] <module|address>`: parse the options, resolve the image
-    /// (see [`Self::resolve_image`]), and decode it.
+    /// `!dh`: decode the headers and debug directory of `image`, mapped in
+    /// `image.dtb`'s address space (else the module-list scope's), plus its
+    /// exports and imports when asked for.
     pub fn inspect_image_headers(
         &self,
-        args: &[&str],
-        eval: impl FnOnce(&str) -> Result<VirtAddr>,
-    ) -> Result<ImageHeadersDetail> {
-        let (parts, rest) = DhParts::parse(args)?;
-        let text = match rest.as_slice() {
-            [text] => *text,
-            [] => {
-                return Err(Error::InvalidArgument(
-                    "!dh needs a module name or an address".into(),
-                ));
-            }
-            _ => {
-                return Err(Error::InvalidArgument(format!(
-                    "!dh takes one module or address, got '{}'",
-                    rest.join(" ")
-                )));
-            }
-        };
-        let (base, module) = self.resolve_image(text, eval)?;
-        self.image_headers(self.process_dtb(), base, module.as_ref(), parts)
+        image: &ImageRef,
+        exports: bool,
+        imports: bool,
+    ) -> Result<ImageHeaders> {
+        let base = image.base;
+        let dtb = image.dtb.unwrap_or_else(|| self.process_dtb());
+        let (image_bytes, headers) = self.decoded_image(dtb, base)?;
+        let debug = DiagnosticValue::from_result(debug_directory(&image_bytes, &headers));
+        let exports =
+            exports.then(|| DiagnosticValue::from_result(read_pe_exports(&image_bytes, base)));
+        let imports = imports
+            .then(|| DiagnosticValue::from_result(pe_imports(&image_bytes, &headers)));
+        let PeHeaders {
+            file,
+            optional,
+            directories,
+            sections,
+        } = headers;
+        Ok(ImageHeaders {
+            base,
+            module: image.module.as_ref().map(|module| module.name.clone()),
+            file,
+            optional,
+            directories,
+            sections,
+            debug,
+            exports,
+            imports,
+        })
     }
 
     /// The loaded module named `name` (its short name, `nt` for the kernel,
@@ -260,39 +360,9 @@ impl Target {
         }
     }
 
-    /// Decode the headers of the image mapped at `base` in `dtb`'s address
-    /// space, plus the directories `parts` asks for.
-    pub fn image_headers(
-        &self,
-        dtb: Dtb,
-        base: VirtAddr,
-        module: Option<&ModuleInfo>,
-        parts: DhParts,
-    ) -> Result<ImageHeadersDetail> {
-        let (image, headers) = self.decoded_image(dtb, base)?;
-        let debug = parts
-            .sections
-            .then(|| DiagnosticValue::from_result(debug_directory(&image, &headers)));
-        let exports = parts
-            .exports
-            .then(|| DiagnosticValue::from_result(read_pe_exports(&image, base)));
-        let imports = parts
-            .imports
-            .then(|| DiagnosticValue::from_result(imports(&image, &headers)));
-        Ok(ImageHeadersDetail {
-            base,
-            module: module.map(|module| module.name.clone()),
-            parts,
-            headers,
-            debug,
-            exports,
-            imports,
-        })
-    }
-
     /// The image mapped at `base` in `dtb`'s address space and its decoded
     /// headers.
-    fn decoded_image(&self, dtb: Dtb, base: VirtAddr) -> Result<(PeImage, ImageHeaders)> {
+    fn decoded_image(&self, dtb: Dtb, base: VirtAddr) -> Result<(PeImage, PeHeaders)> {
         let image = self.mapped_pe_image(dtb, base).map_err(|error| {
             Error::DebugInfo(format!("cannot read PE headers at {:#x}: {error}", base.0))
         })?;

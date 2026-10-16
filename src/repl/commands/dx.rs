@@ -20,15 +20,63 @@ use super::dx_model::{self as model, ModelValue};
 use super::dx_query;
 use super::types::MAX_RECURSION_DEPTH;
 use crate::repl::*;
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
+use ntoseye_macros::command;
 
-repl_command! {
-    cmd_dx;
-    names: ["dx"],
-    category: "symbols, types, and expressions",
-    usage: "dx [-r<depth>] [-g] <expression>[, d | , <count>]",
-    summary: "Show a typed expression's value and its fields.",
-    details: "Evaluates an expression with casts, ->, ., [] and *, such as dx -r1 (*((nt!_IO_STACK_LOCATION *)0xffff...)) or dx ((nt!_EPROCESS*)@rcx)->UniqueProcessId, and shows its value with its type, then its fields -r levels deep (1 by default, -r0 for the value alone), following a pointer to a structure to the structure. Types read as in WinDbg (unsigned long, _EPROCESS *), and a cast takes them as WinDbg writes them, such as (unsigned long *). A pointer to a number shows the number it points to, a char or wchar_t pointer its string, and a function pointer the function. Numbers are decimal unless written with 0x, as in C++. @$proc, @$thread, @$teb and @$peb are typed pointers. The debugger data model's objects read as in WinDbg: Debugger.Sessions, @$cursession, @$curprocess, and @$curthread, a session's Processes (indexed by process ID), a process's Name, Id, Threads (indexed by thread ID), Modules (indexed from 0), and Io.Handles (indexed by handle, each with its Type and Object), a thread's Id, and a module's BaseAddress, Name, and Size. KernelObject is the typed _EPROCESS or _ETHREAD, which reads on as a typed expression: dx @$curprocess.KernelObject.Pcb. A collection takes .Count() and the queries Where, Select, SelectMany, First, Last, Any, All, OrderBy, OrderByDescending, Take, and Skip with lambdas, as in dx @$cursession.Processes.Where(p => p.Name.Contains(\"svchost\")).Select(p => new { Name = p.Name, Id = p.Id }), and Debugger.Utility.Collections.FromListEntry(head, \"nt!_EPROCESS\", \"ActiveProcessLinks\") walks a kernel list. -g shows a collection as a grid, and a format after the expression lists more elements than 100 (, 500) or shows the model's numbers in decimal (, d). NatVis views (such as a driver object's) are not supported. -nv is accepted as in WinDbg.",
-    completion: Expression,
+/// Show a typed expression's value and its fields.
+///
+/// Evaluates an expression with casts, ->, ., [] and *, such as dx -r1
+/// (*((nt!_IO_STACK_LOCATION *)0xffff...)) or dx
+/// ((nt!_EPROCESS*)@rcx)->UniqueProcessId, and shows its value with its type,
+/// then its fields -r levels deep (1 by default, -r0 for the value alone),
+/// following a pointer to a structure to the structure. Types read as in WinDbg
+/// (unsigned long, _EPROCESS *), and a cast takes them as WinDbg writes them,
+/// such as (unsigned long *). A pointer to a number shows the number it points
+/// to, a char or wchar_t pointer its string, and a function pointer the
+/// function. Numbers are decimal unless written with 0x, as in C++. @$proc,
+/// @$thread, @$teb and @$peb are typed pointers. The debugger data model's
+/// objects read as in WinDbg: Debugger.Sessions, @$cursession, @$curprocess,
+/// and @$curthread, a session's Processes (indexed by process ID), a process's
+/// Name, Id, Threads (indexed by thread ID), Modules (indexed from 0), and
+/// Io.Handles (indexed by handle, each with its Type and Object), a thread's
+/// Id, and a module's BaseAddress, Name, and Size. KernelObject is the typed
+/// _EPROCESS or _ETHREAD, which reads on as a typed expression: dx
+/// @$curprocess.KernelObject.Pcb. A collection takes .Count() and the queries
+/// Where, Select, SelectMany, First, Last, Any, All, OrderBy,
+/// OrderByDescending, Take, and Skip with lambdas, as in dx
+/// @$cursession.Processes.Where(p => p.Name.Contains("svchost")).Select(p =>
+/// new { Name = p.Name, Id = p.Id }), and
+/// Debugger.Utility.Collections.FromListEntry(head, "nt!_EPROCESS",
+/// "ActiveProcessLinks") walks a kernel list. -g shows a collection as a grid,
+/// and a format after the expression lists more elements than 100 (, 500) or
+/// shows the model's numbers in decimal (, d). NatVis views (such as a driver
+/// object's) are not supported. -nv is accepted as in WinDbg.
+#[command(
+    names = ["dx"],
+    category = "symbols, types, and expressions",
+    kind = Query,
+    python = none,
+    usage = "dx [-r<depth>] [-g] <expression>[, d | , <count>]",
+    completion = Expression
+)]
+fn dx(state: &mut ReplState<'_>, #[arg(parse = dx_request)] request: DxRequest) -> Result<()> {
+    state.dx(&request.0)
+}
+
+/// A `dx` line whose options and format parse and that has an expression:
+/// its own grammar, [`parse_dx_args`], which the command reads it with.
+struct DxRequest(String);
+
+fn dx_request(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<DxRequest, ArgError> {
+    let raw = cursor.raw();
+    let args = parse_dx_args(&raw).map_err(|message| ArgError::Message(format!("dx: {message}")))?;
+    if args.text.is_empty() {
+        return Err(ArgError::Missing);
+    }
+    Ok(DxRequest(raw))
 }
 
 /// The elements `dx` lists of an array or a collection before its `[...]`
@@ -372,19 +420,10 @@ enum Place {
 }
 
 impl ReplState<'_> {
-    fn cmd_dx(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let args = match parse_dx_args(invocation.raw_tail) {
-            Ok(parsed) => parsed,
-            Err(message) => {
-                error!("dx: {message}");
-                return Ok(());
-            }
-        };
+    /// `dx` on a line [`dx_request`] accepted.
+    fn dx(&mut self, raw: &str) -> Result<()> {
+        let args = parse_dx_args(raw).map_err(Error::DebugInfo)?;
         let text = args.text;
-        if text.is_empty() {
-            outln!("{}\n", command_help(invocation.name));
-            return Ok(());
-        }
         // A grid shows each element's fields, so it reads two levels.
         let depth = if args.grid {
             args.depth.max(2)

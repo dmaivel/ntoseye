@@ -5,7 +5,6 @@ use ntoseye_macros::record;
 
 use super::bugcheck::{Bugcheck, bugcheck};
 use super::execution::{run_status, stack_frames};
-use super::module::module;
 use crate::dmp::triage::TriagePrcbInfo;
 use crate::dmp::{self, DmpException, DmpSystemInfo};
 use crate::target::DiagnosticValue;
@@ -374,7 +373,7 @@ pub struct TriageReport {
     pub backtrace: Option<Vec<super::execution::StackFrame>>,
     /// The loaded modules, up to a maximum that the caller sets (see
     /// `modules_total`).
-    pub modules: Vec<super::module::LoadedModule>,
+    pub modules: Vec<crate::guest::ModuleInfo>,
     /// The number of loaded modules.
     pub modules_total: usize,
     pub unloaded_drivers: Vec<UnloadedDriver>,
@@ -854,7 +853,7 @@ pub fn triage_report(report: &ReportDetail, module_limit: usize) -> TriageReport
             .modules
             .iter()
             .take(module_limit)
-            .map(module)
+            .cloned()
             .collect(),
         modules_total: report.modules.len(),
         unloaded_drivers: report

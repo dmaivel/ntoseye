@@ -18,6 +18,7 @@ use crate::guest::ProcessInfo;
 use crate::session::Session;
 use crate::session::effects::{Effects, Refusal, RunState, TargetScope};
 use crate::target::cpu::Processor;
+use crate::target::image::ImageRef;
 use crate::target::{MemoryKind, ThreadInfo};
 use crate::types::VirtAddr;
 use crate::view::record::{ToView, Typed};
@@ -27,6 +28,7 @@ pub use super::inspect::Inspect;
 pub use super::memory::Memory;
 pub use super::module::{Device, Driver, Module};
 pub use super::process::{Heap, Heaps, Process};
+pub use super::symbols::Symbols;
 use super::symbols::load_scope_symbols;
 pub use super::thread::{Cpu, Thread};
 pub use super::userdump::{UserProcess, UserThread};
@@ -444,5 +446,22 @@ impl CommandHost for Module {
 impl Bind<String> for Module {
     fn bind(&self) -> String {
         self.info.short_name.clone()
+    }
+}
+
+/// A module binds its image (`!dh`, `!lmi`): its base and loader entry, in
+/// the address space it was listed in. The kernel's is left to the command,
+/// which names it for the session.
+impl Bind<ImageRef> for Module {
+    fn bind(&self) -> ImageRef {
+        ImageRef {
+            base: self.info.base_address,
+            module: Some(self.info.clone()),
+            dtb: match &self.space {
+                Space::Process(process) => Some(process.dtb),
+                Space::Secure(root) | Space::Root(root) => Some(*root),
+                Space::Kernel | Space::Physical => None,
+            },
+        }
     }
 }

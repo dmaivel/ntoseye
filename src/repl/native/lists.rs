@@ -12,7 +12,7 @@ use crate::guest::{ModuleInfo, ProcessInfo};
 use crate::repl::commands::address_space::{
     PAGE_SHIFT, format_region_size, vad_protection_label, vad_type_label,
 };
-use crate::repl::commands::symbols::ModuleListing;
+use crate::symbols::ModuleListing;
 use crate::session::VcpuInfo;
 use crate::symbols::ModuleSymbolStatus;
 use crate::target::mm::{MemoryRegionInfo, VadType};
@@ -90,10 +90,10 @@ pub fn modules(modules: &[ModuleListing], timestamp: bool) -> View {
                     None => none(),
                 },
             )
-            .cell("symbols", symbol_status(listing.status.as_ref()))
+            .cell("symbols", symbol_status(listing.symbols.status.as_ref()))
             .cell(
                 "source",
-                match &listing.source {
+                match &listing.symbols.source {
                     Some(source) => span(source.label(), MUTED),
                     None => none(),
                 },
@@ -128,21 +128,21 @@ pub fn module_details(modules: &[ModuleListing], timestamp: bool) -> View {
                     addr(module.end_address().0),
                 ],
             )
-            .item("symbols", symbol_status(listing.status.as_ref()))
+            .item("symbols", symbol_status(listing.symbols.status.as_ref()))
             .item(
                 "source",
-                match &listing.source {
+                match &listing.symbols.source {
                     Some(source) => span(source.label(), ""),
                     None => none(),
                 },
             );
-        kv = match listing.pdb {
+        kv = match listing.symbols.pdb {
             Some(identity) => kv
                 .item("pdb guid", span(format!("{:032X}", identity.guid), NUMBER))
                 .item("pdb age", span(identity.age.to_string(), NUMBER)),
             None => kv.item("pdb", none()),
         };
-        if let Some(ModuleSymbolStatus::Failed(reason)) = &listing.status {
+        if let Some(ModuleSymbolStatus::Failed(reason)) = &listing.symbols.status {
             kv = kv.item("error", span(reason, "error"));
         }
         if timestamp {

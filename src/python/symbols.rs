@@ -2,17 +2,20 @@
 
 use pyo3::prelude::*;
 
-use super::context::Space;
+use super::command::CommandHost;
+use super::context::{Context, Space};
 use super::handle::Owner;
 use super::{err, raise, symbol_not_found};
 use crate::breakpoints::BreakpointSpec;
 use crate::expr::Expr;
 use crate::session::Session;
-use crate::symbols::{CodeFrame, parse_source_paths, parse_symbol_sources};
-use crate::target::ReloadScope;
+use crate::symbols::{
+    CodeFrame, ProcedureLocal, SourceLocation, SymbolCandidate, parse_source_paths,
+    parse_symbol_sources,
+};
+use crate::target::SymbolSearchMatch;
 use crate::types::{Dtb, VirtAddr};
 use crate::view::record::Typed;
-use crate::view::{self};
 
 /// Symbol lookup in one address space (`dbg.symbols`, `proc.symbols`).
 #[pyclass(module = "ntoseye")]
@@ -83,38 +86,13 @@ impl Symbols {
         &self,
         py: Python<'py>,
         name: &str,
-    ) -> PyResult<Typed<'py, Vec<view::symbols::SymbolCandidate>>> {
+    ) -> PyResult<Typed<'py, Vec<SymbolCandidate>>> {
         let space = &self.space;
         let candidates = scoped(py, &self.owner, space, |session| {
             let dtb = space.dtb(&session.target)?;
             Ok(session.target.symbols.find_symbol_candidates(dtb, name))
         })?;
-        Typed::new(
-            py,
-            candidates
-                .iter()
-                .map(view::symbols::symbol_candidate)
-                .collect::<Vec<_>>(),
-        )
-    }
-
-    /// Get the nearest symbol, or `None` if no symbol covers `addr`.
-    fn nearest<'py>(
-        &self,
-        py: Python<'py>,
-        addr: u64,
-    ) -> PyResult<Typed<'py, Option<view::symbols::Symbol>>> {
-        let nearest = scoped(py, &self.owner, &self.space, |session| {
-            Ok(session
-                .target
-                .nearest_symbol_current_context(VirtAddr(addr)))
-        })?;
-        Typed::new(
-            py,
-            nearest.map(|(module, name, offset)| {
-                view::symbols::symbol(VirtAddr(addr), module, name, offset)
-            }),
-        )
+        Typed::new(py, candidates)
     }
 
     /// Search symbol names by fuzzy match. Use `module!query` to search in one module.
@@ -124,20 +102,14 @@ impl Symbols {
         py: Python<'py>,
         query: &str,
         limit: usize,
-    ) -> PyResult<Typed<'py, Vec<view::symbols::SymbolSearchMatch>>> {
+    ) -> PyResult<Typed<'py, Vec<SymbolSearchMatch>>> {
         if !(1..=500).contains(&limit) {
             return Err(raise("limit must be in range 1-500"));
         }
         let results = scoped(py, &self.owner, &self.space, |session| {
             Ok(session.target.search_symbols(query, limit))
         })?;
-        Typed::new(
-            py,
-            results
-                .iter()
-                .map(view::symbols::symbol_search_match)
-                .collect::<Vec<_>>(),
-        )
+        Typed::new(py, results)
     }
 
     /// Get the PDB source metadata and the mapped local path for an address.
@@ -145,11 +117,11 @@ impl Symbols {
         &self,
         py: Python<'py>,
         addr: u64,
-    ) -> PyResult<Typed<'py, Option<view::symbols::SourceLocation>>> {
+    ) -> PyResult<Typed<'py, Option<SourceLocation>>> {
         let location = scoped(py, &self.owner, &self.space, |session| {
             Ok(session.target.source_location(VirtAddr(addr)))
         })?;
-        Typed::new(py, location.as_ref().map(view::symbols::source_location))
+        Typed::new(py, location)
     }
 
     /// Get all loaded addresses that match a source file and line.
@@ -171,38 +143,16 @@ impl Symbols {
         &self,
         py: Python<'py>,
         addr: u64,
-    ) -> PyResult<Typed<'py, Vec<view::symbols::ProcedureLocal>>> {
+    ) -> PyResult<Typed<'py, Vec<ProcedureLocal>>> {
         let rows = scoped(py, &self.owner, &self.space, |session| {
             let locals = session
                 .target
                 .frame_locals(CodeFrame::at(VirtAddr(addr)))
                 .map_err(err)?
                 .unwrap_or_default();
-            Ok(locals
-                .iter()
-                .map(view::symbols::procedure_local)
-                .collect::<Vec<_>>())
+            Ok(locals.to_vec())
         })?;
         Typed::new(py, rows)
-    }
-
-    /// Reload symbols in this space, and resolve symbolic breakpoints again.
-    fn reload<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Typed<'py, view::module::SymbolReloadReport>> {
-        let report = scoped(py, &self.owner, &self.space, |session| {
-            let report = session
-                .target
-                .reload_module_symbols(ReloadScope::Current, None)
-                .map_err(err)?;
-            session
-                .breakpoints
-                .resolve_symbolic(session.backend.as_mut(), &session.target)
-                .map_err(err)?;
-            Ok(view::module::module_symbol_report(&report))
-        })?;
-        Typed::new(py, report)
     }
 
     /// The ordered symbol sources (`.sympath`). An assignment replaces the full path.
@@ -224,14 +174,6 @@ impl Symbols {
         let parsed = parse_symbol_sources(&sources);
         scoped(py, &self.owner, &self.space, move |session| {
             session.target.symbols.set_symbol_sources(parsed);
-            Ok(())
-        })
-    }
-
-    /// Restore the default symbol sources (`.symfix`).
-    fn reset_path(&self, py: Python<'_>) -> PyResult<()> {
-        scoped(py, &self.owner, &self.space, |session| {
-            session.target.symbols.reset_symbol_sources();
             Ok(())
         })
     }
@@ -286,6 +228,19 @@ impl Symbols {
                 .map(|address| address.map(|address| address.0))
                 .map_err(err)
         })
+    }
+}
+
+/// Symbol commands (`ln`, `.reload`, `.symfix`) run in the handle's
+/// address space, with its module symbols loaded first.
+impl CommandHost for Symbols {
+    fn owner(&self) -> &Owner {
+        &self.owner
+    }
+
+    fn context(&self, py: Python<'_>) -> PyResult<Context> {
+        scoped(py, &self.owner, &self.space, |_| Ok(()))?;
+        Ok(self.space.context())
     }
 }
 

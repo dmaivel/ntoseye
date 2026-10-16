@@ -349,9 +349,12 @@ impl StringDescriptor {
     }
 }
 
+/// A symbol that a name search matched.
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolSearchMatch {
     pub name: String,
+    /// `None` if the match does not resolve to a unique address.
     pub address: Option<VirtAddr>,
     pub module: Option<String>,
 }
