@@ -420,6 +420,9 @@ impl<'a> GdbTarget<'a> {
         if self.terminating() || self.session.backend.is_running() {
             return;
         }
+        // Not `Session::run`: the driver resumes to reach and report the
+        // next stop, and returns a parked stop instead of resuming. A detach
+        // reports nothing and must leave the guest running either way.
         if supports_capability(
             &self.session.capabilities(),
             DebugCapability::ExecutionControl,

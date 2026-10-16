@@ -138,10 +138,9 @@ impl Session {
     /// Resume the VM. If sitting on one of our breakpoints, step past it first
     /// (otherwise the `int3` at RIP re-fires immediately), re-arm enabled
     /// breakpoints, then continue and drop the now-stale inspection caches.
-    /// The canonical resume prologue, shared by the REPL and the SDK.
-    ///
-    /// Does not poll for Ctrl+C or handle KD target-reload/reconnect the way the
-    /// REPL's continue loop does; those remain REPL concerns.
+    /// It waits for nothing: a run that ends on a stop goes through
+    /// [`Self::run`]. Only a resume that reports no stop calls it directly:
+    /// [`Self::with_target_halted`]'s own break-in, and gdbserver's detach.
     pub fn resume(&mut self) -> Result<()> {
         self.resume_with_disposition(ContinueDisposition::Handled)
     }
