@@ -134,7 +134,7 @@ impl Render for PfnDetail {
     names = ["!vtop", "vtop"],
     category = "memory manager",
     kind = Query,
-    target = Kernel,
+    target = Machine,
     python = Inspect,
 )]
 fn vtop(

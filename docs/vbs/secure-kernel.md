@@ -64,7 +64,7 @@ bc *
 
 ntoseye identifies secure-system and trustlet roots by their mapping of the secure kernel. A stop shows `VTL1`, the real CPU registers, and the secure-kernel stack frames, and ntoseye does not attribute an NT thread to that CPU. `.vtl 0` leaves an explicit memory view, but it does not move a CPU that stopped in VTL1 back into NT.
 
-At a VTL1 stop, {command}`t`, {command}`p`, {command}`gu`, {command}`pa`/{command}`ta`, {command}`wt`, and `g <address>` run through secure-kernel code. They use free debug-register slots: a step uses one slot for each place where the instruction can continue, and a run-to command uses one slot for its target. For more information, see [stepping under the Windows hypervisor](internals.md#stepping-without-the-trap-flag). In the `.vtl 1` memory view, you can use only plain {command}`g`.
+At a VTL1 stop, {command}`t`, {command}`p`, {command}`gu`, {command}`wt`, `g <address>`, and the step-until commands ({command}`pa`/{command}`ta`, {command}`pc`/{command}`tc`, {command}`pt`/{command}`tt`, {command}`ph`/{command}`th`) run through secure-kernel code. They use free debug-register slots: a step uses one slot for each place where the instruction can continue, and a run-to command uses one slot for its target. For more information, see [stepping under the Windows hypervisor](internals.md#stepping-without-the-trap-flag). In the `.vtl 1` memory view, you can use only {command}`g`, {command}`gh` and {command}`gn` without an address.
 
 ntoseye does not support these operations:
 

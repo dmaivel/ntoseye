@@ -94,7 +94,9 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   ...] | none` (one method on each class: a kernel and a user-dump
 ///   class can share a command);
 /// - effects, which `Session::admit` enforces for every host: `target =
-///   Any | Kernel`, `state = Any | Halted | HaltedOrParkedThread | Running`,
+///   Any | Kernel | Machine | Nt` (`Kernel` and `Machine` need a kernel
+///   target; `Kernel` and `Nt` read NT's structures, which a VTL1 address
+///   space refuses), `state = Any | Halted | HaltedOrParkedThread | Running`,
 ///   `run = None | Step | Run`, `writes = [Memory, Registers, Hardware,
 ///   Breakpoints, Symbols, Files]`, `live_only`, `capability =
 ///   <DebugCapability>`;

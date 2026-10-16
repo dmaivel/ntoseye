@@ -536,10 +536,7 @@ pub fn report_refusal(typed: &str, refusal: Refusal) {
             "{typed} needs {} support, which the {backend} backend lacks",
             capability.label()
         ),
-        Refusal::ReadOnlyVtl1 => error!(
-            "'{typed}' is unavailable in the .vtl 1 memory view, which is read-only; use .vtl 0 \
-             first"
-        ),
+        Refusal::Vtl1(refusal) => error!("{}", refusal.message(typed)),
     }
 }
 

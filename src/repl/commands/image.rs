@@ -162,6 +162,7 @@ fn lmi_image(
     names = ["!lmi", "lmi"],
     category = "processes and modules",
     kind = Query,
+    target = Nt,
     python = Module,
     python_name = "image_info",
 )]

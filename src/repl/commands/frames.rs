@@ -209,6 +209,7 @@ impl Render for FunctionEntry {
     names = [".cxr"],
     category = "execution and stack",
     kind = Action,
+    target = Nt,
     state = Halted,
     python = none,
 )]
@@ -255,6 +256,7 @@ fn lone_address(
     names = [".ecxr"],
     category = "execution and stack",
     kind = Action,
+    target = Nt,
     state = Halted,
     python = none,
 )]
@@ -366,7 +368,7 @@ fn ecxr(state: &mut ReplState<'_>) -> Result<()> {
     names = [".vtlcxr"],
     category = "execution and stack",
     kind = Action,
-    target = Kernel,
+    target = Machine,
     state = Halted,
     python = none,
 )]
@@ -523,6 +525,7 @@ fn vtl_choice(
     names = [".exr"],
     category = "execution and stack",
     kind = Query,
+    target = Nt,
     python = Inspect,
     python_name = "exception_record",
 )]

@@ -377,6 +377,7 @@ impl Render<bool> for AddressReport {
     names = ["!vprot", "vprot"],
     category = "memory manager",
     kind = Query,
+    target = Nt,
     python = Process,
     python_name = "protection",
 )]

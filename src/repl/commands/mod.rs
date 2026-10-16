@@ -1,6 +1,7 @@
 use crate::diagnostics::{errors_reported, print_notice};
 use crate::expr::Expr;
 use crate::repl::*;
+use crate::session::effects::Refusal;
 use crate::session::{ActionRunner, Session};
 use crate::types::VirtAddr;
 use crate::ui;
@@ -343,10 +344,6 @@ impl ReplState<'_> {
             error!("{reason}");
             return Ok(Some(Flow::Denied));
         }
-        if let Some(reason) = self.secure_denial(spec) {
-            error!("{reason}");
-            return Ok(Some(Flow::Denied));
-        }
         if let Some(reason) = self.run_control_denial(spec) {
             error!("{reason}");
             return Ok(Some(Flow::Denied));
@@ -355,8 +352,15 @@ impl ReplState<'_> {
             return Ok(Some(flow));
         }
         if let Err(refusal) = self.ctx.admit(&spec.effects) {
+            // A VTL1 refusal ends a script or event command as a context
+            // denial does: what follows was meant for the other VTL.
+            let flow = if matches!(refusal, Refusal::Vtl1(_)) {
+                Flow::Denied
+            } else {
+                Flow::Continue
+            };
             report_refusal(typed, refusal);
-            return Ok(Some(Flow::Continue));
+            return Ok(Some(flow));
         }
         Ok(None)
     }

@@ -544,7 +544,7 @@ pub struct MsrValue {
     names = ["rdmsr"],
     category = "cpu",
     kind = Query,
-    target = Kernel,
+    target = Machine,
     state = Halted,
     capability = Msr,
     python = none,
@@ -883,7 +883,7 @@ impl Render for CpuInfo {
     names = ["vcpu"],
     category = "processes and modules",
     kind = Action,
-    target = Kernel,
+    target = Machine,
     state = Halted,
     python = none,
 )]

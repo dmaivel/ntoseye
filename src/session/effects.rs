@@ -72,13 +72,31 @@ impl Effects {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TargetScope {
     Any,
-    /// A Windows kernel: a live target or a kernel dump.
+    /// A Windows kernel: a live target or a kernel dump. Reads NT's
+    /// structures, so a VTL1 address space refuses it.
     Kernel,
+    /// A Windows kernel target's machine rather than NT's structures:
+    /// processors, MSRs, page tables, the hypervisor, the VTLs, and the
+    /// selection of a VTL0 context. A VTL1 address space admits it.
+    Machine,
     /// NT's own state about an address space: a kernel target or a
     /// user-mode minidump (both are NT's), but not VTL1 or a root outside
-    /// NT. The REPL and admission treat it as `Any`; an SDK `Memory` over
-    /// such a space refuses it (`!address`).
+    /// NT. Admission refuses it in a VTL1 address space and otherwise
+    /// treats it as `Any`; an SDK `Memory` over such a space refuses it
+    /// (`!address`).
     Nt,
+}
+
+impl TargetScope {
+    /// Refused on a user-mode minidump.
+    pub fn needs_kernel(self) -> bool {
+        matches!(self, TargetScope::Kernel | TargetScope::Machine)
+    }
+
+    /// Reads NT's structures, which a VTL1 address space does not have.
+    pub fn reads_nt(self) -> bool {
+        matches!(self, TargetScope::Kernel | TargetScope::Nt)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,20 +161,59 @@ pub enum Refusal {
         capability: DebugCapability,
         backend: &'static str,
     },
-    /// An operation that writes guest or debugger state (anything but host
-    /// files) in the `.vtl 1` memory view, which is read-only.
-    ReadOnlyVtl1,
+    /// The current VTL1 address space refuses the operation.
+    Vtl1(Vtl1Refusal),
+}
+
+/// Why a VTL1 address space refuses an operation. The secure kernel's
+/// state is not laid out as NT's, VTL0 cannot write VTL1's memory,
+/// registers or code, and the `.vtl 1` view is memory alone, with no vCPU
+/// behind it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Vtl1Refusal {
+    /// In the explicit `.vtl 1` memory view: it reads NT, writes, or needs
+    /// a vCPU's state.
+    MemoryView,
+    /// At a live VTL1 stop with a saved VTL1 context selected (`.vtlcxr`),
+    /// which is read-only.
+    SelectedContext,
+    /// At a live VTL1 stop: it reads NT or writes.
+    LiveStop,
+}
+
+impl Vtl1Refusal {
+    /// The refusal of `operation`, worded the same for every host.
+    pub fn message(self, operation: &str) -> String {
+        match self {
+            Vtl1Refusal::MemoryView => format!(
+                "'{operation}' is unavailable in the .vtl 1 memory view (reads, `ba e1`, and plain \
+                 g only); use .vtl 0 first"
+            ),
+            Vtl1Refusal::SelectedContext => format!(
+                "'{operation}' is unavailable while a VTL1 context is selected, which is \
+                 read-only; .vtlcxr goes back to VTL0's"
+            ),
+            Vtl1Refusal::LiveStop => format!(
+                "'{operation}' is unavailable while the vCPU is stopped in VTL1: it needs NT \
+                 state, or writes VTL1 memory, registers, or code"
+            ),
+        }
+    }
 }
 
 impl Session {
     /// Whether `effects` may run now. Checked in a fixed order (target kind,
-    /// run state, execution control, static dump, capability, VTL1 view),
-    /// so every host refuses the same operation for the same reason.
+    /// VTL1 address space, run state, execution control, static dump,
+    /// capability), so every host refuses the same operation for the same
+    /// reason.
     pub fn admit(&self, effects: &Effects) -> Result<(), Refusal> {
-        if effects.target == TargetScope::Kernel
+        if effects.target.needs_kernel()
             && let Err(error) = self.target.require_kernel()
         {
             return Err(Refusal::KernelRequired(error));
+        }
+        if let Some(refusal) = self.vtl1_refusal(effects) {
+            return Err(Refusal::Vtl1(refusal));
         }
         let running = self.backend.is_running();
         if running && effects.needs_halt(self) {
@@ -195,20 +252,48 @@ impl Session {
                 backend: self.backend.name(),
             });
         }
-        // The `.vtl 1` view is read-only for the guest; a file the debugger
-        // writes on the host, or its symbol state (`.reload` of the secure
-        // kernel's modules), changes nothing in it, and the breakpoint table
-        // is the debugger's (`ba e1` is how a VTL1 stop is reached; the
-        // breakpoint core refuses a site that would patch VTL1 code).
-        if effects
+        Ok(())
+    }
+
+    /// Why the current VTL1 address space (the `.vtl 1` view, or the root of
+    /// a live VTL1 stop) refuses `effects`, if it does.
+    ///
+    /// NT's structures are not the secure kernel's, and VTL0 cannot write
+    /// VTL1's memory, registers or devices. A file the debugger writes on
+    /// the host, its symbol state (`.reload` of the secure kernel's
+    /// modules) and the breakpoint table are the debugger's: `ba e1` is how
+    /// a VTL1 stop is reached, and the breakpoint core refuses a site that
+    /// would patch VTL1 code, as runs and steps take debug-register sites
+    /// there. The `.vtl 1` view is memory alone: it also refuses what needs
+    /// a vCPU's state (any operation that needs the target halted, but
+    /// breakpoint bookkeeping), and a resume leaves it first.
+    fn vtl1_refusal(&self, effects: &Effects) -> Option<Vtl1Refusal> {
+        let target = &self.target;
+        if !target.in_secure_address_space() {
+            return None;
+        }
+        let writes_guest = effects
             .writes
             .iter()
-            .any(|write| !matches!(write, Writes::Files | Writes::Symbols | Writes::Breakpoints))
-            && self.target.in_secure_scope()
-        {
-            return Err(Refusal::ReadOnlyVtl1);
+            .any(|write| matches!(write, Writes::Memory | Writes::Registers | Writes::Hardware));
+        let refused = effects.target.reads_nt() || writes_guest;
+        if target.in_secure_scope() {
+            let needs_vcpu =
+                effects.state != RunState::Any && effects.writes != [Writes::Breakpoints];
+            return (refused || needs_vcpu).then_some(Vtl1Refusal::MemoryView);
         }
-        Ok(())
+        if !refused {
+            return None;
+        }
+        let context_selected = target
+            .selected_frame
+            .as_ref()
+            .is_some_and(|frame| !frame.is_live());
+        Some(if context_selected {
+            Vtl1Refusal::SelectedContext
+        } else {
+            Vtl1Refusal::LiveStop
+        })
     }
 
     fn supports(&self, capability: DebugCapability) -> bool {

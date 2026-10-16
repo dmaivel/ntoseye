@@ -280,6 +280,6 @@ pub fn admit(session: &mut Session, effects: &Effects, operation: &str) -> PyRes
             "{operation} needs {} support, which the {backend} backend lacks",
             capability.label()
         )),
-        Refusal::ReadOnlyVtl1 => raise("VTL1 memory is read-only"),
+        Refusal::Vtl1(refusal) => raise(refusal.message(operation)),
     })
 }

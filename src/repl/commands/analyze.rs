@@ -1312,6 +1312,7 @@ impl Render for Option<BugcheckAnalysis> {
     names = ["!analyze", "analyze"],
     category = "analysis",
     kind = Query,
+    target = Nt,
     forms = [triage, hang, decode_bugcheck],
 )]
 fn analyze(

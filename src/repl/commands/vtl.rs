@@ -392,192 +392,7 @@ fn field_lines(fields: &[HypercallField]) -> Vec<String> {
         .collect()
 }
 
-/// Commands that only read memory through the current root or are
-/// debugger-local, so they mean the same in any VTL1 address space. No VTL0
-/// register file or mediated write may be interpreted as belonging to the
-/// secure kernel. Aliases pass this same gate.
-fn secure_inspection_command(spec: &CommandSpec) -> bool {
-    matches!(
-        spec.names[0],
-        ".vtl"
-            | "!trustlets"
-            | "!hvpartitions"
-            | "!hvvps"
-            | "!hvept"
-            | "!hveptdiff"
-            | "!hvcalls"
-            | "!hvvmcs"
-            | "!hvr"
-            | "!hvd"
-            | "!hvu"
-            | ".process"
-            | "attach"
-            | "detach"
-            | ".context"
-            | "db"
-            | "dw"
-            | "dW"
-            | "dc"
-            | "dd"
-            | "dq"
-            | "dp"
-            | "dds"
-            | "dqs"
-            | "dyb"
-            | "dpp"
-            | "da"
-            | "du"
-            | "ds"
-            | "dS"
-            | "u"
-            | "uf"
-            | "ub"
-            | "dt"
-            | "dl"
-            | "!list"
-            | "x"
-            | "ln"
-            // An explicit root and a page walk; no NT state.
-            | "!vtop"
-            | "?"
-            | "set"
-            | "vars"
-            | "unset"
-            | "lm"
-            | "lmv"
-            | ".reload"
-            | "ld"
-            | ".fetchimage"
-            | ".sympath"
-            | ".sympath+"
-            | ".symfix"
-            | ".srcpath"
-            | ".srcpath+"
-            | "n"
-            | ".effmach"
-            | ".echo"
-            | ".printf"
-            // Each command it runs passes this gate itself.
-            | ".foreach"
-            // Walks `lm`'s list, the secure kernel's in VTL1.
-            | "!for_each_module"
-            // Script control flow; each command it runs passes this gate.
-            | ".if"
-            | ".elsif"
-            | ".else"
-            | ".while"
-            | ".for"
-            | ".do"
-            | ".break"
-            | ".continue"
-            | ".block"
-            | "j"
-            | "$<"
-            | "$$"
-            | ".sleep"
-            | ".cls"
-            | ".logopen"
-            | ".logappend"
-            | ".logclose"
-            | ".hh"
-            | "!error"
-            | "q"
-            | "capabilities"
-    )
-}
-
-/// Breakpoint bookkeeping and the one resume a VTL1 stop can be reached and
-/// left with. The core accepts only GDB hardware execute breakpoints in a
-/// VTL1 space; software sites (`bp`, `g <address>`, stepping) would patch or
-/// trap code VTL0 cannot see. `g` is refused with an address by its handler.
-fn secure_hardware_workflow_command(spec: &CommandSpec) -> bool {
-    matches!(
-        spec.names[0],
-        "ba" | "bl" | ".bpcmds" | "bc" | "bd" | "be" | "bpc" | "bs" | "br" | "bpp" | "g" | "gc"
-    )
-}
-
-/// vCPU state that is genuinely VTL1's when the backend is stopped there:
-/// the live register file (read-only: `r` refuses assignment), its stack,
-/// frames, and the processor list, and `.vtlcxr`, which selects a saved
-/// VTL state the hypervisor wrote and writes nothing, so a selected VTL1
-/// state has a way back to VTL0's. NT structures (KPCR, threads,
-/// processes) and `.cxr` (a context record read from memory) stay refused
-/// because the secure kernel's state is not laid out as NT's.
-fn live_secure_vcpu_command(spec: &CommandSpec) -> bool {
-    matches!(
-        spec.names[0],
-        "r" | "kn"
-            | ".frame"
-            | ".vtlcxr"
-            | "!for_each_frame"
-            | "dv"
-            | "~"
-            | "vcpu"
-            | "rdmsr"
-            | "break"
-            | "status"
-            | ".lastevent"
-    )
-}
-
-/// Whether the explicit `.vtl 1` scope admits `spec`. The scope is a memory
-/// view, not a claim that the backend is stopped in VTL1, so it has no
-/// register file: only reads, the hardware breakpoint workflow, and a plain
-/// `g` (which leaves the scope before resuming) run in it.
-pub fn secure_scope_admits(spec: &CommandSpec) -> bool {
-    secure_inspection_command(spec) || secure_hardware_workflow_command(spec)
-}
-
-/// Whether a live stop whose read root is a VTL1 root admits `spec`: what
-/// the explicit scope admits plus the real vCPU state.
-pub fn live_secure_admits(spec: &CommandSpec) -> bool {
-    secure_scope_admits(spec) || live_secure_vcpu_command(spec) || secure_step_command(spec)
-}
-
-/// Run control a live VTL1 stop can take without writing secure-kernel code:
-/// steps run the vCPU alone to debug-register sites on an instruction's
-/// successors, and run-to targets (`p` over a call, `gu`, `g <address>`)
-/// in secure-kernel code take a debug-register site too. A software site
-/// anywhere in VTL1 is still refused by the breakpoint core.
-fn secure_step_command(spec: &CommandSpec) -> bool {
-    matches!(spec.names[0], "t" | "p" | "gu" | "pa" | "ta" | "wt")
-}
-
 impl ReplState<'_> {
-    /// Why the current VTL1 address space refuses `spec`, if it does. Decided
-    /// on the resolved command, after alias expansion, so an alias cannot
-    /// reach a write or an NT extension from VTL1.
-    pub fn secure_denial(&self, spec: &CommandSpec) -> Option<String> {
-        let target = &self.ctx.target;
-        let name = spec.names[0];
-        if target.in_secure_scope() {
-            return (!secure_scope_admits(spec)).then(|| {
-                format!(
-                    "'{name}' is unavailable in the .vtl 1 memory view (reads, `ba e1`, and plain g \
-                     only); use .vtl 0 first"
-                )
-            });
-        }
-        if target.in_secure_address_space() && !live_secure_admits(spec) {
-            if target
-                .selected_frame
-                .as_ref()
-                .is_some_and(|frame| !frame.is_live())
-            {
-                return Some(format!(
-                    "'{name}' is unavailable while a VTL1 context is selected, which is \
-                     read-only; .vtlcxr goes back to VTL0's"
-                ));
-            }
-            return Some(format!(
-                "'{name}' is unavailable while the vCPU is stopped in VTL1: it needs NT state, \
-                 or writes VTL1 memory, registers, or code"
-            ));
-        }
-        None
-    }
-
     /// Leave the explicit VTL1 scope before a VTL0 selection (`.vtl 0`,
     /// `.process`, `attach`, `detach`, `.context`) or a resume. The live
     /// register file and the root it implies come back, which is a VTL1 root
@@ -956,7 +771,7 @@ fn all_words(
     names = [".vtl"],
     category = "processes and modules",
     kind = Action,
-    target = Kernel,
+    target = Machine,
     python = none,
 )]
 fn vtl(
@@ -981,7 +796,7 @@ fn vtl(
     names = ["!trustlets"],
     category = "processes and modules",
     kind = Query,
-    target = Kernel,
+    target = Machine,
     python = none,
 )]
 fn trustlets(repl: &mut ReplState<'_>) -> Result<()> {
@@ -1027,7 +842,7 @@ fn trustlets(repl: &mut ReplState<'_>) -> Result<()> {
     names = ["!hvpartitions"],
     category = "processes and modules",
     kind = Query,
-    target = Kernel,
+    target = Machine,
     python = none,
 )]
 fn hvpartitions(repl: &mut ReplState<'_>) -> Result<()> {
@@ -1085,7 +900,7 @@ fn hvpartitions(repl: &mut ReplState<'_>) -> Result<()> {
     names = ["!hvvps"],
     category = "processes and modules",
     kind = Query,
-    target = Kernel,
+    target = Machine,
     python = none,
 )]
 fn hvvps(
@@ -1204,7 +1019,7 @@ fn hvvps(
     names = ["!hvept"],
     category = "processes and modules",
     kind = Query,
-    target = Kernel,
+    target = Machine,
     python = none,
 )]
 fn hvept(
@@ -1339,7 +1154,7 @@ fn hvept(
     names = ["!hveptdiff"],
     category = "processes and modules",
     kind = Query,
-    target = Kernel,
+    target = Machine,
     python = none,
 )]
 fn hveptdiff(
@@ -1459,7 +1274,7 @@ fn hveptdiff(
     names = ["!hvcalls"],
     category = "processes and modules",
     kind = Query,
-    target = Kernel,
+    target = Machine,
     forms = [hypercalls],
 )]
 fn hvcalls(
@@ -1634,7 +1449,7 @@ fn hvcall(repl: &mut ReplState<'_>) -> Result<()> {
     names = ["!hvvmcs"],
     category = "processes and modules",
     kind = Query,
-    target = Kernel,
+    target = Machine,
     python = none,
 )]
 fn hvvmcs(
@@ -1722,7 +1537,7 @@ fn hvvmcs(
     names = ["!hvd"],
     category = "processes and modules",
     kind = Query,
-    target = Kernel,
+    target = Machine,
     python = none,
 )]
 fn hvd(
@@ -1824,7 +1639,7 @@ fn hvd(
     names = ["!hvu"],
     category = "processes and modules",
     kind = Query,
-    target = Kernel,
+    target = Machine,
     python = none,
 )]
 fn hvu(
@@ -1924,7 +1739,7 @@ fn hvu(
     names = ["!hvr"],
     category = "processes and modules",
     kind = Query,
-    target = Kernel,
+    target = Machine,
     state = Halted,
     python = none,
 )]
@@ -2087,6 +1902,7 @@ mod tests {
     use super::*;
     use crate::guest::hypercall_input::decode_hypercall;
     use crate::output::capture;
+    use crate::session::effects::Refusal;
     use crate::session::tests::{MockBackend, session_with_mock};
 
     fn spec(name: &str) -> &'static CommandSpec {
@@ -2251,51 +2067,71 @@ mod tests {
         assert_eq!(default_vp(&partitions, None, false), Some((0, 0)));
     }
 
+    /// Which commands `admit` lets through in a VTL1 address space, by
+    /// their declared effects: `.vtl 1` view first (`scope`), else a live
+    /// VTL1 stop.
+    fn vtl1_admits(scope: bool) -> impl Fn(&str) -> bool {
+        let mut session = session_with_mock(MockBackend::default());
+        let root = session.target.current_dtb();
+        session.target.symbols.set_secure_roots(root, []);
+        if scope {
+            session.target.enter_secure_scope(root);
+        }
+        // Another refusal (a capability the mock lacks) means VTL1 let it
+        // through.
+        move |name| !matches!(session.admit(&spec(name).effects), Err(Refusal::Vtl1(_)))
+    }
+
+    /// The `.vtl 1` view is memory alone: reads, the debugger's own state,
+    /// breakpoint bookkeeping (a software site in VTL1 is the breakpoint
+    /// core's to refuse) and a resume, which leaves the view first.
     #[test]
-    fn memory_view_admits_the_hardware_breakpoint_workflow_without_registers_or_writes() {
+    fn memory_view_admits_reads_and_breakpoints_but_no_vcpu_state_nt_or_writes() {
+        let admits = vtl1_admits(true);
         for name in [
-            "ba", "bl", "bc", "bd", "be", "g", "continue", "db", "u", "x", "!vtop", ".vtl",
+            "ba",
+            "bp",
+            "bl",
+            "bc",
+            "bd",
+            "be",
+            "g",
+            "gh",
+            "continue",
+            "db",
+            "u",
+            "x",
+            "!vtop",
+            ".vtl",
+            ".reload",
+            ".writemem",
         ] {
-            assert!(secure_scope_admits(spec(name)), "'{name}' refused");
+            assert!(admits(name), "'{name}' refused");
         }
         for name in [
-            "bp", "bu", "bm", "gh", "gn", "t", "p", "gu", "pa", "wt", "r", "k", ".frame", "~",
-            "vcpu", "eb", "ed", "f", ".readmem", "!eb", "wrmsr", "!process", "!thread", "!pcr",
+            "t", "p", "gu", "pa", "wt", "r", "k", ".frame", "~", "vcpu", "rdmsr", "eb", "ed", "f",
+            ".readmem", "!eb", "wrmsr", "!process", "!thread", "!pcr", "!peb",
         ] {
-            assert!(!secure_scope_admits(spec(name)), "'{name}' admitted");
+            assert!(!admits(name), "'{name}' admitted");
         }
     }
 
+    /// A live VTL1 stop has the vCPU's own state and runs and steps (which
+    /// take debug-register sites there), but no NT structures and no writes.
     #[test]
-    fn live_vtl1_stop_admits_vcpu_state_and_steps_but_not_nt_extensions_or_writes() {
+    fn live_vtl1_stop_admits_vcpu_state_and_steps_but_not_nt_reads_or_writes() {
+        let admits = vtl1_admits(false);
         for name in [
-            "r", "k", "kb", ".frame", "~", "vcpu", "break", "status", "ba", "bl", "g", "db", "u",
-            ".vtl", "t", "p", "gu", "pa", "ta", "wt", ".vtlcxr",
+            "r", "k", "kb", ".frame", "~", "vcpu", "rdmsr", "status", "ba", "bl", "g", "gn", "db",
+            "u", ".vtl", "t", "p", "gu", "pa", "ta", "tc", "wt", ".vtlcxr", ".process",
         ] {
-            assert!(live_secure_admits(spec(name)), "'{name}' refused");
+            assert!(admits(name), "'{name}' refused");
         }
         for name in [
-            "bp", "bu", "bm", "gh", "gn", "eb", "eq", "f", ".readmem", "!eb", "wrmsr", "!process",
-            "!thread", ".thread", "!pcr", "!prcb", "!irql", "!idt", ".cxr", ".trap", "!peb",
-            "!pte",
+            "eb", "eq", "f", ".readmem", "!eb", "wrmsr", "!process", "!thread", ".thread", "!pcr",
+            "!prcb", "!irql", "!idt", ".cxr", ".trap", "!peb", "!pte", ".pagein", ".crash",
         ] {
-            assert!(!live_secure_admits(spec(name)), "'{name}' admitted");
-        }
-    }
-
-    /// Only run control whose temporary sites become debug-register sites
-    /// in VTL1 may leave a VTL1 stop, so a new run command stays refused
-    /// until someone decides it is VTL1-safe.
-    #[test]
-    fn only_g_and_hardware_steps_move_the_target_from_a_vtl1_address_space() {
-        for spec in COMMANDS.iter() {
-            if spec.effects.run != RunEffect::None && live_secure_admits(spec) {
-                assert!(
-                    matches!(spec.names[0], "g" | "t" | "p" | "gu" | "pa" | "ta" | "wt"),
-                    "'{}' admitted",
-                    spec.names[0]
-                );
-            }
+            assert!(!admits(name), "'{name}' admitted");
         }
     }
 
@@ -2321,8 +2157,13 @@ mod tests {
 
         let (result, _) = capture(|| state.dispatch_line("eb 1000 cc"));
         assert_eq!(result.unwrap(), Flow::Denied);
-        let (result, _) = capture(|| state.dispatch_line("bp 1000"));
-        assert_eq!(result.unwrap(), Flow::Denied);
+        // The breakpoint core refuses a software site in VTL1 code.
+        let (result, text) = capture(|| state.dispatch_line("bp 1000"));
+        result.unwrap();
+        assert!(
+            state.ctx.breakpoints.list().is_empty(),
+            "bp set a site: {text}"
+        );
         assert!(!state.ctx.backend.is_running(), "bp resumed");
 
         let (result, _) = capture(|| state.dispatch_line("g"));

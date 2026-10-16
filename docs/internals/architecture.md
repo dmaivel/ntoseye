@@ -102,7 +102,7 @@ When one REPL command is several operations (`!alpc` decodes a port, a message, 
 
 A command declares what it needs and what it changes, instead of checking for itself:
 
-- `target = Kernel` (the command is refused on a user-mode minidump);
+- `target = Kernel | Machine | Nt`: `Kernel` and `Machine` are refused on a user-mode minidump; `Kernel` and `Nt` read NT's structures, which a VTL1 address space does not have, while `Machine` reads processors, MSRs, page tables, the hypervisor or the VTLs;
 - `state = Halted | HaltedOrParkedThread | Running`;
 - `run = Step | Run`;
 - `writes = [Memory, Registers, Hardware, Breakpoints, Symbols, Files]`;
@@ -110,6 +110,8 @@ A command declares what it needs and what it changes, instead of checking for it
 - `capability = <DebugCapability>`.
 
 `Session::admit(&Effects)` (`src/session/effects.rs`) makes the decision for every host and returns a `Refusal`. The REPL reports a refusal with the message that it has always printed (`report_refusal`). The SDK raises the matching exception (`python::command::admit`), for example `TargetRunningError`. Hand-written SDK methods go through the same function.
+
+VTL1 is part of the same decision. In a VTL1 address space (the `.vtl 1` view, or the root of a live VTL1 stop), `admit` refuses what reads NT (`Kernel`, `Nt`) or writes guest state (`Memory`, `Registers`, `Hardware`). The `.vtl 1` view is memory alone, so it also refuses anything that needs the target halted, except breakpoint bookkeeping. Both hosts word the refusal with `Vtl1Refusal::message`.
 
 ## Running the target: the run driver and `Stop`
 

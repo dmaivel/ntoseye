@@ -313,7 +313,7 @@ fn help(state: &mut ReplState<'_>, command: Option<String>) -> Result<()> {
     let mut hidden = BTreeSet::new();
     for (_, spec) in command_registry().command_names() {
         let canonical = spec.names[0];
-        if user_dump && spec.effects.target == TargetScope::Kernel {
+        if user_dump && spec.effects.target.needs_kernel() {
             hidden.insert(canonical);
             continue;
         }
@@ -409,6 +409,7 @@ fn quit(_state: &mut ReplState<'_>) -> Result<()> {
     names = ["vertarget", "version"],
     category = "target control",
     kind = Query,
+    target = Nt,
     python = Inspect,
     python_name = "version"
 )]
@@ -428,6 +429,7 @@ impl Render for TargetVersion {
     names = [".time"],
     category = "target control",
     kind = Query,
+    target = Nt,
     python = Inspect,
     python_name = "time"
 )]

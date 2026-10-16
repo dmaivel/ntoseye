@@ -32,6 +32,7 @@ use ntoseye_macros::{command, grammar};
     names = ["!heap", "heap"],
     category = "user mode",
     kind = Query,
+    target = Nt,
     forms = [inspect_heap, find_block],
 )]
 fn heap(session: &Session, #[arg(parse = heap_query)] query: HeapQuery) -> Result<HeapReport> {

@@ -40,6 +40,7 @@ fn optional_address(
     names = ["!peb", "peb"],
     category = "user mode",
     kind = Query,
+    target = Nt,
     python = [Process, UserProcess],
     python_name = "decode_peb",
 )]
@@ -65,6 +66,7 @@ impl Render for Peb {
     names = ["!teb", "teb"],
     category = "user mode",
     kind = Query,
+    target = Nt,
     python = [Thread, UserThread],
     python_name = "decode_teb",
 )]
@@ -115,6 +117,7 @@ fn dlls_filter(
     names = ["!dlls", "dlls"],
     category = "user mode",
     kind = Query,
+    target = Nt,
     python = [Process, UserProcess],
     python_name = "loader_modules",
 )]
@@ -137,6 +140,7 @@ impl Render for LoaderModules {
     names = ["!gle", "gle"],
     category = "user mode",
     kind = Query,
+    target = Nt,
     python = [Thread, UserThread],
 )]
 fn last_error(session: &Session) -> Result<LastError> {

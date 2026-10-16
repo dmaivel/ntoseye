@@ -230,7 +230,7 @@ fn process_context_selector(
     names = [".process"],
     category = "processes and modules",
     kind = Action,
-    target = Kernel,
+    target = Machine,
     python = none,
 )]
 fn process_context(
@@ -272,7 +272,7 @@ fn process_context(
     names = ["attach"],
     category = "processes and modules",
     kind = Action,
-    target = Kernel,
+    target = Machine,
     python = none,
 )]
 fn attach(state: &mut ReplState<'_>, #[arg(complete = Process)] pid: String) -> Result<()> {
@@ -309,7 +309,7 @@ fn attach(state: &mut ReplState<'_>, #[arg(complete = Process)] pid: String) -> 
     names = ["detach"],
     category = "processes and modules",
     kind = Action,
-    target = Kernel,
+    target = Machine,
     python = none
 )]
 fn detach(state: &mut ReplState<'_>) -> Result<()> {
@@ -331,7 +331,7 @@ fn detach(state: &mut ReplState<'_>) -> Result<()> {
     names = [".context"],
     category = "processes and modules",
     kind = Action,
-    target = Kernel,
+    target = Machine,
     python = none,
 )]
 fn context(state: &mut ReplState<'_>, #[arg(complete = Expression)] dtb: String) -> Result<()> {

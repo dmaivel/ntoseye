@@ -236,6 +236,7 @@ fn print_resource(detail: &ExecutiveResource) {
     names = ["!handle"],
     category = "objects and I/O",
     kind = Query,
+    target = Nt,
     forms = [process_handle, process_handles],
 )]
 fn handle(session: &Session, #[arg(parse = handle_query)] query: HandleQuery) -> Result<Handles> {

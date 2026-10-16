@@ -131,6 +131,7 @@ impl Render<bool> for SecurityDescriptor {
     names = ["!acl", "acl"],
     category = "security",
     kind = Query,
+    target = Nt,
     python = Inspect,
 )]
 fn acl(session: &Session, #[arg(parse = single_address)] address: VirtAddr) -> Result<Acl> {
@@ -148,6 +149,7 @@ impl Render for Acl {
     names = ["!sid", "sid"],
     category = "security",
     kind = Query,
+    target = Nt,
     python = Inspect,
 )]
 fn sid(session: &Session, #[arg(parse = single_address)] address: VirtAddr) -> Result<Sid> {

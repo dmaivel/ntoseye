@@ -204,6 +204,7 @@ fn step_out(_session: &mut Session) -> Result<Motion> {
     names = ["pa"],
     category = "execution and stack",
     kind = Run,
+    state = Halted,
     run = Run,
     python = none,
 )]
