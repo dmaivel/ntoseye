@@ -83,7 +83,8 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   bare `completion: Expression`),
 ///   `python_name = "..."` (else the function's name), `style = RawTail |
 ///   ExpressionTail` (the line is not split into words, for a `raw`
-///   argument), and `flow = Quit` (the flow the command ends with).
+///   argument), and `flow = Quit` (the flow the command ends with once it
+///   ran; a line that does not parse ends with `Continue`).
 ///
 /// The first parameter is `&Session`, `&mut Session`, or (REPL only)
 /// `&mut ReplState`. Every other parameter is an argument, parsed in order

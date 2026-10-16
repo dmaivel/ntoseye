@@ -525,6 +525,12 @@ impl Command {
             if path.path.segments.last().is_some_and(|segment| segment.ident == "Flow"))
     }
 
+    /// Whether the REPL handler hands the dispatcher a [`Flow`]: the
+    /// function's own, or the `flow = ...` it ends with.
+    fn flow_handler(&self) -> bool {
+        self.returns_flow() || self.options.flow.is_some()
+    }
+
     fn validate(&self) -> Result<()> {
         if let Some(object) = self.options.python.first()
             && (self.options.kind == "Host" || self.returns_flow())
@@ -673,7 +679,7 @@ impl Command {
             .flow
             .as_ref()
             .map_or_else(|| quote!(Continue), |ident| quote!(#ident));
-        let handler = if self.returns_flow() {
+        let handler = if self.flow_handler() {
             quote!(ArgsFlow)
         } else {
             quote!(Args)
@@ -867,7 +873,17 @@ impl Command {
                 Ok(())
             },
         };
-        let (returns, parse_failed) = if returns_flow {
+        // A command that ends with a flow of its own (`q` quits) ends with
+        // it once it ran, but not when its line did not parse.
+        let run = match &self.options.flow {
+            Some(flow) if !returns_flow => quote! {
+                #[allow(clippy::redundant_closure_call)]
+                let () = (|| -> crate::error::Result<()> { #run })()?;
+                Ok(crate::repl::Flow::#flow)
+            },
+            _ => run,
+        };
+        let (returns, parse_failed) = if self.flow_handler() {
             (
                 quote!(crate::repl::Flow),
                 quote!(crate::repl::Flow::Continue),
