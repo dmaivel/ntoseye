@@ -642,15 +642,6 @@ impl UserThread {
             .collect())
     }
 
-    /// Decode the Win32 last-error and NTSTATUS values of the thread (`!gle`).
-    fn last_error<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::usermode::LastError>> {
-        let view = self.owner.with_in(py, &self.context(), |session| {
-            let detail = session.target.last_error().map_err(err)?;
-            Ok(view::usermode::last_error(&detail))
-        })?;
-        Typed::new(py, view)
-    }
-
     /// The thread as a plain `dict`.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {
         self.owner.check(py)?;

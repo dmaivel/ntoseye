@@ -5,12 +5,11 @@ use pyo3::types::PyBytes;
 
 use super::args::{ApcTarget, DeviceArg, FltFilterArg};
 use super::command::admit;
-use super::context::{Context, in_context};
+use super::context::Context;
 use super::handle::Owner;
 use super::module::Device;
 use super::process::Process;
-use super::thread::{Frame, Thread, process_for_thread, trap_frame_view};
-use super::userdump::{UserProcess, UserThread};
+use super::thread::{Frame, trap_frame_view};
 use super::{err, raise};
 use crate::bugchecks::{bugcheck_from_dump_info, current_bugcheck};
 use crate::error::Error;
@@ -32,26 +31,12 @@ use crate::view::{self};
 
 /// System-wide reports and helpers that decode an object at an address
 /// (`dbg.inspect`). The results are typed `Record`s. On a user-mode
-/// minidump, which has no kernel, only `peb`, `teb`, `version`, `time`,
-/// `triage`, `bugcheck`, `exception_record`, and `context_record` apply; the
-/// others raise `NtoseyeError`.
+/// minidump, which has no kernel, only `version`, `time`, `triage`,
+/// `bugcheck`, `exception_record`, and `context_record` apply; the others
+/// raise `NtoseyeError`.
 #[pyclass(module = "ntoseye")]
 pub struct Inspect {
     pub owner: Owner,
-}
-
-/// A process `peb()` decodes: a kernel target's, or a user dump's one.
-#[derive(FromPyObject)]
-pub enum ProcessArg<'py> {
-    Kernel(PyRef<'py, Process>),
-    User(PyRef<'py, UserProcess>),
-}
-
-/// A thread `teb()` decodes: a kernel target's, or a user dump's.
-#[derive(FromPyObject)]
-pub enum ThreadArg<'py> {
-    Kernel(PyRef<'py, Thread>),
-    User(PyRef<'py, UserThread>),
 }
 
 impl Inspect {
@@ -292,90 +277,6 @@ impl Inspect {
             let detail = session.inspect_uniqstack(scope).map_err(err)?;
             Ok(detail)
         })
-    }
-
-    /// Decode the PEB of a process, with its parameters and loader-list heads
-    /// (`!peb`): a kernel target's `Process`, or a user-mode minidump's
-    /// `UserProcess`.
-    #[pyo3(signature = (process, address=None))]
-    fn peb<'py>(
-        &self,
-        py: Python<'py>,
-        process: ProcessArg<'_>,
-        address: Option<u64>,
-    ) -> PyResult<Typed<'py, view::usermode::Peb>> {
-        let context = match &process {
-            ProcessArg::Kernel(process) => {
-                process
-                    .owner
-                    .require_argument_of(py, &self.owner, "process")?;
-                Context::process(process.info.clone())
-            }
-            // The dump's one address space is the default scope.
-            ProcessArg::User(process) => {
-                process
-                    .owner
-                    .require_argument_of(py, &self.owner, "process")?;
-                Context::default()
-            }
-        };
-        let detail = self.owner.with_in(py, &context, |session| {
-            session
-                .target
-                .inspect_peb(address.map(VirtAddr))
-                .map(|detail| view::usermode::peb(&detail))
-                .map_err(err)
-        })?;
-        Typed::new(py, detail)
-    }
-
-    /// Decode the TEB of a thread and its WOW64 companion (`!teb`): a kernel
-    /// target's `Thread`, or a user-mode minidump's `UserThread`.
-    #[pyo3(signature = (thread, address=None))]
-    fn teb<'py>(
-        &self,
-        py: Python<'py>,
-        thread: ThreadArg<'_>,
-        address: Option<u64>,
-    ) -> PyResult<Typed<'py, view::usermode::Teb>> {
-        let thread = match thread {
-            ThreadArg::Kernel(thread) => thread,
-            ThreadArg::User(thread) => {
-                thread
-                    .owner()
-                    .require_argument_of(py, &self.owner, "thread")?;
-                let context = Context::vcpu(thread.backend_id().to_string());
-                let detail = self.owner.with_in(py, &context, |session| {
-                    session
-                        .target
-                        .inspect_teb(address.map(VirtAddr))
-                        .map(|detail| view::usermode::teb(&detail))
-                        .map_err(err)
-                })?;
-                return Typed::new(py, detail);
-            }
-        };
-        thread
-            .owner
-            .require_argument_of(py, &self.owner, "thread")?;
-        let info = thread.info.clone();
-        let detail = self.owner.with(py, |session| {
-            let process = process_for_thread(session, &info)?
-                .ok_or_else(|| raise("thread has no associated process"))?;
-            let context = Context {
-                process: Some(process),
-                thread: Some(info.clone()),
-                ..Context::default()
-            };
-            in_context(session, &context, |session| {
-                session
-                    .target
-                    .inspect_teb(address.map(VirtAddr))
-                    .map(|detail| view::usermode::teb(&detail))
-                    .map_err(err)
-            })
-        })?;
-        Typed::new(py, detail)
     }
 
     /// Decode a `_KTRAP_FRAME` at `address` (`.trap`).

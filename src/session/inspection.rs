@@ -24,7 +24,7 @@ use crate::session::{
     VpRegisters,
 };
 use crate::target::meta::TargetVersionDetail;
-use crate::target::usermode::ImageCheckDetail;
+use crate::target::usermode::ImageCheck;
 use crate::target::{CompareResult, SearchResult, SelectedFrame, ThreadInfo, exit_registers};
 use crate::types::{Arch, CodeMachine, Dtb, VirtAddr};
 use crate::unwind::{
@@ -200,7 +200,7 @@ impl Session {
     /// Compare `module`'s executable sections against its cached image
     /// (`!chkimg`), with this session's own breakpoints (and the bugcheck
     /// trap) masked back to the code they replaced.
-    pub fn check_image(&self, module: &str, include_diffs: bool) -> Result<ImageCheckDetail> {
+    pub fn check_image(&self, module: &str, include_diffs: bool) -> Result<ImageCheck> {
         let dtb = self.target.process_dtb();
         self.target
             .check_image(module, include_diffs, &|address, buf| {

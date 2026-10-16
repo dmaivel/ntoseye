@@ -12,6 +12,7 @@ use crate::pe::{image_base, read_pe_header_page, size_of_image};
 use crate::target::{DiagnosticValue, ListTermination, Target, TargetKind};
 use crate::types::{Arch, Dtb, VirtAddr};
 use iced_x86::{Code, Decoder, DecoderOptions};
+use ntoseye_macros::record;
 use pelite::{PeView, Wrap};
 
 pub mod address;
@@ -26,160 +27,230 @@ const MAX_REPORT_RANGES: usize = 64;
 const MAX_BYTE_DIFFS: usize = 4096;
 const SECTION_READ_CHUNK: usize = 0x1000;
 
-/// A decoded `_UNICODE_STRING` field in `_RTL_USER_PROCESS_PARAMETERS`.
-#[derive(Debug, Clone)]
-pub struct ProcessParametersDetail {
+/// A process's `_RTL_USER_PROCESS_PARAMETERS`. ntoseye reads each string
+/// separately, and a string that is paged out is unavailable.
+#[record]
+pub struct ProcessParameters {
     pub address: VirtAddr,
     pub command_line: DiagnosticValue<String>,
+    /// The image's full path.
     pub image_path_name: DiagnosticValue<String>,
     pub current_directory: DiagnosticValue<String>,
+    /// The DLL search path.
     pub dll_path: DiagnosticValue<String>,
     pub window_title: DiagnosticValue<String>,
     pub desktop_info: DiagnosticValue<String>,
     pub shell_info: DiagnosticValue<String>,
     pub runtime_data: DiagnosticValue<String>,
+    /// The environment block's address.
     pub environment: DiagnosticValue<VirtAddr>,
+    /// The environment block's size in bytes.
     pub environment_size: DiagnosticValue<u64>,
 }
 
-/// One loader list head and its two links.
-#[derive(Debug, Clone)]
+/// A `_PEB_LDR_DATA` list head.
+#[record]
 pub struct LoaderListHead {
+    /// The `LIST_ENTRY` head.
     pub address: VirtAddr,
+    /// The first entry.
     pub flink: DiagnosticValue<VirtAddr>,
+    /// The last entry.
     pub blink: DiagnosticValue<VirtAddr>,
 }
 
-/// The three lists rooted in `_PEB_LDR_DATA`.
-#[derive(Debug, Clone)]
-pub struct LoaderListHeads {
+/// The heads of the three `_PEB_LDR_DATA` module lists.
+#[record]
+pub struct LoaderLists {
     pub in_load_order: DiagnosticValue<LoaderListHead>,
     pub in_memory_order: DiagnosticValue<LoaderListHead>,
     pub in_initialization_order: DiagnosticValue<LoaderListHead>,
 }
 
-/// Native PEB fields, process parameters, and loader-list heads.
-#[derive(Debug, Clone)]
-pub struct PebDetail {
+/// A process's `_PEB` (`!peb`). ntoseye reads each field separately.
+#[record]
+pub struct Peb {
     pub address: VirtAddr,
     pub image_base_address: DiagnosticValue<VirtAddr>,
+    /// The `_PEB_LDR_DATA` address.
     pub ldr: DiagnosticValue<VirtAddr>,
+    /// The `_RTL_USER_PROCESS_PARAMETERS` address.
     pub process_parameters: DiagnosticValue<VirtAddr>,
-    pub process_parameters_detail: DiagnosticValue<ProcessParametersDetail>,
+    /// The decoded process parameters.
+    pub process_parameters_detail: DiagnosticValue<ProcessParameters>,
+    /// The default heap.
     pub process_heap: DiagnosticValue<VirtAddr>,
     pub number_of_heaps: DiagnosticValue<u64>,
+    /// The heap pointer array.
     pub process_heaps: DiagnosticValue<VirtAddr>,
+    /// `BeingDebugged`: nonzero while a user-mode debugger is attached.
     pub being_debugged: DiagnosticValue<u8>,
     pub os_major_version: DiagnosticValue<u64>,
     pub os_minor_version: DiagnosticValue<u64>,
     pub os_build_number: DiagnosticValue<u64>,
     pub session_id: DiagnosticValue<u64>,
     pub number_of_processors: DiagnosticValue<u64>,
+    /// The API set schema.
     pub api_set_map: DiagnosticValue<VirtAddr>,
-    pub loader_lists: DiagnosticValue<LoaderListHeads>,
-    pub peb32: Option<Peb32Detail>,
+    /// The loader's module list heads.
+    pub loader_lists: DiagnosticValue<LoaderLists>,
+    /// The WOW64 `_PEB32`. `None` for a native process.
+    pub peb32: Option<Peb32>,
 }
 
-/// The 32-bit PEB and its 32-bit process-parameter view in a WOW64 process.
-#[derive(Debug, Clone)]
-pub struct Peb32Detail {
+/// A WOW64 process's 32-bit `_PEB32`. ntoseye reads each field separately.
+#[record]
+pub struct Peb32 {
     pub address: VirtAddr,
     pub image_base_address: DiagnosticValue<VirtAddr>,
+    /// The `_PEB_LDR_DATA32` address.
     pub ldr: DiagnosticValue<VirtAddr>,
+    /// The 32-bit process parameters' address.
     pub process_parameters: DiagnosticValue<VirtAddr>,
-    pub process_parameters_detail: DiagnosticValue<ProcessParametersDetail>,
+    /// The decoded 32-bit process parameters.
+    pub process_parameters_detail: DiagnosticValue<ProcessParameters>,
+    /// The default heap.
     pub process_heap: DiagnosticValue<VirtAddr>,
     pub number_of_heaps: DiagnosticValue<u64>,
+    /// The heap pointer array.
     pub process_heaps: DiagnosticValue<VirtAddr>,
+    /// `BeingDebugged`: nonzero while a user-mode debugger is attached.
     pub being_debugged: DiagnosticValue<u8>,
     pub os_major_version: DiagnosticValue<u64>,
     pub os_minor_version: DiagnosticValue<u64>,
     pub os_build_number: DiagnosticValue<u64>,
     pub session_id: DiagnosticValue<u64>,
     pub number_of_processors: DiagnosticValue<u64>,
-    pub loader_lists: DiagnosticValue<LoaderListHeads>,
+    /// The loader's 32-bit module list heads.
+    pub loader_lists: DiagnosticValue<LoaderLists>,
 }
 
-/// The native fields printed by `!teb`, plus the optional WOW64 TEB.
-#[derive(Debug, Clone)]
-pub struct TebDetail {
+/// A thread's `_TEB` (`!teb`). ntoseye reads each field separately.
+#[record]
+pub struct Teb {
     pub address: VirtAddr,
     pub stack_base: DiagnosticValue<VirtAddr>,
     pub stack_limit: DiagnosticValue<VirtAddr>,
+    /// The thread-local storage array.
     pub tls_pointer: DiagnosticValue<VirtAddr>,
+    /// The Win32 last error.
     pub last_error_value: DiagnosticValue<u32>,
+    /// The last NTSTATUS.
+    #[record(hex)]
     pub last_status_value: DiagnosticValue<u32>,
     pub count_of_owned_critical_sections: DiagnosticValue<u32>,
+    /// The process's `_PEB`.
     pub peb: DiagnosticValue<VirtAddr>,
+    /// `WowTebOffset`: the byte offset to the WOW64 `_TEB32`, or 0 if there
+    /// is no `_TEB32`.
     pub wow_teb_offset: DiagnosticValue<i32>,
+    /// `WOW32Reserved`: the WOW64 transition thunk.
     pub wow64_reserved: DiagnosticValue<VirtAddr>,
+    /// The active activation context, or `None` if there is no active
+    /// context.
     pub activation_context: DiagnosticValue<Option<VirtAddr>>,
     pub client_id_unique_process: DiagnosticValue<VirtAddr>,
     pub client_id_unique_thread: DiagnosticValue<VirtAddr>,
-    pub teb32: Option<Teb32Detail>,
+    /// The WOW64 `_TEB32`. `None` for a native thread.
+    pub teb32: Option<Teb32>,
 }
 
-/// The 32-bit TEB fields available to a WOW64 thread.
-#[derive(Debug, Clone)]
-pub struct Teb32Detail {
+/// A WOW64 thread's 32-bit `_TEB32`. ntoseye reads each field separately.
+#[record]
+pub struct Teb32 {
     pub address: VirtAddr,
     pub stack_base: DiagnosticValue<VirtAddr>,
     pub stack_limit: DiagnosticValue<VirtAddr>,
+    /// The thread-local storage array.
     pub tls_pointer: DiagnosticValue<VirtAddr>,
+    /// The Win32 last error.
     pub last_error_value: DiagnosticValue<u32>,
+    /// The last NTSTATUS.
+    #[record(hex)]
     pub last_status_value: DiagnosticValue<u32>,
     pub count_of_owned_critical_sections: DiagnosticValue<u32>,
+    /// The process's `_PEB32`.
     pub peb: DiagnosticValue<VirtAddr>,
     pub client_id_unique_process: DiagnosticValue<VirtAddr>,
     pub client_id_unique_thread: DiagnosticValue<VirtAddr>,
 }
 
-/// One module recovered from a process's loader list.
-#[derive(Debug, Clone)]
-pub struct LoaderModuleDetail {
+/// One module on a process's loader list (`!dlls`).
+#[record]
+pub struct LoaderModule {
+    /// The full path.
     pub name: String,
+    /// The file name.
     pub short_name: String,
     pub base_address: VirtAddr,
+    /// The image size in bytes.
     pub size: u32,
+    /// Whether the module is on the WOW64 (32-bit) loader list.
     pub is_32bit: bool,
+    /// The entry point. `None` if the loader entry has no entry point or
+    /// ntoseye cannot read it.
     pub entry_point: Option<VirtAddr>,
+    /// The link timestamp from the PE header. `None` if ntoseye cannot read
+    /// the header.
+    #[record(hex)]
     pub time_date_stamp: Option<u32>,
+    /// The checksum from the PE header. `None` if ntoseye cannot read the
+    /// header.
+    #[record(hex)]
     pub checksum: Option<u32>,
+    /// The file version from the version resource. `None` if ntoseye cannot
+    /// read it.
     pub file_version: Option<String>,
+    /// The product version from the version resource. `None` if ntoseye
+    /// cannot read it.
     pub product_version: Option<String>,
 }
 
-/// Loader modules and the termination state of each list walked.
-#[derive(Debug, Clone)]
-pub struct LoaderModulesDetail {
-    pub modules: Vec<LoaderModuleDetail>,
+/// The modules on a process's loader lists (`!dlls`), and how the native
+/// and WOW64 list walks ended.
+#[record]
+pub struct LoaderModules {
+    pub modules: Vec<LoaderModule>,
     pub termination: ListTermination,
+    /// `None` for a native process.
     pub wow64_termination: Option<ListTermination>,
 }
 
-/// Last-error/status values for the selected thread and its WOW64 TEB.
-#[derive(Debug, Clone)]
-pub struct LastErrorDetail {
+/// A thread's Win32 last error and last NTSTATUS (`!gle`).
+#[record]
+pub struct LastError {
+    /// The `_TEB` that ntoseye read.
     pub teb: VirtAddr,
     pub last_error_value: DiagnosticValue<u32>,
+    /// The symbolic name of the error, or `None` if the name is unknown.
     pub last_error_name: DiagnosticValue<Option<String>>,
+    #[record(hex)]
     pub last_status_value: DiagnosticValue<u32>,
+    /// The symbolic name of the status, or `None` if the name is unknown.
     pub last_status_name: DiagnosticValue<Option<String>>,
-    pub teb32: Option<LastError32Detail>,
+    /// The values from the WOW64 `_TEB32`. `None` for a native thread.
+    pub teb32: Option<LastError32>,
 }
 
-/// Last-error/status values from the 32-bit TEB of a WOW64 thread.
-#[derive(Debug, Clone)]
-pub struct LastError32Detail {
+/// A WOW64 thread's 32-bit last error and last NTSTATUS.
+#[record]
+pub struct LastError32 {
+    /// The `_TEB32` that ntoseye read.
     pub teb: VirtAddr,
     pub last_error_value: DiagnosticValue<u32>,
+    /// The symbolic name of the error, or `None` if the name is unknown.
     pub last_error_name: DiagnosticValue<Option<String>>,
+    #[record(hex)]
     pub last_status_value: DiagnosticValue<u32>,
+    /// The symbolic name of the status, or `None` if the name is unknown.
     pub last_status_name: DiagnosticValue<Option<String>>,
 }
 
-/// A kind of known kernel self-patch recognized by `!chkimg`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A kind of known kernel self-patch recognized by `!chkimg`: `import
+/// optimization`, `retpoline`, `KiPatchSelf/JMP thunk`, or `kernel VA
+/// region rebase`.
+#[record]
+#[derive(Copy, PartialEq, Eq)]
 pub enum SelfPatchKind {
     ImportOptimization,
     Retpoline,
@@ -208,16 +279,38 @@ impl SelfPatchKind {
     }
 }
 
-/// Counts of recognized self-patches by kind.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct SelfPatchCounts {
+impl std::fmt::Display for SelfPatchKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// The number of bytes that ntoseye identifies as known kernel self-patches,
+/// by kind.
+#[record(impl)]
+#[derive(Default, Copy, PartialEq, Eq)]
+pub struct ImageSelfPatchCounts {
     pub import_optimization: u64,
     pub retpoline: u64,
+    /// `KiPatchSelf` / JMP thunks.
     pub ki_patch_self: u64,
+    /// Relocated addresses of the kernel VA regions that the kernel moves at
+    /// boot.
     pub region_rebase: u64,
 }
 
-impl SelfPatchCounts {
+#[record]
+impl ImageSelfPatchCounts {
+    /// The bytes of every kind.
+    #[record(getter)]
+    pub fn total(&self) -> u64 {
+        SelfPatchKind::ALL
+            .into_iter()
+            .fold(0u64, |total, kind| total.saturating_add(self.get(kind)))
+    }
+}
+
+impl ImageSelfPatchCounts {
     fn slot(&mut self, kind: SelfPatchKind) -> &mut u64 {
         match kind {
             SelfPatchKind::ImportOptimization => &mut self.import_optimization,
@@ -236,12 +329,6 @@ impl SelfPatchCounts {
         *slot = slot.saturating_add(count);
     }
 
-    pub fn total(self) -> u64 {
-        SelfPatchKind::ALL
-            .into_iter()
-            .fold(0u64, |total, kind| total.saturating_add(self.get(kind)))
-    }
-
     fn add_counts(&mut self, other: Self) {
         for kind in SelfPatchKind::ALL {
             self.add(kind, other.get(kind));
@@ -249,63 +336,111 @@ impl SelfPatchCounts {
     }
 }
 
-/// A contiguous RVA range of genuine mismatches or known self-patches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MismatchRange {
+/// A contiguous RVA range of mismatched bytes.
+#[record(impl)]
+#[derive(Copy, PartialEq, Eq)]
+pub struct ImageMismatchRange {
+    #[record(hex)]
     pub start: u64,
+    /// The end, exclusive.
+    #[record(hex)]
     pub end: u64,
 }
 
-/// A contiguous RVA range identified as one self-patch kind.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SelfPatchRange {
+#[record]
+impl ImageMismatchRange {
+    /// The size in bytes.
+    #[record(getter)]
+    pub fn size(&self) -> u64 {
+        self.end.saturating_sub(self.start)
+    }
+}
+
+/// A contiguous RVA range that ntoseye identifies as one kind of kernel
+/// self-patch.
+#[record(impl)]
+#[derive(PartialEq, Eq)]
+pub struct ImageSelfPatchRange {
+    #[record(hex)]
     pub start: u64,
+    /// The end, exclusive.
+    #[record(hex)]
     pub end: u64,
     pub kind: SelfPatchKind,
+    /// The function that contains the patch, if a symbol covers it.
     pub function: Option<String>,
 }
 
-/// One bounded expected/actual byte difference.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ByteDiff {
+#[record]
+impl ImageSelfPatchRange {
+    /// The size in bytes.
+    #[record(getter)]
+    pub fn size(&self) -> u64 {
+        self.end.saturating_sub(self.start)
+    }
+}
+
+/// One byte that differs from the cached image.
+#[record]
+#[derive(Copy, PartialEq, Eq)]
+pub struct ImageByteDiff {
+    #[record(hex)]
     pub rva: u32,
+    /// The byte in the cached image.
+    #[record(hex)]
     pub expected: u8,
+    /// The byte in memory.
+    #[record(hex)]
     pub actual: u8,
+    /// The self-patch kind of the byte. `None` for a genuine mismatch.
     pub kind: Option<SelfPatchKind>,
 }
 
-/// Results for one checked executable section.
-#[derive(Debug, Clone)]
-pub struct ImageSectionResult {
+/// The comparison of one executable section with the cached image.
+#[record]
+pub struct ImageSectionCheck {
     pub name: String,
+    #[record(hex)]
     pub rva: u32,
+    /// The number of mismatched bytes, without known self-patches.
     pub genuine_mismatches: u64,
+    /// The number of mismatched bytes, with known self-patches.
     pub total_mismatches: u64,
-    pub self_patches: SelfPatchCounts,
+    pub self_patches: ImageSelfPatchCounts,
+    /// Whether ntoseye skipped the comparison of this section.
     pub skipped: bool,
+    /// The reason for the skip. `None` if ntoseye compared the section.
     pub skip_reason: Option<String>,
+    /// The reason that ntoseye could not read the section memory. `None` if
+    /// the read succeeded.
     pub unavailable: Option<String>,
 }
 
-/// Cached-image comparison results. `total_mismatched_bytes` includes known
-/// self-patches; `genuine_mismatched_bytes` excludes them so the REPL can apply
-/// `-nospec` while retaining both views for structured callers.
-#[derive(Debug, Clone)]
-pub struct ImageCheckDetail {
+/// A module's in-memory code, compared with its cached image (`!chkimg`).
+/// Each range list has a limit, and its `*_overflow` flag is true if more
+/// ranges exist.
+#[record]
+pub struct ImageCheck {
+    /// The full path.
     pub module: String,
     pub short_name: String,
     pub base_address: VirtAddr,
-    pub sections: Vec<ImageSectionResult>,
+    pub sections: Vec<ImageSectionCheck>,
+    /// The number of mismatched bytes, without known self-patches.
     pub genuine_mismatched_bytes: u64,
+    /// The number of mismatched bytes, with known self-patches.
     pub total_mismatched_bytes: u64,
-    pub self_patches: SelfPatchCounts,
-    pub mismatch_ranges: Vec<MismatchRange>,
+    pub self_patches: ImageSelfPatchCounts,
+    /// Genuine mismatch ranges.
+    pub mismatch_ranges: Vec<ImageMismatchRange>,
     pub mismatch_range_overflow: bool,
-    pub all_mismatch_ranges: Vec<MismatchRange>,
+    /// Mismatch ranges, with self-patches.
+    pub all_mismatch_ranges: Vec<ImageMismatchRange>,
     pub all_mismatch_range_overflow: bool,
-    pub self_patch_ranges: Vec<SelfPatchRange>,
+    pub self_patch_ranges: Vec<ImageSelfPatchRange>,
     pub self_patch_range_overflow: bool,
-    pub byte_diffs: Vec<ByteDiff>,
+    /// Byte-level differences. Empty if you do not request them (`-d`).
+    pub byte_diffs: Vec<ImageByteDiff>,
     pub byte_diffs_truncated: bool,
 }
 
@@ -320,17 +455,17 @@ struct CheckSection {
 #[derive(Debug, Default)]
 struct SectionCheckResult {
     genuine: u64,
-    self_patches: SelfPatchCounts,
+    self_patches: ImageSelfPatchCounts,
     skipped: bool,
     skip_reason: Option<&'static str>,
     unavailable: Option<String>,
-    mismatch_ranges: Vec<MismatchRange>,
+    mismatch_ranges: Vec<ImageMismatchRange>,
     mismatch_range_overflow: bool,
-    all_mismatch_ranges: Vec<MismatchRange>,
+    all_mismatch_ranges: Vec<ImageMismatchRange>,
     all_mismatch_range_overflow: bool,
-    self_patch_ranges: Vec<SelfPatchRange>,
+    self_patch_ranges: Vec<ImageSelfPatchRange>,
     self_patch_range_overflow: bool,
-    diffs: Vec<ByteDiff>,
+    diffs: Vec<ImageByteDiff>,
     diff_overflow: bool,
 }
 
@@ -414,12 +549,12 @@ fn read_unicode_or_empty(record: &StructRef<'_>, field: &str) -> DiagnosticValue
 fn decode_process_parameters(
     record: &StructRef<'_>,
     environment_size: Result<u64>,
-) -> ProcessParametersDetail {
+) -> ProcessParameters {
     let current_directory = record
         .embedded("CurrentDirectory")
         .and_then(|directory| directory.unicode_string("DosPath"))
         .or_else(|_| record.unicode_string("CurrentDirectory"));
-    ProcessParametersDetail {
+    ProcessParameters {
         address: record.addr(),
         command_line: read_unicode_or_empty(record, "CommandLine"),
         image_path_name: read_unicode_or_empty(record, "ImagePathName"),
@@ -442,16 +577,16 @@ fn read_loader_list_head(ldr: &StructRef<'_>, field: &str) -> DiagnosticValue<Lo
     }))
 }
 
-fn read_loader_list_heads(ldr: &StructRef<'_>) -> LoaderListHeads {
-    LoaderListHeads {
+fn read_loader_list_heads(ldr: &StructRef<'_>) -> LoaderLists {
+    LoaderLists {
         in_load_order: read_loader_list_head(ldr, "InLoadOrderModuleList"),
         in_memory_order: read_loader_list_head(ldr, "InMemoryOrderModuleList"),
         in_initialization_order: read_loader_list_head(ldr, "InInitializationOrderModuleList"),
     }
 }
 
-fn loader_module_detail(module: ModuleInfo) -> LoaderModuleDetail {
-    LoaderModuleDetail {
+fn loader_module_detail(module: ModuleInfo) -> LoaderModule {
+    LoaderModule {
         name: module.name,
         short_name: module.short_name,
         base_address: module.base_address,
@@ -465,9 +600,9 @@ fn loader_module_detail(module: ModuleInfo) -> LoaderModuleDetail {
     }
 }
 
-fn make_unavailable_peb32(address: VirtAddr, error: impl ToString) -> Peb32Detail {
+fn make_unavailable_peb32(address: VirtAddr, error: impl ToString) -> Peb32 {
     let error = error.to_string();
-    Peb32Detail {
+    Peb32 {
         address,
         image_base_address: DiagnosticValue::unavailable(&error),
         ldr: DiagnosticValue::unavailable(&error),
@@ -603,7 +738,7 @@ impl Target {
     /// included when the current process has one and no explicit address was
     /// requested. On a user-mode minidump the PEB is the one the selected
     /// thread's TEB names, decoded with ntdll's layouts.
-    pub fn inspect_peb(&self, address: Option<VirtAddr>) -> Result<PebDetail> {
+    pub fn inspect_peb(&self, address: Option<VirtAddr>) -> Result<Peb> {
         let (dtb, peb_address, wow64_peb) = self.peb_scope(address)?;
         let types = self.user_mode_types(dtb)?;
         self.require_captured(peb_address, "PEB")?;
@@ -646,7 +781,7 @@ impl Target {
         } else {
             None
         };
-        Ok(PebDetail {
+        Ok(Peb {
             address: peb_address,
             image_base_address,
             ldr,
@@ -681,7 +816,7 @@ impl Target {
         })
     }
 
-    fn decode_loader_heads32(&self, ldr: VirtAddr) -> DiagnosticValue<LoaderListHeads> {
+    fn decode_loader_heads32(&self, ldr: VirtAddr) -> DiagnosticValue<LoaderLists> {
         let memory = self.process_memory();
         let read_head = |offset: u64| {
             let address = ldr + offset;
@@ -695,14 +830,14 @@ impl Target {
                 ),
             }
         };
-        DiagnosticValue::Available(LoaderListHeads {
+        DiagnosticValue::Available(LoaderLists {
             in_load_order: DiagnosticValue::Available(read_head(0x0c)),
             in_memory_order: DiagnosticValue::Available(read_head(0x14)),
             in_initialization_order: DiagnosticValue::Available(read_head(0x1c)),
         })
     }
 
-    fn decode_peb32(&self, dtb: u64, address: VirtAddr) -> Peb32Detail {
+    fn decode_peb32(&self, dtb: u64, address: VirtAddr) -> Peb32 {
         let types = match self.user_mode_types(dtb) {
             Ok(types) => types,
             Err(error) => return make_unavailable_peb32(address, error),
@@ -741,7 +876,7 @@ impl Target {
             DiagnosticValue::Available(_) => DiagnosticValue::unavailable("pointer is null"),
             DiagnosticValue::Unavailable(error) => DiagnosticValue::unavailable(error.clone()),
         };
-        Peb32Detail {
+        Peb32 {
             address,
             image_base_address: DiagnosticValue::from_result(
                 peb_ref
@@ -788,7 +923,7 @@ impl Target {
     /// default address is the selected Windows thread's `teb` pseudo-register;
     /// on a user-mode minidump, the selected captured thread's TEB. Every
     /// independently unreadable field carries its own diagnostic error.
-    pub fn inspect_teb(&self, address: Option<VirtAddr>) -> Result<TebDetail> {
+    pub fn inspect_teb(&self, address: Option<VirtAddr>) -> Result<Teb> {
         let (dtb, teb_address) = match (self.kind(), address) {
             (TargetKind::UserDump, address) => (
                 self.current_dtb(),
@@ -818,7 +953,7 @@ impl Target {
                 .map(|address| self.decode_teb32(dtb, address)),
             DiagnosticValue::Unavailable(_) => None,
         };
-        Ok(TebDetail {
+        Ok(Teb {
             address: teb_address,
             stack_base: DiagnosticValue::from_result(read_tib_pointer(&teb_ref, "StackBase")),
             stack_limit: DiagnosticValue::from_result(read_tib_pointer(&teb_ref, "StackLimit")),
@@ -867,7 +1002,7 @@ impl Target {
         })
     }
 
-    fn decode_teb32(&self, dtb: u64, address: VirtAddr) -> Teb32Detail {
+    fn decode_teb32(&self, dtb: u64, address: VirtAddr) -> Teb32 {
         let types = match self.user_mode_types(dtb) {
             Ok(types) => types,
             Err(error) => return make_unavailable_teb32(address, error),
@@ -876,7 +1011,7 @@ impl Target {
             Ok(teb_ref) => teb_ref.prefetch(),
             Err(error) => return make_unavailable_teb32(address, error),
         };
-        Teb32Detail {
+        Teb32 {
             address,
             stack_base: DiagnosticValue::from_result(
                 teb_ref
@@ -928,18 +1063,18 @@ impl Target {
 
     /// Decode the selected thread's Win32 last-error and NT status values,
     /// retaining symbolic names when known and per-value errors otherwise.
-    pub fn last_error(&self) -> Result<LastErrorDetail> {
+    pub fn last_error(&self) -> Result<LastError> {
         let teb = self.inspect_teb(None)?;
         let last_error_name = error_name(&teb.last_error_value, win32_error_name);
         let last_status_name = error_name(&teb.last_status_value, ntstatus_name);
-        let teb32 = teb.teb32.map(|teb32| LastError32Detail {
+        let teb32 = teb.teb32.map(|teb32| LastError32 {
             teb: teb32.address,
             last_error_name: error_name(&teb32.last_error_value, win32_error_name),
             last_error_value: teb32.last_error_value,
             last_status_name: error_name(&teb32.last_status_value, ntstatus_name),
             last_status_value: teb32.last_status_value,
         });
-        Ok(LastErrorDetail {
+        Ok(LastError {
             teb: teb.address,
             last_error_value: teb.last_error_value,
             last_error_name,
@@ -955,7 +1090,7 @@ impl Target {
     /// lists are merged, matching `!dlls -c`. On a user-mode minidump the
     /// lists are walked from the PEB the selected thread's TEB names, as far
     /// as the dump captured them.
-    pub fn loader_modules(&self, containing: Option<VirtAddr>) -> Result<LoaderModulesDetail> {
+    pub fn loader_modules(&self, containing: Option<VirtAddr>) -> Result<LoaderModules> {
         let detail = match self.kind() {
             TargetKind::Kernel => {
                 let process = current_process(self)?;
@@ -969,7 +1104,7 @@ impl Target {
             .filter(|module| containing.is_none_or(|address| module.contains_address(address)))
             .map(loader_module_detail)
             .collect();
-        Ok(LoaderModulesDetail {
+        Ok(LoaderModules {
             modules,
             termination: detail.termination,
             wow64_termination: detail.wow64_termination,
@@ -1043,7 +1178,7 @@ impl Target {
         module: &str,
         include_diffs: bool,
         read_code: &dyn Fn(VirtAddr, &mut [u8]) -> Result<()>,
-    ) -> Result<ImageCheckDetail> {
+    ) -> Result<ImageCheck> {
         let mut modules = self.modules()?;
         if find_module(&modules, module).is_none()
             && self.attached_process().is_some()
@@ -1078,14 +1213,14 @@ impl Target {
         })?;
         let mut sections = build_check_sections(&view, &bytes);
         if sections.is_empty() {
-            return Ok(ImageCheckDetail {
+            return Ok(ImageCheck {
                 module: module_info.name,
                 short_name: module_info.short_name,
                 base_address: module_info.base_address,
                 sections: Vec::new(),
                 genuine_mismatched_bytes: 0,
                 total_mismatched_bytes: 0,
-                self_patches: SelfPatchCounts::default(),
+                self_patches: ImageSelfPatchCounts::default(),
                 mismatch_ranges: Vec::new(),
                 mismatch_range_overflow: false,
                 all_mismatch_ranges: Vec::new(),
@@ -1102,7 +1237,7 @@ impl Target {
         let mut section_results = Vec::with_capacity(sections.len());
         let mut genuine_total = 0u64;
         let mut total = 0u64;
-        let mut self_patch_total = SelfPatchCounts::default();
+        let mut self_patch_total = ImageSelfPatchCounts::default();
         let mut ranges = Vec::new();
         let mut range_overflow = false;
         let mut all_ranges = Vec::new();
@@ -1155,7 +1290,7 @@ impl Target {
                     diff_overflow = true;
                 }
             }
-            section_results.push(ImageSectionResult {
+            section_results.push(ImageSectionCheck {
                 name: section.name.clone(),
                 rva: section.rva,
                 genuine_mismatches: result.genuine,
@@ -1167,7 +1302,7 @@ impl Target {
             });
             diff_overflow |= result.diff_overflow;
         }
-        Ok(ImageCheckDetail {
+        Ok(ImageCheck {
             module: module_info.name,
             short_name: module_info.short_name,
             base_address: module_info.base_address,
@@ -1276,7 +1411,7 @@ impl Target {
                     }
                     if include_diffs {
                         if result.diffs.len() < MAX_BYTE_DIFFS {
-                            result.diffs.push(ByteDiff {
+                            result.diffs.push(ImageByteDiff {
                                 rva: section.rva + (offset + index) as u32,
                                 expected: expected[index],
                                 actual: actual[index],
@@ -1417,9 +1552,9 @@ impl Target {
     }
 }
 
-fn make_unavailable_teb32(address: VirtAddr, error: impl ToString) -> Teb32Detail {
+fn make_unavailable_teb32(address: VirtAddr, error: impl ToString) -> Teb32 {
     let error = error.to_string();
-    Teb32Detail {
+    Teb32 {
         address,
         stack_base: DiagnosticValue::unavailable(&error),
         stack_limit: DiagnosticValue::unavailable(&error),
@@ -1482,7 +1617,12 @@ fn record_mismatch_run(
     }
 }
 
-fn push_mismatch_range(ranges: &mut Vec<MismatchRange>, overflow: &mut bool, start: u64, end: u64) {
+fn push_mismatch_range(
+    ranges: &mut Vec<ImageMismatchRange>,
+    overflow: &mut bool,
+    start: u64,
+    end: u64,
+) {
     if let Some(last) = ranges.last_mut()
         && last.end == start
     {
@@ -1490,14 +1630,14 @@ fn push_mismatch_range(ranges: &mut Vec<MismatchRange>, overflow: &mut bool, sta
         return;
     }
     if ranges.len() < MAX_REPORT_RANGES {
-        ranges.push(MismatchRange { start, end });
+        ranges.push(ImageMismatchRange { start, end });
     } else {
         *overflow = true;
     }
 }
 
 fn push_self_patch_range(
-    ranges: &mut Vec<SelfPatchRange>,
+    ranges: &mut Vec<ImageSelfPatchRange>,
     overflow: &mut bool,
     start: u64,
     end: u64,
@@ -1513,7 +1653,7 @@ fn push_self_patch_range(
         return;
     }
     if ranges.len() < MAX_REPORT_RANGES {
-        ranges.push(SelfPatchRange {
+        ranges.push(ImageSelfPatchRange {
             start,
             end,
             kind,

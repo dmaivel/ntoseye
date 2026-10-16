@@ -1,68 +1,211 @@
 use crate::error::Result;
+use crate::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::repl::*;
+use crate::session::Session;
 use crate::target::usermode::{
-    ByteDiff, ImageCheckDetail, ImageSectionResult, LastError32Detail, LastErrorDetail,
-    LoaderListHead, LoaderListHeads, LoaderModulesDetail, MismatchRange, Peb32Detail, PebDetail,
-    ProcessParametersDetail, SelfPatchCounts, SelfPatchKind, SelfPatchRange, Teb32Detail,
-    TebDetail,
+    ImageByteDiff, ImageCheck, ImageMismatchRange, ImageSectionCheck, ImageSelfPatchCounts,
+    ImageSelfPatchRange, LastError, LastError32, LoaderListHead, LoaderLists, LoaderModules, Peb,
+    Peb32, ProcessParameters, SelfPatchKind, Teb, Teb32,
 };
 use crate::target::{DiagnosticValue, ListTermination};
 use crate::types::VirtAddr;
 use crate::ui;
+use ntoseye_macros::command;
 use tabled::builder::Builder;
 
 use super::diagnostics::{diagnostic_addr, diagnostic_cell};
 
-repl_command! {
-    cmd_peb;
-    names: ["!peb", "peb"],
-    category: "user mode",
-    usage: "!peb [address]",
-    summary: "Decode the process environment block and process parameters of the current process.",
-    details: "If you do not give an address, the command uses EPROCESS.Peb of the current process: the one that .process selected, else the owner of the current thread. On a user-mode minidump it uses the PEB that the selected thread's TEB names, and the layouts of the dump's ntdll. It decodes the process parameters with their PDB layouts. To list the loader modules, use !dlls.",
-    completion: Expression,
+/// `[address]`: one optional expression; more words print the help.
+fn optional_address(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Option<VirtAddr>, ArgError> {
+    if cursor.remaining() > 1 {
+        return Err(ArgError::Missing);
+    }
+    cursor.word().map(|text| cx.eval(&text)).transpose()
 }
 
-repl_command! {
-    cmd_teb;
-    names: ["!teb", "teb"],
-    category: "user mode",
-    usage: "!teb [address]",
-    summary: "Decode a thread environment block.",
-    details: "If you do not give an address, the command uses the teb pseudo-register of the current thread. On a user-mode minidump it uses the TEB of the selected thread (~<n>s), and the layouts of the dump's ntdll.",
-    completion: Expression,
+/// Decode the process environment block and process parameters of the
+/// current process.
+///
+/// If you do not give an address, the command uses EPROCESS.Peb of the
+/// current process: the one that .process selected, else the owner of the
+/// current thread. On a user-mode minidump it uses the PEB that the selected
+/// thread's TEB names, and the layouts of the dump's ntdll. It decodes the
+/// process parameters with their PDB layouts. To list the loader modules,
+/// use !dlls.
+#[command(
+    names = ["!peb", "peb"],
+    category = "user mode",
+    kind = Query,
+    python = [Process, UserProcess],
+    python_name = "decode_peb",
+    usage = "!peb [address]",
+    completion = [Expression]
+)]
+fn peb(
+    session: &Session,
+    #[arg(parse = optional_address)] address: Option<VirtAddr>,
+) -> Result<Peb> {
+    session.target.inspect_peb(address)
 }
 
-repl_command! {
-    cmd_dlls;
-    names: ["!dlls", "dlls"],
-    category: "user mode",
-    usage: "!dlls [-c <address>]",
-    summary: "List the modules in the loader lists of the current process.",
-    details: "The current process is the one that .process selected, else the owner of the current thread; on a user-mode minidump, its one process, as far as the dump captured the loader's lists (lm lists the dump's own module list). With -c <address>, the command shows only the module that contains that address. The module walk has a limit, and also stops if it finds a cycle in a list.",
-    completion: [None, Expression],
+impl Render for Peb {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_peb(self);
+    }
 }
 
-repl_command! {
-    cmd_gle();
-    names: ["!gle", "gle"],
-    category: "user mode",
-    usage: "!gle",
-    summary: "Show the last Win32 error value and the last NT status value of the current thread.",
-    completion: None,
+/// Decode a thread environment block.
+///
+/// If you do not give an address, the command uses the teb pseudo-register
+/// of the current thread. On a user-mode minidump it uses the TEB of the
+/// selected thread (~<n>s), and the layouts of the dump's ntdll.
+#[command(
+    names = ["!teb", "teb"],
+    category = "user mode",
+    kind = Query,
+    python = [Thread, UserThread],
+    python_name = "decode_teb",
+    usage = "!teb [address]",
+    completion = [Expression]
+)]
+fn teb(
+    session: &Session,
+    #[arg(parse = optional_address)] address: Option<VirtAddr>,
+) -> Result<Teb> {
+    session.target.inspect_teb(address)
 }
 
-repl_command! {
-    cmd_chkimg;
-    names: ["!chkimg", "chkimg"],
-    category: "analysis",
-    usage: "!chkimg [-d] [-v] [-nospec] <module>",
-    summary: "Compare the executable sections of a module with the cached on-disk image.",
-    details: "Compares the .text, PAGE*, and INIT executable sections after applying the DIR64/HIGHLOW relocations, and skips discardable and paged-out sections. The command counts known kernel self-patches separately: import optimization, retpoline, KiPatchSelf retargets, and the addresses of the kernel VA regions that the kernel moves at boot. With -nospec, the command does not show this breakdown and reports the self-patches as ordinary mismatches. -d prints byte diffs, up to a limit, and -v prints the results for each section.",
-    completion: [None, None, None, Symbol],
+impl Render for Teb {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_teb(self);
+    }
 }
 
-fn print_process_parameters(parameters: &ProcessParametersDetail) {
+/// `[-c <address>]`.
+fn dlls_filter(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Option<VirtAddr>, ArgError> {
+    let mut filter = None;
+    while let Some(word) = cursor.word() {
+        if word != "-c" {
+            return Err(ArgError::Missing);
+        }
+        if filter.is_some() {
+            return Err(ArgError::Message(
+                "!dlls: -c may only be specified once".into(),
+            ));
+        }
+        let text = cursor.word().ok_or(ArgError::Missing)?;
+        filter = Some(cx.eval(&text)?);
+    }
+    Ok(filter)
+}
+
+/// List the modules in the loader lists of the current process.
+///
+/// The current process is the one that .process selected, else the owner of
+/// the current thread; on a user-mode minidump, its one process, as far as
+/// the dump captured the loader's lists (lm lists the dump's own module
+/// list). With -c <address>, the command shows only the module that
+/// contains that address. The module walk has a limit, and also stops if it
+/// finds a cycle in a list.
+#[command(
+    names = ["!dlls", "dlls"],
+    category = "user mode",
+    kind = Query,
+    python = [Process, UserProcess],
+    python_name = "loader_modules",
+    usage = "!dlls [-c <address>]",
+    completion = [None, Expression]
+)]
+fn dlls(
+    session: &Session,
+    #[arg(parse = dlls_filter)] containing: Option<VirtAddr>,
+) -> Result<LoaderModules> {
+    session.target.loader_modules(containing)
+}
+
+impl Render for LoaderModules {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_loader_module_table(self);
+    }
+}
+
+/// Show the last Win32 error value and the last NT status value of the
+/// current thread.
+#[command(
+    names = ["!gle", "gle"],
+    category = "user mode",
+    kind = Query,
+    python = [Thread, UserThread],
+    usage = "!gle"
+)]
+fn last_error(session: &Session) -> Result<LastError> {
+    session.target.last_error()
+}
+
+impl Render for LastError {
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        print_last_error(self);
+    }
+}
+
+/// `<module>`: the one word the switches leave; none, or more, print the
+/// help.
+fn chkimg_module(
+    _: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<String, ArgError> {
+    if cursor.remaining() != 1 {
+        return Err(ArgError::Missing);
+    }
+    cursor
+        .word()
+        .map(|word| word.into_owned())
+        .ok_or(ArgError::Missing)
+}
+
+/// Compare the executable sections of a module with the cached on-disk
+/// image.
+///
+/// Compares the .text, PAGE*, and INIT executable sections after applying
+/// the DIR64/HIGHLOW relocations, and skips discardable and paged-out
+/// sections. The command counts known kernel self-patches separately:
+/// import optimization, retpoline, KiPatchSelf retargets, and the addresses
+/// of the kernel VA regions that the kernel moves at boot. With -nospec, the
+/// command does not show this breakdown and reports the self-patches as
+/// ordinary mismatches. -d prints byte diffs, up to a limit, and -v prints
+/// the results for each section.
+#[command(
+    names = ["!chkimg", "chkimg"],
+    category = "analysis",
+    kind = Query,
+    python = Module,
+    python_name = "check_image",
+    usage = "!chkimg [-d] [-v] [-nospec] <module>",
+    completion = [None, None, None, Symbol]
+)]
+fn chkimg(
+    session: &Session,
+    #[arg(switch = "-d")] include_diffs: bool,
+    #[arg(switch = "-v", render)] verbose: bool,
+    #[arg(switch = "-nospec", render)] no_spec: bool,
+    #[arg(receiver, parse = chkimg_module)] module: String,
+) -> Result<ImageCheck> {
+    session.check_image(&module, include_diffs)
+}
+
+impl Render<(bool, bool)> for ImageCheck {
+    fn render(&self, _: &mut ReplState<'_>, (verbose, no_spec): (bool, bool)) {
+        print_image_check(self, no_spec, verbose);
+    }
+}
+
+fn print_process_parameters(parameters: &ProcessParameters) {
     outln!(
         "    CommandLine       : {}",
         diagnostic_cell(&parameters.command_line)
@@ -107,7 +250,7 @@ fn print_process_parameters(parameters: &ProcessParametersDetail) {
 
 fn print_parameters_field(
     pointer: &DiagnosticValue<VirtAddr>,
-    detail: &DiagnosticValue<ProcessParametersDetail>,
+    detail: &DiagnosticValue<ProcessParameters>,
 ) {
     match pointer {
         DiagnosticValue::Available(address) if address.is_zero() => {
@@ -142,7 +285,7 @@ fn print_loader_list_head(label: &str, value: &DiagnosticValue<LoaderListHead>) 
     }
 }
 
-fn print_loader_lists(value: &DiagnosticValue<LoaderListHeads>) {
+fn print_loader_lists(value: &DiagnosticValue<LoaderLists>) {
     match value {
         DiagnosticValue::Available(heads) => {
             print_loader_list_head("InLoadOrderModuleList", &heads.in_load_order);
@@ -158,7 +301,7 @@ fn print_loader_lists(value: &DiagnosticValue<LoaderListHeads>) {
     }
 }
 
-fn print_peb32(detail: &Peb32Detail) {
+fn print_peb32(detail: &Peb32) {
     outln!("PEB32 {}", ui::addr(detail.address.0));
     outln!(
         "  ImageBaseAddress : {}",
@@ -201,7 +344,7 @@ fn print_peb32(detail: &Peb32Detail) {
     print_loader_lists(&detail.loader_lists);
 }
 
-fn print_peb(detail: &PebDetail) {
+fn print_peb(detail: &Peb) {
     outln!("PEB {}", ui::addr(detail.address.0));
     outln!(
         "  ImageBaseAddress : {}",
@@ -261,7 +404,7 @@ fn display_activation(value: &DiagnosticValue<Option<VirtAddr>>) -> String {
     }
 }
 
-fn print_teb32(detail: &Teb32Detail) {
+fn print_teb32(detail: &Teb32) {
     outln!("TEB32 {}", ui::addr(detail.address.0));
     outln!(
         "  {:30}: {}",
@@ -304,7 +447,7 @@ fn print_teb32(detail: &Teb32Detail) {
     );
 }
 
-fn print_teb(detail: &TebDetail) {
+fn print_teb(detail: &Teb) {
     outln!("TEB {}", ui::addr(detail.address.0));
     outln!(
         "  {:30}: {}",
@@ -378,7 +521,7 @@ fn termination_text(termination: &ListTermination) -> String {
     }
 }
 
-fn print_loader_module_table(detail: &LoaderModulesDetail) {
+fn print_loader_module_table(detail: &LoaderModules) {
     outln!("{} loader modules", detail.modules.len());
     let mut builder = Builder::default();
     builder.push_record(["Base", "Size", "Entry", "Timestamp", "Name"]);
@@ -434,7 +577,7 @@ fn display_named_value(
     }
 }
 
-fn print_last_error32(detail: &LastError32Detail) {
+fn print_last_error32(detail: &LastError32) {
     outln!(
         "TEB32 LastErrorValue = {}",
         display_named_value(&detail.last_error_value, &detail.last_error_name, |value| {
@@ -451,7 +594,7 @@ fn print_last_error32(detail: &LastError32Detail) {
     );
 }
 
-fn print_last_error(detail: &LastErrorDetail) {
+fn print_last_error(detail: &LastError) {
     outln!(
         "LastErrorValue = {}",
         display_named_value(&detail.last_error_value, &detail.last_error_name, |value| {
@@ -471,7 +614,7 @@ fn print_last_error(detail: &LastErrorDetail) {
     }
 }
 
-fn print_self_patch_counts(counts: &SelfPatchCounts) {
+fn print_self_patch_counts(counts: &ImageSelfPatchCounts) {
     if counts.total() == 0 {
         return;
     }
@@ -484,7 +627,7 @@ fn print_self_patch_counts(counts: &SelfPatchCounts) {
     }
 }
 
-fn print_section_result(section: &ImageSectionResult, no_spec: bool, verbose: bool) {
+fn print_section_result(section: &ImageSectionCheck, no_spec: bool, verbose: bool) {
     if section.skipped {
         outln!(
             "  {:<8} skipped ({})",
@@ -517,7 +660,7 @@ fn print_section_result(section: &ImageSectionResult, no_spec: bool, verbose: bo
     }
 }
 
-fn print_mismatch_ranges(ranges: &[MismatchRange], overflow: bool) {
+fn print_mismatch_ranges(ranges: &[ImageMismatchRange], overflow: bool) {
     if ranges.is_empty() {
         return;
     }
@@ -533,7 +676,7 @@ fn print_mismatch_ranges(ranges: &[MismatchRange], overflow: bool) {
     }
 }
 
-fn print_self_patch_ranges(ranges: &[SelfPatchRange], overflow: bool) {
+fn print_self_patch_ranges(ranges: &[ImageSelfPatchRange], overflow: bool) {
     if ranges.is_empty() {
         return;
     }
@@ -556,7 +699,7 @@ fn print_self_patch_ranges(ranges: &[SelfPatchRange], overflow: bool) {
     }
 }
 
-fn print_byte_diffs(diffs: &[ByteDiff], truncated: bool, no_spec: bool) {
+fn print_byte_diffs(diffs: &[ImageByteDiff], truncated: bool, no_spec: bool) {
     if diffs.is_empty() {
         return;
     }
@@ -582,7 +725,7 @@ fn print_byte_diffs(diffs: &[ByteDiff], truncated: bool, no_spec: bool) {
     }
 }
 
-fn print_image_check(detail: &ImageCheckDetail, no_spec: bool, verbose: bool) {
+fn print_image_check(detail: &ImageCheck, no_spec: bool, verbose: bool) {
     if detail.sections.is_empty() {
         outln!("{}: no executable .text/PAGE*/INIT sections", detail.module);
         return;
@@ -618,108 +761,4 @@ fn print_image_check(detail: &ImageCheckDetail, no_spec: bool, verbose: bool) {
         print_self_patch_ranges(&detail.self_patch_ranges, detail.self_patch_range_overflow);
     }
     print_byte_diffs(&detail.byte_diffs, detail.byte_diffs_truncated, no_spec);
-}
-
-impl ReplState<'_> {
-    fn cmd_peb(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if invocation.argv.len() > 1 {
-            outln!("{}\n", command_help("!peb"));
-            return Ok(());
-        }
-        let address = match invocation.arg(0) {
-            Some(text) => match self.eval_or_report(text) {
-                Some(address) => Some(address),
-                None => return Ok(()),
-            },
-            None => None,
-        };
-        match self.ctx.target.inspect_peb(address) {
-            Ok(detail) => print_peb(&detail),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_teb(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        if invocation.argv.len() > 1 {
-            outln!("{}\n", command_help("!teb"));
-            return Ok(());
-        }
-        let address = match invocation.arg(0) {
-            Some(text) => match self.eval_or_report(text) {
-                Some(address) => Some(address),
-                None => return Ok(()),
-            },
-            None => None,
-        };
-        match self.ctx.target.inspect_teb(address) {
-            Ok(detail) => print_teb(&detail),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_dlls(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let mut filter = None;
-        let mut arguments = invocation.argv.iter();
-        while let Some(argument) = arguments.next() {
-            if argument.as_ref() != "-c" || filter.is_some() {
-                if argument.as_ref() == "-c" && filter.is_some() {
-                    error!("!dlls: -c may only be specified once");
-                } else {
-                    outln!("{}\n", command_help("!dlls"));
-                }
-                return Ok(());
-            }
-            let Some(text) = arguments.next() else {
-                outln!("{}\n", command_help("!dlls"));
-                return Ok(());
-            };
-            filter = match self.eval_or_report(text) {
-                Some(address) => Some(address),
-                None => return Ok(()),
-            };
-        }
-        match self.ctx.target.loader_modules(filter) {
-            Ok(detail) => print_loader_module_table(&detail),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_gle(&mut self) -> Result<()> {
-        match self.ctx.target.last_error() {
-            Ok(detail) => print_last_error(&detail),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
-
-    fn cmd_chkimg(&mut self, invocation: CommandInvocation<'_>) -> Result<()> {
-        let mut show_diffs = false;
-        let mut verbose = false;
-        let mut no_spec = false;
-        let mut module_name = None;
-        for argument in &invocation.argv {
-            match argument.as_ref() {
-                "-d" => show_diffs = true,
-                "-v" => verbose = true,
-                "-nospec" => no_spec = true,
-                value if module_name.is_none() => module_name = Some(value),
-                _ => {
-                    outln!("{}\n", command_help("!chkimg"));
-                    return Ok(());
-                }
-            }
-        }
-        let Some(module_name) = module_name else {
-            outln!("{}\n", command_help("!chkimg"));
-            return Ok(());
-        };
-        match self.ctx.check_image(module_name, show_diffs) {
-            Ok(detail) => print_image_check(&detail, no_spec, verbose),
-            Err(error) => error!("{error}"),
-        }
-        Ok(())
-    }
 }

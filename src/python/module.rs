@@ -303,7 +303,7 @@ impl Module {
                 let detail = session.target.loader_modules(None).map_err(err)?;
                 let module = detail
                     .modules
-                    .iter()
+                    .into_iter()
                     .find(|module| module.base_address == info.base_address)
                     .ok_or_else(|| {
                         err(Error::DebugInfo(format!(
@@ -311,9 +311,7 @@ impl Module {
                             info.name
                         )))
                     })?;
-                Ok(view::module::ModuleDetail::Process(
-                    view::usermode::loader_module(module),
-                ))
+                Ok(view::module::ModuleDetail::Process(module))
             } else {
                 Ok(view::module::ModuleDetail::Kernel(
                     view::module::module_with_symbols(&session.target, &info, dtb),
@@ -391,20 +389,6 @@ impl Module {
         Ok(path.to_string_lossy().into_owned())
     }
 
-    /// Compare the executable sections with the cached image (`!chkimg`).
-    #[pyo3(signature = (include_diffs=false))]
-    fn check_image<'py>(
-        &self,
-        py: Python<'py>,
-        include_diffs: bool,
-    ) -> PyResult<Typed<'py, view::usermode::ImageCheck>> {
-        let name = self.info.short_name.clone();
-        let detail = self.owner.with_in(py, &self.context(), |session| {
-            session.check_image(&name, include_diffs).map_err(err)
-        })?;
-        Typed::new(py, view::usermode::image_check(&detail))
-    }
-
     /// Get the verifier data for this driver module.
     fn verifier<'py>(&self, py: Python<'py>) -> PyResult<Typed<'py, view::meta::VerifierDriver>> {
         // Driver Verifier is NT's; it never tracks secure-kernel modules.
@@ -461,26 +445,6 @@ impl Modules {
             .into_iter()
             .find(|module| module.contains_address(VirtAddr(addr)));
         self.handle(py, found)
-    }
-
-    /// How the loader lists of a process ended, which shows whether a list is
-    /// complete, corrupt, or truncated. It has `termination` and
-    /// `wow64_termination`, each `{kind, address, error}`, and is `None` for
-    /// kernel modules.
-    #[getter]
-    fn termination<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Typed<'py, Option<view::usermode::LoaderTerminations>>> {
-        let Space::Process(process) = &self.space else {
-            return Typed::new(py, None);
-        };
-        let detail = self
-            .owner
-            .with_in(py, &Context::process(process.clone()), |session| {
-                session.target.loader_modules(None).map_err(err)
-            })?;
-        Typed::new(py, Some(view::usermode::loader_terminations(&detail)))
     }
 
     fn __getitem__(&self, py: Python<'_>, name: &str) -> PyResult<Module> {

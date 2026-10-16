@@ -16,12 +16,11 @@ use super::thread::Threads;
 use super::types::{Struct, Types};
 use super::{err, view_dict};
 use crate::guest::ProcessInfo;
-use crate::target::heap::HeapSelector;
+use crate::target::heap::{HeapBlockSearch, HeapDetail, HeapSelector};
 use crate::target::mm::{MemoryRegionInfo, MemoryRegionInfoPy};
 use crate::target::object::{HandleEntry, HandleTable};
 use crate::target::sched::ApcSelector;
 use crate::types::VirtAddr;
-use crate::view;
 use crate::view::record::Typed;
 
 /// The running processes, with their PIDs as keys (`dbg.processes`). Each
@@ -425,17 +424,13 @@ struct HeapHandleInfo {
 #[pymethods]
 impl Heaps {
     /// Find the heap block that contains `addr` (`!heap -x`).
-    fn find_block<'py>(
-        &self,
-        py: Python<'py>,
-        addr: u64,
-    ) -> PyResult<Typed<'py, view::heap::HeapBlockSearch>> {
+    fn find_block<'py>(&self, py: Python<'py>, addr: u64) -> PyResult<Typed<'py, HeapBlockSearch>> {
         let ctx = Context::process(self.info.clone());
         let detail = self.owner.with_in(py, &ctx, |session| {
             symbols::load_scope_symbols(session, &Space::Process(self.info.clone()))?;
             session.target.find_heap_block(VirtAddr(addr)).map_err(err)
         })?;
-        Typed::new(py, view::heap::heap_block_search(&detail))
+        Typed::new(py, detail)
     }
 
     fn get(&self, py: Python<'_>, index: usize) -> PyResult<Option<Heap>> {
@@ -511,7 +506,7 @@ impl Heap {
         &self,
         py: Python<'py>,
         list_entries: bool,
-    ) -> PyResult<Typed<'py, view::heap::HeapDetail>> {
+    ) -> PyResult<Typed<'py, HeapDetail>> {
         let ctx = Context::process(self.info.clone());
         let detail = self.owner.with_in(py, &ctx, |session| {
             symbols::load_scope_symbols(session, &Space::Process(self.info.clone()))?;
@@ -520,7 +515,7 @@ impl Heap {
                 .inspect_heap(HeapSelector::Address(self.address), list_entries)
                 .map_err(err)
         })?;
-        Typed::new(py, view::heap::heap(&detail))
+        Typed::new(py, detail)
     }
 
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<PlainDict<'py>> {

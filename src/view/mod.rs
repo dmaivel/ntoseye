@@ -6,7 +6,6 @@ pub mod backend;
 pub mod bugcheck;
 pub mod execution;
 pub mod fs;
-pub mod heap;
 pub mod hypervisor;
 pub mod meta;
 pub mod module;
@@ -17,7 +16,6 @@ pub mod registry;
 pub mod symbols;
 pub mod triage;
 pub mod userdump;
-pub mod usermode;
 
 /// A node in the value tree the SDK builds its results from.
 pub enum View {

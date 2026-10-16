@@ -464,7 +464,7 @@ pub fn module_symbols(target: &Target, info: &ModuleInfo, dtb: Dtb) -> ModuleSym
 #[record]
 pub enum ModuleDetail {
     Kernel(LoadedModule),
-    Process(super::usermode::LoaderModule),
+    Process(crate::target::usermode::LoaderModule),
 }
 
 /// A module's identity with its symbol status (a kernel module's

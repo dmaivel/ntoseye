@@ -94,7 +94,6 @@ mod command;
 mod commands;
 mod completion;
 mod disasm;
-mod heap;
 #[cfg(feature = "cli")]
 mod line_editor;
 mod memory_view;
@@ -116,7 +115,6 @@ pub use command::*;
 pub use commands::{ReplActions, command_reference_json, json_string};
 pub use completion::*;
 pub use disasm::*;
-pub use heap::*;
 #[cfg(feature = "cli")]
 use line_editor::{CustomPrompt, MyCompleter, TrackingHighlighter};
 pub use memory_view::*;
