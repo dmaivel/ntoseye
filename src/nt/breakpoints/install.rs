@@ -134,9 +134,9 @@ pub fn forget_site(debugger: &Target, memory: &AddressSpace<'_, PhysMem>, addres
 /// displaced instruction is `original` (`None` when its page is not resident
 /// and the target writes the site later). A backend that does not reclaim
 /// what a dead session abandons has the site journaled first, and forgotten
-/// again if the backend refuses it. A site in the kernel's user/kernel
-/// transition code is refused where Windows itself takes the trap (see
-/// [`Target::kernel_transition_refusal`]).
+/// again if the backend refuses it. Where Windows itself takes the trap, a
+/// site it cannot take one at is refused (see
+/// [`Target::breakpoint_site_refusal`]).
 pub fn plant_target_site(
     client: &mut dyn DebugBackend,
     debugger: &Target,
@@ -144,7 +144,7 @@ pub fn plant_target_site(
     original: Option<&[u8]>,
 ) -> Result<()> {
     if client.debug_traps_reach_target()
-        && let Some(refusal) = debugger.kernel_transition_refusal(address, "a breakpoint")
+        && let Some(refusal) = debugger.breakpoint_site_refusal(address)
     {
         return Err(Error::Breakpoint(refusal));
     }

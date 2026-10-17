@@ -40,6 +40,7 @@ pub mod smbios;
 pub mod srb;
 pub mod storport;
 mod symbols;
+mod trap_sites;
 pub mod userdump;
 pub mod usermode;
 mod variables;

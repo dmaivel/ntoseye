@@ -242,6 +242,9 @@ pub struct Guest {
     /// Windows asks, and a kernel whose headers were not read at symbol
     /// load costs a read.
     kernel_transition_code: OnceLock<Option<Range<VirtAddr>>>,
+    /// The code a trap runs before the kernel reports it to the debugger,
+    /// found once per boot (see [`Self::trap_dispatch_code`]).
+    trap_dispatch_code: OnceLock<Vec<Range<VirtAddr>>>,
     memo: Mutex<HaltMemo>,
     secure_kernel: Mutex<Option<Arc<SecureKernel>>>,
     /// Whether saved VTL state already looked for the secure kernel, which
@@ -343,6 +346,7 @@ impl Guest {
         }
         Self {
             kernel_transition_code: OnceLock::new(),
+            trap_dispatch_code: OnceLock::new(),
             ntoskrnl,
             memo: Mutex::new(HaltMemo::default()),
             secure_kernel: Mutex::new(None),
@@ -372,6 +376,17 @@ impl Guest {
         self.kernel_transition_code
             .get_or_init(|| self.ntoskrnl.section_range("KVASCODE"))
             .as_ref()
+    }
+
+    /// The code a trap runs through before the kernel reports it to the
+    /// debugger, as sorted, disjoint ranges: `find` finds it the first
+    /// time, from the kernel's code and symbols, which only the target
+    /// resolves.
+    pub fn trap_dispatch_code(
+        &self,
+        find: impl FnOnce() -> Vec<Range<VirtAddr>>,
+    ) -> &[Range<VirtAddr>] {
+        self.trap_dispatch_code.get_or_init(find)
     }
 
     /// Where the VPs of the hypervisor image at `base` keep their saved

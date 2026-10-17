@@ -32,6 +32,10 @@ USER_SPACE = "cannot plant a software breakpoint in user space"
 # A walk following its switched-out thread ends when that thread exits
 # before it runs again; another thread caught at the same function goes on.
 EXITED = "exited before it went on"
+# A walk following its switched-out thread on KD ends when the instruction
+# it goes on at is in code Windows runs to dispatch a trap, where no
+# breakpoint can mark it; another attempt starts elsewhere.
+IN_TRAP_DISPATCH = "in code that Windows runs to dispatch a debug trap"
 # How a step refuses a vCPU halted in the Windows hypervisor, where an
 # interrupt can catch it taking a VM exit.
 IN_HYPERVISOR = "is halted in the Windows hypervisor"
@@ -175,7 +179,8 @@ def test_trace_calls_returns_a_call_tree(halted: Debugger) -> None:
         if trace.end not in ("diverted", "interrupted") and not (
             trace.end == "failed"
             and any(
-                reason in (trace.error or "") for reason in (HYPERVISOR_WAIT, USER_SPACE, EXITED)
+                reason in (trace.error or "")
+                for reason in (HYPERVISOR_WAIT, USER_SPACE, EXITED, IN_TRAP_DISPATCH)
             )
         ):
             break

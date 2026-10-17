@@ -537,7 +537,7 @@ impl Session {
         let (breakpoints, backend, target) = self.breakpoint_sites();
         if access == HwBreakpointAccess::Execute
             && backend.debug_traps_reach_target()
-            && let Some(refusal) = target.kernel_transition_refusal(addr, "a breakpoint")
+            && let Some(refusal) = target.breakpoint_site_refusal(addr)
         {
             return Err(Error::Breakpoint(refusal));
         }
