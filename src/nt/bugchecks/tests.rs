@@ -153,3 +153,16 @@ fn minidump_aliases_reuse_base_parameter_schemas() {
         );
     }
 }
+
+#[test]
+fn only_an_unexpected_trap_takes_its_fault_from_the_stack() {
+    // A minidump of a double fault records 0x1000007F.
+    assert!(trap_on_stack_is_the_fault(0x7f));
+    assert!(trap_on_stack_is_the_fault(0x1000_007f));
+    // 0xD1 raised from KiPageFault crosses a trap frame too, but names the
+    // faulting instruction in its parameters; 0x8E and 0x139 name their
+    // trap frame there.
+    for code in [0xd1, 0x8e, 0x1000_008e, 0x139, 0x7e] {
+        assert!(!trap_on_stack_is_the_fault(code), "{code:#x}");
+    }
+}

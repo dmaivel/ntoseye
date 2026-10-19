@@ -255,6 +255,15 @@ pub fn fault_at_trap_frame(
     })
 }
 
+/// Whether the innermost trap on a bugcheck's stack (see
+/// [`bugcheck_trap_frame_on_stack`]) is the fault: an
+/// UNEXPECTED_KERNEL_MODE_TRAP is that trap (a double fault, say), so the
+/// instruction it interrupted is the fault. A minidump records the code as
+/// its alias, 0x1000007F.
+pub fn trap_on_stack_is_the_fault(code: u32) -> bool {
+    matches!(code, 0x0000_007f | 0x1000_007f)
+}
+
 /// Resolve parameter meanings that vary by bugcheck parameter values.
 ///
 /// [`BugcheckDescriptor::arguments`] stays a code-only, conservative fallback;

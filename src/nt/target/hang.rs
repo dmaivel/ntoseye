@@ -221,12 +221,16 @@ pub const IPI_FIELDS: &[&str] = &[
     "TargetSet",
 ];
 
+/// `_KPRCB.IpiFrozen`'s state for a processor that `KiFreezeTargetExecution`
+/// holds.
+const IPI_FROZEN: u64 = 2;
+
 /// `_KPRCB.IpiFrozen`'s state (its low nibble), as `KeFreezeExecution`,
 /// `KiSendFreeze`, `KiFreezeTargetExecution`, and `KiSendThawExecution` set it.
 pub fn ipi_frozen_name(value: u64) -> &'static str {
     match value & 0xf {
         0 => "Running",
-        2 => "Frozen",
+        IPI_FROZEN => "Frozen",
         3 => "Thaw",
         4 => "Freeze owner",
         5 => "Freeze requested",
@@ -240,13 +244,12 @@ pub fn ipi_frozen_name(value: u64) -> &'static str {
 /// every state is known and exactly one of several processors is not
 /// frozen: on a live-system dump none is.
 pub fn bugcheck_processor_from_freeze_states(states: &[Option<u64>]) -> Option<u16> {
-    const FROZEN: u64 = 2;
     if states.len() < 2 {
         return None;
     }
     let mut running = None;
     for (index, state) in states.iter().enumerate() {
-        if (*state)? & 0xf != FROZEN {
+        if (*state)? & 0xf != IPI_FROZEN {
             if running.is_some() {
                 return None;
             }
