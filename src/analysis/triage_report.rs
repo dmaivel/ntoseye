@@ -13,13 +13,15 @@ mod whea;
 
 use ntoseye_macros::record;
 
-use crate::nt::bugchecks::{BugcheckAnalysis, bugcheck_trap_frame_on_stack, module_filename};
+use crate::nt::bugchecks::{
+    BugcheckAnalysis, bugcheck_trap_frame_on_stack, fault_at_trap_frame, module_filename,
+};
 use crate::nt::dmp::triage::TriagePrcbInfo;
 use crate::nt::dmp::{DmpException, DmpInfo, DmpSystemInfo, UnloadedDriver};
 use crate::nt::guest::ModuleInfo;
 
 use crate::base::types::VirtAddr;
-use crate::nt::unwind::StackTrace;
+use crate::nt::unwind::{StackTrace, resolve_thread_trace_context};
 use crate::session::{RunStatus, Session};
 use blackbox::blackbox_findings;
 pub use crash_context::TriageCrashInfo;
@@ -35,6 +37,9 @@ pub use user::{
 };
 use verifier::verifier_finding;
 use whea::{decode_whea_record, whea_without_memory};
+
+/// UNEXPECTED_KERNEL_MODE_TRAP: a trap the kernel did not handle.
+const UNEXPECTED_KERNEL_MODE_TRAP: u32 = 0x7f;
 
 /// Canonical crash-code kind used by a failure signature: `bugcheck` or
 /// `exception`.
@@ -432,6 +437,19 @@ impl TriageReport {
             && analysis.trap_frames.is_empty()
             && let Some(trap_frame) = bugcheck_trap_frame_on_stack(&session.target, trace)
         {
+            // An UNEXPECTED_KERNEL_MODE_TRAP is that trap (a double fault,
+            // say), so the instruction it interrupted is the fault.
+            if analysis.code == UNEXPECTED_KERNEL_MODE_TRAP && analysis.fault.is_none() {
+                let trace =
+                    resolve_thread_trace_context(&session.target, session.target.kernel_dtb());
+                analysis.fault = fault_at_trap_frame(&session.target, &trace, &trap_frame);
+                if analysis.driver.is_none() {
+                    analysis.driver = analysis
+                        .fault
+                        .as_ref()
+                        .and_then(|fault| fault.driver.clone());
+                }
+            }
             analysis.trap_frames.push(trap_frame);
         }
         let modules = match session.target.kernel_modules() {
