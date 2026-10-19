@@ -97,9 +97,9 @@ struct TargetOptions {
     pdb_server: Vec<String>,
 
     /// Append a local directory to the symbol path, which you can give more
-    /// than once. ntoseye looks for PDB files (bare or in symbol-store
-    /// layout) in these directories after checking the cache and before
-    /// contacting symbol servers
+    /// than once. ntoseye looks for PDB files (bare, in symbol-store layout,
+    /// or in subdirectories) in these directories after checking the cache
+    /// and before contacting symbol servers
     #[arg(long, global = true)]
     sympath_append: Vec<PathBuf>,
 

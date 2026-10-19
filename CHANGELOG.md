@@ -15,6 +15,10 @@ Keeping this file:
 
 ## Unreleased
 
+### Added
+
+- A local directory on the symbol path (`--sympath-append`, `.sympath+`) supplies the PDBs in its subdirectories too, eight levels down, so a mounted virtio-win ISO's driver PDBs (`viostor/w11/amd64/viostor.pdb`) load without copying them out. ntoseye reads each directory once; `.reload` reads it again for PDBs put there since.
+
 ### Fixed
 
 - `!analyze` names the faulting instruction and its driver for a KERNEL_SECURITY_CHECK_FAILURE (0x139) and an UNEXPECTED_KERNEL_MODE_TRAP (0x7F, or 0x1000007F in a minidump), from the trap frame the parameters name or the stack crosses, and buckets the crash and names the culprit by that driver. It named no fault for them, and bucketed them on the instruction the processor stopped at.

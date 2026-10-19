@@ -179,26 +179,71 @@ fn local_source_paths_cover_direct_and_symbol_store_layouts() {
 }
 
 #[test]
-fn local_source_candidates_finds_pdbs_in_subdirectories() {
+fn local_source_candidates_go_on_to_pdbs_further_down() {
     let identity = PdbIdentity {
         guid: 0x00112233445566778899AABBCCDDEEFF,
         age: 2,
     };
-    let root = std::env::temp_dir().join("ntoseye_test_local_source_recursive");
-    let _ = std::fs::remove_dir_all(&root);
-    // Create a PDB in a nested subdirectory, like a virtio-win ISO:
-    //   root/viorng/2k22/amd64/viorng.pdb
-    let nested = root.join("viorng").join("2k22").join("amd64");
-    std::fs::create_dir_all(&nested).unwrap();
-    std::fs::write(nested.join("viorng.pdb"), b"fake").unwrap();
+    let root = temp_root("nested-pdbs");
+    let put = |relative: &str| {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"pdb").unwrap();
+        path
+    };
+    // A virtio-win ISO's layout, in either case, down to the deepest level
+    // read.
+    let mut nested = vec![
+        put("viorng/2k22/amd64/viorng.pdb"),
+        put("viorng/w11/ARM64/VIORNG.PDB"),
+        put("1/2/3/4/5/6/7/viorng.pdb"),
+    ];
+    put("1/2/3/4/5/6/7/8/viorng.pdb");
+    // Another build in the symbol-store layout is not this one.
+    put("viorng.pdb/FFEEDDCCBBAA99887766554433221100/viorng.pdb");
+    put("viorng/2k22/amd64/viorng.sys");
+    // A link back up the tree is not followed into the same PDBs again.
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&root, root.join("viorng/2k22/up")).unwrap();
 
-    let candidates = local_source_candidates(&root, "viorng.pdb", identity);
-    // The flat candidates come first, then the recursively discovered one.
-    assert_eq!(candidates.len(), 3);
-    assert_eq!(candidates[0], root.join("viorng.pdb"));
-    assert!(candidates[2].ends_with("viorng/2k22/amd64/viorng.pdb"));
+    let mut candidates = local_source_candidates(&root, "viorng.pdb", identity);
+    let flat = candidates.drain(..2).collect::<Vec<_>>();
+    assert_eq!(
+        flat,
+        [
+            root.join("viorng.pdb"),
+            root.join("viorng.pdb/00112233445566778899AABBCCDDEEFF2/viorng.pdb"),
+        ]
+    );
+    candidates.sort();
+    nested.sort();
+    assert_eq!(candidates, nested);
 
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_pdb_put_in_a_local_directory_is_found_once_reload_forgets_it() {
+    let identity = PdbIdentity {
+        guid: 0x00112233445566778899AABBCCDDEEFF,
+        age: 2,
+    };
+    let root = temp_root("nested-pdbs-reload");
+    std::fs::create_dir_all(root.join("viostor/w11/amd64")).unwrap();
+    assert_eq!(
+        local_source_candidates(&root, "viostor.pdb", identity).len(),
+        2
+    );
+
+    let added = root.join("viostor/w11/amd64/viostor.pdb");
+    std::fs::write(&added, b"pdb").unwrap();
+    SymbolStore::new().forget_unavailable();
+    assert_eq!(
+        local_source_candidates(&root, "viostor.pdb", identity)[2..],
+        [added]
+    );
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

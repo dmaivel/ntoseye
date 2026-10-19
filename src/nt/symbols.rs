@@ -313,7 +313,8 @@ pub struct SymbolStore {
 pub enum SymbolSource {
     /// ntoseye's managed on-disk symbol cache.
     Cache,
-    /// A directory containing either bare PDBs or a conventional symbol store.
+    /// A directory containing bare PDBs, a conventional symbol store, or
+    /// PDBs in subdirectories.
     LocalDirectory(PathBuf),
     /// An HTTP(S) symbol server root.
     Http(String),
@@ -1017,9 +1018,11 @@ impl SymbolStore {
         self.unavailable.lock().get(&job.path).cloned()
     }
 
-    /// Let every file that was unavailable be fetched again.
+    /// Let every file that was unavailable be fetched again, and the local
+    /// directories be read again for it.
     pub fn forget_unavailable(&self) {
         self.unavailable.lock().clear();
+        forget_nested_pdbs();
     }
 
     /// See [`SymbolStore::load_generation`] field docs.
@@ -1674,6 +1677,7 @@ mod source;
 mod types;
 
 use cache::{ModuleIdentities, symbols_directory};
+use download::forget_nested_pdbs;
 pub use index::SymbolIndex;
 pub use inline::ProcedureInlines;
 

@@ -10,12 +10,13 @@ use crate::base::output;
 use dashmap::DashMap;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use spin::Mutex;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs::File,
     path::{Path, PathBuf},
     sync::{
-        Arc, LazyLock,
+        Arc, LazyLock, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -214,42 +215,81 @@ pub(super) fn local_source_candidates(
     server_name: &str,
     identity: PdbIdentity,
 ) -> Vec<PathBuf> {
+    let bare = root.join(server_name);
     let mut candidates = vec![
-        root.join(server_name),
+        bare.clone(),
         store_path(root, server_name, &identity.symbol_store_key()),
     ];
-    // Recursively search for PDBs by file name: a virtio-win ISO (or any
-    // directory tree that is not a flat symbol store) keeps PDBs under
-    // driver/os-version/arch subdirectories. The depth limit avoids
-    // unbounded traversals of very large trees.
-    find_files_by_name(root, server_name, 8, &mut candidates);
+    // Then every PDB of that name further down, as a virtio-win ISO keeps
+    // them (`viostor/w11/amd64/viostor.pdb`), except the other builds that
+    // the symbol-store layout keeps under the bare name.
+    candidates.extend(
+        nested_pdbs(root, server_name)
+            .into_iter()
+            .filter(|path| !path.starts_with(&bare)),
+    );
     candidates
 }
 
-/// Append every file named `target` found under `dir`, up to `max_depth`
-/// levels deep, to `out`. Entries already in `out` (the flat candidates)
-/// are not duplicated.
-fn find_files_by_name(dir: &Path, target: &str, max_depth: u8, out: &mut Vec<PathBuf>) {
-    if max_depth == 0 {
-        return;
-    }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            find_files_by_name(&path, target, max_depth - 1, out);
-        } else if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.eq_ignore_ascii_case(target))
-            && !out.contains(&path)
-        {
-            out.push(path);
+/// How many directory levels [`index_nested_pdbs`] reads under a local
+/// directory on the symbol path.
+const NESTED_PDB_DEPTH: usize = 8;
+
+/// The PDB files under a local directory on the symbol path, by lowercased
+/// file name.
+type NestedPdbs = HashMap<String, Vec<PathBuf>>;
+
+/// Each local directory's [`NestedPdbs`], indexed on the first lookup there
+/// and kept until [`forget_nested_pdbs`]: the modules of a kernel look up
+/// their PDBs together, and a walk for each would read the whole tree as
+/// many times.
+static NESTED_PDBS: LazyLock<Mutex<HashMap<PathBuf, Arc<OnceLock<NestedPdbs>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Index each local directory again on its next lookup, to find the PDBs
+/// put there since.
+pub fn forget_nested_pdbs() {
+    NESTED_PDBS.lock().clear();
+}
+
+/// The PDB files named `name` (in any case) under `root`.
+fn nested_pdbs(root: &Path, name: &str) -> Vec<PathBuf> {
+    // Lookups in other directories go on while this one is indexed.
+    let index = Arc::clone(NESTED_PDBS.lock().entry(root.to_path_buf()).or_default());
+    index
+        .get_or_init(|| index_nested_pdbs(root))
+        .get(&name.to_ascii_lowercase())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Walk `root` for PDB files, [`NESTED_PDB_DEPTH`] levels down. A symbolic
+/// link to a directory is not followed: it can lead back up the tree.
+fn index_nested_pdbs(root: &Path) -> NestedPdbs {
+    let mut pdbs = NestedPdbs::new();
+    let mut directories = vec![(root.to_path_buf(), 1)];
+    while let Some((directory, depth)) = directories.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                if depth < NESTED_PDB_DEPTH {
+                    directories.push((path, depth + 1));
+                }
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("pdb"))
+                && let Some(name) = entry.file_name().to_str()
+            {
+                pdbs.entry(name.to_ascii_lowercase())
+                    .or_default()
+                    .push(path);
+            }
         }
     }
+    pdbs
 }
 
 /// Copy `source` to `destination` in the cache, through a temporary file
