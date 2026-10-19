@@ -179,6 +179,29 @@ fn local_source_paths_cover_direct_and_symbol_store_layouts() {
 }
 
 #[test]
+fn local_source_candidates_finds_pdbs_in_subdirectories() {
+    let identity = PdbIdentity {
+        guid: 0x00112233445566778899AABBCCDDEEFF,
+        age: 2,
+    };
+    let root = std::env::temp_dir().join("ntoseye_test_local_source_recursive");
+    let _ = std::fs::remove_dir_all(&root);
+    // Create a PDB in a nested subdirectory, like a virtio-win ISO:
+    //   root/viorng/2k22/amd64/viorng.pdb
+    let nested = root.join("viorng").join("2k22").join("amd64");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("viorng.pdb"), b"fake").unwrap();
+
+    let candidates = local_source_candidates(&root, "viorng.pdb", identity);
+    // The flat candidates come first, then the recursively discovered one.
+    assert_eq!(candidates.len(), 3);
+    assert_eq!(candidates[0], root.join("viorng.pdb"));
+    assert!(candidates[2].ends_with("viorng/2k22/amd64/viorng.pdb"));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn pdb_identity_requires_guid_and_non_stale_age() {
     let expected = PdbIdentity {
         guid: 0x1234,
