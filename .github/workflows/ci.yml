@@ -119,7 +119,9 @@ jobs:
       fail-fast: false
       matrix:
         python: ["3.9", "3.13"]
-    runs-on: ubuntu-latest
+    # setup-python has no Python 3.9 for Ubuntu 26.04, which ubuntu-latest
+    # now runs.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
