@@ -234,6 +234,28 @@ pub fn ipi_frozen_name(value: u64) -> &'static str {
     }
 }
 
+/// The processor that bugchecked, from each processor's `IpiFrozen` (see
+/// [`Target::ipi_frozen_states`]): `KeBugCheck2` freezes every other
+/// processor, so it is the one processor that is not frozen. `None` unless
+/// every state is known and exactly one of several processors is not
+/// frozen: on a live-system dump none is.
+pub fn bugcheck_processor_from_freeze_states(states: &[Option<u64>]) -> Option<u16> {
+    const FROZEN: u64 = 2;
+    if states.len() < 2 {
+        return None;
+    }
+    let mut running = None;
+    for (index, state) in states.iter().enumerate() {
+        if (*state)? & 0xf != FROZEN {
+            if running.is_some() {
+                return None;
+            }
+            running = Some(u16::try_from(index).ok()?);
+        }
+    }
+    running
+}
+
 /// A mailbox request's type (the low nibble of `RequestSummary`), as
 /// Windows 11's `KiIpiProcessRequests` dispatches it; `None` for a type it
 /// ignores.
@@ -522,6 +544,23 @@ impl Target {
         Ok(detail)
     }
 
+    /// Each processor's `_KPRCB.IpiFrozen`, by index: `None` for a
+    /// processor whose block or field cannot be read.
+    pub fn ipi_frozen_states(&self) -> Result<Vec<Option<u64>>> {
+        let prcb = layout_for(self, "_KPRCB")?;
+        let types = self.guest()?.ntoskrnl.types();
+        Ok(processor_indices(self)?
+            .into_iter()
+            .map(|index| {
+                let kprcb = kprcb_for_processor(self, index).ok()?;
+                types
+                    .struct_with_layout(Arc::clone(&prcb), kprcb)
+                    .read_uint("IpiFrozen")
+                    .ok()
+            })
+            .collect())
+    }
+
     fn mailbox_layout(&self, prcb: &TypeInfo) -> std::result::Result<MailboxLayout, String> {
         let layout = || -> Result<MailboxLayout> {
             let mailbox = prcb.field_offset("Mailbox")?;
@@ -632,6 +671,38 @@ struct MailboxLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bugcheck_processor_is_the_one_left_unfrozen() {
+        assert_eq!(
+            bugcheck_processor_from_freeze_states(&[Some(2), Some(2), Some(2), Some(0)]),
+            Some(3)
+        );
+        // The freeze owner's state, and the upper bits, do not matter.
+        assert_eq!(
+            bugcheck_processor_from_freeze_states(&[Some(4), Some(0x12)]),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn bugcheck_processor_needs_every_other_processor_frozen() {
+        // A live-system dump: nothing is frozen.
+        assert_eq!(
+            bugcheck_processor_from_freeze_states(&[Some(0), Some(0)]),
+            None
+        );
+        assert_eq!(
+            bugcheck_processor_from_freeze_states(&[Some(2), Some(2)]),
+            None
+        );
+        assert_eq!(
+            bugcheck_processor_from_freeze_states(&[Some(2), None, Some(0)]),
+            None
+        );
+        assert_eq!(bugcheck_processor_from_freeze_states(&[Some(0)]), None);
+        assert_eq!(bugcheck_processor_from_freeze_states(&[]), None);
+    }
 
     fn entry(processor: u16, next: u64, lock: u64) -> LockEntry {
         LockEntry {
