@@ -865,6 +865,22 @@ impl DmpBackend {
         }
     }
 
+    /// Whether the dump header's CONTEXT is empty, which leaves the PRCB
+    /// contexts nothing to match: a live-system dump's, or that of a dump
+    /// QEMU wrote (`dump-guest-memory -w`, as libvirt does on a guest crash),
+    /// whose header holds the context the guest pre-filled.
+    pub fn header_context_is_empty(&self) -> bool {
+        self.header_context.instruction_pointer() == 0
+    }
+
+    /// Select processor `index` as the one that bugchecked, when the header
+    /// context could not tell (see [`Self::header_context_is_empty`]).
+    pub fn select_bugcheck_processor(&mut self, index: u16) {
+        if usize::from(index) < self.per_cpu_registers.len() {
+            self.current_processor = usize::from(index);
+        }
+    }
+
     /// The number of processors this dump holds a register context for.
     pub fn processor_count(&self) -> usize {
         self.per_cpu_registers.len()
@@ -1250,6 +1266,7 @@ mod tests {
 
         backend.select_crash_processor();
         assert_eq!(backend.current_processor, 0);
+        assert!(!backend.header_context_is_empty());
         let data = backend.read_registers().unwrap();
         let map = backend.register_map().clone();
         assert_eq!(map.read_u64("rip", &data).unwrap(), info.context.rip);

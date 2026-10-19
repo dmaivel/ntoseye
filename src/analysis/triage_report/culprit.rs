@@ -124,7 +124,7 @@ pub(super) fn culprit_attribution(report: &TriageReport) -> Option<CulpritAttrib
             },
         );
     }
-    if let Some(address) = report.status.rip
+    if let Some(address) = report.current_instruction()
         && let Some(module) = evidence_module_for_address(report, address)
     {
         add_culprit_evidence(
