@@ -214,10 +214,42 @@ pub(super) fn local_source_candidates(
     server_name: &str,
     identity: PdbIdentity,
 ) -> Vec<PathBuf> {
-    vec![
+    let mut candidates = vec![
         root.join(server_name),
         store_path(root, server_name, &identity.symbol_store_key()),
-    ]
+    ];
+    // Recursively search for PDBs by file name: a virtio-win ISO (or any
+    // directory tree that is not a flat symbol store) keeps PDBs under
+    // driver/os-version/arch subdirectories. The depth limit avoids
+    // unbounded traversals of very large trees.
+    find_files_by_name(root, server_name, 8, &mut candidates);
+    candidates
+}
+
+/// Append every file named `target` found under `dir`, up to `max_depth`
+/// levels deep, to `out`. Entries already in `out` (the flat candidates)
+/// are not duplicated.
+fn find_files_by_name(dir: &Path, target: &str, max_depth: u8, out: &mut Vec<PathBuf>) {
+    if max_depth == 0 {
+        return;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            find_files_by_name(&path, target, max_depth - 1, out);
+        } else if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case(target))
+            && !out.contains(&path)
+        {
+            out.push(path);
+        }
+    }
 }
 
 /// Copy `source` to `destination` in the cache, through a temporary file
