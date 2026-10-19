@@ -410,7 +410,7 @@ impl TriageReport {
         let status = session.run_status();
         let mut bugcheck = session.bugcheck();
         let mut warnings = Vec::new();
-        let backtrace = if status.running {
+        let mut backtrace = if status.running {
             None
         } else {
             match session.backtrace(TRIAGE_BACKTRACE_LIMIT) {
@@ -421,6 +421,11 @@ impl TriageReport {
                 }
             }
         };
+        if bugcheck.is_some()
+            && let Some(trace) = backtrace.as_mut()
+        {
+            trim_bugcheck_callbacks(trace);
+        }
         // A bugcheck raised from a trap handler names no trap frame; the stack
         // crossed it on the way to the fault.
         if let (Some(analysis), Some(trace)) = (bugcheck.as_mut(), backtrace.as_ref())
@@ -533,6 +538,28 @@ impl TriageReport {
                 .is_some_and(|name| names_match(name, &driver.name))
     }
 
+    /// The instruction the evidence takes as current: where the target
+    /// stopped, unless the backtrace starts at the bugcheck's
+    /// `nt!KeBugCheckEx` frame below it (see [`trim_bugcheck_callbacks`]),
+    /// where a dump that Windows wrote would have stopped.
+    pub(super) fn current_instruction(&self) -> Option<u64> {
+        let rip = self.status.rip?;
+        match self
+            .backtrace
+            .as_ref()
+            .and_then(|trace| trace.frames.first())
+        {
+            Some(top)
+                if self.bugcheck.is_some()
+                    && top.ip != rip
+                    && symbol_is_function(&top.symbol, "nt!KeBugCheckEx") =>
+            {
+                Some(top.ip)
+            }
+            _ => Some(rip),
+        }
+    }
+
     fn recorded_address_in(&self, start: u64, end: u64) -> bool {
         if start >= end {
             return false;
@@ -551,6 +578,37 @@ impl TriageReport {
                 .as_ref()
                 .is_some_and(|trace| trace.frames.iter().any(|frame| contains(frame.ip)))
     }
+}
+
+/// Start a bugcheck's stack at its `nt!KeBugCheckEx` frame, dropping the
+/// bugcheck callbacks that `nt!KeBugCheck2` runs above it. A dump that
+/// Windows writes holds the context `KeBugCheckEx` captured. A dump that
+/// QEMU writes (`dump-guest-memory -w`) holds the registers at dump time,
+/// which libvirt takes when pvpanic's callback reports the crash:
+/// `pvpanic+0x10cf` <- `nt!KiScanBugCheckCallbackList` <- `nt!KeBugCheck2` <-
+/// `nt!KeBugCheckEx`. That callback is not where the crash happened. `k`
+/// still walks the whole stack.
+fn trim_bugcheck_callbacks(trace: &mut StackTrace) {
+    let Some(bugcheck) = trace
+        .frames
+        .iter()
+        .position(|frame| symbol_is_function(&frame.symbol, "nt!KeBugCheckEx"))
+    else {
+        return;
+    };
+    if trace.frames[..bugcheck]
+        .iter()
+        .any(|frame| symbol_is_function(&frame.symbol, "nt!KeBugCheck2"))
+    {
+        trace.frames.drain(..bugcheck);
+    }
+}
+
+/// Whether a frame's symbol (`nt!KeBugCheckEx+0x107`) is in `function`.
+fn symbol_is_function(symbol: &str, function: &str) -> bool {
+    let symbol = symbol.split_whitespace().next().unwrap_or_default();
+    let name = symbol.split_once('+').map_or(symbol, |(name, _)| name);
+    name.eq_ignore_ascii_case(function)
 }
 
 fn evidence_module_for_address(report: &TriageReport, address: u64) -> Option<&str> {
@@ -909,6 +967,65 @@ mod tests {
         assert_eq!(signature.source, FailureSignatureSource::CurrentInstruction);
         assert_eq!(signature.symbol.as_deref(), Some("nt!kipagefault"));
         assert!(!signature.bucket.contains("thirdparty"));
+    }
+
+    fn bugcheck_callback_stack() -> StackTrace {
+        StackTrace {
+            frames: vec![
+                frame(DRIVER_BASE + 0x10cf, "pvpanic+0x10cf"),
+                frame(NT_BASE + 0x358643, "nt!KiScanBugCheckCallbackList+0x9b"),
+                frame(NT_BASE + 0x357206, "nt!KeBugCheck2+0xd36"),
+                frame(NT_BASE + 0x22fc57, "nt!KeBugCheckEx+0x107"),
+                frame(NT_BASE + 0x245529, "nt!KiBugCheckDispatch+0x69"),
+                frame(NT_BASE + 0x23f5dc, "nt!KiDoubleFaultAbort+0x31c"),
+            ],
+            truncated: 0,
+        }
+    }
+
+    #[test]
+    fn bugcheck_callbacks_are_trimmed_to_kebugcheckex() {
+        let mut trace = bugcheck_callback_stack();
+        trim_bugcheck_callbacks(&mut trace);
+        let symbols: Vec<&str> = trace.frames.iter().map(|f| f.symbol.as_str()).collect();
+        assert_eq!(
+            symbols,
+            [
+                "nt!KeBugCheckEx+0x107",
+                "nt!KiBugCheckDispatch+0x69",
+                "nt!KiDoubleFaultAbort+0x31c"
+            ]
+        );
+
+        // A stack that already starts at KeBugCheckEx, as in a dump Windows
+        // wrote, or that never entered KeBugCheck2, is kept.
+        let mut trace = bugcheck_callback_stack();
+        trace.frames.remove(2);
+        trim_bugcheck_callbacks(&mut trace);
+        assert_eq!(trace.frames.len(), 5);
+    }
+
+    #[test]
+    fn a_bugcheck_callback_is_neither_the_signature_nor_the_culprit() {
+        let mut trace = bugcheck_callback_stack();
+        trim_bugcheck_callbacks(&mut trace);
+        let report = TriageReport::assemble(
+            status(false, Some(DRIVER_BASE + 0x10cf)),
+            Some(bugcheck(0x7f, [8, 0, 0, 0], None)),
+            Some(trace),
+            vec![
+                ModuleInfo::new("ntoskrnl.exe".into(), VirtAddr(NT_BASE), 0x100_0000),
+                ModuleInfo::new("pvpanic.sys".into(), VirtAddr(DRIVER_BASE), 0x1_0000),
+            ],
+            None,
+            None,
+        );
+
+        assert_eq!(report.current_instruction(), Some(NT_BASE + 0x22fc57));
+        let signature = report.failure_signature.as_ref().unwrap();
+        assert_eq!(signature.bucket, "bugcheck:0000007f|symbol:nt!kebugcheckex");
+        assert_eq!(signature.source, FailureSignatureSource::CurrentInstruction);
+        assert!(report.culprit.is_none());
     }
 
     #[test]

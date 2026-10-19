@@ -17,7 +17,7 @@ Keeping this file:
 
 ### Fixed
 
-- A kernel dump that QEMU wrote (`dump-guest-memory -w`, which libvirt runs when a guest crashes) now opens on the processor that bugchecked, so `!analyze`, `k` and the registers show the crash. ntoseye opened such a dump on processor 0, which on a multiprocessor guest was usually a processor that the bugcheck froze in `nt!KiFreezeTargetExecution`.
+- A kernel dump that QEMU wrote (`dump-guest-memory -w`, which libvirt runs when a guest crashes) now opens on the processor that bugchecked, so `!analyze`, `k` and the registers show the crash. ntoseye opened such a dump on processor 0, which on a multiprocessor guest was usually a processor that the bugcheck froze in `nt!KiFreezeTargetExecution`. `!analyze` starts that processor's stack at `nt!KeBugCheckEx`, as for a dump Windows wrote, rather than in the bugcheck callback (pvpanic's) that QEMU's dump was taken in, and no longer takes that callback for the current instruction when it buckets the crash or names a culprit.
 
 ## v0.50.0 (2026-10-16)
 

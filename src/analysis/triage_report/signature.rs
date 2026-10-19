@@ -61,7 +61,7 @@ pub(super) fn failure_signature(report: &TriageReport) -> Option<FailureSignatur
                 .map(|symbol| (symbol, FailureSignatureSource::ExceptionAddress))
         })
     });
-    let current_symbol = report.status.rip.and_then(|rip| {
+    let current_symbol = report.current_instruction().and_then(|rip| {
         report.backtrace.as_ref().and_then(|trace| {
             trace
                 .frames
@@ -152,7 +152,7 @@ fn best_signature_module(report: &TriageReport) -> Option<(String, FailureSignat
             FailureSignatureSource::ExceptionAddress,
         ));
     }
-    if let Some(rip) = report.status.rip
+    if let Some(rip) = report.current_instruction()
         && let Some(module) = evidence_module_for_address(report, rip)
     {
         return Some((
