@@ -14,7 +14,7 @@ use memmap2::Mmap;
 use ntoseye_macros::record;
 use pdb2::TypeIndex;
 use rustc_hash::FxHashMap;
-use smallvec::{SmallVec, smallvec};
+use smallvec::SmallVec;
 use spin::{Mutex, RwLock};
 use std::{
     collections::{HashMap, HashSet},
@@ -1192,25 +1192,9 @@ impl SymbolStore {
     ) {
         if !self.symbol_rvas.contains_key(&guid) {
             self.symbol_extents.insert(guid, extents);
-            self.index.insert(
+            self.publish_public_names(
                 guid,
-                SymbolIndex::from_names(symbols.iter().map(|(name, _)| name.clone()).collect()),
-            );
-            self.publish_symbol_rvas(
-                guid,
-                symbols
-                    .iter()
-                    .map(|(name, rva)| {
-                        (
-                            Arc::from(name.as_str()),
-                            smallvec![IndexedSymbol {
-                                rva: *rva,
-                                visibility: SymbolVisibility::Public,
-                                compiland: None,
-                            }],
-                        )
-                    })
-                    .collect(),
+                symbols.iter().map(|(name, rva)| (name.as_str(), *rva)),
             );
         }
         self.modules.insert(
@@ -1288,30 +1272,11 @@ impl SymbolStore {
                     .collect(),
             ),
         );
-        self.index.insert(
-            guid,
-            sorted(symbols.iter().map(|(name, _)| name.to_string()).collect()),
-        );
         for type_info in types {
             self.type_cache
                 .insert((guid, type_info.name.clone()), Some(Arc::new(type_info)));
         }
-        self.publish_symbol_rvas(
-            guid,
-            symbols
-                .iter()
-                .map(|(name, rva)| {
-                    (
-                        Arc::from(*name),
-                        smallvec![IndexedSymbol {
-                            rva: *rva,
-                            visibility: SymbolVisibility::Public,
-                            compiland: None,
-                        }],
-                    )
-                })
-                .collect(),
-        );
+        self.publish_public_names(guid, symbols.iter().copied());
         // Symbols became available: what a real load reports through the
         // generation counter.
         self.load_generation.fetch_add(1, Ordering::AcqRel);

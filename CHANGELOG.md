@@ -17,7 +17,11 @@ Keeping this file:
 
 ### Added
 
-- A module whose PDB no symbol source has — a vendor driver never published — falls back to the export table of its image in the dump, as the Windows debugger does, so `k`, `ln` and `!analyze` name its functions (`myfault!nmf_fault_irql+0x35`) where they showed `module+offset`. A PDB indexed later under the same identity replaces the export symbols.
+- A module whose PDB no symbol source has — a vendor driver never published — falls back to the export table of its image in the dump, as the Windows debugger does, so `k`, `ln` and `!analyze` name its functions (`myfault!nmf_fault_irql+0x35`) where they showed `module+offset`, and a deferred breakpoint on an export binds. A PDB acquired later under the same identity (a source added, the process attached again) replaces the export symbols.
+
+### Fixed
+
+- Modules are named after their image file, as WinDbg's `lm` names them, not the loader's alias for it: `kd.dll` rather than `kdcom.dll`, `mcupdate_GenuineIntel.dll` rather than `mcupdate.dll`, in a WOW64 process's 32-bit module list too. Their `module!` prefixes follow (`kd!`, `mcupdate_genuineintel!`).
 
 ## v0.51.0 (2026-10-19)
 

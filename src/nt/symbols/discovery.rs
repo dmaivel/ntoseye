@@ -256,22 +256,32 @@ impl SymbolStore {
 
     pub fn load_downloaded_pdb(&self, load: &ModuleSymbolLoad) -> Result<()> {
         let module_key = Self::module_key(load.dtb, load.module.base_address);
-        if let Some(existing) = self.modules.get(&module_key) {
+        let existing_guid = self.modules.get(&module_key).map(|existing| existing.guid);
+        if let Some(existing_guid) = existing_guid {
             // A job that outlived a reload/reattach of its module describes a
             // different image; finishing it would mark the wrong PDB loaded.
-            if existing.guid != load.guid {
+            if existing_guid != load.guid {
                 return Err(Error::DebugInfo(format!(
                     "stale symbol job for {}: module was replaced",
                     load.module.name
                 )));
             }
-            self.set_module_symbol_status(
-                load.dtb,
-                load.module.base_address,
-                ModuleSymbolStatus::Loaded,
-            );
-            self.set_module_symbol_source(load.dtb, load.module.base_address, load.source.clone());
-            return Ok(());
+            // Registered with its PDB already loaded. A registration from the
+            // export-table fallback has no PDB yet: load it below, which
+            // replaces the export symbols.
+            if self.has_matching_pdb(&load.job) {
+                self.set_module_symbol_status(
+                    load.dtb,
+                    load.module.base_address,
+                    ModuleSymbolStatus::Loaded,
+                );
+                self.set_module_symbol_source(
+                    load.dtb,
+                    load.module.base_address,
+                    load.source.clone(),
+                );
+                return Ok(());
+            }
         }
 
         self.ensure_pdb_loaded(load.job.expected_identity().unwrap(), &load.job.path)?;

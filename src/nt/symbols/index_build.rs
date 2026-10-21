@@ -12,13 +12,14 @@ use crate::nt::guest::ModuleInfo;
 use crate::nt::layout::aggregate_key;
 use crate::nt::pe::ModuleExportInfo;
 use crate::nt::wpp::{MessageKey, TmfMessage};
+use dashmap::mapref::entry::Entry;
 use pdb2::{AddressMap, FallibleIterator, StringTable, TypeData, TypeIndex};
 use rayon::slice::ParallelSliceMut;
 use rustc_hash::FxHashMap;
 use std::{
     collections::HashMap,
     io::Cursor,
-    sync::{Arc, OnceLock},
+    sync::{Arc, OnceLock, atomic::Ordering},
 };
 
 /// What one PDB's symbol, line and module streams contribute to the symbol
@@ -325,31 +326,54 @@ impl SymbolStore {
         exports: &[ModuleExportInfo],
     ) {
         let module_key = Self::module_key(dtb, module.base_address);
-        self.modules
-            .entry(module_key)
-            .or_insert_with(|| LoadedModule {
-                name: module.name.clone(),
-                short_name: module.short_name.clone(),
-                guid,
-                base_address: module.base_address,
-                size: module.size,
-                dtb,
-            });
-        // An indexed PDB is strictly more than the export table.
-        if self.symbol_rvas.contains_key(&guid) {
-            return;
-        }
-        let mut rvas = SymbolRvas::default();
-        let mut names = Vec::with_capacity(exports.len());
-        for export in exports {
-            // An ordinal-only export has no name to index, and a forwarder
-            // no address of its own.
-            if let (Some(name), Some(rva)) = (&export.name, export.rva) {
-                names.push(name.clone());
-                insert_symbol_rva(&mut rvas, name, rva, SymbolVisibility::Public, None);
+        match self.modules.entry(module_key) {
+            // Another image is registered there now: this load is stale.
+            Entry::Occupied(existing) if existing.get().guid != guid => return,
+            Entry::Occupied(_) => {}
+            Entry::Vacant(vacant) => {
+                vacant.insert(LoadedModule {
+                    name: module.name.clone(),
+                    short_name: module.short_name.clone(),
+                    guid,
+                    base_address: module.base_address,
+                    size: module.size,
+                    dtb,
+                });
             }
         }
-        self.index.insert(guid, SymbolIndex::from_names(names));
+        // An indexed PDB is strictly more than the export table, and the
+        // same image's exports may be indexed already from another root.
+        if !self.symbol_rvas.contains_key(&guid) {
+            // An ordinal-only export has no name to index, and a forwarder
+            // no address of its own.
+            self.publish_public_names(
+                guid,
+                exports
+                    .iter()
+                    .filter_map(|export| Some((export.name.as_deref()?, export.rva?))),
+            );
+        }
+        self.load_generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Index `names` at their RVAs as public symbols of `guid`, for an image
+    /// whose names come from somewhere other than a PDB.
+    pub(super) fn publish_public_names<'a>(
+        &self,
+        guid: u128,
+        names: impl IntoIterator<Item = (&'a str, u32)>,
+    ) {
+        let mut rvas = SymbolRvas::default();
+        let mut index_names = Vec::new();
+        for (name, rva) in names {
+            index_names.push(name.to_string());
+            insert_symbol_rva(&mut rvas, name, rva, SymbolVisibility::Public, None);
+        }
+        // The index's names are sorted and deduped, as a PDB load leaves them.
+        index_names.sort_unstable();
+        index_names.dedup();
+        self.index
+            .insert(guid, SymbolIndex::from_names(index_names));
         self.publish_symbol_rvas(guid, rvas);
     }
 }

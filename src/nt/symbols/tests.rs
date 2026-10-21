@@ -8,6 +8,7 @@ use super::*;
 use crate::base::error::Result;
 use crate::base::memory::MemoryOps;
 use crate::base::types::{Arch, PhysAddr};
+use smallvec::smallvec;
 use std::io::Write;
 use std::path::Path;
 
@@ -1569,7 +1570,7 @@ fn an_imported_image_is_found_for_its_own_build_only() {
 }
 
 #[test]
-fn export_fallback_resolves_symbols_and_yields_to_a_pdb() {
+fn export_fallback_resolves_named_exports() {
     let store = SymbolStore::new();
     let dtb: Dtb = 0x1234;
     let base = VirtAddr(0x0000_0001_8000_0000);
@@ -1588,34 +1589,66 @@ fn export_fallback_resolves_symbols_and_yields_to_a_pdb() {
         export(10, None, Some(0x1e50)),
         export(11, Some("forwarded"), None),
     ];
+    let generation = store.load_generation();
     store.index_module_exports(dtb, &module, 42, &exports);
 
     // The module is registered, and frames in it resolve to
-    // module!export+offset the way a PDB's symbols would.
+    // module!export+offset the way a PDB's symbols would; the generation
+    // moves so deferred breakpoints on those names re-resolve.
     assert_eq!(
         store.find_closest_symbol_for_address(dtb, VirtAddr(base.0 + 0x1e35)),
         Some(("myfault".to_string(), "nmf_fault_irql".to_string(), 0x35))
     );
+    assert!(store.load_generation() > generation);
+}
 
-    // A PDB indexed later under the same identity replaces the exports.
-    let mut rvas = FxHashMap::default();
-    insert_symbol_rva(
-        &mut rvas,
-        "nmf_fault_irql",
-        0x1e10,
-        SymbolVisibility::Public,
-        None,
+#[test]
+fn a_pdb_acquired_after_the_export_fallback_replaces_it() {
+    let path = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/inline_frames.pdb"
+    ));
+    let bytes = std::fs::read(path).unwrap();
+    let info = pdb2::PDB::open(std::io::Cursor::new(bytes.as_slice()))
+        .unwrap()
+        .pdb_information()
+        .unwrap();
+    let store = SymbolStore::new();
+    let dtb: Dtb = 0x1000;
+    let module = ModuleInfo::new(
+        "fixture.sys".to_string(),
+        VirtAddr(INLINE_FIXTURE_BASE),
+        0x8000,
     );
-    store.publish_symbol_rvas(42, rvas);
-    assert_eq!(
-        store.find_closest_symbol_for_address(dtb, VirtAddr(base.0 + 0x1e35)),
-        Some(("myfault".to_string(), "nmf_fault_irql".to_string(), 0x25))
-    );
+    let (mut job, guid) = store
+        .build_download_job("inline_frames.pdb", info.guid.as_u128(), info.age)
+        .unwrap();
+    job.path = path.to_path_buf();
+    let load = ModuleSymbolLoad::new(job, guid, ModuleSymbolSource::Memory, module.clone(), dtb);
 
-    // The export fallback never overwrites that PDB index.
-    store.index_module_exports(dtb, &module, 42, &exports);
-    assert_eq!(
-        store.find_closest_symbol_for_address(dtb, VirtAddr(base.0 + 0x1e35)),
-        Some(("myfault".to_string(), "nmf_fault_irql".to_string(), 0x25))
-    );
+    // The PDB was unavailable at first: the export table stands in.
+    let exports = [ModuleExportInfo {
+        ordinal: 1,
+        name: Some("exported_entry".to_string()),
+        rva: Some(0x1000),
+        address: Some(fixture_address(0x1000)),
+        forwarder: None,
+    }];
+    store.index_module_exports(dtb, &module, guid, &exports);
+    let closest = || {
+        store
+            .find_closest_symbol_for_address(dtb, fixture_address(0x1010))
+            .map(|(_, symbol, offset)| (symbol, offset))
+    };
+    assert_eq!(closest(), Some(("exported_entry".to_string(), 0x10)));
+
+    // Then it is acquired (a source added, the process attached again):
+    // the PDB is loaded and its symbols replace the exports.
+    store.load_downloaded_pdb(&load).unwrap();
+    assert!(store.has_matching_pdb(&load.job));
+    assert_eq!(closest(), Some(("DriverEntry".to_string(), 0x10)));
+
+    // The export fallback never overwrites the PDB's symbols.
+    store.index_module_exports(dtb, &module, guid, &exports);
+    assert_eq!(closest(), Some(("DriverEntry".to_string(), 0x10)));
 }
