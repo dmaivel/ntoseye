@@ -225,13 +225,14 @@ pub fn walk_loader_list32(
         if dll_base == 0 {
             continue;
         }
-        let name = read_unicode32(memory, usize::from(read_u16(&entry, 0x2c)), u32_at(0x30))
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| UNKNOWN_MODULE_NAME.to_string());
+        let loader_name = read_unicode32(memory, usize::from(read_u16(&entry, 0x2c)), u32_at(0x30))
+            .filter(|name| !name.is_empty());
+        let full_path = read_unicode32(memory, usize::from(read_u16(&entry, 0x24)), u32_at(0x28))
+            .filter(|path| !path.is_empty());
+        let name = record_module_name(loader_name, full_path.clone());
         let mut module = ModuleInfo::new(name, VirtAddr(u64::from(dll_base)), u32_at(0x20))
             .with_time_date_stamp(u32_at(0x44));
-        module.path = read_unicode32(memory, usize::from(read_u16(&entry, 0x24)), u32_at(0x28))
-            .filter(|path| !path.is_empty());
+        module.path = full_path;
         module.is_32bit = true;
         let entry_point = u32_at(0x1c);
         if entry_point != 0 {
