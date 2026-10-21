@@ -82,16 +82,17 @@ pub(super) fn module_info_from_record(record: &StructRef<'_>) -> Result<Option<M
         return Ok(None);
     }
     let size_of_image: u32 = record.read_field("SizeOfImage")?;
-    let name = record
+    let loader_name = record
         .unicode_string("BaseDllName")
         .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| UNKNOWN_MODULE_NAME.to_string());
-    let mut info = ModuleInfo::new(name, dll_base, size_of_image);
-    info.path = record
+        .filter(|s| !s.is_empty());
+    let full_path = record
         .unicode_string("FullDllName")
         .ok()
         .filter(|path| !path.is_empty());
+    let name = record_module_name(loader_name, full_path.clone());
+    let mut info = ModuleInfo::new(name, dll_base, size_of_image);
+    info.path = full_path;
     if let Ok(entry_point) = record.read_pointer("EntryPoint")
         && !entry_point.is_zero()
     {
@@ -104,6 +105,25 @@ pub(super) fn module_info_from_record(record: &StructRef<'_>) -> Result<Option<M
         info = info.with_checksum(cs);
     }
     Ok(Some(info))
+}
+
+/// The module's display name: the image file, as WinDbg's `lm` names it,
+/// falling back to the loader's `BaseDllName` and then the unknown marker.
+///
+/// The loader can record a canonical or legacy `BaseDllName` that differs
+/// from the loaded file: `ntoskrnl.exe` for the `ntkrnlmp.exe` kernel
+/// variant, `mcupdate.dll` for a vendor-specific
+/// `mcupdate_GenuineIntel.dll`, `kdcom.dll` for `kd.dll`. Taking the name
+/// from `FullDllName` keeps module lists diffable against WinDbg/CDB,
+/// which report the image file.
+fn record_module_name(loader_name: Option<String>, full_path: Option<String>) -> String {
+    full_path
+        .as_deref()
+        .and_then(|path| path.rsplit(['\\', '/']).next())
+        .filter(|file| !file.is_empty())
+        .map(|file| file.to_string())
+        .or(loader_name)
+        .unwrap_or_else(|| UNKNOWN_MODULE_NAME.to_string())
 }
 
 fn read_loader_pointer(
@@ -469,6 +489,46 @@ impl Guest {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn record_module_name_prefers_the_image_file() {
+        // The loader's BaseDllName can be a canonical or legacy alias of the
+        // loaded file; WinDbg reports the file.
+        assert_eq!(
+            record_module_name(
+                Some("ntoskrnl.exe".to_string()),
+                Some("\\SystemRoot\\system32\\ntkrnlmp.exe".to_string()),
+            ),
+            "ntkrnlmp.exe"
+        );
+        assert_eq!(
+            record_module_name(
+                Some("mcupdate.dll".to_string()),
+                Some("\\SystemRoot\\system32\\mcupdate_GenuineIntel.dll".to_string()),
+            ),
+            "mcupdate_GenuineIntel.dll"
+        );
+    }
+
+    #[test]
+    fn record_module_name_falls_back_to_the_loader_name() {
+        assert_eq!(
+            record_module_name(Some("hal.dll".to_string()), None),
+            "hal.dll"
+        );
+        assert_eq!(
+            record_module_name(
+                Some("driver.sys".to_string()),
+                Some("\\SystemRoot\\system32\\".to_string()),
+            ),
+            "driver.sys" // trailing separator: no file name to take
+        );
+        assert_eq!(
+            record_module_name(Some("driver.sys".to_string()), Some(String::new())),
+            "driver.sys"
+        );
+        assert_eq!(record_module_name(None, None), UNKNOWN_MODULE_NAME);
+    }
 
     /// A VAD tree: node address -> (start page, end page, left, right).
     fn tree(nodes: &[(u64, u64, u64, u64, u64)]) -> HashMap<u64, (u64, u64, u64, u64)> {
