@@ -5,7 +5,7 @@ use crate::{
     nt::{
         guest::ModuleInfo,
         layout::{EnumDef, ParsedType, TypeInfo},
-        pe::PeImage,
+        pe::{ModuleExportInfo, PeImage},
         wpp::{MessageKey, TmfMessage},
     },
 };
@@ -889,6 +889,10 @@ pub struct ModuleSymbolLoad {
     /// Why the PDB could not be rebuilt from guest memory, when that was
     /// tried and failed.
     pub memory_recovery: Option<String>,
+    /// The module's named exports, read while guest memory was reachable
+    /// from the loading thread: the symbol fallback for when no source has
+    /// the PDB (see [`SymbolStore::index_module_exports`]).
+    pub exports: Option<Vec<ModuleExportInfo>>,
 }
 
 impl ModuleSymbolLoad {
@@ -906,6 +910,7 @@ impl ModuleSymbolLoad {
             module,
             dtb,
             memory_recovery: None,
+            exports: None,
         }
     }
 

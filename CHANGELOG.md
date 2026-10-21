@@ -13,6 +13,12 @@ Keeping this file:
 - To release, rename "## Unreleased" to "## vX.Y.Z (YYYY-MM-DD)", the version in Cargo.toml. The release workflow refuses a tag whose version has no section here, or an empty one; dist publishes the section as the release notes, under the tag as the release title.
 -->
 
+## Unreleased
+
+### Added
+
+- A module whose PDB no symbol source has — a vendor driver never published — falls back to the export table of its image in the dump, as the Windows debugger does, so `k`, `ln` and `!analyze` name its functions (`myfault!nmf_fault_irql+0x35`) where they showed `module+offset`. A PDB indexed later under the same identity replaces the export symbols.
+
 ## v0.51.0 (2026-10-19)
 
 ### Added

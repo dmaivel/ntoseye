@@ -1567,3 +1567,55 @@ fn an_imported_image_is_found_for_its_own_build_only() {
         let _ = std::fs::remove_dir_all(directory);
     }
 }
+
+#[test]
+fn export_fallback_resolves_symbols_and_yields_to_a_pdb() {
+    let store = SymbolStore::new();
+    let dtb: Dtb = 0x1234;
+    let base = VirtAddr(0x0000_0001_8000_0000);
+    let module = ModuleInfo::new("myfault.sys".to_string(), base, 0xb000);
+    let export = |ordinal: u32, name: Option<&str>, rva: Option<u32>| ModuleExportInfo {
+        ordinal,
+        name: name.map(str::to_string),
+        rva,
+        address: rva.map(|rva| VirtAddr(base.0 + u64::from(rva))),
+        forwarder: None,
+    };
+    // A named export, an ordinal-only one, and a forwarder: only the first
+    // can name an address.
+    let exports = vec![
+        export(9, Some("nmf_fault_irql"), Some(0x1e00)),
+        export(10, None, Some(0x1e50)),
+        export(11, Some("forwarded"), None),
+    ];
+    store.index_module_exports(dtb, &module, 42, &exports);
+
+    // The module is registered, and frames in it resolve to
+    // module!export+offset the way a PDB's symbols would.
+    assert_eq!(
+        store.find_closest_symbol_for_address(dtb, VirtAddr(base.0 + 0x1e35)),
+        Some(("myfault".to_string(), "nmf_fault_irql".to_string(), 0x35))
+    );
+
+    // A PDB indexed later under the same identity replaces the exports.
+    let mut rvas = FxHashMap::default();
+    insert_symbol_rva(
+        &mut rvas,
+        "nmf_fault_irql",
+        0x1e10,
+        SymbolVisibility::Public,
+        None,
+    );
+    store.publish_symbol_rvas(42, rvas);
+    assert_eq!(
+        store.find_closest_symbol_for_address(dtb, VirtAddr(base.0 + 0x1e35)),
+        Some(("myfault".to_string(), "nmf_fault_irql".to_string(), 0x25))
+    );
+
+    // The export fallback never overwrites that PDB index.
+    store.index_module_exports(dtb, &module, 42, &exports);
+    assert_eq!(
+        store.find_closest_symbol_for_address(dtb, VirtAddr(base.0 + 0x1e35)),
+        Some(("myfault".to_string(), "nmf_fault_irql".to_string(), 0x25))
+    );
+}

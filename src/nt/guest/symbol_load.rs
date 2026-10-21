@@ -8,7 +8,10 @@ use super::{
 };
 use crate::{
     backend::phys::PhysMem,
-    base::{error::Result, notice::Notice, output, types::*},
+    base::{
+        error::Result, memory::AddressSpace, memory::MemoryOps, notice::Notice, output, types::*,
+    },
+    nt::pe::{ModuleExportInfo, read_pe_exports, read_pe_image},
     nt::symbols::{
         DownloadJob, ModuleSymbolDiscovery, ModuleSymbolLoad, ModuleSymbolSource,
         ModuleSymbolStatus, SymbolIndexDiagnostic, SymbolStore, download::download_jobs_parallel,
@@ -167,7 +170,7 @@ impl Guest {
     /// render uses [`Guest::load_module_symbols_or_fetch_later`] instead so a
     /// stack walk through an uncached module never waits on the network.
     pub fn load_module_symbols(
-        phys: &PhysMem,
+        phys: &Arc<PhysMem>,
         symbols: &SymbolStore,
         modules: Vec<ModuleInfo>,
         dtb: Dtb,
@@ -222,7 +225,7 @@ impl Guest {
     /// A remembered identity that turns out stale is rediscovered once, here,
     /// before anything is handed off.
     pub fn load_module_symbols_or_fetch_later(
-        phys: &PhysMem,
+        phys: &Arc<PhysMem>,
         symbols: &Arc<SymbolStore>,
         modules: Vec<ModuleInfo>,
         dtb: Dtb,
@@ -344,7 +347,7 @@ impl Guest {
     /// fetched to learn the PDB identity. Touches guest memory; never the
     /// network.
     fn plan_module_symbol_loads(
-        phys: &PhysMem,
+        phys: &Arc<PhysMem>,
         symbols: &SymbolStore,
         modules: Vec<ModuleInfo>,
         dtb: Dtb,
@@ -381,16 +384,27 @@ impl Guest {
             };
             match symbols.extract_download_job(phys, dtb, &module, arch) {
                 Ok(ModuleSymbolDiscovery::Ready { job, guid, source }) => {
-                    let load = ModuleSymbolLoad::new(job, guid, source, module, dtb);
-                    match unavailable(&load.job).filter(|_| !plan.is_ready(symbols, &load)) {
-                        Some(status) => Self::apply_module_symbol_status(
-                            symbols,
-                            report,
-                            dtb,
-                            &load.module,
-                            status,
-                        ),
-                        None if !plan.is_ready(symbols, &load)
+                    let mut load = ModuleSymbolLoad::new(job, guid, source, module, dtb);
+                    let ready = plan.is_ready(symbols, &load);
+                    if !ready {
+                        // The PDB must be fetched or rebuilt, and may not
+                        // exist anywhere: read the export table now, while
+                        // guest memory is reachable from this thread, as the
+                        // fallback symbols for that case.
+                        load.exports = Self::read_export_fallback(phys, dtb, arch, &load.module);
+                    }
+                    match unavailable(&load.job).filter(|_| !ready) {
+                        Some(status) => {
+                            Self::publish_export_fallback(symbols, dtb, &load);
+                            Self::apply_module_symbol_status(
+                                symbols,
+                                report,
+                                dtb,
+                                &load.module,
+                                status,
+                            );
+                        }
+                        None if !ready
                             && pdb_from_memory_enabled()
                             // Rebuilding walks the kernel's file cache,
                             // which a user-mode minidump does not hold.
@@ -504,6 +518,36 @@ impl Guest {
         }
     }
 
+    /// A module's named exports, read from its mapped image's export
+    /// directory: the symbol fallback for a PDB no source has. `None` when
+    /// the image's pages cannot be read or it exports nothing.
+    fn read_export_fallback(
+        phys: &Arc<PhysMem>,
+        dtb: Dtb,
+        arch: Arch,
+        module: &ModuleInfo,
+    ) -> Option<Vec<ModuleExportInfo>> {
+        let reader_phys = Arc::clone(phys);
+        // The module's own VA root for both halves, as PDB discovery reads
+        // the same image.
+        let kernel_dtb = dtb;
+        let image = read_pe_image(module.base_address, move |address, buffer| {
+            AddressSpace::for_arch(&reader_phys, dtb, kernel_dtb, arch).read_bytes(address, buffer)
+        })
+        .ok()?;
+        let exports = read_pe_exports(&image, module.base_address).ok()?;
+        (!exports.exports.is_empty()).then_some(exports.exports)
+    }
+
+    /// Index a module's stashed exports when its PDB could not be acquired:
+    /// the last-resort symbols, so its frames resolve to
+    /// `module!export+offset` rather than `module+offset`.
+    fn publish_export_fallback(symbols: &SymbolStore, dtb: Dtb, load: &ModuleSymbolLoad) {
+        if let Some(exports) = &load.exports {
+            symbols.index_module_exports(dtb, &load.module, load.guid, exports);
+        }
+    }
+
     /// Acquisition half of a symbol load: download images and PDBs the plan
     /// asked for, then index everything that is on disk. Files and network
     /// only, so it may run off the session thread. Returns the modules whose
@@ -592,6 +636,7 @@ impl Guest {
                         Some(reason) => format!("{e}; guest memory: {reason}"),
                         None => e.to_string(),
                     };
+                    Self::publish_export_fallback(symbols, dtb, &load);
                     Self::apply_module_symbol_status(
                         symbols,
                         report,
@@ -658,6 +703,7 @@ impl Guest {
                         stale_identities.push(load.module);
                     }
                     Err(e) => {
+                        Self::publish_export_fallback(symbols, dtb, &load);
                         Self::apply_module_symbol_status(
                             symbols,
                             report,
@@ -675,7 +721,7 @@ impl Guest {
 
     pub fn load_all_kernel_module_symbols(
         &self,
-        phys: &PhysMem,
+        phys: &Arc<PhysMem>,
         symbols: &SymbolStore,
     ) -> Result<ModuleSymbolLoadReport> {
         let mut modules = self.kernel_modules()?;
@@ -705,7 +751,7 @@ impl Guest {
 
     pub fn load_missing_kernel_module_symbols(
         &self,
-        phys: &PhysMem,
+        phys: &Arc<PhysMem>,
         symbols: &SymbolStore,
     ) -> Result<ModuleSymbolLoadReport> {
         let dtb = self.ntoskrnl.dtb();
@@ -739,7 +785,7 @@ impl Guest {
 
     pub fn load_all_process_module_symbols(
         &self,
-        phys: &PhysMem,
+        phys: &Arc<PhysMem>,
         symbols: &SymbolStore,
         info: &ProcessInfo,
     ) -> Result<ModuleSymbolLoadReport> {
@@ -762,7 +808,7 @@ impl Guest {
     /// modules; this loads whatever it is given.
     pub fn load_symbols_for_modules(
         &self,
-        phys: &PhysMem,
+        phys: &Arc<PhysMem>,
         symbols: &SymbolStore,
         modules: Vec<ModuleInfo>,
         dtb: Dtb,
