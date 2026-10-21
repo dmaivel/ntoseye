@@ -2,12 +2,15 @@
 //! streams under the PDB lock, then publishing the derived indexes.
 
 use super::{
-    AddressEntry, IndexedSymbol, ProcedureSpan, SourceChecksum, SourceLineEntry, SourceLocation,
-    SymbolIndex, SymbolIndexDiagnostic, SymbolRvas, SymbolStore, SymbolVisibility,
+    AddressEntry, IndexedSymbol, LoadedModule, ProcedureSpan, SourceChecksum, SourceLineEntry,
+    SourceLocation, SymbolIndex, SymbolIndexDiagnostic, SymbolRvas, SymbolStore, SymbolVisibility,
     source::recorded_checksum,
 };
 use crate::base::error::{Error, Result};
+use crate::base::types::Dtb;
+use crate::nt::guest::ModuleInfo;
 use crate::nt::layout::aggregate_key;
+use crate::nt::pe::ModuleExportInfo;
 use crate::nt::wpp::{MessageKey, TmfMessage};
 use pdb2::{AddressMap, FallibleIterator, StringTable, TypeData, TypeIndex};
 use rayon::slice::ParallelSliceMut;
@@ -306,6 +309,48 @@ impl SymbolStore {
     pub(super) fn publish_symbol_rvas(&self, guid: u128, rvas: SymbolRvas) {
         self.symbol_addresses.insert(guid, address_index(&rvas));
         self.symbol_rvas.insert(guid, rvas);
+    }
+
+    /// Index a module's export table as its symbols and register the module
+    /// in the module list: the fallback for a module whose PDB no symbol
+    /// source has — a vendor driver never published — which the Windows
+    /// debugger serves from the image the same way. Its frames then resolve
+    /// to `module!export+offset` instead of `module+offset`. A PDB indexed
+    /// later under the same identity replaces the export index.
+    pub fn index_module_exports(
+        &self,
+        dtb: Dtb,
+        module: &ModuleInfo,
+        guid: u128,
+        exports: &[ModuleExportInfo],
+    ) {
+        let module_key = Self::module_key(dtb, module.base_address);
+        self.modules
+            .entry(module_key)
+            .or_insert_with(|| LoadedModule {
+                name: module.name.clone(),
+                short_name: module.short_name.clone(),
+                guid,
+                base_address: module.base_address,
+                size: module.size,
+                dtb,
+            });
+        // An indexed PDB is strictly more than the export table.
+        if self.symbol_rvas.contains_key(&guid) {
+            return;
+        }
+        let mut rvas = SymbolRvas::default();
+        let mut names = Vec::with_capacity(exports.len());
+        for export in exports {
+            // An ordinal-only export has no name to index, and a forwarder
+            // no address of its own.
+            if let (Some(name), Some(rva)) = (&export.name, export.rva) {
+                names.push(name.clone());
+                insert_symbol_rva(&mut rvas, name, rva, SymbolVisibility::Public, None);
+            }
+        }
+        self.index.insert(guid, SymbolIndex::from_names(names));
+        self.publish_symbol_rvas(guid, rvas);
     }
 }
 
