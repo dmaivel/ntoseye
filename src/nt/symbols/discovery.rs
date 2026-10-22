@@ -257,10 +257,14 @@ impl SymbolStore {
     pub fn load_downloaded_pdb(&self, load: &ModuleSymbolLoad) -> Result<()> {
         let module_key = Self::module_key(load.dtb, load.module.base_address);
         let existing_guid = self.modules.get(&module_key).map(|existing| existing.guid);
+        // The export fallback of this very image, from before its PDB
+        // identity was known, which the PDB replaces.
+        let image_fallback = existing_guid
+            .filter(|guid| *guid != load.guid && *guid == Self::image_exports_key(&load.module));
         if let Some(existing_guid) = existing_guid {
             // A job that outlived a reload/reattach of its module describes a
             // different image; finishing it would mark the wrong PDB loaded.
-            if existing_guid != load.guid {
+            if existing_guid != load.guid && image_fallback.is_none() {
                 return Err(Error::DebugInfo(format!(
                     "stale symbol job for {}: module was replaced",
                     load.module.name
@@ -269,7 +273,7 @@ impl SymbolStore {
             // Registered with its PDB already loaded. A registration from the
             // export-table fallback has no PDB yet: load it below, which
             // replaces the export symbols.
-            if self.has_matching_pdb(&load.job) {
+            if existing_guid == load.guid && self.has_matching_pdb(&load.job) {
                 self.set_module_symbol_status(
                     load.dtb,
                     load.module.base_address,
@@ -286,6 +290,13 @@ impl SymbolStore {
 
         self.ensure_pdb_loaded(load.job.expected_identity().unwrap(), &load.job.path)?;
         self.modules.insert(module_key, load.loaded_module());
+        if let Some(fallback) = image_fallback
+            && !self.modules.iter().any(|module| module.guid == fallback)
+        {
+            self.index.remove(&fallback);
+            self.symbol_rvas.remove(&fallback);
+            self.symbol_addresses.remove(&fallback);
+        }
         self.set_module_symbol_status(
             load.dtb,
             load.module.base_address,

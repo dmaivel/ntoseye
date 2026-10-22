@@ -91,9 +91,19 @@ struct ModuleSymbolPlan {
     ready: Vec<ModuleSymbolLoad>,
     /// PDB identity known; the file must be acquired.
     downloads: Vec<ModuleSymbolLoad>,
-    /// Headers unreadable in memory; the image must be fetched to learn the
-    /// PDB identity, then treated as `downloads`.
-    image_jobs: Vec<(DownloadJob, ModuleInfo)>,
+    /// No PDB identity in memory; the image must be fetched to learn it,
+    /// then treated as `downloads`.
+    image_jobs: Vec<ImageLoad>,
+}
+
+/// A module whose PDB identity guest memory does not give (no CodeView
+/// record, or its pages unreadable): its image is fetched to learn it.
+struct ImageLoad {
+    job: DownloadJob,
+    module: ModuleInfo,
+    /// The module's named exports, read during planning: its symbols if the
+    /// image names no PDB, cannot be fetched, or its PDB cannot be.
+    exports: Option<Vec<ModuleExportInfo>>,
 }
 
 impl ModuleSymbolPlan {
@@ -139,7 +149,7 @@ impl ModuleSymbolPlan {
             .iter()
             .chain(&self.downloads)
             .map(|load| &load.module)
-            .chain(self.image_jobs.iter().map(|(_, module)| module))
+            .chain(self.image_jobs.iter().map(|image| &image.module))
     }
 
     fn module_names(&self) -> Vec<String> {
@@ -417,11 +427,24 @@ impl Guest {
                     }
                 }
                 Ok(ModuleSymbolDiscovery::NeedsImage { image_job }) => {
+                    // Memory names no PDB: if the image does not either, or
+                    // cannot be fetched, its export table is all there is.
+                    let exports = Self::read_export_fallback(phys, dtb, arch, &module);
                     match unavailable(&image_job) {
                         Some(status) => {
+                            Self::publish_image_export_fallback(
+                                symbols,
+                                dtb,
+                                &module,
+                                exports.as_deref(),
+                            );
                             Self::apply_module_symbol_status(symbols, report, dtb, &module, status)
                         }
-                        None => plan.image_jobs.push((image_job, module)),
+                        None => plan.image_jobs.push(ImageLoad {
+                            job: image_job,
+                            module,
+                            exports,
+                        }),
                     }
                 }
                 Err(_e) if module.time_date_stamp.is_some() => {
@@ -431,7 +454,12 @@ impl Guest {
                             Some(status) => Self::apply_module_symbol_status(
                                 symbols, report, dtb, &module, status,
                             ),
-                            None => plan.image_jobs.push((image_job, module)),
+                            // The headers are unreadable, so the exports are too.
+                            None => plan.image_jobs.push(ImageLoad {
+                                job: image_job,
+                                module,
+                                exports: None,
+                            }),
                         },
                         Err(e) => Self::apply_module_symbol_status(
                             symbols,
@@ -548,6 +576,21 @@ impl Guest {
         }
     }
 
+    /// [`Self::publish_export_fallback`] for a module no PDB identity is
+    /// known for, keyed by its image instead
+    /// ([`SymbolStore::image_exports_key`]).
+    fn publish_image_export_fallback(
+        symbols: &SymbolStore,
+        dtb: Dtb,
+        module: &ModuleInfo,
+        exports: Option<&[ModuleExportInfo]>,
+    ) {
+        if let Some(exports) = exports {
+            let key = SymbolStore::image_exports_key(module);
+            symbols.index_module_exports(dtb, module, key, exports);
+        }
+    }
+
     /// Acquisition half of a symbol load: download images and PDBs the plan
     /// asked for, then index everything that is on disk. Files and network
     /// only, so it may run off the session thread. Returns the modules whose
@@ -567,20 +610,26 @@ impl Guest {
         } = plan;
 
         let image_results = download_jobs_parallel(
-            image_jobs.iter().map(|(job, _)| job.clone()).collect(),
+            image_jobs.iter().map(|image| image.job.clone()).collect(),
             quiet,
         );
-        for ((image_job, module), result) in image_jobs.into_iter().zip(image_results) {
+        for (image, result) in image_jobs.into_iter().zip(image_results) {
+            let ImageLoad {
+                job: image_job,
+                module,
+                exports,
+            } = image;
             match result {
                 Ok(_) => match symbols.extract_download_job_from_image_file(&image_job.path) {
                     Ok(Some((job, guid))) => {
-                        let load = ModuleSymbolLoad::new(
+                        let mut load = ModuleSymbolLoad::new(
                             job,
                             guid,
                             ModuleSymbolSource::Image,
                             module,
                             dtb,
                         );
+                        load.exports = exports;
                         if symbols.has_matching_pdb(&load.job) || load.job.cached_pdb_matches() {
                             ready.push(load);
                         } else {
@@ -588,6 +637,12 @@ impl Guest {
                         }
                     }
                     Ok(None) => {
+                        Self::publish_image_export_fallback(
+                            symbols,
+                            dtb,
+                            &module,
+                            exports.as_deref(),
+                        );
                         Self::apply_module_symbol_status(
                             symbols,
                             report,
@@ -597,6 +652,12 @@ impl Guest {
                         );
                     }
                     Err(e) => {
+                        Self::publish_image_export_fallback(
+                            symbols,
+                            dtb,
+                            &module,
+                            exports.as_deref(),
+                        );
                         Self::apply_module_symbol_status(
                             symbols,
                             report,
@@ -608,6 +669,7 @@ impl Guest {
                 },
                 Err(e) => {
                     symbols.remember_unavailable(&image_job, &e.to_string());
+                    Self::publish_image_export_fallback(symbols, dtb, &module, exports.as_deref());
                     Self::apply_module_symbol_status(
                         symbols,
                         report,

@@ -15,9 +15,10 @@ use crate::nt::wpp::{MessageKey, TmfMessage};
 use dashmap::mapref::entry::Entry;
 use pdb2::{AddressMap, FallibleIterator, StringTable, TypeData, TypeIndex};
 use rayon::slice::ParallelSliceMut;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHasher};
 use std::{
     collections::HashMap,
+    hash::{Hash, Hasher},
     io::Cursor,
     sync::{Arc, OnceLock, atomic::Ordering},
 };
@@ -354,6 +355,21 @@ impl SymbolStore {
             );
         }
         self.load_generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// The key a module's export symbols are indexed under when no PDB
+    /// identity is known for it: its image's name, timestamp and size, so
+    /// one image shares it across address spaces. Without a timestamp the
+    /// base address stands in, as two builds may share name and size. A
+    /// PDB GUID is random, so this collides with none.
+    pub fn image_exports_key(module: &ModuleInfo) -> u128 {
+        let mut hasher = FxHasher::default();
+        module.name.to_ascii_lowercase().hash(&mut hasher);
+        match module.time_date_stamp {
+            Some(stamp) => stamp.hash(&mut hasher),
+            None => module.base_address.0.hash(&mut hasher),
+        }
+        (u128::from(hasher.finish()) << 64) | u128::from(module.size)
     }
 
     /// Index `names` at their RVAs as public symbols of `guid`, for an image

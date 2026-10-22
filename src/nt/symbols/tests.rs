@@ -1652,3 +1652,59 @@ fn a_pdb_acquired_after_the_export_fallback_replaces_it() {
     store.index_module_exports(dtb, &module, guid, &exports);
     assert_eq!(closest(), Some(("DriverEntry".to_string(), 0x10)));
 }
+
+#[test]
+fn the_pdb_of_an_image_whose_identity_was_unknown_replaces_its_exports() {
+    let path = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/inline_frames.pdb"
+    ));
+    let bytes = std::fs::read(path).unwrap();
+    let info = pdb2::PDB::open(std::io::Cursor::new(bytes.as_slice()))
+        .unwrap()
+        .pdb_information()
+        .unwrap();
+    let store = SymbolStore::new();
+    let dtb: Dtb = 0x1000;
+    let module = ModuleInfo::new(
+        "fixture.sys".to_string(),
+        VirtAddr(INLINE_FIXTURE_BASE),
+        0x8000,
+    )
+    .with_time_date_stamp(0x6000_0000);
+    let load_for = |module: &ModuleInfo| {
+        let (mut job, guid) = store
+            .build_download_job("inline_frames.pdb", info.guid.as_u128(), info.age)
+            .unwrap();
+        job.path = path.to_path_buf();
+        ModuleSymbolLoad::new(job, guid, ModuleSymbolSource::Image, module.clone(), dtb)
+    };
+    let exports = [ModuleExportInfo {
+        ordinal: 1,
+        name: Some("exported_entry".to_string()),
+        rva: Some(0x1000),
+        address: Some(fixture_address(0x1000)),
+        forwarder: None,
+    }];
+    let closest = || {
+        store
+            .find_closest_symbol_for_address(dtb, fixture_address(0x1010))
+            .map(|(_, symbol, offset)| (symbol, offset))
+    };
+
+    // Memory named no PDB, so the exports are keyed by the image.
+    let image_key = SymbolStore::image_exports_key(&module);
+    store.index_module_exports(dtb, &module, image_key, &exports);
+    assert_eq!(closest(), Some(("exported_entry".to_string(), 0x10)));
+
+    // A job for another build at that address is stale, as before.
+    let other_build = module.clone().with_time_date_stamp(0x6000_0001);
+    assert!(store.load_downloaded_pdb(&load_for(&other_build)).is_err());
+    assert_eq!(closest(), Some(("exported_entry".to_string(), 0x10)));
+
+    // The image, fetched since, names its PDB: it replaces the exports, and
+    // the image-keyed names go with them.
+    store.load_downloaded_pdb(&load_for(&module)).unwrap();
+    assert_eq!(closest(), Some(("DriverEntry".to_string(), 0x10)));
+    assert!(!store.symbol_rvas.contains_key(&image_key));
+}
